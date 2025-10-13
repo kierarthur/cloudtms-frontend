@@ -34,23 +34,32 @@
     <pre id="out"></pre>
   </main>
 
-  <script src="./js/auth-broker.js"></script>
+  <!-- Load your broker auth module (this file defines BROKER_BASE_URL and all auth helpers) -->
+  <script src="./js/main.js"></script>
+
   <script>
     async function loadFromServer() {
       const status = document.getElementById('status');
       const user = window.getCurrentUser?.();
       status.textContent = user ? `Signed in as: ${user.email}` : 'Not signed in.';
     }
+
     document.getElementById('btnLogin').onclick  = () => window.openLoginOverlay?.();
     document.getElementById('btnLogout').onclick = () => window.logoutAuth?.();
 
     document.getElementById('btnWhoAmI').onclick = async () => {
       const out = document.getElementById('out');
       try {
-        const r = await fetch(BROKER_BASE_URL + '/auth/refresh', { method:'POST', credentials:'include', headers:{'Content-Type':'application/json'} });
+        const r = await fetch(BROKER_BASE_URL + '/auth/refresh', {
+          method: 'POST',
+          credentials: 'include',
+          headers: { 'Content-Type': 'application/json' }
+        });
         out.textContent = JSON.stringify(await r.json(), null, 2);
         await loadFromServer();
-      } catch (e) { out.textContent = e?.message || String(e); }
+      } catch (e) {
+        out.textContent = e?.message || String(e);
+      }
     };
 
     document.getElementById('btnVersion').onclick = async () => {
@@ -58,8 +67,13 @@
       try {
         const r = await fetch(BROKER_BASE_URL + '/version');
         out.textContent = JSON.stringify(await r.json(), null, 2);
-      } catch (e) { out.textContent = e?.message || String(e); }
+      } catch (e) {
+        out.textContent = e?.message || String(e);
+      }
     };
+
+    // initial state
+    loadFromServer();
   </script>
 </body>
 </html>
