@@ -252,7 +252,8 @@
      *  Worker base URL from your handover. :contentReference[oaicite:1]{index=1}
      *  Forgot/reset/login endpoints exist on the broker. :contentReference[oaicite:2]{index=2}
      * ───────────────────────────────────────────────────────────────── ******/
-    const BROKER_BASE_URL = 'https://cloudtms.kier-88a.workers.dev';
+    window.BROKER_BASE_URL = window.BROKER_BASE_URL || 'https://cloudtms.kier-88a.workers.dev';
+     const BROKER_BASE_URL = window.BROKER_BASE_URL;
     const API = (path)=> `${BROKER_BASE_URL}${path}`;
     let SESSION = null;  // {accessToken, user, exp}
     let refreshTimer = 0;
@@ -295,18 +296,20 @@
       return res;
     }
     async function apiLogin(email, password){
-      const res = await fetch(API('/auth/login'), {
-        method:'POST', headers:{'content-type':'application/json'},
-        body: JSON.stringify({ email, password })
-      });
-      if (!res.ok) throw new Error('Invalid credentials');
-      const data = await res.json();
-      // tolerate shapes: {access_token, user, expires_in} or {token, user, ttl}
-      const token = data.access_token || data.token || data.accessToken;
-      const ttl = data.expires_in || data.token_ttl_sec || data.ttl || 3600;
-      saveSession({ accessToken: token, user: data.user || data.profile || null, exp: Math.floor(Date.now()/1000) + ttl });
-      return data;
-    }
+  const res = await fetch(API('/auth/login'), {
+    method:'POST',
+    headers:{'content-type':'application/json'},
+    credentials: 'include',                // <-- REQUIRED
+    body: JSON.stringify({ email, password })
+  });
+  if (!res.ok) throw new Error('Invalid credentials');
+  const data = await res.json();
+  const token = data.access_token || data.token || data.accessToken;
+  const ttl   = data.expires_in || data.token_ttl_sec || data.ttl || 3600;
+  saveSession({ accessToken: token, user: data.user || data.profile || null, exp: Math.floor(Date.now()/1000) + ttl });
+  return data;
+}
+
     async function refreshToken(){
       try{
         const res = await fetch(API('/auth/refresh'), { method:'POST', credentials:'include', headers:{'content-type':'application/json'}, body: JSON.stringify({}) });
