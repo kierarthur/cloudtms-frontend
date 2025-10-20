@@ -35,6 +35,18 @@ function scheduleRefresh(){
   refreshTimer = setTimeout(refreshToken, ms);
 }
 
+// Unwrap list/envelope responses into arrays
+async function toList(res) {
+  if (!res.ok) throw new Error(`Request failed: ${res.status}`);
+  const j = await res.json();
+  if (Array.isArray(j)) return j;
+  if (Array.isArray(j.items)) return j.items;
+  if (Array.isArray(j.rows))  return j.rows;
+  if (j.data && Array.isArray(j.data)) return j.data;
+  return [];
+}
+
+
 // ===== Auth fetch with refresh retry =====
 async function authFetch(input, init={}){
   const headers = new Headers(init.headers || {});
@@ -294,20 +306,60 @@ byId('btnColumns').onclick = ()=>{
 };
 
 // ===== Data fetchers =====
-async function listCandidates(){ const r = await authFetch(API('/api/candidates')); if (!r.ok) throw new Error('Fetch candidates failed'); return r.json(); }
-async function listClients(){ const r = await authFetch(API('/api/clients')); if (!r.ok) throw new Error('Fetch clients failed'); return r.json(); }
-async function listUmbrellas(){ const r = await authFetch(API('/api/umbrellas')); if (!r.ok) throw new Error('Fetch umbrellas failed'); return r.json(); }
-async function getSettings(){ const r = await authFetch(API('/api/settings/defaults')); if (!r.ok) throw new Error('Fetch settings failed'); return r.json(); }
-async function saveSettings(payload){ const r = await authFetch(API('/api/settings/defaults'), {method:'PUT', headers:{'content-type':'application/json'}, body: JSON.stringify(payload)}); if (!r.ok) throw new Error('Save failed'); return true; }
-async function listOutbox(){ const r = await authFetch(API('/api/email/outbox')); if (!r.ok) throw new Error('Fetch outbox failed'); return r.json(); }
-async function retryOutbox(id){ const r = await authFetch(API(`/api/email/outbox/${id}/retry`), {method:'POST'}); return r.ok; }
-async function fetchRelated(entity, id, type){ const r = await authFetch(API(`/api/related/${entity}/${id}/${type}`)); if (!r.ok) return []; return r.json(); }
-async function fetchRelatedCounts(entity, id){ const r = await authFetch(API(`/api/related/${entity}/${id}/counts`)); if (!r.ok) return {}; return r.json(); }
-async function search(section, q){
-  const map = {candidates:'/api/search/candidates', clients:'/api/search/clients', umbrellas:'/api/search/umbrellas', timesheets:'/api/search/timesheets', invoices:'/api/search/invoices'};
-  const p = map[section]; if (!p) return null;
-  const r = await authFetch(API(`${p}?q=${encodeURIComponent(q)}`)); if (!r.ok) return null; return r.json();
+async function listCandidates(){ const r = await authFetch(API('/api/candidates')); return toList(r); }
+async function listClients(){   const r = await authFetch(API('/api/clients'));   return toList(r); }
+async function listUmbrellas(){ const r = await authFetch(API('/api/umbrellas')); return toList(r); }
+async function listOutbox(){    const r = await authFetch(API('/api/email/outbox')); return toList(r); }
+
+async function listClientRates(){
+  const r = await authFetch(API('/api/rates/client-defaults'));
+  return toList(r);
 }
+async function listCandidateRates(candidate_id){
+  const r = await authFetch(API(`/api/rates/candidate-overrides?candidate_id=${encodeURIComponent(candidate_id)}`));
+  return toList(r);
+}
+
+async function fetchRelated(entity, id, type){
+  const r = await authFetch(API(`/api/related/${entity}/${id}/${type}`));
+  return toList(r);
+}
+// Settings (singleton)
+async function getSettings(){
+  const r = await authFetch(API('/api/settings/defaults'));
+  if (!r.ok) throw new Error('Fetch settings failed');
+  return r.json(); // single object
+}
+async function saveSettings(payload){
+  const r = await authFetch(API('/api/settings/defaults'), {
+    method:'PUT',
+    headers:{'content-type':'application/json'},
+    body: JSON.stringify(payload)
+  });
+  if (!r.ok) throw new Error('Save failed');
+  return true;
+}
+
+// Related counts (object map: {type: count, ...})
+async function fetchRelatedCounts(entity, id){
+  const r = await authFetch(API(`/api/related/${entity}/${id}/counts`));
+  if (!r.ok) return {};
+  return r.json();
+}
+
+async function search(section, q){
+  const map = {
+    candidates:'/api/search/candidates',
+    clients:'/api/search/clients',
+    umbrellas:'/api/search/umbrellas',
+    timesheets:'/api/search/timesheets',
+    invoices:'/api/search/invoices'
+  };
+  const p = map[section]; if (!p) return [];
+  const r = await authFetch(API(`${p}?q=${encodeURIComponent(q)}`));
+  return toList(r);
+}
+
 async function upsertCandidate(payload, id){
   const url = id ? `/api/candidates/${id}` : '/api/candidates';
   const method = id ? 'PUT' : 'POST';
@@ -326,10 +378,7 @@ async function upsertUmbrella(payload, id){
   const r = await authFetch(API(url), {method, headers:{'content-type':'application/json'}, body: JSON.stringify(payload)});
   if (!r.ok) throw new Error('Save failed'); return true;
 }
-async function listCandidateRates(candidate_id){
-  const r = await authFetch(API(`/api/rates/candidate-overrides?candidate_id=${encodeURIComponent(candidate_id)}`)); if (!r.ok) return [];
-  return r.json();
-}
+
 async function addCandidateRate(payload){
   const r = await authFetch(API('/api/rates/candidate-overrides'), {method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify(payload)});
   return r.ok;
@@ -337,14 +386,12 @@ async function addCandidateRate(payload){
 async function deleteCandidateRatesFor(candidate_id){
   const r = await authFetch(API(`/api/rates/candidate-overrides/${candidate_id}`), {method:'DELETE'}); return r.ok;
 }
-async function listClientRates(){
-  const r = await authFetch(API('/api/rates/client-defaults')); if (!r.ok) return [];
-  return r.json();
-}
+
 async function upsertClientRate(payload){
   const r = await authFetch(API('/api/rates/client-defaults'), {method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify(payload)});
   return r.ok;
 }
+
 
 // ===== Section loaders =====
 async function loadSection(){
@@ -618,7 +665,8 @@ function promptClientRate(client_id){
 async function renderHospitalsUI(client_id){
   const el = byId('clientHospitals'); if (!el) return;
   const r = await authFetch(API(`/api/clients/${client_id}/hospitals`));
-  const rows = r.ok ? await r.json() : [];
+const rows = await toList(r);
+
   const tbl = document.createElement('table'); tbl.className='grid';
   const cols=['hospital_name_norm','ward_hint','created_at'];
   const trh=document.createElement('tr'); cols.forEach(c=>{ const th=document.createElement('th'); th.textContent=c; trh.appendChild(th);});
@@ -795,9 +843,9 @@ function openSearch(){
 async function renderAll(){
   renderTopNav(); renderTools();
   const data = await loadSection();
-  if (currentSection==='settings') renderSummary(data);
-  else if (currentSection==='audit') renderSummary(data);
-  else renderSummary(Array.isArray(data) ? data : []);
+ if (currentSection==='settings' || currentSection==='audit') renderSummary(data);
+else renderSummary(data); // list functions already return arrays via toList()
+
 }
 async function bootstrapApp(){
   renderTopNav(); renderTools(); await renderAll();
