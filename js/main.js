@@ -359,6 +359,55 @@ function headersFromRows(rows){
   return [...keys];
 }
 
+/* ===== UK date/time formatter helpers (display only) =====
+   - Date-only 'YYYY-MM-DD' -> 'DD/MM/YYYY'
+   - UTC timestamps -> 'DD/MM/YYYY HHMMhrs' (Europe/London, no seconds)
+*/
+function formatUkDate(isoDateStr){
+  if (!isoDateStr || typeof isoDateStr !== 'string') return isoDateStr;
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(isoDateStr);
+  if (!m) return isoDateStr;
+  const [,y,mo,d] = m;
+  return `${d}/${mo}/${y}`;
+}
+function formatUkTimestampFromUtc(isoLike){
+  if (!isoLike) return isoLike;
+  const dt = new Date(isoLike); // parse ISO / ISO-like (+00:00, with ms) to JS Date
+  if (isNaN(dt.getTime())) return isoLike;
+  const fmt = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Europe/London',
+    year:'numeric', month:'2-digit', day:'2-digit',
+    hour:'2-digit', minute:'2-digit', hour12:false
+  });
+  const parts = fmt.formatToParts(dt);
+  const g = (type)=> (parts.find(p=>p.type===type)?.value || '');
+  const dd = g('day'), mm = g('month'), yyyy = g('year');
+  const hh = g('hour'), mi = g('minute');
+  return `${dd}/${mm}/${yyyy} ${hh}${mi}hrs`;
+}
+function formatDisplayValue(key, val){
+  if (val === null || val === undefined || val === '') return '—';
+  if (typeof val === 'boolean') return val ? 'Yes' : 'No';
+
+  if (typeof val === 'string'){
+    // date-only?
+    if (/^\d{4}-\d{2}-\d{2}$/.test(val)) return formatUkDate(val);
+    // ISO-ish timestamp?
+    if (/\d{4}-\d{2}-\d{2}T/.test(val))  return formatUkTimestampFromUtc(val);
+  }
+
+  // Heuristic by column name
+  if (typeof key === 'string' && (
+      key.endsWith('_at_utc') ||
+      key === 'created_at' || key === 'updated_at' ||
+      key.endsWith('_timestamp') || key.endsWith('_utc')
+    )){
+    return formatUkTimestampFromUtc(val);
+  }
+
+  return String(val);
+}
+
 function renderSummary(rows){
   currentRows = rows;
   const cols = defaultColumnsFor(currentSection);
@@ -376,9 +425,11 @@ function renderSummary(rows){
   rows.forEach(r=>{
     const tr=document.createElement('tr');
     tr.ondblclick = ()=> openDetails(r);
-    cols.forEach(c=>{ const td=document.createElement('td'); let v = r[c];
-      if (c==='vat_chargeable' || c==='enabled' || typeof v === 'boolean') v = v ? 'Yes' : 'No';
-      td.textContent = (v ?? '') === '' ? '—' : v; tr.appendChild(td);
+    cols.forEach(c=>{
+      const td=document.createElement('td');
+      const v = r[c];
+      td.textContent = formatDisplayValue(c, v);
+      tr.appendChild(td);
     });
     tb.appendChild(tr);
   });
@@ -394,9 +445,11 @@ function renderAuditTable(content, rows){
   const tb = document.createElement('tbody');
   rows.forEach(r=>{
     const tr=document.createElement('tr'); tr.ondblclick=()=> openAuditItem(r);
-    cols.forEach(c=>{ const td=document.createElement('td');
-      let v=r[c]; if (c==='status') td.innerHTML = `<span class="pill ${v==='SENT'?'tag-ok':v==='FAILED'?'tag-fail':'tag-warn'}">${v}</span>`;
-      else td.textContent = (v ?? '')===''?'—':v;
+    cols.forEach(c=>{
+      const td=document.createElement('td');
+      let v=r[c];
+      if (c==='status') td.innerHTML = `<span class="pill ${v==='SENT'?'tag-ok':v==='FAILED'?'tag-fail':'tag-warn'}">${v}</span>`;
+      else td.textContent = formatDisplayValue(c, v);
       tr.appendChild(td);
     }); tb.appendChild(tr);
   }); tbl.appendChild(tb); content.appendChild(tbl);
@@ -705,7 +758,7 @@ function renderCandidateRatesTable(rates){
     tr.ondblclick = () => openCandidateRateModal(modalCtx.data?.id, r);
     cols.forEach(c=>{
       const td=document.createElement('td');
-      td.textContent = (r[c] ?? '—');
+      td.textContent = formatDisplayValue(c, r[c]);
       tr.appendChild(td);
     });
     tb.appendChild(tr);
@@ -949,7 +1002,7 @@ function renderClientRatesTable(rates){
 
     cols.forEach(c => {
       const td = document.createElement('td');
-      td.textContent = (r[c] ?? '—');
+      td.textContent = formatDisplayValue(c, r[c]);
       tr.appendChild(td);
     });
     tb.appendChild(tr);
@@ -975,7 +1028,7 @@ function renderClientTab(key, row={}){
   if (key==='main') return html(`
     <div class="form" id="tab-main">
       ${input('name','Client name', row.name)}
-      ${input('cli_ref','Client Ref (CLI-…)', row.cli_ref)}
+      ${input('cli_ref','Client Ref (CLI-…) ', row.cli_ref)}
       <div class="row" style="grid-column:1/-1"><label>Invoice address</label><textarea name="invoice_address">${row.invoice_address || ''}</textarea></div>
       ${input('primary_invoice_email','Primary invoice email', row.primary_invoice_email,'email')}
       ${input('ap_phone','A/P phone', row.ap_phone)}
@@ -1101,7 +1154,11 @@ async function renderHospitalsUI(client_id){
   const tb = document.createElement('tbody');
   rows.forEach(x => {
     const tr = document.createElement('tr');
-    cols.forEach(c => { const td = document.createElement('td'); td.textContent = x[c] ?? '—'; tr.appendChild(td); });
+    cols.forEach(c => {
+      const td = document.createElement('td');
+      td.textContent = formatDisplayValue(c, x[c]);
+      tr.appendChild(td);
+    });
     tb.appendChild(tr);
   });
   tbl.appendChild(tb);
@@ -1394,9 +1451,8 @@ document.addEventListener('keydown', (e)=>{
 async function renderAll(){
   renderTopNav(); renderTools();
   const data = await loadSection();
- if (currentSection==='settings' || currentSection==='audit') renderSummary(data);
-else renderSummary(data); // list functions already return arrays via toList()
-
+  if (currentSection==='settings' || currentSection==='audit') renderSummary(data);
+  else renderSummary(data); // list functions already return arrays via toList()
 }
 async function bootstrapApp(){
   renderTopNav(); renderTools(); await renderAll();
