@@ -213,11 +213,132 @@ function renderTools(){
   addBtn('Create New Record', ()=> openCreate());
   addBtn('Edit Record', ()=> openEdit());
   addBtn('Delete Record', ()=> openDelete());
-  addBtn('Search…', ()=> openSearch());
+  addBtn('Search…', ()=> openSearchModal());   // <— now opens the modal
+
 
   if (!canCreate) el.children[0].classList.add('btn');
   if (!canEdit) el.children[1].classList.add('btn');
   if (!canDelete) el.children[2].classList.add('btn');
+}
+
+// NEW: advanced, section-aware search modal
+async function openSearchModal(){
+  // enum pickers from DB (timesheet_status_enum, invoice_status_enum)
+  const TIMESHEET_STATUS = ['ERROR','RECEIVED','REVOKED','SHEETS_PARTIAL','SHEETS_PENDING','SHEETS_SYNCED','STORED'];
+  const INVOICE_STATUS   = ['DRAFT','ISSUED','ON_HOLD','PAID'];
+
+  function boolSelect(name, label){
+    return `
+      <div class="row">
+        <label>${label}</label>
+        <select name="${name}">
+          <option value="">Any</option>
+          <option value="true">Yes</option>
+          <option value="false">No</option>
+        </select>
+      </div>`;
+  }
+  function dates(nameFrom, labelFrom, nameTo, labelTo){
+    return `
+      <div class="row"><label>${labelFrom}</label><input type="date" name="${nameFrom}" /></div>
+      <div class="row"><label>${labelTo}</label><input type="date" name="${nameTo}" /></div>`;
+  }
+  function multi(name, label, values){
+    const opts = values.map(v=>`<option value="${v}">${v}</option>`).join('');
+    return `
+      <div class="row">
+        <label>${label}</label>
+        <select name="${name}" multiple size="6">${opts}</select>
+      </div>`;
+  }
+
+  // Per-section form fragments (only fields you can actually filter on without “making up” API)
+  let form = '';
+  if (currentSection === 'candidates'){
+    form = `
+      <div class="form" id="searchForm">
+        ${input('first_name','First name','')}
+        ${input('last_name','Last name','')}
+        ${input('email','Email','')}
+        ${input('phone','Telephone','')}
+        <div class="row"><label>Pay method</label>
+          <select name="pay_method">
+            <option value="">Any</option>
+            <option value="PAYE">PAYE</option>
+            <option value="UMBRELLA">UMBRELLA</option>
+          </select>
+        </div>
+        ${boolSelect('active','Active')}
+        ${dates('created_from','Created from','created_to','Created to')}
+      </div>`;
+  } else if (currentSection === 'clients'){
+    form = `
+      <div class="form" id="searchForm">
+        ${input('name','Client name','')}
+        ${input('cli_ref','Client Ref','')}
+        ${input('primary_invoice_email','Primary invoice email','')}
+        ${input('ap_phone','A/P phone','')}
+        ${boolSelect('vat_chargeable','VAT chargeable')}
+        ${dates('created_from','Created from','created_to','Created to')}
+      </div>`;
+  } else if (currentSection === 'umbrellas'){
+    form = `
+      <div class="form" id="searchForm">
+        ${input('name','Name','')}
+        ${input('bank_name','Bank','')}
+        ${input('sort_code','Sort code','')}
+        ${input('account_number','Account number','')}
+        ${boolSelect('vat_chargeable','VAT chargeable')}
+        ${boolSelect('enabled','Enabled')}
+        ${dates('created_from','Created from','created_to','Created to')}
+      </div>`;
+  } else if (currentSection === 'timesheets'){
+    form = `
+      <div class="form" id="searchForm">
+        ${input('booking_id','Booking ID','')}
+        ${input('occupant_key_norm','Occupant key','')}
+        ${input('hospital_norm','Hospital','')}
+        ${dates('worked_from','Worked from (date)','worked_to','Worked to (date)')}
+        ${dates('week_ending_from','Week ending from','week_ending_to','Week ending to')}
+        ${multi('status','Status (multi-select)', TIMESHEET_STATUS)}
+        ${dates('created_from','Created from','created_to','Created to')}
+      </div>`;
+  } else if (currentSection === 'invoices'){
+    form = `
+      <div class="form" id="searchForm">
+        ${input('invoice_no','Invoice number','')}
+        ${input('client_id','Client ID (UUID)','')}
+        ${multi('status','Status (multi-select)', INVOICE_STATUS)}
+        ${dates('issued_from','Issued from','issued_to','Issued to')}
+        ${dates('due_from','Due from','due_to','Due to')}
+        ${dates('created_from','Created from','created_to','Created to')}
+      </div>`;
+  } else {
+    form = `<div class="tabc">No advanced search for this section.</div>`;
+  }
+
+  showModal('Advanced Search', [{key:'filter',label:'Filters'}], ()=> form, async ()=>{
+    const raw = collectForm('#searchForm', false);
+
+    // Convert select[multiple] to array and booleans from "true"/"false"
+    Object.keys(raw).forEach(k=>{
+      const el = document.querySelector(`#searchForm [name="${k}"]`);
+      if (!el) return;
+      if (el.tagName==='SELECT' && el.multiple){
+        raw[k] = Array.from(el.selectedOptions).map(o=>o.value);
+      }
+      if (el.tagName==='SELECT' && (el.value === 'true' || el.value === 'false')){
+        raw[k] = (el.value === 'true');
+      }
+      if (el.type === 'number' && raw[k] === '') raw[k] = null;
+      if (raw[k] === '') delete raw[k];
+    });
+
+    // Call the existing /api/search/{section}?q=… with JSON filters
+    const rows = await search(currentSection, JSON.stringify(raw));
+    if (rows) renderSummary(rows);
+    closeModal();
+  }, false);
 }
 
 function defaultColumnsFor(section){
@@ -451,33 +572,125 @@ async function openCandidate(row){
     {key:'pay',label:'Payment details'},
     {key:'bookings',label:'Bookings'}
   ], renderCandidateTab, async ()=>{
-    const payload = collectForm('#tab-main');
+    // MERGE main + pay tabs so umbrella/bank fields are saved too
+    const main = collectForm('#tab-main');
+    const pay  = collectForm('#tab-pay');
+    const payload = { ...main, ...pay };
+
     if (!payload.first_name && !payload.last_name) return alert('Enter at least a first or last name.');
     if (!payload.pay_method) payload.pay_method = 'PAYE';
-    if (payload.pay_method==='PAYE') payload.umbrella_id = null;
+
+    // If user set PAYE, clear umbrella_id and allow custom bank details
+    if (payload.pay_method === 'PAYE') {
+      payload.umbrella_id = null;
+    }
+
     await upsertCandidate(payload, row?.id);
     closeModal(); renderAll();
   }, row?.id);
 
-  // Umbrellas dropdown in Payment tab
-  const umb = await listUmbrellas();
-  const sel = document.querySelector('#tab-pay select[name="umbrella_id"]'); if (sel){
-    sel.innerHTML = `<option value="">— Select —</option>` + umb.map(u=>`<option value="${u.id}">${u.name}</option>`).join('');
-    if (row?.umbrella_id) sel.value = row.umbrella_id;
-    sel.onchange = ()=>{ if (sel.value) document.querySelector('#pay-method').value = 'UMBRELLA'; };
+  // ===== Umbrella type-ahead binding =====
+  const umbrellas = await listUmbrellas();
+  const nameToUmb = new Map(umbrellas.map(u => [String(u.name).toLowerCase(), u]));
+
+  // Populate datalist options
+  const dl = document.querySelector('#umbList');
+  if (dl) {
+    dl.innerHTML = umbrellas.map(u => `<option value="${u.name}"></option>`).join('');
   }
 
-  // Candidate rates
+  const nameInput = document.querySelector('#tab-pay #umbrella_name');
+  const idHidden  = document.querySelector('#tab-pay #umbrella_id');
+  const paySel    = document.getElementById('pay-method');
+  const bankName  = document.querySelector('#tab-pay input[name="bank_name"]');
+  const sortCode  = document.querySelector('#tab-pay input[name="sort_code"]');
+  const accNum    = document.querySelector('#tab-pay input[name="account_number"]');
+
+  // If record already has an umbrella, prefill the visible name & lock fields
+  if (row?.umbrella_id) {
+    const existing = umbrellas.find(u => u.id === row.umbrella_id);
+    if (existing) {
+      nameInput.value = existing.name;
+      paySel.value    = 'UMBRELLA';
+      lockBankFromUmb(existing);
+    }
+  }
+
+  // Resolve typed umbrella name to a record
+  function resolveUmbrella(value){
+    const v = String(value || '').trim().toLowerCase();
+    if (!v) { clearUmbrella(); return; }
+    // exact match first
+    let match = nameToUmb.get(v);
+    if (!match) {
+      // fallback startsWith (best-effort)
+      match = umbrellas.find(u => String(u.name).toLowerCase().startsWith(v));
+    }
+    if (match) {
+      idHidden.value = match.id;
+      paySel.value   = 'UMBRELLA';
+      lockBankFromUmb(match);
+    } else {
+      // unknown text: treat as PAYE until a real umbrella is chosen
+      clearUmbrella();
+    }
+  }
+
+  function lockBankFromUmb(umb){
+    // Fill + lock bank fields to umbrella details
+    bankName.value = umb.bank_name || '';
+    sortCode.value = umb.sort_code || '';
+    accNum.value   = umb.account_number || '';
+    [bankName, sortCode, accNum].forEach(i => i.readOnly = true);
+  }
+  function unlockBank(){
+    [bankName, sortCode, accNum].forEach(i => i.readOnly = false);
+  }
+  function clearUmbrella(){
+    idHidden.value = '';
+    if (paySel.value === 'UMBRELLA') {
+      // If no valid umbrella left, revert to PAYE and unlock
+      paySel.value = 'PAYE';
+    }
+    unlockBank();
+  }
+
+  // Events: user types or picks from list
+  if (nameInput) {
+    nameInput.addEventListener('change', () => resolveUmbrella(nameInput.value));
+    nameInput.addEventListener('blur',   () => resolveUmbrella(nameInput.value));
+    // optional: live feedback while typing (don’t commit yet)
+    // nameInput.addEventListener('input', () => {/* could highlight best match */});
+  }
+
+  // If user flips pay method manually, respect that
+  if (paySel) {
+    paySel.addEventListener('change', () => {
+      if (paySel.value === 'PAYE') {
+        clearUmbrella();
+      } else if (paySel.value === 'UMBRELLA') {
+        // If no valid umbrella chosen yet, keep bank fields unlocked until one is resolved
+        if (idHidden.value) {
+          const pick = umbrellas.find(u => u.id === idHidden.value);
+          if (pick) lockBankFromUmb(pick); else unlockBank();
+        } else {
+          unlockBank();
+        }
+      }
+    });
+  }
+
+  // ===== Existing behaviour =====
   if (row?.id) {
     const rates = await listCandidateRates(row.id);
     renderCandidateRatesTable(rates);
   }
-  // Calendar from related timesheets
   if (row?.id) {
     const ts = await fetchRelated('candidates', row.id, 'timesheets');
     renderCalendar(ts || []);
   }
 }
+
 function renderCandidateTab(key, row={}){
   if (key==='main') return html(`
     <div class="form" id="tab-main">
@@ -498,15 +711,26 @@ function renderCandidateTab(key, row={}){
     </div>
   `);
   if (key==='pay') return html(`
-    <div class="form" id="tab-pay">
-      <div class="row"><label class="hint">PAYE bank fields are editable. Umbrella bank comes from the umbrella company record.</label></div>
-      ${input('account_holder','Account holder', row.account_holder)}
-      ${input('bank_name','Bank name', row.bank_name)}
-      ${input('sort_code','Sort code', row.sort_code)}
-      ${input('account_number','Account number', row.account_number)}
-      ${select('umbrella_id','Umbrella company', row.umbrella_id || '', [], {})}
+  <div class="form" id="tab-pay">
+    <div class="row"><label class="hint">
+      PAYE bank fields are editable. If UMBRELLA is selected, bank details are taken from the umbrella and locked.
+    </label></div>
+
+    ${input('account_holder','Account holder', row.account_holder)}
+    ${input('bank_name','Bank name', row.bank_name)}
+    ${input('sort_code','Sort code', row.sort_code)}
+    ${input('account_number','Account number', row.account_number)}
+
+    <!-- Umbrella chooser: text input + datalist + hidden canonical id -->
+    <div class="row">
+      <label>Umbrella company</label>
+      <input name="umbrella_name" id="umbrella_name" list="umbList" placeholder="Type to search umbrellas…" value="" />
+      <datalist id="umbList"></datalist>
+      <input type="hidden" name="umbrella_id" id="umbrella_id" value="${row.umbrella_id || ''}"/>
     </div>
-  `);
+  </div>
+`);
+
   if (key==='bookings') return html(`
     <div id="calendarWrap">
       <div class="legend">
@@ -518,42 +742,77 @@ function renderCandidateTab(key, row={}){
     </div>
   `);
 }
-function renderCandidateRatesTable(rates){
-  const div = byId('ratesTable'); if (!div) return;
-  if (!rates.length) { div.innerHTML = '<div class="hint">No candidate-specific rates. Client defaults will apply.</div>'; return; }
-  const cols = ['client_id','role','band','pay_day','pay_night','pay_sat','pay_sun','pay_bh','date_from','date_to'];
-  const tbl = document.createElement('table'); tbl.className='grid';
-  const thead = document.createElement('thead'); const trh=document.createElement('tr');
-  cols.forEach(c=>{ const th=document.createElement('th'); th.textContent=c; trh.appendChild(th); });
-  thead.appendChild(trh); tbl.appendChild(thead);
-  const tb = document.createElement('tbody');
-  rates.forEach(r=>{
-    const tr=document.createElement('tr');
-    cols.forEach(c=>{ const td=document.createElement('td'); td.textContent = r[c] ?? '—'; tr.appendChild(td);});
-    tb.appendChild(tr);
-  })
-  tbl.appendChild(tb); div.innerHTML=''; div.appendChild(tbl);
 
+
+async function mountCandidateRatesTab(){
+  // fetch & render list (id comes from modalCtx)
+  const rates = modalCtx.data?.id ? await listCandidateRates(modalCtx.data.id) : [];
+  renderCandidateRatesTable(rates);
+
+  // bind "Add…" button now that the tab DOM exists
   const btn = byId('btnAddRate');
-  if (btn) btn.onclick = async ()=>{
-    const payload = promptRateOverride(modalCtx.data?.id);
-    if (!payload) return;
-    await addCandidateRate(payload);
-    const newRates = await listCandidateRates(modalCtx.data.id);
-    renderCandidateRatesTable(newRates);
-  };
+  if (btn) btn.onclick = () => openCandidateRateModal(modalCtx.data?.id);
 }
-function promptRateOverride(candidate_id){
-  const role = prompt('Role (e.g. HCA, RMN)'); if (!role) return null;
-  const band = prompt('Band (optional)') || null;
-  const date_from = prompt('Date from (YYYY-MM-DD)') || new Date().toISOString().slice(0,10);
-  const pay_day = prompt('Pay (Day) e.g. 13.50') || null;
-  const pay_night = prompt('Pay (Night)') || null;
-  const pay_sat = prompt('Pay (Sat)') || null;
-  const pay_sun = prompt('Pay (Sun)') || null;
-  const pay_bh = prompt('Pay (BH)') || null;
-  return { candidate_id, role, band, date_from, pay_day, pay_night, pay_sat, pay_sun, pay_bh };
+
+function openCandidateRateModal(candidate_id, existing){
+  const formHtml = html(`
+    <div class="form" id="candRateForm">
+      ${input('role','Role (required)', existing?.role || '')}
+      ${input('band','Band (optional)', existing?.band || '')}
+      ${input('date_from','Effective from (YYYY-MM-DD)', existing?.date_from || new Date().toISOString().slice(0,10))}
+      ${input('pay_day','Pay (Day)',   existing?.pay_day   ?? '', 'number')}
+      ${input('pay_night','Pay (Night)', existing?.pay_night ?? '', 'number')}
+      ${input('pay_sat','Pay (Sat)',   existing?.pay_sat   ?? '', 'number')}
+      ${input('pay_sun','Pay (Sun)',   existing?.pay_sun   ?? '', 'number')}
+      ${input('pay_bh','Pay (BH)',     existing?.pay_bh     ?? '', 'number')}
+    </div>
+  `);
+
+  const title = existing ? 'Edit Candidate Rate Override' : 'Add Candidate Rate Override';
+
+  showModal(title, [{ key:'form', label:'Form' }], () => formHtml, async ()=>{
+    const raw = collectForm('#candRateForm');
+    if (!raw.role || !raw.date_from) { alert('Role and Effective from are required'); return; }
+
+    // coerce to numeric where present
+    const payload = {
+      candidate_id,
+      role: raw.role,
+      band: raw.band || null,
+      date_from: raw.date_from,
+      pay_day:   raw.pay_day   !== '' ? Number(raw.pay_day)   : null,
+      pay_night: raw.pay_night !== '' ? Number(raw.pay_night) : null,
+      pay_sat:   raw.pay_sat   !== '' ? Number(raw.pay_sat)   : null,
+      pay_sun:   raw.pay_sun   !== '' ? Number(raw.pay_sun)   : null,
+      pay_bh:    raw.pay_bh    !== '' ? Number(raw.pay_bh)    : null,
+    };
+
+    let ok = false;
+    if (existing) {
+      // Update via PATCH (identified by candidate_id + role/band/date_from on the backend)
+      const resp = await authFetch(API(`/api/rates/candidate-overrides/${candidate_id}`), {
+        method:'PATCH',
+        headers:{'content-type':'application/json'},
+        body: JSON.stringify(payload)
+      });
+      if (!resp.ok) {
+        const msg = await resp.text().catch(()=> 'Save failed');
+        alert(msg || 'Save failed');
+        return;
+      }
+      ok = true;
+    } else {
+      ok = await addCandidateRate(payload);
+      if (!ok) { alert('Save failed'); return; }
+    }
+
+    // Refresh Rates in-place and close only this small form
+    await mountCandidateRatesTab();
+    closeModal();
+
+  }, false); // no delete button for this tiny form
 }
+
 
 function renderCalendar(timesheets){
   const wrap = byId('calendar'); if (!wrap) return;
@@ -627,64 +886,135 @@ function renderClientTab(key, row={}){
   if (key==='settings') return html(`<div id="clientSettings"></div>`);
   if (key==='hospitals') return html(`<div id="clientHospitals"></div>`);
 }
-function renderClientRatesTable(rates){
-  const div = byId('clientRates'); if (!div) return;
-  const cols = ['role','band','charge_day','charge_night','charge_sat','charge_sun','charge_bh','pay_day','pay_night','pay_sat','pay_sun','pay_bh','date_from','date_to'];
-  const tbl = document.createElement('table'); tbl.className='grid';
-  const trh=document.createElement('tr'); cols.forEach(c=>{ const th=document.createElement('th'); th.textContent=c; trh.appendChild(th); });
-  const thead=document.createElement('thead'); thead.appendChild(trh); tbl.appendChild(thead);
-  const tb=document.createElement('tbody');
-  rates.forEach(r=>{ const tr=document.createElement('tr'); cols.forEach(c=>{ const td=document.createElement('td'); td.textContent=r[c] ?? '—'; tr.appendChild(td);}); tb.appendChild(tr);});
-  tbl.appendChild(tb); div.innerHTML=''; div.appendChild(tbl);
+if (modalCtx.entity === 'candidates' && k === 'rates') { mountCandidateRatesTab(); }
+if (modalCtx.entity === 'clients' && k === 'rates')   { mountClientRatesTab(); }
+if (modalCtx.entity === 'clients' && k === 'hospitals'){ renderHospitalsUI(modalCtx.data?.id); }
+
+
+async function mountClientRatesTab(){
+  const list = await listClientRates();
+  const rows = modalCtx.data?.id ? list.filter(r => r.client_id === modalCtx.data.id) : [];
+  renderClientRatesTable(rows);
 
   const btn = byId('btnAddClientRate');
-  if (btn) btn.onclick = async ()=>{
-    const payload = promptClientRate(modalCtx.data.id);
-    if (!payload) return;
-    await upsertClientRate(payload);
-    const fresh = (await listClientRates()).filter(r=>r.client_id===modalCtx.data.id);
-    renderClientRatesTable(fresh);
-  };
+  if (btn) btn.onclick = () => openClientRateModal(modalCtx.data?.id);
 }
-function promptClientRate(client_id){
-  const role = prompt('Role (e.g. HCA, RMN)'); if (!role) return null;
-  const band = prompt('Band (optional)') || null;
-  const date_from = prompt('Date from (YYYY-MM-DD)') || new Date().toISOString().slice(0,10);
-  const charge_day = prompt('Charge (Day)') || null;
-  const charge_night = prompt('Charge (Night)') || null;
-  const charge_sat = prompt('Charge (Sat)') || null;
-  const charge_sun = prompt('Charge (Sun)') || null;
-  const charge_bh = prompt('Charge (BH)') || null;
-  const pay_day = prompt('Default Pay (Day) optional') || null;
-  const pay_night = prompt('Default Pay (Night) optional') || null;
-  const pay_sat = prompt('Default Pay (Sat) optional') || null;
-  const pay_sun = prompt('Default Pay (Sun) optional') || null;
-  const pay_bh = prompt('Default Pay (BH) optional') || null;
-  return { client_id, role, band, date_from, charge_day, charge_night, charge_sat, charge_sun, charge_bh, pay_day, pay_night, pay_sat, pay_sun, pay_bh };
+function openClientRateModal(client_id, existing){
+  const formHtml = html(`
+    <div class="form" id="clientRateForm">
+      ${input('role','Role (required)', existing?.role || '')}
+      ${input('band','Band (optional)', existing?.band || '')}
+      ${input('date_from','Effective from (YYYY-MM-DD)', existing?.date_from || new Date().toISOString().slice(0,10))}
+      ${input('charge_day','Charge (Day)',   existing?.charge_day   ?? '', 'number')}
+      ${input('charge_night','Charge (Night)', existing?.charge_night ?? '', 'number')}
+      ${input('charge_sat','Charge (Sat)',   existing?.charge_sat   ?? '', 'number')}
+      ${input('charge_sun','Charge (Sun)',   existing?.charge_sun   ?? '', 'number')}
+      ${input('charge_bh','Charge (BH)',     existing?.charge_bh     ?? '', 'number')}
+      <div class="row"><label class="hint">Optional default pay (used if no candidate/client override):</label></div>
+      ${input('pay_day','Pay (Day)',   existing?.pay_day   ?? '', 'number')}
+      ${input('pay_night','Pay (Night)', existing?.pay_night ?? '', 'number')}
+      ${input('pay_sat','Pay (Sat)',   existing?.pay_sat   ?? '', 'number')}
+      ${input('pay_sun','Pay (Sun)',   existing?.pay_sun   ?? '', 'number')}
+      ${input('pay_bh','Pay (BH)',     existing?.pay_bh     ?? '', 'number')}
+    </div>
+  `);
+
+  const title = existing ? 'Edit Client Default Rate' : 'Add/Upsert Client Default Rate';
+
+  showModal(title, [{ key:'form', label:'Form' }], () => formHtml, async ()=>{
+    const raw = collectForm('#clientRateForm');
+    if (!raw.role || !raw.date_from) { alert('Role and Effective from are required'); return; }
+
+    // Coerce numeric fields (empty string → null)
+    const payload = {
+      client_id,
+      role: raw.role,
+      band: raw.band || null,
+      date_from: raw.date_from,
+      charge_day:   raw.charge_day   !== '' ? Number(raw.charge_day)   : null,
+      charge_night: raw.charge_night !== '' ? Number(raw.charge_night) : null,
+      charge_sat:   raw.charge_sat   !== '' ? Number(raw.charge_sat)   : null,
+      charge_sun:   raw.charge_sun   !== '' ? Number(raw.charge_sun)   : null,
+      charge_bh:    raw.charge_bh    !== '' ? Number(raw.charge_bh)    : null,
+      pay_day:      raw.pay_day      !== '' ? Number(raw.pay_day)      : null,
+      pay_night:    raw.pay_night    !== '' ? Number(raw.pay_night)    : null,
+      pay_sat:      raw.pay_sat      !== '' ? Number(raw.pay_sat)      : null,
+      pay_sun:      raw.pay_sun      !== '' ? Number(raw.pay_sun)      : null,
+      pay_bh:       raw.pay_bh       !== '' ? Number(raw.pay_bh)       : null,
+    };
+
+    // POST upsert (backend upserts on client_id+role+band+date_from)
+    const resp = await authFetch(API('/api/rates/client-defaults'), {
+      method:'POST',
+      headers:{'content-type':'application/json'},
+      body: JSON.stringify(payload)
+    });
+    if (!resp.ok) {
+      const msg = await resp.text().catch(()=> 'Save failed');
+      alert(msg || 'Save failed');
+      return;
+    }
+
+    // Refresh the Rates tab in-place and close this small form
+    await mountClientRatesTab();
+    closeModal();
+  }, false);
 }
+
+
+function openClientHospitalModal(client_id){
+  const formHtml = html(`
+    <div class="form" id="hospitalForm">
+      ${input('hospital_name_norm','Hospital / Trust (normalised)','')}
+      ${input('ward_hint','Ward hint (optional)','')}
+    </div>
+  `);
+  showModal('Add Hospital / Ward', [{key:'form',label:'Form'}], () => formHtml, async ()=>{
+    const raw = collectForm('#hospitalForm');
+    if (!raw.hospital_name_norm) return alert('Hospital / Trust is required');
+    const res = await authFetch(API(`/api/clients/${client_id}/hospitals`), {
+      method:'POST', headers:{'content-type':'application/json'},
+      body: JSON.stringify({ hospital_name_norm: raw.hospital_name_norm, ward_hint: raw.ward_hint || null })
+    });
+    if (!res.ok) { alert(await res.text() || 'Add failed'); return; }
+    await renderHospitalsUI(client_id);
+    closeModal();
+  }, true);
+}
+
 async function renderHospitalsUI(client_id){
   const el = byId('clientHospitals'); if (!el) return;
-  const r = await authFetch(API(`/api/clients/${client_id}/hospitals`));
-const rows = await toList(r);
 
-  const tbl = document.createElement('table'); tbl.className='grid';
-  const cols=['hospital_name_norm','ward_hint','created_at'];
-  const trh=document.createElement('tr'); cols.forEach(c=>{ const th=document.createElement('th'); th.textContent=c; trh.appendChild(th);});
-  const thead=document.createElement('thead'); thead.appendChild(trh); tbl.appendChild(thead);
-  const tb=document.createElement('tbody');
-  rows.forEach(x=>{ const tr=document.createElement('tr');
-    cols.forEach(c=>{ const td=document.createElement('td'); td.textContent=x[c] ?? '—'; tr.appendChild(td);}); tb.appendChild(tr);
-  }); tbl.appendChild(tb); el.innerHTML=''; el.appendChild(tbl);
-  const add = document.createElement('div'); add.className='actions';
-  const btn=document.createElement('button'); btn.textContent='Add Hospital / Ward hint';
-  btn.onclick= async ()=>{
-    const hospital_name_norm = prompt('Hospital / Trust name (normalised)'); if (!hospital_name_norm) return;
-    const ward_hint = prompt('Ward hint (optional)') || null;
-    const res = await authFetch(API(`/api/clients/${client_id}/hospitals`), {method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({ client_id, hospital_name_norm, ward_hint })});
-    if (res.ok) renderHospitalsUI(client_id); else alert('Add failed');
-  };
-  add.appendChild(btn); el.appendChild(add);
+  const r = await authFetch(API(`/api/clients/${client_id}/hospitals`));
+  const rows = await toList(r);
+
+  const tbl = document.createElement('table'); tbl.className = 'grid';
+  const cols = ['hospital_name_norm','ward_hint','created_at'];
+
+  const thead = document.createElement('thead');
+  const trh = document.createElement('tr');
+  cols.forEach(c => { const th = document.createElement('th'); th.textContent = c; trh.appendChild(th); });
+  thead.appendChild(trh); tbl.appendChild(thead);
+
+  const tb = document.createElement('tbody');
+  rows.forEach(x => {
+    const tr = document.createElement('tr');
+    cols.forEach(c => { const td = document.createElement('td'); td.textContent = x[c] ?? '—'; tr.appendChild(td); });
+    tb.appendChild(tr);
+  });
+  tbl.appendChild(tb);
+
+  el.innerHTML = '';
+  el.appendChild(tbl);
+
+  const actions = document.createElement('div'); actions.className = 'actions';
+  const addBtn = document.createElement('button');
+  addBtn.textContent = 'Add Hospital / Ward hint';
+  addBtn.onclick = () => openClientHospitalModal(client_id);
+  actions.appendChild(addBtn);
+  el.appendChild(actions);
 }
+
 async function renderClientSettingsUI(row){
   const div = byId('clientSettings'); if (!div) return;
   // Placeholder; wire to specific client settings endpoint if/when exposed
@@ -768,42 +1098,68 @@ async function renderSettingsPanel(content){
 // ===== Generic modal plumbing =====
 function showModal(title, tabs, renderTab, onSave, hasId){
   byId('modalTitle').textContent = title;
-  const tabsEl = byId('modalTabs'); tabsEl.innerHTML='';
-  tabs.forEach((t,i)=>{
-    const b=document.createElement('button'); b.textContent=t.label; if(i===0)b.classList.add('active');
-    b.onclick = ()=>{ tabsEl.querySelectorAll('button').forEach(x=>x.classList.remove('active')); b.classList.add('active'); setTab(t.key); };
+
+  const tabsEl = byId('modalTabs');
+  tabsEl.innerHTML = '';
+
+  tabs.forEach((t, i) => {
+    const b = document.createElement('button');
+    b.textContent = t.label;
+    if (i === 0) b.classList.add('active');
+    b.onclick = () => {
+      tabsEl.querySelectorAll('button').forEach(x => x.classList.remove('active'));
+      b.classList.add('active');
+      setTab(t.key);
+    };
     tabsEl.appendChild(b);
   });
-  function setTab(k){ byId('modalBody').innerHTML = renderTab(k, modalCtx.data) || ''; }
+
+  function setTab(k){
+    byId('modalBody').innerHTML = renderTab(k, modalCtx.data) || '';
+
+    // Mount hooks per tab so buttons exist before we bind
+    if (modalCtx.entity === 'candidates' && k === 'rates')    { mountCandidateRatesTab?.(); }
+    if (modalCtx.entity === 'clients'    && k === 'rates')    { mountClientRatesTab?.(); }
+    if (modalCtx.entity === 'clients'    && k === 'hospitals'){ renderHospitalsUI?.(modalCtx.data?.id); }
+    if (modalCtx.entity === 'clients'    && k === 'settings') { renderClientSettingsUI?.(modalCtx.data); }
+
+    // If you moved the umbrella type-ahead initialisation into a function,
+    // mount it when the Pay tab becomes active:
+    if (modalCtx.entity === 'candidates' && k === 'pay')      { window.mountCandidatePayTab?.(); }
+  }
+
   setTab(tabs[0].key);
 
   byId('btnDelete').style.display = hasId ? '' : 'none';
   byId('btnDelete').onclick = openDelete;
-  byId('btnSave').onclick = onSave;
+  byId('btnSave').onclick   = onSave;
 
-  // related button
-  byId('btnRelated').onclick = async ()=>{
-    const ent = modalCtx.entity; const id = modalCtx.data?.id;
-    const data = await fetchRelatedCounts(ent, id);
-    if (!data || !Object.keys(data).length) return alert('No related records found.');
-    const pick = prompt('Related counts:\n'+Object.entries(data).map(([k,v])=>`${k}: ${v}`).join('\n')+'\n\nEnter a type to open (e.g. timesheets, invoices):');
-    if (!pick) return;
-    const rows = await fetchRelated(ent, id, pick);
-    if (!rows) return;
-    currentSection = (pick==='timesheets'?'timesheets':(pick==='invoices'?'invoices':currentSection));
-    renderSummary(rows);
-    closeModal();
+  // Related… button (dropdown menu at click position)
+  byId('btnRelated').onclick = async (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const ent = modalCtx.entity;
+    const id  = modalCtx.data?.id;
+    const counts = await fetchRelatedCounts(ent, id);
+    showRelatedMenu(e.clientX, e.clientY, counts, ent, id);
   };
 
-  // drag
-  const back = byId('modalBack'); back.style.display='flex';
-  const modal = byId('modal'); const drag = byId('modalDrag');
-  let offX=0, offY=0, dragging=false;
-  drag.onmousedown = (e)=>{ dragging=true; modal.classList.add('dragging'); offX=e.offsetX; offY=e.offsetY; document.onmousemove=mm; document.onmouseup=mu; };
-  function mm(e){ if(!dragging) return; modal.style.position='absolute'; modal.style.left=(e.clientX-offX)+'px'; modal.style.top=(e.clientY-offY)+'px'; }
-  function mu(){ dragging=false; modal.classList.remove('dragging'); document.onmousemove=null; document.onmouseup=null; }
-  byId('btnCloseModal').onclick = closeModal;
+  // Drag handling
+  const back  = byId('modalBack'); back.style.display = 'flex';
+  const modal = byId('modal');
+  const drag  = byId('modalDrag');
+  let offX = 0, offY = 0, dragging = false;
+
+  drag.onmousedown = (e) => {
+    dragging = true; modal.classList.add('dragging'); offX = e.offsetX; offY = e.offsetY;
+    document.onmousemove = mm; document.onmouseup = mu;
+  };
+  function mm(e){ if(!dragging) return; modal.style.position = 'absolute'; modal.style.left = (e.clientX - offX) + 'px'; modal.style.top = (e.clientY - offY) + 'px'; }
+  function mu(){ dragging = false; modal.classList.remove('dragging'); document.onmousemove = null; document.onmouseup = null; }
+
+  byId('btnCloseModal').onclick = () => { closeRelatedMenu?.(); closeModal(); };
 }
+
 function closeModal(){ byId('modalBack').style.display='none'; }
 
 // ===== Small helpers =====
@@ -827,6 +1183,90 @@ function collectForm(sel, jsonTry=false){
   }); return out;
 }
 
+// Close any existing floating menu
+function closeRelatedMenu(){
+  const m = document.getElementById('relatedMenu');
+  if (m) m.remove();
+  document.removeEventListener('click', closeRelatedMenu, { capture: true });
+  document.removeEventListener('keydown', escCloseRelatedMenu, true);
+}
+function escCloseRelatedMenu(ev){
+  if (ev.key === 'Escape') closeRelatedMenu();
+}
+
+// Create & show a context menu near (x,y)
+function showRelatedMenu(x, y, counts, entity, id){
+  closeRelatedMenu();
+
+  // Normalize counts into entries
+  const entries = counts && typeof counts === 'object'
+    ? Object.entries(counts).filter(([k])=>k && k.trim().length>0)
+    : [];
+
+  // Build container
+  const menu = document.createElement('div');
+  menu.id = 'relatedMenu';
+  menu.style.position = 'fixed';
+  menu.style.left = x + 'px';
+  menu.style.top  = y + 'px';
+  menu.style.zIndex = 1000;
+  menu.style.minWidth = '220px';
+  menu.style.maxWidth = '280px';
+  menu.style.background = '#0b1221';
+  menu.style.border = '1px solid #334155';
+  menu.style.borderRadius = '10px';
+  menu.style.boxShadow = '0 10px 24px rgba(0,0,0,.35)';
+  menu.style.padding = '6px';
+  menu.style.color = '#f8fafc';
+  menu.style.font = '14px/1.4 system-ui,Segoe UI,Roboto,Helvetica,Arial';
+
+  // Item factory (button-like divs)
+  function item(label, disabled, onClick){
+    const it = document.createElement('div');
+    it.textContent = label;
+    it.style.padding = '8px 10px';
+    it.style.borderRadius = '8px';
+    it.style.cursor = disabled ? 'default' : 'pointer';
+    it.style.opacity = disabled ? '.6' : '1';
+    it.onmouseenter = ()=>{ if (!disabled) it.style.background = 'rgba(255,255,255,.06)'; };
+    it.onmouseleave = ()=>{ it.style.background = 'transparent'; };
+    if (!disabled) it.onclick = async (ev)=>{
+      ev.stopPropagation();
+      // Fetch rows for the chosen related type
+      const rows = await fetchRelated(entity, id, onClick.type);
+      if (rows) {
+        if (onClick.type === 'timesheets' || onClick.type === 'invoices') {
+          currentSection = onClick.type; // switch to a known section
+        }
+        renderSummary(rows);
+      }
+      closeRelatedMenu();
+    };
+    menu.appendChild(it);
+  }
+
+  if (!entries.length) {
+    item('No related records', true, {});
+  } else {
+    // Sort by largest count first (optional)
+    entries.sort((a,b)=> (b[1]||0)-(a[1]||0));
+    entries.forEach(([type, count])=>{
+      const label = `${count} related ${type}`;
+      item(label, count===0, { type });
+    });
+  }
+
+  // Insert and wire global dismissals
+  document.body.appendChild(menu);
+  setTimeout(()=>{
+    document.addEventListener('click', closeRelatedMenu, { capture: true, once: true });
+    document.addEventListener('keydown', escCloseRelatedMenu, true);
+  }, 0);
+
+  // Keep clicks inside menu from closing it immediately
+  menu.addEventListener('click', ev => ev.stopPropagation());
+}
+
 // ===== Quick search =====
 byId('quickSearch').onkeydown = async (e)=>{
   if (e.key!=='Enter') return;
@@ -838,6 +1278,15 @@ function openSearch(){
   const q = prompt('Search text:'); if (!q) return;
   byId('quickSearch').value = q; byId('quickSearch').dispatchEvent(new KeyboardEvent('keydown',{key:'Enter'}));
 }
+
+// OPTIONAL: open ALT+F for fast search
+document.addEventListener('keydown', (e)=>{
+  if (e.altKey && (e.key === 'f' || e.key === 'F')) {
+    e.preventDefault();
+    openSearchModal();
+  }
+});
+
 
 // ===== Boot =====
 async function renderAll(){
