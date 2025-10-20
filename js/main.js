@@ -432,10 +432,12 @@ async function listClients(){   const r = await authFetch(API('/api/clients')); 
 async function listUmbrellas(){ const r = await authFetch(API('/api/umbrellas')); return toList(r); }
 async function listOutbox(){    const r = await authFetch(API('/api/email/outbox')); return toList(r); }
 
-async function listClientRates(){
-  const r = await authFetch(API('/api/rates/client-defaults'));
+async function listClientRates(clientId){
+  const qs = clientId ? `?client_id=${encodeURIComponent(clientId)}` : '';
+  const r = await authFetch(API(`/api/rates/client-defaults${qs}`));
   return toList(r);
 }
+
 async function listCandidateRates(candidate_id){
   const r = await authFetch(API(`/api/rates/candidate-overrides?candidate_id=${encodeURIComponent(candidate_id)}`));
   return toList(r);
@@ -564,6 +566,7 @@ async function openDelete(){
 }
 
 // ---- Candidate modal
+
 async function openCandidate(row){
   modalCtx = {entity:'candidates', data: row};
   showModal('Candidate', [
@@ -572,7 +575,7 @@ async function openCandidate(row){
     {key:'pay',label:'Payment details'},
     {key:'bookings',label:'Bookings'}
   ], renderCandidateTab, async ()=>{
-    // MERGE main + pay tabs so umbrella/bank fields are saved too
+    // Merge main + pay so umbrella/bank fields are captured
     const main = collectForm('#tab-main');
     const pay  = collectForm('#tab-pay');
     const payload = { ...main, ...pay };
@@ -580,7 +583,7 @@ async function openCandidate(row){
     if (!payload.first_name && !payload.last_name) return alert('Enter at least a first or last name.');
     if (!payload.pay_method) payload.pay_method = 'PAYE';
 
-    // If user set PAYE, clear umbrella_id and allow custom bank details
+    // If PAYE, clear umbrella link (keep manual bank details editable)
     if (payload.pay_method === 'PAYE') {
       payload.umbrella_id = null;
     }
@@ -589,98 +592,7 @@ async function openCandidate(row){
     closeModal(); renderAll();
   }, row?.id);
 
-  // ===== Umbrella type-ahead binding =====
-  const umbrellas = await listUmbrellas();
-  const nameToUmb = new Map(umbrellas.map(u => [String(u.name).toLowerCase(), u]));
-
-  // Populate datalist options
-  const dl = document.querySelector('#umbList');
-  if (dl) {
-    dl.innerHTML = umbrellas.map(u => `<option value="${u.name}"></option>`).join('');
-  }
-
-  const nameInput = document.querySelector('#tab-pay #umbrella_name');
-  const idHidden  = document.querySelector('#tab-pay #umbrella_id');
-  const paySel    = document.getElementById('pay-method');
-  const bankName  = document.querySelector('#tab-pay input[name="bank_name"]');
-  const sortCode  = document.querySelector('#tab-pay input[name="sort_code"]');
-  const accNum    = document.querySelector('#tab-pay input[name="account_number"]');
-
-  // If record already has an umbrella, prefill the visible name & lock fields
-  if (row?.umbrella_id) {
-    const existing = umbrellas.find(u => u.id === row.umbrella_id);
-    if (existing) {
-      nameInput.value = existing.name;
-      paySel.value    = 'UMBRELLA';
-      lockBankFromUmb(existing);
-    }
-  }
-
-  // Resolve typed umbrella name to a record
-  function resolveUmbrella(value){
-    const v = String(value || '').trim().toLowerCase();
-    if (!v) { clearUmbrella(); return; }
-    // exact match first
-    let match = nameToUmb.get(v);
-    if (!match) {
-      // fallback startsWith (best-effort)
-      match = umbrellas.find(u => String(u.name).toLowerCase().startsWith(v));
-    }
-    if (match) {
-      idHidden.value = match.id;
-      paySel.value   = 'UMBRELLA';
-      lockBankFromUmb(match);
-    } else {
-      // unknown text: treat as PAYE until a real umbrella is chosen
-      clearUmbrella();
-    }
-  }
-
-  function lockBankFromUmb(umb){
-    // Fill + lock bank fields to umbrella details
-    bankName.value = umb.bank_name || '';
-    sortCode.value = umb.sort_code || '';
-    accNum.value   = umb.account_number || '';
-    [bankName, sortCode, accNum].forEach(i => i.readOnly = true);
-  }
-  function unlockBank(){
-    [bankName, sortCode, accNum].forEach(i => i.readOnly = false);
-  }
-  function clearUmbrella(){
-    idHidden.value = '';
-    if (paySel.value === 'UMBRELLA') {
-      // If no valid umbrella left, revert to PAYE and unlock
-      paySel.value = 'PAYE';
-    }
-    unlockBank();
-  }
-
-  // Events: user types or picks from list
-  if (nameInput) {
-    nameInput.addEventListener('change', () => resolveUmbrella(nameInput.value));
-    nameInput.addEventListener('blur',   () => resolveUmbrella(nameInput.value));
-    // optional: live feedback while typing (don’t commit yet)
-    // nameInput.addEventListener('input', () => {/* could highlight best match */});
-  }
-
-  // If user flips pay method manually, respect that
-  if (paySel) {
-    paySel.addEventListener('change', () => {
-      if (paySel.value === 'PAYE') {
-        clearUmbrella();
-      } else if (paySel.value === 'UMBRELLA') {
-        // If no valid umbrella chosen yet, keep bank fields unlocked until one is resolved
-        if (idHidden.value) {
-          const pick = umbrellas.find(u => u.id === idHidden.value);
-          if (pick) lockBankFromUmb(pick); else unlockBank();
-        } else {
-          unlockBank();
-        }
-      }
-    });
-  }
-
-  // ===== Existing behaviour =====
+  // Load and render rates + calendar when applicable
   if (row?.id) {
     const rates = await listCandidateRates(row.id);
     renderCandidateRatesTable(rates);
@@ -690,9 +602,133 @@ async function openCandidate(row){
     renderCalendar(ts || []);
   }
 }
+async function mountCandidatePayTab(){
+  // Elements inside Pay tab
+  const umbRow    = document.querySelector('#tab-pay #umbRow');
+  const nameInput = document.querySelector('#tab-pay #umbrella_name');
+  const idHidden  = document.querySelector('#tab-pay #umbrella_id');
+  const paySel    = document.getElementById('pay-method');
+  const bankName  = document.querySelector('#tab-pay input[name="bank_name"]');
+  const sortCode  = document.querySelector('#tab-pay input[name="sort_code"]');
+  const accNum    = document.querySelector('#tab-pay input[name="account_number"]');
+  const dl        = document.querySelector('#tab-pay #umbList');
 
-function renderCandidateTab(key, row={}){
-  if (key==='main') return html(`
+  if (!umbRow || !nameInput || !idHidden || !paySel || !dl) return;
+
+  // Fetch umbrellas and populate datalist
+  const umbrellas = await listUmbrellas();
+  const byName = new Map(umbrellas.map(u => [String(u.name).toLowerCase(), u]));
+  dl.innerHTML = umbrellas.map(u => `<option value="${u.name}"></option>`).join('');
+
+  // Helpers
+  function lockFromUmb(u){
+    bankName.value = u.bank_name || '';
+    sortCode.value = u.sort_code || '';
+    accNum.value   = u.account_number || '';
+    [bankName, sortCode, accNum].forEach(i => i.readOnly = true);
+  }
+  function unlockBank(){ [bankName, sortCode, accNum].forEach(i => i.readOnly = false); }
+  function clearUmbrella(){
+    idHidden.value = '';
+    nameInput.value = '';
+    unlockBank();
+  }
+  function resolveUmbrella(val){
+    const v = String(val||'').trim().toLowerCase();
+    if (!v) { clearUmbrella(); return; }
+    let match = byName.get(v);
+    if (!match) match = umbrellas.find(u => String(u.name).toLowerCase().startsWith(v));
+    if (match) {
+      idHidden.value = match.id;
+      paySel.value = 'UMBRELLA';
+      lockFromUmb(match);
+      // ensure chooser visible when umbrella is active
+      umbRow.style.display = '';
+    } else {
+      // unknown text ⇒ treat as PAYE until a valid umbrella picked
+      clearUmbrella();
+      if (paySel.value === 'UMBRELLA') paySel.value = 'PAYE';
+      umbRow.style.display = 'none';
+    }
+  }
+
+  // Show/hide umbrella chooser based on pay method
+  function updateUmbVisibility(){
+    if (paySel.value === 'UMBRELLA') {
+      umbRow.style.display = '';
+      // If we have a chosen umbrella id, lock; else unlock until a valid pick
+      const u = umbrellas.find(x => x.id === idHidden.value);
+      if (u) lockFromUmb(u); else unlockBank();
+    } else {
+      umbRow.style.display = 'none';
+      clearUmbrella();
+    }
+  }
+
+  // Initial visibility (based on loaded data if any)
+  updateUmbVisibility();
+
+  // Bind events
+  paySel.addEventListener('change', updateUmbVisibility);
+  nameInput.addEventListener('change', () => resolveUmbrella(nameInput.value));
+  nameInput.addEventListener('blur',   () => resolveUmbrella(nameInput.value));
+  // optional live assist:
+  // nameInput.addEventListener('input', () => {/* highlight best match if desired */});
+}
+
+
+function renderCandidateRatesTable(rates){
+  const div = byId('ratesTable'); if (!div) return;
+
+  // Empty state but keep the add button visible
+  if (!rates.length) {
+    div.innerHTML = `
+      <div class="hint" style="margin-bottom:8px">No candidate-specific rates. Client defaults will apply.</div>
+      <div class="actions"><button id="btnAddRate">Add rate override</button></div>
+    `;
+    const addBtn = byId('btnAddRate');
+    if (addBtn) addBtn.onclick = () => openCandidateRateModal(modalCtx.data?.id);
+    return;
+  }
+
+  const cols = ['client_id','role','band','pay_day','pay_night','pay_sat','pay_sun','pay_bh','date_from','date_to'];
+  const tbl  = document.createElement('table'); tbl.className='grid';
+  const thead= document.createElement('thead'); 
+  const trh  = document.createElement('tr');
+  cols.forEach(c=>{ const th=document.createElement('th'); th.textContent=c; trh.appendChild(th); });
+  thead.appendChild(trh); tbl.appendChild(thead);
+
+  const tb = document.createElement('tbody');
+  rates.forEach(r=>{
+    const tr=document.createElement('tr');
+    // Double-click to EDIT
+    tr.ondblclick = () => openCandidateRateModal(modalCtx.data?.id, r);
+    cols.forEach(c=>{
+      const td=document.createElement('td');
+      td.textContent = (r[c] ?? '—');
+      tr.appendChild(td);
+    });
+    tb.appendChild(tr);
+  });
+  tbl.appendChild(tb);
+
+  // Footer actions
+  const actions = document.createElement('div');
+  actions.className = 'actions';
+  actions.innerHTML = `<button id="btnAddRate">Add rate override</button>`;
+
+  // Render
+  div.innerHTML = '';
+  div.appendChild(tbl);
+  div.appendChild(actions);
+
+  // Bind after DOM is present
+  const addBtn = byId('btnAddRate');
+  if (addBtn) addBtn.onclick = () => openCandidateRateModal(modalCtx.data?.id);
+}
+
+function renderCandidateTab(key, row = {}) {
+  if (key === 'main') return html(`
     <div class="form" id="tab-main">
       ${input('first_name','First name', row.first_name)}
       ${input('last_name','Last name', row.last_name)}
@@ -704,34 +740,36 @@ function renderCandidateTab(key, row={}){
       <div class="row"><label>Notes</label><textarea name="notes" placeholder="Free text…">${row.notes || ''}</textarea></div>
     </div>
   `);
-  if (key==='rates') return html(`
+
+  if (key === 'rates') return html(`
     <div id="tab-rates">
       <div class="actions"><button id="btnAddRate">Add rate override</button></div>
       <div id="ratesTable"></div>
     </div>
   `);
-  if (key==='pay') return html(`
-  <div class="form" id="tab-pay">
-    <div class="row"><label class="hint">
-      PAYE bank fields are editable. If UMBRELLA is selected, bank details are taken from the umbrella and locked.
-    </label></div>
 
-    ${input('account_holder','Account holder', row.account_holder)}
-    ${input('bank_name','Bank name', row.bank_name)}
-    ${input('sort_code','Sort code', row.sort_code)}
-    ${input('account_number','Account number', row.account_number)}
+  if (key === 'pay') return html(`
+    <div class="form" id="tab-pay">
+      <div class="row"><label class="hint">
+        PAYE bank fields are editable. If UMBRELLA is selected, bank details are taken from the umbrella and locked.
+      </label></div>
 
-    <!-- Umbrella chooser: text input + datalist + hidden canonical id -->
-    <div class="row">
-      <label>Umbrella company</label>
-      <input name="umbrella_name" id="umbrella_name" list="umbList" placeholder="Type to search umbrellas…" value="" />
-      <datalist id="umbList"></datalist>
-      <input type="hidden" name="umbrella_id" id="umbrella_id" value="${row.umbrella_id || ''}"/>
+      ${input('account_holder','Account holder', row.account_holder)}
+      ${input('bank_name','Bank name', row.bank_name)}
+      ${input('sort_code','Sort code', row.sort_code)}
+      ${input('account_number','Account number', row.account_number)}
+
+      <!-- Umbrella chooser: text input + datalist + hidden canonical id -->
+      <div class="row" id="umbRow">
+        <label>Umbrella company</label>
+        <input name="umbrella_name" id="umbrella_name" list="umbList" placeholder="Type to search umbrellas…" value="" />
+        <datalist id="umbList"></datalist>
+        <input type="hidden" name="umbrella_id" id="umbrella_id" value="${row.umbrella_id || ''}"/>
+      </div>
     </div>
-  </div>
-`);
+  `);
 
-  if (key==='bookings') return html(`
+  if (key === 'bookings') return html(`
     <div id="calendarWrap">
       <div class="legend">
         <div class="lg"><span class="sq a"></span> Authorised</div>
@@ -742,6 +780,7 @@ function renderCandidateTab(key, row={}){
     </div>
   `);
 }
+
 
 
 async function mountCandidateRatesTab(){
@@ -849,6 +888,7 @@ function renderCalendar(timesheets){
 }
 
 // ---- Client modal
+
 async function openClient(row){
   modalCtx = {entity:'clients', data: row};
   showModal('Client', [
@@ -864,12 +904,73 @@ async function openClient(row){
   }, row?.id);
 
   if (row?.id){
-    const rates = (await listClientRates()).filter(r=>r.client_id===row.id);
+    const rates = await listClientRates(row.id);
     renderClientRatesTable(rates);
     renderHospitalsUI(row.id);
     renderClientSettingsUI(row);
   }
 }
+
+
+
+function renderClientRatesTable(rates){
+  const div = byId('clientRates'); if (!div) return;
+
+  // Empty state: message + Add button so users can add the first rate
+  if (!rates.length) {
+    div.innerHTML = `
+      <div class="hint" style="margin-bottom:8px">No client default rates yet.</div>
+      <div class="actions"><button id="btnAddClientRate">Add/Upsert client rate</button></div>
+    `;
+    const addBtn = byId('btnAddClientRate');
+    if (addBtn) addBtn.onclick = () => openClientRateModal(modalCtx.data?.id);
+    return;
+  }
+
+  const cols = [
+    'role','band',
+    'charge_day','charge_night','charge_sat','charge_sun','charge_bh',
+    'pay_day','pay_night','pay_sat','pay_sun','pay_bh',
+    'date_from','date_to'
+  ];
+
+  const tbl   = document.createElement('table'); tbl.className='grid';
+  const thead = document.createElement('thead');
+  const trh   = document.createElement('tr');
+  cols.forEach(c => { const th = document.createElement('th'); th.textContent = c; trh.appendChild(th); });
+  thead.appendChild(trh); tbl.appendChild(thead);
+
+  const tb = document.createElement('tbody');
+  rates.forEach(r => {
+    const tr = document.createElement('tr');
+
+    // Double-click to EDIT (prefilled modal)
+    tr.ondblclick = () => openClientRateModal(modalCtx.data?.id, r);
+
+    cols.forEach(c => {
+      const td = document.createElement('td');
+      td.textContent = (r[c] ?? '—');
+      tr.appendChild(td);
+    });
+    tb.appendChild(tr);
+  });
+  tbl.appendChild(tb);
+
+  // Footer actions
+  const actions = document.createElement('div');
+  actions.className = 'actions';
+  actions.innerHTML = `<button id="btnAddClientRate">Add/Upsert client rate</button>`;
+
+  // Render and bind
+  div.innerHTML = '';
+  div.appendChild(tbl);
+  div.appendChild(actions);
+
+  const addBtn = byId('btnAddClientRate');
+  if (addBtn) addBtn.onclick = () => openClientRateModal(modalCtx.data?.id);
+}
+
+
 function renderClientTab(key, row={}){
   if (key==='main') return html(`
     <div class="form" id="tab-main">
@@ -892,13 +993,14 @@ if (modalCtx.entity === 'clients' && k === 'hospitals'){ renderHospitalsUI(modal
 
 
 async function mountClientRatesTab(){
-  const list = await listClientRates();
-  const rows = modalCtx.data?.id ? list.filter(r => r.client_id === modalCtx.data.id) : [];
-  renderClientRatesTable(rows);
+  const clientId = modalCtx.data?.id;
+  const list = clientId ? await listClientRates(clientId) : [];
+  renderClientRatesTable(list);
 
   const btn = byId('btnAddClientRate');
-  if (btn) btn.onclick = () => openClientRateModal(modalCtx.data?.id);
+  if (btn) btn.onclick = () => openClientRateModal(clientId);
 }
+
 function openClientRateModal(client_id, existing){
   const formHtml = html(`
     <div class="form" id="clientRateForm">
@@ -1096,7 +1198,7 @@ async function renderSettingsPanel(content){
 }
 
 // ===== Generic modal plumbing =====
-function showModal(title, tabs, renderTab, onSave, hasId){
+function showModal(title, tabs, renderTab, onSave, hasId) {
   byId('modalTitle').textContent = title;
 
   const tabsEl = byId('modalTabs');
@@ -1123,9 +1225,8 @@ function showModal(title, tabs, renderTab, onSave, hasId){
     if (modalCtx.entity === 'clients'    && k === 'hospitals'){ renderHospitalsUI?.(modalCtx.data?.id); }
     if (modalCtx.entity === 'clients'    && k === 'settings') { renderClientSettingsUI?.(modalCtx.data); }
 
-    // If you moved the umbrella type-ahead initialisation into a function,
-    // mount it when the Pay tab becomes active:
-    if (modalCtx.entity === 'candidates' && k === 'pay')      { window.mountCandidatePayTab?.(); }
+    // Pay tab: attach umbrella type-ahead & locking **after** the Pay DOM exists
+    if (modalCtx.entity === 'candidates' && k === 'pay')      { mountCandidatePayTab?.(); }
   }
 
   setTab(tabs[0].key);
@@ -1159,6 +1260,7 @@ function showModal(title, tabs, renderTab, onSave, hasId){
 
   byId('btnCloseModal').onclick = () => { closeRelatedMenu?.(); closeModal(); };
 }
+
 
 function closeModal(){ byId('modalBack').style.display='none'; }
 
