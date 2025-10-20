@@ -222,8 +222,8 @@ function renderTools(){
 }
 
 // NEW: advanced, section-aware search modal
+// === UPDATED: Advanced Search — add Roles (any) multi-select, use UK date pickers ===
 async function openSearchModal(){
-  // enum pickers from DB (timesheet_status_enum, invoice_status_enum)
   const TIMESHEET_STATUS = ['ERROR','RECEIVED','REVOKED','SHEETS_PARTIAL','SHEETS_PENDING','SHEETS_SYNCED','STORED'];
   const INVOICE_STATUS   = ['DRAFT','ISSUED','ON_HOLD','PAID'];
 
@@ -238,10 +238,11 @@ async function openSearchModal(){
         </select>
       </div>`;
   }
-  function dates(nameFrom, labelFrom, nameTo, labelTo){
+  function datesUk(nameFrom, labelFrom, nameTo, labelTo){
+    // text inputs + we will attach UK date pickers after mount
     return `
-      <div class="row"><label>${labelFrom}</label><input type="date" name="${nameFrom}" /></div>
-      <div class="row"><label>${labelTo}</label><input type="date" name="${nameTo}" /></div>`;
+      <div class="row"><label>${labelFrom}</label><input type="text" placeholder="DD/MM/YYYY" name="${nameFrom}" /></div>
+      <div class="row"><label>${labelTo}</label><input type="text" placeholder="DD/MM/YYYY" name="${nameTo}" /></div>`;
   }
   function multi(name, label, values){
     const opts = values.map(v=>`<option value="${v}">${v}</option>`).join('');
@@ -252,9 +253,10 @@ async function openSearchModal(){
       </div>`;
   }
 
-  // Per-section form fragments (only fields you can actually filter on without “making up” API)
   let form = '';
   if (currentSection === 'candidates'){
+    const roles = await loadGlobalRoleOptions();
+    const roleOpts = roles.map(r=>`<option value="${r}">${r}</option>`).join('');
     form = `
       <div class="form" id="searchForm">
         ${input('first_name','First name','')}
@@ -268,8 +270,12 @@ async function openSearchModal(){
             <option value="UMBRELLA">UMBRELLA</option>
           </select>
         </div>
+        <div class="row">
+          <label>Roles (any)</label>
+          <select name="roles_any" multiple size="6">${roleOpts}</select>
+        </div>
         ${boolSelect('active','Active')}
-        ${dates('created_from','Created from','created_to','Created to')}
+        ${datesUk('created_from','Created from','created_to','Created to')}
       </div>`;
   } else if (currentSection === 'clients'){
     form = `
@@ -279,7 +285,7 @@ async function openSearchModal(){
         ${input('primary_invoice_email','Primary invoice email','')}
         ${input('ap_phone','A/P phone','')}
         ${boolSelect('vat_chargeable','VAT chargeable')}
-        ${dates('created_from','Created from','created_to','Created to')}
+        ${datesUk('created_from','Created from','created_to','Created to')}
       </div>`;
   } else if (currentSection === 'umbrellas'){
     form = `
@@ -290,7 +296,7 @@ async function openSearchModal(){
         ${input('account_number','Account number','')}
         ${boolSelect('vat_chargeable','VAT chargeable')}
         ${boolSelect('enabled','Enabled')}
-        ${dates('created_from','Created from','created_to','Created to')}
+        ${datesUk('created_from','Created from','created_to','Created to')}
       </div>`;
   } else if (currentSection === 'timesheets'){
     form = `
@@ -298,10 +304,10 @@ async function openSearchModal(){
         ${input('booking_id','Booking ID','')}
         ${input('occupant_key_norm','Occupant key','')}
         ${input('hospital_norm','Hospital','')}
-        ${dates('worked_from','Worked from (date)','worked_to','Worked to (date)')}
-        ${dates('week_ending_from','Week ending from','week_ending_to','Week ending to')}
+        ${datesUk('worked_from','Worked from (date)','worked_to','Worked to (date)')}
+        ${datesUk('week_ending_from','Week ending from','week_ending_to','Week ending to')}
         ${multi('status','Status (multi-select)', TIMESHEET_STATUS)}
-        ${dates('created_from','Created from','created_to','Created to')}
+        ${datesUk('created_from','Created from','created_to','Created to')}
       </div>`;
   } else if (currentSection === 'invoices'){
     form = `
@@ -309,9 +315,9 @@ async function openSearchModal(){
         ${input('invoice_no','Invoice number','')}
         ${input('client_id','Client ID (UUID)','')}
         ${multi('status','Status (multi-select)', INVOICE_STATUS)}
-        ${dates('issued_from','Issued from','issued_to','Issued to')}
-        ${dates('due_from','Due from','due_to','Due to')}
-        ${dates('created_from','Created from','created_to','Created to')}
+        ${datesUk('issued_from','Issued from','issued_to','Issued to')}
+        ${datesUk('due_from','Due from','due_to','Due to')}
+        ${datesUk('created_from','Created from','created_to','Created to')}
       </div>`;
   } else {
     form = `<div class="tabc">No advanced search for this section.</div>`;
@@ -334,12 +340,337 @@ async function openSearchModal(){
       if (raw[k] === '') delete raw[k];
     });
 
-    // Call the existing /api/search/{section}?q=… with JSON filters
+    // Convert any UK date inputs to ISO for the filters
+    ['created_from','created_to','worked_from','worked_to','week_ending_from','week_ending_to','issued_from','issued_to','due_from','due_to']
+      .forEach(f => {
+        if (raw[f]) {
+          const iso = parseUkDateToIso(raw[f]);
+          if (iso) raw[f] = iso;
+        }
+      });
+
+    // Call existing search
     const rows = await search(currentSection, JSON.stringify(raw));
     if (rows) renderSummary(rows);
     closeModal();
   }, false);
+
+  // After mount: attach UK date pickers
+  document.querySelectorAll('#searchForm input[placeholder="DD/MM/YYYY"]').forEach(attachUkDatePicker);
 }
+
+// ===================== NEW HELPERS (UI + data) =====================
+
+// Cache for global roles
+let __GLOBAL_ROLE_CODES_CACHE__ = null;
+let __GLOBAL_ROLE_CODES_CACHE_TS__ = 0;
+function invalidateGlobalRoleOptionsCache(){
+  __GLOBAL_ROLE_CODES_CACHE__ = null;
+  __GLOBAL_ROLE_CODES_CACHE_TS__ = 0;
+}
+
+// Load and dedupe all role codes from client defaults across all clients
+async function loadGlobalRoleOptions(){
+  const now = Date.now();
+  if (__GLOBAL_ROLE_CODES_CACHE__ && (now - __GLOBAL_ROLE_CODES_CACHE_TS__ < 60_000)) {
+    return __GLOBAL_ROLE_CODES_CACHE__;
+  }
+  const list = await listClientRates(); // no client_id → all
+  const set = new Set();
+  (list || []).forEach(r => { if (r.role) set.add(r.role); });
+  const arr = [...set].sort((a,b)=> a.localeCompare(b));
+  __GLOBAL_ROLE_CODES_CACHE__ = arr;
+  __GLOBAL_ROLE_CODES_CACHE_TS__ = now;
+  return arr;
+}
+
+// Render roles editor into a container; updates modalCtx.rolesState
+function renderRolesEditor(container, rolesState, allRoleOptions){
+  // Use a local mutable copy so the updater can refresh options
+  let roleOptions = Array.isArray(allRoleOptions) ? allRoleOptions.slice() : [];
+
+  container.innerHTML = `
+    <div class="roles-editor">
+      <div class="roles-add">
+        <select id="rolesAddSelect">
+          <option value="">Add role…</option>
+          ${roleOptions.map(code => `<option value="${code}">${code}</option>`).join('')}
+        </select>
+        <button id="rolesAddBtn" type="button">Add</button>
+      </div>
+      <ul id="rolesList" class="roles-list"></ul>
+    </div>
+  `;
+
+  const sel = container.querySelector('#rolesAddSelect');
+  const btn = container.querySelector('#rolesAddBtn');
+  const ul  = container.querySelector('#rolesList');
+
+  function availableOptions(){
+    const picked = new Set((rolesState||[]).map(x => x.code));
+    return roleOptions.filter(code => !picked.has(code));
+  }
+
+  function refreshAddSelect(){
+    const opts = ['<option value="">Add role…</option>'].concat(
+      availableOptions().map(code => `<option value="${code}">${code}</option>`)
+    ).join('');
+    sel.innerHTML = opts;
+  }
+
+  function renderList(){
+    ul.innerHTML = '';
+    const arr = (rolesState||[]).slice().sort((a,b)=> a.rank - b.rank);
+    arr.forEach((item, idx) => {
+      const li = document.createElement('li');
+      li.className = 'role-item';
+      li.draggable = true;
+      li.dataset.index = String(idx);
+      li.innerHTML = `
+        <span class="drag" title="Drag to reorder">⋮⋮</span>
+        <span class="rank">${item.rank}.</span>
+        <span class="code">${item.code}</span>
+        <input class="label" type="text" placeholder="Optional label…" value="${item.label || ''}" />
+        <button class="remove" type="button" title="Remove">✕</button>
+      `;
+      // Remove
+      li.querySelector('.remove').onclick = () => {
+        rolesState = rolesState.filter((_, i) => i !== idx);
+        rolesState = normaliseRolesForSave(rolesState);
+        modalCtx.rolesState = rolesState;
+        renderList(); refreshAddSelect();
+      };
+      // Label change
+      li.querySelector('.label').oninput = (e) => {
+        rolesState[idx].label = e.target.value;
+        modalCtx.rolesState = rolesState;
+      };
+      // Drag & drop
+      li.addEventListener('dragstart', (e) => {
+        e.dataTransfer.setData('text/plain', String(idx));
+      });
+      li.addEventListener('dragover', (e) => e.preventDefault());
+      li.addEventListener('drop', (e) => {
+        e.preventDefault();
+        const from = parseInt(e.dataTransfer.getData('text/plain'), 10);
+        const to = idx;
+        if (Number.isInteger(from) && from !== to) {
+          const copy = rolesState.slice();
+          const [moved] = copy.splice(from, 1);
+          copy.splice(to, 0, moved);
+          rolesState = normaliseRolesForSave(copy);
+          modalCtx.rolesState = rolesState;
+          renderList();
+        }
+      });
+      ul.appendChild(li);
+    });
+  }
+
+  btn.onclick = () => {
+    const code = sel.value;
+    if (!code) return;
+    // Prevent duplicates
+    if ((rolesState||[]).some(r => r.code === code)) return;
+    const nextRank = ((rolesState||[]).length || 0) + 1;
+    rolesState = [...(rolesState||[]), { code, rank: nextRank }];
+    rolesState = normaliseRolesForSave(rolesState);
+    modalCtx.rolesState = rolesState;
+    renderList(); refreshAddSelect();
+  };
+
+  // Expose a tiny API on the container to refresh options in-place
+  container.__rolesEditor = {
+    updateOptions(newOptions){
+      roleOptions = Array.isArray(newOptions) ? newOptions.slice() : [];
+      refreshAddSelect();
+    }
+  };
+
+  // Initial render
+  refreshAddSelect();
+  renderList();
+}
+
+
+// Drop dups (by code), sort by rank, rewrite rank 1..N
+function normaliseRolesForSave(roles){
+  const out = [];
+  const seen = new Set();
+  (Array.isArray(roles) ? roles : []).forEach(r => {
+    const code = String(r.code || '').trim();
+    if (!code) return;
+    if (seen.has(code)) return;
+    seen.add(code);
+    out.push({ code, rank: Number(r.rank) || 0, label: r.label ? String(r.label) : undefined });
+  });
+  out.sort((a,b)=> a.rank - b.rank);
+  out.forEach((r,i)=> r.rank = i+1);
+  return out;
+}
+
+function formatRolesSummary(roles){
+  if (!Array.isArray(roles) || !roles.length) return '';
+  const sorted = roles.slice().sort((a,b)=> (a.rank||0)-(b.rank||0));
+  return sorted.map(r => `${ordinal(r.rank)} ${r.code}`).join(', ');
+}
+
+function ordinal(n){
+  const s = ["th","st","nd","rd"], v = n % 100;
+  return n + (s[(v-20)%10] || s[v] || s[0]);
+}
+
+// Basic clients list for dropdowns (id + name)
+async function listClientsBasic(){
+  const r = await authFetch(API('/api/clients'));
+  const rows = await r.json().catch(()=>({items:[]}));
+  const list = Array.isArray(rows?.items) ? rows.items : (Array.isArray(rows) ? rows : []);
+  return list.map(x => ({ id: x.id, name: x.name })).filter(x => x.id && x.name);
+}
+
+// ===== UK date helpers & lightweight picker =====
+
+function formatIsoToUk(iso){ // 'YYYY-MM-DD' -> 'DD/MM/YYYY'
+  if (!iso || typeof iso !== 'string') return '';
+  const m = iso.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (!m) return '';
+  return `${m[3]}/${m[2]}/${m[1]}`;
+}
+
+function parseUkDateToIso(ddmmyyyy){ // 'DD/MM/YYYY' -> 'YYYY-MM-DD' or null
+  if (!ddmmyyyy || typeof ddmmyyyy !== 'string') return null;
+  const m = ddmmyyyy.trim().match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+  if (!m) return null;
+  const d = parseInt(m[1],10), mo=parseInt(m[2],10), y=parseInt(m[3],10);
+  if (mo<1||mo>12||d<1||d>31||y<1900||y>3000) return null;
+  const dt = new Date(Date.UTC(y, mo-1, d));
+  if (dt.getUTCFullYear()!==y || (dt.getUTCMonth()+1)!==mo || dt.getUTCDate()!==d) return null; // invalid date like 31/02
+  const mm = String(mo).padStart(2,'0'), dd = String(d).padStart(2,'0');
+  return `${y}-${mm}-${dd}`;
+}
+
+// Minimal calendar that sits above modals; ESC / outside closes; keyboard nav supported
+function attachUkDatePicker(inputEl){
+  if (!inputEl) return;
+  inputEl.setAttribute('autocomplete','off');
+
+  let portal, current;
+
+  function openPicker(){
+    closePicker();
+    // Parse current value if present
+    let today = new Date();
+    if (inputEl.value) {
+      const iso = parseUkDateToIso(inputEl.value);
+      if (iso) {
+        const [y,m,d] = iso.split('-').map(Number);
+        today = new Date(Date.UTC(y, m-1, d));
+      }
+    }
+    current = { year: today.getUTCFullYear(), month: today.getUTCMonth() }; // 0-based
+
+    portal = document.createElement('div');
+    portal.className = 'uk-datepicker-portal';
+    portal.style.position = 'fixed';
+    portal.style.zIndex = '99999';
+    portal.style.background = '#fff';
+    portal.style.border = '1px solid #ccc';
+    portal.style.borderRadius = '8px';
+    portal.style.boxShadow = '0 8px 24px rgba(0,0,0,0.15)';
+    portal.style.padding = '8px';
+
+    positionPortal();
+
+    portal.innerHTML = renderCalendarHtml(current.year, current.month, inputEl.value);
+    document.body.appendChild(portal);
+
+    portal.addEventListener('click', onPortalClick);
+    window.addEventListener('resize', positionPortal);
+    document.addEventListener('keydown', onKeyDown, true);
+    setTimeout(()=> document.addEventListener('click', onOutside, true), 0);
+  }
+
+  function positionPortal(){
+    const r = inputEl.getBoundingClientRect();
+    portal.style.left = `${Math.max(8, r.left)}px`;
+    portal.style.top  = `${Math.max(8, r.top + window.scrollY + r.height + 6)}px`;
+  }
+
+  function closePicker(){
+    if (!portal) return;
+    document.removeEventListener('click', onOutside, true);
+    document.removeEventListener('keydown', onKeyDown, true);
+    window.removeEventListener('resize', positionPortal);
+    portal.removeEventListener('click', onPortalClick);
+    portal.remove();
+    portal = null;
+  }
+
+  function onOutside(e){
+    if (portal && !portal.contains(e.target) && e.target !== inputEl) closePicker();
+  }
+
+  function onKeyDown(e){
+    if (!portal) return;
+    if (e.key === 'Escape') { e.preventDefault(); closePicker(); return; }
+  }
+
+  function onPortalClick(e){
+    const t = e.target;
+    if (t.matches('.nav-prev')) { e.preventDefault(); navMonth(-1); }
+    if (t.matches('.nav-next')) { e.preventDefault(); navMonth(+1); }
+    const dayBtn = t.closest('button.day');
+    if (dayBtn) {
+      const y = Number(dayBtn.dataset.y), m = Number(dayBtn.dataset.m), d = Number(dayBtn.dataset.d);
+      const iso = `${y}-${String(m+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
+      inputEl.value = formatIsoToUk(iso);
+      closePicker();
+      inputEl.dispatchEvent(new Event('change'));
+    }
+  }
+
+  function navMonth(delta){
+    current.month += delta;
+    if (current.month < 0) { current.month = 11; current.year--; }
+    if (current.month > 11){ current.month = 0;  current.year++; }
+    portal.innerHTML = renderCalendarHtml(current.year, current.month, inputEl.value);
+  }
+
+  function renderCalendarHtml(year, month0, selectedUk){
+    const selectedIso = parseUkDateToIso(selectedUk || '') || '';
+    const sel = selectedIso ? selectedIso.split('-').map(Number) : null;
+
+    const first = new Date(Date.UTC(year, month0, 1));
+    const startDow = first.getUTCDay(); // 0=Sun
+    const daysInMonth = new Date(Date.UTC(year, month0+1, 0)).getUTCDate();
+    const monthNames = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+    let grid = '<div class="cal-head" style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">' +
+      `<a href="#" class="nav-prev" aria-label="Previous month">‹</a>` +
+      `<div class="title" style="font-weight:600">${monthNames[month0]} ${year}</div>` +
+      `<a href="#" class="nav-next" aria-label="Next month">›</a>` +
+      '</div>';
+
+    grid += `<div class="cal-grid" style="display:grid;grid-template-columns:repeat(7,2em);gap:2px;justify-items:center;align-items:center">`;
+    ['Su','Mo','Tu','We','Th','Fr','Sa'].forEach(d => grid += `<div style="font-size:12px;color:#666">${d}</div>`);
+
+    // leading blanks
+    for (let i=0;i<startDow;i++) grid += `<div></div>`;
+    for (let d=1; d<=daysInMonth; d++){
+      const iso = `${year}-${String(month0+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
+      const isSel = sel && sel[0]===year && (sel[1]-1)===month0 && sel[2]===d;
+      grid += `<button type="button" class="day${isSel?' selected':''}" data-y="${year}" data-m="${month0}" data-d="${d}"` +
+              ` style="width:2em;height:2em;border:1px solid #ddd;border-radius:4px;background:${isSel?'#eef':'#fff'}">${d}</button>`;
+    }
+    grid += `</div>`;
+    return grid;
+  }
+
+  inputEl.addEventListener('focus', openPicker);
+  inputEl.addEventListener('click', openPicker);
+}
+
+
 
 function defaultColumnsFor(section){
   const ls = localStorage.getItem('cloudtms.cols.'+section);
@@ -408,6 +739,7 @@ function formatDisplayValue(key, val){
   return String(val);
 }
 
+// === UPDATED: Summary renders role summary for candidates (computed from JSON) ===
 function renderSummary(rows){
   currentRows = rows;
   const cols = defaultColumnsFor(currentSection);
@@ -416,6 +748,17 @@ function renderSummary(rows){
 
   if (currentSection === 'settings') return renderSettingsPanel(content);
   if (currentSection === 'audit') return renderAuditTable(content, rows);
+
+  // Inject computed 'role' summary for candidates grid
+  if (currentSection === 'candidates') {
+    rows.forEach(r => {
+      if (r && Array.isArray(r.roles)) {
+        r.role = formatRolesSummary(r.roles); // e.g., "1st RMN, 2nd HCA"
+      } else {
+        r.role = '';
+      }
+    });
+  }
 
   const tbl = document.createElement('table'); tbl.className='grid';
   const thead = document.createElement('thead'); const trh=document.createElement('tr');
@@ -619,9 +962,16 @@ async function openDelete(){
 }
 
 // ---- Candidate modal
-
+// === UPDATED: Candidate open modal (mount roles editor; include roles on save) ===
 async function openCandidate(row){
   modalCtx = {entity:'candidates', data: row};
+
+  // If we previously added a roles-updated listener in another modal instance, remove it
+  if (modalCtx._rolesUpdatedHandler) {
+    window.removeEventListener('global-roles-updated', modalCtx._rolesUpdatedHandler);
+    modalCtx._rolesUpdatedHandler = null;
+  }
+
   showModal('Candidate', [
     {key:'main',label:'Main Details'},
     {key:'rates',label:'Rates'},
@@ -631,7 +981,11 @@ async function openCandidate(row){
     // Merge main + pay so umbrella/bank fields are captured
     const main = collectForm('#tab-main');
     const pay  = collectForm('#tab-pay');
-    const payload = { ...main, ...pay };
+
+    // Collect roles from editor state
+    const roles = normaliseRolesForSave(modalCtx.rolesState || []);
+
+    const payload = { ...main, ...pay, roles };
 
     if (!payload.first_name && !payload.last_name) return alert('Enter at least a first or last name.');
     if (!payload.pay_method) payload.pay_method = 'PAYE';
@@ -641,9 +995,45 @@ async function openCandidate(row){
       payload.umbrella_id = null;
     }
 
+    // Clean up the roles-updated listener before closing
+    if (modalCtx._rolesUpdatedHandler) {
+      window.removeEventListener('global-roles-updated', modalCtx._rolesUpdatedHandler);
+      modalCtx._rolesUpdatedHandler = null;
+    }
+
     await upsertCandidate(payload, row?.id);
     closeModal(); renderAll();
   }, row?.id);
+
+  // Mount Roles editor (after modal DOM exists)
+  try {
+    const allRoleOptions = await loadGlobalRoleOptions(); // ['HCA','RMN',...]
+    const initial = Array.isArray(row?.roles) ? row.roles : [];
+    modalCtx.rolesState = normaliseRolesForSave(initial);
+
+    const container = document.querySelector('#rolesEditor');
+    if (container) renderRolesEditor(container, modalCtx.rolesState, allRoleOptions);
+
+    // Soft-refresh handler: when global roles change elsewhere, refresh the Add dropdown here
+    modalCtx._rolesUpdatedHandler = async () => {
+      try {
+        const refreshed = await loadGlobalRoleOptions();
+        const c = document.querySelector('#rolesEditor');
+        if (!c) return;
+        // If the roles editor exposed an updater, use it; otherwise re-render
+        if (c.__rolesEditor && typeof c.__rolesEditor.updateOptions === 'function') {
+          c.__rolesEditor.updateOptions(refreshed);
+        } else {
+          renderRolesEditor(c, modalCtx.rolesState || [], refreshed);
+        }
+      } catch (e) {
+        console.error('Failed to soft-refresh global roles', e);
+      }
+    };
+    window.addEventListener('global-roles-updated', modalCtx._rolesUpdatedHandler);
+  } catch (e) {
+    console.error('Failed to load global roles', e);
+  }
 
   // Load and render rates + calendar when applicable
   if (row?.id) {
@@ -655,6 +1045,7 @@ async function openCandidate(row){
     renderCalendar(ts || []);
   }
 }
+
 async function mountCandidatePayTab(){
   // Elements inside Pay tab
   const umbRow    = document.querySelector('#tab-pay #umbRow');
@@ -780,6 +1171,7 @@ function renderCandidateRatesTable(rates){
   if (addBtn) addBtn.onclick = () => openCandidateRateModal(modalCtx.data?.id);
 }
 
+// === UPDATED: Candidate modal tabs (adds Roles editor placeholder on 'main') ===
 function renderCandidateTab(key, row = {}) {
   if (key === 'main') return html(`
     <div class="form" id="tab-main">
@@ -790,6 +1182,14 @@ function renderCandidateTab(key, row = {}) {
       ${select('pay_method','Pay method', row.pay_method || 'PAYE', ['PAYE','UMBRELLA'], {id:'pay-method'})}
       ${input('tms_ref','Unique Candidate Ref (TMS…)', row.tms_ref)}
       ${input('display_name','Display name', row.display_name)}
+
+      <!-- Roles editor -->
+      <div class="row">
+        <label>Roles (ranked)</label>
+        <div id="rolesEditor" data-init="1"></div>
+        <div class="hint">Pick from global roles (from Client Default Rates). Drag to reorder. Remove to delete. No duplicates.</div>
+      </div>
+
       <div class="row"><label>Notes</label><textarea name="notes" placeholder="Free text…">${row.notes || ''}</textarea></div>
     </div>
   `);
@@ -836,6 +1236,8 @@ function renderCandidateTab(key, row = {}) {
 
 
 
+
+
 async function mountCandidateRatesTab(){
   // fetch & render list (id comes from modalCtx)
   const rates = modalCtx.data?.id ? await listCandidateRates(modalCtx.data.id) : [];
@@ -846,32 +1248,84 @@ async function mountCandidateRatesTab(){
   if (btn) btn.onclick = () => openCandidateRateModal(modalCtx.data?.id);
 }
 
-function openCandidateRateModal(candidate_id, existing){
+
+// === UPDATED: Candidate Rate Override modal (Client→Role gated; bands; UK dates; date_to) ===
+async function openCandidateRateModal(candidate_id, existing){
+  // Prefetch clients for dropdown
+  const clients = await listClientsBasic(); // [{id,name},...]
+  const clientOptions = clients.map(c => `<option value="${c.id}">${c.name}</option>`).join('');
+  const initialClientId = existing?.client_id || (clients[0]?.id || '');
+
+  // Template with dropdowns + UK date inputs (DD/MM/YYYY)
   const formHtml = html(`
     <div class="form" id="candRateForm">
-      ${input('role','Role (required)', existing?.role || '')}
-      ${input('band','Band (optional)', existing?.band || '')}
-      ${input('date_from','Effective from (YYYY-MM-DD)', existing?.date_from || new Date().toISOString().slice(0,10))}
+      <div class="row">
+        <label>Client (required)</label>
+        <select name="client_id" id="cr_client_id" required>
+          <option value="">Select client…</option>
+          ${clientOptions}
+        </select>
+      </div>
+      <div class="row">
+        <label>Role (required)</label>
+        <select name="role" id="cr_role" required disabled>
+          <option value="">Select role…</option>
+        </select>
+      </div>
+      <div class="row" id="cr_band_row" style="display:none">
+        <label>Band (optional)</label>
+        <select name="band" id="cr_band"></select>
+      </div>
+
+      <div class="row">
+        <label>Effective from (DD/MM/YYYY)</label>
+        <input type="text" name="date_from" id="cr_date_from" placeholder="DD/MM/YYYY" />
+      </div>
+      <div class="row">
+        <label>Effective to (optional, DD/MM/YYYY)</label>
+        <input type="text" name="date_to" id="cr_date_to" placeholder="DD/MM/YYYY" />
+      </div>
+
       ${input('pay_day','Pay (Day)',   existing?.pay_day   ?? '', 'number')}
       ${input('pay_night','Pay (Night)', existing?.pay_night ?? '', 'number')}
       ${input('pay_sat','Pay (Sat)',   existing?.pay_sat   ?? '', 'number')}
       ${input('pay_sun','Pay (Sun)',   existing?.pay_sun   ?? '', 'number')}
       ${input('pay_bh','Pay (BH)',     existing?.pay_bh     ?? '', 'number')}
+      <div class="row"><label class="hint">Leave any pay field blank if not applicable (will be saved as null).</label></div>
     </div>
   `);
 
   const title = existing ? 'Edit Candidate Rate Override' : 'Add Candidate Rate Override';
 
+  // Local cache for client roles/bands
+  let cache = { roles: [], bandsByRole: {} };
+
   showModal(title, [{ key:'form', label:'Form' }], () => formHtml, async ()=>{
     const raw = collectForm('#candRateForm');
-    if (!raw.role || !raw.date_from) { alert('Role and Effective from are required'); return; }
 
-    // coerce to numeric where present
+    // Required checks
+    if (!raw.client_id) { alert('Client is required'); return; }
+    if (!raw.role)      { alert('Role is required'); return; }
+    if (!raw.date_from) { alert('Effective from is required'); return; }
+
+    // Convert dates DD/MM/YYYY → YYYY-MM-DD
+    const isoFrom = parseUkDateToIso(raw.date_from);
+    if (!isoFrom) { alert('Invalid Effective from date'); return; }
+    let isoTo = null;
+    if (raw.date_to) {
+      isoTo = parseUkDateToIso(raw.date_to);
+      if (!isoTo) { alert('Invalid Effective to date'); return; }
+      if (isoTo < isoFrom) { alert('Effective to cannot be before Effective from'); return; }
+    }
+
+    // Coerce numeric fields (empty string → null)
     const payload = {
       candidate_id,
+      client_id: raw.client_id,
       role: raw.role,
       band: raw.band || null,
-      date_from: raw.date_from,
+      date_from: isoFrom,
+      date_to: isoTo,
       pay_day:   raw.pay_day   !== '' ? Number(raw.pay_day)   : null,
       pay_night: raw.pay_night !== '' ? Number(raw.pay_night) : null,
       pay_sat:   raw.pay_sat   !== '' ? Number(raw.pay_sat)   : null,
@@ -881,7 +1335,6 @@ function openCandidateRateModal(candidate_id, existing){
 
     let ok = false;
     if (existing) {
-      // Update via PATCH (identified by candidate_id + role/band/date_from on the backend)
       const resp = await authFetch(API(`/api/rates/candidate-overrides/${candidate_id}`), {
         method:'PATCH',
         headers:{'content-type':'application/json'},
@@ -898,12 +1351,98 @@ function openCandidateRateModal(candidate_id, existing){
       if (!ok) { alert('Save failed'); return; }
     }
 
-    // Refresh Rates in-place and close only this small form
     await mountCandidateRatesTab();
     closeModal();
+  }, false);
 
-  }, false); // no delete button for this tiny form
+  // After modal mounts: wire up controls
+  const selClient = document.getElementById('cr_client_id');
+  const selRole   = document.getElementById('cr_role');
+  const selBand   = document.getElementById('cr_band');
+  const bandRow   = document.getElementById('cr_band_row');
+  const inFrom    = document.getElementById('cr_date_from');
+  const inTo      = document.getElementById('cr_date_to');
+
+  // Pre-fill existing values
+  if (initialClientId) selClient.value = initialClientId;
+  if (existing?.date_from) inFrom.value = formatIsoToUk(existing.date_from);
+  if (existing?.date_to)   inTo.value   = formatIsoToUk(existing.date_to);
+
+  // Attach UK date pickers
+  attachUkDatePicker(inFrom);
+  attachUkDatePicker(inTo);
+
+  async function refreshClientRoles(clientId){
+    selRole.innerHTML = `<option value="">Select role…</option>`;
+    selRole.disabled = true;
+    bandRow.style.display = 'none';
+    selBand.innerHTML = '';
+
+    if (!clientId) return;
+
+    const list = await listClientRates(clientId);
+    const roles = new Set();
+    const bandsByRole = {};
+    list.forEach(r => {
+      if (r.role) {
+        roles.add(r.role);
+        if (r.band) {
+          if (!bandsByRole[r.role]) bandsByRole[r.role] = new Set();
+          bandsByRole[r.role].add(r.band);
+        }
+      }
+    });
+
+    // Gate by candidate roles (prefer unsaved roles in editor)
+    const liveRoles = Array.isArray(modalCtx?.rolesState) && modalCtx.rolesState.length
+      ? modalCtx.rolesState
+      : (Array.isArray(modalCtx?.data?.roles) ? modalCtx.data.roles : []);
+    const candRoleCodes = liveRoles.map(x => x.code);
+    const allowed = [...roles].filter(code => candRoleCodes.includes(code));
+
+    if (!allowed.length) {
+      selRole.innerHTML = `<option value="">Select role…</option>`;
+      selRole.disabled = true;
+      alert("This candidate has no matching roles for this client. Add the role to the candidate or add a Client Default Rate first.");
+      return;
+    }
+
+    allowed.sort((a,b)=> a.localeCompare(b));
+    selRole.innerHTML = `<option value="">Select role…</option>` + allowed.map(code => `<option value="${code}">${code}</option>`).join('');
+    selRole.disabled = false;
+
+    // cache
+    cache.roles = allowed;
+    cache.bandsByRole = Object.fromEntries(Object.entries(bandsByRole).map(([k,v]) => [k, [...v]]));
+  }
+
+  selClient.addEventListener('change', () => {
+    refreshClientRoles(selClient.value);
+  });
+
+  selRole.addEventListener('change', () => {
+    const role = selRole.value;
+    const bands = cache.bandsByRole[role] || [];
+    if (bands.length) {
+      bands.sort((a,b)=> String(a).localeCompare(String(b)));
+      selBand.innerHTML = `<option value="">(none)</option>` + bands.map(b => `<option value="${b}">${b}</option>`).join('');
+      bandRow.style.display = '';
+    } else {
+      selBand.innerHTML = '';
+      bandRow.style.display = 'none';
+    }
+  });
+
+  // Initial hydrate
+  await refreshClientRoles(initialClientId);
+  if (existing?.role) {
+    selRole.value = existing.role;
+    selRole.dispatchEvent(new Event('change'));
+    if (existing?.band) selBand.value = existing.band;
+  }
 }
+
+
 
 
 function renderCalendar(timesheets){
@@ -1040,9 +1579,6 @@ function renderClientTab(key, row={}){
   if (key==='settings') return html(`<div id="clientSettings"></div>`);
   if (key==='hospitals') return html(`<div id="clientHospitals"></div>`);
 }
-if (modalCtx.entity === 'candidates' && k === 'rates') { mountCandidateRatesTab(); }
-if (modalCtx.entity === 'clients' && k === 'rates')   { mountClientRatesTab(); }
-if (modalCtx.entity === 'clients' && k === 'hospitals'){ renderHospitalsUI(modalCtx.data?.id); }
 
 
 async function mountClientRatesTab(){
@@ -1054,12 +1590,42 @@ async function mountClientRatesTab(){
   if (btn) btn.onclick = () => openClientRateModal(clientId);
 }
 
-function openClientRateModal(client_id, existing){
+// === UPDATED: Client Default Rate modal (Role dropdown + new-role option; UK dates; date_to) ===
+async function openClientRateModal(client_id, existing){
+  // Load global roles (deduped across all clients)
+  const globalRoles = await loadGlobalRoleOptions(); // ['HCA','RMN',...]
+  // Provide "Other…" to allow adding new role here
+  const roleOptions = globalRoles.map(r => `<option value="${r}">${r}</option>`).join('') + `<option value="__OTHER__">+ Add new role…</option>`;
+
   const formHtml = html(`
     <div class="form" id="clientRateForm">
-      ${input('role','Role (required)', existing?.role || '')}
-      ${input('band','Band (optional)', existing?.band || '')}
-      ${input('date_from','Effective from (YYYY-MM-DD)', existing?.date_from || new Date().toISOString().slice(0,10))}
+      <div class="row">
+        <label>Role (required)</label>
+        <select name="role" id="cl_role" required>
+          <option value="">Select role…</option>
+          ${roleOptions}
+        </select>
+      </div>
+      <div class="row" id="cl_role_new_row" style="display:none">
+        <label>New role code</label>
+        <input type="text" id="cl_role_new" placeholder="e.g. RMN-Lead" />
+        <div class="hint">Uppercase letters/numbers/[-_/ ] recommended. This will become available globally.</div>
+      </div>
+
+      <div class="row">
+        <label>Band (optional)</label>
+        <input type="text" name="band" id="cl_band" value="${existing?.band || ''}"/>
+      </div>
+
+      <div class="row">
+        <label>Effective from (DD/MM/YYYY)</label>
+        <input type="text" name="date_from" id="cl_date_from" placeholder="DD/MM/YYYY" />
+      </div>
+      <div class="row">
+        <label>Effective to (optional, DD/MM/YYYY)</label>
+        <input type="text" name="date_to" id="cl_date_to" placeholder="DD/MM/YYYY" />
+      </div>
+
       ${input('charge_day','Charge (Day)',   existing?.charge_day   ?? '', 'number')}
       ${input('charge_night','Charge (Night)', existing?.charge_night ?? '', 'number')}
       ${input('charge_sat','Charge (Sat)',   existing?.charge_sat   ?? '', 'number')}
@@ -1078,14 +1644,34 @@ function openClientRateModal(client_id, existing){
 
   showModal(title, [{ key:'form', label:'Form' }], () => formHtml, async ()=>{
     const raw = collectForm('#clientRateForm');
-    if (!raw.role || !raw.date_from) { alert('Role and Effective from are required'); return; }
+
+    // Resolve role (existing or new)
+    let role = raw.role;
+    const newRole = (document.getElementById('cl_role_new')?.value || '').trim();
+    if (role === '__OTHER__') {
+      if (!newRole) { alert('Enter a new role code'); return; }
+      role = newRole.toUpperCase();
+    }
+    if (!role) { alert('Role is required'); return; }
+    if (!raw.date_from) { alert('Effective from is required'); return; }
+
+    // Dates: DD/MM/YYYY → YYYY-MM-DD
+    const isoFrom = parseUkDateToIso(raw.date_from);
+    if (!isoFrom) { alert('Invalid Effective from date'); return; }
+    let isoTo = null;
+    if (raw.date_to) {
+      isoTo = parseUkDateToIso(raw.date_to);
+      if (!isoTo) { alert('Invalid Effective to date'); return; }
+      if (isoTo < isoFrom) { alert('Effective to cannot be before Effective from'); return; }
+    }
 
     // Coerce numeric fields (empty string → null)
     const payload = {
       client_id,
-      role: raw.role,
+      role,
       band: raw.band || null,
-      date_from: raw.date_from,
+      date_from: isoFrom,
+      date_to: isoTo,
       charge_day:   raw.charge_day   !== '' ? Number(raw.charge_day)   : null,
       charge_night: raw.charge_night !== '' ? Number(raw.charge_night) : null,
       charge_sat:   raw.charge_sat   !== '' ? Number(raw.charge_sat)   : null,
@@ -1110,11 +1696,49 @@ function openClientRateModal(client_id, existing){
       return;
     }
 
+    // IMPORTANT: invalidate global roles cache so new role appears in roles editor dropdowns
+    if (role === newRole.toUpperCase()) {
+      invalidateGlobalRoleOptionsCache && invalidateGlobalRoleOptionsCache();
+      // Right after invalidateGlobalRoleOptionsCache()
+if (typeof window !== 'undefined' && window.dispatchEvent) {
+  window.dispatchEvent(new CustomEvent('global-roles-updated'));
+}
+
+    }
+
     // Refresh the Rates tab in-place and close this small form
     await mountClientRatesTab();
     closeModal();
   }, false);
+
+  // After mount: prefill controls + attach date pickers + role new toggle
+  const selRole = document.getElementById('cl_role');
+  const rowNew  = document.getElementById('cl_role_new_row');
+  const inFrom  = document.getElementById('cl_date_from');
+  const inTo    = document.getElementById('cl_date_to');
+
+  if (existing?.role) selRole.value = globalRoles.includes(existing.role) ? existing.role : '__OTHER__';
+  if (selRole.value === '__OTHER__') {
+    rowNew.style.display = '';
+    const nr = document.getElementById('cl_role_new'); nr.value = existing?.role || '';
+  }
+
+  selRole.addEventListener('change', () => {
+    if (selRole.value === '__OTHER__') {
+      rowNew.style.display = '';
+    } else {
+      rowNew.style.display = 'none';
+      const nr = document.getElementById('cl_role_new'); if (nr) nr.value = '';
+    }
+  });
+
+  if (existing?.date_from) inFrom.value = formatIsoToUk(existing.date_from);
+  if (existing?.date_to)   inTo.value   = formatIsoToUk(existing.date_to);
+
+  attachUkDatePicker(inFrom);
+  attachUkDatePicker(inTo);
 }
+
 
 
 function openClientHospitalModal(client_id){
@@ -1240,7 +1864,12 @@ async function renderSettingsPanel(content){
         ${select('apply_holiday_to','Apply holiday to', s.apply_holiday_to || 'PAYE_ONLY', ['PAYE_ONLY','ALL','NONE'])}
         ${select('apply_erni_to','Apply ERNI to', s.apply_erni_to || 'PAYE_ONLY', ['PAYE_ONLY','ALL','NONE'])}
         <div class="row" style="grid-column:1/-1"><label>Margin includes (JSON)</label><textarea name="margin_includes">${JSON.stringify(s.margin_includes || {}, null, 2)}</textarea></div>
-        ${input('effective_from','Effective from (YYYY-MM-DD)', s.effective_from || new Date().toISOString().slice(0,10))}
+
+        <div class="row">
+          <label>Effective from (DD/MM/YYYY)</label>
+          <input type="text" name="effective_from" id="settings_effective_from" placeholder="DD/MM/YYYY"
+                 value="${s.effective_from ? formatIsoToUk(s.effective_from) : ''}" />
+        </div>
       </div>
       <div class="actions">
         <div class="spacer"></div>
@@ -1248,11 +1877,24 @@ async function renderSettingsPanel(content){
       </div>
     </div>
   `;
+
+  // Attach UK date picker
+  const eff = document.getElementById('settings_effective_from');
+  if (eff) attachUkDatePicker(eff);
+
   byId('btnSaveSettings').onclick = async ()=>{
     const payload = collectForm('#settingsForm', true);
-    try{ await saveSettings(payload); alert('Saved.'); }catch{ alert('Save failed'); }
+    // Convert UK date (if present)
+    if (payload.effective_from) {
+      const iso = parseUkDateToIso(payload.effective_from);
+      if (!iso) { alert('Invalid Effective from date'); return; }
+      payload.effective_from = iso;
+    }
+    try { await saveSettings(payload); alert('Saved.'); }
+    catch { alert('Save failed'); }
   };
 }
+
 
 // ===== Generic modal plumbing =====
 function showModal(title, tabs, renderTab, onSave, hasId) {
@@ -1331,15 +1973,25 @@ const select = (name, label, val, options=[], extra={})=>{
 };
 const readonly = (label, value)=> `<div class="row"><label>${label}</label><input value="${value ?? ''}" readonly/></div>`;
 function collectForm(sel, jsonTry=false){
-  const root = document.querySelector(sel); const out={};
+  const root = document.querySelector(sel); const out = {};
   root.querySelectorAll('input,select,textarea').forEach(el=>{
     const k = el.name; if (!k) return;
     let v = el.value;
-    if (el.type==='number') v = Number(v); 
-    if (el.tagName==='SELECT' && (v==='Yes'||v==='No')) v = (v==='Yes');
-    if (jsonTry && (k==='bh_list' || k==='margin_includes')) { try{ v = JSON.parse(v || (k==='bh_list'?'[]':'{}')); }catch{} }
-    out[k]=v;
-  }); return out;
+
+    // ✅ keep blanks as '' so callers can map '' → null
+    if (el.type === 'number') v = (el.value === '' ? '' : Number(el.value));
+
+    // Existing Yes/No → boolean
+    if (el.tagName === 'SELECT' && (v === 'Yes' || v === 'No')) v = (v === 'Yes');
+
+    // Existing optional JSON parses
+    if (jsonTry && (k === 'bh_list' || k === 'margin_includes')) {
+      try { v = JSON.parse(v || (k === 'bh_list' ? '[]' : '{}')); } catch {}
+    }
+
+    out[k] = v;
+  });
+  return out;
 }
 
 // Close any existing floating menu
