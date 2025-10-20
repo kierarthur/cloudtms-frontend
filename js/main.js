@@ -877,9 +877,23 @@ async function listCandidateRates(candidate_id){
 }
 
 async function fetchRelated(entity, id, type){
-  const r = await authFetch(API(`/api/related/${entity}/${id}/${type}`));
-  return toList(r);
+  const url = API(`/api/related/${entity}/${id}/${type}`);
+  let res;
+  try {
+    res = await authFetch(url);
+  } catch (err) {
+    console.error('fetchRelated network error:', { url, error: err });
+    throw err;
+  }
+
+  if (!res.ok) {
+    const text = await res.text().catch(()=>'');
+    console.error('fetchRelated failed:', { status: res.status, url, server: text });
+    throw new Error(`Request failed: ${res.status}`);
+  }
+  return toList(res);
 }
+
 // Settings (singleton)
 async function getSettings(){
   const r = await authFetch(API('/api/settings/defaults'));
@@ -1025,10 +1039,8 @@ async function openDelete(){
 // ---- Candidate modal
 // === UPDATED: Candidate open modal (mount roles editor; include roles on save) ===
 async function openCandidate(row){
-  // Set modal context for this instance
+  // Modal context for this instance
   modalCtx = { entity: 'candidates', data: row };
-
-  // (Any previous listener would have been cleaned up when that modal saved/closed.)
 
   showModal(
     'Candidate',
@@ -1041,21 +1053,38 @@ async function openCandidate(row){
     renderCandidateTab,
     // === Save handler ===
     async () => {
+      const isNew = !row?.id;
+
       // Collect from mounted tabs (collectForm is null-safe)
-      const main = collectForm('#tab-main');
-      const pay  = collectForm('#tab-pay');
+      const main = document.querySelector('#tab-main') ? collectForm('#tab-main') : {};
+      const pay  = document.querySelector('#tab-pay')  ? collectForm('#tab-pay')  : {};
 
       // Roles from editor state (independent of visible tab)
       const roles = normaliseRolesForSave(modalCtx.rolesState || []);
 
+      // Start payload with what was actually edited
       const payload = { ...main, ...pay, roles };
 
-      // Basic validations
-      if (!payload.first_name && !payload.last_name) {
+      // ---- Carry over core identity if tab wasn't mounted (edit path) ----
+      if (!payload.first_name && row?.first_name) payload.first_name = row.first_name;
+      if (!payload.last_name  && row?.last_name)  payload.last_name  = row.last_name;
+
+      // Display name convenience (prefer edited names, else existing)
+      if (!payload.display_name) {
+        const dn = [payload.first_name, payload.last_name].filter(Boolean).join(' ').trim();
+        payload.display_name = dn || row?.display_name || null;
+      }
+
+      // Pay method: default to existing on edit; PAYE only for brand new
+      if (!payload.pay_method) {
+        payload.pay_method = isNew ? 'PAYE' : (row?.pay_method || 'PAYE');
+      }
+
+      // ---- Validations ----
+      if (isNew && !payload.first_name && !payload.last_name) {
         alert('Enter at least a first or last name.');
         return;
       }
-      if (!payload.pay_method) payload.pay_method = 'PAYE';
 
       // Umbrella logic: enforce null for PAYE; for UMBRELLA require a selection
       if (payload.pay_method === 'PAYE') {
@@ -1068,9 +1097,9 @@ async function openCandidate(row){
       }
       if (payload.umbrella_id === '') payload.umbrella_id = null;
 
-      // Display name convenience
-      if (!payload.display_name) {
-        payload.display_name = [payload.first_name, payload.last_name].filter(Boolean).join(' ').trim() || null;
+      // Optional safety: drop empty-string fields so they don't overwrite DB values unintentionally
+      for (const k of Object.keys(payload)) {
+        if (payload[k] === '') delete payload[k];
       }
 
       // Clean up the roles-updated listener before closing (if attached)
@@ -1089,7 +1118,7 @@ async function openCandidate(row){
 
   // === Mount Roles editor (after modal DOM exists) ===
   try {
-    const allRoleOptions = await loadGlobalRoleOptions(); // ['HCA','RMN',...]
+    const allRoleOptions = await loadGlobalRoleOptions(); // ['HCA','RMN', ...]
     const initial = Array.isArray(row?.roles) ? row.roles : [];
     modalCtx.rolesState = normaliseRolesForSave(initial);
 
