@@ -1,79 +1,256 @@
 <!doctype html>
 <html lang="en">
 <head>
-  <meta charset="utf-8" />
-  <title>cloudtms</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta charset="utf-8"/>
+  <title>CloudTMS</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <style>
-    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;background:#0f1624;color:#e7ecf3;margin:0}
-    header{display:flex;justify-content:space-between;align-items:center;padding:12px 16px;border-bottom:1px solid #2a3446}
-    main{padding:16px;max-width:900px;margin:0 auto}
-    .btn{background:#1b2331;border:1px solid #2a3446;color:#e7ecf3;border-radius:10px;padding:.5rem 1rem;font-weight:800;cursor:pointer}
-    pre{background:#0b1220;border:1px solid #2a3446;border-radius:10px;padding:12px;overflow:auto}
+    :root{
+      --bg:#0f172a; --panel:#111827; --muted:#1f2937; --text:#f8fafc; --sub:#cbd5e1; --brand:#4f46e5;
+      --ok:#16a34a; --warn:#f59e0b; --fail:#ef4444; --line:#334155; --chip:#0ea5e9;
+      --hover: rgba(79,70,229,.12);
+      --radius:12px;
+      --shadow: 0 6px 20px rgba(0,0,0,.25);
+    }
+    *{box-sizing:border-box}
+    html,body{height:100%}
+    body{margin:0;background:linear-gradient(180deg,#0b1221,#0a1020 60%);color:var(--text);font:14px/1.5 system-ui,Segoe UI,Roboto,Helvetica,Arial,"Apple Color Emoji","Segoe UI Emoji"}
+    a{color:inherit}
+
+    /* ===== App chrome ===== */
+    .topbar{
+      position:sticky;top:0;z-index:9;
+      display:flex;align-items:center;gap:10px;
+      padding:10px 14px;background:rgba(14,18,34,.72);backdrop-filter:saturate(140%) blur(8px); border-bottom:1px solid var(--line);
+    }
+    .brand{display:flex;align-items:center;gap:10px;margin-right:8px;font-weight:700}
+    .brand .dot{width:10px;height:10px;border-radius:50%;background:var(--brand);box-shadow:0 0 12px var(--brand)}
+    .nav{display:flex;gap:6px;flex-wrap:wrap}
+    .nav button{
+      display:flex;align-items:center;gap:8px;border:1px solid var(--line);background:#0b1221;color:var(--text);
+      padding:8px 10px;border-radius:10px;cursor:pointer;transition:.15s; box-shadow: inset 0 -1px 0 rgba(255,255,255,.03)
+    }
+    .nav button:hover{background:var(--hover)}
+    .nav button.active{outline:2px solid var(--brand);background:rgba(79,70,229,.18)}
+    .nav .ico{width:18px;height:18px;opacity:.9}
+
+    .userbox{margin-left:auto;display:flex;align-items:center;gap:10px;color:var(--sub)}
+    .userbox .chip{background:#0a1427;border:1px solid var(--line);padding:4px 8px;border-radius:20px}
+    .userbox button{background:transparent;color:var(--sub);border:1px solid var(--line);padding:6px 10px;border-radius:10px;cursor:pointer}
+    .layout{display:grid;grid-template-columns:260px 1fr;gap:16px;padding:16px;min-height:calc(100vh - 58px)}
+    .panel{background:linear-gradient(180deg,#0b1221,#0a1326);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow)}
+    .tools{padding:12px;position:sticky;top:76px;height:fit-content}
+    .tools h3{margin:6px 0 10px;font-size:12px;font-weight:600;color:var(--sub);text-transform:uppercase;letter-spacing:.06em}
+    .tools .group{border-top:1px dashed var(--line);padding-top:10px;margin-top:8px}
+    .tools button,.tools .btn{
+      width:100%; text-align:left; display:flex;align-items:center;gap:10px;
+      background:#0c152a;border:1px solid var(--line);color:var(--text);padding:8px 10px;border-radius:10px;margin:6px 0;cursor:pointer
+    }
+    .tools button:hover{background:var(--hover)}
+    .tools .note{font-size:12px;color:var(--sub)}
+
+    /* ===== Summary table ===== */
+    .main{padding:0}
+    .toolbar{display:flex;align-items:center;gap:8px;padding:10px;border-bottom:1px solid var(--line)}
+    .toolbar .title{font-weight:700}
+    .spacer{flex:1}
+    .toolbar input[type="text"]{background:#0b1427;border:1px solid var(--line);color:var(--text);border-radius:8px;padding:8px 10px;min-width:260px}
+    .toolbar .mini{font-size:12px;color:var(--sub)}
+    .grid{width:100%; border-collapse:collapse}
+    .grid th,.grid td{padding:10px 12px;border-bottom:1px solid var(--line);vertical-align:top}
+    .grid th{position:sticky;top:58px;background:#0b1221;border-bottom:1px solid var(--line);text-align:left}
+    .grid tr:hover{background:rgba(255,255,255,.02)}
+    .pill{font-size:12px;border:1px solid var(--line);padding:2px 6px;border-radius:999px;background:#0e1a34;color:var(--sub)}
+    .tag-ok{background:rgba(22,163,74,.15);color:#bbf7d0;border-color:rgba(16,185,129,.35)}
+    .tag-warn{background:rgba(245,158,11,.15);color:#fde68a;border-color:rgba(251,191,36,.35)}
+    .tag-fail{background:rgba(239,68,68,.15);color:#fecaca;border-color:rgba(248,113,113,.35)}
+
+    /* ===== Modal (draggable) ===== */
+    .modal-back{position:fixed;inset:0;background:rgba(2,6,23,.6);display:none;align-items:center;justify-content:center;z-index:99}
+    .modal{width:min(1100px,95vw);max-height:90vh;display:flex;flex-direction:column;background:#0b1221;border:1px solid var(--line);border-radius:14px;box-shadow:var(--shadow);overflow:hidden}
+    .modal.dragging{opacity:.95}
+    .modal-h{display:flex;align-items:center;gap:10px;padding:10px;border-bottom:1px solid var(--line);cursor:move;background:linear-gradient(180deg,#0d1427,#0b1221)}
+    .modal-h .ttl{font-weight:700}
+    .modal-h .spacer{flex:1}
+    .modal-h button{border:1px solid var(--line);background:#0c172d;color:var(--sub);padding:6px 10px;border-radius:10px}
+    .modal-b{padding:0;overflow:auto}
+    .tabs{display:flex;gap:6px;border-bottom:1px solid var(--line);padding:8px}
+    .tabs button{background:#0c172d;border:1px solid var(--line);border-bottom:none;padding:8px 10px;border-top-left-radius:10px;border-top-right-radius:10px;color:var(--sub);cursor:pointer}
+    .tabs button.active{background:rgba(79,70,229,.18);color:var(--text);outline:2px solid var(--brand)}
+    .tabc{padding:14px}
+    .form{display:grid;grid-template-columns:repeat(2,minmax(220px,1fr));gap:10px}
+    .form .row{display:flex;flex-direction:column;gap:6px}
+    .form input, .form select, .form textarea{
+      background:#0b1427;border:1px solid var(--line);color:var(--text);border-radius:8px;padding:8px 10px;width:100%
+    }
+    .form textarea{min-height:90px}
+    .actions{padding:10px;border-top:1px solid var(--line);display:flex;gap:10px;justify-content:flex-end;background:#0c172d}
+    .actions button{border:1px solid var(--line);background:#0b152a;color:var(--text);padding:8px 12px;border-radius:10px;cursor:pointer}
+    .actions .primary{background:linear-gradient(180deg,#5146e5,#4038cc);border-color:#3730a3}
+    .hint{color:var(--sub);font-size:12px}
+
+    /* ===== Calendar ===== */
+    .calendar{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
+    .month{border:1px solid var(--line);border-radius:10px;overflow:hidden}
+    .month h4{margin:0;padding:8px 10px;background:#0c172d;border-bottom:1px solid var(--line)}
+    .days{display:grid;grid-template-columns:repeat(7,1fr)}
+    .d{padding:6px 6px;border-right:1px solid var(--line);border-bottom:1px solid var(--line);min-height:32px}
+    .d.mark-a{background:rgba(245,158,11,.2)}
+    .d.mark-i{background:rgba(59,130,246,.2)}
+    .d.mark-p{background:rgba(34,197,94,.25)}
+    .legend{display:flex;gap:8px;margin-top:8px}
+    .legend .lg{display:flex;align-items:center;gap:6px}
+    .sq{width:10px;height:10px;border-radius:2px}
+    .sq.a{background:rgba(245,158,11,.7)} .sq.i{background:rgba(59,130,246,.7)} .sq.p{background:rgba(34,197,94,.7)}
+
+    /* ===== Auth overlays ===== */
+    .auth-overlay{position:fixed;inset:0;display:none;place-items:center;background:radial-gradient(800px 400px at 20% 0%,rgba(79,70,229,.2),transparent),rgba(2,6,23,.8);z-index:100}
+    .auth-card{width:min(520px,92vw);padding:16px;border-radius:16px;border:1px solid var(--line);background:linear-gradient(180deg,#0e1428,#0b1221);box-shadow:var(--shadow)}
+    .auth-h{display:flex;align-items:center;gap:10px;margin:2px 0 10px}
+    .auth-h .ttl{font-weight:800;font-size:18px}
+    .auth-f .row{display:flex;flex-direction:column;gap:6px;margin:8px 0}
+    .auth-f label{font-size:12px;color:var(--sub)}
+    .auth-f input{background:#0b1427;border:1px solid var(--line);color:var(--text);border-radius:8px;padding:10px}
+    .auth-f .actions{display:flex;justify-content:space-between;align-items:center;border-top:none;background:transparent;padding:8px 0}
+    .link{color:#93c5fd;cursor:pointer}
+    .error{color:#fecaca;background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.35);padding:8px;border-radius:8px}
+    .success{color:#bbf7d0;background:rgba(16,185,129,.12);border:1px solid rgba(16,185,129,.3);padding:8px;border-radius:8px}
+    .split{display:flex;gap:10px}
+    .eye{cursor:pointer;font-size:12px;color:var(--sub)}
   </style>
 </head>
 <body>
-  <header>
-    <strong>cloudtms</strong>
-    <nav style="display:flex;gap:.5rem;">
-      <button id="btnLogin"  class="btn" type="button">Sign in</button>
-      <button id="btnLogout" class="btn" type="button">Sign out</button>
-    </nav>
-  </header>
-
-  <main>
-    <h2>Status</h2>
-    <div id="status">Not signed in.</div>
-
-    <div style="margin-top:16px;display:flex;gap:.5rem;flex-wrap:wrap">
-      <button id="btnWhoAmI" class="btn" type="button">Test: /auth/refresh</button>
-      <button id="btnVersion" class="btn" type="button">Test: /version</button>
+  <div class="topbar">
+    <div class="brand"><span class="dot"></span> CloudTMS</div>
+    <div class="nav" id="nav"></div>
+    <div class="userbox">
+      <span class="chip" id="userChip">Signed out</span>
+      <button id="btnLogout">Logout</button>
     </div>
+  </div>
 
-    <h3 style="margin-top:16px">Response</h3>
-    <pre id="out"></pre>
-  </main>
+  <div class="layout">
+    <aside class="panel tools" id="tools">
+      <h3>Tools</h3>
+      <div id="toolButtons"></div>
+      <div class="group">
+        <div class="note">Tip: Double-click a row to view & edit full details.</div>
+      </div>
+    </aside>
+    <main class="panel main">
+      <div class="toolbar">
+        <div class="title" id="title">Loading…</div>
+        <div class="spacer"></div>
+        <input type="text" id="quickSearch" placeholder="Quick search…"/>
+        <button id="btnColumns">Columns</button>
+      </div>
+      <div id="content"></div>
+    </main>
+  </div>
 
-  <!-- Load your broker auth module (this file defines BROKER_BASE_URL and all auth helpers) -->
-  <script src="./js/main.js"></script>
+  <!-- ===== Draggable modal ===== -->
+  <div class="modal-back" id="modalBack">
+    <div class="modal" id="modal">
+      <div class="modal-h" id="modalDrag">
+        <div class="ttl" id="modalTitle">Details</div>
+        <div class="spacer"></div>
+        <button id="btnRelated">Related…</button>
+        <button id="btnCloseModal">Close</button>
+      </div>
+      <div class="modal-b">
+        <div class="tabs" id="modalTabs"></div>
+        <div class="tabc" id="modalBody"></div>
+      </div>
+      <div class="actions" id="modalActions">
+        <span class="hint" id="modalHint"></span>
+        <div class="spacer"></div>
+        <button id="btnDelete" class="danger" style="display:none">Delete</button>
+        <button id="btnSave" class="primary">Save</button>
+      </div>
+    </div>
+  </div>
 
+  <!-- ===== Auth overlays (login / forgot / reset) ===== -->
+  <div class="auth-overlay" id="loginOverlay" aria-hidden="true">
+    <div class="auth-card">
+      <div class="auth-h"><div class="ttl">Sign in</div></div>
+      <form class="auth-f" id="loginForm">
+        <div id="loginError" class="error" style="display:none"></div>
+        <div class="row">
+          <label>Email</label>
+          <input id="loginEmail" type="email" autocomplete="username" required />
+        </div>
+        <div class="row">
+          <label>Password</label>
+          <div class="split">
+            <input id="loginPassword" type="password" autocomplete="current-password" required />
+            <span class="eye" id="toggleLoginPw">show</span>
+          </div>
+        </div>
+        <div class="row">
+          <label><input type="checkbox" id="rememberMe" checked/> Keep me signed in</label>
+        </div>
+        <div class="actions">
+          <span class="link" id="linkForgot">Forgot password?</span>
+          <button type="submit" class="primary">Sign in</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div class="auth-overlay" id="forgotOverlay" aria-hidden="true">
+    <div class="auth-card">
+      <div class="auth-h"><div class="ttl">Password reset</div></div>
+      <form class="auth-f" id="forgotForm">
+        <div id="forgotMsg" class="success" style="display:none"></div>
+        <div id="forgotError" class="error" style="display:none"></div>
+        <div class="row">
+          <label>Enter your account email</label>
+          <input id="forgotEmail" type="email" required />
+        </div>
+        <div class="actions">
+          <span class="link" id="linkBackToLogin">Back to login</span>
+          <button type="submit">Send reset email</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div class="auth-overlay" id="resetOverlay" aria-hidden="true">
+    <div class="auth-card">
+      <div class="auth-h"><div class="ttl">Set a new password</div></div>
+      <form class="auth-f" id="resetForm">
+        <div id="resetMsg" class="success" style="display:none"></div>
+        <div id="resetError" class="error" style="display:none"></div>
+        <div class="row">
+          <label>New password</label>
+          <div class="split">
+            <input id="resetPw1" type="password" required minlength="8" />
+            <span class="eye" id="toggleResetPw1">show</span>
+          </div>
+        </div>
+        <div class="row">
+          <label>Confirm new password</label>
+          <div class="split">
+            <input id="resetPw2" type="password" required minlength="8" />
+            <span class="eye" id="toggleResetPw2">show</span>
+          </div>
+        </div>
+        <div class="actions">
+          <span class="link" id="linkResetToLogin">Back to login</span>
+          <button type="submit" class="primary">Update password</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- 1) Define the global base URL early -->
   <script>
-    async function loadFromServer() {
-      const status = document.getElementById('status');
-      const user = window.getCurrentUser?.();
-      status.textContent = user ? `Signed in as: ${user.email}` : 'Not signed in.';
-    }
-
-    document.getElementById('btnLogin').onclick  = () => window.openLoginOverlay?.();
-    document.getElementById('btnLogout').onclick = () => window.logoutAuth?.();
-
-    document.getElementById('btnWhoAmI').onclick = async () => {
-      const out = document.getElementById('out');
-      try {
-        const r = await fetch(BROKER_BASE_URL + '/auth/refresh', {
-          method: 'POST',
-          credentials: 'include',
-          headers: { 'Content-Type': 'application/json' }
-        });
-        out.textContent = JSON.stringify(await r.json(), null, 2);
-        await loadFromServer();
-      } catch (e) {
-        out.textContent = e?.message || String(e);
-      }
-    };
-
-    document.getElementById('btnVersion').onclick = async () => {
-      const out = document.getElementById('out');
-      try {
-        const r = await fetch(BROKER_BASE_URL + '/version');
-        out.textContent = JSON.stringify(await r.json(), null, 2);
-      } catch (e) {
-        out.textContent = e?.message || String(e);
-      }
-    };
-
-    // initial state
-    loadFromServer();
+    window.BROKER_BASE_URL = window.BROKER_BASE_URL || 'https://cloudtms.kier-88a.workers.dev';
   </script>
+
+ <!-- 2) Load the application logic -->
+<script src="./js/main.js"></script>
+
 </body>
 </html>
