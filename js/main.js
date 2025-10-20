@@ -2086,6 +2086,9 @@ async function renderSettingsPanel(content){
 function showModal(title, tabs, renderTab, onSave, hasId) {
   byId('modalTitle').textContent = title;
 
+  // Ensure a formState container exists for this modal instance
+  modalCtx.formState = modalCtx.formState || { main: {}, pay: {} };
+
   const tabsEl = byId('modalTabs');
   tabsEl.innerHTML = '';
 
@@ -2101,23 +2104,53 @@ function showModal(title, tabs, renderTab, onSave, hasId) {
     tabsEl.appendChild(b);
   });
 
-  function setTab(k){
-    byId('modalBody').innerHTML = renderTab(k, modalCtx.data) || '';
+  let currentTabKey = tabs[0].key;
 
-    // Mount hooks per tab so buttons exist before we bind
+  function persistCurrentTabState() {
+    // Collect the currently mounted tab before switching away (null-safe collectForm)
+    if (currentTabKey === 'main' && byId('tab-main')) {
+      const cur = collectForm('#tab-main');
+      modalCtx.formState.main = { ...modalCtx.formState.main, ...cur };
+    }
+    if (currentTabKey === 'pay' && byId('tab-pay')) {
+      const cur = collectForm('#tab-pay');
+      modalCtx.formState.pay = { ...modalCtx.formState.pay, ...cur };
+    }
+    // (rates tab has no simple form state to persist here)
+  }
+
+  function mergedRowForTab(k) {
+    const base = { ...modalCtx.data };
+    if (k === 'main') return { ...base, ...(modalCtx.formState.main || {}) };
+    if (k === 'pay')  return { ...base, ...(modalCtx.formState.pay  || {}) };
+    return base;
+  }
+
+  function setTab(k){
+    // 1) save state of the tab we are leaving
+    persistCurrentTabState();
+
+    // 2) render with merged state for the tab we're entering
+    const rowForTab = mergedRowForTab(k);
+    byId('modalBody').innerHTML = renderTab(k, rowForTab) || '';
+
+    // 3) mount hooks per tab so buttons/inputs exist before we bind
     if (modalCtx.entity === 'candidates' && k === 'rates')    { mountCandidateRatesTab?.(); }
     if (modalCtx.entity === 'clients'    && k === 'rates')    { mountClientRatesTab?.(); }
     if (modalCtx.entity === 'clients'    && k === 'hospitals'){ renderHospitalsUI?.(modalCtx.data?.id); }
     if (modalCtx.entity === 'clients'    && k === 'settings') { renderClientSettingsUI?.(modalCtx.data); }
 
-    // MAIN tab: capture pay-method changes and broadcast cross-tab state
+    // MAIN tab: capture pay-method changes and broadcast + persist into formState
     if (modalCtx.entity === 'candidates' && k === 'main') {
       const pm = document.getElementById('pay-method');
       if (pm) {
-        // set initial state
-        modalCtx.payMethodState = pm.value || modalCtx.data?.pay_method || 'PAYE';
+        // initialise from merged row or original data
+        modalCtx.payMethodState = pm.value || modalCtx.formState.main?.pay_method || modalCtx.data?.pay_method || 'PAYE';
+        // persist into form state immediately so Pay tab can see it
+        modalCtx.formState.main = { ...modalCtx.formState.main, pay_method: modalCtx.payMethodState };
         pm.addEventListener('change', () => {
           modalCtx.payMethodState = pm.value || 'PAYE';
+          modalCtx.formState.main = { ...modalCtx.formState.main, pay_method: modalCtx.payMethodState };
           if (typeof window !== 'undefined' && typeof window.dispatchEvent === 'function') {
             window.dispatchEvent(new CustomEvent('pay-method-changed', { detail: modalCtx.payMethodState }));
           }
@@ -2127,8 +2160,12 @@ function showModal(title, tabs, renderTab, onSave, hasId) {
 
     // PAY tab: attach umbrella type-ahead & locking after the Pay DOM exists
     if (modalCtx.entity === 'candidates' && k === 'pay')      { mountCandidatePayTab?.(); }
+
+    // 4) update current tab pointer
+    currentTabKey = k;
   }
 
+  // initial render
   setTab(tabs[0].key);
 
   byId('btnDelete').style.display = hasId ? '' : 'none';
@@ -2140,7 +2177,7 @@ function showModal(title, tabs, renderTab, onSave, hasId) {
     e.preventDefault();
     e.stopPropagation();
 
-    // 🔧 Normalize to singular for counts endpoint
+    // Normalize to singular for counts endpoint
     const entRaw = modalCtx.entity;
     const ent = (entRaw === 'candidates') ? 'candidate'
             : (entRaw === 'timesheets')  ? 'timesheet'
@@ -2149,7 +2186,6 @@ function showModal(title, tabs, renderTab, onSave, hasId) {
             : entRaw;
 
     const id  = modalCtx.data?.id;
-
     let counts = { timesheets: 0, invoices: 0, remittances: 0 };
     try {
       counts = await fetchRelatedCounts(ent, id) || counts;
