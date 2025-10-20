@@ -1044,8 +1044,8 @@ async function openDelete(){
 
 // ---- Candidate modal
 // === UPDATED: Candidate open modal (mount roles editor; include roles on save) ===
+// === UPDATED: openCandidate — save uses full persisted state + current tab values ===
 async function openCandidate(row){
-  // Modal context for this instance
   modalCtx = { entity: 'candidates', data: row };
 
   showModal(
@@ -1057,42 +1057,47 @@ async function openCandidate(row){
       { key:'bookings',label:'Bookings' }
     ],
     renderCandidateTab,
-    // === Save handler ===
+    // Save handler
     async () => {
       const isNew = !row?.id;
 
-      // Collect from mounted tabs (collectForm is null-safe)
+      // 1) Pull in-modal persisted state (captures edits from tabs you visited)
+      const stateMain = (modalCtx.formState && modalCtx.formState.main) || {};
+      const statePay  = (modalCtx.formState && modalCtx.formState.pay)  || {};
+
+      // 2) Also pull currently mounted tab(s) (ensures latest keystroke is included)
       const main = document.querySelector('#tab-main') ? collectForm('#tab-main') : {};
       const pay  = document.querySelector('#tab-pay')  ? collectForm('#tab-pay')  : {};
 
-      // Roles from editor state (independent of visible tab)
+      // 3) Roles from editor state
       const roles = normaliseRolesForSave(modalCtx.rolesState || []);
 
-      // Start payload with what was actually edited
-      const payload = { ...main, ...pay, roles };
+      // 4) Build payload: persisted state first, then live collects override, then roles
+      const payload = { ...stateMain, ...statePay, ...main, ...pay, roles };
 
-      // ---- Carry over core identity if tab wasn't mounted (edit path) ----
+      // 5) Defensive: strip UI-only fields
+      if ('umbrella_name' in payload) delete payload.umbrella_name;
+
+      // 6) Ensure core identity (names) present on edit if main tab wasn’t mounted
       if (!payload.first_name && row?.first_name) payload.first_name = row.first_name;
       if (!payload.last_name  && row?.last_name)  payload.last_name  = row.last_name;
 
-      // Display name convenience (prefer edited names, else existing)
+      // 7) Display name convenience
       if (!payload.display_name) {
         const dn = [payload.first_name, payload.last_name].filter(Boolean).join(' ').trim();
         payload.display_name = dn || row?.display_name || null;
       }
 
-      // Pay method: default to existing on edit; PAYE only for brand new
+      // 8) Pay method defaulting: preserve user choice from state; fallback to existing on edit
       if (!payload.pay_method) {
         payload.pay_method = isNew ? 'PAYE' : (row?.pay_method || 'PAYE');
       }
 
-      // ---- Validations ----
+      // 9) Validation & umbrella handling
       if (isNew && !payload.first_name && !payload.last_name) {
         alert('Enter at least a first or last name.');
         return;
       }
-
-      // Umbrella logic: enforce null for PAYE; for UMBRELLA require a selection
       if (payload.pay_method === 'PAYE') {
         payload.umbrella_id = null;
       } else {
@@ -1103,32 +1108,32 @@ async function openCandidate(row){
       }
       if (payload.umbrella_id === '') payload.umbrella_id = null;
 
-      // Defensive: strip any UI-only fields that might slip in
-      if ('umbrella_name' in payload) delete payload.umbrella_name;
-
-      // Optional safety: drop empty-string fields so they don't overwrite DB values unintentionally
+      // 10) Optional: drop empty-string fields to avoid accidental overwrites
       for (const k of Object.keys(payload)) {
         if (payload[k] === '') delete payload[k];
       }
 
-      // Persist
       await upsertCandidate(payload, row?.id);
+
+      // On success, clear the in-modal state and refresh UI
+      modalCtx.formState = { main: {}, pay: {} };
+      modalCtx.rolesState = undefined;
       closeModal();
       renderAll();
     },
     row?.id
   );
 
-  // === Mount Roles editor (after modal DOM exists) ===
+  // Mount Roles editor
   try {
-    const allRoleOptions = await loadGlobalRoleOptions(); // ['HCA','RMN', ...]
+    const allRoleOptions = await loadGlobalRoleOptions();
     const initial = Array.isArray(row?.roles) ? row.roles : [];
     modalCtx.rolesState = normaliseRolesForSave(initial);
 
     const container = document.querySelector('#rolesEditor');
     if (container) renderRolesEditor(container, modalCtx.rolesState, allRoleOptions);
 
-    // Soft-refresh handler: when global roles change elsewhere, refresh the Add dropdown here
+    // Soft-refresh roles list if new client role is added elsewhere
     modalCtx._rolesUpdatedHandler = async () => {
       try {
         const refreshed = await loadGlobalRoleOptions();
@@ -1139,22 +1144,17 @@ async function openCandidate(row){
         } else {
           renderRolesEditor(c, modalCtx.rolesState || [], refreshed);
         }
-      } catch (e) {
-        console.error('Failed to soft-refresh global roles', e);
-      }
+      } catch (e) { console.error('Failed to soft-refresh global roles', e); }
     };
     window.addEventListener('global-roles-updated', modalCtx._rolesUpdatedHandler);
   } catch (e) {
     console.error('Failed to load global roles', e);
   }
 
-  // === Load and render rates + calendar when applicable ===
+  // Load and render rates + calendar
   if (row?.id) {
     const rates = await listCandidateRates(row.id);
     await renderCandidateRatesTable(rates);
-  }
-  if (row?.id) {
-    // NOTE: singular entity ('candidate') matches backend handler
     const ts = await fetchRelated('candidate', row.id, 'timesheets');
     renderCalendar(ts || []);
   }
@@ -2086,7 +2086,7 @@ async function renderSettingsPanel(content){
 function showModal(title, tabs, renderTab, onSave, hasId) {
   byId('modalTitle').textContent = title;
 
-  // Ensure a formState container exists for this modal instance
+  // Ensure per-modal state exists
   modalCtx.formState = modalCtx.formState || { main: {}, pay: {} };
 
   const tabsEl = byId('modalTabs');
@@ -2107,7 +2107,6 @@ function showModal(title, tabs, renderTab, onSave, hasId) {
   let currentTabKey = tabs[0].key;
 
   function persistCurrentTabState() {
-    // Collect the currently mounted tab before switching away (null-safe collectForm)
     if (currentTabKey === 'main' && byId('tab-main')) {
       const cur = collectForm('#tab-main');
       modalCtx.formState.main = { ...modalCtx.formState.main, ...cur };
@@ -2116,7 +2115,6 @@ function showModal(title, tabs, renderTab, onSave, hasId) {
       const cur = collectForm('#tab-pay');
       modalCtx.formState.pay = { ...modalCtx.formState.pay, ...cur };
     }
-    // (rates tab has no simple form state to persist here)
   }
 
   function mergedRowForTab(k) {
@@ -2127,26 +2125,19 @@ function showModal(title, tabs, renderTab, onSave, hasId) {
   }
 
   function setTab(k){
-    // 1) save state of the tab we are leaving
     persistCurrentTabState();
-
-    // 2) render with merged state for the tab we're entering
     const rowForTab = mergedRowForTab(k);
     byId('modalBody').innerHTML = renderTab(k, rowForTab) || '';
 
-    // 3) mount hooks per tab so buttons/inputs exist before we bind
     if (modalCtx.entity === 'candidates' && k === 'rates')    { mountCandidateRatesTab?.(); }
     if (modalCtx.entity === 'clients'    && k === 'rates')    { mountClientRatesTab?.(); }
     if (modalCtx.entity === 'clients'    && k === 'hospitals'){ renderHospitalsUI?.(modalCtx.data?.id); }
     if (modalCtx.entity === 'clients'    && k === 'settings') { renderClientSettingsUI?.(modalCtx.data); }
 
-    // MAIN tab: capture pay-method changes and broadcast + persist into formState
     if (modalCtx.entity === 'candidates' && k === 'main') {
       const pm = document.getElementById('pay-method');
       if (pm) {
-        // initialise from merged row or original data
         modalCtx.payMethodState = pm.value || modalCtx.formState.main?.pay_method || modalCtx.data?.pay_method || 'PAYE';
-        // persist into form state immediately so Pay tab can see it
         modalCtx.formState.main = { ...modalCtx.formState.main, pay_method: modalCtx.payMethodState };
         pm.addEventListener('change', () => {
           modalCtx.payMethodState = pm.value || 'PAYE';
@@ -2158,41 +2149,35 @@ function showModal(title, tabs, renderTab, onSave, hasId) {
       }
     }
 
-    // PAY tab: attach umbrella type-ahead & locking after the Pay DOM exists
-    if (modalCtx.entity === 'candidates' && k === 'pay')      { mountCandidatePayTab?.(); }
+    if (modalCtx.entity === 'candidates' && k === 'pay') { mountCandidatePayTab?.(); }
 
-    // 4) update current tab pointer
     currentTabKey = k;
   }
 
-  // initial render
   setTab(tabs[0].key);
 
   byId('btnDelete').style.display = hasId ? '' : 'none';
   byId('btnDelete').onclick = openDelete;
-  byId('btnSave').onclick   = onSave;
 
-  // Related… button (dropdown menu at click position)
+  // Save: persist current tab then call onSave
+  byId('btnSave').onclick = async () => {
+    persistCurrentTabState();
+    await onSave();
+  };
+
+  // Related… (normalize to singular)
   byId('btnRelated').onclick = async (e) => {
     e.preventDefault();
     e.stopPropagation();
-
-    // Normalize to singular for counts endpoint
     const entRaw = modalCtx.entity;
     const ent = (entRaw === 'candidates') ? 'candidate'
             : (entRaw === 'timesheets')  ? 'timesheet'
             : (entRaw === 'invoices')    ? 'invoice'
             : (entRaw === 'remittances') ? 'remittance'
             : entRaw;
-
     const id  = modalCtx.data?.id;
     let counts = { timesheets: 0, invoices: 0, remittances: 0 };
-    try {
-      counts = await fetchRelatedCounts(ent, id) || counts;
-    } catch (err) {
-      console.error('fetchRelatedCounts failed:', { ent, id, err });
-    }
-
+    try { counts = await fetchRelatedCounts(ent, id) || counts; } catch (err) { console.error('fetchRelatedCounts failed:', { ent, id, err }); }
     showRelatedMenu(e.clientX, e.clientY, counts, ent, id);
   };
 
@@ -2201,7 +2186,6 @@ function showModal(title, tabs, renderTab, onSave, hasId) {
   const modal = byId('modal');
   const drag  = byId('modalDrag');
   let offX = 0, offY = 0, dragging = false;
-
   drag.onmousedown = (e) => {
     dragging = true; modal.classList.add('dragging'); offX = e.offsetX; offY = e.offsetY;
     document.onmousemove = mm; document.onmouseup = mu;
@@ -2209,7 +2193,20 @@ function showModal(title, tabs, renderTab, onSave, hasId) {
   function mm(e){ if(!dragging) return; modal.style.position = 'absolute'; modal.style.left = (e.clientX - offX) + 'px'; modal.style.top = (e.clientY - offY) + 'px'; }
   function mu(){ dragging = false; modal.classList.remove('dragging'); document.onmousemove = null; document.onmouseup = null; }
 
-  byId('btnCloseModal').onclick = () => { closeRelatedMenu?.(); closeModal(); };
+  // 🔄 Rename Close → Discard and ensure it **discards** unsaved edits
+  const closeBtn = byId('btnCloseModal');
+  if (closeBtn) {
+    closeBtn.textContent = 'Discard';
+    closeBtn.setAttribute('title', 'Discard changes and close');
+    closeBtn.setAttribute('aria-label', 'Discard changes and close');
+    closeBtn.onclick = () => {
+      closeRelatedMenu?.();
+      // Discard all in-modal edits
+      modalCtx.formState = { main: {}, pay: {} };
+      modalCtx.rolesState = undefined;
+      closeModal();
+    };
+  }
 }
 
 
