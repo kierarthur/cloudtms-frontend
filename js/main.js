@@ -915,13 +915,37 @@ async function search(section, q){
   const r = await authFetch(API(`${p}?q=${encodeURIComponent(q)}`));
   return toList(r);
 }
-
 async function upsertCandidate(payload, id){
   const url = id ? `/api/candidates/${id}` : '/api/candidates';
   const method = id ? 'PUT' : 'POST';
-  const r = await authFetch(API(url), {method, headers:{'content-type':'application/json'}, body: JSON.stringify(payload)});
-  if (!r.ok) throw new Error('Save failed'); return r.json();
+
+  let res;
+  try {
+    res = await authFetch(API(url), {
+      method,
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+  } catch (err) {
+    console.error('Candidate save request/network error:', { url, method, payload, error: err });
+    throw err;
+  }
+
+  const text = await res.text().catch(() => '');
+
+  if (!res.ok) {
+    console.error('Candidate save failed:', { status: res.status, url, method, payload, server: text });
+    throw new Error(text || `Save failed (${res.status})`);
+  }
+
+  try {
+    return text ? JSON.parse(text) : {};
+  } catch (e) {
+    console.warn('Candidate save: non-JSON response body', { body: text });
+    return {};
+  }
 }
+
 async function upsertClient(payload, id){
   const url = id ? `/api/clients/${id}` : '/api/clients';
   const method = id ? 'PUT' : 'POST';
@@ -1001,48 +1025,69 @@ async function openDelete(){
 // ---- Candidate modal
 // === UPDATED: Candidate open modal (mount roles editor; include roles on save) ===
 async function openCandidate(row){
-  modalCtx = {entity:'candidates', data: row};
+  // Set modal context for this instance
+  modalCtx = { entity: 'candidates', data: row };
 
-  // If we previously added a roles-updated listener in another modal instance, remove it
-  if (modalCtx._rolesUpdatedHandler) {
-    window.removeEventListener('global-roles-updated', modalCtx._rolesUpdatedHandler);
-    modalCtx._rolesUpdatedHandler = null;
-  }
+  // (Any previous listener would have been cleaned up when that modal saved/closed.)
 
-  showModal('Candidate', [
-    {key:'main',label:'Main Details'},
-    {key:'rates',label:'Rates'},
-    {key:'pay',label:'Payment details'},
-    {key:'bookings',label:'Bookings'}
-  ], renderCandidateTab, async ()=>{
-    // Merge main + pay so umbrella/bank fields are captured
-    const main = collectForm('#tab-main');
-    const pay  = collectForm('#tab-pay');
+  showModal(
+    'Candidate',
+    [
+      { key:'main',    label:'Main Details' },
+      { key:'rates',   label:'Rates' },
+      { key:'pay',     label:'Payment details' },
+      { key:'bookings',label:'Bookings' }
+    ],
+    renderCandidateTab,
+    // === Save handler ===
+    async () => {
+      // Collect from mounted tabs (collectForm is null-safe)
+      const main = collectForm('#tab-main');
+      const pay  = collectForm('#tab-pay');
 
-    // Collect roles from editor state
-    const roles = normaliseRolesForSave(modalCtx.rolesState || []);
+      // Roles from editor state (independent of visible tab)
+      const roles = normaliseRolesForSave(modalCtx.rolesState || []);
 
-    const payload = { ...main, ...pay, roles };
+      const payload = { ...main, ...pay, roles };
 
-    if (!payload.first_name && !payload.last_name) return alert('Enter at least a first or last name.');
-    if (!payload.pay_method) payload.pay_method = 'PAYE';
+      // Basic validations
+      if (!payload.first_name && !payload.last_name) {
+        alert('Enter at least a first or last name.');
+        return;
+      }
+      if (!payload.pay_method) payload.pay_method = 'PAYE';
 
-    // If PAYE, clear umbrella link (keep manual bank details editable)
-    if (payload.pay_method === 'PAYE') {
-      payload.umbrella_id = null;
-    }
+      // Umbrella logic: enforce null for PAYE; for UMBRELLA require a selection
+      if (payload.pay_method === 'PAYE') {
+        payload.umbrella_id = null;
+      } else {
+        if (!payload.umbrella_id || payload.umbrella_id === '') {
+          alert('Select an umbrella company for UMBRELLA pay.');
+          return;
+        }
+      }
+      if (payload.umbrella_id === '') payload.umbrella_id = null;
 
-    // Clean up the roles-updated listener before closing
-    if (modalCtx._rolesUpdatedHandler) {
-      window.removeEventListener('global-roles-updated', modalCtx._rolesUpdatedHandler);
-      modalCtx._rolesUpdatedHandler = null;
-    }
+      // Display name convenience
+      if (!payload.display_name) {
+        payload.display_name = [payload.first_name, payload.last_name].filter(Boolean).join(' ').trim() || null;
+      }
 
-    await upsertCandidate(payload, row?.id);
-    closeModal(); renderAll();
-  }, row?.id);
+      // Clean up the roles-updated listener before closing (if attached)
+      if (modalCtx._rolesUpdatedHandler) {
+        window.removeEventListener('global-roles-updated', modalCtx._rolesUpdatedHandler);
+        modalCtx._rolesUpdatedHandler = null;
+      }
 
-  // Mount Roles editor (after modal DOM exists)
+      // Persist
+      await upsertCandidate(payload, row?.id);
+      closeModal();
+      renderAll();
+    },
+    row?.id
+  );
+
+  // === Mount Roles editor (after modal DOM exists) ===
   try {
     const allRoleOptions = await loadGlobalRoleOptions(); // ['HCA','RMN',...]
     const initial = Array.isArray(row?.roles) ? row.roles : [];
@@ -1057,7 +1102,6 @@ async function openCandidate(row){
         const refreshed = await loadGlobalRoleOptions();
         const c = document.querySelector('#rolesEditor');
         if (!c) return;
-        // If the roles editor exposed an updater, use it; otherwise re-render
         if (c.__rolesEditor && typeof c.__rolesEditor.updateOptions === 'function') {
           c.__rolesEditor.updateOptions(refreshed);
         } else {
@@ -1072,12 +1116,13 @@ async function openCandidate(row){
     console.error('Failed to load global roles', e);
   }
 
-  // Load and render rates + calendar when applicable
+  // === Load and render rates + calendar when applicable ===
   if (row?.id) {
     const rates = await listCandidateRates(row.id);
-    renderCandidateRatesTable(rates);
+    await renderCandidateRatesTable(rates);
   }
   if (row?.id) {
+    // NOTE: singular entity ('candidate') matches backend handler
     const ts = await fetchRelated('candidate', row.id, 'timesheets');
     renderCalendar(ts || []);
   }
