@@ -808,10 +808,30 @@ function renderSummary(rows){
   const thead = document.createElement('thead'); const trh=document.createElement('tr');
   cols.forEach(c=>{ const th=document.createElement('th'); th.textContent=c; trh.appendChild(th); });
   thead.appendChild(trh); tbl.appendChild(thead);
+
   const tb = document.createElement('tbody');
   rows.forEach(r=>{
     const tr=document.createElement('tr');
-    tr.ondblclick = ()=> openDetails(r);
+
+    // Single-click: select and highlight this row
+    tr.onclick = () => {
+      const prevSel = content.querySelector('tbody tr.selected');
+      if (prevSel) prevSel.classList.remove('selected');
+      tr.classList.add('selected');
+      currentSelection = r;
+    };
+
+    // Double-click: ensure selection, then open details
+    tr.ondblclick = () => {
+      const prevSel = content.querySelector('tbody tr.selected');
+      if (prevSel !== tr) {
+        if (prevSel) prevSel.classList.remove('selected');
+        tr.classList.add('selected');
+      }
+      currentSelection = r;
+      openDetails(r);
+    };
+
     cols.forEach(c=>{
       const td=document.createElement('td');
       const v = r[c];
@@ -1118,6 +1138,14 @@ async function openCandidate(row){
       if (!payload.first_name && row?.first_name) payload.first_name = row.first_name;
       if (!payload.last_name  && row?.last_name)  payload.last_name  = row.last_name;
 
+      // 6a) Ensure CGK/CCR included even if Main tab wasn’t visited
+      if (typeof payload.key_norm === 'undefined' && typeof row?.key_norm !== 'undefined') {
+        payload.key_norm = row.key_norm;
+      }
+      if (typeof payload.tms_ref === 'undefined' && typeof row?.tms_ref !== 'undefined') {
+        payload.tms_ref = row.tms_ref;
+      }
+
       // 7) Display name convenience
       if (!payload.display_name) {
         const dn = [payload.first_name, payload.last_name].filter(Boolean).join(' ').trim();
@@ -1195,6 +1223,7 @@ async function openCandidate(row){
     renderCalendar(ts || []);
   }
 }
+
 
 
 async function mountCandidatePayTab(){
@@ -1394,6 +1423,7 @@ async function renderCandidateRatesTable(rates){
 
 // === UPDATED: Candidate modal tabs (adds Roles editor placeholder on 'main') ===
 
+
 function renderCandidateTab(key, row = {}) {
   if (key === 'main') return html(`
     <div class="form" id="tab-main">
@@ -1402,7 +1432,10 @@ function renderCandidateTab(key, row = {}) {
       ${input('email','Email', row.email, 'email')}
       ${input('phone','Telephone', row.phone)}
       ${select('pay_method','Pay method', row.pay_method || 'PAYE', ['PAYE','UMBRELLA'], {id:'pay-method'})}
-      ${input('tms_ref','Unique Candidate Ref (TMS…)', row.tms_ref)}
+
+      ${input('key_norm','Global Candidate Key (CGK)', row.key_norm)}
+      ${input('tms_ref','CloudTMS Candidate Reference (CCR)', row.tms_ref)}
+
       ${input('display_name','Display name', row.display_name)}
 
       <!-- Roles editor -->
@@ -1456,7 +1489,6 @@ function renderCandidateTab(key, row = {}) {
     </div>
   `);
 }
-
 
 
 
