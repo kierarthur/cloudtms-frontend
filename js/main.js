@@ -1902,9 +1902,7 @@ function renderClientTab(key, row={}){
 
   return '';
 }
-
 async function mountClientRatesTab(){
-  // No refetch; render from staged
   renderClientRatesTable(modalCtx.ratesState || []);
   const btn = byId('btnAddClientRate');
   if (btn) btn.onclick = () => openClientRateModal(modalCtx.data?.id);
@@ -1919,9 +1917,7 @@ function mountClientHospitalsTab(){
 
 // === UPDATED: Client Default Rate modal (Role dropdown + new-role option; UK dates; date_to) ===
 async function openClientRateModal(client_id, existing){
-  // Load global roles (deduped across all clients)
   const globalRoles = await loadGlobalRoleOptions(); // ['HCA','RMN',...]
-
   const roleOptions = globalRoles.map(r => `<option value="${r}">${r}</option>`).join('')
     + `<option value="__OTHER__">+ Add new role…</option>`;
 
@@ -1973,13 +1969,12 @@ async function openClientRateModal(client_id, existing){
   showModal(title, [{ key:'form', label:'Form' }], () => formHtml, async ()=>{
     const raw = collectForm('#clientRateForm');
 
-    // Resolve role (existing or new)
+    // Resolve role
     let role = raw.role;
     const newRole = (document.getElementById('cl_role_new')?.value || '').trim();
     if (role === '__OTHER__') {
       if (!newRole) { alert('Enter a new role code'); return; }
       role = newRole.toUpperCase();
-      // Optional: invalidate cache so it appears elsewhere immediately
       invalidateGlobalRoleOptionsCache && invalidateGlobalRoleOptionsCache();
       if (typeof window !== 'undefined' && window.dispatchEvent) {
         window.dispatchEvent(new CustomEvent('global-roles-updated'));
@@ -1988,7 +1983,6 @@ async function openClientRateModal(client_id, existing){
     if (!role) { alert('Role is required'); return; }
     if (!raw.date_from) { alert('Effective from is required'); return; }
 
-    // Dates: DD/MM/YYYY → YYYY-MM-DD
     const isoFrom = parseUkDateToIso(raw.date_from);
     if (!isoFrom) { alert('Invalid Effective from date'); return; }
     let isoTo = null;
@@ -1998,7 +1992,6 @@ async function openClientRateModal(client_id, existing){
       if (isoTo < isoFrom) { alert('Effective to cannot be before Effective from'); return; }
     }
 
-    // Build staged rate object
     const staged = {
       client_id,
       role,
@@ -2017,10 +2010,9 @@ async function openClientRateModal(client_id, existing){
       pay_bh:       raw.pay_bh       !== '' ? Number(raw.pay_bh)       : null,
     };
 
-    // Insert/update into staged array
+    // Stage change
     modalCtx.ratesState = Array.isArray(modalCtx.ratesState) ? modalCtx.ratesState : [];
     if (existing) {
-      // Find & replace by a simple signature (role+band+date_from) or by reference match
       const idx = modalCtx.ratesState.findIndex(r =>
         r === existing ||
         (String(r.role||'')===String(existing.role||'')
@@ -2030,13 +2022,17 @@ async function openClientRateModal(client_id, existing){
     } else {
       modalCtx.ratesState.push(staged);
     }
+    // No backend calls; Apply returns to parent
+  }, /*hasId*/ false, /*onReturn*/ () => {
+    // Ensure we are on the Rates tab and refreshed
+    const parent = window.__modalStack && window.__modalStack[window.__modalStack.length-1];
+    if (parent) {
+      parent.currentTabKey = 'rates';
+      parent.setTab('rates');
+    }
+  });
 
-    // Close small modal and refresh rates tab
-    closeModal();
-    mountClientRatesTab();
-  }, false);
-
-  // After mount: prefill controls + attach date pickers + role new toggle
+  // After mount: wire extras
   const selRole = document.getElementById('cl_role');
   const rowNew  = document.getElementById('cl_role_new_row');
   const inFrom  = document.getElementById('cl_date_from');
@@ -2053,14 +2049,9 @@ async function openClientRateModal(client_id, existing){
     else { rowNew.style.display = 'none'; const nr = document.getElementById('cl_role_new'); if (nr) nr.value = ''; }
   });
 
-  if (existing?.date_from) inFrom.value = formatIsoToUk(existing.date_from);
-  if (existing?.date_to)   inTo.value   = formatIsoToUk(existing.date_to);
-
   attachUkDatePicker(inFrom);
   attachUkDatePicker(inTo);
 }
-
-
 function openClientHospitalModal(client_id){
   const formHtml = html(`
     <div class="form" id="hospitalForm">
@@ -2074,18 +2065,22 @@ function openClientHospitalModal(client_id){
     const name = String(raw.hospital_name_norm || '').trim();
     if (!name) { alert('Hospital / Trust is required'); return; }
 
-    // Stage it only
     modalCtx.hospitalsState = Array.isArray(modalCtx.hospitalsState) ? modalCtx.hospitalsState : [];
     modalCtx.hospitalsState.push({
       hospital_name_norm: name,
       ward_hint: (raw.ward_hint || '').trim() || null
     });
-
-    // Close and refresh
-    closeModal();
-    mountClientHospitalsTab();
-  }, true);
+    // No backend calls; Apply returns to parent
+  }, /*hasId*/ true, /*onReturn*/ () => {
+    // Ensure we are on the Hospitals tab and refreshed
+    const parent = window.__modalStack && window.__modalStack[window.__modalStack.length-1];
+    if (parent) {
+      parent.currentTabKey = 'hospitals';
+      parent.setTab('hospitals');
+    }
+  });
 }
+
 
 async function renderHospitalsUI(client_id){
   const el = byId('clientHospitals'); if (!el) return;
@@ -2317,128 +2312,234 @@ async function renderSettingsPanel(content){
 
 
 // ===== Generic modal plumbing =====
-function showModal(title, tabs, renderTab, onSave, hasId) {
-  byId('modalTitle').textContent = title;
+function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
+  // ── Modal stack init
+  if (!window.__modalStack) window.__modalStack = [];
 
-  // Ensure per-modal state exists
-  modalCtx.formState = modalCtx.formState || { main: {}, pay: {} };
+  // Each frame stores everything needed to render and restore its view
+  const frame = {
+    title,
+    tabs: Array.isArray(tabs) ? tabs.slice() : [],
+    renderTab,
+    onSave,          // parent: Save; child: Apply (staging)
+    onReturn,        // optional callback to run after child closes (re-enter parent)
+    hasId: !!hasId,
+    entity: modalCtx.entity,
+    currentTabKey: (Array.isArray(tabs) && tabs.length ? tabs[0].key : null),
 
-  const tabsEl = byId('modalTabs');
-  tabsEl.innerHTML = '';
+    // Persist only the bits this frame owns
+    persistCurrentTabState() {
+      if (this.currentTabKey === 'main' && byId('tab-main')) {
+        const cur = collectForm('#tab-main');
+        modalCtx.formState = modalCtx.formState || { main:{}, pay:{} };
+        modalCtx.formState.main = { ...(modalCtx.formState.main||{}), ...cur };
+      }
+      if (this.currentTabKey === 'pay' && byId('tab-pay')) {
+        const cur = collectForm('#tab-pay');
+        modalCtx.formState = modalCtx.formState || { main:{}, pay:{} };
+        modalCtx.formState.pay = { ...(modalCtx.formState.pay||{}), ...cur };
+      }
+      // Settings: two-way binding updates modalCtx.clientSettingsState directly
+    },
 
-  tabs.forEach((t, i) => {
-    const b = document.createElement('button');
-    b.textContent = t.label;
-    if (i === 0) b.classList.add('active');
-    b.onclick = () => {
-      tabsEl.querySelectorAll('button').forEach(x => x.classList.remove('active'));
-      b.classList.add('active');
-      setTab(t.key);
+    mergedRowForTab(k) {
+      const base = { ...modalCtx.data };
+      if (k === 'main') return { ...base, ...(modalCtx.formState?.main || {}) };
+      if (k === 'pay')  return { ...base, ...(modalCtx.formState?.pay  || {}) };
+      return base;
+    },
+
+    setTab(k) {
+      this.persistCurrentTabState();
+      const rowForTab = this.mergedRowForTab(k);
+      byId('modalBody').innerHTML = this.renderTab(k, rowForTab) || '';
+
+      // Candidate mounts (unchanged)
+      if (this.entity === 'candidates' && k === 'rates') { mountCandidateRatesTab?.(); }
+      if (this.entity === 'candidates' && k === 'pay')   { mountCandidatePayTab?.(); }
+
+      // Client staged mounts
+      if (this.entity === 'clients' && k === 'rates')     { mountClientRatesTab?.(); }
+      if (this.entity === 'clients' && k === 'hospitals') { mountClientHospitalsTab?.(); }
+      if (this.entity === 'clients' && k === 'settings')  { renderClientSettingsUI?.(modalCtx.clientSettingsState || {}); }
+
+      this.currentTabKey = k;
+    }
+  };
+
+  // Push the new frame and render it
+  window.__modalStack.push(frame);
+  byId('modalBack').style.display = 'flex';
+
+  // Internal renderer for the top of stack
+  function renderTop() {
+    const depth = window.__modalStack.length;
+    const top = window.__modalStack[window.__modalStack.length - 1];
+    const isChild = depth > 1;
+
+    byId('modalTitle').textContent = top.title;
+
+    // Tabs
+    const tabsEl = byId('modalTabs');
+    tabsEl.innerHTML = '';
+    (top.tabs || []).forEach((t, i) => {
+      const b = document.createElement('button');
+      b.textContent = t.label;
+      if (i === 0 && !top.currentTabKey) top.currentTabKey = t.key;
+      if (t.key === top.currentTabKey || (i === 0 && !top.currentTabKey)) b.classList.add('active');
+      b.onclick = () => {
+        tabsEl.querySelectorAll('button').forEach(x => x.classList.remove('active'));
+        b.classList.add('active');
+        top.setTab(t.key);
+      };
+      tabsEl.appendChild(b);
+    });
+
+    // First-time setTab (or re-enter)
+    if (top.currentTabKey) {
+      top.setTab(top.currentTabKey);
+    } else if (top.tabs && top.tabs[0]) {
+      top.setTab(top.tabs[0].key);
+    } else {
+      // No tabs → single form frame
+      byId('modalBody').innerHTML = top.renderTab('form', {}) || '';
+    }
+
+    // Buttons: parent uses Save/Discard; child uses Apply/Discard
+    const primaryBtn = byId('btnSave');       // reuse existing buttons
+    const discardBtn = byId('btnCloseModal'); // renamed to Discard previously
+
+    // Label the buttons per depth
+    primaryBtn.textContent = isChild ? 'Apply' : 'Save';
+    primaryBtn.setAttribute('aria-label', isChild ? 'Apply' : 'Save');
+
+    // Delete visibility (parent-specific)
+    byId('btnDelete').style.display = top.hasId ? '' : 'none';
+    byId('btnDelete').onclick = openDelete;
+
+    // Primary click
+    primaryBtn.onclick = async () => {
+      // For both parent and child, persist the tab first
+      top.persistCurrentTabState();
+
+      if (typeof top.onSave === 'function') {
+        await top.onSave(); // parent: Save; child: stage+return
+      }
+
+      if (isChild) {
+        // Child: pop and re-enter parent
+        window.__modalStack.pop();
+        if (window.__modalStack.length > 0) {
+          const parent = window.__modalStack[window.__modalStack.length - 1];
+          // Parent re-entry: re-render and run optional callback
+          renderTop();
+          try { parent.onReturn && parent.onReturn(); } catch(_) {}
+        } else {
+          // Should not happen (there was a parent), fallback
+          byId('modalBack').style.display = 'none';
+        }
+      } else {
+        // Parent saved: done
+        window.__modalStack = [];
+        byId('modalBack').style.display = 'none';
+      }
     };
-    tabsEl.appendChild(b);
-  });
 
-  let currentTabKey = tabs[0].key;
-
-  function persistCurrentTabState() {
-    if (currentTabKey === 'main' && byId('tab-main')) {
-      const cur = collectForm('#tab-main');
-      modalCtx.formState.main = { ...modalCtx.formState.main, ...cur };
-    }
-    if (currentTabKey === 'pay' && byId('tab-pay')) {
-      const cur = collectForm('#tab-pay');
-      modalCtx.formState.pay = { ...modalCtx.formState.pay, ...cur };
-    }
-    // Settings tab persists by updating modalCtx.clientSettingsState inside renderClientSettingsUI handlers (two-way).
-  }
-
-  function mergedRowForTab(k) {
-    const base = { ...modalCtx.data };
-    if (k === 'main') return { ...base, ...(modalCtx.formState.main || {}) };
-    if (k === 'pay')  return { ...base, ...(modalCtx.formState.pay  || {}) };
-    return base;
-  }
-
-  function setTab(k){
-    persistCurrentTabState();
-    const rowForTab = mergedRowForTab(k);
-    byId('modalBody').innerHTML = renderTab(k, rowForTab) || '';
-
-    // Candidate-specific mounts remain unchanged
-    if (modalCtx.entity === 'candidates' && k === 'rates')    { mountCandidateRatesTab?.(); }
-    if (modalCtx.entity === 'candidates' && k === 'pay')      { mountCandidatePayTab?.(); }
-
-    // Client-specific staged mounts
-    if (modalCtx.entity === 'clients' && k === 'rates') {
-      mountClientRatesTab?.();
-    }
-    if (modalCtx.entity === 'clients' && k === 'hospitals') {
-      mountClientHospitalsTab?.();
-    }
-    if (modalCtx.entity === 'clients' && k === 'settings') {
-      renderClientSettingsUI?.(modalCtx.clientSettingsState || {});
-    }
-
-    currentTabKey = k;
-  }
-
-  setTab(tabs[0].key);
-
-  byId('btnDelete').style.display = hasId ? '' : 'none';
-  byId('btnDelete').onclick = openDelete;
-
-  // Save: persist current tab then call onSave (parent)
-  byId('btnSave').onclick = async () => {
-    persistCurrentTabState();
-    await onSave();
-  };
-
-  // Related…
-  byId('btnRelated').onclick = async (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    const entRaw = modalCtx.entity;
-    const ent = (entRaw === 'candidates') ? 'candidate'
-            : (entRaw === 'timesheets')  ? 'timesheet'
-            : (entRaw === 'invoices')    ? 'invoice'
-            : (entRaw === 'remittances') ? 'remittance'
-            : entRaw;
-    const id  = modalCtx.data?.id;
-    let counts = { timesheets: 0, invoices: 0, remittances: 0 };
-    try { counts = await fetchRelatedCounts(ent, id) || counts; } catch (err) { console.error('fetchRelatedCounts failed:', { ent, id, err }); }
-    showRelatedMenu(e.clientX, e.clientY, counts, ent, id);
-  };
-
-  // Drag handling
-  const back  = byId('modalBack'); back.style.display = 'flex';
-  const modal = byId('modal');
-  const drag  = byId('modalDrag');
-  let offX = 0, offY = 0, dragging = false;
-  drag.onmousedown = (e) => {
-    dragging = true; modal.classList.add('dragging'); offX = e.offsetX; offY = e.offsetY;
-    document.onmousemove = mm; document.onmouseup = mu;
-  };
-  function mm(e){ if(!dragging) return; modal.style.position = 'absolute'; modal.style.left = (e.clientX - offX) + 'px'; modal.style.top = (e.clientY - offY) + 'px'; }
-  function mu(){ dragging = false; modal.classList.remove('dragging'); document.onmousemove = null; document.onmouseup = null; }
-
-  // Discard behaviour
-  const closeBtn = byId('btnCloseModal');
-  if (closeBtn) {
-    closeBtn.textContent = 'Discard';
-    closeBtn.setAttribute('title', 'Discard changes and close');
-    closeBtn.setAttribute('aria-label', 'Discard changes and close');
-    closeBtn.onclick = () => {
-      closeRelatedMenu?.();
-      modalCtx.formState = { main: {}, pay: {} };
-      modalCtx.rolesState = undefined;
-      closeModal();
+    // Discard click
+    discardBtn.textContent = 'Discard';
+    discardBtn.setAttribute('title', 'Discard changes and close');
+    discardBtn.setAttribute('aria-label', 'Discard changes and close');
+    discardBtn.onclick = () => {
+      const closing = window.__modalStack.pop();
+      // No staging revert needed here; staging occurs only in child onApply
+      if (window.__modalStack.length > 0) {
+        renderTop(); // show parent again
+        const parent = window.__modalStack[window.__modalStack.length - 1];
+        try { parent.onReturn && parent.onReturn(); } catch(_) {}
+      } else {
+        byId('modalBack').style.display = 'none';
+      }
     };
+
+    // Related menu (unchanged; operates on the current frame)
+    byId('btnRelated').onclick = async (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const entRaw = modalCtx.entity;
+      const ent = (entRaw === 'candidates') ? 'candidate'
+              : (entRaw === 'timesheets')  ? 'timesheet'
+              : (entRaw === 'invoices')    ? 'invoice'
+              : (entRaw === 'remittances') ? 'remittance'
+              : entRaw;
+      const id  = modalCtx.data?.id;
+      let counts = { timesheets: 0, invoices: 0, remittances: 0 };
+      try { counts = await fetchRelatedCounts(ent, id) || counts; } catch (err) { console.error('fetchRelatedCounts failed:', { ent, id, err }); }
+      showRelatedMenu(e.clientX, e.clientY, counts, ent, id);
+    };
+
+    // Drag (unchanged)
+    const modal = byId('modal');
+    const drag  = byId('modalDrag');
+    let offX = 0, offY = 0, dragging = false;
+    drag.onmousedown = (e) => {
+      dragging = true; modal.classList.add('dragging'); offX = e.offsetX; offY = e.offsetY;
+      document.onmousemove = mm; document.onmouseup = mu;
+    };
+    function mm(e){ if(!dragging) return; modal.style.position = 'absolute'; modal.style.left = (e.clientX - offX) + 'px'; modal.style.top = (e.clientY - offY) + 'px'; }
+    function mu(){ dragging = false; modal.classList.remove('dragging'); document.onmousemove = null; document.onmouseup = null; }
   }
+
+  // Initial render of this new frame
+  renderTop();
 }
 
+function closeModal(){
+  if (!window.__modalStack || !window.__modalStack.length) {
+    byId('modalBack').style.display = 'none';
+    return;
+  }
+  // Pop current frame
+  window.__modalStack.pop();
 
+  if (window.__modalStack.length > 0) {
+    // Re-render the parent frame
+    // Reuse the renderer from showModal via a lightweight call:
+    // simply push a no-op child then immediately pop to trigger render,
+    // or better, re-invoke showModal’s internal renderer logic.
+    // Easiest: call showModal again with parent's stored state by “re-pushing”:
+    const parent = window.__modalStack[window.__modalStack.length - 1];
+    // Force refresh of parent by rebuilding title/tabs/body like in showModal's renderTop:
+    // We simulate this by calling showModal with the same frame content would duplicate stack,
+    // so instead re-run the render logic inline:
+    // Rebuild visible UI for the parent:
+    // (factorized renderer lives inside showModal; here we mirror the minimal steps)
+    // For simplicity, just re-open the parent tab:
+    byId('modalBack').style.display = 'flex';
+    // Trigger parent.setTab on whatever it had as current
+    if (parent.title) byId('modalTitle').textContent = parent.title;
 
-function closeModal(){ byId('modalBack').style.display='none'; }
+    // Rebuild tabs
+    const tabsEl = byId('modalTabs'); tabsEl.innerHTML = '';
+    (parent.tabs || []).forEach((t) => {
+      const b = document.createElement('button');
+      b.textContent = t.label;
+      if (t.key === parent.currentTabKey) b.classList.add('active');
+      b.onclick = () => {
+        tabsEl.querySelectorAll('button').forEach(x => x.classList.remove('active'));
+        b.classList.add('active');
+        parent.setTab(t.key);
+      };
+      tabsEl.appendChild(b);
+    });
+
+    // Re-show parent current tab
+    if (parent.currentTabKey) parent.setTab(parent.currentTabKey);
+    else if (parent.tabs && parent.tabs[0]) parent.setTab(parent.tabs[0].key);
+  } else {
+    // Nothing left → hide overlay
+    byId('modalBack').style.display = 'none';
+  }
+}
 
 // ===== Small helpers =====
 const html = (s)=> s;
