@@ -546,6 +546,13 @@ function normaliseRolesForSave(roles){
   return out;
 }
 
+async function listClientHospitals(clientId){
+  if (!clientId) return [];
+  const r = await authFetch(API(`/api/clients/${clientId}/hospitals`));
+  return toList(r);
+}
+
+
 function formatRolesSummary(roles){
   if (!Array.isArray(roles) || !roles.length) return '';
   const sorted = roles.slice().sort((a,b)=> (a.rank||0)-(b.rank||0));
@@ -965,13 +972,42 @@ async function upsertCandidate(payload, id){
     return {};
   }
 }
-
 async function upsertClient(payload, id){
-  const url = id ? `/api/clients/${id}` : '/api/clients';
+  const url    = id ? `/api/clients/${id}` : '/api/clients';
   const method = id ? 'PUT' : 'POST';
-  const r = await authFetch(API(url), {method, headers:{'content-type':'application/json'}, body: JSON.stringify(payload)});
-  if (!r.ok) throw new Error('Save failed'); return true;
+
+  const r = await authFetch(API(url), {
+    method,
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(payload)
+  });
+
+  if (!r.ok) {
+    const msg = await r.text().catch(()=>'');
+    throw new Error(msg || 'Save failed');
+  }
+
+  // Try JSON response first
+  try {
+    const data = await r.json();
+    if (data && typeof data === 'object') return data;
+  } catch (_) { /* no JSON body (e.g., 204) */ }
+
+  // Fallbacks: Location header or known id (PUT)
+  let clientId = null;
+  try {
+    const loc = r.headers && r.headers.get('Location');
+    if (loc) {
+      const m = loc.match(/\/api\/clients\/([^/?#]+)/i) || loc.match(/\/clients\/([^/?#]+)/i);
+      if (m) clientId = m[1];
+    }
+  } catch (_) {}
+
+  if (!clientId && method === 'PUT' && id) clientId = id;
+
+  return clientId ? { id: clientId, ...payload } : { ...payload };
 }
+
 async function upsertUmbrella(payload, id){
   const url = id ? `/api/umbrellas/${id}` : '/api/umbrellas';
   const method = id ? 'PUT' : 'POST';
@@ -1668,34 +1704,132 @@ function renderCalendar(timesheets){
 // ---- Client modal
 
 async function openClient(row){
-  modalCtx = {entity:'clients', data: row};
+  modalCtx = { entity:'clients', data: row };
+
+  // ── Initialise staged state (once per modal open)
+  modalCtx.formState = { main: {}, settings: {}, hospitals: {} };
+  modalCtx.ratesState = [];          // staged client default rates
+  modalCtx.hospitalsState = [];      // staged hospitals/wards
+  modalCtx.clientSettingsState = {}; // staged client settings blob
+
+  // Preload staged collections if we have an id
+  if (row?.id) {
+    try {
+      // Rates
+      const rates = await listClientRates(row.id);
+      modalCtx.ratesState = Array.isArray(rates) ? rates.slice() : [];
+
+      // Hospitals
+      const hospitals = await listClientHospitals(row.id);
+      modalCtx.hospitalsState = Array.isArray(hospitals) ? hospitals.slice() : [];
+
+      // Client settings: GET /api/clients/{id} and read client_settings
+      const r = await authFetch(API(`/api/clients/${row.id}`));
+      if (r.ok) {
+        const clientObj = await r.json().catch(()=> ({}));
+        const cs = clientObj && (clientObj.client_settings || clientObj.settings || {});
+        modalCtx.clientSettingsState = (cs && typeof cs === 'object') ? JSON.parse(JSON.stringify(cs)) : {};
+      } else {
+        modalCtx.clientSettingsState = {};
+      }
+    } catch (e) {
+      console.error('openClient preload error', e);
+    }
+  } else {
+    // New client → start with empty staged collections
+    modalCtx.ratesState = [];
+    modalCtx.hospitalsState = [];
+    modalCtx.clientSettingsState = {};
+  }
+
+  // Open the Client modal with staged-commit Save
   showModal('Client', [
     {key:'main',label:'Main'},
     {key:'rates',label:'Rates'},
     {key:'settings',label:'Client settings'},
     {key:'hospitals',label:'Hospitals & wards'}
   ], renderClientTab, async ()=>{
+    // Persist current tab UI into formState
+    // (showModal already calls persist before onSave)
     const payload = collectForm('#tab-main');
     if (!payload.name) return alert('Client name is required.');
-    await upsertClient(payload, row?.id);
-    closeModal(); renderAll();
+
+    // Attach staged client-level settings to the client payload
+    if (modalCtx.clientSettingsState && typeof modalCtx.clientSettingsState === 'object') {
+      payload.client_settings = modalCtx.clientSettingsState;
+    }
+
+    // 1) Upsert main client
+    const clientResp = await upsertClient(payload, row?.id);
+    const clientId = row?.id || (clientResp && clientResp.id);
+
+    // 2) Commit staged RATES (upsert each)
+    if (clientId && Array.isArray(modalCtx.ratesState)) {
+      for (const rate of modalCtx.ratesState) {
+        try {
+          await upsertClientRate({
+            client_id: clientId,
+            role: rate.role || '',
+            band: rate.band || null,
+            date_from: rate.date_from || rate.dateFrom || null,
+            date_to: rate.date_to || rate.dateTo || null,
+            charge_day:   rate.charge_day   ?? null,
+            charge_night: rate.charge_night ?? null,
+            charge_sat:   rate.charge_sat   ?? null,
+            charge_sun:   rate.charge_sun   ?? null,
+            charge_bh:    rate.charge_bh    ?? null,
+            pay_day:      rate.pay_day      ?? null,
+            pay_night:    rate.pay_night    ?? null,
+            pay_sat:      rate.pay_sat      ?? null,
+            pay_sun:      rate.pay_sun      ?? null,
+            pay_bh:       rate.pay_bh       ?? null,
+          });
+        } catch (e) {
+          console.error('Upsert client rate failed', rate, e);
+          // keep going; or alert/abort depending on your policy
+        }
+      }
+    }
+
+    // 3) Commit staged HOSPITALS (upsert/add each)
+    if (clientId && Array.isArray(modalCtx.hospitalsState)) {
+      for (const h of modalCtx.hospitalsState) {
+        try {
+          const body = {
+            hospital_name_norm: h.hospital_name_norm || h.hospital || '',
+            ward_hint: h.ward_hint ?? null
+          };
+          const res = await authFetch(API(`/api/clients/${clientId}/hospitals`), {
+            method:'POST', headers:{'content-type':'application/json'},
+            body: JSON.stringify(body)
+          });
+          if (!res.ok) {
+            const msg = await res.text().catch(()=> 'Save hospital failed');
+            console.warn('Hospital upsert failed:', msg);
+          }
+        } catch (e) {
+          console.error('Upsert hospital failed', h, e);
+        }
+      }
+    }
+
+    // Done — close modal and refresh
+    closeModal();
+    renderAll();
   }, row?.id);
-
-  if (row?.id){
-    const rates = await listClientRates(row.id);
-    renderClientRatesTable(rates);
-    renderHospitalsUI(row.id);
-    renderClientSettingsUI(row);
-  }
 }
-
-
 
 function renderClientRatesTable(rates){
   const div = byId('clientRates'); if (!div) return;
 
-  // Empty state: message + Add button so users can add the first rate
-  if (!rates.length) {
+  // Always render from staged state
+  const staged = Array.isArray(modalCtx.ratesState) ? modalCtx.ratesState : [];
+
+  // Clear container and rebuild
+  div.innerHTML = '';
+
+  // Empty state + Add button
+  if (!staged.length) {
     div.innerHTML = `
       <div class="hint" style="margin-bottom:8px">No client default rates yet.</div>
       <div class="actions"><button id="btnAddClientRate">Add/Upsert client rate</button></div>
@@ -1719,12 +1853,9 @@ function renderClientRatesTable(rates){
   thead.appendChild(trh); tbl.appendChild(thead);
 
   const tb = document.createElement('tbody');
-  rates.forEach(r => {
+  staged.forEach(r => {
     const tr = document.createElement('tr');
-
-    // Double-click to EDIT (prefilled modal)
-    tr.ondblclick = () => openClientRateModal(modalCtx.data?.id, r);
-
+    tr.ondblclick = () => openClientRateModal(modalCtx.data?.id, r); // Edit staged
     cols.forEach(c => {
       const td = document.createElement('td');
       td.textContent = formatDisplayValue(c, r[c]);
@@ -1734,13 +1865,11 @@ function renderClientRatesTable(rates){
   });
   tbl.appendChild(tb);
 
-  // Footer actions
+  // Footer actions (single Add button)
   const actions = document.createElement('div');
   actions.className = 'actions';
   actions.innerHTML = `<button id="btnAddClientRate">Add/Upsert client rate</button>`;
 
-  // Render and bind
-  div.innerHTML = '';
   div.appendChild(tbl);
   div.appendChild(actions);
 
@@ -1761,27 +1890,40 @@ function renderClientTab(key, row={}){
       ${input('payment_terms_days','Payment terms (days)', row.payment_terms_days || 30, 'number')}
     </div>
   `);
-  if (key==='rates') return html(`<div id="clientRates"></div> <div class="actions"><button id="btnAddClientRate">Add/Upsert client rate</button></div>`);
-  if (key==='settings') return html(`<div id="clientSettings"></div>`);
-  if (key==='hospitals') return html(`<div id="clientHospitals"></div>`);
-}
 
+  // Rates tab: container only (Add button is rendered by renderClientRatesTable)
+  if (key==='rates') return html(`<div id="clientRates"></div>`);
+
+  // Settings tab: container only (real staged form rendered by renderClientSettingsUI)
+  if (key==='settings') return html(`<div id="clientSettings"></div>`);
+
+  // Hospitals tab: container only (table + Add button rendered by renderClientHospitalsTable)
+  if (key==='hospitals') return html(`<div id="clientHospitals"></div>`);
+
+  return '';
+}
 
 async function mountClientRatesTab(){
-  const clientId = modalCtx.data?.id;
-  const list = clientId ? await listClientRates(clientId) : [];
-  renderClientRatesTable(list);
-
+  // No refetch; render from staged
+  renderClientRatesTable(modalCtx.ratesState || []);
   const btn = byId('btnAddClientRate');
-  if (btn) btn.onclick = () => openClientRateModal(clientId);
+  if (btn) btn.onclick = () => openClientRateModal(modalCtx.data?.id);
 }
+
+function mountClientHospitalsTab(){
+  renderClientHospitalsTable(modalCtx.hospitalsState || []);
+  const addBtn = byId('btnAddClientHospital');
+  if (addBtn) addBtn.onclick = () => openClientHospitalModal(modalCtx.data?.id);
+}
+
 
 // === UPDATED: Client Default Rate modal (Role dropdown + new-role option; UK dates; date_to) ===
 async function openClientRateModal(client_id, existing){
   // Load global roles (deduped across all clients)
   const globalRoles = await loadGlobalRoleOptions(); // ['HCA','RMN',...]
-  // Provide "Other…" to allow adding new role here
-  const roleOptions = globalRoles.map(r => `<option value="${r}">${r}</option>`).join('') + `<option value="__OTHER__">+ Add new role…</option>`;
+
+  const roleOptions = globalRoles.map(r => `<option value="${r}">${r}</option>`).join('')
+    + `<option value="__OTHER__">+ Add new role…</option>`;
 
   const formHtml = html(`
     <div class="form" id="clientRateForm">
@@ -1795,7 +1937,7 @@ async function openClientRateModal(client_id, existing){
       <div class="row" id="cl_role_new_row" style="display:none">
         <label>New role code</label>
         <input type="text" id="cl_role_new" placeholder="e.g. RMN-Lead" />
-        <div class="hint">Uppercase letters/numbers/[-_/ ] recommended. This will become available globally.</div>
+        <div class="hint">Uppercase letters/numbers/[-_/ ] recommended.</div>
       </div>
 
       <div class="row">
@@ -1837,6 +1979,11 @@ async function openClientRateModal(client_id, existing){
     if (role === '__OTHER__') {
       if (!newRole) { alert('Enter a new role code'); return; }
       role = newRole.toUpperCase();
+      // Optional: invalidate cache so it appears elsewhere immediately
+      invalidateGlobalRoleOptionsCache && invalidateGlobalRoleOptionsCache();
+      if (typeof window !== 'undefined' && window.dispatchEvent) {
+        window.dispatchEvent(new CustomEvent('global-roles-updated'));
+      }
     }
     if (!role) { alert('Role is required'); return; }
     if (!raw.date_from) { alert('Effective from is required'); return; }
@@ -1851,8 +1998,8 @@ async function openClientRateModal(client_id, existing){
       if (isoTo < isoFrom) { alert('Effective to cannot be before Effective from'); return; }
     }
 
-    // Coerce numeric fields (empty string → null)
-    const payload = {
+    // Build staged rate object
+    const staged = {
       client_id,
       role,
       band: raw.band || null,
@@ -1870,31 +2017,23 @@ async function openClientRateModal(client_id, existing){
       pay_bh:       raw.pay_bh       !== '' ? Number(raw.pay_bh)       : null,
     };
 
-    // POST upsert (backend upserts on client_id+role+band+date_from)
-    const resp = await authFetch(API('/api/rates/client-defaults'), {
-      method:'POST',
-      headers:{'content-type':'application/json'},
-      body: JSON.stringify(payload)
-    });
-    if (!resp.ok) {
-      const msg = await resp.text().catch(()=> 'Save failed');
-      alert(msg || 'Save failed');
-      return;
+    // Insert/update into staged array
+    modalCtx.ratesState = Array.isArray(modalCtx.ratesState) ? modalCtx.ratesState : [];
+    if (existing) {
+      // Find & replace by a simple signature (role+band+date_from) or by reference match
+      const idx = modalCtx.ratesState.findIndex(r =>
+        r === existing ||
+        (String(r.role||'')===String(existing.role||'')
+         && String(r.band||'')===String(existing.band||'')
+         && String(r.date_from||'')===String(existing.date_from||'')));
+      if (idx >= 0) modalCtx.ratesState[idx] = staged; else modalCtx.ratesState.push(staged);
+    } else {
+      modalCtx.ratesState.push(staged);
     }
 
-    // IMPORTANT: invalidate global roles cache so new role appears in roles editor dropdowns
-    if (role === newRole.toUpperCase()) {
-      invalidateGlobalRoleOptionsCache && invalidateGlobalRoleOptionsCache();
-      // Right after invalidateGlobalRoleOptionsCache()
-if (typeof window !== 'undefined' && window.dispatchEvent) {
-  window.dispatchEvent(new CustomEvent('global-roles-updated'));
-}
-
-    }
-
-    // Refresh the Rates tab in-place and close this small form
-    await mountClientRatesTab();
+    // Close small modal and refresh rates tab
     closeModal();
+    mountClientRatesTab();
   }, false);
 
   // After mount: prefill controls + attach date pickers + role new toggle
@@ -1910,12 +2049,8 @@ if (typeof window !== 'undefined' && window.dispatchEvent) {
   }
 
   selRole.addEventListener('change', () => {
-    if (selRole.value === '__OTHER__') {
-      rowNew.style.display = '';
-    } else {
-      rowNew.style.display = 'none';
-      const nr = document.getElementById('cl_role_new'); if (nr) nr.value = '';
-    }
+    if (selRole.value === '__OTHER__') rowNew.style.display = '';
+    else { rowNew.style.display = 'none'; const nr = document.getElementById('cl_role_new'); if (nr) nr.value = ''; }
   });
 
   if (existing?.date_from) inFrom.value = formatIsoToUk(existing.date_from);
@@ -1926,7 +2061,6 @@ if (typeof window !== 'undefined' && window.dispatchEvent) {
 }
 
 
-
 function openClientHospitalModal(client_id){
   const formHtml = html(`
     <div class="form" id="hospitalForm">
@@ -1934,16 +2068,22 @@ function openClientHospitalModal(client_id){
       ${input('ward_hint','Ward hint (optional)','')}
     </div>
   `);
+
   showModal('Add Hospital / Ward', [{key:'form',label:'Form'}], () => formHtml, async ()=>{
     const raw = collectForm('#hospitalForm');
-    if (!raw.hospital_name_norm) return alert('Hospital / Trust is required');
-    const res = await authFetch(API(`/api/clients/${client_id}/hospitals`), {
-      method:'POST', headers:{'content-type':'application/json'},
-      body: JSON.stringify({ hospital_name_norm: raw.hospital_name_norm, ward_hint: raw.ward_hint || null })
+    const name = String(raw.hospital_name_norm || '').trim();
+    if (!name) { alert('Hospital / Trust is required'); return; }
+
+    // Stage it only
+    modalCtx.hospitalsState = Array.isArray(modalCtx.hospitalsState) ? modalCtx.hospitalsState : [];
+    modalCtx.hospitalsState.push({
+      hospital_name_norm: name,
+      ward_hint: (raw.ward_hint || '').trim() || null
     });
-    if (!res.ok) { alert(await res.text() || 'Add failed'); return; }
-    await renderHospitalsUI(client_id);
+
+    // Close and refresh
     closeModal();
+    mountClientHospitalsTab();
   }, true);
 }
 
@@ -1984,10 +2124,104 @@ async function renderHospitalsUI(client_id){
   el.appendChild(actions);
 }
 
-async function renderClientSettingsUI(row){
+function renderClientHospitalsTable(hospitals){
+  const el = byId('clientHospitals'); if (!el) return;
+
+  const staged = Array.isArray(modalCtx.hospitalsState) ? modalCtx.hospitalsState : [];
+  el.innerHTML = '';
+
+  // Table
+  const tbl = document.createElement('table'); tbl.className = 'grid';
+  const cols = ['hospital_name_norm','ward_hint'];
+  const thead = document.createElement('thead');
+  const trh = document.createElement('tr');
+  cols.forEach(c => { const th = document.createElement('th'); th.textContent = c; trh.appendChild(th); });
+  thead.appendChild(trh); tbl.appendChild(thead);
+
+  const tb = document.createElement('tbody');
+  if (!staged.length) {
+    const tr = document.createElement('tr');
+    const td = document.createElement('td'); td.colSpan = cols.length; td.textContent = 'No hospitals/wards added yet.';
+    tr.appendChild(td); tb.appendChild(tr);
+  } else {
+    staged.forEach((x, idx) => {
+      const tr = document.createElement('tr');
+      cols.forEach(c => {
+        const td = document.createElement('td');
+        td.textContent = formatDisplayValue(c, x[c]);
+        tr.appendChild(td);
+      });
+
+      // Simple inline remove
+      const tdAct = document.createElement('td');
+      const btnDel = document.createElement('button'); btnDel.textContent = 'Remove';
+      btnDel.onclick = () => {
+        modalCtx.hospitalsState.splice(idx, 1);
+        renderClientHospitalsTable(modalCtx.hospitalsState);
+      };
+      tdAct.appendChild(btnDel);
+      tr.appendChild(tdAct);
+
+      tb.appendChild(tr);
+    });
+  }
+  tbl.appendChild(tb);
+
+  // Footer with single Add button
+  const actions = document.createElement('div');
+  actions.className = 'actions';
+  actions.innerHTML = `<button id="btnAddClientHospital">Add Hospital / Ward</button>`;
+
+  el.appendChild(tbl);
+  el.appendChild(actions);
+
+  const addBtn = byId('btnAddClientHospital');
+  if (addBtn) addBtn.onclick = () => openClientHospitalModal(modalCtx.data?.id);
+}
+
+
+async function renderClientSettingsUI(settingsObj){
   const div = byId('clientSettings'); if (!div) return;
-  // Placeholder; wire to specific client settings endpoint if/when exposed
-  div.innerHTML = `<div class="hint">Client-level settings override system defaults (classification windows, VAT/holiday/ERNI). Configure via API when available. Global defaults can be edited in the Settings section.</div>`;
+
+  // Use staged object; show a JSON editor to avoid schema coupling
+  const initial = (modalCtx.clientSettingsState && typeof modalCtx.clientSettingsState === 'object')
+    ? modalCtx.clientSettingsState
+    : (settingsObj && typeof settingsObj === 'object' ? settingsObj : {});
+
+  div.innerHTML = `
+    <div class="form" id="clientSettingsForm">
+      <div class="row" style="grid-column:1/-1">
+        <label>Client settings (JSON)</label>
+        <textarea id="client_settings_json" style="min-height:200px">${JSON.stringify(initial, null, 2)}</textarea>
+        <div id="client_settings_err" class="hint" style="color:#b21f1f; display:none; margin-top:6px"></div>
+        <div class="hint">Edits here are staged. They will be saved when you click <b>Save</b> on the Client modal.</div>
+      </div>
+    </div>
+  `;
+
+  const ta  = document.getElementById('client_settings_json');
+  const err = document.getElementById('client_settings_err');
+
+  // Two-way staging: parse on change; keep last-good to avoid accidental nulling
+  let lastGood = initial;
+  ta.addEventListener('input', () => {
+    try {
+      const parsed = JSON.parse(ta.value || '{}');
+      if (parsed && typeof parsed === 'object') {
+        modalCtx.clientSettingsState = parsed;
+        lastGood = parsed;
+        err.style.display = 'none';
+        err.textContent = '';
+      } else {
+        throw new Error('Settings must be a JSON object.');
+      }
+    } catch (e) {
+      err.style.display = '';
+      err.textContent = 'Invalid JSON: ' + (e && e.message ? e.message : String(e));
+      // keep lastGood staged; do not overwrite on parse errors
+      modalCtx.clientSettingsState = lastGood;
+    }
+  });
 }
 
 // ---- Umbrella modal
@@ -2115,6 +2349,7 @@ function showModal(title, tabs, renderTab, onSave, hasId) {
       const cur = collectForm('#tab-pay');
       modalCtx.formState.pay = { ...modalCtx.formState.pay, ...cur };
     }
+    // Settings tab persists by updating modalCtx.clientSettingsState inside renderClientSettingsUI handlers (two-way).
   }
 
   function mergedRowForTab(k) {
@@ -2129,27 +2364,20 @@ function showModal(title, tabs, renderTab, onSave, hasId) {
     const rowForTab = mergedRowForTab(k);
     byId('modalBody').innerHTML = renderTab(k, rowForTab) || '';
 
+    // Candidate-specific mounts remain unchanged
     if (modalCtx.entity === 'candidates' && k === 'rates')    { mountCandidateRatesTab?.(); }
-    if (modalCtx.entity === 'clients'    && k === 'rates')    { mountClientRatesTab?.(); }
-    if (modalCtx.entity === 'clients'    && k === 'hospitals'){ renderHospitalsUI?.(modalCtx.data?.id); }
-    if (modalCtx.entity === 'clients'    && k === 'settings') { renderClientSettingsUI?.(modalCtx.data); }
+    if (modalCtx.entity === 'candidates' && k === 'pay')      { mountCandidatePayTab?.(); }
 
-    if (modalCtx.entity === 'candidates' && k === 'main') {
-      const pm = document.getElementById('pay-method');
-      if (pm) {
-        modalCtx.payMethodState = pm.value || modalCtx.formState.main?.pay_method || modalCtx.data?.pay_method || 'PAYE';
-        modalCtx.formState.main = { ...modalCtx.formState.main, pay_method: modalCtx.payMethodState };
-        pm.addEventListener('change', () => {
-          modalCtx.payMethodState = pm.value || 'PAYE';
-          modalCtx.formState.main = { ...modalCtx.formState.main, pay_method: modalCtx.payMethodState };
-          if (typeof window !== 'undefined' && typeof window.dispatchEvent === 'function') {
-            window.dispatchEvent(new CustomEvent('pay-method-changed', { detail: modalCtx.payMethodState }));
-          }
-        });
-      }
+    // Client-specific staged mounts
+    if (modalCtx.entity === 'clients' && k === 'rates') {
+      mountClientRatesTab?.();
     }
-
-    if (modalCtx.entity === 'candidates' && k === 'pay') { mountCandidatePayTab?.(); }
+    if (modalCtx.entity === 'clients' && k === 'hospitals') {
+      mountClientHospitalsTab?.();
+    }
+    if (modalCtx.entity === 'clients' && k === 'settings') {
+      renderClientSettingsUI?.(modalCtx.clientSettingsState || {});
+    }
 
     currentTabKey = k;
   }
@@ -2159,13 +2387,13 @@ function showModal(title, tabs, renderTab, onSave, hasId) {
   byId('btnDelete').style.display = hasId ? '' : 'none';
   byId('btnDelete').onclick = openDelete;
 
-  // Save: persist current tab then call onSave
+  // Save: persist current tab then call onSave (parent)
   byId('btnSave').onclick = async () => {
     persistCurrentTabState();
     await onSave();
   };
 
-  // Related… (normalize to singular)
+  // Related…
   byId('btnRelated').onclick = async (e) => {
     e.preventDefault();
     e.stopPropagation();
@@ -2193,7 +2421,7 @@ function showModal(title, tabs, renderTab, onSave, hasId) {
   function mm(e){ if(!dragging) return; modal.style.position = 'absolute'; modal.style.left = (e.clientX - offX) + 'px'; modal.style.top = (e.clientY - offY) + 'px'; }
   function mu(){ dragging = false; modal.classList.remove('dragging'); document.onmousemove = null; document.onmouseup = null; }
 
-  // 🔄 Rename Close → Discard and ensure it **discards** unsaved edits
+  // Discard behaviour
   const closeBtn = byId('btnCloseModal');
   if (closeBtn) {
     closeBtn.textContent = 'Discard';
@@ -2201,13 +2429,13 @@ function showModal(title, tabs, renderTab, onSave, hasId) {
     closeBtn.setAttribute('aria-label', 'Discard changes and close');
     closeBtn.onclick = () => {
       closeRelatedMenu?.();
-      // Discard all in-modal edits
       modalCtx.formState = { main: {}, pay: {} };
       modalCtx.rolesState = undefined;
       closeModal();
     };
   }
 }
+
 
 
 function closeModal(){ byId('modalBack').style.display='none'; }
