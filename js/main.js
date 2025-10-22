@@ -1635,6 +1635,15 @@ function discardAllModalsAndState(){
     document.onmouseup   = null;
   }
 
+  // 🔒 Clear any hidden modal DOM so stale inputs can't be read on next open
+  const modalBody = document.getElementById('modalBody');
+  if (modalBody) modalBody.replaceChildren();
+  const modalTabs = document.getElementById('modalTabs');
+  if (modalTabs) modalTabs.replaceChildren();
+  const modalTitle = document.getElementById('modalTitle');
+  if (modalTitle) modalTitle.textContent = '';
+
+  // Reset modal stack & context
   window.__modalStack = [];
   modalCtx = {
     entity: null, data: null,
@@ -1644,11 +1653,13 @@ function discardAllModalsAndState(){
     openToken: null
   };
 
+  // Hide overlay last
   const back = document.getElementById('modalBack');
   if (back) back.style.display = 'none';
 
   console.debug('[MODAL] hard reset complete');
 }
+
 
 
 function confirmDiscardChangesIfDirty(){
@@ -2689,8 +2700,14 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
     currentTabKey: (Array.isArray(tabs) && tabs.length ? tabs[0].key : null),
     isDirty: false,
     _detachDirty: null,
+    _hasMountedOnce: false, // ← skip first persist on initial mount
 
+    // Persist visible tab ONLY when overlay is visible (prevents reading hidden/stale DOM)
     persistCurrentTabState() {
+      const back = byId('modalBack');
+      const overlayVisible = back && getComputedStyle(back).display !== 'none';
+      if (!overlayVisible) return; // ← critical guard
+
       if (this.currentTabKey === 'main' && byId('tab-main')) {
         const cur = collectForm('#tab-main');
         const fs = modalCtx.formState || { __forId: modalCtx.data?.id || null, main:{}, pay:{} };
@@ -2732,7 +2749,9 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
     },
 
     setTab(k) {
-      this.persistCurrentTabState();
+      // Only persist if we've already mounted once (skip on initial mount)
+      if (this._hasMountedOnce) this.persistCurrentTabState();
+
       const rowForTab = this.mergedRowForTab(k);
       byId('modalBody').innerHTML = this.renderTab(k, rowForTab) || '';
 
@@ -2757,6 +2776,7 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
 
       this.currentTabKey = k;
       this._attachDirtyTracker();
+      this._hasMountedOnce = true; // ← first mount complete; future tab switches may persist
     }
   };
 
@@ -2860,6 +2880,7 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
 
   renderTop();
 }
+
 
 // =============================== closeModal (kept) ===============================
 function closeModal(){
