@@ -1057,8 +1057,10 @@ async function fetchRelated(entity, id, type){
 async function getSettings(){
   const r = await authFetch(API('/api/settings/defaults'));
   if (!r.ok) throw new Error('Fetch settings failed');
-  return r.json(); // single object
+  const j = await r.json();
+  return j?.settings || j || {};   // <-- unwrap {settings: {...}}
 }
+
 async function saveSettings(payload){
   const r = await authFetch(API('/api/settings/defaults'), {
     method:'PUT',
@@ -2989,7 +2991,22 @@ function openAuditItem(row){
 
 // ---- Settings (global defaults)
 async function renderSettingsPanel(content){
-  const s = await getSettings();
+  // Load settings with a visible error if the call fails
+  let s;
+  try {
+    // getSettings() should now unwrap { settings: {...} } → {...}
+    s = await getSettings();
+  } catch (e) {
+    content.innerHTML = `
+      <div class="tabc">
+        <div class="error">Couldn’t load settings: ${e?.message || 'Unknown error'}</div>
+      </div>`;
+    return;
+  }
+
+  // Prefer the new key; fall back to legacy if needed (still GLOBAL-only)
+  const erniValue = (s.employers_ni_pct ?? s.erni_pct ?? 0);
+
   content.innerHTML = `
     <div class="tabc">
       <div class="form" id="settingsForm">
@@ -2999,14 +3016,20 @@ async function renderSettingsPanel(content){
         ${input('night_start','Night start', s.night_start || '20:00')}
         ${input('night_end','Night end', s.night_end || '06:00')}
         ${select('bh_source','Bank Holidays source', s.bh_source || 'MANUAL', ['MANUAL','FEED'])}
-        <div class="row" style="grid-column:1/-1"><label>Bank Holidays list (JSON dates)</label><textarea name="bh_list">${JSON.stringify(s.bh_list || [], null, 2)}</textarea></div>
+        <div class="row" style="grid-column:1/-1">
+          <label>Bank Holidays list (JSON dates)</label>
+          <textarea name="bh_list">${JSON.stringify(s.bh_list || [], null, 2)}</textarea>
+        </div>
         ${input('bh_feed_url','BH feed URL', s.bh_feed_url || '')}
         ${input('vat_rate_pct','VAT %', s.vat_rate_pct ?? 20)}
         ${input('holiday_pay_pct','Holiday pay %', s.holiday_pay_pct ?? 0)}
-        ${input('erni_pct','ERNI %', s.erni_pct ?? 0)}
+        ${input('erni_pct','ERNI %', erniValue)}
         ${select('apply_holiday_to','Apply holiday to', s.apply_holiday_to || 'PAYE_ONLY', ['PAYE_ONLY','ALL','NONE'])}
         ${select('apply_erni_to','Apply ERNI to', s.apply_erni_to || 'PAYE_ONLY', ['PAYE_ONLY','ALL','NONE'])}
-        <div class="row" style="grid-column:1/-1"><label>Margin includes (JSON)</label><textarea name="margin_includes">${JSON.stringify(s.margin_includes || {}, null, 2)}</textarea></div>
+        <div class="row" style="grid-column:1/-1">
+          <label>Margin includes (JSON)</label>
+          <textarea name="margin_includes">${JSON.stringify(s.margin_includes || {}, null, 2)}</textarea>
+        </div>
 
         <div class="row">
           <label>Effective from (DD/MM/YYYY)</label>
@@ -3027,17 +3050,23 @@ async function renderSettingsPanel(content){
 
   byId('btnSaveSettings').onclick = async ()=>{
     const payload = collectForm('#settingsForm', true);
+
     // Convert UK date (if present)
     if (payload.effective_from) {
       const iso = parseUkDateToIso(payload.effective_from);
       if (!iso) { alert('Invalid Effective from date'); return; }
       payload.effective_from = iso;
     }
-    try { await saveSettings(payload); alert('Saved.'); }
-    catch { alert('Save failed'); }
+
+    // ERNI is global-only; just pass the field as entered (backend owns validation)
+    try {
+      await saveSettings(payload);
+      alert('Saved.');
+    } catch (e) {
+      alert('Save failed: ' + (e?.message || 'Unknown error'));
+    }
   };
 }
-
 
 // ===== Generic modal plumbing =====
 
