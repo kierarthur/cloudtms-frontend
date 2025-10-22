@@ -190,6 +190,7 @@ let currentSection = 'candidates';
 let currentRows = [];
 let currentSelection = null;
 
+// =========================== renderTopNav (kept with reset) ===========================
 function renderTopNav(){
   const nav = byId('nav'); nav.innerHTML = '';
   sections.forEach(s=>{
@@ -216,6 +217,7 @@ function renderTopNav(){
     nav.appendChild(b);
   });
 }
+
 
 
 function renderTools(){
@@ -941,12 +943,12 @@ async function listClientRates(clientId){
   const r = await authFetch(API(`/api/rates/client-defaults${qs}`));
   return toList(r);
 }
-
+// ====================== listCandidateRates (unchanged API) ======================
 async function listCandidateRates(candidate_id){
   const r = await authFetch(API(`/api/rates/candidate-overrides?candidate_id=${encodeURIComponent(candidate_id)}`));
   return toList(r);
 }
-
+// =========================== fetchRelated (unchanged API) ===========================
 async function fetchRelated(entity, id, type){
   const url = API(`/api/related/${entity}/${id}/${type}`);
   let res;
@@ -958,12 +960,13 @@ async function fetchRelated(entity, id, type){
   }
 
   if (!res.ok) {
-    const text = await res.text().catch(()=>'');
+    const text = await res.text().catch(()=> '');
     console.error('fetchRelated failed:', { status: res.status, url, server: text });
     throw new Error(`Request failed: ${res.status}`);
   }
   return toList(res);
 }
+
 
 // Settings (singleton)
 async function getSettings(){
@@ -1171,34 +1174,55 @@ async function openDelete(){
 // === UPDATED: Candidate open modal (mount roles editor; include roles on save) ===
 // === UPDATED: openCandidate — save uses full persisted state + current tab values ===
 
+// ========================= openCandidate (FIXED) =========================
 async function openCandidate(row){
-  modalCtx = { entity: 'candidates', data: row };
+  // Fresh, isolated modal context for this record
+  const deep = (o)=> JSON.parse(JSON.stringify(o || {}));
+  const seedId = row?.id || null;
+
+  modalCtx = {
+    entity: 'candidates',
+    data: deep(row),                            // never mutate grid row
+    formState: { __forId: seedId, main: {}, pay: {} },
+    rolesState: Array.isArray(row?.roles) ? normaliseRolesForSave(row.roles) : [],
+    ratesState: null,
+    clientSettingsState: null,
+    openToken: (seedId || 'new') + ':' + Date.now()
+  };
 
   showModal(
     'Candidate',
     [
-      { key:'main',    label:'Main Details' },
-      { key:'rates',   label:'Rates' },
-      { key:'pay',     label:'Payment details' },
-      { key:'bookings',label:'Bookings' }
+      { key:'main',     label:'Main Details' },
+      { key:'rates',    label:'Rates' },
+      { key:'pay',      label:'Payment details' },
+      { key:'bookings', label:'Bookings' }
     ],
     renderCandidateTab,
     async () => {
       const isNew = !modalCtx?.data?.id;
 
-      const stateMain = (modalCtx.formState && modalCtx.formState.main) || {};
-      const statePay  = (modalCtx.formState && modalCtx.formState.pay)  || {};
+      // Only use staged state if it belongs to THIS record
+      const fs = modalCtx.formState || { __forId: null, main:{}, pay:{} };
+      const sameRecord = (!!modalCtx.data?.id && fs.__forId === modalCtx.data.id) || (!modalCtx.data?.id && fs.__forId == null);
+
+      const stateMain = sameRecord ? (fs.main || {}) : {};
+      const statePay  = sameRecord ? (fs.pay  || {}) : {};
+
       const main      = document.querySelector('#tab-main') ? collectForm('#tab-main') : {};
       const pay       = document.querySelector('#tab-pay')  ? collectForm('#tab-pay')  : {};
       const roles     = normaliseRolesForSave(modalCtx.rolesState || []);
 
-      const payload = { ...stateMain, ...statePay, ...main, ...pay, roles };
+      const payload   = { ...stateMain, ...statePay, ...main, ...pay, roles };
 
+      // Clean transient fields
       if ('umbrella_name' in payload) delete payload.umbrella_name;
+
+      // Defensive carry-over if Main tab wasn’t visited
       if (!payload.first_name && row?.first_name) payload.first_name = row.first_name;
       if (!payload.last_name  && row?.last_name)  payload.last_name  = row.last_name;
 
-      // Ensure CGK/CCR included even if Main tab wasn’t visited
+      // Ensure CGK/CCR even if Main wasn’t visited
       if (typeof payload.key_norm === 'undefined' && typeof row?.key_norm !== 'undefined') payload.key_norm = row.key_norm;
       if (typeof payload.tms_ref  === 'undefined' && typeof row?.tms_ref  !== 'undefined') payload.tms_ref  = row.tms_ref;
 
@@ -1207,27 +1231,25 @@ async function openCandidate(row){
         payload.display_name = dn || row?.display_name || null;
       }
 
+      // Payment guard
       if (!payload.pay_method) payload.pay_method = isNew ? 'PAYE' : (row?.pay_method || 'PAYE');
-
-      if (isNew && !payload.first_name && !payload.last_name) {
-        alert('Enter at least a first or last name.'); return;
-      }
+      if (isNew && !payload.first_name && !payload.last_name) { alert('Enter at least a first or last name.'); return; }
       if (payload.pay_method === 'PAYE') {
         payload.umbrella_id = null;
       } else {
-        if (!payload.umbrella_id || payload.umbrella_id === '') {
-          alert('Select an umbrella company for UMBRELLA pay.'); return;
-        }
+        if (!payload.umbrella_id || payload.umbrella_id === '') { alert('Select an umbrella company for UMBRELLA pay.'); return; }
       }
       if (payload.umbrella_id === '') payload.umbrella_id = null;
 
+      // Strip empty strings
       for (const k of Object.keys(payload)) if (payload[k] === '') delete payload[k];
 
-      // Always save against the id in THIS modal (prevents cross‑record mix)
+      // Always save against THIS modal’s id
       const idForUpdate = modalCtx?.data?.id || row?.id || null;
       await upsertCandidate(payload, idForUpdate);
 
-      modalCtx.formState = { main: {}, pay: {} };
+      // Clear staged state and close
+      modalCtx.formState = { __forId: idForUpdate || null, main: {}, pay: {} };
       modalCtx.rolesState = undefined;
       closeModal();
       renderAll();
@@ -1235,10 +1257,9 @@ async function openCandidate(row){
     row?.id
   );
 
+  // === Async: roles editor mount ===
   try {
     const allRoleOptions = await loadGlobalRoleOptions();
-    const initial = Array.isArray(row?.roles) ? row.roles : [];
-    modalCtx.rolesState = normaliseRolesForSave(initial);
     const container = document.querySelector('#rolesEditor');
     if (container) renderRolesEditor(container, modalCtx.rolesState, allRoleOptions);
 
@@ -1259,17 +1280,41 @@ async function openCandidate(row){
     console.error('Failed to load global roles', e);
   }
 
+  // === Async: rates + related (token-gated) ===
   if (row?.id) {
-    const rates = await listCandidateRates(row.id);
-    await renderCandidateRatesTable(rates);
-    const ts = await fetchRelated('candidate', row.id, 'timesheets');
-    renderCalendar(ts || []);
+    const token = modalCtx.openToken;
+    const id    = row.id;
+
+    try {
+      const rates = await listCandidateRates(id);
+      if (token === modalCtx.openToken && modalCtx.data?.id === id) {
+        await renderCandidateRatesTable(rates);
+      } else {
+        console.debug('[ASYNC] candidate rates dropped (stale)', { forId: id, active: modalCtx.data?.id });
+      }
+    } catch (e) {
+      console.error('listCandidateRates failed', e);
+    }
+
+    try {
+      const ts = await fetchRelated('candidate', id, 'timesheets');
+      if (token === modalCtx.openToken && modalCtx.data?.id === id) {
+        renderCalendar(ts || []);
+      } else {
+        console.debug('[ASYNC] related timesheets dropped (stale)', { forId: id, active: modalCtx.data?.id });
+      }
+    } catch (e) {
+      console.error('fetchRelated timesheets failed', e);
+    }
   }
 }
 
 
-
+// ====================== mountCandidatePayTab (FIXED) ======================
 async function mountCandidatePayTab(){
+  const token    = modalCtx.openToken;
+  const idActive = modalCtx.data?.id || null;
+
   // Elements inside Pay tab
   const umbRow    = document.querySelector('#tab-pay #umbRow');
   const nameInput = document.querySelector('#tab-pay #umbrella_name');
@@ -1279,11 +1324,15 @@ async function mountCandidatePayTab(){
   const accNum    = document.querySelector('#tab-pay input[name="account_number"]');
   const dl        = document.querySelector('#tab-pay #umbList');
 
-  // We do NOT require #pay-method here (main tab may be unmounted)
   if (!umbRow || !nameInput || !idHidden || !bankName || !sortCode || !accNum || !dl) return;
 
-  // Fetch umbrellas and populate datalist
+  // Fetch umbrellas and populate datalist (token-gated)
   const umbrellas = await listUmbrellas().catch(()=>[]);
+  if (token !== modalCtx.openToken || modalCtx.data?.id !== idActive) {
+    console.debug('[ASYNC] umbrellas dropped (stale)', { forId: idActive, active: modalCtx.data?.id });
+    return;
+  }
+
   const byName = new Map((umbrellas||[]).map(u => [String(u.name || '').toLowerCase(), u]));
   const byId   = new Map((umbrellas||[]).map(u => [u.id, u]));
   dl.innerHTML = (umbrellas||[]).map(u => `<option value="${u.name}"></option>`).join('');
@@ -1326,14 +1375,12 @@ async function mountCandidatePayTab(){
       idHidden.value = match.id;
       lockFromUmb(match);
     } else {
-      // Unknown text: keep pay method as-is; just clear id & unlock so user can type
       clearUmbrellaOnly();
       unlockBank();
     }
   }
 
   function currentPayMethod(){
-    // Prefer live state recorded by main tab, else original row value, else PAYE
     return modalCtx?.payMethodState || modalCtx?.data?.pay_method || 'PAYE';
   }
 
@@ -1341,7 +1388,6 @@ async function mountCandidatePayTab(){
     const pm = currentPayMethod();
     const prev = modalCtx._lastPayMethod;
 
-    // Transitions: snapshot on PAYE->UMBRELLA; restore on UMBRELLA->PAYE
     if (prev !== pm) {
       if (prev !== 'UMBRELLA' && pm === 'UMBRELLA') snapshotIfNeeded();
       if (prev === 'UMBRELLA' && pm !== 'UMBRELLA') restoreSnapshot();
@@ -1355,7 +1401,6 @@ async function mountCandidatePayTab(){
         nameInput.value = u.name || '';
         lockFromUmb(u);
       } else {
-        // No umbrella chosen yet: keep fields unlocked until user picks one
         unlockBank();
       }
     } else {
@@ -1384,21 +1429,29 @@ async function mountCandidatePayTab(){
   // Listen for cross-tab pay method changes
   const onPmChanged = () => updateUmbVisibility();
   window.addEventListener('pay-method-changed', onPmChanged, { passive: true });
-
-  // Optional: store a cleanup hook if you implement modal close cleanup elsewhere
   modalCtx._payMethodChangedHandler = onPmChanged;
 }
 
 
 
 // Replaces your current function
+// =================== renderCandidateRatesTable (FIXED) ===================
 async function renderCandidateRatesTable(rates){
-  const div = byId('ratesTable'); if (!div) return;
+  const token   = modalCtx.openToken;
+  const idActive= modalCtx.data?.id || null;
+
+  const div = byId('ratesTable'); 
+  if (!div) return;
 
   // Build a lookup of client_id -> client name
   let clientsById = {};
   try {
     const clients = await listClientsBasic(); // [{id,name}]
+    // Drop if modal context changed while awaiting
+    if (token !== modalCtx.openToken || modalCtx.data?.id !== idActive) {
+      console.debug('[ASYNC] client list dropped (stale)', { forId: idActive, active: modalCtx.data?.id });
+      return;
+    }
     clientsById = Object.fromEntries((clients || []).map(c => [c.id, c.name]));
   } catch (e) {
     console.error('Failed to load clients for candidate rates table', e);
@@ -1406,6 +1459,11 @@ async function renderCandidateRatesTable(rates){
 
   // Empty state but keep the add button visible
   if (!rates || !rates.length) {
+    // Verify still valid before mutating DOM
+    if (token !== modalCtx.openToken || modalCtx.data?.id !== idActive) {
+      console.debug('[ASYNC] rates table render dropped (stale empty)', { forId: idActive, active: modalCtx.data?.id });
+      return;
+    }
     div.innerHTML = `
       <div class="hint" style="margin-bottom:8px">No candidate-specific rates. Client defaults will apply.</div>
       <div class="actions"><button id="btnAddRate">Add rate override</button></div>
@@ -1422,8 +1480,14 @@ async function renderCandidateRatesTable(rates){
   // Enrich rows with client name
   const rows = (rates || []).map(r => ({
     ...r,
-    client: clientsById[r.client_id] || ''   // show Client name instead of client_id
+    client: clientsById[r.client_id] || ''
   }));
+
+  // Verify still valid before constructing DOM
+  if (token !== modalCtx.openToken || modalCtx.data?.id !== idActive) {
+    console.debug('[ASYNC] rates table render dropped (stale enriched)', { forId: idActive, active: modalCtx.data?.id });
+    return;
+  }
 
   // Build table
   const tbl   = document.createElement('table'); tbl.className = 'grid';
@@ -1441,7 +1505,6 @@ async function renderCandidateRatesTable(rates){
 
     cols.forEach(c => {
       const td = document.createElement('td');
-      // Use your formatter for dates/numbers; 'client' is already a name string
       td.textContent = formatDisplayValue(c, r[c]);
       tr.appendChild(td);
     });
@@ -1454,7 +1517,11 @@ async function renderCandidateRatesTable(rates){
   actions.className = 'actions';
   actions.innerHTML = `<button id="btnAddRate">Add rate override</button>`;
 
-  // Render
+  // Render (final validity check)
+  if (token !== modalCtx.openToken || modalCtx.data?.id !== idActive) {
+    console.debug('[ASYNC] rates table render dropped (stale pre-commit)', { forId: idActive, active: modalCtx.data?.id });
+    return;
+  }
   div.innerHTML = '';
   div.appendChild(tbl);
   div.appendChild(actions);
@@ -1538,6 +1605,7 @@ function isAnyModalDirty(){
   const st = window.__modalStack || [];
   return st.some(f => f && f.isDirty);
 }
+// ==================== discardAllModalsAndState (kept with geometry reset) ====================
 function discardAllModalsAndState(){
   try {
     if (modalCtx && modalCtx._rolesUpdatedHandler) {
@@ -1572,7 +1640,8 @@ function discardAllModalsAndState(){
     entity: null, data: null,
     formState: null, rolesState: null,
     ratesState: null, hospitalsState: null,
-    clientSettingsState: null
+    clientSettingsState: null,
+    openToken: null
   };
 
   const back = document.getElementById('modalBack');
@@ -1580,6 +1649,7 @@ function discardAllModalsAndState(){
 
   console.debug('[MODAL] hard reset complete');
 }
+
 
 function confirmDiscardChangesIfDirty(){
   if (!isAnyModalDirty()) return true;
@@ -1589,11 +1659,20 @@ function confirmDiscardChangesIfDirty(){
   return true;
 }
 
-
+// ====================== mountCandidateRatesTab (FIXED) ======================
 async function mountCandidateRatesTab(){
-  // fetch & render list (id comes from modalCtx)
-  const rates = modalCtx.data?.id ? await listCandidateRates(modalCtx.data.id) : [];
-  renderCandidateRatesTable(rates);
+  const token = modalCtx.openToken;
+  const id    = modalCtx.data?.id || null;
+
+  const rates = id ? await listCandidateRates(id) : [];
+
+  // Drop stale updates if user switched records mid-fetch
+  if (token !== modalCtx.openToken || modalCtx.data?.id !== id) {
+    console.debug('[ASYNC] candidate rates dropped (stale)', { forId: id, active: modalCtx.data?.id });
+    return;
+  }
+
+  await renderCandidateRatesTable(rates);
 
   // bind "Add…" button now that the tab DOM exists
   const btn = byId('btnAddRate');
@@ -1602,8 +1681,14 @@ async function mountCandidateRatesTab(){
 
 
 // === UPDATED: Candidate Rate Override modal (Client→Role gated; bands; UK dates; date_to) ===
+// ====================== openCandidateRateModal (FIXED) ======================
 async function openCandidateRateModal(candidate_id, existing){
-  // Prefetch clients for dropdown
+  // Capture parent modal context to gate async + save (stale child protection)
+  const parentToken = modalCtx.openToken;
+  const parentEntity = modalCtx.entity;
+  const parentId = modalCtx.data?.id || null;
+
+  // Prefetch clients for dropdown (simple, fast; done before child modal mounts)
   const clients = await listClientsBasic(); // [{id,name},...]
   const clientOptions = clients.map(c => `<option value="${c.id}">${c.name}</option>`).join('');
   const initialClientId = existing?.client_id || (clients[0]?.id || '');
@@ -1638,11 +1723,11 @@ async function openCandidateRateModal(candidate_id, existing){
         <input type="text" name="date_to" id="cr_date_to" placeholder="DD/MM/YYYY" />
       </div>
 
-      ${input('pay_day','Pay (Day)',   existing?.pay_day   ?? '', 'number')}
-      ${input('pay_night','Pay (Night)', existing?.pay_night ?? '', 'number')}
-      ${input('pay_sat','Pay (Sat)',   existing?.pay_sat   ?? '', 'number')}
-      ${input('pay_sun','Pay (Sun)',   existing?.pay_sun   ?? '', 'number')}
-      ${input('pay_bh','Pay (BH)',     existing?.pay_bh     ?? '', 'number')}
+      ${input('pay_day','Pay (Day)',     existing?.pay_day     ?? '', 'number')}
+      ${input('pay_night','Pay (Night)', existing?.pay_night   ?? '', 'number')}
+      ${input('pay_sat','Pay (Sat)',     existing?.pay_sat     ?? '', 'number')}
+      ${input('pay_sun','Pay (Sun)',     existing?.pay_sun     ?? '', 'number')}
+      ${input('pay_bh','Pay (BH)',       existing?.pay_bh       ?? '', 'number')}
       <div class="row"><label class="hint">Leave any pay field blank if not applicable (will be saved as null).</label></div>
     </div>
   `);
@@ -1653,6 +1738,12 @@ async function openCandidateRateModal(candidate_id, existing){
   let cache = { roles: [], bandsByRole: {} };
 
   showModal(title, [{ key:'form', label:'Form' }], () => formHtml, async ()=>{
+    // Stale child protection: ensure we still edit the same candidate context
+    if (parentToken !== modalCtx.openToken || parentEntity !== 'candidates' || modalCtx.data?.id !== candidate_id) {
+      alert('This rate form is no longer current. Please reopen it.');
+      return;
+    }
+
     const raw = collectForm('#candRateForm');
 
     // Required checks
@@ -1703,6 +1794,7 @@ async function openCandidateRateModal(candidate_id, existing){
       if (!ok) { alert('Save failed'); return; }
     }
 
+    // Repaint parent tab (token-gated inside mountCandidateRatesTab)
     await mountCandidateRatesTab();
     closeModal();
   }, false);
@@ -1732,7 +1824,13 @@ async function openCandidateRateModal(candidate_id, existing){
 
     if (!clientId) return;
 
+    // Pull the client’s default rates, but drop results if parent context changed
     const list = await listClientRates(clientId);
+    if (parentToken !== modalCtx.openToken || modalCtx.entity !== 'candidates' || modalCtx.data?.id !== parentId) {
+      console.debug('[ASYNC] refreshClientRoles dropped (stale)', { clientId, forId: parentId, active: modalCtx.data?.id });
+      return;
+    }
+
     const roles = new Set();
     const bandsByRole = {};
     list.forEach(r => {
@@ -1833,110 +1931,142 @@ function renderCalendar(timesheets){
 
 // ---- Client modal
 
+// =========================== openClient (FIXED) ==========================
 async function openClient(row){
-  modalCtx = { entity:'clients', data: row };
+  const deep = (o)=> JSON.parse(JSON.stringify(o || {}));
+  const seedId = row?.id || null;
 
-  // Staged state per modal
-  modalCtx.formState = { main: {} };
-  modalCtx.ratesState = [];
-  modalCtx.hospitalsState = [];
-  modalCtx.clientSettingsState = {};
+  // Fresh, isolated modal context for this record
+  modalCtx = {
+    entity: 'clients',
+    data: deep(row),
+    formState: { __forId: seedId, main: {} },
+    ratesState: [],
+    hospitalsState: [],
+    clientSettingsState: {},
+    openToken: (seedId || 'new') + ':' + Date.now()
+  };
 
-  // Preload staged collections for edits
-  if (row?.id) {
+  // Preload staged collections for edits (token-gated)
+  if (seedId) {
+    const token = modalCtx.openToken;
+
     try {
-      const rates = await listClientRates(row.id);
-      modalCtx.ratesState = Array.isArray(rates) ? rates.slice() : [];
+      const rates = await listClientRates(seedId);
+      if (token === modalCtx.openToken && modalCtx.data?.id === seedId) {
+        modalCtx.ratesState = Array.isArray(rates) ? rates.slice() : [];
+      } else {
+        console.debug('[ASYNC] client rates dropped (stale)', { forId: seedId, active: modalCtx.data?.id });
+      }
+    } catch (e) { console.error('openClient preload rates error', e); }
 
-      const hospitals = await listClientHospitals(row.id);
-      modalCtx.hospitalsState = Array.isArray(hospitals) ? hospitals.slice() : [];
+    try {
+      const hospitals = await listClientHospitals(seedId);
+      if (token === modalCtx.openToken && modalCtx.data?.id === seedId) {
+        modalCtx.hospitalsState = Array.isArray(hospitals) ? hospitals.slice() : [];
+      } else {
+        console.debug('[ASYNC] hospitals dropped (stale)', { forId: seedId, active: modalCtx.data?.id });
+      }
+    } catch (e) { console.error('openClient preload hospitals error', e); }
 
-      const r = await authFetch(API(`/api/clients/${row.id}`));
+    try {
+      const r = await authFetch(API(`/api/clients/${seedId}`));
       if (r.ok) {
         const clientObj = await r.json().catch(()=> ({}));
         const cs = clientObj && (clientObj.client_settings || clientObj.settings || {});
-        modalCtx.clientSettingsState = (cs && typeof cs === 'object') ? JSON.parse(JSON.stringify(cs)) : {};
+        if (token === modalCtx.openToken && modalCtx.data?.id === seedId) {
+          modalCtx.clientSettingsState = (cs && typeof cs === 'object') ? JSON.parse(JSON.stringify(cs)) : {};
+        } else {
+          console.debug('[ASYNC] client settings dropped (stale)', { forId: seedId, active: modalCtx.data?.id });
+        }
       }
     } catch (e) {
-      console.error('openClient preload error', e);
+      console.error('openClient preload client settings error', e);
     }
   }
 
-  showModal('Client', [
-    {key:'main',label:'Main'},
-    {key:'rates',label:'Rates'},
-    {key:'settings',label:'Client settings'},
-    {key:'hospitals',label:'Hospitals & wards'}
-  ], renderClientTab, async ()=>{
-    // Build payload purely from staged state, with live override if Main is mounted
-    const stagedMain = (modalCtx.formState && modalCtx.formState.main) || {};
-    const liveMain   = byId('tab-main') ? collectForm('#tab-main') : {};
-    const payload    = { ...stagedMain, ...liveMain };
+  showModal(
+    'Client',
+    [
+      {key:'main',     label:'Main'},
+      {key:'rates',    label:'Rates'},
+      {key:'settings', label:'Client settings'},
+      {key:'hospitals',label:'Hospitals & wards'}
+    ],
+    renderClientTab,
+    async ()=>{
+      // Build payload purely from staged state, with live override if Main is mounted
+      const fs = modalCtx.formState || { __forId: null, main:{} };
+      const sameRecord = (!!modalCtx.data?.id && fs.__forId === modalCtx.data.id) || (!modalCtx.data?.id && fs.__forId == null);
 
-    // Defensive carry-over if user never visited Main on edit
-    if (!payload.name && row?.name) payload.name = row.name;
+      const stagedMain = sameRecord ? (fs.main || {}) : {};
+      const liveMain   = byId('tab-main') ? collectForm('#tab-main') : {};
+      const payload    = { ...stagedMain, ...liveMain };
 
-    // Attach staged client settings
-    if (modalCtx.clientSettingsState && typeof modalCtx.clientSettingsState === 'object') {
-      payload.client_settings = modalCtx.clientSettingsState;
-    }
+      if (!payload.name && row?.name) payload.name = row.name;
+      if (!payload.name) { alert('Client name is required.'); return; }
 
-    if (!payload.name) { alert('Client name is required.'); return; }
+      // Attach staged client settings
+      if (modalCtx.clientSettingsState && typeof modalCtx.clientSettingsState === 'object') {
+        payload.client_settings = modalCtx.clientSettingsState;
+      }
 
-    // Upsert client using the id from THIS modal context
-    const clientIdFromCtx = modalCtx?.data?.id || row?.id || null;
-    const clientResp = await upsertClient(payload, clientIdFromCtx);
-    const clientId   = clientIdFromCtx || (clientResp && clientResp.id);
+      // Upsert client using id from THIS modal context
+      const clientIdFromCtx = modalCtx?.data?.id || row?.id || null;
+      const clientResp = await upsertClient(payload, clientIdFromCtx);
+      const clientId   = clientIdFromCtx || (clientResp && clientResp.id);
 
-    // Commit staged RATES (idempotent upserts)
-    if (clientId && Array.isArray(modalCtx.ratesState)) {
-      for (const rate of modalCtx.ratesState) {
-        try {
-          await upsertClientRate({
-            client_id: clientId,
-            role: rate.role || '',
-            band: rate.band || null,
-            date_from: rate.date_from || null,
-            date_to:   rate.date_to   || null,
-            charge_day:   rate.charge_day   ?? null,
-            charge_night: rate.charge_night ?? null,
-            charge_sat:   rate.charge_sat   ?? null,
-            charge_sun:   rate.charge_sun   ?? null,
-            charge_bh:    rate.charge_bh    ?? null,
-            pay_day:      rate.pay_day      ?? null,
-            pay_night:    rate.pay_night    ?? null,
-            pay_sat:      rate.pay_sat      ?? null,
-            pay_sun:      rate.pay_sun      ?? null,
-            pay_bh:       rate.pay_bh       ?? null,
-          });
-        } catch (e) {
-          console.error('Upsert client rate failed', rate, e);
+      // Commit staged RATES
+      if (clientId && Array.isArray(modalCtx.ratesState)) {
+        for (const rate of modalCtx.ratesState) {
+          try {
+            await upsertClientRate({
+              client_id: clientId,
+              role: rate.role || '',
+              band: rate.band || null,
+              date_from: rate.date_from || null,
+              date_to:   rate.date_to   || null,
+              charge_day:   rate.charge_day   ?? null,
+              charge_night: rate.charge_night ?? null,
+              charge_sat:   rate.charge_sat   ?? null,
+              charge_sun:   rate.charge_sun   ?? null,
+              charge_bh:    rate.charge_bh    ?? null,
+              pay_day:      rate.pay_day      ?? null,
+              pay_night:    rate.pay_night    ?? null,
+              pay_sat:      rate.pay_sat      ?? null,
+              pay_sun:      rate.pay_sun      ?? null,
+              pay_bh:       rate.pay_bh       ?? null,
+            });
+          } catch (e) {
+            console.error('Upsert client rate failed', rate, e);
+          }
         }
       }
-    }
 
-    // Commit staged HOSPITALS
-    if (clientId && Array.isArray(modalCtx.hospitalsState)) {
-      for (const h of modalCtx.hospitalsState) {
-        try {
-          const res = await authFetch(API(`/api/clients/${clientId}/hospitals`), {
-            method:'POST',
-            headers:{'content-type':'application/json'},
-            body: JSON.stringify({
-              hospital_name_norm: h.hospital_name_norm || '',
-              ward_hint: h.ward_hint ?? null
-            })
-          });
-          if (!res.ok) console.warn('Hospital upsert failed:', await res.text().catch(()=> ''));
-        } catch (e) {
-          console.error('Upsert hospital failed', h, e);
+      // Commit staged HOSPITALS
+      if (clientId && Array.isArray(modalCtx.hospitalsState)) {
+        for (const h of modalCtx.hospitalsState) {
+          try {
+            const res = await authFetch(API(`/api/clients/${clientId}/hospitals`), {
+              method:'POST',
+              headers:{'content-type':'application/json'},
+              body: JSON.stringify({
+                hospital_name_norm: h.hospital_name_norm || '',
+                ward_hint: h.ward_hint ?? null
+              })
+            });
+            if (!res.ok) console.warn('Hospital upsert failed:', await res.text().catch(()=> ''));
+          } catch (e) {
+            console.error('Upsert hospital failed', h, e);
+          }
         }
       }
-    }
 
-    closeModal();
-    renderAll();
-  }, row?.id);
+      closeModal();
+      renderAll();
+    },
+    row?.id
+  );
 }
 
 function renderClientRatesTable(rates){
@@ -2057,7 +2187,13 @@ function mountClientHospitalsTab(){
 
 
 // === UPDATED: Client Default Rate modal (Role dropdown + new-role option; UK dates; date_to) ===
+// ======================== openClientRateModal (FIXED) ========================
 async function openClientRateModal(client_id, existing){
+  // Capture parent modal context to gate save (stale child protection)
+  const parentToken = modalCtx.openToken;
+  const parentEntity = modalCtx.entity;
+  const parentId = modalCtx.data?.id || null;
+
   const globalRoles = await loadGlobalRoleOptions(); // ['HCA','RMN',...]
   const roleOptions = globalRoles.map(r => `<option value="${r}">${r}</option>`).join('')
     + `<option value="__OTHER__">+ Add new role…</option>`;
@@ -2091,23 +2227,29 @@ async function openClientRateModal(client_id, existing){
         <input type="text" name="date_to" id="cl_date_to" placeholder="DD/MM/YYYY" />
       </div>
 
-      ${input('charge_day','Charge (Day)',   existing?.charge_day   ?? '', 'number')}
-      ${input('charge_night','Charge (Night)', existing?.charge_night ?? '', 'number')}
-      ${input('charge_sat','Charge (Sat)',   existing?.charge_sat   ?? '', 'number')}
-      ${input('charge_sun','Charge (Sun)',   existing?.charge_sun   ?? '', 'number')}
-      ${input('charge_bh','Charge (BH)',     existing?.charge_bh     ?? '', 'number')}
+      ${input('charge_day','Charge (Day)',     existing?.charge_day     ?? '', 'number')}
+      ${input('charge_night','Charge (Night)', existing?.charge_night   ?? '', 'number')}
+      ${input('charge_sat','Charge (Sat)',     existing?.charge_sat     ?? '', 'number')}
+      ${input('charge_sun','Charge (Sun)',     existing?.charge_sun     ?? '', 'number')}
+      ${input('charge_bh','Charge (BH)',       existing?.charge_bh       ?? '', 'number')}
       <div class="row"><label class="hint">Optional default pay (used if no candidate/client override):</label></div>
-      ${input('pay_day','Pay (Day)',   existing?.pay_day   ?? '', 'number')}
-      ${input('pay_night','Pay (Night)', existing?.pay_night ?? '', 'number')}
-      ${input('pay_sat','Pay (Sat)',   existing?.pay_sat   ?? '', 'number')}
-      ${input('pay_sun','Pay (Sun)',   existing?.pay_sun   ?? '', 'number')}
-      ${input('pay_bh','Pay (BH)',     existing?.pay_bh     ?? '', 'number')}
+      ${input('pay_day','Pay (Day)',     existing?.pay_day     ?? '', 'number')}
+      ${input('pay_night','Pay (Night)', existing?.pay_night   ?? '', 'number')}
+      ${input('pay_sat','Pay (Sat)',     existing?.pay_sat     ?? '', 'number')}
+      ${input('pay_sun','Pay (Sun)',     existing?.pay_sun     ?? '', 'number')}
+      ${input('pay_bh','Pay (BH)',       existing?.pay_bh       ?? '', 'number')}
     </div>
   `);
 
   const title = existing ? 'Edit Client Default Rate' : 'Add/Upsert Client Default Rate';
 
   showModal(title, [{ key:'form', label:'Form' }], () => formHtml, async ()=>{
+    // Stale child protection: ensure we still edit the same client context
+    if (parentToken !== modalCtx.openToken || parentEntity !== 'clients' || modalCtx.data?.id !== client_id) {
+      alert('This rate form is no longer current. Please reopen it.');
+      return;
+    }
+
     const raw = collectForm('#clientRateForm');
 
     // Resolve role
@@ -2151,7 +2293,7 @@ async function openClientRateModal(client_id, existing){
       pay_bh:       raw.pay_bh       !== '' ? Number(raw.pay_bh)       : null,
     };
 
-    // Stage change
+    // Stage change into parent modal state (no backend call here by design)
     modalCtx.ratesState = Array.isArray(modalCtx.ratesState) ? modalCtx.ratesState : [];
     if (existing) {
       const idx = modalCtx.ratesState.findIndex(r =>
@@ -2163,7 +2305,7 @@ async function openClientRateModal(client_id, existing){
     } else {
       modalCtx.ratesState.push(staged);
     }
-    // No backend calls; Apply returns to parent
+    // Child closes via Apply; parent handles persistence
   }, /*hasId*/ false, /*onReturn*/ () => {
     // Ensure we are on the Rates tab and refreshed
     const parent = window.__modalStack && window.__modalStack[window.__modalStack.length-1];
@@ -2193,6 +2335,7 @@ async function openClientRateModal(client_id, existing){
   attachUkDatePicker(inFrom);
   attachUkDatePicker(inTo);
 }
+
 function openClientHospitalModal(client_id){
   const formHtml = html(`
     <div class="form" id="hospitalForm">
@@ -2230,12 +2373,22 @@ function openClientHospitalModal(client_id){
 }
 
 
-
+// ========================= renderHospitalsUI (FIXED) =========================
 async function renderHospitalsUI(client_id){
-  const el = byId('clientHospitals'); if (!el) return;
+  const el = byId('clientHospitals'); 
+  if (!el) return;
+
+  const token    = modalCtx.openToken;
+  const idActive = modalCtx.data?.id || null;
 
   const r = await authFetch(API(`/api/clients/${client_id}/hospitals`));
   const rows = await toList(r);
+
+  // Drop stale updates if user switched records/tabs mid-fetch
+  if (token !== modalCtx.openToken || modalCtx.entity !== 'clients' || modalCtx.data?.id !== client_id || modalCtx.data?.id !== idActive) {
+    console.debug('[ASYNC] hospitals UI dropped (stale)', { forId: client_id, active: modalCtx.data?.id });
+    return;
+  }
 
   const tbl = document.createElement('table'); tbl.className = 'grid';
   const cols = ['hospital_name_norm','ward_hint','created_at'];
@@ -2377,26 +2530,64 @@ async function renderClientSettingsUI(settingsObj){
 }
 
 // ---- Umbrella modal
+// ========================= openUmbrella (FIXED) =========================
 async function openUmbrella(row){
-  modalCtx = {entity:'umbrellas', data: row};
-  showModal('Umbrella', [{key:'main',label:'Main'}], (key)=> html(`
-    <div class="form" id="tab-main">
-      ${input('name','Name', row.name)}
-      ${input('remittance_email','Remittance email', row.remittance_email, 'email')}
-      ${input('bank_name','Bank', row.bank_name)}
-      ${input('sort_code','Sort code', row.sort_code)}
-      ${input('account_number','Account number', row.account_number)}
-      ${select('vat_chargeable','VAT chargeable', row.vat_chargeable? 'Yes' : 'No', ['Yes','No'])}
-      ${select('enabled','Enabled', (row.enabled===false)?'No':'Yes', ['Yes','No'])}
-    </div>
-  `), async ()=>{
-    const payload = collectForm('#tab-main');
-    payload.vat_chargeable = payload.vat_chargeable==='Yes';
-    payload.enabled = payload.enabled!=='No';
-    await upsertUmbrella(payload, row?.id);
-    closeModal(); renderAll();
-  }, row?.id);
+  const deep = (o)=> JSON.parse(JSON.stringify(o || {}));
+  const seedId = row?.id || null;
+
+  // Fresh, isolated modal context for this record
+  modalCtx = {
+    entity: 'umbrellas',
+    data: deep(row),
+    formState: { __forId: seedId, main: {} },
+    rolesState: null,
+    ratesState: null,
+    clientSettingsState: null,
+    openToken: (seedId || 'new') + ':' + Date.now()
+  };
+
+  showModal(
+    'Umbrella',
+    [{ key:'main', label:'Main' }],
+    // Use rowForTab (second arg) provided by showModal to avoid stale closure
+    (key, r)=> html(`
+      <div class="form" id="tab-main">
+        ${input('name','Name', r?.name)}
+        ${input('remittance_email','Remittance email', r?.remittance_email, 'email')}
+        ${input('bank_name','Bank', r?.bank_name)}
+        ${input('sort_code','Sort code', r?.sort_code)}
+        ${input('account_number','Account number', r?.account_number)}
+        ${select('vat_chargeable','VAT chargeable', (r?.vat_chargeable? 'Yes' : 'No'), ['Yes','No'])}
+        ${select('enabled','Enabled', (r?.enabled===false)?'No':'Yes', ['Yes','No'])}
+      </div>
+    `),
+    async ()=>{
+      // Only use staged state if it belongs to THIS record
+      const fs = modalCtx.formState || { __forId: null, main:{} };
+      const sameRecord = (!!modalCtx.data?.id && fs.__forId === modalCtx.data.id) || (!modalCtx.data?.id && fs.__forId == null);
+
+      const staged = sameRecord ? (fs.main || {}) : {};
+      const live   = collectForm('#tab-main');
+      const payload = { ...staged, ...live };
+
+      payload.vat_chargeable = payload.vat_chargeable === 'Yes';
+      payload.enabled = payload.enabled !== 'No';
+
+      // Strip empty-string fields
+      for (const k of Object.keys(payload)) if (payload[k] === '') delete payload[k];
+
+      const idForUpdate = modalCtx?.data?.id || row?.id || null;
+      await upsertUmbrella(payload, idForUpdate);
+
+      // Clear staged state and close
+      modalCtx.formState = { __forId: idForUpdate || null, main: {} };
+      closeModal();
+      renderAll();
+    },
+    row?.id
+  );
 }
+
 
 // ---- Audit (Outbox)
 function openAuditItem(row){
@@ -2469,6 +2660,8 @@ async function renderSettingsPanel(content){
 
 
 // ===== Generic modal plumbing =====
+
+// =============================== showModal (FIXED) ===============================
 function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
   // Sanitize any previous geometry so we never inherit a dragged position
   const modalEl = byId('modal');
@@ -2500,20 +2693,28 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
     persistCurrentTabState() {
       if (this.currentTabKey === 'main' && byId('tab-main')) {
         const cur = collectForm('#tab-main');
-        modalCtx.formState = modalCtx.formState || { main:{}, pay:{} };
+        const fs = modalCtx.formState || { __forId: modalCtx.data?.id || null, main:{}, pay:{} };
+        if (fs.__forId == null) fs.__forId = modalCtx.data?.id || null;
+        modalCtx.formState = fs;
         modalCtx.formState.main = { ...(modalCtx.formState.main||{}), ...cur };
       }
       if (this.currentTabKey === 'pay' && byId('tab-pay')) {
         const cur = collectForm('#tab-pay');
-        modalCtx.formState = modalCtx.formState || { main:{}, pay:{} };
+        const fs = modalCtx.formState || { __forId: modalCtx.data?.id || null, main:{}, pay:{} };
+        if (fs.__forId == null) fs.__forId = modalCtx.data?.id || null;
+        modalCtx.formState = fs;
         modalCtx.formState.pay = { ...(modalCtx.formState.pay||{}), ...cur };
       }
     },
 
+    // Guard the merge: only apply formState if it's for THIS record
     mergedRowForTab(k) {
       const base = { ...modalCtx.data };
-      if (k === 'main') return { ...base, ...(modalCtx.formState?.main || {}) };
-      if (k === 'pay')  return { ...base, ...(modalCtx.formState?.pay  || {}) };
+      const fs = modalCtx.formState;
+      const sameRecord = fs && fs.__forId === modalCtx.data?.id;
+
+      if (k === 'main') return sameRecord ? { ...base, ...(fs.main || {}) } : base;
+      if (k === 'pay')  return sameRecord ? { ...base, ...(fs.pay  || {}) } : base;
       return base;
     },
 
@@ -2601,13 +2802,13 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
     primaryBtn.onclick = async () => {
       top.persistCurrentTabState();
 
-      // onSave may already close the frame (some callers call closeModal())
+      // onSave may already close the frame
       if (typeof top.onSave === 'function') {
         await top.onSave();
         top.isDirty = false;
       }
 
-      // If onSave already popped this frame, do nothing
+      // If onSave already popped this frame, stop
       if (!window.__modalStack.length || window.__modalStack[window.__modalStack.length - 1] !== top) {
         console.debug('[MODAL] primary close handled by onSave');
         return;
@@ -2645,7 +2846,7 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
       }
     };
 
-    // Drag same as before
+    // Drag (unchanged)
     const modal = byId('modal');
     const drag  = byId('modalDrag');
     let offX = 0, offY = 0, dragging = false;
@@ -2659,6 +2860,8 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
 
   renderTop();
 }
+
+// =============================== closeModal (kept) ===============================
 function closeModal(){
   if (!window.__modalStack || !window.__modalStack.length) {
     // nothing to close; ensure overlay hidden and geometry clean
@@ -2747,15 +2950,14 @@ function escCloseRelatedMenu(ev){
 }
 
 // Create & show a context menu near (x,y)
+// ========================= showRelatedMenu (FIXED) =========================
 function showRelatedMenu(x, y, counts, entity, id){
   closeRelatedMenu();
 
-  // Normalize counts into entries
   const entries = counts && typeof counts === 'object'
     ? Object.entries(counts).filter(([k])=>k && k.trim().length>0)
     : [];
 
-  // Build container
   const menu = document.createElement('div');
   menu.id = 'relatedMenu';
   menu.style.position = 'fixed';
@@ -2772,7 +2974,6 @@ function showRelatedMenu(x, y, counts, entity, id){
   menu.style.color = '#f8fafc';
   menu.style.font = '14px/1.4 system-ui,Segoe UI,Roboto,Helvetica,Arial';
 
-  // Item factory (button-like divs)
   function item(label, disabled, onClick){
     const it = document.createElement('div');
     it.textContent = label;
@@ -2784,11 +2985,14 @@ function showRelatedMenu(x, y, counts, entity, id){
     it.onmouseleave = ()=>{ it.style.background = 'transparent'; };
     if (!disabled) it.onclick = async (ev)=>{
       ev.stopPropagation();
-      // Fetch rows for the chosen related type
       const rows = await fetchRelated(entity, id, onClick.type);
       if (rows) {
+        // When jumping sections via Related, tear down any open modal to avoid stale state
+        if ((window.__modalStack?.length || 0) > 0 || modalCtx?.entity) {
+          discardAllModalsAndState();
+        }
         if (onClick.type === 'timesheets' || onClick.type === 'invoices') {
-          currentSection = onClick.type; // switch to a known section
+          currentSection = onClick.type;
         }
         renderSummary(rows);
       }
@@ -2800,7 +3004,6 @@ function showRelatedMenu(x, y, counts, entity, id){
   if (!entries.length) {
     item('No related records', true, {});
   } else {
-    // Sort by largest count first (optional)
     entries.sort((a,b)=> (b[1]||0)-(a[1]||0));
     entries.forEach(([type, count])=>{
       const label = `${count} related ${type}`;
@@ -2808,14 +3011,12 @@ function showRelatedMenu(x, y, counts, entity, id){
     });
   }
 
-  // Insert and wire global dismissals
   document.body.appendChild(menu);
   setTimeout(()=>{
     document.addEventListener('click', closeRelatedMenu, { capture: true, once: true });
     document.addEventListener('keydown', escCloseRelatedMenu, true);
   }, 0);
 
-  // Keep clicks inside menu from closing it immediately
   menu.addEventListener('click', ev => ev.stopPropagation());
 }
 
