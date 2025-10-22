@@ -1744,6 +1744,7 @@ async function mountCandidateRatesTab() {
 // === UPDATED: Candidate Rate Override modal (Client→Role gated; bands; UK dates; date_to) ===
 // ====================== openCandidateRateModal (FIXED) ======================
 // =================== CANDIDATE OVERRIDE MODAL (UPDATED) ===================
+// ==== CHILD MODAL (CANDIDATE RATE) — throw on errors; return true on success ====
 async function openCandidateRateModal(candidate_id, existing) {
   const parentToken  = modalCtx.openToken;
   const parentEntity = modalCtx.entity;
@@ -1803,7 +1804,6 @@ async function openCandidateRateModal(candidate_id, existing) {
 
       <div class="row"><label class="hint">Leave any pay field blank if not applicable (will be saved as null).</label></div>
 
-      <!-- Live margin preview (read-only) -->
       <div class="row" style="grid-column:1/-1">
         <div id="cr_margin_box" class="hint" style="padding:8px;border:1px dashed #ddd;border-radius:8px">
           Enter pay and select rate type to preview margin (per bucket) using current client charge and Employers NI%.
@@ -1818,7 +1818,6 @@ async function openCandidateRateModal(candidate_id, existing) {
   let lastCharge = null;
   let erniPct = 0;
 
-  // IMPORTANT: throw on validation/API errors to keep modal OPEN
   showModal(title, [{ key:'form', label:'Form' }], () => formHtml, async () => {
     if (parentToken !== modalCtx.openToken || parentEntity !== 'candidates' || modalCtx.data?.id !== candidate_id) {
       alert('This rate form is no longer current. Please reopen it.');
@@ -1840,7 +1839,7 @@ async function openCandidateRateModal(candidate_id, existing) {
       if (isoTo < isoFrom) { alert('Effective to cannot be before Effective from'); throw new Error('VALIDATION'); }
     }
 
-    // Overlap guard: same client/role/band/rate_type
+    // Overlap guard
     try {
       const all = await listCandidateRates(candidate_id);
       const sameType = (all || []).filter(x =>
@@ -1905,7 +1904,7 @@ async function openCandidateRateModal(candidate_id, existing) {
     }
 
     await mountCandidateRatesTab();
-    closeModal();
+    return true; // success: allow showModal to close
   }, false);
 
   // After mount
@@ -2064,7 +2063,6 @@ async function openCandidateRateModal(candidate_id, existing) {
   }
   await refreshMargin();
 }
-
 
 
 
@@ -2482,8 +2480,9 @@ async function openClientRateModal(client_id, existing) {
 
   const title = existing ? 'Edit Client Default Rate' : 'Add/Upsert Client Default Rate';
 
-  // IMPORTANT: throw on validation errors to keep modal OPEN
+  // IMPORTANT: throw on validation/API errors so the modal stays OPEN; return true on success
   showModal(title, [{ key:'form', label:'Form' }], () => formHtml, async () => {
+    // stale-guard
     if (parentToken !== modalCtx.openToken || parentEntity !== 'clients' || modalCtx.data?.id !== client_id) {
       alert('This rate form is no longer current. Please reopen it.');
       throw new Error('STALE_CONTEXT');
@@ -2560,10 +2559,12 @@ async function openClientRateModal(client_id, existing) {
       const src = staged;
       const otherType = src.rate_type === 'PAYE' ? 'UMBRELLA' : 'PAYE';
 
+      // detect if any charge is set
       const hasAnyCharge =
         src.charge_day != null || src.charge_night != null ||
         src.charge_sat != null || src.charge_sun != null || src.charge_bh != null;
 
+      // detect if charges changed (for edit) — only then prompt
       const chargesChanged = existing
         ? (
             (existing.charge_day   ?? null) !== (src.charge_day   ?? null) ||
@@ -2585,6 +2586,7 @@ async function openClientRateModal(client_id, existing) {
         String((r.rate_type || '').toUpperCase()) === otherType
       );
 
+      // Determine whether mirroring will create or update
       const willCreateOther = (idx < 0);
       const willUpdateOther = (idx >= 0) && (
         (rows[idx].charge_day   ?? null) !== (src.charge_day   ?? null) ||
@@ -2594,16 +2596,20 @@ async function openClientRateModal(client_id, existing) {
         (rows[idx].charge_bh    ?? null) !== (src.charge_bh    ?? null)
       );
 
-      if (!willCreateOther && !willUpdateOther) return;
+      if (!willCreateOther && !willUpdateOther) return; // nothing to mirror
 
       const otherLabel = (otherType === 'PAYE') ? 'PAYE charge rates' : 'Umbrella charge rates';
       const message =
         `This will automatically update the ${otherLabel} for the same Role/Band and Date window to match ` +
         `the charges you’ve entered here. Do you want to continue?`;
 
-      if (!window.confirm(message)) return;
+      if (!window.confirm(message)) {
+        // User opted out — keep current row, do not mirror
+        return;
+      }
 
       if (idx >= 0) {
+        // Update the counterpart's CHARGE only (leave its PAY as-is)
         const tgt = { ...rows[idx] };
         tgt.charge_day   = src.charge_day;
         tgt.charge_night = src.charge_night;
@@ -2612,6 +2618,7 @@ async function openClientRateModal(client_id, existing) {
         tgt.charge_bh    = src.charge_bh;
         rows[idx] = tgt;
       } else {
+        // Create a twin row with same charge; PAY remains nulls
         rows.push({
           client_id: src.client_id,
           role: src.role,
@@ -2629,7 +2636,7 @@ async function openClientRateModal(client_id, existing) {
       }
     })();
 
-    // returning (no throw) means success → modal will close
+    return true; // ← signal success so showModal will close
   }, false, () => {
     const parent = window.__modalStack && window.__modalStack[window.__modalStack.length-1];
     if (parent) { parent.currentTabKey = 'rates'; parent.setTab('rates'); }
@@ -2655,8 +2662,10 @@ async function openClientRateModal(client_id, existing) {
 
   attachUkDatePicker(inFrom); attachUkDatePicker(inTo);
 
+  // Live margin preview inside this modal (uses local inputs only)
   async function refreshClientMargin() {
     const s = await getSettingsCached();
+    // robust ERNI% conversion
     const erniPct = (() => {
       const v = s?.erni_pct;
       if (v == null) return 0;
@@ -2718,6 +2727,7 @@ async function openClientRateModal(client_id, existing) {
 
 
 // =================== ADD HOSPITAL MODAL (UPDATED: push into stagedNew) ===================
+// ==== CHILD MODAL (ADD HOSPITAL) — throw on errors; return true on success ====
 function openClientHospitalModal(client_id) {
   const formHtml = html(`
     <div class="form" id="hospitalForm">
@@ -2731,14 +2741,14 @@ function openClientHospitalModal(client_id) {
     [{key:'form',label:'Form'}],
     () => formHtml,
     async ()=> {
-      const raw = collectForm('#hospitalForm');
+      const raw  = collectForm('#hospitalForm');
       const name = String(raw.hospital_name_norm || '').trim();
-      if (!name) { alert('Hospital / Trust is required'); return; }
+      if (!name) { alert('Hospital / Trust is required'); throw new Error('VALIDATION'); }
 
       const H = modalCtx.hospitalsState || (modalCtx.hospitalsState = { existing: [], stagedNew: [], stagedEdits:{}, stagedDeletes: new Set() });
       H.stagedNew.push({ hospital_name_norm: name, ward_hint: (raw.ward_hint || '').trim() || null });
 
-      // Apply only; parent Save will commit
+      return true; // success: close child modal; parent Hospitals tab will refresh onReturn
     },
     false,
     () => {
@@ -3056,287 +3066,325 @@ async function renderSettingsPanel(content){
 // ===== Generic modal plumbing =====
 
 // =============================== showModal (FIXED) ===============================
-function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
-  // Sanitize any previous geometry so we never inherit a dragged position
-  const modalEl = byId('modal');
-  if (modalEl) {
-    modalEl.style.position = '';
-    modalEl.style.left = '';
-    modalEl.style.top = '';
-    modalEl.style.right = '';
-    modalEl.style.bottom = '';
-    modalEl.style.transform = '';
-    modalEl.classList.remove('dragging');
-  }
+// ==== FIXED MODAL FRAMEWORK: close only on explicit success from onSave ====
+// ==== CHILD MODAL (CANDIDATE RATE) — throw on errors; return true on success ====
+async function openCandidateRateModal(candidate_id, existing) {
+  const parentToken  = modalCtx.openToken;
+  const parentEntity = modalCtx.entity;
+  const parentId     = modalCtx.data?.id || null;
 
-  if (!window.__modalStack) window.__modalStack = [];
-  const closeToken = (showModal._tokenCounter = (showModal._tokenCounter || 0) + 1);
+  const clients = await listClientsBasic();
+  const clientOptions = clients.map(c => `<option value="${c.id}">${c.name}</option>`).join('');
+  const initialClientId = existing?.client_id || (clients[0]?.id || '');
 
-  // local helper to sanitize geometry/handlers before any close/re-render
-  function sanitizeModalGeometry() {
-    const m = byId('modal');
-    if (m) {
-      m.style.position = '';
-      m.style.left = '';
-      m.style.top = '';
-      m.style.right = '';
-      m.style.bottom = '';
-      m.style.transform = '';
-      m.classList.remove('dragging');
+  const defaultRateType = existing?.rate_type
+    ? String(existing.rate_type).toUpperCase()
+    : String(modalCtx?.data?.pay_method || 'PAYE').toUpperCase();
+
+  const formHtml = html(`
+    <div class="form" id="candRateForm">
+      <div class="row">
+        <label>Client (required)</label>
+        <select name="client_id" id="cr_client_id" required>
+          <option value="">Select client…</option>
+          ${clientOptions}
+        </select>
+      </div>
+
+      <div class="row">
+        <label>Rate type (required)</label>
+        <select name="rate_type" id="cr_rate_type" required>
+          <option ${defaultRateType==='PAYE'?'selected':''}>PAYE</option>
+          <option ${defaultRateType==='UMBRELLA'?'selected':''}>UMBRELLA</option>
+        </select>
+      </div>
+
+      <div class="row">
+        <label>Role (required)</label>
+        <select name="role" id="cr_role" required disabled>
+          <option value="">Select role…</option>
+        </select>
+      </div>
+      <div class="row" id="cr_band_row" style="display:none">
+        <label>Band (optional)</label>
+        <select name="band" id="cr_band"></select>
+      </div>
+
+      <div class="row">
+        <label>Effective from (DD/MM/YYYY)</label>
+        <input type="text" name="date_from" id="cr_date_from" placeholder="DD/MM/YYYY" />
+      </div>
+      <div class="row">
+        <label>Effective to (optional, DD/MM/YYYY)</label>
+        <input type="text" name="date_to" id="cr_date_to" placeholder="DD/MM/YYYY" />
+      </div>
+
+      ${input('pay_day','Pay (Day)',     existing?.pay_day     ?? '', 'number')}
+      ${input('pay_night','Pay (Night)', existing?.pay_night   ?? '', 'number')}
+      ${input('pay_sat','Pay (Sat)',     existing?.pay_sat     ?? '', 'number')}
+      ${input('pay_sun','Pay (Sun)',     existing?.pay_sun     ?? '', 'number')}
+      ${input('pay_bh','Pay (BH)',       existing?.pay_bh       ?? '', 'number')}
+
+      <div class="row"><label class="hint">Leave any pay field blank if not applicable (will be saved as null).</label></div>
+
+      <div class="row" style="grid-column:1/-1">
+        <div id="cr_margin_box" class="hint" style="padding:8px;border:1px dashed #ddd;border-radius:8px">
+          Enter pay and select rate type to preview margin (per bucket) using current client charge and Employers NI%.
+        </div>
+      </div>
+    </div>
+  `);
+
+  const title = existing ? 'Edit Candidate Rate Override' : 'Add Candidate Rate Override';
+
+  let cache = { roles: [], bandsByRole: {} };
+  let lastCharge = null;
+  let erniPct = 0;
+
+  showModal(title, [{ key:'form', label:'Form' }], () => formHtml, async () => {
+    if (parentToken !== modalCtx.openToken || parentEntity !== 'candidates' || modalCtx.data?.id !== candidate_id) {
+      alert('This rate form is no longer current. Please reopen it.');
+      throw new Error('STALE_CONTEXT');
     }
-    document.onmousemove = null;
-    document.onmouseup   = null;
-  }
+    const raw = collectForm('#candRateForm');
 
-  const frame = {
-    title,
-    tabs: Array.isArray(tabs) ? tabs.slice() : [],
-    renderTab,
-    onSave,
-    onReturn,
-    hasId: !!hasId,
-    entity: modalCtx.entity,
-    currentTabKey: (Array.isArray(tabs) && tabs.length ? tabs[0].key : null),
-    isDirty: false,
-    _detachDirty: null,
-    _detachGlobal: null,
-    _hasMountedOnce: false, // ← skip first persist on initial mount
+    if (!raw.client_id) { alert('Client is required'); throw new Error('VALIDATION'); }
+    if (!raw.rate_type) { alert('Rate type is required'); throw new Error('VALIDATION'); }
+    if (!raw.role)      { alert('Role is required'); throw new Error('VALIDATION'); }
+    if (!raw.date_from) { alert('Effective from is required'); throw new Error('VALIDATION'); }
 
-    // Persist visible tab ONLY when overlay is visible (prevents reading hidden/stale DOM)
-    persistCurrentTabState() {
-      const back = byId('modalBack');
-      const overlayVisible = back && getComputedStyle(back).display !== 'none';
-      if (!overlayVisible) return; // ← critical guard
+    const isoFrom = parseUkDateToIso(raw.date_from);
+    if (!isoFrom) { alert('Invalid Effective from date'); throw new Error('VALIDATION'); }
+    let isoTo = null;
+    if (raw.date_to) {
+      isoTo = parseUkDateToIso(raw.date_to);
+      if (!isoTo) { alert('Invalid Effective to date'); throw new Error('VALIDATION'); }
+      if (isoTo < isoFrom) { alert('Effective to cannot be before Effective from'); throw new Error('VALIDATION'); }
+    }
 
-      if (this.currentTabKey === 'main' && byId('tab-main')) {
-        const cur = collectForm('#tab-main');
-        const fs = modalCtx.formState || { __forId: modalCtx.data?.id || null, main:{}, pay:{} };
-        if (fs.__forId == null) fs.__forId = modalCtx.data?.id || null;
-        modalCtx.formState = fs;
-        modalCtx.formState.main = { ...(modalCtx.formState.main||{}), ...cur };
+    // Overlap guard
+    try {
+      const all = await listCandidateRates(candidate_id);
+      const sameType = (all || []).filter(x =>
+        String(x.client_id) === String(raw.client_id) &&
+        String(x.role || '') === String(raw.role || '') &&
+        (String(x.band || '') === String(raw.band || '')) &&
+        String(x.rate_type || '').toUpperCase() === String(raw.rate_type || '').toUpperCase() &&
+        (!existing || x.id !== existing.id)
+      );
+      const overlap = sameType.some(x => rangesOverlap(isoFrom, isoTo, x.date_from || null, x.date_to || null));
+      if (overlap) {
+        alert('Date range overlaps an existing override for the same client/role/band and rate type.');
+        throw new Error('VALIDATION');
       }
-      if (this.currentTabKey === 'pay' && byId('tab-pay')) {
-        const cur = collectForm('#tab-pay');
-        const fs = modalCtx.formState || { __forId: modalCtx.data?.id || null, main:{}, pay:{} };
-        if (fs.__forId == null) fs.__forId = modalCtx.data?.id || null;
-        modalCtx.formState = fs;
-        modalCtx.formState.pay = { ...(modalCtx.formState.pay||{}), ...cur };
+    } catch (e) {
+      console.warn('Overlap check failed (continuing with save):', e);
+    }
+
+    const payload = {
+      candidate_id,
+      client_id: raw.client_id,
+      role: raw.role,
+      band: raw.band || null,
+      rate_type: String(raw.rate_type).toUpperCase(),
+      date_from: isoFrom,
+      date_to: isoTo,
+      pay_day:   raw.pay_day   !== '' ? Number(raw.pay_day)   : null,
+      pay_night: raw.pay_night !== '' ? Number(raw.pay_night) : null,
+      pay_sat:   raw.pay_sat   !== '' ? Number(raw.pay_sat)   : null,
+      pay_sun:   raw.pay_sun   !== '' ? Number(raw.pay_sun)   : null,
+      pay_bh:    raw.pay_bh    !== '' ? Number(raw.pay_bh)    : null,
+    };
+
+    let ok = false;
+    if (existing) {
+      const q = new URLSearchParams();
+      q.set('rate_type', payload.rate_type);
+      q.set('client_id', payload.client_id || 'null');
+      q.set('role',      payload.role      || 'null');
+      q.set('band',      (payload.band ?? 'null'));
+      const url = `/api/rates/candidate-overrides/${candidate_id}?${q.toString()}`;
+
+      const resp = await authFetch(API(url), {
+        method:'PATCH',
+        headers:{'content-type':'application/json'},
+        body: JSON.stringify(payload)
+      });
+      if (!resp.ok) {
+        const msg = await resp.text().catch(()=> 'Save failed');
+        alert(msg || 'Save failed');
+        throw new Error('API_REJECT');
       }
-    },
+      ok = true;
+    } else {
+      try {
+        ok = await addCandidateRate(payload);
+      } catch (e) {
+        alert(e.message || 'Save failed');
+        throw new Error('API_REJECT');
+      }
+      if (!ok) { alert('Save failed'); throw new Error('API_REJECT'); }
+    }
 
-    // Guard the merge: only apply formState if it's for THIS record
-    mergedRowForTab(k) {
-      const base = { ...modalCtx.data };
-      const fs = modalCtx.formState;
-      const sameRecord = fs && fs.__forId === modalCtx.data?.id;
+    await mountCandidateRatesTab();
+    return true; // success: allow showModal to close
+  }, false);
 
-      if (k === 'main') return sameRecord ? { ...base, ...(fs.main || {}) } : base;
-      if (k === 'pay')  return sameRecord ? { ...base, ...(fs.pay  || {}) } : base;
-      return base;
-    },
+  // After mount
+  const selClient = document.getElementById('cr_client_id');
+  const selRateT  = document.getElementById('cr_rate_type');
+  const selRole   = document.getElementById('cr_role');
+  const selBand   = document.getElementById('cr_band');
+  const bandRow   = document.getElementById('cr_band_row');
+  const inFrom    = document.getElementById('cr_date_from');
+  const inTo      = document.getElementById('cr_date_to');
+  const box       = document.getElementById('cr_margin_box');
 
-    _attachDirtyTracker() {
-      if (this._detachDirty) { try { this._detachDirty(); } catch(_){}; this._detachDirty = null; }
-      const root = byId('modalBody');
-      if (!root) return;
-      const onDirty = ()=>{ 
-        this.isDirty = true; 
-        // do NOT call updateSecondaryLabel() here; it is scoped inside renderTop
-        // let the toolbar listener flip the label:
-        try { window.dispatchEvent(new CustomEvent('modal-dirty')); } catch {}
-      };
-      root.addEventListener('input', onDirty, true);
-      root.addEventListener('change', onDirty, true);
-      this._detachDirty = ()=>{
-        root.removeEventListener('input', onDirty, true);
-        root.removeEventListener('change', onDirty, true);
-      };
-    },
+  if (initialClientId) selClient.value = initialClientId;
+  if (existing?.date_from) inFrom.value = formatIsoToUk(existing.date_from);
+  if (existing?.date_to)   inTo.value   = formatIsoToUk(existing.date_to);
 
-    setTab(k) {
-      // Only persist if we've already mounted once (skip on initial mount)
-      if (this._hasMountedOnce) this.persistCurrentTabState();
+  attachUkDatePicker(inFrom);
+  attachUkDatePicker(inTo);
 
-      const rowForTab = this.mergedRowForTab(k);
-      byId('modalBody').innerHTML = this.renderTab(k, rowForTab) || '';
+  async function refreshClientRoles(clientId) {
+    selRole.innerHTML = `<option value="">Select role…</option>`;
+    selRole.disabled = true; bandRow.style.display = 'none'; selBand.innerHTML = '';
+    if (!clientId) return;
 
-      if (this.entity === 'candidates' && k === 'rates') { mountCandidateRatesTab?.(); }
-      if (this.entity === 'candidates' && k === 'pay')   { mountCandidatePayTab?.(); }
+    const activeOn = parseUkDateToIso(inFrom.value || '') || null;
+    const rt = String(selRateT.value || '').toUpperCase() || undefined;
+    const list = await listClientRates(clientId, { rate_type: rt, active_on: activeOn });
 
-      if (this.entity === 'candidates' && k === 'main') {
-        const pmSel = document.querySelector('#pay-method');
-        if (pmSel) {
-          pmSel.addEventListener('change', () => {
-            modalCtx.payMethodState = pmSel.value;
-            try { window.dispatchEvent(new CustomEvent('pay-method-changed')); }
-            catch { window.dispatchEvent(new Event('pay-method-changed')); }
-          });
-          modalCtx.payMethodState = pmSel.value;
+    if (parentToken !== modalCtx.openToken || modalCtx.entity !== 'candidates' || modalCtx.data?.id !== parentId) return;
+
+    const roles = new Set(); const bandsByRole = {};
+    (list || []).forEach(r => {
+      if (r.role) {
+        roles.add(r.role);
+        if (r.band) {
+          if (!bandsByRole[r.role]) bandsByRole[r.role] = new Set();
+          bandsByRole[r.role].add(r.band);
         }
       }
-
-      if (this.entity === 'clients' && k === 'rates')     { mountClientRatesTab?.(); }
-      if (this.entity === 'clients' && k === 'hospitals') { mountClientHospitalsTab?.(); }
-      if (this.entity === 'clients' && k === 'settings')  { renderClientSettingsUI?.(modalCtx.clientSettingsState || {}); }
-
-      this.currentTabKey = k;
-      this._attachDirtyTracker();
-      this._hasMountedOnce = true; // ← first mount complete; future tab switches may persist
-      // do NOT call updateSecondaryLabel() here; it lives inside renderTop
-    }
-  };
-
-  window.__modalStack.push(frame);
-  byId('modalBack').style.display = 'flex';
-
-  function renderTop() {
-    const depth = window.__modalStack.length;
-    const top = window.__modalStack[window.__modalStack.length - 1];
-    const isChild = depth > 1;
-
-    byId('modalTitle').textContent = top.title;
-
-    const tabsEl = byId('modalTabs');
-    tabsEl.innerHTML = '';
-    (top.tabs || []).forEach((t, i) => {
-      const b = document.createElement('button');
-      b.textContent = t.label;
-      if (i === 0 && !top.currentTabKey) top.currentTabKey = t.key;
-      if (t.key === top.currentTabKey || (i === 0 && !top.currentTabKey)) b.classList.add('active');
-      b.onclick = () => {
-        tabsEl.querySelectorAll('button').forEach(x => x.classList.remove('active'));
-        b.classList.add('active');
-        top.setTab(t.key);
-      };
-      tabsEl.appendChild(b);
     });
 
-    if (top.currentTabKey) top.setTab(top.currentTabKey);
-    else if (top.tabs && top.tabs[0]) top.setTab(top.tabs[0].key);
-    else byId('modalBody').innerHTML = top.renderTab('form', {}) || '';
+    const liveRoles = Array.isArray(modalCtx?.rolesState) && modalCtx.rolesState.length
+      ? modalCtx.rolesState : (Array.isArray(modalCtx?.data?.roles) ? modalCtx.data.roles : []);
+    const candRoleCodes = liveRoles.map(x => x.code);
+    const allowed = [...roles].filter(code => candRoleCodes.includes(code));
 
-    const primaryBtn = byId('btnSave');
-    const discardBtn = byId('btnCloseModal');
-    const backEl     = byId('modalBack');
-
-    primaryBtn.textContent = isChild ? 'Apply' : 'Save';
-    primaryBtn.setAttribute('aria-label', isChild ? 'Apply' : 'Save');
-
-    const delBtn = byId('btnDelete');
-    delBtn.style.display = top.hasId ? '' : 'none';
-    delBtn.onclick = openDelete;
-
-    function updateSecondaryLabel() {
-      const label = top.isDirty ? 'Discard' : 'Close';
-      discardBtn.textContent = label;
-      discardBtn.setAttribute('aria-label', label);
-      discardBtn.setAttribute('title', top.isDirty ? 'Discard changes and close' : 'Close');
+    if (!allowed.length) {
+      selRole.innerHTML = `<option value="">Select role…</option>`;
+      selRole.disabled = true;
+      alert("This candidate has no matching roles for this client / type. Add the role to the candidate or add a Client Default Rate first.");
+      return;
     }
-    updateSecondaryLabel();
 
-    // Listen for "modal-dirty" events to flip the label instantly on edits
-    const onDirtyLabel = () => updateSecondaryLabel();
-    window.addEventListener('modal-dirty', onDirtyLabel);
+    allowed.sort((a,b)=> a.localeCompare(b));
+    selRole.innerHTML = `<option value="">Select role…</option>` + allowed.map(code => `<option value="${code}">${code}</option>`).join('');
+    selRole.disabled = false;
 
-    // Secondary action (Close/Discard) shared logic
-    const handleSecondary = () => {
-      console.debug('[MODAL] discard/close click', { title: top.title, depth, closeToken, isDirty: top.isDirty });
+    cache.roles = allowed;
+    cache.bandsByRole = Object.fromEntries(Object.entries(bandsByRole).map(([k,v]) => [k, [...v]]));
 
-      if (top.isDirty) {
-        const ok = window.confirm('You have unsaved changes. Discard them and close?');
-        if (!ok) return;
-      }
-
-      // Sanitize geometry before any close/re-render
-      sanitizeModalGeometry();
-
-      const closing = window.__modalStack.pop();
-      // detach listeners owned by this frame
-      if (closing && closing._detachDirty) { try { closing._detachDirty(); } catch(_){}; closing._detachDirty = null; }
-      window.removeEventListener('modal-dirty', onDirtyLabel);
-
-      if (window.__modalStack.length > 0) {
-        // Re-render parent
-        renderTop();
-        const parent = window.__modalStack[window.__modalStack.length - 1];
-        try { parent.onReturn && parent.onReturn(); } catch(_) {}
-      } else {
-        discardAllModalsAndState();
-      }
-    };
-
-    primaryBtn.onclick = async () => {
-      top.persistCurrentTabState();
-
-      if (typeof top.onSave === 'function') {
-        await top.onSave();
-        top.isDirty = false;
-        updateSecondaryLabel();
-      }
-
-      // If onSave already popped this frame, stop
-      if (!window.__modalStack.length || window.__modalStack[window.__modalStack.length - 1] !== top) {
-        console.debug('[MODAL] primary close handled by onSave');
-        return;
-      }
-
-      // Sanitize geometry before any close/re-render
-      sanitizeModalGeometry();
-
-      if (isChild) {
-        if (top._detachDirty) { try { top._detachDirty(); } catch(_){}; top._detachDirty = null; }
-        window.removeEventListener('modal-dirty', onDirtyLabel);
-        window.__modalStack.pop();
-        if (window.__modalStack.length > 0) {
-          const parent = window.__modalStack[window.__modalStack.length - 1];
-          renderTop();
-          try { parent.onReturn && parent.onReturn(); } catch(_) {}
-        } else {
-          discardAllModalsAndState();
-        }
-      } else {
-        window.removeEventListener('modal-dirty', onDirtyLabel);
-        discardAllModalsAndState();
-      }
-    };
-
-    discardBtn.onclick = handleSecondary;
-
-    // Close on overlay click (outside modal) – same dirty/clean rules
-    const onOverlayClick = (e) => {
-      if (e.target === backEl) handleSecondary();
-    };
-    backEl.addEventListener('click', onOverlayClick, { capture: true });
-
-    // Close on ESC – same dirty/clean rules
-    const onEsc = (e) => {
-      if (e.key === 'Escape') {
-        e.preventDefault();
-        handleSecondary();
-      }
-    };
-    window.addEventListener('keydown', onEsc);
-
-    // store global detach so we can remove when frame closes elsewhere
-    top._detachGlobal = () => {
-      window.removeEventListener('modal-dirty', onDirtyLabel);
-      backEl.removeEventListener('click', onOverlayClick, { capture: true });
-      window.removeEventListener('keydown', onEsc);
-    };
-
-    // Drag (unchanged)
-    const modal = byId('modal');
-    const drag  = byId('modalDrag');
-    let offX = 0, offY = 0, dragging = false;
-    drag.onmousedown = (e) => {
-      dragging = true; modal.classList.add('dragging'); offX = e.offsetX; offY = e.offsetY;
-      document.onmousemove = mm; document.onmouseup = mu;
-    };
-    function mm(e){ if(!dragging) return; modal.style.position = 'absolute'; modal.style.left = (e.clientX - offX) + 'px'; modal.style.top = (e.clientY - offY) + 'px'; }
-    function mu(){ dragging = false; modal.classList.remove('dragging'); document.onmousemove = null; document.onmouseup = null; }
+    if (existing?.role) {
+      selRole.value = existing.role;
+      selRole.dispatchEvent(new Event('change'));
+      if (existing?.band) selBand.value = existing.band;
+    }
   }
 
-  renderTop();
+  function onRoleChanged() {
+    const role = selRole.value;
+    const bands = cache.bandsByRole[role] || [];
+    if (bands.length) {
+      bands.sort((a,b)=> String(a).localeCompare(String(b)));
+      selBand.innerHTML = `<option value="">(none)</option>` + bands.map(b => `<option value="${b}">${b}</option>`).join('');
+      bandRow.style.display = '';
+    } else {
+      selBand.innerHTML = '';
+      bandRow.style.display = 'none';
+    }
+    refreshMargin();
+  }
+
+  async function refreshMargin() {
+    const s = await getSettingsCached();
+    const erniPct = (() => {
+      const v = s?.erni_pct;
+      if (v == null) return 0;
+
+      if (typeof v === 'string') {
+        const m = v.trim();
+        if (!m) return 0;
+        if (m.endsWith('%')) {
+          const n = parseFloat(m.slice(0, -1));
+          return Number.isFinite(n) ? Math.max(0, n / 100) : 0;
+        }
+        const n = parseFloat(m);
+        return Number.isFinite(n) ? (n > 1 ? n / 100 : n) : 0;
+      }
+
+      const n = Number(v);
+      return Number.isFinite(n) ? (n > 1 ? n / 100 : n) : 0;
+    })();
+
+    const role = selRole.value || null;
+    const band = selBand.value || null;
+    const rt   = String(selRateT.value || '').toUpperCase();
+    const client_id = selClient.value || null;
+    const active_on = parseUkDateToIso(inFrom.value || '') || null;
+
+    lastCharge = client_id && role ? (await findBestChargeFor({ client_id, role, band, active_on })) : null;
+
+    const raw = collectForm('#candRateForm');
+    const pays = {
+      day:   raw.pay_day   === '' ? null : Number(raw.pay_day),
+      night: raw.pay_night === '' ? null : Number(raw.pay_night),
+      sat:   raw.pay_sat   === '' ? null : Number(raw.pay_sat),
+      sun:   raw.pay_sun   === '' ? null : Number(raw.pay_sun),
+      bh:    raw.pay_bh    === '' ? null : Number(raw.pay_bh)
+    };
+    const chg = lastCharge || {};
+
+    function line(lbl, bucket) {
+      const charge = chg[`charge_${bucket}`];
+      const pay    = pays[bucket];
+      const m = calcMargin(charge, pay, rt, erniPct);
+      const v = (charge==null || pay==null) ? '—' : `£${m.toFixed(2)}`;
+      return `<div>${lbl}: <strong>${v}</strong></div>`;
+    }
+
+    const expl = (rt === 'PAYE')
+      ? `PAYE margin uses Employers NI ${(erniPct*100).toFixed(2)}%: Assumes Holiday Pay included in hourly rate and Pension Opt Out.`
+      : `Umbrella margin: margin = charge − pay.`;
+
+    box.innerHTML = `
+      <div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px">
+        ${line('Day','day')}${line('Night','night')}${line('Sat','sat')}
+        ${line('Sun','sun')}${line('BH','bh')}<div></div>
+      </div>
+      <div class="hint" style="margin-top:6px">${expl}</div>
+    `;
+  }
+
+  selClient.addEventListener('change', () => { refreshClientRoles(selClient.value); refreshMargin(); });
+  selRateT .addEventListener('change', () => { refreshClientRoles(selClient.value); refreshMargin(); });
+  document.querySelectorAll('#candRateForm input[type="number"]').forEach(el => el.addEventListener('input', refreshMargin));
+  inFrom.addEventListener('change', () => { refreshClientRoles(selClient.value); refreshMargin(); });
+  selRole.addEventListener('change', onRoleChanged);
+  selBand.addEventListener('change', refreshMargin);
+
+  selClient.value = initialClientId;
+  await refreshClientRoles(initialClientId);
+  attachUkDatePicker(inFrom); attachUkDatePicker(inTo);
+  if (existing?.role) {
+    selRole.value = existing.role;
+    selRole.dispatchEvent(new Event('change'));
+    if (existing?.band) selBand.value = existing.band;
+  }
+  await refreshMargin();
 }
 
 
