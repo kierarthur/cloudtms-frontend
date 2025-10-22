@@ -1938,6 +1938,21 @@ function renderClientRatesTable(rates){
   const addBtn = byId('btnAddClientRate');
   if (addBtn) addBtn.onclick = () => openClientRateModal(modalCtx.data?.id);
 }
+function ensureSelectionStyles(){
+  if (document.getElementById('gridSelectionStyles')) return;
+  const style = document.createElement('style');
+  style.id = 'gridSelectionStyles';
+  style.textContent = `
+    .grid tbody tr.selected {
+      background: #dbeafe !important;      /* light blue */
+      outline: 2px solid #1d4ed8;          /* vivid blue border */
+    }
+    .grid tbody tr:hover {
+      background: #f3f4f6;                 /* subtle hover */
+    }
+  `;
+  document.head.appendChild(style);
+}
 
 
 function renderClientTab(key, row={}){
@@ -2122,26 +2137,34 @@ function openClientHospitalModal(client_id){
     </div>
   `);
 
-  showModal('Add Hospital / Ward', [{key:'form',label:'Form'}], () => formHtml, async ()=>{
-    const raw = collectForm('#hospitalForm');
-    const name = String(raw.hospital_name_norm || '').trim();
-    if (!name) { alert('Hospital / Trust is required'); return; }
+  showModal(
+    'Add Hospital / Ward',
+    [{key:'form',label:'Form'}],
+    () => formHtml,
+    async ()=>{
+      const raw = collectForm('#hospitalForm');
+      const name = String(raw.hospital_name_norm || '').trim();
+      if (!name) { alert('Hospital / Trust is required'); return; }
 
-    modalCtx.hospitalsState = Array.isArray(modalCtx.hospitalsState) ? modalCtx.hospitalsState : [];
-    modalCtx.hospitalsState.push({
-      hospital_name_norm: name,
-      ward_hint: (raw.ward_hint || '').trim() || null
-    });
-    // No backend calls; Apply returns to parent
-  }, /*hasId*/ true, /*onReturn*/ () => {
-    // Ensure we are on the Hospitals tab and refreshed
-    const parent = window.__modalStack && window.__modalStack[window.__modalStack.length-1];
-    if (parent) {
-      parent.currentTabKey = 'hospitals';
-      parent.setTab('hospitals');
+      modalCtx.hospitalsState = Array.isArray(modalCtx.hospitalsState) ? modalCtx.hospitalsState : [];
+      modalCtx.hospitalsState.push({
+        hospital_name_norm: name,
+        ward_hint: (raw.ward_hint || '').trim() || null
+      });
+      // Apply only (staged); parent Save will commit
+    },
+    /*hasId*/ false,     // ← IMPORTANT: hide Delete button in child modal
+    /*onReturn*/ () => {
+      // Ensure we are on the Hospitals tab and refreshed
+      const parent = window.__modalStack && window.__modalStack[window.__modalStack.length-1];
+      if (parent) {
+        parent.currentTabKey = 'hospitals';
+        parent.setTab('hospitals');
+      }
     }
-  });
+  );
 }
+
 
 
 async function renderHospitalsUI(client_id){
@@ -2236,49 +2259,57 @@ function renderClientHospitalsTable(hospitals){
   if (addBtn) addBtn.onclick = () => openClientHospitalModal(modalCtx.data?.id);
 }
 
-
 async function renderClientSettingsUI(settingsObj){
   const div = byId('clientSettings'); if (!div) return;
 
-  // Use staged object; show a JSON editor to avoid schema coupling
+  // Use staged object; fall back to what we were passed
   const initial = (modalCtx.clientSettingsState && typeof modalCtx.clientSettingsState === 'object')
     ? modalCtx.clientSettingsState
     : (settingsObj && typeof settingsObj === 'object' ? settingsObj : {});
 
+  // Fill sensible defaults (non-destructive)
+  const s = {
+    timezone_id : initial.timezone_id ?? 'Europe/London',
+    day_start   : initial.day_start   ?? '06:00',
+    day_end     : initial.day_end     ?? '20:00',
+    night_start : initial.night_start ?? '20:00',
+    night_end   : initial.night_end   ?? '06:00'
+  };
+
+  // Persist initial back into staged state (one source of truth)
+  modalCtx.clientSettingsState = { ...initial, ...s };
+
+  // Render structured form (no raw JSON box)
   div.innerHTML = `
     <div class="form" id="clientSettingsForm">
-      <div class="row" style="grid-column:1/-1">
-        <label>Client settings (JSON)</label>
-        <textarea id="client_settings_json" style="min-height:200px">${JSON.stringify(initial, null, 2)}</textarea>
-        <div id="client_settings_err" class="hint" style="color:#b21f1f; display:none; margin-top:6px"></div>
-        <div class="hint">Edits here are staged. They will be saved when you click <b>Save</b> on the Client modal.</div>
+      ${input('timezone_id','Timezone', s.timezone_id)}
+      ${input('day_start','Day shift starts (HH:MM)', s.day_start, 'time')}
+      ${input('day_end','Day shift ends (HH:MM)', s.day_end, 'time')}
+      ${input('night_start','Night shift starts (HH:MM)', s.night_start, 'time')}
+      ${input('night_end','Night shift ends (HH:MM)', s.night_end, 'time')}
+      <div class="hint" style="grid-column:1/-1">
+        Example: Day 06:00–20:00, Night 20:00–06:00. These settings override global defaults for this client only.
       </div>
     </div>
   `;
 
-  const ta  = document.getElementById('client_settings_json');
-  const err = document.getElementById('client_settings_err');
-
-  // Two-way staging: parse on change; keep last-good to avoid accidental nulling
-  let lastGood = initial;
-  ta.addEventListener('input', () => {
-    try {
-      const parsed = JSON.parse(ta.value || '{}');
-      if (parsed && typeof parsed === 'object') {
-        modalCtx.clientSettingsState = parsed;
-        lastGood = parsed;
-        err.style.display = 'none';
-        err.textContent = '';
-      } else {
-        throw new Error('Settings must be a JSON object.');
+  // Two‑way binding: update staged settings on any input/change
+  const root = document.getElementById('clientSettingsForm');
+  const sync = ()=>{
+    const vals = collectForm('#clientSettingsForm', false);
+    // Minimal validation: HH:MM 24‑hour
+    const hhmm = /^([01]\d|2[0-3]):[0-5]\d$/;
+    ['day_start','day_end','night_start','night_end'].forEach(k=>{
+      if (vals[k] && !hhmm.test(vals[k])) {
+        alert(`${k.replace('_',' ')} must be HH:MM (24-hour)`);
+        // do not write invalid values into staged state
+        delete vals[k];
       }
-    } catch (e) {
-      err.style.display = '';
-      err.textContent = 'Invalid JSON: ' + (e && e.message ? e.message : String(e));
-      // keep lastGood staged; do not overwrite on parse errors
-      modalCtx.clientSettingsState = lastGood;
-    }
-  });
+    });
+    modalCtx.clientSettingsState = { ...modalCtx.clientSettingsState, ...vals };
+  };
+  root.addEventListener('input',  sync, true);
+  root.addEventListener('change', sync, true);
 }
 
 // ---- Umbrella modal
@@ -2771,8 +2802,12 @@ async function renderAll(){
   else renderSummary(data); // list functions already return arrays via toList()
 }
 async function bootstrapApp(){
-  renderTopNav(); renderTools(); await renderAll();
+  ensureSelectionStyles();   // ← ensure the highlight is clearly visible
+  renderTopNav();
+  renderTools();
+  await renderAll();
 }
+
 
 // Initialize
 initAuthUI();
