@@ -1013,11 +1013,12 @@ function calcMargin(charge, pay, rate_type, erni_pct = 0) {
   if (charge == null || pay == null) return null;
   const rt = String(rate_type || '').toUpperCase();
   if (rt === 'PAYE') {
-    const denom = 1 + (Number.isFinite(erni_pct) ? erni_pct : 0);
-    return +(charge - (pay / denom)).toFixed(2);
+    const factor = 1 + (Number.isFinite(erni_pct) ? erni_pct : 0);
+    return +(charge - (pay * factor)).toFixed(2);
   }
-  return +(charge - pay).toFixed(2); // Umbrella
+  return +(charge - pay).toFixed(2);
 }
+
 
 // Helper: basic date overlap check for YYYY-MM-DD strings (null = open-ended)
 function rangesOverlap(a_from, a_to, b_from, b_to) {
@@ -2038,7 +2039,7 @@ const erniPct = (() => {
     }
 
     const expl = (rt === 'PAYE')
-      ? `PAYE margin uses Employers NI ${(erniPct*100).toFixed(2)}%: margin = charge − (pay / (1 + NI)).`
+      ? `PAYE margin uses Employers NI ${(erniPct*100).toFixed(2)}%: Assumes Holiday Pay included in hourly rate and Pension Opt Out.`
       : `Umbrella margin: margin = charge − pay.`;
 
     box.innerHTML = `
@@ -2714,7 +2715,7 @@ async function openClientRateModal(client_id, existing) {
     }
 
     const expl = (rt === 'PAYE')
-      ? `PAYE margin uses Employers NI ${(erniPct*100).toFixed(2)}%: margin = charge − (pay / (1 + NI)).`
+      ? `PAYE margin uses Employers NI ${(erniPct*100).toFixed(2)}%: Assumes Holiday Pay included in hourly rate and Pension Opt Out.`
       : `Umbrella margin: margin = charge − pay.`;
 
     box.innerHTML = `
