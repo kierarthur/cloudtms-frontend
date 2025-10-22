@@ -816,7 +816,7 @@ function renderSummary(rows){
 
   rows.forEach(r=>{
     const tr = document.createElement('tr');
-    tr.dataset.id = (r && r.id) ? String(r.id) : '';    // <— stable identity
+    tr.dataset.id = (r && r.id) ? String(r.id) : '';    // stable identity
     tr.dataset.section = currentSection;
 
     cols.forEach(c=>{
@@ -833,6 +833,7 @@ function renderSummary(rows){
   tb.addEventListener('click', (ev) => {
     const tr = ev.target && ev.target.closest('tr');
     if (!tr) return;
+
     tb.querySelectorAll('tr.selected').forEach(n => n.classList.remove('selected'));
     tr.classList.add('selected');
 
@@ -840,23 +841,38 @@ function renderSummary(rows){
     currentSelection = currentRows.find(x => String(x.id) === id) || null;
   });
 
-  // Delegated double-click: reselect + open the correct row (with guard)
+  // Delegated double-click: confirm discard BEFORE selection; open the correct row; clear highlight only if a modal opens
   tb.addEventListener('dblclick', (ev) => {
     const tr = ev.target && ev.target.closest('tr');
     if (!tr) return;
 
+    // If user declines to discard unsaved changes (if any), do nothing—no selection change either.
+    if (!confirmDiscardChangesIfDirty()) return;
+
+    // Select the row we’re about to open
     tb.querySelectorAll('tr.selected').forEach(n => n.classList.remove('selected'));
     tr.classList.add('selected');
 
     const id = tr.dataset.id;
     const row = currentRows.find(x => String(x.id) === id) || null;
     if (!row) return;
-    openDetails(row);  // openDetails itself is guarded against unsaved modals
+
+    // Track modal depth to know if a modal actually opened, then clear highlight to avoid leftovers
+    const beforeDepth = (window.__modalStack && window.__modalStack.length) || 0;
+    openDetails(row);  // openDetails is also guarded against unsaved modals
+
+    setTimeout(() => {
+      const afterDepth = (window.__modalStack && window.__modalStack.length) || 0;
+      if (afterDepth > beforeDepth) {
+        tb.querySelectorAll('tr.selected').forEach(n => n.classList.remove('selected'));
+      }
+    }, 0);
   });
 
   tbl.appendChild(tb);
   content.appendChild(tbl);
 }
+
 
 function renderAuditTable(content, rows){
   const cols = defaultColumnsFor('audit');
@@ -1939,16 +1955,22 @@ function renderClientRatesTable(rates){
   if (addBtn) addBtn.onclick = () => openClientRateModal(modalCtx.data?.id);
 }
 function ensureSelectionStyles(){
-  if (document.getElementById('gridSelectionStyles')) return;
+  const ID = 'gridSelectionStyles';
+  if (document.getElementById(ID)) return;
   const style = document.createElement('style');
-  style.id = 'gridSelectionStyles';
+  style.id = ID;
   style.textContent = `
+    /* Subtle selected-row highlight — readable, not shouty */
     .grid tbody tr.selected {
-      background: #dbeafe !important;      /* light blue */
-      outline: 2px solid #1d4ed8;          /* vivid blue border */
+      background: rgba(30,136,229,0.12) !important;  /* soft blue tint */
+      color: inherit !important;                     /* keep text color */
+      box-shadow: inset 0 0 0 1px rgba(29,78,216,.35); /* delicate rim */
     }
+    .grid tbody tr.selected td { color: inherit !important; }
+
+    /* Hover stays understated */
     .grid tbody tr:hover {
-      background: #f3f4f6;                 /* subtle hover */
+      background: rgba(0,0,0,0.04);
     }
   `;
   document.head.appendChild(style);
