@@ -1620,6 +1620,17 @@ function discardAllModalsAndState(){
     console.warn('[MODAL] listener cleanup failed', e);
   }
 
+  // Detach any remaining frame-level listeners (dirty/global) from all frames
+  try {
+    if (Array.isArray(window.__modalStack)) {
+      while (window.__modalStack.length) {
+        const fr = window.__modalStack.pop();
+        if (fr && fr._detachDirty)  { try { fr._detachDirty();  } catch(_) {} }
+        if (fr && fr._detachGlobal) { try { fr._detachGlobal(); } catch(_) {} }
+      }
+    }
+  } catch (_) {}
+
   // Reset modal geometry to prevent "snap to right" on the next open
   const modal = byId('modal');
   if (modal) {
@@ -1643,8 +1654,7 @@ function discardAllModalsAndState(){
   const modalTitle = document.getElementById('modalTitle');
   if (modalTitle) modalTitle.textContent = '';
 
-  // Reset modal stack & context
-  window.__modalStack = [];
+  // Reset modal context
   modalCtx = {
     entity: null, data: null,
     formState: null, rolesState: null,
@@ -1659,6 +1669,7 @@ function discardAllModalsAndState(){
 
   console.debug('[MODAL] hard reset complete');
 }
+
 
 function confirmDiscardChangesIfDirty(){
   if (!isAnyModalDirty()) return true; // not dirty → acts as plain "Close" guard
@@ -2730,6 +2741,7 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
     currentTabKey: (Array.isArray(tabs) && tabs.length ? tabs[0].key : null),
     isDirty: false,
     _detachDirty: null,
+    _detachGlobal: null,
     _hasMountedOnce: false, // ← skip first persist on initial mount
 
     // Persist visible tab ONLY when overlay is visible (prevents reading hidden/stale DOM)
@@ -2771,7 +2783,9 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
       if (!root) return;
       const onDirty = ()=>{ 
         this.isDirty = true; 
-        updateSecondaryLabel(); 
+        // do NOT call updateSecondaryLabel() here; it is scoped inside renderTop
+        // let the toolbar listener flip the label:
+        try { window.dispatchEvent(new CustomEvent('modal-dirty')); } catch {}
       };
       root.addEventListener('input', onDirty, true);
       root.addEventListener('change', onDirty, true);
@@ -2810,7 +2824,7 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
       this.currentTabKey = k;
       this._attachDirtyTracker();
       this._hasMountedOnce = true; // ← first mount complete; future tab switches may persist
-      updateSecondaryLabel();
+      // do NOT call updateSecondaryLabel() here; it lives inside renderTop
     }
   };
 
@@ -2845,6 +2859,7 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
 
     const primaryBtn = byId('btnSave');
     const discardBtn = byId('btnCloseModal');
+    const backEl     = byId('modalBack');
 
     primaryBtn.textContent = isChild ? 'Apply' : 'Save';
     primaryBtn.setAttribute('aria-label', isChild ? 'Apply' : 'Save');
@@ -2860,6 +2875,37 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
       discardBtn.setAttribute('title', top.isDirty ? 'Discard changes and close' : 'Close');
     }
     updateSecondaryLabel();
+
+    // Listen for "modal-dirty" events to flip the label instantly on edits
+    const onDirtyLabel = () => updateSecondaryLabel();
+    window.addEventListener('modal-dirty', onDirtyLabel);
+
+    // Secondary action (Close/Discard) shared logic
+    const handleSecondary = () => {
+      console.debug('[MODAL] discard/close click', { title: top.title, depth, closeToken, isDirty: top.isDirty });
+
+      if (top.isDirty) {
+        const ok = window.confirm('You have unsaved changes. Discard them and close?');
+        if (!ok) return;
+      }
+
+      // Sanitize geometry before any close/re-render
+      sanitizeModalGeometry();
+
+      const closing = window.__modalStack.pop();
+      // detach listeners owned by this frame
+      if (closing && closing._detachDirty) { try { closing._detachDirty(); } catch(_){}; closing._detachDirty = null; }
+      window.removeEventListener('modal-dirty', onDirtyLabel);
+
+      if (window.__modalStack.length > 0) {
+        // Re-render parent
+        renderTop();
+        const parent = window.__modalStack[window.__modalStack.length - 1];
+        try { parent.onReturn && parent.onReturn(); } catch(_) {}
+      } else {
+        discardAllModalsAndState();
+      }
+    };
 
     primaryBtn.onclick = async () => {
       top.persistCurrentTabState();
@@ -2881,6 +2927,7 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
 
       if (isChild) {
         if (top._detachDirty) { try { top._detachDirty(); } catch(_){}; top._detachDirty = null; }
+        window.removeEventListener('modal-dirty', onDirtyLabel);
         window.__modalStack.pop();
         if (window.__modalStack.length > 0) {
           const parent = window.__modalStack[window.__modalStack.length - 1];
@@ -2890,35 +2937,33 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
           discardAllModalsAndState();
         }
       } else {
+        window.removeEventListener('modal-dirty', onDirtyLabel);
         discardAllModalsAndState();
       }
     };
 
-    discardBtn.textContent = top.isDirty ? 'Discard' : 'Close';
-    discardBtn.setAttribute('title', top.isDirty ? 'Discard changes and close' : 'Close');
-    discardBtn.setAttribute('aria-label', top.isDirty ? 'Discard' : 'Close');
+    discardBtn.onclick = handleSecondary;
 
-    discardBtn.onclick = () => {
-      console.debug('[MODAL] discard/close click', { title: top.title, depth, closeToken, isDirty: top.isDirty });
+    // Close on overlay click (outside modal) – same dirty/clean rules
+    const onOverlayClick = (e) => {
+      if (e.target === backEl) handleSecondary();
+    };
+    backEl.addEventListener('click', onOverlayClick, { capture: true });
 
-      if (top.isDirty) {
-        const ok = window.confirm('You have unsaved changes. Discard them and close?');
-        if (!ok) return;
+    // Close on ESC – same dirty/clean rules
+    const onEsc = (e) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        handleSecondary();
       }
+    };
+    window.addEventListener('keydown', onEsc);
 
-      // Sanitize geometry before any close/re-render
-      sanitizeModalGeometry();
-
-      const closing = window.__modalStack.pop();
-      if (closing && closing._detachDirty) { try { closing._detachDirty(); } catch(_){}; closing._detachDirty = null; }
-
-      if (window.__modalStack.length > 0) {
-        renderTop();
-        const parent = window.__modalStack[window.__modalStack.length - 1];
-        try { parent.onReturn && parent.onReturn(); } catch(_) {}
-      } else {
-        discardAllModalsAndState();
-      }
+    // store global detach so we can remove when frame closes elsewhere
+    top._detachGlobal = () => {
+      window.removeEventListener('modal-dirty', onDirtyLabel);
+      backEl.removeEventListener('click', onOverlayClick, { capture: true });
+      window.removeEventListener('keydown', onEsc);
     };
 
     // Drag (unchanged)
@@ -2961,8 +3006,10 @@ function closeModal(){
   document.onmouseup   = null;
 
   const closing = window.__modalStack.pop();
-  if (closing && closing._detachDirty) {
-    try { closing._detachDirty(); } catch(_) {}
+  if (closing) {
+    // Detach per-frame listeners
+    if (closing._detachDirty)  { try { closing._detachDirty();  } catch(_) {} closing._detachDirty  = null; }
+    if (closing._detachGlobal) { try { closing._detachGlobal(); } catch(_) {} closing._detachGlobal = null; }
   }
 
   if (window.__modalStack.length > 0) {
@@ -2991,6 +3038,7 @@ function closeModal(){
     discardAllModalsAndState();
   }
 }
+
 
 
 // ===== Small helpers =====
