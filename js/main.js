@@ -3482,6 +3482,279 @@ function collectForm(sel, jsonTry=false){
   return out;
 }
 
+// ==== FIXED MODAL FRAMEWORK: close only on explicit success from onSave ====
+function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
+  // Sanitize any previous geometry so we never inherit a dragged position
+  const modalEl = byId('modal');
+  if (modalEl) {
+    modalEl.style.position = '';
+    modalEl.style.left = '';
+    modalEl.style.top = '';
+    modalEl.style.right = '';
+    modalEl.style.bottom = '';
+    modalEl.style.transform = '';
+    modalEl.classList.remove('dragging');
+  }
+
+  if (!window.__modalStack) window.__modalStack = [];
+  const closeToken = (showModal._tokenCounter = (showModal._tokenCounter || 0) + 1);
+
+  function sanitizeModalGeometry() {
+    const m = byId('modal');
+    if (m) {
+      m.style.position = '';
+      m.style.left = '';
+      m.style.top = '';
+      m.style.right = '';
+      m.style.bottom = '';
+      m.style.transform = '';
+      m.classList.remove('dragging');
+    }
+    document.onmousemove = null;
+    document.onmouseup   = null;
+  }
+
+  const frame = {
+    title,
+    tabs: Array.isArray(tabs) ? tabs.slice() : [],
+    renderTab,
+    onSave,
+    onReturn,
+    hasId: !!hasId,
+    entity: modalCtx.entity,
+    currentTabKey: (Array.isArray(tabs) && tabs.length ? tabs[0].key : null),
+    isDirty: false,
+    _detachDirty: null,
+    _detachGlobal: null,
+    _hasMountedOnce: false,
+
+    persistCurrentTabState() {
+      const back = byId('modalBack');
+      const overlayVisible = back && getComputedStyle(back).display !== 'none';
+      if (!overlayVisible) return;
+
+      if (this.currentTabKey === 'main' && byId('tab-main')) {
+        const cur = collectForm('#tab-main');
+        const fs = modalCtx.formState || { __forId: modalCtx.data?.id || null, main:{}, pay:{} };
+        if (fs.__forId == null) fs.__forId = modalCtx.data?.id || null;
+        modalCtx.formState = fs;
+        modalCtx.formState.main = { ...(modalCtx.formState.main||{}), ...cur };
+      }
+      if (this.currentTabKey === 'pay' && byId('tab-pay')) {
+        const cur = collectForm('#tab-pay');
+        const fs = modalCtx.formState || { __forId: modalCtx.data?.id || null, main:{}, pay:{} };
+        if (fs.__forId == null) fs.__forId = modalCtx.data?.id || null;
+        modalCtx.formState = fs;
+        modalCtx.formState.pay = { ...(modalCtx.formState.pay||{}), ...cur };
+      }
+    },
+
+    mergedRowForTab(k) {
+      const base = { ...modalCtx.data };
+      const fs = modalCtx.formState;
+      const sameRecord = fs && fs.__forId === modalCtx.data?.id;
+
+      if (k === 'main') return sameRecord ? { ...base, ...(fs.main || {}) } : base;
+      if (k === 'pay')  return sameRecord ? { ...base, ...(fs.pay  || {}) } : base;
+      return base;
+    },
+
+    _attachDirtyTracker() {
+      if (this._detachDirty) { try { this._detachDirty(); } catch(_){}; this._detachDirty = null; }
+      const root = byId('modalBody');
+      if (!root) return;
+      const onDirty = ()=>{ 
+        this.isDirty = true; 
+        try { window.dispatchEvent(new CustomEvent('modal-dirty')); } catch {}
+      };
+      root.addEventListener('input', onDirty, true);
+      root.addEventListener('change', onDirty, true);
+      this._detachDirty = ()=>{
+        root.removeEventListener('input', onDirty, true);
+        root.removeEventListener('change', onDirty, true);
+      };
+    },
+
+    setTab(k) {
+      if (this._hasMountedOnce) this.persistCurrentTabState();
+
+      const rowForTab = this.mergedRowForTab(k);
+      byId('modalBody').innerHTML = this.renderTab(k, rowForTab) || '';
+
+      if (this.entity === 'candidates' && k === 'rates') { mountCandidateRatesTab?.(); }
+      if (this.entity === 'candidates' && k === 'pay')   { mountCandidatePayTab?.(); }
+
+      if (this.entity === 'candidates' && k === 'main') {
+        const pmSel = document.querySelector('#pay-method');
+        if (pmSel) {
+          pmSel.addEventListener('change', () => {
+            modalCtx.payMethodState = pmSel.value;
+            try { window.dispatchEvent(new CustomEvent('pay-method-changed')); }
+            catch { window.dispatchEvent(new Event('pay-method-changed')); }
+          });
+          modalCtx.payMethodState = pmSel.value;
+        }
+      }
+
+      if (this.entity === 'clients' && k === 'rates')     { mountClientRatesTab?.(); }
+      if (this.entity === 'clients' && k === 'hospitals') { mountClientHospitalsTab?.(); }
+      if (this.entity === 'clients' && k === 'settings')  { renderClientSettingsUI?.(modalCtx.clientSettingsState || {}); }
+
+      this.currentTabKey = k;
+      this._attachDirtyTracker();
+      this._hasMountedOnce = true;
+    }
+  };
+
+  window.__modalStack.push(frame);
+  byId('modalBack').style.display = 'flex';
+
+  function renderTop() {
+    const depth = window.__modalStack.length;
+    const top = window.__modalStack[window.__modalStack.length - 1];
+    const isChild = depth > 1;
+
+    byId('modalTitle').textContent = top.title;
+
+    const tabsEl = byId('modalTabs');
+    tabsEl.innerHTML = '';
+    (top.tabs || []).forEach((t, i) => {
+      const b = document.createElement('button');
+      b.textContent = t.label;
+      if (i === 0 && !top.currentTabKey) top.currentTabKey = t.key;
+      if (t.key === top.currentTabKey || (i === 0 && !top.currentTabKey)) b.classList.add('active');
+      b.onclick = () => {
+        tabsEl.querySelectorAll('button').forEach(x => x.classList.remove('active'));
+        b.classList.add('active');
+        top.setTab(t.key);
+      };
+      tabsEl.appendChild(b);
+    });
+
+    if (top.currentTabKey) top.setTab(top.currentTabKey);
+    else if (top.tabs && top.tabs[0]) top.setTab(top.tabs[0].key);
+    else byId('modalBody').innerHTML = top.renderTab('form', {}) || '';
+
+    const primaryBtn = byId('btnSave');
+    const discardBtn = byId('btnCloseModal');
+    const backEl     = byId('modalBack');
+
+    primaryBtn.textContent = isChild ? 'Apply' : 'Save';
+    primaryBtn.setAttribute('aria-label', isChild ? 'Apply' : 'Save');
+
+    const delBtn = byId('btnDelete');
+    delBtn.style.display = top.hasId ? '' : 'none';
+    delBtn.onclick = openDelete;
+
+    function updateSecondaryLabel() {
+      const label = top.isDirty ? 'Discard' : 'Close';
+      discardBtn.textContent = label;
+      discardBtn.setAttribute('aria-label', label);
+      discardBtn.setAttribute('title', top.isDirty ? 'Discard changes and close' : 'Close');
+    }
+    updateSecondaryLabel();
+
+    const onDirtyLabel = () => updateSecondaryLabel();
+    window.addEventListener('modal-dirty', onDirtyLabel);
+
+    const handleSecondary = () => {
+      if (top.isDirty) {
+        const ok = window.confirm('You have unsaved changes. Discard them and close?');
+        if (!ok) return;
+      }
+
+      sanitizeModalGeometry();
+
+      const closing = window.__modalStack.pop();
+      if (closing && closing._detachDirty) { try { closing._detachDirty(); } catch(_){}; closing._detachDirty = null; }
+      window.removeEventListener('modal-dirty', onDirtyLabel);
+
+      if (window.__modalStack.length > 0) {
+        renderTop();
+        const parent = window.__modalStack[window.__modalStack.length - 1];
+        try { parent.onReturn && parent.onReturn(); } catch(_) {}
+      } else {
+        discardAllModalsAndState();
+      }
+    };
+
+    // PRIMARY (Save/Apply): close ONLY on explicit success
+    primaryBtn.onclick = async () => {
+      top.persistCurrentTabState();
+
+      let shouldClose = true;
+
+      if (typeof top.onSave === 'function') {
+        try {
+          const res = await top.onSave();
+          const ok  = (res === true) || (res && res.ok === true);
+          if (ok) {
+            top.isDirty = false;
+            updateSecondaryLabel();
+            shouldClose = true;
+          } else {
+            shouldClose = false;
+          }
+        } catch (e) {
+          // validation/API error → keep modal open
+          shouldClose = false;
+        }
+      }
+
+      // If child already popped this frame, stop
+      if (!window.__modalStack.length || window.__modalStack[window.__modalStack.length - 1] !== top) {
+        return;
+      }
+
+      if (!shouldClose) return;
+
+      sanitizeModalGeometry();
+
+      if (isChild) {
+        if (top._detachDirty) { try { top._detachDirty(); } catch(_){}; top._detachDirty = null; }
+        window.removeEventListener('modal-dirty', onDirtyLabel);
+        window.__modalStack.pop();
+        if (window.__modalStack.length > 0) {
+          const parent = window.__modalStack[window.__modalStack.length - 1];
+          renderTop();
+          try { parent.onReturn && parent.onReturn(); } catch(_) {}
+        } else {
+          discardAllModalsAndState();
+        }
+      } else {
+        window.removeEventListener('modal-dirty', onDirtyLabel);
+        discardAllModalsAndState();
+      }
+    };
+
+    discardBtn.onclick = handleSecondary;
+
+    const onOverlayClick = (e) => { if (e.target === backEl) handleSecondary(); };
+    backEl.addEventListener('click', onOverlayClick, { capture: true });
+
+    const onEsc = (e) => { if (e.key === 'Escape') { e.preventDefault(); handleSecondary(); } };
+    window.addEventListener('keydown', onEsc);
+
+    top._detachGlobal = () => {
+      window.removeEventListener('modal-dirty', onDirtyLabel);
+      backEl.removeEventListener('click', onOverlayClick, { capture: true });
+      window.removeEventListener('keydown', onEsc);
+    };
+
+    // Drag (unchanged)
+    const modal = byId('modal');
+    const drag  = byId('modalDrag');
+    let offX = 0, offY = 0, dragging = false;
+    drag.onmousedown = (e) => {
+      dragging = true; modal.classList.add('dragging'); offX = e.offsetX; offY = e.offsetY;
+      document.onmousemove = mm; document.onmouseup = mu;
+    };
+    function mm(e){ if(!dragging) return; modal.style.position = 'absolute'; modal.style.left = (e.clientX - offX) + 'px'; modal.style.top = (e.clientY - offY) + 'px'; }
+    function mu(){ dragging = false; modal.classList.remove('dragging'); document.onmousemove = null; document.onmouseup = null; }
+  }
+
+  renderTop();
+}
 
 
 // Close any existing floating menu
