@@ -2512,6 +2512,16 @@ async function openClientRateModal(client_id, existing) {
       if (isoTo < isoFrom) { alert('Effective to cannot be before Effective from'); throw new Error('VALIDATION'); }
     }
 
+    // Helper: compute YMD day-before
+    const dayBeforeYmd = (ymd) => {
+      const d = new Date(ymd + 'T00:00:00Z');
+      d.setUTCDate(d.getUTCDate() - 1);
+      const y = d.getUTCFullYear();
+      const m = String(d.getUTCMonth()+1).padStart(2,'0');
+      const dd= String(d.getUTCDate()).padStart(2,'0');
+      return `${y}-${m}-${dd}`;
+    };
+
     // Build staged row (uniqueness: client_id, role, band, date_from, rate_type)
     const staged = {
       client_id,
@@ -2532,20 +2542,117 @@ async function openClientRateModal(client_id, existing) {
       pay_bh:       raw.pay_bh       !== '' ? Number(raw.pay_bh)       : null,
     };
 
-    // Overlap guard (same role/band AND same rate_type)
-    const list = Array.isArray(modalCtx.ratesState) ? modalCtx.ratesState.slice() : [];
-    const isSame = (r) =>
+    // === Auto-end incumbents BEFORE overlap checks ===
+    const list = Array.isArray(modalCtx.ratesState) ? modalCtx.ratesState : [];
+    const sameType = (r) =>
       String(r.role || '') === String(staged.role || '') &&
       String(r.band || '') === String(staged.band || '') &&
       String(String(r.rate_type || '').toUpperCase()) === staged.rate_type;
-    const others = existing ? list.filter(r => r !== existing && isSame(r)) : list.filter(r => isSame(r));
-    const hasOverlap = others.some(r => rangesOverlap(staged.date_from, staged.date_to, r.date_from || null, r.date_to || null));
-    if (hasOverlap) {
-      alert('Date range overlaps an existing client default for the same role/band and rate type.');
+
+    const otherTypeVal = (staged.rate_type === 'PAYE') ? 'UMBRELLA' : 'PAYE';
+    const otherType = (r) =>
+      String(r.role || '') === String(staged.role || '') &&
+      String(r.band || '') === String(staged.band || '') &&
+      String(String(r.rate_type || '').toUpperCase()) === otherTypeVal;
+
+    // find incumbent in same type: open-ended & starts before new start
+    const incumbentsSame = list
+      .filter(sameType)
+      .filter(r => (r.date_to == null) && (r.date_from < staged.date_from));
+
+    if (incumbentsSame.length > 1) {
+      alert('Multiple open-ended rates exist for this Role/Band/Type. Please end older cards first.');
       throw new Error('VALIDATION');
     }
 
-    // Stage into parent state (edit in place or push new)
+    if (incumbentsSame.length === 1) {
+      const inc = incumbentsSame[0];
+      const cut = dayBeforeYmd(staged.date_from);
+      if (cut < inc.date_from) {
+        alert('The new start date overlaps the existing card start. Adjust the start date or end the existing card first.');
+        throw new Error('VALIDATION');
+      }
+      const ok = window.confirm(
+        `An open-ended ${staged.rate_type} rate exists for Role ${staged.role} / Band ${staged.band || '(none)'} from ${formatIsoToUk(inc.date_from)}.\n` +
+        `We will end it on ${formatIsoToUk(cut)} so the new card can start on ${formatIsoToUk(staged.date_from)}.\nContinue?`
+      );
+      if (!ok) throw new Error('CANCELLED');
+
+      // apply end date to incumbent in staged list
+      const idx = list.indexOf(inc);
+      if (idx >= 0) {
+        const patched = { ...list[idx], date_to: cut };
+        modalCtx.ratesState[idx] = patched;
+      }
+    }
+
+    // now evaluate other type counterpart: if active beyond cut, end it too (with warning)
+    const cut = dayBeforeYmd(staged.date_from);
+    const activeOther = list
+      .filter(otherType)
+      .filter(r => {
+        const ends = r.date_to;
+        if (!ends) return (r.date_from < staged.date_from);       // open-ended and started before new
+        return ends >= cut && r.date_from <= cut;                 // spans across cut
+      });
+
+    if (activeOther.length > 1) {
+      alert('Multiple counterpart (PAYE/UMBRELLA) rates are active over this period. Please tidy them first.');
+      throw new Error('VALIDATION');
+    }
+
+    if (activeOther.length === 1) {
+      const incO = activeOther[0];
+      if (cut < incO.date_from) {
+        alert('Counterpart card starts after the proposed end date. Adjust dates or tidy counterpart first.');
+        throw new Error('VALIDATION');
+      }
+      const ok2 = window.confirm(
+        `A ${otherTypeVal} rate for the same Role/Band is also active past ${formatIsoToUk(cut)}.\n` +
+        `We will end it on ${formatIsoToUk(cut)} to keep margins aligned if charges changed.\n` +
+        `You will need to add a new ${otherTypeVal} card from ${formatIsoToUk(staged.date_from)}.\nContinue?`
+      );
+      if (!ok2) throw new Error('CANCELLED');
+
+      const idxO = list.indexOf(incO);
+      if (idxO >= 0) {
+        const patchedO = { ...list[idxO], date_to: cut };
+        modalCtx.ratesState[idxO] = patchedO;
+      }
+    }
+
+    // Immediately refresh the parent grid behind the modal so the new end-dates are visible
+    try {
+      const parent = window.__modalStack && window.__modalStack[window.__modalStack.length - 2];
+      if (parent && typeof parent.setTab === 'function') {
+        parent.currentTabKey = 'rates';
+        parent.setTab('rates');
+      }
+    } catch (_) {}
+
+    // === Now perform overlap guard with the UPDATED staged data (both types) ===
+    const listAfter = Array.isArray(modalCtx.ratesState) ? modalCtx.ratesState.slice() : [];
+    const overlapsExist = listAfter.some(r => {
+      if (!(String(r.role||'')===String(staged.role||'') && String(r.band||'')===String(staged.band||'') && String(String(r.rate_type||'').toUpperCase())===staged.rate_type)) {
+        return false;
+      }
+      // any row that overlaps with staged
+      const a0 = r.date_from || null, a1 = r.date_to || null;
+      const b0 = staged.date_from || null, b1 = staged.date_to || null;
+      const A0 = a0 || '0000-01-01', A1 = a1 || '9999-12-31';
+      const B0 = b0 || '0000-01-01', B1 = b1 || '9999-12-31';
+      const overlap = !(A1 < B0 || B1 < A0);
+
+      // exclude comparing to the exact same edited row instance
+      return overlap && r !== existing;
+    });
+
+    if (overlapsExist) {
+      alert('Date range still overlaps an existing client default in this category. Please adjust dates.');
+      throw new Error('VALIDATION');
+    }
+
+    // === Stage NEW/EDIT row ===
     modalCtx.ratesState = Array.isArray(modalCtx.ratesState) ? modalCtx.ratesState : [];
     if (existing) {
       const idx = modalCtx.ratesState.findIndex(r => r === existing);
@@ -2554,17 +2661,15 @@ async function openClientRateModal(client_id, existing) {
       modalCtx.ratesState.push(staged);
     }
 
-    // === confirm + auto-mirror SHARED charge across the other rate_type ===
+    // === confirm + auto-mirror SHARED charge across the other rate_type (optional UX) ===
     (function mirrorSharedChargeWithConfirm() {
       const src = staged;
       const otherType = src.rate_type === 'PAYE' ? 'UMBRELLA' : 'PAYE';
 
-      // detect if any charge is set
       const hasAnyCharge =
         src.charge_day != null || src.charge_night != null ||
         src.charge_sat != null || src.charge_sun != null || src.charge_bh != null;
 
-      // detect if charges changed (for edit) — only then prompt
       const chargesChanged = existing
         ? (
             (existing.charge_day   ?? null) !== (src.charge_day   ?? null) ||
@@ -2586,7 +2691,6 @@ async function openClientRateModal(client_id, existing) {
         String((r.rate_type || '').toUpperCase()) === otherType
       );
 
-      // Determine whether mirroring will create or update
       const willCreateOther = (idx < 0);
       const willUpdateOther = (idx >= 0) && (
         (rows[idx].charge_day   ?? null) !== (src.charge_day   ?? null) ||
@@ -2596,20 +2700,16 @@ async function openClientRateModal(client_id, existing) {
         (rows[idx].charge_bh    ?? null) !== (src.charge_bh    ?? null)
       );
 
-      if (!willCreateOther && !willUpdateOther) return; // nothing to mirror
+      if (!willCreateOther && !willUpdateOther) return;
 
       const otherLabel = (otherType === 'PAYE') ? 'PAYE charge rates' : 'Umbrella charge rates';
       const message =
         `This will automatically update the ${otherLabel} for the same Role/Band and Date window to match ` +
         `the charges you’ve entered here. Do you want to continue?`;
 
-      if (!window.confirm(message)) {
-        // User opted out — keep current row, do not mirror
-        return;
-      }
+      if (!window.confirm(message)) return;
 
       if (idx >= 0) {
-        // Update the counterpart's CHARGE only (leave its PAY as-is)
         const tgt = { ...rows[idx] };
         tgt.charge_day   = src.charge_day;
         tgt.charge_night = src.charge_night;
@@ -2618,7 +2718,6 @@ async function openClientRateModal(client_id, existing) {
         tgt.charge_bh    = src.charge_bh;
         rows[idx] = tgt;
       } else {
-        // Create a twin row with same charge; PAY remains nulls
         rows.push({
           client_id: src.client_id,
           role: src.role,
@@ -2634,9 +2733,18 @@ async function openClientRateModal(client_id, existing) {
           pay_day: null, pay_night: null, pay_sat: null, pay_sun: null, pay_bh: null,
         });
       }
+
+      // parent refresh so mirrored charges are visible immediately behind the modal
+      try {
+        const parent = window.__modalStack && window.__modalStack[window.__modalStack.length - 2];
+        if (parent && typeof parent.setTab === 'function') {
+          parent.currentTabKey = 'rates';
+          parent.setTab('rates');
+        }
+      } catch (_) {}
     })();
 
-    return true; // ← signal success so showModal will close
+    return true; // ← success so showModal will close (the parent onReturn will also re-render)
   }, false, () => {
     const parent = window.__modalStack && window.__modalStack[window.__modalStack.length-1];
     if (parent) { parent.currentTabKey = 'rates'; parent.setTab('rates'); }
@@ -3162,23 +3270,88 @@ async function openCandidateRateModal(candidate_id, existing) {
       if (isoTo < isoFrom) { alert('Effective to cannot be before Effective from'); throw new Error('VALIDATION'); }
     }
 
-    // Overlap guard
+    // Helper: YMD day-before
+    const dayBeforeYmd = (ymd) => {
+      const d = new Date(ymd + 'T00:00:00Z');
+      d.setUTCDate(d.getUTCDate() - 1);
+      const y = d.getUTCFullYear();
+      const m = String(d.getUTCMonth()+1).padStart(2,'0');
+      const dd= String(d.getUTCDate()).padStart(2,'0');
+      return `${y}-${m}-${dd}`;
+    };
+    const cut = dayBeforeYmd(isoFrom);
+
+    // === AUTO-END incumbent open-ended override in same category (same rate_type) BEFORE overlap ===
     try {
       const all = await listCandidateRates(candidate_id);
-      const sameType = (all || []).filter(x =>
+
+      // find a single open-ended incumbent for same (client, role, band, rate_type) that starts before new
+      const incumbents = (all || []).filter(x =>
+        String(x.client_id) === String(raw.client_id) &&
+        String(x.role || '') === String(raw.role || '') &&
+        (String(x.band || '') === String(raw.band || '')) &&
+        String(x.rate_type || '').toUpperCase() === String(raw.rate_type || '').toUpperCase() &&
+        (x.date_to == null) &&
+        (x.date_from < isoFrom)
+      );
+
+      if (incumbents.length > 1) {
+        alert('Multiple open-ended overrides exist for this client/role/band/type. Please end older overrides first.');
+        throw new Error('VALIDATION');
+      }
+
+      if (incumbents.length === 1) {
+        const inc = incumbents[0];
+        if (cut < inc.date_from) {
+          alert('The new start date overlaps the existing override start. Adjust the start date or end the existing override first.');
+          throw new Error('VALIDATION');
+        }
+
+        // PATCH incumbent to set date_to = cut
+        const qEnd = new URLSearchParams();
+        qEnd.set('rate_type', String(raw.rate_type).toUpperCase());
+        qEnd.set('client_id', raw.client_id || 'null');
+        qEnd.set('role',      raw.role      || 'null');
+        qEnd.set('band',      (raw.band ?? 'null'));
+        const urlEnd = `/api/rates/candidate-overrides/${candidate_id}?${qEnd.toString()}`;
+
+        const resEnd = await authFetch(API(urlEnd), {
+          method:'PATCH',
+          headers:{'content-type':'application/json'},
+          body: JSON.stringify({ date_to: cut })
+        });
+        if (!resEnd.ok) {
+          const msg = await resEnd.text().catch(()=> 'Failed to end previous override');
+          alert(msg || 'Failed to end previous override');
+          throw new Error('API_REJECT');
+        }
+      }
+    } catch (e) {
+      if (e && (String(e.message).includes('VALIDATION') || String(e.message).includes('API_REJECT'))) throw e;
+      // non-fatal fetch issue of candidate rates — continue, overlap check below will still protect
+    }
+
+    // === Overlap guard AFTER possible auto-end ===
+    try {
+      const all2 = await listCandidateRates(candidate_id);
+      const sameType = (all2 || []).filter(x =>
         String(x.client_id) === String(raw.client_id) &&
         String(x.role || '') === String(raw.role || '') &&
         (String(x.band || '') === String(raw.band || '')) &&
         String(x.rate_type || '').toUpperCase() === String(raw.rate_type || '').toUpperCase() &&
         (!existing || x.id !== existing.id)
       );
-      const overlap = sameType.some(x => rangesOverlap(isoFrom, isoTo, x.date_from || null, x.date_to || null));
+      const overlap = sameType.some(x => {
+        const A0 = x.date_from || '0000-01-01', A1 = x.date_to || '9999-12-31';
+        const B0 = isoFrom || '0000-01-01',     B1 = isoTo || '9999-12-31';
+        return !(A1 < B0 || B1 < A0);
+      });
       if (overlap) {
         alert('Date range overlaps an existing override for the same client/role/band and rate type.');
         throw new Error('VALIDATION');
       }
     } catch (e) {
-      console.warn('Overlap check failed (continuing with save):', e);
+      console.warn('Overlap post-check failed:', e);
     }
 
     const payload = {
@@ -3198,6 +3371,7 @@ async function openCandidateRateModal(candidate_id, existing) {
 
     let ok = false;
     if (existing) {
+      // Standard update path for editing an existing override
       const q = new URLSearchParams();
       q.set('rate_type', payload.rate_type);
       q.set('client_id', payload.client_id || 'null');
@@ -3389,6 +3563,7 @@ async function openCandidateRateModal(candidate_id, existing) {
 
 
 
+
 // =============================== closeModal (kept) ===============================
 function closeModal(){
   if (!window.__modalStack || !window.__modalStack.length) {
@@ -3482,6 +3657,7 @@ function collectForm(sel, jsonTry=false){
   return out;
 }
 
+// ==== FIXED MODAL FRAMEWORK: close only on explicit success from onSave ====
 // ==== FIXED MODAL FRAMEWORK: close only on explicit success from onSave ====
 function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
   // Sanitize any previous geometry so we never inherit a dragged position
