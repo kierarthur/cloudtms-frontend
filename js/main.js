@@ -1815,31 +1815,32 @@ async function openCandidateRateModal(candidate_id, existing) {
   const title = existing ? 'Edit Candidate Rate Override' : 'Add Candidate Rate Override';
 
   let cache = { roles: [], bandsByRole: {} };
-  let lastCharge = null; // {charge_day,...}
+  let lastCharge = null;
   let erniPct = 0;
 
+  // IMPORTANT: throw on validation/API errors to keep modal OPEN
   showModal(title, [{ key:'form', label:'Form' }], () => formHtml, async () => {
     if (parentToken !== modalCtx.openToken || parentEntity !== 'candidates' || modalCtx.data?.id !== candidate_id) {
       alert('This rate form is no longer current. Please reopen it.');
-      return;
+      throw new Error('STALE_CONTEXT');
     }
     const raw = collectForm('#candRateForm');
 
-    if (!raw.client_id) { alert('Client is required'); return; }
-    if (!raw.rate_type) { alert('Rate type is required'); return; }
-    if (!raw.role)      { alert('Role is required'); return; }
-    if (!raw.date_from) { alert('Effective from is required'); return; }
+    if (!raw.client_id) { alert('Client is required'); throw new Error('VALIDATION'); }
+    if (!raw.rate_type) { alert('Rate type is required'); throw new Error('VALIDATION'); }
+    if (!raw.role)      { alert('Role is required'); throw new Error('VALIDATION'); }
+    if (!raw.date_from) { alert('Effective from is required'); throw new Error('VALIDATION'); }
 
     const isoFrom = parseUkDateToIso(raw.date_from);
-    if (!isoFrom) { alert('Invalid Effective from date'); return; }
+    if (!isoFrom) { alert('Invalid Effective from date'); throw new Error('VALIDATION'); }
     let isoTo = null;
     if (raw.date_to) {
       isoTo = parseUkDateToIso(raw.date_to);
-      if (!isoTo) { alert('Invalid Effective to date'); return; }
-      if (isoTo < isoFrom) { alert('Effective to cannot be before Effective from'); return; }
+      if (!isoTo) { alert('Invalid Effective to date'); throw new Error('VALIDATION'); }
+      if (isoTo < isoFrom) { alert('Effective to cannot be before Effective from'); throw new Error('VALIDATION'); }
     }
 
-    // Overlap guard: for same client+role+(band||null) and SAME rate_type, disallow overlapping
+    // Overlap guard: same client/role/band/rate_type
     try {
       const all = await listCandidateRates(candidate_id);
       const sameType = (all || []).filter(x =>
@@ -1852,7 +1853,7 @@ async function openCandidateRateModal(candidate_id, existing) {
       const overlap = sameType.some(x => rangesOverlap(isoFrom, isoTo, x.date_from || null, x.date_to || null));
       if (overlap) {
         alert('Date range overlaps an existing override for the same client/role/band and rate type.');
-        return;
+        throw new Error('VALIDATION');
       }
     } catch (e) {
       console.warn('Overlap check failed (continuing with save):', e);
@@ -1874,32 +1875,33 @@ async function openCandidateRateModal(candidate_id, existing) {
     };
 
     let ok = false;
-   if (existing) {
-  // Build WHERE-side filters; pass 'null' literal for NULL band so the backend uses is.null
-  const q = new URLSearchParams();
-  q.set('rate_type', payload.rate_type);
-  q.set('client_id', payload.client_id || 'null');
-  q.set('role',      payload.role      || 'null');
-  q.set('band',      (payload.band ?? 'null'));
-  const url = `/api/rates/candidate-overrides/${candidate_id}?${q.toString()}`;
+    if (existing) {
+      const q = new URLSearchParams();
+      q.set('rate_type', payload.rate_type);
+      q.set('client_id', payload.client_id || 'null');
+      q.set('role',      payload.role      || 'null');
+      q.set('band',      (payload.band ?? 'null'));
+      const url = `/api/rates/candidate-overrides/${candidate_id}?${q.toString()}`;
 
-  const resp = await authFetch(API(url), {
-    method:'PATCH',
-    headers:{'content-type':'application/json'},
-    body: JSON.stringify(payload)
-  });
+      const resp = await authFetch(API(url), {
+        method:'PATCH',
+        headers:{'content-type':'application/json'},
+        body: JSON.stringify(payload)
+      });
       if (!resp.ok) {
         const msg = await resp.text().catch(()=> 'Save failed');
-        alert(msg || 'Save failed'); return;
+        alert(msg || 'Save failed');
+        throw new Error('API_REJECT');
       }
       ok = true;
     } else {
       try {
         ok = await addCandidateRate(payload);
       } catch (e) {
-        alert(e.message || 'Save failed'); return;
+        alert(e.message || 'Save failed');
+        throw new Error('API_REJECT');
       }
-      if (!ok) { alert('Save failed'); return; }
+      if (!ok) { alert('Save failed'); throw new Error('API_REJECT'); }
     }
 
     await mountCandidateRatesTab();
@@ -1945,7 +1947,6 @@ async function openCandidateRateModal(candidate_id, existing) {
       }
     });
 
-    // Gate by candidate's allowed roles
     const liveRoles = Array.isArray(modalCtx?.rolesState) && modalCtx.rolesState.length
       ? modalCtx.rolesState : (Array.isArray(modalCtx?.data?.roles) ? modalCtx.data.roles : []);
     const candRoleCodes = liveRoles.map(x => x.code);
@@ -1965,7 +1966,6 @@ async function openCandidateRateModal(candidate_id, existing) {
     cache.roles = allowed;
     cache.bandsByRole = Object.fromEntries(Object.entries(bandsByRole).map(([k,v]) => [k, [...v]]));
 
-    // Pre-select existing role/band for edit
     if (existing?.role) {
       selRole.value = existing.role;
       selRole.dispatchEvent(new Event('change'));
@@ -1988,27 +1988,25 @@ async function openCandidateRateModal(candidate_id, existing) {
   }
 
   async function refreshMargin() {
-    // fetch settings (erni)
     const s = await getSettingsCached();
-    // Robust ERNI% normalization (handles numbers, strings, and "15%")
-const erniPct = (() => {
-  const v = s?.erni_pct;
-  if (v == null) return 0;
+    const erniPct = (() => {
+      const v = s?.erni_pct;
+      if (v == null) return 0;
 
-  if (typeof v === 'string') {
-    const m = v.trim();
-    if (!m) return 0;
-    if (m.endsWith('%')) {
-      const n = parseFloat(m.slice(0, -1));
-      return Number.isFinite(n) ? Math.max(0, n / 100) : 0;
-    }
-    const n = parseFloat(m);
-    return Number.isFinite(n) ? (n > 1 ? n / 100 : n) : 0;
-  }
+      if (typeof v === 'string') {
+        const m = v.trim();
+        if (!m) return 0;
+        if (m.endsWith('%')) {
+          const n = parseFloat(m.slice(0, -1));
+          return Number.isFinite(n) ? Math.max(0, n / 100) : 0;
+        }
+        const n = parseFloat(m);
+        return Number.isFinite(n) ? (n > 1 ? n / 100 : n) : 0;
+      }
 
-  const n = Number(v);
-  return Number.isFinite(n) ? (n > 1 ? n / 100 : n) : 0;
-})();
+      const n = Number(v);
+      return Number.isFinite(n) ? (n > 1 ? n / 100 : n) : 0;
+    })();
 
     const role = selRole.value || null;
     const band = selBand.value || null;
@@ -2016,10 +2014,8 @@ const erniPct = (() => {
     const client_id = selClient.value || null;
     const active_on = parseUkDateToIso(inFrom.value || '') || null;
 
-    // fetch shared charge for the chosen window
     lastCharge = client_id && role ? (await findBestChargeFor({ client_id, role, band, active_on })) : null;
 
-    // Collect pay inputs
     const raw = collectForm('#candRateForm');
     const pays = {
       day:   raw.pay_day   === '' ? null : Number(raw.pay_day),
@@ -2051,7 +2047,6 @@ const erniPct = (() => {
     `;
   }
 
-  // Bind events
   selClient.addEventListener('change', () => { refreshClientRoles(selClient.value); refreshMargin(); });
   selRateT .addEventListener('change', () => { refreshClientRoles(selClient.value); refreshMargin(); });
   document.querySelectorAll('#candRateForm input[type="number"]').forEach(el => el.addEventListener('input', refreshMargin));
@@ -2059,7 +2054,6 @@ const erniPct = (() => {
   selRole.addEventListener('change', onRoleChanged);
   selBand.addEventListener('change', refreshMargin);
 
-  // Initial hydrate
   selClient.value = initialClientId;
   await refreshClientRoles(initialClientId);
   attachUkDatePicker(inFrom); attachUkDatePicker(inTo);
@@ -2488,11 +2482,11 @@ async function openClientRateModal(client_id, existing) {
 
   const title = existing ? 'Edit Client Default Rate' : 'Add/Upsert Client Default Rate';
 
+  // IMPORTANT: throw on validation errors to keep modal OPEN
   showModal(title, [{ key:'form', label:'Form' }], () => formHtml, async () => {
-    // stale-guard
     if (parentToken !== modalCtx.openToken || parentEntity !== 'clients' || modalCtx.data?.id !== client_id) {
       alert('This rate form is no longer current. Please reopen it.');
-      return;
+      throw new Error('STALE_CONTEXT');
     }
 
     const raw = collectForm('#clientRateForm');
@@ -2501,22 +2495,22 @@ async function openClientRateModal(client_id, existing) {
     let role = raw.role;
     const newRole = (document.getElementById('cl_role_new')?.value || '').trim();
     if (role === '__OTHER__') {
-      if (!newRole) { alert('Enter a new role code'); return; }
+      if (!newRole) { alert('Enter a new role code'); throw new Error('VALIDATION'); }
       role = newRole.toUpperCase();
       invalidateGlobalRoleOptionsCache && invalidateGlobalRoleOptionsCache();
       try { window.dispatchEvent(new CustomEvent('global-roles-updated')); } catch {}
     }
-    if (!role) { alert('Role is required'); return; }
-    if (!raw.rate_type) { alert('Rate type is required'); return; }
-    if (!raw.date_from) { alert('Effective from is required'); return; }
+    if (!role) { alert('Role is required'); throw new Error('VALIDATION'); }
+    if (!raw.rate_type) { alert('Rate type is required'); throw new Error('VALIDATION'); }
+    if (!raw.date_from) { alert('Effective from is required'); throw new Error('VALIDATION'); }
 
     const isoFrom = parseUkDateToIso(raw.date_from);
-    if (!isoFrom) { alert('Invalid Effective from date'); return; }
+    if (!isoFrom) { alert('Invalid Effective from date'); throw new Error('VALIDATION'); }
     let isoTo = null;
     if (raw.date_to) {
       isoTo = parseUkDateToIso(raw.date_to);
-      if (!isoTo) { alert('Invalid Effective to date'); return; }
-      if (isoTo < isoFrom) { alert('Effective to cannot be before Effective from'); return; }
+      if (!isoTo) { alert('Invalid Effective to date'); throw new Error('VALIDATION'); }
+      if (isoTo < isoFrom) { alert('Effective to cannot be before Effective from'); throw new Error('VALIDATION'); }
     }
 
     // Build staged row (uniqueness: client_id, role, band, date_from, rate_type)
@@ -2549,7 +2543,7 @@ async function openClientRateModal(client_id, existing) {
     const hasOverlap = others.some(r => rangesOverlap(staged.date_from, staged.date_to, r.date_from || null, r.date_to || null));
     if (hasOverlap) {
       alert('Date range overlaps an existing client default for the same role/band and rate type.');
-      return;
+      throw new Error('VALIDATION');
     }
 
     // Stage into parent state (edit in place or push new)
@@ -2561,17 +2555,15 @@ async function openClientRateModal(client_id, existing) {
       modalCtx.ratesState.push(staged);
     }
 
-    // === NEW: confirm + auto-mirror SHARED charge across the other rate_type ===
+    // === confirm + auto-mirror SHARED charge across the other rate_type ===
     (function mirrorSharedChargeWithConfirm() {
       const src = staged;
       const otherType = src.rate_type === 'PAYE' ? 'UMBRELLA' : 'PAYE';
 
-      // detect if any charge is set
       const hasAnyCharge =
         src.charge_day != null || src.charge_night != null ||
         src.charge_sat != null || src.charge_sun != null || src.charge_bh != null;
 
-      // detect if charges changed (for edit) — only then prompt
       const chargesChanged = existing
         ? (
             (existing.charge_day   ?? null) !== (src.charge_day   ?? null) ||
@@ -2593,7 +2585,6 @@ async function openClientRateModal(client_id, existing) {
         String((r.rate_type || '').toUpperCase()) === otherType
       );
 
-      // Determine whether mirroring will create or update
       const willCreateOther = (idx < 0);
       const willUpdateOther = (idx >= 0) && (
         (rows[idx].charge_day   ?? null) !== (src.charge_day   ?? null) ||
@@ -2603,20 +2594,16 @@ async function openClientRateModal(client_id, existing) {
         (rows[idx].charge_bh    ?? null) !== (src.charge_bh    ?? null)
       );
 
-      if (!willCreateOther && !willUpdateOther) return; // nothing to mirror
+      if (!willCreateOther && !willUpdateOther) return;
 
       const otherLabel = (otherType === 'PAYE') ? 'PAYE charge rates' : 'Umbrella charge rates';
       const message =
         `This will automatically update the ${otherLabel} for the same Role/Band and Date window to match ` +
         `the charges you’ve entered here. Do you want to continue?`;
 
-      if (!window.confirm(message)) {
-        // User opted out — keep current row, do not mirror
-        return;
-      }
+      if (!window.confirm(message)) return;
 
       if (idx >= 0) {
-        // Update the counterpart's CHARGE only (leave its PAY as-is)
         const tgt = { ...rows[idx] };
         tgt.charge_day   = src.charge_day;
         tgt.charge_night = src.charge_night;
@@ -2625,7 +2612,6 @@ async function openClientRateModal(client_id, existing) {
         tgt.charge_bh    = src.charge_bh;
         rows[idx] = tgt;
       } else {
-        // Create a twin row with same charge; PAY remains nulls
         rows.push({
           client_id: src.client_id,
           role: src.role,
@@ -2643,7 +2629,7 @@ async function openClientRateModal(client_id, existing) {
       }
     })();
 
-    // child closes via Apply; parent handles persistence
+    // returning (no throw) means success → modal will close
   }, false, () => {
     const parent = window.__modalStack && window.__modalStack[window.__modalStack.length-1];
     if (parent) { parent.currentTabKey = 'rates'; parent.setTab('rates'); }
@@ -2669,10 +2655,8 @@ async function openClientRateModal(client_id, existing) {
 
   attachUkDatePicker(inFrom); attachUkDatePicker(inTo);
 
-  // Live margin preview inside this modal (uses local inputs only)
   async function refreshClientMargin() {
     const s = await getSettingsCached();
-    // robust ERNI% conversion
     const erniPct = (() => {
       const v = s?.erni_pct;
       if (v == null) return 0;
