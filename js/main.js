@@ -1660,15 +1660,29 @@ function discardAllModalsAndState(){
   console.debug('[MODAL] hard reset complete');
 }
 
-
-
 function confirmDiscardChangesIfDirty(){
-  if (!isAnyModalDirty()) return true;
+  if (!isAnyModalDirty()) return true; // not dirty → acts as plain "Close" guard
   const ok = window.confirm('You have unsaved changes. Discard them and continue?');
   if (!ok) return false;
+
+  // Sanitize geometry before teardown
+  const m = byId('modal');
+  if (m) {
+    m.style.position = '';
+    m.style.left = '';
+    m.style.top = '';
+    m.style.right = '';
+    m.style.bottom = '';
+    m.style.transform = '';
+    m.classList.remove('dragging');
+  }
+  document.onmousemove = null;
+  document.onmouseup   = null;
+
   discardAllModalsAndState();
   return true;
 }
+
 
 // ====================== mountCandidateRatesTab (FIXED) ======================
 async function mountCandidateRatesTab(){
@@ -2689,6 +2703,22 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
   if (!window.__modalStack) window.__modalStack = [];
   const closeToken = (showModal._tokenCounter = (showModal._tokenCounter || 0) + 1);
 
+  // local helper to sanitize geometry/handlers before any close/re-render
+  function sanitizeModalGeometry() {
+    const m = byId('modal');
+    if (m) {
+      m.style.position = '';
+      m.style.left = '';
+      m.style.top = '';
+      m.style.right = '';
+      m.style.bottom = '';
+      m.style.transform = '';
+      m.classList.remove('dragging');
+    }
+    document.onmousemove = null;
+    document.onmouseup   = null;
+  }
+
   const frame = {
     title,
     tabs: Array.isArray(tabs) ? tabs.slice() : [],
@@ -2739,7 +2769,10 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
       if (this._detachDirty) { try { this._detachDirty(); } catch(_){}; this._detachDirty = null; }
       const root = byId('modalBody');
       if (!root) return;
-      const onDirty = ()=>{ this.isDirty = true; };
+      const onDirty = ()=>{ 
+        this.isDirty = true; 
+        updateSecondaryLabel(); 
+      };
       root.addEventListener('input', onDirty, true);
       root.addEventListener('change', onDirty, true);
       this._detachDirty = ()=>{
@@ -2777,6 +2810,7 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
       this.currentTabKey = k;
       this._attachDirtyTracker();
       this._hasMountedOnce = true; // ← first mount complete; future tab switches may persist
+      updateSecondaryLabel();
     }
   };
 
@@ -2819,13 +2853,21 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
     delBtn.style.display = top.hasId ? '' : 'none';
     delBtn.onclick = openDelete;
 
+    function updateSecondaryLabel() {
+      const label = top.isDirty ? 'Discard' : 'Close';
+      discardBtn.textContent = label;
+      discardBtn.setAttribute('aria-label', label);
+      discardBtn.setAttribute('title', top.isDirty ? 'Discard changes and close' : 'Close');
+    }
+    updateSecondaryLabel();
+
     primaryBtn.onclick = async () => {
       top.persistCurrentTabState();
 
-      // onSave may already close the frame
       if (typeof top.onSave === 'function') {
         await top.onSave();
         top.isDirty = false;
+        updateSecondaryLabel();
       }
 
       // If onSave already popped this frame, stop
@@ -2833,6 +2875,9 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
         console.debug('[MODAL] primary close handled by onSave');
         return;
       }
+
+      // Sanitize geometry before any close/re-render
+      sanitizeModalGeometry();
 
       if (isChild) {
         if (top._detachDirty) { try { top._detachDirty(); } catch(_){}; top._detachDirty = null; }
@@ -2849,11 +2894,21 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
       }
     };
 
-    discardBtn.textContent = 'Discard';
-    discardBtn.setAttribute('title', 'Discard changes and close');
-    discardBtn.setAttribute('aria-label', 'Discard changes and close');
+    discardBtn.textContent = top.isDirty ? 'Discard' : 'Close';
+    discardBtn.setAttribute('title', top.isDirty ? 'Discard changes and close' : 'Close');
+    discardBtn.setAttribute('aria-label', top.isDirty ? 'Discard' : 'Close');
+
     discardBtn.onclick = () => {
-      console.debug('[MODAL] discard click', { title: top.title, depth, closeToken });
+      console.debug('[MODAL] discard/close click', { title: top.title, depth, closeToken, isDirty: top.isDirty });
+
+      if (top.isDirty) {
+        const ok = window.confirm('You have unsaved changes. Discard them and close?');
+        if (!ok) return;
+      }
+
+      // Sanitize geometry before any close/re-render
+      sanitizeModalGeometry();
+
       const closing = window.__modalStack.pop();
       if (closing && closing._detachDirty) { try { closing._detachDirty(); } catch(_){}; closing._detachDirty = null; }
 
@@ -2882,6 +2937,7 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
 }
 
 
+
 // =============================== closeModal (kept) ===============================
 function closeModal(){
   if (!window.__modalStack || !window.__modalStack.length) {
@@ -2889,6 +2945,20 @@ function closeModal(){
     discardAllModalsAndState();
     return;
   }
+
+  // Sanitize geometry before changing frames
+  const m = byId('modal');
+  if (m) {
+    m.style.position = '';
+    m.style.left = '';
+    m.style.top = '';
+    m.style.right = '';
+    m.style.bottom = '';
+    m.style.transform = '';
+    m.classList.remove('dragging');
+  }
+  document.onmousemove = null;
+  document.onmouseup   = null;
 
   const closing = window.__modalStack.pop();
   if (closing && closing._detachDirty) {
@@ -2921,6 +2991,7 @@ function closeModal(){
     discardAllModalsAndState();
   }
 }
+
 
 // ===== Small helpers =====
 const html = (s)=> s;
