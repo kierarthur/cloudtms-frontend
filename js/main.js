@@ -1522,6 +1522,12 @@ async function openCandidate(row) {
       }
 
       if (!payload.pay_method) payload.pay_method = isNew ? 'PAYE' : (row?.pay_method || 'PAYE');
+
+      // ✅ FIX: if Pay tab wasn’t opened, honour existing umbrella_id for UMBRELLA before validating.
+      if (payload.pay_method === 'UMBRELLA' && (!payload.umbrella_id || payload.umbrella_id === '') && row?.umbrella_id) {
+        payload.umbrella_id = row.umbrella_id;
+      }
+
       if (isNew && !payload.first_name && !payload.last_name) { alert('Enter at least a first or last name.'); return; }
       if (payload.pay_method === 'PAYE') payload.umbrella_id = null;
       else {
@@ -1626,7 +1632,6 @@ async function openCandidate(row) {
     } catch (e) { console.error('fetchRelated timesheets failed', e); }
   }
 }
-
 
 
 // ====================== mountCandidatePayTab (FIXED) ======================
@@ -1868,9 +1873,10 @@ function renderCandidateTab(key, row = {}) {
     </div>
   `);
 
+  // ✅ FIX: remove the top-level "Add rate override" button here.
+  // renderCandidateRatesTable() is the single place that renders the Add button (in both empty/non-empty states).
   if (key === 'rates') return html(`
     <div id="tab-rates">
-      <div class="actions"><button id="btnAddRate">Add rate override</button></div>
       <div id="ratesTable"></div>
     </div>
   `);
@@ -1908,6 +1914,7 @@ function renderCandidateTab(key, row = {}) {
     </div>
   `);
 }
+
 
 // === DIRTY NAVIGATION GUARDS (add) ===
 function isAnyModalDirty(){
@@ -2033,7 +2040,8 @@ async function openCandidateRateModal(candidate_id, existing) {
 
   const clients = await listClientsBasic();
   const clientOptions = clients.map(c => `<option value="${c.id}">${c.name}</option>`).join('');
-  const initialClientId = existing?.client_id || (clients[0]?.id || '');
+  // ✅ FIX: do NOT auto-select the first client for new overrides; start blank.
+  const initialClientId = existing?.client_id || '';
 
   const defaultRateType = existing?.rate_type
     ? String(existing.rate_type).toUpperCase()
@@ -2127,7 +2135,7 @@ async function openCandidateRateModal(candidate_id, existing) {
 
       const band = (raw.band || '').trim() || null;
 
-      // ✅ Gate by client defaults for this (client, role, band|null) active on isoFrom
+      // Gate by client defaults for this (client, role, band|null) active on isoFrom
       const candidatesForRole = (cache.windows || []).filter(w => w.role === role && w.date_from <= isoFrom && (!w.date_to || w.date_to >= isoFrom));
       if (!candidatesForRole.length) {
         alert(`No active client default window for role ${role} at ${formatIsoToUk(isoFrom)}.`); 
@@ -2232,61 +2240,61 @@ async function openCandidateRateModal(candidate_id, existing) {
   attachUkDatePicker(inFrom);
   attachUkDatePicker(inTo);
 
- async function refreshClientRoles(clientId) {
-  selRole.innerHTML = `<option value="">Select role…</option>`;
-  selRole.disabled = true; 
-  bandRow.style.display = 'none'; 
-  selBand.innerHTML = '';
-  if (!clientId) return;
-
-  const active_on = parseUkDateToIso(inFrom.value || '') || null;
-
-  // Unified client defaults; no rate_type filter
-  const list = await listClientRates(clientId, { active_on });
-  if (parentToken !== modalCtx.openToken || modalCtx.entity !== 'candidates' || modalCtx.data?.id !== parentId) return;
-
-  cache.windows = Array.isArray(list) ? list : [];
-
-  // Build role set and available bands (track band-null as '' so we can offer "(none)")
-  const roles = new Set(); 
-  const bandsByRole = {};
-  (cache.windows).forEach(w => {
-    if (!w.role) return;
-    roles.add(w.role);
-    const bKey = (w.band == null ? '' : String(w.band));
-    (bandsByRole[w.role] ||= new Set()).add(bKey);
-  });
-
-  // Candidate’s own roles filter
-  const liveRoles = Array.isArray(modalCtx?.rolesState) && modalCtx.rolesState.length
-    ? modalCtx.rolesState
-    : (Array.isArray(modalCtx?.data?.roles) ? modalCtx.data.roles : []);
-  const candRoleCodes = new Set((liveRoles || []).map(x => String(x.code)));
-
-  const allowed = [...roles].filter(code => candRoleCodes.has(code)).sort((a,b)=> a.localeCompare(b));
-  if (!allowed.length) {
+  async function refreshClientRoles(clientId) {
     selRole.innerHTML = `<option value="">Select role…</option>`;
-    selRole.disabled = true;
-    alert("This candidate has no matching roles for this client's active windows at the selected start date.");
-    return;
+    selRole.disabled = true; 
+    bandRow.style.display = 'none'; 
+    selBand.innerHTML = '';
+    if (!clientId) return;
+
+    const active_on = parseUkDateToIso(inFrom.value || '') || null;
+
+    // ✅ Unified client defaults; no rate_type filter
+    const list = await listClientRates(clientId, { active_on });
+    if (parentToken !== modalCtx.openToken || modalCtx.entity !== 'candidates' || modalCtx.data?.id !== parentId) return;
+
+    cache.windows = Array.isArray(list) ? list : [];
+
+    // Build role set and available bands (track band-null as '' so we can offer "(none)")
+    const roles = new Set(); 
+    const bandsByRole = {};
+    (cache.windows).forEach(w => {
+      if (!w.role) return;
+      roles.add(w.role);
+      const bKey = (w.band == null ? '' : String(w.band));
+      (bandsByRole[w.role] ||= new Set()).add(bKey);
+    });
+
+    // Candidate’s own roles filter
+    const liveRoles = Array.isArray(modalCtx?.rolesState) && modalCtx.rolesState.length
+      ? modalCtx.rolesState
+      : (Array.isArray(modalCtx?.data?.roles) ? modalCtx.data.roles : []);
+    const candRoleCodes = new Set((liveRoles || []).map(x => String(x.code)));
+
+    const allowed = [...roles].filter(code => candRoleCodes.has(code)).sort((a,b)=> a.localeCompare(b));
+    if (!allowed.length) {
+      selRole.innerHTML = `<option value="">Select role…</option>`;
+      selRole.disabled = true;
+      alert("This candidate has no matching roles for this client's active windows at the selected start date.");
+      return;
+    }
+
+    selRole.innerHTML = `<option value="">Select role…</option>` + 
+                        allowed.map(code => `<option value="${code}">${code}</option>`).join('');
+    selRole.disabled = false;
+
+    cache.roles = allowed;
+    // Convert band sets to arrays (include '' when band-null exists so UI can show “(none)”)
+    cache.bandsByRole = Object.fromEntries(
+      allowed.map(code => [code, [...(bandsByRole[code] || new Set())]])
+    );
+
+    if (existing?.role) {
+      selRole.value = existing.role;
+      selRole.dispatchEvent(new Event('change'));
+      if (existing?.band != null) selBand.value = existing.band;
+    }
   }
-
-  selRole.innerHTML = `<option value="">Select role…</option>` + 
-                      allowed.map(code => `<option value="${code}">${code}</option>`).join('');
-  selRole.disabled = false;
-
-  cache.roles = allowed;
-  // Convert band sets to arrays (include '' when band-null exists so UI can show “(none)”)
-  cache.bandsByRole = Object.fromEntries(
-    allowed.map(code => [code, [...(bandsByRole[code] || new Set())]])
-  );
-
-  if (existing?.role) {
-    selRole.value = existing.role;
-    selRole.dispatchEvent(new Event('change'));
-    if (existing?.band != null) selBand.value = existing.band;
-  }
-}
 
   function onRoleChanged() {
     const role = selRole.value;
@@ -2358,8 +2366,11 @@ async function openCandidateRateModal(candidate_id, existing) {
   selRole.addEventListener('change', onRoleChanged);
   selBand.addEventListener('change', refreshMargin);
 
-  selClient.value = initialClientId;
-  await refreshClientRoles(initialClientId);
+  // ✅ FIX: only pre-select & refresh when editing an existing override with a client.
+  if (initialClientId) {
+    selClient.value = initialClientId;
+    await refreshClientRoles(initialClientId);
+  }
   attachUkDatePicker(inFrom); 
   attachUkDatePicker(inTo);
   if (existing?.role) {
@@ -2369,8 +2380,6 @@ async function openCandidateRateModal(candidate_id, existing) {
   }
   await refreshMargin();
 }
-
-
 
 
 function renderCalendar(timesheets){
