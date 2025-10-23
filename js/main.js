@@ -3910,8 +3910,8 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
     _detachDirty: null,
     _detachGlobal: null,
     _hasMountedOnce: false,
-    _wired: false,      // ⬅️ single-attach guard for global listeners
-    _closing: false,    // ⬅️ re-entrancy guard for close/discard
+    _wired: false,      // single-attach guard for global listeners
+    _closing: false,    // re-entrancy guard for close/discard
 
     persistCurrentTabState() {
       const back = byId('modalBack');
@@ -3999,7 +3999,7 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
     const top = window.__modalStack[window.__modalStack.length - 1];
     const isChild = depth > 1;
 
-    // 🔒 Ensure we don't keep stale global listeners between renders
+    // Ensure we don't keep stale global listeners between renders
     if (typeof top._detachGlobal === 'function') {
       try { top._detachGlobal(); } catch(_) {}
       top._wired = false;
@@ -4047,20 +4047,16 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
 
     const onDirtyLabel = () => updateSecondaryLabel();
 
-    // 🧰 Global wiring — single-attach with guard
+    // Global wiring — single-attach with guard
     if (!top._wired) {
-      // label updates when anything becomes dirty
       window.addEventListener('modal-dirty', onDirtyLabel);
 
-      // ESC to close (with discard confirm if dirty)
       const onEsc = (e) => { if (e.key === 'Escape') { e.preventDefault(); handleSecondary(); } };
       window.addEventListener('keydown', onEsc);
 
-      // Click outside (overlay) to close
       const onOverlayClick = (e) => { if (e.target === backEl) handleSecondary(); };
       backEl.addEventListener('click', onOverlayClick, true);
 
-      // Assign detach to remove exactly these listeners
       top._detachGlobal = () => {
         try { window.removeEventListener('modal-dirty', onDirtyLabel); } catch {}
         try { window.removeEventListener('keydown', onEsc); } catch {}
@@ -4071,7 +4067,7 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
     }
 
     const handleSecondary = () => {
-      // 🔒 Re-entrancy guard to prevent multiple confirms
+      // Re-entrancy guard to prevent multiple confirms
       if (top._closing) return;
       top._closing = true;
 
@@ -4114,7 +4110,6 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
             shouldClose = false;
           }
         } catch (e) {
-          // validation/API error → keep modal open
           shouldClose = false;
         }
       }
@@ -4147,8 +4142,7 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
       }
     };
 
-    // Secondary (Discard/Close)
-    const discardBtn = byId('btnCloseModal'); // re-select in case DOM re-rendered
+    // Secondary (Discard/Close) — just assign, no redeclare
     discardBtn.onclick = handleSecondary;
 
     // Drag (unchanged)
