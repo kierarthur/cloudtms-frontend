@@ -381,6 +381,7 @@ async function openSearchModal(){
 // ===================== NEW HELPERS (UI + data) =====================
 
 // Cache for global roles
+// Cache for global roles
 let __GLOBAL_ROLE_CODES_CACHE__ = null;
 let __GLOBAL_ROLE_CODES_CACHE_TS__ = 0;
 function invalidateGlobalRoleOptionsCache(){
@@ -394,14 +395,15 @@ async function loadGlobalRoleOptions(){
   if (__GLOBAL_ROLE_CODES_CACHE__ && (now - __GLOBAL_ROLE_CODES_CACHE_TS__ < 60_000)) {
     return __GLOBAL_ROLE_CODES_CACHE__;
   }
-  const list = await listClientRates(); // no client_id → all
+  const list = await listClientRates().catch(() => []);  // unified windows; no rate_type
   const set = new Set();
-  (list || []).forEach(r => { if (r.role) set.add(r.role); });
-  const arr = [...set].sort((a,b)=> a.localeCompare(b));
+  (list || []).forEach(r => { if (r && r.role) set.add(String(r.role)); });
+  const arr = [...set].sort((a,b)=> a.localeCompare(b)); // <-- fixed
   __GLOBAL_ROLE_CODES_CACHE__ = arr;
   __GLOBAL_ROLE_CODES_CACHE_TS__ = now;
   return arr;
 }
+
 
 // Render roles editor into a container; updates modalCtx.rolesState
 function renderRolesEditor(container, rolesState, allRoleOptions){
@@ -545,6 +547,157 @@ function renderRolesEditor(container, rolesState, allRoleOptions){
   };
 
   // Initial render
+  refreshAddSelect();
+  renderList();
+}function renderRolesEditor(container, rolesState, allRoleOptions){
+  // Local, mutable copy of available options so we can refresh after adds/removes
+  let roleOptions = Array.isArray(allRoleOptions) ? allRoleOptions.slice() : [];
+
+  container.innerHTML = `
+    <div class="roles-editor">
+      <div class="roles-add">
+        <select id="rolesAddSelect">
+          <option value="">Add role…</option>
+          ${roleOptions.map(code => `<option value="${code}">${code}</option>`).join('')}
+        </select>
+        <button id="rolesAddBtn" type="button">Add</button>
+      </div>
+      <ul id="rolesList" class="roles-list"></ul>
+    </div>
+  `;
+
+  const sel = container.querySelector('#rolesAddSelect');
+  const btn = container.querySelector('#rolesAddBtn');
+  const ul  = container.querySelector('#rolesList');
+
+  const byCode = (code) => (rolesState || []).find(r => String(r.code) === String(code));
+
+  function availableOptions(){
+    const picked = new Set((rolesState||[]).map(x => x.code));
+    return roleOptions.filter(code => !picked.has(code));
+  }
+
+  function refreshAddSelect(){
+    const opts = ['<option value="">Add role…</option>']
+      .concat(availableOptions().map(code => `<option value="${code}">${code}</option>`))
+      .join('');
+    sel.innerHTML = opts;
+  }
+
+  function renderList(){
+    ul.innerHTML = '';
+    // Always render in current rank order
+    const arr = (rolesState||[]).slice().sort((a,b)=> (a.rank||0) - (b.rank||0));
+
+    arr.forEach((item, idx) => {
+      const li = document.createElement('li');
+      li.className = 'role-item';
+      li.draggable = true;
+      li.dataset.index = String(idx);
+
+      li.innerHTML = `
+        <span class="drag" title="Drag to reorder" style="cursor:grab">⋮⋮</span>
+        <span class="rank">${idx+1}.</span>
+        <span class="code">${item.code}</span>
+        <input class="label" type="text" placeholder="Optional label…" value="${item.label || ''}" />
+        <button class="remove" type="button" title="Remove">✕</button>
+      `;
+
+      // Remove by identity (code), not by stale index
+      li.querySelector('.remove').onclick = () => {
+        rolesState = (rolesState || []).filter(r => r.code !== item.code);
+        // Re-rank 1..N
+        rolesState.forEach((r,i)=> r.rank = i+1);
+        rolesState = normaliseRolesForSave(rolesState);
+        modalCtx.rolesState = rolesState;
+        renderList(); refreshAddSelect();
+      };
+
+      // Label edits by identity
+      li.querySelector('.label').oninput = (e) => {
+        const rec = byCode(item.code);
+        if (rec) rec.label = e.target.value;
+        modalCtx.rolesState = rolesState;
+      };
+
+      // Drag payload
+      li.addEventListener('dragstart', (e) => {
+        const from = li.dataset.index || String(idx);
+        try { e.dataTransfer.setData('text/x-role-index', from); } catch {}
+        try { e.dataTransfer.setData('text/plain', from); } catch {}
+        if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move';
+        li.classList.add('dragging');
+      });
+      li.addEventListener('dragend', () => {
+        li.classList.remove('dragging');
+        ul.querySelectorAll('.over').forEach(n => n.classList.remove('over'));
+      });
+
+      ul.appendChild(li);
+    });
+  }
+
+  // Delegate DnD: highlight target & allow drop
+  ul.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    const overLi = e.target && e.target.closest('li.role-item');
+    ul.querySelectorAll('.over').forEach(n => n.classList.remove('over'));
+    if (overLi) overLi.classList.add('over');
+    if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+  });
+
+  ul.addEventListener('drop', (e) => {
+    e.preventDefault();
+    const toLi = e.target && e.target.closest('li.role-item');
+    if (!toLi) return;
+
+    // Read source index; support custom & plain types
+    let from = NaN;
+    try { from = parseInt(e.dataTransfer.getData('text/x-role-index'), 10); } catch {}
+    if (isNaN(from)) {
+      try { from = parseInt(e.dataTransfer.getData('text/plain'), 10); } catch {}
+    }
+    const to = parseInt(toLi.dataset.index, 10);
+    if (!Number.isInteger(from) || !Number.isInteger(to) || from === to) return;
+
+    // Reorder against current rank-sorted view
+    const view = (rolesState||[]).slice().sort((a,b)=> (a.rank||0) - (b.rank||0));
+    const [moved] = view.splice(from, 1);
+    view.splice(to, 0, moved);
+
+    // ✅ KEY FIX: rewrite ranks to match the NEW order before normalising
+    view.forEach((r,i)=> r.rank = i+1);
+
+    // Normalise (dedupe/tidy) without losing the new order
+    rolesState = normaliseRolesForSave(view);
+    modalCtx.rolesState = rolesState;
+
+    // Re-render so the list reflects the swap immediately
+    renderList();
+    refreshAddSelect();
+  });
+
+  // Add role
+  btn.onclick = () => {
+    const code = sel.value;
+    if (!code) return;
+    if ((rolesState||[]).some(r => r.code === code)) return; // no duplicates
+    const nextRank = ((rolesState||[]).length || 0) + 1;
+    rolesState = [...(rolesState||[]), { code, rank: nextRank }];
+    rolesState = normaliseRolesForSave(rolesState);
+    modalCtx.rolesState = rolesState;
+    renderList(); refreshAddSelect();
+  };
+
+  // Expose a tiny API for refreshing options live
+  container.__rolesEditor = {
+    updateOptions(newOptions){
+      roleOptions = Array.isArray(newOptions) ? newOptions.slice() : [];
+      refreshAddSelect();
+    }
+  };
+
+  // Initial paint
   refreshAddSelect();
   renderList();
 }
@@ -3757,6 +3910,8 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
     _detachDirty: null,
     _detachGlobal: null,
     _hasMountedOnce: false,
+    _wired: false,      // ⬅️ single-attach guard for global listeners
+    _closing: false,    // ⬅️ re-entrancy guard for close/discard
 
     persistCurrentTabState() {
       const back = byId('modalBack');
@@ -3844,6 +3999,12 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
     const top = window.__modalStack[window.__modalStack.length - 1];
     const isChild = depth > 1;
 
+    // 🔒 Ensure we don't keep stale global listeners between renders
+    if (typeof top._detachGlobal === 'function') {
+      try { top._detachGlobal(); } catch(_) {}
+      top._wired = false;
+    }
+
     byId('modalTitle').textContent = top.title;
 
     const tabsEl = byId('modalTabs');
@@ -3885,19 +4046,46 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
     updateSecondaryLabel();
 
     const onDirtyLabel = () => updateSecondaryLabel();
-    window.addEventListener('modal-dirty', onDirtyLabel);
+
+    // 🧰 Global wiring — single-attach with guard
+    if (!top._wired) {
+      // label updates when anything becomes dirty
+      window.addEventListener('modal-dirty', onDirtyLabel);
+
+      // ESC to close (with discard confirm if dirty)
+      const onEsc = (e) => { if (e.key === 'Escape') { e.preventDefault(); handleSecondary(); } };
+      window.addEventListener('keydown', onEsc);
+
+      // Click outside (overlay) to close
+      const onOverlayClick = (e) => { if (e.target === backEl) handleSecondary(); };
+      backEl.addEventListener('click', onOverlayClick, true);
+
+      // Assign detach to remove exactly these listeners
+      top._detachGlobal = () => {
+        try { window.removeEventListener('modal-dirty', onDirtyLabel); } catch {}
+        try { window.removeEventListener('keydown', onEsc); } catch {}
+        try { backEl.removeEventListener('click', onOverlayClick, true); } catch {}
+      };
+
+      top._wired = true;
+    }
 
     const handleSecondary = () => {
+      // 🔒 Re-entrancy guard to prevent multiple confirms
+      if (top._closing) return;
+      top._closing = true;
+
       if (top.isDirty) {
         const ok = window.confirm('You have unsaved changes. Discard them and close?');
-        if (!ok) return;
+        if (!ok) { top._closing = false; return; }
       }
 
       sanitizeModalGeometry();
 
       const closing = window.__modalStack.pop();
       if (closing && closing._detachDirty) { try { closing._detachDirty(); } catch(_){}; closing._detachDirty = null; }
-      window.removeEventListener('modal-dirty', onDirtyLabel);
+      if (closing && closing._detachGlobal) { try { closing._detachGlobal(); } catch(_){}; closing._detachGlobal = null; }
+      top._wired = false;
 
       if (window.__modalStack.length > 0) {
         renderTop();
@@ -3942,7 +4130,8 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
 
       if (isChild) {
         if (top._detachDirty) { try { top._detachDirty(); } catch(_){}; top._detachDirty = null; }
-        window.removeEventListener('modal-dirty', onDirtyLabel);
+        if (top._detachGlobal) { try { top._detachGlobal(); } catch(_){}; top._detachGlobal = null; }
+        top._wired = false;
         window.__modalStack.pop();
         if (window.__modalStack.length > 0) {
           const parent = window.__modalStack[window.__modalStack.length - 1];
@@ -3952,24 +4141,15 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
           discardAllModalsAndState();
         }
       } else {
-        window.removeEventListener('modal-dirty', onDirtyLabel);
+        if (top._detachGlobal) { try { top._detachGlobal(); } catch(_){}; top._detachGlobal = null; }
+        window.removeEventListener('modal-dirty', onDirtyLabel); // safety
         discardAllModalsAndState();
       }
     };
 
+    // Secondary (Discard/Close)
+    const discardBtn = byId('btnCloseModal'); // re-select in case DOM re-rendered
     discardBtn.onclick = handleSecondary;
-
-    const onOverlayClick = (e) => { if (e.target === backEl) handleSecondary(); };
-    backEl.addEventListener('click', onOverlayClick, { capture: true });
-
-    const onEsc = (e) => { if (e.key === 'Escape') { e.preventDefault(); handleSecondary(); } };
-    window.addEventListener('keydown', onEsc);
-
-    top._detachGlobal = () => {
-      window.removeEventListener('modal-dirty', onDirtyLabel);
-      backEl.removeEventListener('click', onOverlayClick, { capture: true });
-      window.removeEventListener('keydown', onEsc);
-    };
 
     // Drag (unchanged)
     const modal = byId('modal');
