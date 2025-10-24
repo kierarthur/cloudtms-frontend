@@ -757,9 +757,9 @@ async function openLoadSearchModal(section){
 // - Provide inline Save/Load buttons that open child modals
 // -----------------------------
 async function openSearchModal(opts = {}) {
-  const TIMESHEET_STATUS = ['ERROR','RECEIVED','REVOKED','STORED','SAT','SUN','BH']; // unchanged logic
-  const INTHOOK = ['DRAFT','PAID','CANCELLED']; // if you need these; rename as per your codebase
+  const TIMESHEET_STATUS = ['ERROR','RECEIVED','REVOKED','STORED','SAT','SUN','BH'];
 
+  // small helpers for consistent form markup
   function boolSelect(name, label){
     return `
       <div class="row">
@@ -777,11 +777,11 @@ async function openSearchModal(opts = {}) {
         <label>${labelFrom}</label><input class="input" type="text" placeholder="DD/MM/YYYY" name="${nameFrom}" />
       </div>
       <div class="row">
-        <label>${labelTo}</label><input class="input" type="text"   placeholder="DD/MM/YYYY" name="${nameTo}" />
+        <label>${labelTo}</label><input class="input" type="text" placeholder="DD/MM/YYYY" name="${nameTo}" />
       </div>`;
   }
   function multi(name, label, values){
-    const opts = values.map(v=>`<option value="${v}">${v}</option>`).join('');
+    const opts = values.map(v => `<option value="${v}">${v}</option>`).join('');
     return `
       <div class="row">
         <label>${label}</label>
@@ -789,18 +789,18 @@ async function openSearchModal(opts = {}) {
       </div>`;
   }
 
-  // Section-specific form content (unchanged)
+  // Build section-specific form content (no stray/undefined identifiers)
   let inner = '';
-  if (currentSection === 'candidates'){
+  if (currentSection === 'candidates') {
     const roles = await loadGlobalRoleOptions();
-    const roleOpts = roles.map(r=>`<option value="${r}">${r}</option>`).join('');
+    const roleOpts = Array.isArray(roles) ? roles.map(r => `<option value="${r}">${r}</option>`).join('') : '';
     inner = `
       ${input('first_name','First name','')}
       ${input('last_name','Last name','')}
       ${input('email','Email','')}
       ${input('phone','Telephone','')}
       <div class="row"><label>Pay method</label>
-        <select name="${'pay_method'}">
+        <select name="pay_method">
           <option value="">Any</option>
           <option value="PAYE">PAYE</option>
           <option value="UMBRELLA">UMBRELLA</option>
@@ -808,7 +808,7 @@ async function openSearchModal(opts = {}) {
       </div>
       <div class="row">
         <label>Roles (any)</label>
-        <select name="roles_any" multiple size="6">${roleExistsHere ? roleOpts : ''}</select>
+        <select name="roles_any" multiple size="6">${roleOpts}</select>
       </div>
       ${boolSelect('active','Active')}
       ${datesUk('created_from','Created from','created_to','Created to')}
@@ -817,24 +817,24 @@ async function openSearchModal(opts = {}) {
     inner = `
       ${input('name','Client name','')}
       ${input('cli_ref','Client Ref','')}
-      ${input('primary')}}" // ensure markup closed correctly in your actual code
+      ${input('primary_email','Primary email','')}
       ${input('ap_phone','A/P phone','')}
-      ${boolSee ?? ''}      // keep your existing helpers
+      ${boolSelect('vat_charge','VAT')}
       ${datesUk('created_from','Created from','created_to','Created to')}
     `;
   } else if (currentSection === 'umbrellas') {
     inner = `
       ${input('name','Name','')}
       ${input('bank_name','Bank','')}
-      ${input('primary')}}" // ensure markup closed correctly in your actual code
-      ${boolSee ?? ''}
-      ${datesUpTo ?? ''}
+      ${boolSelect('vat_chargeable','VAT')}
+      ${boolSelect('enabled','Enabled')}
+      ${datesUk('created_from','Created from','created_to','Created to')}
     `;
   } else if (currentSection === 'timesheets') {
     inner = `
       ${input('booking_id','Booking ID','')}
-      ${input('occupant','','')}
-      ${input('hospital','Hospital','')}
+      ${input('occupant_key_norm','Occupant key','')}
+      ${input('hospital_norm','Hospital','')}
       ${datesUk('worked_from','Worked from (date)','worked_to','Worked to (date)')}
       ${multi('status','Status', TIMESHEET_STATUS)}
       ${datesUk('created_from','Created from','created_to','Created to')}
@@ -843,7 +843,7 @@ async function openSearchModal(opts = {}) {
     inner = `<div class="tabc">No filters for this section.</div>`;
   }
 
-  // Discreet inline buttons
+  // Discreet inline actions (small, neutral/secondary styles)
   const form = html(`
     <div class="form" id="searchForm">
       <div class="row" style="justify-content:flex-end; gap: .5rem; margin-bottom: .5rem;">
@@ -854,9 +854,44 @@ async function openSearchModal(opts = {}) {
     </div>
   `);
 
-  // Use showModal; it will label the primary as “Search”
-  showOpenSearchModalWithForm(form, opts); // see below helper
+  // Render the modal (showModal will set the primary CTA label to “Search” for this title)
+  showModal(
+    'Advanced Search',
+    [{ key: 'filter', label: 'Filters' }],
+    () => form,
+    async () => {
+      const filters = extractFiltersFromForm('#searchForm'); // your existing helper
+      const rows = await s
+      earch(currentSection, filters);
+      if (rows) renderSummary(rows);
+      return true; // close after successful search
+    },
+    false
+  );
+
+  // Bind modal internal controls once per open (idempotent wiring)
+  setTimeout(() => {
+    document.querySelectorAll('#searchForm input[placeholder="DD/MM/YYYY"]').forEach(attachU
+k
+DateEditor /* or your existing attachUkDatePicker */);
+
+    const saveBtn = byId('btnSaveSearch');
+    if (saveBtn) {
+      saveBtn.onclick = async () => {
+        const filters = extractFiltersFromForm('#searchForm');
+        await openSaveSearchModal(currentSection, filters);
+      };
+    }
+
+    const loadBtn = byId('btnLoadSavedSearch');
+    if (loadBtn) {
+      loadBtn.onclick = async () => {
+        await openLoadSearchModal(currentSection);
+      };
+    }
+  }, 0);
 }
+
 
 // Small helper to render Advanced Search with proper labels and idempotent wiring
 function showOpenSearchModalWithForm(form, opts = {}) {
