@@ -556,37 +556,48 @@ async function openSaveSearchModal(section, filters){
   const options = mine.map(m => `<option value="${m.id}">${m.name}</option>`).join('');
   const body = html(`
     <div class="form" id="saveSearchForm">
-      <div class="row"><label>Preset name</label><input type="text" name="preset_name" placeholder="e.g. 'PAYE RMNs last 7 days'"/></div>
+      <div class="row">
+        <label>Preset name</label>
+        <div class="controls"><input type="text" name="preset_name" placeholder="e.g. 'PAYE RMNs last 7 days'"/></div>
+      </div>
+
       <div class="row">
         <label>Mode</label>
-        <div>
-          <label><input type="radio" name="mode" value="new" checked/> Save as new</label>
-          <label style="margin-left:12px"><input type="radio" name="mode" value="overwrite"/> Overwrite existing</label>
+        <div class="controls">
+          <label class="inline"><input type="radio" name="mode" value="new" checked/> <span>Save as new</span></label>
+          <label class="inline" style="margin-left:12px"><input type="radio" name="mode" value="overwrite"/> <span>Overwrite existing</span></label>
         </div>
       </div>
+
       <div class="row" id="overwriteRow" style="display:none">
         <label>Choose preset</label>
-        <select id="overwritePresetId">${options}</select>
+        <div class="controls"><select id="overwritePresetId">${options}</select></div>
       </div>
+
       <div class="row">
-        <label>Shared</label>
-        <label><input type="checkbox" id="presetShared"/> Visible to all users</label>
+        <label>Visibility</label>
+        <div class="controls">
+          <label class="inline"><input type="checkbox" id="presetShared"/> <span>Visible to all users</span></label>
+        </div>
       </div>
+
       <div class="hint">Only you can edit/delete a shared search you own.</div>
     </div>
   `);
 
+  // Use title mapping in showModal to label primary as "Save"
   showModal('Save search', [{key:'form', label:'Details'}], ()=> body, async ()=>{
     const form = collectForm('#saveSearchForm', false);
     const mode = (form.mode || 'new').toLowerCase();
     const name = (form.preset_name || '').trim();
     const isShared = !!document.getElementById('presetShared')?.checked;
 
-    if (!name && mode === 'new') { alert('Please enter a name'); return; }
+    if (!name && mode === 'new') { alert('Please enter a name'); return false; }
+
     if (mode === 'overwrite') {
       const el = document.getElementById('overwritePresetId');
       const id = el && el.value;
-      if (!id) { alert('Select a preset to overwrite'); return; }
+      if (!id) { alert('Select a preset to overwrite'); return false; }
       await updateReportPreset({ id, name: name || undefined, filters, is_shared: isShared });
     } else {
       await createReportPreset({ section, kind:'search', name, filters, is_shared: isShared });
@@ -596,9 +607,13 @@ async function openSaveSearchModal(section, filters){
     return true; // close only this child modal
   }, false);
 
-  // wire mode toggle
+  // wire mode toggle once
   setTimeout(()=>{
-    const radios = document.querySelectorAll('#saveSearchForm input[name="mode"]');
+    const formEl = document.getElementById('saveSearchForm');
+    if (!formEl || formEl.dataset.wired === '1') return;
+    formEl.dataset.wired = '1';
+
+    const radios = formEl.querySelectorAll('input[name="mode"]');
     const row = document.getElementById('overwriteRow');
     radios.forEach(r => r.addEventListener('change', ()=> {
       row.style.display = (r.value === 'overwrite' && r.checked) ? '' : 'none';
@@ -646,8 +661,8 @@ async function openLoadSearchModal(section){
     `);
   };
 
+  // Use title mapping in showModal to label primary as "Load"
   showModal('Load saved search', [{key:'list', label:'Saved'}], renderList, async ()=>{
-    // Apply selected -> populate the parent search modal form
     if (!selectedId) { alert('Pick a saved search to apply.'); return false; }
     const chosen = (list || []).find(p => p.id === selectedId);
     if (!chosen) { alert('Preset not found.'); return false; }
@@ -655,55 +670,67 @@ async function openLoadSearchModal(section){
     return true; // close this child modal only; parent search stays open
   }, false);
 
-  // Wire table interactions & Save changes for staged deletes
+  // Wire table interactions & Save changes for staged deletes (single-attach + no duplicate footer button)
   setTimeout(()=>{
     const tbl = document.getElementById('presetTable');
-    if (!tbl) return;
+    if (tbl && !tbl.__wired) {
+      tbl.__wired = true;
+      tbl.addEventListener('click', (e)=>{
+        const tr  = e.target && e.target.closest('tr[data-id]');
+        const bin = e.target && e.target.closest('button.bin');
+        if (!tr) return;
+        const id = tr.getAttribute('data-id');
 
-    tbl.addEventListener('click', (e)=>{
-      const tr = e.target.closest('tr[data-id]');
-      const bin = e.target.closest('button.bin');
-      if (!tr) return;
-      const id = tr.getAttribute('data-id');
+        if (bin) {
+          const row = (list || []).find(p => p.id === id);
+          if (!row || row.user_id !== myId) return;
+          if (ctx.stagedDeletes.has(id)) ctx.stagedDeletes.delete(id); else ctx.stagedDeletes.add(id);
+          document.querySelector('#modalBody').innerHTML = renderList();
+          updateSaveChangesVisibility();
+          return;
+        }
 
-      if (bin) {
-        // toggle staged delete for owned presets
-        const row = (list || []).find(p => p.id === id);
-        if (!row || row.user_id !== myId) return;
-        if (ctx.stagedDeletes.has(id)) ctx.stagedDeletes.delete(id); else ctx.stagedDeletes.add(id);
-        // re-render body
-        document.querySelector('#modalBody').innerHTML = renderList();
-        return;
-      }
+        // select row
+        selectedId = id;
+        Array.from(tbl.querySelectorAll('tbody tr')).forEach(r => r.classList.toggle('selected', r.getAttribute('data-id') === id));
+      });
+    }
 
-      // pick
-      selectedId = id;
-      Array.from(tbl.querySelectorAll('tbody tr')).forEach(r => r.classList.toggle('selected', r.getAttribute('data-id') === id));
-    });
+    function updateSaveChangesVisibility(){
+      const btn = byId('btnSavePresetChanges');
+      if (!btn) return;
+      const hasChanges = ctx.stagedDeletes.size > 0 || Object.keys(ctx.stagedEdits).length > 0;
+      btn.style.display = hasChanges ? '' : 'none';
+      btn.disabled = !hasChanges;
+    }
 
-    // Add "Save changes" button next to primary Apply
     const primary = byId('btnSave');
-    if (primary) {
-      let aux = document.createElement('button');
+    if (primary && !byId('btnSavePresetChanges')) {
+      const aux = document.createElement('button');
       aux.textContent = 'Save changes';
       aux.id = 'btnSavePresetChanges';
       aux.style.marginLeft = '8px';
+      aux.style.display = 'none'; // hidden until there are staged changes
       aux.onclick = async ()=>{
         // commit deletes only (rename/share toggle could be added similarly via ctx.stagedEdits)
         for (const delId of ctx.stagedDeletes) {
           const row = (list || []).find(p => p.id === delId);
-          if (!row || row.user_id !== myId) continue; // guard
+          if (!row || row.user_id !== myId) continue;
           try { await deleteReportPreset(delId); } catch (e) { alert(String(e)); return; }
         }
         ctx.stagedDeletes.clear();
         invalidatePresetCache(section, 'search');
         list = await listReportPresets({ section, kind:'search', include_shared:true });
         document.querySelector('#modalBody').innerHTML = renderList();
+        updateSaveChangesVisibility();
       };
       primary.parentElement?.appendChild(aux);
+      // initial visibility
+      updateSaveChangesVisibility();
     }
   }, 0);
 }
+
 
 // -----------------------------
 // UPDATED: openSearchModal()
@@ -805,16 +832,16 @@ async function openSearchModal(opts = {}) {
     inner = `<div class="tabc">No advanced search for this section.</div>`;
   }
 
-  // Inline actions for Save/Load presets inside the modal
-  const form = html(`
-    <div class="form" id="searchForm">
-      <div class="row" style="justify-content:flex-end;gap:8px;margin-bottom:8px">
-        <button type="button" id="btnLoadSavedSearch">Load saved search…</button>
-        <button type="button" id="btnSaveSearch">Save search…</button>
-      </div>
-      ${inner}
+  // In your openSearchModal, update the inline button styles to be less “loud”:
+const form = html(`
+  <div class="form" id="searchForm">
+    <div class="row" style="justify-content:flex-end;gap:8px;margin-bottom:8px">
+      <button type="button" id="btnLoadSavedSearch" class="btn btn-ghost btn-sm">Load saved search…</button>
+      <button type="button" id="btnSaveSearch" class="btn btn-primary btn-sm">Save search</button>
     </div>
-  `);
+    ${inner}
+  </div>
+`);
 
   // onSave = RUN SEARCH
   showModal('Advanced Search', [{key:'filter',label:'Filters'}], ()=> form, async ()=>{
@@ -860,13 +887,12 @@ function renderTools(){
   const addBtn = (txt, cb)=>{ const b=document.createElement('button'); b.textContent = txt; b.onclick=cb; el.appendChild(b); };
 
   addBtn('Create New Record', ()=> openCreate());
-  addBtn('Edit Record', ()=> openEdit());
+  addBtn('Edit Record',   ()=> openEdit());
   addBtn('Delete Record', ()=> openDelete());
-  addBtn('Search…', ()=> openSearchModal());
-  addBtn('Saved searches…', ()=> openSearchModal({ startWithLoad: true })); // opens search modal then immediately opens presets list
+  addBtn('Search…',       ()=> openSearchModal()); // 🔧 removed "Saved searches…" per brief
 
   if (!canCreate) el.children[0].classList.add('btn');
-  if (!canEdit) el.children[1].classList.add('btn');
+  if (!canEdit)   el.children[1].classList.add('btn');
   if (!canDelete) el.children[2].classList.add('btn');
 }
 
@@ -3843,6 +3869,7 @@ function collectForm(sel, jsonTry=false){
 
 // ==== FIXED MODAL FRAMEWORK: close only on explicit success from onSave ====
 // ==== FIXED MODAL FRAMEWORK: close only on explicit success from onSave ====
+
 function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
   // Sanitize any previous geometry so we never inherit a dragged position
   const modalEl = byId('modal');
@@ -3957,7 +3984,6 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
           modalCtx.payMethodState = pmSel.value;
         }
 
-        // ✅ Re-mount Roles editor every time we enter the Main tab
         const el = document.querySelector('#rolesEditor');
         if (el) {
           (async () => {
@@ -4020,8 +4046,15 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
     const discardBtn = byId('btnCloseModal');
     const backEl     = byId('modalBack');
 
-    primaryBtn.textContent = isChild ? 'Apply' : 'Save';
-    primaryBtn.setAttribute('aria-label', isChild ? 'Apply' : 'Save');
+    // 🔧 Primary label mapping (keeps UX clean without changing signature)
+    const defaultPrimary = isChild ? 'Apply' : 'Save';
+    let primaryLabel = defaultPrimary;
+    if (top.title === 'Advanced Search')    primaryLabel = 'Search';
+    if (top.title === 'Load saved search')  primaryLabel = 'Load';
+    if (top.title === 'Save search')        primaryLabel = 'Save';
+
+    primaryBtn.textContent = primaryLabel;
+    primaryBtn.setAttribute('aria-label', primaryLabel);
 
     const delBtn = byId('btnDelete');
     delBtn.style.display = top.hasId ? '' : 'none';
@@ -4057,7 +4090,6 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
     }
 
     const handleSecondary = () => {
-      // Re-entrancy guard to prevent multiple confirms
       if (top._closing) return;
       top._closing = true;
 
@@ -4069,7 +4101,7 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
       sanitizeModalGeometry();
 
       const closing = window.__modalStack.pop();
-      if (closing && closing._detachDirty) { try { closing._detachDirty(); } catch(_){}; closing._detachDirty = null; }
+      if (closing && closing._detachDirty)  { try { closing._detachDirty(); } catch(_){}; closing._detachDirty = null; }
       if (closing && closing._detachGlobal) { try { closing._detachGlobal(); } catch(_){}; closing._detachGlobal = null; }
       top._wired = false;
 
@@ -4082,7 +4114,7 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
       }
     };
 
-    // PRIMARY (Save/Apply): close ONLY on explicit success
+    // PRIMARY (Search/Load/Save/Apply): close ONLY on explicit success
     primaryBtn.onclick = async () => {
       top.persistCurrentTabState();
 
@@ -4104,7 +4136,6 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
         }
       }
 
-      // If child already popped this frame, stop
       if (!window.__modalStack.length || window.__modalStack[window.__modalStack.length - 1] !== top) {
         return;
       }
@@ -4114,7 +4145,7 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
       sanitizeModalGeometry();
 
       if (isChild) {
-        if (top._detachDirty) { try { top._detachDirty(); } catch(_){}; top._detachDirty = null; }
+        if (top._detachDirty)  { try { top._detachDirty(); } catch(_){}; top._detachDirty = null; }
         if (top._detachGlobal) { try { top._detachGlobal(); } catch(_){}; top._detachGlobal = null; }
         top._wired = false;
         window.__modalStack.pop();
@@ -4132,7 +4163,6 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
       }
     };
 
-    // Secondary (Discard/Close) — just assign, no redeclare
     discardBtn.onclick = handleSecondary;
 
     // Drag (unchanged)
@@ -4149,6 +4179,7 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
 
   renderTop();
 }
+
 
 
 // Close any existing floating menu
@@ -4234,37 +4265,52 @@ function showRelatedMenu(x, y, counts, entity, id){
 }
 
 // ===== Quick search =====
+// ✅ Quick search: build minimal per-section filters (with timesheet heuristic)
+// ✅ Quick search: build minimal per-section filters (with timesheet heuristic)
+// Helper to build minimal quick-search filters per section
+function buildQuickFilters(section, text) {
+  const q = String(text || '').trim();
+  if (!q) return {};
+
+  switch (section) {
+    case 'clients':
+    case 'umbrellas':
+    case 'invoices':
+      // backend supports ?q=... (ilike on name / invoice_no depending on endpoint)
+      return { q: q };
+
+    case 'timesheets': {
+      // Pick ONE field to avoid AND-ing and missing matches
+      const looksLikeUUID   = /^[0-9a-f-]{10,}$/i.test(q);
+      const looksLikeBkId   = /^[A-Za-z0-9-]{6,}$/.test(q);
+      const looksLikeOccKey = /^[A-Za-z0-9_.-]{4,}$/.test(q);
+
+      if (looksLikeBkId || looksLikeUUID) return { booking_id: q };
+      if (looksLikeOccKey)                return { occupant_key_norm: q };
+      return { hospital_norm: q };
+    }
+
+    case 'candidates':
+      return { first_name: q, last_name: q, email: q, phone: q };
+
+    default:
+      return {};
+  }
+}
+
+// ✅ Quick search: use heuristic builder (includes timesheets fix)
 byId('quickSearch').onkeydown = async (e) => {
   if (e.key !== 'Enter') return;
 
   const text = String(e.target.value || '').trim();
   if (!text) return renderAll();
 
-  const filters = (() => {
-    switch (currentSection) {
-      case 'clients':    return { q: text };
-      case 'umbrellas':  return { q: text };
-      case 'invoices':   return { q: text };
-      case 'timesheets': {
-        // Heuristic: pick ONE field to avoid ANDing multiple filters
-        const looksLikeUUID   = /^[0-9a-f-]{10,}$/i.test(text);
-        const looksLikeBkId   = /^[A-Za-z0-9-]{6,}$/.test(text);
-        const looksLikeOccKey = /^[A-Za-z0-9_.-]{4,}$/.test(text);
-
-        if (looksLikeBkId || looksLikeUUID) return { booking_id: text };
-        if (looksLikeOccKey)                return { occupant_key_norm: text };
-        return { hospital_norm: text };
-      }
-      case 'candidates': return { first_name: text, last_name: text, email: text, phone: text };
-      default:           return {};
-    }
-  })();
-
+  const filters = buildQuickFilters(currentStage ?? currentSection, text); // use your actual section var
   const rows = await search(currentSection, filters);
   if (rows) renderSummary(rows);
 };
 
-async function openSearch(){
+async function openSearch() {
   const q = prompt('Search text:');
   if (!q) return;
 
@@ -4272,58 +4318,20 @@ async function openSearch(){
   const box = byId('quickSearch');
   if (box) box.value = q;
 
-  // Build minimal filters for quick search per section
-  const text = q.trim();
-  const filters = (() => {
-    switch (currentSection) {
-      case 'clients':
-        // backend supports ?q= (name ilike) + other fields if user refines later
-        return { q: text };
-
-      case 'umbrellas':
-        // backend supports ?q= (name ilike)
-        return { q: text };
-
-      case 'invoices':
-        // support partial invoice number via ?q= as well
-        return { q: text };
-
-      case 'timesheets': {
-        // Heuristic: pick ONE field to avoid ANDing multiple filters
-        const looksLikeUUID   = /^[0-9a-f-]{10,}$/i.test(text);
-        const looksLikeBkId   = /^[A-Za-z0-9-]{6,}$/.test(text);
-        const looksLikeOccKey = /^[A-Za-z0-9_.-]{4,}$/.test(text);
-
-        if (looksLikeBkId || looksLikeUUID) return { booking_id: text };
-        if (looksLikeOccKey)                return { occupant_key_norm: text };
-        return { hospital_norm: text };
-      }
-
-      case 'candidates':
-        // broad pass: try common fields; server can choose which to apply
-        return {
-          first_name: text,
-          last_name:  text,
-          email:      text,
-          phone:      text
-        };
-
-      default:
-        return {};
-    }
-  })();
-
+  const filters = buildQuickFilters(currentSection, q);
   const rows = await search(currentSection, filters);
   if (rows) renderSummary(rows);
 }
 
 // OPTIONAL: open ALT+F for fast search
-document.addEventListener('keydown', (e)=>{
+document.addEventListener('keydown', (e) => {
   if (e.altKey && (e.key === 'f' || e.key === 'F')) {
     e.preventDefault();
     openSearchModal();
   }
 });
+
+
 
 
 
