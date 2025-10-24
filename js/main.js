@@ -756,142 +756,162 @@ async function openLoadSearchModal(section){
 // - Fix search submit path (object filters, not JSON string)
 // - Provide inline Save/Load buttons that open child modals
 // -----------------------------
+// -----------------------------
+// FIXED: openSearchModal()
+// - No undefined variables
+// - Uses attachUkDatePicker + extractFiltersFromForm
+// - Section-aware fields that match buildSearchQS()
+// -----------------------------
 async function openSearchModal(opts = {}) {
+  // Keep your existing status vocab (timesheets) and add invoice statuses
   const TIMESHEET_STATUS = ['ERROR','RECEIVED','REVOKED','STORED','SAT','SUN','BH'];
+  const INVOICE_STATUS   = ['DRAFT','ISSUED','ON_HOLD','PAID'];
 
-  // small helpers for consistent form markup
-  function boolSelect(name, label){
-    return `
-      <div class="row">
-        <label>${label}</label>
-        <select name="${name}">
-          <option value="">Any</option>
-          <option value="true">Yes</option>
-          <option value="false">No</option>
-        </select>
-      </div>`;
-  }
-  function datesUk(nameFrom, labelFrom, nameTo, labelTo){
-    return `
-      <div class="row">
-        <label>${labelFrom}</label><input class="input" type="text" placeholder="DD/MM/YYYY" name="${nameFrom}" />
-      </div>
-      <div class="row">
-        <label>${labelTo}</label><input class="input" type="text" placeholder="DD/MM/YYYY" name="${nameTo}" />
-      </div>`;
-  }
-  function multi(name, label, values){
-    const opts = values.map(v => `<option value="${v}">${v}</option>`).join('');
-    return `
-      <div class="row">
-        <label>${label}</label>
-        <select name="${name}" multiple size="6">${opts}</select>
-      </div>`;
-  }
+  // Small, local HTML helpers (no external deps)
+  const row = (label, inner) => `
+    <div class="row">
+      <label>${label}</label>
+      <div class="controls">${inner}</div>
+    </div>`;
 
-  // Build section-specific form content (no stray/undefined identifiers)
+  const inputText = (name, placeholder='') =>
+    `<input class="input" type="text" name="${name}" placeholder="${placeholder}" />`;
+
+  const boolSelect = (name) => `
+    <select name="${name}">
+      <option value="">Any</option>
+      <option value="true">Yes</option>
+      <option value="false">No</option>
+    </select>`;
+
+  const datePair = (fromName, fromLabel, toName, toLabel) => `
+    ${row(fromLabel, `<input class="input" type="text" name="${fromName}" placeholder="DD/MM/YYYY" />`)}
+    ${row(toLabel,   `<input class="input" type="text" name="${toName}"   placeholder="DD/MM/YYYY" />`)}`;
+
+  const multi = (name, values) =>
+    `<select name="${name}" multiple size="6">${values.map(v=>`<option value="${v}">${v}</option>`).join('')}</select>`;
+
+  // Build section-specific form body
   let inner = '';
+
   if (currentSection === 'candidates') {
-    const roles = await loadGlobalRoleOptions();
-    const roleOpts = Array.isArray(roles) ? roles.map(r => `<option value="${r}">${r}</option>`).join('') : '';
-    inner = `
-      ${input('first_name','First name','')}
-      ${input('last_name','Last name','')}
-      ${input('email','Email','')}
-      ${input('phone','Telephone','')}
-      <div class="row"><label>Pay method</label>
+    // Roles are taken from client-default windows; load once here
+    let roleOptions = [];
+    try { roleOptions = await loadGlobalRoleOptions(); } catch { roleOptions = []; }
+
+    inner = [
+      row('First name',           inputText('first_name')),
+      row('Last name',            inputText('last_name')),
+      row('Email',                `<input class="input" type="email" name="email" placeholder="name@domain" />`),
+      row('Telephone',            inputText('phone')),
+      row('Pay method', `
         <select name="pay_method">
           <option value="">Any</option>
           <option value="PAYE">PAYE</option>
           <option value="UMBRELLA">UMBRELLA</option>
         </select>
-      </div>
-      <div class="row">
-        <label>Roles (any)</label>
-        <select name="roles_any" multiple size="6">${roleOpts}</select>
-      </div>
-      ${boolSelect('active','Active')}
-      ${datesUk('created_from','Created from','created_to','Created to')}
-    `;
-  } else if (currentSection === 'clients') {
-    inner = `
-      ${input('name','Client name','')}
-      ${input('cli_ref','Client Ref','')}
-      ${input('primary_email','Primary email','')}
-      ${input('ap_phone','A/P phone','')}
-      ${boolSelect('vat_charge','VAT')}
-      ${datesUk('created_from','Created from','created_to','Created to')}
-    `;
-  } else if (currentSection === 'umbrellas') {
-    inner = `
-      ${input('name','Name','')}
-      ${input('bank_name','Bank','')}
-      ${boolSelect('vat_chargeable','VAT')}
-      ${boolSelect('enabled','Enabled')}
-      ${datesUk('created_from','Created from','created_to','Created to')}
-    `;
-  } else if (currentSection === 'timesheets') {
-    inner = `
-      ${input('booking_id','Booking ID','')}
-      ${input('occupant_key_norm','Occupant key','')}
-      ${input('hospital_norm','Hospital','')}
-      ${datesUk('worked_from','Worked from (date)','worked_to','Worked to (date)')}
-      ${multi('status','Status', TIMESHEET_STATUS)}
-      ${datesUk('created_from','Created from','created_to','Created to')}
-    `;
-  } else {
+      `),
+      row('Roles (any)',          `<select name="roles_any" multiple size="6">${roleOptions.map(r=>`<option value="${r}">${r}</option>`).join('')}</select>`),
+      row('Active',               boolSelect('active')),
+      datePair('created_from','Created from','created_to','Created to')
+    ].join('');
+  }
+
+  else if (currentSection === 'clients') {
+    inner = [
+      row('Client name',          inputText('name', 'partial match')),
+      row('Client Ref',           inputText('cli_ref')),
+      row('Primary invoice email',`<input class="input" type="email" name="primary_invoice_email" placeholder="ap@client" />`),
+      row('A/P phone',            inputText('ap_phone')),
+      row('VAT chargeable',       boolSelect('vat_chargeable')),
+      datePair('created_from','Created from','created_to','Created to')
+    ].join('');
+  }
+
+  else if (currentSection === 'umbrellas') {
+    inner = [
+      row('Name',                 inputText('name')),
+      row('Bank',                 inputText('bank_name')),
+      row('Sort code',            inputText('sort_code', '12-34-56')),
+      row('Account number',       inputText('account_number')),
+      row('VAT chargeable',       boolSelect('vat_chargeable')),
+      row('Enabled',              boolSelect('enabled')),
+      datePair('created_from','Created from','created_to','Created to')
+    ].join('');
+  }
+
+  else if (currentSection === 'timesheets') {
+    inner = [
+      row('Booking ID',           inputText('booking_id')),
+      row('Candidate key',        inputText('occupant_key_norm', 'candidate_id / key_norm')),
+      row('Hospital',             inputText('hospital_norm')),
+      datePair('worked_from','Worked from (date)','worked_to','Worked to (date)'),
+      datePair('week_ending_from','Week ending from','week_ending_to','Week ending to'),
+      row('Status',               multi('status', TIMESHEET_STATUS)),
+      datePair('created_from','Created from','created_to','Created to')
+    ].join('');
+  }
+
+  else if (currentSection === 'invoices') {
+    inner = [
+      row('Invoice no',           inputText('invoice_no')),
+      row('Client ID',            inputText('client_id', 'UUID')),
+      row('Status',               multi('status', INVOICE_STATUS)),
+      datePair('issued_from','Issued from','issued_to','Issued to'),
+      datePair('due_from','Due from','due_to','Due to'),
+      datePair('created_from','Created from','created_to','Created to')
+    ].join('');
+  }
+
+  else {
     inner = `<div class="tabc">No filters for this section.</div>`;
   }
 
-  // Discreet inline actions (small, neutral/secondary styles)
+  // Wrap the form with Save/Load buttons
   const form = html(`
     <div class="form" id="searchForm">
-      <div class="row" style="justify-content:flex-end; gap: .5rem; margin-bottom: .5rem;">
+      <div class="row" style="justify-content:flex-end; gap:.5rem; margin-bottom:.5rem">
         <button id="btnLoadSavedSearch" type="button" class="btn btn-ghost btn-sm">Load saved search…</button>
-        <button id="btnSaveSearch"  type="button" class="btn btn-primary btn-sm">Save search</button>
+        <button id="btnSaveSearch"      type="button" class="btn btn-primary btn-sm">Save search</button>
       </div>
       ${inner}
     </div>
   `);
 
-  // Render the modal (showModal will set the primary CTA label to “Search” for this title)
+  // Show the modal; primary button runs the search
   showModal(
     'Advanced Search',
-    [{ key: 'filter', label: 'Filters' }],
+    [{ key: 'filter', title: 'Filters' }],
     () => form,
     async () => {
-      const filters = extractFiltersFromForm('#searchForm'); // your existing helper
-      const rows = await s
-      earch(currentSection, filters);
+      const filters = extractFiltersFromForm('#searchForm'); // UK→ISO conversion happens here
+      const rows    = await search(currentSection, filters);
       if (rows) renderSummary(rows);
-      return true; // close after successful search
+      return true; // close modal
     },
     false
   );
 
-  // Bind modal internal controls once per open (idempotent wiring)
+  // After mount: wire date pickers and Save/Load actions
   setTimeout(() => {
-    document.querySelectorAll('#searchForm input[placeholder="DD/MM/YYYY"]').forEach(attachU
-k
-DateEditor /* or your existing attachUkDatePicker */);
+    // Attach UK date pickers to all DD/MM/YYYY inputs
+    document
+      .querySelectorAll('#searchForm input[placeholder="DD/MM/YYYY"]')
+      .forEach(el => attachUkDatePicker(el));
 
-    const saveBtn = byId('btnSaveSearch');
-    if (saveBtn) {
-      saveBtn.onclick = async () => {
-        const filters = extractFiltersFromForm('#searchForm');
-        await openSaveSearchModal(currentSection, filters);
-      };
-    }
+    const saveBtn = document.getElementById('btnSaveSearch');
+    const loadBtn = document.getElementById('btnLoadSavedSearch');
 
-    const loadBtn = byId('btnLoadSavedSearch');
-    if (loadBtn) {
-      loadBtn.onclick = async () => {
-        await openLoadSearchModal(currentSection);
-      };
-    }
+    if (saveBtn) saveBtn.onclick = async () => {
+      const filters = extractFiltersFromForm('#searchForm');
+      await openSaveSearchModal(currentSection, filters);
+    };
+
+    if (loadBtn) loadBtn.onclick = async () => {
+      await openLoadSearchModal(currentSection);
+    };
   }, 0);
 }
-
 
 // Small helper to render Advanced Search with proper labels and idempotent wiring
 function showOpenSearchModalWithForm(form, opts = {}) {
