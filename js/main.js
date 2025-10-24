@@ -771,18 +771,35 @@ async function openLoadSearchModal(section){
 // -----------------------------
 // === REPLACE: openSearchModal (icons + robust wiring + fallback for old text buttons) ===
 // === FORCE-HIDE legacy buttons (one-time CSS) ===
+// Run once: force-hide any legacy white buttons, and add compact button styles
 (function ensureAdvancedSearchCSS(){
-  if (document.getElementById('advSearchIconCSS')) return;
+  if (document.getElementById('advSearchCSS')) return;
   const s = document.createElement('style');
-  s.id = 'advSearchIconCSS';
+  s.id = 'advSearchCSS';
   s.textContent = `
+    /* never show legacy white buttons */
     #btnLoadSavedSearch, #btnSaveSearch { display: none !important; visibility: hidden !important; }
-    .icon-btn { outline: none; }
+
+    /* compact, not-white text buttons */
+    .adv-btn {
+      height: 26px;
+      padding: 0 10px;
+      border: 1px solid #d1d5db;
+      border-radius: 6px;
+      background: #f3f4f6;          /* not white */
+      color: #111827;
+      font-size: 12px;
+      font-weight: 500;
+      cursor: pointer;
+    }
+    .adv-btn:hover { background: #e5e7eb; }
   `;
   document.head.appendChild(s);
 })();
 
+
 // === REPLACE: openSearchModal (icons only, legacy forced hidden, robust wiring) ===
+// === REPLACE: openSearchModal (compact text buttons + robust delegated wiring) ===
 async function openSearchModal(opts = {}) {
   const TIMESHEET_STATUS = ['ERROR','RECEIVED','REVOKED','STORED','SAT','SUN','BH'];
   const INVOICE_STATUS   = ['DRAFT','ISSUED','ON_HOLD','PAID'];
@@ -810,7 +827,7 @@ async function openSearchModal(opts = {}) {
   const multi = (name, values) =>
     `<select name="${name}" multiple size="6">${values.map(v=>`<option value="${v}">${v}</option>`).join('')}</select>`;
 
-  // Section-specific body
+  // Section-specific filters
   let inner = '';
   if (currentSection === 'candidates') {
     let roleOptions = [];
@@ -872,23 +889,55 @@ async function openSearchModal(opts = {}) {
     inner = `<div class="tabc">No filters for this section.</div>`;
   }
 
-  // Icon buttons (small, discreet)
-  const iconBtn = (id, label, glyph) =>
-    `<button id="${id}" type="button" class="icon-btn" title="${label}" aria-label="${label}"
-             style="width:28px;height:28px;display:inline-grid;place-items:center;border:1px solid #d1d5db;border-radius:6px;background:#fff;cursor:pointer">
-       <span style="font-size:14px;line-height:1">${glyph}</span>
-     </button>`;
+  // Compact text buttons (not white)
+  const headerHtml = `
+    <div class="row" id="searchHeaderRow" style="justify-content:flex-end; gap:.35rem; margin-bottom:.5rem">
+      <button type="button" class="adv-btn" data-adv-act="load">Load Saved Search</button>
+      <button type="button" class="adv-btn" data-adv-act="save">Save Search</button>
+    </div>`;
 
   const formHtml = `
     <div class="form" id="searchForm">
-      <div class="row" id="searchHeaderRow" style="justify-content:flex-end; gap:.35rem; margin-bottom:.5rem">
-        ${iconBtn('icoLoadSaved','Load saved search','📂')}
-        ${iconBtn('icoSaveSearch','Save search','💾')}
-      </div>
+      ${headerHtml}
       ${inner}
     </div>
   `;
 
+  // Helper that (re)wires date pickers + delegated clicks. Safe to call repeatedly.
+  function wireAdvancedSearch() {
+    const bodyEl = document.getElementById('modalBody');
+    const formEl = document.getElementById('searchForm');
+    if (!bodyEl || !formEl) return;
+
+    // UK date pickers on any DD/MM/YYYY fields
+    formEl.querySelectorAll('input[placeholder="DD/MM/YYYY"]').forEach(el => {
+      try { attachUkDatePicker(el); } catch {}
+    });
+
+    // Hide legacy white buttons if any template injected them
+    formEl.querySelectorAll('#btnLoadSavedSearch,#btnSaveSearch').forEach(el => {
+      el.style.display = 'none'; el.hidden = true; el.disabled = true;
+    });
+
+    // Delegated click handler that survives innerHTML re-renders
+    if (bodyEl._advSearchHandler) {
+      bodyEl.removeEventListener('click', bodyEl._advSearchHandler, true);
+    }
+    bodyEl._advSearchHandler = async (e) => {
+      const btn = e.target && e.target.closest('button[data-adv-act]');
+      if (!btn) return;
+      const act = btn.dataset.advAct;
+      if (act === 'load') {
+        await openLoadSearchModal(currentSection);
+      } else if (act === 'save') {
+        const filters = extractFiltersFromForm('#searchForm');
+        await openSaveSearchModal(currentSection, filters);
+      }
+    };
+    bodyEl.addEventListener('click', bodyEl._advSearchHandler, true);
+  }
+
+  // Show the modal (parent)
   showModal(
     'Advanced Search',
     [{ key: 'filter', title: 'Filters' }],
@@ -899,71 +948,69 @@ async function openSearchModal(opts = {}) {
       if (rows) renderSummary(rows);
       return true;
     },
-    false
+    false,
+    // 🔁 When a child modal closes, parent re-renders; re-wire the buttons again.
+    () => wireAdvancedSearch()
   );
 
-  // After mount: date pickers + hard-hide legacy + ensure icons + wire clicks
-  setTimeout(() => {
+  // Initial wire
+  setTimeout(wireAdvancedSearch, 0);
+}
+
+// === REPLACE: showOpenSearchModalWithForm (icons only, legacy forced hidden, robust wiring) ===
+// === REPLACE: showOpenSearchModalWithForm (inject compact buttons + delegated wiring) ===
+function showOpenSearchModalWithForm(form, opts = {}) {
+  function wireAdvancedSearch() {
+    const bodyEl = document.getElementById('modalBody');
     const formEl = document.getElementById('searchForm');
-    if (!formEl || formEl.dataset.wired === '1') return;
-    formEl.dataset.wired = '1';
+    if (!bodyEl || !formEl) return;
 
-    // Attach datepickers (ignore if helper not present)
-    formEl.querySelectorAll('input[placeholder="DD/MM/YYYY"]').forEach(el => {
-      try { attachUkDatePicker(el); } catch {}
-    });
-
-    // HARD HIDE legacy buttons (plus disable them)
-    const legacyLoad = document.getElementById('btnLoadSavedSearch');
-    const legacySave = document.getElementById('btnSaveSearch');
-    if (legacyLoad) { legacyLoad.style.display = 'none'; legacyLoad.hidden = true; legacyLoad.disabled = true; }
-    if (legacySave) { legacySave.style.display = 'none'; legacySave.hidden = true; legacySave.disabled = true; }
-
-    // Ensure header row exists (in case template replaced it)
+    // Ensure header exists with compact text buttons
     let header = document.getElementById('searchHeaderRow');
     if (!header) {
       header = document.createElement('div');
       header.id = 'searchHeaderRow';
       header.className = 'row';
       header.style.cssText = 'justify-content:flex-end; gap:.35rem; margin-bottom:.5rem';
+      header.innerHTML = `
+        <button type="button" class="adv-btn" data-adv-act="load">Load Saved Search</button>
+        <button type="button" class="adv-btn" data-adv-act="save">Save Search</button>`;
       formEl.insertBefore(header, formEl.firstChild);
+    } else {
+      // If header exists but has legacy content, normalise it
+      header.innerHTML = `
+        <button type="button" class="adv-btn" data-adv-act="load">Load Saved Search</button>
+        <button type="button" class="adv-btn" data-adv-act="save">Save Search</button>`;
     }
 
-    // Ensure icons exist
-    const ensureIcon = (id, label, glyph) => {
-      let btn = document.getElementById(id);
-      if (!btn) {
-        const wrap = document.createElement('div');
-        wrap.innerHTML = iconBtn(id, label, glyph);
-        btn = wrap.firstChild;
-        header.appendChild(btn);
-      }
-      return btn;
-    };
+    // UK date pickers
+    formEl.querySelectorAll('input[placeholder="DD/MM/YYYY"]').forEach(el => {
+      try { attachUkDatePicker(el); } catch {}
+    });
 
-    const loadBtn = ensureIcon('icoLoadSaved','Load saved search','📂');
-    const saveBtn = ensureIcon('icoSaveSearch','Save search','💾');
+    // Hide legacy buttons if any
+    formEl.querySelectorAll('#btnLoadSavedSearch,#btnSaveSearch').forEach(el => {
+      el.style.display = 'none'; el.hidden = true; el.disabled = true;
+    });
 
-    // Wire clicks (idempotent)
-    if (!loadBtn.dataset.wired) {
-      loadBtn.addEventListener('click', async () => {
+    // Delegated click that survives re-renders
+    if (bodyEl._advSearchHandler) {
+      bodyEl.removeEventListener('click', bodyEl._advSearchHandler, true);
+    }
+    bodyEl._advSearchHandler = async (e) => {
+      const btn = e.target && e.target.closest('button[data-adv-act]');
+      if (!btn) return;
+      const act = btn.dataset.advAct;
+      if (act === 'load') {
         await openLoadSearchModal(currentSection);
-      });
-      loadBtn.dataset.wired = '1';
-    }
-
-    if (!saveBtn.dataset.wired) {
-      saveBtn.addEventListener('click', async () => {
+      } else if (act === 'save') {
         const filters = extractFiltersFromForm('#searchForm');
         await openSaveSearchModal(currentSection, filters);
-      });
-      saveBtn.dataset.wired = '1';
-    }
-  }, 0);
-}
+      }
+    };
+    bodyEl.addEventListener('click', bodyEl._advSearchHandler, true);
+  }
 
-// === REPLACE: showOpenSearchModalWithForm (icons only, legacy forced hidden, robust wiring) ===
-function showOpenSearchModalWithForm(form, opts = {}) {
   showModal(
     'Advanced Search',
     [{ key: 'filter', title: 'Filters' }],
@@ -974,71 +1021,13 @@ function showOpenSearchModalWithForm(form, opts = {}) {
       if (rows) renderSummary(rows);
       return true;
     },
-    false
+    false,
+    // Re-bind after any child closes
+    () => wireAdvancedSearch()
   );
 
-  setTimeout(() => {
-    const formEl = document.getElementById('searchForm');
-    if (!formEl || formEl.dataset.wired === '1') return;
-    formEl.dataset.wired = '1';
-
-    // Datepickers
-    formEl.querySelectorAll('input[placeholder="DD/MM/YYYY"]').forEach(el => {
-      try { attachUkDatePicker(el); } catch {}
-    });
-
-    // HARD HIDE legacy buttons (plus disable)
-    const legacyLoad = document.getElementById('btnLoadSavedSearch');
-    const legacySave = document.getElementById('btnSaveSearch');
-    if (legacyLoad) { legacyLoad.style.display = 'none'; legacyLoad.hidden = true; legacyLoad.disabled = true; }
-    if (legacySave) { legacySave.style.display = 'none'; legacySave.hidden = true; legacySave.disabled = true; }
-
-    // Ensure header row exists
-    let header = document.getElementById('searchHeaderRow');
-    if (!header) {
-      header = document.createElement('div');
-      header.id = 'searchHeaderRow';
-      header.className = 'row';
-      header.style.cssText = 'justify-content:flex-end; gap:.35rem; margin-bottom:.5rem';
-      formEl.insertBefore(header, formEl.firstChild);
-    }
-
-    // Add icons if missing
-    const addIcon = (id, label, glyph) => {
-      let btn = document.getElementById(id);
-      if (!btn) {
-        btn = document.createElement('button');
-        btn.id = id;
-        btn.type = 'button';
-        btn.className = 'icon-btn';
-        btn.title = label;
-        btn.setAttribute('aria-label', label);
-        btn.style.cssText = 'width:28px;height:28px;display:inline-grid;place-items:center;border:1px solid #d1d5db;border-radius:6px;background:#fff;cursor:pointer';
-        btn.innerHTML = `<span style="font-size:14px;line-height:1">${glyph}</span>`;
-        header.appendChild(btn);
-      }
-      return btn;
-    };
-
-    const loadBtn = addIcon('icoLoadSaved','Load saved search','📂');
-    const saveBtn = addIcon('icoSaveSearch','Save search','💾');
-
-    // Wire clicks (idempotent)
-    if (!loadBtn.dataset.wired) {
-      loadBtn.addEventListener('click', async () => {
-        await openLoadSearchModal(currentSection);
-      });
-      loadBtn.dataset.wired = '1';
-    }
-
-    if (!saveBtn.dataset.wired) {
-      saveBtn.addEventListener('click', async () => {
-        const filters = extractFiltersFromForm('#searchForm');
-        await openSaveSearchModal(currentSection, filters);
-      });
-      saveBtn.dataset.wired = '1';
-    }
-  }, 0);
+  // Initial wire
+  setTimeout(wireAdvancedSearch, 0);
 }
 
 
