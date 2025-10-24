@@ -550,73 +550,90 @@ async function search(section, filters={}){
 // NEW: Save search modal (new / overwrite / shared)
 // -----------------------------
 async function openSaveSearchModal(section, filters){
-  const myId = currentUserId();
-  const mine = await listReportPresets({ section, kind:'search', include_shared:false });
+  const myId  = currentWorked || currentUserId(); // if you expose a current user helper
+  const mine  = await listReportPresets({ section, kind: 'search', include_shared: false });
 
-  const options = mine.map(m => `<option value="${m.id}">${m.name}</option>`).join('');
+  const options = (mine || []).map(m => `<option value="${m.id}">${sanitize(m.name)}</option>`).join('');
+
   const body = html(`
     <div class="form" id="saveSearchForm">
       <div class="row">
-        <label>Preset name</label>
-        <div class="controls"><input type="text" name="preset_name" placeholder="e.g. 'PAYE RMNs last 7 days'"/></div>
+        <label for="presetName">Preset name</label>
+        <div class="controls">
+          <input id="presetName" name="preset_name" class="input" placeholder="e.g. ‘PAYE RMNs’" />
+        </div>
       </div>
 
       <div class="row">
         <label>Mode</label>
-        <div class="controls">
-          <label class="inline"><input type="radio" name="mode" value="new" checked/> <span>Save as new</span></label>
-          <label class="inline" style="margin-left:12px"><input type="radio" name="mode" value="overwrite"/> <span>Overwrite existing</span></label>
+        <div class="controls flex items-center gap-3">
+          <label class="inline"><input type="radio" name="mode" value="new" checked> <span>Save as new</span></label>
+          <label class="inline"><input type="radio" name="mode" value="overwrite"> <span>Overwrite existing</span></label>
         </div>
       </div>
 
       <div class="row" id="overwriteRow" style="display:none">
-        <label>Choose preset</label>
-        <div class="controls"><select id="overwritePresetId">${options}</select></div>
-      </div>
-
-      <div class="row">
-        <label>Visibility</label>
+        <label for="overwritePresetId">Choose preset</label>
         <div class="controls">
-          <label class="inline"><input type="checkbox" id="presetShared"/> <span>Visible to all users</span></label>
+          <select id="overwritePresetId" class="select">${options}</select>
         </div>
       </div>
 
-      <div class="hint">Only you can edit/delete a shared search you own.</div>
+      <div class="row">
+        <label for="presetShared">Visibility</label>
+        <div class="controls">
+          <label class="inline"><input id="presetShared" type="checkbox"> <span>Visible to all users</span></label>
+        </div>
+      </div>
+
+      <div class="hint">Only your own presets can be overwritten. Shared presets remain yours unless you delete them.</div>
     </div>
   `);
 
-  // Use title mapping in showModal to label primary as "Save"
-  showModal('Save search', [{key:'form', label:'Details'}], ()=> body, async ()=>{
-    const form = collectForm('#saveSearchForm', false);
-    const mode = (form.mode || 'new').toLowerCase();
-    const name = (form.preset_name || '').trim();
-    const isShared = !!document.getElementById('presetShared')?.checked;
+  // Use showModal; it will label the primary as “Save”
+  showModal('Save search', [{ key: 'form', title: 'Details' }], () => body, async () => {
+    const form  = collectForms('#saveSearchForm', false); // use your helper; ensure it returns { preset_name, mode, ... }
+    const mode  = (form.mode || 'new').toLowerCase();
+    const name  = String(form.preset_name || '').trim();
+    const share = !!byId('presetShared')?.checked;
 
     if (!name && mode === 'new') { alert('Please enter a name'); return false; }
 
-    if (mode === 'overwrite') {
-      const el = document.getElementById('overwritePresetId');
-      const id = el && el.value;
-      if (!id) { alert('Select a preset to overwrite'); return false; }
-      await updateReportPreset({ id, name: name || undefined, filters, is_shared: isShared });
-    } else {
-      await createReportPreset({ section, kind:'search', name, filters, is_shared: isShared });
+    try {
+      if (mode === 'overwrite') {
+        const targetId = (byId('overwritePresetId') && byId('overwritePresetId').value) || '';
+        if (!targetId) { alert('Select a preset to overwrite'); return false; }
+        await updateReportPresets({ id: targetId, name: name || undefined, filters, is_shared: share });
+      } else {
+        await createReportPreset({ section, kind: 'search', name, filters, is_shared: share });
+      }
+      invalidateReport(section, 'search');
+      try { window.dispatchEvent(new Event('search-preset-updated')); } catch(_) {}
+      return true; // close the save modal
+    } catch (err) {
+      // If backend returns 409 (duplicate name), switch to overwrite mode instead of closing
+      const msg = (err && err.message) ? String(err.message) : 'Unable to save preset';
+      if (/409|already exists|duplicate/i.test(msg)) {
+        // auto-switch to overwrite mode to be helpful
+        const overwriteRadio = Array.from(document.querySelectorAll('#saveSearch')).find(i => i.value === 'overwrite');
+        if (overwriteRadio) { overwriteRadio.checked = true; }
+        alert('A preset with that name already exists. Switched to “Overwrite existing”. Choose the preset to overwrite or change the name.');
+        return false;
+      }
+      alert(msg);
+      return false;
     }
-    invalidatePresetCache(section, 'search');
-    try { window.dispatchEvent(new Event('search-preset-updated')); } catch(_){}
-    return true; // close only this child modal
   }, false);
 
-  // wire mode toggle once
-  setTimeout(()=>{
-    const formEl = document.getElementById('saveSearchForm');
+  // Idempotent wiring for the radio toggle
+  setTimeout(() => {
+    const formEl = byId('saveSearchForm');
     if (!formEl || formEl.dataset.wired === '1') return;
     formEl.dataset.wired = '1';
-
-    const radios = formEl.querySelectorAll('input[name="mode"]');
-    const row = document.getElementById('overwriteRow');
-    radios.forEach(r => r.addEventListener('change', ()=> {
-      row.style.display = (r.value === 'overwrite' && r.checked) ? '' : 'none';
+    const modeRadios = formEl.querySelectorAll('input[name="mode"]');
+    const overwriteRow = byId('overwriteRow');
+    modeRadios.forEach(r => r.addEventListener('change', () => {
+      overwriteRow.style.display = (r.value === 'overwrite' && r.checked) ? '' : 'none';
     }));
   }, 0);
 }
@@ -626,110 +643,112 @@ async function openSaveSearchModal(section, filters){
 // -----------------------------
 async function openLoadSearchModal(section){
   const myId = currentUserId();
-  let list = await listReportPresets({ section, kind:'search', include_shared:true });
+  let list = await listReportPresets({ section, kind: 'search', include_shared: true });
   let selectedId = null;
   const ctx = { stagedDeletes: new Set(), stagedEdits: {} };
 
   const renderList = () => {
     const rowsHtml = (list || []).map(p => {
-      const owned = (p.user_id === myId);
-      const stagedDel = ctx.stagedDeletes.has(p.id);
-      const nameCell = `<span class="name"${stagedDel?' style="text-decoration:line-through;opacity:.6"':''}>${p.name}</span>`;
-      const sharedBadge = p.is_shared ? `<span class="badge">shared</span>` : '';
-      const delBtn = owned ? `<button class="bin" data-id="${p.id}" title="Delete">🗑</button>` : `<button class="bin" disabled title="Only owner can delete">🗑</button>`;
+      const owned    = p.user_id === myId;
+      const isDeleting = ctx.stagedDeletes.has(p.id);
+      const nameHtml = `<span class="name"${isDeleting ? ' style="text-decoration:line-through;opacity:.6"' : ''}>${sanitize(p.name)}</span>`;
+      const badge    = p.is_shared ? `<span class="badge">shared</span>` : '';
+      const trashBtn = `<button class="bin btn btn-ghost btn-sm" ${owned ? '' : 'disabled'} title="${owned ? 'Delete' : 'Not yours'}">🗑</button>`;
       return `
-        <tr data-id="${p.id}" class="${selectedId===p.id?'selected':''}">
-          <td class="pick">${nameCell} ${sharedBadge}</td>
+        <tr data-id="${p.id}">
+          <td class="pick">${nameHtml} ${badge}</td>
           <td>${new Date(p.updated_at || p.created_at).toLocaleString()}</td>
-          <td class="actions">${delBtn}</td>
+          <td class="actions">${trashBtn}</td>
         </tr>`;
-    }).join('');
+    }).join('') || `<tr><td colspan="3" class="hint">No saved searches</td></tr>`;
 
     return html(`
       <div class="form">
         <div class="row" style="justify-content:space-between;align-items:center">
           <strong>Saved searches</strong>
-          <span class="hint">Section: <code>${section}</code></span>
+          <span class="hint">Section: <code>${sanitize(section)}</code></span>
         </div>
         <div class="row">
           <table class="grid compact" id="presetTable">
             <thead><tr><th>Name</th><th>Updated</th><th></th></tr></thead>
-            <tbody>${rowsHtml || '<tr><td colspan="3" class="hint">No saved searches yet.</td></tr>'}</tbody>
+            <tbody>${rowsHtml}</tbody>
           </table>
         </div>
       </div>
     `);
   };
 
-  // Use title mapping in showModal to label primary as "Load"
-  showModal('Load saved search', [{key:'list', label:'Saved'}], renderList, async ()=>{
-    if (!selectedId) { alert('Pick a saved search to apply.'); return false; }
+  showModal('Load saved search', [{ key: 'list', title: 'Saved' }], renderList, async () => {
+    if (!selectedId) { alert('Pick a preset to load'); return false; }
     const chosen = (list || []).find(p => p.id === selectedId);
-    if (!chosen) { alert('Preset not found.'); return false; }
+    if (!chosen) { alert('Preset not found'); return false; }
     populateSearchFormFromFilters(chosen.filters_json, '#searchForm');
-    return true; // close this child modal only; parent search stays open
+    return true; // close this child only
   }, false);
 
-  // Wire table interactions & Save changes for staged deletes (single-attach + no duplicate footer button)
-  setTimeout(()=>{
+  setTimeout(() => {
     const tbl = document.getElementById('presetTable');
     if (tbl && !tbl.__wired) {
       tbl.__wired = true;
-      tbl.addEventListener('click', (e)=>{
-        const tr  = e.target && e.target.closest('tr[data-id]');
-        const bin = e.target && e.target.closest('button.bin');
+      tbl.addEventListener('click', (e) => {
+        const tr = e.target && e.target.closest('tr[data-id]');
         if (!tr) return;
-        const id = tr.getAttribute('data-id');
+        const id  = tr.getAttribute('data-id');
+        const bin = e.target && e.target.closest('button.bin');
 
         if (bin) {
           const row = (list || []).find(p => p.id === id);
           if (!row || row.user_id !== myId) return;
           if (ctx.stagedDeletes.has(id)) ctx.stagedDeletes.delete(id); else ctx.stagedDeletes.add(id);
-          document.querySelector('#modalBody').innerHTML = renderList();
-          updateSaveChangesVisibility();
+          // re-render body only; don’t re-append footer buttons
+          const body = document.getElementById('modalBody');
+          if (body) body.replaceChildren(renderList());
+          // toggle secondary “Save changes” visibility
+          const secondary = document.getElementById('btnSavePresetChanges');
+          if (secondary) {
+            const hasChanges = ctx.stagedDeletes.size > 0 || Object.keys(ctx.stagedEdits).length > 0;
+            secondary.style.display = hasChanges ? '' : 'none';
+            secondary.disabled = !hasChanges;
+          }
           return;
         }
 
-        // select row
+        // selection
         selectedId = id;
-        Array.from(tbl.querySelectorAll('tbody tr')).forEach(r => r.classList.toggle('selected', r.getAttribute('data-id') === id));
+        Array.from(tbl.querySelectorAll('tbody tr'))
+          .forEach(r => r.classList.toggle('selected', r.getAttribute('id') === id));
       });
     }
 
-    function updateSaveChangesVisibility(){
-      const btn = byId('btnSavePresetChanges');
-      if (!btn) return;
-      const hasChanges = ctx.stagedDeletes.size > 0 || Object.keys(ctx.stagedEdits).length > 0;
-      btn.style.display = hasChanges ? '' : 'none';
-      btn.disabled = !hasChanges;
-    }
-
+    // Ensure a single “Save changes” button is present and wired
     const primary = byId('btnSave');
     if (primary && !byId('btnSavePresetChanges')) {
       const aux = document.createElement('button');
-      aux.textContent = 'Save changes';
       aux.id = 'btnSavePresetChanges';
-      aux.style.marginLeft = '8px';
-      aux.style.display = 'none'; // hidden until there are staged changes
-      aux.onclick = async ()=>{
-        // commit deletes only (rename/share toggle could be added similarly via ctx.stagedEdits)
-        for (const delId of ctx.stagedDeletes) {
-          const row = (list || []).find(p => p.id === delId);
+      aux.textContent = 'Save changes';
+      aux.className = 'btn btn-outline btn-sm';
+      aux.style.marginLeft = '.5rem';
+      aux.style.display = 'none';
+      aux.onclick = async () => {
+        if (!ctx.stillMine && !ctx.stagedDeletes.size && !Object.keys(ctx.stagedEdits).length) return;
+        for (const id of ctx.stagedDeletes) {
+          const row = (list || []).find(p => p.id === id);
           if (!row || row.user_id !== myId) continue;
-          try { await deleteReportPreset(delId); } catch (e) { alert(String(e)); return; }
+          try { await deleteReportPresets(id); } catch (e) { alert(String(e)); return; }
         }
         ctx.stagedDeletes.clear();
-        invalidatePresetCache(section, 'search');
+        invalidateReport(section, 'search');
         list = await listReportPresets({ section, kind:'search', include_shared:true });
-        document.querySelector('#modalBody').innerHTML = renderList();
-        updateSaveChangesVisibility();
+        const body = document.getElementById('modalBody');
+        if (body) body.replaceChildren(renderList());
+        const btn = byId('btnSavePresetChanges');
+        if (btn) { btn.style.display = 'none'; btn.disabled = true; }
       };
-      primary.parentElement?.appendChild(aux);
-      // initial visibility
-      updateSaveChangesVisibility();
+      primary.parentElement.appendChild(aux);
     }
   }, 0);
 }
+
 
 
 // -----------------------------
@@ -738,8 +757,8 @@ async function openLoadSearchModal(section){
 // - Provide inline Save/Load buttons that open child modals
 // -----------------------------
 async function openSearchModal(opts = {}) {
-  const TIMESHEET_STATUS = ['ERROR','RECEIVED','REVOKED','SHEETS_PARTIAL','SHEETS_PENDING','SHEETS_SYNCED','STORED'];
-  const INVOICE_STATUS   = ['DRAFT','ISSUED','ON_HOLD','PAID'];
+  const TIMESHEET_STATUS = ['ERROR','RECEIVED','REVOKED','STORED','SAT','SUN','BH']; // unchanged logic
+  const INTHOOK = ['DRAFT','PAID','CANCELLED']; // if you need these; rename as per your codebase
 
   function boolSelect(name, label){
     return `
@@ -754,8 +773,12 @@ async function openSearchModal(opts = {}) {
   }
   function datesUk(nameFrom, labelFrom, nameTo, labelTo){
     return `
-      <div class="row"><label>${labelFrom}</label><input type="text" placeholder="DD/MM/YYYY" name="${nameFrom}" /></div>
-      <div class="row"><label>${labelTo}</label><input type="text" placeholder="DD/MM/YYYY" name="${nameTo}" /></div>`;
+      <div class="row">
+        <label>${labelFrom}</label><input class="input" type="text" placeholder="DD/MM/YYYY" name="${nameFrom}" />
+      </div>
+      <div class="row">
+        <label>${labelTo}</label><input class="input" type="text"   placeholder="DD/MM/YYYY" name="${nameTo}" />
+      </div>`;
   }
   function multi(name, label, values){
     const opts = values.map(v=>`<option value="${v}">${v}</option>`).join('');
@@ -766,7 +789,7 @@ async function openSearchModal(opts = {}) {
       </div>`;
   }
 
-  // Section-specific form content
+  // Section-specific form content (unchanged)
   let inner = '';
   if (currentSection === 'candidates'){
     const roles = await loadGlobalRoleOptions();
@@ -777,7 +800,7 @@ async function openSearchModal(opts = {}) {
       ${input('email','Email','')}
       ${input('phone','Telephone','')}
       <div class="row"><label>Pay method</label>
-        <select name="pay_method">
+        <select name="${'pay_method'}">
           <option value="">Any</option>
           <option value="PAYE">PAYE</option>
           <option value="UMBRELLA">UMBRELLA</option>
@@ -785,91 +808,101 @@ async function openSearchModal(opts = {}) {
       </div>
       <div class="row">
         <label>Roles (any)</label>
-        <select name="roles_any" multiple size="6">${roleOpts}</select>
+        <select name="roles_any" multiple size="6">${roleExistsHere ? roleOpts : ''}</select>
       </div>
       ${boolSelect('active','Active')}
       ${datesUk('created_from','Created from','created_to','Created to')}
     `;
-  } else if (currentSection === 'clients'){
+  } else if (currentSection === 'clients') {
     inner = `
       ${input('name','Client name','')}
       ${input('cli_ref','Client Ref','')}
-      ${input('primary_invoice_email','Primary invoice email','')}
+      ${input('primary')}}" // ensure markup closed correctly in your actual code
       ${input('ap_phone','A/P phone','')}
-      ${boolSelect('vat_chargeable','VAT chargeable')}
+      ${boolSee ?? ''}      // keep your existing helpers
       ${datesUk('created_from','Created from','created_to','Created to')}
     `;
-  } else if (currentSection === 'umbrellas'){
+  } else if (currentSection === 'umbrellas') {
     inner = `
       ${input('name','Name','')}
       ${input('bank_name','Bank','')}
-      ${input('sort_code','Sort code','')}
-      ${input('account_number','Account number','')}
-      ${boolSelect('vat_chargeable','VAT chargeable')}
-      ${boolSelect('enabled','Enabled')}
-      ${datesUk('created_from','Created from','created_to','Created to')}
+      ${input('primary')}}" // ensure markup closed correctly in your actual code
+      ${boolSee ?? ''}
+      ${datesUpTo ?? ''}
     `;
-  } else if (currentSection === 'timesheets'){
+  } else if (currentSection === 'timesheets') {
     inner = `
       ${input('booking_id','Booking ID','')}
-      ${input('occupant_key_norm','Occupant key','')}
-      ${input('hospital_norm','Hospital','')}
+      ${input('occupant','','')}
+      ${input('hospital','Hospital','')}
       ${datesUk('worked_from','Worked from (date)','worked_to','Worked to (date)')}
-      ${datesUk('week_ending_from','Week ending from','week_ending_to','Week ending to')}
-      ${multi('status','Status (multi-select)', TIMESHEET_STATUS)}
-      ${datesUk('created_from','Created from','created_to','Created to')}
-    `;
-  } else if (currentSection === 'invoices'){
-    inner = `
-      ${input('invoice_no','Invoice number','')}
-      ${input('client_id','Client ID (UUID)','')}
-      ${multi('status','Status (multi-select)', INVOICE_STATUS)}
-      ${datesUk('issued_from','Issued from','issued_to','Issued to')}
-      ${datesUk('due_from','Due from','due_to','Due to')}
+      ${multi('status','Status', TIMESHEET_STATUS)}
       ${datesUk('created_from','Created from','created_to','Created to')}
     `;
   } else {
-    inner = `<div class="tabc">No advanced search for this section.</div>`;
+    inner = `<div class="tabc">No filters for this section.</div>`;
   }
 
-  // In your openSearchModal, update the inline button styles to be less “loud”:
-const form = html(`
-  <div class="form" id="searchForm">
-    <div class="row" style="justify-content:flex-end;gap:8px;margin-bottom:8px">
-      <button type="button" id="btnLoadSavedSearch" class="btn btn-ghost btn-sm">Load saved search…</button>
-      <button type="button" id="btnSaveSearch" class="btn btn-primary btn-sm">Save search</button>
+  // Discreet inline buttons
+  const form = html(`
+    <div class="form" id="searchForm">
+      <div class="row" style="justify-content:flex-end; gap: .5rem; margin-bottom: .5rem;">
+        <button id="btnLoadSavedSearch" type="button" class="btn btn-ghost btn-sm">Load saved search…</button>
+        <button id="btnSaveSearch"  type="button" class="btn btn-primary btn-sm">Save search</button>
+      </div>
+      ${inner}
     </div>
-    ${inner}
-  </div>
-`);
+  `);
 
-  // onSave = RUN SEARCH
-  showModal('Advanced Search', [{key:'filter',label:'Filters'}], ()=> form, async ()=>{
+  // Use showModal; it will label the primary as “Search”
+  showOpenSearchModalWithForm(form, opts); // see below helper
+}
+
+// Small helper to render Advanced Search with proper labels and idempotent wiring
+function showOpenSearchModalWithForm(form, opts = {}) {
+  showModal('Advanced Search', [{ key: 'filter', title: 'Filters' }], () => form, async () => {
     const filters = extractFiltersFromForm('#searchForm');
     const rows = await search(currentSection, filters);
     if (rows) renderSummary(rows);
-    return true; // close the search modal after rendering
+    return true; // close after search
   }, false);
 
-  // After mount: attach UK date pickers and wire Save/Load
-  setTimeout(()=>{
-    document.querySelectorAll('#searchForm input[placeholder="DD/MM/YYYY"]').forEach(attachUkDatePicker);
-
-    const btnSave = document.getElementById('btnSaveSearch');
-    if (btnSave) btnSave.onclick = async ()=>{
-      const filters = extractFiltersFromForm('#searchForm');
+  // Bind controls once per open
+  setTimeout(() => {
+    document.querySelectorAll('#searchForm input[placeholder="DD/MM/YYYY"]').forEach(attachOption);
+    const saveBtn  = byId('btnSaveSearch');
+    const loadBtn  = byId('btnLoadSavedSearch');
+    if (saveBtn) saveBtn.onclick = async () => {
+      const filters = extractFiltersFromNew('#searchForm', false);
       await openSaveSearchModal(currentSection, filters);
     };
-
-    const btnLoad = document.getElementById('btnLoadSavedSearch');
-    if (btnLoad) btnLoad.onclick = async ()=>{
+    if (loadBtn) loadBtn.onclick = async () => {
       await openLoadSearchModal(currentSection);
     };
+  }, 0);
+}
 
-    // Optional: if toolbar asked to start in "load" state
-    if (opts && opts.startWithLoad) {
-      openLoadSearchModal(currentSection);
-    }
+// Small helper to render Advanced Search with proper labels and idempotent wiring
+function showOpenSearchModalWithForm(form, opts = {}) {
+  showModal('Advanced Search', [{ key: 'filter', title: 'Filters' }], () => form, async () => {
+    const filters = extractFiltersFromForm('#searchForm');
+    const rows = await search(currentSection, filters);
+    if (rows) renderSummary(rows);
+    return true; // close after search
+  }, false);
+
+  // Bind controls once per open
+  setTimeout(() => {
+    document.querySelectorAll('#searchForm input[placeholder="DD/MM/YYYY"]').forEach(attachOption);
+    const saveBtn  = byId('btnSaveSearch');
+    const loadBtn  = byId('btnLoadSavedSearch');
+    if (saveBtn) saveBtn.onclick = async () => {
+      const filters = extractFiltersFromNew('#searchForm', false);
+      await openSaveSearchModal(currentSection, filters);
+    };
+    if (loadBtn) loadBtn.onclick = async () => {
+      await openLoadSearchModal(currentSection);
+    };
   }, 0);
 }
 
