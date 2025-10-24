@@ -219,30 +219,498 @@ function renderTopNav(){
 }
 
 
-
-function renderTools(){
-  const el = byId('toolButtons');
-  const canCreate = ['candidates','clients','umbrellas'].includes(currentSection);
-  const canEdit = ['candidates','clients','umbrellas','settings'].includes(currentSection);
-  const canDelete = ['candidates','clients','umbrellas'].includes(currentSection);
-
-  el.innerHTML = '';
-  const addBtn = (txt, cb)=>{ const b=document.createElement('button'); b.textContent = txt; b.onclick=cb; el.appendChild(b); };
-
-  addBtn('Create New Record', ()=> openCreate());
-  addBtn('Edit Record', ()=> openEdit());
-  addBtn('Delete Record', ()=> openDelete());
-  addBtn('Search…', ()=> openSearchModal());   // <— now opens the modal
-
-
-  if (!canCreate) el.children[0].classList.add('btn');
-  if (!canEdit) el.children[1].classList.add('btn');
-  if (!canDelete) el.children[2].classList.add('btn');
-}
-
 // NEW: advanced, section-aware search modal
 // === UPDATED: Advanced Search — add Roles (any) multi-select, use UK date pickers ===
-async function openSearchModal(){
+// -----------------------------
+// Search presets FE cache (optional but handy)
+// -----------------------------
+const __PRESETS_CACHE__ = new Map(); // key = `${section}:${kind}|shared=${0/1}|q=...|p=..|ps=..`
+
+function cacheKey(section, kind = 'search', opts = {}) {
+  const shared = opts.include_shared ? 1 : 0;
+  const q      = opts.q ? String(opts.q) : '';
+  const page   = Number.isFinite(opts.page) ? opts.page : 1;
+  const ps     = Number.isFinite(opts.page_size) ? opts.page_size : 100;
+  return `${section || ''}:${kind || 'search'}|shared=${shared}|q=${q}|p=${page}|ps=${ps}`;
+}
+
+function invalidatePresetCache(section, kind = 'search', opts) {
+  if (opts) {
+    __PRESETS_CACHE__.delete(cacheKey(section, kind, opts));
+    return;
+  }
+  // No opts provided: clear all variants for this (section,kind)
+  const prefix = `${section || ''}:${kind || 'search'}|`;
+  for (const key of __PRESETS_CACHE__.keys()) {
+    if (key.startsWith(prefix)) __PRESETS_CACHE__.delete(key);
+  }
+}
+
+function getPresetCache(section, kind = 'search', opts) {
+  return __PRESETS_CACHE__.get(cacheKey(section, kind, opts)) || null;
+}
+
+function setPresetCache(section, kind, rows, opts) {
+  __PRESETS_CACHE__.set(
+    cacheKey(section, kind, opts),
+    Array.isArray(rows) ? rows : []
+  );
+}
+// Quick helper for ownership checks; adapt if you keep user in a different global
+function currentUserId(){
+  try {
+    return (window.SESSION && window.SESSION.user && window.SESSION.user.id)
+        || (window.__auth && window.__auth.user && window.__auth.user.id)
+        || window.__USER_ID
+        || null;
+  } catch (_) {
+    return null;
+  }
+}
+
+// -----------------------------
+// Preset API wrappers
+// -----------------------------
+async function listReportPresets({ section, kind = 'search', include_shared = true, q, page = 1, page_size = 100 } = {}) {
+  const opts = { include_shared, q, page, page_size };
+  const cached = getPresetCache(section, kind, opts);
+  if (cached) return cached;
+
+  const qs = new URLSearchParams();
+  if (section) qs.set('section', section);
+  if (kind) qs.set('kind', kind);
+  if (include_shared) qs.set('include_shared', 'true');
+  if (q) qs.set('q', q);
+  qs.set('page', page);
+  qs.set('page_size', page_size);
+
+  const res = await authFetch(API(`/api/report-presets?${qs.toString()}`));
+  const data = await res.json().catch(() => ({ rows: [] }));
+  const rows = data && Array.isArray(data.rows) ? data.rows : [];
+  setPresetCache(section, kind, rows, opts);
+  return rows;
+}
+async function createReportPreset({ section, kind='search', name, filters, is_shared=false, is_default=false }) {
+  const res = await authFetch(
+    API(`/api/report-presets`),
+    {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ section, kind, name, filters, is_shared, is_default })
+    }
+  );
+
+  // Handle duplicate-name ergonomics (HTTP 409 from unique (user_id, section, kind, name))
+  if (res.status === 409) {
+    // Try to locate the conflicting preset so we can preselect it for overwrite mode
+    let conflicting = null;
+    try {
+      const presets = await listReportPresets({ section, kind, include_shared: false, q: name, page: 1, page_size: 100 });
+      const lower = String(name || '').toLowerCase();
+      conflicting = (presets || []).find(p => String(p.name || '').toLowerCase() === lower) || null;
+    } catch (_) {
+      // ignore lookup failures; we can still switch the UI to overwrite mode without preselecting
+    }
+
+    // Attempt to switch the Save modal into "Overwrite" mode with the conflicting preset selected
+    try {
+      const form = document.getElementById('saveSearchForm');
+      if (form) {
+        const overwriteRadio = form.querySelector('input[name="mode"][value="overwrite"]');
+        const overwriteRow   = form.querySelector('#overwriteRow');
+        const selectEl       = form.querySelector('#overwritePresetId');
+
+        if (overwriteRadio) overwriteRadio.checked = true;
+        if (overwriteRow)   overwriteRow.style.display = ''; // reveal the dropdown
+
+        if (selectEl && conflicting) {
+          const hasOption = Array.from(selectEl.options).some(o => o.value === String(conflicting.id));
+          if (!hasOption) {
+            const opt = document.createElement('option');
+            opt.value = String(conflicting.id);
+            opt.textContent = conflicting.name || '(unnamed)';
+            selectEl.appendChild(opt);
+          }
+          selectEl.value = String(conflicting.id);
+        }
+      }
+    } catch (_) {
+      // Non-fatal if DOM not available; caller will still receive a structured error below
+    }
+
+    // Throw a structured error so the caller (openSaveSearchModal/onSave) keeps the modal open
+    const err = new Error('Preset name already exists. Switched to Overwrite—pick the preset and save again.');
+    err.code = 'PRESET_NAME_CONFLICT';
+    if (conflicting) err.preset = conflicting;
+    err.section = section;
+    err.kind = kind;
+    throw err;
+  }
+
+  if (!res.ok) {
+    // Other errors: propagate server message
+    throw new Error(await res.text());
+  }
+
+  invalidatePresetCache(section, kind);
+  const data = await res.json().catch(()=>({}));
+  return data.row || null;
+}
+
+
+async function updateReportPreset({ id, name, filters, is_shared, is_default, section, kind }) {
+  const patch = {};
+  if (typeof name === 'string') patch.name = name;
+  if (filters && typeof filters === 'object') patch.filters = filters;
+  if (typeof is_shared === 'boolean') patch.is_shared = is_shared;
+  if (typeof is_default === 'boolean') patch.is_default = is_default;
+  if (typeof section === 'string') patch.section = section;
+  if (typeof kind === 'string') patch.kind = kind;
+
+  const res = await authFetch(
+    API(`/api/report-presets/${encodeURIComponent(id)}`),
+    {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(patch)
+    }
+  );
+  if (!res.ok) throw new Error(await res.text());
+  // Invalidate caches for the effective section/kind; simplest: nuke all 'search' caches
+  __PRESETS_CACHE__.clear();
+  const data = await res.json().catch(()=>({}));
+  return data.row || null;
+}
+
+async function deleteReportPreset(id) {
+  const res = await authFetch(API(`/api/report-presets/${encodeURIComponent(id)}`), { method: 'DELETE' });
+  if (!res.ok) throw new Error(await res.text());
+  __PRESETS_CACHE__.clear();
+  const data = await res.json().catch(()=> ({}));
+  return data.deleted_id || id;
+}
+
+// -----------------------------
+// Search helpers
+// -----------------------------
+function extractFiltersFromForm(formSel='#searchForm'){
+  const raw = collectForm(formSel, false);
+
+  // Convert select[multiple] to array and booleans from "true"/"false"
+  Object.keys(raw).forEach(k=>{
+    const el = document.querySelector(`${formSel} [name="${k}"]`);
+    if (!el) return;
+    if (el.tagName==='SELECT' && el.multiple){
+      raw[k] = Array.from(el.selectedOptions).map(o=>o.value);
+    }
+    if (el.tagName==='SELECT' && (el.value === 'true' || el.value === 'false')){
+      raw[k] = (el.value === 'true');
+    }
+    if (el.type === 'number' && raw[k] === '') raw[k] = null;
+    if (raw[k] === '') delete raw[k];
+  });
+
+  // Convert UK dates → ISO (backend expects ISO)
+  ['created_from','created_to','worked_from','worked_to','week_ending_from','week_ending_to','issued_from','issued_to','due_from','due_to']
+    .forEach(f => {
+      if (raw[f]) {
+        const iso = parseUkDateToIso(raw[f]);
+        if (iso) raw[f] = iso;
+      }
+    });
+
+  return raw;
+}
+
+function populateSearchFormFromFilters(filters={}, formSel='#searchForm'){
+  const form = document.querySelector(formSel);
+  if (!form) return;
+
+  for (const [k,v] of Object.entries(filters || {})) {
+    const el = form.querySelector(`[name="${k}"]`);
+    if (!el) continue;
+
+    if (Array.isArray(v) && el.tagName === 'SELECT' && el.multiple) {
+      const values = new Set(v.map(String));
+      Array.from(el.options).forEach(opt => { opt.selected = values.has(opt.value); });
+      continue;
+    }
+
+    if (typeof v === 'boolean' && el.tagName === 'SELECT') {
+      el.value = v ? 'true' : 'false';
+      continue;
+    }
+
+    // Dates: try to present as UK DD/MM/YYYY for text inputs we later parse
+    const isDateField = ['created_from','created_to','worked_from','worked_to','week_ending_from','week_ending_to','issued_from','issued_to','due_from','due_to'].includes(k);
+    if (isDateField && typeof v === 'string') {
+      const uk = (typeof formatIsoToUk === 'function') ? formatIsoToUk(v) : v;
+      el.value = uk || '';
+      continue;
+    }
+
+    // Default
+    el.value = (v == null ? '' : String(v));
+  }
+}
+
+// Build querystring per section
+function buildSearchQS(section, filters={}){
+  const qs = new URLSearchParams();
+  const add = (key, val) => { if (val==null || val==='') return; qs.append(key, String(val)); };
+  const addArr = (key, arr) => { if (!Array.isArray(arr)) return; arr.forEach(v => { if (v!=null && v!=='') qs.append(key, String(v)); }); };
+
+  switch (section) {
+    case 'candidates': {
+      const { first_name,last_name,email,phone,pay_method,roles_any,active,created_from,created_to } = filters;
+      add('first_name', first_name);
+      add('last_name',  last_name);
+      add('email',      email);
+      add('phone',      phone);
+      add('pay_method', pay_method);
+      if (typeof active === 'boolean') add('active', active);
+      add('created_from', created_from);
+      add('created_to',   created_to);
+      addArr('roles_any', roles_any);
+      break;
+    }
+    case 'clients': {
+      const { name, cli_ref, primary_invoice_email, ap_phone, vat_chargeable, created_from, created_to } = filters;
+      if (name) add('q', name);       // backend uses q for name ilike
+      add('cli_ref', cli_ref);
+      add('primary_invoice_email', primary_invoice_email);
+      add('ap_phone', ap_phone);
+      if (typeof vat_chargeable === 'boolean') add('vat_chargeable', vat_chargeable);
+      add('created_from', created_from);
+      add('created_to',   created_to);
+      break;
+    }
+    case 'umbrellas': {
+      const { name, bank_name, sort_code, account_number, vat_chargeable, enabled, created_from, created_to } = filters;
+      if (name) add('q', name);
+      add('bank_name', bank_name);
+      add('sort_code', sort_code);
+      add('account_number', account_number);
+      if (typeof vat_chargeable === 'boolean') add('vat_chargeable', vat_chargeable);
+      if (typeof enabled === 'boolean') add('enabled', enabled);
+      add('created_from', created_from);
+      add('created_to',   created_to);
+      break;
+    }
+    case 'timesheets': {
+      const { booking_id, occupant_key_norm, hospital_norm, worked_from, worked_to, week_ending_from, week_ending_to, status, created_from, created_to } = filters;
+      add('booking_id', booking_id);
+      add('occupant_key_norm', occupant_key_norm);
+      add('hospital_norm', hospital_norm);
+      add('worked_from', worked_from);
+      add('worked_to',   worked_to);
+      add('week_ending_from', week_ending_from);
+      add('week_ending_to',   week_ending_to);
+      addArr('status', status);
+      add('created_from', created_from);
+      add('created_to',   created_to);
+      break;
+    }
+    case 'invoices': {
+      const { invoice_no, client_id, status, issued_from, issued_to, due_from, due_to, created_from, created_to } = filters;
+      add('invoice_no',  invoice_no);   // backend supports invoice_no (and/or q)
+      add('client_id',   client_id);
+      addArr('status',   status);
+      add('issued_from', issued_from);
+      add('issued_to',   issued_to);
+      add('due_from',    due_from);
+      add('due_to',      due_to);
+      add('created_from', created_from);
+      add('created_to',   created_to);
+      break;
+    }
+  }
+  return qs.toString();
+}
+
+// -----------------------------
+// UPDATED: search()
+// -----------------------------
+async function search(section, filters={}){
+  const map = {
+    candidates:'/api/search/candidates',
+    clients:'/api/search/clients',
+    umbrellas:'/api/search/umbrellas',
+    timesheets:'/api/search/timesheets',
+    invoices:'/api/search/invoices'
+  };
+  const p = map[section]; if (!p) return [];
+  const qs = buildSearchQS(section, filters);
+  const url = qs ? `${p}?${qs}` : p;
+  const r = await authFetch(API(url));
+  return toList(r);
+}
+
+// -----------------------------
+// NEW: Save search modal (new / overwrite / shared)
+// -----------------------------
+async function openSaveSearchModal(section, filters){
+  const myId = currentUserId();
+  const mine = await listReportPresets({ section, kind:'search', include_shared:false });
+
+  const options = mine.map(m => `<option value="${m.id}">${m.name}</option>`).join('');
+  const body = html(`
+    <div class="form" id="saveSearchForm">
+      <div class="row"><label>Preset name</label><input type="text" name="preset_name" placeholder="e.g. 'PAYE RMNs last 7 days'"/></div>
+      <div class="row">
+        <label>Mode</label>
+        <div>
+          <label><input type="radio" name="mode" value="new" checked/> Save as new</label>
+          <label style="margin-left:12px"><input type="radio" name="mode" value="overwrite"/> Overwrite existing</label>
+        </div>
+      </div>
+      <div class="row" id="overwriteRow" style="display:none">
+        <label>Choose preset</label>
+        <select id="overwritePresetId">${options}</select>
+      </div>
+      <div class="row">
+        <label>Shared</label>
+        <label><input type="checkbox" id="presetShared"/> Visible to all users</label>
+      </div>
+      <div class="hint">Only you can edit/delete a shared search you own.</div>
+    </div>
+  `);
+
+  showModal('Save search', [{key:'form', label:'Details'}], ()=> body, async ()=>{
+    const form = collectForm('#saveSearchForm', false);
+    const mode = (form.mode || 'new').toLowerCase();
+    const name = (form.preset_name || '').trim();
+    const isShared = !!document.getElementById('presetShared')?.checked;
+
+    if (!name && mode === 'new') { alert('Please enter a name'); return; }
+    if (mode === 'overwrite') {
+      const el = document.getElementById('overwritePresetId');
+      const id = el && el.value;
+      if (!id) { alert('Select a preset to overwrite'); return; }
+      await updateReportPreset({ id, name: name || undefined, filters, is_shared: isShared });
+    } else {
+      await createReportPreset({ section, kind:'search', name, filters, is_shared: isShared });
+    }
+    invalidatePresetCache(section, 'search');
+    try { window.dispatchEvent(new Event('search-preset-updated')); } catch(_){}
+    return true; // close only this child modal
+  }, false);
+
+  // wire mode toggle
+  setTimeout(()=>{
+    const radios = document.querySelectorAll('#saveSearchForm input[name="mode"]');
+    const row = document.getElementById('overwriteRow');
+    radios.forEach(r => r.addEventListener('change', ()=> {
+      row.style.display = (r.value === 'overwrite' && r.checked) ? '' : 'none';
+    }));
+  }, 0);
+}
+
+// -----------------------------
+// NEW: Load saved search modal (with staged delete/edit apply)
+// -----------------------------
+async function openLoadSearchModal(section){
+  const myId = currentUserId();
+  let list = await listReportPresets({ section, kind:'search', include_shared:true });
+  let selectedId = null;
+  const ctx = { stagedDeletes: new Set(), stagedEdits: {} };
+
+  const renderList = () => {
+    const rowsHtml = (list || []).map(p => {
+      const owned = (p.user_id === myId);
+      const stagedDel = ctx.stagedDeletes.has(p.id);
+      const nameCell = `<span class="name"${stagedDel?' style="text-decoration:line-through;opacity:.6"':''}>${p.name}</span>`;
+      const sharedBadge = p.is_shared ? `<span class="badge">shared</span>` : '';
+      const delBtn = owned ? `<button class="bin" data-id="${p.id}" title="Delete">🗑</button>` : `<button class="bin" disabled title="Only owner can delete">🗑</button>`;
+      return `
+        <tr data-id="${p.id}" class="${selectedId===p.id?'selected':''}">
+          <td class="pick">${nameCell} ${sharedBadge}</td>
+          <td>${new Date(p.updated_at || p.created_at).toLocaleString()}</td>
+          <td class="actions">${delBtn}</td>
+        </tr>`;
+    }).join('');
+
+    return html(`
+      <div class="form">
+        <div class="row" style="justify-content:space-between;align-items:center">
+          <strong>Saved searches</strong>
+          <span class="hint">Section: <code>${section}</code></span>
+        </div>
+        <div class="row">
+          <table class="grid compact" id="presetTable">
+            <thead><tr><th>Name</th><th>Updated</th><th></th></tr></thead>
+            <tbody>${rowsHtml || '<tr><td colspan="3" class="hint">No saved searches yet.</td></tr>'}</tbody>
+          </table>
+        </div>
+      </div>
+    `);
+  };
+
+  showModal('Load saved search', [{key:'list', label:'Saved'}], renderList, async ()=>{
+    // Apply selected -> populate the parent search modal form
+    if (!selectedId) { alert('Pick a saved search to apply.'); return false; }
+    const chosen = (list || []).find(p => p.id === selectedId);
+    if (!chosen) { alert('Preset not found.'); return false; }
+    populateSearchFormFromFilters(chosen.filters_json, '#searchForm');
+    return true; // close this child modal only; parent search stays open
+  }, false);
+
+  // Wire table interactions & Save changes for staged deletes
+  setTimeout(()=>{
+    const tbl = document.getElementById('presetTable');
+    if (!tbl) return;
+
+    tbl.addEventListener('click', (e)=>{
+      const tr = e.target.closest('tr[data-id]');
+      const bin = e.target.closest('button.bin');
+      if (!tr) return;
+      const id = tr.getAttribute('data-id');
+
+      if (bin) {
+        // toggle staged delete for owned presets
+        const row = (list || []).find(p => p.id === id);
+        if (!row || row.user_id !== myId) return;
+        if (ctx.stagedDeletes.has(id)) ctx.stagedDeletes.delete(id); else ctx.stagedDeletes.add(id);
+        // re-render body
+        document.querySelector('#modalBody').innerHTML = renderList();
+        return;
+      }
+
+      // pick
+      selectedId = id;
+      Array.from(tbl.querySelectorAll('tbody tr')).forEach(r => r.classList.toggle('selected', r.getAttribute('data-id') === id));
+    });
+
+    // Add "Save changes" button next to primary Apply
+    const primary = byId('btnSave');
+    if (primary) {
+      let aux = document.createElement('button');
+      aux.textContent = 'Save changes';
+      aux.id = 'btnSavePresetChanges';
+      aux.style.marginLeft = '8px';
+      aux.onclick = async ()=>{
+        // commit deletes only (rename/share toggle could be added similarly via ctx.stagedEdits)
+        for (const delId of ctx.stagedDeletes) {
+          const row = (list || []).find(p => p.id === delId);
+          if (!row || row.user_id !== myId) continue; // guard
+          try { await deleteReportPreset(delId); } catch (e) { alert(String(e)); return; }
+        }
+        ctx.stagedDeletes.clear();
+        invalidatePresetCache(section, 'search');
+        list = await listReportPresets({ section, kind:'search', include_shared:true });
+        document.querySelector('#modalBody').innerHTML = renderList();
+      };
+      primary.parentElement?.appendChild(aux);
+    }
+  }, 0);
+}
+
+// -----------------------------
+// UPDATED: openSearchModal()
+// - Fix search submit path (object filters, not JSON string)
+// - Provide inline Save/Load buttons that open child modals
+// -----------------------------
+async function openSearchModal(opts = {}) {
   const TIMESHEET_STATUS = ['ERROR','RECEIVED','REVOKED','SHEETS_PARTIAL','SHEETS_PENDING','SHEETS_SYNCED','STORED'];
   const INVOICE_STATUS   = ['DRAFT','ISSUED','ON_HOLD','PAID'];
 
@@ -258,7 +726,6 @@ async function openSearchModal(){
       </div>`;
   }
   function datesUk(nameFrom, labelFrom, nameTo, labelTo){
-    // text inputs + we will attach UK date pickers after mount
     return `
       <div class="row"><label>${labelFrom}</label><input type="text" placeholder="DD/MM/YYYY" name="${nameFrom}" /></div>
       <div class="row"><label>${labelTo}</label><input type="text" placeholder="DD/MM/YYYY" name="${nameTo}" /></div>`;
@@ -272,110 +739,135 @@ async function openSearchModal(){
       </div>`;
   }
 
-  let form = '';
+  // Section-specific form content
+  let inner = '';
   if (currentSection === 'candidates'){
     const roles = await loadGlobalRoleOptions();
     const roleOpts = roles.map(r=>`<option value="${r}">${r}</option>`).join('');
-    form = `
-      <div class="form" id="searchForm">
-        ${input('first_name','First name','')}
-        ${input('last_name','Last name','')}
-        ${input('email','Email','')}
-        ${input('phone','Telephone','')}
-        <div class="row"><label>Pay method</label>
-          <select name="pay_method">
-            <option value="">Any</option>
-            <option value="PAYE">PAYE</option>
-            <option value="UMBRELLA">UMBRELLA</option>
-          </select>
-        </div>
-        <div class="row">
-          <label>Roles (any)</label>
-          <select name="roles_any" multiple size="6">${roleOpts}</select>
-        </div>
-        ${boolSelect('active','Active')}
-        ${datesUk('created_from','Created from','created_to','Created to')}
-      </div>`;
+    inner = `
+      ${input('first_name','First name','')}
+      ${input('last_name','Last name','')}
+      ${input('email','Email','')}
+      ${input('phone','Telephone','')}
+      <div class="row"><label>Pay method</label>
+        <select name="pay_method">
+          <option value="">Any</option>
+          <option value="PAYE">PAYE</option>
+          <option value="UMBRELLA">UMBRELLA</option>
+        </select>
+      </div>
+      <div class="row">
+        <label>Roles (any)</label>
+        <select name="roles_any" multiple size="6">${roleOpts}</select>
+      </div>
+      ${boolSelect('active','Active')}
+      ${datesUk('created_from','Created from','created_to','Created to')}
+    `;
   } else if (currentSection === 'clients'){
-    form = `
-      <div class="form" id="searchForm">
-        ${input('name','Client name','')}
-        ${input('cli_ref','Client Ref','')}
-        ${input('primary_invoice_email','Primary invoice email','')}
-        ${input('ap_phone','A/P phone','')}
-        ${boolSelect('vat_chargeable','VAT chargeable')}
-        ${datesUk('created_from','Created from','created_to','Created to')}
-      </div>`;
+    inner = `
+      ${input('name','Client name','')}
+      ${input('cli_ref','Client Ref','')}
+      ${input('primary_invoice_email','Primary invoice email','')}
+      ${input('ap_phone','A/P phone','')}
+      ${boolSelect('vat_chargeable','VAT chargeable')}
+      ${datesUk('created_from','Created from','created_to','Created to')}
+    `;
   } else if (currentSection === 'umbrellas'){
-    form = `
-      <div class="form" id="searchForm">
-        ${input('name','Name','')}
-        ${input('bank_name','Bank','')}
-        ${input('sort_code','Sort code','')}
-        ${input('account_number','Account number','')}
-        ${boolSelect('vat_chargeable','VAT chargeable')}
-        ${boolSelect('enabled','Enabled')}
-        ${datesUk('created_from','Created from','created_to','Created to')}
-      </div>`;
+    inner = `
+      ${input('name','Name','')}
+      ${input('bank_name','Bank','')}
+      ${input('sort_code','Sort code','')}
+      ${input('account_number','Account number','')}
+      ${boolSelect('vat_chargeable','VAT chargeable')}
+      ${boolSelect('enabled','Enabled')}
+      ${datesUk('created_from','Created from','created_to','Created to')}
+    `;
   } else if (currentSection === 'timesheets'){
-    form = `
-      <div class="form" id="searchForm">
-        ${input('booking_id','Booking ID','')}
-        ${input('occupant_key_norm','Occupant key','')}
-        ${input('hospital_norm','Hospital','')}
-        ${datesUk('worked_from','Worked from (date)','worked_to','Worked to (date)')}
-        ${datesUk('week_ending_from','Week ending from','week_ending_to','Week ending to')}
-        ${multi('status','Status (multi-select)', TIMESHEET_STATUS)}
-        ${datesUk('created_from','Created from','created_to','Created to')}
-      </div>`;
+    inner = `
+      ${input('booking_id','Booking ID','')}
+      ${input('occupant_key_norm','Occupant key','')}
+      ${input('hospital_norm','Hospital','')}
+      ${datesUk('worked_from','Worked from (date)','worked_to','Worked to (date)')}
+      ${datesUk('week_ending_from','Week ending from','week_ending_to','Week ending to')}
+      ${multi('status','Status (multi-select)', TIMESHEET_STATUS)}
+      ${datesUk('created_from','Created from','created_to','Created to')}
+    `;
   } else if (currentSection === 'invoices'){
-    form = `
-      <div class="form" id="searchForm">
-        ${input('invoice_no','Invoice number','')}
-        ${input('client_id','Client ID (UUID)','')}
-        ${multi('status','Status (multi-select)', INVOICE_STATUS)}
-        ${datesUk('issued_from','Issued from','issued_to','Issued to')}
-        ${datesUk('due_from','Due from','due_to','Due to')}
-        ${datesUk('created_from','Created from','created_to','Created to')}
-      </div>`;
+    inner = `
+      ${input('invoice_no','Invoice number','')}
+      ${input('client_id','Client ID (UUID)','')}
+      ${multi('status','Status (multi-select)', INVOICE_STATUS)}
+      ${datesUk('issued_from','Issued from','issued_to','Issued to')}
+      ${datesUk('due_from','Due from','due_to','Due to')}
+      ${datesUk('created_from','Created from','created_to','Created to')}
+    `;
   } else {
-    form = `<div class="tabc">No advanced search for this section.</div>`;
+    inner = `<div class="tabc">No advanced search for this section.</div>`;
   }
 
+  // Inline actions for Save/Load presets inside the modal
+  const form = html(`
+    <div class="form" id="searchForm">
+      <div class="row" style="justify-content:flex-end;gap:8px;margin-bottom:8px">
+        <button type="button" id="btnLoadSavedSearch">Load saved search…</button>
+        <button type="button" id="btnSaveSearch">Save search…</button>
+      </div>
+      ${inner}
+    </div>
+  `);
+
+  // onSave = RUN SEARCH
   showModal('Advanced Search', [{key:'filter',label:'Filters'}], ()=> form, async ()=>{
-    const raw = collectForm('#searchForm', false);
-
-    // Convert select[multiple] to array and booleans from "true"/"false"
-    Object.keys(raw).forEach(k=>{
-      const el = document.querySelector(`#searchForm [name="${k}"]`);
-      if (!el) return;
-      if (el.tagName==='SELECT' && el.multiple){
-        raw[k] = Array.from(el.selectedOptions).map(o=>o.value);
-      }
-      if (el.tagName==='SELECT' && (el.value === 'true' || el.value === 'false')){
-        raw[k] = (el.value === 'true');
-      }
-      if (el.type === 'number' && raw[k] === '') raw[k] = null;
-      if (raw[k] === '') delete raw[k];
-    });
-
-    // Convert any UK date inputs to ISO for the filters
-    ['created_from','created_to','worked_from','worked_to','week_ending_from','week_ending_to','issued_from','issued_to','due_from','due_to']
-      .forEach(f => {
-        if (raw[f]) {
-          const iso = parseUkDateToIso(raw[f]);
-          if (iso) raw[f] = iso;
-        }
-      });
-
-    // Call existing search
-    const rows = await search(currentSection, JSON.stringify(raw));
+    const filters = extractFiltersFromForm('#searchForm');
+    const rows = await search(currentSection, filters);
     if (rows) renderSummary(rows);
-    closeModal();
+    return true; // close the search modal after rendering
   }, false);
 
-  // After mount: attach UK date pickers
-  document.querySelectorAll('#searchForm input[placeholder="DD/MM/YYYY"]').forEach(attachUkDatePicker);
+  // After mount: attach UK date pickers and wire Save/Load
+  setTimeout(()=>{
+    document.querySelectorAll('#searchForm input[placeholder="DD/MM/YYYY"]').forEach(attachUkDatePicker);
+
+    const btnSave = document.getElementById('btnSaveSearch');
+    if (btnSave) btnSave.onclick = async ()=>{
+      const filters = extractFiltersFromForm('#searchForm');
+      await openSaveSearchModal(currentSection, filters);
+    };
+
+    const btnLoad = document.getElementById('btnLoadSavedSearch');
+    if (btnLoad) btnLoad.onclick = async ()=>{
+      await openLoadSearchModal(currentSection);
+    };
+
+    // Optional: if toolbar asked to start in "load" state
+    if (opts && opts.startWithLoad) {
+      openLoadSearchModal(currentSection);
+    }
+  }, 0);
+}
+
+// -----------------------------
+// UPDATED: renderTools()
+// - Keep Search…, add “Saved searches…” shortcut that opens Search modal pre-focused on loading presets
+// -----------------------------
+function renderTools(){
+  const el = byId('toolButtons');
+  const canCreate = ['candidates','clients','umbrellas'].includes(currentSection);
+  const canEdit = ['candidates','clients','umbrellas','settings'].includes(currentSection);
+  const canDelete = ['candidates','clients','umbrellas'].includes(currentSection);
+
+  el.innerHTML = '';
+  const addBtn = (txt, cb)=>{ const b=document.createElement('button'); b.textContent = txt; b.onclick=cb; el.appendChild(b); };
+
+  addBtn('Create New Record', ()=> openCreate());
+  addBtn('Edit Record', ()=> openEdit());
+  addBtn('Delete Record', ()=> openDelete());
+  addBtn('Search…', ()=> openSearchModal());
+  addBtn('Saved searches…', ()=> openSearchModal({ startWithLoad: true })); // opens search modal then immediately opens presets list
+
+  if (!canCreate) el.children[0].classList.add('btn');
+  if (!canEdit) el.children[1].classList.add('btn');
+  if (!canDelete) el.children[2].classList.add('btn');
 }
 
 // ===================== NEW HELPERS (UI + data) =====================
@@ -407,151 +899,19 @@ async function loadGlobalRoleOptions(){
 
 // Render roles editor into a container; updates modalCtx.rolesState
 function renderRolesEditor(container, rolesState, allRoleOptions){
-  // Use a local mutable copy so the updater can refresh options
-  let roleOptions = Array.isArray(allRoleOptions) ? allRoleOptions.slice() : [];
-
-  container.innerHTML = `
-    <div class="roles-editor">
-      <div class="roles-add">
-        <select id="rolesAddSelect">
-          <option value="">Add role…</option>
-          ${roleOptions.map(code => `<option value="${code}">${code}</option>`).join('')}
-        </select>
-        <button id="rolesAddBtn" type="button">Add</button>
-      </div>
-      <ul id="rolesList" class="roles-list"></ul>
-    </div>
-  `;
-
-  const sel = container.querySelector('#rolesAddSelect');
-  const btn = container.querySelector('#rolesAddBtn');
-  const ul  = container.querySelector('#rolesList');
-
-  function availableOptions(){
-    const picked = new Set((rolesState||[]).map(x => x.code));
-    return roleOptions.filter(code => !picked.has(code));
-  }
-
-  function refreshAddSelect(){
-    const opts = ['<option value="">Add role…</option>'].concat(
-      availableOptions().map(code => `<option value="${code}">${code}</option>`)
-    ).join('');
-    sel.innerHTML = opts;
-  }
-
-  function renderList(){
-    ul.innerHTML = '';
-    const arr = (rolesState||[]).slice().sort((a,b)=> a.rank - b.rank);
-
-    arr.forEach((item, idx) => {
-      const li = document.createElement('li');
-      li.className = 'role-item';
-      li.draggable = true;                 // drag starts on the whole LI
-      li.dataset.index = String(idx);      // source-of-truth index for this render
-
-      li.innerHTML = `
-        <span class="drag" title="Drag to reorder" style="cursor:grab">⋮⋮</span>
-        <span class="rank">${item.rank}.</span>
-        <span class="code">${item.code}</span>
-        <input class="label" type="text" placeholder="Optional label…" value="${item.label || ''}" />
-        <button class="remove" type="button" title="Remove">✕</button>
-      `;
-
-      // Remove
-      li.querySelector('.remove').onclick = () => {
-        rolesState = rolesState.filter((_, i) => i !== idx);
-        rolesState = normaliseRolesForSave(rolesState);
-        modalCtx.rolesState = rolesState;
-        renderList(); refreshAddSelect();
-      };
-
-      // Label change
-      li.querySelector('.label').oninput = (e) => {
-        rolesState[idx].label = e.target.value;
-        modalCtx.rolesState = rolesState;
-      };
-
-      // Set the drag payload on dragstart (use a custom type and plain text for safety)
-      li.addEventListener('dragstart', (e) => {
-        const from = li.dataset.index || String(idx);
-        try { e.dataTransfer.setData('text/x-role-index', from); } catch {}
-        try { e.dataTransfer.setData('text/plain', from); } catch {}
-        if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move';
-        li.classList.add('dragging');
-      });
-
-      li.addEventListener('dragend', () => {
-        li.classList.remove('dragging');
-        ul.querySelectorAll('.over').forEach(n => n.classList.remove('over'));
-      });
-
-      ul.appendChild(li);
-    });
-  }
-
-  // === Delegated DnD handlers on the UL (works even if you drop on inner elements) ===
-  ul.addEventListener('dragover', (e) => {
-    e.preventDefault(); // allow drop
-    const overLi = e.target && e.target.closest('li.role-item');
-    ul.querySelectorAll('.over').forEach(n => n.classList.remove('over'));
-    if (overLi) overLi.classList.add('over');
-    if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
-  });
-
-  ul.addEventListener('drop', (e) => {
-    e.preventDefault();
-    const toLi = e.target && e.target.closest('li.role-item');
-    if (!toLi) return;
-
-    // Read source index from payload (supports both custom and plain)
-    let from = NaN;
-    try { from = parseInt(e.dataTransfer.getData('text/x-role-index'), 10); } catch {}
-    if (isNaN(from)) {
-      try { from = parseInt(e.dataTransfer.getData('text/plain'), 10); } catch {}
-    }
-    const to = parseInt(toLi.dataset.index, 10);
-    if (!Number.isInteger(from) || !Number.isInteger(to) || from === to) return;
-
-    // Reorder against the CURRENT rank-sorted view
-    const view = (rolesState||[]).slice().sort((a,b)=> a.rank - b.rank);
-    const [moved] = view.splice(from, 1);
-    view.splice(to, 0, moved);
-
-    // Normalise (sets rank 1..N and returns sorted array)
-    rolesState = normaliseRolesForSave(view);
-    modalCtx.rolesState = rolesState;
-
-    // Re-render list & add-select
-    renderList();
-    refreshAddSelect();
-  });
-
-  // Add button
-  btn.onclick = () => {
-    const code = sel.value;
-    if (!code) return;
-    if ((rolesState||[]).some(r => r.code === code)) return; // no duplicates
-    const nextRank = ((rolesState||[]).length || 0) + 1;
-    rolesState = [...(rolesState||[]), { code, rank: nextRank }];
-    rolesState = normaliseRolesForSave(rolesState);
-    modalCtx.rolesState = rolesState;
-    renderList(); refreshAddSelect();
-  };
-
-  // Expose a tiny API on the container to refresh options in-place
-  container.__rolesEditor = {
-    updateOptions(newOptions){
-      roleOptions = Array.isArray(newOptions) ? newOptions.slice() : [];
-      refreshAddSelect();
-    }
-  };
-
-  // Initial render
-  refreshAddSelect();
-  renderList();
-}function renderRolesEditor(container, rolesState, allRoleOptions){
   // Local, mutable copy of available options so we can refresh after adds/removes
   let roleOptions = Array.isArray(allRoleOptions) ? allRoleOptions.slice() : [];
+
+  // Helper: mark the current modal as dirty and notify UI to update the Discard/Close label
+  function markDirty() {
+    try {
+      const stack = window.__modalStack || [];
+      const top = stack[stack.length - 1];
+      if (top) top.isDirty = true;
+      try { window.dispatchEvent(new CustomEvent('modal-dirty')); }
+      catch { try { window.dispatchEvent(new Event('modal-dirty')); } catch(_) {} }
+    } catch (_) {}
+  }
 
   container.innerHTML = `
     <div class="roles-editor">
@@ -610,14 +970,16 @@ function renderRolesEditor(container, rolesState, allRoleOptions){
         rolesState.forEach((r,i)=> r.rank = i+1);
         rolesState = normaliseRolesForSave(rolesState);
         modalCtx.rolesState = rolesState;
+        markDirty();                 // ← mark dirty on remove
         renderList(); refreshAddSelect();
       };
 
-      // Label edits by identity
+      // Label edits by identity (this already triggers input/change and will mark dirty via modal tracker)
       li.querySelector('.label').oninput = (e) => {
         const rec = byCode(item.code);
         if (rec) rec.label = e.target.value;
         modalCtx.rolesState = rolesState;
+        // no explicit markDirty() needed; _attachDirtyTracker handles input/change
       };
 
       // Drag payload
@@ -665,14 +1027,14 @@ function renderRolesEditor(container, rolesState, allRoleOptions){
     const [moved] = view.splice(from, 1);
     view.splice(to, 0, moved);
 
-    // ✅ KEY FIX: rewrite ranks to match the NEW order before normalising
+    // Rewrite ranks to new order before normalising
     view.forEach((r,i)=> r.rank = i+1);
 
     // Normalise (dedupe/tidy) without losing the new order
     rolesState = normaliseRolesForSave(view);
     modalCtx.rolesState = rolesState;
 
-    // Re-render so the list reflects the swap immediately
+    markDirty();                     // ← mark dirty on reorder
     renderList();
     refreshAddSelect();
   });
@@ -686,13 +1048,14 @@ function renderRolesEditor(container, rolesState, allRoleOptions){
     rolesState = [...(rolesState||[]), { code, rank: nextRank }];
     rolesState = normaliseRolesForSave(rolesState);
     modalCtx.rolesState = rolesState;
+    markDirty();                     // ← mark dirty on add
     renderList(); refreshAddSelect();
   };
 
   // Expose a tiny API for refreshing options live
   container.__rolesEditor = {
     updateOptions(newOptions){
-      roleOptions = Array.isArray(newOptions) ? newOptions.slice() : [];
+      roleOptions = Array.isArray(newOptions) ? newRoleOptions = newOptions.slice() : [];
       refreshAddSelect();
     }
   };
@@ -701,6 +1064,7 @@ function renderRolesEditor(container, rolesState, allRoleOptions){
   refreshAddSelect();
   renderList();
 }
+
 
 // Drop dups (by code), sort by rank, rewrite rank 1..N
 function normaliseRolesForSave(roles){
@@ -1292,18 +1656,7 @@ async function fetchRelatedCounts(entity, id){
   return r.json();
 }
 
-async function search(section, q){
-  const map = {
-    candidates:'/api/search/candidates',
-    clients:'/api/search/clients',
-    umbrellas:'/api/search/umbrellas',
-    timesheets:'/api/search/timesheets',
-    invoices:'/api/search/invoices'
-  };
-  const p = map[section]; if (!p) return [];
-  const r = await authFetch(API(`${p}?q=${encodeURIComponent(q)}`));
-  return toList(r);
-}
+
 async function upsertCandidate(payload, id){
   const url = id ? `/api/candidates/${id}` : '/api/candidates';
   const method = id ? 'PUT' : 'POST';
@@ -3881,15 +4234,87 @@ function showRelatedMenu(x, y, counts, entity, id){
 }
 
 // ===== Quick search =====
-byId('quickSearch').onkeydown = async (e)=>{
-  if (e.key!=='Enter') return;
-  const q = e.target.value.trim(); if (!q) return renderAll();
-  const rows = await search(currentSection, q);
+byId('quickSearch').onkeydown = async (e) => {
+  if (e.key !== 'Enter') return;
+
+  const text = String(e.target.value || '').trim();
+  if (!text) return renderAll();
+
+  const filters = (() => {
+    switch (currentSection) {
+      case 'clients':    return { q: text };
+      case 'umbrellas':  return { q: text };
+      case 'invoices':   return { q: text };
+      case 'timesheets': {
+        // Heuristic: pick ONE field to avoid ANDing multiple filters
+        const looksLikeUUID   = /^[0-9a-f-]{10,}$/i.test(text);
+        const looksLikeBkId   = /^[A-Za-z0-9-]{6,}$/.test(text);
+        const looksLikeOccKey = /^[A-Za-z0-9_.-]{4,}$/.test(text);
+
+        if (looksLikeBkId || looksLikeUUID) return { booking_id: text };
+        if (looksLikeOccKey)                return { occupant_key_norm: text };
+        return { hospital_norm: text };
+      }
+      case 'candidates': return { first_name: text, last_name: text, email: text, phone: text };
+      default:           return {};
+    }
+  })();
+
+  const rows = await search(currentSection, filters);
   if (rows) renderSummary(rows);
-}
-function openSearch(){
-  const q = prompt('Search text:'); if (!q) return;
-  byId('quickSearch').value = q; byId('quickSearch').dispatchEvent(new KeyboardEvent('keydown',{key:'Enter'}));
+};
+
+async function openSearch(){
+  const q = prompt('Search text:');
+  if (!q) return;
+
+  // reflect in the quick box for consistency
+  const box = byId('quickSearch');
+  if (box) box.value = q;
+
+  // Build minimal filters for quick search per section
+  const text = q.trim();
+  const filters = (() => {
+    switch (currentSection) {
+      case 'clients':
+        // backend supports ?q= (name ilike) + other fields if user refines later
+        return { q: text };
+
+      case 'umbrellas':
+        // backend supports ?q= (name ilike)
+        return { q: text };
+
+      case 'invoices':
+        // support partial invoice number via ?q= as well
+        return { q: text };
+
+      case 'timesheets': {
+        // Heuristic: pick ONE field to avoid ANDing multiple filters
+        const looksLikeUUID   = /^[0-9a-f-]{10,}$/i.test(text);
+        const looksLikeBkId   = /^[A-Za-z0-9-]{6,}$/.test(text);
+        const looksLikeOccKey = /^[A-Za-z0-9_.-]{4,}$/.test(text);
+
+        if (looksLikeBkId || looksLikeUUID) return { booking_id: text };
+        if (looksLikeOccKey)                return { occupant_key_norm: text };
+        return { hospital_norm: text };
+      }
+
+      case 'candidates':
+        // broad pass: try common fields; server can choose which to apply
+        return {
+          first_name: text,
+          last_name:  text,
+          email:      text,
+          phone:      text
+        };
+
+      default:
+        return {};
+    }
+  })();
+
+  const rows = await search(currentSection, filters);
+  if (rows) renderSummary(rows);
 }
 
 // OPTIONAL: open ALT+F for fast search
@@ -3899,6 +4324,7 @@ document.addEventListener('keydown', (e)=>{
     openSearchModal();
   }
 });
+
 
 
 // ===== Boot =====
