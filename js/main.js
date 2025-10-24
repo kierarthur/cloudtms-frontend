@@ -551,6 +551,7 @@ async function search(section, filters={}){
 // -----------------------------
 
 // === REPLACE: openSaveSearchModal (no currentWorked; built-in sanitize) ===
+// === REPLACE: openSaveSearchModal (radio-safe + stable layout + full-width dropdown)
 async function openSaveSearchModal(section, filters){
   // Local, safe sanitizer (uses global sanitize if present)
   const sanitize = (typeof window !== 'undefined' && typeof window.sanitize === 'function')
@@ -567,7 +568,7 @@ async function openSaveSearchModal(section, filters){
     .join('');
 
   const body = html(`
-    <div class="form" id="saveSearchForm">
+    <div class="form" id="saveSearchForm" style="max-width:640px">
       <div class="row">
         <label for="presetName">Preset name</label>
         <div class="controls">
@@ -577,16 +578,17 @@ async function openSaveSearchModal(section, filters){
 
       <div class="row">
         <label>Mode</label>
-        <div class="controls" style="display:flex;gap:12px;align-items:center">
-          <label class="inline"><input type="radio" name="mode" value="new" checked> <span>Save as new</span></label>
-          <label class="inline"><input type="radio" name="mode" value="overwrite"> <span>Overwrite existing</span></label>
-        </div>
-      </div>
+        <div class="controls" style="display:flex;flex-direction:column;gap:8px;min-width:0">
+          <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+            <label class="inline"><input type="radio" name="mode" value="new" checked> <span>Save as new</span></label>
+            <label class="inline"><input type="radio" name="mode" value="overwrite"> <span>Overwrite existing</span></label>
+          </div>
 
-      <div class="row" id="overwriteRow" style="display:none">
-        <label for="overwritePresetId">Choose preset</label>
-        <div class="controls">
-          <select id="overwritePresetId" class="select">${options}</select>
+          <!-- Keep the overwrite picker INSIDE the controls column so "Visibility" row won't jump -->
+          <div id="overwriteWrap" style="display:none; width:100%; max-width:100%">
+            <div style="font-size:12px; color:#6b7280; margin:2px 0 4px">Choose preset to overwrite</div>
+            <select id="overwritePresetId" class="select" style="width:100%; max-width:100%">${options}</select>
+          </div>
         </div>
       </div>
 
@@ -600,10 +602,13 @@ async function openSaveSearchModal(section, filters){
   `);
 
   showModal('Save search', [{ key: 'form', title: 'Details' }], () => body, async () => {
-    const form  = collectForm('#saveSearchForm', false);
-    const mode  = (form.mode || 'new').toLowerCase();
-    const name  = String(form.preset_name || '').trim();
-    const share = !!document.getElementById('presetShared')?.checked;
+    // ✅ Read the checked radio explicitly (collectForm doesn't handle radio groups reliably)
+    const modeInput = document.querySelector('#saveSearchForm input[name="mode"]:checked');
+    const mode  = (modeInput?.value || 'new').toLowerCase();
+
+    const nameEl = document.getElementById('presetName');
+    const name   = String(nameEl?.value || '').trim();
+    const share  = !!document.getElementById('presetShared')?.checked;
 
     if (!name && mode === 'new') { alert('Please enter a name'); return false; }
 
@@ -620,11 +625,12 @@ async function openSaveSearchModal(section, filters){
       return true;
     } catch (err) {
       const msg = (err && err.message) ? String(err.message) : 'Unable to save preset';
+      // Ergonomics: HTTP 409 → switch UI to Overwrite and reveal dropdown
       if (err.code === 'PRESET_NAME_CONFLICT' || /already exists|duplicate|409/.test(msg)) {
         const overwriteRadio = document.querySelector('#saveSearchForm input[name="mode"][value="overwrite"]');
-        const overwriteRow   = document.getElementById('overwriteRow');
+        const overwriteWrap  = document.getElementById('overwriteWrap');
         if (overwriteRadio) overwriteRadio.checked = true;
-        if (overwriteRow) overwriteRow.style.display = '';
+        if (overwriteWrap)  overwriteWrap.style.display = 'block';
         alert('A preset with that name already exists. Choose it under “Overwrite existing”, or change the name.');
         return false;
       }
@@ -633,19 +639,26 @@ async function openSaveSearchModal(section, filters){
     }
   }, false);
 
-  // Toggle overwrite row
+  // Toggle UI (idempotent)
   setTimeout(() => {
     const formEl = document.getElementById('saveSearchForm');
     if (!formEl || formEl.dataset.wired === '1') return;
     formEl.dataset.wired = '1';
-    const overwriteRow = document.getElementById('overwriteRow');
+
+    const overwriteWrap = document.getElementById('overwriteWrap');
     formEl.querySelectorAll('input[name="mode"]').forEach(r =>
       r.addEventListener('change', () => {
-        overwriteRow.style.display = (r.value === 'overwrite' && r.checked) ? '' : 'none';
+        const isOverwrite = r.value === 'overwrite' && r.checked;
+        if (overwriteWrap) overwriteWrap.style.display = isOverwrite ? 'block' : 'none';
       })
     );
+
+    // Keep select fully visible within the modal
+    const sel = document.getElementById('overwritePresetId');
+    if (sel) { sel.style.maxWidth = '100%'; sel.style.width = '100%'; }
   }, 0);
 }
+
 
 // === REPLACE: openLoadSearchModal (built-in sanitize; no globals required) ===
 async function openLoadSearchModal(section){
