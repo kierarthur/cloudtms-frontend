@@ -753,6 +753,7 @@ async function openLoadSearchModal(section){
 // - Uses attachUkDatePicker + extractFiltersFromForm
 // - Section-aware fields that match buildSearchQS()
 // -----------------------------
+// === REPLACE: openSearchModal (icons + robust wiring + fallback for old text buttons) ===
 async function openSearchModal(opts = {}) {
   const TIMESHEET_STATUS = ['ERROR','RECEIVED','REVOKED','STORED','SAT','SUN','BH'];
   const INVOICE_STATUS   = ['DRAFT','ISSUED','ON_HOLD','PAID'];
@@ -780,8 +781,8 @@ async function openSearchModal(opts = {}) {
   const multi = (name, values) =>
     `<select name="${name}" multiple size="6">${values.map(v=>`<option value="${v}">${v}</option>`).join('')}</select>`;
 
+  // Build section-specific body
   let inner = '';
-
   if (currentSection === 'candidates') {
     let roleOptions = [];
     try { roleOptions = await loadGlobalRoleOptions(); } catch { roleOptions = []; }
@@ -795,8 +796,7 @@ async function openSearchModal(opts = {}) {
           <option value="">Any</option>
           <option value="PAYE">PAYE</option>
           <option value="UMBRELLA">UMBRELLA</option>
-        </select>
-      `),
+        </select>`),
       row('Roles (any)',          `<select name="roles_any" multiple size="6">${roleOptions.map(r=>`<option value="${r}">${r}</option>`).join('')}</select>`),
       row('Active',               boolSelect('active')),
       datePair('created_from','Created from','created_to','Created to')
@@ -873,50 +873,123 @@ async function openSearchModal(opts = {}) {
     false
   );
 
-  // Wire after mount (idempotent)
+  // After mount: date pickers + resilient wiring (icons OR legacy text buttons)
   setTimeout(() => {
-    document
-      .querySelectorAll('#searchForm input[placeholder="DD/MM/YYYY"]')
-      .forEach(el => attachUkDatePicker(el));
+    const formEl = document.getElementById('searchForm');
+    if (!formEl || formEl.dataset.wired === '1') return;
+    formEl.dataset.wired = '1';
 
-    const wired = document.getElementById('searchForm');
-    if (wired && wired.dataset.wired === '1') return;
-    if (wired) wired.dataset.wired = '1';
+    formEl.querySelectorAll('input[placeholder="DD/MM/YYYY"]').forEach(el => {
+      try { attachUkDatePicker(el); } catch {}
+    });
 
-    const saveIco = document.getElementById('icoSaveSearch');
-    const loadIco = document.getElementById('icoLoadSaved');
+    // Fallback: if legacy text buttons exist, hide them and inject icons
+    const legacyLoad = document.getElementById('btnLoadSavedSearch');
+    const legacySave = document.getElementById('btnSaveSearch');
+    if (!document.getElementById('icoLoadSaved') && legacyLoad) {
+      legacyLoad.style.display = 'none';
+      const ico = document.createElement('div');
+      ico.innerHTML = iconBtn('icoLoadSaved','Load saved search','📂');
+      legacyLoad.parentElement?.insertBefore(ico.firstChild, legacyLoad);
+    }
+    if (!document.getElementById('icoSaveSearch') && legacySave) {
+      legacySave.style.display = 'none';
+      const ico = document.createElement('div');
+      ico.innerHTML = iconBtn('icoSaveSearch','Save search','💾');
+      legacySave.parentElement?.insertBefore(ico.firstChild, legacySave);
+    }
 
-    if (saveIco) saveIco.onclick = async () => {
-      const filters = extractFiltersFromForm('#searchForm');
-      await openSaveSearchModal(currentSection, filters);
-    };
-    if (loadIco) loadIco.onclick = async () => {
-      await openLoadSearchModal(currentSection);
-    };
+    const saveBtn =
+      document.getElementById('icoSaveSearch') ||
+      document.getElementById('btnSaveSearch');
+
+    const loadBtn =
+      document.getElementById('icoLoadSaved') ||
+      document.getElementById('btnLoadSavedSearch');
+
+    if (saveBtn) {
+      saveBtn.onclick = async () => {
+        const filters = extractFiltersFromForm('#searchForm');
+        await openSaveSearchModal(currentSection, filters);
+      };
+    }
+    if (loadBtn) {
+      loadBtn.onclick = async () => {
+        await openLoadSearchModal(currentSection);
+      };
+    }
   }, 0);
 }
 
 // Small helper to render Advanced Search with proper labels and idempotent wiring
+// === REPLACE: showOpenSearchModalWithForm (uses same icon UI + resilient wiring) ===
 function showOpenSearchModalWithForm(form, opts = {}) {
-  showModal('Advanced Search', [{ key: 'filter', title: 'Filters' }], () => form, async () => {
-    const filters = extractFiltersFromForm('#searchForm');
-    const rows = await search(currentSection, filters);
-    if (rows) renderSummary(rows);
-    return true; // close after search
-  }, false);
+  showModal(
+    'Advanced Search',
+    [{ key: 'filter', title: 'Filters' }],
+    () => form,
+    async () => {
+      const filters = extractFiltersFromForm('#searchForm');
+      const rows = await search(currentSection, filters);
+      if (rows) renderSummary(rows);
+      return true;
+    },
+    false
+  );
 
-  // Bind controls once per open
   setTimeout(() => {
-    document.querySelectorAll('#searchForm input[placeholder="DD/MM/YYYY"]').forEach(attachOption);
-    const saveBtn  = byId('btnSaveSearch');
-    const loadBtn  = byId('btnLoadSavedSearch');
-    if (saveBtn) saveBtn.onclick = async () => {
-      const filters = extractFiltersFromNew('#searchForm', false);
-      await openSaveSearchModal(currentSection, filters);
+    const formEl = document.getElementById('searchForm');
+    if (!formEl || formEl.dataset.wired === '1') return;
+    formEl.dataset.wired = '1';
+
+    formEl.querySelectorAll('input[placeholder="DD/MM/YYYY"]').forEach(el => {
+      try { attachUkDatePicker(el); } catch {}
+    });
+
+    // If the template passed into this function still has legacy buttons, upgrade them
+    const legacyLoad = document.getElementById('btnLoadSavedSearch');
+    const legacySave = document.getElementById('btnSaveSearch');
+
+    const ensureIcon = (wantId, label, glyph, beforeEl) => {
+      if (document.getElementById(wantId)) return;
+      const wrap = document.createElement('div');
+      wrap.innerHTML = `<button id="${wantId}" type="button" class="icon-btn" title="${label}" aria-label="${label}"
+                          style="width:28px;height:28px;display:inline-grid;place-items:center;border:1px solid #d1d5db;border-radius:6px;background:#fff;cursor:pointer">
+                          <span style="font-size:14px;line-height:1">${glyph}</span>
+                        </button>`;
+      const node = wrap.firstChild;
+      if (beforeEl && beforeEl.parentElement) {
+        beforeEl.style.display = 'none';
+        beforeEl.parentElement.insertBefore(node, beforeEl);
+      } else {
+        // fallback: prepend to form header row if available
+        const headerRow = formEl.querySelector('.row');
+        if (headerRow) headerRow.insertBefore(node, headerRow.firstChild);
+      }
     };
-    if (loadBtn) loadBtn.onclick = async () => {
-      await openLoadSearchModal(currentSection);
-    };
+
+    if (legacyLoad) ensureIcon('icoLoadSaved','Load saved search','📂', legacyLoad);
+    if (legacySave) ensureIcon('icoSaveSearch','Save search','💾', legacySave);
+
+    const saveBtn =
+      document.getElementById('icoSaveSearch') ||
+      document.getElementById('btnSaveSearch');
+
+    const loadBtn =
+      document.getElementById('icoLoadSaved') ||
+      document.getElementById('btnLoadSavedSearch');
+
+    if (saveBtn) {
+      saveBtn.onclick = async () => {
+        const filters = extractFiltersFromForm('#searchForm');
+        await openSaveSearchModal(currentSection, filters);
+      };
+    }
+    if (loadBtn) {
+      loadBtn.onclick = async () => {
+        await openLoadSearchModal(currentSection);
+      };
+    }
   }, 0);
 }
 
