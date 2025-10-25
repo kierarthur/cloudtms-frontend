@@ -3841,6 +3841,7 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
         try { window.removeEventListener('modal-dirty', onDirtyLabel); } catch {}
         try { window.removeEventListener('keydown', onEsc); } catch {}
         try { backEl.removeEventListener('click', onOverlayClick, true); } catch {}
+        // NOTE: additional detachments may be layered below (drag & related); they will chain to this
       };
 
       top._wired = true;
@@ -3927,6 +3928,70 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
 
     discardBtn.onclick = handleSecondary;
 
+    // ===== DRAG — Only from the title text area (no drag on the right near Related / Close) =====
+    (function ensureDrag() {
+      const modal = byId('modal');
+      const dragBar = byId('modalDrag');
+      const titleEl = byId('modalTitle');
+      if (!modal || !dragBar || !titleEl) return;
+
+      let startX = 0, startY = 0, baseLeft = 0, baseTop = 0, moved = false;
+      let onMove = null, onUp = null;
+
+      dragBar.onmousedown = (e) => {
+        // Left-click only, and start drag ONLY when originating from the title text
+        if (e.button !== 0) return;
+        if (!e.target || !e.target.closest('#modalTitle')) return;
+
+        // Block if clicking on any interactive control just in case
+        if (e.target.closest('#btnCloseModal') || e.target.closest('#btnRelatedWrap') || e.target.closest('#relatedMenu')) {
+          return;
+        }
+
+        // Record starting positions
+        const rect = modal.getBoundingClientRect();
+        baseLeft = rect.left + window.scrollX;
+        baseTop  = rect.top  + window.scrollY;
+        startX = e.clientX;
+        startY = e.clientY;
+        moved = false;
+
+        e.preventDefault();
+
+        onMove = (ev) => {
+          const dx = ev.clientX - startX;
+          const dy = ev.clientY - startY;
+          if (!moved && Math.max(Math.abs(dx), Math.abs(dy)) < 3) return; // small threshold
+          moved = true;
+
+          modal.style.position = 'absolute';
+          modal.style.left = (baseLeft + dx) + 'px';
+          modal.style.top  = (baseTop  + dy) + 'px';
+          modal.classList.add('dragging');
+        };
+
+        onUp = () => {
+          document.removeEventListener('mousemove', onMove, true);
+          document.removeEventListener('mouseup', onUp, true);
+          onMove = onUp = null;
+          modal.classList.remove('dragging');
+        };
+
+        document.addEventListener('mousemove', onMove, true);
+        document.addEventListener('mouseup', onUp, true);
+      };
+
+      // Chain detach so drag listeners are always cleared on rerender/close
+      const prevDetach = top._detachGlobal;
+      top._detachGlobal = () => {
+        if (onMove) { try { document.removeEventListener('mousemove', onMove, true); } catch {} onMove = null; }
+        if (onUp)   { try { document.removeEventListener('mouseup',   onUp,   true); } catch {} onUp   = null; }
+        if (typeof prevDetach === 'function') {
+          try { prevDetach(); } catch {}
+        }
+      };
+    })();
+
     // === RELATED… button & dropdown next to Save/Close (SAFE INSERTION + DEDUPE + ACTIVE-ONLY) ===
     (function ensureRelatedUI() {
       try {
@@ -3966,7 +4031,6 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
             try { wrap.parentElement?.removeChild(wrap); } catch {}
             actionsBar.appendChild(wrap);
           }
-          // Remove any duplicate wraps beyond the first
           const wraps = Array.from(document.querySelectorAll('#btnRelatedWrap'));
           wraps.forEach((n, i) => { if (i > 0) n.parentElement?.removeChild(n); });
           wrap.innerHTML = '';
@@ -3988,34 +4052,31 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
 
         // Modal entity -> API entity
         const apiEntityMap = { candidates:'candidate', timesheets:'timesheet', invoices:'invoice', umbrellas:'umbrella', clients:'client' };
-        // Section mapping for navigation
-        const navMap = { timesheets:'timesheets', invoices:'invoices', candidates:'candidates', clients:'clients', umbrellas:'umbrellas' };
+        // Section mapping for navigation (support singular & plural umbrella keys)
+        const navMap = { timesheets:'timesheets', invoices:'invoices', candidates:'candidates', clients:'clients', umbrella:'umbrellas', umbrellas:'umbrellas' };
 
         function renderRelatedMenu(counts) {
           const ent = apiEntityMap[top.entity];
           const spec = [];
           if (ent === 'timesheet') {
-            spec.push(['candidates','candidate'], ['clients','client'], ['invoices','invoice'], ['umbrella','umbrella']); // FIX: singular key
+            spec.push(['candidates','candidate'], ['clients','client'], ['invoices','invoice'], ['umbrella','umbrella']);
           } else if (ent === 'invoice') {
             spec.push(['timesheets','timesheets'], ['candidates','candidates'], ['clients','client'], ['umbrellas','umbrellas']);
           } else if (ent === 'candidate') {
-            spec.push(['timesheets','timesheets'], ['invoices','invoices'], ['clients','clients'], ['umbrella','umbrella']); // FIX: singular key
+            spec.push(['timesheets','timesheets'], ['invoices','invoices'], ['clients','clients'], ['umbrella','umbrella']);
           } else if (ent === 'client') {
             spec.push(['timesheets','timesheets'], ['invoices','invoices'], ['candidates','candidates']);
           } else if (ent === 'umbrella') {
             spec.push(['candidates','candidates'], ['timesheets','timesheets'], ['invoices','invoices']);
           }
 
-          const rows = spec.map(([key,labelKey]) => {
+        const rows = spec.map(([key,labelKey]) => {
             let val = counts ? Number(counts[key] ?? 0) : 0;
-
-            // Front-end safety for Candidate/Umbrella: if server says 0 but modal shows umbrella info, force 1
+            // FE safety: if Candidate has umbrella in modal but count is 0, show 1
             if (ent === 'candidate' && key === 'umbrella') {
-              const hasUmbFromModal =
-                (modalCtx?.data && (modalCtx.data.umbrella_id || (modalCtx.data.pay_method === 'UMBRELLA')));
+              const hasUmbFromModal = (modalCtx?.data && (modalCtx.data.umbrella_id || (modalCtx.data.pay_method === 'UMBRELLA')));
               if (val === 0 && hasUmbFromModal) val = 1;
             }
-
             return { key, labelKey, count: isNaN(val) ? 0 : val };
           });
 
@@ -4038,8 +4099,8 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
             btnItem.addEventListener('click', async () => {
               const enabled = btnItem.getAttribute('data-enabled') === '1';
               if (!enabled) return;
-              const tgt = btnItem.getAttribute('data-target');
-              const section = navMap[tgt];
+              const tgt = btnItem.getAttribute('data-target');           // e.g., 'umbrella' or 'umbrellas'
+              const section = navMap[tgt];                                // maps both to 'umbrellas'
               const id  = modalCtx?.data?.id;
               const ent = apiEntityMap[top.entity];
               menu.style.display = 'none';
@@ -4047,7 +4108,7 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
 
               let rows = [];
               try { rows = await fetchRelated(ent, id, tgt); } catch {}
-              // Do NOT close the modal: just switch section and render the related rows
+              // Do NOT close the modal: switch section and render related rows
               try { currentSection = section; } catch {}
               try { renderSummary(rows || []); } catch {}
             });
@@ -4080,6 +4141,7 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
 
         document.addEventListener('click', onDocClick, true);
 
+        // Chain cleanup with any previous global detach (e.g., drag)
         const prevDetach = top._detachGlobal;
         top._detachGlobal = () => {
           try { document.removeEventListener('click', onDocClick, true); } catch {}
@@ -4096,6 +4158,7 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
 
   renderTop();
 }
+
 
 // =================== ADD HOSPITAL MODAL (UPDATED: push into stagedNew) ===================
 // ==== CHILD MODAL (ADD HOSPITAL) — throw on errors; return true on success ====
