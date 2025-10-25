@@ -4219,7 +4219,6 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
     const top = window.__modalStack[window.__modalStack.length - 1];
     const isChild = depth > 1;
 
-    // Ensure we don't keep stale global listeners between renders
     if (typeof top._detachGlobal === 'function') {
       try { top._detachGlobal(); } catch(_) {}
       top._wired = false;
@@ -4250,7 +4249,6 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
     const discardBtn = byId('btnCloseModal');
     const backEl     = byId('modalBack');
 
-    // 🔧 Primary label mapping (keeps UX clean without changing signature)
     const defaultPrimary = isChild ? 'Apply' : 'Save';
     let primaryLabel = defaultPrimary;
     if (top.title === 'Advanced Search')    primaryLabel = 'Search';
@@ -4274,9 +4272,12 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
 
     const onDirtyLabel = () => updateSecondaryLabel();
 
-    // === RELATED… button & dropdown next to Save/Close ===
+    // === RELATED… button & dropdown next to Save/Close (SAFE INSERTION) ===
     (function ensureRelatedUI() {
-      const actionsBar = primaryBtn && primaryBtn.parentElement ? primaryBtn.parentElement : null;
+      const actionsBar =
+        (discardBtn && discardBtn.parentElement) ||
+        (primaryBtn && primaryBtn.parentElement) ||
+        null;
       if (!actionsBar) return;
 
       let wrap = byId('btnRelatedWrap');
@@ -4286,8 +4287,18 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
         wrap.style.display = 'inline-block';
         wrap.style.position = 'relative';
         wrap.style.marginRight = '.5rem';
-        actionsBar.insertBefore(wrap, discardBtn); // place before Close/Discard
+        // Safe placement: insert before Close if Close is a child of actionsBar, else append
+        if (discardBtn && discardBtn.parentElement === actionsBar) {
+          actionsBar.insertBefore(wrap, discardBtn);
+        } else {
+          actionsBar.appendChild(wrap);
+        }
       } else {
+        // Ensure wrapper is actually inside actionsBar
+        if (wrap.parentElement !== actionsBar) {
+          try { wrap.parentElement?.removeChild(wrap); } catch(_) {}
+          actionsBar.appendChild(wrap);
+        }
         wrap.innerHTML = '';
       }
 
@@ -4307,7 +4318,7 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
 
       // Modal entity -> API entity
       const apiEntityMap = { candidates:'candidate', timesheets:'timesheet', invoices:'invoice', umbrellas:'umbrella', clients:'client' };
-      // List section mapping for navigation
+      // Section mapping for navigation
       const navMap = { timesheets:'timesheets', invoices:'invoices', candidates:'candidates', clients:'clients', umbrellas:'umbrellas' };
 
       function renderRelatedMenu(counts) {
@@ -4329,7 +4340,6 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
           if (typeof counts.invoices   === 'number') rows.push({ key:'invoices',   label:`Invoices (${counts.invoices})` });
           if (typeof counts.clients    === 'number') rows.push({ key:'clients',    label:`Clients (${counts.clients})` });
           if (typeof counts.umbrella   === 'number') rows.push({ key:'umbrellas',  label:`Umbrella (${counts.umbrella})` });
-          // (optional) remittances not shown in the menu per your final list
         } else if (ent === 'client') {
           if (typeof counts.timesheets === 'number') rows.push({ key:'timesheets', label:`Timesheets (${counts.timesheets})` });
           if (typeof counts.invoices   === 'number') rows.push({ key:'invoices',   label:`Invoices (${counts.invoices})` });
