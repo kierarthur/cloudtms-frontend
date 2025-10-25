@@ -4371,7 +4371,7 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
 
     discardBtn.onclick = handleSecondary;
 
-    // === RELATED… button & dropdown next to Save/Close (SAFE INSERTION) ===
+    // === RELATED… button & dropdown next to Save/Close (SAFE INSERTION + DEDUPE + ACTIVE-ONLY) ===
     (function ensureRelatedUI() {
       try {
         // Find the actions container (parent of either button)
@@ -4380,6 +4380,11 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
           (primaryBtn && primaryBtn.parentElement) ||
           null;
         if (!actionsBar) return;
+
+        // Remove any stray/legacy Related wraps not under actionsBar
+        document.querySelectorAll('#btnRelatedWrap').forEach(n => {
+          if (n.parentElement !== actionsBar) n.parentElement?.removeChild(n);
+        });
 
         // Create or reuse wrapper
         let wrap = byId('btnRelatedWrap');
@@ -4390,26 +4395,25 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
           wrap.style.position = 'relative';
           wrap.style.marginRight = '.5rem';
 
-          // SAFE insert: only insertBefore if discard is a direct child; otherwise append
           if (discardBtn && discardBtn.parentElement === actionsBar) {
-            try {
-              actionsBar.insertBefore(wrap, discardBtn);
-            } catch {
-              actionsBar.appendChild(wrap);
-            }
+            try { actionsBar.insertBefore(wrap, discardBtn); }
+            catch { actionsBar.appendChild(wrap); }
           } else {
             actionsBar.appendChild(wrap);
           }
         } else {
-          // Move wrapper into actions bar if needed
+          // Ensure wrapper is actually inside actionsBar and dedupe
           if (wrap.parentElement !== actionsBar) {
             try { wrap.parentElement?.removeChild(wrap); } catch {}
             actionsBar.appendChild(wrap);
           }
+          // Remove any duplicate wraps beyond the first
+          const wraps = Array.from(document.querySelectorAll('#btnRelatedWrap'));
+          wraps.forEach((n, i) => { if (i > 0) n.parentElement?.removeChild(n); });
           wrap.innerHTML = '';
         }
 
-        // Build button
+        // Button
         const btn = document.createElement('button');
         btn.id = 'btnRelated';
         btn.type = 'button';
@@ -4423,59 +4427,65 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
         menu.style.cssText = 'position:absolute; right:0; top:calc(100% + 6px); background:#fff; border:1px solid #e5e7eb; border-radius:6px; box-shadow:0 8px 24px rgba(0,0,0,.08); min-width:240px; display:none; z-index:1000';
         wrap.appendChild(menu);
 
+        // Modal entity -> API entity
         const apiEntityMap = { candidates:'candidate', timesheets:'timesheet', invoices:'invoice', umbrellas:'umbrella', clients:'client' };
-        const navMap       = { timesheets:'timesheets', invoices:'invoices', candidates:'candidates', clients:'clients', umbrellas:'umbrellas' };
+        // Section mapping for navigation
+        const navMap = { timesheets:'timesheets', invoices:'invoices', candidates:'candidates', clients:'clients', umbrellas:'umbrellas' };
 
         function renderRelatedMenu(counts) {
           const ent = apiEntityMap[top.entity];
-          const rows = [];
-
+          const spec = [];
           if (ent === 'timesheet') {
-            if (typeof counts.candidate === 'number') rows.push({ key:'candidates', label:`Candidate (${counts.candidate})` });
-            if (typeof counts.client    === 'number') rows.push({ key:'clients',   label:`Client (${counts.client})` });
-            if (typeof counts.invoice   === 'number') rows.push({ key:'invoices',  label:`Invoice (${counts.invoice})` });
-            if (typeof counts.umbrella  === 'number') rows.push({ key:'umbrellas', label:`Umbrella (${counts.umbrella})` });
+            spec.push(['candidates','candidate'], ['clients','client'], ['invoices','invoice'], ['umbrellas','umbrella']);
           } else if (ent === 'invoice') {
-            if (typeof counts.timesheets === 'number') rows.push({ key:'timesheets', label:`Timesheets (${counts.timesheets})` });
-            if (typeof counts.candidates === 'number') rows.push({ key:'candidates', label:`Candidates (${counts.candidates})` });
-            if (typeof counts.client     === 'number') rows.push({ key:'clients',    label:`Client (${counts.client})` });
-            if (typeof counts.umbrellas  === 'number') rows.push({ key:'umbrellas',  label:`Umbrellas (${counts.umbrellas})` });
+            spec.push(['timesheets','timesheets'], ['candidates','candidates'], ['clients','client'], ['umbrellas','umbrellas']);
           } else if (ent === 'candidate') {
-            if (typeof counts.timesheets === 'number') rows.push({ key:'timesheets', label:`Timesheets (${counts.timesheets})` });
-            if (typeof counts.invoices   === 'number') rows.push({ key:'invoices',   label:`Invoices (${counts.invoices})` });
-            if (typeof counts.clients    === 'number') rows.push({ key:'clients',    label:`Clients (${counts.clients})` });
-            if (typeof counts.umbrella   === 'number') rows.push({ key:'umbrellas',  label:`Umbrella (${counts.umbrella})` });
+            spec.push(['timesheets','timesheets'], ['invoices','invoices'], ['clients','clients'], ['umbrellas','umbrella']);
           } else if (ent === 'client') {
-            if (typeof counts.timesheets === 'number') rows.push({ key:'timesheets', label:`Timesheets (${counts.timesheets})` });
-            if (typeof counts.invoices   === 'number') rows.push({ key:'invoices',   label:`Invoices (${counts.invoices})` });
-            if (typeof counts.candidates === 'number') rows.push({ key:'candidates', label:`Candidates (${counts.candidates})` });
+            spec.push(['timesheets','timesheets'], ['invoices','invoices'], ['candidates','candidates']);
           } else if (ent === 'umbrella') {
-            if (typeof counts.candidates === 'number') rows.push({ key:'candidates', label:`Candidates (${counts.candidates})` });
-            if (typeof counts.timesheets === 'number') rows.push({ key:'timesheets', label:`Timesheets (${counts.timesheets})` });
-            if (typeof counts.invoices   === 'number') rows.push({ key:'invoices',   label:`Invoices (${counts.invoices})` });
+            spec.push(['candidates','candidates'], ['timesheets','timesheets'], ['invoices','invoices']);
           }
+
+          const rows = spec.map(([key,labelKey]) => {
+            const c = Number(counts[key] ?? 0);
+            return { key, labelKey, count: isNaN(c) ? 0 : c };
+          });
 
           if (!rows.length) {
             menu.innerHTML = `<div style="padding:10px 12px;color:#6b7280;font-size:12px">No related records</div>`;
             return;
           }
 
-          menu.innerHTML = rows.map(r =>
-            `<button type="button" class="rel-item" data-target="${r.key}" style="display:block;width:100%;text-align:left;padding:8px 12px;background:#fff;border:0;border-bottom:1px solid #f3f4f6;font-size:13px;cursor:pointer">${r.label}</button>`
-          ).join('') + `<div style="height:2px;background:#fff;border-bottom-left-radius:6px;border-bottom-right-radius:6px"></div>`;
+          menu.innerHTML = rows.map(r => {
+            const disabled = r.count === 0;
+            const style = disabled
+              ? 'color:#9ca3af;cursor:not-allowed;opacity:.6'
+              : 'color:#111827;cursor:pointer';
+            const label = r.labelKey.charAt(0).toUpperCase() + r.labelKey.slice(1);
+            return `<button type="button" class="rel-item${disabled?' rel-disabled':''}" data-target="${r.key}" data-enabled="${disabled? '0':'1'}" style="display:block;width:100%;text-align:left;padding:8px 12px;background:#fff;border:0;border-bottom:1px solid #f3f4f6;font-size:13px;${style}">${label} (${r.count})</button>`;
+          }).join('') + `<div style="height:2px;background:#fff;border-bottom-left-radius:6px;border-bottom-right-radius:6px"></div>`;
 
+          // Wire item clicks: only enabled ones fetch and render
           menu.querySelectorAll('.rel-item').forEach(btnItem => {
-            btnItem.addEventListener('click', () => {
+            btnItem.addEventListener('click', async () => {
+              const enabled = btnItem.getAttribute('data-enabled') === '1';
+              if (!enabled) return;
               const tgt = btnItem.getAttribute('data-target');
               const section = navMap[tgt];
+              const ent = apiEntityMap[top.entity];
+              const id  = modalCtx?.data?.id;
               menu.style.display = 'none';
-              discardBtn.click(); // close modal
-              if (section) {
-                setTimeout(() => {
-                  if (typeof loadSection === 'function') loadSection(section);
-                  else { try { currentSection = section; renderAll(); } catch {} }
-                }, 0);
-              }
+              if (!ent || !id || !section) return;
+
+              // Fetch the actual related rows, then close and render
+              let rows = [];
+              try { rows = await fetchRelated(ent, id, tgt); } catch {}
+              discardBtn.click(); // close modal (respects dirty)
+              setTimeout(() => {
+                try { currentSection = section; } catch {}
+                try { renderSummary(rows || []); } catch {}
+              }, 0);
             });
           });
         }
@@ -4487,8 +4497,8 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
         };
 
         btn.onclick = async () => {
-          const id  = modalCtx?.data?.id;
           const ent = apiEntityMap[top.entity];
+          const id  = modalCtx?.data?.id;
           if (!ent || !id) {
             menu.innerHTML = `<div style="padding:10px 12px;color:#6b7280;font-size:12px">No related records</div>`;
             menu.style.display = (menu.style.display === 'none' ? 'block' : 'none');
@@ -4522,7 +4532,6 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
 
   renderTop();
 }
-
 
 
 // Close any existing floating menu
