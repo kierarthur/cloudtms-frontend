@@ -1977,6 +1977,7 @@ async function loadSection(){
 // ===== Details Modals =====
 let modalCtx = { entity:null, data:null };
 function openDetails(rowOrId){
+  // global dirty guard before opening any new modal (also called from dblclick)
   if (!confirmDiscardChangesIfDirty()) return;
 
   let row = rowOrId;
@@ -4071,466 +4072,83 @@ function collectForm(sel, jsonTry=false){
 
 // FRONTEND — UPDATED
 // showModal: ignore non-trusted events for dirty; ensure drag handlers cleared early on close
-function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
-  // Sanitize any previous geometry so we never inherit a dragged position
-  const modalEl = byId('modal');
-  if (modalEl) {
-    modalEl.style.position = '';
-    modalEl.style.left = '';
-    modalEl.style.top = '';
-    modalEl.style.right = '';
-    modalEl.style.bottom = '';
-    modalEl.style.transform = '';
-    modalEl.classList.remove('dragging');
+function renderSummary(rows){
+  currentRows = rows;
+  currentSelection = null;
+
+  const cols = defaultColumnsFor(currentSection);
+  byId('title').textContent = sections.find(s=>s.key===currentSection)?.label || '';
+  const content = byId('content'); content.innerHTML = '';
+
+  if (currentSection === 'settings') return renderSettingsPanel(content);
+  if (currentSection === 'audit')    return renderAuditTable(content, rows);
+
+  if (currentSection === 'candidates') {
+    rows.forEach(r => {
+      r.role = (r && Array.isArray(r.roles)) ? formatRolesSummary(r.roles) : '';
+    });
   }
 
-  if (!window.__modalStack) window.__modalStack = [];
-  const closeToken = (showModal._tokenCounter = (showModal._tokenCounter || 0) + 1);
+  const tbl = document.createElement('table'); tbl.className='grid';
+  const thead = document.createElement('thead'); const trh=document.createElement('tr');
+  cols.forEach(c=>{ const th=document.createElement('th'); th.textContent=c; trh.appendChild(th); });
+  thead.appendChild(trh); tbl.appendChild(thead);
 
-  function sanitizeModalGeometry() {
-    const m = byId('modal');
-    if (m) {
-      m.style.position = '';
-      m.style.left = '';
-      m.style.top = '';
-      m.style.right = '';
-      m.style.bottom = '';
-      m.style.transform = '';
-      m.classList.remove('dragging');
-    }
-    document.onmousemove = null;
-    document.onmouseup   = null;
-  }
+  const tb = document.createElement('tbody');
 
-  const frame = {
-    title,
-    tabs: Array.isArray(tabs) ? tabs.slice() : [],
-    renderTab,
-    onSave,
-    onReturn,
-    hasId: !!hasId,
-    entity: modalCtx.entity,
-    currentTabKey: (Array.isArray(tabs) && tabs.length ? tabs[0].key : null),
-    isDirty: false,
-    _detachDirty: null,
-    _detachGlobal: null,
-    _hasMountedOnce: false,
-    _wired: false,
-    _closing: false,
+  rows.forEach(r=>{
+    const tr = document.createElement('tr');
+    tr.dataset.id = (r && r.id) ? String(r.id) : '';
+    tr.dataset.section = currentSection;
 
-    persistCurrentTabState() {
-      const back = byId('modalBack');
-      const overlayVisible = back && getComputedStyle(back).display !== 'none';
-      if (!overlayVisible) return;
-
-      if (this.currentTabKey === 'main' && byId('tab-main')) {
-        const cur = collectForm('#tab-main');
-        const fs = modalCtx.formState || { __forId: modalCtx.data?.id || null, main:{}, pay:{} };
-        if (fs.__forId == null) fs.__forId = modalCtx.data?.id || null;
-        modalCtx.formState = fs;
-        modalCtx.formState.main = { ...(modalCtx.formState.main||{}), ...cur };
-      }
-      if (this.currentTabKey === 'pay' && byId('tab-pay')) {
-        const cur = collectForm('#tab-pay');
-        const fs = modalCtx.formState || { __forId: modalCtx.data?.id || null, main:{}, pay:{} };
-        if (fs.__forId == null) fs.__forId = modalCtx.data?.id || null;
-        modalCtx.formState = fs;
-        modalCtx.formState.pay = { ...(modalCtx.formState.pay||{}), ...cur };
-      }
-    },
-
-    mergedRowForTab(k) {
-      const base = { ...modalCtx.data };
-      const fs = modalCtx.formState;
-      const sameRecord = fs && fs.__forId === modalCtx.data?.id;
-
-      if (k === 'main') return sameRecord ? { ...base, ...(fs.main || {}) } : base;
-      if (k === 'pay')  return sameRecord ? { ...base, ...(fs.pay  || {}) } : base;
-      return base;
-    },
-
-    _attachDirtyTracker() {
-      if (this._detachDirty) { try { this._detachDirty(); } catch(_){}; this._detachDirty = null; }
-      const root = byId('modalBody');
-      if (!root) return;
-      const onDirty = (ev)=>{
-        if (ev && !ev.isTrusted) return;
-        if (window.__squelchDirty) return;
-        this.isDirty = true;
-        try { window.dispatchEvent(new CustomEvent('modal-dirty')); } catch {}
-      };
-      root.addEventListener('input', onDirty, true);
-      root.addEventListener('change', onDirty, true);
-      this._detachDirty = ()=>{
-        root.removeEventListener('input', onDirty, true);
-        root.removeEventListener('change', onDirty, true);
-      };
-    },
-
-    setTab(k) {
-      if (this._hasMountedOnce) this.persistCurrentTabState();
-
-      const rowForTab = this.mergedRowForTab(k);
-      byId('modalBody').innerHTML = this.renderTab(k, rowForTab) || '';
-
-      if (this.entity === 'candidates' && k === 'rates') { mountCandidateRatesTab?.(); }
-      if (this.entity === 'candidates' && k === 'pay')   { mountCandidatePayTab?.(); }
-
-      if (this.entity === 'candidates' && k === 'main') {
-        const pmSel = document.querySelector('#pay-method');
-        if (pmSel) {
-          pmSel.addEventListener('change', () => {
-            modalCtx.payMethodState = pmSel.value;
-            try { window.dispatchEvent(new CustomEvent('pay-method-changed')); }
-            catch { window.dispatchEvent(new Event('pay-method-changed')); }
-          });
-          modalCtx.payMethodState = pmSel.value;
-        }
-
-        const el = document.querySelector('#rolesEditor');
-        if (el) {
-          (async () => {
-            try {
-              const opts = await loadGlobalRoleOptions();
-              renderRolesEditor(el, modalCtx.rolesState || [], opts);
-            } catch (e) {
-              console.error('[MODAL] roles mount failed', e);
-            }
-          })();
-        }
-      }
-
-      if (this.entity === 'clients' && k === 'rates')     { mountClientRatesTab?.(); }
-      if (this.entity === 'clients' && k === 'hospitals') { mountClientHospitalsTab?.(); }
-      if (this.entity === 'clients' && k === 'settings')  { renderClientSettingsUI?.(modalCtx.clientSettingsState || {}); }
-
-      this.currentTabKey = k;
-      this._attachDirtyTracker();
-      this._hasMountedOnce = true;
-    }
-  };
-
-  window.__modalStack.push(frame);
-  byId('modalBack').style.display = 'flex';
-
-  function renderTop() {
-    const depth = window.__modalStack.length;
-    const top = window.__modalStack[window.__modalStack.length - 1];
-    const isChild = depth > 1;
-
-    if (typeof top._detachGlobal === 'function') {
-      try { top._detachGlobal(); } catch(_) {}
-      top._wired = false;
-    }
-
-    byId('modalTitle').textContent = top.title;
-
-    const tabsEl = byId('modalTabs');
-    tabsEl.innerHTML = '';
-    (top.tabs || []).forEach((t, i) => {
-      const b = document.createElement('button');
-      b.textContent = t.label;
-      if (i === 0 && !top.currentTabKey) top.currentTabKey = t.key;
-      if (t.key === top.currentTabKey || (i === 0 && !top.currentTabKey)) b.classList.add('active');
-      b.onclick = () => {
-        tabsEl.querySelectorAll('button').forEach(x => x.classList.remove('active'));
-        b.classList.add('active');
-        top.setTab(t.key);
-      };
-      tabsEl.appendChild(b);
+    cols.forEach(c=>{
+      const td=document.createElement('td');
+      const v = r[c];
+      td.textContent = formatDisplayValue(c, v);
+      tr.appendChild(td);
     });
 
-    if (top.currentTabKey) top.setTab(top.currentTabKey);
-    else if (top.tabs && top.tabs[0]) top.setTab(top.tabs[0].key);
-    else byId('modalBody').innerHTML = top.renderTab('form', {}) || '';
+    tb.appendChild(tr);
+  });
 
-    const primaryBtn = byId('btnSave');
-    const discardBtn = byId('btnCloseModal');
-    const backEl     = byId('modalBack');
+  tb.addEventListener('click', (ev) => {
+    const tr = ev.target && ev.target.closest('tr');
+    if (!tr) return;
+    tb.querySelectorAll('tr.selected').forEach(n => n.classList.remove('selected'));
+    tr.classList.add('selected');
+    const id = tr.dataset.id;
+    currentSelection = currentRows.find(x => String(x.id) === id) || null;
+    console.debug('[GRID] click select', { section: currentSection, id, found: !!currentSelection });
+  });
 
-    const defaultPrimary = isChild ? 'Apply' : 'Save';
-    let primaryLabel = defaultPrimary;
-    if (top.title === 'Advanced Search')    primaryLabel = 'Search';
-    if (top.title === 'Load saved search')  primaryLabel = 'Load';
-    if (top.title === 'Save search')        primaryLabel = 'Save';
+  tb.addEventListener('dblclick', (ev) => {
+    const tr = ev.target && ev.target.closest('tr');
+    if (!tr) return;
+    if (!confirmDiscardChangesIfDirty()) return; // dirty guard before opening a new modal
 
-    primaryBtn.textContent = primaryLabel;
-    primaryBtn.setAttribute('aria-label', primaryLabel);
+    tb.querySelectorAll('tr.selected').forEach(n => n.classList.remove('selected'));
+    tr.classList.add('selected');
 
-    const delBtn = byId('btnDelete');
-    delBtn.style.display = top.hasId ? '' : 'none';
-    delBtn.onclick = openDelete;
+    const id = tr.dataset.id;
+    const row = currentRows.find(x => String(x.id) === id) || null;
+    console.debug('[GRID] dblclick open', { section: currentSection, id, found: !!row });
 
-    function updateSecondaryLabel() {
-      const label = top.isDirty ? 'Discard' : 'Close';
-      discardBtn.textContent = label;
-      discardBtn.setAttribute('aria-label', label);
-      discardBtn.setAttribute('title', top.isDirty ? 'Discard changes and close' : 'Close');
-    }
-    updateSecondaryLabel();
+    if (!row) return;
 
-    const onDirtyLabel = () => updateSecondaryLabel();
+    const beforeDepth = (window.__modalStack && window.__modalStack.length) || 0;
+    openDetails(row);
 
-    // Wire global listeners
-    if (!top._wired) {
-      window.addEventListener('modal-dirty', onDirtyLabel);
-
-      const onEsc = (e) => { if (e.key === 'Escape') { e.preventDefault(); handleSecondary(); } };
-      window.addEventListener('keydown', onEsc);
-
-      const onOverlayClick = (e) => { if (e.target === backEl) handleSecondary(); };
-      backEl.addEventListener('click', onOverlayClick, true);
-
-      top._detachGlobal = () => {
-        try { window.removeEventListener('modal-dirty', onDirtyLabel); } catch {}
-        try { window.removeEventListener('keydown', onEsc); } catch {}
-        try { backEl.removeEventListener('click', onOverlayClick, true); } catch {}
-      };
-
-      top._wired = true;
-    }
-
-    // Unified close handler
-    const handleSecondary = () => {
-      if (top._closing) return;
-      top._closing = true;
-
-      // Clear drag handlers
-      document.onmousemove = null;
-      document.onmouseup   = null;
-      const m = byId('modal'); if (m) m.classList.remove('dragging');
-
-      if (top.isDirty) {
-        const ok = window.confirm('You have unsaved changes. Discard them and close?');
-        if (!ok) { top._closing = false; return; }
+    setTimeout(() => {
+      const afterDepth = (window.__modalStack && window.__modalStack.length) || 0;
+      if (afterDepth > beforeDepth) {
+        tb.querySelectorAll('tr.selected').forEach(n => n.classList.remove('selected'));
+        console.debug('[GRID] modal opened for', id);
       }
+    }, 0);
+  });
 
-      sanitizeModalGeometry();
-
-      const closing = window.__modalStack.pop();
-      if (closing && closing._detachDirty)  { try { closing._detachDirty(); } catch(_){}; closing._detachDirty = null; }
-      if (closing && closing._detachGlobal) { try { closing._detachGlobal(); } catch(_){}; closing._detachGlobal = null; }
-      top._wired = false;
-
-      if (window.__modalStack.length > 0) {
-        renderTop();
-        const parent = window.__modalStack[window.__modalStack.length - 1];
-        try { parent.onReturn && parent.onReturn(); } catch(_) {}
-      } else {
-        discardAllModalsAndState();
-      }
-    };
-
-    // Primary (Search/Load/Save/Apply)
-    primaryBtn.onclick = async () => {
-      top.persistCurrentTabState();
-
-      let shouldClose = true;
-
-      if (typeof top.onSave === 'function') {
-        try {
-          const res = await top.onSave();
-          const ok  = (res === true) || (res && res.ok === true);
-          if (ok) {
-            top.isDirty = false;
-            updateSecondaryLabel();
-            shouldClose = true;
-          } else {
-            shouldClose = false;
-          }
-        } catch (e) {
-          shouldClose = false;
-        }
-      }
-
-      if (!window.__modalStack.length || window.__modalStack[window.__modalStack.length - 1] !== top) {
-        return;
-      }
-      if (!shouldClose) return;
-
-      sanitizeModalGeometry();
-
-      if (isChild) {
-        if (top._detachDirty)  { try { top._detachDirty(); } catch(_){}; top._detachDirty = null; }
-        if (top._detachGlobal) { try { top._detachGlobal(); } catch(_){}; top._detachGlobal = null; }
-        top._wired = false;
-        window.__modalStack.pop();
-        if (window.__modalStack.length > 0) {
-          const parent = window.__modalStack[window.__modalStack.length - 1];
-          renderTop();
-          try { parent.onReturn && parent.onReturn(); } catch(_) {}
-        } else {
-          discardAllModalsAndState();
-        }
-      } else {
-        if (top._detachGlobal) { try { top._detachGlobal(); } catch(_){}; top._detachGlobal = null; }
-        window.removeEventListener('modal-dirty', onDirtyLabel);
-        discardAllModalsAndState();
-      }
-    };
-
-    discardBtn.onclick = handleSecondary;
-
-    // === RELATED… button & dropdown next to Save/Close (SAFE INSERTION + DEDUPE + ACTIVE-ONLY) ===
-    (function ensureRelatedUI() {
-      try {
-        // Find the actions container (parent of either button)
-        const actionsBar =
-          (discardBtn && discardBtn.parentElement) ||
-          (primaryBtn && primaryBtn.parentElement) ||
-          null;
-        if (!actionsBar) return;
-
-        // Remove any stray/legacy Related wraps not under actionsBar
-        document.querySelectorAll('#btnRelatedWrap').forEach(n => {
-          if (n.parentElement !== actionsBar) n.parentElement?.removeChild(n);
-        });
-
-        // Create or reuse wrapper
-        let wrap = byId('btnRelatedWrap');
-        if (!wrap) {
-          wrap = document.createElement('div');
-          wrap.id = 'btnRelatedWrap';
-          wrap.style.display = 'inline-block';
-          wrap.style.position = 'relative';
-          wrap.style.marginRight = '.5rem';
-
-          if (discardBtn && discardBtn.parentElement === actionsBar) {
-            try { actionsBar.insertBefore(wrap, discardBtn); }
-            catch { actionsBar.appendChild(wrap); }
-          } else {
-            actionsBar.appendChild(wrap);
-          }
-        } else {
-          // Ensure wrapper is actually inside actionsBar and dedupe
-          if (wrap.parentElement !== actionsBar) {
-            try { wrap.parentElement?.removeChild(wrap); } catch {}
-            actionsBar.appendChild(wrap);
-          }
-          // Remove any duplicate wraps beyond the first
-          const wraps = Array.from(document.querySelectorAll('#btnRelatedWrap'));
-          wraps.forEach((n, i) => { if (i > 0) n.parentElement?.removeChild(n); });
-          wrap.innerHTML = '';
-        }
-
-        // Button
-        const btn = document.createElement('button');
-        btn.id = 'btnRelated';
-        btn.type = 'button';
-        btn.className = 'btn btn-outline btn-sm';
-        btn.textContent = 'Related ▾';
-        wrap.appendChild(btn);
-
-        // Dropdown
-        const menu = document.createElement('div');
-        menu.id = 'relatedMenu';
-        menu.style.cssText = 'position:absolute; right:0; top:calc(100% + 6px); background:#fff; border:1px solid #e5e7eb; border-radius:6px; box-shadow:0 8px 24px rgba(0,0,0,.08); min-width:240px; display:none; z-index:1000';
-        wrap.appendChild(menu);
-
-        // Modal entity -> API entity
-        const apiEntityMap = { candidates:'candidate', timesheets:'timesheet', invoices:'invoice', umbrellas:'umbrella', clients:'client' };
-        // Section mapping for navigation
-        const navMap = { timesheets:'timesheets', invoices:'invoices', candidates:'candidates', clients:'clients', umbrellas:'umbrellas' };
-
-        function renderRelatedMenu(counts) {
-          const ent = apiEntityMap[top.entity];
-          const spec = [];
-          if (ent === 'timesheet') {
-            spec.push(['candidates','candidate'], ['clients','client'], ['invoices','invoice'], ['umbrellas','umbrella']);
-          } else if (ent === 'invoice') {
-            spec.push(['timesheets','timesheets'], ['candidates','candidates'], ['clients','client'], ['umbrellas','umbrellas']);
-          } else if (ent === 'candidate') {
-            spec.push(['timesheets','timesheets'], ['invoices','invoices'], ['clients','clients'], ['umbrellas','umbrella']);
-          } else if (ent === 'client') {
-            spec.push(['timesheets','timesheets'], ['invoices','invoices'], ['candidates','candidates']);
-          } else if (ent === 'umbrella') {
-            spec.push(['candidates','candidates'], ['timesheets','timesheets'], ['invoices','invoices']);
-          }
-
-          const rows = spec.map(([key,labelKey]) => {
-            const c = Number(counts[key] ?? 0);
-            return { key, labelKey, count: isNaN(c) ? 0 : c };
-          });
-
-          if (!rows.length) {
-            menu.innerHTML = `<div style="padding:10px 12px;color:#6b7280;font-size:12px">No related records</div>`;
-            return;
-          }
-
-          menu.innerHTML = rows.map(r => {
-            const disabled = r.count === 0;
-            const style = disabled
-              ? 'color:#9ca3af;cursor:not-allowed;opacity:.6'
-              : 'color:#111827;cursor:pointer';
-            const label = r.labelKey.charAt(0).toUpperCase() + r.labelKey.slice(1);
-            return `<button type="button" class="rel-item${disabled?' rel-disabled':''}" data-target="${r.key}" data-enabled="${disabled? '0':'1'}" style="display:block;width:100%;text-align:left;padding:8px 12px;background:#fff;border:0;border-bottom:1px solid #f3f4f6;font-size:13px;${style}">${label} (${r.count})</button>`;
-          }).join('') + `<div style="height:2px;background:#fff;border-bottom-left-radius:6px;border-bottom-right-radius:6px"></div>`;
-
-          // Wire item clicks: only enabled ones fetch and render
-          menu.querySelectorAll('.rel-item').forEach(btnItem => {
-            btnItem.addEventListener('click', async () => {
-              const enabled = btnItem.getAttribute('data-enabled') === '1';
-              if (!enabled) return;
-              const tgt = btnItem.getAttribute('data-target');
-              const section = navMap[tgt];
-              const ent = apiEntityMap[top.entity];
-              const id  = modalCtx?.data?.id;
-              menu.style.display = 'none';
-              if (!ent || !id || !section) return;
-
-              // Fetch the actual related rows, then close and render
-              let rows = [];
-              try { rows = await fetchRelated(ent, id, tgt); } catch {}
-              discardBtn.click(); // close modal (respects dirty)
-              setTimeout(() => {
-                try { currentSection = section; } catch {}
-                try { renderSummary(rows || []); } catch {}
-              }, 0);
-            });
-          });
-        }
-
-        const onDocClick = (ev) => {
-          if (!menu || menu.style.display === 'none') return;
-          const within = ev.target === menu || ev.target === btn || menu.contains(ev.target);
-          if (!within) menu.style.display = 'none';
-        };
-
-        btn.onclick = async () => {
-          const ent = apiEntityMap[top.entity];
-          const id  = modalCtx?.data?.id;
-          if (!ent || !id) {
-            menu.innerHTML = `<div style="padding:10px 12px;color:#6b7280;font-size:12px">No related records</div>`;
-            menu.style.display = (menu.style.display === 'none' ? 'block' : 'none');
-            return;
-          }
-          menu.innerHTML = `<div style="padding:10px 12px;color:#6b7280;font-size:12px">Loading…</div>`;
-          menu.style.display = 'block';
-          try {
-            const counts = await fetchRelatedCounts(ent, id).catch(()=>({}));
-            renderRelatedMenu(counts || {});
-          } catch {
-            menu.innerHTML = `<div style="padding:10px 12px;color:#ef4444;font-size:12px">Failed to load related</div>`;
-          }
-        };
-
-        document.addEventListener('click', onDocClick, true);
-
-        const prevDetach = top._detachGlobal;
-        top._detachGlobal = () => {
-          try { document.removeEventListener('click', onDocClick, true); } catch {}
-          if (typeof prevDetach === 'function') {
-            try { prevDetach(); } catch {}
-          }
-        };
-      } catch (err) {
-        console.error('[RelatedUI] mount failed', err);
-      }
-    })();
-    // === end Related UI ===
-  }
-
-  renderTop();
+  tbl.appendChild(tb);
+  content.appendChild(tbl);
 }
 
 
