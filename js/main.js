@@ -1880,8 +1880,10 @@ async function fetchRelatedCounts(entity, id){
   return r.json();
 }
 
-
 async function upsertCandidate(payload, id){
+  // Never send CCR in the payload
+  if ('tms_ref' in payload) delete payload.tms_ref;
+
   const url = id ? `/api/candidates/${id}` : '/api/candidates';
   const method = id ? 'PUT' : 'POST';
 
@@ -1912,6 +1914,9 @@ async function upsertCandidate(payload, id){
   }
 }
 async function upsertClient(payload, id){
+  // Never send CLI in the payload
+  if ('cli_ref' in payload) delete payload.cli_ref;
+
   const url    = id ? `/api/clients/${id}` : '/api/clients';
   const method = id ? 'PUT' : 'POST';
 
@@ -1941,8 +1946,6 @@ async function upsertClient(payload, id){
       if (m) clientId = m[1];
     }
   } catch (_) {}
-
-  if (!clientId && method === 'PUT' && id) clientId = id;
 
   return clientId ? { id: clientId, ...payload } : { ...payload };
 }
@@ -2086,13 +2089,18 @@ async function openCandidate(row) {
       const roles     = normaliseRolesForSave(modalCtx.rolesState || []);
 
       const payload   = { ...stateMain, ...statePay, ...main, ...pay, roles };
-      if ('umbrella_name' in payload) delete payload.umbrella_name;
+
+      // Never send display-only fields
+      delete payload.umbrella_name; // safety
+      delete payload.tms_ref;       // safety (CCR minted server-side)
 
       if (!payload.first_name && row?.first_name) payload.first_name = row.first_name;
       if (!payload.last_name  && row?.last_name)  payload.last_name  = row.last_name;
 
-      if (typeof payload.key_norm === 'undefined' && typeof row?.key_norm !== 'undefined') payload.key_norm = row.key_norm;
-      if (typeof payload.tms_ref  === 'undefined' && typeof row?.tms_ref  !== 'undefined') payload.tms_ref  = row.tms_ref;
+      // key_norm may be pre-seeded from the row; keep if user didn't touch it
+      if (typeof payload.key_norm === 'undefined' && typeof row?.key_norm !== 'undefined') {
+        payload.key_norm = row.key_norm;
+      }
 
       if (!payload.display_name) {
         const dn = [payload.first_name, payload.last_name].filter(Boolean).join(' ').trim();
@@ -2102,11 +2110,9 @@ async function openCandidate(row) {
       if (!payload.pay_method) payload.pay_method = isNew ? 'PAYE' : (row?.pay_method || 'PAYE');
 
       if (payload.pay_method === 'UMBRELLA') {
-        // Default umbrella_id if Pay tab not opened
         if ((!payload.umbrella_id || payload.umbrella_id === '') && row?.umbrella_id) {
           payload.umbrella_id = row.umbrella_id;
         }
-        // Default account_holder from umbrella name if empty
         if (!payload.account_holder) {
           const umbNameEl = document.querySelector('#tab-pay #umbrella_name');
           if (umbNameEl && umbNameEl.value) payload.account_holder = umbNameEl.value;
@@ -2127,7 +2133,7 @@ async function openCandidate(row) {
       const candidateId = idForUpdate || (saved && saved.id);
       if (!candidateId) { alert('Failed to save candidate'); return; }
 
-      // staged overrides commit (unchanged)
+      // === staged overrides commit (unchanged) ===
       const O = modalCtx.overrides || { existing: [], stagedNew: [], stagedEdits: {}, stagedDeletes: new Set() };
 
       for (const delId of O.stagedDeletes) {
@@ -2212,7 +2218,6 @@ async function openCandidate(row) {
     } catch (e) { console.error('fetchRelated timesheets failed', e); }
   }
 }
-
 // ====================== mountCandidatePayTab (FIXED) ======================
 // FRONTEND — UPDATED
 // mountCandidatePayTab: also keeps Account Holder in sync with umbrella name when UMNRELLA pay.
@@ -2425,7 +2430,6 @@ async function renderCandidateRatesTable() {
 
 // === UPDATED: Candidate modal tabs (adds Roles editor placeholder on 'main') ===
 
-
 function renderCandidateTab(key, row = {}) {
   if (key === 'main') return html(`
     <div class="form" id="tab-main">
@@ -2436,7 +2440,16 @@ function renderCandidateTab(key, row = {}) {
       ${select('pay_method','Pay method', row.pay_method || 'PAYE', ['PAYE','UMBRELLA'], {id:'pay-method'})}
 
       ${input('key_norm','Global Candidate Key (CGK)', row.key_norm)}
-      ${input('tms_ref','CloudTMS Candidate Reference (CCR)', row.tms_ref)}
+
+      <!-- CCR: display-only, never posted -->
+      <div class="row">
+        <label>CloudTMS Candidate Reference (CCR)</label>
+        <input id="tms_ref_display"
+               value="${row.tms_ref ? String(row.tms_ref) : 'Awaiting CCR number from server'}"
+               disabled
+               readonly
+               style="opacity:.7" />
+      </div>
 
       ${input('display_name','Display name', row.display_name)}
 
@@ -2451,8 +2464,7 @@ function renderCandidateTab(key, row = {}) {
     </div>
   `);
 
-  // ✅ FIX: remove the top-level "Add rate override" button here.
-  // renderCandidateRatesTable() is the single place that renders the Add button (in both empty/non-empty states).
+  // ✅ FIX remains: no "Add rate override" button here.
   if (key === 'rates') return html(`
     <div id="tab-rates">
       <div id="ratesTable"></div>
@@ -2999,6 +3011,7 @@ function renderCalendar(timesheets){
 // =========================== openClient (FIXED) ==========================
 // =================== CLIENT MODAL (UPDATED: rates rate_type + hospitals staged-CRUD) ===================
 // ✅ UPDATED — unified FE model; on load, convert server rows to unified; on save, validate overlaps, bridge to per-type API
+
 async function openClient(row) {
   const deep = (o)=> JSON.parse(JSON.stringify(o || {}));
   const seedId = row?.id || null;
@@ -3018,7 +3031,6 @@ async function openClient(row) {
   if (seedId) {
     const token = modalCtx.openToken;
     try {
-      // 🚜 get per-type rows from API and group into unified for FE
       const unified = await listClientRates(seedId);
       if (token === modalCtx.openToken && modalCtx.data?.id === seedId) {
         modalCtx.ratesState = Array.isArray(unified) ? unified.map(r => ({ ...r })) : [];
@@ -3061,6 +3073,10 @@ async function openClient(row) {
       const stagedMain = same ? (fs.main || {}) : {};
       const liveMain   = byId('tab-main') ? collectForm('#tab-main') : {};
       const payload    = { ...stagedMain, ...liveMain };
+
+      // Never send CLI in the payload
+      delete payload.cli_ref;
+
       if (!payload.name && row?.name) payload.name = row.name;
       if (!payload.name) { alert('Client name is required.'); return; }
 
@@ -3076,7 +3092,6 @@ async function openClient(row) {
       if (clientId && Array.isArray(modalCtx.ratesState)) {
         const windows = modalCtx.ratesState.slice();
 
-        // client-side overlap guard within same category (ignore per-type entirely)
         for (let i = 0; i < windows.length; i++) {
           for (let j = i + 1; j < windows.length; j++) {
             const A = windows[i], B = windows[j];
@@ -3093,7 +3108,6 @@ async function openClient(row) {
           }
         }
 
-        // bridge each unified window to two per-type posts
         for (const w of windows) {
           try {
             await upsertClientRate({
@@ -3206,6 +3220,7 @@ async function openClient(row) {
   );
 }
 
+
 // =================== CLIENT RATES TABLE (UPDATED) ===================
 // ✅ UPDATED — unified table view, dbl-click opens unified modal
 function renderClientRatesTable() {
@@ -3292,11 +3307,21 @@ function ensureSelectionStyles(){
 }
 
 
-function renderClientTab(key, row={}){
+function renderClientTab(key, row = {}){
   if (key==='main') return html(`
     <div class="form" id="tab-main">
       ${input('name','Client name', row.name)}
-      ${input('cli_ref','Client Ref (CLI-…) ', row.cli_ref)}
+
+      <!-- CLI: display-only, never posted -->
+      <div class="row">
+        <label>Client Ref (CLI-…)</label>
+        <input id="cli_ref_display"
+               value="${row.cli_ref ? String(row.cli_ref) : 'Awaiting CLI number from server'}"
+               disabled
+               readonly
+               style="opacity:.7" />
+      </div>
+
       <div class="row" style="grid-column:1/-1"><label>Invoice address</label><textarea name="invoice_address">${row.invoice_address || ''}</textarea></div>
       ${input('primary_invoice_email','Primary invoice email', row.primary_invoice_email,'email')}
       ${input('ap_phone','A/P phone', row.ap_phone)}
@@ -3305,17 +3330,13 @@ function renderClientTab(key, row={}){
     </div>
   `);
 
-  // Rates tab: container only (Add button is rendered by renderClientRatesTable)
-  if (key==='rates') return html(`<div id="clientRates"></div>`);
-
-  // Settings tab: container only (real staged form rendered by renderClientSettingsUI)
-  if (key==='settings') return html(`<div id="clientSettings"></div>`);
-
-  // Hospitals tab: container only (table + Add button rendered by renderClientHospitalsTable)
+  if (key==='rates')     return html(`<div id="clientRates"></div>`);
+  if (key==='settings')  return html(`<div id="clientSettings"></div>`);
   if (key==='hospitals') return html(`<div id="clientHospitals"></div>`);
-
   return '';
 }
+
+
 // =================== MOUNT CLIENT RATES TAB (unchanged glue) ===================
 async function mountClientRatesTab() {
   // render uses modalCtx.ratesState directly; no args needed
@@ -4339,6 +4360,8 @@ async function renderClientSettingsUI(settingsObj){
 
 // ---- Umbrella modal
 // ========================= openUmbrella (FIXED) =========================
+// ---- Umbrella modal
+// ========================= openUmbrella (FIXED) =========================
 async function openUmbrella(row){
   const deep = (o)=> JSON.parse(JSON.stringify(o || {}));
   const seedId = row?.id || null;
@@ -4365,8 +4388,8 @@ async function openUmbrella(row){
         ${input('bank_name','Bank', r?.bank_name)}
         ${input('sort_code','Sort code', r?.sort_code)}
         ${input('account_number','Account number', r?.account_number)}
-        ${select('vat_chargeable','VAT chargeable', (r?.vat_chargeable? 'Yes' : 'No'), ['Yes','No'])}
-        ${select('enabled','Enabled', (r?.enabled===false)?'No':'Yes', ['Yes','No'])}
+        ${select('vat_chargeable','VAT chargeable', (r?.vat_chargeable ? 'Yes' : 'No'), ['Yes','No'])}
+        ${select('enabled','Enabled', (r?.enabled === false) ? 'No' : 'Yes', ['Yes','No'])}
       </div>
     `),
     async ()=>{
@@ -4375,11 +4398,16 @@ async function openUmbrella(row){
       const sameRecord = (!!modalCtx.data?.id && fs.__forId === modalCtx.data.id) || (!modalCtx.data?.id && fs.__forId == null);
 
       const staged = sameRecord ? (fs.main || {}) : {};
-      const live   = collectForm('#tab-main');
+      const live   = collectForm('#tab-main'); // returns booleans for Yes/No selects
       const payload = { ...staged, ...live };
 
-      payload.vat_chargeable = payload.vat_chargeable === 'Yes';
-      payload.enabled = payload.enabled !== 'No';
+      // FIX: trust collectForm booleans; only coerce if legacy strings slip through
+      if (typeof payload.vat_chargeable !== 'boolean') {
+        payload.vat_chargeable = (payload.vat_chargeable === 'Yes' || payload.vat_chargeable === 'true');
+      }
+      if (typeof payload.enabled !== 'boolean') {
+        payload.enabled = (payload.enabled === 'Yes' || payload.enabled === 'true');
+      }
 
       // Strip empty-string fields
       for (const k of Object.keys(payload)) if (payload[k] === '') delete payload[k];
@@ -4395,7 +4423,6 @@ async function openUmbrella(row){
     row?.id
   );
 }
-
 
 // ---- Audit (Outbox)
 function openAuditItem(row){
@@ -4570,13 +4597,24 @@ const select = (name, label, val, options=[], extra={})=>{
 };
 const readonly = (label, value)=> `<div class="row"><label>${label}</label><input value="${value ?? ''}" readonly/></div>`;
 
+
+/**
+ * Safer form collector:
+ * - Skips elements with no name
+ * - Skips disabled/readonly or data-no-collect
+ * - Converts Yes/No selects to booleans
+ */
 function collectForm(sel, jsonTry=false){
   const root = document.querySelector(sel);
   if (!root) return {}; // null-safe
 
   const out = {};
   root.querySelectorAll('input,select,textarea').forEach(el=>{
-    const k = el.name; if (!k) return;
+    // skip non-collectable fields
+    if (!el.name) return;
+    if (el.disabled || el.readOnly || el.dataset.noCollect === 'true') return;
+
+    const k = el.name;
     let v = el.value;
 
     // keep blanks as '' so callers can map '' → null (fixes 0 vs null)
