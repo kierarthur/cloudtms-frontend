@@ -1879,10 +1879,9 @@ async function fetchRelatedCounts(entity, id){
   if (!r.ok) return {};
   return r.json();
 }
-
+// ===== UPDATED: upsertCandidate — normalize server response so we always return the created/updated object with an id
 async function upsertCandidate(payload, id){
-  // Never send CCR in the payload
-  if ('tms_ref' in payload) delete payload.tms_ref;
+  if ('tms_ref' in payload) delete payload.tms_ref; // safety
 
   const url = id ? `/api/candidates/${id}` : '/api/candidates';
   const method = id ? 'PUT' : 'POST';
@@ -1900,22 +1899,29 @@ async function upsertCandidate(payload, id){
   }
 
   const text = await res.text().catch(() => '');
-
   if (!res.ok) {
     console.error('Candidate save failed:', { status: res.status, url, method, payload, server: text });
     throw new Error(text || `Save failed (${res.status})`);
   }
 
   try {
-    return text ? JSON.parse(text) : {};
+    const data = text ? JSON.parse(text) : null;
+    // normalize common shapes: [row], { candidate: {...} }, or { ...row }
+    let obj = null;
+    if (Array.isArray(data)) obj = data[0] || null;
+    else if (data && data.candidate) obj = data.candidate;
+    else if (data && typeof data === 'object') obj = data;
+
+    return obj || (id ? { id, ...payload } : {});
   } catch (e) {
     console.warn('Candidate save: non-JSON response body', { body: text });
-    return {};
+    return id ? { id, ...payload } : {};
   }
 }
+
+// ===== UPDATED: upsertClient — normalize server response so we always return the created/updated object with an id
 async function upsertClient(payload, id){
-  // Never send CLI in the payload
-  if ('cli_ref' in payload) delete payload.cli_ref;
+  if ('cli_ref' in payload) delete payload.cli_ref; // safety
 
   const url    = id ? `/api/clients/${id}` : '/api/clients';
   const method = id ? 'PUT' : 'POST';
@@ -1927,15 +1933,20 @@ async function upsertClient(payload, id){
   });
 
   if (!r.ok) {
-    const msg = await r.text().catch(()=>'');
+    const msg = await r.text().catch(()=> '');
     throw new Error(msg || 'Save failed');
   }
 
-  // Try JSON response first
+  // Normalize JSON shapes: [row], { client: {...} }, or { ...row }
   try {
     const data = await r.json();
-    if (data && typeof data === 'object') return data;
-  } catch (_) { /* no JSON body (e.g., 204) */ }
+    let obj = null;
+    if (Array.isArray(data)) obj = data[0] || null;
+    else if (data && data.client) obj = data.client;
+    else if (data && typeof data === 'object') obj = data;
+
+    if (obj) return obj;
+  } catch (_) { /* fall through to Location/PUT fallback */ }
 
   // Fallbacks: Location header or known id (PUT)
   let clientId = null;
@@ -1947,15 +1958,34 @@ async function upsertClient(payload, id){
     }
   } catch (_) {}
 
-  return clientId ? { id: clientId, ...payload } : { ...payload };
+  return clientId ? { id: clientId, ...payload } : (id ? { id, ...payload } : { ...payload });
 }
 
+
+// ================== FRONTEND: upsertUmbrella (UPDATED to return saved object) ==================
+// ===== UPDATED: upsertUmbrella — normalize server response so we always return the created/updated object with an id
 async function upsertUmbrella(payload, id){
   const url = id ? `/api/umbrellas/${id}` : '/api/umbrellas';
   const method = id ? 'PUT' : 'POST';
   const r = await authFetch(API(url), {method, headers:{'content-type':'application/json'}, body: JSON.stringify(payload)});
-  if (!r.ok) throw new Error('Save failed'); return true;
+  if (!r.ok) { 
+    const msg = await r.text().catch(()=> 'Save failed');
+    throw new Error(msg || 'Save failed'); 
+  }
+  try {
+    const data = await r.json();
+    // normalize shapes: [row], { umbrella: {...} }, or { ...row }
+    let obj = null;
+    if (Array.isArray(data)) obj = data[0] || null;
+    else if (data && data.umbrella) obj = data.umbrella;
+    else if (data && typeof data === 'object') obj = data;
+
+    return obj || (id ? { id, ...payload } : { ...payload });
+  } catch (_) {
+    return id ? { id, ...payload } : { ...payload };
+  }
 }
+
 
 async function deleteCandidateRatesFor(candidate_id){
   const r = await authFetch(API(`/api/rates/candidate-overrides/${candidate_id}`), {method:'DELETE'}); return r.ok;
@@ -2054,6 +2084,7 @@ async function openDelete(){
 
 // FRONTEND — UPDATED
 // openCandidate: default Account holder from umbrella name if pay_method is UMBRELLA and empty.
+// ================== FRONTEND: openCandidate (UPDATED) ==================
 async function openCandidate(row) {
   const deep = (o)=> JSON.parse(JSON.stringify(o || {}));
   const seedId = row?.id || null;
@@ -2168,12 +2199,18 @@ async function openCandidate(row) {
         }
       }
 
+      // === Focus & refresh on close ===
+      if (isNew) {
+        // Prefer section key to match your currentSection ('candidates')
+        window.__pendingFocus = { section: 'candidates', id: candidateId };
+      }
+
       modalCtx.overrides = { existing: [], stagedNew: [], stagedEdits: {}, stagedDeletes: new Set() };
       modalCtx.formState = { __forId: candidateId || null, main: {}, pay: {} };
       modalCtx.rolesState = undefined;
 
-      closeModal();
-      renderAll();
+      closeModal(); // close → closeModal will trigger refresh if __pendingFocus exists
+      // (renderAll() intentionally removed to avoid double-refresh; closeModal handles it)
     },
     row?.id
   );
@@ -2218,6 +2255,7 @@ async function openCandidate(row) {
     } catch (e) { console.error('fetchRelated timesheets failed', e); }
   }
 }
+
 // ====================== mountCandidatePayTab (FIXED) ======================
 // FRONTEND — UPDATED
 // mountCandidatePayTab: also keeps Account Holder in sync with umbrella name when UMNRELLA pay.
@@ -3012,6 +3050,7 @@ function renderCalendar(timesheets){
 // =================== CLIENT MODAL (UPDATED: rates rate_type + hospitals staged-CRUD) ===================
 // ✅ UPDATED — unified FE model; on load, convert server rows to unified; on save, validate overlaps, bridge to per-type API
 
+// ================== FRONTEND: openClient (UPDATED) ==================
 async function openClient(row) {
   const deep = (o)=> JSON.parse(JSON.stringify(o || {}));
   const seedId = row?.id || null;
@@ -3087,6 +3126,7 @@ async function openClient(row) {
       const clientIdFromCtx = modalCtx?.data?.id || row?.id || null;
       const clientResp = await upsertClient(payload, clientIdFromCtx);
       const clientId   = clientIdFromCtx || (clientResp && clientResp.id);
+      if (!clientId) { alert('Failed to save client'); return; }
 
       // === Commit staged unified RATES (overlap validation per (role,band))
       if (clientId && Array.isArray(modalCtx.ratesState)) {
@@ -3213,8 +3253,12 @@ async function openClient(row) {
         }
       }
 
-      closeModal();
-      renderAll();
+      // === Focus & refresh on close ===
+      if (!seedId && clientId) {
+        window.__pendingFocus = { section: 'clients', id: clientId };
+      }
+
+      closeModal(); // close → closeModal will trigger refresh if __pendingFocus exists
     },
     row?.id
   );
@@ -4362,6 +4406,7 @@ async function renderClientSettingsUI(settingsObj){
 // ========================= openUmbrella (FIXED) =========================
 // ---- Umbrella modal
 // ========================= openUmbrella (FIXED) =========================
+// ================== FRONTEND: openUmbrella (UPDATED) ==================
 async function openUmbrella(row){
   const deep = (o)=> JSON.parse(JSON.stringify(o || {}));
   const seedId = row?.id || null;
@@ -4413,12 +4458,18 @@ async function openUmbrella(row){
       for (const k of Object.keys(payload)) if (payload[k] === '') delete payload[k];
 
       const idForUpdate = modalCtx?.data?.id || row?.id || null;
-      await upsertUmbrella(payload, idForUpdate);
+      const saved = await upsertUmbrella(payload, idForUpdate);
+      const umbrellaId = idForUpdate || (saved && saved.id);
+      if (!umbrellaId) { alert('Failed to save umbrella'); return; }
+
+      // Focus & refresh on close
+      if (!seedId && umbrellaId) {
+        window.__pendingFocus = { section: 'umbrellas', id: umbrellaId };
+      }
 
       // Clear staged state and close
-      modalCtx.formState = { __forId: idForUpdate || null, main: {} };
-      closeModal();
-      renderAll();
+      modalCtx.formState = { __forId: umbrellaId || null, main: {} };
+      closeModal(); // close → closeModal will trigger refresh if __pendingFocus exists
     },
     row?.id
   );
@@ -4530,6 +4581,7 @@ async function renderSettingsPanel(content){
 
 
 // =============================== closeModal (kept) ===============================
+// ================== FRONTEND: closeModal (UPDATED to refresh if pending focus) ==================
 function closeModal(){
   if (!window.__modalStack || !window.__modalStack.length) {
     // nothing to close; ensure overlay hidden and geometry clean
@@ -4582,6 +4634,11 @@ function closeModal(){
   } else {
     // last frame closed -> full teardown so nothing lingers
     discardAllModalsAndState();
+
+    // If a pending focus token exists, refresh the summary now so it can jump & highlight
+    if (window.__pendingFocus) {
+      try { renderAll(); } catch (e) { console.error('refresh after modal close failed', e); }
+    }
   }
 }
 
@@ -4638,6 +4695,9 @@ function collectForm(sel, jsonTry=false){
 
 // FRONTEND — UPDATED
 // showModal: ignore non-trusted events for dirty; ensure drag handlers cleared early on close
+// ================== FRONTEND: renderSummary (UPDATED to jump & highlight pending focus) ==================
+
+// ===== UPDATED: renderSummary — if pending focus row isn't visible, try one auto-relax/reload pass, then highlight when found
 function renderSummary(rows){
   currentRows = rows;
   currentSelection = null;
@@ -4715,8 +4775,45 @@ function renderSummary(rows){
 
   tbl.appendChild(tb);
   content.appendChild(tbl);
-}
 
+  // ---- Jump & highlight if a pending focus token matches this section
+  if (window.__pendingFocus) {
+    const pf = window.__pendingFocus;
+    const pfSection = pf.section || (pf.entity ? (pf.entity + 's') : null);
+    if (pfSection && pfSection === currentSection && pf.id != null) {
+      const targetId = String(pf.id);
+      const sel = `tr[data-id="${CSS.escape ? CSS.escape(targetId) : targetId}"]`;
+      let tr = tb.querySelector(sel);
+
+      if (!tr) {
+        // Not visible under current filters - attempt one auto-relax/reload pass
+        if (!pf._retried) {
+          pf._retried = true;
+          try {
+            if (typeof clearFilters === 'function') clearFilters();
+          } catch (_) {}
+          try { renderAll(); } catch (e) { console.error('auto-refresh after filter clear failed', e); }
+          return; // wait for next render to try again
+        }
+        // If we've already retried once, leave token set so a manual refresh can still catch it.
+        console.debug('[GRID] pending focus row not found under current filters; already retried once');
+        return;
+      }
+
+      // Select it in our state, scroll, and highlight
+      currentSelection = currentRows.find(x => String(x.id) === targetId) || null;
+      try { tr.scrollIntoView({ block: 'center', behavior: 'smooth' }); } catch (_) { tr.scrollIntoView(); }
+      tb.querySelectorAll('tr.selected').forEach(n => n.classList.remove('selected'));
+      tr.classList.add('selected');
+      const oldOutline = tr.style.outline;
+      tr.style.outline = '2px solid #ffbf00';
+      setTimeout(() => { tr.style.outline = oldOutline || ''; }, 2000);
+
+      // Clear token so we don't jump again
+      window.__pendingFocus = null;
+    }
+  }
+}
 
 
 // Close any existing floating menu
