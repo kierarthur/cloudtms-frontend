@@ -317,11 +317,11 @@ async function createReportPreset({ section, kind='search', name, filters, is_sh
       const form = document.getElementById('saveSearchForm');
       if (form) {
         const overwriteRadio = form.querySelector('input[name="mode"][value="overwrite"]');
-        const overwriteRow   = form.querySelector('#overwriteRow');
+        const overwriteWrap  = form.querySelector('#overwriteWrap'); // ✅ updated to match current modal markup
         const selectEl       = form.querySelector('#overwritePresetId');
 
         if (overwriteRadio) overwriteRadio.checked = true;
-        if (overwriteRow)   overwriteRow.style.display = ''; // reveal the dropdown
+        if (overwriteWrap)  overwriteWrap.style.display = 'block'; // reveal the dropdown
 
         if (selectEl && conflicting) {
           const hasOption = Array.from(selectEl.options).some(o => o.value === String(conflicting.id));
@@ -661,6 +661,9 @@ async function openSaveSearchModal(section, filters){
 
 
 // === REPLACE: openLoadSearchModal (built-in sanitize; no globals required) ===
+// FRONTEND — UPDATED
+// openLoadSearchModal: emit event with filters (so parent re-applies after repaint),
+// stage-delete UI kept; shows shared badge and (when present) creator.
 async function openLoadSearchModal(section){
   // Local, safe sanitizer (uses global sanitize if present)
   const sanitize = (typeof window !== 'undefined' && typeof window.sanitize === 'function')
@@ -674,12 +677,20 @@ async function openLoadSearchModal(section){
   let selectedId = null;
   const ctx = { stagedDeletes: new Set() };
 
+  function sortMineThenShared(rows) {
+    const mine   = (rows || []).filter(r => r.user_id === myId).sort((a,b)=>String(a.name||'').localeCompare(String(b.name||''), undefined, {sensitivity:'base'}));
+    const shared = (rows || []).filter(r => r.user_id !== myId).sort((a,b)=>String(a.name||'').localeCompare(String(b.name||''), undefined, {sensitivity:'base'}));
+    return mine.concat(shared);
+  }
+
   const renderList = () => {
-    const rowsHtml = (list || []).map(p => {
+    const rows = sortMineThenShared(list || []);
+    const rowsHtml = rows.map(p => {
       const owned    = p.user_id === myId;
       const deleting = ctx.stagedDeletes.has(p.id);
       const nameHtml = `<span class="name"${deleting ? ' style="text-decoration:line-through;opacity:.6"' : ''}>${sanitize(p.name)}</span>`;
-      const badge    = p.is_shared ? `<span class="badge">shared</span>` : '';
+      const creator  = (p.user && (p.user.display_name || p.user.email)) ? ` <span class="hint">• by ${sanitize(p.user.display_name || p.user.email)}</span>` : '';
+      const badge    = p.is_shared ? `<span class="badge">shared</span>${creator}` : '';
       const trashBtn = `<button class="bin btn btn-ghost btn-sm" ${owned ? '' : 'disabled'} title="${owned ? 'Delete' : 'Not yours'}">🗑</button>`;
       return `
         <tr data-id="${p.id}">
@@ -711,7 +722,8 @@ async function openLoadSearchModal(section){
     if (!chosen) { alert('Preset not found'); return false; }
 
     const filters = chosen.filters || chosen.filters_json || chosen.filtersJson || {};
-    populateSearchFormFromFilters(filters, '#searchForm');
+    // Let parent know BEFORE closing, so it can re-apply after repaint
+    try { window.dispatchEvent(new CustomEvent('adv-search-apply-preset', { detail: { section, filters } })); } catch {}
     return true;
   }, false);
 
@@ -771,6 +783,7 @@ async function openLoadSearchModal(section){
 }
 
 
+
 // -----------------------------
 // UPDATED: openSearchModal()
 // - Fix search submit path (object filters, not JSON string)
@@ -813,6 +826,9 @@ async function openLoadSearchModal(section){
 
 // === REPLACE: openSearchModal (icons only, legacy forced hidden, robust wiring) ===
 // === REPLACE: openSearchModal (compact text buttons + robust delegated wiring) ===
+// FRONTEND — UPDATED
+// openSearchModal: compact text buttons + delegated wiring + listens for preset-apply event
+// and re-applies filters AFTER parent repaint (onReturn hook).
 async function openSearchModal(opts = {}) {
   const TIMESHEET_STATUS = ['ERROR','RECEIVED','REVOKED','STORED','SAT','SUN','BH'];
   const INVOICE_STATUS   = ['DRAFT','ISSUED','ON_HOLD','PAID'];
@@ -902,7 +918,6 @@ async function openSearchModal(opts = {}) {
     inner = `<div class="tabc">No filters for this section.</div>`;
   }
 
-  // Compact text buttons (not white)
   const headerHtml = `
     <div class="row" id="searchHeaderRow" style="justify-content:flex-end; gap:.35rem; margin-bottom:.5rem">
       <button type="button" class="adv-btn" data-adv-act="load">Load Saved Search</button>
@@ -916,26 +931,22 @@ async function openSearchModal(opts = {}) {
     </div>
   `;
 
-  // Helper that (re)wires date pickers + delegated clicks. Safe to call repeatedly.
   function wireAdvancedSearch() {
     const bodyEl = document.getElementById('modalBody');
     const formEl = document.getElementById('searchForm');
     if (!bodyEl || !formEl) return;
 
-    // UK date pickers on any DD/MM/YYYY fields
     formEl.querySelectorAll('input[placeholder="DD/MM/YYYY"]').forEach(el => {
       try { attachUkDatePicker(el); } catch {}
     });
 
-    // Hide legacy white buttons if any template injected them
+    // hide legacy buttons
     formEl.querySelectorAll('#btnLoadSavedSearch,#btnSaveSearch').forEach(el => {
       el.style.display = 'none'; el.hidden = true; el.disabled = true;
     });
 
-    // Delegated click handler that survives innerHTML re-renders
-    if (bodyEl._advSearchHandler) {
-      bodyEl.removeEventListener('click', bodyEl._advSearchHandler, true);
-    }
+    // delegated click (survives re-renders)
+    if (bodyEl._advSearchHandler) bodyEl.removeEventListener('click', bodyEl._advSearchHandler, true);
     bodyEl._advSearchHandler = async (e) => {
       const btn = e.target && e.target.closest('button[data-adv-act]');
       if (!btn) return;
@@ -948,9 +959,20 @@ async function openSearchModal(opts = {}) {
       }
     };
     bodyEl.addEventListener('click', bodyEl._advSearchHandler, true);
+
+    // listen once for preset apply events
+    if (!window.__advPresetListener) {
+      window.__advPresetListener = (ev) => {
+        const det = ev && ev.detail; if (!det || det.section !== currentSection) return;
+        try { window.__squelchDirty = true; } catch {}
+        try { populateSearchFormFromFilters(det.filters || {}, '#searchForm'); } finally {
+          setTimeout(() => { try { window.__squelchDirty = false; } catch {} }, 0);
+        }
+      };
+      window.addEventListener('adv-search-apply-preset', window.__advPresetListener);
+    }
   }
 
-  // Show the modal (parent)
   showModal(
     'Advanced Search',
     [{ key: 'filter', title: 'Filters' }],
@@ -962,23 +984,24 @@ async function openSearchModal(opts = {}) {
       return true;
     },
     false,
-    // 🔁 When a child modal closes, parent re-renders; re-wire the buttons again.
-    () => wireAdvancedSearch()
+    () => wireAdvancedSearch() // re-wire after child closes
   );
 
-  // Initial wire
   setTimeout(wireAdvancedSearch, 0);
 }
 
 // === REPLACE: showOpenSearchModalWithForm (icons only, legacy forced hidden, robust wiring) ===
 // === REPLACE: showOpenSearchModalWithForm (inject compact buttons + delegated wiring) ===
+
+// FRONTEND — UPDATED
+// showOpenSearchModalWithForm: normalises header, re-wires delegated clicks,
+// listens for preset-apply event, re-applies after repaint.
 function showOpenSearchModalWithForm(form, opts = {}) {
   function wireAdvancedSearch() {
     const bodyEl = document.getElementById('modalBody');
     const formEl = document.getElementById('searchForm');
     if (!bodyEl || !formEl) return;
 
-    // Ensure header exists with compact text buttons
     let header = document.getElementById('searchHeaderRow');
     if (!header) {
       header = document.createElement('div');
@@ -990,26 +1013,20 @@ function showOpenSearchModalWithForm(form, opts = {}) {
         <button type="button" class="adv-btn" data-adv-act="save">Save Search</button>`;
       formEl.insertBefore(header, formEl.firstChild);
     } else {
-      // If header exists but has legacy content, normalise it
       header.innerHTML = `
         <button type="button" class="adv-btn" data-adv-act="load">Load Saved Search</button>
         <button type="button" class="adv-btn" data-adv-act="save">Save Search</button>`;
     }
 
-    // UK date pickers
     formEl.querySelectorAll('input[placeholder="DD/MM/YYYY"]').forEach(el => {
       try { attachUkDatePicker(el); } catch {}
     });
 
-    // Hide legacy buttons if any
     formEl.querySelectorAll('#btnLoadSavedSearch,#btnSaveSearch').forEach(el => {
       el.style.display = 'none'; el.hidden = true; el.disabled = true;
     });
 
-    // Delegated click that survives re-renders
-    if (bodyEl._advSearchHandler) {
-      bodyEl.removeEventListener('click', bodyEl._advSearchHandler, true);
-    }
+    if (bodyEl._advSearchHandler) bodyEl.removeEventListener('click', bodyEl._advSearchHandler, true);
     bodyEl._advSearchHandler = async (e) => {
       const btn = e.target && e.target.closest('button[data-adv-act]');
       if (!btn) return;
@@ -1022,6 +1039,17 @@ function showOpenSearchModalWithForm(form, opts = {}) {
       }
     };
     bodyEl.addEventListener('click', bodyEl._advSearchHandler, true);
+
+    if (!window.__advPresetListener) {
+      window.__advPresetListener = (ev) => {
+        const det = ev && ev.detail; if (!det || det.section !== currentSection) return;
+        try { window.__squelchDirty = true; } catch {}
+        try { populateSearchFormFromFilters(det.filters || {}, '#searchForm'); } finally {
+          setTimeout(() => { try { window.__squelchDirty = false; } catch {} }, 0);
+        }
+      };
+      window.addEventListener('adv-search-apply-preset', window.__advPresetListener);
+    }
   }
 
   showModal(
@@ -1035,14 +1063,11 @@ function showOpenSearchModalWithForm(form, opts = {}) {
       return true;
     },
     false,
-    // Re-bind after any child closes
     () => wireAdvancedSearch()
   );
 
-  // Initial wire
   setTimeout(wireAdvancedSearch, 0);
 }
-
 
 
 
@@ -2023,6 +2048,9 @@ async function openDelete(){
 // =================== CANDIDATE MODAL (unchanged save; ensures pay_method present) ===================
 // ✅ UPDATED — staged candidate overrides model (apply vs save)
 //    Parent Save commits staged deletes → edits → creates
+
+// FRONTEND — UPDATED
+// openCandidate: default Account holder from umbrella name if pay_method is UMBRELLA and empty.
 async function openCandidate(row) {
   const deep = (o)=> JSON.parse(JSON.stringify(o || {}));
   const seedId = row?.id || null;
@@ -2032,7 +2060,6 @@ async function openCandidate(row) {
     data:   deep(row),
     formState: { __forId: seedId, main: {}, pay: {} },
     rolesState: Array.isArray(row?.roles) ? normaliseRolesForSave(row.roles) : [],
-    // staged overrides (separate from server)
     overrides: { existing: [], stagedNew: [], stagedEdits: {}, stagedDeletes: new Set() },
     clientSettingsState: null,
     openToken: (seedId || 'new') + ':' + Date.now()
@@ -2050,7 +2077,6 @@ async function openCandidate(row) {
     async () => {
       const isNew = !modalCtx?.data?.id;
 
-      // collect main & pay
       const fs = modalCtx.formState || { __forId: null, main:{}, pay:{} };
       const sameRecord = (!!modalCtx.data?.id && fs.__forId === modalCtx.data.id) || (!modalCtx.data?.id && fs.__forId == null);
       const stateMain = sameRecord ? (fs.main || {}) : {};
@@ -2075,9 +2101,16 @@ async function openCandidate(row) {
 
       if (!payload.pay_method) payload.pay_method = isNew ? 'PAYE' : (row?.pay_method || 'PAYE');
 
-      // ✅ FIX: if Pay tab wasn’t opened, honour existing umbrella_id for UMBRELLA before validating.
-      if (payload.pay_method === 'UMBRELLA' && (!payload.umbrella_id || payload.umbrella_id === '') && row?.umbrella_id) {
-        payload.umbrella_id = row.umbrella_id;
+      if (payload.pay_method === 'UMBRELLA') {
+        // Default umbrella_id if Pay tab not opened
+        if ((!payload.umbrella_id || payload.umbrella_id === '') && row?.umbrella_id) {
+          payload.umbrella_id = row.umbrella_id;
+        }
+        // Default account_holder from umbrella name if empty
+        if (!payload.account_holder) {
+          const umbNameEl = document.querySelector('#tab-pay #umbrella_name');
+          if (umbNameEl && umbNameEl.value) payload.account_holder = umbNameEl.value;
+        }
       }
 
       if (isNew && !payload.first_name && !payload.last_name) { alert('Enter at least a first or last name.'); return; }
@@ -2094,10 +2127,9 @@ async function openCandidate(row) {
       const candidateId = idForUpdate || (saved && saved.id);
       if (!candidateId) { alert('Failed to save candidate'); return; }
 
-      // ✅ commit staged overrides (delete → patch → create)
+      // staged overrides commit (unchanged)
       const O = modalCtx.overrides || { existing: [], stagedNew: [], stagedEdits: {}, stagedDeletes: new Set() };
 
-      // deletes
       for (const delId of O.stagedDeletes) {
         const res = await authFetch(API(`/api/rates/candidate-overrides/${encodeURIComponent(delId)}`), { method: 'DELETE' });
         if (!res.ok && res.status !== 404) {
@@ -2106,7 +2138,6 @@ async function openCandidate(row) {
         }
       }
 
-      // edits (PATCH)
       for (const [id, patch] of Object.entries(O.stagedEdits || {})) {
         if (!patch.client_id) { alert('Override must include client_id'); return; }
         const res = await authFetch(
@@ -2119,7 +2150,6 @@ async function openCandidate(row) {
         }
       }
 
-      // creates (POST)
       for (const nv of (O.stagedNew || [])) {
         if (!nv.client_id) { alert('Override must include client_id'); return; }
         const res = await authFetch(
@@ -2132,7 +2162,6 @@ async function openCandidate(row) {
         }
       }
 
-      // reset staged state
       modalCtx.overrides = { existing: [], stagedNew: [], stagedEdits: {}, stagedDeletes: new Set() };
       modalCtx.formState = { __forId: candidateId || null, main: {}, pay: {} };
       modalCtx.rolesState = undefined;
@@ -2163,16 +2192,15 @@ async function openCandidate(row) {
     window.addEventListener('global-roles-updated', modalCtx._rolesUpdatedHandler);
   } catch (e) { console.error('Failed to load global roles', e); }
 
-  // preload existing overrides + timesheets
   if (row?.id) {
     const token = modalCtx.openToken;
     const id    = row.id;
 
     try {
-      const existing = await listCandidateRates(id); // server list
+      const existing = await listCandidateRates(id);
       if (token === modalCtx.openToken && modalCtx.data?.id === id) {
         modalCtx.overrides.existing = Array.isArray(existing) ? existing : [];
-        await renderCandidateRatesTable(); // uses modalCtx.overrides
+        await renderCandidateRatesTable();
       }
     } catch (e) { console.error('listCandidateRates failed', e); }
 
@@ -2185,24 +2213,24 @@ async function openCandidate(row) {
   }
 }
 
-
 // ====================== mountCandidatePayTab (FIXED) ======================
+// FRONTEND — UPDATED
+// mountCandidatePayTab: also keeps Account Holder in sync with umbrella name when UMNRELLA pay.
 async function mountCandidatePayTab(){
   const token    = modalCtx.openToken;
   const idActive = modalCtx.data?.id || null;
 
-  // Elements inside Pay tab
   const umbRow    = document.querySelector('#tab-pay #umbRow');
   const nameInput = document.querySelector('#tab-pay #umbrella_name');
   const idHidden  = document.querySelector('#tab-pay #umbrella_id');
   const bankName  = document.querySelector('#tab-pay input[name="bank_name"]');
   const sortCode  = document.querySelector('#tab-pay input[name="sort_code"]');
   const accNum    = document.querySelector('#tab-pay input[name="account_number"]');
+  const accHolder = document.querySelector('#tab-pay input[name="account_holder"]');
   const dl        = document.querySelector('#tab-pay #umbList');
 
   if (!umbRow || !nameInput || !idHidden || !bankName || !sortCode || !accNum || !dl) return;
 
-  // Fetch umbrellas and populate datalist (token-gated)
   const umbrellas = await listUmbrellas().catch(()=>[]);
   if (token !== modalCtx.openToken || modalCtx.data?.id !== idActive) {
     console.debug('[ASYNC] umbrellas dropped (stale)', { forId: idActive, active: modalCtx.data?.id });
@@ -2213,11 +2241,11 @@ async function mountCandidatePayTab(){
   const byId   = new Map((umbrellas||[]).map(u => [u.id, u]));
   dl.innerHTML = (umbrellas||[]).map(u => `<option value="${u.name}"></option>`).join('');
 
-  // Helpers
   function lockFromUmb(u){
     bankName.value = u.bank_name || '';
     sortCode.value = u.sort_code || '';
     accNum.value   = u.account_number || '';
+    if (accHolder && !accHolder.value) accHolder.value = u.name || '';
     [bankName, sortCode, accNum].forEach(i => i.readOnly = true);
   }
   function unlockBank(){ [bankName, sortCode, accNum].forEach(i => i.readOnly = false); }
@@ -2226,7 +2254,8 @@ async function mountCandidatePayTab(){
       modalCtx.bankSnapshot = {
         bank_name: bankName.value,
         sort_code: sortCode.value,
-        account_number: accNum.value
+        account_number: accNum.value,
+        account_holder: accHolder ? accHolder.value : ''
       };
     }
   }
@@ -2235,6 +2264,7 @@ async function mountCandidatePayTab(){
       bankName.value = modalCtx.bankSnapshot.bank_name || '';
       sortCode.value = modalCtx.bankSnapshot.sort_code || '';
       accNum.value   = modalCtx.bankSnapshot.account_number || '';
+      if (accHolder) accHolder.value = modalCtx.bankSnapshot.account_holder || '';
     }
     unlockBank();
   }
@@ -2286,10 +2316,8 @@ async function mountCandidatePayTab(){
     }
   }
 
-  // Initial visibility + prefill when opening existing record
   updateUmbVisibility();
 
-  // Pre-fill umbrella name if we have an id
   if (idHidden.value) {
     const u = byId.get(idHidden.value);
     if (u) {
@@ -2298,11 +2326,9 @@ async function mountCandidatePayTab(){
     }
   }
 
-  // Bind events
   nameInput.addEventListener('change', () => resolveUmbrella(nameInput.value));
   nameInput.addEventListener('blur',   () => resolveUmbrella(nameInput.value));
 
-  // Listen for cross-tab pay method changes
   const onPmChanged = () => updateUmbVisibility();
   window.addEventListener('pay-method-changed', onPmChanged, { passive: true });
   modalCtx._payMethodChangedHandler = onPmChanged;
@@ -4043,6 +4069,8 @@ function collectForm(sel, jsonTry=false){
 // ==== FIXED MODAL FRAMEWORK: close only on explicit success from onSave ====
 // ==== FIXED MODAL FRAMEWORK: close only on explicit success from onSave ====
 
+// FRONTEND — UPDATED
+// showModal: ignore non-trusted events for dirty; ensure drag handlers cleared early on close
 function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
   // Sanitize any previous geometry so we never inherit a dragged position
   const modalEl = byId('modal');
@@ -4125,7 +4153,10 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
       if (this._detachDirty) { try { this._detachDirty(); } catch(_){}; this._detachDirty = null; }
       const root = byId('modalBody');
       if (!root) return;
-      const onDirty = ()=>{
+      const onDirty = (ev)=>{
+        // Only mark dirty for *trusted* user input; ignore programmatic changes and preset apply
+        if (ev && !ev.isTrusted) return;
+        if (window.__squelchDirty) return;
         this.isDirty = true;
         try { window.dispatchEvent(new CustomEvent('modal-dirty')); } catch {}
       };
@@ -4243,6 +4274,136 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
 
     const onDirtyLabel = () => updateSecondaryLabel();
 
+    // === RELATED… button & dropdown next to Save/Close ===
+    (function ensureRelatedUI() {
+      const actionsBar = primaryBtn && primaryBtn.parentElement ? primaryBtn.parentElement : null;
+      if (!actionsBar) return;
+
+      let wrap = byId('btnRelatedWrap');
+      if (!wrap) {
+        wrap = document.createElement('div');
+        wrap.id = 'btnRelatedWrap';
+        wrap.style.display = 'inline-block';
+        wrap.style.position = 'relative';
+        wrap.style.marginRight = '.5rem';
+        actionsBar.insertBefore(wrap, discardBtn); // place before Close/Discard
+      } else {
+        wrap.innerHTML = '';
+      }
+
+      // Button
+      const btn = document.createElement('button');
+      btn.id = 'btnRelated';
+      btn.type = 'button';
+      btn.className = 'btn btn-outline btn-sm';
+      btn.textContent = 'Related ▾';
+      wrap.appendChild(btn);
+
+      // Dropdown
+      const menu = document.createElement('div');
+      menu.id = 'relatedMenu';
+      menu.style.cssText = 'position:absolute; right:0; top:calc(100% + 6px); background:#fff; border:1px solid #e5e7eb; border-radius:6px; box-shadow:0 8px 24px rgba(0,0,0,.08); min-width:240px; display:none; z-index:1000';
+      wrap.appendChild(menu);
+
+      // Modal entity -> API entity
+      const apiEntityMap = { candidates:'candidate', timesheets:'timesheet', invoices:'invoice', umbrellas:'umbrella', clients:'client' };
+      // List section mapping for navigation
+      const navMap = { timesheets:'timesheets', invoices:'invoices', candidates:'candidates', clients:'clients', umbrellas:'umbrellas' };
+
+      function renderRelatedMenu(counts) {
+        const ent = apiEntityMap[top.entity];
+        const rows = [];
+
+        if (ent === 'timesheet') {
+          if (typeof counts.candidate === 'number') rows.push({ key:'candidates', label:`Candidate (${counts.candidate})` });
+          if (typeof counts.client    === 'number') rows.push({ key:'clients',   label:`Client (${counts.client})` });
+          if (typeof counts.invoice   === 'number') rows.push({ key:'invoices',  label:`Invoice (${counts.invoice})` });
+          if (typeof counts.umbrella  === 'number') rows.push({ key:'umbrellas', label:`Umbrella (${counts.umbrella})` });
+        } else if (ent === 'invoice') {
+          if (typeof counts.timesheets === 'number') rows.push({ key:'timesheets', label:`Timesheets (${counts.timesheets})` });
+          if (typeof counts.candidates === 'number') rows.push({ key:'candidates', label:`Candidates (${counts.candidates})` });
+          if (typeof counts.client     === 'number') rows.push({ key:'clients',    label:`Client (${counts.client})` });
+          if (typeof counts.umbrellas  === 'number') rows.push({ key:'umbrellas',  label:`Umbrellas (${counts.umbrellas})` });
+        } else if (ent === 'candidate') {
+          if (typeof counts.timesheets === 'number') rows.push({ key:'timesheets', label:`Timesheets (${counts.timesheets})` });
+          if (typeof counts.invoices   === 'number') rows.push({ key:'invoices',   label:`Invoices (${counts.invoices})` });
+          if (typeof counts.clients    === 'number') rows.push({ key:'clients',    label:`Clients (${counts.clients})` });
+          if (typeof counts.umbrella   === 'number') rows.push({ key:'umbrellas',  label:`Umbrella (${counts.umbrella})` });
+          // (optional) remittances not shown in the menu per your final list
+        } else if (ent === 'client') {
+          if (typeof counts.timesheets === 'number') rows.push({ key:'timesheets', label:`Timesheets (${counts.timesheets})` });
+          if (typeof counts.invoices   === 'number') rows.push({ key:'invoices',   label:`Invoices (${counts.invoices})` });
+          if (typeof counts.candidates === 'number') rows.push({ key:'candidates', label:`Candidates (${counts.candidates})` });
+        } else if (ent === 'umbrella') {
+          if (typeof counts.candidates === 'number') rows.push({ key:'candidates', label:`Candidates (${counts.candidates})` });
+          if (typeof counts.timesheets === 'number') rows.push({ key:'timesheets', label:`Timesheets (${counts.timesheets})` });
+          if (typeof counts.invoices   === 'number') rows.push({ key:'invoices',   label:`Invoices (${counts.invoices})` });
+        }
+
+        if (!rows.length) {
+          menu.innerHTML = `<div style="padding:10px 12px;color:#6b7280;font-size:12px">No related records</div>`;
+          return;
+        }
+
+        menu.innerHTML = rows.map(r =>
+          `<button type="button" class="rel-item" data-target="${r.key}" style="display:block;width:100%;text-align:left;padding:8px 12px;background:#fff;border:0;border-bottom:1px solid #f3f4f6;font-size:13px;cursor:pointer">${r.label}</button>`
+        ).join('') + `<div style="height:2px;background:#fff;border-bottom-left-radius:6px;border-bottom-right-radius:6px"></div>`;
+
+        // Wire item clicks
+        menu.querySelectorAll('.rel-item').forEach(btnItem => {
+          btnItem.addEventListener('click', () => {
+            const tgt = btnItem.getAttribute('data-target');
+            const section = navMap[tgt];
+            menu.style.display = 'none';
+            // Close modal (respect dirty flow)
+            discardBtn.click();
+            // Navigate to target section after modal closes
+            if (section) {
+              setTimeout(() => {
+                if (typeof loadSection === 'function') loadSection(section);
+                else { try { currentSection = section; renderAll(); } catch {} }
+              }, 0);
+            }
+          });
+        });
+      }
+
+      const onDocClick = (ev) => {
+        if (!menu || menu.style.display === 'none') return;
+        const within = ev.target === menu || ev.target === btn || menu.contains(ev.target);
+        if (!within) menu.style.display = 'none';
+      };
+
+      btn.onclick = async () => {
+        const ent = apiEntityMap[top.entity];
+        const id  = modalCtx?.data?.id;
+        if (!ent || !id) {
+          menu.innerHTML = `<div style="padding:10px 12px;color:#6b7280;font-size:12px">No related records</div>`;
+          menu.style.display = (menu.style.display === 'none' ? 'block' : 'none');
+          return;
+        }
+        menu.innerHTML = `<div style="padding:10px 12px;color:#6b7280;font-size:12px">Loading…</div>`;
+        menu.style.display = 'block';
+        try {
+          const counts = await fetchRelatedCounts(ent, id).catch(()=>({}));
+          renderRelatedMenu(counts || {});
+        } catch {
+          menu.innerHTML = `<div style="padding:10px 12px;color:#ef4444;font-size:12px">Failed to load related</div>`;
+        }
+      };
+
+      document.addEventListener('click', onDocClick, true);
+
+      const prevDetach = top._detachGlobal;
+      top._detachGlobal = () => {
+        try { document.removeEventListener('click', onDocClick, true); } catch {}
+        if (typeof prevDetach === 'function') {
+          try { prevDetach(); } catch {}
+        }
+      };
+    })();
+    // === end Related UI ===
+
     // Global wiring — single-attach with guard
     if (!top._wired) {
       window.addEventListener('modal-dirty', onDirtyLabel);
@@ -4253,10 +4414,14 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
       const onOverlayClick = (e) => { if (e.target === backEl) handleSecondary(); };
       backEl.addEventListener('click', onOverlayClick, true);
 
+      const prevDetach = top._detachGlobal;
       top._detachGlobal = () => {
         try { window.removeEventListener('modal-dirty', onDirtyLabel); } catch {}
         try { window.removeEventListener('keydown', onEsc); } catch {}
         try { backEl.removeEventListener('click', onOverlayClick, true); } catch {}
+        if (typeof prevDetach === 'function') {
+          try { prevDetach(); } catch {}
+        }
       };
 
       top._wired = true;
@@ -4266,11 +4431,17 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
       if (top._closing) return;
       top._closing = true;
 
+      // Clear any drag handlers immediately to avoid "jump"
+      document.onmousemove = null;
+      document.onmouseup   = null;
+      const m = byId('modal'); if (m) m.classList.remove('dragging');
+
       if (top.isDirty) {
         const ok = window.confirm('You have unsaved changes. Discard them and close?');
         if (!ok) { top._closing = false; return; }
       }
 
+      // Reset geometry on close
       sanitizeModalGeometry();
 
       const closing = window.__modalStack.pop();
