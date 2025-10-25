@@ -4115,8 +4115,8 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
     _detachDirty: null,
     _detachGlobal: null,
     _hasMountedOnce: false,
-    _wired: false,      // single-attach guard for global listeners
-    _closing: false,    // re-entrancy guard for close/discard
+    _wired: false,
+    _closing: false,
 
     persistCurrentTabState() {
       const back = byId('modalBack');
@@ -4154,7 +4154,6 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
       const root = byId('modalBody');
       if (!root) return;
       const onDirty = (ev)=>{
-        // Only mark dirty for *trusted* user input; ignore programmatic changes and preset apply
         if (ev && !ev.isTrusted) return;
         if (window.__squelchDirty) return;
         this.isDirty = true;
@@ -4272,149 +4271,7 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
 
     const onDirtyLabel = () => updateSecondaryLabel();
 
-    // === RELATED… button & dropdown next to Save/Close (SAFE INSERTION) ===
-    (function ensureRelatedUI() {
-      const actionsBar =
-        (discardBtn && discardBtn.parentElement) ||
-        (primaryBtn && primaryBtn.parentElement) ||
-        null;
-      if (!actionsBar) return;
-
-      let wrap = byId('btnRelatedWrap');
-      if (!wrap) {
-        wrap = document.createElement('div');
-        wrap.id = 'btnRelatedWrap';
-        wrap.style.display = 'inline-block';
-        wrap.style.position = 'relative';
-        wrap.style.marginRight = '.5rem';
-        // Safe placement: insert before Close if Close is a child of actionsBar, else append
-        if (discardBtn && discardBtn.parentElement === actionsBar) {
-          actionsBar.insertBefore(wrap, discardBtn);
-        } else {
-          actionsBar.appendChild(wrap);
-        }
-      } else {
-        // Ensure wrapper is actually inside actionsBar
-        if (wrap.parentElement !== actionsBar) {
-          try { wrap.parentElement?.removeChild(wrap); } catch(_) {}
-          actionsBar.appendChild(wrap);
-        }
-        wrap.innerHTML = '';
-      }
-
-      // Button
-      const btn = document.createElement('button');
-      btn.id = 'btnRelated';
-      btn.type = 'button';
-      btn.className = 'btn btn-outline btn-sm';
-      btn.textContent = 'Related ▾';
-      wrap.appendChild(btn);
-
-      // Dropdown
-      const menu = document.createElement('div');
-      menu.id = 'relatedMenu';
-      menu.style.cssText = 'position:absolute; right:0; top:calc(100% + 6px); background:#fff; border:1px solid #e5e7eb; border-radius:6px; box-shadow:0 8px 24px rgba(0,0,0,.08); min-width:240px; display:none; z-index:1000';
-      wrap.appendChild(menu);
-
-      // Modal entity -> API entity
-      const apiEntityMap = { candidates:'candidate', timesheets:'timesheet', invoices:'invoice', umbrellas:'umbrella', clients:'client' };
-      // Section mapping for navigation
-      const navMap = { timesheets:'timesheets', invoices:'invoices', candidates:'candidates', clients:'clients', umbrellas:'umbrellas' };
-
-      function renderRelatedMenu(counts) {
-        const ent = apiEntityMap[top.entity];
-        const rows = [];
-
-        if (ent === 'timesheet') {
-          if (typeof counts.candidate === 'number') rows.push({ key:'candidates', label:`Candidate (${counts.candidate})` });
-          if (typeof counts.client    === 'number') rows.push({ key:'clients',   label:`Client (${counts.client})` });
-          if (typeof counts.invoice   === 'number') rows.push({ key:'invoices',  label:`Invoice (${counts.invoice})` });
-          if (typeof counts.umbrella  === 'number') rows.push({ key:'umbrellas', label:`Umbrella (${counts.umbrella})` });
-        } else if (ent === 'invoice') {
-          if (typeof counts.timesheets === 'number') rows.push({ key:'timesheets', label:`Timesheets (${counts.timesheets})` });
-          if (typeof counts.candidates === 'number') rows.push({ key:'candidates', label:`Candidates (${counts.candidates})` });
-          if (typeof counts.client     === 'number') rows.push({ key:'clients',    label:`Client (${counts.client})` });
-          if (typeof counts.umbrellas  === 'number') rows.push({ key:'umbrellas',  label:`Umbrellas (${counts.umbrellas})` });
-        } else if (ent === 'candidate') {
-          if (typeof counts.timesheets === 'number') rows.push({ key:'timesheets', label:`Timesheets (${counts.timesheets})` });
-          if (typeof counts.invoices   === 'number') rows.push({ key:'invoices',   label:`Invoices (${counts.invoices})` });
-          if (typeof counts.clients    === 'number') rows.push({ key:'clients',    label:`Clients (${counts.clients})` });
-          if (typeof counts.umbrella   === 'number') rows.push({ key:'umbrellas',  label:`Umbrella (${counts.umbrella})` });
-        } else if (ent === 'client') {
-          if (typeof counts.timesheets === 'number') rows.push({ key:'timesheets', label:`Timesheets (${counts.timesheets})` });
-          if (typeof counts.invoices   === 'number') rows.push({ key:'invoices',   label:`Invoices (${counts.invoices})` });
-          if (typeof counts.candidates === 'number') rows.push({ key:'candidates', label:`Candidates (${counts.candidates})` });
-        } else if (ent === 'umbrella') {
-          if (typeof counts.candidates === 'number') rows.push({ key:'candidates', label:`Candidates (${counts.candidates})` });
-          if (typeof counts.timesheets === 'number') rows.push({ key:'timesheets', label:`Timesheets (${counts.timesheets})` });
-          if (typeof counts.invoices   === 'number') rows.push({ key:'invoices',   label:`Invoices (${counts.invoices})` });
-        }
-
-        if (!rows.length) {
-          menu.innerHTML = `<div style="padding:10px 12px;color:#6b7280;font-size:12px">No related records</div>`;
-          return;
-        }
-
-        menu.innerHTML = rows.map(r =>
-          `<button type="button" class="rel-item" data-target="${r.key}" style="display:block;width:100%;text-align:left;padding:8px 12px;background:#fff;border:0;border-bottom:1px solid #f3f4f6;font-size:13px;cursor:pointer">${r.label}</button>`
-        ).join('') + `<div style="height:2px;background:#fff;border-bottom-left-radius:6px;border-bottom-right-radius:6px"></div>`;
-
-        // Wire item clicks
-        menu.querySelectorAll('.rel-item').forEach(btnItem => {
-          btnItem.addEventListener('click', () => {
-            const tgt = btnItem.getAttribute('data-target');
-            const section = navMap[tgt];
-            menu.style.display = 'none';
-            // Close modal (respect dirty flow)
-            discardBtn.click();
-            // Navigate to target section after modal closes
-            if (section) {
-              setTimeout(() => {
-                if (typeof loadSection === 'function') loadSection(section);
-                else { try { currentSection = section; renderAll(); } catch {} }
-              }, 0);
-            }
-          });
-        });
-      }
-
-      const onDocClick = (ev) => {
-        if (!menu || menu.style.display === 'none') return;
-        const within = ev.target === menu || ev.target === btn || menu.contains(ev.target);
-        if (!within) menu.style.display = 'none';
-      };
-
-      btn.onclick = async () => {
-        const ent = apiEntityMap[top.entity];
-        const id  = modalCtx?.data?.id;
-        if (!ent || !id) {
-          menu.innerHTML = `<div style="padding:10px 12px;color:#6b7280;font-size:12px">No related records</div>`;
-          menu.style.display = (menu.style.display === 'none' ? 'block' : 'none');
-          return;
-        }
-        menu.innerHTML = `<div style="padding:10px 12px;color:#6b7280;font-size:12px">Loading…</div>`;
-        menu.style.display = 'block';
-        try {
-          const counts = await fetchRelatedCounts(ent, id).catch(()=>({}));
-          renderRelatedMenu(counts || {});
-        } catch {
-          menu.innerHTML = `<div style="padding:10px 12px;color:#ef4444;font-size:12px">Failed to load related</div>`;
-        }
-      };
-
-      document.addEventListener('click', onDocClick, true);
-
-      const prevDetach = top._detachGlobal;
-      top._detachGlobal = () => {
-        try { document.removeEventListener('click', onDocClick, true); } catch {}
-        if (typeof prevDetach === 'function') {
-          try { prevDetach(); } catch {}
-        }
-      };
-    })();
-    // === end Related UI ===
-
-    // Global wiring — single-attach with guard
+    // Wire global listeners
     if (!top._wired) {
       window.addEventListener('modal-dirty', onDirtyLabel);
 
@@ -4424,24 +4281,21 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
       const onOverlayClick = (e) => { if (e.target === backEl) handleSecondary(); };
       backEl.addEventListener('click', onOverlayClick, true);
 
-      const prevDetach = top._detachGlobal;
       top._detachGlobal = () => {
         try { window.removeEventListener('modal-dirty', onDirtyLabel); } catch {}
         try { window.removeEventListener('keydown', onEsc); } catch {}
         try { backEl.removeEventListener('click', onOverlayClick, true); } catch {}
-        if (typeof prevDetach === 'function') {
-          try { prevDetach(); } catch {}
-        }
       };
 
       top._wired = true;
     }
 
+    // Unified close handler
     const handleSecondary = () => {
       if (top._closing) return;
       top._closing = true;
 
-      // Clear any drag handlers immediately to avoid "jump"
+      // Clear drag handlers
       document.onmousemove = null;
       document.onmouseup   = null;
       const m = byId('modal'); if (m) m.classList.remove('dragging');
@@ -4451,7 +4305,6 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
         if (!ok) { top._closing = false; return; }
       }
 
-      // Reset geometry on close
       sanitizeModalGeometry();
 
       const closing = window.__modalStack.pop();
@@ -4468,7 +4321,7 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
       }
     };
 
-    // PRIMARY (Search/Load/Save/Apply): close ONLY on explicit success
+    // Primary (Search/Load/Save/Apply)
     primaryBtn.onclick = async () => {
       top.persistCurrentTabState();
 
@@ -4493,7 +4346,6 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
       if (!window.__modalStack.length || window.__modalStack[window.__modalStack.length - 1] !== top) {
         return;
       }
-
       if (!shouldClose) return;
 
       sanitizeModalGeometry();
@@ -4512,23 +4364,160 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
         }
       } else {
         if (top._detachGlobal) { try { top._detachGlobal(); } catch(_){}; top._detachGlobal = null; }
-        window.removeEventListener('modal-dirty', onDirtyLabel); // safety
+        window.removeEventListener('modal-dirty', onDirtyLabel);
         discardAllModalsAndState();
       }
     };
 
     discardBtn.onclick = handleSecondary;
 
-    // Drag (unchanged)
-    const modal = byId('modal');
-    const drag  = byId('modalDrag');
-    let offX = 0, offY = 0, dragging = false;
-    drag.onmousedown = (e) => {
-      dragging = true; modal.classList.add('dragging'); offX = e.offsetX; offY = e.offsetY;
-      document.onmousemove = mm; document.onmouseup = mu;
-    };
-    function mm(e){ if(!dragging) return; modal.style.position = 'absolute'; modal.style.left = (e.clientX - offX) + 'px'; modal.style.top = (e.clientY - offY) + 'px'; }
-    function mu(){ dragging = false; modal.classList.remove('dragging'); document.onmousemove = null; document.onmouseup = null; }
+    // === RELATED… button & dropdown next to Save/Close (SAFE INSERTION) ===
+    (function ensureRelatedUI() {
+      try {
+        // Find the actions container (parent of either button)
+        const actionsBar =
+          (discardBtn && discardBtn.parentElement) ||
+          (primaryBtn && primaryBtn.parentElement) ||
+          null;
+        if (!actionsBar) return;
+
+        // Create or reuse wrapper
+        let wrap = byId('btnRelatedWrap');
+        if (!wrap) {
+          wrap = document.createElement('div');
+          wrap.id = 'btnRelatedWrap';
+          wrap.style.display = 'inline-block';
+          wrap.style.position = 'relative';
+          wrap.style.marginRight = '.5rem';
+
+          // SAFE insert: only insertBefore if discard is a direct child; otherwise append
+          if (discardBtn && discardBtn.parentElement === actionsBar) {
+            try {
+              actionsBar.insertBefore(wrap, discardBtn);
+            } catch {
+              actionsBar.appendChild(wrap);
+            }
+          } else {
+            actionsBar.appendChild(wrap);
+          }
+        } else {
+          // Move wrapper into actions bar if needed
+          if (wrap.parentElement !== actionsBar) {
+            try { wrap.parentElement?.removeChild(wrap); } catch {}
+            actionsBar.appendChild(wrap);
+          }
+          wrap.innerHTML = '';
+        }
+
+        // Build button
+        const btn = document.createElement('button');
+        btn.id = 'btnRelated';
+        btn.type = 'button';
+        btn.className = 'btn btn-outline btn-sm';
+        btn.textContent = 'Related ▾';
+        wrap.appendChild(btn);
+
+        // Dropdown
+        const menu = document.createElement('div');
+        menu.id = 'relatedMenu';
+        menu.style.cssText = 'position:absolute; right:0; top:calc(100% + 6px); background:#fff; border:1px solid #e5e7eb; border-radius:6px; box-shadow:0 8px 24px rgba(0,0,0,.08); min-width:240px; display:none; z-index:1000';
+        wrap.appendChild(menu);
+
+        const apiEntityMap = { candidates:'candidate', timesheets:'timesheet', invoices:'invoice', umbrellas:'umbrella', clients:'client' };
+        const navMap       = { timesheets:'timesheets', invoices:'invoices', candidates:'candidates', clients:'clients', umbrellas:'umbrellas' };
+
+        function renderRelatedMenu(counts) {
+          const ent = apiEntityMap[top.entity];
+          const rows = [];
+
+          if (ent === 'timesheet') {
+            if (typeof counts.candidate === 'number') rows.push({ key:'candidates', label:`Candidate (${counts.candidate})` });
+            if (typeof counts.client    === 'number') rows.push({ key:'clients',   label:`Client (${counts.client})` });
+            if (typeof counts.invoice   === 'number') rows.push({ key:'invoices',  label:`Invoice (${counts.invoice})` });
+            if (typeof counts.umbrella  === 'number') rows.push({ key:'umbrellas', label:`Umbrella (${counts.umbrella})` });
+          } else if (ent === 'invoice') {
+            if (typeof counts.timesheets === 'number') rows.push({ key:'timesheets', label:`Timesheets (${counts.timesheets})` });
+            if (typeof counts.candidates === 'number') rows.push({ key:'candidates', label:`Candidates (${counts.candidates})` });
+            if (typeof counts.client     === 'number') rows.push({ key:'clients',    label:`Client (${counts.client})` });
+            if (typeof counts.umbrellas  === 'number') rows.push({ key:'umbrellas',  label:`Umbrellas (${counts.umbrellas})` });
+          } else if (ent === 'candidate') {
+            if (typeof counts.timesheets === 'number') rows.push({ key:'timesheets', label:`Timesheets (${counts.timesheets})` });
+            if (typeof counts.invoices   === 'number') rows.push({ key:'invoices',   label:`Invoices (${counts.invoices})` });
+            if (typeof counts.clients    === 'number') rows.push({ key:'clients',    label:`Clients (${counts.clients})` });
+            if (typeof counts.umbrella   === 'number') rows.push({ key:'umbrellas',  label:`Umbrella (${counts.umbrella})` });
+          } else if (ent === 'client') {
+            if (typeof counts.timesheets === 'number') rows.push({ key:'timesheets', label:`Timesheets (${counts.timesheets})` });
+            if (typeof counts.invoices   === 'number') rows.push({ key:'invoices',   label:`Invoices (${counts.invoices})` });
+            if (typeof counts.candidates === 'number') rows.push({ key:'candidates', label:`Candidates (${counts.candidates})` });
+          } else if (ent === 'umbrella') {
+            if (typeof counts.candidates === 'number') rows.push({ key:'candidates', label:`Candidates (${counts.candidates})` });
+            if (typeof counts.timesheets === 'number') rows.push({ key:'timesheets', label:`Timesheets (${counts.timesheets})` });
+            if (typeof counts.invoices   === 'number') rows.push({ key:'invoices',   label:`Invoices (${counts.invoices})` });
+          }
+
+          if (!rows.length) {
+            menu.innerHTML = `<div style="padding:10px 12px;color:#6b7280;font-size:12px">No related records</div>`;
+            return;
+          }
+
+          menu.innerHTML = rows.map(r =>
+            `<button type="button" class="rel-item" data-target="${r.key}" style="display:block;width:100%;text-align:left;padding:8px 12px;background:#fff;border:0;border-bottom:1px solid #f3f4f6;font-size:13px;cursor:pointer">${r.label}</button>`
+          ).join('') + `<div style="height:2px;background:#fff;border-bottom-left-radius:6px;border-bottom-right-radius:6px"></div>`;
+
+          menu.querySelectorAll('.rel-item').forEach(btnItem => {
+            btnItem.addEventListener('click', () => {
+              const tgt = btnItem.getAttribute('data-target');
+              const section = navMap[tgt];
+              menu.style.display = 'none';
+              discardBtn.click(); // close modal
+              if (section) {
+                setTimeout(() => {
+                  if (typeof loadSection === 'function') loadSection(section);
+                  else { try { currentSection = section; renderAll(); } catch {} }
+                }, 0);
+              }
+            });
+          });
+        }
+
+        const onDocClick = (ev) => {
+          if (!menu || menu.style.display === 'none') return;
+          const within = ev.target === menu || ev.target === btn || menu.contains(ev.target);
+          if (!within) menu.style.display = 'none';
+        };
+
+        btn.onclick = async () => {
+          const id  = modalCtx?.data?.id;
+          const ent = apiEntityMap[top.entity];
+          if (!ent || !id) {
+            menu.innerHTML = `<div style="padding:10px 12px;color:#6b7280;font-size:12px">No related records</div>`;
+            menu.style.display = (menu.style.display === 'none' ? 'block' : 'none');
+            return;
+          }
+          menu.innerHTML = `<div style="padding:10px 12px;color:#6b7280;font-size:12px">Loading…</div>`;
+          menu.style.display = 'block';
+          try {
+            const counts = await fetchRelatedCounts(ent, id).catch(()=>({}));
+            renderRelatedMenu(counts || {});
+          } catch {
+            menu.innerHTML = `<div style="padding:10px 12px;color:#ef4444;font-size:12px">Failed to load related</div>`;
+          }
+        };
+
+        document.addEventListener('click', onDocClick, true);
+
+        const prevDetach = top._detachGlobal;
+        top._detachGlobal = () => {
+          try { document.removeEventListener('click', onDocClick, true); } catch {}
+          if (typeof prevDetach === 'function') {
+            try { prevDetach(); } catch {}
+          }
+        };
+      } catch (err) {
+        console.error('[RelatedUI] mount failed', err);
+      }
+    })();
+    // === end Related UI ===
   }
 
   renderTop();
