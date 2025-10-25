@@ -3827,13 +3827,10 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
 
     const onDirtyLabel = () => updateSecondaryLabel();
 
-    // Wire global listeners
     if (!top._wired) {
       window.addEventListener('modal-dirty', onDirtyLabel);
-
       const onEsc = (e) => { if (e.key === 'Escape') { e.preventDefault(); handleSecondary(); } };
       window.addEventListener('keydown', onEsc);
-
       const onOverlayClick = (e) => { if (e.target === backEl) handleSecondary(); };
       backEl.addEventListener('click', onOverlayClick, true);
 
@@ -3841,18 +3838,15 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
         try { window.removeEventListener('modal-dirty', onDirtyLabel); } catch {}
         try { window.removeEventListener('keydown', onEsc); } catch {}
         try { backEl.removeEventListener('click', onOverlayClick, true); } catch {}
-        // NOTE: additional detachments may be layered below (drag & related); they will chain to this
       };
 
       top._wired = true;
     }
 
-    // Unified close handler
     const handleSecondary = () => {
       if (top._closing) return;
       top._closing = true;
 
-      // Clear drag handlers
       document.onmousemove = null;
       document.onmouseup   = null;
       const m = byId('modal'); if (m) m.classList.remove('dragging');
@@ -3878,10 +3872,8 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
       }
     };
 
-    // Primary (Search/Load/Save/Apply)
     primaryBtn.onclick = async () => {
       top.persistCurrentTabState();
-
       let shouldClose = true;
 
       if (typeof top.onSave === 'function') {
@@ -3900,9 +3892,7 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
         }
       }
 
-      if (!window.__modalStack.length || window.__modalStack[window.__modalStack.length - 1] !== top) {
-        return;
-      }
+      if (!window.__modalStack.length || window.__modalStack[window.__modalStack.length - 1] !== top) return;
       if (!shouldClose) return;
 
       sanitizeModalGeometry();
@@ -3928,45 +3918,45 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
 
     discardBtn.onclick = handleSecondary;
 
-    // ===== DRAG — generous on title bar, but exclude a 1cm (≈38px) buffer before the Right controls =====
+    // ===== DRAG — allow anywhere on the title bar (header) except the last ~1cm before the controls on the right =====
     (function ensureDrag() {
       const modal = byId('modal');
       const dragBar = byId('modalDrag');
       if (!modal || !dragBar) return;
 
-      // Compute the forbidden boundary: 1cm (~38px) to the left of the nearest header control on the right
-      const CLOSE = byId('btnCloseModal');
-      const hdrRelatedWrap = document.querySelector('#modalDrag #btnRelatedWrap'); // should not exist now, but safe
+      // Find the left edge of the right-hand controls (Close / Related), so we can create a 1cm "no-drag buffer" to its left
+      const closeBtn = byId('btnCloseModal');
+      const relatedWrap = document.querySelector('#modalDrag #btnRelatedWrap');
       let rightControlLeft = Infinity;
 
-      if (CLOSE && CLOSE.closest('#modalDrag')) {
-        const r = CLOSE.getBoundingClientRect();
+      if (closeBtn && closeBtn.closest('#modalDrag')) {
+        const r = closeBtn.getBoundingClientRect();
         rightControlLeft = Math.min(rightControlLeft, r.left);
       }
-      if (hdrRelatedWrap) {
-        const r = hdrRelatedWrap.getBoundingClientRect();
+      if (relatedWrap && relatedWrap.closest('#modalDrag')) {
+        const r = relatedWrap.getBoundingClientRect();
         rightControlLeft = Math.min(rightControlLeft, r.left);
       }
 
-      const BUFFER_CM_PX = 38; // ~1cm @ 96dpi
-      const safeRightEdge = Number.isFinite(rightControlLeft) ? (rightControlLeft - BUFFER_CM_PX) : null;
+      const BUFFER_PX = 38; // ≈ 1cm @ ~96dpi
+      let safeRightEdge = null; // rightmost x where a drag can start
+      if (Number.isFinite(rightControlLeft)) safeRightEdge = rightControlLeft - BUFFER_PX;
 
       let startX = 0, startY = 0, baseLeft = 0, baseTop = 0, moved = false;
       let onMove = null, onUp = null;
 
-      dragBar.onmousedown = (e) => {
-        if (e.button !== 0) return;                  // left click only
+      // Use capture so nothing in the header can swallow the event before we see it
+      const onDown = (e) => {
+        if (e.button !== 0) return; // left click only
         if (!e.target || !e.target.closest('#modalDrag')) return;
 
-        // Exclude clicks inside the no-drag zone near right-side controls
+        // Exclude clicks inside the last 1cm before the controls on the right
         if (safeRightEdge !== null && e.clientX >= safeRightEdge) return;
 
-        // Exclude direct interactive elements anywhere
-        if (e.target.closest('#btnCloseModal, #btnRelatedWrap, #relatedMenu, button, [role="button"], a, input, select')) {
-          return;
-        }
+        // Exclude interactive elements (buttons, inputs, links) anywhere in the header
+        if (e.target.closest('#btnCloseModal, #btnRelatedWrap, #relatedMenu, button, [role="button"], a, input, select')) return;
 
-        // Record starting positions
+        // Start drag
         const rect = modal.getBoundingClientRect();
         baseLeft = rect.left + window.scrollX;
         baseTop  = rect.top  + window.scrollY;
@@ -3979,7 +3969,7 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
         onMove = (ev) => {
           const dx = ev.clientX - startX;
           const dy = ev.clientY - startY;
-          if (!moved && Math.max(Math.abs(dx), Math.abs(dy)) < 3) return; // small threshold to prevent accidental drags
+          if (!moved && Math.max(Math.abs(dx), Math.abs(dy)) < 3) return; // threshold to avoid jitter
           moved = true;
 
           modal.style.position = 'absolute';
@@ -3999,9 +3989,13 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
         document.addEventListener('mouseup', onUp, true);
       };
 
-      // Chain detach so drag listeners are always cleared on rerender/close
+      // Capture phase so empty areas (spacer) also initiate drag reliably
+      dragBar.addEventListener('mousedown', onDown, true);
+
+      // Chain cleanup on detach
       const prevDetach = top._detachGlobal;
       top._detachGlobal = () => {
+        try { dragBar.removeEventListener('mousedown', onDown, true); } catch {}
         if (onMove) { try { document.removeEventListener('mousemove', onMove, true); } catch {} onMove = null; }
         if (onUp)   { try { document.removeEventListener('mouseup',   onUp,   true); } catch {} onUp   = null; }
         if (typeof prevDetach === 'function') {
@@ -4010,7 +4004,7 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
       };
     })();
 
-    // === RELATED… button & dropdown next to Save/Close (SAFE INSERTION + DEDUPE + ACTIVE-ONLY) ===
+    // === RELATED… (safe insert + dedupe + active-only) ===
     (function ensureRelatedUI() {
       try {
         const actionsBar =
@@ -4019,7 +4013,7 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
           null;
         if (!actionsBar) return;
 
-        // Remove any stray/legacy Related wraps or buttons not under actionsBar
+        // Remove any stray/legacy pieces
         document.querySelectorAll('#btnRelatedWrap').forEach(n => {
           if (n.parentElement !== actionsBar) n.parentElement?.removeChild(n);
         });
@@ -4068,32 +4062,23 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
         menu.style.cssText = 'position:absolute; right:0; top:calc(100% + 6px); background:#fff; border:1px solid #e5e7eb; border-radius:6px; box-shadow:0 8px 24px rgba(0,0,0,.08); min-width:240px; display:none; z-index:1000';
         wrap.appendChild(menu);
 
-        // Modal entity -> API entity
         const apiEntityMap = { candidates:'candidate', timesheets:'timesheet', invoices:'invoice', umbrellas:'umbrella', clients:'client' };
-        // Section mapping for navigation (support singular & plural umbrella keys)
         const navMap = { timesheets:'timesheets', invoices:'invoices', candidates:'candidates', clients:'clients', umbrella:'umbrellas', umbrellas:'umbrellas' };
 
         function renderRelatedMenu(counts) {
           const ent = apiEntityMap[top.entity];
           const spec = [];
-          if (ent === 'timesheet') {
-            spec.push(['candidates','candidate'], ['clients','client'], ['invoices','invoice'], ['umbrella','umbrella']);
-          } else if (ent === 'invoice') {
-            spec.push(['timesheets','timesheets'], ['candidates','candidates'], ['clients','client'], ['umbrellas','umbrellas']);
-          } else if (ent === 'candidate') {
-            spec.push(['timesheets','timesheets'], ['invoices','invoices'], ['clients','clients'], ['umbrella','umbrella']);
-          } else if (ent === 'client') {
-            spec.push(['timesheets','timesheets'], ['invoices','invoices'], ['candidates','candidates']);
-          } else if (ent === 'umbrella') {
-            spec.push(['candidates','candidates'], ['timesheets','timesheets'], ['invoices','invoices']);
-          }
+          if (ent === 'timesheet')      spec.push(['candidates','candidate'], ['clients','client'], ['invoices','invoice'], ['umbrella','umbrella']);
+          else if (ent === 'invoice')   spec.push(['timesheets','timesheets'], ['candidates','candidates'], ['clients','client'], ['umbrellas','umbrellas']);
+          else if (ent === 'candidate') spec.push(['timesheets','timesheets'], ['invoices','invoices'], ['clients','clients'], ['umbrella','umbrella']);
+          else if (ent === 'client')    spec.push(['timesheets','timesheets'], ['invoices','invoices'], ['candidates','candidates']);
+          else if (ent === 'umbrella')  spec.push(['candidates','candidates'], ['timesheets','timesheets'], ['invoices','invoices']);
 
           const rows = spec.map(([key,labelKey]) => {
             let val = counts ? Number(counts[key] ?? 0) : 0;
-            // FE safety: if Candidate has umbrella in modal but count is 0, show 1
             if (ent === 'candidate' && key === 'umbrella') {
-              const hasUmbFromModal = (modalCtx?.data && (modalCtx.data.umbrella_id || (modalCtx.data.pay_method === 'UMBRELLA')));
-              if (val === 0 && hasUmbFromModal) val = 1;
+              const hasUmb = (modalCtx?.data && (modalCtx.data.umbrella_id || modalCtx.data.pay_method === 'UMBRELLA'));
+              if (val === 0 && hasUmb) val = 1;
             }
             return { key, labelKey, count: isNaN(val) ? 0 : val };
           });
@@ -4112,13 +4097,12 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
             return `<button type="button" class="rel-item${disabled?' rel-disabled':''}" data-target="${r.key}" data-enabled="${disabled? '0':'1'}" style="display:block;width:100%;text-align:left;padding:8px 12px;background:#fff;border:0;border-bottom:1px solid #f3f4f6;font-size:13px;${style}">${label} (${r.count})</button>`;
           }).join('') + `<div style="height:2px;background:#fff;border-bottom-left-radius:6px;border-bottom-right-radius:6px"></div>`;
 
-          // Wire item clicks: only enabled ones fetch and render (KEEP MODAL OPEN)
           menu.querySelectorAll('.rel-item').forEach(btnItem => {
             btnItem.addEventListener('click', async () => {
               const enabled = btnItem.getAttribute('data-enabled') === '1';
               if (!enabled) return;
-              const tgt = btnItem.getAttribute('data-target');           // e.g., 'umbrella' or 'umbrellas'
-              const section = navMap[tgt];                                // maps both to 'umbrellas'
+              const tgt = btnItem.getAttribute('data-target');
+              const section = navMap[tgt];
               const id  = modalCtx?.data?.id;
               const ent = apiEntityMap[top.entity];
               menu.style.display = 'none';
@@ -4126,7 +4110,6 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
 
               let rows = [];
               try { rows = await fetchRelated(ent, id, tgt); } catch {}
-              // Do NOT close the modal: switch section and render related rows
               try { currentSection = section; } catch {}
               try { renderSummary(rows || []); } catch {}
             });
@@ -4157,7 +4140,6 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
           }
         };
 
-        // Chain cleanup with any previous global detach (e.g., drag)
         const prevDetach = top._detachGlobal;
         top._detachGlobal = () => {
           try { document.removeEventListener('click', onDocClick, true); } catch {}
@@ -4169,7 +4151,6 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
         console.error('[RelatedUI] mount failed', err);
       }
     })();
-    // === end Related UI ===
   }
 
   renderTop();
