@@ -3928,23 +3928,41 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
 
     discardBtn.onclick = handleSecondary;
 
-    // ===== DRAG — Only from the title text area (no drag on the right near Related / Close) =====
+    // ===== DRAG — generous on title bar, but exclude a 1cm (≈38px) buffer before the Right controls =====
     (function ensureDrag() {
       const modal = byId('modal');
       const dragBar = byId('modalDrag');
-      const titleEl = byId('modalTitle');
-      if (!modal || !dragBar || !titleEl) return;
+      if (!modal || !dragBar) return;
+
+      // Compute the forbidden boundary: 1cm (~38px) to the left of the nearest header control on the right
+      const CLOSE = byId('btnCloseModal');
+      const hdrRelatedWrap = document.querySelector('#modalDrag #btnRelatedWrap'); // should not exist now, but safe
+      let rightControlLeft = Infinity;
+
+      if (CLOSE && CLOSE.closest('#modalDrag')) {
+        const r = CLOSE.getBoundingClientRect();
+        rightControlLeft = Math.min(rightControlLeft, r.left);
+      }
+      if (hdrRelatedWrap) {
+        const r = hdrRelatedWrap.getBoundingClientRect();
+        rightControlLeft = Math.min(rightControlLeft, r.left);
+      }
+
+      const BUFFER_CM_PX = 38; // ~1cm @ 96dpi
+      const safeRightEdge = Number.isFinite(rightControlLeft) ? (rightControlLeft - BUFFER_CM_PX) : null;
 
       let startX = 0, startY = 0, baseLeft = 0, baseTop = 0, moved = false;
       let onMove = null, onUp = null;
 
       dragBar.onmousedown = (e) => {
-        // Left-click only, and start drag ONLY when originating from the title text
-        if (e.button !== 0) return;
-        if (!e.target || !e.target.closest('#modalTitle')) return;
+        if (e.button !== 0) return;                  // left click only
+        if (!e.target || !e.target.closest('#modalDrag')) return;
 
-        // Block if clicking on any interactive control just in case
-        if (e.target.closest('#btnCloseModal') || e.target.closest('#btnRelatedWrap') || e.target.closest('#relatedMenu')) {
+        // Exclude clicks inside the no-drag zone near right-side controls
+        if (safeRightEdge !== null && e.clientX >= safeRightEdge) return;
+
+        // Exclude direct interactive elements anywhere
+        if (e.target.closest('#btnCloseModal, #btnRelatedWrap, #relatedMenu, button, [role="button"], a, input, select')) {
           return;
         }
 
@@ -3961,7 +3979,7 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
         onMove = (ev) => {
           const dx = ev.clientX - startX;
           const dy = ev.clientY - startY;
-          if (!moved && Math.max(Math.abs(dx), Math.abs(dy)) < 3) return; // small threshold
+          if (!moved && Math.max(Math.abs(dx), Math.abs(dy)) < 3) return; // small threshold to prevent accidental drags
           moved = true;
 
           modal.style.position = 'absolute';
@@ -4070,7 +4088,7 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
             spec.push(['candidates','candidates'], ['timesheets','timesheets'], ['invoices','invoices']);
           }
 
-        const rows = spec.map(([key,labelKey]) => {
+          const rows = spec.map(([key,labelKey]) => {
             let val = counts ? Number(counts[key] ?? 0) : 0;
             // FE safety: if Candidate has umbrella in modal but count is 0, show 1
             if (ent === 'candidate' && key === 'umbrella') {
@@ -4138,8 +4156,6 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
             menu.innerHTML = `<div style="padding:10px 12px;color:#ef4444;font-size:12px">Failed to load related</div>`;
           }
         };
-
-        document.addEventListener('click', onDocClick, true);
 
         // Chain cleanup with any previous global detach (e.g., drag)
         const prevDetach = top._detachGlobal;
