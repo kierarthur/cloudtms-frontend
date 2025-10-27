@@ -1108,25 +1108,28 @@ function invalidateGlobalRoleOptionsCache(){
 // Load and dedupe all role codes from client defaults across all clients
 async function loadGlobalRoleOptions(){
   const now = Date.now();
-  if (__GLOBAL_ROLE_CODES_CACHE__ && (now - __GLOBAL_ROLE_CODES_CACHE_TS__ < 60_000)) {
-    return __GLOBAL_ROLE_CODES_CACHE__;
+  if (window.__GLOBAL_ROLE_CODES_CACHE__ && (now - window.__GLOBAL_ROLE_CODES_CACHE_TS__ < 60_000)) {
+    return window.__GLOBAL_ROLE_CODES_CACHE__;
   }
   const list = await listClientRates().catch(() => []);  // unified windows; no rate_type
   const set = new Set();
   (list || []).forEach(r => { if (r && r.role) set.add(String(r.role)); });
-  const arr = [...set].sort((a,b)=> a.localeCompare(b)); // <-- fixed
-  __GLOBAL_ROLE_CODES_CACHE__ = arr;
-  __GLOBAL_ROLE_CODES_CACHE_TS__ = now;
+  const arr = [...set].sort((a,b)=> a.localeCompare(b)); // fixed spread
+  window.__GLOBAL_ROLE_CODES_CACHE__ = arr;
+  window.__GLOBAL_ROLE_CODES_CACHE_TS__ = now;
   return arr;
 }
 
 
 // Render roles editor into a container; updates modalCtx.rolesState
 function renderRolesEditor(container, rolesState, allRoleOptions){
+  // Detect read-only (view mode) from the active modal frame
+  const fr = (window.__modalStack || [])[ (window.__modalStack || []).length - 1 ] || null;
+  const readOnly = !fr || fr.mode !== 'edit';
+
   // Local, mutable copy of available options so we can refresh after adds/removes
   let roleOptions = Array.isArray(allRoleOptions) ? allRoleOptions.slice() : [];
 
-  // Helper: mark the current modal as dirty and notify UI to update the Discard/Close label
   function markDirty() {
     try {
       const stack = window.__modalStack || [];
@@ -1139,7 +1142,7 @@ function renderRolesEditor(container, rolesState, allRoleOptions){
 
   container.innerHTML = `
     <div class="roles-editor">
-      <div class="roles-add">
+      <div class="roles-add" ${readOnly ? 'style="display:none"' : ''}>
         <select id="rolesAddSelect">
           <option value="">Add role…</option>
           ${roleOptions.map(code => `<option value="${code}">${code}</option>`).join('')}
@@ -1162,6 +1165,7 @@ function renderRolesEditor(container, rolesState, allRoleOptions){
   }
 
   function refreshAddSelect(){
+    if (!sel) return;
     const opts = ['<option value="">Add role…</option>']
       .concat(availableOptions().map(code => `<option value="${code}">${code}</option>`))
       .join('');
@@ -1170,116 +1174,114 @@ function renderRolesEditor(container, rolesState, allRoleOptions){
 
   function renderList(){
     ul.innerHTML = '';
-    // Always render in current rank order
     const arr = (rolesState||[]).slice().sort((a,b)=> (a.rank||0) - (b.rank||0));
 
     arr.forEach((item, idx) => {
       const li = document.createElement('li');
       li.className = 'role-item';
-      li.draggable = true;
+      li.draggable = !readOnly;
       li.dataset.index = String(idx);
 
       li.innerHTML = `
-        <span class="drag" title="Drag to reorder" style="cursor:grab">⋮⋮</span>
+        <span class="drag" title="Drag to reorder" style="cursor:${readOnly?'default':'grab'}">⋮⋮</span>
         <span class="rank">${idx+1}.</span>
         <span class="code">${item.code}</span>
-        <input class="label" type="text" placeholder="Optional label…" value="${item.label || ''}" />
-        <button class="remove" type="button" title="Remove">✕</button>
+        <input class="label" type="text" placeholder="Optional label…" value="${item.label || ''}" ${readOnly?'disabled':''}/>
+        <button class="remove" type="button" title="Remove" ${readOnly?'disabled style="display:none"':''}>✕</button>
       `;
 
-      // Remove by identity (code), not by stale index
-      li.querySelector('.remove').onclick = () => {
-        rolesState = (rolesState || []).filter(r => r.code !== item.code);
-        // Re-rank 1..N
-        rolesState.forEach((r,i)=> r.rank = i+1);
-        rolesState = normaliseRolesForSave(rolesState);
-        modalCtx.rolesState = rolesState;
-        markDirty();                 // ← mark dirty on remove
-        renderList(); refreshAddSelect();
-      };
+      if (!readOnly) {
+        li.querySelector('.remove').onclick = () => {
+          rolesState = (rolesState || []).filter(r => r.code !== item.code);
+          rolesState.forEach((r,i)=> r.rank = i+1);
+          rolesState = normaliseRolesForSave(rolesState);
+          window.modalCtx.rolesState = rolesState;
+          markDirty();
+          renderList(); refreshAddSelect();
+        };
 
-      // Label edits by identity (this already triggers input/change and will mark dirty via modal tracker)
-      li.querySelector('.label').oninput = (e) => {
-        const rec = byCode(item.code);
-        if (rec) rec.label = e.target.value;
-        modalCtx.rolesState = rolesState;
-        // no explicit markDirty() needed; _attachDirtyTracker handles input/change
-      };
+        li.querySelector('.label').oninput = (e) => {
+          const rec = byCode(item.code);
+          if (rec) rec.label = e.target.value;
+          window.modalCtx.rolesState = rolesState;
+          // dirty state handled by global tracker
+        };
 
-      // Drag payload
-      li.addEventListener('dragstart', (e) => {
-        const from = li.dataset.index || String(idx);
-        try { e.dataTransfer.setData('text/x-role-index', from); } catch {}
-        try { e.dataTransfer.setData('text/plain', from); } catch {}
-        if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move';
-        li.classList.add('dragging');
-      });
-      li.addEventListener('dragend', () => {
-        li.classList.remove('dragging');
-        ul.querySelectorAll('.over').forEach(n => n.classList.remove('over'));
-      });
+        // Drag payload
+        li.addEventListener('dragstart', (e) => {
+          const from = li.dataset.index || String(idx);
+          try { e.dataTransfer.setData('text/x-role-index', from); } catch {}
+          try { e.dataTransfer.setData('text/plain', from); } catch {}
+          if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move';
+          li.classList.add('dragging');
+        });
+        li.addEventListener('dragend', () => {
+          li.classList.remove('dragging');
+          ul.querySelectorAll('.over').forEach(n => n.classList.remove('over'));
+        });
+      }
 
       ul.appendChild(li);
     });
   }
 
-  // Delegate DnD: highlight target & allow drop
-  ul.addEventListener('dragover', (e) => {
-    e.preventDefault();
-    const overLi = e.target && e.target.closest('li.role-item');
-    ul.querySelectorAll('.over').forEach(n => n.classList.remove('over'));
-    if (overLi) overLi.classList.add('over');
-    if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
-  });
+  // Delegate DnD only when editable
+  if (!readOnly) {
+    ul.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      const overLi = e.target && e.target.closest('li.role-item');
+      ul.querySelectorAll('.over').forEach(n => n.classList.remove('over'));
+      if (overLi) overLi.classList.add('over');
+      if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+    });
 
-  ul.addEventListener('drop', (e) => {
-    e.preventDefault();
-    const toLi = e.target && e.target.closest('li.role-item');
-    if (!toLi) return;
+    ul.addEventListener('drop', (e) => {
+      e.preventDefault();
+      const toLi = e.target && e.target.closest('li.role-item');
+      if (!toLi) return;
 
-    // Read source index; support custom & plain types
-    let from = NaN;
-    try { from = parseInt(e.dataTransfer.getData('text/x-role-index'), 10); } catch {}
-    if (isNaN(from)) {
-      try { from = parseInt(e.dataTransfer.getData('text/plain'), 10); } catch {}
-    }
-    const to = parseInt(toLi.dataset.index, 10);
-    if (!Number.isInteger(from) || !Number.isInteger(to) || from === to) return;
+      let from = NaN;
+      try { from = parseInt(e.dataTransfer.getData('text/x-role-index'), 10); } catch {}
+      if (isNaN(from)) {
+        try { from = parseInt(e.dataTransfer.getData('text/plain'), 10); } catch {}
+      }
+      const to = parseInt(toLi.dataset.index, 10);
+      if (!Number.isInteger(from) || !Number.isInteger(to) || from === to) return;
 
-    // Reorder against current rank-sorted view
-    const view = (rolesState||[]).slice().sort((a,b)=> (a.rank||0) - (b.rank||0));
-    const [moved] = view.splice(from, 1);
-    view.splice(to, 0, moved);
+      // Reorder against current rank-sorted view
+      const view = (rolesState||[]).slice().sort((a,b)=> (a.rank||0) - (b.rank||0));
+      const [moved] = view.splice(from, 1);
+      view.splice(to, 0, moved);
 
-    // Rewrite ranks to new order before normalising
-    view.forEach((r,i)=> r.rank = i+1);
+      view.forEach((r,i)=> r.rank = i+1);
+      rolesState = normaliseRolesForSave(view);
+      window.modalCtx.rolesState = rolesState;
 
-    // Normalise (dedupe/tidy) without losing the new order
-    rolesState = normaliseRolesForSave(view);
-    modalCtx.rolesState = rolesState;
+      markDirty();
+      renderList();
+      refreshAddSelect();
+    });
+  }
 
-    markDirty();                     // ← mark dirty on reorder
-    renderList();
-    refreshAddSelect();
-  });
-
-  // Add role
-  btn.onclick = () => {
-    const code = sel.value;
-    if (!code) return;
-    if ((rolesState||[]).some(r => r.code === code)) return; // no duplicates
-    const nextRank = ((rolesState||[]).length || 0) + 1;
-    rolesState = [...(rolesState||[]), { code, rank: nextRank }];
-    rolesState = normaliseRolesForSave(rolesState);
-    modalCtx.rolesState = rolesState;
-    markDirty();                     // ← mark dirty on add
-    renderList(); refreshAddSelect();
-  };
+  // Add role (only in edit)
+  if (!readOnly && btn) {
+    btn.onclick = () => {
+      const code = sel.value;
+      if (!code) return;
+      if ((rolesState||[]).some(r => r.code === code)) return; // no duplicates
+      const nextRank = ((rolesState||[]).length || 0) + 1;
+      rolesState = [...(rolesState||[]), { code, rank: nextRank }];
+      rolesState = normaliseRolesForSave(rolesState);
+      window.modalCtx.rolesState = rolesState;
+      markDirty();
+      renderList(); refreshAddSelect();
+    };
+  }
 
   // Expose a tiny API for refreshing options live
   container.__rolesEditor = {
     updateOptions(newOptions){
-      roleOptions = Array.isArray(newOptions) ? newRoleOptions = newOptions.slice() : [];
+      roleOptions = Array.isArray(newOptions) ? newOptions.slice() : [];
       refreshAddSelect();
     }
   };
@@ -2437,11 +2439,11 @@ async function openUmbrella(row){
 // =================== CANDIDATE RATES TABLE (UPDATED) ===================
 // ✅ UPDATED — renders from modalCtx.overrides (existing ⊕ staged edits/new ⊖ staged deletes)
 async function renderCandidateRatesTable() {
-  const token   = modalCtx.openToken;
-  const idActive= modalCtx.data?.id || null;
+  const token    = window.modalCtx.openToken;
+  const idActive = window.modalCtx.data?.id || null;
   const div = byId('ratesTable'); 
   if (!div) return;
-  if (token !== modalCtx.openToken || modalCtx.data?.id !== idActive) return;
+  if (token !== window.modalCtx.openToken || window.modalCtx.data?.id !== idActive) return;
 
   // Determine parent mode (view vs edit)
   const frame = _currentFrame();
@@ -2451,11 +2453,11 @@ async function renderCandidateRatesTable() {
   let clientsById = {};
   try {
     const clients = await listClientsBasic();
-    if (token !== modalCtx.openToken || modalCtx.data?.id !== idActive) return;
+    if (token !== window.modalCtx.openToken || window.modalCtx.data?.id !== idActive) return;
     clientsById = Object.fromEntries((clients || []).map(c => [c.id, c.name]));
   } catch (e) { console.error('load clients failed', e); }
 
-  const O = modalCtx.overrides || { existing: [], stagedNew: [], stagedEdits: {}, stagedDeletes: new Set() };
+  const O = window.modalCtx.overrides || { existing: [], stagedNew: [], stagedEdits: {}, stagedDeletes: new Set() };
 
   const rows = [];
   for (const ex of (O.existing || [])) {
@@ -2474,7 +2476,7 @@ async function renderCandidateRatesTable() {
       </div>
     `;
     const addBtn = byId('btnAddRate');
-    if (addBtn && parentEditable) addBtn.onclick = () => openCandidateRateModal(modalCtx.data?.id);
+    if (addBtn && parentEditable) addBtn.onclick = () => openCandidateRateModal(window.modalCtx.data?.id);
     return;
   }
 
@@ -2490,7 +2492,7 @@ async function renderCandidateRatesTable() {
   const tb = document.createElement('tbody');
   rows.forEach(r => {
     const tr = document.createElement('tr');
-    if (parentEditable) tr.ondblclick = () => openCandidateRateModal(modalCtx.data?.id, r);
+    if (parentEditable) tr.ondblclick = () => openCandidateRateModal(window.modalCtx.data?.id, r);
     const pretty = {
       client: clientsById[r.client_id] || '',
       role  : r.role || '',
@@ -2523,9 +2525,8 @@ async function renderCandidateRatesTable() {
   div.appendChild(actions);
 
   const addBtn = byId('btnAddRate');
-  if (addBtn && parentEditable) addBtn.onclick = () => openCandidateRateModal(modalCtx.data?.id);
+  if (addBtn && parentEditable) addBtn.onclick = () => openCandidateRateModal(window.modalCtx.data?.id);
 }
-
 
 
 // === UPDATED: Candidate modal tabs (adds Roles editor placeholder on 'main') ===
@@ -2564,7 +2565,6 @@ function renderCandidateTab(key, row = {}) {
     </div>
   `);
 
-  // ✅ FIX remains: no "Add rate override" button here.
   if (key === 'rates') return html(`
     <div id="tab-rates">
       <div id="ratesTable"></div>
@@ -2703,20 +2703,8 @@ function confirmDiscardChangesIfDirty(){
 
 // ====================== mountCandidateRatesTab (FIXED) ======================
 // =================== MOUNT CANDIDATE RATES TAB (unchanged flow) ===================
-async function mountCandidateRatesTab() {
-  const token = modalCtx.openToken;
-  const id    = modalCtx.data?.id || null;
 
-  const rates = id ? await listCandidateRates(id) : [];
-  if (token !== modalCtx.openToken || modalCtx.data?.id !== id) return;
-
-  await renderCandidateRatesTable(rates);
-  const btn = byId('btnAddRate');
-  const frame = _currentFrame();
-  if (btn && frame && frame.mode === 'edit') btn.onclick = () => openCandidateRateModal(modalCtx.data?.id);
-}
-
-
+V
 
 // === UPDATED: Candidate Rate Override modal (Client→Role gated; bands; UK dates; date_to) ===
 // ====================== openCandidateRateModal (FIXED) ======================
@@ -2725,7 +2713,7 @@ async function mountCandidateRatesTab() {
 // ✅ UPDATED — Apply (stage), gate against client defaults active at date_from,
 //    auto-truncate incumbent of same rate_type at N−1 (staged), NO persistence here
 async function openCandidateRateModal(candidate_id, existing) {
-  const parentFrame = _currentFrame(); // parent frame is current; child will be pushed next
+  const parentFrame = _currentFrame();
   const parentEditable = parentFrame && parentFrame.mode === 'edit';
 
   const clients = await listClientsBasic();
@@ -2734,7 +2722,7 @@ async function openCandidateRateModal(candidate_id, existing) {
 
   const defaultRateType = existing?.rate_type
     ? String(existing.rate_type).toUpperCase()
-    : String(modalCtx?.data?.pay_method || 'PAYE').toUpperCase();
+    : String(window.modalCtx?.data?.pay_method || 'PAYE').toUpperCase();
 
   const formHtml = html(`
     <div class="form" id="candRateForm">
@@ -2789,7 +2777,6 @@ async function openCandidateRateModal(candidate_id, existing) {
     [{ key:'form', label:'Form' }],
     () => formHtml,
     async () => {
-      // Block Apply if parent not editing
       const pf = _parentFrame();
       if (!pf || pf.mode !== 'edit') return false;
 
@@ -2838,7 +2825,7 @@ async function openCandidateRateModal(candidate_id, existing) {
         pay_bh    : raw['pay_bh']    !== '' ? Number(raw['pay_bh'])    : null
       };
 
-      const O = modalCtx.overrides || (modalCtx.overrides = { existing: [], stagedNew: [], stagedEdits: {}, stagedDeletes: new Set() });
+      const O = window.modalCtx.overrides || (window.modalCtx.overrides = { existing: [], stagedNew: [], stagedEdits: {}, stagedDeletes: new Set() });
 
       // overlap handling within staged universe
       const universe = [
@@ -2882,7 +2869,6 @@ async function openCandidateRateModal(candidate_id, existing) {
       }
 
       await renderCandidateRatesTable();
-      // Signal parent dirty
       try { window.dispatchEvent(new CustomEvent('modal-dirty')); } catch {}
       return true; // child Apply closes child
     },
@@ -2893,7 +2879,7 @@ async function openCandidateRateModal(candidate_id, existing) {
     }
   );
 
-  // After mount: prefill and wire (unchanged logic, minus preselect if needed)
+  // After mount: prefill and wire
   const selClient = document.getElementById('cr_client_id');
   const selRateT  = document.getElementById('cr_rate_type');
   const selRole   = document.getElementById('cr_role');
@@ -2929,16 +2915,14 @@ async function openCandidateRateModal(candidate_id, existing) {
       (bandsByRole[w.role] ||= new Set()).add(bKey);
     });
 
-    // Candidate roles filter
-    const liveRoles = Array.isArray(modalCtx?.rolesState) && modalCtx.rolesState.length
-      ? modalCtx.rolesState : (Array.isArray(modalCtx?.data?.roles) ? modalCtx.data.roles : []);
+    const liveRoles = Array.isArray(window.modalCtx?.rolesState) && window.modalCtx.rolesState.length
+      ? window.modalCtx.rolesState : (Array.isArray(window.modalCtx?.data?.roles) ? window.modalCtx.data.roles : []);
     const candRoleCodes = new Set((liveRoles || []).map(x => String(x.code)));
     const allowed = [...roles].filter(code => candRoleCodes.has(code)).sort((a,b)=> a.localeCompare(b));
 
     if (!allowed.length) {
       selRole.innerHTML = `<option value="">Select role…</option>`;
       selRole.disabled = true;
-      if (parentEditable) alert("This candidate has no matching roles for this client's windows at the selected start date.");
       return;
     }
 
@@ -3432,6 +3416,97 @@ function renderClientTab(key, row = {}){
   if (key==='hospitals') return html(`<div id="clientHospitals"></div>`);
   return '';
 }
+async function mountCandidatePayTab(){
+  const fr = (window.__modalStack || [])[ (window.__modalStack || []).length - 1 ] || null;
+  const mode = fr ? fr.mode : 'view';
+  const isEdit = mode === 'edit';
+
+  const payMethod = (window.modalCtx?.payMethodState || window.modalCtx?.data?.pay_method || 'PAYE').toUpperCase();
+  const currentUmbId = window.modalCtx?.data?.umbrella_id || '';
+
+  const umbRow    = document.getElementById('umbRow');
+  const nameInput = document.getElementById('umbrella_name');
+  const listEl    = document.getElementById('umbList');
+  const idHidden  = document.getElementById('umbrella_id');
+
+  const accHolder = document.querySelector('#tab-pay input[name="account_holder"]');
+  const bankName  = document.querySelector('#tab-pay input[name="bank_name"]');
+  const sortCode  = document.querySelector('#tab-pay input[name="sort_code"]');
+  const accNum    = document.querySelector('#tab-pay input[name="account_number"]');
+
+  function setBankDisabled(disabled) {
+    [accHolder, bankName, sortCode, accNum].forEach(el => { if (el) el.disabled = !!disabled; });
+  }
+
+  // Helper to unwrap list shapes
+  const unwrapList = (data) => {
+    if (Array.isArray(data)) return data;
+    if (data && Array.isArray(data.items)) return data.items;
+    if (data && Array.isArray(data.rows))  return data.rows;
+    if (data && Array.isArray(data.data))  return data.data;
+    return [];
+  };
+
+  if (payMethod === 'UMBRELLA') {
+    if (umbRow) umbRow.style.display = '';
+    setBankDisabled(true);
+
+    // Load umbrellas
+    let umbrellas = [];
+    try {
+      const res = await authFetch(API('/api/umbrellas'));
+      if (res && res.ok) {
+        const j = await res.json().catch(()=>[]);
+        umbrellas = unwrapList(j);
+      }
+    } catch (_) { umbrellas = []; }
+
+    // Populate datalist
+    if (listEl) {
+      listEl.innerHTML = (umbrellas || []).map(u => {
+        const label = u.name || u.remittance_email || u.id;
+        return `<option data-id="${u.id}" value="${label}"></option>`;
+      }).join('');
+    }
+
+    // Preselect current umbrella
+    if (currentUmbId && nameInput) {
+      const match = (umbrellas || []).find(u => String(u.id) === String(currentUmbId));
+      if (match) {
+        nameInput.value = match.name || '';
+        if (idHidden) idHidden.value = match.id;
+        if (accHolder) accHolder.value = match.name || '';
+      }
+    }
+
+    // Change handler: set hidden id based on typed label
+    function syncUmbrellaSelection() {
+      const val = nameInput.value.trim();
+      if (!val) { if (idHidden) idHidden.value = ''; return; }
+      // Try to find exact match by displayed label
+      const allOpts = Array.from((listEl && listEl.options) ? listEl.options : []);
+      const hit = allOpts.find(o => o.value === val);
+      if (hit && hit.getAttribute('data-id')) {
+        if (idHidden) idHidden.value = hit.getAttribute('data-id');
+        if (accHolder) accHolder.value = val;
+      } else {
+        // no match — clear id but keep typed label
+        if (idHidden) idHidden.value = '';
+      }
+    }
+
+    if (nameInput) {
+      nameInput.disabled = !isEdit;
+      nameInput.oninput = syncUmbrellaSelection;
+      nameInput.onchange = syncUmbrellaSelection;
+    }
+  } else {
+    // PAYE: hide umbrella row and enable bank fields
+    if (umbRow) umbRow.style.display = 'none';
+    setBankDisabled(!isEdit);
+    if (nameInput && idHidden) { nameInput.value = ''; idHidden.value = ''; }
+  }
+}
 
 
 // =================== MOUNT CLIENT RATES TAB (unchanged glue) ===================
@@ -3669,7 +3744,6 @@ async function openClientRateModal(client_id, existing) {
     else { newRow.style.display = 'none'; const nr = document.getElementById('cl_role_new'); if (nr) nr.value = ''; }
   });
 }
-
 function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
   // ===== Logging helpers (toggle with window.__LOG_MODAL = true/false) =====
   const LOG = (typeof window.__LOG_MODAL === 'boolean') ? window.__LOG_MODAL : false;
@@ -3724,7 +3798,7 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
     }
     if (typeof frame._updateButtons === 'function') frame._updateButtons();
 
-    // FIX (1): Avoid redundant first repaint. Only repaint after mount cycles.
+    // Avoid redundant first repaint. Only repaint after mount cycles.
     const willRepaint = !!(frame._hasMountedOnce && frame.currentTabKey);
     L('setFrameMode', { prevMode, nextMode: mode, _hasMountedOnce: frame._hasMountedOnce, willRepaint });
     if (willRepaint) frame.setTab(frame.currentTabKey);
@@ -3783,7 +3857,6 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
     _saving: false,
 
     persistCurrentTabState() {
-      // FIX (2a): No-op in view mode; only persist in edit/create.
       if (!window.modalCtx || (this.mode === 'view')) {
         L('persist(skip)', { reason: 'mode=view or no modalCtx', mode: this.mode });
         return;
@@ -3808,10 +3881,7 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
     },
 
     mergedRowForTab(k) {
-      // Base = hydrated row
       const base = { ...(window.modalCtx?.data || {}) };
-
-      // Current staged state (only if same record)
       const fs = window.modalCtx?.formState;
       const sameRecord = !!fs?.__forId && fs.__forId === window.modalCtx?.data?.id;
 
@@ -3872,18 +3942,18 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
         const pmSel = document.querySelector('#pay-method');
         if (pmSel) {
           pmSel.addEventListener('change', () => {
-            modalCtx.payMethodState = pmSel.value;
+            window.modalCtx.payMethodState = pmSel.value;
             try { window.dispatchEvent(new CustomEvent('pay-method-changed')); }
             catch { window.dispatchEvent(new Event('pay-method-changed')); }
           });
-          modalCtx.payMethodState = pmSel.value;
+          window.modalCtx.payMethodState = pmSel.value;
         }
         const el = document.querySelector('#rolesEditor');
         if (el) {
           (async () => {
             try {
               const opts = await loadGlobalRoleOptions();
-              renderRolesEditor(el, modalCtx.rolesState || [], opts);
+              renderRolesEditor(el, window.modalCtx.rolesState || [], opts);
             } catch (e) {
               console.error('[MODAL] roles mount failed', e);
             }
@@ -3893,7 +3963,8 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
 
       if (this.entity === 'clients' && k === 'rates')     { L('mountClientRatesTab?');     mountClientRatesTab?.(); }
       if (this.entity === 'clients' && k === 'hospitals') { L('mountClientHospitalsTab?'); mountClientHospitalsTab?.(); }
-      if (this.entity === 'clients' && k === 'settings')  { L('renderClientSettingsUI?');  renderClientSettingsUI?.(modalCtx.clientSettingsState || {}); }
+      if (this.entity === 'clients' && k === 'settings')  { L('renderClientSettingsUI?');  renderClientSettingsUI?.(window.modalCtx.clientSettingsState || {});
+ }
 
       this.currentTabKey = k;
       this._attachDirtyTracker();
@@ -3974,7 +4045,8 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
     const btnSave   = byId('btnSave');
     const btnClose  = byId('btnCloseModal');
     const btnDelete = byId('btnDelete');
-    const header    = byId('modalDrag'); // header area for Related
+    const header    = byId('modalDrag');
+    const modalNode = byId('modal');
 
     btnDelete.style.display = top.hasId ? '' : 'none';
     btnDelete.onclick = openDelete;
@@ -3991,12 +4063,68 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
       if (actionsBar) actionsBar.insertBefore(btnEdit, btnSave);
     }
 
-    // Ensure RELATED menu is present & wired (parents with an id only)
+    // === DRAG WIRING =======================================================
+    (function ensureDragUI() {
+      if (!header || !modalNode) return;
+
+      const onDown = (e) => {
+        if ((e.button !== 0 && e.type === 'mousedown') || e.target.closest('button')) return;
+
+        const rect = modalNode.getBoundingClientRect();
+        modalNode.style.position = 'fixed';
+        modalNode.style.left = rect.left + 'px';
+        modalNode.style.top = rect.top + 'px';
+        modalNode.style.right = 'auto';
+        modalNode.style.bottom = 'auto';
+        modalNode.style.transform = 'none';
+        modalNode.classList.add('dragging');
+
+        const offsetX = e.clientX - rect.left;
+        const offsetY = e.clientY - rect.top;
+
+        document.onmousemove = (ev) => {
+          let l = ev.clientX - offsetX;
+          let t = ev.clientY - offsetY;
+          const maxL = Math.max(0, window.innerWidth  - rect.width);
+          const maxT = Math.max(0, window.innerHeight - rect.height);
+          if (l < 0) l = 0; if (t < 0) t = 0;
+          if (l > maxL) l = maxL; if (t > maxT) t = maxT;
+          modalNode.style.left = l + 'px';
+          modalNode.style.top  = t + 'px';
+        };
+
+        document.onmouseup = () => {
+          modalNode.classList.remove('dragging');
+          document.onmousemove = null;
+          document.onmouseup = null;
+        };
+
+        e.preventDefault();
+      };
+
+      const onDbl = (e) => {
+        if (e.target.closest('button')) return;
+        sanitizeModalGeometry();
+      };
+
+      header.addEventListener('mousedown', onDown);
+      header.addEventListener('dblclick', onDbl);
+
+      const prevDetach = top._detachGlobal;
+      top._detachGlobal = () => {
+        try { header.removeEventListener('mousedown', onDown); } catch {}
+        try { header.removeEventListener('dblclick', onDbl); } catch {}
+        document.onmousemove = null;
+        document.onmouseup = null;
+        if (typeof prevDetach === 'function') { try { prevDetach(); } catch {} }
+      };
+    })();
+    // ======================================================================
+
+    // RELATED menu omitted for brevity (unchanged from your version) …
     (function ensureRelatedUI() {
-      // Clear any stale instances not in header
       document.querySelectorAll('#btnRelatedWrap').forEach(n => { if (n.parentElement !== header) n.remove(); });
 
-      // Build wrapper in header (to the left of Close)
       let wrap = document.getElementById('btnRelatedWrap');
       if (!wrap) {
         wrap = document.createElement('div');
@@ -4008,18 +4136,16 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
         wrap.remove();
         if (header) header.insertBefore(wrap, btnClose);
       }
-      wrap.innerHTML = ''; // reset
+      wrap.innerHTML = '';
 
-      // Button
       const relatedBtn = document.createElement('button');
       relatedBtn.id = 'btnRelated';
       relatedBtn.type = 'button';
       relatedBtn.className = 'btn';
       relatedBtn.textContent = 'Related ▾';
-      relatedBtn.disabled = !(top.hasId && top.mode === 'view'); // visible/usable in view mode with an id
+      relatedBtn.disabled = !(top.hasId && top.mode === 'view');
       wrap.appendChild(relatedBtn);
 
-      // Dropdown
       const menu = document.createElement('div');
       menu.id = 'relatedMenu';
       menu.style.cssText = 'position:absolute; right:0; top:calc(100% + 6px); background:#0b1427; border:1px solid var(--line); border-radius:8px; min-width:220px; display:none; padding:6px; z-index:1000';
@@ -4084,13 +4210,11 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
         if (menu.style.display === 'block') await renderMenu();
       };
 
-      // Close menu if user clicks outside
       const onDoc = (ev) => {
         if (menu.style.display === 'none') return;
         if (!wrap.contains(ev.target)) menu.style.display = 'none';
       };
 
-      // Chain detach
       const prevDetach = top._detachGlobal;
       top._detachGlobal = () => {
         try { document.removeEventListener('click', onDoc, true); } catch {}
@@ -4142,7 +4266,6 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
     btnEdit.onclick = () => {
       if (isChild) return;
       if (top.mode === 'view') {
-        // Capture snapshot for discard
         top._snapshot = {
           data:                 deep(window.modalCtx?.data || null),
           formState:            deep(window.modalCtx?.formState || null),
@@ -4158,16 +4281,13 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
 
     // Close / Cancel / Discard logic
     const handleSecondary = () => {
-      // Parent in EDIT: do not close — either Cancel (no dirty) or Discard (dirty) → back to VIEW
       if (!isChild && top.mode === 'edit') {
         if (!top.isDirty) {
-          // Cancel: no changes → just return to view
           top.isDirty = false;
           setFrameMode(top, 'view');
           top._snapshot = null;
           return;
         } else {
-          // Discard: restore snapshot → view (do not close)
           const ok = window.confirm('Discard changes and return to view?');
           if (!ok) return;
           if (top._snapshot && window.modalCtx) {
@@ -4185,7 +4305,6 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
         }
       }
 
-      // All other cases use normal close behavior
       if (top._closing) return;
       top._closing = true;
 
@@ -4193,7 +4312,6 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
       document.onmouseup   = null;
       const m = byId('modal'); if (m) m.classList.remove('dragging');
 
-      // For parent CREATE mode, still confirm discard
       if (!isChild && (top.mode === 'create') && top.isDirty) {
         const ok = window.confirm('You have unsaved changes. Discard them and close?');
         if (!ok) { top._closing = false; return; }
@@ -4208,7 +4326,7 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
 
       if (stack().length > 0) {
         const parent = currentFrame();
-        renderTop(); // rewire parent
+        renderTop();
         try { parent.onReturn && parent.onReturn(); } catch(_) {}
       } else {
         discardAllModalsAndState();
@@ -4219,11 +4337,32 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
     };
     btnClose.onclick = handleSecondary;
 
-    // Save / Apply
+    // Save / Apply (with "no changes" → cancel/close behaviour)
     const onSaveClick = async () => {
       if (top._saving) return;
-      top.persistCurrentTabState();
 
+      if (top.mode !== 'view' && !top.isDirty) {
+        L('onSaveClick: no changes, treating as cancel/close');
+        if (isChild) {
+          sanitizeModalGeometry();
+          stack().pop();
+          if (stack().length > 0) {
+            const parent = currentFrame();
+            renderTop();
+            try { parent.onReturn && parent.onReturn(); } catch(_) {}
+          } else {
+            discardAllModalsAndState();
+          }
+        } else {
+          top.isDirty = false;
+          top._snapshot = null;
+          setFrameMode(top, 'view');
+          top._updateButtons && top._updateButtons();
+        }
+        return;
+      }
+
+      top.persistCurrentTabState();
       if (isChild && (!parent || parent.mode !== 'edit')) return;
 
       top._saving = true;
@@ -4263,7 +4402,7 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
           top.hasId = !!window.modalCtx.data?.id;
         }
         top.isDirty = false;
-        top._snapshot = null; // new view baseline is the saved state
+        top._snapshot = null;
         setFrameMode(top, 'view');
       }
     };
@@ -4278,7 +4417,6 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
 
     if (!top._wired) {
       window.addEventListener('modal-dirty', onDirtyEvt);
-      // Only *cancel/discard* on ESC/backdrop while editing; only Close in view actually closes
       const onEsc = (e) => { if (e.key === 'Escape') { e.preventDefault(); btnClose.click(); } };
       window.addEventListener('keydown', onEsc);
       const onOverlayClick = (e) => { if (e.target === byId('modalBack')) btnClose.click(); };
