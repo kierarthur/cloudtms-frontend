@@ -3547,6 +3547,12 @@ async function openClientRateModal(client_id, existing) {
 }
 
 function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
+  // ===== Logging helpers (toggle with window.__LOG_MODAL = true/false) =====
+  const LOG = (typeof window.__LOG_MODAL === 'boolean') ? window.__LOG_MODAL : true;
+  const L  = (...a)=> { if (LOG) console.log('[MODAL]', ...a); };
+  const GC = (label)=> { if (LOG) console.groupCollapsed('[MODAL]', label); };
+  const GE = ()=> { if (LOG) console.groupEnd(); };
+
   // ——— Helpers (scoped) ————————————————————————————————————————————————
   const stack = () => (window.__modalStack ||= []);
   const currentFrame = () => stack()[stack().length - 1] || null;
@@ -3583,6 +3589,7 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
   }
 
   function setFrameMode(frame, mode) {
+    const prevMode = frame.mode;
     frame.mode = mode; // 'create' | 'view' | 'edit' | 'saving'
     const isChild = stack().length > 1;
     if (isChild) {
@@ -3594,9 +3601,9 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
     if (typeof frame._updateButtons === 'function') frame._updateButtons();
 
     // FIX (1): Avoid redundant first repaint. Only repaint after mount cycles.
-    if (frame._hasMountedOnce && frame.currentTabKey) {
-      frame.setTab(frame.currentTabKey);
-    }
+    const willRepaint = !!(frame._hasMountedOnce && frame.currentTabKey);
+    L('setFrameMode', { prevMode, nextMode: mode, _hasMountedOnce: frame._hasMountedOnce, willRepaint });
+    if (willRepaint) frame.setTab(frame.currentTabKey);
   }
 
   function sanitizeModalGeometry() {
@@ -3653,21 +3660,24 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
 
     persistCurrentTabState() {
       // FIX (2a): No-op in view mode; only persist in edit/create.
-      if (!window.modalCtx || (this.mode === 'view')) return;
+      if (!window.modalCtx || (this.mode === 'view')) {
+        L('persist(skip)', { reason: 'mode=view or no modalCtx', mode: this.mode });
+        return;
+      }
 
       const fs = window.modalCtx.formState || { __forId: window.modalCtx.data?.id || null, main:{}, pay:{} };
       if (fs.__forId == null) fs.__forId = window.modalCtx.data?.id || null;
 
       if (this.currentTabKey === 'main' && byId('tab-main')) {
         const collected = collectForm('#tab-main');
-        // FIX (2b): Strip empty keys before merging.
-        const cleaned = stripEmpty(collected);
+        const cleaned   = stripEmpty(collected);
+        L('persist(main)', { mode: this.mode, __forId: fs.__forId, collectedKeys: Object.keys(collected||{}), cleanedKeys: Object.keys(cleaned||{}) });
         fs.main = { ...(fs.main||{}), ...cleaned };
       }
       if (this.currentTabKey === 'pay' && byId('tab-pay')) {
         const collected = collectForm('#tab-pay');
-        // FIX (2b): Strip empty keys before merging.
-        const cleaned = stripEmpty(collected);
+        const cleaned   = stripEmpty(collected);
+        L('persist(pay)', { mode: this.mode, __forId: fs.__forId, collectedKeys: Object.keys(collected||{}), cleanedKeys: Object.keys(cleaned||{}) });
         fs.pay = { ...(fs.pay||{}), ...cleaned };
       }
       window.modalCtx.formState = fs;
@@ -3681,13 +3691,23 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
       const fs = window.modalCtx?.formState;
       const sameRecord = !!fs?.__forId && fs.__forId === window.modalCtx?.data?.id;
 
-      if (!sameRecord) return base;
+      const stagedRaw = sameRecord
+        ? ((k === 'main') ? (fs.main || {}) : (k === 'pay') ? (fs.pay || {}) : {})
+        : {};
 
-      const stagedRaw = (k === 'main') ? (fs.main || {}) :
-                        (k === 'pay')  ? (fs.pay  || {}) : {};
-      // FIX (3): Overlay only non-empty staged values.
       const staged = stripEmpty(stagedRaw);
-      return { ...base, ...staged };
+      const out = { ...base, ...staged };
+
+      L('mergedRowForTab', {
+        tab: k,
+        sameRecord,
+        baseKeys: Object.keys(base||{}),
+        stagedKeys: Object.keys(stagedRaw||{}),
+        stagedAfterStrip: Object.keys(staged||{}),
+        sample: { first_name: out.first_name, last_name: out.last_name, id: out.id }
+      });
+
+      return out;
     },
 
     _attachDirtyTracker() {
@@ -3711,15 +3731,18 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
     },
 
     setTab(k) {
-      // Keep guard: only persist after first mount, to avoid capturing blanks on first paint
-      if (this._hasMountedOnce) this.persistCurrentTabState();
+      GC(`setTab(${k})`);
+      const doPersist = this._hasMountedOnce;
+      L('pre-persist check', { _hasMountedOnce: this._hasMountedOnce, willPersist: doPersist, mode: this.mode });
+      if (doPersist) this.persistCurrentTabState();
 
       const rowForTab = this.mergedRowForTab(k);
+      L('renderTab(call)', { tab: k, rowKeys: Object.keys(rowForTab||{}), sample: { first_name: rowForTab?.first_name, last_name: rowForTab?.last_name, id: rowForTab?.id }});
       byId('modalBody').innerHTML = this.renderTab(k, rowForTab) || '';
 
       // Per-entity sub-mounts
-      if (this.entity === 'candidates' && k === 'rates') { mountCandidateRatesTab?.(); }
-      if (this.entity === 'candidates' && k === 'pay')   { mountCandidatePayTab?.(); }
+      if (this.entity === 'candidates' && k === 'rates') { L('mountCandidateRatesTab?'); mountCandidateRatesTab?.(); }
+      if (this.entity === 'candidates' && k === 'pay')   { L('mountCandidatePayTab?');   mountCandidatePayTab?.(); }
 
       if (this.entity === 'candidates' && k === 'main') {
         const pmSel = document.querySelector('#pay-method');
@@ -3744,9 +3767,9 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
         }
       }
 
-      if (this.entity === 'clients' && k === 'rates')     { mountClientRatesTab?.(); }
-      if (this.entity === 'clients' && k === 'hospitals') { mountClientHospitalsTab?.(); }
-      if (this.entity === 'clients' && k === 'settings')  { renderClientSettingsUI?.(modalCtx.clientSettingsState || {}); }
+      if (this.entity === 'clients' && k === 'rates')     { L('mountClientRatesTab?');     mountClientRatesTab?.(); }
+      if (this.entity === 'clients' && k === 'hospitals') { L('mountClientHospitalsTab?'); mountClientHospitalsTab?.(); }
+      if (this.entity === 'clients' && k === 'settings')  { L('renderClientSettingsUI?');  renderClientSettingsUI?.(modalCtx.clientSettingsState || {}); }
 
       this.currentTabKey = k;
       this._attachDirtyTracker();
@@ -3761,6 +3784,17 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
       }
 
       this._hasMountedOnce = true;
+
+      // Snapshot what actually landed in the DOM
+      try {
+        const dump = [...document.querySelectorAll('#tab-main input, #tab-main select, #tab-main textarea')].map(el=>({
+          name: el.name || el.id || '(no-name)',
+          valueAttr: el.getAttribute('value'),
+          valueProp: el.value
+        }));
+        L('DOM dump (post-render)', dump);
+      } catch {}
+      GE();
     }
   };
 
@@ -3768,8 +3802,17 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
   stack().push(frame);
   byId('modalBack').style.display = 'flex';
 
+  // Entry logging (what data do we have right now?)
+  L('ENTRY', {
+    title, hasId, entity: frame.entity,
+    dataId: window.modalCtx?.data?.id,
+    dataKeys: Object.keys(window.modalCtx?.data || {}),
+    formStateForId: window.modalCtx?.formState?.__forId
+  });
+
   // ——— Top renderer (buttons, wiring, modes) ————————————————————————
   function renderTop() {
+    GC('renderTop()');
     const isChild = stack().length > 1;
     const top = currentFrame();
     const parent = parentFrame();
@@ -3798,9 +3841,10 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
       tabsEl.appendChild(b);
     });
 
-    if (top.currentTabKey) top.setTab(top.currentTabKey);
-    else if (top.tabs && top.tabs[0]) top.setTab(top.tabs[0].key);
-    else byId('modalBody').innerHTML = top.renderTab('form', {}) || '';
+    // Initial tab render
+    if (top.currentTabKey) { L('initial setTab', top.currentTabKey); top.setTab(top.currentTabKey); }
+    else if (top.tabs && top.tabs[0]) { L('initial setTab (fallback)', top.tabs[0].key); top.setTab(top.tabs[0].key); }
+    else { byId('modalBody').innerHTML = top.renderTab('form', {}) || ''; }
 
     // Buttons
     const btnSave   = byId('btnSave');
@@ -3858,7 +3902,6 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
       wrap.appendChild(menu);
 
       function entityKey() {
-        // Map top.entity to API entity
         if (top.entity === 'candidates') return 'candidate';
         if (top.entity === 'clients')    return 'client';
         if (top.entity === 'umbrellas')  return 'umbrella';
@@ -4133,12 +4176,26 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
     } else {
       setFrameMode(top, top.mode);
     }
+    GE();
   }
 
   // Show overlay and render
   byId('modalBack').style.display = 'flex';
+
+  // Log entry state for this modal
+  L('ENTRY', {
+    title, hasId, entity: (window.modalCtx && window.modalCtx.entity) || null,
+    dataId: window.modalCtx?.data?.id,
+    dataKeys: Object.keys(window.modalCtx?.data || {}),
+    formStateForId: window.modalCtx?.formState?.__forId
+  });
+
+  // Expose a quick getter for this frame (handy in Console)
+  window.__getModalFrame = currentFrame;
+
   renderTop();
 }
+
 
 
 
