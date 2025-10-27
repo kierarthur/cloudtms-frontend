@@ -1552,8 +1552,13 @@ function renderSummary(rows){
   byId('title').textContent = sections.find(s=>s.key===currentSection)?.label || '';
   const content = byId('content'); content.innerHTML = '';
 
-  if (currentSection === 'settings') return renderSettingsPanel(content);
-  if (currentSection === 'audit')    return renderAuditTable(content, rows);
+  // Settings uses a dedicated panel with view/edit gating
+  if (currentSection === 'settings') {
+    return renderSettingsPanel(content);
+  }
+  if (currentSection === 'audit') {
+    return renderAuditTable(content, rows);
+  }
 
   if (currentSection === 'candidates') {
     rows.forEach(r => {
@@ -1596,7 +1601,7 @@ function renderSummary(rows){
   tb.addEventListener('dblclick', (ev) => {
     const tr = ev.target && ev.target.closest('tr');
     if (!tr) return;
-    if (!confirmDiscardChangesIfDirty()) return;
+    if (!confirmDiscardChangesIfDirty()) return; // dirty guard before opening a new modal
 
     tb.querySelectorAll('tr.selected').forEach(n => n.classList.remove('selected'));
     tr.classList.add('selected');
@@ -1621,6 +1626,44 @@ function renderSummary(rows){
 
   tbl.appendChild(tb);
   content.appendChild(tbl);
+
+  // ---- Jump & highlight if a pending focus token matches this section
+  if (window.__pendingFocus) {
+    const pf = window.__pendingFocus;
+    const pfSection = pf.section || (pf.entity ? (pf.entity + 's') : null);
+    if (pfSection && pfSection === currentSection && pf.id != null) {
+      const targetId = String(pf.id);
+      const sel = `tr[data-id="${CSS.escape ? CSS.escape(targetId) : targetId}"]`;
+      let tr = tb.querySelector(sel);
+
+      if (!tr) {
+        // Not visible under current filters - attempt one auto-relax/reload pass
+        if (!pf._retried) {
+          pf._retried = true;
+          try {
+            if (typeof clearFilters === 'function') clearFilters();
+          } catch (_) {}
+          try { renderAll(); } catch (e) { console.error('auto-refresh after filter clear failed', e); }
+          return; // wait for next render to try again
+        }
+        // If we've already retried once, leave token set so a manual refresh can still catch it.
+        console.debug('[GRID] pending focus row not found under current filters; already retried once');
+        return;
+      }
+
+      // Select it in our state, scroll, and highlight
+      currentSelection = currentRows.find(x => String(x.id) === targetId) || null;
+      try { tr.scrollIntoView({ block: 'center', behavior: 'smooth' }); } catch (_) { tr.scrollIntoView(); }
+      tb.querySelectorAll('tr.selected').forEach(n => n.classList.remove('selected'));
+      tr.classList.add('selected');
+      const oldOutline = tr.style.outline;
+      tr.style.outline = '2px solid #ffbf00';
+      setTimeout(() => { tr.style.outline = oldOutline || ''; }, 2000);
+
+      // Clear token so we don't jump again
+      window.__pendingFocus = null;
+    }
+  }
 }
 
 
@@ -2086,6 +2129,7 @@ async function openDelete(){
 // openCandidate: default Account holder from umbrella name if pay_method is UMBRELLA and empty.
 // ================== FRONTEND: openCandidate (UPDATED) ==================
 // ================== FIXED: openCandidate (hydrate before showModal) ==================
+// ================== FIXED: openCandidate (hydrate before showModal) ==================
 async function openCandidate(row) {
   const deep = (o)=> JSON.parse(JSON.stringify(o || {}));
   const incoming = deep(row || {});
@@ -2213,7 +2257,7 @@ async function openCandidate(row) {
     full?.id
   );
 
-  // 4) Optional async companion loads (will not blank fields because modal was hydrated first)
+  // 4) Optional async companion loads (won’t blank fields because modal was hydrated first)
   if (full?.id) {
     const token = modalCtx.openToken;
     const id    = full.id;
@@ -2240,122 +2284,81 @@ async function openCandidate(row) {
 // ====================== mountCandidatePayTab (FIXED) ======================
 // FRONTEND — UPDATED
 // mountCandidatePayTab: also keeps Account Holder in sync with umbrella name when UMNRELLA pay.
-async function mountCandidatePayTab(){
-  const token    = modalCtx.openToken;
-  const idActive = modalCtx.data?.id || null;
+// ================== FIXED: openUmbrella (hydrate before showModal) ==================
+async function openUmbrella(row){
+  const deep = (o)=> JSON.parse(JSON.stringify(o || {}));
+  const incoming = deep(row || {});
+  const seedId   = incoming?.id || null;
 
-  const umbRow    = document.querySelector('#tab-pay #umbRow');
-  const nameInput = document.querySelector('#tab-pay #umbrella_name');
-  const idHidden  = document.querySelector('#tab-pay #umbrella_id');
-  const bankName  = document.querySelector('#tab-pay input[name="bank_name"]');
-  const sortCode  = document.querySelector('#tab-pay input[name="sort_code"]');
-  const accNum    = document.querySelector('#tab-pay input[name="account_number"]');
-  const accHolder = document.querySelector('#tab-pay input[name="account_holder"]');
-  const dl        = document.querySelector('#tab-pay #umbList');
-
-  if (!umbRow || !nameInput || !idHidden || !bankName || !sortCode || !accNum || !dl) return;
-
-  // Lock whole tab if parent is in view
-  const frame = _currentFrame();
-  if (frame && (frame.mode === 'view' || frame.mode === 'saving')) {
-    _setFormReadOnly(byId('tab-pay'), true);
-  }
-
-  const umbrellas = await listUmbrellas().catch(()=>[]);
-  if (token !== modalCtx.openToken || modalCtx.data?.id !== idActive) {
-    console.debug('[ASYNC] umbrellas dropped (stale)', { forId: idActive, active: modalCtx.data?.id });
-    return;
-  }
-
-  const byName = new Map((umbrellas||[]).map(u => [String(u.name || '').toLowerCase(), u]));
-  const byId   = new Map((umbrellas||[]).map(u => [u.id, u]));
-  dl.innerHTML = (umbrellas||[]).map(u => `<option value="${u.name}"></option>`).join('');
-
-  function lockFromUmb(u){
-    bankName.value = u.bank_name || '';
-    sortCode.value = u.sort_code || '';
-    accNum.value   = u.account_number || '';
-    if (accHolder && !accHolder.value) accHolder.value = u.name || '';
-    [bankName, sortCode, accNum].forEach(i => i.readOnly = true);
-  }
-  function unlockBank(){ [bankName, sortCode, accNum].forEach(i => i.readOnly = false); }
-  function snapshotIfNeeded(){
-    if (!modalCtx.bankSnapshot) {
-      modalCtx.bankSnapshot = {
-        bank_name: bankName.value,
-        sort_code: sortCode.value,
-        account_number: accNum.value,
-        account_holder: accHolder ? accHolder.value : ''
-      };
-    }
-  }
-  function restoreSnapshot(){
-    if (modalCtx.bankSnapshot) {
-      bankName.value = modalCtx.bankSnapshot.bank_name || '';
-      sortCode.value = modalCtx.bankSnapshot.sort_code || '';
-      accNum.value   = modalCtx.bankSnapshot.account_number || '';
-      if (accHolder) accHolder.value = modalCtx.bankSnapshot.account_holder || '';
-    }
-    unlockBank();
-  }
-  function clearUmbrellaOnly(){
-    idHidden.value = '';
-    nameInput.value = '';
-  }
-  function resolveUmbrella(val){
-    const v = String(val||'').trim().toLowerCase();
-    if (!v) { clearUmbrellaOnly(); unlockBank(); return; }
-    let match = byName.get(v);
-    if (!match) match = (umbrellas||[]).find(u => String(u.name || '').toLowerCase().startsWith(v));
-    if (match) {
-      idHidden.value = match.id;
-      lockFromUmb(match);
-    } else {
-      clearUmbrellaOnly();
-      unlockBank();
+  // 1) Hydrate full umbrella if we have an id
+  let full = incoming;
+  if (seedId) {
+    try {
+      const res = await authFetch(API(`/api/umbrellas/${encodeURIComponent(seedId)}`));
+      if (res.ok) {
+        const data = await res.json().catch(()=> ({}));
+        full = Array.isArray(data) ? (data[0] || incoming) : (data.umbrella || data || incoming);
+      }
+    } catch (e) {
+      console.warn('openUmbrella hydrate failed; using summary row', e);
     }
   }
 
-  function currentPayMethod(){
-    return modalCtx?.payMethodState || modalCtx?.data?.pay_method || 'PAYE';
-  }
+  // 2) Build modal context from hydrated data
+  modalCtx = {
+    entity: 'umbrellas',
+    data: deep(full),
+    formState: { __forId: full?.id || null, main: {} },
+    rolesState: null,
+    ratesState: null,
+    clientSettingsState: null,
+    openToken: ((full?.id) || 'new') + ':' + Date.now()
+  };
 
-  function updateUmbVisibility(){
-    const pm = currentPayMethod();
-    const prev = modalCtx._lastPayMethod;
+  // 3) Render modal (now hydrated)
+  showModal(
+    'Umbrella',
+    [{ key:'main', label:'Main' }],
+    (key, r)=> html(`
+      <div class="form" id="tab-main">
+        ${input('name','Name', r?.name)}
+        ${input('remittance_email','Remittance email', r?.remittance_email, 'email')}
+        ${input('bank_name','Bank', r?.bank_name)}
+        ${input('sort_code','Sort code', r?.sort_code)}
+        ${input('account_number','Account number', r?.account_number)}
+        ${select('vat_chargeable','VAT chargeable', (r?.vat_chargeable ? 'Yes' : 'No'), ['Yes','No'])}
+        ${select('enabled','Enabled', (r?.enabled === false) ? 'No' : 'Yes', ['Yes','No'])}
+      </div>
+    `),
+    async ()=>{
+      const fs = modalCtx.formState || { __forId: null, main:{} };
+      const sameRecord = (!!modalCtx.data?.id && fs.__forId === modalCtx.data.id) || (!modalCtx.data?.id && fs.__forId == null);
 
-    if (prev !== pm) {
-      if (prev !== 'UMBRELLA' && pm === 'UMBRELLA') snapshotIfNeeded();
-      if (prev === 'UMBRELLA' && pm !== 'UMBRELLA') restoreSnapshot();
-      modalCtx._lastPayMethod = pm;
-    }
+      const staged = sameRecord ? (fs.main || {}) : {};
+      const live   = collectForm('#tab-main');
+      const payload = { ...staged, ...live };
 
-    if (pm === 'UMBRELLA') {
-      umbRow.style.display = '';
-      const u = byId.get(idHidden.value);
-      if (u) { nameInput.value = u.name || ''; lockFromUmb(u); }
-      else { unlockBank(); }
-    } else {
-      umbRow.style.display = 'none';
-      clearUmbrellaOnly();
-      restoreSnapshot();
-    }
-  }
+      if (typeof payload.vat_chargeable !== 'boolean') payload.vat_chargeable = (payload.vat_chargeable === 'Yes' || payload.vat_chargeable === 'true');
+      if (typeof payload.enabled        !== 'boolean') payload.enabled        = (payload.enabled        === 'Yes' || payload.enabled        === 'true');
 
-  updateUmbVisibility();
+      for (const k of Object.keys(payload)) if (payload[k] === '') delete payload[k];
 
-  if (idHidden.value) {
-    const u = byId.get(idHidden.value);
-    if (u) { nameInput.value = u.name || ''; lockFromUmb(u); }
-  }
+      const idForUpdate = modalCtx?.data?.id || full?.id || null;
+      const saved = await upsertUmbrella(payload, idForUpdate);
+      const umbrellaId = idForUpdate || (saved && saved.id);
+      if (!umbrellaId) { alert('Failed to save umbrella'); return { ok:false }; }
 
-  nameInput.addEventListener('change', () => resolveUmbrella(nameInput.value));
-  nameInput.addEventListener('blur',   () => resolveUmbrella(nameInput.value));
+      modalCtx.data      = { ...(modalCtx.data || {}), ...(saved || {}), id: umbrellaId };
+      modalCtx.formState = { __forId: umbrellaId, main: {} };
 
-  const onPmChanged = () => updateUmbVisibility();
-  window.addEventListener('pay-method-changed', onPmChanged, { passive: true });
-  modalCtx._payMethodChangedHandler = onPmChanged;
+      if (!seedId && umbrellaId) window.__pendingFocus = { section: 'umbrellas', id: umbrellaId };
+
+      return { ok: true, saved: modalCtx.data };
+    },
+    full?.id
+  );
 }
+
 
 
 
@@ -2957,6 +2960,7 @@ function renderCalendar(timesheets){
 
 // ================== FRONTEND: openClient (UPDATED) ==================
 // ================== FIXED: openClient (hydrate before showModal) ==================
+// ================== FIXED: openClient (hydrate before showModal) ==================
 async function openClient(row) {
   const deep = (o)=> JSON.parse(JSON.stringify(o || {}));
   const incoming = deep(row || {});
@@ -3056,7 +3060,8 @@ async function openClient(row) {
         for (let i = 0; i < windows.length; i++) {
           for (let j = i + 1; j < windows.length; j++) {
             const A = windows[i], B = windows[j];
-            if (String(A.role||'') === String(B.role||'') && String(A.band||'') === String(B.band||'')) {
+            if (String(A.role||'') === String(B.role||'') &&
+                String(A.band||'') === String(B.band||'')) {
               const a0 = A.date_from || null, a1 = A.date_to || null;
               const b0 = B.date_from || null, b1 = B.date_to || null;
               if (rangesOverlap(a0, a1, b0, b1)) {
@@ -3076,16 +3081,20 @@ async function openClient(row) {
               band      : w.band ?? null,
               date_from : w.date_from || null,
               date_to   : w.date_to ?? null,
+
+              // charge & pay blocks — unified
               charge_day   : w.charge_day   ?? null,
               charge_night : w.charge_night ?? null,
               charge_sat   : w.charge_sat   ?? null,
               charge_sun   : w.charge_sun   ?? null,
               charge_bh    : w.charge_bh    ?? null,
+
               paye_day     : w.paye_day     ?? null,
               paye_night   : w.paye_night   ?? null,
               paye_sat     : w.paye_sat     ?? null,
               paye_sun     : w.paye_sun     ?? null,
               paye_bh      : w.paye_bh      ?? null,
+
               umb_day      : w.umb_day      ?? null,
               umb_night    : w.umb_night    ?? null,
               umb_sat      : w.umb_sat      ?? null,
@@ -3532,7 +3541,7 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
     root.querySelectorAll('input, select, textarea, button').forEach((el) => {
       const isDisplayOnly = el.id === 'tms_ref_display' || el.id === 'cli_ref_display';
       if (el.type === 'button') {
-        const controlIds = new Set(['btnCloseModal','btnDelete','btnEditModal','btnSave']);
+        const controlIds = new Set(['btnCloseModal','btnDelete','btnEditModal','btnSave','btnRelated']);
         if (!controlIds.has(el.id)) el.disabled = !!ro;
         return;
       }
@@ -3748,6 +3757,7 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
     const btnSave   = byId('btnSave');
     const btnClose  = byId('btnCloseModal');
     const btnDelete = byId('btnDelete');
+    const header    = byId('modalDrag'); // header area for Related
 
     btnDelete.style.display = top.hasId ? '' : 'none';
     btnDelete.onclick = openDelete;
@@ -3763,6 +3773,115 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
       const actionsBar = btnSave?.parentElement || btnClose?.parentElement;
       if (actionsBar) actionsBar.insertBefore(btnEdit, btnSave);
     }
+
+    // Ensure RELATED menu is present & wired (parents with an id only)
+    (function ensureRelatedUI() {
+      // Clear any stale instances not in header
+      document.querySelectorAll('#btnRelatedWrap').forEach(n => { if (n.parentElement !== header) n.remove(); });
+
+      // Build wrapper in header (to the left of Close)
+      let wrap = document.getElementById('btnRelatedWrap');
+      if (!wrap) {
+        wrap = document.createElement('div');
+        wrap.id = 'btnRelatedWrap';
+        wrap.style.position = 'relative';
+        wrap.style.marginRight = '.5rem';
+        if (header) header.insertBefore(wrap, btnClose);
+      } else if (wrap.parentElement !== header) {
+        wrap.remove();
+        if (header) header.insertBefore(wrap, btnClose);
+      }
+      wrap.innerHTML = ''; // reset
+
+      // Button
+      const relatedBtn = document.createElement('button');
+      relatedBtn.id = 'btnRelated';
+      relatedBtn.type = 'button';
+      relatedBtn.className = 'btn';
+      relatedBtn.textContent = 'Related ▾';
+      relatedBtn.disabled = !(top.hasId && top.mode === 'view'); // visible/usable in view mode with an id
+      wrap.appendChild(relatedBtn);
+
+      // Dropdown
+      const menu = document.createElement('div');
+      menu.id = 'relatedMenu';
+      menu.style.cssText = 'position:absolute; right:0; top:calc(100% + 6px); background:#0b1427; border:1px solid var(--line); border-radius:8px; min-width:220px; display:none; padding:6px; z-index:1000';
+      wrap.appendChild(menu);
+
+      function entityKey() {
+        // Map top.entity to API entity
+        if (top.entity === 'candidates') return 'candidate';
+        if (top.entity === 'clients')    return 'client';
+        if (top.entity === 'umbrellas')  return 'umbrella';
+        return top.entity || 'candidate';
+      }
+      const sectionMap = { timesheets:'timesheets', invoices:'invoices', candidates:'candidates', clients:'clients', umbrellas:'umbrellas', umbrella:'umbrellas' };
+
+      async function renderMenu() {
+        menu.innerHTML = `<div class="hint" style="padding:6px 8px">Loading…</div>`;
+        const ent = entityKey();
+        const id  = window.modalCtx?.data?.id;
+        if (!ent || !id) { menu.innerHTML = `<div class="hint" style="padding:6px 8px">No related</div>`; return; }
+
+        let counts = {};
+        try { counts = (await fetchRelatedCounts(ent, id)) || {}; } catch {}
+        const spec = (function buildSpec() {
+          if (ent === 'candidate') return [['timesheets','Timesheets'], ['invoices','Invoices'], ['clients','Clients'], ['umbrella','Umbrella']];
+          if (ent === 'client')    return [['timesheets','Timesheets'], ['invoices','Invoices'], ['candidates','Candidates']];
+          if (ent === 'umbrella')  return [['candidates','Candidates'], ['timesheets','Timesheets'], ['invoices','Invoices']];
+          return [];
+        })();
+
+        const rows = spec.map(([key,label]) => {
+          const val = Number(counts[key] ?? 0);
+          const disabled = (val <= 0);
+          return { key, label, disabled };
+        });
+
+        if (!rows.length) { menu.innerHTML = `<div class="hint" style="padding:6px 8px">No related</div>`; return; }
+
+        menu.innerHTML = rows.map(r => {
+          const s = r.disabled ? 'opacity:.6;cursor:not-allowed' : 'cursor:pointer';
+          return `<div class="rel" data-key="${r.key}" data-enabled="${r.disabled?0:1}" style="padding:8px;border-bottom:1px solid var(--line);${s}">${r.label}${counts[r.key]!=null?` (${counts[r.key]})`:''}</div>`;
+        }).join('') + `<div style="height:2px"></div>`;
+
+        menu.querySelectorAll('.rel').forEach(el => {
+          el.onclick = async () => {
+            if (el.getAttribute('data-enabled') !== '1') return;
+            const key = el.getAttribute('data-key');
+            try {
+              const rows = await fetchRelated(entityKey(), id, key);
+              const section = sectionMap[key] || key;
+              currentSection = section;
+              renderSummary(Array.isArray(rows) ? rows : []);
+              menu.style.display = 'none';
+            } catch (err) {
+              menu.innerHTML = `<div class="hint" style="padding:6px 8px;color:#fca5a5">Failed to load related</div>`;
+            }
+          };
+        });
+      }
+
+      relatedBtn.onclick = async () => {
+        if (relatedBtn.disabled) return;
+        menu.style.display = (menu.style.display === 'none' ? 'block' : 'none');
+        if (menu.style.display === 'block') await renderMenu();
+      };
+
+      // Close menu if user clicks outside
+      const onDoc = (ev) => {
+        if (menu.style.display === 'none') return;
+        if (!wrap.contains(ev.target)) menu.style.display = 'none';
+      };
+
+      // Chain detach
+      const prevDetach = top._detachGlobal;
+      top._detachGlobal = () => {
+        try { document.removeEventListener('click', onDoc, true); } catch {}
+        if (typeof prevDetach === 'function') { try { prevDetach(); } catch {} }
+      };
+      document.addEventListener('click', onDoc, true);
+    })();
 
     // Labels
     const defaultPrimary = isChild ? 'Apply' : 'Save';
@@ -3781,12 +3900,16 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
     // Visibility/enable rules
     top._updateButtons = () => {
       const parentEditable = parent ? (parent.mode === 'edit') : true;
+      const relatedBtn = document.getElementById('btnRelated');
+
       if (isChild) {
         btnSave.style.display = parentEditable ? '' : 'none';
         btnSave.disabled = !parentEditable;
         btnEdit.style.display = 'none';
+        if (relatedBtn) relatedBtn.disabled = true;
       } else {
         btnEdit.style.display = (top.mode === 'view' && top.hasId) ? '' : 'none';
+        if (relatedBtn) relatedBtn.disabled = !(top.mode === 'view' && top.hasId);
         if (top.mode === 'view') {
           btnSave.style.display = 'none';
         } else {
@@ -3825,7 +3948,7 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
           // Cancel: no changes → just return to view
           top.isDirty = false;
           setFrameMode(top, 'view');
-          top._snapshot = null; // snapshot no longer needed
+          top._snapshot = null;
           return;
         } else {
           // Discard: restore snapshot → view (do not close)
@@ -3938,6 +4061,7 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
 
     if (!top._wired) {
       window.addEventListener('modal-dirty', onDirtyEvt);
+      // Only *cancel/discard* on ESC/backdrop while editing; only Close in view actually closes
       const onEsc = (e) => { if (e.key === 'Escape') { e.preventDefault(); btnClose.click(); } };
       window.addEventListener('keydown', onEsc);
       const onOverlayClick = (e) => { if (e.target === byId('modalBack')) btnClose.click(); };
@@ -3965,6 +4089,7 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
   byId('modalBack').style.display = 'flex';
   renderTop();
 }
+
 
 
 // =================== ADD HOSPITAL MODAL (UPDATED: push into stagedNew) ===================
@@ -4173,6 +4298,7 @@ async function renderClientSettingsUI(settingsObj){
 // ========================= openUmbrella (FIXED) =========================
 // ================== FRONTEND: openUmbrella (UPDATED) ==================
 // ================== FIXED: openUmbrella (hydrate before showModal) ==================
+// ================== FIXED: openUmbrella (hydrate before showModal) ==================
 async function openUmbrella(row){
   const deep = (o)=> JSON.parse(JSON.stringify(o || {}));
   const incoming = deep(row || {});
@@ -4248,6 +4374,7 @@ async function openUmbrella(row){
 }
 
 
+
 // ---- Audit (Outbox)
 function openAuditItem(row){
   const body = html(`
@@ -4271,8 +4398,7 @@ async function renderSettingsPanel(content){
   // Load settings with a visible error if the call fails
   let s;
   try {
-    // getSettings() should now unwrap { settings: {...} } → {...}
-    s = await getSettings();
+    s = await getSettings(); // unwraps {settings:{...}} → {...}
   } catch (e) {
     content.innerHTML = `
       <div class="tabc">
@@ -4281,9 +4407,15 @@ async function renderSettingsPanel(content){
     return;
   }
 
+  // Establish mode + snapshot for Cancel/Discard semantics
+  let mode = 'view';            // 'view' | 'edit' | 'saving'
+  let dirty = false;            // enable Save only when true
+  let snapshot = JSON.parse(JSON.stringify(s)); // original values to restore on Discard
+
   // Prefer the new key; fall back to legacy if needed (still GLOBAL-only)
   const erniValue = (s.employers_ni_pct ?? s.erni_pct ?? 0);
 
+  // Render panel shell with explicit Edit / Save / Cancel buttons
   content.innerHTML = `
     <div class="tabc">
       <div class="form" id="settingsForm">
@@ -4298,9 +4430,9 @@ async function renderSettingsPanel(content){
           <textarea name="bh_list">${JSON.stringify(s.bh_list || [], null, 2)}</textarea>
         </div>
         ${input('bh_feed_url','BH feed URL', s.bh_feed_url || '')}
-        ${input('vat_rate_pct','VAT %', s.vat_rate_pct ?? 20)}
-        ${input('holiday_pay_pct','Holiday pay %', s.holiday_pay_pct ?? 0)}
-        ${input('erni_pct','ERNI %', erniValue)}
+        ${input('vat_rate_pct','VAT %', s.vat_rate_pct ?? 20, 'number')}
+        ${input('holiday_pay_pct','Holiday pay %', s.holiday_pay_pct ?? 0, 'number')}
+        ${input('erni_pct','ERNI %', erniValue, 'number')}
         ${select('apply_holiday_to','Apply holiday to', s.apply_holiday_to || 'PAYE_ONLY', ['PAYE_ONLY','ALL','NONE'])}
         ${select('apply_erni_to','Apply ERNI to', s.apply_erni_to || 'PAYE_ONLY', ['PAYE_ONLY','ALL','NONE'])}
         <div class="row" style="grid-column:1/-1">
@@ -4314,32 +4446,149 @@ async function renderSettingsPanel(content){
                  value="${s.effective_from ? formatIsoToUk(s.effective_from) : ''}" />
         </div>
       </div>
+
       <div class="actions">
+        <span class="hint" id="settingsHint"></span>
         <div class="spacer"></div>
-        <button id="btnSaveSettings" class="primary">Save defaults</button>
+        <button id="btnEditSettings">Edit</button>
+        <button id="btnCancelSettings">Close</button>
+        <button id="btnSaveSettings" class="primary" disabled>Save</button>
       </div>
     </div>
   `;
 
-  // Attach UK date picker
-  const eff = document.getElementById('settings_effective_from');
-  if (eff) attachUkDatePicker(eff);
+  // Elements
+  const formEl   = byId('settingsForm');
+  const effInput = byId('settings_effective_from');
+  const btnEdit  = byId('btnEditSettings');
+  const btnSave  = byId('btnSaveSettings');
+  const btnCancel= byId('btnCancelSettings');
+  const hintEl   = byId('settingsHint');
 
-  byId('btnSaveSettings').onclick = async ()=>{
+  // Attach date picker
+  if (effInput) attachUkDatePicker(effInput);
+
+  // Helpers for view/edit toggling
+  function setReadOnly(ro) {
+    formEl.querySelectorAll('input, select, textarea').forEach(el => {
+      el.disabled = !!ro;
+      el.readOnly = !!ro && el.tagName === 'INPUT';
+    });
+  }
+  function repaintButtons() {
+    // Secondary button label: Cancel (edit & not dirty) / Discard (edit & dirty) / Close (view)
+    if (mode === 'view') {
+      btnCancel.textContent = 'Close';
+      hintEl.textContent = '';
+      btnEdit.style.display = '';
+      btnSave.style.display = 'none';
+    } else if (mode === 'edit') {
+      btnCancel.textContent = dirty ? 'Discard' : 'Cancel';
+      hintEl.textContent = dirty ? 'You have unsaved changes' : '';
+      btnEdit.style.display = 'none';
+      btnSave.style.display = '';
+      btnSave.disabled = !dirty;
+    } else if (mode === 'saving') {
+      btnCancel.textContent = 'Saving…';
+      btnEdit.style.display = 'none';
+      btnSave.style.display = '';
+      btnSave.disabled = true;
+    }
+  }
+  function toView() {
+    mode = 'view'; dirty = false;
+    setReadOnly(true);
+    repaintButtons();
+  }
+  function toEdit() {
+    mode = 'edit'; dirty = false;
+    setReadOnly(false);
+    repaintButtons();
+  }
+  function refillFrom(obj) {
+    // Reset form inputs from a settings object
+    const map = new Map([...formEl.querySelectorAll('input,select,textarea')].map(el => [el.name, el]));
+    if (map.has('timezone_id')) map.get('timezone_id').value = obj.timezone_id || 'Europe/London';
+    if (map.has('day_start'))   map.get('day_start').value   = obj.day_start || '06:00';
+    if (map.has('day_end'))     map.get('day_end').value     = obj.day_end || '20:00';
+    if (map.has('night_start')) map.get('night_start').value = obj.night_start || '20:00';
+    if (map.has('night_end'))   map.get('night_end').value   = obj.night_end || '06:00';
+    if (map.has('bh_source'))   map.get('bh_source').value   = obj.bh_source || 'MANUAL';
+    if (map.has('bh_list'))     map.get('bh_list').value     = JSON.stringify(obj.bh_list || [], null, 2);
+    if (map.has('bh_feed_url')) map.get('bh_feed_url').value = obj.bh_feed_url || '';
+    if (map.has('vat_rate_pct'))map.get('vat_rate_pct').value= obj.vat_rate_pct ?? 20;
+    if (map.has('holiday_pay_pct')) map.get('holiday_pay_pct').value = obj.holiday_pay_pct ?? 0;
+    if (map.has('erni_pct'))    map.get('erni_pct').value    = (obj.employers_ni_pct ?? obj.erni_pct ?? 0);
+    if (map.has('apply_holiday_to')) map.get('apply_holiday_to').value = obj.apply_holiday_to || 'PAYE_ONLY';
+    if (map.has('apply_erni_to'))    map.get('apply_erni_to').value    = obj.apply_erni_to || 'PAYE_ONLY';
+    if (map.has('margin_includes'))  map.get('margin_includes').value  = JSON.stringify(obj.margin_includes || {}, null, 2);
+    if (map.has('effective_from'))   map.get('effective_from').value   = obj.effective_from ? formatIsoToUk(obj.effective_from) : '';
+  }
+
+  // Initial view-only mode
+  setReadOnly(true);
+  repaintButtons();
+
+  // Dirty tracking (only in edit mode)
+  const onDirty = (e) => {
+    if (mode !== 'edit') return;
+    dirty = true;
+    repaintButtons();
+  };
+  formEl.addEventListener('input', onDirty, true);
+  formEl.addEventListener('change', onDirty, true);
+
+  // Edit
+  btnEdit.onclick = () => {
+    if (mode !== 'view') return;
+    snapshot = JSON.parse(JSON.stringify(s)); // capture original
+    toEdit();
+  };
+
+  // Cancel / Discard / Close
+  btnCancel.onclick = () => {
+    if (mode === 'edit') {
+      if (!dirty) {
+        // Cancel: no changes → back to view without closing
+        toView();
+        return;
+      }
+      // Discard: restore snapshot
+      const ok = window.confirm('Discard changes and return to view?');
+      if (!ok) return;
+      s = JSON.parse(JSON.stringify(snapshot));
+      refillFrom(s);
+      toView();
+      return;
+    }
+    // mode === 'view' → Close the settings panel view (navigate away)
+    // Keep behaviour consistent with app: return to whatever section was last used.
+    // If you prefer to stay, simply do nothing here.
+    // For now we’ll keep the panel visible; no close action needed.
+  };
+
+  // Save
+  btnSave.onclick = async () => {
+    if (mode !== 'edit' || !dirty) return;
+    mode = 'saving'; repaintButtons();
+
     const payload = collectForm('#settingsForm', true);
-
-    // Convert UK date (if present)
     if (payload.effective_from) {
       const iso = parseUkDateToIso(payload.effective_from);
-      if (!iso) { alert('Invalid Effective from date'); return; }
+      if (!iso) { alert('Invalid Effective from date'); mode='edit'; repaintButtons(); return; }
       payload.effective_from = iso;
     }
 
-    // ERNI is global-only; just pass the field as entered (backend owns validation)
     try {
       await saveSettings(payload);
-      alert('Saved.');
+      // Update live settings + snapshot to saved state
+      s = { ...s, ...payload };
+      snapshot = JSON.parse(JSON.stringify(s));
+      toView();
+      hintEl.textContent = 'Saved.';
+      setTimeout(()=> { if (hintEl.textContent === 'Saved.') hintEl.textContent=''; }, 1500);
     } catch (e) {
+      mode = 'edit'; repaintButtons();
       alert('Save failed: ' + (e?.message || 'Unknown error'));
     }
   };
@@ -4775,6 +5024,103 @@ document.addEventListener('keydown', (e) => {
   }
 });
 
+// ================== NEW: openSettings (parent modal; opens in View) ==================
+async function openSettings() {
+  const deep = (o)=> JSON.parse(JSON.stringify(o || {}));
+
+  // Hydrate settings first
+  let settings;
+  try {
+    settings = await getSettings(); // unwraps {settings:{...}} → {...}
+  } catch (e) {
+    alert('Could not load settings.');
+    return;
+  }
+
+  // Seed modal context
+  modalCtx = {
+    entity: 'settings',
+    data: deep(settings),                    // single source of truth for showModal
+    formState: { __forId: 'global', main:{} },
+    openToken: 'settings:' + Date.now()
+  };
+
+  // Open in VIEW mode (hasId=true) and let showModal manage Edit/Cancel/Discard/Save
+  showModal(
+    'Settings',
+    [{ key:'main', label:'Defaults' }],
+    renderSettingsTab,
+    handleSaveSettings,
+    true // hasId → opens in View mode
+  );
+}
+
+
+// ================== NEW: renderSettingsTab (tab renderer; showModal controls read-only) ==================
+function renderSettingsTab(key, s = {}) {
+  if (key !== 'main') return '';
+
+  const erniValue = (s.employers_ni_pct ?? s.erni_pct ?? 0);
+
+  return html(`
+    <div class="form" id="settingsForm">
+      ${input('timezone_id','Timezone', s.timezone_id || 'Europe/London')}
+      ${input('day_start','Day start', s.day_start || '06:00')}
+      ${input('day_end','Day end', s.day_end || '20:00')}
+      ${input('night_start','Night start', s.night_start || '20:00')}
+      ${input('night_end','Night end', s.night_end || '06:00')}
+      ${select('bh_source','Bank Holidays source', s.bh_source || 'MANUAL', ['MANUAL','FEED'])}
+      <div class="row" style="grid-column:1/-1">
+        <label>Bank Holidays list (JSON dates)</label>
+        <textarea name="bh_list">${JSON.stringify(s.bh_list || [], null, 2)}</textarea>
+      </div>
+      ${input('bh_feed_url','BH feed URL', s.bh_feed_url || '')}
+      ${input('vat_rate_pct','VAT %', s.vat_rate_pct ?? 20, 'number')}
+      ${input('holiday_pay_pct','Holiday pay %', s.holiday_pay_pct ?? 0, 'number')}
+      ${input('erni_pct','ERNI %', erniValue, 'number')}
+      ${select('apply_holiday_to','Apply holiday to', s.apply_holiday_to || 'PAYE_ONLY', ['PAYE_ONLY','ALL','NONE'])}
+      ${select('apply_erni_to','Apply ERNI to', s.apply_erni_to || 'PAYE_ONLY', ['PAYE_ONLY','ALL','NONE'])}
+      <div class="row" style="grid-column:1/-1">
+        <label>Margin includes (JSON)</label>
+        <textarea name="margin_includes">${JSON.stringify(s.margin_includes || {}, null, 2)}</textarea>
+      </div>
+
+      <div class="row">
+        <label>Effective from (DD/MM/YYYY)</label>
+        <input type="text" name="effective_from" id="settings_effective_from" placeholder="DD/MM/YYYY"
+               value="${s.effective_from ? formatIsoToUk(s.effective_from) : ''}" />
+      </div>
+    </div>
+  `);
+}
+
+
+// ================== NEW: handleSaveSettings (parent onSave; persist then stay open in View) ==================
+async function handleSaveSettings() {
+  // Collect with JSON parsing for bh_list / margin_includes
+  const payload = collectForm('#settingsForm', true) || {};
+
+  // Normalise date
+  if (payload.effective_from) {
+    const iso = parseUkDateToIso(payload.effective_from);
+    if (!iso) {
+      alert('Invalid “Effective from” date');
+      return { ok:false };
+    }
+    payload.effective_from = iso;
+  }
+
+  try {
+    await saveSettings(payload);
+  } catch (e) {
+    alert('Save failed: ' + (e?.message || 'Unknown error'));
+    return { ok:false };
+  }
+
+  // Return the merged saved state so showModal flips to View and repaints with new values
+  const saved = { ...(modalCtx.data || {}), ...payload };
+  return { ok:true, saved };
+}
 
 
 
