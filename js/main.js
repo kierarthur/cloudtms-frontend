@@ -2162,14 +2162,10 @@ async function openCandidate(row) {
       const res = await authFetch(url);
       L('[HTTP] status', res?.status, res?.ok);
 
-      // peek raw for debugging (safe via clone)
       try {
-        const clone = res.clone();
-        const raw   = await clone.text();
-        if (LOG) console.debug('[HTTP] raw body (truncated 2KB):', raw.slice(0, 2048));
-      } catch (peekErr) {
-        W('[HTTP] raw peek failed', peekErr?.message || peekErr);
-      }
+        const raw = await res.clone().text();
+        if (LOG) console.debug('[HTTP] raw body (≤2KB):', raw.slice(0, 2048));
+      } catch (peekErr) { W('[HTTP] raw peek failed', peekErr?.message || peekErr); }
 
       if (res.ok) {
         const data = await res.json().catch((jErr)=>{ W('res.json() failed, using {}', jErr); return {}; });
@@ -2186,11 +2182,11 @@ async function openCandidate(row) {
     L('no seedId — create mode');
   }
 
-  // 2) Build modal context from hydrated data
+  // 2) Build modal context from hydrated data — ***IMPORTANT: seed window.modalCtx***
   const fullKeys = Object.keys(full || {});
-  L('seeding modalCtx', { entity: 'candidates', fullId: full?.id, fullKeys });
+  L('seeding window.modalCtx', { entity: 'candidates', fullId: full?.id, fullKeys });
 
-  modalCtx = {
+  window.modalCtx = {
     entity: 'candidates',
     data:   deep(full),
     formState: { __forId: full?.id || null, main: {}, pay: {} },
@@ -2200,12 +2196,12 @@ async function openCandidate(row) {
     openToken: ((full?.id) || 'new') + ':' + Date.now()
   };
 
-  L('modalCtx seeded', {
-    entity: modalCtx.entity,
-    dataId: modalCtx.data?.id,
-    dataKeys: Object.keys(modalCtx.data||{}),
-    formStateForId: modalCtx.formState?.__forId,
-    openToken: modalCtx.openToken
+  L('window.modalCtx seeded', {
+    entity: window.modalCtx.entity,
+    dataId: window.modalCtx.data?.id,
+    dataKeys: Object.keys(window.modalCtx.data||{}),
+    formStateForId: window.modalCtx.formState?.__forId,
+    openToken: window.modalCtx.openToken
   });
 
   // 3) Render modal (now we have real data to populate fields)
@@ -2219,27 +2215,25 @@ async function openCandidate(row) {
       { key:'bookings', label:'Bookings' }
     ],
     (k, r) => {
-      // extra debug line to confirm renderer receives a populated row
       L('[renderCandidateTab] tab=', k, 'rowKeys=', Object.keys(r||{}), 'sample=', { first: r?.first_name, last: r?.last_name, id: r?.id });
       return renderCandidateTab(k, r);
     },
     async () => {
-      L('[onSave] begin', { dataId: modalCtx?.data?.id, forId: modalCtx?.formState?.__forId });
-      const isNew = !modalCtx?.data?.id;
+      L('[onSave] begin', { dataId: window.modalCtx?.data?.id, forId: window.modalCtx?.formState?.__forId });
+      const isNew = !window.modalCtx?.data?.id;
 
-      const fs   = modalCtx.formState || { __forId: null, main:{}, pay:{} };
-      const same = (!!modalCtx.data?.id && fs.__forId === modalCtx.data.id) || (!modalCtx.data?.id && fs.__forId == null);
+      const fs   = window.modalCtx.formState || { __forId: null, main:{}, pay:{} };
+      const same = (!!window.modalCtx.data?.id && fs.__forId === window.modalCtx.data.id) || (!window.modalCtx.data?.id && fs.__forId == null);
       const stateMain = same ? (fs.main || {}) : {};
       const statePay  = same ? (fs.pay  || {}) : {};
       const main      = document.querySelector('#tab-main') ? collectForm('#tab-main') : {};
       const pay       = document.querySelector('#tab-pay')  ? collectForm('#tab-pay')  : {};
-      const roles     = normaliseRolesForSave(modalCtx.rolesState || []);
+      const roles     = normaliseRolesForSave(window.modalCtx.rolesState || []);
       const payload   = { ...stateMain, ...statePay, ...main, ...pay, roles };
 
       L('[onSave] collected', {
         same, stateMainKeys: Object.keys(stateMain||{}), statePayKeys: Object.keys(statePay||{}),
-        mainKeys: Object.keys(main||{}), payKeys: Object.keys(pay||{}),
-        rolesCount: roles?.length || 0
+        mainKeys: Object.keys(main||{}), payKeys: Object.keys(pay||{}), rolesCount: roles?.length || 0
       });
 
       delete payload.umbrella_name;
@@ -2274,7 +2268,7 @@ async function openCandidate(row) {
 
       for (const k of Object.keys(payload)) if (payload[k] === '') delete payload[k];
 
-      const idForUpdate = modalCtx?.data?.id || full?.id || null;
+      const idForUpdate = window.modalCtx?.data?.id || full?.id || null;
       L('[onSave] upsertCandidate', { idForUpdate, payloadKeys: Object.keys(payload||{}) });
       const saved = await upsertCandidate(payload, idForUpdate).catch(err => { E('upsertCandidate failed', err); return null; });
       const candidateId = idForUpdate || (saved && saved.id);
@@ -2282,7 +2276,7 @@ async function openCandidate(row) {
       if (!candidateId) { alert('Failed to save candidate'); return { ok:false }; }
 
       // Commit staged overrides (unchanged)
-      const O = modalCtx.overrides || { existing: [], stagedNew: [], stagedEdits: {}, stagedDeletes: new Set() };
+      const O = window.modalCtx.overrides || { existing: [], stagedNew: [], stagedEdits: {}, stagedDeletes: new Set() };
       L('[onSave] overrides', { deletes: Array.from(O.stagedDeletes||[]), edits: Object.keys(O.stagedEdits||{}), newCount: (O.stagedNew||[]).length });
 
       for (const delId of O.stagedDeletes) {
@@ -2309,35 +2303,35 @@ async function openCandidate(row) {
       }
 
       // Keep open; flip to view mode via showModal logic
-      modalCtx.data       = { ...(modalCtx.data || {}), ...(saved || {}), id: candidateId };
-      modalCtx.formState  = { __forId: candidateId, main: {}, pay: {} };
-      modalCtx.rolesState = undefined;
+      window.modalCtx.data       = { ...(window.modalCtx.data || {}), ...(saved || {}), id: candidateId };
+      window.modalCtx.formState  = { __forId: candidateId, main: {}, pay: {} };
+      window.modalCtx.rolesState = undefined;
 
-      L('[onSave] final modalCtx', {
-        dataId: modalCtx.data?.id,
-        dataKeys: Object.keys(modalCtx.data||{}),
-        formStateForId: modalCtx.formState?.__forId
+      L('[onSave] final window.modalCtx', {
+        dataId: window.modalCtx.data?.id,
+        dataKeys: Object.keys(window.modalCtx.data||{}),
+        formStateForId: window.modalCtx.formState?.__forId
       });
 
       if (isNew) window.__pendingFocus = { section: 'candidates', id: candidateId };
 
-      return { ok: true, saved: modalCtx.data };
+      return { ok: true, saved: window.modalCtx.data };
     },
     full?.id
   );
-  L('showModal returned (synchronously)', { currentOpenToken: modalCtx.openToken });
+  L('showModal returned (sync)', { currentOpenToken: window.modalCtx.openToken });
 
   // 4) Optional async companion loads
   if (full?.id) {
-    const token = modalCtx.openToken;
+    const token = window.modalCtx.openToken;
     const id    = full.id;
 
     try {
       L('[listCandidateRates] GET', { id, token });
       const existing = await listCandidateRates(id);
-      L('[listCandidateRates] result', { count: Array.isArray(existing) ? existing.length : -1, sameToken: token === modalCtx.openToken, modalCtxId: modalCtx.data?.id });
-      if (token === modalCtx.openToken && modalCtx.data?.id === id) {
-        modalCtx.overrides.existing = Array.isArray(existing) ? existing : [];
+      L('[listCandidateRates] result', { count: Array.isArray(existing) ? existing.length : -1, sameToken: token === window.modalCtx.openToken, modalCtxId: window.modalCtx.data?.id });
+      if (token === window.modalCtx.openToken && window.modalCtx.data?.id === id) {
+        window.modalCtx.overrides.existing = Array.isArray(existing) ? existing : [];
         await renderCandidateRatesTable();
       }
     } catch (e) { E('listCandidateRates failed', e); }
@@ -2345,8 +2339,8 @@ async function openCandidate(row) {
     try {
       L('[fetchRelated:timesheets] GET', { id, token });
       const ts = await fetchRelated('candidate', id, 'timesheets');
-      L('[fetchRelated:timesheets] result', { rows: Array.isArray(ts) ? ts.length : -1, sameToken: token === modalCtx.openToken, modalCtxId: modalCtx.data?.id });
-      if (token === modalCtx.openToken && modalCtx.data?.id === id) {
+      L('[fetchRelated:timesheets] result', { rows: Array.isArray(ts) ? ts.length : -1, sameToken: token === window.modalCtx.openToken, modalCtxId: window.modalCtx.data?.id });
+      if (token === window.modalCtx.openToken && window.modalCtx.data?.id === id) {
         renderCalendar(ts || []);
       }
     } catch (e) { E('fetchRelated timesheets failed', e); }
