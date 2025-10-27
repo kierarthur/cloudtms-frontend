@@ -2135,6 +2135,16 @@ async function openCandidate(row) {
   const incoming = deep(row || {});
   const seedId   = incoming?.id || null;
 
+  // helper to unwrap a single record from many common backend shapes
+  const unwrapSingle = (data, key) => {
+    if (Array.isArray(data)) return data[0] || null;
+    if (data && key && data[key]) return unwrapSingle(data[key], null);
+    if (data && Array.isArray(data.rows))  return data.rows[0]  || null;
+    if (data && Array.isArray(data.items)) return data.items[0] || null;
+    if (data && Array.isArray(data.data))  return data.data[0]  || null;
+    return (data && typeof data === 'object') ? data : null;
+  };
+
   // 1) Hydrate full record if we have an id
   let full = incoming;
   if (seedId) {
@@ -2142,7 +2152,7 @@ async function openCandidate(row) {
       const res = await authFetch(API(`/api/candidates/${encodeURIComponent(seedId)}`));
       if (res.ok) {
         const data = await res.json().catch(()=> ({}));
-        full = Array.isArray(data) ? (data[0] || incoming) : (data.candidate || data || incoming);
+        full = unwrapSingle(data, 'candidate') || incoming;
       }
     } catch (e) {
       console.warn('openCandidate hydrate failed; using summary row', e);
@@ -2246,8 +2256,8 @@ async function openCandidate(row) {
       }
 
       // Keep open; flip to view mode via showModal logic
-      modalCtx.data      = { ...(modalCtx.data || {}), ...(saved || {}), id: candidateId };
-      modalCtx.formState = { __forId: candidateId, main: {}, pay: {} };
+      modalCtx.data       = { ...(modalCtx.data || {}), ...(saved || {}), id: candidateId };
+      modalCtx.formState  = { __forId: candidateId, main: {}, pay: {} };
       modalCtx.rolesState = undefined;
 
       if (isNew) window.__pendingFocus = { section: 'candidates', id: candidateId };
@@ -2257,7 +2267,7 @@ async function openCandidate(row) {
     full?.id
   );
 
-  // 4) Optional async companion loads (won’t blank fields because modal was hydrated first)
+  // 4) Optional async companion loads
   if (full?.id) {
     const token = modalCtx.openToken;
     const id    = full.id;
@@ -2278,7 +2288,6 @@ async function openCandidate(row) {
     } catch (e) { console.error('fetchRelated timesheets failed', e); }
   }
 }
-
 
 
 // ====================== mountCandidatePayTab (FIXED) ======================
@@ -2966,6 +2975,15 @@ async function openClient(row) {
   const incoming = deep(row || {});
   const seedId   = incoming?.id || null;
 
+  const unwrapSingle = (data, key) => {
+    if (Array.isArray(data)) return data[0] || null;
+    if (data && key && data[key]) return unwrapSingle(data[key], null);
+    if (data && Array.isArray(data.rows))  return data.rows[0]  || null;
+    if (data && Array.isArray(data.items)) return data.items[0] || null;
+    if (data && Array.isArray(data.data))  return data.data[0]  || null;
+    return (data && typeof data === 'object') ? data : null;
+  };
+
   // 1) Hydrate full client if we have an id
   let full = incoming;
   if (seedId) {
@@ -2973,7 +2991,7 @@ async function openClient(row) {
       const r = await authFetch(API(`/api/clients/${encodeURIComponent(seedId)}`));
       if (r.ok) {
         const data = await r.json().catch(()=> ({}));
-        full = Array.isArray(data) ? (data[0] || incoming) : (data.client || data || incoming);
+        full = unwrapSingle(data, 'client') || incoming;
       }
     } catch (e) {
       console.warn('openClient hydrate failed; using summary row', e);
@@ -3142,7 +3160,7 @@ async function openClient(row) {
           const res = await authFetch(API(`/api/clients/${clientId}/hospitals/${encodeURIComponent(hid)}`), {
             method:'PATCH', headers:{'content-type':'application/json'}, body: JSON.stringify(patch)
           });
-          if (!res.ok) { const msg = await res.text().catch(()=> ''); alert(`Update hospital failed: ${msg}`); return { ok:false }; }
+            if (!res.ok) { const msg = await res.text().catch(()=> ''); alert(`Update hospital failed: ${msg}`); return { ok:false }; }
         }
 
         for (const hid of (H.stagedDeletes || new Set())) {
@@ -3161,7 +3179,6 @@ async function openClient(row) {
     full?.id
   );
 }
-
 
 
 
@@ -4304,6 +4321,15 @@ async function openUmbrella(row){
   const incoming = deep(row || {});
   const seedId   = incoming?.id || null;
 
+  const unwrapSingle = (data, key) => {
+    if (Array.isArray(data)) return data[0] || null;
+    if (data && key && data[key]) return unwrapSingle(data[key], null);
+    if (data && Array.isArray(data.rows))  return data.rows[0]  || null;
+    if (data && Array.isArray(data.items)) return data.items[0] || null;
+    if (data && Array.isArray(data.data))  return data.data[0]  || null;
+    return (data && typeof data === 'object') ? data : null;
+  };
+
   // 1) Hydrate full umbrella if we have an id
   let full = incoming;
   if (seedId) {
@@ -4311,7 +4337,7 @@ async function openUmbrella(row){
       const res = await authFetch(API(`/api/umbrellas/${encodeURIComponent(seedId)}`));
       if (res.ok) {
         const data = await res.json().catch(()=> ({}));
-        full = Array.isArray(data) ? (data[0] || incoming) : (data.umbrella || data || incoming);
+        full = unwrapSingle(data, 'umbrella') || incoming;
       }
     } catch (e) {
       console.warn('openUmbrella hydrate failed; using summary row', e);
@@ -4372,7 +4398,6 @@ async function openUmbrella(row){
     full?.id
   );
 }
-
 
 
 // ---- Audit (Outbox)
@@ -4495,16 +4520,9 @@ async function renderSettingsPanel(content){
       btnSave.disabled = true;
     }
   }
-  function toView() {
-    mode = 'view'; dirty = false;
-    setReadOnly(true);
-    repaintButtons();
-  }
-  function toEdit() {
-    mode = 'edit'; dirty = false;
-    setReadOnly(false);
-    repaintButtons();
-  }
+  function toView() { mode = 'view'; dirty = false; setReadOnly(true);  repaintButtons(); }
+  function toEdit() { mode = 'edit'; dirty = false; setReadOnly(false); repaintButtons(); }
+
   function refillFrom(obj) {
     // Reset form inputs from a settings object
     const map = new Map([...formEl.querySelectorAll('input,select,textarea')].map(el => [el.name, el]));
@@ -4530,11 +4548,7 @@ async function renderSettingsPanel(content){
   repaintButtons();
 
   // Dirty tracking (only in edit mode)
-  const onDirty = (e) => {
-    if (mode !== 'edit') return;
-    dirty = true;
-    repaintButtons();
-  };
+  const onDirty = (e) => { if (mode !== 'edit') return; dirty = true; repaintButtons(); };
   formEl.addEventListener('input', onDirty, true);
   formEl.addEventListener('change', onDirty, true);
 
@@ -4548,12 +4562,7 @@ async function renderSettingsPanel(content){
   // Cancel / Discard / Close
   btnCancel.onclick = () => {
     if (mode === 'edit') {
-      if (!dirty) {
-        // Cancel: no changes → back to view without closing
-        toView();
-        return;
-      }
-      // Discard: restore snapshot
+      if (!dirty) { toView(); return; }
       const ok = window.confirm('Discard changes and return to view?');
       if (!ok) return;
       s = JSON.parse(JSON.stringify(snapshot));
@@ -4562,9 +4571,9 @@ async function renderSettingsPanel(content){
       return;
     }
     // mode === 'view' → Close the settings panel view (navigate away)
-    // Keep behaviour consistent with app: return to whatever section was last used.
-    // If you prefer to stay, simply do nothing here.
-    // For now we’ll keep the panel visible; no close action needed.
+    // Keep behaviour consistent with the rest of the app: go back to the main list.
+    currentSection = 'candidates';
+    renderAll();
   };
 
   // Save
@@ -4581,8 +4590,7 @@ async function renderSettingsPanel(content){
 
     try {
       await saveSettings(payload);
-      // Update live settings + snapshot to saved state
-      s = { ...s, ...payload };
+      s = { ...s, ...payload };           // Update live settings + snapshot
       snapshot = JSON.parse(JSON.stringify(s));
       toView();
       hintEl.textContent = 'Saved.';
@@ -4703,15 +4711,49 @@ function _setFrameMode(frame, mode) {
 }
 
 
-// ===== Small helpers =====
+// ===== Small helpers (fixed attribute serialization + HTML escaping) =====
 const html = (s)=> s;
-const input = (name, label, val='', type='text', extra='') => `<div class="row"><label>${label}</label><input name="${name}" type="${type}" value="${val ?? ''}" ${extra}/></div>`;
-const select = (name, label, val, options=[], extra={})=>{
-  const id = extra.id ? `id="${extra.id}"` : '';
-  const opts = options.map(o=>`<option ${String(o)===String(val)?'selected':''}>${o}</option>`).join('');
-  return `<div class="row"><label>${label}</label><select name="${name}" ${id}>${opts}</select></div>`;
+
+const _esc = (v) => String(v)
+  .replace(/&/g,'&amp;')
+  .replace(/</g,'&lt;')
+  .replace(/>/g,'&gt;')
+  .replace(/"/g,'&quot;')
+  .replace(/'/g,'&#39;');
+
+const _attrStr = (extra) => {
+  if (!extra) return '';
+  if (typeof extra === 'string') {
+    const t = extra.trim();
+    return t ? (' ' + t) : '';
+  }
+  if (typeof extra !== 'object') return '';
+  let out = '';
+  for (const [k, v] of Object.entries(extra)) {
+    if (v === false || v == null) continue;      // skip false/null/undefined
+    if (v === true) { out += ` ${k}`; continue; } // boolean attribute
+    out += ` ${k}="${_esc(v)}"`;                  // key="value"
+  }
+  return out;
 };
-const readonly = (label, value)=> `<div class="row"><label>${label}</label><input value="${value ?? ''}" readonly/></div>`;
+
+const input = (name, label, val = '', type = 'text', extra = '') => {
+  const attrs = _attrStr(extra);
+  const value = (val == null ? '' : val);
+  return `<div class="row"><label>${_esc(label)}</label><input name="${_esc(name)}" type="${_esc(type)}" value="${_esc(value)}"${attrs}/></div>`;
+};
+
+const select = (name, label, val, options = [], extra = {}) => {
+  const attrs = _attrStr(extra);
+  const opts = options.map(o => {
+    const selected = String(o) === String(val) ? ' selected' : '';
+    return `<option${selected}>${_esc(o)}</option>`;
+  }).join('');
+  return `<div class="row"><label>${_esc(label)}</label><select name="${_esc(name)}"${attrs}>${opts}</select></div>`;
+};
+
+const readonly = (label, value) =>
+  `<div class="row"><label>${_esc(label)}</label><input value="${_esc(value ?? '')}" readonly/></div>`;
 
 
 /**
