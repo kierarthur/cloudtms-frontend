@@ -134,7 +134,8 @@
       <h3>Tools</h3>
       <div id="toolButtons"></div>
       <div class="group">
-        <div class="note">Tip: Double-click a row to view & edit full details.</div>
+        <!-- Updated to reflect new UX contract -->
+        <div class="note">Tip: Double-click a row to view. Click <strong>Edit</strong> in the dialog to make changes.</div>
       </div>
     </aside>
     <main class="panel main">
@@ -154,7 +155,7 @@
       <div class="modal-h" id="modalDrag">
         <div class="ttl" id="modalTitle">Details</div>
         <div class="spacer"></div>
-        <!-- Removed legacy Related… button to avoid duplicate; related UI is injected dynamically -->
+        <!-- Related UI is injected dynamically -->
         <button id="btnCloseModal">Close</button>
       </div>
       <div class="modal-b">
@@ -165,6 +166,8 @@
         <span class="hint" id="modalHint"></span>
         <div class="spacer"></div>
         <button id="btnDelete" class="danger" style="display:none">Delete</button>
+        <!-- NEW: placeholder for Edit; JS will toggle visibility per mode -->
+        <button id="btnEditModal" style="display:none">Edit</button>
         <button id="btnSave" class="primary">Save</button>
       </div>
     </div>
@@ -249,8 +252,8 @@
     window.BROKER_BASE_URL = window.BROKER_BASE_URL || 'https://cloudtms.kier-88a.workers.dev';
   </script>
 
- <!-- 2) Load the application logic -->
-<script src="./js/main.js"></script>
+  <!-- 2) Load the application logic -->
+  <script src="./js/main.js"></script>
 
 </body>
 </html>
