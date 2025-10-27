@@ -3081,7 +3081,7 @@ async function openClient(row) {
     L('no seedId — create mode');
   }
 
-  // 2) Build modal context from hydrated data — seed window.modalCtx
+  // 2) Seed window.modalCtx and SHOW IMMEDIATELY (do NOT preload first)
   const fullKeys = Object.keys(full || {});
   L('seeding window.modalCtx', { entity: 'clients', fullId: full?.id, fullKeys });
 
@@ -3103,45 +3103,7 @@ async function openClient(row) {
     openToken: window.modalCtx.openToken
   });
 
-  // 3) Preload client-specific state (rates/hospitals/settings)
-  if (full?.id) {
-    const token = window.modalCtx.openToken;
-
-    try {
-      L('[listClientRates] GET', { client_id: full.id, token });
-      const unified = await listClientRates(full.id);
-      L('[listClientRates] result', { count: Array.isArray(unified) ? unified.length : -1, sameToken: token === window.modalCtx.openToken, modalCtxId: window.modalCtx.data?.id });
-      if (token === window.modalCtx.openToken && window.modalCtx.data?.id === full.id) {
-        window.modalCtx.ratesState = Array.isArray(unified) ? unified.map(r => ({ ...r })) : [];
-      }
-    } catch (e) { E('openClient preload rates error', e); }
-
-    try {
-      L('[listClientHospitals] GET', { client_id: full.id, token });
-      const hospitals = await listClientHospitals(full.id);
-      L('[listClientHospitals] result', { count: Array.isArray(hospitals) ? hospitals.length : -1, sameToken: token === window.modalCtx.openToken, modalCtxId: window.modalCtx.data?.id });
-      if (token === window.modalCtx.openToken && window.modalCtx.data?.id === full.id) {
-        window.modalCtx.hospitalsState.existing = Array.isArray(hospitals) ? hospitals.slice() : [];
-      }
-    } catch (e) { E('openClient preload hospitals error', e); }
-
-    try {
-      const url2 = API(`/api/clients/${encodeURIComponent(full.id)}`);
-      L('[HTTP] GET (client settings)', url2);
-      const r2 = await authFetch(url2);
-      L('[HTTP] status (client settings)', r2?.status, r2?.ok);
-      if (r2.ok) {
-        const clientObj = await r2.json().catch(()=> ({}));
-        const cs = clientObj && (clientObj.client_settings || clientObj.settings || {});
-        if (token === window.modalCtx.openToken && window.modalCtx.data?.id === full.id) {
-          window.modalCtx.clientSettingsState = (cs && typeof cs === 'object') ? JSON.parse(JSON.stringify(cs)) : {};
-          L('clientSettingsState keys', Object.keys(window.modalCtx.clientSettingsState||{}));
-        }
-      }
-    } catch (e) { E('openClient preload client settings error', e); }
-  }
-
-  // 4) Render modal (now hydrated)
+  // 3) Render modal NOW (first paint uses hydrated "full")
   L('calling showModal with hasId=', !!full?.id, 'rawHasIdArg=', full?.id);
   showModal(
     'Client',
@@ -3294,6 +3256,51 @@ async function openClient(row) {
     },
     full?.id
   );
+
+  // 4) Post-paint async companion loads (TOKEN/ID GUARDED like candidate)
+  if (full?.id) {
+    const token = window.modalCtx.openToken;
+    const id    = full.id;
+
+    try {
+      L('[listClientRates] POST-PAINT GET', { id, token });
+      const unified = await listClientRates(id);
+      L('[listClientRates] POST-PAINT result', { count: Array.isArray(unified) ? unified.length : -1, sameToken: token === window.modalCtx.openToken, modalCtxId: window.modalCtx.data?.id });
+      if (token === window.modalCtx.openToken && window.modalCtx.data?.id === id) {
+        window.modalCtx.ratesState = Array.isArray(unified) ? unified.map(r => ({ ...r })) : [];
+        // If you want a live refresh of the rates tab table, call its renderer here
+        // e.g., if (currentFrame()?.currentTabKey === 'rates') mountClientRatesTab?.();
+      }
+    } catch (e) { E('openClient POST-PAINT rates error', e); }
+
+    try {
+      L('[listClientHospitals] POST-PAINT GET', { id, token });
+      const hospitals = await listClientHospitals(id);
+      L('[listClientHospitals] POST-PAINT result', { count: Array.isArray(hospitals) ? hospitals.length : -1, sameToken: token === window.modalCtx.openToken, modalCtxId: window.modalCtx.data?.id });
+      if (token === window.modalCtx.openToken && window.modalCtx.data?.id === id) {
+        window.modalCtx.hospitalsState.existing = Array.isArray(hospitals) ? hospitals.slice() : [];
+        // e.g., if (currentFrame()?.currentTabKey === 'hospitals') mountClientHospitalsTab?.();
+      }
+    } catch (e) { E('openClient POST-PAINT hospitals error', e); }
+
+    try {
+      const url2 = API(`/api/clients/${encodeURIComponent(id)}`);
+      L('[HTTP] POST-PAINT GET (client settings)', url2);
+      const r2 = await authFetch(url2);
+      L('[HTTP] status (client settings)', r2?.status, r2?.ok);
+      if (r2.ok) {
+        const clientObj = await r2.json().catch(()=> ({}));
+        const cs = clientObj && (clientObj.client_settings || clientObj.settings || {});
+        if (token === window.modalCtx.openToken && window.modalCtx.data?.id === id) {
+          window.modalCtx.clientSettingsState = (cs && typeof cs === 'object') ? JSON.parse(JSON.stringify(cs)) : {};
+          L('POST-PAINT clientSettingsState keys', Object.keys(window.modalCtx.clientSettingsState||{}));
+          // e.g., if (currentFrame()?.currentTabKey === 'settings') renderClientSettingsUI?.(window.modalCtx.clientSettingsState||{});
+        }
+      }
+    } catch (e) { E('openClient POST-PAINT client settings error', e); }
+  } else {
+    L('skip companion loads (no full.id)');
+  }
 }
 
 
@@ -4572,7 +4579,7 @@ async function openUmbrella(row){
     L('no seedId — create mode');
   }
 
-  // 2) Build modal context from hydrated data — seed window.modalCtx
+  // 2) Seed window.modalCtx and SHOW IMMEDIATELY
   const fullKeys = Object.keys(full || {});
   L('seeding window.modalCtx', { entity: 'umbrellas', fullId: full?.id, fullKeys });
 
@@ -4594,7 +4601,7 @@ async function openUmbrella(row){
     openToken: window.modalCtx.openToken
   });
 
-  // 3) Render modal (now hydrated)
+  // 3) Render modal NOW
   L('calling showModal with hasId=', !!full?.id, 'rawHasIdArg=', full?.id);
   showModal(
     'Umbrella',
@@ -4651,6 +4658,9 @@ async function openUmbrella(row){
     },
     full?.id
   );
+
+  // (Umbrella has no heavy post-paint preloads in your snippet; if you add any later,
+  // keep them here, after showModal, and guard with token/id like in openClient.)
 }
 
 
