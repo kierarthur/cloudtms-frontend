@@ -2748,7 +2748,7 @@ async function mountCandidateRatesTab() {
 // ✅ UPDATED — Apply (stage), gate against client defaults active at date_from,
 //    auto-truncate incumbent of same rate_type at N−1 (staged), NO persistence here
 async function openCandidateRateModal(candidate_id, existing) {
-  const parentFrame = _currentFrame();
+  const parentFrame = _currentFrame();                       // this is the PARENT at call time
   const parentEditable = parentFrame && parentFrame.mode === 'edit';
 
   const clients = await listClientsBasic();
@@ -2812,8 +2812,11 @@ async function openCandidateRateModal(candidate_id, existing) {
     [{ key:'form', label:'Form' }],
     () => formHtml,
     async () => {
-      const pf = _parentFrame();
-      if (!pf || pf.mode !== 'edit') return false;
+      // 🔧 FIX: rely on captured parentEditable instead of _parentFrame()
+      if (!parentEditable) {
+        alert('Open the candidate in Edit mode to add/modify overrides.');
+        return false; // prevent staging when parent isn’t editable
+      }
 
       const raw = collectForm('#candRateForm');
 
@@ -2888,7 +2891,7 @@ async function openCandidateRateModal(candidate_id, existing) {
 
         if (ov.id) O.stagedEdits[ov.id] = { ...(O.stagedEdits[ov.id]||{}), date_to: cut };
         else {
-          // Might be a staged-new row; update by _tmpId if present or by index
+          // staged-new: update by stable _tmpId (not by object reference)
           const ix = O.stagedNew.findIndex(s => s._tmpId && ov._tmpId && s._tmpId === ov._tmpId);
           if (ix >= 0) O.stagedNew[ix] = { ...O.stagedNew[ix], date_to: cut };
           else {
@@ -2898,16 +2901,12 @@ async function openCandidateRateModal(candidate_id, existing) {
         }
       }
 
-      // === FIX: update staged-new by _tmpId instead of object reference =================
+      // edit vs new staging
       if (existing?.id) {
-        // Persisted row being edited → stage into edits
         O.stagedEdits[existing.id] = { ...O.stagedEdits[existing.id], ...staged };
       } else if (existing && !existing.id) {
-        // It’s a staged-new clone from the table; find original by stable _tmpId
         const tmpId = existing._tmpId || null;
         let idx = (tmpId ? O.stagedNew.findIndex(r => r._tmpId === tmpId) : -1);
-
-        // Fallback (rare): try to match by full key if _tmpId missing
         if (idx < 0) {
           idx = O.stagedNew.findIndex(r =>
             String(r.client_id) === String(existing.client_id) &&
@@ -2918,7 +2917,6 @@ async function openCandidateRateModal(candidate_id, existing) {
             String(r.date_to||'')   === String(existing.date_to||'')
           );
         }
-
         if (idx >= 0) {
           const keepTmp = O.stagedNew[idx]._tmpId || tmpId || `tmp_${Date.now()}`;
           O.stagedNew[idx] = { ...O.stagedNew[idx], ...staged, _tmpId: keepTmp };
@@ -2926,23 +2924,28 @@ async function openCandidateRateModal(candidate_id, existing) {
           O.stagedNew.push({ ...staged, _tmpId: tmpId || `tmp_${Date.now()}` });
         }
       } else {
-        // Brand new staged row
         O.stagedNew.push({ ...staged, _tmpId: `tmp_${Date.now()}` });
       }
-      // =====================================================================
 
-      await renderCandidateRatesTable();
+      // Safe re-render (only if parent DOM is currently mounted)
+      if (document.getElementById('ratesTable')) {
+        await renderCandidateRatesTable();
+      }
+
+      // Signal parent to enable Save; parent listener will set isDirty when child closes
       try { window.dispatchEvent(new CustomEvent('modal-dirty')); } catch {}
-      return true; // child Apply closes child
+
+      return true; // child Apply ⇒ ok; showModal will close child, mark parent dirty, and re-render
     },
     false,
     () => {
+      // After child closes, force parent to land on Rates and re-mount the tab
       const parent = _currentFrame();
       if (parent) { parent.currentTabKey = 'rates'; parent.setTab('rates'); }
     }
   );
 
-  // After mount: prefill and wire
+  // — Prefill & wireup (unchanged) —
   const selClient = document.getElementById('cr_client_id');
   const selRateT  = document.getElementById('cr_rate_type');
   const selRole   = document.getElementById('cr_role');
@@ -3031,6 +3034,7 @@ async function openCandidateRateModal(candidate_id, existing) {
     await refreshClientRoles(initialClientId);
   }
 }
+
 
 
 function renderCalendar(timesheets){
@@ -3500,7 +3504,7 @@ async function mountCandidatePayTab(){
     [accHolder, bankName, sortCode, accNum].forEach(el => { if (el) el.disabled = !!disabled; });
   }
 
-  // Helper to unwrap list shapes
+  // Helpers
   const unwrapList = (data) => {
     if (Array.isArray(data)) return data;
     if (data && Array.isArray(data.items)) return data.items;
@@ -3508,12 +3512,64 @@ async function mountCandidatePayTab(){
     if (data && Array.isArray(data.data))  return data.data;
     return [];
   };
+  const unwrapSingle = (data) => {
+    if (!data) return null;
+    if (Array.isArray(data)) return data[0] || null;
+    if (data && data.item) return data.item;
+    if (data && Array.isArray(data.items)) return data.items[0] || null;
+    if (data && Array.isArray(data.rows))  return data.rows[0]  || null;
+    if (data && Array.isArray(data.data))  return data.data[0]  || null;
+    return (typeof data === 'object') ? data : null;
+  };
+
+  const normaliseSort = (v) => {
+    if (!v) return '';
+    const digits = String(v).replace(/\D+/g, '').slice(0,6);
+    if (digits.length !== 6) return v; // leave as-is if unusual
+    return digits.replace(/(\d{2})(\d{2})(\d{2})/, '$1-$2-$3');
+  };
+
+  async function fetchUmbrellaById(id) {
+    try {
+      const res = await authFetch(API(`/api/umbrellas/${encodeURIComponent(id)}`));
+      if (!res || !res.ok) return null;
+      const json = await res.json().catch(() => null);
+      return unwrapSingle(json);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function prefillUmbrellaBankFields(umb) {
+    if (!umb) return;
+    // Prefer explicit bank fields; fall back to common aliases
+    const bank = umb.bank_name || umb.bank || umb.bankName || '';
+    const sc   = umb.sort_code || umb.bank_sort_code || umb.sortCode || '';
+    const an   = umb.account_number || umb.bank_account_number || umb.accountNumber || '';
+    const ah   = umb.account_holder || umb.bank_account_name || umb.accountHolder || umb.name || '';
+
+    if (bankName)  bankName.value  = bank;
+    if (sortCode)  sortCode.value  = normaliseSort(sc);
+    if (accNum)    accNum.value    = an;
+    if (accHolder && (!accHolder.value || accHolder.value.trim() === '')) accHolder.value = ah;
+  }
+
+  async function fetchAndPrefill(id) {
+    if (!id) return;
+    const umb = await fetchUmbrellaById(id);
+    if (umb) {
+      // Ensure visible name/id reflect the fetched umbrella
+      if (nameInput) nameInput.value = umb.name || nameInput.value || '';
+      if (idHidden)  idHidden.value  = umb.id   || idHidden.value  || '';
+      prefillUmbrellaBankFields(umb);
+    }
+  }
 
   if (payMethod === 'UMBRELLA') {
     if (umbRow) umbRow.style.display = '';
-    setBankDisabled(true);
+    setBankDisabled(true); // umbrella: bank details come from umbrella, not editable
 
-    // Load umbrellas
+    // Load umbrellas for the datalist (helps user search/change)
     let umbrellas = [];
     try {
       const res = await authFetch(API('/api/umbrellas'));
@@ -3523,7 +3579,6 @@ async function mountCandidatePayTab(){
       }
     } catch (_) { umbrellas = []; }
 
-    // Populate datalist
     if (listEl) {
       listEl.innerHTML = (umbrellas || []).map(u => {
         const label = u.name || u.remittance_email || u.id;
@@ -3531,29 +3586,35 @@ async function mountCandidatePayTab(){
       }).join('');
     }
 
-    // Preselect current umbrella
-    if (currentUmbId && nameInput) {
-      const match = (umbrellas || []).find(u => String(u.id) === String(currentUmbId));
-      if (match) {
-        nameInput.value = match.name || '';
-        if (idHidden) idHidden.value = match.id;
-        if (accHolder) accHolder.value = match.name || '';
+    // If candidate already has an umbrella_id, fetch its bank details now
+    if (currentUmbId) {
+      await fetchAndPrefill(currentUmbId);
+    } else {
+      // If only a name is stored (rare), try to find and prefill
+      const typed = nameInput && nameInput.value ? nameInput.value.trim() : '';
+      if (typed && umbrellas.length) {
+        const hit = umbrellas.find(u => (u.name || '').trim() === typed);
+        if (hit) await fetchAndPrefill(hit.id);
       }
     }
 
-    // Change handler: set hidden id based on typed label
+    // Change handler: when user picks an umbrella by label, set id and prefill
     function syncUmbrellaSelection() {
-      const val = nameInput.value.trim();
+      const val = (nameInput && nameInput.value) ? nameInput.value.trim() : '';
       if (!val) { if (idHidden) idHidden.value = ''; return; }
-      // Try to find exact match by displayed label
       const allOpts = Array.from((listEl && listEl.options) ? listEl.options : []);
-      const hit = allOpts.find(o => o.value === val);
-      if (hit && hit.getAttribute('data-id')) {
-        if (idHidden) idHidden.value = hit.getAttribute('data-id');
-        if (accHolder) accHolder.value = val;
+      const hitOpt = allOpts.find(o => o.value === val);
+      const id = hitOpt && hitOpt.getAttribute('data-id');
+      if (id) {
+        if (idHidden) idHidden.value = id;
+        fetchAndPrefill(id); // async, no await to keep UI snappy
       } else {
-        // no match — clear id but keep typed label
+        // No exact label match → clear id & bank fields
         if (idHidden) idHidden.value = '';
+        if (bankName) bankName.value = '';
+        if (sortCode) sortCode.value = '';
+        if (accNum)   accNum.value   = '';
+        // leave account_holder as-is in case the user typed a custom one
       }
     }
 
@@ -3562,8 +3623,30 @@ async function mountCandidatePayTab(){
       nameInput.oninput = syncUmbrellaSelection;
       nameInput.onchange = syncUmbrellaSelection;
     }
+
+    // Also respond if the hidden id changes programmatically
+    if (idHidden) {
+      idHidden.addEventListener('change', () => fetchAndPrefill(idHidden.value));
+    }
+
+    // If user changes pay method while this tab is open, re-apply UI
+    const onPmChanged = () => {
+      const pm = (window.modalCtx?.payMethodState || window.modalCtx?.data?.pay_method || 'PAYE').toUpperCase();
+      if (pm !== 'UMBRELLA') {
+        if (umbRow) umbRow.style.display = 'none';
+        setBankDisabled(!isEdit);
+      } else {
+        if (umbRow) umbRow.style.display = '';
+        setBankDisabled(true);
+        // If we just flipped to Umbrella, try to prefill from selected id
+        const id = (idHidden && idHidden.value) ? idHidden.value : (window.modalCtx?.data?.umbrella_id || '');
+        if (id) fetchAndPrefill(id);
+      }
+    };
+    try { window.addEventListener('pay-method-changed', onPmChanged, { once: true }); } catch {}
+
   } else {
-    // PAYE: hide umbrella row and enable bank fields
+    // PAYE: hide umbrella row and enable bank fields for editing
     if (umbRow) umbRow.style.display = 'none';
     setBankDisabled(!isEdit);
     if (nameInput && idHidden) { nameInput.value = ''; idHidden.value = ''; }
