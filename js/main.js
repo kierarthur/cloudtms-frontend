@@ -4197,8 +4197,6 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
 }
 
 
-
-
 // =================== ADD HOSPITAL MODAL (UPDATED: push into stagedNew) ===================
 // ==== CHILD MODAL (ADD HOSPITAL) — throw on errors; return true on success ====
 function openClientHospitalModal(client_id) {
