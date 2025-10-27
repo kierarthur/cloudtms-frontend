@@ -2132,7 +2132,7 @@ async function openDelete(){
 // ================== FIXED: openCandidate (hydrate before showModal) ==================
 async function openCandidate(row) {
   // ===== Logging helpers (toggle with window.__LOG_MODAL = true/false) =====
-  const LOG = (typeof window.__LOG_MODAL === 'boolean') ? window.__LOG_MODAL : true;
+  const LOG = (typeof window.__LOG_MODAL === 'boolean') ? window.__LOG_MODAL : false;
   const L  = (...a)=> { if (LOG) console.log('[OPEN_CANDIDATE]', ...a); };
   const W  = (...a)=> { if (LOG) console.warn('[OPEN_CANDIDATE]', ...a); };
   const E  = (...a)=> { if (LOG) console.error('[OPEN_CANDIDATE]', ...a); };
@@ -3031,9 +3031,17 @@ function renderCalendar(timesheets){
 // ================== FIXED: openClient (hydrate before showModal) ==================
 // ================== FIXED: openClient (hydrate before showModal) ==================
 async function openClient(row) {
+  // ===== Logging helpers (toggle with window.__LOG_MODAL = true/false) =====
+  const LOG = (typeof window.__LOG_MODAL === 'boolean') ? window.__LOG_MODAL : true;
+  const L  = (...a)=> { if (LOG) console.log('[OPEN_CLIENT]', ...a); };
+  const W  = (...a)=> { if (LOG) console.warn('[OPEN_CLIENT]', ...a); };
+  const E  = (...a)=> { if (LOG) console.error('[OPEN_CLIENT]', ...a); };
+
   const deep = (o)=> JSON.parse(JSON.stringify(o || {}));
   const incoming = deep(row || {});
   const seedId   = incoming?.id || null;
+
+  L('ENTRY', { incomingKeys: Object.keys(incoming||{}), seedId });
 
   const unwrapSingle = (data, key) => {
     if (Array.isArray(data)) return data[0] || null;
@@ -3048,18 +3056,36 @@ async function openClient(row) {
   let full = incoming;
   if (seedId) {
     try {
-      const r = await authFetch(API(`/api/clients/${encodeURIComponent(seedId)}`));
+      const url = API(`/api/clients/${encodeURIComponent(seedId)}`);
+      L('[HTTP] GET', url);
+      const r = await authFetch(url);
+      L('[HTTP] status', r?.status, r?.ok);
+
+      try {
+        const raw = await r.clone().text();
+        if (LOG) console.debug('[HTTP] raw body (≤2KB):', raw.slice(0, 2048));
+      } catch (peekErr) { W('[HTTP] raw peek failed', peekErr?.message || peekErr); }
+
       if (r.ok) {
         const data = await r.json().catch(()=> ({}));
-        full = unwrapSingle(data, 'client') || incoming;
+        const unwrapped = unwrapSingle(data, 'client');
+        L('hydrated JSON keys', Object.keys(data||{}), 'unwrapped keys', Object.keys(unwrapped||{}));
+        full = unwrapped || incoming;
+      } else {
+        W('non-OK response, using incoming row');
       }
     } catch (e) {
-      console.warn('openClient hydrate failed; using summary row', e);
+      W('openClient hydrate failed; using summary row', e);
     }
+  } else {
+    L('no seedId — create mode');
   }
 
-  // 2) Build modal context from hydrated data
-  modalCtx = {
+  // 2) Build modal context from hydrated data — seed window.modalCtx
+  const fullKeys = Object.keys(full || {});
+  L('seeding window.modalCtx', { entity: 'clients', fullId: full?.id, fullKeys });
+
+  window.modalCtx = {
     entity: 'clients',
     data: deep(full),
     formState: { __forId: full?.id || null, main: {} },
@@ -3069,36 +3095,54 @@ async function openClient(row) {
     openToken: ((full?.id) || 'new') + ':' + Date.now()
   };
 
+  L('window.modalCtx seeded', {
+    entity: window.modalCtx.entity,
+    dataId: window.modalCtx.data?.id,
+    dataKeys: Object.keys(window.modalCtx.data||{}),
+    formStateForId: window.modalCtx.formState?.__forId,
+    openToken: window.modalCtx.openToken
+  });
+
   // 3) Preload client-specific state (rates/hospitals/settings)
   if (full?.id) {
-    const token = modalCtx.openToken;
+    const token = window.modalCtx.openToken;
+
     try {
+      L('[listClientRates] GET', { client_id: full.id, token });
       const unified = await listClientRates(full.id);
-      if (token === modalCtx.openToken && modalCtx.data?.id === full.id) {
-        modalCtx.ratesState = Array.isArray(unified) ? unified.map(r => ({ ...r })) : [];
+      L('[listClientRates] result', { count: Array.isArray(unified) ? unified.length : -1, sameToken: token === window.modalCtx.openToken, modalCtxId: window.modalCtx.data?.id });
+      if (token === window.modalCtx.openToken && window.modalCtx.data?.id === full.id) {
+        window.modalCtx.ratesState = Array.isArray(unified) ? unified.map(r => ({ ...r })) : [];
       }
-    } catch (e) { console.error('openClient preload rates error', e); }
+    } catch (e) { E('openClient preload rates error', e); }
 
     try {
+      L('[listClientHospitals] GET', { client_id: full.id, token });
       const hospitals = await listClientHospitals(full.id);
-      if (token === modalCtx.openToken && modalCtx.data?.id === full.id) {
-        modalCtx.hospitalsState.existing = Array.isArray(hospitals) ? hospitals.slice() : [];
+      L('[listClientHospitals] result', { count: Array.isArray(hospitals) ? hospitals.length : -1, sameToken: token === window.modalCtx.openToken, modalCtxId: window.modalCtx.data?.id });
+      if (token === window.modalCtx.openToken && window.modalCtx.data?.id === full.id) {
+        window.modalCtx.hospitalsState.existing = Array.isArray(hospitals) ? hospitals.slice() : [];
       }
-    } catch (e) { console.error('openClient preload hospitals error', e); }
+    } catch (e) { E('openClient preload hospitals error', e); }
 
     try {
-      const r = await authFetch(API(`/api/clients/${encodeURIComponent(full.id)}`));
-      if (r.ok) {
-        const clientObj = await r.json().catch(()=> ({}));
+      const url2 = API(`/api/clients/${encodeURIComponent(full.id)}`);
+      L('[HTTP] GET (client settings)', url2);
+      const r2 = await authFetch(url2);
+      L('[HTTP] status (client settings)', r2?.status, r2?.ok);
+      if (r2.ok) {
+        const clientObj = await r2.json().catch(()=> ({}));
         const cs = clientObj && (clientObj.client_settings || clientObj.settings || {});
-        if (token === modalCtx.openToken && modalCtx.data?.id === full.id) {
-          modalCtx.clientSettingsState = (cs && typeof cs === 'object') ? JSON.parse(JSON.stringify(cs)) : {};
+        if (token === window.modalCtx.openToken && window.modalCtx.data?.id === full.id) {
+          window.modalCtx.clientSettingsState = (cs && typeof cs === 'object') ? JSON.parse(JSON.stringify(cs)) : {};
+          L('clientSettingsState keys', Object.keys(window.modalCtx.clientSettingsState||{}));
         }
       }
-    } catch (e) { console.error('openClient preload client settings error', e); }
+    } catch (e) { E('openClient preload client settings error', e); }
   }
 
   // 4) Render modal (now hydrated)
+  L('calling showModal with hasId=', !!full?.id, 'rawHasIdArg=', full?.id);
   showModal(
     'Client',
     [
@@ -3107,33 +3151,38 @@ async function openClient(row) {
       {key:'settings', label:'Client settings'},
       {key:'hospitals',label:'Hospitals & wards'}
     ],
-    renderClientTab,
+    (k, r) => { L('[renderClientTab] tab=', k, 'rowKeys=', Object.keys(r||{}), 'sample=', { name: r?.name, id: r?.id }); return renderClientTab(k, r); },
     async ()=> {
-      const isNew = !modalCtx?.data?.id;
+      L('[onSave] begin', { dataId: window.modalCtx?.data?.id, forId: window.modalCtx?.formState?.__forId });
+      const isNew = !window.modalCtx?.data?.id;
 
-      const fs = modalCtx.formState || { __forId: null, main:{} };
-      const same = (!!modalCtx.data?.id && fs.__forId === modalCtx.data.id) || (!modalCtx.data?.id && fs.__forId == null);
+      const fs = window.modalCtx.formState || { __forId: null, main:{} };
+      const same = (!!window.modalCtx.data?.id && fs.__forId === window.modalCtx.data.id) || (!window.modalCtx.data?.id && fs.__forId == null);
       const stagedMain = same ? (fs.main || {}) : {};
       const liveMain   = byId('tab-main') ? collectForm('#tab-main') : {};
       const payload    = { ...stagedMain, ...liveMain };
+
+      L('[onSave] collected', { same, stagedKeys: Object.keys(stagedMain||{}), liveKeys: Object.keys(liveMain||{}) });
 
       delete payload.cli_ref;
 
       if (!payload.name && full?.name) payload.name = full.name;
       if (!payload.name) { alert('Client name is required.'); return { ok:false }; }
 
-      if (modalCtx.clientSettingsState && typeof modalCtx.clientSettingsState === 'object') {
-        payload.client_settings = modalCtx.clientSettingsState;
+      if (window.modalCtx.clientSettingsState && typeof window.modalCtx.clientSettingsState === 'object') {
+        payload.client_settings = window.modalCtx.clientSettingsState;
       }
 
-      const idForUpdate = modalCtx?.data?.id || full?.id || null;
-      const clientResp  = await upsertClient(payload, idForUpdate);
+      const idForUpdate = window.modalCtx?.data?.id || full?.id || null;
+      L('[onSave] upsertClient', { idForUpdate, payloadKeys: Object.keys(payload||{}) });
+      const clientResp  = await upsertClient(payload, idForUpdate).catch(err => { E('upsertClient failed', err); return null; });
       const clientId    = idForUpdate || (clientResp && clientResp.id);
+      L('[onSave] saved', { ok: !!clientResp, clientId, savedKeys: Object.keys(clientResp||{}) });
       if (!clientId) { alert('Failed to save client'); return { ok:false }; }
 
       // Validate & persist staged windows (unchanged)
-      if (clientId && Array.isArray(modalCtx.ratesState)) {
-        const windows = modalCtx.ratesState.slice();
+      if (clientId && Array.isArray(window.modalCtx.ratesState)) {
+        const windows = window.modalCtx.ratesState.slice();
 
         for (let i = 0; i < windows.length; i++) {
           for (let j = i + 1; j < windows.length; j++) {
@@ -3153,6 +3202,7 @@ async function openClient(row) {
 
         for (const w of windows) {
           try {
+            L('[upsertClientRate]', { role: w.role, band: w.band, from: w.date_from, to: w.date_to });
             await upsertClientRate({
               client_id : clientId,
               role      : w.role || '',
@@ -3180,7 +3230,7 @@ async function openClient(row) {
               umb_bh       : w.umb_bh       ?? null
             });
           } catch (e) {
-            console.error('Upsert client default window failed', w, e);
+            E('Upsert client default window failed', w, e);
             alert('Failed to save a client rate window. See console for details.');
             return { ok:false };
           }
@@ -3188,8 +3238,8 @@ async function openClient(row) {
       }
 
       // Commit staged hospitals (unchanged)
-      if (clientId && modalCtx.hospitalsState && typeof modalCtx.hospitalsState === 'object') {
-        const H = modalCtx.hospitalsState;
+      if (clientId && window.modalCtx.hospitalsState && typeof window.modalCtx.hospitalsState === 'object') {
+        const H = window.modalCtx.hospitalsState;
         const existingAlive = (H.existing || []).filter(x => !H.stagedDeletes.has(x.id));
         const names = new Set(existingAlive.map(x => String(x.hospital_name_norm||'').trim().toUpperCase()).filter(Boolean));
 
@@ -3220,7 +3270,7 @@ async function openClient(row) {
           const res = await authFetch(API(`/api/clients/${clientId}/hospitals/${encodeURIComponent(hid)}`), {
             method:'PATCH', headers:{'content-type':'application/json'}, body: JSON.stringify(patch)
           });
-            if (!res.ok) { const msg = await res.text().catch(()=> ''); alert(`Update hospital failed: ${msg}`); return { ok:false }; }
+          if (!res.ok) { const msg = await res.text().catch(()=> ''); alert(`Update hospital failed: ${msg}`); return { ok:false }; }
         }
 
         for (const hid of (H.stagedDeletes || new Set())) {
@@ -3229,16 +3279,23 @@ async function openClient(row) {
         }
       }
 
-      modalCtx.data      = { ...(modalCtx.data || {}), ...(clientResp || {}), id: clientId };
-      modalCtx.formState = { __forId: clientId, main:{} };
+      window.modalCtx.data      = { ...(window.modalCtx.data || {}), ...(clientResp || {}), id: clientId };
+      window.modalCtx.formState = { __forId: clientId, main:{} };
+
+      L('[onSave] final window.modalCtx', {
+        dataId: window.modalCtx.data?.id,
+        dataKeys: Object.keys(window.modalCtx.data||{}),
+        formStateForId: window.modalCtx.formState?.__forId
+      });
 
       if (isNew) window.__pendingFocus = { section: 'clients', id: clientId };
 
-      return { ok: true, saved: modalCtx.data };
+      return { ok: true, saved: window.modalCtx.data };
     },
     full?.id
   );
 }
+
 
 
 
@@ -3608,7 +3665,7 @@ async function openClientRateModal(client_id, existing) {
 
 function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
   // ===== Logging helpers (toggle with window.__LOG_MODAL = true/false) =====
-  const LOG = (typeof window.__LOG_MODAL === 'boolean') ? window.__LOG_MODAL : true;
+  const LOG = (typeof window.__LOG_MODAL === 'boolean') ? window.__LOG_MODAL : false;
   const L  = (...a)=> { if (LOG) console.log('[MODAL]', ...a); };
   const GC = (label)=> { if (LOG) console.groupCollapsed('[MODAL]', label); };
   const GE = ()=> { if (LOG) console.groupEnd(); };
@@ -4465,9 +4522,17 @@ async function renderClientSettingsUI(settingsObj){
 // ================== FIXED: openUmbrella (hydrate before showModal) ==================
 // ================== FIXED: openUmbrella (hydrate before showModal) ==================
 async function openUmbrella(row){
+  // ===== Logging helpers (toggle with window.__LOG_MODAL = true/false) =====
+  const LOG = (typeof window.__LOG_MODAL === 'boolean') ? window.__LOG_MODAL : true;
+  const L  = (...a)=> { if (LOG) console.log('[OPEN_UMBRELLA]', ...a); };
+  const W  = (...a)=> { if (LOG) console.warn('[OPEN_UMBRELLA]', ...a); };
+  const E  = (...a)=> { if (LOG) console.error('[OPEN_UMBRELLA]', ...a); };
+
   const deep = (o)=> JSON.parse(JSON.stringify(o || {}));
   const incoming = deep(row || {});
   const seedId   = incoming?.id || null;
+
+  L('ENTRY', { incomingKeys: Object.keys(incoming||{}), seedId });
 
   const unwrapSingle = (data, key) => {
     if (Array.isArray(data)) return data[0] || null;
@@ -4482,18 +4547,36 @@ async function openUmbrella(row){
   let full = incoming;
   if (seedId) {
     try {
-      const res = await authFetch(API(`/api/umbrellas/${encodeURIComponent(seedId)}`));
+      const url = API(`/api/umbrellas/${encodeURIComponent(seedId)}`);
+      L('[HTTP] GET', url);
+      const res = await authFetch(url);
+      L('[HTTP] status', res?.status, res?.ok);
+
+      try {
+        const raw = await res.clone().text();
+        if (LOG) console.debug('[HTTP] raw body (≤2KB):', raw.slice(0, 2048));
+      } catch (peekErr) { W('[HTTP] raw peek failed', peekErr?.message || peekErr); }
+
       if (res.ok) {
         const data = await res.json().catch(()=> ({}));
-        full = unwrapSingle(data, 'umbrella') || incoming;
+        const unwrapped = unwrapSingle(data, 'umbrella');
+        L('hydrated JSON keys', Object.keys(data||{}), 'unwrapped keys', Object.keys(unwrapped||{}));
+        full = unwrapped || incoming;
+      } else {
+        W('non-OK response, using incoming row');
       }
     } catch (e) {
-      console.warn('openUmbrella hydrate failed; using summary row', e);
+      W('openUmbrella hydrate failed; using summary row', e);
     }
+  } else {
+    L('no seedId — create mode');
   }
 
-  // 2) Build modal context from hydrated data
-  modalCtx = {
+  // 2) Build modal context from hydrated data — seed window.modalCtx
+  const fullKeys = Object.keys(full || {});
+  L('seeding window.modalCtx', { entity: 'umbrellas', fullId: full?.id, fullKeys });
+
+  window.modalCtx = {
     entity: 'umbrellas',
     data: deep(full),
     formState: { __forId: full?.id || null, main: {} },
@@ -4503,45 +4586,68 @@ async function openUmbrella(row){
     openToken: ((full?.id) || 'new') + ':' + Date.now()
   };
 
+  L('window.modalCtx seeded', {
+    entity: window.modalCtx.entity,
+    dataId: window.modalCtx.data?.id,
+    dataKeys: Object.keys(window.modalCtx.data||{}),
+    formStateForId: window.modalCtx.formState?.__forId,
+    openToken: window.modalCtx.openToken
+  });
+
   // 3) Render modal (now hydrated)
+  L('calling showModal with hasId=', !!full?.id, 'rawHasIdArg=', full?.id);
   showModal(
     'Umbrella',
     [{ key:'main', label:'Main' }],
-    (key, r)=> html(`
-      <div class="form" id="tab-main">
-        ${input('name','Name', r?.name)}
-        ${input('remittance_email','Remittance email', r?.remittance_email, 'email')}
-        ${input('bank_name','Bank', r?.bank_name)}
-        ${input('sort_code','Sort code', r?.sort_code)}
-        ${input('account_number','Account number', r?.account_number)}
-        ${select('vat_chargeable','VAT chargeable', (r?.vat_chargeable ? 'Yes' : 'No'), ['Yes','No'])}
-        ${select('enabled','Enabled', (r?.enabled === false) ? 'No' : 'Yes', ['Yes','No'])}
-      </div>
-    `),
+    (key, r)=> {
+      L('[renderUmbrellaTab] tab=', key, 'rowKeys=', Object.keys(r||{}), 'sample=', { name: r?.name, id: r?.id });
+      return html(`
+        <div class="form" id="tab-main">
+          ${input('name','Name', r?.name)}
+          ${input('remittance_email','Remittance email', r?.remittance_email, 'email')}
+          ${input('bank_name','Bank', r?.bank_name)}
+          ${input('sort_code','Sort code', r?.sort_code)}
+          ${input('account_number','Account number', r?.account_number)}
+          ${select('vat_chargeable','VAT chargeable', (r?.vat_chargeable ? 'Yes' : 'No'), ['Yes','No'])}
+          ${select('enabled','Enabled', (r?.enabled === false) ? 'No' : 'Yes', ['Yes','No'])}
+        </div>
+      `);
+    },
     async ()=>{
-      const fs = modalCtx.formState || { __forId: null, main:{} };
-      const sameRecord = (!!modalCtx.data?.id && fs.__forId === modalCtx.data.id) || (!modalCtx.data?.id && fs.__forId == null);
+      L('[onSave] begin', { dataId: window.modalCtx?.data?.id, forId: window.modalCtx?.formState?.__forId });
+
+      const fs = window.modalCtx.formState || { __forId: null, main:{} };
+      const sameRecord = (!!window.modalCtx.data?.id && fs.__forId === window.modalCtx.data.id) || (!window.modalCtx.data?.id && fs.__forId == null);
 
       const staged = sameRecord ? (fs.main || {}) : {};
       const live   = collectForm('#tab-main');
       const payload = { ...staged, ...live };
+
+      L('[onSave] collected', { sameRecord, stagedKeys: Object.keys(staged||{}), liveKeys: Object.keys(live||{}) });
 
       if (typeof payload.vat_chargeable !== 'boolean') payload.vat_chargeable = (payload.vat_chargeable === 'Yes' || payload.vat_chargeable === 'true');
       if (typeof payload.enabled        !== 'boolean') payload.enabled        = (payload.enabled        === 'Yes' || payload.enabled        === 'true');
 
       for (const k of Object.keys(payload)) if (payload[k] === '') delete payload[k];
 
-      const idForUpdate = modalCtx?.data?.id || full?.id || null;
-      const saved = await upsertUmbrella(payload, idForUpdate);
+      const idForUpdate = window.modalCtx?.data?.id || full?.id || null;
+      L('[onSave] upsertUmbrella', { idForUpdate, payloadKeys: Object.keys(payload||{}) });
+      const saved = await upsertUmbrella(payload, idForUpdate).catch(err => { E('upsertUmbrella failed', err); return null; });
       const umbrellaId = idForUpdate || (saved && saved.id);
+      L('[onSave] saved', { ok: !!saved, umbrellaId, savedKeys: Object.keys(saved||{}) });
       if (!umbrellaId) { alert('Failed to save umbrella'); return { ok:false }; }
 
-      modalCtx.data      = { ...(modalCtx.data || {}), ...(saved || {}), id: umbrellaId };
-      modalCtx.formState = { __forId: umbrellaId, main: {} };
+      window.modalCtx.data      = { ...(window.modalCtx.data || {}), ...(saved || {}), id: umbrellaId };
+      window.modalCtx.formState = { __forId: umbrellaId, main: {} };
 
       if (!seedId && umbrellaId) window.__pendingFocus = { section: 'umbrellas', id: umbrellaId };
 
-      return { ok: true, saved: modalCtx.data };
+      L('[onSave] final window.modalCtx', {
+        dataId: window.modalCtx.data?.id,
+        dataKeys: Object.keys(window.modalCtx.data||{})
+      });
+
+      return { ok: true, saved: window.modalCtx.data };
     },
     full?.id
   );
