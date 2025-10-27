@@ -2085,20 +2085,38 @@ async function openDelete(){
 // FRONTEND — UPDATED
 // openCandidate: default Account holder from umbrella name if pay_method is UMBRELLA and empty.
 // ================== FRONTEND: openCandidate (UPDATED) ==================
+// ================== FIXED: openCandidate (hydrate before showModal) ==================
 async function openCandidate(row) {
   const deep = (o)=> JSON.parse(JSON.stringify(o || {}));
-  const seedId = row?.id || null;
+  const incoming = deep(row || {});
+  const seedId   = incoming?.id || null;
 
+  // 1) Hydrate full record if we have an id
+  let full = incoming;
+  if (seedId) {
+    try {
+      const res = await authFetch(API(`/api/candidates/${encodeURIComponent(seedId)}`));
+      if (res.ok) {
+        const data = await res.json().catch(()=> ({}));
+        full = Array.isArray(data) ? (data[0] || incoming) : (data.candidate || data || incoming);
+      }
+    } catch (e) {
+      console.warn('openCandidate hydrate failed; using summary row', e);
+    }
+  }
+
+  // 2) Build modal context from hydrated data
   modalCtx = {
     entity: 'candidates',
-    data:   deep(row),
-    formState: { __forId: seedId, main: {}, pay: {} },
-    rolesState: Array.isArray(row?.roles) ? normaliseRolesForSave(row.roles) : [],
+    data:   deep(full),
+    formState: { __forId: full?.id || null, main: {}, pay: {} },
+    rolesState: Array.isArray(full?.roles) ? normaliseRolesForSave(full.roles) : [],
     overrides: { existing: [], stagedNew: [], stagedEdits: {}, stagedDeletes: new Set() },
     clientSettingsState: null,
-    openToken: (seedId || 'new') + ':' + Date.now()
+    openToken: ((full?.id) || 'new') + ':' + Date.now()
   };
 
+  // 3) Render modal (now we have real data to populate fields)
   showModal(
     'Candidate',
     [
@@ -2111,36 +2129,33 @@ async function openCandidate(row) {
     async () => {
       const isNew = !modalCtx?.data?.id;
 
-      const fs = modalCtx.formState || { __forId: null, main:{}, pay:{} };
-      const sameRecord = (!!modalCtx.data?.id && fs.__forId === modalCtx.data.id) || (!modalCtx.data?.id && fs.__forId == null);
-      const stateMain = sameRecord ? (fs.main || {}) : {};
-      const statePay  = sameRecord ? (fs.pay  || {}) : {};
+      const fs   = modalCtx.formState || { __forId: null, main:{}, pay:{} };
+      const same = (!!modalCtx.data?.id && fs.__forId === modalCtx.data.id) || (!modalCtx.data?.id && fs.__forId == null);
+      const stateMain = same ? (fs.main || {}) : {};
+      const statePay  = same ? (fs.pay  || {}) : {};
       const main      = document.querySelector('#tab-main') ? collectForm('#tab-main') : {};
       const pay       = document.querySelector('#tab-pay')  ? collectForm('#tab-pay')  : {};
       const roles     = normaliseRolesForSave(modalCtx.rolesState || []);
       const payload   = { ...stateMain, ...statePay, ...main, ...pay, roles };
 
-      // Never send display-only fields
       delete payload.umbrella_name;
       delete payload.tms_ref;
 
-      if (!payload.first_name && row?.first_name) payload.first_name = row.first_name;
-      if (!payload.last_name  && row?.last_name)  payload.last_name  = row.last_name;
-
-      if (typeof payload.key_norm === 'undefined' && typeof row?.key_norm !== 'undefined') {
-        payload.key_norm = row.key_norm;
-      }
+      // Carry forward untouched fields from hydrated row
+      if (!payload.first_name && full?.first_name) payload.first_name = full.first_name;
+      if (!payload.last_name  && full?.last_name)  payload.last_name  = full.last_name;
+      if (typeof payload.key_norm === 'undefined' && typeof full?.key_norm !== 'undefined') payload.key_norm = full.key_norm;
 
       if (!payload.display_name) {
         const dn = [payload.first_name, payload.last_name].filter(Boolean).join(' ').trim();
-        payload.display_name = dn || row?.display_name || null;
+        payload.display_name = dn || full?.display_name || null;
       }
 
-      if (!payload.pay_method) payload.pay_method = isNew ? 'PAYE' : (row?.pay_method || 'PAYE');
+      if (!payload.pay_method) payload.pay_method = isNew ? 'PAYE' : (full?.pay_method || 'PAYE');
 
       if (payload.pay_method === 'UMBRELLA') {
-        if ((!payload.umbrella_id || payload.umbrella_id === '') && row?.umbrella_id) {
-          payload.umbrella_id = row.umbrella_id;
+        if ((!payload.umbrella_id || payload.umbrella_id === '') && full?.umbrella_id) {
+          payload.umbrella_id = full.umbrella_id;
         }
         if (!payload.account_holder) {
           const umbNameEl = document.querySelector('#tab-pay #umbrella_name');
@@ -2150,27 +2165,22 @@ async function openCandidate(row) {
 
       if (isNew && !payload.first_name && !payload.last_name) { alert('Enter at least a first or last name.'); return { ok:false }; }
       if (payload.pay_method === 'PAYE') payload.umbrella_id = null;
-      else {
-        if (!payload.umbrella_id || payload.umbrella_id === '') { alert('Select an umbrella company for UMBRELLA pay.'); return { ok:false }; }
-      }
+      else if (!payload.umbrella_id || payload.umbrella_id === '') { alert('Select an umbrella company for UMBRELLA pay.'); return { ok:false }; }
       if (payload.umbrella_id === '') payload.umbrella_id = null;
 
       for (const k of Object.keys(payload)) if (payload[k] === '') delete payload[k];
 
-      const idForUpdate = modalCtx?.data?.id || row?.id || null;
+      const idForUpdate = modalCtx?.data?.id || full?.id || null;
       const saved = await upsertCandidate(payload, idForUpdate);
       const candidateId = idForUpdate || (saved && saved.id);
       if (!candidateId) { alert('Failed to save candidate'); return { ok:false }; }
 
-      // staged overrides commit (unchanged)
+      // Commit staged overrides (unchanged)
       const O = modalCtx.overrides || { existing: [], stagedNew: [], stagedEdits: {}, stagedDeletes: new Set() };
 
       for (const delId of O.stagedDeletes) {
         const res = await authFetch(API(`/api/rates/candidate-overrides/${encodeURIComponent(delId)}`), { method: 'DELETE' });
-        if (!res.ok && res.status !== 404) {
-          const msg = await res.text().catch(()=> 'Delete override failed');
-          alert(msg); return { ok:false };
-        }
+        if (!res.ok && res.status !== 404) { const msg = await res.text().catch(()=> 'Delete override failed'); alert(msg); return { ok:false }; }
       }
 
       for (const [id, patch] of Object.entries(O.stagedEdits || {})) {
@@ -2179,10 +2189,7 @@ async function openCandidate(row) {
           API(`/api/rates/candidate-overrides/${encodeURIComponent(id)}`),
           { method:'PATCH', headers:{'content-type':'application/json'}, body: JSON.stringify({ ...patch, candidate_id: candidateId }) }
         );
-        if (!res.ok) {
-          const msg = await res.text().catch(()=> 'Update override failed');
-          alert(msg); return { ok:false };
-        }
+        if (!res.ok) { const msg = await res.text().catch(()=> 'Update override failed'); alert(msg); return { ok:false }; }
       }
 
       for (const nv of (O.stagedNew || [])) {
@@ -2191,50 +2198,25 @@ async function openCandidate(row) {
           API(`/api/rates/candidate-overrides`),
           { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({ ...nv, candidate_id: candidateId }) }
         );
-        if (!res.ok) {
-          const msg = await res.text().catch(()=> 'Create override failed');
-          alert(msg); return { ok:false };
-        }
+        if (!res.ok) { const msg = await res.text().catch(()=> 'Create override failed'); alert(msg); return { ok:false }; }
       }
 
-      // Keep modal open in view mode, update CCR display via modalCtx.data
-      modalCtx.data = { ...(modalCtx.data || {}), ...(saved || {}), id: candidateId };
-      modalCtx.formState = { __forId: candidateId || null, main: {}, pay: {} };
+      // Keep open; flip to view mode via showModal logic
+      modalCtx.data      = { ...(modalCtx.data || {}), ...(saved || {}), id: candidateId };
+      modalCtx.formState = { __forId: candidateId, main: {}, pay: {} };
       modalCtx.rolesState = undefined;
 
-      if (isNew) {
-        window.__pendingFocus = { section: 'candidates', id: candidateId };
-      }
+      if (isNew) window.__pendingFocus = { section: 'candidates', id: candidateId };
 
       return { ok: true, saved: modalCtx.data };
     },
-    row?.id
+    full?.id
   );
 
-  // preload for tabs (unchanged)
-  try {
-    const allRoleOptions = await loadGlobalRoleOptions();
-    const container = document.querySelector('#rolesEditor');
-    if (container) renderRolesEditor(container, modalCtx.rolesState, allRoleOptions);
-
-    modalCtx._rolesUpdatedHandler = async () => {
-      try {
-        const refreshed = await loadGlobalRoleOptions();
-        const c = document.querySelector('#rolesEditor');
-        if (!c) return;
-        if (c.__rolesEditor && typeof c.__rolesEditor.updateOptions === 'function') {
-          c.__rolesEditor.updateOptions(refreshed);
-        } else {
-          renderRolesEditor(c, modalCtx.rolesState || [], refreshed);
-        }
-      } catch (e) { console.error('Failed to soft-refresh global roles', e); }
-    };
-    window.addEventListener('global-roles-updated', modalCtx._rolesUpdatedHandler);
-  } catch (e) { console.error('Failed to load global roles', e); }
-
-  if (row?.id) {
+  // 4) Optional async companion loads (will not blank fields because modal was hydrated first)
+  if (full?.id) {
     const token = modalCtx.openToken;
-    const id    = row.id;
+    const id    = full.id;
 
     try {
       const existing = await listCandidateRates(id);
@@ -2252,6 +2234,7 @@ async function openCandidate(row) {
     } catch (e) { console.error('fetchRelated timesheets failed', e); }
   }
 }
+
 
 
 // ====================== mountCandidatePayTab (FIXED) ======================
@@ -2973,48 +2956,67 @@ function renderCalendar(timesheets){
 // ✅ UPDATED — unified FE model; on load, convert server rows to unified; on save, validate overlaps, bridge to per-type API
 
 // ================== FRONTEND: openClient (UPDATED) ==================
+// ================== FIXED: openClient (hydrate before showModal) ==================
 async function openClient(row) {
   const deep = (o)=> JSON.parse(JSON.stringify(o || {}));
-  const seedId = row?.id || null;
+  const incoming = deep(row || {});
+  const seedId   = incoming?.id || null;
 
+  // 1) Hydrate full client if we have an id
+  let full = incoming;
+  if (seedId) {
+    try {
+      const r = await authFetch(API(`/api/clients/${encodeURIComponent(seedId)}`));
+      if (r.ok) {
+        const data = await r.json().catch(()=> ({}));
+        full = Array.isArray(data) ? (data[0] || incoming) : (data.client || data || incoming);
+      }
+    } catch (e) {
+      console.warn('openClient hydrate failed; using summary row', e);
+    }
+  }
+
+  // 2) Build modal context from hydrated data
   modalCtx = {
     entity: 'clients',
-    data: deep(row),
-    formState: { __forId: seedId, main: {} },
+    data: deep(full),
+    formState: { __forId: full?.id || null, main: {} },
     ratesState: [],
     hospitalsState: { existing: [], stagedNew: [], stagedEdits: {}, stagedDeletes: new Set() },
     clientSettingsState: {},
-    openToken: (seedId || 'new') + ':' + Date.now()
+    openToken: ((full?.id) || 'new') + ':' + Date.now()
   };
 
-  if (seedId) {
+  // 3) Preload client-specific state (rates/hospitals/settings)
+  if (full?.id) {
     const token = modalCtx.openToken;
     try {
-      const unified = await listClientRates(seedId);
-      if (token === modalCtx.openToken && modalCtx.data?.id === seedId) {
+      const unified = await listClientRates(full.id);
+      if (token === modalCtx.openToken && modalCtx.data?.id === full.id) {
         modalCtx.ratesState = Array.isArray(unified) ? unified.map(r => ({ ...r })) : [];
       }
     } catch (e) { console.error('openClient preload rates error', e); }
 
     try {
-      const hospitals = await listClientHospitals(seedId);
-      if (token === modalCtx.openToken && modalCtx.data?.id === seedId) {
+      const hospitals = await listClientHospitals(full.id);
+      if (token === modalCtx.openToken && modalCtx.data?.id === full.id) {
         modalCtx.hospitalsState.existing = Array.isArray(hospitals) ? hospitals.slice() : [];
       }
     } catch (e) { console.error('openClient preload hospitals error', e); }
 
     try {
-      const r = await authFetch(API(`/api/clients/${seedId}`));
+      const r = await authFetch(API(`/api/clients/${encodeURIComponent(full.id)}`));
       if (r.ok) {
         const clientObj = await r.json().catch(()=> ({}));
         const cs = clientObj && (clientObj.client_settings || clientObj.settings || {});
-        if (token === modalCtx.openToken && modalCtx.data?.id === seedId) {
+        if (token === modalCtx.openToken && modalCtx.data?.id === full.id) {
           modalCtx.clientSettingsState = (cs && typeof cs === 'object') ? JSON.parse(JSON.stringify(cs)) : {};
         }
       }
     } catch (e) { console.error('openClient preload client settings error', e); }
   }
 
+  // 4) Render modal (now hydrated)
   showModal(
     'Client',
     [
@@ -3033,30 +3035,28 @@ async function openClient(row) {
       const liveMain   = byId('tab-main') ? collectForm('#tab-main') : {};
       const payload    = { ...stagedMain, ...liveMain };
 
-      // Never send CLI in the payload
       delete payload.cli_ref;
 
-      if (!payload.name && row?.name) payload.name = row.name;
+      if (!payload.name && full?.name) payload.name = full.name;
       if (!payload.name) { alert('Client name is required.'); return { ok:false }; }
 
       if (modalCtx.clientSettingsState && typeof modalCtx.clientSettingsState === 'object') {
         payload.client_settings = modalCtx.clientSettingsState;
       }
 
-      const idForUpdate = modalCtx?.data?.id || row?.id || null;
-      const clientResp = await upsertClient(payload, idForUpdate);
-      const clientId   = idForUpdate || (clientResp && clientResp.id);
+      const idForUpdate = modalCtx?.data?.id || full?.id || null;
+      const clientResp  = await upsertClient(payload, idForUpdate);
+      const clientId    = idForUpdate || (clientResp && clientResp.id);
       if (!clientId) { alert('Failed to save client'); return { ok:false }; }
 
-      // Commit staged RATES (validate overlaps per role/band)
+      // Validate & persist staged windows (unchanged)
       if (clientId && Array.isArray(modalCtx.ratesState)) {
         const windows = modalCtx.ratesState.slice();
 
         for (let i = 0; i < windows.length; i++) {
           for (let j = i + 1; j < windows.length; j++) {
             const A = windows[i], B = windows[j];
-            if (String(A.role||'') === String(B.role||'') &&
-                String(A.band||'') === String(B.band||'')) {
+            if (String(A.role||'') === String(B.role||'') && String(A.band||'') === String(B.band||'')) {
               const a0 = A.date_from || null, a1 = A.date_to || null;
               const b0 = B.date_from || null, b1 = B.date_to || null;
               if (rangesOverlap(a0, a1, b0, b1)) {
@@ -3076,20 +3076,16 @@ async function openClient(row) {
               band      : w.band ?? null,
               date_from : w.date_from || null,
               date_to   : w.date_to ?? null,
-
-              // charge & pay blocks — unified
               charge_day   : w.charge_day   ?? null,
               charge_night : w.charge_night ?? null,
               charge_sat   : w.charge_sat   ?? null,
               charge_sun   : w.charge_sun   ?? null,
               charge_bh    : w.charge_bh    ?? null,
-
               paye_day     : w.paye_day     ?? null,
               paye_night   : w.paye_night   ?? null,
               paye_sat     : w.paye_sat     ?? null,
               paye_sun     : w.paye_sun     ?? null,
               paye_bh      : w.paye_bh      ?? null,
-
               umb_day      : w.umb_day      ?? null,
               umb_night    : w.umb_night    ?? null,
               umb_sat      : w.umb_sat      ?? null,
@@ -3104,14 +3100,12 @@ async function openClient(row) {
         }
       }
 
-      // Commit staged HOSPITALS — three-phase (create, update, delete)
+      // Commit staged hospitals (unchanged)
       if (clientId && modalCtx.hospitalsState && typeof modalCtx.hospitalsState === 'object') {
         const H = modalCtx.hospitalsState;
-
         const existingAlive = (H.existing || []).filter(x => !H.stagedDeletes.has(x.id));
         const names = new Set(existingAlive.map(x => String(x.hospital_name_norm||'').trim().toUpperCase()).filter(Boolean));
 
-        // creates
         for (const n of (H.stagedNew || [])) {
           const nm = String(n.hospital_name_norm||'').trim();
           if (!nm) { alert('Hospital / Trust is required'); return { ok:false }; }
@@ -3125,7 +3119,6 @@ async function openClient(row) {
           if (!res.ok) { const msg = await res.text().catch(()=> ''); alert(`Create hospital failed: ${msg}`); return { ok:false }; }
         }
 
-        // updates
         for (const [hid, patch] of Object.entries(H.stagedEdits || {})) {
           if (H.stagedDeletes.has(hid)) continue;
           if (patch.hospital_name_norm !== undefined) {
@@ -3143,28 +3136,23 @@ async function openClient(row) {
           if (!res.ok) { const msg = await res.text().catch(()=> ''); alert(`Update hospital failed: ${msg}`); return { ok:false }; }
         }
 
-        // deletes
         for (const hid of (H.stagedDeletes || new Set())) {
           const res = await authFetch(API(`/api/clients/${clientId}/hospitals/${encodeURIComponent(hid)}`), { method:'DELETE' });
-          if (!res.ok && res.status !== 404) {
-            const msg = await res.text().catch(()=> ''); alert(`Delete hospital failed: ${msg}`); return { ok:false };
-          }
+          if (!res.ok && res.status !== 404) { const msg = await res.text().catch(()=> ''); alert(`Delete hospital failed: ${msg}`); return { ok:false }; }
         }
       }
 
-      // Update modal state, remain open in view mode
-      modalCtx.data = { ...(modalCtx.data || {}), ...(clientResp || {}), id: clientId };
+      modalCtx.data      = { ...(modalCtx.data || {}), ...(clientResp || {}), id: clientId };
       modalCtx.formState = { __forId: clientId, main:{} };
 
-      if (!seedId && clientId) {
-        window.__pendingFocus = { section: 'clients', id: clientId };
-      }
+      if (isNew) window.__pendingFocus = { section: 'clients', id: clientId };
 
       return { ok: true, saved: modalCtx.data };
     },
-    row?.id
+    full?.id
   );
 }
+
 
 
 
@@ -3537,13 +3525,13 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
   const stack = () => (window.__modalStack ||= []);
   const currentFrame = () => stack()[stack().length - 1] || null;
   const parentFrame  = () => (stack().length > 1 ? stack()[stack().length - 2] : null);
+  const deep = (o) => JSON.parse(JSON.stringify(o));
 
   function setFormReadOnly(root, ro) {
     if (!root) return;
     root.querySelectorAll('input, select, textarea, button').forEach((el) => {
       const isDisplayOnly = el.id === 'tms_ref_display' || el.id === 'cli_ref_display';
       if (el.type === 'button') {
-        // Keep Close / Delete / Edit / Save logic controlled separately; only disable other action buttons.
         const controlIds = new Set(['btnCloseModal','btnDelete','btnEditModal','btnSave']);
         if (!controlIds.has(el.id)) el.disabled = !!ro;
         return;
@@ -3559,8 +3547,7 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
   }
 
   function setFrameMode(frame, mode) {
-    // mode: 'create' | 'view' | 'edit' | 'saving'
-    frame.mode = mode;
+    frame.mode = mode; // 'create' | 'view' | 'edit' | 'saving'
     const isChild = stack().length > 1;
     if (isChild) {
       const p = parentFrame();
@@ -3569,8 +3556,7 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
       setFormReadOnly(document.getElementById('modalBody'), (mode === 'view' || mode === 'saving'));
     }
     if (typeof frame._updateButtons === 'function') frame._updateButtons();
-    // Repaint current tab to ensure inputs show values in the new mode (this preserves data)
-    if (frame.currentTabKey) frame.setTab(frame.currentTabKey);
+    if (frame.currentTabKey) frame.setTab(frame.currentTabKey); // repaint with current values
   }
 
   function sanitizeModalGeometry() {
@@ -3615,6 +3601,7 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
     // State
     mode: hasId ? 'view' : 'create',
     isDirty: false,
+    _snapshot: null, // ← original values captured on entering edit
 
     // Lifecycles
     _detachDirty: null,
@@ -3625,7 +3612,6 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
     _saving: false,
 
     persistCurrentTabState() {
-      // Persist simple tab forms into modalCtx.formState for parent modals
       if (!window.modalCtx) return;
       const fs = window.modalCtx.formState || { __forId: window.modalCtx.data?.id || null, main:{}, pay:{} };
       if (fs.__forId == null) fs.__forId = window.modalCtx.data?.id || null;
@@ -3640,7 +3626,6 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
     },
 
     mergedRowForTab(k) {
-      // Critical for values to populate: always start from modalCtx.data (server/current record)
       const base = { ...(window.modalCtx?.data || {}) };
       const fs = window.modalCtx?.formState;
       const sameRecord = fs && fs.__forId === window.modalCtx?.data?.id;
@@ -3654,7 +3639,6 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
       const root = byId('modalBody'); if (!root) return;
       const onDirty = (ev)=>{
         if (ev && !ev.isTrusted) return;
-        // Only parent in edit/create flips dirty from input; children mark parent dirty via Apply
         const isChild = stack().length > 1;
         if (isChild) return;
         if (this.mode !== 'edit' && this.mode !== 'create') return;
@@ -3672,11 +3656,7 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
 
     setTab(k) {
       if (this._hasMountedOnce) this.persistCurrentTabState();
-
-      // Merge canonical data + any staged edits for this tab
       const rowForTab = this.mergedRowForTab(k);
-
-      // Render with the merged row (this is what fills values!)
       byId('modalBody').innerHTML = this.renderTab(k, rowForTab) || '';
 
       // Per-entity sub-mounts
@@ -3713,7 +3693,7 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
       this.currentTabKey = k;
       this._attachDirtyTracker();
 
-      // Enforce readonly/editable depending on mode (and child gating)
+      // Read-only gating
       const isChild = stack().length > 1;
       if (isChild) {
         const p = parentFrame();
@@ -3790,7 +3770,9 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
     btnSave.setAttribute('aria-label', defaultPrimary);
 
     const updateSecondaryLabel = () => {
-      const label = (isChild || top.mode === 'edit' || top.mode === 'create') ? (top.isDirty ? 'Discard' : 'Cancel') : 'Close';
+      const label = (isChild || top.mode === 'edit' || top.mode === 'create')
+        ? (top.isDirty ? 'Discard' : 'Cancel')
+        : 'Close';
       btnClose.textContent = label;
       btnClose.setAttribute('aria-label', label);
       btnClose.setAttribute('title', label);
@@ -3800,12 +3782,10 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
     top._updateButtons = () => {
       const parentEditable = parent ? (parent.mode === 'edit') : true;
       if (isChild) {
-        // Child modal: Apply only when parent is editing
         btnSave.style.display = parentEditable ? '' : 'none';
         btnSave.disabled = !parentEditable;
         btnEdit.style.display = 'none';
       } else {
-        // Parent modal
         btnEdit.style.display = (top.mode === 'view' && top.hasId) ? '' : 'none';
         if (top.mode === 'view') {
           btnSave.style.display = 'none';
@@ -3819,17 +3799,54 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
 
     top._updateButtons();
 
-    // Edit → switch to edit mode (keep values!)
+    // Edit → switch to edit mode (capture snapshot, do NOT close)
     btnEdit.onclick = () => {
       if (isChild) return;
       if (top.mode === 'view') {
+        // Capture snapshot for discard
+        top._snapshot = {
+          data:                 deep(window.modalCtx?.data || null),
+          formState:            deep(window.modalCtx?.formState || null),
+          rolesState:           deep(window.modalCtx?.rolesState || null),
+          ratesState:           deep(window.modalCtx?.ratesState || null),
+          hospitalsState:       deep(window.modalCtx?.hospitalsState || null),
+          clientSettingsState:  deep(window.modalCtx?.clientSettingsState || null)
+        };
         top.isDirty = false;
         setFrameMode(top, 'edit');
       }
     };
 
-    // Close / Discard
+    // Close / Cancel / Discard logic
     const handleSecondary = () => {
+      // Parent in EDIT: do not close — either Cancel (no dirty) or Discard (dirty) → back to VIEW
+      if (!isChild && top.mode === 'edit') {
+        if (!top.isDirty) {
+          // Cancel: no changes → just return to view
+          top.isDirty = false;
+          setFrameMode(top, 'view');
+          top._snapshot = null; // snapshot no longer needed
+          return;
+        } else {
+          // Discard: restore snapshot → view (do not close)
+          const ok = window.confirm('Discard changes and return to view?');
+          if (!ok) return;
+          if (top._snapshot && window.modalCtx) {
+            window.modalCtx.data                = deep(top._snapshot.data);
+            window.modalCtx.formState           = deep(top._snapshot.formState);
+            window.modalCtx.rolesState          = deep(top._snapshot.rolesState);
+            window.modalCtx.ratesState          = deep(top._snapshot.ratesState);
+            window.modalCtx.hospitalsState      = deep(top._snapshot.hospitalsState);
+            window.modalCtx.clientSettingsState = deep(top._snapshot.clientSettingsState);
+          }
+          top.isDirty = false;
+          top._snapshot = null;
+          setFrameMode(top, 'view');
+          return;
+        }
+      }
+
+      // All other cases use normal close behavior
       if (top._closing) return;
       top._closing = true;
 
@@ -3837,7 +3854,8 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
       document.onmouseup   = null;
       const m = byId('modal'); if (m) m.classList.remove('dragging');
 
-      if (!isChild && (top.mode === 'edit' || top.mode === 'create') && top.isDirty) {
+      // For parent CREATE mode, still confirm discard
+      if (!isChild && (top.mode === 'create') && top.isDirty) {
         const ok = window.confirm('You have unsaved changes. Discard them and close?');
         if (!ok) { top._closing = false; return; }
       }
@@ -3850,14 +3868,11 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
       top._wired = false;
 
       if (stack().length > 0) {
-        // Return to parent
         const parent = currentFrame();
         renderTop(); // rewire parent
         try { parent.onReturn && parent.onReturn(); } catch(_) {}
       } else {
-        // Full teardown
         discardAllModalsAndState();
-        // Jump & highlight (if set by create flows)
         if (window.__pendingFocus) {
           try { renderAll(); } catch (e) { console.error('refresh after modal close failed', e); }
         }
@@ -3870,7 +3885,7 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
       if (top._saving) return;
       top.persistCurrentTabState();
 
-      if (isChild && (!parent || parent.mode !== 'edit')) return; // child blocked in view
+      if (isChild && (!parent || parent.mode !== 'edit')) return;
 
       top._saving = true;
       top._updateButtons();
@@ -3891,7 +3906,6 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
       if (!ok) { top._updateButtons(); return; }
 
       if (isChild) {
-        // child Apply: stage to parent, mark parent dirty, close child
         try { window.dispatchEvent(new CustomEvent('modal-dirty')); } catch {}
         sanitizeModalGeometry();
         stack().pop();
@@ -3905,17 +3919,17 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
           discardAllModalsAndState();
         }
       } else {
-        // parent Save: stay open, flip to view; keep values populated
         if (savedRow && window.modalCtx) {
           window.modalCtx.data = { ...(window.modalCtx.data || {}), ...savedRow };
           top.hasId = !!window.modalCtx.data?.id;
         }
         top.isDirty = false;
+        top._snapshot = null; // new view baseline is the saved state
         setFrameMode(top, 'view');
       }
     };
 
-    // Global dirty listener enables Save in parent edit/create
+    // Global dirty → enable Save in parent edit/create
     const onDirtyEvt = () => {
       if (!isChild && (top.mode === 'edit' || top.mode === 'create')) {
         top.isDirty = true; top._updateButtons();
@@ -3924,9 +3938,9 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
 
     if (!top._wired) {
       window.addEventListener('modal-dirty', onDirtyEvt);
-      const onEsc = (e) => { if (e.key === 'Escape') { e.preventDefault(); handleSecondary(); } };
+      const onEsc = (e) => { if (e.key === 'Escape') { e.preventDefault(); btnClose.click(); } };
       window.addEventListener('keydown', onEsc);
-      const onOverlayClick = (e) => { if (e.target === byId('modalBack')) handleSecondary(); };
+      const onOverlayClick = (e) => { if (e.target === byId('modalBack')) btnClose.click(); };
       byId('modalBack').addEventListener('click', onOverlayClick, true);
 
       top._detachGlobal = () => {
@@ -3951,6 +3965,7 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
   byId('modalBack').style.display = 'flex';
   renderTop();
 }
+
 
 // =================== ADD HOSPITAL MODAL (UPDATED: push into stagedNew) ===================
 // ==== CHILD MODAL (ADD HOSPITAL) — throw on errors; return true on success ====
@@ -4157,20 +4172,38 @@ async function renderClientSettingsUI(settingsObj){
 // ---- Umbrella modal
 // ========================= openUmbrella (FIXED) =========================
 // ================== FRONTEND: openUmbrella (UPDATED) ==================
+// ================== FIXED: openUmbrella (hydrate before showModal) ==================
 async function openUmbrella(row){
   const deep = (o)=> JSON.parse(JSON.stringify(o || {}));
-  const seedId = row?.id || null;
+  const incoming = deep(row || {});
+  const seedId   = incoming?.id || null;
 
+  // 1) Hydrate full umbrella if we have an id
+  let full = incoming;
+  if (seedId) {
+    try {
+      const res = await authFetch(API(`/api/umbrellas/${encodeURIComponent(seedId)}`));
+      if (res.ok) {
+        const data = await res.json().catch(()=> ({}));
+        full = Array.isArray(data) ? (data[0] || incoming) : (data.umbrella || data || incoming);
+      }
+    } catch (e) {
+      console.warn('openUmbrella hydrate failed; using summary row', e);
+    }
+  }
+
+  // 2) Build modal context from hydrated data
   modalCtx = {
     entity: 'umbrellas',
-    data: deep(row),
-    formState: { __forId: seedId, main: {} },
+    data: deep(full),
+    formState: { __forId: full?.id || null, main: {} },
     rolesState: null,
     ratesState: null,
     clientSettingsState: null,
-    openToken: (seedId || 'new') + ':' + Date.now()
+    openToken: ((full?.id) || 'new') + ':' + Date.now()
   };
 
+  // 3) Render modal (now hydrated)
   showModal(
     'Umbrella',
     [{ key:'main', label:'Main' }],
@@ -4193,31 +4226,24 @@ async function openUmbrella(row){
       const live   = collectForm('#tab-main');
       const payload = { ...staged, ...live };
 
-      if (typeof payload.vat_chargeable !== 'boolean') {
-        payload.vat_chargeable = (payload.vat_chargeable === 'Yes' || payload.vat_chargeable === 'true');
-      }
-      if (typeof payload.enabled !== 'boolean') {
-        payload.enabled = (payload.enabled === 'Yes' || payload.enabled === 'true');
-      }
+      if (typeof payload.vat_chargeable !== 'boolean') payload.vat_chargeable = (payload.vat_chargeable === 'Yes' || payload.vat_chargeable === 'true');
+      if (typeof payload.enabled        !== 'boolean') payload.enabled        = (payload.enabled        === 'Yes' || payload.enabled        === 'true');
 
       for (const k of Object.keys(payload)) if (payload[k] === '') delete payload[k];
 
-      const idForUpdate = modalCtx?.data?.id || row?.id || null;
+      const idForUpdate = modalCtx?.data?.id || full?.id || null;
       const saved = await upsertUmbrella(payload, idForUpdate);
       const umbrellaId = idForUpdate || (saved && saved.id);
       if (!umbrellaId) { alert('Failed to save umbrella'); return { ok:false }; }
 
-      modalCtx.data = { ...(modalCtx.data || {}), ...(saved || {}), id: umbrellaId };
-      modalCtx.formState = { __forId: umbrellaId || null, main: {} };
+      modalCtx.data      = { ...(modalCtx.data || {}), ...(saved || {}), id: umbrellaId };
+      modalCtx.formState = { __forId: umbrellaId, main: {} };
 
-      // For new umbrella we also want to jump in summary after closing parent
-      if (!seedId && umbrellaId) {
-        window.__pendingFocus = { section: 'umbrellas', id: umbrellaId };
-      }
+      if (!seedId && umbrellaId) window.__pendingFocus = { section: 'umbrellas', id: umbrellaId };
 
       return { ok: true, saved: modalCtx.data };
     },
-    row?.id
+    full?.id
   );
 }
 
