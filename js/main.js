@@ -2230,7 +2230,7 @@ async function openCandidate(row) {
       const statePay  = same ? (fs.pay  || {}) : {};
       const main      = document.querySelector('#tab-main') ? collectForm('#tab-main') : {};
       const pay       = document.querySelector('#tab-pay')  ? collectForm('#tab-pay')  : {};
-      const roles     = normaliseRolesForSave(window.modalCtx.rolesState || []);
+      const roles     = normaliseRolesForSave(window.modalCtx.rolesState || window.modalCtx.data?.roles || []);
       const payload   = { ...stateMain, ...statePay, ...main, ...pay, roles };
 
       L('[onSave] collected', {
@@ -2271,13 +2271,14 @@ async function openCandidate(row) {
       for (const k of Object.keys(payload)) if (payload[k] === '') delete payload[k];
 
       const idForUpdate = window.modalCtx?.data?.id || full?.id || null;
+      const tokenAtSave = window.modalCtx.openToken;
       L('[onSave] upsertCandidate', { idForUpdate, payloadKeys: Object.keys(payload||{}) });
       const saved = await upsertCandidate(payload, idForUpdate).catch(err => { E('upsertCandidate failed', err); return null; });
       const candidateId = idForUpdate || (saved && saved.id);
       L('[onSave] saved', { ok: !!saved, candidateId, savedKeys: Object.keys(saved||{}) });
       if (!candidateId) { alert('Failed to save candidate'); return { ok:false }; }
 
-      // Commit staged overrides (unchanged)
+      // Persist staged overrides
       const O = window.modalCtx.overrides || { existing: [], stagedNew: [], stagedEdits: {}, stagedDeletes: new Set() };
       L('[onSave] overrides', { deletes: Array.from(O.stagedDeletes||[]), edits: Object.keys(O.stagedEdits||{}), newCount: (O.stagedNew||[]).length });
 
@@ -2304,14 +2305,30 @@ async function openCandidate(row) {
         if (!res.ok) { const msg = await res.text().catch(()=> 'Create override failed'); alert(msg); return { ok:false }; }
       }
 
+      // Refresh overrides list from server and clear staging
+      try {
+        const latest = await listCandidateRates(candidateId);
+        if (tokenAtSave === window.modalCtx.openToken && window.modalCtx.data?.id === candidateId) {
+          window.modalCtx.overrides.existing = Array.isArray(latest) ? latest : [];
+          window.modalCtx.overrides.stagedEdits = {};
+          window.modalCtx.overrides.stagedNew = [];
+          if (window.modalCtx.overrides.stagedDeletes?.clear) window.modalCtx.overrides.stagedDeletes.clear();
+          await renderCandidateRatesTable();
+        }
+      } catch (e) {
+        W('post-save rates refresh failed', e);
+      }
+
       // Keep open; flip to view mode via showModal logic
-      window.modalCtx.data       = { ...(window.modalCtx.data || {}), ...(saved || {}), id: candidateId };
+      // IMPORTANT: do not clear roles; copy back to data & keep rolesState
+      const mergedRoles = (saved && saved.roles) || payload.roles || window.modalCtx.data?.roles || [];
+      window.modalCtx.data       = { ...(window.modalCtx.data || {}), ...(saved || {}), id: candidateId, roles: mergedRoles };
       window.modalCtx.formState  = { __forId: candidateId, main: {}, pay: {} };
-      window.modalCtx.rolesState = undefined;
+      window.modalCtx.rolesState = mergedRoles;
 
       L('[onSave] final window.modalCtx', {
         dataId: window.modalCtx.data?.id,
-        dataKeys: Object.keys(window.modalCtx.data||{}),
+        rolesCount: Array.isArray(window.modalCtx.data?.roles) ? window.modalCtx.data.roles.length : 0,
         formStateForId: window.modalCtx.formState?.__forId
       });
 
