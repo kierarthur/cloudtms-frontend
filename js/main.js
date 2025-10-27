@@ -2704,7 +2704,25 @@ function confirmDiscardChangesIfDirty(){
 // ====================== mountCandidateRatesTab (FIXED) ======================
 // =================== MOUNT CANDIDATE RATES TAB (unchanged flow) ===================
 
-V
+async function mountCandidateRatesTab() {
+  const token = window.modalCtx.openToken;
+  const id    = window.modalCtx.data?.id || null;
+
+  const rates = id ? await listCandidateRates(id) : [];
+  if (token !== window.modalCtx.openToken || window.modalCtx.data?.id !== id) return;
+
+  // seed existing overrides list if needed
+  if (Array.isArray(rates)) {
+    window.modalCtx.overrides = window.modalCtx.overrides || { existing: [], stagedNew: [], stagedEdits: {}, stagedDeletes: new Set() };
+    window.modalCtx.overrides.existing = rates.slice();
+  }
+
+  await renderCandidateRatesTable();
+
+  const btn = byId('btnAddRate');
+  const frame = _currentFrame();
+  if (btn && frame && frame.mode === 'edit') btn.onclick = () => openCandidateRateModal(window.modalCtx.data?.id);
+}
 
 // === UPDATED: Candidate Rate Override modal (Client→Role gated; bands; UK dates; date_to) ===
 // ====================== openCandidateRateModal (FIXED) ======================
