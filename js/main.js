@@ -2888,20 +2888,48 @@ async function openCandidateRateModal(candidate_id, existing) {
 
         if (ov.id) O.stagedEdits[ov.id] = { ...(O.stagedEdits[ov.id]||{}), date_to: cut };
         else {
-          const idx = O.stagedNew.findIndex(s => s === ov);
-          if (idx >= 0) O.stagedNew[idx] = { ...ov, date_to: cut };
+          // Might be a staged-new row; update by _tmpId if present or by index
+          const ix = O.stagedNew.findIndex(s => s._tmpId && ov._tmpId && s._tmpId === ov._tmpId);
+          if (ix >= 0) O.stagedNew[ix] = { ...O.stagedNew[ix], date_to: cut };
+          else {
+            const ix2 = O.stagedNew.indexOf(ov);
+            if (ix2 >= 0) O.stagedNew[ix2] = { ...ov, date_to: cut };
+          }
         }
       }
 
+      // === FIX: update staged-new by _tmpId instead of object reference =================
       if (existing?.id) {
+        // Persisted row being edited → stage into edits
         O.stagedEdits[existing.id] = { ...O.stagedEdits[existing.id], ...staged };
       } else if (existing && !existing.id) {
-        const idx = O.stagedNew.findIndex(r => r === existing);
-        if (idx >= 0) O.stagedNew[idx] = { ...existing, ...staged };
-        else O.stagedNew.push({ ...staged, _tmpId: `tmp_${Date.now()}` });
+        // It’s a staged-new clone from the table; find original by stable _tmpId
+        const tmpId = existing._tmpId || null;
+        let idx = (tmpId ? O.stagedNew.findIndex(r => r._tmpId === tmpId) : -1);
+
+        // Fallback (rare): try to match by full key if _tmpId missing
+        if (idx < 0) {
+          idx = O.stagedNew.findIndex(r =>
+            String(r.client_id) === String(existing.client_id) &&
+            String(r.role||'')  === String(existing.role||'') &&
+            String(r.rate_type || '').toUpperCase() === String(existing.rate_type || '').toUpperCase() &&
+            String(r.band||'')  === String(existing.band||'') &&
+            String(r.date_from||'') === String(existing.date_from||'') &&
+            String(r.date_to||'')   === String(existing.date_to||'')
+          );
+        }
+
+        if (idx >= 0) {
+          const keepTmp = O.stagedNew[idx]._tmpId || tmpId || `tmp_${Date.now()}`;
+          O.stagedNew[idx] = { ...O.stagedNew[idx], ...staged, _tmpId: keepTmp };
+        } else {
+          O.stagedNew.push({ ...staged, _tmpId: tmpId || `tmp_${Date.now()}` });
+        }
       } else {
+        // Brand new staged row
         O.stagedNew.push({ ...staged, _tmpId: `tmp_${Date.now()}` });
       }
+      // =====================================================================
 
       await renderCandidateRatesTable();
       try { window.dispatchEvent(new CustomEvent('modal-dirty')); } catch {}
@@ -3003,7 +3031,6 @@ async function openCandidateRateModal(candidate_id, existing) {
     await refreshClientRoles(initialClientId);
   }
 }
-
 
 
 function renderCalendar(timesheets){
