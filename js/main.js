@@ -3553,6 +3553,16 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
   const parentFrame  = () => (stack().length > 1 ? stack()[stack().length - 2] : null);
   const deep = (o) => JSON.parse(JSON.stringify(o));
 
+  // Drop keys whose values are '', null or undefined (keep 0/false)
+  const stripEmpty = (obj) => {
+    const out = {};
+    for (const [k, v] of Object.entries(obj || {})) {
+      if (v === '' || v == null) continue;
+      out[k] = v;
+    }
+    return out;
+  };
+
   function setFormReadOnly(root, ro) {
     if (!root) return;
     root.querySelectorAll('input, select, textarea, button').forEach((el) => {
@@ -3582,7 +3592,11 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
       setFormReadOnly(document.getElementById('modalBody'), (mode === 'view' || mode === 'saving'));
     }
     if (typeof frame._updateButtons === 'function') frame._updateButtons();
-    if (frame.currentTabKey) frame.setTab(frame.currentTabKey); // repaint with current values
+
+    // FIX (1): Avoid redundant first repaint. Only repaint after mount cycles.
+    if (frame._hasMountedOnce && frame.currentTabKey) {
+      frame.setTab(frame.currentTabKey);
+    }
   }
 
   function sanitizeModalGeometry() {
@@ -3638,26 +3652,42 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
     _saving: false,
 
     persistCurrentTabState() {
-      if (!window.modalCtx) return;
+      // FIX (2a): No-op in view mode; only persist in edit/create.
+      if (!window.modalCtx || (this.mode === 'view')) return;
+
       const fs = window.modalCtx.formState || { __forId: window.modalCtx.data?.id || null, main:{}, pay:{} };
       if (fs.__forId == null) fs.__forId = window.modalCtx.data?.id || null;
 
       if (this.currentTabKey === 'main' && byId('tab-main')) {
-        fs.main = { ...(fs.main||{}), ...collectForm('#tab-main') };
+        const collected = collectForm('#tab-main');
+        // FIX (2b): Strip empty keys before merging.
+        const cleaned = stripEmpty(collected);
+        fs.main = { ...(fs.main||{}), ...cleaned };
       }
       if (this.currentTabKey === 'pay' && byId('tab-pay')) {
-        fs.pay = { ...(fs.pay||{}), ...collectForm('#tab-pay') };
+        const collected = collectForm('#tab-pay');
+        // FIX (2b): Strip empty keys before merging.
+        const cleaned = stripEmpty(collected);
+        fs.pay = { ...(fs.pay||{}), ...cleaned };
       }
       window.modalCtx.formState = fs;
     },
 
     mergedRowForTab(k) {
+      // Base = hydrated row
       const base = { ...(window.modalCtx?.data || {}) };
+
+      // Current staged state (only if same record)
       const fs = window.modalCtx?.formState;
-      const sameRecord = fs && fs.__forId === window.modalCtx?.data?.id;
-      if (k === 'main') return sameRecord ? { ...base, ...(fs.main || {}) } : base;
-      if (k === 'pay')  return sameRecord ? { ...base, ...(fs.pay  || {}) } : base;
-      return base;
+      const sameRecord = !!fs?.__forId && fs.__forId === window.modalCtx?.data?.id;
+
+      if (!sameRecord) return base;
+
+      const stagedRaw = (k === 'main') ? (fs.main || {}) :
+                        (k === 'pay')  ? (fs.pay  || {}) : {};
+      // FIX (3): Overlay only non-empty staged values.
+      const staged = stripEmpty(stagedRaw);
+      return { ...base, ...staged };
     },
 
     _attachDirtyTracker() {
@@ -3681,7 +3711,9 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
     },
 
     setTab(k) {
+      // Keep guard: only persist after first mount, to avoid capturing blanks on first paint
       if (this._hasMountedOnce) this.persistCurrentTabState();
+
       const rowForTab = this.mergedRowForTab(k);
       byId('modalBody').innerHTML = this.renderTab(k, rowForTab) || '';
 
@@ -4021,7 +4053,7 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
     btnClose.onclick = handleSecondary;
 
     // Save / Apply
-    btnSave.onclick = async () => {
+    const onSaveClick = async () => {
       if (top._saving) return;
       top.persistCurrentTabState();
 
@@ -4068,6 +4100,7 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
         setFrameMode(top, 'view');
       }
     };
+    btnSave.onclick = onSaveClick;
 
     // Global dirty → enable Save in parent edit/create
     const onDirtyEvt = () => {
