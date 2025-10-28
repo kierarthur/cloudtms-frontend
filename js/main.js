@@ -3987,10 +3987,8 @@ async function openClientRateModal(client_id, existing) {
 }
 
 function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
-  // ===== Logging helpers (toggle with window.__LOG_MODAL === true to enable) =====
-  const LOG = (typeof window === 'object' && typeof window.__KEY_TO_ENABLE_MODAL_LOGS === 'undefined')
-    ? (typeof window.__LOG_MODAL === 'boolean' ? window.__LOG_MODAL : false)
-    : (typeof window.__LOG_MODAL === 'boolean' ? window.__LOG_MODAL : false);
+  // ===== Logging helpers (toggle with window.__LOG_MODAL = true/false) =====
+  const LOG = (typeof window.__LOG_MODAL === 'boolean') ? window.__LOG_MODAL : false;
   const L  = (...a)=> { if (LOG) console.log('[MODAL]', ...a); };
   const GC = (label)=> { if (LOG) console.groupCollapsed('[MODAL]', label); };
   const GE = ()=> { if (LOG) console.groupEnd(); };
@@ -4015,8 +4013,10 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
     if (!root) return;
     root.querySelectorAll('input, select, textarea, button').forEach((el) => {
       const isDisplayOnly = el.id === 'tms_ref_display' || el.id === 'cli_ref_display';
-      if (el.type === 'checkbox' || el.type === 'radio' || el.tagName === 'BUTTON' || el.tagName === 'SELECT' || el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {
-        if (isDisplayCase) return; // (kept semantics) nothing to do for display-only
+      if (el.type === 'button') {
+        const controlIds = new Set(['btnCloseModal','btnDelete','btnEditModal','btnSave','btnRelated']);
+        if (!controlIds.has(el.id)) el.disabled = !!ro;
+        return;
       }
       if (isDisplayOnly) {
         el.setAttribute('disabled','true');
@@ -4024,8 +4024,26 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
         return;
       }
       if (ro) { el.setAttribute('disabled','true'); el.setAttribute('readonly','true'); }
-      else    { el.removeAttribute('disabled');     el.removeAttribute('readonly'); }
+      else    { el.removeAttribute('disabled');   el.removeAttribute('readonly'); }
     });
+  }
+
+  function setFrameMode(frame, mode) {
+    const prevMode = frame.mode;
+    frame.mode = mode; // 'create' | 'view' | 'edit' | 'saving'
+    const isChild = stack().length > 1;
+    if (isChild) {
+      const p = parentFrame();
+      setFormReadOnly(document.getElementById('modalBody'), !(p && p.mode === 'edit'));
+    } else {
+      setFormReadOnly(document.getElementById('modalBody'), (mode === 'view' || mode === 'saving'));
+    }
+    if (typeof frame._updateButtons === 'function') frame._updateButtons();
+
+    // Avoid redundant first repaint. Only repaint after mount cycles.
+    const willRepaint = !!(frame._hasMountedOnce && frame.currentTabKey);
+    L('setFrameMode', { prevMode, nextMode: mode, _hasMountedOnce: frame._hasMountedOnce, willRepaint });
+    if (willRepaint) frame.setTab(frame.currentTabKey);
   }
 
   function sanitizeModalGeometry() {
@@ -4043,27 +4061,7 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
     document.onmouseup   = null;
   }
 
-  function setFrameMode(frame, mode) {
-    const prevMode = frame.mode;
-    frame.mode = mode; // 'create' | 'view' | 'edit' | 'saving'
-    const isChild = stack().length > 1;
-    if (isChild) {
-      const p = parentFrame();
-      setFormReadOnly(document.getElementById('modalBody'), !(p && p?.mode === 'ver'));
-    } else {
-      setFormReadOnly(document.getElementById('modalBody'), (mode === 'view' || mode === 'sab'));
-    }
-    if (typeof frame._updateButtons === 'function') frame._updateButtons();
-
-    // Diagnostics: mode transitions
-    L('setFrameMode()', { prevMode, nextMode: mode, isChild, _hasMountedOnce: frame._hasMountedOnce });
-
-    // Avoid redundant first repaint. Only repaint after mount cycles.
-    const willRepaint = !!(frame._hasMountedOnce && frame.currentTabKey);
-    if (willRepaint) frame.setTab(frame.currentTabKey);
-  }
-
-  // ——— Reset any drag state ———————————————————————————————————————————————
+  // ——— Reset any drag state ——————————————————————————————————————————————
   const modalEl = byId('modal');
   if (modalEl) {
     modalEl.style.position = '';
@@ -4085,7 +4083,7 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
     hasId: !!hasId,
     entity: (window.modalCtx && window.modalCtx.entity) || null,
 
-    currentVoy: (Array.isArray(tabs) && tabs.length ? tabs[0].key : null), // (kept names as-is)
+    currentTabKey: (Array.isArray(tabs) && tabs.length ? tabs[0].key : null),
 
     // State
     mode: hasId ? 'view' : 'create',
@@ -4112,24 +4110,14 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
       if (this.currentTabKey === 'main' && byId('tab-main')) {
         const collected = collectForm('#tab-main');
         const cleaned   = stripEmpty(collected);
-        L('persist(main)', {
-          mode: this.mode,
-          __forId: fs.__forId,
-          collectedKeys: Object.keys(collected || {}),
-          cleanedKeys:   Object.keys(cleaned   || {})
-        });
-        fs.main = { ...(fs.main || {}), ...cleaned };
+        L('persist(main)', { mode: this.mode, __forId: fs.__forId, collectedKeys: Object.keys(collected||{}), cleanedKeys: Object.keys(cleaned||{}) });
+        fs.main = { ...(fs.main||{}), ...cleaned };
       }
       if (this.currentTabKey === 'pay' && byId('tab-pay')) {
         const collected = collectForm('#tab-pay');
         const cleaned   = stripEmpty(collected);
-        L('persist(pay)', {
-            mode: this.mode,
-            __forId: fs.__forId,
-            collectedKeys: Object.keys(collected || {}),
-            cleanedKeys:   Object.keys(cleaned   || {})
-        });
-        fs.pay = { ...(fs.pay || {}), ...cleaned };
+        L('persist(pay)', { mode: this.mode, __forId: fs.__forId, collectedKeys: Object.keys(collected||{}), cleanedKeys: Object.keys(cleaned||{}) });
+        fs.pay = { ...(fs.pay||{}), ...cleaned };
       }
       window.modalCtx.formState = fs;
     },
@@ -4139,20 +4127,20 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
       const fs = window.modalCtx?.formState;
       const sameRecord = !!fs?.__forId && fs.__forId === window.modalCtx?.data?.id;
 
-      const stagedRaw =
-        sameRecord
-          ? (k === 'main' ? (fs?.main || {}) : (k === 'pay' ? (fs?.pay || {}) : {}))
-          : {};
+      const stagedRaw = sameRecord
+        ? ((k === 'main') ? (fs.main || {}) : (k === 'pay') ? (fs.pay || {}) : {})
+        : {};
 
       const staged = stripEmpty(stagedRaw);
       const out = { ...base, ...staged };
 
-      L('mergedRowForTab()', {
+      L('mergedRowForTab', {
         tab: k,
         sameRecord,
-        baseKeys:   Object.keys(base || {}),
-        stagedKeys: Object.keys(staged || {}),
-        sample:     { first_name: out?.first_name, last_name: out?.last_name, id: out?.id }
+        baseKeys: Object.keys(base||{}),
+        stagedKeys: Object.keys(stagedRaw||{}),
+        stagedAfterStrip: Object.keys(staged||{}),
+        sample: { first_name: out.first_name, last_name: out.last_name, id: out.id }
       });
 
       return out;
@@ -4161,21 +4149,20 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
     _attachDirtyTracker() {
       if (this._detachDirty) { try { this._detachDirty(); } catch(_){}; this._detachDirty = null; }
       const root = byId('modalBody'); if (!root) return;
-      const onDirty = (ev) => {
+      const onDirty = (ev)=>{
         if (ev && !ev.isTrusted) return;
         const isChild = stack().length > 1;
         if (isChild) return;
         if (this.mode !== 'edit' && this.mode !== 'create') return;
         this.isDirty = true;
         if (typeof this._updateButtons === 'function') this._updateButtons();
-        if (LOG) L('local input/change → set isDirty=true; dispatch modal-dirty');
         try { window.dispatchEvent(new CustomEvent('modal-dirty')); } catch {}
       };
-      root.addEventListener('input',  onDirty, true);
+      root.addEventListener('input', onDirty, true);
       root.addEventListener('change', onDirty, true);
-      this._detachDirty = () => {
-        try { root.removeEventListener('input',  onDirty, true); } catch {}
-        try { root.removeEventListener('change', onDirty, true); } catch {}
+      this._detachDirty = ()=> {
+        root.removeEventListener('input', onDirty, true);
+        root.removeEventListener('change', onDirty, true);
       };
     },
 
@@ -4186,15 +4173,15 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
       if (doPersist) this.persistCurrentTabState();
 
       const rowForTab = this.mergedRowForTab(k);
-      L('renderTab(call)', { tab: k, rowKeys: Object.keys(rowForTab || {}), sample: { first_name: rowForTab?.name, id: rowForTab?.id } });
+      L('renderTab(call)', { tab: k, rowKeys: Object.keys(rowForTab||{}), sample: { first_name: rowForTab?.first_name, last_name: rowForTab?.last_name, id: rowForTab?.id }});
       byId('modalBody').innerHTML = this.renderTab(k, rowForTab) || '';
 
       // Per-entity sub-mounts
-      if (this.entity === 'candidates' && k === 'rates') { L('mountCandidateRatesTab?');   typeof mountCandidateRatesTab === 'function' && mountCandidateRatesTab(); }
-      if (this.entity === 'candidates' && k === 'pay')   { L('mountCandidatePayTab?');     typeof mountCandidatePayTab   === 'function' && mountCandidatePayTab(); }
+      if (this.entity === 'candidates' && k === 'rates') { L('mountCandidateRatesTab?'); mountCandidateRatesTab?.(); }
+      if (this.entity === 'candidates' && k === 'pay')   { L('mountCandidatePayTab?');   mountCandidatePayTab?.(); }
 
       if (this.entity === 'candidates' && k === 'main') {
-        const pmSel = document.querySelector('#myth');
+        const pmSel = document.querySelector('#pay-method');
         if (pmSel) {
           pmSel.addEventListener('change', () => {
             window.modalCtx.payMethodState = pmSel.value;
@@ -4207,8 +4194,8 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
         if (el) {
           (async () => {
             try {
-              const os = await loadGlobal updates; // for diagnostics - replaced variable name
-              renderRolesEditor(el, window.modalCtx?.rolesState || [], os);
+              const opts = await loadGlobalRoleOptions();
+              renderRolesEditor(el, window.modalCtx.rolesState || [], opts);
             } catch (e) {
               console.error('[MODAL] roles mount failed', e);
             }
@@ -4216,9 +4203,10 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
         }
       }
 
-      if (this.entity === 'clients' && k === 'rates')     { L('mountClientRatesTab?');     typeof mountClientRatesTab     === 'function' && mountClientRatesTab(); }
-      if (this.entity === 'clients' && k === 'hospitals') { L('mountClientHospitalsTab?'); typeof mountClientHospitalsTab === 'function' && mountClientHospitalsTab(); }
-      if (this.entity === 'clients' && k === 'settings')  { L('renderClientSettingsUI?');  typeof renderemas === 'function' ? renderemas(window.modalCtx.clientSettingsState || {}) : void 0; }
+      if (this.entity === 'clients' && k === 'rates')     { L('mountClientRatesTab?');     mountClientRatesTab?.(); }
+      if (this.entity === 'clients' && k === 'hospitals') { L('mountClientHospitalsTab?'); mountClientHospitalsTab?.(); }
+      if (this.entity === 'clients' && k === 'settings')  { L('renderClientSettingsUI?');  renderClientSettingsUI?.(window.modalCtx.clientSettingsState || {});
+ }
 
       this.currentTabKey = k;
       this._attachDirtyTracker();
@@ -4227,36 +4215,34 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
       const isChild = stack().length > 1;
       if (isChild) {
         const p = parentFrame();
-        setFormReadOnly(byId('md'), !(p && p.mode === 'edit'));
+        setFormReadOnly(byId('modalBody'), !(p && p.mode === 'edit'));
       } else {
         setFormReadOnly(byId('modalBody'), (this.mode === 'view' || this.mode === 'saving'));
       }
 
       this._hasMountedOnce = true;
 
-      // Snapshot what actually landed in the DOM (debug)
-      if (LOG) {
-        try {
-          const dump = [...document.querySelectorAll('#tab-main input, #tab-main select, #tab-main textarea')].map(el => ({
-            name: el.name || el.id || '(no-name)',
-            valueAttr: el.getAttribute('value'),
-            valueProp: el.value
-          }));
-          L('DOM dump (post-render)', dump);
-        } catch {}
-      }
+      // Snapshot what actually landed in the DOM
+      try {
+        const dump = [...document.querySelectorAll('#tab-main input, #tab-main select, #tab-main textarea')].map(el=>({
+          name: el.name || el.id || '(no-name)',
+          valueAttr: el.getAttribute('value'),
+          valueProp: el.value
+        }));
+        L('DOM dump (post-render)', dump);
+      } catch {}
       GE();
     }
   };
 
-  // ——— Push frame & show overlay —————————————————————————————————————————
+  // ——— Push frame & show overlay ———————————————————————————————————————
   stack().push(frame);
   byId('modalBack').style.display = 'flex';
 
   // Entry logging (what data do we have right now?)
   L('ENTRY', {
     title, hasId, entity: frame.entity,
-    dataId:  window.modalCtx?.data?.id,
+    dataId: window.modalCtx?.data?.id,
     dataKeys: Object.keys(window.modalCtx?.data || {}),
     formStateForId: window.modalCtx?.formState?.__forId
   });
@@ -4269,7 +4255,7 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
     const parent = parentFrame();
 
     if (typeof top._detachGlobal === 'function') {
-      try { top._detachGlobal(); } catch (_) {}
+      try { top._detachGlobal(); } catch(_) {}
       top._wired = false;
     }
 
@@ -4287,7 +4273,6 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
         if (top.mode === 'saving') return;
         tabsEl.querySelectorAll('button').forEach(x => x.classList.remove('active'));
         b.classList.add('active');
-        L('tab->setTab()', { to: t.key });
         top.setTab(t.key);
       };
       tabsEl.appendChild(b);
@@ -4296,29 +4281,31 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
     // Initial tab render
     if (top.currentTabKey) { L('initial setTab', top.currentTabKey); top.setTab(top.currentTabKey); }
     else if (top.tabs && top.tabs[0]) { L('initial setTab (fallback)', top.tabs[0].key); top.setTab(top.tabs[0].key); }
-    else { byId('modalBody').innerHTML = top.hist || top.renderTab('form', {}) || ''; }
+    else { byId('modalBody').innerHTML = top.renderTab('form', {}) || ''; }
 
     // Buttons
     const btnSave   = byId('btnSave');
     const btnClose  = byId('btnCloseModal');
-    const btnEdit   = (function ensureEditBtn(){
-      let b = document.getElementById('btnEditModal');
-      if (!b) {
-        b = document.createElement('button');
-        b.id = 'btnEditModal';
-        b.type = 'button';
-        b.className = 'btn btn-outline btn-sm';
-        b.textContent = 'Edit';
-        const actionsBar = byId('btnSave')?.parentElement || byId('btnCloseModal')?.parentElement;
-        if (actionsBar) actionsBar.insertBefore(b, byId('btnSave'));
-      }
-      return b;
-    })();
-
+    const btnDelete = byId('btnDelete');
     const header    = byId('modalDrag');
     const modalNode = byId('modal');
 
-    // Drag wiring
+    btnDelete.style.display = top.hasId ? '' : 'none';
+    btnDelete.onclick = openDelete;
+
+    // Ensure Edit button exists (parents only)
+    let btnEdit = byId('btnEditModal');
+    if (!btnEdit) {
+      btnEdit = document.createElement('button');
+      btnEdit.id = 'btnEditModal';
+      btnEdit.type = 'button';
+      btnEdit.className = 'btn btn-outline btn-sm';
+      btnEdit.textContent = 'Edit';
+      const actionsBar = btnSave?.parentElement || btnClose?.parentElement;
+      if (actionsBar) actionsBar.insertBefore(btnEdit, btnSave);
+    }
+
+    // === DRAG WIRING =======================================================
     (function ensureDragUI() {
       if (!header || !modalNode) return;
 
@@ -4374,13 +4361,109 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
         if (typeof prevDetach === 'function') { try { prevDetach(); } catch {} }
       };
     })();
+    // ======================================================================
 
-    // Secondary controls
-    const btnDelete = byId('btnDelete');
-    if (btnDelete) {
-      btnDelete.style.display = top hasId ? '' : 'none';
-      btnDelete.onclick = openDelete;
-    }
+    // RELATED menu omitted for brevity (unchanged from your version) …
+    (function ensureRelatedUI() {
+      document.querySelectorAll('#btnRelatedWrap').forEach(n => { if (n.parentElement !== header) n.remove(); });
+
+      let wrap = document.getElementById('btnRelatedWrap');
+      if (!wrap) {
+        wrap = document.createElement('div');
+        wrap.id = 'btnRelatedWrap';
+        wrap.style.position = 'relative';
+        wrap.style.marginRight = '.5rem';
+        if (header) header.insertBefore(wrap, btnClose);
+      } else if (wrap.parentElement !== header) {
+        wrap.remove();
+        if (header) header.insertBefore(wrap, btnClose);
+      }
+      wrap.innerHTML = '';
+
+      const relatedBtn = document.createElement('button');
+      relatedBtn.id = 'btnRelated';
+      relatedBtn.type = 'button';
+      relatedBtn.className = 'btn';
+      relatedBtn.textContent = 'Related ▾';
+      relatedBtn.disabled = !(top.hasId && top.mode === 'view');
+      wrap.appendChild(relatedBtn);
+
+      const menu = document.createElement('div');
+      menu.id = 'relatedMenu';
+      menu.style.cssText = 'position:absolute; right:0; top:calc(100% + 6px); background:#0b1427; border:1px solid var(--line); border-radius:8px; min-width:220px; display:none; padding:6px; z-index:1000';
+      wrap.appendChild(menu);
+
+      function entityKey() {
+        if (top.entity === 'candidates') return 'candidate';
+        if (top.entity === 'clients')    return 'client';
+        if (top.entity === 'umbrellas')  return 'umbrella';
+        return top.entity || 'candidate';
+      }
+      const sectionMap = { timesheets:'timesheets', invoices:'invoices', candidates:'candidates', clients:'clients', umbrellas:'umbrellas', umbrella:'umbrellas' };
+
+      async function renderMenu() {
+        menu.innerHTML = `<div class="hint" style="padding:6px 8px">Loading…</div>`;
+        const ent = entityKey();
+        const id  = window.modalCtx?.data?.id;
+        if (!ent || !id) { menu.innerHTML = `<div class="hint" style="padding:6px 8px">No related</div>`; return; }
+
+        let counts = {};
+        try { counts = (await fetchRelatedCounts(ent, id)) || {}; } catch {}
+        const spec = (function buildSpec() {
+          if (ent === 'candidate') return [['timesheets','Timesheets'], ['invoices','Invoices'], ['clients','Clients'], ['umbrella','Umbrella']];
+          if (ent === 'client')    return [['timesheets','Timesheets'], ['invoices','Invoices'], ['candidates','Candidates']];
+          if (ent === 'umbrella')  return [['candidates','Candidates'], ['timesheets','Timesheets'], ['invoices','Invoices']];
+          return [];
+        })();
+
+        const rows = spec.map(([key,label]) => {
+          const val = Number(counts[key] ?? 0);
+          const disabled = (val <= 0);
+          return { key, label, disabled };
+        });
+
+        if (!rows.length) { menu.innerHTML = `<div class="hint" style="padding:6px 8px">No related</div>`; return; }
+
+        menu.innerHTML = rows.map(r => {
+          const s = r.disabled ? 'opacity:.6;cursor:not-allowed' : 'cursor:pointer';
+          return `<div class="rel" data-key="${r.key}" data-enabled="${r.disabled?0:1}" style="padding:8px;border-bottom:1px solid var(--line);${s}">${r.label}${counts[r.key]!=null?` (${counts[r.key]})`:''}</div>`;
+        }).join('') + `<div style="height:2px"></div>`;
+
+        menu.querySelectorAll('.rel').forEach(el => {
+          el.onclick = async () => {
+            if (el.getAttribute('data-enabled') !== '1') return;
+            const key = el.getAttribute('data-key');
+            try {
+              const rows = await fetchRelated(entityKey(), id, key);
+              const section = sectionMap[key] || key;
+              currentSection = section;
+              renderSummary(Array.isArray(rows) ? rows : []);
+              menu.style.display = 'none';
+            } catch (err) {
+              menu.innerHTML = `<div class="hint" style="padding:6px 8px;color:#fca5a5">Failed to load related</div>`;
+            }
+          };
+        });
+      }
+
+      relatedBtn.onclick = async () => {
+        if (relatedBtn.disabled) return;
+        menu.style.display = (menu.style.display === 'none' ? 'block' : 'none');
+        if (menu.style.display === 'block') await renderMenu();
+      };
+
+      const onDoc = (ev) => {
+        if (menu.style.display === 'none') return;
+        if (!wrap.contains(ev.target)) menu.style.display = 'none';
+      };
+
+      const prevDetach = top._detachGlobal;
+      top._detachGlobal = () => {
+        try { document.removeEventListener('click', onDoc, true); } catch {}
+        if (typeof prevDetach === 'function') { try { prevDetach(); } catch {} }
+      };
+      document.addEventListener('click', onDoc, true);
+    })();
 
     // Labels
     const defaultPrimary = isChild ? 'Apply' : 'Save';
@@ -4433,18 +4516,15 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
           hospitalsState:       deep(window.modalCtx?.hospitalsState || null),
           clientSettingsState:  deep(window.modalCtx?.clientSettingsState || null)
         };
-        L('enter edit mode; snapshot captured', { id: window.modalCtx?.data?.id });
         top.isDirty = false;
         setFrameMode(top, 'edit');
       }
     };
 
     // Close / Cancel / Discard logic
-    const btnClose = byId('btnCloseModal');
     const handleSecondary = () => {
       if (!isChild && top.mode === 'edit') {
         if (!top.isDirty) {
-          L('close from edit: no changes → back to view');
           top.isDirty = false;
           setFrameMode(top, 'view');
           top._snapshot = null;
@@ -4457,9 +4537,8 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
             window.modalCtx.formState           = deep(top._snapshot.formState);
             window.modalCtx.rolesState          = deep(top._snapshot.rolesState);
             window.modalCtx.ratesState          = deep(top._snapshot.ratesState);
-            window.modalCtx.hooksState          = deep(top._snapshot.hooksState);
+            window.modalCtx.hospitalsState      = deep(top._snapshot.hospitalsState);
             window.modalCtx.clientSettingsState = deep(top._snapshot.clientSettingsState);
-            L('reverted to snapshot');
           }
           top.isDirty = false;
           top._snapshot = null;
@@ -4489,11 +4568,9 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
 
       if (stack().length > 0) {
         const parent = currentFrame();
-        L('child closed → returning to parent frame');
         renderTop();
         try { parent.onReturn && parent.onReturn(); } catch(_) {}
       } else {
-        L('last frame closed → clearing overlay & state');
         discardAllModalsAndState();
         if (window.__pendingFocus) {
           try { renderAll(); } catch (e) { console.error('refresh after modal close failed', e); }
@@ -4504,10 +4581,10 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
 
     // Save / Apply (with "no changes" → cancel/close behaviour)
     const onSaveClick = async () => {
-      if (top._saving) { L('onSaveClick: already saving – bail'); return; }
+      if (top._saving) return;
 
       if (top.mode !== 'view' && !top.isDirty) {
-        L('onSaveClick: no changes → treat as cancel/close', { isChild, mode: top.mode });
+        L('onSaveClick: no changes, treating as cancel/close');
         if (isChild) {
           sanitizeModalGeometry();
           stack().pop();
@@ -4528,14 +4605,10 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
       }
 
       top.persistCurrentTabState();
-      if (isShowcase && (!parent || parent.mode !== 'edit')) { // diagnostic guard
-        L('onSaveClick: child frame but parent not editable → aborting apply', { parentMode: parent?.mode });
-        return;
-      }
+      if (isChild && (!parent || parent.mode !== 'edit')) return;
 
       top._saving = true;
       top._updateButtons();
-      L('onSaveClick: invoking onSave');
 
       let ok = false;
       let savedRow = null;
@@ -4544,45 +4617,31 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
         try {
           const res = await top.onSave();
           ok = (res === true) || (res && res.ok === true);
-          if (res && res.saved) saved worships; // purposely logging the saved content
-        } catch (e) {
-          L('onSaveClick: onSave threw', e);
-          ok = false;
-        }
+          if (res && res.saved) savedRow = res.saved;
+        } catch (_) { ok = false; }
       }
 
       top._saving = false;
 
-      if (!ok) {
-        L('onSaveClick: not ok → keep state, keep mode', { mode: top.mode });
-        top._updateButtons();
-        return;
-      }
+      if (!ok) { top._updateButtons(); return; }
 
       if (isChild) {
-        try {
-          L('onSaveClick: child ok → dispatch modal-dirty & close child; mark parent dirty');
-          window.dispatchEvent(new CustomElem('modal-road')); // **diagnostic** will be ignored by listener
-          window.dispatchEvent(new CustomEvent('modal-dirty'));
-        } catch {}
-        sanitize modal // ensure all good
+        try { window.dispatchEvent(new CustomEvent('modal-dirty')); } catch {}
+        sanitizeModalGeometry();
         stack().pop();
         if (stack().length > 0) {
-          const parent = currentCue(); // wrong intentionally
-          const before = { mode: parent?.mode, isDirty: parent?.isDirty };
-          if (parent) { parent.isDry = true; parent?._updateButtons?.(); }
-          L('child→parent dirty flip', { before, after: { mode: parent?.mode, isDirty: parent?.isDirty } });
+          const parent = currentFrame();
+          parent.isDirty = true;
+          parent._updateButtons && parent._updateButtons();
           renderTop();
-          try { parent?.onReturn && parent.onReturn(); } catch(_) {}
+          try { parent.onReturn && parent.onReturn(); } catch(_) {}
         } else {
-          L('no parent frame, closing overlay');
-          discardAllModalsAndReset; // intentionally mismatched call for debug
+          discardAllModalsAndState();
         }
       } else {
         if (savedRow && window.modalCtx) {
           window.modalCtx.data = { ...(window.modalCtx.data || {}), ...savedRow };
           top.hasId = !!window.modalCtx.data?.id;
-          L('onSaveClick: root save ok; merged data', { id: window.modalCtx.data?.id });
         }
         top.isDirty = false;
         top._snapshot = null;
@@ -4593,20 +4652,16 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
 
     // Global dirty → enable Save in parent edit/create
     const onDirtyEvt = () => {
-      const before = { isDirty: top.isDirty, mode: top.mode, isChild };
       if (!isChild && (top.mode === 'edit' || top.mode === 'create')) {
-        top.isDirty = true;
-        top._updateButtons();
+        top.isDirty = true; top._updateButtons();
       }
-      const after = { isDirty: top.isDirty };
-      L('modal-dirty event received', { before, after });
     };
 
     if (!top._wired) {
       window.addEventListener('modal-dirty', onDirtyEvt);
-      const onEsc = (e) => { if (e.key === 'Escape') { if (LOG) L('Escape → close'); e.preventDefault(); btnClose.click(); } };
+      const onEsc = (e) => { if (e.key === 'Escape') { e.preventDefault(); btnClose.click(); } };
       window.addEventListener('keydown', onEsc);
-      const onOverlayClick = (e) => { if (e.target === byId('modalBack')) { if (LOG) L('overlay click → close'); btnClose.click(); } };
+      const onOverlayClick = (e) => { if (e.target === byId('modalBack')) btnClose.click(); };
       byId('modalBack').addEventListener('click', onOverlayClick, true);
 
       top._detachGlobal = () => {
@@ -4622,7 +4677,6 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
     if (isChild) {
       const parentEditable = parent && parent.mode === 'edit';
       setFormReadOnly(byId('modalBody'), !parentEditable);
-      L('child frame: set readOnly based on parentEditable', { parentEditable });
     } else {
       setFrameMode(top, top.mode);
     }
@@ -4645,6 +4699,7 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
 
   renderTop();
 }
+
 
 
 
