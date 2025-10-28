@@ -10,6 +10,7 @@ let refreshTimer = 0;
 window.__LOG_RATES  = true;   // logs for rate staging + rates table + rates tab
 window.__LOG_PAYTAB = true;   // logs for payment tab + umbrella prefill
 window.__LOG_MODAL  = true;   // logs from modal framework (showModal)
+const __LOG_API = true;   // turns on authFetch + rates/hospitals/client POST/PATCH logging
 
 
 
@@ -93,14 +94,28 @@ function normalizeClientSettingsForSave(raw) {
 
 // ===== Auth fetch with refresh retry =====
 async function authFetch(input, init={}){
+  const APILOG = (typeof window !== 'undefined' && !!window.__LOG_API) || (typeof __LOG_API !== 'undefined' && !!__LOG_API);
   const headers = new Headers(init.headers || {});
   if (SESSION?.accessToken) headers.set('Authorization', `Bearer ${SESSION.accessToken}`);
+  if (APILOG) {
+    const safeHeaders = {};
+    headers.forEach((v,k)=>{ safeHeaders[k] = (k.toLowerCase()==='authorization') ? '***' : v; });
+    const bodyPreview = typeof init.body === 'string' ? (init.body.length > 500 ? init.body.slice(0,500)+'…' : init.body) : init.body;
+    console.log('[authFetch] →', { url: typeof input==='string'?input:input?.url, method: (init.method||'GET'), headers: safeHeaders, body: bodyPreview });
+  }
   let res = await fetch(input, { ...init, headers, credentials: init.credentials || 'omit' });
+  if (APILOG) {
+    try { const txt = await res.clone().text(); console.log('[authFetch] ←', res.status, res.ok, txt.slice(0,500)); } catch {}
+  }
   if (res.status === 401) {
     const ok = await refreshToken();
     if (!ok) throw new Error('Unauthorised');
     headers.set('Authorization', `Bearer ${SESSION.accessToken}`);
+    if (APILOG) console.log('[authFetch] retrying after 401');
     res = await fetch(input, { ...init, headers, credentials: init.credentials || 'omit' });
+    if (APILOG) {
+      try { const txt2 = await res.clone().text(); console.log('[authFetch] ← (retry)', res.status, res.ok, txt2.slice(0,500)); } catch {}
+    }
   }
   return res;
 }
@@ -1354,9 +1369,16 @@ function normaliseRolesForSave(roles){
 
 async function listClientHospitals(clientId){
   if (!clientId) return [];
-  const r = await authFetch(API(`/api/clients/${clientId}/hospitals`));
-  return toList(r);
+  const url = API(`/api/clients/${clientId}/hospitals`);
+  const APILOG = (typeof window !== 'undefined' && !!window.__LOG_API) || (typeof __LOG_API !== 'undefined' && !!__LOG_API);
+  if (APILOG) console.log('[listClientHospitals] → GET', url);
+  const r = await authFetch(url);
+  if (APILOG) console.log('[listClientHospitals] ←', r.status, r.ok);
+  const list = await toList(r);
+  if (APILOG) console.log('[listClientHospitals] parsed length', Array.isArray(list) ? list.length : -1);
+  return list;
 }
+
 
 
 function formatRolesSummary(roles){
@@ -1784,10 +1806,15 @@ async function listClientRates(clientId, opts = {}) {
   }
   if (opts.active_on) qp.set('active_on', String(opts.active_on)); // YYYY-MM-DD
 
-  // Backend returns unified rows (paye_*, umb_*, charge_*) — no rate_type
   const qs = qp.toString() ? `?${qp.toString()}` : '';
-  const res = await authFetch(API(`/api/rates/client-defaults${qs}`));
+  const url = API(`/api/rates/client-defaults${qs}`);
+  const APILOG = (typeof window !== 'undefined' && !!window.__LOG_API) || (typeof __LOG_API !== 'undefined' && !!__LOG_API);
+  if (APILOG) console.log('[listClientRates] → GET', url);
+
+  const res = await authFetch(url);
+  if (APILOG) console.log('[listClientRates] ←', res.status, res.ok);
   const rows = await toList(res);
+  if (APILOG) console.log('[listClientRates] parsed length', Array.isArray(rows) ? rows.length : -1);
   return Array.isArray(rows) ? rows : [];
 }
 
@@ -1812,8 +1839,8 @@ async function upsertClientRate(payload) {
   if (!payload || !payload.client_id || !payload.role || !payload.date_from) {
     throw new Error('upsertClientRate: client_id, role and date_from are required');
   }
+  const APILOG = (typeof window !== 'undefined' && !!window.__LOG_API) || (typeof __LOG_API !== 'undefined' && !!__LOG_API);
 
-  // Single unified payload: one window with 5× charge + 5× PAYE + 5× UMBRELLA
   const body = {
     client_id : String(payload.client_id),
     role      : String(payload.role),
@@ -1821,21 +1848,18 @@ async function upsertClientRate(payload) {
     date_from : payload.date_from,
     date_to   : payload.date_to ?? null,
 
-    // charge (five-way)
     charge_day   : payload.charge_day   ?? null,
     charge_night : payload.charge_night ?? null,
     charge_sat   : payload.charge_sat   ?? null,
     charge_sun   : payload.charge_sun   ?? null,
     charge_bh    : payload.charge_bh    ?? null,
 
-    // PAYE pay (five-way)
     paye_day     : payload.paye_day     ?? null,
     paye_night   : payload.paye_night   ?? null,
     paye_sat     : payload.paye_sat     ?? null,
     paye_sun     : payload.paye_sun     ?? null,
     paye_bh      : payload.paye_bh      ?? null,
 
-    // Umbrella pay (five-way)
     umb_day      : payload.umb_day      ?? null,
     umb_night    : payload.umb_night    ?? null,
     umb_sat      : payload.umb_sat      ?? null,
@@ -1843,15 +1867,20 @@ async function upsertClientRate(payload) {
     umb_bh       : payload.umb_bh       ?? null
   };
 
+  if (APILOG) console.log('[upsertClientRate] → POST /api/rates/client-defaults', body);
   const res = await authFetch(
     API(`/api/rates/client-defaults`),
     { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }
   );
+  if (APILOG) console.log('[upsertClientRate] ←', res.status, res.ok);
   if (!res.ok) {
     const msg = await res.text().catch(() => 'Failed to upsert client default window');
+    if (APILOG) console.error('[upsertClientRate] error body', msg);
     throw new Error(msg);
   }
-  return res.json().catch(() => ({}));
+  const json = await res.json().catch(() => ({}));
+  if (APILOG) console.log('[upsertClientRate] parsed', json);
+  return json;
 }
 
 
@@ -2022,6 +2051,8 @@ async function upsertClient(payload, id){
 
   const url    = id ? `/api/clients/${id}` : '/api/clients';
   const method = id ? 'PUT' : 'POST';
+  const APILOG = (typeof window !== 'undefined' && !!window.__LOG_API) || (typeof __LOG_API !== 'undefined' && !!__LOG_API);
+  if (APILOG) console.log('[upsertClient] →', { method, url: API(url), body: clean });
 
   const r = await authFetch(API(url), {
     method,
@@ -2029,14 +2060,16 @@ async function upsertClient(payload, id){
     body: JSON.stringify(clean)
   });
 
+  if (APILOG) console.log('[upsertClient] ←', r.status, r.ok);
   if (!r.ok) {
     const msg = await r.text().catch(()=> '');
+    if (APILOG) console.error('[upsertClient] error body', msg);
     throw new Error(msg || 'Save failed');
   }
 
-  // Normalize JSON shapes: [row], { client: {...} }, or { ...row }
   try {
     const data = await r.json();
+    if (APILOG) console.log('[upsertClient] parsed', data);
     let obj = null;
     if (Array.isArray(data)) obj = data[0] || null;
     else if (data && data.client) obj = data.client;
@@ -2045,7 +2078,6 @@ async function upsertClient(payload, id){
     if (obj) return obj;
   } catch (_) { /* fall through to Location/PUT fallback */ }
 
-  // Fallbacks: Location header or known id (PUT)
   let clientId = null;
   try {
     const loc = r.headers && r.headers.get('Location');
@@ -2055,8 +2087,11 @@ async function upsertClient(payload, id){
     }
   } catch (_) {}
 
-  return clientId ? { id: clientId, ...clean } : (id ? { id, ...clean } : { ...clean });
+  const fallback = clientId ? { id: clientId, ...clean } : (id ? { id, ...clean } : { ...clean });
+  if (APILOG) console.log('[upsertClient] fallback', fallback);
+  return fallback;
 }
+
 
 // ================== FRONTEND: upsertUmbrella (UPDATED to return saved object) ==================
 // ===== UPDATED: upsertUmbrella — normalize server response so we always return the created/updated object with an id
@@ -3277,6 +3312,7 @@ function renderCalendar(timesheets){
 async function openClient(row) {
   // ===== Logging helpers (toggle with window.__LOG_MODAL = true/false) =====
   const LOG = (typeof window.__LOG_MODAL === 'boolean') ? window.__LOG_MODAL : true;
+  const APILOG = (typeof window !== 'undefined' && !!window.__LOG_API) || (typeof __LOG_API !== 'undefined' && !!__LOG_API);
   const L  = (...a)=> { if (LOG) console.log('[OPEN_CLIENT]', ...a); };
   const W  = (...a)=> { if (LOG) console.warn('[OPEN_CLIENT]', ...a); };
   const E  = (...a)=> { if (LOG) console.error('[OPEN_CLIENT]', ...a); };
@@ -3383,7 +3419,6 @@ async function openClient(row) {
       let csMerged = { ...(window.modalCtx.clientSettingsState || {}) };
       if (byId('clientSettingsForm')) {
         const liveSettings = collectForm('#clientSettingsForm', false);
-        // write only well-formed HH:MM into staged to avoid partials
         ['day_start','day_end','night_start','night_end'].forEach(k=>{
           const v = _toHHMM(liveSettings[k]);
           if (v) csMerged[k] = v;
@@ -3393,27 +3428,28 @@ async function openClient(row) {
         }
       }
       const { cleaned: csClean, invalid: csInvalid } = normalizeClientSettingsForSave(csMerged);
+      if (APILOG) console.log('[OPEN_CLIENT] client_settings (merged→clean)', { csMerged, csClean, csInvalid });
       if (csInvalid) {
         alert('Times must be HH:MM (24-hour). Please correct the client settings.');
         return { ok:false };
       }
-      // Only attach if we have any settings at all
       if (Object.keys(csClean).length) {
         payload.client_settings = csClean;
       }
 
-      // Save client + settings in one call (server merges)
-      // (Your current code already attaches client_settings here, we just normalised it and refused invalid)
       const idForUpdate = window.modalCtx?.data?.id || full?.id || null;
+      if (APILOG) console.log('[OPEN_CLIENT] upsertClient → request', { idForUpdate, payload });
       L('[onSave] upsertClient', { idForUpdate, payloadKeys: Object.keys(payload||{}) });
       const clientResp  = await upsertClient(payload, idForUpdate).catch(err => { E('upsertClient failed', err); return null; });
       const clientId    = idForUpdate || (clientResp && clientResp.id);
+      if (APILOG) console.log('[OPEN_CLIENT] upsertClient ← response', { ok: !!clientResp, clientResp, clientId });
       L('[onSave] saved', { ok: !!clientResp, clientId, savedKeys: Object.keys(clientResp||{}) });
       if (!clientId) { alert('Failed to save client'); return { ok:false }; }
 
-      // Validate & persist staged client default windows (unchanged)
+      // Validate & persist staged client default windows
       if (clientId && Array.isArray(window.modalCtx.ratesState)) {
         const windows = window.modalCtx.ratesState.slice();
+        if (APILOG) console.log('[OPEN_CLIENT] upserting client default windows', { count: windows.length, windows });
 
         for (let i = 0; i < windows.length; i++) {
           for (let j = i + 1; j < windows.length; j++) {
@@ -3425,6 +3461,7 @@ async function openClient(row) {
               if (rangesOverlap(a0, a1, b0, b1)) {
                 alert(`Client default windows overlap for role=${A.role} band=${A.band||'(none)'}.\n` +
                       `${formatIsoToUk(a0)}–${formatIsoToUk(a1||'')}  vs  ${formatIsoToUk(b0)}–${formatIsoToUk(b1||'')}`);
+                if (APILOG) console.warn('[OPEN_CLIENT] overlap detected', { A, B });
                 return { ok:false };
               }
             }
@@ -3433,6 +3470,7 @@ async function openClient(row) {
 
         for (const w of windows) {
           try {
+            if (APILOG) console.log('[OPEN_CLIENT] upsertClientRate →', w);
             L('[upsertClientRate]', { role: w.role, band: w.band, from: w.date_from, to: w.date_to });
             await upsertClientRate({
               client_id : clientId,
@@ -3441,7 +3479,6 @@ async function openClient(row) {
               date_from : w.date_from || null,
               date_to   : w.date_to ?? null,
 
-              // charge & pay blocks — unified
               charge_day   : w.charge_day   ?? null,
               charge_night : w.charge_night ?? null,
               charge_sat   : w.charge_sat   ?? null,
@@ -3460,17 +3497,25 @@ async function openClient(row) {
               umb_sun      : w.umb_sun      ?? null,
               umb_bh       : w.umb_bh       ?? null
             });
+            if (APILOG) console.log('[OPEN_CLIENT] upsertClientRate ← ok');
           } catch (e) {
             E('Upsert client default window failed', w, e);
+            if (APILOG) console.error('[OPEN_CLIENT] upsertClientRate ← error', e);
             alert('Failed to save a client rate window. See console for details.');
             return { ok:false };
           }
         }
       }
 
-      // Commit staged hospitals (unchanged)
+      // Commit staged hospitals
       if (clientId && window.modalCtx.hospitalsState && typeof window.modalCtx.hospitalsState === 'object') {
         const H = window.modalCtx.hospitalsState;
+        if (APILOG) console.log('[OPEN_CLIENT] hospitals staged', {
+          existing: (H.existing||[]).length,
+          stagedNew: (H.stagedNew||[]).length,
+          stagedEdits: Object.keys(H.stagedEdits||{}).length,
+          stagedDeletes: (H.stagedDeletes||new Set()).size
+        });
         const existingAlive = (H.existing || []).filter(x => !H.stagedDeletes.has(x.id));
         const names = new Set(existingAlive.map(x => String(x.hospital_name_norm||'').trim().toUpperCase()).filter(Boolean));
 
@@ -3480,10 +3525,12 @@ async function openClient(row) {
           const norm = nm.toUpperCase();
           if (names.has(norm)) { alert(`Duplicate hospital: ${nm}`); return { ok:false }; }
           names.add(norm);
+          if (APILOG) console.log('[OPEN_CLIENT] POST /hospitals →', { nm, clientId, body: { hospital_name_norm: nm, ward_hint: n.ward_hint ?? null }});
           const res = await authFetch(API(`/api/clients/${clientId}/hospitals`), {
             method:'POST', headers:{'content-type':'application/json'},
             body: JSON.stringify({ hospital_name_norm: nm, ward_hint: n.ward_hint ?? null })
           });
+          if (APILOG) console.log('[OPEN_CLIENT] POST /hospitals ←', res.status, res.ok);
           if (!res.ok) { const msg = await res.text().catch(()=> ''); alert(`Create hospital failed: ${msg}`); return { ok:false }; }
         }
 
@@ -3498,14 +3545,18 @@ async function openClient(row) {
             if (norm !== currentNorm && names.has(norm)) { alert(`Duplicate hospital: ${nm}`); return { ok:false }; }
             names.add(norm);
           }
+          if (APILOG) console.log('[OPEN_CLIENT] PATCH /hospitals/:id →', { hid, clientId, patch });
           const res = await authFetch(API(`/api/clients/${clientId}/hospitals/${encodeURIComponent(hid)}`), {
             method:'PATCH', headers:{'content-type':'application/json'}, body: JSON.stringify(patch)
           });
+          if (APILOG) console.log('[OPEN_CLIENT] PATCH /hospitals/:id ←', res.status, res.ok);
           if (!res.ok) { const msg = await res.text().catch(()=> ''); alert(`Update hospital failed: ${msg}`); return { ok:false }; }
         }
 
         for (const hid of (H.stagedDeletes || new Set())) {
+          if (APILOG) console.log('[OPEN_CLIENT] DELETE /hospitals/:id →', { hid, clientId });
           const res = await authFetch(API(`/api/clients/${clientId}/hospitals/${encodeURIComponent(hid)}`), { method:'DELETE' });
+          if (APILOG) console.log('[OPEN_CLIENT] DELETE /hospitals/:id ←', res.status, res.ok);
           if (!res.ok && res.status !== 404) { const msg = await res.text().catch(()=> ''); alert(`Delete hospital failed: ${msg}`); return { ok:false }; }
         }
       }
@@ -3944,6 +3995,7 @@ function mountClientHospitalsTab() {
 async function openClientRateModal(client_id, existing) {
   const parentFrame = _currentFrame();
   const parentEditable = parentFrame && parentFrame.mode === 'edit';
+  const APILOG = (typeof window !== 'undefined' && !!window.__LOG_API) || (typeof __LOG_API !== 'undefined' && !!__LOG_API);
 
   const globalRoles = await loadGlobalRoleOptions();
   const roleOptions = globalRoles.map(r => `<option value="${r}">${r}</option>`).join('')
@@ -4013,8 +4065,8 @@ async function openClientRateModal(client_id, existing) {
       if (!pf || pf.mode !== 'edit') return false;
 
       const raw = collectForm('#clientRateForm');
+      if (APILOG) console.log('[openClientRateModal] Apply collected', raw);
 
-      // role/new role
       let role = (raw.role || '').trim();
       const newRole = (document.getElementById('cl_role_new')?.value || '').trim();
       if (role === '__OTHER__') {
@@ -4042,32 +4094,31 @@ async function openClientRateModal(client_id, existing) {
         date_from: isoFrom,
         date_to:   isoTo,
 
-        // charges
         charge_day  : raw['charge_day']  !== '' ? Number(raw['charge_day'])  : null,
         charge_night: raw['charge_night']!== '' ? Number(raw['charge_night']): null,
         charge_sat  : raw['charge_sat']  !== '' ? Number(raw['charge_sat'])  : null,
         charge_sun  : raw['charge_sun']  !== '' ? Number(raw['charge_sun'])  : null,
         charge_bh   : raw['charge_bh']   !== '' ? Number(raw['charge_bh'])   : null,
 
-        // paye five-way
         paye_day   : raw['paye_day']   !== '' ? Number(raw['paye_day'])   : null,
         paye_night : raw['paye_night'] !== '' ? Number(raw['paye_night']) : null,
         paye_sat   : raw['paye_sat']   !== '' ? Number(raw['paye_sat'])   : null,
         paye_sun   : raw['paye_sun']   !== '' ? Number(raw['paye_sun'])   : null,
         paye_bh    : raw['paye_bh']    !== '' ? Number(raw['paye_bh'])    : null,
 
-        // umbrella five-way
         umb_day    : raw['umb_day']    !== '' ? Number(raw['umb_day'])    : null,
         umb_night  : raw['umb_night']  !== '' ? Number(raw['umb_night'])  : null,
         umb_sat    : raw['umb_sat']    !== '' ? Number(raw['umb_sat'])    : null,
         umb_sun    : raw['umb_sun']    !== '' ? Number(raw['umb_sun'])    : null,
         umb_bh     : raw['umb_bh']     !== '' ? Number(raw['umb_bh'])     : null
       };
+      if (APILOG) console.log('[openClientRateModal] staged', staged);
 
       const list = Array.isArray(modalCtx.ratesState) ? modalCtx.ratesState : [];
       const sameCat = r => String(r.role||'')===staged.role && String(r.band||'')===String(staged.band||'');
 
       const activeAtStart = list.filter(r => sameCat(r) && r.date_from && r.date_from <= staged.date_from && (!r.date_to || r.date_to >= staged.date_from));
+      if (APILOG) console.log('[openClientRateModal] activeAtStart', activeAtStart);
       if (activeAtStart.length > 1) {
         alert(`Multiple active windows for role=${staged.role} band=${staged.band||'(none)'} at ${formatIsoToUk(isoFrom)}.\nPlease tidy them first.`);
         return false;
@@ -4087,21 +4138,21 @@ async function openClientRateModal(client_id, existing) {
         if (!ok) return false;
         const idx = list.indexOf(inc);
         if (idx >= 0) modalCtx.ratesState[idx] = { ...inc, date_to: cut };
+        if (APILOG) console.log('[openClientRateModal] truncated incumbent', { from: inc.date_from, to: cut });
       }
 
-      // final overlap guard
       const after = (Array.isArray(modalCtx.ratesState) ? modalCtx.ratesState.slice() : []).filter(sameCat);
       for (const r of after) {
         if (existing && r === existing) continue;
         const a0 = r.date_from || null, a1 = r.date_to || null;
         const b0 = staged.date_from || null, b1 = staged.date_to || null;
         if (rangesOverlap(a0, a1, b0, b1)) {
+          if (APILOG) console.warn('[openClientRateModal] final overlap guard failed', { r, staged });
           alert(`Window still overlaps existing ${formatIsoToUk(a0)}–${formatIsoToUk(a1||'')} for role=${staged.role} / ${staged.band||'(none)'}`);
           return false;
         }
       }
 
-      // stage
       modalCtx.ratesState = Array.isArray(modalCtx.ratesState) ? modalCtx.ratesState : [];
       if (existing) {
         const idx = modalCtx.ratesState.findIndex(r => r === existing);
@@ -4109,8 +4160,8 @@ async function openClientRateModal(client_id, existing) {
       } else {
         modalCtx.ratesState.push(staged);
       }
+      if (APILOG) console.log('[openClientRateModal] ratesState size', modalCtx.ratesState.length);
 
-      // refresh parent rates tab and mark dirty
       try {
         const parent = _currentFrame();
         if (parent && typeof parent.setTab === 'function') {
@@ -4129,7 +4180,6 @@ async function openClientRateModal(client_id, existing) {
     }
   );
 
-  // Prefill & minor wiring (same as before)
   const selRole = document.getElementById('cl_role');
   const newRow  = document.getElementById('cl_role_new_row');
   const inFrom  = document.getElementById('cl_date_from');
