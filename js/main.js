@@ -2283,32 +2283,65 @@ async function openCandidate(row) {
       L('[onSave] upsertCandidate', { idForUpdate, payloadKeys: Object.keys(payload||{}) });
       const saved = await upsertCandidate(payload, idForUpdate).catch(err => { E('upsertCandidate failed', err); return null; });
       const candidateId = idForUpdate || (saved && saved.id);
-      L('[onSave] saved', { ok: !!saved, candidateId, savedKeys: Object.keys(saved||{}) });
+      L('[onSave] saved', { ok: !!saved, candidateId, savedKeys: Array.isArray(saved)?[]:Object.keys(saved||{}) });
       if (!candidateId) { alert('Failed to save candidate'); return { ok:false }; }
 
       // Persist staged overrides
       const O = window.modalCtx.overrides || { existing: [], stagedNew: [], stagedEdits: {}, stagedDeletes: new Set() };
       L('[onSave] overrides', { deletes: Array.from(O.stagedDeletes||[]), edits: Object.keys(O.stagedEdits||{}), newCount: (O.stagedNew||[]).length });
 
+      // Deletes (unchanged)
       for (const delId of O.stagedDeletes) {
         const res = await authFetch(API(`/api/rates/candidate-overrides/${encodeURIComponent(delId)}`), { method: 'DELETE' });
         if (!res.ok && res.status !== 404) { const msg = await res.text().catch(()=> 'Delete override failed'); alert(msg); return { ok:false }; }
       }
 
-      for (const [id, patch] of Object.entries(O.stagedEdits || {})) {
-        if (!patch.client_id) { alert('Override must include client_id'); return { ok:false }; }
-        const res = await authFetch(
-          API(`/api/rates/candidate-overrides/${encodeURIComponent(id)}`),
-          { method:'PATCH', headers:{'content-type':'application/json'}, body: JSON.stringify({ ...patch, candidate_id: candidateId }) }
-        );
-        if (!res.ok) { const msg = await res.text().catch(()=> 'Update override failed'); alert(msg); return { ok:false }; }
+      // Edits — PATCH uses candidateId in path + ORIGINAL keys in query, updates in body
+      for (const [editId, patchRaw] of Object.entries(O.stagedEdits || {})) {
+        const original = (O.existing || []).find(x => String(x.id) === String(editId));
+        if (!original) { alert('Cannot locate original override to patch'); return { ok:false }; }
+
+        // Build query string from ORIGINAL keys
+        const q = new URLSearchParams();
+        if (original.client_id) q.set('client_id', original.client_id);
+        if (original.role != null) q.set('role', String(original.role));
+        // band=null means bandless window; send empty value for null band
+        if (original.band == null || original.band === '') q.set('band', '');
+        else q.set('band', String(original.band));
+        if (original.rate_type) q.set('rate_type', String(original.rate_type).toUpperCase());
+
+        // Sanitize body: strip empty strings; dates must be ISO YYYY-MM-DD
+        const body = {};
+        for (const [k,v] of Object.entries(patchRaw || {})) {
+          if (v === '' || v === undefined) continue;
+          body[k] = v;
+        }
+        body.candidate_id = candidateId;
+
+        const url = API(`/api/rates/candidate-overrides/${encodeURIComponent(candidateId)}?${q.toString()}`);
+        const res = await authFetch(url, {
+          method:'PATCH',
+          headers:{ 'content-type':'application/json' },
+          body: JSON.stringify(body)
+        });
+        if (!res.ok) {
+          const msg = await res.text().catch(()=> 'Update override failed');
+          alert(msg);
+          return { ok:false };
+        }
       }
 
+      // Creates (unchanged, but ensure ISO dates are already staged)
       for (const nv of (O.stagedNew || [])) {
         if (!nv.client_id) { alert('Override must include client_id'); return { ok:false }; }
+        const clean = {};
+        for (const [k,v] of Object.entries(nv)) {
+          if (k === '_tmpId' || v === '') continue;
+          clean[k] = v;
+        }
         const res = await authFetch(
           API(`/api/rates/candidate-overrides`),
-          { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({ ...nv, candidate_id: candidateId }) }
+          { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({ ...clean, candidate_id: candidateId }) }
         );
         if (!res.ok) { const msg = await res.text().catch(()=> 'Create override failed'); alert(msg); return { ok:false }; }
       }
@@ -2471,10 +2504,10 @@ async function renderCandidateRatesTable() {
   const LOG = !!window.__LOG_RATES;
   const token    = window.modalCtx.openToken;
   const idActive = window.modalCtx.data?.id || null;
-  const div = byId('ratesTable'); 
+  const div = byId('ratesTable');
   if (!div) { if (LOG) console.warn('[RATES][renderCandidateRatesTable] no #ratesTable'); return; }
   if (token !== window.modalCtx.openToken || window.modalCtx.data?.id !== idActive) {
-    if (LOG) console.warn('[RATES][renderCandidateRatesTable] token/id changed mid-flight'); 
+    if (LOG) console.warn('[RATES][renderCandidateRatesTable] token/id changed mid-flight');
     return;
   }
 
@@ -2521,8 +2554,8 @@ async function renderCandidateRatesTable() {
 
   const tbl   = document.createElement('table'); tbl.className = 'grid';
   const thead = document.createElement('thead'); const trh = document.createElement('tr');
-  headers.forEach(h => { const th=document.createElement('th'); th.textContent=h; trh.appendChild(th); }); 
-  thead.appendChild(trh); 
+  headers.forEach(h => { const th=document.createElement('th'); th.textContent=h; trh.appendChild(th); });
+  thead.appendChild(trh);
   tbl.appendChild(thead);
 
   const tb = document.createElement('tbody');
@@ -2796,6 +2829,14 @@ async function openCandidateRateModal(candidate_id, existing) {
   const parentEditable = parentFrame && parentFrame.mode === 'edit';
   if (LOG) console.log('[RATES][openCandidateRateModal] parentEditable?', parentEditable, 'parentMode=', parentFrame?.mode);
 
+  // Helpers for date rules
+  const todayIso = (() => {
+    const now = new Date(); // local (UK browser timezone)
+    const y = now.getFullYear(), m = String(now.getMonth()+1).padStart(2,'0'), d = String(now.getDate()).padStart(2,'0');
+    return `${y}-${m}-${d}`;
+  })();
+  const isPastOrToday = (iso) => !!iso && iso <= todayIso;
+
   const clients = await listClientsBasic();
   const clientOptions = clients.map(c => `<option value="${c.id}">${c.name}</option>`).join('');
   const initialClientId = existing?.client_id || '';
@@ -2860,33 +2901,44 @@ async function openCandidateRateModal(candidate_id, existing) {
       if (!parentEditable) {
         alert('Open the candidate in Edit mode to add/modify overrides.');
         if (LOG) console.warn('[RATES][openCandidateRateModal] Apply blocked: parent not editable');
-        return false; // prevent staging when parent isn’t editable
+        return false;
       }
 
       const raw = collectForm('#candRateForm');
       if (LOG) G('Apply collected form', raw);
 
       const client_id = (raw.client_id || '').trim();
-      if (!client_id) { alert('Client is required'); return false; }
-
+      const role = (raw.role || '').trim();
+      const band = (raw.band || '').trim() || null;
       const rate_type = String(raw.rate_type || '').toUpperCase();
+
+      if (!client_id) { alert('Client is required'); return false; }
+      if (!role) { alert('Role is required'); return false; }
       if (rate_type !== 'PAYE' && rate_type !== 'UMBRELLA') { alert('Rate type must be PAYE or UMBRELLA'); return false; }
 
-      const role = (raw.role || '').trim();
-      if (!role) { alert('Role is required'); return false; }
-
-      const isoFrom = parseUkDateToIso(raw.date_from);
+      // Dates: always compute ISO from UI, but when locked, enforce using existing.date_from
+      const isoFromUI = parseUkDateToIso(raw.date_from);
+      let isoFrom = isoFromUI;
       if (!isoFrom) { alert('Invalid “Effective from” date'); return false; }
+      if (existing?.date_from) isoFrom = existing.date_from || isoFrom; // prefer original if present
+
       let isoTo = null;
       if (raw.date_to) {
         isoTo = parseUkDateToIso(raw.date_to);
         if (!isoTo) { alert('Invalid “Effective to” date'); return false; }
-        if (isoTo < isoFrom) { alert('“Effective to” cannot be before “Effective from”'); return false; }
       }
 
-      const band = (raw.band || '').trim() || null;
+      const locked = !!existing?.date_from && isPastOrToday(existing.date_from);
+      if (locked) {
+        // For locked rows, only end date can be changed and must be ≥ start date
+        if (!isoTo) { alert('You can only set or extend the end date for past/today starts.'); return false; }
+        if (isoTo < (existing.date_from || isoFrom)) { alert('“Effective to” cannot be before “Effective from”.'); return false; }
+      } else {
+        // For future-start rows, allow full edit but still enforce ordering if end provided
+        if (isoTo && isoTo < isoFrom) { alert('“Effective to” cannot be before “Effective from”.'); return false; }
+      }
 
-      // Gate by client defaults
+      // Gate by client defaults (using isoFrom)
       const candidatesForRole = (cache.windows || []).filter(w => w.role === role && w.date_from <= isoFrom && (!w.date_to || w.date_to >= isoFrom));
       if (!candidatesForRole.length) { alert(`No active client default window for role ${role} at ${formatIsoToUk(isoFrom)}.`); return false; }
       const hasExactBand = candidatesForRole.some(w => String(w.band||'') === String(band||''));
@@ -2894,25 +2946,43 @@ async function openCandidateRateModal(candidate_id, existing) {
       if (band == null && !hasBandNull) { alert(`This client has no band-null window for ${role} on ${formatIsoToUk(isoFrom)}.`); return false; }
       if (band != null && !hasExactBand) { alert(`This client has no active window for ${role} / band ${band} on ${formatIsoToUk(isoFrom)}.`); return false; }
 
-      const staged = {
+      // Build staged payload respecting lock rules
+      const stagedAll = {
         id        : existing?.id,
         candidate_id,
         client_id,
         role, band,
         rate_type,
         date_from : isoFrom,
-        date_to   : isoTo,
+        date_to   : isoTo ?? null,
         pay_day   : raw['pay_day']   !== '' ? Number(raw['pay_day'])   : null,
         pay_night : raw['pay_night'] !== '' ? Number(raw['pay_night']) : null,
         pay_sat   : raw['pay_sat']   !== '' ? Number(raw['pay_sat'])   : null,
         pay_sun   : raw['pay_sun']   !== '' ? Number(raw['pay_sun'])   : null,
         pay_bh    : raw['pay_bh']    !== '' ? Number(raw['pay_bh'])    : null
       };
-      if (LOG) G('Apply staged payload', staged);
+
+      // When locked, only stage the end date change
+      const stagedPatch = locked ? { date_to: stagedAll.date_to } : stagedAll;
+      if (locked) {
+        // additionally ensure UI didn't attempt to alter identity/rate_type
+        if (existing && (
+          String(existing.client_id) !== client_id ||
+          String(existing.role||'')  !== role ||
+          String(existing.rate_type||'').toUpperCase() !== rate_type ||
+          String(existing.band||'')  !== String(band||'') ||
+          String(existing.date_from||'') !== String(isoFrom||'')
+        )) {
+          alert('For past/today starts, only the end date can be changed.');
+          return false;
+        }
+      }
+
+      if (LOG) { G('Apply staged payload', stagedPatch); }
 
       const O = window.modalCtx.overrides || (window.modalCtx.overrides = { existing: [], stagedNew: [], stagedEdits: {}, stagedDeletes: new Set() });
 
-      // overlap handling within staged universe
+      // Overlap handling within staged universe (only relevant when not locked or changing dates)
       const universe = [
         ...O.existing.filter(x => !O.stagedDeletes.has(x.id)),
         ...O.stagedNew
@@ -2923,13 +2993,14 @@ async function openCandidateRateModal(candidate_id, existing) {
         String((o.rate_type || '')).toUpperCase() === rate_type &&
         String(o.band||'')  === String(band||'');
 
-      const overlapping = universe.filter(o => sameKey(o) && (!staged.id || o.id !== staged.id))
-        .filter(o => rangesOverlap(o.date_from||null, o.date_to||null, staged.date_from, staged.date_to));
+      const overlapping = universe
+        .filter(o => sameKey(o) && (!existing?.id || o.id !== existing.id))
+        .filter(o => rangesOverlap(o.date_from||null, o.date_to||null, stagedAll.date_from, stagedAll.date_to));
       if (LOG) console.log('[RATES][openCandidateRateModal] overlap candidates:', overlapping);
 
       if (overlapping.length) {
         const ov = overlapping[0];
-        const d = new Date(staged.date_from+'T00:00:00Z'); d.setUTCDate(d.getUTCDate()-1);
+        const d = new Date(stagedAll.date_from+'T00:00:00Z'); d.setUTCDate(d.getUTCDate()-1);
         const cut = `${d.getUTCFullYear()}-${String(d.getUTCMonth()+1).padStart(2,'0')}-${String(d.getUTCDate()).padStart(2,'0')}`;
         const ok = window.confirm(
           `An override for ${ov.role}${ov.band?` / ${ov.band}`:''} (${ov.rate_type}) is active `+
@@ -2939,7 +3010,6 @@ async function openCandidateRateModal(candidate_id, existing) {
 
         if (ov.id) O.stagedEdits[ov.id] = { ...(O.stagedEdits[ov.id]||{}), date_to: cut };
         else {
-          // staged-new: update by stable _tmpId (not by object reference)
           const ix = O.stagedNew.findIndex(s => s._tmpId && ov._tmpId && s._tmpId === ov._tmpId);
           if (ix >= 0) O.stagedNew[ix] = { ...O.stagedNew[ix], date_to: cut };
           else {
@@ -2949,9 +3019,9 @@ async function openCandidateRateModal(candidate_id, existing) {
         }
       }
 
-      // edit vs new staging
+      // edit vs new staging, with lock-aware patching
       if (existing?.id) {
-        O.stagedEdits[existing.id] = { ...O.stagedEdits[existing.id], ...staged };
+        O.stagedEdits[existing.id] = { ...O.stagedEdits[existing.id], ...stagedPatch };
       } else if (existing && !existing.id) {
         const tmpId = existing._tmpId || null;
         let idx = (tmpId ? O.stagedNew.findIndex(r => r._tmpId === tmpId) : -1);
@@ -2967,12 +3037,12 @@ async function openCandidateRateModal(candidate_id, existing) {
         }
         if (idx >= 0) {
           const keepTmp = O.stagedNew[idx]._tmpId || tmpId || `tmp_${Date.now()}`;
-          O.stagedNew[idx] = { ...O.stagedNew[idx], ...staged, _tmpId: keepTmp };
+          O.stagedNew[idx] = { ...O.stagedNew[idx], ...stagedPatch, _tmpId: keepTmp };
         } else {
-          O.stagedNew.push({ ...staged, _tmpId: tmpId || `tmp_${Date.now()}` });
+          O.stagedNew.push({ ...stagedPatch, _tmpId: tmpId || `tmp_${Date.now()}` });
         }
       } else {
-        O.stagedNew.push({ ...staged, _tmpId: `tmp_${Date.now()}` });
+        O.stagedNew.push({ ...stagedPatch, _tmpId: `tmp_${Date.now()}` });
       }
 
       if (LOG) {
@@ -2988,9 +3058,9 @@ async function openCandidateRateModal(candidate_id, existing) {
       if (LOG) console.log('[RATES][openCandidateRateModal] has #ratesTable?', hasRatesTable);
       if (hasRatesTable) await renderCandidateRatesTable();
 
-      try { 
+      try {
         if (LOG) console.log('[RATES][openCandidateRateModal] dispatch modal-dirty');
-        window.dispatchEvent(new CustomEvent('modal-dirty')); 
+        window.dispatchEvent(new CustomEvent('modal-dirty'));
       } catch {}
 
       return true; // child Apply ⇒ ok; showModal will close child, mark parent dirty, and re-render
@@ -2998,9 +3068,9 @@ async function openCandidateRateModal(candidate_id, existing) {
     false,
     () => {
       const parent = _currentFrame();
-      if (parent) { 
+      if (parent) {
         if (LOG) console.log('[RATES][openCandidateRateModal] onReturn → setTab("rates")');
-        parent.currentTabKey = 'rates'; parent.setTab('rates'); 
+        parent.currentTabKey = 'rates'; parent.setTab('rates');
       }
     }
   );
@@ -3021,11 +3091,27 @@ async function openCandidateRateModal(candidate_id, existing) {
   attachUkDatePicker(inFrom);
   attachUkDatePicker(inTo);
 
+  // Lock UI if start date is today/past: only allow end-date edit
+  const lockThis = !!existing?.date_from && isPastOrToday(existing.date_from);
+  if (lockThis) {
+    selClient.disabled = true;
+    selRateT.disabled  = true;
+    selRole.disabled   = true;
+    selBand.disabled   = true;
+    inFrom.disabled    = true;
+
+    // Disable pay inputs too
+    ['pay_day','pay_night','pay_sat','pay_sun','pay_bh'].forEach(n => {
+      const el = document.querySelector(`#candRateForm input[name="${n}"]`);
+      if (el) el.disabled = true;
+    });
+  }
+
   async function refreshClientRoles(clientId) {
     if (LOG) console.log('[RATES][openCandidateRateModal] refreshClientRoles', { clientId, active_on: inFrom.value });
     selRole.innerHTML = `<option value="">Select role…</option>`;
-    selRole.disabled = true; 
-    bandRow.style.display = 'none'; 
+    selRole.disabled = true;
+    bandRow.style.display = 'none';
     selBand.innerHTML = '';
     if (!clientId) return;
 
@@ -3034,7 +3120,7 @@ async function openCandidateRateModal(candidate_id, existing) {
     cache.windows = Array.isArray(list) ? list : [];
     if (LOG) console.log('[RATES][openCandidateRateModal] windows fetched', cache.windows.length);
 
-    const roles = new Set(); 
+    const roles = new Set();
     const bandsByRole = {};
     (cache.windows).forEach(w => {
       if (!w.role) return;
@@ -3057,7 +3143,7 @@ async function openCandidateRateModal(candidate_id, existing) {
 
     selRole.innerHTML = `<option value="">Select role…</option>` +
       allowed.map(code => `<option value="${code}">${code}</option>`).join('');
-    selRole.disabled = false;
+    selRole.disabled = !!lockThis; // locked rows cannot change role
 
     cache.roles = allowed;
     cache.bandsByRole = Object.fromEntries(
@@ -3076,7 +3162,7 @@ async function openCandidateRateModal(candidate_id, existing) {
     const bands = cache.bandsByRole[role] || [];
     const hasNull = bands.includes('');
     if (bands.length) {
-      const opts = (hasNull ? `<option value="">(none)</option>` : '') + 
+      const opts = (hasNull ? `<option value="">(none)</option>` : '') +
                    bands.filter(b=>b!=='').sort((a,b)=> String(a).localeCompare(String(b)))
                         .map(b => `<option value="${b}">${b}</option>`).join('');
       selBand.innerHTML = opts;
@@ -3085,12 +3171,13 @@ async function openCandidateRateModal(candidate_id, existing) {
       selBand.innerHTML = '';
       bandRow.style.display = 'none';
     }
+    selBand.disabled = !!lockThis;
     if (LOG) console.log('[RATES][openCandidateRateModal] onRoleChanged', { role, bands });
   }
 
-  selClient.addEventListener('change', () => { refreshClientRoles(selClient.value); });
-  selRateT .addEventListener('change', () => { refreshClientRoles(selClient.value); });
-  inFrom.addEventListener('change', () => { refreshClientRoles(selClient.value); });
+  selClient.addEventListener('change', () => { if (!lockThis) refreshClientRoles(selClient.value); });
+  selRateT .addEventListener('change', () => { if (!lockThis) refreshClientRoles(selClient.value); });
+  inFrom.addEventListener('change', () => { if (!lockThis) refreshClientRoles(selClient.value); });
   selRole.addEventListener('change', onRoleChanged);
 
   if (initialClientId) {
@@ -4895,6 +4982,9 @@ async function renderClientSettingsUI(settingsObj){
   // Persist initial back into staged state (one source of truth)
   modalCtx.clientSettingsState = { ...initial, ...s };
 
+  // Keep a copy of last valid values to allow safe reverts without alert loops
+  let lastValid = { ...s };
+
   // Render structured form (no raw JSON box)
   div.innerHTML = `
     <div class="form" id="clientSettingsForm">
@@ -4909,23 +4999,69 @@ async function renderClientSettingsUI(settingsObj){
     </div>
   `;
 
-  // Two‑way binding: update staged settings on any input/change
   const root = document.getElementById('clientSettingsForm');
-  const sync = ()=>{
+  const hhmm = /^([01]\d|2[0-3]):[0-5]\d$/;
+
+  // Soft sync on input: no validation, no alerts – avoids spam during typing and prevents dirty-loop on discard
+  const syncSoft = ()=>{
+    const frame = _currentFrame();
+    if (!frame || frame.mode !== 'edit') return; // ignore programmatic paints while not editing
+
     const vals = collectForm('#clientSettingsForm', false);
-    // Minimal validation: HH:MM 24‑hour
-    const hhmm = /^([01]\d|2[0-3]):[0-5]\d$/;
+    // Don't write obviously invalid partials for time fields; keep staged values as lastValid until validated
+    const next = { ...modalCtx.clientSettingsState, ...vals };
     ['day_start','day_end','night_start','night_end'].forEach(k=>{
-      if (vals[k] && !hhmm.test(vals[k])) {
-        alert(`${k.replace('_',' ')} must be HH:MM (24-hour)`);
-        // do not write invalid values into staged state
-        delete vals[k];
+      const v = vals[k];
+      if (typeof v === 'string' && v.trim() !== '' && !hhmm.test(v)) {
+        // keep last valid for this key until validation step
+        next[k] = lastValid[k];
       }
     });
-    modalCtx.clientSettingsState = { ...modalCtx.clientSettingsState, ...vals };
+    modalCtx.clientSettingsState = next;
   };
-  root.addEventListener('input',  sync, true);
-  root.addEventListener('change', sync, true);
+
+  // Validate on change/blur only: single alert, then revert field to last valid value
+  const syncValidate = (ev)=>{
+    const frame = _currentFrame();
+    if (!frame || frame.mode !== 'edit') return;
+
+    const target = ev && ev.target ? ev.target : null;
+    const vals = collectForm('#clientSettingsForm', false);
+
+    let hadError = false;
+    ['day_start','day_end','night_start','night_end'].forEach(k=>{
+      const v = vals[k];
+      if (typeof v === 'string' && v.trim() !== '' && !hhmm.test(v)) {
+        hadError = true;
+        // Revert the specific field in the DOM to the last valid value
+        const el = root.querySelector(`input[name="${k}"]`);
+        if (el) el.value = lastValid[k] || '';
+      }
+    });
+
+    if (hadError) {
+      alert('Times must be HH:MM (24-hour)');
+      return;
+    }
+
+    // All good → commit and update lastValid
+    modalCtx.clientSettingsState = { ...modalCtx.clientSettingsState, ...vals };
+    lastValid = {
+      day_start:   modalCtx.clientSettingsState.day_start,
+      day_end:     modalCtx.clientSettingsState.day_end,
+      night_start: modalCtx.clientSettingsState.night_start,
+      night_end:   modalCtx.clientSettingsState.night_end,
+      timezone_id: modalCtx.clientSettingsState.timezone_id
+    };
+  };
+
+  // Bind listeners: input = soft (no alerts), change/blur = validate once
+  root.addEventListener('input',  syncSoft, true);
+  root.addEventListener('change', syncValidate, true);
+  ['day_start','day_end','night_start','night_end'].forEach(k=>{
+    const el = root.querySelector(`input[name="${k}"]`);
+    if (el) el.addEventListener('blur', syncValidate, true);
+  });
 }
 
 // ---- Umbrella modal
