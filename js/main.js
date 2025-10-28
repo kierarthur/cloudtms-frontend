@@ -3583,15 +3583,7 @@ async function mountCandidatePayTab(){
     if (data && Array.isArray(data.data))  return data.data;
     return [];
   };
-  const unwrapSingle = (data) => {
-    if (!data) return null;
-    if (Array.isArray(data)) return data[0] || null;
-    if (data && data.item) return data.item;
-    if (data && Array.isArray(data.items)) return data.items[0] || null;
-    if (data && Array.isArray(data.rows))  return data.rows[0]  || null;
-    if (data && Array.isArray(data.data))  return data.data[0]  || null;
-    return (typeof data === 'object') ? data : null;
-  };
+  
 
   const normaliseSort = (v) => {
     if (!v) return '';
