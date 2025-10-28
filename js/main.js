@@ -3641,7 +3641,12 @@ function renderClientRatesTable() {
       </div>
     `;
     const addBtn = byId('btnAddClientRate');
-    if (addBtn && parentEditable) addBtn.onclick = () => openClientRateModal(modalCtx.data?.id);
+    if (addBtn && parentEditable) {
+      addBtn.onclick = () => {
+        const cid = (modalCtx && modalCtx.data && (modalCtx.data.id || modalCtx.data.client_id)) || null; // 🔧 ensure id
+        return openClientRateModal(cid);
+      };
+    }
     return;
   }
 
@@ -3664,13 +3669,19 @@ function renderClientRatesTable() {
   const thead = document.createElement('thead');
   const trh   = document.createElement('tr');
   headers.forEach(h => { const th = document.createElement('th'); th.textContent = h; trh.appendChild(th); });
-  thead.appendChild(trh); 
+  thead.appendChild(trh);
   tbl.appendChild(thead);
 
   const tb = document.createElement('tbody');
   staged.forEach(r => {
     const tr = document.createElement('tr');
-    if (parentEditable) tr.ondblclick = () => openClientRateModal(modalCtx.data?.id, r);
+
+    // 🔧 ensure client id is passed on edit too
+    if (parentEditable) tr.ondblclick = () => {
+      const cid = (modalCtx && modalCtx.data && (modalCtx.data.id || modalCtx.data.client_id)) || r.client_id || null;
+      return openClientRateModal(cid, r);
+    };
+
     cols.forEach(c => {
       const td = document.createElement('td');
       td.textContent = formatDisplayValue(c, r[c]);
@@ -3692,7 +3703,12 @@ function renderClientRatesTable() {
   div.appendChild(actions);
 
   const addBtn = byId('btnAddClientRate');
-  if (addBtn && parentEditable) addBtn.onclick = () => openClientRateModal(modalCtx.data?.id);
+  if (addBtn && parentEditable) {
+    addBtn.onclick = () => {
+      const cid = (modalCtx && modalCtx.data && (modalCtx.data.id || modalCtx.data.client_id)) || null; // 🔧 ensure id
+      return openClientRateModal(cid);
+    };
+  }
 }
 
 
@@ -3970,20 +3986,52 @@ function unwrapSingle(json) {
 }
 
 // =================== MOUNT CLIENT RATES TAB (unchanged glue) ===================
+
 async function mountClientRatesTab() {
   // render uses modalCtx.ratesState directly; no args needed
   renderClientRatesTable();
 
-  // wire the "Add / Upsert client window" button to the unified modal
+  // 🔧 Always resolve a real client id before opening the modal
   const btn = byId('btnAddClientRate');
-  if (btn) btn.onclick = () => openClientRateModal(modalCtx.data?.id);
+  if (btn) {
+    btn.onclick = () => {
+      const cid = (modalCtx && modalCtx.data && (modalCtx.data.id || modalCtx.data.client_id)) || null;
+      return openClientRateModal(cid);
+    };
+  }
 }
 
 // =================== MOUNT HOSPITALS TAB (unchanged glue) ===================
 function mountClientHospitalsTab() {
+  // 🔧 Ensure state structure exists before wiring
+  const H = modalCtx.hospitalsState || (modalCtx.hospitalsState = { existing: [], stagedNew: [], stagedEdits: {}, stagedDeletes: new Set() });
+
   renderClientHospitalsTable();
+
+  // Wire add
   const addBtn = byId('btnAddClientHospital');
   if (addBtn) addBtn.onclick = () => openClientHospitalModal(modalCtx.data?.id);
+
+  // 🔧 Wire "bin" (delete) via event delegation; expect buttons/links with class or data-action
+  const wrap = byId('clientHospitals');
+  if (wrap && !wrap.__wiredDelete) {
+    wrap.addEventListener('click', (ev) => {
+      const t = ev.target;
+      const el = t && (t.closest('[data-action="delete"]') || t.closest('.btnDelHospital'));
+      if (!el) return;
+
+      const hid = el.getAttribute('data-hid') || el.getAttribute('data-id');
+      if (!hid) return;
+
+      // Stage delete and re-render immediately so the row disappears from UI
+      H.stagedDeletes = H.stagedDeletes || new Set();
+      H.stagedDeletes.add(String(hid));
+
+      try { window.dispatchEvent(new CustomEvent('modal-dirty')); } catch {}
+      renderClientHospitalsTable();
+    }, true);
+    wrap.__wiredDelete = true;
+  }
 }
 
 
@@ -3996,6 +4044,15 @@ async function openClientRateModal(client_id, existing) {
   const parentFrame = _currentFrame();
   const parentEditable = parentFrame && parentFrame.mode === 'edit';
   const APILOG = (typeof window !== 'undefined' && !!window.__LOG_API) || (typeof __LOG_API !== 'undefined' && !!__LOG_API);
+
+  // 🔧 Robust client_id resolution (fixes "client_id: undefined" in staged payload)
+  const resolvedClientId =
+    client_id ||
+    (existing && existing.client_id) ||
+    (window.modalCtx && window.modalCtx.data && (window.modalCtx.data.id || window.modalCtx.data.client_id)) ||
+    null;
+
+  if (APILOG) console.log('[openClientRateModal] resolvedClientId', resolvedClientId, { passed: client_id, existing });
 
   const globalRoles = await loadGlobalRoleOptions();
   const roleOptions = globalRoles.map(r => `<option value="${r}">${r}</option>`).join('')
@@ -4064,6 +4121,12 @@ async function openClientRateModal(client_id, existing) {
       const pf = _parentFrame();
       if (!pf || pf.mode !== 'edit') return false;
 
+      if (!resolvedClientId) {
+        alert('Cannot determine client. Please close and reopen the client, then try again.');
+        if (APILOG) console.error('[openClientRateModal] missing client_id — aborting apply');
+        return false;
+      }
+
       const raw = collectForm('#clientRateForm');
       if (APILOG) console.log('[openClientRateModal] Apply collected', raw);
 
@@ -4088,29 +4151,32 @@ async function openClientRateModal(client_id, existing) {
       }
 
       const staged = {
-        client_id,
+        client_id: resolvedClientId, // 🔧 fixed: always a real id
         role,
         band: (raw.band || '').trim() || null,
         date_from: isoFrom,
         date_to:   isoTo,
 
+        // charges
         charge_day  : raw['charge_day']  !== '' ? Number(raw['charge_day'])  : null,
         charge_night: raw['charge_night']!== '' ? Number(raw['charge_night']): null,
         charge_sat  : raw['charge_sat']  !== '' ? Number(raw['charge_sat'])  : null,
         charge_sun  : raw['charge_sun']  !== '' ? Number(raw['charge_sun'])  : null,
         charge_bh   : raw['charge_bh']   !== '' ? Number(raw['charge_bh'])   : null,
 
-        paye_day   : raw['paye_day']   !== '' ? Number(raw['paye_day'])   : null,
-        paye_night : raw['paye_night'] !== '' ? Number(raw['paye_night']) : null,
-        paye_sat   : raw['paye_sat']   !== '' ? Number(raw['paye_sat'])   : null,
-        paye_sun   : raw['paye_sun']   !== '' ? Number(raw['paye_sun'])   : null,
-        paye_bh    : raw['paye_bh']    !== '' ? Number(raw['paye_bh'])    : null,
+        // paye five-way
+        paye_day    : raw['paye_day']    !== '' ? Number(raw['paye_day'])    : null,
+        paye_night  : raw['paye_night']  !== '' ? Number(raw['paye_night'])  : null,
+        paye_sat    : raw['paye_sat']    !== '' ? Number(raw['paye_sat'])    : null,
+        paye_sun    : raw['paye_sun']    !== '' ? Number(raw['paye_sun'])    : null,
+        paye_bh     : raw['paye_bh']     !== '' ? Number(raw['paye_bh'])     : null,
 
-        umb_day    : raw['umb_day']    !== '' ? Number(raw['umb_day'])    : null,
-        umb_night  : raw['umb_night']  !== '' ? Number(raw['umb_night'])  : null,
-        umb_sat    : raw['umb_sat']    !== '' ? Number(raw['umb_sat'])    : null,
-        umb_sun    : raw['umb_sun']    !== '' ? Number(raw['umb_sun'])    : null,
-        umb_bh     : raw['umb_bh']     !== '' ? Number(raw['umb_bh'])     : null
+        // umbrella five-way
+        umb_day     : raw['umb_day']     !== '' ? Number(raw['umb_day'])     : null,
+        umb_night   : raw['umb_night']   !== '' ? Number(raw['umb_night'])   : null,
+        umb_sat     : raw['umb_sat']     !== '' ? Number(raw['umb_sat'])     : null,
+        umb_sun     : raw['umb_sun']     !== '' ? Number(raw['umb_sun'])     : null,
+        umb_bh      : raw['umb_bh']      !== '' ? Number(raw['umb_bh'])      : null
       };
       if (APILOG) console.log('[openClientRateModal] staged', staged);
 
@@ -4180,6 +4246,7 @@ async function openClientRateModal(client_id, existing) {
     }
   );
 
+  // Prefill & minor wiring
   const selRole = document.getElementById('cl_role');
   const newRow  = document.getElementById('cl_role_new_row');
   const inFrom  = document.getElementById('cl_date_from');
