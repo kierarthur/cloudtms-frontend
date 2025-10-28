@@ -5046,6 +5046,12 @@ function renderClientHospitalsTable() {
   const parentEditable = frame && frame.mode === 'edit';
 
   const H = modalCtx.hospitalsState || { existing: [], stagedNew: [], stagedEdits: {}, stagedDeletes: new Set() };
+  // Ensure sets/arrays exist
+  H.stagedDeletes = H.stagedDeletes || new Set();
+  H.stagedNew     = Array.isArray(H.stagedNew) ? H.stagedNew : [];
+  H.existing      = Array.isArray(H.existing) ? H.existing : [];
+  H.stagedEdits   = H.stagedEdits || {};
+
   el.innerHTML = '';
 
   const tbl = document.createElement('table'); tbl.className = 'grid';
@@ -5059,8 +5065,10 @@ function renderClientHospitalsTable() {
 
   // Existing rows (DB)
   (H.existing || []).forEach((x) => {
+    // 🔧 Hide rows that are staged for deletion (remove from table immediately)
+    if (H.stagedDeletes.has(String(x.id))) return;
+
     const tr = document.createElement('tr');
-    if (H.stagedDeletes.has(x.id)) tr.style.textDecoration = 'line-through';
 
     const nameTd = document.createElement('td');
     const nameInp = document.createElement('input');
@@ -5083,17 +5091,14 @@ function renderClientHospitalsTable() {
     hintTd.appendChild(hintInp);
 
     const actTd = document.createElement('td');
-    const toggle = document.createElement('button');
-    toggle.textContent = H.stagedDeletes.has(x.id) ? 'Undo remove' : 'Remove';
-    toggle.disabled = !parentEditable;
-    toggle.onclick = () => {
-      if (!parentEditable) return;
-      if (H.stagedDeletes.has(x.id)) H.stagedDeletes.delete(x.id);
-      else H.stagedDeletes.add(x.id);
-      try { window.dispatchEvent(new CustomEvent('modal-dirty')); } catch {}
-      renderClientHospitalsTable();
-    };
-    actTd.appendChild(toggle);
+    const rmBtn = document.createElement('button');
+    rmBtn.textContent = 'Remove';
+    rmBtn.disabled = !parentEditable;
+    // 🔧 Use delegation-friendly attributes; mountClientHospitalsTab listens for these
+    rmBtn.setAttribute('data-action', 'delete');
+    rmBtn.setAttribute('data-hid', String(x.id));
+    rmBtn.className = 'btnDelHospital';
+    actTd.appendChild(rmBtn);
 
     tr.appendChild(nameTd); tr.appendChild(hintTd); tr.appendChild(actTd);
     tb.appendChild(tr);
@@ -5139,6 +5144,7 @@ function renderClientHospitalsTable() {
   const addBtn = byId('btnAddClientHospital');
   if (addBtn && parentEditable) addBtn.onclick = () => openClientHospitalModal(modalCtx.data?.id);
 }
+
 
 
 async function renderClientSettingsUI(settingsObj){
