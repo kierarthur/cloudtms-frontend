@@ -54,6 +54,42 @@ async function toList(res) {
   return [];
 }
 
+// --- helpers for normalising/time validation ---
+function _toHHMM(val) {
+  if (val == null) return '';
+  const s = String(val).trim();
+  if (!s) return '';
+  // accept HH:MM, HH:MM:SS, H:MM, HHMM
+  const m = s.match(/^(\d{1,2}):?(\d{2})(?::(\d{2}))?$/);
+  if (!m) return '';
+  let hh = Number(m[1]), mm = Number(m[2]);
+  if (!Number.isFinite(hh) || !Number.isFinite(mm) || hh < 0 || hh > 23 || mm < 0 || mm > 59) return '';
+  return String(hh).padStart(2,'0') + ':' + String(mm).padStart(2,'0');
+}
+
+function _toHHMMSS(val) {
+  const hm = _toHHMM(val);
+  return hm ? hm + ':00' : null; // server likes HH:MM:SS (supabase time)
+}
+
+// Build a clean object to send to the API
+function normalizeClientSettingsForSave(raw) {
+  const src = raw || {};
+  const out = { ...src };
+
+  // normalise times for persistence
+  out.day_start   = _toHHMMSS(src.day_start);
+  out.day_end     = _toHHMMSS(src.day_end);
+  out.night_start = _toHHMMSS(src.night_start);
+  out.night_end   = _toHHMMSS(src.night_end);
+
+  // if any are invalid -> signal to caller
+  const invalid = ['day_start','day_end','night_start','night_end']
+    .some(k => out[k] === null);
+
+  return { cleaned: out, invalid };
+}
+
 
 // ===== Auth fetch with refresh retry =====
 async function authFetch(input, init={}){
@@ -3237,6 +3273,7 @@ function renderCalendar(timesheets){
 // ================== FRONTEND: openClient (UPDATED) ==================
 // ================== FIXED: openClient (hydrate before showModal) ==================
 // ================== FIXED: openClient (hydrate before showModal) ==================
+
 async function openClient(row) {
   // ===== Logging helpers (toggle with window.__LOG_MODAL = true/false) =====
   const LOG = (typeof window.__LOG_MODAL === 'boolean') ? window.__LOG_MODAL : true;
@@ -3288,7 +3325,7 @@ async function openClient(row) {
     L('no seedId — create mode');
   }
 
-  // 2) Seed window.modalCtx and SHOW IMMEDIATELY (do NOT preload first)
+  // 2) Seed window.modalCtx and show
   const fullKeys = Object.keys(full || {});
   L('seeding window.modalCtx', { entity: 'clients', fullId: full?.id, fullKeys });
 
@@ -3310,7 +3347,7 @@ async function openClient(row) {
     openToken: window.modalCtx.openToken
   });
 
-  // 3) Render modal NOW (first paint uses hydrated "full")
+  // 3) Render modal (first paint uses hydrated "full")
   L('calling showModal with hasId=', !!full?.id, 'rawHasIdArg=', full?.id);
   showModal(
     'Client',
@@ -3325,6 +3362,7 @@ async function openClient(row) {
       L('[onSave] begin', { dataId: window.modalCtx?.data?.id, forId: window.modalCtx?.formState?.__forId });
       const isNew = !window.modalCtx?.data?.id;
 
+      // Collect "main" form
       const fs = window.modalCtx.formState || { __forId: null, main:{} };
       const same = (!!window.modalCtx.data?.id && fs.__forId === window.modalCtx.data.id) || (!window.modalCtx.data?.id && fs.__forId == null);
       const stagedMain = same ? (fs.main || {}) : {};
@@ -3333,30 +3371,47 @@ async function openClient(row) {
 
       L('[onSave] collected', { same, stagedKeys: Object.keys(stagedMain||{}), liveKeys: Object.keys(liveMain||{}) });
 
-      // Never send CLI fields from UI
+      // Immutable on server
       delete payload.cli_ref;
 
+      // Required
       if (!payload.name && full?.name) payload.name = full.name;
       if (!payload.name) { alert('Client name is required.'); return { ok:false }; }
 
-      if (window.modalCtx.clientSettingsState && typeof window.modalCtx.clientSettingsState === 'object') {
-        payload.client_settings = window.modalCtx.clientSettingsState;
+      // Pull latest settings from DOM (if mounted), merge with staged,
+      // then normalise to HH:MM:SS for the API.
+      let csMerged = { ...(window.modalCtx.clientSettingsState || {}) };
+      if (byId('clientSettingsForm')) {
+        const liveSettings = collectForm('#clientSettingsForm', false);
+        // write only well-formed HH:MM into staged to avoid partials
+        ['day_start','day_end','night_start','night_end'].forEach(k=>{
+          const v = _toHHMM(liveSettings[k]);
+          if (v) csMerged[k] = v;
+        });
+        if (typeof liveSettings.timezone_id === 'string' && liveSettings.timezone_id.trim() !== '') {
+          csMerged.timezone_id = liveSettings.timezone_id.trim();
+        }
+      }
+      const { cleaned: csClean, invalid: csInvalid } = normalizeClientSettingsForSave(csMerged);
+      if (csInvalid) {
+        alert('Times must be HH:MM (24-hour). Please correct the client settings.');
+        return { ok:false };
+      }
+      // Only attach if we have any settings at all
+      if (Object.keys(csClean).length) {
+        payload.client_settings = csClean;
       }
 
+      // Save client + settings in one call (server merges)
+      // (Your current code already attaches client_settings here, we just normalised it and refused invalid)
       const idForUpdate = window.modalCtx?.data?.id || full?.id || null;
       L('[onSave] upsertClient', { idForUpdate, payloadKeys: Object.keys(payload||{}) });
       const clientResp  = await upsertClient(payload, idForUpdate).catch(err => { E('upsertClient failed', err); return null; });
-
-      // Gate everything else on successful client upsert
-      if (!clientResp) {
-        alert('Failed to save client (see console for details). No changes were applied.');
-        return { ok:false };
-      }
-
-      const clientId    = idForUpdate || clientResp.id;
+      const clientId    = idForUpdate || (clientResp && clientResp.id);
       L('[onSave] saved', { ok: !!clientResp, clientId, savedKeys: Object.keys(clientResp||{}) });
+      if (!clientId) { alert('Failed to save client'); return { ok:false }; }
 
-      // Validate & persist staged windows (unchanged)
+      // Validate & persist staged client default windows (unchanged)
       if (clientId && Array.isArray(window.modalCtx.ratesState)) {
         const windows = window.modalCtx.ratesState.slice();
 
@@ -3455,6 +3510,7 @@ async function openClient(row) {
         }
       }
 
+      // Keep data fresh in the modal
       window.modalCtx.data      = { ...(window.modalCtx.data || {}), ...(clientResp || {}), id: clientId };
       window.modalCtx.formState = { __forId: clientId, main:{} };
 
@@ -3471,11 +3527,10 @@ async function openClient(row) {
     full?.id
   );
 
-  // 4) Post-paint async companion loads (TOKEN/ID GUARDED like candidate)
+  // 4) Post-paint async loads (unchanged)
   if (full?.id) {
     const token = window.modalCtx.openToken;
     const id    = full.id;
-
     try {
       L('[listClientRates] POST-PAINT GET', { id, token });
       const unified = await listClientRates(id);
@@ -3512,7 +3567,6 @@ async function openClient(row) {
     L('skip companion loads (no full.id)');
   }
 }
-
 
 
 
@@ -4970,32 +5024,27 @@ function renderClientHospitalsTable() {
 }
 
 
-
-
 async function renderClientSettingsUI(settingsObj){
   const div = byId('clientSettings'); if (!div) return;
 
-  // Use staged object; fall back to what we were passed
+  // Prefer staged copy
   const initial = (modalCtx.clientSettingsState && typeof modalCtx.clientSettingsState === 'object')
     ? modalCtx.clientSettingsState
     : (settingsObj && typeof settingsObj === 'object' ? settingsObj : {});
 
-  // Fill sensible defaults (non-destructive)
+  // Strip seconds for the UI (server may return HH:MM:SS)
   const s = {
     timezone_id : initial.timezone_id ?? 'Europe/London',
-    day_start   : initial.day_start   ?? '06:00',
-    day_end     : initial.day_end     ?? '20:00',
-    night_start : initial.night_start ?? '20:00',
-    night_end   : initial.night_end   ?? '06:00'
+    day_start   : _toHHMM(initial.day_start)   || '06:00',
+    day_end     : _toHHMM(initial.day_end)     || '20:00',
+    night_start : _toHHMM(initial.night_start) || '20:00',
+    night_end   : _toHHMM(initial.night_end)   || '06:00'
   };
 
-  // Persist initial back into staged state (one source of truth)
+  // One source of truth in staged state (kept as HH:MM in the UI)
   modalCtx.clientSettingsState = { ...initial, ...s };
 
-  // Keep a copy of last valid values to allow safe reverts without alert loops
-  let lastValid = { ...s };
-
-  // Render structured form (no raw JSON box)
+  // Render the form
   div.innerHTML = `
     <div class="form" id="clientSettingsForm">
       ${input('timezone_id','Timezone', s.timezone_id)}
@@ -5012,49 +5061,60 @@ async function renderClientSettingsUI(settingsObj){
   const root = document.getElementById('clientSettingsForm');
   const hhmm = /^([01]\d|2[0-3]):[0-5]\d$/;
 
-  // Soft sync on input: no validation, no alerts – avoids spam during typing and prevents dirty-loop on discard
+  // Keep last valid values for non-destructive revert
+  let lastValid = { ...s };
+  // Prevent duplicate bindings across re-renders
+  if (root.__wired) {
+    root.removeEventListener('input', root.__syncSoft, true);
+    root.removeEventListener('change', root.__syncValidate, true);
+    ['day_start','day_end','night_start','night_end'].forEach(k=>{
+      const el = root.querySelector(`input[name="${k}"]`);
+      if (el && el.__syncValidate) el.removeEventListener('blur', el.__syncValidate, true);
+    });
+  }
+
+  // During typing: update staged state but DO NOT alert; ignore obviously bad partials
   const syncSoft = ()=>{
     const frame = _currentFrame();
-    if (!frame || frame.mode !== 'edit') return; // ignore programmatic paints while not editing
+    if (!frame || frame.mode !== 'edit') return;
 
     const vals = collectForm('#clientSettingsForm', false);
-    // Don't write obviously invalid partials for time fields; keep staged values as lastValid until validated
     const next = { ...modalCtx.clientSettingsState, ...vals };
     ['day_start','day_end','night_start','night_end'].forEach(k=>{
-      const v = vals[k];
-      if (typeof v === 'string' && v.trim() !== '' && !hhmm.test(v)) {
-        // keep last valid for this key until validation step
-        next[k] = lastValid[k];
-      }
+      const v = String(vals[k] ?? '').trim();
+      if (v && !hhmm.test(v)) next[k] = lastValid[k]; // hold previous good value until validated
     });
     modalCtx.clientSettingsState = next;
   };
 
-  // Validate on change/blur only: single alert, then revert field to last valid value
+  // On change/blur: validate once, revert field if invalid, then commit
+  let lastAlertAt = 0;
   const syncValidate = (ev)=>{
     const frame = _currentFrame();
     if (!frame || frame.mode !== 'edit') return;
 
-    const target = ev && ev.target ? ev.target : null;
     const vals = collectForm('#clientSettingsForm', false);
-
     let hadError = false;
+
     ['day_start','day_end','night_start','night_end'].forEach(k=>{
-      const v = vals[k];
-      if (typeof v === 'string' && v.trim() !== '' && !hhmm.test(v)) {
+      const v = String(vals[k] ?? '').trim();
+      if (v && !hhmm.test(v)) {
         hadError = true;
-        // Revert the specific field in the DOM to the last valid value
         const el = root.querySelector(`input[name="${k}"]`);
         if (el) el.value = lastValid[k] || '';
       }
     });
 
     if (hadError) {
-      alert('Times must be HH:MM (24-hour)');
+      // throttle the alert so it doesn't fire twice (blur+change)
+      const now = Date.now();
+      if (now - lastAlertAt > 400) {
+        alert('Times must be HH:MM (24-hour)');
+        lastAlertAt = now;
+      }
       return;
     }
 
-    // All good → commit and update lastValid
     modalCtx.clientSettingsState = { ...modalCtx.clientSettingsState, ...vals };
     lastValid = {
       day_start:   modalCtx.clientSettingsState.day_start,
@@ -5065,14 +5125,23 @@ async function renderClientSettingsUI(settingsObj){
     };
   };
 
-  // Bind listeners: input = soft (no alerts), change/blur = validate once
+  // Bind listeners
+  root.__syncSoft = syncSoft;
+  root.__syncValidate = syncValidate;
   root.addEventListener('input',  syncSoft, true);
   root.addEventListener('change', syncValidate, true);
   ['day_start','day_end','night_start','night_end'].forEach(k=>{
     const el = root.querySelector(`input[name="${k}"]`);
-    if (el) el.addEventListener('blur', syncValidate, true);
+    if (el) {
+      el.__syncValidate = syncValidate;
+      el.addEventListener('blur', syncValidate, true);
+      // ensure the browser's <input type="time"> is minute precision (no seconds UI)
+      el.setAttribute('step', '60');
+    }
   });
+  root.__wired = true;
 }
+
 
 // ---- Umbrella modal
 // ========================= openUmbrella (FIXED) =========================
