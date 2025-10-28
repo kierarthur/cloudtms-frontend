@@ -1974,7 +1974,15 @@ async function upsertCandidate(payload, id){
 
 // ===== UPDATED: upsertClient — normalize server response so we always return the created/updated object with an id
 async function upsertClient(payload, id){
-  if ('cli_ref' in payload) delete payload.cli_ref; // safety
+  // Never allow CLI to be sent from UI
+  if ('cli_ref' in payload) delete payload.cli_ref;
+
+  // Strip empty-string fields so we don't overwrite existing values with ''
+  const clean = {};
+  for (const [k, v] of Object.entries(payload || {})) {
+    if (v === '' || v === undefined) continue;
+    clean[k] = v;
+  }
 
   const url    = id ? `/api/clients/${id}` : '/api/clients';
   const method = id ? 'PUT' : 'POST';
@@ -1982,7 +1990,7 @@ async function upsertClient(payload, id){
   const r = await authFetch(API(url), {
     method,
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(payload)
+    body: JSON.stringify(clean)
   });
 
   if (!r.ok) {
@@ -2011,9 +2019,8 @@ async function upsertClient(payload, id){
     }
   } catch (_) {}
 
-  return clientId ? { id: clientId, ...payload } : (id ? { id, ...payload } : { ...payload });
+  return clientId ? { id: clientId, ...clean } : (id ? { id, ...clean } : { ...clean });
 }
-
 
 // ================== FRONTEND: upsertUmbrella (UPDATED to return saved object) ==================
 // ===== UPDATED: upsertUmbrella — normalize server response so we always return the created/updated object with an id
@@ -3326,6 +3333,7 @@ async function openClient(row) {
 
       L('[onSave] collected', { same, stagedKeys: Object.keys(stagedMain||{}), liveKeys: Object.keys(liveMain||{}) });
 
+      // Never send CLI fields from UI
       delete payload.cli_ref;
 
       if (!payload.name && full?.name) payload.name = full.name;
@@ -3338,9 +3346,15 @@ async function openClient(row) {
       const idForUpdate = window.modalCtx?.data?.id || full?.id || null;
       L('[onSave] upsertClient', { idForUpdate, payloadKeys: Object.keys(payload||{}) });
       const clientResp  = await upsertClient(payload, idForUpdate).catch(err => { E('upsertClient failed', err); return null; });
-      const clientId    = idForUpdate || (clientResp && clientResp.id);
+
+      // Gate everything else on successful client upsert
+      if (!clientResp) {
+        alert('Failed to save client (see console for details). No changes were applied.');
+        return { ok:false };
+      }
+
+      const clientId    = idForUpdate || clientResp.id;
       L('[onSave] saved', { ok: !!clientResp, clientId, savedKeys: Object.keys(clientResp||{}) });
-      if (!clientId) { alert('Failed to save client'); return { ok:false }; }
 
       // Validate & persist staged windows (unchanged)
       if (clientId && Array.isArray(window.modalCtx.ratesState)) {
@@ -3468,8 +3482,6 @@ async function openClient(row) {
       L('[listClientRates] POST-PAINT result', { count: Array.isArray(unified) ? unified.length : -1, sameToken: token === window.modalCtx.openToken, modalCtxId: window.modalCtx.data?.id });
       if (token === window.modalCtx.openToken && window.modalCtx.data?.id === id) {
         window.modalCtx.ratesState = Array.isArray(unified) ? unified.map(r => ({ ...r })) : [];
-        // If you want a live refresh of the rates tab table, call its renderer here
-        // e.g., if (currentFrame()?.currentTabKey === 'rates') mountClientRatesTab?.();
       }
     } catch (e) { E('openClient POST-PAINT rates error', e); }
 
@@ -3479,7 +3491,6 @@ async function openClient(row) {
       L('[listClientHospitals] POST-PAINT result', { count: Array.isArray(hospitals) ? hospitals.length : -1, sameToken: token === window.modalCtx.openToken, modalCtxId: window.modalCtx.data?.id });
       if (token === window.modalCtx.openToken && window.modalCtx.data?.id === id) {
         window.modalCtx.hospitalsState.existing = Array.isArray(hospitals) ? hospitals.slice() : [];
-        // e.g., if (currentFrame()?.currentTabKey === 'hospitals') mountClientHospitalsTab?.();
       }
     } catch (e) { E('openClient POST-PAINT hospitals error', e); }
 
@@ -3494,7 +3505,6 @@ async function openClient(row) {
         if (token === window.modalCtx.openToken && window.modalCtx.data?.id === id) {
           window.modalCtx.clientSettingsState = (cs && typeof cs === 'object') ? JSON.parse(JSON.stringify(cs)) : {};
           L('POST-PAINT clientSettingsState keys', Object.keys(window.modalCtx.clientSettingsState||{}));
-          // e.g., if (currentFrame()?.currentTabKey === 'settings') renderClientSettingsUI?.(window.modalCtx.clientSettingsState||{});
         }
       }
     } catch (e) { E('openClient POST-PAINT client settings error', e); }
