@@ -3600,16 +3600,41 @@ async function mountCandidatePayTab(){
     return digits.replace(/(\d{2})(\d{2})(\d{2})/, '$1-$2-$3');
   };
 
-  async function fetchUmbrellaById(id) {
-    try {
-      const res = await authFetch(API(`/api/umbrellas/${encodeURIComponent(id)}`));
-      if (!res || !res.ok) return null;
-      const json = await res.json().catch(() => null);
-      return unwrapSingle(json);
-    } catch (_) {
-      return null;
-    }
+async function fetchUmbrellaById(id) {
+  try {
+    const res = await authFetch(API(`/api/umbrellas/${encodeURIComponent(id)}`));
+    if (!res || !res.ok) return null;
+    const json = await res.json().catch(() => null);
+    // FIX: handle `{ umbrella: {...} }` envelope as well as generic shapes
+    const row = json && (json.umbrella || unwrapSingle(json));
+    return row || null;
+  } catch (_) {
+    return null;
   }
+}
+
+// Updated to gracefully unwrap common single-row envelopes
+function unwrapSingle(json) {
+  if (!json) return null;
+
+  // Arrays: return the first row
+  if (Array.isArray(json)) return json[0] || null;
+
+  // Common API shapes
+  if (json.data && Array.isArray(json.data)) return json.data[0] || null;
+  if (Array.isArray(json.rows)) return json.rows[0] || null;
+  if (json.item && typeof json.item === 'object' && !Array.isArray(json.item)) return json.item;
+
+  // Generic single-key envelopes: { umbrella: {...} }, { candidate: {...} }, { client: {...} }, etc.
+  const keys = Object.keys(json);
+  if (keys.length === 1) {
+    const only = json[keys[0]];
+    if (only && typeof only === 'object' && !Array.isArray(only)) return only;
+  }
+
+  // Fallback: return as-is (callers that expect an object can still read fields)
+  return json;
+}
 
   function fillFromCandidate() {
     const d = window.modalCtx?.data || {};
@@ -3986,6 +4011,7 @@ async function openClientRateModal(client_id, existing) {
   });
 }
 
+
 function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
   // ===== Logging helpers (toggle with window.__LOG_MODAL = true/false) =====
   const LOG = (typeof window.__LOG_MODAL === 'boolean') ? window.__LOG_MODAL : false;
@@ -4151,12 +4177,17 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
       const root = byId('modalBody'); if (!root) return;
       const onDirty = (ev)=>{
         if (ev && !ev.isTrusted) return;
-        const isChild = stack().length > 1;
-        if (isChild) return;
         if (this.mode !== 'edit' && this.mode !== 'create') return;
+        const isChild = stack().length > 1;
+
+        // Mark THIS frame dirty so child Save can enable when fields change.
         this.isDirty = true;
         if (typeof this._updateButtons === 'function') this._updateButtons();
-        try { window.dispatchEvent(new CustomEvent('modal-dirty')); } catch {}
+
+        // Only bubble a global 'modal-dirty' to mark the parent when THIS is not a child.
+        if (!isChild) {
+          try { window.dispatchEvent(new CustomEvent('modal-dirty')); } catch {}
+        }
       };
       root.addEventListener('input', onDirty, true);
       root.addEventListener('change', onDirty, true);
@@ -4486,7 +4517,8 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
 
       if (isChild) {
         btnSave.style.display = parentEditable ? '' : 'none';
-        btnSave.disabled = !parentEditable;
+        // FIX: child Save disabled until child modal becomes dirty
+        btnSave.disabled = (!parentEditable) || (!top.isDirty);
         btnEdit.style.display = 'none';
         if (relatedBtn) relatedBtn.disabled = true;
       } else {
@@ -4699,7 +4731,6 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
 
   renderTop();
 }
-
 
 
 
