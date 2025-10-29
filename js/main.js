@@ -3662,7 +3662,9 @@ async function openClient(row) {
 // ✅ UPDATED — unified table view, dbl-click opens unified modal
 function renderClientRatesTable() {
   const div = byId('clientRates'); if (!div) return;
-  const staged = Array.isArray(modalCtx.ratesState) ? modalCtx.ratesState : [];
+
+  const ctx = window.modalCtx; // use canonical context
+  const staged = Array.isArray(ctx.ratesState) ? ctx.ratesState : [];
   const frame = _currentFrame();
   const parentEditable = frame && frame.mode === 'edit';
 
@@ -3680,7 +3682,7 @@ function renderClientRatesTable() {
     const addBtn = byId('btnAddClientRate');
     if (addBtn && parentEditable) {
       addBtn.onclick = () => {
-        const cid = (modalCtx && modalCtx.data && (modalCtx.data.id || modalCtx.data.client_id)) || null; // 🔧 ensure id
+        const cid = (ctx && ctx.data && (ctx.data.id || ctx.data.client_id)) || null; // ensure id
         return openClientRateModal(cid);
       };
     }
@@ -3713,9 +3715,9 @@ function renderClientRatesTable() {
   staged.forEach(r => {
     const tr = document.createElement('tr');
 
-    // 🔧 ensure client id is passed on edit too
+    // ensure client id is passed on edit too
     if (parentEditable) tr.ondblclick = () => {
-      const cid = (modalCtx && modalCtx.data && (modalCtx.data.id || modalCtx.data.client_id)) || r.client_id || null;
+      const cid = (ctx && ctx.data && (ctx.data.id || ctx.data.client_id)) || r.client_id || null;
       return openClientRateModal(cid, r);
     };
 
@@ -3742,7 +3744,7 @@ function renderClientRatesTable() {
   const addBtn = byId('btnAddClientRate');
   if (addBtn && parentEditable) {
     addBtn.onclick = () => {
-      const cid = (modalCtx && modalCtx.data && (modalCtx.data.id || modalCtx.data.client_id)) || null; // 🔧 ensure id
+      const cid = (ctx && ctx.data && (ctx.data.id || ctx.data.client_id)) || null; // ensure id
       return openClientRateModal(cid);
     };
   }
@@ -4023,33 +4025,33 @@ function unwrapSingle(json) {
 }
 
 // =================== MOUNT CLIENT RATES TAB (unchanged glue) ===================
-
 async function mountClientRatesTab() {
-  // render uses modalCtx.ratesState directly; no args needed
+  const ctx = window.modalCtx; // use canonical context
+
+  // render uses ctx.ratesState directly; no args needed
   renderClientRatesTable();
 
-  // 🔧 Always resolve a real client id before opening the modal
+  // Always resolve a real client id before opening the modal
   const btn = byId('btnAddClientRate');
   if (btn) {
     btn.onclick = () => {
-      const cid = (modalCtx && modalCtx.data && (modalCtx.data.id || modalCtx.data.client_id)) || null;
+      const cid = (ctx && ctx.data && (ctx.data.id || ctx.data.client_id)) || null;
       return openClientRateModal(cid);
     };
   }
 }
 
+
 // =================== MOUNT HOSPITALS TAB (unchanged glue) ===================
 function mountClientHospitalsTab() {
-  // 🔧 Ensure state structure exists before wiring
-  const H = modalCtx.hospitalsState || (modalCtx.hospitalsState = { existing: [], stagedNew: [], stagedEdits: {}, stagedDeletes: new Set() });
+  const ctx = window.modalCtx; // 🔧 use canonical context
+  const H = ctx.hospitalsState || (ctx.hospitalsState = { existing: [], stagedNew: [], stagedEdits: {}, stagedDeletes: new Set() });
 
   renderClientHospitalsTable();
 
-  // Wire add
   const addBtn = byId('btnAddClientHospital');
-  if (addBtn) addBtn.onclick = () => openClientHospitalModal(modalCtx.data?.id);
+  if (addBtn) addBtn.onclick = () => openClientHospitalModal(ctx.data?.id);
 
-  // 🔧 Wire "bin" (delete) via event delegation; expect buttons/links with class or data-action
   const wrap = byId('clientHospitals');
   if (wrap && !wrap.__wiredDelete) {
     wrap.addEventListener('click', (ev) => {
@@ -4060,7 +4062,6 @@ function mountClientHospitalsTab() {
       const hid = el.getAttribute('data-hid') || el.getAttribute('data-id');
       if (!hid) return;
 
-      // Stage delete and re-render immediately so the row disappears from UI
       H.stagedDeletes = H.stagedDeletes || new Set();
       H.stagedDeletes.add(String(hid));
 
@@ -4082,11 +4083,12 @@ async function openClientRateModal(client_id, existing) {
   const parentEditable = parentFrame && parentFrame.mode === 'edit';
   const APILOG = (typeof window !== 'undefined' && !!window.__LOG_API) || (typeof __LOG_API !== 'undefined' && !!__LOG_API);
 
-  // 🔧 Robust client_id resolution (fixes "client_id: undefined" in staged payload)
+  const ctx = window.modalCtx; // 🔧 use canonical context
+  // Robust client_id resolution
   const resolvedClientId =
     client_id ||
     (existing && existing.client_id) ||
-    (window.modalCtx && window.modalCtx.data && (window.modalCtx.data.id || window.modalCtx.data.client_id)) ||
+    (ctx && ctx.data && (ctx.data.id || ctx.data.client_id)) ||
     null;
 
   if (APILOG) console.log('[openClientRateModal] resolvedClientId', resolvedClientId, { passed: client_id, existing });
@@ -4188,27 +4190,24 @@ async function openClientRateModal(client_id, existing) {
       }
 
       const staged = {
-        client_id: resolvedClientId, // 🔧 fixed: always a real id
+        client_id: resolvedClientId,
         role,
         band: (raw.band || '').trim() || null,
         date_from: isoFrom,
         date_to:   isoTo,
 
-        // charges
         charge_day  : raw['charge_day']  !== '' ? Number(raw['charge_day'])  : null,
         charge_night: raw['charge_night']!== '' ? Number(raw['charge_night']): null,
         charge_sat  : raw['charge_sat']  !== '' ? Number(raw['charge_sat'])  : null,
         charge_sun  : raw['charge_sun']  !== '' ? Number(raw['charge_sun'])  : null,
         charge_bh   : raw['charge_bh']   !== '' ? Number(raw['charge_bh'])   : null,
 
-        // paye five-way
         paye_day    : raw['paye_day']    !== '' ? Number(raw['paye_day'])    : null,
         paye_night  : raw['paye_night']  !== '' ? Number(raw['paye_night'])  : null,
         paye_sat    : raw['paye_sat']    !== '' ? Number(raw['paye_sat'])    : null,
         paye_sun    : raw['paye_sun']    !== '' ? Number(raw['paye_sun'])    : null,
         paye_bh     : raw['paye_bh']     !== '' ? Number(raw['paye_bh'])     : null,
 
-        // umbrella five-way
         umb_day     : raw['umb_day']     !== '' ? Number(raw['umb_day'])     : null,
         umb_night   : raw['umb_night']   !== '' ? Number(raw['umb_night'])   : null,
         umb_sat     : raw['umb_sat']     !== '' ? Number(raw['umb_sat'])     : null,
@@ -4217,7 +4216,8 @@ async function openClientRateModal(client_id, existing) {
       };
       if (APILOG) console.log('[openClientRateModal] staged', staged);
 
-      const list = Array.isArray(modalCtx.ratesState) ? modalCtx.ratesState : [];
+      // 🔧 Read/merge against canonical ctx
+      const list = Array.isArray(ctx.ratesState) ? ctx.ratesState : [];
       const sameCat = r => String(r.role||'')===staged.role && String(r.band||'')===String(staged.band||'');
 
       const activeAtStart = list.filter(r => sameCat(r) && r.date_from && r.date_from <= staged.date_from && (!r.date_to || r.date_to >= staged.date_from));
@@ -4240,11 +4240,11 @@ async function openClientRateModal(client_id, existing) {
         );
         if (!ok) return false;
         const idx = list.indexOf(inc);
-        if (idx >= 0) modalCtx.ratesState[idx] = { ...inc, date_to: cut };
+        if (idx >= 0) ctx.ratesState[idx] = { ...inc, date_to: cut };
         if (APILOG) console.log('[openClientRateModal] truncated incumbent', { from: inc.date_from, to: cut });
       }
 
-      const after = (Array.isArray(modalCtx.ratesState) ? modalCtx.ratesState.slice() : []).filter(sameCat);
+      const after = (Array.isArray(ctx.ratesState) ? ctx.ratesState.slice() : []).filter(sameCat);
       for (const r of after) {
         if (existing && r === existing) continue;
         const a0 = r.date_from || null, a1 = r.date_to || null;
@@ -4256,14 +4256,14 @@ async function openClientRateModal(client_id, existing) {
         }
       }
 
-      modalCtx.ratesState = Array.isArray(modalCtx.ratesState) ? modalCtx.ratesState : [];
+      ctx.ratesState = Array.isArray(ctx.ratesState) ? ctx.ratesState : [];
       if (existing) {
-        const idx = modalCtx.ratesState.findIndex(r => r === existing);
-        if (idx >= 0) modalCtx.ratesState[idx] = staged; else modalCtx.ratesState.push(staged);
+        const idx = ctx.ratesState.findIndex(r => r === existing);
+        if (idx >= 0) ctx.ratesState[idx] = staged; else ctx.ratesState.push(staged);
       } else {
-        modalCtx.ratesState.push(staged);
+        ctx.ratesState.push(staged);
       }
-      if (APILOG) console.log('[openClientRateModal] ratesState size', modalCtx.ratesState.length);
+      if (APILOG) console.log('[openClientRateModal] ratesState size', ctx.ratesState.length);
 
       try {
         const parent = _currentFrame();
@@ -5038,6 +5038,7 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
 function openClientHospitalModal(client_id) {
   const parentFrame = _currentFrame();
   const parentEditable = parentFrame && parentFrame.mode === 'edit';
+  const ctx = window.modalCtx; // 🔧 use canonical context
 
   const formHtml = html(`
     <div class="form" id="hospitalForm">
@@ -5058,7 +5059,7 @@ function openClientHospitalModal(client_id) {
       const name = String(raw.hospital_name_norm || '').trim();
       if (!name) { alert('Hospital / Trust is required'); return false; }
 
-      const H = modalCtx.hospitalsState || (modalCtx.hospitalsState = { existing: [], stagedNew: [], stagedEdits:{}, stagedDeletes: new Set() });
+      const H = ctx.hospitalsState || (ctx.hospitalsState = { existing: [], stagedNew: [], stagedEdits:{}, stagedDeletes: new Set() });
       H.stagedNew.push({ hospital_name_norm: name, ward_hint: (raw.ward_hint || '').trim() || null });
 
       try { window.dispatchEvent(new CustomEvent('modal-dirty')); } catch {}
@@ -5074,7 +5075,6 @@ function openClientHospitalModal(client_id) {
 
 
 
-
 // =================== HOSPITALS TABLE (UPDATED: staged delete & edit) ===================
 function renderClientHospitalsTable() {
   const el = byId('clientHospitals'); if (!el) return;
@@ -5082,8 +5082,8 @@ function renderClientHospitalsTable() {
   const frame = _currentFrame();
   const parentEditable = frame && frame.mode === 'edit';
 
-  const H = modalCtx.hospitalsState || { existing: [], stagedNew: [], stagedEdits: {}, stagedDeletes: new Set() };
-  // Ensure sets/arrays exist
+  const ctx = window.modalCtx; // 🔧 use canonical context
+  const H = ctx.hospitalsState || (ctx.hospitalsState = { existing: [], stagedNew: [], stagedEdits: {}, stagedDeletes: new Set() });
   H.stagedDeletes = H.stagedDeletes || new Set();
   H.stagedNew     = Array.isArray(H.stagedNew) ? H.stagedNew : [];
   H.existing      = Array.isArray(H.existing) ? H.existing : [];
@@ -5102,7 +5102,6 @@ function renderClientHospitalsTable() {
 
   // Existing rows (DB)
   (H.existing || []).forEach((x) => {
-    // 🔧 Hide rows that are staged for deletion (remove from table immediately)
     if (H.stagedDeletes.has(String(x.id))) return;
 
     const tr = document.createElement('tr');
@@ -5131,7 +5130,6 @@ function renderClientHospitalsTable() {
     const rmBtn = document.createElement('button');
     rmBtn.textContent = 'Remove';
     rmBtn.disabled = !parentEditable;
-    // 🔧 Use delegation-friendly attributes; mountClientHospitalsTab listens for these
     rmBtn.setAttribute('data-action', 'delete');
     rmBtn.setAttribute('data-hid', String(x.id));
     rmBtn.className = 'btnDelHospital';
@@ -5179,17 +5177,16 @@ function renderClientHospitalsTable() {
   el.appendChild(actions);
 
   const addBtn = byId('btnAddClientHospital');
-  if (addBtn && parentEditable) addBtn.onclick = () => openClientHospitalModal(modalCtx.data?.id);
+  if (addBtn && parentEditable) addBtn.onclick = () => openClientHospitalModal(ctx.data?.id);
 }
-
-
-
 async function renderClientSettingsUI(settingsObj){
   const div = byId('clientSettings'); if (!div) return;
 
+  const ctx = window.modalCtx; // use canonical context
+
   // Prefer staged copy
-  const initial = (modalCtx.clientSettingsState && typeof modalCtx.clientSettingsState === 'object')
-    ? modalCtx.clientSettingsState
+  const initial = (ctx.clientSettingsState && typeof ctx.clientSettingsState === 'object')
+    ? ctx.clientSettingsState
     : (settingsObj && typeof settingsObj === 'object' ? settingsObj : {});
 
   // Strip seconds for the UI (server may return HH:MM:SS)
@@ -5202,7 +5199,7 @@ async function renderClientSettingsUI(settingsObj){
   };
 
   // One source of truth in staged state (kept as HH:MM in the UI)
-  modalCtx.clientSettingsState = { ...initial, ...s };
+  ctx.clientSettingsState = { ...initial, ...s };
 
   // Render the form
   div.innerHTML = `
@@ -5239,12 +5236,12 @@ async function renderClientSettingsUI(settingsObj){
     if (!frame || frame.mode !== 'edit') return;
 
     const vals = collectForm('#clientSettingsForm', false);
-    const next = { ...modalCtx.clientSettingsState, ...vals };
+    const next = { ...ctx.clientSettingsState, ...vals };
     ['day_start','day_end','night_start','night_end'].forEach(k=>{
       const v = String(vals[k] ?? '').trim();
       if (v && !hhmm.test(v)) next[k] = lastValid[k]; // hold previous good value until validated
     });
-    modalCtx.clientSettingsState = next;
+    ctx.clientSettingsState = next;
   };
 
   // On change/blur: validate once, revert field if invalid, then commit
@@ -5266,7 +5263,6 @@ async function renderClientSettingsUI(settingsObj){
     });
 
     if (hadError) {
-      // throttle the alert so it doesn't fire twice (blur+change)
       const now = Date.now();
       if (now - lastAlertAt > 400) {
         alert('Times must be HH:MM (24-hour)');
@@ -5275,13 +5271,13 @@ async function renderClientSettingsUI(settingsObj){
       return;
     }
 
-    modalCtx.clientSettingsState = { ...modalCtx.clientSettingsState, ...vals };
+    ctx.clientSettingsState = { ...ctx.clientSettingsState, ...vals };
     lastValid = {
-      day_start:   modalCtx.clientSettingsState.day_start,
-      day_end:     modalCtx.clientSettingsState.day_end,
-      night_start: modalCtx.clientSettingsState.night_start,
-      night_end:   modalCtx.clientSettingsState.night_end,
-      timezone_id: modalCtx.clientSettingsState.timezone_id
+      day_start:   ctx.clientSettingsState.day_start,
+      day_end:     ctx.clientSettingsState.day_end,
+      night_start: ctx.clientSettingsState.night_start,
+      night_end:   ctx.clientSettingsState.night_end,
+      timezone_id: ctx.clientSettingsState.timezone_id
     };
   };
 
@@ -5295,8 +5291,7 @@ async function renderClientSettingsUI(settingsObj){
     if (el) {
       el.__syncValidate = syncValidate;
       el.addEventListener('blur', syncValidate, true);
-      // ensure the browser's <input type="time"> is minute precision (no seconds UI)
-      el.setAttribute('step', '60');
+      el.setAttribute('step', '60'); // minute precision
     }
   });
   root.__wired = true;
