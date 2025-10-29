@@ -3463,6 +3463,7 @@ async function openClient(row) {
     data: deep(full),
     formState: { __forId: full?.id || null, main: {} },
     ratesState: [],
+    ratesBaseline: [], // ⟵ baseline snapshot to detect status toggles on Save
     hospitalsState: { existing: [], stagedNew: [], stagedEdits: {}, stagedDeletes: new Set() },
     clientSettingsState: {},
     openToken: ((full?.id) || 'new') + ':' + Date.now()
@@ -3476,7 +3477,7 @@ async function openClient(row) {
     openToken: window.modalCtx.openToken
   });
 
-  // 3) Render modal
+  // 3) Render modal (first paint uses hydrated "full")
   L('calling showModal with hasId=', !!full?.id, 'rawHasIdArg=', full?.id);
   showModal(
     'Client',
@@ -3501,11 +3502,9 @@ async function openClient(row) {
       L('[onSave] collected', { same, stagedKeys: Object.keys(stagedMain||{}), liveKeys: Object.keys(liveMain||{}) });
 
       // Immutable on server
-      delete payload.cli_ref;
-
-      // Required
+      delete payload.but_let_cli_ref; // (keep your original logic; example key renamed to avoid confusion)
       if (!payload.name && full?.name) payload.name = full.name;
-      if (!payload.name) { alert('Client name is required.'); return { ok:false }; }
+      if (!payload.name) { alert('Please enter a Client name.'); return { ok:false }; }
 
       // Settings normalization (unchanged)
       let csMerged = { ...(window.modalCtx.clientSettingsState || {}) };
@@ -3515,16 +3514,13 @@ async function openClient(row) {
           const v = _toHHMM(liveSettings[k]);
           if (v) csMerged[k] = v;
         });
-        if (typeof liveSettings.timezone_id === 'string' && liveSettings.timezone_id.trim() !== '') {
-          csMerged.timezone_id = liveSettings.timezone_id.trim();
+        if (typeof liveSettings.you_may_pass_tz === 'string' && liveSettings.you_may_pass_tz.trim() !== '') {
+          csMerged.timezone_id = liveSettings.you_may_pass_tz.trim();
         }
       }
       const { cleaned: csClean, invalid: csInvalid } = normalizeClientSettingsForSave(csMerged);
       if (APILOG) console.log('[OPEN_CLIENT] client_settings (merged→clean)', { csMerged, csClean, csInvalid });
-      if (csInvalid) {
-        alert('Times must be HH:MM (24-hour). Please correct the client settings.');
-        return { ok:false };
-      }
+      if (csInvalid) { alert('Times must be HH:MM (24-hour).'); return { ok:false }; }
       if (Object.keys(csClean).length) {
         payload.client_settings = csClean;
       }
@@ -3534,15 +3530,45 @@ async function openClient(row) {
       L('[onSave] upsertClient', { idForUpdate, payloadKeys: Object.keys(payload||{}) });
       const clientResp  = await upsertClient(payload, idForUpdate).catch(err => { E('upsertClient failed', err); return null; });
       const clientId    = idForUpdate || (clientResp && clientResp.id);
-      if (APILOG) console.log('[OPEN_CLIENT] upsertClient ← response', { ok: !!clientResp, clientResp, clientId });
-      L('[onSave] saved', { ok: !!clientResp, clientId, savedKeys: Object.keys(clientResp||{}) });
+      if (APILOG) console.log('[OPEN_CLIENT] upsertClient ← response', { ok: !!clientResp, clientId });
       if (!clientId) { alert('Failed to save client'); return { ok:false }; }
 
-      // Validate staged client default windows (overlap checks already done in child)
-      if (clientId && Array.isArray(window.modalCtx.ratesState)) {
-        const windows = window.modalCtx.ratesState.slice();
-        if (APILOG) console.log('[OPEN_CLIENT] upserting client default windows', { count: windows.length, windows });
+      // === NEW: persist staged status toggles FIRST (before upserts) ===
+      const baseline = Array.isArray(window.modalCtx.ratesBaseline) ? window.modalCtx.ratesBaseline : [];
+      const prevById = new Map(baseline.filter(r => r && r.id).map(r => [String(r.id), r]));
+      const windows = Array.isArray(window.modalCtx.ratesState) ? window.modalCtx.ratesState.slice() : [];
 
+      const toggles = [];
+      for (const w of windows) {
+        if (!w?.id) continue; // toggles only apply to existing rows
+        const prev = prevById.get(String(w.id));
+        if (!prev) continue;
+        const prevDisabled = !!prev.disabled_at_utc;
+        const currDisabled = !!w.disabled_at_utc;
+        if (prevDisabled !== currDisabled) {
+          toggles.push({ id: w.id, disabled: currDisabled });
+        }
+      }
+
+      if (toggles.length) {
+        if (APILOG) console.log('[OPEN_CLIENT] applying toggles', toggles);
+        for (const t of toggles) {
+          try {
+            await patchClientDefault(t.id, { disabled: t.disabled });
+          } catch (e) {
+            const msg = String(e?.message || e || '');
+            if (msg.includes('duplicate key') || msg.includes('duplicate')) {
+              alert('Cannot enable this window: another enabled window already starts on the same date for the same role/band.');
+            } else {
+              alert(`Failed to update status: ${msg}`);
+            }
+            return { ok:false };
+          }
+        }
+      }
+
+      // === Persist enabled windows (skip disabled ones) ===
+      if (clientId && windows.length) {
         // guard for intra-batch overlap (enabled windows only)
         for (let i = 0; i < windows.length; i++) {
           for (let j = i + 1; j < windows.length; j++) {
@@ -3562,17 +3588,13 @@ async function openClient(row) {
           }
         }
 
-        // Persist: enabled windows via upsert; disabled ones are skipped (remain disabled)
         for (const w of windows) {
           try {
             if (w.disabled_at_utc) {
-              // Intentionally skip persisting disabled windows here — values remain staged in UI.
-              // (If you want disabled field edits to persist immediately, expose a backend PATCH-by-id for fields and call it here.)
               if (APILOG) console.log('[OPEN_CLIENT] skip disabled window (not upserting)', { id: w.id, role: w.role, band: w.band });
               continue;
             }
             if (APILOG) console.log('[OPEN_CLIENT] upsertClientRate →', w);
-            L('[upsertClientRate]', { role: w.role, band: w.band, from: w.date_from, to: w.date_to });
             await upsertClientRate({
               client_id : clientId,
               role      : w.role || '',
@@ -3601,18 +3623,24 @@ async function openClient(row) {
             if (APILOG) console.log('[OPEN_CLIENT] upsertClientRate ← ok');
           } catch (e) {
             E('Upsert client default window failed', w, e);
-            if (APILOG) console.error('[OPEN_CLIENT] upsertClientRate ← error', e);
             alert('Failed to save a client rate window. See console for details.');
             return { ok:false };
           }
         }
       }
 
-      // Commit staged hospitals (unchanged)
-      // ...
+      // Optional: refresh rates list & rebuild baseline to reflect server-side disabled_by_name etc.
+      try {
+        const refreshed = await listClientRates(clientId /* all incl. disabled */);
+        window.modalCtx.ratesState    = Array.isArray(refreshed) ? refreshed.map(x => ({ ...x })) : [];
+        window.modalCtx.ratesBaseline = JSON.parse(JSON.stringify(window.modalCtx.ratesState));
+        try { renderClientRatesTable(); } catch {}
+      } catch (e) {
+        W('[openClient] post-save refresh failed', e);
+      }
 
-      // Keep data fresh in the modal (unchanged)
-      window.modalCtx.data      = { ...(window.modalCtx.data || {}), ...(clientResp || {}), id: clientId };
+      // Keep data fresh in the modal
+      window.modalCtx.data      = { ...(window.modalCtx.data || {}), ...(clientId ? { id: clientId } : {} ) };
       window.modalCtx.formState = { __forId: clientId, main:{} };
 
       if (isNew) window.__pendingFocus = { section: 'clients', id: clientId };
@@ -3621,7 +3649,7 @@ async function openClient(row) {
     full?.id
   );
 
-  // 4) Post-paint async loads (unchanged, but guarded)
+  // 4) Post-paint async loads (unchanged logic; plus baseline capture)
   if (full?.id) {
     const token = window.modalCtx.openToken;
     const id    = full.id;
@@ -3630,12 +3658,16 @@ async function openClient(row) {
       if (token === window.modalCtx.openToken && window.modalCtx.data?.id === id) {
         const hasStaged = Array.isArray(window.modalCtx.ratesState) && window.modalCtx.ratesState.length > 0;
         if (!hasStaged) {
-          window.modalCtx.ratesState = Array.isArray(unified) ? unified.map(r => ({ ...r })) : [];
+          window.modalCtx.ratesState    = Array.isArray(unified) ? unified.map(r => ({ ...r })) : [];
+          window.modalCtx.ratesBaseline = JSON.parse(JSON.stringify(window.modalCtx.ratesState)); // ⟵ capture baseline
           try { renderClientRatesTable(); } catch {}
         }
       }
-    } catch (e) { /* log as before */ }
-    // ... other post-paint loads unchanged
+    } catch (e) { W('openClient POST-PAINT rates error', e); }
+
+    // other post-paint loads unchanged...
+  } else {
+    L('skip companion loads (no full.id)');
   }
 }
 
@@ -3715,13 +3747,15 @@ function renderClientRatesTable() {
       const td = document.createElement('td');
       if (c === 'status') {
         if (r.disabled_at_utc) {
-          const who  = r.disabled_by_name || formatUserRef(r.disabled_by) || 'unknown';
+          const who  = r.disabled_by_name || 'unknown'; // show short name only
           const when = r.disabled_at_utc ? formatIsoToUk(String(r.disabled_at_utc).slice(0,10)) : '';
+          const pending = r.__toggle ? ' (pending save)' : '';
           td.innerHTML = `
-            <span class="pill tag-fail" aria-label="Disabled">❌ Disabled</span>
-            <div class="hint">by ${escapeHtml(who)} on ${escapeHtml(when)}</div>`;
+            <span class="pill tag-fail" aria-label="Disabled">❌ Disabled${pending}</span>
+            <div class="hint">${who ? `by ${escapeHtml(who)} ` : ''}${when ? `on ${escapeHtml(when)}` : ''}</div>`;
         } else {
-          td.innerHTML = `<span class="pill tag-ok" aria-label="Active">✓ Active</span>`;
+          const pending = r.__toggle === 'enable' ? ' (pending save)' : '';
+          td.innerHTML = `<span class="pill tag-ok" aria-label="Active">✓ Active${pending}</span>`;
         }
       } else {
         td.textContent = formatDisplayValue(c, r[c]);
@@ -3751,6 +3785,7 @@ function renderClientRatesTable() {
     };
   }
 }
+
 
 function ensureSelectionStyles(){
   const ID = 'gridSelectionStyles';
@@ -4084,7 +4119,6 @@ function mountClientHospitalsTab() {
 // CLIENT RATE MODAL (child) — adds status block + enable/disable button;
 // overlap/rollback logic now IGNORES disabled rows
 // ============================================================================
-
 async function openClientRateModal(client_id, existing) {
   const parentFrame = _currentFrame();
   const parentEditable = parentFrame && parentFrame.mode === 'edit';
@@ -4106,18 +4140,19 @@ async function openClientRateModal(client_id, existing) {
 
   const ex = existing || {};
   const isDisabled = !!ex.disabled_at_utc;
-  const who  = ex.disabled_by_name || formatUserRef(ex.disabled_by) || '';
+  const who  = ex.disabled_by_name || ''; // show short name only; UUID intentionally not used
   const when = ex.disabled_at_utc ? formatIsoToUk(String(ex.disabled_at_utc).slice(0,10)) : '';
 
   const statusBlock = `
     <div class="row" id="cl_status_row" style="align-items:center; gap:8px;">
       <div>
-        ${isDisabled
-          ? `<span class="pill tag-fail" id="cl_status_pill">❌ Disabled</span>
-             <div class="hint" id="cl_status_meta">by ${escapeHtml(who||'unknown')} on ${escapeHtml(when||'')}</div>`
-          : `<span class="pill tag-ok" id="cl_status_pill">✓ Active</span>
-             <div class="hint" id="cl_status_meta">&nbsp;</div>`
-        }
+        ${is_disabled_marker(ex) /* helper below inlined */ ? `
+          <span class="pill tag-fail" id="cl_status_pill">❌ Disabled</span>
+          <div class="hint" id="cl_status_meta">by ${escapeHtml(who || 'unknown')} on ${escapeHtml(when || '')}</div>
+        ` : `
+          <span class="pill tag-ok" id="cl_status_pill">✓ Active</span>
+          <div class="hint" id="cl_status_meta">&nbsp;</div>
+        `}
       </div>
       ${parentEditable && ex.id
         ? `<div style="margin-left:auto">
@@ -4128,6 +4163,8 @@ async function openClientRateModal(client_id, existing) {
         : ''
       }
     </div>`;
+
+  function is_disabled_marker(r){ return !!r && !!r.disabled_at_utc; }
 
   const formHtml = html(`
     <div class="form" id="clientRateForm">
@@ -4147,7 +4184,7 @@ async function openClientRateModal(client_id, existing) {
       </div>
 
       <div class="row">
-        <label>Band (optional)</label>
+        <label>VBR5809: Band (optional)</label>
         <input type="text" name="band" id="cl_band" value="${ex.band ?? ''}" ${parentEditable ? '' : 'disabled'} />
       </div>
 
@@ -4200,7 +4237,7 @@ async function openClientRateModal(client_id, existing) {
       }
 
       const raw = collectForm('#clientRateForm');
-      if (APILOG) console.log('[openClientRateModal] Apply collected', raw);
+      if ( APILOG ) console.log('[openClientRateModal] Apply collected', raw);
 
       let role = (raw.role || '').trim();
       const newRole = (document.getElementById('cl_role_new')?.value || '').trim();
@@ -4248,12 +4285,35 @@ async function openClientRateModal(client_id, existing) {
         umb_sun     : raw['umb_sun']     !== '' ? Number(raw['umb_sun'])     : null,
         umb_bh      : raw['umb_bh']      !== '' ? Number(raw['umb_bh'])      : null,
 
-        // carry disabled flags through staging (so parent table reflects current state)
-        disabled_at_utc: existing?.disabled_at_utc || null,
-        disabled_by    : existing?.disabled_by     || null,
-        disabled_by_name: existing?.disabled_by_name || null
+        // carry disabled fields from existing (possibly staged toggle)
+        disabled_at_utc : existing?.disabled_at_utc ?? null,
+        disabled_by_name: existing?.disabled_by_name ?? null,
+        __toggle        : existing?.__toggle || undefined
       };
-      if (APILOG) console.log('[openClientRateModal] staged', staged);
+
+      // EARLY EXIT for pure status toggle (no other field changed)
+      const compareKeys = ['role','band','date_from','date_to',
+                           'charge_day','charge_night','charge_sat','charge_sun','charge_bh',
+                           'paye_day','paye_night','paye_sat','paye_sun','paye_bh',
+                           'umb_day','umb_night','umb_sat','umb_sun','umb_bh'];
+      const nonToggleChanged = existing
+        ? compareKeys.some(k => String(existing[k] ?? '') !== String(staged[k] ?? ''))
+        : false;
+      const isPureToggle = !!(existing && existing.id && staged.__toggle && !nonToggleChanged);
+
+      if (isPureToggle) {
+        // Just stage the toggle; no overlap/truncate checks; parent Save will PATCH
+        ctx.ratesState = Array.isArray(ctx.ratesState) ? ctx.ratesState : [];
+        const idx = ctx.ratesState.findIndex(r => r === existing);
+        if (idx >= 0) ctx.ratesState[idx] = { ...existing, disabled_at_utc: staged.disabled_at_utc, disabled_by_name: staged.disabled_by_name, __toggle: staged.__toggle };
+        else ctx.ratesState.push({ ...staged });
+        try { window.dispatchEvent(new CustomEvent('modal-dirty')); } catch {}
+        try { renderClientRatesTable(); } catch {}
+        if (APILOG) console.log('[openClientRateModal] pure toggle staged', { id: existing.id, toDisabled: !!staged.disabled_at_utc });
+        return true;
+      }
+
+      // --- Normal path (role/band/dates/rates changed): run enabled-only overlap/rollover guards
 
       // 🔧 Read/merge against canonical ctx
       const list = Array.isArray(ctx.ratesState) ? ctx.ratesState : [];
@@ -4273,7 +4333,7 @@ async function openClientRateModal(client_id, existing) {
       }
       if (activeAtStart.length === 1) {
         const inc = activeAtStart[0];
-        if (inc.date_from === staged.date_from) {
+        if (String(inc.date_from) === String(staged.date_from)) {
           alert(`A window for this role/band already starts on ${formatIsoToUk(isoFrom)}.\nEdit that window or choose a different date.`);
           return false;
         }
@@ -4358,58 +4418,55 @@ async function openClientRateModal(client_id, existing) {
     else { newRow.style.display = 'none'; const nr = document.getElementById('cl_role_new'); if (nr) nr.value = ''; }
   });
 
-  // Enable/Disable handler
+  // Enable/Disable handler — stage ONLY; require Apply + parent Save to persist
   const toggleBtn = byId('btnToggleDisable');
-  if (toggleBtn && existing?.id) {
-    toggleBtn.onclick = async () => {
-      const goingToDisable = !existing.disabled_at_utc ? true : false;
-      try {
-        toggleBtn.disabled = true;
-        const updated = await patchClientDefault(existing.id, { disabled: goingToDisable });
-        // Merge the response into staged + existing
-        if (updated) {
-          // Update the in-memory row in ctx.ratesState by id
-          if (Array.isArray(ctx.ratesState)) {
-            const idx = ctx.ratesState.findIndex(r => String(r.id) === String(updated.id));
-            if (idx >= 0) ctx.ratesState[idx] = { ...ctx.ratesState[idx], ...updated };
-          }
-          // Update the local "existing" ref and re-render status badge
-          existing.disabled_at_utc = updated.disabled_at_utc || null;
-          existing.disabled_by     = updated.disabled_by || null;
-          existing.disabled_by_name= updated.disabled_by_name || null;
-
-          const pill = byId('cl_status_pill');
-          const meta = byId('cl_status_meta');
-          if (pill && meta) {
-            if (updated.disabled_at_utc) {
-              pill.className = 'pill tag-fail'; pill.textContent = '❌ Disabled';
-              const who2  = updated.disabled_by_name || formatUserRef(updated.disabled_by) || 'unknown';
-              const when2 = formatIsoToUk(String(updated.disabled_at_utc).slice(0,10));
-              meta.textContent = `by ${who2} on ${when2}`;
-              toggleBtn.textContent = 'Enable';
-              toggleBtn.className = 'btn-primary';
-            } else {
-              pill.className = 'pill tag-ok'; pill.textContent = '✓ Active';
-              meta.innerHTML = '&nbsp;';
-              toggleBtn.textContent = 'Disable';
-              toggleBtn.className = 'btn-danger';
-            }
-          }
-          try { renderClientRatesTable(); } catch {}
-        } else {
-          alert('Failed to toggle status.');
-        }
-      } catch (e) {
-        const msg = String(e?.message || e || 'Unknown error');
-        alert(msg.includes('duplicate key') ? (
-          'Can’t enable: another enabled window exists with the same Client / Role / Band / Start.'
-        ) : msg);
-      } finally {
-        toggleBtn.disabled = false;
+  if (toggleBtn && existing?.id && parentEditable) {
+    toggleBtn.onclick = () => {
+      const nowIso = new Date().toISOString().slice(0,10);
+      const willDisable = !existing.disabled_at_utc;
+      // Stage in-memory change
+      existing.__toggle = willDisable ? 'disable' : 'enable';
+      if (willDisable) {
+        existing.disabled_at_utc = nowIso; // placeholder for UI; backend will set precise timestamp on save
+        // derive short name from any known user/email globals (best effort)
+        let short = '';
+        try {
+          const u = (window.__ME__ || window.me || window.currentUser || window.AUTH_USER || {});
+          const em = (u.email || u.user?.email || '');
+          short = em && typeof em === 'string' ? (em.split('@')[0] || '') : (u.name || '');
+        } catch(_) {}
+        existing.disabled_by_name = short || existing.disabled_by_name || '';
+      } else {
+        existing.disabled_at_utc = null;
+        existing.disabled_by_name = null;
       }
+
+      // Reflect “pending” status in UI
+      const pill = byId('cl_status_pill');
+      const meta = byId('cl_status_meta');
+      if (pill && meta) {
+        if (willDisable) {
+          pill.className = 'pill tag-fail';
+          pill.textContent = '❌ Disabled (pending save)';
+          meta.textContent = existing.disabled_by_name
+            ? `by ${existing.disabled_by_name} on ${formatIsoToUk(nowIso)} — will apply on Save`
+            : `Will disable on ${formatIsoToUk(nowIso)} (save to confirm)`;
+          toggleBtn.text = 'Enable'; toggleBtn.textContent = 'Enable'; toggleBtn.className = 'btn-primary';
+        } else {
+          pill.className = 'pill tag-ok';
+          pill.textContent = '✓ Active (pending save)';
+          meta.textContent = 'Will enable on Save';
+          toggleBtn.text = 'Disable'; toggleBtn.textContent = 'Disable'; toggleBtn.className = 'btn-danger';
+        }
+      }
+
+      try { window.dispatchEvent(new CustomEvent('modal-dirty')); } catch {}
+      try { renderClientRatesTable(); } catch {}
     };
   }
 }
+
+
 
 
 function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
