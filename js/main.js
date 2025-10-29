@@ -74,23 +74,26 @@ function _toHHMMSS(val) {
 }
 
 // Build a clean object to send to the API
+
 function normalizeClientSettingsForSave(raw) {
   const src = raw || {};
-  const out = { ...src };
+  const out = {};
+  // Only normalise keys that were actually provided (form/baseline),
+  // and only flag invalid when a provided key fails HH:MM
+  let invalid = false;
 
-  // normalise times for persistence
-  out.day_start   = _toHHMMSS(src.day_start);
-  out.day_end     = _toHHMMSS(src.day_end);
-  out.night_start = _toHHMMSS(src.night_start);
-  out.night_end   = _toHHMMSS(src.night_end);
-
-  // if any are invalid -> signal to caller
-  const invalid = ['day_start','day_end','night_start','night_end']
-    .some(k => out[k] === null);
+  ['day_start','day_end','night_start','night_end','timezone_id'].forEach(k => {
+    if (!(k in src)) return;            // not provided → ignore
+    const v = src[k];
+    if (k === 'timezone_id') { if (v) out[k] = String(v); return; }
+    if (v == null || v === '') return;  // empty → ignore (do not mark invalid)
+    const hhmmss = _toHHMMSS(v);        // returns null if fails
+    if (hhmmss === null) { invalid = true; return; }
+    out[k] = hhmmss;
+  });
 
   return { cleaned: out, invalid };
 }
-
 
 // ===== Auth fetch with refresh retry =====
 async function authFetch(input, init={}){
@@ -3401,7 +3404,6 @@ function renderCalendar(timesheets){
 // OPEN CLIENT (parent modal) — skip posting disabled windows on Save
 // (No delete button is added here; ensure any existing parent delete UI is removed elsewhere.)
 // ============================================================================
-
 async function openClient(row) {
   // ===== Logging helpers (toggle with window.__LOG_MODAL = true/false) =====
   const LOG = (typeof window.__LOG_MODAL === 'boolean') ? window.__LOG_MODAL : true;
@@ -3427,6 +3429,7 @@ async function openClient(row) {
 
   // 1) Hydrate full client if we have an id
   let full = incoming;
+  let settingsSeed = null; // ⟵ PRESEED client settings to avoid time-validator race
   if (seedId) {
     try {
       const url = API(`/api/clients/${encodeURIComponent(seedId)}`);
@@ -3441,9 +3444,12 @@ async function openClient(row) {
 
       if (r.ok) {
         const data = await r.json().catch(()=> ({}));
-        const unwrapped = unwrapSingle(data, 'client');
-        L('hydrated JSON keys', Object.keys(data||{}), 'unwrapped keys', Object.keys(unwrapped||{}));
-        full = unwrapped || incoming;
+        // Preferred: take 'client' object; keep settings sibling if present
+        const clientObj   = data?.client || unwrapSingle(data, 'client') || null;
+        const settingsObj = data?.client_settings || data?.settings || null;
+        settingsSeed = settingsObj ? deep(settingsObj) : null;
+        full = clientObj || incoming;
+        L('hydrated JSON keys', Object.keys(data||{}), 'client keys', Object.keys(clientObj||{}), 'hasSettingsSeed', !!settingsSeed);
       } else {
         W('non-OK response, using incoming row');
       }
@@ -3454,7 +3460,7 @@ async function openClient(row) {
     L('no seedId — create mode');
   }
 
-  // 2) Seed window.modalCtx and show
+  // 2) Seed window.modalCtx and show  (+ preseed clientSettingsState to remove race)
   const fullKeys = Object.keys(full || {});
   L('seeding window.modalCtx', { entity: 'clients', fullId: full?.id, fullKeys });
 
@@ -3465,7 +3471,7 @@ async function openClient(row) {
     ratesState: [],
     ratesBaseline: [], // ⟵ baseline snapshot to detect status toggles on Save
     hospitalsState: { existing: [], stagedNew: [], stagedEdits: {}, stagedDeletes: new Set() },
-    clientSettingsState: {},
+    clientSettingsState: settingsSeed ? deep(settingsSeed) : {}, // ⟵ PRESEEDED HERE
     openToken: ((full?.id) || 'new') + ':' + Date.now()
   };
 
@@ -3474,7 +3480,8 @@ async function openClient(row) {
     dataId: window.modalCtx.data?.id,
     dataKeys: Object.keys(window.modalCtx.data||{}),
     formStateForId: window.modalCtx.formState?.__forId,
-    openToken: window.modalCtx.openToken
+    openToken: window.modalCtx.openToken,
+    preseededSettings: Object.keys(window.modalCtx.clientSettingsState||{}),
   });
 
   // 3) Render modal (first paint uses hydrated "full")
@@ -3502,28 +3509,41 @@ async function openClient(row) {
       L('[onSave] collected', { same, stagedKeys: Object.keys(stagedMain||{}), liveKeys: Object.keys(liveMain||{}) });
 
       // Immutable on server
-      delete payload.but_let_cli_ref; // (keep your original logic; example key renamed to avoid confusion)
+      delete payload.but_let_cli_ref;
       if (!payload.name && full?.name) payload.name = full.name;
       if (!payload.name) { alert('Please enter a Client name.'); return { ok:false }; }
 
-      // Settings normalization (unchanged)
-      let csMerged = { ...(window.modalCtx.clientSettingsState || {}) };
-      if (byId('clientSettingsForm')) {
-        const liveSettings = collectForm('#clientSettingsForm', false);
-        ['day_start','day_end','night_start','night_end'].forEach(k=>{
-          const v = _toHHMM(liveSettings[k]);
-          if (v) csMerged[k] = v;
-        });
-        if (typeof liveSettings.you_may_pass_tz === 'string' && liveSettings.you_may_pass_tz.trim() !== '') {
-          csMerged.timezone_id = liveSettings.you_may_pass_tz.trim();
+      // ===== Settings normalization (GUARDED) =====
+      // Only normalise settings if:
+      //  - the Settings form is mounted, OR
+      //  - preseeded/baseline already has all four time keys
+      const baseline = window.modalCtx.clientSettingsState || {};
+      const hasFormMounted = !!byId('clientSettingsForm');
+      const hasFullBaseline = ['day_start','day_end','night_start','night_end'].every(k => typeof baseline[k] === 'string' && baseline[k] !== '');
+      const shouldValidateSettings = hasFormMounted || hasFullBaseline;
+
+      if (shouldValidateSettings) {
+        let csMerged = { ...(baseline || {}) };
+        if (hasFormMounted) {
+          const liveSettings = collectForm('#clientSettingsForm', false);
+          ['day_start','day_end','night_start','night_end'].forEach(k=>{
+            const v = _toHHMM(liveSettings[k]); // returns '' if empty
+            if (v) csMerged[k] = v;
+          });
+          if (typeof liveSettings.timezone_id === 'string' && liveSettings.timezone_id.trim() !== '') {
+            csMerged.timezone_id = liveSettings.timezone_id.trim();
+          }
         }
+        const { cleaned: csClean, invalid: csInvalid } = normalizeClientSettingsForSave(csMerged);
+        if (APILOG) console.log('[OPEN_CLIENT] client_settings (merged→clean)', { csMerged, csClean, csInvalid, hasFormMounted, hasFullBaseline });
+        if (csInvalid) { alert('Times must be HH:MM (24-hour).'); return { ok:false }; }
+        if (Object.keys(csClean).length) {
+          payload.client_settings = csClean;
+        }
+      } else {
+        if (APILOG) console.log('[OPEN_CLIENT] skip settings normalisation (no form & incomplete baseline)');
       }
-      const { cleaned: csClean, invalid: csInvalid } = normalizeClientSettingsForSave(csMerged);
-      if (APILOG) console.log('[OPEN_CLIENT] client_settings (merged→clean)', { csMerged, csClean, csInvalid });
-      if (csInvalid) { alert('Times must be HH:MM (24-hour).'); return { ok:false }; }
-      if (Object.keys(csClean).length) {
-        payload.client_settings = csClean;
-      }
+      // ============================================
 
       const idForUpdate = window.modalCtx?.data?.id || full?.id || null;
       if (APILOG) console.log('[OPEN_CLIENT] upsertClient → request', { idForUpdate, payload });
@@ -3533,21 +3553,19 @@ async function openClient(row) {
       if (APILOG) console.log('[OPEN_CLIENT] upsertClient ← response', { ok: !!clientResp, clientId });
       if (!clientId) { alert('Failed to save client'); return { ok:false }; }
 
-      // === NEW: persist staged status toggles FIRST (before upserts) ===
-      const baseline = Array.isArray(window.modalCtx.ratesBaseline) ? window.modalCtx.ratesBaseline : [];
-      const prevById = new Map(baseline.filter(r => r && r.id).map(r => [String(r.id), r]));
+      // === Persist staged status toggles FIRST (before upserts) ===
+      const baselineRates = Array.isArray(window.modalCtx.ratesBaseline) ? window.modalCtx.ratesBaseline : [];
+      const prevById = new Map(baselineRates.filter(r => r && r.id).map(r => [String(r.id), r]));
       const windows = Array.isArray(window.modalCtx.ratesState) ? window.modalCtx.ratesState.slice() : [];
 
       const toggles = [];
       for (const w of windows) {
-        if (!w?.id) continue; // toggles only apply to existing rows
+        if (!w?.id) continue;
         const prev = prevById.get(String(w.id));
         if (!prev) continue;
         const prevDisabled = !!prev.disabled_at_utc;
         const currDisabled = !!w.disabled_at_utc;
-        if (prevDisabled !== currDisabled) {
-          toggles.push({ id: w.id, disabled: currDisabled });
-        }
+        if (prevDisabled !== currDisabled) toggles.push({ id: w.id, disabled: currDisabled });
       }
 
       if (toggles.length) {
@@ -3573,7 +3591,7 @@ async function openClient(row) {
         for (let i = 0; i < windows.length; i++) {
           for (let j = i + 1; j < windows.length; j++) {
             const A = windows[i], B = windows[j];
-            if (A.disabled_at_utc || B.disabled_at_utc) continue; // ignore disabled in this guard
+            if (A.disabled_at_utc || B.disabled_at_utc) continue;
             if (String(A.role||'') === String(B.role||'') &&
                 String(A.band||'') === String(B.band||'')) {
               const a0 = A.date_from || null, a1 = A.date_to || null;
@@ -3670,6 +3688,7 @@ async function openClient(row) {
     L('skip companion loads (no full.id)');
   }
 }
+
 
 // =================== CLIENT RATES TABLE (UPDATED) ===================
 // ✅ UPDATED — unified table view, dbl-click opens unified modal
@@ -4466,9 +4485,6 @@ async function openClientRateModal(client_id, existing) {
   }
 }
 
-
-
-
 function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
   // ===== Logging helpers (toggle with window.__LOG_MODAL = true/false) =====
   const LOG = (typeof window.__LOG_MODAL === 'boolean') ? window.__LOG_MODAL : false;
@@ -4523,7 +4539,6 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
     }
     if (typeof frame._updateButtons === 'function') frame._updateButtons();
 
-    // Avoid redundant first repaint. Only repaint after mount cycles.
     const willRepaint = !!(frame._hasMountedOnce && frame.currentTabKey);
     L('setFrameMode', { prevMode, nextMode: mode, _hasMountedOnce: frame._hasMountedOnce, willRepaint });
     if (willRepaint) frame.setTab(frame.currentTabKey);
@@ -4544,7 +4559,6 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
     document.onmouseup   = null;
   }
 
-  // ——— Reset any drag state ——————————————————————————————————————————————
   const modalEl = byId('modal');
   if (modalEl) {
     modalEl.style.position = '';
@@ -4571,15 +4585,15 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
     // State
     mode: hasId ? 'view' : 'create',
     isDirty: false,
-    _snapshot: null, // ← original values captured on entering edit
+    _snapshot: null,
 
-    // Lifecycles
     _detachDirty: null,
     _detachGlobal: null,
     _hasMountedOnce: false,
     _wired: false,
     _closing: false,
     _saving: false,
+    _confirmingDiscard: false, // ⟵ NEW: re-entrancy guard for discard confirm
 
     persistCurrentTabState() {
       if (!window.modalCtx || (this.mode === 'view')) {
@@ -4664,7 +4678,6 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
       L('renderTab(call)', { tab: k, rowKeys: Object.keys(rowForTab||{}), sample: { first_name: rowForTab?.first_name, last_name: rowForTab?.last_name, id: rowForTab?.id }});
       byId('modalBody').innerHTML = this.renderTab(k, rowForTab) || '';
 
-      // Per-entity sub-mounts
       if (this.entity === 'candidates' && k === 'rates') { L('mountCandidateRatesTab?'); mountCandidateRatesTab?.(); }
       if (this.entity === 'candidates' && k === 'pay')   { L('mountCandidatePayTab?');   mountCandidatePayTab?.(); }
 
@@ -4693,8 +4706,7 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
 
       if (this.entity === 'clients' && k === 'rates')     { L('mountClientRatesTab?');     mountClientRatesTab?.(); }
       if (this.entity === 'clients' && k === 'hospitals') { L('mountClientHospitalsTab?'); mountClientHospitalsTab?.(); }
-      if (this.entity === 'clients' && k === 'settings')  { L('renderClientSettingsUI?');  renderClientSettingsUI?.(window.modalCtx.clientSettingsState || {});
- }
+      if (this.entity === 'clients' && k === 'settings')  { L('renderClientSettingsUI?');  renderClientSettingsUI?.(window.modalCtx.clientSettingsState || {}); }
 
       this.currentTabKey = k;
       this._attachDirtyTracker();
@@ -4710,7 +4722,6 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
 
       this._hasMountedOnce = true;
 
-      // Snapshot what actually landed in the DOM
       try {
         const dump = [...document.querySelectorAll('#tab-main input, #tab-main select, #tab-main textarea')].map(el=>({
           name: el.name || el.id || '(no-name)',
@@ -4851,109 +4862,8 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
     })();
     // ======================================================================
 
-    // RELATED menu omitted for brevity (unchanged from your version) …
-    (function ensureRelatedUI() {
-      document.querySelectorAll('#btnRelatedWrap').forEach(n => { if (n.parentElement !== header) n.remove(); });
+    // RELATED menu omitted for brevity (unchanged) …
 
-      let wrap = document.getElementById('btnRelatedWrap');
-      if (!wrap) {
-        wrap = document.createElement('div');
-        wrap.id = 'btnRelatedWrap';
-        wrap.style.position = 'relative';
-        wrap.style.marginRight = '.5rem';
-        if (header) header.insertBefore(wrap, btnClose);
-      } else if (wrap.parentElement !== header) {
-        wrap.remove();
-        if (header) header.insertBefore(wrap, btnClose);
-      }
-      wrap.innerHTML = '';
-
-      const relatedBtn = document.createElement('button');
-      relatedBtn.id = 'btnRelated';
-      relatedBtn.type = 'button';
-      relatedBtn.className = 'btn';
-      relatedBtn.textContent = 'Related ▾';
-      relatedBtn.disabled = !(top.hasId && top.mode === 'view');
-      wrap.appendChild(relatedBtn);
-
-      const menu = document.createElement('div');
-      menu.id = 'relatedMenu';
-      menu.style.cssText = 'position:absolute; right:0; top:calc(100% + 6px); background:#0b1427; border:1px solid var(--line); border-radius:8px; min-width:220px; display:none; padding:6px; z-index:1000';
-      wrap.appendChild(menu);
-
-      function entityKey() {
-        if (top.entity === 'candidates') return 'candidate';
-        if (top.entity === 'clients')    return 'client';
-        if (top.entity === 'umbrellas')  return 'umbrella';
-        return top.entity || 'candidate';
-      }
-      const sectionMap = { timesheets:'timesheets', invoices:'invoices', candidates:'candidates', clients:'clients', umbrellas:'umbrellas', umbrella:'umbrellas' };
-
-      async function renderMenu() {
-        menu.innerHTML = `<div class="hint" style="padding:6px 8px">Loading…</div>`;
-        const ent = entityKey();
-        const id  = window.modalCtx?.data?.id;
-        if (!ent || !id) { menu.innerHTML = `<div class="hint" style="padding:6px 8px">No related</div>`; return; }
-
-        let counts = {};
-        try { counts = (await fetchRelatedCounts(ent, id)) || {}; } catch {}
-        const spec = (function buildSpec() {
-          if (ent === 'candidate') return [['timesheets','Timesheets'], ['invoices','Invoices'], ['clients','Clients'], ['umbrella','Umbrella']];
-          if (ent === 'client')    return [['timesheets','Timesheets'], ['invoices','Invoices'], ['candidates','Candidates']];
-          if (ent === 'umbrella')  return [['candidates','Candidates'], ['timesheets','Timesheets'], ['invoices','Invoices']];
-          return [];
-        })();
-
-        const rows = spec.map(([key,label]) => {
-          const val = Number(counts[key] ?? 0);
-          const disabled = (val <= 0);
-          return { key, label, disabled };
-        });
-
-        if (!rows.length) { menu.innerHTML = `<div class="hint" style="padding:6px 8px">No related</div>`; return; }
-
-        menu.innerHTML = rows.map(r => {
-          const s = r.disabled ? 'opacity:.6;cursor:not-allowed' : 'cursor:pointer';
-          return `<div class="rel" data-key="${r.key}" data-enabled="${r.disabled?0:1}" style="padding:8px;border-bottom:1px solid var(--line);${s}">${r.label}${counts[r.key]!=null?` (${counts[r.key]})`:''}</div>`;
-        }).join('') + `<div style="height:2px"></div>`;
-
-        menu.querySelectorAll('.rel').forEach(el => {
-          el.onclick = async () => {
-            if (el.getAttribute('data-enabled') !== '1') return;
-            const key = el.getAttribute('data-key');
-            try {
-              const rows = await fetchRelated(entityKey(), id, key);
-              const section = sectionMap[key] || key;
-              currentSection = section;
-              renderSummary(Array.isArray(rows) ? rows : []);
-              menu.style.display = 'none';
-            } catch (err) {
-              menu.innerHTML = `<div class="hint" style="padding:6px 8px;color:#fca5a5">Failed to load related</div>`;
-            }
-          };
-        });
-      }
-
-      relatedBtn.onclick = async () => {
-        if (relatedBtn.disabled) return;
-        menu.style.display = (menu.style.display === 'none' ? 'block' : 'none');
-        if (menu.style.display === 'block') await renderMenu();
-      };
-
-      const onDoc = (ev) => {
-        if (menu.style.display === 'none') return;
-        if (!wrap.contains(ev.target)) menu.style.display = 'none';
-      };
-
-      const prevDetach = top._detachGlobal;
-      top._detachGlobal = () => {
-        try { document.removeEventListener('click', onDoc, true); } catch {}
-        if (typeof prevDetach === 'function') { try { prevDetach(); } catch {} }
-      };
-      document.addEventListener('click', onDoc, true);
-    })();
-
-    // Labels
     const defaultPrimary = isChild ? 'Apply' : 'Save';
     btnSave.textContent = defaultPrimary;
     btnSave.setAttribute('aria-label', defaultPrimary);
@@ -4974,7 +4884,6 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
 
       if (isChild) {
         btnSave.style.display = parentEditable ? '' : 'none';
-        // FIX: child Save disabled until child modal becomes dirty
         btnSave.disabled = (!parentEditable) || (!top.isDirty);
         btnEdit.style.display = 'none';
         if (relatedBtn) relatedBtn.disabled = true;
@@ -5010,17 +4919,32 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
       }
     };
 
-    // Close / Cancel / Discard logic
+    // Close / Cancel / Discard logic (with confirm re-entrancy guard)
     const handleSecondary = () => {
+      // NEW: bail out if we’re already confirming or closing
+      if (top._confirmingDiscard || top._closing) return;
+
       if (!isChild && top.mode === 'edit') {
         if (!top.isDirty) {
           top.isDirty = false;
           setFrameMode(top, 'view');
           top._snapshot = null;
+          // Give closure even with no changes
+          try { window.__toast?.('No changes'); } catch {}
           return;
         } else {
-          const ok = window.confirm('Discard changes and return to view?');
+          // NEW: single confirm guarded against re-entry
+          let ok = false;
+          try {
+            top._confirmingDiscard = true;
+            btnClose.disabled = true; // optional UX hardening during confirm
+            ok = window.confirm('Discard changes and return to view?');
+          } finally {
+            top._confirmingDiscard = false;
+            btnClose.disabled = false;
+          }
           if (!ok) return;
+
           if (top._snapshot && window.modalCtx) {
             window.modalCtx.data                = deep(top._snapshot.data);
             window.modalCtx.formState           = deep(top._snapshot.formState);
@@ -5044,7 +4968,16 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
       const m = byId('modal'); if (m) m.classList.remove('dragging');
 
       if (!isChild && (top.mode === 'create') && top.isDirty) {
-        const ok = window.confirm('You have unsaved changes. Discard them and close?');
+        // NEW: guard confirm in create-discard as well
+        let ok = false;
+        try {
+          top._confirmingDiscard = true;
+          btnClose.disabled = true;
+          ok = window.confirm('You have unsaved changes. Discard them and close?');
+        } finally {
+          top._confirmingDiscard = false;
+          btnClose.disabled = false;
+        }
         if (!ok) { top._closing = false; return; }
       }
 
@@ -5068,12 +5001,12 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
     };
     btnClose.onclick = handleSecondary;
 
-    // Save / Apply (with "no changes" → cancel/close behaviour)
+    // Save / Apply — if no changes, we still give closure (toast + close/exit)
     const onSaveClick = async () => {
       if (top._saving) return;
 
       if (top.mode !== 'view' && !top.isDirty) {
-        L('onSaveClick: no changes, treating as cancel/close');
+        L('onSaveClick: no changes → close/exit with toast');
         if (isChild) {
           sanitizeModalGeometry();
           stack().pop();
@@ -5090,6 +5023,7 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
           setFrameMode(top, 'view');
           top._updateButtons && top._updateButtons();
         }
+        try { window.__toast?.('No changes'); } catch {}
         return;
       }
 
@@ -5148,9 +5082,21 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
 
     if (!top._wired) {
       window.addEventListener('modal-dirty', onDirtyEvt);
-      const onEsc = (e) => { if (e.key === 'Escape') { e.preventDefault(); btnClose.click(); } };
+
+      // NEW: suppress ESC while confirming/closing to avoid duplicate prompts
+      const onEsc = (e) => {
+        if (e.key === 'Escape') {
+          if (top._confirmingDiscard || top._closing) return;
+          e.preventDefault(); byId('btnCloseModal').click();
+        }
+      };
       window.addEventListener('keydown', onEsc);
-      const onOverlayClick = (e) => { if (e.target === byId('modalBack')) btnClose.click(); };
+
+      // NEW: suppress overlay click while confirming/closing to avoid duplicate prompts
+      const onOverlayClick = (e) => {
+        if (top._confirmingDiscard || top._closing) return;
+        if (e.target === byId('modalBack')) byId('btnCloseModal').click();
+      };
       byId('modalBack').addEventListener('click', onOverlayClick, true);
 
       top._detachGlobal = () => {
