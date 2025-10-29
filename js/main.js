@@ -1167,15 +1167,39 @@ function invalidateGlobalRoleOptionsCache(){
 // Load and dedupe all role codes from client defaults across all clients
 async function loadGlobalRoleOptions(){
   const now = Date.now();
-  if (window.__GLOBAL_ROLE_CODES_CACHE__ && (now - window.__GLOBAL_ROLE_CODES_CACHE_TS__ < 60_000)) {
-    return window.__GLOBAL_ROLE_CODES_CACHE__;
+
+  // Use per-client cache to avoid cross-client pollution and avoid stray global fetches
+  const cid = (window.modalCtx && window.modalCtx.data && (window.modalCtx.data.id || window.modalCtx.data.client_id)) || null;
+
+  // Initialise cache maps
+  window.__GLOBAL_ROLE_CODES_CACHE__   = window.__GLOBAL_ROLE_CODES_CACHE__   || Object.create(null);
+  window.__GLOBAL_ROLE_CODES_CACHE_TS__= window.__GLOBAL_ROLE_CODES_CACHE_TS__|| Object.create(null);
+
+  // Serve from cache when fresh
+  if (cid && window.__GLOBAL_ROLE_CODES_CACHE__[cid] && (now - (window.__GLOBAL_ROLE_CODES_CACHE_TS__[cid] || 0) < 60_000)) {
+    return window.__GLOBAL_ROLE_CODES_CACHE__[cid];
   }
-  const list = await listClientRates().catch(() => []);  // unified windows; no rate_type
+
+  // If we don't have a client id, do NOT call listClientRates() globally — return cached (if any) or empty
+  if (!cid) {
+    const fallback = window.__GLOBAL_ROLE_CODES_CACHE__['__fallback__'];
+    return Array.isArray(fallback) ? fallback : [];
+  }
+
+  // Fetch roles for this specific client id only
+  const list = await listClientRates(cid).catch(() => []);  // unified windows for this client
   const set = new Set();
   (list || []).forEach(r => { if (r && r.role) set.add(String(r.role)); });
-  const arr = [...set].sort((a,b)=> a.localeCompare(b)); // fixed spread
-  window.__GLOBAL_ROLE_CODES_CACHE__ = arr;
-  window.__GLOBAL_ROLE_CODES_CACHE_TS__ = now;
+  const arr = [...set].sort((a,b)=> a.localeCompare(b));
+
+  // Cache per client
+  window.__GLOBAL_ROLE_CODES_CACHE__[cid] = arr;
+  window.__GLOBAL_ROLE_CODES_CACHE_TS__[cid] = now;
+
+  // Also keep a fallback snapshot for sessions that briefly lack cid
+  window.__GLOBAL_ROLE_CODES_CACHE__['__fallback__'] = arr;
+  window.__GLOBAL_ROLE_CODES_CACHE_TS__['__fallback__'] = now;
+
   return arr;
 }
 
@@ -1798,17 +1822,24 @@ async function listOutbox(){    const r = await authFetch(API('/api/email/outbox
 //    Returned shape: [{ client_id, role, band|null, date_from, date_to|null,
 //                       charge_day..bh, paye_day..bh, umb_day..bh }]
 async function listClientRates(clientId, opts = {}) {
+  const APILOG = (typeof window !== 'undefined' && !!window.__LOG_API) || (typeof __LOG_API !== 'undefined' && !!__LOG_API);
+
+  // 🔧 Guard: never fetch without a client_id (prevents global empty lists clobbering staged state)
+  if (!clientId) {
+    if (APILOG) console.warn('[listClientRates] called without clientId — returning [] to avoid clobbering state');
+    return [];
+  }
+
   const qp = new URLSearchParams();
-  if (clientId) qp.set('client_id', clientId);
+  qp.set('client_id', clientId);
   if (opts.role) qp.set('role', String(opts.role));
   if (opts.band !== undefined && opts.band !== null && `${opts.band}` !== '') {
     qp.set('band', String(opts.band));
   }
   if (opts.active_on) qp.set('active_on', String(opts.active_on)); // YYYY-MM-DD
 
-  const qs = qp.toString() ? `?${qp.toString()}` : '';
+  const qs = `?${qp.toString()}`;
   const url = API(`/api/rates/client-defaults${qs}`);
-  const APILOG = (typeof window !== 'undefined' && !!window.__LOG_API) || (typeof __LOG_API !== 'undefined' && !!__LOG_API);
   if (APILOG) console.log('[listClientRates] → GET', url);
 
   const res = await authFetch(url);
@@ -3578,7 +3609,7 @@ async function openClient(row) {
     full?.id
   );
 
-  // 4) Post-paint async loads (unchanged)
+  // 4) Post-paint async loads (unchanged, but guarded to avoid clobbering staged state)
   if (full?.id) {
     const token = window.modalCtx.openToken;
     const id    = full.id;
@@ -3586,8 +3617,15 @@ async function openClient(row) {
       L('[listClientRates] POST-PAINT GET', { id, token });
       const unified = await listClientRates(id);
       L('[listClientRates] POST-PAINT result', { count: Array.isArray(unified) ? unified.length : -1, sameToken: token === window.modalCtx.openToken, modalCtxId: window.modalCtx.data?.id });
+
       if (token === window.modalCtx.openToken && window.modalCtx.data?.id === id) {
-        window.modalCtx.ratesState = Array.isArray(unified) ? unified.map(r => ({ ...r })) : [];
+        // 🔧 Do not clobber staged windows if any exist
+        const hasStaged = Array.isArray(window.modalCtx.ratesState) && window.modalCtx.ratesState.length > 0;
+        if (!hasStaged) {
+          window.modalCtx.ratesState = Array.isArray(unified) ? unified.map(r => ({ ...r })) : [];
+        } else if (APILOG) {
+          console.log('[OPEN_CLIENT] skipped assigning fetched rates to preserve staged windows');
+        }
       }
     } catch (e) { E('openClient POST-PAINT rates error', e); }
 
@@ -3618,7 +3656,6 @@ async function openClient(row) {
     L('skip companion loads (no full.id)');
   }
 }
-
 
 
 // =================== CLIENT RATES TABLE (UPDATED) ===================
