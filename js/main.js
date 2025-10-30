@@ -724,7 +724,6 @@ async function openSaveSearchModal(section, filters){
 // openLoadSearchModal: emit event with filters (so parent re-applies after repaint),
 // stage-delete UI kept; shows shared badge and (when present) creator.
 
-
 async function openLoadSearchModal(section){
   const sanitize = (typeof window !== 'undefined' && typeof window.sanitize === 'function')
     ? window.sanitize
@@ -784,7 +783,9 @@ async function openLoadSearchModal(section){
       const chosen = (list || []).find(p => p.id === selectedId);
       if (!chosen) { alert('Preset not found'); return false; }
       const filters = chosen.filters || chosen.filters_json || chosen.filtersJson || {};
-      try { window.dispatchEvent(new CustomEvent('adv-search-apply-preset', { detail: { section, filters } })); } catch {}
+      // Normalise section for the listener
+      const sec = String(section || '').toLowerCase();
+      try { window.dispatchEvent(new CustomEvent('adv-search-apply-preset', { detail: { section: sec, filters } })); } catch {}
       return true;
     },
     false,
@@ -994,48 +995,7 @@ async function openSearchModal(opts = {}) {
     </div>
   `;
 
-  function wireAdvancedSearch() {
-    const bodyEl = document.getElementById('modalBody');
-    const formEl = document.getElementById('searchForm');
-    if (!bodyEl || !formEl) return;
-
-    formEl.querySelectorAll('input[placeholder="DD/MM/YYYY"]').forEach(el => {
-      try { attachUkDatePicker(el); } catch {}
-    });
-
-    // hide legacy buttons
-    formEl.querySelectorAll('#btnLoadSavedSearch,#btnSaveSearch').forEach(el => {
-      el.style.display = 'none'; el.hidden = true; el.disabled = true;
-    });
-
-    // delegated click (survives re-renders)
-    if (bodyEl._advSearchHandler) bodyEl.removeEventListener('click', bodyEl._advSearchHandler, true);
-    bodyEl._advSearchHandler = async (e) => {
-      const btn = e.target && e.target.closest('button[data-adv-act]');
-      if (!btn) return;
-      const act = btn.dataset.advAct;
-      if (act === 'load') {
-        await openLoadSearchModal(currentSection);
-      } else if (act === 'save') {
-        const filters = extractFiltersFromForm('#searchForm');
-        await openSaveSearchModal(currentSection, filters);
-      }
-    };
-    bodyEl.addEventListener('click', bodyEl._advSearchHandler, true);
-
-    // listen once for preset apply events
-    if (!window.__advPresetListener) {
-      window.__advPresetListener = (ev) => {
-        const det = ev && ev.detail; if (!det || det.section !== currentSection) return;
-        try { window.__squelchDirty = true; } catch {}
-        try { populateSearchFormFromFilters(det.filters || {}, '#searchForm'); } finally {
-          setTimeout(() => { try { window.__squelchDirty = false; } catch {} }, 0);
-        }
-      };
-      window.addEventListener('adv-search-apply-preset', window.__advPresetListener);
-    }
-  }
-
+  // NOTE: pass utility flags + kind to customise chrome/behaviour
   showModal(
     'Advanced Search',
     [{ key: 'filter', title: 'Filters' }],
@@ -1044,12 +1004,14 @@ async function openSearchModal(opts = {}) {
       const filters = extractFiltersFromForm('#searchForm');
       const rows    = await search(currentSection, filters);
       if (rows) renderSummary(rows);
-      return true;
+      return true; // close after running search
     },
     false,
-    () => wireAdvancedSearch() // re-wire after child closes
+    () => wireAdvancedSearch(),  // re-wire after child closes
+    { noParentGate: true, forceEdit: true, kind: 'advanced-search' }
   );
 
+  // Ensure listeners are wired after first paint
   setTimeout(wireAdvancedSearch, 0);
 }
 
@@ -1060,60 +1022,51 @@ async function openSearchModal(opts = {}) {
 // showOpenSearchModalWithForm: normalises header, re-wires delegated clicks,
 // listens for preset-apply event, re-applies after repaint.
 function showOpenSearchModalWithForm(form, opts = {}) {
-  function wireAdvancedSearch() {
-    const bodyEl = document.getElementById('modalBody');
-    const formEl = document.getElementById('searchForm');
-    if (!bodyEl || !formEl) return;
+ function wireAdvancedSearch() {
+  const bodyEl = document.getElementById('modalBody');
+  const formEl = document.getElementById('searchForm');
+  if (!bodyEl || !formEl) return;
 
-    let header = document.getElementById('searchHeaderRow');
-    if (!header) {
-      header = document.createElement('div');
-      header.id = 'searchHeaderRow';
-      header.className = 'row';
-      header.style.cssText = 'justify-content:flex-end; gap:.35rem; margin-bottom:.5rem';
-      header.innerHTML = `
-        <button type="button" class="adv-btn" data-adv-act="load">Load Saved Search</button>
-        <button type="button" class="adv-btn" data-adv-act="save">Save Search</button>`;
-      formEl.insertBefore(header, formEl.firstChild);
-    } else {
-      header.innerHTML = `
-        <button type="button" class="adv-btn" data-adv-act="load">Load Saved Search</button>
-        <button type="button" class="adv-btn" data-adv-act="save">Save Search</button>`;
+  formEl.querySelectorAll('input[placeholder="DD/MM/YYYY"]').forEach(el => {
+    try { attachUkDatePicker(el); } catch {}
+  });
+
+  // hide any legacy buttons
+  formEl.querySelectorAll('#btnLoadSavedSearch,#btnSaveSearch').forEach(el => {
+    el.style.display = 'none'; el.hidden = true; el.disabled = true;
+  });
+
+  // delegated click (survives re-renders)
+  if (bodyEl._advSearchHandler) bodyEl.removeEventListener('click', bodyEl._advSearchHandler, true);
+  bodyEl._advSearchHandler = async (e) => {
+    const btn = e.target && e.target.closest('button[data-adv-act]');
+    if (!btn) return;
+    const act = btn.dataset.advAct;
+    if (act === 'load') {
+      await openLoadSearchModal(currentSection);
+    } else if (act === 'save') {
+      const filters = extractFiltersFromForm('#searchForm');
+      await openSaveSearchModal(currentSection, filters);
     }
+  };
+  bodyEl.addEventListener('click', bodyEl._advSearchHandler, true);
 
-    formEl.querySelectorAll('input[placeholder="DD/MM/YYYY"]').forEach(el => {
-      try { attachUkDatePicker(el); } catch {}
-    });
-
-    formEl.querySelectorAll('#btnLoadSavedSearch,#btnSaveSearch').forEach(el => {
-      el.style.display = 'none'; el.hidden = true; el.disabled = true;
-    });
-
-    if (bodyEl._advSearchHandler) bodyEl.removeEventListener('click', bodyEl._advSearchHandler, true);
-    bodyEl._advSearchHandler = async (e) => {
-      const btn = e.target && e.target.closest('button[data-adv-act]');
-      if (!btn) return;
-      const act = btn.dataset.advAct;
-      if (act === 'load') {
-        await openLoadSearchModal(currentSection);
-      } else if (act === 'save') {
-        const filters = extractFiltersFromForm('#searchForm');
-        await openSaveSearchModal(currentSection, filters);
+  // listen once for preset apply events
+  if (!window.__advPresetListener) {
+    window.__advPresetListener = (ev) => {
+      const det = ev && ev.detail;
+      const here = String(currentSection || '').toLowerCase();
+      const inc  = String(det && det.section || '').toLowerCase();
+      if (!det || !inc || inc !== here) return;
+      try { window.__squelchDirty = true; } catch {}
+      try { populateSearchFormFromFilters(det.filters || {}, '#searchForm'); }
+      finally {
+        setTimeout(() => { try { window.__squelchDirty = false; } catch {} }, 0);
       }
     };
-    bodyEl.addEventListener('click', bodyEl._advSearchHandler, true);
-
-    if (!window.__advPresetListener) {
-      window.__advPresetListener = (ev) => {
-        const det = ev && ev.detail; if (!det || det.section !== currentSection) return;
-        try { window.__squelchDirty = true; } catch {}
-        try { populateSearchFormFromFilters(det.filters || {}, '#searchForm'); } finally {
-          setTimeout(() => { try { window.__squelchDirty = false; } catch {} }, 0);
-        }
-      };
-      window.addEventListener('adv-search-apply-preset', window.__advPresetListener);
-    }
+    window.addEventListener('adv-search-apply-preset', window.__advPresetListener);
   }
+}
 
   showModal(
     'Advanced Search',
@@ -4526,6 +4479,7 @@ async function openClientRateModal(client_id, existing) {
   }
 }
 
+
 function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
   // ===== Logging helpers (toggle with window.__LOG_MODAL = true/false) =====
   const LOG = (typeof window.__LOG_MODAL === 'boolean') ? window.__LOG_MODAL : false;
@@ -4873,14 +4827,20 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
       };
     })();
 
-    const defaultPrimary = (top.noParentGate ? 'Apply' : (isChild ? 'Apply' : 'Save'));
+    // Primary button label
+    const defaultPrimary =
+      (top.kind === 'advanced-search') ? 'Search'
+      : (top.noParentGate ? 'Apply' : (isChild ? 'Apply' : 'Save'));
     btnSave.textContent = defaultPrimary;
     btnSave.setAttribute('aria-label', defaultPrimary);
 
+    // Secondary label — Advanced Search always "Close"
     const updateSecondaryLabel = () => {
-      const label = (isChild || top.mode === 'edit' || top.mode === 'create')
-        ? (top.isDirty ? 'Discard' : 'Cancel')
-        : 'Close';
+      const label =
+        (top.kind === 'advanced-search') ? 'Close'
+        : ((isChild || top.mode === 'edit' || top.mode === 'create')
+            ? (top.isDirty ? 'Discard' : 'Cancel')
+            : 'Close');
       btnClose.textContent = label;
       btnClose.setAttribute('aria-label', label);
       btnClose.setAttribute('title', label);
@@ -4891,17 +4851,22 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
       const parentEditable = top.noParentGate ? true : (parent ? (parent.mode === 'edit') : true);
       const relatedBtn = document.getElementById('btnRelated');
 
-      if (isChild && !top.noParentGate) {
+      if (top.kind === 'advanced-search') {
+        // Utility search modal: no Edit, no Delete, Search always enabled (unless saving)
+        btnEdit.style.display = 'none';
+        btnSave.style.display = '';
+        btnSave.disabled = !!top._saving;
+        if (relatedBtn) relatedBtn.disabled = true;
+      } else if (isChild && !top.noParentGate) {
         btnSave.style.display = parentEditable ? '' : 'none';
         btnSave.disabled = (!parentEditable) || top._saving;
         btnEdit.style.display = 'none';
         if (relatedBtn) relatedBtn.disabled = true;
       } else {
-        // Utility or top-level
-        btnEdit.style.display = (top.noParentGate ? 'none' : ((top.mode === 'view' && top.hasId) ? '' : 'none'));
+        // Top-level entity modal
+        btnEdit.style.display = (top.mode === 'view' && top.hasId) ? '' : 'none';
         if (relatedBtn) relatedBtn.disabled = !(top.mode === 'view' && top.hasId);
         if (top.mode === 'view') {
-          // Utility modals default to edit; but if forced view, hide Save
           btnSave.style.display = top.noParentGate ? '' : 'none';
           btnSave.disabled = top._saving;
         } else {
@@ -4914,9 +4879,9 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
 
     top._updateButtons();
 
-    // Edit (entity only; utility modals hide Edit)
+    // Edit → entity only
     btnEdit.onclick = () => {
-      if (isChild || top.noParentGate) return;
+      if (isChild || top.noParentGate || top.kind === 'advanced-search') return;
       if (top.mode === 'view') {
         top._snapshot = {
           data:                 deep(window.modalCtx?.data || null),
@@ -4931,10 +4896,32 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
       }
     };
 
-    // Close / Cancel / Discard (unchanged semantics)
+    // Close / Cancel / Discard
     const handleSecondary = () => {
       if (top._confirmingDiscard || top._closing) return;
 
+      // Advanced Search: never prompt; just close.
+      if (top.kind === 'advanced-search') {
+        top._closing = true;
+        document.onmousemove = null; document.onmouseup = null;
+        const m = byId('modal'); if (m) m.classList.remove('dragging');
+        sanitizeModalGeometry();
+        const closing = stack().pop();
+        if (closing && closing._detachDirty)  { try { closing._detachDirty(); } catch(_){}; closing._detachDirty = null; }
+        if (closing && closing._detachGlobal) { try { closing._detachGlobal(); } catch(_){}; closing._detachGlobal = null; }
+        top._wired = false;
+        if (stack().length > 0) {
+          const parent = currentFrame();
+          renderTop();
+          try { parent.onReturn && parent.onReturn(); } catch(_) {}
+        } else {
+          discardAllModalsAndState();
+          if (window.__pendingFocus) { try { renderAll(); } catch (e) { console.error('refresh after modal close failed', e); } }
+        }
+        return;
+      }
+
+      // Existing entity discard logic
       if (!isChild && !top.noParentGate && top.mode === 'edit') {
         if (!top.isDirty) {
           top.isDirty = false; setFrameMode(top, 'view'); top._snapshot = null;
@@ -4991,12 +4978,12 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
     };
     btnClose.onclick = handleSecondary;
 
-    // Save / Apply
+    // Save / Apply / Search
     const onSaveClick = async () => {
       if (top._saving) return;
 
-      // For utility modals, allow Apply with no changes (close)
-      if (!top.noParentGate && top.mode !== 'view' && !top.isDirty) {
+      // For Advanced Search: allow pressing “Search” even if not dirty
+      if (top.kind !== 'advanced-search' && !top.noParentGate && top.mode !== 'view' && !top.isDirty) {
         if (isChild) {
           sanitizeModalGeometry();
           stack().pop();
@@ -5017,7 +5004,7 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
       top.persistCurrentTabState();
 
       // Gating: only block child saves when NOT a utility modal
-      if (isChild && !top.noParentGate) {
+      if (isChild && !top.noParentGate && top.kind !== 'advanced-search') {
         if (!parent || parent.mode !== 'edit') return;
       }
 
@@ -5031,6 +5018,7 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
           if (res && res.saved) savedRow = res.saved;
         } catch (_) { ok = false; }
       }
+
       top._saving = false;
 
       if (!ok) { top._updateButtons(); return; }
@@ -5067,9 +5055,20 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
 
     if (!top._wired) {
       window.addEventListener('modal-dirty', onDirtyEvt);
-      const onEsc = (e) => { if (e.key === 'Escape') { if (top._confirmingDiscard || top._closing) return; e.preventDefault(); byId('btnCloseModal').click(); } };
+
+      // suppress ESC/overlay while confirming/closing
+      const onEsc = (e) => {
+        if (e.key === 'Escape') {
+          if (top._confirmingDiscard || top._closing) return;
+          e.preventDefault(); byId('btnCloseModal').click();
+        }
+      };
       window.addEventListener('keydown', onEsc);
-      const onOverlayClick = (e) => { if (top._confirmingDiscard || top._closing) return; if (e.target === byId('modalBack')) byId('btnCloseModal').click(); };
+
+      const onOverlayClick = (e) => {
+        if (top._confirmingDiscard || top._closing) return;
+        if (e.target === byId('modalBack')) byId('btnCloseModal').click();
+      };
       byId('modalBack').addEventListener('click', onOverlayClick, true);
 
       top._detachGlobal = () => {
@@ -5077,6 +5076,7 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
         try { window.removeEventListener('keydown', onEsc); } catch {}
         try { byId('modalBack').removeEventListener('click', onOverlayClick, true); } catch {}
       };
+
       top._wired = true;
     }
 
@@ -5098,6 +5098,9 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
 
   renderTop();
 }
+
+
+
 
 
 
