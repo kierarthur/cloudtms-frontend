@@ -1191,45 +1191,52 @@ function invalidateGlobalRoleOptionsCache(){
 }
 
 // Load and dedupe all role codes from client defaults across all clients
+// 🔧 CHANGE: truly global roles list (de-duplicated across ALL clients), with a short TTL cache.
+// Works even when there is no active client in context (e.g., Candidate create).
 async function loadGlobalRoleOptions(){
   const now = Date.now();
+  const TTL_MS = 60_000;
 
-  // Use per-client cache; do NOT treat candidate ids as client ids
-  const ctx = window.modalCtx || {};
-  const isClientEntity = ctx.entity === 'clients';
-  const cid = isClientEntity
-    ? ((ctx.data && (ctx.data.id || ctx.data.client_id)) || null)
-    : (ctx.data && ctx.data.client_id) || null; // only explicit client_id for non-client entities
+  // Prefer our global cache
+  if (Array.isArray(window.__GLOBAL_ROLE_CODES_ALL__) &&
+      (now - (window.__GLOBAL_ROLE_CODES_ALL_TS__ || 0) < TTL_MS)) {
+    return window.__GLOBAL_ROLE_CODES_ALL__;
+  }
 
-  // Initialise caches
+  // Fallback to legacy '__fallback__' if it’s fresh
+  if (window.__GLOBAL_ROLE_CODES_CACHE__ &&
+      window.__GLOBAL_ROLE_CODES_CACHE__['__fallback__'] &&
+      (now - (window.__GLOBAL_ROLE_CODES_CACHE_TS__?.['__fallback__'] || 0) < TTL_MS)) {
+    const arr = window.__GLOBAL_ROLE_CODES_CACHE__['__fallback__'];
+    window.__GLOBAL_ROLE_CODES_ALL__ = arr.slice();
+    window.__GLOBAL_ROLE_CODES_ALL_TS__ = now;
+    return arr;
+  }
+
+  // Aggregate roles across all clients (enabled client-default windows only)
+  const roles = new Set();
+  try {
+    const clients = await listClientsBasic();
+    for (const c of (clients || [])) {
+      try {
+        const rows = await listClientRates(c.id, { only_enabled: true });
+        for (const r of (rows || [])) {
+          if (r && r.role) roles.add(String(r.role));
+        }
+      } catch { /* ignore per-client errors */ }
+    }
+  } catch { /* ignore listClientsBasic error */ }
+
+  const arr = [...roles].sort((a,b)=> a.localeCompare(b));
+
+  // Save to both the new global cache AND the legacy fallback keys so existing invalidation hooks still help
+  window.__GLOBAL_ROLE_CODES_ALL__ = arr;
+  window.__GLOBAL_ROLE_CODES_ALL_TS__ = now;
+
   window.__GLOBAL_ROLE_CODES_CACHE__    = window.__GLOBAL_ROLE_CODES_CACHE__    || Object.create(null);
   window.__GLOBAL_ROLE_CODES_CACHE_TS__ = window.__GLOBAL_ROLE_CODES_CACHE_TS__ || Object.create(null);
-
-  // Serve from cache when fresh
-  if (cid && window.__GLOBAL_ROLE_CODES_CACHE__[cid] &&
-      (now - (window.__GLOBAL_ROLE_CODES_CACHE_TS__[cid] || 0) < 60_000)) {
-    return window.__GLOBAL_ROLE_CODES_CACHE__[cid];
-  }
-
-  // If we don't have a client id (e.g., candidate create), return any cached fallback
-  if (!cid) {
-    const fallback = window.__GLOBAL_ROLE_CODES_CACHE__['__fallback__'];
-    return Array.isArray(fallback) ? fallback : [];
-  }
-
-  // Fetch roles for this specific client id only
-  const list = await listClientRates(cid).catch(() => []);
-  const set = new Set();
-  (list || []).forEach(r => { if (r && r.role) set.add(String(r.role)); });
-  const arr = [...set].sort((a,b)=> a.localeCompare(b));
-
-  // Cache per client
-  window.__GLOBAL_ROLE_CODES_CACHE__[cid]  = arr;
-  window.__GLOBAL_ROLE_CODES_CACHE_TS__[cid]= now;
-
-  // Refresh fallback snapshot so non-client entities have something to show
-  window.__GLOBAL_ROLE_CODES_CACHE__['__fallback__']     = arr;
-  window.__GLOBAL_ROLE_CODES_CACHE_TS__['__fallback__']  = now;
+  window.__GLOBAL_ROLE_CODES_CACHE__['__fallback__']    = arr;
+  window.__GLOBAL_ROLE_CODES_CACHE_TS__['__fallback__'] = now;
 
   return arr;
 }
@@ -2428,7 +2435,10 @@ async function openCandidate(row) {
       const isNew = !window.modalCtx?.data?.id;
 
       const fs   = window.modalCtx.formState || { __forId: null, main:{}, pay:{} };
-      const same = (!!window.modalCtx.data?.id && fs.__forId === window.modalCtx.data.id) || (!window.modalCtx.data?.id && fs.__forId == null);
+      // 🔧 CHANGE: treat create with sentinel openToken as "same record" (for Main + Pay staged blocks)
+      const hasId = !!window.modalCtx.data?.id;
+      const same = hasId ? (fs.__forId === window.modalCtx.data.id)
+                         : (fs.__forId === window.modalCtx.openToken || fs.__forId == null);
       const stateMain = same ? (fs.main || {}) : {};
       const statePay  = same ? (fs.pay  || {}) : {};
       const main      = document.querySelector('#tab-main') ? collectForm('#tab-main') : {};
@@ -2603,7 +2613,6 @@ async function openCandidate(row) {
     L('skip companion loads (no full.id)');
   }
 }
-
 
 // ====================== mountCandidatePayTab (FIXED) ======================
 // FRONTEND — UPDATED
@@ -3485,7 +3494,11 @@ async function openClient(row) {
 
       // Collect "main" form
       const fs = window.modalCtx.formState || { __forId: null, main:{} };
-      const same = (!!window.modalCtx.data?.id && fs.__forId === window.modalCtx.data.id) || (!window.modalCtx.data?.id && fs.__forId == null);
+      // 🔧 CHANGE: treat create with sentinel openToken as "same record"
+      const hasId = !!window.modalCtx.data?.id;
+      const same = hasId ? (fs.__forId === window.modalCtx.data.id)
+                         : (fs.__forId === window.modalCtx.openToken || fs.__forId == null);
+
       const stagedMain = same ? (fs.main || {}) : {};
       const liveMain   = byId('tab-main') ? collectForm('#tab-main') : {};
       const payload    = { ...stagedMain, ...liveMain };
@@ -3764,6 +3777,7 @@ async function openClient(row) {
     L('skip companion loads (no full.id)');
   }
 }
+
 
 
 // =================== CLIENT RATES TABLE (UPDATED) ===================
@@ -4328,9 +4342,10 @@ async function openClientRateModal(client_id, existing) {
       // ✅ Allow create OR edit to apply
       if (!pf || (pf.mode !== 'edit' && pf.mode !== 'create')) return false;
 
-      if (!resolvedClientId) {
+      // 🔧 CHANGE: allow staging with null client_id **when parent is in create mode**
+      if (!resolvedClientId && pf.mode !== 'create') {
         alert('Cannot determine client. Please close and reopen the client, then try again.');
-        if (APILOG) console.error('[openClientRateModal] missing client_id — aborting apply');
+        if (APILOG) console.error('[openClientRateModal] missing client_id — aborting apply (not in create)');
         return false;
       }
 
@@ -4359,7 +4374,7 @@ async function openClientRateModal(client_id, existing) {
 
       const staged = {
         id: existing?.id || undefined,               // keep id if present
-        client_id: resolvedClientId,
+        client_id: resolvedClientId,                 // ← may be null during create; parent Save injects real id
         role,
         band: (raw.band || '').trim() || null,
         date_from: isoFrom,
