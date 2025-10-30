@@ -2710,8 +2710,11 @@ async function renderCandidateRatesTable() {
   const idActive = window.modalCtx.data?.id || null;
   const div = byId('ratesTable');
   if (!div) { if (LOG) console.warn('[RATES][renderCandidateRatesTable] no #ratesTable'); return; }
-  if (token !== window.modalCtx.openToken || window.modalCtx.data?.id !== idActive) {
-    if (LOG) console.warn('[RATES][renderCandidateRatesTable] token/id changed mid-flight');
+
+  // Allow rendering in CREATE flow even if token/id changed mid-flight
+  if ((token !== window.modalCtx.openToken && idActive !== null) ||
+      (window.modalCtx.data?.id !== idActive && idActive !== null)) {
+    if (LOG) console.warn('[RATES][renderCandidateRatesTable] token/id changed mid-flight (blocked because idActive!=null)');
     return;
   }
 
@@ -2723,7 +2726,8 @@ async function renderCandidateRatesTable() {
   let clientsById = {};
   try {
     const clients = await listClientsBasic();
-    if (token !== window.modalCtx.openToken || window.modalCtx.data?.id !== idActive) return;
+    // In create-flow, tolerate token/id drift and continue
+    if (idActive !== null && (token !== window.modalCtx.openToken || window.modalCtx.data?.id !== idActive)) return;
     clientsById = Object.fromEntries((clients || []).map(c => [c.id, c.name]));
     if (LOG) console.log('[RATES][renderCandidateRatesTable] clients loaded', (clients||[]).length);
   } catch (e) { console.error('load clients failed', e); }
@@ -2856,8 +2860,15 @@ function renderCandidateTab(key, row = {}) {
       <!-- Umbrella chooser: text input + datalist + hidden canonical id -->
       <div class="row" id="umbRow">
         <label>Umbrella company</label>
-        <!-- IMPORTANT: no name attribute so it isn't posted -->
-        <input id="umbrella_name" list="umbList" placeholder="Type to search umbrellas…" value="" />
+        <!-- IMPORTANT: leave value empty so clicking shows ALL options.
+             The little UX hook below clears any residual value on focus/click to avoid filtered lists. -->
+        <input id="umbrella_name"
+               list="umbList"
+               placeholder="Type to search umbrellas…"
+               value=""
+               autocomplete="off"
+               onclick="if (this.value) { this.dataset.prev=this.value; this.value=''; this.dispatchEvent(new Event('input',{bubbles:true})); }"
+               onfocus="if (this.value) { this.dataset.prev=this.value; this.value=''; this.dispatchEvent(new Event('input',{bubbles:true})); }" />
         <datalist id="umbList"></datalist>
         <input type="hidden" name="umbrella_id" id="umbrella_id" value="${row.umbrella_id || ''}"/>
       </div>
@@ -2984,9 +2995,24 @@ async function mountCandidateRatesTab() {
   const id    = window.modalCtx.data?.id || null;
   if (LOG) console.log('[RATES][mountCandidateRatesTab] ENTRY', { token, id });
 
-  const rates = id ? await listCandidateRates(id) : [];
+  // In CREATE flows (id === null), skip mid-flight guard entirely and render empty table + Add button.
+  if (!id) {
+    window.modalCtx.overrides = window.modalCtx.overrides || { existing: [], stagedNew: [], stagedEdits: {}, stagedDeletes: new Set() };
+    await renderCandidateRatesTable();
+    if (LOG) console.log('[RATES][mountCandidateRatesTab] create-flow render (no id)');
+
+    const btn = byId('btnAddRate');
+    const frame = _currentFrame();
+    if (btn && frame && (frame.mode === 'edit' || frame.mode === 'create')) {
+      btn.onclick = () => openCandidateRateModal(window.modalCtx.data?.id);
+    }
+    return;
+  }
+
+  // EDIT flows (id present) — existing behaviour
+  const rates = await listCandidateRates(id);
   if (token !== window.modalCtx.openToken || window.modalCtx.data?.id !== id) {
-    if (LOG) console.warn('[RATES][mountCandidateRatesTab] token/id changed mid-flight'); 
+    if (LOG) console.warn('[RATES][mountCandidateRatesTab] token/id changed mid-flight');
     return;
   }
 
@@ -2999,10 +3025,8 @@ async function mountCandidateRatesTab() {
 
   const btn = byId('btnAddRate');
   const frame = _currentFrame();
-  // ✅ Allow add in create mode too
   if (btn && frame && (frame.mode === 'edit' || frame.mode === 'create')) btn.onclick = () => openCandidateRateModal(window.modalCtx.data?.id);
 }
-
 
 
 // === UPDATED: Candidate Rate Override modal (Client→Role gated; bands; UK dates; date_to) ===
@@ -3990,10 +4014,20 @@ async function mountCandidatePayTab(){
   const sortCode  = document.querySelector('#tab-pay input[name="sort_code"]');
   const accNum    = document.querySelector('#tab-pay input[name="account_number"]');
 
-  function setBankDisabled(disabled) {
-    [accHolder, bankName, sortCode, accNum].forEach(el => { if (el) el.disabled = !!disabled; });
-    if (LOG) console.log('[PAYTAB] setBankDisabled', disabled);
-  }
+function setBankDisabled(disabled) {
+  [accHolder, bankName, sortCode, accNum].forEach(el => { if (el) el.disabled = !!disabled; });
+
+  // Do not disable the umbrella chooser; user must be able to open the full list.
+  try {
+    const umbInput = document.getElementById('umbrella_name');
+    if (umbInput) umbInput.disabled = false;
+  } catch {}
+
+  // Remember last state to avoid any upstream re-prefill triggers tied to toggles
+  try { window.__BANK_FIELDS_DISABLED__ = !!disabled; } catch {}
+
+  if (LOG) console.log('[PAYTAB] setBankDisabled', disabled);
+}
 
   // Helpers
   const unwrapList = (data) => {
@@ -4050,24 +4084,38 @@ async function mountCandidatePayTab(){
       sort_code: sortCode?.value, account_number: accNum?.value
     });
   }
+function prefillUmbrellaBankFields(umb) {
+  if (!umb) return;
 
-  function prefillUmbrellaBankFields(umb) {
-    if (!umb) return;
-    const bank = umb.bank_name || umb.bank || umb.bankName || '';
-    const sc   = umb.sort_code || umb.bank_sort_code || umb.sortCode || '';
-    const an   = umb.account_number || umb.bank_account_number || umb.accountNumber || '';
-    const ah   = umb.name || umb.account_holder || umb.bank_account_name || umb.accountHolder || '';
+  // Avoid redundant re-prefill when the umbrella id hasn't changed
+  try {
+    if (window.__LAST_UMB_PREFILL_ID__ && String(window.__LAST_UMB_PREFILL_ID__) === String(umb.id || '')) {
+      return;
+    }
+    window.__LAST_UMB_PREFILL_ID__ = umb.id || null;
+  } catch {}
 
-    if (bankName)  bankName.value  = bank;
-    if (sortCode)  sortCode.value  = normaliseSort(sc);
-    if (accNum)    accNum.value    = an;
-    if (accHolder) accHolder.value = ah;
-    if (nameInput) nameInput.value = umb.name || nameInput.value || '';
+  const bank = umb.bank_name || umb.bank || umb.bankName || '';
+  const sc   = umb.sort_code || umb.bank_sort_code || umb.sortCode || '';
+  const an   = umb.account_number || umb.bank_account_number || umb.accountNumber || '';
+  const ah   = umb.name || umb.account_holder || umb.bank_account_name || umb.accountHolder || '';
 
-    if (LOG) console.log('[PAYTAB] prefillUmbrellaBankFields', {
-      umb_id: umb.id, name: umb.name, bank, sc, an, ah
-    });
+  if (bankName)  bankName.value  = bank;
+  if (sortCode)  sortCode.value  = normaliseSort(sc);
+  if (accNum)    accNum.value    = an;
+  if (accHolder) accHolder.value = ah;
+
+  // IMPORTANT: do NOT set the visible datalist input’s value here — it filters the list.
+  // Instead, if it's empty, leave it blank (so clicking shows ALL options).
+  if (nameInput && !nameInput.value) {
+    nameInput.placeholder = umb.name || nameInput.placeholder || '';
   }
+
+  if (LOG) console.log('[PAYTAB] prefillUmbrellaBankFields', {
+    umb_id: umb.id, name: umb.name, bank, sc, an, ah
+  });
+}
+
 
   async function fetchAndPrefill(id) {
     if (!id) return;
