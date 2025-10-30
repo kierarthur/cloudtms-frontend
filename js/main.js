@@ -27,11 +27,30 @@ function saveSession(sess){
   scheduleRefresh();
   renderUserChip();
 }
+
 function loadSession(){
   const raw = localStorage.getItem('cloudtms.session') || sessionStorage.getItem('cloudtms.session');
   if (!raw) return null;
-  try { SESSION = JSON.parse(raw); return SESSION; } catch { return null; }
+  try {
+    SESSION = JSON.parse(raw);
+
+    // Mirror to globals used by currentUserId() — PRIMARY FIX
+    try {
+      if (typeof window !== 'undefined') {
+        window.SESSION = SESSION;
+        window.__auth = window.__auth || {};
+        window.__auth.user = SESSION?.user || null;
+        window.__USER_ID = SESSION?.user?.id || null;
+      }
+    } catch {}
+
+    return SESSION;
+  } catch {
+    return null;
+  }
 }
+
+
 function clearSession(){
   localStorage.removeItem('cloudtms.session');
   sessionStorage.removeItem('cloudtms.session');
@@ -164,6 +183,14 @@ async function refreshToken(){
           user = (meJson && (meJson.user || meJson)) || user;
         }
       } catch {}
+      // Extra guard: fall back to persisted user if present
+      if (!user || !user.id) {
+        try {
+          const persisted = JSON.parse(localStorage.getItem('cloudtms.session')
+                           || sessionStorage.getItem('cloudtms.session') || 'null');
+          if (persisted?.user?.id) user = persisted.user;
+        } catch {}
+      }
     }
 
     saveSession({
@@ -761,24 +788,28 @@ async function openLoadSearchModal(section){
     : (s => String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;')
                            .replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'));
 
-  const myId = currentUserId();
+  // ⬅️ Remove stale capture at modal open (no myId here)
+
   let list = await listReportPresets({ section, kind: 'search', include_shared: true }).catch(()=>[]);
   let selectedId = null;
 
-  function sortMineThenShared(rows) {
-    const mine   = (rows || []).filter(r => r.user_id === myId).sort((a,b)=>String(a.name||'').localeCompare(String(b.name||''), undefined, {sensitivity:'base'}));
-    const shared = (rows || []).filter(r => r.user_id !== myId).sort((a,b)=>String(a.name||'').localeCompare(String(b.name||''), undefined, {sensitivity:'base'}));
+  function sortMineThenShared(rows, myId) {
+    const mine   = (rows || []).filter(r => String(r.user_id) === String(myId))
+                     .sort((a,b)=>String(a.name||'').localeCompare(String(b.name||''), undefined, {sensitivity:'base'}));
+    const shared = (rows || []).filter(r => String(r.user_id) !== String(myId))
+                     .sort((a,b)=>String(a.name||'').localeCompare(String(b.name||''), undefined, {sensitivity:'base'}));
     return mine.concat(shared);
   }
 
   const renderList = () => {
-    const rows = sortMineThenShared(list || []);
+    const myId = currentUserId(); // ⬅️ Recompute at render time
+    const rows = sortMineThenShared(list || [], myId);
+
     const rowsHtml = rows.map(p => {
-      const owned    = p.user_id === myId;
+      const owned    = String(p.user_id) === String(myId); // robust compare
       const nameHtml = `<span class="name">${sanitize(p.name)}</span>`;
       const creator  = (p.user && (p.user.display_name || p.user.email)) ? ` <span class="hint">• by ${sanitize(p.user.display_name || p.user.email)}</span>` : '';
       const badge    = p.is_shared ? `<span class="badge">shared</span>${creator}` : '';
-      // Show BIN only if owned (your own, whether shared or not)
       const trashBtn = owned ? `<button class="bin btn btn-ghost btn-sm" title="Delete">🗑</button>` : '';
       return `
         <tr data-id="${p.id}">
@@ -815,10 +846,7 @@ async function openLoadSearchModal(section){
       if (!chosen) { alert('Preset not found'); return false; }
       const filters = chosen.filters || chosen.filters_json || chosen.filtersJson || {};
       const sec = String(section || '').toLowerCase();
-      try {
-        // Stash for parent to apply after this modal closes/repaints
-        window.__PENDING_ADV_PRESET = { section: sec, filters };
-      } catch {}
+      try { window.__PENDING_ADV_PRESET = { section: sec, filters }; } catch {}
       return true; // close child modal
     },
     false,
@@ -844,16 +872,13 @@ async function openLoadSearchModal(section){
         const bin = e.target && e.target.closest('button.bin');
 
         if (bin) {
+          const myIdNow = currentUserId(); // ⬅️ Recompute at click time
           const row = (list || []).find(p => p.id === id);
-          if (!row || row.user_id !== myId) return;
+          if (!row || String(row.user_id) !== String(myIdNow)) return;
           if (!confirm(`Delete saved search “${row.name}”? This cannot be undone.`)) return;
-          try {
-            await deleteReportPreset(id);
-          } catch (err) {
-            alert(String(err?.message || err || 'Failed to delete preset'));
-            return;
-          }
-          // Refresh list immediately
+          try { await deleteReportPreset(id); }
+          catch (err) { alert(String(err?.message || err || 'Failed to delete preset')); return; }
+
           try { invalidatePresetCache(section, 'search'); } catch {}
           list = await listReportPresets({ section, kind:'search', include_shared:true }).catch(()=>[]);
           const body = document.getElementById('modalBody');
@@ -868,6 +893,7 @@ async function openLoadSearchModal(section){
     }
   }, 0);
 }
+
 
 // -----------------------------
 // UPDATED: openSearchModal()
@@ -6396,6 +6422,30 @@ async function renderAll(){
   else renderSummary(data); // list functions already return arrays via toList()
 }
 async function bootstrapApp(){
+  // Belt & braces: if loadSession() ran but globals are not mirrored, mirror now
+  try {
+    if (typeof window !== 'undefined') {
+      if (window.SESSION !== SESSION) window.SESSION = SESSION;
+      window.__auth = window.__auth || {};
+      if (!window.__auth.user && SESSION?.user) window.__auth.user = SESSION.user;
+      if (!window.__USER_ID && SESSION?.user?.id) window.__USER_ID = SESSION.user.id;
+    }
+
+    // If token exists but user.id is missing, hydrate via /api/me (non-blocking safety)
+    if (SESSION?.accessToken && (!SESSION.user || !SESSION.user.id)) {
+      try {
+        const meRes = await fetch(API('/api/me'), { headers: { 'Authorization': `Bearer ${SESSION.accessToken}` } });
+        if (meRes.ok) {
+          const meJson = await meRes.json().catch(()=> ({}));
+          const profile = meJson && (meJson.user || meJson);
+          if (profile && profile.id) {
+            saveSession({ ...SESSION, user: profile }); // also re-mirrors globals
+          }
+        }
+      } catch {}
+    }
+  } catch {}
+
   ensureSelectionStyles();   // ← ensure the highlight is clearly visible
   renderTopNav();
   renderTools();
