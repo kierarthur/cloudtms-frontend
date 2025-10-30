@@ -1015,14 +1015,7 @@ async function openSearchModal(opts = {}) {
   setTimeout(wireAdvancedSearch, 0);
 }
 
-// === REPLACE: showOpenSearchModalWithForm (icons only, legacy forced hidden, robust wiring) ===
-// === REPLACE: showOpenSearchModalWithForm (inject compact buttons + delegated wiring) ===
-
-// FRONTEND — UPDATED
-// showOpenSearchModalWithForm: normalises header, re-wires delegated clicks,
-// listens for preset-apply event, re-applies after repaint.
-function showOpenSearchModalWithForm(form, opts = {}) {
- function wireAdvancedSearch() {
+function wireAdvancedSearch() {
   const bodyEl = document.getElementById('modalBody');
   const formEl = document.getElementById('searchForm');
   if (!bodyEl || !formEl) return;
@@ -1066,23 +1059,6 @@ function showOpenSearchModalWithForm(form, opts = {}) {
     };
     window.addEventListener('adv-search-apply-preset', window.__advPresetListener);
   }
-}
-
-  showModal(
-    'Advanced Search',
-    [{ key: 'filter', title: 'Filters' }],
-    () => form,
-    async () => {
-      const filters = extractFiltersFromForm('#searchForm');
-      const rows = await search(currentSection, filters);
-      if (rows) renderSummary(rows);
-      return true;
-    },
-    false,
-    () => wireAdvancedSearch()
-  );
-
-  setTimeout(wireAdvancedSearch, 0);
 }
 
 
