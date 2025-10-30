@@ -3764,23 +3764,52 @@ function renderClientRatesTable() {
 
     cols.forEach(c => {
       const td = document.createElement('td');
+
       if (c === 'status') {
+        // Keep the Status column compact: show only the pill; no multi-line "by/on" text here.
         if (r.disabled_at_utc) {
-          const who  = r.disabled_by_name || 'unknown'; // show short name only
-          const when = r.disabled_at_utc ? formatIsoToUk(String(r.disabled_at_utc).slice(0,10)) : '';
           const pending = r.__toggle ? ' (pending save)' : '';
-          td.innerHTML = `
-            <span class="pill tag-fail" aria-label="Disabled">❌ Disabled${pending}</span>
-            <div class="hint">${who ? `by ${escapeHtml(who)} ` : ''}${when ? `on ${escapeHtml(when)}` : ''}</div>`;
+          td.innerHTML = `<span class="pill tag-fail" aria-label="Disabled">❌ Disabled${pending}</span>`;
         } else {
           const pending = r.__toggle === 'enable' ? ' (pending save)' : '';
           td.innerHTML = `<span class="pill tag-ok" aria-label="Active">✓ Active${pending}</span>`;
         }
+      } else if (c === 'charge_day') {
+        // Render the number normally…
+        td.textContent = formatDisplayValue(c, r[c]);
+
+        // …and add a single-line, non-wrapping meta below the first rate cell (not the first column).
+        // Never show 'Unknown' — if name/date missing, render nothing.
+        const who  = r.disabled_by_name || ''; // blank if unknown
+        const when = r.disabled_at_utc ? formatIsoToUk(String(r.disabled_at_utc).slice(0,10)) : '';
+
+        // Pending enable (no disabled_at_utc) — optional one-liner
+        let metaLine = '';
+        if (r.disabled_at_utc && (who || when)) {
+          // Disabled state with known info
+          // e.g., "Disabled by james on 29/10/2025" all on one line
+          metaLine = `Disabled${who ? ` by ${escapeHtml(who)}` : ''}${when ? ` on ${escapeHtml(when)}` : ''}`;
+        } else if (!r.disabled_at_utc && r.__toggle === 'enable' && (who)) {
+          // Pending enable with a known current user short name
+          metaLine = `Enable pending by ${escapeHtml(who)}`;
+        }
+
+        if (metaLine) {
+          const hint = document.createElement('div');
+          hint.className = 'hint';
+          hint.style.whiteSpace = 'nowrap';
+          hint.style.overflow = 'hidden';
+          hint.style.textOverflow = 'ellipsis';
+          hint.textContent = metaLine;
+          td.appendChild(hint);
+        }
       } else {
         td.textContent = formatDisplayValue(c, r[c]);
       }
+
       tr.appendChild(td);
     });
+
     tb.appendChild(tr);
   });
   tbl.appendChild(tb);
