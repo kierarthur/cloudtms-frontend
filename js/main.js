@@ -733,7 +733,6 @@ async function openLoadSearchModal(section){
   const myId = currentUserId();
   let list = await listReportPresets({ section, kind: 'search', include_shared: true }).catch(()=>[]);
   let selectedId = null;
-  const ctx = { stagedDeletes: new Set() };
 
   function sortMineThenShared(rows) {
     const mine   = (rows || []).filter(r => r.user_id === myId).sort((a,b)=>String(a.name||'').localeCompare(String(b.name||''), undefined, {sensitivity:'base'}));
@@ -745,8 +744,7 @@ async function openLoadSearchModal(section){
     const rows = sortMineThenShared(list || []);
     const rowsHtml = rows.map(p => {
       const owned    = p.user_id === myId;
-      const deleting = ctx.stagedDeletes.has(p.id);
-      const nameHtml = `<span class="name"${deleting ? ' style="text-decoration:line-through;opacity:.6"' : ''}>${sanitize(p.name)}</span>`;
+      const nameHtml = `<span class="name">${sanitize(p.name)}</span>`;
       const creator  = (p.user && (p.user.display_name || p.user.email)) ? ` <span class="hint">• by ${sanitize(p.user.display_name || p.user.email)}</span>` : '';
       const badge    = p.is_shared ? `<span class="badge">shared</span>${creator}` : '';
       const trashBtn = `<button class="bin btn btn-ghost btn-sm" ${owned ? '' : 'disabled'} title="${owned ? 'Delete' : 'Not yours'}">🗑</button>`;
@@ -778,19 +776,29 @@ async function openLoadSearchModal(section){
     'Load saved search',
     [{ key: 'list', label: 'Saved' }],
     renderList,
+    // Apply → stash pending; DO NOT dispatch here
     async () => {
       if (!selectedId) { alert('Pick a preset to load'); return false; }
       const chosen = (list || []).find(p => p.id === selectedId);
       if (!chosen) { alert('Preset not found'); return false; }
       const filters = chosen.filters || chosen.filters_json || chosen.filtersJson || {};
-      // Normalise section for the listener
       const sec = String(section || '').toLowerCase();
-      try { window.dispatchEvent(new CustomEvent('adv-search-apply-preset', { detail: { section: sec, filters } })); } catch {}
-      return true;
+      try {
+        // Stash for parent to apply after this modal closes/repaints
+        window.__PENDING_ADV_PRESET = { section: sec, filters };
+      } catch {}
+      return true; // close child modal
     },
     false,
-    /* onReturn */ undefined,
-    /* options */ { noParentGate: true, forceEdit: true, kind: 'search-load' }
+    // onReturn → fire the event after the child closes so the parent is already repainted
+    () => {
+      const pending = window.__PENDING_ADV_PRESET;
+      if (pending && pending.section) {
+        try { window.dispatchEvent(new CustomEvent('adv-search-apply-preset', { detail: pending })); } catch {}
+      }
+      delete window.__PENDING_ADV_PRESET;
+    },
+    { noParentGate: true, forceEdit: true, kind: 'search-load' }
   );
 
   setTimeout(() => {
@@ -806,36 +814,18 @@ async function openLoadSearchModal(section){
         if (bin) {
           const row = (list || []).find(p => p.id === id);
           if (!row || row.user_id !== myId) return;
-          if (ctx.stagedDeletes.has(id)) ctx.stagedDeletes.delete(id); else ctx.stagedDeletes.add(id);
+          if (!confirm(`Delete saved search “${row.name}”? This cannot be undone.`)) return;
+          try {
+            await deleteReportPreset(id);
+          } catch (err) {
+            alert(String(err?.message || err || 'Failed to delete preset'));
+            return;
+          }
+          // Refresh list immediately
+          try { invalidatePresetCache(section, 'search'); } catch {}
+          list = await listReportPresets({ section, kind:'search', include_shared:true }).catch(()=>[]);
           const body = document.getElementById('modalBody');
           if (body) body.replaceChildren(renderList());
-          // Toggle “Save changes”
-          let secondary = document.getElementById('btnSavePresetChanges');
-          if (!secondary) {
-            secondary = document.createElement('button');
-            secondary.id = 'btnSavePresetChanges';
-            secondary.textContent = 'Save changes';
-            secondary.className = 'btn btn-outline btn-sm';
-            secondary.style.marginLeft = '.5rem';
-            document.getElementById('btnSave')?.parentElement?.appendChild(secondary);
-          }
-          const hasChanges = ctx.stagedDeletes.size > 0;
-          secondary.style.display = hasChanges ? '' : 'none';
-          secondary.disabled = !hasChanges;
-          secondary.onclick = async () => {
-            for (const delId of ctx.stagedDeletes) {
-              const r = (list || []).find(p => p.id === delId);
-              if (!r || r.user_id !== myId) continue;
-              try { await deleteReportPreset(delId); } catch (e) { alert(String(e)); return; }
-            }
-            ctx.stagedDeletes.clear();
-            invalidatePresetCache(section, 'search');
-            list = await listReportPresets({ section, kind:'search', include_shared:true }).catch(()=>[]);
-            const body2 = document.getElementById('modalBody');
-            if (body2) body2.replaceChildren(renderList());
-            secondary.style.display = 'none';
-            secondary.disabled = true;
-          };
           return;
         }
 
@@ -846,7 +836,6 @@ async function openLoadSearchModal(section){
     }
   }, 0);
 }
-
 
 // -----------------------------
 // UPDATED: openSearchModal()
@@ -995,7 +984,7 @@ async function openSearchModal(opts = {}) {
     </div>
   `;
 
-  // NOTE: pass utility flags + kind to customise chrome/behaviour
+  // Pass utility flags + kind to customise chrome/behaviour
   showModal(
     'Advanced Search',
     [{ key: 'filter', title: 'Filters' }],
@@ -1007,7 +996,18 @@ async function openSearchModal(opts = {}) {
       return true; // close after running search
     },
     false,
-    () => wireAdvancedSearch(),  // re-wire after child closes
+    // Parent onReturn: apply any pending preset AFTER the child modal has closed & repaint finished
+    () => {
+      const pending = (typeof window !== 'undefined') ? window.__PENDING_ADV_PRESET : null;
+      if (pending && pending.section) {
+        try {
+          window.dispatchEvent(new CustomEvent('adv-search-apply-preset', { detail: pending }));
+        } catch {}
+      }
+      if (typeof window !== 'undefined') delete window.__PENDING_ADV_PRESET;
+      // Re-wire listeners last
+      try { wireAdvancedSearch(); } catch {}
+    },
     { noParentGate: true, forceEdit: true, kind: 'advanced-search' }
   );
 
@@ -3334,7 +3334,6 @@ function renderCalendar(timesheets){
 // OPEN CLIENT (parent modal) — skip posting disabled windows on Save
 // (No delete button is added here; ensure any existing parent delete UI is removed elsewhere.)
 // ============================================================================
-
 async function openClient(row) {
   // ===== Logging helpers (toggle with window.__LOG_MODAL = true/false) =====
   const LOG = (typeof window.__LOG_MODAL === 'boolean') ? window.__LOG_MODAL : true;
@@ -3472,6 +3471,7 @@ async function openClient(row) {
       }
       // ============================================
 
+      // 1) Upsert client (must have id before hospitals/rates)
       const idForUpdate = window.modalCtx?.data?.id || full?.id || null;
       if (APILOG) console.log('[OPEN_CLIENT] upsertClient → request', { idForUpdate, payload });
       L('[onSave] upsertClient', { idForUpdate, payloadKeys: Object.keys(payload||{}) });
@@ -3480,7 +3480,77 @@ async function openClient(row) {
       if (APILOG) console.log('[OPEN_CLIENT] upsertClient ← response', { ok: !!clientResp, clientId });
       if (!clientId) { alert('Failed to save client'); return { ok:false }; }
 
-      // === Persist staged status toggles FIRST (before upserts) ===
+      // 2) Flush Hospitals staged CRUD (deletes → edits → creates). Abort on first failure.
+      try {
+        const hs = window.modalCtx.hospitalsState || {};
+        // deletes
+        if (hs.stagedDeletes && hs.stagedDeletes.size) {
+          for (const hid of hs.stagedDeletes) {
+            const url = API(`/api/clients/${encodeURIComponent(clientId)}/hospitals/${encodeURIComponent(hid)}`);
+            if (APILOG) console.log('[OPEN_CLIENT] DELETE hospital →', url);
+            const res = await authFetch(url, { method: 'DELETE' });
+            if (!res.ok) throw new Error(await res.text());
+          }
+        }
+        // edits
+        if (hs.stagedEdits && typeof hs.stagedEdits === 'object') {
+          for (const [hid, patchRaw] of Object.entries(hs.stagedEdits)) {
+            const patch = {};
+            if (patchRaw && Object.prototype.hasOwnProperty.call(patchRaw,'hospital_name_norm')) {
+              const name = String(patchRaw.hospital_name_norm || '').trim();
+              if (!name) throw new Error('Hospital name cannot be blank.');
+              patch.hospital_name_norm = name;
+            }
+            if (patchRaw && Object.prototype.hasOwnProperty.call(patchRaw,'ward_hint')) {
+              const hint = String(patchRaw.ward_hint ?? '').trim();
+              patch.ward_hint = hint === '' ? null : hint;
+            }
+            if (Object.keys(patch).length === 0) continue; // nothing to send
+            const url = API(`/api/clients/${encodeURIComponent(clientId)}/hospitals/${encodeURIComponent(hid)}`);
+            if (APILOG) console.log('[OPEN_CLIENT] PATCH hospital →', url, patch);
+            const res = await authFetch(url, {
+              method: 'PATCH',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(patch)
+            });
+            if (!res.ok) throw new Error(await res.text());
+          }
+        }
+        // creates
+        if (Array.isArray(hs.stagedNew) && hs.stagedNew.length) {
+          for (const n of hs.stagedNew) {
+            const body = {
+              hospital_name_norm: String(n?.hospital_name_norm || '').trim(),
+              ward_hint: (String(n?.ward_hint ?? '').trim() || null)
+            };
+            if (!body.hospital_name_norm) throw new Error('Hospital name cannot be blank.');
+            const url = API(`/api/clients/${encodeURIComponent(clientId)}/hospitals`);
+            if (APILOG) console.log('[OPEN_CLIENT] POST hospital →', url, body);
+            const res = await authFetch(url, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(body)
+            });
+            if (!res.ok) throw new Error(await res.text());
+          }
+        }
+        // clear staging and refresh authoritative list in modal
+        if (hs.stagedDeletes) hs.stagedDeletes.clear();
+        if (hs.stagedEdits)   window.modalCtx.hospitalsState.stagedEdits = {};
+        if (hs.stagedNew)     window.modalCtx.hospitalsState.stagedNew = [];
+        try {
+          const fresh = await listClientHospitals(clientId);
+          window.modalCtx.hospitalsState.existing = Array.isArray(fresh) ? fresh : [];
+          try { renderClientHospitalsTable(); } catch {}
+        } catch (e) {
+          W('[OPEN_CLIENT] hospitals refresh failed', e);
+        }
+      } catch (err) {
+        alert(`Failed to save Hospitals & wards: ${String(err?.message || err)}`);
+        return { ok:false };
+      }
+
+      // 3) Persist rate window status toggles (before upserts)
       const baselineRates = Array.isArray(window.modalCtx.ratesBaseline) ? window.modalCtx.ratesBaseline : [];
       const prevById = new Map(baselineRates.filter(r => r && r.id).map(r => [String(r.id), r]));
       const windows = Array.isArray(window.modalCtx.ratesState) ? window.modalCtx.ratesState.slice() : [];
@@ -3512,7 +3582,7 @@ async function openClient(row) {
         }
       }
 
-      // === Persist enabled windows (skip disabled ones) ===
+      // 4) Persist enabled windows (skip disabled)
       if (clientId && windows.length) {
         // guard for intra-batch overlap (enabled windows only)
         for (let i = 0; i < windows.length; i++) {
