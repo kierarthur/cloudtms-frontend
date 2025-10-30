@@ -138,17 +138,48 @@ async function apiLogin(email, password){
   saveSession({ accessToken: token, user: data.user || data.profile || null, exp: Math.floor(Date.now()/1000) + ttl });
   return data;
 }
+
+// single, de-duplicated definition
 async function refreshToken(){
   try{
-    const res = await fetch(API('/auth/refresh'), { method:'POST', credentials:'include', headers:{'content-type':'application/json'}, body: JSON.stringify({}) });
+    const res = await fetch(API('/auth/refresh'), {
+      method:'POST',
+      credentials:'include',
+      headers:{'content-type':'application/json'},
+      body: JSON.stringify({})
+    });
     if (!res.ok) { clearSession(); return false; }
-    const data = await res.json();
+
+    const data  = await res.json();
     const token = data.access_token || data.token || data.accessToken;
-    const ttl = data.expires_in || data.token_ttl_sec || data.ttl || 3600;
-    saveSession({ accessToken: token, user: SESSION?.user || data.user || null, exp: Math.floor(Date.now()/1000) + ttl });
+    const ttl   = data.expires_in || data.token_ttl_sec || data.ttl || 3600;
+
+    // Preserve existing user; hydrate if missing id
+    let user = SESSION?.user || data.user || null;
+    if (!user || !user.id) {
+      try {
+        const meRes = await fetch(API('/api/me'), { headers: { 'Authorization': `Bearer ${token}` } });
+        if (meRes.ok) {
+          const meJson = await meRes.json().catch(()=> ({}));
+          user = (meJson && (meJson.user || meJson)) || user;
+        }
+      } catch {}
+    }
+
+    saveSession({
+      accessToken: token,
+      user,
+      exp: Math.floor(Date.now()/1000) + ttl
+    });
     return true;
-  }catch{ clearSession(); return false; }
+  }catch{
+    clearSession();
+    return false;
+  }
 }
+
+
+
 async function apiForgot(email){
   const r = await fetch(API('/auth/forgot'), { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({ email })});
   if(!r.ok) throw new Error('Failed to request reset');
