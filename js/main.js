@@ -747,7 +747,8 @@ async function openLoadSearchModal(section){
       const nameHtml = `<span class="name">${sanitize(p.name)}</span>`;
       const creator  = (p.user && (p.user.display_name || p.user.email)) ? ` <span class="hint">• by ${sanitize(p.user.display_name || p.user.email)}</span>` : '';
       const badge    = p.is_shared ? `<span class="badge">shared</span>${creator}` : '';
-      const trashBtn = `<button class="bin btn btn-ghost btn-sm" ${owned ? '' : 'disabled'} title="${owned ? 'Delete' : 'Not yours'}">🗑</button>`;
+      // Show BIN only if owned (your own, whether shared or not)
+      const trashBtn = owned ? `<button class="bin btn btn-ghost btn-sm" title="Delete">🗑</button>` : '';
       return `
         <tr data-id="${p.id}">
           <td class="pick">${nameHtml} ${badge}</td>
@@ -3695,11 +3696,21 @@ async function openClient(row) {
       }
     } catch (e) { W('openClient POST-PAINT rates error', e); }
 
+    // === NEW: fetch hospitals on first open ===
+    try {
+      const freshHosp = await listClientHospitals(id);
+      if (token === window.modalCtx.openToken && window.modalCtx.data?.id === id) {
+        window.modalCtx.hospitalsState.existing = Array.isArray(freshHosp) ? freshHosp : [];
+        try { renderClientHospitalsTable(); } catch {}
+      }
+    } catch (e) { W('openClient POST-PAINT hospitals error', e); }
+
     // other post-paint loads unchanged...
   } else {
     L('skip companion loads (no full.id)');
   }
 }
+
 
 // =================== CLIENT RATES TABLE (UPDATED) ===================
 // ✅ UPDATED — unified table view, dbl-click opens unified modal
@@ -3868,7 +3879,6 @@ function ensureSelectionStyles(){
   document.head.appendChild(style);
 }
 
-
 function renderClientTab(key, row = {}){
   if (key==='main') return html(`
     <div class="form" id="tab-main">
@@ -3894,7 +3904,28 @@ function renderClientTab(key, row = {}){
 
   if (key==='rates')     return html(`<div id="clientRates"></div>`);
   if (key==='settings')  return html(`<div id="clientSettings"></div>`);
-  if (key==='hospitals') return html(`<div id="clientHospitals"></div>`);
+
+  if (key==='hospitals') {
+    // Ensure initial render AND first-mount fetch if needed, then render the table
+    setTimeout(async () => {
+      try {
+        const id = window.modalCtx?.data?.id || null;
+        const hs = window.modalCtx?.hospitalsState || {};
+        const hasExisting = Array.isArray(hs.existing) && hs.existing.length > 0;
+
+        if (id && !hasExisting) {
+          const fresh = await listClientHospitals(id);
+          if (window.modalCtx?.data?.id === id) {
+            window.modalCtx.hospitalsState.existing = Array.isArray(fresh) ? fresh : [];
+          }
+        }
+        try { renderClientHospitalsTable(); } catch {}
+      } catch (_) {}
+    }, 0);
+
+    return html(`<div id="clientHospitals"></div>`);
+  }
+
   return '';
 }
 
