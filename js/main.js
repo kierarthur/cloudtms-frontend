@@ -366,6 +366,8 @@ function invalidatePresetCache(section, kind = 'search', opts) {
   }
 }
 
+
+
 function getPresetCache(section, kind = 'search', opts) {
   return __PRESETS_CACHE__.get(cacheKey(section, kind, opts)) || null;
 }
@@ -391,6 +393,7 @@ function currentUserId(){
 // -----------------------------
 // Preset API wrappers
 // -----------------------------
+
 async function listReportPresets({ section, kind = 'search', include_shared = true, q, page = 1, page_size = 100 } = {}) {
   const opts = { include_shared, q, page, page_size };
   const cached = getPresetCache(section, kind, opts);
@@ -406,10 +409,14 @@ async function listReportPresets({ section, kind = 'search', include_shared = tr
 
   const res = await authFetch(API(`/api/report-presets?${qs.toString()}`));
   const data = await res.json().catch(() => ({ rows: [] }));
+  // Keep user_id in cache so ownership checks work downstream
   const rows = data && Array.isArray(data.rows) ? data.rows : [];
   setPresetCache(section, kind, rows, opts);
   return rows;
 }
+
+
+
 async function createReportPreset({ section, kind='search', name, filters, is_shared=false, is_default=false }) {
   const res = await authFetch(
     API(`/api/report-presets`),
@@ -476,8 +483,6 @@ async function createReportPreset({ section, kind='search', name, filters, is_sh
   const data = await res.json().catch(()=>({}));
   return data.row || null;
 }
-
-
 async function updateReportPreset({ id, name, filters, is_shared, is_default, section, kind }) {
   const patch = {};
   if (typeof name === 'string') patch.name = name;
@@ -501,6 +506,8 @@ async function updateReportPreset({ id, name, filters, is_shared, is_default, se
   const data = await res.json().catch(()=>({}));
   return data.row || null;
 }
+
+
 
 async function deleteReportPreset(id) {
   const res = await authFetch(API(`/api/report-presets/${encodeURIComponent(id)}`), { method: 'DELETE' });
@@ -679,9 +686,16 @@ async function openSaveSearchModal(section, filters){
     : (s => String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;')
                            .replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'));
 
-  // Only the caller's presets for overwrite list
-  const mine = await listReportPresets({ section, kind: 'search', include_shared: false }).catch(()=>[]);
-  const optionsHtml = (mine || []).map(m => `<option value="${m.id}">${sanitize(m.name)}</option>`).join('');
+  // Only the caller's presets for overwrite list (server-side gate)…
+  const mineServer = await listReportPresets({ section, kind: 'search', include_shared: false }).catch(()=>[]);
+  // …and client-side belt & braces in case server behavior changes
+  const myId = currentUserId();
+  const mine = (mineServer || []).filter(m => String(m.user_id) === String(myId));
+
+  const hasOwned = Array.isArray(mine) && mine.length > 0;
+  const optionsHtml = hasOwned
+    ? mine.map(m => `<option value="${m.id}">${sanitize(m.name)}</option>`).join('')
+    : '';
 
   const body = html(`
     <div class="form" id="saveSearchForm" style="max-width:640px">
@@ -697,10 +711,13 @@ async function openSaveSearchModal(section, filters){
         <div class="controls" style="display:flex;flex-direction:column;gap:8px;min-width:0">
           <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
             <label class="inline"><input type="radio" name="mode" value="new" checked> <span>Save as new</span></label>
-            <label class="inline"><input type="radio" name="mode" value="overwrite"> <span>Overwrite existing</span></label>
+            <label class="inline">
+              <input type="radio" name="mode" value="overwrite" ${hasOwned ? '' : 'disabled'}>
+              <span>Overwrite existing</span>
+            </label>
           </div>
           <div id="overwriteWrap" style="display:none; width:100%; max-width:100%">
-            <div style="font-size:12px; color:#6b7280; margin:2px 0 4px">Choose preset to overwrite</div>
+            <div style="font-size:12px; color:#6b7280; margin:2px 0 4px">${hasOwned ? 'Choose preset to overwrite' : 'You don’t own any presets to overwrite'}</div>
             <select id="overwritePresetId" class="select" style="width:100%; max-width:100%">${optionsHtml}</select>
           </div>
         </div>
@@ -730,6 +747,7 @@ async function openSaveSearchModal(section, filters){
 
       try {
         if (mode === 'overwrite') {
+          if (!hasOwned) { alert('You don’t own any presets to overwrite'); return false; }
           const targetId = (document.getElementById('overwritePresetId')?.value) || '';
           if (!targetId) { alert('Select a preset to overwrite'); return false; }
           await updateReportPreset({ id: targetId, name: name || undefined, filters, is_shared: share });
@@ -744,8 +762,8 @@ async function openSaveSearchModal(section, filters){
         if (err.code === 'PRESET_NAME_CONFLICT' || /already exists|duplicate|409/.test(msg)) {
           const overwriteRadio = document.querySelector('#saveSearchForm input[name="mode"][value="overwrite"]');
           const overwriteWrap  = document.getElementById('overwriteWrap');
-          if (overwriteRadio) overwriteRadio.checked = true;
-          if (overwriteWrap)  overwriteWrap.style.display = 'block';
+          if (overwriteRadio && hasOwned) overwriteRadio.checked = true;
+          if (overwriteWrap && hasOwned)  overwriteWrap.style.display = 'block';
           alert('A preset with that name already exists. Choose it under “Overwrite existing”, or change the name.');
           return false;
         }
@@ -777,6 +795,7 @@ async function openSaveSearchModal(section, filters){
   }, 0);
 }
 
+
 // === REPLACE: openLoadSearchModal (built-in sanitize; no globals required) ===
 // FRONTEND — UPDATED
 // openLoadSearchModal: emit event with filters (so parent re-applies after repaint),
@@ -787,8 +806,6 @@ async function openLoadSearchModal(section){
     ? window.sanitize
     : (s => String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;')
                            .replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'));
-
-  // ⬅️ Remove stale capture at modal open (no myId here)
 
   let list = await listReportPresets({ section, kind: 'search', include_shared: true }).catch(()=>[]);
   let selectedId = null;
@@ -802,11 +819,11 @@ async function openLoadSearchModal(section){
   }
 
   const renderList = () => {
-    const myId = currentUserId(); // ⬅️ Recompute at render time
+    const myId = currentUserId();
     const rows = sortMineThenShared(list || [], myId);
 
     const rowsHtml = rows.map(p => {
-      const owned    = String(p.user_id) === String(myId); // robust compare
+      const owned    = String(p.user_id) === String(myId);
       const nameHtml = `<span class="name">${sanitize(p.name)}</span>`;
       const creator  = (p.user && (p.user.display_name || p.user.email)) ? ` <span class="hint">• by ${sanitize(p.user.display_name || p.user.email)}</span>` : '';
       const badge    = p.is_shared ? `<span class="badge">shared</span>${creator}` : '';
@@ -835,11 +852,58 @@ async function openLoadSearchModal(section){
     `);
   };
 
+  // Small helper to (re)wire the table after (re)render
+  function wirePresetTable() {
+    const tbl = document.getElementById('presetTable');
+    if (!tbl || tbl.__wired) return;
+    tbl.__wired = true;
+
+    tbl.addEventListener('click', async (e) => {
+      const tr = e.target && e.target.closest('tr[data-id]');
+      if (!tr) return;
+      const id  = tr.getAttribute('data-id');
+      const bin = e.target && e.target.closest('button.bin');
+
+      if (bin) {
+        const myIdNow = currentUserId();
+        const row = (list || []).find(p => p.id === id);
+        if (!row || String(row.user_id) !== String(myIdNow)) return;
+        if (!confirm(`Delete saved search “${row.name}”? This cannot be undone.`)) return;
+
+        try { await deleteReportPreset(id); }
+        catch (err) { alert(String(err?.message || err || 'Failed to delete preset')); return; }
+
+        // Refresh list from server
+        try { invalidatePresetCache(section, 'search'); } catch {}
+        list = await listReportPresets({ section, kind:'search', include_shared:true }).catch(()=>[]);
+
+        // ⚠️ Re-inject markup as HTML (not replaceChildren with a string)
+        const body = document.getElementById('modalBody');
+        if (body) {
+          const markup = renderList();
+          if (typeof markup === 'string') {
+            body.innerHTML = markup;
+          } else if (markup && typeof markup.nodeType === 'number') {
+            body.replaceChildren(markup);
+          } else {
+            body.innerHTML = String(markup ?? '');
+          }
+          // Re-wire the fresh table DOM
+          wirePresetTable();
+        }
+        return;
+      }
+
+      // select row
+      selectedId = id;
+      Array.from(tbl.querySelectorAll('tbody tr')).forEach(r => r.classList.toggle('selected', r === tr));
+    });
+  }
+
   showModal(
     'Load saved search',
     [{ key: 'list', label: 'Saved' }],
     renderList,
-    // Apply → stash pending; DO NOT dispatch here
     async () => {
       if (!selectedId) { alert('Pick a preset to load'); return false; }
       const chosen = (list || []).find(p => p.id === selectedId);
@@ -847,10 +911,9 @@ async function openLoadSearchModal(section){
       const filters = chosen.filters || chosen.filters_json || chosen.filtersJson || {};
       const sec = String(section || '').toLowerCase();
       try { window.__PENDING_ADV_PRESET = { section: sec, filters }; } catch {}
-      return true; // close child modal
+      return true;
     },
     false,
-    // onReturn → fire the event after the child closes so the parent is already repainted
     () => {
       const pending = window.__PENDING_ADV_PRESET;
       if (pending && pending.section) {
@@ -861,37 +924,8 @@ async function openLoadSearchModal(section){
     { noParentGate: true, forceEdit: true, kind: 'search-load' }
   );
 
-  setTimeout(() => {
-    const tbl = document.getElementById('presetTable');
-    if (tbl && !tbl.__wired) {
-      tbl.__wired = true;
-      tbl.addEventListener('click', async (e) => {
-        const tr = e.target && e.target.closest('tr[data-id]');
-        if (!tr) return;
-        const id  = tr.getAttribute('data-id');
-        const bin = e.target && e.target.closest('button.bin');
-
-        if (bin) {
-          const myIdNow = currentUserId(); // ⬅️ Recompute at click time
-          const row = (list || []).find(p => p.id === id);
-          if (!row || String(row.user_id) !== String(myIdNow)) return;
-          if (!confirm(`Delete saved search “${row.name}”? This cannot be undone.`)) return;
-          try { await deleteReportPreset(id); }
-          catch (err) { alert(String(err?.message || err || 'Failed to delete preset')); return; }
-
-          try { invalidatePresetCache(section, 'search'); } catch {}
-          list = await listReportPresets({ section, kind:'search', include_shared:true }).catch(()=>[]);
-          const body = document.getElementById('modalBody');
-          if (body) body.replaceChildren(renderList());
-          return;
-        }
-
-        // select row
-        selectedId = id;
-        Array.from(tbl.querySelectorAll('tbody tr')).forEach(r => r.classList.toggle('selected', r === tr));
-      });
-    }
-  }, 0);
+  // Initial wiring after first paint
+  setTimeout(wirePresetTable, 0);
 }
 
 
@@ -1073,6 +1107,7 @@ async function openSearchModal(opts = {}) {
   setTimeout(wireAdvancedSearch, 0);
 }
 
+
 function wireAdvancedSearch() {
   const bodyEl = document.getElementById('modalBody');
   const formEl = document.getElementById('searchForm');
@@ -1096,6 +1131,7 @@ function wireAdvancedSearch() {
     if (act === 'load') {
       await openLoadSearchModal(currentSection);
     } else if (act === 'save') {
+      // ↳ Recompute filters at click time so we pass the *current* criteria
       const filters = extractFiltersFromForm('#searchForm');
       await openSaveSearchModal(currentSection, filters);
     }
@@ -1118,7 +1154,6 @@ function wireAdvancedSearch() {
     window.addEventListener('adv-search-apply-preset', window.__advPresetListener);
   }
 }
-
 
 
 // -----------------------------
