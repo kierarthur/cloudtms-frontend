@@ -3404,6 +3404,7 @@ function renderCalendar(timesheets){
 // OPEN CLIENT (parent modal) — skip posting disabled windows on Save
 // (No delete button is added here; ensure any existing parent delete UI is removed elsewhere.)
 // ============================================================================
+
 async function openClient(row) {
   // ===== Logging helpers (toggle with window.__LOG_MODAL = true/false) =====
   const LOG = (typeof window.__LOG_MODAL === 'boolean') ? window.__LOG_MODAL : true;
@@ -3429,7 +3430,7 @@ async function openClient(row) {
 
   // 1) Hydrate full client if we have an id
   let full = incoming;
-  let settingsSeed = null; // ⟵ PRESEED client settings to avoid time-validator race
+  let settingsSeed = null; // PRESEED client settings to avoid time-validator race
   if (seedId) {
     try {
       const url = API(`/api/clients/${encodeURIComponent(seedId)}`);
@@ -3444,7 +3445,6 @@ async function openClient(row) {
 
       if (r.ok) {
         const data = await r.json().catch(()=> ({}));
-        // Preferred: take 'client' object; keep settings sibling if present
         const clientObj   = data?.client || unwrapSingle(data, 'client') || null;
         const settingsObj = data?.client_settings || data?.settings || null;
         settingsSeed = settingsObj ? deep(settingsObj) : null;
@@ -3469,9 +3469,9 @@ async function openClient(row) {
     data: deep(full),
     formState: { __forId: full?.id || null, main: {} },
     ratesState: [],
-    ratesBaseline: [], // ⟵ baseline snapshot to detect status toggles on Save
+    ratesBaseline: [], // baseline snapshot to detect status toggles on Save
     hospitalsState: { existing: [], stagedNew: [], stagedEdits: {}, stagedDeletes: new Set() },
-    clientSettingsState: settingsSeed ? deep(settingsSeed) : {}, // ⟵ PRESEEDED HERE
+    clientSettingsState: settingsSeed ? deep(settingsSeed) : {},
     openToken: ((full?.id) || 'new') + ':' + Date.now()
   };
 
@@ -3514,9 +3514,6 @@ async function openClient(row) {
       if (!payload.name) { alert('Please enter a Client name.'); return { ok:false }; }
 
       // ===== Settings normalization (GUARDED) =====
-      // Only normalise settings if:
-      //  - the Settings form is mounted, OR
-      //  - preseeded/baseline already has all four time keys
       const baseline = window.modalCtx.clientSettingsState || {};
       const hasFormMounted = !!byId('clientSettingsForm');
       const hasFullBaseline = ['day_start','day_end','night_start','night_end'].every(k => typeof baseline[k] === 'string' && baseline[k] !== '');
@@ -3591,7 +3588,7 @@ async function openClient(row) {
         for (let i = 0; i < windows.length; i++) {
           for (let j = i + 1; j < windows.length; j++) {
             const A = windows[i], B = windows[j];
-            if (A.disabled_at_utc || B.disabled_at_utc) continue;
+            if (A.disabled_at_utc || B.disabled_at_utc) continue; // ignore disabled in this guard
             if (String(A.role||'') === String(B.role||'') &&
                 String(A.band||'') === String(B.band||'')) {
               const a0 = A.date_from || null, a1 = A.date_to || null;
@@ -3647,7 +3644,7 @@ async function openClient(row) {
         }
       }
 
-      // Optional: refresh rates list & rebuild baseline to reflect server-side disabled_by_name etc.
+      // Refresh list & rebuild baseline (authoritative names from server)
       try {
         const refreshed = await listClientRates(clientId /* all incl. disabled */);
         window.modalCtx.ratesState    = Array.isArray(refreshed) ? refreshed.map(x => ({ ...x })) : [];
@@ -3667,7 +3664,7 @@ async function openClient(row) {
     full?.id
   );
 
-  // 4) Post-paint async loads (unchanged logic; plus baseline capture)
+  // 4) Post-paint async loads (merge metadata when staged so names flow in)
   if (full?.id) {
     const token = window.modalCtx.openToken;
     const id    = full.id;
@@ -3677,9 +3674,24 @@ async function openClient(row) {
         const hasStaged = Array.isArray(window.modalCtx.ratesState) && window.modalCtx.ratesState.length > 0;
         if (!hasStaged) {
           window.modalCtx.ratesState    = Array.isArray(unified) ? unified.map(r => ({ ...r })) : [];
-          window.modalCtx.ratesBaseline = JSON.parse(JSON.stringify(window.modalCtx.ratesState)); // ⟵ capture baseline
-          try { renderClientRatesTable(); } catch {}
+          window.modalCtx.ratesBaseline = JSON.parse(JSON.stringify(window.modalCtx.ratesState)); // capture baseline
+        } else {
+          // Merge authoritative metadata (e.g., disabled_by_name, disabled_at_utc) by id into staged rows
+          const staged = Array.isArray(window.modalCtx.ratesState) ? window.modalCtx.ratesState.slice() : [];
+          const stagedById = new Map(staged.map(r => [String(r.id), r]));
+          (Array.isArray(unified) ? unified : []).forEach(srv => {
+            const s = stagedById.get(String(srv.id));
+            if (s) {
+              s.disabled_at_utc  = srv.disabled_at_utc ?? null;
+              s.disabled_by_name = srv.disabled_by_name ?? null;
+            } else {
+              staged.push({ ...srv });
+            }
+          });
+          window.modalCtx.ratesState = staged;
+          // Do not touch ratesBaseline here; keep original baseline for toggle diffing
         }
+        try { renderClientRatesTable(); } catch {}
       }
     } catch (e) { W('openClient POST-PAINT rates error', e); }
 
@@ -3688,7 +3700,6 @@ async function openClient(row) {
     L('skip companion loads (no full.id)');
   }
 }
-
 
 // =================== CLIENT RATES TABLE (UPDATED) ===================
 // ✅ UPDATED — unified table view, dbl-click opens unified modal
