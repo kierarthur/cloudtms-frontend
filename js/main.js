@@ -1234,7 +1234,8 @@ async function loadGlobalRoleOptions(){
 function renderRolesEditor(container, rolesState, allRoleOptions){
   // Detect read-only (view mode) from the active modal frame
   const fr = (window.__modalStack || [])[ (window.__modalStack || []).length - 1 ] || null;
-  const readOnly = !fr || fr.mode !== 'edit';
+  // ✅ Treat 'create' same as 'edit' (editable)
+  const readOnly = !fr || !(fr.mode === 'edit' || fr.mode === 'create');
 
   // Local, mutable copy of available options so we can refresh after adds/removes
   let roleOptions = Array.isArray(allRoleOptions) ? allRoleOptions.slice() : [];
@@ -1372,7 +1373,7 @@ function renderRolesEditor(container, rolesState, allRoleOptions){
     });
   }
 
-  // Add role (only in edit)
+  // Add role (only in edit/create)
   if (!readOnly && btn) {
     btn.onclick = () => {
       const code = sel.value;
@@ -2701,7 +2702,8 @@ async function renderCandidateRatesTable() {
   }
 
   const frame = _currentFrame();
-  const parentEditable = frame && frame.mode === 'edit';
+  // ✅ Allow edit or create to enable the Add button in new flow
+  const parentEditable = frame && (frame.mode === 'edit' || frame.mode === 'create');
   if (LOG) console.log('[RATES][renderCandidateRatesTable] parentEditable?', parentEditable);
 
   let clientsById = {};
@@ -2721,8 +2723,6 @@ async function renderCandidateRatesTable() {
   }
   for (const n of (O.stagedNew || [])) rows.push({ ...n, _isNew: true });
 
-  if (LOG) console.log('[RATES][renderCandidateRatesTable] merged rows', rows.length, rows[0]);
-
   if (!rows.length) {
     div.innerHTML = `
       <div class="hint" style="margin-bottom:8px">No candidate-specific overrides. Client defaults will apply.</div>
@@ -2734,7 +2734,6 @@ async function renderCandidateRatesTable() {
     `;
     const addBtn = byId('btnAddRate');
     if (addBtn && parentEditable) addBtn.onclick = () => openCandidateRateModal(window.modalCtx.data?.id);
-    if (LOG) console.log('[RATES][renderCandidateRatesTable] rendered empty state');
     return;
   }
 
@@ -2784,9 +2783,8 @@ async function renderCandidateRatesTable() {
 
   const addBtn = byId('btnAddRate');
   if (addBtn && parentEditable) addBtn.onclick = () => openCandidateRateModal(window.modalCtx.data?.id);
-
-  if (LOG) console.log('[RATES][renderCandidateRatesTable] rendered', { parentEditable, dblclickEnabled: !!parentEditable });
 }
+
 
 // === UPDATED: Candidate modal tabs (adds Roles editor placeholder on 'main') ===
 
@@ -2978,25 +2976,19 @@ async function mountCandidateRatesTab() {
     return;
   }
 
-  // seed existing overrides list if needed
   if (Array.isArray(rates)) {
     window.modalCtx.overrides = window.modalCtx.overrides || { existing: [], stagedNew: [], stagedEdits: {}, stagedDeletes: new Set() };
     window.modalCtx.overrides.existing = rates.slice();
   }
-  if (LOG) console.log('[RATES][mountCandidateRatesTab] seeded', {
-    existing: (window.modalCtx.overrides.existing||[]).length,
-    stagedNew: (window.modalCtx.overrides.stagedNew||[]).length,
-    stagedEdits: Object.keys(window.modalCtx.overrides.stagedEdits||{}).length,
-    stagedDeletes: (window.modalCtx.overrides.stagedDeletes||new Set()).size
-  });
-
   await renderCandidateRatesTable();
   if (LOG) console.log('[RATES][mountCandidateRatesTab] renderCandidateRatesTable() called');
 
   const btn = byId('btnAddRate');
   const frame = _currentFrame();
-  if (btn && frame && frame.mode === 'edit') btn.onclick = () => openCandidateRateModal(window.modalCtx.data?.id);
+  // ✅ Allow add in create mode too
+  if (btn && frame && (frame.mode === 'edit' || frame.mode === 'create')) btn.onclick = () => openCandidateRateModal(window.modalCtx.data?.id);
 }
+
 
 
 // === UPDATED: Candidate Rate Override modal (Client→Role gated; bands; UK dates; date_to) ===
@@ -3015,12 +3007,12 @@ async function openCandidateRateModal(candidate_id, existing) {
   if (LOG) console.log('[RATES][openCandidateRateModal] ENTRY', { candidate_id, hasExisting: !!existing });
 
   const parentFrame = _currentFrame();                       // this is the PARENT at call time
-  const parentEditable = parentFrame && parentFrame.mode === 'edit';
+  // ✅ Parent may be in 'create'
+  const parentEditable = parentFrame && (parentFrame.mode === 'edit' || parentFrame.mode === 'create');
   if (LOG) console.log('[RATES][openCandidateRateModal] parentEditable?', parentEditable, 'parentMode=', parentFrame?.mode);
 
-  // Helpers for date rules
   const todayIso = (() => {
-    const now = new Date(); // local (UK browser timezone)
+    const now = new Date();
     const y = now.getFullYear(), m = String(now.getMonth()+1).padStart(2,'0'), d = String(now.getDate()).padStart(2,'0');
     return `${y}-${m}-${d}`;
   })();
@@ -3087,6 +3079,7 @@ async function openCandidateRateModal(candidate_id, existing) {
     [{ key:'form', label:'Form' }],
     () => formHtml,
     async () => {
+      // ✅ Allow Apply when parent is 'edit' or 'create'
       if (!parentEditable) {
         alert('Open the candidate in Edit mode to add/modify overrides.');
         if (LOG) console.warn('[RATES][openCandidateRateModal] Apply blocked: parent not editable');
@@ -3105,11 +3098,10 @@ async function openCandidateRateModal(candidate_id, existing) {
       if (!role) { alert('Role is required'); return false; }
       if (rate_type !== 'PAYE' && rate_type !== 'UMBRELLA') { alert('Rate type must be PAYE or UMBRELLA'); return false; }
 
-      // Dates: always compute ISO from UI, but when locked, enforce using existing.date_from
       const isoFromUI = parseUkDateToIso(raw.date_from);
       let isoFrom = isoFromUI;
       if (!isoFrom) { alert('Invalid “Effective from” date'); return false; }
-      if (existing?.date_from) isoFrom = existing.date_from || isoFrom; // prefer original if present
+      if (existing?.date_from) isoFrom = existing.date_from || isoFrom;
 
       let isoTo = null;
       if (raw.date_to) {
@@ -3119,23 +3111,37 @@ async function openCandidateRateModal(candidate_id, existing) {
 
       const locked = !!existing?.date_from && isPastOrToday(existing.date_from);
       if (locked) {
-        // For locked rows, only end date can be changed and must be ≥ start date
         if (!isoTo) { alert('You can only set or extend the end date for past/today starts.'); return false; }
         if (isoTo < (existing.date_from || isoFrom)) { alert('“Effective to” cannot be before “Effective from”.'); return false; }
       } else {
-        // For future-start rows, allow full edit but still enforce ordering if end provided
         if (isoTo && isoTo < isoFrom) { alert('“Effective to” cannot be before “Effective from”.'); return false; }
       }
 
-      // Gate by client defaults (using isoFrom)
-      const candidatesForRole = (cache.windows || []).filter(w => w.role === role && w.date_from <= isoFrom && (!w.date_to || w.date_to >= isoFrom));
-      if (!candidatesForRole.length) { alert(`No active client default window for role ${role} at ${formatIsoToUk(isoFrom)}.`); return false; }
-      const hasExactBand = candidatesForRole.some(w => String(w.band||'') === String(band||''));
-      const hasBandNull  = candidatesForRole.some(w => !w.band || w.band === '');
-      if (band == null && !hasBandNull) { alert(`This client has no band-null window for ${role} on ${formatIsoToUk(isoFrom)}.`); return false; }
-      if (band != null && !hasExactBand) { alert(`This client has no active window for ${role} / band ${band} on ${formatIsoToUk(isoFrom)}.`); return false; }
+      // Gate by client defaults (using isoFrom) — loads enabled windows for the date
+      const active_on = isoFrom;
+      const list = await listClientRates(client_id, { active_on, only_enabled: true });
+      cache.windows = (Array.isArray(list) ? list.filter(w => !w.disabled_at_utc) : []);
 
-      // Build staged payload respecting lock rules
+      const roles = new Set();
+      const bandsByRole = {};
+      (cache.windows).forEach(w => {
+        if (!w.role) return;
+        roles.add(w.role);
+        const bKey = (w.band == null ? '' : String(w.band));
+        (bandsByRole[w.role] ||= new Set()).add(bKey);
+      });
+      cache.roles = [...roles];
+      cache.bandsByRole = Object.fromEntries(
+        cache.roles.map(code => [code, [...(bandsByRole[code] || new Set())]])
+      );
+
+      const allowed = cache.roles.slice().sort((a,b)=> a.localeCompare(b));
+      if (!allowed.includes(role)) { alert(`No active client default for role ${role} at ${formatIsoToUk(isoFrom)}`); return false; }
+      const bands = cache.bandsByRole[role] || [];
+      const hasNull = bands.includes('');
+      if (band == null && !hasNull) { alert(`This client has no band-null window for ${role} on ${formatIsoToUk(isoFrom)}.`); return false; }
+      if (band != null && !bands.includes(String(band))) { alert(`No active band ${band} for ${role} on ${formatIsoToUk(isoFrom)}.`); return false; }
+
       const stagedAll = {
         id        : existing?.id,
         candidate_id,
@@ -3151,27 +3157,10 @@ async function openCandidateRateModal(candidate_id, existing) {
         pay_bh    : raw['pay_bh']    !== '' ? Number(raw['pay_bh'])    : null
       };
 
-      // When locked, only stage the end date change
-      const stagedPatch = locked ? { date_to: stagedAll.date_to } : stagedAll;
-      if (locked) {
-        // additionally ensure UI didn't attempt to alter identity/rate_type
-        if (existing && (
-          String(existing.client_id) !== client_id ||
-          String(existing.role||'')  !== role ||
-          String(existing.rate_type||'').toUpperCase() !== rate_type ||
-          String(existing.band||'')  !== String(band||'') ||
-          String(existing.date_from||'') !== String(isoFrom||'')
-        )) {
-          alert('For past/today starts, only the end date can be changed.');
-          return false;
-        }
-      }
-
-      if (LOG) { G('Apply staged payload', stagedPatch); }
+      const stagedPatch = (locked ? { date_to: stagedAll.date_to } : stagedAll);
 
       const O = window.modalCtx.overrides || (window.modalCtx.overrides = { existing: [], stagedNew: [], stagedEdits: {}, stagedDeletes: new Set() });
 
-      // Overlap handling within staged universe (only relevant when not locked or changing dates)
       const universe = [
         ...O.existing.filter(x => !O.stagedDeletes.has(x.id)),
         ...O.stagedNew
@@ -3185,8 +3174,6 @@ async function openCandidateRateModal(candidate_id, existing) {
       const overlapping = universe
         .filter(o => sameKey(o) && (!existing?.id || o.id !== existing.id))
         .filter(o => rangesOverlap(o.date_from||null, o.date_to||null, stagedAll.date_from, stagedAll.date_to));
-      if (LOG) console.log('[RATES][openCandidateRateModal] overlap candidates:', overlapping);
-
       if (overlapping.length) {
         const ov = overlapping[0];
         const d = new Date(stagedAll.date_from+'T00:00:00Z'); d.setUTCDate(d.getUTCDate()-1);
@@ -3208,7 +3195,6 @@ async function openCandidateRateModal(candidate_id, existing) {
         }
       }
 
-      // edit vs new staging, with lock-aware patching
       if (existing?.id) {
         O.stagedEdits[existing.id] = { ...O.stagedEdits[existing.id], ...stagedPatch };
       } else if (existing && !existing.id) {
@@ -3216,10 +3202,10 @@ async function openCandidateRateModal(candidate_id, existing) {
         let idx = (tmpId ? O.stagedNew.findIndex(r => r._tmpId === tmpId) : -1);
         if (idx < 0) {
           idx = O.stagedNew.findIndex(r =>
-            String(r.client_id) === String(existing.client_id) &&
-            String(r.role||'')  === String(existing.role||'') &&
-            String(r.rate_type || '').toUpperCase() === String(existing.rate_type || '').toUpperCase() &&
-            String(r.band||'')  === String(existing.band||'') &&
+            String(r.client_id) === client_id &&
+            String(r.role||'')  === role &&
+            String(r.rate_type || '').toUpperCase() === rate_type &&
+            String(r.band||'')  === String(band||'') &&
             String(r.date_from||'') === String(existing.date_from||'') &&
             String(r.date_to||'')   === String(existing.date_to||'')
           );
@@ -3234,25 +3220,9 @@ async function openCandidateRateModal(candidate_id, existing) {
         O.stagedNew.push({ ...stagedPatch, _tmpId: `tmp_${Date.now()}` });
       }
 
-      if (LOG) {
-        console.log('[RATES][openCandidateRateModal] after stage', {
-          existing: (O.existing||[]).length,
-          stagedNew: (O.stagedNew||[]).length,
-          stagedEdits: Object.keys(O.stagedEdits||{}).length,
-          stagedDeletes: (O.stagedDeletes||new Set()).size
-        });
-      }
-
-      const hasRatesTable = !!document.getElementById('ratesTable');
-      if (LOG) console.log('[RATES][openCandidateRateModal] has #ratesTable?', hasRatesTable);
-      if (hasRatesTable) await renderCandidateRatesTable();
-
-      try {
-        if (LOG) console.log('[RATES][openCandidateRateModal] dispatch modal-dirty');
-        window.dispatchEvent(new CustomEvent('modal-dirty'));
-      } catch {}
-
-      return true; // child Apply ⇒ ok; showModal will close child, mark parent dirty, and re-render
+      if (document.getElementById('ratesTable')) await renderCandidateRatesTable();
+      try { window.dispatchEvent(new CustomEvent('modal-dirty')); } catch {}
+      return true;
     },
     false,
     () => {
@@ -3280,7 +3250,6 @@ async function openCandidateRateModal(candidate_id, existing) {
   attachUkDatePicker(inFrom);
   attachUkDatePicker(inTo);
 
-  // Lock UI if start date is today/past: only allow end-date edit
   const lockThis = !!existing?.date_from && isPastOrToday(existing.date_from);
   if (lockThis) {
     selClient.disabled = true;
@@ -3289,65 +3258,54 @@ async function openCandidateRateModal(candidate_id, existing) {
     selBand.disabled   = true;
     inFrom.disabled    = true;
 
-    // Disable pay inputs too
     ['pay_day','pay_night','pay_sat','pay_sun','pay_bh'].forEach(n => {
       const el = document.querySelector(`#candRateForm input[name="${n}"]`);
       if (el) el.disabled = true;
     });
   }
 
-async function refreshClientRoles(clientId) {
-  if (LOG) console.log('[RATES][openCandidateRateModal] refreshClientRoles', { clientId, active_on: inFrom.value });
-  selRole.innerHTML = `<option value="">Select role…</option>`;
-  selRole.disabled = true;
-  bandRow.style.display = 'none';
-  selBand.innerHTML = '';
-  if (!clientId) return;
-
-  const active_on = parseUkDateToIso(inFrom.value || '') || null;
-  // Fetch ONLY enabled windows for this date so gating matches backend rules
-  const list = await listClientRates(clientId, { active_on, only_enabled: true });
-  // Keep only enabled windows in cache for downstream lookups
-  cache.windows = (Array.isArray(list) ? list.filter(w => !w.disabled_at_utc) : []);
-  if (LOG) console.log('[RATES][openCandidateRateModal] windows fetched (enabled only)', cache.windows.length);
-
-  const roles = new Set();
-  const bandsByRole = {};
-  (cache.windows).forEach(w => {
-    if (!w.role) return;
-    roles.add(w.role);
-    const bKey = (w.band == null ? '' : String(w.band));
-    (bandsByRole[w.role] ||= new Set()).add(bKey);
-  });
-
-  const liveRoles = Array.isArray(window.modalCtx?.rolesState) && window.modalCtx.rolesState.length
-    ? window.modalCtx.rolesState : (Array.isArray(window.modalCtx?.data?.roles) ? window.modalCtx.data.roles : []);
-  const candRoleCodes = new Set((liveRoles || []).map(x => String(x.code)));
-  const allowed = [...roles].filter(code => candRoleCodes.has(code)).sort((a,b)=> a.localeCompare(b));
-  if (LOG) console.log('[RATES][openCandidateRateModal] allowed roles (intersection w/ candidate)', allowed);
-
-  if (!allowed.length) {
+  async function refreshClientRoles(clientId) {
     selRole.innerHTML = `<option value="">Select role…</option>`;
     selRole.disabled = true;
-    return;
+    bandRow.style.display = 'none';
+    selBand.innerHTML = '';
+    if (!clientId) return;
+
+    const active_on = parseUkDateToIso(inFrom.value || '') || null;
+    const list = await listClientRates(clientId, { active_on, only_enabled: true });
+    cache.windows = (Array.isArray(list) ? list.filter(w => !w.disabled_at_utc) : []);
+
+    const roles = new Set();
+    const bandsByRole = {};
+    (cache.windows).forEach(w => {
+      if (!w.role) return;
+      roles.add(w.role);
+      const bKey = (w.band == null ? '' : String(w.band));
+      (bandsByRole[w.role] ||= new Set()).add(bKey);
+    });
+
+    const allowed = [...roles].sort((a,b)=> a.localeCompare(b));
+    if (!allowed.length) {
+      selRole.innerHTML = `<option value="">Select role…</option>`;
+      selRole.disabled = true;
+      return;
+    }
+
+    selRole.innerHTML = `<option value="">Select role…</option>` +
+      allowed.map(code => `<option value="${code}">${code}</option>`).join('');
+    selRole.disabled = !!lockThis;
+
+    cache.roles = allowed;
+    cache.bandsByRole = Object.fromEntries(
+      allowed.map(code => [code, [...(bandsByRole[code] || new Set())]])
+    );
+
+    if (existing?.role) {
+      selRole.value = existing.role;
+      selRole.dispatchEvent(new Event('change'));
+      if (existing?.band != null) selBand.value = existing.band;
+    }
   }
-
-  selRole.innerHTML = `<option value="">Select role…</option>` +
-    allowed.map(code => `<option value="${code}">${code}</option>`).join('');
-  selRole.disabled = !!lockThis; // locked rows cannot change role
-
-  cache.roles = allowed;
-  cache.bandsByRole = Object.fromEntries(
-    allowed.map(code => [code, [...(bandsByRole[code] || new Set())]])
-  );
-
-  if (existing?.role) {
-    selRole.value = existing.role;
-    selRole.dispatchEvent(new Event('change'));
-    if (existing?.band != null) selBand.value = existing.band;
-  }
-}
-
 
   function onRoleChanged() {
     const role = selRole.value;
@@ -3364,7 +3322,6 @@ async function refreshClientRoles(clientId) {
       bandRow.style.display = 'none';
     }
     selBand.disabled = !!lockThis;
-    if (LOG) console.log('[RATES][openCandidateRateModal] onRoleChanged', { role, bands });
   }
 
   selClient.addEventListener('change', () => { if (!lockThis) refreshClientRoles(selClient.value); });
@@ -3813,10 +3770,11 @@ async function openClient(row) {
 function renderClientRatesTable() {
   const div = byId('clientRates'); if (!div) return;
 
-  const ctx = window.modalCtx; // use canonical context
+  const ctx = window.modalCtx;
   const staged = Array.isArray(ctx.ratesState) ? ctx.ratesState : [];
   const frame = _currentFrame();
-  const parentEditable = frame && frame.mode === 'edit';
+  // ✅ Allow buttons in create mode for new client
+  const parentEditable = frame && (frame.mode === 'edit' || frame.mode === 'create');
 
   div.innerHTML = '';
 
@@ -3832,7 +3790,7 @@ function renderClientRatesTable() {
     const addBtn = byId('btnAddClientRate');
     if (addBtn && parentEditable) {
       addBtn.onclick = () => {
-        const cid = (ctx && ctx.data && (ctx.data.id || ctx.data.client_id)) || null; // ensure id
+        const cid = (ctx && ctx.data && (ctx.data.id || ctx.data.client_id)) || null;
         return openClientRateModal(cid);
       };
     }
@@ -3840,7 +3798,7 @@ function renderClientRatesTable() {
   }
 
   const cols    = [
-    'status',               // ← virtual column (renders disabled/active)
+    'status',
     'role','band',
     'paye_day','paye_night','paye_sat','paye_sun','paye_bh',
     'umb_day','umb_night','umb_sat','umb_sun','umb_bh',
@@ -3859,18 +3817,15 @@ function renderClientRatesTable() {
   const tbl   = document.createElement('table'); tbl.className='grid';
   const thead = document.createElement('thead');
   const trh   = document.createElement('tr');
-  headers.forEach(h => { const th = document.createElement('th'); th.textContent = h; trh.appendChild(th); });
+  headers.forEach(h => { const th=document.createElement('th'); th.textContent = h; trh.appendChild(th); });
   thead.appendChild(trh);
   tbl.appendChild(thead);
 
   const tb = document.createElement('tbody');
   staged.forEach(r => {
     const tr = document.createElement('tr');
-
-    // soften disabled rows but keep them interactive
     if (r.disabled_at_utc) tr.classList.add('row-disabled');
 
-    // ensure client id is passed on edit too
     if (parentEditable) tr.ondblclick = () => {
       const cid = (ctx && ctx.data && (ctx.data.id || ctx.data.client_id)) || r.client_id || null;
       return openClientRateModal(cid, r);
@@ -3880,42 +3835,12 @@ function renderClientRatesTable() {
       const td = document.createElement('td');
 
       if (c === 'status') {
-        // Keep the Status column compact: show only the pill; no multi-line "by/on" text here.
         if (r.disabled_at_utc) {
           const pending = r.__toggle ? ' (pending save)' : '';
           td.innerHTML = `<span class="pill tag-fail" aria-label="Disabled">❌ Disabled${pending}</span>`;
         } else {
           const pending = r.__toggle === 'enable' ? ' (pending save)' : '';
           td.innerHTML = `<span class="pill tag-ok" aria-label="Active">✓ Active${pending}</span>`;
-        }
-      } else if (c === 'charge_day') {
-        // Render the number normally…
-        td.textContent = formatDisplayValue(c, r[c]);
-
-        // …and add a single-line, non-wrapping meta below the first rate cell (not the first column).
-        // Never show 'Unknown' — if name/date missing, render nothing.
-        const who  = r.disabled_by_name || ''; // blank if unknown
-        const when = r.disabled_at_utc ? formatIsoToUk(String(r.disabled_at_utc).slice(0,10)) : '';
-
-        // Pending enable (no disabled_at_utc) — optional one-liner
-        let metaLine = '';
-        if (r.disabled_at_utc && (who || when)) {
-          // Disabled state with known info
-          // e.g., "Disabled by james on 29/10/2025" all on one line
-          metaLine = `Disabled${who ? ` by ${escapeHtml(who)}` : ''}${when ? ` on ${escapeHtml(when)}` : ''}`;
-        } else if (!r.disabled_at_utc && r.__toggle === 'enable' && (who)) {
-          // Pending enable with a known current user short name
-          metaLine = `Enable pending by ${escapeHtml(who)}`;
-        }
-
-        if (metaLine) {
-          const hint = document.createElement('div');
-          hint.className = 'hint';
-          hint.style.whiteSpace = 'nowrap';
-          hint.style.overflow = 'hidden';
-          hint.style.textOverflow = 'ellipsis';
-          hint.textContent = metaLine;
-          td.appendChild(hint);
         }
       } else {
         td.textContent = formatDisplayValue(c, r[c]);
@@ -3942,7 +3867,7 @@ function renderClientRatesTable() {
   const addBtn = byId('btnAddClientRate');
   if (addBtn && parentEditable) {
     addBtn.onclick = () => {
-      const cid = (ctx && ctx.data && (ctx.data.id || ctx.data.client_id)) || null; // ensure id
+      const cid = (ctx && ctx.data && (ctx.data.id || ctx.data.client_id)) || null;
       return openClientRateModal(cid);
     };
   }
@@ -4029,7 +3954,8 @@ async function mountCandidatePayTab(){
   const LOG = !!window.__LOG_PAYTAB;
   const fr = (window.__modalStack || [])[ (window.__modalStack || []).length - 1 ] || null;
   const mode = fr ? fr.mode : 'view';
-  const isEdit = mode === 'edit';
+  // ✅ Treat create as editable
+  const isEdit = (mode === 'edit' || mode === 'create');
   if (LOG) console.log('[PAYTAB] ENTRY', { mode, isEdit });
 
   const payMethod = (window.modalCtx?.payMethodState || window.modalCtx?.data?.pay_method || 'PAYE').toUpperCase();
@@ -4059,7 +3985,6 @@ async function mountCandidatePayTab(){
     return [];
   };
   
-
   const normaliseSort = (v) => {
     if (!v) return '';
     const digits = String(v).replace(/\D+/g, '').slice(0,6);
@@ -4067,41 +3992,33 @@ async function mountCandidatePayTab(){
     return digits.replace(/(\d{2})(\d{2})(\d{2})/, '$1-$2-$3');
   };
 
-async function fetchUmbrellaById(id) {
-  try {
-    const res = await authFetch(API(`/api/umbrellas/${encodeURIComponent(id)}`));
-    if (!res || !res.ok) return null;
-    const json = await res.json().catch(() => null);
-    // FIX: handle `{ umbrella: {...} }` envelope as well as generic shapes
-    const row = json && (json.umbrella || unwrapSingle(json));
-    return row || null;
-  } catch (_) {
-    return null;
-  }
-}
-
-// Updated to gracefully unwrap common single-row envelopes
-function unwrapSingle(json) {
-  if (!json) return null;
-
-  // Arrays: return the first row
-  if (Array.isArray(json)) return json[0] || null;
-
-  // Common API shapes
-  if (json.data && Array.isArray(json.data)) return json.data[0] || null;
-  if (Array.isArray(json.rows)) return json.rows[0] || null;
-  if (json.item && typeof json.item === 'object' && !Array.isArray(json.item)) return json.item;
-
-  // Generic single-key envelopes: { umbrella: {...} }, { candidate: {...} }, { client: {...} }, etc.
-  const keys = Object.keys(json);
-  if (keys.length === 1) {
-    const only = json[keys[0]];
-    if (only && typeof only === 'object' && !Array.isArray(only)) return only;
+  async function fetchUmbrellaById(id) {
+    try {
+      const res = await authFetch(API(`/api/umbrellas/${encodeURIComponent(id)}`));
+      if (!res || !res.ok) return null;
+      const json = await res.json().catch(() => null);
+      // FIX: handle `{ umbrella: {...} }` envelope as well as generic shapes
+      const row = json && (json.umbrella || unwrapSingle(json));
+      return row || null;
+    } catch (_) {
+      return null;
+    }
   }
 
-  // Fallback: return as-is (callers that expect an object can still read fields)
-  return json;
-}
+  // Updated to gracefully unwrap common single-row envelopes
+  function unwrapSingle(json) {
+    if (!json) return null;
+    if (Array.isArray(json)) return json[0] || null;
+    if (json.data && Array.isArray(json.data)) return json.data[0] || null;
+    if (Array.isArray(json.rows)) return json.rows[0] || null;
+    if (json.item && typeof json.item === 'object' && !Array.isArray(json.item)) return json.item;
+    const keys = Object.keys(json);
+    if (keys.length === 1) {
+      const only = json[keys[0]];
+      if (only && typeof only === 'object' && !Array.isArray(only)) return only;
+    }
+    return json;
+  }
 
   function fillFromCandidate() {
     const d = window.modalCtx?.data || {};
@@ -4117,7 +4034,6 @@ function unwrapSingle(json) {
 
   function prefillUmbrellaBankFields(umb) {
     if (!umb) return;
-    // Prefer explicit bank fields; fall back to common aliases
     const bank = umb.bank_name || umb.bank || umb.bankName || '';
     const sc   = umb.sort_code || umb.bank_sort_code || umb.sortCode || '';
     const an   = umb.account_number || umb.bank_account_number || umb.accountNumber || '';
@@ -4126,7 +4042,7 @@ function unwrapSingle(json) {
     if (bankName)  bankName.value  = bank;
     if (sortCode)  sortCode.value  = normaliseSort(sc);
     if (accNum)    accNum.value    = an;
-    if (accHolder) accHolder.value = ah; // always set to umbrella name per spec
+    if (accHolder) accHolder.value = ah;
     if (nameInput) nameInput.value = umb.name || nameInput.value || '';
 
     if (LOG) console.log('[PAYTAB] prefillUmbrellaBankFields', {
@@ -4147,9 +4063,8 @@ function unwrapSingle(json) {
 
   if (payMethod === 'UMBRELLA') {
     if (umbRow) umbRow.style.display = '';
-    setBankDisabled(true); // umbrella: bank details come from umbrella, not editable
+    setBankDisabled(true);
 
-    // Load umbrellas for datalist
     let umbrellas = [];
     try {
       const res = await authFetch(API('/api/umbrellas'));
@@ -4167,12 +4082,10 @@ function unwrapSingle(json) {
       }).join('');
     }
 
-    // If candidate already has an umbrella_id, fetch its bank details now
     if (currentUmbId) {
       if (LOG) console.log('[PAYTAB] prefill by currentUmbId', currentUmbId);
       await fetchAndPrefill(currentUmbId);
     } else {
-      // If only a name is stored (rare), try to find and prefill
       const typed = nameInput && nameInput.value ? nameInput.value.trim() : '';
       if (typed && umbrellas.length) {
         const hit = umbrellas.find(u => (u.name || '').trim() === typed);
@@ -4180,7 +4093,6 @@ function unwrapSingle(json) {
       }
     }
 
-    // Change handler: when user picks an umbrella by label, set id and prefill
     function syncUmbrellaSelection() {
       const val = (nameInput && nameInput.value) ? nameInput.value.trim() : '';
       if (!val) { 
@@ -4194,14 +4106,13 @@ function unwrapSingle(json) {
       if (id) {
         if (LOG) console.log('[PAYTAB] selected umbrella', { label: val, id });
         if (idHidden) idHidden.value = id;
-        fetchAndPrefill(id); // async, no await to keep UI snappy
+        fetchAndPrefill(id);
       } else {
         if (LOG) console.warn('[PAYTAB] no exact label match; clearing id & bank fields');
         if (idHidden) idHidden.value = '';
         if (bankName) bankName.value = '';
-        if (sortCode) sortCode.value = '';
+        if (sortCode)  sortCode.value  = '';
         if (accNum)   accNum.value   = '';
-        // keep accHolder as-is (user might type something)
       }
     }
 
@@ -4211,12 +4122,10 @@ function unwrapSingle(json) {
       nameInput.onchange = syncUmbrellaSelection;
     }
 
-    // Also respond if the hidden id changes programmatically
     if (idHidden) {
       idHidden.addEventListener('change', () => fetchAndPrefill(idHidden.value));
     }
 
-    // If user changes pay method while this tab is open, re-apply UI
     const onPmChanged = () => {
       const pm = (window.modalCtx?.payMethodState || window.modalCtx?.data?.pay_method || 'PAYE').toUpperCase();
       if (LOG) console.log('[PAYTAB] pay-method-changed', pm);
@@ -4234,13 +4143,13 @@ function unwrapSingle(json) {
     try { window.addEventListener('pay-method-changed', onPmChanged, { once: true }); } catch {}
 
   } else {
-    // PAYE: hide umbrella row and enable bank fields for editing; populate from candidate
     if (umbRow) umbRow.style.display = 'none';
     setBankDisabled(!isEdit);
     if (nameInput && idHidden) { nameInput.value = ''; idHidden.value = ''; }
     fillFromCandidate();
   }
 }
+
 
 // =================== MOUNT CLIENT RATES TAB (unchanged glue) ===================
 async function mountClientRatesTab() {
@@ -4303,7 +4212,8 @@ function mountClientHospitalsTab() {
 // ============================================================================
 async function openClientRateModal(client_id, existing) {
   const parentFrame = _currentFrame();
-  const parentEditable = parentFrame && parentFrame.mode === 'edit';
+  // ✅ Allow create OR edit to be interactive
+  const parentEditable = parentFrame && (parentFrame.mode === 'edit' || parentFrame.mode === 'create');
   const APILOG = (typeof window !== 'undefined' && !!window.__LOG_API) || (typeof __LOG_API !== 'undefined' && !!__LOG_API);
 
   const ctx = window.modalCtx; // 🔧 use canonical context
@@ -4410,7 +4320,8 @@ async function openClientRateModal(client_id, existing) {
     () => formHtml,
     async () => {
       const pf = _parentFrame();
-      if (!pf || pf.mode !== 'edit') return false;
+      // ✅ Allow create OR edit to apply
+      if (!pf || (pf.mode !== 'edit' && pf.mode !== 'create')) return false;
 
       if (!resolvedClientId) {
         alert('Cannot determine client. Please close and reopen the client, then try again.');
@@ -4855,7 +4766,8 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
         setFormReadOnly(byId('modalBody'), (this.mode === 'view' || this.mode === 'saving'));
       } else if (isChild) {
         const p = parentFrame();
-        setFormReadOnly(byId('modalBody'), !(p && p.mode === 'edit'));
+        // ✅ Allow edit *and* create on parent to enable child modals for new records
+        setFormReadOnly(byId('modalBody'), !(p && (p.mode === 'edit' || p.mode === 'create')));
       } else {
         setFormReadOnly(byId('modalBody'), (this.mode === 'view' || this.mode === 'saving'));
       }
@@ -4876,7 +4788,8 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
       setFormReadOnly(document.getElementById('modalBody'), (mode === 'view' || mode === 'saving'));
     } else if (isChild) {
       const p = parentFrame();
-      setFormReadOnly(document.getElementById('modalBody'), !(p && p.mode === 'edit'));
+      // ✅ Allow 'create' at parent level to unlock child controls in new flow
+      setFormReadOnly(document.getElementById('modalBody'), !(p && (p.mode === 'edit' || p.mode === 'create')));
     } else {
       setFormReadOnly(document.getElementById('modalBody'), (mode === 'view' || mode === 'saving'));
     }
@@ -5017,7 +4930,7 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
 
     // Visibility/enable rules — do NOT gate utility modals on parent edit
     top._updateButtons = () => {
-      const parentEditable = top.noParentGate ? true : (parent ? (parent.mode === 'edit') : true);
+      const parentEditable = top.noParentGate ? true : (parent ? (parent.mode === 'edit' || parent.mode === 'create') : true);
       const relatedBtn = document.getElementById('btnRelated');
 
       if (top.kind === 'advanced-search') {
@@ -5091,6 +5004,7 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
       }
 
       // Existing entity discard logic
+      const isChild = stack().length > 1;
       if (!isChild && !top.noParentGate && top.mode === 'edit') {
         if (!top.isDirty) {
           top.isDirty = false; setFrameMode(top, 'view'); top._snapshot = null;
@@ -5153,6 +5067,7 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
 
       // For Advanced Search: allow pressing “Search” even if not dirty
       if (top.kind !== 'advanced-search' && !top.noParentGate && top.mode !== 'view' && !top.isDirty) {
+        const isChild = stack().length > 1;
         if (isChild) {
           sanitizeModalGeometry();
           stack().pop();
@@ -5173,8 +5088,11 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
       top.persistCurrentTabState();
 
       // Gating: only block child saves when NOT a utility modal
+      const isChild = stack().length > 1;
       if (isChild && !top.noParentGate && top.kind !== 'advanced-search') {
-        if (!parent || parent.mode !== 'edit') return;
+        const parent = parentFrame();
+        // ✅ Allow save when parent is edit or create
+        if (!parent || !(parent.mode === 'edit' || parent.mode === 'create')) return;
       }
 
       top._saving = true; top._updateButtons();
@@ -5192,7 +5110,8 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
 
       if (!ok) { top._updateButtons(); return; }
 
-      if (isChild) {
+      const isChild2 = stack().length > 1;
+      if (isChild2) {
         try { window.dispatchEvent(new CustomEvent('modal-dirty')); } catch {}
         sanitizeModalGeometry();
         stack().pop();
@@ -5251,7 +5170,8 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
 
     // Apply initial mode interactivity
     if (isChild && !top.noParentGate) {
-      const parentEditable = parent && parent.mode === 'edit';
+      // ✅ Allow parent create to keep child editable
+      const parentEditable = parent && (parent.mode === 'edit' || parent.mode === 'create');
       setFormReadOnly(byId('modalBody'), !parentEditable);
     } else {
       setFrameMode(top, top.mode);
@@ -5276,9 +5196,11 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
 
 // =================== ADD HOSPITAL MODAL (UPDATED: push into stagedNew) ===================
 // ==== CHILD MODAL (ADD HOSPITAL) — throw on errors; return true on success ====
+
 function openClientHospitalModal(client_id) {
   const parentFrame = _currentFrame();
-  const parentEditable = parentFrame && parentFrame.mode === 'edit';
+  // ✅ Allow create OR edit to add hospitals pre-save
+  const parentEditable = parentFrame && (parentFrame.mode === 'edit' || parentFrame.mode === 'create');
   const ctx = window.modalCtx; // 🔧 use canonical context
 
   const formHtml = html(`
@@ -5294,7 +5216,8 @@ function openClientHospitalModal(client_id) {
     () => formHtml,
     async ()=> {
       const pf = _parentFrame();
-      if (!pf || pf.mode !== 'edit') return false;
+      // ✅ Allow create OR edit to apply
+      if (!pf || (pf.mode !== 'edit' && pf.mode !== 'create')) return false;
 
       const raw  = collectForm('#hospitalForm');
       const name = String(raw.hospital_name_norm || '').trim();
@@ -5316,12 +5239,15 @@ function openClientHospitalModal(client_id) {
 
 
 
+
 // =================== HOSPITALS TABLE (UPDATED: staged delete & edit) ===================
+
 function renderClientHospitalsTable() {
   const el = byId('clientHospitals'); if (!el) return;
 
   const frame = _currentFrame();
-  const parentEditable = frame && frame.mode === 'edit';
+  // ✅ Allow create OR edit to add/edit hospitals
+  const parentEditable = frame && (frame.mode === 'edit' || frame.mode === 'create');
 
   const ctx = window.modalCtx; // 🔧 use canonical context
   const H = ctx.hospitalsState || (ctx.hospitalsState = { existing: [], stagedNew: [], stagedEdits: {}, stagedDeletes: new Set() });
@@ -5420,6 +5346,9 @@ function renderClientHospitalsTable() {
   const addBtn = byId('btnAddClientHospital');
   if (addBtn && parentEditable) addBtn.onclick = () => openClientHospitalModal(ctx.data?.id);
 }
+
+
+
 async function renderClientSettingsUI(settingsObj){
   const div = byId('clientSettings'); if (!div) return;
 
