@@ -4513,7 +4513,6 @@ async function openClientRateModal(client_id, existing) {
     };
   }
 }
-
 function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
   // ===== Logging helpers (toggle with window.__LOG_MODAL = true/false) =====
   const LOG = (typeof window.__LOG_MODAL === 'boolean') ? window.__LOG_MODAL : false;
@@ -4622,7 +4621,7 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
     _wired: false,
     _closing: false,
     _saving: false,
-    _confirmingDiscard: false, // ⟵ NEW: re-entrancy guard for discard confirm
+    _confirmingDiscard: false, // re-entrancy guard for discard confirm
 
     persistCurrentTabState() {
       if (!window.modalCtx || (this.mode === 'view')) {
@@ -4833,7 +4832,7 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
       if (actionsBar) actionsBar.insertBefore(btnEdit, btnSave);
     }
 
-    // === DRAG WIRING =======================================================
+    // === DRAG WIRING (unchanged) ===
     (function ensureDragUI() {
       if (!header || !modalNode) return;
 
@@ -4889,9 +4888,8 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
         if (typeof prevDetach === 'function') { try { prevDetach(); } catch {} }
       };
     })();
-    // ======================================================================
 
-    // RELATED menu omitted for brevity (unchanged) …
+    // RELATED menu omitted for brevity …
 
     const defaultPrimary = isChild ? 'Apply' : 'Save';
     btnSave.textContent = defaultPrimary;
@@ -4906,14 +4904,14 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
       btnClose.setAttribute('title', label);
     };
 
-    // Visibility/enable rules
+    // Visibility/enable rules — **allow Save/Apply even when !isDirty**
     top._updateButtons = () => {
       const parentEditable = parent ? (parent.mode === 'edit') : true;
       const relatedBtn = document.getElementById('btnRelated');
 
       if (isChild) {
         btnSave.style.display = parentEditable ? '' : 'none';
-        btnSave.disabled = (!parentEditable) || (!top.isDirty);
+        btnSave.disabled = (!parentEditable) || top._saving;          // ← do not gate on isDirty
         btnEdit.style.display = 'none';
         if (relatedBtn) relatedBtn.disabled = true;
       } else {
@@ -4923,7 +4921,7 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
           btnSave.style.display = 'none';
         } else {
           btnSave.style.display = '';
-          btnSave.disabled = (!top.isDirty) || top._saving;
+          btnSave.disabled = top._saving;                              // ← do not gate on isDirty
         }
       }
       updateSecondaryLabel();
@@ -4950,7 +4948,7 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
 
     // Close / Cancel / Discard logic (with confirm re-entrancy guard)
     const handleSecondary = () => {
-      // NEW: bail out if we’re already confirming or closing
+      // guard against re-entry while confirming/closing
       if (top._confirmingDiscard || top._closing) return;
 
       if (!isChild && top.mode === 'edit') {
@@ -4958,15 +4956,13 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
           top.isDirty = false;
           setFrameMode(top, 'view');
           top._snapshot = null;
-          // Give closure even with no changes
           try { window.__toast?.('No changes'); } catch {}
           return;
         } else {
-          // NEW: single confirm guarded against re-entry
           let ok = false;
           try {
             top._confirmingDiscard = true;
-            btnClose.disabled = true; // optional UX hardening during confirm
+            btnClose.disabled = true;
             ok = window.confirm('Discard changes and return to view?');
           } finally {
             top._confirmingDiscard = false;
@@ -4997,7 +4993,6 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
       const m = byId('modal'); if (m) m.classList.remove('dragging');
 
       if (!isChild && (top.mode === 'create') && top.isDirty) {
-        // NEW: guard confirm in create-discard as well
         let ok = false;
         try {
           top._confirmingDiscard = true;
@@ -5030,7 +5025,7 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
     };
     btnClose.onclick = handleSecondary;
 
-    // Save / Apply — if no changes, we still give closure (toast + close/exit)
+    // Save / Apply — handle “no changes” by exiting
     const onSaveClick = async () => {
       if (top._saving) return;
 
@@ -5100,9 +5095,9 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
         setFrameMode(top, 'view');
       }
     };
-    btnSave.onclick = onSaveClick;
+    byId('btnSave').onclick = onSaveClick;
 
-    // Global dirty → enable Save in parent edit/create
+    // Global dirty → enable Save in parent edit/create (no longer used to disable, but keeps button state current)
     const onDirtyEvt = () => {
       if (!isChild && (top.mode === 'edit' || top.mode === 'create')) {
         top.isDirty = true; top._updateButtons();
@@ -5112,7 +5107,7 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
     if (!top._wired) {
       window.addEventListener('modal-dirty', onDirtyEvt);
 
-      // NEW: suppress ESC while confirming/closing to avoid duplicate prompts
+      // suppress ESC/overlay while confirming/closing
       const onEsc = (e) => {
         if (e.key === 'Escape') {
           if (top._confirmingDiscard || top._closing) return;
@@ -5121,7 +5116,6 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn) {
       };
       window.addEventListener('keydown', onEsc);
 
-      // NEW: suppress overlay click while confirming/closing to avoid duplicate prompts
       const onOverlayClick = (e) => {
         if (top._confirmingDiscard || top._closing) return;
         if (e.target === byId('modalBack')) byId('btnCloseModal').click();
