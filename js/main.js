@@ -2540,7 +2540,8 @@ async function openCandidate(row) {
           band     : (patchRaw.hasOwnProperty('band') ? patchRaw.band : original.band),
           date_from: patchRaw.date_from ?? original.date_from,
           date_to  : patchRaw.hasOwnProperty('date_to') ? patchRaw.date_to : original.date_to,
-          rate_type: (patchRaw.rate_type ?? original.rate_type || '').toUpperCase(),
+        rate_type: (patchRaw.rate_type ?? original.rate_type ?? '').toUpperCase(),
+
           pay_day  : patchRaw.hasOwnProperty('pay_day')   ? patchRaw.pay_day   : original.pay_day,
           pay_night: patchRaw.hasOwnProperty('pay_night') ? patchRaw.pay_night : original.pay_night,
           pay_sat  : patchRaw.hasOwnProperty('pay_sat')   ? patchRaw.pay_sat   : original.pay_sat,
