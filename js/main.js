@@ -2376,7 +2376,7 @@ async function openCandidate(row) {
 
       try {
         const raw = await res.clone().text();
-        if (LOG) console.debug('[HTTP] raw body (≤2KB):', raw.slice(0, 2048));
+        if (LOG) console.debug('[HTTP] raw body (≤2KB):', raw slice(0, 2048)); // optional peek
       } catch (peekErr) { W('[HTTP] raw peek failed', peekErr?.message || peekErr); }
 
       if (res.ok) {
@@ -2435,7 +2435,6 @@ async function openCandidate(row) {
       const isNew = !window.modalCtx?.data?.id;
 
       const fs   = window.modalCtx.formState || { __forId: null, main:{}, pay:{} };
-      // Treat create with sentinel openToken as "same record" (for Main + Pay staged blocks)
       const hasId = !!window.modalCtx.data?.id;
       const same = hasId ? (fs.__forId === window.modalCtx.data.id)
                          : (fs.__forId === window.modalCtx.openToken || fs.__forId == null);
@@ -2454,7 +2453,6 @@ async function openCandidate(row) {
       delete payload.umbrella_name;
       delete payload.tms_ref;
 
-      // Carry forward untouched fields from hydrated row
       if (!payload.first_name && full?.first_name) payload.first_name = full.first_name;
       if (!payload.last_name  && full?.last_name)  payload.last_name  = full.last_name;
       if (typeof payload.key_norm === 'undefined' && typeof full?.key_norm !== 'undefined') payload.key_norm = full.key_norm;
@@ -2491,24 +2489,29 @@ async function openCandidate(row) {
       L('[onSave] saved', { ok: !!saved, candidateId, savedKeys: Array.isArray(saved)?[]:Object.keys(saved||{}) });
       if (!candidateId) { alert('Failed to save candidate'); return { ok:false }; }
 
-      // ===== NEW: Pre-flight validation that each override (new or edited) has a covering client-default at date_from =====
+      // ===== NEW: Pre-flight coverage + per-bucket charge guards =====
       const O = window.modalCtx.overrides || { existing: [], stagedNew: [], stagedEdits: {}, stagedDeletes: new Set() };
 
-      async function hasCoveringDefault(client_id, role, band, date_from) {
+      async function getCoveringDefault(client_id, role, band, date_from) {
         try {
-          if (!client_id || !role || !date_from) return false;
+          if (!client_id || !role || !date_from) return null;
           const list = await listClientRates(client_id, { active_on: date_from, only_enabled: true });
           const rows = Array.isArray(list) ? list.filter(w => !w.disabled_at_utc && String(w.role) === String(role)) : [];
-          // exact band match first
           let win = rows.find(w => (w.band ?? null) === (band ?? null));
           if (!win && (band == null)) win = rows.find(w => w.band == null);
-          return !!win;
-        } catch {
-          return false;
-        }
+          return win || null;
+        } catch { return null; }
+      }
+      function bucketsMissingCharge(win, payObj){
+        const missing = [];
+        if (!win) return ['day','night','sat','sun','bh'].filter(b=>payObj[`pay_${b}`]!=null);
+        ['day','night','sat','sun','bh'].forEach(b=>{
+          if (payObj[`pay_${b}`] != null && (win[`charge_${b}`] == null)) missing.push(b);
+        });
+        return missing;
       }
 
-      // Validate EDITS (effective values = original + patch)
+      // Validate EDITS
       for (const [editId, patchRaw] of Object.entries(O.stagedEdits || {})) {
         const original = (O.existing || []).find(x => String(x.id) === String(editId));
         if (!original) { alert('Cannot locate original override to validate'); return { ok:false }; }
@@ -2516,9 +2519,22 @@ async function openCandidate(row) {
         const eff_role      = patchRaw.role      ?? original.role;
         const eff_band      = (patchRaw.hasOwnProperty('band') ? patchRaw.band : original.band);
         const eff_date_from = patchRaw.date_from ?? original.date_from;
-        const okCover = await hasCoveringDefault(eff_client_id, eff_role, eff_band, eff_date_from);
-        if (!okCover) {
+
+        const win = await getCoveringDefault(eff_client_id, eff_role, eff_band, eff_date_from);
+        if (!win) {
           alert(`No active client default covers ${eff_role}${eff_band?` / ${eff_band}`:''} on ${formatIsoToUk(eff_date_from)}.\nPlease adjust the Effective from date or add a client rate.`);
+          return { ok:false };
+        }
+        const payObj = {
+          pay_day:   (patchRaw.hasOwnProperty('pay_day')   ? patchRaw.pay_day   : original.pay_day),
+          pay_night: (patchRaw.hasOwnProperty('pay_night') ? patchRaw.pay_night : original.pay_night),
+          pay_sat:   (patchRaw.hasOwnProperty('pay_sat')   ? patchRaw.pay_sat   : original.pay_sat),
+          pay_sun:   (patchRaw.hasOwnProperty('pay_sun')   ? patchRaw.pay_sun   : original.pay_sun),
+          pay_bh:    (patchRaw.hasOwnProperty('pay_bh')    ? patchRaw.pay_bh    : original.pay_bh)
+        };
+        const missing = bucketsMissingCharge(win, payObj);
+        if (missing.length) {
+          alert(`Cannot save override: no client charge for ${missing.map(b=>bucketLabel[b]).join(', ')} on ${formatIsoToUk(eff_date_from)}.\nRemove those pay values or set client charges first.`);
           return { ok:false };
         }
       }
@@ -2529,36 +2545,48 @@ async function openCandidate(row) {
         const eff_role      = nv.role;
         const eff_band      = (nv.hasOwnProperty('band') ? nv.band : null);
         const eff_date_from = nv.date_from;
-        const okCover = await hasCoveringDefault(eff_client_id, eff_role, eff_band, eff_date_from);
-        if (!okCover) {
+
+        const win = await getCoveringDefault(eff_client_id, eff_role, eff_band, eff_date_from);
+        if (!win) {
           alert(`No active client default covers ${eff_role}${eff_band?` / ${eff_band}`:''} on ${formatIsoToUk(eff_date_from)}.\nPlease adjust the Effective from date or add a client rate.`);
           return { ok:false };
         }
+        const payObj = {
+          pay_day:   nv.pay_day,
+          pay_night: nv.pay_night,
+          pay_sat:   nv.pay_sat,
+          pay_sun:   nv.pay_sun,
+          pay_bh:    nv.pay_bh
+        };
+        const missing = bucketsMissingCharge(win, payObj);
+        if (missing.length) {
+          alert(`Cannot save override: no client charge for ${missing.map(b=>bucketLabel[b]).join(', ')} on ${formatIsoToUk(eff_date_from)}.\nRemove those pay values or set client charges first.`);
+          return { ok:false };
+        }
       }
-      // ===== End NEW validation =====
+      // ===== End NEW guards =====
 
-      // Persist staged overrides (existing order preserved)
-      L('[onSave] overrides', { deletes: Array.from(O.stagedDeletes||[]), edits: Object.keys(O.stagedEdits||{}), newCount: (O.stagedNew||[]).length });
+      // ===== Persist staged overrides (existing order preserved) =====
+      const OX = window.modalCtx.overrides || { existing: [], stagedNew: [], stagedEdits: {}, stagedDeletes: new Set() };
+      L('[onSave] overrides', { deletes: Array.from(OX.stagedDeletes||[]), edits: Object.keys(OX.stagedEdits||{}), newCount: (OX.stagedNew||[]).length });
 
       // Deletes
-      for (const delId of O.stagedDeletes) {
+      for (const delId of OX.stagedDeletes) {
         const res = await authFetch(API(`/api/rates/candidate-overrides/${encodeURIComponent(delId)}`), { method: 'DELETE' });
         if (!res.ok && res.status !== 404) { const msg = await res.text().catch(()=> 'Delete override failed'); alert(msg); return { ok:false }; }
       }
 
       // Edits — PATCH uses candidateId in path + ORIGINAL keys in query, updates in body
-      for (const [editId, patchRaw] of Object.entries(O.stagedEdits || {})) {
-        const original = (O.existing || []).find(x => String(x.id) === String(editId));
+      for (const [editId, patchRaw] of Object.entries(OX.stagedEdits || {})) {
+        const original = (OX.existing || []).find(x => String(x.id) === String(editId));
         if (!original) { alert('Cannot locate original override to patch'); return { ok:false }; }
 
-        // Build query string from ORIGINAL keys
         const q = new URLSearchParams();
         if (original.client_id) q.set('client_id', original.client_id);
         if (original.role != null) q.set('role', String(original.role));
         if (original.band == null || original.band === '') q.set('band', ''); else q.set('band', String(original.band));
         if (original.rate_type) q.set('rate_type', String(original.rate_type).toUpperCase());
 
-        // Sanitize body: strip empty strings; dates must be ISO YYYY-MM-DD
         const body = {};
         for (const [k,v] of Object.entries(patchRaw || {})) {
           if (v === '' || v === undefined) continue;
@@ -2580,7 +2608,7 @@ async function openCandidate(row) {
       }
 
       // Creates
-      for (const nv of (O.stagedNew || [])) {
+      for (const nv of (OX.stagedNew || [])) {
         if (!nv.client_id) { alert('Override must include client_id'); return { ok:false }; }
         const clean = {};
         for (const [k,v] of Object.entries(nv)) {
@@ -2655,6 +2683,7 @@ async function openCandidate(row) {
     L('skip companion loads (no full.id)');
   }
 }
+
 
 // ====================== mountCandidatePayTab (FIXED) ======================
 // FRONTEND — UPDATED
@@ -3248,7 +3277,7 @@ async function openCandidateRateModal(candidate_id, existing) {
 
   let cache = { windows: [], roles: [], bandsByRole: {} };
 
-  // Helpers: ERNI & format
+  // === Helpers: ERNI, formatting, and inline error handling ===
   async function _erniMultiplier(){
     if (typeof window.__ERNI_MULT__ === 'number') return window.__ERNI_MULT__;
     let pct = 0;
@@ -3265,6 +3294,28 @@ async function openCandidateRateModal(candidate_id, existing) {
   }
   function numOrNull(v){ const n = Number(v); return Number.isFinite(n) ? n : null; }
   const fmt = v => (v==null || Number.isNaN(v)) ? '—' : (Math.round(v*100)/100).toFixed(2);
+  const bucketLabel = { day:'Day', night:'Night', sat:'Sat', sun:'Sun', bh:'BH' };
+
+  function setFieldError(bucket, msg){
+    // Place/clear a small hint div directly after the corresponding pay input
+    const rowInput = document.querySelector(`#candRateForm input[name="pay_${bucket}"]`);
+    if (!rowInput) return;
+    let hint = rowInput.parentElement?.querySelector?.(`.field-hint.err[data-bucket="${bucket}"]`);
+    if (msg) {
+      if (!hint) {
+        hint = document.createElement('div');
+        hint.className = 'hint field-hint err';
+        hint.setAttribute('data-bucket', bucket);
+        rowInput.parentElement.appendChild(hint);
+      }
+      hint.textContent = msg;
+    } else if (hint) {
+      hint.remove();
+    }
+  }
+  function clearAllFieldErrors(){
+    document.querySelectorAll('#candRateForm .field-hint.err').forEach(el=>el.remove());
+  }
 
   // Resolve the single active default window for (client, role, band|null, active_on)
   async function resolveChargeBuckets(client_id, role, band, active_on){
@@ -3288,6 +3339,25 @@ async function openCandidateRateModal(candidate_id, existing) {
     } catch(e){ return null; }
   }
 
+  // Cache last resolved charges to avoid redundant lookups
+  let _lastChargesKey = null;
+  let _lastCharges = null;
+
+  function validatePayAgainstCharges(charges){
+    // Returns array of invalid buckets; also paints inline errors
+    clearAllFieldErrors();
+    const invalid = [];
+    ['day','night','sat','sun','bh'].forEach(b=>{
+      const pay = numOrNull(document.querySelector(`#candRateForm input[name="pay_${b}"]`)?.value);
+      const chg = charges ? charges[b] : null;
+      if (pay != null && chg == null) {
+        invalid.push(b);
+        setFieldError(b, `No client charge for ${bucketLabel[b]} on the selected start date — remove this value or set a client rate first.`);
+      }
+    });
+    return invalid;
+  }
+
   async function recomputeOverrideMargins(){
     try {
       const rateType = String(byId('cr_rate_type')?.value || '').toUpperCase();
@@ -3298,9 +3368,16 @@ async function openCandidateRateModal(candidate_id, existing) {
       const isoFrom  = parseUkDateToIso(byId('cr_date_from')?.value || '');
       if (!clientId || !role || !isoFrom) return;
 
-      const charges = await resolveChargeBuckets(clientId, role, band, isoFrom);
-      const mult    = await _erniMultiplier();
+      const key = [clientId, role, band ?? '', isoFrom].join('|');
+      const charges = (key === _lastChargesKey && _lastCharges)
+        ? _lastCharges
+        : await resolveChargeBuckets(clientId, role, band, isoFrom);
+      _lastChargesKey = key; _lastCharges = charges;
 
+      // Per-bucket "no charge ⇒ cannot enter pay" validation (live)
+      validatePayAgainstCharges(charges);
+
+      const mult    = await _erniMultiplier();
       ['day','night','sat','sun','bh'].forEach(b=>{
         const pay = numOrNull(document.querySelector(`#candRateForm input[name="pay_${b}"]`)?.value);
         const chg = charges ? charges[b] : null;
@@ -3357,31 +3434,21 @@ async function openCandidateRateModal(candidate_id, existing) {
         if (isoTo && isoTo < isoFrom) { alert('“Effective to” cannot be before “Effective from”.'); return false; }
       }
 
-      // Gate by client defaults (using isoFrom) — loads enabled windows for the date
-      const active_on = isoFrom;
-      const list = await listClientRates(client_id, { active_on, only_enabled: true });
-      cache.windows = (Array.isArray(list) ? list.filter(w => !w.disabled_at_utc) : []);
+      // Resolve charges at isoFrom and run per-bucket guard (block Apply if any pay_* has no charge_*)
+      const charges = await resolveChargeBuckets(client_id, role, band, isoFrom);
+      if (!charges) {
+        alert(`No active client default for ${role}${band?` / ${band}`:''} on ${formatIsoToUk(isoFrom)}.`);
+        return false;
+      }
+      const invalid = validatePayAgainstCharges(charges);
+      if (invalid.length) {
+        // Keep modal open; inline errors are already shown
+        const names = invalid.map(b=>bucketLabel[b]).join(', ');
+        if (LOG) console.warn('[RATES] Block Apply due to missing charge buckets for:', names);
+        return false;
+      }
 
-      const roles = new Set();
-      const bandsByRole = {};
-      (cache.windows).forEach(w => {
-        if (!w.role) return;
-        roles.add(w.role);
-        const bKey = (w.band == null ? '' : String(w.band));
-        (bandsByRole[w.role] ||= new Set()).add(bKey);
-      });
-      cache.roles = [...roles];
-      cache.bandsByRole = Object.fromEntries(
-        cache.roles.map(code => [code, [...(bandsByRole[code] || new Set())]])
-      );
-
-      const allowed = cache.roles.slice().sort((a,b)=> a.localeCompare(b));
-      if (!allowed.includes(role)) { alert(`No active client default for role ${role} at ${formatIsoToUk(isoFrom)}`); return false; }
-      const bands = cache.bandsByRole[role] || [];
-      const hasNull = bands.includes('');
-      if (band == null && !hasNull) { alert(`This client has no band-null window for ${role} on ${formatIsoToUk(isoFrom)}.`); return false; }
-      if (band != null && !bands.includes(String(band))) { alert(`No active band ${band} for ${role} on ${formatIsoToUk(isoFrom)}.`); return false; }
-
+      // Build staged object (unchanged logic)
       const stagedAll = {
         id        : existing?.id,
         candidate_id,
@@ -3546,7 +3613,7 @@ async function openCandidateRateModal(candidate_id, existing) {
       if (existing?.band != null) selBand.value = existing.band;
     }
 
-    // Each time inputs change, recompute live margins
+    // Live recompute + validation on input changes
     recomputeOverrideMargins().catch(()=>{});
   }
 
@@ -3589,7 +3656,6 @@ async function openCandidateRateModal(candidate_id, existing) {
     recomputeOverrideMargins().catch(()=>{});
   }
 }
-
 
 
 function renderCalendar(timesheets){
