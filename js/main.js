@@ -2435,7 +2435,7 @@ async function openCandidate(row) {
       const isNew = !window.modalCtx?.data?.id;
 
       const fs   = window.modalCtx.formState || { __forId: null, main:{}, pay:{} };
-      // 🔧 CHANGE: treat create with sentinel openToken as "same record" (for Main + Pay staged blocks)
+      // Treat create with sentinel openToken as "same record" (for Main + Pay staged blocks)
       const hasId = !!window.modalCtx.data?.id;
       const same = hasId ? (fs.__forId === window.modalCtx.data.id)
                          : (fs.__forId === window.modalCtx.openToken || fs.__forId == null);
@@ -2491,11 +2491,56 @@ async function openCandidate(row) {
       L('[onSave] saved', { ok: !!saved, candidateId, savedKeys: Array.isArray(saved)?[]:Object.keys(saved||{}) });
       if (!candidateId) { alert('Failed to save candidate'); return { ok:false }; }
 
-      // Persist staged overrides
+      // ===== NEW: Pre-flight validation that each override (new or edited) has a covering client-default at date_from =====
       const O = window.modalCtx.overrides || { existing: [], stagedNew: [], stagedEdits: {}, stagedDeletes: new Set() };
+
+      async function hasCoveringDefault(client_id, role, band, date_from) {
+        try {
+          if (!client_id || !role || !date_from) return false;
+          const list = await listClientRates(client_id, { active_on: date_from, only_enabled: true });
+          const rows = Array.isArray(list) ? list.filter(w => !w.disabled_at_utc && String(w.role) === String(role)) : [];
+          // exact band match first
+          let win = rows.find(w => (w.band ?? null) === (band ?? null));
+          if (!win && (band == null)) win = rows.find(w => w.band == null);
+          return !!win;
+        } catch {
+          return false;
+        }
+      }
+
+      // Validate EDITS (effective values = original + patch)
+      for (const [editId, patchRaw] of Object.entries(O.stagedEdits || {})) {
+        const original = (O.existing || []).find(x => String(x.id) === String(editId));
+        if (!original) { alert('Cannot locate original override to validate'); return { ok:false }; }
+        const eff_client_id = patchRaw.client_id ?? original.client_id;
+        const eff_role      = patchRaw.role      ?? original.role;
+        const eff_band      = (patchRaw.hasOwnProperty('band') ? patchRaw.band : original.band);
+        const eff_date_from = patchRaw.date_from ?? original.date_from;
+        const okCover = await hasCoveringDefault(eff_client_id, eff_role, eff_band, eff_date_from);
+        if (!okCover) {
+          alert(`No active client default covers ${eff_role}${eff_band?` / ${eff_band}`:''} on ${formatIsoToUk(eff_date_from)}.\nPlease adjust the Effective from date or add a client rate.`);
+          return { ok:false };
+        }
+      }
+
+      // Validate NEW rows
+      for (const nv of (O.stagedNew || [])) {
+        const eff_client_id = nv.client_id;
+        const eff_role      = nv.role;
+        const eff_band      = (nv.hasOwnProperty('band') ? nv.band : null);
+        const eff_date_from = nv.date_from;
+        const okCover = await hasCoveringDefault(eff_client_id, eff_role, eff_band, eff_date_from);
+        if (!okCover) {
+          alert(`No active client default covers ${eff_role}${eff_band?` / ${eff_band}`:''} on ${formatIsoToUk(eff_date_from)}.\nPlease adjust the Effective from date or add a client rate.`);
+          return { ok:false };
+        }
+      }
+      // ===== End NEW validation =====
+
+      // Persist staged overrides (existing order preserved)
       L('[onSave] overrides', { deletes: Array.from(O.stagedDeletes||[]), edits: Object.keys(O.stagedEdits||{}), newCount: (O.stagedNew||[]).length });
 
-      // Deletes (unchanged)
+      // Deletes
       for (const delId of O.stagedDeletes) {
         const res = await authFetch(API(`/api/rates/candidate-overrides/${encodeURIComponent(delId)}`), { method: 'DELETE' });
         if (!res.ok && res.status !== 404) { const msg = await res.text().catch(()=> 'Delete override failed'); alert(msg); return { ok:false }; }
@@ -2510,9 +2555,7 @@ async function openCandidate(row) {
         const q = new URLSearchParams();
         if (original.client_id) q.set('client_id', original.client_id);
         if (original.role != null) q.set('role', String(original.role));
-        // band=null means bandless window; send empty value for null band
-        if (original.band == null || original.band === '') q.set('band', '');
-        else q.set('band', String(original.band));
+        if (original.band == null || original.band === '') q.set('band', ''); else q.set('band', String(original.band));
         if (original.rate_type) q.set('rate_type', String(original.rate_type).toUpperCase());
 
         // Sanitize body: strip empty strings; dates must be ISO YYYY-MM-DD
@@ -2536,7 +2579,7 @@ async function openCandidate(row) {
         }
       }
 
-      // Creates (unchanged, but ensure ISO dates are already staged)
+      // Creates
       for (const nv of (O.stagedNew || [])) {
         if (!nv.client_id) { alert('Override must include client_id'); return { ok:false }; }
         const clean = {};
@@ -2566,7 +2609,6 @@ async function openCandidate(row) {
       }
 
       // Keep open; flip to view mode via showModal logic
-      // IMPORTANT: do not clear roles; copy back to data & keep rolesState
       const mergedRoles = (saved && saved.roles) || payload.roles || window.modalCtx.data?.roles || [];
       window.modalCtx.data       = { ...(window.modalCtx.data || {}), ...(saved || {}), id: candidateId, roles: mergedRoles };
       window.modalCtx.formState  = { __forId: candidateId, main: {}, pay: {} };
