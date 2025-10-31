@@ -2376,7 +2376,7 @@ async function openCandidate(row) {
 
       try {
         const raw = await res.clone().text();
-        if (LOG) console.debug('[HTTP] raw body (≤2KB):', raw slice(0, 2048)); // optional peek
+        if (LOG) console.debug('[HTTP] raw body (≤2KB):', raw.slice(0, 2048)); // optional peek
       } catch (peekErr) { W('[HTTP] raw peek failed', peekErr?.message || peekErr); }
 
       if (res.ok) {
