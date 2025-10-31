@@ -2704,6 +2704,7 @@ async function openUmbrella(row){
 // ==================================
 // 2) renderCandidateRatesTable(...)
 // ==================================
+// Now computes margins for each override row by resolving client charges at date_from (memoized per render)
 async function renderCandidateRatesTable() {
   const LOG = !!window.__LOG_RATES;
   const token    = window.modalCtx.openToken;
@@ -2741,6 +2742,47 @@ async function renderCandidateRatesTable() {
   }
   for (const n of (O.stagedNew || [])) rows.push({ ...n, _isNew: true });
 
+  const fmt = v => (v==null || Number.isNaN(v)) ? '—' : (Math.round(v*100)/100).toFixed(2);
+  const mult = await (async ()=>{ // ERNI multiplier
+    if (typeof window.__ERNI_MULT__ === 'number') return window.__ERNI_MULT__;
+    let pct = 0;
+    try {
+      if (typeof getSettingsCached === 'function') {
+        const s = await getSettingsCached();
+        let p = s?.erni_pct ?? s?.employers_ni_percent ?? 0;
+        p = Number(p) || 0; if (p > 1) p = p/100;
+        window.__ERNI_MULT__ = 1 + p; return window.__ERNI_MULT__;
+      }
+    } catch {}
+    window.__ERNI_MULT__ = 1; return 1;
+  })();
+
+  // Resolve charge buckets for each unique (client, role, band|null, date_from)
+  const keyOf = r => [r.client_id, r.role || '', (r.band==null?'':String(r.band)), r.date_from || ''].join('|');
+  const uniqueKeys = Array.from(new Set(rows.map(keyOf)));
+  const chargeMap = Object.create(null);
+
+  async function loadChargesForKey(key){
+    const [client_id, role, bandKey, date_from] = key.split('|');
+    const band = (bandKey === '' ? null : bandKey);
+    if (!client_id || !role || !date_from) return null;
+    try {
+      const list = await listClientRates(client_id, { active_on: date_from, only_enabled: true });
+      const rows = Array.isArray(list) ? list.filter(w=>!w.disabled_at_utc && w.role===role) : [];
+      let win = rows.find(w => (w.band ?? null) === (band ?? null));
+      if (!win && (band == null)) win = rows.find(w => w.band == null);
+      return win ? {
+        day: win.charge_day ?? null,
+        night: win.charge_night ?? null,
+        sat: win.charge_sat ?? null,
+        sun: win.charge_sun ?? null,
+        bh: win.charge_bh ?? null
+      } : null;
+    } catch(e){ return null; }
+  }
+
+  await Promise.all(uniqueKeys.map(async k => { chargeMap[k] = await loadChargesForKey(k); }));
+
   if (!rows.length) {
     div.innerHTML = `
       <div class="hint" style="margin-bottom:8px">No candidate-specific overrides. Client defaults will apply.</div>
@@ -2755,8 +2797,19 @@ async function renderCandidateRatesTable() {
     return;
   }
 
-  const cols    = ['client','role','band','rate_type','pay_day','pay_night','pay_sat','pay_sun','pay_bh','date_from','date_to','_state'];
-  const headers = ['Client','Role','Band','Type','Pay Day','Pay Night','Pay Sat','Pay Sun','Pay BH','From','To','Status'];
+  const cols    = [
+    'client','role','band','rate_type',
+    'pay_day','pay_night','pay_sat','pay_sun','pay_bh',
+    // derived margins per bucket
+    'margin_day','margin_night','margin_sat','margin_sun','margin_bh',
+    'date_from','date_to','_state'
+  ];
+  const headers = [
+    'Client','Role','Band','Type',
+    'Pay Day','Pay Night','Pay Sat','Pay Sun','Pay BH',
+    'Margin Day','Margin Night','Margin Sat','Margin Sun','Margin BH',
+    'From','To','Status'
+  ];
 
   const tbl   = document.createElement('table'); tbl.className = 'grid';
   const thead = document.createElement('thead'); const trh = document.createElement('tr');
@@ -2768,6 +2821,20 @@ async function renderCandidateRatesTable() {
   rows.forEach(r => {
     const tr = document.createElement('tr');
     if (parentEditable) tr.ondblclick = () => openCandidateRateModal(window.modalCtx.data?.id, r);
+
+    const key = keyOf(r);
+    const charges = chargeMap[key] || null;
+    const isPAYE = String(r.rate_type || '').toUpperCase() === 'PAYE';
+
+    const margin = {};
+    ['day','night','sat','sun','bh'].forEach(b=>{
+      const pay = r[`pay_${b}`];
+      const chg = charges ? charges[b] : null;
+      margin[b] = (chg!=null && pay!=null)
+        ? (isPAYE ? (chg - (pay * mult)) : (chg - pay))
+        : null;
+    });
+
     const pretty = {
       client: clientsById[r.client_id] || '',
       role  : r.role || '',
@@ -2778,10 +2845,16 @@ async function renderCandidateRatesTable() {
       pay_sat:   r.pay_sat ?? '—',
       pay_sun:   r.pay_sun ?? '—',
       pay_bh:    r.pay_bh ?? '—',
+      margin_day:   fmt(margin.day),
+      margin_night: fmt(margin.night),
+      margin_sat:   fmt(margin.sat),
+      margin_sun:   fmt(margin.sun),
+      margin_bh:    fmt(margin.bh),
       date_from: formatDisplayValue('date_from', r.date_from),
       date_to  : formatDisplayValue('date_to',   r.date_to),
       _state   : r._isNew ? 'Staged (new)' : (r._edited ? 'Staged (edited)' : '')
     };
+
     cols.forEach(c => { const td=document.createElement('td'); td.textContent=String(pretty[c] ?? ''); tr.appendChild(td); });
     tb.appendChild(tr);
   });
@@ -3107,10 +3180,97 @@ async function openCandidateRateModal(candidate_id, existing) {
       ${input('pay_sat','Pay (Sat)',     existing?.pay_sat     ?? '', 'number')}
       ${input('pay_sun','Pay (Sun)',     existing?.pay_sun     ?? '', 'number')}
       ${input('pay_bh','Pay (BH)',       existing?.pay_bh       ?? '', 'number')}
+
+      <!-- Live margins preview -->
+      <div class="row" style="grid-column:1 / -1; margin-top:10px">
+        <table class="grid" id="cr_margins_tbl" style="width:100%">
+          <thead>
+            <tr>
+              <th>Bucket</th>
+              <th>Margin</th>
+              <th class="hint">Formula uses active client charge at start date</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${['day','night','sat','sun','bh'].map(b=>`
+              <tr>
+                <td>${b.toUpperCase()}</td>
+                <td><span id="cr_m_${b}">—</span></td>
+                <td></td>
+              </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>
     </div>
   `);
 
   let cache = { windows: [], roles: [], bandsByRole: {} };
+
+  // Helpers: ERNI & format
+  async function _erniMultiplier(){
+    if (typeof window.__ERNI_MULT__ === 'number') return window.__ERNI_MULT__;
+    let pct = 0;
+    try {
+      if (typeof getSettingsCached === 'function') {
+        const s = await getSettingsCached();
+        let p = s?.erni_pct ?? s?.employers_ni_percent ?? 0;
+        p = Number(p) || 0; if (p > 1) p = p/100;
+        window.__ERNI_MULT__ = 1 + p;
+        return window.__ERNI_MULT__;
+      }
+    } catch {}
+    window.__ERNI_MULT__ = 1; return 1;
+  }
+  function numOrNull(v){ const n = Number(v); return Number.isFinite(n) ? n : null; }
+  const fmt = v => (v==null || Number.isNaN(v)) ? '—' : (Math.round(v*100)/100).toFixed(2);
+
+  // Resolve the single active default window for (client, role, band|null, active_on)
+  async function resolveChargeBuckets(client_id, role, band, active_on){
+    if (!client_id || !role || !active_on) return null;
+    try {
+      const list = await listClientRates(client_id, { active_on, only_enabled: true });
+      const rows = Array.isArray(list) ? list.filter(w=>!w.disabled_at_utc && w.role===role) : [];
+      // exact band first
+      let win = rows.find(w => (w.band ?? null) === (band ?? null));
+      if (!win && (band == null)) {
+        // band-null desired: find band-null default
+        win = rows.find(w => w.band == null);
+      }
+      return win ? {
+        day: win.charge_day ?? null,
+        night: win.charge_night ?? null,
+        sat: win.charge_sat ?? null,
+        sun: win.charge_sun ?? null,
+        bh: win.charge_bh ?? null
+      } : null;
+    } catch(e){ return null; }
+  }
+
+  async function recomputeOverrideMargins(){
+    try {
+      const rateType = String(byId('cr_rate_type')?.value || '').toUpperCase();
+      const clientId = byId('cr_client_id')?.value || '';
+      const role     = byId('cr_role')?.value || '';
+      const bandSel  = byId('cr_band')?.value ?? '';
+      const band     = (bandSel === '' ? null : bandSel);
+      const isoFrom  = parseUkDateToIso(byId('cr_date_from')?.value || '');
+      if (!clientId || !role || !isoFrom) return;
+
+      const charges = await resolveChargeBuckets(clientId, role, band, isoFrom);
+      const mult    = await _erniMultiplier();
+
+      ['day','night','sat','sun','bh'].forEach(b=>{
+        const pay = numOrNull(document.querySelector(`#candRateForm input[name="pay_${b}"]`)?.value);
+        const chg = charges ? charges[b] : null;
+        let m = null;
+        if (chg!=null && pay!=null) {
+          m = (rateType === 'PAYE') ? (chg - (pay * mult)) : (chg - pay);
+        }
+        const sp = byId(`cr_m_${b}`);
+        if (sp) sp.textContent = fmt(m);
+      });
+    } catch {}
+  }
 
   showModal(
     existing ? 'Edit Candidate Rate Override' : 'Add Candidate Rate Override',
@@ -3343,6 +3503,9 @@ async function openCandidateRateModal(candidate_id, existing) {
       selRole.dispatchEvent(new Event('change'));
       if (existing?.band != null) selBand.value = existing.band;
     }
+
+    // Each time inputs change, recompute live margins
+    recomputeOverrideMargins().catch(()=>{});
   }
 
   function onRoleChanged() {
@@ -3360,18 +3523,31 @@ async function openCandidateRateModal(candidate_id, existing) {
       bandRow.style.display = 'none';
     }
     selBand.disabled = !!lockThis;
+
+    recomputeOverrideMargins().catch(()=>{});
   }
 
   selClient.addEventListener('change', () => { if (!lockThis) refreshClientRoles(selClient.value); });
-  selRateT .addEventListener('change', () => { if (!lockThis) refreshClientRoles(selClient.value); });
+  selRateT .addEventListener('change', () => { if (!lockThis) recomputeOverrideMargins(); });
   inFrom.addEventListener('change', () => { if (!lockThis) refreshClientRoles(selClient.value); });
   selRole.addEventListener('change', onRoleChanged);
+  selBand.addEventListener('change', () => recomputeOverrideMargins());
+
+  // recompute when pay fields change
+  ['pay_day','pay_night','pay_sat','pay_sun','pay_bh'].forEach(n=>{
+    const el = document.querySelector(`#candRateForm input[name="${n}"]`);
+    if (el) el.addEventListener('input', ()=>recomputeOverrideMargins());
+  });
 
   if (initialClientId) {
     selClient.value = initialClientId;
     await refreshClientRoles(initialClientId);
+  } else {
+    // still wire live calc (will no-op until client/role/date provided)
+    recomputeOverrideMargins().catch(()=>{});
   }
 }
+
 
 
 function renderCalendar(timesheets){
@@ -3810,7 +3986,8 @@ async function openClient(row) {
 // RENDER CLIENT RATES TABLE (adds "Status" col; shows disabled who/when)
 // ============================================================================
 
-function renderClientRatesTable() {
+// Now shows derived PAYE & Umbrella margins per bucket in the table
+async function renderClientRatesTable() {
   const div = byId('clientRates'); if (!div) return;
 
   const ctx = window.modalCtx;
@@ -3818,6 +3995,26 @@ function renderClientRatesTable() {
   const frame = _currentFrame();
   // ✅ Allow buttons in create mode for new client
   const parentEditable = frame && (frame.mode === 'edit' || frame.mode === 'create');
+
+  // Helper: ERNI multiplier
+  async function _erniMultiplier(){
+    if (typeof window.__ERNI_MULT__ === 'number') return window.__ERNI_MULT__;
+    let pct = 0;
+    try {
+      if (typeof getSettingsCached === 'function') {
+        const s = await getSettingsCached();
+        let p = s?.erni_pct ?? s?.employers_ni_percent ?? 0;
+        p = Number(p) || 0;
+        if (p > 1) p = p / 100;
+        window.__ERNI_MULT__ = 1 + p;
+        return window.__ERNI_MULT__;
+      }
+    } catch {}
+    window.__ERNI_MULT__ = 1;
+    return 1;
+  }
+  const mult = await _erniMultiplier();
+  const fmt = v => (v==null || Number.isNaN(v)) ? '—' : (Math.round(v*100)/100).toFixed(2);
 
   div.innerHTML = '';
 
@@ -3843,9 +4040,14 @@ function renderClientRatesTable() {
   const cols    = [
     'status',
     'role','band',
+    // paye / umb
     'paye_day','paye_night','paye_sat','paye_sun','paye_bh',
     'umb_day','umb_night','umb_sat','umb_sun','umb_bh',
+    // charge
     'charge_day','charge_night','charge_sat','charge_sun','charge_bh',
+    // derived margins
+    'paye_margin_day','paye_margin_night','paye_margin_sat','paye_margin_sun','paye_margin_bh',
+    'umb_margin_day','umb_margin_night','umb_margin_sat','umb_margin_sun','umb_margin_bh',
     'date_from','date_to'
   ];
   const headers = [
@@ -3854,6 +4056,8 @@ function renderClientRatesTable() {
     'PAYE Day','PAYE Night','PAYE Sat','PAYE Sun','PAYE BH',
     'UMB Day','UMB Night','UMB Sat','UMB Sun','UMB BH',
     'Charge Day','Charge Night','Charge Sat','Charge Sun','Charge BH',
+    'PAYE M Day','PAYE M Night','PAYE M Sat','PAYE M Sun','PAYE M BH',
+    'UMB M Day','UMB M Night','UMB M Sat','UMB M Sun','UMB M BH',
     'From','To'
   ];
 
@@ -3885,6 +4089,19 @@ function renderClientRatesTable() {
           const pending = r.__toggle === 'enable' ? ' (pending save)' : '';
           td.innerHTML = `<span class="pill tag-ok" aria-label="Active">✓ Active${pending}</span>`;
         }
+      } else if (c.startsWith('paye_margin_') || c.startsWith('umb_margin_')) {
+        const bucket = c.split('_').pop();
+        const charge = r[`charge_${bucket}`];
+        const paye   = r[`paye_${bucket}`];
+        const umb    = r[`umb_${bucket}`];
+
+        let val = null;
+        if (c.startsWith('paye_margin_')) {
+          val = (charge!=null && paye!=null) ? (charge - (paye * mult)) : null;
+        } else {
+          val = (charge!=null && umb!=null) ? (charge - umb) : null;
+        }
+        td.textContent = fmt(val);
       } else {
         td.textContent = formatDisplayValue(c, r[c]);
       }
@@ -4305,7 +4522,7 @@ async function openClientRateModal(client_id, existing) {
   const statusBlock = `
     <div class="row" id="cl_status_row" style="align-items:center; gap:8px;">
       <div>
-        ${is_disabled_marker(ex) /* helper below inlined */ ? `
+        ${is_disabled_marker(ex) ? `
           <span class="pill tag-fail" id="cl_status_pill">❌ Disabled</span>
           <div class="hint" id="cl_status_meta">by ${escapeHtml(who || 'unknown')} on ${escapeHtml(when || '')}</div>
         ` : `
@@ -4378,8 +4595,68 @@ async function openClientRateModal(client_id, existing) {
           </tbody>
         </table>
       </div>
+
+      <!-- Live derived margins -->
+      <div class="row" style="grid-column:1 / -1; margin-top:10px">
+        <table class="grid" id="cl_margins_tbl" style="width:100%">
+          <thead>
+            <tr>
+              <th>Bucket</th>
+              <th>PAYE margin</th>
+              <th>Umbrella margin</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${['day','night','sat','sun','bh'].map(b=>`
+              <tr>
+                <td>${b.toUpperCase()}</td>
+                <td><span id="m_paye_${b}">—</span></td>
+                <td><span id="m_umb_${b}">—</span></td>
+              </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>
     </div>
   `);
+
+  // Helper to get ERNI multiplier (cached)
+  async function _erniMultiplier(){
+    if (typeof window.__ERNI_MULT__ === 'number') return window.__ERNI_MULT__;
+    let pct = 0;
+    try {
+      if (typeof getSettingsCached === 'function') {
+        const s = await getSettingsCached();
+        let p = s?.erni_pct ?? s?.employers_ni_percent ?? 0;
+        p = Number(p) || 0;
+        if (p > 1) p = p / 100;
+        window.__ERNI_MULT__ = 1 + p;
+        return window.__ERNI_MULT__;
+      }
+    } catch {}
+    window.__ERNI_MULT__ = 1;
+    return 1;
+  }
+
+  function numOrNull(v){ const n = Number(v); return Number.isFinite(n) ? n : null; }
+  function fmt(v){ return (v==null || Number.isNaN(v)) ? '—' : (Math.round(v*100)/100).toFixed(2); }
+
+  async function recomputeClientMargins(){
+    const mult = await _erniMultiplier();
+    const get = name => document.querySelector(`#clientRateForm input[name="${name}"]`);
+    ['day','night','sat','sun','bh'].forEach(bucket=>{
+      const paye = numOrNull(get(`paye_${bucket}`)?.value);
+      const umb  = numOrNull(get(`umb_${bucket}` )?.value);
+      const chg  = numOrNull(get(`charge_${bucket}`)?.value);
+
+      const payeMargin = (paye!=null && chg!=null) ? (chg - (paye * mult)) : null;
+      const umbMargin  = (umb!=null  && chg!=null) ? (chg - umb)          : null;
+
+      const spP = byId(`m_paye_${bucket}`);
+      const spU = byId(`m_umb_${bucket}`);
+      if (spP) spP.textContent = fmt(payeMargin);
+      if (spU) spU.textContent = fmt(umbMargin);
+    });
+  }
 
   showModal(
     existing ? 'Edit Client Default Window' : 'Add/Upsert Client Default Window',
@@ -4578,6 +4855,17 @@ async function openClientRateModal(client_id, existing) {
     if (selRole.value === '__OTHER__') newRow.style.display = '';
     else { newRow.style.display = 'none'; const nr = document.getElementById('cl_role_new'); if (nr) nr.value = ''; }
   });
+
+  // Wire live margin recompute on any input change
+  try {
+    ['day','night','sat','sun','bh'].forEach(b=>{
+      ['paye_','umb_','charge_'].forEach(prefix=>{
+        const el = document.querySelector(`#clientRateForm input[name="${prefix}${b}"]`);
+        if (el) el.addEventListener('input', recomputeClientMargins);
+      });
+    });
+    recomputeClientMargins();
+  } catch {}
 
   // Enable/Disable handler — stage ONLY; require Apply + parent Save to persist
   const toggleBtn = byId('btnToggleDisable');
