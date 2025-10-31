@@ -2491,7 +2491,7 @@ async function openCandidate(row) {
       else if (!payload.umbrella_id || payload.umbrella_id === '') { alert('Select an umbrella company for UMBRELLA pay.'); return { ok:false }; }
       if (payload.umbrella_id === '') payload.umbrella_id = null;
 
-      for (const k of Object.keys(payload)) if (payload[k] === '') delete payload[k'];
+      for (const k of Object.keys(payload)) if (payload[k] === '') delete payload[k];
 
       const idForUpdate = window.modalCtx?.data?.id || full?.id || null;
       const tokenAtSave = window.modalCtx.openToken;
