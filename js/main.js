@@ -2838,7 +2838,6 @@ async function renderCandidateRatesTable() {
   const div = byId('ratesTable');
   if (!div) { if (LOG) console.warn('[RATES][renderCandidateRatesTable] no #ratesTable'); return; }
 
-  // Allow rendering in CREATE flow even if token/id changed mid-flight
   if ((token !== window.modalCtx.openToken && idActive !== null) ||
       (window.modalCtx.data?.id !== idActive && idActive !== null)) {
     if (LOG) console.warn('[RATES][renderCandidateRatesTable] token/id changed mid-flight (blocked because idActive!=null)');
@@ -2846,14 +2845,12 @@ async function renderCandidateRatesTable() {
   }
 
   const frame = _currentFrame();
-  // ✅ Allow edit or create to enable the Add button in new flow
   const parentEditable = frame && (frame.mode === 'edit' || frame.mode === 'create');
   if (LOG) console.log('[RATES][renderCandidateRatesTable] parentEditable?', parentEditable);
 
   let clientsById = {};
   try {
     const clients = await listClientsBasic();
-    // In create-flow, tolerate token/id drift and continue
     if (idActive !== null && (token !== window.modalCtx.openToken || window.modalCtx.data?.id !== idActive)) return;
     clientsById = Object.fromEntries((clients || []).map(c => [c.id, c.name]));
     if (LOG) console.log('[RATES][renderCandidateRatesTable] clients loaded', (clients||[]).length);
@@ -2862,28 +2859,16 @@ async function renderCandidateRatesTable() {
   const O = window.modalCtx.overrides || { existing: [], stagedNew: [], stagedEdits: {}, stagedDeletes: new Set() };
 
   const rows = [];
+  // ⬇️ FIX: include staged-deleted rows and mark them as pending delete (do not splice them out)
   for (const ex of (O.existing || [])) {
-    if (O.stagedDeletes.has(ex.id)) continue;
-    rows.push({ ...ex, ...(O.stagedEdits[ex.id] || {}), _edited: !!O.stagedEdits[ex.id] });
+    const isPendingDelete = !!(O.stagedDeletes && O.stagedDeletes.has(ex.id));
+    rows.push({ ...ex, ...(O.stagedEdits[ex.id] || {}), _edited: !!O.stagedEdits[ex.id], _pendingDelete: isPendingDelete });
   }
   for (const n of (O.stagedNew || [])) rows.push({ ...n, _isNew: true });
 
   const fmt = v => (v==null || Number.isNaN(v)) ? '—' : (Math.round(v*100)/100).toFixed(2);
-  const mult = await (async ()=>{ // ERNI multiplier
-    if (typeof window.__ERNI_MULT__ === 'number') return window.__ERNI_MULT__;
-    let pct = 0;
-    try {
-      if (typeof getSettingsCached === 'function') {
-        const s = await getSettingsCached();
-        let p = s?.erni_pct ?? s?.employers_ni_percent ?? 0;
-        p = Number(p) || 0; if (p > 1) p = p/100;
-        window.__ERNI_MULT__ = 1 + p; return window.__ERNI_MULT__;
-      }
-    } catch {}
-    window.__ERNI_MULT__ = 1; return 1;
-  })();
+  const mult = await (async ()=>{ if (typeof window.__ERNI_MULT__ === 'number') return window.__ERNI_MULT__; try { if (typeof getSettingsCached === 'function') { const s = await getSettingsCached(); let p = s?.erni_pct ?? s?.employers_ni_percent ?? 0; p = Number(p)||0; if (p>1) p=p/100; window.__ERNI_MULT__ = 1 + p; return window.__ERNI_MULT__; } } catch{} window.__ERNI_MULT__ = 1; return 1; })();
 
-  // Resolve charge buckets for each unique (client, role, band|null, date_from)
   const keyOf = r => [r.client_id, r.role || '', (r.band==null?'':String(r.band)), r.date_from || ''].join('|');
   const uniqueKeys = Array.from(new Set(rows.map(keyOf)));
   const chargeMap = Object.create(null);
@@ -2897,13 +2882,7 @@ async function renderCandidateRatesTable() {
       const rows = Array.isArray(list) ? list.filter(w=>!w.disabled_at_utc && w.role===role) : [];
       let win = rows.find(w => (w.band ?? null) === (band ?? null));
       if (!win && (band == null)) win = rows.find(w => w.band == null);
-      return win ? {
-        day: win.charge_day ?? null,
-        night: win.charge_night ?? null,
-        sat: win.charge_sat ?? null,
-        sun: win.charge_sun ?? null,
-        bh: win.charge_bh ?? null
-      } : null;
+      return win ? { day: win.charge_day ?? null, night: win.charge_night ?? null, sat: win.charge_sat ?? null, sun: win.charge_sun ?? null, bh: win.charge_bh ?? null } : null;
     } catch(e){ return null; }
   }
 
@@ -2918,30 +2897,17 @@ async function renderCandidateRatesTable() {
                          : '<span class="hint">Read-only. Click “Edit” in the main dialog to add/modify overrides.</span>'}
       </div>
     `;
-    const addBtn = byId('btnAddRate');
-    if (addBtn && parentEditable) addBtn.onclick = () => openCandidateRateModal(window.modalCtx.data?.id);
+    const addBtn = byId('btnAddRate'); if (addBtn && parentEditable) addBtn.onclick = () => openCandidateRateModal(window.modalCtx.data?.id);
     return;
   }
 
-  const cols    = [
-    'client','role','band','rate_type',
-    'pay_day','pay_night','pay_sat','pay_sun','pay_bh',
-    // derived margins per bucket
-    'margin_day','margin_night','margin_sat','margin_sun','margin_bh',
-    'date_from','date_to','_state'
-  ];
-  const headers = [
-    'Client','Role','Band','Type',
-    'Pay Day','Pay Night','Pay Sat','Pay Sun','Pay BH',
-    'Margin Day','Margin Night','Margin Sat','Margin Sun','Margin BH',
-    'From','To','Status'
-  ];
+  const cols    = ['client','role','band','rate_type','pay_day','pay_night','pay_sat','pay_sun','pay_bh','margin_day','margin_night','margin_sat','margin_sun','margin_bh','date_from','date_to','_state'];
+  const headers = ['Client','Role','Band','Type','Pay Day','Pay Night','Pay Sat','Pay Sun','Pay BH','Margin Day','Margin Night','Margin Sat','Margin Sun','Margin BH','From','To','Status'];
 
-  const tbl   = document.createElement('table'); tbl.className = 'grid';
+  const tbl = document.createElement('table'); tbl.className = 'grid';
   const thead = document.createElement('thead'); const trh = document.createElement('tr');
   headers.forEach(h => { const th=document.createElement('th'); th.textContent=h; trh.appendChild(th); });
-  thead.appendChild(trh);
-  tbl.appendChild(thead);
+  thead.appendChild(trh); tbl.appendChild(thead);
 
   const tb = document.createElement('tbody');
   rows.forEach(r => {
@@ -2954,31 +2920,22 @@ async function renderCandidateRatesTable() {
 
     const margin = {};
     ['day','night','sat','sun','bh'].forEach(b=>{
-      const pay = r[`pay_${b}`];
-      const chg = charges ? charges[b] : null;
-      margin[b] = (chg!=null && pay!=null)
-        ? (isPAYE ? (chg - (pay * mult)) : (chg - pay))
-        : null;
+      const pay = r[`pay_${b}`]; const chg = charges ? charges[b] : null;
+      margin[b] = (chg!=null && pay!=null) ? (isPAYE ? (chg - (pay * mult)) : (chg - pay)) : null;
     });
 
+    const status =
+      r._pendingDelete ? 'Pending delete (save to confirm)'
+      : r._isNew ? 'Staged (new)'
+      : r._edited ? 'Staged (edited)'
+      : '';
+
     const pretty = {
-      client: clientsById[r.client_id] || '',
-      role  : r.role || '',
-      band  : r.band ?? '',
-      rate_type: r.rate_type || '',
-      pay_day:   r.pay_day ?? '—',
-      pay_night: r.pay_night ?? '—',
-      pay_sat:   r.pay_sat ?? '—',
-      pay_sun:   r.pay_sun ?? '—',
-      pay_bh:    r.pay_bh ?? '—',
-      margin_day:   fmt(margin.day),
-      margin_night: fmt(margin.night),
-      margin_sat:   fmt(margin.sat),
-      margin_sun:   fmt(margin.sun),
-      margin_bh:    fmt(margin.bh),
-      date_from: formatDisplayValue('date_from', r.date_from),
-      date_to  : formatDisplayValue('date_to',   r.date_to),
-      _state   : r._isNew ? 'Staged (new)' : (r._edited ? 'Staged (edited)' : '')
+      client: clientsById[r.client_id] || '', role: r.role || '', band: r.band ?? '', rate_type: r.rate_type || '',
+      pay_day: r.pay_day ?? '—', pay_night: r.pay_night ?? '—', pay_sat: r.pay_sat ?? '—', pay_sun: r.pay_sun ?? '—', pay_bh: r.pay_bh ?? '—',
+      margin_day: fmt(margin.day), margin_night: fmt(margin.night), margin_sat: fmt(margin.sat), margin_sun: fmt(margin.sun), margin_bh: fmt(margin.bh),
+      date_from: formatDisplayValue('date_from', r.date_from), date_to: formatDisplayValue('date_to', r.date_to),
+      _state   : status
     };
 
     cols.forEach(c => { const td=document.createElement('td'); td.textContent=String(pretty[c] ?? ''); tr.appendChild(td); });
@@ -3755,6 +3712,13 @@ async function openCandidateRateModal(candidate_id, existing) {
   if (existing?.date_from) inFrom.value = formatIsoToUk(existing.date_from);
   if (existing?.date_to)   inTo.value   = formatIsoToUk(existing.date_to);
 
+  // ⬇️ FIX: prefill pay fields from existing override
+  ['day','night','sat','sun','bh'].forEach(b=>{
+    const val = (existing && typeof existing[`pay_${b}`] !== 'undefined') ? existing[`pay_${b}`] : null;
+    const el = document.querySelector(`#candRateForm input[name="pay_${b}"]`);
+    if (el && val != null) el.value = String(val);
+  });
+
   attachUkDatePicker(inFrom); attachUkDatePicker(inTo);
 
   const lockThis = !!existing?.date_from && isPastOrToday(existing.date_from);
@@ -3855,7 +3819,7 @@ async function openCandidateRateModal(candidate_id, existing) {
         if (!O.stagedDeletes) O.stagedDeletes = new Set();
         O.stagedDeletes.add(existing.id);
         try { renderCandidateRatesTable(); } catch {}
-        try { window.dispatchEvent(new CustomEvent('modal-dirty')); } catch {}
+        try { window.dispatchEvent(new CustomEvent('modal-dirty')); } catch {} // parent Save will enable (via showModal fix)
         const closeBtn = byId('btnCloseModal'); if (closeBtn) closeBtn.click();
       } catch (e) {
         alert('Failed to stage delete.');
@@ -3863,6 +3827,7 @@ async function openCandidateRateModal(candidate_id, existing) {
     };
   })();
 }
+
 
 
 async function renderCandidateRatesTable() {
@@ -4988,6 +4953,7 @@ function mountClientHospitalsTab() {
 // ============================================================================
 
 // ========== CLIENT DEFAULT RATES ==========
+
 async function openClientRateModal(client_id, existing) {
   const parentFrame = _currentFrame();
   const parentEditable = parentFrame && (parentFrame.mode === 'edit' || parentFrame.mode === 'create');
@@ -5304,7 +5270,62 @@ async function openClientRateModal(client_id, existing) {
     { kind: 'client-rate' }          // ← ensure Delete appears ONLY in this child modal
   );
 
-  // After mount: wire gating listeners (unchanged) …
+  // ⬇️ FIX: hydrate fields & wire listeners after the modal is mounted
+  const roleSel   = byId('cl_role');
+  const roleNew   = byId('cl_role_new');
+  const roleNewRow= byId('cl_role_new_row');
+  const bandEl    = byId('cl_band');
+  const fromEl    = byId('cl_date_from');
+  const toEl      = byId('cl_date_to');
+
+  attachUkDatePicker(fromEl); attachUkDatePicker(toEl);
+  if (existing?.date_from) fromEl.value = formatIsoToUk(existing.date_from);
+  if (existing?.date_to)   toEl.value   = formatIsoToUk(existing.date_to);
+
+  // Role selection (prefer existing role if present; fall back to __OTHER__)
+  if (existing?.role) {
+    if (globalRoles.includes(existing.role)) {
+      roleSel.value = existing.role;
+      roleNewRow.style.display = 'none';
+      roleNew.value = '';
+    } else {
+      roleSel.value = '__OTHER__';
+      roleNewRow.style.display = '';
+      roleNew.value = existing.role;
+    }
+  } else {
+    roleNewRow.style.display = 'none';
+  }
+
+  // Buckets prefill (15 inputs)
+  ['day','night','sat','sun','bh'].forEach(b=>{
+    const set = (name, val) => {
+      const el = document.querySelector(`#clientRateForm input[name="${name}_${b}"]`);
+      if (el && typeof val !== 'undefined' && val !== null) el.value = String(val);
+    };
+    set('paye',   existing?.[`paye_${b}`]);
+    set('umb',    existing?.[`umb_${b}`]);
+    set('charge', existing?.[`charge_${b}`]);
+  });
+
+  // Recompute once on mount (after hydration)
+  await recomputeClientMargins();
+
+  // Wire role “other” toggle + margins recompute
+  roleSel.addEventListener('change', async ()=>{
+    if (roleSel.value === '__OTHER__') { roleNewRow.style.display = ''; }
+    else { roleNewRow.style.display = 'none'; roleNew.value=''; }
+    await recomputeClientMargins();
+  });
+  bandEl.addEventListener('input', recomputeClientMargins);
+  fromEl.addEventListener('change', recomputeClientMargins);
+  toEl.addEventListener('change', recomputeClientMargins);
+  ['day','night','sat','sun','bh'].forEach(b=>{
+    ['paye','umb','charge'].forEach(kind=>{
+      const el = document.querySelector(`#clientRateForm input[name="${kind}_${b}"]`);
+      if (el) el.addEventListener('input', recomputeClientMargins);
+    });
+  });
 
   // ---- DELETE BUTTON (staged delete; recorded in persistent Set; effective on parent Save) ----
   (async function wireDeleteButton(){
@@ -5349,6 +5370,7 @@ async function openClientRateModal(client_id, existing) {
     };
   })();
 }
+
 
 async function renderClientRatesTable() {
   const div = byId('clientRates'); if (!div) return;
@@ -5637,13 +5659,22 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
     _attachDirtyTracker() {
       if (this._detachDirty) { try { this._detachDirty(); } catch(_){}; this._detachDirty = null; }
       const root = byId('modalBody'); if (!root) return;
+
+      // ⬇️ FIX: bubble dirty from a child to its parent so Save enables even while child is open
       const onDirty = (ev)=>{
         if (ev && !ev.isTrusted) return;
-        if (this.mode !== 'edit' && this.mode !== 'create') return;
-        this.isDirty = true;
-        if (typeof this._updateButtons === 'function') this._updateButtons();
-        if (stack().length <= 1) {
-          try { window.dispatchEvent(new CustomEvent('modal-dirty')); } catch {}
+        const isChild = stack().length > 1;
+        if (isChild) {
+          const p = parentFrame();
+          if (p && (p.mode === 'edit' || p.mode === 'create')) {
+            p.isDirty = true;
+            p._updateButtons && p._updateButtons();
+          }
+        } else {
+          if (this.mode === 'edit' || this.mode === 'create') {
+            this.isDirty = true;
+            this._updateButtons && this._updateButtons();
+          }
         }
       };
       root.addEventListener('input', onDirty, true);
@@ -5665,9 +5696,6 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
       // Mount per-entity extras
       if (this.entity === 'candidates' && k === 'rates') { mountCandidateRatesTab?.(); }
       if (this.entity === 'candidates' && k === 'pay')   { mountCandidatePayTab?.(); }
-      if (this.entity === 'candidates' && k === 'main')  {
-        // (unchanged)
-      }
       if (this.entity === 'clients' && k === 'rates')     { mountClientRatesTab?.(); }
       if (this.entity === 'clients' && k === 'hospitals') { mountClientHospitalsTab?.(); }
       if (this.entity === 'clients' && k === 'settings')  { renderClientSettingsUI?.(window.modalCtx.clientSettingsState || {}); }
@@ -6040,9 +6068,16 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
     };
     byId('btnSave').onclick = onSaveClick;
 
+    // ⬇️ FIXED: mark parent dirty even when child is open (see _attachDirtyTracker above too)
     const onDirtyEvt = () => {
-      if (stack().length <= 1 && (top.mode === 'edit' || top.mode === 'create')) {
-        top.isDirty = true; top._updateButtons();
+      const isChild = stack().length > 1;
+      if (isChild) {
+        const p = parentFrame();
+        if (p && (p.mode === 'edit' || p.mode === 'create')) {
+          p.isDirty = true; p._updateButtons && p._updateButtons();
+        }
+      } else if (top.mode === 'edit' || top.mode === 'create') {
+        top.isDirty = true; top._updateButtons && top._updateButtons();
       }
     };
 
@@ -6085,7 +6120,6 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
   window.__getModalFrame = currentFrame;
   renderTop();
 }
-
 
 
 
