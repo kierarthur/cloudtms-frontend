@@ -3901,7 +3901,7 @@ async function openClient(row) {
     dataKeys: Object.keys(window.modalCtx.data||{}),
     formStateForId: window.modalCtx.formState?.__forId,
     openToken: window.modalCtx.openToken,
-    preseededSettings: Object.keys(window.modalCtx.clientSettingsState||{}),
+    preseededSettings: Object.keys(window.modalCtx.clientSettingsState||{})
   });
 
   // 3) Render modal (first paint uses hydrated "full")
@@ -3981,17 +3981,12 @@ async function openClient(row) {
       if (APILOG) console.log('[OPEN_CLIENT] upsertClient ← response', { ok: !!clientResp, clientId });
       if (!clientId) { alert('Failed to save client'); return { ok:false }; }
 
-      // 2) Upsert client SETTINGS (separate API) AFTER client exists
+      // 2) Upsert client SETTINGS via existing PUT /api/clients/:id AFTER client exists
       try {
         if (pendingSettings && Object.keys(pendingSettings).length) {
-          const url = API(`/api/clients/${encodeURIComponent(clientId)}/settings`);
-          if (APILOG) console.log('[OPEN_CLIENT] PUT client settings →', url, pendingSettings);
-          const res = await authFetch(url, {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(pendingSettings)
-          });
-          if (!res.ok) throw new Error(await res.text());
+          if (APILOG) console.log('[OPEN_CLIENT] upsertClient (settings) → PUT /api/clients/:id', { clientId, pendingSettings });
+          const upd = await upsertClient({ client_settings: pendingSettings }, clientId);
+          if (!upd) throw new Error('Settings update failed');
         }
       } catch (err) {
         alert(`Failed to save Client settings: ${String(err?.message || err)}`);
@@ -4227,7 +4222,6 @@ async function openClient(row) {
     L('skip companion loads (no full.id)');
   }
 }
-
 
 
 // =================== CLIENT RATES TABLE (UPDATED) ===================
