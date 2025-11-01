@@ -2174,6 +2174,7 @@ async function upsertCandidate(payload, id){
 }
 
 // ===== UPDATED: upsertClient — normalize server response so we always return the created/updated object with an id
+
 async function upsertClient(payload, id){
   // Never allow CLI to be sent from UI
   if ('cli_ref' in payload) delete payload.cli_ref;
@@ -2203,6 +2204,7 @@ async function upsertClient(payload, id){
     throw new Error(msg || 'Save failed');
   }
 
+  // Try to parse a full client row from the response
   try {
     const data = await r.json();
     if (APILOG) console.log('[upsertClient] parsed', data);
@@ -2210,24 +2212,38 @@ async function upsertClient(payload, id){
     if (Array.isArray(data)) obj = data[0] || null;
     else if (data && data.client) obj = data.client;
     else if (data && typeof data === 'object') obj = data;
-
     if (obj) return obj;
-  } catch (_) { /* fall through to Location/PUT fallback */ }
+  } catch (_) { /* fall through to Location/GET fallback */ }
 
-  let clientId = null;
+  // Fallbacks: try to extract id from Location, then GET the full row (to get cli_ref/name/etc.)
+  let clientId = id || null;
   try {
     const loc = r.headers && r.headers.get('Location');
-    if (loc) {
+    if (!clientId && loc) {
       const m = loc.match(/\/api\/clients\/([^/?#]+)/i) || loc.match(/\/clients\/([^/?#]+)/i);
       if (m) clientId = m[1];
     }
   } catch (_) {}
 
+  if (clientId) {
+    try {
+      const rr = await authFetch(API(`/api/clients/${encodeURIComponent(clientId)}`));
+      if (rr.ok) {
+        const dd = await rr.json().catch(()=> ({}));
+        const obj = (dd && dd.client) ? dd.client : dd;
+        if (obj && typeof obj === 'object') {
+          if (APILOG) console.log('[upsertClient] GET backfill', obj);
+          return obj;
+        }
+      }
+    } catch (_) {}
+  }
+
+  // Last resort: return what we know
   const fallback = clientId ? { id: clientId, ...clean } : (id ? { id, ...clean } : { ...clean });
   if (APILOG) console.log('[upsertClient] fallback', fallback);
   return fallback;
 }
-
 
 // ================== FRONTEND: upsertUmbrella (UPDATED to return saved object) ==================
 // ===== UPDATED: upsertUmbrella — normalize server response so we always return the created/updated object with an id
@@ -3988,12 +4004,27 @@ async function openClient(row) {
       if (APILOG) console.log('[OPEN_CLIENT] upsertClient ← response', { ok: !!clientResp, clientId });
       if (!clientId) { alert('Failed to save client'); return { ok:false }; }
 
+      // ✅ Merge authoritative client fields into modalCtx.data (fixes blank Main tab + shows CLI)
+      const savedClient = clientResp && typeof clientResp === 'object'
+        ? clientResp
+        : { id: clientId, ...payload }; // fallback to what we sent if no body
+
+      window.modalCtx.data = {
+        ...(window.modalCtx.data || {}),
+        ...savedClient,
+        id: clientId // ensure id present
+      };
+
       // 2) Upsert client SETTINGS via existing PUT /api/clients/:id AFTER client exists
       try {
         if (pendingSettings && Object.keys(pendingSettings).length) {
           if (APILOG) console.log('[OPEN_CLIENT] upsertClient (settings) → PUT /api/clients/:id', { clientId, pendingSettings });
           const upd = await upsertClient({ client_settings: pendingSettings }, clientId);
           if (!upd) throw new Error('Settings update failed');
+          // Optional: merge any server-changed fields again
+          if (upd && typeof upd === 'object') {
+            window.modalCtx.data = { ...window.modalCtx.data, ...upd, id: clientId };
+          }
         }
       } catch (err) {
         alert(`Failed to save Client settings: ${String(err?.message || err)}`);
@@ -4207,8 +4238,7 @@ async function openClient(row) {
         W('[openClient] post-save refresh failed', e);
       }
 
-      // Keep data fresh in the modal
-      window.modalCtx.data      = { ...(window.modalCtx.data || {}), ...(clientId ? { id: clientId } : {} ) };
+      // Keep data fresh in the modal: keep __forId but DO NOT lose saved main fields
       window.modalCtx.formState = { __forId: clientId, main:{} };
 
       if (isNew) window.__pendingFocus = { section: 'clients', id: clientId };
@@ -4489,6 +4519,7 @@ function renderClientTab(key, row = {}){
 
   return '';
 }
+
 
 // ===========================
 // 5) mountCandidatePayTab(...)
