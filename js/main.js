@@ -3933,7 +3933,11 @@ async function openClient(row) {
     ratesBaseline: [],
     hospitalsState: { existing: [], stagedNew: [], stagedEdits: {}, stagedDeletes: new Set() },
     clientSettingsState: settingsSeed ? deep(settingsSeed) : {},
-    openToken: ((full?.id) || 'new') + ':' + Date.now()
+    openToken: ((full?.id) || 'new') + ':' + Date.now(),
+    // NEW: persistent set for staged client-rate deletes (survives refresh/merge)
+    ratesStagedDeletes: (window.modalCtx && window.modalCtx.ratesStagedDeletes instanceof Set)
+      ? window.modalCtx.ratesStagedDeletes
+      : new Set()
   };
 
   L('window.modalCtx seeded', {
@@ -3976,7 +3980,7 @@ async function openClient(row) {
       if (!payload.name && full?.name) payload.name = full.name;
       if (!payload.name) { alert('Please enter a Client name.'); return { ok:false }; }
 
-      // 2a) Settings normalization (kept as before)
+      // Settings normalization (unchanged)
       const baseline = window.modalCtx.clientSettingsState || {};
       const hasFormMounted = !!byId('clientSettingsForm');
       const hasFullBaseline = ['day_start','day_end','night_start','night_end'].every(k => typeof baseline[k] === 'string' && baseline[k] !== '');
@@ -3987,15 +3991,17 @@ async function openClient(row) {
         let csMerged = { ...(baseline || {}) };
         if (hasFormMounted) {
           const liveSettings = collectForm('#clientSettingsForm', false);
-          ['day_start','day_end','night_start','night_end'].forEach(k=>{ const v = _toHHMM(liveSettings[k]); if (v) csMerged[k] = v; });
-          if (typeof liveSettings.timezone_id === 'string' && liveSettings.timezone_id.trim() !== '') csMerged.timezone_id = liveSettings.timezone_id.trim();
+          ['day_start','day_end','night_start','night_end'].forEach(k=>{
+            const v = _toHHMM(liveSettings[k]); if (v) csMerged[k] = v;
+          });
+          if (typeof liveSettings.timezone_id === 'string' && liveSettings.timezone_id.trim() !== '') {
+            csMerged.timezone_id = liveSettings.timezone_id.trim();
+          }
         }
         const { cleaned: csClean, invalid: csInvalid } = normalizeClientSettingsForSave(csMerged);
         if (APILOG) console.log('[OPEN_CLIENT] client_settings (merged→clean)', { csMerged, csClean, csInvalid, hasFormMounted, hasFullBaseline });
         if (csInvalid) { alert('Times must be HH:MM (24-hour).'); return { ok:false }; }
         if (Object.keys(csClean).length) pendingSettings = csClean;
-      } else {
-        if (APILOG) console.log('[OPEN_CLIENT] skip settings normalisation (no form & incomplete baseline)');
       }
 
       // 3) Upsert client
@@ -4079,14 +4085,17 @@ async function openClient(row) {
         return { ok:false };
       }
 
-      // 6) NEW — Execute staged CLIENT RATE deletes BEFORE toggles/edits/inserts
+      // 6) DELETE staged client windows BEFORE toggles/edits/inserts
       try {
         const allWindows = Array.isArray(window.modalCtx.ratesState) ? window.modalCtx.ratesState : [];
-        const toDelete   = allWindows.filter(w => w && w.id && w.__delete === true);
-        if (toDelete.length) {
-          if (APILOG) console.log('[OPEN_CLIENT] deleting staged client windows', toDelete.map(w=>w.id));
-          for (const w of toDelete) {
-            const url = API(`/api/rates/client-defaults/${encodeURIComponent(w.id)}`);
+        // Union of (__delete flags) ∪ (ids in ratesStagedDeletes Set)
+        const setIds = (window.modalCtx.ratesStagedDeletes instanceof Set) ? new Set([...window.modalCtx.ratesStagedDeletes]) : new Set();
+        for (const w of allWindows) if (w && w.id && w.__delete === true) setIds.add(String(w.id));
+
+        if (setIds.size) {
+          if (APILOG) console.log('[OPEN_CLIENT] deleting staged client windows', [...setIds]);
+          for (const id of setIds) {
+            const url = API(`/api/rates/client-defaults/${encodeURIComponent(id)}`);
             const res = await authFetch(url, { method: 'DELETE' });
             if (res.status === 404) continue; // already gone
             if (!res.ok) {
@@ -4096,17 +4105,20 @@ async function openClient(row) {
               return { ok:false };
             }
           }
-          const deletedIds = new Set(toDelete.map(w => String(w.id)));
-          window.modalCtx.ratesState    = allWindows.filter(w => !(w && w.id && deletedIds.has(String(w.id))));
+          // Prune deleted rows from state/baseline and clear the Set
+          window.modalCtx.ratesState    = allWindows.filter(w => !(w && w.id && setIds.has(String(w.id))));
           window.modalCtx.ratesBaseline = (Array.isArray(window.modalCtx.ratesBaseline) ? window.modalCtx.ratesBaseline : [])
-                                          .filter(b => !(b && b.id && deletedIds.has(String(b.id))));
+                                          .filter(b => !(b && b.id && setIds.has(String(b.id))));
+          if (window.modalCtx.ratesStagedDeletes instanceof Set) {
+            for (const id of setIds) window.modalCtx.ratesStagedDeletes.delete(id);
+          }
         }
       } catch (errDel) {
         alert(`Failed to process deletions: ${String(errDel?.message || errDel || '')}`);
         return { ok:false };
       }
 
-      // 7) Apply status toggles (enable/disable) BEFORE data edits/inserts
+      // 7) Apply status toggles
       const baselineRates = Array.isArray(window.modalCtx.ratesBaseline) ? window.modalCtx.ratesBaseline : [];
       const prevById = new Map(baselineRates.filter(r => r && r.id).map(r => [String(r.id), r]));
       let windows = Array.isArray(window.modalCtx.ratesState) ? window.modalCtx.ratesState.slice() : [];
@@ -4131,7 +4143,7 @@ async function openClient(row) {
         }
       }
 
-      // 8) Final negative-margin guard across staged windows (skip disabled)
+      // 8) Final negative-margin guard (skip disabled)
       const erniMult = (async ()=> {
         if (typeof window.__ERNI_MULT__ === 'number') return window.__ERNI_MULT__;
         try {
@@ -4148,19 +4160,16 @@ async function openClient(row) {
       for (const w of windows) {
         if (w.disabled_at_utc) continue;
         for (const b of ['day','night','sat','sun','bh']) {
-          const chg  = w[`charge_${b}`];
-          const paye = w[`paye_${b}`];
-          const umb  = w[`umb_${b}`];
+          const chg  = w[`charge_${b}`], paye = w[`paye_${b}`], umb = w[`umb_${b}`];
           if (chg != null && paye != null && (chg - (paye * mult)) < 0) { alert(`PAYE margin would be negative for ${w.role}${w.band?` / ${w.band}`:''} (${b.toUpperCase()}). Fix before saving.`); return { ok:false }; }
           if (chg != null && umb  != null && (chg - umb) < 0)            { alert(`Umbrella margin would be negative for ${w.role}${w.band?` / ${w.band}`:''} (${b.toUpperCase()}). Fix before saving.`); return { ok:false }; }
         }
       }
 
-      // 9) UPDATE existing windows, then POST new windows (skip disabled)
-      const toUpdate = windows.filter(w => w.id && !w.disabled_at_utc && !w.__delete);
+      // 9) UPDATE existing, POST new (skip disabled)
+      const toUpdate = windows.filter(w => w.id && !w.disabled_at_utc);
       const toCreate = windows.filter(w => !w.id && !w.disabled_at_utc);
 
-      // Helper to build payload for PUT/POST
       const buildBody = (w) => ({
         client_id : clientId,
         role      : w.role || '',
@@ -4189,6 +4198,7 @@ async function openClient(row) {
 
       // PUT updates
       for (const w of toUpdate) {
+        if (!w.id) continue;
         try {
           const url = API(`/api/rates/client-defaults/${encodeURIComponent(w.id)}`);
           if (APILOG) console.log('[OPEN_CLIENT] PUT client-default window →', w.id);
@@ -4219,35 +4229,42 @@ async function openClient(row) {
         }
       }
 
-      // 10) Refresh list & rebuild baseline
+      // 10) Refresh & rebuild baseline
       try {
         const refreshed = await listClientRates(clientId /* all incl. disabled */);
-        window.modalCtx.ratesState    = Array.isArray(refreshed) ? refreshed.map(x => ({ ...x })) : [];
+        // Re-apply delete markers for any ids still in the staged set (belt & braces)
+        const stagedDelIds = (window.modalCtx.ratesStagedDeletes instanceof Set) ? window.modalCtx.ratesStagedDeletes : new Set();
+        window.modalCtx.ratesState = (Array.isArray(refreshed) ? refreshed.map(x => ({ ...x })) : []).map(x => {
+          if (stagedDelIds.has(String(x.id))) x.__delete = true;
+          return x;
+        });
         window.modalCtx.ratesBaseline = JSON.parse(JSON.stringify(window.modalCtx.ratesState));
         try { renderClientRatesTable(); } catch {}
       } catch (e) {
         W('[openClient] post-save refresh failed', e);
       }
 
-      // 11) Clean main form state
       window.modalCtx.formState = { __forId: clientId, main:{} };
-
       if (isNew) window.__pendingFocus = { section: 'clients', id: clientId };
       return { ok: true, saved: window.modalCtx.data };
     },
     full?.id
   );
 
-  // 4) Post-paint async loads (merge metadata when staged so names flow in)
+  // 4) Post-paint async loads (merge metadata; preserve delete flags)
   if (full?.id) {
     const token = window.modalCtx.openToken;
     const id    = full.id;
     try {
-      const unified = await listClientRates(id /* all, incl. disabled */);
+      const unified = await listClientRates(id);
       if (token === window.modalCtx.openToken && window.modalCtx.data?.id === id) {
+        const stagedDelIds = (window.modalCtx.ratesStagedDeletes instanceof Set) ? window.modalCtx.ratesStagedDeletes : new Set();
         const hasStaged = Array.isArray(window.modalCtx.ratesState) && window.modalCtx.ratesState.length > 0;
         if (!hasStaged) {
-          window.modalCtx.ratesState    = Array.isArray(unified) ? unified.map(r => ({ ...r })) : [];
+          window.modalCtx.ratesState = (Array.isArray(unified) ? unified.map(r => ({ ...r })) : []).map(r => {
+            if (stagedDelIds.has(String(r.id))) r.__delete = true;
+            return r;
+          });
           window.modalCtx.ratesBaseline = JSON.parse(JSON.stringify(window.modalCtx.ratesState));
         } else {
           const staged = Array.isArray(window.modalCtx.ratesState) ? window.modalCtx.ratesState.slice() : [];
@@ -4257,8 +4274,12 @@ async function openClient(row) {
             if (s) {
               s.disabled_at_utc  = srv.disabled_at_utc ?? null;
               s.disabled_by_name = srv.disabled_by_name ?? null;
+              // Preserve pending delete if tracked in the Set
+              if (stagedDelIds.has(String(srv.id))) s.__delete = true;
             } else {
-              staged.push({ ...srv });
+              const row = { ...srv };
+              if (stagedDelIds.has(String(row.id))) row.__delete = true;
+              staged.push(row);
             }
           });
           window.modalCtx.ratesState = staged;
@@ -4813,7 +4834,7 @@ async function openClientRateModal(client_id, existing) {
   const who = ex.disabled_by_name || '';
   const when = ex.disabled_at_utc ? formatIsoToUk(String(ex.disabled_at_utc).slice(0,10)) : '';
 
-  // Status header (status-only; no toggle injection)
+  // Status (no footer controls)
   const statusBlock = `
     <div class="row" id="cl_status_row" style="align-items:center; gap:8px;">
       <div>
@@ -4838,7 +4859,6 @@ async function openClientRateModal(client_id, existing) {
   const formHtml = html(`
     <div class="form" id="clientRateForm">
       ${statusBlock}
-
       <div class="row">
         <label>Role (required)</label>
         <select name="role" id="cl_role" required ${parentEditable ? '' : 'disabled'}>
@@ -4851,31 +4871,18 @@ async function openClientRateModal(client_id, existing) {
         <input type="text" id="cl_role_new" placeholder="e.g. RMN-Lead" ${parentEditable ? '' : 'disabled'} />
         <div class="hint">Uppercase letters/numbers/[-_/ ] recommended.</div>
       </div>
-
-      <div class="row">
-        <label>VBR5809: Band (optional)</label>
+      <div class="row"><label>VBR5809: Band (optional)</label>
         <input type="text" name="band" id="cl_band" value="${ex.band ?? ''}" ${parentEditable ? '' : 'disabled'} />
       </div>
-
-      <div class="row">
-        <label>Effective from (DD/MM/YYYY)</label>
+      <div class="row"><label>Effective from (DD/MM/YYYY)</label>
         <input type="text" name="date_from" id="cl_date_from" placeholder="DD/MM/YYYY" ${parentEditable ? '' : 'disabled'} />
       </div>
-      <div class="row">
-        <label>Effective to (optional, DD/MM/YYYY)</label>
+      <div class="row"><label>Effective to (optional, DD/MM/YYYY)</label>
         <input type="text" name="date_to" id="cl_date_to" placeholder="DD/MM/YYYY" ${parentEditable ? '' : 'disabled'} />
       </div>
-
       <div class="row" style="grid-column: 1 / -1">
         <table class="grid" style="width:100%;border-collapse:collapse">
-          <thead>
-            <tr>
-              <th>Bucket</th>
-              <th>PAYE pay</th>
-              <th>Umbrella pay</th>
-              <th>Charge</th>
-            </tr>
-          </thead>
+          <thead><tr><th>Bucket</th><th>PAYE pay</th><th>Umbrella pay</th><th>Charge</th></tr></thead>
           <tbody>
             ${['day','night','sat','sun','bh'].map(b => `
               <tr>
@@ -4887,18 +4894,12 @@ async function openClientRateModal(client_id, existing) {
           </tbody>
         </table>
       </div>
-
-      <!-- Live derived margins -->
       <div class="row" style="grid-column:1 / -1; margin-top:10px">
         <table class="grid" id="cl_margins_tbl" style="width:100%">
           <thead><tr><th>Bucket</th><th>PAYE margin</th><th>Umbrella margin</th></tr></thead>
           <tbody>
             ${['day','night','sat','sun','bh'].map(b=>`
-              <tr>
-                <td>${b.toUpperCase()}</td>
-                <td><span id="m_paye_${b}">—</span></td>
-                <td><span id="m_umb_${b}">—</span></td>
-              </tr>`).join('')}
+              <tr><td>${b.toUpperCase()}</td><td><span id="m_paye_${b}">—</span></td><td><span id="m_umb_${b}">—</span></td></tr>`).join('')}
           </tbody>
         </table>
         <div class="hint" id="cl_delete_hint" style="display:none;margin-top:6px"></div>
@@ -4975,17 +4976,16 @@ async function openClientRateModal(client_id, existing) {
     setApplyEnabled(!hasNegative);
   }
 
-  // Status in tab label
+  // Tab label with status
   const formTabLabel = `Form — ${ex.disabled_at_utc ? 'Inactive' : 'Active'}`;
 
-  // Helper: check if any overrides overlap this client window (for delete rule when past-dated)
+  // Overlap check helper (for delete button eligibility)
   async function checkAnyOverrideOverlap(win) {
     try {
       const qs = new URLSearchParams();
       qs.set('client_id', String(win.client_id || resolvedClientId || ''));
       qs.set('role', String(win.role || ''));
-      // '' means NULL band in API
-      qs.set('band', (win.band == null || win.band === '') ? '' : String(win.band));
+      qs.set('band', (win.band == null || win.band === '') ? '' : String(win.band)); // '' means NULL
       qs.set('from', String(win.date_from));
       if (win.date_to) qs.set('to', String(win.date_to));
       const url = API(`/api/rates/candidate-overrides/overlap-exists?${qs.toString()}`);
@@ -5070,21 +5070,18 @@ async function openClientRateModal(client_id, existing) {
         umb_sun     : raw['umb_sun']     !== '' ? Number(raw['umb_sun'])     : null,
         umb_bh      : raw['umb_bh']      !== '' ? Number(raw['umb_bh'])      : null,
 
-        // status carry-through
         disabled_at_utc : existing?.disabled_at_utc ?? null,
         disabled_by_name: existing?.disabled_by_name ?? null,
         __toggle        : existing?.__toggle || undefined,
         __localKey      : existing?.__localKey || undefined,
-
-        // delete staging flag (if user chose delete in this session)
         __delete        : existing?.__delete || false
       };
 
       // Overlap guards (enabled rows only)
       const list = Array.isArray(ctx.ratesState) ? ctx.ratesState : [];
       const normBand = v => String(v || '');
-      const sameCat = r => String(r.role||'') === staged.role && normBand(r.band) === normBand(staged.band);
-      const isSelf = r => existing ? sameRow(r, existing) : false;
+      const sameCat  = r => String(r.role||'') === staged.role && normBand(r.band) === normBand(staged.band);
+      const isSelf   = r => existing ? sameRow(r, existing) : false;
 
       const activeAtStart = list.filter(r =>
         !isSelf(r) && !r.disabled_at_utc && sameCat(r) &&
@@ -5153,7 +5150,11 @@ async function openClientRateModal(client_id, existing) {
   attachUkDatePicker(inTo);
 
   inFrom?.addEventListener('change', () => { try { inTo._minIso = parseUkDateToIso(inFrom.value || '') || null; } catch {}; recomputeClientMargins(); });
-  selRole.addEventListener('change', () => { if (selRole.value === '__OTHER__') newRow.style.display = ''; else { newRow.style.display='none'; const nr=document.getElementById('cl_role_new'); if (nr) nr.value=''; } recomputeClientMargins(); });
+  selRole.addEventListener('change', () => {
+    if (selRole.value === '__OTHER__') newRow.style.display = '';
+    else { newRow.style.display = 'none'; const nr = document.getElementById('cl_role_new'); if (nr) nr.value = ''; }
+    recomputeClientMargins();
+  });
   inTo?.addEventListener('change', () => { recomputeClientMargins(); });
 
   // Live margins & gating
@@ -5167,15 +5168,13 @@ async function openClientRateModal(client_id, existing) {
     recomputeClientMargins();
   } catch {}
 
-  // ---- DELETE BUTTON (staged delete; effective on parent Save) ----
+  // ---- DELETE BUTTON (staged delete; recorded in persistent Set; effective on parent Save) ----
   (async function wireDeleteButton(){
     const delBtn = byId('btnDelete');
     if (!delBtn) return;
-
-    // Only show for existing windows
     if (!existing || !existing.id) { delBtn.style.display='none'; return; }
 
-    // Compute if delete is allowed by rule
+    // Eligibility: future/today or past with no overlapping overrides
     const today = new Date(); const yyyy = today.getFullYear(); const mm = String(today.getMonth()+1).padStart(2,'0'); const dd = String(today.getDate()).padStart(2,'0');
     const todayIso = `${yyyy}-${mm}-${dd}`;
     const isFutureOrToday = !!existing.date_from && String(existing.date_from) >= todayIso;
@@ -5183,7 +5182,6 @@ async function openClientRateModal(client_id, existing) {
     let deletable = isFutureOrToday;
     let reason = '';
     if (!deletable) {
-      // Past-dated: allowed only if no overlapping candidate overrides
       const hasOverlap = await checkAnyOverrideOverlap(existing);
       deletable = !hasOverlap;
       if (hasOverlap) reason = 'Cannot delete: candidate overrides overlap this window.';
@@ -5196,21 +5194,19 @@ async function openClientRateModal(client_id, existing) {
       return;
     }
 
-    // Show and enable delete; clicking will stage the delete and close the modal
     delBtn.style.display = '';
     delBtn.disabled = false;
     delBtn.onclick = () => {
       try {
-        // Stage delete on the same object (parent Save will perform DELETE)
+        // Mark the array element for immediate UI
         existing.__delete = true;
-
-        // Update table immediately: show pending delete status
+        // Persist intent in Set so a refresh cannot lose it
+        if (window.modalCtx && window.modalCtx.ratesStagedDeletes instanceof Set && existing.id) {
+          window.modalCtx.ratesStagedDeletes.add(String(existing.id));
+        }
         try { renderClientRatesTable(); } catch {}
         try { window.dispatchEvent(new CustomEvent('modal-dirty')); } catch {}
-
-        // Close modal (delete applies on parent Save)
-        const closeBtn = byId('btnCloseModal');
-        if (closeBtn) closeBtn.click();
+        const closeBtn = byId('btnCloseModal'); if (closeBtn) closeBtn.click();
       } catch (e) {
         alert('Failed to stage delete.');
       }
