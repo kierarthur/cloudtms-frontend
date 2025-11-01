@@ -3238,13 +3238,13 @@ async function mountCandidateRatesTab() {
 // ==============================
 // 1) openCandidateRateModal(...)
 // ==============================
+// ========== CANDIDATE OVERRIDES ==========
 async function openCandidateRateModal(candidate_id, existing) {
   const LOG = !!window.__LOG_RATES;
   const G = (label, obj) => { if (LOG) console.groupCollapsed(`[RATES][openCandidateRateModal] ${label}`); if (LOG && obj!==undefined) console.log(obj); if (LOG) console.groupEnd(); };
   if (LOG) console.log('[RATES][openCandidateRateModal] ENTRY', { candidate_id, hasExisting: !!existing });
 
   const parentFrame = _currentFrame();
-  // ✅ Parent may be in 'create'
   const parentEditable = parentFrame && (parentFrame.mode === 'edit' || parentFrame.mode === 'create');
   if (LOG) console.log('[RATES][openCandidateRateModal] parentEditable?', parentEditable, 'parentMode=', parentFrame?.mode);
 
@@ -3263,11 +3263,7 @@ async function openCandidateRateModal(candidate_id, existing) {
     ? String(existing.rate_type).toUpperCase()
     : String(window.modalCtx?.data?.pay_method || 'PAYE').toUpperCase();
 
-  // --- Fixed 3-row layout for buckets with placeholders ---
-  // Row 1: DAY (full width)
-  // Row 2: NIGHT (left) + SAT (right)
-  // Row 3: SUN (left) + BH (right)
-  // Each slot has a placeholder and an input wrapper; we toggle visibility based on resolved client charges.
+  // fixed 3-row layout with placeholders (unchanged)
   const formHtml = html(`
     <div class="form" id="candRateForm">
       <div class="row">
@@ -3277,7 +3273,6 @@ async function openCandidateRateModal(candidate_id, existing) {
           ${clientOptions}
         </select>
       </div>
-
       <div class="row">
         <label>Rate type (required)</label>
         <select name="rate_type" id="cr_rate_type" ${parentEditable ? '' : 'disabled'}>
@@ -3285,7 +3280,6 @@ async function openCandidateRateModal(candidate_id, existing) {
           <option ${defaultRateType==='UMBRELLA'?'selected':''}>UMBRELLA</option>
         </select>
       </div>
-
       <div class="row">
         <label>Role (required)</label>
         <select name="role" id="cr_role" required ${parentEditable ? '' : 'disabled'}>
@@ -3296,7 +3290,6 @@ async function openCandidateRateModal(candidate_id, existing) {
         <label>Band (optional)</label>
         <select name="band" id="cr_band" ${parentEditable ? '' : 'disabled'}></select>
       </div>
-
       <div class="row">
         <label>Effective from (DD/MM/YYYY)</label>
         <input type="text" name="date_from" id="cr_date_from" placeholder="DD/MM/YYYY" ${parentEditable ? '' : 'disabled'} />
@@ -3307,54 +3300,37 @@ async function openCandidateRateModal(candidate_id, existing) {
         <div class="hint field-hint err" id="cr_date_to_err" style="display:none"></div>
       </div>
 
-      <!-- Buckets: fixed positions -->
-      <!-- Row 1: DAY (full width) -->
+      <!-- Row 1 -->
       <div class="row" style="grid-column:1/-1" data-bucket="day">
         <label>Pay (Day)</label>
         <div class="slot" id="slot_day">
-          <div class="slot-input" id="slot_input_day" style="display:none">
-            <input type="number" step="0.01" name="pay_day" id="pay_day"/>
-          </div>
+          <div class="slot-input" id="slot_input_day" style="display:none"><input type="number" step="0.01" name="pay_day" id="pay_day"/></div>
           <div class="slot-ph" id="slot_ph_day" style="opacity:.75">Not in client rate</div>
         </div>
       </div>
-
-      <!-- Row 2: NIGHT (left) + SAT (right) -->
-      <div class="row" data-bucket="night">
-        <label>Pay (Night)</label>
+      <!-- Row 2 -->
+      <div class="row" data-bucket="night"><label>Pay (Night)</label>
         <div class="slot" id="slot_night">
-          <div class="slot-input" id="slot_input_night" style="display:none">
-            <input type="number" step="0.01" name="pay_night" id="pay_night"/>
-          </div>
+          <div class="slot-input" id="slot_input_night" style="display:none"><input type="number" step="0.01" name="pay_night" id="pay_night"/></div>
           <div class="slot-ph" id="slot_ph_night" style="opacity:.75">Not in client rate</div>
         </div>
       </div>
-      <div class="row" data-bucket="sat">
-        <label>Pay (Sat)</label>
+      <div class="row" data-bucket="sat"><label>Pay (Sat)</label>
         <div class="slot" id="slot_sat">
-          <div class="slot-input" id="slot_input_sat" style="display:none">
-            <input type="number" step="0.01" name="pay_sat" id="pay_sat"/>
-          </div>
+          <div class="slot-input" id="slot_input_sat" style="display:none"><input type="number" step="0.01" name="pay_sat" id="pay_sat"/></div>
           <div class="slot-ph" id="slot_ph_sat" style="opacity:.75">Not in client rate</div>
         </div>
       </div>
-
-      <!-- Row 3: SUN (left) + BH (right) -->
-      <div class="row" data-bucket="sun">
-        <label>Pay (Sun)</label>
+      <!-- Row 3 -->
+      <div class="row" data-bucket="sun"><label>Pay (Sun)</label>
         <div class="slot" id="slot_sun">
-          <div class="slot-input" id="slot_input_sun" style="display:none">
-            <input type="number" step="0.01" name="pay_sun" id="pay_sun"/>
-          </div>
+          <div class="slot-input" id="slot_input_sun" style="display:none"><input type="number" step="0.01" name="pay_sun" id="pay_sun"/></div>
           <div class="slot-ph" id="slot_ph_sun" style="opacity:.75">Not in client rate</div>
         </div>
       </div>
-      <div class="row" data-bucket="bh">
-        <label>Pay (BH)</label>
+      <div class="row" data-bucket="bh"><label>Pay (BH)</label>
         <div class="slot" id="slot_bh">
-          <div class="slot-input" id="slot_input_bh" style="display:none">
-            <input type="number" step="0.01" name="pay_bh" id="pay_bh"/>
-          </div>
+          <div class="slot-input" id="slot_input_bh" style="display:none"><input type="number" step="0.01" name="pay_bh" id="pay_bh"/></div>
           <div class="slot-ph" id="slot_ph_bh" style="opacity:.75">Not in client rate</div>
         </div>
       </div>
@@ -3362,20 +3338,10 @@ async function openCandidateRateModal(candidate_id, existing) {
       <!-- Live margins preview -->
       <div class="row" style="grid-column:1 / -1; margin-top:10px">
         <table class="grid" id="cr_margins_tbl" style="width:100%">
-          <thead>
-            <tr>
-              <th>Bucket</th>
-              <th>Margin</th>
-              <th class="hint">Formula uses active client charge at start date</th>
-            </tr>
-          </thead>
+          <thead><tr><th>Bucket</th><th>Margin</th><th class="hint">Formula uses active client charge at start date</th></tr></thead>
           <tbody>
             ${['day','night','sat','sun','bh'].map(b=>`
-              <tr>
-                <td>${b.toUpperCase()}</td>
-                <td><span id="cr_m_${b}">—</span></td>
-                <td></td>
-              </tr>`).join('')}
+              <tr><td>${b.toUpperCase()}</td><td><span id="cr_m_${b}">—</span></td><td></td></tr>`).join('')}
           </tbody>
         </table>
       </div>
@@ -3384,62 +3350,15 @@ async function openCandidateRateModal(candidate_id, existing) {
 
   let cache = { windows: [], roles: [], bandsByRole: {} };
 
-  // === Helpers: ERNI, formatting, save-button control, inline error handling ===
-  async function _erniMultiplier(){
-    if (typeof window.__ERNI_MULT__ === 'number') return window.__ERNI_MULT__;
-    let pct = 0;
-    try {
-      if (typeof getSettingsCached === 'function') {
-        const s = await getSettingsCached();
-        let p = s?.erni_pct ?? s?.employers_ni_percent ?? 0;
-        p = Number(p) || 0; if (p > 1) p = p/100;
-        window.__ERNI_MULT__ = 1 + p;
-        return window.__ERNI_MULT__;
-      }
-    } catch {}
-    window.__ERNI_MULT__ = 1; return 1;
-  }
-  function numOrNull(v){ const n = Number(v); return Number.isFinite(n) ? n : null; }
+  // ERNI, utils, and gating (unchanged)
+  async function _erniMultiplier(){ if (typeof window.__ERNI_MULT__ === 'number') return window.__ERNI_MULT__; try { if (typeof getSettingsCached === 'function') { const s = await getSettingsCached(); let p = s?.erni_pct ?? s?.employers_ni_percent ?? 0; p = Number(p)||0; if (p>1) p=p/100; window.__ERNI_MULT__ = 1 + p; return window.__ERNI_MULT__; } } catch{} window.__ERNI_MULT__ = 1; return 1; }
+  function numOrNull(v){ const n=Number(v); return Number.isFinite(n) ? n : null; }
   const fmt = v => (v==null || Number.isNaN(v)) ? '—' : (Math.round(v*100)/100).toFixed(2);
-  const bucketLabel = { day:'Day', night:'Night', sat:'Sat', sun:'Sun', bh:'BH' };
+  function setApplyEnabled(enabled){ try { const btn = document.querySelector('#btnSave, #modal .actions .primary, #modal .btn-save, .modal .btn-save'); if (btn) { btn.disabled = !enabled; btn.classList.toggle('disabled', !enabled); } } catch{} try { window.dispatchEvent(new CustomEvent('modal-apply-enabled', { detail:{ enabled } })); } catch {} }
+  function setFieldError(bucket,msg){ const rowInput=document.querySelector(`#candRateForm input[name="pay_${bucket}"]`); if(!rowInput)return; let hint=rowInput.parentElement?.querySelector?.(`.field-hint.err[data-bucket="${bucket}"]`); if(msg){ if(!hint){ hint=document.createElement('div'); hint.className='hint field-hint err'; hint.setAttribute('data-bucket',bucket); rowInput.parentElement.appendChild(hint);} hint.textContent=msg; } else if(hint){ hint.remove(); } }
+  function setDateToError(msg){ const el=byId('cr_date_to_err'); if(!el) return; if(msg){ el.textContent=msg; el.style.display=''; } else { el.textContent=''; el.style.display='none'; } }
+  function clearAllFieldErrors(){ document.querySelectorAll('#candRateForm .field-hint.err').forEach(el=>el.remove()); setDateToError(''); }
 
-  // Use the real Save button selector
-  function setApplyEnabled(enabled){
-    try {
-      const btn = document.querySelector('#btnSave, #modal .actions .primary, #modal .btn-save, .modal .btn-save');
-      if (btn) { btn.disabled = !enabled; btn.classList.toggle('disabled', !enabled); }
-    } catch {}
-    try { window.dispatchEvent(new CustomEvent('modal-apply-enabled', { detail:{ enabled } })); } catch {}
-  }
-
-  function setFieldError(bucket, msg){
-    const rowInput = document.querySelector(`#candRateForm input[name="pay_${bucket}"]`);
-    if (!rowInput) return;
-    let hint = rowInput.parentElement?.querySelector?.(`.field-hint.err[data-bucket="${bucket}"]`);
-    if (msg) {
-      if (!hint) {
-        hint = document.createElement('div');
-        hint.className = 'hint field-hint err';
-        hint.setAttribute('data-bucket', bucket);
-        rowInput.parentElement.appendChild(hint);
-      }
-      hint.textContent = msg;
-    } else if (hint) {
-      hint.remove();
-    }
-  }
-  function setDateToError(msg){
-    const el = document.getElementById('cr_date_to_err');
-    if (!el) return;
-    if (msg) { el.textContent = msg; el.style.display = ''; }
-    else { el.textContent = ''; el.style.display = 'none'; }
-  }
-  function clearAllFieldErrors(){
-    document.querySelectorAll('#candRateForm .field-hint.err').forEach(el=>el.remove());
-    setDateToError('');
-  }
-
-  // Resolve active default window (returns both charges and its end date)
   async function resolveCoveringWindow(client_id, role, band, active_on){
     if (!client_id || !role || !active_on) return null;
     try {
@@ -3447,53 +3366,14 @@ async function openCandidateRateModal(candidate_id, existing) {
       const rows = Array.isArray(list) ? list.filter(w=>!w.disabled_at_utc && w.role===role) : [];
       let win = rows.find(w => (w.band ?? null) === (band ?? null));
       if (!win && (band == null)) win = rows.find(w => w.band == null);
-      return win ? {
-        charges: {
-          day: win.charge_day ?? null,
-          night: win.charge_night ?? null,
-          sat: win.charge_sat ?? null,
-          sun: win.charge_sun ?? null,
-          bh: win.charge_bh ?? null
-        },
-        capIso: win.date_to || null
-      } : null;
+      return win ? { charges: {
+        day: win.charge_day ?? null, night: win.charge_night ?? null, sat: win.charge_sat ?? null,
+        sun: win.charge_sun ?? null, bh: win.charge_bh ?? null
+      }, capIso: win.date_to || null } : null;
     } catch(e){ return null; }
   }
 
-  // Cache last resolved window to cut calls
-  let _lastKey = null;
-  let _lastWin = null;
-
-  function validatePayAgainstCharges(charges){
-    const invalid = [];
-    ['day','night','sat','sun','bh'].forEach(b=>{
-      const pay = numOrNull(document.querySelector(`#candRateForm input[name="pay_${b}"]`)?.value);
-      const chg = charges ? charges[b] : null;
-      setFieldError(b, null);
-      if (pay != null && chg == null) {
-        invalid.push(b);
-        setFieldError(b, `No client charge for ${bucketLabel[b]} on the selected start date — remove this value or set a client rate first.`);
-      }
-    });
-    return invalid;
-  }
-
-  function validateNegativeMargins(charges, rateType, erniMult){
-    const neg = [];
-    ['day','night','sat','sun','bh'].forEach(b=>{
-      const pay = numOrNull(document.querySelector(`#candRateForm input[name="pay_${b}"]`)?.value);
-      const chg = charges ? charges[b] : null;
-      if (pay == null || chg == null) return;
-      const margin = (rateType==='PAYE') ? (chg - (pay * erniMult)) : (chg - pay);
-      if (margin < 0) {
-        neg.push(b);
-        setFieldError(b, `Margin would be negative for ${bucketLabel[b]}. Reduce pay or change date.`);
-      }
-    });
-    return neg;
-  }
-
-  // Driver: decide which buckets are editable/visible and gate Apply
+  // Driver
   async function recomputeOverrideState(){
     const clientId = byId('cr_client_id')?.value || '';
     const role     = byId('cr_role')?.value || '';
@@ -3511,84 +3391,73 @@ async function openCandidateRateModal(candidate_id, existing) {
     let canApply = true;
     clearAllFieldErrors();
 
-    // Gate until all four fields are provided
     const ready = !!clientId && !!rateType && !!role && !!isoFrom;
     if (!ready) {
-      // Disable inputs and show placeholders for all buckets
       buckets.forEach(b => {
-        const inp = inputEl(b);
-        if (inp) { inp.disabled = true; }
+        const inp = inputEl(b); if (inp) { inp.disabled = true; }
         if (slotIn(b)) slotIn(b).style.display = 'none';
         if (slotPh(b)) slotPh(b).style.display = '';
         const sp = byId(`cr_m_${b}`); if (sp) sp.textContent = '—';
       });
-      setApplyEnabled(false);
-      return;
+      setApplyEnabled(false); return;
     }
 
-    // Resolve covering window (cache)
     const key = [clientId, role, band ?? '', isoFrom].join('|');
-    const win = (key === _lastKey && _lastWin) ? _lastWin : await resolveCoveringWindow(clientId, role, band, isoFrom);
-    _lastKey = key; _lastWin = win;
+    const win = await (async (k)=> {
+      if (!window.__CR_WIN_CACHE) window.__CR_WIN_CACHE = {};
+      if (window.__CR_WIN_CACHE[k] !== undefined) return window.__CR_WIN_CACHE[k];
+      const w = await resolveCoveringWindow(clientId, role, band, isoFrom);
+      window.__CR_WIN_CACHE[k] = w; return w;
+    })(key);
 
-    // If no window, keep placeholders and disable
     if (!win) {
       buckets.forEach(b => {
-        const inp = inputEl(b);
-        if (inp) { inp.disabled = true; }
+        const inp = inputEl(b); if (inp) { inp.disabled = true; }
         if (slotIn(b)) slotIn(b).style.display = 'none';
         if (slotPh(b)) slotPh(b).style.display = '';
         const sp = byId(`cr_m_${b}`); if (sp) sp.textContent = '—';
       });
-      setApplyEnabled(false);
-      return;
+      setApplyEnabled(false); return;
     }
 
-    // Show/enable inputs only for buckets present in client charges; keep placeholders for missing ones
     buckets.forEach(b => {
       const hasCharge = (win.charges[b] != null);
       const inp = inputEl(b);
-      if (hasCharge) {
-        if (slotPh(b)) slotPh(b).style.display = 'none';
-        if (slotIn(b)) slotIn(b).style.display = '';
-        if (inp) inp.disabled = false;
-      } else {
-        if (slotIn(b)) slotIn(b).style.display = 'none';
-        if (slotPh(b)) slotPh(b).style.display = '';
-        if (inp) { inp.value = ''; inp.disabled = true; }
-      }
+      if (hasCharge) { if (slotPh(b)) slotPh(b).style.display='none'; if (slotIn(b)) slotIn(b).style.display=''; if (inp) inp.disabled=false; }
+      else { if (slotIn(b)) slotIn(b).style.display='none'; if (slotPh(b)) slotPh(b).style.display=''; if (inp) { inp.value=''; inp.disabled=true; } }
     });
 
-    // Validations and margins preview
     const mult = await _erniMultiplier();
 
-    // (a) No pay where charge is null (should be prevented by hiding inputs, but keep logic)
-    const missing = validatePayAgainstCharges(win.charges);
+    const missing = (()=>{
+      const inv = [];
+      ['day','night','sat','sun','bh'].forEach(b=>{
+        const pay=numOrNull(inputEl(b)?.value); const chg=win.charges[b];
+        setFieldError(b, null);
+        if (pay != null && chg == null) { inv.push(b); setFieldError(b, `No client charge for ${bucketLabel[b]}.`); }
+      });
+      return inv;
+    })();
     if (missing.length) canApply = false;
 
-    // (b) No negative margins
-    const negative = validateNegativeMargins(win.charges, rateType, mult);
+    const negative = (()=>{
+      const neg=[];
+      ['day','night','sat','sun','bh'].forEach(b=>{
+        const pay=numOrNull(inputEl(b)?.value); const chg=win.charges[b];
+        if (pay==null || chg==null) return;
+        const margin = (String(rateType)==='PAYE') ? (chg - (pay * mult)) : (chg - pay);
+        if (margin < 0) { neg.push(b); setFieldError(b, `Margin would be negative for ${bucketLabel[b]}.`); }
+      });
+      return neg;
+    })();
     if (negative.length) canApply = false;
 
-    // (c) End date cap vs client window date_to
     setDateToError('');
-    if (isoTo && win.capIso && isoTo > win.capIso) {
-      setDateToError(`Client rate ends on ${formatIsoToUk(win.capIso)} — override must end on or before this date.`);
-      canApply = false;
-    }
+    if (isoTo && win.capIso && isoTo > win.capIso) { setDateToError(`Client rate ends on ${formatIsoToUk(win.capIso)} — override must end on/before this date.`); canApply = false; }
 
-    // (d) Margins preview (only for buckets that have a client charge)
-    buckets.forEach(b=>{
-      const pay = numOrNull(inputEl(b)?.value);
-      const chg = win.charges[b];
-      const sp  = byId(`cr_m_${b}`);
-      if (!sp) return;
-      if (chg!=null && pay!=null) {
-        const m = (rateType==='PAYE') ? (chg - (pay * mult)) : (chg - pay);
-        sp.textContent = fmt(m);
-      } else {
-        sp.textContent = '—';
-      }
+    ['day','night','sat','sun','bh'].forEach(b=>{
+      const pay = numOrNull(inputEl(b)?.value); const chg = win.charges[b]; const sp = byId(`cr_m_${b}`);
+      if (!sp) return; if (chg!=null && pay!=null){ const m = (String(rateType)==='PAYE') ? (chg-(pay*mult)) : (chg-pay); sp.textContent = fmt(m); } else { sp.textContent='—'; }
     });
 
     setApplyEnabled(canApply);
@@ -3599,79 +3468,47 @@ async function openCandidateRateModal(candidate_id, existing) {
     [{ key:'form', label:'Form' }],
     () => formHtml,
     async () => {
-      // ✅ Allow Apply when parent is 'edit' or 'create'
-      if (!parentEditable) {
-        alert('Open the candidate in Edit mode to add/modify overrides.');
-        if (LOG) console.warn('[RATES][openCandidateRateModal] Apply blocked: parent not editable');
-        return false;
-      }
+      if (!parentEditable) { alert('Open the candidate in Edit mode to add/modify overrides.'); if (LOG) console.warn('[openCandidateRateModal] Apply blocked'); return false; }
 
-      const raw = collectForm('#candRateForm');
-      if (LOG) G('Apply collected form', raw);
-
+      const raw = collectForm('#candRateForm'); if (LOG) G('Apply collected form', raw);
       const client_id = (raw.client_id || '').trim();
       const role = (raw.role || '').trim();
       const band = (raw.band || '').trim() || null;
       const rate_type = String(raw.rate_type || '').toUpperCase();
-
       if (!client_id) { alert('Client is required'); return false; }
       if (!role) { alert('Role is required'); return false; }
-      if (rate_type !== 'PAYE' && rate_type !== 'UMBRELLA') { alert('Rate type must be PAYE or UMBRELLA'); return false; }
+      if (rate_type!=='PAYE' && rate_type!=='UMBRELLA') { alert('Rate type must be PAYE or UMBRELLA'); return false; }
 
       const isoFromUI = parseUkDateToIso(raw.date_from);
-      let isoFrom = isoFromUI;
-      if (!isoFrom) { alert('Invalid “Effective from” date'); return false; }
+      let isoFrom = isoFromUI; if (!isoFrom) { alert('Invalid “Effective from” date'); return false; }
       if (existing?.date_from) isoFrom = existing.date_from || isoFrom;
 
-      let isoTo = null;
-      if (raw.date_to) {
-        isoTo = parseUkDateToIso(raw.date_to);
-        if (!isoTo) { alert('Invalid “Effective to” date'); return false; }
-      }
-      // Basic runtime date rule
+      let isoTo = null; if (raw.date_to) { isoTo = parseUkDateToIso(raw.date_to); if (!isoTo) { alert('Invalid “Effective to” date'); return false; } }
       if (isoTo && isoTo < isoFrom) { alert('“Effective to” cannot be before “Effective from”.'); return false; }
 
-      // Resolve window + enforce all gates in Apply
       const win = await resolveCoveringWindow(client_id, role, band, isoFrom);
-      if (!win) {
-        alert(`No active client default for ${role}${band?` / ${band}`:''} on ${formatIsoToUk(isoFrom)}.`);
-        return false;
-      }
+      if (!win) { alert(`No active client default for ${role}${band?` / ${band}`:''} on ${formatIsoToUk(isoFrom)}.`); return false; }
+      if (isoTo && win.capIso && isoTo > win.capIso) { alert(`Client rate ends on ${formatIsoToUk(win.capIso)} — override must end on/before this date.`); return false; }
 
-      // End-date cap: if client has finite date_to, override must be ≤ that
-      if (isoTo && win.capIso && isoTo > win.capIso) {
-        alert(`Client rate ends on ${formatIsoToUk(win.capIso)} — override must end on or before this date.`);
-        return false;
-      }
-
-      // No pay where charge is null
       for (const b of ['day','night','sat','sun','bh']) {
         const inp = document.querySelector(`#candRateForm input[name="pay_${b}"]`);
-        if (!inp || inp.disabled) continue; // skip hidden buckets
+        if (!inp || inp.disabled) continue;
         const pay = (raw[`pay_${b}`] === '' ? null : Number(raw[`pay_${b}`]));
         const chg = win.charges[b];
-        if (pay != null && chg == null) {
-          alert(`No client charge for ${bucketLabel[b]} on the selected start date — remove this value or set a client rate first.`);
-          return false;
-        }
+        if (pay != null && chg == null) { alert(`No client charge for ${bucketLabel[b]}.`); return false; }
       }
 
-      // No negative margin
       const mult = await _erniMultiplier();
       for (const b of ['day','night','sat','sun','bh']) {
         const inp = document.querySelector(`#candRateForm input[name="pay_${b}"]`);
         if (!inp || inp.disabled) continue;
         const pay = (raw[`pay_${b}`] === '' ? null : Number(raw[`pay_${b}`]));
         const chg = win.charges[b];
-        if (pay == null || chg == null) continue;
+        if (pay==null || chg==null) continue;
         const margin = (rate_type==='PAYE') ? (chg - (pay * mult)) : (chg - pay);
-        if (margin < 0) {
-          alert(`Margin would be negative for ${bucketLabel[b]}. Reduce pay or change date.`);
-          return false;
-        }
+        if (margin < 0) { alert(`Margin would be negative for ${bucketLabel[b]}.`); return false; }
       }
 
-      // Build staged object (existing logic)
       const stagedAll = {
         id        : existing?.id,
         candidate_id,
@@ -3702,7 +3539,6 @@ async function openCandidateRateModal(candidate_id, existing) {
         String((o.rate_type || '')).toUpperCase() === rate_type &&
         String(o.band||'')  === String(band||'');
 
-      // Exclude self when checking overlaps
       const isSelf = (o) => {
         if (!existing) return false;
         if (existing.id && o.id) return String(o.id) === String(existing.id);
@@ -3710,9 +3546,8 @@ async function openCandidateRateModal(candidate_id, existing) {
         return false;
       };
 
-      const overlapping = universe
-        .filter(o => sameKey(o) && !isSelf(o))
-        .filter(o => rangesOverlap(o.date_from||null, o.date_to||null, stagedAll.date_from, stagedAll.date_to));
+      const overlapping = universe.filter(o => sameKey(o) && !isSelf(o))
+                                  .filter(o => rangesOverlap(o.date_from||null, o.date_to||null, stagedAll.date_from, stagedAll.date_to));
       if (overlapping.length) {
         const ov = overlapping[0];
         const d = new Date(stagedAll.date_from+'T00:00:00Z'); d.setUTCDate(d.getUTCDate()-1);
@@ -3765,50 +3600,33 @@ async function openCandidateRateModal(candidate_id, existing) {
     },
     false,
     () => {
-      const parent = _currentFrame();
-      if (parent) {
-        if (LOG) console.log('[RATES][openCandidateRateModal] onReturn → setTab("rates")');
-        parent.currentTabKey = 'rates'; parent.setTab('rates');
-      }
+      const parent = _currentFrame(); if (parent) { parent.currentTabKey = 'rates'; parent.setTab('rates'); }
     }
   );
 
-  // After mount: prefill & wire
-  const selClient = document.getElementById('cr_client_id');
-  const selRateT  = document.getElementById('cr_rate_type');
-  const selRole   = document.getElementById('cr_role');
-  const selBand   = document.getElementById('cr_band');
-  const bandRow   = document.getElementById('cr_band_row');
-  const inFrom    = document.getElementById('cr_date_from');
-  const inTo      = document.getElementById('cr_date_to');
+  // Prefill & wiring
+  const selClient = byId('cr_client_id');
+  const selRateT  = byId('cr_rate_type');
+  const selRole   = byId('cr_role');
+  const selBand   = byId('cr_band');
+  const inFrom    = byId('cr_date_from');
+  const inTo      = byId('cr_date_to');
 
   if (initialClientId) selClient.value = initialClientId;
   if (existing?.date_from) inFrom.value = formatIsoToUk(existing.date_from);
   if (existing?.date_to)   inTo.value   = formatIsoToUk(existing.date_to);
 
-  attachUkDatePicker(inFrom);
-  attachUkDatePicker(inTo);
+  attachUkDatePicker(inFrom); attachUkDatePicker(inTo);
 
   const lockThis = !!existing?.date_from && isPastOrToday(existing.date_from);
   if (lockThis) {
-    selClient.disabled = true;
-    selRateT.disabled  = true;
-    selRole.disabled   = true;
-    selBand.disabled   = true;
-    inFrom.disabled    = true;
-
-    ['pay_day','pay_night','pay_sat','pay_sun','pay_bh'].forEach(n => {
-      const el = document.querySelector(`#candRateForm input[name="${n}"]`);
-      if (el) el.disabled = true;
-    });
+    selClient.disabled = true; selRateT.disabled = true; selRole.disabled = true; selBand.disabled = true; inFrom.disabled = true;
+    ['pay_day','pay_night','pay_sat','pay_sun','pay_bh'].forEach(n => { const el = document.querySelector(`#candRateForm input[name="${n}"]`); if (el) el.disabled = true; });
   }
 
   async function refreshClientRoles(clientId) {
-    selRole.innerHTML = `<option value="">Select role…</option>`;
-    selRole.disabled = true;
-    // Keep Band row visible and disabled (no shift)
-    selBand.innerHTML = `<option value=""></option>`;
-    selBand.disabled  = true;
+    selRole.innerHTML = `<option value="">Select role…</option>`; selRole.disabled = true;
+    selBand.innerHTML = `<option value=""></option>`; selBand.disabled  = true;
 
     if (!clientId) { setApplyEnabled(false); return; }
 
@@ -3816,50 +3634,27 @@ async function openCandidateRateModal(candidate_id, existing) {
     const list = await listClientRates(clientId, { active_on, only_enabled: true });
     cache.windows = (Array.isArray(list) ? list.filter(w => !w.disabled_at_utc) : []);
 
-    const roles = new Set();
-    const bandsByRole = {};
-    (cache.windows).forEach(w => {
-      if (!w.role) return;
-      roles.add(w.role);
-      const bKey = (w.band == null ? '' : String(w.band));
-      (bandsByRole[w.role] ||= new Set()).add(bKey);
-    });
+    const roles = new Set(); const bandsByRole = {};
+    (cache.windows).forEach(w => { if (!w.role) return; roles.add(w.role); const bKey = (w.band == null ? '' : String(w.band)); (bandsByRole[w.role] ||= new Set()).add(bKey); });
 
     const allowed = [...roles].sort((a,b)=> a.localeCompare(b));
-    selRole.innerHTML = `<option value="">Select role…</option>` +
-      allowed.map(code => `<option value="${code}">${code}</option>`).join('');
+    selRole.innerHTML = `<option value="">Select role…</option>` + allowed.map(code => `<option value="${code}">${code}</option>`).join('');
     selRole.disabled = !!lockThis;
 
     cache.roles = allowed;
-    cache.bandsByRole = Object.fromEntries(
-      allowed.map(code => [code, [...(bandsByRole[code] || new Set())]])
-    );
+    cache.bandsByRole = Object.fromEntries(allowed.map(code => [code, [...(bandsByRole[code] || new Set())]]));
 
-    // If we have a role but no bands, keep Band select visible & disabled
-    if (existing?.role) {
-      selRole.value = existing.role;
-      onRoleChanged();
-      if (existing?.band != null) { selBand.value = existing.band; selBand.disabled = !!lockThis; }
-    }
+    if (existing?.role) { selRole.value = existing.role; onRoleChanged(); if (existing?.band != null) { selBand.value = existing.band; selBand.disabled = !!lockThis; } }
 
     await recomputeOverrideState();
   }
 
   function onRoleChanged() {
-    const role = selRole.value;
-    const bands = cache.bandsByRole[role] || [];
-    const hasNull = bands.includes('');
-    // Keep row visible; fill options or empty; disable when none
+    const role = selRole.value; const bands = cache.bandsByRole[role] || []; const hasNull = bands.includes('');
     if (bands.length) {
-      const opts = (hasNull ? `<option value="">(none)</option>` : '') +
-                   bands.filter(b=>b!=='').sort((a,b)=> String(a).localeCompare(String(b)))
-                        .map(b => `<option value="${b}">${b}</option>`).join('');
-      selBand.innerHTML = opts;
-      selBand.disabled = !!lockThis;
-    } else {
-      selBand.innerHTML = `<option value=""></option>`;
-      selBand.disabled  = true;
-    }
+      const opts = (hasNull ? `<option value="">(none)</option>` : '') + bands.filter(b=>b!=='').sort((a,b)=> String(a).localeCompare(String(b))).map(b => `<option value="${b}">${b}</option>`).join('');
+      selBand.innerHTML = opts; selBand.disabled = !!lockThis;
+    } else { selBand.innerHTML = `<option value=""></option>`; selBand.disabled  = true; }
   }
 
   selClient.addEventListener('change', async () => { if (!lockThis) { await refreshClientRoles(selClient.value); } });
@@ -3868,19 +3663,152 @@ async function openCandidateRateModal(candidate_id, existing) {
   selRole.addEventListener('change', async () => { onRoleChanged(); await recomputeOverrideState(); });
   selBand.addEventListener('change', () => recomputeOverrideState());
 
-  // recompute when pay fields change
-  ['pay_day','pay_night','pay_sat','pay_sun','pay_bh'].forEach(n=>{
-    const el = document.querySelector(`#candRateForm input[name="${n}"]`);
-    if (el) el.addEventListener('input', ()=>recomputeOverrideState());
-  });
+  ['pay_day','pay_night','pay_sat','pay_sun','pay_bh'].forEach(n=>{ const el = document.querySelector(`#candRateForm input[name="${n}"]`); if (el) el.addEventListener('input', ()=>recomputeOverrideState()); });
 
-  // Initial render
   await recomputeOverrideState();
 
-  if (initialClientId) {
-    selClient.value = initialClientId;
-    await refreshClientRoles(initialClientId);
+  if (initialClientId) { selClient.value = initialClientId; await refreshClientRoles(initialClientId); }
+
+  // ---- DELETE BUTTON (staged delete; effective on parent Save) ----
+  (function wireDeleteButton(){
+    const delBtn = byId('btnDelete'); if (!delBtn) return;
+    if (!existing || !existing.id) { delBtn.style.display='none'; return; }
+    // Always allowed in candidate modal (staged delete)
+    delBtn.style.display = ''; delBtn.disabled = false;
+    delBtn.onclick = () => {
+      try {
+        const O = window.modalCtx.overrides || (window.modalCtx.overrides = { existing: [], stagedNew: [], stagedEdits: {}, stagedDeletes: new Set() });
+        if (!O.stagedDeletes) O.stagedDeletes = new Set();
+        O.stagedDeletes.add(existing.id);
+        try { renderCandidateRatesTable(); } catch {}
+        try { window.dispatchEvent(new CustomEvent('modal-dirty')); } catch {}
+        const closeBtn = byId('btnCloseModal'); if (closeBtn) closeBtn.click();
+      } catch (e) {
+        alert('Failed to stage delete.');
+      }
+    };
+  })();
+}
+
+async function renderCandidateRatesTable() {
+  const LOG = !!window.__LOG_RATES;
+  const token    = window.modalCtx.openToken;
+  const idActive = window.modalCtx.data?.id || null;
+  const div = byId('ratesTable');
+  if (!div) { if (LOG) console.warn('[RATES][renderCandidateRatesTable] no #ratesTable'); return; }
+
+  if ((token !== window.modalCtx.openToken && idActive !== null) ||
+      (window.modalCtx.data?.id !== idActive && idActive !== null)) {
+    if (LOG) console.warn('[RATES][renderCandidateRatesTable] token/id changed mid-flight (blocked because idActive!=null)');
+    return;
   }
+
+  const frame = _currentFrame();
+  const parentEditable = frame && (frame.mode === 'edit' || frame.mode === 'create');
+  if (LOG) console.log('[RATES][renderCandidateRatesTable] parentEditable?', parentEditable);
+
+  let clientsById = {};
+  try {
+    const clients = await listClientsBasic();
+    if (idActive !== null && (token !== window.modalCtx.openToken || window.modalCtx.data?.id !== idActive)) return;
+    clientsById = Object.fromEntries((clients || []).map(c => [c.id, c.name]));
+    if (LOG) console.log('[RATES][renderCandidateRatesTable] clients loaded', (clients||[]).length);
+  } catch (e) { console.error('load clients failed', e); }
+
+  const O = window.modalCtx.overrides || { existing: [], stagedNew: [], stagedEdits: {}, stagedDeletes: new Set() };
+
+  const rows = [];
+  for (const ex of (O.existing || [])) {
+    if (O.stagedDeletes && O.stagedDeletes.has(ex.id)) continue;
+    rows.push({ ...ex, ...(O.stagedEdits[ex.id] || {}), _edited: !!O.stagedEdits[ex.id] });
+  }
+  for (const n of (O.stagedNew || [])) rows.push({ ...n, _isNew: true });
+
+  const fmt = v => (v==null || Number.isNaN(v)) ? '—' : (Math.round(v*100)/100).toFixed(2);
+  const mult = await (async ()=>{ if (typeof window.__ERNI_MULT__ === 'number') return window.__ERNI_MULT__; try { if (typeof getSettingsCached === 'function') { const s = await getSettingsCached(); let p = s?.erni_pct ?? s?.employers_ni_percent ?? 0; p = Number(p)||0; if (p>1) p=p/100; window.__ERNI_MULT__ = 1 + p; return window.__ERNI_MULT__; } } catch{} window.__ERNI_MULT__ = 1; return 1; })();
+
+  const keyOf = r => [r.client_id, r.role || '', (r.band==null?'':String(r.band)), r.date_from || ''].join('|');
+  const uniqueKeys = Array.from(new Set(rows.map(keyOf)));
+  const chargeMap = Object.create(null);
+
+  async function loadChargesForKey(key){
+    const [client_id, role, bandKey, date_from] = key.split('|');
+    const band = (bandKey === '' ? null : bandKey);
+    if (!client_id || !role || !date_from) return null;
+    try {
+      const list = await listClientRates(client_id, { active_on: date_from, only_enabled: true });
+      const rows = Array.isArray(list) ? list.filter(w=>!w.disabled_at_utc && w.role===role) : [];
+      let win = rows.find(w => (w.band ?? null) === (band ?? null));
+      if (!win && (band == null)) win = rows.find(w => w.band == null);
+      return win ? { day: win.charge_day ?? null, night: win.charge_night ?? null, sat: win.charge_sat ?? null, sun: win.charge_sun ?? null, bh: win.charge_bh ?? null } : null;
+    } catch(e){ return null; }
+  }
+
+  await Promise.all(uniqueKeys.map(async k => { chargeMap[k] = await loadChargesForKey(k); }));
+
+  if (!rows.length) {
+    div.innerHTML = `
+      <div class="hint" style="margin-bottom:8px">No candidate-specific overrides. Client defaults will apply.</div>
+      <div class="actions">
+        <button id="btnAddRate"${parentEditable ? '' : ' disabled'}>Add rate override</button>
+        ${parentEditable ? '<span class="hint">Changes are staged. Click “Save” in the main dialog to persist.</span>'
+                         : '<span class="hint">Read-only. Click “Edit” in the main dialog to add/modify overrides.</span>'}
+      </div>
+    `;
+    const addBtn = byId('btnAddRate'); if (addBtn && parentEditable) addBtn.onclick = () => openCandidateRateModal(window.modalCtx.data?.id);
+    return;
+  }
+
+  const cols    = ['client','role','band','rate_type','pay_day','pay_night','pay_sat','pay_sun','pay_bh','margin_day','margin_night','margin_sat','margin_sun','margin_bh','date_from','date_to','_state'];
+  const headers = ['Client','Role','Band','Type','Pay Day','Pay Night','Pay Sat','Pay Sun','Pay BH','Margin Day','Margin Night','Margin Sat','Margin Sun','Margin BH','From','To','Status'];
+
+  const tbl = document.createElement('table'); tbl.className = 'grid';
+  const thead = document.createElement('thead'); const trh = document.createElement('tr');
+  headers.forEach(h => { const th=document.createElement('th'); th.textContent=h; trh.appendChild(th); });
+  thead.appendChild(trh); tbl.appendChild(thead);
+
+  const tb = document.createElement('tbody');
+  rows.forEach(r => {
+    const tr = document.createElement('tr');
+    if (parentEditable) tr.ondblclick = () => openCandidateRateModal(window.modalCtx.data?.id, r);
+
+    const key = keyOf(r);
+    const charges = chargeMap[key] || null;
+    const isPAYE = String(r.rate_type || '').toUpperCase() === 'PAYE';
+
+    const margin = {};
+    ['day','night','sat','sun','bh'].forEach(b=>{
+      const pay = r[`pay_${b}`]; const chg = charges ? charges[b] : null;
+      margin[b] = (chg!=null && pay!=null) ? (isPAYE ? (chg - (pay * mult)) : (chg - pay)) : null;
+    });
+
+    const pretty = {
+      client: clientsById[r.client_id] || '', role: r.role || '', band: r.band ?? '', rate_type: r.rate_type || '',
+      pay_day: r.pay_day ?? '—', pay_night: r.pay_night ?? '—', pay_sat: r.pay_sat ?? '—', pay_sun: r.pay_sun ?? '—', pay_bh: r.pay_bh ?? '—',
+      margin_day: fmt(margin.day), margin_night: fmt(margin.night), margin_sat: fmt(margin.sat), margin_sun: fmt(margin.sun), margin_bh: fmt(margin.bh),
+      date_from: formatDisplayValue('date_from', r.date_from), date_to: formatDisplayValue('date_to', r.date_to),
+      _state   : r._isNew ? 'Staged (new)' : (r._edited ? 'Staged (edited)' : '')
+    };
+
+    cols.forEach(c => { const td=document.createElement('td'); td.textContent=String(pretty[c] ?? ''); tr.appendChild(td); });
+    tb.appendChild(tr);
+  });
+  tbl.appendChild(tb);
+
+  const actions = document.createElement('div');
+  actions.className = 'actions';
+  actions.innerHTML = `
+    <button id="btnAddRate"${parentEditable ? '' : ' disabled'}>Add rate override</button>
+    ${parentEditable ? '<span class="hint">Changes are staged. Click “Save” in the main dialog to persist.</span>'
+                     : '<span class="hint">Read-only. Click “Edit” in the main dialog to add/modify overrides.</span>'}
+  `;
+
+  div.innerHTML = '';
+  div.appendChild(tbl);
+  div.appendChild(actions);
+
+  const addBtn = byId('btnAddRate');
+  if (addBtn && parentEditable) addBtn.onclick = () => openCandidateRateModal(window.modalCtx.data?.id);
 }
 
 
@@ -4185,10 +4113,44 @@ async function openClient(row) {
         return { ok:false };
       }
 
-      // 4) Persist rate window status toggles (before upserts)
+      // 🔧 4) NEW: Execute staged CLIENT RATE deletes BEFORE toggles/upserts
+      try {
+        const allWindows = Array.isArray(window.modalCtx.ratesState) ? window.modalCtx.ratesState : [];
+        const toDelete   = allWindows.filter(w => w && w.id && w.__delete === true);
+        if (toDelete.length) {
+          if (APILOG) console.log('[OPEN_CLIENT] deleting staged client windows', toDelete.map(w=>w.id));
+          for (const w of toDelete) {
+            const url = API(`/api/rates/client-defaults/${encodeURIComponent(w.id)}`);
+            const res = await authFetch(url, { method: 'DELETE' });
+            if (res.status === 404) {
+              // already gone — continue
+              continue;
+            }
+            if (!res.ok) {
+              const body = await res.text().catch(()=> '');
+              if (res.status === 409) {
+                alert(`Delete blocked: ${body || 'Associated data prevents deletion.'}`);
+              } else {
+                alert(`Failed to delete client rate window: ${body || res.status}`);
+              }
+              return { ok:false };
+            }
+          }
+          // Prune deleted rows from state & baseline
+          const deletedIds = new Set(toDelete.map(w => String(w.id)));
+          window.modalCtx.ratesState    = allWindows.filter(w => !(w && w.id && deletedIds.has(String(w.id))));
+          window.modalCtx.ratesBaseline = (Array.isArray(window.modalCtx.ratesBaseline) ? window.modalCtx.ratesBaseline : [])
+                                          .filter(b => !(b && b.id && deletedIds.has(String(b.id))));
+        }
+      } catch (errDel) {
+        alert(`Failed to process deletions: ${String(errDel?.message || errDel || '')}`);
+        return { ok:false };
+      }
+
+      // 5) Persist rate window status toggles (before upserts)
       const baselineRates = Array.isArray(window.modalCtx.ratesBaseline) ? window.modalCtx.ratesBaseline : [];
       const prevById = new Map(baselineRates.filter(r => r && r.id).map(r => [String(r.id), r]));
-      const windows = Array.isArray(window.modalCtx.ratesState) ? window.modalCtx.ratesState.slice() : [];
+      let windows = Array.isArray(window.modalCtx.ratesState) ? window.modalCtx.ratesState.slice() : [];
 
       const toggles = [];
       for (const w of windows) {
@@ -4197,7 +4159,7 @@ async function openClient(row) {
         if (!prev) continue;
         const prevDisabled = !!prev.disabled_at_utc;
         const currDisabled = !!w.disabled_at_utc;
-        if (prevDisabled !== currDisabled) toggles.push({ id: w.id, disabled: currDisabled });
+        if (prevDisabled !== currDisabled) toggles.push({ id: w.id, disabled: w.disabled_at_utc ? true : false });
       }
 
       if (toggles.length) {
@@ -4217,7 +4179,7 @@ async function openClient(row) {
         }
       }
 
-      // 🔴 4.5) Final negative-margin guard across staged windows (skip disabled)
+      // 6) Final negative-margin guard across staged windows (skip disabled)
       const erniMult = (async ()=> {
         if (typeof window.__ERNI_MULT__ === 'number') return window.__ERNI_MULT__;
         try {
@@ -4234,8 +4196,7 @@ async function openClient(row) {
 
       for (const w of windows) {
         if (w.disabled_at_utc) continue;
-        const buckets = ['day','night','sat','sun','bh'];
-        for (const b of buckets) {
+        for (const b of ['day','night','sat','sun','bh']) {
           const chg  = w[`charge_${b}`];
           const paye = w[`paye_${b}`];
           const umb  = w[`umb_${b}`];
@@ -4250,7 +4211,7 @@ async function openClient(row) {
         }
       }
 
-      // 5) Persist enabled windows (skip disabled)
+      // 7) Upsert enabled windows (skip disabled)
       if (clientId && windows.length) {
         // guard for intra-batch overlap (enabled windows only)
         for (let i = 0; i < windows.length; i++) {
@@ -4273,10 +4234,7 @@ async function openClient(row) {
 
         for (const w of windows) {
           try {
-            if (w.disabled_at_utc) {
-              if (APILOG) console.log('[OPEN_CLIENT] skip disabled window (not upserting)', { id: w.id, role: w.role, band: w.band });
-              continue;
-            }
+            if (w.disabled_at_utc) continue;
             if (APILOG) console.log('[OPEN_CLIENT] upsertClientRate →', w);
             await upsertClientRate({
               client_id : clientId,
@@ -4343,7 +4301,6 @@ async function openClient(row) {
           window.modalCtx.ratesState    = Array.isArray(unified) ? unified.map(r => ({ ...r })) : [];
           window.modalCtx.ratesBaseline = JSON.parse(JSON.stringify(window.modalCtx.ratesState)); // capture baseline
         } else {
-          // Merge authoritative metadata (e.g., disabled_by_name, disabled_at_utc) by id into staged rows
           const staged = Array.isArray(window.modalCtx.ratesState) ? window.modalCtx.ratesState.slice() : [];
           const stagedById = new Map(staged.map(r => [String(r.id), r]));
           (Array.isArray(unified) ? unified : []).forEach(srv => {
@@ -4356,7 +4313,6 @@ async function openClient(row) {
             }
           });
           window.modalCtx.ratesState = staged;
-          // Do not touch ratesBaseline here; keep original baseline for toggle diffing
         }
         try { renderClientRatesTable(); } catch {}
       }
@@ -4371,7 +4327,6 @@ async function openClient(row) {
       }
     } catch (e) { W('openClient POST-PAINT hospitals error', e); }
 
-    // other post-paint loads unchanged...
   } else {
     L('skip companion loads (no full.id)');
   }
@@ -4894,13 +4849,13 @@ function mountClientHospitalsTab() {
 // overlap/rollback logic now IGNORES disabled rows
 // ============================================================================
 
+// ========== CLIENT DEFAULT RATES ==========
 async function openClientRateModal(client_id, existing) {
   const parentFrame = _currentFrame();
-  // ✅ Allow create OR edit to be interactive
   const parentEditable = parentFrame && (parentFrame.mode === 'edit' || parentFrame.mode === 'create');
   const APILOG = (typeof window !== 'undefined' && !!window.__LOG_API) || (typeof __LOG_API !== 'undefined' && !!__LOG_API);
 
-  const ctx = window.modalCtx;
+  const ctx = window.modalCtx || {};
   const resolvedClientId =
     client_id ||
     (existing && existing.client_id) ||
@@ -4910,25 +4865,23 @@ async function openClientRateModal(client_id, existing) {
   if (APILOG) console.log('[openClientRateModal] resolvedClientId', resolvedClientId, { passed: client_id, existing });
 
   const globalRoles = await loadGlobalRoleOptions();
-  const roleOptions = globalRoles.map(r => `<option value="${r}">${r}</option>`).join('')
-                    + `<option value="__OTHER__">+ Add new role…</option>`;
+  const roleOptions = globalRoles.map(r => `<option value="${r}">${r}</option>`).join('') + `<option value="__OTHER__">+ Add new role…</option>`;
 
-  const ex = existing || {};
-  const isDisabled = !!ex.disabled_at_utc;
-  const who  = ex.disabled_by_name || '';
+  const ex  = existing || {};
+  const who = ex.disabled_by_name || '';
   const when = ex.disabled_at_utc ? formatIsoToUk(String(ex.disabled_at_utc).slice(0,10)) : '';
 
-  // Status header (no toggle here anymore)
+  // Status header (status-only; no toggle injection)
   const statusBlock = `
     <div class="row" id="cl_status_row" style="align-items:center; gap:8px;">
       <div>
         ${!!ex.disabled_at_utc ? `
           <span class="pill tag-fail" id="cl_status_pill">❌ Disabled</span>
-          <div class="hint" id="cl_status_meta">by ${escapeHtml(who || 'unknown')} on ${escapeHtml(when || '')}</div>
-        ` : `
+          <div class="hint" id="cl_status_meta">by ${escapeHtml(who || 'unknown')} on ${escapeHtml(when || '')}</div>`
+        : `
           <span class="pill tag-ok" id="cl_status_pill">✓ Active</span>
-          <div class="hint" id="cl_status_meta">&nbsp;</div>
-        `}
+          <div class="hint" id="cl_status_meta">&nbsp;</div>`
+        }
       </div>
     </div>`;
 
@@ -4982,14 +4935,13 @@ async function openClientRateModal(client_id, existing) {
             </tr>
           </thead>
           <tbody>
-            ${['day','night','sat','sun','bh'].map(bucket => `
+            ${['day','night','sat','sun','bh'].map(b => `
               <tr>
-                <td style="white-space:nowrap">${bucket.toUpperCase()}</td>
-                <td><input type="number" step="0.01" name="paye_${bucket}" ${parentEditable ? '' : 'disabled'} /></td>
-                <td><input type="number" step="0.01" name="umb_${bucket}"  ${parentEditable ? '' : 'disabled'} /></td>
-                <td><input type="number" step="0.01" name="charge_${bucket}" ${parentEditable ? '' : 'disabled'} /></td>
-              </tr>
-            `).join('')}
+                <td style="white-space:nowrap">${b.toUpperCase()}</td>
+                <td><input type="number" step="0.01" name="paye_${b}" ${parentEditable ? '' : 'disabled'} /></td>
+                <td><input type="number" step="0.01" name="umb_${b}"  ${parentEditable ? '' : 'disabled'} /></td>
+                <td><input type="number" step="0.01" name="charge_${b}" ${parentEditable ? '' : 'disabled'} /></td>
+              </tr>`).join('')}
           </tbody>
         </table>
       </div>
@@ -4997,13 +4949,7 @@ async function openClientRateModal(client_id, existing) {
       <!-- Live derived margins -->
       <div class="row" style="grid-column:1 / -1; margin-top:10px">
         <table class="grid" id="cl_margins_tbl" style="width:100%">
-          <thead>
-            <tr>
-              <th>Bucket</th>
-              <th>PAYE margin</th>
-              <th>Umbrella margin</th>
-            </tr>
-          </thead>
+          <thead><tr><th>Bucket</th><th>PAYE margin</th><th>Umbrella margin</th></tr></thead>
           <tbody>
             ${['day','night','sat','sun','bh'].map(b=>`
               <tr>
@@ -5013,20 +4959,19 @@ async function openClientRateModal(client_id, existing) {
               </tr>`).join('')}
           </tbody>
         </table>
+        <div class="hint" id="cl_delete_hint" style="display:none;margin-top:6px"></div>
       </div>
     </div>
   `);
 
-  // Helper to get ERNI multiplier (cached)
+  // ERNI
   async function _erniMultiplier(){
     if (typeof window.__ERNI_MULT__ === 'number') return window.__ERNI_MULT__;
-    let pct = 0;
     try {
       if (typeof getSettingsCached === 'function') {
         const s = await getSettingsCached();
         let p = s?.erni_pct ?? s?.employers_ni_percent ?? 0;
-        p = Number(p) || 0;
-        if (p > 1) p = p / 100;
+        p = Number(p) || 0; if (p > 1) p = p/100;
         window.__ERNI_MULT__ = 1 + p;
         return window.__ERNI_MULT__;
       }
@@ -5035,24 +4980,22 @@ async function openClientRateModal(client_id, existing) {
     return 1;
   }
 
-  // 🔒 Disable/enable the Apply button
   function setApplyEnabled(enabled){
     try {
       const btn = document.querySelector('#modal .btn-save, #modal .actions .primary, #modal .actions .btn-primary, .modal .btn-save');
       if (btn) { btn.disabled = !enabled; btn.classList.toggle('disabled', !enabled); }
     } catch {}
   }
+  const numOrNull = v => { const n=Number(v); return Number.isFinite(n) ? n : null; };
+  const fmt = v => (v==null || Number.isNaN(v)) ? '—' : (Math.round(v*100)/100).toFixed(2);
 
-  function numOrNull(v){ const n = Number(v); return Number.isFinite(n) ? n : null; }
-  function fmt(v){ return (v==null || Number.isNaN(v)) ? '—' : (Math.round(v*100)/100).toFixed(2); }
-
-  // 👉 UPDATED: gate inputs as well as Apply based on role + from date
+  // Gate inputs + margins + Apply
   async function recomputeClientMargins(){
     const mult = await _erniMultiplier();
-    const getIn = sel => document.querySelector(sel);
     const roleVal = (document.getElementById('cl_role')?.value || '').trim();
     const fromIso = parseUkDateToIso(document.getElementById('cl_date_from')?.value || '');
 
+    const getIn = sel => document.querySelector(sel);
     const payeInputs = ['day','night','sat','sun','bh'].map(b => getIn(`#clientRateForm input[name="paye_${b}"]`));
     const umbInputs  = ['day','night','sat','sun','bh'].map(b => getIn(`#clientRateForm input[name="umb_${b}"]`));
     const chgInputs  = ['day','night','sat','sun','bh'].map(b => getIn(`#clientRateForm input[name="charge_${b}"]`));
@@ -5060,7 +5003,6 @@ async function openClientRateModal(client_id, existing) {
 
     let hasNegative = false;
 
-    // If role/date not ready: disable all inputs, blank margins, disable Apply
     if (!roleVal || !fromIso) {
       allInputs.forEach(inp => { inp.disabled = true; });
       ['day','night','sat','sun','bh'].forEach(b=>{
@@ -5072,9 +5014,7 @@ async function openClientRateModal(client_id, existing) {
       return;
     }
 
-    // Otherwise, inputs are editable (we’ll still block on negative margins)
     allInputs.forEach(inp => { inp.disabled = false; });
-
     ['day','night','sat','sun','bh'].forEach(bucket=>{
       const paye = numOrNull(getIn(`#clientRateForm input[name="paye_${bucket}"]`)?.value);
       const umb  = numOrNull(getIn(`#clientRateForm input[name="umb_${bucket}"]`)?.value);
@@ -5083,9 +5023,7 @@ async function openClientRateModal(client_id, existing) {
       const payeMargin = (paye!=null && chg!=null) ? (chg - (paye * mult)) : null;
       const umbMargin  = (umb!=null  && chg!=null) ? (chg - umb)          : null;
 
-      if ((payeMargin != null && payeMargin < 0) || (umbMargin != null && umbMargin < 0)) {
-        hasNegative = true;
-      }
+      if ((payeMargin != null && payeMargin < 0) || (umbMargin != null && umbMargin < 0)) hasNegative = true;
 
       const spP = byId(`m_paye_${bucket}`), spU = byId(`m_umb_${bucket}`);
       if (spP) spP.textContent = fmt(payeMargin);
@@ -5095,8 +5033,25 @@ async function openClientRateModal(client_id, existing) {
     setApplyEnabled(!hasNegative);
   }
 
-  // Build the tab label with status
+  // Status in tab label
   const formTabLabel = `Form — ${ex.disabled_at_utc ? 'Inactive' : 'Active'}`;
+
+  // Helper: check if any overrides overlap this client window (for delete rule when past-dated)
+  async function checkAnyOverrideOverlap(win) {
+    try {
+      const qs = new URLSearchParams();
+      qs.set('client_id', String(win.client_id || resolvedClientId || ''));
+      qs.set('role', String(win.role || ''));
+      // '' means NULL band in API
+      qs.set('band', (win.band == null || win.band === '') ? '' : String(win.band));
+      qs.set('from', String(win.date_from));
+      if (win.date_to) qs.set('to', String(win.date_to));
+      const url = API(`/api/rates/candidate-overrides/overlap-exists?${qs.toString()}`);
+      const res = await authFetch(url);
+      const j = res && res.ok ? await res.json().catch(()=>({})) : {};
+      return !!j.exists;
+    } catch { return false; }
+  }
 
   showModal(
     existing ? 'Edit Client Default Window' : 'Add/Upsert Client Default Window',
@@ -5108,7 +5063,7 @@ async function openClientRateModal(client_id, existing) {
 
       if (!resolvedClientId && pf.mode !== 'create') {
         alert('Cannot determine client. Please close and reopen the client, then try again.');
-        if (APILOG) console.error('[openClientRateModal] missing client_id — aborting apply (not in create)');
+        if (APILOG) console.error('[openClientRateModal] missing client_id — abort');
         return false;
       }
 
@@ -5135,22 +5090,15 @@ async function openClientRateModal(client_id, existing) {
         if (isoTo < isoFrom) { alert('“Effective to” cannot be before “Effective from”'); return false; }
       }
 
-      // 🔴 Negative-margin guard (block Apply if any bucket would be < 0)
+      // Negative margin guard
       {
         const mult = await _erniMultiplier();
-        const buckets = ['day','night','sat','sun','bh'];
-        for (const b of buckets) {
+        for (const b of ['day','night','sat','sun','bh']) {
           const chg  = (raw[`charge_${b}`]  === '' ? null : Number(raw[`charge_${b}`]));
           const paye = (raw[`paye_${b}`]    === '' ? null : Number(raw[`paye_${b}`]));
           const umb  = (raw[`umb_${b}`]     === '' ? null : Number(raw[`umb_${b}`]));
-          if (chg != null && paye != null && (chg - (paye * mult)) < 0) {
-            alert(`PAYE margin would be negative for ${b.toUpperCase()}. Increase charge/reduce PAYE or leave one blank.`);
-            return false;
-          }
-          if (chg != null && umb != null && (chg - umb) < 0) {
-            alert(`Umbrella margin would be negative for ${b.toUpperCase()}. Increase charge/reduce Umbrella pay or leave one blank.`);
-            return false;
-          }
+          if (chg != null && paye != null && (chg - (paye * mult)) < 0) { alert(`PAYE margin would be negative for ${b.toUpperCase()}.`); return false; }
+          if (chg != null && umb  != null && (chg - umb) < 0)           { alert(`Umbrella margin would be negative for ${b.toUpperCase()}.`); return false; }
         }
       }
 
@@ -5180,107 +5128,57 @@ async function openClientRateModal(client_id, existing) {
         umb_sun     : raw['umb_sun']     !== '' ? Number(raw['umb_sun'])     : null,
         umb_bh      : raw['umb_bh']      !== '' ? Number(raw['umb_bh'])      : null,
 
-        // carry current status in the staged payload for Save
+        // status carry-through
         disabled_at_utc : existing?.disabled_at_utc ?? null,
         disabled_by_name: existing?.disabled_by_name ?? null,
         __toggle        : existing?.__toggle || undefined,
-        __localKey      : existing?.__localKey || undefined
+        __localKey      : existing?.__localKey || undefined,
+
+        // delete staging flag (if user chose delete in this session)
+        __delete        : existing?.__delete || false
       };
 
-      // EARLY EXIT for pure status toggle
-      const compareKeys = ['role','band','date_from','date_to',
-                           'charge_day','charge_night','charge_sat','charge_sun','charge_bh',
-                           'paye_day','paye_night','paye_sat','paye_sun','paye_bh',
-                           'umb_day','umb_night','umb_sat','umb_sun','umb_bh'];
-      const nonToggleChanged = existing
-        ? compareKeys.some(k => String(existing[k] ?? '') !== String(staged[k] ?? ''))
-        : false;
-      const isPureToggle = !!(existing && existing.id && staged.__toggle && !nonToggleChanged);
-
-      if (isPureToggle) {
-        ctx.ratesState = Array.isArray(ctx.ratesState) ? ctx.ratesState : [];
-        let idx = ctx.ratesState.findIndex(r => sameRow(r, existing));
-        if (idx >= 0) {
-          ctx.ratesState[idx] = { ...existing, disabled_at_utc: staged.disabled_at_utc, disabled_by_name: staged.disabled_by_name, __toggle: staged.__toggle };
-        } else {
-          ctx.ratesState.push({ ...staged });
-        }
-        try { window.dispatchEvent(new CustomEvent('modal-dirty')); } catch {}
-        try { renderClientRatesTable(); } catch {}
-        if (APILOG) console.log('[openClientRateModal] pure toggle staged', { id: existing.id, toDisabled: !!staged.disabled_at_utc });
-        return true;
-      }
-
-      // Overlap/rollover guards against ENABLED rows only
+      // Overlap guards (enabled rows only)
       const list = Array.isArray(ctx.ratesState) ? ctx.ratesState : [];
       const normBand = v => String(v || '');
       const sameCat = r => String(r.role||'') === staged.role && normBand(r.band) === normBand(staged.band);
       const isSelf = r => existing ? sameRow(r, existing) : false;
 
       const activeAtStart = list.filter(r =>
-        !isSelf(r) &&
-        !r.disabled_at_utc &&
-        sameCat(r) &&
+        !isSelf(r) && !r.disabled_at_utc && sameCat(r) &&
         r.date_from && r.date_from <= staged.date_from &&
         (!r.date_to || r.date_to >= staged.date_from)
       );
-      if (APILOG) console.log('[openClientRateModal] activeAtStart (enabled only)', activeAtStart);
-      if (activeAtStart.length > 1) {
-        alert(`Multiple active windows for role=${staged.role} band=${staged.band||'(none)'} at ${formatIsoToUk(isoFrom)}.\nPlease tidy them first.`);
-        return false;
-      }
+      if (activeAtStart.length > 1) { alert(`Multiple active windows at ${formatIsoToUk(isoFrom)}.`); return false; }
       if (activeAtStart.length === 1) {
         const inc = activeAtStart[0];
-        if (String(inc.date_from) === String(staged.date_from)) {
-          alert(`A window for this role/band already starts on ${formatIsoToUk(isoFrom)}.\nEdit that window or choose a different date.`);
-          return false;
-        }
+        if (String(inc.date_from) === String(staged.date_from)) { alert(`A window already starts on ${formatIsoToUk(isoFrom)}.`); return false; }
         const d = new Date(isoFrom + 'T00:00:00Z'); d.setUTCDate(d.getUTCDate()-1);
         const cut = `${d.getUTCFullYear()}-${String(d.getUTCMonth()+1).padStart(2,'0')}-${String(d.getUTCDate()).padStart(2,'0')}`;
-        const ok = window.confirm(
-          `An existing window ${formatIsoToUk(inc.date_from)} → ${formatIsoToUk(inc.date_to||'')} overlaps ${formatIsoToUk(isoFrom)}.\n`+
-          `We will end it on ${formatIsoToUk(cut)}. Continue?`
-        );
+        const ok = window.confirm(`An existing window ${formatIsoToUk(inc.date_from)} → ${formatIsoToUk(inc.date_to||'')} overlaps.\nEnd it on ${formatIsoToUk(cut)}?`);
         if (!ok) return false;
         const idxInc = list.indexOf(inc);
         if (idxInc >= 0) ctx.ratesState[idxInc] = { ...inc, date_to: cut };
-        if (APILOG) console.log('[openClientRateModal] truncated incumbent', { from: inc.date_from, to: cut });
       }
 
-      const after = (Array.isArray(ctx.ratesState) ? ctx.ratesState.slice() : [])
-        .filter(r => !isSelf(r) && sameCat(r) && !r.disabled_at_utc);
+      const after = (Array.isArray(ctx.ratesState) ? ctx.ratesState.slice() : []).filter(r => !isSelf(r) && sameCat(r) && !r.disabled_at_utc);
       for (const r of after) {
         const a0 = r.date_from || null, a1 = r.date_to || null;
         const b0 = staged.date_from || null, b1 = staged.date_to || null;
-        if (rangesOverlap(a0, a1, b0, b1)) {
-          if (APILOG) console.warn('[openClientRateModal] final overlap guard failed', { r, staged });
-          alert(`Window still overlaps existing ${formatIsoToUk(a0)}–${formatIsoToUk(a1||'')} for role=${staged.role} / ${staged.band||'(none)'}`);
-          return false;
-        }
-      }
-
-      // Ensure a stable local key for unsaved rows
-      if (!staged.id) {
-        staged.__localKey = staged.__localKey || ('L' + Date.now().toString(36) + Math.random().toString(36).slice(2,8));
+        if (rangesOverlap(a0, a1, b0, b1)) { alert(`Window still overlaps ${formatIsoToUk(a0)}–${formatIsoToUk(a1||'')}`); return false; }
       }
 
       // Replace-in-place for edits; push for new
       ctx.ratesState = Array.isArray(ctx.ratesState) ? ctx.ratesState : [];
       if (existing) {
-        let idx = ctx.ratesState.findIndex(r => sameRow(r, existing));
+        const idx = ctx.ratesState.findIndex(r => sameRow(r, existing));
         if (idx >= 0) ctx.ratesState[idx] = staged; else ctx.ratesState.push(staged);
       } else {
         const already = ctx.ratesState.findIndex(r => sameRow(r, staged));
         if (already >= 0) ctx.ratesState[already] = staged; else ctx.ratesState.push(staged);
       }
 
-      try {
-        const parent = _currentFrame();
-        if (parent && typeof parent.setTab === 'function') {
-          parent.currentTabKey = 'rates';
-          parent.setTab('rates');
-        }
-      } catch(_) {}
+      try { const parent = _currentFrame(); if (parent && typeof parent.setTab === 'function') { parent.currentTabKey = 'rates'; parent.setTab('rates'); } } catch{}
       try { window.dispatchEvent(new CustomEvent('modal-dirty')); } catch {}
       try { renderClientRatesTable(); } catch {}
 
@@ -5293,79 +5191,7 @@ async function openClientRateModal(client_id, existing) {
     }
   );
 
-  // After modal mounts, add the footer toggle button (styled like Apply)
-  (function addFooterToggle(){
-    const actions = document.getElementById('modalActions');
-    if (!actions) return;
-
-    // Create/insert the toggle button just before Save to sit "next to Apply"
-    const saveBtn = document.getElementById('btnSave') || actions.querySelector('.primary');
-    const btn = document.createElement('button');
-    btn.id = 'btnToggleRateStatus';
-    btn.className = 'primary';          // 👈 same visual style as Apply
-    btn.style.marginRight = 'auto';     // push it left so it's adjacent but separated by spacer
-    btn.textContent = (ex && ex.disabled_at_utc) ? 'Enable' : 'Disable';
-
-    // Insert to the left of Save
-    if (saveBtn && saveBtn.parentNode) {
-      saveBtn.parentNode.insertBefore(btn, saveBtn);
-    } else {
-      actions.appendChild(btn);
-    }
-
-    // Click handler stages the toggle (same logic you had in-row)
-    btn.addEventListener('click', () => {
-      // Only meaningful for an existing row (with id)
-      const nowIso = new Date().toISOString().slice(0,10);
-      const willDisable = !ex.disabled_at_utc;
-
-      ex.__toggle = willDisable ? 'disable' : 'enable';
-      if (willDisable) {
-        ex.disabled_at_utc = nowIso;
-        let short = '';
-        try {
-          const u = (window.__ME__ || window.me || window.currentUser || window.AUTH_USER || {});
-          const em = (u.email || u.user?.email || '');
-          short = em && typeof em === 'string' ? (em.split('@')[0] || '') : (u.name || '');
-        } catch(_) {}
-        ex.disabled_by_name = short || ex.disabled_by_name || '';
-      } else {
-        ex.disabled_at_utc = null;
-        ex.disabled_by_name = null;
-      }
-
-      // Update UI chips + tab label instantly
-      const pill = byId('cl_status_pill');
-      const meta = byId('cl_status_meta');
-      if (pill && meta) {
-        if (willDisable) {
-          pill.className = 'pill tag-fail';
-          pill.textContent = '❌ Disabled (pending save)';
-          meta.textContent = ex.disabled_by_name
-            ? `by ${ex.disabled_by_name} on ${formatIsoToUk(nowIso)} — will apply on Save`
-            : `Will disable on ${formatIsoToUk(nowIso)} (save to confirm)`;
-          btn.textContent = 'Enable';
-        } else {
-          pill.className = 'pill tag-ok';
-          pill.textContent = '✓ Active (pending save)';
-          meta.textContent = 'Will enable on Save';
-          btn.textContent = 'Disable';
-        }
-      }
-
-      // Update the Form tab label text
-      try {
-        const tabs = document.getElementById('modalTabs');
-        const formBtn = tabs && tabs.querySelector('button'); // only one tab in this modal
-        if (formBtn) formBtn.textContent = `Form — ${ex.disabled_at_utc ? 'Inactive' : 'Active'}`;
-      } catch {}
-
-      try { renderClientRatesTable(); } catch {}
-      try { window.dispatchEvent(new CustomEvent('modal-dirty')); } catch {}
-    });
-  })();
-
-  // Prefill & minor wiring
+  // After mount: wire gating listeners
   const selRole = document.getElementById('cl_role');
   const newRow  = document.getElementById('cl_role_new_row');
   const inFrom  = document.getElementById('cl_date_from');
@@ -5379,35 +5205,16 @@ async function openClientRateModal(client_id, existing) {
     }
   }
   if (existing?.date_from) inFrom.value = formatIsoToUk(existing.date_from);
-  if (existing?.date_to   ) inTo.value   = formatIsoToUk(existing.date_to);
+  if (existing?.date_to)   inTo.value   = formatIsoToUk(existing.date_to);
 
   attachUkDatePicker(inFrom);
   attachUkDatePicker(inTo);
 
-  // Keep date_to ≥ date_from at the picker level
-  inFrom?.addEventListener('change', () => {
-    try {
-      const iso = parseUkDateToIso(inFrom.value || '');
-      inTo._minIso = iso || null;
-    } catch {}
-    // re-gate inputs/Apply when date changes
-    recomputeClientMargins();
-  });
-
-  selRole.addEventListener('change', () => {
-    if (selRole.value === '__OTHER__') {
-      newRow.style.display = '';
-    } else {
-      newRow.style.display = 'none';
-      const nr = document.getElementById('cl_role_new'); if (nr) nr.value = '';
-    }
-    // re-gate on role change
-    recomputeClientMargins();
-  });
-
+  inFrom?.addEventListener('change', () => { try { inTo._minIso = parseUkDateToIso(inFrom.value || '') || null; } catch {}; recomputeClientMargins(); });
+  selRole.addEventListener('change', () => { if (selRole.value === '__OTHER__') newRow.style.display = ''; else { newRow.style.display='none'; const nr=document.getElementById('cl_role_new'); if (nr) nr.value=''; } recomputeClientMargins(); });
   inTo?.addEventListener('change', () => { recomputeClientMargins(); });
 
-  // Live margins & live Apply gating
+  // Live margins & gating
   try {
     ['day','night','sat','sun','bh'].forEach(b=>{
       ['paye_','umb_','charge_'].forEach(prefix=>{
@@ -5417,6 +5224,189 @@ async function openClientRateModal(client_id, existing) {
     });
     recomputeClientMargins();
   } catch {}
+
+  // ---- DELETE BUTTON (staged delete; effective on parent Save) ----
+  (async function wireDeleteButton(){
+    const delBtn = byId('btnDelete');
+    if (!delBtn) return;
+
+    // Only show for existing windows
+    if (!existing || !existing.id) { delBtn.style.display='none'; return; }
+
+    // Compute if delete is allowed by rule
+    const today = new Date(); const yyyy = today.getFullYear(); const mm = String(today.getMonth()+1).padStart(2,'0'); const dd = String(today.getDate()).padStart(2,'0');
+    const todayIso = `${yyyy}-${mm}-${dd}`;
+    const isFutureOrToday = !!existing.date_from && String(existing.date_from) >= todayIso;
+
+    let deletable = isFutureOrToday;
+    let reason = '';
+    if (!deletable) {
+      // Past-dated: allowed only if no overlapping candidate overrides
+      const hasOverlap = await checkAnyOverrideOverlap(existing);
+      deletable = !hasOverlap;
+      if (hasOverlap) reason = 'Cannot delete: candidate overrides overlap this window.';
+    }
+
+    if (!deletable) {
+      delBtn.style.display = '';
+      delBtn.disabled = true;
+      const hint = byId('cl_delete_hint'); if (hint) { hint.style.display=''; hint.textContent = reason; }
+      return;
+    }
+
+    // Show and enable delete; clicking will stage the delete and close the modal
+    delBtn.style.display = '';
+    delBtn.disabled = false;
+    delBtn.onclick = () => {
+      try {
+        // Stage delete on the same object (parent Save will perform DELETE)
+        existing.__delete = true;
+
+        // Update table immediately: show pending delete status
+        try { renderClientRatesTable(); } catch {}
+        try { window.dispatchEvent(new CustomEvent('modal-dirty')); } catch {}
+
+        // Close modal (delete applies on parent Save)
+        const closeBtn = byId('btnCloseModal');
+        if (closeBtn) closeBtn.click();
+      } catch (e) {
+        alert('Failed to stage delete.');
+      }
+    };
+  })();
+}
+
+async function renderClientRatesTable() {
+  const div = byId('clientRates'); if (!div) return;
+
+  const ctx = window.modalCtx;
+  const staged = Array.isArray(ctx.ratesState) ? ctx.ratesState : [];
+  const frame = _currentFrame();
+  const parentEditable = frame && (frame.mode === 'edit' || frame.mode === 'create');
+
+  async function _erniMultiplier(){
+    if (typeof window.__ERNI_MULT__ === 'number') return window.__ERNI_MULT__;
+    try {
+      if (typeof getSettingsCached === 'function') {
+        const s = await getSettingsCached();
+        let p = s?.erni_pct ?? s?.employers_ni_percent ?? 0;
+        p = Number(p) || 0; if (p > 1) p = p/100;
+        window.__ERNI_MULT__ = 1 + p;
+        return window.__ERNI_MULT__;
+      }
+    } catch {}
+    window.__ERNI_MULT__ = 1;
+    return 1;
+  }
+  const mult = await _erniMultiplier();
+  const fmt = v => (v==null || Number.isNaN(v)) ? '—' : (Math.round(v*100)/100).toFixed(2);
+
+  div.innerHTML = '';
+
+  if (!staged.length) {
+    div.innerHTML = `
+      <div class="hint" style="margin-bottom:8px">No client default windows yet.</div>
+      <div class="actions">
+        <button id="btnAddClientRate"${parentEditable ? '' : ' disabled'}>Add / Upsert client window</button>
+        ${parentEditable ? '<span class="hint">Changes are staged. Click “Save” in the main dialog to persist.</span>'
+                         : '<span class="hint">Read-only. Click “Edit” in the main dialog to add/modify windows.</span>'}
+      </div>
+    `;
+    const addBtn = byId('btnAddClientRate');
+    if (addBtn && parentEditable) {
+      addBtn.onclick = () => {
+        const cid = (ctx && ctx.data && (ctx.data.id || ctx.data.client_id)) || null;
+        return openClientRateModal(cid);
+      };
+    }
+    return;
+  }
+
+  const cols = [
+    'status',
+    'role','band',
+    'paye_day','paye_night','paye_sat','paye_sun','paye_bh',
+    'umb_day','umb_night','umb_sat','umb_sun','umb_bh',
+    'charge_day','charge_night','charge_sat','charge_sun','charge_bh',
+    'paye_margin_day','paye_margin_night','paye_margin_sat','paye_margin_sun','paye_margin_bh',
+    'umb_margin_day','umb_margin_night','umb_margin_sat','umb_margin_sun','umb_margin_bh',
+    'date_from','date_to'
+  ];
+  const headers = [
+    'Status',
+    'Role','Band',
+    'PAYE Day','PAYE Night','PAYE Sat','PAYE Sun','PAYE BH',
+    'UMB Day','UMB Night','UMB Sat','UMB Sun','UMB BH',
+    'Charge Day','Charge Night','Charge Sat','Charge Sun','Charge BH',
+    'PAYE M Day','PAYE M Night','PAYE M Sat','PAYE M Sun','PAYE M BH',
+    'UMB M Day','UMB M Night','UMB M Sat','UMB M Sun','UMB M BH',
+    'From','To'
+  ];
+
+  const tbl   = document.createElement('table'); tbl.className='grid';
+  const thead = document.createElement('thead');
+  const trh   = document.createElement('tr');
+  headers.forEach(h => { const th=document.createElement('th'); th.textContent = h; trh.appendChild(th); });
+  thead.appendChild(trh);
+  tbl.appendChild(thead);
+
+  const tb = document.createElement('tbody');
+  staged.forEach(r => {
+    const tr = document.createElement('tr');
+    if (r.disabled_at_utc) tr.classList.add('row-disabled');
+    if (r.__delete) tr.classList.add('row-delete-pending');
+
+    if (parentEditable) tr.ondblclick = () => {
+      const cid = (ctx && ctx.data && (ctx.data.id || ctx.data.client_id)) || r.client_id || null;
+      return openClientRateModal(cid, r);
+    };
+
+    cols.forEach(c => {
+      const td = document.createElement('td');
+      if (c === 'status') {
+        if (r.__delete) {
+          td.innerHTML = `<span class="pill tag-fail" aria-label="Pending delete">🗑 Pending delete (save to confirm)</span>`;
+        } else if (r.disabled_at_utc) {
+          const pending = r.__toggle ? ' (pending save)' : '';
+          td.innerHTML = `<span class="pill tag-fail" aria-label="Disabled">❌ Disabled${pending}</span>`;
+        } else {
+          const pending = r.__toggle === 'enable' ? ' (pending save)' : '';
+          td.innerHTML = `<span class="pill tag-ok" aria-label="Active">✓ Active${pending}</span>`;
+        }
+      } else if (c.startsWith('paye_margin_') || c.startsWith('umb_margin_')) {
+        const bucket = c.split('_').pop();
+        const charge = r[`charge_${bucket}`];
+        const paye   = r[`paye_${bucket}`];
+        const umb    = r[`umb_${bucket}`];
+        let val = null;
+        if (c.startsWith('paye_margin_')) val = (charge!=null && paye!=null) ? (charge - (paye * mult)) : null;
+        else                               val = (charge!=null && umb!=null)  ? (charge - umb)          : null;
+        td.textContent = fmt(val);
+      } else {
+        td.textContent = formatDisplayValue(c, r[c]);
+      }
+      tr.appendChild(td);
+    });
+
+    tb.appendChild(tr);
+  });
+  tbl.appendChild(tb);
+
+  const actions = document.createElement('div');
+  actions.className = 'actions';
+  actions.innerHTML = `
+    <button id="btnAddClientRate"${parentEditable ? '' : ' disabled'}>Add / Upsert client window</button>
+    ${parentEditable ? '' : '<span class="hint">Read-only. Click “Edit” in the main dialog to add/modify windows.</span>'}
+  `;
+
+  div.appendChild(tbl);
+  div.appendChild(actions);
+
+  const addBtn = byId('btnAddClientRate');
+  if (addBtn && parentEditable) addBtn.onclick = () => {
+    const cid = (ctx && ctx.data && (ctx.data.id || ctx.data.client_id)) || null;
+    return openClientRateModal(cid);
+  };
 }
 
 
