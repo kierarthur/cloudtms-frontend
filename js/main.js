@@ -3243,7 +3243,7 @@ async function openCandidateRateModal(candidate_id, existing) {
   const G = (label, obj) => { if (LOG) console.groupCollapsed(`[RATES][openCandidateRateModal] ${label}`); if (LOG && obj!==undefined) console.log(obj); if (LOG) console.groupEnd(); };
   if (LOG) console.log('[RATES][openCandidateRateModal] ENTRY', { candidate_id, hasExisting: !!existing });
 
-  const parentFrame = _currentFrame();                       // this is the PARENT at call time
+  const parentFrame = _currentFrame();
   // ✅ Parent may be in 'create'
   const parentEditable = parentFrame && (parentFrame.mode === 'edit' || parentFrame.mode === 'create');
   if (LOG) console.log('[RATES][openCandidateRateModal] parentEditable?', parentEditable, 'parentMode=', parentFrame?.mode);
@@ -3263,6 +3263,11 @@ async function openCandidateRateModal(candidate_id, existing) {
     ? String(existing.rate_type).toUpperCase()
     : String(window.modalCtx?.data?.pay_method || 'PAYE').toUpperCase();
 
+  // --- Fixed 3-row layout for buckets with placeholders ---
+  // Row 1: DAY (full width)
+  // Row 2: NIGHT (left) + SAT (right)
+  // Row 3: SUN (left) + BH (right)
+  // Each slot has a placeholder and an input wrapper; we toggle visibility based on resolved client charges.
   const formHtml = html(`
     <div class="form" id="candRateForm">
       <div class="row">
@@ -3302,11 +3307,57 @@ async function openCandidateRateModal(candidate_id, existing) {
         <div class="hint field-hint err" id="cr_date_to_err" style="display:none"></div>
       </div>
 
-      ${input('pay_day','Pay (Day)',     existing?.pay_day     ?? '', 'number')}
-      ${input('pay_night','Pay (Night)', existing?.pay_night   ?? '', 'number')}
-      ${input('pay_sat','Pay (Sat)',     existing?.pay_sat     ?? '', 'number')}
-      ${input('pay_sun','Pay (Sun)',     existing?.pay_sun     ?? '', 'number')}
-      ${input('pay_bh','Pay (BH)',       existing?.pay_bh       ?? '', 'number')}
+      <!-- Buckets: fixed positions -->
+      <!-- Row 1: DAY (full width) -->
+      <div class="row" style="grid-column:1/-1" data-bucket="day">
+        <label>Pay (Day)</label>
+        <div class="slot" id="slot_day">
+          <div class="slot-input" id="slot_input_day" style="display:none">
+            <input type="number" step="0.01" name="pay_day" id="pay_day"/>
+          </div>
+          <div class="slot-ph" id="slot_ph_day" style="opacity:.75">Not in client rate</div>
+        </div>
+      </div>
+
+      <!-- Row 2: NIGHT (left) + SAT (right) -->
+      <div class="row" data-bucket="night">
+        <label>Pay (Night)</label>
+        <div class="slot" id="slot_night">
+          <div class="slot-input" id="slot_input_night" style="display:none">
+            <input type="number" step="0.01" name="pay_night" id="pay_night"/>
+          </div>
+          <div class="slot-ph" id="slot_ph_night" style="opacity:.75">Not in client rate</div>
+        </div>
+      </div>
+      <div class="row" data-bucket="sat">
+        <label>Pay (Sat)</label>
+        <div class="slot" id="slot_sat">
+          <div class="slot-input" id="slot_input_sat" style="display:none">
+            <input type="number" step="0.01" name="pay_sat" id="pay_sat"/>
+          </div>
+          <div class="slot-ph" id="slot_ph_sat" style="opacity:.75">Not in client rate</div>
+        </div>
+      </div>
+
+      <!-- Row 3: SUN (left) + BH (right) -->
+      <div class="row" data-bucket="sun">
+        <label>Pay (Sun)</label>
+        <div class="slot" id="slot_sun">
+          <div class="slot-input" id="slot_input_sun" style="display:none">
+            <input type="number" step="0.01" name="pay_sun" id="pay_sun"/>
+          </div>
+          <div class="slot-ph" id="slot_ph_sun" style="opacity:.75">Not in client rate</div>
+        </div>
+      </div>
+      <div class="row" data-bucket="bh">
+        <label>Pay (BH)</label>
+        <div class="slot" id="slot_bh">
+          <div class="slot-input" id="slot_input_bh" style="display:none">
+            <input type="number" step="0.01" name="pay_bh" id="pay_bh"/>
+          </div>
+          <div class="slot-ph" id="slot_ph_bh" style="opacity:.75">Not in client rate</div>
+        </div>
+      </div>
 
       <!-- Live margins preview -->
       <div class="row" style="grid-column:1 / -1; margin-top:10px">
@@ -3333,7 +3384,7 @@ async function openCandidateRateModal(candidate_id, existing) {
 
   let cache = { windows: [], roles: [], bandsByRole: {} };
 
-  // === Helpers: ERNI, formatting, save-button control, and inline error handling ===
+  // === Helpers: ERNI, formatting, save-button control, inline error handling ===
   async function _erniMultiplier(){
     if (typeof window.__ERNI_MULT__ === 'number') return window.__ERNI_MULT__;
     let pct = 0;
@@ -3352,9 +3403,10 @@ async function openCandidateRateModal(candidate_id, existing) {
   const fmt = v => (v==null || Number.isNaN(v)) ? '—' : (Math.round(v*100)/100).toFixed(2);
   const bucketLabel = { day:'Day', night:'Night', sat:'Sat', sun:'Sun', bh:'BH' };
 
+  // Use the real Save button selector
   function setApplyEnabled(enabled){
     try {
-      const btn = document.querySelector('#modal .btn-save, #modal .actions .btn-primary, .modal .btn-save');
+      const btn = document.querySelector('#btnSave, #modal .actions .primary, #modal .btn-save, .modal .btn-save');
       if (btn) { btn.disabled = !enabled; btn.classList.toggle('disabled', !enabled); }
     } catch {}
     try { window.dispatchEvent(new CustomEvent('modal-apply-enabled', { detail:{ enabled } })); } catch {}
@@ -3403,7 +3455,7 @@ async function openCandidateRateModal(candidate_id, existing) {
           sun: win.charge_sun ?? null,
           bh: win.charge_bh ?? null
         },
-        capIso: win.date_to || null // null means open-ended
+        capIso: win.date_to || null
       } : null;
     } catch(e){ return null; }
   }
@@ -3413,7 +3465,6 @@ async function openCandidateRateModal(candidate_id, existing) {
   let _lastWin = null;
 
   function validatePayAgainstCharges(charges){
-    // Returns array of invalid "no charge for pay" buckets; also paints inline errors
     const invalid = [];
     ['day','night','sat','sun','bh'].forEach(b=>{
       const pay = numOrNull(document.querySelector(`#candRateForm input[name="pay_${b}"]`)?.value);
@@ -3428,7 +3479,6 @@ async function openCandidateRateModal(candidate_id, existing) {
   }
 
   function validateNegativeMargins(charges, rateType, erniMult){
-    // Returns array of buckets that would be negative (PAYE uses ERNI)
     const neg = [];
     ['day','night','sat','sun','bh'].forEach(b=>{
       const pay = numOrNull(document.querySelector(`#candRateForm input[name="pay_${b}"]`)?.value);
@@ -3443,8 +3493,8 @@ async function openCandidateRateModal(candidate_id, existing) {
     return neg;
   }
 
+  // Driver: decide which buckets are editable/visible and gate Apply
   async function recomputeOverrideState(){
-    // single place that (1) resolves window, (2) validates, (3) recomputes margins, (4) toggles Apply
     const clientId = byId('cr_client_id')?.value || '';
     const role     = byId('cr_role')?.value || '';
     const bandSel  = byId('cr_band')?.value ?? '';
@@ -3453,40 +3503,70 @@ async function openCandidateRateModal(candidate_id, existing) {
     const isoTo    = parseUkDateToIso(byId('cr_date_to')?.value || '');
     const rateType = String(byId('cr_rate_type')?.value || '').toUpperCase();
 
-    // Default: allow save only when clean
+    const buckets = ['day','night','sat','sun','bh'];
+    const inputEl = (b)=> document.querySelector(`#candRateForm input[name="pay_${b}"]`);
+    const slotIn  = (b)=> byId(`slot_input_${b}`);
+    const slotPh  = (b)=> byId(`slot_ph_${b}`);
+
     let canApply = true;
     clearAllFieldErrors();
 
-    if (!clientId || !role || !isoFrom) { setApplyEnabled(false); return; }
+    // Gate until all four fields are provided
+    const ready = !!clientId && !!rateType && !!role && !!isoFrom;
+    if (!ready) {
+      // Disable inputs and show placeholders for all buckets
+      buckets.forEach(b => {
+        const inp = inputEl(b);
+        if (inp) { inp.disabled = true; }
+        if (slotIn(b)) slotIn(b).style.display = 'none';
+        if (slotPh(b)) slotPh(b).style.display = '';
+        const sp = byId(`cr_m_${b}`); if (sp) sp.textContent = '—';
+      });
+      setApplyEnabled(false);
+      return;
+    }
 
     // Resolve covering window (cache)
     const key = [clientId, role, band ?? '', isoFrom].join('|');
     const win = (key === _lastKey && _lastWin) ? _lastWin : await resolveCoveringWindow(clientId, role, band, isoFrom);
     _lastKey = key; _lastWin = win;
 
-    // Wire datepicker bounds (min: from; max: client cap if finite)
-    try {
-      const toEl = byId('cr_date_to');
-      if (toEl) {
-        toEl._minIso = isoFrom || null;
-        toEl._maxIso = (win && win.capIso) ? win.capIso : null;
-      }
-    } catch {}
-
+    // If no window, keep placeholders and disable
     if (!win) {
-      setDateToError('');
+      buckets.forEach(b => {
+        const inp = inputEl(b);
+        if (inp) { inp.disabled = true; }
+        if (slotIn(b)) slotIn(b).style.display = 'none';
+        if (slotPh(b)) slotPh(b).style.display = '';
+        const sp = byId(`cr_m_${b}`); if (sp) sp.textContent = '—';
+      });
       setApplyEnabled(false);
       return;
     }
 
-    // Live validations
+    // Show/enable inputs only for buckets present in client charges; keep placeholders for missing ones
+    buckets.forEach(b => {
+      const hasCharge = (win.charges[b] != null);
+      const inp = inputEl(b);
+      if (hasCharge) {
+        if (slotPh(b)) slotPh(b).style.display = 'none';
+        if (slotIn(b)) slotIn(b).style.display = '';
+        if (inp) inp.disabled = false;
+      } else {
+        if (slotIn(b)) slotIn(b).style.display = 'none';
+        if (slotPh(b)) slotPh(b).style.display = '';
+        if (inp) { inp.value = ''; inp.disabled = true; }
+      }
+    });
+
+    // Validations and margins preview
     const mult = await _erniMultiplier();
 
-    // (a) No pay where charge is null
+    // (a) No pay where charge is null (should be prevented by hiding inputs, but keep logic)
     const missing = validatePayAgainstCharges(win.charges);
     if (missing.length) canApply = false;
 
-    // (b) No negative margin per bucket
+    // (b) No negative margins
     const negative = validateNegativeMargins(win.charges, rateType, mult);
     if (negative.length) canApply = false;
 
@@ -3497,9 +3577,9 @@ async function openCandidateRateModal(candidate_id, existing) {
       canApply = false;
     }
 
-    // Recompute margin preview
-    ['day','night','sat','sun','bh'].forEach(b=>{
-      const pay = numOrNull(document.querySelector(`#candRateForm input[name="pay_${b}"]`)?.value);
+    // (d) Margins preview (only for buckets that have a client charge)
+    buckets.forEach(b=>{
+      const pay = numOrNull(inputEl(b)?.value);
       const chg = win.charges[b];
       const sp  = byId(`cr_m_${b}`);
       if (!sp) return;
@@ -3566,6 +3646,8 @@ async function openCandidateRateModal(candidate_id, existing) {
 
       // No pay where charge is null
       for (const b of ['day','night','sat','sun','bh']) {
+        const inp = document.querySelector(`#candRateForm input[name="pay_${b}"]`);
+        if (!inp || inp.disabled) continue; // skip hidden buckets
         const pay = (raw[`pay_${b}`] === '' ? null : Number(raw[`pay_${b}`]));
         const chg = win.charges[b];
         if (pay != null && chg == null) {
@@ -3577,6 +3659,8 @@ async function openCandidateRateModal(candidate_id, existing) {
       // No negative margin
       const mult = await _erniMultiplier();
       for (const b of ['day','night','sat','sun','bh']) {
+        const inp = document.querySelector(`#candRateForm input[name="pay_${b}"]`);
+        if (!inp || inp.disabled) continue;
         const pay = (raw[`pay_${b}`] === '' ? null : Number(raw[`pay_${b}`]));
         const chg = win.charges[b];
         if (pay == null || chg == null) continue;
@@ -3618,7 +3702,7 @@ async function openCandidateRateModal(candidate_id, existing) {
         String((o.rate_type || '')).toUpperCase() === rate_type &&
         String(o.band||'')  === String(band||'');
 
-      // ❗ Fix: exclude the row being edited (by id OR _tmpId) to avoid self-collision
+      // Exclude self when checking overlaps
       const isSelf = (o) => {
         if (!existing) return false;
         if (existing.id && o.id) return String(o.id) === String(existing.id);
@@ -4809,6 +4893,7 @@ function mountClientHospitalsTab() {
 // CLIENT RATE MODAL (child) — adds status block + enable/disable button;
 // overlap/rollback logic now IGNORES disabled rows
 // ============================================================================
+
 async function openClientRateModal(client_id, existing) {
   const parentFrame = _currentFrame();
   // ✅ Allow create OR edit to be interactive
@@ -4833,6 +4918,7 @@ async function openClientRateModal(client_id, existing) {
   const who  = ex.disabled_by_name || '';
   const when = ex.disabled_at_utc ? formatIsoToUk(String(ex.disabled_at_utc).slice(0,10)) : '';
 
+  // Status header (no toggle here anymore)
   const statusBlock = `
     <div class="row" id="cl_status_row" style="align-items:center; gap:8px;">
       <div>
@@ -4844,14 +4930,6 @@ async function openClientRateModal(client_id, existing) {
           <div class="hint" id="cl_status_meta">&nbsp;</div>
         `}
       </div>
-      ${parentEditable && ex.id
-        ? `<div style="margin-left:auto">
-             <button id="btnToggleDisable" class="${isDisabled ? 'btn-primary' : 'btn-danger'}">
-               ${isDisabled ? 'Enable' : 'Disable'}
-             </button>
-           </div>`
-        : ''
-      }
     </div>`;
 
   function sameRow(a, b) {
@@ -4907,9 +4985,9 @@ async function openClientRateModal(client_id, existing) {
             ${['day','night','sat','sun','bh'].map(bucket => `
               <tr>
                 <td style="white-space:nowrap">${bucket.toUpperCase()}</td>
-                <td><input type="number" step="0.01" name="paye_${bucket}" value="${ex[`paye_${bucket}`] ?? ''}" ${parentEditable ? '' : 'disabled'} /></td>
-                <td><input type="number" step="0.01" name="umb_${bucket}"  value="${ex[`umb_${bucket}`]  ?? ''}" ${parentEditable ? '' : 'disabled'} /></td>
-                <td><input type="number" step="0.01" name="charge_${bucket}" value="${ex[`charge_${bucket}`] ?? ''}" ${parentEditable ? '' : 'disabled'} /></td>
+                <td><input type="number" step="0.01" name="paye_${bucket}" ${parentEditable ? '' : 'disabled'} /></td>
+                <td><input type="number" step="0.01" name="umb_${bucket}"  ${parentEditable ? '' : 'disabled'} /></td>
+                <td><input type="number" step="0.01" name="charge_${bucket}" ${parentEditable ? '' : 'disabled'} /></td>
               </tr>
             `).join('')}
           </tbody>
@@ -4968,15 +5046,39 @@ async function openClientRateModal(client_id, existing) {
   function numOrNull(v){ const n = Number(v); return Number.isFinite(n) ? n : null; }
   function fmt(v){ return (v==null || Number.isNaN(v)) ? '—' : (Math.round(v*100)/100).toFixed(2); }
 
+  // 👉 UPDATED: gate inputs as well as Apply based on role + from date
   async function recomputeClientMargins(){
     const mult = await _erniMultiplier();
-    const get = name => document.querySelector(`#clientRateForm input[name="${name}"]`);
+    const getIn = sel => document.querySelector(sel);
+    const roleVal = (document.getElementById('cl_role')?.value || '').trim();
+    const fromIso = parseUkDateToIso(document.getElementById('cl_date_from')?.value || '');
+
+    const payeInputs = ['day','night','sat','sun','bh'].map(b => getIn(`#clientRateForm input[name="paye_${b}"]`));
+    const umbInputs  = ['day','night','sat','sun','bh'].map(b => getIn(`#clientRateForm input[name="umb_${b}"]`));
+    const chgInputs  = ['day','night','sat','sun','bh'].map(b => getIn(`#clientRateForm input[name="charge_${b}"]`));
+    const allInputs  = [...payeInputs, ...umbInputs, ...chgInputs].filter(Boolean);
+
     let hasNegative = false;
 
+    // If role/date not ready: disable all inputs, blank margins, disable Apply
+    if (!roleVal || !fromIso) {
+      allInputs.forEach(inp => { inp.disabled = true; });
+      ['day','night','sat','sun','bh'].forEach(b=>{
+        const spP = byId(`m_paye_${b}`), spU = byId(`m_umb_${b}`);
+        if (spP) spP.textContent = '—';
+        if (spU) spU.textContent = '—';
+      });
+      setApplyEnabled(false);
+      return;
+    }
+
+    // Otherwise, inputs are editable (we’ll still block on negative margins)
+    allInputs.forEach(inp => { inp.disabled = false; });
+
     ['day','night','sat','sun','bh'].forEach(bucket=>{
-      const paye = numOrNull(get(`paye_${bucket}`)?.value);
-      const umb  = numOrNull(get(`umb_${bucket}` )?.value);
-      const chg  = numOrNull(get(`charge_${bucket}`)?.value);
+      const paye = numOrNull(getIn(`#clientRateForm input[name="paye_${bucket}"]`)?.value);
+      const umb  = numOrNull(getIn(`#clientRateForm input[name="umb_${bucket}"]`)?.value);
+      const chg  = numOrNull(getIn(`#clientRateForm input[name="charge_${bucket}"]`)?.value);
 
       const payeMargin = (paye!=null && chg!=null) ? (chg - (paye * mult)) : null;
       const umbMargin  = (umb!=null  && chg!=null) ? (chg - umb)          : null;
@@ -4985,19 +5087,20 @@ async function openClientRateModal(client_id, existing) {
         hasNegative = true;
       }
 
-      const spP = byId(`m_paye_${bucket}`);
-      const spU = byId(`m_umb_${bucket}`);
+      const spP = byId(`m_paye_${bucket}`), spU = byId(`m_umb_${bucket}`);
       if (spP) spP.textContent = fmt(payeMargin);
       if (spU) spU.textContent = fmt(umbMargin);
     });
 
-    // Shade Apply button: only enabled when all margins are ≥ 0 (or not computable)
     setApplyEnabled(!hasNegative);
   }
 
+  // Build the tab label with status
+  const formTabLabel = `Form — ${ex.disabled_at_utc ? 'Inactive' : 'Active'}`;
+
   showModal(
     existing ? 'Edit Client Default Window' : 'Add/Upsert Client Default Window',
-    [{ key:'form', label:'Form' }],
+    [{ key:'form', label: formTabLabel }],
     () => formHtml,
     async () => {
       const pf = _parentFrame();
@@ -5077,10 +5180,11 @@ async function openClientRateModal(client_id, existing) {
         umb_sun     : raw['umb_sun']     !== '' ? Number(raw['umb_sun'])     : null,
         umb_bh      : raw['umb_bh']      !== '' ? Number(raw['umb_bh'])      : null,
 
+        // carry current status in the staged payload for Save
         disabled_at_utc : existing?.disabled_at_utc ?? null,
         disabled_by_name: existing?.disabled_by_name ?? null,
         __toggle        : existing?.__toggle || undefined,
-        __localKey      : existing?.__localKey || undefined  // carry through for staged edits
+        __localKey      : existing?.__localKey || undefined
       };
 
       // EARLY EXIT for pure status toggle
@@ -5095,7 +5199,6 @@ async function openClientRateModal(client_id, existing) {
 
       if (isPureToggle) {
         ctx.ratesState = Array.isArray(ctx.ratesState) ? ctx.ratesState : [];
-        // replace by identity/id/__localKey
         let idx = ctx.ratesState.findIndex(r => sameRow(r, existing));
         if (idx >= 0) {
           ctx.ratesState[idx] = { ...existing, disabled_at_utc: staged.disabled_at_utc, disabled_by_name: staged.disabled_by_name, __toggle: staged.__toggle };
@@ -5112,8 +5215,6 @@ async function openClientRateModal(client_id, existing) {
       const list = Array.isArray(ctx.ratesState) ? ctx.ratesState : [];
       const normBand = v => String(v || '');
       const sameCat = r => String(r.role||'') === staged.role && normBand(r.band) === normBand(staged.band);
-
-      // Ignore the row being edited (id or __localKey or identity)
       const isSelf = r => existing ? sameRow(r, existing) : false;
 
       const activeAtStart = list.filter(r =>
@@ -5169,7 +5270,6 @@ async function openClientRateModal(client_id, existing) {
         let idx = ctx.ratesState.findIndex(r => sameRow(r, existing));
         if (idx >= 0) ctx.ratesState[idx] = staged; else ctx.ratesState.push(staged);
       } else {
-        // guard against accidental duplicate push of the same localKey in this session
         const already = ctx.ratesState.findIndex(r => sameRow(r, staged));
         if (already >= 0) ctx.ratesState[already] = staged; else ctx.ratesState.push(staged);
       }
@@ -5192,6 +5292,78 @@ async function openClientRateModal(client_id, existing) {
       if (parent) { parent.currentTabKey = 'rates'; parent.setTab('rates'); }
     }
   );
+
+  // After modal mounts, add the footer toggle button (styled like Apply)
+  (function addFooterToggle(){
+    const actions = document.getElementById('modalActions');
+    if (!actions) return;
+
+    // Create/insert the toggle button just before Save to sit "next to Apply"
+    const saveBtn = document.getElementById('btnSave') || actions.querySelector('.primary');
+    const btn = document.createElement('button');
+    btn.id = 'btnToggleRateStatus';
+    btn.className = 'primary';          // 👈 same visual style as Apply
+    btn.style.marginRight = 'auto';     // push it left so it's adjacent but separated by spacer
+    btn.textContent = (ex && ex.disabled_at_utc) ? 'Enable' : 'Disable';
+
+    // Insert to the left of Save
+    if (saveBtn && saveBtn.parentNode) {
+      saveBtn.parentNode.insertBefore(btn, saveBtn);
+    } else {
+      actions.appendChild(btn);
+    }
+
+    // Click handler stages the toggle (same logic you had in-row)
+    btn.addEventListener('click', () => {
+      // Only meaningful for an existing row (with id)
+      const nowIso = new Date().toISOString().slice(0,10);
+      const willDisable = !ex.disabled_at_utc;
+
+      ex.__toggle = willDisable ? 'disable' : 'enable';
+      if (willDisable) {
+        ex.disabled_at_utc = nowIso;
+        let short = '';
+        try {
+          const u = (window.__ME__ || window.me || window.currentUser || window.AUTH_USER || {});
+          const em = (u.email || u.user?.email || '');
+          short = em && typeof em === 'string' ? (em.split('@')[0] || '') : (u.name || '');
+        } catch(_) {}
+        ex.disabled_by_name = short || ex.disabled_by_name || '';
+      } else {
+        ex.disabled_at_utc = null;
+        ex.disabled_by_name = null;
+      }
+
+      // Update UI chips + tab label instantly
+      const pill = byId('cl_status_pill');
+      const meta = byId('cl_status_meta');
+      if (pill && meta) {
+        if (willDisable) {
+          pill.className = 'pill tag-fail';
+          pill.textContent = '❌ Disabled (pending save)';
+          meta.textContent = ex.disabled_by_name
+            ? `by ${ex.disabled_by_name} on ${formatIsoToUk(nowIso)} — will apply on Save`
+            : `Will disable on ${formatIsoToUk(nowIso)} (save to confirm)`;
+          btn.textContent = 'Enable';
+        } else {
+          pill.className = 'pill tag-ok';
+          pill.textContent = '✓ Active (pending save)';
+          meta.textContent = 'Will enable on Save';
+          btn.textContent = 'Disable';
+        }
+      }
+
+      // Update the Form tab label text
+      try {
+        const tabs = document.getElementById('modalTabs');
+        const formBtn = tabs && tabs.querySelector('button'); // only one tab in this modal
+        if (formBtn) formBtn.textContent = `Form — ${ex.disabled_at_utc ? 'Inactive' : 'Active'}`;
+      } catch {}
+
+      try { renderClientRatesTable(); } catch {}
+      try { window.dispatchEvent(new CustomEvent('modal-dirty')); } catch {}
+    });
+  })();
 
   // Prefill & minor wiring
   const selRole = document.getElementById('cl_role');
@@ -5218,12 +5390,22 @@ async function openClientRateModal(client_id, existing) {
       const iso = parseUkDateToIso(inFrom.value || '');
       inTo._minIso = iso || null;
     } catch {}
+    // re-gate inputs/Apply when date changes
+    recomputeClientMargins();
   });
 
   selRole.addEventListener('change', () => {
-    if (selRole.value === '__OTHER__') newRow.style.display = '';
-    else { newRow.style.display = 'none'; const nr = document.getElementById('cl_role_new'); if (nr) nr.value = ''; }
+    if (selRole.value === '__OTHER__') {
+      newRow.style.display = '';
+    } else {
+      newRow.style.display = 'none';
+      const nr = document.getElementById('cl_role_new'); if (nr) nr.value = '';
+    }
+    // re-gate on role change
+    recomputeClientMargins();
   });
+
+  inTo?.addEventListener('change', () => { recomputeClientMargins(); });
 
   // Live margins & live Apply gating
   try {
@@ -5235,52 +5417,7 @@ async function openClientRateModal(client_id, existing) {
     });
     recomputeClientMargins();
   } catch {}
-
-  // Enable/Disable handler — stage ONLY; require Apply + parent Save to persist
-  const toggleBtn = byId('btnToggleDisable');
-  if (toggleBtn && existing?.id && parentEditable) {
-    toggleBtn.onclick = () => {
-      const nowIso = new Date().toISOString().slice(0,10);
-      const willDisable = !existing.disabled_at_utc;
-      existing.__toggle = willDisable ? 'disable' : 'enable';
-      if (willDisable) {
-        existing.disabled_at_utc = nowIso;
-        let short = '';
-        try {
-          const u = (window.__ME__ || window.me || window.currentUser || window.AUTH_USER || {});
-          const em = (u.email || u.user?.email || '');
-          short = em && typeof em === 'string' ? (em.split('@')[0] || '') : (u.name || '');
-        } catch(_) {}
-        existing.disabled_by_name = short || existing.disabled_by_name || '';
-      } else {
-        existing.disabled_at_utc = null;
-        existing.disabled_by_name = null;
-      }
-
-      const pill = byId('cl_status_pill');
-      const meta = byId('cl_status_meta');
-      if (pill && meta) {
-        if (willDisable) {
-          pill.className = 'pill tag-fail';
-          pill.textContent = '❌ Disabled (pending save)';
-          meta.textContent = existing.disabled_by_name
-            ? `by ${existing.disabled_by_name} on ${formatIsoToUk(nowIso)} — will apply on Save`
-            : `Will disable on ${formatIsoToUk(nowIso)} (save to confirm)`;
-          toggleBtn.text = 'Enable'; toggleBtn.textContent = 'Enable'; toggleBtn.className = 'btn-primary';
-        } else {
-          pill.className = 'pill tag-ok';
-          pill.textContent = '✓ Active (pending save)';
-          meta.textContent = 'Will enable on Save';
-          toggleBtn.text = 'Disable'; toggleBtn.textContent = 'Disable'; toggleBtn.className = 'btn-danger';
-        }
-      }
-
-      try { window.dispatchEvent(new CustomEvent('modal-dirty')); } catch {}
-      try { renderClientRatesTable(); } catch {}
-    };
-  }
 }
-
 
 
 function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
