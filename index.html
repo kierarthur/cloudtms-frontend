@@ -117,6 +117,18 @@
     .success{color:#bbf7d0;background:rgba(16,185,129,.12);border:1px solid rgba(16,185,129,.3);padding:8px;border-radius:8px}
     .split{display:flex;gap:10px}
     .eye{cursor:pointer;font-size:12px;color:var(--sub)}
+
+    /* ===== Date-picker portal visibility fix (ensures month arrows are visible) ===== */
+    /* The floating date-picker renders on a light (white) panel and inherits body/link colors.
+       Make its text (and specifically the prev/next arrows) dark so they don't appear "missing". */
+    .uk-datepicker-portal { color: #111827; }
+    .uk-datepicker-portal .cal-head a {
+      color: #111827;
+      text-decoration: none;
+      cursor: pointer;
+      line-height: 1;
+      font-size: 16px;
+    }
   </style>
 </head>
 <body>
