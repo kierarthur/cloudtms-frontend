@@ -89,6 +89,20 @@
     .actions .primary{background:linear-gradient(180deg,#5146e5,#4038cc);border-color:#3730a3}
     .hint{color:var(--sub);font-size:12px}
 
+    /* ===== Button disabled state (visual) ===== */
+    .actions button:disabled,
+    .actions button.disabled {
+      opacity: .45;
+      cursor: not-allowed !important;
+      filter: saturate(0.6) brightness(0.9);
+      pointer-events: none;
+    }
+    .actions .primary:disabled,
+    .actions .primary.disabled{
+      background: #2d2a66; /* dimmed gradient feel */
+      border-color: #252258;
+    }
+
     /* ===== Calendar ===== */
     .calendar{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
     .month{border:1px solid var(--line);border-radius:10px;overflow:hidden}
