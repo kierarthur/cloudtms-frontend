@@ -3860,6 +3860,12 @@ function renderCalendar(timesheets){
 // OPEN CLIENT (parent modal) — skip posting disabled windows on Save
 // (No delete button is added here; ensure any existing parent delete UI is removed elsewhere.)
 // ============================================================================
+
+// =================== CLIENT RATES TABLE (UPDATED) ===================
+// ✅ UPDATED — unified table view, dbl-click opens unified modal
+// ============================================================================
+// RENDER CLIENT RATES TABLE (adds "Status" col; shows disabled who/when)
+// ============================================================================
 async function openClient(row) {
   // ===== Logging helpers (toggle with window.__LOG_MODAL = true/false) =====
   const LOG = (typeof window.__LOG_MODAL === 'boolean') ? window.__LOG_MODAL : true;
@@ -3885,7 +3891,7 @@ async function openClient(row) {
 
   // 1) Hydrate full client if we have an id
   let full = incoming;
-  let settingsSeed = null; // PRESEED client settings to avoid time-validator race
+  let settingsSeed = null;
   if (seedId) {
     try {
       const url = API(`/api/clients/${encodeURIComponent(seedId)}`);
@@ -3915,7 +3921,7 @@ async function openClient(row) {
     L('no seedId — create mode');
   }
 
-  // 2) Seed window.modalCtx and show  (+ preseed clientSettingsState to remove race)
+  // 2) Seed modal context
   const fullKeys = Object.keys(full || {});
   L('seeding window.modalCtx', { entity: 'clients', fullId: full?.id, fullKeys });
 
@@ -3924,7 +3930,7 @@ async function openClient(row) {
     data: deep(full),
     formState: { __forId: full?.id || null, main: {} },
     ratesState: [],
-    ratesBaseline: [], // baseline snapshot to detect status toggles on Save
+    ratesBaseline: [],
     hospitalsState: { existing: [], stagedNew: [], stagedEdits: {}, stagedDeletes: new Set() },
     clientSettingsState: settingsSeed ? deep(settingsSeed) : {},
     openToken: ((full?.id) || 'new') + ':' + Date.now()
@@ -3939,7 +3945,7 @@ async function openClient(row) {
     preseededSettings: Object.keys(window.modalCtx.clientSettingsState||{})
   });
 
-  // 3) Render modal (first paint uses hydrated "full")
+  // 3) Render modal
   L('calling showModal with hasId=', !!full?.id, 'rawHasIdArg=', full?.id);
   showModal(
     'Client',
@@ -3956,7 +3962,6 @@ async function openClient(row) {
 
       // Collect "main" form
       const fs = window.modalCtx.formState || { __forId: null, main:{} };
-      // treat create with sentinel openToken as "same record"
       const hasId = !!window.modalCtx.data?.id;
       const same = hasId ? (fs.__forId === window.modalCtx.data.id)
                          : (fs.__forId === window.modalCtx.openToken || fs.__forId == null);
@@ -3967,12 +3972,11 @@ async function openClient(row) {
 
       L('[onSave] collected', { same, stagedKeys: Object.keys(stagedMain||{}), liveKeys: Object.keys(liveMain||{}) });
 
-      // Immutable on server
       delete payload.but_let_cli_ref;
       if (!payload.name && full?.name) payload.name = full.name;
       if (!payload.name) { alert('Please enter a Client name.'); return { ok:false }; }
 
-      // ===== Settings normalization (collect, but DO NOT attach to client payload) =====
+      // 2a) Settings normalization (kept as before)
       const baseline = window.modalCtx.clientSettingsState || {};
       const hasFormMounted = !!byId('clientSettingsForm');
       const hasFullBaseline = ['day_start','day_end','night_start','night_end'].every(k => typeof baseline[k] === 'string' && baseline[k] !== '');
@@ -3983,32 +3987,20 @@ async function openClient(row) {
         let csMerged = { ...(baseline || {}) };
         if (hasFormMounted) {
           const liveSettings = collectForm('#clientSettingsForm', false);
-          ['day_start','day_end','night_start','night_end'].forEach(k=>{
-            const v = _toHHMM(liveSettings[k]); // returns '' if empty
-            if (v) csMerged[k] = v;
-          });
-          if (typeof liveSettings.timezone_id === 'string' && liveSettings.timezone_id.trim() !== '') {
-            csMerged.timezone_id = liveSettings.timezone_id.trim();
-          }
+          ['day_start','day_end','night_start','night_end'].forEach(k=>{ const v = _toHHMM(liveSettings[k]); if (v) csMerged[k] = v; });
+          if (typeof liveSettings.timezone_id === 'string' && liveSettings.timezone_id.trim() !== '') csMerged.timezone_id = liveSettings.timezone_id.trim();
         }
         const { cleaned: csClean, invalid: csInvalid } = normalizeClientSettingsForSave(csMerged);
         if (APILOG) console.log('[OPEN_CLIENT] client_settings (merged→clean)', { csMerged, csClean, csInvalid, hasFormMounted, hasFullBaseline });
         if (csInvalid) { alert('Times must be HH:MM (24-hour).'); return { ok:false }; }
-        if (Object.keys(csClean).length) {
-          // IMPORTANT: do NOT attach to the main client payload
-          pendingSettings = csClean;
-        }
+        if (Object.keys(csClean).length) pendingSettings = csClean;
       } else {
         if (APILOG) console.log('[OPEN_CLIENT] skip settings normalisation (no form & incomplete baseline)');
       }
-      // =====================================================================
 
-      // 1) Upsert client (must have id before settings/hospitals/rates)
+      // 3) Upsert client
       const idForUpdate = window.modalCtx?.data?.id || full?.id || null;
       if (APILOG) console.log('[OPEN_CLIENT] upsertClient → request', { idForUpdate, payload });
-      L('[onSave] upsertClient', { idForUpdate, payloadKeys: Object.keys(payload||{}) });
-
-      // NEVER send client_settings in this call
       delete payload.client_settings;
 
       const clientResp  = await upsertClient(payload, idForUpdate).catch(err => { E('upsertClient failed', err); return null; });
@@ -4016,37 +4008,25 @@ async function openClient(row) {
       if (APILOG) console.log('[OPEN_CLIENT] upsertClient ← response', { ok: !!clientResp, clientId });
       if (!clientId) { alert('Failed to save client'); return { ok:false }; }
 
-      // ✅ Merge authoritative client fields into modalCtx.data (fixes blank Main tab + shows CLI)
-      const savedClient = clientResp && typeof clientResp === 'object'
-        ? clientResp
-        : { id: clientId, ...payload }; // fallback to what we sent if no body
+      const savedClient = clientResp && typeof clientResp === 'object' ? clientResp : { id: clientId, ...payload };
+      window.modalCtx.data = { ...(window.modalCtx.data || {}), ...savedClient, id: clientId };
 
-      window.modalCtx.data = {
-        ...(window.modalCtx.data || {}),
-        ...savedClient,
-        id: clientId // ensure id present
-      };
-
-      // 2) Upsert client SETTINGS via existing PUT /api/clients/:id AFTER client exists
+      // 4) Save Client settings (after client exists)
       try {
         if (pendingSettings && Object.keys(pendingSettings).length) {
           if (APILOG) console.log('[OPEN_CLIENT] upsertClient (settings) → PUT /api/clients/:id', { clientId, pendingSettings });
           const upd = await upsertClient({ client_settings: pendingSettings }, clientId);
           if (!upd) throw new Error('Settings update failed');
-          // Optional: merge any server-changed fields again
-          if (upd && typeof upd === 'object') {
-            window.modalCtx.data = { ...window.modalCtx.data, ...upd, id: clientId };
-          }
+          if (upd && typeof upd === 'object') window.modalCtx.data = { ...window.modalCtx.data, ...upd, id: clientId };
         }
       } catch (err) {
         alert(`Failed to save Client settings: ${String(err?.message || err)}`);
         return { ok:false };
       }
 
-      // 3) Flush Hospitals staged CRUD (deletes → edits → creates). Abort on first failure.
+      // 5) Hospitals CRUD (unchanged)
       try {
         const hs = window.modalCtx.hospitalsState || {};
-        // deletes
         if (hs.stagedDeletes && hs.stagedDeletes.size) {
           for (const hid of hs.stagedDeletes) {
             const url = API(`/api/clients/${encodeURIComponent(clientId)}/hospitals/${encodeURIComponent(hid)}`);
@@ -4055,7 +4035,6 @@ async function openClient(row) {
             if (!res.ok) throw new Error(await res.text());
           }
         }
-        // edits
         if (hs.stagedEdits && typeof hs.stagedEdits === 'object') {
           for (const [hid, patchRaw] of Object.entries(hs.stagedEdits)) {
             const patch = {};
@@ -4068,36 +4047,23 @@ async function openClient(row) {
               const hint = String(patchRaw.ward_hint ?? '').trim();
               patch.ward_hint = hint === '' ? null : hint;
             }
-            if (Object.keys(patch).length === 0) continue; // nothing to send
+            if (Object.keys(patch).length === 0) continue;
             const url = API(`/api/clients/${encodeURIComponent(clientId)}/hospitals/${encodeURIComponent(hid)}`);
             if (APILOG) console.log('[OPEN_CLIENT] PATCH hospital →', url, patch);
-            const res = await authFetch(url, {
-              method: 'PATCH',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify(patch)
-            });
+            const res = await authFetch(url, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch) });
             if (!res.ok) throw new Error(await res.text());
           }
         }
-        // creates
         if (Array.isArray(hs.stagedNew) && hs.stagedNew.length) {
           for (const n of hs.stagedNew) {
-            const body = {
-              hospital_name_norm: String(n?.hospital_name_norm || '').trim(),
-              ward_hint: (String(n?.ward_hint ?? '').trim() || null)
-            };
+            const body = { hospital_name_norm: String(n?.hospital_name_norm || '').trim(), ward_hint: (String(n?.ward_hint ?? '').trim() || null) };
             if (!body.hospital_name_norm) throw new Error('Hospital name cannot be blank.');
             const url = API(`/api/clients/${encodeURIComponent(clientId)}/hospitals`);
             if (APILOG) console.log('[OPEN_CLIENT] POST hospital →', url, body);
-            const res = await authFetch(url, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify(body)
-            });
+            const res = await authFetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
             if (!res.ok) throw new Error(await res.text());
           }
         }
-        // clear staging and refresh authoritative list in modal
         if (hs.stagedDeletes) hs.stagedDeletes.clear();
         if (hs.stagedEdits)   window.modalCtx.hospitalsState.stagedEdits = {};
         if (hs.stagedNew)     window.modalCtx.hospitalsState.stagedNew = [];
@@ -4113,7 +4079,7 @@ async function openClient(row) {
         return { ok:false };
       }
 
-      // 🔧 4) NEW: Execute staged CLIENT RATE deletes BEFORE toggles/upserts
+      // 6) NEW — Execute staged CLIENT RATE deletes BEFORE toggles/edits/inserts
       try {
         const allWindows = Array.isArray(window.modalCtx.ratesState) ? window.modalCtx.ratesState : [];
         const toDelete   = allWindows.filter(w => w && w.id && w.__delete === true);
@@ -4122,21 +4088,14 @@ async function openClient(row) {
           for (const w of toDelete) {
             const url = API(`/api/rates/client-defaults/${encodeURIComponent(w.id)}`);
             const res = await authFetch(url, { method: 'DELETE' });
-            if (res.status === 404) {
-              // already gone — continue
-              continue;
-            }
+            if (res.status === 404) continue; // already gone
             if (!res.ok) {
               const body = await res.text().catch(()=> '');
-              if (res.status === 409) {
-                alert(`Delete blocked: ${body || 'Associated data prevents deletion.'}`);
-              } else {
-                alert(`Failed to delete client rate window: ${body || res.status}`);
-              }
+              if (res.status === 409) alert(`Delete blocked: ${body || 'Associated data prevents deletion.'}`);
+              else alert(`Failed to delete client rate window: ${body || res.status}`);
               return { ok:false };
             }
           }
-          // Prune deleted rows from state & baseline
           const deletedIds = new Set(toDelete.map(w => String(w.id)));
           window.modalCtx.ratesState    = allWindows.filter(w => !(w && w.id && deletedIds.has(String(w.id))));
           window.modalCtx.ratesBaseline = (Array.isArray(window.modalCtx.ratesBaseline) ? window.modalCtx.ratesBaseline : [])
@@ -4147,7 +4106,7 @@ async function openClient(row) {
         return { ok:false };
       }
 
-      // 5) Persist rate window status toggles (before upserts)
+      // 7) Apply status toggles (enable/disable) BEFORE data edits/inserts
       const baselineRates = Array.isArray(window.modalCtx.ratesBaseline) ? window.modalCtx.ratesBaseline : [];
       const prevById = new Map(baselineRates.filter(r => r && r.id).map(r => [String(r.id), r]));
       let windows = Array.isArray(window.modalCtx.ratesState) ? window.modalCtx.ratesState.slice() : [];
@@ -4157,29 +4116,22 @@ async function openClient(row) {
         if (!w?.id) continue;
         const prev = prevById.get(String(w.id));
         if (!prev) continue;
-        const prevDisabled = !!prev.disabled_at_utc;
-        const currDisabled = !!w.disabled_at_utc;
-        if (prevDisabled !== currDisabled) toggles.push({ id: w.id, disabled: w.disabled_at_utc ? true : false });
+        if (!!prev.disabled_at_utc !== !!w.disabled_at_utc) toggles.push({ id: w.id, disabled: !!w.disabled_at_utc });
       }
-
       if (toggles.length) {
         if (APILOG) console.log('[OPEN_CLIENT] applying toggles', toggles);
         for (const t of toggles) {
-          try {
-            await patchClientDefault(t.id, { disabled: t.disabled });
-          } catch (e) {
+          try { await patchClientDefault(t.id, { disabled: t.disabled }); }
+          catch (e) {
             const msg = String(e?.message || e || '');
-            if (msg.includes('duplicate key') || msg.includes('duplicate')) {
-              alert('Cannot enable this window: another enabled window already starts on the same date for the same role/band.');
-            } else {
-              alert(`Failed to update status: ${msg}`);
-            }
+            if (msg.includes('duplicate')) alert('Cannot enable this window: another enabled window already starts on the same date for the same role/band.');
+            else alert(`Failed to update status: ${msg}`);
             return { ok:false };
           }
         }
       }
 
-      // 6) Final negative-margin guard across staged windows (skip disabled)
+      // 8) Final negative-margin guard across staged windows (skip disabled)
       const erniMult = (async ()=> {
         if (typeof window.__ERNI_MULT__ === 'number') return window.__ERNI_MULT__;
         try {
@@ -4193,84 +4145,81 @@ async function openClient(row) {
         return 1;
       })();
       const mult = await erniMult;
-
       for (const w of windows) {
         if (w.disabled_at_utc) continue;
         for (const b of ['day','night','sat','sun','bh']) {
           const chg  = w[`charge_${b}`];
           const paye = w[`paye_${b}`];
           const umb  = w[`umb_${b}`];
-          if (chg != null && paye != null && (chg - (paye * mult)) < 0) {
-            alert(`PAYE margin would be negative for ${w.role}${w.band?` / ${w.band}`:''} (${b.toUpperCase()}). Fix before saving.`);
-            return { ok:false };
-          }
-          if (chg != null && umb != null && (chg - umb) < 0) {
-            alert(`Umbrella margin would be negative for ${w.role}${w.band?` / ${w.band}`:''} (${b.toUpperCase()}). Fix before saving.`);
-            return { ok:false };
-          }
+          if (chg != null && paye != null && (chg - (paye * mult)) < 0) { alert(`PAYE margin would be negative for ${w.role}${w.band?` / ${w.band}`:''} (${b.toUpperCase()}). Fix before saving.`); return { ok:false }; }
+          if (chg != null && umb  != null && (chg - umb) < 0)            { alert(`Umbrella margin would be negative for ${w.role}${w.band?` / ${w.band}`:''} (${b.toUpperCase()}). Fix before saving.`); return { ok:false }; }
         }
       }
 
-      // 7) Upsert enabled windows (skip disabled)
-      if (clientId && windows.length) {
-        // guard for intra-batch overlap (enabled windows only)
-        for (let i = 0; i < windows.length; i++) {
-          for (let j = i + 1; j < windows.length; j++) {
-            const A = windows[i], B = windows[j];
-            if (A.disabled_at_utc || B.disabled_at_utc) continue; // ignore disabled in this guard
-            if (String(A.role||'') === String(B.role||'') &&
-                String(A.band||'') === String(B.band||'')) {
-              const a0 = A.date_from || null, a1 = A.date_to || null;
-              const b0 = B.date_from || null, b1 = B.date_to || null;
-              if (rangesOverlap(a0, a1, b0, b1)) {
-                alert(`Client default windows overlap for role=${A.role} band=${A.band||'(none)'}.\n` +
-                      `${formatIsoToUk(a0)}–${formatIsoToUk(a1||'')}  vs  ${formatIsoToUk(b0)}–${formatIsoToUk(b1||'')}`);
-                if (APILOG) console.warn('[OPEN_CLIENT] overlap detected', { A, B });
-                return { ok:false };
-              }
-            }
-          }
-        }
+      // 9) UPDATE existing windows, then POST new windows (skip disabled)
+      const toUpdate = windows.filter(w => w.id && !w.disabled_at_utc && !w.__delete);
+      const toCreate = windows.filter(w => !w.id && !w.disabled_at_utc);
 
-        for (const w of windows) {
-          try {
-            if (w.disabled_at_utc) continue;
-            if (APILOG) console.log('[OPEN_CLIENT] upsertClientRate →', w);
-            await upsertClientRate({
-              client_id : clientId,
-              role      : w.role || '',
-              band      : w.band ?? null,
-              date_from : w.date_from || null,
-              date_to   : w.date_to ?? null,
+      // Helper to build payload for PUT/POST
+      const buildBody = (w) => ({
+        client_id : clientId,
+        role      : w.role || '',
+        band      : w.band ?? null,
+        date_from : w.date_from || null,
+        date_to   : w.date_to ?? null,
 
-              charge_day   : w.charge_day   ?? null,
-              charge_night : w.charge_night ?? null,
-              charge_sat   : w.charge_sat   ?? null,
-              charge_sun   : w.charge_sun   ?? null,
-              charge_bh    : w.charge_bh    ?? null,
+        charge_day   : w.charge_day   ?? null,
+        charge_night : w.charge_night ?? null,
+        charge_sat   : w.charge_sat   ?? null,
+        charge_sun   : w.charge_sun   ?? null,
+        charge_bh    : w.charge_bh    ?? null,
 
-              paye_day     : w.paye_day     ?? null,
-              paye_night   : w.paye_night   ?? null,
-              paye_sat     : w.paye_sat     ?? null,
-              paye_sun     : w.paye_sun     ?? null,
-              paye_bh      : w.paye_bh      ?? null,
+        paye_day     : w.paye_day     ?? null,
+        paye_night   : w.paye_night   ?? null,
+        paye_sat     : w.paye_sat     ?? null,
+        paye_sun     : w.paye_sun     ?? null,
+        paye_bh      : w.paye_bh      ?? null,
 
-              umb_day      : w.umb_day      ?? null,
-              umb_night    : w.umb_night    ?? null,
-              umb_sat      : w.umb_sat      ?? null,
-              umb_sun      : w.umb_sun      ?? null,
-              umb_bh       : w.umb_bh       ?? null
-            });
-            if (APILOG) console.log('[OPEN_CLIENT] upsertClientRate ← ok');
-          } catch (e) {
-            E('Upsert client default window failed', w, e);
-            alert('Failed to save a client rate window. See console for details.');
+        umb_day      : w.umb_day      ?? null,
+        umb_night    : w.umb_night    ?? null,
+        umb_sat      : w.umb_sat      ?? null,
+        umb_sun      : w.umb_sun      ?? null,
+        umb_bh       : w.umb_bh       ?? null
+      });
+
+      // PUT updates
+      for (const w of toUpdate) {
+        try {
+          const url = API(`/api/rates/client-defaults/${encodeURIComponent(w.id)}`);
+          if (APILOG) console.log('[OPEN_CLIENT] PUT client-default window →', w.id);
+          const res = await authFetch(url, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(buildBody(w))
+          });
+          if (!res.ok) {
+            const body = await res.text().catch(()=> '');
+            alert(`Failed to update client rate window: ${body || res.status}`);
             return { ok:false };
           }
+        } catch (e) {
+          alert(`Failed to update a client rate window: ${String(e?.message || e)}`); return { ok:false };
         }
       }
 
-      // Refresh list & rebuild baseline (authoritative names from server)
+      // POST creates
+      for (const w of toCreate) {
+        try {
+          if (APILOG) console.log('[OPEN_CLIENT] POST client-default window →', w);
+          await upsertClientRate(buildBody(w));
+        } catch (e) {
+          E('Upsert client default window failed', w, e);
+          alert('Failed to create a client rate window. See console for details.');
+          return { ok:false };
+        }
+      }
+
+      // 10) Refresh list & rebuild baseline
       try {
         const refreshed = await listClientRates(clientId /* all incl. disabled */);
         window.modalCtx.ratesState    = Array.isArray(refreshed) ? refreshed.map(x => ({ ...x })) : [];
@@ -4280,7 +4229,7 @@ async function openClient(row) {
         W('[openClient] post-save refresh failed', e);
       }
 
-      // Keep data fresh in the modal: keep __forId but DO NOT lose saved main fields
+      // 11) Clean main form state
       window.modalCtx.formState = { __forId: clientId, main:{} };
 
       if (isNew) window.__pendingFocus = { section: 'clients', id: clientId };
@@ -4299,7 +4248,7 @@ async function openClient(row) {
         const hasStaged = Array.isArray(window.modalCtx.ratesState) && window.modalCtx.ratesState.length > 0;
         if (!hasStaged) {
           window.modalCtx.ratesState    = Array.isArray(unified) ? unified.map(r => ({ ...r })) : [];
-          window.modalCtx.ratesBaseline = JSON.parse(JSON.stringify(window.modalCtx.ratesState)); // capture baseline
+          window.modalCtx.ratesBaseline = JSON.parse(JSON.stringify(window.modalCtx.ratesState));
         } else {
           const staged = Array.isArray(window.modalCtx.ratesState) ? window.modalCtx.ratesState.slice() : [];
           const stagedById = new Map(staged.map(r => [String(r.id), r]));
@@ -4318,7 +4267,6 @@ async function openClient(row) {
       }
     } catch (e) { W('openClient POST-PAINT rates error', e); }
 
-    // === NEW: fetch hospitals on first open ===
     try {
       const freshHosp = await listClientHospitals(id);
       if (token === window.modalCtx.openToken && window.modalCtx.data?.id === id) {
@@ -4331,12 +4279,6 @@ async function openClient(row) {
     L('skip companion loads (no full.id)');
   }
 }
-
-// =================== CLIENT RATES TABLE (UPDATED) ===================
-// ✅ UPDATED — unified table view, dbl-click opens unified modal
-// ============================================================================
-// RENDER CLIENT RATES TABLE (adds "Status" col; shows disabled who/when)
-// ============================================================================
 
 // Now shows derived PAYE & Umbrella margins per bucket in the table
 async function renderClientRatesTable() {
