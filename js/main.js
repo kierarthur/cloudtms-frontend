@@ -3921,7 +3921,7 @@ async function openClient(row) {
 
       // Collect "main" form
       const fs = window.modalCtx.formState || { __forId: null, main:{} };
-      // 🔧 CHANGE: treat create with sentinel openToken as "same record"
+      // treat create with sentinel openToken as "same record"
       const hasId = !!window.modalCtx.data?.id;
       const same = hasId ? (fs.__forId === window.modalCtx.data.id)
                          : (fs.__forId === window.modalCtx.openToken || fs.__forId == null);
@@ -3937,12 +3937,13 @@ async function openClient(row) {
       if (!payload.name && full?.name) payload.name = full.name;
       if (!payload.name) { alert('Please enter a Client name.'); return { ok:false }; }
 
-      // ===== Settings normalization (GUARDED) =====
+      // ===== Settings normalization (collect, but DO NOT attach to client payload) =====
       const baseline = window.modalCtx.clientSettingsState || {};
       const hasFormMounted = !!byId('clientSettingsForm');
       const hasFullBaseline = ['day_start','day_end','night_start','night_end'].every(k => typeof baseline[k] === 'string' && baseline[k] !== '');
       const shouldValidateSettings = hasFormMounted || hasFullBaseline;
 
+      let pendingSettings = null;
       if (shouldValidateSettings) {
         let csMerged = { ...(baseline || {}) };
         if (hasFormMounted) {
@@ -3959,23 +3960,45 @@ async function openClient(row) {
         if (APILOG) console.log('[OPEN_CLIENT] client_settings (merged→clean)', { csMerged, csClean, csInvalid, hasFormMounted, hasFullBaseline });
         if (csInvalid) { alert('Times must be HH:MM (24-hour).'); return { ok:false }; }
         if (Object.keys(csClean).length) {
-          payload.client_settings = csClean;
+          // IMPORTANT: do NOT attach to the main client payload
+          pendingSettings = csClean;
         }
       } else {
         if (APILOG) console.log('[OPEN_CLIENT] skip settings normalisation (no form & incomplete baseline)');
       }
-      // ============================================
+      // =====================================================================
 
-      // 1) Upsert client (must have id before hospitals/rates)
+      // 1) Upsert client (must have id before settings/hospitals/rates)
       const idForUpdate = window.modalCtx?.data?.id || full?.id || null;
       if (APILOG) console.log('[OPEN_CLIENT] upsertClient → request', { idForUpdate, payload });
       L('[onSave] upsertClient', { idForUpdate, payloadKeys: Object.keys(payload||{}) });
+
+      // NEVER send client_settings in this call
+      delete payload.client_settings;
+
       const clientResp  = await upsertClient(payload, idForUpdate).catch(err => { E('upsertClient failed', err); return null; });
       const clientId    = idForUpdate || (clientResp && clientResp.id);
       if (APILOG) console.log('[OPEN_CLIENT] upsertClient ← response', { ok: !!clientResp, clientId });
       if (!clientId) { alert('Failed to save client'); return { ok:false }; }
 
-      // 2) Flush Hospitals staged CRUD (deletes → edits → creates). Abort on first failure.
+      // 2) Upsert client SETTINGS (separate API) AFTER client exists
+      try {
+        if (pendingSettings && Object.keys(pendingSettings).length) {
+          const url = API(`/api/clients/${encodeURIComponent(clientId)}/settings`);
+          if (APILOG) console.log('[OPEN_CLIENT] PUT client settings →', url, pendingSettings);
+          const res = await authFetch(url, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(pendingSettings)
+          });
+          if (!res.ok) throw new Error(await res.text());
+        }
+      } catch (err) {
+        alert(`Failed to save Client settings: ${String(err?.message || err)}`);
+        return { ok:false };
+      }
+
+      // 3) Flush Hospitals staged CRUD (deletes → edits → creates). Abort on first failure.
       try {
         const hs = window.modalCtx.hospitalsState || {};
         // deletes
@@ -4045,7 +4068,7 @@ async function openClient(row) {
         return { ok:false };
       }
 
-      // 3) Persist rate window status toggles (before upserts)
+      // 4) Persist rate window status toggles (before upserts)
       const baselineRates = Array.isArray(window.modalCtx.ratesBaseline) ? window.modalCtx.ratesBaseline : [];
       const prevById = new Map(baselineRates.filter(r => r && r.id).map(r => [String(r.id), r]));
       const windows = Array.isArray(window.modalCtx.ratesState) ? window.modalCtx.ratesState.slice() : [];
@@ -4077,7 +4100,7 @@ async function openClient(row) {
         }
       }
 
-      // 4) Persist enabled windows (skip disabled)
+      // 5) Persist enabled windows (skip disabled)
       if (clientId && windows.length) {
         // guard for intra-batch overlap (enabled windows only)
         for (let i = 0; i < windows.length; i++) {
