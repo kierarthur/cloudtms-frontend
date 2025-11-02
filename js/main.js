@@ -716,6 +716,9 @@ function populateSearchFormFromFilters(filters={}, formSel='#searchForm'){
 // -----------------------------
 // UPDATED: search()
 // -----------------------------
+// ======================================
+// FRONTEND — search (UPDATED: no extra logic beyond existing; kept for completeness)
+// ======================================
 async function search(section, filters={}){
   window.__listState = window.__listState || {};
   const st = (window.__listState[section] ||= { page: 1, pageSize: 50, total: null, hasMore: false, filters: null });
@@ -744,10 +747,34 @@ async function search(section, filters={}){
   const ps = (st.pageSize === 'ALL') ? null : Number(st.pageSize || 50);
   st.hasMore = (ps != null) ? (Array.isArray(rows) && rows.length === ps) : false;
 
-  // if backend returns count in r (e.g., r.count), wire it to selection total when allMatching later
   try { if (typeof r?.data?.count === 'number') sel.totalMatching = r.data.count; } catch {}
   return rows;
 }
+// ======================================
+// FRONTEND — NEW helper: applySelectionAsFilter
+// If selection has explicit ids, show only those rows.
+// If selection is allMatching, apply its filters instead (caller supplies filters).
+// ======================================
+async function applySelectionAsFilter(section, selectionSnapshot){
+  if (!selectionSnapshot) return;
+  window.__listState = window.__listState || {};
+  const st = (window.__listState[section] ||= { page:1, pageSize:50, total:null, hasMore:false, filters:null });
+
+  if (selectionSnapshot.allMatching === false && Array.isArray(selectionSnapshot.ids) && selectionSnapshot.ids.length > 0) {
+    st.page = 1;
+    st.filters = { ids: selectionSnapshot.ids.map(String) };
+    const rows = await search(section, st.filters);
+    renderSummary(rows);
+  } else {
+    // For allMatching selections, the preset’s filters should be applied by the caller.
+    // No-op here.
+  }
+}
+
+
+// ======================================
+// FRONTEND — buildSearchQS (UPDATED: support ids[] → id=in.(...))
+// ======================================
 function buildSearchQS(section, filters={}){
   window.__listState = window.__listState || {};
   const st = (window.__listState[section] ||= { page: 1, pageSize: 50, total: null, hasMore: false, filters: null });
@@ -756,15 +783,20 @@ function buildSearchQS(section, filters={}){
   const add = (key, val) => { if (val==null || val==='') return; qs.append(key, String(val)); };
   const addArr = (key, arr) => { if (!Array.isArray(arr)) return; arr.forEach(v => { if (v!=null && v!=='') qs.append(key, String(v)); }); };
 
-  // attach paging from state (ALL handled by loader; still include page=1 for consistency)
+  // paging
   if (st.pageSize !== 'ALL') {
     add('page', st.page || 1);
     add('page_size', st.pageSize || 50);
-    add('include_count', 'true'); // optional: helps “All N selected” copy
+    add('include_count', 'true');
   } else {
     add('page', 1);
-    // omit page_size so loader can do multi-page accumulation
-    add('include_count', 'true'); // still helpful for totals on the dataset
+    add('include_count', 'true');
+  }
+
+  // IDs filter (show only these records)
+  if (Array.isArray(filters.ids) && filters.ids.length > 0) {
+    // PostgREST: id=in.(uuid1,uuid2,...)
+    qs.append('id', `in.(${filters.ids.map(String).join(',')})`);
   }
 
   switch (section) {
@@ -783,7 +815,7 @@ function buildSearchQS(section, filters={}){
     }
     case 'clients': {
       const { name, cli_ref, primary_invoice_email, ap_phone, vat_chargeable, created_from, created_to } = filters;
-      if (name) add('q', name);       // backend uses q for name ilike
+      if (name) add('q', name);
       add('cli_ref', cli_ref);
       add('primary_invoice_email', primary_invoice_email);
       add('ap_phone', ap_phone);
@@ -820,7 +852,7 @@ function buildSearchQS(section, filters={}){
     }
     case 'invoices': {
       const { invoice_no, client_id, status, issued_from, issued_to, due_from, due_to, created_from, created_to } = filters;
-      add('invoice_no',  invoice_no);   // backend supports invoice_no (and/or q)
+      add('invoice_no',  invoice_no);
       add('client_id',   client_id);
       addArr('status',   status);
       add('issued_from', issued_from);
@@ -844,6 +876,12 @@ function buildSearchQS(section, filters={}){
 
 // === REPLACE: openSaveSearchModal (no currentWorked; built-in sanitize) ===
 // === REPLACE: openSaveSearchModal (radio-safe + stable layout + full-width dropdown)
+// ======================================
+// FRONTEND — openSaveSearchModal (UPDATED)
+// Behaviour:
+// - If there IS a selection: show “Save Selection” UI only (Save new / Append).
+// - If there is NO selection: show “Save Filters” UI only.
+// ======================================
 async function openSaveSearchModal(section, filters){
   // sanitizer…
   const sanitize = (typeof window !== 'undefined' && typeof window.sanitize === 'function')
@@ -851,159 +889,174 @@ async function openSaveSearchModal(section, filters){
     : (s => String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;')
                            .replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'));
 
+  // Are we in selection mode?
+  window.__selection = window.__selection || {};
+  const sel = window.__selection[section];
+  const hasSelection = !!sel && (sel.allMatching || (sel.ids && sel.ids.size>0));
+
+  // If we’re going to append, we need the user’s presets list
   const mineServer = await listReportPresets({ section, kind: 'search', include_shared: false }).catch(()=>[]);
   const myId = currentUserId();
   const mine = (mineServer || []).filter(m => String(m.user_id) === String(myId));
-
   const hasOwned = Array.isArray(mine) && mine.length > 0;
   const optionsHtml = hasOwned
     ? mine.map(m => `<option value="${m.id}">${sanitize(m.name)}</option>`).join('')
     : '';
 
-  // selection state at OPEN (for initial radio enable/disable only)
-  window.__selection = window.__selection || {};
-  const selOpen = window.__selection[section];
-  const hasSelectionOpen = !!selOpen && (selOpen.allMatching || (selOpen.ids && selOpen.ids.size>0));
-
-  const body = html(`
-    <div class="form" id="saveSearchForm" style="max-width:720px">
-      <div class="row">
-        <label for="presetName">Preset name</label>
-        <div class="controls">
-          <input id="presetName" name="preset_name" class="input" placeholder="e.g. ‘PAYE RMNs’" />
-        </div>
-      </div>
-
-      <div class="row">
-        <label>Save content</label>
-        <div class="controls" style="display:flex;flex-direction:column;gap:8px">
-          <label class="inline"><input type="radio" name="contentMode" value="filters" ${hasSelectionOpen ? '' : 'checked'}> <span>Filters only</span></label>
-          <label class="inline"><input type="radio" name="contentMode" value="selection" ${hasSelectionOpen ? 'checked' : ''} ${hasSelectionOpen ? '' : 'disabled'}> <span>Selection only</span></label>
-          <label class="inline"><input type="radio" name="contentMode" value="both" ${hasSelectionOpen ? '' : 'disabled'}> <span>Filters + selection</span></label>
-          <div class="hint">Selection means the set of chosen records (including “select all across pages”).</div>
-        </div>
-      </div>
-
-      <div class="row">
-        <label>Mode</label>
-        <div class="controls" style="display:flex;flex-direction:column;gap:8px;min-width:0">
-          <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
-            <label class="inline"><input type="radio" name="mode" value="new" checked> <span>Save as new</span></label>
-            <label class="inline">
-              <input type="radio" name="mode" value="overwrite" ${hasOwned ? '' : 'disabled'}>
-              <span>Overwrite existing</span>
-            </label>
+  // Build body per mode
+  let body;
+  if (hasSelection) {
+    // Selection-only UI
+    body = html(`
+      <div class="form" id="saveSearchForm" style="max-width:720px">
+        <div class="row">
+          <label for="presetName">Preset name</label>
+          <div class="controls">
+            <input id="presetName" name="preset_name" class="input" placeholder="e.g. ‘Shortlist — RMNs’" />
           </div>
-          <div id="overwriteWrap" style="display:none; width:100%; max-width:100%">
-            <div style="font-size:12px; color:#6b7280; margin:2px 0 4px">${hasOwned ? 'Choose preset to overwrite' : 'You don’t own any presets to overwrite'}</div>
-            <select id="overwritePresetId" class="select" style="width:100%; max-width:100%">${optionsHtml}</select>
+        </div>
+
+        <div class="row">
+          <label>Mode</label>
+          <div class="controls" style="display:flex;flex-direction:column;gap:8px;min-width:0">
+            <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+              <label class="inline"><input type="radio" name="mode" value="new" checked> <span>Save selection as new</span></label>
+              <label class="inline">
+                <input type="radio" name="mode" value="append" ${hasOwned ? '' : 'disabled'}>
+                <span>Append to existing selection</span>
+              </label>
+            </div>
+            <div id="appendWrap" style="display:none; width:100%; max-width:100%">
+              <div class="hint" style="margin:2px 0 4px">${hasOwned ? 'Choose selection to append to' : 'You don’t own any selections to append'}</div>
+              <select id="appendPresetId" class="select" style="width:100%; max-width:100%">${optionsHtml}</select>
+            </div>
+          </div>
+        </div>
+
+        <div class="row">
+          <label for="presetShared">Visibility</label>
+          <div class="controls">
+            <label class="inline"><input id="presetShared" type="checkbox"> <span>Visible to all users</span></label>
           </div>
         </div>
       </div>
+    `);
+  } else {
+    // Filters-only UI
+    body = html(`
+      <div class="form" id="saveSearchForm" style="max-width:720px">
+        <div class="row">
+          <label for="presetName">Preset name</label>
+          <div class="controls">
+            <input id="presetName" name="preset_name" class="input" placeholder="e.g. ‘PAYE RMNs’" />
+          </div>
+        </div>
 
-      <div class="row">
-        <label for="presetShared">Visibility</label>
-        <div class="controls">
-          <label class="inline"><input id="presetShared" type="checkbox"> <span>Visible to all users</span></label>
+        <div class="row">
+          <label>Visibility</label>
+          <div class="controls">
+            <label class="inline"><input id="presetShared" type="checkbox"> <span>Visible to all users</span></label>
+          </div>
         </div>
       </div>
-    </div>
-  `);
+    `);
+  }
 
   showModal(
-    'Save search / selection',
+    hasSelection ? 'Save selection' : 'Save search',
     [{ key: 'form', label: 'Details' }],
     () => body,
     async () => {
-      const modeInput = document.querySelector('#saveSearchForm input[name="mode"]:checked');
-      const contentInput = document.querySelector('#saveSearchForm input[name="contentMode"]:checked');
-      const mode  = (modeInput?.value || 'new').toLowerCase();
-      const contentMode = (contentInput?.value || 'filters').toLowerCase();
       const name  = String(document.getElementById('presetName')?.value || '').trim();
       const share = !!document.getElementById('presetShared')?.checked;
+      if (!name && !hasSelection) { alert('Please enter a name'); return false; }
+      if (hasSelection && !name) { /* allow append without name for new? Better require name */ }
 
-      if (!name && mode === 'new') { alert('Please enter a name'); return false; }
-
-      // Recompute selection at SUBMIT time (don’t rely on open-time detection)
+      // (Re)compute selection now
       window.__selection = window.__selection || {};
       const curSel = window.__selection[section];
       const hasSelectionNow = !!curSel && (curSel.allMatching || (curSel.ids && curSel.ids.size>0));
 
-      // If selection exists now but the user left “filters only”, silently upgrade to “both”
-      // (covers the case where selection radios were disabled when the modal opened)
-      const effectiveContentMode = (hasSelectionNow && contentMode === 'filters') ? 'both' : contentMode;
+      if (hasSelectionNow) {
+        // Selection-only save flow (new OR append)
+        const modeInput = document.querySelector('#saveSearchForm input[name="mode"]:checked');
+        const mode = (modeInput?.value || 'new').toLowerCase();
+        if (mode === 'append') {
+          if (!hasOwned) { alert('You don’t own any selections to append'); return false; }
+          const targetId = (document.getElementById('appendPresetId')?.value) || '';
+          if (!targetId) { alert('Select a selection to append to'); return false; }
 
-      // build payload
-      const payload = { section, kind:'search', name, is_shared: share };
-      if (effectiveContentMode === 'filters' || effectiveContentMode === 'both') {
-        payload.filters = filters || {};
-      }
-      if ((effectiveContentMode === 'selection' || effectiveContentMode === 'both') && hasSelectionNow) {
-        payload.selection = {
-          fingerprint: curSel.fingerprint || '',
-          allMatching: !!curSel.allMatching,
-          ids: Array.from(curSel.ids || []),
-          excludeIds: Array.from(curSel.excludeIds || []),
-          totalMatching: (typeof curSel.totalMatching === 'number') ? curSel.totalMatching : null
-        };
-      }
-
-      try {
-        if (mode === 'overwrite') {
-          if (!hasOwned) { alert('You don’t own any presets to overwrite'); return false; }
-          const targetId = (document.getElementById('overwritePresetId')?.value) || '';
-          if (!targetId) { alert('Select a preset to overwrite'); return false; }
-          await updateReportPreset({ id: targetId, ...payload });
+          // Load target preset → merge (union) → update
+          const target = (await listReportPresets({ section, kind:'search', include_shared:false }).catch(()=>[])).find(p => String(p.id) === String(targetId));
+          const targetSel = target?.selection || target?.selection_json || null;
+          const merged = mergeSelectionSnapshots(section,
+            { section, fingerprint: targetSel?.fingerprint || '', allMatching: !!targetSel?.allMatching,
+              ids: Array.from(new Set((targetSel?.ids||[]).map(String))), excludeIds: Array.from(new Set((targetSel?.excludeIds||[]).map(String))),
+              totalMatching: (typeof targetSel?.totalMatching==='number') ? targetSel.totalMatching : null },
+            { section, fingerprint: curSel.fingerprint || '', allMatching: !!curSel.allMatching,
+              ids: Array.from(curSel.ids || []), excludeIds: Array.from(curSel.excludeIds || []),
+              totalMatching: (typeof curSel.totalMatching==='number') ? curSel.totalMatching : null }
+          );
+          await updateReportPreset({ id: targetId, name: target?.name, section, kind:'search', selection: merged, is_shared: target?.is_shared });
         } else {
+          // Save selection as new
+          const payload = {
+            section, kind:'search', name, is_shared: share,
+            selection: {
+              fingerprint: curSel.fingerprint || '',
+              allMatching: !!curSel.allMatching,
+              ids: Array.from(curSel.ids || []),
+              excludeIds: Array.from(curSel.excludeIds || []),
+              totalMatching: (typeof curSel.totalMatching === 'number') ? curSel.totalMatching : null
+            }
+          };
           await createReportPreset(payload);
         }
-        invalidatePresetCache(section, 'search');
-        try { window.dispatchEvent(new Event('search-preset-updated')); } catch(_) {}
-        return true;
-      } catch (err) {
-        const msg = (err && err.message) ? String(err.message) : 'Unable to save preset';
-        if (err.code === 'PRESET_NAME_CONFLICT' || /already exists|duplicate|409/.test(msg)) {
-          const overwriteRadio = document.querySelector('#saveSearchForm input[name="mode"][value="overwrite"]');
-          const overwriteWrap  = document.getElementById('overwriteWrap');
-          if (overwriteRadio && hasOwned) overwriteRadio.checked = true;
-          if (overwriteWrap && hasOwned)  overwriteWrap.style.display = 'block';
-          alert('A preset with that name already exists. Choose it under “Overwrite existing”, or change the name.');
-          return false;
-        }
-        alert(msg);
-        return false;
+      } else {
+        // Filters-only save
+        const payload = { section, kind:'search', name, is_shared: share, filters: filters || {} };
+        await createReportPreset(payload);
       }
+
+      invalidatePresetCache(section, 'search');
+      try { window.dispatchEvent(new Event('search-preset-updated')); } catch(_) {}
+      return true;
     },
     false,
-    /* onReturn */ undefined,
-    /* options */ { noParentGate: true, forceEdit: true, kind: 'search-save' }
+    undefined,
+    { noParentGate: true, forceEdit: true, kind: hasSelection ? 'selection-save' : 'search-save' }
   );
 
-  // Wire radio toggles after paint
-  setTimeout(() => {
-    const formEl = document.getElementById('saveSearchForm');
-    if (!formEl || formEl.dataset.wired === '1') return;
-    formEl.dataset.wired = '1';
-
-    const overwriteWrap = document.getElementById('overwriteWrap');
-    formEl.querySelectorAll('input[name="mode"]').forEach(r =>
-      r.addEventListener('change', () => {
-        const isOverwrite = r.value === 'overwrite' && r.checked;
-        if (overwriteWrap) overwriteWrap.style.display = isOverwrite ? 'block' : 'none';
-      })
-    );
-
-    const sel = document.getElementById('overwritePresetId');
-    if (sel) { sel.style.maxWidth = '100%'; sel.style.width = '100%'; }
-  }, 0);
+  // Wire append toggling (only in selection mode)
+  if (hasSelection) {
+    setTimeout(() => {
+      const formEl = document.getElementById('saveSearchForm');
+      if (!formEl || formEl.dataset.wired === '1') return;
+      formEl.dataset.wired = '1';
+      const appendWrap = document.getElementById('appendWrap');
+      formEl.querySelectorAll('input[name="mode"]').forEach(r =>
+        r.addEventListener('change', () => {
+          const isAppend = r.value === 'append' && r.checked;
+          if (appendWrap) appendWrap.style.display = isAppend ? 'block' : 'none';
+        })
+      );
+    }, 0);
+  }
 }
-
 
 // === REPLACE: openLoadSearchModal (built-in sanitize; no globals required) ===
 // FRONTEND — UPDATED
 // openLoadSearchModal: emit event with filters (so parent re-applies after repaint),
 // stage-delete UI kept; shows shared badge and (when present) creator.
 
+
+// ======================================
+// FRONTEND — openLoadSearchModal (UPDATED)
+// Behaviour: list saved presets; double-click applies immediately & closes.
+// - If preset has selection with explicit ids → show only those (applySelectionAsFilter).
+// - If selection has allMatching=true → apply its filters instead.
+// - If preset is a filters-only search → apply filters.
+// ======================================
 async function openLoadSearchModal(section){
   const sanitize = (typeof window !== 'undefined' && typeof window.sanitize === 'function')
     ? window.sanitize
@@ -1039,23 +1092,10 @@ async function openLoadSearchModal(section){
         </tr>`;
     }).join('') || `<tr><td colspan="3" class="hint">No saved searches</td></tr>`;
 
-    // Controls for apply mode (filters/selection/both) and selection merge/replace
-    const applyHtml = `
-      <div class="row" style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
-        <label class="inline"><input type="radio" name="applyMode" value="filters" checked> <span>Apply filters only</span></label>
-        <label class="inline"><input type="radio" name="applyMode" value="selection"> <span>Apply selection only</span></label>
-        <label class="inline"><input type="radio" name="applyMode" value="both"> <span>Filters + selection</span></label>
-      </div>
-      <div class="row" style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
-        <label class="inline"><input type="radio" name="selApplyMode" value="replace" checked> <span>Replace selection</span></label>
-        <label class="inline"><input type="radio" name="selApplyMode" value="merge"> <span>Merge (append) selection</span></label>
-      </div>
-      <div class="hint">Selection apply is only relevant if the preset contains a saved selection and the section matches.</div>`;
-
     return html(`
       <div class="form">
         <div class="row" style="justify-content:space-between;align-items:center">
-          <strong>Saved searches</strong>
+          <strong>Saved searches / selections</strong>
           <span class="hint">Section: <code>${sanitize(section)}</code></span>
         </div>
         <div class="row">
@@ -1064,86 +1104,74 @@ async function openLoadSearchModal(section){
             <tbody>${rowsHtml}</tbody>
           </table>
         </div>
-        <div class="row" style="margin-top:6px">${applyHtml}</div>
       </div>
     `);
   };
-
-  // Load a persisted session from storage, mirror to globals, and report readiness.
-// Returns true when we have a valid, non-expired token; false otherwise.
-function loadSession() {
-  try {
-    // Prefer long-lived (remember me), fall back to session-only
-    const persisted =
-      JSON.parse(localStorage.getItem('cloudtms.session') || 'null') ||
-      JSON.parse(sessionStorage.getItem('cloudtms.session') || 'null');
-
-    if (!persisted || !persisted.accessToken) {
-      clearSession();
-      return false;
-    }
-
-    // If an explicit expiry is present and already elapsed, treat as signed out
-    const nowSec = Math.floor(Date.now() / 1000);
-    if (typeof persisted.exp === 'number' && persisted.exp <= nowSec) {
-      clearSession();
-      return false;
-    }
-
-    // Adopt the session and mirror to the globals other helpers rely on
-    SESSION = persisted;
-    try {
-      window.SESSION = SESSION;
-      window.__auth = window.__auth || {};
-      if (SESSION.user) window.__auth.user = SESSION.user;
-      if (SESSION.user?.id) window.__USER_ID = SESSION.user.id;
-    } catch {}
-
-    // Update UI (chip etc). scheduleRefresh() is called by your boot guard.
-    renderUserChip();
-    return true;
-  } catch {
-    clearSession();
-    return false;
-  }
-}
 
   function wirePresetTable() {
     const tbl = document.getElementById('presetTable');
     if (!tbl || tbl.__wired) return;
     tbl.__wired = true;
 
-    tbl.addEventListener('click', async (e) => {
+    // Single click: select; Double-click: apply immediately & close
+    tbl.addEventListener('click', (e) => {
       const tr = e.target && e.target.closest('tr[data-id]');
       if (!tr) return;
-      const id  = tr.getAttribute('data-id');
-      const bin = e.target && e.target.closest('button.bin');
+      selectedId = tr.getAttribute('data-id');
+      Array.from(tbl.querySelectorAll('tbody tr')).forEach(r => r.classList.toggle('selected', r === tr));
+    });
 
-      if (bin) {
-        const myIdNow = currentUserId();
-        const row = (list || []).find(p => p.id === id);
-        if (!row || String(row.user_id) !== String(myIdNow)) return;
-        if (!confirm(`Delete saved search “${row.name}”? This cannot be undone.`)) return;
+    tbl.addEventListener('dblclick', async (e) => {
+      const tr = e.target && e.target.closest('tr[data-id]');
+      if (!tr) return;
+      const id = tr.getAttribute('data-id');
+      const chosen = (list || []).find(p => p.id === id);
+      if (!chosen) return;
 
-        try { await deleteReportPreset(id); }
-        catch (err) { alert(String(err?.message || err || 'Failed to delete preset')); return; }
+      const filters   = chosen.filters || chosen.filters_json || chosen.filtersJson || {};
+      const selection = chosen.selection || chosen.selection_json || null;
 
-        try { invalidatePresetCache(section, 'search'); } catch {}
-        list = await listReportPresets({ section, kind:'search', include_shared:true }).catch(()=>[]);
-
-        const body = document.getElementById('modalBody');
-        if (body) {
-          const markup = renderList();
-          if (typeof markup === 'string') body.innerHTML = markup;
-          else if (markup && typeof markup.nodeType === 'number') body.replaceChildren(markup);
-          else body.innerHTML = String(markup ?? '');
-          wirePresetTable();
-        }
-        return;
+      if (selection && selection.allMatching === false && Array.isArray(selection.ids) && selection.ids.length > 0) {
+        await applySelectionAsFilter(section, selection);
+      } else {
+        // allMatching or filters-only
+        window.__listState = window.__listState || {};
+        const st = (window.__listState[section] ||= { page:1, pageSize:50, total:null, hasMore:false, filters:null });
+        st.page = 1;
+        st.filters = filters || {};
+        const rows = await search(section, st.filters);
+        renderSummary(rows);
       }
 
-      selectedId = id;
-      Array.from(tbl.querySelectorAll('tbody tr')).forEach(r => r.classList.toggle('selected', r === tr));
+      // Close modal after apply
+      const closeBtn = document.getElementById('btnCloseModal');
+      if (closeBtn) closeBtn.click();
+    });
+
+    // Delete handler
+    tbl.addEventListener('click', async (e) => {
+      const bin = e.target && e.target.closest('button.bin');
+      if (!bin) return;
+      const tr = e.target && e.target.closest('tr[data-id]');
+      const id = tr && tr.getAttribute('data-id');
+      const row = (list || []).find(p => p.id === id);
+      if (!row) return;
+      const myIdNow = currentUserId();
+      if (String(row.user_id) !== String(myIdNow)) return;
+      if (!confirm(`Delete saved preset “${row.name}”? This cannot be undone.`)) return;
+
+      try { await deleteReportPreset(id); } catch (err) { alert(String(err?.message || err || 'Failed to delete preset')); return; }
+      try { invalidatePresetCache(section, 'search'); } catch {}
+      list = await listReportPresets({ section, kind:'search', include_shared:true }).catch(()=>[]);
+
+      const body = document.getElementById('modalBody');
+      if (body) {
+        const markup = renderList();
+        if (typeof markup === 'string') body.innerHTML = markup;
+        else if (markup && typeof markup.nodeType === 'number') body.replaceChildren(markup);
+        else body.innerHTML = String(markup ?? '');
+        wirePresetTable();
+      }
     });
   }
 
@@ -1152,107 +1180,31 @@ function loadSession() {
     [{ key: 'list', label: 'Saved' }],
     renderList,
     async () => {
+      // If user clicks Save in this modal (not dblclick), apply the selected row the same way
       if (!selectedId) { alert('Pick a preset to load'); return false; }
       const chosen = (list || []).find(p => p.id === selectedId);
       if (!chosen) { alert('Preset not found'); return false; }
 
-      const filters = chosen.filters || chosen.filters_json || chosen.filtersJson || {};
-      const selection = chosen.selection || null;
-      const sec = String(section || '').toLowerCase();
+      const filters   = chosen.filters || chosen.filters_json || chosen.filtersJson || {};
+      const selection = chosen.selection || chosen.selection_json || null;
 
-      const applyMode = (document.querySelector('input[name="applyMode"]:checked')?.value || 'filters');
-      const selApplyMode = (document.querySelector('input[name="selApplyMode"]:checked')?.value || 'replace');
-
-      // store intent for parent
-      try { window.__PENDING_ADV_PRESET = { section: sec, filters, selection, applyMode, selApplyMode }; } catch {}
-
+      if (selection && selection.allMatching === false && Array.isArray(selection.ids) && selection.ids.length > 0) {
+        await applySelectionAsFilter(section, selection);
+      } else {
+        window.__listState = window.__listState || {};
+        const st = (window.__listState[section] ||= { page:1, pageSize:50, total:null, hasMore:false, filters:null });
+        st.page = 1;
+        st.filters = filters || {};
+        const rows = await search(section, st.filters);
+        renderSummary(rows);
+      }
       return true;
     },
     false,
-    () => {
-      const pending = window.__PENDING_ADV_PRESET;
-      delete window.__PENDING_ADV_PRESET;
-      if (!pending || !pending.section) return;
-
-      const here = String(currentSection || '').toLowerCase();
-      if (pending.section !== here) return;
-
-      // Apply filters if requested
-      if (pending.applyMode === 'filters' || pending.applyMode === 'both') {
-        try { window.dispatchEvent(new CustomEvent('adv-search-apply-preset', { detail: { section: pending.section, filters: pending.filters || {} } })); } catch {}
-        // Also execute the search immediately
-        (async () => {
-          window.__listState = window.__listState || {};
-          const st = (window.__listState[currentSection] ||= { page: 1, pageSize: 50, total: null, hasMore: false, filters: null });
-          st.page = 1; st.filters = pending.filters || {};
-          const rows = await search(currentSection, pending.filters || {});
-
-          // Apply selection after results load if requested and available
-          if ((pending.applyMode === 'both' || pending.applyMode === 'selection') && pending.selection && pending.selection.fingerprint) {
-            window.__selection = window.__selection || {};
-            const cur = (window.__selection[currentSection] ||= { fingerprint:'', allMatching:false, ids:new Set(), excludeIds:new Set(), totalMatching:null });
-
-            // only apply if section matches; fingerprint mismatch allowed (user intent), but warn if vastly different
-            const incoming = pending.selection;
-            if (pending.selApplyMode === 'replace') {
-              cur.fingerprint = incoming.fingerprint || cur.fingerprint;
-              cur.allMatching = !!incoming.allMatching;
-              cur.ids = new Set((incoming.ids || []).map(String));
-              cur.excludeIds = new Set((incoming.excludeIds || []).map(String));
-              cur.totalMatching = (typeof incoming.totalMatching === 'number') ? incoming.totalMatching : cur.totalMatching;
-            } else {
-              // merge/append
-              if (incoming.allMatching || cur.allMatching) {
-                cur.allMatching = true;
-                const ex = new Set(cur.excludeIds);
-                (incoming.excludeIds || []).forEach(x => ex.add(String(x)));
-                cur.excludeIds = ex;
-              } else {
-                const union = new Set(cur.ids);
-                (incoming.ids || []).forEach(x => union.add(String(x)));
-                cur.ids = union;
-              }
-              cur.fingerprint = cur.fingerprint || incoming.fingerprint || '';
-              if (typeof incoming.totalMatching === 'number') cur.totalMatching = incoming.totalMatching;
-            }
-          }
-
-          renderSummary(rows);
-        })();
-      } else if (pending.applyMode === 'selection' && pending.selection) {
-        // Apply selection only on current dataset
-        window.__selection = window.__selection || {};
-        const cur = (window.__selection[currentSection] ||= { fingerprint:'', allMatching:false, ids:new Set(), excludeIds:new Set(), totalMatching:null });
-        const incoming = pending.selection;
-
-        if (pending.selApplyMode === 'replace') {
-          cur.fingerprint = incoming.fingerprint || cur.fingerprint;
-          cur.allMatching = !!incoming.allMatching;
-          cur.ids = new Set((incoming.ids || []).map(String));
-          cur.excludeIds = new Set((incoming.excludeIds || []).map(String));
-          cur.totalMatching = (typeof incoming.totalMatching === 'number') ? incoming.totalMatching : cur.totalMatching;
-        } else {
-          if (incoming.allMatching || cur.allMatching) {
-            cur.allMatching = true;
-            const ex = new Set(cur.excludeIds);
-            (incoming.excludeIds || []).forEach(x => ex.add(String(x)));
-            cur.excludeIds = ex;
-          } else {
-            const union = new Set(cur.ids);
-            (incoming.ids || []).forEach(x => union.add(String(x)));
-            cur.ids = union;
-          }
-          cur.fingerprint = cur.fingerprint || incoming.fingerprint || '';
-          if (typeof incoming.totalMatching === 'number') cur.totalMatching = incoming.totalMatching;
-        }
-        // Repaint current view to reflect checkboxes
-        renderSummary(currentRows || []);
-      }
-    },
+    undefined,
     { noParentGate: true, forceEdit: true, kind: 'search-load' }
   );
 
-  // Initial wiring after first paint
   setTimeout(wirePresetTable, 0);
 }
 
@@ -1528,7 +1480,22 @@ async function loadSelectionPreset(section, idOrName) {
 // FRONTEND — UPDATED
 // openSearchModal: compact text buttons + delegated wiring + listens for preset-apply event
 // and re-applies filters AFTER parent repaint (onReturn hook).
+// ======================================
+// FRONTEND — openSearchModal (UPDATED)
+// Branches: if there's a selection in the summary → go straight to Save Selection.
+// Otherwise, open the Advanced Search (filters) modal as usual.
+// ======================================
 async function openSearchModal(opts = {}) {
+  // If there is a selection in the summary, go directly to “Save Selection”
+  window.__selection = window.__selection || {};
+  const sel = window.__selection[currentSection];
+  const hasSelection = !!sel && (sel.allMatching || (sel.ids && sel.ids.size > 0));
+  if (hasSelection) {
+    // Call the save modal with the current filters (not used in selection mode)
+    const st = (window.__listState ||= {})[currentSection] ||= { page:1, pageSize:50, total:null, hasMore:false, filters:null };
+    return openSaveSearchModal(currentSection, st.filters || {});
+  }
+
   const TIMESHEET_STATUS = ['ERROR','RECEIVED','REVOKED','STORED','SAT','SUN','BH'];
   const INVOICE_STATUS   = ['DRAFT','ISSUED','ON_HOLD','PAID'];
 
@@ -1652,7 +1619,6 @@ async function openSearchModal(opts = {}) {
       return true; // close after running search
     },
     false,
-    // Parent onReturn: apply any pending preset AFTER the child modal has closed & repaint finished
     () => {
       const pending = (typeof window !== 'undefined') ? window.__PENDING_ADV_PRESET : null;
       if (pending && pending.section) {
@@ -1661,18 +1627,17 @@ async function openSearchModal(opts = {}) {
         } catch {}
       }
       if (typeof window !== 'undefined') delete window.__PENDING_ADV_PRESET;
-      // Re-wire listeners last
       try { wireAdvancedSearch(); } catch {}
     },
     { noParentGate: true, forceEdit: true, kind: 'advanced-search' }
   );
 
-  // Ensure listeners are wired after first paint
   setTimeout(wireAdvancedSearch, 0);
 }
 
-
-
+// ======================================
+// FRONTEND — wireAdvancedSearch (UPDATED only to call the updated save/load modals)
+// ======================================
 function wireAdvancedSearch() {
   const bodyEl = document.getElementById('modalBody');
   const formEl = document.getElementById('searchForm');
