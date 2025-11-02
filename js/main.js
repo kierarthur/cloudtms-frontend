@@ -2404,7 +2404,7 @@ async function openCandidate(row) {
 
       try {
         const raw = await res.clone().text();
-        if (LOG) console.debug('[HTTP] raw body (≤2KB):', raw.slice(0, 2048)); // optional peek
+        if (LOG) console.debug('[HTTP] raw body (≤2KB):', raw.slice(0, 2048));
       } catch (peekErr) { W('[HTTP] raw peek failed', peekErr?.message || peekErr); }
 
       if (res.ok) {
@@ -2517,7 +2517,7 @@ async function openCandidate(row) {
       L('[onSave] saved', { ok: !!saved, candidateId, savedKeys: Array.isArray(saved)?[]:Object.keys(saved||{}) });
       if (!candidateId) { alert('Failed to save candidate'); return { ok:false }; }
 
-      // ===== NEW: Pre-flight coverage + per-bucket + end-date cap + no-negative-margin =====
+      // ===== NEW: validation helpers (unchanged logic) =====
       const O = window.modalCtx.overrides || { existing: [], stagedNew: [], stagedEdits: {}, stagedDeletes: new Set() };
 
       async function getCoveringDefault(client_id, role, band, date_from) {
@@ -2538,7 +2538,7 @@ async function openCandidate(row) {
           if (typeof getSettingsCached === 'function') {
             const s = await getSettingsCached();
             let p = s?.erni_pct ?? s?.employers_ni_percent ?? 0;
-            p = Number(p) || 0; if (p > 1) p = p/100;
+            p = Number(p) || 0; if (p > 1) p=p/100;
             window.__ERNI_MULT__ = 1 + p; return window.__ERNI_MULT__;
           }
         } catch {}
@@ -2556,7 +2556,7 @@ async function openCandidate(row) {
           band     : (patchRaw.hasOwnProperty('band') ? patchRaw.band : original.band),
           date_from: patchRaw.date_from ?? original.date_from,
           date_to  : patchRaw.hasOwnProperty('date_to') ? patchRaw.date_to : original.date_to,
-        rate_type: (patchRaw.rate_type ?? original.rate_type ?? '').toUpperCase(),
+          rate_type: (patchRaw.rate_type ?? original.rate_type ?? '').toUpperCase(),
 
           pay_day  : patchRaw.hasOwnProperty('pay_day')   ? patchRaw.pay_day   : original.pay_day,
           pay_night: patchRaw.hasOwnProperty('pay_night') ? patchRaw.pay_night : original.pay_night,
@@ -2566,28 +2566,16 @@ async function openCandidate(row) {
         };
 
         const win = await getCoveringDefault(eff.client_id, eff.role, eff.band, eff.date_from);
-        if (!win) {
-          alert(`No active client default covers ${eff.role}${eff.band?` / ${eff.band}`:''} on ${formatIsoToUk(eff.date_from)}.\nPlease adjust the Effective from date or add a client rate.`);
-          return { ok:false };
-        }
-        if (eff.date_to && win.date_to && eff.date_to > win.date_to) {
-          alert(`Client rate ends on ${formatIsoToUk(win.date_to)} — override must end on or before this date.`);
-          return { ok:false };
-        }
+        if (!win) { alert(`No active client default covers ${eff.role}${eff.band?` / ${eff.band}`:''} on ${formatIsoToUk(eff.date_from)}.`); return { ok:false }; }
+        if (eff.date_to && win.date_to && eff.date_to > win.date_to) { alert(`Client rate ends on ${formatIsoToUk(win.date_to)} — override must end on or before this date.`); return { ok:false }; }
 
         for (const b of ['day','night','sat','sun','bh']) {
           const pay = eff[`pay_${b}`];
           const chg = win[`charge_${b}`];
-          if (pay != null && chg == null) {
-            alert(`No client charge for ${bucketLabel[b]} on ${formatIsoToUk(eff.date_from)} — remove this value or set a client rate first.`);
-            return { ok:false };
-          }
+          if (pay != null && chg == null) { alert(`No client charge for ${bucketLabel[b]} on ${formatIsoToUk(eff.date_from)}.`); return { ok:false }; }
           if (pay != null && chg != null) {
             const margin = (eff.rate_type==='PAYE') ? (chg - (pay * erniMult)) : (chg - pay);
-            if (margin < 0) {
-              alert(`Margin would be negative for ${bucketLabel[b]}. Reduce pay or change date.`);
-              return { ok:false };
-            }
+            if (margin < 0) { alert(`Margin would be negative for ${bucketLabel[b]}.`); return { ok:false }; }
           }
         }
       }
@@ -2595,43 +2583,46 @@ async function openCandidate(row) {
       // Validate NEW rows
       for (const nv of (O.stagedNew || [])) {
         const win = await getCoveringDefault(nv.client_id, nv.role, nv.band ?? null, nv.date_from);
-        if (!win) {
-          alert(`No active client default covers ${nv.role}${nv.band?` / ${nv.band}`:''} on ${formatIsoToUk(nv.date_from)}.\nPlease adjust the Effective from date or add a client rate.`);
-          return { ok:false };
-        }
-        if (nv.date_to && win.date_to && nv.date_to > win.date_to) {
-          alert(`Client rate ends on ${formatIsoToUk(win.date_to)} — override must end on or before this date.`);
-          return { ok:false };
-        }
+        if (!win) { alert(`No active client default covers ${nv.role}${nv.band?` / ${nv.band}`:''} on ${formatIsoToUk(nv.date_from)}.`); return { ok:false }; }
+        if (nv.date_to && win.date_to && nv.date_to > win.date_to) { alert(`Client rate ends on ${formatIsoToUk(win.date_to)} — override must end on or before this date.`); return { ok:false }; }
         for (const b of ['day','night','sat','sun','bh']) {
-          const pay = nv[`pay_${b}`];
-          const chg = win[`charge_${b}`];
-          if (pay != null && chg == null) {
-            alert(`No client charge for ${bucketLabel[b]} on ${formatIsoToUk(nv.date_from)} — remove this value or set a client rate first.`);
-            return { ok:false };
-          }
+          const pay = nv[`pay_${b}`]; const chg = win[`charge_${b}`];
+          if (pay != null && chg == null) { alert(`No client charge for ${bucketLabel[b]} on ${formatIsoToUk(nv.date_from)}.`); return { ok:false }; }
           if (pay != null && chg != null) {
             const margin = (String(nv.rate_type).toUpperCase()==='PAYE') ? (chg - (pay * erniMult)) : (chg - pay);
-            if (margin < 0) {
-              alert(`Margin would be negative for ${bucketLabel[b]}. Reduce pay or change date.`);
-              return { ok:false };
-            }
+            if (margin < 0) { alert(`Margin would be negative for ${bucketLabel[b]}.`); return { ok:false }; }
           }
         }
       }
-      // ===== End NEW guards =====
 
-      // ===== Persist staged overrides (existing order preserved) =====
+      // ===== Persist staged overrides =====
       const OX = window.modalCtx.overrides || { existing: [], stagedNew: [], stagedEdits: {}, stagedDeletes: new Set() };
       L('[onSave] overrides', { deletes: Array.from(OX.stagedDeletes||[]), edits: Object.keys(OX.stagedEdits||{}), newCount: (OX.stagedNew||[]).length });
 
-      // Deletes
-      for (const delId of OX.stagedDeletes) {
-        const res = await authFetch(API(`/api/rates/candidate-overrides/${encodeURIComponent(delId)}`), { method: 'DELETE' });
-        if (!res.ok && res.status !== 404) { const msg = await res.text().catch(()=> 'Delete override failed'); alert(msg); return { ok:false }; }
+      // ---- FIXED: Deletes use filter-based DELETE (backend expects filters, not /:id) ----
+      for (const delId of OX.stagedDeletes || []) {
+        const row = (OX.existing || []).find(r => String(r.id) === String(delId));
+        if (!row) continue;
+        const qs = new URLSearchParams();
+        qs.set('candidate_id', String(candidateId));
+        if (row.client_id) qs.set('client_id', String(row.client_id));
+        if (row.role != null) qs.set('role', String(row.role));
+        // backend treats empty band as NULL
+        qs.set('band', (row.band == null || row.band === '') ? '' : String(row.band));
+        if (row.rate_type) qs.set('rate_type', String(row.rate_type).toUpperCase());
+        if (row.date_from) qs.set('date_from', String(row.date_from));
+
+        const url = API(`/api/rates/candidate-overrides?${qs.toString()}`);
+        L('[onSave][DELETE override]', url);
+        const res = await authFetch(url, { method: 'DELETE' });
+        if (!res.ok && res.status !== 404) {
+          const msg = await res.text().catch(()=> 'Delete override failed');
+          alert(msg);
+          return { ok:false };
+        }
       }
 
-      // Edits — PATCH uses candidateId in path + ORIGINAL keys in query, updates in body
+      // Edits
       for (const [editId, patchRaw] of Object.entries(OX.stagedEdits || {})) {
         const original = (OX.existing || []).find(x => String(x.id) === String(editId));
         if (!original) { alert('Cannot locate original override to patch'); return { ok:false }; }
@@ -2639,7 +2630,7 @@ async function openCandidate(row) {
         const q = new URLSearchParams();
         if (original.client_id) q.set('client_id', original.client_id);
         if (original.role != null) q.set('role', String(original.role));
-        if (original.band == null || original.band === '') q.set('band', ''); else q.set('band', String(original.band));
+        q.set('band', (original.band == null || original.band === '') ? '' : String(original.band));
         if (original.rate_type) q.set('rate_type', String(original.rate_type).toUpperCase());
 
         const body = {};
@@ -2650,6 +2641,7 @@ async function openCandidate(row) {
         body.candidate_id = candidateId;
 
         const url = API(`/api/rates/candidate-overrides/${encodeURIComponent(candidateId)}?${q.toString()}`);
+        L('[onSave][PATCH override]', { url, body });
         const res = await authFetch(url, {
           method:'PATCH',
           headers:{ 'content-type':'application/json' },
@@ -2865,7 +2857,7 @@ async function renderCandidateRatesTable() {
     const isPendingDelete = !!(pendingDeleteIds && ex && pendingDeleteIds.has(ex.id));
     rows.push({ ...ex, ...(O.stagedEdits[ex.id] || {}), _edited: !!O.stagedEdits[ex.id], _pendingDelete: isPendingDelete });
   }
-  // Include staged-new
+  // Include staged-new rows
   for (const n of (O.stagedNew || [])) rows.push({ ...n, _isNew: true });
 
   const fmt = v => (v==null || Number.isNaN(v)) ? '—' : (Math.round(v*100)/100).toFixed(2);
