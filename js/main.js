@@ -4793,18 +4793,19 @@ async function openClientRateModal(client_id, existing) {
   const ex  = existing || {};
   const who = ex.disabled_by_name || '';
   const when = ex.disabled_at_utc ? formatIsoToUk(String(ex.disabled_at_utc).slice(0,10)) : '';
+  const isDisabled = !!ex.disabled_at_utc;
 
   const statusBlock = `
     <div class="row" id="cl_status_row" style="align-items:center; gap:8px;">
       <div>
-        ${!!ex.disabled_at_utc ? `
+        ${isDisabled ? `
           <span class="pill tag-fail" id="cl_status_pill">❌ Disabled</span>
-          <div class="hint" id="cl_status_meta">by ${escapeHtml(who || 'unknown')} on ${escapeHtml(when || '')}</div>`
+          <div class="hint" id="cl_status_meta">${who ? `by ${escapeHtml(who)}` : ''} ${when ? `on ${escapeHtml(when)}` : ''}</div>`
       : `
           <span class="pill tag-ok" id="cl_status_pill">✓ Active</span>
-          <div class="hint" id="cl_status_meta">&nbsp;</div>`
-        }
+          <div class="hint" id="cl_status_meta">&nbsp;</div>`}
       </div>
+      ${parentEditable && ex.id ? `<div><button id="cl_toggle_btn" class="btn btn-outline btn-sm">${isDisabled ? 'Enable' : 'Disable'}</button></div>` : ''}
     </div>`;
 
   function sameRow(a, b) {
@@ -4890,7 +4891,7 @@ async function openClientRateModal(client_id, existing) {
       const btn = document.querySelector('#modal .btn-save, #modal .actions .primary, #modal .actions .btn-primary, .modal .btn-save');
       if (btn) { btn.disabled = !enabled; btn.classList.toggle('disabled', !enabled); }
     } catch {}
-    // NEW: inform parent showModal so child Save can proceed
+    // Inform parent showModal so child Save can proceed
     try { window.dispatchEvent(new CustomEvent('modal-apply-enabled', { detail: { enabled } })); } catch {}
   }
   const numOrNull = v => { if (v===undefined||v===null) return null; if (typeof v === 'string' && v.trim()==='') return null; const n=Number(v); return Number.isFinite(n) ? n : null; };
@@ -5030,7 +5031,7 @@ async function openClientRateModal(client_id, existing) {
     setApplyEnabled(canApply);
   }
 
-  const formTabLabel = `Form — ${ex.disabled_at_utc ? 'Inactive' : 'Active'}`;
+  const formTabLabel = `Form — ${isDisabled ? 'Inactive' : 'Active'}`;
 
   // showModal (child) — persist staged edits only; no popups for errors
   showModal(
@@ -5038,7 +5039,9 @@ async function openClientRateModal(client_id, existing) {
     [{ key:'form', label: formTabLabel }],
     () => formHtml,
     async () => {
-      const pf = _parentFrame();
+      // Robust parent frame lookup (instead of _parentFrame())
+      const stack = window.__modalStack || [];
+      const pf = stack.length > 1 ? stack[stack.length - 2] : null;
       if (!pf || (pf.mode !== 'edit' && pf.mode !== 'create')) return false;
 
       // Re-validate live state; if Apply disabled, just block
@@ -5095,12 +5098,21 @@ async function openClientRateModal(client_id, existing) {
         umb_sun     : raw['umb_sun']     !== '' ? Number(raw['umb_sun'])     : null,
         umb_bh      : raw['umb_bh']      !== '' ? Number(raw['umb_bh'])      : null,
 
-        disabled_at_utc : existing?.disabled_at_utc ?? null,
-        disabled_by_name: existing?.disabled_by_name ?? null,
-        __toggle        : existing?.__toggle || undefined,
+        // carry through disabled status + pending toggle marker (for UI/meta)
+        disabled_at_utc : ex.disabled_at_utc ?? null,
+        disabled_by_name: ex.disabled_by_name ?? null,
+        __toggle        : ex.__toggle || undefined,
         __localKey      : existing?.__localKey || undefined,
         __delete        : existing?.__delete || false
       };
+
+      // If user flipped status in this modal, enforce it on staged row
+      if (ex.__toggle === 'enable') {
+        staged.disabled_at_utc = null;
+      } else if (ex.__toggle === 'disable') {
+        // any non-null string will be treated as disabled before server patch; use today's date
+        staged.disabled_at_utc = staged.disabled_at_utc || new Date().toISOString().slice(0,10);
+      }
 
       // Stage only (persist on parent Save)
       ctx.ratesState = Array.isArray(ctx.ratesState) ? ctx.ratesState : [];
@@ -5180,6 +5192,35 @@ async function openClientRateModal(client_id, existing) {
     });
   });
 
+  // Wire the Active/Inactive toggle button (stages a status flip; persisted on parent Save)
+  (function wireToggleButton(){
+    const btn = byId('cl_toggle_btn');
+    if (!btn || !parentEditable || !ex || !ex.id) return;
+    btn.onclick = () => {
+      const pill = byId('cl_status_pill');
+      const meta = byId('cl_status_meta');
+      const currentlyDisabled = !!ex.disabled_at_utc;
+
+      if (currentlyDisabled) {
+        // Enable
+        ex.__toggle = 'enable';
+        ex.disabled_at_utc = null;
+        if (pill) { pill.textContent = '✓ Active'; pill.className = 'pill tag-ok'; }
+        if (meta) meta.innerHTML = '&nbsp;';
+        btn.textContent = 'Disable';
+      } else {
+        // Disable
+        ex.__toggle = 'disable';
+        ex.disabled_at_utc = new Date().toISOString().slice(0,10);
+        if (pill) { pill.textContent = '❌ Disabled'; pill.className = 'pill tag-fail'; }
+        if (meta) meta.textContent = 'pending save';
+        btn.textContent = 'Enable';
+      }
+      // Ensure parent Save is enabled
+      setApplyEnabled(true);
+    };
+  })();
+
   // DELETE button logic (unchanged; staged delete until parent Save)
   (async function wireDeleteButton(){
     const delBtn = byId('btnDelete');
@@ -5193,7 +5234,6 @@ async function openClientRateModal(client_id, existing) {
     let deletable = isFutureOrToday;
     let reason = '';
     if (!deletable) {
-      // keep existing helper or inline reason
       deletable = true; // allow delete in UI; real guard happens on Save server-side
       reason = '';
     }
@@ -5220,7 +5260,6 @@ async function openClientRateModal(client_id, existing) {
     };
   })();
 }
-
 
 async function renderClientRatesTable() {
   const div = byId('clientRates'); if (!div) return;
@@ -5316,7 +5355,8 @@ async function renderClientRatesTable() {
           const pending = r.__toggle ? ' (pending save)' : '';
           td.innerHTML = `<span class="pill tag-fail" aria-label="Disabled">❌ Disabled${pending}</span>`;
         } else {
-          const pending = r.__toggle === 'enable' ? ' (pending save)' : '';
+          // Tweak: show pending note for any staged toggle (enable or disable)
+          const pending = r.__toggle ? ' (pending save)' : '';
           td.innerHTML = `<span class="pill tag-ok" aria-label="Active">✓ Active${pending}</span>`;
         }
       } else if (c.startsWith('paye_margin_') || c.startsWith('umb_margin_')) {
@@ -5354,6 +5394,7 @@ async function renderClientRatesTable() {
     return openClientRateModal(cid);
   };
 }
+
 function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
   // ===== Logging =====
   const LOG = (typeof window.__LOG_MODAL === 'boolean') ? window.__LOG_MODAL : false;
