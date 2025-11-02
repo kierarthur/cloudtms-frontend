@@ -3202,13 +3202,6 @@ async function openCandidateRateModal(candidate_id, existing) {
   const parentEditable = parentFrame && (parentFrame.mode === 'edit' || parentFrame.mode === 'create');
   L('parent frame', { editable: !!parentEditable, mode: parentFrame?.mode });
 
-  const todayIso = (() => {
-    const now = new Date();
-    const y = now.getFullYear(), m = String(now.getMonth()+1).padStart(2,'0'), d = String(now.getDate()).padStart(2,'0');
-    return `${y}-${m}-${d}`;
-  })();
-  const isPastOrToday = (iso) => !!iso && iso <= todayIso;
-
   // ===== load clients =====
   const clients = await listClientsBasic().catch(e=>{ L('listClientsBasic failed', e); return []; });
   L('clients loaded', clients?.length || 0);
@@ -3374,22 +3367,52 @@ async function openCandidateRateModal(candidate_id, existing) {
     if (!rateType) need.push('rateType');
     if (!role)     need.push('role');
     if (!isoFrom)  need.push('date_from');
-    if (need.length) { setApplyEnabled(false, 'not_ready'); return; }
+    if (need.length) {
+      // reset UI buckets to placeholders
+      buckets.forEach(b => {
+        const inp = inputEl(b);
+        if (inp) { inp.value = ''; inp.disabled = true; }
+        if (slotIn(b)) slotIn(b).style.display = 'none';
+        if (slotPh(b)) slotPh(b).style.display = '';
+        const sp = byId(`cr_m_${b}`); if (sp) sp.textContent = '—';
+      });
+      setApplyEnabled(false, 'not_ready');
+      return;
+    }
 
     const win = await resolveCoveringWindow(clientId, role, band, isoFrom);
-    if (!win) { showInlineError(`No active client default for <b>${escapeHtml(role)}</b>${band?` / <b>${escapeHtml(band)}</b>`:''} on <b>${formatIsoToUk(isoFrom)}</b>.`); setApplyEnabled(false, 'no_cover'); return; }
+    if (!win) {
+      // show placeholders
+      buckets.forEach(b => {
+        const inp = inputEl(b);
+        if (inp) { inp.value = ''; inp.disabled = true; }
+        if (slotIn(b)) slotIn(b).style.display = 'none';
+        if (slotPh(b)) slotPh(b).style.display = '';
+        const sp = byId(`cr_m_${b}`); if (sp) sp.textContent = '—';
+      });
+      showInlineError(`No active client default for <b>${escapeHtml(role)}</b>${band?` / <b>${escapeHtml(band)}</b>`:''} on <b>${formatIsoToUk(isoFrom)}</b>.`);
+      setApplyEnabled(false, 'no_cover');
+      return;
+    }
 
-    const visibleBuckets = [], hiddenBuckets = [];
+    // Toggle bucket visibility (and inputs) strictly from charges in the window
     buckets.forEach(b => {
       const hasCharge = (win.charges[b] != null);
       const inp = inputEl(b);
-      if (hasCharge) { inp && (inp.disabled = false); visibleBuckets.push(b); }
-      else           { if (inp) { inp.value = ''; inp.disabled = true; } hiddenBuckets.push(b); }
+      if (hasCharge) {
+        if (slotPh(b)) slotPh(b).style.display = 'none';
+        if (slotIn(b)) slotIn(b).style.display = '';
+        if (inp) inp.disabled = false;
+      } else {
+        if (slotIn(b)) slotIn(b).style.display = 'none';
+        if (slotPh(b)) slotPh(b).style.display = '';
+        if (inp) { inp.value = ''; inp.disabled = true; }
+      }
     });
 
     const mult = await _erniMultiplier();
 
-    // per-bucket
+    // Pay without charge (ignore hidden/disabled)
     const invalid = [];
     buckets.forEach(b => {
       const el  = inputEl(b); const chg = win.charges[b];
@@ -3399,6 +3422,7 @@ async function openCandidateRateModal(candidate_id, existing) {
     });
     if (invalid.length) canApply = false;
 
+    // Negative margins (ignore hidden/disabled)
     const neg = [];
     buckets.forEach(b => {
       const el  = inputEl(b); const chg = win.charges[b];
@@ -3410,13 +3434,14 @@ async function openCandidateRateModal(candidate_id, existing) {
     });
     if (neg.length) canApply = false;
 
+    // Date cap
     setDateToError('');
     if (isoTo && win.capIso && isoTo > win.capIso) {
       setDateToError(`Client rate ends on ${formatIsoToUk(win.capIso)} — override must end on/before this date.`);
       canApply = false;
     }
 
-    // overlap against staged + existing
+    // Overlap detection (staged + existing)
     const O = window.modalCtx.overrides || { existing: [], stagedNew: [], stagedEdits: {}, stagedDeletes: new Set() };
     const deletedIds = O.stagedDeletes || new Set();
     const unify = [];
@@ -3460,7 +3485,6 @@ async function openCandidateRateModal(candidate_id, existing) {
         const fixOther = byId('cr_fix_other');
         if (fixOther && cutOther) fixOther.onclick = ()=> {
           try {
-            // pick first conflicting row and stage edit
             const target = conflicts[0];
             if (target.id) {
               O.stagedEdits[target.id] = { ...(O.stagedEdits[target.id]||{}), date_to: cutOther };
@@ -3475,17 +3499,15 @@ async function openCandidateRateModal(candidate_id, existing) {
       }, 0);
     }
 
-    // margins preview (info)
-    const preview = {};
+    // margins preview
     buckets.forEach(b => {
       const sp  = byId(`cr_m_${b}`), el = inputEl(b), chg = win.charges[b];
       const pay = (el && !el.disabled) ? numOrNull(el.value) : null;
       const m = (chg != null && pay != null) ? ((rateType === 'PAYE') ? (chg - (pay * mult)) : (chg - pay)) : null;
-      preview[b] = m; if (sp) sp.textContent = (m==null ? '—' : fmt(m));
+      if (sp) sp.textContent = (m==null ? '—' : fmt(m));
     });
 
-    if (LOG_APPLY) console.log('[RATES][APPLY] canApply?', canApply, { clientId, role, band, isoFrom, isoTo, rateType, visibleBuckets, preview });
-
+    if (LOG_APPLY) console.log('[RATES][APPLY] canApply?', canApply, { clientId, role, band, isoFrom, isoTo, rateType });
     setApplyEnabled(canApply, canApply ? 'ok' : 'violations');
   }
 
@@ -3495,7 +3517,7 @@ async function openCandidateRateModal(candidate_id, existing) {
     [{ key:'form', label:'Form' }],
     () => formHtml,
     async () => {
-      // Re-check: if Apply disabled, we just block silently (inline panel already says why)
+      // Re-check gating; if disabled, block silently (inline panel has details)
       await recomputeOverrideState();
       if (lastApplyState === false) { L('Apply blocked by recompute'); return false; }
 
@@ -3507,10 +3529,9 @@ async function openCandidateRateModal(candidate_id, existing) {
       const band      = (raw.band || '').trim() || null;
       const rate_type = String(raw.rate_type || '').toUpperCase();
 
-      const isoFromUI = parseUkDateToIso(raw.date_from);
-      let date_from = isoFromUI;
-      if (existing?.date_from) date_from = existing.date_from || date_from;
-      const date_to = raw.date_to ? parseUkDateToIso(raw.date_to) : null;
+      // 👈🏻 IMPORTANT: respect user-edited date_from
+      const date_from = parseUkDateToIso(raw.date_from);
+      const date_to   = raw.date_to ? parseUkDateToIso(raw.date_to) : null;
 
       const stagedAll = {
         id: existing?.id,
@@ -3526,22 +3547,26 @@ async function openCandidateRateModal(candidate_id, existing) {
       };
 
       const O = (window.modalCtx.overrides ||= { existing: [], stagedNew: [], stagedEdits: {}, stagedDeletes: new Set() });
-      // LOG before
       LG('STAGING before', { existing: (O.existing||[]).length, stagedNew:(O.stagedNew||[]).length, stagedEdits:Object.keys(O.stagedEdits||{}).length, stagedDeletes: O.stagedDeletes?.size || 0 });
 
       if (existing?.id) {
         O.stagedEdits[existing.id] = { ...(O.stagedEdits[existing.id]||{}), ...stagedAll };
       } else if (existing && !existing.id) {
         const tmpId = existing._tmpId || null;
-        let idx = (tmpId ? O.stagedNew.findIndex(r => r._tmpId === tmpId) : -1);
+        let idx = (tmpId ? (O.stagedNew||[]).findIndex(r => r._tmpId === tmpId) : -1);
         if (idx >= 0) O.stagedNew[idx] = { ...O.stagedNew[idx], ...stagedAll, _tmpId: tmpId };
         else O.stagedNew.push({ ...stagedAll, _tmpId: tmpId || `tmp_${Date.now()}` });
       } else {
         O.stagedNew.push({ ...stagedAll, _tmpId: `tmp_${Date.now()}` });
       }
 
-      // LOG after
-      LG('STAGING after', { existing: (O.existing||[]).length, stagedNew:(O.stagedNew||[]).length, stagedEdits:Object.keys(O.stagedEdits||{}).length, stagedDeletes: O.stagedDeletes?.size || 0, peekNew: (O.stagedNew||[])[(O.stagedNew||[]).length-1] });
+      LG('STAGING after', {
+        existing: (O.existing||[]).length,
+        stagedNew:(O.stagedNew||[]).length,
+        stagedEdits:Object.keys(O.stagedEdits||{}).length,
+        stagedDeletes: O.stagedDeletes?.size || 0,
+        peekNew: (O.stagedNew||[])[(O.stagedNew||[]).length-1]
+      });
 
       // force parent table repaint
       if (document.getElementById('ratesTable')) {
@@ -3581,12 +3606,7 @@ async function openCandidateRateModal(candidate_id, existing) {
 
   attachUkDatePicker(inFrom); attachUkDatePicker(inTo);
 
-  const lockThis = !!existing?.date_from && isPastOrToday(existing.date_from);
-  if (lockThis) {
-    selClient.disabled = true; selRateT.disabled = true; selRole.disabled = true; selBand.disabled = true;
-    ['pay_day','pay_night','pay_sat','pay_sun','pay_bh'].forEach(n => { const el = document.querySelector(`#candRateForm input[name="${n}"]`); if (el) el.disabled = true; });
-    L('locked row → only date_to editable');
-  }
+  // 🔓 No more 'past row' lock — date_from & bucket inputs remain editable when parent is editable
 
   async function refreshClientRoles(clientId) {
     selRole.innerHTML = `<option value="">Select role…</option>`; selRole.disabled = true;
@@ -3602,28 +3622,32 @@ async function openCandidateRateModal(candidate_id, existing) {
 
     const allowed = [...roles].sort((a,b)=> a.localeCompare(b));
     selRole.innerHTML = `<option value="">Select role…</option>` + allowed.map(code => `<option value="${code}">${code}</option>`).join('');
-    selRole.disabled = !!lockThis;
+    selRole.disabled = !parentEditable;
 
+    // If editing an existing row, pre-select role/band
     if (existing?.role) {
       selRole.value = existing.role;
-      onRoleChanged();
-      if (existing?.band != null) { selBand.value = existing.band; selBand.disabled = !!lockThis; }
+      const bandSet = [...(bandsByRole[existing.role] || new Set())];
+      const hasNull = bandSet.includes('');
+      selBand.innerHTML =
+        (hasNull ? `<option value="">(none)</option>` : '') +
+        bandSet.filter(b=>b!=='').sort((a,b)=> String(a).localeCompare(String(b)))
+               .map(b => `<option value="${b}">${b}</option>`).join('');
+      selBand.disabled = !parentEditable;
+      if (existing?.band != null) selBand.value = String(existing.band);
+    } else {
+      selBand.innerHTML = `<option value=""></option>`;
+      selBand.disabled  = true;
     }
 
     await recomputeOverrideState();
   }
 
-  function onRoleChanged() {
-    const role = selRole.value;
-    // get bands from cached fetch in refreshClientRoles (we'll recompute anyway on refresh)
-    // to keep logs concise, not dumping entire cache
-  }
-
-  selClient.addEventListener('change', async () => { if (!lockThis) { L('[EVENT] client change'); await refreshClientRoles(selClient.value); } });
-  selRateT .addEventListener('change', () => { if (!lockThis) { L('[EVENT] rate_type change'); recomputeOverrideState(); } });
-  inFrom   .addEventListener('change', async () => { if (!lockThis) { L('[EVENT] date_from change'); await refreshClientRoles(selClient.value); } });
-  selRole  .addEventListener('change', async () => { if (!lockThis) { L('[EVENT] role change'); await recomputeOverrideState(); } });
-  selBand  .addEventListener('change', () => { L('[EVENT] band change'); recomputeOverrideState(); });
+  selClient.addEventListener('change', async () => { L('[EVENT] client change'); if (parentEditable) await refreshClientRoles(selClient.value); });
+  selRateT .addEventListener('change', () => { L('[EVENT] rate_type change'); if (parentEditable) recomputeOverrideState(); });
+  inFrom   .addEventListener('change', async () => { L('[EVENT] date_from change'); if (parentEditable) await refreshClientRoles(selClient.value); });
+  selRole  .addEventListener('change', async () => { L('[EVENT] role change'); if (parentEditable) await recomputeOverrideState(); });
+  selBand  .addEventListener('change', () => { L('[EVENT] band change'); if (parentEditable) recomputeOverrideState(); });
   ['pay_day','pay_night','pay_sat','pay_sun','pay_bh'].forEach(n=>{
     const el = document.querySelector(`#candRateForm input[name="${n}"]`);
     if (el) el.addEventListener('input', () => { if (LOG_APPLY) console.log('[RATES][EVENT] pay change', n, el.value); recomputeOverrideState(); });
@@ -5327,7 +5351,6 @@ async function renderClientRatesTable() {
   };
 }
 
-
 function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
   // ===== Logging helpers (toggle with window.__LOG_MODAL = true/false) =====
   const LOG = (typeof window.__LOG_MODAL === 'boolean') ? window.__LOG_MODAL : false;
@@ -5342,7 +5365,6 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
   const deep = (o) => JSON.parse(JSON.stringify(o));
 
   // Backward-compat for optional params:
-  // If onReturn is actually an options object, shift params.
   let opts = options || {};
   if (onReturn && typeof onReturn === 'object' && options === undefined) {
     opts = onReturn; onReturn = undefined;
@@ -5363,7 +5385,6 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
     root.querySelectorAll('input, select, textarea, button').forEach((el) => {
       const isDisplayOnly = el.id === 'tms_ref_display' || el.id === 'cli_ref_display';
       if (el.type === 'button') {
-        // NOTE: allow only core controls; child modals wire their own per-view buttons
         const controlIds = new Set(['btnCloseModal','btnDelete','btnEditModal','btnSave','btnRelated']);
         if (!controlIds.has(el.id)) el.disabled = !!ro;
         return;
@@ -5435,7 +5456,7 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
     _wired: false,
     _closing: false,
     _saving: false,
-    _confirmingDiscard: false, // re-entrancy guard for discard confirm
+    _confirmingDiscard: false, // re-entrancy guard
 
     // Child-Apply integration: remember last desired Apply state from child logic
     _applyDesired: null,
@@ -5746,7 +5767,9 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
           rolesState:           deep(window.modalCtx?.rolesState || null),
           ratesState:           deep(window.modalCtx?.ratesState || null),
           hospitalsState:       deep(window.modalCtx?.hospitalsState || null),
-          clientSettingsState:  deep(window.modalCtx?.clientSettingsState || null)
+          clientSettingsState:  deep(window.modalCtx?.clientSettingsState || null),
+          // 👇 NEW: snapshot overrides so Cancel truly reverts staged edits/deletes/new
+          overrides:            deep(window.modalCtx?.overrides || { existing:[], stagedNew:[], stagedEdits:{}, stagedDeletes:[] })
         };
         top.isDirty = false;
         setFrameMode(top, 'edit');
@@ -5779,6 +5802,17 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
       const isChild = stack().length > 1;
       if (!isChild && !top.noParentGate && top.mode === 'edit') {
         if (!top.isDirty) {
+          // Cancel from edit with no changes — still must restore staged overrides from snapshot
+          if (top._snapshot && window.modalCtx) {
+            window.modalCtx.data                = deep(top._snapshot.data);
+            window.modalCtx.formState           = deep(top._snapshot.formState);
+            window.modalCtx.rolesState          = deep(top._snapshot.rolesState);
+            window.modalCtx.ratesState          = deep(top._snapshot.ratesState);
+            window.modalCtx.hospitalsState      = deep(top._snapshot.hospitalsState);
+            window.modalCtx.clientSettingsState = deep(top._snapshot.clientSettingsState);
+            if (top._snapshot.overrides) window.modalCtx.overrides = deep(top._snapshot.overrides);
+            try { renderCandidateRatesTable?.(); } catch {}
+          }
           top.isDirty = false; setFrameMode(top, 'view'); top._snapshot = null;
           try { window.__toast?.('No changes'); } catch {}
           return;
@@ -5794,6 +5828,8 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
             window.modalCtx.ratesState          = deep(top._snapshot.ratesState);
             window.modalCtx.hospitalsState      = deep(top._snapshot.hospitalsState);
             window.modalCtx.clientSettingsState = deep(top._snapshot.clientSettingsState);
+            if (top._snapshot.overrides) window.modalCtx.overrides = deep(top._snapshot.overrides);
+            try { renderCandidateRatesTable?.(); } catch {}
           }
           top.isDirty = false; top._snapshot = null; setFrameMode(top, 'view'); return;
         }
@@ -5838,7 +5874,8 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
       try {
         const anyFlag = Array.isArray(window.modalCtx?.ratesState) && window.modalCtx.ratesState.some(w => w && w.__delete === true);
         const anySet  = (window.modalCtx?.ratesStagedDeletes instanceof Set) && window.modalCtx.ratesStagedDeletes.size > 0;
-        return !!(anyFlag || anySet);
+        const ovDel   = (window.modalCtx?.overrides?.stagedDeletes instanceof Set) && window.modalCtx.overrides.stagedDeletes.size > 0;
+        return !!(anyFlag || anySet || ovDel);
       } catch { return false; }
     };
 
@@ -5847,7 +5884,6 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
       if (!fr) return;
 
       if (fr._saving) return;
-      // 🔧 Treat staged client-rate deletes as "changes" so Save calls onSave
       const onlyDeletes = hasStagedClientDeletes();
 
       if (fr.kind !== 'advanced-search' && !fr.noParentGate && fr.mode !== 'view' && !fr.isDirty && !onlyDeletes) {
@@ -5922,7 +5958,6 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
       const boundToken = btn && btn.dataset ? btn.dataset.ownerToken : undefined;
       if (LOG) console.log('[MODAL] click #btnSave', { boundToken, topToken: topNow?._token, topKind: topNow?.kind, topTitle: topNow?.title });
 
-      // If a parent re-bound the button, execute for the TRUE top frame anyway.
       if (!topNow) return;
       if (boundToken !== topNow._token) {
         if (LOG) console.warn('[MODAL] save token mismatch → executing for TOP frame', { boundToken, wants: topNow._token });
@@ -5930,7 +5965,6 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
       await saveForFrame(topNow);
     };
 
-    // Helper to bind #btnSave to the current top frame, with an owner token
     const bindSaveToFrame = (btn, fr) => {
       if (!btn || !fr) return;
       btn.dataset.ownerToken = fr._token;
@@ -5940,7 +5974,7 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
 
     bindSaveToFrame(btnSave, top);
 
-    // ——— Global listeners to resolve parent/child gating races ———
+    // ——— Global listeners ———
     const onDirtyEvt = () => {
       const isChild = stack().length > 1;
       if (isChild) {
@@ -5951,8 +5985,6 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
       } else if (top.mode === 'edit' || top.mode === 'create') {
         top.isDirty = true; top._updateButtons && top._updateButtons();
       }
-
-      // 🔁 Live repaint for candidate rates when staging changes occur
       try {
         const t = currentFrame();
         if (t && t.entity === 'candidates' && t.currentTabKey === 'rates') {
@@ -5961,7 +5993,6 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
       } catch {}
     };
 
-    // Child captures the latest Apply intent from business logic and stores it on the frame.
     const onApplyEvt = (ev) => {
       const isChildNow = stack().length > 1;
       if (!isChildNow) return;
@@ -5970,12 +6001,10 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
       const enabled = !!(ev && ev.detail && ev.detail.enabled);
       topNow._applyDesired = enabled;
       topNow._updateButtons && topNow._updateButtons();
-      // Re-assert save ownership for the actual top (child) frame
       bindSaveToFrame(byId('btnSave'), topNow);
       if (LOG) console.log('[MODAL] onApplyEvt → _applyDesired =', enabled, 'rebound save to top frame');
     };
 
-    // When parent mode changes (e.g., View→Edit), child re-evaluates buttons using stored _applyDesired.
     const onModeChanged = (ev) => {
       const isChildNow = stack().length > 1;
       if (!isChildNow) return;
@@ -5985,7 +6014,6 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
         if (LOG) console.log('[MODAL] parent mode changed → child _updateButtons()');
         const topNow = currentFrame();
         topNow._updateButtons && topNow._updateButtons();
-        // Re-assert save ownership for the actual top (child) frame
         bindSaveToFrame(byId('btnSave'), topNow);
       }
     };
