@@ -4890,6 +4890,8 @@ async function openClientRateModal(client_id, existing) {
       const btn = document.querySelector('#modal .btn-save, #modal .actions .primary, #modal .actions .btn-primary, .modal .btn-save');
       if (btn) { btn.disabled = !enabled; btn.classList.toggle('disabled', !enabled); }
     } catch {}
+    // NEW: inform parent showModal so child Save can proceed
+    try { window.dispatchEvent(new CustomEvent('modal-apply-enabled', { detail: { enabled } })); } catch {}
   }
   const numOrNull = v => { if (v===undefined||v===null) return null; if (typeof v === 'string' && v.trim()==='') return null; const n=Number(v); return Number.isFinite(n) ? n : null; };
   const fmt = v => (v==null || Number.isNaN(v)) ? '—' : (Math.round(v*100)/100).toFixed(2);
