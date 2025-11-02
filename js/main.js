@@ -860,10 +860,10 @@ async function openSaveSearchModal(section, filters){
     ? mine.map(m => `<option value="${m.id}">${sanitize(m.name)}</option>`).join('')
     : '';
 
-  // current selection snapshot (if any)
+  // current selection snapshot (if any) at OPEN time (for initial radio enable/disable only)
   window.__selection = window.__selection || {};
-  const sel = window.__selection[section];
-  const hasSelection = !!sel && (sel.allMatching || (sel.ids && sel.ids.size>0));
+  const selOpen = window.__selection[section];
+  const hasSelectionOpen = !!selOpen && (selOpen.allMatching || (selOpen.ids && selOpen.ids.size>0));
 
   const body = html(`
     <div class="form" id="saveSearchForm" style="max-width:720px">
@@ -877,9 +877,9 @@ async function openSaveSearchModal(section, filters){
       <div class="row">
         <label>Save content</label>
         <div class="controls" style="display:flex;flex-direction:column;gap:8px">
-          <label class="inline"><input type="radio" name="contentMode" value="filters" ${hasSelection ? '' : 'checked'}> <span>Filters only</span></label>
-          <label class="inline"><input type="radio" name="contentMode" value="selection" ${hasSelection ? 'checked' : ''} ${hasSelection ? '' : 'disabled'}> <span>Selection only</span></label>
-          <label class="inline"><input type="radio" name="contentMode" value="both" ${hasSelection ? '' : 'disabled'}> <span>Filters + selection</span></label>
+          <label class="inline"><input type="radio" name="contentMode" value="filters" ${hasSelectionOpen ? '' : 'checked'}> <span>Filters only</span></label>
+          <label class="inline"><input type="radio" name="contentMode" value="selection" ${hasSelectionOpen ? 'checked' : ''} ${hasSelectionOpen ? '' : 'disabled'}> <span>Selection only</span></label>
+          <label class="inline"><input type="radio" name="contentMode" value="both" ${hasSelectionOpen ? '' : 'disabled'}> <span>Filters + selection</span></label>
           <div class="hint">Selection means the set of chosen records (including “select all across pages”).</div>
         </div>
       </div>
@@ -924,20 +924,23 @@ async function openSaveSearchModal(section, filters){
 
       if (!name && mode === 'new') { alert('Please enter a name'); return false; }
 
+      // Recompute selection at SUBMIT time (do not rely on open-time detection)
+      window.__selection = window.__selection || {};
+      const curSel = window.__selection[section];
+      const hasSelectionNow = !!curSel && (curSel.allMatching || (curSel.ids && curSel.ids.size>0));
+
       // build payload
       const payload = { section, kind:'search', name, is_shared: share };
       if (contentMode === 'filters' || contentMode === 'both') {
         payload.filters = filters || {};
       }
-      if ((contentMode === 'selection' || contentMode === 'both') && hasSelection) {
-        // serialize selection
-        const cur = window.__selection[section];
+      if ((contentMode === 'selection' || contentMode === 'both') && hasSelectionNow) {
         payload.selection = {
-          fingerprint: cur.fingerprint || '',
-          allMatching: !!cur.allMatching,
-          ids: Array.from(cur.ids || []),
-          excludeIds: Array.from(cur.excludeIds || []),
-          totalMatching: (typeof cur.totalMatching === 'number') ? cur.totalMatching : null
+          fingerprint: curSel.fingerprint || '',
+          allMatching: !!curSel.allMatching,
+          ids: Array.from(curSel.ids || []),
+          excludeIds: Array.from(curSel.excludeIds || []),
+          totalMatching: (typeof curSel.totalMatching === 'number') ? curSel.totalMatching : null
         };
       }
 
