@@ -3359,7 +3359,13 @@ async function openCandidateRateModal(candidate_id, existing) {
     window.__ERNI_MULT__ = 1;
     return 1;
   }
-  function numOrNull(v){ const n = Number(v); return Number.isFinite(n) ? n : null; }
+  // FIX: treat empty strings as null so blanks don't become 0
+  function numOrNull(v){
+    if (v === undefined || v === null) return null;
+    if (typeof v === 'string' && v.trim() === '') return null;
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  }
   const fmt = v => (v==null || Number.isNaN(v)) ? '—' : (Math.round(v*100)/100).toFixed(2);
 
   function setApplyEnabled(enabled, reasonSummary){
@@ -3519,12 +3525,14 @@ async function openCandidateRateModal(candidate_id, existing) {
     // Live validations + margin preview
     const mult = await _erniMultiplier();
 
-    // (a) No pay where charge is null
+    // (a) No pay where charge is null  — FIX: ignore disabled/hidden inputs
     const invalid = [];
     buckets.forEach(b => {
-      const pay = numOrNull(inputEl(b)?.value);
+      const el  = inputEl(b);
       const chg = win.charges[b];
       setFieldError(b, null);
+      if (!el || el.disabled) return;               // <-- skip disabled buckets
+      const pay = numOrNull(el.value);
       if (pay != null && chg == null) {
         invalid.push(b);
         setFieldError(b, `No client charge for ${bucketLabel[b]}.`);
@@ -3535,11 +3543,13 @@ async function openCandidateRateModal(candidate_id, existing) {
       reasons.push({ step:'pay_without_charge', buckets: invalid.slice() });
     }
 
-    // (b) No negative margins
+    // (b) No negative margins — also ignore disabled/hidden inputs
     const neg = [];
     buckets.forEach(b => {
-      const pay = numOrNull(inputEl(b)?.value);
+      const el  = inputEl(b);
       const chg = win.charges[b];
+      if (!el || el.disabled) return;               // <-- skip disabled buckets
+      const pay = numOrNull(el.value);
       if (pay == null || chg == null) return;
       const m = (rateType === 'PAYE') ? (chg - (pay * mult)) : (chg - pay);
       if (m < 0) {
@@ -3564,8 +3574,9 @@ async function openCandidateRateModal(candidate_id, existing) {
     const preview = {};
     buckets.forEach(b => {
       const sp  = byId(`cr_m_${b}`);
-      const pay = numOrNull(inputEl(b)?.value);
+      const el  = inputEl(b);
       const chg = win.charges[b];
+      const pay = (el && !el.disabled) ? numOrNull(el.value) : null;
       const m = (chg != null && pay != null) ? ((rateType === 'PAYE') ? (chg - (pay * mult)) : (chg - pay)) : null;
       preview[b] = m;
       if (sp) sp.textContent = (m==null ? '—' : fmt(m));
@@ -3626,7 +3637,7 @@ async function openCandidateRateModal(candidate_id, existing) {
         return false;
       }
 
-      // No pay where charge is null
+      // No pay where charge is null (ignore disabled fields)
       for (const b of ['day','night','sat','sun','bh']) {
         const inp = document.querySelector(`#candRateForm input[name="pay_${b}"]`);
         if (!inp || inp.disabled) continue;
@@ -3635,7 +3646,7 @@ async function openCandidateRateModal(candidate_id, existing) {
         if (pay != null && chg == null) { alert(`No client charge for ${bucketLabel[b]}.`); return false; }
       }
 
-      // No negative margins
+      // No negative margins (ignore disabled fields)
       const mult = await _erniMultiplier();
       for (const b of ['day','night','sat','sun','bh']) {
         const inp = document.querySelector(`#candRateForm input[name="pay_${b}"]`);
