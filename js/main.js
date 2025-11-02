@@ -3134,7 +3134,16 @@ async function mountCandidateRatesTab() {
   const id    = window.modalCtx.data?.id || null;
   if (LOG) console.log('[RATES][mountCandidateRatesTab] ENTRY', { token, id });
 
-  // In CREATE flows (id === null), skip mid-flight guard entirely and render empty table + Add button.
+  // Ensure the rates host exists even if the tab template forgot to add it
+  const host = byId('modalBody');
+  if (host && !byId('ratesTable')) {
+    const c = document.createElement('div');
+    c.id = 'ratesTable';
+    host.appendChild(c);
+    if (LOG) console.log('[RATES][mountCandidateRatesTab] injected #ratesTable host');
+  }
+
+  // In CREATE flows (id === null), render empty table + Add button and keep staging container
   if (!id) {
     window.modalCtx.overrides = window.modalCtx.overrides || { existing: [], stagedNew: [], stagedEdits: {}, stagedDeletes: new Set() };
     await renderCandidateRatesTable();
@@ -3148,25 +3157,26 @@ async function mountCandidateRatesTab() {
     return;
   }
 
-  // EDIT flows (id present) — existing behaviour
+  // EDIT flows (id present) — refresh ONLY the "existing" list; preserve stagedNew/Edits/Deletes
   const rates = await listCandidateRates(id);
   if (token !== window.modalCtx.openToken || window.modalCtx.data?.id !== id) {
     if (LOG) console.warn('[RATES][mountCandidateRatesTab] token/id changed mid-flight');
     return;
   }
 
-  if (Array.isArray(rates)) {
-    window.modalCtx.overrides = window.modalCtx.overrides || { existing: [], stagedNew: [], stagedEdits: {}, stagedDeletes: new Set() };
-    window.modalCtx.overrides.existing = rates.slice();
-  }
+  const O = window.modalCtx.overrides || (window.modalCtx.overrides = { existing: [], stagedNew: [], stagedEdits: {}, stagedDeletes: new Set() });
+  if (Array.isArray(rates)) O.existing = rates.slice();
+
   await renderCandidateRatesTable();
   if (LOG) console.log('[RATES][mountCandidateRatesTab] renderCandidateRatesTable() called');
 
+  // Wire Add button respecting parent mode
   const btn = byId('btnAddRate');
   const frame = _currentFrame();
-  if (btn && frame && (frame.mode === 'edit' || frame.mode === 'create')) btn.onclick = () => openCandidateRateModal(window.modalCtx.data?.id);
+  if (btn && frame && (frame.mode === 'edit' || frame.mode === 'create')) {
+    btn.onclick = () => openCandidateRateModal(window.modalCtx.data?.id);
+  }
 }
-
 
 // === UPDATED: Candidate Rate Override modal (Client→Role gated; bands; UK dates; date_to) ===
 // ====================== openCandidateRateModal (FIXED) ======================
@@ -5771,6 +5781,14 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
             this._updateButtons && this._updateButtons();
           }
         }
+
+        // 🔁 Live repaint for rates tab so staged changes show as you make them
+        try {
+          const top = currentFrame();
+          if (top && top.entity === 'candidates' && top.currentTabKey === 'rates') {
+            renderCandidateRatesTable?.();
+          }
+        } catch {}
       };
       root.addEventListener('input', onDirty, true);
       root.addEventListener('change', onDirty, true);
@@ -6183,6 +6201,14 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
       } else if (top.mode === 'edit' || top.mode === 'create') {
         top.isDirty = true; top._updateButtons && top._updateButtons();
       }
+
+      // 🔁 Live repaint for candidate rates when staging changes occur
+      try {
+        const t = currentFrame();
+        if (t && t.entity === 'candidates' && t.currentTabKey === 'rates') {
+          renderCandidateRatesTable?.();
+        }
+      } catch {}
     };
 
     // Child captures the latest Apply intent from business logic and stores it on the frame.
@@ -6251,7 +6277,6 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
   window.__getModalFrame = currentFrame;
   renderTop();
 }
-
 
 
 
