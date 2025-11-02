@@ -6368,7 +6368,14 @@ function renderSummary(rows){
 
   const cols = defaultColumnsFor(currentSection);
   byId('title').textContent = sections.find(s=>s.key===currentSection)?.label || '';
-  const content = byId('content'); content.innerHTML = '';
+  const content = byId('content');
+
+  // NEW: preserve scroll position per section
+  window.__scrollMemory = window.__scrollMemory || {};
+  const memKey = `summary:${currentSection}`;
+  const prevScrollY = content ? (window.__scrollMemory[memKey] ?? content.scrollTop ?? 0) : 0;
+
+  content.innerHTML = '';
 
   if (currentSection === 'settings') return renderSettingsPanel(content);
   if (currentSection === 'audit')    return renderAuditTable(content, rows);
@@ -6439,6 +6446,19 @@ function renderSummary(rows){
 
   tbl.appendChild(tb);
   content.appendChild(tbl);
+
+  // NEW: restore scroll and keep memory updated
+  try {
+    content.__activeMemKey = memKey;
+    content.scrollTop = prevScrollY;
+    if (!content.__scrollMemHooked) {
+      content.addEventListener('scroll', () => {
+        const k = content.__activeMemKey || memKey;
+        window.__scrollMemory[k] = content.scrollTop || 0;
+      });
+      content.__scrollMemHooked = true;
+    }
+  } catch {}
 
   // ---- Jump & highlight if a pending focus token matches this section
   if (window.__pendingFocus) {
