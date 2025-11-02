@@ -5072,13 +5072,9 @@ async function openClientRateModal(client_id, existing) {
         return false;
       }
 
-      // Re-validate live state; if Apply disabled, just block
+      // Re-validate live state; rely on validation result (do not read DOM disabled state)
       await recomputeClientState();
-      const btn = document.querySelector('#modal .btn-save, #modal .actions .primary, #modal .actions .btn-primary, .modal .btn-save');
-      if (btn && btn.disabled) {
-        DBG('onSave BLOCKED: apply disabled');
-        return false;
-      }
+      DBG('onSave proceeding after recompute');
 
       const raw = collectForm('#clientRateForm');
       DBG('onSave collected', { raw });
@@ -5288,7 +5284,6 @@ async function openClientRateModal(client_id, existing) {
     };
   })();
 }
-
 
 async function renderClientRatesTable() {
   const LOG_RATES = !!window.__LOG_RATES;
