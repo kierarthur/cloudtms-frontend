@@ -2665,9 +2665,13 @@ async function openCandidate(row) {
         if (tokenAtSave === window.modalCtx.openToken && window.modalCtx.data?.id === candidateId) {
           window.modalCtx.overrides.existing = Array.isArray(latest) ? latest : [];
           window.modalCtx.overrides.stagedEdits = {};
-          window.modalCtx.overrides.stagedNew = [];
+          window.modalCtx.overrides.stagedNew = [];   // ← keep as array
           if (window.modalCtx.overrides.stagedDeletes?.clear) window.modalCtx.overrides.stagedDeletes.clear();
-          await renderCandidateRatesTable();
+          // Render rates ONLY if the Rates tab is active
+          const fr1 = window.__getModalFrame?.();
+          if (fr1 && fr1.entity === 'candidates' && fr1.currentTabKey === 'rates') {
+            await renderCandidateRatesTable();
+          }
         }
       } catch (e) {
         W('post-save rates refresh failed', e);
@@ -2704,7 +2708,11 @@ async function openCandidate(row) {
       L('[listCandidateRates] result', { count: Array.isArray(existing) ? existing.length : -1, sameToken: token === window.modalCtx.openToken, modalCtxId: window.modalCtx.data?.id });
       if (token === window.modalCtx.openToken && window.modalCtx.data?.id === id) {
         window.modalCtx.overrides.existing = Array.isArray(existing) ? existing : [];
-        await renderCandidateRatesTable();
+        // Render rates ONLY if the Rates tab is active
+        const fr2 = window.__getModalFrame?.();
+        if (fr2 && fr2.entity === 'candidates' && fr2.currentTabKey === 'rates') {
+          await renderCandidateRatesTable();
+        }
       }
     } catch (e) { E('listCandidateRates failed', e); }
 
@@ -5344,7 +5352,6 @@ async function renderClientRatesTable() {
     return openClientRateModal(cid);
   };
 }
-
 function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
   // ===== Logging =====
   const LOG = (typeof window.__LOG_MODAL === 'boolean') ? window.__LOG_MODAL : false;
@@ -5477,7 +5484,39 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
       // Mount per-entity extras (only inject Rates host on Rates tab)
       if (this.entity==='candidates' && k==='rates') { mountCandidateRatesTab?.(); }
       if (this.entity==='candidates' && k==='pay')   { mountCandidatePayTab?.(); }
-      if (this.entity==='clients'    && k==='rates') { mountClientRatesTab?.(); }
+
+      // >>> Added: Mount Roles on Candidates → Main tab (and keep pay-method state in sync)
+      if (this.entity==='candidates' && k==='main') {
+        // Preserve staged pay method and broadcast changes for dependent tabs (e.g., Pay)
+        const pmSel = document.querySelector('#pay-method');
+        if (pmSel) {
+          const stagedPm   = window.modalCtx?.formState?.main?.pay_method;
+          const preferred  = (window.modalCtx?.payMethodState || stagedPm || pmSel.value);
+          pmSel.value = preferred;
+          pmSel.addEventListener('change', () => {
+            window.modalCtx.payMethodState = pmSel.value;
+            try { window.dispatchEvent(new CustomEvent('pay-method-changed')); }
+            catch { window.dispatchEvent(new Event('pay-method-changed')); }
+          });
+          window.modalCtx.payMethodState = pmSel.value;
+        }
+
+        // Mount Roles editor into #rolesEditor without affecting any Rates logic
+        const rolesHost = document.querySelector('#rolesEditor');
+        if (rolesHost) {
+          (async () => {
+            try {
+              const roleOptions = await loadGlobalRoleOptions();
+              renderRolesEditor(rolesHost, window.modalCtx.rolesState || [], roleOptions);
+            } catch (e) {
+              console.error('[MODAL] roles mount failed', e);
+            }
+          })();
+        }
+      }
+      // <<< End: Roles mount
+
+      if (this.entity==='clients'    && k==='rates')     { mountClientRatesTab?.(); }
       if (this.entity==='clients'    && k==='hospitals') { mountClientHospitalsTab?.(); }
       if (this.entity==='clients'    && k==='settings')  { renderClientSettingsUI?.(window.modalCtx.clientSettingsState||{}); }
 
@@ -5785,7 +5824,6 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
   window.__getModalFrame = currentFrame;
   renderTop();
 }
-
 
 // =================== ADD HOSPITAL MODAL (UPDATED: push into stagedNew) ===================
 // ==== CHILD MODAL (ADD HOSPITAL) — throw on errors; return true on success ====
