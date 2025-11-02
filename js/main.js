@@ -5466,7 +5466,6 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
         L('persist(skip)', { reason: 'mode=view or no modalCtx', mode: this.mode });
         return;
       }
-      // ✅ Seed a stable sentinel for create mode so tab switches keep the same record
       const sentinel = window.modalCtx?.openToken || null;
       const initialId = (window.modalCtx.data?.id ?? sentinel);
 
@@ -5493,7 +5492,6 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
       const fid  = fs.__forId ?? null;
       const sentinel = window.modalCtx?.openToken ?? null;
 
-      // ✅ Treat create as “same record” by matching the sentinel; or null===null
       const sameRecord =
         (fid === rid) ||
         (rid == null && (fid === sentinel || fid == null));
@@ -5510,7 +5508,6 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
       if (this._detachDirty) { try { this._detachDirty(); } catch(_){}; this._detachDirty = null; }
       const root = byId('modalBody'); if (!root) return;
 
-      // ⬇️ Bubble dirty from a child to its parent so Save enables even while child is open
       const onDirty = (ev)=>{
         if (ev && !ev.isTrusted) return;
         const isChild = stack().length > 1;
@@ -5526,8 +5523,7 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
             this._updateButtons && this._updateButtons();
           }
         }
-
-        // 🔁 Live repaint for rates tab so staged changes show as you make them
+        // live repaint for candidate rates
         try {
           const top = currentFrame();
           if (top && top.entity === 'candidates' && top.currentTabKey === 'rates') {
@@ -5561,7 +5557,6 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
       this.currentTabKey = k;
       this._attachDirtyTracker();
 
-      // Read-only gating (bypass when utility)
       const isChild = stack().length > 1;
       if (this.noParentGate) {
         setFormReadOnly(byId('modalBody'), (this.mode === 'view' || this.mode === 'saving'));
@@ -5579,7 +5574,7 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
 
   function setFrameMode(frameObj, mode) {
     const prevMode = frameObj.mode;
-    frameObj.mode = mode; // 'create' | 'view' | 'edit' | 'saving'
+    frameObj.mode = mode;
     const isChild = stack().length > 1;
 
     if (frameObj.noParentGate) {
@@ -5593,7 +5588,6 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
 
     if (typeof frameObj._updateButtons === 'function') frameObj._updateButtons();
 
-    // 🔔 Broadcast mode changes so children can re-evaluate their button gating
     try {
       const idx = stack().indexOf(frameObj);
       window.dispatchEvent(new CustomEvent('modal-frame-mode-changed', { detail: { frameIndex: idx, mode } }));
@@ -5647,10 +5641,9 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
     const header    = byId('modalDrag');
     const modalNode = byId('modal');
 
-    // 🔧 Show Delete ONLY for child client-rate OR candidate-override modals; never in parent
     const showChildDelete = isChild && (top.kind === 'client-rate' || top.kind === 'candidate-override') && top.hasId;
     btnDelete.style.display = showChildDelete ? '' : 'none';
-    btnDelete.onclick = null; // child modals wire their own handler
+    btnDelete.onclick = null;
 
     let btnEdit = byId('btnEditModal');
     if (!btnEdit) {
@@ -5734,7 +5727,6 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
         btnSave.disabled = !!top._saving;
         if (relatedBtn) relatedBtn.disabled = true;
       } else if (isChild && !top.noParentGate) {
-        // Child: base display follows parent editability, but final disabled honors _applyDesired
         btnSave.style.display = parentEditable ? '' : 'none';
         const wantApply = (top._applyDesired === true);
         btnSave.disabled = (!parentEditable) || top._saving || !wantApply;
@@ -5768,7 +5760,7 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
           ratesState:           deep(window.modalCtx?.ratesState || null),
           hospitalsState:       deep(window.modalCtx?.hospitalsState || null),
           clientSettingsState:  deep(window.modalCtx?.clientSettingsState || null),
-          // 👇 NEW: snapshot overrides so Cancel truly reverts staged edits/deletes/new
+          // 👇 snapshot overrides so Cancel truly reverts staged edits/deletes/new
           overrides:            deep(window.modalCtx?.overrides || { existing:[], stagedNew:[], stagedEdits:{}, stagedDeletes:[] })
         };
         top.isDirty = false;
@@ -5802,7 +5794,6 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
       const isChild = stack().length > 1;
       if (!isChild && !top.noParentGate && top.mode === 'edit') {
         if (!top.isDirty) {
-          // Cancel from edit with no changes — still must restore staged overrides from snapshot
           if (top._snapshot && window.modalCtx) {
             window.modalCtx.data                = deep(top._snapshot.data);
             window.modalCtx.formState           = deep(top._snapshot.formState);
@@ -5869,7 +5860,6 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
     };
     byId('btnCloseModal').onclick = handleSecondary;
 
-    // Helper: do we have staged client-rate deletes?
     const hasStagedClientDeletes = ()=> {
       try {
         const anyFlag = Array.isArray(window.modalCtx?.ratesState) && window.modalCtx.ratesState.some(w => w && w.__delete === true);
@@ -5882,11 +5872,14 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
     // ===== Save/Apply: bind to TOP frame token and always execute for current TOP frame =====
     async function saveForFrame(fr) {
       if (!fr) return;
-
       if (fr._saving) return;
+
       const onlyDeletes = hasStagedClientDeletes();
 
-      if (fr.kind !== 'advanced-search' && !fr.noParentGate && fr.mode !== 'view' && !fr.isDirty && !onlyDeletes) {
+      // 👇 **CHANGE HERE** — allow child "Apply" when _applyDesired is true, even if frame.isDirty is false
+      const allowApply = (fr.kind === 'candidate-override' || fr.kind === 'client-rate') && fr._applyDesired === true;
+
+      if (fr.kind !== 'advanced-search' && !fr.noParentGate && fr.mode !== 'view' && !fr.isDirty && !onlyDeletes && !allowApply) {
         const isChild = stack().length > 1;
         if (isChild) {
           sanitizeModalGeometry();
@@ -5905,7 +5898,6 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
         return;
       }
 
-      // keep form state fresh
       fr.persistCurrentTabState();
 
       const isChild = stack().length > 1;
@@ -5974,7 +5966,6 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
 
     bindSaveToFrame(btnSave, top);
 
-    // ——— Global listeners ———
     const onDirtyEvt = () => {
       const isChild = stack().length > 1;
       if (isChild) {
@@ -6061,7 +6052,6 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
   window.__getModalFrame = currentFrame;
   renderTop();
 }
-
 
 
 // =================== ADD HOSPITAL MODAL (UPDATED: push into stagedNew) ===================
