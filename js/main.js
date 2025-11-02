@@ -3128,13 +3128,20 @@ function confirmDiscardChangesIfDirty(){
 // ==============================
 // 3) mountCandidateRatesTab(...)
 // ==============================
+
+// === UPDATED: Candidate Rate Override modal (Client→Role gated; bands; UK dates; date_to) ===
+// ====================== openCandidateRateModal (FIXED) ======================
+// =================== CANDIDATE OVERRIDE MODAL (UPDATED) ===================
+// ==== CHILD MODAL (CANDIDATE RATE) — throw on errors; return true on success ====
+// ✅ UPDATED — Apply (stage), gate against client defaults active at date_from,
+//    auto-truncate incumbent of same rate_type at N−1 (staged), NO persistence here
 async function mountCandidateRatesTab() {
   const LOG = !!window.__LOG_RATES;
   const token = window.modalCtx.openToken;
   const id    = window.modalCtx.data?.id || null;
   if (LOG) console.log('[RATES][mountCandidateRatesTab] ENTRY', { token, id });
 
-  // Ensure the rates host exists even if the tab template forgot to add it
+  // Ensure a host exists (only on Rates tab; this function is called from showModal setTab('rates'))
   const host = byId('modalBody');
   if (host && !byId('ratesTable')) {
     const c = document.createElement('div');
@@ -3143,7 +3150,7 @@ async function mountCandidateRatesTab() {
     if (LOG) console.log('[RATES][mountCandidateRatesTab] injected #ratesTable host');
   }
 
-  // In CREATE flows (id === null), render empty table + Add button and keep staging container
+  // CREATE flow
   if (!id) {
     window.modalCtx.overrides = window.modalCtx.overrides || { existing: [], stagedNew: [], stagedEdits: {}, stagedDeletes: new Set() };
     await renderCandidateRatesTable();
@@ -3151,13 +3158,11 @@ async function mountCandidateRatesTab() {
 
     const btn = byId('btnAddRate');
     const frame = _currentFrame();
-    if (btn && frame && (frame.mode === 'edit' || frame.mode === 'create')) {
-      btn.onclick = () => openCandidateRateModal(window.modalCtx.data?.id);
-    }
+    if (btn && frame && (frame.mode === 'edit' || frame.mode === 'create')) btn.onclick = () => openCandidateRateModal(window.modalCtx.data?.id);
     return;
   }
 
-  // EDIT flows (id present) — refresh ONLY the "existing" list; preserve stagedNew/Edits/Deletes
+  // EDIT flow — refresh ONLY existing; preserve stagedNew/Edits/Deletes
   const rates = await listCandidateRates(id);
   if (token !== window.modalCtx.openToken || window.modalCtx.data?.id !== id) {
     if (LOG) console.warn('[RATES][mountCandidateRatesTab] token/id changed mid-flight');
@@ -3170,20 +3175,10 @@ async function mountCandidateRatesTab() {
   await renderCandidateRatesTable();
   if (LOG) console.log('[RATES][mountCandidateRatesTab] renderCandidateRatesTable() called');
 
-  // Wire Add button respecting parent mode
   const btn = byId('btnAddRate');
   const frame = _currentFrame();
-  if (btn && frame && (frame.mode === 'edit' || frame.mode === 'create')) {
-    btn.onclick = () => openCandidateRateModal(window.modalCtx.data?.id);
-  }
+  if (btn && frame && (frame.mode === 'edit' || frame.mode === 'create')) btn.onclick = () => openCandidateRateModal(window.modalCtx.data?.id);
 }
-
-// === UPDATED: Candidate Rate Override modal (Client→Role gated; bands; UK dates; date_to) ===
-// ====================== openCandidateRateModal (FIXED) ======================
-// =================== CANDIDATE OVERRIDE MODAL (UPDATED) ===================
-// ==== CHILD MODAL (CANDIDATE RATE) — throw on errors; return true on success ====
-// ✅ UPDATED — Apply (stage), gate against client defaults active at date_from,
-//    auto-truncate incumbent of same rate_type at N−1 (staged), NO persistence here
 
 // ==============================
 // 1) openCandidateRateModal(...)
@@ -3198,8 +3193,8 @@ async function openCandidateRateModal(candidate_id, existing) {
 
   L('ENTRY', { candidate_id, hasExisting: !!existing });
 
-  const parentFrame = _currentFrame();
-  const parentEditable = parentFrame && (parentFrame.mode === 'edit' || parentFrame.mode === 'create');
+  const parentFrame   = _currentFrame();
+  const parentEditable= parentFrame && (parentFrame.mode === 'edit' || parentFrame.mode === 'create');
   L('parent frame', { editable: !!parentEditable, mode: parentFrame?.mode });
 
   // ===== load clients =====
@@ -3214,7 +3209,7 @@ async function openCandidateRateModal(candidate_id, existing) {
 
   const bucketLabel = { day:'Day', night:'Night', sat:'Sat', sun:'Sun', bh:'BH' };
 
-  // ===== FORM (with inline error panel) =====
+  // ===== FORM =====
   const formHtml = html(`
     <div class="form" id="candRateForm">
       <div class="row">
@@ -3358,20 +3353,20 @@ async function openCandidateRateModal(candidate_id, existing) {
     const slotIn  = (b)=> byId(`slot_input_${b}`);
     const slotPh  = (b)=> byId(`slot_ph_${b}`);
 
-    showInlineError('');
-    clearAllFieldErrors();
+    showInlineError(''); clearAllFieldErrors();
     let canApply = true;
 
+    // Gate until all core fields present
     const need = [];
     if (!clientId) need.push('clientId');
     if (!rateType) need.push('rateType');
     if (!role)     need.push('role');
     if (!isoFrom)  need.push('date_from');
     if (need.length) {
-      // reset UI buckets to placeholders
+      // reset buckets to placeholders
       buckets.forEach(b => {
         const inp = inputEl(b);
-        if (inp) { inp.value = ''; inp.disabled = true; }
+        if (inp) { inp.disabled = true; }
         if (slotIn(b)) slotIn(b).style.display = 'none';
         if (slotPh(b)) slotPh(b).style.display = '';
         const sp = byId(`cr_m_${b}`); if (sp) sp.textContent = '—';
@@ -3382,10 +3377,10 @@ async function openCandidateRateModal(candidate_id, existing) {
 
     const win = await resolveCoveringWindow(clientId, role, band, isoFrom);
     if (!win) {
-      // show placeholders
+      // placeholders
       buckets.forEach(b => {
         const inp = inputEl(b);
-        if (inp) { inp.value = ''; inp.disabled = true; }
+        if (inp) { inp.disabled = true; }
         if (slotIn(b)) slotIn(b).style.display = 'none';
         if (slotPh(b)) slotPh(b).style.display = '';
         const sp = byId(`cr_m_${b}`); if (sp) sp.textContent = '—';
@@ -3395,7 +3390,7 @@ async function openCandidateRateModal(candidate_id, existing) {
       return;
     }
 
-    // Toggle bucket visibility (and inputs) strictly from charges in the window
+    // Toggle visibility strictly from window charges
     buckets.forEach(b => {
       const hasCharge = (win.charges[b] != null);
       const inp = inputEl(b);
@@ -3412,20 +3407,20 @@ async function openCandidateRateModal(candidate_id, existing) {
 
     const mult = await _erniMultiplier();
 
-    // Pay without charge (ignore hidden/disabled)
+    // Pay without charge – ignore hidden/disabled
     const invalid = [];
     buckets.forEach(b => {
-      const el  = inputEl(b); const chg = win.charges[b];
+      const el  = inputEl(b), chg = win.charges[b];
       if (!el || el.disabled) return;
-      const pay = numOrNull(el.value);
+      const pay = numOrNull(el.value); // blank -> null, NaN -> null
       if (pay != null && chg == null) { invalid.push(b); setFieldError(b, `No client charge for ${bucketLabel[b]}.`); }
     });
     if (invalid.length) canApply = false;
 
-    // Negative margins (ignore hidden/disabled)
+    // Negative margins – ignore hidden/disabled
     const neg = [];
     buckets.forEach(b => {
-      const el  = inputEl(b); const chg = win.charges[b];
+      const el  = inputEl(b), chg = win.charges[b];
       if (!el || el.disabled) return;
       const pay = numOrNull(el.value);
       if (pay == null || chg == null) return;
@@ -3434,14 +3429,14 @@ async function openCandidateRateModal(candidate_id, existing) {
     });
     if (neg.length) canApply = false;
 
-    // Date cap
+    // End-date cap
     setDateToError('');
     if (isoTo && win.capIso && isoTo > win.capIso) {
       setDateToError(`Client rate ends on ${formatIsoToUk(win.capIso)} — override must end on/before this date.`);
       canApply = false;
     }
 
-    // Overlap detection (staged + existing)
+    // Overlap detection (existing + staged)
     const O = window.modalCtx.overrides || { existing: [], stagedNew: [], stagedEdits: {}, stagedDeletes: new Set() };
     const deletedIds = O.stagedDeletes || new Set();
     const unify = [];
@@ -3461,7 +3456,9 @@ async function openCandidateRateModal(candidate_id, existing) {
       return false;
     };
 
-    const conflicts = unify.filter(o => sameKey(o) && !isSelf(o) && !( (o.date_to||'9999-12-31') < (isoFrom||'0000-01-01') || (isoTo||'9999-12-31') < (o.date_from||'0000-01-01') ));
+    const conflicts = unify.filter(o => sameKey(o) && !isSelf(o) &&
+      !((o.date_to||'9999-12-31') < (isoFrom||'0000-01-01') || (isoTo||'9999-12-31') < (o.date_from||'0000-01-01')));
+
     if (conflicts.length) {
       canApply = false;
       const ov = conflicts[0];
@@ -3499,11 +3496,11 @@ async function openCandidateRateModal(candidate_id, existing) {
       }, 0);
     }
 
-    // margins preview
+    // Preview margins (never NaN)
     buckets.forEach(b => {
       const sp  = byId(`cr_m_${b}`), el = inputEl(b), chg = win.charges[b];
-      const pay = (el && !el.disabled) ? numOrNull(el.value) : null;
-      const m = (chg != null && pay != null) ? ((rateType === 'PAYE') ? (chg - (pay * mult)) : (chg - pay)) : null;
+      const pay = (el && !el.disabled) ? numOrNull(el.value) : null; // blank/NaN => null
+      const m   = (chg != null && pay != null) ? ((rateType === 'PAYE') ? (chg - (pay * (await _erniMultiplier()))) : (chg - pay)) : null;
       if (sp) sp.textContent = (m==null ? '—' : fmt(m));
     });
 
@@ -3517,7 +3514,7 @@ async function openCandidateRateModal(candidate_id, existing) {
     [{ key:'form', label:'Form' }],
     () => formHtml,
     async () => {
-      // Re-check gating; if disabled, block silently (inline panel has details)
+      // Re-check gating; if disabled, block silently
       await recomputeOverrideState();
       if (lastApplyState === false) { L('Apply blocked by recompute'); return false; }
 
@@ -3529,9 +3526,11 @@ async function openCandidateRateModal(candidate_id, existing) {
       const band      = (raw.band || '').trim() || null;
       const rate_type = String(raw.rate_type || '').toUpperCase();
 
-      // 👈🏻 IMPORTANT: respect user-edited date_from
       const date_from = parseUkDateToIso(raw.date_from);
       const date_to   = raw.date_to ? parseUkDateToIso(raw.date_to) : null;
+
+      // SAFE mapping: undefined / '' → null (prevents NaN)
+      const mapPay = (k) => (Object.prototype.hasOwnProperty.call(raw, k) && raw[k] !== '' ? Number(raw[k]) : null);
 
       const stagedAll = {
         id: existing?.id,
@@ -3539,11 +3538,11 @@ async function openCandidateRateModal(candidate_id, existing) {
         client_id,
         role, band, rate_type,
         date_from, date_to,
-        pay_day   : raw['pay_day']   !== '' ? Number(raw['pay_day'])   : null,
-        pay_night : raw['pay_night'] !== '' ? Number(raw['pay_night']) : null,
-        pay_sat   : raw['pay_sat']   !== '' ? Number(raw['pay_sat'])   : null,
-        pay_sun   : raw['pay_sun']   !== '' ? Number(raw['pay_sun'])   : null,
-        pay_bh    : raw['pay_bh']    !== '' ? Number(raw['pay_bh'])    : null
+        pay_day   : mapPay('pay_day'),
+        pay_night : mapPay('pay_night'),
+        pay_sat   : mapPay('pay_sat'),
+        pay_sun   : mapPay('pay_sun'),
+        pay_bh    : mapPay('pay_bh')
       };
 
       const O = (window.modalCtx.overrides ||= { existing: [], stagedNew: [], stagedEdits: {}, stagedDeletes: new Set() });
@@ -3553,9 +3552,9 @@ async function openCandidateRateModal(candidate_id, existing) {
         O.stagedEdits[existing.id] = { ...(O.stagedEdits[existing.id]||{}), ...stagedAll };
       } else if (existing && !existing.id) {
         const tmpId = existing._tmpId || null;
-        let idx = (tmpId ? (O.stagedNew||[]).findIndex(r => r._tmpId === tmpId) : -1);
+        const idx   = tmpId ? (O.stagedNew||[]).findIndex(r => r._tmpId === tmpId) : -1;
         if (idx >= 0) O.stagedNew[idx] = { ...O.stagedNew[idx], ...stagedAll, _tmpId: tmpId };
-        else O.stagedNew.push({ ...stagedAll, _tmpId: tmpId || `tmp_${Date.now()}` });
+        else          O.stagedNew.push({ ...stagedAll, _tmpId: tmpId || `tmp_${Date.now()}` });
       } else {
         O.stagedNew.push({ ...stagedAll, _tmpId: `tmp_${Date.now()}` });
       }
@@ -3568,13 +3567,8 @@ async function openCandidateRateModal(candidate_id, existing) {
         peekNew: (O.stagedNew||[])[(O.stagedNew||[]).length-1]
       });
 
-      // force parent table repaint
-      if (document.getElementById('ratesTable')) {
-        await renderCandidateRatesTable();
-      } else {
-        L('No #ratesTable found at Apply-time; parent paint will occur on tab repaint.');
-      }
-
+      // Repaint parent rates table (only on Rates tab; renderer checks tab)
+      try { await renderCandidateRatesTable(); } catch {}
       try { window.dispatchEvent(new CustomEvent('modal-dirty')); } catch {}
       return true;
     },
@@ -3598,33 +3592,32 @@ async function openCandidateRateModal(candidate_id, existing) {
   if (existing?.date_from) inFrom.value = formatIsoToUk(existing.date_from);
   if (existing?.date_to)   inTo.value   = formatIsoToUk(existing.date_to);
 
+  // Prefill ALL buckets that have values (so Day populates immediately)
   ['day','night','sat','sun','bh'].forEach(b=>{
-    const val = (existing && typeof existing[`pay_${b}`] !== 'undefined') ? existing[`pay_${b}`] : null;
-    const el = document.querySelector(`#candRateForm input[name="pay_${b}"]`);
+    const val = (existing && Number.isFinite(existing[`pay_${b}`])) ? existing[`pay_${b}`] : null;
+    const el  = document.querySelector(`#candRateForm input[name="pay_${b}"]`);
     if (el && val != null) el.value = String(val);
   });
 
   attachUkDatePicker(inFrom); attachUkDatePicker(inTo);
 
-  // 🔓 No more 'past row' lock — date_from & bucket inputs remain editable when parent is editable
-
+  // No historic lock — visibility is decided by coverage window
   async function refreshClientRoles(clientId) {
     selRole.innerHTML = `<option value="">Select role…</option>`; selRole.disabled = true;
-    selBand.innerHTML = `<option value=""></option>`; selBand.disabled  = true;
+    selBand.innerHTML = `<option value=""></option>`;             selBand.disabled  = true;
 
     if (!clientId) { setApplyEnabled(false, 'no_client'); return; }
 
     const active_on = parseUkDateToIso(inFrom.value || '') || null;
-    const list = await listClientRates(clientId, { active_on, only_enabled: true }).catch(_=>[]);
-    const windows = (Array.isArray(list) ? list.filter(w => !w.disabled_at_utc) : []);
+    const list  = await listClientRates(clientId, { active_on, only_enabled: true }).catch(_=>[]);
+    const wins  = (Array.isArray(list) ? list.filter(w => !w.disabled_at_utc) : []);
     const roles = new Set(); const bandsByRole = {};
-    windows.forEach(w => { if (!w.role) return; roles.add(w.role); (bandsByRole[w.role] ||= new Set()).add(w.band==null ? '' : String(w.band)); });
+    wins.forEach(w => { if (!w.role) return; roles.add(w.role); (bandsByRole[w.role] ||= new Set()).add(w.band==null ? '' : String(w.band)); });
 
     const allowed = [...roles].sort((a,b)=> a.localeCompare(b));
     selRole.innerHTML = `<option value="">Select role…</option>` + allowed.map(code => `<option value="${code}">${code}</option>`).join('');
     selRole.disabled = !parentEditable;
 
-    // If editing an existing row, pre-select role/band
     if (existing?.role) {
       selRole.value = existing.role;
       const bandSet = [...(bandsByRole[existing.role] || new Set())];
@@ -3644,10 +3637,10 @@ async function openCandidateRateModal(candidate_id, existing) {
   }
 
   selClient.addEventListener('change', async () => { L('[EVENT] client change'); if (parentEditable) await refreshClientRoles(selClient.value); });
-  selRateT .addEventListener('change', () => { L('[EVENT] rate_type change'); if (parentEditable) recomputeOverrideState(); });
-  inFrom   .addEventListener('change', async () => { L('[EVENT] date_from change'); if (parentEditable) await refreshClientRoles(selClient.value); });
-  selRole  .addEventListener('change', async () => { L('[EVENT] role change'); if (parentEditable) await recomputeOverrideState(); });
-  selBand  .addEventListener('change', () => { L('[EVENT] band change'); if (parentEditable) recomputeOverrideState(); });
+  selRateT .addEventListener('change',        () => { L('[EVENT] rate_type change'); if (parentEditable) recomputeOverrideState(); });
+  inFrom   .addEventListener('change',  async () => { L('[EVENT] date_from change'); if (parentEditable) await refreshClientRoles(selClient.value); });
+  selRole  .addEventListener('change',  async () => { L('[EVENT] role change'); if (parentEditable) await recomputeOverrideState(); });
+  selBand  .addEventListener('change',        () => { L('[EVENT] band change'); if (parentEditable) recomputeOverrideState(); });
   ['pay_day','pay_night','pay_sat','pay_sun','pay_bh'].forEach(n=>{
     const el = document.querySelector(`#candRateForm input[name="${n}"]`);
     if (el) el.addEventListener('input', () => { if (LOG_APPLY) console.log('[RATES][EVENT] pay change', n, el.value); recomputeOverrideState(); });
@@ -5352,48 +5345,34 @@ async function renderClientRatesTable() {
 }
 
 function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
-  // ===== Logging helpers (toggle with window.__LOG_MODAL = true/false) =====
+  // ===== Logging =====
   const LOG = (typeof window.__LOG_MODAL === 'boolean') ? window.__LOG_MODAL : false;
   const L  = (...a)=> { if (LOG) console.log('[MODAL]', ...a); };
   const GC = (label)=> { if (LOG) console.groupCollapsed('[MODAL]', label); };
   const GE = ()=> { if (LOG) console.groupEnd(); };
 
-  // ——— Helpers (scoped) ————————————————————————————————————————————————
+  // ===== helpers =====
   const stack = () => (window.__modalStack ||= []);
   const currentFrame = () => stack()[stack().length - 1] || null;
   const parentFrame  = () => (stack().length > 1 ? stack()[stack().length - 2] : null);
   const deep = (o) => JSON.parse(JSON.stringify(o));
 
-  // Backward-compat for optional params:
+  // Back-compat options shift
   let opts = options || {};
-  if (onReturn && typeof onReturn === 'object' && options === undefined) {
-    opts = onReturn; onReturn = undefined;
-  }
+  if (onReturn && typeof onReturn === 'object' && options === undefined) { opts = onReturn; onReturn = undefined; }
 
-  // Drop keys whose values are '', null or undefined (keep 0/false)
-  const stripEmpty = (obj) => {
-    const out = {};
-    for (const [k, v] of Object.entries(obj || {})) {
-      if (v === '' || v == null) continue;
-      out[k] = v;
-    }
-    return out;
-  };
+  const stripEmpty = (obj) => { const out={}; for (const [k,v] of Object.entries(obj||{})) { if (v===''||v==null) continue; out[k]=v; } return out; };
 
   function setFormReadOnly(root, ro) {
     if (!root) return;
     root.querySelectorAll('input, select, textarea, button').forEach((el) => {
       const isDisplayOnly = el.id === 'tms_ref_display' || el.id === 'cli_ref_display';
       if (el.type === 'button') {
-        const controlIds = new Set(['btnCloseModal','btnDelete','btnEditModal','btnSave','btnRelated']);
-        if (!controlIds.has(el.id)) el.disabled = !!ro;
+        const allow = new Set(['btnCloseModal','btnDelete','btnEditModal','btnSave','btnRelated']);
+        if (!allow.has(el.id)) el.disabled = !!ro;
         return;
       }
-      if (isDisplayOnly) {
-        el.setAttribute('disabled','true');
-        el.setAttribute('readonly','true');
-        return;
-      }
+      if (isDisplayOnly) { el.setAttribute('disabled','true'); el.setAttribute('readonly','true'); return; }
       if (ro) { el.setAttribute('disabled','true'); el.setAttribute('readonly','true'); }
       else    { el.removeAttribute('disabled');   el.removeAttribute('readonly'); }
     });
@@ -5410,24 +5389,18 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
       m.style.transform = '';
       m.classList.remove('dragging');
     }
-    document.onmousemove = null;
-    document.onmouseup   = null;
+    document.onmousemove = null; document.onmouseup = null;
   }
 
   const modalEl = byId('modal');
   if (modalEl) {
-    modalEl.style.position = '';
-    modalEl.style.left = '';
-    modalEl.style.top = '';
-    modalEl.style.right = '';
-    modalEl.style.bottom = '';
-    modalEl.style.transform = '';
-    modalEl.classList.remove('dragging');
+    modalEl.style.position = ''; modalEl.style.left = ''; modalEl.style.top = '';
+    modalEl.style.right = '';    modalEl.style.bottom = '';
+    modalEl.style.transform = ''; modalEl.classList.remove('dragging');
   }
 
-  // ——— Frame object ————————————————————————————————————————————————
+  // ===== frame =====
   const frame = {
-    // Stable per-frame token used to "own" the Save/Apply button reliably
     _token: `f:${Date.now()}:${Math.random().toString(36).slice(2)}`,
 
     title,
@@ -5438,361 +5411,229 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
     hasId: !!hasId,
     entity: (window.modalCtx && window.modalCtx.entity) || null,
 
-    // utility modal flags
     noParentGate: !!opts.noParentGate,
     forceEdit:    !!opts.forceEdit,
-    kind:         opts.kind || null,     // ← used to scope Delete to child 'client-rate' / 'candidate-override'
+    kind:         opts.kind || null,
 
     currentTabKey: (Array.isArray(tabs) && tabs.length ? tabs[0].key : null),
 
-    // State
     mode: (opts.forceEdit ? 'edit' : (hasId ? 'view' : 'create')),
-    isDirty: false,
-    _snapshot: null,
-
-    _detachDirty: null,
-    _detachGlobal: null,
-    _hasMountedOnce: false,
-    _wired: false,
-    _closing: false,
-    _saving: false,
-    _confirmingDiscard: false, // re-entrancy guard
-
-    // Child-Apply integration: remember last desired Apply state from child logic
-    _applyDesired: null,
+    isDirty:false, _snapshot:null, _detachDirty:null, _detachGlobal:null, _hasMountedOnce:false, _wired:false, _closing:false, _saving:false, _confirmingDiscard:false,
+    _applyDesired:null,
 
     persistCurrentTabState() {
-      if (!window.modalCtx || (this.mode === 'view')) {
-        L('persist(skip)', { reason: 'mode=view or no modalCtx', mode: this.mode });
-        return;
-      }
+      if (!window.modalCtx || this.mode === 'view') { L('persist(skip)', { reason:'mode=view or no modalCtx', mode:this.mode }); return; }
       const sentinel = window.modalCtx?.openToken || null;
-      const initialId = (window.modalCtx.data?.id ?? sentinel);
-
-      const fs = window.modalCtx.formState || { __forId: initialId, main:{}, pay:{} };
-      if (fs.__forId == null) fs.__forId = initialId;
+      const initial  = (window.modalCtx.data?.id ?? sentinel);
+      const fs = window.modalCtx.formState || { __forId: initial, main:{}, pay:{} };
+      if (fs.__forId == null) fs.__forId = initial;
 
       if (this.currentTabKey === 'main' && byId('tab-main')) {
-        const collected = collectForm('#tab-main');
-        const cleaned   = stripEmpty(collected);
-        fs.main = { ...(fs.main||{}), ...cleaned };
+        const c = collectForm('#tab-main'); fs.main = { ...(fs.main||{}), ...stripEmpty(c) };
       }
-      if (this.currentTabKey === 'pay' && byId('tab-pay')) {
-        const collected = collectForm('#tab-pay');
-        const cleaned   = stripEmpty(collected);
-        fs.pay = { ...(fs.pay||{}), ...cleaned };
+      if (this.currentTabKey === 'pay'  && byId('tab-pay'))  {
+        const c = collectForm('#tab-pay');  fs.pay  = { ...(fs.pay ||{}), ...stripEmpty(c) };
       }
       window.modalCtx.formState = fs;
     },
 
     mergedRowForTab(k) {
       const base = { ...(window.modalCtx?.data || {}) };
-      const fs   = window.modalCtx?.formState || {};
+      const fs   = (window.modalCtx?.formState || {});
       const rid  = window.modalCtx?.data?.id ?? null;
       const fid  = fs.__forId ?? null;
       const sentinel = window.modalCtx?.openToken ?? null;
-
-      const sameRecord =
-        (fid === rid) ||
-        (rid == null && (fid === sentinel || fid == null));
-
-      const stagedRaw = sameRecord
-        ? ((k === 'main') ? (fs.main || {}) : (k === 'pay') ? (fs.pay || {}) : {})
-        : {};
-
-      const staged = stripEmpty(stagedRaw);
-      return { ...base, ...staged };
+      const same = (fid===rid) || (rid==null && (fid===sentinel || fid==null));
+      const staged = same ? ((k==='main')?(fs.main||{}):(k==='pay')?(fs.pay||{}):{}) : {};
+      return { ...base, ...stripEmpty(staged) };
     },
 
     _attachDirtyTracker() {
-      if (this._detachDirty) { try { this._detachDirty(); } catch(_){}; this._detachDirty = null; }
+      if (this._detachDirty) { try { this._detachDirty(); } catch {} this._detachDirty = null; }
       const root = byId('modalBody'); if (!root) return;
-
-      const onDirty = (ev)=>{
+      const onDirty = (ev) => {
         if (ev && !ev.isTrusted) return;
-        const isChild = stack().length > 1;
+        const isChild = (stack().length > 1);
         if (isChild) {
-          const p = parentFrame();
-          if (p && (p.mode === 'edit' || p.mode === 'create')) {
-            p.isDirty = true;
-            p._updateButtons && p._updateButtons();
-          }
+          const p = parentFrame(); if (p && (p.mode==='edit' || p.mode==='create')) { p.isDirty = true; p._updateButtons && p._updateButtons(); }
         } else {
-          if (this.mode === 'edit' || this.mode === 'create') {
-            this.isDirty = true;
-            this._updateButtons && this._updateButtons();
-          }
+          if (this.mode==='edit' || this.mode==='create') { this.isDirty = true; this._updateButtons && this._updateButtons(); }
         }
-        // live repaint for candidate rates
-        try {
-          const top = currentFrame();
-          if (top && top.entity === 'candidates' && top.currentTabKey === 'rates') {
-            renderCandidateRatesTable?.();
-          }
-        } catch {}
+        // live repaint for candidate rates only on Rates tab
+        try { const t=currentFrame(); if (t && t.entity==='candidates' && t.currentTabKey==='rates') { renderCandidateRatesTable?.(); } } catch {}
       };
       root.addEventListener('input', onDirty, true);
-      root.addEventListener('change', onDirty, true);
-      this._detachDirty = ()=> {
-        root.removeEventListener('input', onDirty, true);
-        root.removeEventListener('change', onDirty, true);
-      };
+      root.addEventListener('change',onDirty, true);
+      this._detachDirty = ()=>{ root.removeEventListener('input',onDirty,true); root.removeEventListener('change',onDirty,true); };
     },
 
     setTab(k) {
       GC(`setTab(${k})`);
-      const doPersist = this._hasMountedOnce;
-      if (doPersist) this.persistCurrentTabState();
+      const persist = this._hasMountedOnce; if (persist) this.persistCurrentTabState();
 
-      const rowForTab = this.mergedRowForTab(k);
-      byId('modalBody').innerHTML = this.renderTab(k, rowForTab) || '';
+      byId('modalBody').innerHTML = this.renderTab(k, this.mergedRowForTab(k)) || '';
 
-      // Mount per-entity extras
-      if (this.entity === 'candidates' && k === 'rates') { mountCandidateRatesTab?.(); }
-      if (this.entity === 'candidates' && k === 'pay')   { mountCandidatePayTab?.(); }
-      if (this.entity === 'clients' && k === 'rates')     { mountClientRatesTab?.(); }
-      if (this.entity === 'clients' && k === 'hospitals') { mountClientHospitalsTab?.(); }
-      if (this.entity === 'clients' && k === 'settings')  { renderClientSettingsUI?.(window.modalCtx.clientSettingsState || {}); }
+      // Mount per-entity extras (only inject Rates host on Rates tab)
+      if (this.entity==='candidates' && k==='rates') { mountCandidateRatesTab?.(); }
+      if (this.entity==='candidates' && k==='pay')   { mountCandidatePayTab?.(); }
+      if (this.entity==='clients'    && k==='rates') { mountClientRatesTab?.(); }
+      if (this.entity==='clients'    && k==='hospitals') { mountClientHospitalsTab?.(); }
+      if (this.entity==='clients'    && k==='settings')  { renderClientSettingsUI?.(window.modalCtx.clientSettingsState||{}); }
 
       this.currentTabKey = k;
       this._attachDirtyTracker();
 
-      const isChild = stack().length > 1;
-      if (this.noParentGate) {
-        setFormReadOnly(byId('modalBody'), (this.mode === 'view' || this.mode === 'saving'));
-      } else if (isChild) {
-        const p = parentFrame();
-        setFormReadOnly(byId('modalBody'), !(p && (p.mode === 'edit' || p.mode === 'create')));
-      } else {
-        setFormReadOnly(byId('modalBody'), (this.mode === 'view' || this.mode === 'saving'));
-      }
+      const isChild = (stack().length > 1);
+      if (this.noParentGate) setFormReadOnly(byId('modalBody'), (this.mode==='view'||this.mode==='saving'));
+      else if (isChild)      { const p=parentFrame(); setFormReadOnly(byId('modalBody'), !(p && (p.mode==='edit'||p.mode==='create'))); }
+      else                   setFormReadOnly(byId('modalBody'), (this.mode==='view'||this.mode==='saving'));
 
-      this._hasMountedOnce = true;
-      GE();
+      this._hasMountedOnce = true; GE();
     }
   };
 
   function setFrameMode(frameObj, mode) {
-    const prevMode = frameObj.mode;
-    frameObj.mode = mode;
-    const isChild = stack().length > 1;
-
-    if (frameObj.noParentGate) {
-      setFormReadOnly(document.getElementById('modalBody'), (mode === 'view' || mode === 'saving'));
-    } else if (isChild) {
-      const p = parentFrame();
-      setFormReadOnly(document.getElementById('modalBody'), !(p && (p.mode === 'edit' || p.mode === 'create')));
-    } else {
-      setFormReadOnly(document.getElementById('modalBody'), (mode === 'view' || mode === 'saving'));
-    }
+    const prev = frameObj.mode; frameObj.mode = mode;
+    const isChild = (stack().length > 1);
+    if (frameObj.noParentGate) setFormReadOnly(byId('modalBody'), (mode==='view'||mode==='saving'));
+    else if (isChild)          { const p=parentFrame(); setFormReadOnly(byId('modalBody'), !(p && (p.mode==='edit'||p.mode==='create'))); }
+    else                       setFormReadOnly(byId('modalBody'), (mode==='view'||mode==='saving'));
 
     if (typeof frameObj._updateButtons === 'function') frameObj._updateButtons();
 
-    try {
-      const idx = stack().indexOf(frameObj);
-      window.dispatchEvent(new CustomEvent('modal-frame-mode-changed', { detail: { frameIndex: idx, mode } }));
-    } catch {}
+    try { const idx=stack().indexOf(frameObj); window.dispatchEvent(new CustomEvent('modal-frame-mode-changed',{detail:{frameIndex:idx,mode}})); } catch {}
 
-    const willRepaint = !!(frameObj._hasMountedOnce && frameObj.currentTabKey);
-    L('setFrameMode', { prevMode, nextMode: mode, _hasMountedOnce: frameObj._hasMountedOnce, willRepaint });
-    if (willRepaint) frameObj.setTab(frameObj.currentTabKey);
+    const repaint = !!(frameObj._hasMountedOnce && frameObj.currentTabKey);
+    L('setFrameMode', { prevMode:prev, nextMode:mode, _hasMountedOnce:frameObj._hasMountedOnce, willRepaint:repaint });
+    if (repaint) frameObj.setTab(frameObj.currentTabKey);
   }
 
-  // ——— Push frame & show overlay ———————————————————————————————————————
+  // push + paint
   stack().push(frame);
   byId('modalBack').style.display = 'flex';
 
   function renderTop() {
     GC('renderTop()');
-    const isChild = stack().length > 1;
-    const top = currentFrame();
-    const parent = parentFrame();
+    const isChild = (stack().length > 1);
+    const top     = currentFrame();
+    const parent  = parentFrame();
 
-    if (typeof top._detachGlobal === 'function') {
-      try { top._detachGlobal(); } catch(_) {}
-      top._wired = false;
-    }
+    if (typeof top._detachGlobal === 'function') { try { top._detachGlobal(); } catch {} top._wired = false; }
 
     byId('modalTitle').textContent = top.title;
 
-    const tabsEl = byId('modalTabs');
-    tabsEl.innerHTML = '';
-    (top.tabs || []).forEach((t, i) => {
-      const b = document.createElement('button');
-      b.textContent = t.label || t.title || t.key;
-      if (i === 0 && !top.currentTabKey) top.currentTabKey = t.key;
-      if (t.key === top.currentTabKey || (i === 0 && !top.currentTabKey)) b.classList.add('active');
-      b.onclick = () => {
-        if (top.mode === 'saving') return;
-        tabsEl.querySelectorAll('button').forEach(x => x.classList.remove('active'));
-        b.classList.add('active');
-        top.setTab(t.key);
-      };
+    const tabsEl = byId('modalTabs'); tabsEl.innerHTML='';
+    (top.tabs||[]).forEach((t,i)=>{
+      const b=document.createElement('button'); b.textContent = t.label||t.title||t.key;
+      if (i===0 && !top.currentTabKey) top.currentTabKey = t.key;
+      if (t.key===top.currentTabKey || (i===0 && !top.currentTabKey)) b.classList.add('active');
+      b.onclick = ()=>{ if (top.mode==='saving') return; tabsEl.querySelectorAll('button').forEach(x=>x.classList.remove('active')); b.classList.add('active'); top.setTab(t.key); };
       tabsEl.appendChild(b);
     });
 
-    if (top.currentTabKey) { top.setTab(top.currentTabKey); }
-    else if (top.tabs && top.tabs[0]) { top.setTab(top.tabs[0].key); }
-    else { byId('modalBody').innerHTML = top.renderTab('form', {}) || ''; }
+    if (top.currentTabKey) top.setTab(top.currentTabKey);
+    else if (top.tabs && top.tabs[0]) top.setTab(top.tabs[0].key);
+    else byId('modalBody').innerHTML = top.renderTab('form',{})||'';
 
-    const btnSave   = byId('btnSave');
-    const btnClose  = byId('btnCloseModal');
-    const btnDelete = byId('btnDelete');
-    const header    = byId('modalDrag');
-    const modalNode = byId('modal');
+    const btnSave  = byId('btnSave');
+    const btnClose = byId('btnCloseModal');
+    const btnDel   = byId('btnDelete');
+    const header   = byId('modalDrag');
+    const modalNode= byId('modal');
 
-    const showChildDelete = isChild && (top.kind === 'client-rate' || top.kind === 'candidate-override') && top.hasId;
-    btnDelete.style.display = showChildDelete ? '' : 'none';
-    btnDelete.onclick = null;
+    const showChildDelete = isChild && (top.kind==='client-rate' || top.kind==='candidate-override') && top.hasId;
+    btnDel.style.display = showChildDelete ? '' : 'none'; btnDel.onclick = null;
 
     let btnEdit = byId('btnEditModal');
     if (!btnEdit) {
-      btnEdit = document.createElement('button');
-      btnEdit.id = 'btnEditModal';
-      btnEdit.type = 'button';
-      btnEdit.className = 'btn btn-outline btn-sm';
-      btnEdit.textContent = 'Edit';
-      const actionsBar = btnSave?.parentElement || btnClose?.parentElement;
-      if (actionsBar) actionsBar.insertBefore(btnEdit, btnSave);
+      btnEdit=document.createElement('button');
+      btnEdit.id='btnEditModal'; btnEdit.type='button'; btnEdit.className='btn btn-outline btn-sm'; btnEdit.textContent='Edit';
+      const bar = btnSave?.parentElement || btnClose?.parentElement; if (bar) bar.insertBefore(btnEdit, btnSave);
     }
 
-    (function ensureDragUI() {
-      if (!header || !modalNode) return;
-      const onDown = (e) => {
-        if ((e.button !== 0 && e.type === 'mousedown') || e.target.closest('button')) return;
-        const rect = modalNode.getBoundingClientRect();
-        modalNode.style.position = 'fixed';
-        modalNode.style.left = rect.left + 'px';
-        modalNode.style.top  = rect.top  + 'px';
-        modalNode.style.right = 'auto';
-        modalNode.style.bottom= 'auto';
-        modalNode.style.transform = 'none';
-        modalNode.classList.add('dragging');
-        const offsetX = e.clientX - rect.left;
-        const offsetY = e.clientY - rect.top;
-        document.onmousemove = (ev) => {
-          let l = ev.clientX - offsetX;
-          let t = ev.clientY - offsetY;
-          const maxL = Math.max(0, window.innerWidth  - rect.width);
-          const maxT = Math.max(0, window.innerHeight - rect.height);
-          if (l < 0) l = 0; if (t < 0) t = 0;
-          if (l > maxL) l = maxL; if (t > maxT) t = maxT;
-          modalNode.style.left = l + 'px';
-          modalNode.style.top  = t + 'px';
-        };
-        document.onmouseup = () => {
-          modalNode.classList.remove('dragging');
-          document.onmousemove = null;
-          document.onmouseup = null;
-        };
+    (function dragWire(){
+      if(!header||!modalNode) return;
+      const onDown = e=>{
+        if ((e.button!==0 && e.type==='mousedown') || e.target.closest('button')) return;
+        const R=modalNode.getBoundingClientRect();
+        modalNode.style.position='fixed'; modalNode.style.left=R.left+'px'; modalNode.style.top=R.top+'px';
+        modalNode.style.right='auto'; modalNode.style.bottom='auto'; modalNode.style.transform='none'; modalNode.classList.add('dragging');
+        const ox=e.clientX-R.left, oy=e.clientY-R.top;
+        document.onmousemove = ev=>{ let l=ev.clientX-ox, t=ev.clientY-oy; const ml=Math.max(0,window.innerWidth-R.width), mt=Math.max(0,window.innerHeight-R.height); if(l<0)l=0; if(t<0)t=0; if(l>ml)l=ml; if(t>mt)t=mt; modalNode.style.left=l+'px'; modalNode.style.top=t+'px'; };
+        document.onmouseup   = ()=>{ modalNode.classList.remove('dragging'); document.onmousemove=null; document.onmouseup=null; };
         e.preventDefault();
       };
-      const onDbl = (e) => { if (!e.target.closest('button')) sanitizeModalGeometry(); };
+      const onDbl = e=>{ if(!e.target.closest('button')) sanitizeModalGeometry(); };
       header.addEventListener('mousedown', onDown);
-      header.addEventListener('dblclick', onDbl);
-      const prevDetach = top._detachGlobal;
-      top._detachGlobal = () => {
-        try { header.removeEventListener('mousedown', onDown); } catch {}
-        try { header.removeEventListener('dblclick', onDbl); } catch {}
-        document.onmousemove = null;
-        document.onmouseup = null;
-        if (typeof prevDetach === 'function') { try { prevDetach(); } catch {} }
-      };
+      header.addEventListener('dblclick',  onDbl);
+      const prev=top._detachGlobal;
+      top._detachGlobal = ()=>{ try{header.removeEventListener('mousedown',onDown);}catch{} try{header.removeEventListener('dblclick',onDbl);}catch{} document.onmousemove=null; document.onmouseup=null; if(typeof prev==='function'){ try{prev();}catch{} } };
     })();
 
-    const defaultPrimary =
-      (top.kind === 'advanced-search') ? 'Search'
-      : (top.noParentGate ? 'Apply' : (isChild ? 'Apply' : 'Save'));
-    btnSave.textContent = defaultPrimary;
-    btnSave.setAttribute('aria-label', defaultPrimary);
+    const defaultPrimary = (top.kind==='advanced-search') ? 'Search' : (top.noParentGate ? 'Apply' : (isChild ? 'Apply' : 'Save'));
+    btnSave.textContent = defaultPrimary; btnSave.setAttribute('aria-label', defaultPrimary);
 
-    const updateSecondaryLabel = () => {
-      const label =
-        (top.kind === 'advanced-search') ? 'Close'
-        : ((isChild || top.mode === 'edit' || top.mode === 'create')
-            ? (top.isDirty ? 'Discard' : 'Cancel')
-            : 'Close');
-      btnClose.textContent = label;
-      btnClose.setAttribute('aria-label', label);
-      btnClose.setAttribute('title', label);
+    const setCloseLabel = ()=>{
+      const label = (top.kind==='advanced-search') ? 'Close'
+                 : ((isChild || top.mode==='edit' || top.mode==='create') ? (top.isDirty ? 'Discard' : 'Cancel') : 'Close');
+      btnClose.textContent = label; btnClose.setAttribute('aria-label',label); btnClose.setAttribute('title',label);
     };
 
-    top._updateButtons = () => {
-      const parentEditable = top.noParentGate ? true : (parent ? (parent.mode === 'edit' || parent.mode === 'create') : true);
-      const relatedBtn = document.getElementById('btnRelated');
+    top._updateButtons = ()=>{
+      const parentEditable = top.noParentGate ? true : (parent ? (parent.mode==='edit' || parent.mode==='create') : true);
+      const relatedBtn = byId('btnRelated');
 
-      if (top.kind === 'advanced-search') {
-        btnEdit.style.display = 'none';
-        btnSave.style.display = '';
-        btnSave.disabled = !!top._saving;
-        if (relatedBtn) relatedBtn.disabled = true;
+      if (top.kind==='advanced-search') {
+        btnEdit.style.display='none'; btnSave.style.display=''; btnSave.disabled=!!top._saving; if (relatedBtn) relatedBtn.disabled=true;
       } else if (isChild && !top.noParentGate) {
         btnSave.style.display = parentEditable ? '' : 'none';
-        const wantApply = (top._applyDesired === true);
+        const wantApply = (top._applyDesired===true);
         btnSave.disabled = (!parentEditable) || top._saving || !wantApply;
-        btnEdit.style.display = 'none';
-        if (relatedBtn) relatedBtn.disabled = true;
+        btnEdit.style.display='none'; if (relatedBtn) relatedBtn.disabled=true;
         if (LOG) console.log('[MODAL] child _updateButtons()', { parentEditable, wantApply, disabled: btnSave.disabled });
       } else {
-        btnEdit.style.display = (top.mode === 'view' && top.hasId) ? '' : 'none';
-        if (relatedBtn) relatedBtn.disabled = !(top.mode === 'view' && top.hasId);
-        if (top.mode === 'view') {
-          btnSave.style.display = top.noParentGate ? '' : 'none';
-          btnSave.disabled = top._saving;
-        } else {
-          btnSave.style.display = '';
-          btnSave.disabled = top._saving;
-        }
+        btnEdit.style.display = (top.mode==='view' && top.hasId) ? '' : 'none';
+        if (relatedBtn) relatedBtn.disabled = !(top.mode==='view' && top.hasId);
+        if (top.mode==='view') { btnSave.style.display = top.noParentGate ? '' : 'none'; btnSave.disabled = top._saving; }
+        else { btnSave.style.display=''; btnSave.disabled = top._saving; }
       }
-      updateSecondaryLabel();
+      setCloseLabel();
     };
 
     top._updateButtons();
 
-    btnEdit.onclick = () => {
-      const isChild = stack().length > 1;
-      if (isChild || top.noParentGate || top.kind === 'advanced-search') return;
-      if (top.mode === 'view') {
+    // Snapshot includes overrides so Cancel truly clears staged changes
+    btnEdit.onclick = ()=>{
+      if (isChild || top.noParentGate || top.kind==='advanced-search') return;
+      if (top.mode==='view') {
         top._snapshot = {
-          data:                 deep(window.modalCtx?.data || null),
-          formState:            deep(window.modalCtx?.formState || null),
-          rolesState:           deep(window.modalCtx?.rolesState || null),
-          ratesState:           deep(window.modalCtx?.ratesState || null),
-          hospitalsState:       deep(window.modalCtx?.hospitalsState || null),
-          clientSettingsState:  deep(window.modalCtx?.clientSettingsState || null),
-          // 👇 snapshot overrides so Cancel truly reverts staged edits/deletes/new
-          overrides:            deep(window.modalCtx?.overrides || { existing:[], stagedNew:[], stagedEdits:{}, stagedDeletes:[] })
+          data               : deep(window.modalCtx?.data||null),
+          formState          : deep(window.modalCtx?.formState||null),
+          rolesState         : deep(window.modalCtx?.rolesState||null),
+          ratesState         : deep(window.modalCtx?.ratesState||null),
+          hospitalsState     : deep(window.modalCtx?.hospitalsState||null),
+          clientSettingsState: deep(window.modalCtx?.clientSettingsState||null),
+          overrides          : deep(window.modalCtx?.overrides || { existing:[], stagedNew:[], stagedEdits:{}, stagedDeletes:[] })
         };
-        top.isDirty = false;
-        setFrameMode(top, 'edit');
+        top.isDirty=false; setFrameMode(top,'edit');
       }
     };
 
-    const handleSecondary = () => {
+    const handleSecondary = ()=>{
       if (top._confirmingDiscard || top._closing) return;
 
-      if (top.kind === 'advanced-search') {
-        top._closing = true;
-        document.onmousemove = null; document.onmouseup = null;
-        const m = byId('modal'); if (m) m.classList.remove('dragging');
-        sanitizeModalGeometry();
-        const closing = stack().pop();
-        if (closing && closing._detachDirty)  { try { closing._detachDirty(); } catch(_){}; closing._detachDirty = null; }
-        if (closing && closing._detachGlobal) { try { closing._detachGlobal(); } catch(_){}; closing._detachGlobal = null; }
-        top._wired = false;
-        if (stack().length > 0) {
-          const parent = currentFrame();
-          renderTop();
-          try { parent.onReturn && parent.onReturn(); } catch(_) {}
-        } else {
-          discardAllModalsAndState();
-          if (window.__pendingFocus) { try { renderAll(); } catch (e) { console.error('refresh after modal close failed', e); } }
-        }
+      if (top.kind==='advanced-search') {
+        top._closing=true;
+        document.onmousemove=null; document.onmouseup=null; byId('modal')?.classList.remove('dragging'); sanitizeModalGeometry();
+        const closing=stack().pop(); if (closing?._detachDirty){ try{closing._detachDirty();}catch{} closing._detachDirty=null; }
+        if (closing?._detachGlobal){ try{closing._detachGlobal();}catch{} closing._detachGlobal=null; } top._wired=false;
+        if (stack().length>0) { const p=currentFrame(); renderTop(); try{ p.onReturn && p.onReturn(); } catch{} }
+        else { discardAllModalsAndState(); if (window.__pendingFocus) { try{ renderAll(); } catch(e){ console.error('refresh after modal close failed',e); } } }
         return;
       }
 
-      const isChild = stack().length > 1;
-      if (!isChild && !top.noParentGate && top.mode === 'edit') {
+      const isChildNow = (stack().length > 1);
+      if (!isChildNow && !top.noParentGate && top.mode==='edit') {
         if (!top.isDirty) {
           if (top._snapshot && window.modalCtx) {
             window.modalCtx.data                = deep(top._snapshot.data);
@@ -5804,13 +5645,10 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
             if (top._snapshot.overrides) window.modalCtx.overrides = deep(top._snapshot.overrides);
             try { renderCandidateRatesTable?.(); } catch {}
           }
-          top.isDirty = false; setFrameMode(top, 'view'); top._snapshot = null;
-          try { window.__toast?.('No changes'); } catch {}
-          return;
+          top.isDirty=false; setFrameMode(top,'view'); top._snapshot=null;
+          try{ window.__toast?.('No changes'); }catch{}; return;
         } else {
-          let ok = false;
-          try { top._confirmingDiscard = true; btnClose.disabled = true; ok = window.confirm('Discard changes and return to view?'); }
-          finally { top._confirmingDiscard = false; btnClose.disabled = false; }
+          let ok=false; try{ top._confirmingDiscard=true; btnClose.disabled=true; ok=window.confirm('Discard changes and return to view?'); } finally { top._confirmingDiscard=false; btnClose.disabled=false; }
           if (!ok) return;
           if (top._snapshot && window.modalCtx) {
             window.modalCtx.data                = deep(top._snapshot.data);
@@ -5822,41 +5660,24 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
             if (top._snapshot.overrides) window.modalCtx.overrides = deep(top._snapshot.overrides);
             try { renderCandidateRatesTable?.(); } catch {}
           }
-          top.isDirty = false; top._snapshot = null; setFrameMode(top, 'view'); return;
+          top.isDirty=false; top._snapshot=null; setFrameMode(top,'view'); return;
         }
       }
 
       if (top._closing) return;
-      top._closing = true;
+      top._closing=true;
+      document.onmousemove=null; document.onmouseup=null; byId('modal')?.classList.remove('dragging');
 
-      document.onmousemove = null;
-      document.onmouseup   = null;
-      const m = byId('modal'); if (m) m.classList.remove('dragging');
-
-      if (!isChild && !top.noParentGate && (top.mode === 'create') && top.isDirty) {
-        let ok = false;
-        try { top._confirmingDiscard = true; btnClose.disabled = true; ok = window.confirm('You have unsaved changes. Discard them and close?'); }
-        finally { top._confirmingDiscard = false; btnClose.disabled = false; }
-        if (!ok) { top._closing = false; return; }
+      if (!isChildNow && !top.noParentGate && top.mode==='create' && top.isDirty) {
+        let ok=false; try{ top._confirmingDiscard=true; btnClose.disabled=true; ok=window.confirm('You have unsaved changes. Discard them and close?'); } finally { top._confirmingDiscard=false; btnClose.disabled=false; }
+        if (!ok) { top._closing=false; return; }
       }
 
       sanitizeModalGeometry();
-
-      const closing = stack().pop();
-      if (closing && closing._detachDirty)  { try { closing._detachDirty(); } catch(_){}; closing._detachDirty = null; }
-      if (closing && closing._detachGlobal) { try { closing._detachGlobal(); } catch(_){}; closing._detachGlobal = null; }
-      top._wired = false;
-
-      if (stack().length > 0) {
-        const parent = currentFrame();
-        renderTop();
-        try { parent.onReturn && parent.onReturn(); } catch(_) {}
-      } else {
-        discardAllModalsAndState();
-        if (window.__pendingFocus) {
-          try { renderAll(); } catch (e) { console.error('refresh after modal close failed', e); }
-        }
-      }
+      const closing=stack().pop(); if (closing?._detachDirty){ try{closing._detachDirty();}catch{} closing._detachDirty=null; }
+      if (closing?._detachGlobal){ try{closing._detachGlobal();}catch{} closing._detachGlobal=null; } top._wired=false;
+      if (stack().length>0) { const p=currentFrame(); renderTop(); try{ p.onReturn && p.onReturn(); }catch{} }
+      else { discardAllModalsAndState(); if (window.__pendingFocus) { try{ renderAll(); } catch(e) { console.error('refresh after modal close failed', e); } } }
     };
     byId('btnCloseModal').onclick = handleSecondary;
 
@@ -5869,186 +5690,97 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
       } catch { return false; }
     };
 
-    // ===== Save/Apply: bind to TOP frame token and always execute for current TOP frame =====
     async function saveForFrame(fr) {
-      if (!fr) return;
-      if (fr._saving) return;
+      if (!fr || fr._saving) return;
+      const onlyDel   = hasStagedClientDeletes();
+      const allowApply= (fr.kind==='candidate-override' || fr.kind==='client-rate') && fr._applyDesired===true;
 
-      const onlyDeletes = hasStagedClientDeletes();
-
-      // 👇 **CHANGE HERE** — allow child "Apply" when _applyDesired is true, even if frame.isDirty is false
-      const allowApply = (fr.kind === 'candidate-override' || fr.kind === 'client-rate') && fr._applyDesired === true;
-
-      if (fr.kind !== 'advanced-search' && !fr.noParentGate && fr.mode !== 'view' && !fr.isDirty && !onlyDeletes && !allowApply) {
-        const isChild = stack().length > 1;
-        if (isChild) {
-          sanitizeModalGeometry();
-          stack().pop();
-          if (stack().length > 0) {
-            const parent = currentFrame();
-            renderTop();
-            try { parent.onReturn && parent.onReturn(); } catch(_) {}
-          } else {
-            discardAllModalsAndState();
-          }
+      if (fr.kind!=='advanced-search' && !fr.noParentGate && fr.mode!=='view' && !fr.isDirty && !onlyDel && !allowApply) {
+        const isChildNow=(stack().length>1);
+        if (isChildNow) {
+          sanitizeModalGeometry(); stack().pop();
+          if (stack().length>0) { const p=currentFrame(); renderTop(); try{ p.onReturn && p.onReturn(); }catch{} }
+          else { discardAllModalsAndState(); }
         } else {
-          fr.isDirty = false; fr._snapshot = null; setFrameMode(fr, 'view'); fr._updateButtons && fr._updateButtons();
+          fr.isDirty=false; fr._snapshot=null; setFrameMode(fr,'view'); fr._updateButtons&&fr._updateButtons();
         }
-        try { window.__toast?.('No changes'); } catch {}
-        return;
+        try{ window.__toast?.('No changes'); }catch{}; return;
       }
 
       fr.persistCurrentTabState();
+      const isChildNow=(stack().length>1);
+      if (isChildNow && !fr.noParentGate && fr.kind!=='advanced-search') { const p=parentFrame(); if (!p || !(p.mode==='edit'||p.mode==='create')) return; }
+      fr._saving=true; fr._updateButtons&&fr._updateButtons();
 
-      const isChild = stack().length > 1;
-      if (isChild && !fr.noParentGate && fr.kind !== 'advanced-search') {
-        const parent = parentFrame();
-        if (!parent || !(parent.mode === 'edit' || parent.mode === 'create')) return;
+      let ok=false, saved=null;
+      if (typeof fr.onSave==='function') {
+        try { const res=await fr.onSave(); ok = (res===true) || (res && res.ok===true); if (res&&res.saved) saved=res.saved; } catch { ok=false; }
       }
+      fr._saving=false; if (!ok) { fr._updateButtons&&fr._updateButtons(); return; }
 
-      fr._saving = true; fr._updateButtons && fr._updateButtons();
-
-      let ok = false; let savedRow = null;
-      if (typeof fr.onSave === 'function') {
-        try {
-          const res = await fr.onSave();
-          ok = (res === true) || (res && res.ok === true);
-          if (res && res.saved) savedRow = res.saved;
-        } catch (_) { ok = false; }
-      }
-
-      fr._saving = false;
-
-      if (!ok) { fr._updateButtons && fr._updateButtons(); return; }
-
-      const isChild2 = stack().length > 1;
-      if (isChild2) {
+      if (isChildNow) {
         try { window.dispatchEvent(new CustomEvent('modal-dirty')); } catch {}
-        sanitizeModalGeometry();
-        stack().pop();
-        if (stack().length > 0) {
-          const parent = currentFrame();
-          parent.isDirty = true;
-          parent._updateButtons && parent._updateButtons();
-          renderTop();
-          try { parent.onReturn && parent.onReturn(); } catch(_) {}
+        sanitizeModalGeometry(); stack().pop();
+        if (stack().length>0) {
+          const p=currentFrame(); p.isDirty=true; p._updateButtons&&p._updateButtons(); renderTop(); try{ p.onReturn && p.onReturn(); }catch{}
         } else {
           discardAllModalsAndState();
         }
       } else {
-        if (savedRow && window.modalCtx) {
-          window.modalCtx.data = { ...(window.modalCtx.data || {}), ...savedRow };
-          fr.hasId = !!window.modalCtx.data?.id;
-        }
-        fr.isDirty = false; fr._snapshot = null; setFrameMode(fr, 'view');
+        if (saved && window.modalCtx) { window.modalCtx.data = { ...(window.modalCtx.data||{}), ...saved }; fr.hasId = !!window.modalCtx.data?.id; }
+        fr.isDirty=false; fr._snapshot=null; setFrameMode(fr,'view');
       }
     }
 
-    const onSaveClick = async (ev) => {
-      const btn = ev && ev.currentTarget ? ev.currentTarget : byId('btnSave');
-      const topNow = currentFrame();
-      const boundToken = btn && btn.dataset ? btn.dataset.ownerToken : undefined;
-      if (LOG) console.log('[MODAL] click #btnSave', { boundToken, topToken: topNow?._token, topKind: topNow?.kind, topTitle: topNow?.title });
-
-      if (!topNow) return;
-      if (boundToken !== topNow._token) {
-        if (LOG) console.warn('[MODAL] save token mismatch → executing for TOP frame', { boundToken, wants: topNow._token });
-      }
+    const onSaveClick = async (ev)=>{
+      const btn=ev?.currentTarget || byId('btnSave');
+      const topNow=currentFrame(); const bound=btn?.dataset?.ownerToken;
+      if (LOG) console.log('[MODAL] click #btnSave', {boundToken:bound, topToken:topNow?._token, topKind:topNow?.kind, topTitle:topNow?.title});
+      if(!topNow) return; if(bound!==topNow._token){ if(LOG) console.warn('[MODAL] token mismatch; using top frame'); }
       await saveForFrame(topNow);
     };
 
-    const bindSaveToFrame = (btn, fr) => {
-      if (!btn || !fr) return;
-      btn.dataset.ownerToken = fr._token;
-      btn.onclick = onSaveClick;
-      if (LOG) console.log('[MODAL] bind #btnSave →', { ownerToken: fr._token, kind: fr.kind || '(parent)', title: fr.title, mode: fr.mode });
+    const bindSave = (btn,fr)=>{ if(!btn||!fr) return; btn.dataset.ownerToken = fr._token; btn.onclick = onSaveClick; if(LOG) console.log('[MODAL] bind #btnSave →',{ownerToken:fr._token,kind:fr.kind||'(parent)',title:fr.title,mode:fr.mode}); };
+    bindSave(btnSave, top);
+
+    const onDirtyEvt = ()=>{
+      const isChild=(stack().length>1);
+      if(isChild){ const p=parentFrame(); if(p && (p.mode==='edit'||p.mode==='create')){ p.isDirty=true; p._updateButtons&&p._updateButtons(); } }
+      else if(top.mode==='edit'||top.mode==='create'){ top.isDirty=true; top._updateButtons&&top._updateButtons(); }
+      try{ const t=currentFrame(); if(t && t.entity==='candidates' && t.currentTabKey==='rates'){ renderCandidateRatesTable?.(); } }catch{}
     };
-
-    bindSaveToFrame(btnSave, top);
-
-    const onDirtyEvt = () => {
-      const isChild = stack().length > 1;
-      if (isChild) {
-        const p = parentFrame();
-        if (p && (p.mode === 'edit' || p.mode === 'create')) {
-          p.isDirty = true; p._updateButtons && p._updateButtons();
-        }
-      } else if (top.mode === 'edit' || top.mode === 'create') {
-        top.isDirty = true; top._updateButtons && top._updateButtons();
-      }
-      try {
-        const t = currentFrame();
-        if (t && t.entity === 'candidates' && t.currentTabKey === 'rates') {
-          renderCandidateRatesTable?.();
-        }
-      } catch {}
+    const onApplyEvt = ev=>{
+      const isChildNow=(stack().length>1); if(!isChildNow) return;
+      const t=currentFrame(); if(!(t && (t.kind==='client-rate'||t.kind==='candidate-override'))) return;
+      const enabled=!!(ev && ev.detail && ev.detail.enabled); t._applyDesired=enabled; t._updateButtons&&t._updateButtons(); bindSave(byId('btnSave'), t);
+      if(LOG) console.log('[MODAL] onApplyEvt → _applyDesired =', enabled,'rebound save to top frame');
     };
-
-    const onApplyEvt = (ev) => {
-      const isChildNow = stack().length > 1;
-      if (!isChildNow) return;
-      const topNow = currentFrame();
-      if (!(topNow.kind === 'client-rate' || topNow.kind === 'candidate-override')) return;
-      const enabled = !!(ev && ev.detail && ev.detail.enabled);
-      topNow._applyDesired = enabled;
-      topNow._updateButtons && topNow._updateButtons();
-      bindSaveToFrame(byId('btnSave'), topNow);
-      if (LOG) console.log('[MODAL] onApplyEvt → _applyDesired =', enabled, 'rebound save to top frame');
-    };
-
-    const onModeChanged = (ev) => {
-      const isChildNow = stack().length > 1;
-      if (!isChildNow) return;
-      const parentIdx = stack().length - 2;
-      const changedIdx = ev && ev.detail ? ev.detail.frameIndex : -1;
-      if (changedIdx === parentIdx) {
-        if (LOG) console.log('[MODAL] parent mode changed → child _updateButtons()');
-        const topNow = currentFrame();
-        topNow._updateButtons && topNow._updateButtons();
-        bindSaveToFrame(byId('btnSave'), topNow);
-      }
+    const onModeChanged = ev=>{
+      const isChildNow=(stack().length>1); if(!isChildNow) return;
+      const parentIdx=stack().length-2, changed=ev?.detail?.frameIndex ?? -1;
+      if(changed===parentIdx){ if(LOG) console.log('[MODAL] parent mode changed → child _updateButtons()'); const t=currentFrame(); t._updateButtons&&t._updateButtons(); bindSave(byId('btnSave'), t); }
     };
 
     if (!top._wired) {
       window.addEventListener('modal-dirty', onDirtyEvt);
       window.addEventListener('modal-apply-enabled', onApplyEvt);
       window.addEventListener('modal-frame-mode-changed', onModeChanged);
-
-      const onEsc = (e) => {
-        if (e.key === 'Escape') {
-          if (top._confirmingDiscard || top._closing) return;
-          e.preventDefault(); byId('btnCloseModal').click();
-        }
-      };
+      const onEsc=e=>{ if(e.key==='Escape'){ if(top._confirmingDiscard||top._closing) return; e.preventDefault(); byId('btnCloseModal').click(); } };
       window.addEventListener('keydown', onEsc);
-
-      const onOverlayClick = (e) => {
-        if (top._confirmingDiscard || top._closing) return;
-        if (e.target === byId('modalBack')) byId('btnCloseModal').click();
-      };
+      const onOverlayClick=e=>{ if(top._confirmingDiscard||top._closing) return; if(e.target===byId('modalBack')) byId('btnCloseModal').click(); };
       byId('modalBack').addEventListener('click', onOverlayClick, true);
-
-      top._detachGlobal = () => {
-        try { window.removeEventListener('modal-dirty', onDirtyEvt); } catch {}
-        try { window.removeEventListener('modal-apply-enabled', onApplyEvt); } catch {}
-        try { window.removeEventListener('modal-frame-mode-changed', onModeChanged); } catch {}
-        try { window.removeEventListener('keydown', onEsc); } catch {}
-        try { byId('modalBack').removeEventListener('click', onOverlayClick, true); } catch {}
-      };
-
+      top._detachGlobal = ()=>{ try{window.removeEventListener('modal-dirty',onDirtyEvt);}catch{} try{window.removeEventListener('modal-apply-enabled',onApplyEvt);}catch{} try{window.removeEventListener('modal-frame-mode-changed',onModeChanged);}catch{} try{window.removeEventListener('keydown',onEsc);}catch{} try{byId('modalBack').removeEventListener('click', onOverlayClick, true);}catch{}; };
       top._wired = true;
     }
 
-    if (isChild && !top.noParentGate) {
-      const parentEditable = parent && (parent.mode === 'edit' || parent.mode === 'create');
-      setFormReadOnly(byId('modalBody'), !parentEditable);
-    } else {
-      setFrameMode(top, top.mode);
-    }
+    const parentEditable = parent && (parent.mode==='edit' || parent.mode==='create');
+    if (isChild && !top.noParentGate) setFormReadOnly(byId('modalBody'), !parentEditable);
+    else                              setFrameMode(top, top.mode);
+
     GE();
   }
 
-  byId('modalBack').style.display = 'flex';
+  byId('modalBack').style.display='flex';
   window.__getModalFrame = currentFrame;
   renderTop();
 }
