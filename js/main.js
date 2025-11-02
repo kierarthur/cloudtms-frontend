@@ -5664,6 +5664,9 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
     _saving: false,
     _confirmingDiscard: false, // re-entrancy guard for discard confirm
 
+    // Child-Apply integration: remember last desired Apply state from child logic
+    _applyDesired: null,
+
     persistCurrentTabState() {
       if (!window.modalCtx || (this.mode === 'view')) {
         L('persist(skip)', { reason: 'mode=view or no modalCtx', mode: this.mode });
@@ -5713,7 +5716,7 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
       if (this._detachDirty) { try { this._detachDirty(); } catch(_){}; this._detachDirty = null; }
       const root = byId('modalBody'); if (!root) return;
 
-      // ⬇️ FIX: bubble dirty from a child to its parent so Save enables even while child is open
+      // ⬇️ Bubble dirty from a child to its parent so Save enables even while child is open
       const onDirty = (ev)=>{
         if (ev && !ev.isTrusted) return;
         const isChild = stack().length > 1;
@@ -5787,6 +5790,12 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
     }
 
     if (typeof frameObj._updateButtons === 'function') frameObj._updateButtons();
+
+    // 🔔 Broadcast mode changes so children can re-evaluate their button gating
+    try {
+      const idx = stack().indexOf(frameObj);
+      window.dispatchEvent(new CustomEvent('modal-frame-mode-changed', { detail: { frameIndex: idx, mode } }));
+    } catch {}
 
     const willRepaint = !!(frameObj._hasMountedOnce && frameObj.currentTabKey);
     L('setFrameMode', { prevMode, nextMode: mode, _hasMountedOnce: frameObj._hasMountedOnce, willRepaint });
@@ -5923,10 +5932,13 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
         btnSave.disabled = !!top._saving;
         if (relatedBtn) relatedBtn.disabled = true;
       } else if (isChild && !top.noParentGate) {
+        // Child: base display follows parent editability, but final disabled honors _applyDesired
         btnSave.style.display = parentEditable ? '' : 'none';
-        btnSave.disabled = (!parentEditable) || top._saving;
+        const wantApply = (top._applyDesired === true);
+        btnSave.disabled = (!parentEditable) || top._saving || !wantApply;
         btnEdit.style.display = 'none';
         if (relatedBtn) relatedBtn.disabled = true;
+        if (LOG) console.log('[MODAL] child _updateButtons()', { parentEditable, wantApply, disabled: btnSave.disabled });
       } else {
         btnEdit.style.display = (top.mode === 'view' && top.hasId) ? '' : 'none';
         if (relatedBtn) relatedBtn.disabled = !(top.mode === 'view' && top.hasId);
@@ -6121,7 +6133,7 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
     };
     byId('btnSave').onclick = onSaveClick;
 
-    // ⬇️ FIXED: mark parent dirty even when child is open (see _attachDirtyTracker above too)
+    // ——— Global listeners to resolve parent/child gating races ———
     const onDirtyEvt = () => {
       const isChild = stack().length > 1;
       if (isChild) {
@@ -6134,8 +6146,33 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
       }
     };
 
+    // Child captures the latest Apply intent from business logic and stores it on the frame.
+    const onApplyEvt = (ev) => {
+      const isChild = stack().length > 1;
+      if (!isChild) return;
+      if (!(top.kind === 'client-rate' || top.kind === 'candidate-override')) return;
+      const enabled = !!(ev && ev.detail && ev.detail.enabled);
+      top._applyDesired = enabled;
+      top._updateButtons && top._updateButtons();
+      if (LOG) console.log('[MODAL] onApplyEvt → _applyDesired =', enabled);
+    };
+
+    // When parent mode changes (e.g., View→Edit), child re-evaluates buttons using stored _applyDesired.
+    const onModeChanged = (ev) => {
+      const isChild = stack().length > 1;
+      if (!isChild) return;
+      const parentIdx = stack().length - 2;
+      const changedIdx = ev && ev.detail ? ev.detail.frameIndex : -1;
+      if (changedIdx === parentIdx) {
+        if (LOG) console.log('[MODAL] parent mode changed → child _updateButtons()');
+        top._updateButtons && top._updateButtons();
+      }
+    };
+
     if (!top._wired) {
       window.addEventListener('modal-dirty', onDirtyEvt);
+      window.addEventListener('modal-apply-enabled', onApplyEvt);
+      window.addEventListener('modal-frame-mode-changed', onModeChanged);
 
       const onEsc = (e) => {
         if (e.key === 'Escape') {
@@ -6153,6 +6190,8 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
 
       top._detachGlobal = () => {
         try { window.removeEventListener('modal-dirty', onDirtyEvt); } catch {}
+        try { window.removeEventListener('modal-apply-enabled', onApplyEvt); } catch {}
+        try { window.removeEventListener('modal-frame-mode-changed', onModeChanged); } catch {}
         try { window.removeEventListener('keydown', onEsc); } catch {}
         try { byId('modalBack').removeEventListener('click', onOverlayClick, true); } catch {}
       };
@@ -6173,7 +6212,6 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
   window.__getModalFrame = currentFrame;
   renderTop();
 }
-
 
 
 
