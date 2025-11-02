@@ -313,29 +313,99 @@ let currentSelection = null;
 // =========================== renderTopNav (kept with reset) ===========================
 function renderTopNav(){
   const nav = byId('nav'); nav.innerHTML = '';
-  sections.forEach(s=>{
+
+  // ensure per-section list state exists (first-login / first visit)
+  window.__listState = window.__listState || {};
+
+  sections.forEach(s => {
     const b = document.createElement('button');
     b.innerHTML = `<span class="ico">${s.icon}</span> ${s.label}`;
     if (s.key === currentSection) b.classList.add('active');
-    b.onclick = ()=>{
+
+    b.onclick = () => {
       // keep the unsaved-changes prompt
       if (!confirmDiscardChangesIfDirty()) {
         console.debug('[NAV] blocked by dirty modal', { from: currentSection, to: s.key });
         return;
       }
+
       // always hard-reset modal state to avoid lingering listeners/state
       if ((window.__modalStack?.length || 0) > 0 || modalCtx?.entity) {
         console.debug('[NAV] tearing down modal state before switch', { from: currentSection, to: s.key });
         discardAllModalsAndState();
       }
-      currentSection = s.key;
-      currentRows = [];           // ensure no stale data flashes
+
+      // seed paging defaults for the target section if missing
+      if (!window.__listState[s.key]) {
+        window.__listState[s.key] = { page: 1, pageSize: 50, total: null, hasMore: false, filters: null };
+      }
+
+      currentSection   = s.key;
+      currentRows      = [];   // ensure no stale data flashes
       currentSelection = null;
+
       console.debug('[NAV] switched to section', currentSection);
       renderAll();
     };
+
     nav.appendChild(b);
   });
+
+  // Quick search: Enter to run a search and reset to page 1
+  try {
+    const q = byId('quickSearch');
+    if (q && !q.__wired) {
+      q.addEventListener('keydown', async (e) => {
+        if (e.key !== 'Enter') return;
+        if (!confirmDiscardChangesIfDirty()) return;
+
+        window.__listState = window.__listState || {};
+        const st = (window.__listState[currentSection] ||= { page: 1, pageSize: 50, total: null, hasMore: false, filters: null });
+
+        // always start from page 1 for a new quick search
+        st.page = 1;
+
+        const text = (q.value || '').trim();
+
+        // If the box is empty, clear filters and reload the section list
+        if (!text) {
+          st.filters = null;
+          const data = await loadSection();
+          return renderSummary(data);
+        }
+
+        // Build a minimal quick-search filters object per section
+        let filters = null;
+        if (currentSection === 'candidates') {
+          // heuristic: email → email, digits → phone, "first last" → split, otherwise first_name
+          if (text.includes('@')) {
+            filters = { email: text };
+          } else if (text.replace(/\D/g,'').length >= 7) {
+            filters = { phone: text };
+          } else if (text.includes(' ')) {
+            const [fn, ln] = text.split(' ').filter(Boolean);
+            filters = { first_name: fn || text, last_name: ln || '' };
+          } else {
+            filters = { first_name: text };
+          }
+        } else if (currentSection === 'clients') {
+          filters = { name: text };      // buildSearchQS maps name → q for clients
+        } else if (currentSection === 'umbrellas') {
+          filters = { name: text };      // buildSearchQS maps name → q for umbrellas
+        } else {
+          // for other sections, just reload without applying quick filters
+          const data = await loadSection();
+          return renderSummary(data);
+        }
+
+        // persist filters for paging/navigation and run the search
+        st.filters = filters;
+        const rows = await search(currentSection, filters);
+        renderSummary(rows);
+      });
+      q.__wired = true;
+    }
+  } catch {}
 }
 
 
@@ -582,10 +652,50 @@ function populateSearchFormFromFilters(filters={}, formSel='#searchForm'){
 }
 
 // Build querystring per section
+
+
+// -----------------------------
+// UPDATED: search()
+// -----------------------------
+async function search(section, filters={}){
+  window.__listState = window.__listState || {};
+  const st = (window.__listState[section] ||= { page: 1, pageSize: 50, total: null, hasMore: false, filters: null });
+  const map = {
+    candidates:'/api/search/candidates',
+    clients:'/api/search/clients',
+    umbrellas:'/api/search/umbrellas',
+    timesheets:'/api/search/timesheets',
+    invoices:'/api/search/invoices'
+  };
+  const p = map[section]; if (!p) return [];
+  const qs = buildSearchQS(section, filters);
+  const url = qs ? `${p}?${qs}` : p;
+  const r = await authFetch(API(url));
+  const rows = toList(r);
+  // update state
+  st.filters = { ...(filters || {}) };
+  // we infer hasMore from page_size in qs, but buildSearchQS uses state, so recompute here:
+  const ps = (st.pageSize === 'ALL') ? null : Number(st.pageSize || 50);
+  st.hasMore = (ps != null) ? (Array.isArray(rows) && rows.length === ps) : false;
+  return rows;
+}
+
 function buildSearchQS(section, filters={}){
+  window.__listState = window.__listState || {};
+  const st = (window.__listState[section] ||= { page: 1, pageSize: 50, total: null, hasMore: false, filters: null });
+
   const qs = new URLSearchParams();
   const add = (key, val) => { if (val==null || val==='') return; qs.append(key, String(val)); };
   const addArr = (key, arr) => { if (!Array.isArray(arr)) return; arr.forEach(v => { if (v!=null && v!=='') qs.append(key, String(v)); }); };
+
+  // attach paging from state (ALL handled by loader; still include page=1 for consistency)
+  if (st.pageSize !== 'ALL') {
+    add('page', st.page || 1);
+    add('page_size', st.pageSize || 50);
+  } else {
+    add('page', 1);
+    // omit page_size so loader can do multi-page accumulation
+  }
 
   switch (section) {
     case 'candidates': {
@@ -654,25 +764,6 @@ function buildSearchQS(section, filters={}){
   }
   return qs.toString();
 }
-
-// -----------------------------
-// UPDATED: search()
-// -----------------------------
-async function search(section, filters={}){
-  const map = {
-    candidates:'/api/search/candidates',
-    clients:'/api/search/clients',
-    umbrellas:'/api/search/umbrellas',
-    timesheets:'/api/search/timesheets',
-    invoices:'/api/search/invoices'
-  };
-  const p = map[section]; if (!p) return [];
-  const qs = buildSearchQS(section, filters);
-  const url = qs ? `${p}?${qs}` : p;
-  const r = await authFetch(API(url));
-  return toList(r);
-}
-
 // -----------------------------
 // NEW: Save search modal (new / overwrite / shared)
 // -----------------------------
@@ -1082,6 +1173,11 @@ async function openSearchModal(opts = {}) {
     [{ key: 'filter', title: 'Filters' }],
     () => formHtml,
     async () => {
+      // always start from page 1 when applying new filters
+      window.__listState = window.__listState || {};
+      const st = (window.__listState[currentSection] ||= { page: 1, pageSize: 50, total: null, hasMore: false, filters: null });
+      st.page = 1;
+
       const filters = extractFiltersFromForm('#searchForm');
       const rows    = await search(currentSection, filters);
       if (rows) renderSummary(rows);
@@ -1106,7 +1202,6 @@ async function openSearchModal(opts = {}) {
   // Ensure listeners are wired after first paint
   setTimeout(wireAdvancedSearch, 0);
 }
-
 
 function wireAdvancedSearch() {
   const bodyEl = document.getElementById('modalBody');
@@ -1776,14 +1871,47 @@ byId('btnColumns').onclick = ()=>{
 };
 
 // ===== Data fetchers =====
-async function listCandidates(){ const r = await authFetch(API('/api/candidates')); return toList(r); }
-async function listClients(){   const r = await authFetch(API('/api/clients'));   return toList(r); }
-
-async function listUmbrellas(){
-  const r = await authFetch(API('/api/umbrellas'));
-  return toList(r);
+async function listCandidates(){
+  window.__listState = window.__listState || {};
+  const st = (window.__listState['candidates'] ||= { page: 1, pageSize: 50, total: null, hasMore: false, filters: null });
+  const ps = st.pageSize, pg = st.page;
+  const qs = new URLSearchParams();
+  if (ps !== 'ALL') { qs.set('page', String(pg || 1)); qs.set('page_size', String(ps || 50)); }
+  else { qs.set('page', '1'); } // page_size omitted; ALL handled by loader
+  const url = qs.toString() ? `/api/candidates?${qs}` : '/api/candidates';
+  const r = await authFetch(API(url));
+  const rows = toList(r);
+  if (ps !== 'ALL') st.hasMore = Array.isArray(rows) && rows.length === Number(ps || 50);
+  return rows;
 }
 
+async function listClients(){
+  window.__listState = window.__listState || {};
+  const st = (window.__listState['clients'] ||= { page: 1, pageSize: 50, total: null, hasMore: false, filters: null });
+  const ps = st.pageSize, pg = st.page;
+  const qs = new URLSearchParams();
+  if (ps !== 'ALL') { qs.set('page', String(pg || 1)); qs.set('page_size', String(ps || 50)); }
+  else { qs.set('page', '1'); }
+  const url = qs.toString() ? `/api/clients?${qs}` : '/api/clients';
+  const r = await authFetch(API(url));
+  const rows = toList(r);
+  if (ps !== 'ALL') st.hasMore = Array.isArray(rows) && rows.length === Number(ps || 50);
+  return rows;
+}
+
+async function listUmbrellas(){
+  window.__listState = window.__listState || {};
+  const st = (window.__listState['umbrellas'] ||= { page: 1, pageSize: 50, total: null, hasMore: false, filters: null });
+  const ps = st.pageSize, pg = st.page;
+  const qs = new URLSearchParams();
+  if (ps !== 'ALL') { qs.set('page', String(pg || 1)); qs.set('page_size', String(ps || 50)); }
+  else { qs.set('page', '1'); }
+  const url = qs.toString() ? `/api/umbrellas?${qs}` : '/api/umbrellas';
+  const r = await authFetch(API(url));
+  const rows = toList(r);
+  if (ps !== 'ALL') st.hasMore = Array.isArray(rows) && rows.length === Number(ps || 50);
+  return rows;
+}
 
 async function listOutbox(){    const r = await authFetch(API('/api/email/outbox')); return toList(r); }
 // ===================== API WRAPPERS (UPDATED) =====================
@@ -2155,19 +2283,63 @@ async function deleteCandidateRatesFor(candidate_id){
 
 
 // ===== Section loaders =====
+// ===== Section loaders =====
 async function loadSection(){
-  switch(currentSection){
-    case 'candidates': return await listCandidates();
-    case 'clients': return await listClients();
-    case 'umbrellas': return await listUmbrellas();
-    case 'settings': return await getSettings();
-    case 'audit': return await listOutbox();
-    case 'timesheets': return []; // placeholder
-    case 'invoices': return []; // placeholder
-    case 'healthroster': return []; // placeholder
-    default: return [];
+  // unified paging entry point
+  window.__listState = window.__listState || {};
+  const st = (window.__listState[currentSection] ||= { page: 1, pageSize: 50, total: null, hasMore: false, filters: null });
+
+  // choose which loader to use (search vs plain list)
+  const useSearch = !!st.filters && (Object.keys(st.filters).length > 0);
+
+  // helper to fetch one page
+  const fetchOne = async (section, page, pageSize) => {
+    // temporarily push paging into state so builders pick it up
+    window.__listState[section].page = page;
+    window.__listState[section].pageSize = pageSize;
+    if (useSearch) {
+      return await search(section, window.__listState[section].filters || {});
+    } else {
+      switch(section){
+        case 'candidates': return await listCandidates();
+        case 'clients':    return await listClients();
+        case 'umbrellas':  return await listUmbrellas();
+        case 'settings':   return await getSettings();
+        case 'audit':      return await listOutbox();
+        default:           return [];
+      }
+    }
+  };
+
+  // handle ALL with sequential paging (append until exhausted)
+  if (st.pageSize === 'ALL') {
+    const acc = [];
+    let p = 1;
+    const chunk = 200; // internal chunk size for ALL
+    let gotMore = true;
+    while (gotMore) {
+      const rows = await fetchOne(currentSection, p, chunk);
+      acc.push(...(rows || []));
+      gotMore = Array.isArray(rows) && rows.length === chunk;
+      p += 1;
+      if (!gotMore) break;
+    }
+    // finalise state for render
+    window.__listState[currentSection].page = 1;
+    window.__listState[currentSection].hasMore = false;
+    window.__listState[currentSection].total = acc.length;
+    return acc;
   }
-}
+
+  // normal one-page load
+  const page = Number(st.page || 1);
+  const ps   = Number(st.pageSize || 50);
+  const rows = await fetchOne(currentSection, page, ps);
+  const hasMore = Array.isArray(rows) && rows.length === ps;
+  window.__listState[currentSection].hasMore = hasMore;
+  // total unknown unless backend returns it elsewhere; leave as-is
+  return rows;
+} 
 
 // ===== Details Modals =====
 let modalCtx = { entity:null, data:null };
@@ -6366,6 +6538,12 @@ function renderSummary(rows){
   currentRows = rows;
   currentSelection = null;
 
+  // ── paging state (per section) ──────────────────────────────────────────────
+  window.__listState = window.__listState || {};
+  const st = (window.__listState[currentSection] ||= { page: 1, pageSize: 50, total: null, hasMore: false, filters: null });
+  const page     = Number(st.page || 1);
+  const pageSize = st.pageSize; // 50 | 100 | 200 | 'ALL'
+
   const cols = defaultColumnsFor(currentSection);
   byId('title').textContent = sections.find(s=>s.key===currentSection)?.label || '';
   const content = byId('content');
@@ -6386,6 +6564,35 @@ function renderSummary(rows){
     });
   }
 
+  // ── top controls (page size selector) ───────────────────────────────────────
+  const topControls = document.createElement('div');
+  topControls.style.cssText = 'display:flex;align-items:center;gap:10px;padding:8px 10px;border-bottom:1px solid var(--line)';
+  const sizeLabel = document.createElement('span');
+  sizeLabel.className = 'mini';
+  sizeLabel.textContent = 'Page size:';
+  const sizeSel = document.createElement('select');
+  sizeSel.id = 'summaryPageSize';
+  ['50','100','200','ALL'].forEach(optVal => {
+    const opt = document.createElement('option');
+    opt.value = optVal;
+    opt.textContent = (optVal === 'ALL') ? 'All' : `First ${optVal}`;
+    if (String(pageSize) === optVal) opt.selected = true;
+    sizeSel.appendChild(opt);
+  });
+  sizeSel.addEventListener('change', async () => {
+    const val = sizeSel.value;
+    window.__listState[currentSection].pageSize = (val === 'ALL') ? 'ALL' : Number(val);
+    window.__listState[currentSection].page = 1; // reset to first page
+    const data = await loadSection();            // re-fetch with new page size
+    renderSummary(data);
+  });
+  const spacerTop = document.createElement('div'); spacerTop.style.flex = '1';
+  topControls.appendChild(sizeLabel);
+  topControls.appendChild(sizeSel);
+  topControls.appendChild(spacerTop);
+  content.appendChild(topControls);
+
+  // ── data table ──────────────────────────────────────────────────────────────
   const tbl = document.createElement('table'); tbl.className='grid';
   const thead = document.createElement('thead'); const trh=document.createElement('tr');
   cols.forEach(c=>{ const th=document.createElement('th'); th.textContent=c; trh.appendChild(th); });
@@ -6447,6 +6654,94 @@ function renderSummary(rows){
   tbl.appendChild(tb);
   content.appendChild(tbl);
 
+  // ── pager (Prev / page numbers / Next) ──────────────────────────────────────
+  const pager = document.createElement('div');
+  pager.style.cssText = 'display:flex;align-items:center;gap:6px;padding:8px 10px;border-top:1px solid var(--line);';
+  const info = document.createElement('span'); info.className = 'mini';
+
+  const mkBtn = (label, disabled, onClick) => {
+    const b = document.createElement('button');
+    b.textContent = label;
+    b.disabled = !!disabled;
+    b.style.cssText = 'border:1px solid var(--line);background:#0b152a;color:var(--text);padding:4px 8px;border-radius:8px;cursor:pointer';
+    if (!disabled) b.addEventListener('click', onClick);
+    return b;
+  };
+
+  const hasMore = !!st.hasMore;
+  const totalKnown = (typeof st.total === 'number');
+  const current = page;
+  let maxPageToShow;
+  if (totalKnown && pageSize !== 'ALL') {
+    maxPageToShow = Math.max(1, Math.ceil(st.total / Number(pageSize)));
+  } else if (pageSize === 'ALL') {
+    maxPageToShow = 1;
+  } else {
+    // Unknown total: show up to current+1 while hasMore; else current
+    maxPageToShow = hasMore ? (current + 1) : current;
+  }
+
+  const prevBtn = mkBtn('Prev', current <= 1, async () => {
+    window.__listState[currentSection].page = Math.max(1, current - 1);
+    const data = await loadSection();
+    renderSummary(data);
+  });
+  pager.appendChild(prevBtn);
+
+  // numbered pages (compact)
+  const makePageLink = (n) => mkBtn(String(n), n === current, async () => {
+    window.__listState[currentSection].page = n;
+    const data = await loadSection();
+    renderSummary(data);
+  });
+
+  // If large, show 1 ... current-1, current, next (if hasMore)
+  const pages = [];
+  if (maxPageToShow <= 7) {
+    for (let n=1; n<=maxPageToShow; n++) pages.push(n);
+  } else {
+    pages.push(1);
+    if (current > 3) pages.push('…');
+    for (let n=Math.max(2, current-1); n<=Math.min(maxPageToShow-1, current+1); n++) pages.push(n);
+    if (hasMore || current+1 < maxPageToShow) pages.push('…');
+    pages.push(maxPageToShow);
+  }
+  pages.forEach(pn => {
+    if (pn === '…') {
+      const span = document.createElement('span'); span.textContent = '…'; span.className = 'mini';
+      pager.appendChild(span);
+    } else {
+      pager.appendChild(makePageLink(pn));
+    }
+  });
+
+  const nextBtn = mkBtn('Next', (pageSize === 'ALL') || (!hasMore && (!totalKnown || current >= maxPageToShow)), async () => {
+    window.__listState[currentSection].page = current + 1;
+    const data = await loadSection();
+    renderSummary(data);
+  });
+  pager.appendChild(nextBtn);
+
+  // info text
+  if (pageSize === 'ALL') {
+    info.textContent = `Showing all ${rows.length} ${currentSection}.`;
+  } else if (totalKnown) {
+    const ps = Number(pageSize);
+    const start = (current-1)*ps + 1;
+    const end = Math.min(start + rows.length - 1, st.total || start - 1);
+    info.textContent = `Showing ${start}–${end}${st.total!=null ? ` of ${st.total}` : ''}`;
+  } else {
+    const ps = Number(pageSize);
+    const start = (current-1)*ps + 1;
+    const end = start + rows.length - 1;
+    info.textContent = `Showing ${start}–${end}${hasMore ? '+' : ''}`;
+  }
+  const spacer = document.createElement('div'); spacer.style.flex = '1';
+  pager.appendChild(spacer);
+  pager.appendChild(info);
+
+  content.appendChild(pager);
+
   // NEW: restore scroll and keep memory updated
   try {
     content.__activeMemKey = memKey;
@@ -6497,7 +6792,8 @@ function renderSummary(rows){
       window.__pendingFocus = null;
     }
   }
-}
+} 
+
 
 
 // Close any existing floating menu
@@ -6617,16 +6913,6 @@ function buildQuickFilters(section, text) {
 }
 
 // ✅ Quick search: use heuristic builder (includes timesheets fix)
-byId('quickSearch').onkeydown = async (e) => {
-  if (e.key !== 'Enter') return;
-
-  const text = String(e.target.value || '').trim();
-  if (!text) return renderAll();
-
-  const filters = buildQuickFilters(currentStage ?? currentSection, text); // use your actual section var
-  const rows = await search(currentSection, filters);
-  if (rows) renderSummary(rows);
-};
 
 async function openSearch() {
   const q = prompt('Search text:');
@@ -6752,10 +7038,14 @@ async function handleSaveSettings() {
 
 // ===== Boot =====
 async function renderAll(){
+  // seed defaults for first login / first visit to section
+  window.__listState = window.__listState || {};
+  if (!window.__listState[currentSection]) {
+    window.__listState[currentSection] = { page: 1, pageSize: 50, total: null, hasMore: false, filters: null };
+  }
   renderTopNav(); renderTools();
   const data = await loadSection();
-  if (currentSection==='settings' || currentSection==='audit') renderSummary(data);
-  else renderSummary(data); // list functions already return arrays via toList()
+  renderSummary(data);
 }
 async function bootstrapApp(){
   // Belt & braces: if loadSession() ran but globals are not mirrored, mirror now
