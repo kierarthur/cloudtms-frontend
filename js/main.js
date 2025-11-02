@@ -3198,6 +3198,7 @@ async function mountCandidateRatesTab() {
 // ========== CANDIDATE OVERRIDES ==========
 async function openCandidateRateModal(candidate_id, existing) {
   const LOG = !!window.__LOG_RATES;
+  const LOG_APPLY = (typeof window.__LOG_APPLY === 'boolean') ? window.__LOG_APPLY : LOG;
   const G = (label, obj) => { if (LOG) { console.groupCollapsed(`[RATES][openCandidateRateModal] ${label}`); if (obj !== undefined) console.log(obj); console.groupEnd(); } };
   if (LOG) console.log('[RATES][openCandidateRateModal] ENTRY', { candidate_id, hasExisting: !!existing });
 
@@ -3340,6 +3341,7 @@ async function openCandidateRateModal(candidate_id, existing) {
   `);
 
   let cache = { windows: [], roles: [], bandsByRole: {} };
+  let lastApplyState = null; // for transition logging
 
   // Helpers
   async function _erniMultiplier(){
@@ -3360,11 +3362,16 @@ async function openCandidateRateModal(candidate_id, existing) {
   function numOrNull(v){ const n = Number(v); return Number.isFinite(n) ? n : null; }
   const fmt = v => (v==null || Number.isNaN(v)) ? '—' : (Math.round(v*100)/100).toFixed(2);
 
-  function setApplyEnabled(enabled){
+  function setApplyEnabled(enabled, reasonSummary){
     try {
       const btn = document.querySelector('#btnSave, #modal .actions .primary, #modal .btn-save, .modal .btn-save');
       if (btn) { btn.disabled = !enabled; btn.classList.toggle('disabled', !enabled); }
     } catch {}
+    // Transition log
+    if (LOG_APPLY && lastApplyState !== enabled) {
+      console.log('[RATES][APPLY] state →', enabled ? 'ENABLED' : 'DISABLED', reasonSummary || '');
+      lastApplyState = enabled;
+    }
     try { window.dispatchEvent(new CustomEvent('modal-apply-enabled', { detail:{ enabled } })); } catch {}
   }
   function setFieldError(bucket,msg){
@@ -3397,10 +3404,17 @@ async function openCandidateRateModal(candidate_id, existing) {
   async function resolveCoveringWindow(client_id, role, band, active_on){
     if (!client_id || !role || !active_on) return null;
     try {
+      if (LOG_APPLY) console.groupCollapsed('[RATES][COVER] lookup', { client_id, role, band, active_on });
       const list = await listClientRates(client_id, { active_on, only_enabled: true });
+      if (LOG_APPLY) {
+        const rolesPresent = Array.from(new Set((Array.isArray(list)?list:[]).map(w => w.role)));
+        console.log('[RATES][COVER] fetched windows:', (list||[]).length, 'roles:', rolesPresent);
+      }
       const rows = Array.isArray(list) ? list.filter(w => !w.disabled_at_utc && w.role === role) : [];
       let win = rows.find(w => (w.band ?? null) === (band ?? null));
       if (!win && (band == null)) win = rows.find(w => w.band == null);
+      if (LOG_APPLY) console.log('[RATES][COVER] chosen window:', !!win, win ? { date_from: win.date_from, date_to: win.date_to, charges: {d:win.charge_day,n:win.charge_night,sa:win.charge_sat,su:win.charge_sun,bh:win.charge_bh} } : '(none)');
+      if (LOG_APPLY) console.groupEnd();
       return win ? {
         charges: {
           day  : win.charge_day   ?? null,
@@ -3411,7 +3425,10 @@ async function openCandidateRateModal(candidate_id, existing) {
         },
         capIso: win.date_to || null
       } : null;
-    } catch(e){ return null; }
+    } catch(e){
+      if (LOG_APPLY) console.warn('[RATES][COVER] error', e);
+      return null;
+    }
   }
 
   // DRIVER: gating, validations, margin preview, Apply toggle
@@ -3430,10 +3447,17 @@ async function openCandidateRateModal(candidate_id, existing) {
     const slotPh  = (b)=> byId(`slot_ph_${b}`);
 
     let canApply = true;
+    const reasons = [];
     clearAllFieldErrors();
 
     // Gate until all four core fields are present
-    const ready = !!clientId && !!rateType && !!role && !!isoFrom;
+    const need = [];
+    if (!clientId) need.push('clientId');
+    if (!rateType) need.push('rateType');
+    if (!role)     need.push('role');
+    if (!isoFrom)  need.push('date_from');
+    const ready = (need.length === 0);
+
     if (!ready) {
       buckets.forEach(b => {
         const inp = inputEl(b); if (inp) inp.disabled = true;
@@ -3441,17 +3465,21 @@ async function openCandidateRateModal(candidate_id, existing) {
         if (slotPh(b)) slotPh(b).style.display = '';
         const sp = byId(`cr_m_${b}`); if (sp) sp.textContent = '—';
       });
-      setApplyEnabled(false);
+      reasons.push({ step:'not_ready', missing: need });
+      if (LOG_APPLY) console.log('[RATES][APPLY] not ready → disable', { clientId, role, band, isoFrom, isoTo, rateType, missing: need });
+      setApplyEnabled(false, 'not_ready');
       return;
     }
 
-    // Resolve the covering client window (cached)
+    // Resolve the covering client window (with cache diagnostics)
     const cacheKey = [clientId, role, band ?? '', isoFrom].join('|');
     const win = await (async (k) => {
       if (!window.__CR_WIN_CACHE) window.__CR_WIN_CACHE = {};
+      if (LOG_APPLY) console.log('[RATES][COVER] cache', (k in window.__CR_WIN_CACHE) ? 'HIT' : 'MISS', k);
       if (k in window.__CR_WIN_CACHE) return window.__CR_WIN_CACHE[k];
       const w = await resolveCoveringWindow(clientId, role, band, isoFrom);
       window.__CR_WIN_CACHE[k] = w;
+      if (LOG_APPLY) console.log('[RATES][COVER] cache STORE', k, !!w);
       return w;
     })(cacheKey);
 
@@ -3462,11 +3490,15 @@ async function openCandidateRateModal(candidate_id, existing) {
         if (slotPh(b)) slotPh(b).style.display = '';
         const sp = byId(`cr_m_${b}`); if (sp) sp.textContent = '—';
       });
-      setApplyEnabled(false);
+      reasons.push({ step:'no_cover', key: cacheKey });
+      if (LOG_APPLY) console.log('[RATES][APPLY] no covering window → disable', { cacheKey });
+      setApplyEnabled(false, 'no_cover');
       return;
     }
 
     // Show input only for buckets that have a client charge; keep layout fixed
+    const visibleBuckets = [];
+    const hiddenBuckets = [];
     buckets.forEach(b => {
       const hasCharge = (win.charges[b] != null);
       const inp = inputEl(b);
@@ -3474,12 +3506,15 @@ async function openCandidateRateModal(candidate_id, existing) {
         if (slotPh(b)) slotPh(b).style.display = 'none';
         if (slotIn(b)) slotIn(b).style.display = '';
         if (inp) inp.disabled = false;
+        visibleBuckets.push(b);
       } else {
         if (slotIn(b)) slotIn(b).style.display = 'none';
         if (slotPh(b)) slotPh(b).style.display = '';
         if (inp) { inp.value = ''; inp.disabled = true; }
+        hiddenBuckets.push(b);
       }
     });
+    if (LOG_APPLY) console.log('[RATES][APPLY] bucket visibility', { visibleBuckets, hiddenBuckets, charges: win.charges });
 
     // Live validations + margin preview
     const mult = await _erniMultiplier();
@@ -3495,7 +3530,10 @@ async function openCandidateRateModal(candidate_id, existing) {
         setFieldError(b, `No client charge for ${bucketLabel[b]}.`);
       }
     });
-    if (invalid.length) canApply = false;
+    if (invalid.length) {
+      canApply = false;
+      reasons.push({ step:'pay_without_charge', buckets: invalid.slice() });
+    }
 
     // (b) No negative margins
     const neg = [];
@@ -3509,30 +3547,40 @@ async function openCandidateRateModal(candidate_id, existing) {
         setFieldError(b, `Margin would be negative for ${bucketLabel[b]}.`);
       }
     });
-    if (neg.length) canApply = false;
+    if (neg.length) {
+      canApply = false;
+      reasons.push({ step:'negative_margin', buckets: neg.slice() });
+    }
 
     // (c) End date cap
     setDateToError('');
     if (isoTo && win.capIso && isoTo > win.capIso) {
       setDateToError(`Client rate ends on ${formatIsoToUk(win.capIso)} — override must end on/before this date.`);
       canApply = false;
+      reasons.push({ step:'date_cap', isoTo, cap: win.capIso });
     }
 
     // (d) Margin preview
+    const preview = {};
     buckets.forEach(b => {
       const sp  = byId(`cr_m_${b}`);
       const pay = numOrNull(inputEl(b)?.value);
       const chg = win.charges[b];
-      if (!sp) return;
-      if (chg != null && pay != null) {
-        const m = (rateType === 'PAYE') ? (chg - (pay * mult)) : (chg - pay);
-        sp.textContent = fmt(m);
-      } else {
-        sp.textContent = '—';
-      }
+      const m = (chg != null && pay != null) ? ((rateType === 'PAYE') ? (chg - (pay * mult)) : (chg - pay)) : null;
+      preview[b] = m;
+      if (sp) sp.textContent = (m==null ? '—' : fmt(m));
     });
 
-    setApplyEnabled(canApply);
+    if (LOG_APPLY) {
+      console.groupCollapsed('[RATES][APPLY] decision');
+      console.log('inputs', { clientId, role, band, isoFrom, isoTo, rateType });
+      console.log('window', { charges: win.charges, capIso: win.capIso });
+      console.log('preview', preview);
+      console.log('reasons', reasons);
+      console.groupEnd();
+    }
+
+    setApplyEnabled(canApply, canApply ? 'ok' : JSON.stringify(reasons));
   }
 
   // Use kind so the shell shows Delete only in this child modal
@@ -3712,7 +3760,7 @@ async function openCandidateRateModal(candidate_id, existing) {
   if (existing?.date_from) inFrom.value = formatIsoToUk(existing.date_from);
   if (existing?.date_to)   inTo.value   = formatIsoToUk(existing.date_to);
 
-  // ⬇️ FIX: prefill pay fields from existing override
+  // Prefill pay fields from existing override
   ['day','night','sat','sun','bh'].forEach(b=>{
     const val = (existing && typeof existing[`pay_${b}`] !== 'undefined') ? existing[`pay_${b}`] : null;
     const el = document.querySelector(`#candRateForm input[name="pay_${b}"]`);
@@ -3732,6 +3780,7 @@ async function openCandidateRateModal(candidate_id, existing) {
       const el = document.querySelector(`#candRateForm input[name="${n}"]`);
       if (el) el.disabled = true;
     });
+    if (LOG_APPLY) console.log('[RATES][APPLY] lock (past/today date_from) → only date_to editable');
   }
 
   async function refreshClientRoles(clientId) {
@@ -3740,9 +3789,10 @@ async function openCandidateRateModal(candidate_id, existing) {
     selBand.innerHTML = `<option value=""></option>`;
     selBand.disabled  = true;
 
-    if (!clientId) { setApplyEnabled(false); return; }
+    if (!clientId) { setApplyEnabled(false, 'no_client'); return; }
 
     const active_on = parseUkDateToIso(inFrom.value || '') || null;
+    if (LOG_APPLY) console.log('[RATES][ROLES] refresh', { clientId, active_on });
     const list = await listClientRates(clientId, { active_on, only_enabled: true });
     cache.windows = (Array.isArray(list) ? list.filter(w => !w.disabled_at_utc) : []);
 
@@ -3764,6 +3814,8 @@ async function openCandidateRateModal(candidate_id, existing) {
     cache.bandsByRole = Object.fromEntries(
       allowed.map(code => [code, [...(bandsByRole[code] || new Set())]])
     );
+
+    if (LOG_APPLY) console.log('[RATES][ROLES] allowed', { roles: allowed, bandsByRole: cache.bandsByRole });
 
     if (existing?.role) {
       selRole.value = existing.role;
@@ -3788,18 +3840,19 @@ async function openCandidateRateModal(candidate_id, existing) {
       selBand.innerHTML = `<option value=""></option>`;
       selBand.disabled  = true;
     }
+    if (LOG_APPLY) console.log('[RATES][ROLES] role change', { role, bands, hasNull });
   }
 
-  selClient.addEventListener('change', async () => { if (!lockThis) await refreshClientRoles(selClient.value); });
-  selRateT .addEventListener('change', () => { if (!lockThis) recomputeOverrideState(); });
-  inFrom   .addEventListener('change', async () => { if (!lockThis) await refreshClientRoles(selClient.value); });
-  selRole  .addEventListener('change', async () => { onRoleChanged(); await recomputeOverrideState(); });
-  selBand  .addEventListener('change', () => recomputeOverrideState());
+  selClient.addEventListener('change', async () => { if (!lockThis) { if (LOG_APPLY) console.log('[RATES][EVENT] client change'); await refreshClientRoles(selClient.value); } });
+  selRateT .addEventListener('change', () => { if (!lockThis) { if (LOG_APPLY) console.log('[RATES][EVENT] rate_type change'); recomputeOverrideState(); } });
+  inFrom   .addEventListener('change', async () => { if (!lockThis) { if (LOG_APPLY) console.log('[RATES][EVENT] date_from change'); await refreshClientRoles(selClient.value); } });
+  selRole  .addEventListener('change', async () => { if (!lockThis) { if (LOG_APPLY) console.log('[RATES][EVENT] role change'); onRoleChanged(); await recomputeOverrideState(); } });
+  selBand  .addEventListener('change', () => { if (LOG_APPLY) console.log('[RATES][EVENT] band change'); recomputeOverrideState(); });
 
   // recompute when pay fields change
   ['pay_day','pay_night','pay_sat','pay_sun','pay_bh'].forEach(n=>{
     const el = document.querySelector(`#candRateForm input[name="${n}"]`);
-    if (el) el.addEventListener('input', () => recomputeOverrideState());
+    if (el) el.addEventListener('input', () => { if (LOG_APPLY) console.log('[RATES][EVENT] pay change', n, el.value); recomputeOverrideState(); });
   });
 
   // Initial compute
@@ -3818,8 +3871,9 @@ async function openCandidateRateModal(candidate_id, existing) {
         const O = window.modalCtx.overrides || (window.modalCtx.overrides = { existing: [], stagedNew: [], stagedEdits: {}, stagedDeletes: new Set() });
         if (!O.stagedDeletes) O.stagedDeletes = new Set();
         O.stagedDeletes.add(existing.id);
+        if (LOG_APPLY) console.log('[RATES][DELETE] staged', existing.id);
         try { renderCandidateRatesTable(); } catch {}
-        try { window.dispatchEvent(new CustomEvent('modal-dirty')); } catch {} // parent Save will enable (via showModal fix)
+        try { window.dispatchEvent(new CustomEvent('modal-dirty')); } catch {}
         const closeBtn = byId('btnCloseModal'); if (closeBtn) closeBtn.click();
       } catch (e) {
         alert('Failed to stage delete.');
@@ -3827,7 +3881,6 @@ async function openCandidateRateModal(candidate_id, existing) {
     };
   })();
 }
-
 
 
 async function renderCandidateRatesTable() {
