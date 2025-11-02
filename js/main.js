@@ -3500,7 +3500,8 @@ async function openCandidateRateModal(candidate_id, existing) {
     buckets.forEach(b => {
       const sp  = byId(`cr_m_${b}`), el = inputEl(b), chg = win.charges[b];
       const pay = (el && !el.disabled) ? numOrNull(el.value) : null; // blank/NaN => null
-      const m   = (chg != null && pay != null) ? ((rateType === 'PAYE') ? (chg - (pay * (await _erniMultiplier()))) : (chg - pay)) : null;
+      const m   = (chg != null && pay != null) ? ((rateType === 'PAYE') ? (chg - (pay * mult)) : (chg - pay)) : null;
+
       if (sp) sp.textContent = (m==null ? '—' : fmt(m));
     });
 
