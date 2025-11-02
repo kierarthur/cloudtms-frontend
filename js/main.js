@@ -2705,6 +2705,34 @@ async function renderCandidateRatesTable() {
   }
   await Promise.all(uniqueKeys.map(async k => { chargeMap[k] = await loadChargesForKey(k); }));
 
+  // === NEW: check whether a covering client default exists TODAY (Europe/London), per (client,role,band)
+  const todayIso = (() => {
+    try {
+      const s = new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/London', year:'numeric', month:'2-digit', day:'2-digit' }).format(new Date());
+      const [dd, mm, yyyy] = s.split('/');
+      return `${yyyy}-${mm}-${dd}`;
+    } catch { // fallback
+      const d = new Date(); const y = d.getFullYear(), m = String(d.getMonth()+1).padStart(2,'0'), day = String(d.getDate()).padStart(2,'0');
+      return `${y}-${m}-${day}`;
+    }
+  })();
+  const todayKeyOf = r => [r.client_id, r.role || '', (r.band==null?'':String(r.band))].join('|');
+  const todayKeys = Array.from(new Set(rows.map(todayKeyOf)));
+  const coverTodayMap = Object.create(null);
+  async function loadCoverTodayForKey(key){
+    const [client_id, role, bandKey] = key.split('|');
+    const band = (bandKey === '' ? null : bandKey);
+    if (!client_id || !role) return false;
+    try {
+      const list = await listClientRates(client_id, { active_on: todayIso, only_enabled: true });
+      const filtered = Array.isArray(list) ? list.filter(w=>!w.disabled_at_utc && w.role===role) : [];
+      let win = filtered.find(w => (w.band ?? null) === (band ?? null));
+      if (!win && (band == null)) win = filtered.find(w => w.band == null);
+      return !!win;
+    } catch(e){ return false; }
+  }
+  await Promise.all(todayKeys.map(async k => { coverTodayMap[k] = await loadCoverTodayForKey(k); }));
+
   const cols    = ['client','role','band','rate_type','pay_day','pay_night','pay_sat','pay_sun','pay_bh','margin_day','margin_night','margin_sat','margin_sun','margin_bh','date_from','date_to','_state'];
   const headers = ['Client','Role','Band','Type','Pay Day','Pay Night','Pay Sat','Pay Sun','Pay BH','Margin Day','Margin Night','Margin Sat','Margin Sun','Margin BH','From','To','Status'];
 
@@ -2727,10 +2755,16 @@ async function renderCandidateRatesTable() {
       margin[b] = (chg!=null && pay!=null) ? (isPAYE ? (chg - (pay * mult)) : (chg - pay)) : null;
     });
 
-    const status =
+    let status =
       r._pendingDelete ? 'Pending delete (save to confirm)' :
       r._isNew        ? 'Staged (new)' :
       r._edited       ? 'Staged (edited)' : '';
+
+    // Determine stale/orphan: (a) no covering client rate at override start OR (b) no covering client rate today
+    const hasCoverAtStart = !!charges;
+    const hasCoverToday = !!coverTodayMap[todayKeyOf(r)];
+    const isStaleOrphan = (!hasCoverAtStart) || (!hasCoverToday);
+    if (isStaleOrphan) status = 'Client rate no longer exists';
 
     // pay columns to 2dp
     const to2 = (v) => (v==null ? '—' : fmt(Number(v)));
@@ -2744,6 +2778,14 @@ async function renderCandidateRatesTable() {
     };
 
     cols.forEach(c => { const td=document.createElement('td'); td.textContent=String(pretty[c] ?? ''); tr.appendChild(td); });
+
+    // Shade & disable open if stale/orphan
+    if (isStaleOrphan) {
+      tr.style.opacity = '.55';
+      tr.style.cursor = 'not-allowed';
+      tr.ondblclick = null;
+    }
+
     tb.appendChild(tr);
   });
   tbl.appendChild(tb);
@@ -2765,6 +2807,7 @@ async function renderCandidateRatesTable() {
 
   if (LOG) console.log('[RATES][TABLE rendered]', { rows: rows.length, firstState: rows[0]?._state || '(none)' });
 }
+
 
 
 
