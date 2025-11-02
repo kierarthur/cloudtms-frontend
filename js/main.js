@@ -5327,6 +5327,7 @@ async function renderClientRatesTable() {
   };
 }
 
+
 function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
   // ===== Logging helpers (toggle with window.__LOG_MODAL = true/false) =====
   const LOG = (typeof window.__LOG_MODAL === 'boolean') ? window.__LOG_MODAL : false;
@@ -5405,6 +5406,9 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
 
   // ——— Frame object ————————————————————————————————————————————————
   const frame = {
+    // Stable per-frame token used to "own" the Save/Apply button reliably
+    _token: `f:${Date.now()}:${Math.random().toString(36).slice(2)}`,
+
     title,
     tabs: Array.isArray(tabs) ? tabs.slice() : [],
     renderTab,
@@ -5645,9 +5649,9 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
         const rect = modalNode.getBoundingClientRect();
         modalNode.style.position = 'fixed';
         modalNode.style.left = rect.left + 'px';
-        modalNode.style.top = rect.top + 'px';
+        modalNode.style.top  = rect.top  + 'px';
         modalNode.style.right = 'auto';
-        modalNode.style.bottom = 'auto';
+        modalNode.style.bottom= 'auto';
         modalNode.style.transform = 'none';
         modalNode.classList.add('dragging');
         const offsetX = e.clientX - rect.left;
@@ -5838,13 +5842,15 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
       } catch { return false; }
     };
 
-    const onSaveClick = async () => {
-      if (top._saving) return;
+    // ===== Save/Apply: bind to TOP frame token and always execute for current TOP frame =====
+    async function saveForFrame(fr) {
+      if (!fr) return;
 
+      if (fr._saving) return;
       // 🔧 Treat staged client-rate deletes as "changes" so Save calls onSave
       const onlyDeletes = hasStagedClientDeletes();
 
-      if (top.kind !== 'advanced-search' && !top.noParentGate && top.mode !== 'view' && !top.isDirty && !onlyDeletes) {
+      if (fr.kind !== 'advanced-search' && !fr.noParentGate && fr.mode !== 'view' && !fr.isDirty && !onlyDeletes) {
         const isChild = stack().length > 1;
         if (isChild) {
           sanitizeModalGeometry();
@@ -5857,34 +5863,35 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
             discardAllModalsAndState();
           }
         } else {
-          top.isDirty = false; top._snapshot = null; setFrameMode(top, 'view'); top._updateButtons && top._updateButtons();
+          fr.isDirty = false; fr._snapshot = null; setFrameMode(fr, 'view'); fr._updateButtons && fr._updateButtons();
         }
         try { window.__toast?.('No changes'); } catch {}
         return;
       }
 
-      top.persistCurrentTabState();
+      // keep form state fresh
+      fr.persistCurrentTabState();
 
       const isChild = stack().length > 1;
-      if (isChild && !top.noParentGate && top.kind !== 'advanced-search') {
+      if (isChild && !fr.noParentGate && fr.kind !== 'advanced-search') {
         const parent = parentFrame();
         if (!parent || !(parent.mode === 'edit' || parent.mode === 'create')) return;
       }
 
-      top._saving = true; top._updateButtons();
+      fr._saving = true; fr._updateButtons && fr._updateButtons();
 
       let ok = false; let savedRow = null;
-      if (typeof top.onSave === 'function') {
+      if (typeof fr.onSave === 'function') {
         try {
-          const res = await top.onSave();
+          const res = await fr.onSave();
           ok = (res === true) || (res && res.ok === true);
           if (res && res.saved) savedRow = res.saved;
         } catch (_) { ok = false; }
       }
 
-      top._saving = false;
+      fr._saving = false;
 
-      if (!ok) { top._updateButtons(); return; }
+      if (!ok) { fr._updateButtons && fr._updateButtons(); return; }
 
       const isChild2 = stack().length > 1;
       if (isChild2) {
@@ -5903,12 +5910,35 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
       } else {
         if (savedRow && window.modalCtx) {
           window.modalCtx.data = { ...(window.modalCtx.data || {}), ...savedRow };
-          top.hasId = !!window.modalCtx.data?.id;
+          fr.hasId = !!window.modalCtx.data?.id;
         }
-        top.isDirty = false; top._snapshot = null; setFrameMode(top, 'view');
+        fr.isDirty = false; fr._snapshot = null; setFrameMode(fr, 'view');
       }
+    }
+
+    const onSaveClick = async (ev) => {
+      const btn = ev && ev.currentTarget ? ev.currentTarget : byId('btnSave');
+      const topNow = currentFrame();
+      const boundToken = btn && btn.dataset ? btn.dataset.ownerToken : undefined;
+      if (LOG) console.log('[MODAL] click #btnSave', { boundToken, topToken: topNow?._token, topKind: topNow?.kind, topTitle: topNow?.title });
+
+      // If a parent re-bound the button, execute for the TRUE top frame anyway.
+      if (!topNow) return;
+      if (boundToken !== topNow._token) {
+        if (LOG) console.warn('[MODAL] save token mismatch → executing for TOP frame', { boundToken, wants: topNow._token });
+      }
+      await saveForFrame(topNow);
     };
-    byId('btnSave').onclick = onSaveClick;
+
+    // Helper to bind #btnSave to the current top frame, with an owner token
+    const bindSaveToFrame = (btn, fr) => {
+      if (!btn || !fr) return;
+      btn.dataset.ownerToken = fr._token;
+      btn.onclick = onSaveClick;
+      if (LOG) console.log('[MODAL] bind #btnSave →', { ownerToken: fr._token, kind: fr.kind || '(parent)', title: fr.title, mode: fr.mode });
+    };
+
+    bindSaveToFrame(btnSave, top);
 
     // ——— Global listeners to resolve parent/child gating races ———
     const onDirtyEvt = () => {
@@ -5933,24 +5963,30 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
 
     // Child captures the latest Apply intent from business logic and stores it on the frame.
     const onApplyEvt = (ev) => {
-      const isChild = stack().length > 1;
-      if (!isChild) return;
-      if (!(top.kind === 'client-rate' || top.kind === 'candidate-override')) return;
+      const isChildNow = stack().length > 1;
+      if (!isChildNow) return;
+      const topNow = currentFrame();
+      if (!(topNow.kind === 'client-rate' || topNow.kind === 'candidate-override')) return;
       const enabled = !!(ev && ev.detail && ev.detail.enabled);
-      top._applyDesired = enabled;
-      top._updateButtons && top._updateButtons();
-      if (LOG) console.log('[MODAL] onApplyEvt → _applyDesired =', enabled);
+      topNow._applyDesired = enabled;
+      topNow._updateButtons && topNow._updateButtons();
+      // Re-assert save ownership for the actual top (child) frame
+      bindSaveToFrame(byId('btnSave'), topNow);
+      if (LOG) console.log('[MODAL] onApplyEvt → _applyDesired =', enabled, 'rebound save to top frame');
     };
 
     // When parent mode changes (e.g., View→Edit), child re-evaluates buttons using stored _applyDesired.
     const onModeChanged = (ev) => {
-      const isChild = stack().length > 1;
-      if (!isChild) return;
+      const isChildNow = stack().length > 1;
+      if (!isChildNow) return;
       const parentIdx = stack().length - 2;
       const changedIdx = ev && ev.detail ? ev.detail.frameIndex : -1;
       if (changedIdx === parentIdx) {
         if (LOG) console.log('[MODAL] parent mode changed → child _updateButtons()');
-        top._updateButtons && top._updateButtons();
+        const topNow = currentFrame();
+        topNow._updateButtons && topNow._updateButtons();
+        // Re-assert save ownership for the actual top (child) frame
+        bindSaveToFrame(byId('btnSave'), topNow);
       }
     };
 
@@ -5997,7 +6033,6 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
   window.__getModalFrame = currentFrame;
   renderTop();
 }
-
 
 
 
