@@ -860,7 +860,7 @@ async function openSaveSearchModal(section, filters){
     ? mine.map(m => `<option value="${m.id}">${sanitize(m.name)}</option>`).join('')
     : '';
 
-  // current selection snapshot (if any) at OPEN time (for initial radio enable/disable only)
+  // selection state at OPEN (for initial radio enable/disable only)
   window.__selection = window.__selection || {};
   const selOpen = window.__selection[section];
   const hasSelectionOpen = !!selOpen && (selOpen.allMatching || (selOpen.ids && selOpen.ids.size>0));
@@ -924,17 +924,21 @@ async function openSaveSearchModal(section, filters){
 
       if (!name && mode === 'new') { alert('Please enter a name'); return false; }
 
-      // Recompute selection at SUBMIT time (do not rely on open-time detection)
+      // Recompute selection at SUBMIT time (don’t rely on open-time detection)
       window.__selection = window.__selection || {};
       const curSel = window.__selection[section];
       const hasSelectionNow = !!curSel && (curSel.allMatching || (curSel.ids && curSel.ids.size>0));
 
+      // If selection exists now but the user left “filters only”, silently upgrade to “both”
+      // (covers the case where selection radios were disabled when the modal opened)
+      const effectiveContentMode = (hasSelectionNow && contentMode === 'filters') ? 'both' : contentMode;
+
       // build payload
       const payload = { section, kind:'search', name, is_shared: share };
-      if (contentMode === 'filters' || contentMode === 'both') {
+      if (effectiveContentMode === 'filters' || effectiveContentMode === 'both') {
         payload.filters = filters || {};
       }
-      if ((contentMode === 'selection' || contentMode === 'both') && hasSelectionNow) {
+      if ((effectiveContentMode === 'selection' || effectiveContentMode === 'both') && hasSelectionNow) {
         payload.selection = {
           fingerprint: curSel.fingerprint || '',
           allMatching: !!curSel.allMatching,
@@ -1064,6 +1068,45 @@ async function openLoadSearchModal(section){
       </div>
     `);
   };
+
+  // Load a persisted session from storage, mirror to globals, and report readiness.
+// Returns true when we have a valid, non-expired token; false otherwise.
+function loadSession() {
+  try {
+    // Prefer long-lived (remember me), fall back to session-only
+    const persisted =
+      JSON.parse(localStorage.getItem('cloudtms.session') || 'null') ||
+      JSON.parse(sessionStorage.getItem('cloudtms.session') || 'null');
+
+    if (!persisted || !persisted.accessToken) {
+      clearSession();
+      return false;
+    }
+
+    // If an explicit expiry is present and already elapsed, treat as signed out
+    const nowSec = Math.floor(Date.now() / 1000);
+    if (typeof persisted.exp === 'number' && persisted.exp <= nowSec) {
+      clearSession();
+      return false;
+    }
+
+    // Adopt the session and mirror to the globals other helpers rely on
+    SESSION = persisted;
+    try {
+      window.SESSION = SESSION;
+      window.__auth = window.__auth || {};
+      if (SESSION.user) window.__auth.user = SESSION.user;
+      if (SESSION.user?.id) window.__USER_ID = SESSION.user.id;
+    } catch {}
+
+    // Update UI (chip etc). scheduleRefresh() is called by your boot guard.
+    renderUserChip();
+    return true;
+  } catch {
+    clearSession();
+    return false;
+  }
+}
 
   function wirePresetTable() {
     const tbl = document.getElementById('presetTable');
