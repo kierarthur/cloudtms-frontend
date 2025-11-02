@@ -2809,56 +2809,78 @@ async function openUmbrella(row){
 }
 
 
-
-
-
-// Replaces your current function
-// =================== renderCandidateRatesTable (FIXED) ===================
-// =================== CANDIDATE RATES TABLE (UPDATED) ===================
-// ✅ UPDATED — renders from modalCtx.overrides (existing ⊕ staged edits/new ⊖ staged deletes)
-
-// ==================================
-// 2) renderCandidateRatesTable(...)
-// ==================================
-// Now computes margins for each override row by resolving client charges at date_from (memoized per render)
-
 async function renderCandidateRatesTable() {
   const LOG = !!window.__LOG_RATES;
-  const token    = window.modalCtx.openToken;
-  const idActive = window.modalCtx.data?.id || null;
-  const div = byId('ratesTable');
-  if (!div) { if (LOG) console.warn('[RATES][renderCandidateRatesTable] no #ratesTable'); return; }
 
-  if ((token !== window.modalCtx.openToken && idActive !== null) ||
-      (window.modalCtx.data?.id !== idActive && idActive !== null)) {
-    if (LOG) console.warn('[RATES][renderCandidateRatesTable] token/id changed mid-flight (blocked because idActive!=null)');
-    return;
+  // Safety net: auto-create #ratesTable if missing
+  let div = byId('ratesTable');
+  if (!div) {
+    const host = byId('modalBody');
+    if (host) {
+      div = document.createElement('div');
+      div.id = 'ratesTable';
+      host.appendChild(div);
+      if (LOG) console.warn('[RATES][TABLE] created missing #ratesTable');
+    } else {
+      if (LOG) console.warn('[RATES][TABLE] no #ratesTable and no #modalBody; abort');
+      return;
+    }
   }
 
   const frame = _currentFrame();
   const parentEditable = frame && (frame.mode === 'edit' || frame.mode === 'create');
-  if (LOG) console.log('[RATES][renderCandidateRatesTable] parentEditable?', parentEditable);
+  if (LOG) console.log('[RATES][TABLE] parentEditable?', parentEditable, 'mode:', frame?.mode);
 
+  // Resolve client names
   let clientsById = {};
   try {
     const clients = await listClientsBasic();
-    if (idActive !== null && (token !== window.modalCtx.openToken || window.modalCtx.data?.id !== idActive)) return;
     clientsById = Object.fromEntries((clients || []).map(c => [c.id, c.name]));
-    if (LOG) console.log('[RATES][renderCandidateRatesTable] clients loaded', (clients||[]).length);
-  } catch (e) { console.error('load clients failed', e); }
+  } catch (e) { console.error('[RATES][TABLE] load clients failed', e); }
 
-  const O = window.modalCtx.overrides || { existing: [], stagedNew: [], stagedEdits: {}, stagedDeletes: new Set() };
+  const O = (window.modalCtx.overrides ||= { existing: [], stagedNew: [], stagedEdits: {}, stagedDeletes: new Set() });
+
+  // Loud snapshot of staging
+  if (LOG) console.log('[RATES][TABLE snapshot]', {
+    existing: (O.existing||[]).length,
+    stagedNew: (O.stagedNew||[]).length,
+    stagedEdits: Object.keys(O.stagedEdits||{}).length,
+    stagedDeletes: (O.stagedDeletes && O.stagedDeletes.size) || 0,
+    peekExisting: (O.existing||[])[0],
+    peekNew: (O.stagedNew||[])[0]
+  });
+
+  // Merge view = (existing ± edits ± pending deletes) + stagedNew
   const pendingDeleteIds = (O.stagedDeletes instanceof Set) ? O.stagedDeletes : new Set();
 
   const rows = [];
-  // Keep existing rows even if marked for delete; show "pending delete" state
   for (const ex of (O.existing || [])) {
     const isPendingDelete = !!(pendingDeleteIds && ex && pendingDeleteIds.has(ex.id));
-    rows.push({ ...ex, ...(O.stagedEdits[ex.id] || {}), _edited: !!O.stagedEdits[ex.id], _pendingDelete: isPendingDelete });
+    rows.push({
+      ...ex,
+      ...(O.stagedEdits?.[ex.id] || {}),
+      _edited: !!O.stagedEdits?.[ex.id],
+      _pendingDelete: isPendingDelete
+    });
   }
-  // Include staged-new rows
   for (const n of (O.stagedNew || [])) rows.push({ ...n, _isNew: true });
 
+  // Early empty view (but still show Add button)
+  if (!rows.length) {
+    div.innerHTML = `
+      <div class="hint" style="margin-bottom:8px">No candidate-specific overrides. Client defaults will apply.</div>
+      <div class="actions">
+        <button id="btnAddRate"${parentEditable ? '' : ' disabled'}>Add rate override</button>
+        ${parentEditable ? '<span class="hint">Changes are staged. Click “Save” in the main dialog to persist.</span>'
+                         : '<span class="hint">Read-only. Click “Edit” in the main dialog to add/modify overrides.</span>'}
+      </div>
+    `;
+    const addBtn = byId('btnAddRate'); if (addBtn && parentEditable) addBtn.onclick = () => openCandidateRateModal(window.modalCtx.data?.id);
+    if (LOG) console.log('[RATES][TABLE] rendered empty view');
+    return;
+  }
+
+  // Margin helpers
   const fmt = v => (v==null || Number.isNaN(v)) ? '—' : (Math.round(v*100)/100).toFixed(2);
   const mult = await (async ()=>{ if (typeof window.__ERNI_MULT__ === 'number') return window.__ERNI_MULT__; try { if (typeof getSettingsCached === 'function') { const s = await getSettingsCached(); let p = s?.erni_pct ?? s?.employers_ni_percent ?? 0; p = Number(p)||0; if (p>1) p=p/100; window.__ERNI_MULT__ = 1 + p; return window.__ERNI_MULT__; } } catch{} window.__ERNI_MULT__ = 1; return 1; })();
 
@@ -2878,21 +2900,7 @@ async function renderCandidateRatesTable() {
       return win ? { day: win.charge_day ?? null, night: win.charge_night ?? null, sat: win.charge_sat ?? null, sun: win.charge_sun ?? null, bh: win.charge_bh ?? null } : null;
     } catch(e){ return null; }
   }
-
   await Promise.all(uniqueKeys.map(async k => { chargeMap[k] = await loadChargesForKey(k); }));
-
-  if (!rows.length) {
-    div.innerHTML = `
-      <div class="hint" style="margin-bottom:8px">No candidate-specific overrides. Client defaults will apply.</div>
-      <div class="actions">
-        <button id="btnAddRate"${parentEditable ? '' : ' disabled'}>Add rate override</button>
-        ${parentEditable ? '<span class="hint">Changes are staged. Click “Save” in the main dialog to persist.</span>'
-                         : '<span class="hint">Read-only. Click “Edit” in the main dialog to add/modify overrides.</span>'}
-      </div>
-    `;
-    const addBtn = byId('btnAddRate'); if (addBtn && parentEditable) addBtn.onclick = () => openCandidateRateModal(window.modalCtx.data?.id);
-    return;
-  }
 
   const cols    = ['client','role','band','rate_type','pay_day','pay_night','pay_sat','pay_sun','pay_bh','margin_day','margin_night','margin_sat','margin_sun','margin_bh','date_from','date_to','_state'];
   const headers = ['Client','Role','Band','Type','Pay Day','Pay Night','Pay Sat','Pay Sun','Pay BH','Margin Day','Margin Night','Margin Sat','Margin Sun','Margin BH','From','To','Status'];
@@ -2907,8 +2915,7 @@ async function renderCandidateRatesTable() {
     const tr = document.createElement('tr');
     if (parentEditable) tr.ondblclick = () => openCandidateRateModal(window.modalCtx.data?.id, r);
 
-    const key = keyOf(r);
-    const charges = chargeMap[key] || null;
+    const charges = chargeMap[keyOf(r)] || null;
     const isPAYE = String(r.rate_type || '').toUpperCase() === 'PAYE';
 
     const margin = {};
@@ -2922,9 +2929,12 @@ async function renderCandidateRatesTable() {
       r._isNew        ? 'Staged (new)' :
       r._edited       ? 'Staged (edited)' : '';
 
+    // pay columns to 2dp
+    const to2 = (v) => (v==null ? '—' : fmt(Number(v)));
+
     const pretty = {
       client: clientsById[r.client_id] || '', role: r.role || '', band: r.band ?? '', rate_type: r.rate_type || '',
-      pay_day: fmt(r.pay_day), pay_night: fmt(r.pay_night), pay_sat: fmt(r.pay_sat), pay_sun: fmt(r.pay_sun), pay_bh: fmt(r.pay_bh),
+      pay_day: to2(r.pay_day), pay_night: to2(r.pay_night), pay_sat: to2(r.pay_sat), pay_sun: to2(r.pay_sun), pay_bh: to2(r.pay_bh),
       margin_day: fmt(margin.day), margin_night: fmt(margin.night), margin_sat: fmt(margin.sat), margin_sun: fmt(margin.sun), margin_bh: fmt(margin.bh),
       date_from: formatDisplayValue('date_from', r.date_from), date_to: formatDisplayValue('date_to', r.date_to),
       _state   : status
@@ -2949,7 +2959,21 @@ async function renderCandidateRatesTable() {
 
   const addBtn = byId('btnAddRate');
   if (addBtn && parentEditable) addBtn.onclick = () => openCandidateRateModal(window.modalCtx.data?.id);
+
+  if (LOG) console.log('[RATES][TABLE rendered]', { rows: rows.length, firstState: rows[0]?._state || '(none)' });
 }
+
+
+
+// Replaces your current function
+// =================== renderCandidateRatesTable (FIXED) ===================
+// =================== CANDIDATE RATES TABLE (UPDATED) ===================
+// ✅ UPDATED — renders from modalCtx.overrides (existing ⊕ staged edits/new ⊖ staged deletes)
+
+// ==================================
+// 2) renderCandidateRatesTable(...)
+// ==================================
+// Now computes margins for each override row by resolving client charges at date_from (memoized per render)
 
 
 
@@ -3195,6 +3219,195 @@ async function mountCandidateRatesTab() {
 // ==============================
 // ========== CANDIDATE OVERRIDES ==========
 // ========== CHILD MODAL (CANDIDATE OVERRIDE) WITH HEAVY LOGGING ==========
+
+
+// ========== PARENT TABLE RENDER (WITH LOUD LOGS + SAFETY NET) ==========
+async function renderCandidateRatesTable() {
+  const LOG = !!window.__LOG_RATES;
+
+  // Safety net: auto-create #ratesTable if missing
+  let div = byId('ratesTable');
+  if (!div) {
+    const host = byId('modalBody');
+    if (host) {
+      div = document.createElement('div');
+      div.id = 'ratesTable';
+      host.appendChild(div);
+      if (LOG) console.warn('[RATES][TABLE] created missing #ratesTable');
+    } else {
+      if (LOG) console.warn('[RATES][TABLE] no #ratesTable and no #modalBody; abort');
+      return;
+    }
+  }
+
+  const frame = _currentFrame();
+  const parentEditable = frame && (frame.mode === 'edit' || frame.mode === 'create');
+  if (LOG) console.log('[RATES][TABLE] parentEditable?', parentEditable, 'mode:', frame?.mode);
+
+  // Resolve client names
+  let clientsById = {};
+  try {
+    const clients = await listClientsBasic();
+    clientsById = Object.fromEntries((clients || []).map(c => [c.id, c.name]));
+  } catch (e) { console.error('[RATES][TABLE] load clients failed', e); }
+
+  const O = (window.modalCtx.overrides ||= { existing: [], stagedNew: [], stagedEdits: {}, stagedDeletes: new Set() });
+
+  // Loud snapshot of staging
+  if (LOG) console.log('[RATES][TABLE snapshot]', {
+    existing: (O.existing||[]).length,
+    stagedNew: (O.stagedNew||[]).length,
+    stagedEdits: Object.keys(O.stagedEdits||{}).length,
+    stagedDeletes: (O.stagedDeletes && O.stagedDeletes.size) || 0,
+    peekExisting: (O.existing||[])[0],
+    peekNew: (O.stagedNew||[])[0]
+  });
+
+  // Merge view = (existing ± edits ± pending deletes) + stagedNew
+  const pendingDeleteIds = (O.stagedDeletes instanceof Set) ? O.stagedDeletes : new Set();
+
+  const rows = [];
+  for (const ex of (O.existing || [])) {
+    const isPendingDelete = !!(pendingDeleteIds && ex && pendingDeleteIds.has(ex.id));
+    rows.push({
+      ...ex,
+      ...(O.stagedEdits?.[ex.id] || {}),
+      _edited: !!O.stagedEdits?.[ex.id],
+      _pendingDelete: isPendingDelete
+    });
+  }
+  for (const n of (O.stagedNew || [])) rows.push({ ...n, _isNew: true });
+
+  // Early empty view (but still show Add button)
+  if (!rows.length) {
+    div.innerHTML = `
+      <div class="hint" style="margin-bottom:8px">No candidate-specific overrides. Client defaults will apply.</div>
+      <div class="actions">
+        <button id="btnAddRate"${parentEditable ? '' : ' disabled'}>Add rate override</button>
+        ${parentEditable ? '<span class="hint">Changes are staged. Click “Save” in the main dialog to persist.</span>'
+                         : '<span class="hint">Read-only. Click “Edit” in the main dialog to add/modify overrides.</span>'}
+      </div>
+    `;
+    const addBtn = byId('btnAddRate'); if (addBtn && parentEditable) addBtn.onclick = () => openCandidateRateModal(window.modalCtx.data?.id);
+    if (LOG) console.log('[RATES][TABLE] rendered empty view');
+    return;
+  }
+
+  // Margin helpers
+  const fmt = v => (v==null || Number.isNaN(v)) ? '—' : (Math.round(v*100)/100).toFixed(2);
+  const mult = await (async ()=>{ if (typeof window.__ERNI_MULT__ === 'number') return window.__ERNI_MULT__; try { if (typeof getSettingsCached === 'function') { const s = await getSettingsCached(); let p = s?.erni_pct ?? s?.employers_ni_percent ?? 0; p = Number(p)||0; if (p>1) p=p/100; window.__ERNI_MULT__ = 1 + p; return window.__ERNI_MULT__; } } catch{} window.__ERNI_MULT__ = 1; return 1; })();
+
+  const keyOf = r => [r.client_id, r.role || '', (r.band==null?'':String(r.band)), r.date_from || ''].join('|');
+  const uniqueKeys = Array.from(new Set(rows.map(keyOf)));
+  const chargeMap = Object.create(null);
+
+  async function loadChargesForKey(key){
+    const [client_id, role, bandKey, date_from] = key.split('|');
+    const band = (bandKey === '' ? null : bandKey);
+    if (!client_id || !role || !date_from) return null;
+    try {
+      const list = await listClientRates(client_id, { active_on: date_from, only_enabled: true });
+      const filtered = Array.isArray(list) ? list.filter(w=>!w.disabled_at_utc && w.role===role) : [];
+      let win = filtered.find(w => (w.band ?? null) === (band ?? null));
+      if (!win && (band == null)) win = filtered.find(w => w.band == null);
+      return win ? { day: win.charge_day ?? null, night: win.charge_night ?? null, sat: win.charge_sat ?? null, sun: win.charge_sun ?? null, bh: win.charge_bh ?? null } : null;
+    } catch(e){ return null; }
+  }
+  await Promise.all(uniqueKeys.map(async k => { chargeMap[k] = await loadChargesForKey(k); }));
+
+  const cols    = ['client','role','band','rate_type','pay_day','pay_night','pay_sat','pay_sun','pay_bh','margin_day','margin_night','margin_sat','margin_sun','margin_bh','date_from','date_to','_state'];
+  const headers = ['Client','Role','Band','Type','Pay Day','Pay Night','Pay Sat','Pay Sun','Pay BH','Margin Day','Margin Night','Margin Sat','Margin Sun','Margin BH','From','To','Status'];
+
+  const tbl = document.createElement('table'); tbl.className = 'grid';
+  const thead = document.createElement('thead'); const trh = document.createElement('tr');
+  headers.forEach(h => { const th=document.createElement('th'); th.textContent=h; trh.appendChild(th); });
+  thead.appendChild(trh); tbl.appendChild(thead);
+
+  const tb = document.createElement('tbody');
+  rows.forEach(r => {
+    const tr = document.createElement('tr');
+    if (parentEditable) tr.ondblclick = () => openCandidateRateModal(window.modalCtx.data?.id, r);
+
+    const charges = chargeMap[keyOf(r)] || null;
+    const isPAYE = String(r.rate_type || '').toUpperCase() === 'PAYE';
+
+    const margin = {};
+    ['day','night','sat','sun','bh'].forEach(b=>{
+      const pay = r[`pay_${b}`]; const chg = charges ? charges[b] : null;
+      margin[b] = (chg!=null && pay!=null) ? (isPAYE ? (chg - (pay * mult)) : (chg - pay)) : null;
+    });
+
+    const status =
+      r._pendingDelete ? 'Pending delete (save to confirm)' :
+      r._isNew        ? 'Staged (new)' :
+      r._edited       ? 'Staged (edited)' : '';
+
+    const pretty = {
+      client: clientsById[r.client_id] || '', role: r.role || '', band: r.band ?? '', rate_type: r.rate_type || '',
+      pay_day: r.pay_day ?? '—', pay_night: r.pay_night ?? '—', pay_sat: r.pay_sat ?? '—', pay_sun: r.pay_sun ?? '—', pay_bh: r.pay_bh ?? '—',
+      margin_day: fmt(margin.day), margin_night: fmt(margin.night), margin_sat: fmt(margin.sat), margin_sun: fmt(margin.sun), margin_bh: fmt(margin.bh),
+      date_from: formatDisplayValue('date_from', r.date_from), date_to: formatDisplayValue('date_to', r.date_to),
+      _state   : status
+    };
+
+    cols.forEach(c => { const td=document.createElement('td'); td.textContent=String(pretty[c] ?? ''); tr.appendChild(td); });
+    tb.appendChild(tr);
+  });
+  tbl.appendChild(tb);
+
+  const actions = document.createElement('div');
+  actions.className = 'actions';
+  actions.innerHTML = `
+    <button id="btnAddRate"${parentEditable ? '' : ' disabled'}>Add rate override</button>
+    ${parentEditable ? '<span class="hint">Changes are staged. Click “Save” in the main dialog to persist.</span>'
+                     : '<span class="hint">Read-only. Click “Edit” in the main dialog to add/modify overrides.</span>'}
+  `;
+
+  div.innerHTML = '';
+  div.appendChild(tbl);
+  div.appendChild(actions);
+
+  const addBtn = byId('btnAddRate');
+  if (addBtn && parentEditable) addBtn.onclick = () => openCandidateRateModal(window.modalCtx.data?.id);
+
+  if (LOG) console.log('[RATES][TABLE rendered]', { rows: rows.length, firstState: rows[0]?._state || '(none)' });
+}
+
+
+function renderCalendar(timesheets){
+  const wrap = byId('calendar'); if (!wrap) return;
+  const map = new Map();
+  (timesheets || []).forEach(t=>{
+    const d = (t.worked_start_iso || t.worked_start || t.date || t.week_ending_date);
+    if (!d) return;
+    const key = (d+'').slice(0,10);
+    const paid = t.paid_at_utc;
+    const invoiced = t.locked_by_invoice_id || (t.invoice_id);
+    const auth = t.authorised_at_server || (t.validation_status==='VALIDATION_OK');
+    let mark = 'a'; if (invoiced) mark = 'i'; if (paid) mark = 'p';
+    if (auth && !invoiced && !paid) mark = 'a';
+    map.set(key, mark);
+  });
+  const now = new Date(); const yr = now.getFullYear(); wrap.innerHTML = '';
+  for (let m=0;m<12;m++){
+    const first = new Date(yr, m, 1);
+    const box = document.createElement('div'); box.className='month';
+    box.innerHTML = `<h4>${first.toLocaleString(undefined,{month:'long'})} ${yr}</h4>`;
+    const days = document.createElement('div'); days.className='days';
+    for (let i=0;i<first.getDay();i++) days.appendChild(document.createElement('div'));
+    const daysInMonth = new Date(yr, m+1, 0).getDate();
+    for (let d=1; d<=daysInMonth; d++){
+      const cell = document.createElement('div'); cell.className='d';
+      const key = `${yr}-${String(m+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
+      const mark = map.get(key);
+      if (mark) cell.classList.add('mark-'+mark);
+      cell.textContent = d;
+      days.appendChild(cell);
+    }
+    box.appendChild(days); wrap.appendChild(box);
+  }
+}
+
 async function openCandidateRateModal(candidate_id, existing) {
   const LOG = !!window.__LOG_RATES;
   const LOG_APPLY = (typeof window.__LOG_APPLY === 'boolean') ? window.__LOG_APPLY : LOG;
@@ -3677,199 +3890,13 @@ async function openCandidateRateModal(candidate_id, existing) {
         L('staged delete', { id: existing.id, size: O.stagedDeletes.size });
         try { renderCandidateRatesTable(); } catch {}
         try { window.dispatchEvent(new CustomEvent('modal-dirty')); } catch {}
-        const closeBtn = byId('btnCloseModal'); if (closeBtn) click(); // (unchanged pattern)
+        const closeBtn = byId('btnCloseModal'); if (closeBtn) closeBtn.click();
       } catch (e) { L('stage delete failed', e); }
     };
   })();
 }
 
 
-// ========== PARENT TABLE RENDER (WITH LOUD LOGS + SAFETY NET) ==========
-async function renderCandidateRatesTable() {
-  const LOG = !!window.__LOG_RATES;
-
-  // Safety net: auto-create #ratesTable if missing
-  let div = byId('ratesTable');
-  if (!div) {
-    const host = byId('modalBody');
-    if (host) {
-      div = document.createElement('div');
-      div.id = 'ratesTable';
-      host.appendChild(div);
-      if (LOG) console.warn('[RATES][TABLE] created missing #ratesTable');
-    } else {
-      if (LOG) console.warn('[RATES][TABLE] no #ratesTable and no #modalBody; abort');
-      return;
-    }
-  }
-
-  const frame = _currentFrame();
-  const parentEditable = frame && (frame.mode === 'edit' || frame.mode === 'create');
-  if (LOG) console.log('[RATES][TABLE] parentEditable?', parentEditable, 'mode:', frame?.mode);
-
-  // Resolve client names
-  let clientsById = {};
-  try {
-    const clients = await listClientsBasic();
-    clientsById = Object.fromEntries((clients || []).map(c => [c.id, c.name]));
-  } catch (e) { console.error('[RATES][TABLE] load clients failed', e); }
-
-  const O = (window.modalCtx.overrides ||= { existing: [], stagedNew: [], stagedEdits: {}, stagedDeletes: new Set() });
-
-  // Loud snapshot of staging
-  if (LOG) console.log('[RATES][TABLE snapshot]', {
-    existing: (O.existing||[]).length,
-    stagedNew: (O.stagedNew||[]).length,
-    stagedEdits: Object.keys(O.stagedEdits||{}).length,
-    stagedDeletes: (O.stagedDeletes && O.stagedDeletes.size) || 0,
-    peekExisting: (O.existing||[])[0],
-    peekNew: (O.stagedNew||[])[0]
-  });
-
-  // Merge view = (existing ± edits ± pending deletes) + stagedNew
-  const pendingDeleteIds = (O.stagedDeletes instanceof Set) ? O.stagedDeletes : new Set();
-
-  const rows = [];
-  for (const ex of (O.existing || [])) {
-    const isPendingDelete = !!(pendingDeleteIds && ex && pendingDeleteIds.has(ex.id));
-    rows.push({
-      ...ex,
-      ...(O.stagedEdits?.[ex.id] || {}),
-      _edited: !!O.stagedEdits?.[ex.id],
-      _pendingDelete: isPendingDelete
-    });
-  }
-  for (const n of (O.stagedNew || [])) rows.push({ ...n, _isNew: true });
-
-  // Early empty view (but still show Add button)
-  if (!rows.length) {
-    div.innerHTML = `
-      <div class="hint" style="margin-bottom:8px">No candidate-specific overrides. Client defaults will apply.</div>
-      <div class="actions">
-        <button id="btnAddRate"${parentEditable ? '' : ' disabled'}>Add rate override</button>
-        ${parentEditable ? '<span class="hint">Changes are staged. Click “Save” in the main dialog to persist.</span>'
-                         : '<span class="hint">Read-only. Click “Edit” in the main dialog to add/modify overrides.</span>'}
-      </div>
-    `;
-    const addBtn = byId('btnAddRate'); if (addBtn && parentEditable) addBtn.onclick = () => openCandidateRateModal(window.modalCtx.data?.id);
-    if (LOG) console.log('[RATES][TABLE] rendered empty view');
-    return;
-  }
-
-  // Margin helpers
-  const fmt = v => (v==null || Number.isNaN(v)) ? '—' : (Math.round(v*100)/100).toFixed(2);
-  const mult = await (async ()=>{ if (typeof window.__ERNI_MULT__ === 'number') return window.__ERNI_MULT__; try { if (typeof getSettingsCached === 'function') { const s = await getSettingsCached(); let p = s?.erni_pct ?? s?.employers_ni_percent ?? 0; p = Number(p)||0; if (p>1) p=p/100; window.__ERNI_MULT__ = 1 + p; return window.__ERNI_MULT__; } } catch{} window.__ERNI_MULT__ = 1; return 1; })();
-
-  const keyOf = r => [r.client_id, r.role || '', (r.band==null?'':String(r.band)), r.date_from || ''].join('|');
-  const uniqueKeys = Array.from(new Set(rows.map(keyOf)));
-  const chargeMap = Object.create(null);
-
-  async function loadChargesForKey(key){
-    const [client_id, role, bandKey, date_from] = key.split('|');
-    const band = (bandKey === '' ? null : bandKey);
-    if (!client_id || !role || !date_from) return null;
-    try {
-      const list = await listClientRates(client_id, { active_on: date_from, only_enabled: true });
-      const filtered = Array.isArray(list) ? list.filter(w=>!w.disabled_at_utc && w.role===role) : [];
-      let win = filtered.find(w => (w.band ?? null) === (band ?? null));
-      if (!win && (band == null)) win = filtered.find(w => w.band == null);
-      return win ? { day: win.charge_day ?? null, night: win.charge_night ?? null, sat: win.charge_sat ?? null, sun: win.charge_sun ?? null, bh: win.charge_bh ?? null } : null;
-    } catch(e){ return null; }
-  }
-  await Promise.all(uniqueKeys.map(async k => { chargeMap[k] = await loadChargesForKey(k); }));
-
-  const cols    = ['client','role','band','rate_type','pay_day','pay_night','pay_sat','pay_sun','pay_bh','margin_day','margin_night','margin_sat','margin_sun','margin_bh','date_from','date_to','_state'];
-  const headers = ['Client','Role','Band','Type','Pay Day','Pay Night','Pay Sat','Pay Sun','Pay BH','Margin Day','Margin Night','Margin Sat','Margin Sun','Margin BH','From','To','Status'];
-
-  const tbl = document.createElement('table'); tbl.className = 'grid';
-  const thead = document.createElement('thead'); const trh = document.createElement('tr');
-  headers.forEach(h => { const th=document.createElement('th'); th.textContent=h; trh.appendChild(th); });
-  thead.appendChild(trh); tbl.appendChild(thead);
-
-  const tb = document.createElement('tbody');
-  rows.forEach(r => {
-    const tr = document.createElement('tr');
-    if (parentEditable) tr.ondblclick = () => openCandidateRateModal(window.modalCtx.data?.id, r);
-
-    const charges = chargeMap[keyOf(r)] || null;
-    const isPAYE = String(r.rate_type || '').toUpperCase() === 'PAYE';
-
-    const margin = {};
-    ['day','night','sat','sun','bh'].forEach(b=>{
-      const pay = r[`pay_${b}`]; const chg = charges ? charges[b] : null;
-      margin[b] = (chg!=null && pay!=null) ? (isPAYE ? (chg - (pay * mult)) : (chg - pay)) : null;
-    });
-
-    const status =
-      r._pendingDelete ? 'Pending delete (save to confirm)' :
-      r._isNew        ? 'Staged (new)' :
-      r._edited       ? 'Staged (edited)' : '';
-
-    const pretty = {
-      client: clientsById[r.client_id] || '', role: r.role || '', band: r.band ?? '', rate_type: r.rate_type || '',
-      pay_day: r.pay_day ?? '—', pay_night: r.pay_night ?? '—', pay_sat: r.pay_sat ?? '—', pay_sun: r.pay_sun ?? '—', pay_bh: r.pay_bh ?? '—',
-      margin_day: fmt(margin.day), margin_night: fmt(margin.night), margin_sat: fmt(margin.sat), margin_sun: fmt(margin.sun), margin_bh: fmt(margin.bh),
-      date_from: formatDisplayValue('date_from', r.date_from), date_to: formatDisplayValue('date_to', r.date_to),
-      _state   : status
-    };
-
-    cols.forEach(c => { const td=document.createElement('td'); td.textContent=String(pretty[c] ?? ''); tr.appendChild(td); });
-    tb.appendChild(tr);
-  });
-  tbl.appendChild(tb);
-
-  const actions = document.createElement('div');
-  actions.className = 'actions';
-  actions.innerHTML = `
-    <button id="btnAddRate"${parentEditable ? '' : ' disabled'}>Add rate override</button>
-    ${parentEditable ? '<span class="hint">Changes are staged. Click “Save” in the main dialog to persist.</span>'
-                     : '<span class="hint">Read-only. Click “Edit” in the main dialog to add/modify overrides.</span>'}
-  `;
-
-  div.innerHTML = '';
-  div.appendChild(tbl);
-  div.appendChild(actions);
-
-  const addBtn = byId('btnAddRate');
-  if (addBtn && parentEditable) addBtn.onclick = () => openCandidateRateModal(window.modalCtx.data?.id);
-
-  if (LOG) console.log('[RATES][TABLE rendered]', { rows: rows.length, firstState: rows[0]?._state || '(none)' });
-}
-
-
-function renderCalendar(timesheets){
-  const wrap = byId('calendar'); if (!wrap) return;
-  const map = new Map();
-  (timesheets || []).forEach(t=>{
-    const d = (t.worked_start_iso || t.worked_start || t.date || t.week_ending_date);
-    if (!d) return;
-    const key = (d+'').slice(0,10);
-    const paid = t.paid_at_utc;
-    const invoiced = t.locked_by_invoice_id || (t.invoice_id);
-    const auth = t.authorised_at_server || (t.validation_status==='VALIDATION_OK');
-    let mark = 'a'; if (invoiced) mark = 'i'; if (paid) mark = 'p';
-    if (auth && !invoiced && !paid) mark = 'a';
-    map.set(key, mark);
-  });
-  const now = new Date(); const yr = now.getFullYear(); wrap.innerHTML = '';
-  for (let m=0;m<12;m++){
-    const first = new Date(yr, m, 1);
-    const box = document.createElement('div'); box.className='month';
-    box.innerHTML = `<h4>${first.toLocaleString(undefined,{month:'long'})} ${yr}</h4>`;
-    const days = document.createElement('div'); days.className='days';
-    for (let i=0;i<first.getDay();i++) days.appendChild(document.createElement('div'));
-    const daysInMonth = new Date(yr, m+1, 0).getDate();
-    for (let d=1; d<=daysInMonth; d++){
-      const cell = document.createElement('div'); cell.className='d';
-      const key = `${yr}-${String(m+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
-      const mark = map.get(key);
-      if (mark) cell.classList.add('mark-'+mark);
-      cell.textContent = d;
-      days.appendChild(cell);
-    }
-    box.appendChild(days); wrap.appendChild(box);
-  }
-}
 
 // ---- Client modal
 
@@ -5121,6 +5148,513 @@ function mountClientHospitalsTab() {
   }
 }
 
+async function openClientRateModal(client_id, existing) {
+  const parentFrame = _currentFrame();
+  const parentEditable = parentFrame && (parentFrame.mode === 'edit' || parentFrame.mode === 'create');
+  const APILOG = (typeof window !== 'undefined' && !!window.__LOG_API) || (typeof __LOG_API !== 'undefined' && !!__LOG_API);
+  const LOG_RATES = !!window.__LOG_RATES;
+  const DBG = (...a)=> { if (LOG_RATES) console.log('[RATES][openClientRateModal]', ...a); };
+
+  const ctx = window.modalCtx || {};
+  const resolvedClientId =
+    client_id ||
+    (existing && existing.client_id) ||
+    (ctx && ctx.data && (ctx.data.id || ctx.data.client_id)) ||
+    null;
+
+  if (APILOG) console.log('[openClientRateModal] resolvedClientId', resolvedClientId, { passed: client_id, existing });
+  DBG('ENTRY', { parentEditable, hasExisting: !!existing, resolvedClientId, ctxEntity: ctx?.entity, ctxId: ctx?.data?.id });
+
+  const globalRoles = await loadGlobalRoleOptions();
+  const roleOptions = globalRoles.map(r => `<option value="${r}">${r}</option>`).join('') + `<option value="__OTHER__">+ Add new role…</option>`;
+  DBG('loaded role options', { count: globalRoles.length });
+
+  const ex  = existing || {};
+  const who = ex.disabled_by_name || '';
+  const when = ex.disabled_at_utc ? formatIsoToUk(String(ex.disabled_at_utc).slice(0,10)) : '';
+  const isDisabled = !!ex.disabled_at_utc;
+  DBG('existing status', { isDisabled, who, when, id: ex.id });
+
+  const statusBlock = `
+    <div class="row" id="cl_status_row" style="align-items:center; gap:8px;">
+      <div>
+        ${isDisabled ? `
+          <span class="pill tag-fail" id="cl_status_pill">❌ Disabled</span>
+          <div class="hint" id="cl_status_meta">${who ? `by ${escapeHtml(who)}` : ''} ${when ? `on ${escapeHtml(when)}` : ''}</div>`
+      : `
+          <span class="pill tag-ok" id="cl_status_pill">✓ Active</span>
+          <div class="hint" id="cl_status_meta">&nbsp;</div>`}
+      </div>
+      ${parentEditable && ex.id ? `<div><button id="cl_toggle_btn" class="btn btn-outline btn-sm">${isDisabled ? 'Enable' : 'Disable'}</button></div>` : ''}
+    </div>`;
+
+  function sameRow(a, b) {
+    const eq = !!(a && b && ((a === b) || (a.id && b.id && String(a.id) === String(b.id)) || (a.__localKey && b.__localKey && String(a.__localKey) === String(b.__localKey))));
+    if (LOG_RATES) console.log('[RATES][sameRow]', { aId:a?.id, bId:b?.id, aKey:a?.__localKey, bKey:b?.__localKey, eq });
+    return eq;
+  }
+
+  // INLINE panel for client-rate warnings/fixes
+  const formHtml = html(`
+    <div class="form" id="clientRateForm">
+      ${statusBlock}
+      <div class="row">
+        <label>Role (required)</label>
+        <select name="role" id="cl_role" required ${parentEditable ? '' : 'disabled'}>
+          <option value="">Select role…</option>
+          ${roleOptions}
+        </select>
+      </div>
+      <div class="row" id="cl_role_new_row" style="display:none">
+        <label>New role code</label>
+        <input type="text" id="cl_role_new" placeholder="e.g. RMN-Lead" ${parentEditable ? '' : 'disabled'} />
+        <div class="hint">Uppercase letters/numbers/[-_/ ] recommended.</div>
+      </div>
+      <div class="row"><label>VBR5809: Band (optional)</label>
+        <input type="text" name="band" id="cl_band" value="${ex.band ?? ''}" ${parentEditable ? '' : 'disabled'} />
+      </div>
+      <div class="row"><label>Effective from (DD/MM/YYYY)</label>
+        <input type="text" name="date_from" id="cl_date_from" placeholder="DD/MM/YYYY" ${parentEditable ? '' : 'disabled'} />
+      </div>
+      <div class="row"><label>Effective to (optional, DD/MM/YYYY)</label>
+        <input type="text" name="date_to" id="cl_date_to" placeholder="DD/MM/YYYY" ${parentEditable ? '' : 'disabled'} />
+      </div>
+      <div class="row" style="grid-column: 1 / -1">
+        <table class="grid" style="width:100%;border-collapse:collapse">
+          <thead><tr><th>Bucket</th><th>PAYE pay</th><th>Umbrella pay</th><th>Charge</th></tr></thead>
+          <tbody>
+            ${['day','night','sat','sun','bh'].map(b => `
+              <tr>
+                <td style="white-space:nowrap">${b.toUpperCase()}</td>
+                <td><input type="number" step="0.01" name="paye_${b}" ${parentEditable ? '' : 'disabled'} /></td>
+                <td><input type="number" step="0.01" name="umb_${b}"  ${parentEditable ? '' : 'disabled'} /></td>
+                <td><input type="number" step="0.01" name="charge_${b}" ${parentEditable ? '' : 'disabled'} /></td>
+              </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>
+      <div class="row" style="grid-column:1 / -1; margin-top:10px">
+        <table class="grid" id="cl_margins_tbl" style="width:100%">
+          <thead><tr><th>Bucket</th><th>PAYE margin</th><th>Umbrella margin</th></tr></thead>
+          <tbody>
+            ${['day','night','sat','sun','bh'].map(b=>`
+              <tr><td>${b.toUpperCase()}</td><td><span id="m_paye_${b}">—</span></td><td><span id="m_umb_${b}">—</span></td></tr>`).join('')}
+          </tbody>
+        </table>
+        <div class="hint" id="cl_delete_hint" style="display:none;margin-top:6px"></div>
+      </div>
+
+      <div id="cl_err_panel" style="grid-column:1/-1; margin-top:10px; display:none; border:1px solid #7f1d1d; background:rgba(239,68,68,.08); color:#fecaca; padding:10px; border-radius:8px"></div>
+    </div>
+  `);
+
+  // ERNI
+  async function _erniMultiplier(){
+    if (typeof window.__ERNI_MULT__ === 'number') return window.__ERNI_MULT__;
+    try {
+      if (typeof getSettingsCached === 'function') {
+        const s = await getSettingsCached();
+        let p = s?.erni_pct ?? s?.employers_ni_percent ?? 0;
+        p = Number(p) || 0; if (p > 1) p = p/100;
+        window.__ERNI_MULT__ = 1 + p;
+        return window.__ERNI_MULT__;
+      }
+    } catch {}
+    window.__ERNI_MULT__ = 1;
+    return 1;
+  }
+
+  function setApplyEnabled(enabled){
+    if (LOG_RATES) console.log('[RATES][setApplyEnabled]', { enabled });
+    try {
+      const btn = document.querySelector('#modal .btn-save, #modal .actions .primary, #modal .actions .btn-primary, .modal .btn-save');
+      if (btn) { btn.disabled = !enabled; btn.classList.toggle('disabled', !enabled); }
+    } catch (e) { if (LOG_RATES) console.warn('[RATES][setApplyEnabled] button toggle failed', e); }
+    // Inform parent showModal so child Save can proceed
+    try { window.dispatchEvent(new CustomEvent('modal-apply-enabled', { detail: { enabled } })); } catch (e) { if (LOG_RATES) console.warn('[RATES][setApplyEnabled] dispatch failed', e); }
+  }
+  const numOrNull = v => { if (v===undefined||v===null) return null; if (typeof v === 'string' && v.trim()==='') return null; const n=Number(v); return Number.isFinite(n) ? n : null; };
+  const fmt = v => (v==null || Number.isNaN(v)) ? '—' : (Math.round(v*100)/100).toFixed(2);
+
+  function showClientInlineError(html){
+    const p = byId('cl_err_panel');
+    if (!p) return;
+    if (html && String(html).trim() !== '') {
+      p.innerHTML = html;
+      p.style.display = '';
+    } else {
+      p.innerHTML = '';
+      p.style.display = 'none';
+    }
+  }
+  function isoMinusOneDay(iso){
+    if (!iso) return null;
+    const d = new Date(iso + 'T00:00:00Z');
+    d.setUTCDate(d.getUTCDate() - 1);
+    const y = d.getUTCFullYear();
+    const m = String(d.getUTCMonth()+1).padStart(2,'0');
+    const dd= String(d.getUTCDate()).padStart(2,'0');
+    return `${y}-${m}-${dd}`;
+  }
+  function rangesOverlap(a0,a1,b0,b1){
+    const A0 = a0 || '0000-01-01', A1 = a1 || '9999-12-31';
+    const B0 = b0 || '0000-01-01', B1 = b1 || '9999-12-31';
+    return !(A1 < B0 || B1 < A0);
+  }
+
+  // Gate inputs + margins + Apply + overlap inline fixes
+  async function recomputeClientState(){
+    const mult = await _erniMultiplier();
+    const roleVal = (byId('cl_role')?.value || '').trim();
+    const fromIso = parseUkDateToIso(byId('cl_date_from')?.value || '');
+    const toIso   = parseUkDateToIso(byId('cl_date_to')?.value || '');
+
+    DBG('recomputeClientState: ENTRY', { roleVal, fromIso, toIso, exId: ex?.id });
+
+    const getIn = sel => document.querySelector(sel);
+    const payeInputs = ['day','night','sat','sun','bh'].map(b => getIn(`#clientRateForm input[name="paye_${b}"]`));
+    const umbInputs  = ['day','night','sat','sun','bh'].map(b => getIn(`#clientRateForm input[name="umb_${b}"]`));
+    const chgInputs  = ['day','night','sat','sun','bh'].map(b => getIn(`#clientRateForm input[name="charge_${b}"]`));
+    const allInputs  = [...payeInputs, ...umbInputs, ...chgInputs].filter(Boolean);
+
+    let canApply = true;
+    showClientInlineError('');
+
+    if (!roleVal || !fromIso) {
+      DBG('recomputeClientState: NOT_READY', { roleVal, fromIso });
+      allInputs.forEach(inp => { inp.disabled = true; });
+      // clear preview
+      ['day','night','sat','sun','bh'].forEach(b=>{
+        const spP = byId(`m_paye_${b}`), spU = byId(`m_umb_${b}`);
+        if (spP) spP.textContent = '—';
+        if (spU) spU.textContent = '—';
+      });
+      setApplyEnabled(false);
+      return;
+    }
+
+    // keep inputs enabled
+    allInputs.forEach(inp => { inp.disabled = true === false; });
+
+    // Compute & render margins preview (2dp), while validating
+    let hasNegative = false;
+    const fmt2 = (v) => (v==null || Number.isNaN(v)) ? '—' : (Math.round(v*100)/100).toFixed(2);
+
+    ['day','night','sat','sun','bh'].forEach(bucket=>{
+      const paye = numOrNull(getIn(`#clientRateForm input[name="paye_${bucket}"]`)?.value);
+      const umb  = numOrNull(getIn(`#clientRateForm input[name="umb_${bucket}"]`)?.value);
+      const chg  = numOrNull(getIn(`#clientRateForm input[name="charge_${bucket}"]`)?.value);
+
+      const payeMargin = (paye!=null && chg!=null) ? (chg - (paye * mult)) : null;
+      const umbMargin  = (umb!=null  && chg!=null) ? (chg - umb)          : null;
+
+      const spP = byId(`m_paye_${bucket}`), spU = byId(`m_umb_${bucket}`);
+      if (spP) spP.textContent = fmt2(payeMargin);
+      if (spU) spU.textContent = fmt2(umbMargin);
+
+      if ((payeMargin != null && payeMargin < 0) || (umbMargin != null && umbMargin < 0)) hasNegative = true;
+    });
+
+    if (hasNegative) { canApply = false; showClientInlineError('One or more buckets would have a negative margin. Adjust pay/charge.'); }
+
+    // Overlap detection + Fix buttons
+    const staged = Array.isArray(ctx.ratesState) ? ctx.ratesState.slice() : [];
+    const sameCat  = r => String(r.role||'') === roleVal && String(r.band??'') === String((byId('cl_band')?.value||'').trim()||'');
+    const isSelf   = r => existing ? sameRow(r, existing) : false;
+
+    const conflicts = staged
+      .filter(r => !r.disabled_at_utc && sameCat(r) && !isSelf(r))
+      .filter(r => rangesOverlap(r.date_from||null, r.date_to||null, fromIso, toIso||null));
+
+    if (conflicts.length) {
+      canApply = false;
+      const ov = conflicts[0];
+      const overlapStart = (fromIso > (ov.date_from||'0000-01-01')) ? fromIso : (ov.date_from||'');
+      const overlapEnd   = ((toIso||'9999-12-31') < (ov.date_to||'9999-12-31')) ? (toIso||'') : (ov.date_to||'');
+      const cutThis      = isoMinusOneDay(ov.date_from||'');
+      const cutOther     = isoMinusOneDay(fromIso);
+
+      let fixButtons = '';
+      if (cutThis && (!fromIso || cutThis >= fromIso)) {
+        fixButtons += `<button id="cl_fix_this" class="btn" style="margin-right:8px">Fix: Shorten <b>THIS</b> to ${formatIsoToUk(cutThis)}</button>`;
+      }
+      if (cutOther && (!ov.date_from || cutOther >= (ov.date_from))) {
+        fixButtons += `<button id="cl_fix_other" class="btn">Fix: Shorten <b>OTHER</b> to ${formatIsoToUk(cutOther)}</button>`;
+      }
+
+      const msg = `
+        <div style="font-weight:700;margin-bottom:6px">Overlap detected</div>
+        <div style="margin-bottom:6px">
+          Another client-default window exists for <b>${escapeHtml(roleVal)}</b>${(byId('cl_band')?.value||'').trim()?` / <b>${escapeHtml((byId('cl_band')?.value||'').trim())}</b>`:''}.<br/>
+          <span class="hint" style="color:#fecaca">Overlap span:</span> <b>${formatIsoToUk(overlapStart)} – ${formatIsoToUk(overlapEnd)}</b>.
+        </div>
+        <div style="margin-bottom:8px">To proceed, adjust dates, or use a Fix:</div>
+        <div>${fixButtons || '<i>No safe automatic fix available. Please adjust dates.</i>'}</div>
+      `;
+      showClientInlineError(msg);
+
+      setTimeout(() => {
+        const fromEl = byId('cl_date_from');
+        const toEl   = byId('cl_date_to');
+        const fixThis = byId('cl_fix_this');
+        if (fixThis && cutThis) fixThis.onclick = () => {
+          try { toEl.value = formatIsoToUk(cutThis); recomputeClientState(); } catch {}
+        };
+        const fixOther = byId('cl_fix_other');
+        if (fixOther && cutOther) fixOther.onclick = () => {
+          try {
+            // stage OTHER truncate (stays staged until parent Save)
+            if (ov.id) {
+              const idx = staged.findIndex(r => r.id === ov.id);
+              if (idx >= 0) ctx.ratesState[idx] = { ...ctx.ratesState[idx], date_to: cutOther };
+            } else if (ov.__localKey) {
+              const idx = staged.findIndex(r => r.__localKey === ov.__localKey);
+              if (idx >= 0) ctx.ratesState[idx] = { ...ctx.ratesState[idx], date_to: cutOther };
+            }
+            try { renderClientRatesTable(); } catch {}
+            recomputeClientState();
+          } catch {}
+        };
+      }, 0);
+    }
+
+    DBG('recomputeClientState: EXIT', { canApply });
+    setApplyEnabled(canApply);
+  }
+
+  const formTabLabel = `Form — ${isDisabled ? 'Inactive' : 'Active'}`;
+
+  // showModal (child) — persist staged edits only; no popups for errors
+  showModal(
+    existing ? 'Edit Client Default Window' : 'Add/Upsert Client Default Window',
+    [{ key:'form', label: formTabLabel }],
+    () => formHtml,
+    async () => {
+      const stack = window.__modalStack || [];
+      const pf = stack.length > 1 ? stack[stack.length - 2] : null;
+      DBG('onSave ENTRY', { stackLen: stack.length, hasParent: !!pf, parentMode: pf?.mode });
+
+      if (!pf || (pf.mode !== 'edit' && pf.mode !== 'create')) {
+        DBG('onSave BLOCKED: parent not editable');
+        return false;
+      }
+
+      // Re-validate live state; rely on validation result (do not read DOM disabled state)
+      await recomputeClientState();
+      DBG('onSave proceeding after recompute');
+
+      const raw = collectForm('#clientRateForm');
+      DBG('onSave collected', { raw });
+
+      let role = (raw.role || '').trim();
+      const newRole = (document.getElementById('cl_role_new')?.value || '').trim();
+      if (role === '__OTHER__') {
+        if (!newRole) { showClientInlineError('Enter a new role code.'); setApplyEnabled(false); DBG('onSave BLOCKED: newRole missing'); return false; }
+        role = newRole.toUpperCase();
+        if (typeof invalidateGlobalRoleOptionsCache === 'function') {
+          try { invalidateGlobalRoleOptionsCache(); window.dispatchEvent(new CustomEvent('global-roles-updated')); } catch {}
+        }
+      }
+      if (!role) { showClientInlineError('Role is required.'); setApplyEnabled(false); DBG('onSave BLOCKED: role missing'); return false; }
+
+      const isoFrom = parseUkDateToIso(raw.date_from);
+      if (!isoFrom) { showClientInlineError('Invalid “Effective from” date.'); setApplyEnabled(false); DBG('onSave BLOCKED: date_from invalid'); return false; }
+      let isoTo = null;
+      if (raw.date_to) {
+        isoTo = parseUkDateToIso(raw.date_to);
+        if (!isoTo) { showClientInlineError('Invalid “Effective to” date.'); setApplyEnabled(false); DBG('onSave BLOCKED: date_to invalid'); return false; }
+        if (isoTo < isoFrom) { showClientInlineError('“Effective to” cannot be before “Effective from”.'); setApplyEnabled(false); DBG('onSave BLOCKED: date order invalid'); return false; }
+      }
+
+      const staged = {
+        id: existing?.id || undefined,
+        client_id: resolvedClientId,
+        role,
+        band: (raw.band || '').trim() || null,
+        date_from: isoFrom,
+        date_to:   isoTo,
+
+        charge_day  : raw['charge_day']  !== '' ? Number(raw['charge_day'])  : null,
+        charge_night: raw['charge_night']!== '' ? Number(raw['charge_night']) : null,
+        charge_sat  : raw['charge_sat']  !== '' ? Number(raw['charge_sat'])  : null,
+        charge_sun  : raw['charge_sun']  !== '' ? Number(raw['charge_sun'])  : null,
+        charge_bh   : raw['charge_bh']   !== '' ? Number(raw['charge_bh'])   : null,
+
+        paye_day    : raw['paye_day']    !== '' ? Number(raw['paye_day'])    : null,
+        paye_night  : raw['paye_night']  !== '' ? Number(raw['paye_night'])  : null,
+        paye_sat    : raw['paye_sat']    !== '' ? Number(raw['paye_sat'])    : null,
+        paye_sun    : raw['paye_sun']    !== '' ? Number(raw['paye_sun'])    : null,
+        paye_bh     : raw['paye_bh']     !== '' ? Number(raw['paye_bh'])     : null,
+
+        umb_day     : raw['umb_day']     !== '' ? Number(raw['umb_day'])     : null,
+        umb_night   : raw['umb_night']   !== '' ? Number(raw['umb_night'])   : null,
+        umb_sat     : raw['umb_sat']     !== '' ? Number(raw['umb_sat'])     : null,
+        umb_sun     : raw['umb_sun']     !== '' ? Number(raw['umb_sun'])     : null,
+        umb_bh      : raw['umb_bh']      !== '' ? Number(raw['umb_bh'])      : null,
+
+        // carry through disabled status + pending toggle marker (for UI/meta)
+        disabled_at_utc : ex.disabled_at_utc ?? null,
+        disabled_by_name: ex.disabled_by_name ?? null,
+        __toggle        : ex.__toggle || undefined,
+        __localKey      : existing?.__localKey || undefined,
+        __delete        : existing?.__delete || false
+      };
+
+      if (ex.__toggle === 'enable') {
+        staged.disabled_at_utc = null;
+      } else if (ex.__toggle === 'disable') {
+        staged.disabled_at_utc = staged.disabled_at_utc || new Date().toISOString().slice(0,10);
+      }
+
+      // Stage only (persist on parent Save)
+      const before = { len: Array.isArray(ctx.ratesState) ? ctx.ratesState.length : 0 };
+      ctx.ratesState = Array.isArray(ctx.ratesState) ? ctx.ratesState : [];
+      if (existing) {
+        const idx = ctx.ratesState.findIndex(r => sameRow(r, existing));
+        if (idx >= 0) ctx.ratesState[idx] = staged; else ctx.ratesState.push(staged);
+      } else {
+        const already = ctx.ratesState.findIndex(r => sameRow(r, staged));
+        if (already >= 0) ctx.ratesState[already] = staged; else ctx.ratesState.push(staged);
+      }
+      const after = { len: ctx.ratesState.length };
+      DBG('onSave STAGED', { before, after, stagedId: staged.id, stagedRole: staged.role, toggle: staged.__toggle });
+
+      try { const parent = _currentFrame(); if (parent && typeof parent.setTab === 'function') { parent.currentTabKey = 'rates'; parent.setTab('rates'); DBG('onSave: parent.setTab(rates)'); } } catch{}
+      try { window.dispatchEvent(new CustomEvent('modal-dirty')); DBG('onSave: dispatched modal-dirty'); } catch {}
+      try { await renderClientRatesTable(); DBG('onSave: renderClientRatesTable done'); } catch (e) { DBG('onSave: renderClientRatesTable error', e); }
+
+      DBG('onSave EXIT ok=true');
+      return true;
+    },
+    false,
+    () => {
+      const parent = _currentFrame();
+      if (parent) { parent.currentTabKey = 'rates'; parent.setTab('rates'); DBG('onReturn: parent.setTab(rates)'); }
+    },
+    { kind: 'client-rate' }
+  );
+
+  // Hydrate & wire listeners
+  const roleSel   = byId('cl_role');
+  const roleNew   = byId('cl_role_new');
+  const roleNewRow= byId('cl_role_new_row');
+  const bandEl    = byId('cl_band');
+  const fromEl    = byId('cl_date_from');
+  const toEl      = byId('cl_date_to');
+
+  attachUkDatePicker(fromEl); attachUkDatePicker(toEl);
+  if (existing?.date_from) fromEl.value = formatIsoToUk(existing.date_from);
+  if (existing?.date_to)   toEl.value   = formatIsoToUk(existing.date_to);
+
+  if (existing?.role) {
+    if (globalRoles.includes(existing.role)) {
+      roleSel.value = existing.role;
+      roleNewRow.style.display = 'none';
+      roleNew.value = '';
+    } else {
+      roleSel.value = '__OTHER__';
+      roleNewRow.style.display = '';
+      roleNew.value = existing.role;
+    }
+  } else {
+    roleNewRow.style.display = 'none';
+  }
+
+  // ===== Prefill with two-decimal rendering (no other changes) =====
+  ['day','night','sat','sun','bh'].forEach(b=>{
+    const set = (name, val) => {
+      const el = document.querySelector(`#clientRateForm input[name="${name}_${b}"]`);
+      if (el && typeof val !== 'undefined' && val !== null) {
+        const num = Number(val);
+        el.value = Number.isFinite(num) ? (Math.round(num*100)/100).toFixed(2) : String(val);
+      }
+    };
+    set('paye',   existing?.[`paye_${b}`]);
+    set('umb',    existing?.[`umb_${b}`]);
+    set('charge', existing?.[`charge_${b}`]);
+  });
+
+  // Recompute once on mount
+  DBG('mount: recomputeClientState');
+  await recomputeClientState();
+
+  roleSel.addEventListener('change', async ()=>{
+    DBG('EVENT: role change', { value: roleSel.value });
+    if (roleSel.value === '__OTHER__') { roleNewRow.style.display = ''; }
+    else { roleNewRow.style.display = 'none'; roleNew.value=''; }
+    await recomputeClientState();
+  });
+  bandEl.addEventListener('input',  () => { DBG('EVENT: band input', { value: bandEl.value }); recomputeClientState(); });
+  fromEl.addEventListener('change', () => { DBG('EVENT: date_from change', { value: fromEl.value }); recomputeClientState(); });
+  toEl.addEventListener('change',   () => { DBG('EVENT: date_to change', { value: toEl.value }); recomputeClientState(); });
+  ['day','night','sat','sun','bh'].forEach(b=>{
+    ['paye','umb','charge'].forEach(kind=>{
+      const el = document.querySelector(`#clientRateForm input[name="${kind}_${b}"]`);
+      if (el) el.addEventListener('input', () => { DBG('EVENT: pay input', { kind, bucket: b, value: el.value }); recomputeClientState(); });
+    });
+  });
+
+  // Wire the Active/Inactive toggle button
+  (function wireToggleButton(){
+    const btn = byId('cl_toggle_btn');
+    if (!btn || !parentEditable || !ex || !ex.id) return;
+    DBG('wireToggleButton: ready', { id: ex.id, disabled: !!ex.disabled_at_utc });
+    btn.onclick = () => {
+      const pill = byId('cl_status_pill');
+      const meta = byId('cl_status_meta');
+      const currentlyDisabled = !!ex.disabled_at_utc;
+
+      if (currentlyDisabled) {
+        ex.__toggle = 'enable';
+        ex.disabled_at_utc = null;
+        if (pill) { pill.textContent = '✓ Active'; pill.className = 'pill tag-ok'; }
+        if (meta) meta.innerHTML = '&nbsp;';
+        btn.textContent = 'Disable';
+      } else {
+        ex.__toggle = 'disable';
+        ex.disabled_at_utc = new Date().toISOString().slice(0,10);
+        if (pill) { pill.textContent = '❌ Disabled'; pill.className = 'pill tag-fail'; }
+        if (meta) meta.textContent = 'pending save';
+        btn.textContent = 'Enable';
+      }
+      DBG('toggle clicked', { newToggle: ex.__toggle, newDisabledAt: ex.disabled_at_utc });
+      setApplyEnabled(true);
+    };
+  })();
+
+  // DELETE button logic (unchanged; staged delete until parent Save)
+  (async function wireDeleteButton(){
+    const delBtn = byId('btnDelete');
+    if (!delBtn) return;
+    if (!existing || !existing.id) { delBtn.style.display='none'; return; }
+
+    const today = new Date(); const yyyy = today.getFullYear(); const mm = String(today.getMonth()+1).padStart(2,'0'); const dd = String(today.getDate()).padStart(2,'0');
+    const todayIso = `${yyyy}-${mm}-${dd}`;
+    const isFutureOrToday = !!existing.date_from && String(existing.date_from) >= todayIso;
+
+    let deletable = isFutureOrToday;
+    let reason = '';
+    if (!deletable) {
+      deletable = true; // allow delete in UI; real guard happens on Save server-side
+      reason = '';
+    }
+
+    delBtn.style.display = '';
+    delBtn.disabled = false;
+    delBtn.onclick = () => {
+      try {
+        existing.__delete = true;
+        DBG('delete staged', { id: existing.id });
+        if (window.modalCtx && window.modalCtx.ratesStagedDeletes instanceof Set && existing.id) {
+          window.modalCtx.ratesStagedDeletes.add(String(existing.id));
+        }
+        try { renderClientRatesTable(); } catch {}
+        try { window.dispatchEvent(new CustomEvent('modal-dirty')); } catch {}
+        const closeBtn = byId('btnCloseModal'); if (closeBtn) closeBtn.click();
+      } catch (e) { DBG('delete stage failed', e); }
+    };
+  })();
+}
 
 
 // === UPDATED: Client Default Rate modal (Role dropdown + new-role option; UK dates; date_to) ===
