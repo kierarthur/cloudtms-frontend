@@ -2840,7 +2840,6 @@ async function renderCandidateRatesTable() {
 
   const O = (window.modalCtx.overrides ||= { existing: [], stagedNew: [], stagedEdits: {}, stagedDeletes: new Set() });
 
-  // Loud snapshot of staging
   if (LOG) console.log('[RATES][TABLE snapshot]', {
     existing: (O.existing||[]).length,
     stagedNew: (O.stagedNew||[]).length,
@@ -2850,7 +2849,7 @@ async function renderCandidateRatesTable() {
     peekNew: (O.stagedNew||[])[0]
   });
 
-  // Merge view = (existing ± edits ± pending deletes) + stagedNew
+  // Merge view
   const pendingDeleteIds = (O.stagedDeletes instanceof Set) ? O.stagedDeletes : new Set();
 
   const rows = [];
@@ -2865,7 +2864,6 @@ async function renderCandidateRatesTable() {
   }
   for (const n of (O.stagedNew || [])) rows.push({ ...n, _isNew: true });
 
-  // Early empty view (but still show Add button)
   if (!rows.length) {
     div.innerHTML = `
       <div class="hint" style="margin-bottom:8px">No candidate-specific overrides. Client defaults will apply.</div>
@@ -2880,7 +2878,6 @@ async function renderCandidateRatesTable() {
     return;
   }
 
-  // Margin helpers
   const fmt = v => (v==null || Number.isNaN(v)) ? '—' : (Math.round(v*100)/100).toFixed(2);
   const mult = await (async ()=>{ if (typeof window.__ERNI_MULT__ === 'number') return window.__ERNI_MULT__; try { if (typeof getSettingsCached === 'function') { const s = await getSettingsCached(); let p = s?.erni_pct ?? s?.employers_ni_percent ?? 0; p = Number(p)||0; if (p>1) p=p/100; window.__ERNI_MULT__ = 1 + p; return window.__ERNI_MULT__; } } catch{} window.__ERNI_MULT__ = 1; return 1; })();
 
@@ -3564,7 +3561,7 @@ async function openCandidateRateModal(candidate_id, existing) {
   // ===== driver: recompute state (validations + overlap + preview) =====
   async function recomputeOverrideState(){
     const clientId = byId('cr_client_id')?.value || '';
-    const role     = byId('cr_role')?.value || '';
+       const role     = byId('cr_role')?.value || '';
     const bandSel  = byId('cr_band')?.value ?? '';
     const band     = (bandSel === '' ? null : bandSel);
     const isoFrom  = parseUkDateToIso(byId('cr_date_from')?.value || '');
@@ -3579,14 +3576,12 @@ async function openCandidateRateModal(candidate_id, existing) {
     showInlineError(''); clearAllFieldErrors();
     let canApply = true;
 
-    // Gate until all core fields present
     const need = [];
     if (!clientId) need.push('clientId');
     if (!rateType) need.push('rateType');
     if (!role)     need.push('role');
     if (!isoFrom)  need.push('date_from');
     if (need.length) {
-      // reset buckets to placeholders
       buckets.forEach(b => {
         const inp = inputEl(b);
         if (inp) { inp.disabled = true; }
@@ -3600,7 +3595,6 @@ async function openCandidateRateModal(candidate_id, existing) {
 
     const win = await resolveCoveringWindow(clientId, role, band, isoFrom);
     if (!win) {
-      // placeholders
       buckets.forEach(b => {
         const inp = inputEl(b);
         if (inp) { inp.disabled = true; }
@@ -3613,7 +3607,6 @@ async function openCandidateRateModal(candidate_id, existing) {
       return;
     }
 
-    // Toggle visibility strictly from window charges
     buckets.forEach(b => {
       const hasCharge = (win.charges[b] != null);
       const inp = inputEl(b);
@@ -3630,17 +3623,15 @@ async function openCandidateRateModal(candidate_id, existing) {
 
     const mult = await _erniMultiplier();
 
-    // Pay without charge – ignore hidden/disabled
     const invalid = [];
     buckets.forEach(b => {
       const el  = inputEl(b), chg = win.charges[b];
       if (!el || el.disabled) return;
-      const pay = numOrNull(el.value); // blank -> null, NaN -> null
+      const pay = numOrNull(el.value);
       if (pay != null && chg == null) { invalid.push(b); setFieldError(b, `No client charge for ${bucketLabel[b]}.`); }
     });
     if (invalid.length) canApply = false;
 
-    // Negative margins – ignore hidden/disabled
     const neg = [];
     buckets.forEach(b => {
       const el  = inputEl(b), chg = win.charges[b];
@@ -3652,14 +3643,12 @@ async function openCandidateRateModal(candidate_id, existing) {
     });
     if (neg.length) canApply = false;
 
-    // End-date cap
     setDateToError('');
     if (isoTo && win.capIso && isoTo > win.capIso) {
       setDateToError(`Client rate ends on ${formatIsoToUk(win.capIso)} — override must end on/before this date.`);
       canApply = false;
     }
 
-    // Overlap detection (existing + staged)
     const O = window.modalCtx.overrides || { existing: [], stagedNew: [], stagedEdits: {}, stagedDeletes: new Set() };
     const deletedIds = O.stagedDeletes || new Set();
     const unify = [];
@@ -3722,9 +3711,8 @@ async function openCandidateRateModal(candidate_id, existing) {
     // Preview margins (never NaN)
     buckets.forEach(b => {
       const sp  = byId(`cr_m_${b}`), el = inputEl(b), chg = win.charges[b];
-      const pay = (el && !el.disabled) ? numOrNull(el.value) : null; // blank/NaN => null
+      const pay = (el && !el.disabled) ? numOrNull(el.value) : null;
       const m   = (chg != null && pay != null) ? ((rateType === 'PAYE') ? (chg - (pay * mult)) : (chg - pay)) : null;
-
       if (sp) sp.textContent = (m==null ? '—' : fmt(m));
     });
 
@@ -3732,13 +3720,11 @@ async function openCandidateRateModal(candidate_id, existing) {
     setApplyEnabled(canApply, canApply ? 'ok' : 'violations');
   }
 
-  // ===== child modal =====
   showModal(
     existing ? 'Edit Candidate Rate Override' : 'Add Candidate Rate Override',
     [{ key:'form', label:'Form' }],
     () => formHtml,
     async () => {
-      // Re-check gating; if disabled, block silently
       await recomputeOverrideState();
       if (lastApplyState === false) { L('Apply blocked by recompute'); return false; }
 
@@ -3753,7 +3739,6 @@ async function openCandidateRateModal(candidate_id, existing) {
       const date_from = parseUkDateToIso(raw.date_from);
       const date_to   = raw.date_to ? parseUkDateToIso(raw.date_to) : null;
 
-      // SAFE mapping: undefined / '' → null (prevents NaN)
       const mapPay = (k) => (Object.prototype.hasOwnProperty.call(raw, k) && raw[k] !== '' ? Number(raw[k]) : null);
 
       const stagedAll = {
@@ -3791,7 +3776,6 @@ async function openCandidateRateModal(candidate_id, existing) {
         peekNew: (O.stagedNew||[])[(O.stagedNew||[]).length-1]
       });
 
-      // Repaint parent rates table (only on Rates tab; renderer checks tab)
       try { await renderCandidateRatesTable(); } catch {}
       try { window.dispatchEvent(new CustomEvent('modal-dirty')); } catch {}
       return true;
@@ -3816,7 +3800,7 @@ async function openCandidateRateModal(candidate_id, existing) {
   if (existing?.date_from) inFrom.value = formatIsoToUk(existing.date_from);
   if (existing?.date_to)   inTo.value   = formatIsoToUk(existing.date_to);
 
-  // Prefill ALL buckets that have values (so Day populates immediately) — render to 2dp
+  // Prefill ALL buckets that have values (2dp)
   ['day','night','sat','sun','bh'].forEach(b=>{
     const val = (existing && Number.isFinite(existing[`pay_${b}`])) ? existing[`pay_${b}`] : null;
     const el  = document.querySelector(`#candRateForm input[name="pay_${b}"]`);
@@ -3828,7 +3812,6 @@ async function openCandidateRateModal(candidate_id, existing) {
 
   attachUkDatePicker(inFrom); attachUkDatePicker(inTo);
 
-  // No historic lock — visibility is decided by coverage window
   async function refreshClientRoles(clientId) {
     selRole.innerHTML = `<option value="">Select role…</option>`; selRole.disabled = true;
     selBand.innerHTML = `<option value=""></option>`;             selBand.disabled  = true;
@@ -3876,7 +3859,6 @@ async function openCandidateRateModal(candidate_id, existing) {
   await recomputeOverrideState();
   if (initialClientId) { await refreshClientRoles(initialClientId); }
 
-  // staged delete
   (function wireDeleteButton(){
     const delBtn = byId('btnDelete');
     if (!delBtn) return;
@@ -6273,13 +6255,15 @@ async function renderClientRatesTable() {
     if (!base) return true; // no baseline match means it's effectively different
     for (const f of DIFF_FIELDS) {
       const a = row[f]; const b = base[f];
-      // normalize null/undefined/'' to the same emptiness check
       const na = (a === '' || a == null) ? null : a;
       const nb = (b === '' || b == null) ? null : b;
       if (String(na) !== String(nb)) return true;
     }
     return false;
   };
+
+  // 2dp formatter for numeric cells that aren’t margins
+  const to2 = v => (v==null || v==='') ? '—' : fmt(Number(v));
 
   staged.forEach((r, idx) => {
     const tr = document.createElement('tr');
@@ -6295,7 +6279,6 @@ async function renderClientRatesTable() {
       const td = document.createElement('td');
 
       if (c === 'status') {
-        // Keep existing "first column" behaviour exactly as-is
         if (r.__delete) {
           td.innerHTML = `<span class="pill tag-fail" aria-label="Pending delete">🗑 Pending delete (save to confirm)</span>`;
         } else if (r.disabled_at_utc) {
@@ -6316,8 +6299,15 @@ async function renderClientRatesTable() {
         else                               val = (charge!=null && umb!=null)  ? (charge - umb)          : null;
         td.textContent = fmt(val);
 
+      } else if (
+        c.startsWith('charge_') ||
+        c.startsWith('paye_')   ||
+        c.startsWith('umb_')
+      ) {
+        // NEW: 2dp formatting for charge_* and paye_*/umb_* columns
+        td.textContent = to2(r[c]);
+
       } else if (c === 'change_status') {
-        // NEW: final column — reflect staged change status (pending delete/update/create/enable/disable)
         let label = '';
         if (r.__delete || (r.id && stagedDelSet.has(String(r.id)))) {
           label = 'Pending delete (save to confirm)';
@@ -6330,7 +6320,6 @@ async function renderClientRatesTable() {
         } else if (differsFromBaseline(r)) {
           label = 'Pending update';
         } else {
-          // no staged change → leave blank
           label = '';
         }
         td.textContent = label;
@@ -6359,6 +6348,7 @@ async function renderClientRatesTable() {
   div.appendChild(actions);
   DBG('EXIT render', { stagedLen: staged.length });
 }
+
 
 function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
   // ===== Logging =====
