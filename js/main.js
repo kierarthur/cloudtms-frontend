@@ -5337,6 +5337,11 @@ async function renderClientRatesTable() {
     return;
   }
 
+  // Build a quick baseline lookup (used only for the new last-column status)
+  const baseline = Array.isArray(ctx.ratesBaseline) ? ctx.ratesBaseline : [];
+  const baselineById = new Map(baseline.filter(b => b && b.id).map(b => [String(b.id), b]));
+  const stagedDelSet = (ctx.ratesStagedDeletes instanceof Set) ? ctx.ratesStagedDeletes : new Set();
+
   const cols = [
     'status',
     'role','band',
@@ -5345,7 +5350,9 @@ async function renderClientRatesTable() {
     'charge_day','charge_night','charge_sat','charge_sun','charge_bh',
     'paye_margin_day','paye_margin_night','paye_margin_sat','paye_margin_sun','paye_margin_bh',
     'umb_margin_day','umb_margin_night','umb_margin_sat','umb_margin_sun','umb_margin_bh',
-    'date_from','date_to'
+    'date_from','date_to',
+    // NEW: final column to reflect staged change status
+    'change_status'
   ];
   const headers = [
     'Status',
@@ -5355,7 +5362,9 @@ async function renderClientRatesTable() {
     'Charge Day','Charge Night','Charge Sat','Charge Sun','Charge BH',
     'PAYE M Day','PAYE M Night','PAYE M Sat','PAYE M Sun','PAYE M BH',
     'UMB M Day','UMB M Night','UMB M Sat','UMB M Sun','UMB M BH',
-    'From','To'
+    'From','To',
+    // NEW header aligned with the final column
+    'Change'
   ];
 
   const tbl   = document.createElement('table'); tbl.className='grid';
@@ -5366,6 +5375,28 @@ async function renderClientRatesTable() {
   tbl.appendChild(thead);
 
   const tb = document.createElement('tbody');
+
+  // Helper to detect field differences against baseline
+  const DIFF_FIELDS = [
+    'role','band','date_from','date_to',
+    'charge_day','charge_night','charge_sat','charge_sun','charge_bh',
+    'paye_day','paye_night','paye_sat','paye_sun','paye_bh',
+    'umb_day','umb_night','umb_sat','umb_sun','umb_bh'
+  ];
+  const differsFromBaseline = (row) => {
+    if (!row || !row.id) return false; // creations are handled separately
+    const base = baselineById.get(String(row.id));
+    if (!base) return true; // no baseline match means it's effectively different
+    for (const f of DIFF_FIELDS) {
+      const a = row[f]; const b = base[f];
+      // normalize null/undefined/'' to the same emptiness check
+      const na = (a === '' || a == null) ? null : a;
+      const nb = (b === '' || b == null) ? null : b;
+      if (String(na) !== String(nb)) return true;
+    }
+    return false;
+  };
+
   staged.forEach((r, idx) => {
     const tr = document.createElement('tr');
     if (r.disabled_at_utc) tr.classList.add('row-disabled');
@@ -5378,7 +5409,9 @@ async function renderClientRatesTable() {
 
     cols.forEach(c => {
       const td = document.createElement('td');
+
       if (c === 'status') {
+        // Keep existing "first column" behaviour exactly as-is
         if (r.__delete) {
           td.innerHTML = `<span class="pill tag-fail" aria-label="Pending delete">🗑 Pending delete (save to confirm)</span>`;
         } else if (r.disabled_at_utc) {
@@ -5388,6 +5421,7 @@ async function renderClientRatesTable() {
           const pending = r.__toggle ? ' (pending save)' : '';
           td.innerHTML = `<span class="pill tag-ok" aria-label="Active">✓ Active${pending}</span>`;
         }
+
       } else if (c.startsWith('paye_margin_') || c.startsWith('umb_margin_')) {
         const bucket = c.split('_').pop();
         const charge = r[`charge_${bucket}`];
@@ -5397,15 +5431,37 @@ async function renderClientRatesTable() {
         if (c.startsWith('paye_margin_')) val = (charge!=null && paye!=null) ? (charge - (paye * mult)) : null;
         else                               val = (charge!=null && umb!=null)  ? (charge - umb)          : null;
         td.textContent = fmt(val);
+
+      } else if (c === 'change_status') {
+        // NEW: final column — reflect staged change status (pending delete/update/create/enable/disable)
+        let label = '';
+        if (r.__delete || (r.id && stagedDelSet.has(String(r.id)))) {
+          label = 'Pending delete (save to confirm)';
+        } else if (r && r.__toggle === 'enable') {
+          label = 'Pending enable';
+        } else if (r && r.__toggle === 'disable') {
+          label = 'Pending disable';
+        } else if (!r.id) {
+          label = 'Pending create';
+        } else if (differsFromBaseline(r)) {
+          label = 'Pending update';
+        } else {
+          // no staged change → leave blank
+          label = '';
+        }
+        td.textContent = label;
+
       } else {
         td.textContent = formatDisplayValue(c, r[c]);
       }
+
       tr.appendChild(td);
     });
 
     tb.appendChild(tr);
     if (idx === 0) DBG('first row preview', r);
   });
+
   tbl.appendChild(tb);
 
   const actions = document.createElement('div');
