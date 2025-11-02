@@ -28,27 +28,75 @@ function saveSession(sess){
   renderUserChip();
 }
 
-function loadSession(){
-  const raw = localStorage.getItem('cloudtms.session') || sessionStorage.getItem('cloudtms.session');
-  if (!raw) return null;
-  try {
-    SESSION = JSON.parse(raw);
+async function loadSection(){
+  // unified paging entry point
+  window.__listState = window.__listState || {};
+  const st = (window.__listState[currentSection] ||= { page: 1, pageSize: 50, total: null, hasMore: false, filters: null });
 
-    // Mirror to globals used by currentUserId() — PRIMARY FIX
-    try {
-      if (typeof window !== 'undefined') {
-        window.SESSION = SESSION;
-        window.__auth = window.__auth || {};
-        window.__auth.user = SESSION?.user || null;
-        window.__USER_ID = SESSION?.user?.id || null;
-      }
-    } catch {}
-
-    return SESSION;
-  } catch {
-    return null;
+  // selection fingerprint reset if dataset changed
+  window.__selection = window.__selection || {};
+  const sel = (window.__selection[currentSection] ||= { fingerprint:'', allMatching:false, ids:new Set(), excludeIds:new Set(), totalMatching:null });
+  const computeFingerprint = ()=> JSON.stringify({ section: currentSection, filters: st.filters || {} });
+  const fp = computeFingerprint();
+  if (sel.fingerprint !== fp) {
+    sel.fingerprint = fp;
+    sel.allMatching = false; sel.ids.clear(); sel.excludeIds.clear(); sel.totalMatching = null;
   }
+
+  // choose which loader to use (search vs plain list)
+  const useSearch = !!st.filters && (Object.keys(st.filters).length > 0);
+
+  // helper to fetch one page
+  const fetchOne = async (section, page, pageSize) => {
+    // temporarily push paging into state so builders pick it up
+    window.__listState[section].page = page;
+    window.__listState[section].pageSize = pageSize;
+    if (useSearch) {
+      return await search(section, window.__listState[section].filters || {});
+    } else {
+      switch(section){
+        case 'candidates': return await listCandidates();
+        case 'clients':    return await listClients();
+        case 'umbrellas':  return await listUmbrellas();
+        case 'settings':   return await getSettings();
+        case 'audit':      return await listOutbox();
+        default:           return [];
+      }
+    }
+  };
+
+  // handle ALL with sequential paging (append until exhausted)
+  if (st.pageSize === 'ALL') {
+    const acc = [];
+    let p = 1;
+    const chunk = 200; // internal chunk size for ALL
+    let gotMore = true;
+    while (gotMore) {
+      const rows = await fetchOne(currentSection, p, chunk);
+      acc.push(...(rows || []));
+      gotMore = Array.isArray(rows) && rows.length === chunk;
+      p += 1;
+      if (!gotMore) break;
+    }
+    // finalise state for render
+    window.__listState[currentSection].page = 1;
+    window.__listState[currentSection].hasMore = false;
+    window.__listState[currentSection].total = acc.length;
+    // update selection total if in allMatching mode
+    if (sel.allMatching) sel.totalMatching = acc.length;
+    return acc;
+  }
+
+  // normal one-page load
+  const page = Number(st.page || 1);
+  const ps   = Number(st.pageSize || 50);
+  const rows = await fetchOne(currentSection, page, ps);
+  const hasMore = Array.isArray(rows) && rows.length === ps;
+  window.__listState[currentSection].hasMore = hasMore;
+  // if backend returns totals in a parallel path, you could set st.total and sel.totalMatching here
+  return rows;
 }
+
 
 
 function clearSession(){
@@ -316,6 +364,7 @@ function renderTopNav(){
 
   // ensure per-section list state exists (first-login / first visit)
   window.__listState = window.__listState || {};
+  window.__selection = window.__selection || {};
 
   sections.forEach(s => {
     const b = document.createElement('button');
@@ -340,6 +389,9 @@ function renderTopNav(){
         window.__listState[s.key] = { page: 1, pageSize: 50, total: null, hasMore: false, filters: null };
       }
 
+      // reset selection when switching sections (new dataset)
+      window.__selection[s.key] = window.__selection[s.key] || { fingerprint:'', allMatching:false, ids:new Set(), excludeIds:new Set(), totalMatching:null };
+
       currentSection   = s.key;
       currentRows      = [];   // ensure no stale data flashes
       currentSelection = null;
@@ -360,7 +412,10 @@ function renderTopNav(){
         if (!confirmDiscardChangesIfDirty()) return;
 
         window.__listState = window.__listState || {};
+        window.__selection = window.__selection || {};
+
         const st = (window.__listState[currentSection] ||= { page: 1, pageSize: 50, total: null, hasMore: false, filters: null });
+        const sel = (window.__selection[currentSection] ||= { fingerprint:'', allMatching:false, ids:new Set(), excludeIds:new Set(), totalMatching:null });
 
         // always start from page 1 for a new quick search
         st.page = 1;
@@ -370,6 +425,8 @@ function renderTopNav(){
         // If the box is empty, clear filters and reload the section list
         if (!text) {
           st.filters = null;
+          sel.fingerprint = JSON.stringify({ section: currentSection, filters: {} });
+          sel.allMatching=false; sel.ids.clear(); sel.excludeIds.clear(); sel.totalMatching=null;
           const data = await loadSection();
           return renderSummary(data);
         }
@@ -377,7 +434,6 @@ function renderTopNav(){
         // Build a minimal quick-search filters object per section
         let filters = null;
         if (currentSection === 'candidates') {
-          // heuristic: email → email, digits → phone, "first last" → split, otherwise first_name
           if (text.includes('@')) {
             filters = { email: text };
           } else if (text.replace(/\D/g,'').length >= 7) {
@@ -398,8 +454,11 @@ function renderTopNav(){
           return renderSummary(data);
         }
 
-        // persist filters for paging/navigation and run the search
+        // persist filters & reset selection (new dataset), then run the search
         st.filters = filters;
+        sel.fingerprint = JSON.stringify({ section: currentSection, filters });
+        sel.allMatching=false; sel.ids.clear(); sel.excludeIds.clear(); sel.totalMatching=null;
+
         const rows = await search(currentSection, filters);
         renderSummary(rows);
       });
@@ -660,6 +719,13 @@ function populateSearchFormFromFilters(filters={}, formSel='#searchForm'){
 async function search(section, filters={}){
   window.__listState = window.__listState || {};
   const st = (window.__listState[section] ||= { page: 1, pageSize: 50, total: null, hasMore: false, filters: null });
+
+  // reset selection when applying new filters
+  window.__selection = window.__selection || {};
+  const sel = (window.__selection[section] ||= { fingerprint:'', allMatching:false, ids:new Set(), excludeIds:new Set(), totalMatching:null });
+  sel.fingerprint = JSON.stringify({ section, filters: filters || {} });
+  sel.allMatching = false; sel.ids.clear(); sel.excludeIds.clear(); sel.totalMatching = null;
+
   const map = {
     candidates:'/api/search/candidates',
     clients:'/api/search/clients',
@@ -672,14 +738,16 @@ async function search(section, filters={}){
   const url = qs ? `${p}?${qs}` : p;
   const r = await authFetch(API(url));
   const rows = toList(r);
+
   // update state
   st.filters = { ...(filters || {}) };
-  // we infer hasMore from page_size in qs, but buildSearchQS uses state, so recompute here:
   const ps = (st.pageSize === 'ALL') ? null : Number(st.pageSize || 50);
   st.hasMore = (ps != null) ? (Array.isArray(rows) && rows.length === ps) : false;
+
+  // if backend returns count in r (e.g., r.count), wire it to selection total when allMatching later
+  try { if (typeof r?.data?.count === 'number') sel.totalMatching = r.data.count; } catch {}
   return rows;
 }
-
 function buildSearchQS(section, filters={}){
   window.__listState = window.__listState || {};
   const st = (window.__listState[section] ||= { page: 1, pageSize: 50, total: null, hasMore: false, filters: null });
@@ -692,9 +760,11 @@ function buildSearchQS(section, filters={}){
   if (st.pageSize !== 'ALL') {
     add('page', st.page || 1);
     add('page_size', st.pageSize || 50);
+    add('include_count', 'true'); // optional: helps “All N selected” copy
   } else {
     add('page', 1);
     // omit page_size so loader can do multi-page accumulation
+    add('include_count', 'true'); // still helpful for totals on the dataset
   }
 
   switch (section) {
@@ -764,6 +834,10 @@ function buildSearchQS(section, filters={}){
   }
   return qs.toString();
 }
+
+
+
+
 // -----------------------------
 // NEW: Save search modal (new / overwrite / shared)
 // -----------------------------
@@ -777,9 +851,7 @@ async function openSaveSearchModal(section, filters){
     : (s => String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;')
                            .replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'));
 
-  // Only the caller's presets for overwrite list (server-side gate)…
   const mineServer = await listReportPresets({ section, kind: 'search', include_shared: false }).catch(()=>[]);
-  // …and client-side belt & braces in case server behavior changes
   const myId = currentUserId();
   const mine = (mineServer || []).filter(m => String(m.user_id) === String(myId));
 
@@ -788,12 +860,27 @@ async function openSaveSearchModal(section, filters){
     ? mine.map(m => `<option value="${m.id}">${sanitize(m.name)}</option>`).join('')
     : '';
 
+  // current selection snapshot (if any)
+  window.__selection = window.__selection || {};
+  const sel = window.__selection[section];
+  const hasSelection = !!sel && (sel.allMatching || (sel.ids && sel.ids.size>0));
+
   const body = html(`
-    <div class="form" id="saveSearchForm" style="max-width:640px">
+    <div class="form" id="saveSearchForm" style="max-width:720px">
       <div class="row">
         <label for="presetName">Preset name</label>
         <div class="controls">
           <input id="presetName" name="preset_name" class="input" placeholder="e.g. ‘PAYE RMNs’" />
+        </div>
+      </div>
+
+      <div class="row">
+        <label>Save content</label>
+        <div class="controls" style="display:flex;flex-direction:column;gap:8px">
+          <label class="inline"><input type="radio" name="contentMode" value="filters" ${hasSelection ? '' : 'checked'}> <span>Filters only</span></label>
+          <label class="inline"><input type="radio" name="contentMode" value="selection" ${hasSelection ? 'checked' : ''} ${hasSelection ? '' : 'disabled'}> <span>Selection only</span></label>
+          <label class="inline"><input type="radio" name="contentMode" value="both" ${hasSelection ? '' : 'disabled'}> <span>Filters + selection</span></label>
+          <div class="hint">Selection means the set of chosen records (including “select all across pages”).</div>
         </div>
       </div>
 
@@ -823,27 +910,45 @@ async function openSaveSearchModal(section, filters){
     </div>
   `);
 
-  // NOTE: pass utility flags here
   showModal(
-    'Save search',
+    'Save search / selection',
     [{ key: 'form', label: 'Details' }],
     () => body,
     async () => {
       const modeInput = document.querySelector('#saveSearchForm input[name="mode"]:checked');
+      const contentInput = document.querySelector('#saveSearchForm input[name="contentMode"]:checked');
       const mode  = (modeInput?.value || 'new').toLowerCase();
+      const contentMode = (contentInput?.value || 'filters').toLowerCase();
       const name  = String(document.getElementById('presetName')?.value || '').trim();
       const share = !!document.getElementById('presetShared')?.checked;
 
       if (!name && mode === 'new') { alert('Please enter a name'); return false; }
+
+      // build payload
+      const payload = { section, kind:'search', name, is_shared: share };
+      if (contentMode === 'filters' || contentMode === 'both') {
+        payload.filters = filters || {};
+      }
+      if ((contentMode === 'selection' || contentMode === 'both') && hasSelection) {
+        // serialize selection
+        const cur = window.__selection[section];
+        payload.selection = {
+          fingerprint: cur.fingerprint || '',
+          allMatching: !!cur.allMatching,
+          ids: Array.from(cur.ids || []),
+          excludeIds: Array.from(cur.excludeIds || []),
+          totalMatching: (typeof cur.totalMatching === 'number') ? cur.totalMatching : null
+        };
+      }
 
       try {
         if (mode === 'overwrite') {
           if (!hasOwned) { alert('You don’t own any presets to overwrite'); return false; }
           const targetId = (document.getElementById('overwritePresetId')?.value) || '';
           if (!targetId) { alert('Select a preset to overwrite'); return false; }
-          await updateReportPreset({ id: targetId, name: name || undefined, filters, is_shared: share });
+          await updateReportPreset({ id: targetId, ...payload });
         } else {
-          await createReportPreset({ section, kind: 'search', name, filters, is_shared: share });
+          await createReportPreset(payload);
         }
         invalidatePresetCache(section, 'search');
         try { window.dispatchEvent(new Event('search-preset-updated')); } catch(_) {}
@@ -927,6 +1032,19 @@ async function openLoadSearchModal(section){
         </tr>`;
     }).join('') || `<tr><td colspan="3" class="hint">No saved searches</td></tr>`;
 
+    // Controls for apply mode (filters/selection/both) and selection merge/replace
+    const applyHtml = `
+      <div class="row" style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+        <label class="inline"><input type="radio" name="applyMode" value="filters" checked> <span>Apply filters only</span></label>
+        <label class="inline"><input type="radio" name="applyMode" value="selection"> <span>Apply selection only</span></label>
+        <label class="inline"><input type="radio" name="applyMode" value="both"> <span>Filters + selection</span></label>
+      </div>
+      <div class="row" style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+        <label class="inline"><input type="radio" name="selApplyMode" value="replace" checked> <span>Replace selection</span></label>
+        <label class="inline"><input type="radio" name="selApplyMode" value="merge"> <span>Merge (append) selection</span></label>
+      </div>
+      <div class="hint">Selection apply is only relevant if the preset contains a saved selection and the section matches.</div>`;
+
     return html(`
       <div class="form">
         <div class="row" style="justify-content:space-between;align-items:center">
@@ -939,11 +1057,11 @@ async function openLoadSearchModal(section){
             <tbody>${rowsHtml}</tbody>
           </table>
         </div>
+        <div class="row" style="margin-top:6px">${applyHtml}</div>
       </div>
     `);
   };
 
-  // Small helper to (re)wire the table after (re)render
   function wirePresetTable() {
     const tbl = document.getElementById('presetTable');
     if (!tbl || tbl.__wired) return;
@@ -964,53 +1082,126 @@ async function openLoadSearchModal(section){
         try { await deleteReportPreset(id); }
         catch (err) { alert(String(err?.message || err || 'Failed to delete preset')); return; }
 
-        // Refresh list from server
         try { invalidatePresetCache(section, 'search'); } catch {}
         list = await listReportPresets({ section, kind:'search', include_shared:true }).catch(()=>[]);
 
-        // ⚠️ Re-inject markup as HTML (not replaceChildren with a string)
         const body = document.getElementById('modalBody');
         if (body) {
           const markup = renderList();
-          if (typeof markup === 'string') {
-            body.innerHTML = markup;
-          } else if (markup && typeof markup.nodeType === 'number') {
-            body.replaceChildren(markup);
-          } else {
-            body.innerHTML = String(markup ?? '');
-          }
-          // Re-wire the fresh table DOM
+          if (typeof markup === 'string') body.innerHTML = markup;
+          else if (markup && typeof markup.nodeType === 'number') body.replaceChildren(markup);
+          else body.innerHTML = String(markup ?? '');
           wirePresetTable();
         }
         return;
       }
 
-      // select row
       selectedId = id;
       Array.from(tbl.querySelectorAll('tbody tr')).forEach(r => r.classList.toggle('selected', r === tr));
     });
   }
 
   showModal(
-    'Load saved search',
+    'Load saved search / selection',
     [{ key: 'list', label: 'Saved' }],
     renderList,
     async () => {
       if (!selectedId) { alert('Pick a preset to load'); return false; }
       const chosen = (list || []).find(p => p.id === selectedId);
       if (!chosen) { alert('Preset not found'); return false; }
+
       const filters = chosen.filters || chosen.filters_json || chosen.filtersJson || {};
+      const selection = chosen.selection || null;
       const sec = String(section || '').toLowerCase();
-      try { window.__PENDING_ADV_PRESET = { section: sec, filters }; } catch {}
+
+      const applyMode = (document.querySelector('input[name="applyMode"]:checked')?.value || 'filters');
+      const selApplyMode = (document.querySelector('input[name="selApplyMode"]:checked')?.value || 'replace');
+
+      // store intent for parent
+      try { window.__PENDING_ADV_PRESET = { section: sec, filters, selection, applyMode, selApplyMode }; } catch {}
+
       return true;
     },
     false,
     () => {
       const pending = window.__PENDING_ADV_PRESET;
-      if (pending && pending.section) {
-        try { window.dispatchEvent(new CustomEvent('adv-search-apply-preset', { detail: pending })); } catch {}
-      }
       delete window.__PENDING_ADV_PRESET;
+      if (!pending || !pending.section) return;
+
+      const here = String(currentSection || '').toLowerCase();
+      if (pending.section !== here) return;
+
+      // Apply filters if requested
+      if (pending.applyMode === 'filters' || pending.applyMode === 'both') {
+        try { window.dispatchEvent(new CustomEvent('adv-search-apply-preset', { detail: { section: pending.section, filters: pending.filters || {} } })); } catch {}
+        // Also execute the search immediately
+        (async () => {
+          window.__listState = window.__listState || {};
+          const st = (window.__listState[currentSection] ||= { page: 1, pageSize: 50, total: null, hasMore: false, filters: null });
+          st.page = 1; st.filters = pending.filters || {};
+          const rows = await search(currentSection, pending.filters || {});
+
+          // Apply selection after results load if requested and available
+          if ((pending.applyMode === 'both' || pending.applyMode === 'selection') && pending.selection && pending.selection.fingerprint) {
+            window.__selection = window.__selection || {};
+            const cur = (window.__selection[currentSection] ||= { fingerprint:'', allMatching:false, ids:new Set(), excludeIds:new Set(), totalMatching:null });
+
+            // only apply if section matches; fingerprint mismatch allowed (user intent), but warn if vastly different
+            const incoming = pending.selection;
+            if (pending.selApplyMode === 'replace') {
+              cur.fingerprint = incoming.fingerprint || cur.fingerprint;
+              cur.allMatching = !!incoming.allMatching;
+              cur.ids = new Set((incoming.ids || []).map(String));
+              cur.excludeIds = new Set((incoming.excludeIds || []).map(String));
+              cur.totalMatching = (typeof incoming.totalMatching === 'number') ? incoming.totalMatching : cur.totalMatching;
+            } else {
+              // merge/append
+              if (incoming.allMatching || cur.allMatching) {
+                cur.allMatching = true;
+                const ex = new Set(cur.excludeIds);
+                (incoming.excludeIds || []).forEach(x => ex.add(String(x)));
+                cur.excludeIds = ex;
+              } else {
+                const union = new Set(cur.ids);
+                (incoming.ids || []).forEach(x => union.add(String(x)));
+                cur.ids = union;
+              }
+              cur.fingerprint = cur.fingerprint || incoming.fingerprint || '';
+              if (typeof incoming.totalMatching === 'number') cur.totalMatching = incoming.totalMatching;
+            }
+          }
+
+          renderSummary(rows);
+        })();
+      } else if (pending.applyMode === 'selection' && pending.selection) {
+        // Apply selection only on current dataset
+        window.__selection = window.__selection || {};
+        const cur = (window.__selection[currentSection] ||= { fingerprint:'', allMatching:false, ids:new Set(), excludeIds:new Set(), totalMatching:null });
+        const incoming = pending.selection;
+
+        if (pending.selApplyMode === 'replace') {
+          cur.fingerprint = incoming.fingerprint || cur.fingerprint;
+          cur.allMatching = !!incoming.allMatching;
+          cur.ids = new Set((incoming.ids || []).map(String));
+          cur.excludeIds = new Set((incoming.excludeIds || []).map(String));
+          cur.totalMatching = (typeof incoming.totalMatching === 'number') ? incoming.totalMatching : cur.totalMatching;
+        } else {
+          if (incoming.allMatching || cur.allMatching) {
+            cur.allMatching = true;
+            const ex = new Set(cur.excludeIds);
+            (incoming.excludeIds || []).forEach(x => ex.add(String(x)));
+            cur.excludeIds = ex;
+          } else {
+            const union = new Set(cur.ids);
+            (incoming.ids || []).forEach(x => union.add(String(x)));
+            cur.ids = union;
+          }
+          cur.fingerprint = cur.fingerprint || incoming.fingerprint || '';
+          if (typeof incoming.totalMatching === 'number') cur.totalMatching = incoming.totalMatching;
+        }
+        // Repaint current view to reflect checkboxes
+        renderSummary(currentRows || []);
+      }
     },
     { noParentGate: true, forceEdit: true, kind: 'search-load' }
   );
@@ -1018,6 +1209,232 @@ async function openLoadSearchModal(section){
   // Initial wiring after first paint
   setTimeout(wirePresetTable, 0);
 }
+
+
+// ============================================================================
+// Selection core — NEW helpers to support row checkboxes + “Select all pages”
+// ============================================================================
+
+/** Ensure a selection bucket exists for a section and return it. */
+function ensureSelection(section) {
+  window.__selection = window.__selection || {};
+  if (!window.__selection[section]) {
+    window.__selection[section] = {
+      fingerprint: '',          // ties selection to current dataset (filters/sort/section)
+      allMatching: false,       // true => select-all across pages; false => explicit IDs
+      ids: new Set(),           // used when allMatching=false
+      excludeIds: new Set(),    // used when allMatching=true (explicit UNselections)
+      totalMatching: null,      // optional; for “All N selected”
+    };
+  }
+  return window.__selection[section];
+}
+
+/** Compute a stable fingerprint for the current dataset of a section. */
+function computeSelectionFingerprint(section) {
+  window.__listState = window.__listState || {};
+  const st = (window.__listState[section] ||= { page:1, pageSize:50, filters:null });
+  // You can add sort keys here if/when you implement sorting
+  return JSON.stringify({ section, filters: st.filters || {} });
+}
+
+/** Is a row currently selected in the given section? */
+function isRowSelected(section, id) {
+  if (!id) return false;
+  const sel = ensureSelection(section);
+  const key = String(id);
+  return sel.allMatching ? !sel.excludeIds.has(key) : sel.ids.has(key);
+}
+
+/** Toggle a single row in/out of selection; returns the updated snapshot. */
+function setRowSelected(section, id, selected) {
+  if (!id) return getSelectionSnapshot(section);
+  const sel = ensureSelection(section);
+  const key = String(id);
+  if (sel.allMatching) {
+    if (selected) sel.excludeIds.delete(key);
+    else sel.excludeIds.add(key);
+  } else {
+    if (selected) sel.ids.add(key);
+    else sel.ids.delete(key);
+  }
+  return getSelectionSnapshot(section);
+}
+
+/** Switch to/from “Select all pages” mode and clear explicit sets. */
+function setAllMatching(section, on) {
+  const sel = ensureSelection(section);
+  sel.allMatching = !!on;
+  sel.ids.clear();
+  sel.excludeIds.clear();
+  // keep fingerprint and totalMatching as-is
+  return getSelectionSnapshot(section);
+}
+
+/** Clear all selection for a section (resets to explicit mode, empty sets). */
+function clearSelection(section) {
+  const sel = ensureSelection(section);
+  sel.allMatching = false;
+  sel.ids.clear();
+  sel.excludeIds.clear();
+  // keep fingerprint; totalMatching no longer relevant
+  sel.totalMatching = null;
+  return getSelectionSnapshot(section);
+}
+
+/** Return a plain-object snapshot of the selection for persistence / actions. */
+function getSelectionSnapshot(section) {
+  const sel = ensureSelection(section);
+  return {
+    fingerprint: sel.fingerprint || '',
+    allMatching: !!sel.allMatching,
+    ids: Array.from(sel.ids || []),
+    excludeIds: Array.from(sel.excludeIds || []),
+    totalMatching: (typeof sel.totalMatching === 'number') ? sel.totalMatching : null,
+    section
+  };
+}
+
+/** Serialize current selection (same as snapshot; separated for clarity/compat). */
+function serializeSelection(section) {
+  return getSelectionSnapshot(section);
+}
+
+/** Apply a selection snapshot into the current section (replace). */
+function applySelectionSnapshot(section, snapshot) {
+  if (!snapshot || (snapshot.section && snapshot.section !== section)) {
+    // Ignore mismatched section to avoid accidental cross-apply
+    return getSelectionSnapshot(section);
+  }
+  const sel = ensureSelection(section);
+  sel.fingerprint   = String(snapshot.fingerprint || sel.fingerprint || '');
+  sel.allMatching   = !!snapshot.allMatching;
+  sel.ids           = new Set((snapshot.ids || []).map(String));
+  sel.excludeIds    = new Set((snapshot.excludeIds || []).map(String));
+  sel.totalMatching = (typeof snapshot.totalMatching === 'number') ? snapshot.totalMatching : sel.totalMatching;
+  return getSelectionSnapshot(section);
+}
+
+/**
+ * Merge/append one selection snapshot into another (result stored in current section).
+ * Rules:
+ * - If either has allMatching=true → result is allMatching=true; excludeIds = union of both exclude sets.
+ * - Else (both explicit) → ids = union of both ids.
+ * - fingerprint: keep the existing section’s fingerprint if present, otherwise take from added.
+ * - totalMatching: use existing if present, else added.
+ */
+function mergeSelectionSnapshots(section, baseSnapshot, addSnapshot) {
+  const base = baseSnapshot || getSelectionSnapshot(section);
+  const add  = addSnapshot  || {};
+  const result = {
+    fingerprint: base.fingerprint || add.fingerprint || '',
+    allMatching: !!(base.allMatching || add.allMatching),
+    ids: [],
+    excludeIds: [],
+    totalMatching: (typeof base.totalMatching === 'number')
+      ? base.totalMatching
+      : (typeof add.totalMatching === 'number' ? add.totalMatching : null),
+    section
+  };
+
+  if (result.allMatching) {
+    const ex = new Set((base.excludeIds || []).map(String));
+    (add.excludeIds || []).forEach(x => ex.add(String(x)));
+    result.excludeIds = Array.from(ex);
+  } else {
+    const union = new Set((base.ids || []).map(String));
+    (add.ids || []).forEach(x => union.add(String(x)));
+    result.ids = Array.from(union);
+  }
+
+  // Apply the merged snapshot to store and return the current snapshot
+  return applySelectionSnapshot(section, result);
+}
+
+/** Utility: dedupe a string/ID array; returns a new array (stable order is not guaranteed). */
+function dedupeIds(arr) {
+  return Array.from(new Set((arr || []).map(String)));
+}
+
+// ============================================================================
+// Selection presets — wrappers to save/list/load selection presets via backend
+// ============================================================================
+
+/**
+ * Save a selection preset.
+ * By default uses kind: 'selection' to keep it distinct from pure filter presets,
+ * but your backend can also store it under kind: 'search' with a `selection` block.
+ */
+async function saveSelectionPreset(section, name, snapshot, opts = {}) {
+  const payload = {
+    section,
+    // Use 'search' so it matches KIND_ALLOWED on the backend and won't 400
+    kind: 'search',
+    name: String(name || '').trim(),
+    is_shared: !!opts.is_shared,
+    // Ensure filters is an object (backend defaults to {} if omitted, but we include it explicitly)
+    filters: {},
+    selection: {
+      fingerprint: String(snapshot?.fingerprint || ''),
+      allMatching: !!snapshot?.allMatching,
+      ids: dedupeIds(snapshot?.ids || []),
+      excludeIds: dedupeIds(snapshot?.excludeIds || []),
+      totalMatching: (typeof snapshot?.totalMatching === 'number') ? snapshot.totalMatching : null
+    }
+  };
+  if (!payload.name) throw new Error('Preset name is required');
+
+  // Prefer existing wrapper if present
+  if (typeof createReportPreset === 'function') {
+    const res = await createReportPreset(payload);
+    try { invalidatePresetCache(section, 'search'); } catch {}
+    return res;
+  }
+
+  // Fallback to direct API (optional)
+  const url = API('/api/report-presets');
+  const res = await authFetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type':'application/json' },
+    body: JSON.stringify(payload)
+  });
+  try { invalidatePresetCache(section, 'search'); } catch {}
+  return res?.ok ? res.json().catch(()=>({})) : Promise.reject(new Error('Failed to save selection preset'));
+}
+
+/** List selection presets for a section (owned + shared if requested). */
+async function listSelectionPresets(section, { include_shared = true } = {}) {
+  if (typeof listReportPresets === 'function') {
+    return await listReportPresets({ section, kind: 'selection', include_shared });
+  }
+  // Fallback, if needed:
+  const qs = new URLSearchParams({ section, kind: 'selection', include_shared: include_shared ? 'true' : 'false' });
+  const res = await authFetch(API(`/api/report-presets?${qs}`));
+  return res?.ok ? res.json().catch(()=>[]) : [];
+}
+
+/**
+ * Load a selection preset by ID or name. Returns the preset object (or null).
+ * Note: this does not apply it — use applySelectionSnapshot() or mergeSelectionSnapshots().
+ */
+async function loadSelectionPreset(section, idOrName) {
+  const all = await listSelectionPresets(section, { include_shared: true }) || [];
+  if (!idOrName) return null;
+  const match = all.find(p => String(p.id) === String(idOrName)) ||
+                all.find(p => String(p.name || '').toLowerCase() === String(idOrName).toLowerCase());
+  return match || null;
+}
+
+
+
+
+
+
+
+
+
+
+
 
 
 // -----------------------------
@@ -1167,7 +1584,6 @@ async function openSearchModal(opts = {}) {
     </div>
   `;
 
-  // Pass utility flags + kind to customise chrome/behaviour
   showModal(
     'Advanced Search',
     [{ key: 'filter', title: 'Filters' }],
@@ -1178,7 +1594,13 @@ async function openSearchModal(opts = {}) {
       const st = (window.__listState[currentSection] ||= { page: 1, pageSize: 50, total: null, hasMore: false, filters: null });
       st.page = 1;
 
+      // reset selection for the new dataset
+      window.__selection = window.__selection || {};
+      const sel = (window.__selection[currentSection] ||= { fingerprint:'', allMatching:false, ids:new Set(), excludeIds:new Set(), totalMatching:null });
       const filters = extractFiltersFromForm('#searchForm');
+      sel.fingerprint = JSON.stringify({ section: currentSection, filters });
+      sel.allMatching=false; sel.ids.clear(); sel.excludeIds.clear(); sel.totalMatching=null;
+
       const rows    = await search(currentSection, filters);
       if (rows) renderSummary(rows);
       return true; // close after running search
@@ -1202,6 +1624,8 @@ async function openSearchModal(opts = {}) {
   // Ensure listeners are wired after first paint
   setTimeout(wireAdvancedSearch, 0);
 }
+
+
 
 function wireAdvancedSearch() {
   const bodyEl = document.getElementById('modalBody');
@@ -1233,7 +1657,7 @@ function wireAdvancedSearch() {
   };
   bodyEl.addEventListener('click', bodyEl._advSearchHandler, true);
 
-  // listen once for preset apply events
+  // listen once for preset apply events (filters only — selection is handled in the load modal)
   if (!window.__advPresetListener) {
     window.__advPresetListener = (ev) => {
       const det = ev && ev.detail;
@@ -1249,6 +1673,8 @@ function wireAdvancedSearch() {
     window.addEventListener('adv-search-apply-preset', window.__advPresetListener);
   }
 }
+
+
 
 
 // -----------------------------
@@ -6534,6 +6960,9 @@ function collectForm(sel, jsonTry=false){
 // ================== FRONTEND: renderSummary (UPDATED to jump & highlight pending focus) ==================
 
 // ===== UPDATED: renderSummary — if pending focus row isn't visible, try one auto-relax/reload pass, then highlight when found
+
+
+
 function renderSummary(rows){
   currentRows = rows;
   currentSelection = null;
@@ -6543,6 +6972,51 @@ function renderSummary(rows){
   const st = (window.__listState[currentSection] ||= { page: 1, pageSize: 50, total: null, hasMore: false, filters: null });
   const page     = Number(st.page || 1);
   const pageSize = st.pageSize; // 50 | 100 | 200 | 'ALL'
+
+  // ── selection state (per section) ───────────────────────────────────────────
+  window.__selection = window.__selection || {};
+  const ensureSel = (section)=>{
+    const init = { fingerprint:'', allMatching:false, ids:new Set(), excludeIds:new Set(), totalMatching:null };
+    return (window.__selection[section] ||= init);
+  };
+  const sel = ensureSel(currentSection);
+
+  // selection helpers bound to current section
+  const isRowSelected = (id)=>{
+    if (!id) return false;
+    if (sel.allMatching) return !sel.excludeIds.has(String(id));
+    return sel.ids.has(String(id));
+  };
+  const setRowSelected = (id, selected)=>{
+    id = String(id||'');
+    if (!id) return;
+    if (sel.allMatching) {
+      if (selected) sel.excludeIds.delete(id);
+      else sel.excludeIds.add(id);
+    } else {
+      if (selected) sel.ids.add(id);
+      else sel.ids.delete(id);
+    }
+  };
+  const setAllMatching = (on)=>{
+    sel.allMatching = !!on;
+    sel.ids.clear();
+    sel.excludeIds.clear();
+  };
+  const clearSelection = ()=>{
+    sel.allMatching = false;
+    sel.ids.clear();
+    sel.excludeIds.clear();
+    sel.totalMatching = null;
+  };
+
+  // tie selection to dataset via fingerprint (filters + section)
+  const computeFingerprint = ()=> JSON.stringify({ section: currentSection, filters: st.filters || {} });
+  const fp = computeFingerprint();
+  if (sel.fingerprint !== fp) {
+    sel.fingerprint = fp;
+    clearSelection();
+  }
 
   const cols = defaultColumnsFor(currentSection);
   byId('title').textContent = sections.find(s=>s.key===currentSection)?.label || '';
@@ -6586,15 +7060,59 @@ function renderSummary(rows){
     const data = await loadSection();            // re-fetch with new page size
     renderSummary(data);
   });
+
+  // selection summary inline (e.g., “All N selected” / “K selected” / Clear)
+  const selInfo = document.createElement('div'); selInfo.className = 'mini';
+  const renderSelInfo = ()=>{
+    let text = '';
+    if (sel.allMatching) {
+      if (typeof sel.totalMatching === 'number') text = `All ${sel.totalMatching} ${currentSection} selected.`;
+      else text = `All matching ${currentSection} selected.`;
+    } else if (sel.ids.size > 0) {
+      text = `${sel.ids.size} selected.`;
+    }
+    selInfo.textContent = text;
+  };
+  renderSelInfo();
+
+  const clearBtn = document.createElement('button');
+  clearBtn.textContent = 'Clear selection';
+  clearBtn.style.cssText = 'border:1px solid var(--line);background:#0b152a;color:var(--text);padding:4px 8px;border-radius:8px;cursor:pointer;display:none';
+  clearBtn.onclick = ()=>{ clearSelection(); renderSelInfo(); // refresh checkmarks
+    Array.from(document.querySelectorAll('input.row-select')).forEach(cb=>{ cb.checked = false; });
+    const hdr = byId('summarySelectAll'); if (hdr) { hdr.checked=false; hdr.indeterminate=false; }
+  };
+
   const spacerTop = document.createElement('div'); spacerTop.style.flex = '1';
   topControls.appendChild(sizeLabel);
   topControls.appendChild(sizeSel);
   topControls.appendChild(spacerTop);
+  topControls.appendChild(selInfo);
+  topControls.appendChild(clearBtn);
   content.appendChild(topControls);
 
   // ── data table ──────────────────────────────────────────────────────────────
   const tbl = document.createElement('table'); tbl.className='grid';
   const thead = document.createElement('thead'); const trh=document.createElement('tr');
+
+  // selection header checkbox (master)
+  const thSel = document.createElement('th');
+  const hdrCb = document.createElement('input'); hdrCb.type='checkbox'; hdrCb.id='summarySelectAll';
+  hdrCb.checked = !!sel.allMatching;
+  hdrCb.indeterminate = !sel.allMatching && (sel.ids && sel.ids.size > 0);
+  hdrCb.addEventListener('click', (e)=>{
+    e.stopPropagation();
+    const on = hdrCb.checked;
+    setAllMatching(on);
+    renderSelInfo();
+    clearBtn.style.display = (sel.allMatching || (sel.ids.size>0)) ? '' : 'none';
+    // set all visible checkboxes to match selected state (visual; state is already stored)
+    Array.from(document.querySelectorAll('input.row-select')).forEach(cb=>{ cb.checked = on; });
+  });
+  thSel.appendChild(hdrCb);
+  trh.appendChild(thSel);
+
+  // the rest of headers
   cols.forEach(c=>{ const th=document.createElement('th'); th.textContent=c; trh.appendChild(th); });
   thead.appendChild(trh); tbl.appendChild(thead);
 
@@ -6605,6 +7123,30 @@ function renderSummary(rows){
     tr.dataset.id = (r && r.id) ? String(r.id) : '';
     tr.dataset.section = currentSection;
 
+    // selection cell
+    const tdSel = document.createElement('td');
+    const cb = document.createElement('input'); cb.type='checkbox'; cb.className='row-select';
+    cb.checked = isRowSelected(tr.dataset.id);
+    cb.addEventListener('click', (e)=>{
+      e.stopPropagation();
+      const id = tr.dataset.id;
+      setRowSelected(id, cb.checked);
+      // refresh master states
+      const hdr = byId('summarySelectAll');
+      if (sel.allMatching) {
+        hdr.checked = true;
+        hdr.indeterminate = sel.excludeIds.size > 0;
+      } else {
+        hdr.checked = false;
+        hdr.indeterminate = (sel.ids.size > 0);
+      }
+      clearBtn.style.display = (sel.allMatching || sel.ids.size>0) ? '' : 'none';
+      renderSelInfo();
+    });
+    tdSel.appendChild(cb);
+    tr.appendChild(tdSel);
+
+    // data cells
     cols.forEach(c=>{
       const td=document.createElement('td');
       const v = r[c];
@@ -6618,6 +7160,7 @@ function renderSummary(rows){
   tb.addEventListener('click', (ev) => {
     const tr = ev.target && ev.target.closest('tr');
     if (!tr) return;
+    if (ev.target && ev.target.classList && ev.target.classList.contains('row-select')) return; // ignore clicks on checkbox
     tb.querySelectorAll('tr.selected').forEach(n => n.classList.remove('selected'));
     tr.classList.add('selected');
     const id = tr.dataset.id;
@@ -6755,31 +7298,29 @@ function renderSummary(rows){
     }
   } catch {}
 
+  // show/hide clear button based on current selection
+  clearBtn.style.display = (sel.allMatching || (sel.ids.size>0)) ? '' : 'none';
+
   // ---- Jump & highlight if a pending focus token matches this section
   if (window.__pendingFocus) {
     const pf = window.__pendingFocus;
     const pfSection = pf.section || (pf.entity ? (pf.entity + 's') : null);
     if (pfSection && pfSection === currentSection && pf.id != null) {
       const targetId = String(pf.id);
-      const sel = `tr[data-id="${CSS.escape ? CSS.escape(targetId) : targetId}"]`;
-      let tr = tb.querySelector(sel);
+      const selq = `tr[data-id="${CSS.escape ? CSS.escape(targetId) : targetId}"]`;
+      let tr = tb.querySelector(selq);
 
       if (!tr) {
-        // Not visible under current filters - attempt one auto-relax/reload pass
         if (!pf._retried) {
           pf._retried = true;
-          try {
-            if (typeof clearFilters === 'function') clearFilters();
-          } catch (_) {}
+          try { if (typeof clearFilters === 'function') clearFilters(); } catch (_){}
           try { renderAll(); } catch (e) { console.error('auto-refresh after filter clear failed', e); }
-          return; // wait for next render to try again
+          return;
         }
-        // If we've already retried once, leave token set so a manual refresh can still catch it.
         console.debug('[GRID] pending focus row not found under current filters; already retried once');
         return;
       }
 
-      // Select it in our state, scroll, and highlight
       currentSelection = currentRows.find(x => String(x.id) === targetId) || null;
       try { tr.scrollIntoView({ block: 'center', behavior: 'smooth' }); } catch (_) { tr.scrollIntoView(); }
       tb.querySelectorAll('tr.selected').forEach(n => n.classList.remove('selected'));
@@ -6787,12 +7328,10 @@ function renderSummary(rows){
       const oldOutline = tr.style.outline;
       tr.style.outline = '2px solid #ffbf00';
       setTimeout(() => { tr.style.outline = oldOutline || ''; }, 2000);
-
-      // Clear token so we don't jump again
       window.__pendingFocus = null;
     }
   }
-} 
+}
 
 
 
