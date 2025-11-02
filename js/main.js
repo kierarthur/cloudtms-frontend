@@ -2404,7 +2404,7 @@ async function openCandidate(row) {
 
       try {
         const raw = await res.clone().text();
-        if (LOG) console.debug('[HTTP] raw body (≤2KB):', raw.slice(0, 2048));
+        if (LOG) console.debug('[HTTP] raw body (≤2KB):', raw.slice(0, 2048)); // optional peek
       } catch (peekErr) { W('[HTTP] raw peek failed', peekErr?.message || peekErr); }
 
       if (res.ok) {
@@ -2444,7 +2444,7 @@ async function openCandidate(row) {
     openToken: window.modalCtx.openToken
   });
 
-  // 3) Render modal (now we have real data to populate fields)
+  // 3) Render modal
   L('calling showModal with hasId=', !!full?.id, 'rawHasIdArg=', full?.id);
   showModal(
     'Candidate',
@@ -2517,7 +2517,7 @@ async function openCandidate(row) {
       L('[onSave] saved', { ok: !!saved, candidateId, savedKeys: Array.isArray(saved)?[]:Object.keys(saved||{}) });
       if (!candidateId) { alert('Failed to save candidate'); return { ok:false }; }
 
-      // ===== NEW: validation helpers (unchanged logic) =====
+      // ===== Validate staged overrides (unchanged logic) =====
       const O = window.modalCtx.overrides || { existing: [], stagedNew: [], stagedEdits: {}, stagedDeletes: new Set() };
 
       async function getCoveringDefault(client_id, role, band, date_from) {
@@ -2531,19 +2531,7 @@ async function openCandidate(row) {
         } catch { return null; }
       }
       const bucketLabel = { day:'Day', night:'Night', sat:'Sat', sun:'Sun', bh:'BH' };
-      const erniMult = await (async ()=>{
-        if (typeof window.__ERNI_MULT__ === 'number') return window.__ERNI_MULT__;
-        let pct = 0;
-        try {
-          if (typeof getSettingsCached === 'function') {
-            const s = await getSettingsCached();
-            let p = s?.erni_pct ?? s?.employers_ni_percent ?? 0;
-            p = Number(p) || 0; if (p > 1) p=p/100;
-            window.__ERNI_MULT__ = 1 + p; return window.__ERNI_MULT__;
-          }
-        } catch {}
-        window.__ERNI_MULT__ = 1; return 1;
-      })();
+      const erniMult = await (async ()=>{ if (typeof window.__ERNI_MULT__ === 'number') return window.__ERNI_MULT__; try { if (typeof getSettingsCached === 'function') { const s = await getSettingsCached(); let p = s?.erni_pct ?? s?.employers_ni_percent ?? 0; p = Number(p)||0; if (p>1) p=p/100; window.__ERNI_MULT__ = 1 + p; return window.__ERNI_MULT__; } } catch{} window.__ERNI_MULT__ = 1; return 1; })();
 
       // Validate EDITS
       for (const [editId, patchRaw] of Object.entries(O.stagedEdits || {})) {
@@ -2595,34 +2583,36 @@ async function openCandidate(row) {
         }
       }
 
-      // ===== Persist staged overrides =====
+      // ===== Persist staged overrides (DELETE uses routed path with candidate_id) =====
       const OX = window.modalCtx.overrides || { existing: [], stagedNew: [], stagedEdits: {}, stagedDeletes: new Set() };
       L('[onSave] overrides', { deletes: Array.from(OX.stagedDeletes||[]), edits: Object.keys(OX.stagedEdits||{}), newCount: (OX.stagedNew||[]).length });
 
-      // ---- FIXED: Deletes use filter-based DELETE (backend expects filters, not /:id) ----
+      // Deletes — preferred by id; fallback to legacy filter keys
       for (const delId of OX.stagedDeletes || []) {
         const row = (OX.existing || []).find(r => String(r.id) === String(delId));
         if (!row) continue;
-        const qs = new URLSearchParams();
-        qs.set('candidate_id', String(candidateId));
-        if (row.client_id) qs.set('client_id', String(row.client_id));
-        if (row.role != null) qs.set('role', String(row.role));
-        // backend treats empty band as NULL
-        qs.set('band', (row.band == null || row.band === '') ? '' : String(row.band));
-        if (row.rate_type) qs.set('rate_type', String(row.rate_type).toUpperCase());
-        if (row.date_from) qs.set('date_from', String(row.date_from));
 
-        const url = API(`/api/rates/candidate-overrides?${qs.toString()}`);
+        const q = new URLSearchParams();
+        if (row.id) q.set('id', String(row.id));
+        else {
+          if (row.client_id) q.set('client_id', String(row.client_id));
+          if (row.role != null) q.set('role', String(row.role));
+          q.set('band', (row.band == null || row.band === '') ? '' : String(row.band)); // backend treats '' as NULL
+          if (row.rate_type) q.set('rate_type', String(row.rate_type).toUpperCase());
+          if (row.date_from) q.set('date_from', String(row.date_from));
+        }
+
+        const url = API(`/api/rates/candidate-overrides/${encodeURIComponent(candidateId)}?${q.toString()}`);
         L('[onSave][DELETE override]', url);
         const res = await authFetch(url, { method: 'DELETE' });
-        if (!res.ok && res.status !== 404) {
+        if (!res.ok) {
           const msg = await res.text().catch(()=> 'Delete override failed');
           alert(msg);
           return { ok:false };
         }
       }
 
-      // Edits
+      // Edits — PATCH candidate_id in path + ORIGINAL keys in query, updates in body
       for (const [editId, patchRaw] of Object.entries(OX.stagedEdits || {})) {
         const original = (OX.existing || []).find(x => String(x.id) === String(editId));
         if (!original) { alert('Cannot locate original override to patch'); return { ok:false }; }
@@ -2852,7 +2842,7 @@ async function renderCandidateRatesTable() {
   const pendingDeleteIds = (O.stagedDeletes instanceof Set) ? O.stagedDeletes : new Set();
 
   const rows = [];
-  // Include existing rows even if marked for delete; tag them as pending
+  // Keep existing rows even if marked for delete; show "pending delete" state
   for (const ex of (O.existing || [])) {
     const isPendingDelete = !!(pendingDeleteIds && ex && pendingDeleteIds.has(ex.id));
     rows.push({ ...ex, ...(O.stagedEdits[ex.id] || {}), _edited: !!O.stagedEdits[ex.id], _pendingDelete: isPendingDelete });
