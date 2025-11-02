@@ -3885,6 +3885,7 @@ function renderCalendar(timesheets){
 // ============================================================================
 // RENDER CLIENT RATES TABLE (adds "Status" col; shows disabled who/when)
 // ============================================================================
+
 async function openClient(row) {
   // ===== Logging helpers (toggle with window.__LOG_MODAL = true/false) =====
   const LOG = (typeof window.__LOG_MODAL === 'boolean') ? window.__LOG_MODAL : true;
@@ -4107,7 +4108,8 @@ async function openClient(row) {
       // 6) DELETE staged client windows BEFORE toggles/edits/inserts
       try {
         const allWindows = Array.isArray(window.modalCtx.ratesState) ? window.modalCtx.ratesState : [];
-        // Union of (__delete flags) ∪ (ids in ratesStagedDeletes Set)
+        L('[onSave] delete phase', { windows: allWindows.length, stagedDeleteSet: window.modalCtx.ratesStagedDeletes?.size || 0 });
+        // Union of flags and Set
         const setIds = (window.modalCtx.ratesStagedDeletes instanceof Set) ? new Set([...window.modalCtx.ratesStagedDeletes]) : new Set();
         for (const w of allWindows) if (w && w.id && w.__delete === true) setIds.add(String(w.id));
 
@@ -4116,7 +4118,7 @@ async function openClient(row) {
           for (const id of setIds) {
             const url = API(`/api/rates/client-defaults/${encodeURIComponent(id)}`);
             const res = await authFetch(url, { method: 'DELETE' });
-            if (res.status === 404) continue; // already gone
+            if (res.status === 404) continue;
             if (!res.ok) {
               const body = await res.text().catch(()=> '');
               if (res.status === 409) alert(`Delete blocked: ${body || 'Associated data prevents deletion.'}`);
@@ -4124,7 +4126,6 @@ async function openClient(row) {
               return { ok:false };
             }
           }
-          // Prune deleted rows from state/baseline and clear the Set
           window.modalCtx.ratesState    = allWindows.filter(w => !(w && w.id && setIds.has(String(w.id))));
           window.modalCtx.ratesBaseline = (Array.isArray(window.modalCtx.ratesBaseline) ? window.modalCtx.ratesBaseline : [])
                                           .filter(b => !(b && b.id && setIds.has(String(b.id))));
@@ -4149,6 +4150,7 @@ async function openClient(row) {
         if (!prev) continue;
         if (!!prev.disabled_at_utc !== !!w.disabled_at_utc) toggles.push({ id: w.id, disabled: !!w.disabled_at_utc });
       }
+      L('[onSave] toggle phase', { togglesCount: toggles.length, windows: windows.length, baseline: baselineRates.length });
       if (toggles.length) {
         if (APILOG) console.log('[OPEN_CLIENT] applying toggles', toggles);
         for (const t of toggles) {
@@ -4188,6 +4190,7 @@ async function openClient(row) {
       // 9) UPDATE existing, POST new (skip disabled)
       const toUpdate = windows.filter(w => w.id && !w.disabled_at_utc);
       const toCreate = windows.filter(w => !w.id && !w.disabled_at_utc);
+      L('[onSave] upsert phase', { toUpdate: toUpdate.length, toCreate: toCreate.length });
 
       const buildBody = (w) => ({
         client_id : clientId,
@@ -4251,13 +4254,13 @@ async function openClient(row) {
       // 10) Refresh & rebuild baseline
       try {
         const refreshed = await listClientRates(clientId /* all incl. disabled */);
-        // Re-apply delete markers for any ids still in the staged set (belt & braces)
         const stagedDelIds = (window.modalCtx.ratesStagedDeletes instanceof Set) ? window.modalCtx.ratesStagedDeletes : new Set();
         window.modalCtx.ratesState = (Array.isArray(refreshed) ? refreshed.map(x => ({ ...x })) : []).map(x => {
           if (stagedDelIds.has(String(x.id))) x.__delete = true;
           return x;
         });
         window.modalCtx.ratesBaseline = JSON.parse(JSON.stringify(window.modalCtx.ratesState));
+        L('[onSave] post-refresh', { refreshed: window.modalCtx.ratesState.length });
         try { renderClientRatesTable(); } catch {}
       } catch (e) {
         W('[openClient] post-save refresh failed', e);
@@ -4265,6 +4268,7 @@ async function openClient(row) {
 
       window.modalCtx.formState = { __forId: clientId, main:{} };
       if (isNew) window.__pendingFocus = { section: 'clients', id: clientId };
+      L('[onSave] EXIT ok=true');
       return { ok: true, saved: window.modalCtx.data };
     },
     full?.id
@@ -4293,7 +4297,6 @@ async function openClient(row) {
             if (s) {
               s.disabled_at_utc  = srv.disabled_at_utc ?? null;
               s.disabled_by_name = srv.disabled_by_name ?? null;
-              // Preserve pending delete if tracked in the Set
               if (stagedDelIds.has(String(srv.id))) s.__delete = true;
             } else {
               const row = { ...srv };
@@ -4303,6 +4306,7 @@ async function openClient(row) {
           });
           window.modalCtx.ratesState = staged;
         }
+        L('[POST-PAINT] rates merged', { count: window.modalCtx.ratesState.length });
         try { renderClientRatesTable(); } catch {}
       }
     } catch (e) { W('openClient POST-PAINT rates error', e); }
@@ -4319,6 +4323,9 @@ async function openClient(row) {
     L('skip companion loads (no full.id)');
   }
 }
+
+
+
 
 // Now shows derived PAYE & Umbrella margins per bucket in the table
 async function renderClientRatesTable() {
@@ -4713,20 +4720,29 @@ async function mountCandidatePayTab(){
 
 // =================== MOUNT CLIENT RATES TAB (unchanged glue) ===================
 async function mountClientRatesTab() {
+  const LOG_RATES = !!window.__LOG_RATES;
+  const DBG = (...a)=> { if (LOG_RATES) console.log('[RATES][mountClientRatesTab]', ...a); };
+
   const ctx = window.modalCtx; // use canonical context
+  DBG('ENTRY', { ctxEntity: ctx?.entity, ctxId: ctx?.data?.id });
 
   // render uses ctx.ratesState directly; no args needed
-  renderClientRatesTable();
+  try { await renderClientRatesTable(); DBG('renderClientRatesTable done'); } catch (e) { DBG('renderClientRatesTable error', e); }
 
   // Always resolve a real client id before opening the modal
   const btn = byId('btnAddClientRate');
   if (btn) {
     btn.onclick = () => {
       const cid = (ctx && ctx.data && (ctx.data.id || ctx.data.client_id)) || null;
+      DBG('openClientRateModal from button', { cid });
       return openClientRateModal(cid);
     };
+    DBG('wired btnAddClientRate');
+  } else {
+    DBG('btnAddClientRate not present');
   }
 }
+
 
 
 // =================== MOUNT HOSPITALS TAB (unchanged glue) ===================
@@ -4777,6 +4793,8 @@ async function openClientRateModal(client_id, existing) {
   const parentFrame = _currentFrame();
   const parentEditable = parentFrame && (parentFrame.mode === 'edit' || parentFrame.mode === 'create');
   const APILOG = (typeof window !== 'undefined' && !!window.__LOG_API) || (typeof __LOG_API !== 'undefined' && !!__LOG_API);
+  const LOG_RATES = !!window.__LOG_RATES;
+  const DBG = (...a)=> { if (LOG_RATES) console.log('[RATES][openClientRateModal]', ...a); };
 
   const ctx = window.modalCtx || {};
   const resolvedClientId =
@@ -4786,14 +4804,17 @@ async function openClientRateModal(client_id, existing) {
     null;
 
   if (APILOG) console.log('[openClientRateModal] resolvedClientId', resolvedClientId, { passed: client_id, existing });
+  DBG('ENTRY', { parentEditable, hasExisting: !!existing, resolvedClientId, ctxEntity: ctx?.entity, ctxId: ctx?.data?.id });
 
   const globalRoles = await loadGlobalRoleOptions();
   const roleOptions = globalRoles.map(r => `<option value="${r}">${r}</option>`).join('') + `<option value="__OTHER__">+ Add new role…</option>`;
+  DBG('loaded role options', { count: globalRoles.length });
 
   const ex  = existing || {};
   const who = ex.disabled_by_name || '';
   const when = ex.disabled_at_utc ? formatIsoToUk(String(ex.disabled_at_utc).slice(0,10)) : '';
   const isDisabled = !!ex.disabled_at_utc;
+  DBG('existing status', { isDisabled, who, when, id: ex.id });
 
   const statusBlock = `
     <div class="row" id="cl_status_row" style="align-items:center; gap:8px;">
@@ -4809,11 +4830,9 @@ async function openClientRateModal(client_id, existing) {
     </div>`;
 
   function sameRow(a, b) {
-    if (!a || !b) return false;
-    if (a === b) return true;
-    if (a.id && b.id && String(a.id) === String(b.id)) return true;
-    if (a.__localKey && b.__localKey && String(a.__localKey) === String(b.__localKey)) return true;
-    return false;
+    const eq = !!(a && b && ((a === b) || (a.id && b.id && String(a.id) === String(b.id)) || (a.__localKey && b.__localKey && String(a.__localKey) === String(b.__localKey))));
+    if (LOG_RATES) console.log('[RATES][sameRow]', { aId:a?.id, bId:b?.id, aKey:a?.__localKey, bKey:b?.__localKey, eq });
+    return eq;
   }
 
   // INLINE panel for client-rate warnings/fixes
@@ -4887,12 +4906,13 @@ async function openClientRateModal(client_id, existing) {
   }
 
   function setApplyEnabled(enabled){
+    if (LOG_RATES) console.log('[RATES][setApplyEnabled]', { enabled });
     try {
       const btn = document.querySelector('#modal .btn-save, #modal .actions .primary, #modal .actions .btn-primary, .modal .btn-save');
       if (btn) { btn.disabled = !enabled; btn.classList.toggle('disabled', !enabled); }
-    } catch {}
+    } catch (e) { if (LOG_RATES) console.warn('[RATES][setApplyEnabled] button toggle failed', e); }
     // Inform parent showModal so child Save can proceed
-    try { window.dispatchEvent(new CustomEvent('modal-apply-enabled', { detail: { enabled } })); } catch {}
+    try { window.dispatchEvent(new CustomEvent('modal-apply-enabled', { detail: { enabled } })); } catch (e) { if (LOG_RATES) console.warn('[RATES][setApplyEnabled] dispatch failed', e); }
   }
   const numOrNull = v => { if (v===undefined||v===null) return null; if (typeof v === 'string' && v.trim()==='') return null; const n=Number(v); return Number.isFinite(n) ? n : null; };
   const fmt = v => (v==null || Number.isNaN(v)) ? '—' : (Math.round(v*100)/100).toFixed(2);
@@ -4930,6 +4950,8 @@ async function openClientRateModal(client_id, existing) {
     const fromIso = parseUkDateToIso(byId('cl_date_from')?.value || '');
     const toIso   = parseUkDateToIso(byId('cl_date_to')?.value || '');
 
+    DBG('recomputeClientState: ENTRY', { roleVal, fromIso, toIso, exId: ex?.id });
+
     const getIn = sel => document.querySelector(sel);
     const payeInputs = ['day','night','sat','sun','bh'].map(b => getIn(`#clientRateForm input[name="paye_${b}"]`));
     const umbInputs  = ['day','night','sat','sun','bh'].map(b => getIn(`#clientRateForm input[name="umb_${b}"]`));
@@ -4940,6 +4962,7 @@ async function openClientRateModal(client_id, existing) {
     showClientInlineError('');
 
     if (!roleVal || !fromIso) {
+      DBG('recomputeClientState: NOT_READY', { roleVal, fromIso });
       allInputs.forEach(inp => { inp.disabled = true; });
       ['day','night','sat','sun','bh'].forEach(b=>{
         const spP = byId(`m_paye_${b}`), spU = byId(`m_umb_${b}`);
@@ -4960,12 +4983,11 @@ async function openClientRateModal(client_id, existing) {
       const payeMargin = (paye!=null && chg!=null) ? (chg - (paye * mult)) : null;
       const umbMargin  = (umb!=null  && chg!=null) ? (chg - umb)          : null;
       if ((payeMargin != null && payeMargin < 0) || (umbMargin != null && umbMargin < 0)) hasNegative = true;
-      const spP = byId(`m_paye_${bucket}`), spU = byId(`m_umb_${bucket}`);
-      if (spP) spP.textContent = fmt(payeMargin);
-      if (spU) spU.textContent = fmt(umbMargin);
     });
-
-    if (hasNegative) { canApply = false; showClientInlineError('One or more buckets would have a negative margin. Adjust pay/charge.'); }
+    if (hasNegative) {
+      DBG('recomputeClientState: NEGATIVE_MARGIN');
+      canApply = false; showClientInlineError('One or more buckets would have a negative margin. Adjust pay/charge.');
+    }
 
     // Overlap detection + Fix buttons for client defaults (same role/band)
     const staged = Array.isArray(ctx.ratesState) ? ctx.ratesState.slice() : [];
@@ -4977,6 +4999,7 @@ async function openClientRateModal(client_id, existing) {
       .filter(r => rangesOverlap(r.date_from||null, r.date_to||null, fromIso, toIso||null));
 
     if (conflicts.length) {
+      DBG('recomputeClientState: OVERLAP', { conflictId: conflicts[0]?.id, conflicts: conflicts.length });
       canApply = false;
       const ov = conflicts[0];
       const overlapStart = (fromIso > (ov.date_from||'0000-01-01')) ? fromIso : (ov.date_from||'');
@@ -5013,7 +5036,6 @@ async function openClientRateModal(client_id, existing) {
         const fixOther = byId('cl_fix_other');
         if (fixOther && cutOther) fixOther.onclick = () => {
           try {
-            // stage OTHER truncate (stays staged until parent Save)
             if (ov.id) {
               const idx = staged.findIndex(r => r.id === ov.id);
               if (idx >= 0) ctx.ratesState[idx] = { ...ctx.ratesState[idx], date_to: cutOther };
@@ -5028,6 +5050,7 @@ async function openClientRateModal(client_id, existing) {
       }, 0);
     }
 
+    DBG('recomputeClientState: EXIT', { canApply });
     setApplyEnabled(canApply);
   }
 
@@ -5039,37 +5062,45 @@ async function openClientRateModal(client_id, existing) {
     [{ key:'form', label: formTabLabel }],
     () => formHtml,
     async () => {
-      // Robust parent frame lookup (instead of _parentFrame())
+      // Robust parent frame lookup
       const stack = window.__modalStack || [];
       const pf = stack.length > 1 ? stack[stack.length - 2] : null;
-      if (!pf || (pf.mode !== 'edit' && pf.mode !== 'create')) return false;
+      DBG('onSave ENTRY', { stackLen: stack.length, hasParent: !!pf, parentMode: pf?.mode });
+
+      if (!pf || (pf.mode !== 'edit' && pf.mode !== 'create')) {
+        DBG('onSave BLOCKED: parent not editable');
+        return false;
+      }
 
       // Re-validate live state; if Apply disabled, just block
       await recomputeClientState();
       const btn = document.querySelector('#modal .btn-save, #modal .actions .primary, #modal .actions .btn-primary, .modal .btn-save');
-      if (btn && btn.disabled) return false;
+      if (btn && btn.disabled) {
+        DBG('onSave BLOCKED: apply disabled');
+        return false;
+      }
 
       const raw = collectForm('#clientRateForm');
-      if (APILOG) console.log('[openClientRateModal] Apply collected', raw);
+      DBG('onSave collected', { raw });
 
       let role = (raw.role || '').trim();
       const newRole = (document.getElementById('cl_role_new')?.value || '').trim();
       if (role === '__OTHER__') {
-        if (!newRole) { showClientInlineError('Enter a new role code.'); setApplyEnabled(false); return false; }
+        if (!newRole) { showClientInlineError('Enter a new role code.'); setApplyEnabled(false); DBG('onSave BLOCKED: newRole missing'); return false; }
         role = newRole.toUpperCase();
         if (typeof invalidateGlobalRoleOptionsCache === 'function') {
           try { invalidateGlobalRoleOptionsCache(); window.dispatchEvent(new CustomEvent('global-roles-updated')); } catch {}
         }
       }
-      if (!role) { showClientInlineError('Role is required.'); setApplyEnabled(false); return false; }
+      if (!role) { showClientInlineError('Role is required.'); setApplyEnabled(false); DBG('onSave BLOCKED: role missing'); return false; }
 
       const isoFrom = parseUkDateToIso(raw.date_from);
-      if (!isoFrom) { showClientInlineError('Invalid “Effective from” date.'); setApplyEnabled(false); return false; }
+      if (!isoFrom) { showClientInlineError('Invalid “Effective from” date.'); setApplyEnabled(false); DBG('onSave BLOCKED: date_from invalid'); return false; }
       let isoTo = null;
       if (raw.date_to) {
         isoTo = parseUkDateToIso(raw.date_to);
-        if (!isoTo) { showClientInlineError('Invalid “Effective to” date.'); setApplyEnabled(false); return false; }
-        if (isoTo < isoFrom) { showClientInlineError('“Effective to” cannot be before “Effective from”.'); setApplyEnabled(false); return false; }
+        if (!isoTo) { showClientInlineError('Invalid “Effective to” date.'); setApplyEnabled(false); DBG('onSave BLOCKED: date_to invalid'); return false; }
+        if (isoTo < isoFrom) { showClientInlineError('“Effective to” cannot be before “Effective from”.'); setApplyEnabled(false); DBG('onSave BLOCKED: date order invalid'); return false; }
       }
 
       const staged = {
@@ -5106,15 +5137,14 @@ async function openClientRateModal(client_id, existing) {
         __delete        : existing?.__delete || false
       };
 
-      // If user flipped status in this modal, enforce it on staged row
       if (ex.__toggle === 'enable') {
         staged.disabled_at_utc = null;
       } else if (ex.__toggle === 'disable') {
-        // any non-null string will be treated as disabled before server patch; use today's date
         staged.disabled_at_utc = staged.disabled_at_utc || new Date().toISOString().slice(0,10);
       }
 
       // Stage only (persist on parent Save)
+      const before = { len: Array.isArray(ctx.ratesState) ? ctx.ratesState.length : 0 };
       ctx.ratesState = Array.isArray(ctx.ratesState) ? ctx.ratesState : [];
       if (existing) {
         const idx = ctx.ratesState.findIndex(r => sameRow(r, existing));
@@ -5123,17 +5153,20 @@ async function openClientRateModal(client_id, existing) {
         const already = ctx.ratesState.findIndex(r => sameRow(r, staged));
         if (already >= 0) ctx.ratesState[already] = staged; else ctx.ratesState.push(staged);
       }
+      const after = { len: ctx.ratesState.length };
+      DBG('onSave STAGED', { before, after, stagedId: staged.id, stagedRole: staged.role, toggle: staged.__toggle });
 
-      try { const parent = _currentFrame(); if (parent && typeof parent.setTab === 'function') { parent.currentTabKey = 'rates'; parent.setTab('rates'); } } catch{}
-      try { window.dispatchEvent(new CustomEvent('modal-dirty')); } catch {}
-      try { renderClientRatesTable(); } catch {}
+      try { const parent = _currentFrame(); if (parent && typeof parent.setTab === 'function') { parent.currentTabKey = 'rates'; parent.setTab('rates'); DBG('onSave: parent.setTab(rates)'); } } catch{}
+      try { window.dispatchEvent(new CustomEvent('modal-dirty')); DBG('onSave: dispatched modal-dirty'); } catch {}
+      try { await renderClientRatesTable(); DBG('onSave: renderClientRatesTable done'); } catch (e) { DBG('onSave: renderClientRatesTable error', e); }
 
+      DBG('onSave EXIT ok=true');
       return true;
     },
     false,
     () => {
       const parent = _currentFrame();
-      if (parent) { parent.currentTabKey = 'rates'; parent.setTab('rates'); }
+      if (parent) { parent.currentTabKey = 'rates'; parent.setTab('rates'); DBG('onReturn: parent.setTab(rates)'); }
     },
     { kind: 'client-rate' }
   );
@@ -5175,48 +5208,49 @@ async function openClientRateModal(client_id, existing) {
   });
 
   // Recompute once on mount
+  DBG('mount: recomputeClientState');
   await recomputeClientState();
 
   roleSel.addEventListener('change', async ()=>{
+    DBG('EVENT: role change', { value: roleSel.value });
     if (roleSel.value === '__OTHER__') { roleNewRow.style.display = ''; }
     else { roleNewRow.style.display = 'none'; roleNew.value=''; }
     await recomputeClientState();
   });
-  bandEl.addEventListener('input',  recomputeClientState);
-  fromEl.addEventListener('change', recomputeClientState);
-  toEl.addEventListener('change',   recomputeClientState);
+  bandEl.addEventListener('input',  () => { DBG('EVENT: band input', { value: bandEl.value }); recomputeClientState(); });
+  fromEl.addEventListener('change', () => { DBG('EVENT: date_from change', { value: fromEl.value }); recomputeClientState(); });
+  toEl.addEventListener('change',   () => { DBG('EVENT: date_to change', { value: toEl.value }); recomputeClientState(); });
   ['day','night','sat','sun','bh'].forEach(b=>{
     ['paye','umb','charge'].forEach(kind=>{
       const el = document.querySelector(`#clientRateForm input[name="${kind}_${b}"]`);
-      if (el) el.addEventListener('input', recomputeClientState);
+      if (el) el.addEventListener('input', () => { DBG('EVENT: pay input', { kind, bucket: b, value: el.value }); recomputeClientState(); });
     });
   });
 
-  // Wire the Active/Inactive toggle button (stages a status flip; persisted on parent Save)
+  // Wire the Active/Inactive toggle button
   (function wireToggleButton(){
     const btn = byId('cl_toggle_btn');
     if (!btn || !parentEditable || !ex || !ex.id) return;
+    DBG('wireToggleButton: ready', { id: ex.id, disabled: !!ex.disabled_at_utc });
     btn.onclick = () => {
       const pill = byId('cl_status_pill');
       const meta = byId('cl_status_meta');
       const currentlyDisabled = !!ex.disabled_at_utc;
 
       if (currentlyDisabled) {
-        // Enable
         ex.__toggle = 'enable';
         ex.disabled_at_utc = null;
         if (pill) { pill.textContent = '✓ Active'; pill.className = 'pill tag-ok'; }
         if (meta) meta.innerHTML = '&nbsp;';
         btn.textContent = 'Disable';
       } else {
-        // Disable
         ex.__toggle = 'disable';
         ex.disabled_at_utc = new Date().toISOString().slice(0,10);
         if (pill) { pill.textContent = '❌ Disabled'; pill.className = 'pill tag-fail'; }
         if (meta) meta.textContent = 'pending save';
         btn.textContent = 'Enable';
       }
-      // Ensure parent Save is enabled
+      DBG('toggle clicked', { newToggle: ex.__toggle, newDisabledAt: ex.disabled_at_utc });
       setApplyEnabled(true);
     };
   })();
@@ -5238,36 +5272,36 @@ async function openClientRateModal(client_id, existing) {
       reason = '';
     }
 
-    if (!deletable) {
-      delBtn.style.display = '';
-      delBtn.disabled = true;
-      const hint = byId('cl_delete_hint'); if (hint) { hint.style.display=''; hint.textContent = reason; }
-      return;
-    }
-
     delBtn.style.display = '';
     delBtn.disabled = false;
     delBtn.onclick = () => {
       try {
         existing.__delete = true;
+        DBG('delete staged', { id: existing.id });
         if (window.modalCtx && window.modalCtx.ratesStagedDeletes instanceof Set && existing.id) {
           window.modalCtx.ratesStagedDeletes.add(String(existing.id));
         }
         try { renderClientRatesTable(); } catch {}
         try { window.dispatchEvent(new CustomEvent('modal-dirty')); } catch {}
         const closeBtn = byId('btnCloseModal'); if (closeBtn) closeBtn.click();
-      } catch (e) {}
+      } catch (e) { DBG('delete stage failed', e); }
     };
   })();
 }
 
+
 async function renderClientRatesTable() {
-  const div = byId('clientRates'); if (!div) return;
+  const LOG_RATES = !!window.__LOG_RATES;
+  const DBG = (...a)=> { if (LOG_RATES) console.log('[RATES][renderClientRatesTable]', ...a); };
+
+  const div = byId('clientRates'); if (!div) { DBG('no #clientRates host, bail'); return; }
 
   const ctx = window.modalCtx;
   const staged = Array.isArray(ctx.ratesState) ? ctx.ratesState : [];
   const frame = _currentFrame();
   const parentEditable = frame && (frame.mode === 'edit' || frame.mode === 'create');
+
+  DBG('ENTRY', { stagedLen: staged.length, parentEditable, ctxEntity: ctx?.entity });
 
   async function _erniMultiplier(){
     if (typeof window.__ERNI_MULT__ === 'number') return window.__ERNI_MULT__;
@@ -5289,6 +5323,7 @@ async function renderClientRatesTable() {
   div.innerHTML = '';
 
   if (!staged.length) {
+    DBG('no staged rows → show empty state');
     div.innerHTML = `
       <div class="hint" style="margin-bottom:8px">No client default windows yet.</div>
       <div class="actions">
@@ -5336,7 +5371,7 @@ async function renderClientRatesTable() {
   tbl.appendChild(thead);
 
   const tb = document.createElement('tbody');
-  staged.forEach(r => {
+  staged.forEach((r, idx) => {
     const tr = document.createElement('tr');
     if (r.disabled_at_utc) tr.classList.add('row-disabled');
     if (r.__delete) tr.classList.add('row-delete-pending');
@@ -5355,7 +5390,6 @@ async function renderClientRatesTable() {
           const pending = r.__toggle ? ' (pending save)' : '';
           td.innerHTML = `<span class="pill tag-fail" aria-label="Disabled">❌ Disabled${pending}</span>`;
         } else {
-          // Tweak: show pending note for any staged toggle (enable or disable)
           const pending = r.__toggle ? ' (pending save)' : '';
           td.innerHTML = `<span class="pill tag-ok" aria-label="Active">✓ Active${pending}</span>`;
         }
@@ -5375,6 +5409,7 @@ async function renderClientRatesTable() {
     });
 
     tb.appendChild(tr);
+    if (idx === 0) DBG('first row preview', r);
   });
   tbl.appendChild(tb);
 
@@ -5387,12 +5422,7 @@ async function renderClientRatesTable() {
 
   div.appendChild(tbl);
   div.appendChild(actions);
-
-  const addBtn = byId('btnAddClientRate');
-  if (addBtn && parentEditable) addBtn.onclick = () => {
-    const cid = (ctx && ctx.data && (ctx.data.id || ctx.data.client_id)) || null;
-    return openClientRateModal(cid);
-  };
+  DBG('EXIT render', { stagedLen: staged.length });
 }
 
 function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
@@ -5530,7 +5560,6 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
 
       // >>> Added: Mount Roles on Candidates → Main tab (and keep pay-method state in sync)
       if (this.entity==='candidates' && k==='main') {
-        // Preserve staged pay method and broadcast changes for dependent tabs (e.g., Pay)
         const pmSel = document.querySelector('#pay-method');
         if (pmSel) {
           const stagedPm   = window.modalCtx?.formState?.main?.pay_method;
@@ -5544,7 +5573,6 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
           window.modalCtx.payMethodState = pmSel.value;
         }
 
-        // Mount Roles editor into #rolesEditor without affecting any Rates logic
         const rolesHost = document.querySelector('#rolesEditor');
         if (rolesHost) {
           (async () => {
@@ -5778,7 +5806,10 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
       const onlyDel   = hasStagedClientDeletes();
       const allowApply= (fr.kind==='candidate-override' || fr.kind==='client-rate') && fr._applyDesired===true;
 
+      L('saveForFrame ENTER', { kind: fr.kind, mode: fr.mode, noParentGate: fr.noParentGate, isDirty: fr.isDirty, onlyDel, allowApply });
+
       if (fr.kind!=='advanced-search' && !fr.noParentGate && fr.mode!=='view' && !fr.isDirty && !onlyDel && !allowApply) {
+        L('saveForFrame GUARD: no-op (no changes and apply not allowed)');
         const isChildNow=(stack().length>1);
         if (isChildNow) {
           sanitizeModalGeometry(); stack().pop();
@@ -5792,14 +5823,15 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
 
       fr.persistCurrentTabState();
       const isChildNow=(stack().length>1);
-      if (isChildNow && !fr.noParentGate && fr.kind!=='advanced-search') { const p=parentFrame(); if (!p || !(p.mode==='edit'||p.mode==='create')) return; }
+      if (isChildNow && !fr.noParentGate && fr.kind!=='advanced-search') { const p=parentFrame(); if (!p || !(p.mode==='edit'||p.mode==='create')) { L('saveForFrame GUARD: parent not editable'); return; } }
       fr._saving=true; fr._updateButtons&&fr._updateButtons();
 
       let ok=false, saved=null;
       if (typeof fr.onSave==='function') {
-        try { const res=await fr.onSave(); ok = (res===true) || (res && res.ok===true); if (res&&res.saved) saved=res.saved; } catch { ok=false; }
+        try { const res=await fr.onSave(); ok = (res===true) || (res && res.ok===true); if (res&&res.saved) saved=res.saved; }
+        catch (e) { L('saveForFrame onSave threw', e); ok=false; }
       }
-      fr._saving=false; if (!ok) { fr._updateButtons&&fr._updateButtons(); return; }
+      fr._saving=false; if (!ok) { L('saveForFrame RESULT not ok'); fr._updateButtons&&fr._updateButtons(); return; }
 
       if (isChildNow) {
         try { window.dispatchEvent(new CustomEvent('modal-dirty')); } catch {}
@@ -5809,9 +5841,11 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
         } else {
           discardAllModalsAndState();
         }
+        L('saveForFrame EXIT (child)');
       } else {
         if (saved && window.modalCtx) { window.modalCtx.data = { ...(window.modalCtx.data||{}), ...saved }; fr.hasId = !!window.modalCtx.data?.id; }
         fr.isDirty=false; fr._snapshot=null; setFrameMode(fr,'view');
+        L('saveForFrame EXIT (parent)');
       }
     }
 
@@ -5867,6 +5901,11 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
   window.__getModalFrame = currentFrame;
   renderTop();
 }
+
+
+
+
+
 
 // =================== ADD HOSPITAL MODAL (UPDATED: push into stagedNew) ===================
 // ==== CHILD MODAL (ADD HOSPITAL) — throw on errors; return true on success ====
