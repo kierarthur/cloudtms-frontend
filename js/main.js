@@ -4332,6 +4332,8 @@ async function openCandidateRateModal(candidate_id, existing) {
 // ============================================================================
 
 
+
+// Now shows derived PAYE & Umbrella margins per bucket in the table
 async function openClient(row) {
   // ===== Logging helpers (toggle with window.__LOG_MODAL = true/false) =====
   const LOG = (typeof window.__LOG_MODAL === 'boolean') ? window.__LOG_MODAL : true;
@@ -4428,7 +4430,7 @@ async function openClient(row) {
     (k, r) => { L('[renderClientTab] tab=', k, 'rowKeys=', Object.keys(r||{}), 'sample=', { name: r?.name, id: r?.id }); return renderClientTab(k, r); },
     async ()=> {
       L('[onSave] begin', { dataId: window.modalCtx?.data?.id, forId: window.modalCtx?.formState?.__forId });
-      const isNew = !window.modalCtx?.data?.id;
+      const isNew = !window.modalCtx?.data?.id; // ← declared here (keep)
 
       // Collect "main" form
       const fs = window.modalCtx.formState || { __forId: null, main:{} };
@@ -4734,7 +4736,7 @@ async function openClient(row) {
       }
 
       window.modalCtx.formState = { __forId: clientId, main:{} };
-      const isNew = !full?.id;
+      // ⬇️ FIX: reuse existing isNew; do not redeclare
       if (isNew) window.__pendingFocus = { section: 'clients', id: clientId };
       L('[onSave] EXIT ok=true');
       return { ok: true, saved: window.modalCtx.data };
@@ -4791,10 +4793,6 @@ async function openClient(row) {
     L('skip companion loads (no full.id)');
   }
 }
-
-
-
-// Now shows derived PAYE & Umbrella margins per bucket in the table
 
 
 function ensureSelectionStyles(){
