@@ -4331,6 +4331,7 @@ async function openCandidateRateModal(candidate_id, existing) {
 // RENDER CLIENT RATES TABLE (adds "Status" col; shows disabled who/when)
 // ============================================================================
 
+
 async function openClient(row) {
   // ===== Logging helpers (toggle with window.__LOG_MODAL = true/false) =====
   const LOG = (typeof window.__LOG_MODAL === 'boolean') ? window.__LOG_MODAL : true;
@@ -4495,55 +4496,76 @@ async function openClient(row) {
         return { ok:false };
       }
 
-      // 5) Hospitals CRUD (unchanged)
+      // 5) Hospitals CRUD (typed-safe; skip when no staged changes)
       try {
-        const hs = window.modalCtx.hospitalsState || {};
-        if (hs.stagedDeletes && hs.stagedDeletes.size) {
-          for (const hid of hs.stagedDeletes) {
-            const url = API(`/api/clients/${encodeURIComponent(clientId)}/hospitals/${encodeURIComponent(hid)}`);
-            if (APILOG) console.log('[OPEN_CLIENT] DELETE hospital →', url);
-            const res = await authFetch(url, { method: 'DELETE' });
-            if (!res.ok) throw new Error(await res.text());
-          }
-        }
-        if (hs.stagedEdits && typeof hs.stagedEdits === 'object') {
-          for (const [hid, patchRaw] of Object.entries(hs.stagedEdits)) {
-            const patch = {};
-            if (patchRaw && Object.prototype.hasOwnProperty.call(patchRaw,'hospital_name_norm')) {
-              const name = String(patchRaw.hospital_name_norm || '').trim();
-              if (!name) throw new Error('Hospital name cannot be blank.');
-              patch.hospital_name_norm = name;
+        const hsRaw = window.modalCtx.hospitalsState || {};
+        const hs = {
+          existing     : Array.isArray(hsRaw.existing) ? hsRaw.existing : [],
+          stagedNew    : Array.isArray(hsRaw.stagedNew) ? hsRaw.stagedNew : [],
+          stagedEdits  : (hsRaw.stagedEdits && typeof hsRaw.stagedEdits === 'object') ? hsRaw.stagedEdits : {},
+          stagedDeletes: (hsRaw.stagedDeletes instanceof Set)
+            ? hsRaw.stagedDeletes
+            : new Set(Array.isArray(hsRaw.stagedDeletes) ? hsRaw.stagedDeletes : Object.keys(hsRaw.stagedDeletes || {}))
+        };
+
+        const hasDel   = hs.stagedDeletes.size > 0;
+        const hasEdits = Object.keys(hs.stagedEdits).length > 0;
+        const hasNew   = hs.stagedNew.length > 0;
+
+        if (hasDel || hasEdits || hasNew) {
+          if (hasDel) {
+            for (const hid of hs.stagedDeletes) {
+              const url = API(`/api/clients/${encodeURIComponent(clientId)}/hospitals/${encodeURIComponent(hid)}`);
+              if (APILOG) console.log('[OPEN_CLIENT] DELETE hospital →', url);
+              const res = await authFetch(url, { method: 'DELETE' });
+              if (!res.ok) throw new Error(await res.text());
             }
-            if (patchRaw && Object.prototype.hasOwnProperty.call(patchRaw,'ward_hint')) {
-              const hint = String(patchRaw.ward_hint ?? '').trim();
-              patch.ward_hint = hint === '' ? null : hint;
+          }
+
+          if (hasEdits) {
+            for (const [hid, patchRaw] of Object.entries(hs.stagedEdits)) {
+              const patch = {};
+              if (patchRaw && Object.prototype.hasOwnProperty.call(patchRaw,'hospital_name_norm')) {
+                const name = String(patchRaw.hospital_name_norm || '').trim();
+                if (!name) throw new Error('Hospital name cannot be blank.');
+                patch.hospital_name_norm = name;
+              }
+              if (patchRaw && Object.prototype.hasOwnProperty.call(patchRaw,'ward_hint')) {
+                const hint = String(patchRaw.ward_hint ?? '').trim();
+                patch.ward_hint = hint === '' ? null : hint;
+              }
+              if (Object.keys(patch).length === 0) continue;
+              const url = API(`/api/clients/${encodeURIComponent(clientId)}/hospitals/${encodeURIComponent(hid)}`);
+              if (APILOG) console.log('[OPEN_CLIENT] PATCH hospital →', url, patch);
+              const res = await authFetch(url, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch) });
+              if (!res.ok) throw new Error(await res.text());
             }
-            if (Object.keys(patch).length === 0) continue;
-            const url = API(`/api/clients/${encodeURIComponent(clientId)}/hospitals/${encodeURIComponent(hid)}`);
-            if (APILOG) console.log('[OPEN_CLIENT] PATCH hospital →', url, patch);
-            const res = await authFetch(url, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch) });
-            if (!res.ok) throw new Error(await res.text());
           }
-        }
-        if (Array.isArray(hs.stagedNew) && hs.stagedNew.length) {
-          for (const n of hs.stagedNew) {
-            const body = { hospital_name_norm: String(n?.hospital_name_norm || '').trim(), ward_hint: (String(n?.ward_hint ?? '').trim() || null) };
-            if (!body.hospital_name_norm) throw new Error('Hospital name cannot be blank.');
-            const url = API(`/api/clients/${encodeURIComponent(clientId)}/hospitals`);
-            if (APILOG) console.log('[OPEN_CLIENT] POST hospital →', url, body);
-            const res = await authFetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-            if (!res.ok) throw new Error(await res.text());
+
+          if (hasNew) {
+            for (const n of hs.stagedNew) {
+              const body = { hospital_name_norm: String(n?.hospital_name_norm || '').trim(), ward_hint: (String(n?.ward_hint ?? '').trim() || null) };
+              if (!body.hospital_name_norm) throw new Error('Hospital name cannot be blank.');
+              const url = API(`/api/clients/${encodeURIComponent(clientId)}/hospitals`);
+              if (APILOG) console.log('[OPEN_CLIENT] POST hospital →', url, body);
+              const res = await authFetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+              if (!res.ok) throw new Error(await res.text());
+            }
           }
-        }
-        if (hs.stagedDeletes) hs.stagedDeletes.clear();
-        if (hs.stagedEdits)   window.modalCtx.hospitalsState.stagedEdits = {};
-        if (hs.stagedNew)     window.modalCtx.hospitalsState.stagedNew = [];
-        try {
-          const fresh = await listClientHospitals(clientId);
-          window.modalCtx.hospitalsState.existing = Array.isArray(fresh) ? fresh : [];
-          try { renderClientHospitalsTable(); } catch {}
-        } catch (e) {
-          W('[OPEN_CLIENT] hospitals refresh failed', e);
+
+          // ⬇️ Cleanup (type-agnostic)
+          window.modalCtx.hospitalsState.stagedDeletes = new Set();
+          window.modalCtx.hospitalsState.stagedEdits   = {};
+          window.modalCtx.hospitalsState.stagedNew     = [];
+
+          // Refresh visible list
+          try {
+            const fresh = await listClientHospitals(clientId);
+            window.modalCtx.hospitalsState.existing = Array.isArray(fresh) ? fresh : [];
+            try { renderClientHospitalsTable(); } catch {}
+          } catch (e) {
+            W('[OPEN_CLIENT] hospitals refresh failed', e);
+          }
         }
       } catch (err) {
         alert(`Failed to save Hospitals & wards: ${String(err?.message || err)}`);
@@ -4712,6 +4734,7 @@ async function openClient(row) {
       }
 
       window.modalCtx.formState = { __forId: clientId, main:{} };
+      const isNew = !full?.id;
       if (isNew) window.__pendingFocus = { section: 'clients', id: clientId };
       L('[onSave] EXIT ok=true');
       return { ok: true, saved: window.modalCtx.data };
@@ -4768,7 +4791,6 @@ async function openClient(row) {
     L('skip companion loads (no full.id)');
   }
 }
-
 
 
 
@@ -5051,6 +5073,11 @@ function mountClientHospitalsTab() {
   const ctx = window.modalCtx; // 🔧 use canonical context
   const H = ctx.hospitalsState || (ctx.hospitalsState = { existing: [], stagedNew: [], stagedEdits: {}, stagedDeletes: new Set() });
 
+  // ⬇️ Key change: normalise stagedDeletes as a Set on mount (handles JSON-cloned arrays)
+  if (!(H.stagedDeletes instanceof Set)) {
+    H.stagedDeletes = new Set(Array.isArray(H.stagedDeletes) ? H.stagedDeletes : Object.keys(H.stagedDeletes || {}));
+  }
+
   renderClientHospitalsTable();
 
   const addBtn = byId('btnAddClientHospital');
@@ -5066,7 +5093,10 @@ function mountClientHospitalsTab() {
       const hid = el.getAttribute('data-hid') || el.getAttribute('data-id');
       if (!hid) return;
 
-      H.stagedDeletes = H.stagedDeletes || new Set();
+      // ⬇️ Ensure Set semantics before use
+      if (!(H.stagedDeletes instanceof Set)) {
+        H.stagedDeletes = new Set(Array.isArray(H.stagedDeletes) ? H.stagedDeletes : Object.keys(H.stagedDeletes || {}));
+      }
       H.stagedDeletes.add(String(hid));
 
       try { window.dispatchEvent(new CustomEvent('modal-dirty')); } catch {}
@@ -5075,6 +5105,7 @@ function mountClientHospitalsTab() {
     wrap.__wiredDelete = true;
   }
 }
+
 
 async function openClientRateModal(client_id, existing) {
   const parentFrame = _currentFrame();
@@ -6459,6 +6490,7 @@ function openClientHospitalModal(client_id) {
     </div>
   `);
 
+  // ⬇️ Key change: pass noParentGate so the child save isn't blocked by the "not dirty" guard
   showModal(
     'Add Hospital / Ward',
     [{key:'form',label:'Form'}],
@@ -6476,20 +6508,18 @@ function openClientHospitalModal(client_id) {
       H.stagedNew.push({ hospital_name_norm: name, ward_hint: (raw.ward_hint || '').trim() || null });
 
       try { window.dispatchEvent(new CustomEvent('modal-dirty')); } catch {}
+      try { renderClientHospitalsTable(); } catch {}
       return true; // Apply closes child
     },
     false,
     () => {
       const parent = _currentFrame();
       if (parent) { parent.currentTabKey = 'hospitals'; parent.setTab('hospitals'); }
-    }
+    },
+    // ⬇️ Options: bypass parent-gate guard for this child modal only
+    { noParentGate: true, forceEdit: true, kind: 'client-hospital' }
   );
 }
-
-
-
-
-// =================== HOSPITALS TABLE (UPDATED: staged delete & edit) ===================
 
 function renderClientHospitalsTable() {
   const el = byId('clientHospitals'); if (!el) return;
@@ -6500,7 +6530,11 @@ function renderClientHospitalsTable() {
 
   const ctx = window.modalCtx; // 🔧 use canonical context
   const H = ctx.hospitalsState || (ctx.hospitalsState = { existing: [], stagedNew: [], stagedEdits: {}, stagedDeletes: new Set() });
-  H.stagedDeletes = H.stagedDeletes || new Set();
+
+  // ⬇️ Key change: normalise stagedDeletes back to a Set if it was JSON-cloned to an Array/object
+  if (!(H.stagedDeletes instanceof Set)) {
+    H.stagedDeletes = new Set(Array.isArray(H.stagedDeletes) ? H.stagedDeletes : Object.keys(H.stagedDeletes || {}));
+  }
   H.stagedNew     = Array.isArray(H.stagedNew) ? H.stagedNew : [];
   H.existing      = Array.isArray(H.existing) ? H.existing : [];
   H.stagedEdits   = H.stagedEdits || {};
@@ -6595,6 +6629,9 @@ function renderClientHospitalsTable() {
   const addBtn = byId('btnAddClientHospital');
   if (addBtn && parentEditable) addBtn.onclick = () => openClientHospitalModal(ctx.data?.id);
 }
+
+
+// =================== HOSPITALS TABLE (UPDATED: staged delete & edit) ===================
 
 
 
