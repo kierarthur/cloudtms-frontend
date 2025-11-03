@@ -6031,7 +6031,7 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
   stack().push(frame);
   byId('modalBack').style.display = 'flex';
 
-  function renderTop() {
+function renderTop() {
   GC('renderTop()');
   const isChild = (stack().length > 1);
   const top     = currentFrame();
@@ -6060,7 +6060,7 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
   const header   = byId('modalDrag');
   const modalNode= byId('modal');
 
-  // ⬇️ NEW: pin modal position so it doesn't re-center when tab content height changes
+  // ⬇️ Pin modal position so it doesn't re-center when tab content height changes
   if (modalNode) {
     const anchor = (window.__modalAnchor || null);
     if (!anchor) {
@@ -6081,7 +6081,7 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
       modalNode.style.transform = 'none';
     }
   }
-  // ⬆️ END pin
+  // ⬆️ End pin
 
   const showChildDelete = isChild && (top.kind==='client-rate' || top.kind==='candidate-override') && top.hasId;
   btnDel.style.display = showChildDelete ? '' : 'none'; btnDel.onclick = null;
@@ -6101,15 +6101,10 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
       modalNode.style.position='fixed'; modalNode.style.left=R.left+'px'; modalNode.style.top=R.top+'px';
       modalNode.style.right='auto'; modalNode.style.bottom='auto'; modalNode.style.transform='none'; modalNode.classList.add('dragging');
       const ox=e.clientX-R.left, oy=e.clientY-R.top;
-      document.onmousemove = ev=>{
-        let l=ev.clientX-ox, t=ev.clientY-oy;
-        const ml=Math.max(0,window.innerWidth-R.width), mt=Math.max(0,window.innerHeight-R.height);
-        if(l<0)l=0; if(t<0)t=0; if(l>ml)l=ml; if(t>mt)t=mt;
-        modalNode.style.left=l+'px'; modalNode.style.top=t+'px';
-      };
+      document.onmousemove = ev=>{ let l=ev.clientX-ox, t=ev.clientY-oy; const ml=Math.max(0,window.innerWidth-R.width), mt=Math.max(0,window.innerHeight-R.height); if(l<0)l=0; if(t<0)t=0; if(l>ml)l=ml; if(t>mt)t=mt; modalNode.style.left=l+'px'; modalNode.style.top=t+'px'; };
       document.onmouseup   = ()=>{
         modalNode.classList.remove('dragging');
-        // ⬇️ NEW: update the anchor to wherever the user dropped the modal
+        // ⬇️ Update anchor to new drop position
         const R2 = modalNode.getBoundingClientRect();
         window.__modalAnchor = { left: R2.left, top: R2.top };
         document.onmousemove=null; document.onmouseup=null;
@@ -6244,22 +6239,109 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
   };
 
   async function saveForFrame(fr) {
-    // unchanged …
+    if (!fr || fr._saving) return;
+    const onlyDel   = hasStagedClientDeletes();
+    const allowApply= (fr.kind==='candidate-override' || fr.kind==='client-rate') && fr._applyDesired===true;
+
+    L('saveForFrame ENTER', { kind: fr.kind, mode: fr.mode, noParentGate: fr.noParentGate, isDirty: fr.isDirty, onlyDel, allowApply });
+
+    if (fr.kind!=='advanced-search' && !fr.noParentGate && fr.mode!=='view' && !fr.isDirty && !onlyDel && !allowApply) {
+      L('saveForFrame GUARD: no-op (no changes and apply not allowed)');
+      const isChildNow=(stack().length>1);
+      if (isChildNow) {
+        sanitizeModalGeometry(); stack().pop();
+        if (stack().length>0) { const p=currentFrame(); renderTop(); try{ p.onReturn && p.onReturn(); }catch{} }
+        else { discardAllModalsAndState(); }
+      } else {
+        fr.isDirty=false; fr._snapshot=null; setFrameMode(fr,'view'); fr._updateButtons&&fr._updateButtons();
+      }
+      try{ window.__toast?.('No changes'); }catch{}; return;
+    }
+
+    fr.persistCurrentTabState();
+    const isChildNow=(stack().length>1);
+    if (isChildNow && !fr.noParentGate && fr.kind!=='advanced-search') { const p=parentFrame(); if (!p || !(p.mode==='edit'||p.mode==='create')) { L('saveForFrame GUARD: parent not editable'); return; } }
+    fr._saving=true; fr._updateButtons&&fr._updateButtons();
+
+    let ok=false, saved=null;
+    if (typeof fr.onSave==='function') {
+      try { const res=await fr.onSave(); ok = (res===true) || (res && res.ok===true); if (res&&res.saved) saved=res.saved; }
+      catch (e) { L('saveForFrame onSave threw', e); ok=false; }
+    }
+    fr._saving=false; if (!ok) { L('saveForFrame RESULT not ok'); fr._updateButtons&&fr._updateButtons(); return; }
+
+    // >>> Special-case: Advanced Search closes on success instead of flipping to view
+    if (fr.kind === 'advanced-search') {
+      sanitizeModalGeometry();
+      const closing = stack().pop();
+      if (closing?._detachDirty){ try{closing._detachDirty();}catch{} closing._detachDirty=null; }
+      if (closing?._detachGlobal){ try{closing._detachGlobal();}catch{} closing._detachGlobal=null; } fr._wired=false;
+
+      if (stack().length>0) {
+        const p=currentFrame(); renderTop(); try{ p.onReturn && p.onReturn(); }catch{}
+      } else {
+        discardAllModalsAndState();
+      }
+      L('saveForFrame EXIT (advanced-search closed)');
+      return;
+    }
+    // <<< End special-case
+
+    if (isChildNow) {
+      try { window.dispatchEvent(new CustomEvent('modal-dirty')); } catch {}
+      sanitizeModalGeometry(); stack().pop();
+      if (stack().length>0) {
+        const p=currentFrame(); p.isDirty=true; p._updateButtons&&p._updateButtons(); renderTop(); try{ p.onReturn && p.onReturn(); }catch{}
+      } else {
+        discardAllModalsAndState();
+      }
+      L('saveForFrame EXIT (child)');
+    } else {
+      if (saved && window.modalCtx) { window.modalCtx.data = { ...(window.modalCtx.data||{}), ...saved }; fr.hasId = !!window.modalCtx.data?.id; }
+      fr.isDirty=false; fr._snapshot=null; setFrameMode(fr,'view');
+      L('saveForFrame EXIT (parent)');
+    }
   }
 
   const onSaveClick = async (ev)=>{
-    // unchanged …
+    const btn=ev?.currentTarget || byId('btnSave');
+    const topNow=currentFrame(); const bound=btn?.dataset?.ownerToken;
+    if (LOG) console.log('[MODAL] click #btnSave', {boundToken:bound, topToken:topNow?._token, topKind:topNow?.kind, topTitle:topNow?.title});
+    if(!topNow) return; if(bound!==topNow._token){ if(LOG) console.warn('[MODAL] token mismatch; using top frame'); }
+    await saveForFrame(topNow);
   };
 
-  const bindSave = (btn,fr)=>{ /* unchanged */ };
+  const bindSave = (btn,fr)=>{ if(!btn||!fr) return; btn.dataset.ownerToken = fr._token; btn.onclick = onSaveClick; if(LOG) console.log('[MODAL] bind #btnSave →',{ownerToken:fr._token,kind:fr.kind||'(parent)',title:fr.title,mode:fr.mode}); };
   bindSave(btnSave, top);
 
-  const onDirtyEvt = ()=>{ /* unchanged */ };
-  const onApplyEvt = ev=>{ /* unchanged */ };
-  const onModeChanged = ev=>{ /* unchanged */ };
+  const onDirtyEvt = ()=>{
+    const isChildNow=(stack().length>1);
+    if(isChildNow){ const p=parentFrame(); if(p && (p.mode==='edit'||p.mode==='create')){ p.isDirty=true; p._updateButtons&&p._updateButtons(); } }
+    else if(top.mode==='edit'||top.mode==='create'){ top.isDirty=true; top._updateButtons&&top._updateButtons(); }
+    try{ const t=currentFrame(); if(t && t.entity==='candidates' && t.currentTabKey==='rates'){ renderCandidateRatesTable?.(); } }catch{}
+  };
+  const onApplyEvt = ev=>{
+    const isChildNow=(stack().length>1); if(!isChildNow) return;
+    const t=currentFrame(); if(!(t && (t.kind==='client-rate'||t.kind==='candidate-override'))) return;
+    const enabled=!!(ev && ev.detail && ev.detail.enabled); t._applyDesired=enabled; t._updateButtons&&t._updateButtons(); bindSave(byId('btnSave'), t);
+    if(LOG) console.log('[MODAL] onApplyEvt → _applyDesired =', enabled,'rebound save to top frame');
+  };
+  const onModeChanged = ev=>{
+    const isChildNow=(stack().length>1); if(!isChildNow) return;
+    const parentIdx=stack().length-2, changed=ev?.detail?.frameIndex ?? -1;
+    if(changed===parentIdx){ if(LOG) console.log('[MODAL] parent mode changed → child _updateButtons()'); const t=currentFrame(); t._updateButtons&&t._updateButtons(); bindSave(byId('btnSave'), t); }
+  };
 
   if (!top._wired) {
-    // unchanged wiring …
+    window.addEventListener('modal-dirty', onDirtyEvt);
+    window.addEventListener('modal-apply-enabled', onApplyEvt);
+    window.addEventListener('modal-frame-mode-changed', onModeChanged);
+    const onEsc=e=>{ if(e.key==='Escape'){ if(top._confirmingDiscard||top._closing) return; e.preventDefault(); byId('btnCloseModal').click(); } };
+    window.addEventListener('keydown', onEsc);
+    const onOverlayClick=e=>{ if(top._confirmingDiscard||top._closing) return; if(e.target===byId('modalBack')) byId('btnCloseModal').click(); };
+    byId('modalBack').addEventListener('click', onOverlayClick, true);
+    top._detachGlobal = ()=>{ try{window.removeEventListener('modal-dirty',onDirtyEvt);}catch{} try{window.removeEventListener('modal-apply-enabled',onApplyEvt);}catch{} try{window.removeEventListener('modal-frame-mode-changed',onModeChanged);}catch{} try{window.removeEventListener('keydown',onEsc);}catch{} try{byId('modalBack').removeEventListener('click', onOverlayClick, true);}catch{}; };
+    top._wired = true;
   }
 
   const parentEditable = parent && (parent.mode==='edit' || parent.mode==='create');
@@ -6267,8 +6349,13 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
   if (isChildNow && !top.noParentGate) setFormReadOnly(byId('modalBody'), !parentEditable);
   else                                 setFrameMode(top, top.mode);
 
+  // ⬇️ Ensure final state reflects current mode after potential repaint
+  top._updateButtons && top._updateButtons();
+  bindSave(btnSave, top);
+
   GE();
 }
+
 
   byId('modalBack').style.display='flex';
   window.__getModalFrame = currentFrame;
