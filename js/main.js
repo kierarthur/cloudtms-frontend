@@ -719,15 +719,16 @@ function populateSearchFormFromFilters(filters={}, formSel='#searchForm'){
 // ======================================
 // FRONTEND — search (UPDATED: no extra logic beyond existing; kept for completeness)
 // ======================================
+
 async function search(section, filters={}){
   window.__listState = window.__listState || {};
   const st = (window.__listState[section] ||= { page: 1, pageSize: 50, total: null, hasMore: false, filters: null });
 
-  // reset selection when applying new filters
+  // Reset selection when applying a new dataset (fingerprint change)
   window.__selection = window.__selection || {};
-  const sel = (window.__selection[section] ||= { fingerprint:'', allMatching:false, ids:new Set(), excludeIds:new Set(), totalMatching:null });
+  const sel = (window.__selection[section] ||= { fingerprint:'', ids:new Set() });
   sel.fingerprint = JSON.stringify({ section, filters: filters || {} });
-  sel.allMatching = false; sel.ids.clear(); sel.excludeIds.clear(); sel.totalMatching = null;
+  sel.ids.clear();
 
   const map = {
     candidates:'/api/search/candidates',
@@ -747,9 +748,11 @@ async function search(section, filters={}){
   const ps = (st.pageSize === 'ALL') ? null : Number(st.pageSize || 50);
   st.hasMore = (ps != null) ? (Array.isArray(rows) && rows.length === ps) : false;
 
-  try { if (typeof r?.data?.count === 'number') sel.totalMatching = r.data.count; } catch {}
   return rows;
 }
+
+
+
 // ======================================
 // FRONTEND — NEW helper: applySelectionAsFilter
 // If selection has explicit ids, show only those rows.
@@ -795,7 +798,6 @@ function buildSearchQS(section, filters={}){
 
   // IDs filter (show only these records)
   if (Array.isArray(filters.ids) && filters.ids.length > 0) {
-    // PostgREST: id=in.(uuid1,uuid2,...)
     qs.append('id', `in.(${filters.ids.map(String).join(',')})`);
   }
 
@@ -882,17 +884,17 @@ function buildSearchQS(section, filters={}){
 // - If there IS a selection: show “Save Selection” UI only (Save new / Append).
 // - If there is NO selection: show “Save Filters” UI only.
 // ======================================
+// Save selection/search modal — simplified choices per your spec
 async function openSaveSearchModal(section, filters){
-  // sanitizer…
   const sanitize = (typeof window !== 'undefined' && typeof window.sanitize === 'function')
     ? window.sanitize
     : (s => String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;')
                            .replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'));
 
-  // Are we in selection mode?
+  // Selection present?
   window.__selection = window.__selection || {};
   const sel = window.__selection[section];
-  const hasSelection = !!sel && (sel.allMatching || (sel.ids && sel.ids.size>0));
+  const hasSelection = !!sel && sel.ids && sel.ids.size > 0;
 
   // If we’re going to append, we need the user’s presets list
   const mineServer = await listReportPresets({ section, kind: 'search', include_shared: false }).catch(()=>[]);
@@ -903,10 +905,8 @@ async function openSaveSearchModal(section, filters){
     ? mine.map(m => `<option value="${m.id}">${sanitize(m.name)}</option>`).join('')
     : '';
 
-  // Build body per mode
   let body;
   if (hasSelection) {
-    // Selection-only UI
     body = html(`
       <div class="form" id="saveSearchForm" style="max-width:720px">
         <div class="row">
@@ -942,7 +942,6 @@ async function openSaveSearchModal(section, filters){
       </div>
     `);
   } else {
-    // Filters-only UI
     body = html(`
       <div class="form" id="saveSearchForm" style="max-width:720px">
         <div class="row">
@@ -970,15 +969,12 @@ async function openSaveSearchModal(section, filters){
       const name  = String(document.getElementById('presetName')?.value || '').trim();
       const share = !!document.getElementById('presetShared')?.checked;
       if (!name && !hasSelection) { alert('Please enter a name'); return false; }
-      if (hasSelection && !name) { /* allow append without name for new? Better require name */ }
 
-      // (Re)compute selection now
-      window.__selection = window.__selection || {};
+      // Recompute selection now
       const curSel = window.__selection[section];
-      const hasSelectionNow = !!curSel && (curSel.allMatching || (curSel.ids && curSel.ids.size>0));
+      const hasSelectionNow = !!curSel && curSel.ids && curSel.ids.size>0;
 
       if (hasSelectionNow) {
-        // Selection-only save flow (new OR append)
         const modeInput = document.querySelector('#saveSearchForm input[name="mode"]:checked');
         const mode = (modeInput?.value || 'new').toLowerCase();
         if (mode === 'append') {
@@ -986,34 +982,24 @@ async function openSaveSearchModal(section, filters){
           const targetId = (document.getElementById('appendPresetId')?.value) || '';
           if (!targetId) { alert('Select a selection to append to'); return false; }
 
-          // Load target preset → merge (union) → update
           const target = (await listReportPresets({ section, kind:'search', include_shared:false }).catch(()=>[])).find(p => String(p.id) === String(targetId));
           const targetSel = target?.selection || target?.selection_json || null;
           const merged = mergeSelectionSnapshots(section,
-            { section, fingerprint: targetSel?.fingerprint || '', allMatching: !!targetSel?.allMatching,
-              ids: Array.from(new Set((targetSel?.ids||[]).map(String))), excludeIds: Array.from(new Set((targetSel?.excludeIds||[]).map(String))),
-              totalMatching: (typeof targetSel?.totalMatching==='number') ? targetSel.totalMatching : null },
-            { section, fingerprint: curSel.fingerprint || '', allMatching: !!curSel.allMatching,
-              ids: Array.from(curSel.ids || []), excludeIds: Array.from(curSel.excludeIds || []),
-              totalMatching: (typeof curSel.totalMatching==='number') ? curSel.totalMatching : null }
+            { section, fingerprint: targetSel?.fingerprint || '', ids: Array.from(new Set((targetSel?.ids||[]).map(String))) },
+            { section, fingerprint: curSel.fingerprint || '',  ids: Array.from(curSel.ids || []) }
           );
           await updateReportPreset({ id: targetId, name: target?.name, section, kind:'search', selection: merged, is_shared: target?.is_shared });
         } else {
-          // Save selection as new
           const payload = {
             section, kind:'search', name, is_shared: share,
             selection: {
               fingerprint: curSel.fingerprint || '',
-              allMatching: !!curSel.allMatching,
-              ids: Array.from(curSel.ids || []),
-              excludeIds: Array.from(curSel.excludeIds || []),
-              totalMatching: (typeof curSel.totalMatching === 'number') ? curSel.totalMatching : null
+              ids: Array.from(curSel.ids || [])
             }
           };
           await createReportPreset(payload);
         }
       } else {
-        // Filters-only save
         const payload = { section, kind:'search', name, is_shared: share, filters: filters || {} };
         await createReportPreset(payload);
       }
@@ -1057,6 +1043,7 @@ async function openSaveSearchModal(section, filters){
 // - If selection has allMatching=true → apply its filters instead.
 // - If preset is a filters-only search → apply filters.
 // ======================================
+
 async function openLoadSearchModal(section){
   const sanitize = (typeof window !== 'undefined' && typeof window.sanitize === 'function')
     ? window.sanitize
@@ -1113,7 +1100,7 @@ async function openLoadSearchModal(section){
     if (!tbl || tbl.__wired) return;
     tbl.__wired = true;
 
-    // Single click: select; Double-click: apply immediately & close
+    // Select row on click
     tbl.addEventListener('click', (e) => {
       const tr = e.target && e.target.closest('tr[data-id]');
       if (!tr) return;
@@ -1121,6 +1108,7 @@ async function openLoadSearchModal(section){
       Array.from(tbl.querySelectorAll('tbody tr')).forEach(r => r.classList.toggle('selected', r === tr));
     });
 
+    // Double-click: apply immediately and close
     tbl.addEventListener('dblclick', async (e) => {
       const tr = e.target && e.target.closest('tr[data-id]');
       if (!tr) return;
@@ -1131,10 +1119,9 @@ async function openLoadSearchModal(section){
       const filters   = chosen.filters || chosen.filters_json || chosen.filtersJson || {};
       const selection = chosen.selection || chosen.selection_json || null;
 
-      if (selection && selection.allMatching === false && Array.isArray(selection.ids) && selection.ids.length > 0) {
-        await applySelectionAsFilter(section, selection);
+      if (selection && Array.isArray(selection.ids) && selection.ids.length > 0) {
+        await applySelectionAsFilter(section, { ids: selection.ids });
       } else {
-        // allMatching or filters-only
         window.__listState = window.__listState || {};
         const st = (window.__listState[section] ||= { page:1, pageSize:50, total:null, hasMore:false, filters:null });
         st.page = 1;
@@ -1143,7 +1130,6 @@ async function openLoadSearchModal(section){
         renderSummary(rows);
       }
 
-      // Close modal after apply
       const closeBtn = document.getElementById('btnCloseModal');
       if (closeBtn) closeBtn.click();
     });
@@ -1180,7 +1166,6 @@ async function openLoadSearchModal(section){
     [{ key: 'list', label: 'Saved' }],
     renderList,
     async () => {
-      // If user clicks Save in this modal (not dblclick), apply the selected row the same way
       if (!selectedId) { alert('Pick a preset to load'); return false; }
       const chosen = (list || []).find(p => p.id === selectedId);
       if (!chosen) { alert('Preset not found'); return false; }
@@ -1188,8 +1173,8 @@ async function openLoadSearchModal(section){
       const filters   = chosen.filters || chosen.filters_json || chosen.filtersJson || {};
       const selection = chosen.selection || chosen.selection_json || null;
 
-      if (selection && selection.allMatching === false && Array.isArray(selection.ids) && selection.ids.length > 0) {
-        await applySelectionAsFilter(section, selection);
+      if (selection && Array.isArray(selection.ids) && selection.ids.length > 0) {
+        await applySelectionAsFilter(section, { ids: selection.ids });
       } else {
         window.__listState = window.__listState || {};
         const st = (window.__listState[section] ||= { page:1, pageSize:50, total:null, hasMore:false, filters:null });
@@ -1209,150 +1194,7 @@ async function openLoadSearchModal(section){
 }
 
 
-// ============================================================================
-// Selection core — NEW helpers to support row checkboxes + “Select all pages”
-// ============================================================================
 
-/** Ensure a selection bucket exists for a section and return it. */
-function ensureSelection(section) {
-  window.__selection = window.__selection || {};
-  if (!window.__selection[section]) {
-    window.__selection[section] = {
-      fingerprint: '',          // ties selection to current dataset (filters/sort/section)
-      allMatching: false,       // true => select-all across pages; false => explicit IDs
-      ids: new Set(),           // used when allMatching=false
-      excludeIds: new Set(),    // used when allMatching=true (explicit UNselections)
-      totalMatching: null,      // optional; for “All N selected”
-    };
-  }
-  return window.__selection[section];
-}
-
-/** Compute a stable fingerprint for the current dataset of a section. */
-function computeSelectionFingerprint(section) {
-  window.__listState = window.__listState || {};
-  const st = (window.__listState[section] ||= { page:1, pageSize:50, filters:null });
-  // You can add sort keys here if/when you implement sorting
-  return JSON.stringify({ section, filters: st.filters || {} });
-}
-
-/** Is a row currently selected in the given section? */
-function isRowSelected(section, id) {
-  if (!id) return false;
-  const sel = ensureSelection(section);
-  const key = String(id);
-  return sel.allMatching ? !sel.excludeIds.has(key) : sel.ids.has(key);
-}
-
-/** Toggle a single row in/out of selection; returns the updated snapshot. */
-function setRowSelected(section, id, selected) {
-  if (!id) return getSelectionSnapshot(section);
-  const sel = ensureSelection(section);
-  const key = String(id);
-  if (sel.allMatching) {
-    if (selected) sel.excludeIds.delete(key);
-    else sel.excludeIds.add(key);
-  } else {
-    if (selected) sel.ids.add(key);
-    else sel.ids.delete(key);
-  }
-  return getSelectionSnapshot(section);
-}
-
-/** Switch to/from “Select all pages” mode and clear explicit sets. */
-function setAllMatching(section, on) {
-  const sel = ensureSelection(section);
-  sel.allMatching = !!on;
-  sel.ids.clear();
-  sel.excludeIds.clear();
-  // keep fingerprint and totalMatching as-is
-  return getSelectionSnapshot(section);
-}
-
-/** Clear all selection for a section (resets to explicit mode, empty sets). */
-function clearSelection(section) {
-  const sel = ensureSelection(section);
-  sel.allMatching = false;
-  sel.ids.clear();
-  sel.excludeIds.clear();
-  // keep fingerprint; totalMatching no longer relevant
-  sel.totalMatching = null;
-  return getSelectionSnapshot(section);
-}
-
-/** Return a plain-object snapshot of the selection for persistence / actions. */
-function getSelectionSnapshot(section) {
-  const sel = ensureSelection(section);
-  return {
-    fingerprint: sel.fingerprint || '',
-    allMatching: !!sel.allMatching,
-    ids: Array.from(sel.ids || []),
-    excludeIds: Array.from(sel.excludeIds || []),
-    totalMatching: (typeof sel.totalMatching === 'number') ? sel.totalMatching : null,
-    section
-  };
-}
-
-/** Serialize current selection (same as snapshot; separated for clarity/compat). */
-function serializeSelection(section) {
-  return getSelectionSnapshot(section);
-}
-
-/** Apply a selection snapshot into the current section (replace). */
-function applySelectionSnapshot(section, snapshot) {
-  if (!snapshot || (snapshot.section && snapshot.section !== section)) {
-    // Ignore mismatched section to avoid accidental cross-apply
-    return getSelectionSnapshot(section);
-  }
-  const sel = ensureSelection(section);
-  sel.fingerprint   = String(snapshot.fingerprint || sel.fingerprint || '');
-  sel.allMatching   = !!snapshot.allMatching;
-  sel.ids           = new Set((snapshot.ids || []).map(String));
-  sel.excludeIds    = new Set((snapshot.excludeIds || []).map(String));
-  sel.totalMatching = (typeof snapshot.totalMatching === 'number') ? snapshot.totalMatching : sel.totalMatching;
-  return getSelectionSnapshot(section);
-}
-
-/**
- * Merge/append one selection snapshot into another (result stored in current section).
- * Rules:
- * - If either has allMatching=true → result is allMatching=true; excludeIds = union of both exclude sets.
- * - Else (both explicit) → ids = union of both ids.
- * - fingerprint: keep the existing section’s fingerprint if present, otherwise take from added.
- * - totalMatching: use existing if present, else added.
- */
-function mergeSelectionSnapshots(section, baseSnapshot, addSnapshot) {
-  const base = baseSnapshot || getSelectionSnapshot(section);
-  const add  = addSnapshot  || {};
-  const result = {
-    fingerprint: base.fingerprint || add.fingerprint || '',
-    allMatching: !!(base.allMatching || add.allMatching),
-    ids: [],
-    excludeIds: [],
-    totalMatching: (typeof base.totalMatching === 'number')
-      ? base.totalMatching
-      : (typeof add.totalMatching === 'number' ? add.totalMatching : null),
-    section
-  };
-
-  if (result.allMatching) {
-    const ex = new Set((base.excludeIds || []).map(String));
-    (add.excludeIds || []).forEach(x => ex.add(String(x)));
-    result.excludeIds = Array.from(ex);
-  } else {
-    const union = new Set((base.ids || []).map(String));
-    (add.ids || []).forEach(x => union.add(String(x)));
-    result.ids = Array.from(union);
-  }
-
-  // Apply the merged snapshot to store and return the current snapshot
-  return applySelectionSnapshot(section, result);
-}
-
-/** Utility: dedupe a string/ID array; returns a new array (stable order is not guaranteed). */
-function dedupeIds(arr) {
-  return Array.from(new Set((arr || []).map(String)));
-}
 
 // ============================================================================
 // Selection presets — wrappers to save/list/load selection presets via backend
@@ -6150,6 +5992,85 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
   renderTop();
 }
 
+// Selection state helpers — simplified to explicit IDs only
+
+function ensureSelection(section) {
+  window.__selection = window.__selection || {};
+  if (!window.__selection[section]) {
+    window.__selection[section] = {
+      fingerprint: '',  // ties selection to current dataset (filters/section)
+      ids: new Set(),   // explicit selection of UUIDs
+    };
+  }
+  return window.__selection[section];
+}
+
+function computeSelectionFingerprint(section) {
+  window.__listState = window.__listState || {};
+  const st = (window.__listState[section] ||= { page:1, pageSize:50, filters:null });
+  return JSON.stringify({ section, filters: st.filters || {} });
+}
+
+function isRowSelected(section, id) {
+  if (!id) return false;
+  const sel = ensureSelection(section);
+  return sel.ids.has(String(id));
+}
+
+function setRowSelected(section, id, selected) {
+  if (!id) return getSelectionSnapshot(section);
+  const sel = ensureSelection(section);
+  const key = String(id);
+  if (selected) sel.ids.add(key); else sel.ids.delete(key);
+  return getSelectionSnapshot(section);
+}
+
+function clearSelection(section) {
+  const sel = ensureSelection(section);
+  sel.ids.clear();
+  return getSelectionSnapshot(section);
+}
+
+function getSelectionSnapshot(section) {
+  const sel = ensureSelection(section);
+  return {
+    fingerprint: sel.fingerprint || '',
+    ids: Array.from(sel.ids || []),
+    section
+  };
+}
+
+function serializeSelection(section) {
+  return getSelectionSnapshot(section);
+}
+
+function applySelectionSnapshot(section, snapshot) {
+  if (!snapshot || (snapshot.section && snapshot.section !== section)) {
+    return getSelectionSnapshot(section);
+  }
+  const sel = ensureSelection(section);
+  sel.fingerprint   = String(snapshot.fingerprint || sel.fingerprint || '');
+  sel.ids           = new Set((snapshot.ids || []).map(String));
+  return getSelectionSnapshot(section);
+}
+
+function mergeSelectionSnapshots(section, baseSnapshot, addSnapshot) {
+  const base = baseSnapshot || getSelectionSnapshot(section);
+  const add  = addSnapshot  || {};
+  const result = {
+    fingerprint: base.fingerprint || add.fingerprint || '',
+    ids: Array.from(new Set([
+      ...(base.ids || []).map(String),
+      ...(add.ids  || []).map(String),
+    ])),
+    section
+  };
+  return applySelectionSnapshot(section, result);
+}
+
+function dedupeIds(arr) {
+  return Array.from(new Set((arr || []).map(String)));
+}
 
 
 
@@ -6972,8 +6893,6 @@ function collectForm(sel, jsonTry=false){
 
 // ===== UPDATED: renderSummary — if pending focus row isn't visible, try one auto-relax/reload pass, then highlight when found
 
-
-
 function renderSummary(rows){
   currentRows = rows;
   currentSelection = null;
@@ -6984,44 +6903,24 @@ function renderSummary(rows){
   const page     = Number(st.page || 1);
   const pageSize = st.pageSize; // 50 | 100 | 200 | 'ALL'
 
-  // ── selection state (per section) ───────────────────────────────────────────
+  // ── selection state (per section) — explicit IDs only ──────────────────────
   window.__selection = window.__selection || {};
   const ensureSel = (section)=>{
-    const init = { fingerprint:'', allMatching:false, ids:new Set(), excludeIds:new Set(), totalMatching:null };
+    const init = { fingerprint:'', ids:new Set() };
     return (window.__selection[section] ||= init);
   };
   const sel = ensureSel(currentSection);
 
-  // selection helpers bound to current section
-  const isRowSelected = (id)=>{
-    if (!id) return false;
-    if (sel.allMatching) return !sel.excludeIds.has(String(id));
-    return sel.ids.has(String(id));
-  };
+  const isRowSelected = (id)=> sel.ids.has(String(id||''));
   const setRowSelected = (id, selected)=>{
     id = String(id||'');
     if (!id) return;
-    if (sel.allMatching) {
-      if (selected) sel.excludeIds.delete(id);
-      else sel.excludeIds.add(id);
-    } else {
-      if (selected) sel.ids.add(id);
-      else sel.ids.delete(id);
-    }
+    if (selected) sel.ids.add(id);
+    else sel.ids.delete(id);
   };
-  const setAllMatching = (on)=>{
-    sel.allMatching = !!on;
-    sel.ids.clear();
-    sel.excludeIds.clear();
-  };
-  const clearSelection = ()=>{
-    sel.allMatching = false;
-    sel.ids.clear();
-    sel.excludeIds.clear();
-    sel.totalMatching = null;
-  };
+  const clearSelection = ()=>{ sel.ids.clear(); };
 
-  // tie selection to dataset via fingerprint (filters + section)
+  // Tie selection to dataset via fingerprint (filters + section)
   const computeFingerprint = ()=> JSON.stringify({ section: currentSection, filters: st.filters || {} });
   const fp = computeFingerprint();
   if (sel.fingerprint !== fp) {
@@ -7033,7 +6932,7 @@ function renderSummary(rows){
   byId('title').textContent = sections.find(s=>s.key===currentSection)?.label || '';
   const content = byId('content');
 
-  // NEW: preserve scroll position per section
+  // Preserve scroll position per section
   window.__scrollMemory = window.__scrollMemory || {};
   const memKey = `summary:${currentSection}`;
   const prevScrollY = content ? (window.__scrollMemory[memKey] ?? content.scrollTop ?? 0) : 0;
@@ -7049,7 +6948,7 @@ function renderSummary(rows){
     });
   }
 
-  // ── top controls (page size selector) ───────────────────────────────────────
+  // ── top controls (page size selector + selection summary) ───────────────────
   const topControls = document.createElement('div');
   topControls.style.cssText = 'display:flex;align-items:center;gap:10px;padding:8px 10px;border-bottom:1px solid var(--line)';
   const sizeLabel = document.createElement('span');
@@ -7067,29 +6966,23 @@ function renderSummary(rows){
   sizeSel.addEventListener('change', async () => {
     const val = sizeSel.value;
     window.__listState[currentSection].pageSize = (val === 'ALL') ? 'ALL' : Number(val);
-    window.__listState[currentSection].page = 1; // reset to first page
-    const data = await loadSection();            // re-fetch with new page size
+    window.__listState[currentSection].page = 1;
+    const data = await loadSection();
     renderSummary(data);
   });
 
-  // selection summary inline (e.g., “All N selected” / “K selected” / Clear)
   const selInfo = document.createElement('div'); selInfo.className = 'mini';
   const renderSelInfo = ()=>{
-    let text = '';
-    if (sel.allMatching) {
-      if (typeof sel.totalMatching === 'number') text = `All ${sel.totalMatching} ${currentSection} selected.`;
-      else text = `All matching ${currentSection} selected.`;
-    } else if (sel.ids.size > 0) {
-      text = `${sel.ids.size} selected.`;
-    }
-    selInfo.textContent = text;
+    selInfo.textContent = (sel.ids.size > 0) ? `${sel.ids.size} selected.` : '';
   };
   renderSelInfo();
 
   const clearBtn = document.createElement('button');
   clearBtn.textContent = 'Clear selection';
   clearBtn.style.cssText = 'border:1px solid var(--line);background:#0b152a;color:var(--text);padding:4px 8px;border-radius:8px;cursor:pointer;display:none';
-  clearBtn.onclick = ()=>{ clearSelection(); renderSelInfo(); // refresh checkmarks
+  clearBtn.onclick = ()=>{
+    clearSelection();
+    renderSelInfo();
     Array.from(document.querySelectorAll('input.row-select')).forEach(cb=>{ cb.checked = false; });
     const hdr = byId('summarySelectAll'); if (hdr) { hdr.checked=false; hdr.indeterminate=false; }
   };
@@ -7106,24 +6999,31 @@ function renderSummary(rows){
   const tbl = document.createElement('table'); tbl.className='grid';
   const thead = document.createElement('thead'); const trh=document.createElement('tr');
 
-  // selection header checkbox (master)
+  // Header checkbox: select/deselect **visible rows** only
   const thSel = document.createElement('th');
   const hdrCb = document.createElement('input'); hdrCb.type='checkbox'; hdrCb.id='summarySelectAll';
-  hdrCb.checked = !!sel.allMatching;
-  hdrCb.indeterminate = !sel.allMatching && (sel.ids && sel.ids.size > 0);
+  const computeHeaderState = ()=>{
+    const idsVisible = rows.map(r => String(r.id || ''));
+    const selectedOfVisible = idsVisible.filter(id => sel.ids.has(id)).length;
+    hdrCb.checked = (idsVisible.length > 0 && selectedOfVisible === idsVisible.length);
+    hdrCb.indeterminate = (selectedOfVisible > 0 && selectedOfVisible < idsVisible.length);
+  };
   hdrCb.addEventListener('click', (e)=>{
     e.stopPropagation();
-    const on = hdrCb.checked;
-    setAllMatching(on);
+    const idsVisible = rows.map(r => String(r.id || ''));
+    const wantOn = !!hdrCb.checked;
+    idsVisible.forEach(id => {
+      if (wantOn) sel.ids.add(id); else sel.ids.delete(id);
+    });
+    // Update all visible row checkboxes
+    Array.from(document.querySelectorAll('input.row-select')).forEach(cb=>{ cb.checked = wantOn; });
+    clearBtn.style.display = (sel.ids.size>0) ? '' : 'none';
     renderSelInfo();
-    clearBtn.style.display = (sel.allMatching || (sel.ids.size>0)) ? '' : 'none';
-    // set all visible checkboxes to match selected state (visual; state is already stored)
-    Array.from(document.querySelectorAll('input.row-select')).forEach(cb=>{ cb.checked = on; });
+    computeHeaderState();
   });
   thSel.appendChild(hdrCb);
   trh.appendChild(thSel);
 
-  // the rest of headers
   cols.forEach(c=>{ const th=document.createElement('th'); th.textContent=c; trh.appendChild(th); });
   thead.appendChild(trh); tbl.appendChild(thead);
 
@@ -7142,17 +7042,9 @@ function renderSummary(rows){
       e.stopPropagation();
       const id = tr.dataset.id;
       setRowSelected(id, cb.checked);
-      // refresh master states
-      const hdr = byId('summarySelectAll');
-      if (sel.allMatching) {
-        hdr.checked = true;
-        hdr.indeterminate = sel.excludeIds.size > 0;
-      } else {
-        hdr.checked = false;
-        hdr.indeterminate = (sel.ids.size > 0);
-      }
-      clearBtn.style.display = (sel.allMatching || sel.ids.size>0) ? '' : 'none';
+      clearBtn.style.display = (sel.ids.size>0) ? '' : 'none';
       renderSelInfo();
+      computeHeaderState();
     });
     tdSel.appendChild(cb);
     tr.appendChild(tdSel);
@@ -7168,10 +7060,11 @@ function renderSummary(rows){
     tb.appendChild(tr);
   });
 
+  // Click / dblclick behaviour (unchanged)
   tb.addEventListener('click', (ev) => {
     const tr = ev.target && ev.target.closest('tr');
     if (!tr) return;
-    if (ev.target && ev.target.classList && ev.target.classList.contains('row-select')) return; // ignore clicks on checkbox
+    if (ev.target && ev.target.classList && ev.target.classList.contains('row-select')) return;
     tb.querySelectorAll('tr.selected').forEach(n => n.classList.remove('selected'));
     tr.classList.add('selected');
     const id = tr.dataset.id;
@@ -7182,25 +7075,18 @@ function renderSummary(rows){
   tb.addEventListener('dblclick', (ev) => {
     const tr = ev.target && ev.target.closest('tr');
     if (!tr) return;
-    if (!confirmDiscardChangesIfDirty()) return; // dirty guard before opening a new modal
-
+    if (!confirmDiscardChangesIfDirty()) return;
     tb.querySelectorAll('tr.selected').forEach(n => n.classList.remove('selected'));
     tr.classList.add('selected');
-
     const id = tr.dataset.id;
     const row = currentRows.find(x => String(x.id) === id) || null;
-    console.debug('[GRID] dblclick open', { section: currentSection, id, found: !!row });
-
     if (!row) return;
-
     const beforeDepth = (window.__modalStack && window.__modalStack.length) || 0;
     openDetails(row);
-
     setTimeout(() => {
       const afterDepth = (window.__modalStack && window.__modalStack.length) || 0;
       if (afterDepth > beforeDepth) {
         tb.querySelectorAll('tr.selected').forEach(n => n.classList.remove('selected'));
-        console.debug('[GRID] modal opened for', id);
       }
     }, 0);
   });
@@ -7208,7 +7094,7 @@ function renderSummary(rows){
   tbl.appendChild(tb);
   content.appendChild(tbl);
 
-  // ── pager (Prev / page numbers / Next) ──────────────────────────────────────
+  // Footer/pager (unchanged except no selection text here)
   const pager = document.createElement('div');
   pager.style.cssText = 'display:flex;align-items:center;gap:6px;padding:8px 10px;border-top:1px solid var(--line);';
   const info = document.createElement('span'); info.className = 'mini';
@@ -7231,7 +7117,6 @@ function renderSummary(rows){
   } else if (pageSize === 'ALL') {
     maxPageToShow = 1;
   } else {
-    // Unknown total: show up to current+1 while hasMore; else current
     maxPageToShow = hasMore ? (current + 1) : current;
   }
 
@@ -7242,14 +7127,12 @@ function renderSummary(rows){
   });
   pager.appendChild(prevBtn);
 
-  // numbered pages (compact)
   const makePageLink = (n) => mkBtn(String(n), n === current, async () => {
     window.__listState[currentSection].page = n;
     const data = await loadSection();
     renderSummary(data);
   });
 
-  // If large, show 1 ... current-1, current, next (if hasMore)
   const pages = [];
   if (maxPageToShow <= 7) {
     for (let n=1; n<=maxPageToShow; n++) pages.push(n);
@@ -7276,7 +7159,6 @@ function renderSummary(rows){
   });
   pager.appendChild(nextBtn);
 
-  // info text
   if (pageSize === 'ALL') {
     info.textContent = `Showing all ${rows.length} ${currentSection}.`;
   } else if (totalKnown) {
@@ -7293,10 +7175,9 @@ function renderSummary(rows){
   const spacer = document.createElement('div'); spacer.style.flex = '1';
   pager.appendChild(spacer);
   pager.appendChild(info);
-
   content.appendChild(pager);
 
-  // NEW: restore scroll and keep memory updated
+  // Restore scroll + keep memory updated
   try {
     content.__activeMemKey = memKey;
     content.scrollTop = prevScrollY;
@@ -7309,10 +7190,11 @@ function renderSummary(rows){
     }
   } catch {}
 
-  // show/hide clear button based on current selection
-  clearBtn.style.display = (sel.allMatching || (sel.ids.size>0)) ? '' : 'none';
+  // Update header checkbox state + clear button
+  computeHeaderState();
+  clearBtn.style.display = (sel.ids.size>0) ? '' : 'none';
 
-  // ---- Jump & highlight if a pending focus token matches this section
+  // Focus highlight logic unchanged…
   if (window.__pendingFocus) {
     const pf = window.__pendingFocus;
     const pfSection = pf.section || (pf.entity ? (pf.entity + 's') : null);
@@ -7320,7 +7202,6 @@ function renderSummary(rows){
       const targetId = String(pf.id);
       const selq = `tr[data-id="${CSS.escape ? CSS.escape(targetId) : targetId}"]`;
       let tr = tb.querySelector(selq);
-
       if (!tr) {
         if (!pf._retried) {
           pf._retried = true;
@@ -7328,10 +7209,8 @@ function renderSummary(rows){
           try { renderAll(); } catch (e) { console.error('auto-refresh after filter clear failed', e); }
           return;
         }
-        console.debug('[GRID] pending focus row not found under current filters; already retried once');
         return;
       }
-
       currentSelection = currentRows.find(x => String(x.id) === targetId) || null;
       try { tr.scrollIntoView({ block: 'center', behavior: 'smooth' }); } catch (_) { tr.scrollIntoView(); }
       tb.querySelectorAll('tr.selected').forEach(n => n.classList.remove('selected'));
