@@ -27,6 +27,17 @@ function saveSession(sess){
   scheduleRefresh();
   renderUserChip();
 }
+
+function loadSession(){
+  try {
+    const raw = localStorage.getItem('cloudtms.session') || sessionStorage.getItem('cloudtms.session');
+    const sess = raw ? JSON.parse(raw) : null;
+    if (!sess || !sess.accessToken) return false;
+    saveSession(sess);             // mirrors globals & schedules refresh
+    return true;
+  } catch { return false; }
+}
+
 async function loadSection(){
   // unified paging entry point
   window.__listState = window.__listState || {};
@@ -184,16 +195,43 @@ async function authFetch(input, init={}){
 // ===== Auth API calls =====
 async function apiLogin(email, password){
   const res = await fetch(API('/auth/login'), {
-    method:'POST',
-    headers:{'content-type':'application/json'},
-    credentials: 'include',                // cookie for refresh
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    credentials: 'include', // cookie for refresh
     body: JSON.stringify({ email, password })
   });
-  if (!res.ok) throw new Error('Invalid credentials');
-  const data = await res.json();
-  const token = data.access_token || data.token || data.accessToken;
-  const ttl   = data.expires_in || data.token_ttl_sec || data.ttl || 3600;
-  saveSession({ accessToken: token, user: data.user || data.profile || null, exp: Math.floor(Date.now()/1000) + ttl });
+
+  let data = {};
+  try { data = await res.json(); } catch {}
+
+  if (!res.ok) {
+    const msg = data?.error || data?.message || 'Invalid credentials';
+    throw new Error(msg);
+  }
+
+  const token =
+    data.access_token ||
+    data.token ||
+    data.accessToken;
+
+  if (!token) {
+    throw new Error('No access token returned');
+  }
+
+  const rawTtl = data.expires_in ?? data.token_ttl_sec ?? data.ttl ?? 3600; // seconds
+  const ttl    = Math.max(60, Number(rawTtl) || 3600); // floor at 60s
+  const skew   = 30; // renew slightly early
+
+  saveSession({
+    accessToken: token,
+    user: data.user || data.profile || null,
+    exp: Math.floor(Date.now() / 1000) + (ttl - skew)
+  });
+
+  if (typeof scheduleRefresh === 'function') {
+    scheduleRefresh();
+  }
+
   return data;
 }
 
@@ -274,7 +312,6 @@ function renderUserChip(){
     chip.textContent = (SESSION.user.display_name || SESSION.user.email || 'User');
   } else chip.textContent = 'Signed out';
 }
-
 function initAuthUI(){
   // Buttons and links
   byId('btnLogout').onclick = ()=>{ clearSession(); openLogin(); };
@@ -293,6 +330,7 @@ function initAuthUI(){
     const err = byId('loginError'); err.style.display='none';
     try{
       await apiLogin(email, pw);
+      if (typeof scheduleRefresh === 'function') scheduleRefresh();
       byId('loginOverlay').style.display='none';
       bootstrapApp();
     }catch(ex){
@@ -329,9 +367,10 @@ function initAuthUI(){
     }
   };
 
-  // Open reset overlay automatically if URL carries a token
+  // Open reset overlay automatically if URL carries a token (only if not already signed in)
   const url = new URL(location.href);
-  if (url.searchParams.get('k') || url.searchParams.get('token')) openReset();
+  const hasResetToken = url.searchParams.get('k') || url.searchParams.get('token');
+  if (hasResetToken && !(typeof getSession === 'function' && getSession()?.accessToken)) openReset();
 }
 
 // ===== App state + rendering =====
@@ -6181,14 +6220,12 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
 // IDs-only selection helpers (single source of truth: Set of selected IDs)
 // ──────────────────────────────────────────────────────────────────────────────
 
+
 function ensureSelection(section) {
   window.__selection = window.__selection || {};
-  if (!window.__llection) window.__llection = {}; // defensive
   if (!window.__selection[section]) {
     window.__selection[section] = {
-      // ties the selection to the current dataset “shape”
       fingerprint: '',
-      // explicit selected IDs in this section
       ids: new Set(),
     };
   }
@@ -6220,12 +6257,14 @@ function isRowSelected(section, id) {
 
 function setRowSelected(section, id, selected) {
   if (!id) return getSelectionSnapshot(section);
-  const sel = ensureSlction(section);
+  const sel = ensureSelection(section);
   const key = String(id);
   if (selected) sel.ids.add(key);
   else sel.ids.delete(key);
-  return getSelectSnapshot(section);
+  return getSelectionSnapshot(section);
 }
+
+
 
 async function applyShortlistFilter(section, { ids }) {
   const cleanIds = Array.isArray(ids) ? ids.map(String).filter(Boolean) : [];
@@ -6275,23 +6314,22 @@ async function applySelectionAsFilter(section, selectionSnapshot) {
     return;
   }
 
-  // Reset paging & apply IDs-only filter
-  window.__listlState = window.__lListState || {};
-  const st = (window.__listate[section] ||= {
-    page: 1, pageSze: 50, total: null, hasMore: false, filters: null,
+  window.__listState = window.__listState || {};
+  const st = (window.__listState[section] ||= {
+    page: 1, pageSize: 50, total: null, hasMore: false, filters: null,
   });
   st.page = 1;
   st.filters = { ...(st.filters || {}), ids };
 
-  // mirror into selection for checkbox sync
-  const sel = ensurelection(section);
-  sel.fingerprint = JSON.stringify({ section, filters: st.filters });
+  const sel = ensureSelection(section);
+  sel.fingerprint = JSON.stringify({ section, filters: st.filters || {} });
   sel.ids = new Set(ids);
 
-  // reload data and re-render
   const rows = await search(section, st.filters);
   renderSummary(rows);
 }
+
+
 
 
 
