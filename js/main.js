@@ -823,7 +823,8 @@ async function openSaveSelectionModal(section) {
 
   window.__selection = window.__selection || {};
   const curSel = window.__selection[section] || { fingerprint:'', ids:new Set() };
-  const idsNow = Array.from(curSel.ids || []);
+  const idsNow = Array.from(new Set((Array.from(curSel.ids || []).map(String).filter(Boolean)))); // dedupe
+
   if (!idsNow.length) {
     alert('No records selected to save.');
     return;
@@ -878,8 +879,10 @@ async function openSaveSelectionModal(section) {
       const name  = String(document.getElementById('selPresetName')?.value || '').trim();
       const share = !!document.getElementById('selPresetShared')?.checked;
 
-      // Re-read IDs at submit time
-      const ids = Array.from((window.__selection?.[section]?.ids) || []);
+      // Re-read & dedupe IDs at submit time
+      const ids = Array.from(new Set((Array.from((window.__selection?.[section]?.ids) || []))
+        .map(String).filter(Boolean)));
+
       if (!ids.length) { alert('No records selected.'); return false; }
 
       const mode = (document.querySelector('#saveSelectionForm input[name="mode"]:checked')?.value || 'new').toLowerCase();
@@ -888,11 +891,20 @@ async function openSaveSelectionModal(section) {
         const targetId = (document.getElementById('selAppendPresetId')?.value) || '';
         if (!targetId) { alert('Select a selection to append to.'); return false; }
 
-        // Fetch target → union → PATCH kind: 'selection'
+        // Fetch target → dedupe-union → PATCH kind: 'selection'
         const targetList = await listReportPresets({ section, kind: 'selection', include_shared: false }).catch(()=>[]);
         const target = (targetList || []).find(p => String(p.id) === String(targetId));
-        const targetIds = Array.isArray(target?.selection_json?.ids) ? target.selection_json.ids.map(String) : [];
-        const merged = Array.from(new Set([ ...targetIds, ...ids ]));
+        const targetIds = Array.isArray(target?.selection_json?.ids) ? target.selection_json.ids.map(String).filter(Boolean) : [];
+        const targetSet = new Set(targetIds);
+
+        // Only add what isn't there already
+        const toAdd = ids.filter(id => !targetSet.has(id));
+        if (toAdd.length === 0) {
+          alert('Those records are already in that selection. Nothing to append.');
+          return false;
+        }
+
+        const merged = Array.from(new Set([...targetIds, ...toAdd]));
 
         await updateReportPreset({
           id: targetId,
@@ -907,8 +919,8 @@ async function openSaveSelectionModal(section) {
           kind: 'selection',
           name,
           is_shared: share,
-          filters: {},            // not used for selections
-          selection: { ids }
+          filters: {},                         // not used for selections
+          selection: { ids }                   // already deduped
         });
       }
 
@@ -935,6 +947,7 @@ async function openSaveSelectionModal(section) {
     });
   }, 0);
 }
+
 
 async function openLoadSelectionModal(section) {
   const sanitize = (typeof window !== 'undefined' && typeof window.sanitize === 'function')
@@ -1393,7 +1406,7 @@ async function openLoadSearchModal(section){
       Array.from(tbl.querySelectorAll('tbody tr')).forEach(r => r.classList.toggle('selected', r === tr));
     });
 
-    // Double-click: apply filters immediately and close
+    // Double-click: apply filters immediately and close + notify parent
     tbl.addEventListener('dblclick', async (e) => {
       const tr = e.target && e.target.closest('tr[data-id]');
       if (!tr) return;
@@ -1408,6 +1421,9 @@ async function openLoadSearchModal(section){
       st.page = 1; st.filters = filters || {};
       const rows = await search(section, st.filters);
       renderSummary(rows);
+
+      // notify parent advanced-search to re-populate its form
+      try { window.__PENDING_ADV_PRESET = { section, filters: st.filters || {} }; } catch {}
 
       const closeBtn = document.getElementById('btnCloseModal');
       if (closeBtn) closeBtn.click();
@@ -1455,7 +1471,10 @@ async function openLoadSearchModal(section){
       st.page = 1; st.filters = filters || {};
       const rows = await search(section, st.filters);
       renderSummary(rows);
-      return true;
+
+      // notify parent advanced-search to re-populate its form
+      try { window.__PENDING_ADV_PRESET = { section, filters: st.filters || {} }; } catch {}
+      return true; // child closes; parent will onReturn and re-populate form
     },
     false,
     undefined,
@@ -1682,16 +1701,25 @@ async function openSearchModal(opts = {}) {
 
       const rows = await search(currentSection, filters);
       if (rows) renderSummary(rows);
-      return true;
+      return true; // showModal will close this advanced-search frame on success
     },
     false,
     () => {
+      // Apply pending preset (if a child "Load search" just set it)
       const pending = (typeof window !== 'undefined') ? window.__PENDING_ADV_PRESET : null;
       if (pending && pending.section) {
         try { window.dispatchEvent(new CustomEvent('adv-search-apply-preset', { detail: pending })); } catch {}
       }
       if (typeof window !== 'undefined') delete window.__PENDING_ADV_PRESET;
+
       try { wireAdvancedSearch(); } catch {}
+
+      // Prefill from current filters immediately on mount
+      try {
+        window.__listState = window.__listState || {};
+        const st = (window.__listState[currentSection] ||= { page:1, pageSize:50, total:null, hasMore:false, filters:null });
+        populateSearchFormFromFilters(st.filters || {}, '#searchForm');
+      } catch {}
     },
     { noParentGate: true, forceEdit: true, kind: 'advanced-search' }
   );
@@ -1699,9 +1727,12 @@ async function openSearchModal(opts = {}) {
   setTimeout(wireAdvancedSearch, 0);
 }
 
+
 // ======================================
 // FRONTEND — wireAdvancedSearch (UPDATED only to call the updated save/load modals)
 // ======================================
+
+
 function wireAdvancedSearch() {
   const bodyEl = document.getElementById('modalBody');
   const formEl = document.getElementById('searchForm');
@@ -1747,10 +1778,14 @@ function wireAdvancedSearch() {
     };
     window.addEventListener('adv-search-apply-preset', window.__advPresetListener);
   }
+
+  // NEW: Immediately populate from current filters when the modal mounts/re-renders
+  try {
+    window.__listState = window.__listState || {};
+    const st = (window.__listState[currentSection] ||= { page:1, pageSize:50, total:null, hasMore:false, filters:null });
+    populateSearchFormFromFilters(st.filters || {}, '#searchForm');
+  } catch {}
 }
-
-
-
 
 // -----------------------------
 // UPDATED: renderTools()
@@ -1759,21 +1794,45 @@ function wireAdvancedSearch() {
 function renderTools(){
   const el = byId('toolButtons');
   const canCreate = ['candidates','clients','umbrellas'].includes(currentSection);
-  const canEdit = ['candidates','clients','umbrellas','settings'].includes(currentSection);
-  const canDelete = ['candidates','clients','umbrellas'].includes(currentSection);
 
   el.innerHTML = '';
-  const addBtn = (txt, cb)=>{ const b=document.createElement('button'); b.textContent = txt; b.onclick=cb; el.appendChild(b); };
+  const addBtn = (txt, cb) => {
+    const b = document.createElement('button');
+    b.textContent = txt;
+    b.onclick = cb;
+    el.appendChild(b);
+    return b;
+  };
 
-  addBtn('Create New Record', ()=> openCreate());
-  addBtn('Edit Record',   ()=> openEdit());
-  addBtn('Delete Record', ()=> openDelete());
-  addBtn('Search…',       ()=> openSearchModal()); // 🔧 removed "Saved searches…" per brief
+  const btnCreate = addBtn('Create New Record', () => openCreate());
+  addBtn('Show all records', () => showAllRecords(currentSection));
+  addBtn('Search…', () => openSearchModal()); // left toolbar search
 
-  if (!canCreate) el.children[0].classList.add('btn');
-  if (!canEdit)   el.children[1].classList.add('btn');
-  if (!canDelete) el.children[2].classList.add('btn');
+  if (!canCreate) btnCreate.disabled = true;
 }
+async function showAllRecords(section = currentSection){
+  // Reset paging & clear all filters
+  window.__listState = window.__listState || {};
+  const st = (window.__listState[section] ||= {
+    page: 1, pageSize: 50, total: null, hasMore: false, filters: null,
+  });
+  st.page = 1;
+  st.filters = null;
+
+  // Forget any focused shortlist (IDs selection)
+  const sel = ensureSelection(section);
+  sel.ids.clear();
+  sel.fingerprint = ''; // optional: allow renderSummary to recompute
+
+  // Reload full list for the section and render
+  const rows = await loadSection();
+  renderSummary(rows);
+}
+// Optional alias if other code calls clearFilters()
+function clearFilters(section = currentSection){
+  return showAllRecords(section);
+}
+
 
 // ===================== NEW HELPERS (UI + data) =====================
 
@@ -5852,7 +5911,6 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
         } else {
           if (this.mode==='edit' || this.mode==='create') { this.isDirty = true; this._updateButtons && this._updateButtons(); }
         }
-        // live repaint for candidate rates only on Rates tab
         try { const t=currentFrame(); if (t && t.entity==='candidates' && t.currentTabKey==='rates') { renderCandidateRatesTable?.(); } } catch {}
       };
       root.addEventListener('input', onDirty, true);
@@ -5866,11 +5924,9 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
 
       byId('modalBody').innerHTML = this.renderTab(k, this.mergedRowForTab(k)) || '';
 
-      // Mount per-entity extras (only inject Rates host on Rates tab)
       if (this.entity==='candidates' && k==='rates') { mountCandidateRatesTab?.(); }
       if (this.entity==='candidates' && k==='pay')   { mountCandidatePayTab?.(); }
 
-      // >>> Added: Mount Roles on Candidates → Main tab (and keep pay-method state in sync)
       if (this.entity==='candidates' && k==='main') {
         const pmSel = document.querySelector('#pay-method');
         if (pmSel) {
@@ -5897,7 +5953,6 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
           })();
         }
       }
-      // <<< End: Roles mount
 
       if (this.entity==='clients'    && k==='rates')     { mountClientRatesTab?.(); }
       if (this.entity==='clients'    && k==='hospitals') { mountClientHospitalsTab?.(); }
@@ -6025,9 +6080,9 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
 
     top._updateButtons();
 
-    // Snapshot includes overrides so Cancel truly clears staged changes
     btnEdit.onclick = ()=>{
-      if (isChild || top.noParentGate || top.kind==='advanced-search') return;
+      const isChildNow = (stack().length > 1);
+      if (isChildNow || top.noParentGate || top.kind==='advanced-search') return;
       if (top.mode==='view') {
         top._snapshot = {
           data               : deep(window.modalCtx?.data||null),
@@ -6145,6 +6200,23 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
       }
       fr._saving=false; if (!ok) { L('saveForFrame RESULT not ok'); fr._updateButtons&&fr._updateButtons(); return; }
 
+      // >>> Special-case: Advanced Search closes on success instead of flipping to view
+      if (fr.kind === 'advanced-search') {
+        sanitizeModalGeometry();
+        const closing = stack().pop();
+        if (closing?._detachDirty){ try{closing._detachDirty();}catch{} closing._detachDirty=null; }
+        if (closing?._detachGlobal){ try{closing._detachGlobal();}catch{} closing._detachGlobal=null; } fr._wired=false;
+
+        if (stack().length>0) {
+          const p=currentFrame(); renderTop(); try{ p.onReturn && p.onReturn(); }catch{}
+        } else {
+          discardAllModalsAndState();
+        }
+        L('saveForFrame EXIT (advanced-search closed)');
+        return;
+      }
+      // <<< End special-case
+
       if (isChildNow) {
         try { window.dispatchEvent(new CustomEvent('modal-dirty')); } catch {}
         sanitizeModalGeometry(); stack().pop();
@@ -6173,8 +6245,8 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
     bindSave(btnSave, top);
 
     const onDirtyEvt = ()=>{
-      const isChild=(stack().length>1);
-      if(isChild){ const p=parentFrame(); if(p && (p.mode==='edit'||p.mode==='create')){ p.isDirty=true; p._updateButtons&&p._updateButtons(); } }
+      const isChildNow=(stack().length>1);
+      if(isChildNow){ const p=parentFrame(); if(p && (p.mode==='edit'||p.mode==='create')){ p.isDirty=true; p._updateButtons&&p._updateButtons(); } }
       else if(top.mode==='edit'||top.mode==='create'){ top.isDirty=true; top._updateButtons&&top._updateButtons(); }
       try{ const t=currentFrame(); if(t && t.entity==='candidates' && t.currentTabKey==='rates'){ renderCandidateRatesTable?.(); } }catch{}
     };
@@ -6203,8 +6275,9 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
     }
 
     const parentEditable = parent && (parent.mode==='edit' || parent.mode==='create');
-    if (isChild && !top.noParentGate) setFormReadOnly(byId('modalBody'), !parentEditable);
-    else                              setFrameMode(top, top.mode);
+    const isChildNow = (stack().length > 1);
+    if (isChildNow && !top.noParentGate) setFormReadOnly(byId('modalBody'), !parentEditable);
+    else                                 setFrameMode(top, top.mode);
 
     GE();
   }
@@ -6265,7 +6338,6 @@ function setRowSelected(section, id, selected) {
 }
 
 
-
 async function applyShortlistFilter(section, { ids }) {
   const cleanIds = Array.isArray(ids) ? ids.map(String).filter(Boolean) : [];
   if (!cleanIds.length) {
@@ -6273,13 +6345,13 @@ async function applyShortlistFilter(section, { ids }) {
     return;
   }
 
-  // Reset paging & apply IDs-only filter (canonical state key)
+  // Reset paging & REPLACE existing filters with IDs-only
   window.__listState = window.__listState || {};
   const st = (window.__listState[section] ||= {
     page: 1, pageSize: 50, total: null, hasMore: false, filters: null,
   });
   st.page = 1;
-  st.filters = { ...(st.filters || {}), ids: cleanIds };
+  st.filters = { ids: cleanIds }; // ← replace, don't merge
 
   // Mirror into selection for checkbox sync
   const sel = ensureSelection(section);
@@ -6304,6 +6376,7 @@ async function focusCurrentSelection(section) {
 }
 
 // Apply IDs-only selection as a filter and reload
+// Apply IDs-only selection as a filter and reload
 async function applySelectionAsFilter(section, selectionSnapshot) {
   const ids = Array.isArray(selectionSnapshot?.ids)
     ? selectionSnapshot.ids.map(String).filter(Boolean)
@@ -6314,17 +6387,20 @@ async function applySelectionAsFilter(section, selectionSnapshot) {
     return;
   }
 
+  // Reset paging & REPLACE existing filters with IDs-only
   window.__listState = window.__listState || {};
   const st = (window.__listState[section] ||= {
     page: 1, pageSize: 50, total: null, hasMore: false, filters: null,
   });
   st.page = 1;
-  st.filters = { ...(st.filters || {}), ids };
+  st.filters = { ids }; // ← replace, don't merge
 
+  // Mirror into selection for checkbox sync
   const sel = ensureSelection(section);
   sel.fingerprint = JSON.stringify({ section, filters: st.filters || {} });
   sel.ids = new Set(ids);
 
+  // Reload data and re-render
   const rows = await search(section, st.filters);
   renderSummary(rows);
 }
