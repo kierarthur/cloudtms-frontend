@@ -43,23 +43,15 @@ async function loadSection(){
   window.__listState = window.__listState || {};
   const st = (window.__listState[currentSection] ||= { page: 1, pageSize: 50, total: null, hasMore: false, filters: null });
 
-  // selection fingerprint reset if dataset changed (IDs-only)
-  window.__selection = window.__selection || {};
-  const sel = (window.__selection[currentSection] ||= { fingerprint:'', ids:new Set() });
-  const fp = JSON.stringify({ section: currentSection, filters: st.filters || {} });
-  if (sel.fingerprint !== fp) {
-    sel.fingerprint = fp;
-    sel.ids.clear();
-  }
-
   // choose which loader to use (search vs plain list)
   const useSearch = !!st.filters && (Object.keys(st.filters).length > 0);
 
   // helper to fetch one page
   const fetchOne = async (section, page, pageSize) => {
-    // push paging so builders pick it up
+    // temporarily push paging into state so builders pick it up
     window.__listState[section].page = page;
     window.__listState[section].pageSize = pageSize;
+
     if (useSearch) {
       return await search(section, window.__listState[section].filters || {});
     } else {
@@ -69,36 +61,42 @@ async function loadSection(){
         case 'umbrellas':  return await listUmbrellas();
         case 'settings':   return await getSettings();
         case 'audit':      return await listOutbox();
+        case 'contracts':  // new section: use search wrapper for paging even without explicit filters
+          return await search('contracts', {});
         default:           return [];
       }
     }
   };
 
-  // "ALL" via sequential paging
+  // handle ALL with sequential paging (append until exhausted)
   if (st.pageSize === 'ALL') {
     const acc = [];
     let p = 1;
-    const chunk = 200;
-    while (true) {
+    const chunk = 200; // internal chunk size for ALL
+    let gotMore = true;
+    while (gotMore) {
       const rows = await fetchOne(currentSection, p, chunk);
       acc.push(...(rows || []));
-      if (!Array.isArray(rows) || rows.length < chunk) break;
+      gotMore = Array.isArray(rows) && rows.length === chunk;
       p += 1;
+      if (!gotMore) break;
     }
+    // finalise state for render
     window.__listState[currentSection].page = 1;
     window.__listState[currentSection].hasMore = false;
     window.__listState[currentSection].total = acc.length;
     return acc;
   }
 
-  // normal one-page
+  // normal one-page load
   const page = Number(st.page || 1);
   const ps   = Number(st.pageSize || 50);
   const rows = await fetchOne(currentSection, page, ps);
-  window.__listState[currentSection].hasMore = Array.isArray(rows) && rows.length === ps;
+  const hasMore = Array.isArray(rows) && rows.length === ps;
+  window.__listState[currentSection].hasMore = hasMore;
+  // total unknown unless backend returns it elsewhere; leave as-is
   return rows;
 }
-
 
 
 function clearSession(){
@@ -372,11 +370,11 @@ function initAuthUI(){
   const hasResetToken = url.searchParams.get('k') || url.searchParams.get('token');
   if (hasResetToken && !(typeof getSession === 'function' && getSession()?.accessToken)) openReset();
 }
-
 // ===== App state + rendering =====
 const sections = [
   {key:'candidates', label:'Candidates', icon:'👤'},
   {key:'clients', label:'Clients', icon:'🏥'},
+  {key:'contracts', label:'Contracts', icon:'📄'},
   {key:'timesheets', label:'Timesheets', icon:'🗒️'},
   {key:'healthroster', label:'Healthroster', icon:'📅'},
   {key:'invoices', label:'Invoices', icon:'📄'},
@@ -384,6 +382,7 @@ const sections = [
   {key:'settings', label:'Settings', icon:'⚙️'},
   {key:'audit', label:'Audit', icon:'🛡️'}
 ];
+
 let currentSection = 'candidates';
 let currentRows = [];
 let currentSelection = null;
@@ -715,7 +714,10 @@ function populateSearchFormFromFilters(filters={}, formSel='#searchForm'){
 // FRONTEND — search (UPDATED: no extra logic beyond existing; kept for completeness)
 // ======================================
 
-async function search(section, filters={}){
+// ──────────────────────────────────────────────────────────────────────────────
+// FIX 1: Search route mismatch (contracts now calls /api/contracts with filters)
+// ──────────────────────────────────────────────────────────────────────────────
+async function search(section, filters = {}) {
   window.__listState = window.__listState || {};
   const st = (window.__listState[section] ||= { page: 1, pageSize: 50, total: null, hasMore: false, filters: null });
 
@@ -725,6 +727,7 @@ async function search(section, filters={}){
   sel.fingerprint = JSON.stringify({ section, filters: filters || {} });
   sel.ids.clear();
 
+  // Default mappings for existing sections
   const map = {
     candidates:'/api/search/candidates',
     clients:'/api/search/clients',
@@ -732,9 +735,14 @@ async function search(section, filters={}){
     timesheets:'/api/search/timesheets',
     invoices:'/api/search/invoices'
   };
-  const p = map[section]; if (!p) return [];
+
+  // Contracts use /api/contracts (admin list with filters) — not /api/search/contracts
+  let p = (section === 'contracts') ? '/api/contracts' : map[section];
+  if (!p) return [];
+
   const qs = buildSearchQS(section, filters);
   const url = qs ? `${p}?${qs}` : p;
+
   const r = await authFetch(API(url));
   const rows = toList(r);
 
@@ -745,6 +753,1220 @@ async function search(section, filters={}){
 
   return rows;
 }
+
+
+
+function defaultColumnsFor(section){
+  const ls = localStorage.getItem('cloudtms.cols.'+section);
+  if (ls) try { return JSON.parse(ls); } catch{}
+  switch(section){
+    case 'candidates': return ['last_name','first_name','phone','role','postcode','email'];
+    case 'clients': return ['name','primary_invoice_email','invoice_address','postcode','ap_phone'];
+    case 'umbrellas': return ['name','vat_chargeable','bank_name','sort_code','account_number','enabled'];
+    case 'audit': return ['type','to','subject','status','created_at_utc','last_error'];
+    case 'contracts': // sensible defaults for the new section
+      return ['candidate_name','client_name','role','band','pay_method_snapshot','submission_mode','start_date','end_date','bucket_labels_preview'];
+    default: return ['id'];
+  }
+}
+
+
+
+
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Data / API wrappers — Contracts + Weeks + Utilities
+// ─────────────────────────────────────────────────────────────────────────────-
+
+const _enc = (v) => encodeURIComponent(String(v ?? ''));
+const _json = (o) => JSON.stringify(o ?? {});
+
+async function listContracts(filters = {}) {
+  // Mirrors /api/contracts (admin list) with common FE filters.
+  const qs = new URLSearchParams();
+  if (filters.candidate_id) qs.set('candidate_id', filters.candidate_id);
+  if (filters.client_id)    qs.set('client_id',    filters.client_id);
+  if (filters.role)         qs.set('role',         filters.role);
+  if (filters.band != null) qs.set('band',         filters.band);
+  if (filters.pay_method_snapshot) qs.set('pay_method_snapshot', String(filters.pay_method_snapshot).toUpperCase());
+  if (filters.active_on)    qs.set('active_on',    filters.active_on);  // YYYY-MM-DD
+  if (typeof filters.auto_invoice === 'boolean') qs.set('auto_invoice', String(filters.auto_invoice));
+
+  const url = qs.toString() ? `/api/contracts?${qs}` : `/api/contracts`;
+  const r = await authFetch(API(url));
+  return toList(r);
+}
+
+async function getContract(contract_id) {
+  const r = await authFetch(API(`/api/contracts/${_enc(contract_id)}`));
+  if (!r?.ok) return null;
+  return r.json();
+}
+
+async function upsertContract(payload, id /* optional */) {
+  // Accepts all contract fields + optional bucket_labels_json
+  // Normalise bucket_labels to either null or a strict 5-key object
+  const patch = { ...payload };
+  if ('bucket_labels_json' in patch) {
+    const norm = normaliseBucketLabelsInput(patch.bucket_labels_json);
+    patch.bucket_labels_json = norm === false ? null : norm;
+  }
+
+  const url = id ? `/api/contracts/${_enc(id)}` : `/api/contracts`;
+  const method = id ? 'PATCH' : 'POST';
+  const r = await authFetch(API(url), {
+    method, headers: { 'content-type':'application/json' }, body: _json(patch)
+  });
+  if (!r?.ok) throw new Error(`Contract ${id ? 'update' : 'create'} failed`);
+  return r.json();
+}
+
+async function deleteContract(contract_id) {
+  const r = await authFetch(API(`/api/contracts/${_enc(contract_id)}`), { method: 'DELETE' });
+  if (!r?.ok) throw new Error('Delete contract failed');
+  return r.json();
+}
+
+async function checkContractOverlap(payload /* {candidate_id,start_date,end_date,ignore_contract_id?} */) {
+  const r = await authFetch(API(`/api/contracts/check-overlap`), {
+    method: 'POST', headers: { 'content-type':'application/json' }, body: _json(payload)
+  });
+  if (!r?.ok) throw new Error('Overlap check failed');
+  return r.json();
+}
+
+async function generateContractWeeks(contract_id) {
+  const r = await authFetch(API(`/api/contracts/${_enc(contract_id)}/generate-weeks`), { method: 'POST' });
+  if (!r?.ok) throw new Error('Generate weeks failed');
+  return r.json();
+}
+
+async function listContractWeeks(contract_id, filters = {}) {
+  const qs = new URLSearchParams();
+  if (contract_id) qs.set('contract_id', contract_id);
+  if (filters.status) qs.set('status', filters.status);
+  if (filters.submission_mode_snapshot) qs.set('submission_mode_snapshot', filters.submission_mode_snapshot);
+  if (filters.week_ending_from) qs.set('week_ending_from', filters.week_ending_from);
+  if (filters.week_ending_to)   qs.set('week_ending_to',   filters.week_ending_to);
+  const url = qs.toString() ? `/api/contract-weeks?${qs}` : `/api/contract-weeks`;
+  const r = await authFetch(API(url));
+  return toList(r);
+}
+
+async function getContractCalendar(contract_id, year /* optional */) {
+  const qs = new URLSearchParams();
+  if (year) qs.set('year', String(year));
+  const url = qs.toString()
+    ? `/api/contracts/${_enc(contract_id)}/calendar?${qs}`
+    : `/api/contracts/${_enc(contract_id)}/calendar`;
+  const r = await authFetch(API(url));
+  if (!r?.ok) throw new Error('Calendar fetch failed');
+  return r.json();
+}
+
+async function contractWeekSwitchMode(week_id, newMode /* optional; server toggles if omitted */) {
+  // Backend toggles if no body; allow hint mode to be explicit
+  const init = newMode
+    ? { method:'POST', headers:{'content-type':'application/json'}, body:_json({ submission_mode_snapshot: String(newMode).toUpperCase() }) }
+    : { method:'POST' };
+  const r = await authFetch(API(`/api/contract-weeks/${_enc(week_id)}/switch-mode`), init);
+  if (!r?.ok) throw new Error('Switch mode failed');
+  return r.json();
+}
+
+async function contractWeekPresignPdf(week_id) {
+  const r = await authFetch(API(`/api/contract-weeks/${_enc(week_id)}/presign-manual-pdf`), { method:'POST' });
+  if (!r?.ok) throw new Error('Presign failed');
+  return r.json(); // { key, upload_url, token, expires_in }
+}
+
+async function contractWeekReplacePdf(week_id, r2_key) {
+  const r = await authFetch(API(`/api/contract-weeks/${_enc(week_id)}/replace-manual-pdf`), {
+    method:'POST', headers:{'content-type':'application/json'}, body:_json({ r2_key })
+  });
+  if (!r?.ok) throw new Error('Replace manual PDF failed');
+  return r.json();
+}
+
+async function contractWeekManualUpsert(week_id, payload /* { hours or day_entries_json, reference_number? } */) {
+  // Ensure numeric 5-bucket totals if passed in
+  if (payload?.hours) {
+    const h = payload.hours;
+    payload.hours = {
+      day: Number(h?.day || 0), night: Number(h?.night || 0),
+      sat: Number(h?.sat || 0), sun: Number(h?.sun || 0), bh: Number(h?.bh || 0)
+    };
+  }
+  const r = await authFetch(API(`/api/contract-weeks/${_enc(week_id)}/manual-upsert`), {
+    method:'POST', headers:{'content-type':'application/json'}, body:_json(payload)
+  });
+  if (!r?.ok) throw new Error('Manual upsert failed');
+  return r.json(); // { timesheet_id, processing_status, hours, had_day_entries }
+}
+
+async function contractWeekAuthorise(week_id) {
+  const r = await authFetch(API(`/api/contract-weeks/${_enc(week_id)}/manual-authorise`), { method:'POST' });
+  if (!r?.ok) throw new Error('Authorise failed');
+  return r.json();
+}
+
+async function contractWeekDeleteTimesheet(week_id) {
+  const r = await authFetch(API(`/api/contract-weeks/${_enc(week_id)}/timesheet`), { method:'DELETE' });
+  if (!r?.ok) throw new Error('Delete timesheet failed');
+  return r.json();
+}
+
+async function contractWeekCreateExpenseSheet(week_id) {
+  const r = await authFetch(API(`/api/contract-weeks/${_enc(week_id)}/create-expense-sheet`), { method:'POST' });
+  if (!r?.ok) throw new Error('Create expense sheet failed');
+  return r.json();
+}
+
+// Minimal picker feed
+async function listContractsBasic() {
+  const rows = await listContracts({});
+  return (rows || []).map(c => ({
+    id: c.id,
+    label: [
+      (c.candidate_display || c.candidate_id || '').toString(),
+      '—',
+      (c.client_name || c.client_id || '').toString(),
+      (c.role ? `(${c.role}${c.band ? ` ${c.band}` : ''})` : ''),
+      ' ',
+      `[${c.start_date || ''} → ${c.end_date || ''}]`
+    ].join(' ').replace(/\s+/g, ' ').trim()
+  }));
+}
+
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Bucket label helpers (display-only; math stays canonical)
+// ─────────────────────────────────────────────────────────────────────────────-
+
+function labelsDefault() {
+  return { day:'Day', night:'Night', sat:'Sat', sun:'Sun', bh:'BH' };
+}
+
+/**
+ * @returns {object|false} normalized labels object or false if invalid (to clear)
+ */
+function normaliseBucketLabelsInput(raw) {
+  if (!raw || typeof raw !== 'object') return false;
+  const keys = ['day','night','sat','sun','bh'];
+  const out = {};
+  for (const k of keys) {
+    const v = raw[k];
+    if (typeof v !== 'string' || !v.trim()) return false;
+    out[k] = v.trim();
+  }
+  return out;
+}
+
+function getBucketLabelsForContract(contract) {
+  const userSet = normaliseBucketLabelsInput(contract?.bucket_labels_json || null);
+  return userSet || labelsDefault();
+}
+
+function summariseBucketLabels(labels) {
+  const L = normaliseBucketLabelsInput(labels);
+  return L ? [L.day, L.night, L.sat, L.sun, L.bh].join('/') : '';
+}
+
+function applyBucketLabelsToHoursGrid(gridEl, labels) {
+  const L = normaliseBucketLabelsInput(labels) || labelsDefault();
+  if (!gridEl) return;
+  const map = {
+    day:   gridEl.querySelector('[data-bucket="day"] .lbl'),
+    night: gridEl.querySelector('[data-bucket="night"] .lbl'),
+    sat:   gridEl.querySelector('[data-bucket="sat"] .lbl'),
+    sun:   gridEl.querySelector('[data-bucket="sun"] .lbl'),
+    bh:    gridEl.querySelector('[data-bucket="bh"] .lbl'),
+  };
+  Object.entries(map).forEach(([k, el]) => { if (el) el.textContent = L[k]; });
+}
+
+function renderBucketLabelsEditor(ctx /* modalCtx */) {
+  const L = getBucketLabelsForContract(ctx.data || {});
+  return `
+    <div class="group">
+      <div class="row"><label>Bucket labels (optional)</label>
+        <div class="controls small">
+          <div class="grid-5" id="bucketLabelsGrid">
+            <div data-k="day"><span>Day</span><input class="input" type="text" name="bucket_day"  value="${(L.day||'')}" /></div>
+            <div data-k="night"><span>Night</span><input class="input" type="text" name="bucket_night" value="${(L.night||'')}" /></div>
+            <div data-k="sat"><span>Sat</span><input class="input" type="text" name="bucket_sat"  value="${(L.sat||'')}" /></div>
+            <div data-k="sun"><span>Sun</span><input class="input" type="text" name="bucket_sun"  value="${(L.sun||'')}" /></div>
+            <div data-k="bh"><span>BH</span><input class="input" type="text" name="bucket_bh"   value="${(L.bh||'')}" /></div>
+          </div>
+          <div class="hint">These are display labels only. Calculations still use the canonical 5 buckets.</div>
+        </div>
+      </div>
+    </div>`;
+}
+
+function _collectBucketLabelsFromForm(rootSel = '#contractForm') {
+  const root = document.querySelector(rootSel);
+  if (!root) return null;
+  const day   = root.querySelector('input[name="bucket_day"]')?.value?.trim();
+  const night = root.querySelector('input[name="bucket_night"]')?.value?.trim();
+  const sat   = root.querySelector('input[name="bucket_sat"]')?.value?.trim();
+  const sun   = root.querySelector('input[name="bucket_sun"]')?.value?.trim();
+  const bh    = root.querySelector('input[name="bucket_bh"]')?.value?.trim();
+  const raw = { day, night, sat, sun, bh };
+  // If all empty → treat as null; if partially filled → require full 5, else clear to null
+  const filled = Object.values(raw).filter(Boolean).length;
+  if (filled === 0) return null;
+  const norm = normaliseBucketLabelsInput(raw);
+  return norm || null;
+}
+
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Overlap guard flow
+// ─────────────────────────────────────────────────────────────────────────────-
+
+async function preSaveContractWithOverlapCheck(formData /* object */) {
+  const payload = {
+    candidate_id: formData.candidate_id,
+    start_date:   formData.start_date,
+    end_date:     formData.end_date,
+    ignore_contract_id: formData.id || null
+  };
+  const res = await checkContractOverlap(payload);
+  if (!res?.has_overlap) return true;
+  const ok = await showContractOverlapWarningDialog(res.overlaps || []);
+  return !!ok;
+}
+
+function showContractOverlapWarningDialog(overlaps = []) {
+  // Returns a Promise<boolean> that resolves when user chooses.
+  return new Promise((resolve) => {
+    const list = overlaps.map(o => `
+      <li>
+        <div><b>${(o.client_name || o.client_id || '')}</b> — ${o.role || ''}${o.band ? ` (Band ${o.band})` : ''}</div>
+        <div class="mini">Existing: ${o.existing_start_date} → ${o.existing_end_date}</div>
+        <div class="mini">Overlap: <b>${o.overlap_start_date} → ${o.overlap_end_date}</b> (${o.overlap_days} day(s))</div>
+      </li>`).join('');
+
+    const content = `
+      <div class="warn">
+        <p>The proposed dates overlap the following contract(s) for this candidate:</p>
+        <ul class="overlap-list">${list || '<li>(none)</li>'}</ul>
+        <p>Do you want to proceed anyway?</p>
+      </div>`;
+
+    showModal(
+      'Overlap detected',
+      [{ key: 'ov', title: 'Warning'}],
+      () => content,
+      async () => { resolve(true); return true; },
+      false,
+      () => {}, // onReturn
+      {
+        kind:'overlap-warning',
+        extraButtons: [
+          { label:'Cancel', role:'secondary', onClick: () => { resolve(false); discardTopModal && discardTopModal(); } }
+        ]
+      }
+    );
+  });
+}
+function confirmProceedWithOverlap(){ /* kept for API parity; handled in modal above */ return Promise.resolve(true); }
+function cancelOverlapSave(){ /* kept for API parity; handled in modal above */ return Promise.resolve(false); }
+
+
+// ──────────────────────────────────────────────────────────────────────────────
+// UI — Contracts section (table + modal tabs)
+// ─────────────────────────────────────────────────────────────────────────────-
+
+function renderContractsTable(rows) {
+  // Optional custom renderer if you later want to override generic grid.
+  // For now, rely on generic renderSummary() table; keep this as a hook.
+  const div = document.createElement('div');
+  div.innerHTML = `<div class="hint">Using standard grid columns for Contracts (configure via “Columns”).</div>`;
+  return div;
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// FIX 6: Add guarded Delete entry point inside openContract (plus std_hours_json save)
+// (Delete only if unused; handled by backend; no change to global openDelete())
+// ──────────────────────────────────────────────────────────────────────────────
+// ──────────────────────────────────────────────────────────────────────────────
+// openContract (amended) — surface PAY_METHOD_MISMATCH warnings after save
+// ──────────────────────────────────────────────────────────────────────────────
+function openContract(row) {
+  const isCreate = !row || !row.id;
+  window.modalCtx = {
+    entity: 'contracts',
+    mode: isCreate ? 'create' : 'edit',
+    data: { ...(row || {}) },
+    _saveInFlight: false
+  };
+
+  const extraButtons = [];
+  if (!isCreate && window.modalCtx.data?.id) {
+    extraButtons.push({
+      label: 'Delete contract',
+      role: 'danger',
+      onClick: async () => {
+        const id = window.modalCtx.data?.id;
+        if (!id) return;
+        if (!confirm('Delete this contract? (Only allowed if no timesheets exist)')) return;
+        try {
+          await deleteContract(id);
+          try { discardAllModalsAndState(); } catch {}
+          await renderAll();
+        } catch (e) {
+          alert(e?.message || 'Delete failed');
+        }
+      }
+    });
+  }
+
+  showModal(
+    isCreate ? 'Create Contract' : 'Edit Contract',
+    [
+      { key: 'main',     title: 'Main' },
+      { key: 'rates',    title: 'Rates' },
+      { key: 'calendar', title: 'Calendar' }
+    ],
+    (key) => {
+      if (key === 'main')     return renderContractMainTab(window.modalCtx);
+      if (key === 'rates')    return renderContractRatesTab(window.modalCtx);
+      if (key === 'calendar') return renderContractCalendarTab(window.modalCtx);
+      return `<div class="tabc">Unknown tab.</div>`;
+    },
+    async () => {
+      if (window.modalCtx?._saveInFlight) return false;
+      window.modalCtx._saveInFlight = true;
+
+      try {
+        const form = document.querySelector('#contractForm');
+        if (!form) throw new Error('Form not found');
+
+        const fd = new FormData(form);
+        const val = (k) => (fd.get(k) ?? '').toString().trim() || null;
+        const bool = (k) => {
+          const v = (fd.get(k) ?? '').toString().trim();
+          return v === 'true' || v === 'on' || v === '1';
+        };
+        const numOrNull = (s) => {
+          const v = (fd.get(s) ?? '').toString().trim();
+          return v === '' ? null : Number(v || 0);
+        };
+
+        const gh = {
+          mon: numOrNull('gh_mon'),
+          tue: numOrNull('gh_tue'),
+          wed: numOrNull('gh_wed'),
+          thu: numOrNull('gh_thu'),
+          fri: numOrNull('gh_fri'),
+          sat: numOrNull('gh_sat'),
+          sun: numOrNull('gh_sun'),
+        };
+        const ghFilled = Object.values(gh).some(v => v != null && v !== 0);
+        const std_hours_json = ghFilled ? gh : null;
+
+        const data = {
+          id: window.modalCtx.data?.id || null,
+          candidate_id: val('candidate_id'),
+          client_id:    val('client_id'),
+          role:         val('role'),
+          band:         val('band'),
+          display_site: val('display_site'),
+          ward_hint:    val('ward_hint'),
+          start_date:   val('start_date'),
+          end_date:     val('end_date'),
+          pay_method_snapshot: (val('pay_method_snapshot') || 'PAYE').toUpperCase(),
+          default_submission_mode: (val('default_submission_mode') || 'ELECTRONIC').toUpperCase(),
+          week_ending_weekday_snapshot: (val('week_ending_weekday_snapshot') || '0'),
+          auto_invoice: bool('auto_invoice'),
+          require_reference_to_pay: bool('require_reference_to_pay'),
+          require_reference_to_invoice: bool('require_reference_to_invoice'),
+          rates_json: {
+            paye_day:  Number(val('paye_day') || 0),  paye_night: Number(val('paye_night') || 0), paye_sat: Number(val('paye_sat') || 0), paye_sun: Number(val('paye_sun') || 0), paye_bh: Number(val('paye_bh') || 0),
+            umb_day:   Number(val('umb_day')  || 0),  umb_night:  Number(val('umb_night')  || 0), umb_sat:  Number(val('umb_sat')  || 0), umb_sun:  Number(val('umb_sun')  || 0), umb_bh:  Number(val('umb_bh')  || 0),
+            charge_day:Number(val('charge_day')|| 0), charge_night:Number(val('charge_night')||0), charge_sat:Number(val('charge_sat')||0), charge_sun:Number(val('charge_sun')||0), charge_bh:Number(val('charge_bh')||0),
+          },
+          std_hours_json,
+          bucket_labels_json: _collectBucketLabelsFromForm('#contractForm')
+        };
+
+        const ok = await preSaveContractWithOverlapCheck(data);
+        if (!ok) { window.modalCtx._saveInFlight = false; return false; }
+
+        const saved = await upsertContract(data, data.id || undefined);
+        window.modalCtx.data = saved?.contract || saved || window.modalCtx.data;
+
+        // surface non-blocking warnings (e.g., PAY_METHOD_MISMATCH)
+        try {
+          const warnings = saved?.warnings || saved?.contract?.warnings || [];
+          const warnStr  = Array.isArray(warnings) ? warnings.join(', ') : (saved?.warning || '');
+          if (warnStr) showModalHint(`Warning: ${warnStr}`, 'warn');
+        } catch {}
+
+        const contractId = saved?.id || saved?.contract?.id;
+        if (isCreate && contractId) {
+          try { await generateContractWeeks(contractId); } catch {}
+        }
+
+        try { discardAllModalsAndState(); } catch {}
+        await renderAll();
+        return true;
+      } catch (e) {
+        alert(`Save failed: ${e?.message || e}`);
+        return false;
+      } finally {
+        window.modalCtx._saveInFlight = false;
+      }
+    },
+    !!window.modalCtx.data?.id,
+    // onReturn: wire picker buttons & auto-assist hints when Main tab is visible
+    () => {
+      const wire = () => {
+        const form = document.querySelector('#contractForm'); if (!form) return;
+        const btnPC = document.getElementById('btnPickCandidate');
+        const btnCC = document.getElementById('btnClearCandidate');
+        const btnPL = document.getElementById('btnPickClient');
+        const btnCL = document.getElementById('btnClearClient');
+
+        if (btnPC && !btnPC.__wired) {
+          btnPC.__wired = true;
+          btnPC.addEventListener('click', async () => {
+            openCandidatePicker(async ({ id, label }) => {
+              setContractFormValue('candidate_id', id);
+              const lab = document.getElementById('candidatePickLabel'); if (lab) lab.textContent = `Chosen: ${label}`;
+              // Auto-assist: align pay method & hint if mismatched
+              try {
+                const cand = await getCandidate(id);
+                const hint = prefillPayMethodFromCandidate(cand);
+                if (hint) showModalHint(hint, 'warn');
+              } catch {}
+            });
+          });
+        }
+        if (btnCC && !btnCC.__wired) {
+          btnCC.__wired = true;
+          btnCC.addEventListener('click', () => {
+            setContractFormValue('candidate_id', '');
+            const lab = document.getElementById('candidatePickLabel'); if (lab) lab.textContent = '';
+          });
+        }
+
+        if (btnPL && !btnPL.__wired) {
+          btnPL.__wired = true;
+          btnPL.addEventListener('click', async () => {
+            openClientPicker(async ({ id, label }) => {
+              setContractFormValue('client_id', id);
+              const lab = document.getElementById('clientPickLabel'); if (lab) lab.textContent = `Chosen: ${label}`;
+              // Auto-assist: show hint if no primary invoice email on client
+              try {
+                const client = await getClient(id);
+                const h = checkClientInvoiceEmailPresence(client);
+                if (h) showModalHint(h, 'warn');
+              } catch {}
+            });
+          });
+        }
+        if (btnCL && !btnCL.__wired) {
+          btnCL.__wired = true;
+          btnCL.addEventListener('click', () => {
+            setContractFormValue('client_id', '');
+            const lab = document.getElementById('clientPickLabel'); if (lab) lab.textContent = '';
+          });
+        }
+      };
+
+      // initial wire + re-wire when switching tabs
+      setTimeout(wire, 0);
+      const tabs = document.getElementById('modalTabs');
+      if (tabs && !tabs.__wired_contract_main) {
+        tabs.__wired_contract_main = true;
+        tabs.addEventListener('click', () => setTimeout(wire, 0));
+      }
+    },
+    { forceEdit:true, kind:'contracts', extraButtons }
+  );
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// NEW: contractWeekCreateAdditional — POST /api/contract-weeks/:id/additional
+// ──────────────────────────────────────────────────────────────────────────────
+async function contractWeekCreateAdditional(week_id) {
+  const r = await authFetch(API(`/api/contract-weeks/${encodeURIComponent(String(week_id))}/additional`), {
+    method: 'POST'
+  });
+  if (!r?.ok) throw new Error('Create additional sheet failed');
+  return r.json();
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// (Optional UX) NEW: openCandidatePicker / openClientPicker
+// Lightweight pickers that call onPick({id,label}) and close
+// ──────────────────────────────────────────────────────────────────────────────
+
+async function openCandidatePicker(onPick) {
+  // You can swap this for your real picker/source
+  const rows = await (typeof listCandidates === 'function' ? listCandidates() : []);
+  const html = `
+    <div class="tabc">
+      <div class="row"><label>Search</label><div class="controls">
+        <input class="input" type="text" id="pickerSearch" placeholder="Type a name, email, or phone…"/>
+      </div></div>
+      <div class="hint">Select a candidate</div>
+      <table class="grid" id="pickerTable"><tbody>
+        ${rows.map(r=>`
+          <tr data-id="${r.id||''}" class="pick-row">
+            <td>${(r.last_name||'')}, ${(r.first_name||'')}</td>
+            <td class="mini">${r.email||''}</td>
+          </tr>`).join('')}
+      </tbody></table>
+    </div>`;
+  showModal('Pick Candidate',[{key:'p',title:'Candidates'}],()=>html,async()=>true,false,()=>{
+    const tableEl  = document.getElementById('pickerTable');
+    const inputEl  = document.getElementById('pickerSearch');
+    if (inputEl && tableEl) wirePickerLiveFilter(inputEl, tableEl);
+
+    document.querySelectorAll('.pick-row').forEach(tr=>{
+      tr.addEventListener('click',()=>{
+        const id = tr.getAttribute('data-id');
+        const label = tr.textContent.trim();
+        try { if (typeof onPick==='function') onPick({ id, label }); } catch {}
+        discardTopModal && discardTopModal();
+      });
+    });
+  },{kind:'picker'});
+}
+
+async function openClientPicker(onPick) {
+  const rows = await (typeof listClients === 'function' ? listClients() : []);
+  const html = `
+    <div class="tabc">
+      <div class="row"><label>Search</label><div class="controls">
+        <input class="input" type="text" id="pickerSearch" placeholder="Type a client name or email…"/>
+      </div></div>
+      <div class="hint">Select a client</div>
+      <table class="grid" id="pickerTable"><tbody>
+        ${rows.map(r=>`
+          <tr data-id="${r.id||''}" class="pick-row">
+            <td>${r.name||''}</td>
+            <td class="mini">${r.primary_invoice_email||''}</td>
+          </tr>`).join('')}
+      </tbody></table>
+    </div>`;
+  showModal('Pick Client',[{key:'p',title:'Clients'}],()=>html,async()=>true,false,()=>{
+    const tableEl  = document.getElementById('pickerTable');
+    const inputEl  = document.getElementById('pickerSearch');
+    if (inputEl && tableEl) wirePickerLiveFilter(inputEl, tableEl);
+
+    document.querySelectorAll('.pick-row').forEach(tr=>{
+      tr.addEventListener('click',()=>{
+        const id = tr.getAttribute('data-id');
+        const label = tr.textContent.trim();
+        try { if (typeof onPick==='function') onPick({ id, label }); } catch {}
+        discardTopModal && discardTopModal();
+      });
+    });
+  },{kind:'picker'});
+}
+
+async function openClientPicker(onPick) {
+  const rows = await (typeof listClients === 'function' ? listClients() : []);
+  const html = `
+    <div class="tabc">
+      <div class="row"><label>Search</label><div class="controls">
+        <input class="input" type="text" id="pickerSearch" placeholder="Type a client name or email…"/>
+      </div></div>
+      <div class="hint">Select a client</div>
+      <table class="grid" id="pickerTable"><tbody>
+        ${rows.map(r=>`
+          <tr data-id="${r.id||''}" class="pick-row">
+            <td>${r.name||''}</td>
+            <td class="mini">${r.primary_invoice_email||''}</td>
+          </tr>`).join('')}
+      </tbody></table>
+    </div>`;
+
+  showModal(
+    'Pick Client',
+    [{ key:'p', title:'Clients' }],
+    () => html,
+    async () => true,
+    false,
+    () => {
+      const tableEl = document.getElementById('pickerTable');
+      const inputEl = document.getElementById('pickerSearch');
+
+      // Live filter as you type
+      if (inputEl && tableEl) {
+        if (typeof wirePickerLiveFilter === 'function') {
+          wirePickerLiveFilter(inputEl, tableEl);
+        } else {
+          // Fallback inline filter if helper isn't present
+          const trs = Array.from(tableEl.querySelectorAll('tbody tr'));
+          const norm = s => (s || '').toLowerCase();
+          inputEl.addEventListener('input', () => {
+            const q = norm(inputEl.value);
+            trs.forEach(tr => {
+              tr.style.display = !q || norm(tr.textContent).includes(q) ? '' : 'none';
+            });
+          });
+        }
+      }
+
+      // Row pick handler
+      document.querySelectorAll('.pick-row').forEach(tr => {
+        tr.addEventListener('click', () => {
+          const id = tr.getAttribute('data-id');
+          const label = tr.textContent.trim();
+          try { if (typeof onPick === 'function') onPick({ id, label }); } catch {}
+          if (typeof discardTopModal === 'function') discardTopModal();
+        });
+      });
+    },
+    { kind:'picker' }
+  );
+}
+
+
+
+// ===== NEW HELPERS / WRAPPERS =====
+
+// Fetch one candidate by id (adjust endpoint to your API if needed)
+async function getCandidate(candidate_id) {
+  if (!candidate_id) throw new Error('candidate_id required');
+  const r = await authFetch(API(`/api/candidates/${encodeURIComponent(String(candidate_id))}`));
+  if (!r?.ok) throw new Error('Failed to load candidate');
+  return r.json();
+}
+
+// Fetch one client by id (adjust endpoint to your API if needed)
+async function getClient(client_id) {
+  if (!client_id) throw new Error('client_id required');
+  const r = await authFetch(API(`/api/clients/${encodeURIComponent(String(client_id))}`));
+  if (!r?.ok) throw new Error('Failed to load client');
+  return r.json();
+}
+
+// Set/update the non-blocking hint text in the contract modal footer
+function showModalHint(text, tone /* 'ok' | 'warn' | 'fail' */) {
+  const el = byId('modalHint'); if (!el) return;
+  el.textContent = text || '';
+  el.classList.remove('tag-ok','tag-warn','tag-fail');
+  if (tone === 'ok')   el.classList.add('tag-ok');
+  if (tone === 'warn') el.classList.add('tag-warn');
+  if (tone === 'fail') el.classList.add('tag-fail');
+}
+
+// Generic live-filter helper for picker tables
+function wirePickerLiveFilter(inputEl, tableEl) {
+  const rows = Array.from(tableEl.querySelectorAll('tbody tr'));
+  const norm = (s) => (s||'').toLowerCase();
+  inputEl.addEventListener('input', () => {
+    const q = norm(inputEl.value);
+    rows.forEach(tr => {
+      const show = !q || norm(tr.textContent).includes(q);
+      tr.style.display = show ? '' : 'none';
+    });
+  });
+}
+
+// Convenience: set a form field inside the contract modal
+function setContractFormValue(name, value) {
+  const form = document.querySelector('#contractForm'); if (!form) return;
+  const el = form.querySelector(`[name="${CSS.escape(name)}"]`);
+  if (!el) return;
+  el.value = value == null ? '' : String(value);
+  const evt = new Event('input', { bubbles: true });
+  el.dispatchEvent(evt);
+}
+
+// Optional helper: align pay_method_snapshot to candidate; return hint if mismatch
+function prefillPayMethodFromCandidate(candidate) {
+  if (!candidate) return '';
+  const method = (candidate.pay_method || candidate.pay_method_snapshot || '').toString().toUpperCase();
+  if (!method || (method !== 'PAYE' && method !== 'UMBRELLA')) return '';
+
+  const form = document.querySelector('#contractForm'); if (!form) return '';
+  const sel = form.querySelector('select[name="pay_method_snapshot"]');
+  if (!sel) return '';
+
+  const current = (sel.value || '').toUpperCase();
+  if (current === method) return '';
+
+  // Preselect to match candidate to reduce mistakes (still editable)
+  sel.value = method;
+  const evt = new Event('change', { bubbles: true });
+  sel.dispatchEvent(evt);
+
+  return `Candidate pay method is ${method}; snapshot updated from ${current || 'N/A'}.`;
+}
+
+// Optional helper: return a friendly hint if client has no primary invoice email
+function checkClientInvoiceEmailPresence(client) {
+  if (!client) return '';
+  const has = !!(client.primary_invoice_email && String(client.primary_invoice_email).trim());
+  return has ? '' : 'Client has no primary invoice email set — auto-invoicing may be blocked.';
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// FIX 5: Guide hours UI (std_hours_json) added to Main tab
+// (Mon–Sun numeric hours; optional, display-only helper)
+// ──────────────────────────────────────────────────────────────────────────────
+function renderContractMainTab(ctx) {
+  const d = ctx?.data || {};
+  const labelsBlock = renderBucketLabelsEditor(ctx);
+
+  // Simple pickers; plug your real pickers if available.
+  const candVal   = d.candidate_id || '';
+  const clientVal = d.client_id || '';
+
+  // Pre-fill guide hours if present
+  const GH = d.std_hours_json || {};
+  const num = (v) => (v == null ? '' : String(v));
+
+  // Optional display labels if you have them on the row already
+  const candLabel = (d.candidate_display || '').trim();
+  const clientLabel = (d.client_name || '').trim();
+
+  return `
+    <form id="contractForm" class="tabc">
+      <div class="grid-2">
+        <div class="row">
+          <label>Candidate ID</label>
+          <div class="controls">
+            <div class="split">
+              <input class="input" type="text" name="candidate_id" value="${candVal}" placeholder="UUID" required />
+              <span>
+                <button type="button" class="btn mini" id="btnPickCandidate">Pick…</button>
+                <button type="button" class="btn mini" id="btnClearCandidate">Clear</button>
+              </span>
+            </div>
+            <div class="mini" id="candidatePickLabel">${candLabel ? `Chosen: ${candLabel}` : ''}</div>
+          </div>
+        </div>
+        <div class="row">
+          <label>Client ID</label>
+          <div class="controls">
+            <div class="split">
+              <input class="input" type="text" name="client_id" value="${clientVal}" placeholder="UUID" required />
+              <span>
+                <button type="button" class="btn mini" id="btnPickClient">Pick…</button>
+                <button type="button" class="btn mini" id="btnClearClient">Clear</button>
+              </span>
+            </div>
+            <div class="mini" id="clientPickLabel">${clientLabel ? `Chosen: ${clientLabel}` : ''}</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="grid-3">
+        <div class="row"><label>Role</label><div class="controls"><input class="input" name="role" value="${d.role || ''}" /></div></div>
+        <div class="row"><label>Band</label><div class="controls"><input class="input" name="band" value="${d.band || ''}" /></div></div>
+        <div class="row"><label>Display site</label><div class="controls"><input class="input" name="display_site" value="${d.display_site || ''}" /></div></div>
+      </div>
+
+      <div class="grid-2">
+        <div class="row"><label>Ward hint</label><div class="controls"><input class="input" name="ward_hint" value="${d.ward_hint || ''}" /></div></div>
+        <div class="row"><label>Week-ending weekday</label>
+          <div class="controls">
+            <select name="week_ending_weekday_snapshot">
+              ${[0,1,2,3,4,5,6].map(n => `<option value="${n}" ${String(d.week_ending_weekday_snapshot ?? 0)===String(n)?'selected':''}>${n} ${['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][n]}</option>`).join('')}
+            </select>
+          </div>
+        </div>
+      </div>
+
+      <div class="grid-2">
+        <div class="row"><label>Start date</label><div class="controls"><input class="input" name="start_date" value="${d.start_date || ''}" placeholder="YYYY-MM-DD" required /></div></div>
+        <div class="row"><label>End date</label><div class="controls"><input class="input" name="end_date" value="${d.end_date || ''}" placeholder="YYYY-MM-DD" required /></div></div>
+      </div>
+
+      <div class="grid-3">
+        <div class="row"><label>Pay method snapshot</label>
+          <div class="controls">
+            <select name="pay_method_snapshot">
+              <option value="PAYE" ${String(d.pay_method_snapshot||'PAYE').toUpperCase()==='PAYE'?'selected':''}>PAYE</option>
+              <option value="UMBRELLA" ${String(d.pay_method_snapshot||'PAYE').toUpperCase()==='UMBRELLA'?'selected':''}>Umbrella</option>
+            </select>
+          </div>
+        </div>
+        <div class="row"><label>Default submission mode</label>
+          <div class="controls">
+            <select name="default_submission_mode">
+              <option value="ELECTRONIC" ${String(d.default_submission_mode||'ELECTRONIC').toUpperCase()==='ELECTRONIC'?'selected':''}>Electronic</option>
+              <option value="MANUAL" ${String(d.default_submission_mode||'ELECTRONIC').toUpperCase()==='MANUAL'?'selected':''}>Manual</option>
+            </select>
+          </div>
+        </div>
+        <div class="row"><label>Auto-invoice</label>
+          <div class="controls"><input type="checkbox" name="auto_invoice" ${d.auto_invoice ? 'checked' : ''} /></div>
+        </div>
+      </div>
+
+      <div class="grid-2">
+        <div class="row"><label>Require reference to PAY</label><div class="controls"><input type="checkbox" name="require_reference_to_pay" ${d.require_reference_to_pay ? 'checked':''} /></div></div>
+        <div class="row"><label>Require reference to INVOICE</label><div class="controls"><input type="checkbox" name="require_reference_to_invoice" ${d.require_reference_to_invoice ? 'checked':''} /></div></div>
+      </div>
+
+      <div class="row"><label class="section">Guide hours (Mon–Sun, optional)</label></div>
+      <div class="grid-7">
+        <div class="row"><label>Mon</label><div class="controls"><input class="input" type="number" step="0.25" min="0" name="gh_mon" value="${num(GH.mon)}" /></div></div>
+        <div class="row"><label>Tue</label><div class="controls"><input class="input" type="number" step="0.25" min="0" name="gh_tue" value="${num(GH.tue)}" /></div></div>
+        <div class="row"><label>Wed</label><div class="controls"><input class="input" type="number" step="0.25" min="0" name="gh_wed" value="${num(GH.wed)}" /></div></div>
+        <div class="row"><label>Thu</label><div class="controls"><input class="input" type="number" step="0.25" min="0" name="gh_thu" value="${num(GH.thu)}" /></div></div>
+        <div class="row"><label>Fri</label><div class="controls"><input class="input" type="number" step="0.25" min="0" name="gh_fri" value="${num(GH.fri)}" /></div></div>
+        <div class="row"><label>Sat</label><div class="controls"><input class="input" type="number" step="0.25" min="0" name="gh_sat" value="${num(GH.sat)}" /></div></div>
+        <div class="row"><label>Sun</label><div class="controls"><input class="input" type="number" step="0.25" min="0" name="gh_sun" value="${num(GH.sun)}" /></div></div>
+      </div>
+
+      ${labelsBlock}
+    </form>`;
+}
+
+
+function renderContractRatesTab(ctx) {
+  const R = (ctx?.data?.rates_json) || {};
+  const num = (v) => (v == null ? '' : String(v));
+  return `
+    <div class="tabc">
+      <div class="row"><label class="section">PAYE pay rates</label></div>
+      <div class="grid-5">
+        <div class="row"><label>Day</label><div class="controls"><input class="input" name="paye_day"  value="${num(R.paye_day)}" /></div></div>
+        <div class="row"><label>Night</label><div class="controls"><input class="input" name="paye_night" value="${num(R.paye_night)}" /></div></div>
+        <div class="row"><label>Sat</label><div class="controls"><input class="input" name="paye_sat"  value="${num(R.paye_sat)}" /></div></div>
+        <div class="row"><label>Sun</label><div class="controls"><input class="input" name="paye_sun"  value="${num(R.paye_sun)}" /></div></div>
+        <div class="row"><label>BH</label><div class="controls"><input class="input" name="paye_bh"   value="${num(R.paye_bh)}" /></div></div>
+      </div>
+
+      <div class="row" style="margin-top:10px"><label class="section">Umbrella pay rates</label></div>
+      <div class="grid-5">
+        <div class="row"><label>Day</label><div class="controls"><input class="input" name="umb_day"  value="${num(R.umb_day)}" /></div></div>
+        <div class="row"><label>Night</label><div class="controls"><input class="input" name="umb_night" value="${num(R.umb_night)}" /></div></div>
+        <div class="row"><label>Sat</label><div class="controls"><input class="input" name="umb_sat"  value="${num(R.umb_sat)}" /></div></div>
+        <div class="row"><label>Sun</label><div class="controls"><input class="input" name="umb_sun"  value="${num(R.umb_sun)}" /></div></div>
+        <div class="row"><label>BH</label><div class="controls"><input class="input" name="umb_bh"   value="${num(R.umb_bh)}" /></div></div>
+      </div>
+
+      <div class="row" style="margin-top:10px"><label class="section">Charge-out rates</label></div>
+      <div class="grid-5">
+        <div class="row"><label>Day</label><div class="controls"><input class="input" name="charge_day"  value="${num(R.charge_day)}" /></div></div>
+        <div class="row"><label>Night</label><div class="controls"><input class="input" name="charge_night" value="${num(R.charge_night)}" /></div></div>
+        <div class="row"><label>Sat</label><div class="controls"><input class="input" name="charge_sat"  value="${num(R.charge_sat)}" /></div></div>
+        <div class="row"><label>Sun</label><div class="controls"><input class="input" name="charge_sun"  value="${num(R.charge_sun)}" /></div></div>
+        <div class="row"><label>BH</label><div class="controls"><input class="input" name="charge_bh"   value="${num(R.charge_bh)}" /></div></div>
+      </div>
+    </div>`;
+}
+
+function renderContractCalendarTab(ctx) {
+  const c = ctx?.data || {};
+  const holderId = 'contractCalendarHolder';
+  setTimeout(async () => {
+    try {
+      const y = (new Date()).getFullYear();
+      const cal = await getContractCalendar(c.id, y);
+      const items = Array.isArray(cal?.items) ? cal.items : [];
+
+      const el = byId(holderId); if (!el) return;
+      el.innerHTML = `
+        <div class="row" style="justify-content:space-between;align-items:center">
+          <div class="hint">Year: ${cal.year}</div>
+          <div class="actions">
+            <button id="btnGenWeeks">Generate weeks</button>
+            <button id="btnSkipWeeks">Skip weeks…</button>
+            <button id="btnCloneExtend">Clone & Extend…</button>
+          </div>
+        </div>
+        <table class="grid">
+          <thead><tr><th>Week Ending</th><th>Seq</th><th>Status</th><th>Mode</th><th>TS</th><th>Flags</th><th>Actions</th></tr></thead>
+          <tbody>
+            ${items.map(w => `
+              <tr data-week="${w.id}">
+                <td>${w.week_ending_date}</td>
+                <td>${w.additional_seq}</td>
+                <td>${w.status}</td>
+                <td>${w.submission_mode}</td>
+                <td>${w.has_timesheet ? 'Yes' : 'No'}</td>
+                <td>${w.missing_pdf ? 'Missing PDF; ' : ''}${w.missing_reference ? 'Missing Ref' : ''}</td>
+                <td>
+                  <button class="wk-act" data-act="actions">Actions…</button>
+                  ${w.submission_mode === 'MANUAL' ? `<button class="wk-act" data-act="manual">Manual Edit</button>` : ''}
+                </td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      `;
+
+      el.querySelector('#btnGenWeeks')?.addEventListener('click', async () => {
+        try { await generateContractWeeks(c.id); alert('Weeks generated (idempotent).'); } catch (e) { alert(e?.message || e); }
+        try { const upd = await getContractCalendar(c.id, y); renderContractCalendarTab({ data: c }); } catch {}
+      });
+      el.querySelector('#btnSkipWeeks')?.addEventListener('click', () => openContractSkipWeeks(c.id));
+      el.querySelector('#btnCloneExtend')?.addEventListener('click', () => openContractCloneAndExtend(c.id));
+
+      el.querySelectorAll('.wk-act').forEach(btn => {
+        btn.addEventListener('click', (ev) => {
+          const tr = ev.target.closest('tr'); if (!tr) return;
+          const weekId = tr.getAttribute('data-week');
+          const act = ev.target.getAttribute('data-act');
+          if (act === 'actions') openContractWeekActions(weekId);
+          if (act === 'manual')  openManualWeekEditor(weekId, c.id);
+        });
+      });
+    } catch (e) {
+      const el = byId(holderId); if (el) el.innerHTML = `<div class="error">Calendar load failed.</div>`;
+    }
+  }, 0);
+
+  return `<div id="${holderId}" class="tabc"><div class="hint">Loading calendar…</div></div>`;
+}
+
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Week actions (drawer modals)
+// ─────────────────────────────────────────────────────────────────────────────-
+
+function openManualWeekEditor(week_id, contract_id /* optional but recommended */) {
+  const main = `
+    <div class="tabc">
+      <div id="hoursGrid" class="grid-5 tight">
+        ${['day','night','sat','sun','bh'].map(k => `
+          <div data-bucket="${k}">
+            <div class="lbl mini" style="margin-bottom:4px">${k.toUpperCase()}</div>
+            <input class="input" type="number" step="0.01" min="0" name="h_${k}" placeholder="0.00" />
+          </div>`).join('')}
+      </div>
+      <div class="row" style="margin-top:10px">
+        <label>Reference (optional)</label>
+        <div class="controls"><input class="input" name="reference_number" placeholder="PO / Ref" /></div>
+      </div>
+      <div class="row"><div class="hint">Tip: attach or replace a manual PDF in “Actions…”.</div></div>
+    </div>
+  `;
+
+  showModal(
+    `Manual Week — ${week_id}`,
+    [{ key:'edit', title:'Edit hours' }],
+    () => main,
+    async () => {
+      // Collect & post
+      const root = document.querySelector('#modalRoot') || document;
+      const v = (n) => Number(root.querySelector(`input[name="${n}"]`)?.value || 0);
+      const ref = root.querySelector('input[name="reference_number"]')?.value?.trim() || '';
+
+      const payload = { hours: { day:v('h_day'), night:v('h_night'), sat:v('h_sat'), sun:v('h_sun'), bh:v('h_bh') } };
+      if (ref) payload.reference_number = ref;
+
+      await contractWeekManualUpsert(week_id, payload);
+      alert('Saved.');
+      return true;
+    },
+    false,
+    async () => {
+      // Post-render: apply bucket labels if we have contract_id
+      try {
+        if (!contract_id) return;
+        const cr = await getContract(contract_id);
+        const L = getBucketLabelsForContract(cr?.contract || cr);
+        applyBucketLabelsToHoursGrid(document.querySelector('#hoursGrid'), L);
+      } catch {}
+    },
+    { kind:'manual-week' }
+  );
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// openContractWeekActions (amended) — “Add additional sheet” now calls additional;
+// add separate “Create expense sheet” button wired to expense-sheet endpoint
+// ──────────────────────────────────────────────────────────────────────────────
+function openContractWeekActions(week_id) {
+  const html = `
+    <div class="tabc">
+      <div class="actions">
+        <button id="wkSwitch">Switch mode</button>
+        <button id="wkPresign">Attach / Replace Manual PDF…</button>
+        <button id="wkExtra">Add additional sheet</button>
+        <button id="wkExpense">Create expense sheet</button>
+        <button id="wkDeleteTs">Delete timesheet</button>
+        <button id="wkAuth">Authorise (manual)</button>
+      </div>
+      <div class="hint" style="margin-top:10px">Actions are guarded by invoice/paid status in the API.</div>
+    </div>
+  `;
+  showModal(
+    'Week Actions',
+    [{ key:'a', title:'Actions' }],
+    () => html,
+    async () => true,
+    false,
+    () => {
+      const root = document;
+      root.getElementById('wkSwitch')?.addEventListener('click', async () => { try { await contractWeekSwitchMode(week_id); alert('Mode switched.'); } catch(e){ alert(e?.message||e); }});
+      root.getElementById('wkPresign')?.addEventListener('click', () => presignAndAttachManualWeekPdf(week_id));
+
+      // NEW: additional week row
+      root.getElementById('wkExtra')?.addEventListener('click', async () => {
+        try { await contractWeekCreateAdditional(week_id); alert('Additional sheet created.'); }
+        catch(e){ alert(e?.message||e); }
+      });
+
+      // NEW: separate expense-only sheet
+      root.getElementById('wkExpense')?.addEventListener('click', async () => {
+        try { await contractWeekCreateExpenseSheet(week_id); alert('Expense-only sheet created.'); }
+        catch(e){ alert(e?.message||e); }
+      });
+
+      root.getElementById('wkDeleteTs')?.addEventListener('click', async () => {
+        if (!confirm('Delete attached timesheet?')) return;
+        try { await contractWeekDeleteTimesheet(week_id); alert('Timesheet deleted.'); } catch(e){ alert(e?.message||e); }
+      });
+      root.getElementById('wkAuth')?.addEventListener('click', async () => {
+        try { await contractWeekAuthorise(week_id); alert('Authorised.'); } catch(e){ alert(e?.message||e); }
+      });
+    },
+    { kind:'week-actions' }
+  );
+}
+
+
+
+
+// ──────────────────────────────────────────────────────────────────────────────
+// FIX 2: Clone & Extend endpoint name mismatch (…/clone-and-extend)
+// ──────────────────────────────────────────────────────────────────────────────
+function openContractCloneAndExtend(contract_id) {
+  const content = `
+    <div class="tabc">
+      <div class="row"><label>New start</label><div class="controls"><input class="input" name="new_start_date" placeholder="YYYY-MM-DD" /></div></div>
+      <div class="row"><label>New end</label><div class="controls"><input class="input" name="new_end_date" placeholder="YYYY-MM-DD" /></div></div>
+    </div>
+  `;
+  showModal(
+    'Clone & Extend',
+    [{ key:'c', title:'Successor window'}],
+    () => content,
+    async () => {
+      const root = document;
+      const new_start_date = root.querySelector('input[name="new_start_date"]')?.value?.trim() || null;
+      const new_end_date   = root.querySelector('input[name="new_end_date"]')?.value?.trim() || null;
+      const r = await authFetch(API(`/api/contracts/${_enc(contract_id)}/clone-and-extend`), { // <-- fixed here
+        method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({ new_start_date, new_end_date })
+      });
+      if (!r?.ok) { alert('Clone/extend failed.'); return false; }
+      alert('Successor created and current window truncated.');
+      return true;
+    },
+    false,
+    null,
+    { kind:'clone-extend' }
+  );
+}
+
+
+
+function openContractSkipWeeks(contract_id) {
+  const content = `
+    <div class="tabc">
+      <div class="row"><label>From (W/E)</label><div class="controls"><input class="input" name="from" placeholder="YYYY-MM-DD" /></div></div>
+      <div class="row"><label>To (W/E)</label><div class="controls"><input class="input" name="to" placeholder="YYYY-MM-DD" /></div></div>
+      <div class="hint">Only OPEN/PLANNED weeks without timesheets will be cancelled.</div>
+    </div>
+  `;
+  showModal(
+    'Skip Weeks',
+    [{ key:'s', title:'Cancel range'}],
+    () => content,
+    async () => {
+      const root = document;
+      const from = root.querySelector('input[name="from"]')?.value?.trim() || null;
+      const to   = root.querySelector('input[name="to"]')?.value?.trim() || null;
+      const r = await authFetch(API(`/api/contracts/${_enc(contract_id)}/skip-weeks`), {
+        method:'POST', headers:{'content-type':'application/json'}, body:_json({ from, to })
+      });
+      if (!r?.ok) { alert('Skip weeks failed.'); return false; }
+      alert('Weeks cancelled (where eligible).');
+      return true;
+    },
+    false,
+    null,
+    { kind:'skip-weeks' }
+  );
+}
+
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Helper — presign & upload a manual PDF to the week
+// ─────────────────────────────────────────────────────────────────────────────-
+
+async function presignAndAttachManualWeekPdf(week_id) {
+  try {
+    const { upload_url } = await contractWeekPresignPdf(week_id);
+
+    // Spawn a file input + PUT the first file
+    const inp = document.createElement('input');
+    inp.type = 'file';
+    inp.accept = '.pdf,.jpg,.jpeg,.png,.heic,.heif,application/pdf,image/*';
+    inp.style.display = 'none';
+    document.body.appendChild(inp);
+    inp.onchange = async () => {
+      const f = inp.files && inp.files[0];
+      document.body.removeChild(inp);
+      if (!f) return;
+
+      const put = await fetch(upload_url, { method:'PUT', headers:{ 'content-type': f.type || 'application/octet-stream' }, body: f });
+      if (!put.ok) throw new Error(`Upload failed (${put.status})`);
+      alert('File uploaded and attached to the week.');
+    };
+    inp.click();
+  } catch (e) {
+    alert(e?.message || e);
+  }
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
@@ -1075,6 +2297,12 @@ async function openLoadSelectionModal(section) {
 // ======================================
 // FRONTEND — buildSearchQS (UPDATED: support ids[] → id=in.(...))
 // ======================================
+
+
+// ──────────────────────────────────────────────────────────────────────────────
+// buildSearchQS (amended) — map submission_mode → default_submission_mode;
+// keep original too for safety; pass has_custom_labels through
+// ──────────────────────────────────────────────────────────────────────────────
 function buildSearchQS(section, filters={}){
   window.__listState = window.__listState || {};
   const st = (window.__listState[section] ||= { page: 1, pageSize: 50, total: null, hasMore: false, filters: null });
@@ -1162,9 +2390,40 @@ function buildSearchQS(section, filters={}){
       add('created_to',   created_to);
       break;
     }
+    case 'contracts': {
+      const {
+        q, candidate_id, client_id, roles_any, band,
+        pay_method_snapshot, submission_mode, week_ending_weekday_snapshot,
+        require_reference_to_pay, require_reference_to_invoice,
+        has_custom_labels, active_on, created_from, created_to
+      } = filters;
+
+      add('q', q);
+      add('candidate_id', candidate_id);
+      add('client_id', client_id);
+      addArr('roles_any', roles_any);
+      add('band', band);
+      add('pay_method_snapshot', pay_method_snapshot);
+
+      // NEW: send default_submission_mode (and keep legacy for safety)
+      if (submission_mode) {
+        add('default_submission_mode', submission_mode);
+        add('submission_mode', submission_mode);
+      }
+
+      add('week_ending_weekday_snapshot', week_ending_weekday_snapshot);
+      if (typeof require_reference_to_pay === 'boolean') add('require_reference_to_pay', require_reference_to_pay);
+      if (typeof require_reference_to_invoice === 'boolean') add('require_reference_to_invoice', require_reference_to_invoice);
+      if (typeof has_custom_labels === 'boolean') add('has_custom_labels', has_custom_labels);
+      add('active_on', active_on);
+      add('created_from', created_from);
+      add('created_to',   created_to);
+      break;
+    }
   }
   return qs.toString();
 }
+
 
 
 
@@ -1666,12 +2925,46 @@ async function openSearchModal(opts = {}) {
       datePair('due_from','Due from','due_to','Due to'),
       datePair('created_from','Created from','created_to','Created to')
     ].join('');
+  } else if (currentSection === 'contracts') {
+    let roleOptions = [];
+    try { roleOptions = await loadGlobalRoleOptions(); } catch { roleOptions = []; }
+    const weekdayOptions = ['0 Sun','1 Mon','2 Tue','3 Wed','4 Thu','5 Fri','6 Sat'];
+
+    inner = [
+      row('Free text',            inputText('q', 'client / candidate / role')),
+      row('Candidate ID',         inputText('candidate_id', 'UUID')),
+      row('Client ID',            inputText('client_id', 'UUID')),
+      row('Role (any)',           `<select name="roles_any" multiple size="6">${roleOptions.map(r=>`<option value="${r}">${r}</option>`).join('')}</select>`),
+      row('Band',                 inputText('band', 'e.g. 5 / 6 / 7')),
+      row('Pay method snapshot',  `
+        <select name="pay_method_snapshot">
+          <option value="">Any</option>
+          <option value="PAYE">PAYE</option>
+          <option value="UMBRELLA">UMBRELLA</option>
+        </select>`),
+      row('Submission mode',      `
+        <select name="submission_mode">
+          <option value="">Any</option>
+          <option value="MANUAL">Manual</option>
+          <option value="ELECTRONIC">Electronic</option>
+        </select>`),
+      row('Week-ending weekday',  `
+        <select name="week_ending_weekday_snapshot">
+          <option value="">Any</option>
+          ${weekdayOptions.map(x=>`<option value="${x.split(' ')[0]}">${x}</option>`).join('')}
+        </select>`),
+      row('Require ref to pay',   boolSelect('require_reference_to_pay')),
+      row('Require ref to invoice', boolSelect('require_reference_to_invoice')),
+      row('Has custom labels',    boolSelect('has_custom_labels')),
+      row('Active on date',       `<input class="input" type="text" name="active_on" placeholder="DD/MM/YYYY" />`),
+      datePair('created_from','Created from','created_to','Created to')
+    ].join('');
   } else {
     inner = `<div class="tabc">No filters for this section.</div>`;
   }
 
   const headerHtml = `
-    <div class="row" id="searchHeaderRow" style="justify-content:flex-end; gap:.35rem; margin-bottom:.5rem">
+    <div class="row" id="searchHeaderRow" style="justify-content:flex-end; gap=.35rem; margin-bottom:.5rem">
       <button type="button" class="adv-btn" data-adv-act="load">Load Saved Search</button>
       <button type="button" class="adv-btn" data-adv-act="save">Save Search</button>
     </div>`;
@@ -1726,7 +3019,6 @@ async function openSearchModal(opts = {}) {
 
   setTimeout(wireAdvancedSearch, 0);
 }
-
 
 // ======================================
 // FRONTEND — wireAdvancedSearch (UPDATED only to call the updated save/load modals)
@@ -1791,9 +3083,10 @@ function wireAdvancedSearch() {
 // UPDATED: renderTools()
 // - Keep Search…, add “Saved searches…” shortcut that opens Search modal pre-focused on loading presets
 // -----------------------------
+
 function renderTools(){
   const el = byId('toolButtons');
-  const canCreate = ['candidates','clients','umbrellas'].includes(currentSection);
+  const canCreate = ['candidates','clients','umbrellas','contracts'].includes(currentSection); // added contracts
 
   el.innerHTML = '';
   const addBtn = (txt, cb) => {
@@ -1810,6 +3103,9 @@ function renderTools(){
 
   if (!canCreate) btnCreate.disabled = true;
 }
+
+
+
 async function showAllRecords(section = currentSection){
   // Reset paging & clear all filters
   window.__listState = window.__listState || {};
@@ -2903,6 +4199,8 @@ async function loadSection(){
 
 // ===== Details Modals =====
 let modalCtx = { entity:null, data:null };
+
+
 function openDetails(rowOrId){
   // global dirty guard before opening any new modal (also called from dblclick)
   if (!confirmDiscardChangesIfDirty()) return;
@@ -2921,6 +4219,7 @@ function openDetails(rowOrId){
   else if (currentSection === 'clients')    openClient(row);
   else if (currentSection === 'umbrellas')  openUmbrella(row);
   else if (currentSection === 'audit')      openAuditItem(row);
+  else if (currentSection === 'contracts')  openContract(row); // new route
 }
 
 function openCreate(){
@@ -2928,6 +4227,7 @@ function openCreate(){
   if (currentSection==='candidates') openCandidate({});
   else if (currentSection==='clients') openClient({});
   else if (currentSection==='umbrellas') openUmbrella({});
+  else if (currentSection==='contracts') openContract({}); // new route
   else alert('Create not supported for this section yet.');
 }
 
@@ -2936,6 +4236,7 @@ function openEdit(){
   if (!currentSelection) return alert('Select by double-clicking a row first.');
   openDetails(currentSelection);
 }
+
 async function openDelete(){
   const inModal = (window.__modalStack?.length || 0) > 0;
   const row = inModal ? (modalCtx?.data || null) : currentSelection;
@@ -2954,6 +4255,9 @@ async function openDelete(){
     await upsertCandidate({ ...row, active:false }, row.id);
   } else if (section === 'umbrellas'){
     await upsertUmbrella({ ...row, enabled:false }, row.id);
+  } else if (section === 'contracts'){
+    alert('Delete is not available for Contracts here. Open the contract and use the dedicated action if supported.'); // guarded, non-breaking
+    return;
   } else {
     alert('Delete is not available for this section.');
     return;
@@ -6031,330 +7335,106 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
   stack().push(frame);
   byId('modalBack').style.display = 'flex';
 
-function renderTop() {
-  GC('renderTop()');
-  const isChild = (stack().length > 1);
-  const top     = currentFrame();
-  const parent  = parentFrame();
+// ──────────────────────────────────────────────────────────────────────────────
+// FIX 3: Contracts quick search implemented ({ q: text } passthrough)
+// (and unchanged behaviour for other sections)
+// ──────────────────────────────────────────────────────────────────────────────
+// ──────────────────────────────────────────────────────────────────────────────
+// renderTopNav (amended) — adds Contracts quick-search branch { q: text }
+// ──────────────────────────────────────────────────────────────────────────────
+function renderTopNav(){
+  const nav = byId('nav'); nav.innerHTML = '';
 
-  if (typeof top._detachGlobal === 'function') { try { top._detachGlobal(); } catch {} top._wired = false; }
+  // ensure per-section list + selection exist
+  window.__listState = window.__listState || {};
+  window.__selection = window.__selection || {};
 
-  byId('modalTitle').textContent = top.title;
+  sections.forEach(s => {
+    const b = document.createElement('button');
+    b.innerHTML = `<span class="ico">${s.icon}</span> ${s.label}`;
+    if (s.key === currentSection) b.classList.add('active');
 
-  const tabsEl = byId('modalTabs'); tabsEl.innerHTML='';
-  (top.tabs||[]).forEach((t,i)=>{
-    const b=document.createElement('button'); b.textContent = t.label||t.title||t.key;
-    if (i===0 && !top.currentTabKey) top.currentTabKey = t.key;
-    if (t.key===top.currentTabKey || (i===0 && !top.currentTabKey)) b.classList.add('active');
-    b.onclick = ()=>{ if (top.mode==='saving') return; tabsEl.querySelectorAll('button').forEach(x=>x.classList.remove('active')); b.classList.add('active'); top.setTab(t.key); };
-    tabsEl.appendChild(b);
+    b.onclick = () => {
+      if (!confirmDiscardChangesIfDirty()) return;
+
+      if ((window.__modalStack?.length || 0) > 0 || modalCtx?.entity) {
+        discardAllModalsAndState();
+      }
+
+      if (!window.__listState[s.key]) {
+        window.__listState[s.key] = { page: 1, pageSize: 50, total: null, hasMore: false, filters: null };
+      }
+
+      // IDs-only selection seed for the new section
+      window.__selection[s.key] = window.__selection[s.key] || { fingerprint:'', ids:new Set() };
+
+      currentSection   = s.key;
+      currentRows      = [];
+      currentSelection = null;
+
+      renderAll();
+    };
+
+    nav.appendChild(b);
   });
 
-  if (top.currentTabKey) top.setTab(top.currentTabKey);
-  else if (top.tabs && top.tabs[0]) top.setTab(top.tabs[0].key);
-  else byId('modalBody').innerHTML = top.renderTab('form',{})||'';
+  // Quick search: Enter runs a search and resets to page 1
+  try {
+    const q = byId('quickSearch');
+    if (q && !q.__wired) {
+      q.addEventListener('keydown', async (e) => {
+        if (e.key !== 'Enter') return;
+        if (!confirmDiscardChangesIfDirty()) return;
 
-  const btnSave  = byId('btnSave');
-  const btnClose = byId('btnCloseModal');
-  const btnDel   = byId('btnDelete');
-  const header   = byId('modalDrag');
-  const modalNode= byId('modal');
+        window.__listState = window.__listState || {};
+        window.__selection = window.__selection || {};
 
-  // ⬇️ Pin modal position so it doesn't re-center when tab content height changes
-  if (modalNode) {
-    const anchor = (window.__modalAnchor || null);
-    if (!anchor) {
-      const R = modalNode.getBoundingClientRect();
-      window.__modalAnchor = { left: R.left, top: R.top };
-      modalNode.style.position = 'fixed';
-      modalNode.style.left = R.left + 'px';
-      modalNode.style.top  = R.top  + 'px';
-      modalNode.style.right = 'auto';
-      modalNode.style.bottom= 'auto';
-      modalNode.style.transform = 'none';
-    } else {
-      modalNode.style.position = 'fixed';
-      modalNode.style.left = window.__modalAnchor.left + 'px';
-      modalNode.style.top  = window.__modalAnchor.top  + 'px';
-      modalNode.style.right = 'auto';
-      modalNode.style.bottom= 'auto';
-      modalNode.style.transform = 'none';
-    }
-  }
-  // ⬆️ End pin
+        const st  = (window.__listState[currentSection]  ||= { page: 1, pageSize: 50, total: null, hasMore: false, filters: null });
+        const sel = (window.__selection[currentSection] ||= { fingerprint:'', ids:new Set() });
 
-  const showChildDelete = isChild && (top.kind==='client-rate' || top.kind==='candidate-override') && top.hasId;
-  btnDel.style.display = showChildDelete ? '' : 'none'; btnDel.onclick = null;
+        st.page = 1;
+        const text = (q.value || '').trim();
 
-  let btnEdit = byId('btnEditModal');
-  if (!btnEdit) {
-    btnEdit=document.createElement('button');
-    btnEdit.id='btnEditModal'; btnEdit.type='button'; btnEdit.className='btn btn-outline btn-sm'; btnEdit.textContent='Edit';
-    const bar = btnSave?.parentElement || btnClose?.parentElement; if (bar) bar.insertBefore(btnEdit, btnSave);
-  }
-
-  (function dragWire(){
-    if(!header||!modalNode) return;
-    const onDown = e=>{
-      if ((e.button!==0 && e.type==='mousedown') || e.target.closest('button')) return;
-      const R=modalNode.getBoundingClientRect();
-      modalNode.style.position='fixed'; modalNode.style.left=R.left+'px'; modalNode.style.top=R.top+'px';
-      modalNode.style.right='auto'; modalNode.style.bottom='auto'; modalNode.style.transform='none'; modalNode.classList.add('dragging');
-      const ox=e.clientX-R.left, oy=e.clientY-R.top;
-      document.onmousemove = ev=>{ let l=ev.clientX-ox, t=ev.clientY-oy; const ml=Math.max(0,window.innerWidth-R.width), mt=Math.max(0,window.innerHeight-R.height); if(l<0)l=0; if(t<0)t=0; if(l>ml)l=ml; if(t>mt)t=mt; modalNode.style.left=l+'px'; modalNode.style.top=t+'px'; };
-      document.onmouseup   = ()=>{
-        modalNode.classList.remove('dragging');
-        // ⬇️ Update anchor to new drop position
-        const R2 = modalNode.getBoundingClientRect();
-        window.__modalAnchor = { left: R2.left, top: R2.top };
-        document.onmousemove=null; document.onmouseup=null;
-      };
-      e.preventDefault();
-    };
-    const onDbl = e=>{ if(!e.target.closest('button')) sanitizeModalGeometry(); };
-    header.addEventListener('mousedown', onDown);
-    header.addEventListener('dblclick',  onDbl);
-    const prev=top._detachGlobal;
-    top._detachGlobal = ()=>{ try{header.removeEventListener('mousedown',onDown);}catch{} try{header.removeEventListener('dblclick',onDbl);}catch{} document.onmousemove=null; document.onmouseup=null; if(typeof prev==='function'){ try{prev();}catch{} } };
-  })();
-
-  const defaultPrimary = (top.kind==='advanced-search') ? 'Search' : (top.noParentGate ? 'Apply' : (isChild ? 'Apply' : 'Save'));
-  btnSave.textContent = defaultPrimary; btnSave.setAttribute('aria-label', defaultPrimary);
-
-  const setCloseLabel = ()=>{
-    const label = (top.kind==='advanced-search') ? 'Close'
-               : ((isChild || top.mode==='edit' || top.mode==='create') ? (top.isDirty ? 'Discard' : 'Cancel') : 'Close');
-    btnClose.textContent = label; btnClose.setAttribute('aria-label',label); btnClose.setAttribute('title',label);
-  };
-
-  top._updateButtons = ()=>{
-    const parentEditable = top.noParentGate ? true : (parent ? (parent.mode==='edit' || parent.mode==='create') : true);
-    const relatedBtn = byId('btnRelated');
-
-    if (top.kind==='advanced-search') {
-      btnEdit.style.display='none'; btnSave.style.display=''; btnSave.disabled=!!top._saving; if (relatedBtn) relatedBtn.disabled=true;
-    } else if (isChild && !top.noParentGate) {
-      btnSave.style.display = parentEditable ? '' : 'none';
-      const wantApply = (top._applyDesired===true);
-      btnSave.disabled = (!parentEditable) || top._saving || !wantApply;
-      btnEdit.style.display='none'; if (relatedBtn) relatedBtn.disabled=true;
-      if (LOG) console.log('[MODAL] child _updateButtons()', { parentEditable, wantApply, disabled: btnSave.disabled });
-    } else {
-      btnEdit.style.display = (top.mode==='view' && top.hasId) ? '' : 'none';
-      if (relatedBtn) relatedBtn.disabled = !(top.mode==='view' && top.hasId);
-      if (top.mode==='view') { btnSave.style.display = top.noParentGate ? '' : 'none'; btnSave.disabled = top._saving; }
-      else { btnSave.style.display=''; btnSave.disabled = top._saving; }
-    }
-    setCloseLabel();
-  };
-
-  top._updateButtons();
-
-  btnEdit.onclick = ()=>{
-    const isChildNow = (stack().length > 1);
-    if (isChildNow || top.noParentGate || top.kind==='advanced-search') return;
-    if (top.mode==='view') {
-      top._snapshot = {
-        data               : deep(window.modalCtx?.data||null),
-        formState          : deep(window.modalCtx?.formState||null),
-        rolesState         : deep(window.modalCtx?.rolesState||null),
-        ratesState         : deep(window.modalCtx?.ratesState||null),
-        hospitalsState     : deep(window.modalCtx?.hospitalsState||null),
-        clientSettingsState: deep(window.modalCtx?.clientSettingsState||null),
-        overrides          : deep(window.modalCtx?.overrides || { existing:[], stagedNew:[], stagedEdits:{}, stagedDeletes:[] })
-      };
-      top.isDirty=false; setFrameMode(top,'edit');
-    }
-  };
-
-  const handleSecondary = ()=>{
-    if (top._confirmingDiscard || top._closing) return;
-
-    if (top.kind==='advanced-search') {
-      top._closing=true;
-      document.onmousemove=null; document.onmouseup=null; byId('modal')?.classList.remove('dragging'); sanitizeModalGeometry();
-      const closing=stack().pop(); if (closing?._detachDirty){ try{closing._detachDirty();}catch{} closing._detachDirty=null; }
-      if (closing?._detachGlobal){ try{closing._detachGlobal();}catch{} closing._detachGlobal=null; } top._wired=false;
-      if (stack().length>0) { const p=currentFrame(); renderTop(); try{ p.onReturn && p.onReturn(); } catch{} }
-      else { discardAllModalsAndState(); if (window.__pendingFocus) { try{ renderAll(); } catch(e){ console.error('refresh after modal close failed',e); } } }
-      return;
-    }
-
-    const isChildNow = (stack().length > 1);
-    if (!isChildNow && !top.noParentGate && top.mode==='edit') {
-      if (!top.isDirty) {
-        if (top._snapshot && window.modalCtx) {
-          window.modalCtx.data                = deep(top._snapshot.data);
-          window.modalCtx.formState           = deep(top._snapshot.formState);
-          window.modalCtx.rolesState          = deep(top._snapshot.rolesState);
-          window.modalCtx.ratesState          = deep(top._snapshot.ratesState);
-          window.modalCtx.hospitalsState      = deep(top._snapshot.hospitalsState);
-          window.modalCtx.clientSettingsState = deep(top._snapshot.clientSettingsState);
-          if (top._snapshot.overrides) window.modalCtx.overrides = deep(top._snapshot.overrides);
-          try { renderCandidateRatesTable?.(); } catch {}
+        if (!text) {
+          st.filters = null;
+          sel.fingerprint = JSON.stringify({ section: currentSection, filters: {} });
+          sel.ids.clear();
+          const data = await loadSection();
+          return renderSummary(data);
         }
-        top.isDirty=false; setFrameMode(top,'view'); top._snapshot=null;
-        try{ window.__toast?.('No changes'); }catch{}; return;
-      } else {
-        let ok=false; try{ top._confirmingDiscard=true; btnClose.disabled=true; ok=window.confirm('Discard changes and return to view?'); } finally { top._confirmingDiscard=false; btnClose.disabled=false; }
-        if (!ok) return;
-        if (top._snapshot && window.modalCtx) {
-          window.modalCtx.data                = deep(top._snapshot.data);
-          window.modalCtx.formState           = deep(top._snapshot.formState);
-          window.modalCtx.rolesState          = deep(top._snapshot.rolesState);
-          window.modalCtx.ratesState          = deep(top._snapshot.ratesState);
-          window.modalCtx.hospitalsState      = deep(top._snapshot.hospitalsState);
-          window.modalCtx.clientSettingsState = deep(top._snapshot.clientSettingsState);
-          if (top._snapshot.overrides) window.modalCtx.overrides = deep(top._snapshot.overrides);
-          try { renderCandidateRatesTable?.(); } catch {}
+
+        // Minimal quick-search filters by section
+        let filters = null;
+        if (currentSection === 'candidates') {
+          if (text.includes('@'))       filters = { email: text };
+          else if (text.replace(/\D/g,'').length >= 7) filters = { phone: text };
+          else if (text.includes(' ')) {
+            const [fn, ln] = text.split(' ').filter(Boolean);
+            filters = { first_name: fn || text, last_name: ln || '' };
+          } else filters = { first_name: text };
+        } else if (currentSection === 'clients' || currentSection === 'umbrellas') {
+          filters = { name: text };
+        } else if (currentSection === 'contracts') {
+          // NEW: free-text passthrough for contracts
+          filters = { q: text };
+        } else {
+          const data = await loadSection();
+          return renderSummary(data);
         }
-        top.isDirty=false; top._snapshot=null; setFrameMode(top,'view'); return;
-      }
+
+        st.filters = filters;
+        sel.fingerprint = JSON.stringify({ section: currentSection, filters });
+        sel.ids.clear();
+
+        const rows = await search(currentSection, filters);
+        renderSummary(rows);
+      });
+      q.__wired = true;
     }
-
-    if (top._closing) return;
-    top._closing=true;
-    document.onmousemove=null; document.onmouseup=null; byId('modal')?.classList.remove('dragging');
-
-    if (!isChildNow && !top.noParentGate && top.mode==='create' && top.isDirty) {
-      let ok=false; try{ top._confirmingDiscard=true; btnClose.disabled=true; ok=window.confirm('You have unsaved changes. Discard them and close?'); } finally { top._confirmingDiscard=false; btnClose.disabled=false; }
-      if (!ok) { top._closing=false; return; }
-    }
-
-    sanitizeModalGeometry();
-    const closing=stack().pop(); if (closing?._detachDirty){ try{closing._detachDirty();}catch{} closing._detachDirty=null; }
-    if (closing?._detachGlobal){ try{closing._detachGlobal();}catch{} closing._detachGlobal=null; } top._wired=false;
-    if (stack().length>0) { const p=currentFrame(); renderTop(); try{ p.onReturn && p.onReturn(); }catch{} }
-    else { discardAllModalsAndState(); if (window.__pendingFocus) { try{ renderAll(); } catch(e) { console.error('refresh after modal close failed', e); } } }
-  };
-  byId('btnCloseModal').onclick = handleSecondary;
-
-  const hasStagedClientDeletes = ()=> {
-    try {
-      const anyFlag = Array.isArray(window.modalCtx?.ratesState) && window.modalCtx.ratesState.some(w => w && w.__delete === true);
-      const anySet  = (window.modalCtx?.ratesStagedDeletes instanceof Set) && window.modalCtx.ratesStagedDeletes.size > 0;
-      const ovDel   = (window.modalCtx?.overrides?.stagedDeletes instanceof Set) && window.modalCtx.overrides.stagedDeletes.size > 0;
-      return !!(anyFlag || anySet || ovDel);
-    } catch { return false; }
-  };
-
-  async function saveForFrame(fr) {
-    if (!fr || fr._saving) return;
-    const onlyDel   = hasStagedClientDeletes();
-    const allowApply= (fr.kind==='candidate-override' || fr.kind==='client-rate') && fr._applyDesired===true;
-
-    L('saveForFrame ENTER', { kind: fr.kind, mode: fr.mode, noParentGate: fr.noParentGate, isDirty: fr.isDirty, onlyDel, allowApply });
-
-    if (fr.kind!=='advanced-search' && !fr.noParentGate && fr.mode!=='view' && !fr.isDirty && !onlyDel && !allowApply) {
-      L('saveForFrame GUARD: no-op (no changes and apply not allowed)');
-      const isChildNow=(stack().length>1);
-      if (isChildNow) {
-        sanitizeModalGeometry(); stack().pop();
-        if (stack().length>0) { const p=currentFrame(); renderTop(); try{ p.onReturn && p.onReturn(); }catch{} }
-        else { discardAllModalsAndState(); }
-      } else {
-        fr.isDirty=false; fr._snapshot=null; setFrameMode(fr,'view'); fr._updateButtons&&fr._updateButtons();
-      }
-      try{ window.__toast?.('No changes'); }catch{}; return;
-    }
-
-    fr.persistCurrentTabState();
-    const isChildNow=(stack().length>1);
-    if (isChildNow && !fr.noParentGate && fr.kind!=='advanced-search') { const p=parentFrame(); if (!p || !(p.mode==='edit'||p.mode==='create')) { L('saveForFrame GUARD: parent not editable'); return; } }
-    fr._saving=true; fr._updateButtons&&fr._updateButtons();
-
-    let ok=false, saved=null;
-    if (typeof fr.onSave==='function') {
-      try { const res=await fr.onSave(); ok = (res===true) || (res && res.ok===true); if (res&&res.saved) saved=res.saved; }
-      catch (e) { L('saveForFrame onSave threw', e); ok=false; }
-    }
-    fr._saving=false; if (!ok) { L('saveForFrame RESULT not ok'); fr._updateButtons&&fr._updateButtons(); return; }
-
-    // >>> Special-case: Advanced Search closes on success instead of flipping to view
-    if (fr.kind === 'advanced-search') {
-      sanitizeModalGeometry();
-      const closing = stack().pop();
-      if (closing?._detachDirty){ try{closing._detachDirty();}catch{} closing._detachDirty=null; }
-      if (closing?._detachGlobal){ try{closing._detachGlobal();}catch{} closing._detachGlobal=null; } fr._wired=false;
-
-      if (stack().length>0) {
-        const p=currentFrame(); renderTop(); try{ p.onReturn && p.onReturn(); }catch{}
-      } else {
-        discardAllModalsAndState();
-      }
-      L('saveForFrame EXIT (advanced-search closed)');
-      return;
-    }
-    // <<< End special-case
-
-    if (isChildNow) {
-      try { window.dispatchEvent(new CustomEvent('modal-dirty')); } catch {}
-      sanitizeModalGeometry(); stack().pop();
-      if (stack().length>0) {
-        const p=currentFrame(); p.isDirty=true; p._updateButtons&&p._updateButtons(); renderTop(); try{ p.onReturn && p.onReturn(); }catch{}
-      } else {
-        discardAllModalsAndState();
-      }
-      L('saveForFrame EXIT (child)');
-    } else {
-      if (saved && window.modalCtx) { window.modalCtx.data = { ...(window.modalCtx.data||{}), ...saved }; fr.hasId = !!window.modalCtx.data?.id; }
-      fr.isDirty=false; fr._snapshot=null; setFrameMode(fr,'view');
-      L('saveForFrame EXIT (parent)');
-    }
-  }
-
-  const onSaveClick = async (ev)=>{
-    const btn=ev?.currentTarget || byId('btnSave');
-    const topNow=currentFrame(); const bound=btn?.dataset?.ownerToken;
-    if (LOG) console.log('[MODAL] click #btnSave', {boundToken:bound, topToken:topNow?._token, topKind:topNow?.kind, topTitle:topNow?.title});
-    if(!topNow) return; if(bound!==topNow._token){ if(LOG) console.warn('[MODAL] token mismatch; using top frame'); }
-    await saveForFrame(topNow);
-  };
-
-  const bindSave = (btn,fr)=>{ if(!btn||!fr) return; btn.dataset.ownerToken = fr._token; btn.onclick = onSaveClick; if(LOG) console.log('[MODAL] bind #btnSave →',{ownerToken:fr._token,kind:fr.kind||'(parent)',title:fr.title,mode:fr.mode}); };
-  bindSave(btnSave, top);
-
-  const onDirtyEvt = ()=>{
-    const isChildNow=(stack().length>1);
-    if(isChildNow){ const p=parentFrame(); if(p && (p.mode==='edit'||p.mode==='create')){ p.isDirty=true; p._updateButtons&&p._updateButtons(); } }
-    else if(top.mode==='edit'||top.mode==='create'){ top.isDirty=true; top._updateButtons&&top._updateButtons(); }
-    try{ const t=currentFrame(); if(t && t.entity==='candidates' && t.currentTabKey==='rates'){ renderCandidateRatesTable?.(); } }catch{}
-  };
-  const onApplyEvt = ev=>{
-    const isChildNow=(stack().length>1); if(!isChildNow) return;
-    const t=currentFrame(); if(!(t && (t.kind==='client-rate'||t.kind==='candidate-override'))) return;
-    const enabled=!!(ev && ev.detail && ev.detail.enabled); t._applyDesired=enabled; t._updateButtons&&t._updateButtons(); bindSave(byId('btnSave'), t);
-    if(LOG) console.log('[MODAL] onApplyEvt → _applyDesired =', enabled,'rebound save to top frame');
-  };
-  const onModeChanged = ev=>{
-    const isChildNow=(stack().length>1); if(!isChildNow) return;
-    const parentIdx=stack().length-2, changed=ev?.detail?.frameIndex ?? -1;
-    if(changed===parentIdx){ if(LOG) console.log('[MODAL] parent mode changed → child _updateButtons()'); const t=currentFrame(); t._updateButtons&&t._updateButtons(); bindSave(byId('btnSave'), t); }
-  };
-
-  if (!top._wired) {
-    window.addEventListener('modal-dirty', onDirtyEvt);
-    window.addEventListener('modal-apply-enabled', onApplyEvt);
-    window.addEventListener('modal-frame-mode-changed', onModeChanged);
-    const onEsc=e=>{ if(e.key==='Escape'){ if(top._confirmingDiscard||top._closing) return; e.preventDefault(); byId('btnCloseModal').click(); } };
-    window.addEventListener('keydown', onEsc);
-    const onOverlayClick=e=>{ if(top._confirmingDiscard||top._closing) return; if(e.target===byId('modalBack')) byId('btnCloseModal').click(); };
-    byId('modalBack').addEventListener('click', onOverlayClick, true);
-    top._detachGlobal = ()=>{ try{window.removeEventListener('modal-dirty',onDirtyEvt);}catch{} try{window.removeEventListener('modal-apply-enabled',onApplyEvt);}catch{} try{window.removeEventListener('modal-frame-mode-changed',onModeChanged);}catch{} try{window.removeEventListener('keydown',onEsc);}catch{} try{byId('modalBack').removeEventListener('click', onOverlayClick, true);}catch{}; };
-    top._wired = true;
-  }
-
-  const parentEditable = parent && (parent.mode==='edit' || parent.mode==='create');
-  const isChildNow = (stack().length > 1);
-  if (isChildNow && !top.noParentGate) setFormReadOnly(byId('modalBody'), !parentEditable);
-  else                                 setFrameMode(top, top.mode);
-
-  // ⬇️ Ensure final state reflects current mode after potential repaint
-  top._updateButtons && top._updateButtons();
-  bindSave(btnSave, top);
-
-  GE();
+  } catch {}
 }
+
+
 
 
   byId('modalBack').style.display='flex';
@@ -7341,6 +8421,10 @@ function collectForm(sel, jsonTry=false){
 
 // ===== UPDATED: renderSummary — if pending focus row isn't visible, try one auto-relax/reload pass, then highlight when found
 
+// ──────────────────────────────────────────────────────────────────────────────
+// FIX 4: Bucket labels preview derived for contracts listing
+// (cosmetic only; other sections unchanged)
+// ──────────────────────────────────────────────────────────────────────────────
 function renderSummary(rows){
   currentRows = rows;
   currentSelection = null;
@@ -7368,9 +8452,31 @@ function renderSummary(rows){
   const fp = computeFp();
   if (sel.fingerprint !== fp) { sel.fingerprint = fp; clearSelection(); }
 
+  // Section-specific pre-formatting
+  if (currentSection === 'candidates') {
+    rows.forEach(r => { r.role = (r && Array.isArray(r.roles)) ? formatRolesSummary(r.roles) : ''; });
+  } else if (currentSection === 'contracts') {
+    // ✅ derive a compact labels preview for listing (e.g., "Weekday/Overnight/Sat/Sun/BH")
+    rows.forEach(r => {
+      const j = r && r.bucket_labels_json;
+      if (j && typeof j === 'object') {
+        const day   = (j.day   || '').trim();
+        const night = (j.night || '').trim();
+        const sat   = (j.sat   || '').trim();
+        const sun   = (j.sun   || '').trim();
+        const bh    = (j.bh    || '').trim();
+        const parts = [day,night,sat,sun,bh].filter(Boolean);
+        r.bucket_labels_preview = parts.length === 5 ? parts.join('/') : '';
+      } else {
+        r.bucket_labels_preview = '';
+      }
+    });
+  }
+
   const cols = defaultColumnsFor(currentSection);
   byId('title').textContent = sections.find(s=>s.key===currentSection)?.label || '';
   const content = byId('content');
+
 
   // Preserve scroll position per section
   window.__scrollMemory = window.__scrollMemory || {};
@@ -7381,10 +8487,6 @@ function renderSummary(rows){
 
   if (currentSection === 'settings') return renderSettingsPanel(content);
   if (currentSection === 'audit')    return renderAuditTable(content, rows);
-
-  if (currentSection === 'candidates') {
-    rows.forEach(r => { r.role = (r && Array.isArray(r.roles)) ? formatRolesSummary(r.roles) : ''; });
-  }
 
   // ── top controls (page size selector + selection summary) ───────────────────
   const topControls = document.createElement('div');
@@ -7686,7 +8788,6 @@ function renderSummary(rows){
     }
   }
 }
-
 
 
 // Close any existing floating menu
