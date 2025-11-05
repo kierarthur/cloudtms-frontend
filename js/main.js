@@ -2426,37 +2426,45 @@ function setContractFormValue(name, value) {
     ? (form.querySelector(`[name="${CSS.escape(targetName)}"]`) || form.querySelector(`[name="${CSS.escape(name)}"]`))
     : null;
 
-  // Reflect into DOM if field exists in #contractForm
-  if (el) {
-    if (el.type === 'checkbox') {
-      el.checked = !!value && value !== 'false' && value !== '0';
-    } else {
-      el.value = value == null ? '' : String(value);
-    }
+  // Stage into formState (main vs pay buckets)
+  window.modalCtx = window.modalCtx || {};
+  const fs = (window.modalCtx.formState ||= { __forId: (window.modalCtx.data?.id ?? window.modalCtx.openToken ?? null), main:{}, pay:{} });
+
+  // Determine the value we’re going to store (mirror DOM coercion where relevant)
+  let stored;
+  if (el && el.type === 'checkbox') {
+    // If we have a real element, respect its checked state after the change
+    el.checked = !!value && value !== 'false' && value !== '0';
+    stored = el.checked ? 'on' : '';
+  } else {
+    stored = (value == null ? '' : String(value));
+    // Reflect into DOM if field exists
+    if (el) el.value = stored;
   }
 
-  if (LOGC) console.log('[CONTRACTS] setContractFormValue', { name: targetName, value: (targetName.endsWith('_id') ? '(id)' : value) });
+  // Read previous staged value to avoid needless churn
+  const isRate = /^(paye_|umb_|charge_)/.test(targetName);
+  const prev = isRate ? fs.pay[targetName] : fs.main[targetName];
 
-  // Stage into formState (main vs pay buckets)
-  try {
-    window.modalCtx = window.modalCtx || {};
-    const fs = (window.modalCtx.formState ||= { __forId: (window.modalCtx.data?.id ?? window.modalCtx.openToken ?? null), main:{}, pay:{} });
-    const stored = (el && el.type === 'checkbox') ? (el.checked ? 'on' : '') : (el ? el.value : (value == null ? '' : String(value)));
+  // No-op if nothing actually changed
+  if (prev === stored) {
+    if (LOGC) console.log('[CONTRACTS] setContractFormValue no-op (unchanged)', { name: targetName, stored });
+    return;
+  }
 
-    if (/^(paye_|umb_|charge_)/.test(targetName)) {
-      fs.pay[targetName] = stored;
-    } else {
-      fs.main[targetName] = stored;
-    }
-  } catch {}
+  // Write staged state
+  if (isRate) fs.pay[targetName] = stored;
+  else        fs.main[targetName] = stored;
 
-  // Fire input event if we actually touched a real element
-  if (el) {
-    const evt = new Event('input', { bubbles: true });
-    el.dispatchEvent(evt);
+  if (LOGC) console.log('[CONTRACTS] setContractFormValue', { name: targetName, value: (targetName.endsWith('_id') ? '(id)' : stored) });
+
+  // IMPORTANT: do NOT dispatch a synthetic input event here (prevents re-entrancy loop)
+
+  // If what changed affects margin preview, recompute directly
+  if (isRate || targetName === 'pay_method_snapshot') {
+    try { computeContractMargins(); } catch {}
   }
 }
-
 
 function mergeContractStateIntoRow(row) {
   const base = { ...(row || {}) };
