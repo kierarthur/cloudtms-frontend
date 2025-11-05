@@ -1131,6 +1131,7 @@ function renderContractsTable(rows) {
 // UPDATED: openContract(row)
 // (unchanged logic except it opens the updated pickers; initial onReturn retained)
 // ─────────────────────────────────────────────────────────────────────────────
+
 function openContract(row) {
   const LOGC = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : true; // default ON
   const isCreate = !row || !row.id;
@@ -1169,6 +1170,9 @@ function openContract(row) {
     : [ { key:'main', title:'Main' }, { key:'rates', title:'Rates' }, { key:'calendar', title:'Calendar' } ];
 
   if (LOGC) console.log('[CONTRACTS] tabs', tabs.map(t=>t.key));
+
+  // ==== FIX: pass correct hasId (boolean) in 5th arg, onReturn in 6th, options in 7th; remove forceEdit for create ====
+  const hasId = !!window.modalCtx.data?.id;
 
   showModal(
     isCreate ? 'Create Contract' : 'Edit Contract',
@@ -1258,7 +1262,8 @@ function openContract(row) {
         window.modalCtx._saveInFlight = false;
       }
     },
-    () => { // onReturn
+    hasId, // ✅ correct 5th arg
+    () => { // onReturn (6th arg)
       const wire = () => {
         const form = document.querySelector('#contractForm'); if (!form) { if (LOGC) console.warn('[CONTRACTS] wire(skip): #contractForm not found'); return; }
         const tabs = document.getElementById('modalTabs');
@@ -1367,7 +1372,7 @@ function openContract(row) {
         if (LOGC) console.log('[CONTRACTS] tabs click→wire handler attached');
       }
     },
-    { forceEdit:true, kind:'contracts', extraButtons }
+    { kind:'contracts', extraButtons } // options (no forceEdit for create flow)
   );
 
   setTimeout(() => {
