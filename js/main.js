@@ -810,7 +810,6 @@ async function getContract(contract_id) {
   if (!r?.ok) return null;
   return r.json();
 }
-
 async function upsertContract(payload, id /* optional */) {
   // Accepts all contract fields + optional bucket_labels_json
   // Normalise bucket_labels to either null or a strict 5-key object
@@ -821,7 +820,7 @@ async function upsertContract(payload, id /* optional */) {
   }
 
   const url = id ? `/api/contracts/${_enc(id)}` : `/api/contracts`;
-  const method = id ? 'PATCH' : 'POST';
+  const method = id ? 'PUT' : 'POST';
 
   const res = await authFetch(API(url), {
     method,
@@ -830,7 +829,7 @@ async function upsertContract(payload, id /* optional */) {
   });
 
   let data = null;
-  try { data = await res.json(); } catch (_) { /* ignore non-JSON error bodies */ }
+  try { data = await res.json(); } catch (_) { /* non-JSON error bodies are possible */ }
 
   if (!res || !res.ok) {
     const msg =
@@ -2448,16 +2447,13 @@ function setContractFormValue(name, value) {
   // Determine the value we’re going to store (mirror DOM coercion where relevant)
   let stored;
   if (el && el.type === 'checkbox') {
-    // If we have a real element, respect its checked state after the change
     el.checked = !!value && value !== 'false' && value !== '0';
     stored = el.checked ? 'on' : '';
   } else {
     stored = (value == null ? '' : String(value));
-    // Reflect into DOM if field exists
-    if (el) el.value = stored;
+    if (el) el.value = stored; // reflect into DOM if the element exists
   }
 
-  // Read previous staged value to avoid needless churn
   const isRate = /^(paye_|umb_|charge_)/.test(targetName);
   const prev = isRate ? fs.pay[targetName] : fs.main[targetName];
 
@@ -2473,12 +2469,15 @@ function setContractFormValue(name, value) {
 
   if (LOGC) console.log('[CONTRACTS] setContractFormValue', { name: targetName, value: (targetName.endsWith('_id') ? '(id)' : stored) });
 
-  // IMPORTANT: do NOT dispatch a synthetic input event here (prevents re-entrancy loop)
+  // Do NOT dispatch a synthetic input event here (prevents re-entrancy with the form's stage handler)
 
-  // If what changed affects margin preview, recompute directly
+  // Update any dependent preview (e.g., margins)
   if (isRate || targetName === 'pay_method_snapshot') {
     try { computeContractMargins(); } catch {}
   }
+
+  // Explicitly signal the modal that state changed (so Save button/dirty state updates without re-entrancy)
+  try { window.dispatchEvent(new CustomEvent('modal-dirty')); } catch {}
 }
 
 function mergeContractStateIntoRow(row) {
