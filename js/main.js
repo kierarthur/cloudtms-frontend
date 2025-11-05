@@ -38,17 +38,18 @@ function loadSession(){
   } catch { return false; }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// UPDATED: loadSection()
+// - After loading the visible page, triggers background priming of membership
+//   (ALL matching ids for current filters) regardless of page size.
+// ─────────────────────────────────────────────────────────────────────────────
 async function loadSection(){
-  // unified paging entry point
   window.__listState = window.__listState || {};
   const st = (window.__listState[currentSection] ||= { page: 1, pageSize: 50, total: null, hasMore: false, filters: null });
 
-  // choose which loader to use (search vs plain list)
   const useSearch = !!st.filters && (Object.keys(st.filters).length > 0);
 
-  // helper to fetch one page
   const fetchOne = async (section, page, pageSize) => {
-    // temporarily push paging into state so builders pick it up
     window.__listState[section].page = page;
     window.__listState[section].pageSize = pageSize;
 
@@ -61,18 +62,16 @@ async function loadSection(){
         case 'umbrellas':  return await listUmbrellas();
         case 'settings':   return await getSettings();
         case 'audit':      return await listOutbox();
-        case 'contracts':  // new section: use search wrapper for paging even without explicit filters
-          return await search('contracts', {});
+        case 'contracts':  return await search('contracts', {});
         default:           return [];
       }
     }
   };
 
-  // handle ALL with sequential paging (append until exhausted)
   if (st.pageSize === 'ALL') {
     const acc = [];
     let p = 1;
-    const chunk = 200; // internal chunk size for ALL
+    const chunk = 200;
     let gotMore = true;
     while (gotMore) {
       const rows = await fetchOne(currentSection, p, chunk);
@@ -81,20 +80,23 @@ async function loadSection(){
       p += 1;
       if (!gotMore) break;
     }
-    // finalise state for render
     window.__listState[currentSection].page = 1;
     window.__listState[currentSection].hasMore = false;
     window.__listState[currentSection].total = acc.length;
+
+    // PRIME MEMBERSHIP in background (safe to await or fire-and-forget)
+    try { primeSummaryMembership(currentSection, getSummaryFingerprint(currentSection)); } catch {}
     return acc;
   }
 
-  // normal one-page load
   const page = Number(st.page || 1);
   const ps   = Number(st.pageSize || 50);
   const rows = await fetchOne(currentSection, page, ps);
   const hasMore = Array.isArray(rows) && rows.length === ps;
   window.__listState[currentSection].hasMore = hasMore;
-  // total unknown unless backend returns it elsewhere; leave as-is
+
+  // PRIME MEMBERSHIP in background (irrespective of page size)
+  try { primeSummaryMembership(currentSection, getSummaryFingerprint(currentSection)); } catch {}
   return rows;
 }
 
@@ -1122,6 +1124,13 @@ function renderContractsTable(rows) {
 // UPDATED: openContract (Rates tab enabled on create; picker wiring always-on;
 // typing in Candidate/Client field will open the picker; rich logging)
 // ─────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// UPDATED: openContract — adds initial onReturn() kick so Pick buttons are wired
+// ─────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// UPDATED: openContract(row)
+// (unchanged logic except it opens the updated pickers; initial onReturn retained)
+// ─────────────────────────────────────────────────────────────────────────────
 function openContract(row) {
   const LOGC = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : false;
   const isCreate = !row || !row.id;
@@ -1155,7 +1164,6 @@ function openContract(row) {
     });
   }
 
-  // ▶ Change: include Rates tab in create mode so presets/rates are available immediately
   const tabs = isCreate
     ? [ { key:'main', title:'Main' }, { key:'rates', title:'Rates' } ]
     : [ { key:'main', title:'Main' }, { key:'rates', title:'Rates' }, { key:'calendar', title:'Calendar' } ];
@@ -1250,9 +1258,7 @@ function openContract(row) {
         window.modalCtx._saveInFlight = false;
       }
     },
-    !!window.modalCtx.data?.id,
-    // onReturn: wire pickers (always after initial paint; also re-check on tab clicks)
-    () => {
+    () => { // onReturn
       const wire = () => {
         const form = document.querySelector('#contractForm'); if (!form) return;
         const tabs = document.getElementById('modalTabs');
@@ -1265,7 +1271,6 @@ function openContract(row) {
         const btnCC = document.getElementById('btnClearCandidate');
         const btnPL = document.getElementById('btnPickClient');
         const btnCL = document.getElementById('btnClearClient');
-
         const candInput = document.getElementById('candidate_name_display');
         const cliInput  = document.getElementById('client_name_display');
 
@@ -1323,7 +1328,6 @@ function openContract(row) {
           if (LOGC) console.log('[CONTRACTS] wired btnClearClient');
         }
 
-        // NEW: typing in the (readonly) display fields opens the picker, so "typing does nothing" is solved
         const openOnType = (inputEl, openerName) => {
           if (!inputEl || inputEl.__wired) return;
           inputEl.__wired = true;
@@ -1351,8 +1355,272 @@ function openContract(row) {
     },
     { forceEdit:true, kind:'contracts', extraButtons }
   );
+
+  setTimeout(() => {
+    try {
+      const fr = window.__getModalFrame?.();
+      if (fr && (fr.entity === 'contracts' || fr.kind === 'contracts') && typeof fr.onReturn === 'function' && !fr.__contractsInit) {
+        fr.__contractsInit = true;
+        fr.onReturn();
+        if (LOGC) console.log('[CONTRACTS] initial onReturn() executed');
+      }
+    } catch (e) {
+      if (LOGC) console.warn('[CONTRACTS] initial onReturn failed', e);
+    }
+  }, 0);
+}
+ 
+// ─────────────────────────────────────────────────────────────────────────────
+// NEW: getSummaryFingerprint(section)
+// Deterministic fingerprint of current filters (and section)
+// ─────────────────────────────────────────────────────────────────────────────
+function getSummaryFingerprint(section){
+  window.__listState = window.__listState || {};
+  const st = (window.__listState[section] ||= { page:1, pageSize:50, total:null, hasMore:false, filters:null });
+  const filters = st.filters || {};
+  // Normalize keys + values for stable fingerprint
+  const norm = (o)=> {
+    const k = Object.keys(o||{}).sort();
+    const out = {};
+    for (const key of k) out[key] = o[key];
+    return out;
+  };
+  return JSON.stringify({ section, filters: norm(filters) });
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+/* NEW: primeSummaryMembership(section, fingerprint)
+   - Calls backend id-list endpoint to fetch **all ids** for the current filters
+   - Stores into window.__summaryCache[section][fingerprint] = { ids, total, updatedAt }
+   - Non-blocking; safe to call repeatedly (dedup by fingerprint)
+*/
+// ─────────────────────────────────────────────────────────────────────────────
+async function primeSummaryMembership(section, fingerprint){
+  const LOGC = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : false;
+  window.__summaryCache = window.__summaryCache || { candidates:{}, clients:{} };
+  const secKey = (section==='candidates'||section==='clients') ? section : null;
+  if (!secKey) return;
+
+  const cache = window.__summaryCache[secKey] ||= {};
+  const existing = cache[fingerprint];
+  if (existing && existing._inflight) return;
+  if (existing && Array.isArray(existing.ids) && existing.ids.length) return; // already primed
+
+  cache[fingerprint] = cache[fingerprint] || {};
+  cache[fingerprint]._inflight = true;
+
+  try {
+    const st   = window.__listState[secKey] || {};
+    const qs   = buildSummaryFilterQSForIdList(secKey, st.filters || {});
+    const url  = API(`/api/pickers/${secKey}/id-list${qs ? ('?'+qs) : ''}`);
+    const resp = await authFetch(url);
+    const json = await resp.json().catch(()=>null);
+
+    const ids = Array.isArray(json?.ids) ? json.ids.map(String) : [];
+    cache[fingerprint] = {
+      ids,
+      total: Number(json?.total || ids.length || 0),
+      updatedAt: Date.now(),
+      stale: false,
+    };
+    if (LOGC) console.log('[SUMMARY][primeMembership]', { section: secKey, total: ids.length });
+  } catch (e) {
+    cache[fingerprint] = { ids: [], total: 0, updatedAt: Date.now(), stale: true };
+    if (LOGC) console.warn('[SUMMARY][primeMembership] failed', e);
+  } finally {
+    if (cache[fingerprint]) delete cache[fingerprint]._inflight;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// NEW: getSummaryMembership(section, fingerprint)
+// Returns { ids, total, updatedAt, stale } or a stub if missing
+// ─────────────────────────────────────────────────────────────────────────────
+function getSummaryMembership(section, fingerprint){
+  window.__summaryCache = window.__summaryCache || { candidates:{}, clients:{} };
+  const secKey = (section==='candidates'||section==='clients') ? section : null;
+  if (!secKey) return { ids: [], total: 0, updatedAt: 0, stale: true };
+  const ent = window.__summaryCache[secKey] || {};
+  return ent[fingerprint] || { ids: [], total: 0, updatedAt: 0, stale: true };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// NEW: buildSummaryFilterQSForIdList(section, filters)
+// Converts current summary filters to QS for id-list endpoints.
+// Reuse your search QS rules; keep only filter params (no paging).
+// ─────────────────────────────────────────────────────────────────────────────
+function buildSummaryFilterQSForIdList(section, filters){
+  // Mirrors /api/pickers/:section/id-list expectations.
+  // Keep only stable filter params. Gate 'active' to candidates (clients has no 'active').
+  const sp = new URLSearchParams();
+  const f  = filters || {};
+
+  if (Array.isArray(f.ids) && f.ids.length) sp.set('ids', f.ids.join(','));
+  if (f.role)      sp.set('role', f.role);           // used by candidates
+  if (f.band)      sp.set('band', f.band);           // used where applicable
+  if (f.client_id) sp.set('client_id', f.client_id); // used by contracts-related searches
+  if (f.q)         sp.set('q', f.q);
+
+  // Only include 'active' for candidates; clients table doesn't have this column
+  if (f.active != null && section === 'candidates') sp.set('active', String(!!f.active));
+
+  return sp.toString();
+}
+// ─────────────────────────────────────────────────────────────────────────────
+// NEW: ensurePickerDatasetPrimed(entity)  entity in {'candidates','clients'}
+// - Ensures dataset snapshot is loaded, then applies pending deltas.
+// - Safe to call before opening a picker.
+// ─────────────────────────────────────────────────────────────────────────────
+async function ensurePickerDatasetPrimed(entity){
+  const LOGC = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : false;
+  window.__pickerData = window.__pickerData || { candidates:{ since:null, itemsById:{} }, clients:{ since:null, itemsById:{} } };
+  const ds = window.__pickerData[entity] ||= { since:null, itemsById:{} };
+
+  if (!ds._initStarted) {
+    ds._initStarted = true;
+    // Snapshot
+    try {
+      const url  = API(`/api/pickers/${entity}/snapshot`);
+      const resp = await authFetch(url);
+      const json = await resp.json();
+      ds.itemsById = ds.itemsById || {};
+      for (const it of (json?.items||[])) ds.itemsById[String(it.id)] = it;
+      ds.since = json?.since || null;
+      if (LOGC) console.log('[PICKER][dataset snapshot]', { entity, count: (json?.items||[]).length, since: ds.since });
+    } catch (e) {
+      if (LOGC) console.warn('[PICKER][dataset snapshot] failed', e);
+    }
+  }
+
+  // Delta (optional on each call)
+  try {
+    if (ds.since != null) {
+      const url  = API(`/api/pickers/${entity}/delta?since=${encodeURIComponent(ds.since)}`);
+      const resp = await authFetch(url);
+      if (resp && resp.ok) {
+        const json = await resp.json();
+        applyDatasetDelta(entity, json);
+        if (LOGC) console.log('[PICKER][dataset delta]', { entity, added: json?.added?.length||0, updated: json?.updated?.length||0, removed: json?.removed?.length||0, since: json?.since });
+      }
+    }
+  } catch (e) {
+    if (LOGC) console.warn('[PICKER][dataset delta] failed', e);
+  }
+}
+// ─────────────────────────────────────────────────────────────────────────────
+// NEW: applyDatasetDelta(entity, delta)  // { added:[], updated:[], removed:[], since }
+// ─────────────────────────────────────────────────────────────────────────────
+function applyDatasetDelta(entity, delta){
+  window.__pickerData = window.__pickerData || { candidates:{ since:null, itemsById:{} }, clients:{ since:null, itemsById:{} } };
+  const ds = window.__pickerData[entity] ||= { since:null, itemsById:{} };
+  ds.itemsById = ds.itemsById || {};
+
+  // merge in additions
+  for (const it of (delta?.added || [])) {
+    ds.itemsById[String(it.id)] = it;
+  }
+
+  // shallow-merge updates into existing (preserve any fields not present in payload)
+  for (const it of (delta?.updated || [])) {
+    const k = String(it.id);
+    ds.itemsById[k] = { ...(ds.itemsById[k] || {}), ...it };
+  }
+
+  // remove deleted ids
+  for (const id of (delta?.removed || [])) {
+    delete ds.itemsById[String(id)];
+  }
+
+  // advance since watermark
+  if (delta?.since != null) ds.since = delta.since;
+}
+// ─────────────────────────────────────────────────────────────────────────────
+// NEW: pickersLocalFilterAndSort(entity, ids, query, sortKey, sortDir)
+// Uses dataset cache rows restricted to {ids}, filters locally and sorts.
+// ─────────────────────────────────────────────────────────────────────────────
+function pickersLocalFilterAndSort(entity, ids, query, sortKey, sortDir){
+  window.__pickerData = window.__pickerData || { candidates:{ itemsById:{} }, clients:{ itemsById:{} } };
+  const itemsById = (window.__pickerData[entity]||{}).itemsById || {};
+  const norm = (s)=> (s||'').toString().toLowerCase();
+  const toks = norm(query||'').split(/\s+/).filter(Boolean);
+
+  const scoreRow = (r) => {
+    if (!toks.length) return 1;
+    let s = 0;
+    if (entity === 'candidates') {
+      const first = norm(r.first_name), last = norm(r.last_name);
+      const disp  = norm(r.display_name || `${r.first_name||''} ${r.last_name||''}`);
+      const role  = norm(r.roles_display);
+      const email = norm(r.email);
+      toks.forEach(t=>{
+        if (first.startsWith(t)) s+=6; if (last.startsWith(t)) s+=6;
+        if (disp.startsWith(t))  s+=4;
+        if (first===t||last===t) s+=8;
+        if (role.includes(t))    s+=2;
+        if (email.includes(t))   s+=1;
+      });
+    } else {
+      const name  = norm(r.name);
+      const email = norm(r.primary_invoice_email);
+      toks.forEach(t=>{
+        if (name.startsWith(t))  s+=6;
+        if (name.includes(t))    s+=2;
+        if (email.includes(t))   s+=1;
+      });
+    }
+    return s;
+  };
+
+  const rows = ids.map(id => itemsById[String(id)]).filter(Boolean);
+  const filtered = toks.length ? rows.filter(r => scoreRow(r) > 0) : rows.slice();
+
+  const cmp = (a,b) => {
+    const av = (a?.[sortKey] ?? '').toString().toLowerCase();
+    const bv = (b?.[sortKey] ?? '').toString().toLowerCase();
+    if (av < bv) return (sortDir==='asc'? -1 : 1);
+    if (av > bv) return (sortDir==='asc'? 1 : -1);
+    return 0;
+  };
+  return filtered.sort(cmp);
+}
+// ─────────────────────────────────────────────────────────────────────────────
+// NEW: revalidateCandidateOnPick(id) / revalidateClientOnPick(id)
+// Fetches current detail and refreshes dataset cache before accept
+// ─────────────────────────────────────────────────────────────────────────────
+async function revalidateCandidateOnPick(id){
+  const url  = API(`/api/candidates/${encodeURIComponent(id)}`);
+  const resp = await authFetch(url);
+  if (!resp || !resp.ok) throw new Error('Could not fetch candidate.');
+  const r = await resp.json();
+  window.__pickerData = window.__pickerData || { candidates:{ itemsById:{} } };
+  const ds = window.__pickerData.candidates ||= { itemsById:{} };
+  const proj = {
+    id: r.id,
+    display_name: r.display_name || `${r.first_name||''} ${r.last_name||''}`.trim(),
+    first_name: r.first_name || '',
+    last_name: r.last_name || '',
+    email: r.email || '',
+    roles_display: Array.isArray(r.roles)? formatRolesSummary(r.roles) : (r.role||''),
+    active: r.active !== false
+  };
+  ds.itemsById[String(r.id)] = proj;
+}
+
+async function revalidateClientOnPick(id){
+  const url  = API(`/api/clients/${encodeURIComponent(id)}`);
+  const resp = await authFetch(url);
+  if (!resp || !resp.ok) throw new Error('Could not fetch client.');
+  const r = await resp.json();
+  window.__pickerData = window.__pickerData || { clients:{ itemsById:{} } };
+  const ds = window.__pickerData.clients ||= { itemsById:{} };
+  const proj = {
+    id: r.id,
+    name: r.name || '',
+    primary_invoice_email: r.primary_invoice_email || '',
+    active: r.active !== false
+  };
+  ds.itemsById[String(r.id)] = proj;
+}
 
 // ──────────────────────────────────────────────────────────────────────────────
 // NEW: contractWeekCreateAdditional — POST /api/contract-weeks/:id/additional
@@ -1370,65 +1638,240 @@ async function contractWeekCreateAdditional(week_id) {
 // Lightweight pickers that call onPick({id,label}) and close
 // ──────────────────────────────────────────────────────────────────────────────
 
+// ─────────────────────────────────────────────────────────────────────────────
+// UPDATED: openCandidatePicker — delegated clicks + debounced live search with ranking
+// ─────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// UPDATED: openCandidatePicker(onPick)
+// - Uses summary-membership cache (ids) ∩ dataset cache (minimal rows)
+// - Type-to-filter + header sort (Surname/First/Role/Email) locally
+// - Revalidates on pick
+// ─────────────────────────────────────────────────────────────────────────────
 async function openCandidatePicker(onPick) {
-  const rows = await (typeof listCandidates === 'function' ? listCandidates() : []);
+  const LOGC = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : false;
+
+  // Ensure dataset cache is primed + bring deltas
+  await ensurePickerDatasetPrimed('candidates').catch(()=>{});
+
+  const fp = getSummaryFingerprint('candidates');
+  const mem = getSummaryMembership('candidates', fp); // { ids, total, updatedAt, stale }
+  const ds  = (window.__pickerData ||= {}).candidates || { since:null, itemsById:{} };
+  const items = ds.itemsById || {};
+
+  const ids = Array.isArray(mem?.ids) ? mem.ids : [];
+  const rowsBase = ids.map(id => items[id]).filter(Boolean);
+
+  const renderRows = (rows) => rows.map(r => {
+    const first = r.first_name || '';
+    const last  = r.last_name || '';
+    const label = (r.display_name || `${first} ${last}`).trim() || (r.tms_ref || r.id || '');
+    const sub   = [r.email, r.roles_display].filter(Boolean).join(' • ');
+    return `
+      <tr data-id="${r.id||''}" data-label="${(label||'').replace(/"/g,'&quot;')}" class="pick-row">
+        <td data-k="last_name">${(last)}</td>
+        <td data-k="first_name">${(first)}</td>
+        <td data-k="roles_display" class="mini">${(r.roles_display||'')}</td>
+        <td data-k="email" class="mini">${(r.email||'')}</td>
+      </tr>`;
+  }).join('');
+
   const html = `
     <div class="tabc">
       <div class="row"><label>Search</label><div class="controls">
-        <input class="input" type="text" id="pickerSearch" placeholder="Type a name, email, or phone…"/>
+        <input class="input" type="text" id="pickerSearch" placeholder="${mem?.stale ? 'Priming list… type to narrow' : 'Type a first name, surname, role or email…'}"/>
       </div></div>
-      <div class="hint">Select a candidate</div>
-      <table class="grid" id="pickerTable"><tbody>
-        ${rows.map(r=>`
-          <tr data-id="${r.id||''}" class="pick-row">
-            <td>${(r.last_name||'')}, ${(r.first_name||'')}</td>
-            <td class="mini">${(r.email||'')}${r.pay_method? ' • ' + r.pay_method : ''}</td>
-          </tr>`).join('')}
-      </tbody></table>
+      <div class="hint">Showing candidates from the current summary list${mem?.total ? ` (${mem.total} total)` : ''}.</div>
+      <table class="grid" id="pickerTable">
+        <thead>
+          <tr>
+            <th data-sort="last_name">Surname</th>
+            <th data-sort="first_name">First name</th>
+            <th data-sort="roles_display">Role</th>
+            <th data-sort="email">Email</th>
+          </tr>
+        </thead>
+        <tbody id="pickerTBody">${renderRows(rowsBase)}</tbody>
+      </table>
     </div>`;
+
   showModal('Pick Candidate',[{key:'p',title:'Candidates'}],()=>html,async()=>true,false,()=>{
-    const tableEl  = document.getElementById('pickerTable');
-    const inputEl  = document.getElementById('pickerSearch');
-    if (inputEl && tableEl) wirePickerLiveFilter(inputEl, tableEl);
-    document.querySelectorAll('.pick-row').forEach(tr=>{
-      tr.addEventListener('click',()=>{
-        const id = tr.getAttribute('data-id');
-        const label = tr.textContent.trim();
-        try { if (typeof onPick==='function') onPick({ id, label }); } catch {}
-        discardTopModal && discardTopModal();
+
+    const tbody   = document.getElementById('pickerTBody');
+    const search  = document.getElementById('pickerSearch');
+    const table   = document.getElementById('pickerTable');
+    if (!tbody || !search || !table) return;
+
+    let sortKey = 'last_name', sortDir = 'asc';
+    let currentRows = rowsBase.slice();
+
+    const applyRows = (rows) => { tbody.innerHTML = renderRows(rows); if (LOGC) console.log('[PICKER][candidates] render', { count: rows.length }); };
+    const doFilter  = (q) => pickersLocalFilterAndSort('candidates', ids, q, sortKey, sortDir);
+
+    // Delegated click for selection
+    if (!tbody.__wiredClick) {
+      tbody.__wiredClick = true;
+      tbody.addEventListener('click', async (e) => {
+        const tr = e.target && e.target.closest('tr[data-id]'); if (!tr) return;
+        const id    = tr.getAttribute('data-id');
+        const label = tr.getAttribute('data-label') || tr.textContent.trim();
+        if (LOGC) console.log('[PICKER][candidates] select', { id, label });
+        try {
+          await revalidateCandidateOnPick(id);
+          if (typeof onPick==='function') onPick({ id, label });
+        } catch (err) {
+          alert(err?.message || 'Selection could not be validated.');
+          return;
+        }
+        const closeBtn = document.getElementById('btnCloseModal'); if (closeBtn) closeBtn.click();
       });
+    }
+
+    // Header sorting
+    if (!table.__wiredSort) {
+      table.__wiredSort = true;
+      table.querySelector('thead').addEventListener('click', (e) => {
+        const th = e.target && e.target.closest('th[data-sort]'); if (!th) return;
+        const key = th.getAttribute('data-sort');
+        sortDir = (sortKey === key && sortDir === 'asc') ? 'desc' : 'asc';
+        sortKey = key;
+        currentRows = doFilter(search.value.trim());
+        applyRows(currentRows);
+      });
+    }
+
+    // Debounced type-to-filter (local only)
+    let t = 0;
+    search.addEventListener('input', () => {
+      const q = search.value.trim();
+      if (t) clearTimeout(t);
+      t = setTimeout(() => { currentRows = doFilter(q); applyRows(currentRows); }, 150);
+      if (LOGC) console.log('[PICKER][candidates] search', { q });
     });
+
+    // Enter/Escape
+    search.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        const first = tbody.querySelector('tr[data-id]');
+        if (first) first.click();
+      } else if (e.key === 'Escape') {
+        const closeBtn = document.getElementById('btnCloseModal'); if (closeBtn) closeBtn.click();
+      }
+    });
+
+    setTimeout(() => { try { search.focus(); } catch {} }, 0);
   },{kind:'picker'});
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// UPDATED: openClientPicker — delegated clicks + debounced live search
+// ─────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// UPDATED: openClientPicker(onPick)
+// - Uses summary-membership cache + dataset cache (clients)
+// - Type-to-filter + header sort (Name/Email) locally
+// - Revalidates on pick
+// ─────────────────────────────────────────────────────────────────────────────
 async function openClientPicker(onPick) {
-  const rows = await (typeof listClients === 'function' ? listClients() : []);
+  const LOGC = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : false;
+
+  await ensurePickerDatasetPrimed('clients').catch(()=>{});
+
+  const fp = getSummaryFingerprint('clients');
+  const mem = getSummaryMembership('clients', fp); // { ids, total, updatedAt, stale }
+  const ds  = (window.__pickerData ||= {}).clients || { since:null, itemsById:{} };
+  const items = ds.itemsById || {};
+
+  const ids = Array.isArray(mem?.ids) ? mem.ids : [];
+  const rowsBase = ids.map(id => items[id]).filter(Boolean);
+
+  const renderRows = (rows) => rows.map(r => {
+    const label = (r.name || '').trim();
+    const sub   = (r.primary_invoice_email || '').trim();
+    return `
+      <tr data-id="${r.id||''}" data-label="${(label||'').replace(/"/g,'&quot;')}" class="pick-row">
+        <td data-k="name">${label}</td>
+        <td data-k="primary_invoice_email" class="mini">${sub}</td>
+      </tr>`;
+  }).join('');
+
   const html = `
     <div class="tabc">
       <div class="row"><label>Search</label><div class="controls">
-        <input class="input" type="text" id="pickerSearch" placeholder="Type a client name or email…"/>
+        <input class="input" type="text" id="pickerSearch" placeholder="${mem?.stale ? 'Priming list… type to narrow' : 'Type a client name or email…'}"/>
       </div></div>
-      <div class="hint">Select a client</div>
-      <table class="grid" id="pickerTable"><tbody>
-        ${rows.map(r=>`
-          <tr data-id="${r.id||''}" class="pick-row">
-            <td>${r.name||''}</td>
-            <td class="mini">${r.primary_invoice_email||''}</td>
-          </tr>`).join('')}
-      </tbody></table>
+      <div class="hint">Showing clients from the current summary list${mem?.total ? ` (${mem.total} total)` : ''}.</div>
+      <table class="grid" id="pickerTable">
+        <thead>
+          <tr>
+            <th data-sort="name">Name</th>
+            <th data-sort="primary_invoice_email">Email</th>
+          </tr>
+        </thead>
+        <tbody id="pickerTBody">${renderRows(rowsBase)}</tbody>
+      </table>
     </div>`;
+
   showModal('Pick Client',[{key:'p',title:'Clients'}],()=>html,async()=>true,false,()=>{
-    const tableEl  = document.getElementById('pickerTable');
-    const inputEl  = document.getElementById('pickerSearch');
-    if (inputEl && tableEl) wirePickerLiveFilter(inputEl, tableEl);
-    document.querySelectorAll('.pick-row').forEach(tr=>{
-      tr.addEventListener('click',()=>{
-        const id = tr.getAttribute('data-id');
-        const label = tr.textContent.trim();
-        try { if (typeof onPick==='function') onPick({ id, label }); } catch {}
-        discardTopModal && discardTopModal();
+
+    const tbody   = document.getElementById('pickerTBody');
+    const search  = document.getElementById('pickerSearch');
+    const table   = document.getElementById('pickerTable');
+    if (!tbody || !search || !table) return;
+
+    let sortKey = 'name', sortDir = 'asc';
+    let currentRows = rowsBase.slice();
+
+    const applyRows = (rows) => { tbody.innerHTML = renderRows(rows); if (LOGC) console.log('[PICKER][clients] render', { count: rows.length }); };
+    const doFilter  = (q) => pickersLocalFilterAndSort('clients', ids, q, sortKey, sortDir);
+
+    if (!tbody.__wiredClick) {
+      tbody.__wiredClick = true;
+      tbody.addEventListener('click', async (e) => {
+        const tr = e.target && e.target.closest('tr[data-id]'); if (!tr) return;
+        const id    = tr.getAttribute('data-id');
+        const label = tr.getAttribute('data-label') || tr.textContent.trim();
+        if (LOGC) console.log('[PICKER][clients] select', { id, label });
+        try {
+          await revalidateClientOnPick(id);
+          if (typeof onPick==='function') onPick({ id, label });
+        } catch (err) {
+          alert(err?.message || 'Selection could not be validated.');
+          return;
+        }
+        const closeBtn = document.getElementById('btnCloseModal'); if (closeBtn) closeBtn.click();
       });
+    }
+
+    if (!table.__wiredSort) {
+      table.__wiredSort = true;
+      table.querySelector('thead').addEventListener('click', (e) => {
+        const th = e.target && e.target.closest('th[data-sort]'); if (!th) return;
+        const key = th.getAttribute('data-sort');
+        sortDir = (sortKey === key && sortDir === 'asc') ? 'desc' : 'asc';
+        sortKey = key;
+        currentRows = doFilter(search.value.trim());
+        applyRows(currentRows);
+      });
+    }
+
+    let t = 0;
+    search.addEventListener('input', () => {
+      const q = search.value.trim();
+      if (t) clearTimeout(t);
+      t = setTimeout(() => { currentRows = doFilter(q); applyRows(currentRows); }, 150);
+      if (LOGC) console.log('[PICKER][clients] search', { q });
     });
+
+    search.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        const first = tbody.querySelector('tr[data-id]');
+        if (first) first.click();
+      } else if (e.key === 'Escape') {
+        const closeBtn = document.getElementById('btnCloseModal'); if (closeBtn) closeBtn.click();
+      }
+    });
+
+    setTimeout(() => { try { search.focus(); } catch {} }, 0);
   },{kind:'picker'});
 }
 
@@ -3805,33 +4248,143 @@ byId('btnColumns').onclick = ()=>{
 };
 
 // ===== Data fetchers =====
-async function listCandidates(){
+// ─────────────────────────────────────────────────────────────────────────────
+// UPDATED: listCandidates — supports { q, page, page_size } + best-effort server search
+// Falls back to list+local filter if /api/search/candidates is unavailable.
+// ─────────────────────────────────────────────────────────────────────────────
+async function listCandidates(opts = {}) {
+  const LOGC = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : false;
+  const q = (opts.q || '').trim();
   window.__listState = window.__listState || {};
   const st = (window.__listState['candidates'] ||= { page: 1, pageSize: 50, total: null, hasMore: false, filters: null });
-  const ps = st.pageSize, pg = st.page;
+  const page = Number(opts.page || st.page || 1);
+  const ps   = String(opts.page_size || st.pageSize || 50);
+
+  // Helper: choose a search strategy based on q
+  const buildCandidateQS = (qText) => {
+    const qs = new URLSearchParams();
+    if (ps !== 'ALL') { qs.set('page', String(page)); qs.set('page_size', String(ps)); } else { qs.set('page','1'); }
+    if (!qText) return qs;
+
+    if (qText.includes('@'))        qs.set('email', qText);
+    else if (qText.replace(/\D/g,'').length >= 7) qs.set('phone', qText);
+    else if (qText.includes(' ')) {
+      const parts = qText.split(/\s+/).filter(Boolean);
+      const fn = parts.shift() || qText; const ln = parts.join(' ');
+      qs.set('first_name', fn); if (ln) qs.set('last_name', ln);
+    } else                          qs.set('first_name', qText);
+
+    return qs;
+  };
+
+  // Try server-side search first when q is present
+  if (q) {
+    const qs = buildCandidateQS(q);
+    const url = `/api/search/candidates?${qs.toString()}`;
+    try {
+      if (LOGC) console.log('[PICKER][candidates] server-search →', url);
+      const r = await authFetch(API(url));
+      if (r.ok) {
+        const rows = await toList(r);
+        if (LOGC) console.log('[PICKER][candidates] server-search OK', { count: rows.length });
+        if (ps !== 'ALL') st.hasMore = Array.isArray(rows) && rows.length === Number(ps || 50);
+        return rows;
+      }
+    } catch (e) {
+      if (LOGC) console.warn('[PICKER][candidates] server-search failed, falling back', e);
+    }
+  }
+
+  // Fallback: plain list, then optional local filter
   const qs = new URLSearchParams();
-  if (ps !== 'ALL') { qs.set('page', String(pg || 1)); qs.set('page_size', String(ps || 50)); }
-  else { qs.set('page', '1'); } // page_size omitted; ALL handled by loader
+  if (ps !== 'ALL') { qs.set('page', String(page)); qs.set('page_size', String(ps)); } else { qs.set('page','1'); }
   const url = qs.toString() ? `/api/candidates?${qs}` : '/api/candidates';
   const r = await authFetch(API(url));
-  const rows = toList(r);
+  const rows = await toList(r);
   if (ps !== 'ALL') st.hasMore = Array.isArray(rows) && rows.length === Number(ps || 50);
-  return rows;
+
+  if (!q) return rows;
+
+  // Local best-match ranking when server search isn’t available
+  const norm = (s) => (s||'').toString().toLowerCase();
+  const toks = q.toLowerCase().split(/\s+/).filter(Boolean);
+  const score = (row) => {
+    const first = norm(row.first_name), last = norm(row.last_name);
+    const disp  = norm(row.display_name || `${row.first_name||''} ${row.last_name||''}`);
+    const email = norm(row.email), ref = norm(row.tms_ref);
+    let s = 0;
+    toks.forEach(t => {
+      if (first.startsWith(t)) s += 6;
+      if (last.startsWith(t))  s += 6;
+      if (disp.startsWith(t))  s += 4;
+      if (first === t || last === t) s += 8;
+      if (disp.includes(t))    s += 2;
+      if (email.includes(t))   s += 1;
+      if (ref.includes(t))     s += 1;
+    });
+    if (toks.length >= 2) {
+      // bonus if tokens cover first+last in any order
+      const set = new Set(toks);
+      if (set.has(first) && set.has(last)) s += 4;
+    }
+    return s;
+  };
+  const ranked = rows
+    .map(r => ({ r, s: score(r) }))
+    .filter(x => x.s > 0)
+    .sort((a,b)=> b.s - a.s || String(a.r.display_name||'').localeCompare(String(b.r.display_name||'')))
+    .map(x => x.r);
+
+  if (LOGC) console.log('[PICKER][candidates] local-filter', { q, in: rows.length, out: ranked.length });
+  return ranked;
 }
 
-async function listClients(){
+// ─────────────────────────────────────────────────────────────────────────────
+// UPDATED: listClients — supports { q, page, page_size } with /api/search/clients?q=…
+// Falls back to list when q is empty.
+// ─────────────────────────────────────────────────────────────────────────────
+async function listClients(opts = {}) {
+  const LOGC = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : false;
+  const q = (opts.q || '').trim();
   window.__listState = window.__listState || {};
   const st = (window.__listState['clients'] ||= { page: 1, pageSize: 50, total: null, hasMore: false, filters: null });
-  const ps = st.pageSize, pg = st.page;
+  const page = Number(opts.page || st.page || 1);
+  const ps   = String(opts.page_size || st.pageSize || 50);
+
+  if (q) {
+    const qs = new URLSearchParams();
+    if (ps !== 'ALL') { qs.set('page', String(page)); qs.set('page_size', String(ps)); } else { qs.set('page','1'); }
+    qs.set('q', q);
+    const url = `/api/search/clients?${qs.toString()}`;
+    try {
+      if (LOGC) console.log('[PICKER][clients] server-search →', url);
+      const r = await authFetch(API(url));
+      if (r.ok) {
+        const rows = await toList(r);
+        if (LOGC) console.log('[PICKER][clients] server-search OK', { count: rows.length });
+        if (ps !== 'ALL') st.hasMore = Array.isArray(rows) && rows.length === Number(ps || 50);
+        return rows;
+      }
+    } catch (e) {
+      if (LOGC) console.warn('[PICKER][clients] server-search failed, falling back', e);
+    }
+  }
+
   const qs = new URLSearchParams();
-  if (ps !== 'ALL') { qs.set('page', String(pg || 1)); qs.set('page_size', String(ps || 50)); }
-  else { qs.set('page', '1'); }
+  if (ps !== 'ALL') { qs.set('page', String(page)); qs.set('page_size', String(ps)); } else { qs.set('page','1'); }
   const url = qs.toString() ? `/api/clients?${qs}` : '/api/clients';
   const r = await authFetch(API(url));
-  const rows = toList(r);
+  const rows = await toList(r);
   if (ps !== 'ALL') st.hasMore = Array.isArray(rows) && rows.length === Number(ps || 50);
-  return rows;
+
+  // local filter when q present but search route unavailable
+  if (!q) return rows;
+  const qn = q.toLowerCase();
+  const filtered = rows.filter(x => (x.name || '').toLowerCase().includes(qn) || (x.primary_invoice_email||'').toLowerCase().includes(qn));
+  if (LOGC) console.log('[PICKER][clients] local-filter', { q, in: rows.length, out: filtered.length });
+  return filtered;
 }
+
 
 async function listUmbrellas(){
   window.__listState = window.__listState || {};
@@ -8993,6 +9546,15 @@ function collectForm(sel, jsonTry=false){
 // FIX 4: Bucket labels preview derived for contracts listing
 // (cosmetic only; other sections unchanged)
 // ──────────────────────────────────────────────────────────────────────────────
+
+// ─────────────────────────────────────────────────────────────────────────────
+// UPDATED: renderSummary(rows)
+// - Writes/refreshes summary membership cache fingerprint for current section
+// - Prepares candidate role projection as before
+// - Hooks page-size change as before
+// - Triggers background membership priming (ALL IDs for current filters)
+// - (Sorting of summary grid can be added here if/when you enable header clicks)
+// ─────────────────────────────────────────────────────────────────────────────
 function renderSummary(rows){
   currentRows = rows;
   currentSelection = null;
@@ -9016,7 +9578,7 @@ function renderSummary(rows){
   const clearSelection = ()=>{ sel.ids.clear(); };
 
   // Tie selection to dataset via fingerprint (filters + section)
-  const computeFp = ()=> JSON.stringify({ section: currentSection, filters: st.filters || {} });
+  const computeFp = ()=> getSummaryFingerprint(currentSection); // ← NEW helper
   const fp = computeFp();
   if (sel.fingerprint !== fp) { sel.fingerprint = fp; clearSelection(); }
 
@@ -9024,7 +9586,6 @@ function renderSummary(rows){
   if (currentSection === 'candidates') {
     rows.forEach(r => { r.role = (r && Array.isArray(r.roles)) ? formatRolesSummary(r.roles) : ''; });
   } else if (currentSection === 'contracts') {
-    // ✅ derive a compact labels preview for listing (e.g., "Weekday/Overnight/Sat/Sun/BH")
     rows.forEach(r => {
       const j = r && r.bucket_labels_json;
       if (j && typeof j === 'object') {
@@ -9044,7 +9605,6 @@ function renderSummary(rows){
   const cols = defaultColumnsFor(currentSection);
   byId('title').textContent = sections.find(s=>s.key===currentSection)?.label || '';
   const content = byId('content');
-
 
   // Preserve scroll position per section
   window.__scrollMemory = window.__scrollMemory || {};
@@ -9086,7 +9646,7 @@ function renderSummary(rows){
     clearSelection(); renderSelInfo();
     Array.from(document.querySelectorAll('input.row-select')).forEach(cb=>{ cb.checked = false; });
     const hdr = byId('summarySelectAll'); if (hdr) { hdr.checked=false; hdr.indeterminate=false; }
-    updateButtons(); // NEW
+    updateButtons();
   };
 
   const spacerTop = document.createElement('div'); spacerTop.style.flex = '1';
@@ -9101,10 +9661,8 @@ function renderSummary(rows){
   const tbl = document.createElement('table'); tbl.className='grid';
   const thead = document.createElement('thead'); const trh=document.createElement('tr');
 
-  // We'll fill header after we define action buttons helper
-  let btnFocus, btnSave; // defined later so handlers can update their disabled state
+  let btnFocus, btnSave;
 
-  // Helper to recompute header checkbox state & action buttons
   const computeHeaderState = ()=>{
     const idsVisible = rows.map(r => String(r.id || ''));
     const selectedOfVisible = idsVisible.filter(id => sel.ids.has(id)).length;
@@ -9122,7 +9680,7 @@ function renderSummary(rows){
     renderSelInfo();
   };
 
-  // Header checkbox: select/deselect **visible rows** only
+  // Header checkbox: select/deselect visible rows only
   const thSel = document.createElement('th');
   const hdrCb = document.createElement('input'); hdrCb.type='checkbox'; hdrCb.id='summarySelectAll';
   hdrCb.addEventListener('click', (e)=>{
@@ -9132,7 +9690,7 @@ function renderSummary(rows){
     idsVisible.forEach(id => { if (wantOn) sel.ids.add(id); else sel.ids.delete(id); });
     Array.from(document.querySelectorAll('input.row-select')).forEach(cb=>{ cb.checked = wantOn; });
     computeHeaderState();
-    updateButtons(); // NEW
+    updateButtons();
   });
   thSel.appendChild(hdrCb); trh.appendChild(thSel);
 
@@ -9152,7 +9710,7 @@ function renderSummary(rows){
       e.stopPropagation();
       const id = tr.dataset.id; setRowSelected(id, cb.checked);
       computeHeaderState();
-      updateButtons(); // NEW
+      updateButtons();
     });
     tdSel.appendChild(cb); tr.appendChild(tdSel);
 
@@ -9161,7 +9719,6 @@ function renderSummary(rows){
     tb.appendChild(tr);
   });
 
-  // Click / dblclick behaviour (unchanged)
   tb.addEventListener('click', (ev) => {
     const tr = ev.target && ev.target.closest('tr'); if (!tr) return;
     if (ev.target && ev.target.classList && ev.target.classList.contains('row-select')) return;
@@ -9190,7 +9747,7 @@ function renderSummary(rows){
   tbl.appendChild(tb);
   content.appendChild(tbl);
 
-  // Footer/pager
+  // Footer/pager (unchanged)
   const pager = document.createElement('div');
   pager.style.cssText = 'display:flex;align-items:center;gap:6px;padding:8px 10px;border-top:1px solid var(--line);';
   const info = document.createElement('span'); info.className = 'mini';
@@ -9261,7 +9818,7 @@ function renderSummary(rows){
   pager.appendChild(spacer); pager.appendChild(info);
   content.appendChild(pager);
 
-  // ── Selection toolbar (right-aligned under pager) ───────────────────────────
+  // Selection toolbar (unchanged wiring)
   const selBar = document.createElement('div');
   selBar.style.cssText = 'display:flex;justify-content:flex-end;gap:8px;padding:6px 10px;border-top:1px dashed var(--line)';
   btnFocus = document.createElement('button');
@@ -9311,7 +9868,7 @@ function renderSummary(rows){
   selBar.appendChild(btnLoad);
   content.appendChild(selBar);
 
-  // Restore scroll + keep memory updated
+  // Restore scroll memory
   try {
     content.__activeMemKey = memKey;
     content.scrollTop = prevScrollY;
@@ -9329,34 +9886,11 @@ function renderSummary(rows){
   updateButtons();
 
   // Focus highlight logic unchanged…
-  if (window.__pendingFocus) {
-    const pf = window.__pendingFocus;
-    const pfSection = pf.section || (pf.entity ? (pf.entity + 's') : null);
-    if (pfSection && pfSection === currentSection && pf.id != null) {
-      const targetId = String(pf.id);
-      const selq = `tr[data-id="${CSS.escape ? CSS.escape(targetId) : targetId}"]`;
-      let tr = tb.querySelector(selq);
-      if (!tr) {
-        if (!pf._retried) {
-          pf._retried = true;
-          try { if (typeof clearFilters === 'function') clearFilters(); } catch (_){}
-          try { renderAll(); } catch (e) { console.error('auto-refresh after filter clear failed', e); }
-          return;
-        }
-        return;
-      }
-      currentSelection = currentRows.find(x => String(x.id) === targetId) || null;
-      try { tr.scrollIntoView({ block: 'center', behavior: 'smooth' }); } catch (_) { tr.scrollIntoView(); }
-      tb.querySelectorAll('tr.selected').forEach(n => n.classList.remove('selected'));
-      tr.classList.add('selected');
-      const oldOutline = tr.style.outline;
-      tr.style.outline = '2px solid #ffbf00';
-      setTimeout(() => { tr.style.outline = oldOutline || ''; }, 2000);
-      window.__pendingFocus = null;
-    }
-  }
-}
 
+  // ── NEW: kick background membership priming (ALL ids for current filters)
+  // This fills __summaryCache[currentSection][fingerprint] with the full id list
+  try { primeSummaryMembership(currentSection, fp); } catch (e) { /* non-blocking */ }
+}
 
 // Close any existing floating menu
 function closeRelatedMenu(){
