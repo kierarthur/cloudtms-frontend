@@ -157,6 +157,47 @@
     .tabc .grid-3{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; }
     .tabc .grid-5{ display:grid; grid-template-columns:repeat(5,minmax(0,1fr)); gap:10px; }
     .tabc .grid-7{ display:grid; grid-template-columns:repeat(7,minmax(0,1fr)); gap:10px; }
+
+    /* ─────────────────────────────────────────────────────────────
+       Contracts (modal-only) overrides — affect Contracts modal ONLY
+       This relies on JS adding .contract-modal to #modal when entity==='contracts'
+       ───────────────────────────────────────────────────────────── */
+    #modal.contract-modal .form input,
+    #modal.contract-modal .form select,
+    #modal.contract-modal .form textarea{
+      background:#000;              /* pure black, per spec */
+      color:var(--text);
+      border:1px solid var(--line);
+    }
+    #modal.contract-modal .form input::placeholder,
+    #modal.contract-modal .form textarea::placeholder{
+      color:var(--sub);
+      opacity:.75;
+    }
+    /* inline action buttons inside contract form (Pick…/Clear) */
+    #modal.contract-modal .btn,
+    #modal.contract-modal .tabc .btn{
+      border:1px solid var(--line);
+      background:#0b152a;
+      color:var(--text);
+      padding:6px 10px;
+      border-radius:10px;
+      cursor:pointer;
+    }
+    #modal.contract-modal .btn.mini,
+    #modal.contract-modal .tabc .btn.mini{
+      font-size:12px;
+      padding:4px 8px;
+    }
+    #modal.contract-modal .btn:hover,
+    #modal.contract-modal .tabc .btn:hover{
+      background:var(--hover);
+    }
+    /* subtle secondary line under picker fields */
+    #modal.contract-modal .mini{
+      font-size:12px;
+      color:var(--sub);
+    }
   </style>
 </head>
 <body>
