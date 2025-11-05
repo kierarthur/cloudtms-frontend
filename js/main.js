@@ -817,17 +817,32 @@ async function upsertContract(payload, id /* optional */) {
   const patch = { ...payload };
   if ('bucket_labels_json' in patch) {
     const norm = normaliseBucketLabelsInput(patch.bucket_labels_json);
-    patch.bucket_labels_json = norm === false ? null : norm;
+    patch.bucket_labels_json = (norm === false) ? null : norm;
   }
 
   const url = id ? `/api/contracts/${_enc(id)}` : `/api/contracts`;
   const method = id ? 'PATCH' : 'POST';
-  const r = await authFetch(API(url), {
-    method, headers: { 'content-type':'application/json' }, body: _json(patch)
+
+  const res = await authFetch(API(url), {
+    method,
+    headers: { 'content-type': 'application/json' },
+    body: _json(patch)
   });
-  if (!r?.ok) throw new Error(`Contract ${id ? 'update' : 'create'} failed`);
-  return r.json();
+
+  let data = null;
+  try { data = await res.json(); } catch (_) { /* ignore non-JSON error bodies */ }
+
+  if (!res || !res.ok) {
+    const msg =
+      (data && (data.error || data.message || data.detail)) ||
+      (res && res.statusText) ||
+      `Contract ${id ? 'update' : 'create'} failed`;
+    throw new Error(msg);
+  }
+
+  return data;
 }
+
 
 async function deleteContract(contract_id) {
   const r = await authFetch(API(`/api/contracts/${_enc(contract_id)}`), { method: 'DELETE' });
