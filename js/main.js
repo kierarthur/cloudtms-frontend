@@ -2019,6 +2019,16 @@ async function openCandidatePicker(onPick) {
 
     setTimeout(() => { try { search.focus(); if (LOGC) console.log('[PICKER][candidates] search focused'); } catch {} }, 0);
   },{kind:'picker'});
+
+  // 🔧 Post-render kick: ensure the picker's onReturn wiring runs once on first open
+  setTimeout(() => {
+    try {
+      const fr = window.__getModalFrame?.();
+      const willCall = !!(fr && fr.kind === 'picker' && typeof fr.onReturn === 'function' && !fr.__pickerInit);
+      if (LOGC) console.log('[PICKER][candidates] post-render kick', { hasFrame: !!fr, kind: fr?.kind, hasOnReturn: typeof fr?.onReturn === 'function', already: !!fr?.__pickerInit, willCall });
+      if (willCall) { fr.__pickerInit = true; fr.onReturn(); if (LOGC) console.log('[PICKER][candidates] initial onReturn() executed'); }
+    } catch (e) { if (LOGC) console.warn('[PICKER][candidates] post-render kick failed', e); }
+  }, 0);
 }
 
 
@@ -2031,6 +2041,7 @@ async function openCandidatePicker(onPick) {
 // - Type-to-filter + header sort (Name/Email) locally
 // - Revalidates on pick
 // ─────────────────────────────────────────────────────────────────────────────
+
 
 async function openClientPicker(onPick) {
   const LOGC = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : true; // default ON
@@ -2187,8 +2198,17 @@ async function openClientPicker(onPick) {
 
     setTimeout(() => { try { search.focus(); if (LOGC) console.log('[PICKER][clients] search focused'); } catch {} }, 0);
   },{kind:'picker'});
-}
 
+  // 🔧 Post-render kick: ensure the picker's onReturn wiring runs once on first open
+  setTimeout(() => {
+    try {
+      const fr = window.__getModalFrame?.();
+      const willCall = !!(fr && fr.kind === 'picker' && typeof fr.onReturn === 'function' && !fr.__pickerInit);
+      if (LOGC) console.log('[PICKER][clients] post-render kick', { hasFrame: !!fr, kind: fr?.kind, hasOnReturn: typeof fr?.onReturn === 'function', already: !!fr?.__pickerInit, willCall });
+      if (willCall) { fr.__pickerInit = true; fr.onReturn(); if (LOGC) console.log('[PICKER][clients] initial onReturn() executed'); }
+    } catch (e) { if (LOGC) console.warn('[PICKER][clients] post-render kick failed', e); }
+  }, 0);
+}
 
 
 // ===== NEW HELPERS / WRAPPERS =====
@@ -8469,7 +8489,7 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
       const sentinel = window.modalCtx?.openToken || null;
       const initial  = (window.modalCtx.data?.id ?? sentinel);
       const fs = window.modalCtx.formState || { __forId: initial, main:{}, pay:{} };
-      if (fs.__forId == null) fs.__forId = initial;
+      if (fs.__forId == null) fs.__ForId = initial;
 
       if (this.currentTabKey === 'main' && byId('tab-main')) {
         const c = collectForm('#tab-main'); fs.main = { ...(fs.main||{}), ...stripEmpty(c) };
@@ -8566,7 +8586,6 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
       else if (isChild)      { const p=parentFrame(); setFormReadOnly(byId('modalBody'), !(p && (p.mode==='edit'||p.mode==='create'))); }
       else                   setFormReadOnly(byId('modalBody'), (this.mode==='view'||this.mode==='saving'));
 
-      // Post-render snapshot of picker buttons
       try {
         const pc = document.getElementById('btnPickCandidate');
         const pl = document.getElementById('btnPickClient');
@@ -8608,15 +8627,10 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
     if (repaint) frameObj.setTab(frameObj.currentTabKey);
   }
 
-  // push + paint
   stack().push(frame);
   byId('modalBack').style.display = 'flex';
 
-  // ──────────────────────────────────────────────────────────────────────────
-  // renderTop — (amended) applies contract-modal class when entity is contracts
-  // ──────────────────────────────────────────────────────────────────────────
-function renderTop() {
-    // Enable logging locally for this global renderTop
+  function renderTop() {
     const LOG = (typeof window.__LOG_MODAL === 'boolean') ? window.__LOG_MODAL : true;
     const L  = (...a)=> { if (LOG) console.log('[MODAL]', ...a); };
     const GC = (label)=> { if (LOG) console.groupCollapsed('[MODAL]', label); };
@@ -8652,7 +8666,6 @@ function renderTop() {
     const header   = byId('modalDrag');
     const modalNode= byId('modal');
 
-    // NEW: toggle contract-modal class for theming when Contracts modal is open
     const LOGC = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : true;
     if (modalNode) {
       const isContracts = (top.entity === 'contracts') || (top.kind === 'contracts');
@@ -8660,7 +8673,6 @@ function renderTop() {
       if (LOGC && isContracts) console.log('[CONTRACTS][MODAL] contract-modal class applied to #modal');
     }
 
-    // Pin modal position to avoid re-centering on tab swaps
     if (modalNode) {
       const anchor = (window.__modalAnchor || null);
       if (!anchor) {
@@ -8972,8 +8984,7 @@ function renderTop() {
     } catch {}
 
     GE();
-}
-
+  }
 
   byId('modalBack').style.display='flex';
   window.__getModalFrame = currentFrame;
