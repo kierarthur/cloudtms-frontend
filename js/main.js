@@ -1719,9 +1719,14 @@ function pickersLocalFilterAndSort(entity, ids, query, sortKey, sortDir){
   const norm = (s)=> (s||'').toString().toLowerCase();
   const toks = norm(query||'').split(/\s+/).filter(Boolean);
 
+  // Accept either an array of IDs or an array of row objects
   const rows = (ids && ids.length && typeof ids[0] === 'object')
     ? ids.slice()
     : (ids || []).map(id => itemsById[String(id)]).filter(Boolean);
+
+  if (typeof window.__LOG_CONTRACTS === 'boolean' ? window.__LOG_CONTRACTS : true) {
+    console.log('[PLFS:entry]', { entity, q: query, toks, in: rows.length, sortKey, sortDir });
+  }
 
   const scoreRow = (r) => {
     if (!toks.length) return 0;
@@ -1765,7 +1770,11 @@ function pickersLocalFilterAndSort(entity, ids, query, sortKey, sortDir){
       if (av > bv) return (sortDir==='asc'? 1 : -1);
       return 0;
     };
-    return rows.slice().sort(cmpAlpha);
+    const out = rows.slice().sort(cmpAlpha);
+    if (typeof window.__LOG_CONTRACTS === 'boolean' ? window.__LOG_CONTRACTS : true) {
+      console.log('[PLFS:noquery]', { entity, out: out.length, sample: out.slice(0,6).map(r=> r.display_name||r.name) });
+    }
+    return out;
   }
 
   const withScore = rows.map(r => ({ r, s: scoreRow(r) })).filter(x => x.s > 0);
@@ -1777,7 +1786,11 @@ function pickersLocalFilterAndSort(entity, ids, query, sortKey, sortDir){
     if (av > bv) return (sortDir==='asc'? 1 : -1);
     return 0;
   });
-  return withScore.map(x => x.r);
+  const out = withScore.map(x => x.r);
+  if (typeof window.__LOG_CONTRACTS === 'boolean' ? window.__LOG_CONTRACTS : true) {
+    console.log('[PLFS:out]', { entity, q: query, out: out.length, sample: out.slice(0,6).map(r=> r.display_name||r.name) });
+  }
+  return out;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1854,6 +1867,7 @@ async function openCandidatePicker(onPick) {
   let fp = getSummaryFingerprint('candidates');
   let mem = getSummaryMembership('candidates', fp);
   if (!mem?.ids?.length || mem?.stale) {
+    if (LOGC) console.log('[PICKER][candidates] membership empty/stale → priming', { fp, mem });
     await primeSummaryMembership('candidates', fp);
     fp  = getSummaryFingerprint('candidates');
     mem = getSummaryMembership('candidates', fp);
@@ -1862,12 +1876,12 @@ async function openCandidatePicker(onPick) {
   const ds  = (window.__pickerData ||= {}).candidates || { since:null, itemsById:{} };
   const items = ds.itemsById || {};
 
-  const baseIds = (mem?.ids && mem.ids.length) ? mem.ids : Object.keys(items);
-  const rowsBase = baseIds.map(id => items[id]).filter(Boolean);
+  const baseIds  = (mem?.ids && mem.ids.length) ? mem.ids : Object.keys(items);
+  const baseRows = baseIds.map(id => items[id]).filter(Boolean);
 
   if (LOGC) console.log('[PICKER][candidates] dataset snapshot', {
     fingerprint: fp, total: mem?.total, ids: baseIds.length, stale: !!mem?.stale, since: ds?.since,
-    rowsBase: rowsBase.length, missingItems: baseIds.length - rowsBase.length
+    rowsBase: baseRows.length, missingItems: baseIds.length - baseRows.length
   });
 
   const renderRows = (rows) => rows.map(r => {
@@ -1899,7 +1913,7 @@ async function openCandidatePicker(onPick) {
             <th data-sort="email">Email</th>
           </tr>
         </thead>
-        <tbody id="pickerTBody">${renderRows(rowsBase)}</tbody>
+        <tbody id="pickerTBody">${renderRows(baseRows)}</tbody>
       </table>
     </div>`;
 
@@ -1913,26 +1927,32 @@ async function openCandidatePicker(onPick) {
     if (!tbody || !search || !table) return;
 
     let sortKey = 'last_name', sortDir = 'asc';
-    let currentRows = rowsBase.slice();
+    let currentRows = baseRows.slice();
 
     const applyRows = (rows) => {
       tbody.innerHTML = renderRows(rows);
-      if (LOGC) console.log('[PICKER][candidates] render', { count: rows.length });
+      if (LOGC) console.log('[PICKER][candidates] render()', { count: rows.length, sample: rows.slice(0,6).map(r=>r.display_name||`${r.first_name} ${r.last_name}`) });
       const first = tbody.querySelector('tr[data-id]');
-      if (first) first.classList.add('active');
+      if (first) { first.classList.add('active'); }
     };
-    const doFilter  = (q) => pickersLocalFilterAndSort('candidates', baseIds.map(id=>items[id]).filter(Boolean), q, sortKey, sortDir);
+    const doFilter  = (q) => {
+      const fn = (window.pickersLocalFilterAndSort || pickersLocalFilterAndSort);
+      const out = fn('candidates', currentRows.length ? currentRows : baseRows, q, sortKey, sortDir);
+      if (LOGC) console.log('[PICKER][candidates] doFilter()', { q, in: (currentRows.length||baseRows.length), out: out.length });
+      return out;
+    };
 
     if (!tbody.__wiredClick) {
       tbody.__wiredClick = true;
       const choose = async (tr) => {
         const id    = tr.getAttribute('data-id');
         const label = tr.getAttribute('data-label') || tr.textContent.trim();
-        if (LOGC) console.log('[PICKER][candidates] select', { id, label });
+        if (LOGC) console.log('[PICKER][candidates] select()', { id, label });
         try {
           await revalidateCandidateOnPick(id);
           if (typeof onPick==='function') onPick({ id, label });
         } catch (err) {
+          console.warn('[PICKER][candidates] select() validation failed', err);
           alert(err?.message || 'Selection could not be validated.');
           return;
         }
@@ -1958,37 +1978,48 @@ async function openCandidatePicker(onPick) {
         sortKey = key;
         currentRows = doFilter(search.value.trim());
         applyRows(currentRows);
+        if (LOGC) console.log('[PICKER][candidates] sort', { sortKey, sortDir, count: currentRows.length });
       });
       if (LOGC) console.log('[PICKER][candidates] wired sort header');
     }
 
     let t = 0;
-    search.addEventListener('input', () => {
-      const q = search.value.trim();
-      if (t) clearTimeout(t);
-      t = setTimeout(() => { currentRows = doFilter(q); applyRows(currentRows); }, 150);
-      if (LOGC) console.log('[PICKER][candidates] search', { q });
-    });
+    if (!search.__wiredInput) {
+      search.__wiredInput = true;
+      search.addEventListener('input', () => {
+        const q = search.value.trim();
+        if (LOGC) console.log('[PICKER][candidates] search input', { q });
+        if (t) clearTimeout(t);
+        t = setTimeout(() => { currentRows = doFilter(q); applyRows(currentRows); }, 150);
+      });
+      if (LOGC) console.log('[PICKER][candidates] wired search input');
+    }
 
-    // Arrow navigation + Enter/Escape
-    search.addEventListener('keydown', async (e) => {
-      const itemsEls = Array.from(tbody.querySelectorAll('tr[data-id]'));
-      if (!itemsEls.length) {
-        if (e.key === 'Escape') { const closeBtn = document.getElementById('btnCloseModal'); if (closeBtn) closeBtn.click(); }
-        return;
-      }
-      const idx = itemsEls.findIndex(tr => tr.classList.contains('active'));
-      const setActive = (i) => { itemsEls.forEach(tr=>tr.classList.remove('active')); itemsEls[i].classList.add('active'); itemsEls[i].scrollIntoView({block:'nearest'}); };
-      if (e.key === 'ArrowDown') { e.preventDefault(); setActive(Math.min((idx<0?0:idx+1), itemsEls.length-1)); }
-      if (e.key === 'ArrowUp')   { e.preventDefault(); setActive(Math.max((idx<0?0:idx-1), 0)); }
-      if (e.key === 'Enter')     { e.preventDefault(); const target = itemsEls[Math.max(idx,0)]; if (target) target.click(); }
-      if (e.key === 'Escape')    { e.preventDefault(); const closeBtn = document.getElementById('btnCloseModal'); if (closeBtn) closeBtn.click(); }
-    });
+    if (!search.__wiredKey) {
+      search.__wiredKey = true;
+      search.addEventListener('keydown', async (e) => {
+        const itemsEls = Array.from(tbody.querySelectorAll('tr[data-id]'));
+        if (!itemsEls.length) {
+          if (e.key === 'Escape') { const closeBtn = document.getElementById('btnCloseModal'); if (closeBtn) closeBtn.click(); }
+          return;
+        }
+        const idx = itemsEls.findIndex(tr => tr.classList.contains('active'));
+        const setActive = (i) => {
+          itemsEls.forEach(tr=>tr.classList.remove('active'));
+          itemsEls[i].classList.add('active');
+          itemsEls[i].scrollIntoView({block:'nearest'});
+        };
+        if (e.key === 'ArrowDown') { e.preventDefault(); setActive(Math.min((idx<0?0:idx+1), itemsEls.length-1)); }
+        if (e.key === 'ArrowUp')   { e.preventDefault(); setActive(Math.max((idx<0?0:idx-1), 0)); }
+        if (e.key === 'Enter')     { e.preventDefault(); const target = itemsEls[Math.max(idx,0)]; if (target) target.click(); }
+        if (e.key === 'Escape')    { e.preventDefault(); const closeBtn = document.getElementById('btnCloseModal'); if (closeBtn) closeBtn.click(); }
+      });
+      if (LOGC) console.log('[PICKER][candidates] wired search keydown');
+    }
 
     setTimeout(() => { try { search.focus(); if (LOGC) console.log('[PICKER][candidates] search focused'); } catch {} }, 0);
   },{kind:'picker'});
 }
-
 
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2010,6 +2041,7 @@ async function openClientPicker(onPick) {
   let fp = getSummaryFingerprint('clients');
   let mem = getSummaryMembership('clients', fp);
   if (!mem?.ids?.length || mem?.stale) {
+    if (LOGC) console.log('[PICKER][clients] membership empty/stale → priming', { fp, mem });
     await primeSummaryMembership('clients', fp);
     fp  = getSummaryFingerprint('clients');
     mem = getSummaryMembership('clients', fp);
@@ -2018,12 +2050,12 @@ async function openClientPicker(onPick) {
   const ds  = (window.__pickerData ||= {}).clients || { since:null, itemsById:{} };
   const items = ds.itemsById || {};
 
-  const baseIds = (mem?.ids && mem.ids.length) ? mem.ids : Object.keys(items);
-  const rowsBase = baseIds.map(id => items[id]).filter(Boolean);
+  const baseIds  = (mem?.ids && mem.ids.length) ? mem.ids : Object.keys(items);
+  const baseRows = baseIds.map(id => items[id]).filter(Boolean);
 
   if (LOGC) console.log('[PICKER][clients] dataset snapshot', {
     fingerprint: fp, total: mem?.total, ids: baseIds.length, stale: !!mem?.stale, since: ds?.since,
-    rowsBase: rowsBase.length, missingItems: baseIds.length - rowsBase.length
+    rowsBase: baseRows.length, missingItems: baseIds.length - baseRows.length
   });
 
   const renderRows = (rows) => rows.map(r => {
@@ -2049,7 +2081,7 @@ async function openClientPicker(onPick) {
             <th data-sort="primary_invoice_email">Email</th>
           </tr>
         </thead>
-        <tbody id="pickerTBody">${renderRows(rowsBase)}</tbody>
+        <tbody id="pickerTBody">${renderRows(baseRows)}</tbody>
       </table>
     </div>`;
 
@@ -2063,26 +2095,32 @@ async function openClientPicker(onPick) {
     if (!tbody || !search || !table) return;
 
     let sortKey = 'name', sortDir = 'asc';
-    let currentRows = rowsBase.slice();
+    let currentRows = baseRows.slice();
 
     const applyRows = (rows) => {
       tbody.innerHTML = renderRows(rows);
-      if (LOGC) console.log('[PICKER][clients] render', { count: rows.length });
+      if (LOGC) console.log('[PICKER][clients] render()', { count: rows.length, sample: rows.slice(0,6).map(r=>r.name) });
       const first = tbody.querySelector('tr[data-id]');
-      if (first) first.classList.add('active');
+      if (first) { first.classList.add('active'); }
     };
-    const doFilter  = (q) => pickersLocalFilterAndSort('clients', baseIds.map(id=>items[id]).filter(Boolean), q, sortKey, sortDir);
+    const doFilter  = (q) => {
+      const fn = (window.pickersLocalFilterAndSort || pickersLocalFilterAndSort);
+      const out = fn('clients', currentRows.length ? currentRows : baseRows, q, sortKey, sortDir);
+      if (LOGC) console.log('[PICKER][clients] doFilter()', { q, in: (currentRows.length||baseRows.length), out: out.length });
+      return out;
+    };
 
     if (!tbody.__wiredClick) {
       tbody.__wiredClick = true;
       const choose = async (tr) => {
         const id    = tr.getAttribute('data-id');
         const label = tr.getAttribute('data-label') || tr.textContent.trim();
-        if (LOGC) console.log('[PICKER][clients] select', { id, label });
+        if (LOGC) console.log('[PICKER][clients] select()', { id, label });
         try {
           await revalidateClientOnPick(id);
           if (typeof onPick==='function') onPick({ id, label });
         } catch (err) {
+          console.warn('[PICKER][clients] select() validation failed', err);
           alert(err?.message || 'Selection could not be validated.');
           return;
         }
@@ -2108,37 +2146,48 @@ async function openClientPicker(onPick) {
         sortKey = key;
         currentRows = doFilter(search.value.trim());
         applyRows(currentRows);
+        if (LOGC) console.log('[PICKER][clients] sort', { sortKey, sortDir, count: currentRows.length });
       });
       if (LOGC) console.log('[PICKER][clients] wired sort header');
     }
 
     let t = 0;
-    search.addEventListener('input', () => {
-      const q = search.value.trim();
-      if (t) clearTimeout(t);
-      t = setTimeout(() => { currentRows = doFilter(q); applyRows(currentRows); }, 150);
-      if (LOGC) console.log('[PICKER][clients] search', { q });
-    });
+    if (!search.__wiredInput) {
+      search.__wiredInput = true;
+      search.addEventListener('input', () => {
+        const q = search.value.trim();
+        if (LOGC) console.log('[PICKER][clients] search input', { q });
+        if (t) clearTimeout(t);
+        t = setTimeout(() => { currentRows = doFilter(q); applyRows(currentRows); }, 150);
+      });
+      if (LOGC) console.log('[PICKER][clients] wired search input');
+    }
 
-    // Arrow navigation + Enter/Escape
-    search.addEventListener('keydown', async (e) => {
-      const itemsEls = Array.from(tbody.querySelectorAll('tr[data-id]'));
-      if (!itemsEls.length) {
-        if (e.key === 'Escape') { const closeBtn = document.getElementById('btnCloseModal'); if (closeBtn) closeBtn.click(); }
-        return;
-      }
-      const idx = itemsEls.findIndex(tr => tr.classList.contains('active'));
-      const setActive = (i) => { itemsEls.forEach(tr=>tr.classList.remove('active')); itemsEls[i].classList.add('active'); itemsEls[i].scrollIntoView({block:'nearest'}); };
-      if (e.key === 'ArrowDown') { e.preventDefault(); setActive(Math.min((idx<0?0:idx+1), itemsEls.length-1)); }
-      if (e.key === 'ArrowUp')   { e.preventDefault(); setActive(Math.max((idx<0?0:idx-1), 0)); }
-      if (e.key === 'Enter')     { e.preventDefault(); const target = itemsEls[Math.max(idx,0)]; if (target) target.click(); }
-      if (e.key === 'Escape')    { e.preventDefault(); const closeBtn = document.getElementById('btnCloseModal'); if (closeBtn) closeBtn.click(); }
-    });
+    if (!search.__wiredKey) {
+      search.__wiredKey = true;
+      search.addEventListener('keydown', async (e) => {
+        const itemsEls = Array.from(tbody.querySelectorAll('tr[data-id]'));
+        if (!itemsEls.length) {
+          if (e.key === 'Escape') { const closeBtn = document.getElementById('btnCloseModal'); if (closeBtn) closeBtn.click(); }
+          return;
+        }
+        const idx = itemsEls.findIndex(tr => tr.classList.contains('active'));
+        const setActive = (i) => {
+          itemsEls.forEach(tr=>tr.classList.remove('active'));
+          itemsEls[i].classList.add('active');
+          itemsEls[i].scrollIntoView({ block:'nearest' });
+        };
+        if (e.key === 'ArrowDown') { e.preventDefault(); setActive(Math.min((idx<0?0:idx+1), itemsEls.length-1)); }
+        if (e.key === 'ArrowUp')   { e.preventDefault(); setActive(Math.max((idx<0?0:idx-1), 0)); }
+        if (e.key === 'Enter')     { e.preventDefault(); const target = itemsEls[Math.max(idx,0)]; if (target) target.click(); }
+        if (e.key === 'Escape')    { e.preventDefault(); const closeBtn = document.getElementById('btnCloseModal'); if (closeBtn) closeBtn.click(); }
+      });
+      if (LOGC) console.log('[PICKER][clients] wired search keydown');
+    }
 
     setTimeout(() => { try { search.focus(); if (LOGC) console.log('[PICKER][clients] search focused'); } catch {} }, 0);
   },{kind:'picker'});
 }
-
 
 
 
