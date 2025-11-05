@@ -1383,10 +1383,28 @@ function openContract(row) {
           };
 
           const selectRow = (id, label) => {
+            // Persist selection into hidden, display input, formState and modalCtx.data
             setContractFormValue(hiddenName, id);
             inputEl.value = label || '';
             const labEl = document.getElementById(labelElId);
             if (labEl) labEl.textContent = label ? `Chosen: ${label}` : '';
+
+            // Persist to modalCtx.formState.main
+            try {
+              const fs = (window.modalCtx.formState ||= { __forId: (window.modalCtx.data?.id ?? window.modalCtx.openToken ?? null), main:{}, pay:{} });
+              fs.main ||= {};
+              fs.main[hiddenName] = id;
+              if (hiddenName === 'candidate_id') fs.main['candidate_display'] = label;
+              if (hiddenName === 'client_id')    fs.main['client_name']       = label;
+            } catch {}
+
+            // Persist to modalCtx.data so re-renders show chosen values
+            try {
+              window.modalCtx.data = window.modalCtx.data || {};
+              if (hiddenName === 'candidate_id') { window.modalCtx.data.candidate_id = id; window.modalCtx.data.candidate_display = label; }
+              if (hiddenName === 'client_id')    { window.modalCtx.data.client_id    = id; window.modalCtx.data.client_name       = label; }
+            } catch {}
+
             closeMenu();
           };
 
@@ -1444,8 +1462,15 @@ function openContract(row) {
             if (LOGC) console.log('[CONTRACTS] Pick Candidate clicked');
             openCandidatePicker(async ({ id, label }) => {
               if (LOGC) console.log('[CONTRACTS] Pick Candidate → selected', { id, label });
+              // Persist selection (hidden, labels, formState, data)
               setContractFormValue('candidate_id', id);
               const lab = document.getElementById('candidatePickLabel'); if (lab) lab.textContent = `Chosen: ${label}`;
+              try {
+                const fs = (window.modalCtx.formState ||= { __forId: (window.modalCtx.data?.id ?? window.modalCtx.openToken ?? null), main:{}, pay:{} });
+                fs.main ||= {}; fs.main.candidate_id = id; fs.main.candidate_display = label;
+                window.modalCtx.data = window.modalCtx.data || {};
+                window.modalCtx.data.candidate_id = id; window.modalCtx.data.candidate_display = label;
+              } catch {}
               try {
                 const cand = await getCandidate(id);
                 const hint = prefillPayMethodFromCandidate(cand);
@@ -1461,6 +1486,12 @@ function openContract(row) {
             if (LOGC) console.log('[CONTRACTS] Clear Candidate clicked');
             setContractFormValue('candidate_id', '');
             const lab = document.getElementById('candidatePickLabel'); if (lab) lab.textContent = '';
+            try {
+              const fs = (window.modalCtx.formState ||= { __forId: (window.modalCtx.data?.id ?? window.modalCtx.openToken ?? null), main:{}, pay:{} });
+              fs.main ||= {}; delete fs.main.candidate_id; delete fs.main.candidate_display;
+              window.modalCtx.data = window.modalCtx.data || {};
+              delete window.modalCtx.data.candidate_id; delete window.modalCtx.data.candidate_display;
+            } catch {}
           });
           if (LOGC) console.log('[CONTRACTS] wired btnClearCandidate');
         }
@@ -1471,8 +1502,15 @@ function openContract(row) {
             if (LOGC) console.log('[CONTRACTS] Pick Client clicked');
             openClientPicker(async ({ id, label }) => {
               if (LOGC) console.log('[CONTRACTS] Pick Client → selected', { id, label });
+              // Persist selection (hidden, labels, formState, data)
               setContractFormValue('client_id', id);
               const lab = document.getElementById('clientPickLabel'); if (lab) lab.textContent = `Chosen: ${label}`;
+              try {
+                const fs = (window.modalCtx.formState ||= { __forId: (window.modalCtx.data?.id ?? window.modalCtx.openToken ?? null), main:{}, pay:{} });
+                fs.main ||= {}; fs.main.client_id = id; fs.main.client_name = label;
+                window.modalCtx.data = window.modalCtx.data || {};
+                window.modalCtx.data.client_id = id; window.modalCtx.data.client_name = label;
+              } catch {}
               try {
                 const client = await getClient(id);
                 const h = checkClientInvoiceEmailPresence(client);
@@ -1488,6 +1526,12 @@ function openContract(row) {
             if (LOGC) console.log('[CONTRACTS] Clear Client clicked');
             setContractFormValue('client_id', '');
             const lab = document.getElementById('clientPickLabel'); if (lab) lab.textContent = '';
+            try {
+              const fs = (window.modalCtx.formState ||= { __forId: (window.modalCtx.data?.id ?? window.modalCtx.openToken ?? null), main:{}, pay:{} });
+              fs.main ||= {}; delete fs.main.client_id; delete fs.main.client_name;
+              window.modalCtx.data = window.modalCtx.data || {};
+              delete window.modalCtx.data.client_id; delete window.modalCtx.data.client_name;
+            } catch {}
           });
           if (LOGC) console.log('[CONTRACTS] wired btnClearClient');
         }
@@ -2263,6 +2307,15 @@ function setContractFormValue(name, value) {
   if (!el) return;
   el.value = value == null ? '' : String(value);
   if (LOGC) console.log('[CONTRACTS] setContractFormValue', { name, value: (name.endsWith('_id') ? '(id)' : value) });
+
+  // Stage into formState.main so tab switches don’t lose the value
+  try {
+    window.modalCtx = window.modalCtx || {};
+    const fs = (window.modalCtx.formState ||= { __forId: (window.modalCtx.data?.id ?? window.modalCtx.openToken ?? null), main:{}, pay:{} });
+    fs.main ||= {};
+    fs.main[name] = el.value;
+  } catch {}
+
   const evt = new Event('input', { bubbles: true });
   el.dispatchEvent(evt);
 }
@@ -2303,8 +2356,6 @@ function checkClientInvoiceEmailPresence(client) {
 // UPDATED: renderContractMainTab (layout + logs; site under Client, Ward hint to right;
 // Role with Band to the right; uses .form to pick up input styling)
 // ─────────────────────────────────────────────────────────────────────────────
-
-
 
 function renderContractMainTab(ctx) {
   const LOGC = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : true; // default ON
@@ -8489,10 +8540,15 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
       const sentinel = window.modalCtx?.openToken || null;
       const initial  = (window.modalCtx.data?.id ?? sentinel);
       const fs = window.modalCtx.formState || { __forId: initial, main:{}, pay:{} };
-      if (fs.__forId == null) fs.__ForId = initial;
+      if (fs.__forId == null) fs.__forId = initial;
 
-      if (this.currentTabKey === 'main' && byId('tab-main')) {
-        const c = collectForm('#tab-main'); fs.main = { ...(fs.main||{}), ...stripEmpty(c) };
+      if (this.currentTabKey === 'main') {
+        const sel = byId('tab-main') ? '#tab-main'
+                  : (byId('contractForm') ? '#contractForm' : null);
+        if (sel) {
+          const c = collectForm(sel);
+          fs.main = { ...(fs.main||{}), ...stripEmpty(c) };
+        }
       }
       if (this.currentTabKey === 'pay'  && byId('tab-pay'))  {
         const c = collectForm('#tab-pay');  fs.pay  = { ...(fs.pay ||{}), ...stripEmpty(c) };
