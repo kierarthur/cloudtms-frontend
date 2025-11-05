@@ -1202,6 +1202,14 @@ function openContract(row) {
         const ghFilled = Object.values(gh).some(v => v != null && v !== 0);
         const std_hours_json = ghFilled ? gh : null;
 
+        // Read DD/MM/YYYY from UI and convert to ISO YYYY-MM-DD for API
+        const ukToIso = (ddmmyyyy) => {
+          try { return (typeof parseUkDateToIso === 'function') ? (parseUkDateToIso(ddmmyyyy) || null) : (ddmmyyyy || null); }
+          catch { return ddmmyyyy || null; }
+        };
+        const startIso = ukToIso(val('start_date'));
+        const endIso   = ukToIso(val('end_date'));
+
         const data = {
           id: window.modalCtx.data?.id || null,
           candidate_id: val('candidate_id'),
@@ -1210,8 +1218,8 @@ function openContract(row) {
           band:         val('band'),
           display_site: val('display_site'),
           ward_hint:    val('ward_hint'),
-          start_date:   val('start_date'),
-          end_date:     val('end_date'),
+          start_date:   startIso,
+          end_date:     endIso,
           pay_method_snapshot: (val('default_pay_method_snapshot') || val('pay_method_snapshot') || 'PAYE').toUpperCase(),
           default_submission_mode: (val('default_submission_mode') || 'ELECTRONIC').toUpperCase(),
           week_ending_weekday_snapshot: (val('week_ending_weekday_snapshot') || '0'),
@@ -1287,6 +1295,163 @@ function openContract(row) {
           btnClearClient:   { exists: !!btnCL, disabled: !!(btnCL && btnCL.disabled) }
         });
 
+        // ───────────────────────────────────────────────────────────
+        // Typeahead (inline suggestions) — already wired above
+        // ───────────────────────────────────────────────────────────
+
+        // ───────────────────────────────────────────────────────────
+        // Calendar date pickers for DD/MM/YYYY
+        // ───────────────────────────────────────────────────────────
+        try {
+          const sd = form.querySelector('input[name="start_date"]');
+          const ed = form.querySelector('input[name="end_date"]');
+
+          // Normalize displayed values to UK on first wire if they look ISO
+          const toUk = (iso) => {
+            try { return (typeof formatIsoToUk === 'function') ? (formatIsoToUk(iso) || '') : (iso || ''); }
+            catch { return iso || ''; }
+          };
+          if (sd && /^\d{4}-\d{2}-\d{2}$/.test(sd.value||'')) sd.value = toUk(sd.value);
+          if (ed && /^\d{4}-\d{2}-\d{2}$/.test(ed.value||'')) ed.value = toUk(ed.value);
+
+          if (sd) {
+            sd.setAttribute('placeholder','DD/MM/YYYY');
+            if (typeof attachUkDatePicker === 'function') attachUkDatePicker(sd);
+          }
+          if (ed) {
+            ed.setAttribute('placeholder','DD/MM/YYYY');
+            if (typeof attachUkDatePicker === 'function') attachUkDatePicker(ed);
+          }
+          if (LOGC) console.log('[CONTRACTS] datepickers wired for start_date/end_date', { hasStart: !!sd, hasEnd: !!ed });
+        } catch (e) {
+          if (LOGC) console.warn('[CONTRACTS] datepicker wiring failed', e);
+        }
+
+        // ───────────────────────────────────────────────────────────
+        // NEW: Typeahead (inline suggestions) for candidates & clients
+        // ───────────────────────────────────────────────────────────
+        const ensurePrimed = async (entity) => {
+          try { await ensurePickerDatasetPrimed(entity); } catch (e) { if (LOGC) console.warn('[CONTRACTS] typeahead priming failed', entity, e); }
+        };
+
+        const buildItemLabel = (entity, r) => {
+          if (entity === 'candidates') {
+            const first = (r.first_name||'').trim();
+            const last  = (r.last_name||'').trim();
+            const role  = ((r.roles_display||'').split(/[•;,]/)[0]||'').trim();
+            return `${last}${last?', ':''}${first}${role?` ${role}`:''}`.trim();
+          } else {
+            const name  = (r.name||'').trim();
+            const email = (r.primary_invoice_email||'').trim();
+            return email ? `${name} • ${email}` : name;
+          }
+        };
+
+        const wireTypeahead = async (entity, inputEl, hiddenName, labelElId) => {
+          if (!inputEl) return;
+          await ensurePrimed(entity);
+
+          const menuId = entity === 'candidates' ? 'candTypeaheadMenu' : 'clientTypeaheadMenu';
+          let menu = document.getElementById(menuId);
+          if (!menu) {
+            menu = document.createElement('div');
+            menu.id = menuId;
+            menu.className = 'typeahead-menu';
+            menu.style.position = 'absolute';
+            menu.style.zIndex = '1000';
+            menu.style.background = 'var(--panel, #fff)';
+            menu.style.border = '1px solid var(--line, #ddd)';
+            menu.style.boxShadow = '0 4px 12px rgba(0,0,0,0.08)';
+            menu.style.maxHeight = '240px';
+            menu.style.overflowY = 'auto';
+            menu.style.display = 'none';
+            document.body.appendChild(menu);
+          }
+
+          const positionMenu = () => {
+            const r = inputEl.getBoundingClientRect();
+            menu.style.minWidth = `${Math.max(260, r.width)}px`;
+            menu.style.left = `${window.scrollX + r.left}px`;
+            menu.style.top  = `${window.scrollY + r.bottom + 4}px`;
+          };
+
+          const closeMenu = () => { menu.style.display = 'none'; menu.innerHTML = ''; };
+          const openMenu  = () => { positionMenu(); menu.style.display = ''; };
+
+          const getDataset = () => {
+            const fp  = getSummaryFingerprint(entity);
+            const mem = getSummaryMembership(entity, fp);
+            const ds  = (window.__pickerData ||= {})[entity] || { since:null, itemsById:{} };
+            return { ids: Array.isArray(mem?.ids) ? mem.ids : [], items: ds.itemsById || {} };
+          };
+
+          const applyList = (rows) => {
+            menu.innerHTML = rows.slice(0, 10).map(r => {
+              const label = buildItemLabel(entity, r);
+              return `<div class="ta-item" data-id="${r.id||''}" data-label="${(label||'').replace(/"/g,'&quot;')}" style="padding:8px 10px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${label}</div>`;
+            }).join('');
+            const first = menu.querySelector('.ta-item');
+            if (first) first.style.background = 'var(--hover, #f5f5f5)';
+          };
+
+          const selectRow = (id, label) => {
+            setContractFormValue(hiddenName, id);
+            inputEl.value = label || '';
+            const labEl = document.getElementById(labelElId);
+            if (labEl) labEl.textContent = label ? `Chosen: ${label}` : '';
+            closeMenu();
+          };
+
+          let debTimer = 0;
+          const handleInput = () => {
+            const q = (inputEl.value||'').trim();
+            if (q.length < 3) { closeMenu(); return; }
+            if (debTimer) clearTimeout(debTimer);
+            debTimer = setTimeout(() => {
+              const { ids, items } = getDataset();
+              const rows = pickersLocalFilterAndSort(entity, ids, q, entity==='candidates'?'last_name':'name', 'asc')
+                .map(rid => (typeof rid==='object'? rid : items[String(rid)]))
+                .filter(Boolean);
+              if (!rows.length) { closeMenu(); return; }
+              applyList(rows);
+              openMenu();
+            }, 120);
+          };
+
+          const handleKeyDown = (e) => {
+            if (menu.style.display === 'none') return;
+            const items = Array.from(menu.querySelectorAll('.ta-item'));
+            if (!items.length) return;
+            const idx = items.findIndex(n => n.style.background && n.style.background.includes('hover'));
+            const setActive = (i) => {
+              items.forEach(n => n.style.background='');
+              items[i].style.background = 'var(--hover, #f5f5f5)';
+              items[i].scrollIntoView({ block:'nearest' });
+            };
+            if (e.key === 'ArrowDown') { e.preventDefault(); setActive(Math.min((idx<0?0:idx+1), items.length-1)); }
+            if (e.key === 'ArrowUp')   { e.preventDefault(); setActive(Math.max((idx<0?0:idx-1), 0)); }
+            if (e.key === 'Enter')     { e.preventDefault(); const n = items[Math.max(idx,0)]; if (n) selectRow(n.dataset.id, n.dataset.label); }
+            if (e.key === 'Escape')    { e.preventDefault(); closeMenu(); }
+          };
+
+          menu.addEventListener('click', (ev) => {
+            const n = ev.target && ev.target.closest('.ta-item'); if (!n) return;
+            selectRow(n.dataset.id, n.dataset.label);
+          });
+
+          let blurTimer = 0;
+          inputEl.addEventListener('blur', () => { blurTimer = setTimeout(closeMenu, 150); });
+          menu.addEventListener('mousedown', () => { if (blurTimer) clearTimeout(blurTimer); });
+
+          inputEl.addEventListener('input', handleInput);
+          inputEl.addEventListener('keydown', handleKeyDown);
+        };
+
+        // Wire typeahead for candidate & client
+        wireTypeahead('candidates', candInput, 'candidate_id', 'candidatePickLabel');
+        wireTypeahead('clients',    cliInput,  'client_id',    'clientPickLabel');
+
+        // Keep the Pick/Clear buttons wiring as-is
         if (btnPC && !btnPC.__wired) {
           btnPC.__wired = true;
           btnPC.addEventListener('click', async () => {
@@ -1341,19 +1506,11 @@ function openContract(row) {
           if (LOGC) console.log('[CONTRACTS] wired btnClearClient');
         }
 
+        // Deprecated picker-on-type behaviour removed; typing handled by typeahead
         const openOnType = (inputEl, openerName) => {
-          if (!inputEl || inputEl.__wired) return;
-          inputEl.__wired = true;
-          inputEl.addEventListener('keydown', (ev) => {
-            const isChar = ev.key && ev.key.length === 1 && !ev.ctrlKey && !ev.metaKey && !ev.altKey;
-            if (!isChar) return;
-            ev.preventDefault();
-            if (LOGC) console.log('[CONTRACTS] open picker from typing', { field: openerName, key: ev.key });
-            if (openerName === 'candidate') btnPC?.click();
-            if (openerName === 'client')    btnPL?.click();
-          });
-          inputEl.addEventListener('dblclick', () => { if (LOGC) console.log('[CONTRACTS] open picker from dblclick', { field: openerName }); (openerName==='candidate'?btnPC:btnPL)?.click(); });
-          if (LOGC) console.log('[CONTRACTS] wired typing→open for', openerName);
+          if (!inputEl || inputEl.__wiredTyping) return;
+          inputEl.__wiredTyping = true;
+          if (LOGC) console.log('[CONTRACTS] typing handler installed for', openerName);
         };
         openOnType(candInput, 'candidate');
         openOnType(cliInput, 'client');
@@ -1569,7 +1726,7 @@ function pickersLocalFilterAndSort(entity, ids, query, sortKey, sortDir){
   const toks = norm(query||'').split(/\s+/).filter(Boolean);
 
   const scoreRow = (r) => {
-    if (!toks.length) return 1;
+    if (!toks.length) return 0; // 0 for no-query; we’ll use alphabetical in that case
     let s = 0;
     if (entity === 'candidates') {
       const first = norm(r.first_name), last = norm(r.last_name);
@@ -1596,17 +1753,32 @@ function pickersLocalFilterAndSort(entity, ids, query, sortKey, sortDir){
   };
 
   const rows = ids.map(id => itemsById[String(id)]).filter(Boolean);
-  const filtered = toks.length ? rows.filter(r => scoreRow(r) > 0) : rows.slice();
 
-  const cmp = (a,b) => {
-    const av = (a?.[sortKey] ?? '').toString().toLowerCase();
-    const bv = (b?.[sortKey] ?? '').toString().toLowerCase();
+  if (!toks.length) {
+    // No query → pure alphabetical on sortKey
+    const cmpAlpha = (a,b) => {
+      const av = (a?.[sortKey] ?? '').toString().toLowerCase();
+      const bv = (b?.[sortKey] ?? '').toString().toLowerCase();
+      if (av < bv) return (sortDir==='asc'? -1 : 1);
+      if (av > bv) return (sortDir==='asc'? 1 : -1);
+      return 0;
+    };
+    return rows.slice().sort(cmpAlpha);
+  }
+
+  // With query → score first (desc), then tie-break alphabetically
+  const withScore = rows.map(r => ({ r, s: scoreRow(r) })).filter(x => x.s > 0);
+  withScore.sort((A,B) => {
+    if (A.s !== B.s) return B.s - A.s;
+    const av = (A.r?.[sortKey] ?? '').toString().toLowerCase();
+    const bv = (B.r?.[sortKey] ?? '').toString().toLowerCase();
     if (av < bv) return (sortDir==='asc'? -1 : 1);
     if (av > bv) return (sortDir==='asc'? 1 : -1);
     return 0;
-  };
-  return filtered.sort(cmp);
+  });
+  return withScore.map(x => x.r);
 }
+
 // ─────────────────────────────────────────────────────────────────────────────
 // NEW: revalidateCandidateOnPick(id) / revalidateClientOnPick(id)
 // Fetches current detail and refreshes dataset cache before accept
@@ -1736,14 +1908,19 @@ async function openCandidatePicker(onPick) {
     let sortKey = 'last_name', sortDir = 'asc';
     let currentRows = rowsBase.slice();
 
-    const applyRows = (rows) => { tbody.innerHTML = renderRows(rows); if (LOGC) console.log('[PICKER][candidates] render', { count: rows.length }); };
+    const applyRows = (rows) => {
+      tbody.innerHTML = renderRows(rows);
+      if (LOGC) console.log('[PICKER][candidates] render', { count: rows.length });
+      // highlight first row
+      const first = tbody.querySelector('tr[data-id]');
+      if (first) first.classList.add('active');
+    };
     const doFilter  = (q) => pickersLocalFilterAndSort('candidates', ids, q, sortKey, sortDir);
 
     // Delegated click for selection
     if (!tbody.__wiredClick) {
       tbody.__wiredClick = true;
-      tbody.addEventListener('click', async (e) => {
-        const tr = e.target && e.target.closest('tr[data-id]'); if (!tr) return;
+      const choose = async (tr) => {
         const id    = tr.getAttribute('data-id');
         const label = tr.getAttribute('data-label') || tr.textContent.trim();
         if (LOGC) console.log('[PICKER][candidates] select', { id, label });
@@ -1755,8 +1932,16 @@ async function openCandidatePicker(onPick) {
           return;
         }
         const closeBtn = document.getElementById('btnCloseModal'); if (closeBtn) closeBtn.click();
+      };
+      tbody.addEventListener('click', async (e) => {
+        const tr = e.target && e.target.closest('tr[data-id]'); if (!tr) return;
+        await choose(tr);
       });
-      if (LOGC) console.log('[PICKER][candidates] wired click handler');
+      tbody.addEventListener('dblclick', async (e) => {
+        const tr = e.target && e.target.closest('tr[data-id]'); if (!tr) return;
+        await choose(tr);
+      });
+      if (LOGC) console.log('[PICKER][candidates] wired click + dblclick handler');
     }
 
     // Header sorting
@@ -1863,13 +2048,19 @@ async function openClientPicker(onPick) {
     let sortKey = 'name', sortDir = 'asc';
     let currentRows = rowsBase.slice();
 
-    const applyRows = (rows) => { tbody.innerHTML = renderRows(rows); if (LOGC) console.log('[PICKER][clients] render', { count: rows.length }); };
+    const applyRows = (rows) => {
+      tbody.innerHTML = renderRows(rows);
+      if (LOGC) console.log('[PICKER][clients] render', { count: rows.length });
+      // highlight first row (to mirror candidate picker behaviour)
+      const first = tbody.querySelector('tr[data-id]');
+      if (first) first.classList.add('active');
+    };
     const doFilter  = (q) => pickersLocalFilterAndSort('clients', ids, q, sortKey, sortDir);
 
+    // Delegated click + dblclick for selection (same as candidate picker)
     if (!tbody.__wiredClick) {
       tbody.__wiredClick = true;
-      tbody.addEventListener('click', async (e) => {
-        const tr = e.target && e.target.closest('tr[data-id]'); if (!tr) return;
+      const choose = async (tr) => {
         const id    = tr.getAttribute('data-id');
         const label = tr.getAttribute('data-label') || tr.textContent.trim();
         if (LOGC) console.log('[PICKER][clients] select', { id, label });
@@ -1881,10 +2072,19 @@ async function openClientPicker(onPick) {
           return;
         }
         const closeBtn = document.getElementById('btnCloseModal'); if (closeBtn) closeBtn.click();
+      };
+      tbody.addEventListener('click', async (e) => {
+        const tr = e.target && e.target.closest('tr[data-id]'); if (!tr) return;
+        await choose(tr);
       });
-      if (LOGC) console.log('[PICKER][clients] wired click handler');
+      tbody.addEventListener('dblclick', async (e) => {
+        const tr = e.target && e.target.closest('tr[data-id]'); if (!tr) return;
+        await choose(tr);
+      });
+      if (LOGC) console.log('[PICKER][clients] wired click + dblclick handler');
     }
 
+    // Header sorting
     if (!table.__wiredSort) {
       table.__wiredSort = true;
       table.querySelector('thead').addEventListener('click', (e) => {
@@ -1898,6 +2098,7 @@ async function openClientPicker(onPick) {
       if (LOGC) console.log('[PICKER][clients] wired sort header');
     }
 
+    // Debounced type-to-filter (auto-filter as you type)
     let t = 0;
     search.addEventListener('input', () => {
       const q = search.value.trim();
@@ -1906,6 +2107,7 @@ async function openClientPicker(onPick) {
       if (LOGC) console.log('[PICKER][clients] search', { q });
     });
 
+    // Enter/Escape (Enter selects first, Escape closes) — mirrors candidate picker
     search.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') {
         const first = tbody.querySelector('tr[data-id]');
@@ -2028,6 +2230,14 @@ function renderContractMainTab(ctx) {
   const candLabel   = (d.candidate_display || '').trim();
   const clientLabel = (d.client_name || '').trim();
 
+  // Format date fields for UI as DD/MM/YYYY if helpers exist; otherwise use raw
+  const toUk = (iso) => {
+    try { return (typeof formatIsoToUk === 'function') ? (formatIsoToUk(iso) || '') : (iso || ''); }
+    catch { return iso || ''; }
+  };
+  const startUk = toUk(d.start_date);
+  const endUk   = toUk(d.end_date);
+
   if (LOGC) console.log('[CONTRACTS] renderContractMainTab → layout: Client (full row) then Display site | Ward hint; Role | Band inline');
   if (LOGC) console.log('[CONTRACTS] renderContractMainTab snapshot', {
     candidate_id: candVal, client_id: clientVal,
@@ -2046,7 +2256,7 @@ function renderContractMainTab(ctx) {
         <label>Candidate</label>
         <div class="controls">
           <div class="split">
-            <input class="input" type="text" id="candidate_name_display" value="${candLabel}" placeholder="Pick a candidate…" readonly />
+            <input class="input" type="text" id="candidate_name_display" value="${candLabel}" placeholder="Type 3+ letters to search…" />
             <span>
               <button type="button" class="btn mini" id="btnPickCandidate">Pick…</button>
               <button type="button" class="btn mini" id="btnClearCandidate">Clear</button>
@@ -2061,7 +2271,7 @@ function renderContractMainTab(ctx) {
         <label>Client</label>
         <div class="controls">
           <div class="split">
-            <input class="input" type="text" id="client_name_display" value="${clientLabel}" placeholder="Pick a client…" readonly />
+            <input class="input" type="text" id="client_name_display" value="${clientLabel}" placeholder="Type 3+ letters to search…" />
             <span>
               <button type="button" class="btn mini" id="btnPickClient">Pick…</button>
               <button type="button" class="btn mini" id="btnClearClient">Clear</button>
@@ -2096,8 +2306,8 @@ function renderContractMainTab(ctx) {
 
       <!-- Dates -->
       <div class="grid-2">
-        <div class="row"><label>Start date</label><div class="controls"><input class="input" name="start_date" value="${d.start_date || ''}" placeholder="YYYY-MM-DD" required /></div></div>
-        <div class="row"><label>End date</label><div class="controls"><input class="input" name="end_date" value="${d.end_date || ''}" placeholder="YYYY-MM-DD" required /></div></div>
+        <div class="row"><label>Start date</label><div class="controls"><input class="input" name="start_date" value="${startUk}" placeholder="DD/MM/YYYY" required /></div></div>
+        <div class="row"><label>End date</label><div class="controls"><input class="input" name="end_date" value="${endUk}" placeholder="DD/MM/YYYY" required /></div></div>
       </div>
 
       <!-- Pay method / submission / auto-invoice (unchanged grouping) -->
@@ -2144,7 +2354,6 @@ function renderContractMainTab(ctx) {
       ${labelsBlock}
     </form>`;
 }
-
 
 
 // ─────────────────────────────────────────────────────────────────────────────
