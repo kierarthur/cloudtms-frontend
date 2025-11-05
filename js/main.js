@@ -832,14 +832,24 @@ async function deleteContract(contract_id) {
   if (!r?.ok) throw new Error('Delete contract failed');
   return r.json();
 }
-
+// ─────────────────────────────────────────────────────────────────────────────
+// UPDATED: checkContractOverlap (adds logging)
+// ─────────────────────────────────────────────────────────────────────────────
 async function checkContractOverlap(payload /* {candidate_id,start_date,end_date,ignore_contract_id?} */) {
+  const LOGC = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : false;
+  if (LOGC) console.log('[CONTRACTS] POST /api/contracts/check-overlap', payload);
   const r = await authFetch(API(`/api/contracts/check-overlap`), {
     method: 'POST', headers: { 'content-type':'application/json' }, body: _json(payload)
   });
-  if (!r?.ok) throw new Error('Overlap check failed');
-  return r.json();
+  if (!r?.ok) {
+    if (LOGC) console.error('[CONTRACTS] overlap check failed', r);
+    throw new Error('Overlap check failed');
+  }
+  const json = await r.json();
+  if (LOGC) console.log('[CONTRACTS] overlap check OK', json);
+  return json;
 }
+
 
 async function generateContractWeeks(contract_id) {
   const r = await authFetch(API(`/api/contracts/${_enc(contract_id)}/generate-weeks`), { method: 'POST' });
@@ -1032,16 +1042,23 @@ function _collectBucketLabelsFromForm(rootSel = '#contractForm') {
 // Overlap guard flow
 // ─────────────────────────────────────────────────────────────────────────────-
 
+// ─────────────────────────────────────────────────────────────────────────────
+// UPDATED: preSaveContractWithOverlapCheck (adds logging)
+// ─────────────────────────────────────────────────────────────────────────────
 async function preSaveContractWithOverlapCheck(formData /* object */) {
+  const LOGC = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : false;
   const payload = {
     candidate_id: formData.candidate_id,
     start_date:   formData.start_date,
     end_date:     formData.end_date,
     ignore_contract_id: formData.id || null
   };
+  if (LOGC) console.log('[CONTRACTS] overlap check → request', payload);
   const res = await checkContractOverlap(payload);
+  if (LOGC) console.log('[CONTRACTS] overlap check → response', res);
   if (!res?.has_overlap) return true;
   const ok = await showContractOverlapWarningDialog(res.overlaps || []);
+  if (LOGC) console.log('[CONTRACTS] overlap dialog → userChoice', ok);
   return !!ok;
 }
 
@@ -1101,8 +1118,15 @@ function renderContractsTable(rows) {
 // ──────────────────────────────────────────────────────────────────────────────
 // openContract (amended) — surface PAY_METHOD_MISMATCH warnings after save
 // ──────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// UPDATED: openContract (Rates tab enabled on create; picker wiring always-on;
+// typing in Candidate/Client field will open the picker; rich logging)
+// ─────────────────────────────────────────────────────────────────────────────
 function openContract(row) {
+  const LOGC = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : false;
   const isCreate = !row || !row.id;
+  if (LOGC) console.log('[CONTRACTS] openContract ENTRY', { isCreate, rowPreview: !!row });
+
   window.modalCtx = {
     entity: 'contracts',
     mode: isCreate ? 'create' : 'edit',
@@ -1120,6 +1144,7 @@ function openContract(row) {
         if (!id) return;
         if (!confirm('Delete this contract? (Only allowed if no timesheets exist)')) return;
         try {
+          if (LOGC) console.log('[CONTRACTS] deleteContract', { id });
           await deleteContract(id);
           try { discardAllModalsAndState(); } catch {}
           await renderAll();
@@ -1130,10 +1155,12 @@ function openContract(row) {
     });
   }
 
-  // ✅ GATE: only Main tab while creating; full tabs after id exists
+  // ▶ Change: include Rates tab in create mode so presets/rates are available immediately
   const tabs = isCreate
-    ? [ { key:'main', title:'Main' } ]
+    ? [ { key:'main', title:'Main' }, { key:'rates', title:'Rates' } ]
     : [ { key:'main', title:'Main' }, { key:'rates', title:'Rates' }, { key:'calendar', title:'Calendar' } ];
+
+  if (LOGC) console.log('[CONTRACTS] tabs', tabs.map(t=>t.key));
 
   showModal(
     isCreate ? 'Create Contract' : 'Edit Contract',
@@ -1188,10 +1215,17 @@ function openContract(row) {
           bucket_labels_json: _collectBucketLabelsFromForm('#contractForm')
         };
 
+        if (LOGC) {
+          const preview = { ...data, rates_json: '(object)', std_hours_json: std_hours_json ? '(object)' : null };
+          console.log('[CONTRACTS] onSave payload (preview)', preview);
+        }
+
         const ok = await preSaveContractWithOverlapCheck(data);
-        if (!ok) { window.modalCtx._saveInFlight = false; return false; }
+        if (!ok) { if (LOGC) console.log('[CONTRACTS] Save ABORTED by user after overlap dialog'); window.modalCtx._saveInFlight = false; return false; }
 
         const saved = await upsertContract(data, data.id || undefined);
+        if (LOGC) console.log('[CONTRACTS] upsertContract result', { hasSaved: !!saved, id: saved?.id || saved?.contract?.id });
+
         window.modalCtx.data = saved?.contract || saved || window.modalCtx.data;
 
         try {
@@ -1202,13 +1236,14 @@ function openContract(row) {
 
         const contractId = saved?.id || saved?.contract?.id;
         if (isCreate && contractId) {
-          try { await generateContractWeeks(contractId); } catch {}
+          try { if (LOGC) console.log('[CONTRACTS] generateContractWeeks', { contractId }); await generateContractWeeks(contractId); } catch (e) { if (LOGC) console.warn('[CONTRACTS] generateContractWeeks failed', e); }
         }
 
         try { discardAllModalsAndState(); } catch {}
         await renderAll();
         return true;
       } catch (e) {
+        if (LOGC) console.error('[CONTRACTS] Save failed', e);
         alert(`Save failed: ${e?.message || e}`);
         return false;
       } finally {
@@ -1216,7 +1251,7 @@ function openContract(row) {
       }
     },
     !!window.modalCtx.data?.id,
-    // onReturn: wire pickers ONLY when main tab is active
+    // onReturn: wire pickers (always after initial paint; also re-check on tab clicks)
     () => {
       const wire = () => {
         const form = document.querySelector('#contractForm'); if (!form) return;
@@ -1224,54 +1259,87 @@ function openContract(row) {
         const active = tabs?.querySelector('button.active')?.textContent?.toLowerCase() || 'main';
         if (active !== 'main') return;
 
+        if (LOGC) console.log('[CONTRACTS] wiring MAIN tab controls');
+
         const btnPC = document.getElementById('btnPickCandidate');
         const btnCC = document.getElementById('btnClearCandidate');
         const btnPL = document.getElementById('btnPickClient');
         const btnCL = document.getElementById('btnClearClient');
 
+        const candInput = document.getElementById('candidate_name_display');
+        const cliInput  = document.getElementById('client_name_display');
+
         if (btnPC && !btnPC.__wired) {
           btnPC.__wired = true;
           btnPC.addEventListener('click', async () => {
+            if (LOGC) console.log('[CONTRACTS] Pick Candidate clicked');
             openCandidatePicker(async ({ id, label }) => {
+              if (LOGC) console.log('[CONTRACTS] Pick Candidate → selected', { id, label });
               setContractFormValue('candidate_id', id);
               const lab = document.getElementById('candidatePickLabel'); if (lab) lab.textContent = `Chosen: ${label}`;
               try {
                 const cand = await getCandidate(id);
                 const hint = prefillPayMethodFromCandidate(cand);
                 if (hint) showModalHint(hint, 'warn');
-              } catch {}
+              } catch (e) { if (LOGC) console.warn('[CONTRACTS] prefillPayMethodFromCandidate failed', e); }
             });
           });
+          if (LOGC) console.log('[CONTRACTS] wired btnPickCandidate');
         }
         if (btnCC && !btnCC.__wired) {
           btnCC.__wired = true;
           btnCC.addEventListener('click', () => {
+            if (LOGC) console.log('[CONTRACTS] Clear Candidate clicked');
             setContractFormValue('candidate_id', '');
             const lab = document.getElementById('candidatePickLabel'); if (lab) lab.textContent = '';
           });
+          if (LOGC) console.log('[CONTRACTS] wired btnClearCandidate');
         }
 
         if (btnPL && !btnPL.__wired) {
           btnPL.__wired = true;
           btnPL.addEventListener('click', async () => {
+            if (LOGC) console.log('[CONTRACTS] Pick Client clicked');
             openClientPicker(async ({ id, label }) => {
+              if (LOGC) console.log('[CONTRACTS] Pick Client → selected', { id, label });
               setContractFormValue('client_id', id);
               const lab = document.getElementById('clientPickLabel'); if (lab) lab.textContent = `Chosen: ${label}`;
               try {
                 const client = await getClient(id);
                 const h = checkClientInvoiceEmailPresence(client);
                 if (h) showModalHint(h, 'warn');
-              } catch {}
+              } catch (e) { if (LOGC) console.warn('[CONTRACTS] client hint check failed', e); }
             });
           });
+          if (LOGC) console.log('[CONTRACTS] wired btnPickClient');
         }
         if (btnCL && !btnCL.__wired) {
           btnCL.__wired = true;
           btnCL.addEventListener('click', () => {
+            if (LOGC) console.log('[CONTRACTS] Clear Client clicked');
             setContractFormValue('client_id', '');
             const lab = document.getElementById('clientPickLabel'); if (lab) lab.textContent = '';
           });
+          if (LOGC) console.log('[CONTRACTS] wired btnClearClient');
         }
+
+        // NEW: typing in the (readonly) display fields opens the picker, so "typing does nothing" is solved
+        const openOnType = (inputEl, openerName) => {
+          if (!inputEl || inputEl.__wired) return;
+          inputEl.__wired = true;
+          inputEl.addEventListener('keydown', (ev) => {
+            const isChar = ev.key && ev.key.length === 1 && !ev.ctrlKey && !ev.metaKey && !ev.altKey;
+            if (!isChar) return;
+            ev.preventDefault();
+            if (LOGC) console.log('[CONTRACTS] open picker from typing', { field: openerName, key: ev.key });
+            if (openerName === 'candidate') btnPC?.click();
+            if (openerName === 'client')    btnPL?.click();
+          });
+          inputEl.addEventListener('dblclick', () => { if (LOGC) console.log('[CONTRACTS] open picker from dblclick', { field: openerName }); (openerName==='candidate'?btnPC:btnPL)?.click(); });
+          if (LOGC) console.log('[CONTRACTS] wired typing→open for', openerName);
+        };
+        openOnType(candInput, 'candidate');
+        openOnType(cliInput, 'client');
       };
 
       setTimeout(wire, 0);
@@ -1408,11 +1476,16 @@ function wirePickerLiveFilter(inputEl, tableEl) {
 }
 
 // Convenience: set a form field inside the contract modal
+// ─────────────────────────────────────────────────────────────────────────────
+// UPDATED: setContractFormValue (adds logging)
+// ─────────────────────────────────────────────────────────────────────────────
 function setContractFormValue(name, value) {
+  const LOGC = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : false;
   const form = document.querySelector('#contractForm'); if (!form) return;
   const el = form.querySelector(`[name="${CSS.escape(name)}"]`);
   if (!el) return;
   el.value = value == null ? '' : String(value);
+  if (LOGC) console.log('[CONTRACTS] setContractFormValue', { name, value: (name.endsWith('_id') ? '(id)' : value) });
   const evt = new Event('input', { bubbles: true });
   el.dispatchEvent(evt);
 }
@@ -1449,7 +1522,12 @@ function checkClientInvoiceEmailPresence(client) {
 // FIX 5: Guide hours UI (std_hours_json) added to Main tab
 // (Mon–Sun numeric hours; optional, display-only helper)
 // ──────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// UPDATED: renderContractMainTab (layout + logs; site under Client, Ward hint to right;
+// Role with Band to the right; uses .form to pick up input styling)
+// ─────────────────────────────────────────────────────────────────────────────
 function renderContractMainTab(ctx) {
+  const LOGC = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : false;
   const d = ctx?.data || {};
   const labelsBlock = renderBucketLabelsEditor(ctx);
 
@@ -1462,49 +1540,57 @@ function renderContractMainTab(ctx) {
   const candLabel   = (d.candidate_display || '').trim();
   const clientLabel = (d.client_name || '').trim();
 
+  if (LOGC) console.log('[CONTRACTS] renderContractMainTab → layout: Client (full row) then Display site | Ward hint; Role | Band inline');
+
   return `
-    <form id="contractForm" class="tabc">
+    <form id="contractForm" class="tabc form">
       <input type="hidden" name="candidate_id" value="${candVal}">
       <input type="hidden" name="client_id"    value="${clientVal}">
 
-      <div class="grid-2">
-        <div class="row">
-          <label>Candidate</label>
-          <div class="controls">
-            <div class="split">
-              <input class="input" type="text" id="candidate_name_display" value="${candLabel}" placeholder="Pick a candidate…" readonly />
-              <span>
-                <button type="button" class="btn mini" id="btnPickCandidate">Pick…</button>
-                <button type="button" class="btn mini" id="btnClearCandidate">Clear</button>
-              </span>
-            </div>
-            <div class="mini" id="candidatePickLabel">${candLabel ? `Chosen: ${candLabel}` : ''}</div>
+      <!-- Candidate (full width) -->
+      <div class="row">
+        <label>Candidate</label>
+        <div class="controls">
+          <div class="split">
+            <input class="input" type="text" id="candidate_name_display" value="${candLabel}" placeholder="Pick a candidate…" readonly />
+            <span>
+              <button type="button" class="btn mini" id="btnPickCandidate">Pick…</button>
+              <button type="button" class="btn mini" id="btnClearCandidate">Clear</button>
+            </span>
           </div>
-        </div>
-
-        <div class="row">
-          <label>Client</label>
-          <div class="controls">
-            <div class="split">
-              <input class="input" type="text" id="client_name_display" value="${clientLabel}" placeholder="Pick a client…" readonly />
-              <span>
-                <button type="button" class="btn mini" id="btnPickClient">Pick…</button>
-                <button type="button" class="btn mini" id="btnClearClient">Clear</button>
-              </span>
-            </div>
-            <div class="mini" id="clientPickLabel">${clientLabel ? `Chosen: ${clientLabel}` : ''}</div>
-          </div>
+          <div class="mini" id="candidatePickLabel">${candLabel ? `Chosen: ${candLabel}` : ''}</div>
         </div>
       </div>
 
-      <div class="grid-3">
+      <!-- Client (full width) -->
+      <div class="row">
+        <label>Client</label>
+        <div class="controls">
+          <div class="split">
+            <input class="input" type="text" id="client_name_display" value="${clientLabel}" placeholder="Pick a client…" readonly />
+            <span>
+              <button type="button" class="btn mini" id="btnPickClient">Pick…</button>
+              <button type="button" class="btn mini" id="btnClearClient">Clear</button>
+            </span>
+          </div>
+          <div class="mini" id="clientPickLabel">${clientLabel ? `Chosen: ${clientLabel}` : ''}</div>
+        </div>
+      </div>
+
+      <!-- Display site under Client, Ward hint to the right -->
+      <div class="grid-2">
+        <div class="row"><label>Display site</label><div class="controls"><input class="input" name="display_site" value="${d.display_site || ''}" /></div></div>
+        <div class="row"><label>Ward hint</label><div class="controls"><input class="input" name="ward_hint" value="${d.ward_hint || ''}" /></div></div>
+      </div>
+
+      <!-- Role with Band to the right -->
+      <div class="grid-2">
         <div class="row"><label>Role</label><div class="controls"><input class="input" name="role" value="${d.role || ''}" /></div></div>
         <div class="row"><label>Band</label><div class="controls"><input class="input" name="band" value="${d.band || ''}" /></div></div>
-        <div class="row"><label>Display site</label><div class="controls"><input class="input" name="display_site" value="${d.display_site || ''}" /></div></div>
       </div>
 
+      <!-- Week ending on its own row (kept simple) -->
       <div class="grid-2">
-        <div class="row"><label>Ward hint</label><div class="controls"><input class="input" name="ward_hint" value="${d.ward_hint || ''}" /></div></div>
         <div class="row"><label>Week-ending weekday</label>
           <div class="controls">
             <select name="week_ending_weekday_snapshot">
@@ -1514,11 +1600,13 @@ function renderContractMainTab(ctx) {
         </div>
       </div>
 
+      <!-- Dates -->
       <div class="grid-2">
         <div class="row"><label>Start date</label><div class="controls"><input class="input" name="start_date" value="${d.start_date || ''}" placeholder="YYYY-MM-DD" required /></div></div>
         <div class="row"><label>End date</label><div class="controls"><input class="input" name="end_date" value="${d.end_date || ''}" placeholder="YYYY-MM-DD" required /></div></div>
       </div>
 
+      <!-- Pay method / submission / auto-invoice (unchanged grouping) -->
       <div class="grid-3">
         <div class="row"><label>Pay method snapshot</label>
           <div class="controls">
@@ -1541,11 +1629,13 @@ function renderContractMainTab(ctx) {
         </div>
       </div>
 
+      <!-- Reference gates -->
       <div class="grid-2">
         <div class="row"><label>Require reference to PAY</label><div class="controls"><input type="checkbox" name="require_reference_to_pay" ${d.require_reference_to_pay ? 'checked':''} /></div></div>
         <div class="row"><label>Require reference to INVOICE</label><div class="controls"><input type="checkbox" name="require_reference_to_invoice" ${d.require_reference_to_invoice ? 'checked':''} /></div></div>
       </div>
 
+      <!-- Guide hours -->
       <div class="row"><label class="section">Guide hours (Mon–Sun, optional)</label></div>
       <div class="grid-7">
         <div class="row"><label>Mon</label><div class="controls"><input class="input" type="number" step="0.25" min="0" name="gh_mon" value="${num(GH.mon)}" /></div></div>
@@ -1561,11 +1651,17 @@ function renderContractMainTab(ctx) {
     </form>`;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// UPDATED: renderContractRatesTab (adds logging only)
+// ─────────────────────────────────────────────────────────────────────────────
 function renderContractRatesTab(ctx) {
+  const LOGC = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : false;
   const R = (ctx?.data?.rates_json) || {};
   const payMethod = String(ctx?.data?.pay_method_snapshot || 'PAYE').toUpperCase();
   const showPAYE = (payMethod === 'PAYE');
   const num = (v) => (v == null ? '' : String(v));
+
+  if (LOGC) console.log('[CONTRACTS] renderContractRatesTab', { payMethod, hasRates: !!ctx?.data?.rates_json });
 
   return `
     <div class="tabc" id="contractRatesTab" data-pay-method="${payMethod}">
@@ -7369,6 +7465,9 @@ async function renderClientRatesTable() {
   }
 })();
 
+// ─────────────────────────────────────────────────────────────────────────────
+// UPDATED: showModal (adds contract-modal class toggling for Contracts dialogs)
+// ─────────────────────────────────────────────────────────────────────────────
 function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
   // ===== Logging =====
   const LOG = (typeof window.__LOG_MODAL === 'boolean') ? window.__LOG_MODAL : false;
@@ -7404,30 +7503,29 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
   }
 
   function sanitizeModalGeometry() {
-  const m = byId('modal');
-  if (m) {
-    m.classList.remove('dragging');
-    // ⬇️ NEW: if we’ve pinned an anchor, keep the modal fixed at that spot instead of wiping coords
-    const anchor = (window.__modalAnchor || null);
-    if (anchor) {
-      m.style.position = 'fixed';
-      m.style.left     = anchor.left + 'px';
-      m.style.top      = anchor.top  + 'px';
-      m.style.right    = 'auto';
-      m.style.bottom   = 'auto';
-      m.style.transform= 'none';
-    } else {
-      // original reset when no anchor exists
-      m.style.position = '';
-      m.style.left = '';
-      m.style.top = '';
-      m.style.right = '';
-      m.style.bottom = '';
-      m.style.transform = '';
+    const m = byId('modal');
+    if (m) {
+      m.classList.remove('dragging');
+      // Keep modal anchored if we have a saved position
+      const anchor = (window.__modalAnchor || null);
+      if (anchor) {
+        m.style.position = 'fixed';
+        m.style.left     = anchor.left + 'px';
+        m.style.top      = anchor.top  + 'px';
+        m.style.right    = 'auto';
+        m.style.bottom   = 'auto';
+        m.style.transform= 'none';
+      } else {
+        m.style.position = '';
+        m.style.left = '';
+        m.style.top = '';
+        m.style.right = '';
+        m.style.bottom = '';
+        m.style.transform = '';
+      }
     }
+    document.onmousemove = null; document.onmouseup = null;
   }
-  document.onmousemove = null; document.onmouseup = null;
-}
 
   const modalEl = byId('modal');
   if (modalEl) {
@@ -7542,7 +7640,8 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
       if (this.entity==='clients'    && k==='rates')     { mountClientRatesTab?.(); }
       if (this.entity==='clients'    && k==='hospitals') { mountClientHospitalsTab?.(); }
       if (this.entity==='clients'    && k==='settings')  { renderClientSettingsUI?.(window.modalCtx.clientSettingsState||{}); }
- if (this.entity==='contracts' && k==='rates') { mountContractRatesTab?.(); }
+      if (this.entity==='contracts'  && k==='rates')     { mountContractRatesTab?.(); }
+
       this.currentTabKey = k;
       this._attachDirtyTracker();
 
@@ -7575,340 +7674,336 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
   stack().push(frame);
   byId('modalBack').style.display = 'flex';
 
-// ──────────────────────────────────────────────────────────────────────────────
-// FIX 3: Contracts quick search implemented ({ q: text } passthrough)
-// (and unchanged behaviour for other sections)
-// ──────────────────────────────────────────────────────────────────────────────
-// ──────────────────────────────────────────────────────────────────────────────
-// renderTopNav (amended) — adds Contracts quick-search branch { q: text }
-// ──────────────────────────────────────────────────────────────────────────────
-function renderTop() {
-  GC('renderTop()');
-  const isChild = (stack().length > 1);
-  const top     = currentFrame();
-  const parent  = parentFrame();
+  // ──────────────────────────────────────────────────────────────────────────
+  // renderTop — (amended) applies contract-modal class when entity is contracts
+  // ──────────────────────────────────────────────────────────────────────────
+  function renderTop() {
+    GC('renderTop()');
+    const isChild = (stack().length > 1);
+    const top     = currentFrame();
+    const parent  = parentFrame();
 
-  if (typeof top._detachGlobal === 'function') { try { top._detachGlobal(); } catch {} top._wired = false; }
+    if (typeof top._detachGlobal === 'function') { try { top._detachGlobal(); } catch {} top._wired = false; }
 
-  byId('modalTitle').textContent = top.title;
+    byId('modalTitle').textContent = top.title;
 
-  const tabsEl = byId('modalTabs'); tabsEl.innerHTML='';
-  (top.tabs||[]).forEach((t,i)=>{
-    const b=document.createElement('button'); b.textContent = t.label||t.title||t.key;
-    if (i===0 && !top.currentTabKey) top.currentTabKey = t.key;
-    if (t.key===top.currentTabKey || (i===0 && !top.currentTabKey)) b.classList.add('active');
-    b.onclick = ()=>{ if (top.mode==='saving') return; tabsEl.querySelectorAll('button').forEach(x=>x.classList.remove('active')); b.classList.add('active'); top.setTab(t.key); };
-    tabsEl.appendChild(b);
-  });
+    const tabsEl = byId('modalTabs'); tabsEl.innerHTML='';
+    (top.tabs||[]).forEach((t,i)=>{
+      const b=document.createElement('button'); b.textContent = t.label||t.title||t.key;
+      if (i===0 && !top.currentTabKey) top.currentTabKey = t.key;
+      if (t.key===top.currentTabKey || (i===0 && !top.currentTabKey)) b.classList.add('active');
+      b.onclick = ()=>{ if (top.mode==='saving') return; tabsEl.querySelectorAll('button').forEach(x=>x.classList.remove('active')); b.classList.add('active'); top.setTab(t.key); };
+      tabsEl.appendChild(b);
+    });
 
-  if (top.currentTabKey) top.setTab(top.currentTabKey);
-  else if (top.tabs && top.tabs[0]) top.setTab(top.tabs[0].key);
-  else byId('modalBody').innerHTML = top.renderTab('form',{})||'';
+    if (top.currentTabKey) top.setTab(top.currentTabKey);
+    else if (top.tabs && top.tabs[0]) top.setTab(top.tabs[0].key);
+    else byId('modalBody').innerHTML = top.renderTab('form',{})||'';
 
-  const btnSave  = byId('btnSave');
-  const btnClose = byId('btnCloseModal');
-  const btnDel   = byId('btnDelete');
-  const header   = byId('modalDrag');
-  const modalNode= byId('modal');
+    const btnSave  = byId('btnSave');
+    const btnClose = byId('btnCloseModal');
+    const btnDel   = byId('btnDelete');
+    const header   = byId('modalDrag');
+    const modalNode= byId('modal');
 
-  // ⬇️ Pin modal position so it doesn't re-center when tab content height changes
-  if (modalNode) {
-    const anchor = (window.__modalAnchor || null);
-    if (!anchor) {
-      const R = modalNode.getBoundingClientRect();
-      window.__modalAnchor = { left: R.left, top: R.top };
-      modalNode.style.position = 'fixed';
-      modalNode.style.left = R.left + 'px';
-      modalNode.style.top  = R.top  + 'px';
-      modalNode.style.right = 'auto';
-      modalNode.style.bottom= 'auto';
-      modalNode.style.transform = 'none';
-    } else {
-      modalNode.style.position = 'fixed';
-      modalNode.style.left = window.__modalAnchor.left + 'px';
-      modalNode.style.top  = window.__modalAnchor.top  + 'px';
-      modalNode.style.right = 'auto';
-      modalNode.style.bottom= 'auto';
-      modalNode.style.transform = 'none';
+    // NEW: toggle contract-modal class for theming when Contracts modal is open
+    const LOGC = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : false;
+    if (modalNode) {
+      const isContracts = (top.entity === 'contracts') || (top.kind === 'contracts');
+      modalNode.classList.toggle('contract-modal', !!isContracts);
+      if (LOGC && isContracts) console.log('[CONTRACTS][MODAL] contract-modal class applied to #modal');
     }
-  }
-  // ⬆️ End pin
 
-  const showChildDelete = isChild && (top.kind==='client-rate' || top.kind==='candidate-override') && top.hasId;
-  btnDel.style.display = showChildDelete ? '' : 'none'; btnDel.onclick = null;
+    // Pin modal position to avoid re-centering on tab swaps
+    if (modalNode) {
+      const anchor = (window.__modalAnchor || null);
+      if (!anchor) {
+        const R = modalNode.getBoundingClientRect();
+        window.__modalAnchor = { left: R.left, top: R.top };
+        modalNode.style.position = 'fixed';
+        modalNode.style.left = R.left + 'px';
+        modalNode.style.top  = R.top  + 'px';
+        modalNode.style.right = 'auto';
+        modalNode.style.bottom= 'auto';
+        modalNode.style.transform = 'none';
+      } else {
+        modalNode.style.position = 'fixed';
+        modalNode.style.left = window.__modalAnchor.left + 'px';
+        modalNode.style.top  = window.__modalAnchor.top  + 'px';
+        modalNode.style.right = 'auto';
+        modalNode.style.bottom= 'auto';
+        modalNode.style.transform = 'none';
+      }
+    }
 
-  let btnEdit = byId('btnEditModal');
-  if (!btnEdit) {
-    btnEdit=document.createElement('button');
-    btnEdit.id='btnEditModal'; btnEdit.type='button'; btnEdit.className='btn btn-outline btn-sm'; btnEdit.textContent='Edit';
-    const bar = btnSave?.parentElement || btnClose?.parentElement; if (bar) bar.insertBefore(btnEdit, btnSave);
-  }
+    const showChildDelete = isChild && (top.kind==='client-rate' || top.kind==='candidate-override') && top.hasId;
+    btnDel.style.display = showChildDelete ? '' : 'none'; btnDel.onclick = null;
 
-  (function dragWire(){
-    if(!header||!modalNode) return;
-    const onDown = e=>{
-      if ((e.button!==0 && e.type==='mousedown') || e.target.closest('button')) return;
-      const R=modalNode.getBoundingClientRect();
-      modalNode.style.position='fixed'; modalNode.style.left=R.left+'px'; modalNode.style.top=R.top+'px';
-      modalNode.style.right='auto'; modalNode.style.bottom='auto'; modalNode.style.transform='none'; modalNode.classList.add('dragging');
-      const ox=e.clientX-R.left, oy=e.clientY-R.top;
-      document.onmousemove = ev=>{ let l=ev.clientX-ox, t=ev.clientY-oy; const ml=Math.max(0,window.innerWidth-R.width), mt=Math.max(0,window.innerHeight-R.height); if(l<0)l=0; if(t<0)t=0; if(l>ml)l=ml; if(t>mt)t=mt; modalNode.style.left=l+'px'; modalNode.style.top=t+'px'; };
-      document.onmouseup   = ()=>{
-        modalNode.classList.remove('dragging');
-        // ⬇️ Update anchor to new drop position
-        const R2 = modalNode.getBoundingClientRect();
-        window.__modalAnchor = { left: R2.left, top: R2.top };
-        document.onmousemove=null; document.onmouseup=null;
+    let btnEdit = byId('btnEditModal');
+    if (!btnEdit) {
+      btnEdit=document.createElement('button');
+      btnEdit.id='btnEditModal'; btnEdit.type='button'; btnEdit.className='btn btn-outline btn-sm'; btnEdit.textContent='Edit';
+      const bar = btnSave?.parentElement || btnClose?.parentElement; if (bar) bar.insertBefore(btnEdit, btnSave);
+    }
+
+    (function dragWire(){
+      if(!header||!modalNode) return;
+      const onDown = e=>{
+        if ((e.button!==0 && e.type==='mousedown') || e.target.closest('button')) return;
+        const R=modalNode.getBoundingClientRect();
+        modalNode.style.position='fixed'; modalNode.style.left=R.left+'px'; modalNode.style.top=R.top+'px';
+        modalNode.style.right='auto'; modalNode.style.bottom='auto'; modalNode.style.transform='none'; modalNode.classList.add('dragging');
+        const ox=e.clientX-R.left, oy=e.clientY-R.top;
+        document.onmousemove = ev=>{ let l=ev.clientX-ox, t=ev.clientY-oy; const ml=Math.max(0,window.innerWidth-R.width), mt=Math.max(0,window.innerHeight-R.height); if(l<0)l=0; if(t<0)t=0; if(l>ml)l=ml; if(t>mt)t=mt; modalNode.style.left=l+'px'; modalNode.style.top=t+'px'; };
+        document.onmouseup   = ()=>{
+          modalNode.classList.remove('dragging');
+          const R2 = modalNode.getBoundingClientRect();
+          window.__modalAnchor = { left: R2.left, top: R2.top };
+          document.onmousemove=null; document.onmouseup=null;
+        };
+        e.preventDefault();
       };
-      e.preventDefault();
+      const onDbl = e=>{ if(!e.target.closest('button')) sanitizeModalGeometry(); };
+      header.addEventListener('mousedown', onDown);
+      header.addEventListener('dblclick',  onDbl);
+      const prev=top._detachGlobal;
+      top._detachGlobal = ()=>{ try{header.removeEventListener('mousedown',onDown);}catch{} try{header.removeEventListener('dblclick',onDbl);}catch{} document.onmousemove=null; document.onmouseup=null; if(typeof prev==='function'){ try{prev();}catch{} } };
+    })();
+
+    const defaultPrimary = (top.kind==='advanced-search') ? 'Search' : (top.noParentGate ? 'Apply' : (isChild ? 'Apply' : 'Save'));
+    btnSave.textContent = defaultPrimary; btnSave.setAttribute('aria-label', defaultPrimary);
+
+    const setCloseLabel = ()=>{
+      const label = (top.kind==='advanced-search') ? 'Close'
+                 : ((isChild || top.mode==='edit' || top.mode==='create') ? (top.isDirty ? 'Discard' : 'Cancel') : 'Close');
+      btnClose.textContent = label; btnClose.setAttribute('aria-label',label); btnClose.setAttribute('title',label);
     };
-    const onDbl = e=>{ if(!e.target.closest('button')) sanitizeModalGeometry(); };
-    header.addEventListener('mousedown', onDown);
-    header.addEventListener('dblclick',  onDbl);
-    const prev=top._detachGlobal;
-    top._detachGlobal = ()=>{ try{header.removeEventListener('mousedown',onDown);}catch{} try{header.removeEventListener('dblclick',onDbl);}catch{} document.onmousemove=null; document.onmouseup=null; if(typeof prev==='function'){ try{prev();}catch{} } };
-  })();
 
-  const defaultPrimary = (top.kind==='advanced-search') ? 'Search' : (top.noParentGate ? 'Apply' : (isChild ? 'Apply' : 'Save'));
-  btnSave.textContent = defaultPrimary; btnSave.setAttribute('aria-label', defaultPrimary);
+    top._updateButtons = ()=>{
+      const parentEditable = top.noParentGate ? true : (parent ? (parent.mode==='edit' || parent.mode==='create') : true);
+      const relatedBtn = byId('btnRelated');
 
-  const setCloseLabel = ()=>{
-    const label = (top.kind==='advanced-search') ? 'Close'
-               : ((isChild || top.mode==='edit' || top.mode==='create') ? (top.isDirty ? 'Discard' : 'Cancel') : 'Close');
-    btnClose.textContent = label; btnClose.setAttribute('aria-label',label); btnClose.setAttribute('title',label);
-  };
+      if (top.kind==='advanced-search') {
+        btnEdit.style.display='none'; btnSave.style.display=''; btnSave.disabled=!!top._saving; if (relatedBtn) relatedBtn.disabled=true;
+      } else if (isChild && !top.noParentGate) {
+        btnSave.style.display = parentEditable ? '' : 'none';
+        const wantApply = (top._applyDesired===true);
+        btnSave.disabled = (!parentEditable) || top._saving || !wantApply;
+        btnEdit.style.display='none'; if (relatedBtn) relatedBtn.disabled=true;
+        if (LOG) console.log('[MODAL] child _updateButtons()', { parentEditable, wantApply, disabled: btnSave.disabled });
+      } else {
+        btnEdit.style.display = (top.mode==='view' && top.hasId) ? '' : 'none';
+        if (relatedBtn) relatedBtn.disabled = !(top.mode==='view' && top.hasId);
+        if (top.mode==='view') { btnSave.style.display = top.noParentGate ? '' : 'none'; btnSave.disabled = top._saving; }
+        else { btnSave.style.display=''; btnSave.disabled = top._saving; }
+      }
+      setCloseLabel();
+    };
 
-  top._updateButtons = ()=>{
-    const parentEditable = top.noParentGate ? true : (parent ? (parent.mode==='edit' || parent.mode==='create') : true);
-    const relatedBtn = byId('btnRelated');
+    top._updateButtons();
 
-    if (top.kind==='advanced-search') {
-      btnEdit.style.display='none'; btnSave.style.display=''; btnSave.disabled=!!top._saving; if (relatedBtn) relatedBtn.disabled=true;
-    } else if (isChild && !top.noParentGate) {
-      btnSave.style.display = parentEditable ? '' : 'none';
-      const wantApply = (top._applyDesired===true);
-      btnSave.disabled = (!parentEditable) || top._saving || !wantApply;
-      btnEdit.style.display='none'; if (relatedBtn) relatedBtn.disabled=true;
-      if (LOG) console.log('[MODAL] child _updateButtons()', { parentEditable, wantApply, disabled: btnSave.disabled });
-    } else {
-      btnEdit.style.display = (top.mode==='view' && top.hasId) ? '' : 'none';
-      if (relatedBtn) relatedBtn.disabled = !(top.mode==='view' && top.hasId);
-      if (top.mode==='view') { btnSave.style.display = top.noParentGate ? '' : 'none'; btnSave.disabled = top._saving; }
-      else { btnSave.style.display=''; btnSave.disabled = top._saving; }
-    }
-    setCloseLabel();
-  };
+    btnEdit.onclick = ()=>{
+      const isChildNow = (stack().length > 1);
+      if (isChildNow || top.noParentGate || top.kind==='advanced-search') return;
+      if (top.mode==='view') {
+        top._snapshot = {
+          data               : deep(window.modalCtx?.data||null),
+          formState          : deep(window.modalCtx?.formState||null),
+          rolesState         : deep(window.modalCtx?.rolesState||null),
+          ratesState         : deep(window.modalCtx?.ratesState||null),
+          hospitalsState     : deep(window.modalCtx?.hospitalsState||null),
+          clientSettingsState: deep(window.modalCtx?.clientSettingsState||null),
+          overrides          : deep(window.modalCtx?.overrides || { existing:[], stagedNew:[], stagedEdits:{}, stagedDeletes:[] })
+        };
+        top.isDirty=false; setFrameMode(top,'edit');
+      }
+    };
 
-  top._updateButtons();
+    const handleSecondary = ()=>{
+      if (top._confirmingDiscard || top._closing) return;
 
-  btnEdit.onclick = ()=>{
-    const isChildNow = (stack().length > 1);
-    if (isChildNow || top.noParentGate || top.kind==='advanced-search') return;
-    if (top.mode==='view') {
-      top._snapshot = {
-        data               : deep(window.modalCtx?.data||null),
-        formState          : deep(window.modalCtx?.formState||null),
-        rolesState         : deep(window.modalCtx?.rolesState||null),
-        ratesState         : deep(window.modalCtx?.ratesState||null),
-        hospitalsState     : deep(window.modalCtx?.hospitalsState||null),
-        clientSettingsState: deep(window.modalCtx?.clientSettingsState||null),
-        overrides          : deep(window.modalCtx?.overrides || { existing:[], stagedNew:[], stagedEdits:{}, stagedDeletes:[] })
-      };
-      top.isDirty=false; setFrameMode(top,'edit');
-    }
-  };
+      if (top.kind==='advanced-search') {
+        top._closing=true;
+        document.onmousemove=null; document.onmouseup=null; byId('modal')?.classList.remove('dragging'); sanitizeModalGeometry();
+        const closing=stack().pop(); if (closing?._detachDirty){ try{closing._detachDirty();}catch{} closing._detachDirty=null; }
+        if (closing?._detachGlobal){ try{closing._detachGlobal();}catch{} closing._detachGlobal=null; } top._wired=false;
+        if (stack().length>0) { const p=currentFrame(); renderTop(); try{ p.onReturn && p.onReturn(); } catch{} }
+        else { discardAllModalsAndState(); if (window.__pendingFocus) { try{ renderAll(); } catch(e){ console.error('refresh after modal close failed',e); } } }
+        return;
+      }
 
-  const handleSecondary = ()=>{
-    if (top._confirmingDiscard || top._closing) return;
+      const isChildNow = (stack().length > 1);
+      if (!isChildNow && !top.noParentGate && top.mode==='edit') {
+        if (!top.isDirty) {
+          if (top._snapshot && window.modalCtx) {
+            window.modalCtx.data                = deep(top._snapshot.data);
+            window.modalCtx.formState           = deep(top._snapshot.formState);
+            window.modalCtx.rolesState          = deep(top._snapshot.rolesState);
+            window.modalCtx.ratesState          = deep(top._snapshot.ratesState);
+            window.modalCtx.hospitalsState      = deep(top._snapshot.hospitalsState);
+            window.modalCtx.clientSettingsState = deep(top._snapshot.clientSettingsState);
+            if (top._snapshot.overrides) window.modalCtx.overrides = deep(top._snapshot.overrides);
+            try { renderCandidateRatesTable?.(); } catch {}
+          }
+          top.isDirty=false; setFrameMode(top,'view'); top._snapshot=null;
+          try{ window.__toast?.('No changes'); }catch{}; return;
+        } else {
+          let ok=false; try{ top._confirmingDiscard=true; btnClose.disabled=true; ok=window.confirm('Discard changes and return to view?'); } finally { top._confirmingDiscard=false; btnClose.disabled=false; }
+          if (!ok) return;
+          if (top._snapshot && window.modalCtx) {
+            window.modalCtx.data                = deep(top._snapshot.data);
+            window.modalCtx.formState           = deep(top._snapshot.formState);
+            window.modalCtx.rolesState          = deep(top._snapshot.rolesState);
+            window.modalCtx.ratesState          = deep(top._snapshot.ratesState);
+            window.modalCtx.hospitalsState      = deep(top._snapshot.hospitalsState);
+            window.modalCtx.clientSettingsState = deep(top._snapshot.clientSettingsState);
+            if (top._snapshot.overrides) window.modalCtx.overrides = deep(top._snapshot.overrides);
+            try { renderCandidateRatesTable?.(); } catch {}
+          }
+          top.isDirty=false; top._snapshot=null; setFrameMode(top,'view'); return;
+        }
+      }
 
-    if (top.kind==='advanced-search') {
+      if (top._closing) return;
       top._closing=true;
-      document.onmousemove=null; document.onmouseup=null; byId('modal')?.classList.remove('dragging'); sanitizeModalGeometry();
+      document.onmousemove=null; document.onmouseup=null; byId('modal')?.classList.remove('dragging');
+
+      if (!isChildNow && !top.noParentGate && top.mode==='create' && top.isDirty) {
+        let ok=false; try{ top._confirmingDiscard=true; btnClose.disabled=true; ok=window.confirm('You have unsaved changes. Discard them and close?'); } finally { top._confirmingDiscard=false; btnClose.disabled=false; }
+        if (!ok) { top._closing=false; return; }
+      }
+
+      sanitizeModalGeometry();
       const closing=stack().pop(); if (closing?._detachDirty){ try{closing._detachDirty();}catch{} closing._detachDirty=null; }
       if (closing?._detachGlobal){ try{closing._detachGlobal();}catch{} closing._detachGlobal=null; } top._wired=false;
-      if (stack().length>0) { const p=currentFrame(); renderTop(); try{ p.onReturn && p.onReturn(); } catch{} }
-      else { discardAllModalsAndState(); if (window.__pendingFocus) { try{ renderAll(); } catch(e){ console.error('refresh after modal close failed',e); } } }
-      return;
-    }
+      if (stack().length>0) { const p=currentFrame(); renderTop(); try{ p.onReturn && p.onReturn(); }catch{} }
+      else { discardAllModalsAndState(); if (window.__pendingFocus) { try{ renderAll(); } catch(e) { console.error('refresh after modal close failed', e); } } }
+    };
+    byId('btnCloseModal').onclick = handleSecondary;
 
-    const isChildNow = (stack().length > 1);
-    if (!isChildNow && !top.noParentGate && top.mode==='edit') {
-      if (!top.isDirty) {
-        if (top._snapshot && window.modalCtx) {
-          window.modalCtx.data                = deep(top._snapshot.data);
-          window.modalCtx.formState           = deep(top._snapshot.formState);
-          window.modalCtx.rolesState          = deep(top._snapshot.rolesState);
-          window.modalCtx.ratesState          = deep(top._snapshot.ratesState);
-          window.modalCtx.hospitalsState      = deep(top._snapshot.hospitalsState);
-          window.modalCtx.clientSettingsState = deep(top._snapshot.clientSettingsState);
-          if (top._snapshot.overrides) window.modalCtx.overrides = deep(top._snapshot.overrides);
-          try { renderCandidateRatesTable?.(); } catch {}
+    const hasStagedClientDeletes = ()=> {
+      try {
+        const anyFlag = Array.isArray(window.modalCtx?.ratesState) && window.modalCtx.ratesState.some(w => w && w.__delete === true);
+        const anySet  = (window.modalCtx?.ratesStagedDeletes instanceof Set) && window.modalCtx.ratesStagedDeletes.size > 0;
+        const ovDel   = (window.modalCtx?.overrides?.stagedDeletes instanceof Set) && window.modalCtx.overrides.stagedDeletes.size > 0;
+        return !!(anyFlag || anySet || ovDel);
+      } catch { return false; }
+    };
+
+    async function saveForFrame(fr) {
+      if (!fr || fr._saving) return;
+      const onlyDel   = hasStagedClientDeletes();
+      const allowApply= (fr.kind==='candidate-override' || fr.kind==='client-rate') && fr._applyDesired===true;
+
+      L('saveForFrame ENTER', { kind: fr.kind, mode: fr.mode, noParentGate: fr.noParentGate, isDirty: fr.isDirty, onlyDel, allowApply });
+
+      if (fr.kind!=='advanced-search' && !fr.noParentGate && fr.mode!=='view' && !fr.isDirty && !onlyDel && !allowApply) {
+        L('saveForFrame GUARD: no-op (no changes and apply not allowed)');
+        const isChildNow=(stack().length>1);
+        if (isChildNow) {
+          sanitizeModalGeometry(); stack().pop();
+          if (stack().length>0) { const p=currentFrame(); renderTop(); try{ p.onReturn && p.onReturn(); }catch{} }
+          else { discardAllModalsAndState(); }
+        } else {
+          fr.isDirty=false; fr._snapshot=null; setFrameMode(fr,'view'); fr._updateButtons&&fr._updateButtons();
         }
-        top.isDirty=false; setFrameMode(top,'view'); top._snapshot=null;
         try{ window.__toast?.('No changes'); }catch{}; return;
-      } else {
-        let ok=false; try{ top._confirmingDiscard=true; btnClose.disabled=true; ok=window.confirm('Discard changes and return to view?'); } finally { top._confirmingDiscard=false; btnClose.disabled=false; }
-        if (!ok) return;
-        if (top._snapshot && window.modalCtx) {
-          window.modalCtx.data                = deep(top._snapshot.data);
-          window.modalCtx.formState           = deep(top._snapshot.formState);
-          window.modalCtx.rolesState          = deep(top._snapshot.rolesState);
-          window.modalCtx.ratesState          = deep(top._snapshot.ratesState);
-          window.modalCtx.hospitalsState      = deep(top._snapshot.hospitalsState);
-          window.modalCtx.clientSettingsState = deep(top._snapshot.clientSettingsState);
-          if (top._snapshot.overrides) window.modalCtx.overrides = deep(top._snapshot.overrides);
-          try { renderCandidateRatesTable?.(); } catch {}
-        }
-        top.isDirty=false; top._snapshot=null; setFrameMode(top,'view'); return;
       }
-    }
 
-    if (top._closing) return;
-    top._closing=true;
-    document.onmousemove=null; document.onmouseup=null; byId('modal')?.classList.remove('dragging');
-
-    if (!isChildNow && !top.noParentGate && top.mode==='create' && top.isDirty) {
-      let ok=false; try{ top._confirmingDiscard=true; btnClose.disabled=true; ok=window.confirm('You have unsaved changes. Discard them and close?'); } finally { top._confirmingDiscard=false; btnClose.disabled=false; }
-      if (!ok) { top._closing=false; return; }
-    }
-
-    sanitizeModalGeometry();
-    const closing=stack().pop(); if (closing?._detachDirty){ try{closing._detachDirty();}catch{} closing._detachDirty=null; }
-    if (closing?._detachGlobal){ try{closing._detachGlobal();}catch{} closing._detachGlobal=null; } top._wired=false;
-    if (stack().length>0) { const p=currentFrame(); renderTop(); try{ p.onReturn && p.onReturn(); }catch{} }
-    else { discardAllModalsAndState(); if (window.__pendingFocus) { try{ renderAll(); } catch(e) { console.error('refresh after modal close failed', e); } } }
-  };
-  byId('btnCloseModal').onclick = handleSecondary;
-
-  const hasStagedClientDeletes = ()=> {
-    try {
-      const anyFlag = Array.isArray(window.modalCtx?.ratesState) && window.modalCtx.ratesState.some(w => w && w.__delete === true);
-      const anySet  = (window.modalCtx?.ratesStagedDeletes instanceof Set) && window.modalCtx.ratesStagedDeletes.size > 0;
-      const ovDel   = (window.modalCtx?.overrides?.stagedDeletes instanceof Set) && window.modalCtx.overrides.stagedDeletes.size > 0;
-      return !!(anyFlag || anySet || ovDel);
-    } catch { return false; }
-  };
-
-  async function saveForFrame(fr) {
-    if (!fr || fr._saving) return;
-    const onlyDel   = hasStagedClientDeletes();
-    const allowApply= (fr.kind==='candidate-override' || fr.kind==='client-rate') && fr._applyDesired===true;
-
-    L('saveForFrame ENTER', { kind: fr.kind, mode: fr.mode, noParentGate: fr.noParentGate, isDirty: fr.isDirty, onlyDel, allowApply });
-
-    if (fr.kind!=='advanced-search' && !fr.noParentGate && fr.mode!=='view' && !fr.isDirty && !onlyDel && !allowApply) {
-      L('saveForFrame GUARD: no-op (no changes and apply not allowed)');
+      fr.persistCurrentTabState();
       const isChildNow=(stack().length>1);
+      if (isChildNow && !fr.noParentGate && fr.kind!=='advanced-search') { const p=parentFrame(); if (!p || !(p.mode==='edit'||p.mode==='create')) { L('saveForFrame GUARD: parent not editable'); return; } }
+      fr._saving=true; fr._updateButtons&&fr._updateButtons();
+
+      let ok=false, saved=null;
+      if (typeof fr.onSave==='function') {
+        try { const res=await fr.onSave(); ok = (res===true) || (res && res.ok===true); if (res&&res.saved) saved=res.saved; }
+        catch (e) { L('saveForFrame onSave threw', e); ok=false; }
+      }
+      fr._saving=false; if (!ok) { L('saveForFrame RESULT not ok'); fr._updateButtons&&fr._updateButtons(); return; }
+
+      if (fr.kind === 'advanced-search') {
+        sanitizeModalGeometry();
+        const closing = stack().pop();
+        if (closing?._detachDirty){ try{closing._detachDirty();}catch{} closing._detachDirty=null; }
+        if (closing?._detachGlobal){ try{closing._detachGlobal();}catch{} closing._detachGlobal=null; } fr._wired=false;
+
+        if (stack().length>0) {
+          const p=currentFrame(); renderTop(); try{ p.onReturn && p.onReturn(); }catch{}
+        } else {
+          discardAllModalsAndState();
+        }
+        L('saveForFrame EXIT (advanced-search closed)');
+        return;
+      }
+
       if (isChildNow) {
+        try { window.dispatchEvent(new CustomEvent('modal-dirty')); } catch {}
         sanitizeModalGeometry(); stack().pop();
-        if (stack().length>0) { const p=currentFrame(); renderTop(); try{ p.onReturn && p.onReturn(); }catch{} }
-        else { discardAllModalsAndState(); }
+        if (stack().length>0) {
+          const p=currentFrame(); p.isDirty=true; p._updateButtons&&p._updateButtons(); renderTop(); try{ p.onReturn && p.onReturn(); }catch{}
+        } else {
+          discardAllModalsAndState();
+        }
+        L('saveForFrame EXIT (child)');
       } else {
-        fr.isDirty=false; fr._snapshot=null; setFrameMode(fr,'view'); fr._updateButtons&&fr._updateButtons();
+        if (saved && window.modalCtx) { window.modalCtx.data = { ...(window.modalCtx.data||{}), ...saved }; fr.hasId = !!window.modalCtx.data?.id; }
+        fr.isDirty=false; fr._snapshot=null; setFrameMode(fr,'view');
+        L('saveForFrame EXIT (parent)');
       }
-      try{ window.__toast?.('No changes'); }catch{}; return;
     }
 
-    fr.persistCurrentTabState();
-    const isChildNow=(stack().length>1);
-    if (isChildNow && !fr.noParentGate && fr.kind!=='advanced-search') { const p=parentFrame(); if (!p || !(p.mode==='edit'||p.mode==='create')) { L('saveForFrame GUARD: parent not editable'); return; } }
-    fr._saving=true; fr._updateButtons&&fr._updateButtons();
+    const onSaveClick = async (ev)=>{
+      const btn=ev?.currentTarget || byId('btnSave');
+      const topNow=currentFrame(); const bound=btn?.dataset?.ownerToken;
+      if (LOG) console.log('[MODAL] click #btnSave', {boundToken:bound, topToken:topNow?._token, topKind:topNow?.kind, topTitle:topNow?.title});
+      if(!topNow) return; if(bound!==topNow._token){ if(LOG) console.warn('[MODAL] token mismatch; using top frame'); }
+      await saveForFrame(topNow);
+    };
 
-    let ok=false, saved=null;
-    if (typeof fr.onSave==='function') {
-      try { const res=await fr.onSave(); ok = (res===true) || (res && res.ok===true); if (res&&res.saved) saved=res.saved; }
-      catch (e) { L('saveForFrame onSave threw', e); ok=false; }
+    const bindSave = (btn,fr)=>{ if(!btn||!fr) return; btn.dataset.ownerToken = fr._token; btn.onclick = onSaveClick; if(LOG) console.log('[MODAL] bind #btnSave →',{ownerToken:fr._token,kind:fr.kind||'(parent)',title:fr.title,mode:fr.mode}); };
+    bindSave(btnSave, top);
+
+    const onDirtyEvt = ()=>{
+      const isChildNow=(stack().length>1);
+      if(isChildNow){ const p=parentFrame(); if(p && (p.mode==='edit'||p.mode==='create')){ p.isDirty=true; p._updateButtons&&p._updateButtons(); } }
+      else if(top.mode==='edit'||top.mode==='create'){ top.isDirty=true; top._updateButtons&&top._updateButtons(); }
+      try{ const t=currentFrame(); if(t && t.entity==='candidates' && t.currentTabKey==='rates'){ renderCandidateRatesTable?.(); } }catch{}
+    };
+    const onApplyEvt = ev=>{
+      const isChildNow=(stack().length>1); if(!isChildNow) return;
+      const t=currentFrame(); if(!(t && (t.kind==='client-rate'||t.kind==='candidate-override'))) return;
+      const enabled=!!(ev && ev.detail && ev.detail.enabled); t._applyDesired=enabled; t._updateButtons&&t._updateButtons(); bindSave(byId('btnSave'), t);
+      if(LOG) console.log('[MODAL] onApplyEvt → _applyDesired =', enabled,'rebound save to top frame');
+    };
+    const onModeChanged = ev=>{
+      const isChildNow=(stack().length>1); if(!isChildNow) return;
+      const parentIdx=stack().length-2, changed=ev?.detail?.frameIndex ?? -1;
+      if(changed===parentIdx){ if(LOG) console.log('[MODAL] parent mode changed → child _updateButtons()'); const t=currentFrame(); t._updateButtons&&t._updateButtons(); bindSave(byId('btnSave'), t); }
+    };
+
+    if (!top._wired) {
+      window.addEventListener('modal-dirty', onDirtyEvt);
+      window.addEventListener('modal-apply-enabled', onApplyEvt);
+      window.addEventListener('modal-frame-mode-changed', onModeChanged);
+      const onEsc=e=>{ if(e.key==='Escape'){ if(top._confirmingDiscard||top._closing) return; e.preventDefault(); byId('btnCloseModal').click(); } };
+      window.addEventListener('keydown', onEsc);
+      const onOverlayClick=e=>{ if(top._confirmingDiscard||top._closing) return; if(e.target===byId('modalBack')) byId('btnCloseModal').click(); };
+      byId('modalBack').addEventListener('click', onOverlayClick, true);
+      top._detachGlobal = ()=>{ try{window.removeEventListener('modal-dirty',onDirtyEvt);}catch{} try{window.removeEventListener('modal-apply-enabled',onApplyEvt);}catch{} try{window.removeEventListener('modal-frame-mode-changed',onModeChanged);}catch{} try{window.removeEventListener('keydown',onEsc);}catch{} try{byId('modalBack').removeEventListener('click', onOverlayClick, true);}catch{}; };
+      top._wired = true;
     }
-    fr._saving=false; if (!ok) { L('saveForFrame RESULT not ok'); fr._updateButtons&&fr._updateButtons(); return; }
 
-    // >>> Special-case: Advanced Search closes on success instead of flipping to view
-    if (fr.kind === 'advanced-search') {
-      sanitizeModalGeometry();
-      const closing = stack().pop();
-      if (closing?._detachDirty){ try{closing._detachDirty();}catch{} closing._detachDirty=null; }
-      if (closing?._detachGlobal){ try{closing._detachGlobal();}catch{} closing._detachGlobal=null; } fr._wired=false;
+    const parentEditable = parent && (parent.mode==='edit' || parent.mode==='create');
+    const isChildNow = (stack().length > 1);
+    if (isChildNow && !top.noParentGate) setFormReadOnly(byId('modalBody'), !parentEditable);
+    else                                 setFrameMode(top, top.mode);
 
-      if (stack().length>0) {
-        const p=currentFrame(); renderTop(); try{ p.onReturn && p.onReturn(); }catch{}
-      } else {
-        discardAllModalsAndState();
-      }
-      L('saveForFrame EXIT (advanced-search closed)');
-      return;
-    }
-    // <<< End special-case
+    top._updateButtons && top._updateButtons();
+    bindSave(btnSave, top);
 
-    if (isChildNow) {
-      try { window.dispatchEvent(new CustomEvent('modal-dirty')); } catch {}
-      sanitizeModalGeometry(); stack().pop();
-      if (stack().length>0) {
-        const p=currentFrame(); p.isDirty=true; p._updateButtons&&p._updateButtons(); renderTop(); try{ p.onReturn && p.onReturn(); }catch{}
-      } else {
-        discardAllModalsAndState();
-      }
-      L('saveForFrame EXIT (child)');
-    } else {
-      if (saved && window.modalCtx) { window.modalCtx.data = { ...(window.modalCtx.data||{}), ...saved }; fr.hasId = !!window.modalCtx.data?.id; }
-      fr.isDirty=false; fr._snapshot=null; setFrameMode(fr,'view');
-      L('saveForFrame EXIT (parent)');
-    }
+    GE();
   }
-
-  const onSaveClick = async (ev)=>{
-    const btn=ev?.currentTarget || byId('btnSave');
-    const topNow=currentFrame(); const bound=btn?.dataset?.ownerToken;
-    if (LOG) console.log('[MODAL] click #btnSave', {boundToken:bound, topToken:topNow?._token, topKind:topNow?.kind, topTitle:topNow?.title});
-    if(!topNow) return; if(bound!==topNow._token){ if(LOG) console.warn('[MODAL] token mismatch; using top frame'); }
-    await saveForFrame(topNow);
-  };
-
-  const bindSave = (btn,fr)=>{ if(!btn||!fr) return; btn.dataset.ownerToken = fr._token; btn.onclick = onSaveClick; if(LOG) console.log('[MODAL] bind #btnSave →',{ownerToken:fr._token,kind:fr.kind||'(parent)',title:fr.title,mode:fr.mode}); };
-  bindSave(btnSave, top);
-
-  const onDirtyEvt = ()=>{
-    const isChildNow=(stack().length>1);
-    if(isChildNow){ const p=parentFrame(); if(p && (p.mode==='edit'||p.mode==='create')){ p.isDirty=true; p._updateButtons&&p._updateButtons(); } }
-    else if(top.mode==='edit'||top.mode==='create'){ top.isDirty=true; top._updateButtons&&top._updateButtons(); }
-    try{ const t=currentFrame(); if(t && t.entity==='candidates' && t.currentTabKey==='rates'){ renderCandidateRatesTable?.(); } }catch{}
-  };
-  const onApplyEvt = ev=>{
-    const isChildNow=(stack().length>1); if(!isChildNow) return;
-    const t=currentFrame(); if(!(t && (t.kind==='client-rate'||t.kind==='candidate-override'))) return;
-    const enabled=!!(ev && ev.detail && ev.detail.enabled); t._applyDesired=enabled; t._updateButtons&&t._updateButtons(); bindSave(byId('btnSave'), t);
-    if(LOG) console.log('[MODAL] onApplyEvt → _applyDesired =', enabled,'rebound save to top frame');
-  };
-  const onModeChanged = ev=>{
-    const isChildNow=(stack().length>1); if(!isChildNow) return;
-    const parentIdx=stack().length-2, changed=ev?.detail?.frameIndex ?? -1;
-    if(changed===parentIdx){ if(LOG) console.log('[MODAL] parent mode changed → child _updateButtons()'); const t=currentFrame(); t._updateButtons&&t._updateButtons(); bindSave(byId('btnSave'), t); }
-  };
-
-  if (!top._wired) {
-    window.addEventListener('modal-dirty', onDirtyEvt);
-    window.addEventListener('modal-apply-enabled', onApplyEvt);
-    window.addEventListener('modal-frame-mode-changed', onModeChanged);
-    const onEsc=e=>{ if(e.key==='Escape'){ if(top._confirmingDiscard||top._closing) return; e.preventDefault(); byId('btnCloseModal').click(); } };
-    window.addEventListener('keydown', onEsc);
-    const onOverlayClick=e=>{ if(top._confirmingDiscard||top._closing) return; if(e.target===byId('modalBack')) byId('btnCloseModal').click(); };
-    byId('modalBack').addEventListener('click', onOverlayClick, true);
-    top._detachGlobal = ()=>{ try{window.removeEventListener('modal-dirty',onDirtyEvt);}catch{} try{window.removeEventListener('modal-apply-enabled',onApplyEvt);}catch{} try{window.removeEventListener('modal-frame-mode-changed',onModeChanged);}catch{} try{window.removeEventListener('keydown',onEsc);}catch{} try{byId('modalBack').removeEventListener('click', onOverlayClick, true);}catch{}; };
-    top._wired = true;
-  }
-
-  const parentEditable = parent && (parent.mode==='edit' || parent.mode==='create');
-  const isChildNow = (stack().length > 1);
-  if (isChildNow && !top.noParentGate) setFormReadOnly(byId('modalBody'), !parentEditable);
-  else                                 setFrameMode(top, top.mode);
-
-  // ⬇️ Ensure final state reflects current mode after potential repaint
-  top._updateButtons && top._updateButtons();
-  bindSave(btnSave, top);
-
-  GE();
-}
-
-
-
 
   byId('modalBack').style.display='flex';
   window.__getModalFrame = currentFrame;
