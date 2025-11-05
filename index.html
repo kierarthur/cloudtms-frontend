@@ -88,7 +88,7 @@
     .actions{padding:10px;border-top:1px solid var(--line);display:flex;gap:10px;justify-content:flex-end;background:#0c172d}
     .actions button{border:1px solid var(--line);background:#0b152a;color:var(--text);padding:8px 12px;border-radius:10px;cursor:pointer}
     .actions .primary{background:linear-gradient(180deg,#5146e5,#4038cc);border-color:#3730a3}
-    .hint{color:var(--sub);font-size:12px}
+    .hint{color:#cbd5e1;font-size:12px}
 
     /* ===== Button disabled state (visual) ===== */
     .actions button:disabled,
@@ -133,9 +133,7 @@
     .split{display:flex;gap:10px}
     .eye{cursor:pointer;font-size:12px;color:var(--sub)}
 
-    /* ===== Date-picker portal visibility fix (ensures month arrows are visible) ===== */
-    /* The floating date-picker renders on a light (white) panel and inherits body/link colors.
-       Make its text (and specifically the prev/next arrows) dark so they don't appear "missing". */
+    /* ===== Date-picker portal visibility fix ===== */
     .uk-datepicker-portal { color: #111827; }
     .uk-datepicker-portal .cal-head a {
       color: #111827;
@@ -144,6 +142,21 @@
       line-height: 1;
       font-size: 16px;
     }
+
+    /* ─────────────────────────────────────────────────────────────
+       Contracts (modal-only) helpers — scoped so nothing else changes
+       ───────────────────────────────────────────────────────────── */
+    .tabc .card{
+      background: #0c172d;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      padding: 12px;
+    }
+    .tabc .grid-2{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; }
+    .tabc .grid-3{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; }
+    .tabc .grid-5{ display:grid; grid-template-columns:repeat(5,minmax(0,1fr)); gap:10px; }
+    .tabc .grid-7{ display:grid; grid-template-columns:repeat(7,minmax(0,1fr)); gap:10px; }
   </style>
 </head>
 <body>
