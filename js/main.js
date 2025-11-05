@@ -1174,16 +1174,15 @@ function openContract(row) {
   const hasId = !!window.modalCtx.data?.id;
 
   showModal(
-    isCreate ? 'Create Contract' : 'Edit Contract',
-    tabs,
-    (key) => {
-      // Always render from merged state so staged edits survive re-renders
-      const ctx = { data: mergeContractStateIntoRow(window.modalCtx.data) };
-      if (key === 'main')     return renderContractMainTab(ctx);
-      if (key === 'rates')    return renderContractRatesTab(ctx);
-      if (key === 'calendar') return renderContractCalendarTab(ctx);
-      return `<div class="tabc">Unknown tab.</div>`;
-    },
+  isCreate ? 'Create Contract' : 'Edit Contract',
+  tabs,
+  (key, row) => {
+    const ctx = { data: row }; // use merged row from the framework
+    if (key === 'main')     return renderContractMainTab(ctx);
+    if (key === 'rates')    return renderContractRatesTab(ctx);
+    if (key === 'calendar') return renderContractCalendarTab(ctx);
+    return `<div class="tabc">Unknown tab.</div>`;
+  },
     async () => {
       if (window.modalCtx?._saveInFlight) return false;
       window.modalCtx._saveInFlight = true;
@@ -8717,7 +8716,7 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
 },
 
 
-    mergedRowForTab(k) {
+   mergedRowForTab(k) {
   L('mergedRowForTab ENTER', { k });
   const base = { ...(window.modalCtx?.data || {}) };
   const fs   = (window.modalCtx?.formState || {});
@@ -8726,16 +8725,26 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
   const sentinel = window.modalCtx?.openToken ?? null;
   const same = (fid===rid) || (rid==null && (fid===sentinel || fid==null));
 
-  // ✅ Treat “rates” like “pay” for contracts
   let staged = {};
   if (same) {
     if (k === 'main') staged = (fs.main || {});
     else if (k === 'pay' || k === 'rates') staged = (fs.pay || {});
   }
 
+  // ✅ If we're on the contracts "rates" tab, *nest* staged rate keys under rates_json
+  if (k === 'rates') {
+    const mergedRates = { ...(base.rates_json || {}) };
+    for (const [kk, vv] of Object.entries(staged || {})) mergedRates[kk] = vv;
+    const out = { ...base, ...stripEmpty(fs.main || {}) };
+    out.rates_json = mergedRates;
+    L('mergedRowForTab STATE', { rid, fid, sentinel, same, ratesKeys: Object.keys(mergedRates||{}) });
+    return out;
+  }
+
   L('mergedRowForTab STATE', { rid, fid, sentinel, same, stagedKeys: Object.keys(staged||{}) });
   return { ...base, ...stripEmpty(staged) };
-},
+}
+
 
 
     _attachDirtyTracker() {
