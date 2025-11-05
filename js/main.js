@@ -1004,7 +1004,16 @@ function applyBucketLabelsToHoursGrid(gridEl, labels) {
 }
 
 function renderBucketLabelsEditor(ctx /* modalCtx */) {
-  const L = getBucketLabelsForContract(ctx.data || {});
+  // Prefer staged labels from formState.main; fallback to contract's stored labels; finally to defaults
+  const fsMain = (window.modalCtx && window.modalCtx.formState && window.modalCtx.formState.main) || {};
+  const stored = getBucketLabelsForContract(ctx.data || {});
+  const L = {
+    day:   fsMain.bucket_day   ?? stored.day   ?? 'Day',
+    night: fsMain.bucket_night ?? stored.night ?? 'Night',
+    sat:   fsMain.bucket_sat   ?? stored.sat   ?? 'Sat',
+    sun:   fsMain.bucket_sun   ?? stored.sun   ?? 'Sun',
+    bh:    fsMain.bucket_bh    ?? stored.bh    ?? 'BH',
+  };
   return `
     <div class="group">
       <div class="row"><label>Bucket labels (optional)</label>
@@ -1021,6 +1030,7 @@ function renderBucketLabelsEditor(ctx /* modalCtx */) {
       </div>
     </div>`;
 }
+
 
 
 function _collectBucketLabelsFromForm(rootSel = '#contractForm') {
@@ -1245,6 +1255,13 @@ function openContract(row) {
           bucket_labels_json = Object.keys(cleaned).length ? cleaned : null;
         }
 
+        // Canonical pay method snapshot from state (fallback to form)
+        const payMethodSnap = (
+          window.modalCtx.formState?.main?.pay_method_snapshot ||
+          (fd ? (fd.get('pay_method_snapshot') || fd.get('default_pay_method_snapshot') || '') : '') ||
+          'PAYE'
+        ).toUpperCase();
+
         const data = {
           id: window.modalCtx.data?.id || null,
           candidate_id: val('candidate_id'),
@@ -1255,7 +1272,7 @@ function openContract(row) {
           ward_hint:    val('ward_hint'),
           start_date:   startIso,
           end_date:     endIso,
-          pay_method_snapshot: (val('default_pay_method_snapshot') || val('pay_method_snapshot') || 'PAYE').toUpperCase(),
+          pay_method_snapshot: payMethodSnap,
           default_submission_mode: (val('default_submission_mode') || 'ELECTRONIC').toUpperCase(),
           week_ending_weekday_snapshot: (val('week_ending_weekday_snapshot') || '0'),
           auto_invoice: bool('auto_invoice'),
@@ -1325,7 +1342,7 @@ function openContract(row) {
               if (!t || !t.name) return;
               const v = t.type === 'checkbox' ? (t.checked ? 'on' : '') : t.value;
               setContractFormValue(t.name, v);
-              if (t.name === 'default_pay_method_snapshot' || /^(paye_|umb_|charge_)/.test(t.name)) computeContractMargins();
+              if (t.name === 'pay_method_snapshot' || /^(paye_|umb_|charge_)/.test(t.name)) computeContractMargins();
             };
             form.addEventListener('input', stage, true);
             form.addEventListener('change', stage, true);
@@ -1449,6 +1466,23 @@ function openContract(row) {
                   if (hiddenName === 'client_id')    { window.modalCtx.data.client_id    = id; window.modalCtx.data.client_name       = label; }
                 } catch {}
 
+                // Derive & lock pay method snapshot from candidate when picking a candidate
+                if (hiddenName === 'candidate_id') {
+                  (async () => {
+                    try {
+                      const cand = await getCandidate(id);
+                      const derived = (String(cand?.pay_method || '').toUpperCase() === 'UMBRELLA' && cand?.umbrella_id) ? 'UMBRELLA' : 'PAYE';
+                      const fsm = (window.modalCtx.formState ||= { main:{}, pay:{} }).main ||= {};
+                      fsm.pay_method_snapshot = derived;
+                      fsm.__pay_locked = true;
+                      // reflect into DOM if select exists
+                      const sel = document.querySelector('select[name="pay_method_snapshot"], select[name="default_pay_method_snapshot"]');
+                      if (sel) { sel.value = derived; sel.disabled = true; }
+                      computeContractMargins();
+                    } catch (e) { if (LOGC) console.warn('[CONTRACTS] derive pay method failed', e); }
+                  })();
+                }
+
                 closeMenu();
               };
 
@@ -1460,8 +1494,7 @@ function openContract(row) {
                 debTimer = setTimeout(() => {
                   const { ids, items } = getDataset();
                   const rows = pickersLocalFilterAndSort(entity, ids, q, entity==='candidates'?'last_name':'name', 'asc')
-               .map(v => (typeof v === 'object' ? v : items[String(v)]))
-
+                    .map(v => (typeof v === 'object' ? v : items[String(v)]))
                     .filter(Boolean);
                   if (!rows.length) { closeMenu(); return; }
                   applyList(rows);
@@ -1517,8 +1550,13 @@ function openContract(row) {
                   } catch {}
                   try {
                     const cand = await getCandidate(id);
-                    const hint = prefillPayMethodFromCandidate(cand);
-                    if (hint) showModalHint(hint, 'warn');
+                    const derived = (String(cand?.pay_method || '').toUpperCase() === 'UMBRELLA' && cand?.umbrella_id) ? 'UMBRELLA' : 'PAYE';
+                    const fsm = (window.modalCtx.formState ||= { main:{}, pay:{} }).main ||= {};
+                    fsm.pay_method_snapshot = derived;
+                    fsm.__pay_locked = true;
+                    const sel = document.querySelector('select[name="pay_method_snapshot"], select[name="default_pay_method_snapshot"]');
+                    if (sel) { sel.value = derived; sel.disabled = true; }
+                    computeContractMargins();
                   } catch (e) { if (LOGC) console.warn('[CONTRACTS] prefillPayMethodFromCandidate failed', e); }
                 });
               });
@@ -1533,6 +1571,11 @@ function openContract(row) {
                 try {
                   const fs = (window.modalCtx.formState ||= { __forId: (window.modalCtx.data?.id ?? window.modalCtx.openToken ?? null), main:{}, pay:{} });
                   fs.main ||= {}; delete fs.main.candidate_id; delete fs.main.candidate_display;
+                  // Unlock and reset pay method snapshot
+                  fs.main.__pay_locked = false;
+                  fs.main.pay_method_snapshot = 'PAYE';
+                  const sel = document.querySelector('select[name="pay_method_snapshot"], select[name="default_pay_method_snapshot"]');
+                  if (sel) { sel.disabled = false; sel.value = 'PAYE'; }
                   window.modalCtx.data = window.modalCtx.data || {};
                   delete window.modalCtx.data.candidate_id; delete window.modalCtx.data.candidate_display;
                 } catch {}
@@ -2365,8 +2408,23 @@ function wirePickerLiveFilter(inputEl, tableEl) {
 // ─────────────────────────────────────────────────────────────────────────────
 function setContractFormValue(name, value) {
   const LOGC = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : false;
+
+  // Canonical field name (stop using default_*; keep for back-compat)
+  let targetName = (name === 'default_pay_method_snapshot') ? 'pay_method_snapshot' : name;
+
+  // Guard: if pay method is locked, ignore attempted writes
+  try {
+    const locked = !!(window.modalCtx?.formState?.main?.__pay_locked);
+    if ((targetName === 'pay_method_snapshot' || name === 'default_pay_method_snapshot') && locked) {
+      if (LOGC) console.log('[CONTRACTS] setContractFormValue ignored (pay method locked)', { name, value });
+      return;
+    }
+  } catch {}
+
   const form = document.querySelector('#contractForm'); // may be null when on Rates tab
-  const el = form ? form.querySelector(`[name="${CSS.escape(name)}"]`) : null;
+  const el = form
+    ? (form.querySelector(`[name="${CSS.escape(targetName)}"]`) || form.querySelector(`[name="${CSS.escape(name)}"]`))
+    : null;
 
   // Reflect into DOM if field exists in #contractForm
   if (el) {
@@ -2377,7 +2435,7 @@ function setContractFormValue(name, value) {
     }
   }
 
-  if (LOGC) console.log('[CONTRACTS] setContractFormValue', { name, value: (name.endsWith('_id') ? '(id)' : value) });
+  if (LOGC) console.log('[CONTRACTS] setContractFormValue', { name: targetName, value: (targetName.endsWith('_id') ? '(id)' : value) });
 
   // Stage into formState (main vs pay buckets)
   try {
@@ -2385,10 +2443,10 @@ function setContractFormValue(name, value) {
     const fs = (window.modalCtx.formState ||= { __forId: (window.modalCtx.data?.id ?? window.modalCtx.openToken ?? null), main:{}, pay:{} });
     const stored = (el && el.type === 'checkbox') ? (el.checked ? 'on' : '') : (el ? el.value : (value == null ? '' : String(value)));
 
-    if (/^(paye_|umb_|charge_)/.test(name)) {
-      fs.pay[name] = stored;
+    if (/^(paye_|umb_|charge_)/.test(targetName)) {
+      fs.pay[targetName] = stored;
     } else {
-      fs.main[name] = stored;
+      fs.main[targetName] = stored;
     }
   } catch {}
 
@@ -2398,6 +2456,7 @@ function setContractFormValue(name, value) {
     el.dispatchEvent(evt);
   }
 }
+
 
 function mergeContractStateIntoRow(row) {
   const base = { ...(row || {}) };
@@ -2451,6 +2510,12 @@ function snapshotContractForm() {
     if (el.type === 'checkbox') v = el.checked ? 'on' : '';
     else v = el.value;
 
+    // Canonicalise pay method key: map legacy default_… to pay_method_snapshot
+    if (name === 'default_pay_method_snapshot') {
+      fs.main.pay_method_snapshot = v;
+      continue;
+    }
+
     if (/^(paye_|umb_|charge_)/.test(name)) {
       fs.pay[name] = v;
     } else {
@@ -2458,7 +2523,6 @@ function snapshotContractForm() {
     }
   }
 }
-
 
 
 
@@ -2509,7 +2573,17 @@ function renderContractMainTab(ctx) {
   const candVal   = d.candidate_id || '';
   const clientVal = d.client_id || '';
 
-  const GH = d.std_hours_json || {};
+  // Prefer staged gh_* values; fall back to std_hours_json from data
+  const SH = d.std_hours_json || {};
+  const GH = {
+    mon: (d.gh_mon ?? SH.mon),
+    tue: (d.gh_tue ?? SH.tue),
+    wed: (d.gh_wed ?? SH.wed),
+    thu: (d.gh_thu ?? SH.thu),
+    fri: (d.gh_fri ?? SH.fri),
+    sat: (d.gh_sat ?? SH.sat),
+    sun: (d.gh_sun ?? SH.sun),
+  };
   const num = (v) => (v == null ? '' : String(v));
 
   const candLabel   = (d.candidate_display || '').trim();
@@ -2594,11 +2668,11 @@ function renderContractMainTab(ctx) {
         <div class="row"><label>End date</label><div class="controls"><input class="input" name="end_date" value="${endUk}" placeholder="DD/MM/YYYY" required /></div></div>
       </div>
 
-      <!-- Pay method / submission / auto-invoice (unchanged grouping) -->
+      <!-- Pay method / submission / auto-invoice -->
       <div class="grid-3">
         <div class="row"><label>Pay method snapshot</label>
           <div class="controls">
-            <select name="default_pay_method_snapshot">
+            <select name="pay_method_snapshot" ${d.__pay_locked ? 'disabled' : ''}>
               <option value="PAYE" ${String(d.pay_method_snapshot||'PAYE').toUpperCase()==='PAYE'?'selected':''}>PAYE</option>
               <option value="UMBRELLA" ${String(d.pay_method_snapshot||'PAYE').toUpperCase()==='UMBRELLA'?'selected':''}>Umbrella</option>
             </select>
@@ -2649,7 +2723,7 @@ function renderContractRatesTab(ctx) {
   // Hydrate UI from merged state (server row + staged edits)
   const merged = mergeContractStateIntoRow(ctx?.data || {});
   const R = (merged?.rates_json) || {};
-  const payMethod = String(merged?.pay_method_snapshot || merged?.default_pay_method_snapshot || 'PAYE').toUpperCase();
+  const payMethod = String(merged?.pay_method_snapshot || 'PAYE').toUpperCase();
   const showPAYE = (payMethod === 'PAYE');
   const num = (v) => (v == null ? '' : String(v));
 
@@ -6388,14 +6462,13 @@ function applyRatePresetToContractForm(preset, payMethod /* 'PAYE'|'UMBRELLA' */
     Object.entries(UM).forEach(([k,v])=>{ const el=form.querySelector(`[name="umb_${k}"]`); if (el && v!=null) el.value = v; });
   }
 }
-
 function computeContractMargins() {
   // Prefer reading from staged state, fall back to whatever is mounted
   const fs = (window.modalCtx && window.modalCtx.formState) || { main:{}, pay:{} };
   const form = document.querySelector('#contractRatesTab')?.closest('form') || document.querySelector('#contractForm');
 
-  const pmStaged = (fs.main && (fs.main.default_pay_method_snapshot || fs.main.pay_method_snapshot)) || '';
-  const payMethodSel = form ? form.querySelector('select[name="default_pay_method_snapshot"], select[name="pay_method_snapshot"]') : null;
+  const pmStaged = (fs.main && fs.main.pay_method_snapshot) || '';
+  const payMethodSel = form ? form.querySelector('select[name="pay_method_snapshot"]') : null;
   const payMethod = ((payMethodSel && payMethodSel.value) || pmStaged || 'PAYE').toUpperCase();
 
   const get = (n) => {
@@ -6427,6 +6500,7 @@ function computeContractMargins() {
     }
   });
 }
+
 // ==============================
 // 1) openCandidateRateModal(...)
 // ==============================
@@ -8690,6 +8764,7 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
     persistCurrentTabState() {
   L('persistCurrentTabState ENTER', { mode: this.mode, currentTabKey: this.currentTabKey });
   if (!window.modalCtx || this.mode === 'view') { L('persist(skip)', { reason:'mode=view or no modalCtx', mode:this.mode }); return; }
+
   const sentinel = window.modalCtx?.openToken || null;
   const initial  = (window.modalCtx.data?.id ?? sentinel);
   const fs = window.modalCtx.formState || { __forId: initial, main:{}, pay:{} };
@@ -8706,36 +8781,40 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
   }
 
   // Pay tab (legacy/generic)
-  if (this.currentTabKey === 'pay'  && byId('tab-pay'))  {
+  if (this.currentTabKey === 'pay' && byId('tab-pay')) {
     const c = collectForm('#tab-pay');
-    fs.pay  = { ...(fs.pay ||{}), ...stripEmpty(c) };
+    fs.pay  = { ...(fs.pay||{}), ...stripEmpty(c) };
   }
 
-  // ✅ Contracts “rates” tab — persist all rate inputs into fs.pay, and anything else we can see into fs.main
-  if (this.entity === 'contracts' && (this.currentTabKey === 'rates' || byId('contractRatesTab'))) {
+  // Contracts “rates” tab — persist rate inputs into fs.pay, and main fields if present
+  if (this.entity === 'contracts' && this.currentTabKey === 'rates') {
     try {
-      // Persist rate buckets into fs.pay
       const rt = byId('contractRatesTab');
       if (rt) {
         const rForm = {};
-        rt.querySelectorAll('input, select, textarea').forEach(el => { if (el.name) rForm[el.name] = (el.type==='checkbox' ? (el.checked?'on':'') : el.value); });
+        rt.querySelectorAll('input, select, textarea').forEach(el => {
+          if (el.name) rForm[el.name] = (el.type === 'checkbox' ? (el.checked ? 'on' : '') : el.value);
+        });
         const onlyRates = {};
-        for (const [k,v] of Object.entries(rForm)) if (/^(paye_|umb_|charge_)/.test(k)) onlyRates[k] = v;
-        fs.pay = { ...(fs.pay||{}), ...stripEmpty(onlyRates) };
+        for (const [k, v] of Object.entries(rForm)) if (/^(paye_|umb_|charge_)/.test(k)) onlyRates[k] = v;
+        fs.pay = { ...(fs.pay || {}), ...stripEmpty(onlyRates) };
       }
 
-      // Also persist whatever is currently in the main form (ids, labels, dates, etc.)
+      // If you use a single-form layout in future, persist any visible main fields too
       const mainSel = byId('contractForm') ? '#contractForm' : null;
       if (mainSel) {
         const m = collectForm(mainSel);
-        fs.main = { ...(fs.main||{}), ...stripEmpty(m) };
+        fs.main = { ...(fs.main || {}), ...stripEmpty(m) };
       }
-    } catch (e) { L('persistCurrentTabState contracts/rates failed', e); }
+    } catch (e) {
+      L('persistCurrentTabState contracts/rates failed', e);
+    }
   }
 
   window.modalCtx.formState = fs;
   L('persistCurrentTabState EXIT', { forId: fs.__forId, mainKeys: Object.keys(fs.main||{}), payKeys: Object.keys(fs.pay||{}) });
 },
+
 
 
    mergedRowForTab(k) {
@@ -8747,25 +8826,25 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
   const sentinel = window.modalCtx?.openToken ?? null;
   const same = (fid===rid) || (rid==null && (fid===sentinel || fid==null));
 
-  let staged = {};
-  if (same) {
-    if (k === 'main') staged = (fs.main || {});
-    else if (k === 'pay' || k === 'rates') staged = (fs.pay || {});
-  }
+  const mainStaged = same ? (fs.main || {}) : {};
+  const payStaged  = same ? (fs.pay  || {}) : {};
 
-  // ✅ If we're on the contracts "rates" tab, *nest* staged rate keys under rates_json
+  // Always overlay MAIN staged fields first (ids, dates, gh_*, bucket_*, pay_method_snapshot, etc.)
+  const out = { ...base, ...stripEmpty(mainStaged) };
+
+  // For the contracts “rates” tab, *nest* staged rate keys under rates_json
   if (k === 'rates') {
-    const mergedRates = { ...(base.rates_json || {}) };
-    for (const [kk, vv] of Object.entries(staged || {})) mergedRates[kk] = vv;
-    const out = { ...base, ...stripEmpty(fs.main || {}) };
+    const mergedRates = { ...(out.rates_json || base.rates_json || {}) };
+    for (const [kk, vv] of Object.entries(payStaged)) mergedRates[kk] = vv;
     out.rates_json = mergedRates;
     L('mergedRowForTab STATE', { rid, fid, sentinel, same, ratesKeys: Object.keys(mergedRates||{}) });
     return out;
   }
 
-  L('mergedRowForTab STATE', { rid, fid, sentinel, same, stagedKeys: Object.keys(staged||{}) });
-  return { ...base, ...stripEmpty(staged) };
+  L('mergedRowForTab STATE', { rid, fid, sentinel, same, stagedMainKeys: Object.keys(mainStaged||{}), stagedPayKeys: Object.keys(payStaged||{}) });
+  return out;
 },
+
 
 
     _attachDirtyTracker() {
