@@ -1328,8 +1328,7 @@ function openContract(row) {
             return `${last}${last?', ':''}${first}${role?` ${role}`:''}`.trim();
           } else {
             const name  = (r.name||'').trim();
-            const email = (r.primary_invoice_email||'').trim();
-            return email ? `${name} • ${email}` : name;
+            return name;
           }
         };
 
@@ -1536,7 +1535,6 @@ function openContract(row) {
   }, 0);
 }
 
- 
 // ─────────────────────────────────────────────────────────────────────────────
 // NEW: getSummaryFingerprint(section)
 // Deterministic fingerprint of current filters (and section)
@@ -1548,11 +1546,16 @@ function getSummaryFingerprint(section){
   const norm = (o)=> {
     const k = Object.keys(o||{}).sort();
     const out = {};
-    for (const key of k) out[key] = o[key];
+    for (const key of k) {
+      const v = o[key];
+      if (Array.isArray(v)) out[key] = v.slice().map(x=>String(x)).sort();
+      else out[key] = v;
+    }
     return out;
   };
   return JSON.stringify({ section, filters: norm(filters) });
 }
+
 
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1572,6 +1575,7 @@ async function primeSummaryMembership(section, fingerprint){
   const existing = cache[fingerprint];
   if (existing && existing._inflight) return;
   if (existing && Array.isArray(existing.ids) && existing.ids.length) return;
+  if (existing && existing.updatedAt && (Date.now() - existing.updatedAt > 60_000)) existing.stale = true;
 
   cache[fingerprint] = cache[fingerprint] || {};
   cache[fingerprint]._inflight = true;
@@ -1609,7 +1613,8 @@ function getSummaryMembership(section, fingerprint){
   const secKey = (section==='candidates'||section==='clients') ? section : null;
   if (!secKey) return { ids: [], total: 0, updatedAt: 0, stale: true };
   const ent = window.__summaryCache[secKey] || {};
-  return ent[fingerprint] || { ids: [], total: 0, updatedAt: 0, stale: true };
+  const res = ent[fingerprint] || { ids: [], total: 0, updatedAt: 0, stale: true };
+  return { ids: Array.isArray(res.ids) ? res.ids : [], total: Number(res.total||0), updatedAt: Number(res.updatedAt||0), stale: !!res.stale };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1640,7 +1645,6 @@ function buildSummaryFilterQSForIdList(section, filters){
 // - Safe to call before opening a picker.
 // ─────────────────────────────────────────────────────────────────────────────
 
-
 async function ensurePickerDatasetPrimed(entity){
   const LOGC = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : false;
   window.__pickerData = window.__pickerData || { candidates:{ since:null, itemsById:{} }, clients:{ since:null, itemsById:{} } };
@@ -1653,9 +1657,10 @@ async function ensurePickerDatasetPrimed(entity){
       const resp = await authFetch(url);
       const json = await resp.json();
       ds.itemsById = ds.itemsById || {};
-      for (const it of (json?.items||[])) ds.itemsById[String(it.id)] = it;
-      ds.since = json?.since || null;
-      if (LOGC) console.log('[PICKER][dataset snapshot]', { entity, count: (json?.items||[]).length, since: ds.since });
+      const arr = Array.isArray(json?.items) ? json.items : [];
+      for (const it of arr) ds.itemsById[String(it.id)] = it;
+      ds.since = json?.since ?? ds.since ?? null;
+      if (LOGC) console.log('[PICKER][dataset snapshot]', { entity, count: arr.length, since: ds.since });
     } catch (e) {
       if (LOGC) console.warn('[PICKER][dataset snapshot] failed', e);
     }
@@ -1675,7 +1680,6 @@ async function ensurePickerDatasetPrimed(entity){
     if (LOGC) console.warn('[PICKER][dataset delta] failed', e);
   }
 }
-
 
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1715,7 +1719,6 @@ function pickersLocalFilterAndSort(entity, ids, query, sortKey, sortDir){
   const norm = (s)=> (s||'').toString().toLowerCase();
   const toks = norm(query||'').split(/\s+/).filter(Boolean);
 
-  // Accept either an array of IDs or an array of row objects
   const rows = (ids && ids.length && typeof ids[0] === 'object')
     ? ids.slice()
     : (ids || []).map(id => itemsById[String(id)]).filter(Boolean);
@@ -1723,16 +1726,19 @@ function pickersLocalFilterAndSort(entity, ids, query, sortKey, sortDir){
   const scoreRow = (r) => {
     if (!toks.length) return 0;
     let nameScore = 0, extraScore = 0;
+    let allNameTokensMatch = true;
     if (entity === 'candidates') {
       const first = norm(r.first_name), last = norm(r.last_name);
       const disp  = norm(r.display_name || `${r.first_name||''} ${r.last_name||''}`);
       const role  = norm(r.roles_display);
       const email = norm(r.email);
       toks.forEach(t=>{
-        if (first.startsWith(t)) nameScore+=6;
-        if (last.startsWith(t))  nameScore+=6;
-        if (disp.includes(t))    nameScore+=5; // includes for mid-string matches like "Kier Arthur"
-        if (first===t||last===t) nameScore+=8;
+        let matched=false;
+        if (first.startsWith(t)) { nameScore+=6; matched=true; }
+        if (last.startsWith(t))  { nameScore+=6; matched=true; }
+        if (disp.includes(t))    { nameScore+=5; matched=true; }
+        if (first===t||last===t) { nameScore+=8; matched=true; }
+        if (!matched) allNameTokensMatch=false;
         if (role.includes(t))    extraScore+=2;
         if (email.includes(t))   extraScore+=1;
       });
@@ -1740,11 +1746,14 @@ function pickersLocalFilterAndSort(entity, ids, query, sortKey, sortDir){
       const name  = norm(r.name);
       const email = norm(r.primary_invoice_email);
       toks.forEach(t=>{
-        if (name.includes(t))    nameScore+=6;
+        let matched=false;
+        if (name.includes(t))    { nameScore+=6; matched=true; }
+        if (!matched) allNameTokensMatch=false;
         if (email.includes(t))   extraScore+=1;
       });
     }
-    if (nameScore <= 0) return 0;        // require at least one name/display match
+    if (!allNameTokensMatch) return 0;
+    if (nameScore <= 0) return 0;
     return nameScore + extraScore;
   };
 
@@ -1961,13 +1970,19 @@ async function openCandidatePicker(onPick) {
       if (LOGC) console.log('[PICKER][candidates] search', { q });
     });
 
-    search.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') {
-        const first = tbody.querySelector('tr[data-id]');
-        if (first) first.click();
-      } else if (e.key === 'Escape') {
-        const closeBtn = document.getElementById('btnCloseModal'); if (closeBtn) closeBtn.click();
+    // Arrow navigation + Enter/Escape
+    search.addEventListener('keydown', async (e) => {
+      const itemsEls = Array.from(tbody.querySelectorAll('tr[data-id]'));
+      if (!itemsEls.length) {
+        if (e.key === 'Escape') { const closeBtn = document.getElementById('btnCloseModal'); if (closeBtn) closeBtn.click(); }
+        return;
       }
+      const idx = itemsEls.findIndex(tr => tr.classList.contains('active'));
+      const setActive = (i) => { itemsEls.forEach(tr=>tr.classList.remove('active')); itemsEls[i].classList.add('active'); itemsEls[i].scrollIntoView({block:'nearest'}); };
+      if (e.key === 'ArrowDown') { e.preventDefault(); setActive(Math.min((idx<0?0:idx+1), itemsEls.length-1)); }
+      if (e.key === 'ArrowUp')   { e.preventDefault(); setActive(Math.max((idx<0?0:idx-1), 0)); }
+      if (e.key === 'Enter')     { e.preventDefault(); const target = itemsEls[Math.max(idx,0)]; if (target) target.click(); }
+      if (e.key === 'Escape')    { e.preventDefault(); const closeBtn = document.getElementById('btnCloseModal'); if (closeBtn) closeBtn.click(); }
     });
 
     setTimeout(() => { try { search.focus(); if (LOGC) console.log('[PICKER][candidates] search focused'); } catch {} }, 0);
@@ -2105,13 +2120,19 @@ async function openClientPicker(onPick) {
       if (LOGC) console.log('[PICKER][clients] search', { q });
     });
 
-    search.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') {
-        const first = tbody.querySelector('tr[data-id]');
-        if (first) first.click();
-      } else if (e.key === 'Escape') {
-        const closeBtn = document.getElementById('btnCloseModal'); if (closeBtn) closeBtn.click();
+    // Arrow navigation + Enter/Escape
+    search.addEventListener('keydown', async (e) => {
+      const itemsEls = Array.from(tbody.querySelectorAll('tr[data-id]'));
+      if (!itemsEls.length) {
+        if (e.key === 'Escape') { const closeBtn = document.getElementById('btnCloseModal'); if (closeBtn) closeBtn.click(); }
+        return;
       }
+      const idx = itemsEls.findIndex(tr => tr.classList.contains('active'));
+      const setActive = (i) => { itemsEls.forEach(tr=>tr.classList.remove('active')); itemsEls[i].classList.add('active'); itemsEls[i].scrollIntoView({block:'nearest'}); };
+      if (e.key === 'ArrowDown') { e.preventDefault(); setActive(Math.min((idx<0?0:idx+1), itemsEls.length-1)); }
+      if (e.key === 'ArrowUp')   { e.preventDefault(); setActive(Math.max((idx<0?0:idx-1), 0)); }
+      if (e.key === 'Enter')     { e.preventDefault(); const target = itemsEls[Math.max(idx,0)]; if (target) target.click(); }
+      if (e.key === 'Escape')    { e.preventDefault(); const closeBtn = document.getElementById('btnCloseModal'); if (closeBtn) closeBtn.click(); }
     });
 
     setTimeout(() => { try { search.focus(); if (LOGC) console.log('[PICKER][clients] search focused'); } catch {} }, 0);
