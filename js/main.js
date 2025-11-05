@@ -1171,7 +1171,6 @@ function openContract(row) {
 
   if (LOGC) console.log('[CONTRACTS] tabs', tabs.map(t=>t.key));
 
-  // ==== FIX: pass correct hasId (boolean) in 5th arg, onReturn in 6th, options in 7th; remove forceEdit for create ====
   const hasId = !!window.modalCtx.data?.id;
 
   showModal(
@@ -1202,7 +1201,6 @@ function openContract(row) {
         const ghFilled = Object.values(gh).some(v => v != null && v !== 0);
         const std_hours_json = ghFilled ? gh : null;
 
-        // Read DD/MM/YYYY from UI and convert to ISO YYYY-MM-DD for API
         const ukToIso = (ddmmyyyy) => {
           try { return (typeof parseUkDateToIso === 'function') ? (parseUkDateToIso(ddmmyyyy) || null) : (ddmmyyyy || null); }
           catch { return ddmmyyyy || null; }
@@ -1270,13 +1268,13 @@ function openContract(row) {
         window.modalCtx._saveInFlight = false;
       }
     },
-    hasId, // ✅ correct 5th arg
-    () => { // onReturn (6th arg)
+    hasId,
+    () => {
       const wire = () => {
-        const form = document.querySelector('#contractForm'); if (!form) { if (LOGC) console.warn('[CONTRACTS] wire(skip): #contractForm not found'); return; }
+        const form = document.querySelector('#contractForm'); if (!form) return;
         const tabs = document.getElementById('modalTabs');
         const active = tabs?.querySelector('button.active')?.textContent?.toLowerCase() || 'main';
-        if (active !== 'main') { if (LOGC) console.log('[CONTRACTS] wire(skip): not on MAIN tab', { active }); return; }
+        if (active !== 'main') return;
 
         const fr = window.__getModalFrame?.();
         if (LOGC) console.log('[CONTRACTS] wiring MAIN tab controls', { modalMode: fr?.mode, parentMode: (function(){try{const p=(window.__modalStack||[])[(window.__modalStack||[]).length-2]; return p?.mode;}catch{return undefined;}})() });
@@ -1295,43 +1293,31 @@ function openContract(row) {
           btnClearClient:   { exists: !!btnCL, disabled: !!(btnCL && btnCL.disabled) }
         });
 
-        // ───────────────────────────────────────────────────────────
-        // Typeahead (inline suggestions) — already wired above
-        // ───────────────────────────────────────────────────────────
-
-        // ───────────────────────────────────────────────────────────
-        // Calendar date pickers for DD/MM/YYYY
-        // ───────────────────────────────────────────────────────────
         try {
           const sd = form.querySelector('input[name="start_date"]');
           const ed = form.querySelector('input[name="end_date"]');
-
-          // Normalize displayed values to UK on first wire if they look ISO
           const toUk = (iso) => {
             try { return (typeof formatIsoToUk === 'function') ? (formatIsoToUk(iso) || '') : (iso || ''); }
             catch { return iso || ''; }
           };
           if (sd && /^\d{4}-\d{2}-\d{2}$/.test(sd.value||'')) sd.value = toUk(sd.value);
           if (ed && /^\d{4}-\d{2}-\d{2}$/.test(ed.value||'')) ed.value = toUk(ed.value);
-
-          if (sd) {
-            sd.setAttribute('placeholder','DD/MM/YYYY');
-            if (typeof attachUkDatePicker === 'function') attachUkDatePicker(sd);
-          }
-          if (ed) {
-            ed.setAttribute('placeholder','DD/MM/YYYY');
-            if (typeof attachUkDatePicker === 'function') attachUkDatePicker(ed);
-          }
+          if (sd) { sd.setAttribute('placeholder','DD/MM/YYYY'); if (typeof attachUkDatePicker === 'function') attachUkDatePicker(sd); }
+          if (ed) { ed.setAttribute('placeholder','DD/MM/YYYY'); if (typeof attachUkDatePicker === 'function') attachUkDatePicker(ed); }
           if (LOGC) console.log('[CONTRACTS] datepickers wired for start_date/end_date', { hasStart: !!sd, hasEnd: !!ed });
         } catch (e) {
           if (LOGC) console.warn('[CONTRACTS] datepicker wiring failed', e);
         }
 
-        // ───────────────────────────────────────────────────────────
-        // NEW: Typeahead (inline suggestions) for candidates & clients
-        // ───────────────────────────────────────────────────────────
         const ensurePrimed = async (entity) => {
-          try { await ensurePickerDatasetPrimed(entity); } catch (e) { if (LOGC) console.warn('[CONTRACTS] typeahead priming failed', entity, e); }
+          try {
+            await ensurePickerDatasetPrimed(entity);
+            const fp = getSummaryFingerprint(entity);
+            const mem = getSummaryMembership(entity, fp);
+            if (!mem?.ids?.length || mem?.stale) {
+              await primeSummaryMembership(entity, fp);
+            }
+          } catch (e) { if (LOGC) console.warn('[CONTRACTS] typeahead priming failed', entity, e); }
         };
 
         const buildItemLabel = (entity, r) => {
@@ -1382,7 +1368,10 @@ function openContract(row) {
             const fp  = getSummaryFingerprint(entity);
             const mem = getSummaryMembership(entity, fp);
             const ds  = (window.__pickerData ||= {})[entity] || { since:null, itemsById:{} };
-            return { ids: Array.isArray(mem?.ids) ? mem.ids : [], items: ds.itemsById || {} };
+            const items = ds.itemsById || {};
+            let ids = Array.isArray(mem?.ids) ? mem.ids : [];
+            if (!ids.length) ids = Object.keys(items);
+            return { ids, items };
           };
 
           const applyList = (rows) => {
@@ -1410,7 +1399,7 @@ function openContract(row) {
             debTimer = setTimeout(() => {
               const { ids, items } = getDataset();
               const rows = pickersLocalFilterAndSort(entity, ids, q, entity==='candidates'?'last_name':'name', 'asc')
-                .map(rid => (typeof rid==='object'? rid : items[String(rid)]))
+                .map(v => (typeof v === 'object' ? v : items[String(v)]))
                 .filter(Boolean);
               if (!rows.length) { closeMenu(); return; }
               applyList(rows);
@@ -1447,11 +1436,9 @@ function openContract(row) {
           inputEl.addEventListener('keydown', handleKeyDown);
         };
 
-        // Wire typeahead for candidate & client
         wireTypeahead('candidates', candInput, 'candidate_id', 'candidatePickLabel');
         wireTypeahead('clients',    cliInput,  'client_id',    'clientPickLabel');
 
-        // Keep the Pick/Clear buttons wiring as-is
         if (btnPC && !btnPC.__wired) {
           btnPC.__wired = true;
           btnPC.addEventListener('click', async () => {
@@ -1506,7 +1493,6 @@ function openContract(row) {
           if (LOGC) console.log('[CONTRACTS] wired btnClearClient');
         }
 
-        // Deprecated picker-on-type behaviour removed; typing handled by typeahead
         const openOnType = (inputEl, openerName) => {
           if (!inputEl || inputEl.__wiredTyping) return;
           inputEl.__wiredTyping = true;
@@ -1529,7 +1515,7 @@ function openContract(row) {
         if (LOGC) console.log('[CONTRACTS] tabs click→wire handler attached');
       }
     },
-    { kind:'contracts', extraButtons } // options (no forceEdit for create flow)
+    { kind:'contracts', extraButtons }
   );
 
   setTimeout(() => {
@@ -1559,7 +1545,6 @@ function getSummaryFingerprint(section){
   window.__listState = window.__listState || {};
   const st = (window.__listState[section] ||= { page:1, pageSize:50, total:null, hasMore:false, filters:null });
   const filters = st.filters || {};
-  // Normalize keys + values for stable fingerprint
   const norm = (o)=> {
     const k = Object.keys(o||{}).sort();
     const out = {};
@@ -1568,6 +1553,7 @@ function getSummaryFingerprint(section){
   };
   return JSON.stringify({ section, filters: norm(filters) });
 }
+
 
 // ─────────────────────────────────────────────────────────────────────────────
 /* NEW: primeSummaryMembership(section, fingerprint)
@@ -1585,12 +1571,13 @@ async function primeSummaryMembership(section, fingerprint){
   const cache = window.__summaryCache[secKey] ||= {};
   const existing = cache[fingerprint];
   if (existing && existing._inflight) return;
-  if (existing && Array.isArray(existing.ids) && existing.ids.length) return; // already primed
+  if (existing && Array.isArray(existing.ids) && existing.ids.length) return;
 
   cache[fingerprint] = cache[fingerprint] || {};
   cache[fingerprint]._inflight = true;
 
   try {
+    window.__listState = window.__listState || {};
     const st   = window.__listState[secKey] || {};
     const qs   = buildSummaryFilterQSForIdList(secKey, st.filters || {});
     const url  = API(`/api/pickers/${secKey}/id-list${qs ? ('?'+qs) : ''}`);
@@ -1631,27 +1618,29 @@ function getSummaryMembership(section, fingerprint){
 // Reuse your search QS rules; keep only filter params (no paging).
 // ─────────────────────────────────────────────────────────────────────────────
 function buildSummaryFilterQSForIdList(section, filters){
-  // Mirrors /api/pickers/:section/id-list expectations.
-  // Keep only stable filter params. Gate 'active' to candidates (clients has no 'active').
   const sp = new URLSearchParams();
   const f  = filters || {};
 
   if (Array.isArray(f.ids) && f.ids.length) sp.set('ids', f.ids.join(','));
-  if (f.role)      sp.set('role', f.role);           // used by candidates
-  if (f.band)      sp.set('band', f.band);           // used where applicable
-  if (f.client_id) sp.set('client_id', f.client_id); // used by contracts-related searches
+  if (f.role)      sp.set('role', f.role);
+  if (f.band)      sp.set('band', f.band);
+  if (f.client_id) sp.set('client_id', f.client_id);
   if (f.q)         sp.set('q', f.q);
 
-  // Only include 'active' for candidates; clients table doesn't have this column
   if (f.active != null && section === 'candidates') sp.set('active', String(!!f.active));
 
   return sp.toString();
 }
+
+
+
 // ─────────────────────────────────────────────────────────────────────────────
 // NEW: ensurePickerDatasetPrimed(entity)  entity in {'candidates','clients'}
 // - Ensures dataset snapshot is loaded, then applies pending deltas.
 // - Safe to call before opening a picker.
 // ─────────────────────────────────────────────────────────────────────────────
+
+
 async function ensurePickerDatasetPrimed(entity){
   const LOGC = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : false;
   window.__pickerData = window.__pickerData || { candidates:{ since:null, itemsById:{} }, clients:{ since:null, itemsById:{} } };
@@ -1659,7 +1648,6 @@ async function ensurePickerDatasetPrimed(entity){
 
   if (!ds._initStarted) {
     ds._initStarted = true;
-    // Snapshot
     try {
       const url  = API(`/api/pickers/${entity}/snapshot`);
       const resp = await authFetch(url);
@@ -1673,7 +1661,6 @@ async function ensurePickerDatasetPrimed(entity){
     }
   }
 
-  // Delta (optional on each call)
   try {
     if (ds.since != null) {
       const url  = API(`/api/pickers/${entity}/delta?since=${encodeURIComponent(ds.since)}`);
@@ -1688,6 +1675,9 @@ async function ensurePickerDatasetPrimed(entity){
     if (LOGC) console.warn('[PICKER][dataset delta] failed', e);
   }
 }
+
+
+
 // ─────────────────────────────────────────────────────────────────────────────
 // NEW: applyDatasetDelta(entity, delta)  // { added:[], updated:[], removed:[], since }
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1725,37 +1715,40 @@ function pickersLocalFilterAndSort(entity, ids, query, sortKey, sortDir){
   const norm = (s)=> (s||'').toString().toLowerCase();
   const toks = norm(query||'').split(/\s+/).filter(Boolean);
 
+  // Accept either an array of IDs or an array of row objects
+  const rows = (ids && ids.length && typeof ids[0] === 'object')
+    ? ids.slice()
+    : (ids || []).map(id => itemsById[String(id)]).filter(Boolean);
+
   const scoreRow = (r) => {
-    if (!toks.length) return 0; // 0 for no-query; we’ll use alphabetical in that case
-    let s = 0;
+    if (!toks.length) return 0;
+    let nameScore = 0, extraScore = 0;
     if (entity === 'candidates') {
       const first = norm(r.first_name), last = norm(r.last_name);
       const disp  = norm(r.display_name || `${r.first_name||''} ${r.last_name||''}`);
       const role  = norm(r.roles_display);
       const email = norm(r.email);
       toks.forEach(t=>{
-        if (first.startsWith(t)) s+=6; if (last.startsWith(t)) s+=6;
-        if (disp.startsWith(t))  s+=4;
-        if (first===t||last===t) s+=8;
-        if (role.includes(t))    s+=2;
-        if (email.includes(t))   s+=1;
+        if (first.startsWith(t)) nameScore+=6;
+        if (last.startsWith(t))  nameScore+=6;
+        if (disp.includes(t))    nameScore+=5; // includes for mid-string matches like "Kier Arthur"
+        if (first===t||last===t) nameScore+=8;
+        if (role.includes(t))    extraScore+=2;
+        if (email.includes(t))   extraScore+=1;
       });
     } else {
       const name  = norm(r.name);
       const email = norm(r.primary_invoice_email);
       toks.forEach(t=>{
-        if (name.startsWith(t))  s+=6;
-        if (name.includes(t))    s+=2;
-        if (email.includes(t))   s+=1;
+        if (name.includes(t))    nameScore+=6;
+        if (email.includes(t))   extraScore+=1;
       });
     }
-    return s;
+    if (nameScore <= 0) return 0;        // require at least one name/display match
+    return nameScore + extraScore;
   };
 
-  const rows = ids.map(id => itemsById[String(id)]).filter(Boolean);
-
   if (!toks.length) {
-    // No query → pure alphabetical on sortKey
     const cmpAlpha = (a,b) => {
       const av = (a?.[sortKey] ?? '').toString().toLowerCase();
       const bv = (b?.[sortKey] ?? '').toString().toLowerCase();
@@ -1766,7 +1759,6 @@ function pickersLocalFilterAndSort(entity, ids, query, sortKey, sortDir){
     return rows.slice().sort(cmpAlpha);
   }
 
-  // With query → score first (desc), then tie-break alphabetically
   const withScore = rows.map(r => ({ r, s: scoreRow(r) })).filter(x => x.s > 0);
   withScore.sort((A,B) => {
     if (A.s !== B.s) return B.s - A.s;
@@ -1843,24 +1835,30 @@ async function contractWeekCreateAdditional(week_id) {
 // - Type-to-filter + header sort (Surname/First/Role/Email) locally
 // - Revalidates on pick
 // ─────────────────────────────────────────────────────────────────────────────
+
 async function openCandidatePicker(onPick) {
   const LOGC = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : true; // default ON
 
-  // Ensure dataset cache is primed + bring deltas
   if (LOGC) console.log('[PICKER][candidates] ensure dataset primed → start');
   await ensurePickerDatasetPrimed('candidates').catch(e=>{ if (LOGC) console.warn('[PICKER][candidates] priming failed', e); });
 
-  const fp = getSummaryFingerprint('candidates');
-  const mem = getSummaryMembership('candidates', fp); // { ids, total, updatedAt, stale }
+  let fp = getSummaryFingerprint('candidates');
+  let mem = getSummaryMembership('candidates', fp);
+  if (!mem?.ids?.length || mem?.stale) {
+    await primeSummaryMembership('candidates', fp);
+    fp  = getSummaryFingerprint('candidates');
+    mem = getSummaryMembership('candidates', fp);
+  }
+
   const ds  = (window.__pickerData ||= {}).candidates || { since:null, itemsById:{} };
   const items = ds.itemsById || {};
 
-  const ids = Array.isArray(mem?.ids) ? mem.ids : [];
-  const rowsBase = ids.map(id => items[id]).filter(Boolean);
+  const baseIds = (mem?.ids && mem.ids.length) ? mem.ids : Object.keys(items);
+  const rowsBase = baseIds.map(id => items[id]).filter(Boolean);
 
   if (LOGC) console.log('[PICKER][candidates] dataset snapshot', {
-    fingerprint: fp, total: mem?.total, ids: ids.length, stale: !!mem?.stale, since: ds?.since,
-    rowsBase: rowsBase.length, missingItems: ids.length - rowsBase.length
+    fingerprint: fp, total: mem?.total, ids: baseIds.length, stale: !!mem?.stale, since: ds?.since,
+    rowsBase: rowsBase.length, missingItems: baseIds.length - rowsBase.length
   });
 
   const renderRows = (rows) => rows.map(r => {
@@ -1911,13 +1909,11 @@ async function openCandidatePicker(onPick) {
     const applyRows = (rows) => {
       tbody.innerHTML = renderRows(rows);
       if (LOGC) console.log('[PICKER][candidates] render', { count: rows.length });
-      // highlight first row
       const first = tbody.querySelector('tr[data-id]');
       if (first) first.classList.add('active');
     };
-    const doFilter  = (q) => pickersLocalFilterAndSort('candidates', ids, q, sortKey, sortDir);
+    const doFilter  = (q) => pickersLocalFilterAndSort('candidates', baseIds.map(id=>items[id]).filter(Boolean), q, sortKey, sortDir);
 
-    // Delegated click for selection
     if (!tbody.__wiredClick) {
       tbody.__wiredClick = true;
       const choose = async (tr) => {
@@ -1944,7 +1940,6 @@ async function openCandidatePicker(onPick) {
       if (LOGC) console.log('[PICKER][candidates] wired click + dblclick handler');
     }
 
-    // Header sorting
     if (!table.__wiredSort) {
       table.__wiredSort = true;
       table.querySelector('thead').addEventListener('click', (e) => {
@@ -1958,7 +1953,6 @@ async function openCandidatePicker(onPick) {
       if (LOGC) console.log('[PICKER][candidates] wired sort header');
     }
 
-    // Debounced type-to-filter (local only)
     let t = 0;
     search.addEventListener('input', () => {
       const q = search.value.trim();
@@ -1967,7 +1961,6 @@ async function openCandidatePicker(onPick) {
       if (LOGC) console.log('[PICKER][candidates] search', { q });
     });
 
-    // Enter/Escape
     search.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') {
         const first = tbody.querySelector('tr[data-id]');
@@ -1981,6 +1974,8 @@ async function openCandidatePicker(onPick) {
   },{kind:'picker'});
 }
 
+
+
 // ─────────────────────────────────────────────────────────────────────────────
 // UPDATED: openClientPicker — delegated clicks + debounced live search
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1990,23 +1985,30 @@ async function openCandidatePicker(onPick) {
 // - Type-to-filter + header sort (Name/Email) locally
 // - Revalidates on pick
 // ─────────────────────────────────────────────────────────────────────────────
+
 async function openClientPicker(onPick) {
   const LOGC = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : true; // default ON
 
   if (LOGC) console.log('[PICKER][clients] ensure dataset primed → start');
   await ensurePickerDatasetPrimed('clients').catch(e=>{ if (LOGC) console.warn('[PICKER][clients] priming failed', e); });
 
-  const fp = getSummaryFingerprint('clients');
-  const mem = getSummaryMembership('clients', fp); // { ids, total, updatedAt, stale }
+  let fp = getSummaryFingerprint('clients');
+  let mem = getSummaryMembership('clients', fp);
+  if (!mem?.ids?.length || mem?.stale) {
+    await primeSummaryMembership('clients', fp);
+    fp  = getSummaryFingerprint('clients');
+    mem = getSummaryMembership('clients', fp);
+  }
+
   const ds  = (window.__pickerData ||= {}).clients || { since:null, itemsById:{} };
   const items = ds.itemsById || {};
 
-  const ids = Array.isArray(mem?.ids) ? mem.ids : [];
-  const rowsBase = ids.map(id => items[id]).filter(Boolean);
+  const baseIds = (mem?.ids && mem.ids.length) ? mem.ids : Object.keys(items);
+  const rowsBase = baseIds.map(id => items[id]).filter(Boolean);
 
   if (LOGC) console.log('[PICKER][clients] dataset snapshot', {
-    fingerprint: fp, total: mem?.total, ids: ids.length, stale: !!mem?.stale, since: ds?.since,
-    rowsBase: rowsBase.length, missingItems: ids.length - rowsBase.length
+    fingerprint: fp, total: mem?.total, ids: baseIds.length, stale: !!mem?.stale, since: ds?.since,
+    rowsBase: rowsBase.length, missingItems: baseIds.length - rowsBase.length
   });
 
   const renderRows = (rows) => rows.map(r => {
@@ -2051,13 +2053,11 @@ async function openClientPicker(onPick) {
     const applyRows = (rows) => {
       tbody.innerHTML = renderRows(rows);
       if (LOGC) console.log('[PICKER][clients] render', { count: rows.length });
-      // highlight first row (to mirror candidate picker behaviour)
       const first = tbody.querySelector('tr[data-id]');
       if (first) first.classList.add('active');
     };
-    const doFilter  = (q) => pickersLocalFilterAndSort('clients', ids, q, sortKey, sortDir);
+    const doFilter  = (q) => pickersLocalFilterAndSort('clients', baseIds.map(id=>items[id]).filter(Boolean), q, sortKey, sortDir);
 
-    // Delegated click + dblclick for selection (same as candidate picker)
     if (!tbody.__wiredClick) {
       tbody.__wiredClick = true;
       const choose = async (tr) => {
@@ -2084,7 +2084,6 @@ async function openClientPicker(onPick) {
       if (LOGC) console.log('[PICKER][clients] wired click + dblclick handler');
     }
 
-    // Header sorting
     if (!table.__wiredSort) {
       table.__wiredSort = true;
       table.querySelector('thead').addEventListener('click', (e) => {
@@ -2098,7 +2097,6 @@ async function openClientPicker(onPick) {
       if (LOGC) console.log('[PICKER][clients] wired sort header');
     }
 
-    // Debounced type-to-filter (auto-filter as you type)
     let t = 0;
     search.addEventListener('input', () => {
       const q = search.value.trim();
@@ -2107,7 +2105,6 @@ async function openClientPicker(onPick) {
       if (LOGC) console.log('[PICKER][clients] search', { q });
     });
 
-    // Enter/Escape (Enter selects first, Escape closes) — mirrors candidate picker
     search.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') {
         const first = tbody.querySelector('tr[data-id]');
@@ -2120,6 +2117,7 @@ async function openClientPicker(onPick) {
     setTimeout(() => { try { search.focus(); if (LOGC) console.log('[PICKER][clients] search focused'); } catch {} }, 0);
   },{kind:'picker'});
 }
+
 
 
 
@@ -2216,6 +2214,8 @@ function checkClientInvoiceEmailPresence(client) {
 // Role with Band to the right; uses .form to pick up input styling)
 // ─────────────────────────────────────────────────────────────────────────────
 
+
+
 function renderContractMainTab(ctx) {
   const LOGC = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : true; // default ON
   const d = ctx?.data || {};
@@ -2230,7 +2230,6 @@ function renderContractMainTab(ctx) {
   const candLabel   = (d.candidate_display || '').trim();
   const clientLabel = (d.client_name || '').trim();
 
-  // Format date fields for UI as DD/MM/YYYY if helpers exist; otherwise use raw
   const toUk = (iso) => {
     try { return (typeof formatIsoToUk === 'function') ? (formatIsoToUk(iso) || '') : (iso || ''); }
     catch { return iso || ''; }
@@ -2354,6 +2353,8 @@ function renderContractMainTab(ctx) {
       ${labelsBlock}
     </form>`;
 }
+
+
 
 
 // ─────────────────────────────────────────────────────────────────────────────
