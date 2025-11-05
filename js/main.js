@@ -1225,6 +1225,26 @@ function openContract(row) {
           return Number(v || 0);
         };
 
+        // Bucket labels: prefer DOM; if missing (e.g., saving from Rates tab), fall back to staged state
+        const fsMain = window.modalCtx?.formState?.main || {};
+        const domLabels = (typeof _collectBucketLabelsFromForm === 'function')
+          ? _collectBucketLabelsFromForm('#contractForm')
+          : null;
+
+        let bucket_labels_json = (domLabels && Object.keys(domLabels).length) ? domLabels : null;
+        if (!bucket_labels_json) {
+          const staged = {
+            day:   (fsMain.bucket_day           ?? fsMain.bucket_label_day   ?? '').trim(),
+            night: (fsMain.bucket_night         ?? fsMain.bucket_label_night ?? '').trim(),
+            sat:   (fsMain.bucket_sat           ?? fsMain.bucket_label_sat   ?? '').trim(),
+            sun:   (fsMain.bucket_sun           ?? fsMain.bucket_label_sun   ?? '').trim(),
+            bh:    (fsMain.bucket_bh            ?? fsMain.bucket_label_bh    ?? '').trim(),
+          };
+          const cleaned = {};
+          for (const [k, v] of Object.entries(staged)) if (v) cleaned[k] = v;
+          bucket_labels_json = Object.keys(cleaned).length ? cleaned : null;
+        }
+
         const data = {
           id: window.modalCtx.data?.id || null,
           candidate_id: val('candidate_id'),
@@ -1247,7 +1267,7 @@ function openContract(row) {
             charge_day:getRate('charge_day'), charge_night:getRate('charge_night'), charge_sat:getRate('charge_sat'), charge_sun:getRate('charge_sun'), charge_bh:getRate('charge_bh'),
           },
           std_hours_json,
-          bucket_labels_json: _collectBucketLabelsFromForm('#contractForm')
+          bucket_labels_json
         };
 
         if (LOGC) {
@@ -1440,7 +1460,8 @@ function openContract(row) {
                 debTimer = setTimeout(() => {
                   const { ids, items } = getDataset();
                   const rows = pickersLocalFilterAndSort(entity, ids, q, entity==='candidates'?'last_name':'name', 'asc')
-                    .map(v => (typeof v === 'object' ? v : items[String(v)]))
+               .map(v => (typeof v === 'object' ? v : items[String(v)]))
+
                     .filter(Boolean);
                   if (!rows.length) { closeMenu(); return; }
                   applyList(rows);
@@ -1618,6 +1639,7 @@ function openContract(row) {
     }
   }, 0);
 }
+
 
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -8743,8 +8765,7 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
 
   L('mergedRowForTab STATE', { rid, fid, sentinel, same, stagedKeys: Object.keys(staged||{}) });
   return { ...base, ...stripEmpty(staged) };
-}
-
+},
 
 
     _attachDirtyTracker() {
