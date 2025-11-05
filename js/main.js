@@ -1177,22 +1177,31 @@ function openContract(row) {
     isCreate ? 'Create Contract' : 'Edit Contract',
     tabs,
     (key) => {
-      if (key === 'main')     return renderContractMainTab(window.modalCtx);
-      if (key === 'rates')    return renderContractRatesTab(window.modalCtx);
-      if (key === 'calendar') return renderContractCalendarTab(window.modalCtx);
+      // Always render from merged state so staged edits survive re-renders
+      const ctx = { data: mergeContractStateIntoRow(window.modalCtx.data) };
+      if (key === 'main')     return renderContractMainTab(ctx);
+      if (key === 'rates')    return renderContractRatesTab(ctx);
+      if (key === 'calendar') return renderContractCalendarTab(ctx);
       return `<div class="tabc">Unknown tab.</div>`;
     },
     async () => {
       if (window.modalCtx?._saveInFlight) return false;
       window.modalCtx._saveInFlight = true;
       try {
-        const form = document.querySelector('#contractForm');
-        if (!form) throw new Error('Form not found');
+        // Capture whatever is currently mounted (both tabs)
+        snapshotContractForm();
 
-        const fd = new FormData(form);
-        const val = (k) => (fd.get(k) ?? '').toString().trim() || null;
-        const bool = (k) => { const v = (fd.get(k) ?? '').toString().trim(); return v === 'true' || v === 'on' || v === '1'; };
-        const numOrNull = (s) => { const v = (fd.get(s) ?? '').toString().trim(); return v === '' ? null : Number(v || 0); };
+        const form = document.querySelector('#contractForm'); // may be absent if user is on Rates only; we still use staged state below
+        const fd = form ? new FormData(form) : null;
+        const val = (k) => (fd ? (fd.get(k) ?? '').toString().trim() : (window.modalCtx.formState?.main?.[k] ?? '')).trim() || null;
+        const bool = (k) => {
+          const raw = fd ? (fd.get(k) ?? '').toString().trim() : (window.modalCtx.formState?.main?.[k] ?? '');
+          return raw === 'true' || raw === 'on' || raw === '1';
+        };
+        const numOrNull = (s) => {
+          const raw = fd ? (fd.get(s) ?? '').toString().trim() : (window.modalCtx.formState?.main?.[s] ?? '');
+          return raw === '' ? null : Number(raw || 0);
+        };
 
         const gh = {
           mon: numOrNull('gh_mon'), tue: numOrNull('gh_tue'), wed: numOrNull('gh_wed'),
@@ -1207,6 +1216,15 @@ function openContract(row) {
         };
         const startIso = ukToIso(val('start_date'));
         const endIso   = ukToIso(val('end_date'));
+
+        // Pull RATES from staged state first; fall back to form fields if present
+        const getRate = (n) => {
+          const staged = window.modalCtx.formState?.pay?.[n];
+          if (staged != null && staged !== '') return Number(staged || 0);
+          if (!fd) return 0;
+          const v = (fd.get(n) ?? '').toString().trim();
+          return Number(v || 0);
+        };
 
         const data = {
           id: window.modalCtx.data?.id || null,
@@ -1225,9 +1243,9 @@ function openContract(row) {
           require_reference_to_pay: bool('require_reference_to_pay'),
           require_reference_to_invoice: bool('require_reference_to_invoice'),
           rates_json: {
-            paye_day:  Number(val('paye_day') || 0),  paye_night: Number(val('paye_night') || 0), paye_sat: Number(val('paye_sat') || 0), paye_sun: Number(val('paye_sun') || 0), paye_bh: Number(val('paye_bh') || 0),
-            umb_day:   Number(val('umb_day')  || 0),  umb_night:  Number(val('umb_night')  || 0), umb_sat:  Number(val('umb_sat')  || 0),  umb_sun:  Number(val('umb_sun')  || 0),  umb_bh:  Number(val('umb_bh')  || 0),
-            charge_day:Number(val('charge_day')|| 0), charge_night:Number(val('charge_night')||0), charge_sat:Number(val('charge_sat')||0), charge_sun:Number(val('charge_sun')||0), charge_bh:Number(val('charge_bh')||0),
+            paye_day:  getRate('paye_day'),   paye_night: getRate('paye_night'), paye_sat:   getRate('paye_sat'),  paye_sun: getRate('paye_sun'), paye_bh: getRate('paye_bh'),
+            umb_day:   getRate('umb_day'),    umb_night:  getRate('umb_night'),  umb_sat:    getRate('umb_sat'),   umb_sun:  getRate('umb_sun'),  umb_bh:  getRate('umb_bh'),
+            charge_day:getRate('charge_day'), charge_night:getRate('charge_night'), charge_sat:getRate('charge_sat'), charge_sun:getRate('charge_sun'), charge_bh:getRate('charge_bh'),
           },
           std_hours_json,
           bucket_labels_json: _collectBucketLabelsFromForm('#contractForm')
@@ -1271,291 +1289,314 @@ function openContract(row) {
     hasId,
     () => {
       const wire = () => {
-        const form = document.querySelector('#contractForm'); if (!form) return;
+        // Always snapshot current fields before re-render caused by tab switch
+        snapshotContractForm();
+
+        // MAIN tab specific wiring
+        const form = document.querySelector('#contractForm');
         const tabs = document.getElementById('modalTabs');
         const active = tabs?.querySelector('button.active')?.textContent?.toLowerCase() || 'main';
-        if (active !== 'main') return;
 
-        const fr = window.__getModalFrame?.();
-        if (LOGC) console.log('[CONTRACTS] wiring MAIN tab controls', { modalMode: fr?.mode, parentMode: (function(){try{const p=(window.__modalStack||[])[(window.__modalStack||[]).length-2]; return p?.mode;}catch{return undefined;}})() });
-
-        const btnPC = document.getElementById('btnPickCandidate');
-        const btnCC = document.getElementById('btnClearCandidate');
-        const btnPL = document.getElementById('btnPickClient');
-        const btnCL = document.getElementById('btnClearClient');
-        const candInput = document.getElementById('candidate_name_display');
-        const cliInput  = document.getElementById('client_name_display');
-
-        if (LOGC) console.log('[CONTRACTS] picker buttons snapshot BEFORE', {
-          btnPickCandidate: { exists: !!btnPC, disabled: !!(btnPC && btnPC.disabled) },
-          btnClearCandidate:{ exists: !!btnCC, disabled: !!(btnCC && btnCC.disabled) },
-          btnPickClient:    { exists: !!btnPL, disabled: !!(btnPL && btnPL.disabled) },
-          btnClearClient:   { exists: !!btnCL, disabled: !!(btnCL && btnCL.disabled) }
-        });
-
-        try {
-          const sd = form.querySelector('input[name="start_date"]');
-          const ed = form.querySelector('input[name="end_date"]');
-          const toUk = (iso) => {
-            try { return (typeof formatIsoToUk === 'function') ? (formatIsoToUk(iso) || '') : (iso || ''); }
-            catch { return iso || ''; }
-          };
-          if (sd && /^\d{4}-\d{2}-\d{2}$/.test(sd.value||'')) sd.value = toUk(sd.value);
-          if (ed && /^\d{4}-\d{2}-\d{2}$/.test(ed.value||'')) ed.value = toUk(ed.value);
-          if (sd) { sd.setAttribute('placeholder','DD/MM/YYYY'); if (typeof attachUkDatePicker === 'function') attachUkDatePicker(sd); }
-          if (ed) { ed.setAttribute('placeholder','DD/MM/YYYY'); if (typeof attachUkDatePicker === 'function') attachUkDatePicker(ed); }
-          if (LOGC) console.log('[CONTRACTS] datepickers wired for start_date/end_date', { hasStart: !!sd, hasEnd: !!ed });
-        } catch (e) {
-          if (LOGC) console.warn('[CONTRACTS] datepicker wiring failed', e);
-        }
-
-        const ensurePrimed = async (entity) => {
-          try {
-            await ensurePickerDatasetPrimed(entity);
-            const fp = getSummaryFingerprint(entity);
-            const mem = getSummaryMembership(entity, fp);
-            if (!mem?.ids?.length || mem?.stale) {
-              await primeSummaryMembership(entity, fp);
-            }
-          } catch (e) { if (LOGC) console.warn('[CONTRACTS] typeahead priming failed', entity, e); }
-        };
-
-        const buildItemLabel = (entity, r) => {
-          if (entity === 'candidates') {
-            const first = (r.first_name||'').trim();
-            const last  = (r.last_name||'').trim();
-            const role  = ((r.roles_display||'').split(/[•;,]/)[0]||'').trim();
-            return `${last}${last?', ':''}${first}${role?` ${role}`:''}`.trim();
-          } else {
-            const name  = (r.name||'').trim();
-            return name;
-          }
-        };
-
-        const wireTypeahead = async (entity, inputEl, hiddenName, labelElId) => {
-          if (!inputEl) return;
-          await ensurePrimed(entity);
-
-          const menuId = entity === 'candidates' ? 'candTypeaheadMenu' : 'clientTypeaheadMenu';
-          let menu = document.getElementById(menuId);
-          if (!menu) {
-            menu = document.createElement('div');
-            menu.id = menuId;
-            menu.className = 'typeahead-menu';
-            menu.style.position = 'absolute';
-            menu.style.zIndex = '1000';
-            menu.style.background = 'var(--panel, #fff)';
-            menu.style.border = '1px solid var(--line, #ddd)';
-            menu.style.boxShadow = '0 4px 12px rgba(0,0,0,0.08)';
-            menu.style.maxHeight = '240px';
-            menu.style.overflowY = 'auto';
-            menu.style.display = 'none';
-            document.body.appendChild(menu);
-          }
-
-          const positionMenu = () => {
-            const r = inputEl.getBoundingClientRect();
-            menu.style.minWidth = `${Math.max(260, r.width)}px`;
-            menu.style.left = `${window.scrollX + r.left}px`;
-            menu.style.top  = `${window.scrollY + r.bottom + 4}px`;
-          };
-
-          const closeMenu = () => { menu.style.display = 'none'; menu.innerHTML = ''; };
-          const openMenu  = () => { positionMenu(); menu.style.display = ''; };
-
-          const getDataset = () => {
-            const fp  = getSummaryFingerprint(entity);
-            const mem = getSummaryMembership(entity, fp);
-            const ds  = (window.__pickerData ||= {})[entity] || { since:null, itemsById:{} };
-            const items = ds.itemsById || {};
-            let ids = Array.isArray(mem?.ids) ? mem.ids : [];
-            if (!ids.length) ids = Object.keys(items);
-            return { ids, items };
-          };
-
-          const applyList = (rows) => {
-            menu.innerHTML = rows.slice(0, 10).map(r => {
-              const label = buildItemLabel(entity, r);
-              return `<div class="ta-item" data-id="${r.id||''}" data-label="${(label||'').replace(/"/g,'&quot;')}" style="padding:8px 10px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${label}</div>`;
-            }).join('');
-            const first = menu.querySelector('.ta-item');
-            if (first) first.style.background = 'var(--hover, #f5f5f5)';
-          };
-
-          const selectRow = (id, label) => {
-            // Persist selection into hidden, display input, formState and modalCtx.data
-            setContractFormValue(hiddenName, id);
-            inputEl.value = label || '';
-            const labEl = document.getElementById(labelElId);
-            if (labEl) labEl.textContent = label ? `Chosen: ${label}` : '';
-
-            // Persist to modalCtx.formState.main
-            try {
-              const fs = (window.modalCtx.formState ||= { __forId: (window.modalCtx.data?.id ?? window.modalCtx.openToken ?? null), main:{}, pay:{} });
-              fs.main ||= {};
-              fs.main[hiddenName] = id;
-              if (hiddenName === 'candidate_id') fs.main['candidate_display'] = label;
-              if (hiddenName === 'client_id')    fs.main['client_name']       = label;
-            } catch {}
-
-            // Persist to modalCtx.data so re-renders show chosen values
-            try {
-              window.modalCtx.data = window.modalCtx.data || {};
-              if (hiddenName === 'candidate_id') { window.modalCtx.data.candidate_id = id; window.modalCtx.data.candidate_display = label; }
-              if (hiddenName === 'client_id')    { window.modalCtx.data.client_id    = id; window.modalCtx.data.client_name       = label; }
-            } catch {}
-
-            closeMenu();
-          };
-
-          let debTimer = 0;
-          const handleInput = () => {
-            const q = (inputEl.value||'').trim();
-            if (q.length < 3) { closeMenu(); return; }
-            if (debTimer) clearTimeout(debTimer);
-            debTimer = setTimeout(() => {
-              const { ids, items } = getDataset();
-              const rows = pickersLocalFilterAndSort(entity, ids, q, entity==='candidates'?'last_name':'name', 'asc')
-                .map(v => (typeof v === 'object' ? v : items[String(v)]))
-                .filter(Boolean);
-              if (!rows.length) { closeMenu(); return; }
-              applyList(rows);
-              openMenu();
-            }, 120);
-          };
-
-          const handleKeyDown = (e) => {
-            if (menu.style.display === 'none') return;
-            const items = Array.from(menu.querySelectorAll('.ta-item'));
-            if (!items.length) return;
-            const idx = items.findIndex(n => n.style.background && n.style.background.includes('hover'));
-            const setActive = (i) => {
-              items.forEach(n => n.style.background='');
-              items[i].style.background = 'var(--hover, #f5f5f5)';
-              items[i].scrollIntoView({ block:'nearest' });
+        if (form) {
+          // Generic staging for all inputs in MAIN form
+          if (!form.__wiredStage) {
+            form.__wiredStage = true;
+            const stage = (e) => {
+              const t = e.target;
+              if (!t || !t.name) return;
+              const v = t.type === 'checkbox' ? (t.checked ? 'on' : '') : t.value;
+              setContractFormValue(t.name, v);
+              if (t.name === 'default_pay_method_snapshot' || /^(paye_|umb_|charge_)/.test(t.name)) computeContractMargins();
             };
-            if (e.key === 'ArrowDown') { e.preventDefault(); setActive(Math.min((idx<0?0:idx+1), items.length-1)); }
-            if (e.key === 'ArrowUp')   { e.preventDefault(); setActive(Math.max((idx<0?0:idx-1), 0)); }
-            if (e.key === 'Enter')     { e.preventDefault(); const n = items[Math.max(idx,0)]; if (n) selectRow(n.dataset.id, n.dataset.label); }
-            if (e.key === 'Escape')    { e.preventDefault(); closeMenu(); }
+            form.addEventListener('input', stage, true);
+            form.addEventListener('change', stage, true);
+          }
+
+          if (active === 'main') {
+            // Datepickers + pickers only when main tab is visible
+            try {
+              const sd = form.querySelector('input[name="start_date"]');
+              const ed = form.querySelector('input[name="end_date"]');
+              const toUk = (iso) => {
+                try { return (typeof formatIsoToUk === 'function') ? (formatIsoToUk(iso) || '') : (iso || ''); }
+                catch { return iso || ''; }
+              };
+              if (sd && /^\d{4}-\d{2}-\d{2}$/.test(sd.value||'')) sd.value = toUk(sd.value);
+              if (ed && /^\d{4}-\d{2}-\d{2}$/.test(ed.value||'')) ed.value = toUk(ed.value);
+              if (sd) { sd.setAttribute('placeholder','DD/MM/YYYY'); if (typeof attachUkDatePicker === 'function') attachUkDatePicker(sd); }
+              if (ed) { ed.setAttribute('placeholder','DD/MM/YYYY'); if (typeof attachUkDatePicker === 'function') attachUkDatePicker(ed); }
+              if (LOGC) console.log('[CONTRACTS] datepickers wired for start_date/end_date', { hasStart: !!sd, hasEnd: !!ed });
+            } catch (e) {
+              if (LOGC) console.warn('[CONTRACTS] datepicker wiring failed', e);
+            }
+
+            const btnPC = document.getElementById('btnPickCandidate');
+            const btnCC = document.getElementById('btnClearCandidate');
+            const btnPL = document.getElementById('btnPickClient');
+            const btnCL = document.getElementById('btnClearClient');
+            const candInput = document.getElementById('candidate_name_display');
+            const cliInput  = document.getElementById('client_name_display');
+
+            const ensurePrimed = async (entity) => {
+              try {
+                await ensurePickerDatasetPrimed(entity);
+                const fp = getSummaryFingerprint(entity);
+                const mem = getSummaryMembership(entity, fp);
+                if (!mem?.ids?.length || mem?.stale) {
+                  await primeSummaryMembership(entity, fp);
+                }
+              } catch (e) { if (LOGC) console.warn('[CONTRACTS] typeahead priming failed', entity, e); }
+            };
+
+            const buildItemLabel = (entity, r) => {
+              if (entity === 'candidates') {
+                const first = (r.first_name||'').trim();
+                const last  = (r.last_name||'').trim();
+                const role  = ((r.roles_display||'').split(/[•;,]/)[0]||'').trim();
+                return `${last}${last?', ':''}${first}${role?` ${role}`:''}`.trim();
+              } else {
+                const name  = (r.name||'').trim();
+                return name;
+              }
+            };
+
+            const wireTypeahead = async (entity, inputEl, hiddenName, labelElId) => {
+              if (!inputEl) return;
+              await ensurePrimed(entity);
+
+              const menuId = entity === 'candidates' ? 'candTypeaheadMenu' : 'clientTypeaheadMenu';
+              let menu = document.getElementById(menuId);
+              if (!menu) {
+                menu = document.createElement('div');
+                menu.id = menuId;
+                menu.className = 'typeahead-menu';
+                menu.style.position = 'absolute';
+                menu.style.zIndex = '1000';
+                menu.style.background = 'var(--panel, #fff)';
+                menu.style.border = '1px solid var(--line, #ddd)';
+                menu.style.boxShadow = '0 4px 12px rgba(0,0,0,0.08)';
+                menu.style.maxHeight = '240px';
+                menu.style.overflowY = 'auto';
+                menu.style.display = 'none';
+                document.body.appendChild(menu);
+              }
+
+              const positionMenu = () => {
+                const r = inputEl.getBoundingClientRect();
+                menu.style.minWidth = `${Math.max(260, r.width)}px`;
+                menu.style.left = `${window.scrollX + r.left}px`;
+                menu.style.top  = `${window.scrollY + r.bottom + 4}px`;
+              };
+
+              const closeMenu = () => { menu.style.display = 'none'; menu.innerHTML = ''; };
+              const openMenu  = () => { positionMenu(); menu.style.display = ''; };
+
+              const getDataset = () => {
+                const fp  = getSummaryFingerprint(entity);
+                const mem = getSummaryMembership(entity, fp);
+                const ds  = (window.__pickerData ||= {})[entity] || { since:null, itemsById:{} };
+                const items = ds.itemsById || {};
+                let ids = Array.isArray(mem?.ids) ? mem.ids : [];
+                if (!ids.length) ids = Object.keys(items);
+                return { ids, items };
+              };
+
+              const applyList = (rows) => {
+                menu.innerHTML = rows.slice(0, 10).map(r => {
+                  const label = buildItemLabel(entity, r);
+                  return `<div class="ta-item" data-id="${r.id||''}" data-label="${(label||'').replace(/"/g,'&quot;')}" style="padding:8px 10px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${label}</div>`;
+                }).join('');
+                const first = menu.querySelector('.ta-item');
+                if (first) first.style.background = 'var(--hover, #f5f5f5)';
+              };
+
+              const selectRow = (id, label) => {
+                setContractFormValue(hiddenName, id);
+                inputEl.value = label || '';
+                const labEl = document.getElementById(labelElId);
+                if (labEl) labEl.textContent = label ? `Chosen: ${label}` : '';
+
+                try {
+                  const fs = (window.modalCtx.formState ||= { __forId: (window.modalCtx.data?.id ?? window.modalCtx.openToken ?? null), main:{}, pay:{} });
+                  fs.main ||= {};
+                  fs.main[hiddenName] = id;
+                  if (hiddenName === 'candidate_id') fs.main['candidate_display'] = label;
+                  if (hiddenName === 'client_id')    fs.main['client_name']       = label;
+                } catch {}
+
+                try {
+                  window.modalCtx.data = window.modalCtx.data || {};
+                  if (hiddenName === 'candidate_id') { window.modalCtx.data.candidate_id = id; window.modalCtx.data.candidate_display = label; }
+                  if (hiddenName === 'client_id')    { window.modalCtx.data.client_id    = id; window.modalCtx.data.client_name       = label; }
+                } catch {}
+
+                closeMenu();
+              };
+
+              let debTimer = 0;
+              const handleInput = () => {
+                const q = (inputEl.value||'').trim();
+                if (q.length < 3) { closeMenu(); return; }
+                if (debTimer) clearTimeout(debTimer);
+                debTimer = setTimeout(() => {
+                  const { ids, items } = getDataset();
+                  const rows = pickersLocalFilterAndSort(entity, ids, q, entity==='candidates'?'last_name':'name', 'asc')
+                    .map(v => (typeof v === 'object' ? v : items[String(v)]))
+                    .filter(Boolean);
+                  if (!rows.length) { closeMenu(); return; }
+                  applyList(rows);
+                  openMenu();
+                }, 120);
+              };
+
+              const handleKeyDown = (e) => {
+                if (menu.style.display === 'none') return;
+                const items = Array.from(menu.querySelectorAll('.ta-item'));
+                if (!items.length) return;
+                const idx = items.findIndex(n => n.style.background && n.style.background.includes('hover'));
+                const setActive = (i) => {
+                  items.forEach(n => n.style.background='');
+                  items[i].style.background = 'var(--hover, #f5f5f5)';
+                  items[i].scrollIntoView({ block:'nearest' });
+                };
+                if (e.key === 'ArrowDown') { e.preventDefault(); setActive(Math.min((idx<0?0:idx+1), items.length-1)); }
+                if (e.key === 'ArrowUp')   { e.preventDefault(); setActive(Math.max((idx<0?0:idx-1), 0)); }
+                if (e.key === 'Enter')     { e.preventDefault(); const n = items[Math.max(idx,0)]; if (n) selectRow(n.dataset.id, n.dataset.label); }
+                if (e.key === 'Escape')    { e.preventDefault(); closeMenu(); }
+              };
+
+              menu.addEventListener('click', (ev) => {
+                const n = ev.target && ev.target.closest('.ta-item'); if (!n) return;
+                selectRow(n.dataset.id, n.dataset.label);
+              });
+
+              let blurTimer = 0;
+              inputEl.addEventListener('blur', () => { blurTimer = setTimeout(closeMenu, 150); });
+              menu.addEventListener('mousedown', () => { if (blurTimer) clearTimeout(blurTimer); });
+
+              inputEl.addEventListener('input', handleInput);
+              inputEl.addEventListener('keydown', handleKeyDown);
+            };
+
+            wireTypeahead('candidates', candInput, 'candidate_id', 'candidatePickLabel');
+            wireTypeahead('clients',    cliInput,  'client_id',    'clientPickLabel');
+
+            if (btnPC && !btnPC.__wired) {
+              btnPC.__wired = true;
+              btnPC.addEventListener('click', async () => {
+                if (LOGC) console.log('[CONTRACTS] Pick Candidate clicked');
+                openCandidatePicker(async ({ id, label }) => {
+                  if (LOGC) console.log('[CONTRACTS] Pick Candidate → selected', { id, label });
+                  setContractFormValue('candidate_id', id);
+                  const lab = document.getElementById('candidatePickLabel'); if (lab) lab.textContent = `Chosen: ${label}`;
+                  try {
+                    const fs = (window.modalCtx.formState ||= { __forId: (window.modalCtx.data?.id ?? window.modalCtx.openToken ?? null), main:{}, pay:{} });
+                    fs.main ||= {}; fs.main.candidate_id = id; fs.main.candidate_display = label;
+                    window.modalCtx.data = window.modalCtx.data || {};
+                    window.modalCtx.data.candidate_id = id; window.modalCtx.data.candidate_display = label;
+                  } catch {}
+                  try {
+                    const cand = await getCandidate(id);
+                    const hint = prefillPayMethodFromCandidate(cand);
+                    if (hint) showModalHint(hint, 'warn');
+                  } catch (e) { if (LOGC) console.warn('[CONTRACTS] prefillPayMethodFromCandidate failed', e); }
+                });
+              });
+              if (LOGC) console.log('[CONTRACTS] wired btnPickCandidate');
+            }
+            if (btnCC && !btnCC.__wired) {
+              btnCC.__wired = true;
+              btnCC.addEventListener('click', () => {
+                if (LOGC) console.log('[CONTRACTS] Clear Candidate clicked');
+                setContractFormValue('candidate_id', '');
+                const lab = document.getElementById('candidatePickLabel'); if (lab) lab.textContent = '';
+                try {
+                  const fs = (window.modalCtx.formState ||= { __forId: (window.modalCtx.data?.id ?? window.modalCtx.openToken ?? null), main:{}, pay:{} });
+                  fs.main ||= {}; delete fs.main.candidate_id; delete fs.main.candidate_display;
+                  window.modalCtx.data = window.modalCtx.data || {};
+                  delete window.modalCtx.data.candidate_id; delete window.modalCtx.data.candidate_display;
+                } catch {}
+              });
+              if (LOGC) console.log('[CONTRACTS] wired btnClearCandidate');
+            }
+
+            if (btnPL && !btnPL.__wired) {
+              btnPL.__wired = true;
+              btnPL.addEventListener('click', async () => {
+                if (LOGC) console.log('[CONTRACTS] Pick Client clicked');
+                openClientPicker(async ({ id, label }) => {
+                  if (LOGC) console.log('[CONTRACTS] Pick Client → selected', { id, label });
+                  setContractFormValue('client_id', id);
+                  const lab = document.getElementById('clientPickLabel'); if (lab) lab.textContent = `Chosen: ${label}`;
+                  try {
+                    const fs = (window.modalCtx.formState ||= { __forId: (window.modalCtx.data?.id ?? window.modalCtx.openToken ?? null), main:{}, pay:{} });
+                    fs.main ||= {}; fs.main.client_id = id; fs.main.client_name = label;
+                    window.modalCtx.data = window.modalCtx.data || {};
+                    window.modalCtx.data.client_id = id; window.modalCtx.data.client_name = label;
+                  } catch {}
+                  try {
+                    const client = await getClient(id);
+                    const h = checkClientInvoiceEmailPresence(client);
+                    if (h) showModalHint(h, 'warn');
+                  } catch (e) { if (LOGC) console.warn('[CONTRACTS] client hint check failed', e); }
+                });
+              });
+              if (LOGC) console.log('[CONTRACTS] wired btnPickClient');
+            }
+            if (btnCL && !btnCL.__wired) {
+              btnCL.__wired = true;
+              btnCL.addEventListener('click', () => {
+                if (LOGC) console.log('[CONTRACTS] Clear Client clicked');
+                setContractFormValue('client_id', '');
+                const lab = document.getElementById('clientPickLabel'); if (lab) lab.textContent = '';
+                try {
+                  const fs = (window.modalCtx.formState ||= { __forId: (window.modalCtx.data?.id ?? window.modalCtx.openToken ?? null), main:{}, pay:{} });
+                  fs.main ||= {}; delete fs.main.client_id; delete fs.main.client_name;
+                  window.modalCtx.data = window.modalCtx.data || {};
+                  delete window.modalCtx.data.client_id; delete window.modalCtx.data.client_name;
+                } catch {}
+              });
+              if (LOGC) console.log('[CONTRACTS] wired btnClearClient');
+            }
+
+            const openOnType = (inputEl, openerName) => {
+              if (!inputEl || inputEl.__wiredTyping) return;
+              inputEl.__wiredTyping = true;
+              if (LOGC) console.log('[CONTRACTS] typing handler installed for', openerName);
+            };
+            openOnType(candInput, 'candidate');
+            openOnType(cliInput, 'client');
+          }
+        }
+
+        // RATES tab specific staging and margin preview
+        const ratesTab = document.querySelector('#contractRatesTab');
+        if (ratesTab && !ratesTab.__wiredStage) {
+          ratesTab.__wiredStage = true;
+          const stageRates = (e) => {
+            const t = e.target;
+            if (!t || !t.name) return;
+            if (/^(paye_|umb_|charge_)/.test(t.name)) {
+              setContractFormValue(t.name, t.value);
+              computeContractMargins();
+            }
           };
-
-          menu.addEventListener('click', (ev) => {
-            const n = ev.target && ev.target.closest('.ta-item'); if (!n) return;
-            selectRow(n.dataset.id, n.dataset.label);
-          });
-
-          let blurTimer = 0;
-          inputEl.addEventListener('blur', () => { blurTimer = setTimeout(closeMenu, 150); });
-          menu.addEventListener('mousedown', () => { if (blurTimer) clearTimeout(blurTimer); });
-
-          inputEl.addEventListener('input', handleInput);
-          inputEl.addEventListener('keydown', handleKeyDown);
-        };
-
-        wireTypeahead('candidates', candInput, 'candidate_id', 'candidatePickLabel');
-        wireTypeahead('clients',    cliInput,  'client_id',    'clientPickLabel');
-
-        if (btnPC && !btnPC.__wired) {
-          btnPC.__wired = true;
-          btnPC.addEventListener('click', async () => {
-            if (LOGC) console.log('[CONTRACTS] Pick Candidate clicked');
-            openCandidatePicker(async ({ id, label }) => {
-              if (LOGC) console.log('[CONTRACTS] Pick Candidate → selected', { id, label });
-              // Persist selection (hidden, labels, formState, data)
-              setContractFormValue('candidate_id', id);
-              const lab = document.getElementById('candidatePickLabel'); if (lab) lab.textContent = `Chosen: ${label}`;
-              try {
-                const fs = (window.modalCtx.formState ||= { __forId: (window.modalCtx.data?.id ?? window.modalCtx.openToken ?? null), main:{}, pay:{} });
-                fs.main ||= {}; fs.main.candidate_id = id; fs.main.candidate_display = label;
-                window.modalCtx.data = window.modalCtx.data || {};
-                window.modalCtx.data.candidate_id = id; window.modalCtx.data.candidate_display = label;
-              } catch {}
-              try {
-                const cand = await getCandidate(id);
-                const hint = prefillPayMethodFromCandidate(cand);
-                if (hint) showModalHint(hint, 'warn');
-              } catch (e) { if (LOGC) console.warn('[CONTRACTS] prefillPayMethodFromCandidate failed', e); }
-            });
-          });
-          if (LOGC) console.log('[CONTRACTS] wired btnPickCandidate');
+          ratesTab.addEventListener('input', stageRates, true);
+          ratesTab.addEventListener('change', stageRates, true);
+          computeContractMargins();
         }
-        if (btnCC && !btnCC.__wired) {
-          btnCC.__wired = true;
-          btnCC.addEventListener('click', () => {
-            if (LOGC) console.log('[CONTRACTS] Clear Candidate clicked');
-            setContractFormValue('candidate_id', '');
-            const lab = document.getElementById('candidatePickLabel'); if (lab) lab.textContent = '';
-            try {
-              const fs = (window.modalCtx.formState ||= { __forId: (window.modalCtx.data?.id ?? window.modalCtx.openToken ?? null), main:{}, pay:{} });
-              fs.main ||= {}; delete fs.main.candidate_id; delete fs.main.candidate_display;
-              window.modalCtx.data = window.modalCtx.data || {};
-              delete window.modalCtx.data.candidate_id; delete window.modalCtx.data.candidate_display;
-            } catch {}
-          });
-          if (LOGC) console.log('[CONTRACTS] wired btnClearCandidate');
-        }
-
-        if (btnPL && !btnPL.__wired) {
-          btnPL.__wired = true;
-          btnPL.addEventListener('click', async () => {
-            if (LOGC) console.log('[CONTRACTS] Pick Client clicked');
-            openClientPicker(async ({ id, label }) => {
-              if (LOGC) console.log('[CONTRACTS] Pick Client → selected', { id, label });
-              // Persist selection (hidden, labels, formState, data)
-              setContractFormValue('client_id', id);
-              const lab = document.getElementById('clientPickLabel'); if (lab) lab.textContent = `Chosen: ${label}`;
-              try {
-                const fs = (window.modalCtx.formState ||= { __forId: (window.modalCtx.data?.id ?? window.modalCtx.openToken ?? null), main:{}, pay:{} });
-                fs.main ||= {}; fs.main.client_id = id; fs.main.client_name = label;
-                window.modalCtx.data = window.modalCtx.data || {};
-                window.modalCtx.data.client_id = id; window.modalCtx.data.client_name = label;
-              } catch {}
-              try {
-                const client = await getClient(id);
-                const h = checkClientInvoiceEmailPresence(client);
-                if (h) showModalHint(h, 'warn');
-              } catch (e) { if (LOGC) console.warn('[CONTRACTS] client hint check failed', e); }
-            });
-          });
-          if (LOGC) console.log('[CONTRACTS] wired btnPickClient');
-        }
-        if (btnCL && !btnCL.__wired) {
-          btnCL.__wired = true;
-          btnCL.addEventListener('click', () => {
-            if (LOGC) console.log('[CONTRACTS] Clear Client clicked');
-            setContractFormValue('client_id', '');
-            const lab = document.getElementById('clientPickLabel'); if (lab) lab.textContent = '';
-            try {
-              const fs = (window.modalCtx.formState ||= { __forId: (window.modalCtx.data?.id ?? window.modalCtx.openToken ?? null), main:{}, pay:{} });
-              fs.main ||= {}; delete fs.main.client_id; delete fs.main.client_name;
-              window.modalCtx.data = window.modalCtx.data || {};
-              delete window.modalCtx.data.client_id; delete window.modalCtx.data.client_name;
-            } catch {}
-          });
-          if (LOGC) console.log('[CONTRACTS] wired btnClearClient');
-        }
-
-        const openOnType = (inputEl, openerName) => {
-          if (!inputEl || inputEl.__wiredTyping) return;
-          inputEl.__wiredTyping = true;
-          if (LOGC) console.log('[CONTRACTS] typing handler installed for', openerName);
-        };
-        openOnType(candInput, 'candidate');
-        openOnType(cliInput, 'client');
-
-        if (LOGC) console.log('[CONTRACTS] picker buttons snapshot AFTER', {
-          btnPickCandidate: { exists: !!btnPC, disabled: !!(btnPC && btnPC.disabled) },
-          btnPickClient:    { exists: !!btnPL, disabled: !!(btnPL && btnPL.disabled) }
-        });
       };
 
       setTimeout(wire, 0);
       const tabs = document.getElementById('modalTabs');
-      if (tabs && !tabs.__wired_contract_main) {
-        tabs.__wired_contract_main = true;
-        tabs.addEventListener('click', () => setTimeout(wire, 0));
-        if (LOGC) console.log('[CONTRACTS] tabs click→wire handler attached');
+      if (tabs && !tabs.__wired_contract_stage) {
+        tabs.__wired_contract_stage = true;
+        // Snapshot before switching, then re-wire after DOM updates
+        tabs.addEventListener('click', () => {
+          snapshotContractForm();
+          setTimeout(wire, 0);
+        });
+        if (LOGC) console.log('[CONTRACTS] tabs click→stage+wire handler attached');
       }
     },
     { kind:'contracts', extraButtons }
@@ -1578,6 +1619,7 @@ function openContract(row) {
     }
   }, 0);
 }
+
 
 // ─────────────────────────────────────────────────────────────────────────────
 // NEW: getSummaryFingerprint(section)
@@ -2302,23 +2344,102 @@ function wirePickerLiveFilter(inputEl, tableEl) {
 // ─────────────────────────────────────────────────────────────────────────────
 function setContractFormValue(name, value) {
   const LOGC = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : false;
-  const form = document.querySelector('#contractForm'); if (!form) return;
-  const el = form.querySelector(`[name="${CSS.escape(name)}"]`);
-  if (!el) return;
-  el.value = value == null ? '' : String(value);
+  const form = document.querySelector('#contractForm'); // may be null when on Rates tab
+  const el = form ? form.querySelector(`[name="${CSS.escape(name)}"]`) : null;
+
+  // Reflect into DOM if field exists in #contractForm
+  if (el) {
+    if (el.type === 'checkbox') {
+      el.checked = !!value && value !== 'false' && value !== '0';
+    } else {
+      el.value = value == null ? '' : String(value);
+    }
+  }
+
   if (LOGC) console.log('[CONTRACTS] setContractFormValue', { name, value: (name.endsWith('_id') ? '(id)' : value) });
 
-  // Stage into formState.main so tab switches don’t lose the value
+  // Stage into formState (main vs pay buckets)
   try {
     window.modalCtx = window.modalCtx || {};
     const fs = (window.modalCtx.formState ||= { __forId: (window.modalCtx.data?.id ?? window.modalCtx.openToken ?? null), main:{}, pay:{} });
-    fs.main ||= {};
-    fs.main[name] = el.value;
+    const stored = (el && el.type === 'checkbox') ? (el.checked ? 'on' : '') : (el ? el.value : (value == null ? '' : String(value)));
+
+    if (/^(paye_|umb_|charge_)/.test(name)) {
+      fs.pay[name] = stored;
+    } else {
+      fs.main[name] = stored;
+    }
   } catch {}
 
-  const evt = new Event('input', { bubbles: true });
-  el.dispatchEvent(evt);
+  // Fire input event if we actually touched a real element
+  if (el) {
+    const evt = new Event('input', { bubbles: true });
+    el.dispatchEvent(evt);
+  }
 }
+
+function mergeContractStateIntoRow(row) {
+  const base = { ...(row || {}) };
+  const fs = (window.modalCtx && window.modalCtx.formState) || null;
+
+  // Merge MAIN staged fields (text/selects/checkbox snapshots)
+  if (fs && fs.main) {
+    for (const [k, v] of Object.entries(fs.main)) {
+      // For checkboxes we store 'on' or '', hydrate to boolean-like fields where appropriate
+      if (k === 'auto_invoice' || k === 'require_reference_to_pay' || k === 'require_reference_to_invoice') {
+        base[k] = v === 'on' || v === true;
+      } else if (k === 'start_date' || k === 'end_date') {
+        base[k] = v; // Keep as DD/MM/YYYY in the UI; conversion happens on save
+      } else if (k === 'week_ending_weekday_snapshot') {
+        base[k] = v;
+      } else {
+        base[k] = v;
+      }
+    }
+  }
+
+  // Merge PAY staged fields into rates_json without forcing number conversion (UI shows strings)
+  const stagedRates = (fs && fs.pay) ? fs.pay : null;
+  if (stagedRates) {
+    const r = { ...(base.rates_json || {}) };
+    for (const [k, v] of Object.entries(stagedRates)) r[k] = v;
+    base.rates_json = r;
+  }
+
+  return base;
+}
+
+function snapshotContractForm() {
+  const fs = (window.modalCtx.formState ||= { __forId: (window.modalCtx.data?.id ?? window.modalCtx.openToken ?? null), main:{}, pay:{} });
+
+  // Collect from the MAIN form (if present)
+  const form = document.querySelector('#contractForm');
+  const fromMain = form ? Array.from(form.querySelectorAll('input, select, textarea')) : [];
+
+  // Collect from the RATES container (it may be outside #contractForm)
+  const ratesTab = document.querySelector('#contractRatesTab');
+  const fromRates = ratesTab ? Array.from(ratesTab.querySelectorAll('input, select, textarea')) : [];
+
+  const all = [...fromMain, ...fromRates];
+
+  for (const el of all) {
+    const name = el && el.name;
+    if (!name) continue;
+
+    let v;
+    if (el.type === 'checkbox') v = el.checked ? 'on' : '';
+    else v = el.value;
+
+    if (/^(paye_|umb_|charge_)/.test(name)) {
+      fs.pay[name] = v;
+    } else {
+      fs.main[name] = v;
+    }
+  }
+}
+
+
+
 
 // Optional helper: align pay_method_snapshot to candidate; return hint if mismatch
 function prefillPayMethodFromCandidate(candidate) {
@@ -2359,8 +2480,10 @@ function checkClientInvoiceEmailPresence(client) {
 
 function renderContractMainTab(ctx) {
   const LOGC = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : true; // default ON
-  const d = ctx?.data || {};
-  const labelsBlock = renderBucketLabelsEditor(ctx);
+
+  // Hydrate UI from merged state (server row + staged edits)
+  const d = mergeContractStateIntoRow(ctx?.data || {});
+  const labelsBlock = renderBucketLabelsEditor({ data: d });
 
   const candVal   = d.candidate_id || '';
   const clientVal = d.client_id || '';
@@ -2375,8 +2498,8 @@ function renderContractMainTab(ctx) {
     try { return (typeof formatIsoToUk === 'function') ? (formatIsoToUk(iso) || '') : (iso || ''); }
     catch { return iso || ''; }
   };
-  const startUk = toUk(d.start_date);
-  const endUk   = toUk(d.end_date);
+  const startUk = (d.start_date && /^\d{2}\/\d{2}\/\d{4}$/.test(d.start_date)) ? d.start_date : toUk(d.start_date);
+  const endUk   = (d.end_date && /^\d{2}\/\d{2}\/\d{4}$/.test(d.end_date)) ? d.end_date : toUk(d.end_date);
 
   if (LOGC) console.log('[CONTRACTS] renderContractMainTab → layout: Client (full row) then Display site | Ward hint; Role | Band inline');
   if (LOGC) console.log('[CONTRACTS] renderContractMainTab snapshot', {
@@ -2496,19 +2619,20 @@ function renderContractMainTab(ctx) {
 }
 
 
-
-
 // ─────────────────────────────────────────────────────────────────────────────
 // UPDATED: renderContractRatesTab (adds logging only)
 // ─────────────────────────────────────────────────────────────────────────────
 function renderContractRatesTab(ctx) {
   const LOGC = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : false;
-  const R = (ctx?.data?.rates_json) || {};
-  const payMethod = String(ctx?.data?.pay_method_snapshot || 'PAYE').toUpperCase();
+
+  // Hydrate UI from merged state (server row + staged edits)
+  const merged = mergeContractStateIntoRow(ctx?.data || {});
+  const R = (merged?.rates_json) || {};
+  const payMethod = String(merged?.pay_method_snapshot || merged?.default_pay_method_snapshot || 'PAYE').toUpperCase();
   const showPAYE = (payMethod === 'PAYE');
   const num = (v) => (v == null ? '' : String(v));
 
-  if (LOGC) console.log('[CONTRACTS] renderContractRatesTab', { payMethod, hasRates: !!ctx?.data?.rates_json });
+  if (LOGC) console.log('[CONTRACTS] renderContractRatesTab', { payMethod, hasRates: !!merged?.rates_json });
 
   return `
     <div class="tabc" id="contractRatesTab" data-pay-method="${payMethod}">
@@ -6245,12 +6369,21 @@ function applyRatePresetToContractForm(preset, payMethod /* 'PAYE'|'UMBRELLA' */
 }
 
 function computeContractMargins() {
+  // Prefer reading from staged state, fall back to whatever is mounted
+  const fs = (window.modalCtx && window.modalCtx.formState) || { main:{}, pay:{} };
   const form = document.querySelector('#contractRatesTab')?.closest('form') || document.querySelector('#contractForm');
-  if (!form) return;
-  const payMethodSel = form.querySelector('select[name="default_pay_method_snapshot"], select[name="pay_method_snapshot"]');
-  const payMethod = (payMethodSel?.value || 'PAYE').toUpperCase();
 
-  const get = (n) => Number(form.querySelector(`[name="${n}"]`)?.value || 0);
+  const pmStaged = (fs.main && (fs.main.default_pay_method_snapshot || fs.main.pay_method_snapshot)) || '';
+  const payMethodSel = form ? form.querySelector('select[name="default_pay_method_snapshot"], select[name="pay_method_snapshot"]') : null;
+  const payMethod = ((payMethodSel && payMethodSel.value) || pmStaged || 'PAYE').toUpperCase();
+
+  const get = (n) => {
+    const domVal = form ? form.querySelector(`[name="${n}"]`)?.value : null;
+    const staged = fs.pay ? fs.pay[n] : null;
+    const v = (staged != null && staged !== '') ? staged : (domVal != null ? domVal : '');
+    return Number(v || 0);
+  };
+
   const buckets = ['day','night','sat','sun','bh'];
   buckets.forEach(b => {
     const ch = get(`charge_${b}`);
@@ -6273,7 +6406,6 @@ function computeContractMargins() {
     }
   });
 }
-
 // ==============================
 // 1) openCandidateRateModal(...)
 // ==============================
@@ -8535,40 +8667,76 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
     _applyDesired:null,
 
     persistCurrentTabState() {
-      L('persistCurrentTabState ENTER', { mode: this.mode, currentTabKey: this.currentTabKey });
-      if (!window.modalCtx || this.mode === 'view') { L('persist(skip)', { reason:'mode=view or no modalCtx', mode:this.mode }); return; }
-      const sentinel = window.modalCtx?.openToken || null;
-      const initial  = (window.modalCtx.data?.id ?? sentinel);
-      const fs = window.modalCtx.formState || { __forId: initial, main:{}, pay:{} };
-      if (fs.__forId == null) fs.__forId = initial;
+  L('persistCurrentTabState ENTER', { mode: this.mode, currentTabKey: this.currentTabKey });
+  if (!window.modalCtx || this.mode === 'view') { L('persist(skip)', { reason:'mode=view or no modalCtx', mode:this.mode }); return; }
+  const sentinel = window.modalCtx?.openToken || null;
+  const initial  = (window.modalCtx.data?.id ?? sentinel);
+  const fs = window.modalCtx.formState || { __forId: initial, main:{}, pay:{} };
+  if (fs.__forId == null) fs.__forId = initial;
 
-      if (this.currentTabKey === 'main') {
-        const sel = byId('tab-main') ? '#tab-main'
-                  : (byId('contractForm') ? '#contractForm' : null);
-        if (sel) {
-          const c = collectForm(sel);
-          fs.main = { ...(fs.main||{}), ...stripEmpty(c) };
-        }
+  // Main tab (generic)
+  if (this.currentTabKey === 'main') {
+    const sel = byId('tab-main') ? '#tab-main'
+              : (byId('contractForm') ? '#contractForm' : null);
+    if (sel) {
+      const c = collectForm(sel);
+      fs.main = { ...(fs.main||{}), ...stripEmpty(c) };
+    }
+  }
+
+  // Pay tab (legacy/generic)
+  if (this.currentTabKey === 'pay'  && byId('tab-pay'))  {
+    const c = collectForm('#tab-pay');
+    fs.pay  = { ...(fs.pay ||{}), ...stripEmpty(c) };
+  }
+
+  // ✅ Contracts “rates” tab — persist all rate inputs into fs.pay, and anything else we can see into fs.main
+  if (this.entity === 'contracts' && (this.currentTabKey === 'rates' || byId('contractRatesTab'))) {
+    try {
+      // Persist rate buckets into fs.pay
+      const rt = byId('contractRatesTab');
+      if (rt) {
+        const rForm = {};
+        rt.querySelectorAll('input, select, textarea').forEach(el => { if (el.name) rForm[el.name] = (el.type==='checkbox' ? (el.checked?'on':'') : el.value); });
+        const onlyRates = {};
+        for (const [k,v] of Object.entries(rForm)) if (/^(paye_|umb_|charge_)/.test(k)) onlyRates[k] = v;
+        fs.pay = { ...(fs.pay||{}), ...stripEmpty(onlyRates) };
       }
-      if (this.currentTabKey === 'pay'  && byId('tab-pay'))  {
-        const c = collectForm('#tab-pay');  fs.pay  = { ...(fs.pay ||{}), ...stripEmpty(c) };
+
+      // Also persist whatever is currently in the main form (ids, labels, dates, etc.)
+      const mainSel = byId('contractForm') ? '#contractForm' : null;
+      if (mainSel) {
+        const m = collectForm(mainSel);
+        fs.main = { ...(fs.main||{}), ...stripEmpty(m) };
       }
-      window.modalCtx.formState = fs;
-      L('persistCurrentTabState EXIT', { forId: fs.__forId, mainKeys: Object.keys(fs.main||{}), payKeys: Object.keys(fs.pay||{}) });
-    },
+    } catch (e) { L('persistCurrentTabState contracts/rates failed', e); }
+  }
+
+  window.modalCtx.formState = fs;
+  L('persistCurrentTabState EXIT', { forId: fs.__forId, mainKeys: Object.keys(fs.main||{}), payKeys: Object.keys(fs.pay||{}) });
+},
+
 
     mergedRowForTab(k) {
-      L('mergedRowForTab ENTER', { k });
-      const base = { ...(window.modalCtx?.data || {}) };
-      const fs   = (window.modalCtx?.formState || {});
-      const rid  = window.modalCtx?.data?.id ?? null;
-      const fid  = fs.__forId ?? null;
-      const sentinel = window.modalCtx?.openToken ?? null;
-      const same = (fid===rid) || (rid==null && (fid===sentinel || fid==null));
-      const staged = same ? ((k==='main')?(fs.main||{}):(k==='pay')?(fs.pay||{}):{}) : {};
-      L('mergedRowForTab STATE', { rid, fid, sentinel, same, stagedKeys: Object.keys(staged||{}) });
-      return { ...base, ...stripEmpty(staged) };
-    },
+  L('mergedRowForTab ENTER', { k });
+  const base = { ...(window.modalCtx?.data || {}) };
+  const fs   = (window.modalCtx?.formState || {});
+  const rid  = window.modalCtx?.data?.id ?? null;
+  const fid  = fs.__forId ?? null;
+  const sentinel = window.modalCtx?.openToken ?? null;
+  const same = (fid===rid) || (rid==null && (fid===sentinel || fid==null));
+
+  // ✅ Treat “rates” like “pay” for contracts
+  let staged = {};
+  if (same) {
+    if (k === 'main') staged = (fs.main || {});
+    else if (k === 'pay' || k === 'rates') staged = (fs.pay || {});
+  }
+
+  L('mergedRowForTab STATE', { rid, fid, sentinel, same, stagedKeys: Object.keys(staged||{}) });
+  return { ...base, ...stripEmpty(staged) };
+},
+
 
     _attachDirtyTracker() {
       if (this._detachDirty) { try { this._detachDirty(); } catch {} this._detachDirty = null; }
