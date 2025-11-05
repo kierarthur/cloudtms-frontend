@@ -1132,7 +1132,7 @@ function renderContractsTable(rows) {
 // (unchanged logic except it opens the updated pickers; initial onReturn retained)
 // ─────────────────────────────────────────────────────────────────────────────
 function openContract(row) {
-  const LOGC = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : false;
+  const LOGC = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : true; // default ON
   const isCreate = !row || !row.id;
   if (LOGC) console.log('[CONTRACTS] openContract ENTRY', { isCreate, rowPreview: !!row });
 
@@ -1260,12 +1260,13 @@ function openContract(row) {
     },
     () => { // onReturn
       const wire = () => {
-        const form = document.querySelector('#contractForm'); if (!form) return;
+        const form = document.querySelector('#contractForm'); if (!form) { if (LOGC) console.warn('[CONTRACTS] wire(skip): #contractForm not found'); return; }
         const tabs = document.getElementById('modalTabs');
         const active = tabs?.querySelector('button.active')?.textContent?.toLowerCase() || 'main';
-        if (active !== 'main') return;
+        if (active !== 'main') { if (LOGC) console.log('[CONTRACTS] wire(skip): not on MAIN tab', { active }); return; }
 
-        if (LOGC) console.log('[CONTRACTS] wiring MAIN tab controls');
+        const fr = window.__getModalFrame?.();
+        if (LOGC) console.log('[CONTRACTS] wiring MAIN tab controls', { modalMode: fr?.mode, parentMode: (function(){try{const p=(window.__modalStack||[])[(window.__modalStack||[]).length-2]; return p?.mode;}catch{return undefined;}})() });
 
         const btnPC = document.getElementById('btnPickCandidate');
         const btnCC = document.getElementById('btnClearCandidate');
@@ -1273,6 +1274,13 @@ function openContract(row) {
         const btnCL = document.getElementById('btnClearClient');
         const candInput = document.getElementById('candidate_name_display');
         const cliInput  = document.getElementById('client_name_display');
+
+        if (LOGC) console.log('[CONTRACTS] picker buttons snapshot BEFORE', {
+          btnPickCandidate: { exists: !!btnPC, disabled: !!(btnPC && btnPC.disabled) },
+          btnClearCandidate:{ exists: !!btnCC, disabled: !!(btnCC && btnCC.disabled) },
+          btnPickClient:    { exists: !!btnPL, disabled: !!(btnPL && btnPL.disabled) },
+          btnClearClient:   { exists: !!btnCL, disabled: !!(btnCL && btnCL.disabled) }
+        });
 
         if (btnPC && !btnPC.__wired) {
           btnPC.__wired = true;
@@ -1344,6 +1352,11 @@ function openContract(row) {
         };
         openOnType(candInput, 'candidate');
         openOnType(cliInput, 'client');
+
+        if (LOGC) console.log('[CONTRACTS] picker buttons snapshot AFTER', {
+          btnPickCandidate: { exists: !!btnPC, disabled: !!(btnPC && btnPC.disabled) },
+          btnPickClient:    { exists: !!btnPL, disabled: !!(btnPL && btnPL.disabled) }
+        });
       };
 
       setTimeout(wire, 0);
@@ -1351,6 +1364,7 @@ function openContract(row) {
       if (tabs && !tabs.__wired_contract_main) {
         tabs.__wired_contract_main = true;
         tabs.addEventListener('click', () => setTimeout(wire, 0));
+        if (LOGC) console.log('[CONTRACTS] tabs click→wire handler attached');
       }
     },
     { forceEdit:true, kind:'contracts', extraButtons }
@@ -1363,12 +1377,17 @@ function openContract(row) {
         fr.__contractsInit = true;
         fr.onReturn();
         if (LOGC) console.log('[CONTRACTS] initial onReturn() executed');
+      } else if (LOGC) {
+        console.log('[CONTRACTS] onReturn not executed', {
+          hasFrame: !!fr, entity: fr?.entity, kind: fr?.kind, hasOnReturn: typeof fr?.onReturn === 'function', init: !!fr?.__contractsInit
+        });
       }
     } catch (e) {
       if (LOGC) console.warn('[CONTRACTS] initial onReturn failed', e);
     }
   }, 0);
 }
+
  
 // ─────────────────────────────────────────────────────────────────────────────
 // NEW: getSummaryFingerprint(section)
@@ -1648,10 +1667,11 @@ async function contractWeekCreateAdditional(week_id) {
 // - Revalidates on pick
 // ─────────────────────────────────────────────────────────────────────────────
 async function openCandidatePicker(onPick) {
-  const LOGC = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : false;
+  const LOGC = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : true; // default ON
 
   // Ensure dataset cache is primed + bring deltas
-  await ensurePickerDatasetPrimed('candidates').catch(()=>{});
+  if (LOGC) console.log('[PICKER][candidates] ensure dataset primed → start');
+  await ensurePickerDatasetPrimed('candidates').catch(e=>{ if (LOGC) console.warn('[PICKER][candidates] priming failed', e); });
 
   const fp = getSummaryFingerprint('candidates');
   const mem = getSummaryMembership('candidates', fp); // { ids, total, updatedAt, stale }
@@ -1660,6 +1680,11 @@ async function openCandidatePicker(onPick) {
 
   const ids = Array.isArray(mem?.ids) ? mem.ids : [];
   const rowsBase = ids.map(id => items[id]).filter(Boolean);
+
+  if (LOGC) console.log('[PICKER][candidates] dataset snapshot', {
+    fingerprint: fp, total: mem?.total, ids: ids.length, stale: !!mem?.stale, since: ds?.since,
+    rowsBase: rowsBase.length, missingItems: ids.length - rowsBase.length
+  });
 
   const renderRows = (rows) => rows.map(r => {
     const first = r.first_name || '';
@@ -1694,11 +1719,13 @@ async function openCandidatePicker(onPick) {
       </table>
     </div>`;
 
+  if (LOGC) console.log('[PICKER][candidates] opening modal');
   showModal('Pick Candidate',[{key:'p',title:'Candidates'}],()=>html,async()=>true,false,()=>{
 
     const tbody   = document.getElementById('pickerTBody');
     const search  = document.getElementById('pickerSearch');
     const table   = document.getElementById('pickerTable');
+    if (LOGC) console.log('[PICKER][candidates] onReturn', { hasTBody: !!tbody, hasSearch: !!search, hasTable: !!table });
     if (!tbody || !search || !table) return;
 
     let sortKey = 'last_name', sortDir = 'asc';
@@ -1724,6 +1751,7 @@ async function openCandidatePicker(onPick) {
         }
         const closeBtn = document.getElementById('btnCloseModal'); if (closeBtn) closeBtn.click();
       });
+      if (LOGC) console.log('[PICKER][candidates] wired click handler');
     }
 
     // Header sorting
@@ -1737,6 +1765,7 @@ async function openCandidatePicker(onPick) {
         currentRows = doFilter(search.value.trim());
         applyRows(currentRows);
       });
+      if (LOGC) console.log('[PICKER][candidates] wired sort header');
     }
 
     // Debounced type-to-filter (local only)
@@ -1758,7 +1787,7 @@ async function openCandidatePicker(onPick) {
       }
     });
 
-    setTimeout(() => { try { search.focus(); } catch {} }, 0);
+    setTimeout(() => { try { search.focus(); if (LOGC) console.log('[PICKER][candidates] search focused'); } catch {} }, 0);
   },{kind:'picker'});
 }
 
@@ -1772,9 +1801,10 @@ async function openCandidatePicker(onPick) {
 // - Revalidates on pick
 // ─────────────────────────────────────────────────────────────────────────────
 async function openClientPicker(onPick) {
-  const LOGC = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : false;
+  const LOGC = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : true; // default ON
 
-  await ensurePickerDatasetPrimed('clients').catch(()=>{});
+  if (LOGC) console.log('[PICKER][clients] ensure dataset primed → start');
+  await ensurePickerDatasetPrimed('clients').catch(e=>{ if (LOGC) console.warn('[PICKER][clients] priming failed', e); });
 
   const fp = getSummaryFingerprint('clients');
   const mem = getSummaryMembership('clients', fp); // { ids, total, updatedAt, stale }
@@ -1783,6 +1813,11 @@ async function openClientPicker(onPick) {
 
   const ids = Array.isArray(mem?.ids) ? mem.ids : [];
   const rowsBase = ids.map(id => items[id]).filter(Boolean);
+
+  if (LOGC) console.log('[PICKER][clients] dataset snapshot', {
+    fingerprint: fp, total: mem?.total, ids: ids.length, stale: !!mem?.stale, since: ds?.since,
+    rowsBase: rowsBase.length, missingItems: ids.length - rowsBase.length
+  });
 
   const renderRows = (rows) => rows.map(r => {
     const label = (r.name || '').trim();
@@ -1811,11 +1846,13 @@ async function openClientPicker(onPick) {
       </table>
     </div>`;
 
+  if (LOGC) console.log('[PICKER][clients] opening modal');
   showModal('Pick Client',[{key:'p',title:'Clients'}],()=>html,async()=>true,false,()=>{
 
     const tbody   = document.getElementById('pickerTBody');
     const search  = document.getElementById('pickerSearch');
     const table   = document.getElementById('pickerTable');
+    if (LOGC) console.log('[PICKER][clients] onReturn', { hasTBody: !!tbody, hasSearch: !!search, hasTable: !!table });
     if (!tbody || !search || !table) return;
 
     let sortKey = 'name', sortDir = 'asc';
@@ -1840,6 +1877,7 @@ async function openClientPicker(onPick) {
         }
         const closeBtn = document.getElementById('btnCloseModal'); if (closeBtn) closeBtn.click();
       });
+      if (LOGC) console.log('[PICKER][clients] wired click handler');
     }
 
     if (!table.__wiredSort) {
@@ -1852,6 +1890,7 @@ async function openClientPicker(onPick) {
         currentRows = doFilter(search.value.trim());
         applyRows(currentRows);
       });
+      if (LOGC) console.log('[PICKER][clients] wired sort header');
     }
 
     let t = 0;
@@ -1871,7 +1910,7 @@ async function openClientPicker(onPick) {
       }
     });
 
-    setTimeout(() => { try { search.focus(); } catch {} }, 0);
+    setTimeout(() => { try { search.focus(); if (LOGC) console.log('[PICKER][clients] search focused'); } catch {} }, 0);
   },{kind:'picker'});
 }
 
@@ -1969,8 +2008,9 @@ function checkClientInvoiceEmailPresence(client) {
 // UPDATED: renderContractMainTab (layout + logs; site under Client, Ward hint to right;
 // Role with Band to the right; uses .form to pick up input styling)
 // ─────────────────────────────────────────────────────────────────────────────
+
 function renderContractMainTab(ctx) {
-  const LOGC = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : false;
+  const LOGC = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : true; // default ON
   const d = ctx?.data || {};
   const labelsBlock = renderBucketLabelsEditor(ctx);
 
@@ -1984,6 +2024,12 @@ function renderContractMainTab(ctx) {
   const clientLabel = (d.client_name || '').trim();
 
   if (LOGC) console.log('[CONTRACTS] renderContractMainTab → layout: Client (full row) then Display site | Ward hint; Role | Band inline');
+  if (LOGC) console.log('[CONTRACTS] renderContractMainTab snapshot', {
+    candidate_id: candVal, client_id: clientVal,
+    candidate_label: candLabel, client_label: clientLabel,
+    week_ending_weekday_snapshot: d.week_ending_weekday_snapshot,
+    mode: window.__getModalFrame?.()?.mode
+  });
 
   return `
     <form id="contractForm" class="tabc form">
@@ -2093,6 +2139,8 @@ function renderContractMainTab(ctx) {
       ${labelsBlock}
     </form>`;
 }
+
+
 
 // ─────────────────────────────────────────────────────────────────────────────
 // UPDATED: renderContractRatesTab (adds logging only)
@@ -8023,7 +8071,7 @@ async function renderClientRatesTable() {
 // ─────────────────────────────────────────────────────────────────────────────
 function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
   // ===== Logging =====
-  const LOG = (typeof window.__LOG_MODAL === 'boolean') ? window.__LOG_MODAL : false;
+  const LOG = (typeof window.__LOG_MODAL === 'boolean') ? window.__LOG_MODAL : true; // default ON
   const L  = (...a)=> { if (LOG) console.log('[MODAL]', ...a); };
   const GC = (label)=> { if (LOG) console.groupCollapsed('[MODAL]', label); };
   const GE = ()=> { if (LOG) console.groupEnd(); };
@@ -8041,7 +8089,10 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
   const stripEmpty = (obj) => { const out={}; for (const [k,v] of Object.entries(obj||{})) { if (v===''||v==null) continue; out[k]=v; } return out; };
 
   function setFormReadOnly(root, ro) {
+    if (!root) { L('setFormReadOnly(skip: no root)', { ro }); }
     if (!root) return;
+    const _allBefore = root.querySelectorAll('input, select, textarea, button');
+    const beforeDisabled = Array.from(_allBefore).filter(el => el.disabled).length;
     root.querySelectorAll('input, select, textarea, button').forEach((el) => {
       const isDisplayOnly = el.id === 'tms_ref_display' || el.id === 'cli_ref_display';
       if (el.type === 'button') {
@@ -8053,6 +8104,21 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
       if (ro) { el.setAttribute('disabled','true'); el.setAttribute('readonly','true'); }
       else    { el.removeAttribute('disabled');   el.removeAttribute('readonly'); }
     });
+    const _allAfter = root.querySelectorAll('input, select, textarea, button');
+    const afterDisabled = Array.from(_allAfter).filter(el => el.disabled).length;
+    try {
+      const pc = root.querySelector('#btnPickCandidate');
+      const pl = root.querySelector('#btnPickClient');
+      L('setFormReadOnly snapshot', {
+        ro,
+        beforeDisabled,
+        afterDisabled,
+        picks: {
+          btnPickCandidate: { exists: !!pc, disabled: !!(pc && pc.disabled) },
+          btnPickClient:    { exists: !!pl, disabled: !!(pl && pl.disabled) }
+        }
+      });
+    } catch {}
   }
 
   function sanitizeModalGeometry() {
@@ -8062,6 +8128,7 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
       // Keep modal anchored if we have a saved position
       const anchor = (window.__modalAnchor || null);
       if (anchor) {
+        L('sanitizeModalGeometry: applying saved anchor', anchor);
         m.style.position = 'fixed';
         m.style.left     = anchor.left + 'px';
         m.style.top      = anchor.top  + 'px';
@@ -8069,6 +8136,7 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
         m.style.bottom   = 'auto';
         m.style.transform= 'none';
       } else {
+        L('sanitizeModalGeometry: reset to default (no anchor)');
         m.style.position = '';
         m.style.left = '';
         m.style.top = '';
@@ -8085,6 +8153,7 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
     modalEl.style.position = ''; modalEl.style.left = ''; modalEl.style.top = '';
     modalEl.style.right = '';    modalEl.style.bottom = '';
     modalEl.style.transform = ''; modalEl.classList.remove('dragging');
+    L('showModal: reset #modal initial geometry');
   }
 
   // ===== frame =====
@@ -8110,6 +8179,7 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
     _applyDesired:null,
 
     persistCurrentTabState() {
+      L('persistCurrentTabState ENTER', { mode: this.mode, currentTabKey: this.currentTabKey });
       if (!window.modalCtx || this.mode === 'view') { L('persist(skip)', { reason:'mode=view or no modalCtx', mode:this.mode }); return; }
       const sentinel = window.modalCtx?.openToken || null;
       const initial  = (window.modalCtx.data?.id ?? sentinel);
@@ -8123,9 +8193,11 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
         const c = collectForm('#tab-pay');  fs.pay  = { ...(fs.pay ||{}), ...stripEmpty(c) };
       }
       window.modalCtx.formState = fs;
+      L('persistCurrentTabState EXIT', { forId: fs.__forId, mainKeys: Object.keys(fs.main||{}), payKeys: Object.keys(fs.pay||{}) });
     },
 
     mergedRowForTab(k) {
+      L('mergedRowForTab ENTER', { k });
       const base = { ...(window.modalCtx?.data || {}) };
       const fs   = (window.modalCtx?.formState || {});
       const rid  = window.modalCtx?.data?.id ?? null;
@@ -8133,12 +8205,13 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
       const sentinel = window.modalCtx?.openToken ?? null;
       const same = (fid===rid) || (rid==null && (fid===sentinel || fid==null));
       const staged = same ? ((k==='main')?(fs.main||{}):(k==='pay')?(fs.pay||{}):{}) : {};
+      L('mergedRowForTab STATE', { rid, fid, sentinel, same, stagedKeys: Object.keys(staged||{}) });
       return { ...base, ...stripEmpty(staged) };
     },
 
     _attachDirtyTracker() {
       if (this._detachDirty) { try { this._detachDirty(); } catch {} this._detachDirty = null; }
-      const root = byId('modalBody'); if (!root) return;
+      const root = byId('modalBody'); if (!root) { L('_attachDirtyTracker(skip: no modalBody)'); return; }
       const onDirty = (ev) => {
         if (ev && !ev.isTrusted) return;
         const isChild = (stack().length > 1);
@@ -8152,10 +8225,13 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
       root.addEventListener('input', onDirty, true);
       root.addEventListener('change',onDirty, true);
       this._detachDirty = ()=>{ root.removeEventListener('input',onDirty,true); root.removeEventListener('change',onDirty,true); };
+      L('_attachDirtyTracker: attached');
     },
 
     setTab(k) {
       GC(`setTab(${k})`);
+      L('setTab ENTER', { k, prevKey: this.currentTabKey, entity: this.entity, mode: this.mode, hasMounted: this._hasMountedOnce });
+
       const persist = this._hasMountedOnce; if (persist) this.persistCurrentTabState();
 
       byId('modalBody').innerHTML = this.renderTab(k, this.mergedRowForTab(k)) || '';
@@ -8175,6 +8251,7 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
             catch { window.dispatchEvent(new Event('pay-method-changed')); }
           });
           window.modalCtx.payMethodState = pmSel.value;
+          L('setTab(candidates/main): pay method wired', { preferred });
         }
 
         const rolesHost = document.querySelector('#rolesEditor');
@@ -8183,6 +8260,7 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
             try {
               const roleOptions = await loadGlobalRoleOptions();
               renderRolesEditor(rolesHost, window.modalCtx.rolesState || [], roleOptions);
+              L('setTab(candidates/main): roles editor mounted', { options: (roleOptions||[]).length });
             } catch (e) {
               console.error('[MODAL] roles mount failed', e);
             }
@@ -8203,11 +8281,25 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
       else if (isChild)      { const p=parentFrame(); setFormReadOnly(byId('modalBody'), !(p && (p.mode==='edit'||p.mode==='create'))); }
       else                   setFormReadOnly(byId('modalBody'), (this.mode==='view'||this.mode==='saving'));
 
+      // Post-render snapshot of picker buttons
+      try {
+        const pc = document.getElementById('btnPickCandidate');
+        const pl = document.getElementById('btnPickClient');
+        L('setTab EXIT snapshot', {
+          currentTabKey: this.currentTabKey,
+          pickButtons: {
+            btnPickCandidate: { exists: !!pc, disabled: !!(pc && pc.disabled) },
+            btnPickClient:    { exists: !!pl, disabled: !!(pl && pl.disabled) }
+          }
+        });
+      } catch {}
+
       this._hasMountedOnce = true; GE();
     }
   };
 
   function setFrameMode(frameObj, mode) {
+    L('setFrameMode ENTER', { prevMode: frameObj.mode, nextMode: mode, isChild: (stack().length>1), noParentGate: frameObj.noParentGate });
     const prev = frameObj.mode; frameObj.mode = mode;
     const isChild = (stack().length > 1);
     if (frameObj.noParentGate) setFormReadOnly(byId('modalBody'), (mode==='view'||mode==='saving'));
@@ -8220,6 +8312,14 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
 
     const repaint = !!(frameObj._hasMountedOnce && frameObj.currentTabKey);
     L('setFrameMode', { prevMode:prev, nextMode:mode, _hasMountedOnce:frameObj._hasMountedOnce, willRepaint:repaint });
+    try {
+      const pc = document.getElementById('btnPickCandidate');
+      const pl = document.getElementById('btnPickClient');
+      L('setFrameMode picker snapshot', {
+        pickCandidate: { exists: !!pc, disabled: !!(pc && pc.disabled) },
+        pickClient:    { exists: !!pl, disabled: !!(pl && pl.disabled) }
+      });
+    } catch {}
     if (repaint) frameObj.setTab(frameObj.currentTabKey);
   }
 
@@ -8230,7 +8330,13 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
   // ──────────────────────────────────────────────────────────────────────────
   // renderTop — (amended) applies contract-modal class when entity is contracts
   // ──────────────────────────────────────────────────────────────────────────
-  function renderTop() {
+function renderTop() {
+    // Enable logging locally for this global renderTop
+    const LOG = (typeof window.__LOG_MODAL === 'boolean') ? window.__LOG_MODAL : true;
+    const L  = (...a)=> { if (LOG) console.log('[MODAL]', ...a); };
+    const GC = (label)=> { if (LOG) console.groupCollapsed('[MODAL]', label); };
+    const GE = ()=> { if (LOG) console.groupEnd(); };
+
     GC('renderTop()');
     const isChild = (stack().length > 1);
     const top     = currentFrame();
@@ -8238,6 +8344,7 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
 
     if (typeof top._detachGlobal === 'function') { try { top._detachGlobal(); } catch {} top._wired = false; }
 
+    L('renderTop state (global)', { entity: top?.entity, kind: top?.kind, mode: top?.mode, hasId: top?.hasId, currentTabKey: top?.currentTabKey });
     byId('modalTitle').textContent = top.title;
 
     const tabsEl = byId('modalTabs'); tabsEl.innerHTML='';
@@ -8248,6 +8355,7 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
       b.onclick = ()=>{ if (top.mode==='saving') return; tabsEl.querySelectorAll('button').forEach(x=>x.classList.remove('active')); b.classList.add('active'); top.setTab(t.key); };
       tabsEl.appendChild(b);
     });
+    L('renderTop tabs (global)', { count: (top.tabs||[]).length, active: top.currentTabKey });
 
     if (top.currentTabKey) top.setTab(top.currentTabKey);
     else if (top.tabs && top.tabs[0]) top.setTab(top.tabs[0].key);
@@ -8260,7 +8368,7 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
     const modalNode= byId('modal');
 
     // NEW: toggle contract-modal class for theming when Contracts modal is open
-    const LOGC = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : false;
+    const LOGC = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : true;
     if (modalNode) {
       const isContracts = (top.entity === 'contracts') || (top.kind === 'contracts');
       modalNode.classList.toggle('contract-modal', !!isContracts);
@@ -8279,6 +8387,7 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
         modalNode.style.right = 'auto';
         modalNode.style.bottom= 'auto';
         modalNode.style.transform = 'none';
+        L('renderTop: anchored modal (global/new)', window.__modalAnchor);
       } else {
         modalNode.style.position = 'fixed';
         modalNode.style.left = window.__modalAnchor.left + 'px';
@@ -8286,6 +8395,7 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
         modalNode.style.right = 'auto';
         modalNode.style.bottom= 'auto';
         modalNode.style.transform = 'none';
+        L('renderTop: anchored modal (global/reuse)', window.__modalAnchor);
       }
     }
 
@@ -8297,6 +8407,7 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
       btnEdit=document.createElement('button');
       btnEdit.id='btnEditModal'; btnEdit.type='button'; btnEdit.className='btn btn-outline btn-sm'; btnEdit.textContent='Edit';
       const bar = btnSave?.parentElement || btnClose?.parentElement; if (bar) bar.insertBefore(btnEdit, btnSave);
+      L('renderTop (global): created btnEdit');
     }
 
     (function dragWire(){
@@ -8313,6 +8424,7 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
           const R2 = modalNode.getBoundingClientRect();
           window.__modalAnchor = { left: R2.left, top: R2.top };
           document.onmousemove=null; document.onmouseup=null;
+          L('dragWire (global): saved new anchor', window.__modalAnchor);
         };
         e.preventDefault();
       };
@@ -8351,6 +8463,11 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
         else { btnSave.style.display=''; btnSave.disabled = top._saving; }
       }
       setCloseLabel();
+      L('_updateButtons snapshot (global)', {
+        kind: top.kind, isChild, parentEditable, mode: top.mode,
+        btnSave: { display: btnSave.style.display, disabled: btnSave.disabled },
+        btnEdit: { display: btnEdit.style.display }
+      });
     };
 
     top._updateButtons();
@@ -8369,6 +8486,7 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
           overrides          : deep(window.modalCtx?.overrides || { existing:[], stagedNew:[], stagedEdits:{}, stagedDeletes:[] })
         };
         top.isDirty=false; setFrameMode(top,'edit');
+        L('btnEdit (global) → switch to edit');
       }
     };
 
@@ -8448,10 +8566,10 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
       const onlyDel   = hasStagedClientDeletes();
       const allowApply= (fr.kind==='candidate-override' || fr.kind==='client-rate') && fr._applyDesired===true;
 
-      L('saveForFrame ENTER', { kind: fr.kind, mode: fr.mode, noParentGate: fr.noParentGate, isDirty: fr.isDirty, onlyDel, allowApply });
+      L('saveForFrame ENTER (global)', { kind: fr.kind, mode: fr.mode, noParentGate: fr.noParentGate, isDirty: fr.isDirty, onlyDel, allowApply });
 
       if (fr.kind!=='advanced-search' && !fr.noParentGate && fr.mode!=='view' && !fr.isDirty && !onlyDel && !allowApply) {
-        L('saveForFrame GUARD: no-op (no changes and apply not allowed)');
+        L('saveForFrame GUARD (global): no-op (no changes and apply not allowed)');
         const isChildNow=(stack().length>1);
         if (isChildNow) {
           sanitizeModalGeometry(); stack().pop();
@@ -8465,15 +8583,15 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
 
       fr.persistCurrentTabState();
       const isChildNow=(stack().length>1);
-      if (isChildNow && !fr.noParentGate && fr.kind!=='advanced-search') { const p=parentFrame(); if (!p || !(p.mode==='edit'||p.mode==='create')) { L('saveForFrame GUARD: parent not editable'); return; } }
+      if (isChildNow && !fr.noParentGate && fr.kind!=='advanced-search') { const p=parentFrame(); if (!p || !(p.mode==='edit'||p.mode==='create')) { L('saveForFrame GUARD (global): parent not editable'); return; } }
       fr._saving=true; fr._updateButtons&&fr._updateButtons();
 
       let ok=false, saved=null;
       if (typeof fr.onSave==='function') {
         try { const res=await fr.onSave(); ok = (res===true) || (res && res.ok===true); if (res&&res.saved) saved=res.saved; }
-        catch (e) { L('saveForFrame onSave threw', e); ok=false; }
+        catch (e) { L('saveForFrame onSave threw (global)', e); ok=false; }
       }
-      fr._saving=false; if (!ok) { L('saveForFrame RESULT not ok'); fr._updateButtons&&fr._updateButtons(); return; }
+      fr._saving=false; if (!ok) { L('saveForFrame RESULT not ok (global)'); fr._updateButtons&&fr._updateButtons(); return; }
 
       if (fr.kind === 'advanced-search') {
         sanitizeModalGeometry();
@@ -8486,7 +8604,7 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
         } else {
           discardAllModalsAndState();
         }
-        L('saveForFrame EXIT (advanced-search closed)');
+        L('saveForFrame EXIT (global advanced-search closed)');
         return;
       }
 
@@ -8498,23 +8616,23 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
         } else {
           discardAllModalsAndState();
         }
-        L('saveForFrame EXIT (child)');
+        L('saveForFrame EXIT (global child)');
       } else {
         if (saved && window.modalCtx) { window.modalCtx.data = { ...(window.modalCtx.data||{}), ...saved }; fr.hasId = !!window.modalCtx.data?.id; }
         fr.isDirty=false; fr._snapshot=null; setFrameMode(fr,'view');
-        L('saveForFrame EXIT (parent)');
+        L('saveForFrame EXIT (global parent)');
       }
     }
 
     const onSaveClick = async (ev)=>{
       const btn=ev?.currentTarget || byId('btnSave');
       const topNow=currentFrame(); const bound=btn?.dataset?.ownerToken;
-      if (LOG) console.log('[MODAL] click #btnSave', {boundToken:bound, topToken:topNow?._token, topKind:topNow?.kind, topTitle:topNow?.title});
-      if(!topNow) return; if(bound!==topNow._token){ if(LOG) console.warn('[MODAL] token mismatch; using top frame'); }
+      if (LOG) console.log('[MODAL] click #btnSave (global)', {boundToken:bound, topToken:topNow?._token, topKind:topNow?.kind, topTitle:topNow?.title});
+      if(!topNow) return; if(bound!==topNow._token){ if(LOG) console.warn('[MODAL] token mismatch (global); using top frame'); }
       await saveForFrame(topNow);
     };
 
-    const bindSave = (btn,fr)=>{ if(!btn||!fr) return; btn.dataset.ownerToken = fr._token; btn.onclick = onSaveClick; if(LOG) console.log('[MODAL] bind #btnSave →',{ownerToken:fr._token,kind:fr.kind||'(parent)',title:fr.title,mode:fr.mode}); };
+    const bindSave = (btn,fr)=>{ if(!btn||!fr) return; btn.dataset.ownerToken = fr._token; btn.onclick = onSaveClick; if(LOG) console.log('[MODAL] bind #btnSave → (global)',{ownerToken:fr._token,kind:fr.kind||'(parent)',title:fr.title,mode:fr.mode}); };
     bindSave(btnSave, top);
 
     const onDirtyEvt = ()=>{
@@ -8527,12 +8645,12 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
       const isChildNow=(stack().length>1); if(!isChildNow) return;
       const t=currentFrame(); if(!(t && (t.kind==='client-rate'||t.kind==='candidate-override'))) return;
       const enabled=!!(ev && ev.detail && ev.detail.enabled); t._applyDesired=enabled; t._updateButtons&&t._updateButtons(); bindSave(byId('btnSave'), t);
-      if(LOG) console.log('[MODAL] onApplyEvt → _applyDesired =', enabled,'rebound save to top frame');
+      if(LOG) console.log('[MODAL] onApplyEvt (global) → _applyDesired =', enabled,'rebound save to top frame');
     };
     const onModeChanged = ev=>{
       const isChildNow=(stack().length>1); if(!isChildNow) return;
       const parentIdx=stack().length-2, changed=ev?.detail?.frameIndex ?? -1;
-      if(changed===parentIdx){ if(LOG) console.log('[MODAL] parent mode changed → child _updateButtons()'); const t=currentFrame(); t._updateButtons&&t._updateButtons(); bindSave(byId('btnSave'), t); }
+      if(changed===parentIdx){ if(LOG) console.log('[MODAL] parent mode changed (global) → child _updateButtons()'); const t=currentFrame(); t._updateButtons&&t._updateButtons(); bindSave(byId('btnSave'), t); }
     };
 
     if (!top._wired) {
@@ -8545,6 +8663,7 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
       byId('modalBack').addEventListener('click', onOverlayClick, true);
       top._detachGlobal = ()=>{ try{window.removeEventListener('modal-dirty',onDirtyEvt);}catch{} try{window.removeEventListener('modal-apply-enabled',onApplyEvt);}catch{} try{window.removeEventListener('modal-frame-mode-changed',onModeChanged);}catch{} try{window.removeEventListener('keydown',onEsc);}catch{} try{byId('modalBack').removeEventListener('click', onOverlayClick, true);}catch{}; };
       top._wired = true;
+      L('renderTop (global): listeners wired');
     }
 
     const parentEditable = parent && (parent.mode==='edit' || parent.mode==='create');
@@ -8555,11 +8674,25 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
     top._updateButtons && top._updateButtons();
     bindSave(btnSave, top);
 
+    try {
+      const pc = document.getElementById('btnPickCandidate');
+      const pl = document.getElementById('btnPickClient');
+      L('renderTop final snapshot (global)', {
+        entity: top.entity, mode: top.mode, currentTabKey: top.currentTabKey,
+        pickButtons: {
+          btnPickCandidate: { exists: !!pc, disabled: !!(pc && pc.disabled) },
+          btnPickClient:    { exists: !!pl, disabled: !!(pl && pl.disabled) }
+        }
+      });
+    } catch {}
+
     GE();
-  }
+}
+
 
   byId('modalBack').style.display='flex';
   window.__getModalFrame = currentFrame;
+  L('showModal ENTER', { title, tabs: (tabs||[]).map(t=>t.key||t.title), hasId, entity: window.modalCtx?.entity, kind: opts.kind, forceEdit: !!opts.forceEdit });
   renderTop();
 }
 
