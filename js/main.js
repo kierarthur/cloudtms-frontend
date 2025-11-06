@@ -5726,6 +5726,80 @@ async function openCandidate(row) {
   }
 }
 
+function renderCandidateTab(key, row = {}) {
+  if (key === 'main') return html(`
+    <div class="form" id="tab-main">
+      ${input('first_name','First name', row.first_name)}
+      ${input('last_name','Last name', row.last_name)}
+      ${input('email','Email', row.email, 'email')}
+      ${input('phone','Telephone', row.phone)}
+      ${select('pay_method','Pay method', row.pay_method || 'PAYE', ['PAYE','UMBRELLA'], {id:'pay-method'})}
+
+      ${input('key_norm','Global Candidate Key (CGK)', row.key_norm)}
+
+      <!-- CCR: display-only, never posted -->
+      <div class="row">
+        <label>CloudTMS Candidate Reference (CCR)</label>
+        <input id="tms_ref_display"
+               value="${row.tms_ref ? String(row.tms_ref) : 'Awaiting CCR number from server'}"
+               disabled
+               readonly
+               style="opacity:.7" />
+      </div>
+
+      ${input('display_name','Display name', row.display_name)}
+
+      <!-- Roles editor -->
+      <div class="row">
+        <label>Roles (ranked)</label>
+        <div id="rolesEditor" data-init="1"></div>
+        <div class="hint">Pick from global roles (from Client Default Rates). Drag to reorder. Remove to delete. No duplicates.</div>
+      </div>
+
+      <div class="row"><label>Notes</label><textarea name="notes" placeholder="Free text…">${row.notes || ''}</textarea></div>
+    </div>
+  `);
+
+  if (key === 'rates') return html(`
+    <div id="tab-rates">
+      <div id="ratesTable"></div>
+    </div>
+  `);
+
+  if (key === 'pay') return html(`
+    <div class="form" id="tab-pay">
+      <div class="row"><label class="hint">
+        PAYE bank fields are editable. If UMBRELLA is selected, bank details are taken from the umbrella and locked.
+      </label></div>
+
+      ${input('account_holder','Account holder', row.account_holder)}
+      ${input('bank_name','Bank name', row.bank_name)}
+      ${input('sort_code','Sort code', row.sort_code)}
+      ${input('account_number','Account number', row.account_number)}
+
+      <!-- Umbrella chooser: text input + datalist + hidden canonical id -->
+      <div class="row" id="umbRow">
+        <label>Umbrella company</label>
+        <input id="umbrella_name"
+               list="umbList"
+               placeholder="Type to search umbrellas…"
+               value=""
+               autocomplete="off"
+               onclick="if (this.value) { this.dataset.prev=this.value; this.value=''; this.dispatchEvent(new Event('input',{bubbles:true})); }"
+               onfocus="if (this.value) { this.dataset.prev=this.value; this.value=''; this.dispatchEvent(new Event('input',{bubbles:true})); }" />
+        <datalist id="umbList"></datalist>
+        <input type="hidden" name="umbrella_id" id="umbrella_id" value="${row.umbrella_id || ''}"/>
+      </div>
+    </div>
+  `);
+
+  // NEW: Candidate Calendar tab container (replaces legacy Bookings grid)
+  if (key === 'bookings') return html(`
+    <div id="candidateCalendarHolder" class="tabc">
+      <div class="hint">Loading calendar…</div>
+    </div>
+  `);
+}
 
 
 // ====================== mountCandidatePayTab (FIXED) ======================
