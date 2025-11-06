@@ -813,64 +813,39 @@ async function getContract(contract_id) {
 
 async function upsertContract(payload, id /* optional */) {
   const LOGC = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : true; // enable/disable logging
-  // Accepts all contract fields + optional bucket_labels_json
-  // Normalise bucket_labels to either null or a strict 5-key object
   const patch = { ...payload };
+
   if ('bucket_labels_json' in patch) {
     const norm = normaliseBucketLabelsInput(patch.bucket_labels_json);
     patch.bucket_labels_json = (norm === false) ? null : norm;
   }
 
-  // ── Pre-seed rates_json when updating from non-Rates tabs ─────────────────
-  // Goal: if user clicked Save from Calendar/Main (where rate inputs aren’t mounted),
-  // keep existing rates instead of accidentally overwriting with zeros.
   const BUCKETS = ['paye_day','paye_night','paye_sat','paye_sun','paye_bh','umb_day','umb_night','umb_sat','umb_sun','umb_bh','charge_day','charge_night','charge_sat','charge_sun','charge_bh'];
 
-  // We intentionally keep full-record semantics for updates to avoid partial-update illusions.
   const method = id ? 'PUT' : 'POST';
   const url = id ? `/api/contracts/${_enc(id)}` : `/api/contracts`;
 
   try {
     const currentTab = (window.modalCtx && window.modalCtx.currentTabKey) || null;
     const baseRates = (window.modalCtx && window.modalCtx.data && window.modalCtx.data.rates_json) || {};
-    const isRatesTab = currentTab === 'rates' || currentTab === 'pay';
+    const incoming  = (patch.rates_json && typeof patch.rates_json === 'object') ? patch.rates_json : {};
 
+    // NEW: Always prefer incoming when it is a finite number (including 0).
+    // Otherwise fall back to the latest baseline (modalCtx.data.rates_json).
     if (id) {
-      // Only relevant for updates (PUT). Ensure patch.rates_json exists
-      const incoming = (patch.rates_json && typeof patch.rates_json === 'object') ? patch.rates_json : {};
-
-      // Build merged object: if on non-Rates tab, prefer existing for any bucket that is
-      // missing or non-finite. Keep explicit numbers (including 0) when on Rates/Pay tab.
-      const merged = {};
+      const merged = { ...baseRates };
       for (const k of BUCKETS) {
-        const v = incoming[k];
-        const num = Number(v);
-        const hasFinite = Number.isFinite(num);
-
-        if (isRatesTab) {
-          // On the Rates/Pay tab, take what the user set (including 0).
-          merged[k] = hasFinite ? num : (baseRates?.[k] ?? undefined);
-        } else {
-          // Not on Rates/Pay tab:
-          // - If the incoming value is a positive finite number, keep it (rare).
-          // - If it's 0 or not provided/NaN, prefer the existing baseRates.
-          if (hasFinite && num > 0) {
-            merged[k] = num;
-          } else if (baseRates && baseRates[k] != null && Number.isFinite(Number(baseRates[k]))) {
-            merged[k] = Number(baseRates[k]);
-          } else if (hasFinite) {
-            // If we truly have a finite number (0) and nothing in base, keep it.
-            merged[k] = num;
-          }
-          // Otherwise leave undefined to avoid overwriting in Worker PATCH→PUT pathway.
+        const n = Number(incoming[k]);
+        if (Number.isFinite(n)) {
+          merged[k] = n;                // explicit value from this save (0 allowed)
+        } else if (merged[k] !== undefined) {
+          merged[k] = Number(merged[k]); // keep baseline value
         }
+        // if still undefined, leave as is (server default handling)
       }
-
-      // If we merged anything, write it back (ensures we don't send an all-zeros blob)
       patch.rates_json = merged;
     }
 
-    // Client-side logging of the final payload that will be sent
     if (LOGC) {
       console.groupCollapsed('[CONTRACTS][UPSERT] sending');
       console.log('method', method, 'url', API(url));
@@ -880,7 +855,6 @@ async function upsertContract(payload, id /* optional */) {
       console.groupEnd();
     }
   } catch (e) {
-    // Don’t block on logging problems
     if (LOGC) console.warn('[CONTRACTS][UPSERT] logging/pre-seed failed', e);
   }
 
@@ -1268,93 +1242,136 @@ function openContract(row) {
       window.modalCtx._saveInFlight = true;
       try {
         if (LOGC) console.groupCollapsed('[CONTRACTS] onSave pipeline');
-        // Capture whatever is currently mounted (both tabs)
+
+        // 0) Snapshot any currently mounted inputs into formState
         snapshotContractForm();
 
-        const form = document.querySelector('#contractForm'); // may be absent if user is on Rates only; we still use staged state below
-        const fd = form ? new FormData(form) : null;
-        const val = (k) => (fd ? (fd.get(k) ?? '').toString().trim() : (window.modalCtx.formState?.main?.[k] ?? '')).trim() || null;
-        const bool = (k) => {
-          const raw = fd ? (fd.get(k) ?? '').toString().trim() : (window.modalCtx.formState?.main?.[k] ?? '');
-          return raw === 'true' || raw === 'on' || raw === '1';
+        // Helpers
+        const base = window.modalCtx?.data || {};
+        const fs   = (window.modalCtx?.formState || { main:{}, pay:{} });
+        const fdForm = document.querySelector('#contractForm');
+        const fd = fdForm ? new FormData(fdForm) : null;
+
+        const fromFS = (k, fallback='') => {
+          const v = (fs.main||{})[k]; return (v===undefined ? fallback : v);
         };
-        const numOrNull = (s) => {
-          const raw = fd ? (fd.get(s) ?? '').toString().trim() : (window.modalCtx.formState?.main?.[s] ?? '');
-          return raw === '' ? null : Number(raw || 0);
+        const fromFD = (k, fallback='') => {
+          if (!fd) return fallback;
+          const raw = fd.get(k); return (raw==null ? fallback : String(raw).trim());
+        };
+        const choose = (key, fallback='') => {
+          // priority: staged (formState) → DOM (formdata) → baseline
+          const fsVal = fromFS(key, null);
+          if (fsVal !== null && fsVal !== undefined && fsVal !== '') return fsVal;
+          const fdVal = fromFD(key, null);
+          if (fdVal !== null && fdVal !== undefined && fdVal !== '') return fdVal;
+          return (base[key] ?? fallback);
         };
 
+        const ukToIso = (ddmmyyyy, fb=null) => {
+          try {
+            return (typeof parseUkDateToIso === 'function')
+              ? (parseUkDateToIso(ddmmyyyy) || fb)
+              : ((ddmmyyyy && /^\d{2}\/\d{2}\/\d{4}$/.test(ddmmyyyy)) ? ddmmyyyy : (ddmmyyyy || fb));
+          } catch { return ddmmyyyy || fb; }
+        };
+
+        // 1) Bucket labels (prefer DOM; else staged; else baseline)
+        const domLabels = (typeof _collectBucketLabelsFromForm === 'function')
+          ? _collectBucketLabelsFromForm('#contractForm')
+          : null;
+        let bucket_labels_json = domLabels && Object.keys(domLabels).length ? domLabels : null;
+        if (!bucket_labels_json) {
+          const staged = {
+            day   : (fs.main?.bucket_day            ?? fs.main?.bucket_label_day   ?? '').trim(),
+            night : (fs.main?.bucket_night          ?? fs.main?.bucket_label_night ?? '').trim(),
+            sat   : (fs.main?.bucket_sat            ?? fs.main?.bucket_label_sat   ?? '').trim(),
+            sun   : (fs.main?.bucket_sun            ?? fs.main?.bucket_label_sun   ?? '').trim(),
+            bh    : (fs.main?.bucket_bh             ?? fs.main?.bucket_label_bh    ?? '').trim(),
+          };
+          const cleaned = {};
+          for (const [k,v] of Object.entries(staged)) if (v) cleaned[k]=v;
+          bucket_labels_json = Object.keys(cleaned).length ? cleaned : (base.bucket_labels_json ?? null);
+        }
+
+        // 2) Hours (gh_* staged → std_hours_json, else keep baseline/null)
+        const numOrNull = (s) => {
+          const raw = fromFS(s, fromFD(s, ''));
+          if (raw === '' || raw === null || raw === undefined) return null;
+          const n = Number(raw); return Number.isFinite(n) ? n : null;
+        };
         const gh = {
           mon: numOrNull('gh_mon'), tue: numOrNull('gh_tue'), wed: numOrNull('gh_wed'),
           thu: numOrNull('gh_thu'), fri: numOrNull('gh_fri'), sat: numOrNull('gh_sat'), sun: numOrNull('gh_sun'),
         };
         const ghFilled = Object.values(gh).some(v => v != null && v !== 0);
-        const std_hours_json = ghFilled ? gh : null;
+        const std_hours_json = ghFilled ? gh : (base.std_hours_json ?? null);
 
-        const ukToIso = (ddmmyyyy) => {
-          try { return (typeof parseUkDateToIso === 'function') ? (parseUkDateToIso(ddmmyyyy) || null) : (ddmmyyyy || null); }
-          catch { return ddmmyyyy || null; }
-        };
-        const startIso = ukToIso(val('start_date'));
-        const endIso   = ukToIso(val('end_date'));
+        // 3) Dates & main scalar fields (stage → DOM → baseline)
+        const startIso = ukToIso(choose('start_date', ''), base.start_date ?? null);
+        const endIso   = ukToIso(choose('end_date', ''),   base.end_date   ?? null);
 
-        // Pull RATES from staged state first; fall back to form fields if present
-        const getRate = (n) => {
-          const staged = window.modalCtx.formState?.pay?.[n];
-          if (staged != null && staged !== '') return Number(staged || 0);
-          if (!fd) return 0;
-          const v = (fd.get(n) ?? '').toString().trim();
-          return Number(v || 0);
-        };
-
-        // Bucket labels: prefer DOM; if missing (e.g., saving from Rates tab), fall back to staged state
-        const fsMain = window.modalCtx?.formState?.main || {};
-        const domLabels = (typeof _collectBucketLabelsFromForm === 'function')
-          ? _collectBucketLabelsFromForm('#contractForm')
-          : null;
-
-        let bucket_labels_json = (domLabels && Object.keys(domLabels).length) ? domLabels : null;
-        if (!bucket_labels_json) {
-          const staged = {
-            day:   (fsMain.bucket_day           ?? fsMain.bucket_label_day   ?? '').trim(),
-            night: (fsMain.bucket_night         ?? fsMain.bucket_label_night ?? '').trim(),
-            sat:   (fsMain.bucket_sat           ?? fsMain.bucket_label_sat   ?? '').trim(),
-            sun:   (fsMain.bucket_sun           ?? fsMain.bucket_label_sun   ?? '').trim(),
-            bh:    (fsMain.bucket_bh            ?? fsMain.bucket_label_bh    ?? '').trim(),
-          };
-          const cleaned = {};
-          for (const [k, v] of Object.entries(staged)) if (v) cleaned[k] = v;
-          bucket_labels_json = Object.keys(cleaned).length ? cleaned : null;
-        }
-
-        // Canonical pay method snapshot from state (fallback to form)
-        const payMethodSnap = (
-          window.modalCtx.formState?.main?.pay_method_snapshot ||
-          (fd ? (fd.get('pay_method_snapshot') || fd.get('default_pay_method_snapshot') || '') : '') ||
-          'PAYE'
+        const payMethodSnap = String(
+          (fs.main?.pay_method_snapshot) ||
+          fromFD('pay_method_snapshot', fromFD('default_pay_method_snapshot', base.pay_method_snapshot || 'PAYE')) ||
+          base.pay_method_snapshot || 'PAYE'
         ).toUpperCase();
+
+        const default_submission_mode = String(
+          choose('default_submission_mode', base.default_submission_mode || 'ELECTRONIC')
+        ).toUpperCase();
+
+        const week_ending_weekday_snapshot = String(
+          choose('week_ending_weekday_snapshot', (base.week_ending_weekday_snapshot ?? '0'))
+        );
+
+        const candidate_id = choose('candidate_id', base.candidate_id ?? null) || null;
+        const client_id    = choose('client_id', base.client_id ?? null) || null;
+        const role         = choose('role', base.role ?? null);
+        const band         = choose('band', base.band ?? null);
+        const display_site = choose('display_site', base.display_site ?? '');
+        const ward_hint    = choose('ward_hint', base.ward_hint ?? '');
+
+        const auto_invoice                 = ['true','on','1',true].includes(choose('auto_invoice', base.auto_invoice ? 'true' : '')) ? true : false;
+        const require_reference_to_pay     = ['true','on','1',true].includes(choose('require_reference_to_pay', base.require_reference_to_pay ? 'true' : '')) ? true : false;
+        const require_reference_to_invoice = ['true','on','1',true].includes(choose('require_reference_to_invoice', base.require_reference_to_invoice ? 'true' : '')) ? true : false;
+
+        // 4) RATES — build from baseline and overlay staged (avoids stale/zero clobber)
+        const BUCKETS = ['paye_day','paye_night','paye_sat','paye_sun','paye_bh','umb_day','umb_night','umb_sat','umb_sun','umb_bh','charge_day','charge_night','charge_sat','charge_sun','charge_bh'];
+        const baseRates = { ...(base.rates_json || {}) };
+        const mergedRates = { ...baseRates };
+        for (const k of BUCKETS) {
+          const staged = (fs.pay || {})[k];
+          if (staged !== undefined && staged !== '') {
+            const n = Number(staged);
+            mergedRates[k] = Number.isFinite(n) ? n : 0;
+          } else {
+            // If the DOM has a value (when on Rates tab), prefer it; otherwise keep baseline
+            const domVal = fd ? fd.get(k) : null;
+            if (domVal !== null && domVal !== undefined && String(domVal).trim() !== '') {
+              const n = Number(domVal);
+              mergedRates[k] = Number.isFinite(n) ? n : 0;
+            } // else leave baseline
+          }
+        }
 
         const data = {
           id: window.modalCtx.data?.id || null,
-          candidate_id: val('candidate_id'),
-          client_id:    val('client_id'),
-          role:         val('role'),
-          band:         val('band'),
-          display_site: val('display_site'),
-          ward_hint:    val('ward_hint'),
+          candidate_id,
+          client_id,
+          role,
+          band,
+          display_site,
+          ward_hint,
           start_date:   startIso,
           end_date:     endIso,
           pay_method_snapshot: payMethodSnap,
-          default_submission_mode: (val('default_submission_mode') || 'ELECTRONIC').toUpperCase(),
-          week_ending_weekday_snapshot: (val('week_ending_weekday_snapshot') || '0'),
-          auto_invoice: bool('auto_invoice'),
-          require_reference_to_pay: bool('require_reference_to_pay'),
-          require_reference_to_invoice: bool('require_reference_to_invoice'),
-          // We keep PUT semantics for full-record safety; upsertContract will pre-seed to avoid zero clobber.
-          rates_json: {
-            paye_day:  getRate('paye_day'),   paye_night: getRate('paye_night'), paye_sat:   getRate('paye_sat'),  paye_sun: getRate('paye_sun'), paye_bh: getRate('paye_bh'),
-            umb_day:   getRate('umb_day'),    umb_night:  getRate('umb_night'),  umb_sat:    getRate('umb_sat'),   umb_sun:  getRate('umb_sun'),  umb_bh:  getRate('umb_bh'),
-            charge_day:getRate('charge_day'), charge_night:getRate('charge_night'), charge_sat:getRate('charge_sat'), charge_sun:getRate('charge_sun'), charge_bh:getRate('charge_bh'),
-          },
+          default_submission_mode,
+          week_ending_weekday_snapshot,
+          auto_invoice,
+          require_reference_to_pay,
+          require_reference_to_invoice,
+          rates_json: mergedRates,
           std_hours_json,
           bucket_labels_json
         };
@@ -1364,7 +1381,7 @@ function openContract(row) {
           console.log('[CONTRACTS] onSave payload (preview)', preview);
         }
 
-        // 1) Overlap check + upsert contract
+        // 5) Overlap check + upsert contract
         if (LOGC) console.log('[CONTRACTS] overlap → preSaveContractWithOverlapCheck');
         const ok = await preSaveContractWithOverlapCheck(data);
         if (!ok) { if (LOGC) console.log('[CONTRACTS] Save ABORTED by user after overlap dialog'); window.modalCtx._saveInFlight = false; console.groupEnd?.(); return false; }
@@ -1381,7 +1398,7 @@ function openContract(row) {
           if (warnStr) { if (LOGC) console.warn('[CONTRACTS] warnings', warnStr); showModalHint?.(`Warning: ${warnStr}`, 'warn'); }
         } catch {}
 
-        // 2) Generate weeks if newly created
+        // 6) Generate weeks if newly created
         const contractId = saved?.id || saved?.contract?.id;
         if (isCreate && contractId) {
           try {
@@ -1392,7 +1409,7 @@ function openContract(row) {
           }
         }
 
-        // 3) Commit calendar if there is any staged change (single big Save behaviour)
+        // 7) Commit calendar if there is any staged change (single big Save behaviour)
         if (contractId) {
           if (LOGC) console.log('[CONTRACTS] calendar → commitContractCalendarStageIfPending');
           const calRes = await commitContractCalendarStageIfPending(contractId);
@@ -1405,7 +1422,7 @@ function openContract(row) {
           }
         }
 
-        // 4) In-place refresh (KEEP MODAL OPEN; repaint current tab as needed)
+        // 8) In-place refresh (KEEP MODAL OPEN; repaint current tab as needed)
         try {
           const fr = window.__getModalFrame?.();
           const currentTab = fr?.currentTabKey || (document.querySelector('#modalTabs button.active')?.textContent?.toLowerCase() || 'main');
@@ -1444,7 +1461,6 @@ function openContract(row) {
         const active = tabs?.querySelector('button.active')?.textContent?.toLowerCase() || 'main';
 
         if (form) {
-          // Generic staging for all inputs in MAIN form
           if (!form.__wiredStage) {
             form.__wiredStage = true;
             const stage = (e) => {
@@ -1453,7 +1469,6 @@ function openContract(row) {
               const v = t.type === 'checkbox' ? (t.checked ? 'on' : '') : t.value;
               setContractFormValue(t.name, v);
               if (t.name === 'pay_method_snapshot' || /^(paye_|umb_|charge_)/.test(t.name)) computeContractMargins();
-              // Mark modal dirty when anything changes
               try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
             };
             form.addEventListener('input', stage, true);
@@ -1461,7 +1476,6 @@ function openContract(row) {
           }
 
           if (active === 'main') {
-            // Datepickers + pickers only when main tab is visible
             try {
               const sd = form.querySelector('input[name="start_date"]');
               const ed = form.querySelector('input[name="end_date"]');
@@ -1578,7 +1592,6 @@ function openContract(row) {
                   if (hiddenName === 'client_id')    { window.modalCtx.data.client_id    = id; window.modalCtx.data.client_name       = label; }
                 } catch {}
 
-                // Derive & lock pay method snapshot from candidate when picking a candidate
                 if (hiddenName === 'candidate_id') {
                   (async () => {
                     try {
@@ -1587,7 +1600,6 @@ function openContract(row) {
                       const fsm = (window.modalCtx.formState ||= { main:{}, pay:{} }).main ||= {};
                       fsm.pay_method_snapshot = derived;
                       fsm.__pay_locked = true;
-                      // reflect into DOM if select exists
                       const sel = document.querySelector('select[name="pay_method_snapshot"], select[name="default_pay_method_snapshot"]');
                       if (sel) { sel.value = derived; sel.disabled = true; }
                       computeContractMargins();
@@ -1596,7 +1608,6 @@ function openContract(row) {
                 }
 
                 closeMenu();
-                // mark modal dirty
                 try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
               };
 
@@ -1685,7 +1696,6 @@ function openContract(row) {
                 try {
                   const fs = (window.modalCtx.formState ||= { __forId: (window.modalCtx.data?.id ?? window.modalCtx.openToken ?? null), main:{}, pay:{} });
                   fs.main ||= {}; delete fs.main.candidate_id; delete fs.main.candidate_display;
-                  // Unlock and reset pay method snapshot
                   fs.main.__pay_locked = false;
                   fs.main.pay_method_snapshot = 'PAYE';
                   const sel = document.querySelector('select[name="pay_method_snapshot"], select[name="default_pay_method_snapshot"]');
@@ -1802,6 +1812,7 @@ function openContract(row) {
     }
   }, 0);
 }
+
 
 // ─────────────────────────────────────────────────────────────────────────────
 // NEW: getSummaryFingerprint(section)
@@ -9773,31 +9784,44 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
       L('persistCurrentTabState EXIT', { forId: fs.__forId, mainKeys: Object.keys(fs.main||{}), payKeys: Object.keys(fs.pay||{}) });
     },
 
-    mergedRowForTab(k) {
-      L('mergedRowForTab ENTER', { k });
-      const base = { ...(window.modalCtx?.data || {}) };
-      const fs   = (window.modalCtx?.formState || {});
-      const rid  = window.modalCtx?.data?.id ?? null;
-      const fid  = fs.__forId ?? null;
-      const sentinel = window.modalCtx?.openToken ?? null;
-      const same = (fid===rid) || (rid==null && (fid===sentinel || fid==null));
+mergedRowForTab(k) {
+  L('mergedRowForTab ENTER', { k });
+  const base = { ...(window.modalCtx?.data || {}) };
+  const fs   = (window.modalCtx?.formState || {});
+  const rid  = window.modalCtx?.data?.id ?? null;
+  const fid  = fs.__forId ?? null;
+  const sentinel = window.modalCtx?.openToken ?? null;
+  const same = (fid===rid) || (rid==null && (fid===sentinel || fid==null));
 
-      const mainStaged = same ? (fs.main || {}) : {};
-      const payStaged  = same ? (fs.pay  || {}) : {};
+  const mainStaged = same ? (fs.main || {}) : {};
+  const payStaged  = same ? (fs.pay  || {}) : {};
 
-      const out = { ...base, ...stripEmpty(mainStaged) };
+  // Always overlay MAIN staged fields first (ids, dates, gh_*, bucket_*, pay_method_snapshot, etc.)
+  const out = { ...base, ...stripEmpty(mainStaged) };
 
-      if (k === 'rates') {
-        const mergedRates = { ...(out.rates_json || base.rates_json || {}) };
-        for (const [kk, vv] of Object.entries(payStaged)) mergedRates[kk] = vv;
-        out.rates_json = mergedRates;
-        L('mergedRowForTab STATE', { rid, fid, sentinel, same, ratesKeys: Object.keys(mergedRates||{}) });
-        return out;
+  // NEW: Always merge staged pay buckets into rates_json (on any tab), not only 'rates'
+  try {
+    const mergedRates = { ...(out.rates_json || base.rates_json || {}) };
+    for (const [kk, vv] of Object.entries(payStaged)) {
+      if (/^(paye_|umb_|charge_)/.test(kk)) {
+        // keep staged as-is (string in formState); view logic can format; saving coercion happens later
+        mergedRates[kk] = vv;
       }
+    }
+    out.rates_json = mergedRates;
+  } catch (e) {
+    L('mergedRowForTab rates merge failed', e);
+  }
 
-      L('mergedRowForTab STATE', { rid, fid, sentinel, same, stagedMainKeys: Object.keys(mainStaged||{}), stagedPayKeys: Object.keys(payStaged||{}) });
-      return out;
-    },
+  L('mergedRowForTab STATE', {
+    rid, fid, sentinel, same,
+    stagedMainKeys: Object.keys(mainStaged||{}),
+    stagedPayKeys: Object.keys(payStaged||{}),
+    ratesKeys: Object.keys(out.rates_json || {})
+  });
+  return out;
+},
+
 
     _attachDirtyTracker() {
       if (this._detachDirty) { try { this._detachDirty(); } catch {} this._detachDirty = null; }
