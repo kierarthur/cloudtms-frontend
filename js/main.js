@@ -11967,6 +11967,75 @@ async function handleSaveSettings() {
   return { ok:true, saved };
 }
 
+async function commitContractCalendarStage(contractId) {
+  const LOG_CAL = (typeof window.__LOG_CAL === 'boolean') ? window.__LOG_CAL : true;
+  const L = (...a)=> { if (LOG_CAL) console.log('[CAL][commit]', ...a); };
+  const W = (...a)=> { if (LOG_CAL) console.warn('[CAL][commit]', ...a); };
+  const E = (...a)=> { if (LOG_CAL) console.error('[CAL][commit]', ...a); };
+
+  const { addRanges, removeRanges, additionals } = buildPlanRangesFromStage(contractId);
+  L('BEGIN', { contractId, addRanges, removeRanges, additionals });
+
+  // Commit sequence: (1) addRanges (auto-extend window), (2) removeRanges, (3) additionals
+  if (addRanges.length) {
+    const payload = {
+      extend_contract_window: true,  // enable auto-extend to cover out-of-window dates
+      ranges: addRanges             // days are explicit { date: 'YYYY-MM-DD' } objects
+    };
+    L('POST /plan-ranges', payload);
+    try {
+      const resp = await contractsPlanRanges(contractId, payload);
+      L('POST /plan-ranges ←', resp);
+      if (!resp || typeof resp !== 'object') W('plan-ranges returned unexpected response', resp);
+    } catch (err) {
+      E('plan-ranges failed', err);
+      throw err;
+    }
+  } else {
+    L('No addRanges to commit');
+  }
+
+  if (removeRanges.length) {
+    const payload = {
+      when_timesheet_exists: 'skip',
+      empty_week_action: 'cancel',
+      ranges: removeRanges
+    };
+    L('DELETE /plan-ranges', payload);
+    try {
+      const resp = await contractsUnplanRanges(contractId, payload);
+      L('DELETE /plan-ranges ←', resp);
+    } catch (err) {
+      E('unplan-ranges failed', err);
+      throw err;
+    }
+  } else {
+    L('No removeRanges to commit');
+  }
+
+  if (additionals.length) {
+    L('Committing additional weeks…', { count: additionals.length });
+    for (const g of additionals) {
+      try {
+        L('Create additional for baseWeekId', g.baseWeekId, 'dates=', g.dates);
+        const addRow = await contractWeekCreateAdditional(g.baseWeekId);
+        L('additional created ←', addRow);
+        const payload = { add: g.dates.map(d => ({ date: d })), merge: 'append' };
+        L('PATCH /contract-weeks/:id/plan', { week_id: addRow.id, payload });
+        const resp = await contractWeekPlanPatch(addRow.id, payload);
+        L('PATCH /contract-weeks/:id/plan ←', resp);
+      } catch (err) {
+        E('additional week flow failed', err);
+        throw err;
+      }
+    }
+  } else {
+    L('No additional week patches to commit');
+  }
+
+  clearContractCalendarStageState(contractId);
+  L('DONE: stage cleared for', contractId);
+}
 
 
 
