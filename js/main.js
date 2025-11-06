@@ -8109,58 +8109,142 @@ function topState(arr) {
 
 // Build payloads for commit
 function buildPlanRangesFromStage(contractId) {
+  const LOG_CAL = (typeof window.__LOG_CAL === 'boolean') ? window.__LOG_CAL : true;
+  const L = (...a)=> { if (LOG_CAL) console.log('[CAL][buildRanges]', ...a); };
+
   const st = getContractCalendarStageState(contractId);
   const adds = [...st.add];
   const rems = [...st.remove];
 
+  // Build add ranges (explicit per-date objects to avoid weekday-mask semantics)
   const addRanges = [];
   if (adds.length) {
-    // Single range with explicit per-dates (we send explicit objects to avoid weekday-mask semantics)
     const bounds = computeSelectionBounds(adds);
-    addRanges.push({ from: bounds.from, to: bounds.to, days: adds.sort().map(d => ({ date:d })), merge:'append', when_timesheet_exists:'create_additional' });
+    const explicit = adds.sort().map(d => ({ date: d }));
+    addRanges.push({
+      from: bounds.from,
+      to:   bounds.to,
+      days: explicit,
+      merge: 'append',
+      when_timesheet_exists: 'create_additional'
+    });
+    L('addRanges', { bounds, count: explicit.length, sample: explicit.slice(0, 5) });
+  } else {
+    L('addRanges: none');
   }
 
+  // Build remove ranges
   const removeRanges = [];
   if (rems.length) {
     const bounds = computeSelectionBounds(rems);
-    removeRanges.push({ from: bounds.from, to: bounds.to, days: rems.sort() });
+    const explicitRem = rems.sort(); // strings okay for remove; server treats as explicit dates
+    removeRanges.push({
+      from: bounds.from,
+      to:   bounds.to,
+      days: explicitRem
+    });
+    L('removeRanges', { bounds, count: explicitRem.length, sample: explicitRem.slice(0, 5) });
+  } else {
+    L('removeRanges: none');
   }
 
-  // Additional per base week id groups will be handled separately
-  const additionals = Object.entries(st.additional).map(([baseWeekId, set]) => ({ baseWeekId, dates: [...set].sort() }));
+  // Additional: baseWeekId → [dates]
+  const additionals = Object.entries(st.additional).map(([baseWeekId, set]) => ({
+    baseWeekId, dates: [...set].sort()
+  }));
+  L('additionals', { count: additionals.length, sample: additionals.slice(0, 3) });
 
   return { addRanges, removeRanges, additionals };
 }
 
-async function commitContractCalendarStage(contractId) {
-  const { addRanges, removeRanges, additionals } = buildPlanRangesFromStage(contractId);
+async function fetchAndRenderContractCalendar(contractId, opts /* { from,to, view } */) {
+  const state = (window.__calState[contractId] ||= { view:'year', win: computeYearWindow((new Date()).getUTCFullYear()), weekEndingWeekday: (window.modalCtx?.data?.week_ending_weekday_snapshot ?? 0) });
 
-  // Commit sequence: (1) addRanges (auto-extend window), (2) removeRanges, (3) additionals
-  if (addRanges.length) {
-    await contractsPlanRanges(contractId, {
-      extend_contract_window: true,       // ← enable auto-extend to cover out-of-window dates
-      ranges: addRanges                   //     (days are explicit { date: 'YYYY-MM-DD' } objects)
-    });
-  }
+  if (opts?.view) state.view = opts.view;
+  if (opts?.from && opts?.to) state.win = { from: opts.from, to: opts.to };
 
-  if (removeRanges.length) {
-    await contractsUnplanRanges(contractId, {
-      when_timesheet_exists: 'skip',
-      empty_week_action: 'cancel',
-      ranges: removeRanges
-    });
-  }
+  const holder = byId('contractCalendarHolder'); if (!holder) return;
 
-  if (additionals.length) {
-    // For each base week create an additional and patch plan
-    for (const g of additionals) {
-      const addRow = await contractWeekCreateAdditional(g.baseWeekId);
-      const payload = { add: g.dates.map(d => ({ date: d })), merge: 'append' };
-      await contractWeekPlanPatch(addRow.id, payload);
+  // fetch day rows
+  const dayResp = await getContractCalendarRange(contractId, state.win.from, state.win.to, 'day');
+  const dayItems = Array.isArray(dayResp?.items) ? dayResp.items : [];
+
+  // fetch weeks (for base TS info)
+  const weeksForIndex = (await getContractCalendar(contractId, { from: state.win.from, to: state.win.to, granularity:'week' })).items || [];
+  const weekIndex = buildWeekIndex(weeksForIndex);
+
+  // overlay staged changes
+  const overlayedMap = applyStagedContractCalendarOverlay(contractId, buildDateIndex(dayItems), weekIndex);
+
+  // render grid
+  const gridHost = document.createElement('div'); gridHost.id = 'contractDayGrid';
+  holder.innerHTML = ''; holder.appendChild(gridHost);
+
+  renderDayGrid(gridHost, {
+    from: state.win.from, to: state.win.to, itemsByDate: overlayedMap, view: state.view, bucketKey: `c:${contractId}`,
+    onNav: async (delta) => { const nextWin = stepMonth(state.win, delta); await fetchAndRenderContractCalendar(contractId, { from: nextWin.from, to: nextWin.to }); },
+    onToggleView: async () => {
+      const newView = (state.view === 'year') ? 'month' : 'year';
+      let win = state.win;
+      if (newView === 'year') { const y = ymdToDate(state.win.from).getUTCFullYear(); win = computeYearWindow(y); }
+      else { const dt = ymdToDate(state.win.from); win = computeMonthWindow(dt.getUTCFullYear(), dt.getUTCMonth()); }
+      await fetchAndRenderContractCalendar(contractId, { from: win.from, to: win.to, view: newView });
+    },
+    onCellContextMenu: (theDate, ev) => {
+      const sel = initSelBucket(`c:${contractId}`).set; const selArr = [...sel];
+      const resolveFinalState = (d) => topState(overlayedMap.get(d) || []);
+      const allEmpty = selArr.every(d => resolveFinalState(d) === 'EMPTY');
+      const allPlannedAndNoTs = selArr.every(d => {
+        const we = computeWeekEnding(d, state.weekEndingWeekday);
+        const week = weekIndex.get(we);
+        return resolveFinalState(d) === 'PLANNED' && week && !week.baseHasTs;
+      });
+      const canAddAdditional = selArr.some(d => {
+        const st = resolveFinalState(d); const we = computeWeekEnding(d, state.weekEndingWeekday); const w = weekIndex.get(we);
+        return st === 'EMPTY' && w && w.baseHasTs && w.baseWeekId;
+      });
+
+      openCalendarContextMenu({
+        anchorEl: ev.target,
+        bucketKey: `c:${contractId}`,
+        selection: selArr,
+        capabilities: { canBook: allEmpty, canUnbook: allPlannedAndNoTs, canAddAdditional },
+        onAction: async ({ type, selection }) => {
+          try {
+            if (type === 'book') {
+              stageContractCalendarBookings(contractId, selection);
+            }
+            if (type === 'unbook') {
+              stageContractCalendarUnbookings(contractId, selection);
+            }
+            if (type === 'additional') {
+              // group by base week id
+              const byBase = {};
+              for (const d of selection) {
+                const we = computeWeekEnding(d, state.weekEndingWeekday);
+                const wi = weekIndex.get(we);
+                if (!wi || !wi.baseWeekId || !wi.baseHasTs) continue;
+                (byBase[wi.baseWeekId] ||= []).push(d);
+              }
+              for (const [baseWeekId, dates] of Object.entries(byBase)) {
+                stageContractCalendarAdditional(contractId, baseWeekId, dates);
+              }
+            }
+            // re-render with overlay
+            await fetchAndRenderContractCalendar(contractId, { from: state.win.from, to: state.win.to });
+          } catch (e) {
+            alert(e?.message || e);
+          }
+        }
+      });
     }
-  }
+  });
 
-  clearContractCalendarStageState(contractId);
+  // Legend
+  const legend = document.createElement('div'); legend.id = 'contractCalLegend'; holder.appendChild(legend); renderCalendarLegend(legend);
+
+  // Save / Discard controls (only visible if staged)
+  wireContractCalendarSaveControls(contractId, holder, weekIndex);
 }
 
 function revertContractCalendarStage(contractId) {
@@ -8214,6 +8298,9 @@ async function contractWeekPlanPatch(week_id, payload) {
 // CALENDAR – CONTEXT MENU
 // ============================================================================
 function openCalendarContextMenu({ anchorEl, bucketKey, selection, capabilities, onAction }) {
+  const LOG_CAL = (typeof window.__LOG_CAL === 'boolean') ? window.__LOG_CAL : true;
+  const L = (...a)=> { if (LOG_CAL) console.log('[CAL][ctx]', ...a); };
+
   // Remove any existing menu first
   document.getElementById('calCtxMenu')?.remove();
 
@@ -8229,12 +8316,12 @@ function openCalendarContextMenu({ anchorEl, bucketKey, selection, capabilities,
   menu.style.top  = (window.scrollY + r.bottom) + 'px';
   menu.style.left = (window.scrollX + r.left) + 'px';
 
-  // ---- NEW: dark, bordered, legible styling (inline so it works even without CSS) ----
+  // Dark, bordered, legible styling (inline so it works even without CSS)
   menu.style.minWidth = '180px';
   menu.style.padding = '6px';
   menu.style.border = '1px solid var(--line)';
   menu.style.borderRadius = '10px';
-  menu.style.background = 'rgba(12, 21, 42, 0.98)';                 // slightly lighter than page bg
+  menu.style.background = 'rgba(12, 21, 42, 0.98)'; // slightly lighter than page bg
   menu.style.boxShadow = '0 12px 28px rgba(0,0,0,.45), inset 0 0 0 1px rgba(255,255,255,.02)';
   menu.style.backdropFilter = 'blur(6px) saturate(120%)';
 
@@ -8245,7 +8332,7 @@ function openCalendarContextMenu({ anchorEl, bucketKey, selection, capabilities,
     <div class="ctx-item ${capabilities.canAddAdditional ? '' : 'disabled'}" data-act="additional">Add additional sheet</div>
   `;
 
-  // Apply minimal inline styles to items in case page CSS hasn't been updated yet
+  // Minimal inline item styles + hover
   [...menu.querySelectorAll('.ctx-item')].forEach((el, i) => {
     el.style.color = 'var(--text)';
     el.style.padding = '8px 10px';
@@ -8254,22 +8341,19 @@ function openCalendarContextMenu({ anchorEl, bucketKey, selection, capabilities,
     el.style.userSelect = 'none';
     el.style.lineHeight = '1.25';
     if (i > 0) el.style.marginTop = '4px';
-
-    // Hover feedback (inline JS for robustness)
-    el.addEventListener('mouseenter', () => {
-      if (!el.classList.contains('disabled')) el.style.background = 'var(--hover)';
-    });
-    el.addEventListener('mouseleave', () => {
-      el.style.background = 'transparent';
-    });
-
-    if (el.classList.contains('disabled')) {
-      el.style.opacity = '.45';
-      el.style.filter = 'saturate(0.6) brightness(0.9)';
-    }
+    el.addEventListener('mouseenter', () => { if (!el.classList.contains('disabled')) el.style.background = 'var(--hover)'; });
+    el.addEventListener('mouseleave', () => { el.style.background = 'transparent'; });
+    if (el.classList.contains('disabled')) { el.style.opacity = '.45'; el.style.filter = 'saturate(0.6) brightness(0.9)'; }
   });
 
   document.body.appendChild(menu);
+
+  // Diagnostic log
+  L('open', {
+    bucketKey,
+    selection: selection.slice(),
+    capabilities
+  });
 
   // Close + dispatch
   const close = () => { try { menu.remove(); } catch {} };
@@ -8289,6 +8373,7 @@ function openCalendarContextMenu({ anchorEl, bucketKey, selection, capabilities,
   };
   setTimeout(() => document.addEventListener('mousedown', onDoc, true), 0);
 }
+
 
 // ============================================================================
 // CALENDAR – GENERIC DAY GRID
@@ -8385,59 +8470,121 @@ function renderCalendarLegend(container) {
 // CONTRACTS – FETCH & RENDER (DAY CALENDAR) with STAGING
 // ============================================================================
 async function fetchAndRenderContractCalendar(contractId, opts /* { from,to, view } */) {
-  const state = (window.__calState[contractId] ||= { view:'year', win: computeYearWindow((new Date()).getUTCFullYear()), weekEndingWeekday: (window.modalCtx?.data?.week_ending_weekday_snapshot ?? 0) });
+  const LOG_CAL = (typeof window.__LOG_CAL === 'boolean') ? window.__LOG_CAL : true;
+  const L = (...a)=> { if (LOG_CAL) console.log('[CAL][contract]', ...a); };
+  const W = (...a)=> { if (LOG_CAL) console.warn('[CAL][contract]', ...a); };
+  const E = (...a)=> { if (LOG_CAL) console.error('[CAL][contract]', ...a); };
+
+  const state = (window.__calState[contractId] ||= {
+    view: 'year',
+    win: computeYearWindow((new Date()).getUTCFullYear()),
+    weekEndingWeekday: (window.modalCtx?.data?.week_ending_weekday_snapshot ?? 0)
+  });
 
   if (opts?.view) state.view = opts.view;
   if (opts?.from && opts?.to) state.win = { from: opts.from, to: opts.to };
 
-  const holder = byId('contractCalendarHolder'); if (!holder) return;
+  const holder = byId('contractCalendarHolder'); if (!holder) { W('no #contractCalendarHolder'); return; }
+
+  L('FETCH begin', { contractId, win: state.win, view: state.view, weekEndingWeekday: state.weekEndingWeekday });
 
   // fetch day rows
-  const dayResp = await getContractCalendarRange(contractId, state.win.from, state.win.to, 'day');
+  let dayResp;
+  try {
+    dayResp = await getContractCalendarRange(contractId, state.win.from, state.win.to, 'day');
+    L('GET /contracts/:id/calendar day ←', { count: (dayResp?.items||[]).length });
+  } catch (err) {
+    E('day feed failed', err);
+    dayResp = { items: [] };
+  }
   const dayItems = Array.isArray(dayResp?.items) ? dayResp.items : [];
 
   // fetch weeks (for base TS info)
-  const weeksForIndex = (await getContractCalendar(contractId, { from: state.win.from, to: state.win.to, granularity:'week' })).items || [];
+  let weeksForIndex = [];
+  try {
+    const weekResp = await getContractCalendar(contractId, { from: state.win.from, to: state.win.to, granularity: 'week' });
+    weeksForIndex = weekResp?.items || [];
+    L('GET /contracts/:id/calendar week ←', { count: weeksForIndex.length, sample: weeksForIndex.slice(0, 3) });
+  } catch (err) {
+    E('week feed failed', err);
+    weeksForIndex = [];
+  }
   const weekIndex = buildWeekIndex(weeksForIndex);
 
   // overlay staged changes
   const overlayedMap = applyStagedContractCalendarOverlay(contractId, buildDateIndex(dayItems), weekIndex);
+  const overlayCount = [...overlayedMap.values()].reduce((n, arr) => n + (arr?.length || 0), 0);
+  L('overlay applied', { dates: overlayedMap.size, itemsTotal: overlayCount });
 
-  // render grid
-  const gridHost = document.createElement('div'); gridHost.id = 'contractDayGrid';
-  holder.innerHTML = ''; holder.appendChild(gridHost);
+  // Render grid
+  const gridHost = document.createElement('div');
+  gridHost.id = 'contractDayGrid';
+  holder.innerHTML = '';
+  holder.appendChild(gridHost);
 
   renderDayGrid(gridHost, {
-    from: state.win.from, to: state.win.to, itemsByDate: overlayedMap, view: state.view, bucketKey: `c:${contractId}`,
-    onNav: async (delta) => { const nextWin = stepMonth(state.win, delta); await fetchAndRenderContractCalendar(contractId, { from: nextWin.from, to: nextWin.to }); },
+    from: state.win.from,
+    to: state.win.to,
+    itemsByDate: overlayedMap,
+    view: state.view,
+    bucketKey: `c:${contractId}`,
+
+    onNav: async (delta) => {
+      const nextWin = stepMonth(state.win, delta);
+      L('NAV month', { delta, nextWin });
+      await fetchAndRenderContractCalendar(contractId, { from: nextWin.from, to: nextWin.to });
+    },
+
     onToggleView: async () => {
       const newView = (state.view === 'year') ? 'month' : 'year';
       let win = state.win;
-      if (newView === 'year') { const y = ymdToDate(state.win.from).getUTCFullYear(); win = computeYearWindow(y); }
-      else { const dt = ymdToDate(state.win.from); win = computeMonthWindow(dt.getUTCFullYear(), dt.getUTCMonth()); }
+      if (newView === 'year') {
+        const y = ymdToDate(state.win.from).getUTCFullYear();
+        win = computeYearWindow(y);
+      } else {
+        const dt = ymdToDate(state.win.from);
+        win = computeMonthWindow(dt.getUTCFullYear(), dt.getUTCMonth());
+      }
+      L('TOGGLE view', { from: state.view, to: newView, win });
       await fetchAndRenderContractCalendar(contractId, { from: win.from, to: win.to, view: newView });
     },
+
     onCellContextMenu: (theDate, ev) => {
-      const sel = initSelBucket(`c:${contractId}`).set; const selArr = [...sel];
+      const sel = initSelBucket(`c:${contractId}`).set;
+      const selArr = [...sel];
       const resolveFinalState = (d) => topState(overlayedMap.get(d) || []);
       const allEmpty = selArr.every(d => resolveFinalState(d) === 'EMPTY');
       const allPlannedAndNoTs = selArr.every(d => {
         const we = computeWeekEnding(d, state.weekEndingWeekday);
         const week = weekIndex.get(we);
-        return resolveFinalState(d) === 'PLANNED' && week && !week.baseHasTs;
+        const ok = (resolveFinalState(d) === 'PLANNED') && week && !week.baseHasTs;
+        if (!ok && LOG_CAL) {
+          const st = resolveFinalState(d);
+          L('cap check fail (Unbook)', { date: d, state: st, baseWeek: week ? { id: week.baseWeekId, hasTs: week.baseHasTs } : null });
+        }
+        return ok;
       });
       const canAddAdditional = selArr.some(d => {
-        const st = resolveFinalState(d); const we = computeWeekEnding(d, state.weekEndingWeekday); const w = weekIndex.get(we);
-        return st === 'EMPTY' && w && w.baseHasTs && w.baseWeekId;
+        const st = resolveFinalState(d);
+        const we = computeWeekEnding(d, state.weekEndingWeekday);
+        const w = weekIndex.get(we);
+        const ok = (st === 'EMPTY') && w && w.baseHasTs && w.baseWeekId;
+        if (ok && LOG_CAL) L('cap ok (Additional)', { date: d, baseWeekId: w.baseWeekId });
+        return ok;
       });
+
+      L('CTX open', { date: theDate, selection: selArr, caps: { canBook: allEmpty, canUnbook: allPlannedAndNoTs, canAddAdditional }, weekEndingWeekday: state.weekEndingWeekday });
 
       openCalendarContextMenu({
         anchorEl: ev.target,
         bucketKey: `c:${contractId}`,
         selection: selArr,
         capabilities: { canBook: allEmpty, canUnbook: allPlannedAndNoTs, canAddAdditional },
+
         onAction: async ({ type, selection }) => {
           try {
+            L('CTX act', { type, selection });
+
             if (type === 'book') {
               stageContractCalendarBookings(contractId, selection);
             }
@@ -8450,16 +8597,22 @@ async function fetchAndRenderContractCalendar(contractId, opts /* { from,to, vie
               for (const d of selection) {
                 const we = computeWeekEnding(d, state.weekEndingWeekday);
                 const wi = weekIndex.get(we);
-                if (!wi || !wi.baseWeekId || !wi.baseHasTs) continue;
+                if (!wi || !wi.baseWeekId || !wi.baseHasTs) {
+                  L('skip additional (no base or no TS)', { date: d, we, hasBase: !!wi?.baseWeekId, baseHasTs: !!wi?.baseHasTs });
+                  continue;
+                }
                 (byBase[wi.baseWeekId] ||= []).push(d);
               }
+              L('stage additional groups', byBase);
               for (const [baseWeekId, dates] of Object.entries(byBase)) {
                 stageContractCalendarAdditional(contractId, baseWeekId, dates);
               }
             }
+
             // re-render with overlay
             await fetchAndRenderContractCalendar(contractId, { from: state.win.from, to: state.win.to });
           } catch (e) {
+            E('CTX act failed', e);
             alert(e?.message || e);
           }
         }
@@ -8467,11 +8620,27 @@ async function fetchAndRenderContractCalendar(contractId, opts /* { from,to, vie
     }
   });
 
-  // Legend
-  const legend = document.createElement('div'); legend.id = 'contractCalLegend'; holder.appendChild(legend); renderCalendarLegend(legend);
+  // Legend + Save/Discard
+  const legend = document.createElement('div');
+  legend.id = 'contractCalLegend';
+  holder.appendChild(legend);
+  renderCalendarLegend(legend);
 
-  // Save / Discard controls (only visible if staged)
   wireContractCalendarSaveControls(contractId, holder, weekIndex);
+
+  // Post-render diagnostics
+  const staged = getContractCalendarStageState(contractId);
+  L('RENDER complete', {
+    win: state.win,
+    view: state.view,
+    dayCount: dayItems.length,
+    weekCount: weeksForIndex.length,
+    staged: {
+      add: staged.add.size,
+      remove: staged.remove.size,
+      additionalGroups: Object.keys(staged.additional || {}).length
+    }
+  });
 }
 
 function wireContractCalendarSaveControls(contractId, holder, weekIndex) {
