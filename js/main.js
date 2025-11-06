@@ -885,17 +885,6 @@ async function listContractWeeks(contract_id, filters = {}) {
   return toList(r);
 }
 
-async function getContractCalendar(contract_id, year /* optional */) {
-  const qs = new URLSearchParams();
-  if (year) qs.set('year', String(year));
-  const url = qs.toString()
-    ? `/api/contracts/${_enc(contract_id)}/calendar?${qs}`
-    : `/api/contracts/${_enc(contract_id)}/calendar`;
-  const r = await authFetch(API(url));
-  if (!r?.ok) throw new Error('Calendar fetch failed');
-  return r.json();
-}
-
 async function contractWeekSwitchMode(week_id, newMode /* optional; server toggles if omitted */) {
   // Backend toggles if no body; allow hint mode to be explicit
   const init = newMode
@@ -2811,83 +2800,6 @@ function renderContractRatesTab(ctx) {
     </div>`;
 }
 
-function renderContractCalendarTab(ctx) {
-  const c = ctx?.data || {};
-  const holderId = 'contractCalendarHolder';
-
-  // ✅ Guard: require id before calling API
-  if (!c.id) {
-    return `
-      <div id="${holderId}" class="tabc">
-        <div class="hint">Save the contract to unlock the calendar (weeks are generated after save).</div>
-        <div class="actions" style="margin-top:8px">
-          <button disabled>Generate weeks</button>
-          <button disabled>Skip weeks…</button>
-          <button disabled>Clone & Extend…</button>
-        </div>
-      </div>`;
-  }
-
-  setTimeout(async () => {
-    try {
-      const y = (new Date()).getFullYear();
-      const cal = await getContractCalendar(c.id, y);
-      const items = Array.isArray(cal?.items) ? cal.items : [];
-
-      const el = byId(holderId); if (!el) return;
-      el.innerHTML = `
-        <div class="row" style="justify-content:space-between;align-items:center">
-          <div class="hint">Year: ${cal.year}</div>
-          <div class="actions">
-            <button id="btnGenWeeks">Generate weeks</button>
-            <button id="btnSkipWeeks">Skip weeks…</button>
-            <button id="btnCloneExtend">Clone & Extend…</button>
-          </div>
-        </div>
-        <table class="grid">
-          <thead><tr><th>Week Ending</th><th>Seq</th><th>Status</th><th>Mode</th><th>TS</th><th>Flags</th><th>Actions</th></tr></thead>
-          <tbody>
-            ${items.map(w => `
-              <tr data-week="${w.id}">
-                <td>${w.week_ending_date}</td>
-                <td>${w.additional_seq}</td>
-                <td>${w.status}</td>
-                <td>${w.submission_mode}</td>
-                <td>${w.has_timesheet ? 'Yes' : 'No'}</td>
-                <td>${w.missing_pdf ? 'Missing PDF; ' : ''}${w.missing_reference ? 'Missing Ref' : ''}</td>
-                <td>
-                  <button class="wk-act" data-act="actions">Actions…</button>
-                  ${w.submission_mode === 'MANUAL' ? `<button class="wk-act" data-act="manual">Manual Edit</button>` : ''}
-                </td>
-              </tr>
-            `).join('')}
-          </tbody>
-        </table>
-      `;
-
-      el.querySelector('#btnGenWeeks')?.addEventListener('click', async () => {
-        try { await generateContractWeeks(c.id); alert('Weeks generated (idempotent).'); } catch (e) { alert(e?.message || e); }
-        try { await getContractCalendar(c.id, y); renderContractCalendarTab({ data: c }); } catch {}
-      });
-      el.querySelector('#btnSkipWeeks')?.addEventListener('click', () => openContractSkipWeeks(c.id));
-      el.querySelector('#btnCloneExtend')?.addEventListener('click', () => openContractCloneAndExtend(c.id));
-
-      el.querySelectorAll('.wk-act').forEach(btn => {
-        btn.addEventListener('click', (ev) => {
-          const tr = ev.target.closest('tr'); if (!tr) return;
-          const weekId = tr.getAttribute('data-week');
-          const act = ev.target.getAttribute('data-act');
-          if (act === 'actions') openContractWeekActions(weekId);
-          if (act === 'manual')  openManualWeekEditor(weekId, c.id);
-        });
-      });
-    } catch (e) {
-      const el = byId(holderId); if (el) el.innerHTML = `<div class="error">Calendar load failed.</div>`;
-    }
-  }, 0);
-
-  return `<div id="${holderId}" class="tabc"><div class="hint">Loading calendar…</div></div>`;
-}
 
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -2947,54 +2859,6 @@ function openManualWeekEditor(week_id, contract_id /* optional but recommended *
 // openContractWeekActions (amended) — “Add additional sheet” now calls additional;
 // add separate “Create expense sheet” button wired to expense-sheet endpoint
 // ──────────────────────────────────────────────────────────────────────────────
-function openContractWeekActions(week_id) {
-  const html = `
-    <div class="tabc">
-      <div class="actions">
-        <button id="wkSwitch">Switch mode</button>
-        <button id="wkPresign">Attach / Replace Manual PDF…</button>
-        <button id="wkExtra">Add additional sheet</button>
-        <button id="wkExpense">Create expense sheet</button>
-        <button id="wkDeleteTs">Delete timesheet</button>
-        <button id="wkAuth">Authorise (manual)</button>
-      </div>
-      <div class="hint" style="margin-top:10px">Actions are guarded by invoice/paid status in the API.</div>
-    </div>
-  `;
-  showModal(
-    'Week Actions',
-    [{ key:'a', title:'Actions' }],
-    () => html,
-    async () => true,
-    false,
-    () => {
-      const root = document;
-      root.getElementById('wkSwitch')?.addEventListener('click', async () => { try { await contractWeekSwitchMode(week_id); alert('Mode switched.'); } catch(e){ alert(e?.message||e); }});
-      root.getElementById('wkPresign')?.addEventListener('click', () => presignAndAttachManualWeekPdf(week_id));
-
-      // NEW: additional week row
-      root.getElementById('wkExtra')?.addEventListener('click', async () => {
-        try { await contractWeekCreateAdditional(week_id); alert('Additional sheet created.'); }
-        catch(e){ alert(e?.message||e); }
-      });
-
-      // NEW: separate expense-only sheet
-      root.getElementById('wkExpense')?.addEventListener('click', async () => {
-        try { await contractWeekCreateExpenseSheet(week_id); alert('Expense-only sheet created.'); }
-        catch(e){ alert(e?.message||e); }
-      });
-
-      root.getElementById('wkDeleteTs')?.addEventListener('click', async () => {
-        if (!confirm('Delete attached timesheet?')) return;
-        try { await contractWeekDeleteTimesheet(week_id); alert('Timesheet deleted.'); } catch(e){ alert(e?.message||e); }
-      });
-      root.getElementById('wkAuth')?.addEventListener('click', async () => {
-        try { await contractWeekAuthorise(week_id); alert('Authorised.'); } catch(e){ alert(e?.message||e); }
-      });
-    },
-    { kind:'week-actions' }
-  );
-}
 
 
 
@@ -6532,39 +6396,6 @@ function computeContractMargins() {
 
 // ========== PARENT TABLE RENDER (WITH LOUD LOGS + SAFETY NET) ==========
 
-function renderCalendar(timesheets){
-  const wrap = byId('calendar'); if (!wrap) return;
-  const map = new Map();
-  (timesheets || []).forEach(t=>{
-    const d = (t.worked_start_iso || t.worked_start || t.date || t.week_ending_date);
-    if (!d) return;
-    const key = (d+'').slice(0,10);
-    const paid = t.paid_at_utc;
-    const invoiced = t.locked_by_invoice_id || (t.invoice_id);
-    const auth = t.authorised_at_server || (t.validation_status==='VALIDATION_OK');
-    let mark = 'a'; if (invoiced) mark = 'i'; if (paid) mark = 'p';
-    if (auth && !invoiced && !paid) mark = 'a';
-    map.set(key, mark);
-  });
-  const now = new Date(); const yr = now.getFullYear(); wrap.innerHTML = '';
-  for (let m=0;m<12;m++){
-    const first = new Date(yr, m, 1);
-    const box = document.createElement('div'); box.className='month';
-    box.innerHTML = `<h4>${first.toLocaleString(undefined,{month:'long'})} ${yr}</h4>`;
-    const days = document.createElement('div'); days.className='days';
-    for (let i=0;i<first.getDay();i++) days.appendChild(document.createElement('div'));
-    const daysInMonth = new Date(yr, m+1, 0).getDate();
-    for (let d=1; d<=daysInMonth; d++){
-      const cell = document.createElement('div'); cell.className='d';
-      const key = `${yr}-${String(m+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
-      const mark = map.get(key);
-      if (mark) cell.classList.add('mark-'+mark);
-      cell.textContent = d;
-      days.appendChild(cell);
-    }
-    box.appendChild(days); wrap.appendChild(box);
-  }
-}
 
 async function openCandidateRateModal(candidate_id, existing) {
   const LOG = !!window.__LOG_RATES;
@@ -7767,6 +7598,633 @@ async function mountCandidatePayTab(){
     if (nameInput && idHidden) { nameInput.value = ''; idHidden.value = ''; }
     fillFromCandidate();
   }
+}
+
+// ============================================================================
+// CALENDAR – SHARED HELPERS & STATE
+// ============================================================================
+
+window.__calState = window.__calState || {};     // per contract_id: { view, win, weekEndingWeekday }
+window.__candCalState = window.__candCalState || {}; // per candidate_id
+window.__calStage = window.__calStage || {};     // staged changes per contract_id
+
+// ---------- Date utilities ----------
+function ymd(d) { return (typeof d === 'string') ? d.slice(0,10) : (new Date(d)).toISOString().slice(0,10); }
+function ymdToDate(ymdStr) { return new Date(ymdStr + 'T00:00:00Z'); }
+function dateToYmd(dt) { return dt.toISOString().slice(0,10); }
+function enumerateDates(fromYmd, toYmd) {
+  const out = []; let d = ymdToDate(fromYmd), end = ymdToDate(toYmd);
+  while (d <= end) { out.push(dateToYmd(d)); d.setUTCDate(d.getUTCDate() + 1); }
+  return out;
+}
+function computeYearWindow(year)   { return { from: `${year}-01-01`, to: `${year}-12-31` }; }
+function monthBounds(year, monthIndex) { const s = new Date(Date.UTC(year, monthIndex, 1)); const e = new Date(Date.UTC(year, monthIndex+1, 0)); return { from: dateToYmd(s), to: dateToYmd(e) }; }
+function computeMonthWindow(year, monthIndex) { return monthBounds(year, monthIndex); }
+function stepMonth(win, delta) { const s = ymdToDate(win.from); const n = new Date(Date.UTC(s.getUTCFullYear(), s.getUTCMonth()+delta, 1)); return monthBounds(n.getUTCFullYear(), n.getUTCMonth()); }
+
+// ---------- Week ending ----------
+function computeWeekEnding(ymdStr, weekEndingWeekday /* 0=Sun..6=Sat */) {
+  const d = ymdToDate(ymdStr); const dow = d.getUTCDay(); const delta = (weekEndingWeekday - dow + 7) % 7; d.setUTCDate(d.getUTCDate() + delta); return dateToYmd(d);
+}
+
+// ---------- Colors / states ----------
+function colorForState(state) {
+  const s = String(state || 'EMPTY').toUpperCase();
+  if (s === 'PLANNED')    return 'cal-planned';
+  if (s === 'SUBMITTED')  return 'cal-submitted';
+  if (s === 'AUTHORISED') return 'cal-authorised';
+  if (s === 'INVOICED')   return 'cal-invoiced';
+  if (s === 'PAID')       return 'cal-paid';
+  return ''; // EMPTY -> white
+}
+
+// ---------- Selection helpers ----------
+function initSelBucket(bucketKey) {
+  const store = (bucketKey === 'cand') ? window.__candSel : window.__calSel;
+  if (!store) {
+    if (bucketKey === 'cand') window.__candSel = { set: new Set(), anchor: null };
+    else window.__calSel = { set: new Set(), anchor: null };
+  }
+  return (bucketKey === 'cand') ? window.__candSel : window.__calSel;
+}
+function toggleDaySelected(bucketKey, ymdStr, additive = false) {
+  const sel = initSelBucket(bucketKey);
+  if (!additive) sel.set.clear();
+  if (sel.set.has(ymdStr) && additive) sel.set.delete(ymdStr); else sel.set.add(ymdStr);
+  sel.anchor = ymdStr;
+}
+function selectRange(bucketKey, fromYmd, toYmd, additive = false) {
+  const sel = initSelBucket(bucketKey);
+  if (!additive) sel.set.clear();
+  const lo = (fromYmd < toYmd) ? fromYmd : toYmd;
+  const hi = (fromYmd < toYmd) ? toYmd   : fromYmd;
+  enumerateDates(lo, hi).forEach(d => sel.set.add(d));
+}
+function clearCalendarSelection(bucketKey) {
+  const sel = initSelBucket(bucketKey); sel.set.clear(); sel.anchor = null;
+}
+function computeSelectionBounds(selection /* array of ymd */) {
+  if (!selection?.length) return null;
+  let lo = selection[0], hi = selection[0];
+  for (const d of selection) { if (d < lo) lo = d; if (d > hi) hi = d; }
+  return { from: lo, to: hi };
+}
+
+// ---------- Index builders ----------
+function buildDateIndex(items) { const map = new Map(); for (const it of (items||[])) { const k = it.date; const arr = map.get(k) || []; arr.push(it); map.set(k, arr); } return map; }
+function buildWeekIndex(weeks) {
+  const m = new Map();
+  for (const w of (weeks||[])) {
+    const key = w.week_ending_date;
+    const e = m.get(key) || { baseWeekId: null, baseHasTs: false, baseMode: 'ELECTRONIC', siblings: [] };
+    e.siblings.push(w);
+    if (Number(w.additional_seq||0) === 0) { e.baseWeekId = w.id; e.baseHasTs  = !!w.timesheet_id; e.baseMode   = w.submission_mode_snapshot || 'ELECTRONIC'; }
+    m.set(key, e);
+  }
+  return m;
+}
+
+// ---------- Staging state ----------
+function getContractCalendarStageState(contractId) {
+  return (window.__calStage[contractId] ||= { add: new Set(), remove: new Set(), additional: {}, weekEndingWeekday: (window.__calState[contractId]?.weekEndingWeekday || 0) });
+}
+function clearContractCalendarStageState(contractId) {
+  window.__calStage[contractId] = { add:new Set(), remove:new Set(), additional:{}, weekEndingWeekday: (window.__calState[contractId]?.weekEndingWeekday || 0) };
+}
+function stageContractCalendarBookings(contractId, dates /* array of ymd */) {
+  const st = getContractCalendarStageState(contractId);
+  for (const d of dates) { st.remove.delete(d); st.add.add(d); }
+}
+function stageContractCalendarUnbookings(contractId, dates /* array of ymd */) {
+  const st = getContractCalendarStageState(contractId);
+  for (const d of dates) { st.add.delete(d); st.remove.add(d); }
+}
+function stageContractCalendarAdditional(contractId, baseWeekId, dates /* array of ymd */) {
+  const st = getContractCalendarStageState(contractId);
+  const set = (st.additional[baseWeekId] ||= new Set());
+  for (const d of dates) set.add(d);
+}
+
+// Overlay staged colors onto fetched items (without persisting)
+function applyStagedContractCalendarOverlay(contractId, itemsByDate /* Map<date, [items]> */, weekIndex) {
+  const st = getContractCalendarStageState(contractId);
+  const overlay = new Map(itemsByDate ? itemsByDate : []);
+  const addDates = [...st.add]; const remDates = [...st.remove];
+
+  const ensureArr = (k) => { const a = overlay.get(k) || []; overlay.set(k, a); return a; };
+
+  // Apply ADD as PLANNED
+  for (const d of addDates) {
+    const arr = ensureArr(d);
+    // if already has stronger state (INVOICED/PAID/AUTHORISED/SUBMITTED), leave as is
+    const hasStrong = arr.some(x => ['SUBMITTED','AUTHORISED','INVOICED','PAID'].includes(String(x.state||'EMPTY').toUpperCase()));
+    if (!hasStrong) {
+      arr.push({ date:d, state:'PLANNED' });
+    }
+  }
+
+  // Apply REMOVE → EMPTY only if the original top state was PLANNED (i.e., no TS)
+  for (const d of remDates) {
+    const arr = ensureArr(d);
+    const top = topState(arr);
+    if (top === 'PLANNED') {
+      // clear planned: replace with EMPTY
+      overlay.set(d, []); // nothing planned/worked
+    }
+  }
+
+  // Apply ADDITIONAL (planned via additional week) → PLANNED on those dates
+  for (const [baseWeekId, set] of Object.entries(st.additional)) {
+    for (const d of set) {
+      const arr = ensureArr(d);
+      const hasStrong = arr.some(x => ['SUBMITTED','AUTHORISED','INVOICED','PAID'].includes(String(x.state||'EMPTY').toUpperCase()));
+      if (!hasStrong) {
+        arr.push({ date:d, state:'PLANNED' });
+      }
+    }
+  }
+
+  return overlay;
+}
+
+function topState(arr) {
+  if (!arr?.length) return 'EMPTY';
+  const prio = { EMPTY:0, PLANNED:1, SUBMITTED:2, AUTHORISED:3, INVOICED:4, PAID:5 };
+  let s = 'EMPTY';
+  for (const it of arr) { const st = String(it.state||'EMPTY').toUpperCase(); if ((prio[st]||0) > (prio[s]||0)) s = st; }
+  return s;
+}
+
+// Build payloads for commit
+function buildPlanRangesFromStage(contractId) {
+  const st = getContractCalendarStageState(contractId);
+  const adds = [...st.add];
+  const rems = [...st.remove];
+
+  const addRanges = [];
+  if (adds.length) {
+    // Single range with explicit per-dates (we send explicit objects to avoid weekday-mask semantics)
+    const bounds = computeSelectionBounds(adds);
+    addRanges.push({ from: bounds.from, to: bounds.to, days: adds.sort().map(d => ({ date:d })), merge:'append', when_timesheet_exists:'create_additional' });
+  }
+
+  const removeRanges = [];
+  if (rems.length) {
+    const bounds = computeSelectionBounds(rems);
+    removeRanges.push({ from: bounds.from, to: bounds.to, days: rems.sort() });
+  }
+
+  // Additional per base week id groups will be handled separately
+  const additionals = Object.entries(st.additional).map(([baseWeekId, set]) => ({ baseWeekId, dates: [...set].sort() }));
+
+  return { addRanges, removeRanges, additionals };
+}
+
+async function commitContractCalendarStage(contractId) {
+  const { addRanges, removeRanges, additionals } = buildPlanRangesFromStage(contractId);
+  // Commit sequence: (1) addRanges, (2) removeRanges, (3) additionals
+  if (addRanges.length) {
+    await contractsPlanRanges(contractId, { extend_contract_window:false, ranges: addRanges });
+  }
+  if (removeRanges.length) {
+    await contractsUnplanRanges(contractId, { when_timesheet_exists:'skip', empty_week_action:'cancel', ranges: removeRanges });
+  }
+  if (additionals.length) {
+    // For each base week create an additional and patch plan
+    for (const g of additionals) {
+      const addRow = await contractWeekCreateAdditional(g.baseWeekId);
+      const payload = { add: g.dates.map(d => ({ date:d })), merge:'append' };
+      await contractWeekPlanPatch(addRow.id, payload);
+    }
+  }
+  clearContractCalendarStageState(contractId);
+}
+
+function revertContractCalendarStage(contractId) {
+  clearContractCalendarStageState(contractId);
+}
+
+// ============================================================================
+// CALENDAR – API WRAPPERS
+// ============================================================================
+
+async function getContractCalendar(contract_id, opts) {
+  const qs = new URLSearchParams();
+  if (typeof opts === 'number') {
+    qs.set('year', String(opts));
+  } else if (opts && typeof opts === 'object') {
+    if (opts.from) qs.set('from', String(opts.from));
+    if (opts.to) qs.set('to',   String(opts.to));
+    if (opts.granularity) qs.set('granularity', String(opts.granularity)); else qs.set('granularity', 'week');
+    if (!opts.from && !opts.to && opts.year) qs.set('year', String(opts.year));
+  } else {
+    qs.set('year', String((new Date()).getUTCFullYear()));
+  }
+  const url = `/api/contracts/${_enc(contract_id)}/calendar?` + qs.toString();
+  const r = await authFetch(API(url));
+  if (!r?.ok) throw new Error('Calendar fetch failed');
+  return r.json();
+}
+async function getContractCalendarRange(contract_id, from, to, granularity = 'day') {
+  return getContractCalendar(contract_id, { from, to, granularity });
+}
+async function getCandidateCalendar(candidate_id, from, to) {
+  const qs = new URLSearchParams(); qs.set('from', from); qs.set('to', to);
+  const r = await authFetch(API(`/api/candidates/${_enc(candidate_id)}/calendar?` + qs.toString()));
+  if (!r?.ok) throw new Error('Candidate calendar fetch failed');
+  return r.json();
+}
+async function contractsPlanRanges(contract_id, payload) {
+  const r = await authFetch(API(`/api/contracts/${_enc(contract_id)}/plan-ranges`), { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify(payload) });
+  if (!r?.ok) throw new Error(await r.text()); return r.json();
+}
+async function contractsUnplanRanges(contract_id, payload) {
+  const r = await authFetch(API(`/api/contracts/${_enc(contract_id)}/plan-ranges`), { method:'DELETE', headers:{'content-type':'application/json'}, body: JSON.stringify(payload) });
+  if (!r?.ok) throw new Error(await r.text()); return r.json();
+}
+async function contractWeekPlanPatch(week_id, payload) {
+  const r = await authFetch(API(`/api/contract-weeks/${_enc(week_id)}/plan`), { method:'PATCH', headers:{'content-type':'application/json'}, body: JSON.stringify(payload) });
+  if (!r?.ok) throw new Error(await r.text()); return r.json();
+}
+
+// ============================================================================
+// CALENDAR – CONTEXT MENU
+// ============================================================================
+function openCalendarContextMenu({ anchorEl, bucketKey, selection, capabilities, onAction }) {
+  document.getElementById('calCtxMenu')?.remove();
+  const menu = document.createElement('div');
+  menu.id = 'calCtxMenu'; menu.className = 'ctx-menu';
+  menu.style.position = 'absolute'; menu.style.zIndex = 10000;
+  menu.style.top  = (window.scrollY + anchorEl.getBoundingClientRect().bottom) + 'px';
+  menu.style.left = (window.scrollX + anchorEl.getBoundingClientRect().left) + 'px';
+  menu.innerHTML = `
+    <div class="ctx-item ${capabilities.canBook ? '' : 'disabled'}"  data-act="book">Book</div>
+    <div class="ctx-item ${capabilities.canUnbook ? '' : 'disabled'}" data-act="unbook">Unbook</div>
+    <div class="ctx-item ${capabilities.canAddAdditional ? '' : 'disabled'}" data-act="additional">Add additional sheet</div>
+  `;
+  document.body.appendChild(menu);
+  const close = () => { try { menu.remove(); } catch {} };
+  menu.addEventListener('click', (e) => { const act = e.target?.getAttribute?.('data-act'); if (!act || e.target.classList.contains('disabled')) return; close(); onAction && onAction({ type: act, selection }); });
+  const onDoc = (e) => { if (!menu.contains(e.target)) { close(); document.removeEventListener('mousedown', onDoc, true); } };
+  setTimeout(()=> document.addEventListener('mousedown', onDoc, true), 0);
+}
+
+// ============================================================================
+// CALENDAR – GENERIC DAY GRID
+// ============================================================================
+function renderDayGrid(hostEl, opts) {
+  if (!hostEl) return;
+  const { from, to, itemsByDate, view, bucketKey } = opts;
+  const sel = initSelBucket(bucketKey);
+
+  hostEl.innerHTML = '';
+  const toolbar = document.createElement('div');
+  toolbar.className = 'row'; toolbar.style.justifyContent='space-between'; toolbar.style.alignItems='center';
+  toolbar.innerHTML = `
+    <div class="actions">
+      <button id="calPrev">◀</button>
+      <button id="calNext">▶</button>
+      <button id="calToggle">${view === 'year' ? 'Month view' : 'Year view'}</button>
+    </div>
+    <div class="hint">${from} → ${to}</div>`;
+  hostEl.appendChild(toolbar);
+
+  const wrap = document.createElement('div'); wrap.className = (view === 'year') ? 'year-wrap' : 'month-wrap'; hostEl.appendChild(wrap);
+
+  const months = [];
+  if (view === 'year') { const y = ymdToDate(from).getUTCFullYear(); for (let m = 0; m < 12; m++) months.push({ y, m }); }
+  else { const d0 = ymdToDate(from); months.push({ y:d0.getUTCFullYear(), m:d0.getUTCMonth() }); }
+
+  for (const { y, m } of months) {
+    const box = document.createElement('div'); box.className='month';
+    box.innerHTML = `<h4>${new Date(Date.UTC(y, m, 1)).toLocaleString(undefined,{month:'long'})} ${y}</h4>`;
+    const days = document.createElement('div'); days.className = (view === 'year') ? 'days' : 'days days-large';
+
+    const first = new Date(Date.UTC(y, m, 1)); for (let i=0;i<first.getUTCDay();i++) days.appendChild(document.createElement('div'));
+    const daysInMonth = new Date(Date.UTC(y, m+1, 0)).getUTCDate();
+
+    for (let d=1; d<=daysInMonth; d++) {
+      const cell = document.createElement('div'); cell.className='d';
+      const dYmd = `${y}-${String(m+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
+      const items = itemsByDate.get(dYmd) || [];
+      const finalState = topState(items);
+      const cls = colorForState(finalState); if (cls) cell.classList.add(cls);
+      if (sel.set.has(dYmd)) cell.classList.add('selected');
+
+      const dow = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][new Date(Date.UTC(y, m, d)).getUTCDay()];
+      cell.innerHTML = `<div class="ico"><div class="dow">${dow.slice(0,3)}</div><div class="num">${d}</div></div>`;
+      cell.setAttribute('data-date', dYmd);
+
+      // Selection
+      cell.addEventListener('click', (ev) => {
+        const additive = ev.ctrlKey || ev.metaKey;
+        const useRange = ev.shiftKey && initSelBucket(bucketKey).anchor;
+        if (useRange) selectRange(bucketKey, initSelBucket(bucketKey).anchor, dYmd, additive);
+        else toggleDaySelected(bucketKey, dYmd, additive);
+
+        wrap.querySelectorAll('.d.selected').forEach(n => n.classList.remove('selected'));
+        initSelBucket(bucketKey).set.forEach(s => { const dom = wrap.querySelector(`.d[data-date="${CSS.escape(s)}"]`); if (dom) dom.classList.add('selected'); });
+      });
+
+      // Context menu
+      cell.addEventListener('contextmenu', (ev) => {
+        ev.preventDefault();
+        const selSet = initSelBucket(bucketKey).set;
+        if (!selSet.has(dYmd)) { clearCalendarSelection(bucketKey); toggleDaySelected(bucketKey, dYmd, false); cell.classList.add('selected'); }
+        opts.onCellContextMenu && opts.onCellContextMenu(dYmd, ev);
+      });
+
+      days.appendChild(cell);
+    }
+    box.appendChild(days); wrap.appendChild(box);
+  }
+
+  toolbar.querySelector('#calPrev')?.addEventListener('click', () => opts.onNav && opts.onNav(-1));
+  toolbar.querySelector('#calNext')?.addEventListener('click', () => opts.onNav && opts.onNav(1));
+  toolbar.querySelector('#calToggle')?.addEventListener('click', () => opts.onToggleView && opts.onToggleView());
+}
+
+// ============================================================================
+// CALENDAR – LEGEND
+// ============================================================================
+function renderCalendarLegend(container) {
+  if (!container) return;
+  container.innerHTML = `
+    <div class="legend">
+      <span class="chip cal-planned">Planned</span>
+      <span class="chip cal-submitted">Submitted</span>
+      <span class="chip cal-authorised">Authorised</span>
+      <span class="chip cal-invoiced">Invoiced</span>
+      <span class="chip cal-paid">Paid</span>
+      <span class="chip">Not booked</span>
+    </div>`;
+}
+
+// ============================================================================
+// CONTRACTS – FETCH & RENDER (DAY CALENDAR) with STAGING
+// ============================================================================
+async function fetchAndRenderContractCalendar(contractId, opts /* { from,to, view } */) {
+  const state = (window.__calState[contractId] ||= { view:'year', win: computeYearWindow((new Date()).getUTCFullYear()), weekEndingWeekday: (window.modalCtx?.data?.week_ending_weekday_snapshot ?? 0) });
+
+  if (opts?.view) state.view = opts.view;
+  if (opts?.from && opts?.to) state.win = { from: opts.from, to: opts.to };
+
+  const holder = byId('contractCalendarHolder'); if (!holder) return;
+
+  // fetch day rows
+  const dayResp = await getContractCalendarRange(contractId, state.win.from, state.win.to, 'day');
+  const dayItems = Array.isArray(dayResp?.items) ? dayResp.items : [];
+
+  // fetch weeks (for base TS info)
+  const weeksForIndex = (await getContractCalendar(contractId, { from: state.win.from, to: state.win.to, granularity:'week' })).items || [];
+  const weekIndex = buildWeekIndex(weeksForIndex);
+
+  // overlay staged changes
+  const overlayedMap = applyStagedContractCalendarOverlay(contractId, buildDateIndex(dayItems), weekIndex);
+
+  // render grid
+  const gridHost = document.createElement('div'); gridHost.id = 'contractDayGrid';
+  holder.innerHTML = ''; holder.appendChild(gridHost);
+
+  renderDayGrid(gridHost, {
+    from: state.win.from, to: state.win.to, itemsByDate: overlayedMap, view: state.view, bucketKey: `c:${contractId}`,
+    onNav: async (delta) => { const nextWin = stepMonth(state.win, delta); await fetchAndRenderContractCalendar(contractId, { from: nextWin.from, to: nextWin.to }); },
+    onToggleView: async () => {
+      const newView = (state.view === 'year') ? 'month' : 'year';
+      let win = state.win;
+      if (newView === 'year') { const y = ymdToDate(state.win.from).getUTCFullYear(); win = computeYearWindow(y); }
+      else { const dt = ymdToDate(state.win.from); win = computeMonthWindow(dt.getUTCFullYear(), dt.getUTCMonth()); }
+      await fetchAndRenderContractCalendar(contractId, { from: win.from, to: win.to, view: newView });
+    },
+    onCellContextMenu: (theDate, ev) => {
+      const sel = initSelBucket(`c:${contractId}`).set; const selArr = [...sel];
+      const resolveFinalState = (d) => topState(overlayedMap.get(d) || []);
+      const allEmpty = selArr.every(d => resolveFinalState(d) === 'EMPTY');
+      const allPlannedAndNoTs = selArr.every(d => {
+        const we = computeWeekEnding(d, state.weekEndingWeekday);
+        const week = weekIndex.get(we);
+        return resolveFinalState(d) === 'PLANNED' && week && !week.baseHasTs;
+      });
+      const canAddAdditional = selArr.some(d => {
+        const st = resolveFinalState(d); const we = computeWeekEnding(d, state.weekEndingWeekday); const w = weekIndex.get(we);
+        return st === 'EMPTY' && w && w.baseHasTs && w.baseWeekId;
+      });
+
+      openCalendarContextMenu({
+        anchorEl: ev.target,
+        bucketKey: `c:${contractId}`,
+        selection: selArr,
+        capabilities: { canBook: allEmpty, canUnbook: allPlannedAndNoTs, canAddAdditional },
+        onAction: async ({ type, selection }) => {
+          try {
+            if (type === 'book') {
+              stageContractCalendarBookings(contractId, selection);
+            }
+            if (type === 'unbook') {
+              stageContractCalendarUnbookings(contractId, selection);
+            }
+            if (type === 'additional') {
+              // group by base week id
+              const byBase = {};
+              for (const d of selection) {
+                const we = computeWeekEnding(d, state.weekEndingWeekday);
+                const wi = weekIndex.get(we);
+                if (!wi || !wi.baseWeekId || !wi.baseHasTs) continue;
+                (byBase[wi.baseWeekId] ||= []).push(d);
+              }
+              for (const [baseWeekId, dates] of Object.entries(byBase)) {
+                stageContractCalendarAdditional(contractId, baseWeekId, dates);
+              }
+            }
+            // re-render with overlay
+            await fetchAndRenderContractCalendar(contractId, { from: state.win.from, to: state.win.to });
+          } catch (e) {
+            alert(e?.message || e);
+          }
+        }
+      });
+    }
+  });
+
+  // Legend
+  const legend = document.createElement('div'); legend.id = 'contractCalLegend'; holder.appendChild(legend); renderCalendarLegend(legend);
+
+  // Save / Discard controls (only visible if staged)
+  wireContractCalendarSaveControls(contractId, holder, weekIndex);
+}
+
+function wireContractCalendarSaveControls(contractId, holder, weekIndex) {
+  // Remove old bar
+  holder.querySelector('#calSaveBar')?.remove();
+
+  const st = getContractCalendarStageState(contractId);
+  const hasPending = st.add.size || st.remove.size || Object.keys(st.additional).length;
+
+  const bar = document.createElement('div');
+  bar.id = 'calSaveBar';
+  bar.className = 'actions';
+  bar.style.marginTop = '10px';
+  bar.innerHTML = `
+    <span class="hint">Pending changes: ${hasPending ? 'Yes' : 'No'}</span>
+    <button id="calSave" ${hasPending ? '' : 'disabled'}>Save</button>
+    <button id="calDiscard" ${hasPending ? '' : 'disabled'}>Discard</button>
+  `;
+  holder.appendChild(bar);
+
+  bar.querySelector('#calSave')?.addEventListener('click', async () => {
+    try {
+      await commitContractCalendarStage(contractId);
+      alert('Calendar changes saved.');
+      const s = window.__calState[contractId];
+      await fetchAndRenderContractCalendar(contractId, { from: s.win.from, to: s.win.to, view: s.view });
+    } catch (e) {
+      alert(e?.message || e);
+      // On error, revert overlay to last server state
+      revertContractCalendarStage(contractId);
+      const s = window.__calState[contractId];
+      await fetchAndRenderContractCalendar(contractId, { from: s.win.from, to: s.win.to, view: s.view });
+    }
+  });
+
+  bar.querySelector('#calDiscard')?.addEventListener('click', async () => {
+    revertContractCalendarStage(contractId);
+    const s = window.__calState[contractId];
+    await fetchAndRenderContractCalendar(contractId, { from: s.win.from, to: s.win.to, view: s.view });
+  });
+}
+
+// ============================================================================
+// CONTRACTS – TAB RENDERER
+// ============================================================================
+function renderContractCalendarTab(ctx) {
+  const c = ctx?.data || {}; const holderId = 'contractCalendarHolder';
+
+  if (!c.id) {
+    return `
+      <div id="${holderId}" class="tabc">
+        <div class="hint">Save the contract to unlock the calendar (weeks are generated after save).</div>
+        <div class="actions" style="margin-top:8px">
+          <button disabled>Generate weeks</button>
+          <button disabled>Skip weeks…</button>
+          <button disabled>Clone & Extend…</button>
+        </div>
+      </div>`;
+  }
+
+  // seed week-ending weekday into state
+  (window.__calState[c.id] ||= {}).weekEndingWeekday = (c.week_ending_weekday_snapshot ?? 0);
+
+  setTimeout(async () => {
+    try {
+      const y = (new Date()).getUTCFullYear(); const win = computeYearWindow(y);
+      const el = byId(holderId); if (!el) return;
+      el.innerHTML = `<div class="tabc" id="__contractCal"></div>`;
+      await fetchAndRenderContractCalendar(c.id, { from: win.from, to: win.to, view:'year' });
+
+      const host = byId('__contractCal');
+      const actionRow = document.createElement('div');
+      actionRow.className = 'actions'; actionRow.style.marginTop = '8px';
+      actionRow.innerHTML = `
+        <button id="btnGenWeeks">Generate weeks</button>
+        <button id="btnSkipWeeks">Skip weeks…</button>
+        <button id="btnCloneExtend">Clone & Extend…</button>`;
+      el.insertBefore(actionRow, host);
+
+      el.querySelector('#btnGenWeeks')?.addEventListener('click', async () => {
+        try { await generateContractWeeks(c.id); alert('Weeks generated (idempotent).'); } catch (e) { alert(e?.message || e); }
+        const s = window.__calState[c.id]; await fetchAndRenderContractCalendar(c.id, { from: s.win.from, to: s.win.to, view: s.view });
+      });
+      el.querySelector('#btnSkipWeeks')?.addEventListener('click', () => openContractSkipWeeks(c.id));
+      el.querySelector('#btnCloneExtend')?.addEventListener('click', () => openContractCloneAndExtend(c.id));
+    } catch (e) {
+      const el = byId(holderId); if (el) el.innerHTML = `<div class="error">Calendar load failed.</div>`;
+    }
+  }, 0);
+
+  return `<div id="${holderId}" class="tabc"><div class="hint">Loading calendar…</div></div>`;
+}
+
+// ============================================================================
+// CANDIDATE – RENDER CALENDAR TAB
+// ============================================================================
+async function fetchAndRenderCandidateCalendar(candidateId, opts /* { from,to, view, filterContractId? } */) {
+  const state = (window.__candCalState[candidateId] ||= { view:'year', win: computeYearWindow((new Date()).getUTCFullYear()), filterContractId: null });
+
+  if (opts?.view) state.view = opts.view;
+  if (opts?.from && opts?.to) state.win = { from: opts.from, to: opts.to };
+  if ('filterContractId' in (opts||{})) state.filterContractId = opts.filterContractId;
+
+  const host = byId('candidateCalendarHolder'); if (!host) return;
+
+  const res = await getCandidateCalendar(candidateId, state.win.from, state.win.to);
+  let items = Array.isArray(res?.items) ? res.items : [];
+
+  // Build contract list (now includes client_name from API)
+  const contractMap = new Map(); // contract_id -> { client_name, role, band, from, to }
+  for (const it of items) {
+    const cid = it.contract_id || null; if (!cid) continue;
+    const cur = contractMap.get(cid) || { client_name: it.client_name || null, role: it.role || null, band: it.band || null, from: it.date, to: it.date };
+    if (it.date < cur.from) cur.from = it.date; if (it.date > cur.to) cur.to = it.date;
+    // prefer a non-null client_name
+    if (!cur.client_name && it.client_name) cur.client_name = it.client_name;
+    contractMap.set(cid, cur);
+  }
+
+  if (state.filterContractId) {
+    items = items.map(it => (it.contract_id === state.filterContractId ? it : { ...it, state:'EMPTY' }));
+  }
+
+  const itemsByDate = buildDateIndex(items);
+
+  host.innerHTML = '';
+  const gridHost = document.createElement('div'); gridHost.id = 'candDayGrid'; host.appendChild(gridHost);
+
+  renderDayGrid(gridHost, {
+    from: state.win.from, to: state.win.to, itemsByDate, view: state.view, bucketKey: `cand:${candidateId}`,
+    onNav: async (delta) => { const nextWin = stepMonth(state.win, delta); await fetchAndRenderCandidateCalendar(candidateId, { from: nextWin.from, to: nextWin.to }); },
+    onToggleView: async () => {
+      const newView = (state.view === 'year') ? 'month' : 'year'; let win = state.win;
+      if (newView === 'year') { const y = ymdToDate(state.win.from).getUTCFullYear(); win = computeYearWindow(y); }
+      else { const dt = ymdToDate(state.win.from); win = computeMonthWindow(dt.getUTCFullYear(), dt.getUTCMonth()); }
+      await fetchAndRenderCandidateCalendar(candidateId, { from: win.from, to: win.to, view: newView, filterContractId: state.filterContractId });
+    },
+    onCellContextMenu: () => { /* read-only for candidate calendar */ }
+  });
+
+  const legend = document.createElement('div'); legend.id = 'candCalLegend'; host.appendChild(legend); renderCalendarLegend(legend);
+
+  const listHost = document.createElement('div'); listHost.id = 'candCalContracts'; listHost.className='contract-list'; host.appendChild(listHost);
+  renderCandidateContractList(listHost, contractMap, {
+    onClick: async (contractId) => { await fetchAndRenderCandidateCalendar(candidateId, { filterContractId: contractId }); },
+    onDblClick: async (contractId) => { try { const row = await getContract(contractId); openContract(row); } catch (e) { alert(e?.message||e); } },
+    onClear: async () => { await fetchAndRenderCandidateCalendar(candidateId, { filterContractId: null }); }
+  });
+}
+
+function renderCandidateContractList(container, contractMap, handlers) {
+  container.innerHTML = '';
+  const title = document.createElement('div'); title.className='hint'; title.textContent='Contracts in view:'; container.appendChild(title);
+
+  const list = document.createElement('div'); list.className='list';
+  contractMap.forEach((v, cid) => {
+    const row = document.createElement('div'); row.className='row item'; row.tabIndex = 0;
+    row.innerHTML = `
+      <span class="txt">${(v.client_name || 'Client')} • ${(v.role||'Role')}${v.band?` • ${v.band}`:''} • ${v.from} → ${v.to}</span>
+      <span class="act"><button data-act="filter">Show only</button> <button data-act="open">Open</button></span>`;
+    row.querySelector('[data-act="filter"]')?.addEventListener('click', () => handlers.onClick && handlers.onClick(cid));
+    row.querySelector('[data-act="open"]')?.addEventListener('click', () => handlers.onDblClick && handlers.onDblClick(cid));
+    row.addEventListener('dblclick', () => handlers.onDblClick && handlers.onDblClick(cid));
+    list.appendChild(row);
+  });
+  container.appendChild(list);
+
+  if (!contractMap.size) {
+    const none = document.createElement('div'); none.className='hint'; none.textContent='No contracts in this window.'; container.appendChild(none);
+  }
+
+  const clear = document.createElement('div'); clear.className='actions';
+  clear.innerHTML = `<button id="candClearFilter">Clear filter</button>`; container.appendChild(clear);
+  clear.querySelector('#candClearFilter')?.addEventListener('click', () => handlers.onClear && handlers.onClear());
 }
 
 
