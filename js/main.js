@@ -1187,15 +1187,15 @@ function openContract(row) {
   const hasId = !!window.modalCtx.data?.id;
 
   showModal(
-  isCreate ? 'Create Contract' : 'Edit Contract',
-  tabs,
-  (key, row) => {
-    const ctx = { data: row }; // use merged row from the framework
-    if (key === 'main')     return renderContractMainTab(ctx);
-    if (key === 'rates')    return renderContractRatesTab(ctx);
-    if (key === 'calendar') return renderContractCalendarTab(ctx);
-    return `<div class="tabc">Unknown tab.</div>`;
-  },
+    isCreate ? 'Create Contract' : 'Edit Contract',
+    tabs,
+    (key, row) => {
+      const ctx = { data: row }; // use merged row from the framework
+      if (key === 'main')     return renderContractMainTab(ctx);
+      if (key === 'rates')    return renderContractRatesTab(ctx);
+      if (key === 'calendar') return renderContractCalendarTab(ctx);
+      return `<div class="tabc">Unknown tab.</div>`;
+    },
     async () => {
       if (window.modalCtx?._saveInFlight) return false;
       window.modalCtx._saveInFlight = true;
@@ -1295,6 +1295,7 @@ function openContract(row) {
           console.log('[CONTRACTS] onSave payload (preview)', preview);
         }
 
+        // 1) Overlap check + upsert contract
         const ok = await preSaveContractWithOverlapCheck(data);
         if (!ok) { if (LOGC) console.log('[CONTRACTS] Save ABORTED by user after overlap dialog'); window.modalCtx._saveInFlight = false; return false; }
 
@@ -1306,14 +1307,26 @@ function openContract(row) {
         try {
           const warnings = saved?.warnings || saved?.contract?.warnings || [];
           const warnStr  = Array.isArray(warnings) ? warnings.join(', ') : (saved?.warning || '');
-          if (warnStr) showModalHint(`Warning: ${warnStr}`, 'warn');
+          if (warnStr) showModalHint?.(`Warning: ${warnStr}`, 'warn');
         } catch {}
 
+        // 2) Generate weeks if newly created
         const contractId = saved?.id || saved?.contract?.id;
         if (isCreate && contractId) {
           try { if (LOGC) console.log('[CONTRACTS] generateContractWeeks', { contractId }); await generateContractWeeks(contractId); } catch (e) { if (LOGC) console.warn('[CONTRACTS] generateContractWeeks failed', e); }
         }
 
+        // 3) Commit calendar if there is any staged change (single big Save behaviour)
+        if (contractId) {
+          const calRes = await commitContractCalendarStageIfPending(contractId);
+          if (!calRes.ok) {
+            // Warn but continue: form has been saved successfully
+            const msg = `Calendar save failed: ${calRes.message || 'unknown error'}. Contract details were saved.`;
+            if (typeof showModalHint === 'function') showModalHint(msg, 'warn'); else alert(msg);
+          }
+        }
+
+        // 4) Close & refresh
         try { discardAllModalsAndState(); } catch {}
         await renderAll();
         return true;
@@ -1346,6 +1359,8 @@ function openContract(row) {
               const v = t.type === 'checkbox' ? (t.checked ? 'on' : '') : t.value;
               setContractFormValue(t.name, v);
               if (t.name === 'pay_method_snapshot' || /^(paye_|umb_|charge_)/.test(t.name)) computeContractMargins();
+              // Mark modal dirty when anything changes
+              try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
             };
             form.addEventListener('input', stage, true);
             form.addEventListener('change', stage, true);
@@ -1487,6 +1502,8 @@ function openContract(row) {
                 }
 
                 closeMenu();
+                // mark modal dirty
+                try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
               };
 
               let debTimer = 0;
@@ -1582,6 +1599,7 @@ function openContract(row) {
                   window.modalCtx.data = window.modalCtx.data || {};
                   delete window.modalCtx.data.candidate_id; delete window.modalCtx.data.candidate_display;
                 } catch {}
+                try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
               });
               if (LOGC) console.log('[CONTRACTS] wired btnClearCandidate');
             }
@@ -1605,6 +1623,7 @@ function openContract(row) {
                     const h = checkClientInvoiceEmailPresence(client);
                     if (h) showModalHint(h, 'warn');
                   } catch (e) { if (LOGC) console.warn('[CONTRACTS] client hint check failed', e); }
+                  try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
                 });
               });
               if (LOGC) console.log('[CONTRACTS] wired btnPickClient');
@@ -1621,6 +1640,7 @@ function openContract(row) {
                   window.modalCtx.data = window.modalCtx.data || {};
                   delete window.modalCtx.data.client_id; delete window.modalCtx.data.client_name;
                 } catch {}
+                try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
               });
               if (LOGC) console.log('[CONTRACTS] wired btnClearClient');
             }
@@ -1645,6 +1665,7 @@ function openContract(row) {
             if (/^(paye_|umb_|charge_)/.test(t.name)) {
               setContractFormValue(t.name, t.value);
               computeContractMargins();
+              try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
             }
           };
           ratesTab.addEventListener('input', stageRates, true);
@@ -1685,7 +1706,6 @@ function openContract(row) {
     }
   }, 0);
 }
-
 
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -6383,6 +6403,7 @@ function isAnyModalDirty(){
   return st.some(f => f && f.isDirty);
 }
 // ==================== discardAllModalsAndState (kept with geometry reset) ====================
+
 function discardAllModalsAndState(){
   try {
     if (modalCtx && modalCtx._rolesUpdatedHandler) {
@@ -6407,6 +6428,17 @@ function discardAllModalsAndState(){
       }
     }
   } catch (_) {}
+
+  // Clear any staged calendar changes for open contracts (defensive sweep)
+  try {
+    if (window.__calStage && typeof clearContractCalendarStageState === 'function') {
+      for (const contractId of Object.keys(window.__calStage)) {
+        try { clearContractCalendarStageState(contractId); } catch {}
+      }
+    }
+  } catch (e) {
+    console.warn('[MODAL] calendar stage cleanup failed', e);
+  }
 
   // Reset modal geometry to prevent "snap to right" on the next open
   const modal = byId('modal');
@@ -6448,6 +6480,7 @@ function discardAllModalsAndState(){
 }
 
 
+
 function confirmDiscardChangesIfDirty(){
   if (!isAnyModalDirty()) return true; // not dirty → acts as plain "Close" guard
   const ok = window.confirm('You have unsaved changes. Discard them and continue?');
@@ -6467,10 +6500,28 @@ function confirmDiscardChangesIfDirty(){
   document.onmousemove = null;
   document.onmouseup   = null;
 
+  // Discard also clears any staged calendar changes (handled inside)
   discardAllModalsAndState();
   return true;
 }
 
+
+async function commitContractCalendarStageIfPending(contractId) {
+  const LOG_CAL = (typeof window.__LOG_CAL === 'boolean') ? window.__LOG_CAL : true;
+  const L = (...a)=> { if (LOG_CAL) console.log('[CAL][commitIfPending]', ...a); };
+  try {
+    const st = getContractCalendarStageState(contractId);
+    const hasPending = st && (st.add.size || st.remove.size || Object.keys(st.additional||{}).length);
+    if (!hasPending) { L('no pending calendar changes'); return { ok: true, detail: 'no-op' }; }
+
+    await commitContractCalendarStage(contractId);
+    L('calendar commit ok');
+    return { ok: true, detail: 'calendar saved' };
+  } catch (e) {
+    console.warn('[CAL][commitIfPending] failed', e);
+    return { ok: false, message: e?.message || 'Calendar commit failed' };
+  }
+}
 
 // ====================== mountCandidateRatesTab (FIXED) ======================
 // =================== MOUNT CANDIDATE RATES TAB (unchanged flow) ===================
@@ -8643,44 +8694,11 @@ async function fetchAndRenderContractCalendar(contractId, opts /* { from,to, vie
   });
 }
 
+// Calendar Save/Discard is deprecated — keep as a no-op to avoid breaking older calls.
 function wireContractCalendarSaveControls(contractId, holder, weekIndex) {
-  // Remove old bar
+  // Remove old bar if present, and do not render anything new
   holder.querySelector('#calSaveBar')?.remove();
-
-  const st = getContractCalendarStageState(contractId);
-  const hasPending = st.add.size || st.remove.size || Object.keys(st.additional).length;
-
-  const bar = document.createElement('div');
-  bar.id = 'calSaveBar';
-  bar.className = 'actions';
-  bar.style.marginTop = '10px';
-  bar.innerHTML = `
-    <span class="hint">Pending changes: ${hasPending ? 'Yes' : 'No'}</span>
-    <button id="calSave" ${hasPending ? '' : 'disabled'}>Save</button>
-    <button id="calDiscard" ${hasPending ? '' : 'disabled'}>Discard</button>
-  `;
-  holder.appendChild(bar);
-
-  bar.querySelector('#calSave')?.addEventListener('click', async () => {
-    try {
-      await commitContractCalendarStage(contractId);
-      alert('Calendar changes saved.');
-      const s = window.__calState[contractId];
-      await fetchAndRenderContractCalendar(contractId, { from: s.win.from, to: s.win.to, view: s.view });
-    } catch (e) {
-      alert(e?.message || e);
-      // On error, revert overlay to last server state
-      revertContractCalendarStage(contractId);
-      const s = window.__calState[contractId];
-      await fetchAndRenderContractCalendar(contractId, { from: s.win.from, to: s.win.to, view: s.view });
-    }
-  });
-
-  bar.querySelector('#calDiscard')?.addEventListener('click', async () => {
-    revertContractCalendarStage(contractId);
-    const s = window.__calState[contractId];
-    await fetchAndRenderContractCalendar(contractId, { from: s.win.from, to: s.win.to, view: s.view });
-  });
+  // No-op: Big Save (modal) is responsible for committing calendar changes now.
 }
 
 // ============================================================================
@@ -8737,58 +8755,101 @@ function renderContractCalendarTab(ctx) {
 // ============================================================================
 // CANDIDATE – RENDER CALENDAR TAB
 // ============================================================================
-async function fetchAndRenderCandidateCalendar(candidateId, opts /* { from,to, view, filterContractId? } */) {
-  const state = (window.__candCalState[candidateId] ||= { view:'year', win: computeYearWindow((new Date()).getUTCFullYear()), filterContractId: null });
+async function fetchAndRenderContractCalendar(contractId, opts /* { from,to, view } */) {
+  const LOG_CAL = (typeof window.__LOG_CAL === 'boolean') ? window.__LOG_CAL : true;
+  const L = (...a)=> { if (LOG_CAL) console.log('[CAL][contract]', ...a); };
+
+  const state = (window.__calState[contractId] ||= { view:'year', win: computeYearWindow((new Date()).getUTCFullYear()), weekEndingWeekday: (window.modalCtx?.data?.week_ending_weekday_snapshot ?? 0) });
 
   if (opts?.view) state.view = opts.view;
   if (opts?.from && opts?.to) state.win = { from: opts.from, to: opts.to };
-  if ('filterContractId' in (opts||{})) state.filterContractId = opts.filterContractId;
 
-  const host = byId('candidateCalendarHolder'); if (!host) return;
+  const holder = byId('contractCalendarHolder'); if (!holder) return;
 
-  const res = await getCandidateCalendar(candidateId, state.win.from, state.win.to);
-  let items = Array.isArray(res?.items) ? res.items : [];
+  // fetch day rows
+  const dayResp = await getContractCalendarRange(contractId, state.win.from, state.win.to, 'day');
+  const dayItems = Array.isArray(dayResp?.items) ? dayResp.items : [];
 
-  // Build contract list (now includes client_name from API)
-  const contractMap = new Map(); // contract_id -> { client_name, role, band, from, to }
-  for (const it of items) {
-    const cid = it.contract_id || null; if (!cid) continue;
-    const cur = contractMap.get(cid) || { client_name: it.client_name || null, role: it.role || null, band: it.band || null, from: it.date, to: it.date };
-    if (it.date < cur.from) cur.from = it.date; if (it.date > cur.to) cur.to = it.date;
-    // prefer a non-null client_name
-    if (!cur.client_name && it.client_name) cur.client_name = it.client_name;
-    contractMap.set(cid, cur);
-  }
+  // fetch weeks (for base TS info)
+  const weeksForIndex = (await getContractCalendar(contractId, { from: state.win.from, to: state.win.to, granularity:'week' })).items || [];
+  const weekIndex = buildWeekIndex(weeksForIndex);
 
-  if (state.filterContractId) {
-    items = items.map(it => (it.contract_id === state.filterContractId ? it : { ...it, state:'EMPTY' }));
-  }
+  // overlay staged changes
+  const overlayedMap = applyStagedContractCalendarOverlay(contractId, buildDateIndex(dayItems), weekIndex);
 
-  const itemsByDate = buildDateIndex(items);
-
-  host.innerHTML = '';
-  const gridHost = document.createElement('div'); gridHost.id = 'candDayGrid'; host.appendChild(gridHost);
+  // render grid
+  const gridHost = document.createElement('div'); gridHost.id = 'contractDayGrid';
+  holder.innerHTML = ''; holder.appendChild(gridHost);
 
   renderDayGrid(gridHost, {
-    from: state.win.from, to: state.win.to, itemsByDate, view: state.view, bucketKey: `cand:${candidateId}`,
-    onNav: async (delta) => { const nextWin = stepMonth(state.win, delta); await fetchAndRenderCandidateCalendar(candidateId, { from: nextWin.from, to: nextWin.to }); },
+    from: state.win.from, to: state.win.to, itemsByDate: overlayedMap, view: state.view, bucketKey: `c:${contractId}`,
+    onNav: async (delta) => { const nextWin = stepMonth(state.win, delta); await fetchAndRenderContractCalendar(contractId, { from: nextWin.from, to: nextWin.to }); },
     onToggleView: async () => {
-      const newView = (state.view === 'year') ? 'month' : 'year'; let win = state.win;
+      const newView = (state.view === 'year') ? 'month' : 'year';
+      let win = state.win;
       if (newView === 'year') { const y = ymdToDate(state.win.from).getUTCFullYear(); win = computeYearWindow(y); }
       else { const dt = ymdToDate(state.win.from); win = computeMonthWindow(dt.getUTCFullYear(), dt.getUTCMonth()); }
-      await fetchAndRenderCandidateCalendar(candidateId, { from: win.from, to: win.to, view: newView, filterContractId: state.filterContractId });
+      await fetchAndRenderContractCalendar(contractId, { from: win.from, to: win.to, view: newView });
     },
-    onCellContextMenu: () => { /* read-only for candidate calendar */ }
+    onCellContextMenu: (theDate, ev) => {
+      const sel = initSelBucket(`c:${contractId}`).set; const selArr = [...sel];
+      const resolveFinalState = (d) => topState(overlayedMap.get(d) || []);
+      const allEmpty = selArr.every(d => resolveFinalState(d) === 'EMPTY');
+      const allPlannedAndNoTs = selArr.every(d => {
+        const we = computeWeekEnding(d, state.weekEndingWeekday);
+        const week = weekIndex.get(we);
+        return resolveFinalState(d) === 'PLANNED' && week && !week.baseHasTs;
+      });
+      const canAddAdditional = selArr.some(d => {
+        const st = resolveFinalState(d); const we = computeWeekEnding(d, state.weekEndingWeekday); const w = weekIndex.get(we);
+        return st === 'EMPTY' && w && w.baseHasTs && w.baseWeekId;
+      });
+
+      openCalendarContextMenu({
+        anchorEl: ev.target,
+        bucketKey: `c:${contractId}`,
+        selection: selArr,
+        capabilities: { canBook: allEmpty, canUnbook: allPlannedAndNoTs, canAddAdditional },
+        onAction: async ({ type, selection }) => {
+          try {
+            if (type === 'book') {
+              stageContractCalendarBookings(contractId, selection);
+            }
+            if (type === 'unbook') {
+              stageContractCalendarUnbookings(contractId, selection);
+            }
+            if (type === 'additional') {
+              // group by base week id
+              const byBase = {};
+              for (const d of selection) {
+                const we = computeWeekEnding(d, state.weekEndingWeekday);
+                const wi = weekIndex.get(we);
+                if (!wi || !wi.baseWeekId || !wi.baseHasTs) continue;
+                (byBase[wi.baseWeekId] ||= []).push(d);
+              }
+              for (const [baseWeekId, dates] of Object.entries(byBase)) {
+                stageContractCalendarAdditional(contractId, baseWeekId, dates);
+              }
+            }
+            // Mark the modal dirty so big Save enables, even if user switches tabs
+            try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
+
+            // re-render with overlay
+            await fetchAndRenderContractCalendar(contractId, { from: state.win.from, to: state.win.to });
+          } catch (e) {
+            alert(e?.message || e);
+          }
+        }
+      });
+    }
   });
 
-  const legend = document.createElement('div'); legend.id = 'candCalLegend'; host.appendChild(legend); renderCalendarLegend(legend);
+  // Legend only (no calendar Save/Discard UI)
+  const legend = document.createElement('div'); legend.id = 'contractCalLegend'; holder.appendChild(legend); renderCalendarLegend(legend);
 
-  const listHost = document.createElement('div'); listHost.id = 'candCalContracts'; listHost.className='contract-list'; host.appendChild(listHost);
-  renderCandidateContractList(listHost, contractMap, {
-    onClick: async (contractId) => { await fetchAndRenderCandidateCalendar(candidateId, { filterContractId: contractId }); },
-    onDblClick: async (contractId) => { try { const row = await getContract(contractId); openContract(row); } catch (e) { alert(e?.message||e); } },
-    onClear: async () => { await fetchAndRenderCandidateCalendar(candidateId, { filterContractId: null }); }
-  });
+  // Calendar Save/Discard is removed; Big Save commits calendar.
+  // (Keep the function defined for back-compat, but it is a no-op now.)
+  // wireContractCalendarSaveControls(contractId, holder, weekIndex); // ← deliberately NOT called
 }
 
 function renderCandidateContractList(container, contractMap, handlers) {
@@ -12036,7 +12097,6 @@ async function commitContractCalendarStage(contractId) {
   clearContractCalendarStageState(contractId);
   L('DONE: stage cleared for', contractId);
 }
-
 
 
 // ===== Boot =====
