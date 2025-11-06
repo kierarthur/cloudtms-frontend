@@ -810,6 +810,7 @@ async function getContract(contract_id) {
   if (!r?.ok) return null;
   return r.json();
 }
+
 async function upsertContract(payload, id /* optional */) {
   // Accepts all contract fields + optional bucket_labels_json
   // Normalise bucket_labels to either null or a strict 5-key object
@@ -819,8 +820,67 @@ async function upsertContract(payload, id /* optional */) {
     patch.bucket_labels_json = (norm === false) ? null : norm;
   }
 
-  const url = id ? `/api/contracts/${_enc(id)}` : `/api/contracts`;
+  // ── Pre-seed rates_json when updating from non-Rates tabs ─────────────────
+  // Goal: if user clicked Save from Calendar/Main (where rate inputs aren’t mounted),
+  // keep existing rates instead of accidentally overwriting with zeros.
+  const BUCKETS = ['paye_day','paye_night','paye_sat','paye_sun','paye_bh','umb_day','umb_night','umb_sat','umb_sun','umb_bh','charge_day','charge_night','charge_sat','charge_sun','charge_bh'];
+
   const method = id ? 'PUT' : 'POST';
+  const url = id ? `/api/contracts/${_enc(id)}` : `/api/contracts`;
+
+  try {
+    const currentTab = (window.modalCtx && window.modalCtx.currentTabKey) || null;
+    const baseRates = (window.modalCtx && window.modalCtx.data && window.modalCtx.data.rates_json) || {};
+    const isRatesTab = currentTab === 'rates' || currentTab === 'pay';
+
+    if (id) {
+      // Only relevant for updates (PUT). Ensure patch.rates_json exists
+      const incoming = (patch.rates_json && typeof patch.rates_json === 'object') ? patch.rates_json : {};
+
+      // Build merged object: if on non-Rates tab, prefer existing for any bucket that is
+      // missing or non-finite. Keep explicit numbers (including 0) when on Rates/Pay tab.
+      const merged = {};
+      for (const k of BUCKETS) {
+        const v = incoming[k];
+        const num = Number(v);
+        const hasFinite = Number.isFinite(num);
+
+        if (isRatesTab) {
+          // On the Rates/Pay tab, take what the user set (including 0).
+          merged[k] = hasFinite ? num : (baseRates?.[k] ?? undefined);
+        } else {
+          // Not on Rates/Pay tab:
+          // - If the incoming value is a positive finite number, keep it (rare).
+          // - If it's 0 or not provided/NaN, prefer the existing baseRates.
+          if (hasFinite && num > 0) {
+            merged[k] = num;
+          } else if (baseRates && baseRates[k] != null && Number.isFinite(Number(baseRates[k]))) {
+            merged[k] = Number(baseRates[k]);
+          } else if (hasFinite) {
+            // If we truly have a finite number (0) and nothing in base, keep it.
+            merged[k] = num;
+          }
+          // Otherwise leave undefined to avoid overwriting in Worker PATCH→PUT pathway.
+        }
+      }
+
+      // If we merged anything, write it back (ensures we don't send an all-zeros blob)
+      patch.rates_json = merged;
+    }
+
+    // 🔎 client-side logging of the final payload that will be sent
+    console.groupCollapsed('[CONTRACTS][UPSERT] sending');
+    console.log('method', method, 'url', API(url));
+    console.log('currentTab', currentTab);
+    console.log('payload (final)', patch);
+    if (id) {
+      console.log('baseRates (from modalCtx.data.rates_json)', baseRates);
+    }
+    console.groupEnd();
+  } catch (e) {
+    // Don’t block on logging problems
+    try { console.warn('[CONTRACTS][UPSERT] logging/pre-seed failed', e); } catch {}
+  }
 
   const res = await authFetch(API(url), {
     method,
@@ -829,7 +889,7 @@ async function upsertContract(payload, id /* optional */) {
   });
 
   let data = null;
-  try { data = await res.json(); } catch (_) { /* non-JSON error bodies are possible */ }
+  try { data = await res.json(); } catch (_) {}
 
   if (!res || !res.ok) {
     const msg =
@@ -839,9 +899,11 @@ async function upsertContract(payload, id /* optional */) {
     throw new Error(msg);
   }
 
+  // 🔎 log success summary
+  try { console.log('[CONTRACTS][UPSERT] success', { method, id, status: res.status }); } catch {}
+
   return data;
 }
-
 
 async function deleteContract(contract_id) {
   const r = await authFetch(API(`/api/contracts/${_enc(contract_id)}`), { method: 'DELETE' });
