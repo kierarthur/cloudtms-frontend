@@ -1208,7 +1208,6 @@ function renderContractsTable(rows) {
 
 // ✅ CHANGED: honour fresh row; give the modal an openToken for stable formState binding
 
-
 function openContract(row) {
   const LOGC = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : true; // default ON
   const isCreate = !row || !row.id;
@@ -1323,6 +1322,25 @@ function openContract(row) {
         const ghFilled = Object.values(gh).some(v => v != null && v !== 0);
         const std_hours_json = ghFilled ? gh : (base.std_hours_json ?? null);
 
+        // NEW: collect Mon–Sun Start/End/Breaks to std_schedule_json (no overnight flag; server infers end<=start)
+        const days = ['mon','tue','wed','thu','fri','sat','sun'];
+        const get = (n) => fromFS(n, fromFD(n, ''));
+        const schedule = {};
+        for (const d of days) {
+          const s = get(`${d}_start`);
+          const e = get(`${d}_end`);
+          const br = get(`${d}_break`);
+          const hasAny = (s && s.trim()) || (e && e.trim()) || (br && String(br).trim());
+          if (hasAny) {
+            schedule[d] = {
+              start: (s||'').trim(),
+              end: (e||'').trim(),
+              break_minutes: Math.max(0, Number(br||0))
+            };
+          }
+        }
+        const std_schedule_json = Object.keys(schedule).length ? schedule : null;
+
         const startIso = ukToIso(choose('start_date', ''), base.start_date ?? null);
         const endIso   = ukToIso(choose('end_date', ''),   base.end_date   ?? null);
 
@@ -1347,9 +1365,17 @@ function openContract(row) {
         const display_site = choose('display_site', base.display_site ?? '');
         const ward_hint    = choose('ward_hint', base.ward_hint ?? '');
 
-        const auto_invoice                 = ['true','on','1',true].includes(choose('auto_invoice', base.auto_invoice ? 'true' : '')) ? true : false;
-        const require_reference_to_pay     = ['true','on','1',true].includes(choose('require_reference_to_pay', base.require_reference_to_pay ? 'true' : '')) ? true : false;
-        const require_reference_to_invoice = ['true','on','1',true].includes(choose('require_reference_to_invoice', base.require_reference_to_invoice ? 'true' : '')) ? true : false;
+        // NEW: checkboxes must not fall back via choose(); read direct from formState
+        const boolFromFS = (name, baseVal=false) => {
+          if (fs && fs.main && Object.prototype.hasOwnProperty.call(fs.main, name)) {
+            const v = fs.main[name];
+            return v === 'on' || v === true || v === 'true' || v === 1 || v === '1';
+          }
+          return !!base[name];
+        };
+        const auto_invoice                 = boolFromFS('auto_invoice',                 !!base.auto_invoice);
+        const require_reference_to_pay     = boolFromFS('require_reference_to_pay',     !!base.require_reference_to_pay);
+        const require_reference_to_invoice = boolFromFS('require_reference_to_invoice', !!base.require_reference_to_invoice);
 
         const BUCKETS = ['paye_day','paye_night','paye_sat','paye_sun','paye_bh','umb_day','umb_night','umb_sat','umb_sun','umb_bh','charge_day','charge_night','charge_sat','charge_sun','charge_bh'];
         const baseRates = { ...(base.rates_json || {}) };
@@ -1386,11 +1412,12 @@ function openContract(row) {
           require_reference_to_invoice,
           rates_json: mergedRates,
           std_hours_json,
+          std_schedule_json,                 // NEW (server derives totals; we keep std_hours_json for back-compat)
           bucket_labels_json
         };
 
         if (LOGC) {
-          const preview = { ...data, rates_json: '(object)', std_hours_json: std_hours_json ? '(object)' : null };
+          const preview = { ...data, rates_json: '(object)', std_hours_json: std_hours_json ? '(object)' : null, std_schedule_json: std_schedule_json ? '(object)' : null };
           console.log('[CONTRACTS] onSave payload (preview)', preview);
         }
 
@@ -2712,19 +2739,6 @@ function renderContractMainTab(ctx) {
   const candVal   = d.candidate_id || '';
   const clientVal = d.client_id || '';
 
-  // Prefer staged gh_* values; fall back to std_hours_json from data
-  const SH = d.std_hours_json || {};
-  const GH = {
-    mon: (d.gh_mon ?? SH.mon),
-    tue: (d.gh_tue ?? SH.tue),
-    wed: (d.gh_wed ?? SH.wed),
-    thu: (d.gh_thu ?? SH.thu),
-    fri: (d.gh_fri ?? SH.fri),
-    sat: (d.gh_sat ?? SH.sat),
-    sun: (d.gh_sun ?? SH.sun),
-  };
-  const num = (v) => (v == null ? '' : String(v));
-
   const candLabel   = (d.candidate_display || '').trim();
   const clientLabel = (d.client_name || '').trim();
 
@@ -2735,7 +2749,141 @@ function renderContractMainTab(ctx) {
   const startUk = (d.start_date && /^\d{2}\/\d{2}\/\d{4}$/.test(d.start_date)) ? d.start_date : toUk(d.start_date);
   const endUk   = (d.end_date && /^\d{2}\/\d{2}\/\d{4}$/.test(d.end_date)) ? d.end_date : toUk(d.end_date);
 
-  if (LOGC) console.log('[CONTRACTS] renderContractMainTab → layout: Client (full row) then Display site | Ward hint; Role | Band inline');
+  // Canonical schedule source for defaults
+  const SS = d.std_schedule_json || {};
+
+  // Helper to pick staged value (from merged row) or default from std_schedule_json
+  const pick = (day, part) => {
+    const staged = d[`${day}_${part}`];
+    if (staged !== undefined && staged !== null && String(staged).trim() !== '') return String(staged).trim();
+    if (part === 'break') {
+      const v = SS?.[day]?.break_minutes;
+      return (v === 0 || v) ? String(v) : '';
+    }
+    return (SS?.[day]?.[part] || '');
+  };
+
+  const DAYS = [
+    ['mon','Mon'],['tue','Tue'],['wed','Wed'],['thu','Thu'],
+    ['fri','Fri'],['sat','Sat'],['sun','Sun']
+  ];
+
+  const dayRow = (k, label) => {
+    const s = pick(k,'start');
+    const e = pick(k,'end');
+    const br = pick(k,'break');
+    const num = (v) => (v == null ? '' : String(v));
+    return `
+      <div class="row sched">
+        <label>${label}</label>
+        <div class="controls">
+          <div class="grid-3">
+            <div class="split">
+              <span class="mini">Start</span>
+              <input class="input" name="${k}_start" value="${s}" placeholder="HH:MM" />
+            </div>
+            <div class="split">
+              <span class="mini">End</span>
+              <input class="input" name="${k}_end" value="${e}" placeholder="HH:MM" />
+            </div>
+            <div class="split">
+              <span class="mini">Break (min)</span>
+              <input class="input" type="number" min="0" step="1" name="${k}_break" value="${num(br)}" placeholder="0" />
+            </div>
+          </div>
+        </div>
+      </div>`;
+  };
+
+  if (LOGC) console.log('[CONTRACTS] renderContractMainTab → Start/End/Breaks enabled');
+
+  // Build the schedule grid
+  const schedGrid = `
+    <div class="row"><label class="section">Proposed schedule (Mon–Sun)</label></div>
+    <div class="sched-grid">
+      ${DAYS.map(([k,l]) => dayRow(k,l)).join('')}
+    </div>
+
+    <div class="row" style="margin-top:8px">
+      <label>Copy schedule</label>
+      <div class="controls">
+        <div class="split" style="flex-wrap:wrap; gap:8px; align-items:center">
+          <span class="mini">From</span>
+          <select id="schedCopySrc">
+            ${DAYS.map(([k,l]) => `<option value="${k}" ${k==='mon'?'selected':''}>${l}</option>`).join('')}
+          </select>
+          <span class="mini">to</span>
+          <span class="mini">(select one or more)</span>
+          <span class="pill" style="display:flex; gap:8px; flex-wrap:wrap">
+            ${DAYS.map(([k,l]) => {
+              const defaultChecked = (k!=='mon' && ['tue','wed','thu','fri'].includes(k)); // default: weekdays checked
+              return `<label class="mini"><input type="checkbox" class="schedCopyTgt" value="${k}" ${defaultChecked?'checked':''}/> ${l}</label>`;
+            }).join('')}
+          </span>
+          <button type="button" class="btn mini" id="btnSchedCopy"
+            onclick="(function(){
+              try{
+                const form = document.querySelector('#contractForm'); if(!form) return;
+                const src = (document.getElementById('schedCopySrc')||{}).value || 'mon';
+                const read = (n)=>{ const el=form.querySelector('[name='+n+']'); return el?el.value:''; };
+                const s = read(src+'_start'), e = read(src+'_end'), br = read(src+'_break');
+
+                const targets = Array.from(document.querySelectorAll('.schedCopyTgt:checked')).map(x=>x.value);
+                targets.forEach(k=>{
+                  const isSame = (k===src); if(isSame) return; // don't overwrite the source row
+                  const set = (name, val)=>{
+                    const el=form.querySelector('[name='+name+']'); if(!el) return;
+                    el.value = val;
+                    if (typeof setContractFormValue === 'function') { try { setContractFormValue(name, val); } catch {} }
+                    try { el.dispatchEvent(new Event('input', { bubbles:true })); el.dispatchEvent(new Event('change', { bubbles:true })); } catch {}
+                  };
+                  set(k+'_start', s);
+                  set(k+'_end',   e);
+                  set(k+'_break', br);
+                });
+              }catch(e){ console.warn('sched copy failed', e); }
+            })()">Copy</button>
+
+          <button type="button" class="btn mini"
+            title="Copy Monday to Tue–Fri"
+            onclick="(function(){
+              try{
+                const form=document.querySelector('#contractForm'); if(!form) return;
+                const read=(n)=>{ const el=form.querySelector('[name='+n+']'); return el?el.value:''; };
+                const s=read('mon_start'), e=read('mon_end'), br=read('mon_break');
+                ['tue','wed','thu','fri'].forEach(k=>{
+                  ['start','end','break'].forEach(part=>{
+                    const name=k+'_'+part; const el=form.querySelector('[name='+name+']'); if(!el) return;
+                    el.value = (part==='break'? br : (part==='start'? s : e));
+                    if (typeof setContractFormValue === 'function') { try { setContractFormValue(name, el.value); } catch {} }
+                    try { el.dispatchEvent(new Event('input', { bubbles:true })); el.dispatchEvent(new Event('change', { bubbles:true })); } catch {}
+                  });
+                });
+              }catch(e){ console.warn('copy mon→weekdays failed', e); }
+            })()">Mon → Weekdays</button>
+
+          <button type="button" class="btn mini"
+            title="Copy Monday to all days"
+            onclick="(function(){
+              try{
+                const form=document.querySelector('#contractForm'); if(!form) return;
+                const read=(n)=>{ const el=form.querySelector('[name='+n+']'); return el?el.value:''; };
+                const s=read('mon_start'), e=read('mon_end'), br=read('mon_break');
+                ['tue','wed','thu','fri','sat','sun'].forEach(k=>{
+                  ['start','end','break'].forEach(part=>{
+                    const name=k+'_'+part; const el=form.querySelector('[name='+name+']'); if(!el) return;
+                    el.value = (part==='break'? br : (part==='start'? s : e));
+                    if (typeof setContractFormValue === 'function') { try { setContractFormValue(name, el.value); } catch {} }
+                    try { el.dispatchEvent(new Event('input', { bubbles:true })); el.dispatchEvent(new Event('change', { bubbles:true })); } catch {}
+                  });
+                });
+              }catch(e){ console.warn('copy mon→all failed', e); }
+            })()">Mon → All</button>
+        </div>
+      </div>
+    </div>
+  `;
+
   if (LOGC) console.log('[CONTRACTS] renderContractMainTab snapshot', {
     candidate_id: candVal, client_id: clientVal,
     candidate_label: candLabel, client_label: clientLabel,
@@ -2836,17 +2984,8 @@ function renderContractMainTab(ctx) {
         <div class="row"><label>Require reference to INVOICE</label><div class="controls"><input type="checkbox" name="require_reference_to_invoice" ${d.require_reference_to_invoice ? 'checked':''} /></div></div>
       </div>
 
-      <!-- Guide hours -->
-      <div class="row"><label class="section">Guide hours (Mon–Sun, optional)</label></div>
-      <div class="grid-7">
-        <div class="row"><label>Mon</label><div class="controls"><input class="input" type="number" step="0.25" min="0" name="gh_mon" value="${num(GH.mon)}" /></div></div>
-        <div class="row"><label>Tue</label><div class="controls"><input class="input" type="number" step="0.25" min="0" name="gh_tue" value="${num(GH.tue)}" /></div></div>
-        <div class="row"><label>Wed</label><div class="controls"><input class="input" type="number" step="0.25" min="0" name="gh_wed" value="${num(GH.wed)}" /></div></div>
-        <div class="row"><label>Thu</label><div class="controls"><input class="input" type="number" step="0.25" min="0" name="gh_thu" value="${num(GH.thu)}" /></div></div>
-        <div class="row"><label>Fri</label><div class="controls"><input class="input" type="number" step="0.25" min="0" name="gh_fri" value="${num(GH.fri)}" /></div></div>
-        <div class="row"><label>Sat</label><div class="controls"><input class="input" type="number" step="0.25" min="0" name="gh_sat" value="${num(GH.sat)}" /></div></div>
-        <div class="row"><label>Sun</label><div class="controls"><input class="input" type="number" step="0.25" min="0" name="gh_sun" value="${num(GH.sun)}" /></div></div>
-      </div>
+      <!-- Start/End/Breaks -->
+      ${schedGrid}
 
       ${labelsBlock}
     </form>`;
@@ -6596,8 +6735,16 @@ function discardAllModalsAndState(){
   if (modalBody) modalBody.replaceChildren();
   const modalTabs = document.getElementById('modalTabs');
   if (modalTabs) modalTabs.replaceChildren();
-  const modalTitle = document.getElementById('modalTitle');
+    const modalTitle = document.getElementById('modalTitle');
   if (modalTitle) modalTitle.textContent = '';
+
+  // Clear any lingering bottom-right hint
+  const modalHint = document.getElementById('modalHint');
+  if (modalHint) {
+    modalHint.textContent = '';
+    modalHint.removeAttribute('data-tone');
+    try { modalHint.classList.remove('ok', 'warn', 'err'); } catch {}
+  }
 
   // Reset modal context
   modalCtx = {
@@ -9975,17 +10122,26 @@ mergedRowForTab(k) {
   byId('modalBack').style.display = 'flex';
 
   function renderTop() {
-    const LOG = (typeof window.__LOG_MODAL === 'boolean') ? window.__LOG_MODAL : true;
-    const L  = (...a)=> { if (LOG) console.log('[MODAL]', ...a); };
-    const GC = (label)=> { if (LOG) console.groupCollapsed('[MODAL]', label); };
-    const GE = ()=> { if (LOG) console.groupEnd(); };
+  const LOG = (typeof window.__LOG_MODAL === 'boolean') ? window.__LOG_MODAL : true;
+  const L  = (...a)=> { if (LOG) console.log('[MODAL]', ...a); };
+  const GC = (label)=> { if (LOG) console.groupCollapsed('[MODAL]', label); };
+  const GE = ()=> { if (LOG) console.groupEnd(); };
 
-    GC('renderTop()');
-    const isChild = (stack().length > 1);
-    const top     = currentFrame();
-    const parent  = parentFrame();
+  GC('renderTop()');
 
-    if (typeof top._detachGlobal === 'function') { try { top._detachGlobal(); } catch {} top._wired = false; }
+  // Clear any lingering bottom-right hint
+  const hintEl = document.getElementById('modalHint');
+  if (hintEl) {
+    hintEl.textContent = '';
+    hintEl.removeAttribute('data-tone');
+    try { hintEl.classList.remove('ok','warn','err'); } catch {}
+  }
+
+  const isChild = (stack().length > 1);
+  const top     = currentFrame();
+  const parent  = parentFrame();
+
+  if (typeof top._detachGlobal === 'function') { try { top._detachGlobal(); } catch {} top._wired = false; }
 
     L('renderTop state (global)', { entity: top?.entity, kind: top?.kind, mode: top?.mode, hasId: top?.hasId, currentTabKey: top?.currentTabKey });
     byId('modalTitle').textContent = top.title;
