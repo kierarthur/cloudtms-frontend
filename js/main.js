@@ -2543,10 +2543,8 @@ function wirePickerLiveFilter(inputEl, tableEl) {
 function setContractFormValue(name, value) {
   const LOGC = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : false;
 
-  // Canonical field name (stop using default_*; keep for back-compat)
   let targetName = (name === 'default_pay_method_snapshot') ? 'pay_method_snapshot' : name;
 
-  // Guard: if pay method is locked, ignore attempted writes
   try {
     const locked = !!(window.modalCtx?.formState?.main?.__pay_locked);
     if ((targetName === 'pay_method_snapshot' || name === 'default_pay_method_snapshot') && locked) {
@@ -2555,48 +2553,45 @@ function setContractFormValue(name, value) {
     }
   } catch {}
 
-  const form = document.querySelector('#contractForm'); // may be null when on Rates tab
-  const el = form
-    ? (form.querySelector(`[name="${CSS.escape(targetName)}"]`) || form.querySelector(`[name="${CSS.escape(name)}"]`))
-    : null;
+  const form = document.querySelector('#contractForm');
+  let el = null;
+  if (form) {
+    el = form.querySelector(`*[name="${CSS.escape(targetName)}"]`) || form.querySelector(`*[name="${CSS.escape(name)}"]`);
+  }
 
-  // Stage into formState (main vs pay buckets)
   window.modalCtx = window.modalCtx || {};
   const fs = (window.modalCtx.formState ||= { __forId: (window.modalCtx.data?.id ?? window.modalCtx.openToken ?? null), main:{}, pay:{} });
 
-  // Determine the value we’re going to store (mirror DOM coercion where relevant)
   let stored;
   if (el && el.type === 'checkbox') {
     el.checked = !!value && value !== 'false' && value !== '0';
     stored = el.checked ? 'on' : '';
+  } else if (el && el.type === 'radio') {
+    stored = String(value ?? '');
+    const group = form ? Array.from(form.querySelectorAll(`input[type="radio"][name="${CSS.escape(el.name)}"]`)) : [];
+    for (const r of group) r.checked = (String(r.value) === stored);
   } else {
     stored = (value == null ? '' : String(value));
-    if (el) el.value = stored; // reflect into DOM if the element exists
+    if (el) el.value = stored;
   }
 
   const isRate = /^(paye_|umb_|charge_)/.test(targetName);
   const prev = isRate ? fs.pay[targetName] : fs.main[targetName];
 
-  // No-op if nothing actually changed
   if (prev === stored) {
     if (LOGC) console.log('[CONTRACTS] setContractFormValue no-op (unchanged)', { name: targetName, stored });
     return;
   }
 
-  // Write staged state
   if (isRate) fs.pay[targetName] = stored;
   else        fs.main[targetName] = stored;
 
   if (LOGC) console.log('[CONTRACTS] setContractFormValue', { name: targetName, value: (targetName.endsWith('_id') ? '(id)' : stored) });
 
-  // Do NOT dispatch a synthetic input event here (prevents re-entrancy with the form's stage handler)
-
-  // Update any dependent preview (e.g., margins)
   if (isRate || targetName === 'pay_method_snapshot') {
     try { computeContractMargins(); } catch {}
   }
 
-  // Explicitly signal the modal that state changed (so Save button/dirty state updates without re-entrancy)
   try { window.dispatchEvent(new CustomEvent('modal-dirty')); } catch {}
 }
 
@@ -2630,15 +2625,12 @@ function mergeContractStateIntoRow(row) {
 
   return base;
 }
-
 function snapshotContractForm() {
   const fs = (window.modalCtx.formState ||= { __forId: (window.modalCtx.data?.id ?? window.modalCtx.openToken ?? null), main:{}, pay:{} });
 
-  // Collect from the MAIN form (if present)
   const form = document.querySelector('#contractForm');
   const fromMain = form ? Array.from(form.querySelectorAll('input, select, textarea')) : [];
 
-  // Collect from the RATES container (it may be outside #contractForm)
   const ratesTab = document.querySelector('#contractRatesTab');
   const fromRates = ratesTab ? Array.from(ratesTab.querySelectorAll('input, select, textarea')) : [];
 
@@ -2647,12 +2639,18 @@ function snapshotContractForm() {
   for (const el of all) {
     const name = el && el.name;
     if (!name) continue;
+    if (el.disabled || el.readOnly || el.dataset.noCollect === 'true') continue;
 
     let v;
-    if (el.type === 'checkbox') v = el.checked ? 'on' : '';
-    else v = el.value;
+    if (el.type === 'checkbox') {
+      v = el.checked ? 'on' : '';
+    } else if (el.type === 'radio') {
+      if (!el.checked) continue;
+      v = el.value;
+    } else {
+      v = el.value;
+    }
 
-    // Canonicalise pay method key: map legacy default_… to pay_method_snapshot
     if (name === 'default_pay_method_snapshot') {
       fs.main.pay_method_snapshot = v;
       continue;
@@ -2665,7 +2663,6 @@ function snapshotContractForm() {
     }
   }
 }
-
 
 
 // Optional helper: align pay_method_snapshot to candidate; return hint if mismatch
@@ -11299,24 +11296,29 @@ const readonly = (label, value) =>
  */
 function collectForm(sel, jsonTry=false){
   const root = document.querySelector(sel);
-  if (!root) return {}; // null-safe
+  if (!root) return {};
 
   const out = {};
   root.querySelectorAll('input,select,textarea').forEach(el=>{
-    // skip non-collectable fields
     if (!el.name) return;
     if (el.disabled || el.readOnly || el.dataset.noCollect === 'true') return;
 
     const k = el.name;
-    let v = el.value;
+    let v;
 
-    // keep blanks as '' so callers can map '' → null (fixes 0 vs null)
-    if (el.type === 'number') v = (el.value === '' ? '' : Number(el.value));
+    if (el.type === 'checkbox') {
+      v = el.checked ? 'on' : '';
+    } else if (el.type === 'radio') {
+      if (!el.checked) return;
+      v = el.value;
+    } else if (el.type === 'number') {
+      v = (el.value === '' ? '' : Number(el.value));
+    } else {
+      v = el.value;
+    }
 
-    // Yes/No -> boolean (existing behaviour)
     if (el.tagName === 'SELECT' && (v === 'Yes' || v === 'No')) v = (v === 'Yes');
 
-    // Optional JSON parses for specific fields
     if (jsonTry && (k === 'bh_list' || k === 'margin_includes')) {
       try { v = JSON.parse(v || (k === 'bh_list' ? '[]' : '{}')); } catch {}
     }
