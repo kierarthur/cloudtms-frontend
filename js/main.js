@@ -6958,7 +6958,9 @@ function mountContractRatesTab() {
   const root = byId('contractRatesTab'); if (!root) return;
 
   const form = document.querySelector('#contractForm');
-  const payMethodSel = form?.querySelector('select[name="default_pay_method_snapshot"], select[name="pay_method_snapshot"]`);
+  // Use a proper string literal and query either pay_method_snapshot or default_pay_method_snapshot
+const payMethodSel = form?.querySelector('select[name="pay_method_snapshot"], select[name="default_pay_method_snapshot"]');
+
 
   const toggleCards = () => {
     const pm = (payMethodSel?.value || root.dataset.payMethod || 'PAYE').toUpperCase();
