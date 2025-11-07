@@ -806,12 +806,13 @@ async function listContracts(filters = {}) {
 }
 
 // ✅ CHANGED: add cache-busting and explicit no-cache header
+
 async function getContract(contract_id) {
-  // IMPORTANT: no custom cache-control header; rely on query ts to bypass caches
   const url = API(`/api/contracts/${_enc(contract_id)}?ts=${Date.now()}`);
-  const r = await authFetch(url); // keep default auth flow; no extra headers
+  const r = await authFetch(url);
   if (!r?.ok) return null;
-  return r.json();
+  const j = await r.json();
+  return j && j.contract ? j.contract : j;
 }
 
 
@@ -1215,7 +1216,7 @@ function openContract(row) {
 
   window.modalCtx = {
     entity: 'contracts',
-    mode: isCreate ? 'create' : 'edit',
+    mode: isCreate ? 'create' : 'view',
     data: { ...(row || {}) },
     _saveInFlight: false
   };
@@ -1265,10 +1266,8 @@ function openContract(row) {
       try {
         if (LOGC) console.groupCollapsed('[CONTRACTS] onSave pipeline');
 
-        // 0) Snapshot any currently mounted inputs into formState
         snapshotContractForm();
 
-        // Helpers
         const base = window.modalCtx?.data || {};
         const fs   = (window.modalCtx?.formState || { main:{}, pay:{} });
         const fdForm = document.querySelector('#contractForm');
@@ -1282,7 +1281,6 @@ function openContract(row) {
           const raw = fd.get(k); return (raw==null ? fallback : String(raw).trim());
         };
         const choose = (key, fallback='') => {
-          // priority: staged (formState) → DOM (formdata) → baseline
           const fsVal = fromFS(key, null);
           if (fsVal !== null && fsVal !== undefined && fsVal !== '') return fsVal;
           const fdVal = fromFD(key, null);
@@ -1298,7 +1296,6 @@ function openContract(row) {
           } catch { return ddmmyyyy || fb; }
         };
 
-        // 1) Bucket labels (prefer DOM; else staged; else baseline)
         const domLabels = (typeof _collectBucketLabelsFromForm === 'function')
           ? _collectBucketLabelsFromForm('#contractForm')
           : null;
@@ -1316,20 +1313,16 @@ function openContract(row) {
           bucket_labels_json = Object.keys(cleaned).length ? cleaned : (base.bucket_labels_json ?? null);
         }
 
-        // 2) Hours (gh_* staged → std_hours_json, else keep baseline/null)
         const numOrNull = (s) => {
           const raw = fromFS(s, fromFD(s, ''));
           if (raw === '' || raw === null || raw === undefined) return null;
           const n = Number(raw); return Number.isFinite(n) ? n : null;
         };
-        const gh = {
-          mon: numOrNull('gh_mon'), tue: numOrNull('gh_tue'), wed: numOrNull('gh_wed'),
-          thu: numOrNull('gh_thu'), fri: numOrNull('gh_fri'), sat: numOrNull('gh_sat'), sun: numOrNull('gh_sun'),
-        };
+        const gh = { mon: numOrNull('gh_mon'), tue: numOrNull('gh_tue'), wed: numOrNull('gh_wed'),
+                     thu: numOrNull('gh_thu'), fri: numOrNull('gh_fri'), sat: numOrNull('gh_sat'), sun: numOrNull('gh_sun') };
         const ghFilled = Object.values(gh).some(v => v != null && v !== 0);
         const std_hours_json = ghFilled ? gh : (base.std_hours_json ?? null);
 
-        // 3) Dates & main scalar fields (stage → DOM → baseline)
         const startIso = ukToIso(choose('start_date', ''), base.start_date ?? null);
         const endIso   = ukToIso(choose('end_date', ''),   base.end_date   ?? null);
 
@@ -1358,7 +1351,6 @@ function openContract(row) {
         const require_reference_to_pay     = ['true','on','1',true].includes(choose('require_reference_to_pay', base.require_reference_to_pay ? 'true' : '')) ? true : false;
         const require_reference_to_invoice = ['true','on','1',true].includes(choose('require_reference_to_invoice', base.require_reference_to_invoice ? 'true' : '')) ? true : false;
 
-        // 4) RATES — build from baseline and overlay staged (avoids stale/zero clobber)
         const BUCKETS = ['paye_day','paye_night','paye_sat','paye_sun','paye_bh','umb_day','umb_night','umb_sat','umb_sun','umb_bh','charge_day','charge_night','charge_sat','charge_sun','charge_bh'];
         const baseRates = { ...(base.rates_json || {}) };
         const mergedRates = { ...baseRates };
@@ -1368,12 +1360,11 @@ function openContract(row) {
             const n = Number(staged);
             mergedRates[k] = Number.isFinite(n) ? n : 0;
           } else {
-            // If the DOM has a value (when on Rates tab), prefer it; otherwise keep baseline
             const domVal = fd ? fd.get(k) : null;
             if (domVal !== null && domVal !== undefined && String(domVal).trim() !== '') {
               const n = Number(domVal);
               mergedRates[k] = Number.isFinite(n) ? n : 0;
-            } // else leave baseline
+            }
           }
         }
 
@@ -1403,7 +1394,6 @@ function openContract(row) {
           console.log('[CONTRACTS] onSave payload (preview)', preview);
         }
 
-        // 5) Overlap check + upsert contract
         if (LOGC) console.log('[CONTRACTS] overlap → preSaveContractWithOverlapCheck');
         const ok = await preSaveContractWithOverlapCheck(data);
         if (!ok) { if (LOGC) console.log('[CONTRACTS] Save ABORTED by user after overlap dialog'); window.modalCtx._saveInFlight = false; console.groupEnd?.(); return false; }
@@ -1420,7 +1410,6 @@ function openContract(row) {
           if (warnStr) { if (LOGC) console.warn('[CONTRACTS] warnings', warnStr); showModalHint?.(`Warning: ${warnStr}`, 'warn'); }
         } catch {}
 
-        // 6) Generate weeks if newly created
         const contractId = saved?.id || saved?.contract?.id;
         if (isCreate && contractId) {
           try {
@@ -1431,7 +1420,6 @@ function openContract(row) {
           }
         }
 
-        // 7) Commit calendar if there is any staged change (single big Save behaviour)
         if (contractId) {
           if (LOGC) console.log('[CONTRACTS] calendar → commitContractCalendarStageIfPending');
           const calRes = await commitContractCalendarStageIfPending(contractId);
@@ -1444,7 +1432,6 @@ function openContract(row) {
           }
         }
 
-        // 8) In-place refresh (KEEP MODAL OPEN; repaint current tab as needed)
         try {
           const fr = window.__getModalFrame?.();
           const currentTab = fr?.currentTabKey || (document.querySelector('#modalTabs button.active')?.textContent?.toLowerCase() || 'main');
@@ -1474,10 +1461,8 @@ function openContract(row) {
     hasId,
     () => {
       const wire = () => {
-        // Always snapshot current fields before re-render caused by tab switch
         snapshotContractForm();
 
-        // MAIN tab specific wiring
         const form = document.querySelector('#contractForm');
         const tabs = document.getElementById('modalTabs');
         const active = tabs?.querySelector('button.active')?.textContent?.toLowerCase() || 'main';
@@ -1781,7 +1766,6 @@ function openContract(row) {
           }
         }
 
-        // RATES tab specific staging and margin preview
         const ratesTab = document.querySelector('#contractRatesTab');
         if (ratesTab && !ratesTab.__wiredStage) {
           ratesTab.__wiredStage = true;
@@ -1804,7 +1788,6 @@ function openContract(row) {
       const tabs = document.getElementById('modalTabs');
       if (tabs && !tabs.__wired_contract_stage) {
         tabs.__wired_contract_stage = true;
-        // Snapshot before switching, then re-wire after DOM updates
         tabs.addEventListener('click', () => {
           snapshotContractForm();
           setTimeout(wire, 0);
@@ -1834,7 +1817,6 @@ function openContract(row) {
     }
   }, 0);
 }
-
 
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -5434,7 +5416,6 @@ let modalCtx = { entity:null, data:null };
 
 // ✅ CHANGED: make this async, always hydrate fresh from server before opening
 function openDetails(rowOrId){
-  // global dirty guard before opening any new modal (also called from dblclick)
   if (!confirmDiscardChangesIfDirty()) return;
 
   let row = rowOrId;
@@ -5449,12 +5430,11 @@ function openDetails(rowOrId){
 
   if (!id) { alert('Record id not provided'); return; }
 
-  // Always hydrate from server for contracts to avoid stale data
   if (currentSection === 'contracts') {
     (async () => {
       let fresh = null;
       try {
-        fresh = await getContract(id); // cache-busted, no custom headers
+        fresh = await getContract(id);
       } catch (e) {
         console.debug('[OPEN] getContract failed, falling back to cached row', e);
       }
@@ -5462,7 +5442,6 @@ function openDetails(rowOrId){
       const effective = fresh || row;
       if (!effective) { alert('Record not found'); return; }
 
-      // Update currentSelection with the freshest row
       currentSelection = effective;
       console.debug('[OPEN] openDetails', { section: currentSection, id: effective.id });
 
@@ -5471,7 +5450,6 @@ function openDetails(rowOrId){
     return;
   }
 
-  // Non-contract entities remain as before
   if (!row) { alert('Record not found'); return; }
 
   currentSelection = row;
@@ -5481,8 +5459,9 @@ function openDetails(rowOrId){
   else if (currentSection === 'clients')    openClient(row);
   else if (currentSection === 'umbrellas')  openUmbrella(row);
   else if (currentSection === 'audit')      openAuditItem(row);
-  else if (currentSection === 'contracts')  openContract(row); // (kept for completeness; contracts path above returns earlier)
+  else if (currentSection === 'contracts')  openContract(row);
 }
+
 
 function openCreate(){
   if (!confirmDiscardChangesIfDirty()) return;
@@ -10238,10 +10217,9 @@ async function saveForFrame(fr) {
     L('saveForFrame GUARD (global): no-op (no changes and apply not allowed)');
     const isChildNow=(window.__modalStack?.length>1);
     if (isChildNow) {
-      // keep child stack behaviour intact
       sanitizeModalGeometry(); window.__modalStack.pop();
       if (window.__modalStack.length>0) { const p=window.__modalStack[window.__modalStack.length-1]; renderTop(); try{ p.onReturn && p.onReturn(); }catch{} }
-      else { /* NO teardown here */ }
+      else { /* keep open */ }
     } else {
       fr.isDirty=false; fr._snapshot=null; setFrameMode(fr,'view'); fr._updateButtons&&fr._updateButtons();
     }
@@ -10264,7 +10242,6 @@ async function saveForFrame(fr) {
   fr._saving=false; if (!ok) { L('saveForFrame RESULT not ok (global)'); fr._updateButtons&&fr._updateButtons(); return; }
 
   if (fr.kind === 'advanced-search') {
-    // unchanged behaviour for advanced-search (modal close)
     sanitizeModalGeometry();
     const closing = window.__modalStack.pop();
     if (closing?._detachDirty){ try{closing._detachDirty();}catch{} closing._detachDirty=null; }
@@ -10273,7 +10250,7 @@ async function saveForFrame(fr) {
     if (window.__modalStack.length>0) {
       const p=window.__modalStack[window.__modalStack.length-1]; renderTop(); try{ p.onReturn && p.onReturn(); } catch{}
     } else {
-      // no teardown here; caller manages view
+      // keep page state
     }
     L('saveForFrame EXIT (global advanced-search closed)');
     return;
@@ -10285,18 +10262,16 @@ async function saveForFrame(fr) {
     if (window.__modalStack.length>0) {
       const p=window.__modalStack[window.__modalStack.length-1]; p.isDirty=true; p._updateButtons&&p._updateButtons(); renderTop(); try{ p.onReturn && p.onReturn(); }catch{}
     } else {
-      // keep open; do not teardown
+      // keep open
     }
     L('saveForFrame EXIT (global child)');
   } else {
-    // ✅ Merge the just-saved contract into the list cache so re-open is fresh
     try {
       const savedContract = (saved && (saved.contract || saved)) || null;
       const id = savedContract?.id || window.modalCtx?.data?.id || null;
       if (id && savedContract) {
         const idx = Array.isArray(currentRows) ? currentRows.findIndex(x => String(x.id) === String(id)) : -1;
         if (idx >= 0) currentRows[idx] = savedContract;
-        // record last-saved time for recency checks elsewhere if needed
         (window.__lastSavedAtById ||= {})[String(id)] = Date.now();
       }
     } catch (e) { console.warn('[SAVE] list cache merge failed', e); }
@@ -10306,6 +10281,7 @@ async function saveForFrame(fr) {
     L('saveForFrame EXIT (global parent, kept open)');
   }
 }
+
 
 
     const onSaveClick = async (ev)=>{
