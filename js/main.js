@@ -1521,39 +1521,53 @@ const std_schedule_json = Object.keys(schedule).length ? schedule : null;
             form.addEventListener('input', stage, true);
             form.addEventListener('change', stage, true);
 
-            const onBlurNorm = (e) => {
-              const t = e.target;
+                       // Shared normaliser so both Blur and Tab use the same logic
+            const normaliseTimeInput = (t) => {
               if (!t || !/^(mon|tue|wed|thu|fri|sat|sun)_(start|end)$/.test(t.name)) return;
               const raw = (t.value || '').trim();
-              const norm = (function(x){
+              const norm = (function (x) {
                 if (!x) return '';
-                const y = x.replace(/\s+/g,'');
-                let h,m;
+                const y = x.replace(/\s+/g, '');
+                let h, m;
                 if (/^\d{3,4}$/.test(y)) {
-                  const s = y.padStart(4,'0'); h = +s.slice(0,2); m = +s.slice(2,4);
+                  const s = y.padStart(4, '0'); h = +s.slice(0, 2); m = +s.slice(2, 4);
                 } else if (/^\d{1,2}:\d{1,2}$/.test(y)) {
                   const parts = y.split(':'); h = +parts[0]; m = +parts[1];
                 } else return '';
-                if (h<0 || h>23 || m<0 || m>59) return '';
-                return String(h).padStart(2,'0') + ':' + String(m).padStart(2,'0');
+                if (h < 0 || h > 23 || m < 0 || m > 59) return '';
+                return String(h).padStart(2, '0') + ':' + String(m).padStart(2, '0');
               })(raw);
+
               if (!norm && raw) {
                 t.value = '';
-                t.setAttribute('data-invalid','1');
-                t.setAttribute('title','Enter a valid time HH:MM (00:00–23:59)');
+                t.setAttribute('data-invalid', '1');
+                t.setAttribute('title', 'Enter a valid time HH:MM (00:00–23:59)');
                 setContractFormValue(t.name, '');
+                try { t.dispatchEvent(new Event('input', { bubbles: true })); t.dispatchEvent(new Event('change', { bubbles: true })); } catch {}
                 try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
                 return;
               }
+
               if (norm) {
                 t.value = norm;
                 t.removeAttribute('data-invalid');
                 t.removeAttribute('title');
                 setContractFormValue(t.name, norm);
+                try { t.dispatchEvent(new Event('input', { bubbles: true })); t.dispatchEvent(new Event('change', { bubbles: true })); } catch {}
                 try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
               }
             };
+
+            // Blur → normalise
+            const onBlurNorm = (e) => { normaliseTimeInput(e.target); };
             form.addEventListener('blur', onBlurNorm, true);
+
+            // Tab key → normalise before focus leaves
+            const onKeydownNorm = (e) => {
+              if (e.key === 'Tab') normaliseTimeInput(e.target);
+            };
+            form.addEventListener('keydown', onKeydownNorm, true);
+
           }
 
           if (active === 'main') {
@@ -2660,7 +2674,7 @@ function setContractFormValue(name, value) {
     el = form.querySelector(`*[name="${CSS.escape(targetName)}"]`) || form.querySelector(`*[name="${CSS.escape(name)}"]`);
   }
 
-  // Reject staging invalid time strings for *_start/*_end (empty allowed)
+  // Validate & normalise *_start/*_end (empty allowed)
   if (/^(mon|tue|wed|thu|fri|sat|sun)_(start|end)$/.test(targetName)) {
     const raw = (value == null ? '' : String(value).trim());
     const isValidHHMM = (s)=>{
@@ -2755,9 +2769,9 @@ function snapshotContractForm() {
   const fs = (window.modalCtx.formState ||= { __forId: (window.modalCtx.data?.id ?? window.modalCtx.openToken ?? null), main:{}, pay:{} });
 
   const form = document.querySelector('#contractForm');
-  const fromMain = form ? Array.from(form.querySelectorAll('input, select, textarea')) : [];
+  const fromMain  = form ? Array.from(form.querySelectorAll('input, select, textarea')) : [];
 
-  const ratesTab = document.querySelector('#contractRatesTab');
+  const ratesTab  = document.querySelector('#contractRatesTab');
   const fromRates = ratesTab ? Array.from(ratesTab.querySelectorAll('input, select, textarea')) : [];
 
   const all = [...fromMain, ...fromRates];
@@ -2865,34 +2879,103 @@ function renderContractMainTab(ctx) {
     ['fri','Fri'],['sat','Sat'],['sun','Sun']
   ];
 
+  // Inline time normaliser/validator wired on blur + Tab (keydown)
+  const timeEvents = () => `
+    onblur="(function(el){
+      var v=(el.value||'').trim(); v=v.replace(/[^0-9:]/g,'');
+      if(!v){ try{ if(typeof setContractFormValue==='function') setContractFormValue(el.name,''); }catch(e){}; return; }
+      if(v.indexOf(':')<0){
+        if(v.length===3){ v='0'+v; }
+        if(v.length!==4){ el.value=''; try{ if(typeof setContractFormValue==='function') setContractFormValue(el.name,''); }catch(e){}; try{ el.dispatchEvent(new Event('input',{bubbles:true})); el.dispatchEvent(new Event('change',{bubbles:true})); }catch(e){}; return; }
+        v=v.slice(0,2)+':'+v.slice(2,4);
+      }
+      var p=v.split(':'), h=parseInt(p[0],10), m=parseInt(p[1],10);
+      if(isNaN(h)||isNaN(m)||h<0||h>23||m<0||m>59){ el.value=''; }
+      else { el.value=(h<10?'0'+h:h)+':' + (m<10?'0'+m:m); }
+      try{ if(typeof setContractFormValue==='function') setContractFormValue(el.name, el.value);}catch(e){}
+      try{ el.dispatchEvent(new Event('input',{bubbles:true})); el.dispatchEvent(new Event('change',{bubbles:true})); }catch(e){}
+    })(this)"
+    onkeydown="if(event.key==='Tab'){ (function(el){
+      var v=(el.value||'').trim(); v=v.replace(/[^0-9:]/g,'');
+      if(!v){ try{ if(typeof setContractFormValue==='function') setContractFormValue(el.name,''); }catch(e){}; return; }
+      if(v.indexOf(':')<0){
+        if(v.length===3){ v='0'+v; }
+        if(v.length!==4){ el.value=''; try{ if(typeof setContractFormValue==='function') setContractFormValue(el.name,''); }catch(e){}; try{ el.dispatchEvent(new Event('input',{bubbles:true})); el.dispatchEvent(new Event('change',{bubbles:true})); }catch(e){}; return; }
+        v=v.slice(0,2)+':'+v.slice(2,4);
+      }
+      var p=v.split(':'), h=parseInt(p[0],10), m=parseInt(p[1],10);
+      if(isNaN(h)||isNaN(m)||h<0||h>23||m<0||m>59){ el.value=''; }
+      else { el.value=(h<10?'0'+h:h)+':' + (m<10?'0'+m:m); }
+      try{ if(typeof setContractFormValue==='function') setContractFormValue(el.name, el.value);}catch(e){}
+      try{ el.dispatchEvent(new Event('input',{bubbles:true})); el.dispatchEvent(new Event('change',{bubbles:true})); }catch(e){}
+    })(this) }"
+  `;
+
   const dayRow = (k, label) => {
-    const s = pick(k,'start');
-    const e = pick(k,'end');
+    const s  = pick(k,'start');
+    const e  = pick(k,'end');
     const br = pick(k,'break');
     const num = (v) => (v == null ? '' : String(v));
     return `
-      <div class="row sched">
+      <div class="row sched" data-day="${k}">
         <label>${label}</label>
-        <div class="controls">
-          <div class="grid-3">
+        <div class="controls" style="display:flex;align-items:flex-end;gap:8px;flex-wrap:wrap">
+          <div class="grid-3" style="min-width:420px">
             <div class="split">
               <span class="mini">Start</span>
-              <input class="input" name="${k}_start" value="${s}" placeholder="HH:MM" />
+              <input class="input" name="${k}_start" value="${s}" placeholder="HH:MM" ${timeEvents()} />
             </div>
             <div class="split">
               <span class="mini">End</span>
-              <input class="input" name="${k}_end" value="${e}" placeholder="HH:MM" />
+              <input class="input" name="${k}_end" value="${e}" placeholder="HH:MM" ${timeEvents()} />
             </div>
             <div class="split">
               <span class="mini">Break (min)</span>
-              <input class="input" type="number" min="0" step="1" name="${k}_break" value="${num(br)}" placeholder="0" />
+              <input class="input" type="number" min="0" step="1" name="${k}_break" value="${num(br)}" placeholder="0"
+                oninput="try{ if(typeof setContractFormValue==='function') setContractFormValue(this.name, this.value); }catch(e){}" />
             </div>
+          </div>
+          <div class="row-actions" style="display:flex;gap:6px">
+            <button type="button" class="btn mini"
+              title="Copy this row’s Start/End/Break"
+              onclick="(function(){
+                try{
+                  const f=document.querySelector('#contractForm'); if(!f) return;
+                  const s=f['${k}_start']?.value||''; const e=f['${k}_end']?.value||''; const b=f['${k}_break']?.value||'';
+                 window.__schedClipboard = { s, e, b };
+try {
+  // Build a friendly message like: "Copied Tue 08:00–18:00 + 30m"
+  var day = '${label}';
+  var range = (s || '—') + ((s || e) ? '–' : '') + (e || '');
+  var br = (b && String(b).trim() ? (' + ' + b + 'm') : '');
+  if (window.__toast) window.__toast('Copied ' + day + ' ' + range + br);
+} catch {}
+
+
+                }catch(e){ console.warn('sched copy failed', e); }
+              })()">Copy</button>
+            <button type="button" class="btn mini"
+              title="Paste to this row"
+              onclick="(function(){
+                try{
+                  const clip = window.__schedClipboard || {};
+                  const f=document.querySelector('#contractForm'); if(!f) return;
+                  const S=f['${k}_start'], E=f['${k}_end'], B=f['${k}_break'];
+                  if(S && clip.s!=null){ S.value = clip.s; S.dispatchEvent(new Event('blur', {bubbles:true})); }
+                  if(E && clip.e!=null){ E.value = clip.e; E.dispatchEvent(new Event('blur', {bubbles:true})); }
+                  if(B && clip.b!=null){
+                    B.value = clip.b;
+                    try{ if(typeof setContractFormValue==='function') setContractFormValue(B.name, B.value); }catch(e){}
+                    B.dispatchEvent(new Event('input',{bubbles:true})); B.dispatchEvent(new Event('change',{bubbles:true}));
+                  }
+                }catch(e){ console.warn('sched paste failed', e); }
+              })()">Paste</button>
           </div>
         </div>
       </div>`;
   };
 
-  if (LOGC) console.log('[CONTRACTS] renderContractMainTab → Start/End/Breaks enabled');
+  if (LOGC) console.log('[CONTRACTS] renderContractMainTab → Start/End/Breaks enabled + per-row Copy/Paste, auto-normalise on blur/Tab');
 
   const weekNames = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
   const weVal = Number(d.week_ending_weekday_snapshot ?? 0);
@@ -2900,47 +2983,8 @@ function renderContractMainTab(ctx) {
 
   const schedGrid = `
     <div class="row"><label class="section">Proposed schedule (Mon–Sun)</label></div>
-    <div class="grid-2" style="align-items:flex-start;gap:16px">
-      <div class="sched-grid" style="min-width:0;flex:1">
-        ${DAYS.map(([k,l]) => dayRow(k,l)).join('')}
-      </div>
-      <div class="apply-col" style="max-width:220px">
-        <div class="row">
-          <label class="section">Apply Mon →</label>
-          <div class="controls">
-            <div class="col" style="display:flex;flex-direction:column;gap:6px">
-              ${DAYS.slice(1).map(([k,l]) => `
-                <label class="mini" style="display:flex;align-items:center;gap:6px">
-                  <input type="checkbox" class="schedApplyTgt" value="${k}" /> ${l}
-                </label>
-              `).join('')}
-              <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:6px">
-                <button type="button" class="btn mini" id="btnSchedApply"
-                  onclick="(function(){
-                    try{
-                      const form = document.querySelector('#contractForm'); if(!form) return;
-                      const read=(n)=>{ const el=form.querySelector('[name='+n+']'); return el?el.value:''; };
-                      const s=read('mon_start'), e=read('mon_end'), br=read('mon_break');
-                      Array.from(document.querySelectorAll('.schedApplyTgt:checked')).forEach(cb=>{
-                        const k=cb.value;
-                        ['start','end','break'].forEach(part=>{
-                          const name=k+'_'+part; const el=form.querySelector('[name='+name+']'); if(!el) return;
-                          el.value = (part==='break'? br : (part==='start'? s : e));
-                          if (typeof setContractFormValue === 'function') { try { setContractFormValue(name, el.value); } catch {} }
-                          try { el.dispatchEvent(new Event('input',{bubbles:true})); el.dispatchEvent(new Event('change',{bubbles:true})); } catch {}
-                        });
-                      });
-                    }catch(e){ console.warn('apply Mon → targets failed', e); }
-                  })()">Apply</button>
-                <button type="button" class="btn mini"
-                  onclick="Array.from(document.querySelectorAll('.schedApplyTgt')).forEach(cb=>{ cb.checked=['tue','wed','thu','fri'].includes(cb.value); })">Weekdays</button>
-                <button type="button" class="btn mini"
-                  onclick="Array.from(document.querySelectorAll('.schedApplyTgt')).forEach(cb=>{ cb.checked=true; })">All</button>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
+    <div class="sched-grid" style="min-width:0;flex:1">
+      ${DAYS.map(([k,l]) => dayRow(k,l)).join('')}
     </div>
   `;
 
@@ -3032,7 +3076,6 @@ function renderContractMainTab(ctx) {
       ${labelsBlock}
     </form>`;
 }
-
 
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -9838,7 +9881,7 @@ async function renderClientRatesTable() {
 
 function computeContractSaveEligibility() {
   try {
-    const fs = (window.modalCtx && window.modalCtx.formState) || { main:{}, pay:{} };
+    const fs   = (window.modalCtx && window.modalCtx.formState) || { main:{}, pay:{} };
     const data = (window.modalCtx && window.modalCtx.data) || {};
     const form = document.querySelector('#contractForm');
 
@@ -9851,10 +9894,12 @@ function computeContractSaveEligibility() {
 
     const hasText = (s) => !!(s && String(s).trim().length);
 
+    // -------- Required entities
     const candidateOk = hasText(val('candidate_id'));
     const clientOk    = hasText(val('client_id'));
     const roleOk      = hasText(val('role'));
 
+    // -------- Dates (UK → ISO). Rule: need both dates in order, OR staged calendar
     const toIso = (uk) => {
       if (!uk) return '';
       try { return (typeof parseUkDateToIso === 'function') ? (parseUkDateToIso(uk) || '') : uk; }
@@ -9864,7 +9909,7 @@ function computeContractSaveEligibility() {
     const edIso = toIso(val('end_date'));
     const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
     const bothDatesProvided = dateRegex.test(sdIso) && dateRegex.test(edIso);
-    const dateOrderOk = (!bothDatesProvided) || (sdIso <= edIso);
+    const dateOrderOk       = (!bothDatesProvided) || (sdIso <= edIso);
 
     let hasStaged = false;
     try {
@@ -9875,21 +9920,47 @@ function computeContractSaveEligibility() {
       }
     } catch {}
 
+    // -------- Schedule validation with PENDING_TIME_FORMAT support
+    const reValidHHMM   = /^(\d{1,2}):(\d{2})$/;
+    const rePendingOnly = /^\d{3,4}$/; // <-- treated as PENDING_TIME_FORMAT and OK for gating
     const hhmm = (s) => {
-      const m = String(s||'').match(/^(\d{1,2}):(\d{2})$/);
+      const m = String(s||'').match(reValidHHMM);
       if (!m) return null;
       const h = +m[1], mi = +m[2];
       if (h<0 || h>23 || mi<0 || mi>59) return null;
       return [h,mi];
     };
+
     const days = ['mon','tue','wed','thu','fri','sat','sun'];
-    let hasSched = false;
+    let hasValidPair   = false;
+    let hasPendingPair = false;
+    const pendingFields = []; // e.g., ['mon_start','mon_end']
+    const pendingDays   = []; // e.g., ['mon']
+
     for (const d of days) {
       const s = val(`${d}_start`);
       const e = val(`${d}_end`);
-      if (hhmm(s) && hhmm(e)) { hasSched = true; break; }
+      if (!s || !e) continue;
+
+      const sValid   = !!hhmm(s);
+      const eValid   = !!hhmm(e);
+      const sPending = rePendingOnly.test(s);
+      const ePending = rePendingOnly.test(e);
+
+      if (sValid && eValid) {
+        hasValidPair = true;
+      } else if ((sValid || sPending) && (eValid || ePending)) {
+        hasPendingPair = true;
+        if (sPending) pendingFields.push(`${d}_start`);
+        if (ePending) pendingFields.push(`${d}_end`);
+        pendingDays.push(d);
+      }
     }
 
+    const scheduleOk = (hasValidPair || hasPendingPair || hasStaged);
+    const pendingTimeFormat = hasPendingPair || pendingFields.length > 0;
+
+    // -------- Finance checks
     const payMethod = (val('pay_method_snapshot') || 'PAYE').toUpperCase();
     const getNum = (n) => {
       const staged = fs.pay && fs.pay[n];
@@ -9913,22 +9984,76 @@ function computeContractSaveEligibility() {
       hasNegativeMargins = !!window.__contractMarginState.hasNegativeMargins;
     } else {
       for (const cb of chargeBuckets) {
-        const b = cb.split('_')[1];
+        const b  = cb.split('_')[1];
         const ch = getNum(`charge_${b}`);
         const py = getNum(`${payMethod === 'PAYE' ? 'paye' : 'umb'}_${b}`);
         if (ch !== null && py !== null && (ch - py) < 0) { hasNegativeMargins = true; break; }
       }
     }
 
-    const datesOk = (bothDatesProvided ? dateOrderOk : hasStaged);
-    const scheduleOk = hasSched || hasStaged;
+    // -------- Compose eligibility & reasons
+    const reasons = [];
 
-    return !!(candidateOk && clientOk && roleOk && datesOk && scheduleOk && anyPay && anyCharge && !hasNegativeMargins);
-  } catch {
+    if (!candidateOk) reasons.push({ code:'MISSING_CANDIDATE', message:'Pick a candidate.' });
+    if (!clientOk)    reasons.push({ code:'MISSING_CLIENT',    message:'Pick a client.' });
+    if (!roleOk)      reasons.push({ code:'MISSING_ROLE',      message:'Enter a role.' });
+
+    // Dates
+    if (!bothDatesProvided && !hasStaged) {
+      reasons.push({ code:'DATES_OR_STAGE_REQUIRED', message:'Provide start & end dates or stage calendar changes.' });
+    } else if (bothDatesProvided && !dateOrderOk) {
+      reasons.push({ code:'DATE_ORDER_INVALID', message:'Start date must be on or before end date.' });
+    }
+
+    // Schedule
+    if (!scheduleOk) {
+      reasons.push({ code:'SCHEDULE_REQUIRED', message:'Add at least one day with Start & End (or stage calendar changes).' });
+    }
+
+    // Finance
+    if (!anyPay)    reasons.push({ code:'MISSING_PAY_RATES',    message:'Enter at least one pay bucket.' });
+    if (!anyCharge) reasons.push({ code:'MISSING_CHARGE_RATES', message:'Enter at least one charge bucket.' });
+    if (hasNegativeMargins) reasons.push({ code:'NEGATIVE_MARGIN', message:'One or more buckets produce a negative margin.' });
+
+    const ok =
+      candidateOk &&
+      clientOk &&
+      roleOk &&
+      ((bothDatesProvided ? dateOrderOk : hasStaged)) &&
+      scheduleOk &&
+      anyPay &&
+      anyCharge &&
+      !hasNegativeMargins;
+
+    // -------- Expose structured result (without breaking existing boolean checks)
+    const detail = {
+      ok,
+      pendingTimeFormat,
+      pending: {
+        timeFormat: pendingTimeFormat,
+        fields: pendingFields,
+        days: pendingDays
+      },
+      checkpoints: {
+        candidateOk, clientOk, roleOk,
+        dates: { bothDatesProvided, dateOrderOk, hasStagedCalendar: hasStaged },
+        schedule: { hasValidPair, hasPendingPair, hasStagedCalendar: hasStaged },
+        finance: { anyPay, anyCharge, hasNegativeMargins, payMethod }
+      },
+      reasons, // array of {code, message}
+      tip: pendingTimeFormat
+        ? 'We’ll format times like 0900 → 09:00 when you tab out or save.'
+        : null
+    };
+
+    // Store globally for UI (e.g., footer hints) and return boolean for back-compat
+    window.__contractEligibility = detail;
+    return ok;
+  } catch (e) {
+    window.__contractEligibility = { ok:false, reasons:[{ code:'INTERNAL_ERROR', message:String(e && e.message || e || 'unknown error') }] };
     return false;
   }
 }
-
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Global margin helpers (safe, contracts-only consumers can use immediately)
@@ -10471,42 +10596,65 @@ mergedRowForTab(k) {
       btnClose.textContent = label; btnClose.setAttribute('aria-label',label); btnClose.setAttribute('title',label);
     };
 
-    top._updateButtons = ()=>{
-      const parentEditable = top.noParentGate ? true : (parent ? (parent.mode==='edit' || parent.mode==='create') : true);
-      const relatedBtn = byId('btnRelated');
+          top._updateButtons = ()=>{
+        const parentEditable = top.noParentGate ? true : (parent ? (parent.mode==='edit' || parent.mode==='create') : true);
+        const relatedBtn = byId('btnRelated');
 
-      if (top.kind==='advanced-search') {
-        btnEdit.style.display='none'; btnSave.style.display=''; btnSave.disabled=!!top._saving; if (relatedBtn) relatedBtn.disabled=true;
-      } else if (isChild && !top.noParentGate) {
-        btnSave.style.display = parentEditable ? '' : 'none';
-        const wantApply = (top._applyDesired===true);
-        btnSave.disabled = (!parentEditable) || top._saving || !wantApply;
-        btnEdit.style.display='none'; if (relatedBtn) relatedBtn.disabled=true;
-        if (LOG) console.log('[MODAL] child _updateButtons()', { parentEditable, wantApply, disabled: btnSave.disabled });
-      } else {
-        btnEdit.style.display = (top.mode==='view' && top.hasId) ? '' : 'none';
-        if (relatedBtn) relatedBtn.disabled = !(top.mode==='view' && top.hasId);
-        if (top.mode==='view') {
-          btnSave.style.display = top.noParentGate ? '' : 'none';
-          btnSave.disabled = top._saving;
+        if (top.kind==='advanced-search') {
+          btnEdit.style.display='none'; btnSave.style.display=''; btnSave.disabled=!!top._saving; if (relatedBtn) relatedBtn.disabled=true;
+        } else if (isChild && !top.noParentGate) {
+          btnSave.style.display = parentEditable ? '' : 'none';
+          const wantApply = (top._applyDesired===true);
+          btnSave.disabled = (!parentEditable) || top._saving || !wantApply;
+          btnEdit.style.display='none'; if (relatedBtn) relatedBtn.disabled=true;
+          if (LOG) console.log('[MODAL] child _updateButtons()', { parentEditable, wantApply, disabled: btnSave.disabled });
         } else {
-          btnSave.style.display='';
-          let gateOK = true;
-          if (top.entity === 'contracts') {
-            try { gateOK = (typeof computeContractSaveEligibility === 'function') ? !!computeContractSaveEligibility() : true; } catch { gateOK = true; }
-            btnSave.disabled = top._saving || !top.isDirty || !gateOK;
-          } else {
+          btnEdit.style.display = (top.mode==='view' && top.hasId) ? '' : 'none';
+          if (relatedBtn) relatedBtn.disabled = !(top.mode==='view' && top.hasId);
+          if (top.mode==='view') {
+            btnSave.style.display = top.noParentGate ? '' : 'none';
             btnSave.disabled = top._saving;
+          } else {
+            btnSave.style.display='';
+
+            // ---- Contracts: use detailed eligibility + footer hinting
+            let gateOK = true;
+            let elig   = null;
+            if (top.entity === 'contracts') {
+              try {
+                gateOK = (typeof computeContractSaveEligibility === 'function') ? !!computeContractSaveEligibility() : true;
+                elig   = (typeof window !== 'undefined') ? (window.__contractEligibility || null) : null;
+
+                // a) Allow save when the ONLY blocker would be pending time format
+                if (!gateOK && elig && elig.pendingTimeFormat && (!elig.reasons || elig.reasons.length === 0)) {
+                  gateOK = true;
+                }
+
+                // b) Footer hint: reasons if blocked, else show pending-time tip if applicable
+                if (typeof showModalHint === 'function' && (top.mode==='edit' || top.mode==='create')) {
+                  if (elig && Array.isArray(elig.reasons) && elig.reasons.length && !elig.ok) {
+                    const msg = elig.reasons.map(r => r && r.message).filter(Boolean).join(' • ');
+                    if (msg) showModalHint(msg, 'warn');
+                  } else if (elig && elig.pendingTimeFormat && elig.tip) {
+                    showModalHint(elig.tip, 'ok');
+                  }
+                }
+              } catch { gateOK = true; }
+            }
+
+            btnSave.disabled = (top.entity === 'contracts')
+              ? (top._saving || !top.isDirty || !gateOK)
+              : (top._saving);
           }
         }
-      }
-      setCloseLabel();
-      L('_updateButtons snapshot (global)', {
-        kind: top.kind, isChild, parentEditable, mode: top.mode,
-        btnSave: { display: btnSave.style.display, disabled: btnSave.disabled },
-        btnEdit: { display: btnEdit.style.display }
-      });
-    };
+        setCloseLabel();
+        L('_updateButtons snapshot (global)', {
+          kind: top.kind, isChild, parentEditable, mode: top.mode,
+          btnSave: { display: btnSave.style.display, disabled: btnSave.disabled },
+          btnEdit: { display: btnEdit.style.display }
+        });
+      };
+
 
     top._updateButtons();
 
