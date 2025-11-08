@@ -1476,6 +1476,17 @@ function openContract(row) {
 
         const contractId = saved?.id || saved?.contract?.id;
 
+        // ---- FIX: align formState.__forId to the saved id and rehydrate labels post-save
+        try {
+          const fsAll = (window.modalCtx.formState ||= { __forId: (contractId || window.modalCtx.openToken || null), main:{}, pay:{} });
+          fsAll.__forId = contractId || fsAll.__forId;
+          const nameCandEl  = document.getElementById('candidate_name_display');
+          const nameClientEl= document.getElementById('client_name_display');
+          const fsm = (fsAll.main ||= {});
+          if (nameCandEl && nameCandEl.value && !fsm.candidate_display) fsm.candidate_display = nameCandEl.value;
+          if (nameClientEl && nameClientEl.value && !fsm.client_name)    fsm.client_name = nameClientEl.value;
+        } catch {}
+
         // Adopt staged calendar from openToken → contractId (create flow)
         let adoptedStage = false;
         if (isCreate && contractId && window.modalCtx.openToken) {
@@ -1525,6 +1536,9 @@ function openContract(row) {
             console.log('[CONTRACTS] calendar commit ok', calRes);
           }
         }
+
+        // Recompute margins/eligibility after rehydration
+        try { if (typeof computeContractMargins === 'function') computeContractMargins(); } catch {}
 
         try {
           const fr = window.__getModalFrame?.();
@@ -2001,8 +2015,6 @@ function openContract(row) {
     }
   }, 0);
 }
-
-
 
 // ─────────────────────────────────────────────────────────────────────────────
 // NEW: getSummaryFingerprint(section)
@@ -2931,6 +2943,35 @@ function renderContractMainTab(ctx) {
   const candLabel   = (d.candidate_display || '').trim();
   const clientLabel = (d.client_name || '').trim();
 
+  // Derive labels from picker cache if missing but ids exist (and store into formState for persistence)
+  let derivedCand = '';
+  let derivedClient = '';
+  try {
+    const pickData = (window.__pickerData ||= {});
+    if (!candLabel && candVal && pickData.candidates && pickData.candidates.itemsById) {
+      const r = pickData.candidates.itemsById[candVal];
+      if (r) {
+        const first = (r.first_name||'').trim();
+        const last  = (r.last_name||'').trim();
+        const role  = ((r.roles_display||'').split(/[•;,]/)[0]||'').trim();
+        derivedCand = `${last}${last?', ':''}${first}${role?` ${role}`:''}`.trim();
+        const fs = (window.modalCtx.formState ||= { __forId:(window.modalCtx.data?.id ?? window.modalCtx.openToken ?? null), main:{}, pay:{} });
+        (fs.main ||= {}).candidate_display = derivedCand;
+      }
+    }
+    if (!clientLabel && clientVal && pickData.clients && pickData.clients.itemsById) {
+      const r = pickData.clients.itemsById[clientVal];
+      if (r) {
+        derivedClient = (r.name||'').trim();
+        const fs = (window.modalCtx.formState ||= { __forId:(window.modalCtx.data?.id ?? window.modalCtx.openToken ?? null), main:{}, pay:{} });
+        (fs.main ||= {}).client_name = derivedClient;
+      }
+    }
+  } catch {}
+
+  const _candLabel   = candLabel   || derivedCand;
+  const _clientLabel = clientLabel || derivedClient;
+
   const toUk = (iso) => {
     try { return (typeof formatIsoToUk === 'function') ? (formatIsoToUk(iso) || '') : (iso || ''); }
     catch { return iso || ''; }
@@ -3063,7 +3104,7 @@ function renderContractMainTab(ctx) {
 
   if (LOGC) console.log('[CONTRACTS] renderContractMainTab snapshot', {
     candidate_id: candVal, client_id: clientVal,
-    candidate_label: candLabel, client_label: clientLabel,
+    candidate_label: _candLabel, client_label: _clientLabel,
     week_ending_weekday_snapshot: d.week_ending_weekday_snapshot,
     mode: window.__getModalFrame?.()?.mode
   });
@@ -3120,7 +3161,6 @@ function renderContractMainTab(ctx) {
             }
           });
         } else {
-          // clear cache when switching back to no-id or incomplete dates
           if (!excl) window.__tsBoundaryResult = null;
         }
       }catch(e){}
@@ -3136,13 +3176,13 @@ function renderContractMainTab(ctx) {
         <label>Candidate</label>
         <div class="controls">
           <div class="split">
-            <input class="input" type="text" id="candidate_name_display" value="${candLabel}" placeholder="Type 3+ letters to search…" />
+            <input class="input" type="text" id="candidate_name_display" value="${_candLabel}" placeholder="Type 3+ letters to search…" />
             <span>
               <button type="button" class="btn mini" id="btnPickCandidate">Pick…</button>
               <button type="button" class="btn mini" id="btnClearCandidate">Clear</button>
             </span>
           </div>
-          <div class="mini" id="candidatePickLabel">${candLabel ? `Chosen: ${candLabel}` : ''}</div>
+          <div class="mini" id="candidatePickLabel">${_candLabel ? `Chosen: ${_candLabel}` : ''}</div>
         </div>
       </div>
 
@@ -3150,13 +3190,13 @@ function renderContractMainTab(ctx) {
         <label>Client</label>
         <div class="controls">
           <div class="split">
-            <input class="input" type="text" id="client_name_display" value="${clientLabel}" placeholder="Type 3+ letters to search…" />
+            <input class="input" type="text" id="client_name_display" value="${_clientLabel}" placeholder="Type 3+ letters to search…" />
             <span>
               <button type="button" class="btn mini" id="btnPickClient">Pick…</button>
               <button type="button" class="btn mini" id="btnClearClient">Clear</button>
             </span>
           </div>
-          <div class="mini" id="clientPickLabel">${clientLabel ? `Chosen: ${clientLabel}` : ''}</div>
+          <div class="mini" id="clientPickLabel">${_clientLabel ? `Chosen: ${_clientLabel}` : ''}</div>
         </div>
       </div>
 
@@ -3207,7 +3247,6 @@ function renderContractMainTab(ctx) {
       ${labelsBlock}
     </form>`;
 }
-
 
 // ─────────────────────────────────────────────────────────────────────────────
 // UPDATED: renderContractRatesTab (adds logging only)
@@ -7132,9 +7171,23 @@ function mountContractRatesTab() {
   const root = byId('contractRatesTab'); if (!root) return;
 
   const form = document.querySelector('#contractForm');
-  // Use a proper string literal and query either pay_method_snapshot or default_pay_method_snapshot
-const payMethodSel = form?.querySelector('select[name="pay_method_snapshot"], select[name="default_pay_method_snapshot"]');
+  // Read either pay_method_snapshot or default_pay_method_snapshot
+  const payMethodSel = form?.querySelector('select[name="pay_method_snapshot"], select[name="default_pay_method_snapshot"]');
 
+  // Optional nicety: seed formState.pay from saved rates_json so eligibility
+  // works even if the Rates tab was never touched in this session.
+  try {
+    const fs = (window.modalCtx.formState ||= { __forId:(window.modalCtx.data?.id ?? window.modalCtx.openToken ?? null), main:{}, pay:{} });
+    if (!fs.pay || Object.keys(fs.pay).length === 0) {
+      const saved = (window.modalCtx.data && window.modalCtx.data.rates_json) || {};
+      const buckets = ['paye_day','paye_night','paye_sat','paye_sun','paye_bh','umb_day','umb_night','umb_sat','umb_sun','umb_bh','charge_day','charge_night','charge_sat','charge_sun','charge_bh'];
+      fs.pay = fs.pay || {};
+      for (const k of buckets) {
+        const v = saved[k];
+        if (v === 0 || (typeof v === 'number' && Number.isFinite(v))) fs.pay[k] = String(v);
+      }
+    }
+  } catch {}
 
   const toggleCards = () => {
     const pm = (payMethodSel?.value || root.dataset.payMethod || 'PAYE').toUpperCase();
@@ -10274,7 +10327,7 @@ function computeContractSaveEligibility() {
     const clientOk    = hasText(val('client_id'));
     const roleOk      = hasText(val('role'));
 
-    // -------- Dates (UK → ISO). Rule: need both dates in order, OR staged calendar
+    // -------- Dates (UK → ISO). Need both dates in order, OR staged calendar
     const toIso = (uk) => {
       if (!uk) return '';
       try { return (typeof parseUkDateToIso === 'function') ? (parseUkDateToIso(uk) || '') : uk; }
@@ -10282,10 +10335,10 @@ function computeContractSaveEligibility() {
     };
     const sdIso = toIso(val('start_date'));
     const edIso = toIso(val('end_date'));
-    const dateRegex = /^\d{4}-\d{2}-\d2$/; // intentional typo fix not allowed; keep format robustness
     const bothDatesProvided = /^\d{4}-\d{2}-\d{2}$/.test(sdIso) && /^\d{4}-\d{2}-\d{2}$/.test(edIso);
     const dateOrderOk       = (!bothDatesProvided) || (sdIso <= edIso);
 
+    // -------- Is there any staged calendar?
     let hasStaged = false;
     try {
       const key = data.id || window.modalCtx?.openToken || null;
@@ -10297,7 +10350,7 @@ function computeContractSaveEligibility() {
 
     // -------- Schedule validation with PENDING_TIME_FORMAT support
     const reValidHHMM   = /^(\d{1,2}):(\d{2})$/;
-    const rePendingOnly = /^\d{3,4}$/; // <-- treated as PENDING_TIME_FORMAT and OK for gating
+    const rePendingOnly = /^\d{3,4}$/; // treated as pending, don’t block Save
     const hhmm = (s) => {
       const m = String(s||'').match(reValidHHMM);
       if (!m) return null;
@@ -10335,15 +10388,38 @@ function computeContractSaveEligibility() {
     const scheduleOk = (hasValidPair || hasPendingPair || hasStaged);
     const pendingTimeFormat = hasPendingPair || pendingFields.length > 0;
 
-    // -------- Finance checks
+    // -------- Finance checks (with fallback to saved rates_json)
     const payMethod = (val('pay_method_snapshot') || 'PAYE').toUpperCase();
+
     const getNum = (n) => {
-      const staged = fs.pay && fs.pay[n];
-      const domEl = form ? form.querySelector(`[name="${n}"]`) : null;
-      const raw = staged !== undefined ? staged : (domEl ? domEl.value : '');
-      if (raw === '' || raw === null || raw === undefined) return null;
-      const num = Number(raw);
-      return Number.isFinite(num) ? num : null;
+      // 1) staged formState.pay
+      if (fs.pay && Object.prototype.hasOwnProperty.call(fs.pay, n)) {
+        const rawStaged = fs.pay[n];
+        if (rawStaged === '' || rawStaged === null || rawStaged === undefined) {
+          // fall through to DOM / saved
+        } else {
+          const numS = Number(rawStaged);
+          if (Number.isFinite(numS)) return numS;
+        }
+      }
+      // 2) DOM element (may not exist if Rates tab not mounted)
+      if (form) {
+        const el = form.querySelector(`[name="${n}"]`);
+        if (el) {
+          const rawDom = el.value;
+          if (rawDom !== '' && rawDom !== null && rawDom !== undefined) {
+            const numD = Number(rawDom);
+            if (Number.isFinite(numD)) return numD;
+          }
+        }
+      }
+      // 3) Fallback to saved window.modalCtx.data.rates_json
+      try {
+        const saved = (window.modalCtx && window.modalCtx.data && window.modalCtx.data.rates_json) || {};
+        const v = saved[n];
+        if (v === 0 || (typeof v === 'number' && Number.isFinite(v))) return Number(v);
+      } catch {}
+      return null;
     };
 
     const payBuckets = (payMethod === 'PAYE')
@@ -10366,7 +10442,7 @@ function computeContractSaveEligibility() {
       }
     }
 
-    // -------- Timesheet boundary guard (uses cached result set by Main tab or Save pre-check)
+    // -------- Timesheet boundary guard (uses cached result)
     let tsBoundaryViolation = false;
     let tsBoundaryMsg = null;
     try {
