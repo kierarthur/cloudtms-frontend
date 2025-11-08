@@ -11375,9 +11375,6 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
       }
     }
 
-    const btnSave  = byId('btnSave');
-    const btnClose = byId('btnCloseModal');
-    const btnDel   = byId('btnDelete');
 
     const onSaveClick = async (ev)=>{
       const btn=ev?.currentTarget || byId('btnSave');
