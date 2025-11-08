@@ -1218,6 +1218,12 @@ function openContract(row) {
     _saveInFlight: false
   };
 
+  // Temporary calendar owner key for create mode
+  if (isCreate && !window.modalCtx.openToken) {
+    window.modalCtx.openToken = `contract:new:${Date.now()}:${Math.random().toString(36).slice(2)}`;
+    if (LOGC) console.log('[CONTRACTS] openToken issued for create', window.modalCtx.openToken);
+  }
+
   const extraButtons = [];
   if (!isCreate && window.modalCtx.data?.id) {
     extraButtons.push({
@@ -1239,10 +1245,8 @@ function openContract(row) {
     });
   }
 
-  const tabs = isCreate
-    ? [ { key:'main', title:'Main' }, { key:'rates', title:'Rates' } ]
-    : [ { key:'main', title:'Main' }, { key:'rates', title:'Rates' }, { key:'calendar', title:'Calendar' } ];
-
+  // Always include Calendar (also in create mode)
+  const tabs = [ { key:'main', title:'Main' }, { key:'rates', title:'Rates' }, { key:'calendar', title:'Calendar' } ];
   if (LOGC) console.log('[CONTRACTS] tabs', tabs.map(t=>t.key));
 
   const hasId = !!window.modalCtx.data?.id;
@@ -1320,28 +1324,28 @@ function openContract(row) {
         const ghFilled = Object.values(gh).some(v => v != null && v !== 0);
         const std_hours_json = ghFilled ? gh : (base.std_hours_json ?? null);
 
-const days = ['mon','tue','wed','thu','fri','sat','sun'];
-const get = (n) => fromFS(n, fromFD(n, ''));
-const hhmmOk = (v) => /^\d{2}:\d{2}$/.test(String(v||'').trim());
-const normHHMM = (v) => {
-  const t = String(v || '').trim();
-  if (!t) return '';
-  const m = t.match(/^(\d{1,2})(?::?(\d{2}))$/); // accepts "0900" or "09:00"
-  if (!m) return '';
-  const h = +m[1], mi = +m[2];
-  if (Number.isNaN(h) || Number.isNaN(mi) || h < 0 || h > 23 || mi < 0 || mi > 59) return '';
-  return String(h).padStart(2,'0') + ':' + String(mi).padStart(2,'0');
-};
-const schedule = {};
-for (const d2 of days) {
-  const s = normHHMM(get(`${d2}_start`));
-  const e = normHHMM(get(`${d2}_end`));
-  const br = get(`${d2}_break`);
-  if (hhmmOk(s) && hhmmOk(e)) {
-    schedule[d2] = { start: s, end: e, break_minutes: Math.max(0, Number(br||0)) };
-  }
-}
-const std_schedule_json = Object.keys(schedule).length ? schedule : null;
+        const days = ['mon','tue','wed','thu','fri','sat','sun'];
+        const get = (n) => fromFS(n, fromFD(n, ''));
+        const hhmmOk = (v) => /^\d{2}:\d{2}$/.test(String(v||'').trim());
+        const normHHMM = (v) => {
+          const t = String(v || '').trim();
+          if (!t) return '';
+          const m = t.match(/^(\d{1,2})(?::?(\d{2}))$/); // accepts "0900" or "09:00"
+          if (!m) return '';
+          const h = +m[1], mi = +m[2];
+          if (Number.isNaN(h) || Number.isNaN(mi) || h < 0 || h > 23 || mi < 0 || mi > 59) return '';
+          return String(h).padStart(2,'0') + ':' + String(mi).padStart(2,'0');
+        };
+        const schedule = {};
+        for (const d2 of days) {
+          const s = normHHMM(get(`${d2}_start`));
+          const e = normHHMM(get(`${d2}_end`));
+          const br = get(`${d2}_break`);
+          if (hhmmOk(s) && hhmmOk(e)) {
+            schedule[d2] = { start: s, end: e, break_minutes: Math.max(0, Number(br||0)) };
+          }
+        }
+        const std_schedule_json = Object.keys(schedule).length ? schedule : null;
 
         const startIso = ukToIso(choose('start_date', ''), base.start_date ?? null);
         const endIso   = ukToIso(choose('end_date', ''),   base.end_date   ?? null);
@@ -1420,6 +1424,40 @@ const std_schedule_json = Object.keys(schedule).length ? schedule : null;
           console.log('[CONTRACTS] onSave payload (preview)', preview);
         }
 
+        // ===== HARD GUARD: Prevent saving if real timesheets would fall outside new date window
+        if (!isCreate && data.id && typeof callCheckTimesheetBoundary === 'function' && data.start_date && data.end_date) {
+          try {
+            const boundary = await callCheckTimesheetBoundary(data.id, data.start_date, data.end_date);
+            // cache for eligibility UI too
+            window.__tsBoundaryResult = boundary || null;
+            if (!boundary || boundary.ok === false) {
+              let msg = 'Date range excludes existing timesheets.';
+              try {
+                const v = boundary?.violations || [];
+                if (v.length) {
+                  const sample = v.slice(0,3).map(x => {
+                    const nm = x.client_name || 'Client';
+                    const dt = x.date || '';
+                    const st = x.status || '';
+                    return `${nm} ${dt}${st?` (${st})`:''}`;
+                  }).join(' • ');
+                  msg = `Dates exclude existing timesheets: ${sample}${v.length>3? '…':''}`;
+                } else if (boundary?.min_ts_date || boundary?.max_ts_date) {
+                  const a = boundary.min_ts_date || '';
+                  const b = boundary.max_ts_date || '';
+                  msg = `Dates exclude timesheets in range ${a} → ${b}.`;
+                }
+              } catch {}
+              if (typeof showModalHint === 'function') showModalHint(msg, 'warn'); else alert(msg);
+              window.modalCtx._saveInFlight = false;
+              console.groupEnd?.();
+              return false;
+            }
+          } catch (e) {
+            if (LOGC) console.warn('[CONTRACTS] timesheet boundary check failed (non-blocking fallback)', e);
+          }
+        }
+
         if (LOGC) console.log('[CONTRACTS] overlap → preSaveContractWithOverlapCheck');
         const ok = await preSaveContractWithOverlapCheck(data);
         if (!ok) { if (LOGC) console.log('[CONTRACTS] Save ABORTED by user after overlap dialog'); window.modalCtx._saveInFlight = false; console.groupEnd?.(); return false; }
@@ -1437,15 +1475,39 @@ const std_schedule_json = Object.keys(schedule).length ? schedule : null;
         } catch {}
 
         const contractId = saved?.id || saved?.contract?.id;
-        if (isCreate && contractId) {
+
+        // Adopt staged calendar from openToken → contractId (create flow)
+        let adoptedStage = false;
+        if (isCreate && contractId && window.modalCtx.openToken) {
           try {
-            const st = (typeof getContractCalendarStageState === 'function') ? getContractCalendarStageState(contractId) : null;
-            const hasStage = !!(st && (st.add?.size || st.remove?.size || Object.keys(st.additional||{}).length));
-            if (!hasStage && !!std_schedule_json) {
+            const tokenKey = window.modalCtx.openToken;
+            if (typeof getContractCalendarStageState === 'function') {
+              const stToken = getContractCalendarStageState(tokenKey);
+              const hasTokenStage = !!(stToken && (stToken.add.size || stToken.remove.size || Object.keys(stToken.additional||{}).length));
+              if (hasTokenStage) {
+                const stId = getContractCalendarStageState(contractId);
+                for (const d of stToken.add)    stId.add.add(d);
+                for (const d of stToken.remove) stId.remove.add(d);
+                stId.additional = { ...(stId.additional||{}), ...(stToken.additional||{}) };
+                if (typeof stToken.add.clear === 'function') stToken.add.clear();
+                if (typeof stToken.remove.clear === 'function') stToken.remove.clear();
+                stToken.additional = {};
+                adoptedStage = true;
+                if (LOGC) console.log('[CONTRACTS] adopted staged calendar from token → id', { tokenKey, contractId });
+              }
+            }
+          } catch (e) { if (LOGC) console.warn('[CONTRACTS] adopt token stage failed', e); }
+        }
+
+        if (contractId) {
+          try {
+            const stId = (typeof getContractCalendarStageState === 'function') ? getContractCalendarStageState(contractId) : null;
+            const hasStageNow = !!(stId && (stId.add?.size || stId.remove?.size || Object.keys(stId.additional||{}).length));
+            if (!hasStageNow && !!std_schedule_json) {
               if (LOGC) console.log('[CONTRACTS] generateContractWeeks (no staged dates, template present)', { contractId });
               await generateContractWeeks(contractId);
             } else {
-              if (LOGC) console.log('[CONTRACTS] skip generateContractWeeks (staged dates present or no template)');
+              if (LOGC) console.log('[CONTRACTS] skip generateContractWeeks (staged dates present or no template)', { adoptedStage, hasStageNow });
             }
           } catch (e) {
             if (LOGC) console.warn('[CONTRACTS] generateContractWeeks skipped/failed', e);
@@ -1471,7 +1533,12 @@ const std_schedule_json = Object.keys(schedule).length ? schedule : null;
 
           if (currentTab === 'calendar' && contractId) {
             const win = (window.__calState?.[contractId]?.win) || null;
-            await fetchAndRenderContractCalendar(contractId, win ? { from: win.from, to: win.to } : undefined);
+            const candId = window.modalCtx?.data?.candidate_id || null;
+            if (typeof fetchAndRenderCandidateCalendarForContract === 'function' && candId) {
+              await fetchAndRenderCandidateCalendarForContract(contractId, candId, { from: win?.from, to: win?.to });
+            } else {
+              await fetchAndRenderContractCalendar(contractId, win ? { from: win.from, to: win.to } : undefined);
+            }
           } else if (currentTab === 'rates') {
             try { computeContractMargins(); } catch {}
           }
@@ -1507,10 +1574,13 @@ const std_schedule_json = Object.keys(schedule).length ? schedule : null;
               if (!t || !t.name) return;
               let v = t.type === 'checkbox' ? (t.checked ? 'on' : '') : t.value;
 
-              if (/^(mon|tue|wed|thu|fri|sat|sun)_(start|end)$/.test(t.name)) {
+              const isTimeField = /^(mon|tue|wed|thu|fri|sat|sun)_(start|end)$/.test(t.name);
+              if (isTimeField) {
                 if (e.type === 'input') {
                   v = v.replace(/[^\d:]/g,'');
                   t.value = v;
+                  try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
+                  return; // do not stage on keystroke; commit on blur/Tab/change
                 }
               }
 
@@ -1521,7 +1591,6 @@ const std_schedule_json = Object.keys(schedule).length ? schedule : null;
             form.addEventListener('input', stage, true);
             form.addEventListener('change', stage, true);
 
-                       // Shared normaliser so both Blur and Tab use the same logic
             const normaliseTimeInput = (t) => {
               if (!t || !/^(mon|tue|wed|thu|fri|sat|sun)_(start|end)$/.test(t.name)) return;
               const raw = (t.value || '').trim();
@@ -1567,7 +1636,6 @@ const std_schedule_json = Object.keys(schedule).length ? schedule : null;
               if (e.key === 'Tab') normaliseTimeInput(e.target);
             };
             form.addEventListener('keydown', onKeydownNorm, true);
-
           }
 
           if (active === 'main') {
@@ -1894,6 +1962,13 @@ const std_schedule_json = Object.keys(schedule).length ? schedule : null;
       };
 
       setTimeout(wire, 0);
+
+      // Re-attach Main tab behaviours after any (re)render
+      if (!window.__contractsWireBound) {
+        window.__contractsWireBound = true;
+        window.addEventListener('contracts-main-rendered', () => setTimeout(wire, 0));
+      }
+
       const tabs = document.getElementById('modalTabs');
       if (tabs && !tabs.__wired_contract_stage) {
         tabs.__wired_contract_stage = true;
@@ -1926,6 +2001,7 @@ const std_schedule_json = Object.keys(schedule).length ? schedule : null;
     }
   }, 0);
 }
+
 
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2942,16 +3018,13 @@ function renderContractMainTab(ctx) {
                 try{
                   const f=document.querySelector('#contractForm'); if(!f) return;
                   const s=f['${k}_start']?.value||''; const e=f['${k}_end']?.value||''; const b=f['${k}_break']?.value||'';
-                 window.__schedClipboard = { s, e, b };
-try {
-  // Build a friendly message like: "Copied Tue 08:00–18:00 + 30m"
-  var day = '${label}';
-  var range = (s || '—') + ((s || e) ? '–' : '') + (e || '');
-  var br = (b && String(b).trim() ? (' + ' + b + 'm') : '');
-  if (window.__toast) window.__toast('Copied ' + day + ' ' + range + br);
-} catch {}
-
-
+                  window.__schedClipboard = { s, e, b };
+                  try {
+                    var day='${label}';
+                    var range=(s||'—') + ((s||e)?'–':'') + (e||'');
+                    var br=(b && String(b).trim()?(' + '+b+'m'):'');
+                    if (window.__toast) window.__toast('Copied ' + day + ' ' + range + br);
+                  } catch {}
                 }catch(e){ console.warn('sched copy failed', e); }
               })()">Copy</button>
             <button type="button" class="btn mini"
@@ -2994,6 +3067,64 @@ try {
     week_ending_weekday_snapshot: d.week_ending_weekday_snapshot,
     mode: window.__getModalFrame?.()?.mode
   });
+
+  // Inline, non-blocking overlap + timesheet-boundary checks on date changes
+  const overlapChangeAttr = `
+    onchange="(function(el){
+      try{
+        var form = document.querySelector('#contractForm');
+        var cid  = form ? (form.querySelector('[name=\\'candidate_id\\']')?.value||'') : '';
+        var sd   = form ? (form.querySelector('[name=\\'start_date\\']')?.value||'') : '';
+        var ed   = form ? (form.querySelector('[name=\\'end_date\\']')?.value||'')  : '';
+        var sIso = (window.parseUkDateToIso ? parseUkDateToIso(sd) : sd);
+        var eIso = (window.parseUkDateToIso ? parseUkDateToIso(ed) : ed);
+        var excl = (window.modalCtx && window.modalCtx.data && window.modalCtx.data.id) || null;
+
+        // Overlap (non-blocking)
+        if (cid && sIso && eIso && window.callCheckContractWindowOverlap) {
+          callCheckContractWindowOverlap(cid, sIso, eIso, excl).then(function(res){
+            if (res && res.has_overlap) {
+              var msg = (res.overlaps||[]).map(function(o){
+                var nm = o.client_name || o.client || 'Client';
+                var a = o.overlap_from || '';
+                var b = o.overlap_to   || '';
+                return nm + ' ' + a + '→' + b;
+              }).join(' • ');
+              if (window.showModalHint) { showModalHint('Overlap with: ' + msg, 'warn'); }
+              else if (window.__toast)  { __toast('Overlap with: ' + msg); }
+            }
+          });
+        }
+
+        // Timesheet boundary (non-blocking hint + cache for save eligibility). Skip in create (no contract id yet)
+        if (excl && sIso && eIso && window.callCheckTimesheetBoundary) {
+          callCheckTimesheetBoundary(excl, sIso, eIso).then(function(bres){
+            window.__tsBoundaryResult = bres || null;
+            if (bres && bres.ok === false) {
+              var txt = 'Dates exclude existing timesheets.';
+              try {
+                var v = bres.violations || [];
+                if (v.length) {
+                  var sample = v.slice(0,3).map(function(x){
+                    var nm = x.client_name || 'Client';
+                    var dt = x.date || '';
+                    var st = x.status || '';
+                    return nm + ' ' + dt + (st?(' ('+st+')'):'');
+                  }).join(' • ');
+                  txt = 'Dates exclude existing timesheets: ' + sample + (v.length>3?'…':'');
+                } else if (bres.min_ts_date || bres.max_ts_date) {
+                  txt = 'Dates exclude timesheets in range ' + (bres.min_ts_date||'') + ' → ' + (bres.max_ts_date||'') + '.';
+                }
+              } catch {}
+              if (window.showModalHint) { showModalHint(txt, 'warn'); } else if (window.__toast) { __toast(txt); }
+            }
+          });
+        } else {
+          // clear cache when switching back to no-id or incomplete dates
+          if (!excl) window.__tsBoundaryResult = null;
+        }
+      }catch(e){}
+    })(this)"`;
 
   return `
     <form id="contractForm" class="tabc form">
@@ -3040,8 +3171,8 @@ try {
       </div>
 
       <div class="grid-2">
-        <div class="row"><label>Start date</label><div class="controls"><input class="input" name="start_date" value="${startUk}" placeholder="DD/MM/YYYY" required /></div></div>
-        <div class="row"><label>End date</label><div class="controls"><input class="input" name="end_date" value="${endUk}" placeholder="DD/MM/YYYY" required /></div></div>
+        <div class="row"><label>Start date</label><div class="controls"><input class="input" name="start_date" value="${startUk}" placeholder="DD/MM/YYYY" required ${overlapChangeAttr} /></div></div>
+        <div class="row"><label>End date</label><div class="controls"><input class="input" name="end_date" value="${endUk}" placeholder="DD/MM/YYYY" required ${overlapChangeAttr} /></div></div>
       </div>
 
       <div class="grid-3">
@@ -8811,6 +8942,9 @@ function renderDayGrid(hostEl, opts) {
   const { from, to, itemsByDate, view, bucketKey } = opts;
   const sel = initSelBucket(bucketKey);
 
+  // derive currentKey from bucketKey (e.g. "c:<key>")
+  const currentKey = (bucketKey && bucketKey.startsWith('c:')) ? bucketKey.slice(2) : bucketKey;
+
   hostEl.innerHTML = '';
   const toolbar = document.createElement('div');
   toolbar.className = 'row'; toolbar.style.justifyContent='space-between'; toolbar.style.alignItems='center';
@@ -8841,8 +8975,19 @@ function renderDayGrid(hostEl, opts) {
       const cell = document.createElement('div'); cell.className='d';
       const dYmd = `${y}-${String(m+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
       const items = itemsByDate.get(dYmd) || [];
+
+      // primary state colouring
       const finalState = topState(items);
       const cls = colorForState(finalState); if (cls) cell.classList.add(cls);
+
+      // grey/readonly for other-contract occupancy (only if NOT owned by currentKey)
+      const ownedByCurrent = items.some(it => String(it.contract_id || '') === String(currentKey));
+      const occupiedByOtherOnly = items.some(it => {
+        const cid = String(it.contract_id || '');
+        return cid && cid !== String(currentKey);
+      }) && !ownedByCurrent;
+      if (occupiedByOtherOnly) cell.classList.add('occupied-other');
+
       if (sel.set.has(dYmd)) cell.classList.add('selected');
 
       const dow = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][new Date(Date.UTC(y, m, d)).getUTCDay()];
@@ -8910,51 +9055,281 @@ function wireContractCalendarSaveControls(contractId, holder, weekIndex) {
 // CONTRACTS – TAB RENDERER
 // ============================================================================
 function renderContractCalendarTab(ctx) {
-  const c = ctx?.data || {}; const holderId = 'contractCalendarHolder';
+  const c = ctx?.data || {};
+  const holderId = 'contractCalendarHolder';
 
-  if (!c.id) {
+  const currentKey = (c.id || window.modalCtx?.openToken || null);
+  const candId = c.candidate_id
+              || (window.modalCtx?.formState?.main?.candidate_id || '').trim()
+              || (document.querySelector('#contractForm input[name="candidate_id"]')?.value || '').trim();
+
+  const weekEnding = (c.week_ending_weekday_snapshot ?? window.modalCtx?.formState?.main?.week_ending_weekday_snapshot ?? 0);
+
+  const actionsHtml = (c.id
+    ? `<div class="actions" style="margin-top:8px">
+         <button id="btnGenWeeks">Generate weeks</button>
+         <button id="btnSkipWeeks">Skip weeks…</button>
+         <button id="btnCloneExtend">Clone & Extend…</button>
+       </div>`
+    : `<div class="actions" style="margin-top:8px">
+         <button disabled>Generate weeks</button>
+         <button disabled>Skip weeks…</button>
+         <button disabled>Clone & Extend…</button>
+       </div>`);
+
+  if (!candId) {
     return `
       <div id="${holderId}" class="tabc">
-        <div class="hint">Save the contract to unlock the calendar (weeks are generated after save).</div>
-        <div class="actions" style="margin-top:8px">
-          <button disabled>Generate weeks</button>
-          <button disabled>Skip weeks…</button>
-          <button disabled>Clone & Extend…</button>
-        </div>
+        <div class="hint">Pick a candidate to view and stage calendar dates.</div>
+        ${actionsHtml}
       </div>`;
   }
 
-  // seed week-ending weekday into state
-  (window.__calState[c.id] ||= {}).weekEndingWeekday = (c.week_ending_weekday_snapshot ?? 0);
-
   setTimeout(async () => {
     try {
-      const y = (new Date()).getUTCFullYear(); const win = computeYearWindow(y);
+      const y = (new Date()).getUTCFullYear();
+      const win = computeYearWindow(y);
       const el = byId(holderId); if (!el) return;
-      el.innerHTML = `<div class="tabc" id="__contractCal"></div>`;
-      await fetchAndRenderContractCalendar(c.id, { from: win.from, to: win.to, view:'year' });
+      el.innerHTML = `<div class="tabc" id="__contractCal"></div>${actionsHtml}`;
 
-      const host = byId('__contractCal');
-      const actionRow = document.createElement('div');
-      actionRow.className = 'actions'; actionRow.style.marginTop = '8px';
-      actionRow.innerHTML = `
-        <button id="btnGenWeeks">Generate weeks</button>
-        <button id="btnSkipWeeks">Skip weeks…</button>
-        <button id="btnCloneExtend">Clone & Extend…</button>`;
-      el.insertBefore(actionRow, host);
+      // Always use candidate-wide renderer
+      await fetchAndRenderCandidateCalendarForContract(currentKey, candId, { from: win.from, to: win.to, view:'year', weekEnding });
 
-      el.querySelector('#btnGenWeeks')?.addEventListener('click', async () => {
-        try { await generateContractWeeks(c.id); alert('Weeks generated (idempotent).'); } catch (e) { alert(e?.message || e); }
-        const s = window.__calState[c.id]; await fetchAndRenderContractCalendar(c.id, { from: s.win.from, to: s.win.to, view: s.view });
-      });
-      el.querySelector('#btnSkipWeeks')?.addEventListener('click', () => openContractSkipWeeks(c.id));
-      el.querySelector('#btnCloneExtend')?.addEventListener('click', () => openContractCloneAndExtend(c.id));
+      if (c.id) {
+        el.querySelector('#btnGenWeeks')?.addEventListener('click', async () => {
+          try { await generateContractWeeks(c.id); alert('Weeks generated (idempotent).'); } catch (e) { alert(e?.message || e); }
+          const s = window.__calState[c.id]; await fetchAndRenderCandidateCalendarForContract(c.id, candId, { from: s.win.from, to: s.win.to, view: s.view, weekEnding });
+        });
+        el.querySelector('#btnSkipWeeks')?.addEventListener('click', () => openContractSkipWeeks(c.id));
+        el.querySelector('#btnCloneExtend')?.addEventListener('click', () => openContractCloneAndExtend(c.id));
+      }
     } catch (e) {
       const el = byId(holderId); if (el) el.innerHTML = `<div class="error">Calendar load failed.</div>`;
     }
   }, 0);
 
   return `<div id="${holderId}" class="tabc"><div class="hint">Loading calendar…</div></div>`;
+}
+
+// ───────────────────────────────────────────────────────────────
+// 5) Optional thin wrapper if you prefer not to call the API
+//    directly throughout the UI (used by calendar wrapper).
+// ───────────────────────────────────────────────────────────────
+async function fetchCandidateCalendarForRange(candidateId, fromYmd, toYmd) {
+  if (typeof getCandidateCalendarRange !== 'function') return { items: [] };
+  try {
+    return await getCandidateCalendarRange(candidateId, fromYmd, toYmd, 'day');
+  } catch {
+    return { items: [] };
+  }
+}
+// ───────────────────────────────────────────────────────────────
+// 4) Unbooking helper (present in some snippets, ensure available)
+// ───────────────────────────────────────────────────────────────
+function stageContractCalendarUnbookings(contractId, dates /* array of ymd */) {
+  const st = getContractCalendarStageState(contractId);
+  for (const d of dates) { st.add.delete(d); st.remove.add(d); }
+}
+// ───────────────────────────────────────────────────────────────
+// 3) Stage adoption helper (token → real id) for create flow
+//    You can use this inside openContract.onSave to simplify.
+// ───────────────────────────────────────────────────────────────
+function adoptCalendarStageFromToken(openToken, contractId) {
+  const LOG_CAL = (typeof window.__LOG_CAL === 'boolean') ? window.__LOG_CAL : false;
+  if (!openToken || !contractId || typeof getContractCalendarStageState !== 'function') return false;
+  try {
+    const stToken = getContractCalendarStageState(openToken);
+    if (!stToken) return false;
+    const has = (stToken.add?.size || stToken.remove?.size || Object.keys(stToken.additional||{}).length);
+    if (!has) return false;
+    const stId = getContractCalendarStageState(contractId);
+    for (const d of stToken.add)    stId.add.add(d);
+    for (const d of stToken.remove) stId.remove.add(d);
+    stId.additional = { ...(stId.additional||{}), ...(stToken.additional||{}) };
+    stToken.add?.clear?.(); stToken.remove?.clear?.(); stToken.additional = {};
+    if (LOG_CAL) console.log('[CAL][adopt] token → id', { openToken, contractId });
+    return true;
+  } catch (e) {
+    if (LOG_CAL) console.warn('[CAL][adopt] failed', e);
+    return false;
+  }
+}
+// ───────────────────────────────────────────────────────────────
+// 2) Candidate-wide calendar renderer for the contract modal
+//    Always renders ALL bookings for the candidate and stages
+//    against currentKey (contract.id or openToken).
+//    (Used by renderContractCalendarTab and openContract repaint)
+// ───────────────────────────────────────────────────────────────
+async function fetchAndRenderCandidateCalendarForContract(currentKey, candidateId, opts /* { from,to, view, weekEnding } */) {
+  const LOG_CAL = (typeof window.__LOG_CAL === 'boolean') ? window.__LOG_CAL : true;
+  const L = (...a)=> { if (LOG_CAL) console.log('[CAL][candidate-wide]', ...a); };
+
+  const state = (window.__calState[currentKey] ||= {
+    view: (opts?.view || 'year'),
+    win:  (opts?.from && opts?.to) ? { from: opts.from, to: opts.to } : computeYearWindow((new Date()).getUTCFullYear()),
+    weekEndingWeekday: (typeof opts?.weekEnding !== 'undefined' ? Number(opts.weekEnding) : (window.modalCtx?.data?.week_ending_weekday_snapshot ?? 0))
+  });
+
+  if (opts?.view) state.view = opts.view;
+  if (opts?.from && opts?.to) state.win = { from: opts.from, to: opts.to };
+  if (typeof opts?.weekEnding !== 'undefined') state.weekEndingWeekday = Number(opts.weekEnding);
+
+  const holder = byId('contractCalendarHolder'); if (!holder) return;
+
+  // Fetch candidate-wide day items
+  let dayItems = [];
+  try {
+    if (typeof getCandidateCalendarRange === 'function') {
+      const resp = await getCandidateCalendarRange(candidateId, state.win.from, state.win.to, 'day');
+      dayItems = Array.isArray(resp?.items) ? resp.items : [];
+    } else {
+      dayItems = [];
+    }
+  } catch (e) {
+    L('getCandidateCalendarRange failed; fallback to empty', e);
+    dayItems = [];
+  }
+
+  const itemsByDate = buildDateIndex(dayItems);
+
+  // If we are editing an existing contract, build a week index for TS locks (to allow unbook of committed days safely)
+  let weekIndex = null;
+  const contractId = (window.modalCtx?.data?.id && String(currentKey) === String(window.modalCtx.data.id)) ? window.modalCtx.data.id : null;
+  if (contractId && typeof getContractCalendar === 'function' && typeof buildWeekIndex === 'function') {
+    try {
+      const weeks = (await getContractCalendar(contractId, { from: state.win.from, to: state.win.to, granularity:'week' })).items || [];
+      weekIndex = buildWeekIndex(weeks);
+    } catch (e) {
+      L('week index fetch failed; proceeding without TS lock context', e);
+      weekIndex = null;
+    }
+  }
+
+  // Overlay staged changes for currentKey
+  const overlayedMap = applyStagedContractCalendarOverlay(currentKey, itemsByDate, new Map());
+
+  // Render grid
+  const gridHost = document.createElement('div'); gridHost.id = 'contractDayGrid';
+  holder.innerHTML = ''; holder.appendChild(gridHost);
+
+  renderDayGrid(gridHost, {
+    from: state.win.from,
+    to: state.win.to,
+    itemsByDate: overlayedMap,
+    view: state.view,
+    bucketKey: `c:${currentKey}`,
+    onNav: async (delta) => {
+      const nextWin = stepMonth(state.win, delta);
+      await fetchAndRenderCandidateCalendarForContract(currentKey, candidateId, { from: nextWin.from, to: nextWin.to, weekEnding: state.weekEndingWeekday, view: state.view });
+    },
+    onToggleView: async () => {
+      const newView = (state.view === 'year') ? 'month' : 'year';
+      let win = state.win;
+      if (newView === 'year') { const y = ymdToDate(state.win.from).getUTCFullYear(); win = computeYearWindow(y); }
+      else { const dt = ymdToDate(state.win.from); win = computeMonthWindow(dt.getUTCFullYear(), dt.getUTCMonth()); }
+      await fetchAndRenderCandidateCalendarForContract(currentKey, candidateId, { from: win.from, to: win.to, view: newView, weekEnding: state.weekEndingWeekday });
+    },
+    onCellContextMenu: (theDate, ev) => {
+      const sel = initSelBucket(`c:${currentKey}`).set; const selArr = [...sel];
+
+      const mine = String(window.modalCtx?.data?.id || currentKey);
+      const ownedByCurrent = (d) => {
+        const arr = itemsByDate.get(d) || [];
+        return arr.some(it => String(it.contract_id || '') === mine);
+      };
+      const occupiedByOtherOnly = (d) => {
+        const arr = itemsByDate.get(d) || [];
+        return arr.some(it => {
+          const cid = String(it.contract_id || '');
+          return cid && cid !== mine;
+        }) && !ownedByCurrent(d);
+      };
+
+      const anyGrey = selArr.some(occupiedByOtherOnly);
+
+      const resolveFinalState = (d) => topState(overlayedMap.get(d) || []);
+
+      // Planned (staged add) unbooking always safe
+      const allOwnedPlannedNoTs = selArr.every(d => resolveFinalState(d) === 'PLANNED');
+
+      // Committed unbooking allowed only if owned by current contract and week has no TS lock (edit mode with weekIndex)
+      const allOwnedCommittedNoTs = !!contractId && !!weekIndex && selArr.every(d => {
+        if (!ownedByCurrent(d)) return false;
+        const we = computeWeekEnding(d, state.weekEndingWeekday);
+        const w  = weekIndex.get(we);
+        return !!w && !w.baseHasTs;
+      });
+
+      const capabilities = {
+        canBook: true,
+        canUnbook: allOwnedPlannedNoTs || allOwnedCommittedNoTs,
+        canAddAdditional: false
+      };
+
+      openCalendarContextMenu({
+        anchorEl: ev.target,
+        bucketKey: `c:${currentKey}`,
+        selection: selArr,
+        capabilities,
+        onAction: async ({ type, selection }) => {
+          try {
+            if (type === 'book') {
+              if (anyGrey) {
+                const names = [];
+                for (const d of selection) {
+                  if (!occupiedByOtherOnly(d)) continue;
+                  const arr = itemsByDate.get(d) || [];
+                  arr.forEach(it => {
+                    const cid = String(it.contract_id || '');
+                    if (cid && cid !== mine) names.push(it.client_name || 'Other client');
+                  });
+                }
+                const hint = names.length
+                  ? `This would clash with existing contract(s): ${[...new Set(names)].join(', ')}. Continue?`
+                  : 'This would clash with an existing contract. Continue?';
+                if (!window.confirm(hint)) return;
+              }
+              stageContractCalendarBookings(currentKey, selection);
+            }
+            if (type === 'unbook') {
+              stageContractCalendarUnbookings(currentKey, selection);
+            }
+            try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
+            await fetchAndRenderCandidateCalendarForContract(currentKey, candidateId, { from: state.win.from, to: state.win.to, view: state.view, weekEnding: state.weekEndingWeekday });
+          } catch (e) {
+            alert(e?.message || e);
+          }
+        }
+      });
+    }
+  });
+
+  const legend = document.createElement('div'); legend.id = 'contractCalLegend'; holder.appendChild(legend); renderCalendarLegend(legend);
+}
+
+// ───────────────────────────────────────────────────────────────
+// 1) Non-blocking date-window overlap checker (Main tab hint)
+//    Call from renderContractMainTab on start/end date change.
+// ───────────────────────────────────────────────────────────────
+async function callCheckContractWindowOverlap(candidate_id, start_date_iso, end_date_iso, exclude_contract_id) {
+  const LOGC = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : false;
+  const payload = {
+    candidate_id: candidate_id || null,
+    start_date  : start_date_iso || null,
+    end_date    : end_date_iso || null,
+    ignore_contract_id: exclude_contract_id || null
+  };
+  if (!candidate_id || !start_date_iso || !end_date_iso) return { has_overlap: false, overlaps: [] };
+  if (typeof checkContractOverlap !== 'function') { if (LOGC) console.warn('[CONTRACTS] checkContractOverlap missing'); return { has_overlap:false, overlaps:[] }; }
+  try {
+    if (LOGC) console.log('[CONTRACTS] callCheckContractWindowOverlap → req', payload);
+    const res = await checkContractOverlap(payload);
+    if (LOGC) console.log('[CONTRACTS] callCheckContractWindowOverlap ← res', res);
+    return res || { has_overlap:false, overlaps:[] };
+  } catch (e) {
+    if (LOGC) console.warn('[CONTRACTS] window overlap check failed', e);
+    return { has_overlap:false, overlaps:[] };
+  }
 }
 
 // ============================================================================
@@ -9907,8 +10282,8 @@ function computeContractSaveEligibility() {
     };
     const sdIso = toIso(val('start_date'));
     const edIso = toIso(val('end_date'));
-    const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
-    const bothDatesProvided = dateRegex.test(sdIso) && dateRegex.test(edIso);
+    const dateRegex = /^\d{4}-\d{2}-\d2$/; // intentional typo fix not allowed; keep format robustness
+    const bothDatesProvided = /^\d{4}-\d{2}-\d{2}$/.test(sdIso) && /^\d{4}-\d{2}-\d{2}$/.test(edIso);
     const dateOrderOk       = (!bothDatesProvided) || (sdIso <= edIso);
 
     let hasStaged = false;
@@ -9934,8 +10309,8 @@ function computeContractSaveEligibility() {
     const days = ['mon','tue','wed','thu','fri','sat','sun'];
     let hasValidPair   = false;
     let hasPendingPair = false;
-    const pendingFields = []; // e.g., ['mon_start','mon_end']
-    const pendingDays   = []; // e.g., ['mon']
+    const pendingFields = [];
+    const pendingDays   = [];
 
     for (const d of days) {
       const s = val(`${d}_start`);
@@ -9991,6 +10366,30 @@ function computeContractSaveEligibility() {
       }
     }
 
+    // -------- Timesheet boundary guard (uses cached result set by Main tab or Save pre-check)
+    let tsBoundaryViolation = false;
+    let tsBoundaryMsg = null;
+    try {
+      const tsRes = window.__tsBoundaryResult;
+      if (data?.id && bothDatesProvided && tsRes && tsRes.ok === false) {
+        tsBoundaryViolation = true;
+        const v = tsRes.violations || [];
+        if (v.length) {
+          const sample = v.slice(0,3).map(x => {
+            const nm = x.client_name || 'Client';
+            const dt = x.date || '';
+            const st = x.status || '';
+            return `${nm} ${dt}${st?` (${st})`:''}`;
+          }).join(' • ');
+          tsBoundaryMsg = `Dates exclude existing timesheets: ${sample}${v.length>3? '…':''}`;
+        } else if (tsRes.min_ts_date || tsRes.max_ts_date) {
+          tsBoundaryMsg = `Dates exclude timesheets in range ${tsRes.min_ts_date||''} → ${tsRes.max_ts_date||''}.`;
+        } else {
+          tsBoundaryMsg = 'Dates exclude existing timesheets.';
+        }
+      }
+    } catch {}
+
     // -------- Compose eligibility & reasons
     const reasons = [];
 
@@ -9998,22 +10397,23 @@ function computeContractSaveEligibility() {
     if (!clientOk)    reasons.push({ code:'MISSING_CLIENT',    message:'Pick a client.' });
     if (!roleOk)      reasons.push({ code:'MISSING_ROLE',      message:'Enter a role.' });
 
-    // Dates
     if (!bothDatesProvided && !hasStaged) {
       reasons.push({ code:'DATES_OR_STAGE_REQUIRED', message:'Provide start & end dates or stage calendar changes.' });
     } else if (bothDatesProvided && !dateOrderOk) {
       reasons.push({ code:'DATE_ORDER_INVALID', message:'Start date must be on or before end date.' });
     }
 
-    // Schedule
     if (!scheduleOk) {
       reasons.push({ code:'SCHEDULE_REQUIRED', message:'Add at least one day with Start & End (or stage calendar changes).' });
     }
 
-    // Finance
     if (!anyPay)    reasons.push({ code:'MISSING_PAY_RATES',    message:'Enter at least one pay bucket.' });
     if (!anyCharge) reasons.push({ code:'MISSING_CHARGE_RATES', message:'Enter at least one charge bucket.' });
     if (hasNegativeMargins) reasons.push({ code:'NEGATIVE_MARGIN', message:'One or more buckets produce a negative margin.' });
+
+    if (tsBoundaryViolation) {
+      reasons.push({ code:'TS_BOUNDARY_VIOLATION', message: tsBoundaryMsg || 'Dates exclude existing timesheets.' });
+    }
 
     const ok =
       candidateOk &&
@@ -10023,9 +10423,9 @@ function computeContractSaveEligibility() {
       scheduleOk &&
       anyPay &&
       anyCharge &&
-      !hasNegativeMargins;
+      !hasNegativeMargins &&
+      !tsBoundaryViolation;
 
-    // -------- Expose structured result (without breaking existing boolean checks)
     const detail = {
       ok,
       pendingTimeFormat,
@@ -10036,17 +10436,14 @@ function computeContractSaveEligibility() {
       },
       checkpoints: {
         candidateOk, clientOk, roleOk,
-        dates: { bothDatesProvided, dateOrderOk, hasStagedCalendar: hasStaged },
+        dates: { bothDatesProvided, dateOrderOk, hasStagedCalendar: hasStaged, tsBoundaryOk: !tsBoundaryViolation },
         schedule: { hasValidPair, hasPendingPair, hasStagedCalendar: hasStaged },
         finance: { anyPay, anyCharge, hasNegativeMargins, payMethod }
       },
-      reasons, // array of {code, message}
-      tip: pendingTimeFormat
-        ? 'We’ll format times like 0900 → 09:00 when you tab out or save.'
-        : null
+      reasons,
+      tip: pendingTimeFormat ? 'We’ll format times like 0900 → 09:00 when you tab out or save.' : null
     };
 
-    // Store globally for UI (e.g., footer hints) and return boolean for back-compat
     window.__contractEligibility = detail;
     return ok;
   } catch (e) {
@@ -10164,19 +10561,16 @@ function computeContractSaveEligibility() {
 // UPDATED: showModal (adds contract-modal class toggling for Contracts dialogs)
 // ─────────────────────────────────────────────────────────────────────────────
 function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
-  // ===== Logging =====
-  const LOG = (typeof window.__LOG_MODAL === 'boolean') ? window.__LOG_MODAL : true; // default ON
+  const LOG = (typeof window.__LOG_MODAL === 'boolean') ? window.__LOG_MODAL : true;
   const L  = (...a)=> { if (LOG) console.log('[MODAL]', ...a); };
   const GC = (label)=> { if (LOG) console.groupCollapsed('[MODAL]', label); };
   const GE = ()=> { if (LOG) console.groupEnd(); };
 
-  // ===== helpers =====
   const stack = () => (window.__modalStack ||= []);
   const currentFrame = () => stack()[stack().length - 1] || null;
   const parentFrame  = () => (stack().length > 1 ? stack()[stack().length - 2] : null);
   const deep = (o) => JSON.parse(JSON.stringify(o));
 
-  // Back-compat options shift
   let opts = options || {};
   if (onReturn && typeof onReturn === 'object' && options === undefined) { opts = onReturn; onReturn = undefined; }
 
@@ -10249,7 +10643,6 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
     L('showModal: reset #modal initial geometry');
   }
 
-  // ===== frame =====
   const frame = {
     _token: `f:${Date.now()}:${Math.random().toString(36).slice(2)}`,
 
@@ -10319,41 +10712,40 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
       L('persistCurrentTabState EXIT', { forId: fs.__forId, mainKeys: Object.keys(fs.main||{}), payKeys: Object.keys(fs.pay||{}) });
     },
 
-mergedRowForTab(k) {
-  L('mergedRowForTab ENTER', { k });
-  const base = { ...(window.modalCtx?.data || {}) };
-  const fs   = (window.modalCtx?.formState || {});
-  const rid  = window.modalCtx?.data?.id ?? null;
-  const fid  = fs.__forId ?? null;
-  const sentinel = window.modalCtx?.openToken ?? null;
-  const same = (fid===rid) || (rid==null && (fid===sentinel || fid==null));
+    mergedRowForTab(k) {
+      L('mergedRowForTab ENTER', { k });
+      const base = { ...(window.modalCtx?.data || {}) };
+      const fs   = (window.modalCtx?.formState || {});
+      const rid  = window.modalCtx?.data?.id ?? null;
+      const fid  = fs.__forId ?? null;
+      const sentinel = window.modalCtx?.openToken ?? null;
+      const same = (fid===rid) || (rid==null && (fid===sentinel || fid==null));
 
-  const mainStaged = same ? (fs.main || {}) : {};
-  const payStaged  = same ? (fs.pay  || {}) : {};
+      const mainStaged = same ? (fs.main || {}) : {};
+      const payStaged  = same ? (fs.pay  || {}) : {};
 
-  const out = { ...base, ...stripEmpty(mainStaged) };
+      const out = { ...base, ...stripEmpty(mainStaged) };
 
-  try {
-    const mergedRates = { ...(out.rates_json || base.rates_json || {}) };
-    for (const [kk, vv] of Object.entries(payStaged)) {
-      if (/^(paye_|umb_|charge_)/.test(kk)) {
-        mergedRates[kk] = vv;
+      try {
+        const mergedRates = { ...(out.rates_json || base.rates_json || {}) };
+        for (const [kk, vv] of Object.entries(payStaged)) {
+          if (/^(paye_|umb_|charge_)/.test(kk)) {
+            mergedRates[kk] = vv;
+          }
+        }
+        out.rates_json = mergedRates;
+      } catch (e) {
+        L('mergedRowForTab rates merge failed', e);
       }
-    }
-    out.rates_json = mergedRates;
-  } catch (e) {
-    L('mergedRowForTab rates merge failed', e);
-  }
 
-  L('mergedRowForTab STATE', {
-    rid, fid, sentinel, same,
-    stagedMainKeys: Object.keys(mainStaged||{}),
-    stagedPayKeys: Object.keys(payStaged||{}),
-    ratesKeys: Object.keys(out.rates_json || {})
-  });
-  return out;
-},
-
+      L('mergedRowForTab STATE', {
+        rid, fid, sentinel, same,
+        stagedMainKeys: Object.keys(mainStaged||{}),
+        stagedPayKeys: Object.keys(payStaged||{}),
+        ratesKeys: Object.keys(out.rates_json || {})
+      });
+      return out;
+    },
 
     _attachDirtyTracker() {
       if (this._detachDirty) { try { this._detachDirty(); } catch {} this._detachDirty = null; }
@@ -10444,6 +10836,12 @@ mergedRowForTab(k) {
         });
       } catch {}
 
+      try {
+        if (this.entity === 'contracts' && k === 'main') {
+          window.dispatchEvent(new Event('contracts-main-rendered'));
+        }
+      } catch {}
+
       this._hasMountedOnce = true; GE();
     }
   };
@@ -10474,29 +10872,28 @@ mergedRowForTab(k) {
   }
 
   stack().push(frame);
-  byId('modalBack').style.display = 'flex';
+  byId('modalBack').style.display='flex';
 
   function renderTop() {
-  const LOG = (typeof window.__LOG_MODAL === 'boolean') ? window.__LOG_MODAL : true;
-  const L  = (...a)=> { if (LOG) console.log('[MODAL]', ...a); };
-  const GC = (label)=> { if (LOG) console.groupCollapsed('[MODAL]', label); };
-  const GE = ()=> { if (LOG) console.groupEnd(); };
+    const LOG = (typeof window.__LOG_MODAL === 'boolean') ? window.__LOG_MODAL : true;
+    const L  = (...a)=> { if (LOG) console.log('[MODAL]', ...a); };
+    const GC = (label)=> { if (LOG) console.groupCollapsed('[MODAL]', label); };
+    const GE = ()=> { if (LOG) console.groupEnd(); };
 
-  GC('renderTop()');
+    GC('renderTop()');
 
-  // Clear any lingering bottom-right hint
-  const hintEl = document.getElementById('modalHint');
-  if (hintEl) {
-    hintEl.textContent = '';
-    hintEl.removeAttribute('data-tone');
-    try { hintEl.classList.remove('ok','warn','err'); } catch {}
-  }
+    const hintEl = document.getElementById('modalHint');
+    if (hintEl) {
+      hintEl.textContent = '';
+      hintEl.removeAttribute('data-tone');
+      try { hintEl.classList.remove('ok','warn','err'); } catch {}
+    }
 
-  const isChild = (stack().length > 1);
-  const top     = currentFrame();
-  const parent  = parentFrame();
+    const isChild = (stack().length > 1);
+    const top     = currentFrame();
+    const parent  = parentFrame();
 
-  if (typeof top._detachGlobal === 'function') { try { top._detachGlobal(); } catch {} top._wired = false; }
+    if (typeof top._detachGlobal === 'function') { try { top._detachGlobal(); } catch {} top._wired = false; }
 
     L('renderTop state (global)', { entity: top?.entity, kind: top?.kind, mode: top?.mode, hasId: top?.hasId, currentTabKey: top?.currentTabKey });
     byId('modalTitle').textContent = top.title;
@@ -10596,65 +10993,77 @@ mergedRowForTab(k) {
       btnClose.textContent = label; btnClose.setAttribute('aria-label',label); btnClose.setAttribute('title',label);
     };
 
-          top._updateButtons = ()=>{
-        const parentEditable = top.noParentGate ? true : (parent ? (parent.mode==='edit' || parent.mode==='create') : true);
-        const relatedBtn = byId('btnRelated');
+    top._updateButtons = ()=>{
+      const parentEditable = top.noParentGate ? true : (parent ? (parent.mode==='edit' || parent.mode==='create') : true);
+      const relatedBtn = byId('btnRelated');
 
-        if (top.kind==='advanced-search') {
-          btnEdit.style.display='none'; btnSave.style.display=''; btnSave.disabled=!!top._saving; if (relatedBtn) relatedBtn.disabled=true;
-        } else if (isChild && !top.noParentGate) {
-          btnSave.style.display = parentEditable ? '' : 'none';
-          const wantApply = (top._applyDesired===true);
-          btnSave.disabled = (!parentEditable) || top._saving || !wantApply;
-          btnEdit.style.display='none'; if (relatedBtn) relatedBtn.disabled=true;
-          if (LOG) console.log('[MODAL] child _updateButtons()', { parentEditable, wantApply, disabled: btnSave.disabled });
+      if (top.kind==='advanced-search') {
+        btnEdit.style.display='none'; btnSave.style.display=''; btnSave.disabled=!!top._saving; if (relatedBtn) relatedBtn.disabled=true;
+      } else if (isChild && !top.noParentGate) {
+        btnSave.style.display = parentEditable ? '' : 'none';
+        const wantApply = (top._applyDesired===true);
+        btnSave.disabled = (!parentEditable) || top._saving || !wantApply;
+        btnEdit.style.display='none'; if (relatedBtn) relatedBtn.disabled=true;
+        if (LOG) console.log('[MODAL] child _updateButtons()', { parentEditable, wantApply, disabled: btnSave.disabled });
+      } else {
+        btnEdit.style.display = (top.mode==='view' && top.hasId) ? '' : 'none';
+        if (relatedBtn) relatedBtn.disabled = !(top.mode==='view' && top.hasId);
+        if (top.mode==='view') {
+          btnSave.style.display = top.noParentGate ? '' : 'none';
+          btnSave.disabled = top._saving;
         } else {
-          btnEdit.style.display = (top.mode==='view' && top.hasId) ? '' : 'none';
-          if (relatedBtn) relatedBtn.disabled = !(top.mode==='view' && top.hasId);
-          if (top.mode==='view') {
-            btnSave.style.display = top.noParentGate ? '' : 'none';
-            btnSave.disabled = top._saving;
-          } else {
-            btnSave.style.display='';
+          btnSave.style.display='';
 
-            // ---- Contracts: use detailed eligibility + footer hinting
-            let gateOK = true;
-            let elig   = null;
-            if (top.entity === 'contracts') {
-              try {
-                gateOK = (typeof computeContractSaveEligibility === 'function') ? !!computeContractSaveEligibility() : true;
-                elig   = (typeof window !== 'undefined') ? (window.__contractEligibility || null) : null;
+          let gateOK = true;
+          let elig   = null;
+          if (top.entity === 'contracts') {
+            try {
+              gateOK = (typeof computeContractSaveEligibility === 'function') ? !!computeContractSaveEligibility() : true;
+              elig   = (typeof window !== 'undefined') ? (window.__contractEligibility || null) : null;
 
-                // a) Allow save when the ONLY blocker would be pending time format
-                if (!gateOK && elig && elig.pendingTimeFormat && (!elig.reasons || elig.reasons.length === 0)) {
-                  gateOK = true;
+              // Explicit surfacing of hard block for timesheet boundary violations
+              if (elig && Array.isArray(elig.reasons)) {
+                const tsReason = elig.reasons.find(r => r && r.code === 'TS_BOUNDARY_VIOLATION');
+                if (tsReason) {
+                  gateOK = false;
+                  if (typeof showModalHint === 'function') showModalHint(tsReason.message || 'Dates exclude existing timesheets.', 'warn');
                 }
+              }
 
-                // b) Footer hint: reasons if blocked, else show pending-time tip if applicable
-                if (typeof showModalHint === 'function' && (top.mode==='edit' || top.mode==='create')) {
-                  if (elig && Array.isArray(elig.reasons) && elig.reasons.length && !elig.ok) {
+              // Allow save when only pending-time-format remains
+              if (!gateOK && elig && elig.pendingTimeFormat && (!elig.reasons || elig.reasons.length === 0)) {
+                gateOK = true;
+              }
+
+              // Footer hint: generic reasons (when blocked) or pending-time tip (when OK but pending)
+              if (typeof showModalHint === 'function' && (top.mode==='edit' || top.mode==='create')) {
+                if (elig && Array.isArray(elig.reasons) && elig.reasons.length && !elig.ok) {
+                  // If TS reason already shown above, this will either repeat or be complementary;
+                  // to avoid duplication, only aggregate if no explicit TS hint was shown.
+                  const hasTs = elig.reasons.some(r => r && r.code === 'TS_BOUNDARY_VIOLATION');
+                  if (!hasTs) {
                     const msg = elig.reasons.map(r => r && r.message).filter(Boolean).join(' • ');
                     if (msg) showModalHint(msg, 'warn');
-                  } else if (elig && elig.pendingTimeFormat && elig.tip) {
-                    showModalHint(elig.tip, 'ok');
                   }
+                } else if (elig && elig.pendingTimeFormat && elig.tip) {
+                  showModalHint(elig.tip, 'ok');
                 }
-              } catch { gateOK = true; }
-            }
-
-            btnSave.disabled = (top.entity === 'contracts')
-              ? (top._saving || !top.isDirty || !gateOK)
-              : (top._saving);
+              }
+            } catch { gateOK = true; }
           }
-        }
-        setCloseLabel();
-        L('_updateButtons snapshot (global)', {
-          kind: top.kind, isChild, parentEditable, mode: top.mode,
-          btnSave: { display: btnSave.style.display, disabled: btnSave.disabled },
-          btnEdit: { display: btnEdit.style.display }
-        });
-      };
 
+          btnSave.disabled = (top.entity === 'contracts')
+            ? (top._saving || !top.isDirty || !gateOK)
+            : (top._saving);
+        }
+      }
+      setCloseLabel();
+      L('_updateButtons snapshot (global)', {
+        kind: top.kind, isChild, parentEditable, mode: top.mode,
+        btnSave: { display: btnSave.style.display, disabled: btnSave.disabled },
+        btnEdit: { display: btnEdit.style.display }
+      });
+    };
 
     top._updateButtons();
 
@@ -10747,83 +11156,79 @@ mergedRowForTab(k) {
       } catch { return false; }
     };
 
-    // ✅ CHANGED: keep modal open, merge saved row into list cache, no teardown
-async function saveForFrame(fr) {
-  if (!fr || fr._saving) return;
-  const onlyDel   = hasStagedClientDeletes();
-  const allowApply= (fr.kind==='candidate-override' || fr.kind==='client-rate') && fr._applyDesired===true;
+    async function saveForFrame(fr) {
+      if (!fr || fr._saving) return;
+      const onlyDel   = hasStagedClientDeletes();
+      const allowApply= (fr.kind==='candidate-override' || fr.kind==='client-rate') && fr._applyDesired===true;
 
-  L('saveForFrame ENTER (global)', { kind: fr.kind, mode: fr.mode, noParentGate: fr.noParentGate, isDirty: fr.isDirty, onlyDel, allowApply });
+      L('saveForFrame ENTER (global)', { kind: fr.kind, mode: fr.mode, noParentGate: fr.noParentGate, isDirty: fr.isDirty, onlyDel, allowApply });
 
-  if (fr.kind!=='advanced-search' && !fr.noParentGate && fr.mode!=='view' && !fr.isDirty && !onlyDel && !allowApply) {
-    L('saveForFrame GUARD (global): no-op (no changes and apply not allowed)');
-    const isChildNow=(window.__modalStack?.length>1);
-    if (isChildNow) {
-      sanitizeModalGeometry(); window.__modalStack.pop();
-      if (window.__modalStack.length>0) { const p=window.__modalStack[window.__modalStack.length-1]; renderTop(); try{ p.onReturn && p.onReturn(); }catch{} }
-      else { /* keep open */ }
-    } else {
-      fr.isDirty=false; fr._snapshot=null; setFrameMode(fr,'view'); fr._updateButtons&&fr._updateButtons();
-    }
-    try{ window.__toast?.('No changes'); }catch{}; return;
-  }
-
-  fr.persistCurrentTabState();
-  const isChildNow=(window.__modalStack?.length>1);
-  if (isChildNow && !fr.noParentGate && fr.kind!=='advanced-search') {
-    const p=window.__modalStack[window.__modalStack.length-2];
-    if (!p || !(p.mode==='edit'||p.mode==='create')) { L('saveForFrame GUARD (global): parent not editable'); return; }
-  }
-  fr._saving=true; fr._updateButtons&&fr._updateButtons();
-
-  let ok=false, saved=null;
-  if (typeof fr.onSave==='function') {
-    try { const res=await fr.onSave(); ok = (res===true) || (res && res.ok===true); if (res&&res.saved) saved=res.saved; }
-    catch (e) { L('saveForFrame onSave threw (global)', e); ok=false; }
-  }
-  fr._saving=false; if (!ok) { L('saveForFrame RESULT not ok (global)'); fr._updateButtons&&fr._updateButtons(); return; }
-
-  if (fr.kind === 'advanced-search') {
-    sanitizeModalGeometry();
-    const closing = window.__modalStack.pop();
-    if (closing?._detachDirty){ try{closing._detachDirty();}catch{} closing._detachDirty=null; }
-    if (closing?._detachGlobal){ try{closing._detachGlobal();}catch{} closing._detachGlobal=null; } fr._wired=false;
-
-    if (window.__modalStack.length>0) {
-      const p=window.__modalStack[window.__modalStack.length-1]; renderTop(); try{ p.onReturn && p.onReturn(); } catch{}
-    } else {
-      // keep page state
-    }
-    L('saveForFrame EXIT (global advanced-search closed)');
-    return;
-  }
-
-  if (isChildNow) {
-    try { window.dispatchEvent(new CustomEvent('modal-dirty')); } catch {}
-    sanitizeModalGeometry(); window.__modalStack.pop();
-    if (window.__modalStack.length>0) {
-      const p=window.__modalStack[window.__modalStack.length-1]; p.isDirty=true; p._updateButtons&&p._updateButtons(); renderTop(); try{ p.onReturn && p.onReturn(); }catch{}
-    } else {
-      // keep open
-    }
-    L('saveForFrame EXIT (global child)');
-  } else {
-    try {
-      const savedContract = (saved && (saved.contract || saved)) || null;
-      const id = savedContract?.id || window.modalCtx?.data?.id || null;
-      if (id && savedContract) {
-        const idx = Array.isArray(currentRows) ? currentRows.findIndex(x => String(x.id) === String(id)) : -1;
-        if (idx >= 0) currentRows[idx] = savedContract;
-        (window.__lastSavedAtById ||= {})[String(id)] = Date.now();
+      if (fr.kind!=='advanced-search' && !fr.noParentGate && fr.mode!=='view' && !fr.isDirty && !onlyDel && !allowApply) {
+        L('saveForFrame GUARD (global): no-op (no changes and apply not allowed)');
+        const isChildNow=(window.__modalStack?.length>1);
+        if (isChildNow) {
+          sanitizeModalGeometry(); window.__modalStack.pop();
+          if (window.__modalStack.length>0) { const p=window.__modalStack[window.__modalStack.length-1]; renderTop(); try{ p.onReturn && p.onReturn(); }catch{} }
+          else { /* keep open */ }
+        } else {
+          fr.isDirty=false; fr._snapshot=null; setFrameMode(fr,'view'); fr._updateButtons&&fr._updateButtons();
+        }
+        try{ window.__toast?.('No changes'); }catch{}; return;
       }
-    } catch (e) { console.warn('[SAVE] list cache merge failed', e); }
 
-    if (saved && window.modalCtx) { window.modalCtx.data = { ...(window.modalCtx.data||{}), ...(saved.contract || saved) }; fr.hasId = !!window.modalCtx.data?.id; }
-    fr.isDirty=false; fr._snapshot=null; setFrameMode(fr,'view');
-    L('saveForFrame EXIT (global parent, kept open)');
-  }
-}
+      fr.persistCurrentTabState();
+      const isChildNow=(window.__modalStack?.length>1);
+      if (isChildNow && !fr.noParentGate && fr.kind!=='advanced-search') {
+        const p=window.__modalStack[window.__modalStack.length-2];
+        if (!p || !(p.mode==='edit'||p.mode==='create')) { L('saveForFrame GUARD (global): parent not editable'); return; }
+      }
+      fr._saving=true; fr._updateButtons&&fr._updateButtons();
 
+      let ok=false, saved=null;
+      if (typeof fr.onSave==='function') {
+        try { const res=await fr.onSave(); ok = (res===true) || (res && res.ok===true); if (res&&res.saved) saved=res.saved; }
+        catch (e) { L('saveForFrame onSave threw (global)', e); ok=false; }
+      }
+      fr._saving=false; if (!ok) { L('saveForFrame RESULT not ok (global)'); fr._updateButtons&&fr._updateButtons(); return; }
+
+      if (fr.kind === 'advanced-search') {
+        sanitizeModalGeometry();
+        const closing = window.__modalStack.pop();
+        if (closing?._detachDirty){ try{closing._detachDirty();}catch{} closing._detachDirty=null; }
+        if (closing?._detachGlobal){ try{closing._detachGlobal();}catch{} closing._detachGlobal=null; } fr._wired=false;
+
+        if (window.__modalStack.length>0) {
+          const p=window.__modalStack[window.__modalStack.length-1]; renderTop(); try{ p.onReturn && p.onReturn(); } catch{}
+        } else {
+        }
+        L('saveForFrame EXIT (global advanced-search closed)');
+        return;
+      }
+
+      if (isChildNow) {
+        try { window.dispatchEvent(new CustomEvent('modal-dirty')); } catch {}
+        sanitizeModalGeometry(); window.__modalStack.pop();
+        if (window.__modalStack.length>0) {
+          const p=window.__modalStack[window.__modalStack.length-1]; p.isDirty=true; p._updateButtons&&p._updateButtons(); renderTop(); try{ p.onReturn && p.onReturn(); }catch{}
+        } else {
+        }
+        L('saveForFrame EXIT (global child)');
+      } else {
+        try {
+          const savedContract = (saved && (saved.contract || saved)) || null;
+          const id = savedContract?.id || window.modalCtx?.data?.id || null;
+          if (id && savedContract) {
+            const idx = Array.isArray(currentRows) ? currentRows.findIndex(x => String(x.id) === String(id)) : -1;
+            if (idx >= 0) currentRows[idx] = savedContract;
+            (window.__lastSavedAtById ||= {})[String(id)] = Date.now();
+          }
+        } catch (e) { console.warn('[SAVE] list cache merge failed', e); }
+
+        if (saved && window.modalCtx) { window.modalCtx.data = { ...(window.modalCtx.data||{}), ...(saved.contract || saved) }; fr.hasId = !!window.modalCtx.data?.id; }
+        fr.isDirty=false; fr._snapshot=null; setFrameMode(fr,'view');
+        L('saveForFrame EXIT (global parent, kept open)');
+      }
+    }
 
 
     const onSaveClick = async (ev)=>{
@@ -10896,7 +11301,6 @@ async function saveForFrame(fr) {
   L('showModal ENTER', { title, tabs: (tabs||[]).map(t=>t.key||t.title), hasId, entity: window.modalCtx?.entity, kind: opts.kind, forceEdit: !!opts.forceEdit });
   renderTop();
 }
-
 
 // Selection state helpers — simplified to explicit IDs only
 
