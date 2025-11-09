@@ -1492,21 +1492,7 @@ function openContract(row) {
           return false;
         }
 
-        try {
-          const stageKey = data.id || window.modalCtx.openToken || null;
-          if (stageKey && typeof getContractCalendarStageState === 'function') {
-            const st = getContractCalendarStageState(stageKey);
-            const adds = st && st.add ? Array.from(st.add) : [];
-            if (adds.length) {
-              const smin = adds.reduce((m, d) => (!m || d < m ? d : m), null);
-              const smax = adds.reduce((m, d) => (!m || d > m ? d : m), null);
-              if (smin && (!data.start_date || smin < data.start_date)) data.start_date = smin;
-              if (smax && (!data.end_date   || smax > data.end_date))   data.end_date   = smax;
-            }
-          }
-        } catch (e) {
-          if (LOGC) console.warn('[CONTRACTS] auto-expand compute failed (non-blocking)', e);
-        }
+        try {} catch {}
 
         if (!isCreate && data.id && typeof callCheckTimesheetBoundary === 'function' && data.start_date && data.end_date) {
           try {
@@ -1540,8 +1526,20 @@ function openContract(row) {
           }
         }
 
-        if (LOGC) console.log('[CONTRACTS] upsert → upsertContract');
-        const saved = await upsertContract(data, data.id || undefined);
+        let hasManualStage = false;
+try {
+  const stageKey = data.id || window.modalCtx.openToken || null;
+  if (stageKey && typeof getContractCalendarStageState === 'function') {
+    const st = getContractCalendarStageState(stageKey);
+    hasManualStage = !!(st && (st.add?.size || st.remove?.size || Object.keys(st.additional || {}).length));
+  }
+} catch {}
+
+if (!isCreate && hasManualStage) data.skip_generate_weeks = true;
+
+if (LOGC) console.log('[CONTRACTS] upsert → upsertContract');
+const saved = await upsertContract(data, data.id || undefined);
+
         if (LOGC) console.log('[CONTRACTS] upsertContract result', { hasSaved: !!saved, id: saved?.id || saved?.contract?.id });
 
         window.modalCtx.data = saved?.contract || saved || window.modalCtx.data;
