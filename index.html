@@ -14,17 +14,25 @@
     }
     *{box-sizing:border-box}
     html,body{height:100%}
-    body{margin:0;background:linear-gradient(180deg,#0b1221,#0a1020 60%);color:var(--text);font:14px/1.5 system-ui,Segoe UI,Roboto,Helvetica,Arial,"Apple Color Emoji","Segoe UI Emoji"}
+    body{
+      margin:0;
+      background:linear-gradient(180deg,#0b1221,#0a1020 60%);
+      color:var(--text);
+      font:14px/1.5 system-ui,Segoe UI,Roboto,Helvetica,Arial,"Apple Color Emoji","Segoe UI Emoji"
+    }
     a{color:inherit}
 
-    /* ===== App chrome ===== */
+    /* ===== App chrome (old look) ===== */
     .topbar{
-      position:sticky;top:0;z-index:9;
-      display:flex;align-items:center;gap:10px;
-      padding:10px 14px;background:rgba(14,18,34,.72);border-bottom:1px solid var(--line);
+      position:sticky; top:0; z-index:9;
+      display:flex; align-items:center; gap:10px;
+      padding:10px 14px;
+      background:rgba(14,18,34,.72);
+      border-bottom:1px solid var(--line);
       backdrop-filter:saturate(140%) blur(8px);
     }
     .brand{display:flex;align-items:center;gap:10px;margin-right:8px;font-weight:700}
+    /* keep your .row-dot class name, style it like the old .dot */
     .brand .row-dot{width:10px;height:10px;border-radius:50%;background:var(--brand);box-shadow:0 0 12px var(--brand)}
     .nav{display:flex;gap:6px;flex-wrap:wrap}
     .nav button{
@@ -57,10 +65,11 @@
     .panel{ background:linear-gradient(180deg,#0b1221,#0a1326); border:1px solid var(--line); border-radius:var(--radius); box-shadow:var(--shadow) }
     .tools{ padding:12px; position:sticky; top:76px; height:fit-content }
     .tools h3{ margin:6px 0 10px; font-size:12px; font-weight:600; color:var(--sub); text-transform:uppercase; letter-spacing:.06em }
-    .tools .group{ border-top:1px solid var(--line); padding-top:10px; margin-top:8px }
+    /* old index used a dashed divider here */
+    .tools .group{ border-top:1px dashed var(--line); padding-top:10px; margin-top:8px }
     .tools button,.tools .btn{
       width:100%; text-align:left; display:flex; align-items:center; gap:10px;
-      background:#0c152a; border:1px solid var(--line); color:var(--text); padding:8px 10px; border-radius:10px; cursor:pointer
+      background:#0c152a; border:1px solid var(--line); color:var(--text); padding:8px 10px; border-radius:10px; cursor:pointer; margin:6px 0;
     }
     .tools button:hover{ background: var(--hover) }
     .tools .note{ font-size:12px; color:var(--sub) }
@@ -72,7 +81,7 @@
     .spacer{ flex:1 }
     .toolbar input[type="text"]{ background:#0b1427; border:1px solid var(--line); color:#fff; border-radius:8px; padding:8px 10px; min-width:260px }
     .toolbar .mini{ font-size:12px; color:var(--sub) }
-    #content{ flex:1; min-height:0; overflow:auto } /* ⟵ content area is the scroll container */
+    #content{ flex:1; min-height:0; overflow:auto } /* old: content area is the scroll container */
     .grid{ width:100%; border-collapse:collapse }
     .grid th,.grid td{ padding:10px 12px; border-bottom:1px solid var(--line); vertical-align:top }
     .grid th{ position:sticky; top:0; background:#0b1221; border-bottom:1px solid var(--line); text-align:left }
@@ -82,77 +91,71 @@
     .tag-warn{ background:rgba(245,158,11,.15); color:#fde68a;  border-color:rgba(251,191,36,.35) }
     .tag-fail{ background:rgba(239,68,68,.15);  color:#fecaca;  border-color:rgba(248,113,113,.35) }
 
-    /* ===== Modal (draggable) ===== */
+    /* ===== Modal (old feel) ===== */
     .modal-back{
-      position:fixed;
-      inset:0;
-      background:rgba(2,6,23,.6);
-      display:none;
-      align-items:center;
-      justify-content:center;
-      z-index:99;
+      position:fixed; inset:0; background:rgba(2,6,23,.6);
+      display:none; align-items:center; justify-content:center; z-index:99;
     }
     .modal{
       width: min(1100px, 95vw);
       max-height: 90vh;
-      display: flex;
-      flex-direction: column;
+      display: flex; flex-direction: column;
       background: #0b1221;
       border: 1px solid var(--line);
       border-radius: 14px;
       box-shadow: var(--shadow);
-      overflow: hidden; /* keep header/tabs fixed */
+      overflow: hidden; /* header/tabs fixed edge */
     }
     .modal.dragging{ opacity:.95 }
     .modal-h{
-      display:flex;
-      align-items:center;
-      gap:10px;
-      padding:10px;
-      border-bottom:1px solid var(--line);
+      display:flex; align-items:center; gap:10px;
+      padding:10px; border-bottom:1px solid var(--line);
       cursor:move;
       background:linear-gradient(180deg,#0d1427,#0b1221)
     }
     .modal-h .ttl{ font-weight:700 }
     .modal-h .spacer{ flex:1 }
     .modal-h button{ border:1px solid var(--line); background:#0c172d; color:#fff; padding:6px 10px; border-radius:10px }
-    .modal-b{
-      padding:0;
-      display:flex;            /* tabs + body in a column */
-      flex-direction:column;
-      overflow:hidden;         /* body is the only scrollable area */
-    }
+    /* old modal made the body the scrollable region, tabs weren’t sticky */
+    .modal-b{ padding:0; overflow:auto }
     .tabs{
-      display:flex;
-      gap:6px;
+      display:flex; gap:6px;
       border-bottom:1px solid var(--line);
       padding:8px;
-      position: sticky;        /* pin tabs under header */
-      top: 0;
-      z-index: 1;
-      background:#0b1221;
+      /* remove the new sticky behavior to match old visual flow */
+      position: static; top:auto; z-index:auto; background:transparent;
     }
-    #modalBody{
-      flex: 1;                 /* take remaining height */
-      min-height: 0;           /* allow scroll area calculation */
-      overflow: auto;          /* scroll only this pane */
+    .tabs button{
+      background:#0c172d; border:1px solid var(--line); border-bottom:none;
+      padding:8px 10px; border-top-left-radius:10px; border-top-right-radius:10px;
+      color:var(--sub); cursor:pointer;
     }
+    .tabs button.active{ background:rgba(79,70,229,.18); color:var(--text); outline:2px solid var(--brand) }
     .tabc{ padding:14px }
+
+    /* Global form fields — restored to the “old, black input” feel everywhere */
+    .form{ display:grid; grid-template-columns:repeat(2,minmax(220px,1fr)); gap:10px }
+    .form .row{ display:flex; flex-direction:column; gap:6px }
+    .form input, .form select, .form textarea{
+      background:#000;                  /* black inputs */
+      border:1px solid var(--line);
+      color:var(--text);
+      border-radius:8px;
+      padding:8px 10px;
+      width:100%;
+    }
+    .form textarea{ min-height:90px }
 
     /* ===== Button row ===== */
     .actions{
-      padding:10px;
-      border-top:1px solid var(--line);
-      display:flex;
-      gap:10px;
-      justify-content:flex-end;
-      background:#0c172d;
+      padding:10px; border-top:1px solid var(--line);
+      display:flex; gap:10px; justify-content:flex-end; background:#0c172d;
     }
     .actions button{ border:1px solid var(--line); background:#0b152a; color:#fff; padding:8px 12px; border-radius:10px; cursor:pointer }
     .actions .primary{ background:linear-gradient(180deg,#5146e5,#4038cc); border-color:#3730a3 }
     .hint{ color:#cbd5e1; font-size:12px }
 
-    /* ===== Button disabled state (visual) ===== */
+    /* Disabled state (unchanged) */
     .actions button:disabled,
     .actions button.disabled {
       opacity: .45;
@@ -162,27 +165,27 @@
     }
     .actions .primary:disabled,
     .actions .primary.disabled{
-      background: #2d2a66; /* dimmed gradient feel */
+      background: #2d2a66;
       border-color: #252258;
     }
 
-    /* ===== Calendar ===== */
+    /* ===== Calendar (old palette) ===== */
     .calendar{ display:grid; grid-template-columns:repeat(4,1fr); gap:10px }
     .month{ border:1px solid var(--line); border-radius:10px; overflow:hidden }
-    .month h4{ margin:0; padding:8px 10px; background:#0c172d; display:block }
+    .month h4{ margin:0; padding:8px 10px; background:#0c172d; display:block; border-bottom:1px solid var(--line) }
     .days{ display:grid; grid-template-columns:repeat(7,1fr) }
     .days .d{ padding:6px; border-right:1px solid var(--line); border-bottom:1px solid var(--line); min-height:32px }
     .days.days-large .d{ min-height:46px; padding:8px }
-    /* Old mark-* (compat) */
+    /* legacy marks retained */
     .d.mark-a{ background:rgba(245,158,11,.2) }
     .d.mark-i{ background:rgba(59,130,246,.2) }
     .d.mark-p{ background:rgba(34,197,94,.25) }
-    /* State classes (keep long + short for compatibility) */
-    .cal-planned, .cal-pl        { background: rgba(59,130,246,.18); }  /* planned / blue */
-    .cal-submitted               { background: rgba(147,51,234,.22); }  /* purple */
-    .cal-authorised              { background: rgba(34,197,94,.22); }   /* green */
-    .cal-invoiced                { background: rgba(245,158,11,.22); }  /* amber */
-    .cal-paid                    { background: rgba(20,184,166,.24); }  /* teal */
+    /* state classes */
+    .cal-planned   { background: rgba(59,130,246,.18); }
+    .cal-submitted { background: rgba(147,51,234,.22); }
+    .cal-authorised{ background: rgba(34,197,94,.22); }
+    .cal-invoiced  { background: rgba(245,158,11,.22); }
+    .cal-paid      { background: rgba(20,184,166,.24); }
     .d.selected{ outline:2px solid var(--brand); outline-offset:-2px; box-shadow: inset 0 0 0 1px rgba(255,255,255,.06) }
     .d .ico{ display:flex; align-items:center; justify-content:space-between }
     .d .ico .dow{ font-size:10px; letter-spacing:.02em; opacity:.8 }
@@ -194,19 +197,22 @@
     .sq{ width:10px; height:10px; border-radius:2px }
     .sq.a{ background:rgba(245,158,11,.7) } .sq.i{ background:rgba(59,130,246,.7) } .sq.p{ background:rgba(34,197,94,.7) }
 
-    /* ===== Auth overlays ===== */
+    /* ===== Auth overlays (old card tone) ===== */
     .auth-overlay{position:fixed;inset:0;display:none;place-items:center;background:radial-gradient(800px 400px at 20% 0%,rgba(79,70,229,.2),transparent),rgba(2,6,23,.8);z-index:100}
-    .auth-card{width:min(520px,92vw);padding:16px;border-radius:16px;border:1px solid var(--line);background:linear-gradient(180deg,#0b1221,#0a1326);box-shadow:var(--shadow);color:#fff}
+    .auth-card{width:min(520px,92vw);padding:16px;border-radius:16px;border:1px solid var(--line);background:linear-gradient(180deg,#0e1428,#0b1221);box-shadow:var(--shadow);color:#fff}
     .auth-h{display:flex;align-items:center;gap:10px;margin:8px 0 10px}
     .auth-h .ttl{font-weight:800;font-size:18px}
     .auth-f .row{display:flex;flex-direction:column;gap:6px;margin:8px 0}
-    .auth-f input{background:#0b1427;border:1px solid #334155;color:#fff;padding:10px;border-radius:8px}
+    .auth-f label{font-size:12px;color:var(--sub)}
+    .auth-f input{background:#000;border:1px solid var(--line);color:#fff;padding:10px;border-radius:8px} /* black inputs */
     .auth-f .actions{display:flex;justify-content:space-between;align-items:center;border-top:none;background:transparent;padding:8px 0}
     .link{color:#93c5fd;cursor:pointer}
     .error{color:#fecaca;background:rgba(239,68,68,.1);border:1px solid rgba(248,113,113,.35);padding:8px;border-radius:8px}
     .success{color:#bbf7d0;background:rgba(16,185,129,.12);border:1px solid rgba(16,185,129,.3);padding:8px;border-radius:8px}
+    .split{display:flex;gap:10px}
+    .eye{cursor:pointer;font-size:12px;color:var(--sub)}
 
-    /* ===== Date-picker portal visibility fix ===== */
+    /* Date-picker portal visibility fix */
     .uk-datepicker-portal { color: #111827; }
     .uk-datepicker-portal .cal-head a {
       color: #111827;
@@ -217,7 +223,7 @@
     }
 
     /* ─────────────────────────────────────────────────────────────
-       Contracts (modal-only) helpers — scoped so nothing else changes
+       Contracts helpers & overrides (old behavior)
        ───────────────────────────────────────────────────────────── */
     .tabc .card{
       background:#0c172d;
@@ -231,13 +237,10 @@
     .tabc .grid-5{ display:grid; grid-template-columns:repeat(5,minmax(0,1fr)); gap:10px; }
     .tabc .grid-7{ display:grid; grid-template-columns:repeat(7,minmax(0,1fr)); gap:10px; }
 
-    /* ─────────────────────────────────────────────────────────────
-       Contracts (modal-only) overrides — requires #modal.contract-modal class toggled in JS
-       ───────────────────────────────────────────────────────────── */
     #modal.contract-modal .form input,
     #modal.contract-modal .form select,
     #modal.contract-modal .form textarea{
-      background:#000;
+      background:#000;  /* hard black in Contracts modal, as before */
       color:var(--text);
       border:1px solid var(--line);
     }
@@ -310,7 +313,7 @@
       </div>
       <div class="modal-b">
         <div class="tabs" id="modalTabs"></div>
-        <div class="tabc" id="modalBody"></div> <!-- The only scrollable pane -->
+        <div class="tabc" id="modalBody"></div>
       </div>
       <div class="actions" id="modalActions">
         <span class="hint" id="modalHint"></span>
@@ -322,7 +325,7 @@
     </div>
   </div>
 
-  <!-- ===== Auth overlays (login / forgot / reset) ===== -->
+  <!-- ===== Auth overlays ===== -->
   <div class="auth-overlay" id="loginOverlay" aria-hidden="true">
     <div class="auth-card">
       <div class="auth-h"><div class="ttl">Sign in</div></div>
@@ -336,7 +339,7 @@
           <label>Password</label>
           <div class="split">
             <input id="loginPassword" type="password" autocomplete="current-password" required />
-            <span class="link" id="toggleLoginPw">show</span>
+            <span class="eye" id="toggleLoginPw">show</span>
           </div>
         </div>
         <div class="row">
@@ -378,14 +381,14 @@
           <label>New password</label>
           <div class="split">
             <input id="resetPw1" type="password" autocomplete="new-password" required minlength="8" />
-            <span class="link" id="toggleResetPw1">show</span>
+            <span class="eye" id="toggleResetPw1">show</span>
           </div>
         </div>
         <div class="row">
           <label>Confirm new password</label>
           <div class="split">
             <input id="resetPw2" type="password" autocomplete="new-password" required minlength="8" />
-            <span class="link" id="toggleResetPw2">show</span>
+            <span class="eye" id="toggleResetPw2">show</span>
           </div>
         </div>
         <div class="actions">
