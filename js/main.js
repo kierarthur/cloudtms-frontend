@@ -1218,7 +1218,6 @@ function openContract(row) {
     _saveInFlight: false
   };
 
-  // Temporary calendar owner key for create mode
   if (isCreate && !window.modalCtx.openToken) {
     window.modalCtx.openToken = `contract:new:${Date.now()}:${Math.random().toString(36).slice(2)}`;
     if (LOGC) console.log('[CONTRACTS] openToken issued for create', window.modalCtx.openToken);
@@ -1245,7 +1244,6 @@ function openContract(row) {
     });
   }
 
-  // Always include Calendar (also in create mode)
   const tabs = [ { key:'main', title:'Main' }, { key:'rates', title:'Rates' }, { key:'calendar', title:'Calendar' } ];
   if (LOGC) console.log('[CONTRACTS] tabs', tabs.map(t=>t.key));
 
@@ -1330,7 +1328,7 @@ function openContract(row) {
         const normHHMM = (v) => {
           const t = String(v || '').trim();
           if (!t) return '';
-          const m = t.match(/^(\d{1,2})(?::?(\d{2}))$/); // accepts "0900" or "09:00"
+          const m = t.match(/^(\d{1,2})(?::?(\d{2}))$/);
           if (!m) return '';
           const h = +m[1], mi = +m[2];
           if (Number.isNaN(h) || Number.isNaN(mi) || h < 0 || h > 23 || mi < 0 || mi > 59) return '';
@@ -1346,6 +1344,9 @@ function openContract(row) {
           }
         }
         const std_schedule_json = Object.keys(schedule).length ? schedule : null;
+
+        const prevStartIso = base.start_date || null;
+        const prevEndIso   = base.end_date   || null;
 
         const startIso = ukToIso(choose('start_date', ''), base.start_date ?? null);
         const endIso   = ukToIso(choose('end_date', ''),   base.end_date   ?? null);
@@ -1424,7 +1425,6 @@ function openContract(row) {
           console.log('[CONTRACTS] onSave payload (preview)', preview);
         }
 
-        // ===== OVERLAP CONFIRM (parent context) — proceed/cancel =====
         let overlapProceed = true;
         try {
           if (typeof checkContractOverlap === 'function' && data.candidate_id && data.start_date && data.end_date) {
@@ -1453,10 +1453,9 @@ function openContract(row) {
           window.modalCtx._saveInFlight = false;
           if (LOGC) console.log('[CONTRACTS] Save cancelled by user on overlap dialog');
           console.groupEnd?.();
-          return false; // leave modal in edit & dirty
+          return false;
         }
 
-        // ===== AUTO-EXPAND WINDOW BEFORE ANY GUARDS/WRITES (based on staged adds) =====
         try {
           const stageKey = data.id || window.modalCtx.openToken || null;
           if (stageKey && typeof getContractCalendarStageState === 'function') {
@@ -1473,7 +1472,6 @@ function openContract(row) {
           if (LOGC) console.warn('[CONTRACTS] auto-expand compute failed (non-blocking)', e);
         }
 
-        // ===== HARD GUARD: Prevent saving if real timesheets would fall outside new date window (after expand) =====
         if (!isCreate && data.id && typeof callCheckTimesheetBoundary === 'function' && data.start_date && data.end_date) {
           try {
             const boundary = await callCheckTimesheetBoundary(data.id, data.start_date, data.end_date);
@@ -1506,7 +1504,6 @@ function openContract(row) {
           }
         }
 
-        // ===== UPSERT (with possibly widened window) =====
         if (LOGC) console.log('[CONTRACTS] upsert → upsertContract');
         const saved = await upsertContract(data, data.id || undefined);
         if (LOGC) console.log('[CONTRACTS] upsertContract result', { hasSaved: !!saved, id: saved?.id || saved?.contract?.id });
@@ -1521,7 +1518,6 @@ function openContract(row) {
 
         const contractId = saved?.id || saved?.contract?.id;
 
-        // Rebind formState to saved id + persist pick labels
         try {
           const fsAll = (window.modalCtx.formState ||= { __forId: (contractId || window.modalCtx.openToken || null), main:{}, pay:{} });
           fsAll.__forId = contractId || fsAll.__forId;
@@ -1532,18 +1528,55 @@ function openContract(row) {
           if (nameClientEl && nameClientEl.value && !fsm.client_name)    fsm.client_name = nameClientEl.value;
         } catch {}
 
-        // ===== ALWAYS: scaffold weeks first if staged OR template exists; then commit staged plan =====
         if (contractId) {
+          let hasStageNow = false;
           try {
             const stId = (typeof getContractCalendarStageState === 'function') ? getContractCalendarStageState(contractId) : null;
-            const hasStageNow = !!(stId && (stId.add?.size || stId.remove?.size || Object.keys(stId.additional||{}).length));
-            if (hasStageNow || !!std_schedule_json) {
-              if (LOGC) console.log('[CONTRACTS] generateContractWeeks (stage/template present)', { contractId });
-              await generateContractWeeks(contractId);
+            hasStageNow = !!(stId && (stId.add?.size || stId.remove?.size || Object.keys(stId.additional||{}).length));
+          } catch {}
+
+          const newStart = window.modalCtx?.data?.start_date || data.start_date || null;
+          const newEnd   = window.modalCtx?.data?.end_date   || data.end_date   || null;
+
+          const extendedHead = !!(prevStartIso && newStart && newStart < prevStartIso);
+          const extendedTail = !!(prevEndIso   && newEnd   && newEnd   > prevEndIso);
+
+          let didRangeGen = false;
+
+          if (isCreate) {
+            if (!!std_schedule_json) {
+              if (LOGC) console.log('[CONTRACTS] generateContractWeeks (create, full)');
+              if (typeof generateContractWeeks === 'function') await generateContractWeeks(contractId);
             }
-          } catch (e) {
-            if (LOGC) console.warn('[CONTRACTS] generateContractWeeks failed (non-blocking)', e);
+          } else {
+            if (hasStageNow) {
+              if (LOGC) console.log('[CONTRACTS] generateContractWeeks (edit, staged present)');
+              if (typeof generateContractWeeks === 'function') await generateContractWeeks(contractId);
+            } else if ((extendedHead || extendedTail) && !!std_schedule_json) {
+              const headFrom = extendedHead ? newStart : null;
+              const headTo   = extendedHead ? prevStartIso : null;
+              const tailFrom = extendedTail ? prevEndIso : null;
+              const tailTo   = extendedTail ? newEnd : null;
+
+              if (LOGC) console.log('[CONTRACTS] generate range (template-only head/tail)', { headFrom, headTo, tailFrom, tailTo });
+
+              if (typeof generateContractWeeksRange === 'function') {
+                if (extendedHead) await generateContractWeeksRange(contractId, { from: headFrom, to: headTo, mode: 'TEMPLATE_ONLY' });
+                if (extendedTail) await generateContractWeeksRange(contractId, { from: tailFrom, to: tailTo, mode: 'TEMPLATE_ONLY' });
+                didRangeGen = true;
+              } else if (typeof generateContractWeeks === 'function') {
+                if (extendedHead) await generateContractWeeks(contractId, { from: headFrom, to: headTo, templateOnly: true });
+                if (extendedTail) await generateContractWeeks(contractId, { from: tailFrom, to: tailTo, templateOnly: true });
+                didRangeGen = true;
+              }
+            } else {
+              if (!!std_schedule_json && typeof generateContractWeeks === 'function') {
+                if (LOGC) console.log('[CONTRACTS] generateContractWeeks (edit, full when no staged and no extension)');
+                await generateContractWeeks(contractId);
+              }
+            }
           }
+
           if (LOGC) console.log('[CONTRACTS] calendar → commitContractCalendarStageIfPending');
           const calRes = await commitContractCalendarStageIfPending(contractId);
           if (!calRes.ok) {
@@ -1555,10 +1588,8 @@ function openContract(row) {
           }
         }
 
-        // Refresh finance gates
         try { if (typeof computeContractMargins === 'function') computeContractMargins(); } catch {}
 
-        // Post-save repaint
         try {
           const fr = window.__getModalFrame?.();
           const currentTab = fr?.currentTabKey || (document.querySelector('#modalTabs button.active')?.textContent?.toLowerCase() || 'main');
@@ -1994,7 +2025,6 @@ function openContract(row) {
 
       setTimeout(wire, 0);
 
-      // Re-attach Main tab behaviours after any (re)render
       if (!window.__contractsWireBound) {
         window.__contractsWireBound = true;
         window.addEventListener('contracts-main-rendered', () => setTimeout(wire, 0));
@@ -3415,12 +3445,23 @@ function openManualWeekEditor(week_id, contract_id /* optional but recommended *
 // FIX 2: Clone & Extend endpoint name mismatch (…/clone-and-extend)
 // ──────────────────────────────────────────────────────────────────────────────
 function openContractCloneAndExtend(contract_id) {
+  const old = (window.modalCtx && window.modalCtx.data) ? window.modalCtx.data : {};
+  const oldEnd = old?.end_date || toYmd(new Date());
+  const defaultStart = (() => { const d=new Date((oldEnd||toYmd(new Date()))+'T00:00:00Z'); d.setUTCDate(d.getUTCDate()+1); return toYmd(d); })();
+  const defaultEnd = (() => { const d=new Date(defaultStart+'T00:00:00Z'); d.setUTCDate(d.getUTCDate()+84); return toYmd(d); })();
+
   const content = `
     <div class="tabc">
-      <div class="row"><label>New start</label><div class="controls"><input class="input" name="new_start_date" placeholder="YYYY-MM-DD" /></div></div>
-      <div class="row"><label>New end</label><div class="controls"><input class="input" name="new_end_date" placeholder="YYYY-MM-DD" /></div></div>
+      <div class="row"><label>New start</label><div class="controls">
+        <input class="input" type="date" name="new_start_date" value="${defaultStart}" />
+      </div></div>
+      <div class="row"><label>New end</label><div class="controls">
+        <input class="input" type="date" name="new_end_date" value="${defaultEnd}" />
+      </div></div>
+      <div class="mini">The old contract will end on the day before the new start, and planned bookings on or after the new start will be removed where no timesheets exist.</div>
     </div>
   `;
+
   showModal(
     'Clone & Extend',
     [{ key:'c', title:'Successor window'}],
@@ -3429,11 +3470,26 @@ function openContractCloneAndExtend(contract_id) {
       const root = document;
       const new_start_date = root.querySelector('input[name="new_start_date"]')?.value?.trim() || null;
       const new_end_date   = root.querySelector('input[name="new_end_date"]')?.value?.trim() || null;
-      const r = await authFetch(API(`/api/contracts/${_enc(contract_id)}/clone-and-extend`), { // <-- fixed here
-        method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({ new_start_date, new_end_date })
+      if (!new_start_date || !new_end_date) { alert('Enter both dates.'); return false; }
+      if (new_start_date > new_end_date) { alert('End must be on or after start.'); return false; }
+
+      const r = await authFetch(API(`/api/contracts/${_enc(contract_id)}/clone-and-extend`), {
+        method:'POST',
+        headers:{'content-type':'application/json'},
+        body: JSON.stringify({ new_start_date, new_end_date })
       });
-      if (!r?.ok) { alert('Clone/extend failed.'); return false; }
-      alert('Successor created and current window truncated.');
+      if (!r?.ok) { alert('Clone & extend failed.'); return false; }
+      const payload = await r.json().catch(()=>null);
+      const successor = payload && (payload.successor || payload.contract || null);
+
+      try { window.__toast?.('Successor created'); } catch {}
+      if (successor && successor.id) {
+        try {
+          openContract(successor);
+        } catch {
+          try { renderAll(); } catch {}
+        }
+      }
       return true;
     },
     false,
@@ -3441,8 +3497,6 @@ function openContractCloneAndExtend(contract_id) {
     { kind:'clone-extend' }
   );
 }
-
-
 
 function openContractSkipWeeks(contract_id) {
   const content = `
@@ -9135,17 +9189,9 @@ function renderContractCalendarTab(ctx) {
 
   const weekEnding = (c.week_ending_weekday_snapshot ?? window.modalCtx?.formState?.main?.week_ending_weekday_snapshot ?? 0);
 
-  const actionsHtml = (c.id
-    ? `<div class="actions" style="margin-top:8px">
-         <button id="btnGenWeeks">Generate weeks</button>
-         <button id="btnSkipWeeks">Skip weeks…</button>
-         <button id="btnCloneExtend">Clone & Extend…</button>
-       </div>`
-    : `<div class="actions" style="margin-top:8px">
-         <button disabled>Generate weeks</button>
-         <button disabled>Skip weeks…</button>
-         <button disabled>Clone & Extend…</button>
-       </div>`);
+  const actionsHtml = (c.id ? `<div class="actions" style="margin-top:8px;display:flex;gap:8px">
+    <button id="btnCloneExtend">Clone & Extend…</button>
+  </div>` : ``);
 
   if (!candId) {
     return `
@@ -9161,24 +9207,20 @@ function renderContractCalendarTab(ctx) {
       const win = computeYearWindow(y);
       const el = byId(holderId); if (!el) return;
       el.innerHTML = `<div class="tabc" id="__contractCal"></div>${actionsHtml}`;
-
-      // Always use candidate-wide renderer
       await fetchAndRenderCandidateCalendarForContract(currentKey, candId, { from: win.from, to: win.to, view:'year', weekEnding });
-
       if (c.id) {
-        el.querySelector('#btnGenWeeks')?.addEventListener('click', async () => {
-          try { await generateContractWeeks(c.id); alert('Weeks generated (idempotent).'); } catch (e) { alert(e?.message || e); }
-          const s = window.__calState[c.id]; await fetchAndRenderCandidateCalendarForContract(c.id, candId, { from: s.win.from, to: s.win.to, view: s.view, weekEnding });
-        });
-        el.querySelector('#btnSkipWeeks')?.addEventListener('click', () => openContractSkipWeeks(c.id));
-        el.querySelector('#btnCloneExtend')?.addEventListener('click', () => openContractCloneAndExtend(c.id));
+        const btnCE = el.querySelector('#btnCloneExtend');
+        if (btnCE && !btnCE.__wired) {
+          btnCE.__wired = true;
+          btnCE.addEventListener('click', () => openContractCloneAndExtend(c.id));
+        }
       }
     } catch (e) {
       const el = byId(holderId); if (el) el.innerHTML = `<div class="error">Calendar load failed.</div>`;
     }
   }, 0);
 
-  return `<div id="${holderId}" class="tabc"><div class="hint">Loading calendar…</div></div>`;
+  return `<div id="${holderId}" class="tabc"><div class="hint">Loading calendar…</div>${c.id ? `<div class="actions" style="margin-top:8px;display:flex;gap:8px"><button id="btnCloneExtend" disabled>Clone & Extend…</button></div>` : ``}</div>`;
 }
 
 // ───────────────────────────────────────────────────────────────
