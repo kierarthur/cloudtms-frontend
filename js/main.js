@@ -1223,6 +1223,39 @@ function openContract(row) {
     if (LOGC) console.log('[CONTRACTS] openToken issued for create', window.modalCtx.openToken);
   }
 
+  // Seed a complete baseline into formState so all values exist across tabs
+  try {
+    const base = window.modalCtx.data || {};
+    const fs = (window.modalCtx.formState ||= { __forId: (base.id ?? window.modalCtx.openToken ?? null), main:{}, pay:{} });
+    fs.__forId = fs.__forId ?? (base.id ?? window.modalCtx.openToken ?? null);
+    const m = (fs.main ||= {});
+    if (m.__seeded !== true) {
+      if (base.candidate_id != null) m.candidate_id = base.candidate_id;
+      if (base.client_id != null)    m.client_id    = base.client_id;
+      if (base.role != null)         m.role         = base.role;
+      if (base.band != null)         m.band         = base.band;
+      if (base.display_site != null) m.display_site = base.display_site;
+      if (base.start_date)           m.start_date   = base.start_date;
+      if (base.end_date)             m.end_date     = base.end_date;
+      if (base.pay_method_snapshot)  m.pay_method_snapshot = base.pay_method_snapshot;
+      if (base.default_submission_mode) m.default_submission_mode = base.default_submission_mode;
+      if (base.week_ending_weekday_snapshot != null) m.week_ending_weekday_snapshot = String(base.week_ending_weekday_snapshot);
+      if (base.bucket_labels_json)   m.__bucket_labels = base.bucket_labels_json;
+      if (base.std_schedule_json)    m.__template      = base.std_schedule_json;
+      if (base.std_hours_json)       m.__hours         = base.std_hours_json;
+      m.__seeded = true;
+    }
+    // Seed rates buckets once so eligibility works even if Rates tab never opened
+    const p = (fs.pay ||= {});
+    if (!Object.keys(p).length && base.rates_json && typeof base.rates_json === 'object') {
+      const buckets = ['paye_day','paye_night','paye_sat','paye_sun','paye_bh','umb_day','umb_night','umb_sat','umb_sun','umb_bh','charge_day','charge_night','charge_sat','charge_sun','charge_bh'];
+      for (const k of buckets) {
+        const v = base.rates_json[k];
+        if (v === 0 || (typeof v === 'number' && Number.isFinite(v))) p[k] = String(v);
+      }
+    }
+  } catch {}
+
   const extraButtons = [];
   if (!isCreate && window.modalCtx.data?.id) {
     extraButtons.push({
@@ -1320,7 +1353,8 @@ function openContract(row) {
         const gh = { mon: numOrNull('gh_mon'), tue: numOrNull('gh_tue'), wed: numOrNull('gh_wed'),
                      thu: numOrNull('gh_thu'), fri: numOrNull('gh_fri'), sat: numOrNull('gh_sat'), sun: numOrNull('gh_sun') };
         const ghFilled = Object.values(gh).some(v => v != null && v !== 0);
-        const std_hours_json = ghFilled ? gh : (base.std_hours_json ?? null);
+        let std_hours_json = ghFilled ? gh : (base.std_hours_json ?? null);
+        if (!std_hours_json && fs.main && fs.main.__hours) std_hours_json = fs.main.__hours;
 
         const days = ['mon','tue','wed','thu','fri','sat','sun'];
         const get = (n) => fromFS(n, fromFD(n, ''));
@@ -1343,7 +1377,11 @@ function openContract(row) {
             schedule[d2] = { start: s, end: e, break_minutes: Math.max(0, Number(br||0)) };
           }
         }
-        const std_schedule_json = Object.keys(schedule).length ? schedule : null;
+        let std_schedule_json = Object.keys(schedule).length ? schedule : null;
+        if (!std_schedule_json) {
+          if (fs.main && fs.main.__template) std_schedule_json = fs.main.__template;
+          else if (base.std_schedule_json)   std_schedule_json = base.std_schedule_json;
+        }
 
         const prevStartIso = base.start_date || null;
         const prevEndIso   = base.end_date   || null;
@@ -1526,6 +1564,10 @@ function openContract(row) {
           const fsm = (fsAll.main ||= {});
           if (nameCandEl && nameCandEl.value && !fsm.candidate_display) fsm.candidate_display = nameCandEl.value;
           if (nameClientEl && nameClientEl.value && !fsm.client_name)    fsm.client_name = nameClientEl.value;
+          // ensure persisted baselines remain if backend echoed them
+          if (!fsm.__template && window.modalCtx.data?.std_schedule_json) fsm.__template = window.modalCtx.data.std_schedule_json;
+          if (!fsm.__hours && window.modalCtx.data?.std_hours_json)       fsm.__hours    = window.modalCtx.data.std_hours_json;
+          if (!fsm.__bucket_labels && window.modalCtx.data?.bucket_labels_json) fsm.__bucket_labels = window.modalCtx.data.bucket_labels_json;
         } catch {}
 
         if (contractId) {
@@ -2062,6 +2104,7 @@ function openContract(row) {
     }
   }, 0);
 }
+
 
 // ─────────────────────────────────────────────────────────────────────────────
 // NEW: getSummaryFingerprint(section)
@@ -8885,11 +8928,10 @@ function buildPlanRangesFromStage(contractId) {
   const L = (...a)=> { if (LOG_CAL) console.log('[CAL][buildRanges]', ...a); };
 
   const st = getContractCalendarStageState(contractId);
-  const adds = [...st.add].sort();   // ascending YYYY-MM-DD
+  const adds = [...st.add].sort();
   const rems = [...st.remove].sort();
 
-  // ---------- helpers ----------
-  const boundsOf = (arr) => computeSelectionBounds(arr); // { from, to }
+  const boundsOf = (arr) => computeSelectionBounds(arr);
 
   const isConsecutiveDailyRun = (arr) => {
     if (arr.length < 2) return false;
@@ -8902,33 +8944,33 @@ function buildPlanRangesFromStage(contractId) {
     return true;
   };
 
-  const stdSched = (window.modalCtx?.data?.std_schedule_json && typeof window.modalCtx.data.std_schedule_json === 'object')
+  let template = (window.modalCtx?.data?.std_schedule_json && typeof window.modalCtx.data.std_schedule_json === 'object')
     ? window.modalCtx.data.std_schedule_json
     : null;
+  if (!template) {
+    try {
+      const fsT = window.modalCtx?.formState?.main?.__template;
+      if (fsT && typeof fsT === 'object') template = fsT;
+    } catch {}
+  }
 
-  // Build the set of active weekdays (only those with valid start+end)
   const activeDows = (() => {
     const s = new Set();
-    if (!stdSched) return s;
+    if (!template) return s;
     const valid = (d) => d && typeof d.start === 'string' && d.start && typeof d.end === 'string' && d.end;
-    if (valid(stdSched.sun)) s.add(0);
-    if (valid(stdSched.mon)) s.add(1);
-    if (valid(stdSched.tue)) s.add(2);
-    if (valid(stdSched.wed)) s.add(3);
-    if (valid(stdSched.thu)) s.add(4);
-    if (valid(stdSched.fri)) s.add(5);
-    if (valid(stdSched.sat)) s.add(6);
+    if (valid(template.sun)) s.add(0);
+    if (valid(template.mon)) s.add(1);
+    if (valid(template.tue)) s.add(2);
+    if (valid(template.wed)) s.add(3);
+    if (valid(template.thu)) s.add(4);
+    if (valid(template.fri)) s.add(5);
+    if (valid(template.sat)) s.add(6);
     return s;
   })();
 
-  // ---------- ADD ranges ----------
   const addRanges = [];
   if (adds.length) {
     const b = boundsOf(adds);
-
-    // Rule:
-    //  - If the selection is a long, consecutive span, keep ONLY dates whose weekday is templated.
-    //  - Otherwise (sparse or short), keep ALL explicit dates (these can become 00:00/00:00/0 later).
     const LONG_CONSECUTIVE_THRESHOLD = 10;
     const consecutive = isConsecutiveDailyRun(adds);
     let explicitDays;
@@ -8939,11 +8981,9 @@ function buildPlanRangesFromStage(contractId) {
           .filter(d => activeDows.has(new Date(d + 'T00:00:00Z').getUTCDay()))
           .map(d => ({ date: d }));
       } else {
-        // No active weekdays in template → nothing to add for a bulk span
         explicitDays = [];
       }
     } else {
-      // Sparse selection → include everything explicitly (even if not templated)
       explicitDays = adds.map(d => ({ date: d }));
     }
 
@@ -8959,7 +8999,6 @@ function buildPlanRangesFromStage(contractId) {
     L('addRanges: none');
   }
 
-  // ---------- REMOVE ranges ----------
   const removeRanges = [];
   if (rems.length) {
     const b = boundsOf(rems);
@@ -8973,7 +9012,6 @@ function buildPlanRangesFromStage(contractId) {
     L('removeRanges: none');
   }
 
-  // ---------- ADDITIONALS (per-baseWeekId dates) ----------
   const additionals = Object.entries(st.additional).map(([baseWeekId, set]) => ({
     baseWeekId, dates: [...set].sort()
   }));
@@ -8981,7 +9019,6 @@ function buildPlanRangesFromStage(contractId) {
 
   return { addRanges, removeRanges, additionals };
 }
-
 
 function revertContractCalendarStage(contractId) {
   clearContractCalendarStageState(contractId);
@@ -10955,88 +10992,96 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
     isDirty:false, _snapshot:null, _detachDirty:null, _detachGlobal:null, _hasMountedOnce:false, _wired:false, _closing:false, _saving:false, _confirmingDiscard:false,
     _applyDesired:null,
 
-    persistCurrentTabState() {
-      L('persistCurrentTabState ENTER', { mode: this.mode, currentTabKey: this.currentTabKey });
-      if (!window.modalCtx || this.mode === 'view') { L('persist(skip)', { reason:'mode=view or no modalCtx', mode:this.mode }); return; }
+persistCurrentTabState() {
+  L('persistCurrentTabState ENTER', { mode: this.mode, currentTabKey: this.currentTabKey });
+  if (!window.modalCtx || this.mode === 'view') { L('persist(skip)', { reason:'mode=view or no modalCtx', mode:this.mode }); return; }
 
-      const sentinel = window.modalCtx?.openToken || null;
-      const initial  = (window.modalCtx.data?.id ?? sentinel);
-      const fs = window.modalCtx.formState || { __forId: initial, main:{}, pay:{} };
-      if (fs.__forId == null) fs.__forId = initial;
+  const sentinel = window.modalCtx?.openToken || null;
+  const initial  = (window.modalCtx.data?.id ?? sentinel);
+  const fs = window.modalCtx.formState || { __forId: initial, main:{}, pay:{} };
+  if (fs.__forId == null) fs.__forId = initial;
 
-      if (this.currentTabKey === 'main') {
-        const sel = byId('tab-main') ? '#tab-main' : (byId('contractForm') ? '#contractForm' : null);
-        if (sel) {
-          const c = collectForm(sel);
-          fs.main = { ...(fs.main||{}), ...stripEmpty(c) };
-        }
+  if (this.currentTabKey === 'main') {
+    const sel = byId('tab-main') ? '#tab-main' : (byId('contractForm') ? '#contractForm' : null);
+    if (sel) {
+      const c = collectForm(sel);
+      fs.main = { ...(fs.main||{}), ...stripEmpty(c) };
+    }
+  }
+
+  if (this.currentTabKey === 'pay' && byId('tab-pay')) {
+    const c = collectForm('#tab-pay');
+    fs.pay  = { ...(fs.pay||{}), ...stripEmpty(c) };
+  }
+
+  if (this.entity === 'contracts' && this.currentTabKey === 'rates') {
+    try {
+      const rt = byId('contractRatesTab');
+      if (rt) {
+        const rForm = {};
+        rt.querySelectorAll('input, select, textarea').forEach(el => {
+          if (el.name) rForm[el.name] = (el.type === 'checkbox' ? (el.checked ? 'on' : '') : el.value);
+        });
+        const onlyRates = {};
+        for (const [k, v] of Object.entries(rForm)) if (/^(paye_|umb_|charge_)/.test(k)) onlyRates[k] = v;
+        fs.pay = { ...(fs.pay || {}), ...stripEmpty(onlyRates) };
       }
-
-      if (this.currentTabKey === 'pay' && byId('tab-pay')) {
-        const c = collectForm('#tab-pay');
-        fs.pay  = { ...(fs.pay||{}), ...stripEmpty(c) };
+      const mainSel = byId('contractForm') ? '#contractForm' : null;
+      if (mainSel) {
+        const m = collectForm(mainSel);
+        fs.main = { ...(fs.main || {}), ...stripEmpty(m) };
       }
+    } catch (e) {
+      L('persistCurrentTabState contracts/rates failed', e);
+    }
+  }
 
-      if (this.entity === 'contracts' && this.currentTabKey === 'rates') {
-        try {
-          const rt = byId('contractRatesTab');
-          if (rt) {
-            const rForm = {};
-            rt.querySelectorAll('input, select, textarea').forEach(el => {
-              if (el.name) rForm[el.name] = (el.type === 'checkbox' ? (el.checked ? 'on' : '') : el.value);
-            });
-            const onlyRates = {};
-            for (const [k, v] of Object.entries(rForm)) if (/^(paye_|umb_|charge_)/.test(k)) onlyRates[k] = v;
-            fs.pay = { ...(fs.pay || {}), ...stripEmpty(onlyRates) };
-          }
-          const mainSel = byId('contractForm') ? '#contractForm' : null;
-          if (mainSel) {
-            const m = collectForm(mainSel);
-            fs.main = { ...(fs.main || {}), ...stripEmpty(m) };
-          }
-        } catch (e) {
-          L('persistCurrentTabState contracts/rates failed', e);
-        }
+  window.modalCtx.formState = fs;
+  L('persistCurrentTabState EXIT', { forId: fs.__forId, mainKeys: Object.keys(fs.main||{}), payKeys: Object.keys(fs.pay||{}) });
+},
+
+mergedRowForTab(k) {
+  L('mergedRowForTab ENTER', { k });
+  const base = { ...(window.modalCtx?.data || {}) };
+  const fs   = (window.modalCtx?.formState || {});
+  const rid  = window.modalCtx?.data?.id ?? null;
+  const fid  = fs.__forId ?? null;
+  const sentinel = window.modalCtx?.openToken ?? null;
+  const same = (fid===rid) || (rid==null && (fid===sentinel || fid==null));
+
+  const mainStaged = same ? (fs.main || {}) : {};
+  const payStaged  = same ? (fs.pay  || {}) : {};
+
+  const out = { ...base, ...stripEmpty(mainStaged) };
+
+  // Ensure non-DOM baselines remain visible in the merged row
+  try {
+    if (!out.std_schedule_json && mainStaged.__template) out.std_schedule_json = mainStaged.__template;
+    if (!out.std_hours_json   && mainStaged.__hours)    out.std_hours_json    = mainStaged.__hours;
+    if (!out.bucket_labels_json && mainStaged.__bucket_labels) out.bucket_labels_json = mainStaged.__bucket_labels;
+  } catch {}
+
+  try {
+    const mergedRates = { ...(out.rates_json || base.rates_json || {}) };
+    for (const [kk, vv] of Object.entries(payStaged)) {
+      if (/^(paye_|umb_|charge_)/.test(kk)) {
+        mergedRates[kk] = vv;
       }
+    }
+    out.rates_json = mergedRates;
+  } catch (e) {
+    L('mergedRowForTab rates merge failed', e);
+  }
 
-      window.modalCtx.formState = fs;
-      L('persistCurrentTabState EXIT', { forId: fs.__forId, mainKeys: Object.keys(fs.main||{}), payKeys: Object.keys(fs.pay||{}) });
-    },
+  L('mergedRowForTab STATE', {
+    rid, fid, sentinel, same,
+    stagedMainKeys: Object.keys(mainStaged||{}),
+    stagedPayKeys: Object.keys(payStaged||{}),
+    ratesKeys: Object.keys(out.rates_json || {})
+  });
+  return out;
+},
 
-    mergedRowForTab(k) {
-      L('mergedRowForTab ENTER', { k });
-      const base = { ...(window.modalCtx?.data || {}) };
-      const fs   = (window.modalCtx?.formState || {});
-      const rid  = window.modalCtx?.data?.id ?? null;
-      const fid  = fs.__forId ?? null;
-      const sentinel = window.modalCtx?.openToken ?? null;
-      const same = (fid===rid) || (rid==null && (fid===sentinel || fid==null));
-
-      const mainStaged = same ? (fs.main || {}) : {};
-      const payStaged  = same ? (fs.pay  || {}) : {};
-
-      const out = { ...base, ...stripEmpty(mainStaged) };
-
-      try {
-        const mergedRates = { ...(out.rates_json || base.rates_json || {}) };
-        for (const [kk, vv] of Object.entries(payStaged)) {
-          if (/^(paye_|umb_|charge_)/.test(kk)) {
-            mergedRates[kk] = vv;
-          }
-        }
-        out.rates_json = mergedRates;
-      } catch (e) {
-        L('mergedRowForTab rates merge failed', e);
-      }
-
-      L('mergedRowForTab STATE', {
-        rid, fid, sentinel, same,
-        stagedMainKeys: Object.keys(mainStaged||{}),
-        stagedPayKeys: Object.keys(payStaged||{}),
-        ratesKeys: Object.keys(out.rates_json || {})
-      });
-      return out;
-    },
 
     _attachDirtyTracker() {
       if (this._detachDirty) { try { this._detachDirty(); } catch {} this._detachDirty = null; }
