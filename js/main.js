@@ -1223,7 +1223,6 @@ function openContract(row) {
     if (LOGC) console.log('[CONTRACTS] openToken issued for create', window.modalCtx.openToken);
   }
 
-  // Seed a complete baseline into formState so all values exist across tabs
   try {
     const base = window.modalCtx.data || {};
     const fs = (window.modalCtx.formState ||= { __forId: (base.id ?? window.modalCtx.openToken ?? null), main:{}, pay:{} });
@@ -1245,7 +1244,6 @@ function openContract(row) {
       if (base.std_hours_json)       m.__hours         = base.std_hours_json;
       m.__seeded = true;
     }
-    // Seed rates buckets once so eligibility works even if Rates tab never opened
     const p = (fs.pay ||= {});
     if (!Object.keys(p).length && base.rates_json && typeof base.rates_json === 'object') {
       const buckets = ['paye_day','paye_night','paye_sat','paye_sun','paye_bh','umb_day','umb_night','umb_sat','umb_sun','umb_bh','charge_day','charge_night','charge_sat','charge_sun','charge_bh'];
@@ -1564,7 +1562,6 @@ function openContract(row) {
           const fsm = (fsAll.main ||= {});
           if (nameCandEl && nameCandEl.value && !fsm.candidate_display) fsm.candidate_display = nameCandEl.value;
           if (nameClientEl && nameClientEl.value && !fsm.client_name)    fsm.client_name = nameClientEl.value;
-          // ensure persisted baselines remain if backend echoed them
           if (!fsm.__template && window.modalCtx.data?.std_schedule_json) fsm.__template = window.modalCtx.data.std_schedule_json;
           if (!fsm.__hours && window.modalCtx.data?.std_hours_json)       fsm.__hours    = window.modalCtx.data.std_hours_json;
           if (!fsm.__bucket_labels && window.modalCtx.data?.bucket_labels_json) fsm.__bucket_labels = window.modalCtx.data.bucket_labels_json;
@@ -1583,39 +1580,28 @@ function openContract(row) {
           const extendedHead = !!(prevStartIso && newStart && newStart < prevStartIso);
           const extendedTail = !!(prevEndIso   && newEnd   && newEnd   > prevEndIso);
 
-          let didRangeGen = false;
-
           if (isCreate) {
-            if (!!std_schedule_json) {
-              if (LOGC) console.log('[CONTRACTS] generateContractWeeks (create, full)');
-              if (typeof generateContractWeeks === 'function') await generateContractWeeks(contractId);
+            if (std_schedule_json && typeof generateContractWeeks === 'function') {
+              if (LOGC) console.log('[CONTRACTS] generateContractWeeks (create)');
+              await generateContractWeeks(contractId);
             }
           } else {
             if (hasStageNow) {
-              if (LOGC) console.log('[CONTRACTS] generateContractWeeks (edit, staged present)');
-              if (typeof generateContractWeeks === 'function') await generateContractWeeks(contractId);
-            } else if ((extendedHead || extendedTail) && !!std_schedule_json) {
+              if (LOGC) console.log('[CONTRACTS] skip generation (edit, manual stage present)');
+            } else if ((extendedHead || extendedTail) && std_schedule_json) {
               const headFrom = extendedHead ? newStart : null;
               const headTo   = extendedHead ? prevStartIso : null;
               const tailFrom = extendedTail ? prevEndIso : null;
               const tailTo   = extendedTail ? newEnd : null;
-
-              if (LOGC) console.log('[CONTRACTS] generate range (template-only head/tail)', { headFrom, headTo, tailFrom, tailTo });
-
               if (typeof generateContractWeeksRange === 'function') {
                 if (extendedHead) await generateContractWeeksRange(contractId, { from: headFrom, to: headTo, mode: 'TEMPLATE_ONLY' });
                 if (extendedTail) await generateContractWeeksRange(contractId, { from: tailFrom, to: tailTo, mode: 'TEMPLATE_ONLY' });
-                didRangeGen = true;
               } else if (typeof generateContractWeeks === 'function') {
                 if (extendedHead) await generateContractWeeks(contractId, { from: headFrom, to: headTo, templateOnly: true });
                 if (extendedTail) await generateContractWeeks(contractId, { from: tailFrom, to: tailTo, templateOnly: true });
-                didRangeGen = true;
               }
             } else {
-              if (!!std_schedule_json && typeof generateContractWeeks === 'function') {
-                if (LOGC) console.log('[CONTRACTS] generateContractWeeks (edit, full when no staged and no extension)');
-                await generateContractWeeks(contractId);
-              }
+              if (LOGC) console.log('[CONTRACTS] skip generation (edit, no date change, no manual stage)');
             }
           }
 
@@ -2079,7 +2065,6 @@ function openContract(row) {
           snapshotContractForm();
           setTimeout(wire, 0);
         });
-        if (LOGC) console.log('[CONTRACTS] tabs click→stage+wire handler attached');
       }
     },
     { kind:'contracts', extraButtons }
@@ -9155,9 +9140,8 @@ function renderDayGrid(hostEl, opts) {
   if (!hostEl) return;
   const { from, to, itemsByDate, view, bucketKey } = opts;
   const sel = initSelBucket(bucketKey);
-
-  // derive currentKey from bucketKey (e.g. "c:<key>")
   const currentKey = (bucketKey && bucketKey.startsWith('c:')) ? bucketKey.slice(2) : bucketKey;
+  const interactive = (typeof opts.isInteractive === 'boolean') ? opts.isInteractive : true;
 
   hostEl.innerHTML = '';
   const toolbar = document.createElement('div');
@@ -9190,11 +9174,9 @@ function renderDayGrid(hostEl, opts) {
       const dYmd = `${y}-${String(m+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
       const items = itemsByDate.get(dYmd) || [];
 
-      // primary state colouring
       const finalState = topState(items);
       const cls = colorForState(finalState); if (cls) cell.classList.add(cls);
 
-      // grey/readonly for other-contract occupancy (only if NOT owned by currentKey)
       const ownedByCurrent = items.some(it => String(it.contract_id || '') === String(currentKey));
       const occupiedByOtherOnly = items.some(it => {
         const cid = String(it.contract_id || '');
@@ -9208,24 +9190,23 @@ function renderDayGrid(hostEl, opts) {
       cell.innerHTML = `<div class="ico"><div class="dow">${dow.slice(0,3)}</div><div class="num">${d}</div></div>`;
       cell.setAttribute('data-date', dYmd);
 
-      // Selection
-      cell.addEventListener('click', (ev) => {
-        const additive = ev.ctrlKey || ev.metaKey;
-        const useRange = ev.shiftKey && initSelBucket(bucketKey).anchor;
-        if (useRange) selectRange(bucketKey, initSelBucket(bucketKey).anchor, dYmd, additive);
-        else toggleDaySelected(bucketKey, dYmd, additive);
+      if (interactive) {
+        cell.addEventListener('click', (ev) => {
+          const additive = ev.ctrlKey || ev.metaKey;
+          const useRange = ev.shiftKey && initSelBucket(bucketKey).anchor;
+          if (useRange) selectRange(bucketKey, initSelBucket(bucketKey).anchor, dYmd, additive);
+          else toggleDaySelected(bucketKey, dYmd, additive);
+          wrap.querySelectorAll('.d.selected').forEach(n => n.classList.remove('selected'));
+          initSelBucket(bucketKey).set.forEach(s => { const dom = wrap.querySelector(`.d[data-date="${CSS.escape(s)}"]`); if (dom) dom.classList.add('selected'); });
+        });
 
-        wrap.querySelectorAll('.d.selected').forEach(n => n.classList.remove('selected'));
-        initSelBucket(bucketKey).set.forEach(s => { const dom = wrap.querySelector(`.d[data-date="${CSS.escape(s)}"]`); if (dom) dom.classList.add('selected'); });
-      });
-
-      // Context menu
-      cell.addEventListener('contextmenu', (ev) => {
-        ev.preventDefault();
-        const selSet = initSelBucket(bucketKey).set;
-        if (!selSet.has(dYmd)) { clearCalendarSelection(bucketKey); toggleDaySelected(bucketKey, dYmd, false); cell.classList.add('selected'); }
-        opts.onCellContextMenu && opts.onCellContextMenu(dYmd, ev);
-      });
+        cell.addEventListener('contextmenu', (ev) => {
+          ev.preventDefault();
+          const selSet = initSelBucket(bucketKey).set;
+          if (!selSet.has(dYmd)) { clearCalendarSelection(bucketKey); toggleDaySelected(bucketKey, dYmd, false); cell.classList.add('selected'); }
+          opts.onCellContextMenu && opts.onCellContextMenu(dYmd, ev);
+        });
+      }
 
       days.appendChild(cell);
     }
@@ -9333,6 +9314,22 @@ function renderContractCalendarTab(ctx) {
       ${c.id && inViewMode ? `<div class="actions" style="margin-top:8px;display:flex;gap:8px"><button id="btnCloneExtend" disabled>Clone & Extend…</button></div>` : ``}
     </div>`;
 }
+function isConsecutiveDailyRun(dates) {
+  if (!Array.isArray(dates) || dates.length < 2) return false;
+  const arr = [...dates].sort();
+  let hasPair = false;
+  for (let i = 1; i < arr.length; i++) {
+    const a = ymdToDate(arr[i - 1]);
+    const b = ymdToDate(arr[i]);
+    const diff = Math.round((b - a) / 86400000);
+    if (diff === 1) hasPair = true;
+  }
+  return hasPair;
+}
+
+function updateCalendarInteractivity(isInteractive) {
+  window.__calInteractive = !!isInteractive;
+}
 
 
 // ───────────────────────────────────────────────────────────────
@@ -9384,228 +9381,6 @@ function adoptCalendarStageFromToken(openToken, contractId) {
 //    against currentKey (contract.id or openToken).
 //    (Used by renderContractCalendarTab and openContract repaint)
 // ───────────────────────────────────────────────────────────────
-async function fetchAndRenderCandidateCalendarForContract(currentKey, candidateId, opts /* { from,to, view, weekEnding } */) {
-  const LOG_CAL = (typeof window.__LOG_CAL === 'boolean') ? window.__LOG_CAL : true;
-  const L = (...a)=> { if (LOG_CAL) console.log('[CAL][candidate-wide]', ...a); };
-
-  const state = (window.__calState[currentKey] ||= {
-    view: (opts?.view || 'year'),
-    win:  (opts?.from && opts?.to) ? { from: opts.from, to: opts.to } : computeYearWindow((new Date()).getUTCFullYear()),
-    weekEndingWeekday: (typeof opts?.weekEnding !== 'undefined' ? Number(opts.weekEnding) : (window.modalCtx?.data?.week_ending_weekday_snapshot ?? 0))
-  });
-
-  if (opts?.view) state.view = opts.view;
-  if (opts?.from && opts?.to) state.win = { from: opts.from, to: opts.to };
-  if (typeof opts?.weekEnding !== 'undefined') state.weekEndingWeekday = Number(opts.weekEnding);
-
-  const holder = byId('contractCalendarHolder'); if (!holder) return;
-
-  // Current contract context
-  const contractId   = (window.modalCtx?.data?.id && String(currentKey) === String(window.modalCtx.data.id)) ? window.modalCtx.data.id : null;
-  const currentStart = window.modalCtx?.data?.start_date || null;
-  const currentEnd   = window.modalCtx?.data?.end_date   || null;
-
-  // Ensure the view window actually covers the contract window (important after clone/extend)
-  try {
-    if (contractId && currentStart && currentEnd) {
-      let from = state.win.from;
-      let to   = state.win.to;
-      if (currentStart < from) from = currentStart;
-      if (currentEnd   > to)   to   = currentEnd;
-      if (from !== state.win.from || to !== state.win.to) {
-        state.win = { from, to };
-        if (LOG_CAL) L('[CAL] expanded window to include contract range', state.win);
-      }
-    }
-  } catch (e) { /* non-blocking */ }
-
-  // Fetch candidate-wide day items
-  let dayItems = [];
-  try {
-    if (typeof getCandidateCalendarRange === 'function') {
-      const resp = await getCandidateCalendarRange(candidateId, state.win.from, state.win.to, 'day');
-      dayItems = Array.isArray(resp?.items) ? resp.items : [];
-    } else {
-      dayItems = [];
-    }
-  } catch (e) {
-    L('getCandidateCalendarRange failed; fallback to empty', e);
-    dayItems = [];
-  }
-
-  // Start with candidate-day index
-  const itemsByDate = buildDateIndex(dayItems);
-
-  // Merge contract-day items (planned days from contract_weeks) so they actually paint
-  if (contractId && typeof getContractCalendar === 'function') {
-    try {
-      const cday = await getContractCalendar(contractId, { from: state.win.from, to: state.win.to, granularity:'day' });
-      const cItems = Array.isArray(cday?.items) ? cday.items : [];
-      for (const it of cItems) {
-        const d = it?.date;
-        if (!d) continue;
-        const arr = itemsByDate.get(d) || [];
-        // Tag with contract_id (useful for ownership checks in painters)
-        if (it && !it.contract_id) it.contract_id = contractId;
-        arr.push(it);
-        itemsByDate.set(d, arr);
-      }
-      if (LOG_CAL) L('[CAL] merged contract-day items', { count: cItems.length });
-    } catch (e) {
-      L('getContractCalendar(day) failed; proceeding with candidate-only', e);
-    }
-  }
-
-  // Contract week index for TS locks (used by context menu logic)
-  let weekIndex = null;
-  if (contractId && typeof getContractCalendar === 'function' && typeof buildWeekIndex === 'function') {
-    try {
-      const weeks = (await getContractCalendar(contractId, { from: state.win.from, to: state.win.to, granularity:'week' })).items || [];
-      weekIndex = buildWeekIndex(weeks);
-    } catch (e) {
-      L('week index fetch failed; proceeding without TS lock context', e);
-      weekIndex = null;
-    }
-  }
-
-  // Overlay staged changes for currentKey
-  const overlayedMap = applyStagedContractCalendarOverlay(currentKey, itemsByDate, new Map());
-
-  // Helper: banner for pending window expansion
-  const ensureBanner = (text) => {
-    let bar = holder.querySelector('#calExpandBanner');
-    if (!bar) {
-      bar = document.createElement('div');
-      bar.id = 'calExpandBanner';
-      bar.style.margin = '8px 0';
-      bar.style.padding = '6px 10px';
-      bar.style.borderRadius = '8px';
-      bar.style.background = 'var(--panel, #f7f7ff)';
-      bar.style.border = '1px solid var(--line, #d8d8ee)';
-      bar.style.fontSize = '12px';
-      holder.prepend(bar);
-    }
-    bar.textContent = text || '';
-    bar.style.display = text ? '' : 'none';
-  };
-
-  // Render grid
-  const gridHost = document.createElement('div'); gridHost.id = 'contractDayGrid';
-  holder.innerHTML = ''; holder.appendChild(gridHost);
-
-  renderDayGrid(gridHost, {
-    from: state.win.from,
-    to: state.win.to,
-    itemsByDate: overlayedMap,
-    view: state.view,
-    bucketKey: `c:${currentKey}`,
-    onNav: async (delta) => {
-      const nextWin = stepMonth(state.win, delta);
-      await fetchAndRenderCandidateCalendarForContract(currentKey, candidateId, { from: nextWin.from, to: nextWin.to, weekEnding: state.weekEndingWeekday, view: state.view });
-    },
-    onToggleView: async () => {
-      const newView = (state.view === 'year') ? 'month' : 'year';
-      let win = state.win;
-      if (newView === 'year') { const y = ymdToDate(state.win.from).getUTCFullYear(); win = computeYearWindow(y); }
-      else { const dt = ymdToDate(state.win.from); win = computeMonthWindow(dt.getUTCFullYear(), dt.getUTCMonth()); }
-      await fetchAndRenderCandidateCalendarForContract(currentKey, candidateId, { from: win.from, to: win.to, view: newView, weekEnding: state.weekEndingWeekday });
-    },
-    onCellContextMenu: (theDate, ev) => {
-      const sel = initSelBucket(`c:${currentKey}`).set; const selArr = [...sel];
-
-      // Compute pending auto-expand if selection goes outside current window
-      const selMin = selArr.length ? selArr.reduce((a,b)=> a < b ? a : b) : null;
-      const selMax = selArr.length ? selArr.reduce((a,b)=> a > b ? a : b) : null;
-      let willExpand = false;
-      let expStart = currentStart || selMin || null;
-      let expEnd   = currentEnd   || selMax || null;
-
-      if (currentStart && selMin && selMin < currentStart) { expStart = selMin; willExpand = true; }
-      if (currentEnd   && selMax && selMax > currentEnd)   { expEnd   = selMax; willExpand = true; }
-
-      if (willExpand && expStart && expEnd) {
-        window.modalCtx.__windowExpand = { start: expStart, end: expEnd };
-        const toUk = (iso) => { try { return (typeof formatIsoToUk === 'function') ? (formatIsoToUk(iso) || iso) : iso; } catch { return iso; } };
-        ensureBanner(`These selections are outside the current window (${toUk(currentStart)||'—'} → ${toUk(currentEnd)||'—'}). We’ll extend to ${toUk(expStart)} → ${toUk(expEnd)} on Save.`);
-      } else {
-        window.modalCtx.__windowExpand = null;
-        ensureBanner('');
-      }
-
-      const mine = String(window.modalCtx?.data?.id || currentKey);
-      const ownedByCurrent = (d) => {
-        const arr = itemsByDate.get(d) || [];
-        return arr.some(it => String(it.contract_id || '') === mine);
-      };
-      const occupiedByOtherOnly = (d) => {
-        const arr = itemsByDate.get(d) || [];
-        return arr.some(it => {
-          const cid = String(it.contract_id || '');
-          return cid && cid !== mine;
-        }) && !ownedByCurrent(d);
-      };
-
-      const anyGrey = selArr.some(occupiedByOtherOnly);
-
-      const resolveFinalState = (d) => topState(overlayedMap.get(d) || []);
-
-      // Planned (staged add) unbooking always safe
-      const allOwnedPlannedNoTs = selArr.every(d => resolveFinalState(d) === 'PLANNED');
-
-      // Committed unbooking allowed only if owned by current contract and week has no TS lock (edit mode with weekIndex)
-      const allOwnedCommittedNoTs = !!contractId && !!weekIndex && selArr.every(d => {
-        if (!ownedByCurrent(d)) return false;
-        const we = computeWeekEnding(d, state.weekEndingWeekday);
-        const w  = weekIndex.get(we);
-        return !!w && !w.baseHasTs;
-      });
-
-      const capabilities = {
-        canBook: true,
-        canUnbook: allOwnedPlannedNoTs || allOwnedCommittedNoTs,
-        canAddAdditional: false
-      };
-
-      openCalendarContextMenu({
-        anchorEl: ev.target,
-        bucketKey: `c:${currentKey}`,
-        selection: selArr,
-        capabilities,
-        onAction: async ({ type, selection }) => {
-          try {
-            if (type === 'book') {
-              if (anyGrey) {
-                const names = [];
-                for (const d of selection) {
-                  if (!occupiedByOtherOnly(d)) continue;
-                  const arr = itemsByDate.get(d) || [];
-                  arr.forEach(it => {
-                    const cid = String(it.contract_id || '');
-                    if (cid && cid !== mine) names.push(it.client_name || 'Other client');
-                  });
-                }
-                const hint = names.length
-                  ? `This would clash with existing contract(s): ${[...new Set(names)].join(', ')}. Continue?`
-                  : 'This would clash with an existing contract. Continue?';
-                if (!window.confirm(hint)) return;
-              }
-              stageContractCalendarBookings(currentKey, selection);
-            }
-            if (type === 'unbook') {
-              stageContractCalendarUnbookings(currentKey, selection);
-            }
-            try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
-            await fetchAndRenderCandidateCalendarForContract(currentKey, candidateId, { from: state.win.from, to: state.win.to, view: state.view, weekEnding: state.weekEndingWeekday });
-          } catch (e) {
-            alert(e?.message || e);
-          }
-        }
-      });
-    }
-  });
-
-  const legend = document.createElement('div'); legend.id = 'contractCalLegend'; holder.appendChild(legend); renderCalendarLegend(legend);
-}
 
 
 function computeContractSaveEligibility() {
@@ -9856,11 +9631,219 @@ async function callCheckContractWindowOverlap(candidate_id, start_date_iso, end_
     return { has_overlap:false, overlaps:[] };
   }
 }
+async function fetchAndRenderCandidateCalendarForContract(currentKey, candidateId, opts) {
+  const LOG_CAL = (typeof window.__LOG_CAL === 'boolean') ? window.__LOG_CAL : true;
+  const L = (...a)=> { if (LOG_CAL) console.log('[CAL][candidate-wide]', ...a); };
+
+  const state = (window.__calState[currentKey] ||= {
+    view: (opts?.view || 'year'),
+    win:  (opts?.from && opts?.to) ? { from: opts.from, to: opts.to } : computeYearWindow((new Date()).getUTCFullYear()),
+    weekEndingWeekday: (typeof opts?.weekEnding !== 'undefined' ? Number(opts.weekEnding) : (window.modalCtx?.data?.week_ending_weekday_snapshot ?? 0))
+  });
+
+  if (opts?.view) state.view = opts.view;
+  if (opts?.from && opts?.to) state.win = { from: opts.from, to: opts.to };
+  if (typeof opts?.weekEnding !== 'undefined') state.weekEndingWeekday = Number(opts.weekEnding);
+
+  const holder = byId('contractCalendarHolder'); if (!holder) return;
+
+  const contractId   = (window.modalCtx?.data?.id && String(currentKey) === String(window.modalCtx.data.id)) ? window.modalCtx.data.id : null;
+  const currentStart = window.modalCtx?.data?.start_date || null;
+  const currentEnd   = window.modalCtx?.data?.end_date   || null;
+
+  let dayItems = [];
+  try {
+    if (typeof getCandidateCalendarRange === 'function') {
+      const resp = await getCandidateCalendarRange(candidateId, state.win.from, state.win.to, 'day');
+      dayItems = Array.isArray(resp?.items) ? resp.items : [];
+    } else {
+      dayItems = [];
+    }
+  } catch (e) {
+    L('getCandidateCalendarRange failed; fallback to empty', e);
+    dayItems = [];
+  }
+
+  const itemsByDate = buildDateIndex(dayItems);
+
+  if (contractId && typeof getContractCalendar === 'function') {
+    try {
+      const cday = await getContractCalendar(contractId, { from: state.win.from, to: state.win.to, granularity:'day' });
+      const cItems = Array.isArray(cday?.items) ? cday.items : [];
+      for (const it of cItems) {
+        const d = it?.date;
+        if (!d) continue;
+        const arr = itemsByDate.get(d) || [];
+        if (it && !it.contract_id) it.contract_id = contractId;
+        arr.push(it);
+        itemsByDate.set(d, arr);
+      }
+      if (LOG_CAL) L('[CAL] merged contract-day items', { count: cItems.length });
+    } catch (e) {
+      L('getContractCalendar(day) failed; proceeding with candidate-only', e);
+    }
+  }
+
+  let weekIndex = null;
+  if (contractId && typeof getContractCalendar === 'function' && typeof buildWeekIndex === 'function') {
+    try {
+      const weeks = (await getContractCalendar(contractId, { from: state.win.from, to: state.win.to, granularity:'week' })).items || [];
+      weekIndex = buildWeekIndex(weeks);
+    } catch (e) {
+      L('week index fetch failed; proceeding without TS lock context', e);
+      weekIndex = null;
+    }
+  }
+
+  const overlayedMap = applyStagedContractCalendarOverlay(currentKey, itemsByDate, new Map());
+
+  const ensureBanner = (text) => {
+    let bar = holder.querySelector('#calExpandBanner');
+    if (!bar) {
+      bar = document.createElement('div');
+      bar.id = 'calExpandBanner';
+      bar.style.margin = '8px 0';
+      bar.style.padding = '6px 10px';
+      bar.style.borderRadius = '8px';
+      bar.style.background = 'var(--panel, #f7f7ff)';
+      bar.style.border = '1px solid var(--line, #d8d8ee)';
+      bar.style.fontSize = '12px';
+      holder.prepend(bar);
+    }
+    bar.textContent = text || '';
+    bar.style.display = text ? '' : 'none';
+  };
+
+  const gridHost = document.createElement('div'); gridHost.id = 'contractDayGrid';
+  holder.innerHTML = ''; holder.appendChild(gridHost);
+
+  renderDayGrid(gridHost, {
+    from: state.win.from,
+    to: state.win.to,
+    itemsByDate: overlayedMap,
+    view: state.view,
+    bucketKey: `c:${currentKey}`,
+    isInteractive: !!window.__calInteractive,
+    onNav: async (delta) => {
+      if (state.view === 'year') {
+        const y = ymdToDate(state.win.from).getUTCFullYear() + delta;
+        const nextWin = computeYearWindow(y);
+        await fetchAndRenderCandidateCalendarForContract(currentKey, candidateId, { from: nextWin.from, to: nextWin.to, weekEnding: state.weekEndingWeekday, view: 'year' });
+      } else {
+        const nextWin = stepMonth(state.win, delta);
+        await fetchAndRenderCandidateCalendarForContract(currentKey, candidateId, { from: nextWin.from, to: nextWin.to, weekEnding: state.weekEndingWeekday, view: 'month' });
+      }
+    },
+    onToggleView: async () => {
+      const newView = (state.view === 'year') ? 'month' : 'year';
+      let win = state.win;
+      if (newView === 'year') { const y = ymdToDate(state.win.from).getUTCFullYear(); win = computeYearWindow(y); }
+      else { const dt = ymdToDate(state.win.from); win = computeMonthWindow(dt.getUTCFullYear(), dt.getUTCMonth()); }
+      await fetchAndRenderCandidateCalendarForContract(currentKey, candidateId, { from: win.from, to: win.to, view: newView, weekEnding: state.weekEndingWeekday });
+    },
+    onCellContextMenu: (theDate, ev) => {
+      if (!window.__calInteractive) return;
+      const sel = initSelBucket(`c:${currentKey}`).set; const selArr = [...sel];
+
+      const selMin = selArr.length ? selArr.reduce((a,b)=> a < b ? a : b) : null;
+      const selMax = selArr.length ? selArr.reduce((a,b)=> a > b ? a : b) : null;
+      let willExpand = false;
+      let expStart = currentStart || selMin || null;
+      let expEnd   = currentEnd   || selMax || null;
+
+      if (currentStart && selMin && selMin < currentStart) { expStart = selMin; willExpand = true; }
+      if (currentEnd   && selMax && selMax > currentEnd)   { expEnd   = selMax; willExpand = true; }
+
+      if (willExpand && expStart && expEnd) {
+        window.modalCtx.__windowExpand = { start: expStart, end: expEnd };
+        const toUk = (iso) => { try { return (typeof formatIsoToUk === 'function') ? (formatIsoToUk(iso) || iso) : iso; } catch { return iso; } };
+        ensureBanner(`These selections are outside the current window (${toUk(currentStart)||'—'} → ${toUk(currentEnd)||'—'}). We’ll extend to ${toUk(expStart)} → ${toUk(expEnd)} on Save.`);
+      } else {
+        window.modalCtx.__windowExpand = null;
+        ensureBanner('');
+      }
+
+      const mine = String(window.modalCtx?.data?.id || currentKey);
+      const ownedByCurrent = (d) => {
+        const arr = itemsByDate.get(d) || [];
+        return arr.some(it => String(it.contract_id || '') === mine);
+      };
+      const occupiedByOtherOnly = (d) => {
+        const arr = itemsByDate.get(d) || [];
+        return arr.some(it => {
+          const cid = String(it.contract_id || '');
+          return cid && cid !== mine;
+        }) && !ownedByCurrent(d);
+      };
+
+      const anyGrey = selArr.some(occupiedByOtherOnly);
+      const resolveFinalState = (d) => topState(overlayedMap.get(d) || []);
+
+      const eligible = (d) => {
+        const st = resolveFinalState(d);
+        if (st === 'PLANNED') return true;
+        if (!contractId || !ownedByCurrent(d) || !weekIndex) return false;
+        const we = computeWeekEnding(d, state.weekEndingWeekday);
+        const w  = weekIndex.get(we);
+        return !!w && !w.baseHasTs;
+      };
+      const anyEligible = selArr.some(eligible);
+      const allEligible = selArr.every(eligible);
+      const blockMode = isConsecutiveDailyRun(selArr);
+
+      const capabilities = {
+        canBook: true,
+        canUnbook: blockMode ? anyEligible : allEligible,
+        canAddAdditional: false
+      };
+
+      openCalendarContextMenu({
+        anchorEl: ev.target,
+        bucketKey: `c:${currentKey}`,
+        selection: selArr,
+        capabilities,
+        onAction: async ({ type, selection }) => {
+          try {
+            if (type === 'book') {
+              if (anyGrey) {
+                const names = [];
+                for (const d of selection) {
+                  if (!occupiedByOtherOnly(d)) continue;
+                  const arr = itemsByDate.get(d) || [];
+                  arr.forEach(it => {
+                    const cid = String(it.contract_id || '');
+                    if (cid && cid !== mine) names.push(it.client_name || 'Other client');
+                  });
+                }
+                const hint = names.length
+                  ? `This would clash with existing contract(s): ${[...new Set(names)].join(', ')}. Continue?`
+                  : 'This would clash with an existing contract. Continue?';
+                if (!window.confirm(hint)) return;
+              }
+              stageContractCalendarBookings(currentKey, selection);
+            }
+            if (type === 'unbook') {
+              const toUnbook = selection.filter(eligible);
+              if (toUnbook.length) stageContractCalendarUnbookings(currentKey, toUnbook);
+            }
+            try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
+            await fetchAndRenderCandidateCalendarForContract(currentKey, candidateId, { from: state.win.from, to: state.win.to, view: state.view, weekEnding: state.weekEndingWeekday });
+          } catch (e) {
+            alert(e?.message || e);
+          }
+        }
+      });
+    }
+  });
+
+  const legend = document.createElement('div'); legend.id = 'contractCalLegend'; holder.appendChild(legend); renderCalendarLegend(legend);
+}
+
 
 // ============================================================================
 // CANDIDATE – RENDER CALENDAR TAB
 // ============================================================================
-async function fetchAndRenderContractCalendar(contractId, opts /* { from,to, view } */) {
+async function fetchAndRenderContractCalendar(contractId, opts) {
   const LOG_CAL = (typeof window.__LOG_CAL === 'boolean') ? window.__LOG_CAL : true;
   const L = (...a)=> { if (LOG_CAL) console.log('[CAL][contract]', ...a); };
 
@@ -9871,24 +9854,34 @@ async function fetchAndRenderContractCalendar(contractId, opts /* { from,to, vie
 
   const holder = byId('contractCalendarHolder'); if (!holder) return;
 
-  // fetch day rows
   const dayResp = await getContractCalendarRange(contractId, state.win.from, state.win.to, 'day');
   const dayItems = Array.isArray(dayResp?.items) ? dayResp.items : [];
 
-  // fetch weeks (for base TS info)
   const weeksForIndex = (await getContractCalendar(contractId, { from: state.win.from, to: state.win.to, granularity:'week' })).items || [];
   const weekIndex = buildWeekIndex(weeksForIndex);
 
-  // overlay staged changes
   const overlayedMap = applyStagedContractCalendarOverlay(contractId, buildDateIndex(dayItems), weekIndex);
 
-  // render grid
   const gridHost = document.createElement('div'); gridHost.id = 'contractDayGrid';
   holder.innerHTML = ''; holder.appendChild(gridHost);
 
   renderDayGrid(gridHost, {
-    from: state.win.from, to: state.win.to, itemsByDate: overlayedMap, view: state.view, bucketKey: `c:${contractId}`,
-    onNav: async (delta) => { const nextWin = stepMonth(state.win, delta); await fetchAndRenderContractCalendar(contractId, { from: nextWin.from, to: nextWin.to }); },
+    from: state.win.from,
+    to: state.win.to,
+    itemsByDate: overlayedMap,
+    view: state.view,
+    bucketKey: `c:${contractId}`,
+    isInteractive: !!window.__calInteractive,
+    onNav: async (delta) => {
+      if (state.view === 'year') {
+        const y = ymdToDate(state.win.from).getUTCFullYear() + delta;
+        const nextWin = computeYearWindow(y);
+        await fetchAndRenderContractCalendar(contractId, { from: nextWin.from, to: nextWin.to, view: 'year' });
+      } else {
+        const nextWin = stepMonth(state.win, delta);
+        await fetchAndRenderContractCalendar(contractId, { from: nextWin.from, to: nextWin.to, view: 'month' });
+      }
+    },
     onToggleView: async () => {
       const newView = (state.view === 'year') ? 'month' : 'year';
       let win = state.win;
@@ -9897,14 +9890,19 @@ async function fetchAndRenderContractCalendar(contractId, opts /* { from,to, vie
       await fetchAndRenderContractCalendar(contractId, { from: win.from, to: win.to, view: newView });
     },
     onCellContextMenu: (theDate, ev) => {
+      if (!window.__calInteractive) return;
       const sel = initSelBucket(`c:${contractId}`).set; const selArr = [...sel];
       const resolveFinalState = (d) => topState(overlayedMap.get(d) || []);
       const allEmpty = selArr.every(d => resolveFinalState(d) === 'EMPTY');
-      const allPlannedAndNoTs = selArr.every(d => {
+      const eligible = (d) => {
+        const st = resolveFinalState(d);
         const we = computeWeekEnding(d, state.weekEndingWeekday);
-        const week = weekIndex.get(we);
-        return resolveFinalState(d) === 'PLANNED' && week && !week.baseHasTs;
-      });
+        const w = weekIndex.get(we);
+        return st === 'PLANNED' && w && !w.baseHasTs;
+      };
+      const anyEligible = selArr.some(eligible);
+      const allEligible = selArr.every(eligible);
+      const blockMode = isConsecutiveDailyRun(selArr);
       const canAddAdditional = selArr.some(d => {
         const st = resolveFinalState(d); const we = computeWeekEnding(d, state.weekEndingWeekday); const w = weekIndex.get(we);
         return st === 'EMPTY' && w && w.baseHasTs && w.baseWeekId;
@@ -9914,17 +9912,17 @@ async function fetchAndRenderContractCalendar(contractId, opts /* { from,to, vie
         anchorEl: ev.target,
         bucketKey: `c:${contractId}`,
         selection: selArr,
-        capabilities: { canBook: allEmpty, canUnbook: allPlannedAndNoTs, canAddAdditional },
+        capabilities: { canBook: allEmpty, canUnbook: (blockMode ? anyEligible : allEligible), canAddAdditional },
         onAction: async ({ type, selection }) => {
           try {
             if (type === 'book') {
               stageContractCalendarBookings(contractId, selection);
             }
             if (type === 'unbook') {
-              stageContractCalendarUnbookings(contractId, selection);
+              const toUnbook = (blockMode ? selection.filter(eligible) : selection.filter(eligible));
+              if (toUnbook.length) stageContractCalendarUnbookings(contractId, toUnbook);
             }
             if (type === 'additional') {
-              // group by base week id
               const byBase = {};
               for (const d of selection) {
                 const we = computeWeekEnding(d, state.weekEndingWeekday);
@@ -9936,11 +9934,8 @@ async function fetchAndRenderContractCalendar(contractId, opts /* { from,to, vie
                 stageContractCalendarAdditional(contractId, baseWeekId, dates);
               }
             }
-            // Mark the modal dirty so big Save enables, even if user switches tabs
             try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
-
-            // re-render with overlay
-            await fetchAndRenderContractCalendar(contractId, { from: state.win.from, to: state.win.to });
+            await fetchAndRenderContractCalendar(contractId, { from: state.win.from, to: state.win.to, view: state.view });
           } catch (e) {
             alert(e?.message || e);
           }
@@ -9949,13 +9944,9 @@ async function fetchAndRenderContractCalendar(contractId, opts /* { from,to, vie
     }
   });
 
-  // Legend only (no calendar Save/Discard UI)
   const legend = document.createElement('div'); legend.id = 'contractCalLegend'; holder.appendChild(legend); renderCalendarLegend(legend);
-
-  // Calendar Save/Discard is removed; Big Save commits calendar.
-  // (Keep the function defined for back-compat, but it is a no-op now.)
-  // wireContractCalendarSaveControls(contractId, holder, weekIndex); // ← deliberately NOT called
 }
+
 
 function renderCandidateContractList(container, contractMap, handlers) {
   container.innerHTML = '';
@@ -11181,31 +11172,32 @@ mergedRowForTab(k) {
       this._hasMountedOnce = true; GE();
     }
   };
+function setFrameMode(frameObj, mode) {
+  L('setFrameMode ENTER', { prevMode: frameObj.mode, nextMode: mode, isChild: (stack().length>1), noParentGate: frameObj.noParentGate });
+  const prev = frameObj.mode; frameObj.mode = mode;
+  const isChild = (stack().length > 1);
+  if (frameObj.noParentGate) setFormReadOnly(byId('modalBody'), (mode==='view'||mode==='saving'));
+  else if (isChild)          { const p=parentFrame(); setFormReadOnly(byId('modalBody'), !(p && (p.mode==='edit'||p.mode==='create'))); }
+  else                       setFormReadOnly(byId('modalBody'), (mode==='view'||mode==='saving'));
 
-  function setFrameMode(frameObj, mode) {
-    L('setFrameMode ENTER', { prevMode: frameObj.mode, nextMode: mode, isChild: (stack().length>1), noParentGate: frameObj.noParentGate });
-    const prev = frameObj.mode; frameObj.mode = mode;
-    const isChild = (stack().length > 1);
-    if (frameObj.noParentGate) setFormReadOnly(byId('modalBody'), (mode==='view'||mode==='saving'));
-    else if (isChild)          { const p=parentFrame(); setFormReadOnly(byId('modalBody'), !(p && (p.mode==='edit'||p.mode==='create'))); }
-    else                       setFormReadOnly(byId('modalBody'), (mode==='view'||mode==='saving'));
+  if (typeof frameObj._updateButtons === 'function') frameObj._updateButtons();
 
-    if (typeof frameObj._updateButtons === 'function') frameObj._updateButtons();
+  try { const idx=stack().indexOf(frameObj); window.dispatchEvent(new CustomEvent('modal-frame-mode-changed',{detail:{frameIndex:idx,mode}})); } catch {}
 
-    try { const idx=stack().indexOf(frameObj); window.dispatchEvent(new CustomEvent('modal-frame-mode-changed',{detail:{frameIndex:idx,mode}})); } catch {}
+  const repaint = !!(frameObj._hasMountedOnce && frameObj.currentTabKey);
+  L('setFrameMode', { prevMode:prev, nextMode:mode, _hasMountedOnce:frameObj._hasMountedOnce, willRepaint:repaint });
+  try {
+    const pc = document.getElementById('btnPickCandidate');
+    const pl = document.getElementById('btnPickClient');
+    L('setFrameMode picker snapshot', {
+      pickCandidate: { exists: !!pc, disabled: !!(pc && pc.disabled) },
+      pickClient:    { exists: !!pl, disabled: !!(pl && pl.disabled) }
+    });
+  } catch {}
+  updateCalendarInteractivity(mode==='edit' || mode==='create');
+  if (repaint) frameObj.setTab(frameObj.currentTabKey);
+}
 
-    const repaint = !!(frameObj._hasMountedOnce && frameObj.currentTabKey);
-    L('setFrameMode', { prevMode:prev, nextMode:mode, _hasMountedOnce:frameObj._hasMountedOnce, willRepaint:repaint });
-    try {
-      const pc = document.getElementById('btnPickCandidate');
-      const pl = document.getElementById('btnPickClient');
-      L('setFrameMode picker snapshot', {
-        pickCandidate: { exists: !!pc, disabled: !!(pc && pc.disabled) },
-        pickClient:    { exists: !!pl, disabled: !!(pl && pl.disabled) }
-      });
-    } catch {}
-    if (repaint) frameObj.setTab(frameObj.currentTabKey);
-  }
 
   stack().push(frame);
   byId('modalBack').style.display='flex';
