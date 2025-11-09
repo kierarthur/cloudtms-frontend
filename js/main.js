@@ -1527,18 +1527,18 @@ function openContract(row) {
         }
 
         let hasManualStage = false;
-try {
-  const stageKey = data.id || window.modalCtx.openToken || null;
-  if (stageKey && typeof getContractCalendarStageState === 'function') {
-    const st = getContractCalendarStageState(stageKey);
-    hasManualStage = !!(st && (st.add?.size || st.remove?.size || Object.keys(st.additional || {}).length));
-  }
-} catch {}
+        try {
+          const stageKey = data.id || window.modalCtx.openToken || null;
+          if (stageKey && typeof getContractCalendarStageState === 'function') {
+            const st = getContractCalendarStageState(stageKey);
+            hasManualStage = !!(st && (st.add?.size || st.remove?.size || Object.keys(st.additional || {}).length));
+          }
+        } catch {}
 
-if (!isCreate && hasManualStage) data.skip_generate_weeks = true;
+        if (!isCreate && hasManualStage) data.skip_generate_weeks = true;
 
-if (LOGC) console.log('[CONTRACTS] upsert → upsertContract');
-const saved = await upsertContract(data, data.id || undefined);
+        if (LOGC) console.log('[CONTRACTS] upsert → upsertContract');
+        const saved = await upsertContract(data, data.id || undefined);
 
         if (LOGC) console.log('[CONTRACTS] upsertContract result', { hasSaved: !!saved, id: saved?.id || saved?.contract?.id });
 
@@ -1587,16 +1587,9 @@ const saved = await upsertContract(data, data.id || undefined);
             if (hasStageNow) {
               if (LOGC) console.log('[CONTRACTS] skip generation (edit, manual stage present)');
             } else if ((extendedHead || extendedTail) && std_schedule_json) {
-              const headFrom = extendedHead ? newStart : null;
-              const headTo   = extendedHead ? prevStartIso : null;
-              const tailFrom = extendedTail ? prevEndIso : null;
-              const tailTo   = extendedTail ? newEnd : null;
-              if (typeof generateContractWeeksRange === 'function') {
-                if (extendedHead) await generateContractWeeksRange(contractId, { from: headFrom, to: headTo, mode: 'TEMPLATE_ONLY' });
-                if (extendedTail) await generateContractWeeksRange(contractId, { from: tailFrom, to: tailTo, mode: 'TEMPLATE_ONLY' });
-              } else if (typeof generateContractWeeks === 'function') {
-                if (extendedHead) await generateContractWeeks(contractId, { from: headFrom, to: headTo, templateOnly: true });
-                if (extendedTail) await generateContractWeeks(contractId, { from: tailFrom, to: tailTo, templateOnly: true });
+              if (LOGC) console.log('[CONTRACTS] generate missing weeks (template-only, head/tail extension)');
+              if (typeof generateContractWeeks === 'function') {
+                await generateContractWeeks(contractId);
               }
             } else {
               if (LOGC) console.log('[CONTRACTS] skip generation (edit, no date change, no manual stage)');
@@ -1611,6 +1604,10 @@ const saved = await upsertContract(data, data.id || undefined);
             if (typeof showModalHint === 'function') showModalHint(msg, 'warn'); else alert(msg);
           } else if (LOGC) {
             console.log('[CONTRACTS] calendar commit ok', calRes);
+            try {
+              clearContractCalendarStageState(contractId);
+              clearCalendarSelection(`c:${contractId}`);
+            } catch {}
           }
         }
 
@@ -1624,11 +1621,15 @@ const saved = await upsertContract(data, data.id || undefined);
           if (currentTab === 'calendar' && contractId) {
             const win = (window.__calState?.[contractId]?.win) || null;
             const candId = window.modalCtx?.data?.candidate_id || null;
+            const scrollBox = document.getElementById('__calScroll');
+            const prevScroll = scrollBox ? scrollBox.scrollTop : 0;
             if (typeof fetchAndRenderCandidateCalendarForContract === 'function' && candId) {
-              await fetchAndRenderCandidateCalendarForContract(contractId, candId, { from: win?.from, to: win?.to });
+              await fetchAndRenderCandidateCalendarForContract(contractId, candId, { from: win?.from, to: win?.to, view: window.__calState?.[contractId]?.view, weekEnding: window.modalCtx?.data?.week_ending_weekday_snapshot ?? 0 });
             } else {
-              await fetchAndRenderContractCalendar(contractId, win ? { from: win.from, to: win.to } : undefined);
+              await fetchAndRenderContractCalendar(contractId, win ? { from: win.from, to: win.to, view: window.__calState?.[contractId]?.view } : undefined);
             }
+            const newScrollBox = document.getElementById('__calScroll');
+            if (newScrollBox) newScrollBox.scrollTop = prevScroll;
           } else if (currentTab === 'rates') {
             try { computeContractMargins(); } catch {}
           }
@@ -2087,7 +2088,6 @@ const saved = await upsertContract(data, data.id || undefined);
     }
   }, 0);
 }
-
 
 // ─────────────────────────────────────────────────────────────────────────────
 // NEW: getSummaryFingerprint(section)
@@ -9258,13 +9258,14 @@ function renderContractCalendarTab(ctx) {
 
   const weekEnding = (c.week_ending_weekday_snapshot ?? window.modalCtx?.formState?.main?.week_ending_weekday_snapshot ?? 0);
 
-  // Gate Clone & Extend visibility: VIEW mode only
   const fr = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
   const inViewMode = !!(fr && fr.mode === 'view');
 
-  const actionsHtml = (c.id && inViewMode
+  const actionsHtml = (c.id
     ? `<div class="actions" style="margin-top:8px;display:flex;gap:8px">
-         <button id="btnCloneExtend">Clone & Extend…</button>
+         <button id="btnAddMissing">Add missing weeks</button>
+         <button id="btnRemoveAll">Remove all weeks</button>
+         ${inViewMode ? `<button id="btnCloneExtend">Clone & Extend…</button>` : ``}
        </div>`
     : ``);
 
@@ -9282,7 +9283,6 @@ function renderContractCalendarTab(ctx) {
       const win = computeYearWindow(y);
       const el = byId(holderId); if (!el) return;
 
-      // Fixed layout: only the calendar area scrolls, not the modal shell
       el.innerHTML = `
         <div class="tabc" style="display:flex;flex-direction:column;gap:8px;height:calc(72vh);max-height:calc(72vh)">
           <div id="__calScroll" style="flex:1;min-height:0;overflow:auto;border:1px solid var(--line,#e5e5e5);border-radius:8px;padding:4px;">
@@ -9291,9 +9291,34 @@ function renderContractCalendarTab(ctx) {
           ${actionsHtml}
         </div>`;
 
-      await fetchAndRenderCandidateCalendarForContract(currentKey, candId, { from: win.from, to: win.to, view:'year', weekEnding });
+      await fetchAndRenderContractCalendar(currentKey, { from: win.from, to: win.to, view:'year' });
 
-      if (c.id && inViewMode) {
+      if (c.id) {
+        const btnAdd = el.querySelector('#btnAddMissing');
+        if (btnAdd && !btnAdd.__wired) {
+          btnAdd.__wired = true;
+          btnAdd.addEventListener('click', async () => {
+            if (typeof generateContractWeeks === 'function') {
+              await generateContractWeeks(c.id);
+              const prev = byId('__calScroll')?.scrollTop || 0;
+              await fetchAndRenderContractCalendar(c.id, { from: window.__calState[c.id]?.win?.from, to: window.__calState[c.id]?.win?.to, view: window.__calState[c.id]?.view });
+              const sb = byId('__calScroll'); if (sb) sb.scrollTop = prev;
+            }
+          });
+        }
+        const btnRem = el.querySelector('#btnRemoveAll');
+        if (btnRem && !btnRem.__wired) {
+          btnRem.__wired = true;
+          btnRem.addEventListener('click', async () => {
+            if (!window.confirm('Remove all unsubmitted weeks for this contract?')) return;
+            if (typeof removeAllUnsubmittedWeeks === 'function') {
+              await removeAllUnsubmittedWeeks(c.id);
+            }
+            const prev = byId('__calScroll')?.scrollTop || 0;
+            await fetchAndRenderContractCalendar(c.id, { from: window.__calState[c.id]?.win?.from, to: window.__calState[c.id]?.win?.to, view: window.__calState[c.id]?.view });
+            const sb = byId('__calScroll'); if (sb) sb.scrollTop = prev;
+          });
+        }
         const btnCE = el.querySelector('#btnCloneExtend');
         if (btnCE && !btnCE.__wired) {
           btnCE.__wired = true;
@@ -9305,13 +9330,13 @@ function renderContractCalendarTab(ctx) {
     }
   }, 0);
 
-  // Initial skeleton with scroll container + (if applicable) a disabled button placeholder
   return `
     <div id="${holderId}" class="tabc">
       <div class="hint">Loading calendar…</div>
-      ${c.id && inViewMode ? `<div class="actions" style="margin-top:8px;display:flex;gap:8px"><button id="btnCloneExtend" disabled>Clone & Extend…</button></div>` : ``}
+      ${actionsHtml}
     </div>`;
 }
+
 function isConsecutiveDailyRun(dates) {
   if (!Array.isArray(dates) || dates.length < 2) return false;
   const arr = [...dates].sort();
@@ -9629,14 +9654,16 @@ async function callCheckContractWindowOverlap(candidate_id, start_date_iso, end_
     return { has_overlap:false, overlaps:[] };
   }
 }
+
 async function fetchAndRenderCandidateCalendarForContract(currentKey, candidateId, opts) {
   const LOG_CAL = (typeof window.__LOG_CAL === 'boolean') ? window.__LOG_CAL : true;
   const L = (...a)=> { if (LOG_CAL) console.log('[CAL][candidate-wide]', ...a); };
 
   const state = (window.__calState[currentKey] ||= {
     view: (opts?.view || 'year'),
-    win:  (opts?.from && opts?.to) ? { from: opts.from, to: opts.to } : computeYearWindow((new Date()).getUTCFullYear()),
-    weekEndingWeekday: (typeof opts?.weekEnding !== 'undefined' ? Number(opts.weekEnding) : (window.modalCtx?.data?.week_ending_weekday_snapshot ?? 0))
+    win:  (opts?.from && opts?.to) ? { from: opts.from, to: opts.to } : computeYearWindow((new Date()).getUTCYear ? (new Date()).getUTCFullYear() : (new Date()).getFullYear()),
+    weekEndingWeekday: (typeof opts?.weekEnding !== 'undefined' ? Number(opts.weekEnding) : (window.modalCtx?.data?.week_ending_weekday_snapshot ?? 0)),
+    scrollTop: 0
   });
 
   if (opts?.view) state.view = opts.view;
@@ -9644,6 +9671,8 @@ async function fetchAndRenderCandidateCalendarForContract(currentKey, candidateI
   if (typeof opts?.weekEnding !== 'undefined') state.weekEndingWeekday = Number(opts.weekEnding);
 
   const holder = byId('contractCalendarHolder'); if (!holder) return;
+  const scrollBox = byId('__calScroll') || holder;
+  state.scrollTop = scrollBox.scrollTop || 0;
 
   const contractId   = (window.modalCtx?.data?.id && String(currentKey) === String(window.modalCtx.data.id)) ? window.modalCtx.data.id : null;
   const currentStart = window.modalCtx?.data?.start_date || null;
@@ -9695,25 +9724,11 @@ async function fetchAndRenderCandidateCalendarForContract(currentKey, candidateI
 
   const overlayedMap = applyStagedContractCalendarOverlay(currentKey, itemsByDate, new Map());
 
-  const ensureBanner = (text) => {
-    let bar = holder.querySelector('#calExpandBanner');
-    if (!bar) {
-      bar = document.createElement('div');
-      bar.id = 'calExpandBanner';
-      bar.style.margin = '8px 0';
-      bar.style.padding = '6px 10px';
-      bar.style.borderRadius = '8px';
-      bar.style.background = 'var(--panel, #f7f7ff)';
-      bar.style.border = '1px solid var(--line, #d8d8ee)';
-      bar.style.fontSize = '12px';
-      holder.prepend(bar);
-    }
-    bar.textContent = text || '';
-    bar.style.display = text ? '' : 'none';
-  };
-
   const gridHost = document.createElement('div'); gridHost.id = 'contractDayGrid';
-  holder.innerHTML = ''; holder.appendChild(gridHost);
+  const container = byId('__contractCal') || holder;
+  if (container === holder) holder.innerHTML = '';
+  container.innerHTML = '';
+  container.appendChild(gridHost);
 
   renderDayGrid(gridHost, {
     from: state.win.from,
@@ -9755,10 +9770,12 @@ async function fetchAndRenderCandidateCalendarForContract(currentKey, candidateI
       if (willExpand && expStart && expEnd) {
         window.modalCtx.__windowExpand = { start: expStart, end: expEnd };
         const toUk = (iso) => { try { return (typeof formatIsoToUk === 'function') ? (formatIsoToUk(iso) || iso) : iso; } catch { return iso; } };
-        ensureBanner(`These selections are outside the current window (${toUk(currentStart)||'—'} → ${toUk(currentEnd)||'—'}). We’ll extend to ${toUk(expStart)} → ${toUk(expEnd)} on Save.`);
+        const banner = byId('calExpandBanner');
+        if (banner) banner.textContent = `These selections are outside the current window (${toUk(currentStart)||'—'} → ${toUk(currentEnd)||'—'}). We’ll extend to ${toUk(expStart)} → ${toUk(expEnd)} on Save.`;
       } else {
         window.modalCtx.__windowExpand = null;
-        ensureBanner('');
+        const banner = byId('calExpandBanner');
+        if (banner) banner.textContent = '';
       }
 
       const mine = String(window.modalCtx?.data?.id || currentKey);
@@ -9825,7 +9842,9 @@ async function fetchAndRenderCandidateCalendarForContract(currentKey, candidateI
               if (toUnbook.length) stageContractCalendarUnbookings(currentKey, toUnbook);
             }
             try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
+            const prev = (byId('__calScroll') || holder).scrollTop || 0;
             await fetchAndRenderCandidateCalendarForContract(currentKey, candidateId, { from: state.win.from, to: state.win.to, view: state.view, weekEnding: state.weekEndingWeekday });
+            (byId('__calScroll') || holder).scrollTop = prev;
           } catch (e) {
             alert(e?.message || e);
           }
@@ -9834,9 +9853,8 @@ async function fetchAndRenderCandidateCalendarForContract(currentKey, candidateI
     }
   });
 
-  const legend = document.createElement('div'); legend.id = 'contractCalLegend'; holder.appendChild(legend); renderCalendarLegend(legend);
+  (byId('__calScroll') || holder).scrollTop = state.scrollTop;
 }
-
 
 // ============================================================================
 // CANDIDATE – RENDER CALENDAR TAB
@@ -9845,23 +9863,49 @@ async function fetchAndRenderContractCalendar(contractId, opts) {
   const LOG_CAL = (typeof window.__LOG_CAL === 'boolean') ? window.__LOG_CAL : true;
   const L = (...a)=> { if (LOG_CAL) console.log('[CAL][contract]', ...a); };
 
-  const state = (window.__calState[contractId] ||= { view:'year', win: computeYearWindow((new Date()).getUTCFullYear()), weekEndingWeekday: (window.modalCtx?.data?.week_ending_weekday_snapshot ?? 0) });
+  const state = (window.__calState[contractId] ||= { view:'year', win: computeYearWindow((new Date()).getUTCFullYear()), weekEndingWeekday: (window.modalCtx?.data?.week_ending_weekday_snapshot ?? 0), scrollTop: 0 });
 
   if (opts?.view) state.view = opts.view;
   if (opts?.from && opts?.to) state.win = { from: opts.from, to: opts.to };
 
   const holder = byId('contractCalendarHolder'); if (!holder) return;
+  const scrollBox = byId('__calScroll') || holder;
+  state.scrollTop = scrollBox.scrollTop || 0;
+
+  const candidateId = window.modalCtx?.data?.candidate_id || window.modalCtx?.formState?.main?.candidate_id || null;
+
+  let candidateItems = [];
+  try {
+    if (candidateId && typeof getCandidateCalendarRange === 'function') {
+      const resp = await getCandidateCalendarRange(candidateId, state.win.from, state.win.to, 'day');
+      candidateItems = Array.isArray(resp?.items) ? resp.items : [];
+    }
+  } catch (e) {
+    L('getCandidateCalendarRange failed', e);
+    candidateItems = [];
+  }
+  const itemsByDate = buildDateIndex(candidateItems);
 
   const dayResp = await getContractCalendarRange(contractId, state.win.from, state.win.to, 'day');
   const dayItems = Array.isArray(dayResp?.items) ? dayResp.items : [];
+  for (const it of dayItems) {
+    const d = it?.date; if (!d) continue;
+    const arr = itemsByDate.get(d) || [];
+    if (it && !it.contract_id) it.contract_id = contractId;
+    arr.push(it);
+    itemsByDate.set(d, arr);
+  }
 
   const weeksForIndex = (await getContractCalendar(contractId, { from: state.win.from, to: state.win.to, granularity:'week' })).items || [];
   const weekIndex = buildWeekIndex(weeksForIndex);
 
-  const overlayedMap = applyStagedContractCalendarOverlay(contractId, buildDateIndex(dayItems), weekIndex);
+  const overlayedMap = applyStagedContractCalendarOverlay(contractId, itemsByDate, weekIndex);
 
   const gridHost = document.createElement('div'); gridHost.id = 'contractDayGrid';
-  holder.innerHTML = ''; holder.appendChild(gridHost);
+  const container = byId('__contractCal') || holder;
+  if (container === holder) holder.innerHTML = '';
+  container.innerHTML = '';
+  container.appendChild(gridHost);
 
   renderDayGrid(gridHost, {
     from: state.win.from,
@@ -9890,19 +9934,40 @@ async function fetchAndRenderContractCalendar(contractId, opts) {
     onCellContextMenu: (theDate, ev) => {
       if (!window.__calInteractive) return;
       const sel = initSelBucket(`c:${contractId}`).set; const selArr = [...sel];
+
+      const ownedByCurrent = (d) => {
+        const arr = itemsByDate.get(d) || [];
+        return arr.some(it => String(it.contract_id || '') === String(contractId));
+      };
+      const occupiedByOtherOnly = (d) => {
+        const arr = itemsByDate.get(d) || [];
+        return arr.some(it => {
+          const cid = String(it.contract_id || '');
+          return cid && cid !== String(contractId);
+        }) && !ownedByCurrent(d);
+      };
+      const anyGrey = selArr.some(occupiedByOtherOnly);
+
       const resolveFinalState = (d) => topState(overlayedMap.get(d) || []);
-      const allEmpty = selArr.every(d => resolveFinalState(d) === 'EMPTY');
-      const eligible = (d) => {
+
+      const eligibleUnbook = (d) => {
+        if (!ownedByCurrent(d)) return false;
+        const we = computeWeekEnding(d, state.weekEndingWeekday);
+        const w = weekIndex.get(we);
+        const st = resolveFinalState(d);
+        return st === 'PLANNED' && w && !w.baseHasTs;
+      };
+      const anyEligible = selArr.some(eligibleUnbook);
+      const allEligible = selArr.every(eligibleUnbook);
+      const blockMode = isConsecutiveDailyRun(selArr);
+
+      const canBook = selArr.every(d => !ownedByCurrent(d));
+      const canUnbook = blockMode ? anyEligible : allEligible;
+
+      const canAddAdditional = selArr.some(d => {
         const st = resolveFinalState(d);
         const we = computeWeekEnding(d, state.weekEndingWeekday);
         const w = weekIndex.get(we);
-        return st === 'PLANNED' && w && !w.baseHasTs;
-      };
-      const anyEligible = selArr.some(eligible);
-      const allEligible = selArr.every(eligible);
-      const blockMode = isConsecutiveDailyRun(selArr);
-      const canAddAdditional = selArr.some(d => {
-        const st = resolveFinalState(d); const we = computeWeekEnding(d, state.weekEndingWeekday); const w = weekIndex.get(we);
         return st === 'EMPTY' && w && w.baseHasTs && w.baseWeekId;
       });
 
@@ -9910,14 +9975,17 @@ async function fetchAndRenderContractCalendar(contractId, opts) {
         anchorEl: ev.target,
         bucketKey: `c:${contractId}`,
         selection: selArr,
-        capabilities: { canBook: allEmpty, canUnbook: (blockMode ? anyEligible : allEligible), canAddAdditional },
+        capabilities: { canBook, canUnbook, canAddAdditional },
         onAction: async ({ type, selection }) => {
           try {
             if (type === 'book') {
+              if (anyGrey) {
+                if (!window.confirm('This would clash with an existing contract on some selected dates. Continue?')) return;
+              }
               stageContractCalendarBookings(contractId, selection);
             }
             if (type === 'unbook') {
-              const toUnbook = (blockMode ? selection.filter(eligible) : selection.filter(eligible));
+              const toUnbook = selection.filter(eligibleUnbook);
               if (toUnbook.length) stageContractCalendarUnbookings(contractId, toUnbook);
             }
             if (type === 'additional') {
@@ -9933,7 +10001,9 @@ async function fetchAndRenderContractCalendar(contractId, opts) {
               }
             }
             try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
+            const prev = (byId('__calScroll') || holder).scrollTop || 0;
             await fetchAndRenderContractCalendar(contractId, { from: state.win.from, to: state.win.to, view: state.view });
+            (byId('__calScroll') || holder).scrollTop = prev;
           } catch (e) {
             alert(e?.message || e);
           }
@@ -9942,7 +10012,7 @@ async function fetchAndRenderContractCalendar(contractId, opts) {
     }
   });
 
-  const legend = document.createElement('div'); legend.id = 'contractCalLegend'; holder.appendChild(legend); renderCalendarLegend(legend);
+  (byId('__calScroll') || holder).scrollTop = state.scrollTop;
 }
 
 
@@ -10878,6 +10948,7 @@ async function renderClientRatesTable() {
 // UPDATED: showModal (adds contract-modal class toggling for Contracts dialogs)
 // ─────────────────────────────────────────────────────────────────────────────
 function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
+
   const LOG = (typeof window.__LOG_MODAL === 'boolean') ? window.__LOG_MODAL : true;
   const L  = (...a)=> { if (LOG) console.log('[MODAL]', ...a); };
   const GC = (label)=> { if (LOG) console.groupCollapsed('[MODAL]', label); };
@@ -11200,437 +11271,434 @@ function setFrameMode(frameObj, mode) {
   stack().push(frame);
   byId('modalBack').style.display='flex';
 
-  function renderTop() {
-    const LOG = (typeof window.__LOG_MODAL === 'boolean') ? window.__LOG_MODAL : true;
-    const L  = (...a)=> { if (LOG) console.log('[MODAL]', ...a); };
-    const GC = (label)=> { if (LOG) console.groupCollapsed('[MODAL]', label); };
-    const GE = ()=> { if (LOG) console.groupEnd(); };
+ function renderTop() {
+  const LOG = (typeof window.__LOG_MODAL === 'boolean') ? window.__LOG_MODAL : true;
+  const L  = (...a)=> { if (LOG) console.log('[MODAL]', ...a); };
+  const GC = (label)=> { if (LOG) console.groupCollapsed('[MODAL]', label); };
+  const GE = ()=> { if (LOG) console.groupEnd(); };
 
-    GC('renderTop()');
+  GC('renderTop()');
 
-    const hintEl = document.getElementById('modalHint');
-    if (hintEl) {
-      hintEl.textContent = '';
-      hintEl.removeAttribute('data-tone');
-      try { hintEl.classList.remove('ok','warn','err'); } catch {}
+  const hintEl = document.getElementById('modalHint');
+  if (hintEl) {
+    hintEl.textContent = '';
+    hintEl.removeAttribute('data-tone');
+    try { hintEl.classList.remove('ok','warn','err'); } catch {}
+  }
+
+  const isChild = (stack().length > 1);
+  const top     = currentFrame();
+  const parent  = parentFrame();
+
+  if (typeof top._detachGlobal === 'function') { try { top._detachGlobal(); } catch {} top._wired = false; }
+
+  L('renderTop state (global)', { entity: top?.entity, kind: top?.kind, mode: top?.mode, hasId: top?.hasId, currentTabKey: top?.currentTabKey });
+  byId('modalTitle').textContent = top.title;
+
+  const tabsEl = byId('modalTabs'); tabsEl.innerHTML='';
+  (top.tabs||[]).forEach((t,i)=>{
+    const b=document.createElement('button'); b.textContent = t.label||t.title||t.key;
+    if (i===0 && !top.currentTabKey) top.currentTabKey = t.key;
+    if (t.key===top.currentTabKey || (i===0 && !top.currentTabKey)) b.classList.add('active');
+    b.onclick = ()=>{ if (top.mode==='saving') return; tabsEl.querySelectorAll('button').forEach(x=>x.classList.remove('active')); b.classList.add('active'); top.setTab(t.key); };
+    tabsEl.appendChild(b);
+  });
+  L('renderTop tabs (global)', { count: (top.tabs||[]).length, active: top.currentTabKey });
+
+  if (top.currentTabKey) top.setTab(top.currentTabKey);
+  else if (top.tabs && top.tabs[0]) top.setTab(top.tabs[0].key);
+  else byId('modalBody').innerHTML = top.renderTab('form',{})||'';
+
+  const btnSave  = byId('btnSave');
+  const btnClose = byId('btnCloseModal');
+  const btnDel   = byId('btnDelete');
+  const header   = byId('modalDrag');
+  const modalNode= byId('modal');
+
+  const LOGC = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : true;
+  if (modalNode) {
+    const parentIsContracts = !!(parent && ((parent.entity === 'contracts') || (parent.kind === 'contracts')));
+    const isContracts = ((top.entity === 'contracts') || (top.kind === 'contracts') || parentIsContracts);
+    modalNode.classList.toggle('contract-modal', !!isContracts);
+    if (LOGC && isContracts) console.log('[CONTRACTS][MODAL] contract-modal class applied to #modal (inherited:', parentIsContracts, ')');
+  }
+
+  if (modalNode) {
+    const anchor = (window.__modalAnchor || null);
+    if (!anchor) {
+      const R = modalNode.getBoundingClientRect();
+      window.__modalAnchor = { left: R.left, top: R.top };
+      modalNode.style.position = 'fixed';
+      modalNode.style.left = R.left + 'px';
+      modalNode.style.top  = R.top  + 'px';
+      modalNode.style.right = 'auto';
+      modalNode.style.bottom= 'auto';
+      modalNode.style.transform = 'none';
+      L('renderTop: anchored modal (global/new)', window.__modalAnchor);
+    } else {
+      modalNode.style.position = 'fixed';
+      modalNode.style.left = window.__modalAnchor.left + 'px';
+      modalNode.style.top  = window.__modalAnchor.top  + 'px';
+      modalNode.style.right = 'auto';
+      modalNode.style.bottom= 'auto';
+      modalNode.style.transform = 'none';
+      L('renderTop: anchored modal (global/reuse)', window.__modalAnchor);
     }
+  }
 
-    const isChild = (stack().length > 1);
-    const top     = currentFrame();
-    const parent  = parentFrame();
+  const showChildDelete = isChild && (top.kind==='client-rate' || top.kind==='candidate-override') && top.hasId;
+  btnDel.style.display = showChildDelete ? '' : 'none'; btnDel.onclick = null;
 
-    if (typeof top._detachGlobal === 'function') { try { top._detachGlobal(); } catch {} top._wired = false; }
+  let btnEdit = byId('btnEditModal');
+  if (!btnEdit) {
+    btnEdit=document.createElement('button');
+    btnEdit.id='btnEditModal'; btnEdit.type='button'; btnEdit.className='btn btn-outline btn-sm'; btnEdit.textContent='Edit';
+    const bar = btnSave?.parentElement || btnClose?.parentElement; if (bar) bar.insertBefore(btnEdit, btnSave);
+    L('renderTop (global): created btnEdit');
+  }
 
-    L('renderTop state (global)', { entity: top?.entity, kind: top?.kind, mode: top?.mode, hasId: top?.hasId, currentTabKey: top?.currentTabKey });
-    byId('modalTitle').textContent = top.title;
-
-    const tabsEl = byId('modalTabs'); tabsEl.innerHTML='';
-    (top.tabs||[]).forEach((t,i)=>{
-      const b=document.createElement('button'); b.textContent = t.label||t.title||t.key;
-      if (i===0 && !top.currentTabKey) top.currentTabKey = t.key;
-      if (t.key===top.currentTabKey || (i===0 && !top.currentTabKey)) b.classList.add('active');
-      b.onclick = ()=>{ if (top.mode==='saving') return; tabsEl.querySelectorAll('button').forEach(x=>x.classList.remove('active')); b.classList.add('active'); top.setTab(t.key); };
-      tabsEl.appendChild(b);
-    });
-    L('renderTop tabs (global)', { count: (top.tabs||[]).length, active: top.currentTabKey });
-
-    if (top.currentTabKey) top.setTab(top.currentTabKey);
-    else if (top.tabs && top.tabs[0]) top.setTab(top.tabs[0].key);
-    else byId('modalBody').innerHTML = top.renderTab('form',{})||'';
-
-    const btnSave  = byId('btnSave');
-    const btnClose = byId('btnCloseModal');
-    const btnDel   = byId('btnDelete');
-    const header   = byId('modalDrag');
-    const modalNode= byId('modal');
-
-    const LOGC = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : true;
-    if (modalNode) {
-      const isContracts = (top.entity === 'contracts') || (top.kind === 'contracts');
-      modalNode.classList.toggle('contract-modal', !!isContracts);
-      if (LOGC && isContracts) console.log('[CONTRACTS][MODAL] contract-modal class applied to #modal');
-    }
-
-    if (modalNode) {
-      const anchor = (window.__modalAnchor || null);
-      if (!anchor) {
-        const R = modalNode.getBoundingClientRect();
-        window.__modalAnchor = { left: R.left, top: R.top };
-        modalNode.style.position = 'fixed';
-        modalNode.style.left = R.left + 'px';
-        modalNode.style.top  = R.top  + 'px';
-        modalNode.style.right = 'auto';
-        modalNode.style.bottom= 'auto';
-        modalNode.style.transform = 'none';
-        L('renderTop: anchored modal (global/new)', window.__modalAnchor);
-      } else {
-        modalNode.style.position = 'fixed';
-        modalNode.style.left = window.__modalAnchor.left + 'px';
-        modalNode.style.top  = window.__modalAnchor.top  + 'px';
-        modalNode.style.right = 'auto';
-        modalNode.style.bottom= 'auto';
-        modalNode.style.transform = 'none';
-        L('renderTop: anchored modal (global/reuse)', window.__modalAnchor);
-      }
-    }
-
-    const showChildDelete = isChild && (top.kind==='client-rate' || top.kind==='candidate-override') && top.hasId;
-    btnDel.style.display = showChildDelete ? '' : 'none'; btnDel.onclick = null;
-
-    let btnEdit = byId('btnEditModal');
-    if (!btnEdit) {
-      btnEdit=document.createElement('button');
-      btnEdit.id='btnEditModal'; btnEdit.type='button'; btnEdit.className='btn btn-outline btn-sm'; btnEdit.textContent='Edit';
-      const bar = btnSave?.parentElement || btnClose?.parentElement; if (bar) bar.insertBefore(btnEdit, btnSave);
-      L('renderTop (global): created btnEdit');
-    }
-
-    (function dragWire(){
-      if(!header||!modalNode) return;
-      const onDown = e=>{
-        if ((e.button!==0 && e.type==='mousedown') || e.target.closest('button')) return;
-        const R=modalNode.getBoundingClientRect();
-        modalNode.style.position='fixed'; modalNode.style.left=R.left+'px'; modalNode.style.top=R.top+'px';
-        modalNode.style.right='auto'; modalNode.style.bottom='auto'; modalNode.style.transform='none'; modalNode.classList.add('dragging');
-        const ox=e.clientX-R.left, oy=e.clientY-R.top;
-        document.onmousemove = ev=>{ let l=ev.clientX-ox, t=ev.clientY-oy; const ml=Math.max(0,window.innerWidth-R.width), mt=Math.max(0,window.innerHeight-R.height); if(l<0)l=0; if(t<0)t=0; if(l>ml)l=ml; if(t>mt)t=mt; modalNode.style.left=l+'px'; modalNode.style.top=t+'px'; };
-        document.onmouseup   = ()=>{
-          modalNode.classList.remove('dragging');
-          const R2 = modalNode.getBoundingClientRect();
-          window.__modalAnchor = { left: R2.left, top: R2.top };
-          document.onmousemove=null; document.onmouseup=null;
-          L('dragWire (global): saved new anchor', window.__modalAnchor);
-        };
-        e.preventDefault();
+  (function dragWire(){
+    if(!header||!modalNode) return;
+    const onDown = e=>{
+      if ((e.button!==0 && e.type==='mousedown') || e.target.closest('button')) return;
+      const R=modalNode.getBoundingClientRect();
+      modalNode.style.position='fixed'; modalNode.style.left=R.left+'px'; modalNode.style.top=R.top+'px';
+      modalNode.style.right='auto'; modalNode.style.bottom='auto'; modalNode.style.transform='none'; modalNode.classList.add('dragging');
+      const ox=e.clientX-R.left, oy=e.clientY-R.top;
+      document.onmousemove = ev=>{ let l=ev.clientX-ox, t=ev.clientY-oy; const ml=Math.max(0,window.innerWidth-R.width), mt=Math.max(0,window.innerHeight-R.height); if(l<0)l=0; if(t<0)t=0; if(l>ml)l=ml; if(t>mt)t=mt; modalNode.style.left=l+'px'; modalNode.style.top=t+'px'; };
+      document.onmouseup   = ()=>{
+        modalNode.classList.remove('dragging');
+        const R2 = modalNode.getBoundingClientRect();
+        window.__modalAnchor = { left: R2.left, top: R2.top };
+        document.onmousemove=null; document.onmouseup=null;
+        L('dragWire (global): saved new anchor', window.__modalAnchor);
       };
-      const onDbl = e=>{ if(!e.target.closest('button')) sanitizeModalGeometry(); };
-      header.addEventListener('mousedown', onDown);
-      header.addEventListener('dblclick',  onDbl);
-      const prev=top._detachGlobal;
-      top._detachGlobal = ()=>{ try{header.removeEventListener('mousedown',onDown);}catch{} try{header.removeEventListener('dblclick',onDbl);}catch{} document.onmousemove=null; document.onmouseup=null; if(typeof prev==='function'){ try{prev();}catch{} } };
-    })();
-
-    const defaultPrimary = (top.kind==='advanced-search') ? 'Search' : (top.noParentGate ? 'Apply' : (isChild ? 'Apply' : 'Save'));
-    btnSave.textContent = defaultPrimary; btnSave.setAttribute('aria-label', defaultPrimary);
-
-    const setCloseLabel = ()=>{
-      const label = (top.kind==='advanced-search') ? 'Close'
-                 : ((isChild || top.mode==='edit' || top.mode==='create') ? (top.isDirty ? 'Discard' : 'Cancel') : 'Close');
-      btnClose.textContent = label; btnClose.setAttribute('aria-label',label); btnClose.setAttribute('title',label);
+      e.preventDefault();
     };
+    const onDbl = e=>{ if(!e.target.closest('button')) sanitizeModalGeometry(); };
+    header.addEventListener('mousedown', onDown);
+    header.addEventListener('dblclick',  onDbl);
+    const prev=top._detachGlobal;
+    top._detachGlobal = ()=>{ try{header.removeEventListener('mousedown',onDown);}catch{} try{header.removeEventListener('dblclick',onDbl);}catch{} document.onmousemove=null; document.onmouseup=null; if(typeof prev==='function'){ try{prev();}catch{} } };
+  })();
 
-    top._updateButtons = ()=>{
-      // Always clear the hint bar before re-evaluating reasons (prevents stale hints persisting)
-      try {
-        const h = document.getElementById('modalHint');
-        if (h) {
-          h.textContent = '';
-          h.removeAttribute('data-tone');
-          h.classList.remove('ok','warn','err');
-        }
-      } catch {}
+  const defaultPrimary = (top.kind==='advanced-search') ? 'Search' : (top.noParentGate ? 'Apply' : (isChild ? 'Apply' : 'Save'));
+  btnSave.textContent = defaultPrimary; btnSave.setAttribute('aria-label', defaultPrimary);
 
-      const parentEditable = top.noParentGate ? true : (parent ? (parent.mode==='edit' || parent.mode==='create') : true);
-      const relatedBtn = byId('btnRelated');
+  const setCloseLabel = ()=>{
+    const label = (top.kind==='advanced-search') ? 'Close'
+               : ((isChild || top.mode==='edit' || top.mode==='create') ? (top.isDirty ? 'Discard' : 'Cancel') : 'Close');
+    btnClose.textContent = label; btnClose.setAttribute('aria-label',label); btnClose.setAttribute('title',label);
+  };
 
-      if (top.kind==='advanced-search') {
-        btnEdit.style.display='none'; btnSave.style.display=''; btnSave.disabled=!!top._saving; if (relatedBtn) relatedBtn.disabled=true;
-      } else if (isChild && !top.noParentGate) {
-        btnSave.style.display = parentEditable ? '' : 'none';
-        const wantApply = (top._applyDesired===true);
-        btnSave.disabled = (!parentEditable) || top._saving || !wantApply;
-        btnEdit.style.display='none'; if (relatedBtn) relatedBtn.disabled=true;
-        if (LOG) console.log('[MODAL] child _updateButtons()', { parentEditable, wantApply, disabled: btnSave.disabled });
-      } else {
-        btnEdit.style.display = (top.mode==='view' && top.hasId) ? '' : 'none';
-        if (relatedBtn) relatedBtn.disabled = !(top.mode==='view' && top.hasId);
-        if (top.mode==='view') {
-          btnSave.style.display = top.noParentGate ? '' : 'none';
-          btnSave.disabled = top._saving;
-        } else {
-          btnSave.style.display='';
-
-          let gateOK = true;
-          let elig   = null;
-          if (top.entity === 'contracts') {
-            try {
-              gateOK = (typeof computeContractSaveEligibility === 'function') ? !!computeContractSaveEligibility() : true;
-              elig   = (typeof window !== 'undefined') ? (window.__contractEligibility || null) : null;
-
-              // Explicit surfacing of hard block for timesheet boundary violations
-              if (elig && Array.isArray(elig.reasons)) {
-                const tsReason = elig.reasons.find(r => r && r.code === 'TS_BOUNDARY_VIOLATION');
-                if (tsReason) {
-                  gateOK = false;
-                  if (typeof showModalHint === 'function') showModalHint(tsReason.message || 'Dates exclude existing timesheets.', 'warn');
-                }
-              }
-
-              // Allow save when only pending-time-format remains
-              if (!gateOK && elig && elig.pendingTimeFormat && (!elig.reasons || elig.reasons.length === 0)) {
-                gateOK = true;
-              }
-
-              // Footer hint: generic reasons (when blocked) or pending-time tip (when OK but pending)
-              if (typeof showModalHint === 'function' && (top.mode==='edit' || top.mode==='create')) {
-                if (elig && Array.isArray(elig.reasons) && elig.reasons.length && !elig.ok) {
-                  const hasTs = elig.reasons.some(r => r && r.code === 'TS_BOUNDARY_VIOLATION');
-                  if (!hasTs) {
-                    const msg = elig.reasons.map(r => r && r.message).filter(Boolean).join(' • ');
-                    if (msg) showModalHint(msg, 'warn');
-                  }
-                } else if (elig && elig.pendingTimeFormat && elig.tip) {
-                  showModalHint(elig.tip, 'ok');
-                }
-              }
-            } catch { gateOK = true; }
-          }
-
-          btnSave.disabled = (top.entity === 'contracts')
-            ? (top._saving || !top.isDirty || !gateOK)
-            : (top._saving);
-        }
-      }
-      setCloseLabel();
-      L('_updateButtons snapshot (global)', {
-        kind: top.kind, isChild, parentEditable, mode: top.mode,
-        btnSave: { display: btnSave.style.display, disabled: btnSave.disabled },
-        btnEdit: { display: btnEdit.style.display }
-      });
-    };
-
-    top._updateButtons();
-
-    btnEdit.onclick = ()=>{
-      const isChildNow = (stack().length > 1);
-      if (isChildNow || top.noParentGate || top.kind==='advanced-search') return;
-      if (top.mode==='view') {
-        top._snapshot = {
-          data               : deep(window.modalCtx?.data||null),
-          formState          : deep(window.modalCtx?.formState||null),
-          rolesState         : deep(window.modalCtx?.rolesState||null),
-          ratesState         : deep(window.modalCtx?.ratesState||null),
-          hospitalsState     : deep(window.modalCtx?.hospitalsState||null),
-          clientSettingsState: deep(window.modalCtx?.clientSettingsState||null),
-          overrides          : deep(window.modalCtx?.overrides || { existing:[], stagedNew:[], stagedEdits:{}, stagedDeletes:[] })
-        };
-        top.isDirty=false; setFrameMode(top,'edit');
-        L('btnEdit (global) → switch to edit');
-      }
-    };
-
-    const handleSecondary = ()=>{
-      if (top._confirmingDiscard || top._closing) return;
-
-      if (top.kind==='advanced-search') {
-        top._closing=true;
-        document.onmousemove=null; document.onmouseup=null; byId('modal')?.classList.remove('dragging'); sanitizeModalGeometry();
-        const closing=stack().pop(); if (closing?._detachDirty){ try{closing._detachDirty();}catch{} closing._detachDirty=null; }
-        if (closing?._detachGlobal){ try{closing._detachGlobal();}catch{} closing._detachGlobal=null; } top._wired=false;
-        if (stack().length>0) { const p=currentFrame(); renderTop(); try{ p.onReturn && p.onReturn(); } catch{} }
-        else { discardAllModalsAndState(); if (window.__pendingFocus) { try{ renderAll(); } catch(e){ console.error('refresh after modal close failed',e); } } }
-        return;
-      }
-
-      const isChildNow = (stack().length > 1);
-      if (!isChildNow && !top.noParentGate && top.mode==='edit') {
-        if (!top.isDirty) {
-          if (top._snapshot && window.modalCtx) {
-            window.modalCtx.data                = deep(top._snapshot.data);
-            window.modalCtx.formState           = deep(top._snapshot.formState);
-            window.modalCtx.rolesState          = deep(top._snapshot.rolesState);
-            window.modalCtx.ratesState          = deep(top._snapshot.ratesState);
-            window.modalCtx.hospitalsState      = deep(top._snapshot.hospitalsState);
-            window.modalCtx.clientSettingsState = deep(top._snapshot.clientSettingsState);
-            if (top._snapshot.overrides) window.modalCtx.overrides = deep(top._snapshot.overrides);
-            try { renderCandidateRatesTable?.(); } catch {}
-          }
-          top.isDirty=false; setFrameMode(top,'view'); top._snapshot=null;
-          try{ window.__toast?.('No changes'); }catch{}; return;
-        } else {
-          let ok=false; try{ top._confirmingDiscard=true; btnClose.disabled=true; ok=window.confirm('Discard changes and return to view?'); } finally { top._confirmingDiscard=false; btnClose.disabled=false; }
-          if (!ok) return;
-          if (top._snapshot && window.modalCtx) {
-            window.modalCtx.data                = deep(top._snapshot.data);
-            window.modalCtx.formState           = deep(top._snapshot.formState);
-            window.modalCtx.rolesState          = deep(top._snapshot.rolesState);
-            window.modalCtx.ratesState          = deep(top._snapshot.ratesState);
-            window.modalCtx.hospitalsState      = deep(top._snapshot.hospitalsState);
-            window.modalCtx.clientSettingsState = deep(top._snapshot.clientSettingsState);
-            if (top._snapshot.overrides) window.modalCtx.overrides = deep(top._snapshot.overrides);
-            try { renderCandidateRatesTable?.(); } catch {}
-          }
-          top.isDirty=false; top._snapshot=null; setFrameMode(top,'view'); return;
-        }
-      }
-
-      if (top._closing) return;
-      top._closing=true;
-      document.onmousemove=null; document.onmouseup=null; byId('modal')?.classList.remove('dragging');
-
-      if (!isChildNow && !top.noParentGate && top.mode==='create' && top.isDirty) {
-        let ok=false; try{ top._confirmingDiscard=true; btnClose.disabled=true; ok=window.confirm('You have unsaved changes. Discard them and close?'); } finally { top._confirmingDiscard=false; btnClose.disabled=false; }
-        if (!ok) { top._closing=false; return; }
-      }
-
-      sanitizeModalGeometry();
-      const closing=stack().pop(); if (closing?._detachDirty){ try{closing._detachDirty();}catch{} closing._detachDirty=null; }
-      if (closing?._detachGlobal){ try{closing._detachGlobal();}catch{} closing._detachGlobal=null; } top._wired=false;
-      if (stack().length>0) { const p=currentFrame(); renderTop(); try{ p.onReturn && p.onReturn(); }catch{} }
-      else { discardAllModalsAndState(); if (window.__pendingFocus) { try{ renderAll(); } catch(e) { console.error('refresh after modal close failed', e); } } }
-    };
-    byId('btnCloseModal').onclick = handleSecondary;
-
-    const hasStagedClientDeletes = ()=> {
-      try {
-        const anyFlag = Array.isArray(window.modalCtx?.ratesState) && window.modalCtx.ratesState.some(w => w && w.__delete === true);
-        const anySet  = (window.modalCtx?.ratesStagedDeletes instanceof Set) && window.modalCtx.ratesStagedDeletes.size > 0;
-        const ovDel   = (window.modalCtx?.overrides?.stagedDeletes instanceof Set) && window.modalCtx.overrides.stagedDeletes.size > 0;
-        return !!(anyFlag || anySet || ovDel);
-      } catch { return false; }
-    };
-
-    async function saveForFrame(fr) {
-      if (!fr || fr._saving) return;
-      const onlyDel   = hasStagedClientDeletes();
-      const allowApply= (fr.kind==='candidate-override' || fr.kind==='client-rate') && fr._applyDesired===true;
-
-      L('saveForFrame ENTER (global)', { kind: fr.kind, mode: fr.mode, noParentGate: fr.noParentGate, isDirty: fr.isDirty, onlyDel, allowApply });
-
-      if (fr.kind!=='advanced-search' && !fr.noParentGate && fr.mode!=='view' && !fr.isDirty && !onlyDel && !allowApply) {
-        L('saveForFrame GUARD (global): no-op (no changes and apply not allowed)');
-        const isChildNow=(window.__modalStack?.length>1);
-        if (isChildNow) {
-          sanitizeModalGeometry(); window.__modalStack.pop();
-          if (window.__modalStack.length>0) { const p=window.__modalStack[window.__modalStack.length-1]; renderTop(); try{ p.onReturn && p.onReturn(); }catch{} }
-          else { /* keep open */ }
-        } else {
-          fr.isDirty=false; fr._snapshot=null; setFrameMode(fr,'view'); fr._updateButtons&&fr._updateButtons();
-        }
-        try{ window.__toast?.('No changes'); }catch{}; return;
-      }
-
-      fr.persistCurrentTabState();
-      const isChildNow=(window.__modalStack?.length>1);
-      if (isChildNow && !fr.noParentGate && fr.kind!=='advanced-search') {
-        const p=window.__modalStack[window.__modalStack.length-2];
-        if (!p || !(p.mode==='edit'||p.mode==='create')) { L('saveForFrame GUARD (global): parent not editable'); return; }
-      }
-      fr._saving=true; fr._updateButtons&&fr._updateButtons();
-
-      let ok=false, saved=null;
-      if (typeof fr.onSave==='function') {
-        try { const res=await fr.onSave(); ok = (res===true) || (res && res.ok===true); if (res&&res.saved) saved=res.saved; }
-        catch (e) { L('saveForFrame onSave threw (global)', e); ok=false; }
-      }
-      fr._saving=false; if (!ok) { L('saveForFrame RESULT not ok (global)'); fr._updateButtons&&fr._updateButtons(); return; }
-
-      if (fr.kind === 'advanced-search') {
-        sanitizeModalGeometry();
-        const closing = window.__modalStack.pop();
-        if (closing?._detachDirty){ try{closing._detachDirty();}catch{} closing._detachDirty=null; }
-        if (closing?._detachGlobal){ try{closing._detachGlobal();}catch{} closing._detachGlobal=null; } fr._wired=false;
-
-        if (window.__modalStack.length>0) {
-          const p=window.__modalStack[window.__modalStack.length-1]; renderTop(); try{ p.onReturn && p.onReturn(); } catch{}
-        } else {
-        }
-        L('saveForFrame EXIT (global advanced-search closed)');
-        return;
-      }
-
-      if (isChildNow) {
-        try { window.dispatchEvent(new CustomEvent('modal-dirty')); } catch {}
-        sanitizeModalGeometry(); window.__modalStack.pop();
-        if (window.__modalStack.length>0) {
-          const p=window.__modalStack[window.__modalStack.length-1]; p.isDirty=true; p._updateButtons&&p._updateButtons(); renderTop(); try{ p.onReturn && p.onReturn(); }catch{}
-        } else {
-        }
-        L('saveForFrame EXIT (global child)');
-      } else {
-        try {
-          const savedContract = (saved && (saved.contract || saved)) || null;
-          const id = savedContract?.id || window.modalCtx?.data?.id || null;
-          if (id && savedContract) {
-            const idx = Array.isArray(currentRows) ? currentRows.findIndex(x => String(x.id) === String(id)) : -1;
-            if (idx >= 0) currentRows[idx] = savedContract;
-            (window.__lastSavedAtById ||= {})[String(id)] = Date.now();
-          }
-        } catch (e) { console.warn('[SAVE] list cache merge failed', e); }
-
-        if (saved && window.modalCtx) { window.modalCtx.data = { ...(window.modalCtx.data||{}), ...(saved.contract || saved) }; fr.hasId = !!window.modalCtx.data?.id; }
-        fr.isDirty=false; fr._snapshot=null; setFrameMode(fr,'view');
-        L('saveForFrame EXIT (global parent, kept open)');
-      }
-    }
-
-
-    const onSaveClick = async (ev)=>{
-      const btn=ev?.currentTarget || byId('btnSave');
-      const topNow=currentFrame(); const bound=btn?.dataset?.ownerToken;
-      if (LOG) console.log('[MODAL] click #btnSave (global)', {boundToken:bound, topToken:topNow?._token, topKind:topNow?.kind, topTitle:topNow?.title});
-      if(!topNow) return; if(bound!==topNow._token){ if(LOG) console.warn('[MODAL] token mismatch (global); using top frame'); }
-      await saveForFrame(topNow);
-    };
-
-    const bindSave = (btn,fr)=>{ if(!btn||!fr) return; btn.dataset.ownerToken = fr._token; btn.onclick = onSaveClick; if(LOG) console.log('[MODAL] bind #btnSave → (global)',{ownerToken:fr._token,kind:fr.kind||'(parent)',title:fr.title,mode:fr.mode}); };
-    bindSave(btnSave, top);
-
-    const onDirtyEvt = ()=>{
-      const isChildNow=(stack().length>1);
-      if(isChildNow){ const p=parentFrame(); if(p && (p.mode==='edit'||p.mode==='create')){ p.isDirty=true; p._updateButtons&&p._updateButtons(); } }
-      else if(top.mode==='edit'||top.mode==='create'){ top.isDirty=true; top._updateButtons&&top._updateButtons(); }
-      try{ const t=currentFrame(); if(t && t.entity==='candidates' && t.currentTabKey==='rates'){ renderCandidateRatesTable?.(); } }catch{}
-    };
-    const onApplyEvt = ev=>{
-      const isChildNow=(stack().length>1); if(!isChildNow) return;
-      const t=currentFrame(); if(!(t && (t.kind==='client-rate'||t.kind==='candidate-override'))) return;
-      const enabled=!!(ev && ev.detail && ev.detail.enabled); t._applyDesired=enabled; t._updateButtons&&t._updateButtons(); bindSave(byId('btnSave'), t);
-      if(LOG) console.log('[MODAL] onApplyEvt (global) → _applyDesired =', enabled,'rebound save to top frame');
-    };
-    const onModeChanged = ev=>{
-      const isChildNow=(stack().length>1); if(!isChildNow) return;
-      const parentIdx=stack().length-2, changed=ev?.detail?.frameIndex ?? -1;
-      if(changed===parentIdx){ if(LOG) console.log('[MODAL] parent mode changed (global) → child _updateButtons()'); const t=currentFrame(); t._updateButtons&&t._updateButtons(); bindSave(byId('btnSave'), t); }
-    };
-    const onMarginsEvt = ()=>{ try { const t=currentFrame(); if (t && (t.mode==='edit'||t.mode==='create')) t._updateButtons(); } catch {} };
-
-    if (!top._wired) {
-      window.addEventListener('modal-dirty', onDirtyEvt);
-      window.addEventListener('modal-apply-enabled', onApplyEvt);
-      window.addEventListener('modal-frame-mode-changed', onModeChanged);
-      window.addEventListener('contract-margins-updated', onMarginsEvt);
-      const onEsc=e=>{ if(e.key==='Escape'){ if(top._confirmingDiscard||top._closing) return; e.preventDefault(); byId('btnCloseModal').click(); } };
-      window.addEventListener('keydown', onEsc);
-      const onOverlayClick=e=>{ if(top._confirmingDiscard||top._closing) return; if(e.target===byId('modalBack')) byId('btnCloseModal').click(); };
-      byId('modalBack').addEventListener('click', onOverlayClick, true);
-      top._detachGlobal = ()=>{ try{window.removeEventListener('modal-dirty',onDirtyEvt);}catch{} try{window.removeEventListener('modal-apply-enabled',onApplyEvt);}catch{} try{window.removeEventListener('modal-frame-mode-changed',onModeChanged);}catch{} try{window.removeEventListener('contract-margins-updated',onMarginsEvt);}catch{} try{window.removeEventListener('keydown',onEsc);}catch{} try{byId('modalBack').removeEventListener('click', onOverlayClick, true);}catch{}; };
-      top._wired = true;
-      L('renderTop (global): listeners wired');
-    }
-
-    const parentEditable = parent && (parent.mode==='edit' || parent.mode==='create');
-    const isChildNow = (stack().length > 1);
-    if (isChildNow && !top.noParentGate) setFormReadOnly(byId('modalBody'), !parentEditable);
-    else                                 setFrameMode(top, top.mode);
-
-    top._updateButtons && top._updateButtons();
-    bindSave(btnSave, top);
-
+  top._updateButtons = ()=>{
     try {
-      const pc = document.getElementById('btnPickCandidate');
-      const pl = document.getElementById('btnPickClient');
-      L('renderTop final snapshot (global)', {
-        entity: top.entity, mode: top.mode, currentTabKey: top.currentTabKey,
-        pickButtons: {
-          btnPickCandidate: { exists: !!pc, disabled: !!(pc && pc.disabled) },
-          btnPickClient:    { exists: !!pl, disabled: !!(pl && pl.disabled) }
-        }
-      });
+      const h = document.getElementById('modalHint');
+      if (h) {
+        h.textContent = '';
+        h.removeAttribute('data-tone');
+        h.classList.remove('ok','warn','err');
+      }
     } catch {}
 
-    GE();
+    const parentEditable = top.noParentGate ? true : (parent ? (parent.mode==='edit' || parent.mode==='create') : true);
+    const relatedBtn = byId('btnRelated');
+
+    if (top.kind==='advanced-search') {
+      btnEdit.style.display='none'; btnSave.style.display=''; btnSave.disabled=!!top._saving; if (relatedBtn) relatedBtn.disabled=true;
+    } else if (isChild && !top.noParentGate) {
+      btnSave.style.display = parentEditable ? '' : 'none';
+      const wantApply = (top._applyDesired===true);
+      btnSave.disabled = (!parentEditable) || top._saving || !wantApply;
+      btnEdit.style.display='none'; if (relatedBtn) relatedBtn.disabled=true;
+      if (LOG) console.log('[MODAL] child _updateButtons()', { parentEditable, wantApply, disabled: btnSave.disabled });
+    } else {
+      btnEdit.style.display = (top.mode==='view' && top.hasId) ? '' : 'none';
+      if (relatedBtn) relatedBtn.disabled = !(top.mode==='view' && top.hasId);
+      if (top.mode==='view') {
+        btnSave.style.display = top.noParentGate ? '' : 'none';
+        btnSave.disabled = top._saving;
+      } else {
+        btnSave.style.display='';
+
+        let gateOK = true;
+        let elig   = null;
+        if (top.entity === 'contracts') {
+          try {
+            gateOK = (typeof computeContractSaveEligibility === 'function') ? !!computeContractSaveEligibility() : true;
+            elig   = (typeof window !== 'undefined') ? (window.__contractEligibility || null) : null;
+
+            if (elig && Array.isArray(elig.reasons)) {
+              const tsReason = elig.reasons.find(r => r && r.code === 'TS_BOUNDARY_VIOLATION');
+              if (tsReason) {
+                gateOK = false;
+                if (typeof showModalHint === 'function') showModalHint(tsReason.message || 'Dates exclude existing timesheets.', 'warn');
+              }
+            }
+
+            if (!gateOK && elig && elig.pendingTimeFormat && (!elig.reasons || elig.reasons.length === 0)) {
+              gateOK = true;
+            }
+
+            if (typeof showModalHint === 'function' && (top.mode==='edit' || top.mode==='create')) {
+              if (elig && Array.isArray(elig.reasons) && elig.reasons.length && !elig.ok) {
+                const hasTs = elig.reasons.some(r => r && r.code === 'TS_BOUNDARY_VIOLATION');
+                if (!hasTs) {
+                  const msg = elig.reasons.map(r => r && r.message).filter(Boolean).join(' • ');
+                  if (msg) showModalHint(msg, 'warn');
+                }
+              } else if (elig && elig.pendingTimeFormat && elig.tip) {
+                showModalHint(elig.tip, 'ok');
+              }
+            }
+          } catch { gateOK = true; }
+        }
+
+        btnSave.disabled = (top.entity === 'contracts')
+          ? (top._saving || !top.isDirty || !gateOK)
+          : (top._saving);
+      }
+    }
+    setCloseLabel();
+    L('_updateButtons snapshot (global)', {
+      kind: top.kind, isChild, parentEditable, mode: top.mode,
+      btnSave: { display: btnSave.style.display, disabled: btnSave.disabled },
+      btnEdit: { display: btnEdit.style.display }
+    });
+  };
+
+  top._updateButtons();
+
+  btnEdit.onclick = ()=>{
+    const isChildNow = (stack().length > 1);
+    if (isChildNow || top.noParentGate || top.kind==='advanced-search') return;
+    if (top.mode==='view') {
+      top._snapshot = {
+        data               : deep(window.modalCtx?.data||null),
+        formState          : deep(window.modalCtx?.formState||null),
+        rolesState         : deep(window.modalCtx?.rolesState||null),
+        ratesState         : deep(window.modalCtx?.ratesState||null),
+        hospitalsState     : deep(window.modalCtx?.hospitalsState||null),
+        clientSettingsState: deep(window.modalCtx?.clientSettingsState||null),
+        overrides          : deep(window.modalCtx?.overrides || { existing:[], stagedNew:[], stagedEdits:{}, stagedDeletes:[] })
+      };
+      top.isDirty=false; setFrameMode(top,'edit');
+      L('btnEdit (global) → switch to edit');
+    }
+  };
+
+  const handleSecondary = ()=>{
+    if (top._confirmingDiscard || top._closing) return;
+
+    if (top.kind==='advanced-search') {
+      top._closing=true;
+      document.onmousemove=null; document.onmouseup=null; byId('modal')?.classList.remove('dragging'); sanitizeModalGeometry();
+      const closing=stack().pop(); if (closing?._detachDirty){ try{closing._detachDirty();}catch{} closing._detachDirty=null; }
+      if (closing?._detachGlobal){ try{closing._detachGlobal();}catch{} closing._detachGlobal=null; } top._wired=false;
+      if (stack().length>0) { const p=currentFrame(); renderTop(); try{ p.onReturn && p.onReturn(); } catch{} }
+      else { discardAllModalsAndState(); if (window.__pendingFocus) { try{ renderAll(); } catch(e){ console.error('refresh after modal close failed',e); } } }
+      return;
+    }
+
+    const isChildNow = (stack().length > 1);
+    if (!isChildNow && !top.noParentGate && top.mode==='edit') {
+      if (!top.isDirty) {
+        if (top._snapshot && window.modalCtx) {
+          window.modalCtx.data                = deep(top._snapshot.data);
+          window.modalCtx.formState           = deep(top._snapshot.formState);
+          window.modalCtx.rolesState          = deep(top._snapshot.rolesState);
+          window.modalCtx.ratesState          = deep(top._snapshot.ratesState);
+          window.modalCtx.hospitalsState      = deep(top._snapshot.hospitalsState);
+          window.modalCtx.clientSettingsState = deep(top._snapshot.clientSettingsState);
+          if (top._snapshot.overrides) window.modalCtx.overrides = deep(top._snapshot.overrides);
+          try { renderCandidateRatesTable?.(); } catch {}
+        }
+        top.isDirty=false; setFrameMode(top,'view'); top._snapshot=null;
+        try{ window.__toast?.('No changes'); }catch{}; return;
+      } else {
+        let ok=false; try{ top._confirmingDiscard=true; btnClose.disabled=true; ok=window.confirm('Discard changes and return to view?'); } finally { top._confirmingDiscard=false; btnClose.disabled=false; }
+        if (!ok) return;
+        if (top._snapshot && window.modalCtx) {
+          window.modalCtx.data                = deep(top._snapshot.data);
+          window.modalCtx.formState           = deep(top._snapshot.formState);
+          window.modalCtx.rolesState          = deep(top._snapshot.rolesState);
+          window.modalCtx.ratesState          = deep(top._snapshot.ratesState);
+          window.modalCtx.hospitalsState      = deep(top._snapshot.hospitalsState);
+          window.modalCtx.clientSettingsState = deep(top._snapshot.clientSettingsState);
+          if (top._snapshot.overrides) window.modalCtx.overrides = deep(top._snapshot.overrides);
+          try { renderCandidateRatesTable?.(); } catch {}
+        }
+        top.isDirty=false; top._snapshot=null; setFrameMode(top,'view'); return;
+      }
+    }
+
+    if (top._closing) return;
+    top._closing=true;
+    document.onmousemove=null; document.onmouseup=null; byId('modal')?.classList.remove('dragging');
+
+    if (!isChildNow && !top.noParentGate && top.mode==='create' && top.isDirty) {
+      let ok=false; try{ top._confirmingDiscard=true; btnClose.disabled=true; ok=window.confirm('You have unsaved changes. Discard them and close?'); } finally { top._confirmingDiscard=false; btnClose.disabled=false; }
+      if (!ok) { top._closing=false; return; }
+    }
+
+    sanitizeModalGeometry();
+    const closing=stack().pop(); if (closing?._detachDirty){ try{closing._detachDirty();}catch{} closing._detachDirty=null; }
+    if (closing?._detachGlobal){ try{closing._detachGlobal();}catch{} closing._detachGlobal=null; } top._wired=false;
+    if (stack().length>0) { const p=currentFrame(); renderTop(); try{ p.onReturn && p.onReturn(); }catch{} }
+    else { discardAllModalsAndState(); if (window.__pendingFocus) { try{ renderAll(); } catch(e) { console.error('refresh after modal close failed', e); } } }
+  };
+  byId('btnCloseModal').onclick = handleSecondary;
+
+  const hasStagedClientDeletes = ()=> {
+    try {
+      const anyFlag = Array.isArray(window.modalCtx?.ratesState) && window.modalCtx.ratesState.some(w => w && w.__delete === true);
+      const anySet  = (window.modalCtx?.ratesStagedDeletes instanceof Set) && window.modalCtx.ratesStagedDeletes.size > 0;
+      const ovDel   = (window.modalCtx?.overrides?.stagedDeletes instanceof Set) && window.modalCtx.overrides.stagedDeletes.size > 0;
+      return !!(anyFlag || anySet || ovDel);
+    } catch { return false; }
+  };
+
+  async function saveForFrame(fr) {
+    if (!fr || fr._saving) return;
+    const onlyDel   = hasStagedClientDeletes();
+    const allowApply= (fr.kind==='candidate-override' || fr.kind==='client-rate') && fr._applyDesired===true;
+
+    L('saveForFrame ENTER (global)', { kind: fr.kind, mode: fr.mode, noParentGate: fr.noParentGate, isDirty: fr.isDirty, onlyDel, allowApply });
+
+    if (fr.kind!=='advanced-search' && !fr.noParentGate && fr.mode!=='view' && !fr.isDirty && !onlyDel && !allowApply) {
+      L('saveForFrame GUARD (global): no-op (no changes and apply not allowed)');
+      const isChildNow=(window.__modalStack?.length>1);
+      if (isChildNow) {
+        sanitizeModalGeometry(); window.__modalStack.pop();
+        if (window.__modalStack.length>0) { const p=window.__modalStack[window.__modalStack.length-1]; renderTop(); try{ p.onReturn && p.onReturn(); }catch{} }
+        else { /* keep open */ }
+      } else {
+        fr.isDirty=false; fr._snapshot=null; setFrameMode(fr,'view'); fr._updateButtons&&fr._updateButtons();
+      }
+      try{ window.__toast?.('No changes'); }catch{}; return;
+    }
+
+    fr.persistCurrentTabState();
+    const isChildNow=(window.__modalStack?.length>1);
+    if (isChildNow && !fr.noParentGate && fr.kind!=='advanced-search') {
+      const p=window.__modalStack[window.__modalStack.length-2];
+      if (!p || !(p.mode==='edit'||p.mode==='create')) { L('saveForFrame GUARD (global): parent not editable'); return; }
+    }
+    fr._saving=true; fr._updateButtons&&fr._updateButtons();
+
+    let ok=false, saved=null;
+    if (typeof fr.onSave==='function') {
+      try { const res=await fr.onSave(); ok = (res===true) || (res && res.ok===true); if (res&&res.saved) saved=res.saved; }
+      catch (e) { L('saveForFrame onSave threw (global)', e); ok=false; }
+    }
+    fr._saving=false; if (!ok) { L('saveForFrame RESULT not ok (global)'); fr._updateButtons&&fr._updateButtons(); return; }
+
+    if (fr.kind === 'advanced-search') {
+      sanitizeModalGeometry();
+      const closing = window.__modalStack.pop();
+      if (closing?._detachDirty){ try{closing._detachDirty();}catch{} closing._detachDirty=null; }
+      if (closing?._detachGlobal){ try{closing._detachGlobal();}catch{} closing._detachGlobal=null; } fr._wired=false;
+
+      if (window.__modalStack.length>0) {
+        const p=window.__modalStack[window.__modalStack.length-1]; renderTop(); try{ p.onReturn && p.onReturn(); } catch{}
+      } else {
+      }
+      L('saveForFrame EXIT (global advanced-search closed)');
+      return;
+    }
+
+    if (isChildNow) {
+      try { window.dispatchEvent(new CustomEvent('modal-dirty')); } catch {}
+      sanitizeModalGeometry(); window.__modalStack.pop();
+      if (window.__modalStack.length>0) {
+        const p=window.__modalStack[window.__modalStack.length-1]; p.isDirty=true; p._updateButtons&&p._updateButtons(); renderTop(); try{ p.onReturn && p.onReturn(); }catch{}
+      } else {
+      }
+      L('saveForFrame EXIT (global child)');
+    } else {
+      try {
+        const savedContract = (saved && (saved.contract || saved)) || null;
+        const id = savedContract?.id || window.modalCtx?.data?.id || null;
+        if (id && savedContract) {
+          const idx = Array.isArray(currentRows) ? currentRows.findIndex(x => String(x.id) === String(id)) : -1;
+          if (idx >= 0) currentRows[idx] = savedContract;
+          (window.__lastSavedAtById ||= {})[String(id)] = Date.now();
+        }
+      } catch (e) { console.warn('[SAVE] list cache merge failed', e); }
+
+      if (saved && window.modalCtx) { window.modalCtx.data = { ...(window.modalCtx.data||{}), ...(saved.contract || saved) }; fr.hasId = !!window.modalCtx.data?.id; }
+      fr.isDirty=false; fr._snapshot=null; setFrameMode(fr,'view');
+      L('saveForFrame EXIT (global parent, kept open)');
+    }
   }
+
+  const onSaveClick = async (ev)=>{
+    const btn=ev?.currentTarget || byId('btnSave');
+    const topNow=currentFrame(); const bound=btn?.dataset?.ownerToken;
+    if (LOG) console.log('[MODAL] click #btnSave (global)', {boundToken:bound, topToken:topNow?._token, topKind:topNow?.kind, topTitle:topNow?.title});
+    if(!topNow) return; if(bound!==topNow._token){ if(LOG) console.warn('[MODAL] token mismatch (global); using top frame'); }
+    await saveForFrame(topNow);
+  };
+
+  const bindSave = (btn,fr)=>{ if(!btn||!fr) return; btn.dataset.ownerToken = fr._token; btn.onclick = onSaveClick; if(LOG) console.log('[MODAL] bind #btnSave → (global)',{ownerToken:fr._token,kind:fr.kind||'(parent)',title:fr.title,mode:fr.mode}); };
+  bindSave(btnSave, top);
+
+  const onDirtyEvt = ()=>{
+    const isChildNow=(stack().length>1);
+    if(isChildNow){ const p=parentFrame(); if(p && (p.mode==='edit'||p.mode==='create')){ p.isDirty=true; p._updateButtons&&p._updateButtons(); } }
+    else if(top.mode==='edit'||top.mode==='create'){ top.isDirty=true; top._updateButtons&&top._updateButtons(); }
+    try{ const t=currentFrame(); if(t && t.entity==='candidates' && t.currentTabKey==='rates'){ renderCandidateRatesTable?.(); } }catch{}
+  };
+  const onApplyEvt = ev=>{
+    const isChildNow=(stack().length>1); if(!isChildNow) return;
+    const t=currentFrame(); if(!(t && (t.kind==='client-rate'||t.kind==='candidate-override'))) return;
+    const enabled=!!(ev && ev.detail && ev.detail.enabled); t._applyDesired=enabled; t._updateButtons&&t._updateButtons(); bindSave(byId('btnSave'), t);
+    if(LOG) console.log('[MODAL] onApplyEvt (global) → _applyDesired =', enabled,'rebound save to top frame');
+  };
+  const onModeChanged = ev=>{
+    const isChildNow=(stack().length>1); if(!isChildNow) return;
+    const parentIdx=stack().length-2, changed=ev?.detail?.frameIndex ?? -1;
+    if(changed===parentIdx){ if(LOG) console.log('[MODAL] parent mode changed (global) → child _updateButtons()'); const t=currentFrame(); t._updateButtons&&t._updateButtons(); bindSave(byId('btnSave'), t); }
+  };
+  const onMarginsEvt = ()=>{ try { const t=currentFrame(); if (t && (t.mode==='edit'||t.mode==='create')) t._updateButtons(); } catch {} };
+
+  if (!top._wired) {
+    window.addEventListener('modal-dirty', onDirtyEvt);
+    window.addEventListener('modal-apply-enabled', onApplyEvt);
+    window.addEventListener('modal-frame-mode-changed', onModeChanged);
+    window.addEventListener('contract-margins-updated', onMarginsEvt);
+    const onEsc=e=>{ if(e.key==='Escape'){ if(top._confirmingDiscard||top._closing) return; e.preventDefault(); byId('btnCloseModal').click(); } };
+    window.addEventListener('keydown', onEsc);
+    const onOverlayClick=e=>{ if(top._confirmingDiscard||top._closing) return; if(e.target===byId('modalBack')) byId('btnCloseModal').click(); };
+    byId('modalBack').addEventListener('click', onOverlayClick, true);
+    top._detachGlobal = ()=>{ try{window.removeEventListener('modal-dirty',onDirtyEvt);}catch{} try{window.removeEventListener('modal-apply-enabled',onApplyEvt);}catch{} try{window.removeEventListener('modal-frame-mode-changed',onModeChanged);}catch{} try{window.removeEventListener('contract-margins-updated',onMarginsEvt);}catch{} try{window.removeEventListener('keydown',onEsc);}catch{} try{byId('modalBack').removeEventListener('click', onOverlayClick, true);}catch{}; };
+    top._wired = true;
+    L('renderTop (global): listeners wired');
+  }
+
+  const parentEditable = parent && (parent.mode==='edit' || parent.mode==='create');
+  const isChildNow = (stack().length > 1);
+  if (isChildNow && !top.noParentGate) setFormReadOnly(byId('modalBody'), !parentEditable);
+  else                                 setFrameMode(top, top.mode);
+
+  top._updateButtons && top._updateButtons();
+  bindSave(btnSave, top);
+
+  try {
+    const pc = document.getElementById('btnPickCandidate');
+    const pl = document.getElementById('btnPickClient');
+    L('renderTop final snapshot (global)', {
+      entity: top.entity, mode: top.mode, currentTabKey: top.currentTabKey,
+      pickButtons: {
+        btnPickCandidate: { exists: !!pc, disabled: !!(pc && pc.disabled) },
+        btnPickClient:    { exists: !!pl, disabled: !!(pl && pl.disabled) }
+      }
+    });
+  } catch {}
+
+  GE();
+}
+
 
   byId('modalBack').style.display='flex';
   window.__getModalFrame = currentFrame;
