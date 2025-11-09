@@ -8885,42 +8885,95 @@ function buildPlanRangesFromStage(contractId) {
   const L = (...a)=> { if (LOG_CAL) console.log('[CAL][buildRanges]', ...a); };
 
   const st = getContractCalendarStageState(contractId);
-  const adds = [...st.add];
-  const rems = [...st.remove];
+  const adds = [...st.add].sort();   // ascending YYYY-MM-DD
+  const rems = [...st.remove].sort();
 
-  // Build add ranges (explicit per-date objects to avoid weekday-mask semantics)
+  // ---------- helpers ----------
+  const boundsOf = (arr) => computeSelectionBounds(arr); // { from, to }
+
+  const isConsecutiveDailyRun = (arr) => {
+    if (arr.length < 2) return false;
+    const ONE = 24*60*60*1000;
+    for (let i = 1; i < arr.length; i++) {
+      const prev = new Date(arr[i-1] + 'T00:00:00Z').getTime();
+      const curr = new Date(arr[i]   + 'T00:00:00Z').getTime();
+      if ((curr - prev) !== ONE) return false;
+    }
+    return true;
+  };
+
+  const stdSched = (window.modalCtx?.data?.std_schedule_json && typeof window.modalCtx.data.std_schedule_json === 'object')
+    ? window.modalCtx.data.std_schedule_json
+    : null;
+
+  // Build the set of active weekdays (only those with valid start+end)
+  const activeDows = (() => {
+    const s = new Set();
+    if (!stdSched) return s;
+    const valid = (d) => d && typeof d.start === 'string' && d.start && typeof d.end === 'string' && d.end;
+    if (valid(stdSched.sun)) s.add(0);
+    if (valid(stdSched.mon)) s.add(1);
+    if (valid(stdSched.tue)) s.add(2);
+    if (valid(stdSched.wed)) s.add(3);
+    if (valid(stdSched.thu)) s.add(4);
+    if (valid(stdSched.fri)) s.add(5);
+    if (valid(stdSched.sat)) s.add(6);
+    return s;
+  })();
+
+  // ---------- ADD ranges ----------
   const addRanges = [];
   if (adds.length) {
-    const bounds = computeSelectionBounds(adds);
-    const explicit = adds.sort().map(d => ({ date: d }));
+    const b = boundsOf(adds);
+
+    // Rule:
+    //  - If the selection is a long, consecutive span, keep ONLY dates whose weekday is templated.
+    //  - Otherwise (sparse or short), keep ALL explicit dates (these can become 00:00/00:00/0 later).
+    const LONG_CONSECUTIVE_THRESHOLD = 10;
+    const consecutive = isConsecutiveDailyRun(adds);
+    let explicitDays;
+
+    if (consecutive && adds.length >= LONG_CONSECUTIVE_THRESHOLD) {
+      if (activeDows.size > 0) {
+        explicitDays = adds
+          .filter(d => activeDows.has(new Date(d + 'T00:00:00Z').getUTCDay()))
+          .map(d => ({ date: d }));
+      } else {
+        // No active weekdays in template → nothing to add for a bulk span
+        explicitDays = [];
+      }
+    } else {
+      // Sparse selection → include everything explicitly (even if not templated)
+      explicitDays = adds.map(d => ({ date: d }));
+    }
+
     addRanges.push({
-      from: bounds.from,
-      to:   bounds.to,
-      days: explicit,
+      from: b.from,
+      to:   b.to,
+      days: explicitDays,
       merge: 'append',
       when_timesheet_exists: 'create_additional'
     });
-    L('addRanges', { bounds, count: explicit.length, sample: explicit.slice(0, 5) });
+    L('addRanges', { bounds: b, count: explicitDays.length, sample: explicitDays.slice(0, 5) });
   } else {
     L('addRanges: none');
   }
 
-  // Build remove ranges
+  // ---------- REMOVE ranges ----------
   const removeRanges = [];
   if (rems.length) {
-    const bounds = computeSelectionBounds(rems);
-    const explicitRem = rems.sort(); // strings okay for remove; server treats as explicit dates
+    const b = boundsOf(rems);
     removeRanges.push({
-      from: bounds.from,
-      to:   bounds.to,
-      days: explicitRem
+      from: b.from,
+      to:   b.to,
+      days: rems
     });
-    L('removeRanges', { bounds, count: explicitRem.length, sample: explicitRem.slice(0, 5) });
+    L('removeRanges', { bounds: b, count: rems.length, sample: rems.slice(0, 5) });
   } else {
     L('removeRanges: none');
   }
 
-  // Additional: baseWeekId → [dates]
+  // ---------- ADDITIONALS (per-baseWeekId dates) ----------
   const additionals = Object.entries(st.additional).map(([baseWeekId, set]) => ({
     baseWeekId, dates: [...set].sort()
   }));
@@ -9189,9 +9242,15 @@ function renderContractCalendarTab(ctx) {
 
   const weekEnding = (c.week_ending_weekday_snapshot ?? window.modalCtx?.formState?.main?.week_ending_weekday_snapshot ?? 0);
 
-  const actionsHtml = (c.id ? `<div class="actions" style="margin-top:8px;display:flex;gap:8px">
-    <button id="btnCloneExtend">Clone & Extend…</button>
-  </div>` : ``);
+  // Gate Clone & Extend visibility: VIEW mode only
+  const fr = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
+  const inViewMode = !!(fr && fr.mode === 'view');
+
+  const actionsHtml = (c.id && inViewMode
+    ? `<div class="actions" style="margin-top:8px;display:flex;gap:8px">
+         <button id="btnCloneExtend">Clone & Extend…</button>
+       </div>`
+    : ``);
 
   if (!candId) {
     return `
@@ -9206,9 +9265,19 @@ function renderContractCalendarTab(ctx) {
       const y = (new Date()).getUTCFullYear();
       const win = computeYearWindow(y);
       const el = byId(holderId); if (!el) return;
-      el.innerHTML = `<div class="tabc" id="__contractCal"></div>${actionsHtml}`;
+
+      // Fixed layout: only the calendar area scrolls, not the modal shell
+      el.innerHTML = `
+        <div class="tabc" style="display:flex;flex-direction:column;gap:8px;height:calc(72vh);max-height:calc(72vh)">
+          <div id="__calScroll" style="flex:1;min-height:0;overflow:auto;border:1px solid var(--line,#e5e5e5);border-radius:8px;padding:4px;">
+            <div id="__contractCal"></div>
+          </div>
+          ${actionsHtml}
+        </div>`;
+
       await fetchAndRenderCandidateCalendarForContract(currentKey, candId, { from: win.from, to: win.to, view:'year', weekEnding });
-      if (c.id) {
+
+      if (c.id && inViewMode) {
         const btnCE = el.querySelector('#btnCloneExtend');
         if (btnCE && !btnCE.__wired) {
           btnCE.__wired = true;
@@ -9220,8 +9289,14 @@ function renderContractCalendarTab(ctx) {
     }
   }, 0);
 
-  return `<div id="${holderId}" class="tabc"><div class="hint">Loading calendar…</div>${c.id ? `<div class="actions" style="margin-top:8px;display:flex;gap:8px"><button id="btnCloneExtend" disabled>Clone & Extend…</button></div>` : ``}</div>`;
+  // Initial skeleton with scroll container + (if applicable) a disabled button placeholder
+  return `
+    <div id="${holderId}" class="tabc">
+      <div class="hint">Loading calendar…</div>
+      ${c.id && inViewMode ? `<div class="actions" style="margin-top:8px;display:flex;gap:8px"><button id="btnCloneExtend" disabled>Clone & Extend…</button></div>` : ``}
+    </div>`;
 }
+
 
 // ───────────────────────────────────────────────────────────────
 // 5) Optional thin wrapper if you prefer not to call the API
