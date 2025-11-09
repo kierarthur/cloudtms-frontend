@@ -9363,6 +9363,25 @@ async function fetchAndRenderCandidateCalendarForContract(currentKey, candidateI
 
   const holder = byId('contractCalendarHolder'); if (!holder) return;
 
+  // Current contract context
+  const contractId   = (window.modalCtx?.data?.id && String(currentKey) === String(window.modalCtx.data.id)) ? window.modalCtx.data.id : null;
+  const currentStart = window.modalCtx?.data?.start_date || null;
+  const currentEnd   = window.modalCtx?.data?.end_date   || null;
+
+  // Ensure the view window actually covers the contract window (important after clone/extend)
+  try {
+    if (contractId && currentStart && currentEnd) {
+      let from = state.win.from;
+      let to   = state.win.to;
+      if (currentStart < from) from = currentStart;
+      if (currentEnd   > to)   to   = currentEnd;
+      if (from !== state.win.from || to !== state.win.to) {
+        state.win = { from, to };
+        if (LOG_CAL) L('[CAL] expanded window to include contract range', state.win);
+      }
+    }
+  } catch (e) { /* non-blocking */ }
+
   // Fetch candidate-wide day items
   let dayItems = [];
   try {
@@ -9377,14 +9396,31 @@ async function fetchAndRenderCandidateCalendarForContract(currentKey, candidateI
     dayItems = [];
   }
 
+  // Start with candidate-day index
   const itemsByDate = buildDateIndex(dayItems);
 
-  // Contract context for TS lock checks + current window
-  let weekIndex = null;
-  const contractId = (window.modalCtx?.data?.id && String(currentKey) === String(window.modalCtx.data.id)) ? window.modalCtx.data.id : null;
-  const currentStart = window.modalCtx?.data?.start_date || null;
-  const currentEnd   = window.modalCtx?.data?.end_date   || null;
+  // Merge contract-day items (planned days from contract_weeks) so they actually paint
+  if (contractId && typeof getContractCalendar === 'function') {
+    try {
+      const cday = await getContractCalendar(contractId, { from: state.win.from, to: state.win.to, granularity:'day' });
+      const cItems = Array.isArray(cday?.items) ? cday.items : [];
+      for (const it of cItems) {
+        const d = it?.date;
+        if (!d) continue;
+        const arr = itemsByDate.get(d) || [];
+        // Tag with contract_id (useful for ownership checks in painters)
+        if (it && !it.contract_id) it.contract_id = contractId;
+        arr.push(it);
+        itemsByDate.set(d, arr);
+      }
+      if (LOG_CAL) L('[CAL] merged contract-day items', { count: cItems.length });
+    } catch (e) {
+      L('getContractCalendar(day) failed; proceeding with candidate-only', e);
+    }
+  }
 
+  // Contract week index for TS locks (used by context menu logic)
+  let weekIndex = null;
   if (contractId && typeof getContractCalendar === 'function' && typeof buildWeekIndex === 'function') {
     try {
       const weeks = (await getContractCalendar(contractId, { from: state.win.from, to: state.win.to, granularity:'week' })).items || [];
@@ -9533,6 +9569,7 @@ async function fetchAndRenderCandidateCalendarForContract(currentKey, candidateI
 
   const legend = document.createElement('div'); legend.id = 'contractCalLegend'; holder.appendChild(legend); renderCalendarLegend(legend);
 }
+
 
 function computeContractSaveEligibility() {
   try {
