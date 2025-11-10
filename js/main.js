@@ -8858,6 +8858,28 @@ window.__calStage = window.__calStage || {};     // staged changes per contract_
 function ymd(d) { return (typeof d === 'string') ? d.slice(0,10) : (new Date(d)).toISOString().slice(0,10); }
 function ymdToDate(ymdStr) { return new Date(ymdStr + 'T00:00:00Z'); }
 function dateToYmd(dt) { return dt.toISOString().slice(0,10); }
+// define once, both as window prop and local alias
+// 1) Ensure a single global + local alias for toYmd
+window.toYmd = window.toYmd || (
+  (typeof dateToYmd === 'function')
+    ? dateToYmd
+    : (d) => {
+        const y = d.getUTCFullYear();
+        const m = String(d.getUTCMonth() + 1).padStart(2, '0');
+        const day = String(d.getUTCDate()).padStart(2, '0');
+        return `${y}-${m}-${day}`;
+      }
+);
+var toYmd = window.toYmd; // avoids redeclare on re-exec
+
+// 2) Define addDays (and expose globally)
+window.addDays = window.addDays || function(ymdStr, delta){
+  const d = ymdToDate(ymdStr);
+  d.setUTCDate(d.getUTCDate() + Number(delta || 0));
+  return toYmd(d);
+};
+var addDays = window.addDays; // optional local alias
+
 function enumerateDates(fromYmd, toYmd) {
   const out = []; let d = ymdToDate(fromYmd), end = ymdToDate(toYmd);
   while (d <= end) { out.push(dateToYmd(d)); d.setUTCDate(d.getUTCDate() + 1); }
