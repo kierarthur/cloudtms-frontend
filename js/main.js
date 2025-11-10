@@ -1535,7 +1535,45 @@ function openContract(row) {
           }
         } catch {}
 
-        if (!isCreate && hasManualStage) data.skip_generate_weeks = true;
+           if (!isCreate && hasManualStage) data.skip_generate_weeks = true;
+
+        // --- detect calendar stage shape BEFORE any persistence ---
+        let stageShape = { hasAny:false, hasRemoveAll:false, hasAdds:false, hasAdditionals:false };
+        try {
+          const stageKey = data.id || window.modalCtx.openToken || null;
+          if (stageKey && typeof getContractCalendarStageState === 'function') {
+            const st = getContractCalendarStageState(stageKey);
+            stageShape.hasAny         = !!st && (!!st.removeAll || st.add.size || st.remove.size || Object.keys(st.additional||{}).length);
+            stageShape.hasRemoveAll   = !!st?.removeAll;
+            stageShape.hasAdds        = !!(st && st.add && st.add.size);
+            stageShape.hasAdditionals = !!(st && st.additional && Object.keys(st.additional).length);
+          }
+        } catch {}
+
+        // --- if REMOVE-ALL is staged and we are editing, commit calendar first (bulk) then normalise window ---
+        if (!isCreate && data.id && stageShape.hasRemoveAll && stageShape.hasAny && !stageShape.hasAdds && !stageShape.hasAdditionals) {
+          if (LOGC) console.log('[CONTRACTS] calendar (remove-all first) → commitContractCalendarStageIfPending');
+          const preCalRes = await commitContractCalendarStageIfPending(data.id);
+          if (!preCalRes.ok) {
+            const msg = `Calendar save failed: ${preCalRes.message || 'unknown error'}. Contract details were not saved.`;
+            if (LOGC) console.warn('[CONTRACTS] calendar commit failed (pre-upsert)', preCalRes);
+            if (typeof showModalHint === 'function') showModalHint(msg, 'warn'); else alert(msg);
+            window.modalCtx._saveInFlight = false;
+            console.groupEnd?.();
+            return false;
+          }
+          if (typeof normalizeContractWindowToShifts === 'function') {
+            try {
+              const norm = await normalizeContractWindowToShifts(data.id);
+              if (norm && norm.ok) {
+                data.start_date = norm.start_date || data.start_date || null;
+                data.end_date   = norm.end_date   || data.end_date   || null;
+              }
+            } catch (e) {
+              if (LOGC) console.warn('[CONTRACTS] normalize window to shifts failed (pre-upsert, non-fatal)', e);
+            }
+          }
+        }
 
         if (LOGC) console.log('[CONTRACTS] upsert → upsertContract');
         const saved = await upsertContract(data, data.id || undefined);
@@ -1569,10 +1607,15 @@ if (contractId) {
         } catch {}
 
         if (contractId) {
-          let hasStageNow = false;
+          let hasStageNow = false, hasRemoveAllOnly = false;
           try {
-            const stId = (typeof getContractCalendarStageState === 'function') ? getContractCalendarStageState(contractId) : null;
-            hasStageNow = !!(stId && (stId.add?.size || stId.remove?.size || Object.keys(stId.additional||{}).length));
+            const st = (typeof getContractCalendarStageState === 'function') ? getContractCalendarStageState(contractId) : null;
+            const hasAdds        = !!(st && st.add && st.add.size);
+            const hasRemoves     = !!(st && st.remove && st.remove.size);
+            const hasAdditionals = !!(st && st.additional && Object.keys(st.additional).length);
+            const hasRemoveAll   = !!st?.removeAll;
+            hasStageNow          = !!(hasAdds || hasRemoves || hasAdditionals || hasRemoveAll);
+            hasRemoveAllOnly     = !!(hasRemoveAll && !hasAdds && !hasAdditionals);
           } catch {}
 
           const newStart = window.modalCtx?.data?.start_date || data.start_date || null;
@@ -1588,7 +1631,7 @@ if (contractId) {
             }
           } else {
             if (hasStageNow) {
-              if (LOGC) console.log('[CONTRACTS] skip generation (edit, manual stage present)');
+              if (LOGC) console.log('[CONTRACTS] manual stage present; will commit shortly');
             } else if ((extendedHead || extendedTail) && std_schedule_json) {
               if (LOGC) console.log('[CONTRACTS] generate missing weeks (template-only, head/tail extension)');
               if (typeof generateContractWeeks === 'function') {
@@ -1599,39 +1642,39 @@ if (contractId) {
             }
           }
 
-          if (LOGC) console.log('[CONTRACTS] calendar → commitContractCalendarStageIfPending');
-const calRes = await commitContractCalendarStageIfPending(contractId);
-if (!calRes.ok) {
-  const msg = `Calendar save failed: ${calRes.message || 'unknown error'}. Contract details were saved.`;
-  if (LOGC) console.warn('[CONTRACTS] calendar commit failed', calRes);
-  if (typeof showModalHint === 'function') showModalHint(msg, 'warn'); else alert(msg);
-} else {
-  if (LOGC) console.log('[CONTRACTS] calendar commit ok', calRes);
-  if (typeof normalizeContractWindowToShifts === 'function') {
-    try {
-      const norm = await normalizeContractWindowToShifts(contractId);
-      if (norm && norm.ok) {
-        try {
-          const fs = (window.modalCtx.formState ||= { __forId: (contractId || null), main:{}, pay:{} });
-          fs.main ||= {};
-          fs.main.start_date = (window.modalCtx.data?.start_date || norm.start_date || fs.main.start_date || '');
-          fs.main.end_date   = (window.modalCtx.data?.end_date   || norm.end_date   || fs.main.end_date   || '');
-          const fr = window.__getModalFrame?.();
-          const currentTab = fr?.currentTabKey || (document.querySelector('#modalTabs button.active')?.textContent?.toLowerCase() || '');
-          if (currentTab === 'main' && typeof fr?.setTab === 'function') fr.setTab('main');
-        } catch {}
-      }
-    } catch (e) {
-      if (LOGC) console.warn('[CONTRACTS] normalize window to shifts failed (non-fatal)', e);
-    }
-  }
-  try {
-    clearContractCalendarStageState(contractId);
-    clearCalendarSelection(`c:${contractId}`);
-  } catch {}
-}
-
-
+          if (hasStageNow) {
+            if (LOGC) console.log('[CONTRACTS] calendar → commitContractCalendarStageIfPending');
+            const calRes = await commitContractCalendarStageIfPending(contractId);
+            if (!calRes.ok) {
+              const msg = `Calendar save failed: ${calRes.message || 'unknown error'}. Contract details were saved.`;
+              if (LOGC) console.warn('[CONTRACTS] calendar commit failed', calRes);
+              if (typeof showModalHint === 'function') showModalHint(msg, 'warn'); else alert(msg);
+            } else {
+              if (LOGC) console.log('[CONTRACTS] calendar commit ok', calRes);
+              if (typeof normalizeContractWindowToShifts === 'function') {
+                try {
+                  const norm = await normalizeContractWindowToShifts(contractId);
+                  if (norm && norm.ok) {
+                    try {
+                      const fs = (window.modalCtx.formState ||= { __forId: (contractId || null), main:{}, pay:{} });
+                      fs.main ||= {};
+                      fs.main.start_date = (window.modalCtx.data?.start_date || norm.start_date || fs.main.start_date || '');
+                      fs.main.end_date   = (window.modalCtx.data?.end_date   || norm.end_date   || fs.main.end_date   || '');
+                      const fr = window.__getModalFrame?.();
+                      const currentTab = fr?.currentTabKey || (document.querySelector('#modalTabs button.active')?.textContent?.toLowerCase() || '');
+                      if (currentTab === 'main' && typeof fr?.setTab === 'function') fr.setTab('main');
+                    } catch {}
+                  }
+                } catch (e) {
+                  if (LOGC) console.warn('[CONTRACTS] normalize window to shifts failed (non-fatal)', e);
+                }
+              }
+              try {
+                clearContractCalendarStageState(contractId);
+                clearCalendarSelection(`c:${contractId}`);
+              } catch {}
+            }
+          }
         }
 
         try { if (typeof computeContractMargins === 'function') computeContractMargins(); } catch {}
@@ -1663,6 +1706,7 @@ if (!calRes.ok) {
 
         if (LOGC) console.groupEnd?.();
         return true;
+
       } catch (e) {
         if (LOGC) { console.error('[CONTRACTS] Save failed', e); console.groupEnd?.(); }
         alert(`Save failed: ${e?.message || e}`);
@@ -7248,16 +7292,18 @@ async function removeAllUnsubmittedWeeks(contractId, bounds) {
   st.removeAll = { from: startFrom, to: endTo };
   st.remove.clear?.();
   st.add.clear?.();
+  st.additional = {};
 
   L('staged removeAll', st.removeAll);
   try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
   return { ok: true, staged: true, bounds: st.removeAll };
 }
 
-
 // After a "remove-all" commit, rebound the contract dates to actuals
 // Rule: if any timesheets exist => (start=min_ts, end=max_ts)
 //       else => (end = start) leave start as-is.
+
+
 async function normalizeContractWindowToShifts(contractId) {
   try {
     const r = await authFetch(API(`/api/contracts/${encodeURIComponent(contractId)}`), { method:'GET' });
@@ -8991,7 +9037,7 @@ function getContractCalendarStageState(contractId) {
     remove: new Set(),
     additional: {},
     weekEndingWeekday: (window.__calState[contractId]?.weekEndingWeekday || 0),
-    removeAll: null // { from, to } when "remove all" is staged
+    removeAll: null
   });
 }
 function clearContractCalendarStageState(contractId) {
@@ -9009,6 +9055,9 @@ async function discardContractCalendarStage(contractId) {
   await fetchAndRenderContractCalendar(contractId, { from: last.from, to: last.to, view: window.__calState?.[contractId]?.view || 'year' });
   return { ok:true };
 }
+
+
+
 
 function stageContractCalendarBookings(contractId, dates /* array of ymd */) {
   const st = getContractCalendarStageState(contractId);
@@ -9145,6 +9194,7 @@ async function stageAddMissingWeeks(contractId, bounds) {
   return { ok:true, added, from, to };
 }
 
+
 function topState(arr) {
   if (!arr?.length) return 'EMPTY';
   const prio = { EMPTY:0, PLANNED:1, SUBMITTED:2, AUTHORISED:3, INVOICED:4, PAID:5 };
@@ -9199,6 +9249,16 @@ function buildPlanRangesFromStage(contractId) {
     return s;
   })();
 
+  // Mutual exclusivity: if removeAll is set, ignore all adds/additionals.
+  if (st.removeAll) {
+    const removeRanges = [];
+    const from = st.removeAll.from || window.modalCtx?.data?.start_date || null;
+    const to   = st.removeAll.to   || window.modalCtx?.data?.end_date   || null;
+    removeRanges.push({ from, to, days: [] });
+    L('removeRanges (removeAll)', { bounds: { from, to } });
+    return { addRanges: [], removeRanges, additionals: [], removeAll: true };
+  }
+
   const addRanges = [];
   if (adds.length) {
     const b = boundsOf(adds);
@@ -9231,8 +9291,7 @@ function buildPlanRangesFromStage(contractId) {
   }
 
   const removeRanges = [];
-  // NORMAL granular removals
-  if (rems.length && !st.removeAll) {
+  if (rems.length) {
     const b = boundsOf(rems);
     removeRanges.push({
       from: b.from,
@@ -9240,14 +9299,6 @@ function buildPlanRangesFromStage(contractId) {
       days: rems
     });
     L('removeRanges', { bounds: b, count: rems.length, sample: rems.slice(0, 5) });
-  } else if (st.removeAll && (st.removeAll.from || st.removeAll.to)) {
-    // SAVE-GATED "REMOVE ALL" — single full-window range (no explicit days)
-    removeRanges.push({
-      from: st.removeAll.from || window.modalCtx?.data?.start_date || null,
-      to:   st.removeAll.to   || window.modalCtx?.data?.end_date   || null,
-      days: []
-    });
-    L('removeRanges (removeAll)', { bounds: { from: removeRanges[0].from, to: removeRanges[0].to } });
   } else {
     L('removeRanges: none');
   }
@@ -9257,8 +9308,9 @@ function buildPlanRangesFromStage(contractId) {
   }));
   L('additionals', { count: additionals.length, sample: additionals.slice(0, 3) });
 
-  return { addRanges, removeRanges, additionals, removeAll: !!st.removeAll };
+  return { addRanges, removeRanges, additionals, removeAll: false };
 }
+
 
 function revertContractCalendarStage(contractId) {
   clearContractCalendarStageState(contractId);
@@ -9288,6 +9340,15 @@ async function getContractCalendar(contract_id, opts) {
 async function getContractCalendarRange(contract_id, from, to, granularity = 'day') {
   return getContractCalendar(contract_id, { from, to, granularity });
 }
+// Thin wrapper to match existing call sites.
+// Backend returns day-level items; granularity is ignored for now.
+async function getCandidateCalendarRange(candidate_id, from, to, granularity = 'day') {
+  const qs = new URLSearchParams(); qs.set('from', from); qs.set('to', to);
+  const r = await authFetch(API(`/api/candidates/${_enc(candidate_id)}/calendar?` + qs.toString()));
+  if (!r?.ok) throw new Error('Candidate calendar fetch failed');
+  return r.json();
+}
+
 async function getCandidateCalendar(candidate_id, from, to) {
   const qs = new URLSearchParams(); qs.set('from', from); qs.set('to', to);
   const r = await authFetch(API(`/api/candidates/${_enc(candidate_id)}/calendar?` + qs.toString()));
@@ -9504,6 +9565,7 @@ function wireContractCalendarSaveControls(contractId, holder, weekIndex) {
 // ============================================================================
 // CONTRACTS – TAB RENDERER
 // ============================================================================
+
 function renderContractCalendarTab(ctx) {
   const c = ctx?.data || {};
   const holderId = 'contractCalendarHolder';
@@ -9597,6 +9659,9 @@ function renderContractCalendarTab(ctx) {
       ${actionsHtml}
     </div>`;
 }
+
+
+
 
 function isConsecutiveDailyRun(dates) {
   if (!Array.isArray(dates) || dates.length < 2) return false;
@@ -9916,6 +9981,7 @@ async function callCheckContractWindowOverlap(candidate_id, start_date_iso, end_
   }
 }
 
+
 async function fetchAndRenderCandidateCalendarForContract(currentKey, candidateId, opts) {
   const LOG_CAL = (typeof window.__LOG_CAL === 'boolean') ? window.__LOG_CAL : true;
   const L = (...a)=> { if (LOG_CAL) console.log('[CAL][candidate-wide]', ...a); };
@@ -10039,6 +10105,8 @@ async function fetchAndRenderCandidateCalendarForContract(currentKey, candidateI
         if (banner) banner.textContent = '';
       }
 
+      const itemsByDate = overlayedMap; // already overlaid
+
       const mine = String(window.modalCtx?.data?.id || currentKey);
       const ownedByCurrent = (d) => {
         const arr = itemsByDate.get(d) || [];
@@ -10058,10 +10126,7 @@ async function fetchAndRenderCandidateCalendarForContract(currentKey, candidateI
       const eligible = (d) => {
         const st = resolveFinalState(d);
         if (st === 'PLANNED') return true;
-        if (!contractId || !ownedByCurrent(d) || !weekIndex) return false;
-        const we = computeWeekEnding(d, state.weekEndingWeekday);
-        const w  = weekIndex.get(we);
-        return !!w && !w.baseHasTs;
+        return false;
       };
       const anyEligible = selArr.some(eligible);
       const allEligible = selArr.every(eligible);
@@ -10116,6 +10181,8 @@ async function fetchAndRenderCandidateCalendarForContract(currentKey, candidateI
 
   (byId('__calScroll') || holder).scrollTop = state.scrollTop;
 }
+
+
 
 // ============================================================================
 // CANDIDATE – RENDER CALENDAR TAB
@@ -12008,6 +12075,7 @@ byId('btnCloseModal').onclick = handleSecondary;
 // ──────────────────────────────────────────────────────────────────────────────
 
 
+
 function ensureSelection(section) {
   window.__selection = window.__selection || {};
   if (!window.__selection[section]) {
@@ -13587,7 +13655,31 @@ async function commitContractCalendarStage(contractId) {
   const { addRanges, removeRanges, additionals, removeAll } = buildPlanRangesFromStage(contractId);
   L('BEGIN', { contractId, addRanges, removeRanges, additionals, removeAll });
 
-  // Commit sequence: (1) addRanges (auto-extend window), (2) removeRanges, (3) additionals
+  // If "remove all" is staged, we only perform the single bulk unplan and exit.
+  if (removeAll) {
+    if (removeRanges.length) {
+      const payload = {
+        when_timesheet_exists: 'skip',
+        empty_week_action: 'delete',
+        ranges: removeRanges
+      };
+      L('DELETE /plan-ranges (removeAll)', payload);
+      try {
+        const resp = await contractsUnplanRanges(contractId, payload);
+        L('DELETE /plan-ranges ←', resp);
+      } catch (err) {
+        E('unplan-ranges (removeAll) failed', err);
+        throw err;
+      }
+    } else {
+      L('removeAll=true but no removeRanges built');
+    }
+    clearContractCalendarStageState(contractId);
+    L('DONE: stage cleared for', contractId);
+    return { ok: true, detail: 'calendar saved', removedAll: true };
+  }
+
+  // Otherwise, proceed with normal sequence: adds → removes → additionals.
   if (addRanges.length) {
     const payload = {
       extend_contract_window: true,
@@ -13609,7 +13701,7 @@ async function commitContractCalendarStage(contractId) {
   if (removeRanges.length) {
     const payload = {
       when_timesheet_exists: 'skip',
-      empty_week_action: removeAll ? 'delete' : 'cancel', // IMPORTANT: hard-delete for "remove all"
+      empty_week_action: 'cancel',
       ranges: removeRanges
     };
     L('DELETE /plan-ranges', payload);
@@ -13646,8 +13738,9 @@ async function commitContractCalendarStage(contractId) {
 
   clearContractCalendarStageState(contractId);
   L('DONE: stage cleared for', contractId);
-  return { ok: true, detail: 'calendar saved', removedAll: !!removeAll };
+  return { ok: true, detail: 'calendar saved', removedAll: false };
 }
+
 
 // ===== Boot =====
 async function renderAll(){
