@@ -1600,14 +1600,13 @@ if (contractId) {
           }
 
           if (LOGC) console.log('[CONTRACTS] calendar → commitContractCalendarStageIfPending');
-      const calRes = await commitContractCalendarStageIfPending(contractId);
+ const calRes = await commitContractCalendarStageIfPending(contractId);
 if (!calRes.ok) {
   const msg = `Calendar save failed: ${calRes.message || 'unknown error'}. Contract details were saved.`;
   if (LOGC) console.warn('[CONTRACTS] calendar commit failed', calRes);
   if (typeof showModalHint === 'function') showModalHint(msg, 'warn'); else alert(msg);
 } else {
   if (LOGC) console.log('[CONTRACTS] calendar commit ok', calRes);
-  // Always normalize contract dates to first/last real shift; else planned; else collapse to single day
   if (typeof normalizeContractWindowToShifts === 'function') {
     try {
       await normalizeContractWindowToShifts(contractId);
@@ -7247,56 +7246,67 @@ async function removeAllUnsubmittedWeeks(contractId, bounds) {
 // After a "remove-all" commit, rebound the contract dates to actuals
 // Rule: if any timesheets exist => (start=min_ts, end=max_ts)
 //       else => (end = start) leave start as-is.
-async function reboundContractWindowFromActuals(contractId) {
-  const LOGC = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : true;
-  const L = (...a)=> { if (LOGC) console.log('[CONTRACTS][reboundActuals]', ...a); };
-
-  const base = window.modalCtx?.data || {};
-  const currStart = base.start_date || null;
-  const currEnd   = base.end_date   || null;
-
-  let minDt = null, maxDt = null;
+async function normalizeContractWindowToShifts(contractId) {
   try {
-    if (typeof callCheckTimesheetBoundary === 'function') {
-      const b = await callCheckTimesheetBoundary(contractId, currStart, currEnd);
-      minDt = b?.min_ts_date || null;
-      maxDt = b?.max_ts_date || null;
-    }
-  } catch (e) {
-    if (LOGC) console.warn('[reboundActuals] boundary check failed', e);
-  }
+    const r = await authFetch(API(`/api/contracts/${encodeURIComponent(contractId)}`), { method:'GET' });
+    const data = await r.json().catch(()=>null);
+    const contract = data?.contract || data || {};
+    const currStart = contract.start_date || null;
+    const currEnd   = contract.end_date   || null;
+    if (!currStart || !currEnd) return { ok:false, reason:'no-window' };
 
-  let newStart = currStart;
-  let newEnd   = currEnd;
-
-  if (minDt && maxDt) {
-    newStart = minDt;
-    newEnd   = maxDt;
-  } else {
-    // no actuals: collapse end to start (leave start unchanged)
-    if (currStart) newEnd = currStart;
-  }
-
-  // Only patch if dates changed
-  if ((newStart && newStart !== currStart) || (newEnd && newEnd !== currEnd)) {
-    const payload = {
-      id: contractId,
-      start_date: newStart || currStart || null,
-      end_date:   newEnd   || currEnd   || null
-    };
-    L('updating contract dates →', payload);
+    let minTs = null, maxTs = null;
     try {
-      const saved = await upsertContract(payload, contractId);
-      window.modalCtx.data = saved?.contract || saved || window.modalCtx.data;
-      L('dates updated ←', { start: window.modalCtx.data.start_date, end: window.modalCtx.data.end_date });
-    } catch (e) {
-      if (LOGC) console.warn('[reboundActuals] upsert failed (non-fatal)', e);
-    }
-  } else {
-    L('no date change required', { currStart, currEnd });
-  }
+      const bRes = await authFetch(API(`/api/contracts/check-timesheet-boundary`), {
+        method:'POST',
+        headers: { 'content-type':'application/json' },
+        body: JSON.stringify({ contract_id: contractId, start_date: currStart, end_date: currEnd })
+      });
+      const b = await bRes.json().catch(()=>null);
+      if (b) { minTs = b.min_ts_date || null; maxTs = b.max_ts_date || null; }
+    } catch {}
 
-  return { start_date: window.modalCtx?.data?.start_date || newStart, end_date: window.modalCtx?.data?.end_date || newEnd };
+    let newStart = currStart;
+    let newEnd   = currEnd;
+
+    if (minTs && maxTs) {
+      newStart = minTs;
+      newEnd   = maxTs;
+    } else {
+      try {
+        const dRes = await authFetch(API(`/api/contracts/${encodeURIComponent(contractId)}/calendar?from=${encodeURIComponent(currStart)}&to=${encodeURIComponent(currEnd)}&granularity=day`), { method:'GET' });
+        const d = await dRes.json().catch(()=>null);
+        const items = Array.isArray(d?.items) ? d.items : [];
+        const plannedDates = items
+          .filter(it => String(it?.state||'').toUpperCase() === 'PLANNED')
+          .map(it => it?.date)
+          .filter(Boolean)
+          .sort();
+        if (plannedDates.length) {
+          newStart = plannedDates[0];
+          newEnd   = plannedDates[plannedDates.length - 1];
+        } else {
+          newEnd = currStart;
+        }
+      } catch {
+        newEnd = currStart;
+      }
+    }
+
+    if (newStart !== currStart || newEnd !== currEnd) {
+      const payload = { id: contractId, start_date: newStart, end_date: newEnd };
+      const saved = await upsertContract(payload, contractId);
+      const savedContract = saved?.contract || saved || null;
+      if (savedContract) {
+        try { window.modalCtx.data = savedContract; } catch {}
+      }
+      return { ok:true, start_date: newStart, end_date: newEnd, changed:true };
+    }
+
+    return { ok:true, start_date: newStart, end_date: newEnd, changed:false };
+  } catch (e) {
+    return { ok:false, error: e?.message || String(e) };
+  }
 }
 
 
