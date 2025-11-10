@@ -1600,7 +1600,7 @@ if (contractId) {
           }
 
           if (LOGC) console.log('[CONTRACTS] calendar → commitContractCalendarStageIfPending');
- const calRes = await commitContractCalendarStageIfPending(contractId);
+const calRes = await commitContractCalendarStageIfPending(contractId);
 if (!calRes.ok) {
   const msg = `Calendar save failed: ${calRes.message || 'unknown error'}. Contract details were saved.`;
   if (LOGC) console.warn('[CONTRACTS] calendar commit failed', calRes);
@@ -1609,7 +1609,18 @@ if (!calRes.ok) {
   if (LOGC) console.log('[CONTRACTS] calendar commit ok', calRes);
   if (typeof normalizeContractWindowToShifts === 'function') {
     try {
-      await normalizeContractWindowToShifts(contractId);
+      const norm = await normalizeContractWindowToShifts(contractId);
+      if (norm && norm.ok) {
+        try {
+          const fs = (window.modalCtx.formState ||= { __forId: (contractId || null), main:{}, pay:{} });
+          fs.main ||= {};
+          fs.main.start_date = (window.modalCtx.data?.start_date || norm.start_date || fs.main.start_date || '');
+          fs.main.end_date   = (window.modalCtx.data?.end_date   || norm.end_date   || fs.main.end_date   || '');
+          const fr = window.__getModalFrame?.();
+          const currentTab = fr?.currentTabKey || (document.querySelector('#modalTabs button.active')?.textContent?.toLowerCase() || '');
+          if (currentTab === 'main' && typeof fr?.setTab === 'function') fr.setTab('main');
+        } catch {}
+      }
     } catch (e) {
       if (LOGC) console.warn('[CONTRACTS] normalize window to shifts failed (non-fatal)', e);
     }
@@ -1619,6 +1630,7 @@ if (!calRes.ok) {
     clearCalendarSelection(`c:${contractId}`);
   } catch {}
 }
+
 
         }
 
@@ -7299,6 +7311,15 @@ async function normalizeContractWindowToShifts(contractId) {
       const savedContract = saved?.contract || saved || null;
       if (savedContract) {
         try { window.modalCtx.data = savedContract; } catch {}
+        try {
+          const fs = (window.modalCtx.formState ||= { __forId: (contractId || null), main:{}, pay:{} });
+          fs.main ||= {};
+          fs.main.start_date = savedContract.start_date || newStart;
+          fs.main.end_date   = savedContract.end_date   || newEnd;
+          const fr = window.__getModalFrame?.();
+          const currentTab = fr?.currentTabKey || (document.querySelector('#modalTabs button.active')?.textContent?.toLowerCase() || '');
+          if (currentTab === 'main' && typeof fr?.setTab === 'function') fr.setTab('main');
+        } catch {}
       }
       return { ok:true, start_date: newStart, end_date: newEnd, changed:true };
     }
@@ -11410,7 +11431,20 @@ mergedRowForTab(k) {
 
       const persist = this._hasMountedOnce; if (persist) this.persistCurrentTabState();
 
-      byId('modalBody').innerHTML = this.renderTab(k, this.mergedRowForTab(k)) || '';
+      const merged = this.mergedRowForTab(k);
+if (this.entity === 'contracts' && k === 'main' && this.mode !== 'edit' && this.mode !== 'create') {
+  if (window.modalCtx?.data?.start_date) merged.start_date = window.modalCtx.data.start_date;
+  if (window.modalCtx?.data?.end_date)   merged.end_date   = window.modalCtx.data.end_date;
+  try {
+    const fs = (window.modalCtx.formState ||= { __forId:(window.modalCtx?.data?.id || window.modalCtx?.openToken || null), main:{}, pay:{} });
+    fs.main ||= {};
+    if (merged.start_date) fs.main.start_date = merged.start_date;
+    if (merged.end_date)   fs.main.end_date   = merged.end_date;
+  } catch {}
+}
+byId('modalBody').innerHTML = this.renderTab(k, merged) || '';
+
+
 
       if (this.entity==='candidates' && k==='rates') { mountCandidateRatesTab?.(); }
       if (this.entity==='candidates' && k==='pay')   { mountCandidatePayTab?.(); }
