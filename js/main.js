@@ -1600,20 +1600,19 @@ if (contractId) {
           }
 
           if (LOGC) console.log('[CONTRACTS] calendar → commitContractCalendarStageIfPending');
-          const calRes = await commitContractCalendarStageIfPending(contractId);
+      const calRes = await commitContractCalendarStageIfPending(contractId);
 if (!calRes.ok) {
   const msg = `Calendar save failed: ${calRes.message || 'unknown error'}. Contract details were saved.`;
   if (LOGC) console.warn('[CONTRACTS] calendar commit failed', calRes);
   if (typeof showModalHint === 'function') showModalHint(msg, 'warn'); else alert(msg);
 } else {
   if (LOGC) console.log('[CONTRACTS] calendar commit ok', calRes);
-  // If "remove all" ran, rebound contract dates to actuals before repaint
-  if (calRes.removedAll && typeof reboundContractWindowFromActuals === 'function') {
+  // Always normalize contract dates to first/last real shift; else planned; else collapse to single day
+  if (typeof normalizeContractWindowToShifts === 'function') {
     try {
-      await reboundContractWindowFromActuals(contractId);
-      if (typeof showModalHint === 'function') showModalHint('Contract dates rebased to actuals.', 'info');
+      await normalizeContractWindowToShifts(contractId);
     } catch (e) {
-      if (LOGC) console.warn('[CONTRACTS] rebound to actuals failed (non-fatal)', e);
+      if (LOGC) console.warn('[CONTRACTS] normalize window to shifts failed (non-fatal)', e);
     }
   }
   try {
@@ -7223,11 +7222,21 @@ async function removeAllUnsubmittedWeeks(contractId, bounds) {
   const L = (...a)=> { if (LOG_CAL) console.log('[CAL][removeAllUnsubmittedWeeks]', ...a); };
 
   const st = getContractCalendarStageState(contractId);
-  const from = bounds?.from || window.modalCtx?.data?.start_date || null;
-  const to   = bounds?.to   || window.modalCtx?.data?.end_date   || null;
 
-  st.removeAll = { from, to };
-  st.remove.clear?.(); // remove granular deletes; window-wide wins
+  const rawFrom = bounds?.from || window.modalCtx?.data?.start_date || null;
+  const rawTo   = bounds?.to   || window.modalCtx?.data?.end_date   || null;
+
+  const fromIso = (!rawFrom ? null : (rawFrom.includes('/') && typeof parseUkDateToIso === 'function') ? (parseUkDateToIso(rawFrom) || rawFrom) : rawFrom);
+  const toIso   = (!rawTo   ? null : (rawTo.includes('/')   && typeof parseUkDateToIso === 'function') ? (parseUkDateToIso(rawTo)   || rawTo)   : rawTo);
+
+  const wew = (window.modalCtx?.data?.week_ending_weekday_snapshot ?? 0);
+  const endFrom = computeWeekEnding(fromIso || window.modalCtx?.data?.start_date, wew);
+  const startFrom = addDays(endFrom, -6);
+  const endTo = computeWeekEnding(toIso || window.modalCtx?.data?.end_date, wew);
+
+  st.removeAll = { from: startFrom, to: endTo };
+  st.remove.clear?.();
+  st.add.clear?.();
 
   L('staged removeAll', st.removeAll);
   try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
@@ -8932,7 +8941,6 @@ function getContractCalendarStageState(contractId) {
     removeAll: null // { from, to } when "remove all" is staged
   });
 }
-
 function clearContractCalendarStageState(contractId) {
   window.__calStage[contractId] = {
     add: new Set(),
@@ -8941,6 +8949,12 @@ function clearContractCalendarStageState(contractId) {
     weekEndingWeekday: (window.__calState[contractId]?.weekEndingWeekday || 0),
     removeAll: null
   };
+}
+async function discardContractCalendarStage(contractId) {
+  clearContractCalendarStageState(contractId);
+  const last = window.__calState?.[contractId]?.win || computeYearWindow((new Date()).getUTCFullYear());
+  await fetchAndRenderContractCalendar(contractId, { from: last.from, to: last.to, view: window.__calState?.[contractId]?.view || 'year' });
+  return { ok:true };
 }
 
 function stageContractCalendarBookings(contractId, dates /* array of ymd */) {
@@ -8965,46 +8979,57 @@ function applyStagedContractCalendarOverlay(contractId, itemsByDate /* Map<date,
   const remDates = [...st.remove];
 
   const ensureArr = (k) => { const a = overlay.get(k) || []; overlay.set(k, a); return a; };
+  const strong = (x) => ['SUBMITTED','AUTHORISED','INVOICED','PAID'].includes(String(x.state||'EMPTY').toUpperCase());
 
-  // 1) REMOVE-ALL preview — drop PLANNED for this contract across [from..to] when the base week has no TS
   if (st.removeAll && (st.removeAll.from || st.removeAll.to)) {
     const from = st.removeAll.from || '0000-01-01';
     const to   = st.removeAll.to   || '9999-12-31';
     const dates = enumerateDates(from, to);
     for (const d of dates) {
       const we = computeWeekEnding(d, st.weekEndingWeekday || 0);
-      const wi = weekIndex.get(we);
-      // If no base week or it already has a timesheet, don't hide anything (actuals still show)
+      let wi = weekIndex.get(we);
+
+      if (!wi) {
+        const weStart = addDays(we, -6);
+        let hasStrongForThis = false;
+        for (let i=0;i<7;i++){
+          const dd = addDays(weStart, i);
+          const arr = overlay.get(dd) || [];
+          if (arr.some(x => String(x.contract_id||'')===String(contractId) && strong(x))) { hasStrongForThis = true; break; }
+        }
+        if (hasStrongForThis) {
+          wi = { baseHasTs: true };
+        } else {
+          wi = { baseHasTs: false };
+        }
+      }
+
       const arr = ensureArr(d);
-      if (!wi || wi.baseHasTs) continue;
-      // Filter out this-contract PLANNED items; keep others/stronger states
+      if (wi.baseHasTs) continue;
       const filtered = arr.filter(x => !(String(x.contract_id || '') === String(contractId)
                                       && String(x.state || 'EMPTY').toUpperCase() === 'PLANNED'));
       overlay.set(d, filtered);
     }
   }
 
-  // 2) Apply ADD as PLANNED (preview)
   for (const d of addDates) {
     const arr = ensureArr(d);
-    const hasStrong = arr.some(x => ['SUBMITTED','AUTHORISED','INVOICED','PAID'].includes(String(x.state||'EMPTY').toUpperCase()));
+    const hasStrong = arr.some(strong);
     if (!hasStrong) {
       arr.push({ date:d, state:'PLANNED', contract_id: contractId });
     }
   }
 
-  // 3) Apply REMOVE (preview) — only clear if top was PLANNED (no TS)
   for (const d of remDates) {
     const arr = ensureArr(d);
     const top = topState(arr);
     if (top === 'PLANNED') overlay.set(d, []);
   }
 
-  // 4) Apply ADDITIONAL (preview) — planned via additional sheet
   for (const [baseWeekId, set] of Object.entries(st.additional)) {
     for (const d of set) {
       const arr = ensureArr(d);
-      const hasStrong = arr.some(x => ['SUBMITTED','AUTHORISED','INVOICED','PAID'].includes(String(x.state||'EMPTY').toUpperCase()));
+      const hasStrong = arr.some(strong);
       if (!hasStrong) {
         arr.push({ date:d, state:'PLANNED', contract_id: contractId });
       }
@@ -9013,6 +9038,7 @@ function applyStagedContractCalendarOverlay(contractId, itemsByDate /* Map<date,
 
   return overlay;
 }
+
 // NEW — stage "Add missing weeks" (preview only)
 // Decides dates from bounds and current template (std_schedule_json / __template),
 // adds them into st.add; UI repaints via fetchAndRenderContractCalendar.
@@ -9022,12 +9048,13 @@ async function stageAddMissingWeeks(contractId, bounds) {
 
   const st = getContractCalendarStageState(contractId);
 
-  // Bounds: contract window by default
-  const from = bounds?.from || window.modalCtx?.data?.start_date || null;
-  const to   = bounds?.to   || window.modalCtx?.data?.end_date   || null;
-  if (!from || !to) return { ok:false, reason:'no-bounds' };
+  const rawFrom = bounds?.from || window.modalCtx?.data?.start_date || null;
+  const rawTo   = bounds?.to   || window.modalCtx?.data?.end_date   || null;
+  if (!rawFrom || !rawTo) return { ok:false, reason:'no-bounds' };
 
-  // Template: prefer saved, then staged
+  const from = (rawFrom.includes('/') && typeof parseUkDateToIso === 'function') ? (parseUkDateToIso(rawFrom) || rawFrom) : rawFrom;
+  const to   = (rawTo.includes('/')   && typeof parseUkDateToIso === 'function') ? (parseUkDateToIso(rawTo)   || rawTo)   : rawTo;
+
   let template = (window.modalCtx?.data?.std_schedule_json && typeof window.modalCtx.data.std_schedule_json === 'object')
     ? window.modalCtx.data.std_schedule_json
     : null;
@@ -9049,12 +9076,13 @@ async function stageAddMissingWeeks(contractId, bounds) {
   if (valid(template.fri)) activeDows.add(5);
   if (valid(template.sat)) activeDows.add(6);
 
+  st.removeAll = null;
+
   const days = enumerateDates(from, to);
   let added = 0;
   for (const d of days) {
     const dow = ymdToDate(d).getUTCDay();
     if (!activeDows.has(dow)) continue;
-    // stage as planned; respect any explicit staged remove
     st.remove.delete(d);
     if (!st.add.has(d)) { st.add.add(d); added++; }
   }
@@ -9439,8 +9467,8 @@ function renderContractCalendarTab(ctx) {
 
   const actionsHtml = (c.id
     ? `<div class="actions" style="margin-top:8px;display:flex;gap:8px">
-         <button id="btnAddMissing">Add missing weeks</button>
-         <button id="btnRemoveAll">Remove all weeks</button>
+         ${inViewMode ? `` : `<button id="btnAddMissing">Add missing weeks</button>
+         <button id="btnRemoveAll">Remove all weeks</button>`}
          ${inViewMode ? `<button id="btnCloneExtend">Clone & Extend…</button>` : ``}
        </div>`
     : ``);
@@ -9474,7 +9502,6 @@ function renderContractCalendarTab(ctx) {
         if (btnAdd && !btnAdd.__wired) {
           btnAdd.__wired = true;
           btnAdd.addEventListener('click', async () => {
-            // stage missing based on template + bounds; repaint immediately
             if (typeof stageAddMissingWeeks === 'function') {
               await stageAddMissingWeeks(c.id, { from: c.start_date || win.from, to: c.end_date || win.to });
               try { showModalHint?.('Missing weeks staged (preview only). Save to persist.', 'warn'); } catch {}
@@ -10077,7 +10104,9 @@ async function fetchAndRenderContractCalendar(contractId, opts) {
     itemsByDate.set(d, arr);
   }
 
-  const weeksForIndex = (await getContractCalendar(contractId, { from: state.win.from, to: state.win.to, granularity:'week' })).items || [];
+  const bufFrom = addDays(state.win.from, -7);
+  const bufTo   = addDays(state.win.to,   +7);
+  const weeksForIndex = (await getContractCalendar(contractId, { from: bufFrom, to: bufTo, granularity:'week' })).items || [];
   const weekIndex = buildWeekIndex(weeksForIndex);
 
   const overlayedMap = applyStagedContractCalendarOverlay(contractId, itemsByDate, weekIndex);
@@ -11682,53 +11711,72 @@ function setFrameMode(frameObj, mode) {
     }
 
     const isChildNow = (stack().length > 1);
-    if (!isChildNow && !top.noParentGate && top.mode==='edit') {
-      if (!top.isDirty) {
-        if (top._snapshot && window.modalCtx) {
-          window.modalCtx.data                = deep(top._snapshot.data);
-          window.modalCtx.formState           = deep(top._snapshot.formState);
-          window.modalCtx.rolesState          = deep(top._snapshot.rolesState);
-          window.modalCtx.ratesState          = deep(top._snapshot.ratesState);
-          window.modalCtx.hospitalsState      = deep(top._snapshot.hospitalsState);
-          window.modalCtx.clientSettingsState = deep(top._snapshot.clientSettingsState);
-          if (top._snapshot.overrides) window.modalCtx.overrides = deep(top._snapshot.overrides);
-          try { renderCandidateRatesTable?.(); } catch {}
-        }
-        top.isDirty=false; setFrameMode(top,'view'); top._snapshot=null;
-        try{ window.__toast?.('No changes'); }catch{}; return;
-      } else {
-        let ok=false; try{ top._confirmingDiscard=true; btnClose.disabled=true; ok=window.confirm('Discard changes and return to view?'); } finally { top._confirmingDiscard=false; btnClose.disabled=false; }
-        if (!ok) return;
-        if (top._snapshot && window.modalCtx) {
-          window.modalCtx.data                = deep(top._snapshot.data);
-          window.modalCtx.formState           = deep(top._snapshot.formState);
-          window.modalCtx.rolesState          = deep(top._snapshot.rolesState);
-          window.modalCtx.ratesState          = deep(top._snapshot.ratesState);
-          window.modalCtx.hospitalsState      = deep(top._snapshot.hospitalsState);
-          window.modalCtx.clientSettingsState = deep(top._snapshot.clientSettingsState);
-          if (top._snapshot.overrides) window.modalCtx.overrides = deep(top._snapshot.overrides);
-          try { renderCandidateRatesTable?.(); } catch {}
-        }
-        top.isDirty=false; top._snapshot=null; setFrameMode(top,'view'); return;
+  if (!isChildNow && !top.noParentGate && top.mode==='edit') {
+  if (!top.isDirty) {
+    if (top._snapshot && window.modalCtx) {
+      window.modalCtx.data                = deep(top._snapshot.data);
+      window.modalCtx.formState           = deep(top._snapshot.formState);
+      window.modalCtx.rolesState          = deep(top._snapshot.rolesState);
+      window.modalCtx.ratesState          = deep(top._snapshot.ratesState);
+      window.modalCtx.hospitalsState      = deep(top._snapshot.hospitalsState);
+      window.modalCtx.clientSettingsState = deep(top._snapshot.clientSettingsState);
+      if (top._snapshot.overrides) window.modalCtx.overrides = deep(top._snapshot.overrides);
+      try { renderCandidateRatesTable?.(); } catch {}
+    }
+    try {
+      if (top.entity === 'contracts') {
+        const cid = window.modalCtx?.data?.id;
+        if (cid && typeof discardContractCalendarStage === 'function') discardContractCalendarStage(cid);
       }
+    } catch {}
+    top.isDirty=false; setFrameMode(top,'view'); top._snapshot=null;
+    try{ window.__toast?.('No changes'); }catch{}; return;
+  } else {
+    let ok=false; try{ top._confirmingDiscard=true; btnClose.disabled=true; ok=window.confirm('Discard changes and return to view?'); } finally { top._confirmingDiscard=false; btnClose.disabled=false; }
+    if (!ok) return;
+    if (top._snapshot && window.modalCtx) {
+      window.modalCtx.data                = deep(top._snapshot.data);
+      window.modalCtx.formState           = deep(top._snapshot.formState);
+      window.modalCtx.rolesState          = deep(top._snapshot.rolesState);
+      window.modalCtx.ratesState          = deep(top._snapshot.ratesState);
+      window.modalCtx.hospitalsState      = deep(top._snapshot.hospitalsState);
+      window.modalCtx.clientSettingsState = deep(top._snapshot.clientSettingsState);
+      if (top._snapshot.overrides) window.modalCtx.overrides = deep(top._snapshot.overrides);
+      try { renderCandidateRatesTable?.(); } catch {}
     }
+    try {
+      if (top.entity === 'contracts') {
+        const cid = window.modalCtx?.data?.id;
+        if (cid && typeof discardContractCalendarStage === 'function') discardContractCalendarStage(cid);
+      }
+    } catch {}
+    top.isDirty=false; top._snapshot=null; setFrameMode(top,'view'); return;
+  }
+}
 
-    if (top._closing) return;
-    top._closing=true;
-    document.onmousemove=null; document.onmouseup=null; byId('modal')?.classList.remove('dragging');
+if (top._closing) return;
+top._closing=true;
+document.onmousemove=null; document.onmouseup=null; byId('modal')?.classList.remove('dragging');
 
-    if (!isChildNow && !top.noParentGate && top.mode==='create' && top.isDirty) {
-      let ok=false; try{ top._confirmingDiscard=true; btnClose.disabled=true; ok=window.confirm('You have unsaved changes. Discard them and close?'); } finally { top._confirmingDiscard=false; btnClose.disabled=false; }
-      if (!ok) { top._closing=false; return; }
-    }
+if (!isChildNow && !top.noParentGate && top.mode==='create' && top.isDirty) {
+  let ok=false; try{ top._confirmingDiscard=true; btnClose.disabled=true; ok=window.confirm('You have unsaved changes. Discard them and close?'); } finally { top._confirmingDiscard=false; btnClose.disabled=false; }
+  if (!ok) { top._closing=false; return; }
+}
 
-    sanitizeModalGeometry();
-    const closing=stack().pop(); if (closing?._detachDirty){ try{closing._detachDirty();}catch{} closing._detachDirty=null; }
-    if (closing?._detachGlobal){ try{closing._detachGlobal();}catch{} closing._detachGlobal=null; } top._wired=false;
-    if (stack().length>0) { const p=currentFrame(); renderTop(); try{ p.onReturn && p.onReturn(); }catch{} }
-    else { discardAllModalsAndState(); if (window.__pendingFocus) { try{ renderAll(); } catch(e) { console.error('refresh after modal close failed', e); } } }
-  };
-  byId('btnCloseModal').onclick = handleSecondary;
+try {
+  if (top.entity === 'contracts' && (top.mode==='edit' || top.mode==='create')) {
+    const cid = window.modalCtx?.data?.id;
+    if (cid && typeof discardContractCalendarStage === 'function') discardContractCalendarStage(cid);
+  }
+} catch {}
+
+sanitizeModalGeometry();
+const closing=stack().pop(); if (closing?._detachDirty){ try{closing._detachDirty();}catch{} closing._detachDirty=null; }
+if (closing?._detachGlobal){ try{closing._detachGlobal();}catch{} closing._detachGlobal=null; } top._wired=false;
+if (stack().length>0) { const p=currentFrame(); renderTop(); try{ p.onReturn && p.onReturn(); }catch{} }
+else { discardAllModalsAndState(); if (window.__pendingFocus) { try{ renderAll(); } catch(e) { console.error('refresh after modal close failed', e); } } }
+};
+byId('btnCloseModal').onclick = handleSecondary;
 
   const hasStagedClientDeletes = ()=> {
     try {
