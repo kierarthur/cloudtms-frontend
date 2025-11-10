@@ -1611,45 +1611,103 @@ if (contractId) {
           if (!fsm.__bucket_labels && window.modalCtx.data?.bucket_labels_json) fsm.__bucket_labels = window.modalCtx.data.bucket_labels_json;
         } catch {}
 
-        if (contractId) {
-          let hasStageNow = false, hasRemoveAllOnly = false;
-          try {
-            const st = (typeof getContractCalendarStageState === 'function') ? getContractCalendarStageState(contractId) : null;
-            const hasAdds        = !!(st && st.add && st.add.size);
-            const hasRemoves     = !!(st && st.remove && st.remove.size);
-            const hasAdditionals = !!(st && st.additional && Object.keys(st.additional).length);
-            const hasRemoveAll   = !!st?.removeAll;
-            hasStageNow          = !!(hasAdds || hasRemoves || hasAdditionals || hasRemoveAll);
-            hasRemoveAllOnly     = !!(hasRemoveAll && !hasAdds && !hasAdditionals);
-          } catch {}
+      if (contractId) {
+  let hasStageNow = false, hasRemoveAllOnly = false;
+  try {
+    const st = (typeof getContractCalendarStageState === 'function') ? getContractCalendarStageState(contractId) : null;
+    const hasAdds        = !!(st && st.add && st.add.size);
+    const hasRemoves     = !!(st && st.remove && st.remove.size);
+    const hasAdditionals = !!(st && st.additional && Object.keys(st.additional).length);
+    const hasRemoveAll   = !!st?.removeAll;
+    hasStageNow          = !!(hasAdds || hasRemoves || hasAdditionals || hasRemoveAll);
+    hasRemoveAllOnly     = !!(hasRemoveAll && !hasAdds && !hasAdditionals);
+  } catch {}
 
-          const newStart = window.modalCtx?.data?.start_date || data.start_date || null;
-          const newEnd   = window.modalCtx?.data?.end_date   || data.end_date   || null;
+  const newStart = window.modalCtx?.data?.start_date || data.start_date || null;
+  const newEnd   = window.modalCtx?.data?.end_date   || data.end_date   || null;
 
-          const extendedHead = !!(prevStartIso && newStart && newStart < prevStartIso);
-          const extendedTail = !!(prevEndIso   && newEnd   && newEnd   > prevEndIso);
+  const extendedHead = !!(prevStartIso && newStart && newStart < prevStartIso);
+  const extendedTail = !!(prevEndIso   && newEnd   && newEnd   > prevEndIso);
 
-          if (isCreate) {
-            if (std_schedule_json && typeof generateContractWeeks === 'function') {
-              if (LOGC) console.log('[CONTRACTS] generateContractWeeks (create)');
-              await generateContractWeeks(contractId);
-            }
-          } else {
-            if (hasStageNow) {
-              if (LOGC) console.log('[CONTRACTS] manual stage present; will commit shortly');
-            } else if ((extendedHead || extendedTail) && std_schedule_json) {
-              if (LOGC) console.log('[CONTRACTS] generate missing weeks (template-only, head/tail extension)');
-              if (typeof generateContractWeeks === 'function') {
-                await generateContractWeeks(contractId);
-              }
-            } else {
-              if (LOGC) console.log('[CONTRACTS] skip generation (edit, no date change, no manual stage)');
-            }
-          }
+  if (isCreate) {
+    // NEW: adopt any staged selections from token → id (create flow)
+    try {
+      if (window.modalCtx?.openToken && typeof adoptCalendarStageFromToken === 'function') {
+        adoptCalendarStageFromToken(window.modalCtx.openToken, contractId);
+      }
+    } catch {}
 
-          if (hasStageNow) {
-            if (LOGC) console.log('[CONTRACTS] calendar → commitContractCalendarStageIfPending');
-            const calRes = await commitContractCalendarStageIfPending(contractId);
+    // NEW: re-evaluate stage presence AFTER adoption
+    try {
+      const st2 = (typeof getContractCalendarStageState === 'function') ? getContractCalendarStageState(contractId) : null;
+      const hasAdds2        = !!(st2 && st2.add && st2.add.size);
+      const hasRemoves2     = !!(st2 && st2.remove && st2.remove.size);
+      const hasAdditionals2 = !!(st2 && st2.additional && Object.keys(st2.additional).length);
+      const hasRemoveAll2   = !!st2?.removeAll;
+      hasStageNow           = !!(hasAdds2 || hasRemoves2 || hasAdditionals2 || hasRemoveAll2);
+      hasRemoveAllOnly      = !!(hasRemoveAll2 && !hasAdds2 && !hasAdditionals2);
+    } catch {}
+
+    if (!hasStageNow) {
+      // No manual stage → generate template weeks
+      if (std_schedule_json && typeof generateContractWeeks === 'function') {
+        if (LOGC) console.log('[CONTRACTS] generateContractWeeks (create)');
+        await generateContractWeeks(contractId);
+      }
+    } else {
+      // Manual stage detected → skip generation (backend will extend window on commit)
+      if (LOGC) console.log('[CONTRACTS] create: manual stage detected; skip generation');
+      data.skip_generate_weeks = true;
+    }
+
+   } else {
+    if (hasStageNow) {
+      if (LOGC) console.log('[CONTRACTS] manual stage present; will commit shortly');
+    } else if ((extendedHead || extendedTail) && std_schedule_json) {
+      if (LOGC) console.log('[CONTRACTS] generate missing weeks (template-only, head/tail extension)');
+      if (typeof generateContractWeeks === 'function') {
+        await generateContractWeeks(contractId);
+      }
+    } else {
+      // NEW: handle shrink (no manual stage and no extension)
+      const shrunkHead = !!(prevStartIso && newStart && newStart > prevStartIso);
+      const shrunkTail = !!(prevEndIso   && newEnd   && newEnd   < prevEndIso);
+
+      if (shrunkHead || shrunkTail) {
+        const ymdShift = (ymd, days) => {
+          const dt = new Date(`${ymd}T00:00:00Z`);
+          dt.setUTCDate(dt.getUTCDate() + days);
+          return dt.toISOString().slice(0,10);
+        };
+
+        const ranges = [];
+        if (shrunkHead) {
+          // remove everything BEFORE newStart (inclusive of prevStart .. day before newStart)
+          ranges.push({ from: prevStartIso, to: ymdShift(newStart, -1), days: [] });
+        }
+        if (shrunkTail) {
+          // remove everything AFTER newEnd (day after newEnd .. prevEnd inclusive)
+          ranges.push({ from: ymdShift(newEnd, +1), to: prevEndIso, days: [] });
+        }
+
+        if (ranges.length && typeof contractsUnplanRanges === 'function') {
+          if (LOGC) console.log('[CONTRACTS] unplan outside new window', { ranges });
+          await contractsUnplanRanges(contractId, {
+            when_timesheet_exists: 'skip',
+            empty_week_action: 'cancel',
+            ranges
+          });
+        }
+      } else {
+        if (LOGC) console.log('[CONTRACTS] skip generation (edit, no date change, no manual stage)');
+      }
+    }
+  }
+
+
+  if (hasStageNow) {
+    if (LOGC) console.log('[CONTRACTS] calendar → commitContractCalendarStageIfPending');
+    const calRes = await commitContractCalendarStageIfPending(contractId);
             if (!calRes.ok) {
               const msg = `Calendar save failed: ${calRes.message || 'unknown error'}. Contract details were saved.`;
               if (LOGC) console.warn('[CONTRACTS] calendar commit failed', calRes);
@@ -1704,13 +1762,15 @@ if (contractId) {
           } else if (currentTab === 'rates') {
             try { computeContractMargins(); } catch {}
           }
-          try { window.__toast?.('Saved'); } catch {}
+                try { window.__toast?.('Saved'); } catch {}
         } catch (e) {
           if (LOGC) console.warn('[CONTRACTS] post-save repaint failed', e);
         }
 
         if (LOGC) console.groupEnd?.();
-        return true;
+        // Return the saved row so saveForFrame() can set hasId=true and flip to View
+        const savedRow = (saved && (saved.contract || saved)) || window.modalCtx.data || null;
+        return { ok: true, saved: savedRow };
 
       } catch (e) {
         if (LOGC) { console.error('[CONTRACTS] Save failed', e); console.groupEnd?.(); }
@@ -1720,6 +1780,7 @@ if (contractId) {
         window.modalCtx._saveInFlight = false;
       }
     },
+
     hasId,
     () => {
       const wire = () => {
@@ -8763,6 +8824,8 @@ function renderClientTab(key, row = {}){
 // (auto-populate Umbrella or PAYE bank fields + logging)
 // ===========================
 // ========== PAY TAB (just extra logs; logic unchanged) ==========
+// This function now RESOLVES ONLY AFTER prefill (when umbrella_id is known).
+// In your modal's setTab/renderTab: `return mountCandidatePayTab();` and await it.
 async function mountCandidatePayTab(){
   const LOG = !!window.__LOG_PAYTAB;
   const fr = (window.__modalStack || [])[ (window.__modalStack || []).length - 1 ] || null;
@@ -8770,7 +8833,7 @@ async function mountCandidatePayTab(){
   const isEdit = (mode === 'edit' || mode === 'create');
   if (LOG) console.log('[PAYTAB] ENTRY', { mode, isEdit });
 
-  const payMethod = (window.modalCtx?.payMethodState || window.modalCtx?.data?.pay_method || 'PAYE').toUpperCase();
+  const payMethod   = (window.modalCtx?.payMethodState || window.modalCtx?.data?.pay_method || 'PAYE').toUpperCase();
   const currentUmbId = window.modalCtx?.data?.umbrella_id || '';
 
   const umbRow    = document.getElementById('umbRow');
@@ -8850,53 +8913,84 @@ async function mountCandidatePayTab(){
   async function fetchAndPrefill(id) {
     if (!id) return;
     const umb = await fetchUmbrellaById(id);
-    if (umb) { if (idHidden) idHidden.value = umb.id || idHidden.value || ''; prefillUmbrellaBankFields(umb); }
-    else if (LOG) console.warn('[PAYTAB] fetchAndPrefill: umbrella not found', id);
+    if (umb) {
+      if (idHidden) idHidden.value = umb.id || idHidden.value || '';
+      prefillUmbrellaBankFields(umb);
+    } else if (LOG) {
+      console.warn('[PAYTAB] fetchAndPrefill: umbrella not found', id);
+    }
   }
 
+  function syncUmbrellaSelection() {
+    const val = (nameInput && nameInput.value) ? nameInput.value.trim() : '';
+    if (!val) {
+      if (idHidden) idHidden.value = '';
+      if (LOG) console.log('[PAYTAB] selection cleared');
+      return;
+    }
+    const allOpts = Array.from((listEl && listEl.options) ? listEl.options : []);
+    const hitOpt = allOpts.find(o => o.value === val);
+    const id = hitOpt && hitOpt.getAttribute('data-id');
+    if (id) {
+      if (LOG) console.log('[PAYTAB] selected umbrella', { label: val, id });
+      if (idHidden) idHidden.value = id;
+      fetchAndPrefill(id);
+    } else {
+      if (LOG) console.warn('[PAYTAB] no exact label match; clearing id & bank fields');
+      if (idHidden) idHidden.value = '';
+      if (bankName) bankName.value = '';
+      if (sortCode) sortCode.value = '';
+      if (accNum)   accNum.value = '';
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // Deterministic prefill: await known-umbrella fetch BEFORE returning
+  // ─────────────────────────────────────────────────────────────
   if (payMethod === 'UMBRELLA') {
     if (umbRow) umbRow.style.display = '';
     setBankDisabled(true);
 
-    let umbrellas = [];
-    try {
-      const res = await authFetch(API('/api/umbrellas'));
-      if (res && res.ok) { const j = await res.json().catch(()=>[]); umbrellas = unwrapList(j); }
-    } catch (_) { umbrellas = []; }
-    if (LOG) console.log('[PAYTAB] umbrellas list loaded', umbrellas.length);
+    // Remember any typed label at mount (for later list-matching when NO id)
+    const typedAtMount = (nameInput && nameInput.value) ? nameInput.value.trim() : '';
 
-    if (listEl) {
-      listEl.innerHTML = (umbrellas || []).map(u => {
-        const label = u.name || u.remittance_email || u.id;
-        return `<option data-id="${u.id}" value="${label}"></option>`;
-      }).join('');
+    // 1) If we KNOW the umbrella id, PREFILL and AWAIT before returning.
+    if (currentUmbId) {
+      if (LOG) console.log('[PAYTAB] deterministic prefill by umbrella_id', currentUmbId);
+      await fetchAndPrefill(currentUmbId);
     }
 
-    if (currentUmbId) { if (LOG) console.log('[PAYTAB] prefill by currentUmbId', currentUmbId); await fetchAndPrefill(currentUmbId); }
-    else {
-      const typed = nameInput && nameInput.value ? nameInput.value.trim() : '';
-      if (typed && umbrellas.length) {
-        const hit = umbrellas.find(u => (u.name || '').trim() === typed);
-        if (hit) await fetchAndPrefill(hit.id);
+    // 2) Load umbrella list in parallel (NOT awaited) for the datalist & label→id case.
+    (async () => {
+      let umbrellas = [];
+      try {
+        const res = await authFetch(API('/api/umbrellas'));
+        if (res && res.ok) {
+          const j = await res.json().catch(()=>[]);
+          umbrellas = unwrapList(j);
+        }
+      } catch (_) { umbrellas = []; }
+      if (LOG) console.log('[PAYTAB] umbrellas list loaded', umbrellas.length);
+
+      if (listEl) {
+        listEl.innerHTML = (umbrellas || []).map(u => {
+          const label = u.name || u.remittance_email || u.id;
+          return `<option data-id="${u.id}" value="${label}"></option>`;
+        }).join('');
       }
-    }
 
-    function syncUmbrellaSelection() {
-      const val = (nameInput && nameInput.value) ? nameInput.value.trim() : '';
-      if (!val) { if (idHidden) idHidden.value = ''; if (LOG) console.log('[PAYTAB] selection cleared'); return; }
-      const allOpts = Array.from((listEl && listEl.options) ? listEl.options : []);
-      const hitOpt = allOpts.find(o => o.value === val);
-      const id = hitOpt && hitOpt.getAttribute('data-id');
-      if (id) { if (LOG) console.log('[PAYTAB] selected umbrella', { label: val, id }); if (idHidden) idHidden.value = id; fetchAndPrefill(id); }
-      else {
-        if (LOG) console.warn('[PAYTAB] no exact label match; clearing id & bank fields');
-        if (idHidden) idHidden.value = '';
-        if (bankName) bankName.value = '';
-        if (sortCode) sortCode.value = '';
-        if (accNum)   accNum.value = '';
+      // If we DIDN'T have an id at mount but user already had a typed label, try to map it now.
+      if (!currentUmbId && typedAtMount && umbrellas.length) {
+        const hit = umbrellas.find(u => (u.name || '').trim() === typedAtMount);
+        if (hit) {
+          if (LOG) console.log('[PAYTAB] post-list typed match', { typedAtMount, id: hit.id });
+          if (idHidden) idHidden.value = hit.id;
+          fetchAndPrefill(hit.id);
+        }
       }
-    }
+    })().catch(()=>{});
 
+    // Wiring for user selection & future changes
     if (nameInput) {
       nameInput.disabled = !isEdit;
       nameInput.oninput = syncUmbrellaSelection;
@@ -8924,8 +9018,12 @@ async function mountCandidatePayTab(){
     if (umbRow) umbRow.style.display = 'none';
     setBankDisabled(!isEdit);
     if (nameInput && idHidden) { nameInput.value = ''; idHidden.value = ''; }
+    // PAYE path is immediate (no awaits needed)
     fillFromCandidate();
   }
+
+  // IMPORTANT: The function is async; it resolves AFTER the umbrella prefill (when known).
+  // If no umbrella_id or pay method isn’t UMBRELLA, it resolves immediately here.
 }
 
 // ============================================================================
@@ -9526,16 +9624,33 @@ function renderDayGrid(hostEl, opts) {
       const dYmd = `${y}-${String(m + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
       const items = itemsByDate.get(dYmd) || [];
 
-const finalState = (typeof topState === 'function') ? topState(items) : 'EMPTY';
-
-      const stateClass = typeof colorForState === 'function' ? colorForState(finalState) : null;
-      if (stateClass) cell.classList.add(stateClass);
-
-      // Only apply “occupied-other” greying in *contract* buckets.
-  
+      // ── NEW: colour source selection
+      // Candidate view → derive colour from ALL items (unchanged).
+      // Contract view  → derive colour ONLY from current contract's items.
+      let finalState = 'EMPTY';
+      let ownedByCurrent = false;
       if (isContractBucket) {
         const keyStr = String(currentKey || '');
-        const ownedByCurrent = items.some(it => String(it?.contract_id || '') === keyStr);
+        const owned = items.filter(it => String(it?.contract_id || '') === keyStr);
+        ownedByCurrent = owned.length > 0;
+        if (ownedByCurrent) {
+          finalState = (typeof topState === 'function') ? topState(owned) : 'EMPTY';
+        } else {
+          // When a day is occupied only by other contracts, we keep the state as EMPTY
+          // (no coloured class) and add a light-grey overlay class below.
+          finalState = 'EMPTY';
+        }
+      } else {
+        finalState = (typeof topState === 'function') ? topState(items) : 'EMPTY';
+      }
+
+      const stateClass = (typeof colorForState === 'function') ? colorForState(finalState) : null;
+      if (stateClass) cell.classList.add(stateClass);
+
+      // Only apply “occupied-other” greying in *contract* calendars and only when the day has
+      // items but NONE belong to the current contract.
+      if (isContractBucket) {
+        const keyStr = String(currentKey || '');
         const occupiedByOtherOnly =
           !ownedByCurrent &&
           items.some(it => {
@@ -9543,7 +9658,7 @@ const finalState = (typeof topState === 'function') ? topState(items) : 'EMPTY';
             return !!cid && cid !== keyStr;
           });
         if (occupiedByOtherOnly) {
-          cell.classList.add("occupied-other");
+          cell.classList.add('occupied-other'); // style this as your light grey
         }
       }
 
@@ -9556,7 +9671,7 @@ const finalState = (typeof topState === 'function') ? topState(items) : 'EMPTY';
       if (interactive) {
         const onClick = (ev) => {
           if (controller.signal.aborted) return;
-  const additive = ev.ctrlKey || ev.metaKey;
+          const additive = ev.ctrlKey || ev.metaKey;
           const bucket = bucketKey;
           const anchor = initSelBucket(bucket).anchor;
           const useRange = ev.shiftKey && !!(anchor);
@@ -9683,7 +9798,16 @@ function renderContractCalendarTab(ctx) {
           ${actionsHtml}
         </div>`;
 
-      await fetchAndRenderContractCalendar(currentKey, { from: win.from, to: win.to, view:'year' });
+      // ── FIX: Use candidate-wide calendar when creating (no numeric/real id yet).
+      if (c.id) {
+        await fetchAndRenderContractCalendar(c.id, { from: win.from, to: win.to, view: 'year' });
+      } else {
+        await fetchAndRenderCandidateCalendarForContract(
+          currentKey,   // token key to stage against during create
+          candId,
+          { from: win.from, to: win.to, view: 'year', weekEnding: Number(weekEnding) }
+        );
+      }
 
       if (c.id) {
         const btnAdd = el.querySelector('#btnAddMissing');
@@ -9732,7 +9856,6 @@ function renderContractCalendarTab(ctx) {
       ${actionsHtml}
     </div>`;
 }
-
 
 
 
