@@ -1630,79 +1630,80 @@ if (contractId) {
   const extendedTail = !!(prevEndIso   && newEnd   && newEnd   > prevEndIso);
 
   if (isCreate) {
-    // NEW: adopt any staged selections from token → id (create flow)
-    try {
-      if (window.modalCtx?.openToken && typeof adoptCalendarStageFromToken === 'function') {
-        adoptCalendarStageFromToken(window.modalCtx.openToken, contractId);
-      }
-    } catch {}
-
-    // NEW: re-evaluate stage presence AFTER adoption
-    try {
-      const st2 = (typeof getContractCalendarStageState === 'function') ? getContractCalendarStageState(contractId) : null;
-      const hasAdds2        = !!(st2 && st2.add && st2.add.size);
-      const hasRemoves2     = !!(st2 && st2.remove && st2.remove.size);
-      const hasAdditionals2 = !!(st2 && st2.additional && Object.keys(st2.additional).length);
-      const hasRemoveAll2   = !!st2?.removeAll;
-      hasStageNow           = !!(hasAdds2 || hasRemoves2 || hasAdditionals2 || hasRemoveAll2);
-      hasRemoveAllOnly      = !!(hasRemoveAll2 && !hasAdds2 && !hasAdditionals2);
-    } catch {}
-
-    if (!hasStageNow) {
-      // No manual stage → generate template weeks
-      if (std_schedule_json && typeof generateContractWeeks === 'function') {
-        if (LOGC) console.log('[CONTRACTS] generateContractWeeks (create)');
-        await generateContractWeeks(contractId);
-      }
-    } else {
-      // Manual stage detected → skip generation (backend will extend window on commit)
-      if (LOGC) console.log('[CONTRACTS] create: manual stage detected; skip generation');
-      data.skip_generate_weeks = true;
+  // NEW: adopt any staged selections from token → id (create flow)
+  try {
+    if (window.modalCtx?.openToken && typeof adoptCalendarStageFromToken === 'function') {
+      adoptCalendarStageFromToken(window.modalCtx.openToken, contractId);
     }
+  } catch {}
 
-   } else {
-    if (hasStageNow) {
-      if (LOGC) console.log('[CONTRACTS] manual stage present; will commit shortly');
-    } else if ((extendedHead || extendedTail) && std_schedule_json) {
-      if (LOGC) console.log('[CONTRACTS] generate missing weeks (template-only, head/tail extension)');
-      if (typeof generateContractWeeks === 'function') {
-        await generateContractWeeks(contractId);
+  // NEW: re-evaluate stage presence AFTER adoption
+  try {
+    const st2 = (typeof getContractCalendarStageState === 'function') ? getContractCalendarStageState(contractId) : null;
+    const hasAdds2        = !!(st2 && st2.add && st2.add.size);
+    const hasRemoves2     = !!(st2 && st2.remove && st2.remove.size);
+    const hasAdditionals2 = !!(st2 && st2.additional && Object.keys(st2.additional).length);
+    const hasRemoveAll2   = !!st2?.removeAll;
+    hasStageNow           = !!(hasAdds2 || hasRemoves2 || hasAdditionals2 || hasRemoveAll2);
+    hasRemoveAllOnly      = !!(hasRemoveAll2 && !hasAdds2 && !hasAdditionals2);
+  } catch {}
+
+  if (!hasStageNow) {
+    // No manual stage → generate template weeks
+    if (std_schedule_json && typeof generateContractWeeks === 'function') {
+      if (LOGC) console.log('[CONTRACTS] generateContractWeeks (create)');
+      await generateContractWeeks(contractId);
+    }
+  } else {
+    // Manual stage detected → skip generation (backend will extend window on commit)
+    if (LOGC) console.log('[CONTRACTS] create: manual stage detected; skip generation');
+    data.skip_generate_weeks = true;
+  }
+
+} else {
+  if (hasStageNow) {
+    if (LOGC) console.log('[CONTRACTS] manual stage present; will commit shortly');
+  } else if ((extendedHead || extendedTail) && std_schedule_json) {
+    if (LOGC) console.log('[CONTRACTS] generate missing weeks (template-only, head/tail extension)');
+    if (typeof generateContractWeeks === 'function') {
+      await generateContractWeeks(contractId);
+    }
+  } else {
+    // NEW: handle shrink (no manual stage and no extension)
+    const shrunkHead = !!(prevStartIso && newStart && newStart > prevStartIso);
+    const shrunkTail = !!(prevEndIso   && newEnd   && newEnd   < prevEndIso);
+
+    if (shrunkHead || shrunkTail) {
+      const ymdShift = (ymd, days) => {
+        const dt = new Date(`${ymd}T00:00:00Z`);
+        dt.setUTCDate(dt.getUTCDate() + days);
+        return dt.toISOString().slice(0,10);
+      };
+
+      const ranges = [];
+      if (shrunkHead) {
+        // remove everything BEFORE newStart (inclusive of prevStart .. day before newStart)
+        ranges.push({ from: prevStartIso, to: ymdShift(newStart, -1), days: [] });
+      }
+      if (shrunkTail) {
+        // remove everything AFTER newEnd (day after newEnd .. prevEnd inclusive)
+        ranges.push({ from: ymdShift(newEnd, +1), to: prevEndIso, days: [] });
+      }
+
+      if (ranges.length && typeof contractsUnplanRanges === 'function') {
+        if (LOGC) console.log('[CONTRACTS] unplan outside new window', { ranges });
+        await contractsUnplanRanges(contractId, {
+          when_timesheet_exists: 'skip',
+          empty_week_action: 'cancel',
+          ranges
+        });
       }
     } else {
-      // NEW: handle shrink (no manual stage and no extension)
-      const shrunkHead = !!(prevStartIso && newStart && newStart > prevStartIso);
-      const shrunkTail = !!(prevEndIso   && newEnd   && newEnd   < prevEndIso);
-
-      if (shrunkHead || shrunkTail) {
-        const ymdShift = (ymd, days) => {
-          const dt = new Date(`${ymd}T00:00:00Z`);
-          dt.setUTCDate(dt.getUTCDate() + days);
-          return dt.toISOString().slice(0,10);
-        };
-
-        const ranges = [];
-        if (shrunkHead) {
-          // remove everything BEFORE newStart (inclusive of prevStart .. day before newStart)
-          ranges.push({ from: prevStartIso, to: ymdShift(newStart, -1), days: [] });
-        }
-        if (shrunkTail) {
-          // remove everything AFTER newEnd (day after newEnd .. prevEnd inclusive)
-          ranges.push({ from: ymdShift(newEnd, +1), to: prevEndIso, days: [] });
-        }
-
-        if (ranges.length && typeof contractsUnplanRanges === 'function') {
-          if (LOGC) console.log('[CONTRACTS] unplan outside new window', { ranges });
-          await contractsUnplanRanges(contractId, {
-            when_timesheet_exists: 'skip',
-            empty_week_action: 'cancel',
-            ranges
-          });
-        }
-      } else {
-        if (LOGC) console.log('[CONTRACTS] skip generation (edit, no date change, no manual stage)');
-      }
+      if (LOGC) console.log('[CONTRACTS] skip generation (edit, no date change, no manual stage)');
     }
   }
+}
+
 
 
   if (hasStageNow) {
@@ -11835,125 +11836,129 @@ mergedRowForTab(k) {
 },
 
 
-    _attachDirtyTracker() {
-      if (this._detachDirty) { try { this._detachDirty(); } catch {} this._detachDirty = null; }
-      const root = byId('modalBody'); if (!root) { L('_attachDirtyTracker(skip: no modalBody)'); return; }
-      const onDirty = (ev) => {
-        if (ev && !ev.isTrusted) return;
-        const isChild = (stack().length > 1);
-        if (isChild) {
-          const p = parentFrame(); if (p && (p.mode==='edit' || p.mode==='create')) { p.isDirty = true; p._updateButtons && p._updateButtons(); }
-        } else {
-          if (this.mode==='edit' || this.mode==='create') { this.isDirty = true; this._updateButtons && this._updateButtons(); }
-        }
-        try { const t=currentFrame(); if (t && t.entity==='candidates' && t.currentTabKey==='rates') { renderCandidateRatesTable?.(); } } catch {}
-      };
-      root.addEventListener('input', onDirty, true);
-      root.addEventListener('change',onDirty, true);
-      this._detachDirty = ()=>{ root.removeEventListener('input',onDirty,true); root.removeEventListener('change',onDirty,true); };
-      L('_attachDirtyTracker: attached');
-    },
-
-    setTab(k) {
-      GC(`setTab(${k})`);
-      L('setTab ENTER', { k, prevKey: this.currentTabKey, entity: this.entity, mode: this.mode, hasMounted: this._hasMountedOnce });
-
-      const persist = this._hasMountedOnce; if (persist) this.persistCurrentTabState();
-
-      const merged = this.mergedRowForTab(k);
-if (this.entity === 'contracts' && k === 'main' && this.mode !== 'edit' && this.mode !== 'create') {
-  if (window.modalCtx?.data?.start_date) merged.start_date = window.modalCtx.data.start_date;
-  if (window.modalCtx?.data?.end_date)   merged.end_date   = window.modalCtx.data.end_date;
-  try {
-    const fs = (window.modalCtx.formState ||= { __forId:(window.modalCtx?.data?.id || window.modalCtx?.openToken || null), main:{}, pay:{} });
-    fs.main ||= {};
-    if (merged.start_date) fs.main.start_date = merged.start_date;
-    if (merged.end_date)   fs.main.end_date   = merged.end_date;
-  } catch {}
-}
-byId('modalBody').innerHTML = this.renderTab(k, merged) || '';
-
-if (this.entity==='candidates' && k==='bookings') {
-  const candId = window.modalCtx?.data?.id;
-  if (candId) {
-    try { renderCandidateCalendarTab(candId); } catch(e) { console.warn('renderCandidateCalendarTab failed', e); }
-  }
-}
-
-
-
-
-      if (this.entity==='candidates' && k==='rates') { mountCandidateRatesTab?.(); }
-      if (this.entity==='candidates' && k==='pay')   { mountCandidatePayTab?.(); }
-
-      if (this.entity==='candidates' && k==='bookings') {
-        const candId = window.modalCtx?.data?.id;
-        if (candId) { try { renderCandidateCalendarTab(candId); } catch(e) { console.warn('renderCandidateCalendarTab failed', e); } }
-      }
-
-      if (this.entity==='candidates' && k==='main') {
-        const pmSel = document.querySelector('#pay-method');
-        if (pmSel) {
-          const stagedPm   = window.modalCtx?.formState?.main?.pay_method;
-          const preferred  = (window.modalCtx?.payMethodState || stagedPm || pmSel.value);
-          pmSel.value = preferred;
-          pmSel.addEventListener('change', () => {
-            window.modalCtx.payMethodState = pmSel.value;
-            try { window.dispatchEvent(new CustomEvent('pay-method-changed')); }
-            catch { window.dispatchEvent(new Event('pay-method-changed')); }
-          });
-          window.modalCtx.payMethodState = pmSel.value;
-          L('setTab(candidates/main): pay method wired', { preferred });
-        }
-
-        const rolesHost = document.querySelector('#rolesEditor');
-        if (rolesHost) {
-          (async () => {
-            try {
-              const roleOptions = await loadGlobalRoleOptions();
-              renderRolesEditor(rolesHost, window.modalCtx.rolesState || [], roleOptions);
-              L('setTab(candidates/main): roles editor mounted', { options: (roleOptions||[]).length });
-            } catch (e) {
-              console.error('[MODAL] roles mount failed', e);
-            }
-          })();
-        }
-      }
-
-      if (this.entity==='clients'    && k==='rates')     { mountClientRatesTab?.(); }
-      if (this.entity==='clients'    && k==='hospitals') { mountClientHospitalsTab?.(); }
-      if (this.entity==='clients'    && k==='settings')  { renderClientSettingsUI?.(window.modalCtx.clientSettingsState||{}); }
-      if (this.entity==='contracts'  && k==='rates')     { mountContractRatesTab?.(); }
-
-      this.currentTabKey = k;
-      this._attachDirtyTracker();
-
+  _attachDirtyTracker() {
+    if (this._detachDirty) { try { this._detachDirty(); } catch {} this._detachDirty = null; }
+    const root = byId('modalBody'); if (!root) { L('_attachDirtyTracker(skip: no modalBody)'); return; }
+    const onDirty = (ev) => {
+      if (ev && !ev.isTrusted) return;
       const isChild = (stack().length > 1);
-      if (this.noParentGate) setFormReadOnly(byId('modalBody'), (this.mode==='view'||this.mode==='saving'));
-      else if (isChild)      { const p=parentFrame(); setFormReadOnly(byId('modalBody'), !(p && (p.mode==='edit'||p.mode==='create'))); }
-      else                   setFormReadOnly(byId('modalBody'), (this.mode==='view'||this.mode==='saving'));
+      if (isChild) {
+        const p = parentFrame(); if (p && (p.mode==='edit' || p.mode==='create')) { p.isDirty = true; p._updateButtons && p._updateButtons(); }
+      } else {
+        if (this.mode==='edit' || this.mode==='create') { this.isDirty = true; this._updateButtons && this._updateButtons(); }
+      }
+      try { const t=currentFrame(); if (t && t.entity==='candidates' && t.currentTabKey==='rates') { renderCandidateRatesTable?.(); } } catch {}
+    };
+    root.addEventListener('input', onDirty, true);
+    root.addEventListener('change',onDirty, true);
+    this._detachDirty = ()=>{ root.removeEventListener('input',onDirty,true); root.removeEventListener('change',onDirty,true); };
+    L('_attachDirtyTracker: attached');
+  },
 
+  async setTab(k) {
+    GC(`setTab(${k})`);
+    L('setTab ENTER', { k, prevKey: this.currentTabKey, entity: this.entity, mode: this.mode, hasMounted: this._hasMountedOnce });
+
+    const persist = this._hasMountedOnce; if (persist) this.persistCurrentTabState();
+
+    const merged = this.mergedRowForTab(k);
+    if (this.entity === 'contracts' && k === 'main' && this.mode !== 'edit' && this.mode !== 'create') {
+      if (window.modalCtx?.data?.start_date) merged.start_date = window.modalCtx.data.start_date;
+      if (window.modalCtx?.data?.end_date)   merged.end_date   = window.modalCtx.data.end_date;
       try {
-        const pc = document.getElementById('btnPickCandidate');
-        const pl = document.getElementById('btnPickClient');
-        L('setTab EXIT snapshot', {
-          currentTabKey: this.currentTabKey,
-          pickButtons: {
-            btnPickCandidate: { exists: !!pc, disabled: !!(pc && pc.disabled) },
-            btnPickClient:    { exists: !!pl, disabled: !!(pl && pl.disabled) }
-          }
-        });
+        const fs = (window.modalCtx.formState ||= { __forId:(window.modalCtx?.data?.id || window.modalCtx?.openToken || null), main:{}, pay:{} });
+        fs.main ||= {};
+        if (merged.start_date) fs.main.start_date = merged.start_date;
+        if (merged.end_date)   fs.main.end_date   = merged.end_date;
       } catch {}
-
-      try {
-        if (this.entity === 'contracts' && k === 'main') {
-          window.dispatchEvent(new Event('contracts-main-rendered'));
-        }
-      } catch {}
-
-      this._hasMountedOnce = true; GE();
     }
-  };
+    byId('modalBody').innerHTML = this.renderTab(k, merged) || '';
+
+    // Candidate tabs
+    if (this.entity==='candidates' && k==='bookings') {
+      const candId = window.modalCtx?.data?.id;
+      if (candId) {
+        try { renderCandidateCalendarTab(candId); } catch(e) { console.warn('renderCandidateCalendarTab failed', e); }
+      }
+    }
+    if (this.entity==='candidates' && k==='rates') { mountCandidateRatesTab?.(); }
+    if (this.entity==='candidates' && k==='pay') {
+      // Seed payMethodState from saved row if missing; await mount to avoid blank flash
+      if (!window.modalCtx?.payMethodState && window.modalCtx?.data?.pay_method) {
+        window.modalCtx.payMethodState = String(window.modalCtx.data.pay_method);
+        L('setTab(candidates/pay): seeded payMethodState', { payMethodState: window.modalCtx.payMethodState });
+      }
+      const p = mountCandidatePayTab?.();
+      if (p && typeof p.then === 'function') { await p; }
+    }
+
+    if (this.entity==='candidates' && k==='main') {
+      const pmSel = document.querySelector('#pay-method');
+      if (pmSel) {
+        const stagedPm   = window.modalCtx?.formState?.main?.pay_method;
+        const preferred  = (window.modalCtx?.payMethodState || stagedPm || pmSel.value);
+        pmSel.value = preferred;
+        pmSel.addEventListener('change', () => {
+          window.modalCtx.payMethodState = pmSel.value;
+          try { window.dispatchEvent(new CustomEvent('pay-method-changed')); }
+          catch { window.dispatchEvent(new Event('pay-method-changed')); }
+        });
+        window.modalCtx.payMethodState = pmSel.value;
+        L('setTab(candidates/main): pay method wired', { preferred });
+      }
+
+      const rolesHost = document.querySelector('#rolesEditor');
+      if (rolesHost) {
+        (async () => {
+          try {
+            const roleOptions = await loadGlobalRoleOptions();
+            renderRolesEditor(rolesHost, window.modalCtx.rolesState || [], roleOptions);
+            L('setTab(candidates/main): roles editor mounted', { options: (roleOptions||[]).length });
+          } catch (e) {
+            console.error('[MODAL] roles mount failed', e);
+          }
+        })();
+      }
+    }
+
+    // Client tabs
+    if (this.entity==='clients'    && k==='rates')     { mountClientRatesTab?.(); }
+    if (this.entity==='clients'    && k==='hospitals') { mountClientHospitalsTab?.(); }
+    if (this.entity==='clients'    && k==='settings')  { renderClientSettingsUI?.(window.modalCtx.clientSettingsState||{}); }
+
+    // Contract tabs
+    if (this.entity==='contracts'  && k==='rates')     { mountContractRatesTab?.(); }
+
+    this.currentTabKey = k;
+    this._attachDirtyTracker();
+
+    const isChild = (stack().length > 1);
+    if (this.noParentGate) setFormReadOnly(byId('modalBody'), (this.mode==='view'||this.mode==='saving'));
+    else if (isChild)      { const p=parentFrame(); setFormReadOnly(byId('modalBody'), !(p && (p.mode==='edit'||p.mode==='create'))); }
+    else                   setFormReadOnly(byId('modalBody'), (this.mode==='view'||this.mode==='saving'));
+
+    try {
+      const pc = document.getElementById('btnPickCandidate');
+      const pl = document.getElementById('btnPickClient');
+      L('setTab EXIT snapshot', {
+        currentTabKey: this.currentTabKey,
+        pickButtons: {
+          btnPickCandidate: { exists: !!pc, disabled: !!(pc && pc.disabled) },
+          btnPickClient:    { exists: !!pl, disabled: !!(pl && pl.disabled) }
+        }
+      });
+    } catch {}
+
+    try {
+      if (this.entity === 'contracts' && k === 'main') {
+        window.dispatchEvent(new Event('contracts-main-rendered'));
+      }
+    } catch {}
+
+    this._hasMountedOnce = true; GE();
+  }
+};
+
 function setFrameMode(frameObj, mode) {
   L('setFrameMode ENTER', { prevMode: frameObj.mode, nextMode: mode, isChild: (stack().length>1), noParentGate: frameObj.noParentGate });
   const prev = frameObj.mode; frameObj.mode = mode;
