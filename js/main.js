@@ -1551,6 +1551,9 @@ function openContract(row) {
         } catch {}
 
         const contractId = saved?.id || saved?.contract?.id;
+if (contractId) {
+  window.__pendingFocus = { section: 'contracts', id: contractId };
+}
 
         try {
           const fsAll = (window.modalCtx.formState ||= { __forId: (contractId || window.modalCtx.openToken || null), main:{}, pay:{} });
@@ -1598,17 +1601,27 @@ function openContract(row) {
 
           if (LOGC) console.log('[CONTRACTS] calendar → commitContractCalendarStageIfPending');
           const calRes = await commitContractCalendarStageIfPending(contractId);
-          if (!calRes.ok) {
-            const msg = `Calendar save failed: ${calRes.message || 'unknown error'}. Contract details were saved.`;
-            if (LOGC) console.warn('[CONTRACTS] calendar commit failed', calRes);
-            if (typeof showModalHint === 'function') showModalHint(msg, 'warn'); else alert(msg);
-          } else if (LOGC) {
-            console.log('[CONTRACTS] calendar commit ok', calRes);
-            try {
-              clearContractCalendarStageState(contractId);
-              clearCalendarSelection(`c:${contractId}`);
-            } catch {}
-          }
+if (!calRes.ok) {
+  const msg = `Calendar save failed: ${calRes.message || 'unknown error'}. Contract details were saved.`;
+  if (LOGC) console.warn('[CONTRACTS] calendar commit failed', calRes);
+  if (typeof showModalHint === 'function') showModalHint(msg, 'warn'); else alert(msg);
+} else {
+  if (LOGC) console.log('[CONTRACTS] calendar commit ok', calRes);
+  // If "remove all" ran, rebound contract dates to actuals before repaint
+  if (calRes.removedAll && typeof reboundContractWindowFromActuals === 'function') {
+    try {
+      await reboundContractWindowFromActuals(contractId);
+      if (typeof showModalHint === 'function') showModalHint('Contract dates rebased to actuals.', 'info');
+    } catch (e) {
+      if (LOGC) console.warn('[CONTRACTS] rebound to actuals failed (non-fatal)', e);
+    }
+  }
+  try {
+    clearContractCalendarStageState(contractId);
+    clearCalendarSelection(`c:${contractId}`);
+  } catch {}
+}
+
         }
 
         try { if (typeof computeContractMargins === 'function') computeContractMargins(); } catch {}
@@ -7191,17 +7204,91 @@ async function commitContractCalendarStageIfPending(contractId) {
   const L = (...a)=> { if (LOG_CAL) console.log('[CAL][commitIfPending]', ...a); };
   try {
     const st = getContractCalendarStageState(contractId);
-    const hasPending = st && (st.add.size || st.remove.size || Object.keys(st.additional||{}).length);
-    if (!hasPending) { L('no pending calendar changes'); return { ok: true, detail: 'no-op' }; }
-    await commitContractCalendarStage(contractId);
+    const hasPending =
+      !!st &&
+      (st.add.size || st.remove.size || Object.keys(st.additional||{}).length || !!st.removeAll);
+    if (!hasPending) { L('no pending calendar changes'); return { ok: true, detail: 'no-op', removedAll: false }; }
+    const res = await commitContractCalendarStage(contractId);
     L('calendar commit ok');
-    return { ok: true, detail: 'calendar saved' };
+    return res || { ok: true, detail: 'calendar saved', removedAll: false };
   } catch (e) {
     console.warn('[CAL][commitIfPending] failed', e);
-    return { ok: false, message: e?.message || 'Calendar commit failed' };
+    return { ok: false, message: e?.message || 'Calendar commit failed', removedAll: false };
   }
 }
 
+// Stage a full-window delete of all TS-free weeks (committed on Save).
+async function removeAllUnsubmittedWeeks(contractId, bounds) {
+  const LOG_CAL = (typeof window.__LOG_CAL === 'boolean') ? window.__LOG_CAL : true;
+  const L = (...a)=> { if (LOG_CAL) console.log('[CAL][removeAllUnsubmittedWeeks]', ...a); };
+
+  const st = getContractCalendarStageState(contractId);
+  const from = bounds?.from || window.modalCtx?.data?.start_date || null;
+  const to   = bounds?.to   || window.modalCtx?.data?.end_date   || null;
+
+  st.removeAll = { from, to };
+  // clear any granular removes (we treat removeAll as authoritative)
+  st.remove.clear?.();
+
+  L('staged removeAll', st.removeAll);
+  try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
+  return { ok: true, staged: true, bounds: st.removeAll };
+}
+
+// After a "remove-all" commit, rebound the contract dates to actuals
+// Rule: if any timesheets exist => (start=min_ts, end=max_ts)
+//       else => (end = start) leave start as-is.
+async function reboundContractWindowFromActuals(contractId) {
+  const LOGC = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : true;
+  const L = (...a)=> { if (LOGC) console.log('[CONTRACTS][reboundActuals]', ...a); };
+
+  const base = window.modalCtx?.data || {};
+  const currStart = base.start_date || null;
+  const currEnd   = base.end_date   || null;
+
+  let minDt = null, maxDt = null;
+  try {
+    if (typeof callCheckTimesheetBoundary === 'function') {
+      const b = await callCheckTimesheetBoundary(contractId, currStart, currEnd);
+      minDt = b?.min_ts_date || null;
+      maxDt = b?.max_ts_date || null;
+    }
+  } catch (e) {
+    if (LOGC) console.warn('[reboundActuals] boundary check failed', e);
+  }
+
+  let newStart = currStart;
+  let newEnd   = currEnd;
+
+  if (minDt && maxDt) {
+    newStart = minDt;
+    newEnd   = maxDt;
+  } else {
+    // no actuals: collapse end to start (leave start unchanged)
+    if (currStart) newEnd = currStart;
+  }
+
+  // Only patch if dates changed
+  if ((newStart && newStart !== currStart) || (newEnd && newEnd !== currEnd)) {
+    const payload = {
+      id: contractId,
+      start_date: newStart || currStart || null,
+      end_date:   newEnd   || currEnd   || null
+    };
+    L('updating contract dates →', payload);
+    try {
+      const saved = await upsertContract(payload, contractId);
+      window.modalCtx.data = saved?.contract || saved || window.modalCtx.data;
+      L('dates updated ←', { start: window.modalCtx.data.start_date, end: window.modalCtx.data.end_date });
+    } catch (e) {
+      if (LOGC) console.warn('[reboundActuals] upsert failed (non-fatal)', e);
+    }
+  } else {
+    L('no date change required', { currStart, currEnd });
+  }
+
+  return { start_date: window.modalCtx?.data?.start_date || newStart, end_date: window.modalCtx?.data?.end_date || newEnd };
+}
 
 
 
@@ -8836,11 +8923,25 @@ function buildWeekIndex(weeks) {
 
 // ---------- Staging state ----------
 function getContractCalendarStageState(contractId) {
-  return (window.__calStage[contractId] ||= { add: new Set(), remove: new Set(), additional: {}, weekEndingWeekday: (window.__calState[contractId]?.weekEndingWeekday || 0) });
+  return (window.__calStage[contractId] ||= {
+    add: new Set(),
+    remove: new Set(),
+    additional: {},
+    weekEndingWeekday: (window.__calState[contractId]?.weekEndingWeekday || 0),
+    removeAll: null // { from, to } when "remove all" is staged
+  });
 }
+
 function clearContractCalendarStageState(contractId) {
-  window.__calStage[contractId] = { add:new Set(), remove:new Set(), additional:{}, weekEndingWeekday: (window.__calState[contractId]?.weekEndingWeekday || 0) };
+  window.__calStage[contractId] = {
+    add: new Set(),
+    remove: new Set(),
+    additional: {},
+    weekEndingWeekday: (window.__calState[contractId]?.weekEndingWeekday || 0),
+    removeAll: null
+  };
 }
+
 function stageContractCalendarBookings(contractId, dates /* array of ymd */) {
   const st = getContractCalendarStageState(contractId);
   for (const d of dates) { st.remove.delete(d); st.add.add(d); }
@@ -8983,7 +9084,8 @@ function buildPlanRangesFromStage(contractId) {
   }
 
   const removeRanges = [];
-  if (rems.length) {
+  // NORMAL granular removals
+  if (rems.length && !st.removeAll) {
     const b = boundsOf(rems);
     removeRanges.push({
       from: b.from,
@@ -8991,6 +9093,14 @@ function buildPlanRangesFromStage(contractId) {
       days: rems
     });
     L('removeRanges', { bounds: b, count: rems.length, sample: rems.slice(0, 5) });
+  } else if (st.removeAll && (st.removeAll.from || st.removeAll.to)) {
+    // SAVE-GATED "REMOVE ALL" — single full-window range (no explicit days)
+    removeRanges.push({
+      from: st.removeAll.from || window.modalCtx?.data?.start_date || null,
+      to:   st.removeAll.to   || window.modalCtx?.data?.end_date   || null,
+      days: []
+    });
+    L('removeRanges (removeAll)', { bounds: { from: removeRanges[0].from, to: removeRanges[0].to } });
   } else {
     L('removeRanges: none');
   }
@@ -9000,7 +9110,7 @@ function buildPlanRangesFromStage(contractId) {
   }));
   L('additionals', { count: additionals.length, sample: additionals.slice(0, 3) });
 
-  return { addRanges, removeRanges, additionals };
+  return { addRanges, removeRanges, additionals, removeAll: !!st.removeAll };
 }
 
 function revertContractCalendarStage(contractId) {
@@ -9312,7 +9422,8 @@ function renderContractCalendarTab(ctx) {
           btnRem.addEventListener('click', async () => {
             if (!window.confirm('Remove all unsubmitted weeks for this contract?')) return;
             if (typeof removeAllUnsubmittedWeeks === 'function') {
-              await removeAllUnsubmittedWeeks(c.id);
+              await removeAllUnsubmittedWeeks(c.id, { from: c.start_date || null, to: c.end_date || null });
+              try { showModalHint?.('All unsubmitted weeks staged for removal (will delete on Save).', 'warn'); } catch {}
             }
             const prev = byId('__calScroll')?.scrollTop || 0;
             await fetchAndRenderContractCalendar(c.id, { from: window.__calState[c.id]?.win?.from, to: window.__calState[c.id]?.win?.to, view: window.__calState[c.id]?.view });
@@ -13289,14 +13400,14 @@ async function commitContractCalendarStage(contractId) {
   const W = (...a)=> { if (LOG_CAL) console.warn('[CAL][commit]', ...a); };
   const E = (...a)=> { if (LOG_CAL) console.error('[CAL][commit]', ...a); };
 
-  const { addRanges, removeRanges, additionals } = buildPlanRangesFromStage(contractId);
-  L('BEGIN', { contractId, addRanges, removeRanges, additionals });
+  const { addRanges, removeRanges, additionals, removeAll } = buildPlanRangesFromStage(contractId);
+  L('BEGIN', { contractId, addRanges, removeRanges, additionals, removeAll });
 
   // Commit sequence: (1) addRanges (auto-extend window), (2) removeRanges, (3) additionals
   if (addRanges.length) {
     const payload = {
-      extend_contract_window: true,  // enable auto-extend to cover out-of-window dates
-      ranges: addRanges             // days are explicit { date: 'YYYY-MM-DD' } objects
+      extend_contract_window: true,
+      ranges: addRanges
     };
     L('POST /plan-ranges', payload);
     try {
@@ -13314,7 +13425,7 @@ async function commitContractCalendarStage(contractId) {
   if (removeRanges.length) {
     const payload = {
       when_timesheet_exists: 'skip',
-      empty_week_action: 'cancel',
+      empty_week_action: removeAll ? 'delete' : 'cancel', // IMPORTANT: hard-delete for "remove all"
       ranges: removeRanges
     };
     L('DELETE /plan-ranges', payload);
@@ -13351,8 +13462,8 @@ async function commitContractCalendarStage(contractId) {
 
   clearContractCalendarStageState(contractId);
   L('DONE: stage cleared for', contractId);
+  return { ok: true, detail: 'calendar saved', removedAll: !!removeAll };
 }
-
 
 // ===== Boot =====
 async function renderAll(){
