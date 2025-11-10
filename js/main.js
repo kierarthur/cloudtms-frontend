@@ -1537,7 +1537,7 @@ function openContract(row) {
 
            if (!isCreate && hasManualStage) data.skip_generate_weeks = true;
 
-        // --- detect calendar stage shape BEFORE any persistence ---
+               // --- detect calendar stage shape BEFORE any persistence ---
         let stageShape = { hasAny:false, hasRemoveAll:false, hasAdds:false, hasAdditionals:false };
         try {
           const stageKey = data.id || window.modalCtx.openToken || null;
@@ -1550,9 +1550,11 @@ function openContract(row) {
           }
         } catch {}
 
-        // --- if REMOVE-ALL is staged and we are editing, commit calendar first (bulk) then normalise window ---
-        if (!isCreate && data.id && stageShape.hasRemoveAll && stageShape.hasAny && !stageShape.hasAdds && !stageShape.hasAdditionals) {
-          if (LOGC) console.log('[CONTRACTS] calendar (remove-all first) → commitContractCalendarStageIfPending');
+        // === CREATE vs EDIT ordering ===
+        // CREATE: upsert first to obtain id → then commit stage (if any) → normalize window → (maybe) generate defaults
+        // EDIT: if any stage present, always commit calendar FIRST → normalize window → then upsert metadata
+        if (!isCreate && data.id && stageShape.hasAny) {
+          if (LOGC) console.log('[CONTRACTS] calendar (any stage) → commitContractCalendarStageIfPending');
           const preCalRes = await commitContractCalendarStageIfPending(data.id);
           if (!preCalRes.ok) {
             const msg = `Calendar save failed: ${preCalRes.message || 'unknown error'}. Contract details were not saved.`;
@@ -1573,10 +1575,13 @@ function openContract(row) {
               if (LOGC) console.warn('[CONTRACTS] normalize window to shifts failed (pre-upsert, non-fatal)', e);
             }
           }
+          // when editing with stage, also avoid auto-generation
+          data.skip_generate_weeks = true;
         }
 
         if (LOGC) console.log('[CONTRACTS] upsert → upsertContract');
         const saved = await upsertContract(data, data.id || undefined);
+
 
         if (LOGC) console.log('[CONTRACTS] upsertContract result', { hasSaved: !!saved, id: saved?.id || saved?.contract?.id });
 
@@ -9344,10 +9349,21 @@ async function getContractCalendarRange(contract_id, from, to, granularity = 'da
 // Backend returns day-level items; granularity is ignored for now.
 async function getCandidateCalendarRange(candidate_id, from, to, granularity = 'day') {
   const qs = new URLSearchParams(); qs.set('from', from); qs.set('to', to);
-  const r = await authFetch(API(`/api/candidates/${_enc(candidate_id)}/calendar?` + qs.toString()));
-  if (!r?.ok) throw new Error('Candidate calendar fetch failed');
-  return r.json();
+  try {
+    const r = await authFetch(API(`/api/candidates/${_enc(candidate_id)}/calendar?` + qs.toString()));
+    if (!r || !r.ok) {
+      try { const err = await r.json(); console.warn('[CAL][candidate] non-200', err); } catch {}
+      return { from, to, items: [] };
+    }
+    const data = await r.json().catch(()=>null);
+    if (!data || !Array.isArray(data.items)) return { from, to, items: [] };
+    return data;
+  } catch (e) {
+    console.warn('[CAL][candidate] fetch failed', e);
+    return { from, to, items: [] };
+  }
 }
+
 
 async function getCandidateCalendar(candidate_id, from, to) {
   const qs = new URLSearchParams(); qs.set('from', from); qs.set('to', to);
@@ -9456,12 +9472,19 @@ function renderDayGrid(hostEl, opts) {
   if (!hostEl) return;
   const { from, to, itemsByDate, view, bucketKey } = opts;
   const sel = initSelBucket(bucketKey);
-  const currentKey = (bucketKey && bucketKey.startsWith('c:')) ? bucketKey.slice(2) : bucketKey;
+  const isContractBucket = (typeof bucketKey === 'string') && bucketKey.startsWith('c:');
+  const currentKey = isContractBucket ? bucketKey.slice(2) : null;
   const interactive = (typeof opts.isInteractive === 'boolean') ? opts.isInteractive : true;
+
+  hostEl.tripwire && hostEl.tripwire.abort?.();
+  const controller = new AbortController();
+  hostEl.tripwire = controller;
 
   hostEl.innerHTML = '';
   const toolbar = document.createElement('div');
-  toolbar.className = 'row'; toolbar.style.justifyContent='space-between'; toolbar.style.alignItems='center';
+  toolbar.className = 'row';
+  toolbar.style.justifyContent = 'space-between';
+  toolbar.style.alignItems = 'center';
   toolbar.innerHTML = `
     <div class="actions">
       <button id="calPrev">◀</button>
@@ -9471,67 +9494,117 @@ function renderDayGrid(hostEl, opts) {
     <div class="hint">${from} → ${to}</div>`;
   hostEl.appendChild(toolbar);
 
-  const wrap = document.createElement('div'); wrap.className = (view === 'year') ? 'year-wrap' : 'month-wrap'; hostEl.appendChild(wrap);
+  const wrap = document.createElement('div');
+  wrap.className = (view === 'year') ? 'year-wrap' : 'month-wrap';
+  hostEl.appendChild(wrap);
 
   const months = [];
-  if (view === 'year') { const y = ymdToDate(from).getUTCFullYear(); for (let m = 0; m < 12; m++) months.push({ y, m }); }
-  else { const d0 = ymdToDate(from); months.push({ y:d0.getUTCFullYear(), m:d0.getUTCMonth() }); }
+  if (view === 'year') {
+    const y = ymdToDate(from).getUTCFullYear();
+    for (let m = 0; m < 12; m++) months.push({ y, m });
+  } else {
+    const d0 = ymdToDate(from);
+    months.push({ y: d0.getUTCFullYear(), m: d0.getUTCMonth() });
+  }
 
   for (const { y, m } of months) {
-    const box = document.createElement('div'); box.className='month';
-    box.innerHTML = `<h4>${new Date(Date.UTC(y, m, 1)).toLocaleString(undefined,{month:'long'})} ${y}</h4>`;
-    const days = document.createElement('div'); days.className = (view === 'year') ? 'days' : 'days days-large';
+    const box = document.createElement('div');
+    box.className = 'month';
+    box.innerHTML = `<h4>${new Date(Date.UTC(y, m, 1)).toLocaleString(undefined, { month: 'long' })} ${y}</h4>`;
+    const days = document.createElement('div');
+    days.className = (view === 'year') ? 'days' : 'days days-large';
 
-    const first = new Date(Date.UTC(y, m, 1)); for (let i=0;i<first.getUTCDay();i++) days.appendChild(document.createElement('div'));
-    const daysInMonth = new Date(Date.UTC(y, m+1, 0)).getUTCDate();
+    const first = new Date(Date.UTC(y, m, 1));
+    for (let i = 0; i < first.getUTCDay(); i++) {
+      days.appendChild(document.createElement('div'));
+    }
+    const daysInMonth = new Date(Date.UTC(y, m + 1, 0)).getUTCDate();
 
-    for (let d=1; d<=daysInMonth; d++) {
-      const cell = document.createElement('div'); cell.className='d';
-      const dYmd = `${y}-${String(m+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
+    for (let d = 1; d <= daysInMonth; d++) {
+      const cell = document.createElement('div');
+      cell.className = 'd';
+      const dYmd = `${y}-${String(m + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
       const items = itemsByDate.get(dYmd) || [];
 
-      const finalState = topState(items);
-      const cls = colorForState(finalState); if (cls) cell.classList.add(cls);
+const finalState = (typeof topState === 'function') ? topState(items) : 'EMPTY';
 
-      const ownedByCurrent = items.some(it => String(it.contract_id || '') === String(currentKey));
-      const occupiedByOtherOnly = items.some(it => {
-        const cid = String(it.contract_id || '');
-        return cid && cid !== String(currentKey);
-      }) && !ownedByCurrent;
-      if (occupiedByOtherOnly) cell.classList.add('occupied-other');
+      const stateClass = typeof colorForState === 'function' ? colorForState(finalState) : null;
+      if (stateClass) cell.classList.add(stateClass);
 
-      if (sel.set.has(dYmd)) cell.classList.add('selected');
+      // Only apply “occupied-other” greying in *contract* buckets.
+  
+      if (isContractBucket) {
+        const keyStr = String(currentKey || '');
+        const ownedByCurrent = items.some(it => String(it?.contract_id || '') === keyStr);
+        const occupiedByOtherOnly =
+          !ownedByCurrent &&
+          items.some(it => {
+            const cid = String(it?.contract_id || '');
+            return !!cid && cid !== keyStr;
+          });
+        if (occupiedByOtherOnly) {
+          cell.classList.add("occupied-other");
+        }
+      }
 
-      const dow = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][new Date(Date.UTC(y, m, d)).getUTCDay()];
-      cell.innerHTML = `<div class="ico"><div class="dow">${dow.slice(0,3)}</div><div class="num">${d}</div></div>`;
+      if (sel.set.has(dYmd)) cell.className += ' selected';
+
+      const dow = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][new Date(Date.UTC(y, m, d)).getUTCDay()];
+      cell.innerHTML = `<div class="ico"><div class="dow">${dow.slice(0, 3)}</div><div class="num">${d}</div></div>`;
       cell.setAttribute('data-date', dYmd);
 
       if (interactive) {
-        cell.addEventListener('click', (ev) => {
-          const additive = ev.ctrlKey || ev.metaKey;
-          const useRange = ev.shiftKey && initSelBucket(bucketKey).anchor;
-          if (useRange) selectRange(bucketKey, initSelBucket(bucketKey).anchor, dYmd, additive);
-          else toggleDaySelected(bucketKey, dYmd, additive);
+        const onClick = (ev) => {
+          if (controller.signal.aborted) return;
+  const additive = ev.ctrlKey || ev.metaKey;
+          const bucket = bucketKey;
+          const anchor = initSelBucket(bucket).anchor;
+          const useRange = ev.shiftKey && !!(anchor);
+          if (useRange) {
+            selectRange(bucket, anchor, dYmd, additive);
+          } else {
+            toggleDaySelected(bucket, dYmd, additive);
+          }
           wrap.querySelectorAll('.d.selected').forEach(n => n.classList.remove('selected'));
-          initSelBucket(bucketKey).set.forEach(s => { const dom = wrap.querySelector(`.d[data-date="${CSS.escape(s)}"]`); if (dom) dom.classList.add('selected'); });
-        });
-
-        cell.addEventListener('contextmenu', (ev) => {
+          initSelBucket(bucket).set.forEach(s => {
+            const dom = wrap.querySelector(`.d[data-date="${CSS.escape(s)}"]`);
+            if (dom) dom.classList.add('selected');
+          });
+        };
+        const onCtx = (ev) => {
+          if (controller.signal.aborted) return;
           ev.preventDefault();
-          const selSet = initSelBucket(bucketKey).set;
-          if (!selSet.has(dYmd)) { clearCalendarSelection(bucketKey); toggleDaySelected(bucketKey, dYmd, false); cell.classList.add('selected'); }
+          const bucket = bucketKey;
+          const selSet = initSelBucket(bucket).set;
+          if (!selSet.has(dYmd)) {
+            clearCalendarSelection(bucket);
+            toggleDaySelected(bucket, dYmd, false);
+            cell.classList.add('selected');
+          }
           opts.onCellContextMenu && opts.onCellContextMenu(dYmd, ev);
-        });
+        };
+        cell.addEventListener('click', onClick, { signal: controller.signal });
+        cell.addEventListener('contextmenu', onCtx, { signal: controller.signal });
       }
 
       days.appendChild(cell);
     }
-    box.appendChild(days); wrap.appendChild(box);
+
+    box.appendChild(days);
+    wrap.appendChild(box);
   }
 
-  toolbar.querySelector('#calPrev')?.addEventListener('click', () => opts.onNav && opts.onNav(-1));
-  toolbar.querySelector('#calNext')?.addEventListener('click', () => opts.onNav && opts.onNav(1));
-  toolbar.querySelector('#calToggle')?.addEventListener('click', () => opts.onToggleView && opts.onToggleView());
+  toolbar.querySelector('#calPrev')?.addEventListener('click', () => {
+    if (!controller.signal.aborted) opts.onNav && opts.onNav(-1);
+  }, { signal: controller.signal });
+
+  toolbar.querySelector('#calNext')?.addEventListener('click', () => {
+    if (!controller.signal.aborted) opts.onNav && opts.onNav(1);
+  }, { signal: controller.signal });
+
+  toolbar.querySelector('#calToggle')?.addEventListener('click', () => {
+    if (!controller.signal.aborted) opts.onToggleView && opts.onToggleView();
+  }, { signal: controller.signal });
 }
 
 // ============================================================================
@@ -10343,6 +10416,172 @@ async function fetchAndRenderContractCalendar(contractId, opts) {
   });
 
   (byId('__calScroll') || holder).scrollTop = state.scrollTop;
+}
+async function renderCandidateCalendarTab(candidateId) {
+  const holderId = 'candidateCalendarHolder';
+  const host = byId(holderId);
+  if (!host) return;
+
+  // Compute initial window (year view)
+  const y = (new Date()).getUTCFullYear();
+  const win = typeof computeYearWindow === 'function'
+    ? computeYearWindow(y)
+    : { from: `${y}-01-01`, to: `${y}-12-31` };
+
+  // Build inner scaffold: scroll box + grid mount + legend
+  host.innerHTML = `
+    <div class="tabc" style="display:flex;flex-direction:column;gap:8px;height:calc(72vh);max-height:calc(72vh)">
+      <div id="__candCalScroll" style="flex:1;min-height:0;overflow:auto;border:1px solid var(--line,#e5e5e5);border-radius:8px;padding:4px;">
+        <div id="__candCal"></div>
+      </div>
+      <div id="__candCalLegend"></div>
+    </div>
+  `;
+
+  // Render legend
+  const legendHost = byId('__candCalLegend');
+  if (legendHost && typeof renderCalendar === 'undefined') {
+    // Reuse existing legend helper (does full overwrite of target node)
+    if (typeof renderCalendarLegend === 'function') {
+      renderCalendarLegend(legendHost);
+    } else {
+      // Fallback: minimal legend if helper is missing
+      legendHost.innerHTML = `
+        <div class="legend">
+          <span class="chip cal-planned">Planned</span>
+          <span class="chip cal-submitted">Submitted</span>
+          <span class="chip cal-authorised">Certified</span>
+          <span class="chip cal-invoiced">Invoiced</span>
+          <span class="chip cal-paid">Paid</span>
+          <span class="chip">Not booked</span>
+        </div>`;
+    }
+  }
+
+  // Draw initial window
+  await fetchAndRenderCandidateCalendar(candidateId, { from: win.from, to: win.to, view: 'year' });
+}
+async function fetchAndRenderCandidateCalendar(candidateId, opts) {
+  const LOG_CAL = (typeof window.__LOG_CAL === 'boolean') ? window.__LOG_CAL : true;
+  const L = (...a)=> { if (LOG_CAL) console.log('[CAL][candidate]', ...a); };
+
+  const key = `cand:${candidateId}`;
+
+  // Persist per-view state (separate from any contract bucket).
+  const state = (window.__calState[key] ||= {
+    view: (opts && typeof opts.view === 'string') ? opts.view : 'year',
+    win:  (opts && opts.from && opts.to)
+            ? { from: opts.from, to: opts.to }
+            : (typeof computeYearWindow === 'function'
+                ? computeYearWindow((new Date()).getUTCFullYear())
+                : { from: `${(new Date()).getFullYear()}-01-01`, to: `${(new Date()).getFullYear()}-12-31` }),
+    scrollTop: 0
+  });
+
+  // Allow caller to change view/window
+  if (opts && typeof opts.view === 'string') state.view = opts.view;
+  if (opts && opts.from && opts.to) state.win = { from: opts.from, to: opts.to };
+
+  const holder = byId('candidateCalendarHolder');
+  if (!holder) return;
+
+  // Correct scroll box id (and legacy fallback to container)
+  const scrollBox = byId('__candCalScroll') || holder;
+
+  // Remember current scroll
+  try { state.scrollTop = (typeof scrollBox.scrollTop === 'number') ? scrollBox.scrollTop : 0; } catch {}
+
+  // Fetch candidate-wide day feed (all contracts; read-only render)
+  let items = [];
+  try {
+    if (typeof getCandidateCalendarRange === 'function') {
+      const r = await getCandidateCalendarRange(candidateId, state.win.from, state.win.to, 'day');
+      items = Array.isArray(r?.items) ? r.items : [];
+    } else if (typeof fetchCandidateCalendarForRange === 'function') {
+      const r = await fetchCandidateCalendarForRange(candidateId, state.win.from, state.win.to);
+      items = Array.isArray(r?.items) ? r.items : [];
+    } else if (typeof getCandidateCalendar === 'function') {
+      const r = await getCandidateCalendar(candidateId, state.win.from, state.win.to);
+      items = Array.isArray(r?.items) ? r.items : [];
+    }
+  } catch (e) {
+    L('candidate calendar fetch failed', e);
+  }
+
+  // Build map: date → [items]
+  const itemsByDate = (typeof buildDateIndex === 'function')
+    ? buildDateIndex(items)
+    : (() => {
+        const m = new Map();
+        for (const it of items) {
+          if (!it?.date) continue;
+          const arr = m.get(it.date) || [];
+          arr.push(it);
+          m.set(it.date, arr);
+        }
+        return m;
+      })();
+
+  // Render grid (read-only)
+  const gridHost = byId('__candCal') || (() => {
+    const d = document.createElement('div'); d.id = '__candCal'; holder.appendChild(d); return d;
+  })();
+  gridHost.innerHTML = '';
+
+  if (typeof renderDayGrid !== 'function') {
+    gridHost.innerHTML = `<div class="hint">Calendar renderer not available.</div>`;
+    return;
+  }
+
+  renderDayGrid(gridHost, {
+    from: state.win.from,
+    to:   state.win.to,
+    itemsByDate,
+    view: state.view,          // 'year' | 'month'
+    bucketKey: key,            // not a contract id → no “other” greying
+    isInteractive: false,      // candidate view is read-only
+    onNav: async (delta) => {
+      if (state.view === 'year') {
+        const y = (new Date(state.win.from)).getUTCFullYear() + delta;
+        const nextWin = (typeof computeYearWindow === 'function')
+          ? computeYearWindow(y)
+          : { from: `${y}-01-01`, to: `${y}-12-31` };
+        await fetchAndRenderCandidateCalendar(candidateId, { from: nextWin.from, to: nextWin.to, view: 'year' });
+      } else {
+        const nextWin = (typeof stepMonth === 'function')
+          ? stepMonth(state.win, delta)
+          : (function () {
+              const d = new Date(state.win.from);
+              d.setUTCMonth(d.getUTCMonth() + delta, 1);
+              const y = d.getUTCFullYear(), m = d.getUTCMonth();
+              return (typeof computeMonthWindow === 'function')
+                ? computeMonthWindow(y, m)
+                : { from: `${y}-${String(m+1).padStart(2,'0')}-01`, to: `${y}-${String(m+1).padStart(2,'0')}-28` };
+            })();
+        await fetchAndRenderCandidateCalendar(candidateId, { from: nextWin.from, to: nextWin.to, view: 'month' });
+      }
+    },
+    onToggleView: async () => {
+      const newView = (state.view === 'year') ? 'month' : 'year';
+      let nextWin;
+      if (newView === 'year') {
+        const y = (new Date(state.win.from)).getUTCFullYear();
+        nextWin = (typeof computeYearWindow === 'function')
+          ? computeYearWindow(y)
+          : { from: `${y}-01-01`, to: `${y}-12-31` };
+      } else {
+        const d = new Date(state.win.from);
+        const y = d.getUTCFullYear(), m = d.getUTCMonth();
+        nextWin = (typeof computeMonthWindow === 'function')
+          ? computeMonthWindow(y, m)
+          : { from: `${y}-${String(m+1).padStart(2,'0')}-01`, to: `${y}-${String(m+1).padStart(2,'0')}-28` };
+      }
+      await fetchAndRenderCandidateCalendar(candidateId, { from: nextWin.from, to: nextWin.to, view: newView });
+    }
+  });
+
+  // Restore scroll
+  try { if (typeof scrollBox.scrollTop === 'number') scrollBox.scrollTop = state.scrollTop; } catch {}
 }
 
 
@@ -11510,6 +11749,14 @@ if (this.entity === 'contracts' && k === 'main' && this.mode !== 'edit' && this.
   } catch {}
 }
 byId('modalBody').innerHTML = this.renderTab(k, merged) || '';
+
+if (this.entity==='candidates' && k==='bookings') {
+  const candId = window.modalCtx?.data?.id;
+  if (candId) {
+    try { renderCandidateCalendarTab(candId); } catch(e) { console.warn('renderCandidateCalendarTab failed', e); }
+  }
+}
+
 
 
 
