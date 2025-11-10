@@ -7227,13 +7227,13 @@ async function removeAllUnsubmittedWeeks(contractId, bounds) {
   const to   = bounds?.to   || window.modalCtx?.data?.end_date   || null;
 
   st.removeAll = { from, to };
-  // clear any granular removes (we treat removeAll as authoritative)
-  st.remove.clear?.();
+  st.remove.clear?.(); // remove granular deletes; window-wide wins
 
   L('staged removeAll', st.removeAll);
   try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
   return { ok: true, staged: true, bounds: st.removeAll };
 }
+
 
 // After a "remove-all" commit, rebound the contract dates to actuals
 // Rule: if any timesheets exist => (start=min_ts, end=max_ts)
@@ -8922,6 +8922,7 @@ function buildWeekIndex(weeks) {
 }
 
 // ---------- Staging state ----------
+
 function getContractCalendarStageState(contractId) {
   return (window.__calStage[contractId] ||= {
     add: new Set(),
@@ -8960,42 +8961,107 @@ function stageContractCalendarAdditional(contractId, baseWeekId, dates /* array 
 function applyStagedContractCalendarOverlay(contractId, itemsByDate /* Map<date, [items]> */, weekIndex) {
   const st = getContractCalendarStageState(contractId);
   const overlay = new Map(itemsByDate ? itemsByDate : []);
-  const addDates = [...st.add]; const remDates = [...st.remove];
+  const addDates = [...st.add];
+  const remDates = [...st.remove];
 
   const ensureArr = (k) => { const a = overlay.get(k) || []; overlay.set(k, a); return a; };
 
-  // Apply ADD as PLANNED
-  for (const d of addDates) {
-    const arr = ensureArr(d);
-    // if already has stronger state (INVOICED/PAID/AUTHORISED/SUBMITTED), leave as is
-    const hasStrong = arr.some(x => ['SUBMITTED','AUTHORISED','INVOICED','PAID'].includes(String(x.state||'EMPTY').toUpperCase()));
-    if (!hasStrong) {
-      arr.push({ date:d, state:'PLANNED' });
+  // 1) REMOVE-ALL preview — drop PLANNED for this contract across [from..to] when the base week has no TS
+  if (st.removeAll && (st.removeAll.from || st.removeAll.to)) {
+    const from = st.removeAll.from || '0000-01-01';
+    const to   = st.removeAll.to   || '9999-12-31';
+    const dates = enumerateDates(from, to);
+    for (const d of dates) {
+      const we = computeWeekEnding(d, st.weekEndingWeekday || 0);
+      const wi = weekIndex.get(we);
+      // If no base week or it already has a timesheet, don't hide anything (actuals still show)
+      const arr = ensureArr(d);
+      if (!wi || wi.baseHasTs) continue;
+      // Filter out this-contract PLANNED items; keep others/stronger states
+      const filtered = arr.filter(x => !(String(x.contract_id || '') === String(contractId)
+                                      && String(x.state || 'EMPTY').toUpperCase() === 'PLANNED'));
+      overlay.set(d, filtered);
     }
   }
 
-  // Apply REMOVE → EMPTY only if the original top state was PLANNED (i.e., no TS)
+  // 2) Apply ADD as PLANNED (preview)
+  for (const d of addDates) {
+    const arr = ensureArr(d);
+    const hasStrong = arr.some(x => ['SUBMITTED','AUTHORISED','INVOICED','PAID'].includes(String(x.state||'EMPTY').toUpperCase()));
+    if (!hasStrong) {
+      arr.push({ date:d, state:'PLANNED', contract_id: contractId });
+    }
+  }
+
+  // 3) Apply REMOVE (preview) — only clear if top was PLANNED (no TS)
   for (const d of remDates) {
     const arr = ensureArr(d);
     const top = topState(arr);
-    if (top === 'PLANNED') {
-      // clear planned: replace with EMPTY
-      overlay.set(d, []); // nothing planned/worked
-    }
+    if (top === 'PLANNED') overlay.set(d, []);
   }
 
-  // Apply ADDITIONAL (planned via additional week) → PLANNED on those dates
+  // 4) Apply ADDITIONAL (preview) — planned via additional sheet
   for (const [baseWeekId, set] of Object.entries(st.additional)) {
     for (const d of set) {
       const arr = ensureArr(d);
       const hasStrong = arr.some(x => ['SUBMITTED','AUTHORISED','INVOICED','PAID'].includes(String(x.state||'EMPTY').toUpperCase()));
       if (!hasStrong) {
-        arr.push({ date:d, state:'PLANNED' });
+        arr.push({ date:d, state:'PLANNED', contract_id: contractId });
       }
     }
   }
 
   return overlay;
+}
+// NEW — stage "Add missing weeks" (preview only)
+// Decides dates from bounds and current template (std_schedule_json / __template),
+// adds them into st.add; UI repaints via fetchAndRenderContractCalendar.
+async function stageAddMissingWeeks(contractId, bounds) {
+  const LOG_CAL = (typeof window.__LOG_CAL === 'boolean') ? window.__LOG_CAL : true;
+  const L = (...a)=> { if (LOG_CAL) console.log('[CAL][stageAddMissingWeeks]', ...a); };
+
+  const st = getContractCalendarStageState(contractId);
+
+  // Bounds: contract window by default
+  const from = bounds?.from || window.modalCtx?.data?.start_date || null;
+  const to   = bounds?.to   || window.modalCtx?.data?.end_date   || null;
+  if (!from || !to) return { ok:false, reason:'no-bounds' };
+
+  // Template: prefer saved, then staged
+  let template = (window.modalCtx?.data?.std_schedule_json && typeof window.modalCtx.data.std_schedule_json === 'object')
+    ? window.modalCtx.data.std_schedule_json
+    : null;
+  if (!template) {
+    try {
+      const fsT = window.modalCtx?.formState?.main?.__template;
+      if (fsT && typeof fsT === 'object') template = fsT;
+    } catch {}
+  }
+  if (!template || typeof template !== 'object') return { ok:false, reason:'no-template' };
+
+  const activeDows = new Set();
+  const valid = (d) => d && typeof d.start === 'string' && d.start && typeof d.end === 'string' && d.end;
+  if (valid(template.sun)) activeDows.add(0);
+  if (valid(template.mon)) activeDows.add(1);
+  if (valid(template.tue)) activeDows.add(2);
+  if (valid(template.wed)) activeDows.add(3);
+  if (valid(template.thu)) activeDows.add(4);
+  if (valid(template.fri)) activeDows.add(5);
+  if (valid(template.sat)) activeDows.add(6);
+
+  const days = enumerateDates(from, to);
+  let added = 0;
+  for (const d of days) {
+    const dow = ymdToDate(d).getUTCDay();
+    if (!activeDows.has(dow)) continue;
+    // stage as planned; respect any explicit staged remove
+    st.remove.delete(d);
+    if (!st.add.has(d)) { st.add.add(d); added++; }
+  }
+
+  try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
+  L('staged add-missing', { from, to, added });
+  return { ok:true, added, from, to };
 }
 
 function topState(arr) {
@@ -9408,14 +9474,17 @@ function renderContractCalendarTab(ctx) {
         if (btnAdd && !btnAdd.__wired) {
           btnAdd.__wired = true;
           btnAdd.addEventListener('click', async () => {
-            if (typeof generateContractWeeks === 'function') {
-              await generateContractWeeks(c.id);
-              const prev = byId('__calScroll')?.scrollTop || 0;
-              await fetchAndRenderContractCalendar(c.id, { from: window.__calState[c.id]?.win?.from, to: window.__calState[c.id]?.win?.to, view: window.__calState[c.id]?.view });
-              const sb = byId('__calScroll'); if (sb) sb.scrollTop = prev;
+            // stage missing based on template + bounds; repaint immediately
+            if (typeof stageAddMissingWeeks === 'function') {
+              await stageAddMissingWeeks(c.id, { from: c.start_date || win.from, to: c.end_date || win.to });
+              try { showModalHint?.('Missing weeks staged (preview only). Save to persist.', 'warn'); } catch {}
             }
+            const prev = byId('__calScroll')?.scrollTop || 0;
+            await fetchAndRenderContractCalendar(c.id, { from: window.__calState[c.id]?.win?.from, to: window.__calState[c.id]?.win?.to, view: window.__calState[c.id]?.view });
+            const sb = byId('__calScroll'); if (sb) sb.scrollTop = prev;
           });
         }
+
         const btnRem = el.querySelector('#btnRemoveAll');
         if (btnRem && !btnRem.__wired) {
           btnRem.__wired = true;
@@ -9423,13 +9492,14 @@ function renderContractCalendarTab(ctx) {
             if (!window.confirm('Remove all unsubmitted weeks for this contract?')) return;
             if (typeof removeAllUnsubmittedWeeks === 'function') {
               await removeAllUnsubmittedWeeks(c.id, { from: c.start_date || null, to: c.end_date || null });
-              try { showModalHint?.('All unsubmitted weeks staged for removal (will delete on Save).', 'warn'); } catch {}
+              try { showModalHint?.('All unsubmitted weeks staged for removal (preview only). Save to persist.', 'warn'); } catch {}
             }
             const prev = byId('__calScroll')?.scrollTop || 0;
             await fetchAndRenderContractCalendar(c.id, { from: window.__calState[c.id]?.win?.from, to: window.__calState[c.id]?.win?.to, view: window.__calState[c.id]?.view });
             const sb = byId('__calScroll'); if (sb) sb.scrollTop = prev;
           });
         }
+
         const btnCE = el.querySelector('#btnCloneExtend');
         if (btnCE && !btnCE.__wired) {
           btnCE.__wired = true;
