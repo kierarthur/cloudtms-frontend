@@ -3769,19 +3769,34 @@ if (LOGM) console.log('[CLONE] stage intent', { token: newToken, intent: window.
         rates_json: rates || {}
       };
 
-      // Open the normal contract modal in Create mode; calendar will stage against newToken
-      try {
-        if (LOGM) console.log('[CLONE] opening staged successor in Create mode', { token: newToken });
-        // Make sure an openToken is present for staging bucket
-        window.modalCtx = window.modalCtx || {};
-        window.modalCtx.openToken = newToken;
-        openContract(stagedRow);
-      } catch (e) {
-        console.error('[CLONE] openContract failed', e);
-        try { renderAll(); } catch {}
-      }
+     // Open the normal contract modal in Create mode; calendar will stage against newToken
+try {
+  if (LOGM) console.log('[CLONE] opening staged successor in Create mode', { token: newToken });
+  // Make sure an openToken is present for staging bucket (pre-launch best effort)
+  window.modalCtx = window.modalCtx || {};
+  window.modalCtx.openToken = newToken;
+  openContract(stagedRow);
 
-      return true;
+  // After the modal constructs its own modalCtx, bind our token + persist forId
+  setTimeout(() => {
+    try {
+      if (window.modalCtx) {
+        window.modalCtx.openToken = newToken;
+        const fs2 = (window.modalCtx.formState ||= { __forId: newToken, main:{}, pay:{} });
+        if (!fs2.__forId) fs2.__forId = newToken;
+        if (LOGM) console.log('[CLONE] bound token to create modal', { openToken: window.modalCtx.openToken, forId: fs2.__forId });
+      }
+    } catch (e) {
+      console.warn('[CLONE] bind token failed', e);
+    }
+  }, 0);
+} catch (e) {
+  console.error('[CLONE] openContract failed', e);
+  try { renderAll(); } catch {}
+}
+
+return true;
+
     },
     false,
     null,
@@ -5561,15 +5576,19 @@ function attachUkDatePicker(inputEl, opts) {
     return grid;
   }
 
-  // public dynamic API for constraints refresh
+   // public dynamic API for constraints refresh
   inputEl.setMinDate = (minDate) => {
     inputEl._minIso = setIso(minDate);
-    if (inputEl.__ukdpPortal) {
-      try { inputEl.dispatchEvent(new Event('change')); } catch {}
-    }
+    if (inputEl.__ukdpPortal) { try { inputEl.__ukdpRepaint && inputEl.__ukdpRepaint(); } catch {} }
+  };
+
+  inputEl.setMaxDate = (maxDate) => {
+    inputEl._maxIso = setIso(maxDate);
+    if (inputEl.__ukdpPortal) { try { inputEl.__ukdpRepaint && inputEl.__ukdpRepaint(); } catch {} }
   };
 
   inputEl.addEventListener('focus', openPicker);
+
   inputEl.addEventListener('click', openPicker);
 
   inputEl.__ukdpBound = true;
