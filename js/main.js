@@ -2279,7 +2279,22 @@ if (contractId) {
         });
       }
     },
-   { kind:'contracts', extraButtons, forceEdit: !!isCreate }
+    hasId,                                   // ← 5th arg must be the boolean
+    () => {                                  // ← 6th arg is onReturn (keep your existing wire() refresher pattern)
+      const wire = () => {
+        snapshotContractForm();
+        const form = document.querySelector('#contractForm');
+        const tabs = document.getElementById('modalTabs');
+        const active = tabs?.querySelector('button.active')?.textContent?.toLowerCase() || 'main';
+        /* the same re-wire logic you already use */
+      };
+      setTimeout(wire, 0);
+      if (!window.__contractsWireBound) {
+        window.__contractsWireBound = true;
+        window.addEventListener('contracts-main-rendered', () => setTimeout(wire, 0));
+      }
+    },
+    { kind:'contracts', extraButtons, forceEdit: !!isCreate }  // ← options are 7th
   );
 
   setTimeout(() => {
