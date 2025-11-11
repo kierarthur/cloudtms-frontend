@@ -2284,7 +2284,7 @@ showModal(
   },
 
   // 7th: options (now with noParentGate)
-  { kind:'contracts', extraButtons, forceEdit: !!isCreate, noParentGate: isSuccessorCreate }
+   { kind:'contracts', extraButtons,                           noParentGate: isSuccessorCreate } 
 );
 
   setTimeout(() => {
@@ -11970,15 +11970,17 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
 
 
   const frame = {
-    _token: `f:${Date.now()}:${Math.random().toString(36).slice(2)}`,
+  _token: `f:${Date.now()}:${Math.random().toString(36).slice(2)}`,
+  _ctxRef: window.modalCtx,   // ⬅️ keep a reference to the active context
 
-    title,
-    tabs: Array.isArray(tabs) ? tabs.slice() : [],
-    renderTab,
-    onSave,
-    onReturn,
-    hasId: !!hasId,
-    entity: (window.modalCtx && window.modalCtx.entity) || null,
+  title,
+  tabs: Array.isArray(tabs) ? tabs.slice() : [],
+  renderTab,
+  onSave,
+  onReturn,
+  hasId: !!hasId,
+  entity: (window.modalCtx && window.modalCtx.entity) || null,
+
 
     noParentGate: !!opts.noParentGate,
     forceEdit:    !!opts.forceEdit,
@@ -12265,8 +12267,12 @@ function setFrameMode(frameObj, mode) {
   }
 
   const isChild = (stack().length > 1);
-  const top     = currentFrame();
-  const parent  = parentFrame();
+const top     = currentFrame();
+const parent  = parentFrame();
+
+// restore the parent/owner context for whatever frame is now on top
+if (top && top._ctxRef) window.modalCtx = top._ctxRef;
+
 
   if (typeof top._detachGlobal === 'function') { try { top._detachGlobal(); } catch {} top._wired = false; }
 
@@ -12359,11 +12365,14 @@ function setFrameMode(frameObj, mode) {
     const prev=top._detachGlobal;
     top._detachGlobal = ()=>{ try{header.removeEventListener('mousedown',onDown);}catch{} try{header.removeEventListener('dblclick',onDbl);}catch{} document.onmousemove=null; document.onmouseup=null; if(typeof prev==='function'){ try{prev();}catch{} } };
   })();
+const wantApply = (isChild && !top.noParentGate) ||
+                  (top.kind === 'client-rate' || top.kind === 'candidate-override');
 
-  const defaultPrimary =
-    (top.kind === 'contract-clone-extend') ? 'Create'
-  : (top.kind === 'advanced-search')       ? 'Search'
-  : (top.noParentGate ? 'Apply' : (isChild ? 'Apply' : 'Save'));
+const defaultPrimary =
+  (top.kind === 'contract-clone-extend') ? 'Create'
+: (top.kind === 'advanced-search')       ? 'Search'
+: (wantApply ? 'Apply' : 'Save');
+
 
     btnSave.textContent = defaultPrimary; btnSave.setAttribute('aria-label', defaultPrimary);
   L('showModal defaultPrimary', { kind: top.kind, defaultPrimary });
@@ -12485,10 +12494,11 @@ function setFrameMode(frameObj, mode) {
       document.onmousemove=null; document.onmouseup=null; byId('modal')?.classList.remove('dragging'); sanitizeModalGeometry();
       const closing=stack().pop(); if (closing?._detachDirty){ try{closing._detachDirty();}catch{} closing._detachDirty=null; }
       if (closing?._detachGlobal){ try{closing._detachGlobal();}catch{} closing._detachGlobal=null; } top._wired=false;
-      if (stack().length>0) { const p=currentFrame(); renderTop(); try{ p.onReturn && p.onReturn(); } catch{} }
+      if (stack().length>0) { const p=currentFrame(); if (p && p._ctxRef) window.modalCtx = p._ctxRef; renderTop(); try{ p.onReturn && p.onReturn(); } catch{} }
       else { discardAllModalsAndState(); if (window.__pendingFocus) { try{ renderAll(); } catch(e){ console.error('refresh after modal close failed',e); } } }
       return;
     }
+
 
     const isChildNow = (stack().length > 1);
   if (!isChildNow && !top.noParentGate && top.mode==='edit') {
@@ -12549,12 +12559,13 @@ try {
     if (cid && typeof discardContractCalendarStage === 'function') discardContractCalendarStage(cid);
   }
 } catch {}
-
 sanitizeModalGeometry();
 const closing=stack().pop(); if (closing?._detachDirty){ try{closing._detachDirty();}catch{} closing._detachDirty=null; }
 if (closing?._detachGlobal){ try{closing._detachGlobal();}catch{} closing._detachGlobal=null; } top._wired=false;
 if (stack().length>0) {
   const p=currentFrame();
+  // restore parent context to ensure actions (Clone & Extend) render correctly
+  if (p && p._ctxRef) window.modalCtx = p._ctxRef;
   // ▶ make sure parent resumes view-mode so calendar actions (Clone & Extend) return
   try { setFrameMode(p, 'view'); } catch {}
   renderTop();
