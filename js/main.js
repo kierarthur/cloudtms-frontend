@@ -3784,26 +3784,31 @@ function openContractCloneAndExtend(contract_id) {
       rates_json: (old.rates_json && typeof old.rates_json === 'object') ? old.rates_json : {}
     };
 
+    // Defer opening until AFTER this child frame closes, so saveForFrame pops the wizard first.
     try {
-      if (LOGM) console.log('[CLONE] opening staged successor in Create mode', { token: newToken, stagedRow });
-      // Hand the token to the upcoming create modal (so openContract won’t mint a different one)
+      if (LOGM) console.log('[CLONE] will open staged successor in Create mode (deferred)', { token: newToken, stagedRow });
       window.__preOpenToken = newToken;
-      openContract(stagedRow);
-
-      // After the modal builds its own formState, force-align __forId with our token
       setTimeout(() => {
         try {
-          if (window.modalCtx) {
-            window.modalCtx.openToken = newToken;
-            const fs2 = (window.modalCtx.formState ||= { __forId: newToken, main:{}, pay:{} });
-            fs2.__forId = newToken;                           // force override (don’t keep the auto-minted id)
-            if (LOGM) console.log('[CLONE] bound token to create modal', { openToken: window.modalCtx.openToken, forId: fs2.__forId });
-          }
-        } catch (e) { console.warn('[CLONE] bind token failed', e); }
+          openContract(stagedRow);
+          // After the modal builds its own formState, force-align __forId with our token
+          setTimeout(() => {
+            try {
+              if (window.modalCtx) {
+                window.modalCtx.openToken = newToken;
+                const fs2 = (window.modalCtx.formState ||= { __forId: newToken, main:{}, pay:{} });
+                fs2.__forId = newToken; // force override (don’t keep the auto-minted id)
+                if (LOGM) console.log('[CLONE] bound token to create modal', { openToken: window.modalCtx.openToken, forId: fs2.__forId });
+              }
+            } catch (e) { console.warn('[CLONE] bind token failed', e); }
+          }, 0);
+        } catch (e) {
+          console.error('[CLONE] openContract failed', e);
+          try { renderAll(); } catch {}
+        }
       }, 0);
     } catch (e) {
-      console.error('[CLONE] openContract failed', e);
-      try { renderAll(); } catch {}
+      console.error('[CLONE] schedule open failed', e);
     }
 
     return true;
