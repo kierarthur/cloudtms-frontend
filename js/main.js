@@ -1232,9 +1232,7 @@ function openContract(row) {
     }
   }
 
-
-  // If this create comes from Clone&Extend staging, pull intent (end-old etc.)
-  // If this create comes from Clone&Extend staging, pull intent (end-old etc.)
+// If this create comes from Clone&Extend staging, pull intent (end-old etc.)
 try {
   const intents = (window.__cloneIntents || {});
   const token   = window.modalCtx.openToken;
@@ -1242,25 +1240,28 @@ try {
 
   if (LOGC) console.groupCollapsed('[CLONE][attach-intent]');
   if (LOGC) console.log('openToken', token);
-  if (LOGC) console.log('intents.hasToken', Object.prototype.hasOwnProperty.call(intents, token));
-  if (LOGC) console.log('intent.keys', ci ? Object.keys(ci) : '(none)');
+  if (LOGC) console.log('staging.keys', Object.keys(intents || {}));
+  if (LOGC) console.log('staging.has(openToken)?', Object.prototype.hasOwnProperty.call(intents, token));
 
   if (ci) {
-    window.modalCtx.__cloneIntent = { ...ci };
-    if (LOGC) console.log('ATTACHED', {
+    // Normalise & echo intent
+    const endIso = ci.end_existing_on || null;
+    window.modalCtx.__cloneIntent = {
+      source_contract_id: ci.source_contract_id || null,
       end_existing: !!ci.end_existing,
-      source_contract_id: ci.source_contract_id || '(missing)',
-      end_existing_on: ci.end_existing_on || '(missing)'
-    });
+      end_existing_on: endIso
+    };
+    if (LOGC) console.log('ATTACHED', window.modalCtx.__cloneIntent);
     // one-shot: keep it only on this modal
     try { delete intents[token]; if (LOGC) console.log('intent cleared from staging bucket'); } catch {}
   } else {
-    if (LOGC) console.log('NO_INTENT_FOR_TOKEN');
+    if (LOGC) console.log('NO_INTENT_FOR_TOKEN (possible token mismatch) – will not truncate tail unless a later step re-attaches.');
   }
   if (LOGC) console.groupEnd?.();
 } catch (e) {
   if (LOGC) console.warn('[CLONE][attach-intent] EXCEPTION', e);
 }
+
 
 
   try {
@@ -1326,11 +1327,16 @@ try {
 
   const tabs = [ { key:'main', title:'Main' }, { key:'rates', title:'Rates' }, { key:'calendar', title:'Calendar' } ];
   if (LOGC) console.log('[CONTRACTS] tabs', tabs.map(t=>t.key));
-  const hasId = !!window.modalCtx.data?.id;
-  // NEW: successor create (opened from Clone & Extend) should not inherit parent gating
-  const isSuccessorCreate = isCreate && ( !!window.modalCtx?.__cloneIntent || !!preToken );
+ const hasId = !!window.modalCtx.data?.id;
+const isSuccessorCreate = isCreate && ( !!window.modalCtx?.__cloneIntent || !!preToken );
+if (LOGC) console.log('[CONTRACTS] showModal opts preview', {
+  hasId, isCreate, isSuccessorCreate,
+  stayOpenOnSave: !!isSuccessorCreate, noParentGate: !!isSuccessorCreate,
+  openToken: window.modalCtx.openToken, hasCloneIntent: !!window.modalCtx.__cloneIntent
+});
 
 showModal(
+
   isCreate ? 'Create Contract' : 'Edit Contract',
   tabs,
   (key, row) => {
@@ -1631,10 +1637,17 @@ showModal(
 
       if (LOGC) console.log('[CONTRACTS] upsert → upsertContract');
       const saved = await upsertContract(data, data.id || undefined);
+const persistedId = saved?.id || saved?.contract?.id || null;
+if (LOGC) console.log('[CONTRACTS] upsertContract result', {
+  isCreate, persistedId, rawHasSaved: !!saved
+});
 
-      if (LOGC) console.log('[CONTRACTS] upsertContract result', { hasSaved: !!saved, id: saved?.id || saved?.contract?.id });
-
-      window.modalCtx.data = saved?.contract || saved || window.modalCtx.data;
+window.modalCtx.data = saved?.contract || saved || window.modalCtx.data;
+if (LOGC) console.log('[CONTRACTS] modalCtx.data snapshot', {
+  id: window.modalCtx.data?.id || null,
+  start_date: window.modalCtx.data?.start_date || null,
+  end_date:   window.modalCtx.data?.end_date   || null
+});
 
       try {
         const warnings = saved?.warnings || saved?.contract?.warnings || [];
@@ -1649,6 +1662,7 @@ showModal(
         // If this was a Clone&Extend staging and user opted to end the old contract, apply now.
     // If this was a Clone&Extend staging and user opted to end the old contract, apply now.
 try {
+  const t0 = Date.now();
   const savedContractId = contractId || (saved?.contract?.id) || (saved?.id) || null;
   const ci = window.modalCtx.__cloneIntent || null;
 
@@ -1660,7 +1674,10 @@ try {
 
   if (LOGC) console.groupCollapsed('[CLONE][post-save decision]');
   if (LOGC) console.log('context', {
+    isCreate,
     savedContractId,
+    savedStart: window.modalCtx?.data?.start_date || null,
+    savedEnd:   window.modalCtx?.data?.end_date   || null,
     openToken: window.modalCtx?.openToken || null
   });
   if (LOGC) console.log('intent-checks', {
@@ -1674,14 +1691,15 @@ try {
       source: ci.source_contract_id, desired_end: ci.end_existing_on
     });
 
-    let res = null, ok=false, clamped=false, safe_end=null, message=null;
+    let res = null, ok=false, clamped=false, safe_end=null, message=null, t1=0;
     try {
       res = await endContractSafely(ci.source_contract_id, ci.end_existing_on);
+      t1 = Date.now();
       ok       = !!res?.ok;
       clamped  = !!res?.clamped;
       safe_end = res?.safe_end || null;
       message  = res?.message  || null;
-      if (LOGC) console.log('endContractSafely RESULT', { ok, clamped, safe_end, message, raw: res });
+      if (LOGC) console.log('endContractSafely RESULT', { ok, clamped, safe_end, message, elapsed_ms: (t1 - t0), raw: res });
     } catch (err) {
       if (LOGC) console.warn('endContractSafely THREW', err);
     }
@@ -1694,16 +1712,16 @@ try {
         try { await refreshOldContractAfterTruncate(ci.source_contract_id); } catch (e) { if (LOGC) console.warn('refreshOldContractAfterTruncate failed', e); }
       }
     } else {
-      if (LOGC) console.warn('SKIP_AFTER_CALL_NOT_OK', { res });
+      if (LOGC) console.warn('CALL_RETURNED_NOT_OK', { res });
     }
   } else {
     const skipReasons = [];
-    if (!hasCi)      skipReasons.push('NO_INTENT');
-    if (hasCi && !wantsEnd)   skipReasons.push('BOX_UNTICKED_end_existing=false');
-    if (hasCi && !hasSource)  skipReasons.push('MISSING_source_contract_id');
-    if (hasCi && !hasEndDate) skipReasons.push('MISSING_end_existing_on');
-    if (!hasFn)      skipReasons.push('NO_endContractSafely');
-    if (LOGC) console.log('SKIP_CALL', { reasons: skipReasons });
+    if (!hasCi)                     skipReasons.push('NO_INTENT');
+    if (hasCi && !wantsEnd)         skipReasons.push('BOX_UNTICKED_end_existing=false');
+    if (hasCi && !hasSource)        skipReasons.push('MISSING_source_contract_id');
+    if (hasCi && !hasEndDate)       skipReasons.push('MISSING_end_existing_on');
+    if (!hasFn)                     skipReasons.push('NO_endContractSafely');
+    if (LOGC) console.log('SKIP_CALL (gates false)', { reasons: skipReasons });
   }
 
   if (LOGC) console.log('CLEAR_INTENT');
@@ -1712,6 +1730,7 @@ try {
 } catch (e) {
   if (LOGC) console.warn('[CLONE][post-save decision] EXCEPTION', e);
 }
+
 
       }
 
@@ -2323,7 +2342,10 @@ try {
   },
 
   // 7th: options (now with noParentGate)
- { kind:'contracts', extraButtons, noParentGate: isSuccessorCreate, stayOpenOnSave: isSuccessorCreate }
+ { kind:'contracts', extraButtons, noParentGate: isSuccessorCreate, stayOpenOnSave: isSuccessorCreate,
+  // Diagnostic only:
+  _trace: (LOGC && { tag:'contracts-open', isCreate, isSuccessorCreate, openToken: window.modalCtx.openToken })
+}
 
 );
 
