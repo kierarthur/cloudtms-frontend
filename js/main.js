@@ -12,6 +12,37 @@ window.__LOG_PAYTAB = true;   // logs for payment tab + umbrella prefill
 window.__LOG_MODAL  = true;   // logs from modal framework (showModal)
 const __LOG_API = true;   // turns on authFetch + rates/hospitals/client POST/PATCH logging
 
+// define once, attach to window (only if not present)
+if (typeof window.endContractSafely !== 'function') {
+  window.endContractSafely = async function endContractSafely(contract_id, desired_end) {
+    const LOGC = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : true;
+    const url  = `${window.BROKER_BASE_URL}/api/contracts/${encodeURIComponent(contract_id)}/truncate-tail`;
+    const payload = { desired_end };
+
+    console.groupCollapsed('[TRUNCATE][call]');
+    console.log('→ POST', url, payload);
+
+    let ok=false, json=null;
+    try {
+      if (typeof authFetch === 'function') {
+        const res = await authFetch({ url, method:'POST', headers:{ 'content-type':'application/json' }, body: JSON.stringify(payload) });
+        ok   = !!res?.ok;
+        json = res?.json || res;
+      } else {
+        const r = await fetch(url, { method:'POST', headers:{ 'content-type':'application/json' }, body: JSON.stringify(payload) });
+        ok   = r.ok;
+        try { json = await r.clone().json(); } catch {}
+      }
+      console.log('← OK?', ok, 'payload:', json);
+    } finally {
+      console.groupEnd();
+    }
+
+    if (!ok) throw new Error((json && (json.error||json.message)) || 'truncate-tail failed');
+    if (LOGC) console.log('[CONTRACTS] endContractSafely result', json);
+    return json;
+  };
+}
 
 
 // Quick DOM helper
@@ -1667,81 +1698,107 @@ if (LOGC) console.log('[CONTRACTS] modalCtx.data snapshot', {
         // If this was a Clone&Extend staging and user opted to end the old contract, apply now.
     // If this was a Clone&Extend staging and user opted to end the old contract, apply now.
 try {
+  console.log('[CLONE][post-save hook] ENTER', {
+  hasId: !!savedContractId, isCreate,
+  hasLiveIntent: !!ciLive, hadSnapshot: !!__preCloneIntent
+});
+
   const t0 = Date.now();
   const savedContractId = contractId || (saved?.contract?.id) || (saved?.id) || null;
 
   // Prefer the live intent; if lost due to UI state flips, fall back to the pre-save snapshot
   const ciLive = window.modalCtx?.__cloneIntent || null;
   const ci     = ciLive || __preCloneIntent || null;
+const hasCi      = !!ci;
+const wantsEnd   = !!ci?.end_existing;
+const hasSource  = !!ci?.source_contract_id;
+const hasEndDate = !!ci?.end_existing_on;
 
-  const hasCi      = !!ci;
-  const wantsEnd   = !!ci?.end_existing;
-  const hasSource  = !!ci?.source_contract_id;
-  const hasEndDate = !!ci?.end_existing_on;
-  const hasFn      = (typeof endContractSafely === 'function');
+// 🔧 resolve callable robustly
+const hasFnGlobal = (typeof endContractSafely === 'function');
+const hasFnWindow = (typeof window?.endContractSafely === 'function');
+const callTrim =
+  (hasFnWindow && window.endContractSafely) ||
+  (hasFnGlobal && endContractSafely) ||
+  null;
+const hasFnResolved = !!callTrim;
 
-  if (LOGC) console.groupCollapsed('[CLONE][post-save decision]');
-  if (LOGC) console.log('context', {
-    isCreate,
-    savedContractId,
-    savedStart: window.modalCtx?.data?.start_date || null,
-    savedEnd:   window.modalCtx?.data?.end_date   || null,
-    openToken: window.modalCtx?.openToken || null
+if (LOGC) console.groupCollapsed('[CLONE][post-save decision]');
+
+// entry beacon + resolver visibility
+if (LOGC) console.log('[CLONE][post-save hook] ENTER', {
+  isCreate,
+  savedContractId,
+  savedStart: window.modalCtx?.data?.start_date || null,
+  savedEnd:   window.modalCtx?.data?.end_date   || null,
+  openToken:  window.modalCtx?.openToken || null,
+});
+if (LOGC) console.log('resolver', {
+  winFn: hasFnWindow ? 'function' : typeof window?.endContractSafely,
+  globalFn: hasFnGlobal ? 'function' : typeof endContractSafely,
+  chosen: hasFnResolved
+});
+
+if (LOGC) console.log('intent-checks', {
+  hasCi, wantsEnd, hasSource, hasEndDate,
+  hasFn_global: hasFnGlobal,
+  hasFn_window: hasFnWindow,
+  hasFn_resolved: hasFnResolved,
+  source_contract_id: ci?.source_contract_id || '(missing)',
+  end_existing_on:    ci?.end_existing_on    || '(missing)',
+  usedSnapshot: (!!__preCloneIntent && !ciLive)
+});
+
+// hard guards (will print assertion failures in console if false)
+console.assert(hasCi || __preCloneIntent, '[ASSERT] No clone intent at post-save; cannot truncate tail.');
+console.assert(hasFnResolved,              '[ASSERT] No tail-trim function bound (endContractSafely missing).');
+
+if (hasCi && wantsEnd && hasSource && hasEndDate && hasFnResolved) {
+  if (LOGC) console.log('WILL_CALL endContractSafely', {
+    source: ci.source_contract_id, desired_end: ci.end_existing_on
   });
-  if (LOGC) console.log('intent-checks', {
-    hasCi, wantsEnd, hasSource, hasEndDate, hasFn,
-    source_contract_id: ci?.source_contract_id || '(missing)',
-    end_existing_on:    ci?.end_existing_on    || '(missing)',
-    usedSnapshot: (!!__preCloneIntent && !ciLive)
-  });
 
-  if (hasCi && wantsEnd && hasSource && hasEndDate && hasFn) {
-    if (LOGC) console.log('WILL_CALL endContractSafely', {
-      source: ci.source_contract_id, desired_end: ci.end_existing_on
-    });
+  let res = null, ok=false, clamped=false, safe_end=null, message=null, t1=0;
+  try {
+    res = await callTrim(ci.source_contract_id, ci.end_existing_on);
+    t1  = Date.now();
+    ok       = !!res?.ok;
+    clamped  = !!res?.clamped;
+    safe_end = res?.safe_end || null;
+    message  = res?.message  || null;
+    if (LOGC) console.log('endContractSafely RESULT', { ok, clamped, safe_end, message, elapsed_ms: (t1 - t0), raw: res });
+  } catch (err) {
+    if (LOGC) console.warn('endContractSafely THREW', err);
+  }
 
-    let res = null, ok=false, clamped=false, safe_end=null, message=null, t1=0;
-    try {
-      res = await endContractSafely(ci.source_contract_id, ci.end_existing_on);
-      t1 = Date.now();
-      ok       = !!res?.ok;
-      clamped  = !!res?.clamped;
-      safe_end = res?.safe_end || null;
-      message  = res?.message  || null;
-      if (LOGC) console.log('endContractSafely RESULT', { ok, clamped, safe_end, message, elapsed_ms: (t1 - t0), raw: res });
-    } catch (err) {
-      if (LOGC) console.warn('endContractSafely THREW', err);
+  if (ok) {
+    if (clamped && typeof showTailClampWarning === 'function') {
+      try { showTailClampWarning(safe_end, ci.end_existing_on); } catch {}
     }
-
-    if (ok) {
-      if (clamped && typeof showTailClampWarning === 'function') {
-        try { showTailClampWarning(safe_end, ci.end_existing_on); } catch {}
-      }
-      if (typeof refreshOldContractAfterTruncate === 'function') {
-        try { await refreshOldContractAfterTruncate(ci.source_contract_id); } catch (e) { if (LOGC) console.warn('refreshOldContractAfterTruncate failed', e); }
-      }
-      // ✅ only clear AFTER a successful (or at least attempted) tail-trim path
-      if (LOGC) console.log('CLEAR_INTENT (after endContractSafely)');
-      clearCloneIntent();
-    } else {
-      if (LOGC) console.warn('CALL_RETURNED_NOT_OK', { res });
-      // Still clear to avoid leaking intent into future operations
-      if (LOGC) console.log('CLEAR_INTENT (after not-ok result)');
-      clearCloneIntent();
+    if (typeof refreshOldContractAfterTruncate === 'function') {
+      try { await refreshOldContractAfterTruncate(ci.source_contract_id); } catch (e) { if (LOGC) console.warn('refreshOldContractAfterTruncate failed', e); }
     }
+    if (LOGC) console.log('CLEAR_INTENT (after endContractSafely)');
+    clearCloneIntent();
   } else {
-    const skipReasons = [];
-    if (!hasCi)                     skipReasons.push('NO_INTENT');
-    if (hasCi && !wantsEnd)         skipReasons.push('BOX_UNTICKED_end_existing=false');
-    if (hasCi && !hasSource)        skipReasons.push('MISSING_source_contract_id');
-    if (hasCi && !hasEndDate)       skipReasons.push('MISSING_end_existing_on');
-    if (!hasFn)                     skipReasons.push('NO_endContractSafely');
-    if (LOGC) console.log('SKIP_CALL (gates false)', { reasons: skipReasons });
-
-    // If we’re skipping for any reason, clear once, here.
-    if (LOGC) console.log('CLEAR_INTENT (skip path)');
+    if (LOGC) console.warn('CALL_RETURNED_NOT_OK', { res });
+    if (LOGC) console.log('CLEAR_INTENT (after not-ok result)');
     clearCloneIntent();
   }
+} else {
+  const skipReasons = [];
+  if (!hasCi)               skipReasons.push('NO_INTENT');
+  if (hasCi && !wantsEnd)   skipReasons.push('BOX_UNTICKED_end_existing=false');
+  if (hasCi && !hasSource)  skipReasons.push('MISSING_source_contract_id');
+  if (hasCi && !hasEndDate) skipReasons.push('MISSING_end_existing_on');
+  if (!hasFnResolved)       skipReasons.push('NO_endContractSafely');
+
+  if (LOGC) console.log('SKIP_CALL (gates false)', { reasons: skipReasons });
+  if (LOGC) console.log('CLEAR_INTENT (skip path)');
+  clearCloneIntent();
+}
+
+
 
   if (LOGC) console.groupEnd?.();
 } catch (e) {
