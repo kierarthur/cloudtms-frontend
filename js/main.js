@@ -2279,7 +2279,7 @@ if (contractId) {
         });
       }
     },
-    { kind:'contracts', extraButtons }
+   { kind:'contracts', extraButtons, forceEdit: !!isCreate }
   );
 
   setTimeout(() => {
@@ -12199,9 +12199,18 @@ function setFrameMode(frameObj, mode) {
   L('setFrameMode ENTER', { prevMode: frameObj.mode, nextMode: mode, isChild: (stack().length>1), noParentGate: frameObj.noParentGate });
   const prev = frameObj.mode; frameObj.mode = mode;
   const isChild = (stack().length > 1);
-  if (frameObj.noParentGate) setFormReadOnly(byId('modalBody'), (mode==='view'||mode==='saving'));
-  else if (isChild)          { const p=parentFrame(); setFormReadOnly(byId('modalBody'), !(p && (p.mode==='edit'||p.mode==='create'))); }
-  else                       setFormReadOnly(byId('modalBody'), (mode==='view'||mode==='saving'));
+
+  // ▶ never read-only while creating
+  if (mode === 'create') {
+    setFormReadOnly(byId('modalBody'), false);
+  } else if (frameObj.noParentGate) {
+    setFormReadOnly(byId('modalBody'), (mode==='view'||mode==='saving'));
+  } else if (isChild) {
+    const p=parentFrame(); setFormReadOnly(byId('modalBody'), !(p && (p.mode==='edit'||p.mode==='create')));
+  } else {
+    setFormReadOnly(byId('modalBody'), (mode==='view'||mode==='saving'));
+  }
+
 
   if (typeof frameObj._updateButtons === 'function') frameObj._updateButtons();
 
@@ -12372,17 +12381,22 @@ function setFrameMode(frameObj, mode) {
       btnSave.disabled = (!parentEditable) || top._saving || !wantApply;
       btnEdit.style.display='none'; if (relatedBtn) relatedBtn.disabled=true;
       if (LOG) console.log('[MODAL] child _updateButtons()', { parentEditable, wantApply, disabled: btnSave.disabled });
-    } else {
+       } else {
       btnEdit.style.display = (top.mode==='view' && top.hasId) ? '' : 'none';
       if (relatedBtn) relatedBtn.disabled = !(top.mode==='view' && top.hasId);
-      if (top.mode==='view') {
+
+      // ▶ ensure Save is visible in create mode
+      if (top.mode === 'create') {
+        btnSave.style.display = '';
+        btnSave.disabled = top._saving;   // visibility independent of dirtiness
+      } else if (top.mode==='view') {
         btnSave.style.display = top.noParentGate ? '' : 'none';
         btnSave.disabled = top._saving;
       } else {
         btnSave.style.display='';
-
         let gateOK = true;
         let elig   = null;
+
         if (top.entity === 'contracts') {
           try {
             gateOK = (typeof computeContractSaveEligibility === 'function') ? !!computeContractSaveEligibility() : true;
@@ -12587,14 +12601,22 @@ byId('btnCloseModal').onclick = handleSecondary;
       return;
     }
 
-    if (isChildNow) {
+        if (isChildNow) {
       try { window.dispatchEvent(new CustomEvent('modal-dirty')); } catch {}
       sanitizeModalGeometry(); window.__modalStack.pop();
       if (window.__modalStack.length>0) {
-        const p=window.__modalStack[window.__modalStack.length-1]; p.isDirty=true; p._updateButtons&&p._updateButtons(); renderTop(); try{ p.onReturn && p.onReturn(); }catch{}
+        const p=window.__modalStack[window.__modalStack.length-1];
+        // ▶ ensure parent is back in view so actions (Clone & Extend) show
+        try { setFrameMode(p, 'view'); } catch {}
+        p.isDirty=true; p._updateButtons&&p._updateButtons();
+        renderTop();
+        // ▶ nudge calendar/action bar re-wire if needed
+        try { window.dispatchEvent(new Event('contracts-main-rendered')); } catch {}
+        try { p.onReturn && p.onReturn(); }catch{}
       } else {
       }
       L('saveForFrame EXIT (global child)');
+
     } else {
       try {
         const savedContract = (saved && (saved.contract || saved)) || null;
