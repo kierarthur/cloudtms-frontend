@@ -3711,97 +3711,100 @@ function openContractCloneAndExtend(contract_id) {
     </div>
   `;
 
-  showModal(
-    'Clone & Extend',
-    [{ key:'c', title:'Successor window' }],
-    () => content,
-    async () => {
-      const root = document.getElementById('cloneExtendForm') || document;
+ showModal(
+  'Clone & Extend',
+  [{ key:'c', title:'Successor window' }],
+  () => content,
+  async () => {
+    const LOGM = !!window.__LOG_MODAL;
+    const root = document.getElementById('cloneExtendForm') || document;
 
-      const newStartUk  = root.querySelector('input[name="new_start_date"]')?.value?.trim() || '';
-      const newEndUk    = root.querySelector('input[name="new_end_date"]')?.value?.trim()   || '';
-      const endChk      = !!root.querySelector('input[name="end_existing_checked"]')?.checked;
-      const endOldUk    = root.querySelector('input[name="end_existing_on"]')?.value?.trim() || '';
+    const newStartUk  = root.querySelector('input[name="new_start_date"]')?.value?.trim() || '';
+    const newEndUk    = root.querySelector('input[name="new_end_date"]')?.value?.trim()   || '';
+    const endChk      = !!root.querySelector('input[name="end_existing_checked"]')?.checked;
+    const endOldUk    = root.querySelector('input[name="end_existing_on"]')?.value?.trim() || '';
 
-      const new_start_date = parseUkDateToIso(newStartUk);
-      const new_end_date   = parseUkDateToIso(newEndUk);
-      const end_existing_on= endChk ? parseUkDateToIso(endOldUk) : null;
+    const new_start_date  = parseUkDateToIso(newStartUk);
+    const new_end_date    = parseUkDateToIso(newEndUk);
+    const end_existing_on = endChk ? parseUkDateToIso(endOldUk) : null;
 
-      if (!new_start_date || !new_end_date) { alert('Enter both new start and new end.'); return false; }
-      if (new_start_date > new_end_date)   { alert('New end must be on or after new start.'); return false; }
+    if (!new_start_date || !new_end_date) { alert('Enter both new start and new end.'); return false; }
+    if (new_start_date > new_end_date)    { alert('New end must be on or after new start.'); return false; }
 
+    // Validate “end existing” only if checked
+    try {
+      const oldStartIso = (window.modalCtx?.data?.start_date) || '';
       if (endChk) {
-        if (!end_existing_on)               { alert('Pick a valid end date for the existing contract.'); return false; }
-        if (end_existing_on < oldStart)     { alert('Existing contract cannot end before its original start.'); return false; }
+        if (!end_existing_on) { alert('Pick a valid end date for the existing contract.'); return false; }
+        if (oldStartIso && end_existing_on < oldStartIso) { alert('Existing contract cannot end before its original start.'); return false; }
         if (end_existing_on >= new_start_date) { alert('Existing contract end must be before the new start.'); return false; }
       }
+    } catch {}
 
-      // === STAGING (no backend create here) ===
-      const newToken = `contract:new:${Date.now()}:${Math.random().toString(36).slice(2)}`;
-      const LOGM = (typeof window.__LOG_MODAL === 'boolean') ? window.__LOG_MODAL : true;
+    // Stage intent under a fresh token (no backend create yet)
+    const newToken = `contract:new:${Date.now()}:${Math.random().toString(36).slice(2)}`;
+    if (!window.__cloneIntents) window.__cloneIntents = {};
+    window.__cloneIntents[newToken] = {
+      source_contract_id: String(window.modalCtx?.data?.id || ''),
+      end_existing: !!endChk,
+      end_existing_on: endChk ? end_existing_on : null,
+      new_start_date,
+      new_end_date
+    };
+    if (LOGM) console.log('[CLONE] stage intent', { token: newToken, intent: window.__cloneIntents[newToken] });
 
-window.__cloneIntents = window.__cloneIntents || {};
-window.__cloneIntents[newToken] = {
-  source_contract_id: String(old?.id || contract_id || ''),
-  end_existing: !!endChk,
-  end_existing_on: end_existing_on || null,
-  new_start_date, new_end_date
-};
-if (LOGM) console.log('[CLONE] stage intent', { token: newToken, intent: window.__cloneIntents[newToken] });
+    // Build staged successor row from current contract as template
+    const old = window.modalCtx?.data || {};
+    const stagedRow = {
+      id: null,
+      candidate_id: old.candidate_id || '',
+      client_id:    old.client_id    || '',
+      role:         old.role         || '',
+      band:         (old.band ?? null),
+      display_site: old.display_site || '',
+      start_date:   new_start_date,
+      end_date:     new_end_date,
+      pay_method_snapshot: old.pay_method_snapshot || 'PAYE',
+      default_submission_mode: old.default_submission_mode || 'ELECTRONIC',
+      week_ending_weekday_snapshot: Number(old.week_ending_weekday_snapshot ?? 0),
+      std_schedule_json: old.std_schedule_json || null,
+      std_hours_json:    old.std_hours_json    || null,
+      bucket_labels_json: old.bucket_labels_json || null,
+      rates_json: (old.rates_json && typeof old.rates_json === 'object') ? old.rates_json : {}
+    };
 
-      
-      // Build a lightweight row-less shell to open in Create mode
-      const stagedRow = {
-        id: null,
-        candidate_id: m.candidate_id,
-        client_id: m.client_id,
-        role: m.role,
-        band: m.band || null,
-        display_site: m.display_site || '',
-        start_date: m.start_date,
-        end_date: m.end_date,
-        pay_method_snapshot: m.pay_method_snapshot,
-        default_submission_mode: m.default_submission_mode,
-        week_ending_weekday_snapshot: Number(m.week_ending_weekday_snapshot || 0),
-        std_schedule_json: m.__template || null,
-        std_hours_json:    m.__hours    || null,
-        bucket_labels_json:m.__bucket_labels || null,
-        rates_json: rates || {}
-      };
-
-     // Open the normal contract modal in Create mode; calendar will stage against newToken
-try {
-  if (LOGM) console.log('[CLONE] opening staged successor in Create mode', { token: newToken });
-  // Make sure an openToken is present for staging bucket (pre-launch best effort)
-  window.modalCtx = window.modalCtx || {};
-  window.modalCtx.openToken = newToken;
-  openContract(stagedRow);
-
-  // After the modal constructs its own modalCtx, bind our token + persist forId
-  setTimeout(() => {
+    // Open the normal contract modal in Create mode; calendar will stage against newToken
     try {
-      if (window.modalCtx) {
-        window.modalCtx.openToken = newToken;
-        const fs2 = (window.modalCtx.formState ||= { __forId: newToken, main:{}, pay:{} });
-        if (!fs2.__forId) fs2.__forId = newToken;
-        if (LOGM) console.log('[CLONE] bound token to create modal', { openToken: window.modalCtx.openToken, forId: fs2.__forId });
-      }
+      if (LOGM) console.log('[CLONE] opening staged successor in Create mode', { token: newToken, stagedRow });
+      if (!window.modalCtx) window.modalCtx = {};
+      window.modalCtx.openToken = newToken;
+      openContract(stagedRow);
+
+      // After the modal constructs its own modalCtx, bind token + ensure forId
+      setTimeout(() => {
+        try {
+          if (window.modalCtx) {
+            window.modalCtx.openToken = newToken;
+            if (!window.modalCtx.formState) window.modalCtx.formState = { __forId: newToken, main:{}, pay:{} };
+            if (!window.modalCtx.formState.__forId) window.modalCtx.formState.__forId = newToken;
+            if (LOGM) console.log('[CLONE] bound token to create modal', { openToken: window.modalCtx.openToken, forId: window.modalCtx.formState.__forId });
+          }
+        } catch (e) {
+          console.warn('[CLONE] bind token failed', e);
+        }
+      }, 0);
     } catch (e) {
-      console.warn('[CLONE] bind token failed', e);
+      console.error('[CLONE] openContract failed', e);
+      try { renderAll(); } catch {}
     }
-  }, 0);
-} catch (e) {
-  console.error('[CLONE] openContract failed', e);
-  try { renderAll(); } catch {}
-}
 
-return true;
+    return true;
+  },
+  false,
+  null,
+  { kind:'contract-clone-extend', forceEdit:true }
+);
 
-    },
-    false,
-    null,
-    { kind:'contract-clone-extend', forceEdit:true } // child is editable; show Create/Cancel labels
-  );
 
   // Wire pickers & auto-sync after mount
   setTimeout(() => {
@@ -3819,14 +3822,21 @@ return true;
 
     const isoMinusOne = (isoStr) => { try { const d=new Date(isoStr+'T00:00:00Z'); d.setUTCDate(d.getUTCDate()-1); return toYmd(d); } catch { return null; } };
 
-    const onStartChange = () => {
-      const startIso = parseUkDateToIso(startEl.value || '') || oldEnd;
-      const maxOldEndUk = formatIsoToUk(isoMinusOne(startIso));
-      endOld.setMinDate(formatIsoToUk(oldStart));
-      endOld.setMaxDate(maxOldEndUk);
-      if (endChk.checked) endOld.value = maxOldEndUk;
-      if (LOGM) console.log('[CLONE] onStartChange', { startIso, endOldUk: endOld.value });
-    };
+const onStartChange = () => {
+  const startIso = parseUkDateToIso(startEl.value || '') || defaultStart;
+  const maxOldEndIso = isoMinusOne(startIso);
+  const maxOldEndUk  = formatIsoToUk(maxOldEndIso);
+
+  // update bounds
+  if (typeof endOld.setMinDate === 'function') endOld.setMinDate(formatIsoToUk(oldStart));
+  // attachUkDatePicker doesn't expose setMaxDate; set the internal bound + repaint
+  endOld._maxIso = maxOldEndIso;
+  if (typeof endOld.__ukdpRepaint === 'function') endOld.__ukdpRepaint();
+
+  if (endChk.checked) endOld.value = maxOldEndUk;
+
+  if (LOGM) console.log('[CLONE] onStartChange', { startIso, endOldUk: endOld.value, maxOldEndIso });
+};
 
     const onChkToggle = () => {
       const checked = !!endChk.checked;
