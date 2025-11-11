@@ -1211,17 +1211,27 @@ function openContract(row) {
   const isCreate = !row || !row.id;
   if (LOGC) console.log('[CONTRACTS] openContract ENTRY', { isCreate, rowPreview: !!row });
 
-  window.modalCtx = {
+   window.modalCtx = {
     entity: 'contracts',
     mode: isCreate ? 'create' : 'view',
     data: { ...(row || {}) },
     _saveInFlight: false
   };
 
-    if (isCreate && !window.modalCtx.openToken) {
-    window.modalCtx.openToken = `contract:new:${Date.now()}:${Math.random().toString(36).slice(2)}`;
-    if (LOGC) console.log('[CONTRACTS] openToken issued for create', window.modalCtx.openToken);
+  const preToken = window.__preOpenToken || null;
+  if (LOGC) console.log('[CONTRACTS] preOpenToken snapshot', preToken);
+
+  if (isCreate) {
+    if (preToken) {
+      window.modalCtx.openToken = preToken;
+      try { delete window.__preOpenToken; } catch {}
+      if (LOGC) console.log('[CONTRACTS] using preOpenToken for create', preToken);
+    } else if (!window.modalCtx.openToken) {
+      window.modalCtx.openToken = `contract:new:${Date.now()}:${Math.random().toString(36).slice(2)}`;
+      if (LOGC) console.log('[CONTRACTS] openToken issued for create', window.modalCtx.openToken);
+    }
   }
+
 
   // If this create comes from Clone&Extend staging, pull intent (end-old etc.)
   try {
@@ -1242,8 +1252,10 @@ function openContract(row) {
   try {
     const base = window.modalCtx.data || {};
 
-    const fs = (window.modalCtx.formState ||= { __forId: (base.id ?? window.modalCtx.openToken ?? null), main:{}, pay:{} });
-    fs.__forId = fs.__forId ?? (base.id ?? window.modalCtx.openToken ?? null);
+       const fs = (window.modalCtx.formState ||= { __forId: (base.id ?? window.modalCtx.openToken ?? null), main:{}, pay:{} });
+    fs.__forId = preToken || fs.__forId || (base.id ?? window.modalCtx.openToken ?? null);
+    if (LOGC) console.log('[CONTRACTS] formState forId bound', { preToken, forId: fs.__forId, openToken: window.modalCtx.openToken });
+
     const m = (fs.main ||= {});
     if (m.__seeded !== true) {
       if (base.candidate_id != null) m.candidate_id = base.candidate_id;
