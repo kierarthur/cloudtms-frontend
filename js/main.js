@@ -1353,6 +1353,11 @@ showModal(
       if (LOGC) console.groupCollapsed('[CONTRACTS] onSave pipeline');
 
       snapshotContractForm();
+// Keep a stable copy in case something re-renders and drops modalCtx.__cloneIntent
+const __preCloneIntent = window.modalCtx?.__cloneIntent
+  ? { ...window.modalCtx.__cloneIntent }
+  : null;
+if (LOGC) console.log('[CLONE][pre-save snapshot]', __preCloneIntent || '(none)');
 
       const base = window.modalCtx?.data || {};
       const fs   = (window.modalCtx?.formState || { main:{}, pay:{} });
@@ -1664,7 +1669,10 @@ if (LOGC) console.log('[CONTRACTS] modalCtx.data snapshot', {
 try {
   const t0 = Date.now();
   const savedContractId = contractId || (saved?.contract?.id) || (saved?.id) || null;
-  const ci = window.modalCtx.__cloneIntent || null;
+
+  // Prefer the live intent; if lost due to UI state flips, fall back to the pre-save snapshot
+  const ciLive = window.modalCtx?.__cloneIntent || null;
+  const ci     = ciLive || __preCloneIntent || null;
 
   const hasCi      = !!ci;
   const wantsEnd   = !!ci?.end_existing;
@@ -1683,7 +1691,8 @@ try {
   if (LOGC) console.log('intent-checks', {
     hasCi, wantsEnd, hasSource, hasEndDate, hasFn,
     source_contract_id: ci?.source_contract_id || '(missing)',
-    end_existing_on: ci?.end_existing_on || '(missing)'
+    end_existing_on:    ci?.end_existing_on    || '(missing)',
+    usedSnapshot: (!!__preCloneIntent && !ciLive)
   });
 
   if (hasCi && wantsEnd && hasSource && hasEndDate && hasFn) {
@@ -1711,8 +1720,14 @@ try {
       if (typeof refreshOldContractAfterTruncate === 'function') {
         try { await refreshOldContractAfterTruncate(ci.source_contract_id); } catch (e) { if (LOGC) console.warn('refreshOldContractAfterTruncate failed', e); }
       }
+      // ✅ only clear AFTER a successful (or at least attempted) tail-trim path
+      if (LOGC) console.log('CLEAR_INTENT (after endContractSafely)');
+      clearCloneIntent();
     } else {
       if (LOGC) console.warn('CALL_RETURNED_NOT_OK', { res });
+      // Still clear to avoid leaking intent into future operations
+      if (LOGC) console.log('CLEAR_INTENT (after not-ok result)');
+      clearCloneIntent();
     }
   } else {
     const skipReasons = [];
@@ -1722,14 +1737,17 @@ try {
     if (hasCi && !hasEndDate)       skipReasons.push('MISSING_end_existing_on');
     if (!hasFn)                     skipReasons.push('NO_endContractSafely');
     if (LOGC) console.log('SKIP_CALL (gates false)', { reasons: skipReasons });
+
+    // If we’re skipping for any reason, clear once, here.
+    if (LOGC) console.log('CLEAR_INTENT (skip path)');
+    clearCloneIntent();
   }
 
-  if (LOGC) console.log('CLEAR_INTENT');
-  clearCloneIntent();
   if (LOGC) console.groupEnd?.();
 } catch (e) {
   if (LOGC) console.warn('[CLONE][post-save decision] EXCEPTION', e);
 }
+
 
 
       }
