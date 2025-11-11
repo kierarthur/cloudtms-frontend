@@ -1234,20 +1234,34 @@ function openContract(row) {
 
 
   // If this create comes from Clone&Extend staging, pull intent (end-old etc.)
-  try {
-    const intents = (window.__cloneIntents || {});
-    const ci = intents[window.modalCtx.openToken];
-    if (ci) {
-      window.modalCtx.__cloneIntent = { ...ci };
-      if (LOGC) console.log('[CONTRACTS] clone intent attached to modalCtx', { token: window.modalCtx.openToken, intent: window.modalCtx.__cloneIntent });
-      // one-shot: keep it only on this modal
-      try { delete intents[window.modalCtx.openToken]; } catch {}
-    } else {
-      if (LOGC) console.log('[CONTRACTS] no clone intent for token', window.modalCtx.openToken);
-    }
-  } catch (e) {
-    if (LOGC) console.warn('[CONTRACTS] failed to attach clone intent', e);
+  // If this create comes from Clone&Extend staging, pull intent (end-old etc.)
+try {
+  const intents = (window.__cloneIntents || {});
+  const token   = window.modalCtx.openToken;
+  const ci      = intents[token];
+
+  if (LOGC) console.groupCollapsed('[CLONE][attach-intent]');
+  if (LOGC) console.log('openToken', token);
+  if (LOGC) console.log('intents.hasToken', Object.prototype.hasOwnProperty.call(intents, token));
+  if (LOGC) console.log('intent.keys', ci ? Object.keys(ci) : '(none)');
+
+  if (ci) {
+    window.modalCtx.__cloneIntent = { ...ci };
+    if (LOGC) console.log('ATTACHED', {
+      end_existing: !!ci.end_existing,
+      source_contract_id: ci.source_contract_id || '(missing)',
+      end_existing_on: ci.end_existing_on || '(missing)'
+    });
+    // one-shot: keep it only on this modal
+    try { delete intents[token]; if (LOGC) console.log('intent cleared from staging bucket'); } catch {}
+  } else {
+    if (LOGC) console.log('NO_INTENT_FOR_TOKEN');
   }
+  if (LOGC) console.groupEnd?.();
+} catch (e) {
+  if (LOGC) console.warn('[CLONE][attach-intent] EXCEPTION', e);
+}
+
 
   try {
     const base = window.modalCtx.data || {};
@@ -1633,19 +1647,72 @@ showModal(
         window.__pendingFocus = { section: 'contracts', id: contractId };
 
         // If this was a Clone&Extend staging and user opted to end the old contract, apply now.
-      try {
+    // If this was a Clone&Extend staging and user opted to end the old contract, apply now.
+try {
+  const savedContractId = contractId || (saved?.contract?.id) || (saved?.id) || null;
   const ci = window.modalCtx.__cloneIntent || null;
-  if (ci && ci.end_existing && ci.source_contract_id && ci.end_existing_on) {
-    const res = await endContractSafely(ci.source_contract_id, ci.end_existing_on);
-    if (res && res.ok) {
-      if (res.clamped) showTailClampWarning(res.safe_end, ci.end_existing_on);
-      await refreshOldContractAfterTruncate(ci.source_contract_id);
+
+  const hasCi      = !!ci;
+  const wantsEnd   = !!ci?.end_existing;
+  const hasSource  = !!ci?.source_contract_id;
+  const hasEndDate = !!ci?.end_existing_on;
+  const hasFn      = (typeof endContractSafely === 'function');
+
+  if (LOGC) console.groupCollapsed('[CLONE][post-save decision]');
+  if (LOGC) console.log('context', {
+    savedContractId,
+    openToken: window.modalCtx?.openToken || null
+  });
+  if (LOGC) console.log('intent-checks', {
+    hasCi, wantsEnd, hasSource, hasEndDate, hasFn,
+    source_contract_id: ci?.source_contract_id || '(missing)',
+    end_existing_on: ci?.end_existing_on || '(missing)'
+  });
+
+  if (hasCi && wantsEnd && hasSource && hasEndDate && hasFn) {
+    if (LOGC) console.log('WILL_CALL endContractSafely', {
+      source: ci.source_contract_id, desired_end: ci.end_existing_on
+    });
+
+    let res = null, ok=false, clamped=false, safe_end=null, message=null;
+    try {
+      res = await endContractSafely(ci.source_contract_id, ci.end_existing_on);
+      ok       = !!res?.ok;
+      clamped  = !!res?.clamped;
+      safe_end = res?.safe_end || null;
+      message  = res?.message  || null;
+      if (LOGC) console.log('endContractSafely RESULT', { ok, clamped, safe_end, message, raw: res });
+    } catch (err) {
+      if (LOGC) console.warn('endContractSafely THREW', err);
     }
+
+    if (ok) {
+      if (clamped && typeof showTailClampWarning === 'function') {
+        try { showTailClampWarning(safe_end, ci.end_existing_on); } catch {}
+      }
+      if (typeof refreshOldContractAfterTruncate === 'function') {
+        try { await refreshOldContractAfterTruncate(ci.source_contract_id); } catch (e) { if (LOGC) console.warn('refreshOldContractAfterTruncate failed', e); }
+      }
+    } else {
+      if (LOGC) console.warn('SKIP_AFTER_CALL_NOT_OK', { res });
+    }
+  } else {
+    const skipReasons = [];
+    if (!hasCi)      skipReasons.push('NO_INTENT');
+    if (hasCi && !wantsEnd)   skipReasons.push('BOX_UNTICKED_end_existing=false');
+    if (hasCi && !hasSource)  skipReasons.push('MISSING_source_contract_id');
+    if (hasCi && !hasEndDate) skipReasons.push('MISSING_end_existing_on');
+    if (!hasFn)      skipReasons.push('NO_endContractSafely');
+    if (LOGC) console.log('SKIP_CALL', { reasons: skipReasons });
   }
+
+  if (LOGC) console.log('CLEAR_INTENT');
   clearCloneIntent();
+  if (LOGC) console.groupEnd?.();
 } catch (e) {
-  if (LOGC) console.warn('[CONTRACTS][CLONE] safe tail truncate failed', e);
+  if (LOGC) console.warn('[CLONE][post-save decision] EXCEPTION', e);
 }
+
       }
 
       try {
