@@ -1218,13 +1218,30 @@ function openContract(row) {
     _saveInFlight: false
   };
 
-  if (isCreate && !window.modalCtx.openToken) {
+    if (isCreate && !window.modalCtx.openToken) {
     window.modalCtx.openToken = `contract:new:${Date.now()}:${Math.random().toString(36).slice(2)}`;
     if (LOGC) console.log('[CONTRACTS] openToken issued for create', window.modalCtx.openToken);
   }
 
+  // If this create comes from Clone&Extend staging, pull intent (end-old etc.)
+  try {
+    const intents = (window.__cloneIntents || {});
+    const ci = intents[window.modalCtx.openToken];
+    if (ci) {
+      window.modalCtx.__cloneIntent = { ...ci };
+      if (LOGC) console.log('[CONTRACTS] clone intent attached to modalCtx', { token: window.modalCtx.openToken, intent: window.modalCtx.__cloneIntent });
+      // one-shot: keep it only on this modal
+      try { delete intents[window.modalCtx.openToken]; } catch {}
+    } else {
+      if (LOGC) console.log('[CONTRACTS] no clone intent for token', window.modalCtx.openToken);
+    }
+  } catch (e) {
+    if (LOGC) console.warn('[CONTRACTS] failed to attach clone intent', e);
+  }
+
   try {
     const base = window.modalCtx.data || {};
+
     const fs = (window.modalCtx.formState ||= { __forId: (base.id ?? window.modalCtx.openToken ?? null), main:{}, pay:{} });
     fs.__forId = fs.__forId ?? (base.id ?? window.modalCtx.openToken ?? null);
     const m = (fs.main ||= {});
@@ -1242,7 +1259,13 @@ function openContract(row) {
       if (base.bucket_labels_json)   m.__bucket_labels = base.bucket_labels_json;
       if (base.std_schedule_json)    m.__template      = base.std_schedule_json;
       if (base.std_hours_json)       m.__hours         = base.std_hours_json;
-      m.__seeded = true;
+            m.__seeded = true;
+      if (LOGC) console.log('[CONTRACTS] seed formState (main/pay) from base row', {
+        forId: (window.modalCtx.formState && window.modalCtx.formState.__forId),
+        mainKeys: Object.keys(window.modalCtx.formState?.main || {}),
+        payKeys: Object.keys(window.modalCtx.formState?.pay || {})
+      });
+
     }
     const p = (fs.pay ||= {});
     if (!Object.keys(p).length && base.rates_json && typeof base.rates_json === 'object') {
@@ -1593,10 +1616,54 @@ function openContract(row) {
           if (warnStr) { if (LOGC) console.warn('[CONTRACTS] warnings', warnStr); showModalHint?.(`Warning: ${warnStr}`, 'warn'); }
         } catch {}
 
-        const contractId = saved?.id || saved?.contract?.id;
+              const contractId = saved?.id || saved?.contract?.id;
 if (contractId) {
   window.__pendingFocus = { section: 'contracts', id: contractId };
+
+  // If this was a Clone&Extend staging and user opted to end the old contract, apply now.
+  try {
+    const ci = window.modalCtx.__cloneIntent || null;
+    if (ci && ci.end_existing && ci.source_contract_id && ci.end_existing_on) {
+      if (LOGC) console.log('[CONTRACTS][CLONE] applying end-existing', {
+        source: ci.source_contract_id, end_on: ci.end_existing_on, successor: contractId
+      });
+
+      // 1) Unplan days AFTER end_existing_on (day+1 .. previous end), skipping weeks with timesheets
+      const prevEnd = (window.__sourceRowPreview && window.__sourceRowPreview.end_date) || null; // optional assist; safe if null
+      const dayPlusOne = (iso)=>{ const d=new Date(iso+'T00:00:00Z'); d.setUTCDate(d.getUTCDate()+1); return d.toISOString().slice(0,10); };
+      const fromY = dayPlusOne(ci.end_existing_on);
+      if (typeof contractsUnplanRanges === 'function' && prevEnd && fromY <= prevEnd) {
+        await contractsUnplanRanges(ci.source_contract_id, {
+          when_timesheet_exists: 'skip',
+          empty_week_action: 'cancel',
+          ranges: [{ from: fromY, to: prevEnd, days: [] }]
+        });
+        if (LOGC) console.log('[CONTRACTS][CLONE] unplan tail ok', { from: fromY, to: prevEnd });
+      } else if (LOGC) {
+        console.log('[CONTRACTS][CLONE] skip unplan tail (no prevEnd or range invalid)', { prevEnd, from: fromY });
+      }
+
+      // 2) Patch the old contract end_date to end_existing_on
+      try {
+        const url = `${window.BROKER_BASE_URL}/rest/v1/contracts?id=eq.${encodeURIComponent(ci.source_contract_id)}`;
+        const res = await fetch(url, {
+          method:'PATCH',
+          headers: { 'content-type':'application/json', 'Prefer':'return=minimal', ...(window.sbHeaders || {}) },
+          body: JSON.stringify({ end_date: ci.end_existing_on, updated_at: (new Date()).toISOString() })
+        });
+        if (!res.ok) { try { console.warn('[CONTRACTS][CLONE] end-old PATCH failed', await res.text()); } catch {} }
+        else if (LOGC) console.log('[CONTRACTS][CLONE] end-old patch ok');
+      } catch (e) {
+        if (LOGC) console.warn('[CONTRACTS][CLONE] end-old patch exception', e);
+      }
+    } else if (LOGC) {
+      console.log('[CONTRACTS][CLONE] no end-existing to apply or incomplete intent', { hasIntent: !!ci });
+    }
+  } catch (e) {
+    if (LOGC) console.warn('[CONTRACTS][CLONE] apply end-existing failed', e);
+  }
 }
+
 
         try {
           const fsAll = (window.modalCtx.formState ||= { __forId: (contractId || window.modalCtx.openToken || null), main:{}, pay:{} });
@@ -3605,58 +3672,194 @@ function openManualWeekEditor(week_id, contract_id /* optional but recommended *
 // FIX 2: Clone & Extend endpoint name mismatch (…/clone-and-extend)
 // ──────────────────────────────────────────────────────────────────────────────
 function openContractCloneAndExtend(contract_id) {
+  const LOGM = !!window.__LOG_MODAL;
   const old = (window.modalCtx && window.modalCtx.data) ? window.modalCtx.data : {};
-  const oldEnd = old?.end_date || toYmd(new Date());
+  if (LOGM) console.log('[CLONE] entry', { contract_id, hasOld: !!old?.id, oldPreview: old?.id ? { id: old.id, start: old.start_date, end: old.end_date } : null });
+
+  const iso = (d)=> (typeof d === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(d)) ? d : toYmd(new Date());
+  const oldStart = iso(old?.start_date);
+  const oldEnd   = iso(old?.end_date);
+
+  // Defaults for the wizard
   const defaultStart = (() => { const d=new Date((oldEnd||toYmd(new Date()))+'T00:00:00Z'); d.setUTCDate(d.getUTCDate()+1); return toYmd(d); })();
-  const defaultEnd = (() => { const d=new Date(defaultStart+'T00:00:00Z'); d.setUTCDate(d.getUTCDate()+84); return toYmd(d); })();
+  const defaultEnd   = (() => { const d=new Date(defaultStart+'T00:00:00Z'); d.setUTCDate(d.getUTCDate()+84); return toYmd(d); })();
+  const defaultEndOld= (() => { const d=new Date(defaultStart+'T00:00:00Z'); d.setUTCDate(d.getUTCDate()-1); return toYmd(d); })();
 
   const content = `
-    <div class="tabc">
-      <div class="row"><label>New start</label><div class="controls">
-        <input class="input" type="date" name="new_start_date" value="${defaultStart}" />
-      </div></div>
-      <div class="row"><label>New end</label><div class="controls">
-        <input class="input" type="date" name="new_end_date" value="${defaultEnd}" />
-      </div></div>
-      <div class="mini">The old contract will end on the day before the new start, and planned bookings on or after the new start will be removed where no timesheets exist.</div>
+    <div class="tabc" id="cloneExtendForm">
+      <div class="row"><label>New start</label>
+        <div class="controls"><input class="input" type="text" name="new_start_date" placeholder="DD/MM/YYYY" value="${formatIsoToUk(defaultStart)}" /></div>
+      </div>
+      <div class="row"><label>New end</label>
+        <div class="controls"><input class="input" type="text" name="new_end_date" placeholder="DD/MM/YYYY" value="${formatIsoToUk(defaultEnd)}" /></div>
+      </div>
+
+      <div class="row" style="margin-top:6px">
+        <label style="display:flex;align-items:center;gap:6px">
+          <input type="checkbox" name="end_existing_checked" checked />
+          End existing contract on
+        </label>
+        <div class="controls" style="margin-top:6px">
+          <input class="input" type="text" name="end_existing_on" placeholder="DD/MM/YYYY" value="${formatIsoToUk(defaultEndOld)}" />
+          <div class="mini" style="margin-top:4px">Default is New start − 1 day. Untick to keep the existing contract running.</div>
+        </div>
+      </div>
+
+      <div class="mini" style="margin-top:10px">
+        After this, the successor opens in the normal contract modal (Create mode). You can edit Main / Rates / Calendar before saving.
+      </div>
     </div>
   `;
 
   showModal(
     'Clone & Extend',
-    [{ key:'c', title:'Successor window'}],
+    [{ key:'c', title:'Successor window' }],
     () => content,
     async () => {
-      const root = document;
-      const new_start_date = root.querySelector('input[name="new_start_date"]')?.value?.trim() || null;
-      const new_end_date   = root.querySelector('input[name="new_end_date"]')?.value?.trim() || null;
-      if (!new_start_date || !new_end_date) { alert('Enter both dates.'); return false; }
-      if (new_start_date > new_end_date) { alert('End must be on or after start.'); return false; }
+      const root = document.getElementById('cloneExtendForm') || document;
 
-      const r = await authFetch(API(`/api/contracts/${_enc(contract_id)}/clone-and-extend`), {
-        method:'POST',
-        headers:{'content-type':'application/json'},
-        body: JSON.stringify({ new_start_date, new_end_date })
-      });
-      if (!r?.ok) { alert('Clone & extend failed.'); return false; }
-      const payload = await r.json().catch(()=>null);
-      const successor = payload && (payload.successor || payload.contract || null);
+      const newStartUk  = root.querySelector('input[name="new_start_date"]')?.value?.trim() || '';
+      const newEndUk    = root.querySelector('input[name="new_end_date"]')?.value?.trim()   || '';
+      const endChk      = !!root.querySelector('input[name="end_existing_checked"]')?.checked;
+      const endOldUk    = root.querySelector('input[name="end_existing_on"]')?.value?.trim() || '';
 
-      try { window.__toast?.('Successor created'); } catch {}
-      if (successor && successor.id) {
-        try {
-          openContract(successor);
-        } catch {
-          try { renderAll(); } catch {}
-        }
+      const new_start_date = parseUkDateToIso(newStartUk);
+      const new_end_date   = parseUkDateToIso(newEndUk);
+      const end_existing_on= endChk ? parseUkDateToIso(endOldUk) : null;
+
+      if (!new_start_date || !new_end_date) { alert('Enter both new start and new end.'); return false; }
+      if (new_start_date > new_end_date)   { alert('New end must be on or after new start.'); return false; }
+
+      if (endChk) {
+        if (!end_existing_on)               { alert('Pick a valid end date for the existing contract.'); return false; }
+        if (end_existing_on < oldStart)     { alert('Existing contract cannot end before its original start.'); return false; }
+        if (end_existing_on >= new_start_date) { alert('Existing contract end must be before the new start.'); return false; }
       }
+
+      // === STAGING (no backend create here) ===
+      const newToken = `contract:new:${Date.now()}:${Math.random().toString(36).slice(2)}`;
+      (window.__cloneIntents ||= {});
+      window.__cloneIntents[newToken] = {
+        source_contract_id: String(old?.id || contract_id || ''),
+        end_existing: !!endChk,
+        end_existing_on: end_existing_on || null,
+        new_start_date, new_end_date
+      };
+      if (LOGM) console.log('[CLONE] stage intent', { token: newToken, intent: window.__cloneIntents[newToken] });
+
+      // Seed formState for the successor (so tabs persist while user edits)
+      const fs = (window.modalCtx?.formState ||= { __forId: newToken, main:{}, pay:{} });
+      fs.__forId = newToken;
+      const m = (fs.main ||= {});
+      const p = (fs.pay  ||= {});
+
+      // Clone core fields from the source row
+      m.candidate_id = old.candidate_id || '';
+      m.client_id    = old.client_id    || '';
+      m.role         = old.role         || '';
+      m.band         = (old.band ?? '');
+      m.display_site = (old.display_site || '');
+      m.start_date   = new_start_date;
+      m.end_date     = new_end_date;
+      m.pay_method_snapshot           = (old.pay_method_snapshot || 'PAYE');
+      m.default_submission_mode       = (old.default_submission_mode || 'ELECTRONIC');
+      m.week_ending_weekday_snapshot  = String(old.week_ending_weekday_snapshot ?? 0);
+      m.__template     = old.std_schedule_json || null;
+      m.__hours        = old.std_hours_json    || null;
+      m.__bucket_labels= old.bucket_labels_json|| null;
+
+      // Clone rates (if any)
+      const BUCKETS = ['paye_day','paye_night','paye_sat','paye_sun','paye_bh','umb_day','umb_night','umb_sat','umb_sun','umb_bh','charge_day','charge_night','charge_sat','charge_sun','charge_bh'];
+      const rates = (old.rates_json && typeof old.rates_json === 'object') ? old.rates_json : {};
+      BUCKETS.forEach(k => { if (rates[k] !== undefined && rates[k] !== null) p[k] = String(rates[k]); });
+
+      if (LOGM) console.log('[CLONE] seeded formState', { __forId: fs.__forId, main: { ...m, __template: !!m.__template, __hours: !!m.__hours, __bucket_labels: !!m.__bucket_labels }, payKeys: Object.keys(p) });
+
+      // Build a lightweight row-less shell to open in Create mode
+      const stagedRow = {
+        id: null,
+        candidate_id: m.candidate_id,
+        client_id: m.client_id,
+        role: m.role,
+        band: m.band || null,
+        display_site: m.display_site || '',
+        start_date: m.start_date,
+        end_date: m.end_date,
+        pay_method_snapshot: m.pay_method_snapshot,
+        default_submission_mode: m.default_submission_mode,
+        week_ending_weekday_snapshot: Number(m.week_ending_weekday_snapshot || 0),
+        std_schedule_json: m.__template || null,
+        std_hours_json:    m.__hours    || null,
+        bucket_labels_json:m.__bucket_labels || null,
+        rates_json: rates || {}
+      };
+
+      // Open the normal contract modal in Create mode; calendar will stage against newToken
+      try {
+        if (LOGM) console.log('[CLONE] opening staged successor in Create mode', { token: newToken });
+        // Make sure an openToken is present for staging bucket
+        window.modalCtx = window.modalCtx || {};
+        window.modalCtx.openToken = newToken;
+        openContract(stagedRow);
+      } catch (e) {
+        console.error('[CLONE] openContract failed', e);
+        try { renderAll(); } catch {}
+      }
+
       return true;
     },
     false,
     null,
-    { kind:'clone-extend' }
+    { kind:'contract-clone-extend', forceEdit:true } // child is editable; show Create/Cancel labels
   );
+
+  // Wire pickers & auto-sync after mount
+  setTimeout(() => {
+    const root = document.getElementById('cloneExtendForm');
+    if (!root) return;
+
+    const startEl = root.querySelector('input[name="new_start_date"]');
+    const endEl   = root.querySelector('input[name="new_end_date"]');
+    const endChk  = root.querySelector('input[name="end_existing_checked"]');
+    const endOld  = root.querySelector('input[name="end_existing_on"]');
+
+    attachUkDatePicker(startEl, { minDate: formatIsoToUk(oldStart) });
+    attachUkDatePicker(endEl,   { minDate: startEl.value, maxDate: null });
+    attachUkDatePicker(endOld,  { minDate: formatIsoToUk(oldStart), maxDate: startEl.value });
+
+    const isoMinusOne = (isoStr) => { try { const d=new Date(isoStr+'T00:00:00Z'); d.setUTCDate(d.getUTCDate()-1); return toYmd(d); } catch { return null; } };
+
+    const onStartChange = () => {
+      const startIso = parseUkDateToIso(startEl.value || '') || oldEnd;
+      const maxOldEndUk = formatIsoToUk(isoMinusOne(startIso));
+      endOld.setMinDate(formatIsoToUk(oldStart));
+      endOld.setMaxDate(maxOldEndUk);
+      if (endChk.checked) endOld.value = maxOldEndUk;
+      if (LOGM) console.log('[CLONE] onStartChange', { startIso, endOldUk: endOld.value });
+    };
+
+    const onChkToggle = () => {
+      const checked = !!endChk.checked;
+      endOld.disabled = !checked;
+      if (checked) {
+        const sIso = parseUkDateToIso(startEl.value || '') || oldEnd;
+        const maxIso = isoMinusOne(sIso);
+        const maxUk  = formatIsoToUk(maxIso);
+        const eIso   = parseUkDateToIso(endOld.value || '') || '';
+        if (!eIso || eIso >= sIso || eIso < oldStart) endOld.value = maxUk;
+      }
+      if (LOGM) console.log('[CLONE] onChkToggle', { checked, endOldUk: endOld.value });
+    };
+
+    startEl.addEventListener('change', onStartChange, true);
+    startEl.addEventListener('blur',   onStartChange, true);
+    endChk.addEventListener('change',  onChkToggle,   true);
+
+    onChkToggle();
+    onStartChange();
+  }, 0);
 }
+
 
 function openContractSkipWeeks(contract_id) {
   const content = `
@@ -9756,6 +9959,7 @@ function wireContractCalendarSaveControls(contractId, holder, weekIndex) {
 // ============================================================================
 
 function renderContractCalendarTab(ctx) {
+  const LOGM = !!window.__LOG_MODAL;
   const c = ctx?.data || {};
   const holderId = 'contractCalendarHolder';
 
@@ -9778,6 +9982,7 @@ function renderContractCalendarTab(ctx) {
     : ``);
 
   if (!candId) {
+    if (LOGM) console.log('[CAL][contract] no candidate yet; render hint');
     return `
       <div id="${holderId}" class="tabc">
         <div class="hint">Pick a candidate to view and stage calendar dates.</div>
@@ -9799,12 +10004,13 @@ function renderContractCalendarTab(ctx) {
           ${actionsHtml}
         </div>`;
 
-      // ── FIX: Use candidate-wide calendar when creating (no numeric/real id yet).
       if (c.id) {
+        if (LOGM) console.log('[CAL][contract] render with real contract id', { id: c.id, win });
         await fetchAndRenderContractCalendar(c.id, { from: win.from, to: win.to, view: 'year' });
       } else {
+        if (LOGM) console.log('[CAL][contract] render in CREATE mode (candidate-wide) with token bucket', { token: currentKey, candId, weekEnding });
         await fetchAndRenderCandidateCalendarForContract(
-          currentKey,   // token key to stage against during create
+          currentKey,
           candId,
           { from: win.from, to: win.to, view: 'year', weekEnding: Number(weekEnding) }
         );
@@ -9816,6 +10022,7 @@ function renderContractCalendarTab(ctx) {
           btnAdd.__wired = true;
           btnAdd.addEventListener('click', async () => {
             if (typeof stageAddMissingWeeks === 'function') {
+              if (LOGM) console.log('[CAL][contract] stage add missing weeks', { id: c.id, from: c.start_date || win.from, to: c.end_date || win.to });
               await stageAddMissingWeeks(c.id, { from: c.start_date || win.from, to: c.end_date || win.to });
               try { showModalHint?.('Missing weeks staged (preview only). Save to persist.', 'warn'); } catch {}
             }
@@ -9831,6 +10038,7 @@ function renderContractCalendarTab(ctx) {
           btnRem.addEventListener('click', async () => {
             if (!window.confirm('Remove all unsubmitted weeks for this contract?')) return;
             if (typeof removeAllUnsubmittedWeeks === 'function') {
+              if (LOGM) console.log('[CAL][contract] stage remove all unsubmitted weeks', { id: c.id, from: c.start_date || null, to: c.end_date || null });
               await removeAllUnsubmittedWeeks(c.id, { from: c.start_date || null, to: c.end_date || null });
               try { showModalHint?.('All unsubmitted weeks staged for removal (preview only). Save to persist.', 'warn'); } catch {}
             }
@@ -9843,11 +10051,15 @@ function renderContractCalendarTab(ctx) {
         const btnCE = el.querySelector('#btnCloneExtend');
         if (btnCE && !btnCE.__wired) {
           btnCE.__wired = true;
-          btnCE.addEventListener('click', () => openContractCloneAndExtend(c.id));
+          btnCE.addEventListener('click', () => {
+            if (LOGM) console.log('[CAL][contract] open clone & extend', { id: c.id });
+            openContractCloneAndExtend(c.id);
+          });
         }
       }
     } catch (e) {
       const el = byId(holderId); if (el) el.innerHTML = `<div class="error">Calendar load failed.</div>`;
+      if (LOGM) console.warn('[CAL][contract] calendar render failed', e);
     }
   }, 0);
 
@@ -9857,7 +10069,6 @@ function renderContractCalendarTab(ctx) {
       ${actionsHtml}
     </div>`;
 }
-
 
 
 function isConsecutiveDailyRun(dates) {
@@ -11724,6 +11935,15 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
     L('showModal: reset #modal initial geometry');
   }
 
+    // Allow staging children (Clone & Extend) to be fully editable regardless of parent mode
+  if (opts && opts.kind === 'contract-clone-extend') {
+    opts.noParentGate = true;
+    if (!opts.forceEdit) opts.forceEdit = true;
+    L('showModal(kind=contract-clone-extend): enable noParentGate + forceEdit', { noParentGate: opts.noParentGate, forceEdit: opts.forceEdit });
+  }
+
+
+
   const frame = {
     _token: `f:${Date.now()}:${Math.random().toString(36).slice(2)}`,
 
@@ -12100,8 +12320,14 @@ function setFrameMode(frameObj, mode) {
     top._detachGlobal = ()=>{ try{header.removeEventListener('mousedown',onDown);}catch{} try{header.removeEventListener('dblclick',onDbl);}catch{} document.onmousemove=null; document.onmouseup=null; if(typeof prev==='function'){ try{prev();}catch{} } };
   })();
 
-  const defaultPrimary = (top.kind==='advanced-search') ? 'Search' : (top.noParentGate ? 'Apply' : (isChild ? 'Apply' : 'Save'));
-  btnSave.textContent = defaultPrimary; btnSave.setAttribute('aria-label', defaultPrimary);
+  const defaultPrimary =
+    (top.kind === 'contract-clone-extend') ? 'Create'
+  : (top.kind === 'advanced-search')       ? 'Search'
+  : (top.noParentGate ? 'Apply' : (isChild ? 'Apply' : 'Save'));
+
+    btnSave.textContent = defaultPrimary; btnSave.setAttribute('aria-label', defaultPrimary);
+  L('showModal defaultPrimary', { kind: top.kind, defaultPrimary });
+
 
   const setCloseLabel = ()=>{
     const label = (top.kind==='advanced-search') ? 'Close'
@@ -12172,9 +12398,10 @@ function setFrameMode(frameObj, mode) {
           } catch { gateOK = true; }
         }
 
-        btnSave.disabled = (top.entity === 'contracts')
-          ? (top._saving || !top.isDirty || !gateOK)
+             btnSave.disabled = (top.entity === 'contracts')
+          ? (top._saving || ((top.kind !== 'contract-clone-extend') && !top.isDirty) || !gateOK)
           : (top._saving);
+
       }
     }
     setCloseLabel();
