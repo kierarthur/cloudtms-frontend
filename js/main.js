@@ -1633,47 +1633,19 @@ showModal(
         window.__pendingFocus = { section: 'contracts', id: contractId };
 
         // If this was a Clone&Extend staging and user opted to end the old contract, apply now.
-        try {
-          const ci = window.modalCtx.__cloneIntent || null;
-          if (ci && ci.end_existing && ci.source_contract_id && ci.end_existing_on) {
-            if (LOGC) console.log('[CONTRACTS][CLONE] applying end-existing', {
-              source: ci.source_contract_id, end_on: ci.end_existing_on, successor: contractId
-            });
-
-            // 1) Unplan days AFTER end_existing_on (day+1 .. previous end), skipping weeks with timesheets
-            const prevEnd = (window.__sourceRowPreview && window.__sourceRowPreview.end_date) || null;
-            const dayPlusOne = (iso)=>{ const d=new Date(iso+'T00:00:00Z'); d.setUTCDate(d.getUTCDate()+1); return d.toISOString().slice(0,10); };
-            const fromY = dayPlusOne(ci.end_existing_on);
-            if (typeof contractsUnplanRanges === 'function' && prevEnd && fromY <= prevEnd) {
-              await contractsUnplanRanges(ci.source_contract_id, {
-                when_timesheet_exists: 'skip',
-                empty_week_action: 'cancel',
-                ranges: [{ from: fromY, to: prevEnd, days: [] }]
-              });
-              if (LOGC) console.log('[CONTRACTS][CLONE] unplan tail ok', { from: fromY, to: prevEnd });
-            } else if (LOGC) {
-              console.log('[CONTRACTS][CLONE] skip unplan tail (no prevEnd or range invalid)', { prevEnd, from: fromY });
-            }
-
-            // 2) Patch the old contract end_date to end_existing_on
-            try {
-              const url = `${window.BROKER_BASE_URL}/rest/v1/contracts?id=eq.${encodeURIComponent(ci.source_contract_id)}`;
-              const res = await fetch(url, {
-                method:'PATCH',
-                headers: { 'content-type':'application/json', 'Prefer':'return=minimal', ...(window.sbHeaders || {}) },
-                body: JSON.stringify({ end_date: ci.end_existing_on, updated_at: (new Date()).toISOString() })
-              });
-              if (!res.ok) { try { console.warn('[CONTRACTS][CLONE] end-old PATCH failed', await res.text()); } catch {} }
-              else if (LOGC) console.log('[CONTRACTS][CLONE] end-old patch ok');
-            } catch (e) {
-              if (LOGC) console.warn('[CONTRACTS][CLONE] end-old patch exception', e);
-            }
-          } else if (LOGC) {
-            console.log('[CONTRACTS][CLONE] no end-existing to apply or incomplete intent', { hasIntent: !!ci });
-          }
-        } catch (e) {
-          if (LOGC) console.warn('[CONTRACTS][CLONE] apply end-existing failed', e);
-        }
+      try {
+  const ci = window.modalCtx.__cloneIntent || null;
+  if (ci && ci.end_existing && ci.source_contract_id && ci.end_existing_on) {
+    const res = await endContractSafely(ci.source_contract_id, ci.end_existing_on);
+    if (res && res.ok) {
+      if (res.clamped) showTailClampWarning(res.safe_end, ci.end_existing_on);
+      await refreshOldContractAfterTruncate(ci.source_contract_id);
+    }
+  }
+  clearCloneIntent();
+} catch (e) {
+  if (LOGC) console.warn('[CONTRACTS][CLONE] safe tail truncate failed', e);
+}
       }
 
       try {
@@ -2284,7 +2256,8 @@ showModal(
   },
 
   // 7th: options (now with noParentGate)
-   { kind:'contracts', extraButtons,                           noParentGate: isSuccessorCreate } 
+ { kind:'contracts', extraButtons, noParentGate: isSuccessorCreate, stayOpenOnSave: isSuccessorCreate }
+
 );
 
   setTimeout(() => {
@@ -11873,6 +11846,108 @@ async function renderClientRatesTable() {
   }
 })();
 
+
+// NEW
+async function endContractSafely(contractId, desiredEnd) {
+  const LOGC = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : true;
+  const url = `${window.BROKER_BASE_URL}/api/contracts/${encodeURIComponent(contractId)}/truncate-tail`;
+  const payload = { desired_end: desiredEnd };
+
+  if (typeof authFetch === 'function') {
+    const res = await authFetch({
+      url,
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    if (LOGC) console.log('[CONTRACTS] endContractSafely result', res);
+    return res;
+  }
+
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', ...(window.sbHeaders || {}) },
+    body: JSON.stringify(payload)
+  });
+  const json = await res.json().catch(() => null);
+  if (!res.ok) throw new Error(json?.error || res.statusText);
+  if (LOGC) console.log('[CONTRACTS] endContractSafely result', json);
+  return json;
+}
+
+// NEW
+async function refetchContract(id) {
+  const url = `${window.BROKER_BASE_URL}/api/contracts/${encodeURIComponent(id)}`;
+  if (typeof authFetch === 'function') {
+    const res = await authFetch({ url, method: 'GET', headers: { 'content-type': 'application/json' } });
+    return res?.contract || res || null;
+  }
+  const r = await fetch(url, { headers: { ...(window.sbHeaders || {}) } });
+  if (!r.ok) return null;
+  const j = await r.json().catch(() => null);
+  return j?.contract || j || null;
+}
+
+// NEW
+function updateContractsListCache(id, row) {
+  try {
+    if (Array.isArray(window.currentRows)) {
+      const i = window.currentRows.findIndex(x => String(x.id) === String(id));
+      if (i >= 0) window.currentRows[i] = row;
+      (window.__lastSavedAtById ||= {})[String(id)] = Date.now();
+    }
+  } catch {}
+}
+
+// NEW
+function showTailClampWarning(safeEnd, desiredEnd) {
+  const msg = `End date adjusted to ${safeEnd} due to existing timesheet(s). (Requested ${desiredEnd})`;
+  if (typeof showModalHint === 'function') showModalHint(msg, 'warn');
+  try { window.__toast?.(msg); } catch {}
+}
+
+// NEW
+function clearCloneIntent() {
+  try {
+    const token = window.modalCtx?.openToken || null;
+    if (window.modalCtx && window.modalCtx.__cloneIntent) delete window.modalCtx.__cloneIntent;
+    if (token && window.__cloneIntents) delete window.__cloneIntents[token];
+  } catch {}
+}
+// NEW
+async function refreshOldContractAfterTruncate(oldContractId) {
+  const LOGC = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : true;
+  const row = await refetchContract(oldContractId);
+  if (!row) return;
+
+  updateContractsListCache(oldContractId, row);
+
+  try {
+    const fr = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
+    if (fr && window.modalCtx && window.modalCtx.entity === 'contracts' && String(window.modalCtx?.data?.id || '') === String(oldContractId)) {
+      window.modalCtx.data = { ...(window.modalCtx.data || {}), ...row };
+      try { window.dispatchEvent(new Event('contracts-main-rendered')); } catch {}
+    }
+  } catch {}
+
+  try {
+    const st = (window.__calState || {})[oldContractId];
+    const win = st && st.win ? st.win : null;
+    if (typeof fetchAndRenderContractCalendar === 'function') {
+      if (win) {
+        await fetchAndRenderContractCalendar(oldContractId, { from: win.from, to: win.to, view: st.view });
+      } else {
+        const y = (new Date()).getUTCFullYear();
+        const def = (typeof computeYearWindow === 'function') ? computeYearWindow(y) : { from: `${y}-01-01`, to: `${y}-12-31` };
+        await fetchAndRenderContractCalendar(oldContractId, { from: def.from, to: def.to, view: 'year' });
+      }
+    }
+  } catch (e) {
+    if (LOGC) console.warn('[CONTRACTS] refreshOldContractAfterTruncate calendar refresh failed', e);
+  }
+}
+
+
 // ─────────────────────────────────────────────────────────────────────────────
 // UPDATED: showModal (adds contract-modal class toggling for Contracts dialogs)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -11968,11 +12043,9 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
   }
 
 
-
-  const frame = {
+const frame = {
   _token: `f:${Date.now()}:${Math.random().toString(36).slice(2)}`,
-  _ctxRef: window.modalCtx,   // ⬅️ keep a reference to the active context
-
+  _ctxRef: window.modalCtx,
   title,
   tabs: Array.isArray(tabs) ? tabs.slice() : [],
   renderTab,
@@ -11981,10 +12054,11 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
   hasId: !!hasId,
   entity: (window.modalCtx && window.modalCtx.entity) || null,
 
+  noParentGate: !!opts.noParentGate,
+  forceEdit:    !!opts.forceEdit,
+  kind:         opts.kind || null,
+  stayOpenOnSave: !!opts.stayOpenOnSave,
 
-    noParentGate: !!opts.noParentGate,
-    forceEdit:    !!opts.forceEdit,
-    kind:         opts.kind || null,
 
     currentTabKey: (Array.isArray(tabs) && tabs.length ? tabs[0].key : null),
 
@@ -12636,24 +12710,40 @@ byId('btnCloseModal').onclick = handleSecondary;
       return;
     }
 
-   if (isChildNow) {
-  try { window.dispatchEvent(new CustomEvent('modal-dirty')); } catch {}
-  sanitizeModalGeometry(); window.__modalStack.pop();
-  if (window.__modalStack.length>0) {
-    const p=window.__modalStack[window.__modalStack.length-1];
-
-    // ▶ ensure parent is back in view so actions (Clone & Extend) show
-    try { setFrameMode(p, 'view'); } catch {}
-    p.isDirty=true; p._updateButtons&&p._updateButtons();
-    renderTop();
-
-    // ▶ nudge calendar/action bar re-wire if needed
-    try { window.dispatchEvent(new Event('contracts-main-rendered')); } catch {}
-    try { p.onReturn && p.onReturn(); }catch{}
+if (isChildNow) {
+  // If this child should remain open after save (successor contract),
+  // flip it in-place to view mode and keep it on screen.
+  if (fr.stayOpenOnSave) {
+    try {
+      if (saved && window.modalCtx) {
+        window.modalCtx.data = { ...(window.modalCtx.data||{}), ...(saved.contract || saved) };
+        fr.hasId = !!window.modalCtx.data?.id;
+      }
+      setFrameMode(fr, 'view');
+      fr._updateButtons && fr._updateButtons();
+      renderTop();
+    } catch {}
+    L('saveForFrame EXIT (child kept open)');
   } else {
+    try { window.dispatchEvent(new CustomEvent('modal-dirty')); } catch {}
+    sanitizeModalGeometry(); window.__modalStack.pop();
+    if (window.__modalStack.length>0) {
+      const p=window.__modalStack[window.__modalStack.length-1];
+
+      // ▶ ensure parent is back in view so actions (Clone & Extend) show
+      try { setFrameMode(p, 'view'); } catch {}
+      p.isDirty=true; p._updateButtons&&p._updateButtons();
+      renderTop();
+
+      // ▶ nudge calendar/action bar re-wire if needed
+      try { window.dispatchEvent(new Event('contracts-main-rendered')); } catch {}
+      try { p.onReturn && p.onReturn(); }catch{}
+    } else {
+    }
+    L('saveForFrame EXIT (global child)');
   }
-  L('saveForFrame EXIT (global child)');
 } else {
+
       try {
         const savedContract = (saved && (saved.contract || saved)) || null;
         const id = savedContract?.id || window.modalCtx?.data?.id || null;
