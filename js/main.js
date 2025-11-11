@@ -1312,845 +1312,769 @@ function openContract(row) {
 
   const tabs = [ { key:'main', title:'Main' }, { key:'rates', title:'Rates' }, { key:'calendar', title:'Calendar' } ];
   if (LOGC) console.log('[CONTRACTS] tabs', tabs.map(t=>t.key));
-
   const hasId = !!window.modalCtx.data?.id;
+  // NEW: successor create (opened from Clone & Extend) should not inherit parent gating
+  const isSuccessorCreate = isCreate && ( !!window.modalCtx?.__cloneIntent || !!preToken );
 
-  showModal(
-    isCreate ? 'Create Contract' : 'Edit Contract',
-    tabs,
-    (key, row) => {
-      const ctx = { data: row };
-      if (key === 'main')     return renderContractMainTab(ctx);
-      if (key === 'rates')    return renderContractRatesTab(ctx);
-      if (key === 'calendar') return renderContractCalendarTab(ctx);
-      return `<div class="tabc">Unknown tab.</div>`;
-    },
-    async () => {
-      if (window.modalCtx?._saveInFlight) return false;
-      window.modalCtx._saveInFlight = true;
-      try {
-        if (LOGC) console.groupCollapsed('[CONTRACTS] onSave pipeline');
+showModal(
+  isCreate ? 'Create Contract' : 'Edit Contract',
+  tabs,
+  (key, row) => {
+    const ctx = { data: row };
+    if (key === 'main')     return renderContractMainTab(ctx);
+    if (key === 'rates')    return renderContractRatesTab(ctx);
+    if (key === 'calendar') return renderContractCalendarTab(ctx);
+    return `<div class="tabc">Unknown tab.</div>`;
+  },
+  async () => {
+    if (window.modalCtx?._saveInFlight) return false;
+    window.modalCtx._saveInFlight = true;
+    try {
+      if (LOGC) console.groupCollapsed('[CONTRACTS] onSave pipeline');
 
-        snapshotContractForm();
+      snapshotContractForm();
 
-        const base = window.modalCtx?.data || {};
-        const fs   = (window.modalCtx?.formState || { main:{}, pay:{} });
-        const fdForm = document.querySelector('#contractForm');
-        const fd = fdForm ? new FormData(fdForm) : null;
+      const base = window.modalCtx?.data || {};
+      const fs   = (window.modalCtx?.formState || { main:{}, pay:{} });
+      const fdForm = document.querySelector('#contractForm');
+      const fd = fdForm ? new FormData(fdForm) : null;
 
-        const fromFS = (k, fallback='') => {
-          const v = (fs.main||{})[k]; return (v===undefined ? fallback : v);
+      const fromFS = (k, fallback='') => {
+        const v = (fs.main||{})[k]; return (v===undefined ? fallback : v);
+      };
+      const fromFD = (k, fallback='') => {
+        if (!fd) return fallback;
+        const raw = fd.get(k); return (raw==null ? fallback : String(raw).trim());
+      };
+      const choose = (key, fallback='') => {
+        const fsVal = fromFS(key, null);
+        if (fsVal !== null && fsVal !== undefined && fsVal !== '') return fsVal;
+        const fdVal = fromFD(key, null);
+        if (fdVal !== null && fdVal !== undefined && fdVal !== '') return fdVal;
+        return (base[key] ?? fallback);
+      };
+
+      const ukToIso = (ddmmyyyy, fb=null) => {
+        try {
+          return (typeof parseUkDateToIso === 'function')
+            ? (parseUkDateToIso(ddmmyyyy) || fb)
+            : ((ddmmyyyy && /^\d{2}\/\d{2}\/\d{4}$/.test(ddmmyyyy)) ? ddmmyyyy : (ddmmyyyy || fb));
+        } catch { return ddmmyyyy || fb; }
+      };
+
+      const domLabels = (typeof _collectBucketLabelsFromForm === 'function')
+        ? _collectBucketLabelsFromForm('#contractForm')
+        : null;
+      let bucket_labels_json = domLabels && Object.keys(domLabels).length ? domLabels : null;
+      if (!bucket_labels_json) {
+        const staged = {
+          day   : (fs.main?.bucket_day            ?? fs.main?.bucket_label_day   ?? '').trim(),
+          night : (fs.main?.bucket_night          ?? fs.main?.bucket_label_night ?? '').trim(),
+          sat   : (fs.main?.bucket_sat            ?? fs.main?.bucket_label_sat   ?? '').trim(),
+          sun   : (fs.main?.bucket_sun            ?? fs.main?.bucket_label_sun   ?? '').trim(),
+          bh    : (fs.main?.bucket_bh             ?? fs.main?.bucket_label_bh    ?? '').trim(),
         };
-        const fromFD = (k, fallback='') => {
-          if (!fd) return fallback;
-          const raw = fd.get(k); return (raw==null ? fallback : String(raw).trim());
-        };
-        const choose = (key, fallback='') => {
-          const fsVal = fromFS(key, null);
-          if (fsVal !== null && fsVal !== undefined && fsVal !== '') return fsVal;
-          const fdVal = fromFD(key, null);
-          if (fdVal !== null && fdVal !== undefined && fdVal !== '') return fdVal;
-          return (base[key] ?? fallback);
-        };
+        const cleaned = {};
+        for (const [k,v] of Object.entries(staged)) if (v) cleaned[k]=v;
+        bucket_labels_json = Object.keys(cleaned).length ? cleaned : (base.bucket_labels_json ?? null);
+      }
 
-        const ukToIso = (ddmmyyyy, fb=null) => {
-          try {
-            return (typeof parseUkDateToIso === 'function')
-              ? (parseUkDateToIso(ddmmyyyy) || fb)
-              : ((ddmmyyyy && /^\d{2}\/\d{2}\/\d{4}$/.test(ddmmyyyy)) ? ddmmyyyy : (ddmmyyyy || fb));
-          } catch { return ddmmyyyy || fb; }
-        };
+      const numOrNull = (s) => {
+        const raw = fromFS(s, fromFD(s, ''));
+        if (raw === '' || raw === null || raw === undefined) return null;
+        const n = Number(raw); return Number.isFinite(n) ? n : null;
+      };
+      const gh = { mon: numOrNull('gh_mon'), tue: numOrNull('gh_tue'), wed: numOrNull('gh_wed'),
+                   thu: numOrNull('gh_thu'), fri: numOrNull('gh_fri'), sat: numOrNull('gh_sat'), sun: numOrNull('gh_sun') };
+      const ghFilled = Object.values(gh).some(v => v != null && v !== 0);
+      let std_hours_json = ghFilled ? gh : (base.std_hours_json ?? null);
+      if (!std_hours_json && fs.main && fs.main.__hours) std_hours_json = fs.main.__hours;
 
-        const domLabels = (typeof _collectBucketLabelsFromForm === 'function')
-          ? _collectBucketLabelsFromForm('#contractForm')
-          : null;
-        let bucket_labels_json = domLabels && Object.keys(domLabels).length ? domLabels : null;
-        if (!bucket_labels_json) {
-          const staged = {
-            day   : (fs.main?.bucket_day            ?? fs.main?.bucket_label_day   ?? '').trim(),
-            night : (fs.main?.bucket_night          ?? fs.main?.bucket_label_night ?? '').trim(),
-            sat   : (fs.main?.bucket_sat            ?? fs.main?.bucket_label_sat   ?? '').trim(),
-            sun   : (fs.main?.bucket_sun            ?? fs.main?.bucket_label_sun   ?? '').trim(),
-            bh    : (fs.main?.bucket_bh             ?? fs.main?.bucket_label_bh    ?? '').trim(),
-          };
-          const cleaned = {};
-          for (const [k,v] of Object.entries(staged)) if (v) cleaned[k]=v;
-          bucket_labels_json = Object.keys(cleaned).length ? cleaned : (base.bucket_labels_json ?? null);
+      const days = ['mon','tue','wed','thu','fri','sat','sun'];
+      const get = (n) => fromFS(n, fromFD(n, ''));
+      const hhmmOk = (v) => /^\d{2}:\d{2}$/.test(String(v||'').trim());
+      const normHHMM = (v) => {
+        const t = String(v || '').trim();
+        if (!t) return '';
+        const m = t.match(/^(\d{1,2})(?::?(\d{2}))$/);
+        if (!m) return '';
+        const h = +m[1], mi = +m[2];
+        if (Number.isNaN(h) || Number.isNaN(mi) || h < 0 || h > 23 || mi < 0 || mi > 59) return '';
+        return String(h).padStart(2,'0') + ':' + String(mi).padStart(2,'0');
+      };
+      const schedule = {};
+      for (const d2 of days) {
+        const s = normHHMM(get(`${d2}_start`));
+        const e = normHHMM(get(`${d2}_end`));
+        const br = get(`${d2}_break`);
+        if (hhmmOk(s) && hhmmOk(e)) {
+          schedule[d2] = { start: s, end: e, break_minutes: Math.max(0, Number(br||0)) };
         }
+      }
+      let std_schedule_json = Object.keys(schedule).length ? schedule : null;
+      if (!std_schedule_json) {
+        if (fs.main && fs.main.__template) std_schedule_json = fs.main.__template;
+        else if (base.std_schedule_json)   std_schedule_json = base.std_schedule_json;
+      }
 
-        const numOrNull = (s) => {
-          const raw = fromFS(s, fromFD(s, ''));
-          if (raw === '' || raw === null || raw === undefined) return null;
-          const n = Number(raw); return Number.isFinite(n) ? n : null;
-        };
-        const gh = { mon: numOrNull('gh_mon'), tue: numOrNull('gh_tue'), wed: numOrNull('gh_wed'),
-                     thu: numOrNull('gh_thu'), fri: numOrNull('gh_fri'), sat: numOrNull('gh_sat'), sun: numOrNull('gh_sun') };
-        const ghFilled = Object.values(gh).some(v => v != null && v !== 0);
-        let std_hours_json = ghFilled ? gh : (base.std_hours_json ?? null);
-        if (!std_hours_json && fs.main && fs.main.__hours) std_hours_json = fs.main.__hours;
+      const prevStartIso = base.start_date || null;
+      const prevEndIso   = base.end_date   || null;
 
-        const days = ['mon','tue','wed','thu','fri','sat','sun'];
-        const get = (n) => fromFS(n, fromFD(n, ''));
-        const hhmmOk = (v) => /^\d{2}:\d{2}$/.test(String(v||'').trim());
-        const normHHMM = (v) => {
-          const t = String(v || '').trim();
-          if (!t) return '';
-          const m = t.match(/^(\d{1,2})(?::?(\d{2}))$/);
-          if (!m) return '';
-          const h = +m[1], mi = +m[2];
-          if (Number.isNaN(h) || Number.isNaN(mi) || h < 0 || h > 23 || mi < 0 || mi > 59) return '';
-          return String(h).padStart(2,'0') + ':' + String(mi).padStart(2,'0');
-        };
-        const schedule = {};
-        for (const d2 of days) {
-          const s = normHHMM(get(`${d2}_start`));
-          const e = normHHMM(get(`${d2}_end`));
-          const br = get(`${d2}_break`);
-          if (hhmmOk(s) && hhmmOk(e)) {
-            schedule[d2] = { start: s, end: e, break_minutes: Math.max(0, Number(br||0)) };
-          }
+      const startIso = ukToIso(choose('start_date', ''), base.start_date ?? null);
+      const endIso   = ukToIso(choose('end_date', ''),   base.end_date   ?? null);
+
+      const payMethodSnap = String(
+        (fs.main?.pay_method_snapshot) ||
+        fromFD('pay_method_snapshot', fromFD('default_pay_method_snapshot', base.pay_method_snapshot || 'PAYE')) ||
+        base.pay_method_snapshot || 'PAYE'
+      ).toUpperCase();
+
+      const default_submission_mode = String(
+        choose('default_submission_mode', base.default_submission_mode || 'ELECTRONIC')
+      ).toUpperCase();
+
+      const week_ending_weekday_snapshot = String(
+        choose('week_ending_weekday_snapshot', (base.week_ending_weekday_snapshot ?? '0'))
+      );
+
+      const candidate_id = choose('candidate_id', base.candidate_id ?? null) || null;
+      const client_id    = choose('client_id', base.client_id ?? null) || null;
+      const role         = choose('role', base.role ?? null);
+      const band         = choose('band', base.band ?? null);
+      const display_site = choose('display_site', base.display_site ?? '');
+
+      const boolFromFS = (name, baseVal=false) => {
+        if (fs && fs.main && Object.prototype.hasOwnProperty.call(fs.main, name)) {
+          const v = fs.main[name];
+          return v === 'on' || v === true || v === 'true' || v === 1 || v === '1';
         }
-        let std_schedule_json = Object.keys(schedule).length ? schedule : null;
-        if (!std_schedule_json) {
-          if (fs.main && fs.main.__template) std_schedule_json = fs.main.__template;
-          else if (base.std_schedule_json)   std_schedule_json = base.std_schedule_json;
-        }
+        return !!base[name];
+      };
+      const auto_invoice                 = boolFromFS('auto_invoice',                 !!base.auto_invoice);
+      const require_reference_to_pay     = boolFromFS('require_reference_to_pay',     !!base.require_reference_to_pay);
+      const require_reference_to_invoice = boolFromFS('require_reference_to_invoice', !!base.require_reference_to_invoice);
 
-        const prevStartIso = base.start_date || null;
-        const prevEndIso   = base.end_date   || null;
-
-        const startIso = ukToIso(choose('start_date', ''), base.start_date ?? null);
-        const endIso   = ukToIso(choose('end_date', ''),   base.end_date   ?? null);
-
-        const payMethodSnap = String(
-          (fs.main?.pay_method_snapshot) ||
-          fromFD('pay_method_snapshot', fromFD('default_pay_method_snapshot', base.pay_method_snapshot || 'PAYE')) ||
-          base.pay_method_snapshot || 'PAYE'
-        ).toUpperCase();
-
-        const default_submission_mode = String(
-          choose('default_submission_mode', base.default_submission_mode || 'ELECTRONIC')
-        ).toUpperCase();
-
-        const week_ending_weekday_snapshot = String(
-          choose('week_ending_weekday_snapshot', (base.week_ending_weekday_snapshot ?? '0'))
-        );
-
-        const candidate_id = choose('candidate_id', base.candidate_id ?? null) || null;
-        const client_id    = choose('client_id', base.client_id ?? null) || null;
-        const role         = choose('role', base.role ?? null);
-        const band         = choose('band', base.band ?? null);
-        const display_site = choose('display_site', base.display_site ?? '');
-
-        const boolFromFS = (name, baseVal=false) => {
-          if (fs && fs.main && Object.prototype.hasOwnProperty.call(fs.main, name)) {
-            const v = fs.main[name];
-            return v === 'on' || v === true || v === 'true' || v === 1 || v === '1';
-          }
-          return !!base[name];
-        };
-        const auto_invoice                 = boolFromFS('auto_invoice',                 !!base.auto_invoice);
-        const require_reference_to_pay     = boolFromFS('require_reference_to_pay',     !!base.require_reference_to_pay);
-        const require_reference_to_invoice = boolFromFS('require_reference_to_invoice', !!base.require_reference_to_invoice);
-
-        const BUCKETS = ['paye_day','paye_night','paye_sat','paye_sun','paye_bh','umb_day','umb_night','umb_sat','umb_sun','umb_bh','charge_day','charge_night','charge_sat','charge_sun','charge_bh'];
-        const baseRates = { ...(base.rates_json || {}) };
-        const mergedRates = { ...baseRates };
-        for (const k of BUCKETS) {
-          const staged = (fs.pay || {})[k];
-          if (staged !== undefined && staged !== '') {
-            const n = Number(staged);
+      const BUCKETS = ['paye_day','paye_night','paye_sat','paye_sun','paye_bh','umb_day','umb_night','umb_sat','umb_sun','umb_bh','charge_day','charge_night','charge_sat','charge_sun','charge_bh'];
+      const baseRates = { ...(base.rates_json || {}) };
+      const mergedRates = { ...baseRates };
+      for (const k of BUCKETS) {
+        const staged = (fs.pay || {})[k];
+        if (staged !== undefined && staged !== '') {
+          const n = Number(staged);
+          mergedRates[k] = Number.isFinite(n) ? n : 0;
+        } else {
+          const domVal = fd ? fd.get(k) : null;
+          if (domVal !== null && domVal !== undefined && String(domVal).trim() !== '') {
+            const n = Number(domVal);
             mergedRates[k] = Number.isFinite(n) ? n : 0;
-          } else {
-            const domVal = fd ? fd.get(k) : null;
-            if (domVal !== null && domVal !== undefined && String(domVal).trim() !== '') {
-              const n = Number(domVal);
-              mergedRates[k] = Number.isFinite(n) ? n : 0;
-            }
           }
         }
+      }
 
-        const data = {
-          id: window.modalCtx.data?.id || null,
-          candidate_id,
-          client_id,
-          role,
-          band,
-          display_site,
-          start_date:   startIso,
-          end_date:     endIso,
-          pay_method_snapshot: payMethodSnap,
-          default_submission_mode,
-          week_ending_weekday_snapshot,
-          auto_invoice,
-          require_reference_to_pay,
-          require_reference_to_invoice,
-          rates_json: mergedRates,
-          std_hours_json,
-          std_schedule_json,
-          bucket_labels_json
-        };
+      const data = {
+        id: window.modalCtx.data?.id || null,
+        candidate_id,
+        client_id,
+        role,
+        band,
+        display_site,
+        start_date:   startIso,
+        end_date:     endIso,
+        pay_method_snapshot: payMethodSnap,
+        default_submission_mode,
+        week_ending_weekday_snapshot,
+        auto_invoice,
+        require_reference_to_pay,
+        require_reference_to_invoice,
+        rates_json: mergedRates,
+        std_hours_json,
+        std_schedule_json,
+        bucket_labels_json
+      };
 
-        if (LOGC) {
-          const preview = { ...data, rates_json: '(object)', std_hours_json: std_hours_json ? '(object)' : null, std_schedule_json: std_schedule_json ? '(object)' : null };
-          console.log('[CONTRACTS] onSave payload (preview)', preview);
-        }
+      if (LOGC) {
+        const preview = { ...data, rates_json: '(object)', std_hours_json: std_hours_json ? '(object)' : null, std_schedule_json: std_schedule_json ? '(object)' : null };
+        console.log('[CONTRACTS] onSave payload (preview)', preview);
+      }
 
-        let overlapProceed = true;
-        try {
-          if (typeof checkContractOverlap === 'function' && data.candidate_id && data.start_date && data.end_date) {
-            const ov = await checkContractOverlap({
-              candidate_id: data.candidate_id,
-              start_date: data.start_date,
-              end_date: data.end_date,
-              ignore_contract_id: data.id || null
+      let overlapProceed = true;
+      try {
+        if (typeof checkContractOverlap === 'function' && data.candidate_id && data.start_date && data.end_date) {
+          const ov = await checkContractOverlap({
+            candidate_id: data.candidate_id,
+            start_date: data.start_date,
+            end_date: data.end_date,
+            ignore_contract_id: data.id || null
+          });
+          if (ov && ov.has_overlap) {
+            const lines = (ov.overlaps || []).slice(0, 3).map(o => {
+              const nm = o.client_name || o.client || 'Client';
+              const a  = o.overlap_from || '';
+              const b  = o.overlap_to   || '';
+              return `${nm} ${a}→${b}`;
             });
-            if (ov && ov.has_overlap) {
-              const lines = (ov.overlaps || []).slice(0, 3).map(o => {
-                const nm = o.client_name || o.client || 'Client';
-                const a  = o.overlap_from || '';
-                const b  = o.overlap_to   || '';
-                return `${nm} ${a}→${b}`;
-              });
-              const extra = (ov.overlaps || []).length > 3 ? ` …and ${ov.overlaps.length - 3} more` : '';
-              const msg = `This contract overlaps existing contract(s):\n• ${lines.join('\n• ')}${extra}\n\nProceed anyway?`;
-              overlapProceed = !!window.confirm(msg);
-            }
-          }
-        } catch (e) {
-          if (LOGC) console.warn('[CONTRACTS] overlap check failed (non-blocking)', e);
-        }
-        if (!overlapProceed) {
-          window.modalCtx._saveInFlight = false;
-          if (LOGC) console.log('[CONTRACTS] Save cancelled by user on overlap dialog');
-          console.groupEnd?.();
-          return false;
-        }
-
-        try {} catch {}
-
-        if (!isCreate && data.id && typeof callCheckTimesheetBoundary === 'function' && data.start_date && data.end_date) {
-          try {
-            const boundary = await callCheckTimesheetBoundary(data.id, data.start_date, data.end_date);
-            window.__tsBoundaryResult = boundary || null;
-            if (!boundary || boundary.ok === false) {
-              let msg = 'Date range excludes existing timesheets.';
-              try {
-                const v = boundary?.violations || [];
-                if (v.length) {
-                  const sample = v.slice(0,3).map(x => {
-                    const nm = x.client_name || 'Client';
-                    const dt = x.date || '';
-                    const st = x.status || '';
-                    return `${nm} ${dt}${st?` (${st})`:''}`;
-                  }).join(' • ');
-                  msg = `Dates exclude existing timesheets: ${sample}${v.length>3? '…':''}`;
-                } else if (boundary?.min_ts_date || boundary?.max_ts_date) {
-                  const a = boundary.min_ts_date || '';
-                  const b = boundary.max_ts_date || '';
-                  msg = `Dates exclude timesheets in range ${a} → ${b}.`;
-                }
-              } catch {}
-              if (typeof showModalHint === 'function') showModalHint(msg, 'warn'); else alert(msg);
-              window.modalCtx._saveInFlight = false;
-              console.groupEnd?.();
-              return false;
-            }
-          } catch (e) {
-            if (LOGC) console.warn('[CONTRACTS] timesheet boundary check failed (non-blocking fallback)', e);
+            const extra = (ov.overlaps || []).length > 3 ? ` …and ${ov.overlaps.length - 3} more` : '';
+            const msg = `This contract overlaps existing contract(s):\n• ${lines.join('\n• ')}${extra}\n\nProceed anyway?`;
+            overlapProceed = !!window.confirm(msg);
           }
         }
+      } catch (e) {
+        if (LOGC) console.warn('[CONTRACTS] overlap check failed (non-blocking)', e);
+      }
+      if (!overlapProceed) {
+        window.modalCtx._saveInFlight = false;
+        if (LOGC) console.log('[CONTRACTS] Save cancelled by user on overlap dialog');
+        console.groupEnd?.();
+        return false;
+      }
 
-        let hasManualStage = false;
+      try {} catch {}
+
+      if (!isCreate && data.id && typeof callCheckTimesheetBoundary === 'function' && data.start_date && data.end_date) {
         try {
-          const stageKey = data.id || window.modalCtx.openToken || null;
-          if (stageKey && typeof getContractCalendarStageState === 'function') {
-            const st = getContractCalendarStageState(stageKey);
-            hasManualStage = !!(st && (st.add?.size || st.remove?.size || Object.keys(st.additional || {}).length));
-          }
-        } catch {}
-
-           if (!isCreate && hasManualStage) data.skip_generate_weeks = true;
-
-               // --- detect calendar stage shape BEFORE any persistence ---
-        let stageShape = { hasAny:false, hasRemoveAll:false, hasAdds:false, hasAdditionals:false };
-        try {
-          const stageKey = data.id || window.modalCtx.openToken || null;
-          if (stageKey && typeof getContractCalendarStageState === 'function') {
-            const st = getContractCalendarStageState(stageKey);
-            stageShape.hasAny         = !!st && (!!st.removeAll || st.add.size || st.remove.size || Object.keys(st.additional||{}).length);
-            stageShape.hasRemoveAll   = !!st?.removeAll;
-            stageShape.hasAdds        = !!(st && st.add && st.add.size);
-            stageShape.hasAdditionals = !!(st && st.additional && Object.keys(st.additional).length);
-          }
-        } catch {}
-
-        // === CREATE vs EDIT ordering ===
-        // CREATE: upsert first to obtain id → then commit stage (if any) → normalize window → (maybe) generate defaults
-        // EDIT: if any stage present, always commit calendar FIRST → normalize window → then upsert metadata
-        if (!isCreate && data.id && stageShape.hasAny) {
-          if (LOGC) console.log('[CONTRACTS] calendar (any stage) → commitContractCalendarStageIfPending');
-          const preCalRes = await commitContractCalendarStageIfPending(data.id);
-          if (!preCalRes.ok) {
-            const msg = `Calendar save failed: ${preCalRes.message || 'unknown error'}. Contract details were not saved.`;
-            if (LOGC) console.warn('[CONTRACTS] calendar commit failed (pre-upsert)', preCalRes);
+          const boundary = await callCheckTimesheetBoundary(data.id, data.start_date, data.end_date);
+          window.__tsBoundaryResult = boundary || null;
+          if (!boundary || boundary.ok === false) {
+            let msg = 'Date range excludes existing timesheets.';
+            try {
+              const v = boundary?.violations || [];
+              if (v.length) {
+                const sample = v.slice(0,3).map(x => {
+                  const nm = x.client_name || 'Client';
+                  const dt = x.date || '';
+                  const st = x.status || '';
+                  return `${nm} ${dt}${st?` (${st})`:''}`;
+                }).join(' • ');
+                msg = `Dates exclude existing timesheets: ${sample}${v.length>3? '…':''}`;
+              } else if (boundary?.min_ts_date || boundary?.max_ts_date) {
+                const a = boundary.min_ts_date || '';
+                const b = boundary.max_ts_date || '';
+                msg = `Dates exclude timesheets in range ${a} → ${b}.`;
+              }
+            } catch {}
             if (typeof showModalHint === 'function') showModalHint(msg, 'warn'); else alert(msg);
             window.modalCtx._saveInFlight = false;
             console.groupEnd?.();
             return false;
           }
-          if (typeof normalizeContractWindowToShifts === 'function') {
-            try {
-              const norm = await normalizeContractWindowToShifts(data.id);
-              if (norm && norm.ok) {
-                data.start_date = norm.start_date || data.start_date || null;
-                data.end_date   = norm.end_date   || data.end_date   || null;
-              }
-            } catch (e) {
-              if (LOGC) console.warn('[CONTRACTS] normalize window to shifts failed (pre-upsert, non-fatal)', e);
-            }
-          }
-          // when editing with stage, also avoid auto-generation
-          data.skip_generate_weeks = true;
+        } catch (e) {
+          if (LOGC) console.warn('[CONTRACTS] timesheet boundary check failed (non-blocking fallback)', e);
         }
-
-        if (LOGC) console.log('[CONTRACTS] upsert → upsertContract');
-        const saved = await upsertContract(data, data.id || undefined);
-
-
-        if (LOGC) console.log('[CONTRACTS] upsertContract result', { hasSaved: !!saved, id: saved?.id || saved?.contract?.id });
-
-        window.modalCtx.data = saved?.contract || saved || window.modalCtx.data;
-
-        try {
-          const warnings = saved?.warnings || saved?.contract?.warnings || [];
-          const warnStr  = Array.isArray(warnings) ? warnings.join(', ') : (saved?.warning || '');
-          if (warnStr) { if (LOGC) console.warn('[CONTRACTS] warnings', warnStr); showModalHint?.(`Warning: ${warnStr}`, 'warn'); }
-        } catch {}
-
-              const contractId = saved?.id || saved?.contract?.id;
-if (contractId) {
-  window.__pendingFocus = { section: 'contracts', id: contractId };
-
-  // If this was a Clone&Extend staging and user opted to end the old contract, apply now.
-  try {
-    const ci = window.modalCtx.__cloneIntent || null;
-    if (ci && ci.end_existing && ci.source_contract_id && ci.end_existing_on) {
-      if (LOGC) console.log('[CONTRACTS][CLONE] applying end-existing', {
-        source: ci.source_contract_id, end_on: ci.end_existing_on, successor: contractId
-      });
-
-      // 1) Unplan days AFTER end_existing_on (day+1 .. previous end), skipping weeks with timesheets
-      const prevEnd = (window.__sourceRowPreview && window.__sourceRowPreview.end_date) || null; // optional assist; safe if null
-      const dayPlusOne = (iso)=>{ const d=new Date(iso+'T00:00:00Z'); d.setUTCDate(d.getUTCDate()+1); return d.toISOString().slice(0,10); };
-      const fromY = dayPlusOne(ci.end_existing_on);
-      if (typeof contractsUnplanRanges === 'function' && prevEnd && fromY <= prevEnd) {
-        await contractsUnplanRanges(ci.source_contract_id, {
-          when_timesheet_exists: 'skip',
-          empty_week_action: 'cancel',
-          ranges: [{ from: fromY, to: prevEnd, days: [] }]
-        });
-        if (LOGC) console.log('[CONTRACTS][CLONE] unplan tail ok', { from: fromY, to: prevEnd });
-      } else if (LOGC) {
-        console.log('[CONTRACTS][CLONE] skip unplan tail (no prevEnd or range invalid)', { prevEnd, from: fromY });
       }
 
-      // 2) Patch the old contract end_date to end_existing_on
+      let hasManualStage = false;
       try {
-        const url = `${window.BROKER_BASE_URL}/rest/v1/contracts?id=eq.${encodeURIComponent(ci.source_contract_id)}`;
-        const res = await fetch(url, {
-          method:'PATCH',
-          headers: { 'content-type':'application/json', 'Prefer':'return=minimal', ...(window.sbHeaders || {}) },
-          body: JSON.stringify({ end_date: ci.end_existing_on, updated_at: (new Date()).toISOString() })
-        });
-        if (!res.ok) { try { console.warn('[CONTRACTS][CLONE] end-old PATCH failed', await res.text()); } catch {} }
-        else if (LOGC) console.log('[CONTRACTS][CLONE] end-old patch ok');
-      } catch (e) {
-        if (LOGC) console.warn('[CONTRACTS][CLONE] end-old patch exception', e);
+        const stageKey = data.id || window.modalCtx.openToken || null;
+        if (stageKey && typeof getContractCalendarStageState === 'function') {
+          const st = getContractCalendarStageState(stageKey);
+          hasManualStage = !!(st && (st.add?.size || st.remove?.size || Object.keys(st.additional || {}).length));
+        }
+      } catch {}
+
+      if (!isCreate && hasManualStage) data.skip_generate_weeks = true;
+
+      // --- detect calendar stage shape BEFORE any persistence ---
+      let stageShape = { hasAny:false, hasRemoveAll:false, hasAdds:false, hasAdditionals:false };
+      try {
+        const stageKey = data.id || window.modalCtx.openToken || null;
+        if (stageKey && typeof getContractCalendarStageState === 'function') {
+          const st = getContractCalendarStageState(stageKey);
+          stageShape.hasAny         = !!st && (!!st.removeAll || st.add.size || st.remove.size || Object.keys(st.additional||{}).length);
+          stageShape.hasRemoveAll   = !!st?.removeAll;
+          stageShape.hasAdds        = !!(st && st.add && st.add.size);
+          stageShape.hasAdditionals = !!(st && st.additional && Object.keys(st.additional).length);
+        }
+      } catch {}
+
+      // === CREATE vs EDIT ordering ===
+      // CREATE: upsert first to obtain id → then commit stage (if any) → normalize window → (maybe) generate defaults
+      // EDIT: if any stage present, always commit calendar FIRST → normalize window → then upsert metadata
+      if (!isCreate && data.id && stageShape.hasAny) {
+        if (LOGC) console.log('[CONTRACTS] calendar (any stage) → commitContractCalendarStageIfPending');
+        const preCalRes = await commitContractCalendarStageIfPending(data.id);
+        if (!preCalRes.ok) {
+          const msg = `Calendar save failed: ${preCalRes.message || 'unknown error'}. Contract details were not saved.`;
+          if (LOGC) console.warn('[CONTRACTS] calendar commit failed (pre-upsert)', preCalRes);
+          if (typeof showModalHint === 'function') showModalHint(msg, 'warn'); else alert(msg);
+          window.modalCtx._saveInFlight = false;
+          console.groupEnd?.();
+          return false;
+        }
+        if (typeof normalizeContractWindowToShifts === 'function') {
+          try {
+            const norm = await normalizeContractWindowToShifts(data.id);
+            if (norm && norm.ok) {
+              data.start_date = norm.start_date || data.start_date || null;
+              data.end_date   = norm.end_date   || data.end_date   || null;
+            }
+          } catch (e) {
+            if (LOGC) console.warn('[CONTRACTS] normalize window to shifts failed (pre-upsert, non-fatal)', e);
+          }
+        }
+        // when editing with stage, also avoid auto-generation
+        data.skip_generate_weeks = true;
       }
-    } else if (LOGC) {
-      console.log('[CONTRACTS][CLONE] no end-existing to apply or incomplete intent', { hasIntent: !!ci });
-    }
-  } catch (e) {
-    if (LOGC) console.warn('[CONTRACTS][CLONE] apply end-existing failed', e);
-  }
-}
 
+      if (LOGC) console.log('[CONTRACTS] upsert → upsertContract');
+      const saved = await upsertContract(data, data.id || undefined);
 
+      if (LOGC) console.log('[CONTRACTS] upsertContract result', { hasSaved: !!saved, id: saved?.id || saved?.contract?.id });
+
+      window.modalCtx.data = saved?.contract || saved || window.modalCtx.data;
+
+      try {
+        const warnings = saved?.warnings || saved?.contract?.warnings || [];
+        const warnStr  = Array.isArray(warnings) ? warnings.join(', ') : (saved?.warning || '');
+        if (warnStr) { if (LOGC) console.warn('[CONTRACTS] warnings', warnStr); showModalHint?.(`Warning: ${warnStr}`, 'warn'); }
+      } catch {}
+
+      const contractId = saved?.id || saved?.contract?.id;
+      if (contractId) {
+        window.__pendingFocus = { section: 'contracts', id: contractId };
+
+        // If this was a Clone&Extend staging and user opted to end the old contract, apply now.
         try {
-          const fsAll = (window.modalCtx.formState ||= { __forId: (contractId || window.modalCtx.openToken || null), main:{}, pay:{} });
-          fsAll.__forId = contractId || fsAll.__forId;
-          const nameCandEl  = document.getElementById('candidate_name_display');
-          const nameClientEl= document.getElementById('client_name_display');
-          const fsm = (fsAll.main ||= {});
-          if (nameCandEl && nameCandEl.value && !fsm.candidate_display) fsm.candidate_display = nameCandEl.value;
-          if (nameClientEl && nameClientEl.value && !fsm.client_name)    fsm.client_name = nameClientEl.value;
-          if (!fsm.__template && window.modalCtx.data?.std_schedule_json) fsm.__template = window.modalCtx.data.std_schedule_json;
-          if (!fsm.__hours && window.modalCtx.data?.std_hours_json)       fsm.__hours    = window.modalCtx.data.std_hours_json;
-          if (!fsm.__bucket_labels && window.modalCtx.data?.bucket_labels_json) fsm.__bucket_labels = window.modalCtx.data.bucket_labels_json;
-        } catch {}
+          const ci = window.modalCtx.__cloneIntent || null;
+          if (ci && ci.end_existing && ci.source_contract_id && ci.end_existing_on) {
+            if (LOGC) console.log('[CONTRACTS][CLONE] applying end-existing', {
+              source: ci.source_contract_id, end_on: ci.end_existing_on, successor: contractId
+            });
+
+            // 1) Unplan days AFTER end_existing_on (day+1 .. previous end), skipping weeks with timesheets
+            const prevEnd = (window.__sourceRowPreview && window.__sourceRowPreview.end_date) || null;
+            const dayPlusOne = (iso)=>{ const d=new Date(iso+'T00:00:00Z'); d.setUTCDate(d.getUTCDate()+1); return d.toISOString().slice(0,10); };
+            const fromY = dayPlusOne(ci.end_existing_on);
+            if (typeof contractsUnplanRanges === 'function' && prevEnd && fromY <= prevEnd) {
+              await contractsUnplanRanges(ci.source_contract_id, {
+                when_timesheet_exists: 'skip',
+                empty_week_action: 'cancel',
+                ranges: [{ from: fromY, to: prevEnd, days: [] }]
+              });
+              if (LOGC) console.log('[CONTRACTS][CLONE] unplan tail ok', { from: fromY, to: prevEnd });
+            } else if (LOGC) {
+              console.log('[CONTRACTS][CLONE] skip unplan tail (no prevEnd or range invalid)', { prevEnd, from: fromY });
+            }
+
+            // 2) Patch the old contract end_date to end_existing_on
+            try {
+              const url = `${window.BROKER_BASE_URL}/rest/v1/contracts?id=eq.${encodeURIComponent(ci.source_contract_id)}`;
+              const res = await fetch(url, {
+                method:'PATCH',
+                headers: { 'content-type':'application/json', 'Prefer':'return=minimal', ...(window.sbHeaders || {}) },
+                body: JSON.stringify({ end_date: ci.end_existing_on, updated_at: (new Date()).toISOString() })
+              });
+              if (!res.ok) { try { console.warn('[CONTRACTS][CLONE] end-old PATCH failed', await res.text()); } catch {} }
+              else if (LOGC) console.log('[CONTRACTS][CLONE] end-old patch ok');
+            } catch (e) {
+              if (LOGC) console.warn('[CONTRACTS][CLONE] end-old patch exception', e);
+            }
+          } else if (LOGC) {
+            console.log('[CONTRACTS][CLONE] no end-existing to apply or incomplete intent', { hasIntent: !!ci });
+          }
+        } catch (e) {
+          if (LOGC) console.warn('[CONTRACTS][CLONE] apply end-existing failed', e);
+        }
+      }
+
+      try {
+        const fsAll = (window.modalCtx.formState ||= { __forId: (contractId || window.modalCtx.openToken || null), main:{}, pay:{} });
+        fsAll.__forId = contractId || fsAll.__forId;
+        const nameCandEl  = document.getElementById('candidate_name_display');
+        const nameClientEl= document.getElementById('client_name_display');
+        const fsm = (fsAll.main ||= {});
+        if (nameCandEl && nameCandEl.value && !fsm.candidate_display) fsm.candidate_display = nameCandEl.value;
+        if (nameClientEl && nameClientEl.value && !fsm.client_name)    fsm.client_name = nameClientEl.value;
+        if (!fsm.__template && window.modalCtx.data?.std_schedule_json) fsm.__template = window.modalCtx.data.std_schedule_json;
+        if (!fsm.__hours && window.modalCtx.data?.std_hours_json)       fsm.__hours    = window.modalCtx.data.std_hours_json;
+        if (!fsm.__bucket_labels && window.modalCtx.data?.bucket_labels_json) fsm.__bucket_labels = window.modalCtx.data.bucket_labels_json;
+      } catch {}
 
       if (contractId) {
-  let hasStageNow = false, hasRemoveAllOnly = false;
-  try {
-    const st = (typeof getContractCalendarStageState === 'function') ? getContractCalendarStageState(contractId) : null;
-    const hasAdds        = !!(st && st.add && st.add.size);
-    const hasRemoves     = !!(st && st.remove && st.remove.size);
-    const hasAdditionals = !!(st && st.additional && Object.keys(st.additional).length);
-    const hasRemoveAll   = !!st?.removeAll;
-    hasStageNow          = !!(hasAdds || hasRemoves || hasAdditionals || hasRemoveAll);
-    hasRemoveAllOnly     = !!(hasRemoveAll && !hasAdds && !hasAdditionals);
-  } catch {}
-
-  const newStart = window.modalCtx?.data?.start_date || data.start_date || null;
-  const newEnd   = window.modalCtx?.data?.end_date   || data.end_date   || null;
-
-  const extendedHead = !!(prevStartIso && newStart && newStart < prevStartIso);
-  const extendedTail = !!(prevEndIso   && newEnd   && newEnd   > prevEndIso);
-
-  if (isCreate) {
-  // NEW: adopt any staged selections from token → id (create flow)
-  try {
-    if (window.modalCtx?.openToken && typeof adoptCalendarStageFromToken === 'function') {
-      adoptCalendarStageFromToken(window.modalCtx.openToken, contractId);
-    }
-  } catch {}
-
-  // NEW: re-evaluate stage presence AFTER adoption
-  try {
-    const st2 = (typeof getContractCalendarStageState === 'function') ? getContractCalendarStageState(contractId) : null;
-    const hasAdds2        = !!(st2 && st2.add && st2.add.size);
-    const hasRemoves2     = !!(st2 && st2.remove && st2.remove.size);
-    const hasAdditionals2 = !!(st2 && st2.additional && Object.keys(st2.additional).length);
-    const hasRemoveAll2   = !!st2?.removeAll;
-    hasStageNow           = !!(hasAdds2 || hasRemoves2 || hasAdditionals2 || hasRemoveAll2);
-    hasRemoveAllOnly      = !!(hasRemoveAll2 && !hasAdds2 && !hasAdditionals2);
-  } catch {}
-
-  if (!hasStageNow) {
-    // No manual stage → generate template weeks
-    if (std_schedule_json && typeof generateContractWeeks === 'function') {
-      if (LOGC) console.log('[CONTRACTS] generateContractWeeks (create)');
-      await generateContractWeeks(contractId);
-    }
-  } else {
-    // Manual stage detected → skip generation (backend will extend window on commit)
-    if (LOGC) console.log('[CONTRACTS] create: manual stage detected; skip generation');
-    data.skip_generate_weeks = true;
-  }
-
-} else {
-  if (hasStageNow) {
-    if (LOGC) console.log('[CONTRACTS] manual stage present; will commit shortly');
-  } else if ((extendedHead || extendedTail) && std_schedule_json) {
-    if (LOGC) console.log('[CONTRACTS] generate missing weeks (template-only, head/tail extension)');
-    if (typeof generateContractWeeks === 'function') {
-      await generateContractWeeks(contractId);
-    }
-  } else {
-    // NEW: handle shrink (no manual stage and no extension)
-    const shrunkHead = !!(prevStartIso && newStart && newStart > prevStartIso);
-    const shrunkTail = !!(prevEndIso   && newEnd   && newEnd   < prevEndIso);
-
-    if (shrunkHead || shrunkTail) {
-      const ymdShift = (ymd, days) => {
-        const dt = new Date(`${ymd}T00:00:00Z`);
-        dt.setUTCDate(dt.getUTCDate() + days);
-        return dt.toISOString().slice(0,10);
-      };
-
-      const ranges = [];
-      if (shrunkHead) {
-        // remove everything BEFORE newStart (inclusive of prevStart .. day before newStart)
-        ranges.push({ from: prevStartIso, to: ymdShift(newStart, -1), days: [] });
-      }
-      if (shrunkTail) {
-        // remove everything AFTER newEnd (day after newEnd .. prevEnd inclusive)
-        ranges.push({ from: ymdShift(newEnd, +1), to: prevEndIso, days: [] });
-      }
-
-      if (ranges.length && typeof contractsUnplanRanges === 'function') {
-        if (LOGC) console.log('[CONTRACTS] unplan outside new window', { ranges });
-        await contractsUnplanRanges(contractId, {
-          when_timesheet_exists: 'skip',
-          empty_week_action: 'cancel',
-          ranges
-        });
-      }
-    } else {
-      if (LOGC) console.log('[CONTRACTS] skip generation (edit, no date change, no manual stage)');
-    }
-  }
-}
-
-
-
-  if (hasStageNow) {
-    if (LOGC) console.log('[CONTRACTS] calendar → commitContractCalendarStageIfPending');
-    const calRes = await commitContractCalendarStageIfPending(contractId);
-            if (!calRes.ok) {
-              const msg = `Calendar save failed: ${calRes.message || 'unknown error'}. Contract details were saved.`;
-              if (LOGC) console.warn('[CONTRACTS] calendar commit failed', calRes);
-              if (typeof showModalHint === 'function') showModalHint(msg, 'warn'); else alert(msg);
-            } else {
-              if (LOGC) console.log('[CONTRACTS] calendar commit ok', calRes);
-              if (typeof normalizeContractWindowToShifts === 'function') {
-                try {
-                  const norm = await normalizeContractWindowToShifts(contractId);
-                  if (norm && norm.ok) {
-                    try {
-                      const fs = (window.modalCtx.formState ||= { __forId: (contractId || null), main:{}, pay:{} });
-                      fs.main ||= {};
-                      fs.main.start_date = (window.modalCtx.data?.start_date || norm.start_date || fs.main.start_date || '');
-                      fs.main.end_date   = (window.modalCtx.data?.end_date   || norm.end_date   || fs.main.end_date   || '');
-                      const fr = window.__getModalFrame?.();
-                      const currentTab = fr?.currentTabKey || (document.querySelector('#modalTabs button.active')?.textContent?.toLowerCase() || '');
-                      if (currentTab === 'main' && typeof fr?.setTab === 'function') fr.setTab('main');
-                    } catch {}
-                  }
-                } catch (e) {
-                  if (LOGC) console.warn('[CONTRACTS] normalize window to shifts failed (non-fatal)', e);
-                }
-              }
-              try {
-                clearContractCalendarStageState(contractId);
-                clearCalendarSelection(`c:${contractId}`);
-              } catch {}
-            }
-          }
-        }
-
-        try { if (typeof computeContractMargins === 'function') computeContractMargins(); } catch {}
-
+        let hasStageNow = false, hasRemoveAllOnly = false;
         try {
-          const fr = window.__getModalFrame?.();
-          const currentTab = fr?.currentTabKey || (document.querySelector('#modalTabs button.active')?.textContent?.toLowerCase() || 'main');
-          if (LOGC) console.log('[CONTRACTS] post-save repaint (in-place)', { currentTab, contractId });
+          const st = (typeof getContractCalendarStageState === 'function') ? getContractCalendarStageState(contractId) : null;
+          const hasAdds        = !!(st && st.add && st.add.size);
+          const hasRemoves     = !!(st && st.remove && st.remove.size);
+          const hasAdditionals = !!(st && st.additional && Object.keys(st.additional).length);
+          const hasRemoveAll   = !!st?.removeAll;
+          hasStageNow          = !!(hasAdds || hasRemoves || hasAdditionals || hasRemoveAll);
+          hasRemoveAllOnly     = !!(hasRemoveAll && !hasAdds && !hasAdditionals);
+        } catch {}
 
-          if (currentTab === 'calendar' && contractId) {
-            const win = (window.__calState?.[contractId]?.win) || null;
-            const candId = window.modalCtx?.data?.candidate_id || null;
-            const scrollBox = document.getElementById('__calScroll');
-            const prevScroll = scrollBox ? scrollBox.scrollTop : 0;
-            if (typeof fetchAndRenderCandidateCalendarForContract === 'function' && candId) {
-              await fetchAndRenderCandidateCalendarForContract(contractId, candId, { from: win?.from, to: win?.to, view: window.__calState?.[contractId]?.view, weekEnding: window.modalCtx?.data?.week_ending_weekday_snapshot ?? 0 });
-            } else {
-              await fetchAndRenderContractCalendar(contractId, win ? { from: win.from, to: win.to, view: window.__calState?.[contractId]?.view } : undefined);
+        const newStart = window.modalCtx?.data?.start_date || data.start_date || null;
+        const newEnd   = window.modalCtx?.data?.end_date   || data.end_date   || null;
+
+        const extendedHead = !!(prevStartIso && newStart && newStart < prevStartIso);
+        const extendedTail = !!(prevEndIso   && newEnd   && newEnd   > prevEndIso);
+
+        if (isCreate) {
+          // NEW: adopt any staged selections from token → id (create flow)
+          try {
+            if (window.modalCtx?.openToken && typeof adoptCalendarStageFromToken === 'function') {
+              adoptCalendarStageFromToken(window.modalCtx.openToken, contractId);
             }
-            const newScrollBox = document.getElementById('__calScroll');
-            if (newScrollBox) newScrollBox.scrollTop = prevScroll;
-          } else if (currentTab === 'rates') {
-            try { computeContractMargins(); } catch {}
+          } catch {}
+
+          // NEW: re-evaluate stage presence AFTER adoption
+          try {
+            const st2 = (typeof getContractCalendarStageState === 'function') ? getContractCalendarStageState(contractId) : null;
+            const hasAdds2        = !!(st2 && st2.add && st2.add.size);
+            const hasRemoves2     = !!(st2 && st2.remove && st2.remove.size);
+            const hasAdditionals2 = !!(st2 && st2.additional && Object.keys(st2.additional).length);
+            const hasRemoveAll2   = !!st2?.removeAll;
+            hasStageNow           = !!(hasAdds2 || hasRemoves2 || hasAdditionals2 || hasRemoveAll2);
+            hasRemoveAllOnly      = !!(hasRemoveAll2 && !hasAdds2 && !hasAdditionals2);
+          } catch {}
+
+          if (!hasStageNow) {
+            // No manual stage → generate template weeks
+            if (std_schedule_json && typeof generateContractWeeks === 'function') {
+              if (LOGC) console.log('[CONTRACTS] generateContractWeeks (create)');
+              await generateContractWeeks(contractId);
+            }
+          } else {
+            // Manual stage detected → skip generation (backend will extend window on commit)
+            if (LOGC) console.log('[CONTRACTS] create: manual stage detected; skip generation');
+            data.skip_generate_weeks = true;
           }
-                try { window.__toast?.('Saved'); } catch {}
-        } catch (e) {
-          if (LOGC) console.warn('[CONTRACTS] post-save repaint failed', e);
-        }
 
-        if (LOGC) console.groupEnd?.();
-        // Return the saved row so saveForFrame() can set hasId=true and flip to View
-        const savedRow = (saved && (saved.contract || saved)) || window.modalCtx.data || null;
-        return { ok: true, saved: savedRow };
+        } else {
+          if (hasStageNow) {
+            if (LOGC) console.log('[CONTRACTS] manual stage present; will commit shortly');
+          } else if ((extendedHead || extendedTail) && std_schedule_json) {
+            if (LOGC) console.log('[CONTRACTS] generate missing weeks (template-only, head/tail extension)');
+            if (typeof generateContractWeeks === 'function') {
+              await generateContractWeeks(contractId);
+            }
+          } else {
+            // NEW: handle shrink (no manual stage and no extension)
+            const shrunkHead = !!(prevStartIso && newStart && newStart > prevStartIso);
+            const shrunkTail = !!(prevEndIso   && newEnd   && newEnd   < prevEndIso);
 
-      } catch (e) {
-        if (LOGC) { console.error('[CONTRACTS] Save failed', e); console.groupEnd?.(); }
-        alert(`Save failed: ${e?.message || e}`);
-        return false;
-      } finally {
-        window.modalCtx._saveInFlight = false;
-      }
-    },
+            if (shrunkHead || shrunkTail) {
+              const ymdShift = (ymd, days) => {
+                const dt = new Date(`${ymd}T00:00:00Z`);
+                dt.setUTCDate(dt.getUTCDate() + days);
+                return dt.toISOString().slice(0,10);
+              };
 
-    hasId,
-    () => {
-      const wire = () => {
-        snapshotContractForm();
-
-        const form = document.querySelector('#contractForm');
-        const tabs = document.getElementById('modalTabs');
-        const active = tabs?.querySelector('button.active')?.textContent?.toLowerCase() || 'main';
-
-        if (form) {
-          if (!form.__wiredStage) {
-            form.__wiredStage = true;
-            const stage = (e) => {
-              const t = e.target;
-              if (!t || !t.name) return;
-              let v = t.type === 'checkbox' ? (t.checked ? 'on' : '') : t.value;
-
-              const isTimeField = /^(mon|tue|wed|thu|fri|sat|sun)_(start|end)$/.test(t.name);
-              if (isTimeField) {
-                if (e.type === 'input') {
-                  v = v.replace(/[^\d:]/g,'');
-                  t.value = v;
-                  try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
-                  return;
-                }
+              const ranges = [];
+              if (shrunkHead) {
+                // remove everything BEFORE newStart (inclusive of prevStart .. day before newStart)
+                ranges.push({ from: prevStartIso, to: ymdShift(newStart, -1), days: [] });
+              }
+              if (shrunkTail) {
+                // remove everything AFTER newEnd (day after newEnd .. prevEnd inclusive)
+                ranges.push({ from: ymdShift(newEnd, +1), to: prevEndIso, days: [] });
               }
 
-              setContractFormValue(t.name, v);
-              if (t.name === 'pay_method_snapshot' || /^(paye_|umb_|charge_)/.test(t.name)) computeContractMargins();
-              try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
-            };
-            form.addEventListener('input', stage, true);
-            form.addEventListener('change', stage, true);
+              if (ranges.length && typeof contractsUnplanRanges === 'function') {
+                if (LOGC) console.log('[CONTRACTS] unplan outside new window', { ranges });
+                await contractsUnplanRanges(contractId, {
+                  when_timesheet_exists: 'skip',
+                  empty_week_action: 'cancel',
+                  ranges
+                });
+              }
+            } else {
+              if (LOGC) console.log('[CONTRACTS] skip generation (edit, no date change, no manual stage)');
+            }
+          }
+        }
 
-            const normaliseTimeInput = (t) => {
-              if (!t || !/^(mon|tue|wed|thu|fri|sat|sun)_(start|end)$/.test(t.name)) return;
-              const raw = (t.value || '').trim();
-              const norm = (function (x) {
-                if (!x) return '';
-                const y = x.replace(/\s+/g, '');
-                let h, m;
-                if (/^\d{3,4}$/.test(y)) {
-                  const s = y.padStart(4, '0'); h = +s.slice(0, 2); m = +s.slice(2, 4);
-                } else if (/^\d{1,2}:\d{1,2}$/.test(y)) {
-                  const parts = y.split(':'); h = +parts[0]; m = +parts[1];
-                } else return '';
-                if (h < 0 || h > 23 || m < 0 || m > 59) return '';
-                return String(h).padStart(2, '0') + ':' + String(m).padStart(2, '0');
-              })(raw);
+        if (hasStageNow) {
+          if (LOGC) console.log('[CONTRACTS] calendar → commitContractCalendarStageIfPending');
+          const calRes = await commitContractCalendarStageIfPending(contractId);
+          if (!calRes.ok) {
+            const msg = `Calendar save failed: ${calRes.message || 'unknown error'}. Contract details were saved.`;
+            if (LOGC) console.warn('[CONTRACTS] calendar commit failed', calRes);
+            if (typeof showModalHint === 'function') showModalHint(msg, 'warn'); else alert(msg);
+          } else {
+            if (LOGC) console.log('[CONTRACTS] calendar commit ok', calRes);
+            if (typeof normalizeContractWindowToShifts === 'function') {
+              try {
+                const norm = await normalizeContractWindowToShifts(contractId);
+                if (norm && norm.ok) {
+                  try {
+                    const fs = (window.modalCtx.formState ||= { __forId: (contractId || null), main:{}, pay:{} });
+                    fs.main ||= {};
+                    fs.main.start_date = (window.modalCtx.data?.start_date || norm.start_date || fs.main.start_date || '');
+                    fs.main.end_date   = (window.modalCtx.data?.end_date   || norm.end_date   || fs.main.end_date   || '');
+                    const fr = window.__getModalFrame?.();
+                    const currentTab = fr?.currentTabKey || (document.querySelector('#modalTabs button.active')?.textContent?.toLowerCase() || '');
+                    if (currentTab === 'main' && typeof fr?.setTab === 'function') fr.setTab('main');
+                  } catch {}
+                }
+              } catch (e) {
+                if (LOGC) console.warn('[CONTRACTS] normalize window to shifts failed (non-fatal)', e);
+              }
+            }
+            try {
+              clearContractCalendarStageState(contractId);
+              clearCalendarSelection(`c:${contractId}`);
+            } catch {}
+          }
+        }
+      }
 
-              if (!norm && raw) {
-                t.value = '';
-                t.setAttribute('data-invalid', '1');
-                t.setAttribute('title', 'Enter a valid time HH:MM (00:00–23:59)');
-                setContractFormValue(t.name, '');
-                try { t.dispatchEvent(new Event('input', { bubbles: true })); t.dispatchEvent(new Event('change', { bubbles: true })); } catch {}
+      try { if (typeof computeContractMargins === 'function') computeContractMargins(); } catch {}
+
+      try {
+        const fr = window.__getModalFrame?.();
+        const currentTab = fr?.currentTabKey || (document.querySelector('#modalTabs button.active')?.textContent?.toLowerCase() || 'main');
+        if (LOGC) console.log('[CONTRACTS] post-save repaint (in-place)', { currentTab, contractId: (window.modalCtx?.data?.id) });
+
+        if (currentTab === 'calendar' && window.modalCtx?.data?.id) {
+          const contractId2 = window.modalCtx.data.id;
+          const win = (window.__calState?.[contractId2]?.win) || null;
+          const candId = window.modalCtx?.data?.candidate_id || null;
+          const scrollBox = document.getElementById('__calScroll');
+          const prevScroll = scrollBox ? scrollBox.scrollTop : 0;
+          if (typeof fetchAndRenderCandidateCalendarForContract === 'function' && candId) {
+            await fetchAndRenderCandidateCalendarForContract(contractId2, candId, {
+              from: win?.from, to: win?.to, view: window.__calState?.[contractId2]?.view,
+              weekEnding: window.modalCtx?.data?.week_ending_weekday_snapshot ?? 0
+            });
+          } else {
+            await fetchAndRenderContractCalendar(contractId2, win ? { from: win.from, to: win.to, view: window.__calState?.[contractId2]?.view } : undefined);
+          }
+          const newScrollBox = document.getElementById('__calScroll');
+          if (newScrollBox) newScrollBox.scrollTop = prevScroll;
+        } else if (currentTab === 'rates') {
+          try { computeContractMargins(); } catch {}
+        }
+        try { window.__toast?.('Saved'); } catch {}
+      } catch (e) {
+        if (LOGC) console.warn('[CONTRACTS] post-save repaint failed', e);
+      }
+
+      if (LOGC) console.groupEnd?.();
+      // Return the saved row so saveForFrame() can set hasId=true and flip to View
+      const savedRow = (window.modalCtx.data || null);
+      return { ok: true, saved: savedRow };
+
+    } catch (e) {
+      if (LOGC) { console.error('[CONTRACTS] Save failed', e); console.groupEnd?.(); }
+      alert(`Save failed: ${e?.message || e}`);
+      return false;
+    } finally {
+      window.modalCtx._saveInFlight = false;
+    }
+  },
+
+  hasId, // 5th
+
+  // 6th: onReturn — single, deduped
+  () => {
+    const wire = () => {
+      snapshotContractForm();
+
+      const form = document.querySelector('#contractForm');
+      const tabs = document.getElementById('modalTabs');
+      const active = tabs?.querySelector('button.active')?.textContent?.toLowerCase() || 'main';
+
+      if (form) {
+        if (!form.__wiredStage) {
+          form.__wiredStage = true;
+          const stage = (e) => {
+            const t = e.target;
+            if (!t || !t.name) return;
+            let v = t.type === 'checkbox' ? (t.checked ? 'on' : '') : t.value;
+
+            const isTimeField = /^(mon|tue|wed|thu|fri|sat|sun)_(start|end)$/.test(t.name);
+            if (isTimeField) {
+              if (e.type === 'input') {
+                v = v.replace(/[^\d:]/g,'');
+                t.value = v;
                 try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
                 return;
               }
-
-              if (norm) {
-                t.value = norm;
-                t.removeAttribute('data-invalid');
-                t.removeAttribute('title');
-                setContractFormValue(t.name, norm);
-                try { t.dispatchEvent(new Event('input', { bubbles: true })); t.dispatchEvent(new Event('change', { bubbles: true })); } catch {}
-                try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
-              }
-            };
-
-            const onBlurNorm = (e) => { normaliseTimeInput(e.target); };
-            form.addEventListener('blur', onBlurNorm, true);
-
-            const onKeydownNorm = (e) => {
-              if (e.key === 'Tab') normaliseTimeInput(e.target);
-            };
-            form.addEventListener('keydown', onKeydownNorm, true);
-          }
-
-          if (active === 'main') {
-            try {
-              const sd = form.querySelector('input[name="start_date"]');
-              const ed = form.querySelector('input[name="end_date"]');
-              const toUk = (iso) => {
-                try { return (typeof formatIsoToUk === 'function') ? (formatIsoToUk(iso) || '') : (iso || ''); }
-                catch { return iso || ''; }
-              };
-              if (sd && /^\d{4}-\d{2}-\d{2}$/.test(sd.value||'')) sd.value = toUk(sd.value);
-              if (ed && /^\d{4}-\d{2}-\d{2}$/.test(ed.value||'')) ed.value = toUk(ed.value);
-              if (sd) { sd.setAttribute('placeholder','DD/MM/YYYY'); if (typeof attachUkDatePicker === 'function') attachUkDatePicker(sd); }
-              if (ed) { ed.setAttribute('placeholder','DD/MM/YYYY'); if (typeof attachUkDatePicker === 'function') attachUkDatePicker(ed, { minDate: sd?.value || null }); }
-              if (sd && ed) {
-                sd.addEventListener('change', () => {
-                  const sv = sd.value || '';
-                  if (typeof attachUkDatePicker === 'function') attachUkDatePicker(ed, { minDate: sv || null });
-                  if (sv && ed.value) {
-                    try {
-                      const si = parseUkDateToIso?.(sv) || sv;
-                      const ei = parseUkDateToIso?.(ed.value) || ed.value;
-                      if (si && ei && si > ei) { ed.value=''; showModalHint?.('Pick an end date after start','warn'); setContractFormValue('end_date',''); }
-                    } catch {}
-                  }
-                });
-              }
-              if (LOGC) console.log('[CONTRACTS] datepickers wired for start_date/end_date', { hasStart: !!sd, hasEnd: !!ed });
-            } catch (e) {
-              if (LOGC) console.warn('[CONTRACTS] datepicker wiring failed', e);
             }
 
-            const btnPC = document.getElementById('btnPickCandidate');
-            const btnCC = document.getElementById('btnClearCandidate');
-            const btnPL = document.getElementById('btnPickClient');
-            const btnCL = document.getElementById('btnClearClient');
-            const candInput = document.getElementById('candidate_name_display');
-            const cliInput  = document.getElementById('client_name_display');
+            setContractFormValue(t.name, v);
+            if (t.name === 'pay_method_snapshot' || /^(paye_|umb_|charge_)/.test(t.name)) computeContractMargins();
+            try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
+          };
+          form.addEventListener('input', stage, true);
+          form.addEventListener('change', stage, true);
 
-            const ensurePrimed = async (entity) => {
-              try {
-                await ensurePickerDatasetPrimed(entity);
-                const fp = getSummaryFingerprint(entity);
-                const mem = getSummaryMembership(entity, fp);
-                if (!mem?.ids?.length || mem?.stale) {
-                  await primeSummaryMembership(entity, fp);
-                }
-              } catch (e) { if (LOGC) console.warn('[CONTRACTS] typeahead priming failed', entity, e); }
+          const normaliseTimeInput = (t) => {
+            if (!t || !/^(mon|tue|wed|thu|fri|sat|sun)_(start|end)$/.test(t.name)) return;
+            const raw = (t.value || '').trim();
+            const norm = (function (x) {
+              if (!x) return '';
+              const y = x.replace(/\s+/g, '');
+              let h, m;
+              if (/^\d{3,4}$/.test(y)) {
+                const s = y.padStart(4, '0'); h = +s.slice(0, 2); m = +s.slice(2, 4);
+              } else if (/^\d{1,2}:\d{1,2}$/.test(y)) {
+                const parts = y.split(':'); h = +parts[0]; m = +parts[1];
+              } else return '';
+              if (h < 0 || h > 23 || m < 0 || m > 59) return '';
+              return String(h).padStart(2, '0') + ':' + String(m).padStart(2, '0');
+            })(raw);
+
+            if (!norm && raw) {
+              t.value = '';
+              t.setAttribute('data-invalid', '1');
+              t.setAttribute('title', 'Enter a valid time HH:MM (00:00–23:59)');
+              setContractFormValue(t.name, '');
+              try { t.dispatchEvent(new Event('input', { bubbles: true })); t.dispatchEvent(new Event('change', { bubbles: true })); } catch {}
+              try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
+              return;
+            }
+
+            if (norm) {
+              t.value = norm;
+              t.removeAttribute('data-invalid');
+              t.removeAttribute('title');
+              setContractFormValue(t.name, norm);
+              try { t.dispatchEvent(new Event('input', { bubbles: true })); t.dispatchEvent(new Event('change', { bubbles: true })); } catch {}
+              try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
+            }
+          };
+
+          const onBlurNorm = (e) => { normaliseTimeInput(e.target); };
+          form.addEventListener('blur', onBlurNorm, true);
+
+          const onKeydownNorm = (e) => {
+            if (e.key === 'Tab') normaliseTimeInput(e.target);
+          };
+          form.addEventListener('keydown', onKeydownNorm, true);
+        }
+
+        if (active === 'main') {
+          try {
+            const sd = form.querySelector('input[name="start_date"]');
+            const ed = form.querySelector('input[name="end_date"]');
+            const toUk = (iso) => {
+              try { return (typeof formatIsoToUk === 'function') ? (formatIsoToUk(iso) || '') : (iso || ''); }
+              catch { return iso || ''; }
             };
-
-            const buildItemLabel = (entity, r) => {
-              if (entity === 'candidates') {
-                const first = (r.first_name||'').trim();
-                const last  = (r.last_name||'').trim();
-                const role  = ((r.roles_display||'').split(/[•;,]/)[0]||'').trim();
-                return `${last}${last?', ':''}${first}${role?` ${role}`:''}`.trim();
-              } else {
-                const name  = (r.name||'').trim();
-                return name;
-              }
-            };
-
-            const wireTypeahead = async (entity, inputEl, hiddenName, labelElId) => {
-              if (!inputEl) return;
-              await ensurePrimed(entity);
-
-              const menuId = entity === 'candidates' ? 'candTypeaheadMenu' : 'clientTypeaheadMenu';
-              let menu = document.getElementById(menuId);
-              if (!menu) {
-                menu = document.createElement('div');
-                menu.id = menuId;
-                menu.className = 'typeahead-menu';
-                menu.style.position = 'absolute';
-                menu.style.zIndex = '1000';
-                menu.style.background = 'var(--panel, #fff)';
-                menu.style.border = '1px solid var(--line, #ddd)';
-                menu.style.boxShadow = '0 4px 12px rgba(0,0,0,0.08)';
-                menu.style.maxHeight = '240px';
-                menu.style.overflowY = 'auto';
-                menu.style.display = 'none';
-                document.body.appendChild(menu);
-              }
-
-              const positionMenu = () => {
-                const r = inputEl.getBoundingClientRect();
-                menu.style.minWidth = `${Math.max(260, r.width)}px`;
-                menu.style.left = `${window.scrollX + r.left}px`;
-                menu.style.top  = `${window.scrollY + r.bottom + 4}px`;
-              };
-
-              const closeMenu = () => { menu.style.display = 'none'; menu.innerHTML = ''; };
-              const openMenu  = () => { positionMenu(); menu.style.display = ''; };
-
-              const getDataset = () => {
-                const fp  = getSummaryFingerprint(entity);
-                const mem = getSummaryMembership(entity, fp);
-                const ds  = (window.__pickerData ||= {})[entity] || { since:null, itemsById:{} };
-                const items = ds.itemsById || {};
-                let ids = Array.isArray(mem?.ids) ? mem.ids : [];
-                if (!ids.length) ids = Object.keys(items);
-                return { ids, items };
-              };
-
-              const applyList = (rows) => {
-                menu.innerHTML = rows.slice(0, 10).map(r => {
-                  const label = buildItemLabel(entity, r);
-                  return `<div class="ta-item" data-id="${r.id||''}" data-label="${(label||'').replace(/"/g,'&quot;')}" style="padding:8px 10px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${label}</div>`;
-                }).join('');
-                const first = menu.querySelector('.ta-item');
-                if (first) first.style.background = 'var(--hover, #f5f5f5)';
-              };
-
-              const selectRow = (id, label) => {
-                setContractFormValue(hiddenName, id);
-                inputEl.value = label || '';
-                const labEl = document.getElementById(labelElId);
-                if (labEl) labEl.textContent = label ? `Chosen: ${label}` : '';
-
-                try {
-                  const fs = (window.modalCtx.formState ||= { __forId: (window.modalCtx.data?.id ?? window.modalCtx.openToken ?? null), main:{}, pay:{} });
-                  fs.main ||= {};
-                  fs.main[hiddenName] = id;
-                  if (hiddenName === 'candidate_id') fs.main['candidate_display'] = label;
-                  if (hiddenName === 'client_id')    fs.main['client_name']       = label;
-                } catch {}
-
-                try {
-                  window.modalCtx.data = window.modalCtx.data || {};
-                  if (hiddenName === 'candidate_id') { window.modalCtx.data.candidate_id = id; window.modalCtx.data.candidate_display = label; }
-                  if (hiddenName === 'client_id')    { window.modalCtx.data.client_id    = id; window.modalCtx.data.client_name = label; }
-                } catch {}
-
-                if (hiddenName === 'candidate_id') {
-                  (async () => {
-                    try {
-                      const cand = await getCandidate(id);
-                      const derived = (String(cand?.pay_method || '').toUpperCase() === 'UMBRELLA' && cand?.umbrella_id) ? 'UMBRELLA' : 'PAYE';
-                      const fsm = (window.modalCtx.formState ||= { main:{}, pay:{} }).main ||= {};
-                      fsm.pay_method_snapshot = derived;
-                      fsm.__pay_locked = true;
-                      const sel = document.querySelector('select[name="pay_method_snapshot"], select[name="default_pay_method_snapshot"]');
-                      if (sel) { sel.value = derived; sel.disabled = true; }
-                      computeContractMargins();
-                    } catch (e) { if (LOGC) console.warn('[CONTRACTS] derive pay method failed', e); }
-                  })();
-                }
-
-                closeMenu();
-                try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
-              };
-
-              let debTimer = 0;
-              const handleInput = () => {
-                const q = (inputEl.value||'').trim();
-                if (q.length < 3) { closeMenu(); return; }
-                if (debTimer) clearTimeout(debTimer);
-                debTimer = setTimeout(() => {
-                  const { ids, items } = getDataset();
-                  const rows = pickersLocalFilterAndSort(entity, ids, q, entity==='candidates'?'last_name':'name', 'asc')
-                    .map(v => (typeof v === 'object' ? v : items[String(v)]))
-                    .filter(Boolean);
-                  if (!rows.length) { closeMenu(); return; }
-                  applyList(rows);
-                  openMenu();
-                }, 120);
-              };
-
-              const handleKeyDown = (e) => {
-                if (menu.style.display === 'none') return;
-                const items = Array.from(menu.querySelectorAll('.ta-item'));
-                if (!items.length) return;
-                const idx = items.findIndex(n => n.style.background && n.style.background.includes('hover'));
-                const setActive = (i) => {
-                  items.forEach(n => n.style.background='');
-                  items[i].style.background = 'var(--hover, #f5f5f5)';
-                  items[i].scrollIntoView({ block:'nearest' });
-                };
-                if (e.key === 'ArrowDown') { e.preventDefault(); setActive(Math.min((idx<0?0:idx+1), items.length-1)); }
-                if (e.key === 'ArrowUp')   { e.preventDefault(); setActive(Math.max((idx<0?0:idx-1), 0)); }
-                if (e.key === 'Enter')     { e.preventDefault(); const n = items[Math.max(idx,0)]; if (n) selectRow(n.dataset.id, n.dataset.label); }
-                if (e.key === 'Escape')    { e.preventDefault(); closeMenu(); }
-              };
-
-              menu.addEventListener('click', (ev) => {
-                const n = ev.target && ev.target.closest('.ta-item'); if (!n) return;
-                selectRow(n.dataset.id, n.dataset.label);
-              });
-
-              let blurTimer = 0;
-              inputEl.addEventListener('blur', () => { blurTimer = setTimeout(closeMenu, 150); });
-              menu.addEventListener('mousedown', () => { if (blurTimer) clearTimeout(blurTimer); });
-
-              inputEl.addEventListener('input', handleInput);
-              inputEl.addEventListener('keydown', handleKeyDown);
-            };
-
-            wireTypeahead('candidates', candInput, 'candidate_id', 'candidatePickLabel');
-            wireTypeahead('clients',    cliInput,  'client_id',    'clientPickLabel');
-
-            if (btnPC && !btnPC.__wired) {
-              btnPC.__wired = true;
-              btnPC.addEventListener('click', async () => {
-                if (LOGC) console.log('[CONTRACTS] Pick Candidate clicked');
-                openCandidatePicker(async ({ id, label }) => {
-                  if (LOGC) console.log('[CONTRACTS] Pick Candidate → selected', { id, label });
-                  setContractFormValue('candidate_id', id);
-                  const lab = document.getElementById('candidatePickLabel'); if (lab) lab.textContent = `Chosen: ${label}`;
+            if (sd && /^\d{4}-\d{2}-\d{2}$/.test(sd.value||'')) sd.value = toUk(sd.value);
+            if (ed && /^\d{4}-\d{2}-\d{2}$/.test(ed.value||'')) ed.value = toUk(ed.value);
+            if (sd) { sd.setAttribute('placeholder','DD/MM/YYYY'); if (typeof attachUkDatePicker === 'function') attachUkDatePicker(sd); }
+            if (ed) { ed.setAttribute('placeholder','DD/MM/YYYY'); if (typeof attachUkDatePicker === 'function') attachUkDatePicker(ed, { minDate: sd?.value || null }); }
+            if (sd && ed) {
+              sd.addEventListener('change', () => {
+                const sv = sd.value || '';
+                if (typeof attachUkDatePicker === 'function') attachUkDatePicker(ed, { minDate: sv || null });
+                if (sv && ed.value) {
                   try {
-                    const fs2 = (window.modalCtx.formState ||= { __forId: (window.modalCtx.data?.id ?? window.modalCtx.openToken ?? null), main:{}, pay:{} });
-                    fs2.main ||= {}; fs2.main.candidate_id = id; fs2.main.candidate_display = label;
-                    window.modalCtx.data = window.modalCtx.data || {};
-                    window.modalCtx.data.candidate_id = id; window.modalCtx.data.candidate_display = label;
+                    const si = parseUkDateToIso?.(sv) || sv;
+                    const ei = parseUkDateToIso?.(ed.value) || ed.value;
+                    if (si && ei && si > ei) { ed.value=''; showModalHint?.('Pick an end date after start','warn'); setContractFormValue('end_date',''); }
                   } catch {}
+                }
+              });
+            }
+            if (LOGC) console.log('[CONTRACTS] datepickers wired for start_date/end_date', { hasStart: !!sd, hasEnd: !!ed });
+          } catch (e) {
+            if (LOGC) console.warn('[CONTRACTS] datepicker wiring failed', e);
+          }
+
+          const btnPC = document.getElementById('btnPickCandidate');
+          const btnCC = document.getElementById('btnClearCandidate');
+          const btnPL = document.getElementById('btnPickClient');
+          const btnCL = document.getElementById('btnClearClient');
+          const candInput = document.getElementById('candidate_name_display');
+          const cliInput  = document.getElementById('client_name_display');
+
+          const ensurePrimed = async (entity) => {
+            try {
+              await ensurePickerDatasetPrimed(entity);
+              const fp = getSummaryFingerprint(entity);
+              const mem = getSummaryMembership(entity, fp);
+              if (!mem?.ids?.length || mem?.stale) {
+                await primeSummaryMembership(entity, fp);
+              }
+            } catch (e) { if (LOGC) console.warn('[CONTRACTS] typeahead priming failed', entity, e); }
+          };
+
+          const buildItemLabel = (entity, r) => {
+            if (entity === 'candidates') {
+              const first = (r.first_name||'').trim();
+              const last  = (r.last_name||'').trim();
+              const role  = ((r.roles_display||'').split(/[•;,]/)[0]||'').trim();
+              return `${last}${last?', ':''}${first}${role?` ${role}`:''}`.trim();
+            } else {
+              const name  = (r.name||'').trim();
+              return name;
+            }
+          };
+
+          const wireTypeahead = async (entity, inputEl, hiddenName, labelElId) => {
+            if (!inputEl) return;
+            await ensurePrimed(entity);
+
+            const menuId = entity === 'candidates' ? 'candTypeaheadMenu' : 'clientTypeaheadMenu';
+            let menu = document.getElementById(menuId);
+            if (!menu) {
+              menu = document.createElement('div');
+              menu.id = menuId;
+              menu.className = 'typeahead-menu';
+              menu.style.position = 'absolute';
+              menu.style.zIndex = '1000';
+              menu.style.background = 'var(--panel, #fff)';
+              menu.style.border = '1px solid var(--line, #ddd)';
+              menu.style.boxShadow = '0 4px 12px rgba(0,0,0,0.08)';
+              menu.style.maxHeight = '240px';
+              menu.style.overflowY = 'auto';
+              menu.style.display = 'none';
+              document.body.appendChild(menu);
+            }
+
+            const positionMenu = () => {
+              const r = inputEl.getBoundingClientRect();
+              menu.style.minWidth = `${Math.max(260, r.width)}px`;
+              menu.style.left = `${window.scrollX + r.left}px`;
+              menu.style.top  = `${window.scrollY + r.bottom + 4}px`;
+            };
+
+            const closeMenu = () => { menu.style.display = 'none'; menu.innerHTML = ''; };
+            const openMenu  = () => { positionMenu(); menu.style.display = ''; };
+
+            const getDataset = () => {
+              const fp  = getSummaryFingerprint(entity);
+              const mem = getSummaryMembership(entity, fp);
+              const ds  = (window.__pickerData ||= {})[entity] || { since:null, itemsById:{} };
+              const items = ds.itemsById || {};
+              let ids = Array.isArray(mem?.ids) ? mem.ids : [];
+              if (!ids.length) ids = Object.keys(items);
+              return { ids, items };
+            };
+
+            const applyList = (rows) => {
+              menu.innerHTML = rows.slice(0, 10).map(r => {
+                const label = buildItemLabel(entity, r);
+                return `<div class="ta-item" data-id="${r.id||''}" data-label="${(label||'').replace(/"/g,'&quot;')}" style="padding:8px 10px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${label}</div>`;
+              }).join('');
+              const first = menu.querySelector('.ta-item');
+              if (first) first.style.background = 'var(--hover, #f5f5f5)';
+            };
+
+            const selectRow = (id, label) => {
+              setContractFormValue(hiddenName, id);
+              inputEl.value = label || '';
+              const labEl = document.getElementById(labelElId);
+              if (labEl) labEl.textContent = label ? `Chosen: ${label}` : '';
+
+              try {
+                const fs = (window.modalCtx.formState ||= { __forId: (window.modalCtx.data?.id ?? window.modalCtx.openToken ?? null), main:{}, pay:{} });
+                fs.main ||= {};
+                fs.main[hiddenName] = id;
+                if (hiddenName === 'candidate_id') fs.main['candidate_display'] = label;
+                if (hiddenName === 'client_id')    fs.main['client_name']       = label;
+              } catch {}
+
+              try {
+                window.modalCtx.data = window.modalCtx.data || {};
+                if (hiddenName === 'candidate_id') { window.modalCtx.data.candidate_id = id; window.modalCtx.data.candidate_display = label; }
+                if (hiddenName === 'client_id')    { window.modalCtx.data.client_id    = id; window.modalCtx.data.client_name = label; }
+              } catch {}
+
+              if (hiddenName === 'candidate_id') {
+                (async () => {
                   try {
                     const cand = await getCandidate(id);
                     const derived = (String(cand?.pay_method || '').toUpperCase() === 'UMBRELLA' && cand?.umbrella_id) ? 'UMBRELLA' : 'PAYE';
@@ -2160,142 +2084,208 @@ if (contractId) {
                     const sel = document.querySelector('select[name="pay_method_snapshot"], select[name="default_pay_method_snapshot"]');
                     if (sel) { sel.value = derived; sel.disabled = true; }
                     computeContractMargins();
-                  } catch (e) { if (LOGC) console.warn('[CONTRACTS] prefillPayMethodFromCandidate failed', e); }
-                });
-              });
-              if (LOGC) console.log('[CONTRACTS] wired btnPickCandidate');
-            }
-            if (btnCC && !btnCC.__wired) {
-              btnCC.__wired = true;
-              btnCC.addEventListener('click', () => {
-                if (LOGC) console.log('[CONTRACTS] Clear Candidate clicked');
-                setContractFormValue('candidate_id', '');
-                const lab = document.getElementById('candidatePickLabel'); if (lab) lab.textContent = '';
-                try {
-                  const fs2 = (window.modalCtx.formState ||= { __forId: (window.modalCtx.data?.id ?? window.modalCtx.openToken ?? null), main:{}, pay:{} });
-                  fs2.main ||= {}; delete fs2.main.candidate_id; delete fs2.main.candidate_display;
-                  fs2.main.__pay_locked = false;
-                  fs2.main.pay_method_snapshot = 'PAYE';
-                  const sel = document.querySelector('select[name="pay_method_snapshot"], select[name="default_pay_method_snapshot"]');
-                  if (sel) { sel.disabled = false; sel.value = 'PAYE'; }
-                  window.modalCtx.data = window.modalCtx.data || {};
-                  delete window.modalCtx.data.candidate_id; delete window.modalCtx.data.candidate_display;
-                } catch {}
-                try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
-              });
-              if (LOGC) console.log('[CONTRACTS] wired btnClearCandidate');
-            }
+                  } catch (e) { if (LOGC) console.warn('[CONTRACTS] derive pay method failed', e); }
+                })();
+              }
 
-            if (btnPL && !btnPL.__wired) {
-              btnPL.__wired = true;
-              btnPL.addEventListener('click', async () => {
-                if (LOGC) console.log('[CONTRACTS] Pick Client clicked');
-                openClientPicker(async ({ id, label }) => {
-                  if (LOGC) console.log('[CONTRACTS] Pick Client → selected', { id, label });
-                  setContractFormValue('client_id', id);
-                  const lab = document.getElementById('clientPickLabel'); if (lab) lab.textContent = `Chosen: ${label}`;
-                  try {
-                    const fs2 = (window.modalCtx.formState ||= { __forId: (window.modalCtx.data?.id ?? window.modalCtx.openToken ?? null), main:{}, pay:{} });
-                    fs2.main ||= {}; fs2.main.client_id = id; fs2.main.client_name = label;
-                    window.modalCtx.data = window.modalCtx.data || {};
-                    window.modalCtx.data.client_id = id; window.modalCtx.data.client_name = label;
-                  } catch {}
-                  try {
-                    const client = await getClient(id);
-                    const h = checkClientInvoiceEmailPresence(client);
-                    if (h) showModalHint(h, 'warn');
-                    const we = (client?.week_ending_weekday ?? (client?.client_settings && client.client_settings.week_ending_weekday)) ?? 0;
-                    const fs2 = (window.modalCtx.formState ||= { main:{}, pay:{} });
-                    fs2.main ||= {}; fs2.main.week_ending_weekday_snapshot = String(we);
-                    const weekNames = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
-                    const lbl = document.getElementById('weLabel'); if (lbl) lbl.textContent = weekNames[Number(we)] || 'Sunday';
-                    const hidden = form?.querySelector('input[name="week_ending_weekday_snapshot"]'); if (hidden) hidden.value = String(we);
-                    try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
-                  } catch (e) { if (LOGC) console.warn('[CONTRACTS] client hint/week-ending check failed', e); }
-                });
-              });
-              if (LOGC) console.log('[CONTRACTS] wired btnPickClient');
-            }
-            if (btnCL && !btnCL.__wired) {
-              btnCL.__wired = true;
-              btnCL.addEventListener('click', () => {
-                if (LOGC) console.log('[CONTRACTS] Clear Client clicked');
-                setContractFormValue('client_id', '');
-                const lab = document.getElementById('clientPickLabel'); if (lab) lab.textContent = '';
-                try {
-                  const fs2 = (window.modalCtx.formState ||= { __forId: (window.modalCtx.data?.id ?? window.modalCtx.openToken ?? null), main:{}, pay:{} });
-                  fs2.main ||= {}; delete fs2.main.client_id; delete fs2.main.client_name; delete fs2.main.week_ending_weekday_snapshot;
-                  window.modalCtx.data = window.modalCtx.data || {};
-                  delete window.modalCtx.data.client_id; delete window.modalCtx.data.client_name;
-                  const lbl = document.getElementById('weLabel'); if (lbl) lbl.textContent = 'Sunday';
-                  const hidden = form?.querySelector('input[name="week_ending_weekday_snapshot"]'); if (hidden) hidden.value = '';
-                } catch {}
-                try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
-              });
-              if (LOGC) console.log('[CONTRACTS] wired btnClearClient');
-            }
-
-            const openOnType = (inputEl, openerName) => {
-              if (!inputEl || inputEl.__wiredTyping) return;
-              inputEl.__wiredTyping = true;
-              if (LOGC) console.log('[CONTRACTS] typing handler installed for', openerName);
-            };
-            openOnType(candInput, 'candidate');
-            openOnType(cliInput, 'client');
-          }
-        }
-
-        const ratesTab = document.querySelector('#contractRatesTab');
-        if (ratesTab && !ratesTab.__wiredStage) {
-          ratesTab.__wiredStage = true;
-          const stageRates = (e) => {
-            const t = e.target;
-            if (!t || !t.name) return;
-            if (/^(paye_|umb_|charge_)/.test(t.name)) {
-              setContractFormValue(t.name, t.value);
-              computeContractMargins();
+              closeMenu();
               try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
-            }
+            };
+
+            let debTimer = 0;
+            const handleInput = () => {
+              const q = (inputEl.value||'').trim();
+              if (q.length < 3) { closeMenu(); return; }
+              if (debTimer) clearTimeout(debTimer);
+              debTimer = setTimeout(() => {
+                const { ids, items } = getDataset();
+                const rows = pickersLocalFilterAndSort(entity, ids, q, entity==='candidates'?'last_name':'name', 'asc')
+                  .map(v => (typeof v === 'object' ? v : items[String(v)]))
+                  .filter(Boolean);
+                if (!rows.length) { closeMenu(); return; }
+                applyList(rows);
+                openMenu();
+              }, 120);
+            };
+
+            const handleKeyDown = (e) => {
+              if (menu.style.display === 'none') return;
+              const items = Array.from(menu.querySelectorAll('.ta-item'));
+              if (!items.length) return;
+              const idx = items.findIndex(n => n.style.background && n.style.background.includes('hover'));
+              const setActive = (i) => {
+                items.forEach(n => n.style.background='');
+                items[i].style.background = 'var(--hover, #f5f5f5)';
+                items[i].scrollIntoView({ block:'nearest' });
+              };
+              if (e.key === 'ArrowDown') { e.preventDefault(); setActive(Math.min((idx<0?0:idx+1), items.length-1)); }
+              if (e.key === 'ArrowUp')   { e.preventDefault(); setActive(Math.max((idx<0?0:idx-1), 0)); }
+              if (e.key === 'Enter')     { e.preventDefault(); const n = items[Math.max(idx,0)]; if (n) selectRow(n.dataset.id, n.dataset.label); }
+              if (e.key === 'Escape')    { e.preventDefault(); closeMenu(); }
+            };
+
+            menu.addEventListener('click', (ev) => {
+              const n = ev.target && ev.target.closest('.ta-item'); if (!n) return;
+              selectRow(n.dataset.id, n.dataset.label);
+            });
+
+            let blurTimer = 0;
+            inputEl.addEventListener('blur', () => { blurTimer = setTimeout(closeMenu, 150); });
+            menu.addEventListener('mousedown', () => { if (blurTimer) clearTimeout(blurTimer); });
+
+            inputEl.addEventListener('input', handleInput);
+            inputEl.addEventListener('keydown', handleKeyDown);
           };
-          ratesTab.addEventListener('input', stageRates, true);
-          ratesTab.addEventListener('change', stageRates, true);
-          computeContractMargins();
+
+          wireTypeahead('candidates', candInput, 'candidate_id', 'candidatePickLabel');
+          wireTypeahead('clients',    cliInput,  'client_id',    'clientPickLabel');
+
+          if (btnPC && !btnPC.__wired) {
+            btnPC.__wired = true;
+            btnPC.addEventListener('click', async () => {
+              if (LOGC) console.log('[CONTRACTS] Pick Candidate clicked');
+              openCandidatePicker(async ({ id, label }) => {
+                if (LOGC) console.log('[CONTRACTS] Pick Candidate → selected', { id, label });
+                setContractFormValue('candidate_id', id);
+                const lab = document.getElementById('candidatePickLabel'); if (lab) lab.textContent = `Chosen: ${label}`;
+                try {
+                  const fs2 = (window.modalCtx.formState ||= { __forId: (window.modalCtx.data?.id ?? window.modalCtx.openToken ?? null), main:{}, pay:{} });
+                  fs2.main ||= {}; fs2.main.candidate_id = id; fs2.main.candidate_display = label;
+                  window.modalCtx.data = window.modalCtx.data || {};
+                  window.modalCtx.data.candidate_id = id; window.modalCtx.data.candidate_display = label;
+                } catch {}
+                try {
+                  const cand = await getCandidate(id);
+                  const derived = (String(cand?.pay_method || '').toUpperCase() === 'UMBRELLA' && cand?.umbrella_id) ? 'UMBRELLA' : 'PAYE';
+                  const fsm = (window.modalCtx.formState ||= { main:{}, pay:{} }).main ||= {};
+                  fsm.pay_method_snapshot = derived;
+                  fsm.__pay_locked = true;
+                  const sel = document.querySelector('select[name="pay_method_snapshot"], select[name="default_pay_method_snapshot"]');
+                  if (sel) { sel.value = derived; sel.disabled = true; }
+                  computeContractMargins();
+                } catch (e) { if (LOGC) console.warn('[CONTRACTS] prefillPayMethodFromCandidate failed', e); }
+              });
+            });
+            if (LOGC) console.log('[CONTRACTS] wired btnPickCandidate');
+          }
+          if (btnCC && !btnCC.__wired) {
+            btnCC.__wired = true;
+            btnCC.addEventListener('click', () => {
+              if (LOGC) console.log('[CONTRACTS] Clear Candidate clicked');
+              setContractFormValue('candidate_id', '');
+              const lab = document.getElementById('candidatePickLabel'); if (lab) lab.textContent = '';
+              try {
+                const fs2 = (window.modalCtx.formState ||= { __forId: (window.modalCtx.data?.id ?? window.modalCtx.openToken ?? null), main:{}, pay:{} });
+                fs2.main ||= {}; delete fs2.main.candidate_id; delete fs2.main.candidate_display;
+                fs2.main.__pay_locked = false;
+                fs2.main.pay_method_snapshot = 'PAYE';
+                const sel = document.querySelector('select[name="pay_method_snapshot"], select[name="default_pay_method_snapshot"]');
+                if (sel) { sel.disabled = false; sel.value = 'PAYE'; }
+                window.modalCtx.data = window.modalCtx.data || {};
+                delete window.modalCtx.data.candidate_id; delete window.modalCtx.data.candidate_display;
+              } catch {}
+              try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
+            });
+            if (LOGC) console.log('[CONTRACTS] wired btnClearCandidate');
+          }
+
+          if (btnPL && !btnPL.__wired) {
+            btnPL.__wired = true;
+            btnPL.addEventListener('click', async () => {
+              if (LOGC) console.log('[CONTRACTS] Pick Client clicked');
+              openClientPicker(async ({ id, label }) => {
+                if (LOGC) console.log('[CONTRACTS] Pick Client → selected', { id, label });
+                setContractFormValue('client_id', id);
+                const lab = document.getElementById('clientPickLabel'); if (lab) lab.textContent = `Chosen: ${label}`;
+                try {
+                  const fs2 = (window.modalCtx.formState ||= { __forId: (window.modalCtx.data?.id ?? window.modalCtx.openToken ?? null), main:{}, pay:{} });
+                  fs2.main ||= {}; fs2.main.client_id = id; fs2.main.client_name = label;
+                  window.modalCtx.data = window.modalCtx.data || {};
+                  window.modalCtx.data.client_id = id; window.modalCtx.data.client_name = label;
+                } catch {}
+                try {
+                  const client = await getClient(id);
+                  const h = checkClientInvoiceEmailPresence(client);
+                  if (h) showModalHint(h, 'warn');
+                  const we = (client?.week_ending_weekday ?? (client?.client_settings && client.client_settings.week_ending_weekday)) ?? 0;
+                  const fs2 = (window.modalCtx.formState ||= { main:{}, pay:{} });
+                  fs2.main ||= {}; fs2.main.week_ending_weekday_snapshot = String(we);
+                  const weekNames = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
+                  const lbl = document.getElementById('weLabel'); if (lbl) lbl.textContent = weekNames[Number(we)] || 'Sunday';
+                  const hidden = form?.querySelector('input[name="week_ending_weekday_snapshot"]'); if (hidden) hidden.value = String(we);
+                  try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
+                } catch (e) { if (LOGC) console.warn('[CONTRACTS] client hint/week-ending check failed', e); }
+              });
+            });
+            if (LOGC) console.log('[CONTRACTS] wired btnPickClient');
+          }
+          if (btnCL && !btnCL.__wired) {
+            btnCL.__wired = true;
+            btnCL.addEventListener('click', () => {
+              if (LOGC) console.log('[CONTRACTS] Clear Client clicked');
+              setContractFormValue('client_id', '');
+              const lab = document.getElementById('clientPickLabel'); if (lab) lab.textContent = '';
+              try {
+                const fs2 = (window.modalCtx.formState ||= { __forId: (window.modalCtx.data?.id ?? window.modalCtx.openToken ?? null), main:{}, pay:{} });
+                fs2.main ||= {}; delete fs2.main.client_id; delete fs2.main.client_name; delete fs2.main.week_ending_weekday_snapshot;
+                window.modalCtx.data = window.modalCtx.data || {};
+                delete window.modalCtx.data.client_id; delete window.modalCtx.data.client_name;
+                const lbl = document.getElementById('weLabel'); if (lbl) lbl.textContent = 'Sunday';
+                const hidden = form?.querySelector('input[name="week_ending_weekday_snapshot"]'); if (hidden) hidden.value = '';
+              } catch {}
+              try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
+            });
+            if (LOGC) console.log('[CONTRACTS] wired btnClearClient');
+          }
+
+          const openOnType = (inputEl, openerName) => {
+            if (!inputEl || inputEl.__wiredTyping) return;
+            inputEl.__wiredTyping = true;
+            if (LOGC) console.log('[CONTRACTS] typing handler installed for', openerName);
+          };
+          openOnType(candInput, 'candidate');
+          openOnType(cliInput, 'client');
         }
-      };
-
-      setTimeout(wire, 0);
-
-      if (!window.__contractsWireBound) {
-        window.__contractsWireBound = true;
-        window.addEventListener('contracts-main-rendered', () => setTimeout(wire, 0));
       }
 
-      const tabs = document.getElementById('modalTabs');
-      if (tabs && !tabs.__wired_contract_stage) {
-        tabs.__wired_contract_stage = true;
-        tabs.addEventListener('click', () => {
-          snapshotContractForm();
-          setTimeout(wire, 0);
-        });
+      const ratesTab = document.querySelector('#contractRatesTab');
+      if (ratesTab && !ratesTab.__wiredStage) {
+        ratesTab.__wiredStage = true;
+        const stageRates = (e) => {
+          const t = e.target;
+          if (!t || !t.name) return;
+          if (/^(paye_|umb_|charge_)/.test(t.name)) {
+            setContractFormValue(t.name, t.value);
+            computeContractMargins();
+            try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
+          }
+        };
+        ratesTab.addEventListener('input', stageRates, true);
+        ratesTab.addEventListener('change', stageRates, true);
+        computeContractMargins();
       }
-    },
-    hasId,                                   // ← 5th arg must be the boolean
-    () => {                                  // ← 6th arg is onReturn (keep your existing wire() refresher pattern)
-      const wire = () => {
+    };
+
+    setTimeout(wire, 0);
+
+    if (!window.__contractsWireBound) {
+      window.__contractsWireBound = true;
+      window.addEventListener('contracts-main-rendered', () => setTimeout(wire, 0));
+    }
+
+    const tabs = document.getElementById('modalTabs');
+    if (tabs && !tabs.__wired_contract_stage) {
+      tabs.__wired_contract_stage = true;
+      tabs.addEventListener('click', () => {
         snapshotContractForm();
-        const form = document.querySelector('#contractForm');
-        const tabs = document.getElementById('modalTabs');
-        const active = tabs?.querySelector('button.active')?.textContent?.toLowerCase() || 'main';
-        /* the same re-wire logic you already use */
-      };
-      setTimeout(wire, 0);
-      if (!window.__contractsWireBound) {
-        window.__contractsWireBound = true;
-        window.addEventListener('contracts-main-rendered', () => setTimeout(wire, 0));
-      }
-    },
-    { kind:'contracts', extraButtons, forceEdit: !!isCreate }  // ← options are 7th
-  );
+        setTimeout(wire, 0);
+      });
+    }
+  },
+
+  // 7th: options (now with noParentGate)
+  { kind:'contracts', extraButtons, forceEdit: !!isCreate, noParentGate: isSuccessorCreate }
+);
 
   setTimeout(() => {
     try {
@@ -3738,100 +3728,104 @@ function openContractCloneAndExtend(contract_id) {
     </div>
   `;
 
- showModal(
-  'Clone & Extend',
-  [{ key:'c', title:'Successor window' }],
-  () => content,
-  async () => {
-    const LOGM = !!window.__LOG_MODAL;
-    const root = document.getElementById('cloneExtendForm') || document;
+  showModal(
+    'Clone & Extend',
+    [{ key:'c', title:'Successor window' }],
+    () => content,
+    async () => {
+      const LOGM = !!window.__LOG_MODAL;
+      const root = document.getElementById('cloneExtendForm') || document;
 
-    const newStartUk  = root.querySelector('input[name="new_start_date"]')?.value?.trim() || '';
-    const newEndUk    = root.querySelector('input[name="new_end_date"]')?.value?.trim()   || '';
-    const endChk      = !!root.querySelector('input[name="end_existing_checked"]')?.checked;
-    const endOldUk    = root.querySelector('input[name="end_existing_on"]')?.value?.trim() || '';
+      const newStartUk  = root.querySelector('input[name="new_start_date"]')?.value?.trim() || '';
+      const newEndUk    = root.querySelector('input[name="new_end_date"]')?.value?.trim()   || '';
+      const endChk      = !!root.querySelector('input[name="end_existing_checked"]')?.checked;
+      const endOldUk    = root.querySelector('input[name="end_existing_on"]')?.value?.trim() || '';
 
-    const new_start_date = parseUkDateToIso(newStartUk);
-    const new_end_date   = parseUkDateToIso(newEndUk);
-    const end_existing_on= endChk ? parseUkDateToIso(endOldUk) : null;
+      const new_start_date = parseUkDateToIso(newStartUk);
+      const new_end_date   = parseUkDateToIso(newEndUk);
+      const end_existing_on= endChk ? parseUkDateToIso(endOldUk) : null;
 
-    if (!new_start_date || !new_end_date) { alert('Enter both new start and new end.'); return false; }
-    if (new_start_date > new_end_date)   { alert('New end must be on or after new start.'); return false; }
+      if (!new_start_date || !new_end_date) { alert('Enter both new start and new end.'); return false; }
+      if (new_start_date > new_end_date)   { alert('New end must be on or after new start.'); return false; }
 
-    try {
-      const oldStartIso = (window.modalCtx?.data?.start_date) || '';
-      if (endChk) {
-        if (!end_existing_on) { alert('Pick a valid end date for the existing contract.'); return false; }
-        if (oldStartIso && end_existing_on < oldStartIso) { alert('Existing contract cannot end before its original start.'); return false; }
-        if (end_existing_on >= new_start_date) { alert('Existing contract end must be before the new start.'); return false; }
-      }
-    } catch {}
-
-    // Stage (no backend create)
-    const newToken = `contract:new:${Date.now()}:${Math.random().toString(36).slice(2)}`;
-    (window.__cloneIntents ||= {});
-    window.__cloneIntents[newToken] = {
-      source_contract_id: String(window.modalCtx?.data?.id || ''),
-      end_existing: !!endChk,
-      end_existing_on: endChk ? end_existing_on : null,
-      new_start_date,
-      new_end_date
-    };
-    if (LOGM) console.log('[CLONE] stage intent', { token: newToken, intent: window.__cloneIntents[newToken] });
-
-    // Build staged successor row from current contract
-    const old = window.modalCtx?.data || {};
-    const stagedRow = {
-      id: null,
-      candidate_id: old.candidate_id || '',
-      client_id:    old.client_id    || '',
-      role:         old.role         || '',
-      band:         (old.band ?? null),
-      display_site: old.display_site || '',
-      start_date:   new_start_date,
-      end_date:     new_end_date,
-      pay_method_snapshot: old.pay_method_snapshot || 'PAYE',
-      default_submission_mode: old.default_submission_mode || 'ELECTRONIC',
-      week_ending_weekday_snapshot: Number(old.week_ending_weekday_snapshot ?? 0),
-      std_schedule_json: old.std_schedule_json || null,
-      std_hours_json:    old.std_hours_json    || null,
-      bucket_labels_json: old.bucket_labels_json || null,
-      rates_json: (old.rates_json && typeof old.rates_json === 'object') ? old.rates_json : {}
-    };
-
-    // Defer opening until AFTER this child frame closes, so saveForFrame pops the wizard first.
-    try {
-      if (LOGM) console.log('[CLONE] will open staged successor in Create mode (deferred)', { token: newToken, stagedRow });
-      window.__preOpenToken = newToken;
-      setTimeout(() => {
-        try {
-          openContract(stagedRow);
-          // After the modal builds its own formState, force-align __forId with our token
-          setTimeout(() => {
-            try {
-              if (window.modalCtx) {
-                window.modalCtx.openToken = newToken;
-                const fs2 = (window.modalCtx.formState ||= { __forId: newToken, main:{}, pay:{} });
-                fs2.__forId = newToken; // force override (don’t keep the auto-minted id)
-                if (LOGM) console.log('[CLONE] bound token to create modal', { openToken: window.modalCtx.openToken, forId: fs2.__forId });
-              }
-            } catch (e) { console.warn('[CLONE] bind token failed', e); }
-          }, 0);
-        } catch (e) {
-          console.error('[CLONE] openContract failed', e);
-          try { renderAll(); } catch {}
+      try {
+        const oldStartIso = (window.modalCtx?.data?.start_date) || '';
+        if (endChk) {
+          if (!end_existing_on) { alert('Pick a valid end date for the existing contract.'); return false; }
+          if (oldStartIso && end_existing_on < oldStartIso) { alert('Existing contract cannot end before its original start.'); return false; }
+          if (end_existing_on >= new_start_date) { alert('Existing contract end must be before the new start.'); return false; }
         }
-      }, 0);
-    } catch (e) {
-      console.error('[CLONE] schedule open failed', e);
-    }
+      } catch {}
 
-    return true;
-  },
-  false,
-  null,
-  { kind:'contract-clone-extend', forceEdit:true }
-);
+      // Stage (no backend create)
+      const newToken = `contract:new:${Date.now()}:${Math.random().toString(36).slice(2)}`;
+      (window.__cloneIntents ||= {});
+      window.__cloneIntents[newToken] = {
+        source_contract_id: String(window.modalCtx?.data?.id || ''),
+        end_existing: !!endChk,
+        end_existing_on: endChk ? end_existing_on : null,
+        new_start_date,
+        new_end_date
+      };
+      if (LOGM) console.log('[CLONE] stage intent', { token: newToken, intent: window.__cloneIntents[newToken] });
+
+      // Build staged successor row from current contract
+      const old = window.modalCtx?.data || {};
+      const stagedRow = {
+        id: null,
+        candidate_id: old.candidate_id || '',
+        client_id:    old.client_id    || '',
+        role:         old.role         || '',
+        band:         (old.band ?? null),
+        display_site: old.display_site || '',
+        start_date:   new_start_date,
+        end_date:     new_end_date,
+        pay_method_snapshot: old.pay_method_snapshot || 'PAYE',
+        default_submission_mode: old.default_submission_mode || 'ELECTRONIC',
+        week_ending_weekday_snapshot: Number(old.week_ending_weekday_snapshot ?? 0),
+        std_schedule_json: old.std_schedule_json || null,
+        std_hours_json:    old.std_hours_json    || null,
+        bucket_labels_json: old.bucket_labels_json || null,
+        rates_json: (old.rates_json && typeof old.rates_json === 'object') ? old.rates_json : {}
+      };
+
+      // Defer opening until AFTER this child frame closes, so saveForFrame pops the wizard first.
+      try {
+        if (LOGM) console.log('[CLONE] will open staged successor in Create mode (deferred)', { token: newToken, stagedRow });
+        window.__preOpenToken = newToken;
+        setTimeout(() => {
+          try {
+            openContract(stagedRow);
+            // After the modal builds its own formState, force-align __forId with our token
+            setTimeout(() => {
+              try {
+                if (window.modalCtx) {
+                  window.modalCtx.openToken = newToken;
+                  const fs2 = (window.modalCtx.formState ||= { __forId: newToken, main:{}, pay:{} });
+                  fs2.__forId = newToken; // force override (don’t keep the auto-minted id)
+                  if (LOGM) console.log('[CLONE] bound token to create modal', { openToken: window.modalCtx.openToken, forId: fs2.__forId });
+                }
+              } catch (e) { console.warn('[CLONE] bind token failed', e); }
+            }, 0);
+          } catch (e) {
+            console.error('[CLONE] openContract failed', e);
+            try { renderAll(); } catch {}
+          }
+        }, 0);
+      } catch (e) {
+        console.error('[CLONE] schedule open failed', e);
+      }
+
+      return true;
+    },
+    false,
+    // onReturn: make sure parent actions (Clone & Extend…) are rebuilt immediately after wizard closes/cancels
+    () => {
+      try { window.dispatchEvent(new Event('contracts-main-rendered')); } catch {}
+    },
+    // OPTIONS: explicitly bypass parent gating for the wizard itself
+    { kind:'contract-clone-extend', forceEdit:true, noParentGate:true }
+  );
 
   // Wire pickers & auto-sync after mount
   setTimeout(() => {
@@ -3849,21 +3843,21 @@ function openContractCloneAndExtend(contract_id) {
 
     const isoMinusOne = (isoStr) => { try { const d=new Date(isoStr+'T00:00:00Z'); d.setUTCDate(d.getUTCDate()-1); return toYmd(d); } catch { return null; } };
 
-const onStartChange = () => {
-  const startIso = parseUkDateToIso(startEl.value || '') || defaultStart;
-  const maxOldEndIso = isoMinusOne(startIso);
-  const maxOldEndUk  = formatIsoToUk(maxOldEndIso);
+    const onStartChange = () => {
+      const startIso = parseUkDateToIso(startEl.value || '') || defaultStart;
+      const maxOldEndIso = isoMinusOne(startIso);
+      const maxOldEndUk  = formatIsoToUk(maxOldEndIso);
 
-  // update bounds
-  if (typeof endOld.setMinDate === 'function') endOld.setMinDate(formatIsoToUk(oldStart));
-  // attachUkDatePicker doesn't expose setMaxDate; set the internal bound + repaint
-  endOld._maxIso = maxOldEndIso;
-  if (typeof endOld.__ukdpRepaint === 'function') endOld.__ukdpRepaint();
+      // update bounds
+      if (typeof endOld.setMinDate === 'function') endOld.setMinDate(formatIsoToUk(oldStart));
+      // attachUkDatePicker doesn't expose setMaxDate; set the internal bound + repaint
+      endOld._maxIso = maxOldEndIso;
+      if (typeof endOld.__ukdpRepaint === 'function') endOld.__ukdpRepaint();
 
-  if (endChk.checked) endOld.value = maxOldEndUk;
+      if (endChk.checked) endOld.value = maxOldEndUk;
 
-  if (LOGM) console.log('[CLONE] onStartChange', { startIso, endOldUk: endOld.value, maxOldEndIso });
-};
+      if (LOGM) console.log('[CLONE] onStartChange', { startIso, endOldUk: endOld.value, maxOldEndIso });
+    };
 
     const onChkToggle = () => {
       const checked = !!endChk.checked;
@@ -12215,8 +12209,14 @@ function setFrameMode(frameObj, mode) {
   const prev = frameObj.mode; frameObj.mode = mode;
   const isChild = (stack().length > 1);
 
-  // ▶ never read-only while creating
-  if (mode === 'create') {
+  // ▶ correct accidental 'view' on brand-new frames (e.g., successor create)
+  if (!frameObj.hasId && mode === 'view') {
+    mode = frameObj.forceEdit ? 'edit' : 'create';
+    frameObj.mode = mode;
+  }
+
+  // ▶ never read-only for top-level create/edit
+  if (!isChild && (mode === 'create' || mode === 'edit')) {
     setFormReadOnly(byId('modalBody'), false);
   } else if (frameObj.noParentGate) {
     setFormReadOnly(byId('modalBody'), (mode==='view'||mode==='saving'));
@@ -12387,7 +12387,6 @@ function setFrameMode(frameObj, mode) {
 
     const parentEditable = top.noParentGate ? true : (parent ? (parent.mode==='edit' || parent.mode==='create') : true);
     const relatedBtn = byId('btnRelated');
-
     if (top.kind==='advanced-search') {
       btnEdit.style.display='none'; btnSave.style.display=''; btnSave.disabled=!!top._saving; if (relatedBtn) relatedBtn.disabled=true;
     } else if (isChild && !top.noParentGate) {
@@ -12449,6 +12448,7 @@ function setFrameMode(frameObj, mode) {
 
       }
     }
+
     setCloseLabel();
     L('_updateButtons snapshot (global)', {
       kind: top.kind, isChild, parentEditable, mode: top.mode,
@@ -12553,8 +12553,17 @@ try {
 sanitizeModalGeometry();
 const closing=stack().pop(); if (closing?._detachDirty){ try{closing._detachDirty();}catch{} closing._detachDirty=null; }
 if (closing?._detachGlobal){ try{closing._detachGlobal();}catch{} closing._detachGlobal=null; } top._wired=false;
-if (stack().length>0) { const p=currentFrame(); renderTop(); try{ p.onReturn && p.onReturn(); }catch{} }
-else { discardAllModalsAndState(); if (window.__pendingFocus) { try{ renderAll(); } catch(e) { console.error('refresh after modal close failed', e); } } }
+if (stack().length>0) {
+  const p=currentFrame();
+  // ▶ make sure parent resumes view-mode so calendar actions (Clone & Extend) return
+  try { setFrameMode(p, 'view'); } catch {}
+  renderTop();
+  try{ p.onReturn && p.onReturn(); }catch{}
+} else {
+  discardAllModalsAndState();
+  if (window.__pendingFocus) { try{ renderAll(); } catch(e) { console.error('refresh after modal close failed', e); } }
+}
+
 };
 byId('btnCloseModal').onclick = handleSecondary;
 
@@ -12616,23 +12625,24 @@ byId('btnCloseModal').onclick = handleSecondary;
       return;
     }
 
-        if (isChildNow) {
-      try { window.dispatchEvent(new CustomEvent('modal-dirty')); } catch {}
-      sanitizeModalGeometry(); window.__modalStack.pop();
-      if (window.__modalStack.length>0) {
-        const p=window.__modalStack[window.__modalStack.length-1];
-        // ▶ ensure parent is back in view so actions (Clone & Extend) show
-        try { setFrameMode(p, 'view'); } catch {}
-        p.isDirty=true; p._updateButtons&&p._updateButtons();
-        renderTop();
-        // ▶ nudge calendar/action bar re-wire if needed
-        try { window.dispatchEvent(new Event('contracts-main-rendered')); } catch {}
-        try { p.onReturn && p.onReturn(); }catch{}
-      } else {
-      }
-      L('saveForFrame EXIT (global child)');
+   if (isChildNow) {
+  try { window.dispatchEvent(new CustomEvent('modal-dirty')); } catch {}
+  sanitizeModalGeometry(); window.__modalStack.pop();
+  if (window.__modalStack.length>0) {
+    const p=window.__modalStack[window.__modalStack.length-1];
 
-    } else {
+    // ▶ ensure parent is back in view so actions (Clone & Extend) show
+    try { setFrameMode(p, 'view'); } catch {}
+    p.isDirty=true; p._updateButtons&&p._updateButtons();
+    renderTop();
+
+    // ▶ nudge calendar/action bar re-wire if needed
+    try { window.dispatchEvent(new Event('contracts-main-rendered')); } catch {}
+    try { p.onReturn && p.onReturn(); }catch{}
+  } else {
+  }
+  L('saveForFrame EXIT (global child)');
+} else {
       try {
         const savedContract = (saved && (saved.contract || saved)) || null;
         const id = savedContract?.id || window.modalCtx?.data?.id || null;
