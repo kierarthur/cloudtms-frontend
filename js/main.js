@@ -3716,89 +3716,87 @@ function openContractCloneAndExtend(contract_id) {
   [{ key:'c', title:'Successor window' }],
   () => content,
   async () => {
-    const LOGM = !!window.__LOG_MODAL;
-    const root = document.getElementById('cloneExtendForm') || document;
+  const LOGM = !!window.__LOG_MODAL;
+  const root = document.getElementById('cloneExtendForm') || document;
 
-    const newStartUk  = root.querySelector('input[name="new_start_date"]')?.value?.trim() || '';
-    const newEndUk    = root.querySelector('input[name="new_end_date"]')?.value?.trim()   || '';
-    const endChk      = !!root.querySelector('input[name="end_existing_checked"]')?.checked;
-    const endOldUk    = root.querySelector('input[name="end_existing_on"]')?.value?.trim() || '';
+  const newStartUk  = root.querySelector('input[name="new_start_date"]')?.value?.trim() || '';
+  const newEndUk    = root.querySelector('input[name="new_end_date"]')?.value?.trim()   || '';
+  const endChk      = !!root.querySelector('input[name="end_existing_checked"]')?.checked;
+  const endOldUk    = root.querySelector('input[name="end_existing_on"]')?.value?.trim() || '';
 
-    const new_start_date  = parseUkDateToIso(newStartUk);
-    const new_end_date    = parseUkDateToIso(newEndUk);
-    const end_existing_on = endChk ? parseUkDateToIso(endOldUk) : null;
+  const new_start_date = parseUkDateToIso(newStartUk);
+  const new_end_date   = parseUkDateToIso(newEndUk);
+  const end_existing_on= endChk ? parseUkDateToIso(endOldUk) : null;
 
-    if (!new_start_date || !new_end_date) { alert('Enter both new start and new end.'); return false; }
-    if (new_start_date > new_end_date)    { alert('New end must be on or after new start.'); return false; }
+  if (!new_start_date || !new_end_date) { alert('Enter both new start and new end.'); return false; }
+  if (new_start_date > new_end_date)   { alert('New end must be on or after new start.'); return false; }
 
-    // Validate “end existing” only if checked
-    try {
-      const oldStartIso = (window.modalCtx?.data?.start_date) || '';
-      if (endChk) {
-        if (!end_existing_on) { alert('Pick a valid end date for the existing contract.'); return false; }
-        if (oldStartIso && end_existing_on < oldStartIso) { alert('Existing contract cannot end before its original start.'); return false; }
-        if (end_existing_on >= new_start_date) { alert('Existing contract end must be before the new start.'); return false; }
-      }
-    } catch {}
-
-    // Stage intent under a fresh token (no backend create yet)
-    const newToken = `contract:new:${Date.now()}:${Math.random().toString(36).slice(2)}`;
-    if (!window.__cloneIntents) window.__cloneIntents = {};
-    window.__cloneIntents[newToken] = {
-      source_contract_id: String(window.modalCtx?.data?.id || ''),
-      end_existing: !!endChk,
-      end_existing_on: endChk ? end_existing_on : null,
-      new_start_date,
-      new_end_date
-    };
-    if (LOGM) console.log('[CLONE] stage intent', { token: newToken, intent: window.__cloneIntents[newToken] });
-
-    // Build staged successor row from current contract as template
-    const old = window.modalCtx?.data || {};
-    const stagedRow = {
-      id: null,
-      candidate_id: old.candidate_id || '',
-      client_id:    old.client_id    || '',
-      role:         old.role         || '',
-      band:         (old.band ?? null),
-      display_site: old.display_site || '',
-      start_date:   new_start_date,
-      end_date:     new_end_date,
-      pay_method_snapshot: old.pay_method_snapshot || 'PAYE',
-      default_submission_mode: old.default_submission_mode || 'ELECTRONIC',
-      week_ending_weekday_snapshot: Number(old.week_ending_weekday_snapshot ?? 0),
-      std_schedule_json: old.std_schedule_json || null,
-      std_hours_json:    old.std_hours_json    || null,
-      bucket_labels_json: old.bucket_labels_json || null,
-      rates_json: (old.rates_json && typeof old.rates_json === 'object') ? old.rates_json : {}
-    };
-
-    // Open the normal contract modal in Create mode; calendar will stage against newToken
-    try {
-      if (LOGM) console.log('[CLONE] opening staged successor in Create mode', { token: newToken, stagedRow });
-      if (!window.modalCtx) window.modalCtx = {};
-      window.modalCtx.openToken = newToken;
-      openContract(stagedRow);
-
-      // After the modal constructs its own modalCtx, bind token + ensure forId
-      setTimeout(() => {
-        try {
-          if (window.modalCtx) {
-            window.modalCtx.openToken = newToken;
-            if (!window.modalCtx.formState) window.modalCtx.formState = { __forId: newToken, main:{}, pay:{} };
-            if (!window.modalCtx.formState.__forId) window.modalCtx.formState.__forId = newToken;
-            if (LOGM) console.log('[CLONE] bound token to create modal', { openToken: window.modalCtx.openToken, forId: window.modalCtx.formState.__forId });
-          }
-        } catch (e) {
-          console.warn('[CLONE] bind token failed', e);
-        }
-      }, 0);
-    } catch (e) {
-      console.error('[CLONE] openContract failed', e);
-      try { renderAll(); } catch {}
+  try {
+    const oldStartIso = (window.modalCtx?.data?.start_date) || '';
+    if (endChk) {
+      if (!end_existing_on) { alert('Pick a valid end date for the existing contract.'); return false; }
+      if (oldStartIso && end_existing_on < oldStartIso) { alert('Existing contract cannot end before its original start.'); return false; }
+      if (end_existing_on >= new_start_date) { alert('Existing contract end must be before the new start.'); return false; }
     }
+  } catch {}
 
-    return true;
+  // Stage (no backend create)
+  const newToken = `contract:new:${Date.now()}:${Math.random().toString(36).slice(2)}`;
+  (window.__cloneIntents ||= {});
+  window.__cloneIntents[newToken] = {
+    source_contract_id: String(window.modalCtx?.data?.id || ''),
+    end_existing: !!endChk,
+    end_existing_on: endChk ? end_existing_on : null,
+    new_start_date,
+    new_end_date
+  };
+  if (LOGM) console.log('[CLONE] stage intent', { token: newToken, intent: window.__cloneIntents[newToken] });
+
+  // Build staged successor row from current contract
+  const old = window.modalCtx?.data || {};
+  const stagedRow = {
+    id: null,
+    candidate_id: old.candidate_id || '',
+    client_id:    old.client_id    || '',
+    role:         old.role         || '',
+    band:         (old.band ?? null),
+    display_site: old.display_site || '',
+    start_date:   new_start_date,
+    end_date:     new_end_date,
+    pay_method_snapshot: old.pay_method_snapshot || 'PAYE',
+    default_submission_mode: old.default_submission_mode || 'ELECTRONIC',
+    week_ending_weekday_snapshot: Number(old.week_ending_weekday_snapshot ?? 0),
+    std_schedule_json: old.std_schedule_json || null,
+    std_hours_json:    old.std_hours_json    || null,
+    bucket_labels_json: old.bucket_labels_json || null,
+    rates_json: (old.rates_json && typeof old.rates_json === 'object') ? old.rates_json : {}
+  };
+
+  try {
+    if (LOGM) console.log('[CLONE] opening staged successor in Create mode', { token: newToken, stagedRow });
+    // Hand the token to the upcoming create modal (so openContract won’t mint a different one)
+    window.__preOpenToken = newToken;
+    openContract(stagedRow);
+
+    // After the modal builds its own formState, force-align __forId with our token
+    setTimeout(() => {
+      try {
+        if (window.modalCtx) {
+          window.modalCtx.openToken = newToken;
+          const fs2 = (window.modalCtx.formState ||= { __forId: newToken, main:{}, pay:{} });
+          fs2.__forId = newToken;                           // force override (don’t keep the auto-minted id)
+          if (LOGM) console.log('[CLONE] bound token to create modal', { openToken: window.modalCtx.openToken, forId: fs2.__forId });
+        }
+      } catch (e) { console.warn('[CLONE] bind token failed', e); }
+    }, 0);
+  } catch (e) {
+    console.error('[CLONE] openContract failed', e);
+    try { renderAll(); } catch {}
+  }
+
+  return true;
+
+
   },
   false,
   null,
