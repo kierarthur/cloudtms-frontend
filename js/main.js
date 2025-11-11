@@ -3738,43 +3738,18 @@ function openContractCloneAndExtend(contract_id) {
 
       // === STAGING (no backend create here) ===
       const newToken = `contract:new:${Date.now()}:${Math.random().toString(36).slice(2)}`;
-      (window.__cloneIntents ||= {});
-      window.__cloneIntents[newToken] = {
-        source_contract_id: String(old?.id || contract_id || ''),
-        end_existing: !!endChk,
-        end_existing_on: end_existing_on || null,
-        new_start_date, new_end_date
-      };
-      if (LOGM) console.log('[CLONE] stage intent', { token: newToken, intent: window.__cloneIntents[newToken] });
+      const LOGM = (typeof window.__LOG_MODAL === 'boolean') ? window.__LOG_MODAL : true;
 
-      // Seed formState for the successor (so tabs persist while user edits)
-      const fs = (window.modalCtx?.formState ||= { __forId: newToken, main:{}, pay:{} });
-      fs.__forId = newToken;
-      const m = (fs.main ||= {});
-      const p = (fs.pay  ||= {});
+window.__cloneIntents = window.__cloneIntents || {};
+window.__cloneIntents[newToken] = {
+  source_contract_id: String(old?.id || contract_id || ''),
+  end_existing: !!endChk,
+  end_existing_on: end_existing_on || null,
+  new_start_date, new_end_date
+};
+if (LOGM) console.log('[CLONE] stage intent', { token: newToken, intent: window.__cloneIntents[newToken] });
 
-      // Clone core fields from the source row
-      m.candidate_id = old.candidate_id || '';
-      m.client_id    = old.client_id    || '';
-      m.role         = old.role         || '';
-      m.band         = (old.band ?? '');
-      m.display_site = (old.display_site || '');
-      m.start_date   = new_start_date;
-      m.end_date     = new_end_date;
-      m.pay_method_snapshot           = (old.pay_method_snapshot || 'PAYE');
-      m.default_submission_mode       = (old.default_submission_mode || 'ELECTRONIC');
-      m.week_ending_weekday_snapshot  = String(old.week_ending_weekday_snapshot ?? 0);
-      m.__template     = old.std_schedule_json || null;
-      m.__hours        = old.std_hours_json    || null;
-      m.__bucket_labels= old.bucket_labels_json|| null;
-
-      // Clone rates (if any)
-      const BUCKETS = ['paye_day','paye_night','paye_sat','paye_sun','paye_bh','umb_day','umb_night','umb_sat','umb_sun','umb_bh','charge_day','charge_night','charge_sat','charge_sun','charge_bh'];
-      const rates = (old.rates_json && typeof old.rates_json === 'object') ? old.rates_json : {};
-      BUCKETS.forEach(k => { if (rates[k] !== undefined && rates[k] !== null) p[k] = String(rates[k]); });
-
-      if (LOGM) console.log('[CLONE] seeded formState', { __forId: fs.__forId, main: { ...m, __template: !!m.__template, __hours: !!m.__hours, __bucket_labels: !!m.__bucket_labels }, payKeys: Object.keys(p) });
-
+      
       // Build a lightweight row-less shell to open in Create mode
       const stagedRow = {
         id: null,
