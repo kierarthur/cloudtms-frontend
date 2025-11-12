@@ -12723,104 +12723,113 @@ byId('btnCloseModal').onclick = handleSecondary;
     } catch { return false; }
   };
 
-  async function saveForFrame(fr) {
-    if (!fr || fr._saving) return;
-    const onlyDel   = hasStagedClientDeletes();
-    const allowApply= (fr.kind==='candidate-override' || fr.kind==='client-rate') && fr._applyDesired===true;
+async function saveForFrame(fr) {
+  if (!fr || fr._saving) return;
+  const onlyDel   = hasStagedClientDeletes();
+  const allowApply= (fr.kind==='candidate-override' || fr.kind==='client-rate') && fr._applyDesired===true;
 
-    L('saveForFrame ENTER (global)', { kind: fr.kind, mode: fr.mode, noParentGate: fr.noParentGate, isDirty: fr.isDirty, onlyDel, allowApply });
+  L('saveForFrame ENTER (global)', { kind: fr.kind, mode: fr.mode, noParentGate: fr.noParentGate, isDirty: fr.isDirty, onlyDel, allowApply });
 
-    if (fr.kind!=='advanced-search' && !fr.noParentGate && fr.mode!=='view' && !fr.isDirty && !onlyDel && !allowApply) {
-      L('saveForFrame GUARD (global): no-op (no changes and apply not allowed)');
-      const isChildNow=(window.__modalStack?.length>1);
-      if (isChildNow) {
-        sanitizeModalGeometry(); window.__modalStack.pop();
-        if (window.__modalStack.length>0) { const p=window.__modalStack[window.__modalStack.length-1]; renderTop(); try{ p.onReturn && p.onReturn(); }catch{} }
-        else { /* keep open */ }
-      } else {
-        fr.isDirty=false; fr._snapshot=null; setFrameMode(fr,'view'); fr._updateButtons&&fr._updateButtons();
-      }
-      try{ window.__toast?.('No changes'); }catch{}; return;
+  // Changed: do NOT block create saves; only no-op in EDIT when nothing changed
+  const isChildNow = (window.__modalStack?.length > 1);
+  const shouldNoop =
+    (fr.kind!=='advanced-search') &&
+    !fr.noParentGate &&
+    fr.mode === 'edit' &&            // <-- was fr.mode!=='view'
+    !fr.isDirty &&
+    !onlyDel &&
+    !allowApply;
+
+  if (shouldNoop) {
+    L('saveForFrame GUARD (global): no-op (no changes and apply not allowed)');
+    if (isChildNow) {
+      sanitizeModalGeometry(); window.__modalStack.pop();
+      if (window.__modalStack.length>0) { const p=window.__modalStack[window.__modalStack.length-1]; renderTop(); try{ p.onReturn && p.onReturn(); }catch{} }
+      else { /* keep open */ }
+    } else {
+      fr.isDirty=false; fr._snapshot=null; setFrameMode(fr,'view'); fr._updateButtons&&fr._updateButtons();
     }
+    try{ window.__toast?.('No changes'); }catch{}; return;
+  }
 
-    fr.persistCurrentTabState();
-    const isChildNow=(window.__modalStack?.length>1);
-    if (isChildNow && !fr.noParentGate && fr.kind!=='advanced-search') {
-      const p=window.__modalStack[window.__modalStack.length-2];
-      if (!p || !(p.mode==='edit'||p.mode==='create')) { L('saveForFrame GUARD (global): parent not editable'); return; }
-    }
-    fr._saving=true; fr._updateButtons&&fr._updateButtons();
+  fr.persistCurrentTabState();
+  if (isChildNow && !fr.noParentGate && fr.kind!=='advanced-search') {
+    const p=window.__modalStack[window.__modalStack.length-2];
+    if (!p || !(p.mode==='edit'||p.mode==='create')) { L('saveForFrame GUARD (global): parent not editable'); return; }
+  }
+  fr._saving=true; fr._updateButtons&&fr._updateButtons();
 
-    let ok=false, saved=null;
-    if (typeof fr.onSave==='function') {
-      try { const res=await fr.onSave(); ok = (res===true) || (res && res.ok===true); if (res&&res.saved) saved=res.saved; }
-      catch (e) { L('saveForFrame onSave threw (global)', e); ok=false; }
-    }
-    fr._saving=false; if (!ok) { L('saveForFrame RESULT not ok (global)'); fr._updateButtons&&fr._updateButtons(); return; }
+  let ok=false, saved=null;
+  if (typeof fr.onSave==='function') {
+    try { const res=await fr.onSave(); ok = (res===true) || (res && res.ok===true); if (res&&res.saved) saved=res.saved; }
+    catch (e) { L('saveForFrame onSave threw (global)', e); ok=false; }
+  }
+  fr._saving=false; if (!ok) { L('saveForFrame RESULT not ok (global)'); fr._updateButtons&&fr._updateButtons(); return; }
 
-    if (fr.kind === 'advanced-search') {
-      sanitizeModalGeometry();
-      const closing = window.__modalStack.pop();
-      if (closing?._detachDirty){ try{closing._detachDirty();}catch{} closing._detachDirty=null; }
-      if (closing?._detachGlobal){ try{closing._detachGlobal();}catch{} closing._detachGlobal=null; } fr._wired=false;
+  if (fr.kind === 'advanced-search') {
+    sanitizeModalGeometry();
+    const closing = window.__modalStack.pop();
+    if (closing?._detachDirty){ try{closing._detachDirty();}catch{} closing._detachDirty=null; }
+    if (closing?._detachGlobal){ try{closing._detachGlobal();}catch{} closing._detachGlobal=null; } fr._wired=false;
 
-      if (window.__modalStack.length>0) {
-        const p=window.__modalStack[window.__modalStack.length-1]; renderTop(); try{ p.onReturn && p.onReturn(); } catch{}
-      } else {
-      }
-      L('saveForFrame EXIT (global advanced-search closed)');
-      return;
-    }
-
-if (isChildNow) {
-  // If this child should remain open after save (successor contract),
-  // flip it in-place to view mode and keep it on screen.
-  if (fr.stayOpenOnSave) {
-    try {
-      if (saved && window.modalCtx) {
-        window.modalCtx.data = { ...(window.modalCtx.data||{}), ...(saved.contract || saved) };
-        fr.hasId = !!window.modalCtx.data?.id;
-      }
-      setFrameMode(fr, 'view');
-      fr._updateButtons && fr._updateButtons();
-      renderTop();
-    } catch {}
-    L('saveForFrame EXIT (child kept open)');
-  } else {
-    try { window.dispatchEvent(new CustomEvent('modal-dirty')); } catch {}
-    sanitizeModalGeometry(); window.__modalStack.pop();
     if (window.__modalStack.length>0) {
-      const p=window.__modalStack[window.__modalStack.length-1];
-
-      // ▶ ensure parent is back in view so actions (Clone & Extend) show
-      try { setFrameMode(p, 'view'); } catch {}
-      p.isDirty=true; p._updateButtons&&p._updateButtons();
-      renderTop();
-
-      // ▶ nudge calendar/action bar re-wire if needed
-      try { window.dispatchEvent(new Event('contracts-main-rendered')); } catch {}
-      try { p.onReturn && p.onReturn(); }catch{}
+      const p=window.__modalStack[window.__modalStack.length-1]; renderTop(); try{ p.onReturn && p.onReturn(); } catch{}
     } else {
     }
-    L('saveForFrame EXIT (global child)');
+    L('saveForFrame EXIT (global advanced-search closed)');
+    return;
   }
-} else {
 
+  if (isChildNow) {
+    // If this child should remain open after save (successor contract),
+    // flip it in-place to view mode and keep it on screen.
+    if (fr.stayOpenOnSave) {
       try {
-        const savedContract = (saved && (saved.contract || saved)) || null;
-        const id = savedContract?.id || window.modalCtx?.data?.id || null;
-        if (id && savedContract) {
-          const idx = Array.isArray(currentRows) ? currentRows.findIndex(x => String(x.id) === String(id)) : -1;
-          if (idx >= 0) currentRows[idx] = savedContract;
-          (window.__lastSavedAtById ||= {})[String(id)] = Date.now();
+        if (saved && window.modalCtx) {
+          window.modalCtx.data = { ...(window.modalCtx.data||{}), ...(saved.contract || saved) };
+          fr.hasId = !!window.modalCtx.data?.id;
         }
-      } catch (e) { console.warn('[SAVE] list cache merge failed', e); }
+        setFrameMode(fr, 'view');
+        fr._updateButtons && fr._updateButtons();
+        renderTop();
+      } catch {}
+      L('saveForFrame EXIT (child kept open)');
+    } else {
+      try { window.dispatchEvent(new CustomEvent('modal-dirty')); } catch {}
+      sanitizeModalGeometry(); window.__modalStack.pop();
+      if (window.__modalStack.length>0) {
+        const p=window.__modalStack[window.__modalStack.length-1];
 
-      if (saved && window.modalCtx) { window.modalCtx.data = { ...(window.modalCtx.data||{}), ...(saved.contract || saved) }; fr.hasId = !!window.modalCtx.data?.id; }
-      fr.isDirty=false; fr._snapshot=null; setFrameMode(fr,'view');
-      L('saveForFrame EXIT (global parent, kept open)');
+        // ▶ ensure parent is back in view so actions (Clone & Extend) show
+        try { setFrameMode(p, 'view'); } catch {}
+        p.isDirty=true; p._updateButtons&&p._updateButtons();
+        renderTop();
+
+        // ▶ nudge calendar/action bar re-wire if needed
+        try { window.dispatchEvent(new Event('contracts-main-rendered')); } catch {}
+        try { p.onReturn && p.onReturn(); }catch{}
+      } else {
+      }
+      L('saveForFrame EXIT (global child)');
     }
+  } else {
+
+    try {
+      const savedContract = (saved && (saved.contract || saved)) || null;
+      const id = savedContract?.id || window.modalCtx?.data?.id || null;
+      if (id && savedContract) {
+        const idx = Array.isArray(currentRows) ? currentRows.findIndex(x => String(x.id) === String(id)) : -1;
+        if (idx >= 0) currentRows[idx] = savedContract;
+        (window.__lastSavedAtById ||= {})[String(id)] = Date.now();
+      }
+    } catch (e) { console.warn('[SAVE] list cache merge failed', e); }
+
+    if (saved && window.modalCtx) { window.modalCtx.data = { ...(window.modalCtx.data||{}), ...(saved.contract || saved) }; fr.hasId = !!window.modalCtx.data?.id; }
+    fr.isDirty=false; fr._snapshot=null; setFrameMode(fr,'view');
+    L('saveForFrame EXIT (global parent, kept open)');
   }
+}
+
 
   const onSaveClick = async (ev)=>{
     const btn=ev?.currentTarget || byId('btnSave');
