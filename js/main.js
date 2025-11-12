@@ -3715,47 +3715,70 @@ function openContractCloneAndExtend(contract_id) {
       } catch {}
 
       // === NEW: pre-truncate the existing contract (blocking) BEFORE opening successor ===
-      let effectiveOldEnd = end_existing_on;
-      if (endChk) {
-        const oldId = String(window.modalCtx?.data?.id || '');
-        if (!oldId) { alert('Source contract id missing.'); return false; }
+    // === NEW: pre-truncate the existing contract (blocking) BEFORE opening successor ===
+let effectiveOldEnd = end_existing_on;
+if (endChk) {
+  const oldId = String(window.modalCtx?.data?.id || '');
+  if (!oldId) { alert('Source contract id missing.'); return false; }
 
-        try {
-          console.groupCollapsed('[CLONE][pre-trim gate]');
-          console.log('request', { oldId, desired_end: end_existing_on, new_start_date, new_end_date });
-          const res = await endContractSafely(oldId, end_existing_on);
-          const ok = !!(res && (res.ok ?? (res === true)));
-          const clamped = !!res?.clamped;
-          const safe_end = res?.safe_end || null;
-          console.log('result', { ok, clamped, safe_end, raw: res });
-          console.groupEnd();
+  try {
+    console.groupCollapsed('[CLONE][pre-trim gate]');
+    const url  = API(`/api/contracts/${encodeURIComponent(oldId)}/truncate-tail`);
+    const init = {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ id: oldId, desired_end: end_existing_on })
+    };
+    console.log('request', { url, init, new_start_date, new_end_date });
 
-          if (!ok) {
-            alert(res?.message || 'Failed to end the existing contract.');
-            return false;
-          }
+    // Force API logs for this call path too
+    try { window.__LOG_API = true; } catch {}
 
-          if (clamped && typeof showTailClampWarning === 'function') {
-            try { showTailClampWarning(safe_end, end_existing_on); } catch {}
-          }
+    // Give TAIL-SPY something obvious to latch onto even if authFetch captured an old fetch
+    const res = await (typeof authFetch === 'function' ? authFetch(url, init) : fetch(url, init));
+    let obj = null;
+    try { obj = await res.clone().json(); } catch { obj = null; }
 
-          effectiveOldEnd = safe_end || end_existing_on;
+    const okField =
+      (typeof obj?.ok === 'boolean' ? obj.ok :
+       typeof obj?.success === 'boolean' ? obj.success :
+       (typeof res?.ok === 'boolean' ? res.ok : undefined));
 
-          // Guard against overlap with successor window after clamp
-          if (effectiveOldEnd >= new_start_date) {
-            alert(`Existing contract now ends on ${effectiveOldEnd}, which overlaps the new start (${new_start_date}). Adjust dates and try again.`);
-            return false;
-          }
+    const clamped  = !!obj?.clamped;
+    const safe_end = obj?.safe_end || null;
+    const status   = (typeof res?.status === 'number') ? res.status : (typeof obj?.status === 'number' ? obj.status : undefined);
 
-          if (typeof refreshOldContractAfterTruncate === 'function') {
-            try { await refreshOldContractAfterTruncate(oldId); } catch (e) { if (LOGM) console.warn('[CLONE] refresh after truncate failed', e); }
-          }
-        } catch (e) {
-          console.warn('[CLONE][pre-trim gate] exception', e);
-          alert(`Could not end the existing contract: ${e?.message || e}`);
-          return false;
-        }
-      }
+    console.log('response', { status, ok: !!okField, clamped, safe_end, obj });
+
+    if (!okField) {
+      alert((obj && (obj.message || obj.error)) || res.statusText || 'Failed to end the existing contract.');
+      console.groupEnd?.();
+      return false;
+    }
+
+    if (clamped && typeof showTailClampWarning === 'function') {
+      try { showTailClampWarning(safe_end, end_existing_on); } catch {}
+    }
+
+    effectiveOldEnd = safe_end || end_existing_on;
+
+    // Guard against overlap after clamp
+    if (effectiveOldEnd >= new_start_date) {
+      alert(`Existing contract now ends on ${effectiveOldEnd}, which overlaps the new start (${new_start_date}). Adjust dates and try again.`);
+      console.groupEnd?.();
+      return false;
+    }
+
+    if (typeof refreshOldContractAfterTruncate === 'function') {
+      try { await refreshOldContractAfterTruncate(oldId); } catch (e) { if (LOGM) console.warn('[CLONE] refresh after truncate failed', e); }
+    }
+    console.groupEnd?.();
+  } catch (e) {
+    console.warn('[CLONE][pre-trim gate] exception', e);
+    alert(`Could not end the existing contract: ${e?.message || e}`);
+    return false;
+  }
+}
 
       // Build staged successor row from current contract (no staging of end_existing intent anymore)
       const old = window.modalCtx?.data || {};
