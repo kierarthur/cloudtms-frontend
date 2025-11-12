@@ -1651,8 +1651,7 @@ function openContract(row) {
   data.skip_generate_weeks = true;
 
   // ⬇️ REFRESH server truth to avoid stale window re-write
-  try {
-    // ⬇️ REFRESH server truth to avoid stale window re-write
+   // ⬇️ REFRESH server truth to avoid stale window re-write
   try {
     const fresh = await getContract(data.id);
     if (fresh && fresh.id) {
