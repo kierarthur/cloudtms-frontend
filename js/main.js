@@ -12696,18 +12696,19 @@ const setCloseLabel = ()=>{
       const closing=stack().pop(); if (closing?._detachDirty){ try{closing._detachDirty();}catch{} closing._detachDirty=null; }
       if (closing?._detachGlobal){ try{closing._detachGlobal();}catch{} closing._detachGlobal=null; } top._wired=false;
 if (stack().length>0) {
-  const p=currentFrame();
+  const p = currentFrame();
   if (p && p._ctxRef) window.modalCtx = p._ctxRef;
 
-  const resumeMode = (typeof closing !== 'undefined' && closing && closing._parentModeOnOpen)
-    ? closing._parentModeOnOpen
-    : p.mode;
+  const resumeMode =
+    (typeof closing !== 'undefined' && closing && closing._parentModeOnOpen)
+      ? closing._parentModeOnOpen
+      : p.mode;
 
   try { setFrameMode(p, resumeMode); } catch {}
-  p._updateButtons && p._updateButtons();
+  p._updateButtons?.();
 
   renderTop();
-  try{ p.onReturn && p.onReturn(); }catch{}
+  try { p.onReturn && p.onReturn(); } catch {}
 } else {
 
 
@@ -12783,8 +12784,15 @@ if (stack().length>0) {
   // restore parent context to ensure actions (Clone & Extend) render correctly
   if (p && p._ctxRef) window.modalCtx = p._ctxRef;
   // ▶ make sure parent resumes view-mode so calendar actions (Clone & Extend) return
-  try { setFrameMode(p, 'view'); } catch {}
-  renderTop();
+ const resumeMode =
+  (typeof closing !== 'undefined' && closing && closing._parentModeOnOpen)
+    ? closing._parentModeOnOpen
+    : p.mode;
+
+try { setFrameMode(p, resumeMode); } catch {}
+p._updateButtons && p._updateButtons();
+renderTop();
+
   try{ p.onReturn && p.onReturn(); }catch{}
 } else {
   discardAllModalsAndState();
@@ -12881,9 +12889,15 @@ async function saveForFrame(fr) {
         const p=window.__modalStack[window.__modalStack.length-1];
 
         // ▶ ensure parent is back in view so actions (Clone & Extend) show
-        try { setFrameMode(p, 'view'); } catch {}
-        p.isDirty=true; p._updateButtons&&p._updateButtons();
-        renderTop();
+       const resumeMode =
+  (typeof fr !== 'undefined' && fr && fr._parentModeOnOpen)
+    ? fr._parentModeOnOpen
+    : p.mode; // keep whatever the parent already was
+
+try { setFrameMode(p, resumeMode); } catch {}
+p._updateButtons && p._updateButtons();
+renderTop();
+
 
         // ▶ nudge calendar/action bar re-wire if needed
         try { window.dispatchEvent(new Event('contracts-main-rendered')); } catch {}
@@ -12910,19 +12924,19 @@ async function saveForFrame(fr) {
   }
 }
 
+const onSaveClick = async (ev)=>{
+  const btn=ev?.currentTarget || byId('btnSave');
+  const topNow=currentFrame(); const bound=btn?.dataset?.ownerToken;
+  if (LOG) console.log('[MODAL] click #btnSave (global)', {boundToken:bound, topToken:topNow?._token, topKind:topNow?.kind, topTitle:topNow?.title});
+  if(!topNow) return; if(bound!==topNow._token){ if(LOG) console.warn('[MODAL] token mismatch (global); using top frame'); }
+  await saveForFrame(topNow);
+};
 
-  const onSaveClick = async (ev)=>{
-    const btn=ev?.currentTarget || byId('btnSave');
-    const topNow=currentFrame(); const bound=btn?.dataset?.ownerToken;
-    if (LOG) console.log('[MODAL] click #btnSave (global)', {boundToken:bound, topToken:topNow?._token, topKind:topNow?.kind, topTitle:topNow?.title});
-    if(!topNow) return; if(bound!==topNow._token){ if(LOG) console.warn('[MODAL] token mismatch (global); using top frame'); }
-    await saveForFrame(topNow);
-  };
+const bindSave = (btn,fr)=>{ if(!btn||!fr) return; btn.dataset.ownerToken = fr._token; btn.onclick = onSaveClick; if(LOG) console.log('[MODAL] bind #btnSave → (global)',{ownerToken:fr._token,kind:fr.kind||'(parent)',title:fr.title,mode:fr.mode}); };
+bindSave(btnSave, top);
 
-  const bindSave = (btn,fr)=>{ if(!btn||!fr) return; btn.dataset.ownerToken = fr._token; btn.onclick = onSaveClick; if(LOG) console.log('[MODAL] bind #btnSave → (global)',{ownerToken:fr._token,kind:fr.kind||'(parent)',title:fr.title,mode:fr.mode}); };
-  bindSave(btnSave, top);
-
-  const onDirtyEvt = ()=>{
+// FIX: ignore programmatic "dirty" while suppression is active
+const onDirtyEvt = ()=>{
   const fr = currentFrame(); if (fr && fr._suppressDirty) return;
 
   const isChildNow=(stack().length>1);
@@ -12931,32 +12945,38 @@ async function saveForFrame(fr) {
   try{ const t=currentFrame(); if(t && t.entity==='candidates' && t.currentTabKey==='rates'){ renderCandidateRatesTable?.(); } }catch{}
 };
 
-  const onApplyEvt = ev=>{
-    const isChildNow=(stack().length>1); if(!isChildNow) return;
-    const t=currentFrame(); if(!(t && (t.kind==='client-rate'||t.kind==='candidate-override'))) return;
-    const enabled=!!(ev && ev.detail && ev.detail.enabled); t._applyDesired=enabled; t._updateButtons&&t._updateButtons(); bindSave(byId('btnSave'), t);
-    if(LOG) console.log('[MODAL] onApplyEvt (global) → _applyDesired =', enabled,'rebound save to top frame');
-  };
-  const onModeChanged = ev=>{
-    const isChildNow=(stack().length>1); if(!isChildNow) return;
-    const parentIdx=stack().length-2, changed=ev?.detail?.frameIndex ?? -1;
-    if(changed===parentIdx){ if(LOG) console.log('[MODAL] parent mode changed (global) → child _updateButtons()'); const t=currentFrame(); t._updateButtons&&t._updateButtons(); bindSave(byId('btnSave'), t); }
-  };
-  const onMarginsEvt = ()=>{ try { const t=currentFrame(); if (t && (t.mode==='edit'||t.mode==='create')) t._updateButtons(); } catch {} };
+const onApplyEvt = ev=>{
+  const isChildNow=(stack().length>1); if(!isChildNow) return;
+  const t=currentFrame(); if(!(t && (t.kind==='client-rate'||t.kind==='candidate-override'))) return;
+  const enabled=!!(ev && ev.detail && ev.detail.enabled);
+  t._applyDesired=enabled;
+  t._updateButtons&&t._updateButtons();
+  bindSave(byId('btnSave'), t);
+  if(LOG) console.log('[MODAL] onApplyEvt (global) → _applyDesired =', enabled,'rebound save to top frame');
+};
 
-  if (!top._wired) {
-    window.addEventListener('modal-dirty', onDirtyEvt);
-    window.addEventListener('modal-apply-enabled', onApplyEvt);
-    window.addEventListener('modal-frame-mode-changed', onModeChanged);
-    window.addEventListener('contract-margins-updated', onMarginsEvt);
-    const onEsc=e=>{ if(e.key==='Escape'){ if(top._confirmingDiscard||top._closing) return; e.preventDefault(); byId('btnCloseModal').click(); } };
-    window.addEventListener('keydown', onEsc);
-    const onOverlayClick=e=>{ if(top._confirmingDiscard||top._closing) return; if(e.target===byId('modalBack')) byId('btnCloseModal').click(); };
-    byId('modalBack').addEventListener('click', onOverlayClick, true);
-    top._detachGlobal = ()=>{ try{window.removeEventListener('modal-dirty',onDirtyEvt);}catch{} try{window.removeEventListener('modal-apply-enabled',onApplyEvt);}catch{} try{window.removeEventListener('modal-frame-mode-changed',onModeChanged);}catch{} try{window.removeEventListener('contract-margins-updated',onMarginsEvt);}catch{} try{window.removeEventListener('keydown',onEsc);}catch{} try{byId('modalBack').removeEventListener('click', onOverlayClick, true);}catch{}; };
-    top._wired = true;
-    L('renderTop (global): listeners wired');
-  }
+const onModeChanged = ev=>{
+  const isChildNow=(stack().length>1); if(!isChildNow) return;
+  const parentIdx=stack().length-2, changed=ev?.detail?.frameIndex ?? -1;
+  if(changed===parentIdx){ if(LOG) console.log('[MODAL] parent mode changed (global) → child _updateButtons()'); const t=currentFrame(); t._updateButtons&&t._updateButtons(); bindSave(byId('btnSave'), t); }
+};
+
+const onMarginsEvt = ()=>{ try { const t=currentFrame(); if (t && (t.mode==='edit'||t.mode==='create')) t._updateButtons(); } catch {} };
+
+if (!top._wired) {
+  window.addEventListener('modal-dirty', onDirtyEvt);
+  window.addEventListener('modal-apply-enabled', onApplyEvt);
+  window.addEventListener('modal-frame-mode-changed', onModeChanged);
+  window.addEventListener('contract-margins-updated', onMarginsEvt);
+  const onEsc=e=>{ if(e.key==='Escape'){ if(top._confirmingDiscard||top._closing) return; e.preventDefault(); byId('btnCloseModal').click(); } };
+  window.addEventListener('keydown', onEsc);
+  const onOverlayClick=e=>{ if(top._confirmingDiscard||top._closing) return; if(e.target===byId('modalBack')) byId('btnCloseModal').click(); };
+  byId('modalBack').addEventListener('click', onOverlayClick, true);
+  top._detachGlobal = ()=>{ try{window.removeEventListener('modal-dirty',onDirtyEvt);}catch{} try{window.removeEventListener('modal-apply-enabled',onApplyEvt);}catch{} try{window.removeEventListener('modal-frame-mode-changed',onModeChanged);}catch{} try{window.removeEventListener('contract-margins-updated',onMarginsEvt);}catch{} try{window.removeEventListener('keydown',onEsc);}catch{} try{byId('modalBack').removeEventListener('click', onOverlayClick, true);}catch{}; };
+  top._wired = true;
+  L('renderTop (global): listeners wired');
+}
+
 
   const parentEditable = parent && (parent.mode==='edit' || parent.mode==='create');
   const isChildNow = (stack().length > 1);
