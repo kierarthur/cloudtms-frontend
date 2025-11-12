@@ -1353,6 +1353,8 @@ function openContract(row) {
         if (LOGC) console.groupCollapsed('[CONTRACTS] onSave pipeline');
 
         snapshotContractForm();
+        console.warn('[BREACH A] after snapshotContractForm');
+
         // Keep a stable copy in case something re-renders and drops modalCtx.__cloneIntent
         const __preCloneIntent = window.modalCtx?.__cloneIntent
           ? { ...window.modalCtx.__cloneIntent }
@@ -3712,20 +3714,52 @@ function openContractCloneAndExtend(contract_id) {
         }
       } catch {}
 
-      // Stage (no backend create)
-      const newToken = `contract:new:${Date.now()}:${Math.random().toString(36).slice(2)}`;
-      (window.__cloneIntents ||= {});
-      window.__cloneIntents[newToken] = {
-        source_contract_id: String(window.modalCtx?.data?.id || ''),
-        end_existing: !!endChk,
-        end_existing_on: endChk ? end_existing_on : null,
-        new_start_date,
-        new_end_date
-      };
-      if (LOGM) console.log('[CLONE] stage intent', { token: newToken, intent: window.__cloneIntents[newToken] });
+      // === NEW: pre-truncate the existing contract (blocking) BEFORE opening successor ===
+      let effectiveOldEnd = end_existing_on;
+      if (endChk) {
+        const oldId = String(window.modalCtx?.data?.id || '');
+        if (!oldId) { alert('Source contract id missing.'); return false; }
 
-      // Build staged successor row from current contract
+        try {
+          console.groupCollapsed('[CLONE][pre-trim gate]');
+          console.log('request', { oldId, desired_end: end_existing_on, new_start_date, new_end_date });
+          const res = await endContractSafely(oldId, end_existing_on);
+          const ok = !!(res && (res.ok ?? (res === true)));
+          const clamped = !!res?.clamped;
+          const safe_end = res?.safe_end || null;
+          console.log('result', { ok, clamped, safe_end, raw: res });
+          console.groupEnd();
+
+          if (!ok) {
+            alert(res?.message || 'Failed to end the existing contract.');
+            return false;
+          }
+
+          if (clamped && typeof showTailClampWarning === 'function') {
+            try { showTailClampWarning(safe_end, end_existing_on); } catch {}
+          }
+
+          effectiveOldEnd = safe_end || end_existing_on;
+
+          // Guard against overlap with successor window after clamp
+          if (effectiveOldEnd >= new_start_date) {
+            alert(`Existing contract now ends on ${effectiveOldEnd}, which overlaps the new start (${new_start_date}). Adjust dates and try again.`);
+            return false;
+          }
+
+          if (typeof refreshOldContractAfterTruncate === 'function') {
+            try { await refreshOldContractAfterTruncate(oldId); } catch (e) { if (LOGM) console.warn('[CLONE] refresh after truncate failed', e); }
+          }
+        } catch (e) {
+          console.warn('[CLONE][pre-trim gate] exception', e);
+          alert(`Could not end the existing contract: ${e?.message || e}`);
+          return false;
+        }
+      }
+
+      // Build staged successor row from current contract (no staging of end_existing intent anymore)
       const old = window.modalCtx?.data || {};
+      const newToken = `contract:new:${Date.now()}:${Math.random().toString(36).slice(2)}`;
       const stagedRow = {
         id: null,
         candidate_id: old.candidate_id || '',
@@ -3744,9 +3778,9 @@ function openContractCloneAndExtend(contract_id) {
         rates_json: (old.rates_json && typeof old.rates_json === 'object') ? old.rates_json : {}
       };
 
-      // Defer opening until AFTER this child frame closes, so saveForFrame pops the wizard first.
+      // Open successor ONLY AFTER the pre-trim has finished successfully
       try {
-        if (LOGM) console.log('[CLONE] will open staged successor in Create mode (deferred)', { token: newToken, stagedRow });
+        if (LOGM) console.log('[CLONE] will open staged successor in Create mode (deferred)', { token: newToken, stagedRow, effectiveOldEnd });
         window.__preOpenToken = newToken;
         setTimeout(() => {
           try {
@@ -3757,7 +3791,7 @@ function openContractCloneAndExtend(contract_id) {
                 if (window.modalCtx) {
                   window.modalCtx.openToken = newToken;
                   const fs2 = (window.modalCtx.formState ||= { __forId: newToken, main:{}, pay:{} });
-                  fs2.__forId = newToken; // force override (don’t keep the auto-minted id)
+                  fs2.__forId = newToken;
                   if (LOGM) console.log('[CLONE] bound token to create modal', { openToken: window.modalCtx.openToken, forId: fs2.__forId });
                 }
               } catch (e) { console.warn('[CLONE] bind token failed', e); }
