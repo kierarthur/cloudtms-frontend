@@ -1640,19 +1640,27 @@ function openContract(row) {
           data.skip_generate_weeks = true;
         }
 
-        if (LOGC) console.log('[CONTRACTS] upsert → upsertContract');
-        const saved = await upsertContract(data, data.id || undefined);
-        const persistedId = saved?.id || saved?.contract?.id || null;
-        if (LOGC) console.log('[CONTRACTS] upsertContract result', {
-          isCreate, persistedId, rawHasSaved: !!saved
-        });
+      if (LOGC) console.log('[CONTRACTS] upsert → upsertContract');
+const saved = await upsertContract(data, data.id || undefined);
+const persistedId = saved?.id || saved?.contract?.id || null;
+if (LOGC) console.log('[CONTRACTS] upsertContract result', {
+  isCreate, persistedId, rawHasSaved: !!saved
+});
 
-        window.modalCtx.data = saved?.contract || saved || window.modalCtx.data;
-        if (LOGC) console.log('[CONTRACTS] modalCtx.data snapshot', {
-          id: window.modalCtx.data?.id || null,
-          start_date: window.modalCtx.data?.start_date || null,
-          end_date:   window.modalCtx.data?.end_date   || null
-        });
+window.modalCtx.data = saved?.contract || saved || window.modalCtx.data;
+if (LOGC) console.log('[CONTRACTS] modalCtx.data snapshot', {
+  id: window.modalCtx.data?.id || null,
+  start_date: window.modalCtx.data?.start_date || null,
+  end_date:   window.modalCtx.data?.end_date   || null
+});
+
+// 🔎 breadcrumb to prove we reached the post-save gate
+console.warn('[AFTER UPSERT] reached post-save pre-gate', {
+  modalId: window.modalCtx?.data?.id,
+  isCreate,
+  openToken: window.modalCtx?.openToken,
+  persistedId
+});
 
         try {
           const warnings = saved?.warnings || saved?.contract?.warnings || [];
