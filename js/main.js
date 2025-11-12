@@ -823,6 +823,13 @@ async function upsertContract(payload, id /* optional */) {
   const LOGC = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : true; // enable/disable logging
   const patch = { ...payload };
 
+  // Drop start/end unless explicitly flagged as user-edited (prevents stale overwrite after calendar commit)
+  if (id && patch.__userChangedDates !== true) {
+    if ('start_date' in patch) delete patch.start_date;
+    if ('end_date'   in patch) delete patch.end_date;
+  }
+  if ('__userChangedDates' in patch) delete patch.__userChangedDates;
+
   if ('bucket_labels_json' in patch) {
     const norm = normaliseBucketLabelsInput(patch.bucket_labels_json);
     patch.bucket_labels_json = (norm === false) ? null : norm;
@@ -1616,34 +1623,53 @@ function openContract(row) {
         // === CREATE vs EDIT ordering ===
         // CREATE: upsert first to obtain id → then commit stage (if any) → normalize window → (maybe) generate defaults
         // EDIT: if any stage present, always commit calendar FIRST → normalize window → then upsert metadata
-        if (!isCreate && data.id && stageShape.hasAny) {
-          if (LOGC) console.log('[CONTRACTS] calendar (any stage) → commitContractCalendarStageIfPending');
-          const preCalRes = await commitContractCalendarStageIfPending(data.id);
-          if (!preCalRes.ok) {
-            const msg = `Calendar save failed: ${preCalRes.message || 'unknown error'}. Contract details were not saved.`;
-            if (LOGC) console.warn('[CONTRACTS] calendar commit failed (pre-upsert)', preCalRes);
-            if (typeof showModalHint === 'function') showModalHint(msg, 'warn'); else alert(msg);
-            window.modalCtx._saveInFlight = false;
-            console.groupEnd?.();
-            return false;
-          }
-          if (typeof normalizeContractWindowToShifts === 'function') {
-            try {
-              const norm = await normalizeContractWindowToShifts(data.id);
-              if (norm && norm.ok) {
-                data.start_date = norm.start_date || data.start_date || null;
-                data.end_date   = norm.end_date   || data.end_date   || null;
-              }
-            } catch (e) {
-              if (LOGC) console.warn('[CONTRACTS] normalize window to shifts failed (pre-upsert, non-fatal)', e);
-            }
-          }
-          // when editing with stage, also avoid auto-generation
-          data.skip_generate_weeks = true;
-        }
+      if (!isCreate && data.id && stageShape.hasAny) {
+  if (LOGC) console.log('[CONTRACTS] calendar (any stage) → commitContractCalendarStageIfPending');
+  const preCalRes = await commitContractCalendarStageIfPending(data.id);
+  if (!preCalRes.ok) {
+    const msg = `Calendar save failed: ${preCalRes.message || 'unknown error'}. Contract details were not saved.`;
+    if (LOGC) console.warn('[CONTRACTS] calendar commit failed (pre-upsert)', preCalRes);
+    if (typeof showModalHint === 'function') showModalHint(msg, 'warn'); else alert(msg);
+    window.modalCtx._saveInFlight = false;
+    console.groupEnd?.();
+    return false;
+  }
+  if (typeof normalizeContractWindowToShifts === 'function') {
+    try {
+      const norm = await normalizeContractWindowToShifts(data.id);
+      if (norm && norm.ok) {
+        data.start_date = norm.start_date || data.start_date || null;
+        data.end_date   = norm.end_date   || data.end_date   || null;
+      }
+    } catch (e) {
+      if (LOGC) console.warn('[CONTRACTS] normalize window to shifts failed (pre-upsert, non-fatal)', e);
+    }
+  }
+  // when editing with stage, also avoid auto-generation
+  data.skip_generate_weeks = true;
 
-      if (LOGC) console.log('[CONTRACTS] upsert → upsertContract');
+  // ⬇️ REFRESH server truth to avoid stale window re-write
+  try {
+    const fresh = await getContract(data.id);
+    if (fresh && fresh.id) {
+      window.modalCtx.data = fresh;
+      // Only allow date fields to be sent if the user actually changed them in Main
+      const userEditedStart = !!(prevStartIso && startIso && startIso !== prevStartIso);
+      const userEditedEnd   = !!(prevEndIso   && endIso   && endIso   !== prevEndIso);
+      data.__userChangedDates = (userEditedStart || userEditedEnd);
+      if (!data.__userChangedDates) {
+        delete data.start_date;
+        delete data.end_date;
+      }
+    }
+  } catch (e) {
+    if (LOGC) console.warn('[CONTRACTS] fresh refetch failed (proceeding with current modal data)', e);
+  }
+}
+
+if (LOGC) console.log('[CONTRACTS] upsert → upsertContract');
 const saved = await upsertContract(data, data.id || undefined);
+
 const persistedId = saved?.id || saved?.contract?.id || null;
 if (LOGC) console.log('[CONTRACTS] upsertContract result', {
   isCreate, persistedId, rawHasSaved: !!saved
