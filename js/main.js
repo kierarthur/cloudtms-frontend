@@ -2236,13 +2236,10 @@ console.warn('[AFTER UPSERT] reached post-save pre-gate', {
     },
 
     // 7th: options (now with noParentGate)
-    { kind:'contracts', extraButtons, noParentGate: isSuccessorCreate, stayOpenOnSave: isSuccessorCreate,
-      // Diagnostic only:
-      _trace: (LOGC && { tag:'contracts-open', isCreate, isSuccessorCreate, openToken: window.modalCtx.openToken })
-    }
-
-  );
-
+   { kind:'contracts', extraButtons,
+    _trace: (LOGC && { tag:'contracts-open', isCreate, isSuccessorCreate, openToken: window.modalCtx.openToken })
+  }
+);
   setTimeout(() => {
     try {
       const fr = window.__getModalFrame?.();
@@ -3715,70 +3712,65 @@ function openContractCloneAndExtend(contract_id) {
       } catch {}
 
       // === NEW: pre-truncate the existing contract (blocking) BEFORE opening successor ===
-    // === NEW: pre-truncate the existing contract (blocking) BEFORE opening successor ===
-let effectiveOldEnd = end_existing_on;
-if (endChk) {
-  const oldId = String(window.modalCtx?.data?.id || '');
-  if (!oldId) { alert('Source contract id missing.'); return false; }
+      let effectiveOldEnd = end_existing_on;
+      if (endChk) {
+        const oldId = String(window.modalCtx?.data?.id || '');
+        if (!oldId) { alert('Source contract id missing.'); return false; }
 
-  try {
-    console.groupCollapsed('[CLONE][pre-trim gate]');
-    const url  = API(`/api/contracts/${encodeURIComponent(oldId)}/truncate-tail`);
-    const init = {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ id: oldId, desired_end: end_existing_on })
-    };
-    console.log('request', { url, init, new_start_date, new_end_date });
+        try {
+          console.groupCollapsed('[CLONE][pre-trim gate]');
+          const url  = API(`/api/contracts/${encodeURIComponent(oldId)}/truncate-tail`);
+          const init = {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ id: oldId, desired_end: end_existing_on })
+          };
+          console.log('request', { url, init, new_start_date, new_end_date });
+          try { window.__LOG_API = true; } catch {}
 
-    // Force API logs for this call path too
-    try { window.__LOG_API = true; } catch {}
+          const res = await (typeof authFetch === 'function' ? authFetch(url, init) : fetch(url, init));
+          let obj = null;
+          try { obj = await res.clone().json(); } catch { obj = null; }
 
-    // Give TAIL-SPY something obvious to latch onto even if authFetch captured an old fetch
-    const res = await (typeof authFetch === 'function' ? authFetch(url, init) : fetch(url, init));
-    let obj = null;
-    try { obj = await res.clone().json(); } catch { obj = null; }
+          const okField =
+            (typeof obj?.ok === 'boolean' ? obj.ok :
+             typeof obj?.success === 'boolean' ? obj.success :
+             (typeof res?.ok === 'boolean' ? res.ok : undefined));
 
-    const okField =
-      (typeof obj?.ok === 'boolean' ? obj.ok :
-       typeof obj?.success === 'boolean' ? obj.success :
-       (typeof res?.ok === 'boolean' ? res.ok : undefined));
+          const clamped  = !!obj?.clamped;
+          const safe_end = obj?.safe_end || null;
+          const status   = (typeof res?.status === 'number') ? res.status : (typeof obj?.status === 'number' ? obj.status : undefined);
 
-    const clamped  = !!obj?.clamped;
-    const safe_end = obj?.safe_end || null;
-    const status   = (typeof res?.status === 'number') ? res.status : (typeof obj?.status === 'number' ? obj.status : undefined);
+          console.log('response', { status, ok: !!okField, clamped, safe_end, obj });
 
-    console.log('response', { status, ok: !!okField, clamped, safe_end, obj });
+          if (!okField) {
+            alert((obj && (obj.message || obj.error)) || res.statusText || 'Failed to end the existing contract.');
+            console.groupEnd?.();
+            return false;
+          }
 
-    if (!okField) {
-      alert((obj && (obj.message || obj.error)) || res.statusText || 'Failed to end the existing contract.');
-      console.groupEnd?.();
-      return false;
-    }
+          if (clamped && typeof showTailClampWarning === 'function') {
+            try { showTailClampWarning(safe_end, end_existing_on); } catch {}
+          }
 
-    if (clamped && typeof showTailClampWarning === 'function') {
-      try { showTailClampWarning(safe_end, end_existing_on); } catch {}
-    }
+          effectiveOldEnd = safe_end || end_existing_on;
 
-    effectiveOldEnd = safe_end || end_existing_on;
+          if (effectiveOldEnd >= new_start_date) {
+            alert(`Existing contract now ends on ${effectiveOldEnd}, which overlaps the new start (${new_start_date}). Adjust dates and try again.`);
+            console.groupEnd?.();
+            return false;
+          }
 
-    // Guard against overlap after clamp
-    if (effectiveOldEnd >= new_start_date) {
-      alert(`Existing contract now ends on ${effectiveOldEnd}, which overlaps the new start (${new_start_date}). Adjust dates and try again.`);
-      console.groupEnd?.();
-      return false;
-    }
-
-    if (typeof refreshOldContractAfterTruncate === 'function') {
-      try { await refreshOldContractAfterTruncate(oldId); } catch (e) { if (LOGM) console.warn('[CLONE] refresh after truncate failed', e); }
-    }
-    console.groupEnd?.();
-  } catch (e) {
-    console.warn('[CLONE][pre-trim gate] exception', e);
-    alert(`Could not end the existing contract: ${e?.message || e}`);
-    return false;
-  }
-}
+          if (typeof refreshOldContractAfterTruncate === 'function') {
+            try { await refreshOldContractAfterTruncate(oldId); } catch (e) { if (LOGM) console.warn('[CLONE] refresh after truncate failed', e); }
+          }
+          console.groupEnd?.();
+        } catch (e) {
+          console.warn('[CLONE][pre-trim gate] exception', e);
+          alert(`Could not end the existing contract: ${e?.message || e}`);
+          return false;
+        }
+      }
 
       // Build staged successor row from current contract (no staging of end_existing intent anymore)
       const old = window.modalCtx?.data || {};
@@ -3801,12 +3793,14 @@ if (endChk) {
         rates_json: (old.rates_json && typeof old.rates_json === 'object') ? old.rates_json : {}
       };
 
-      // Open successor ONLY AFTER the pre-trim has finished successfully
+      // Open successor ONLY AFTER the pre-trim has finished successfully — as a ROOT modal
       try {
-        if (LOGM) console.log('[CLONE] will open staged successor in Create mode (deferred)', { token: newToken, stagedRow, effectiveOldEnd });
+        if (LOGM) console.log('[CLONE] will open staged successor in Create mode (root, deferred)', { token: newToken, stagedRow, effectiveOldEnd });
         window.__preOpenToken = newToken;
         setTimeout(() => {
           try {
+            // Tear down entire stack so successor opens as root (no parent to resurface)
+            try { discardAllModalsAndState(); } catch {}
             openContract(stagedRow);
             // After the modal builds its own formState, force-align __forId with our token
             setTimeout(() => {
@@ -3831,11 +3825,9 @@ if (endChk) {
       return true;
     },
     false,
-    // onReturn: make sure parent actions (Clone & Extend…) are rebuilt immediately after wizard closes/cancels
     () => {
       try { window.dispatchEvent(new Event('contracts-main-rendered')); } catch {}
     },
-    // OPTIONS: explicitly bypass parent gating for the wizard itself
     { kind:'contract-clone-extend', forceEdit:true, noParentGate:true }
   );
 
@@ -3859,15 +3851,10 @@ if (endChk) {
       const startIso = parseUkDateToIso(startEl.value || '') || defaultStart;
       const maxOldEndIso = isoMinusOne(startIso);
       const maxOldEndUk  = formatIsoToUk(maxOldEndIso);
-
-      // update bounds
       if (typeof endOld.setMinDate === 'function') endOld.setMinDate(formatIsoToUk(oldStart));
-      // attachUkDatePicker doesn't expose setMaxDate; set the internal bound + repaint
       endOld._maxIso = maxOldEndIso;
       if (typeof endOld.__ukdpRepaint === 'function') endOld.__ukdpRepaint();
-
       if (endChk.checked) endOld.value = maxOldEndUk;
-
       if (LOGM) console.log('[CLONE] onStartChange', { startIso, endOldUk: endOld.value, maxOldEndIso });
     };
 
@@ -12550,19 +12537,22 @@ const defaultPrimary =
       btnSave.disabled = (!parentEditable) || top._saving || !wantApply;
       btnEdit.style.display='none'; if (relatedBtn) relatedBtn.disabled=true;
       if (LOG) console.log('[MODAL] child _updateButtons()', { parentEditable, wantApply, disabled: btnSave.disabled });
-       } else {
-      btnEdit.style.display = (top.mode==='view' && top.hasId) ? '' : 'none';
-      if (relatedBtn) relatedBtn.disabled = !(top.mode==='view' && top.hasId);
+   } else {
+  btnEdit.style.display = (top.mode==='view' && top.hasId) ? '' : 'none';
+  if (relatedBtn) relatedBtn.disabled = !(top.mode==='view' && top.hasId);
 
-      // ▶ ensure Save is visible in create mode
-      if (top.mode === 'create') {
-        btnSave.style.display = '';
-        btnSave.disabled = top._saving;   // visibility independent of dirtiness
-      } else if (top.mode==='view') {
-        btnSave.style.display = top.noParentGate ? '' : 'none';
-        btnSave.disabled = top._saving;
-      } else {
-        btnSave.style.display='';
+  // ▶ ensure Save is visible in create mode
+  if (top.mode === 'create') {
+    btnSave.style.display = '';
+    btnSave.disabled = top._saving;
+  } else if (top.mode==='view') {
+    // Always hide Save in view mode
+    btnSave.style.display = 'none';
+    btnSave.disabled = true;
+  } else {
+    btnSave.style.display='';
+    // ... (rest unchanged)
+
         let gateOK = true;
         let elig   = null;
 
