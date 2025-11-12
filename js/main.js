@@ -2218,21 +2218,59 @@ console.warn('[AFTER UPSERT] reached post-save pre-gate', {
         }
       };
 
-      setTimeout(wire, 0);
+     setTimeout(() => {
+  const fr = window.__getModalFrame?.();
+  const prevDirty = fr?.isDirty;
+  if (fr) fr._suppressDirty = true;
 
-      if (!window.__contractsWireBound) {
-        window.__contractsWireBound = true;
-        window.addEventListener('contracts-main-rendered', () => setTimeout(wire, 0));
-      }
+  wire();
 
-      const tabs = document.getElementById('modalTabs');
-      if (tabs && !tabs.__wired_contract_stage) {
-        tabs.__wired_contract_stage = true;
-        tabs.addEventListener('click', () => {
-          snapshotContractForm();
-          setTimeout(wire, 0);
-        });
+  if (fr) {
+    fr._suppressDirty = false;
+    fr.isDirty = prevDirty;
+    fr._updateButtons && fr._updateButtons();
+  }
+}, 0);
+
+if (!window.__contractsWireBound) {
+  window.__contractsWireBound = true;
+  window.addEventListener('contracts-main-rendered', () => {
+    const fr = window.__getModalFrame?.();
+    const prevDirty = fr?.isDirty;
+    if (fr) fr._suppressDirty = true;
+
+    setTimeout(() => {
+      wire();
+      if (fr) {
+        fr._suppressDirty = false;
+        fr.isDirty = prevDirty;
+        fr._updateButtons && fr._updateButtons();
       }
+    }, 0);
+  });
+}
+
+
+  if (tabs && !tabs.__wired_contract_stage) {
+  tabs.__wired_contract_stage = true;
+  tabs.addEventListener('click', () => {
+  const fr = window.__getModalFrame?.();
+  const prevDirty = fr?.isDirty;
+  if (fr) fr._suppressDirty = true;
+
+  snapshotContractForm();
+  setTimeout(() => {
+    wire();
+    if (fr) {
+      fr._suppressDirty = false;
+      fr.isDirty = prevDirty;
+      fr._updateButtons && fr._updateButtons();
+    }
+  }, 0);
+});
+
+}
+
     },
 
     // 7th: options (now with noParentGate)
@@ -12236,112 +12274,114 @@ mergedRowForTab(k) {
   },
 
   async setTab(k) {
-    GC(`setTab(${k})`);
-    L('setTab ENTER', { k, prevKey: this.currentTabKey, entity: this.entity, mode: this.mode, hasMounted: this._hasMountedOnce });
+  GC(`setTab(${k})`);
+  L('setTab ENTER', { k, prevKey: this.currentTabKey, entity: this.entity, mode: this.mode, hasMounted: this._hasMountedOnce });
 
-    const persist = this._hasMountedOnce; if (persist) this.persistCurrentTabState();
+  const prevDirty = this.isDirty;
+  this._suppressDirty = true;
 
-    const merged = this.mergedRowForTab(k);
-    if (this.entity === 'contracts' && k === 'main' && this.mode !== 'edit' && this.mode !== 'create') {
-      if (window.modalCtx?.data?.start_date) merged.start_date = window.modalCtx.data.start_date;
-      if (window.modalCtx?.data?.end_date)   merged.end_date   = window.modalCtx.data.end_date;
-      try {
-        const fs = (window.modalCtx.formState ||= { __forId:(window.modalCtx?.data?.id || window.modalCtx?.openToken || null), main:{}, pay:{} });
-        fs.main ||= {};
-        if (merged.start_date) fs.main.start_date = merged.start_date;
-        if (merged.end_date)   fs.main.end_date   = merged.end_date;
-      } catch {}
-    }
-    byId('modalBody').innerHTML = this.renderTab(k, merged) || '';
+  const persist = this._hasMountedOnce; if (persist) this.persistCurrentTabState();
 
-    // Candidate tabs
-    if (this.entity==='candidates' && k==='bookings') {
-      const candId = window.modalCtx?.data?.id;
-      if (candId) {
-        try { renderCandidateCalendarTab(candId); } catch(e) { console.warn('renderCandidateCalendarTab failed', e); }
-      }
-    }
-    if (this.entity==='candidates' && k==='rates') { mountCandidateRatesTab?.(); }
-    if (this.entity==='candidates' && k==='pay') {
-      // Seed payMethodState from saved row if missing; await mount to avoid blank flash
-      if (!window.modalCtx?.payMethodState && window.modalCtx?.data?.pay_method) {
-        window.modalCtx.payMethodState = String(window.modalCtx.data.pay_method);
-        L('setTab(candidates/pay): seeded payMethodState', { payMethodState: window.modalCtx.payMethodState });
-      }
-      const p = mountCandidatePayTab?.();
-      if (p && typeof p.then === 'function') { await p; }
-    }
-
-    if (this.entity==='candidates' && k==='main') {
-      const pmSel = document.querySelector('#pay-method');
-      if (pmSel) {
-        const stagedPm   = window.modalCtx?.formState?.main?.pay_method;
-        const preferred  = (window.modalCtx?.payMethodState || stagedPm || pmSel.value);
-        pmSel.value = preferred;
-        pmSel.addEventListener('change', () => {
-          window.modalCtx.payMethodState = pmSel.value;
-          try { window.dispatchEvent(new CustomEvent('pay-method-changed')); }
-          catch { window.dispatchEvent(new Event('pay-method-changed')); }
-        });
-        window.modalCtx.payMethodState = pmSel.value;
-        L('setTab(candidates/main): pay method wired', { preferred });
-      }
-
-      const rolesHost = document.querySelector('#rolesEditor');
-      if (rolesHost) {
-        (async () => {
-          try {
-            const roleOptions = await loadGlobalRoleOptions();
-            renderRolesEditor(rolesHost, window.modalCtx.rolesState || [], roleOptions);
-            L('setTab(candidates/main): roles editor mounted', { options: (roleOptions||[]).length });
-          } catch (e) {
-            console.error('[MODAL] roles mount failed', e);
-          }
-        })();
-      }
-    }
-
-    // Client tabs
-    if (this.entity==='clients'    && k==='rates')     { mountClientRatesTab?.(); }
-    if (this.entity==='clients'    && k==='hospitals') { mountClientHospitalsTab?.(); }
-    if (this.entity==='clients'    && k==='settings')  { renderClientSettingsUI?.(window.modalCtx.clientSettingsState||{}); }
-
-    // Contract tabs
-    if (this.entity==='contracts'  && k==='rates')     { mountContractRatesTab?.(); }
-
-    this.currentTabKey = k;
-    this._attachDirtyTracker();
-
-    const isChild = (stack().length > 1);
-    if (this.noParentGate) setFormReadOnly(byId('modalBody'), (this.mode==='view'||this.mode==='saving'));
-    else if (isChild)      { const p=parentFrame(); setFormReadOnly(byId('modalBody'), !(p && (p.mode==='edit'||p.mode==='create'))); }
-    else                   setFormReadOnly(byId('modalBody'), (this.mode==='view'||this.mode==='saving'));
-
+  const merged = this.mergedRowForTab(k);
+  if (this.entity === 'contracts' && k === 'main' && this.mode !== 'edit' && this.mode !== 'create') {
+    if (window.modalCtx?.data?.start_date) merged.start_date = window.modalCtx.data.start_date;
+    if (window.modalCtx?.data?.end_date)   merged.end_date   = window.modalCtx.data.end_date;
     try {
-      const pc = document.getElementById('btnPickCandidate');
-      const pl = document.getElementById('btnPickClient');
-      L('setTab EXIT snapshot', {
-        currentTabKey: this.currentTabKey,
-        pickButtons: {
-          btnPickCandidate: { exists: !!pc, disabled: !!(pc && pc.disabled) },
-          btnPickClient:    { exists: !!pl, disabled: !!(pl && pl.disabled) }
-        }
-      });
+      const fs = (window.modalCtx.formState ||= { __forId:(window.modalCtx?.data?.id || window.modalCtx?.openToken || null), main:{}, pay:{} });
+      fs.main ||= {};
+      if (merged.start_date) fs.main.start_date = merged.start_date;
+      if (merged.end_date)   fs.main.end_date   = merged.end_date;
     } catch {}
-
-       try {
-      if (this.entity === 'contracts' && k === 'main') {
-        window.dispatchEvent(new Event('contracts-main-rendered'));
-      }
-    } catch {}
-
-    this._hasMountedOnce = true;
-
-    // Re-evaluate header buttons after tab content re-render
-    if (typeof this._updateButtons === 'function') this._updateButtons();
-
-    GE();
   }
+  byId('modalBody').innerHTML = this.renderTab(k, merged) || '';
+
+  if (this.entity==='candidates' && k==='bookings') {
+    const candId = window.modalCtx?.data?.id;
+    if (candId) {
+      try { renderCandidateCalendarTab(candId); } catch(e) { console.warn('renderCandidateCalendarTab failed', e); }
+    }
+  }
+  if (this.entity==='candidates' && k==='rates') { mountCandidateRatesTab?.(); }
+  if (this.entity==='candidates' && k==='pay') {
+    if (!window.modalCtx?.payMethodState && window.modalCtx?.data?.pay_method) {
+      window.modalCtx.payMethodState = String(window.modalCtx.data.pay_method);
+      L('setTab(candidates/pay): seeded payMethodState', { payMethodState: window.modalCtx.payMethodState });
+    }
+    const p = mountCandidatePayTab?.();
+    if (p && typeof p.then === 'function') { await p; }
+  }
+
+  if (this.entity==='candidates' && k==='main') {
+    const pmSel = document.querySelector('#pay-method');
+    if (pmSel) {
+      const stagedPm   = window.modalCtx?.formState?.main?.pay_method;
+      const preferred  = (window.modalCtx?.payMethodState || stagedPm || pmSel.value);
+      pmSel.value = preferred;
+      pmSel.addEventListener('change', () => {
+        window.modalCtx.payMethodState = pmSel.value;
+        try { window.dispatchEvent(new CustomEvent('pay-method-changed')); }
+        catch { window.dispatchEvent(new Event('pay-method-changed')); }
+      });
+      window.modalCtx.payMethodState = pmSel.value;
+      L('setTab(candidates/main): pay method wired', { preferred });
+    }
+
+    const rolesHost = document.querySelector('#rolesEditor');
+    if (rolesHost) {
+      (async () => {
+        try {
+          const roleOptions = await loadGlobalRoleOptions();
+          renderRolesEditor(rolesHost, window.modalCtx.rolesState || [], roleOptions);
+          L('setTab(candidates/main): roles editor mounted', { options: (roleOptions||[]).length });
+        } catch (e) {
+          console.error('[MODAL] roles mount failed', e);
+        }
+      })();
+    }
+  }
+
+  if (this.entity==='clients' && k==='rates')     { mountClientRatesTab?.(); }
+  if (this.entity==='clients' && k==='hospitals') { mountClientHospitalsTab?.(); }
+  if (this.entity==='clients' && k==='settings')  { renderClientSettingsUI?.(window.modalCtx.clientSettingsState||{}); }
+
+  if (this.entity==='contracts' && k==='rates')   { mountContractRatesTab?.(); }
+
+  this.currentTabKey = k;
+  this._attachDirtyTracker();
+
+  const isChild = (stack().length > 1);
+  if (this.noParentGate) setFormReadOnly(byId('modalBody'), (this.mode==='view'||this.mode==='saving'));
+  else if (isChild)      { const p=parentFrame(); setFormReadOnly(byId('modalBody'), !(p && (p.mode==='edit'||p.mode==='create'))); }
+  else                   setFormReadOnly(byId('modalBody'), (this.mode==='view'||this.mode==='saving'));
+
+  try {
+    const pc = document.getElementById('btnPickCandidate');
+    const pl = document.getElementById('btnPickClient');
+    L('setTab EXIT snapshot', {
+      currentTabKey: this.currentTabKey,
+      pickButtons: {
+        btnPickCandidate: { exists: !!pc, disabled: !!(pc && pc.disabled) },
+        btnPickClient:    { exists: !!pl, disabled: !!(pl && pl.disabled) }
+      }
+    });
+  } catch {}
+
+  try {
+    if (this.entity === 'contracts' && k === 'main') {
+      window.dispatchEvent(new Event('contracts-main-rendered'));
+    }
+  } catch {}
+
+  this._hasMountedOnce = true;
+
+  this._suppressDirty = false;
+  this.isDirty = prevDirty;
+
+  if (typeof this._updateButtons === 'function') this._updateButtons();
+
+  GE();
+}
+
 };
 
 function setFrameMode(frameObj, mode) {
@@ -12385,9 +12425,12 @@ function setFrameMode(frameObj, mode) {
   if (repaint) frameObj.setTab(frameObj.currentTabKey);
 }
 
+const parentOnOpen = currentFrame();
+frame._parentModeOnOpen = parentOnOpen ? parentOnOpen.mode : null;
 
-  stack().push(frame);
-  byId('modalBack').style.display='flex';
+stack().push(frame);
+byId('modalBack').style.display='flex';
+
 
  function renderTop() {
   const LOG = (typeof window.__LOG_MODAL === 'boolean') ? window.__LOG_MODAL : true;
@@ -12652,8 +12695,23 @@ const setCloseLabel = ()=>{
       document.onmousemove=null; document.onmouseup=null; byId('modal')?.classList.remove('dragging'); sanitizeModalGeometry();
       const closing=stack().pop(); if (closing?._detachDirty){ try{closing._detachDirty();}catch{} closing._detachDirty=null; }
       if (closing?._detachGlobal){ try{closing._detachGlobal();}catch{} closing._detachGlobal=null; } top._wired=false;
-      if (stack().length>0) { const p=currentFrame(); if (p && p._ctxRef) window.modalCtx = p._ctxRef; renderTop(); try{ p.onReturn && p.onReturn(); } catch{} }
-      else { discardAllModalsAndState(); if (window.__pendingFocus) { try{ renderAll(); } catch(e){ console.error('refresh after modal close failed',e); } } }
+if (stack().length>0) {
+  const p=currentFrame();
+  if (p && p._ctxRef) window.modalCtx = p._ctxRef;
+
+  const resumeMode = (typeof closing !== 'undefined' && closing && closing._parentModeOnOpen)
+    ? closing._parentModeOnOpen
+    : p.mode;
+
+  try { setFrameMode(p, resumeMode); } catch {}
+  p._updateButtons && p._updateButtons();
+
+  renderTop();
+  try{ p.onReturn && p.onReturn(); }catch{}
+} else {
+
+
+ discardAllModalsAndState(); if (window.__pendingFocus) { try{ renderAll(); } catch(e){ console.error('refresh after modal close failed',e); } } }
       return;
     }
 
@@ -12865,11 +12923,14 @@ async function saveForFrame(fr) {
   bindSave(btnSave, top);
 
   const onDirtyEvt = ()=>{
-    const isChildNow=(stack().length>1);
-    if(isChildNow){ const p=parentFrame(); if(p && (p.mode==='edit'||p.mode==='create')){ p.isDirty=true; p._updateButtons&&p._updateButtons(); } }
-    else if(top.mode==='edit'||top.mode==='create'){ top.isDirty=true; top._updateButtons&&top._updateButtons(); }
-    try{ const t=currentFrame(); if(t && t.entity==='candidates' && t.currentTabKey==='rates'){ renderCandidateRatesTable?.(); } }catch{}
-  };
+  const fr = currentFrame(); if (fr && fr._suppressDirty) return;
+
+  const isChildNow=(stack().length>1);
+  if(isChildNow){ const p=parentFrame(); if(p && (p.mode==='edit'||p.mode==='create')){ p.isDirty=true; p._updateButtons&&p._updateButtons(); } }
+  else if(top.mode==='edit'||top.mode==='create'){ top.isDirty=true; top._updateButtons&&top._updateButtons(); }
+  try{ const t=currentFrame(); if(t && t.entity==='candidates' && t.currentTabKey==='rates'){ renderCandidateRatesTable?.(); } }catch{}
+};
+
   const onApplyEvt = ev=>{
     const isChildNow=(stack().length>1); if(!isChildNow) return;
     const t=currentFrame(); if(!(t && (t.kind==='client-rate'||t.kind==='candidate-override'))) return;
