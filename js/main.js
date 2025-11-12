@@ -9,40 +9,11 @@ let refreshTimer = 0;
 // Put this at the very top of main.js so all functions can read them.
 window.__LOG_RATES  = true;   // logs for rate staging + rates table + rates tab
 window.__LOG_PAYTAB = true;   // logs for payment tab + umbrella prefill
+window.__LOG_CONTRACTS = true;
+
 window.__LOG_MODAL  = true;   // logs from modal framework (showModal)
 const __LOG_API = true;   // turns on authFetch + rates/hospitals/client POST/PATCH logging
 
-// define once, attach to window (only if not present)
-if (typeof window.endContractSafely !== 'function') {
-  window.endContractSafely = async function endContractSafely(contract_id, desired_end) {
-    const LOGC = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : true;
-    const url  = `${window.BROKER_BASE_URL}/api/contracts/${encodeURIComponent(contract_id)}/truncate-tail`;
-    const payload = { desired_end };
-
-    console.groupCollapsed('[TRUNCATE][call]');
-    console.log('→ POST', url, payload);
-
-    let ok=false, json=null;
-    try {
-      if (typeof authFetch === 'function') {
-        const res = await authFetch({ url, method:'POST', headers:{ 'content-type':'application/json' }, body: JSON.stringify(payload) });
-        ok   = !!res?.ok;
-        json = res?.json || res;
-      } else {
-        const r = await fetch(url, { method:'POST', headers:{ 'content-type':'application/json' }, body: JSON.stringify(payload) });
-        ok   = r.ok;
-        try { json = await r.clone().json(); } catch {}
-      }
-      console.log('← OK?', ok, 'payload:', json);
-    } finally {
-      console.groupEnd();
-    }
-
-    if (!ok) throw new Error((json && (json.error||json.message)) || 'truncate-tail failed');
-    if (LOGC) console.log('[CONTRACTS] endContractSafely result', json);
-    return json;
-  };
-}
 
 
 // Quick DOM helper
@@ -1263,42 +1234,40 @@ function openContract(row) {
     }
   }
 
-// If this create comes from Clone&Extend staging, pull intent (end-old etc.)
-try {
-  const intents = (window.__cloneIntents || {});
-  const token   = window.modalCtx.openToken;
-  const ci      = intents[token];
+  // If this create comes from Clone&Extend staging, pull intent (end-old etc.)
+  try {
+    const intents = (window.__cloneIntents || {});
+    const token   = window.modalCtx.openToken;
+    const ci      = intents[token];
 
-  if (LOGC) console.groupCollapsed('[CLONE][attach-intent]');
-  if (LOGC) console.log('openToken', token);
-  if (LOGC) console.log('staging.keys', Object.keys(intents || {}));
-  if (LOGC) console.log('staging.has(openToken)?', Object.prototype.hasOwnProperty.call(intents, token));
+    if (LOGC) console.groupCollapsed('[CLONE][attach-intent]');
+    if (LOGC) console.log('openToken', token);
+    if (LOGC) console.log('staging.keys', Object.keys(intents || {}));
+    if (LOGC) console.log('staging.has(openToken)?', Object.prototype.hasOwnProperty.call(intents, token));
 
-  if (ci) {
-    // Normalise & echo intent
-    const endIso = ci.end_existing_on || null;
-    window.modalCtx.__cloneIntent = {
-      source_contract_id: ci.source_contract_id || null,
-      end_existing: !!ci.end_existing,
-      end_existing_on: endIso
-    };
-    if (LOGC) console.log('ATTACHED', window.modalCtx.__cloneIntent);
-    // one-shot: keep it only on this modal
-    try { delete intents[token]; if (LOGC) console.log('intent cleared from staging bucket'); } catch {}
-  } else {
-    if (LOGC) console.log('NO_INTENT_FOR_TOKEN (possible token mismatch) – will not truncate tail unless a later step re-attaches.');
+    if (ci) {
+      // Normalise & echo intent
+      const endIso = ci.end_existing_on || null;
+      window.modalCtx.__cloneIntent = {
+        source_contract_id: ci.source_contract_id || null,
+        end_existing: !!ci.end_existing,
+        end_existing_on: endIso
+      };
+      if (LOGC) console.log('ATTACHED', window.modalCtx.__cloneIntent);
+      // one-shot: keep it only on this modal
+      try { delete intents[token]; if (LOGC) console.log('intent cleared from staging bucket'); } catch {}
+    } else {
+      if (LOGC) console.log('NO_INTENT_FOR_TOKEN (possible token mismatch) – will not truncate tail unless a later step re-attaches.');
+    }
+    if (LOGC) console.groupEnd?.();
+  } catch (e) {
+    if (LOGC) console.warn('[CLONE][attach-intent] EXCEPTION', e);
   }
-  if (LOGC) console.groupEnd?.();
-} catch (e) {
-  if (LOGC) console.warn('[CLONE][attach-intent] EXCEPTION', e);
-}
-
-
 
   try {
     const base = window.modalCtx.data || {};
 
-       const fs = (window.modalCtx.formState ||= { __forId: (base.id ?? window.modalCtx.openToken ?? null), main:{}, pay:{} });
+    const fs = (window.modalCtx.formState ||= { __forId: (base.id ?? window.modalCtx.openToken ?? null), main:{}, pay:{} });
     fs.__forId = preToken || fs.__forId || (base.id ?? window.modalCtx.openToken ?? null);
     if (LOGC) console.log('[CONTRACTS] formState forId bound', { preToken, forId: fs.__forId, openToken: window.modalCtx.openToken });
 
@@ -1317,7 +1286,7 @@ try {
       if (base.bucket_labels_json)   m.__bucket_labels = base.bucket_labels_json;
       if (base.std_schedule_json)    m.__template      = base.std_schedule_json;
       if (base.std_hours_json)       m.__hours         = base.std_hours_json;
-            m.__seeded = true;
+      m.__seeded = true;
       if (LOGC) console.log('[CONTRACTS] seed formState (main/pay) from base row', {
         forId: (window.modalCtx.formState && window.modalCtx.formState.__forId),
         mainKeys: Object.keys(window.modalCtx.formState?.main || {}),
@@ -1358,856 +1327,775 @@ try {
 
   const tabs = [ { key:'main', title:'Main' }, { key:'rates', title:'Rates' }, { key:'calendar', title:'Calendar' } ];
   if (LOGC) console.log('[CONTRACTS] tabs', tabs.map(t=>t.key));
- const hasId = !!window.modalCtx.data?.id;
-const isSuccessorCreate = isCreate && ( !!window.modalCtx?.__cloneIntent || !!preToken );
-if (LOGC) console.log('[CONTRACTS] showModal opts preview', {
-  hasId, isCreate, isSuccessorCreate,
-  stayOpenOnSave: !!isSuccessorCreate, noParentGate: !!isSuccessorCreate,
-  openToken: window.modalCtx.openToken, hasCloneIntent: !!window.modalCtx.__cloneIntent
-});
+  const hasId = !!window.modalCtx.data?.id;
+  const isSuccessorCreate = isCreate && ( !!window.modalCtx?.__cloneIntent || !!preToken );
+  if (LOGC) console.log('[CONTRACTS] showModal opts preview', {
+    hasId, isCreate, isSuccessorCreate,
+    stayOpenOnSave: !!isSuccessorCreate, noParentGate: !!isSuccessorCreate,
+    openToken: window.modalCtx.openToken, hasCloneIntent: !!window.modalCtx.__cloneIntent
+  });
 
-showModal(
+  showModal(
 
-  isCreate ? 'Create Contract' : 'Edit Contract',
-  tabs,
-  (key, row) => {
-    const ctx = { data: row };
-    if (key === 'main')     return renderContractMainTab(ctx);
-    if (key === 'rates')    return renderContractRatesTab(ctx);
-    if (key === 'calendar') return renderContractCalendarTab(ctx);
-    return `<div class="tabc">Unknown tab.</div>`;
-  },
-  async () => {
-    if (window.modalCtx?._saveInFlight) return false;
-    window.modalCtx._saveInFlight = true;
-    try {
-      if (LOGC) console.groupCollapsed('[CONTRACTS] onSave pipeline');
-
-      snapshotContractForm();
-// Keep a stable copy in case something re-renders and drops modalCtx.__cloneIntent
-const __preCloneIntent = window.modalCtx?.__cloneIntent
-  ? { ...window.modalCtx.__cloneIntent }
-  : null;
-if (LOGC) console.log('[CLONE][pre-save snapshot]', __preCloneIntent || '(none)');
-
-      const base = window.modalCtx?.data || {};
-      const fs   = (window.modalCtx?.formState || { main:{}, pay:{} });
-      const fdForm = document.querySelector('#contractForm');
-      const fd = fdForm ? new FormData(fdForm) : null;
-
-      const fromFS = (k, fallback='') => {
-        const v = (fs.main||{})[k]; return (v===undefined ? fallback : v);
-      };
-      const fromFD = (k, fallback='') => {
-        if (!fd) return fallback;
-        const raw = fd.get(k); return (raw==null ? fallback : String(raw).trim());
-      };
-      const choose = (key, fallback='') => {
-        const fsVal = fromFS(key, null);
-        if (fsVal !== null && fsVal !== undefined && fsVal !== '') return fsVal;
-        const fdVal = fromFD(key, null);
-        if (fdVal !== null && fdVal !== undefined && fdVal !== '') return fdVal;
-        return (base[key] ?? fallback);
-      };
-
-      const ukToIso = (ddmmyyyy, fb=null) => {
-        try {
-          return (typeof parseUkDateToIso === 'function')
-            ? (parseUkDateToIso(ddmmyyyy) || fb)
-            : ((ddmmyyyy && /^\d{2}\/\d{2}\/\d{4}$/.test(ddmmyyyy)) ? ddmmyyyy : (ddmmyyyy || fb));
-        } catch { return ddmmyyyy || fb; }
-      };
-
-      const domLabels = (typeof _collectBucketLabelsFromForm === 'function')
-        ? _collectBucketLabelsFromForm('#contractForm')
-        : null;
-      let bucket_labels_json = domLabels && Object.keys(domLabels).length ? domLabels : null;
-      if (!bucket_labels_json) {
-        const staged = {
-          day   : (fs.main?.bucket_day            ?? fs.main?.bucket_label_day   ?? '').trim(),
-          night : (fs.main?.bucket_night          ?? fs.main?.bucket_label_night ?? '').trim(),
-          sat   : (fs.main?.bucket_sat            ?? fs.main?.bucket_label_sat   ?? '').trim(),
-          sun   : (fs.main?.bucket_sun            ?? fs.main?.bucket_label_sun   ?? '').trim(),
-          bh    : (fs.main?.bucket_bh             ?? fs.main?.bucket_label_bh    ?? '').trim(),
-        };
-        const cleaned = {};
-        for (const [k,v] of Object.entries(staged)) if (v) cleaned[k]=v;
-        bucket_labels_json = Object.keys(cleaned).length ? cleaned : (base.bucket_labels_json ?? null);
-      }
-
-      const numOrNull = (s) => {
-        const raw = fromFS(s, fromFD(s, ''));
-        if (raw === '' || raw === null || raw === undefined) return null;
-        const n = Number(raw); return Number.isFinite(n) ? n : null;
-      };
-      const gh = { mon: numOrNull('gh_mon'), tue: numOrNull('gh_tue'), wed: numOrNull('gh_wed'),
-                   thu: numOrNull('gh_thu'), fri: numOrNull('gh_fri'), sat: numOrNull('gh_sat'), sun: numOrNull('gh_sun') };
-      const ghFilled = Object.values(gh).some(v => v != null && v !== 0);
-      let std_hours_json = ghFilled ? gh : (base.std_hours_json ?? null);
-      if (!std_hours_json && fs.main && fs.main.__hours) std_hours_json = fs.main.__hours;
-
-      const days = ['mon','tue','wed','thu','fri','sat','sun'];
-      const get = (n) => fromFS(n, fromFD(n, ''));
-      const hhmmOk = (v) => /^\d{2}:\d{2}$/.test(String(v||'').trim());
-      const normHHMM = (v) => {
-        const t = String(v || '').trim();
-        if (!t) return '';
-        const m = t.match(/^(\d{1,2})(?::?(\d{2}))$/);
-        if (!m) return '';
-        const h = +m[1], mi = +m[2];
-        if (Number.isNaN(h) || Number.isNaN(mi) || h < 0 || h > 23 || mi < 0 || mi > 59) return '';
-        return String(h).padStart(2,'0') + ':' + String(mi).padStart(2,'0');
-      };
-      const schedule = {};
-      for (const d2 of days) {
-        const s = normHHMM(get(`${d2}_start`));
-        const e = normHHMM(get(`${d2}_end`));
-        const br = get(`${d2}_break`);
-        if (hhmmOk(s) && hhmmOk(e)) {
-          schedule[d2] = { start: s, end: e, break_minutes: Math.max(0, Number(br||0)) };
-        }
-      }
-      let std_schedule_json = Object.keys(schedule).length ? schedule : null;
-      if (!std_schedule_json) {
-        if (fs.main && fs.main.__template) std_schedule_json = fs.main.__template;
-        else if (base.std_schedule_json)   std_schedule_json = base.std_schedule_json;
-      }
-
-      const prevStartIso = base.start_date || null;
-      const prevEndIso   = base.end_date   || null;
-
-      const startIso = ukToIso(choose('start_date', ''), base.start_date ?? null);
-      const endIso   = ukToIso(choose('end_date', ''),   base.end_date   ?? null);
-
-      const payMethodSnap = String(
-        (fs.main?.pay_method_snapshot) ||
-        fromFD('pay_method_snapshot', fromFD('default_pay_method_snapshot', base.pay_method_snapshot || 'PAYE')) ||
-        base.pay_method_snapshot || 'PAYE'
-      ).toUpperCase();
-
-      const default_submission_mode = String(
-        choose('default_submission_mode', base.default_submission_mode || 'ELECTRONIC')
-      ).toUpperCase();
-
-      const week_ending_weekday_snapshot = String(
-        choose('week_ending_weekday_snapshot', (base.week_ending_weekday_snapshot ?? '0'))
-      );
-
-      const candidate_id = choose('candidate_id', base.candidate_id ?? null) || null;
-      const client_id    = choose('client_id', base.client_id ?? null) || null;
-      const role         = choose('role', base.role ?? null);
-      const band         = choose('band', base.band ?? null);
-      const display_site = choose('display_site', base.display_site ?? '');
-
-      const boolFromFS = (name, baseVal=false) => {
-        if (fs && fs.main && Object.prototype.hasOwnProperty.call(fs.main, name)) {
-          const v = fs.main[name];
-          return v === 'on' || v === true || v === 'true' || v === 1 || v === '1';
-        }
-        return !!base[name];
-      };
-      const auto_invoice                 = boolFromFS('auto_invoice',                 !!base.auto_invoice);
-      const require_reference_to_pay     = boolFromFS('require_reference_to_pay',     !!base.require_reference_to_pay);
-      const require_reference_to_invoice = boolFromFS('require_reference_to_invoice', !!base.require_reference_to_invoice);
-
-      const BUCKETS = ['paye_day','paye_night','paye_sat','paye_sun','paye_bh','umb_day','umb_night','umb_sat','umb_sun','umb_bh','charge_day','charge_night','charge_sat','charge_sun','charge_bh'];
-      const baseRates = { ...(base.rates_json || {}) };
-      const mergedRates = { ...baseRates };
-      for (const k of BUCKETS) {
-        const staged = (fs.pay || {})[k];
-        if (staged !== undefined && staged !== '') {
-          const n = Number(staged);
-          mergedRates[k] = Number.isFinite(n) ? n : 0;
-        } else {
-          const domVal = fd ? fd.get(k) : null;
-          if (domVal !== null && domVal !== undefined && String(domVal).trim() !== '') {
-            const n = Number(domVal);
-            mergedRates[k] = Number.isFinite(n) ? n : 0;
-          }
-        }
-      }
-
-      const data = {
-        id: window.modalCtx.data?.id || null,
-        candidate_id,
-        client_id,
-        role,
-        band,
-        display_site,
-        start_date:   startIso,
-        end_date:     endIso,
-        pay_method_snapshot: payMethodSnap,
-        default_submission_mode,
-        week_ending_weekday_snapshot,
-        auto_invoice,
-        require_reference_to_pay,
-        require_reference_to_invoice,
-        rates_json: mergedRates,
-        std_hours_json,
-        std_schedule_json,
-        bucket_labels_json
-      };
-
-      if (LOGC) {
-        const preview = { ...data, rates_json: '(object)', std_hours_json: std_hours_json ? '(object)' : null, std_schedule_json: std_schedule_json ? '(object)' : null };
-        console.log('[CONTRACTS] onSave payload (preview)', preview);
-      }
-
-      let overlapProceed = true;
+    isCreate ? 'Create Contract' : 'Edit Contract',
+    tabs,
+    (key, row) => {
+      const ctx = { data: row };
+      if (key === 'main')     return renderContractMainTab(ctx);
+      if (key === 'rates')    return renderContractRatesTab(ctx);
+      if (key === 'calendar') return renderContractCalendarTab(ctx);
+      return `<div class="tabc">Unknown tab.</div>`;
+    },
+    async () => {
+      if (window.modalCtx?._saveInFlight) return false;
+      window.modalCtx._saveInFlight = true;
       try {
-        if (typeof checkContractOverlap === 'function' && data.candidate_id && data.start_date && data.end_date) {
-          const ov = await checkContractOverlap({
-            candidate_id: data.candidate_id,
-            start_date: data.start_date,
-            end_date: data.end_date,
-            ignore_contract_id: data.id || null
-          });
-          if (ov && ov.has_overlap) {
-            const lines = (ov.overlaps || []).slice(0, 3).map(o => {
-              const nm = o.client_name || o.client || 'Client';
-              const a  = o.overlap_from || '';
-              const b  = o.overlap_to   || '';
-              return `${nm} ${a}→${b}`;
-            });
-            const extra = (ov.overlaps || []).length > 3 ? ` …and ${ov.overlaps.length - 3} more` : '';
-            const msg = `This contract overlaps existing contract(s):\n• ${lines.join('\n• ')}${extra}\n\nProceed anyway?`;
-            overlapProceed = !!window.confirm(msg);
+        if (LOGC) console.groupCollapsed('[CONTRACTS] onSave pipeline');
+
+        snapshotContractForm();
+        // Keep a stable copy in case something re-renders and drops modalCtx.__cloneIntent
+        const __preCloneIntent = window.modalCtx?.__cloneIntent
+          ? { ...window.modalCtx.__cloneIntent }
+          : null;
+        if (LOGC) console.log('[CLONE][pre-save snapshot]', __preCloneIntent || '(none)');
+
+        const base = window.modalCtx?.data || {};
+        const fs   = (window.modalCtx?.formState || { main:{}, pay:{} });
+        const fdForm = document.querySelector('#contractForm');
+        const fd = fdForm ? new FormData(fdForm) : null;
+
+        const fromFS = (k, fallback='') => {
+          const v = (fs.main||{})[k]; return (v===undefined ? fallback : v);
+        };
+        const fromFD = (k, fallback='') => {
+          if (!fd) return fallback;
+          const raw = fd.get(k); return (raw==null ? fallback : String(raw).trim());
+        };
+        const choose = (key, fallback='') => {
+          const fsVal = fromFS(key, null);
+          if (fsVal !== null && fsVal !== undefined && fsVal !== '') return fsVal;
+          const fdVal = fromFD(key, null);
+          if (fdVal !== null && fdVal !== undefined && fdVal !== '') return fdVal;
+          return (base[key] ?? fallback);
+        };
+
+        const ukToIso = (ddmmyyyy, fb=null) => {
+          try {
+            return (typeof parseUkDateToIso === 'function')
+              ? (parseUkDateToIso(ddmmyyyy) || fb)
+              : ((ddmmyyyy && /^\d{2}\/\d{2}\/\d{4}$/.test(ddmmyyyy)) ? ddmmyyyy : (ddmmyyyy || fb));
+          } catch { return ddmmyyyy || fb; }
+        };
+
+        const domLabels = (typeof _collectBucketLabelsFromForm === 'function')
+          ? _collectBucketLabelsFromForm('#contractForm')
+          : null;
+        let bucket_labels_json = domLabels && Object.keys(domLabels).length ? domLabels : null;
+        if (!bucket_labels_json) {
+          const staged = {
+            day   : (fs.main?.bucket_day            ?? fs.main?.bucket_label_day   ?? '').trim(),
+            night : (fs.main?.bucket_night          ?? fs.main?.bucket_label_night ?? '').trim(),
+            sat   : (fs.main?.bucket_sat            ?? fs.main?.bucket_label_sat   ?? '').trim(),
+            sun   : (fs.main?.bucket_sun            ?? fs.main?.bucket_label_sun   ?? '').trim(),
+            bh    : (fs.main?.bucket_bh             ?? fs.main?.bucket_label_bh    ?? '').trim(),
+          };
+          const cleaned = {};
+          for (const [k,v] of Object.entries(staged)) if (v) cleaned[k]=v;
+          bucket_labels_json = Object.keys(cleaned).length ? cleaned : (base.bucket_labels_json ?? null);
+        }
+
+        const numOrNull = (s) => {
+          const raw = fromFS(s, fromFD(s, ''));
+          if (raw === '' || raw === null || raw === undefined) return null;
+          const n = Number(raw); return Number.isFinite(n) ? n : null;
+        };
+        const gh = { mon: numOrNull('gh_mon'), tue: numOrNull('gh_tue'), wed: numOrNull('gh_wed'),
+                     thu: numOrNull('gh_thu'), fri: numOrNull('gh_fri'), sat: numOrNull('gh_sat'), sun: numOrNull('gh_sun') };
+        const ghFilled = Object.values(gh).some(v => v != null && v !== 0);
+        let std_hours_json = ghFilled ? gh : (base.std_hours_json ?? null);
+        if (!std_hours_json && fs.main && fs.main.__hours) std_hours_json = fs.main.__hours;
+
+        const days = ['mon','tue','wed','thu','fri','sat','sun'];
+        const get = (n) => fromFS(n, fromFD(n, ''));
+        const hhmmOk = (v) => /^\d{2}:\d{2}$/.test(String(v||'').trim());
+        const normHHMM = (v) => {
+          const t = String(v || '').trim();
+          if (!t) return '';
+          const m = t.match(/^(\d{1,2})(?::?(\d{2}))$/);
+          if (!m) return '';
+          const h = +m[1], mi = +m[2];
+          if (Number.isNaN(h) || Number.isNaN(mi) || h < 0 || h > 23 || mi < 0 || mi > 59) return '';
+          return String(h).padStart(2,'0') + ':' + String(mi).padStart(2,'0');
+        };
+        const schedule = {};
+        for (const d2 of days) {
+          const s = normHHMM(get(`${d2}_start`));
+          const e = normHHMM(get(`${d2}_end`));
+          const br = get(`${d2}_break`);
+          if (hhmmOk(s) && hhmmOk(e)) {
+            schedule[d2] = { start: s, end: e, break_minutes: Math.max(0, Number(br||0)) };
           }
         }
-      } catch (e) {
-        if (LOGC) console.warn('[CONTRACTS] overlap check failed (non-blocking)', e);
-      }
-      if (!overlapProceed) {
-        window.modalCtx._saveInFlight = false;
-        if (LOGC) console.log('[CONTRACTS] Save cancelled by user on overlap dialog');
-        console.groupEnd?.();
-        return false;
-      }
+        let std_schedule_json = Object.keys(schedule).length ? schedule : null;
+        if (!std_schedule_json) {
+          if (fs.main && fs.main.__template) std_schedule_json = fs.main.__template;
+          else if (base.std_schedule_json)   std_schedule_json = base.std_schedule_json;
+        }
 
-      try {} catch {}
+        const prevStartIso = base.start_date || null;
+        const prevEndIso   = base.end_date   || null;
 
-      if (!isCreate && data.id && typeof callCheckTimesheetBoundary === 'function' && data.start_date && data.end_date) {
+        const startIso = ukToIso(choose('start_date', ''), base.start_date ?? null);
+        const endIso   = ukToIso(choose('end_date', ''),   base.end_date   ?? null);
+
+        const payMethodSnap = String(
+          (fs.main?.pay_method_snapshot) ||
+          fromFD('pay_method_snapshot', fromFD('default_pay_method_snapshot', base.pay_method_snapshot || 'PAYE')) ||
+          base.pay_method_snapshot || 'PAYE'
+        ).toUpperCase();
+
+        const default_submission_mode = String(
+          choose('default_submission_mode', base.default_submission_mode || 'ELECTRONIC')
+        ).toUpperCase();
+
+        const week_ending_weekday_snapshot = String(
+          choose('week_ending_weekday_snapshot', (base.week_ending_weekday_snapshot ?? '0'))
+        );
+
+        const candidate_id = choose('candidate_id', base.candidate_id ?? null) || null;
+        const client_id    = choose('client_id', base.client_id ?? null) || null;
+        const role         = choose('role', base.role ?? null);
+        const band         = choose('band', base.band ?? null);
+        const display_site = choose('display_site', base.display_site ?? '');
+
+        const boolFromFS = (name, baseVal=false) => {
+          if (fs && fs.main && Object.prototype.hasOwnProperty.call(fs.main, name)) {
+            const v = fs.main[name];
+            return v === 'on' || v === true || v === 'true' || v === 1 || v === '1';
+          }
+          return !!base[name];
+        };
+        const auto_invoice                 = boolFromFS('auto_invoice',                 !!base.auto_invoice);
+        const require_reference_to_pay     = boolFromFS('require_reference_to_pay',     !!base.require_reference_to_pay);
+        const require_reference_to_invoice = boolFromFS('require_reference_to_invoice', !!base.require_reference_to_invoice);
+
+        const BUCKETS = ['paye_day','paye_night','paye_sat','paye_sun','paye_bh','umb_day','umb_night','umb_sat','umb_sun','umb_bh','charge_day','charge_night','charge_sat','charge_sun','charge_bh'];
+        const baseRates = { ...(base.rates_json || {}) };
+        const mergedRates = { ...baseRates };
+        for (const k of BUCKETS) {
+          const staged = (fs.pay || {})[k];
+          if (staged !== undefined && staged !== '') {
+            const n = Number(staged);
+            mergedRates[k] = Number.isFinite(n) ? n : 0;
+          } else {
+            const domVal = fd ? fd.get(k) : null;
+            if (domVal !== null && domVal !== undefined && String(domVal).trim() !== '') {
+              const n = Number(domVal);
+              mergedRates[k] = Number.isFinite(n) ? n : 0;
+            }
+          }
+        }
+
+        const data = {
+          id: window.modalCtx.data?.id || null,
+          candidate_id,
+          client_id,
+          role,
+          band,
+          display_site,
+          start_date:   startIso,
+          end_date:     endIso,
+          pay_method_snapshot: payMethodSnap,
+          default_submission_mode,
+          week_ending_weekday_snapshot,
+          auto_invoice,
+          require_reference_to_pay,
+          require_reference_to_invoice,
+          rates_json: mergedRates,
+          std_hours_json,
+          std_schedule_json,
+          bucket_labels_json
+        };
+
+        if (LOGC) {
+          const preview = { ...data, rates_json: '(object)', std_hours_json: std_hours_json ? '(object)' : null, std_schedule_json: std_schedule_json ? '(object)' : null };
+          console.log('[CONTRACTS] onSave payload (preview)', preview);
+        }
+
+        let overlapProceed = true;
         try {
-          const boundary = await callCheckTimesheetBoundary(data.id, data.start_date, data.end_date);
-          window.__tsBoundaryResult = boundary || null;
-          if (!boundary || boundary.ok === false) {
-            let msg = 'Date range excludes existing timesheets.';
-            try {
-              const v = boundary?.violations || [];
-              if (v.length) {
-                const sample = v.slice(0,3).map(x => {
-                  const nm = x.client_name || 'Client';
-                  const dt = x.date || '';
-                  const st = x.status || '';
-                  return `${nm} ${dt}${st?` (${st})`:''}`;
-                }).join(' • ');
-                msg = `Dates exclude existing timesheets: ${sample}${v.length>3? '…':''}`;
-              } else if (boundary?.min_ts_date || boundary?.max_ts_date) {
-                const a = boundary.min_ts_date || '';
-                const b = boundary.max_ts_date || '';
-                msg = `Dates exclude timesheets in range ${a} → ${b}.`;
-              }
-            } catch {}
+          if (typeof checkContractOverlap === 'function' && data.candidate_id && data.start_date && data.end_date) {
+            const ov = await checkContractOverlap({
+              candidate_id: data.candidate_id,
+              start_date: data.start_date,
+              end_date: data.end_date,
+              ignore_contract_id: data.id || null
+            });
+            if (ov && ov.has_overlap) {
+              const lines = (ov.overlaps || []).slice(0, 3).map(o => {
+                const nm = o.client_name || o.client || 'Client';
+                const a  = o.overlap_from || '';
+                const b  = o.overlap_to   || '';
+                return `${nm} ${a}→${b}`;
+              });
+              const extra = (ov.overlaps || []).length > 3 ? ` …and ${ov.overlaps.length - 3} more` : '';
+              const msg = `This contract overlaps existing contract(s):\n• ${lines.join('\n• ')}${extra}\n\nProceed anyway?`;
+              overlapProceed = !!window.confirm(msg);
+            }
+          }
+        } catch (e) {
+          if (LOGC) console.warn('[CONTRACTS] overlap check failed (non-blocking)', e);
+        }
+        if (!overlapProceed) {
+          window.modalCtx._saveInFlight = false;
+          if (LOGC) console.log('[CONTRACTS] Save cancelled by user on overlap dialog');
+          console.groupEnd?.();
+          return false;
+        }
+
+        try {} catch {}
+
+        if (!isCreate && data.id && typeof callCheckTimesheetBoundary === 'function' && data.start_date && data.end_date) {
+          try {
+            const boundary = await callCheckTimesheetBoundary(data.id, data.start_date, data.end_date);
+            window.__tsBoundaryResult = boundary || null;
+            if (!boundary || boundary.ok === false) {
+              let msg = 'Date range excludes existing timesheets.';
+              try {
+                const v = boundary?.violations || [];
+                if (v.length) {
+                  const sample = v.slice(0,3).map(x => {
+                    const nm = x.client_name || 'Client';
+                    const dt = x.date || '';
+                    const st = x.status || '';
+                    return `${nm} ${dt}${st?` (${st})`:''}`;
+                  }).join(' • ');
+                  msg = `Dates exclude existing timesheets: ${sample}${v.length>3? '…':''}`;
+                } else if (boundary?.min_ts_date || boundary?.max_ts_date) {
+                  const a = boundary.min_ts_date || '';
+                  const b = boundary.max_ts_date || '';
+                  msg = `Dates exclude timesheets in range ${a} → ${b}.`;
+                }
+              } catch {}
+              if (typeof showModalHint === 'function') showModalHint(msg, 'warn'); else alert(msg);
+              window.modalCtx._saveInFlight = false;
+              console.groupEnd?.();
+              return false;
+            }
+          } catch (e) {
+            if (LOGC) console.warn('[CONTRACTS] timesheet boundary check failed (non-blocking fallback)', e);
+          }
+        }
+
+        let hasManualStage = false;
+        try {
+          const stageKey = data.id || window.modalCtx.openToken || null;
+          if (stageKey && typeof getContractCalendarStageState === 'function') {
+            const st = getContractCalendarStageState(stageKey);
+            hasManualStage = !!(st && (st.add?.size || st.remove?.size || Object.keys(st.additional || {}).length));
+          }
+        } catch {}
+
+        if (!isCreate && hasManualStage) data.skip_generate_weeks = true;
+
+        // --- detect calendar stage shape BEFORE any persistence ---
+        let stageShape = { hasAny:false, hasRemoveAll:false, hasAdds:false, hasAdditionals:false };
+        try {
+          const stageKey = data.id || window.modalCtx.openToken || null;
+          if (stageKey && typeof getContractCalendarStageState === 'function') {
+            const st = getContractCalendarStageState(stageKey);
+            stageShape.hasAny         = !!st && (!!st.removeAll || st.add.size || st.remove.size || Object.keys(st.additional||{}).length);
+            stageShape.hasRemoveAll   = !!st?.removeAll;
+            stageShape.hasAdds        = !!(st && st.add && st.add.size);
+            stageShape.hasAdditionals = !!(st && st.additional && Object.keys(st.additional).length);
+          }
+        } catch {}
+
+        // === CREATE vs EDIT ordering ===
+        // CREATE: upsert first to obtain id → then commit stage (if any) → normalize window → (maybe) generate defaults
+        // EDIT: if any stage present, always commit calendar FIRST → normalize window → then upsert metadata
+        if (!isCreate && data.id && stageShape.hasAny) {
+          if (LOGC) console.log('[CONTRACTS] calendar (any stage) → commitContractCalendarStageIfPending');
+          const preCalRes = await commitContractCalendarStageIfPending(data.id);
+          if (!preCalRes.ok) {
+            const msg = `Calendar save failed: ${preCalRes.message || 'unknown error'}. Contract details were not saved.`;
+            if (LOGC) console.warn('[CONTRACTS] calendar commit failed (pre-upsert)', preCalRes);
             if (typeof showModalHint === 'function') showModalHint(msg, 'warn'); else alert(msg);
             window.modalCtx._saveInFlight = false;
             console.groupEnd?.();
             return false;
           }
-        } catch (e) {
-          if (LOGC) console.warn('[CONTRACTS] timesheet boundary check failed (non-blocking fallback)', e);
-        }
-      }
-
-      let hasManualStage = false;
-      try {
-        const stageKey = data.id || window.modalCtx.openToken || null;
-        if (stageKey && typeof getContractCalendarStageState === 'function') {
-          const st = getContractCalendarStageState(stageKey);
-          hasManualStage = !!(st && (st.add?.size || st.remove?.size || Object.keys(st.additional || {}).length));
-        }
-      } catch {}
-
-      if (!isCreate && hasManualStage) data.skip_generate_weeks = true;
-
-      // --- detect calendar stage shape BEFORE any persistence ---
-      let stageShape = { hasAny:false, hasRemoveAll:false, hasAdds:false, hasAdditionals:false };
-      try {
-        const stageKey = data.id || window.modalCtx.openToken || null;
-        if (stageKey && typeof getContractCalendarStageState === 'function') {
-          const st = getContractCalendarStageState(stageKey);
-          stageShape.hasAny         = !!st && (!!st.removeAll || st.add.size || st.remove.size || Object.keys(st.additional||{}).length);
-          stageShape.hasRemoveAll   = !!st?.removeAll;
-          stageShape.hasAdds        = !!(st && st.add && st.add.size);
-          stageShape.hasAdditionals = !!(st && st.additional && Object.keys(st.additional).length);
-        }
-      } catch {}
-
-      // === CREATE vs EDIT ordering ===
-      // CREATE: upsert first to obtain id → then commit stage (if any) → normalize window → (maybe) generate defaults
-      // EDIT: if any stage present, always commit calendar FIRST → normalize window → then upsert metadata
-      if (!isCreate && data.id && stageShape.hasAny) {
-        if (LOGC) console.log('[CONTRACTS] calendar (any stage) → commitContractCalendarStageIfPending');
-        const preCalRes = await commitContractCalendarStageIfPending(data.id);
-        if (!preCalRes.ok) {
-          const msg = `Calendar save failed: ${preCalRes.message || 'unknown error'}. Contract details were not saved.`;
-          if (LOGC) console.warn('[CONTRACTS] calendar commit failed (pre-upsert)', preCalRes);
-          if (typeof showModalHint === 'function') showModalHint(msg, 'warn'); else alert(msg);
-          window.modalCtx._saveInFlight = false;
-          console.groupEnd?.();
-          return false;
-        }
-        if (typeof normalizeContractWindowToShifts === 'function') {
-          try {
-            const norm = await normalizeContractWindowToShifts(data.id);
-            if (norm && norm.ok) {
-              data.start_date = norm.start_date || data.start_date || null;
-              data.end_date   = norm.end_date   || data.end_date   || null;
+          if (typeof normalizeContractWindowToShifts === 'function') {
+            try {
+              const norm = await normalizeContractWindowToShifts(data.id);
+              if (norm && norm.ok) {
+                data.start_date = norm.start_date || data.start_date || null;
+                data.end_date   = norm.end_date   || data.end_date   || null;
+              }
+            } catch (e) {
+              if (LOGC) console.warn('[CONTRACTS] normalize window to shifts failed (pre-upsert, non-fatal)', e);
             }
-          } catch (e) {
-            if (LOGC) console.warn('[CONTRACTS] normalize window to shifts failed (pre-upsert, non-fatal)', e);
           }
+          // when editing with stage, also avoid auto-generation
+          data.skip_generate_weeks = true;
         }
-        // when editing with stage, also avoid auto-generation
-        data.skip_generate_weeks = true;
-      }
 
-      if (LOGC) console.log('[CONTRACTS] upsert → upsertContract');
-      const saved = await upsertContract(data, data.id || undefined);
-const persistedId = saved?.id || saved?.contract?.id || null;
-if (LOGC) console.log('[CONTRACTS] upsertContract result', {
-  isCreate, persistedId, rawHasSaved: !!saved
-});
+        if (LOGC) console.log('[CONTRACTS] upsert → upsertContract');
+        const saved = await upsertContract(data, data.id || undefined);
+        const persistedId = saved?.id || saved?.contract?.id || null;
+        if (LOGC) console.log('[CONTRACTS] upsertContract result', {
+          isCreate, persistedId, rawHasSaved: !!saved
+        });
 
-window.modalCtx.data = saved?.contract || saved || window.modalCtx.data;
-if (LOGC) console.log('[CONTRACTS] modalCtx.data snapshot', {
-  id: window.modalCtx.data?.id || null,
-  start_date: window.modalCtx.data?.start_date || null,
-  end_date:   window.modalCtx.data?.end_date   || null
-});
+        window.modalCtx.data = saved?.contract || saved || window.modalCtx.data;
+        if (LOGC) console.log('[CONTRACTS] modalCtx.data snapshot', {
+          id: window.modalCtx.data?.id || null,
+          start_date: window.modalCtx.data?.start_date || null,
+          end_date:   window.modalCtx.data?.end_date   || null
+        });
 
-      try {
-        const warnings = saved?.warnings || saved?.contract?.warnings || [];
-        const warnStr  = Array.isArray(warnings) ? warnings.join(', ') : (saved?.warning || '');
-        if (warnStr) { if (LOGC) console.warn('[CONTRACTS] warnings', warnStr); showModalHint?.(`Warning: ${warnStr}`, 'warn'); }
-      } catch {}
-
-      const contractId = saved?.id || saved?.contract?.id;
-      if (contractId) {
-        window.__pendingFocus = { section: 'contracts', id: contractId };
-
-        // If this was a Clone&Extend staging and user opted to end the old contract, apply now.
-    // If this was a Clone&Extend staging and user opted to end the old contract, apply now.
-try {
-  console.log('[CLONE][post-save hook] ENTER', {
-  hasId: !!savedContractId, isCreate,
-  hasLiveIntent: !!ciLive, hadSnapshot: !!__preCloneIntent
-});
-
-  const t0 = Date.now();
-  const savedContractId = contractId || (saved?.contract?.id) || (saved?.id) || null;
-
-  // Prefer the live intent; if lost due to UI state flips, fall back to the pre-save snapshot
-  const ciLive = window.modalCtx?.__cloneIntent || null;
-  const ci     = ciLive || __preCloneIntent || null;
-const hasCi      = !!ci;
-const wantsEnd   = !!ci?.end_existing;
-const hasSource  = !!ci?.source_contract_id;
-const hasEndDate = !!ci?.end_existing_on;
-
-// 🔧 resolve callable robustly
-const hasFnGlobal = (typeof endContractSafely === 'function');
-const hasFnWindow = (typeof window?.endContractSafely === 'function');
-const callTrim =
-  (hasFnWindow && window.endContractSafely) ||
-  (hasFnGlobal && endContractSafely) ||
-  null;
-const hasFnResolved = !!callTrim;
-
-if (LOGC) console.groupCollapsed('[CLONE][post-save decision]');
-
-// entry beacon + resolver visibility
-if (LOGC) console.log('[CLONE][post-save hook] ENTER', {
-  isCreate,
-  savedContractId,
-  savedStart: window.modalCtx?.data?.start_date || null,
-  savedEnd:   window.modalCtx?.data?.end_date   || null,
-  openToken:  window.modalCtx?.openToken || null,
-});
-if (LOGC) console.log('resolver', {
-  winFn: hasFnWindow ? 'function' : typeof window?.endContractSafely,
-  globalFn: hasFnGlobal ? 'function' : typeof endContractSafely,
-  chosen: hasFnResolved
-});
-
-if (LOGC) console.log('intent-checks', {
-  hasCi, wantsEnd, hasSource, hasEndDate,
-  hasFn_global: hasFnGlobal,
-  hasFn_window: hasFnWindow,
-  hasFn_resolved: hasFnResolved,
-  source_contract_id: ci?.source_contract_id || '(missing)',
-  end_existing_on:    ci?.end_existing_on    || '(missing)',
-  usedSnapshot: (!!__preCloneIntent && !ciLive)
-});
-
-// hard guards (will print assertion failures in console if false)
-console.assert(hasCi || __preCloneIntent, '[ASSERT] No clone intent at post-save; cannot truncate tail.');
-console.assert(hasFnResolved,              '[ASSERT] No tail-trim function bound (endContractSafely missing).');
-
-if (hasCi && wantsEnd && hasSource && hasEndDate && hasFnResolved) {
-  if (LOGC) console.log('WILL_CALL endContractSafely', {
-    source: ci.source_contract_id, desired_end: ci.end_existing_on
-  });
-
-  let res = null, ok=false, clamped=false, safe_end=null, message=null, t1=0;
-  try {
-    res = await callTrim(ci.source_contract_id, ci.end_existing_on);
-    t1  = Date.now();
-    ok       = !!res?.ok;
-    clamped  = !!res?.clamped;
-    safe_end = res?.safe_end || null;
-    message  = res?.message  || null;
-    if (LOGC) console.log('endContractSafely RESULT', { ok, clamped, safe_end, message, elapsed_ms: (t1 - t0), raw: res });
-  } catch (err) {
-    if (LOGC) console.warn('endContractSafely THREW', err);
-  }
-
-  if (ok) {
-    if (clamped && typeof showTailClampWarning === 'function') {
-      try { showTailClampWarning(safe_end, ci.end_existing_on); } catch {}
-    }
-    if (typeof refreshOldContractAfterTruncate === 'function') {
-      try { await refreshOldContractAfterTruncate(ci.source_contract_id); } catch (e) { if (LOGC) console.warn('refreshOldContractAfterTruncate failed', e); }
-    }
-    if (LOGC) console.log('CLEAR_INTENT (after endContractSafely)');
-    clearCloneIntent();
-  } else {
-    if (LOGC) console.warn('CALL_RETURNED_NOT_OK', { res });
-    if (LOGC) console.log('CLEAR_INTENT (after not-ok result)');
-    clearCloneIntent();
-  }
-} else {
-  const skipReasons = [];
-  if (!hasCi)               skipReasons.push('NO_INTENT');
-  if (hasCi && !wantsEnd)   skipReasons.push('BOX_UNTICKED_end_existing=false');
-  if (hasCi && !hasSource)  skipReasons.push('MISSING_source_contract_id');
-  if (hasCi && !hasEndDate) skipReasons.push('MISSING_end_existing_on');
-  if (!hasFnResolved)       skipReasons.push('NO_endContractSafely');
-
-  if (LOGC) console.log('SKIP_CALL (gates false)', { reasons: skipReasons });
-  if (LOGC) console.log('CLEAR_INTENT (skip path)');
-  clearCloneIntent();
-}
-
-
-
-  if (LOGC) console.groupEnd?.();
-} catch (e) {
-  if (LOGC) console.warn('[CLONE][post-save decision] EXCEPTION', e);
-}
-
-
-
-      }
-
-      try {
-        const fsAll = (window.modalCtx.formState ||= { __forId: (contractId || window.modalCtx.openToken || null), main:{}, pay:{} });
-        fsAll.__forId = contractId || fsAll.__forId;
-        const nameCandEl  = document.getElementById('candidate_name_display');
-        const nameClientEl= document.getElementById('client_name_display');
-        const fsm = (fsAll.main ||= {});
-        if (nameCandEl && nameCandEl.value && !fsm.candidate_display) fsm.candidate_display = nameCandEl.value;
-        if (nameClientEl && nameClientEl.value && !fsm.client_name)    fsm.client_name = nameClientEl.value;
-        if (!fsm.__template && window.modalCtx.data?.std_schedule_json) fsm.__template = window.modalCtx.data.std_schedule_json;
-        if (!fsm.__hours && window.modalCtx.data?.std_hours_json)       fsm.__hours    = window.modalCtx.data.std_hours_json;
-        if (!fsm.__bucket_labels && window.modalCtx.data?.bucket_labels_json) fsm.__bucket_labels = window.modalCtx.data.bucket_labels_json;
-      } catch {}
-
-      if (contractId) {
-        let hasStageNow = false, hasRemoveAllOnly = false;
         try {
-          const st = (typeof getContractCalendarStageState === 'function') ? getContractCalendarStageState(contractId) : null;
-          const hasAdds        = !!(st && st.add && st.add.size);
-          const hasRemoves     = !!(st && st.remove && st.remove.size);
-          const hasAdditionals = !!(st && st.additional && Object.keys(st.additional).length);
-          const hasRemoveAll   = !!st?.removeAll;
-          hasStageNow          = !!(hasAdds || hasRemoves || hasAdditionals || hasRemoveAll);
-          hasRemoveAllOnly     = !!(hasRemoveAll && !hasAdds && !hasAdditionals);
+          const warnings = saved?.warnings || saved?.contract?.warnings || [];
+          const warnStr  = Array.isArray(warnings) ? warnings.join(', ') : (saved?.warning || '');
+          if (warnStr) { if (LOGC) console.warn('[CONTRACTS] warnings', warnStr); showModalHint?.(`Warning: ${warnStr}`, 'warn'); }
         } catch {}
 
-        const newStart = window.modalCtx?.data?.start_date || data.start_date || null;
-        const newEnd   = window.modalCtx?.data?.end_date   || data.end_date   || null;
+        const contractId = saved?.id || saved?.contract?.id;
+        if (contractId) {
+          window.__pendingFocus = { section: 'contracts', id: contractId };
 
-        const extendedHead = !!(prevStartIso && newStart && newStart < prevStartIso);
-        const extendedTail = !!(prevEndIso   && newEnd   && newEnd   > prevEndIso);
-
-        if (isCreate) {
-          // NEW: adopt any staged selections from token → id (create flow)
+          // If this was a Clone&Extend staging and user opted to end the old contract, apply now.
           try {
-            if (window.modalCtx?.openToken && typeof adoptCalendarStageFromToken === 'function') {
-              adoptCalendarStageFromToken(window.modalCtx.openToken, contractId);
+            const t0 = Date.now();
+            const savedContractId = contractId || (saved?.contract?.id) || (saved?.id) || null;
+
+            // Prefer the live intent; if lost due to UI state flips, fall back to the pre-save snapshot
+            const ciLive     = window.modalCtx?.__cloneIntent || null;
+            const ciSnapshot = __preCloneIntent || null;
+            const ci         = (ciLive ?? ciSnapshot) || null;
+
+            const hasCi      = !!ci;
+            const wantsEnd   = !!ci?.end_existing;
+            const hasSource  = !!ci?.source_contract_id;
+            const hasEndDate = !!ci?.end_existing_on;
+
+            // Resolve callable from either module/global or window
+            const fnLive = (typeof endContractSafely === 'function') ? endContractSafely : undefined;
+            const fnWin  = (typeof window !== 'undefined' && typeof window.endContractSafely === 'function') ? window.endContractSafely : undefined;
+            const trimFn = fnLive || fnWin;
+            const hasFn  = !!trimFn;
+
+            if (LOGC) {
+              console.groupCollapsed('[CLONE][post-save gate]');
+              console.log({
+                isCreate,
+                savedContractId,
+                modalCtxId: window.modalCtx?.data?.id || null,
+                savedStart: window.modalCtx?.data?.start_date || null,
+                savedEnd:   window.modalCtx?.data?.end_date   || null,
+                openToken:  window.modalCtx?.openToken || null,
+                hasCi, wantsEnd, hasSource, hasEndDate,
+                ciLive: !!ciLive,
+                ciSnapshot: !!ciSnapshot,
+                ci: {
+                  source_contract_id: ci?.source_contract_id ?? null,
+                  end_existing:       ci?.end_existing ?? null,
+                  end_existing_on:    ci?.end_existing_on ?? null
+                },
+                hasFnLive:  !!fnLive,
+                hasFnWin:   !!fnWin,
+                hasFnResolved: hasFn
+              });
+              console.groupEnd();
             }
-          } catch {}
 
-          // NEW: re-evaluate stage presence AFTER adoption
-          try {
-            const st2 = (typeof getContractCalendarStageState === 'function') ? getContractCalendarStageState(contractId) : null;
-            const hasAdds2        = !!(st2 && st2.add && st2.add.size);
-            const hasRemoves2     = !!(st2 && st2.remove && st2.remove.size);
-            const hasAdditionals2 = !!(st2 && st2.additional && Object.keys(st2.additional).length);
-            const hasRemoveAll2   = !!st2?.removeAll;
-            hasStageNow           = !!(hasAdds2 || hasRemoves2 || hasAdditionals2 || hasRemoveAll2);
-            hasRemoveAllOnly      = !!(hasRemoveAll2 && !hasAdds2 && !hasAdditionals2);
-          } catch {}
+            if (hasCi && wantsEnd && hasSource && hasEndDate && hasFn) {
+              if (LOGC) console.log('WILL_CALL endContractSafely', { source: ci.source_contract_id, desired_end: ci.end_existing_on });
 
-          if (!hasStageNow) {
-            // No manual stage → generate template weeks
-            if (std_schedule_json && typeof generateContractWeeks === 'function') {
-              if (LOGC) console.log('[CONTRACTS] generateContractWeeks (create)');
-              await generateContractWeeks(contractId);
-            }
-          } else {
-            // Manual stage detected → skip generation (backend will extend window on commit)
-            if (LOGC) console.log('[CONTRACTS] create: manual stage detected; skip generation');
-            data.skip_generate_weeks = true;
-          }
-
-        } else {
-          if (hasStageNow) {
-            if (LOGC) console.log('[CONTRACTS] manual stage present; will commit shortly');
-          } else if ((extendedHead || extendedTail) && std_schedule_json) {
-            if (LOGC) console.log('[CONTRACTS] generate missing weeks (template-only, head/tail extension)');
-            if (typeof generateContractWeeks === 'function') {
-              await generateContractWeeks(contractId);
-            }
-          } else {
-            // NEW: handle shrink (no manual stage and no extension)
-            const shrunkHead = !!(prevStartIso && newStart && newStart > prevStartIso);
-            const shrunkTail = !!(prevEndIso   && newEnd   && newEnd   < prevEndIso);
-
-            if (shrunkHead || shrunkTail) {
-              const ymdShift = (ymd, days) => {
-                const dt = new Date(`${ymd}T00:00:00Z`);
-                dt.setUTCDate(dt.getUTCDate() + days);
-                return dt.toISOString().slice(0,10);
-              };
-
-              const ranges = [];
-              if (shrunkHead) {
-                // remove everything BEFORE newStart (inclusive of prevStart .. day before newStart)
-                ranges.push({ from: prevStartIso, to: ymdShift(newStart, -1), days: [] });
+              let res = null, ok=false, clamped=false, safe_end=null, message=null, t1=0;
+              try {
+                console.groupCollapsed('[TRIM_CALL] →', { source: ci.source_contract_id, desired_end: ci.end_existing_on });
+                res = await trimFn(ci.source_contract_id, ci.end_existing_on);
+                t1 = Date.now();
+                ok       = !!(res && (res.ok ?? (res === true)));
+                clamped  = !!res?.clamped;
+                safe_end = res?.safe_end || null;
+                message  = res?.message  || null;
+                console.log('result', { ok, clamped, safe_end, message, raw: res, elapsed_ms: (t1 - t0) });
+                console.groupEnd();
+              } catch (err) {
+                console.warn('[TRIM_CALL] ✖ threw', err);
               }
-              if (shrunkTail) {
-                // remove everything AFTER newEnd (day after newEnd .. prevEnd inclusive)
-                ranges.push({ from: ymdShift(newEnd, +1), to: prevEndIso, days: [] });
-              }
 
-              if (ranges.length && typeof contractsUnplanRanges === 'function') {
-                if (LOGC) console.log('[CONTRACTS] unplan outside new window', { ranges });
-                await contractsUnplanRanges(contractId, {
-                  when_timesheet_exists: 'skip',
-                  empty_week_action: 'cancel',
-                  ranges
-                });
+              if (ok) {
+                if (clamped && typeof showTailClampWarning === 'function') {
+                  try { showTailClampWarning(safe_end, ci.end_existing_on); } catch {}
+                }
+                if (typeof refreshOldContractAfterTruncate === 'function') {
+                  try { await refreshOldContractAfterTruncate(ci.source_contract_id); } catch (e) { if (LOGC) console.warn('refreshOldContractAfterTruncate failed', e); }
+                }
+                if (LOGC) console.log('CLEAR_INTENT (after endContractSafely)');
+                clearCloneIntent();
+              } else {
+                if (LOGC) console.warn('TRIM_CALL did not report ok', { res });
+                if (LOGC) console.log('CLEAR_INTENT (after not-ok result)');
+                clearCloneIntent();
               }
             } else {
-              if (LOGC) console.log('[CONTRACTS] skip generation (edit, no date change, no manual stage)');
+              const reasons = [];
+              if (!hasCi)               reasons.push('NO_INTENT');
+              if (hasCi && !wantsEnd)   reasons.push('BOX_UNTICKED_end_existing=false');
+              if (hasCi && !hasSource)  reasons.push('MISSING_source_contract_id');
+              if (hasCi && !hasEndDate) reasons.push('MISSING_end_existing_on');
+              if (!hasFn)               reasons.push(`NO_endContractSafely (live=${!!fnLive}, window=${!!fnWin})`);
+              console.warn('[CLONE][post-save SKIP] not calling endContractSafely', { reasons });
+              console.log('CLEAR_INTENT (skip path)');
+              clearCloneIntent();
             }
+
+          } catch (e) {
+            if (LOGC) console.warn('[CLONE][post-save decision] EXCEPTION', e);
           }
+
         }
 
-        if (hasStageNow) {
-          if (LOGC) console.log('[CONTRACTS] calendar → commitContractCalendarStageIfPending');
-          const calRes = await commitContractCalendarStageIfPending(contractId);
-          if (!calRes.ok) {
-            const msg = `Calendar save failed: ${calRes.message || 'unknown error'}. Contract details were saved.`;
-            if (LOGC) console.warn('[CONTRACTS] calendar commit failed', calRes);
-            if (typeof showModalHint === 'function') showModalHint(msg, 'warn'); else alert(msg);
-          } else {
-            if (LOGC) console.log('[CONTRACTS] calendar commit ok', calRes);
-            if (typeof normalizeContractWindowToShifts === 'function') {
-              try {
-                const norm = await normalizeContractWindowToShifts(contractId);
-                if (norm && norm.ok) {
-                  try {
-                    const fs = (window.modalCtx.formState ||= { __forId: (contractId || null), main:{}, pay:{} });
-                    fs.main ||= {};
-                    fs.main.start_date = (window.modalCtx.data?.start_date || norm.start_date || fs.main.start_date || '');
-                    fs.main.end_date   = (window.modalCtx.data?.end_date   || norm.end_date   || fs.main.end_date   || '');
-                    const fr = window.__getModalFrame?.();
-                    const currentTab = fr?.currentTabKey || (document.querySelector('#modalTabs button.active')?.textContent?.toLowerCase() || '');
-                    if (currentTab === 'main' && typeof fr?.setTab === 'function') fr.setTab('main');
-                  } catch {}
-                }
-              } catch (e) {
-                if (LOGC) console.warn('[CONTRACTS] normalize window to shifts failed (non-fatal)', e);
-              }
+        try { if (typeof computeContractMargins === 'function') computeContractMargins(); } catch {}
+
+        try {
+          const fr = window.__getModalFrame?.();
+          const currentTab = fr?.currentTabKey || (document.querySelector('#modalTabs button.active')?.textContent?.toLowerCase() || 'main');
+          if (LOGC) console.log('[CONTRACTS] post-save repaint (in-place)', { currentTab, contractId: (window.modalCtx?.data?.id) });
+
+          if (currentTab === 'calendar' && window.modalCtx?.data?.id) {
+            const contractId2 = window.modalCtx.data.id;
+            const win = (window.__calState?.[contractId2]?.win) || null;
+            const candId = window.modalCtx?.data?.candidate_id || null;
+            const scrollBox = document.getElementById('__calScroll');
+            const prevScroll = scrollBox ? scrollBox.scrollTop : 0;
+            if (typeof fetchAndRenderCandidateCalendarForContract === 'function' && candId) {
+              await fetchAndRenderCandidateCalendarForContract(contractId2, candId, {
+                from: win?.from, to: win?.to, view: window.__calState?.[contractId2]?.view,
+                weekEnding: window.modalCtx?.data?.week_ending_weekday_snapshot ?? 0
+              });
+            } else {
+              await fetchAndRenderContractCalendar(contractId2, win ? { from: win.from, to: win.to, view: window.__calState?.[contractId2]?.view } : undefined);
             }
-            try {
-              clearContractCalendarStageState(contractId);
-              clearCalendarSelection(`c:${contractId}`);
-            } catch {}
+            const newScrollBox = document.getElementById('__calScroll');
+            if (newScrollBox) newScrollBox.scrollTop = prevScroll;
+          } else if (currentTab === 'rates') {
+            try { computeContractMargins(); } catch {}
           }
+          try { window.__toast?.('Saved'); } catch {}
+        } catch (e) {
+          if (LOGC) console.warn('[CONTRACTS] post-save repaint failed', e);
         }
-      }
 
-      try { if (typeof computeContractMargins === 'function') computeContractMargins(); } catch {}
+        if (LOGC) console.groupEnd?.();
+        // Return the saved row so saveForFrame() can set hasId=true and flip to View
+        const savedRow = (window.modalCtx.data || null);
+        return { ok: true, saved: savedRow };
 
-      try {
-        const fr = window.__getModalFrame?.();
-        const currentTab = fr?.currentTabKey || (document.querySelector('#modalTabs button.active')?.textContent?.toLowerCase() || 'main');
-        if (LOGC) console.log('[CONTRACTS] post-save repaint (in-place)', { currentTab, contractId: (window.modalCtx?.data?.id) });
-
-        if (currentTab === 'calendar' && window.modalCtx?.data?.id) {
-          const contractId2 = window.modalCtx.data.id;
-          const win = (window.__calState?.[contractId2]?.win) || null;
-          const candId = window.modalCtx?.data?.candidate_id || null;
-          const scrollBox = document.getElementById('__calScroll');
-          const prevScroll = scrollBox ? scrollBox.scrollTop : 0;
-          if (typeof fetchAndRenderCandidateCalendarForContract === 'function' && candId) {
-            await fetchAndRenderCandidateCalendarForContract(contractId2, candId, {
-              from: win?.from, to: win?.to, view: window.__calState?.[contractId2]?.view,
-              weekEnding: window.modalCtx?.data?.week_ending_weekday_snapshot ?? 0
-            });
-          } else {
-            await fetchAndRenderContractCalendar(contractId2, win ? { from: win.from, to: win.to, view: window.__calState?.[contractId2]?.view } : undefined);
-          }
-          const newScrollBox = document.getElementById('__calScroll');
-          if (newScrollBox) newScrollBox.scrollTop = prevScroll;
-        } else if (currentTab === 'rates') {
-          try { computeContractMargins(); } catch {}
-        }
-        try { window.__toast?.('Saved'); } catch {}
       } catch (e) {
-        if (LOGC) console.warn('[CONTRACTS] post-save repaint failed', e);
+        if (LOGC) { console.error('[CONTRACTS] Save failed', e); console.groupEnd?.(); }
+        alert(`Save failed: ${e?.message || e}`);
+        return false;
+      } finally {
+        window.modalCtx._saveInFlight = false;
       }
+    },
 
-      if (LOGC) console.groupEnd?.();
-      // Return the saved row so saveForFrame() can set hasId=true and flip to View
-      const savedRow = (window.modalCtx.data || null);
-      return { ok: true, saved: savedRow };
+    hasId, // 5th
 
-    } catch (e) {
-      if (LOGC) { console.error('[CONTRACTS] Save failed', e); console.groupEnd?.(); }
-      alert(`Save failed: ${e?.message || e}`);
-      return false;
-    } finally {
-      window.modalCtx._saveInFlight = false;
-    }
-  },
+    // 6th: onReturn — single, deduped
+    () => {
+      const wire = () => {
+        snapshotContractForm();
 
-  hasId, // 5th
+        const form = document.querySelector('#contractForm');
+        const tabs = document.getElementById('modalTabs');
+        const active = tabs?.querySelector('button.active')?.textContent?.toLowerCase() || 'main';
 
-  // 6th: onReturn — single, deduped
-  () => {
-    const wire = () => {
-      snapshotContractForm();
+        if (form) {
+          if (!form.__wiredStage) {
+            form.__wiredStage = true;
+            const stage = (e) => {
+              const t = e.target;
+              if (!t || !t.name) return;
+              let v = t.type === 'checkbox' ? (t.checked ? 'on' : '') : t.value;
 
-      const form = document.querySelector('#contractForm');
-      const tabs = document.getElementById('modalTabs');
-      const active = tabs?.querySelector('button.active')?.textContent?.toLowerCase() || 'main';
+              const isTimeField = /^(mon|tue|wed|thu|fri|sat|sun)_(start|end)$/.test(t.name);
+              if (isTimeField) {
+                if (e.type === 'input') {
+                  v = v.replace(/[^\d:]/g,'');
+                  t.value = v;
+                  try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
+                  return;
+                }
+              }
 
-      if (form) {
-        if (!form.__wiredStage) {
-          form.__wiredStage = true;
-          const stage = (e) => {
-            const t = e.target;
-            if (!t || !t.name) return;
-            let v = t.type === 'checkbox' ? (t.checked ? 'on' : '') : t.value;
+              setContractFormValue(t.name, v);
+              if (t.name === 'pay_method_snapshot' || /^(paye_|umb_|charge_)/.test(t.name)) computeContractMargins();
+              try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
+            };
+            form.addEventListener('input', stage, true);
+            form.addEventListener('change', stage, true);
 
-            const isTimeField = /^(mon|tue|wed|thu|fri|sat|sun)_(start|end)$/.test(t.name);
-            if (isTimeField) {
-              if (e.type === 'input') {
-                v = v.replace(/[^\d:]/g,'');
-                t.value = v;
+            const normaliseTimeInput = (t) => {
+              if (!t || !/^(mon|tue|wed|thu|fri|sat|sun)_(start|end)$/.test(t.name)) return;
+              const raw = (t.value || '').trim();
+              const norm = (function (x) {
+                if (!x) return '';
+                const y = x.replace(/\s+/g, '');
+                let h, m;
+                if (/^\d{3,4}$/.test(y)) {
+                  const s = y.padStart(4, '0'); h = +s.slice(0, 2); m = +s.slice(2, 4);
+                } else if (/^\d{1,2}:\d{1,2}$/.test(y)) {
+                  const parts = y.split(':'); h = +parts[0]; m = +parts[1];
+                } else return '';
+                if (h < 0 || h > 23 || m < 0 || m > 59) return '';
+                return String(h).padStart(2, '0') + ':' + String(m).padStart(2, '0');
+              })(raw);
+
+              if (!norm && raw) {
+                t.value = '';
+                t.setAttribute('data-invalid', '1');
+                t.setAttribute('title', 'Enter a valid time HH:MM (00:00–23:59)');
+                setContractFormValue(t.name, '');
+                try { t.dispatchEvent(new Event('input', { bubbles: true })); t.dispatchEvent(new Event('change', { bubbles: true })); } catch {}
                 try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
                 return;
               }
-            }
 
-            setContractFormValue(t.name, v);
-            if (t.name === 'pay_method_snapshot' || /^(paye_|umb_|charge_)/.test(t.name)) computeContractMargins();
-            try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
-          };
-          form.addEventListener('input', stage, true);
-          form.addEventListener('change', stage, true);
-
-          const normaliseTimeInput = (t) => {
-            if (!t || !/^(mon|tue|wed|thu|fri|sat|sun)_(start|end)$/.test(t.name)) return;
-            const raw = (t.value || '').trim();
-            const norm = (function (x) {
-              if (!x) return '';
-              const y = x.replace(/\s+/g, '');
-              let h, m;
-              if (/^\d{3,4}$/.test(y)) {
-                const s = y.padStart(4, '0'); h = +s.slice(0, 2); m = +s.slice(2, 4);
-              } else if (/^\d{1,2}:\d{1,2}$/.test(y)) {
-                const parts = y.split(':'); h = +parts[0]; m = +parts[1];
-              } else return '';
-              if (h < 0 || h > 23 || m < 0 || m > 59) return '';
-              return String(h).padStart(2, '0') + ':' + String(m).padStart(2, '0');
-            })(raw);
-
-            if (!norm && raw) {
-              t.value = '';
-              t.setAttribute('data-invalid', '1');
-              t.setAttribute('title', 'Enter a valid time HH:MM (00:00–23:59)');
-              setContractFormValue(t.name, '');
-              try { t.dispatchEvent(new Event('input', { bubbles: true })); t.dispatchEvent(new Event('change', { bubbles: true })); } catch {}
-              try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
-              return;
-            }
-
-            if (norm) {
-              t.value = norm;
-              t.removeAttribute('data-invalid');
-              t.removeAttribute('title');
-              setContractFormValue(t.name, norm);
-              try { t.dispatchEvent(new Event('input', { bubbles: true })); t.dispatchEvent(new Event('change', { bubbles: true })); } catch {}
-              try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
-            }
-          };
-
-          const onBlurNorm = (e) => { normaliseTimeInput(e.target); };
-          form.addEventListener('blur', onBlurNorm, true);
-
-          const onKeydownNorm = (e) => {
-            if (e.key === 'Tab') normaliseTimeInput(e.target);
-          };
-          form.addEventListener('keydown', onKeydownNorm, true);
-        }
-
-        if (active === 'main') {
-          try {
-            const sd = form.querySelector('input[name="start_date"]');
-            const ed = form.querySelector('input[name="end_date"]');
-            const toUk = (iso) => {
-              try { return (typeof formatIsoToUk === 'function') ? (formatIsoToUk(iso) || '') : (iso || ''); }
-              catch { return iso || ''; }
+              if (norm) {
+                t.value = norm;
+                t.removeAttribute('data-invalid');
+                t.removeAttribute('title');
+                setContractFormValue(t.name, norm);
+                try { t.dispatchEvent(new Event('input', { bubbles: true })); t.dispatchEvent(new Event('change', { bubbles: true })); } catch {}
+                try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
+              }
             };
-            if (sd && /^\d{4}-\d{2}-\d{2}$/.test(sd.value||'')) sd.value = toUk(sd.value);
-            if (ed && /^\d{4}-\d{2}-\d{2}$/.test(ed.value||'')) ed.value = toUk(ed.value);
-            if (sd) { sd.setAttribute('placeholder','DD/MM/YYYY'); if (typeof attachUkDatePicker === 'function') attachUkDatePicker(sd); }
-            if (ed) { ed.setAttribute('placeholder','DD/MM/YYYY'); if (typeof attachUkDatePicker === 'function') attachUkDatePicker(ed, { minDate: sd?.value || null }); }
-            if (sd && ed) {
-              sd.addEventListener('change', () => {
-                const sv = sd.value || '';
-                if (typeof attachUkDatePicker === 'function') attachUkDatePicker(ed, { minDate: sv || null });
-                if (sv && ed.value) {
-                  try {
-                    const si = parseUkDateToIso?.(sv) || sv;
-                    const ei = parseUkDateToIso?.(ed.value) || ed.value;
-                    if (si && ei && si > ei) { ed.value=''; showModalHint?.('Pick an end date after start','warn'); setContractFormValue('end_date',''); }
-                  } catch {}
-                }
-              });
-            }
-            if (LOGC) console.log('[CONTRACTS] datepickers wired for start_date/end_date', { hasStart: !!sd, hasEnd: !!ed });
-          } catch (e) {
-            if (LOGC) console.warn('[CONTRACTS] datepicker wiring failed', e);
+
+            const onBlurNorm = (e) => { normaliseTimeInput(e.target); };
+            form.addEventListener('blur', onBlurNorm, true);
+
+            const onKeydownNorm = (e) => {
+              if (e.key === 'Tab') normaliseTimeInput(e.target);
+            };
+            form.addEventListener('keydown', onKeydownNorm, true);
           }
 
-          const btnPC = document.getElementById('btnPickCandidate');
-          const btnCC = document.getElementById('btnClearCandidate');
-          const btnPL = document.getElementById('btnPickClient');
-          const btnCL = document.getElementById('btnClearClient');
-          const candInput = document.getElementById('candidate_name_display');
-          const cliInput  = document.getElementById('client_name_display');
-
-          const ensurePrimed = async (entity) => {
+          if (active === 'main') {
             try {
-              await ensurePickerDatasetPrimed(entity);
-              const fp = getSummaryFingerprint(entity);
-              const mem = getSummaryMembership(entity, fp);
-              if (!mem?.ids?.length || mem?.stale) {
-                await primeSummaryMembership(entity, fp);
+              const sd = form.querySelector('input[name="start_date"]');
+              const ed = form.querySelector('input[name="end_date"]');
+              const toUk = (iso) => {
+                try { return (typeof formatIsoToUk === 'function') ? (formatIsoToUk(iso) || '') : (iso || ''); }
+                catch { return iso || ''; }
+              };
+              if (sd && /^\d{4}-\d{2}-\d{2}$/.test(sd.value||'')) sd.value = toUk(sd.value);
+              if (ed && /^\d{4}-\d{2}-\d{2}$/.test(ed.value||'')) ed.value = toUk(ed.value);
+              if (sd) { sd.setAttribute('placeholder','DD/MM/YYYY'); if (typeof attachUkDatePicker === 'function') attachUkDatePicker(sd); }
+              if (ed) { ed.setAttribute('placeholder','DD/MM/YYYY'); if (typeof attachUkDatePicker === 'function') attachUkDatePicker(ed, { minDate: sd?.value || null }); }
+              if (sd && ed) {
+                sd.addEventListener('change', () => {
+                  const sv = sd.value || '';
+                  if (typeof attachUkDatePicker === 'function') attachUkDatePicker(ed, { minDate: sv || null });
+                  if (sv && ed.value) {
+                    try {
+                      const si = parseUkDateToIso?.(sv) || sv;
+                      const ei = parseUkDateToIso?.(ed.value) || ed.value;
+                      if (si && ei && si > ei) { ed.value=''; showModalHint?.('Pick an end date after start','warn'); setContractFormValue('end_date',''); }
+                    } catch {}
+                  }
+                });
               }
-            } catch (e) { if (LOGC) console.warn('[CONTRACTS] typeahead priming failed', entity, e); }
-          };
-
-          const buildItemLabel = (entity, r) => {
-            if (entity === 'candidates') {
-              const first = (r.first_name||'').trim();
-              const last  = (r.last_name||'').trim();
-              const role  = ((r.roles_display||'').split(/[•;,]/)[0]||'').trim();
-              return `${last}${last?', ':''}${first}${role?` ${role}`:''}`.trim();
-            } else {
-              const name  = (r.name||'').trim();
-              return name;
-            }
-          };
-
-          const wireTypeahead = async (entity, inputEl, hiddenName, labelElId) => {
-            if (!inputEl) return;
-            await ensurePrimed(entity);
-
-            const menuId = entity === 'candidates' ? 'candTypeaheadMenu' : 'clientTypeaheadMenu';
-            let menu = document.getElementById(menuId);
-            if (!menu) {
-              menu = document.createElement('div');
-              menu.id = menuId;
-              menu.className = 'typeahead-menu';
-              menu.style.position = 'absolute';
-              menu.style.zIndex = '1000';
-              menu.style.background = 'var(--panel, #fff)';
-              menu.style.border = '1px solid var(--line, #ddd)';
-              menu.style.boxShadow = '0 4px 12px rgba(0,0,0,0.08)';
-              menu.style.maxHeight = '240px';
-              menu.style.overflowY = 'auto';
-              menu.style.display = 'none';
-              document.body.appendChild(menu);
+              if (LOGC) console.log('[CONTRACTS] datepickers wired for start_date/end_date', { hasStart: !!sd, hasEnd: !!ed });
+            } catch (e) {
+              if (LOGC) console.warn('[CONTRACTS] datepicker wiring failed', e);
             }
 
-            const positionMenu = () => {
-              const r = inputEl.getBoundingClientRect();
-              menu.style.minWidth = `${Math.max(260, r.width)}px`;
-              menu.style.left = `${window.scrollX + r.left}px`;
-              menu.style.top  = `${window.scrollY + r.bottom + 4}px`;
-            };
+            const btnPC = document.getElementById('btnPickCandidate');
+            const btnCC = document.getElementById('btnClearCandidate');
+            const btnPL = document.getElementById('btnPickClient');
+            const btnCL = document.getElementById('btnClearClient');
+            const candInput = document.getElementById('candidate_name_display');
+            const cliInput  = document.getElementById('client_name_display');
 
-            const closeMenu = () => { menu.style.display = 'none'; menu.innerHTML = ''; };
-            const openMenu  = () => { positionMenu(); menu.style.display = ''; };
-
-            const getDataset = () => {
-              const fp  = getSummaryFingerprint(entity);
-              const mem = getSummaryMembership(entity, fp);
-              const ds  = (window.__pickerData ||= {})[entity] || { since:null, itemsById:{} };
-              const items = ds.itemsById || {};
-              let ids = Array.isArray(mem?.ids) ? mem.ids : [];
-              if (!ids.length) ids = Object.keys(items);
-              return { ids, items };
-            };
-
-            const applyList = (rows) => {
-              menu.innerHTML = rows.slice(0, 10).map(r => {
-                const label = buildItemLabel(entity, r);
-                return `<div class="ta-item" data-id="${r.id||''}" data-label="${(label||'').replace(/"/g,'&quot;')}" style="padding:8px 10px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${label}</div>`;
-              }).join('');
-              const first = menu.querySelector('.ta-item');
-              if (first) first.style.background = 'var(--hover, #f5f5f5)';
-            };
-
-            const selectRow = (id, label) => {
-              setContractFormValue(hiddenName, id);
-              inputEl.value = label || '';
-              const labEl = document.getElementById(labelElId);
-              if (labEl) labEl.textContent = label ? `Chosen: ${label}` : '';
-
+            const ensurePrimed = async (entity) => {
               try {
-                const fs = (window.modalCtx.formState ||= { __forId: (window.modalCtx.data?.id ?? window.modalCtx.openToken ?? null), main:{}, pay:{} });
-                fs.main ||= {};
-                fs.main[hiddenName] = id;
-                if (hiddenName === 'candidate_id') fs.main['candidate_display'] = label;
-                if (hiddenName === 'client_id')    fs.main['client_name']       = label;
-              } catch {}
+                await ensurePickerDatasetPrimed(entity);
+                const fp = getSummaryFingerprint(entity);
+                const mem = getSummaryMembership(entity, fp);
+                if (!mem?.ids?.length || mem?.stale) {
+                  await primeSummaryMembership(entity, fp);
+                }
+              } catch (e) { if (LOGC) console.warn('[CONTRACTS] typeahead priming failed', entity, e); }
+            };
 
-              try {
-                window.modalCtx.data = window.modalCtx.data || {};
-                if (hiddenName === 'candidate_id') { window.modalCtx.data.candidate_id = id; window.modalCtx.data.candidate_display = label; }
-                if (hiddenName === 'client_id')    { window.modalCtx.data.client_id    = id; window.modalCtx.data.client_name = label; }
-              } catch {}
+            const buildItemLabel = (entity, r) => {
+              if (entity === 'candidates') {
+                const first = (r.first_name||'').trim();
+                const last  = (r.last_name||'').trim();
+                const role  = ((r.roles_display||'').split(/[•;,]/)[0]||'').trim();
+                return `${last}${last?', ':''}${first}${role?` ${role}`:''}`.trim();
+              } else {
+                const name  = (r.name||'').trim();
+                return name;
+              }
+            };
 
-              if (hiddenName === 'candidate_id') {
-                (async () => {
+            const wireTypeahead = async (entity, inputEl, hiddenName, labelElId) => {
+              if (!inputEl) return;
+              await ensurePrimed(entity);
+
+              const menuId = entity === 'candidates' ? 'candTypeaheadMenu' : 'clientTypeaheadMenu';
+              let menu = document.getElementById(menuId);
+              if (!menu) {
+                menu = document.createElement('div');
+                menu.id = menuId;
+                menu.className = 'typeahead-menu';
+                menu.style.position = 'absolute';
+                menu.style.zIndex = '1000';
+                menu.style.background = 'var(--panel, #fff)';
+                menu.style.border = '1px solid var(--line, #ddd)';
+                menu.style.boxShadow = '0 4px 12px rgba(0,0,0,0.08)';
+                menu.style.maxHeight = '240px';
+                menu.style.overflowY = 'auto';
+                menu.style.display = 'none';
+                document.body.appendChild(menu);
+              }
+
+              const positionMenu = () => {
+                const r = inputEl.getBoundingClientRect();
+                menu.style.minWidth = `${Math.max(260, r.width)}px`;
+                menu.style.left = `${window.scrollX + r.left}px`;
+                menu.style.top  = `${window.scrollY + r.bottom + 4}px`;
+              };
+
+              const closeMenu = () => { menu.style.display = 'none'; menu.innerHTML = ''; };
+              const openMenu  = () => { positionMenu(); menu.style.display = ''; };
+
+              const getDataset = () => {
+                const fp  = getSummaryFingerprint(entity);
+                const mem = getSummaryMembership(entity, fp);
+                const ds  = (window.__pickerData ||= {})[entity] || { since:null, itemsById:{} };
+                const items = ds.itemsById || {};
+                let ids = Array.isArray(mem?.ids) ? mem.ids : [];
+                if (!ids.length) ids = Object.keys(items);
+                return { ids, items };
+              };
+
+              const applyList = (rows) => {
+                menu.innerHTML = rows.slice(0, 10).map(r => {
+                  const label = buildItemLabel(entity, r);
+                  return `<div class="ta-item" data-id="${r.id||''}" data-label="${(label||'').replace(/"/g,'&quot;')}" style="padding:8px 10px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${label}</div>`;
+                }).join('');
+                const first = menu.querySelector('.ta-item');
+                if (first) first.style.background = 'var(--hover, #f5f5f5)';
+              };
+
+              const selectRow = (id, label) => {
+                setContractFormValue(hiddenName, id);
+                inputEl.value = label || '';
+                const labEl = document.getElementById(labelElId);
+                if (labEl) labEl.textContent = label ? `Chosen: ${label}` : '';
+
+                try {
+                  const fs = (window.modalCtx.formState ||= { __forId: (window.modalCtx.data?.id ?? window.modalCtx.openToken ?? null), main:{}, pay:{} });
+                  fs.main ||= {};
+                  fs.main[hiddenName] = id;
+                  if (hiddenName === 'candidate_id') fs.main['candidate_display'] = label;
+                  if (hiddenName === 'client_id')    fs.main['client_name']       = label;
+                } catch {}
+
+                try {
+                  window.modalCtx.data = window.modalCtx.data || {};
+                  if (hiddenName === 'candidate_id') { window.modalCtx.data.candidate_id = id; window.modalCtx.data.candidate_display = label; }
+                  if (hiddenName === 'client_id')    { window.modalCtx.data.client_id    = id; window.modalCtx.data.client_name = label; }
+                } catch {}
+
+                if (hiddenName === 'candidate_id') {
+                  (async () => {
+                    try {
+                      const cand = await getCandidate(id);
+                      const derived = (String(cand?.pay_method || '').toUpperCase() === 'UMBRELLA' && cand?.umbrella_id) ? 'UMBRELLA' : 'PAYE';
+                      const fsm = (window.modalCtx.formState ||= { main:{}, pay:{} }).main ||= {};
+                      fsm.pay_method_snapshot = derived;
+                      fsm.__pay_locked = true;
+                      const sel = document.querySelector('select[name="pay_method_snapshot"], select[name="default_pay_method_snapshot"]');
+                      if (sel) { sel.value = derived; sel.disabled = true; }
+                      computeContractMargins();
+                    } catch (e) { if (LOGC) console.warn('[CONTRACTS] derive pay method failed', e); }
+                  })();
+                }
+
+                closeMenu();
+                try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
+              };
+
+              let debTimer = 0;
+              const handleInput = () => {
+                const q = (inputEl.value||'').trim();
+                if (q.length < 3) { closeMenu(); return; }
+                if (debTimer) clearTimeout(debTimer);
+                debTimer = setTimeout(() => {
+                  const { ids, items } = getDataset();
+                  const rows = pickersLocalFilterAndSort(entity, ids, q, entity==='candidates'?'last_name':'name', 'asc')
+                    .map(v => (typeof v === 'object' ? v : items[String(v)]))
+                    .filter(Boolean);
+                  if (!rows.length) { closeMenu(); return; }
+                  applyList(rows);
+                  openMenu();
+                }, 120);
+              };
+
+              const handleKeyDown = (e) => {
+                if (menu.style.display === 'none') return;
+                const items = Array.from(menu.querySelectorAll('.ta-item'));
+                if (!items.length) return;
+                const idx = items.findIndex(n => n.style.background && n.style.background.includes('hover'));
+                const setActive = (i) => {
+                  items.forEach(n => n.style.background='');
+                  items[i].style.background = 'var(--hover, #f5f5f5)';
+                  items[i].scrollIntoView({ block:'nearest' });
+                };
+                if (e.key === 'ArrowDown') { e.preventDefault(); setActive(Math.min((idx<0?0:idx+1), items.length-1)); }
+                if (e.key === 'ArrowUp')   { e.preventDefault(); setActive(Math.max((idx<0?0:idx-1), 0)); }
+                if (e.key === 'Enter')     { e.preventDefault(); const n = items[Math.max(idx,0)]; if (n) selectRow(n.dataset.id, n.dataset.label); }
+                if (e.key === 'Escape')    { e.preventDefault(); closeMenu(); }
+              };
+
+              menu.addEventListener('click', (ev) => {
+                const n = ev.target && ev.target.closest('.ta-item'); if (!n) return;
+                selectRow(n.dataset.id, n.dataset.label);
+              });
+
+              let blurTimer = 0;
+              inputEl.addEventListener('blur', () => { blurTimer = setTimeout(closeMenu, 150); });
+              menu.addEventListener('mousedown', () => { if (blurTimer) clearTimeout(blurTimer); });
+
+              inputEl.addEventListener('input', handleInput);
+              inputEl.addEventListener('keydown', handleKeyDown);
+            };
+
+            wireTypeahead('candidates', candInput, 'candidate_id', 'candidatePickLabel');
+            wireTypeahead('clients',    cliInput,  'client_id',    'clientPickLabel');
+
+            if (btnPC && !btnPC.__wired) {
+              btnPC.__wired = true;
+              btnPC.addEventListener('click', async () => {
+                if (LOGC) console.log('[CONTRACTS] Pick Candidate clicked');
+                openCandidatePicker(async ({ id, label }) => {
+                  if (LOGC) console.log('[CONTRACTS] Pick Candidate → selected', { id, label });
+                  setContractFormValue('candidate_id', id);
+                  const lab = document.getElementById('candidatePickLabel'); if (lab) lab.textContent = `Chosen: ${label}`;
+                  try {
+                    const fs2 = (window.modalCtx.formState ||= { __forId: (window.modalCtx.data?.id ?? window.modalCtx.openToken ?? null), main:{}, pay:{} });
+                    fs2.main ||= {}; fs2.main.candidate_id = id; fs2.main.candidate_display = label;
+                    window.modalCtx.data = window.modalCtx.data || {};
+                    window.modalCtx.data.candidate_id = id; window.modalCtx.data.candidate_display = label;
+                  } catch {}
                   try {
                     const cand = await getCandidate(id);
                     const derived = (String(cand?.pay_method || '').toUpperCase() === 'UMBRELLA' && cand?.umbrella_id) ? 'UMBRELLA' : 'PAYE';
@@ -2217,212 +2105,133 @@ if (hasCi && wantsEnd && hasSource && hasEndDate && hasFnResolved) {
                     const sel = document.querySelector('select[name="pay_method_snapshot"], select[name="default_pay_method_snapshot"]');
                     if (sel) { sel.value = derived; sel.disabled = true; }
                     computeContractMargins();
-                  } catch (e) { if (LOGC) console.warn('[CONTRACTS] derive pay method failed', e); }
-                })();
-              }
-
-              closeMenu();
-              try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
-            };
-
-            let debTimer = 0;
-            const handleInput = () => {
-              const q = (inputEl.value||'').trim();
-              if (q.length < 3) { closeMenu(); return; }
-              if (debTimer) clearTimeout(debTimer);
-              debTimer = setTimeout(() => {
-                const { ids, items } = getDataset();
-                const rows = pickersLocalFilterAndSort(entity, ids, q, entity==='candidates'?'last_name':'name', 'asc')
-                  .map(v => (typeof v === 'object' ? v : items[String(v)]))
-                  .filter(Boolean);
-                if (!rows.length) { closeMenu(); return; }
-                applyList(rows);
-                openMenu();
-              }, 120);
-            };
-
-            const handleKeyDown = (e) => {
-              if (menu.style.display === 'none') return;
-              const items = Array.from(menu.querySelectorAll('.ta-item'));
-              if (!items.length) return;
-              const idx = items.findIndex(n => n.style.background && n.style.background.includes('hover'));
-              const setActive = (i) => {
-                items.forEach(n => n.style.background='');
-                items[i].style.background = 'var(--hover, #f5f5f5)';
-                items[i].scrollIntoView({ block:'nearest' });
-              };
-              if (e.key === 'ArrowDown') { e.preventDefault(); setActive(Math.min((idx<0?0:idx+1), items.length-1)); }
-              if (e.key === 'ArrowUp')   { e.preventDefault(); setActive(Math.max((idx<0?0:idx-1), 0)); }
-              if (e.key === 'Enter')     { e.preventDefault(); const n = items[Math.max(idx,0)]; if (n) selectRow(n.dataset.id, n.dataset.label); }
-              if (e.key === 'Escape')    { e.preventDefault(); closeMenu(); }
-            };
-
-            menu.addEventListener('click', (ev) => {
-              const n = ev.target && ev.target.closest('.ta-item'); if (!n) return;
-              selectRow(n.dataset.id, n.dataset.label);
-            });
-
-            let blurTimer = 0;
-            inputEl.addEventListener('blur', () => { blurTimer = setTimeout(closeMenu, 150); });
-            menu.addEventListener('mousedown', () => { if (blurTimer) clearTimeout(blurTimer); });
-
-            inputEl.addEventListener('input', handleInput);
-            inputEl.addEventListener('keydown', handleKeyDown);
-          };
-
-          wireTypeahead('candidates', candInput, 'candidate_id', 'candidatePickLabel');
-          wireTypeahead('clients',    cliInput,  'client_id',    'clientPickLabel');
-
-          if (btnPC && !btnPC.__wired) {
-            btnPC.__wired = true;
-            btnPC.addEventListener('click', async () => {
-              if (LOGC) console.log('[CONTRACTS] Pick Candidate clicked');
-              openCandidatePicker(async ({ id, label }) => {
-                if (LOGC) console.log('[CONTRACTS] Pick Candidate → selected', { id, label });
-                setContractFormValue('candidate_id', id);
-                const lab = document.getElementById('candidatePickLabel'); if (lab) lab.textContent = `Chosen: ${label}`;
+                  } catch (e) { if (LOGC) console.warn('[CONTRACTS] prefillPayMethodFromCandidate failed', e); }
+                });
+              });
+              if (LOGC) console.log('[CONTRACTS] wired btnPickCandidate');
+            }
+            if (btnCC && !btnCC.__wired) {
+              btnCC.__wired = true;
+              btnCC.addEventListener('click', () => {
+                if (LOGC) console.log('[CONTRACTS] Clear Candidate clicked');
+                setContractFormValue('candidate_id', '');
+                const lab = document.getElementById('candidatePickLabel'); if (lab) lab.textContent = '';
                 try {
                   const fs2 = (window.modalCtx.formState ||= { __forId: (window.modalCtx.data?.id ?? window.modalCtx.openToken ?? null), main:{}, pay:{} });
-                  fs2.main ||= {}; fs2.main.candidate_id = id; fs2.main.candidate_display = label;
-                  window.modalCtx.data = window.modalCtx.data || {};
-                  window.modalCtx.data.candidate_id = id; window.modalCtx.data.candidate_display = label;
-                } catch {}
-                try {
-                  const cand = await getCandidate(id);
-                  const derived = (String(cand?.pay_method || '').toUpperCase() === 'UMBRELLA' && cand?.umbrella_id) ? 'UMBRELLA' : 'PAYE';
-                  const fsm = (window.modalCtx.formState ||= { main:{}, pay:{} }).main ||= {};
-                  fsm.pay_method_snapshot = derived;
-                  fsm.__pay_locked = true;
+                  fs2.main ||= {}; delete fs2.main.candidate_id; delete fs2.main.candidate_display;
+                  fs2.main.__pay_locked = false;
+                  fs2.main.pay_method_snapshot = 'PAYE';
                   const sel = document.querySelector('select[name="pay_method_snapshot"], select[name="default_pay_method_snapshot"]');
-                  if (sel) { sel.value = derived; sel.disabled = true; }
-                  computeContractMargins();
-                } catch (e) { if (LOGC) console.warn('[CONTRACTS] prefillPayMethodFromCandidate failed', e); }
+                  if (sel) { sel.disabled = false; sel.value = 'PAYE'; }
+                  window.modalCtx.data = window.modalCtx.data || {};
+                  delete window.modalCtx.data.candidate_id; delete window.modalCtx.data.candidate_display;
+                } catch {}
+                try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
               });
-            });
-            if (LOGC) console.log('[CONTRACTS] wired btnPickCandidate');
-          }
-          if (btnCC && !btnCC.__wired) {
-            btnCC.__wired = true;
-            btnCC.addEventListener('click', () => {
-              if (LOGC) console.log('[CONTRACTS] Clear Candidate clicked');
-              setContractFormValue('candidate_id', '');
-              const lab = document.getElementById('candidatePickLabel'); if (lab) lab.textContent = '';
-              try {
-                const fs2 = (window.modalCtx.formState ||= { __forId: (window.modalCtx.data?.id ?? window.modalCtx.openToken ?? null), main:{}, pay:{} });
-                fs2.main ||= {}; delete fs2.main.candidate_id; delete fs2.main.candidate_display;
-                fs2.main.__pay_locked = false;
-                fs2.main.pay_method_snapshot = 'PAYE';
-                const sel = document.querySelector('select[name="pay_method_snapshot"], select[name="default_pay_method_snapshot"]');
-                if (sel) { sel.disabled = false; sel.value = 'PAYE'; }
-                window.modalCtx.data = window.modalCtx.data || {};
-                delete window.modalCtx.data.candidate_id; delete window.modalCtx.data.candidate_display;
-              } catch {}
-              try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
-            });
-            if (LOGC) console.log('[CONTRACTS] wired btnClearCandidate');
-          }
+              if (LOGC) console.log('[CONTRACTS] wired btnClearCandidate');
+            }
 
-          if (btnPL && !btnPL.__wired) {
-            btnPL.__wired = true;
-            btnPL.addEventListener('click', async () => {
-              if (LOGC) console.log('[CONTRACTS] Pick Client clicked');
-              openClientPicker(async ({ id, label }) => {
-                if (LOGC) console.log('[CONTRACTS] Pick Client → selected', { id, label });
-                setContractFormValue('client_id', id);
-                const lab = document.getElementById('clientPickLabel'); if (lab) lab.textContent = `Chosen: ${label}`;
+            if (btnPL && !btnPL.__wired) {
+              btnPL.__wired = true;
+              btnPL.addEventListener('click', async () => {
+                if (LOGC) console.log('[CONTRACTS] Pick Client clicked');
+                openClientPicker(async ({ id, label }) => {
+                  if (LOGC) console.log('[CONTRACTS] Pick Client → selected', { id, label });
+                  setContractFormValue('client_id', id);
+                  const lab = document.getElementById('clientPickLabel'); if (lab) lab.textContent = `Chosen: ${label}`;
+                  try {
+                    const fs2 = (window.modalCtx.formState ||= { __forId: (window.modalCtx.data?.id ?? window.modalCtx.openToken ?? null), main:{}, pay:{} });
+                    fs2.main ||= {}; fs2.main.client_id = id; fs2.main.client_name = label;
+                    window.modalCtx.data = window.modalCtx.data || {};
+                    window.modalCtx.data.client_id = id; window.modalCtx.data.client_name = label;
+                  } catch {}
+                  try {
+                    const client = await getClient(id);
+                    const h = checkClientInvoiceEmailPresence(client);
+                    if (h) showModalHint(h, 'warn');
+                    const we = (client?.week_ending_weekday ?? (client?.client_settings && client.client_settings.week_ending_weekday)) ?? 0;
+                    const fs2 = (window.modalCtx.formState ||= { main:{}, pay:{} });
+                    fs2.main ||= {}; fs2.main.week_ending_weekday_snapshot = String(we);
+                    const weekNames = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
+                    const lbl = document.getElementById('weLabel'); if (lbl) lbl.textContent = weekNames[Number(we)] || 'Sunday';
+                    const hidden = form?.querySelector('input[name="week_ending_weekday_snapshot"]'); if (hidden) hidden.value = String(we);
+                    try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
+                  } catch (e) { if (LOGC) console.warn('[CONTRACTS] client hint/week-ending check failed', e); }
+                });
+              });
+              if (LOGC) console.log('[CONTRACTS] wired btnPickClient');
+            }
+            if (btnCL && !btnCL.__wired) {
+              btnCL.__wired = true;
+              btnCL.addEventListener('click', () => {
+                if (LOGC) console.log('[CONTRACTS] Clear Client clicked');
+                setContractFormValue('client_id', '');
+                const lab = document.getElementById('clientPickLabel'); if (lab) lab.textContent = '';
                 try {
                   const fs2 = (window.modalCtx.formState ||= { __forId: (window.modalCtx.data?.id ?? window.modalCtx.openToken ?? null), main:{}, pay:{} });
-                  fs2.main ||= {}; fs2.main.client_id = id; fs2.main.client_name = label;
+                  fs2.main ||= {}; delete fs2.main.client_id; delete fs2.main.client_name; delete fs2.main.week_ending_weekday_snapshot;
                   window.modalCtx.data = window.modalCtx.data || {};
-                  window.modalCtx.data.client_id = id; window.modalCtx.data.client_name = label;
+                  delete window.modalCtx.data.client_id; delete window.modalCtx.data.client_name;
+                  const lbl = document.getElementById('weLabel'); if (lbl) lbl.textContent = 'Sunday';
+                  const hidden = form?.querySelector('input[name="week_ending_weekday_snapshot"]'); if (hidden) hidden.value = '';
                 } catch {}
-                try {
-                  const client = await getClient(id);
-                  const h = checkClientInvoiceEmailPresence(client);
-                  if (h) showModalHint(h, 'warn');
-                  const we = (client?.week_ending_weekday ?? (client?.client_settings && client.client_settings.week_ending_weekday)) ?? 0;
-                  const fs2 = (window.modalCtx.formState ||= { main:{}, pay:{} });
-                  fs2.main ||= {}; fs2.main.week_ending_weekday_snapshot = String(we);
-                  const weekNames = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
-                  const lbl = document.getElementById('weLabel'); if (lbl) lbl.textContent = weekNames[Number(we)] || 'Sunday';
-                  const hidden = form?.querySelector('input[name="week_ending_weekday_snapshot"]'); if (hidden) hidden.value = String(we);
-                  try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
-                } catch (e) { if (LOGC) console.warn('[CONTRACTS] client hint/week-ending check failed', e); }
+                try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
               });
-            });
-            if (LOGC) console.log('[CONTRACTS] wired btnPickClient');
-          }
-          if (btnCL && !btnCL.__wired) {
-            btnCL.__wired = true;
-            btnCL.addEventListener('click', () => {
-              if (LOGC) console.log('[CONTRACTS] Clear Client clicked');
-              setContractFormValue('client_id', '');
-              const lab = document.getElementById('clientPickLabel'); if (lab) lab.textContent = '';
-              try {
-                const fs2 = (window.modalCtx.formState ||= { __forId: (window.modalCtx.data?.id ?? window.modalCtx.openToken ?? null), main:{}, pay:{} });
-                fs2.main ||= {}; delete fs2.main.client_id; delete fs2.main.client_name; delete fs2.main.week_ending_weekday_snapshot;
-                window.modalCtx.data = window.modalCtx.data || {};
-                delete window.modalCtx.data.client_id; delete window.modalCtx.data.client_name;
-                const lbl = document.getElementById('weLabel'); if (lbl) lbl.textContent = 'Sunday';
-                const hidden = form?.querySelector('input[name="week_ending_weekday_snapshot"]'); if (hidden) hidden.value = '';
-              } catch {}
-              try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
-            });
-            if (LOGC) console.log('[CONTRACTS] wired btnClearClient');
-          }
+              if (LOGC) console.log('[CONTRACTS] wired btnClearClient');
+            }
 
-          const openOnType = (inputEl, openerName) => {
-            if (!inputEl || inputEl.__wiredTyping) return;
-            inputEl.__wiredTyping = true;
-            if (LOGC) console.log('[CONTRACTS] typing handler installed for', openerName);
-          };
-          openOnType(candInput, 'candidate');
-          openOnType(cliInput, 'client');
+            const openOnType = (inputEl, openerName) => {
+              if (!inputEl || inputEl.__wiredTyping) return;
+              inputEl.__wiredTyping = true;
+              if (LOGC) console.log('[CONTRACTS] typing handler installed for', openerName);
+            };
+            openOnType(candInput, 'candidate');
+            openOnType(cliInput, 'client');
+          }
         }
+
+        const ratesTab = document.querySelector('#contractRatesTab');
+        if (ratesTab && !ratesTab.__wiredStage) {
+          ratesTab.__wiredStage = true;
+          const stageRates = (e) => {
+            const t = e.target;
+            if (!t || !t.name) return;
+            if (/^(paye_|umb_|charge_)/.test(t.name)) {
+              setContractFormValue(t.name, t.value);
+              computeContractMargins();
+              try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
+            }
+          };
+          ratesTab.addEventListener('input', stageRates, true);
+          ratesTab.addEventListener('change', stageRates, true);
+          computeContractMargins();
+        }
+      };
+
+      setTimeout(wire, 0);
+
+      if (!window.__contractsWireBound) {
+        window.__contractsWireBound = true;
+        window.addEventListener('contracts-main-rendered', () => setTimeout(wire, 0));
       }
 
-      const ratesTab = document.querySelector('#contractRatesTab');
-      if (ratesTab && !ratesTab.__wiredStage) {
-        ratesTab.__wiredStage = true;
-        const stageRates = (e) => {
-          const t = e.target;
-          if (!t || !t.name) return;
-          if (/^(paye_|umb_|charge_)/.test(t.name)) {
-            setContractFormValue(t.name, t.value);
-            computeContractMargins();
-            try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
-          }
-        };
-        ratesTab.addEventListener('input', stageRates, true);
-        ratesTab.addEventListener('change', stageRates, true);
-        computeContractMargins();
+      const tabs = document.getElementById('modalTabs');
+      if (tabs && !tabs.__wired_contract_stage) {
+        tabs.__wired_contract_stage = true;
+        tabs.addEventListener('click', () => {
+          snapshotContractForm();
+          setTimeout(wire, 0);
+        });
       }
-    };
+    },
 
-    setTimeout(wire, 0);
-
-    if (!window.__contractsWireBound) {
-      window.__contractsWireBound = true;
-      window.addEventListener('contracts-main-rendered', () => setTimeout(wire, 0));
+    // 7th: options (now with noParentGate)
+    { kind:'contracts', extraButtons, noParentGate: isSuccessorCreate, stayOpenOnSave: isSuccessorCreate,
+      // Diagnostic only:
+      _trace: (LOGC && { tag:'contracts-open', isCreate, isSuccessorCreate, openToken: window.modalCtx.openToken })
     }
 
-    const tabs = document.getElementById('modalTabs');
-    if (tabs && !tabs.__wired_contract_stage) {
-      tabs.__wired_contract_stage = true;
-      tabs.addEventListener('click', () => {
-        snapshotContractForm();
-        setTimeout(wire, 0);
-      });
-    }
-  },
-
-  // 7th: options (now with noParentGate)
- { kind:'contracts', extraButtons, noParentGate: isSuccessorCreate, stayOpenOnSave: isSuccessorCreate,
-  // Diagnostic only:
-  _trace: (LOGC && { tag:'contracts-open', isCreate, isSuccessorCreate, openToken: window.modalCtx.openToken })
-}
-
-);
+  );
 
   setTimeout(() => {
     try {
@@ -2443,6 +2252,7 @@ if (hasCi && wantsEnd && hasSource && hasEndDate && hasFnResolved) {
     }
   }, 0);
 }
+
 
 // ─────────────────────────────────────────────────────────────────────────────
 // NEW: getSummaryFingerprint(section)
@@ -12013,30 +11823,63 @@ async function renderClientRatesTable() {
 
 // NEW
 async function endContractSafely(contractId, desiredEnd) {
-  const LOGC = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : true;
-  const url = `${window.BROKER_BASE_URL}/api/contracts/${encodeURIComponent(contractId)}/truncate-tail`;
-  const payload = { desired_end: desiredEnd };
+  const LOGC = (typeof window !== 'undefined' && window.__IS_TESTING_LOG) || (typeof window !== 'undefined' && !!window.__LOG_CONTRACTS);
+  const url   = `${window.BROKER_BASE_URL}/api/contracts/${encodeURIComponent(String(contractId))}/truncate-tail`;
+  const body  = { id: String(contractId), desired_end: String(desiredEnd) };
 
-  if (typeof authFetch === 'function') {
-    const res = await authFetch({
-      url,
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(payload)
-    });
-    if (LOGC) console.log('[CONTRACTS] endContractSafely result', res);
-    return res;
+  if (LOGC) {
+    console.groupCollapsed('[TRIM_CALL][frontend] dispatch');
+    console.log('request', { url, body, hasAuthFetch: typeof window !== 'undefined' && typeof window.authFetch === 'function' });
   }
 
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', ...(window.sbHeaders || {}) },
-    body: JSON.stringify(payload)
-  });
-  const json = await res.json().catch(() => null);
-  if (!res.ok) throw new Error(json?.error || res.statusText);
-  if (LOGC) console.log('[CONTRACTS] endContractSafely result', json);
-  return json;
+  let result;
+  try {
+    if (typeof window !== 'undefined' && typeof window.authFetch === 'function') {
+      const resp = await window.authFetch({
+        url,
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body)
+      });
+      // normalise possible shapes from authFetch
+      if (resp && typeof resp === 'object' && 'ok' in resp && 'json' in resp && typeof resp.json === 'function') {
+        const json = await resp.json().catch(() => null);
+        result = (json && typeof json === 'object') ? { ...json } : { ok: !!resp.ok, status: resp.status ?? 200 };
+      } else {
+        result = resp;
+      }
+    } else {
+      const r = await fetch(url, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', ...(window?.sbHeaders || {}) },
+        body: JSON.stringify(body)
+      });
+      const data = await r.json().catch(() => null);
+      if (!r.ok) {
+        const msg = (data && (data.error || data.message)) || `HTTP ${r.status}`;
+        throw new Error(msg);
+      }
+      result = data ?? { ok: true };
+    }
+
+    if (LOGC) console.log('response', result);
+    return result;
+  } catch (err) {
+    if (LOGC) console.warn('[TRIM_CALL][frontend] error', err);
+    throw err;
+  } finally {
+    if (LOGC) console.groupEnd?.();
+  }
+}
+
+// Ensure a window-bound handle exists even when this file is bundled as an ES module
+if (typeof window !== 'undefined') {
+  if (typeof window.endContractScrub === 'function' && !window.endContractSafely) {
+    // legacy alias safeguard if you had a prior name
+    window.endContractSafely = window.endContractScrub;
+  } else if (typeof window.endContractSafely !== 'function') {
+    window.endContractSafely = endContractSafely;
+  }
 }
 
 // NEW
