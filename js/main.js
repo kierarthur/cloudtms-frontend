@@ -7629,24 +7629,24 @@ async function commitContractCalendarStageIfPending(contractId) {
       return { ok: true, detail: 'no-op', removedAll: false };
     }
 
-    // Build ranges + symmetry metadata
+    // Build stage → payload pieces
     const {
       addRanges,
       removeRanges,
-      additionals,
+      additionals,   // not used by backend plan API; handled implicitly via week-creation rules
       removeAll,
       needsLeftExtend,
       leftEdgeDate,
       rightEdgeDate
     } = buildPlanRangesFromStage(contractId);
 
-    // Pull current contract & window from modal
+    // Pull current contract basics
     const contract = (window.modalCtx && window.modalCtx.data) ? window.modalCtx.data : {};
     const contractStart = contract?.start_date || null;
     const contractEnd   = contract?.end_date   || null;
     const candidateId   = contract?.candidate_id || null;
 
-    // Optional preflight overlap check when extending left
+    // ---- Optional overlap preflight for left-extend ----
     if (needsLeftExtend && candidateId) {
       const newStart = leftEdgeDate && contractStart ? (leftEdgeDate < contractStart ? leftEdgeDate : contractStart)
                                                      : (leftEdgeDate || contractStart);
@@ -7661,22 +7661,21 @@ async function commitContractCalendarStageIfPending(contractId) {
       };
 
       L('preflight overlap check', payload);
-      const overlapRes = await authFetch(API('/api/contracts/check-overlap'), {
+      const ovRes = await authFetch(API('/api/contracts/check-overlap'), {
         method: 'POST',
         headers: { 'Content-Type':'application/json' },
         body: JSON.stringify(payload)
       });
+      const ovJson = await ovRes.json().catch(() => null);
 
-      // authFetch returns JSON, not { ok: boolean }
-      if (!overlapRes || overlapRes.error) {
-        const msg = overlapRes?.error || 'Overlap check failed';
+      if (!ovRes.ok || ovJson?.error) {
+        const msg = ovJson?.error || 'Overlap check failed';
         console.warn('[CAL][commitIfPending] overlap preflight failed', msg);
         return { ok: false, message: msg, removedAll: false };
       }
 
-      if (overlapRes.has_overlap) {
-        // Ask the user whether to proceed despite the overlap
-        const first = Array.isArray(overlapRes.overlaps) && overlapRes.overlaps[0] ? overlapRes.overlaps[0] : null;
+      if (ovJson.has_overlap) {
+        const first = Array.isArray(ovJson.overlaps) && ovJson.overlaps[0] ? ovJson.overlaps[0] : null;
         const baseMsg = first
           ? `This extension overlaps ${first.client_name} (${first.role}${first.band ? ' Band ' + first.band : ''}) window ${first.existing_start_date} → ${first.existing_end_date}.`
           : 'This extension overlaps an existing contract window.';
@@ -7686,41 +7685,86 @@ async function commitContractCalendarStageIfPending(contractId) {
           return { ok: false, message: 'User cancelled due to overlap', removedAll: false, cancelled: true };
         }
         L('overlap preflight: user confirmed proceed');
-        // Fall through to save normally
       }
     }
 
-    // Build final payload for backend commit (always allow extend both ways)
-    const body = {
-      extend_contract_window: true,
-      add_ranges: addRanges || [],
-      remove_ranges: removeRanges || [],
-      additionals: additionals || [],
-      remove_all: !!removeAll
-    };
+    // ---- Plan ADDs (send as body.ranges) ----
+    if (Array.isArray(addRanges) && addRanges.length) {
+      const body = {
+        extend_contract_window: true,
+        ranges: addRanges.map(r => ({
+          from: r.from,
+          to:   r.to,
+          // backend accepts either array of date strings or of objects {date, …}; keep your explicit objects
+          days: Array.isArray(r.days) ? r.days : [],
+          // harmless passthroughs (backend ignores unknown keys)
+          merge: r.merge || 'append',
+          when_timesheet_exists: r.when_timesheet_exists || 'create_additional'
+        }))
+      };
 
-    L('commit payload', {
-      extend_contract_window: body.extend_contract_window,
-      add_ranges: body.add_ranges.length,
-      remove_ranges: body.remove_ranges.length,
-      additionals: body.additionals.length,
-      remove_all: body.remove_all
-    });
+      L('commit payload (plan-ranges)', {
+        extend_contract_window: body.extend_contract_window,
+        ranges: body.ranges.length
+      });
 
-    const res = await authFetch(API(`/api/contracts/${contractId}/plan-ranges`), {
-      method: 'POST',
-      headers: { 'Content-Type':'application/json' },
-      body: JSON.stringify(body)
-    });
+      const res = await authFetch(API(`/api/contracts/${contractId}/plan-ranges`), {
+        method: 'POST',
+        headers: { 'Content-Type':'application/json' },
+        body: JSON.stringify(body)
+      });
+      const json = await res.json().catch(() => null);
 
-    // authFetch returns parsed JSON, not { ok: boolean }
-    if (!res || res.error) {
-      const msg = res?.error || 'Calendar commit failed';
-      console.warn('[CAL][commitIfPending] failed', msg);
-      return { ok: false, message: msg, removedAll: !!removeAll };
+      if (!res.ok || json?.error) {
+        const msg = json?.error || 'Calendar commit failed';
+        console.warn('[CAL][commitIfPending] plan-ranges failed', msg);
+        return { ok: false, message: msg, removedAll: false };
+      }
     }
 
-    // Optimistic in-memory window nudge (for immediate UI consistency)
+    // ---- Unplan REMOVALS (optional; if you stage them) ----
+    if ((Array.isArray(removeRanges) && removeRanges.length) || removeAll) {
+      const ranges = [];
+
+      if (Array.isArray(removeRanges)) {
+        for (const r of removeRanges) {
+          ranges.push({
+            from: r.from,
+            to:   r.to,
+            // backend accepts string dates in days[] for explicit removal;
+            // your removeRanges.days is already array of 'YYYY-MM-DD'
+            days: Array.isArray(r.days) ? r.days.slice() : []
+          });
+        }
+      }
+
+      if (removeAll) {
+        const from = removeAll.from || contractStart || leftEdgeDate || null;
+        const to   = removeAll.to   || contractEnd   || rightEdgeDate || null;
+        if (from && to) {
+          // empty days[] = fast path remove-all per backend handler
+          ranges.push({ from, to, days: [] });
+        }
+      }
+
+      if (ranges.length) {
+        L('commit payload (unplan-ranges)', { ranges: ranges.length });
+        const unRes = await authFetch(API(`/api/contracts/${contractId}/unplan-ranges`), {
+          method: 'POST',
+          headers: { 'Content-Type':'application/json' },
+          body: JSON.stringify({ ranges })
+        });
+        const unJson = await unRes.json().catch(() => null);
+
+        if (!unRes.ok || unJson?.error) {
+          const msg = unJson?.error || 'Unplan commit failed';
+          console.warn('[CAL][commitIfPending] unplan-ranges failed', msg);
+          return { ok: false, message: msg, removedAll: !!removeAll };
+        }
+      }
+    }
+
+    // ---- Optimistic tweak (non-authoritative; UI will refetch afterwards) ----
     try {
       if (window.modalCtx && window.modalCtx.data) {
         if (leftEdgeDate && (!window.modalCtx.data.start_date || leftEdgeDate < window.modalCtx.data.start_date)) {
