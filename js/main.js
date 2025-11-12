@@ -7642,14 +7642,19 @@ async function commitContractCalendarStageIfPending(contractId) {
         return { ok: false, message: msg, removedAll: false };
       }
 
-      if (overlapRes.has_overlap) {
-        // Block clearly if overlapping rather than silently pruning
+         if (overlapRes.has_overlap) {
+        // Ask the user whether to proceed despite the overlap
         const first = Array.isArray(overlapRes.overlaps) && overlapRes.overlaps[0] ? overlapRes.overlaps[0] : null;
-        const msg = first
-          ? `Cannot extend start: overlaps ${first.client_name} (${first.role}${first.band ? ' Band ' + first.band : ''}) window ${first.existing_start_date} → ${first.existing_end_date}.`
-          : 'Cannot extend start: requested window overlaps an existing contract.';
-        alert(msg);
-        return { ok: false, message: msg, removedAll: false };
+        const baseMsg = first
+          ? `This extension overlaps ${first.client_name} (${first.role}${first.band ? ' Band ' + first.band : ''}) window ${first.existing_start_date} → ${first.existing_end_date}.`
+          : 'This extension overlaps an existing contract window.';
+        const proceed = confirm(`${baseMsg}\n\nProceed anyway and save with overlapping windows?`);
+        if (!proceed) {
+          L('overlap preflight: user cancelled save');
+          return { ok: false, message: 'User cancelled due to overlap', removedAll: false, cancelled: true };
+        }
+        L('overlap preflight: user confirmed proceed');
+        // Fall through to save normally
       }
     }
 
@@ -7705,6 +7710,7 @@ async function commitContractCalendarStageIfPending(contractId) {
     return { ok: false, message: e?.message || 'Calendar commit failed', removedAll: false };
   }
 }
+
 // Stage a full-window delete of all TS-free weeks (committed on Save).
 async function removeAllUnsubmittedWeeks(contractId, bounds) {
   const LOG_CAL = (typeof window.__LOG_CAL === 'boolean') ? window.__LOG_CAL : true;
