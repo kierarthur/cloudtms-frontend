@@ -817,14 +817,11 @@ async function getContract(contract_id) {
   return j && j.contract ? j.contract : j;
 }
 
-
-// ✅ CHANGED: after successful upsert, also merge into currentRows and stamp recency
 async function upsertContract(payload, id /* optional */) {
-  const LOGC = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : true; // enable/disable logging
+  const LOGC = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : true;
   const patch = { ...payload };
 
-  // Ensure required window fields are present for PUT.
-  // If user didn't change dates and they're missing, copy from the freshest modal snapshot.
+  // Ensure required window fields are present for PUT without re-clobber.
   if (id && patch.__userChangedDates !== true) {
     const snap = (window.modalCtx && window.modalCtx.data) || {};
     if (!patch.start_date && snap.start_date) patch.start_date = snap.start_date;
@@ -847,7 +844,6 @@ async function upsertContract(payload, id /* optional */) {
     const baseRates = (window.modalCtx && window.modalCtx.data && window.modalCtx.data.rates_json) || {};
     const incoming  = (patch.rates_json && typeof patch.rates_json === 'object') ? patch.rates_json : {};
 
-    // Always prefer explicit incoming numbers (including 0). Else keep baseline.
     if (id) {
       const merged = { ...baseRates };
       for (const k of BUCKETS) {
@@ -880,7 +876,7 @@ async function upsertContract(payload, id /* optional */) {
   });
 
   let data = null;
-  try { data = await res.json(); } catch (_) { /* non-JSON bodies possible */ }
+  try { data = await res.json(); } catch (_) {}
 
   if (!res || !res.ok) {
     const msg =
@@ -896,14 +892,13 @@ async function upsertContract(payload, id /* optional */) {
     if (data) console.log('[CONTRACTS][UPSERT] response body', data);
   }
 
-  // === Merge saved contract into in-memory list cache so reopen uses fresh values ===
+  // Merge saved contract into list cache so reopen uses fresh values
   try {
     const savedContract = (data && (data.contract || data)) || null;
     const savedId = savedContract && savedContract.id;
     if (savedId && Array.isArray(window.currentRows)) {
       const idx = window.currentRows.findIndex(r => String(r.id) === String(savedId));
       if (idx >= 0) {
-        // Shallow merge into existing row so grids immediately reflect the new values
         window.currentRows[idx] = { ...window.currentRows[idx], ...savedContract };
       }
     }
@@ -913,6 +908,8 @@ async function upsertContract(payload, id /* optional */) {
 
   return data;
 }
+
+// ✅ CHANGED: after successful upsert, also merge into currentRows and stamp recency
 
 
 async function deleteContract(contract_id) {
@@ -1625,7 +1622,7 @@ function openContract(row) {
         // === CREATE vs EDIT ordering ===
         // CREATE: upsert first to obtain id → then commit stage (if any) → normalize window → (maybe) generate defaults
         // EDIT: if any stage present, always commit calendar FIRST → normalize window → then upsert metadata
-      if (!isCreate && data.id && stageShape.hasAny) {
+  if (!isCreate && data.id && stageShape.hasAny) {
   if (LOGC) console.log('[CONTRACTS] calendar (any stage) → commitContractCalendarStageIfPending');
   const preCalRes = await commitContractCalendarStageIfPending(data.id);
   if (!preCalRes.ok) {
@@ -1636,32 +1633,38 @@ function openContract(row) {
     console.groupEnd?.();
     return false;
   }
-  if (typeof normalizeContractWindowToShifts === 'function') {
-    try {
-      const norm = await normalizeContractWindowToShifts(data.id);
-      if (norm && norm.ok) {
-        data.start_date = norm.start_date || data.start_date || null;
-        data.end_date   = norm.end_date   || data.end_date   || null;
-      }
-    } catch (e) {
-      if (LOGC) console.warn('[CONTRACTS] normalize window to shifts failed (pre-upsert, non-fatal)', e);
-    }
-  }
-  // when editing with stage, also avoid auto-generation
-  data.skip_generate_weeks = true;
 
-  // ⬇️ REFRESH server truth to avoid stale window re-write
-   // ⬇️ REFRESH server truth to avoid stale window re-write
+  // Do NOT normalize on the FE — backend now owns window shrink/extend.
+  // Instead, pull the fresh contract (authoritative window) and bind it.
   try {
     const fresh = await getContract(data.id);
     if (fresh && fresh.id) {
       window.modalCtx.data = fresh;
-      // Only treat as user-edited if Main tab actually changed them
+
+      // Update formState (so subsequent PUTs never push stale dates)
+      const fs = (window.modalCtx.formState ||= { __forId: (data.id||null), main:{}, pay:{} });
+      fs.main ||= {};
+      fs.main.start_date = fresh.start_date || null;
+      fs.main.end_date   = fresh.end_date   || null;
+
+      // Update visible inputs if we're on the Main tab
+      try {
+        const form = document.querySelector('#contractForm');
+        if (form) {
+          const sd = form.querySelector('input[name="start_date"]');
+          const ed = form.querySelector('input[name="end_date"]');
+          const toUk = (iso) => {
+            try { return (typeof formatIsoToUk === 'function') ? (formatIsoToUk(iso) || iso) : iso; } catch { return iso; }
+          };
+          if (sd && fresh.start_date) sd.value = toUk(fresh.start_date);
+          if (ed && fresh.end_date)   ed.value = toUk(fresh.end_date);
+        }
+      } catch {}
+      // Ensure the payload carries authoritative dates unless user explicitly changed them
       const userEditedStart = !!(prevStartIso && startIso && startIso !== prevStartIso);
       const userEditedEnd   = !!(prevEndIso   && endIso   && endIso   !== prevEndIso);
       data.__userChangedDates = (userEditedStart || userEditedEnd);
       if (!data.__userChangedDates) {
-        // Ensure required fields are present, but not stale
         data.start_date = fresh.start_date;
         data.end_date   = fresh.end_date;
       }
@@ -1670,7 +1673,10 @@ function openContract(row) {
     if (LOGC) console.warn('[CONTRACTS] fresh refetch failed (proceeding with current modal data)', e);
   }
 
+  // Avoid auto-generation when calendar stage was present
+  data.skip_generate_weeks = true;
 }
+
 
 if (LOGC) console.log('[CONTRACTS] upsert → upsertContract');
 const saved = await upsertContract(data, data.id || undefined);
@@ -7615,6 +7621,7 @@ function confirmDiscardChangesIfDirty(){
   discardAllModalsAndState();
   return true;
 }
+
 async function commitContractCalendarStageIfPending(contractId) {
   const LOG_CAL = (typeof window.__LOG_CAL === 'boolean') ? window.__LOG_CAL : true;
   const L = (...a)=> { if (LOG_CAL) console.log('[CAL][commitIfPending]', ...a); };
@@ -7633,7 +7640,7 @@ async function commitContractCalendarStageIfPending(contractId) {
     const {
       addRanges,
       removeRanges,
-      additionals,   // not used by backend plan API; handled implicitly via week-creation rules
+      additionals,
       removeAll,
       needsLeftExtend,
       leftEdgeDate,
@@ -7646,34 +7653,29 @@ async function commitContractCalendarStageIfPending(contractId) {
     const contractEnd   = contract?.end_date   || null;
     const candidateId   = contract?.candidate_id || null;
 
-    // ---- Optional overlap preflight for left-extend ----
+    // Optional overlap preflight for left-extend
     if (needsLeftExtend && candidateId) {
       const newStart = leftEdgeDate && contractStart ? (leftEdgeDate < contractStart ? leftEdgeDate : contractStart)
                                                      : (leftEdgeDate || contractStart);
       const newEnd   = rightEdgeDate && contractEnd ? (rightEdgeDate > contractEnd ? rightEdgeDate : contractEnd)
                                                     : (rightEdgeDate || contractEnd || newStart);
 
-      const payload = {
-        candidate_id: candidateId,
-        start_date: newStart,
-        end_date: newEnd,
-        ignore_contract_id: contractId
-      };
-
-      L('preflight overlap check', payload);
       const ovRes = await authFetch(API('/api/contracts/check-overlap'), {
         method: 'POST',
         headers: { 'Content-Type':'application/json' },
-        body: JSON.stringify(payload)
+        body: JSON.stringify({
+          candidate_id: candidateId,
+          start_date: newStart,
+          end_date: newEnd,
+          ignore_contract_id: contractId
+        })
       });
       const ovJson = await ovRes.json().catch(() => null);
-
       if (!ovRes.ok || ovJson?.error) {
         const msg = ovJson?.error || 'Overlap check failed';
         console.warn('[CAL][commitIfPending] overlap preflight failed', msg);
         return { ok: false, message: msg, removedAll: false };
       }
-
       if (ovJson.has_overlap) {
         const first = Array.isArray(ovJson.overlaps) && ovJson.overlaps[0] ? ovJson.overlaps[0] : null;
         const baseMsg = first
@@ -7688,33 +7690,25 @@ async function commitContractCalendarStageIfPending(contractId) {
       }
     }
 
-    // ---- Plan ADDs (send as body.ranges) ----
+    // --- PLAN (adds) ---
     if (Array.isArray(addRanges) && addRanges.length) {
       const body = {
         extend_contract_window: true,
         ranges: addRanges.map(r => ({
           from: r.from,
           to:   r.to,
-          // backend accepts either array of date strings or of objects {date, …}; keep your explicit objects
           days: Array.isArray(r.days) ? r.days : [],
-          // harmless passthroughs (backend ignores unknown keys)
           merge: r.merge || 'append',
           when_timesheet_exists: r.when_timesheet_exists || 'create_additional'
         }))
       };
-
-      L('commit payload (plan-ranges)', {
-        extend_contract_window: body.extend_contract_window,
-        ranges: body.ranges.length
-      });
-
+      L('commit payload (plan-ranges)', { extend_contract_window: body.extend_contract_window, ranges: body.ranges.length });
       const res = await authFetch(API(`/api/contracts/${contractId}/plan-ranges`), {
         method: 'POST',
         headers: { 'Content-Type':'application/json' },
         body: JSON.stringify(body)
       });
       const json = await res.json().catch(() => null);
-
       if (!res.ok || json?.error) {
         const msg = json?.error || 'Calendar commit failed';
         console.warn('[CAL][commitIfPending] plan-ranges failed', msg);
@@ -7722,31 +7716,19 @@ async function commitContractCalendarStageIfPending(contractId) {
       }
     }
 
-    // ---- Unplan REMOVALS (optional; if you stage them) ----
+    // --- UNPLAN (removals / removeAll) ---
     if ((Array.isArray(removeRanges) && removeRanges.length) || removeAll) {
       const ranges = [];
-
       if (Array.isArray(removeRanges)) {
         for (const r of removeRanges) {
-          ranges.push({
-            from: r.from,
-            to:   r.to,
-            // backend accepts string dates in days[] for explicit removal;
-            // your removeRanges.days is already array of 'YYYY-MM-DD'
-            days: Array.isArray(r.days) ? r.days.slice() : []
-          });
+          ranges.push({ from: r.from, to: r.to, days: Array.isArray(r.days) ? r.days.slice() : [] });
         }
       }
-
       if (removeAll) {
         const from = removeAll.from || contractStart || leftEdgeDate || null;
         const to   = removeAll.to   || contractEnd   || rightEdgeDate || null;
-        if (from && to) {
-          // empty days[] = fast path remove-all per backend handler
-          ranges.push({ from, to, days: [] });
-        }
+        if (from && to) ranges.push({ from, to, days: [] });
       }
-
       if (ranges.length) {
         L('commit payload (unplan-ranges)', { ranges: ranges.length });
         const unRes = await authFetch(API(`/api/contracts/${contractId}/unplan-ranges`), {
@@ -7755,7 +7737,6 @@ async function commitContractCalendarStageIfPending(contractId) {
           body: JSON.stringify({ ranges })
         });
         const unJson = await unRes.json().catch(() => null);
-
         if (!unRes.ok || unJson?.error) {
           const msg = unJson?.error || 'Unplan commit failed';
           console.warn('[CAL][commitIfPending] unplan-ranges failed', msg);
@@ -7764,29 +7745,52 @@ async function commitContractCalendarStageIfPending(contractId) {
       }
     }
 
-    // ---- Optimistic tweak (non-authoritative; UI will refetch afterwards) ----
+    // Authoritative refresh from backend (picks up window shrink/extend)
+    let fresh = null;
     try {
-      if (window.modalCtx && window.modalCtx.data) {
-        if (leftEdgeDate && (!window.modalCtx.data.start_date || leftEdgeDate < window.modalCtx.data.start_date)) {
-          window.modalCtx.data.start_date = leftEdgeDate;
-        }
-        if (rightEdgeDate && (!window.modalCtx.data.end_date || rightEdgeDate > window.modalCtx.data.end_date)) {
-          window.modalCtx.data.end_date = rightEdgeDate;
-        }
-      }
+      const r = await authFetch(API(`/api/contracts/${_enc(contractId)}?ts=${Date.now()}`), { method:'GET' });
+      const j = await r.json().catch(()=>null);
+      fresh = (j && (j.contract || j)) || null;
     } catch {}
+    if (fresh && fresh.id) {
+      // bind to modalCtx
+      window.modalCtx = window.modalCtx || {};
+      window.modalCtx.data = fresh;
 
-    // Clear staged state after a successful commit
+      // push into form state
+      const fs = (window.modalCtx.formState ||= { __forId: (fresh.id||contractId), main:{}, pay:{} });
+      fs.main ||= {};
+      fs.main.start_date = fresh.start_date || null;
+      fs.main.end_date   = fresh.end_date   || null;
+
+      // reflect in visible inputs (Main tab) using UK format if helper exists
+      try {
+        const form = document.querySelector('#contractForm');
+        if (form) {
+          const sd = form.querySelector('input[name="start_date"]');
+          const ed = form.querySelector('input[name="end_date"]');
+          const toUk = (iso) => {
+            try { return (typeof formatIsoToUk === 'function') ? (formatIsoToUk(iso) || iso) : iso; } catch { return iso; }
+          };
+          if (sd && fresh.start_date) sd.value = toUk(fresh.start_date);
+          if (ed && fresh.end_date)   ed.value = toUk(fresh.end_date);
+        }
+      } catch {}
+    }
+
+    // Clear staged state after success
     try { clearContractCalendarStageState(contractId); } catch {}
 
     L('calendar commit ok');
-    return { ok: true, detail: 'calendar saved', removedAll: !!removeAll };
+    return { ok: true, detail: 'calendar saved', removedAll: !!removeAll, newStart: fresh?.start_date || null, newEnd: fresh?.end_date || null };
 
   } catch (e) {
     console.warn('[CAL][commitIfPending] failed', e);
     return { ok: false, message: e?.message || 'Calendar commit failed', removedAll: false };
   }
 }
+
+
 
 // Stage a full-window delete of all TS-free weeks (committed on Save).
 async function removeAllUnsubmittedWeeks(contractId, bounds) {
