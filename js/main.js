@@ -7584,25 +7584,127 @@ function confirmDiscardChangesIfDirty(){
   discardAllModalsAndState();
   return true;
 }
-
 async function commitContractCalendarStageIfPending(contractId) {
   const LOG_CAL = (typeof window.__LOG_CAL === 'boolean') ? window.__LOG_CAL : true;
   const L = (...a)=> { if (LOG_CAL) console.log('[CAL][commitIfPending]', ...a); };
+
   try {
     const st = getContractCalendarStageState(contractId);
     const hasPending =
       !!st &&
       (st.add.size || st.remove.size || Object.keys(st.additional||{}).length || !!st.removeAll);
-    if (!hasPending) { L('no pending calendar changes'); return { ok: true, detail: 'no-op', removedAll: false }; }
-    const res = await commitContractCalendarStage(contractId);
+    if (!hasPending) {
+      L('no pending calendar changes');
+      return { ok: true, detail: 'no-op', removedAll: false };
+    }
+
+    // Build ranges + symmetry metadata
+    const {
+      addRanges,
+      removeRanges,
+      additionals,
+      removeAll,
+      needsLeftExtend,
+      leftEdgeDate,
+      rightEdgeDate
+    } = buildPlanRangesFromStage(contractId);
+
+    // Pull current contract & window from modal
+    const contract = (window.modalCtx && window.modalCtx.data) ? window.modalCtx.data : {};
+    const contractStart = contract?.start_date || null;
+    const contractEnd   = contract?.end_date   || null;
+    const candidateId   = contract?.candidate_id || null;
+
+    // Optional preflight overlap check when extending left
+    if (needsLeftExtend && candidateId) {
+      const newStart = leftEdgeDate && contractStart ? (leftEdgeDate < contractStart ? leftEdgeDate : contractStart)
+                                                     : (leftEdgeDate || contractStart);
+      const newEnd   = rightEdgeDate && contractEnd ? (rightEdgeDate > contractEnd ? rightEdgeDate : contractEnd)
+                                                    : (rightEdgeDate || contractEnd || newStart);
+
+      const payload = {
+        candidate_id: candidateId,
+        start_date: newStart,
+        end_date: newEnd,
+        ignore_contract_id: contractId
+      };
+
+      L('preflight overlap check', payload);
+      const overlapRes = await authFetch(API('/api/contracts/check-overlap'), {
+        method: 'POST',
+        headers: { 'Content-Type':'application/json' },
+        body: JSON.stringify(payload)
+      });
+
+      if (!overlapRes?.ok) {
+        const msg = overlapRes?.error || 'Overlap check failed';
+        console.warn('[CAL][commitIfPending] overlap preflight failed', msg);
+        return { ok: false, message: msg, removedAll: false };
+      }
+
+      if (overlapRes.has_overlap) {
+        // Block clearly if overlapping rather than silently pruning
+        const first = Array.isArray(overlapRes.overlaps) && overlapRes.overlaps[0] ? overlapRes.overlaps[0] : null;
+        const msg = first
+          ? `Cannot extend start: overlaps ${first.client_name} (${first.role}${first.band ? ' Band ' + first.band : ''}) window ${first.existing_start_date} → ${first.existing_end_date}.`
+          : 'Cannot extend start: requested window overlaps an existing contract.';
+        alert(msg);
+        return { ok: false, message: msg, removedAll: false };
+      }
+    }
+
+    // Build final payload for backend commit (always allow extend both ways)
+    const body = {
+      extend_contract_window: true,
+      add_ranges: addRanges || [],
+      remove_ranges: removeRanges || [],
+      additionals: additionals || [],
+      remove_all: !!removeAll
+    };
+
+    L('commit payload', {
+      extend_contract_window: body.extend_contract_window,
+      add_ranges: body.add_ranges.length,
+      remove_ranges: body.remove_ranges.length,
+      additionals: body.additionals.length,
+      remove_all: body.remove_all
+    });
+
+    const res = await authFetch(API(`/api/contracts/${contractId}/plan-ranges`), {
+      method: 'POST',
+      headers: { 'Content-Type':'application/json' },
+      body: JSON.stringify(body)
+    });
+
+    if (!res?.ok) {
+      const msg = res?.error || 'Calendar commit failed';
+      console.warn('[CAL][commitIfPending] failed', msg);
+      return { ok: false, message: msg, removedAll: !!removeAll };
+    }
+
+    // Optimistic in-memory window nudge (for immediate UI consistency)
+    try {
+      if (window.modalCtx && window.modalCtx.data) {
+        if (leftEdgeDate && (!window.modalCtx.data.start_date || leftEdgeDate < window.modalCtx.data.start_date)) {
+          window.modalCtx.data.start_date = leftEdgeDate;
+        }
+        if (rightEdgeDate && (!window.modalCtx.data.end_date || rightEdgeDate > window.modalCtx.data.end_date)) {
+          window.modalCtx.data.end_date = rightEdgeDate;
+        }
+      }
+    } catch {}
+
+    // Clear staged state after a successful commit
+    try { clearContractCalendarStageState(contractId); } catch {}
+
     L('calendar commit ok');
-    return res || { ok: true, detail: 'calendar saved', removedAll: false };
+    return res || { ok: true, detail: 'calendar saved', removedAll: !!removeAll };
+
   } catch (e) {
     console.warn('[CAL][commitIfPending] failed', e);
     return { ok: false, message: e?.message || 'Calendar commit failed', removedAll: false };
   }
 }
-
 // Stage a full-window delete of all TS-free weeks (committed on Save).
 async function removeAllUnsubmittedWeeks(contractId, bounds) {
   const LOG_CAL = (typeof window.__LOG_CAL === 'boolean') ? window.__LOG_CAL : true;
@@ -9594,6 +9696,12 @@ function buildPlanRangesFromStage(contractId) {
     return true;
   };
 
+  // Current contract window in modal (ISO YYYY-MM-DD)
+  const contract = (window.modalCtx && window.modalCtx.data) ? window.modalCtx.data : {};
+  const contractStart = contract?.start_date || null;
+  const contractEnd   = contract?.end_date   || null;
+
+  // Template (std_schedule_json) if present
   let template = (window.modalCtx?.data?.std_schedule_json && typeof window.modalCtx.data.std_schedule_json === 'object')
     ? window.modalCtx.data.std_schedule_json
     : null;
@@ -9618,32 +9726,58 @@ function buildPlanRangesFromStage(contractId) {
     return s;
   })();
 
-  // Mutual exclusivity: if removeAll is set, ignore all adds/additionals.
+  // If 'Remove All' was staged, build a single removal range across the (possibly current) contract window.
   if (st.removeAll) {
     const removeRanges = [];
-    const from = st.removeAll.from || window.modalCtx?.data?.start_date || null;
-    const to   = st.removeAll.to   || window.modalCtx?.data?.end_date   || null;
+    const from = st.removeAll.from || contractStart || null;
+    const to   = st.removeAll.to   || contractEnd   || null;
     removeRanges.push({ from, to, days: [] });
     L('removeRanges (removeAll)', { bounds: { from, to } });
-    return { addRanges: [], removeRanges, additionals: [], removeAll: true };
+    return {
+      addRanges: [],
+      removeRanges,
+      additionals: [],
+      removeAll: true,
+      // meta for symmetry callers
+      needsLeftExtend: false,
+      leftEdgeDate: null,
+      rightEdgeDate: null
+    };
   }
 
+  // ---- Add ranges (with left-extend symmetry) ----
   const addRanges = [];
+  let leftEdgeDate  = null;
+  let rightEdgeDate = null;
+  let needsLeftExtend = false;
+
   if (adds.length) {
+    leftEdgeDate  = adds[0];
+    rightEdgeDate = adds[adds.length - 1];
+
+    // Detect if any add is strictly before the current contract start
+    if (contractStart && leftEdgeDate < contractStart) {
+      needsLeftExtend = true; // <-- symmetry trigger
+    }
+
     const b = boundsOf(adds);
     const LONG_CONSECUTIVE_THRESHOLD = 10;
     const consecutive = isConsecutiveDailyRun(adds);
+
+    // IMPORTANT: never produce an empty explicitDays when no template exists.
+    // Only use weekday-compression if a valid template is present.
+    const haveTemplate = activeDows.size > 0;
     let explicitDays;
 
-    if (consecutive && adds.length >= LONG_CONSECUTIVE_THRESHOLD) {
-      if (activeDows.size > 0) {
-        explicitDays = adds
-          .filter(d => activeDows.has(new Date(d + 'T00:00:00Z').getUTCDay()))
-          .map(d => ({ date: d }));
-      } else {
-        explicitDays = [];
-      }
+    if (consecutive && adds.length >= LONG_CONSECUTIVE_THRESHOLD && haveTemplate) {
+      explicitDays = adds
+        .filter(d => activeDows.has(new Date(d + 'T00:00:00Z').getUTCDay()))
+        .map(d => ({ date: d }));
     } else {
+      // Always send explicit days when:
+      // - no template, or
+      // - selection is short/not long-consecutive, or
+      // - we need left-extend (ensure backend sees concrete pre-start dates)
       explicitDays = adds.map(d => ({ date: d }));
     }
 
@@ -9654,11 +9788,12 @@ function buildPlanRangesFromStage(contractId) {
       merge: 'append',
       when_timesheet_exists: 'create_additional'
     });
-    L('addRanges', { bounds: b, count: explicitDays.length, sample: explicitDays.slice(0, 5) });
+    L('addRanges', { bounds: b, count: explicitDays.length, sample: explicitDays.slice(0, 5), needsLeftExtend });
   } else {
     L('addRanges: none');
   }
 
+  // ---- Remove ranges ----
   const removeRanges = [];
   if (rems.length) {
     const b = boundsOf(rems);
@@ -9672,15 +9807,23 @@ function buildPlanRangesFromStage(contractId) {
     L('removeRanges: none');
   }
 
+  // ---- Additional days (for split weeks) ----
   const additionals = Object.entries(st.additional).map(([baseWeekId, set]) => ({
     baseWeekId, dates: [...set].sort()
   }));
   L('additionals', { count: additionals.length, sample: additionals.slice(0, 3) });
 
-  return { addRanges, removeRanges, additionals, removeAll: false };
+  return {
+    addRanges,
+    removeRanges,
+    additionals,
+    removeAll: false,
+    // symmetry meta for the commit path
+    needsLeftExtend,
+    leftEdgeDate,
+    rightEdgeDate
+  };
 }
-
-
 function revertContractCalendarStage(contractId) {
   clearContractCalendarStageState(contractId);
 }
