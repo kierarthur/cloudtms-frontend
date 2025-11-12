@@ -12329,13 +12329,18 @@ mergedRowForTab(k) {
       });
     } catch {}
 
-    try {
+       try {
       if (this.entity === 'contracts' && k === 'main') {
         window.dispatchEvent(new Event('contracts-main-rendered'));
       }
     } catch {}
 
-    this._hasMountedOnce = true; GE();
+    this._hasMountedOnce = true;
+
+    // Re-evaluate header buttons after tab content re-render
+    if (typeof this._updateButtons === 'function') this._updateButtons();
+
+    GE();
   }
 };
 
@@ -12510,12 +12515,18 @@ const defaultPrimary =
     btnSave.textContent = defaultPrimary; btnSave.setAttribute('aria-label', defaultPrimary);
   L('showModal defaultPrimary', { kind: top.kind, defaultPrimary });
 
+const setCloseLabel = ()=>{
+  // In view mode always show "Close", regardless of child/parent gating
+  const label = (top.mode === 'view')
+    ? 'Close'
+    : (top.kind==='advanced-search')
+      ? 'Close'
+      : ((isChild || top.mode==='edit' || top.mode==='create')
+          ? (top.isDirty ? 'Discard' : 'Cancel')
+          : 'Close');
+  btnClose.textContent = label; btnClose.setAttribute('aria-label',label); btnClose.setAttribute('title',label);
+};
 
-  const setCloseLabel = ()=>{
-    const label = (top.kind==='advanced-search') ? 'Close'
-               : ((isChild || top.mode==='edit' || top.mode==='create') ? (top.isDirty ? 'Discard' : 'Cancel') : 'Close');
-    btnClose.textContent = label; btnClose.setAttribute('aria-label',label); btnClose.setAttribute('title',label);
-  };
 
   top._updateButtons = ()=>{
     try {
@@ -12531,13 +12542,24 @@ const defaultPrimary =
     const relatedBtn = byId('btnRelated');
     if (top.kind==='advanced-search') {
       btnEdit.style.display='none'; btnSave.style.display=''; btnSave.disabled=!!top._saving; if (relatedBtn) relatedBtn.disabled=true;
-    } else if (isChild && !top.noParentGate) {
-      btnSave.style.display = parentEditable ? '' : 'none';
-      const wantApply = (top._applyDesired===true);
-      btnSave.disabled = (!parentEditable) || top._saving || !wantApply;
-      btnEdit.style.display='none'; if (relatedBtn) relatedBtn.disabled=true;
-      if (LOG) console.log('[MODAL] child _updateButtons()', { parentEditable, wantApply, disabled: btnSave.disabled });
-   } else {
+ } else if (isChild && !top.noParentGate) {
+  if (top.mode === 'view') {
+    // Child in VIEW: never show Save
+    btnSave.style.display = 'none';
+    btnSave.disabled = true;
+    btnEdit.style.display = 'none';
+    if (relatedBtn) relatedBtn.disabled = !(top.hasId);
+  } else {
+    // Child in EDIT/CREATE: keep existing gating behaviour
+    btnSave.style.display = parentEditable ? '' : 'none';
+    const wantApply = (top._applyDesired===true);
+    btnSave.disabled = (!parentEditable) || top._saving || !wantApply;
+    btnEdit.style.display='none';
+    if (relatedBtn) relatedBtn.disabled=true;
+    if (LOG) console.log('[MODAL] child _updateButtons()', { parentEditable, wantApply, disabled: btnSave.disabled });
+  }
+} else {
+
   btnEdit.style.display = (top.mode==='view' && top.hasId) ? '' : 'none';
   if (relatedBtn) relatedBtn.disabled = !(top.mode==='view' && top.hasId);
 
