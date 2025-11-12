@@ -7636,13 +7636,14 @@ async function commitContractCalendarStageIfPending(contractId) {
         body: JSON.stringify(payload)
       });
 
-      if (!overlapRes?.ok) {
+      // authFetch returns JSON, not { ok: boolean }
+      if (!overlapRes || overlapRes.error) {
         const msg = overlapRes?.error || 'Overlap check failed';
         console.warn('[CAL][commitIfPending] overlap preflight failed', msg);
         return { ok: false, message: msg, removedAll: false };
       }
 
-         if (overlapRes.has_overlap) {
+      if (overlapRes.has_overlap) {
         // Ask the user whether to proceed despite the overlap
         const first = Array.isArray(overlapRes.overlaps) && overlapRes.overlaps[0] ? overlapRes.overlaps[0] : null;
         const baseMsg = first
@@ -7681,7 +7682,8 @@ async function commitContractCalendarStageIfPending(contractId) {
       body: JSON.stringify(body)
     });
 
-    if (!res?.ok) {
+    // authFetch returns parsed JSON, not { ok: boolean }
+    if (!res || res.error) {
       const msg = res?.error || 'Calendar commit failed';
       console.warn('[CAL][commitIfPending] failed', msg);
       return { ok: false, message: msg, removedAll: !!removeAll };
@@ -7703,7 +7705,7 @@ async function commitContractCalendarStageIfPending(contractId) {
     try { clearContractCalendarStageState(contractId); } catch {}
 
     L('calendar commit ok');
-    return res || { ok: true, detail: 'calendar saved', removedAll: !!removeAll };
+    return { ok: true, detail: 'calendar saved', removedAll: !!removeAll };
 
   } catch (e) {
     console.warn('[CAL][commitIfPending] failed', e);
