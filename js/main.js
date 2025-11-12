@@ -823,10 +823,12 @@ async function upsertContract(payload, id /* optional */) {
   const LOGC = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : true; // enable/disable logging
   const patch = { ...payload };
 
-  // Drop start/end unless explicitly flagged as user-edited (prevents stale overwrite after calendar commit)
+  // Ensure required window fields are present for PUT.
+  // If user didn't change dates and they're missing, copy from the freshest modal snapshot.
   if (id && patch.__userChangedDates !== true) {
-    if ('start_date' in patch) delete patch.start_date;
-    if ('end_date'   in patch) delete patch.end_date;
+    const snap = (window.modalCtx && window.modalCtx.data) || {};
+    if (!patch.start_date && snap.start_date) patch.start_date = snap.start_date;
+    if (!patch.end_date   && snap.end_date)   patch.end_date   = snap.end_date;
   }
   if ('__userChangedDates' in patch) delete patch.__userChangedDates;
 
@@ -1650,21 +1652,25 @@ function openContract(row) {
 
   // ⬇️ REFRESH server truth to avoid stale window re-write
   try {
+    // ⬇️ REFRESH server truth to avoid stale window re-write
+  try {
     const fresh = await getContract(data.id);
     if (fresh && fresh.id) {
       window.modalCtx.data = fresh;
-      // Only allow date fields to be sent if the user actually changed them in Main
+      // Only treat as user-edited if Main tab actually changed them
       const userEditedStart = !!(prevStartIso && startIso && startIso !== prevStartIso);
       const userEditedEnd   = !!(prevEndIso   && endIso   && endIso   !== prevEndIso);
       data.__userChangedDates = (userEditedStart || userEditedEnd);
       if (!data.__userChangedDates) {
-        delete data.start_date;
-        delete data.end_date;
+        // Ensure required fields are present, but not stale
+        data.start_date = fresh.start_date;
+        data.end_date   = fresh.end_date;
       }
     }
   } catch (e) {
     if (LOGC) console.warn('[CONTRACTS] fresh refetch failed (proceeding with current modal data)', e);
   }
+
 }
 
 if (LOGC) console.log('[CONTRACTS] upsert → upsertContract');
