@@ -153,6 +153,7 @@ function normalizeClientSettingsForSave(raw) {
   // and only flag invalid when a provided key fails HH:MM
   let invalid = false;
 
+  // Timezone + day/night times
   ['day_start','day_end','night_start','night_end','timezone_id'].forEach(k => {
     if (!(k in src)) return;            // not provided → ignore
     const v = src[k];
@@ -162,6 +163,19 @@ function normalizeClientSettingsForSave(raw) {
     if (hhmmss === null) { invalid = true; return; }
     out[k] = hhmmss;
   });
+
+  // NEW: gates + default submission mode
+  if ('pay_reference_required' in src) {
+    out.pay_reference_required = !!(src.pay_reference_required === true || src.pay_reference_required === 'true' || src.pay_reference_required === 'on' || src.pay_reference_required === 1 || src.pay_reference_required === '1');
+  }
+  if ('invoice_reference_required' in src) {
+    out.invoice_reference_required = !!(src.invoice_reference_required === true || src.invoice_reference_required === 'true' || src.invoice_reference_required === 'on' || src.invoice_reference_required === 1 || src.invoice_reference_required === '1');
+  }
+  if ('default_submission_mode' in src) {
+    const mode = String(src.default_submission_mode || '').toUpperCase();
+    if (mode === 'ELECTRONIC' || mode === 'MANUAL') out.default_submission_mode = mode;
+    else out.default_submission_mode = 'ELECTRONIC';
+  }
 
   return { cleaned: out, invalid };
 }
@@ -2214,6 +2228,9 @@ function openContract(row) {
       if (base.bucket_labels_json)   m.__bucket_labels = base.bucket_labels_json;
       if (base.std_schedule_json)    m.__template      = base.std_schedule_json;
       if (base.std_hours_json)       m.__hours         = base.std_hours_json;
+      // Seed mileage if present on row
+      if (base.mileage_charge_rate != null) m.mileage_charge_rate = base.mileage_charge_rate;
+      if (base.mileage_pay_rate != null)    m.mileage_pay_rate    = base.mileage_pay_rate;
       m.__seeded = true;
       if (LOGC) console.log('[CONTRACTS] seed formState (main/pay) from base row', {
         forId: (window.modalCtx.formState && window.modalCtx.formState.__forId),
@@ -2426,6 +2443,12 @@ function openContract(row) {
           }
         }
 
+        // NEW: mileage values — prefer Rates tab DOM, then FS staging, else null
+        const mcrDom = document.querySelector('#contractRatesTab input[name="mileage_charge_rate"]');
+        const mprDom = document.querySelector('#contractRatesTab input[name="mileage_pay_rate"]');
+        const mileage_charge_rate = (mcrDom && mcrDom.value !== '') ? (Number(mcrDom.value) || null) : numOrNull('mileage_charge_rate');
+        const mileage_pay_rate    = (mprDom && mprDom.value !== '') ? (Number(mprDom.value) || null) : numOrNull('mileage_pay_rate');
+
         const data = {
           id: window.modalCtx.data?.id || null,
           candidate_id,
@@ -2444,7 +2467,10 @@ function openContract(row) {
           rates_json: mergedRates,
           std_hours_json,
           std_schedule_json,
-          bucket_labels_json
+          bucket_labels_json,
+          // NEW: mileage in payload
+          mileage_charge_rate: mileage_charge_rate,
+          mileage_pay_rate: mileage_pay_rate
         };
 
         if (LOGC) {
@@ -3124,6 +3150,47 @@ console.warn('[AFTER UPSERT] reached post-save pre-gate', {
                     const weekNames = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
                     const lbl = document.getElementById('weLabel'); if (lbl) lbl.textContent = weekNames[Number(we)] || 'Sunday';
                     const hidden = form?.querySelector('input[name="week_ending_weekday_snapshot"]'); if (hidden) hidden.value = String(we);
+
+                    // NEW: 2.5 defaults (only on brand new contract and if not manually set yet)
+                    try {
+                      const isNewContract = !window.modalCtx?.data?.id;
+                      const cs = client?.client_settings || {};
+                      if (isNewContract) {
+                        const main = (window.modalCtx.formState ||= {main:{},pay:{}}).main ||= {};
+
+                        if (!Object.prototype.hasOwnProperty.call(main, 'require_reference_to_pay')) {
+                          const v = !!cs.pay_reference_required; setContractFormValue('require_reference_to_pay', v ? 'on' : ''); main.require_reference_to_pay = v;
+                        }
+                        if (!Object.prototype.hasOwnProperty.call(main, 'require_reference_to_invoice')) {
+                          const v = !!cs.invoice_reference_required; setContractFormValue('require_reference_to_invoice', v ? 'on' : ''); main.require_reference_to_invoice = v;
+                        }
+                        if (!Object.prototype.hasOwnProperty.call(main, 'default_submission_mode')) {
+                          const mode = String(cs.default_submission_mode || 'ELECTRONIC').toUpperCase();
+                          const sel = document.querySelector('select[name="default_submission_mode"]'); if (sel) sel.value = mode;
+                          main.default_submission_mode = mode;
+                        }
+
+                        // NEW: mileage default from client when empty
+                        const mcrEl = document.querySelector('#contractRatesTab input[name="mileage_charge_rate"]');
+                        const mprEl = document.querySelector('#contractRatesTab input[name="mileage_pay_rate"]');
+                        const isBlank = (el) => !el || String(el.value||'').trim()==='';
+                        if ((isBlank(mcrEl) && !main.mileage_charge_rate) || (isBlank(mprEl) && !main.mileage_pay_rate)) {
+                          const charge = (client?.mileage_charge_rate != null) ? Number(client.mileage_charge_rate) : null;
+                          if (charge != null && Number.isFinite(charge)) {
+                            const pay = Math.max(0, charge - 0.10);
+                            if (mcrEl) mcrEl.value = charge;
+                            if (mprEl) mprEl.value = pay;
+                            main.mileage_charge_rate = charge;
+                            main.mileage_pay_rate    = pay;
+                            try {
+                              if (mcrEl) { mcrEl.dispatchEvent(new Event('input',{bubbles:true})); mcrEl.dispatchEvent(new Event('change',{bubbles:true})); }
+                              if (mprEl) { mprEl.dispatchEvent(new Event('input',{bubbles:true})); mprEl.dispatchEvent(new Event('change',{bubbles:true})); }
+                            } catch {}
+                          }
+                        }
+                      }
+                    } catch (e) { if (LOGC) console.warn('[CONTRACTS] client defaults (gates/submission/mileage) failed', e); }
+
                     try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
                   } catch (e) { if (LOGC) console.warn('[CONTRACTS] client hint/week-ending check failed', e); }
                 });
@@ -3162,18 +3229,124 @@ console.warn('[AFTER UPSERT] reached post-save pre-gate', {
         const ratesTab = document.querySelector('#contractRatesTab');
         if (ratesTab && !ratesTab.__wiredStage) {
           ratesTab.__wiredStage = true;
+
+          // Stage numeric rate fields + margins
           const stageRates = (e) => {
             const t = e.target;
             if (!t || !t.name) return;
-            if (/^(paye_|umb_|charge_)/.test(t.name)) {
+            if (/^(paye_|umb_|charge_)/.test(t.name) || /^mileage_(charge|pay)_rate$/.test(t.name)) {
               setContractFormValue(t.name, t.value);
-              computeContractMargins();
+              if (/^(paye_|umb_|charge_)/.test(t.name)) computeContractMargins();
               try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
             }
           };
           ratesTab.addEventListener('input', stageRates, true);
           ratesTab.addEventListener('change', stageRates, true);
           computeContractMargins();
+
+          // NEW: Choose preset...
+          const chooseBtn = document.getElementById('btnChoosePreset');
+          if (chooseBtn && !chooseBtn.__wired) {
+            chooseBtn.__wired = true;
+            chooseBtn.addEventListener('click', () => {
+              const payMethod = (function(){
+                try {
+                  const v = (window.modalCtx?.formState?.main?.pay_method_snapshot)
+                         || document.querySelector('select[name="pay_method_snapshot"], select[name="default_pay_method_snapshot"]')?.value
+                         || window.modalCtx?.data?.pay_method_snapshot || 'PAYE';
+                  return String(v).toUpperCase();
+                } catch { return 'PAYE'; }
+              })();
+              openRatePresetPicker((preset /*, pmFromPicker */) => {
+                applyRatePresetToContractForm(preset, payMethod);
+                try {
+                  const chip = document.getElementById('presetChip');
+                  if (chip) {
+                    chip.style.display = '';
+                    const title = preset.name || [preset.role, preset.band?`Band ${preset.band}`:''].filter(Boolean).join(' / ') || 'Preset';
+                    chip.textContent = `Preset: ${title}`;
+                  }
+                } catch {}
+                try { computeContractMargins(); } catch {}
+                try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
+              });
+            });
+          }
+
+          // NEW: Full reset
+          const resetBtn = document.getElementById('btnResetPreset');
+          if (resetBtn && !resetBtn.__wired) {
+            resetBtn.__wired = true;
+            resetBtn.addEventListener('click', () => {
+              // Clear PAYE, Umbrella, Charge
+              const clear = (sel) => { ratesTab.querySelectorAll(sel).forEach(el => { el.value=''; setContractFormValue(el.name, ''); }); };
+              clear('input[name^="paye_"]');
+              clear('input[name^="umb_"]');
+              clear('input[name^="charge_"]');
+
+              // Clear mileage
+              ['mileage_charge_rate','mileage_pay_rate'].forEach(n=>{
+                const el = ratesTab.querySelector(`input[name="${n}"]`);
+                if (el) el.value = '';
+                setContractFormValue(n, '');
+              });
+
+              // Reset bucket labels to defaults & update headings
+              const defaults = { day:'Day', night:'Night', sat:'Sat', sun:'Sun', bh:'BH' };
+              try {
+                const form = document.querySelector('#contractForm');
+                Object.entries(defaults).forEach(([k,v])=>{
+                  setContractFormValue(`bucket_label_${k}`, v);
+                  if (form) {
+                    const el1 = form.querySelector(`[name="bucket_label_${k}"]`);
+                    const el2 = form.querySelector(`[name="bucket_${k}"]`);
+                    if (el1) el1.value = v;
+                    if (el2) el2.value = v;
+                  }
+                  const tr = document.querySelector(`#marginsTable tr[data-b="${k}"] > td:first-child`);
+                  if (tr) tr.textContent = v;
+                  // Also refresh per-bucket labels in cards if visible
+                  ['cardPAYE','cardUMB','cardCHG'].forEach(cid=>{
+                    const card = document.getElementById(cid);
+                    const inp = card?.querySelector(`input[name$="_${k}"]`);
+                    if (card && inp) { const row = inp.closest('.row'); if (row) { const lab=row.querySelector('label'); if (lab) lab.textContent=v; } }
+                  });
+                });
+              } catch {}
+
+              // Clear schedule grid and stage std_schedule_json=null
+              try {
+                const days = ['mon','tue','wed','thu','fri','sat','sun'];
+                days.forEach(d=>{
+                  const s = document.querySelector(`input[name="${d}_start"]`);
+                  const e = document.querySelector(`input[name="${d}_end"]`);
+                  const b = document.querySelector(`input[name="${d}_break"]`);
+                  if (s) s.value = '';
+                  if (e) e.value = '';
+                  if (b) b.value = '';
+                });
+                const fs = (window.modalCtx.formState ||= { main:{}, pay:{} });
+                fs.main.__template = null;
+              } catch {}
+
+              // Clear role/band/display_site (keep candidate/client/gates/submission)
+              try {
+                const fs = (window.modalCtx.formState ||= { main:{}, pay:{} }).main ||= {};
+                fs.role = ''; fs.band = ''; fs.display_site = '';
+                const form = document.querySelector('#contractForm');
+                if (form) {
+                  const r=form.querySelector('[name="role"]'); if (r) r.value='';
+                  const b=form.querySelector('[name="band"]'); if (b) b.value='';
+                  const s=form.querySelector('[name="display_site"]'); if (s) s.value='';
+                }
+              } catch {}
+
+              // Clear chip & recompute margins
+              try { const chip=document.getElementById('presetChip'); if (chip) { chip.style.display='none'; chip.textContent=''; } } catch {}
+              try { computeContractMargins(); } catch {}
+              try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
+            });
+          }
         }
       };
 
@@ -4493,6 +4666,7 @@ function renderContractMainTab(ctx) {
 // ─────────────────────────────────────────────────────────────────────────────
 // UPDATED: renderContractRatesTab (adds logging only)
 // ─────────────────────────────────────────────────────────────────────────────
+
 function renderContractRatesTab(ctx) {
   const LOGC = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : false;
 
@@ -4556,6 +4730,12 @@ function renderContractRatesTab(ctx) {
             <div class="row"><label>${labelOf('sun')}</label><div class="controls"><input class="input" name="charge_sun"   value="${num(R.charge_sun)}" /></div></div>
             <div class="row"><label>${labelOf('bh')}</label><div class="controls"><input class="input" name="charge_bh"    value="${num(R.charge_bh)}" /></div></div>
           </div>
+
+          <!-- Mileage row -->
+          <div class="grid-2" style="margin-top:10px">
+            <div class="row"><label>Mileage charge</label><div class="controls"><input class="input" name="mileage_charge_rate" value="${num(merged?.mileage_charge_rate)}" /></div></div>
+            <div class="row"><label>Mileage pay</label><div class="controls"><input class="input" name="mileage_pay_rate" value="${num(merged?.mileage_pay_rate)}" /></div></div>
+          </div>
         </div>
       </div>
 
@@ -4572,8 +4752,6 @@ function renderContractRatesTab(ctx) {
       </table>
     </div>`;
 }
-
-
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Week actions (drawer modals)
@@ -9026,54 +9204,171 @@ function mountContractRatesTab() {
 // Open preset picker (card grid) and return chosen data
 function openRatePresetPicker(onPick) {
   const form = document.querySelector('#contractForm'); if (!form) return;
-  const client_id    = form.querySelector('[name="client_id"]')?.value || '';
-  const start_date   = form.querySelector('[name="start_date"]')?.value || '';
+  const client_id  = form.querySelector('[name="client_id"]')?.value || '';
+  const start_date = form.querySelector('[name="start_date"]')?.value || '';
 
-  const content = `<div class="tabc">
-    <div class="hint">Select a preset (Global${client_id ? ' and Client' : ''}).</div>
-    <div id="presetGrid" style="max-height:60vh;overflow:auto"></div>
-  </div>`;
+  const defaultScope = client_id ? 'CLIENT' : 'GLOBAL';
 
-  showModal('Rate Presets', [{key:'p',title:'Presets'}], () => content, async ()=>true, false, async () => {
-    const grid = byId('presetGrid'); if (!grid) return;
-
-    let globals = [];
-    try { globals = (typeof fetchGlobalRatePresets === 'function') ? (await fetchGlobalRatePresets({ active_on: start_date })) : []; } catch {}
-    let clientPresets = [];
-    if (client_id) {
-      try { clientPresets = await fetchClientRatePresets({ client_id }); } catch {}
-    }
-
-    const toCard = (p, source) => `
-      <div class="card preset-card" data-src="${source}">
-        <div class="row"><label class="section">${source === 'GLOBAL' ? 'Global preset' : 'Client preset'}</label></div>
-        <div class="mini">${p.role||''}${p.band?` • Band ${p.band}`:''}${p.date_from?` • from ${p.date_from}`:''}${p.date_to?` → ${p.date_to}`:''}</div>
-        <div class="grid-3" style="margin-top:8px">
-          <div><div class="mini">Charge</div><div class="pill">D:${p.charge_day||'-'} N:${p.charge_night||'-'} Sa:${p.charge_sat||'-'} Su:${p.charge_sun||'-'} BH:${p.charge_bh||'-'}</div></div>
-          <div><div class="mini">PAYE</div><div class="pill">D:${p.paye_day||'-'} N:${p.paye_night||'-'} Sa:${p.paye_sat||'-'} Su:${p.paye_sun||'-'} BH:${p.paye_bh||'-'}</div></div>
-          <div><div class="mini">Umbrella</div><div class="pill">D:${p.umb_day||'-'} N:${p.umb_night||'-'} Sa:${p.umb_sat||'-'} Su:${p.umb_sun||'-'} BH:${p.umb_bh||'-'}</div></div>
+  const content = () => `
+    <div class="tabc" id="ratePresetPicker">
+      <div class="row"><label class="section">Source</label>
+        <div class="controls" style="display:flex;gap:10px;align-items:center">
+          <label><input type="radio" name="rp_scope" value="ALL" ${defaultScope==='ALL'?'checked':''}/> All</label>
+          <label><input type="radio" name="rp_scope" value="GLOBAL" ${defaultScope==='GLOBAL'?'checked':''}/> Global</label>
+          <label ${client_id?'':'title="Pick a client to enable Client presets"'}><input type="radio" name="rp_scope" value="CLIENT" ${defaultScope==='CLIENT'?'checked':''} ${client_id?'':'disabled'}/> Client</label>
+          <input type="text" id="rp_search" placeholder="Search…" style="margin-left:auto;min-width:200px"/>
         </div>
-      </div>`;
+      </div>
+      <div class="hint" style="margin:6px 0 10px">
+        Double‑click a row to apply. Single‑click selects; click <em>Pick selected</em> to apply.
+      </div>
+      <div style="border:1px solid var(--line);border-radius:10px;overflow:hidden">
+        <table class="grid" id="rp_table">
+          <thead>
+            <tr>
+              <th style="width:36px"></th>
+              <th>Name / Role / Band</th>
+              <th>Scope</th>
+              <th>Dates</th>
+              <th>Charge (D/N/Sa/Su/BH)</th>
+              <th>PAYE</th>
+              <th>Umbrella</th>
+              <th>Mileage</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <div class="actions" style="justify-content:flex-start">
+        <button type="button" class="btn mini" id="rp_pick_btn" disabled>Pick selected</button>
+      </div>
+    </div>`;
 
-    grid.innerHTML = `
-      ${globals.length ? `<div class="row"><label class="section">Global</label></div><div class="grid-2">${globals.map(p => toCard(p, 'GLOBAL')).join('')}</div>` : ''}
-      ${client_id ? `<div class="row" style="margin-top:8px"><label class="section">Client</label></div><div class="grid-2">${clientPresets.map(p => toCard(p, 'CLIENT')).join('')}</div>` : ''}
-      ${(!globals.length && !clientPresets.length) ? `<div class="mini">No presets found.</div>` : '' }
-    `;
+  showModal(
+    'Rate Presets',
+    [{ key:'p', title:'Presets' }],
+    () => content(),
+    async () => true,      // the picker closes itself on pick
+    false,
+    async () => {
+      // Wire after paint
+      const root   = document.getElementById('ratePresetPicker');
+      const tbody  = root?.querySelector('#rp_table tbody');
+      const search = root?.querySelector('#rp_search');
+      const radios = Array.from(root?.querySelectorAll('input[name="rp_scope"]') || []);
+      const pickBtn= root?.querySelector('#rp_pick_btn');
 
-    grid.querySelectorAll('.preset-card').forEach((card, idx) => {
-      card.addEventListener('click', () => {
-        const source = card.getAttribute('data-src');
-        const list = (source === 'GLOBAL') ? globals : clientPresets;
-        const allCards = Array.from(grid.querySelectorAll('.preset-card'));
-        const offset = (source === 'GLOBAL') ? 0 : (globals.length ? globals.length : 0);
-        const picked = list[allCards.indexOf(card) - (source==='GLOBAL' ? 0 : offset)];
-        if (picked && typeof onPick === 'function') onPick({ ...picked, source });
-        discardTopModal && discardTopModal();
-      });
-    });
-  }, { kind:'rate-presets' });
+      if (!tbody) return;
+
+      let rows = [];
+      let selectedIndex = -1;
+
+      const scopeVal = () => (radios.find(r => r.checked)?.value || (client_id ? 'CLIENT' : 'GLOBAL'));
+      const currentPayMethod = () => {
+        try {
+          const candDerived = (window.modalCtx?.formState?.main?.pay_method_snapshot)
+            || document.querySelector('select[name="pay_method_snapshot"], select[name="default_pay_method_snapshot"]')?.value
+            || window.modalCtx?.data?.pay_method_snapshot || 'PAYE';
+          return String(candDerived).toUpperCase();
+        } catch { return 'PAYE'; }
+      };
+
+      const fetchRows = async () => {
+        const scope = scopeVal();               // 'ALL'|'GLOBAL'|'CLIENT'
+        const q = (search?.value || '').trim();
+        try {
+          // Reuse manager API utilities from 2.2 work
+          const raw = await listRatePresets({ scope, client_id: client_id || null, q, active_on: start_date || null });
+          rows = Array.isArray(raw) ? sortPresetsForView(scope, raw) : [];
+        } catch { rows = []; }
+      };
+
+      const pill = (v) => (v==null||v==='') ? '-' : String(v);
+      const rateRow = (p) => [
+        `D:${pill(p.charge_day)} N:${pill(p.charge_night)} Sa:${pill(p.charge_sat)} Su:${pill(p.charge_sun)} BH:${pill(p.charge_bh)}`,
+        `D:${pill(p.paye_day)} N:${pill(p.paye_night)} Sa:${pill(p.paye_sat)} Su:${pill(p.paye_sun)} BH:${pill(p.paye_bh)}`,
+        `D:${pill(p.umb_day)} N:${pill(p.umb_night)} Sa:${pill(p.umb_sat)} Su:${pill(p.umb_sun)} BH:${pill(p.umb_bh)}`
+      ];
+
+      const render = () => {
+        const q = (search?.value || '').trim().toLowerCase();
+        const list = q
+          ? rows.filter(r => {
+              const s = `${r.name||''} ${r.role||''} ${r.band||''} ${(r.scope||'')}`.toLowerCase();
+              return s.includes(q);
+            })
+          : rows;
+
+        tbody.innerHTML = list.map((p, i) => {
+          const [chg, py, um] = rateRow(p);
+          const dates = `${p.date_from||''}${p.date_to?` → ${p.date_to}`:''}`;
+          const mile = (p.mileage_charge_rate!=null || p.mileage_pay_rate!=null)
+            ? `${pill(p.mileage_charge_rate)} / ${pill(p.mileage_pay_rate)}`
+            : '-';
+          const label = [p.name, p.role, (p.band?`Band ${p.band}`:'')].filter(Boolean).join(' • ');
+          return `<tr data-i="${i}" class="${selectedIndex===i?'selected':''}" style="cursor:pointer">
+            <td><input type="radio" name="rp_row" ${selectedIndex===i?'checked':''}/></td>
+            <td>${label}</td>
+            <td>${p.scope || '-'}</td>
+            <td>${dates}</td>
+            <td><span class="pill">${chg}</span></td>
+            <td><span class="pill">${py}</span></td>
+            <td><span class="pill">${um}</span></td>
+            <td><span class="pill">${mile}</span></td>
+          </tr>`;
+        }).join('');
+
+        Array.from(tbody.querySelectorAll('tr[data-i]')).forEach(tr => {
+          tr.addEventListener('click', () => {
+            selectedIndex = Number(tr.getAttribute('data-i') || -1);
+            render();
+            if (pickBtn) pickBtn.disabled = !(selectedIndex >= 0);
+          });
+          tr.addEventListener('dblclick', () => {
+            selectedIndex = Number(tr.getAttribute('data-i') || -1);
+            if (selectedIndex >= 0) {
+              const picked = (q ? rows.filter(r => {
+                const s = `${r.name||''} ${r.role||''} ${r.band||''} ${(r.scope||'')}`.toLowerCase();
+                return s.includes(q);
+              }) : rows)[selectedIndex];
+              if (picked) {
+                try { if (typeof onPick === 'function') onPick(picked, currentPayMethod()); } catch {}
+                discardTopModal && discardTopModal();
+              }
+            }
+          });
+        });
+      };
+
+      const refresh = async () => { await fetchRows(); selectedIndex = -1; if (pickBtn) pickBtn.disabled = true; render(); };
+
+      radios.forEach(r => r.addEventListener('change', refresh));
+      if (search) search.addEventListener('input', () => { render(); });
+
+      if (pickBtn) {
+        pickBtn.addEventListener('click', () => {
+          if (selectedIndex < 0) return;
+          const q = (search?.value || '').trim().toLowerCase();
+          const list = q
+            ? rows.filter(r => {
+                const s = `${r.name||''} ${r.role||''} ${r.band||''} ${(r.scope||'')}`.toLowerCase();
+                return s.includes(q);
+              })
+            : rows;
+          const picked = list[selectedIndex];
+          if (picked) {
+            try { if (typeof onPick === 'function') onPick(picked, currentPayMethod()); } catch {}
+            discardTopModal && discardTopModal();
+          }
+        });
+      }
+
+      await refresh();
+    },
+    { kind: 'rate-presets' }
+  );
 }
+
 
 async function fetchClientRatePresets({ client_id, role, band, active_on }) {
   if (!client_id) return [];
@@ -9103,18 +9398,136 @@ async function fetchCandidateRateOverrides({ candidate_id, client_id, role, band
 function applyRatePresetToContractForm(preset, payMethod /* 'PAYE'|'UMBRELLA' */) {
   const form = document.querySelector('#contractForm'); if (!form || !preset) return;
 
-  // Always set charges
+  // 1) Always set charges
   const CH = { day:preset.charge_day, night:preset.charge_night, sat:preset.charge_sat, sun:preset.charge_sun, bh:preset.charge_bh };
   Object.entries(CH).forEach(([k,v])=>{ const el=form.querySelector(`[name="charge_${k}"]`); if (el && v!=null) el.value = v; });
 
-  if (payMethod === 'PAYE') {
-    const PY = { day:preset.paye_day, night:preset.paye_night, sat:preset.paye_sat, sun:preset.paye_sun, bh:preset.paye_bh };
-    Object.entries(PY).forEach(([k,v])=>{ const el=form.querySelector(`[name="paye_${k}"]`); if (el && v!=null) el.value = v; });
-  } else {
-    const UM = { day:preset.umb_day, night:preset.umb_night, sat:preset.umb_sat, sun:preset.umb_sun, bh:preset.umb_bh };
-    Object.entries(UM).forEach(([k,v])=>{ const el=form.querySelector(`[name="umb_${k}"]`); if (el && v!=null) el.value = v; });
+  // 2) Set pay for selected method
+  const applyBlock = (prefix, src) => {
+    const MAP = { day:src[`${prefix}_day`], night:src[`${prefix}_night`], sat:src[`${prefix}_sat`], sun:src[`${prefix}_sun`], bh:src[`${prefix}_bh`] };
+    Object.entries(MAP).forEach(([k,v]) => {
+      const el=form.querySelector(`[name="${prefix.toLowerCase()}_${k}"]`); if (el && v!=null) el.value = v;
+    });
+  };
+  if (String(payMethod||'PAYE').toUpperCase()==='PAYE') applyBlock('paye', preset);
+  else applyBlock('umb', preset);
+
+  // 3) Main metadata (role/band/display_site) - if present; do NOT touch candidate/client or gates/submission
+  const roleEl = form.querySelector('[name="role"]');
+  const bandEl = form.querySelector('[name="band"]');
+  const siteEl = form.querySelector('[name="display_site"]');
+  if (preset.role != null && roleEl) roleEl.value = String(preset.role || '');
+  if (preset.band != null && bandEl) bandEl.value = String(preset.band || '');
+  if (preset.display_site != null && siteEl) siteEl.value = String(preset.display_site || '');
+
+  // Stage to formState in case fields aren’t in DOM (e.g., different tab active)
+  try {
+    const fs = (window.modalCtx.formState ||= { main:{}, pay:{} });
+    if (preset.role != null) fs.main.role = String(preset.role || '');
+    if (preset.band != null) fs.main.band = String(preset.band || '');
+    if (preset.display_site != null) fs.main.display_site = String(preset.display_site || '');
+  } catch {}
+
+  // 4) Bucket labels → set inputs and update live headings
+  if (preset.bucket_labels_json && typeof preset.bucket_labels_json === 'object') {
+    const BL = preset.bucket_labels_json;
+    const names = { day:'Day', night:'Night', sat:'Sat', sun:'Sun', bh:'BH' };
+    Object.entries(names).forEach(([k, def]) => {
+      const v = (BL[k] || '').trim() || def;
+      const el1 = form.querySelector(`[name="bucket_label_${k}"]`);
+      const el2 = form.querySelector(`[name="bucket_${k}"]`); // alternate naming seen in onSave builder
+      if (el1) { el1.value = v; try { el1.dispatchEvent(new Event('input', {bubbles:true})); el1.dispatchEvent(new Event('change', {bubbles:true})); } catch {} }
+      if (el2) { el2.value = v; try { el2.dispatchEvent(new Event('input', {bubbles:true})); el2.dispatchEvent(new Event('change', {bubbles:true})); } catch {} }
+      // Stage for save in case inputs are on another tab
+      try { const fs = (window.modalCtx.formState ||= { main:{}, pay:{} }); fs.main[`bucket_label_${k}`] = v; } catch {}
+    });
+
+    // Update visible headings immediately (no full re-render)
+    try {
+      const labels = { ...{day:'Day',night:'Night',sat:'Sat',sun:'Sun',bh:'BH'}, ...preset.bucket_labels_json };
+      const tab = document.getElementById('contractRatesTab');
+      if (tab) {
+        // PAYE / UMB labels
+        ['cardPAYE','cardUMB','cardCHG'].forEach(cid => {
+          const card = document.getElementById(cid);
+          if (!card) return;
+          card.querySelectorAll('.row > label').forEach(lab => {
+            const txt = lab.textContent || '';
+            // headings lines include section titles; skip those
+            if (/pay\s*\(|Charge-out/i.test(txt)) return;
+          });
+          // Per-row labels:
+          Object.entries(labels).forEach(([k,v])=>{
+            const inp = card.querySelector(`input[name$="_${k}"]`);
+            if (inp) {
+              const row = inp.closest('.row');
+              if (row) {
+                const lab = row.querySelector('label');
+                if (lab) lab.textContent = v;
+              }
+            }
+          });
+        });
+        // Margins table bucket column
+        const mg = document.getElementById('marginsTable');
+        if (mg) {
+          Object.entries(labels).forEach(([k,v])=>{
+            const tr = mg.querySelector(`tr[data-b="${k}"] > td:first-child`);
+            if (tr) tr.textContent = v;
+          });
+        }
+      }
+    } catch {}
   }
+
+  // 5) Schedule → copy to grid if provided, and stage for save
+  if (preset.std_schedule_json && typeof preset.std_schedule_json === 'object') {
+    const days = ['mon','tue','wed','thu','fri','sat','sun'];
+    const grid = document; // schedule inputs exist when Calendar/Main tab active; otherwise stage only
+    days.forEach(d => {
+      const s = preset.std_schedule_json[d]?.start || '';
+      const e = preset.std_schedule_json[d]?.end || '';
+      const br= (preset.std_schedule_json[d]?.break_minutes ?? '');
+      const sEl = grid.querySelector(`input[name="${d}_start"]`);
+      const eEl = grid.querySelector(`input[name="${d}_end"]`);
+      const bEl = grid.querySelector(`input[name="${d}_break"]`);
+      if (sEl) sEl.value = s;
+      if (eEl) eEl.value = e;
+      if (bEl) bEl.value = br;
+      try {
+        if (sEl) { sEl.dispatchEvent(new Event('input',{bubbles:true})); sEl.dispatchEvent(new Event('change',{bubbles:true})); }
+        if (eEl) { eEl.dispatchEvent(new Event('input',{bubbles:true})); eEl.dispatchEvent(new Event('change',{bubbles:true})); }
+        if (bEl) { bEl.dispatchEvent(new Event('input',{bubbles:true})); bEl.dispatchEvent(new Event('change',{bubbles:true})); }
+      } catch {}
+    });
+    try {
+      const fs = (window.modalCtx.formState ||= { main:{}, pay:{} });
+      fs.main.__template = JSON.parse(JSON.stringify(preset.std_schedule_json));
+    } catch {}
+  }
+
+  // 6) Mileage → set if present
+  if (preset.mileage_charge_rate != null || preset.mileage_pay_rate != null) {
+    const mcr = document.querySelector('#contractRatesTab input[name="mileage_charge_rate"]');
+    const mpr = document.querySelector('#contractRatesTab input[name="mileage_pay_rate"]');
+    if (mcr && preset.mileage_charge_rate != null) mcr.value = preset.mileage_charge_rate;
+    if (mpr && preset.mileage_pay_rate != null)   mpr.value = preset.mileage_pay_rate;
+    try {
+      if (mcr) { mcr.dispatchEvent(new Event('input',{bubbles:true})); mcr.dispatchEvent(new Event('change',{bubbles:true})); }
+      if (mpr) { mpr.dispatchEvent(new Event('input',{bubbles:true})); mpr.dispatchEvent(new Event('change',{bubbles:true})); }
+    } catch {}
+    try {
+      const fs = (window.modalCtx.formState ||= { main:{}, pay:{} });
+      if (preset.mileage_charge_rate != null) fs.main.mileage_charge_rate = preset.mileage_charge_rate;
+      if (preset.mileage_pay_rate != null)    fs.main.mileage_pay_rate    = preset.mileage_pay_rate;
+    } catch {}
+  }
+
+  // 7) Final UI updates
+  try { computeContractMargins(); } catch {}
+  try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
 }
+
 
 function computeContractMargins() {
   const fs = (window.modalCtx && window.modalCtx.formState) || { main:{}, pay:{} };
@@ -14496,7 +14909,6 @@ function renderClientHospitalsTable() {
 // =================== HOSPITALS TABLE (UPDATED: staged delete & edit) ===================
 
 
-
 async function renderClientSettingsUI(settingsObj){
   const div = byId('clientSettings'); if (!div) return;
 
@@ -14519,7 +14931,11 @@ async function renderClientSettingsUI(settingsObj){
     day_end     : _toHHMM(initial.day_end)     || '20:00',
     night_start : _toHHMM(initial.night_start) || '20:00',
     night_end   : _toHHMM(initial.night_end)   || '06:00',
-    week_ending_weekday: Number.isInteger(Number(initial.week_ending_weekday)) ? String(Math.min(6, Math.max(0, Number(initial.week_ending_weekday)))) : '0'
+    week_ending_weekday: Number.isInteger(Number(initial.week_ending_weekday)) ? String(Math.min(6, Math.max(0, Number(initial.week_ending_weekday)))) : '0',
+    // NEW defaults
+    pay_reference_required: !!initial.pay_reference_required,
+    invoice_reference_required: !!initial.invoice_reference_required,
+    default_submission_mode: String(initial.default_submission_mode || 'ELECTRONIC').toUpperCase()
   };
 
   ctx.clientSettingsState = { ...initial, ...s };
@@ -14533,6 +14949,23 @@ async function renderClientSettingsUI(settingsObj){
     return `<div class="row"><label>Week Ending Day</label><div class="controls"><select name="week_ending_weekday">${opts}</select></div></div>`;
   };
 
+  // NEW: gates & default submission
+  const gatesAndSubmission = () => {
+    return `
+      <div class="row"><label><input type="checkbox" name="pay_reference_required" ${s.pay_reference_required?'checked':''}/> Reference No. required to PAY</label></div>
+      <div class="row"><label><input type="checkbox" name="invoice_reference_required" ${s.invoice_reference_required?'checked':''}/> Reference No. required to INVOICE</label></div>
+      <div class="row">
+        <label>Default Submission</label>
+        <div class="controls">
+          <select name="default_submission_mode">
+            <option value="ELECTRONIC" ${s.default_submission_mode==='ELECTRONIC'?'selected':''}>ELECTRONIC</option>
+            <option value="MANUAL" ${s.default_submission_mode==='MANUAL'?'selected':''}>MANUAL</option>
+          </select>
+        </div>
+      </div>
+    `;
+  };
+
   div.innerHTML = `
     <div class="form" id="clientSettingsForm">
       ${input('timezone_id','Timezone', s.timezone_id)}
@@ -14541,6 +14974,9 @@ async function renderClientSettingsUI(settingsObj){
       ${input('night_start','Night shift starts (HH:MM)', s.night_start, 'time')}
       ${input('night_end','Night shift ends (HH:MM)', s.night_end, 'time')}
       ${weekDaySelect()}
+
+      ${gatesAndSubmission()}
+
       <div class="hint" style="grid-column:1/-1">
         Example: Day 06:00–20:00, Night 20:00–06:00. These settings override global defaults for this client only.
       </div>
@@ -14572,6 +15008,12 @@ async function renderClientSettingsUI(settingsObj){
     // coerce week_ending_weekday to 0..6 (string)
     const w = Number(next.week_ending_weekday);
     next.week_ending_weekday = Number.isInteger(w) ? String(Math.min(6, Math.max(0, w))) : '0';
+
+    // NEW: checkboxes & select coercion
+    next.pay_reference_required = !!(vals.pay_reference_required === 'on' || vals.pay_reference_required === true || vals.pay_reference_required === 'true');
+    next.invoice_reference_required = !!(vals.invoice_reference_required === 'on' || vals.invoice_reference_required === true || vals.invoice_reference_required === 'true');
+    next.default_submission_mode = String((vals.default_submission_mode || next.default_submission_mode || 'ELECTRONIC')).toUpperCase();
+
     ctx.clientSettingsState = next;
   };
 
@@ -14594,7 +15036,21 @@ async function renderClientSettingsUI(settingsObj){
 
     let w = Number(vals.week_ending_weekday);
     if (!Number.isInteger(w) || w<0 || w>6) { hadError = true; w = Number(lastValid.week_ending_weekday) || 0; }
-    ctx.clientSettingsState = { ...ctx.clientSettingsState, ...vals, week_ending_weekday: String(w) };
+
+    // NEW coercions
+    const payReq = !!(vals.pay_reference_required === 'on' || vals.pay_reference_required === true || vals.pay_reference_required === 'true');
+    const invReq = !!(vals.invoice_reference_required === 'on' || vals.invoice_reference_required === true || vals.invoice_reference_required === 'true');
+    const mode   = String(vals.default_submission_mode || '').toUpperCase();
+    const modeOk = (mode === 'ELECTRONIC' || mode === 'MANUAL') ? mode : 'ELECTRONIC';
+
+    ctx.clientSettingsState = {
+      ...ctx.clientSettingsState,
+      ...vals,
+      week_ending_weekday: String(w),
+      pay_reference_required: payReq,
+      invoice_reference_required: invReq,
+      default_submission_mode: modeOk
+    };
     lastValid = { ...ctx.clientSettingsState };
 
     if (hadError) {
