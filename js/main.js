@@ -993,7 +993,7 @@ async function openRatePresetModal({ id, mode } = {}) {
     }
   };
 
-  showModal(
+ showModal(
     isCreate ? 'Create preset' : 'Rate preset',
     [{ key:'main', title:'Main' }],
     () => '<div class="tabc"><div class="hint">Loading…</div></div>',
@@ -1149,9 +1149,10 @@ async function openRatePresetModal({ id, mode } = {}) {
   );
 
   // Kick this frame's onReturn so it doesn't stay on "Loading…"
-  setTimeout(() => {
+   setTimeout(() => {
     const fr = window.__getModalFrame?.();
-    if (fr && fr.kind === 'rate-preset' && typeof fr.onReturn === 'function') {
+    if (fr && fr.kind === 'rate-preset' && typeof fr.onReturn === 'function' && !fr.__init__) {
+      fr.__init__ = true;
       fr.onReturn();
     }
   }, 0);
@@ -1161,11 +1162,12 @@ async function openRatePresetModal({ id, mode } = {}) {
 // Parent modal — Preset Rates manager
 // ─────────────────────────────────────────────────────────────────────────────
 function openPresetRatesManager(){
+  // Shared state for the manager; child modals can request refresh via this handle
   window.__ratesPresets__ = window.__ratesPresets__ || {};
   const S = window.__ratesPresets__;
 
-  S.scope     = S.scope || 'ALL';
-  S.client_id = S.client_id || null;
+  S.scope     = S.scope || 'ALL';     // 'ALL' | 'GLOBAL' | 'CLIENT'
+  S.client_id = S.client_id || null;  // when scope === 'CLIENT'
   S.q         = S.q || '';
 
   const renderTable = (rows) => {
@@ -1249,23 +1251,21 @@ function openPresetRatesManager(){
     return sortPresetsForView(S.scope, raw);
   };
 
+  // Keep selected row id in the manager context
   S.selectedId = null;
 
   showModal(
     'Preset Rates',
     [{ key: 'main', title: 'Presets' }],
     () => '<div class="tabc"><div class="hint">Loading…</div></div>',
-    async () => true,
+    async () => true, // don't perform any save; we leave Save as-is (header Close handles close)
     false,
     async () => {
       const rows = await fetchRows();
-      const body = buildBody(rows);
       const mb = document.getElementById('modalBody');
-      if (mb) mb.innerHTML = body;
+      if (mb) mb.innerHTML = buildBody(rows);
 
-      const saveBtn = document.getElementById('btnSave');
-      if (saveBtn) { saveBtn.textContent = 'Close'; }
-
+      // Enable Delete, but start disabled until a row is clicked
       const delBtn = document.getElementById('btnDelete');
       if (delBtn) {
         delBtn.style.display = '';
@@ -1282,14 +1282,41 @@ function openPresetRatesManager(){
             document.getElementById('rp_table_wrap').innerHTML =
               (buildBody(refreshed)).match(/<div id="rp_table_wrap">([\s\S]*)<\/div>/)[1];
             wireTable();
-            delBtn.classList.add('disabled');
-            delBtn.disabled = true;
+            delBtn.classList.add('disabled'); delBtn.disabled = true;
           } catch (e) {
             alert(e?.message || 'Delete failed');
           }
         };
       }
 
+      // Inject a scoped "New" button (idempotent) into the real actions bar
+      if (!document.getElementById('btnRpNew')) {
+        const bar = document.getElementById('btnSave')?.parentElement;
+        if (bar) {
+          const nb = document.createElement('button');
+          nb.id = 'btnRpNew';
+          nb.type = 'button';
+          nb.className = 'btn';
+          nb.textContent = 'New';
+          nb.style.marginLeft = 'auto';
+          nb.onclick = () => openRatePresetModal({ mode: 'create' });
+          bar.insertBefore(nb, document.getElementById('btnSave'));
+        }
+      }
+
+      // Clean-up hook so "New" disappears when this frame is not top-most
+      try {
+        const fr = window.__getModalFrame?.();
+        const prevDetach = fr && fr._detachGlobal;
+        if (fr) {
+          fr._detachGlobal = () => {
+            try { document.getElementById('btnRpNew')?.remove(); } catch {}
+            if (typeof prevDetach === 'function') { try { prevDetach(); } catch {} }
+          };
+        }
+      } catch {}
+
+      // Expose refresh to child modal
       S.refresh = async () => {
         const newRows = await fetchRows();
         document.getElementById('rp_table_wrap').innerHTML =
@@ -1351,21 +1378,14 @@ function openPresetRatesManager(){
       wireTable();
       wireFilters();
     },
-    {
-      kind:'rates-presets',
-      extraButtons: [
-        {
-          label: 'New',
-          onClick: () => openRatePresetModal({ mode:'create' })
-        }
-      ]
-    }
+    { kind:'rates-presets' }
   );
 
+  // Kick the manager’s onReturn so it replaces the “Loading…” stub
   setTimeout(() => {
     const fr = window.__getModalFrame?.();
-    if (fr && typeof fr.onReturn === 'function' && !fr.__presetsInit) {
-      fr.__presetsInit = true;
+    if (fr && fr.kind === 'rates-presets' && typeof fr.onReturn === 'function' && !fr.__init__) {
+      fr.__init__ = true;
       fr.onReturn();
     }
   }, 0);
@@ -3230,33 +3250,54 @@ console.warn('[AFTER UPSERT] reached post-save pre-gate', {
           computeContractMargins();
 
           // NEW: Choose preset...
+                // NEW: Choose preset...
           const chooseBtn = document.getElementById('btnChoosePreset');
           if (chooseBtn && !chooseBtn.__wired) {
             chooseBtn.__wired = true;
             chooseBtn.addEventListener('click', () => {
               const payMethod = (function(){
                 try {
-                  const v = (window.modalCtx?.formState?.main?.pay_method_snapshot)
-                         || document.querySelector('select[name="pay_method_snapshot"], select[name="default_pay_method_snapshot"]')?.value
-                         || window.modalCtx?.data?.pay_method_snapshot || 'PAYE';
+                  const v =
+                    (window.modalCtx?.formState?.main?.pay_method_snapshot) ||
+                    document.querySelector('select[name="pay_method_snapshot"], select[name="default_pay_method_snapshot"]')?.value ||
+                    window.modalCtx?.data?.pay_method_snapshot ||
+                    'PAYE';
                   return String(v).toUpperCase();
                 } catch { return 'PAYE'; }
               })();
-              openRatePresetPicker((preset /*, pmFromPicker */) => {
-                applyRatePresetToContractForm(preset, payMethod);
-                try {
-                  const chip = document.getElementById('presetChip');
-                  if (chip) {
-                    chip.style.display = '';
-                    const title = preset.name || [preset.role, preset.band?`Band ${preset.band}`:''].filter(Boolean).join(' / ') || 'Preset';
-                    chip.textContent = `Preset: ${title}`;
-                  }
-                } catch {}
-                try { computeContractMargins(); } catch {}
-                try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
-              });
+
+              const formEl   = document.querySelector('#contractForm');
+              const clientId = formEl?.querySelector('[name="client_id"]')?.value?.trim() || null;
+              const start    = formEl?.querySelector('[name="start_date"]')?.value?.trim() || null;
+
+              openRatePresetPicker(
+                (preset) => {
+                  applyRatePresetToContractForm(preset, payMethod);
+                  try {
+                    const chip = document.getElementById('presetChip');
+                    if (chip) {
+                      chip.style.display = '';
+                      const title =
+                        preset.name ||
+                        [preset.role, preset.band ? `Band ${preset.band}` : '']
+                          .filter(Boolean)
+                          .join(' / ') ||
+                        'Preset';
+                      chip.textContent = `Preset: ${title}`;
+                    }
+                  } catch {}
+                  try { computeContractMargins(); } catch {}
+                  try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
+                },
+                {
+                  client_id:    clientId,
+                  start_date:   start,
+                  defaultScope: clientId ? 'CLIENT' : 'GLOBAL'
+                }
+              );
             });
           }
+
 
           // NEW: Full reset
           const resetBtn = document.getElementById('btnResetPreset');
@@ -9161,17 +9202,15 @@ function mountContractRatesTab() {
 
 
 // Open preset picker (card grid) and return chosen data
-function openRatePresetPicker(onPick) {
-  const form = document.querySelector('#contractForm'); if (!form) return;
-  const client_id  = form.querySelector('[name="client_id"]')?.value || '';
-  const start_date = form.querySelector('[name="start_date"]')?.value || '';
 
-  const defaultScope = client_id ? 'CLIENT' : 'GLOBAL';
+function openRatePresetPicker(applyCb, opts = {}) {
+  const { client_id = null, start_date = null, defaultScope = (client_id ? 'CLIENT' : 'GLOBAL') } = opts;
 
   const content = () => `
     <div class="tabc" id="ratePresetPicker">
-      <div class="row"><label class="section">Source</label>
-        <div class="controls" style="display:flex;gap:10px;align-items:center">
+      <div class="row">
+        <label>Scope</label>
+        <div class="controls">
           <label><input type="radio" name="rp_scope" value="ALL" ${defaultScope==='ALL'?'checked':''}/> All</label>
           <label><input type="radio" name="rp_scope" value="GLOBAL" ${defaultScope==='GLOBAL'?'checked':''}/> Global</label>
           <label ${client_id?'':'title="Pick a client to enable Client presets"'}><input type="radio" name="rp_scope" value="CLIENT" ${defaultScope==='CLIENT'?'checked':''} ${client_id?'':'disabled'}/> Client</label>
@@ -9210,13 +9249,11 @@ function openRatePresetPicker(onPick) {
     async () => true,      // the picker closes itself on pick
     false,
     async () => {
-      // Wire after paint
       const root   = document.getElementById('ratePresetPicker');
       const tbody  = root?.querySelector('#rp_table tbody');
       const search = root?.querySelector('#rp_search');
       const radios = Array.from(root?.querySelectorAll('input[name="rp_scope"]') || []);
       const pickBtn= root?.querySelector('#rp_pick_btn');
-
       if (!tbody) return;
 
       let rows = [];
@@ -9236,7 +9273,6 @@ function openRatePresetPicker(onPick) {
         const scope = scopeVal();               // 'ALL'|'GLOBAL'|'CLIENT'
         const q = (search?.value || '').trim();
         try {
-          // Reuse manager API utilities from 2.2 work
           const raw = await listRatePresets({ scope, client_id: client_id || null, q, active_on: start_date || null });
           rows = Array.isArray(raw) ? sortPresetsForView(scope, raw) : [];
         } catch { rows = []; }
@@ -9249,85 +9285,54 @@ function openRatePresetPicker(onPick) {
         `D:${pill(p.umb_day)} N:${pill(p.umb_night)} Sa:${pill(p.umb_sat)} Su:${pill(p.umb_sun)} BH:${pill(p.umb_bh)}`
       ];
 
-      const render = () => {
-        const q = (search?.value || '').trim().toLowerCase();
-        const list = q
-          ? rows.filter(r => {
-              const s = `${r.name||''} ${r.role||''} ${r.band||''} ${(r.scope||'')}`.toLowerCase();
-              return s.includes(q);
-            })
-          : rows;
-
-        tbody.innerHTML = list.map((p, i) => {
-          const [chg, py, um] = rateRow(p);
-          const dates = `${p.date_from||''}${p.date_to?` → ${p.date_to}`:''}`;
-          const mile = (p.mileage_charge_rate!=null || p.mileage_pay_rate!=null)
-            ? `${pill(p.mileage_charge_rate)} / ${pill(p.mileage_pay_rate)}`
-            : '-';
-          const label = [p.name, p.role, (p.band?`Band ${p.band}`:'')].filter(Boolean).join(' • ');
-          return `<tr data-i="${i}" class="${selectedIndex===i?'selected':''}" style="cursor:pointer">
-            <td><input type="radio" name="rp_row" ${selectedIndex===i?'checked':''}/></td>
-            <td>${label}</td>
-            <td>${p.scope || '-'}</td>
-            <td>${dates}</td>
-            <td><span class="pill">${chg}</span></td>
-            <td><span class="pill">${py}</span></td>
-            <td><span class="pill">${um}</span></td>
-            <td><span class="pill">${mile}</span></td>
-          </tr>`;
+      const paint = () => {
+        const pm = currentPayMethod();
+        const activeIndex = Math.max(0, selectedIndex);
+        const body = rows.map((r, i) => {
+          const scope = (String(r.scope|| (r.client_id ? 'CLIENT' : 'GLOBAL')).toUpperCase());
+          const name  = r.name || [r.role, r.band?`Band ${r.band}`:''].filter(Boolean).join(' / ') || 'Preset';
+          const [chg, paye, umb] = rateRow(r);
+          const payCol = pm==='PAYE' ? paye : umb;
+          const active = (i===activeIndex) ? ' class="active"' : '';
+          return `<tr data-i="${i}"${active}><td><input type="radio" name="rp_pick" ${i===activeIndex?'checked':''}/></td><td>${name}</td><td>${scope}</td><td>${r.from_date||'-'} → ${r.to_date||'-'}</td><td>${chg}</td><td>${paye}</td><td>${umb}</td><td>${pill(r.mileage_charge_rate)}</td></tr>`;
         }).join('');
-
-        Array.from(tbody.querySelectorAll('tr[data-i]')).forEach(tr => {
-          tr.addEventListener('click', () => {
-            selectedIndex = Number(tr.getAttribute('data-i') || -1);
-            render();
-            if (pickBtn) pickBtn.disabled = !(selectedIndex >= 0);
-          });
-          tr.addEventListener('dblclick', () => {
-            selectedIndex = Number(tr.getAttribute('data-i') || -1);
-            if (selectedIndex >= 0) {
-              const picked = (q ? rows.filter(r => {
-                const s = `${r.name||''} ${r.role||''} ${r.band||''} ${(r.scope||'')}`.toLowerCase();
-                return s.includes(q);
-              }) : rows)[selectedIndex];
-              if (picked) {
-                try { if (typeof onPick === 'function') onPick(picked, currentPayMethod()); } catch {}
-                discardTopModal && discardTopModal();
-              }
-            }
-          });
-        });
+        tbody.innerHTML = body || '<tr><td colspan="8" class="mini" style="text-align:center">No presets found</td></tr>';
+        pickBtn && (pickBtn.disabled = !(rows.length && selectedIndex >= 0));
       };
 
-      const refresh = async () => { await fetchRows(); selectedIndex = -1; if (pickBtn) pickBtn.disabled = true; render(); };
+      tbody.addEventListener('click', (e) => {
+        const tr = e.target.closest('tr[data-i]'); if (!tr) return;
+        selectedIndex = +tr.getAttribute('data-i');
+        paint();
+      });
+      tbody.addEventListener('dblclick', (e) => {
+        const tr = e.target.closest('tr[data-i]'); if (!tr) return;
+        selectedIndex = +tr.getAttribute('data-i');
+        if (rows[selectedIndex]) { applyCb && applyCb(rows[selectedIndex]); document.getElementById('btnCloseModal')?.click(); }
+      });
 
-      radios.forEach(r => r.addEventListener('change', refresh));
-      if (search) search.addEventListener('input', () => { render(); });
+      pickBtn?.addEventListener('click', () => {
+        if (rows[selectedIndex]) { applyCb && applyCb(rows[selectedIndex]); document.getElementById('btnCloseModal')?.click(); }
+      });
 
-      if (pickBtn) {
-        pickBtn.addEventListener('click', () => {
-          if (selectedIndex < 0) return;
-          const q = (search?.value || '').trim().toLowerCase();
-          const list = q
-            ? rows.filter(r => {
-                const s = `${r.name||''} ${r.role||''} ${r.band||''} ${(r.scope||'')}`.toLowerCase();
-                return s.includes(q);
-              })
-            : rows;
-          const picked = list[selectedIndex];
-          if (picked) {
-            try { if (typeof onPick === 'function') onPick(picked, currentPayMethod()); } catch {}
-            discardTopModal && discardTopModal();
-          }
-        });
-      }
+      search?.addEventListener('input', async () => { await fetchRows(); paint(); });
+      radios.forEach(r => r.addEventListener('change', async () => { await fetchRows(); paint(); }));
 
-      await refresh();
+      await fetchRows();
+      paint();
     },
-    { kind: 'rate-presets' }
+    { kind:'rate-presets-picker' }
   );
-}
 
+  // ✅ Kick the picker’s onReturn so it doesn’t stay on “Loading…”
+  setTimeout(() => {
+    const fr = window.__getModalFrame?.();
+    if (fr && fr.kind === 'rate-presets-picker' && typeof fr.onReturn === 'function' && !fr.__init__) {
+      fr.__init__ = true;
+      fr.onReturn();
+    }
+  }, 0);
+}
 
 async function fetchClientRatePresets({ client_id, role, band, active_on }) {
   if (!client_id) return [];
