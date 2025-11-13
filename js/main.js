@@ -893,7 +893,6 @@ async function openRatePresetModal({ id, mode } = {}) {
   `;
 
   const onSave = async () => {
-    // Collect + validate
     const root = document.getElementById('rp_form');
     if (!root) return false;
 
@@ -916,7 +915,6 @@ async function openRatePresetModal({ id, mode } = {}) {
     const enable_umbrella = !!document.getElementById('rp_en_umb')?.checked;
     if (!enable_paye && !enable_umbrella) { showModalHint('Enable at least one of PAYE or Umbrella.', 'warn'); return false; }
 
-    // Numbers
     const payload = {
       id: st.id || undefined,
       name,
@@ -929,14 +927,12 @@ async function openRatePresetModal({ id, mode } = {}) {
       enable_umbrella
     };
 
-    // Labels (all 5 required to set; else omit => backend defaults/null)
     const labels = {
       day: v('bucket_day'), night: v('bucket_night'), sat: v('bucket_sat'), sun: v('bucket_sun'), bh: v('bucket_bh')
     };
     const Lnorm = normaliseBucketLabelsInput(labels);
     if (Lnorm) payload.bucket_labels_json = Lnorm;
 
-    // Rates: include only for enabled panels
     const push5 = (prefix, enabled) => {
       if (!enabled) return;
       buckets.forEach(b => {
@@ -949,7 +945,6 @@ async function openRatePresetModal({ id, mode } = {}) {
     push5('umb',  enable_umbrella);
     push5('charge', true);
 
-    // Mileage
     const mileage_pay    = num('mileage_pay_rate');
     const mileage_charge = num('mileage_charge_rate');
     if (mileage_pay != null && mileage_pay < 0) { showModalHint('Mileage pay must be ≥ 0', 'warn'); return false; }
@@ -957,7 +952,6 @@ async function openRatePresetModal({ id, mode } = {}) {
     if (mileage_pay != null)    payload.mileage_pay_rate    = mileage_pay;
     if (mileage_charge != null) payload.mileage_charge_rate = mileage_charge;
 
-    // Schedule
     const use_schedule = !!document.getElementById('rp_use_schedule')?.checked;
     if (use_schedule) {
       const days = ['mon','tue','wed','thu','fri','sat','sun'];
@@ -981,7 +975,6 @@ async function openRatePresetModal({ id, mode } = {}) {
       if (Object.keys(S).length) payload.std_schedule_json = S;
     }
 
-    // FE margin validation (charge - pay >= 0 for any enabled bucket pair)
     const margin = computeRatePresetMargins({
       enable_paye, enable_umbrella,
       paye_day:num('paye_day'), paye_night:num('paye_night'), paye_sat:num('paye_sat'), paye_sun:num('paye_sun'), paye_bh:num('paye_bh'),
@@ -992,7 +985,6 @@ async function openRatePresetModal({ id, mode } = {}) {
 
     try {
       await saveRatePreset(payload);
-      // Close child and refresh parent list
       try { window.__ratesPresets__?.refresh && window.__ratesPresets__.refresh(); } catch {}
       return true;
     } catch (e) {
@@ -1008,19 +1000,15 @@ async function openRatePresetModal({ id, mode } = {}) {
     onSave,
     !!st.id,
     () => {
-      // render
       const mb = document.getElementById('modalBody');
       if (mb) mb.innerHTML = renderer();
 
-      // Mode: if requested view, let your modal’s Edit button control switching to edit
       const saveBtn = document.getElementById('btnSave');
       if (saveBtn && initialMode === 'view') {
-        // In view mode, prevent accidental save; your built-in "Edit" button will flip to edit.
         saveBtn.disabled = true;
         saveBtn.title = 'Click Edit to make changes';
       }
 
-      // Wire scope → client picker visibility + client picker prefill rule for mileage
       const scopeBox = document.getElementById('rp_scope_client');
       const cliWrap  = document.getElementById('rp_client_picker');
       const cliLbl   = document.getElementById('rp_cli_lbl');
@@ -1066,7 +1054,6 @@ async function openRatePresetModal({ id, mode } = {}) {
         if (cliLbl) cliLbl.textContent = 'No client chosen';
       };
 
-      // Enable/disable panels
       const enP = document.getElementById('rp_en_paye');
       const enU = document.getElementById('rp_en_umb');
       const rewirePanelState = () => {
@@ -1082,7 +1069,6 @@ async function openRatePresetModal({ id, mode } = {}) {
       enP?.addEventListener('change', rewirePanelState);
       enU?.addEventListener('change', rewirePanelState);
 
-      // Labels → live mirror
       const lblMap = {
         bucket_day:   'day',
         bucket_night: 'night',
@@ -1101,7 +1087,6 @@ async function openRatePresetModal({ id, mode } = {}) {
         });
       });
 
-      // Schedule show/hide
       const useSch = document.getElementById('rp_use_schedule');
       const schBlk = document.getElementById('rp_sched_block');
       if (useSch && schBlk) {
@@ -1110,7 +1095,6 @@ async function openRatePresetModal({ id, mode } = {}) {
         togg();
       }
 
-      // Live margins + gate Save when negative
       const updateMargins = () => {
         const state = {
           enable_paye: !!document.getElementById('rp_en_paye')?.checked,
@@ -1126,7 +1110,6 @@ async function openRatePresetModal({ id, mode } = {}) {
         const m = computeRatePresetMargins(state);
         const warn = document.getElementById('rp_margin_warn');
         if (warn) warn.style.display = m.anyNegative ? '' : 'none';
-        // Update line text
         buckets.forEach(b => {
           const cell = document.querySelector(`.grid-5[data-bucket="${b}"] [data-role="margin"]`);
           if (!cell) return;
@@ -1138,26 +1121,22 @@ async function openRatePresetModal({ id, mode } = {}) {
           ].filter(Boolean).join(' • ');
           cell.textContent = txt;
         });
-        // Gate save
         const fr = window.__getModalFrame?.();
         const btn = document.getElementById('btnSave');
         if (btn) btn.disabled = !!m.anyNegative && !(initialMode === 'view');
         if (fr && fr._updateButtons) fr._updateButtons();
       };
 
-      // Wire inputs for margins
       ['input','change'].forEach(evt => {
         document.getElementById('rp_form').addEventListener(evt, (e) => {
           const t = e.target;
           if (!t?.name) return;
           if (/^(paye|umb|charge)_(day|night|sat|sun|bh)$/.test(t.name)) updateMargins();
-          if (t.name === 'name') { /* keep staged */ }
         }, true);
       });
       rewirePanelState();
       updateMargins();
 
-      // Unlock save if user clicks Edit in view mode
       const btnEdit = document.getElementById('btnEditModal');
       if (btnEdit) {
         btnEdit.addEventListener('click', () => {
@@ -1168,17 +1147,25 @@ async function openRatePresetModal({ id, mode } = {}) {
     },
     { kind:'rate-preset' }
   );
+
+  // Kick this frame's onReturn so it doesn't stay on "Loading…"
+  setTimeout(() => {
+    const fr = window.__getModalFrame?.();
+    if (fr && fr.kind === 'rate-preset' && typeof fr.onReturn === 'function') {
+      fr.onReturn();
+    }
+  }, 0);
 }
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Parent modal — Preset Rates manager
 // ─────────────────────────────────────────────────────────────────────────────
 function openPresetRatesManager(){
-  // Shared state for the manager; child modals can request refresh via this handle
   window.__ratesPresets__ = window.__ratesPresets__ || {};
   const S = window.__ratesPresets__;
 
-  S.scope     = S.scope || 'ALL';     // 'ALL' | 'GLOBAL' | 'CLIENT'
-  S.client_id = S.client_id || null;  // when scope === 'CLIENT'
+  S.scope     = S.scope || 'ALL';
+  S.client_id = S.client_id || null;
   S.q         = S.q || '';
 
   const renderTable = (rows) => {
@@ -1252,7 +1239,6 @@ function openPresetRatesManager(){
     `;
   };
 
-  // One-shot loader with current filters
   const fetchRows = async () => {
     const params = {
       scope: S.scope,
@@ -1263,14 +1249,13 @@ function openPresetRatesManager(){
     return sortPresetsForView(S.scope, raw);
   };
 
-  // Keep selected row id in the manager context
   S.selectedId = null;
 
   showModal(
     'Preset Rates',
     [{ key: 'main', title: 'Presets' }],
     () => '<div class="tabc"><div class="hint">Loading…</div></div>',
-    async () => true, // Save = Close
+    async () => true,
     false,
     async () => {
       const rows = await fetchRows();
@@ -1278,7 +1263,6 @@ function openPresetRatesManager(){
       const mb = document.getElementById('modalBody');
       if (mb) mb.innerHTML = body;
 
-      // Change Save → Close, and add New/Delete buttons
       const saveBtn = document.getElementById('btnSave');
       if (saveBtn) { saveBtn.textContent = 'Close'; }
 
@@ -1306,19 +1290,6 @@ function openPresetRatesManager(){
         };
       }
 
-      // Inject "New" button near Edit (or create one)
-      const hdr = document.getElementById('modalTitle')?.parentElement || document.getElementById('modalActions');
-      if (hdr && !hdr.querySelector('#btnRpNew')) {
-        const nb = document.createElement('button');
-        nb.id = 'btnRpNew';
-        nb.className = 'btn';
-        nb.textContent = 'New';
-        nb.style.marginLeft = 'auto';
-        nb.onclick = () => openRatePresetModal({ mode: 'create' });
-        document.getElementById('modalActions')?.insertBefore(nb, document.getElementById('btnSave'));
-      }
-
-      // Expose refresh to child modal
       S.refresh = async () => {
         const newRows = await fetchRows();
         document.getElementById('rp_table_wrap').innerHTML =
@@ -1329,7 +1300,6 @@ function openPresetRatesManager(){
         wireFilters();
       };
 
-      // Wire table interactions
       function wireTable(){
         const tbl = document.getElementById('ratesPresetsTable');
         if (!tbl) return;
@@ -1347,7 +1317,6 @@ function openPresetRatesManager(){
         });
       }
 
-      // Wire filters (scope radios, client picker, search)
       function wireFilters(){
         const radios = Array.from(document.querySelectorAll('input[name="rp_scope"]'));
         radios.forEach(r => r.addEventListener('change', async () => {
@@ -1382,10 +1351,17 @@ function openPresetRatesManager(){
       wireTable();
       wireFilters();
     },
-    { kind:'rates-presets' }
+    {
+      kind:'rates-presets',
+      extraButtons: [
+        {
+          label: 'New',
+          onClick: () => openRatePresetModal({ mode:'create' })
+        }
+      ]
+    }
   );
 
-  // NEW: kick the manager's onReturn so it doesn't stay on "Loading…"
   setTimeout(() => {
     const fr = window.__getModalFrame?.();
     if (fr && typeof fr.onReturn === 'function' && !fr.__presetsInit) {
@@ -9090,11 +9066,8 @@ function mountContractRatesTab() {
   const root = byId('contractRatesTab'); if (!root) return;
 
   const form = document.querySelector('#contractForm');
-  // Read either pay_method_snapshot or default_pay_method_snapshot
   const payMethodSel = form?.querySelector('select[name="pay_method_snapshot"], select[name="default_pay_method_snapshot"]');
 
-  // Optional nicety: seed formState.pay from saved rates_json so eligibility
-  // works even if the Rates tab was never touched in this session.
   try {
     const fs = (window.modalCtx.formState ||= { __forId:(window.modalCtx.data?.id ?? window.modalCtx.openToken ?? null), main:{}, pay:{} });
     if (!fs.pay || Object.keys(fs.pay).length === 0) {
@@ -9126,37 +9099,6 @@ function mountContractRatesTab() {
     });
   }
 
-  const btnChoose  = byId('btnChoosePreset');
-  const btnReset   = byId('btnResetPreset');
-  const presetChip = byId('presetChip');
-
-  if (btnChoose && !btnChoose.__wired) {
-    btnChoose.__wired = true;
-    btnChoose.addEventListener('click', async () => {
-      try {
-        const clientId = form?.querySelector('[name="client_id"]')?.value?.trim();
-        if (!clientId) { showModalHint?.('Tip: pick a Client to see client presets (showing Global only).', 'warn'); }
-      } catch {}
-      openRatePresetPicker((preset) => {
-        const pmNow = (payMethodSel?.value || root.dataset.payMethod || 'PAYE').toUpperCase();
-        applyRatePresetToContractForm(preset, pmNow);
-        payMethod = toggleCards();
-        if (presetChip) { presetChip.textContent = `Preset: ${preset.source || 'Custom'}`; presetChip.style.display = 'inline-block'; }
-        if (typeof computeContractMargins === 'function') computeContractMargins();
-      });
-    });
-  }
-
-  if (btnReset && !btnReset.__wired) {
-    btnReset.__wired = true;
-    btnReset.addEventListener('click', () => {
-      if (presetChip) { presetChip.textContent = ''; presetChip.style.display = 'none'; }
-      ['paye_day','paye_night','paye_sat','paye_sun','paye_bh','umb_day','umb_night','umb_sat','umb_sun','umb_bh']
-        .forEach(n => { const el = form?.querySelector(`[name="${n}"]`); if (el) el.value = ''; });
-      if (typeof computeContractMargins === 'function') computeContractMargins();
-    });
-  }
-
   const inputs = root.querySelectorAll('input[name^="paye_"], input[name^="umb_"], input[name^="charge_"]');
   inputs.forEach(el => {
     if (!el.__wired_mg) {
@@ -9175,21 +9117,29 @@ function mountContractRatesTab() {
         const mgEl = row.querySelector('.mg');
         if (neg) {
           row.setAttribute('data-negative','1');
-          if (mgEl && !mgEl.querySelector('.mini')) { const hint = document.createElement('div'); hint.className='mini'; hint.textContent='Margin can’t be negative'; mgEl.appendChild(hint); }
+          if (mgEl && !mgEl.querySelector('.mini')) {
+            const hint = document.createElement('div');
+            hint.className='mini';
+            hint.textContent='Margin can’t be negative';
+            mgEl.appendChild(hint);
+          }
         } else {
           row.removeAttribute('data-negative');
-          if (mgEl) { const hint = mgEl.querySelector('.mini'); if (hint) hint.remove(); }
+          if (mgEl) {
+            const hint = mgEl.querySelector('.mini');
+            if (hint) hint.remove();
+          }
         }
       });
     });
     window.addEventListener('bucket-labels-changed', () => {
       const merged = mergeContractStateIntoRow(window.modalCtx?.data||{});
       const LBL = merged?.bucket_labels_json || (window.modalCtx?.formState?.main ? {
-        day: window.modalCtx.formState.main.bucket_day || window.modalCtx.formState.main.bucket_label_day,
+        day:   window.modalCtx.formState.main.bucket_day || window.modalCtx.formState.main.bucket_label_day,
         night: window.modalCtx.formState.main.bucket_night || window.modalCtx.formState.main.bucket_label_night,
-        sat: window.modalCtx.formState.main.bucket_sat || window.modalCtx.formState.main.bucket_label_sat,
-        sun: window.modalCtx.formState.main.bucket_sun || window.modalCtx.formState.main.bucket_label_sun,
-        bh: window.modalCtx.formState.main.bucket_bh || window.modalCtx.formState.main.bucket_label_bh,
+        sat:   window.modalCtx.formState.main.bucket_sat || window.modalCtx.formState.main.bucket_label_sat,
+        sun:   window.modalCtx.formState.main.bucket_sun || window.modalCtx.formState.main.bucket_label_sun,
+        bh:    window.modalCtx.formState.main.bucket_bh || window.modalCtx.formState.main.bucket_label_bh,
       } : {});
       const labelOf = (k, def) => (LBL && LBL[k]) ? LBL[k] : def;
       const map = { day:'Day', night:'Night', sat:'Sat', sun:'Sun', bh:'BH' };
