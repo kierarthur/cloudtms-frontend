@@ -1295,10 +1295,11 @@ function openPresetRatesManager(){
             await deleteRatePreset(S.selectedId);
             S.selectedId = null;
             const refreshed = await fetchRows();
-            document.getElementById('rp_table_wrap').innerHTML = (buildBody(refreshed)).match(/<div id="rp_table_wrap">([\s\S]*)<\/div>/)[1];
+            document.getElementById('rp_table_wrap').innerHTML =
+              (buildBody(refreshed)).match(/<div id="rp_table_wrap">([\s\S]*)<\/div>/)[1];
             wireTable();
-            // keep delete disabled
-            delBtn.classList.add('disabled'); delBtn.disabled = true;
+            delBtn.classList.add('disabled');
+            delBtn.disabled = true;
           } catch (e) {
             alert(e?.message || 'Delete failed');
           }
@@ -1320,8 +1321,8 @@ function openPresetRatesManager(){
       // Expose refresh to child modal
       S.refresh = async () => {
         const newRows = await fetchRows();
-        document.getElementById('rp_table_wrap').innerHTML = (buildBody(newRows)).match(/<div id="rp_table_wrap">([\s\S]*)<\/div>/)[1];
-        // Reset selection
+        document.getElementById('rp_table_wrap').innerHTML =
+          (buildBody(newRows)).match(/<div id="rp_table_wrap">([\s\S]*)<\/div>/)[1];
         S.selectedId = null;
         if (delBtn) { delBtn.classList.add('disabled'); delBtn.disabled = true; }
         wireTable();
@@ -1351,7 +1352,6 @@ function openPresetRatesManager(){
         const radios = Array.from(document.querySelectorAll('input[name="rp_scope"]'));
         radios.forEach(r => r.addEventListener('change', async () => {
           S.scope = r.value;
-          // show/hide client row
           const row = document.getElementById('rp_client_row');
           if (row) row.style.display = (S.scope === 'CLIENT' ? 'block':'none');
           await S.refresh();
@@ -1384,6 +1384,15 @@ function openPresetRatesManager(){
     },
     { kind:'rates-presets' }
   );
+
+  // NEW: kick the manager's onReturn so it doesn't stay on "Loading…"
+  setTimeout(() => {
+    const fr = window.__getModalFrame?.();
+    if (fr && typeof fr.onReturn === 'function' && !fr.__presetsInit) {
+      fr.__presetsInit = true;
+      fr.onReturn();
+    }
+  }, 0);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -9399,106 +9408,120 @@ function applyRatePresetToContractForm(preset, payMethod /* 'PAYE'|'UMBRELLA' */
   const form = document.querySelector('#contractForm'); if (!form || !preset) return;
 
   // 1) Always set charges
-  const CH = { day:preset.charge_day, night:preset.charge_night, sat:preset.charge_sat, sun:preset.charge_sun, bh:preset.charge_bh };
-  Object.entries(CH).forEach(([k,v])=>{ const el=form.querySelector(`[name="charge_${k}"]`); if (el && v!=null) el.value = v; });
-
-  // 2) Set pay for selected method
-  const applyBlock = (prefix, src) => {
-    const MAP = { day:src[`${prefix}_day`], night:src[`${prefix}_night`], sat:src[`${prefix}_sat`], sun:src[`${prefix}_sun`], bh:src[`${prefix}_bh`] };
-    Object.entries(MAP).forEach(([k,v]) => {
-      const el=form.querySelector(`[name="${prefix.toLowerCase()}_${k}"]`); if (el && v!=null) el.value = v;
-    });
+  const CH = {
+    day:   preset.charge_day,
+    night: preset.charge_night,
+    sat:   preset.charge_sat,
+    sun:   preset.charge_sun,
+    bh:    preset.charge_bh
   };
-  if (String(payMethod||'PAYE').toUpperCase()==='PAYE') applyBlock('paye', preset);
-  else applyBlock('umb', preset);
+  Object.entries(CH).forEach(([k, v]) => {
+    const el = form.querySelector(`[name="charge_${k}"]`);
+    if (el && v != null && v !== '') {
+      el.value = v;
+      setContractFormValue(`charge_${k}`, v);
+    }
+  });
 
-  // 3) Main metadata (role/band/display_site) - if present; do NOT touch candidate/client or gates/submission
+  // 2) Set pay for selected method (only that method)
+  const effectivePayMethod = String(payMethod || 'PAYE').toUpperCase();
+  if (effectiveName === 'PAYE') {
+    const src = {
+      day:   preset.paye_day,
+      night: preset.paye_night,
+      sat:   preset.paye_sat,
+      sun:   preset.paye_sun,
+      bh:    preset.paye_bh
+    };
+    Object.entries(src).forEach(([k, v]) => {
+      const el = form.querySelector(`[name="paye_${k}"]`);
+      if (el && v != null && v !== '') {
+        el.value = v;
+        setContractFormValue(`paye_${k}`, v);
+      }
+    });
+  } else {
+    const src = {
+      day:   preset.umb_day,
+      night: preset.umb_night,
+      sat:   preset.umb_sat,
+      sun:   preset.umb_sun,
+      bh:    preset.umb_bh
+    };
+    Object.entries(src).forEach(([k, v]) => {
+      const el = form.querySelector(`[name="umb_${k}"]`);
+      if (el && v != null && v !== '') {
+        el.value = v;
+        setContractFormValue(`umb_${k}`, v);
+      }
+    });
+  }
+
+  // 3) Main metadata — do not touch candidate/client or gates/submission
   const roleEl = form.querySelector('[name="role"]');
   const bandEl = form.querySelector('[name="band"]');
   const siteEl = form.querySelector('[name="display_site"]');
-  if (preset.role != null && roleEl) roleEl.value = String(preset.role || '');
-  if (preset.band != null && bandEl) bandEl.value = String(preset.band || '');
-  if (preset.display_site != null && siteEl) siteEl.value = String(preset.display_site || '');
+  if (preset.role != null && roleEl) {
+    roleEl.value = String(preset.role || '');
+    setContractFormValue('role', roleEl.value);
+  }
+  if (preset.band != null && bandEl) {
+    bandEl.value = String(preset.band || '');
+    setContractFormValue('band', bandEl.value);
+  }
+  if (preset.display_site != null && siteEl) {
+    siteEl.value = String(preset.display_site || '');
+    setContractFormValue('display_site', siteEl.value);
+  }
 
-  // Stage to formState in case fields aren’t in DOM (e.g., different tab active)
-  try {
-    const fs = (window.modalCtx.formState ||= { main:{}, pay:{} });
-    if (preset.role != null) fs.main.role = String(preset.role || '');
-    if (preset.band != null) fs.main.band = String(preset.band || '');
-    if (preset.display_site != null) fs.main.display_site = String(preset.display_site || '');
-  } catch {}
-
-  // 4) Bucket labels → set inputs and update live headings
+  // 4) Bucket labels
   if (preset.bucket_labels_json && typeof preset.bucket_labels_json === 'object') {
     const BL = preset.bucket_labels_json;
-    const names = { day:'Day', night:'Night', sat:'Sat', sun:'Sun', bh:'BH' };
-    Object.entries(names).forEach(([k, def]) => {
-      const v = (BL[k] || '').trim() || def;
+    const defaults = { day:'Day', night:'Night', sat:'Sat', sun:'Sun', bh:'BH' };
+    const labels = { ...defaults, ...BL };
+
+    Object.entries(labels).forEach(([k, v]) => {
+      const val = (v || '').trim() || defaults[k];
       const el1 = form.querySelector(`[name="bucket_label_${k}"]`);
-      const el2 = form.querySelector(`[name="bucket_${k}"]`); // alternate naming seen in onSave builder
-      if (el1) { el1.value = v; try { el1.dispatchEvent(new Event('input', {bubbles:true})); el1.dispatchEvent(new Event('change', {bubbles:true})); } catch {} }
-      if (el2) { el2.value = v; try { el2.dispatchEvent(new Event('input', {bubbles:true})); el2.dispatchEvent(new Event('change', {bubbles:true})); } catch {} }
-      // Stage for save in case inputs are on another tab
-      try { const fs = (window.modalCtx.formState ||= { main:{}, pay:{} }); fs.main[`bucket_label_${k}`] = v; } catch {}
+      const el2 = form.querySelector(`[name="bucket_${k}"]`);
+      if (el1) { el1.value = val; setContractFormValue(`bucket_label_${k}`, val); }
+      if (el2) { el2.value = val; setContractFormValue(`bucket_${k}`, val); }
+
+      const mt = document.querySelector(`#marginsTable tr[data-b="${k}"] > td:first-child`);
+      if (mt) mt.textContent = val;
+
+      ['cardPAYE','cardUMB','cardCHG'].forEach(cid => {
+        const card = document.getElementById(cid);
+        if (!card) return;
+        const anyInput = card.querySelector(`input[name$="_${k}"]`);
+        if (!anyInput) return;
+        const row = anyInput.closest('.row');
+        if (!row) return;
+        const lab = row.querySelector('label');
+        if (lab) lab.textContent = val;
+      });
     });
 
-    // Update visible headings immediately (no full re-render)
     try {
-      const labels = { ...{day:'Day',night:'Night',sat:'Sat',sun:'Sun',bh:'BH'}, ...preset.bucket_labels_json };
-      const tab = document.getElementById('contractRatesTab');
-      if (tab) {
-        // PAYE / UMB labels
-        ['cardPAYE','cardUMB','cardCHG'].forEach(cid => {
-          const card = document.getElementById(cid);
-          if (!card) return;
-          card.querySelectorAll('.row > label').forEach(lab => {
-            const txt = lab.textContent || '';
-            // headings lines include section titles; skip those
-            if (/pay\s*\(|Charge-out/i.test(txt)) return;
-          });
-          // Per-row labels:
-          Object.entries(labels).forEach(([k,v])=>{
-            const inp = card.querySelector(`input[name$="_${k}"]`);
-            if (inp) {
-              const row = inp.closest('.row');
-              if (row) {
-                const lab = row.querySelector('label');
-                if (lab) lab.textContent = v;
-              }
-            }
-          });
-        });
-        // Margins table bucket column
-        const mg = document.getElementById('marginsTable');
-        if (mg) {
-          Object.entries(labels).forEach(([k,v])=>{
-            const tr = mg.querySelector(`tr[data-b="${k}"] > td:first-child`);
-            if (tr) tr.textContent = v;
-          });
-        }
-      }
+      const fs = (window.modalCtx.formState ||= { main:{}, pay:{} });
+      fs.main.__bucket_labels = labels;
     } catch {}
   }
 
-  // 5) Schedule → copy to grid if provided, and stage for save
+  // 5) Schedule: copy Mon–Sun start/end/break if present
   if (preset.std_schedule_json && typeof preset.std_schedule_json === 'object') {
     const days = ['mon','tue','wed','thu','fri','sat','sun'];
-    const grid = document; // schedule inputs exist when Calendar/Main tab active; otherwise stage only
     days.forEach(d => {
-      const s = preset.std_schedule_json[d]?.start || '';
-      const e = preset.std_schedule_json[d]?.end || '';
-      const br= (preset.std_schedule_json[d]?.break_minutes ?? '');
-      const sEl = grid.querySelector(`input[name="${d}_start"]`);
-      const eEl = grid.querySelector(`input[name="${d}_end"]`);
-      const bEl = grid.querySelector(`input[name="${d}_break"]`);
-      if (sEl) sEl.value = s;
-      if (eEl) eEl.value = e;
-      if (bEl) bEl.value = br;
-      try {
-        if (sEl) { sEl.dispatchEvent(new Event('input',{bubbles:true})); sEl.dispatchEvent(new Event('change',{bubbles:true})); }
-        if (eEl) { eEl.dispatchEvent(new Event('input',{bubbles:true})); eEl.dispatchEvent(new Event('change',{bubbles:true})); }
-        if (bEl) { bEl.dispatchEvent(new Event('input',{bubbles:true})); bEl.dispatchEvent(new Event('change',{bubbles:true})); }
-      } catch {}
+      const src = preset.std_schedule_json[d] || {};
+      const s = src.start || '';
+      const e = src.end   || '';
+      const br= src.break_minutes;
+      const sEl = form.querySelector(`input[name="${d}_start"]`);
+      const eEl = form.querySelector(`input[name="${d}_end"]`);
+      const bEl = form.querySelector(`input[name="${d}_break"]`);
+      if (sEl) { sEl.value = s; setContractFormValue(`${d}_start`, s); }
+      if (eEl) { eEl.value = e; setContractFormValue(`${d}_end`,   e); }
+      if (bEl && br != null) { bEl.value = String(br); setContractFormValue(`${d}_break`, br); }
     });
     try {
       const fs = (window.modalCtx.formState ||= { main:{}, pay:{} });
@@ -9506,24 +9529,21 @@ function applyRatePresetToContractForm(preset, payMethod /* 'PAYE'|'UMBRELLA' */
     } catch {}
   }
 
-  // 6) Mileage → set if present
+  // 6) Mileage — if present, overwrite
   if (preset.mileage_charge_rate != null || preset.mileage_pay_rate != null) {
-    const mcr = document.querySelector('#contractRatesTab input[name="mileage_charge_rate"]');
-    const mpr = document.querySelector('#contractRatesTab input[name="mileage_pay_rate"]');
-    if (mcr && preset.mileage_charge_rate != null) mcr.value = preset.mileage_charge_rate;
-    if (mpr && preset.mileage_pay_rate != null)   mpr.value = preset.mileage_pay_rate;
-    try {
-      if (mcr) { mcr.dispatchEvent(new Event('input',{bubbles:true})); mcr.dispatchEvent(new Event('change',{bubbles:true})); }
-      if (mpr) { mpr.dispatchEvent(new Event('input',{bubbles:true})); mpr.dispatchEvent(new Event('change',{bubbles:true})); }
-    } catch {}
-    try {
-      const fs = (window.modalCtx.formState ||= { main:{}, pay:{} });
-      if (preset.mileage_charge_rate != null) fs.main.mileage_charge_rate = preset.mileage_charge_rate;
-      if (preset.mileage_pay_rate != null)    fs.main.mileage_pay_rate    = preset.mileage_pay_rate;
-    } catch {}
+    const mcr = form.querySelector('input[name="mileage_charge_rate"]');
+    const mpr = form.querySelector('input[name="mileage_pay_rate"]');
+    if (mcr && preset.mileage_charge_rate != null) {
+      mcr.value = preset.mileage_charge_rate;
+      setContractFormValue('mileage_charge_rate', preset.mileage_charge_rate);
+    }
+    if (mpr && preset.mileage_pay_rate != null) {
+      mpr.value = preset.mileage_pay_rate;
+      setContractFormValue('mileage_pay_rate', preset.mileage_pay_rate);
+    }
   }
 
-  // 7) Final UI updates
+  // 7) Recompute margins & mark dirty
   try { computeContractMargins(); } catch {}
   try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
 }
