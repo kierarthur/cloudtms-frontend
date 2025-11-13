@@ -7622,9 +7622,12 @@ function confirmDiscardChangesIfDirty(){
   return true;
 }
 
+
 async function commitContractCalendarStageIfPending(contractId) {
   const LOG_CAL = (typeof window.__LOG_CAL === 'boolean') ? window.__LOG_CAL : true;
   const L = (...a)=> { if (LOG_CAL) console.log('[CAL][commitIfPending]', ...a); };
+  const W = (...a)=> { if ( LOG_CAL) console.warn('[CAL][commitIfPending]', ...a); };
+  const E = (...a)=> { if ( LOG_CAL) console.error('[CAL][commitIfPending]', ...a); };
 
   try {
     const st = getContractCalendarStageState(contractId);
@@ -7636,7 +7639,7 @@ async function commitContractCalendarStageIfPending(contractId) {
       return { ok: true, detail: 'no-op', removedAll: false };
     }
 
-    // Build stage → payload pieces
+    // Build ranges + symmetry metadata
     const {
       addRanges,
       removeRanges,
@@ -7647,37 +7650,71 @@ async function commitContractCalendarStageIfPending(contractId) {
       rightEdgeDate
     } = buildPlanRangesFromStage(contractId);
 
-    // Pull current contract basics
-    const contract = (window.modalCtx && window.modalCtx.data) ? window.modalCtx.data : {};
-    const contractStart = contract?.start_date || null;
-    const contractEnd   = contract?.end_date   || null;
+    L('ranges from stage', { addRanges, removeRanges, additionals, removeAll });
+
+    // Pull current contract & window from modal
+    const contract     = (window.modalCtx && window.modalCtx.data) ? window.modalCtx.data : {};
+    const contractStart = contract?.start_date   || null;
+    const contractEnd   = contract?.end_date     || null;
     const candidateId   = contract?.candidate_id || null;
 
-    // Optional overlap preflight for left-extend
+    // Special case: "remove all unsubmitted weeks" → single bulk unplan then exit.
+    if (removeAll) {
+      if (removeRanges.length) {
+        const payload = {
+          when_timesheet_exists: 'skip',
+          empty_week_action: 'delete',   // hard delete empty weeks
+          ranges: removeRanges           // expect [{ from, to, days: [] }]
+        };
+        L('DELETE /plan-ranges (removeAll, IfPending)', payload);
+        try {
+          const resp = await contractsUnplanRanges(contractId, payload);
+          L('DELETE /plan-ranges (removeAll, IfPending) ←', resp);
+        } catch (err) {
+          E('unplan-ranges (removeAll, IfPending) failed', err);
+          return { ok: false, message: err?.message || 'Calendar commit failed', removedAll: true };
+        }
+      } else {
+        L('removeAll=true but no removeRanges built (IfPending)');
+      }
+
+      // Stage will be completely rebuilt by next view; normalizeContractWindowToShifts
+      // will run after this from the caller.
+      try { clearContractCalendarStageState(contractId); } catch {}
+      L('calendar commit ok (removeAll, IfPending)');
+      return { ok: true, detail: 'calendar saved', removedAll: true };
+    }
+
+    // Optional preflight overlap check when extending left
     if (needsLeftExtend && candidateId) {
       const newStart = leftEdgeDate && contractStart ? (leftEdgeDate < contractStart ? leftEdgeDate : contractStart)
                                                      : (leftEdgeDate || contractStart);
       const newEnd   = rightEdgeDate && contractEnd ? (rightEdgeDate > contractEnd ? rightEdgeDate : contractEnd)
                                                     : (rightEdgeDate || contractEnd || newStart);
 
-      const ovRes = await authFetch(API('/api/contracts/check-overlap'), {
+      const payload = {
+        candidate_id:       candidateId,
+        start_date:         newStart,
+        end_date:           newEnd,
+        ignore_contract_id: contractId
+      };
+
+      L('preflight overlap check', payload);
+      const overlapRes = await authFetch(API('/api/contracts/check-overlap'), {
         method: 'POST',
         headers: { 'Content-Type':'application/json' },
-        body: JSON.stringify({
-          candidate_id: candidateId,
-          start_date: newStart,
-          end_date: newEnd,
-          ignore_contract_id: contractId
-        })
+        body: JSON.stringify(payload)
       });
-      const ovJson = await ovRes.json().catch(() => null);
-      if (!ovRes.ok || ovJson?.error) {
-        const msg = ovJson?.error || 'Overlap check failed';
+
+      // authFetch returns JSON
+      if (!overlapRes || overlapRes.error) {
+        const msg = overlapRes?.error || 'Overlap check failed';
         console.warn('[CAL][commitIfPending] overlap preflight failed', msg);
         return { ok: false, message: msg, removedAll: false };
       }
-      if (ovJson.has_overlap) {
-        const first = Array.isArray(ovJson.overlaps) && ovJson.overlaps[0] ? ovJson.overlaps[0] : null;
+
+      if (overlapRes.has_overlap) {
+        const first = Array.isArray(overlapRes.overlaps) && overlapRes.overlaps[0] ? overlapRes.overlaps[0] : null;
         const baseMsg = first
           ? `This extension overlaps ${first.client_name} (${first.role}${first.band ? ' Band ' + first.band : ''}) window ${first.existing_start_date} → ${first.existing_end_date}.`
           : 'This extension overlaps an existing contract window.';
@@ -7690,99 +7727,81 @@ async function commitContractCalendarStageIfPending(contractId) {
       }
     }
 
-    // --- PLAN (adds) ---
+    // === PLAN (adds) ===
     if (Array.isArray(addRanges) && addRanges.length) {
-      const body = {
+      const payload = {
         extend_contract_window: true,
-        ranges: addRanges.map(r => ({
-          from: r.from,
-          to:   r.to,
-          days: Array.isArray(r.days) ? r.days : [],
-          merge: r.merge || 'append',
-          when_timesheet_exists: r.when_timesheet_exists || 'create_additional'
-        }))
+        ranges: addRanges
       };
-      L('commit payload (plan-ranges)', { extend_contract_window: body.extend_contract_window, ranges: body.ranges.length });
-      const res = await authFetch(API(`/api/contracts/${contractId}/plan-ranges`), {
-        method: 'POST',
-        headers: { 'Content-Type':'application/json' },
-        body: JSON.stringify(body)
-      });
-      const json = await res.json().catch(() => null);
-      if (!res.ok || json?.error) {
-        const msg = json?.error || 'Calendar commit failed';
-        console.warn('[CAL][commitIfPending] plan-ranges failed', msg);
-        return { ok: false, message: msg, removedAll: false };
-      }
-    }
-
-    // --- UNPLAN (removals / removeAll) ---
-    if ((Array.isArray(removeRanges) && removeRanges.length) || removeAll) {
-      const ranges = [];
-      if (Array.isArray(removeRanges)) {
-        for (const r of removeRanges) {
-          ranges.push({ from: r.from, to: r.to, days: Array.isArray(r.days) ? r.days.slice() : [] });
-        }
-      }
-      if (removeAll) {
-        const from = removeAll.from || contractStart || leftEdgeDate || null;
-        const to   = removeAll.to   || contractEnd   || rightEdgeDate || null;
-        if (from && to) ranges.push({ from, to, days: [] });
-      }
-      if (ranges.length) {
-        L('commit payload (unplan-ranges)', { ranges: ranges.length });
-        const unRes = await authFetch(API(`/api/contracts/${contractId}/unplan-ranges`), {
-          method: 'POST',
-          headers: { 'Content-Type':'application/json' },
-          body: JSON.stringify({ ranges })
-        });
-        const unJson = await unRes.json().catch(() => null);
-        if (!unRes.ok || unJson?.error) {
-          const msg = unJson?.error || 'Unplan commit failed';
-          console.warn('[CAL][commitIfPending] unplan-ranges failed', msg);
-          return { ok: false, message: msg, removedAll: !!removeAll };
-        }
-      }
-    }
-
-    // Authoritative refresh from backend (picks up window shrink/extend)
-    let fresh = null;
-    try {
-      const r = await authFetch(API(`/api/contracts/${_enc(contractId)}?ts=${Date.now()}`), { method:'GET' });
-      const j = await r.json().catch(()=>null);
-      fresh = (j && (j.contract || j)) || null;
-    } catch {}
-    if (fresh && fresh.id) {
-      // bind to modalCtx
-      window.modalCtx = window.modalCtx || {};
-      window.modalCtx.data = fresh;
-
-      // push into form state
-      const fs = (window.modalCtx.formState ||= { __forId: (fresh.id||contractId), main:{}, pay:{} });
-      fs.main ||= {};
-      fs.main.start_date = fresh.start_date || null;
-      fs.main.end_date   = fresh.end_date   || null;
-
-      // reflect in visible inputs (Main tab) using UK format if helper exists
+      L('POST /plan-ranges (IfPending)', { ranges: payload.ranges.length, extend_contract_window: true });
       try {
-        const form = document.querySelector('#contractForm');
-        if (form) {
-          const sd = form.querySelector('input[name="start_date"]');
-          const ed = form.querySelector('input[name="end_date"]');
-          const toUk = (iso) => {
-            try { return (typeof formatIsoToUk === 'function') ? (formatIsoToUk(iso) || iso) : iso; } catch { return iso; }
-          };
-          if (sd && fresh.start_date) sd.value = toUk(fresh.start_date);
-          if (ed && fresh.end_date)   ed.value = toUk(fresh.end_date);
-        }
-      } catch {}
+        const resp = await contractsPlanRanges(contractId, payload);
+        L('POST /plan-ranges (IfPending) ←', resp);
+      } catch (err) {
+        E('plan-ranges (IfPending) failed', err);
+        return { ok: false, message: err?.message || 'Calendar commit failed', removedAll: false };
+      }
+    } else {
+      L('No addRanges to commit (IfPending)');
     }
 
-    // Clear staged state after success
+    // === UNPLAN (removals) ===
+    if (Array.isArray(removeRanges) && removeRanges.length) {
+      const payload = {
+        when_timesheet_exists: 'skip',
+        empty_week_action: 'cancel',   // clear weeks + mark CANCELLED
+        ranges: removeRanges
+      };
+      L('DELETE /plan-ranges (IfPending)', { ranges: payload.ranges.length });
+      try {
+        const resp = await contractsUnplanRanges(contractId, payload);
+        L('DELETE /plan-ranges (IfPending) ←', resp);
+      } catch (err) {
+        E('unplan-ranges (IfPending) failed', err);
+        return { ok: false, message: err?.message || 'Calendar commit failed', removedAll: false };
+      }
+    } else {
+      L('No removeRanges to commit (IfPending)');
+    }
+
+    // === ADDITIONALS (split weeks) ===
+    if (Array.isArray(additionals) && additionals.length) {
+      L('Committing additional weeks… (IfPending)', { count: additionals.length });
+      for (const g of additionals) {
+        try {
+          L('Create additional for baseWeekId (IfPending)', g.baseWeekId, 'dates=', g.dates);
+          const addRow = await contractWeekCreateAdditional(g.baseWeekId);
+          L('additional created (IfPending) ←', addRow);
+          const payload = { add: g.dates.map(d => ({ date: d })), merge: 'append' };
+          L('PATCH /contract-weeks/:id/plan (IfPending)', { week_id: addRow.id, payload });
+          const resp = await contractWeekPlanPatch(addRow.id, payload);
+          L('PATCH /contract-weeks/:id/plan (IfPending) ←', resp);
+        } catch (err) {
+          E('additional week flow (IfPending) failed', err);
+          return { ok: false, message: err?.message || 'Calendar commit failed', removedAll: false };
+        }
+      }
+    } else {
+      L('No additionals to commit (IfPending)');
+    }
+
+    // Optimistic in-memory window nudge (for immediate UI consistency)
+    try {
+      if (window.modalCtx && window.modalCtx.data) {
+        if (leftEdgeDate && (!window.modalCtx.data.start_date || leftEdgeDate < window.modalCtx.data.start_date)) {
+          window.modalCtx.data.start_date = leftEdgeDate;
+        }
+        if (rightEdgeDate && (!window.modalCtx.data.end_date || rightEdgeDate > window.modalCtx.data.end_date)) {
+          window.modalCtx.data.end_date = rightEdgeDate;
+        }
+      }
+    } catch {}
+
+    // Clear staged state after a successful commit
     try { clearContractCalendarStageState(contractId); } catch {}
 
-    L('calendar commit ok');
-    return { ok: true, detail: 'calendar saved', removedAll: !!removeAll, newStart: fresh?.start_date || null, newEnd: fresh?.end_date || null };
+    L('calendar commit ok (IfPending)');
+    return { ok: true, detail: 'calendar saved', removedAll: false };
 
   } catch (e) {
     console.warn('[CAL][commitIfPending] failed', e);
