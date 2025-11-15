@@ -669,28 +669,21 @@ function computeRatePresetMargins(state){
   });
   return out;
 }
-
 async function openRatePresetModal({ id, mode } = {}) {
   const isCreate = !id;
   const initialMode = mode || (isCreate ? 'edit' : 'view');
 
-  // Stage
   const st = {
     id: id || null,
-    scope: 'GLOBAL', // or 'CLIENT'
+    scope: 'GLOBAL',
     client_id: null, client_label: '',
     name: '', role: '', band: '', display_site: '',
-    // labels
     bucket_day:'Day', bucket_night:'Night', bucket_sat:'Sat', bucket_sun:'Sun', bucket_bh:'BH',
-    // panels
     enable_paye: false, enable_umbrella: false,
-    // rates (strings to keep inputs happy)
     paye_day:'', paye_night:'', paye_sat:'', paye_sun:'', paye_bh:'',
     umb_day:'',  umb_night:'',  umb_sat:'',  umb_sun:'',  umb_bh:'',
     charge_day:'', charge_night:'', charge_sat:'', charge_sun:'', charge_bh:'',
-    // mileage
     mileage_pay_rate:'', mileage_charge_rate:'',
-    // schedule toggle + staged values (Mon–Sun)
     use_schedule: false,
     mon_start:'', mon_end:'', mon_break:'',
     tue_start:'', tue_end:'', tue_break:'',
@@ -712,14 +705,20 @@ async function openRatePresetModal({ id, mode } = {}) {
       st.role        = row.role || '';
       st.band        = (row.band == null ? '' : String(row.band));
       st.display_site= row.display_site || '';
+
       const L = normaliseBucketLabelsInput(row.bucket_labels_json || null) || labelsDefault();
-      st.bucket_day   = L.day;  st.bucket_night = L.night; st.bucket_sat = L.sat; st.bucket_sun = L.sun; st.bucket_bh = L.bh;
+      st.bucket_day   = L.day;
+      st.bucket_night = L.night;
+      st.bucket_sat   = L.sat;
+      st.bucket_sun   = L.sun;
+      st.bucket_bh    = L.bh;
 
       st.enable_paye     = !!row.enable_paye;
       st.enable_umbrella = !!row.enable_umbrella;
 
       const put = (k,v)=>{ if (v===0 || (v!=null && v!=='')) st[k] = String(v); };
       const R = row || {};
+
       put('paye_day',   R.paye_day);
       put('paye_night', R.paye_night);
       put('paye_sat',   R.paye_sat);
@@ -741,7 +740,6 @@ async function openRatePresetModal({ id, mode } = {}) {
       put('mileage_pay_rate',    R.mileage_pay_rate);
       put('mileage_charge_rate', R.mileage_charge_rate);
 
-      // schedule
       if (row.std_schedule_json && typeof row.std_schedule_json === 'object') {
         st.use_schedule = true;
         const S = row.std_schedule_json || {};
@@ -764,6 +762,7 @@ async function openRatePresetModal({ id, mode } = {}) {
 
   const renderGrid = () => {
     const margin = computeRatePresetMargins(st);
+
     const row = (lab, key) => {
       const MP = margin.bucket[key]?.marginPaye;
       const MU = margin.bucket[key]?.marginUmb;
@@ -773,27 +772,38 @@ async function openRatePresetModal({ id, mode } = {}) {
         (st.enable_paye     ? `PAYE: ${MP==null?'—':MP.toFixed(2)}${negP?' ⚠':''}` : ''),
         (st.enable_umbrella ? `Umb: ${MU==null?'—':MU.toFixed(2)}${negU?' ⚠':''}` : '')
       ].filter(Boolean).join(' • ');
+
       return `
-        <div class="grid-5" data-bucket="${key}">
-          <div class="split"><span class="lbl"> ${lab} </span></div>
-          <input class="input" name="paye_${key}"    placeholder="PAYE"     value="${st[`paye_${key}`]||''}" ${st.enable_paye?'':'disabled'}/>
-          <input class="input" name="umb_${key}"     placeholder="Umbrella" value="${st[`umb_${key}`]||''}" ${st.enable_umbrella?'':'disabled'}/>
-          <input class="input" name="charge_${key}"  placeholder="Charge"   value="${st[`charge_${key}`]||''}"/>
+        <div class="grid-5 rp-rate-row" data-bucket="${key}">
+          <div class="split"><span class="lbl">${lab}</span></div>
+          <div class="rp-col-paye">
+            <input class="input" name="paye_${key}" placeholder="PAYE" value="${st[`paye_${key}`]||''}" ${st.enable_paye?'':'disabled'}/>
+          </div>
+          <div class="rp-col-umb">
+            <input class="input" name="umb_${key}" placeholder="Umbrella" value="${st[`umb_${key}`]||''}" ${st.enable_umbrella?'':'disabled'}/>
+          </div>
+          <div class="rp-col-charge">
+            <input class="input" name="charge_${key}" placeholder="Charge" value="${st[`charge_${key}`]||''}"/>
+          </div>
           <div class="mini" data-role="margin">${mTxt || ''}</div>
         </div>`;
     };
 
     return `
       <div class="group">
-        <div class="row">
-          <label>Enable panels</label>
-          <div class="controls">
-            <label><input type="checkbox" id="rp_en_paye" ${st.enable_paye?'checked':''}/> PAYE</label>
-            <label><input type="checkbox" id="rp_en_umb"  ${st.enable_umbrella?'checked':''}/> Umbrella</label>
-          </div>
-        </div>
         <div class="row"><label>Rates</label>
           <div class="controls small">
+            <div class="grid-5" id="rp_rates_header">
+              <div></div>
+              <div class="mini rp-col-paye">
+                <label><input type="checkbox" id="rp_en_paye" ${st.enable_paye?'checked':''}/> PAYE</label>
+              </div>
+              <div class="mini rp-col-umb">
+                <label><input type="checkbox" id="rp_en_umb" ${st.enable_umbrella?'checked':''}/> Umbrella</label>
+              </div>
+              <div class="mini rp-col-charge">Charge</div>
+              <div class="mini">Margin</div>
+            </div>
             ${row(st.bucket_day,   'day')}
             ${row(st.bucket_night, 'night')}
             ${row(st.bucket_sat,   'sat')}
@@ -814,6 +824,10 @@ async function openRatePresetModal({ id, mode } = {}) {
         <div class="split"><span class="mini">${label} start</span>${timeInput(`${key}_start`, st[`${key}_start`])}</div>
         <div class="split"><span class="mini">${label} end</span>${timeInput(`${key}_end`,   st[`${key}_end`])}</div>
         <div class="split"><span class="mini">Break (min)</span>${breakInput(`${key}_break`, st[`${key}_break`])}</div>
+        <div class="split" style="margin-top:4px">
+          <button type="button" class="btn mini rp_copy" data-day="${key}">Copy</button>
+          <button type="button" class="btn mini rp_paste" data-day="${key}">Paste</button>
+        </div>
       </div>`;
     return `
       <div class="group">
@@ -883,12 +897,18 @@ async function openRatePresetModal({ id, mode } = {}) {
     </div>`;
 
   const renderer = () => `
-    <div class="tabc form" id="rp_form">
-      ${renderTop()}
-      ${renderLabels()}
-      ${renderGrid()}
-      ${renderMileage()}
-      ${renderSchedule()}
+    <div class="tabc">
+      <div class="form" id="rp_form">
+        <div>
+          ${renderTop()}
+          ${renderLabels()}
+          ${renderGrid()}
+          ${renderMileage()}
+        </div>
+        <div>
+          ${renderSchedule()}
+        </div>
+      </div>
     </div>
   `;
 
@@ -928,7 +948,11 @@ async function openRatePresetModal({ id, mode } = {}) {
     };
 
     const labels = {
-      day: v('bucket_day'), night: v('bucket_night'), sat: v('bucket_sat'), sun: v('bucket_sun'), bh: v('bucket_bh')
+      day: v('bucket_day'),
+      night: v('bucket_night'),
+      sat: v('bucket_sat'),
+      sun: v('bucket_sun'),
+      bh: v('bucket_bh')
     };
     const Lnorm = normaliseBucketLabelsInput(labels);
     if (Lnorm) payload.bucket_labels_json = Lnorm;
@@ -993,7 +1017,7 @@ async function openRatePresetModal({ id, mode } = {}) {
     }
   };
 
- showModal(
+  showModal(
     isCreate ? 'Create preset' : 'Rate preset',
     [{ key:'main', title:'Main' }],
     () => '<div class="tabc"><div class="hint">Loading…</div></div>',
@@ -1002,6 +1026,8 @@ async function openRatePresetModal({ id, mode } = {}) {
     () => {
       const mb = document.getElementById('modalBody');
       if (mb) mb.innerHTML = renderer();
+
+      const root = document.getElementById('rp_form');
 
       const saveBtn = document.getElementById('btnSave');
       if (saveBtn && initialMode === 'view') {
@@ -1056,18 +1082,29 @@ async function openRatePresetModal({ id, mode } = {}) {
 
       const enP = document.getElementById('rp_en_paye');
       const enU = document.getElementById('rp_en_umb');
+
+      const toggleColDisplay = (selector, on) => {
+        document.querySelectorAll(selector).forEach(el => {
+          el.style.display = on ? '' : 'none';
+        });
+      };
+
       const rewirePanelState = () => {
-        st.enable_paye = !!enP?.checked; st.enable_umbrella = !!enU?.checked;
-        ['day','night','sat','sun','bh'].forEach(b => {
-          const paye = document.querySelector(`[name="paye_${b}"]`);
-          const umb  = document.querySelector(`[name="umb_${b}"]`);
+        st.enable_paye = !!enP?.checked;
+        st.enable_umbrella = !!enU?.checked;
+
+        buckets.forEach(b => {
+          const paye = document.querySelector(`#rp_form [name="paye_${b}"]`);
+          const umb  = document.querySelector(`#rp_form [name="umb_${b}"]`);
           if (paye) paye.disabled = !st.enable_paye;
           if (umb)  umb.disabled  = !st.enable_umbrella;
         });
+
+        toggleColDisplay('#rp_form .rp-col-paye', st.enable_paye);
+        toggleColDisplay('#rp_form .rp-col-umb',  st.enable_umbrella);
+
         updateMargins();
       };
-      enP?.addEventListener('change', rewirePanelState);
-      enU?.addEventListener('change', rewirePanelState);
 
       const lblMap = {
         bucket_day:   'day',
@@ -1082,7 +1119,7 @@ async function openRatePresetModal({ id, mode } = {}) {
         el.addEventListener('input', () => {
           const k = lblMap[n];
           st[`bucket_${k}`] = el.value || '';
-          const cell = document.querySelector(`.grid-5[data-bucket="${k}"] .lbl`);
+          const cell = document.querySelector(`.rp-rate-row[data-bucket="${k}"] .lbl`);
           if (cell) cell.textContent = st[`bucket_${k}`] || cell.textContent;
         });
       });
@@ -1111,7 +1148,7 @@ async function openRatePresetModal({ id, mode } = {}) {
         const warn = document.getElementById('rp_margin_warn');
         if (warn) warn.style.display = m.anyNegative ? '' : 'none';
         buckets.forEach(b => {
-          const cell = document.querySelector(`.grid-5[data-bucket="${b}"] [data-role="margin"]`);
+          const cell = document.querySelector(`.rp-rate-row[data-bucket="${b}"] [data-role="margin"]`);
           if (!cell) return;
           const mp = m.bucket[b].marginPaye;
           const mu = m.bucket[b].marginUmb;
@@ -1123,17 +1160,112 @@ async function openRatePresetModal({ id, mode } = {}) {
         });
         const fr = window.__getModalFrame?.();
         const btn = document.getElementById('btnSave');
-        if (btn) btn.disabled = !!m.anyNegative && !(initialMode === 'view');
+        if (btn && !(initialMode === 'view')) btn.disabled = !!m.anyNegative;
         if (fr && fr._updateButtons) fr._updateButtons();
       };
 
+      if (enP) enP.addEventListener('change', rewirePanelState);
+      if (enU) enU.addEventListener('change', rewirePanelState);
+
+      const mileagePayEl    = root?.querySelector('[name="mileage_pay_rate"]');
+      const mileageChargeEl = root?.querySelector('[name="mileage_charge_rate"]');
+      const normalizeMileageInput = (el) => {
+        if (!el) return;
+        let v = (el.value || '').trim();
+        if (!v) return;
+        if (v.startsWith('.')) v = '0' + v;
+        let numVal;
+        if (v.includes('.')) {
+          numVal = Number(v);
+        } else {
+          numVal = Number(v) / 100;
+        }
+        if (!Number.isFinite(numVal)) return;
+        el.value = numVal.toFixed(2);
+      };
+      [mileagePayEl, mileageChargeEl].forEach(el => {
+        el && el.addEventListener('blur', () => normalizeMileageInput(el));
+      });
+
+      let schedClipboard = null;
+      const schedRoot = document.getElementById('rp_sched_block');
+
+      const normaliseTimeInput = (t) => {
+        if (!t || !/^(mon|tue|wed|thu|fri|sat|sun)_(start|end)$/.test(t.name)) return;
+        const raw = (t.value || '').trim();
+        const norm = (function (x) {
+          if (!x) return '';
+          const y = x.replace(/\s+/g, '');
+          let h, m;
+          if (/^\d{3,4}$/.test(y)) {
+            const s = y.padStart(4, '0'); h = +s.slice(0, 2); m = +s.slice(2, 4);
+          } else if (/^\d{1,2}:\d{1,2}$/.test(y)) {
+            const parts = y.split(':'); h = +parts[0]; m = +parts[1];
+          } else return '';
+          if (h < 0 || h > 23 || m < 0 || m > 59) return '';
+          return String(h).padStart(2, '0') + ':' + String(m).padStart(2, '0');
+        })(raw);
+
+        if (!norm && raw) {
+          t.value = '';
+          t.setAttribute('data-invalid', '1');
+          t.setAttribute('title', 'Enter a valid time HH:MM (00:00–23:59)');
+          try { t.dispatchEvent(new Event('input', { bubbles: true })); t.dispatchEvent(new Event('change', { bubbles: true })); } catch {}
+          return;
+        }
+
+        if (norm) {
+          t.value = norm;
+          t.removeAttribute('data-invalid');
+          t.removeAttribute('title');
+          try { t.dispatchEvent(new Event('input', { bubbles: true })); t.dispatchEvent(new Event('change', { bubbles: true })); } catch {}
+        }
+      };
+
+      if (schedRoot) {
+        schedRoot.addEventListener('blur', (e) => {
+          normaliseTimeInput(e.target);
+        }, true);
+
+        schedRoot.addEventListener('keydown', (e) => {
+          if (e.key === 'Tab') normaliseTimeInput(e.target);
+        }, true);
+
+        schedRoot.addEventListener('click', (e) => {
+          const copyBtn = e.target.closest('button.rp_copy');
+          const pasteBtn = e.target.closest('button.rp_paste');
+          if (copyBtn) {
+            const day = copyBtn.dataset.day;
+            const sEl = root.querySelector(`[name="${day}_start"]`);
+            const eEl = root.querySelector(`[name="${day}_end"]`);
+            const bEl = root.querySelector(`[name="${day}_break"]`);
+            schedClipboard = {
+              start: sEl?.value || '',
+              end:   eEl?.value || '',
+              br:    bEl?.value || ''
+            };
+            return;
+          }
+          if (pasteBtn && schedClipboard) {
+            const day = pasteBtn.dataset.day;
+            const sEl = root.querySelector(`[name="${day}_start"]`);
+            const eEl = root.querySelector(`[name="${day}_end"]`);
+            const bEl = root.querySelector(`[name="${day}_break"]`);
+            if (sEl) sEl.value = schedClipboard.start;
+            if (eEl) eEl.value = schedClipboard.end;
+            if (bEl) bEl.value = schedClipboard.br;
+          }
+        });
+      }
+
       ['input','change'].forEach(evt => {
-        document.getElementById('rp_form').addEventListener(evt, (e) => {
+        root?.addEventListener(evt, (e) => {
           const t = e.target;
           if (!t?.name) return;
           if (/^(paye|umb|charge)_(day|night|sat|sun|bh)$/.test(t.name)) updateMargins();
         }, true);
       });
+
       rewirePanelState();
       updateMargins();
 
@@ -1148,8 +1280,7 @@ async function openRatePresetModal({ id, mode } = {}) {
     { kind:'rate-preset' }
   );
 
-  // Kick this frame's onReturn so it doesn't stay on "Loading…"
-   setTimeout(() => {
+  setTimeout(() => {
     const fr = window.__getModalFrame?.();
     if (fr && fr.kind === 'rate-preset' && typeof fr.onReturn === 'function' && !fr.__init__) {
       fr.__init__ = true;
@@ -1157,6 +1288,7 @@ async function openRatePresetModal({ id, mode } = {}) {
     }
   }, 0);
 }
+
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Parent modal — Preset Rates manager
@@ -1182,18 +1314,32 @@ function openPresetRatesManager(){
       <table class="grid" id="ratesPresetsTable">
         <thead>
           <tr>
-            <th>Name</th><th>Scope</th><th>Client</th><th>Role</th><th>Band</th><th>Last edited</th>
+            <th>Name</th>
+            <th>Scope</th>
+            <th>Client</th>
+            <th>Role</th>
+            <th>Band</th>
+            <th>Last edited</th>
+            <th></th>
           </tr>
         </thead>
         <tbody>
           ${rows.map(r => `
             <tr data-id="${r.id}">
               <td>${r.name || ''}</td>
-              <td>${(String(r.scope|| (r.client_id ? 'CLIENT' : 'GLOBAL')).toUpperCase())}</td>
+              <td>${(String(r.scope || (r.client_id ? 'CLIENT' : 'GLOBAL')).toUpperCase())}</td>
               <td>${(r.client && r.client.name) ? r.client.name : (r.client_name || '')}</td>
               <td>${r.role || ''}</td>
               <td>${r.band ?? ''}</td>
               <td class="mini">${fmtWhen(r.updated_at)}</td>
+              <td class="mini">
+                <button
+                  type="button"
+                  class="icon bin"
+                  data-del="${r.id}"
+                  title="Delete"
+                >🗑</button>
+              </td>
             </tr>
           `).join('')}
         </tbody>
@@ -1258,35 +1404,18 @@ function openPresetRatesManager(){
     'Preset Rates',
     [{ key: 'main', title: 'Presets' }],
     () => '<div class="tabc"><div class="hint">Loading…</div></div>',
-    async () => true, // don't perform any save; we leave Save as-is (header Close handles close)
+    async () => true, // no save in parent
     false,
     async () => {
       const rows = await fetchRows();
       const mb = document.getElementById('modalBody');
       if (mb) mb.innerHTML = buildBody(rows);
 
-      // Enable Delete, but start disabled until a row is clicked
+      // Make sure header Delete stays hidden for this manager
       const delBtn = document.getElementById('btnDelete');
       if (delBtn) {
-        delBtn.style.display = '';
-        delBtn.classList.add('disabled');
-        delBtn.disabled = true;
-        delBtn.textContent = 'Delete';
-        delBtn.onclick = async () => {
-          if (!S.selectedId) return;
-          if (!confirm('Delete selected preset?')) return;
-          try {
-            await deleteRatePreset(S.selectedId);
-            S.selectedId = null;
-            const refreshed = await fetchRows();
-            document.getElementById('rp_table_wrap').innerHTML =
-              (buildBody(refreshed)).match(/<div id="rp_table_wrap">([\s\S]*)<\/div>/)[1];
-            wireTable();
-            delBtn.classList.add('disabled'); delBtn.disabled = true;
-          } catch (e) {
-            alert(e?.message || 'Delete failed');
-          }
-        };
+        delBtn.style.display = 'none';
+        delBtn.onclick = null;
       }
 
       // Inject a scoped "New" button (idempotent) into the real actions bar
@@ -1319,10 +1448,11 @@ function openPresetRatesManager(){
       // Expose refresh to child modal
       S.refresh = async () => {
         const newRows = await fetchRows();
-        document.getElementById('rp_table_wrap').innerHTML =
+        const host = document.getElementById('rp_table_wrap');
+        if (!host) return; // parent closed or not mounted
+        host.innerHTML =
           (buildBody(newRows)).match(/<div id="rp_table_wrap">([\s\S]*)<\/div>/)[1];
         S.selectedId = null;
-        if (delBtn) { delBtn.classList.add('disabled'); delBtn.disabled = true; }
         wireTable();
         wireFilters();
       };
@@ -1330,13 +1460,33 @@ function openPresetRatesManager(){
       function wireTable(){
         const tbl = document.getElementById('ratesPresetsTable');
         if (!tbl) return;
+
         tbl.addEventListener('click', (e) => {
-          const tr = e.target.closest('tr[data-id]'); if (!tr) return;
+          const delEl = e.target.closest('button[data-del]');
+          if (delEl) {
+            const id = delEl.getAttribute('data-del');
+            if (!id) return;
+            if (!confirm('Delete this preset?')) return;
+            (async () => {
+              try {
+                await deleteRatePreset(id);
+                if (S.selectedId === id) S.selectedId = null;
+                await S.refresh();
+              } catch (err) {
+                alert(err?.message || 'Delete failed');
+              }
+            })();
+            e.stopPropagation();
+            return;
+          }
+
+          const tr = e.target.closest('tr[data-id]');
+          if (!tr) return;
           S.selectedId = tr.getAttribute('data-id');
           tbl.querySelectorAll('tr').forEach(n => n.classList.remove('active'));
           tr.classList.add('active');
-          if (delBtn) { delBtn.classList.remove('disabled'); delBtn.disabled = false; }
         });
+
         tbl.addEventListener('dblclick', (e) => {
           const tr = e.target.closest('tr[data-id]'); if (!tr) return;
           const id = tr.getAttribute('data-id');
@@ -1390,6 +1540,7 @@ function openPresetRatesManager(){
     }
   }, 0);
 }
+
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Rates Presets — API wrappers
@@ -2275,8 +2426,13 @@ function openContract(row) {
     });
   }
 
-  const tabs = [ { key:'main', title:'Main' }, { key:'rates', title:'Rates' }, { key:'calendar', title:'Calendar' } ];
-  if (LOGC) console.log('[CONTRACTS] tabs', tabs.map(t=>t.key));
+   const tabDefs = [
+    { key: 'main',     title: 'Main' },
+    { key: 'rates',    title: 'Rates' },
+    { key: 'calendar', title: 'Calendar' }
+  ];
+  if (LOGC) console.log('[CONTRACTS] tabs', tabDefs.map(t => t.key));
+
   const hasId = !!window.modalCtx.data?.id;
   const isSuccessorCreate = isCreate && ( !!window.modalCtx?.__cloneIntent || !!preToken );
   if (LOGC) console.log('[CONTRACTS] showModal opts preview', {
@@ -2288,7 +2444,7 @@ function openContract(row) {
   showModal(
 
     isCreate ? 'Create Contract' : 'Edit Contract',
-    tabs,
+    tabDefs,
     (key, row) => {
       const ctx = { data: row };
       if (key === 'main')     return renderContractMainTab(ctx);
@@ -2811,9 +2967,10 @@ console.warn('[AFTER UPSERT] reached post-save pre-gate', {
       const wire = () => {
         snapshotContractForm();
 
-        const form = document.querySelector('#contractForm');
-        const tabs = document.getElementById('modalTabs');
-        const active = tabs?.querySelector('button.active')?.textContent?.toLowerCase() || 'main';
+              const form   = document.querySelector('#contractForm');
+        const tabsEl = document.getElementById('modalTabs');
+        const active = tabsEl?.querySelector('button.active')?.textContent?.toLowerCase() || 'main';
+
 
         if (form) {
           if (!form.__wiredStage) {
@@ -3251,52 +3408,55 @@ console.warn('[AFTER UPSERT] reached post-save pre-gate', {
 
           // NEW: Choose preset...
                 // NEW: Choose preset...
-          const chooseBtn = document.getElementById('btnChoosePreset');
-          if (chooseBtn && !chooseBtn.__wired) {
-            chooseBtn.__wired = true;
-            chooseBtn.addEventListener('click', () => {
-              const payMethod = (function(){
-                try {
-                  const v =
-                    (window.modalCtx?.formState?.main?.pay_method_snapshot) ||
-                    document.querySelector('select[name="pay_method_snapshot"], select[name="default_pay_method_snapshot"]')?.value ||
-                    window.modalCtx?.data?.pay_method_snapshot ||
-                    'PAYE';
-                  return String(v).toUpperCase();
-                } catch { return 'PAYE'; }
-              })();
+    const chooseBtn = document.getElementById('btnChoosePreset');
+if (chooseBtn && !chooseBtn.__wired) {
+  chooseBtn.__wired = true;
+  chooseBtn.addEventListener('click', () => {
+    console.log('[CONTRACTS] Choose preset clicked');
 
-              const formEl   = document.querySelector('#contractForm');
-              const clientId = formEl?.querySelector('[name="client_id"]')?.value?.trim() || null;
-              const start    = formEl?.querySelector('[name="start_date"]')?.value?.trim() || null;
+    const payMethod = (function () {
+      try {
+        const v =
+          (window.modalCtx?.formState?.main?.pay_method_snapshot) ||
+          document.querySelector('select[name="pay_method_snapshot"], select[name="default_pay_method_snapshot"]')?.value ||
+          window.modalCtx?.data?.pay_method_snapshot ||
+          'PAYE';
+        return String(v).toUpperCase();
+      } catch { return 'PAYE'; }
+    })();
 
-              openRatePresetPicker(
-                (preset) => {
-                  applyRatePresetToContractForm(preset, payMethod);
-                  try {
-                    const chip = document.getElementById('presetChip');
-                    if (chip) {
-                      chip.style.display = '';
-                      const title =
-                        preset.name ||
-                        [preset.role, preset.band ? `Band ${preset.band}` : '']
-                          .filter(Boolean)
-                          .join(' / ') ||
-                        'Preset';
-                      chip.textContent = `Preset: ${title}`;
-                    }
-                  } catch {}
-                  try { computeContractMargins(); } catch {}
-                  try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
-                },
-                {
-                  client_id:    clientId,
-                  start_date:   start,
-                  defaultScope: clientId ? 'CLIENT' : 'GLOBAL'
-                }
-              );
-            });
+    const formEl   = document.querySelector('#contractForm');
+    const clientId = formEl?.querySelector('[name="client_id"]')?.value?.trim() || null;
+    const start    = formEl?.querySelector('[name="start_date"]')?.value?.trim() || null;
+
+    openRatePresetPicker(
+      (preset) => {
+        applyRatePresetToContractForm(preset, payMethod);
+        try {
+          const chip = document.getElementById('presetChip');
+          if (chip) {
+            chip.style.display = '';
+            const title =
+              preset.name ||
+              [preset.role, preset.band ? `Band ${preset.band}` : '']
+                .filter(Boolean)
+                .join(' / ') ||
+              'Preset';
+            chip.textContent = `Preset: ${title}`;
           }
+        } catch {}
+        try { computeContractMargins(); } catch {}
+        try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
+      },
+      {
+        client_id:    clientId,
+        start_date:   start,
+        defaultScope: clientId ? 'CLIENT' : 'GLOBAL'
+      }
+    );
+  });
+}
+
 
 
           // NEW: Full reset
@@ -3389,7 +3549,6 @@ console.warn('[AFTER UPSERT] reached post-save pre-gate', {
     fr._updateButtons && fr._updateButtons();
   }
 }, 0);
-
 if (!window.__contractsWireBound) {
   window.__contractsWireBound = true;
   window.addEventListener('contracts-main-rendered', () => {
@@ -3408,34 +3567,34 @@ if (!window.__contractsWireBound) {
   });
 }
 
+// Re-wire when the user clicks between Main / Rates / Calendar
+const tabsEl = document.getElementById('modalTabs');
+if (tabsEl && !tabsEl.__wired_contract_stage) {
+  tabsEl.__wired_contract_stage = true;
+  tabsEl.addEventListener('click', () => {
+    const fr = window.__getModalFrame?.();
+    const prevDirty = fr?.isDirty;
+    if (fr) fr._suppressDirty = true;
 
-  if (tabs && !tabs.__wired_contract_stage) {
-  tabs.__wired_contract_stage = true;
-  tabs.addEventListener('click', () => {
-  const fr = window.__getModalFrame?.();
-  const prevDirty = fr?.isDirty;
-  if (fr) fr._suppressDirty = true;
-
-  snapshotContractForm();
-  setTimeout(() => {
-    wire();
-    if (fr) {
-      fr._suppressDirty = false;
-      fr.isDirty = prevDirty;
-      fr._updateButtons && fr._updateButtons();
-    }
-  }, 0);
-});
-
+    snapshotContractForm();
+    setTimeout(() => {
+      wire();
+      if (fr) {
+        fr._suppressDirty = false;
+        fr.isDirty = prevDirty;
+        fr._updateButtons && fr._updateButtons();
+      }
+    }, 0);
+  });
 }
 
     },
 
     // 7th: options (now with noParentGate)
-   { kind:'contracts', extraButtons,
-    _trace: (LOGC && { tag:'contracts-open', isCreate, isSuccessorCreate, openToken: window.modalCtx.openToken })
-  }
-);
+    { kind:'contracts', extraButtons,
+      _trace: (LOGC && { tag:'contracts-open', isCreate, isSuccessorCreate, openToken: window.modalCtx.openToken })
+    }
+  );
   setTimeout(() => {
     try {
       const fr = window.__getModalFrame?.();
@@ -14130,7 +14289,7 @@ const setCloseLabel = ()=>{
 };
 
 
-  top._updateButtons = ()=>{
+   top._updateButtons = ()=>{
     try {
       const h = document.getElementById('modalHint');
       if (h) {
@@ -14142,40 +14301,51 @@ const setCloseLabel = ()=>{
 
     const parentEditable = top.noParentGate ? true : (parent ? (parent.mode==='edit' || parent.mode==='create') : true);
     const relatedBtn = byId('btnRelated');
-    if (top.kind==='advanced-search') {
-      btnEdit.style.display='none'; btnSave.style.display=''; btnSave.disabled=!!top._saving; if (relatedBtn) relatedBtn.disabled=true;
- } else if (isChild && !top.noParentGate) {
-  if (top.mode === 'view') {
-    // Child in VIEW: never show Save
-    btnSave.style.display = 'none';
-    btnSave.disabled = true;
-    btnEdit.style.display = 'none';
-    if (relatedBtn) relatedBtn.disabled = !(top.hasId);
-  } else {
-    // Child in EDIT/CREATE: keep existing gating behaviour
-    btnSave.style.display = parentEditable ? '' : 'none';
-    const wantApply = (top._applyDesired===true);
-    btnSave.disabled = (!parentEditable) || top._saving || !wantApply;
-    btnEdit.style.display='none';
-    if (relatedBtn) relatedBtn.disabled=true;
-    if (LOG) console.log('[MODAL] child _updateButtons()', { parentEditable, wantApply, disabled: btnSave.disabled });
-  }
-} else {
 
-  btnEdit.style.display = (top.mode==='view' && top.hasId) ? '' : 'none';
-  if (relatedBtn) relatedBtn.disabled = !(top.mode==='view' && top.hasId);
+    if (top.kind === 'advanced-search') {
+      btnEdit.style.display='none';
+      btnSave.style.display='';
+      btnSave.disabled=!!top._saving;
+      if (relatedBtn) relatedBtn.disabled=true;
+    } else if (top.kind === 'rates-presets') {
+      btnEdit.style.display='none';
+      btnSave.style.display='none';
+      btnSave.disabled=true;
+      if (relatedBtn) relatedBtn.disabled=true;
+      setCloseLabel();
+      L('_updateButtons snapshot (global)', {
+        kind: top.kind, isChild, parentEditable, mode: top.mode,
+        btnSave: { display: btnSave.style.display, disabled: btnSave.disabled },
+        btnEdit: { display: btnEdit.style.display }
+      });
+      return;
+    } else if (isChild && !top.noParentGate) {
+      if (top.mode === 'view') {
+        btnSave.style.display = 'none';
+        btnSave.disabled = true;
+        btnEdit.style.display = 'none';
+        if (relatedBtn) relatedBtn.disabled = !(top.hasId);
+      } else {
+        btnSave.style.display = parentEditable ? '' : 'none';
+        const wantApply = (top._applyDesired===true);
+        btnSave.disabled = (!parentEditable) || top._saving || !wantApply;
+        btnEdit.style.display='none';
+        if (relatedBtn) relatedBtn.disabled=true;
+        if (LOG) console.log('[MODAL] child _updateButtons()', { parentEditable, wantApply, disabled: btnSave.disabled });
+      }
+    } else {
 
-  // ▶ ensure Save is visible in create mode
-  if (top.mode === 'create') {
-    btnSave.style.display = '';
-    btnSave.disabled = top._saving;
-  } else if (top.mode==='view') {
-    // Always hide Save in view mode
-    btnSave.style.display = 'none';
-    btnSave.disabled = true;
-  } else {
-    btnSave.style.display='';
-    // ... (rest unchanged)
+      btnEdit.style.display = (top.mode==='view' && top.hasId) ? '' : 'none';
+      if (relatedBtn) relatedBtn.disabled = !(top.mode==='view' && top.hasId);
+
+      if (top.mode === 'create') {
+        btnSave.style.display = '';
+        btnSave.disabled = top._saving;
+      } else if (top.mode==='view') {
+        btnSave.style.display = 'none';
+        btnSave.disabled = true;
+      } else {
+        btnSave.style.display='';
 
         let gateOK = true;
         let elig   = null;
@@ -14211,10 +14381,9 @@ const setCloseLabel = ()=>{
           } catch { gateOK = true; }
         }
 
-             btnSave.disabled = (top.entity === 'contracts')
+        btnSave.disabled = (top.entity === 'contracts')
           ? (top._saving || ((top.kind !== 'contract-clone-extend') && !top.isDirty) || !gateOK)
           : (top._saving);
-
       }
     }
 
@@ -14225,6 +14394,7 @@ const setCloseLabel = ()=>{
       btnEdit: { display: btnEdit.style.display }
     });
   };
+
 
   top._updateButtons();
 
