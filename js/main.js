@@ -647,31 +647,89 @@ function currentUserId(){
 // ─────────────────────────────────────────────────────────────────────────────
 // Child modal — Rate preset (create / view / edit)
 // ─────────────────────────────────────────────────────────────────────────────
+
 function computeRatePresetMargins(state){
   // returns { bucket:{ day:{paye,umb,charge,marginPaye,marginUmb,negPaye,negUmb}... }, anyNegative }
   const buckets = ['day','night','sat','sun','bh'];
   const out = { bucket:{}, anyNegative:false };
+
+  if (!state || typeof state !== 'object') return out;
+
+  // Best-effort ERNI % lookup (fraction). Falls back to 0 if not found.
+  let erniPct = 0;
+  try {
+    if (typeof getCurrentErniPct === 'function') {
+      const v = getCurrentErniPct();
+      if (typeof v === 'number' && Number.isFinite(v)) erniPct = v;
+    } else if (typeof window !== 'undefined') {
+      const maybe = (window.__erniPctForPresets ?? window.__erniPct ?? null);
+      if (typeof maybe === 'number' && Number.isFinite(maybe)) {
+        erniPct = maybe;
+      } else if (window.modalCtx && window.modalCtx.data) {
+        const d = window.modalCtx.data;
+        if (d.client_settings && typeof d.client_settings.erni_pct === 'number') {
+          erniPct = d.client_settings.erni_pct;
+        } else if (d.client && typeof d.client.erni_pct === 'number') {
+          erniPct = d.client.erni_pct;
+        }
+      }
+    }
+  } catch {
+    // ignore – fall back to 0
+  }
+
+  const applyMargin = (charge, pay, label) => {
+    if (!Number.isFinite(charge) || !Number.isFinite(pay)) return null;
+
+    if (typeof calcMargin === 'function') {
+      try {
+        const res = calcMargin(charge, pay, label || 'PAYE', erniPct);
+        if (typeof res === 'number' && Number.isFinite(res)) return res;
+        if (res && typeof res.margin === 'number' && Number.isFinite(res.margin)) return res.margin;
+      } catch {
+        // fall back below
+      }
+    }
+    // Fallback: simple spread if calcMargin not available or misbehaves
+    return charge - pay;
+  };
+
   buckets.forEach(b=>{
     const paye   = Number(state[`paye_${b}`]);
     const umb    = Number(state[`umb_${b}`]);
     const charge = Number(state[`charge_${b}`]);
-    const hasP   = state.enable_paye && Number.isFinite(paye);
-    const hasU   = state.enable_umbrella && Number.isFinite(umb);
+    const hasP   = !!state.enable_paye && Number.isFinite(paye);
+    const hasU   = !!state.enable_umbrella && Number.isFinite(umb);
     const hasC   = Number.isFinite(charge);
 
-    const marginP = (hasP && hasC) ? (charge - paye) : null;
-    const marginU = (hasU && hasC) ? (charge - umb)  : null;
+    const marginP = (hasP && hasC) ? applyMargin(charge, paye, 'PAYE') : null;
+    const marginU = (hasU && hasC) ? applyMargin(charge, umb,  'UMB')  : null;
     const negP    = (marginP != null) && (marginP < 0);
     const negU    = (marginU != null) && (marginU < 0);
 
     if (negP || negU) out.anyNegative = true;
-    out.bucket[b] = { paye: hasP ? paye:null, umb: hasU ? umb:null, charge: hasC ? charge:null, marginPaye: marginP, marginUmb: marginU, negPaye: negP, negUmb: negU };
+    out.bucket[b] = {
+      paye:        hasP ? paye   : null,
+      umb:         hasU ? umb    : null,
+      charge:      hasC ? charge : null,
+      marginPaye:  marginP,
+      marginUmb:   marginU,
+      negPaye:     negP,
+      negUmb:      negU
+    };
   });
   return out;
 }
+
+
 async function openRatePresetModal({ id, mode } = {}) {
   const isCreate = !id;
-  const initialMode = mode || (isCreate ? 'edit' : 'view');
+  let initialMode = mode || (isCreate ? 'edit' : 'view');
+  initialMode = String(initialMode || '').toLowerCase();
+  if (initialMode === 'create') initialMode = 'edit';
+  if (initialMode !== 'edit' && initialMode !== 'view') {
+    initialMode = isCreate ? 'edit' : 'view';
+  }
 
   const st = {
     id: id || null,
@@ -836,8 +894,8 @@ async function openRatePresetModal({ id, mode } = {}) {
     result.scope = scopeVal;
     if (scopeVal) st.scope = scopeVal;
 
-    // Pay mode
-    const pmEl = root.querySelector('input[name="rp_pay_mode"]:checked');
+    // Pay mode (select)
+    const pmEl = root.querySelector('#rp_pay_mode');
     let payModeVal = (pmEl && pmEl.value) ? String(pmEl.value).toUpperCase() : (st.payMode || '');
     if (!['PAYE', 'UMB', 'BOTH'].includes(payModeVal)) payModeVal = '';
     result.payMode = payModeVal;
@@ -1037,17 +1095,11 @@ async function openRatePresetModal({ id, mode } = {}) {
           </div>
           <div style="margin-top:8px">
             <span class="mini">Pay mode</span>
-            <div class="rp_pay_mode_opts">
-              <label class="mini">
-                <input type="radio" name="rp_pay_mode" value="PAYE" ${st.payMode === 'PAYE' ? 'checked' : ''}/> PAYE
-              </label>
-              <label class="mini" style="margin-left:12px">
-                <input type="radio" name="rp_pay_mode" value="UMB" ${st.payMode === 'UMB' ? 'checked' : ''}/> Umbrella
-              </label>
-              <label class="mini" style="margin-left:12px">
-                <input type="radio" name="rp_pay_mode" value="BOTH" ${st.payMode === 'BOTH' ? 'checked' : ''}/> PAYE &amp; Umbrella
-              </label>
-            </div>
+            <select class="input" name="rp_pay_mode" id="rp_pay_mode">
+              <option value="PAYE" ${st.payMode === 'PAYE' ? 'selected' : ''}>PAYE</option>
+              <option value="UMB" ${st.payMode === 'UMB' ? 'selected' : ''}>Umbrella</option>
+              <option value="BOTH" ${st.payMode === 'BOTH' ? 'selected' : ''}>PAYE &amp; Umbrella</option>
+            </select>
           </div>
         </div>
       </div>
@@ -1153,7 +1205,7 @@ async function openRatePresetModal({ id, mode } = {}) {
     }
 
     // Pay mode
-    const pmEl = root.querySelector('input[name="rp_pay_mode"]:checked');
+    const pmEl = root.querySelector('#rp_pay_mode');
     let payModeVal = (pmEl && pmEl.value) ? String(pmEl.value).toUpperCase() : (st.payMode || '');
     if (!['PAYE', 'UMB', 'BOTH'].includes(payModeVal)) {
       showModalHint('Choose PAYE, Umbrella or PAYE & Umbrella.', 'warn');
@@ -1388,7 +1440,7 @@ async function openRatePresetModal({ id, mode } = {}) {
       }
 
       function syncPayModeFromDom(opts) {
-        const pmEl = root?.querySelector('input[name="rp_pay_mode"]:checked');
+        const pmEl = root?.querySelector('#rp_pay_mode');
         const valRaw = pmEl?.value || st.payMode || 'PAYE';
         const val = String(valRaw).toUpperCase();
         const mode = ['PAYE', 'UMB', 'BOTH'].includes(val) ? val : 'PAYE';
@@ -1444,37 +1496,15 @@ async function openRatePresetModal({ id, mode } = {}) {
         };
       }
 
-      // Pay mode radios
-      const pmInputs = root?.querySelectorAll('input[name="rp_pay_mode"]') || [];
-      pmInputs.forEach(inp => {
-        inp.addEventListener('change', () => syncPayModeFromDom({ clearPrev: true }));
-      });
-
-      if (pmInputs.length) {
-        let found = false;
-        pmInputs.forEach(inp => {
-          if (inp.checked && !found) {
-            found = true;
-            st.payMode = String(inp.value || 'PAYE').toUpperCase();
-          }
-        });
-        if (!found) {
-          const arr = Array.from(pmInputs);
-          const prefer =
-            arr.find(inp => String(inp.value || '').toUpperCase() === (st.payMode || 'PAYE')) ||
-            arr.find(inp => String(inp.value || '').toUpperCase() === 'PAYE');
-          if (prefer) {
-            prefer.checked = true;
-            st.payMode = String(prefer.value || 'PAYE').toUpperCase();
-          } else {
-            st.payMode = 'PAYE';
-          }
-        }
+      const pmSelect = root?.querySelector('#rp_pay_mode');
+      if (pmSelect) {
+        pmSelect.addEventListener('change', () => syncPayModeFromDom({ clearPrev: true }));
+        // Seed from initial selection
+        syncPayModeFromDom({ clearPrev: false });
       } else {
         st.payMode = st.payMode || 'PAYE';
+        refreshPayModeColumns();
       }
-
-      refreshPayModeColumns();
 
       const lblMap = {
         bucket_day: 'day',
@@ -1673,6 +1703,8 @@ async function openRatePresetModal({ id, mode } = {}) {
 // ─────────────────────────────────────────────────────────────────────────────
 // Parent modal — Preset Rates manager
 // ─────────────────────────────────────────────────────────────────────────────
+
+
 function openPresetRatesManager(){
   // Shared state for the manager; child modals can request refresh via this handle
   window.__ratesPresets__ = window.__ratesPresets__ || {};
@@ -1680,12 +1712,21 @@ function openPresetRatesManager(){
 
   S.scope     = S.scope || 'ALL';     // 'ALL' | 'GLOBAL' | 'CLIENT'
   S.client_id = S.client_id || null;  // when scope === 'CLIENT'
+  S.client_label = S.client_label || '';
   S.q         = S.q || '';
 
   const renderTable = (rows) => {
-    if (!Array.isArray(rows) || !rows.length) {
+    const hasRows = Array.isArray(rows) && rows.length;
+    if (!hasRows) {
+      if (S.scope === 'CLIENT') {
+        if (!S.client_id) {
+          return `<div class="hint">Pick a client to see client-specific presets.</div>`;
+        }
+        return `<div class="hint">No presets exist for this client yet.</div>`;
+      }
       return `<div class="hint">No presets match the current filter.</div>`;
     }
+
     const fmtWhen = (iso) => {
       if (!iso) return '';
       try { return (new Date(iso)).toLocaleString(); } catch { return iso; }
@@ -1731,7 +1772,10 @@ function openPresetRatesManager(){
     const scopeAll    = S.scope === 'ALL'    ? 'checked' : '';
     const scopeGlobal = S.scope === 'GLOBAL' ? 'checked' : '';
     const scopeClient = S.scope === 'CLIENT' ? 'checked' : '';
-    const clientBadge = S.client_label ? `<span class="pill">${S.client_label}</span>` : `<span class="mini">No client selected</span>`;
+
+    const clientBadgeInner = S.client_label
+      ? `<span class="pill">${S.client_label}</span>`
+      : `<span class="mini">No client selected</span>`;
 
     return `
       <div class="tabc">
@@ -1750,7 +1794,7 @@ function openPresetRatesManager(){
             <div class="split">
               <button type="button" class="btn mini" id="rp_pick_client">Pick…</button>
               <button type="button" class="btn mini" id="rp_clear_client">Clear</button>
-              <div>${clientBadge}</div>
+              <div id="rp_cli_badge">${clientBadgeInner}</div>
             </div>
           </div>
         </div>
@@ -1773,8 +1817,25 @@ function openPresetRatesManager(){
       client_id: (S.scope === 'CLIENT' ? S.client_id : null),
       q: S.q || undefined
     };
+
+    // Avoid noisy calls when client scope is chosen but no client selected yet.
+    if (params.scope === 'CLIENT' && !params.client_id) {
+      return [];
+    }
+
     const raw = await listRatePresets(params);
-    return sortPresetsForView(S.scope, raw);
+    let rows = Array.isArray(raw) ? raw : [];
+
+    // Hard filter: in CLIENT scope we only ever show client-specific rows for this client.
+    if (S.scope === 'CLIENT' && S.client_id) {
+      const cid = String(S.client_id);
+      rows = rows.filter(r => {
+        const sc = String(r.scope || (r.client_id ? 'CLIENT' : 'GLOBAL')).toUpperCase();
+        return sc === 'CLIENT' && String(r.client_id || '') === cid;
+      });
+    }
+
+    return sortPresetsForView(S.scope, rows);
   };
 
   // Keep selected row id in the manager context
@@ -1808,7 +1869,7 @@ function openPresetRatesManager(){
           nb.className = 'btn';
           nb.textContent = 'New';
           nb.style.marginLeft = 'auto';
-          nb.onclick = () => openRatePresetModal({ mode: 'create' });
+          nb.onclick = () => openRatePresetModal({ mode: 'edit' });
           bar.insertBefore(nb, document.getElementById('btnSave'));
         }
       }
@@ -1830,11 +1891,9 @@ function openPresetRatesManager(){
         const newRows = await fetchRows();
         const host = document.getElementById('rp_table_wrap');
         if (!host) return; // parent closed or not mounted
-        host.innerHTML =
-          (buildBody(newRows)).match(/<div id="rp_table_wrap">([\s\S]*)<\/div>/)[1];
+        host.innerHTML = renderTable(newRows);
         S.selectedId = null;
         wireTable();
-        wireFilters();
       };
 
       function wireTable(){
@@ -1888,11 +1947,19 @@ function openPresetRatesManager(){
           openClientPicker(({ id, label }) => {
             S.client_id = id;
             S.client_label = label;
+            const badge = document.getElementById('rp_cli_badge');
+            if (badge) badge.innerHTML = `<span class="pill">${label}</span>`;
             S.refresh();
           });
         };
         const clr = document.getElementById('rp_clear_client');
-        if (clr) clr.onclick = () => { S.client_id = null; S.client_label = ''; S.refresh(); };
+        if (clr) clr.onclick = () => {
+          S.client_id = null;
+          S.client_label = '';
+          const badge = document.getElementById('rp_cli_badge');
+          if (badge) badge.innerHTML = '<span class="mini">No client selected</span>';
+          S.refresh();
+        };
 
         const inpQ = document.getElementById('rp_q');
         if (inpQ && !inpQ.__wired) {
@@ -3822,54 +3889,63 @@ try {
           }
 
           // Choose preset wiring: may run on every wire(), guarded per-button
-          const chooseBtn = document.getElementById('btnChoosePreset');
-          if (chooseBtn && !chooseBtn.__wired) {
-            chooseBtn.__wired = true;
-            chooseBtn.addEventListener('click', () => {
-              console.log('[CONTRACTS] Choose preset clicked');
+     const chooseBtn = document.getElementById('btnChoosePreset');
+if (chooseBtn && !chooseBtn.__wired) {
+  chooseBtn.__wired = true;
+  chooseBtn.addEventListener('click', () => {
+    console.log('[CONTRACTS] Choose preset clicked');
 
-              const payMethod = (function () {
-                try {
-                  const v =
-                    (window.modalCtx?.formState?.main?.pay_method_snapshot) ||
-                    document.querySelector('select[name="pay_method_snapshot"], select[name="default_pay_method_snapshot"]')?.value ||
-                    window.modalCtx?.data?.pay_method_snapshot ||
-                    'PAYE';
-                  return String(v).toUpperCase();
-                } catch { return 'PAYE'; }
-              })();
+    const payMethod = (function () {
+      try {
+        const v =
+          (window.modalCtx?.formState?.main?.pay_method_snapshot) ||
+          document.querySelector('select[name="pay_method_snapshot"], select[name="default_pay_method_snapshot"]')?.value ||
+          window.modalCtx?.data?.pay_method_snapshot ||
+          'PAYE';
+        return String(v).toUpperCase();
+      } catch { return 'PAYE'; }
+    })();
 
-              const formEl   = document.querySelector('#contractForm');
-              const clientId = formEl?.querySelector('[name="client_id"]')?.value?.trim() || null;
-              const start    = formEl?.querySelector('[name="start_date"]')?.value?.trim() || null;
+    const formEl   = document.querySelector('#contractForm');
+    const clientId = formEl?.querySelector('[name="client_id"]')?.value?.trim() || null;
+    const start    = formEl?.querySelector('[name="start_date"]')?.value?.trim() || null;
 
-              openRatePresetPicker(
-                (preset) => {
-                  applyRatePresetToContractForm(preset, payMethod);
-                  try {
-                    const chip = document.getElementById('presetChip');
-                    if (chip) {
-                      chip.style.display = '';
-                      const title =
-                        preset.name ||
-                        [preset.role, preset.band ? `Band ${preset.band}` : '']
-                          .filter(Boolean)
-                          .join(' / ') ||
-                        'Preset';
-                      chip.textContent = `Preset: ${title}`;
-                    }
-                  } catch {}
-                  try { computeContractMargins(); } catch {}
-                  try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
-                },
-                {
-                  client_id:    clientId,
-                  start_date:   start,
-                  defaultScope: clientId ? 'CLIENT' : 'GLOBAL'
-                }
-              );
-            });
+    openRatePresetPicker(
+      (preset) => {
+        applyRatePresetToContractForm(preset, payMethod);
+        try {
+          const chip = document.getElementById('presetChip');
+          if (chip) {
+            chip.style.display = '';
+            const title =
+              preset.name ||
+              [preset.role, preset.band ? `Band ${preset.band}` : '']
+                .filter(Boolean)
+                .join(' / ') ||
+              'Preset';
+            chip.textContent = `Preset: ${title}`;
           }
+        } catch {}
+        try { computeContractMargins(); } catch {}
+        // Mark the contracts frame dirty so Save becomes available
+        try {
+          const fr = window.__getModalFrame?.();
+          if (fr && (fr.kind === 'contracts' || fr.entity === 'contracts')) {
+            fr.isDirty = true;
+            if (typeof fr._updateButtons === 'function') fr._updateButtons();
+          }
+        } catch {}
+        try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
+      },
+      {
+        client_id:    clientId,
+        start_date:   start,
+        defaultScope: clientId ? 'CLIENT' : 'GLOBAL'
+      }
+    );
+  });
+}
+
 
           // Full reset wiring: same pattern (per-button guard, not tied to __wiredStage)
           const resetBtn = document.getElementById('btnResetPreset');
@@ -9794,6 +9870,7 @@ function openRatePresetPicker(applyCb, opts = {}) {
   // Shared picker state so onApply can see it
   let pickerRows = [];
   let pickerSelectedIndex = -1;
+  let pickerSelectedId = null;
 
   const content = () => `
     <div class="tabc" id="ratePresetPicker">
@@ -9889,6 +9966,12 @@ function openRatePresetPicker(applyCb, opts = {}) {
       const updateApplyState = () => {
         const canApply = !!(pickerRows.length && pickerSelectedIndex >= 0);
         const btn = document.getElementById('btnSave');
+
+        pickerSelectedId =
+          pickerRows && pickerSelectedIndex >= 0 && pickerRows[pickerSelectedIndex]
+            ? (pickerRows[pickerSelectedIndex].id || null)
+            : null;
+
         if (btn) {
           btn.disabled = !canApply;
           btn.title = canApply ? '' : 'Select a preset to apply';
@@ -9902,6 +9985,8 @@ function openRatePresetPicker(applyCb, opts = {}) {
 
       const paint = () => {
         const pm = currentPayMethod();
+        void pm; // pay method currently not used for display but kept for future logic
+
         const activeIndex = pickerSelectedIndex;
         const body = pickerRows.map((r, i) => {
           const scope = String(r.scope || (r.client_id ? 'CLIENT' : 'GLOBAL')).toUpperCase();
@@ -9911,7 +9996,8 @@ function openRatePresetPicker(applyCb, opts = {}) {
             'Preset';
 
           const [chg, paye, umb] = rateRow(r);
-          const active = (i === activeIndex) ? ' class="active"' : '';
+          const isActive = (i === activeIndex);
+          const cls = isActive ? ' class="active selected"' : '';
 
           const mileagePay = pill(r.mileage_pay_rate);
           const mileageCharge = pill(r.mileage_charge_rate);
@@ -9921,7 +10007,7 @@ function openRatePresetPicker(applyCb, opts = {}) {
               `Pay ${mileagePay} / Charge ${mileageCharge}`;
 
           return `
-            <tr data-i="${i}"${active}>
+            <tr data-i="${i}"${cls}>
               <td></td>
               <td>${name}</td>
               <td>${scope}</td>
@@ -9954,6 +10040,7 @@ function openRatePresetPicker(applyCb, opts = {}) {
           pickerRows = [];
         }
         pickerSelectedIndex = -1;
+        pickerSelectedId = null;
         paint();
       };
 
@@ -9963,6 +10050,7 @@ function openRatePresetPicker(applyCb, opts = {}) {
         const idx = +tr.getAttribute('data-i');
         if (!Number.isFinite(idx)) return;
         pickerSelectedIndex = idx;
+        pickerSelectedId = pickerRows[idx]?.id || null;
         paint();
       });
 
@@ -9972,12 +10060,13 @@ function openRatePresetPicker(applyCb, opts = {}) {
         const idx = +tr.getAttribute('data-i');
         if (!Number.isFinite(idx)) return;
         pickerSelectedIndex = idx;
-        const row = pickerRows[pickerSelectedIndex];
-        if (row && typeof applyCb === 'function') {
-          try { applyCb(row); } catch {}
-        }
-        // Close this picker frame
-        document.getElementById('btnCloseModal')?.click();
+        pickerSelectedId = pickerRows[idx]?.id || null;
+        (async () => {
+          const ok = await onApply();
+          if (ok !== false) {
+            document.getElementById('btnCloseModal')?.click();
+          }
+        })();
       });
 
       search?.addEventListener('input', async () => {
@@ -10033,111 +10122,145 @@ async function fetchCandidateRateOverrides({ candidate_id, client_id, role, band
   return rows;
 }
 
+
 function applyRatePresetToContractForm(preset, payMethod /* 'PAYE'|'UMBRELLA' */) {
-  const form = document.querySelector('#contractForm'); if (!form || !preset) return;
+  const form = document.querySelector('#contractForm');
+  if (!form || !preset) return;
 
-  // 1) Always set charges
-  const CH = {
-    day:   preset.charge_day,
-    night: preset.charge_night,
-    sat:   preset.charge_sat,
-    sun:   preset.charge_sun,
-    bh:    preset.charge_bh
-  };
-  Object.entries(CH).forEach(([k, v]) => {
-    const el = form.querySelector(`[name="charge_${k}"]`);
-    if (el && v != null && v !== '') {
-      el.value = v;
-      setContractFormValue(`charge_${k}`, v);
-    }
-  });
-
-  // 2) Set pay for selected method (only that method)
-  const effectivePayMethod = String(payMethod || 'PAYE').toUpperCase();
-  if (effectivePayMethod === 'PAYE') {
-    const src = {
-      day:   preset.paye_day,
-      night: preset.paye_night,
-      sat:   preset.paye_sat,
-      sun:   preset.paye_sun,
-      bh:    preset.paye_bh
-    };
-    Object.entries(src).forEach(([k, v]) => {
-      const el = form.querySelector(`[name="paye_${k}"]`);
-      if (el && v != null && v !== '') {
-        el.value = v;
-        setContractFormValue(`paye_${k}`, v);
-      }
-    });
-  } else {
-    const src = {
-      day:   preset.umb_day,
-      night: preset.umb_night,
-      sat:   preset.umb_sat,
-      sun:   preset.umb_sun,
-      bh:    preset.umb_bh
-    };
-    Object.entries(src).forEach(([k, v]) => {
-      const el = form.querySelector(`[name="umb_${k}"]`);
-      if (el && v != null && v !== '') {
-        el.value = v;
-        setContractFormValue(`umb_${k}`, v);
-      }
-    });
+  // Ensure modalCtx + formState exist
+  const mc = window.modalCtx || {};
+  if (!window.modalCtx) window.modalCtx = mc;
+  if (!mc.formState) {
+    const baseId = (mc.data && (mc.data.id || null)) || mc.openToken || null;
+    mc.formState = { __forId: baseId, main: {}, pay: {} };
   }
+  const fs = mc.formState;
+  fs.main = fs.main || {};
+  fs.pay  = fs.pay  || {};
 
-  // 3) Main metadata — do not touch candidate/client or gates/submission
+  const effectivePayMethod = String(
+    payMethod ||
+    fs.main.pay_method_snapshot ||
+    mc.data?.pay_method_snapshot ||
+    'PAYE'
+  ).toUpperCase();
+  void effectivePayMethod; // current preset application ignores this but kept for future use
+
+  // ──────────────────────────────────────────────────────────────
+  // Zone B – Job identity (role / band / display_site)
+  // Fill only if currently blank, never clear an existing value.
+  // ──────────────────────────────────────────────────────────────
   const roleEl = form.querySelector('[name="role"]');
   const bandEl = form.querySelector('[name="band"]');
   const siteEl = form.querySelector('[name="display_site"]');
 
-  const hasRoleProp = Object.prototype.hasOwnProperty.call(preset, 'role');
-  const hasBandProp = Object.prototype.hasOwnProperty.call(preset, 'band');
-  const hasSiteProp = Object.prototype.hasOwnProperty.call(preset, 'display_site');
-
-  if (roleEl && hasRoleProp) {
-    const v = preset.role == null ? '' : String(preset.role);
-    roleEl.value = v;
-    setContractFormValue('role', v);
-  }
-  if (bandEl && hasBandProp) {
-    const v = preset.band == null ? '' : String(preset.band);
-    bandEl.value = v;
-    setContractFormValue('band', v);
-  }
-  if (siteEl && hasSiteProp) {
-    const v = preset.display_site == null ? '' : String(preset.display_site);
-    siteEl.value = v;
-    setContractFormValue('display_site', v);
+  if (roleEl) {
+    const cur = String(roleEl.value || '').trim();
+    const next = (preset.role == null ? '' : String(preset.role).trim());
+    if (!cur && next) {
+      roleEl.value = next;
+      setContractFormValue('role', next);
+      fs.main.role = next;
+    }
   }
 
-  // 4) Bucket labels
-  if (preset.bucket_labels_json && typeof preset.bucket_labels_json === 'object') {
+  if (bandEl) {
+    const cur = String(bandEl.value || '').trim();
+    const next = (preset.band == null ? '' : String(preset.band).trim());
+    if (!cur && next) {
+      bandEl.value = next;
+      setContractFormValue('band', next);
+      fs.main.band = next;
+    }
+  }
+
+  if (siteEl) {
+    const cur = String(siteEl.value || '').trim();
+    const next = (preset.display_site == null ? '' : String(preset.display_site).trim());
+    if (!cur && next) {
+      siteEl.value = next;
+      setContractFormValue('display_site', next);
+      fs.main.display_site = next;
+    }
+  }
+
+  // ──────────────────────────────────────────────────────────────
+  // Zone C – Rates (all 15 buckets) – preset is authoritative:
+  // - If key is present and numeric/0 → overwrite.
+  // - If key is present and ''/null → clear.
+  // - If key is absent → leave existing.
+  // ──────────────────────────────────────────────────────────────
+  const BUCKETS = ['day', 'night', 'sat', 'sun', 'bh'];
+  const prefixes = ['paye', 'umb', 'charge'];
+
+  const applyBucket = (prefix, bucketKey) => {
+    const fieldName = `${prefix}_${bucketKey}`;
+    const el = form.querySelector(`[name="${fieldName}"]`);
+    if (!el) return;
+
+    if (!Object.prototype.hasOwnProperty.call(preset, fieldName)) {
+      // Preset says nothing about this bucket → keep existing
+      return;
+    }
+
+    const raw = preset[fieldName];
+
+    if (raw === null || raw === '') {
+      // Explicit clear
+      el.value = '';
+      setContractFormValue(fieldName, '');
+      try { delete fs.pay[fieldName]; } catch {}
+      return;
+    }
+
+    const n = Number(raw);
+    const finalVal = Number.isFinite(n) ? String(n) : String(raw);
+    el.value = finalVal;
+    setContractFormValue(fieldName, finalVal);
+    fs.pay[fieldName] = finalVal;
+  };
+
+  BUCKETS.forEach(b => {
+    prefixes.forEach(p => applyBucket(p, b));
+  });
+
+  // ──────────────────────────────────────────────────────────────
+  // Zone C – Bucket labels (only if preset provides bucket_labels_json)
+  // - If key present: string/number → use; null/undefined → clear to ''.
+  // - If key missing for that bucket → keep current label.
+  // ──────────────────────────────────────────────────────────────
+  if (Object.prototype.hasOwnProperty.call(preset, 'bucket_labels_json')) {
     const BL = preset.bucket_labels_json || {};
-    const defaults = { day:'Day', night:'Night', sat:'Sat', sun:'Sun', bh:'BH' };
-    const buckets = ['day','night','sat','sun','bh'];
+    const buckets = ['day', 'night', 'sat', 'sun', 'bh'];
     const stagedLabels = {};
 
     buckets.forEach(k => {
-      let val;
-      if (Object.prototype.hasOwnProperty.call(BL, k)) {
-        const raw = BL[k];
-        val = raw == null ? '' : String(raw).trim();   // empty string is respected, no fallback
-      } else {
-        val = defaults[k];                             // only when preset does not mention this key at all
-      }
-
-      stagedLabels[k] = val;
-
       const el1 = form.querySelector(`[name="bucket_label_${k}"]`);
       const el2 = form.querySelector(`[name="bucket_${k}"]`);
-      if (el1) { el1.value = val; setContractFormValue(`bucket_label_${k}`, val); }
-      if (el2) { el2.value = val; setContractFormValue(`bucket_${k}`, val); }
+
+      const current =
+        (el1 && el1.value != null ? String(el1.value) :
+         el2 && el2.value != null ? String(el2.value) :
+         (k === 'day' ? 'Day' : k === 'night' ? 'Night' : k === 'sat' ? 'Sat' : k === 'sun' ? 'Sun' : 'BH'));
+
+      let next;
+      if (Object.prototype.hasOwnProperty.call(BL, k)) {
+        const raw = BL[k];
+        next = raw == null ? '' : String(raw).trim();
+      } else {
+        // No instruction for this bucket → keep whatever is currently shown
+        next = current;
+      }
+
+      stagedLabels[k] = next;
+
+      if (el1) { el1.value = next; setContractFormValue(`bucket_label_${k}`, next); }
+      if (el2) { el2.value = next; setContractFormValue(`bucket_${k}`, next); }
 
       const mt = document.querySelector(`#marginsTable tr[data-b="${k}"] > td:first-child`);
-      if (mt) mt.textContent = val;
+      if (mt) mt.textContent = next;
 
-      ['cardPAYE','cardUMB','cardCHG'].forEach(cid => {
+      ['cardPAYE', 'cardUMB', 'cardCHG'].forEach(cid => {
         const card = document.getElementById(cid);
         if (!card) return;
         const anyInput = card.querySelector(`input[name$="_${k}"]`);
@@ -10145,35 +10268,43 @@ function applyRatePresetToContractForm(preset, payMethod /* 'PAYE'|'UMBRELLA' */
         const row = anyInput.closest('.row');
         if (!row) return;
         const lab = row.querySelector('label');
-        if (lab) lab.textContent = val;
+        if (lab) lab.textContent = next;
       });
     });
 
     try {
-      const fs = (window.modalCtx.formState ||= { main:{}, pay:{} });
       fs.main.__bucket_labels = stagedLabels; // includes explicit blanks
     } catch {}
   }
 
-  // 5) Schedule: copy Mon–Sun start/end/break if present
-  if (preset.std_schedule_json && typeof preset.std_schedule_json === 'object') {
-    const days = ['mon','tue','wed','thu','fri','sat','sun'];
-    const template = {};
+  // ──────────────────────────────────────────────────────────────
+  // Zone C – Schedule (std_schedule_json)
+  // - If property present:
+  //   * valid start/end → copy
+  //   * invalid / null / missing → clear day
+  // - If property not present → leave schedule alone.
+  // ──────────────────────────────────────────────────────────────
+  const days = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
+  const hasSchedProp = Object.prototype.hasOwnProperty.call(preset, 'std_schedule_json');
+  let template = null;
 
-    days.forEach(d => {
-      const hasKey = Object.prototype.hasOwnProperty.call(preset.std_schedule_json, d);
-      const src = hasKey ? (preset.std_schedule_json[d] || {}) : null;
-      const sEl = form.querySelector(`input[name="${d}_start"]`);
-      const eEl = form.querySelector(`input[name="${d}_end"]`);
-      const bEl = form.querySelector(`input[name="${d}_break"]`);
+  if (hasSchedProp) {
+    const sched = preset.std_schedule_json;
+    template = {};
 
-      if (src && src.start && src.end) {
+    if (sched && typeof sched === 'object') {
+      days.forEach(d => {
+        const sEl = form.querySelector(`input[name="${d}_start"]`);
+        const eEl = form.querySelector(`input[name="${d}_end"]`);
+        const bEl = form.querySelector(`input[name="${d}_break"]`);
+
+        const src = sched[d] || {};
         const start = String(src.start || '').trim();
         const end   = String(src.end   || '').trim();
+        const brRaw = src.break_minutes;
+
         if (start && end) {
-          const brNum = (src.break_minutes == null || src.break_minutes === '')
-            ? 0
-            : (Number(src.break_minutes) || 0);
+          const brNum = (brRaw == null || brRaw === '') ? 0 : (Number(brRaw) || 0);
           const brStr = String(brNum);
 
           if (sEl) { sEl.value = start; setContractFormValue(`${d}_start`, start); }
@@ -10181,42 +10312,89 @@ function applyRatePresetToContractForm(preset, payMethod /* 'PAYE'|'UMBRELLA' */
           if (bEl) { bEl.value = brStr; setContractFormValue(`${d}_break`, brStr); }
 
           template[d] = { start, end, break_minutes: brNum };
-          return;
+        } else if (Object.prototype.hasOwnProperty.call(sched, d)) {
+          // Explicit instruction to clear this day
+          if (sEl) { sEl.value = ''; setContractFormValue(`${d}_start`, ''); }
+          if (eEl) { eEl.value = ''; setContractFormValue(`${d}_end`,   ''); }
+          if (bEl) { bEl.value = ''; setContractFormValue(`${d}_break`, ''); }
         }
-      }
-
-      // If no valid start/end or day missing in preset, clear the fields and staging
-      if (sEl) { sEl.value = ''; setContractFormValue(`${d}_start`, ''); }
-      if (eEl) { eEl.value = ''; setContractFormValue(`${d}_end`,   ''); }
-      if (bEl) { bEl.value = ''; setContractFormValue(`${d}_break`, ''); }
-    });
+      });
+    } else {
+      // Property present but null / non-object → clear all days
+      days.forEach(d => {
+        const sEl = form.querySelector(`input[name="${d}_start"]`);
+        const eEl = form.querySelector(`input[name="${d}_end"]`);
+        const bEl = form.querySelector(`input[name="${d}_break"]`);
+        if (sEl) { sEl.value = ''; setContractFormValue(`${d}_start`, ''); }
+        if (eEl) { eEl.value = ''; setContractFormValue(`${d}_end`,   ''); }
+        if (bEl) { bEl.value = ''; setContractFormValue(`${d}_break`, ''); }
+      });
+      template = null;
+    }
 
     try {
-      const fs = (window.modalCtx.formState ||= { main:{}, pay:{} });
-      fs.main.__template = Object.keys(template).length ? template : null;
+      fs.main.__template = (template && Object.keys(template).length) ? template : null;
     } catch {}
   }
 
-  // 6) Mileage — if present, overwrite
-  if (preset.mileage_charge_rate != null || preset.mileage_pay_rate != null) {
-    const mcr = form.querySelector('input[name="mileage_charge_rate"]');
-    const mpr = form.querySelector('input[name="mileage_pay_rate"]');
-    if (mcr && preset.mileage_charge_rate != null) {
-      mcr.value = preset.mileage_charge_rate;
-      setContractFormValue('mileage_charge_rate', preset.mileage_charge_rate);
-    }
-    if (mpr && preset.mileage_pay_rate != null) {
-      mpr.value = preset.mileage_pay_rate;
-      setContractFormValue('mileage_pay_rate', preset.mileage_pay_rate);
-    }
+  // ──────────────────────────────────────────────────────────────
+  // Zone C – Hours (std_hours_json)
+  // - If preset provides explicit std_hours_json, stage that.
+  // - Else, if we just set a template, derive hours from it.
+  // ──────────────────────────────────────────────────────────────
+  if (Object.prototype.hasOwnProperty.call(preset, 'std_hours_json')) {
+    const h = preset.std_hours_json;
+    try {
+      fs.main.__hours =
+        (h && typeof h === 'object' && Object.keys(h).length) ? h : null;
+    } catch {}
+  } else if (template && Object.keys(template).length) {
+    const hours = {};
+    const toMinutes = (hhmm) => {
+      const m = String(hhmm || '').match(/^(\d{1,2}):(\d{2})$/);
+      if (!m) return null;
+      const h = +m[1], mi = +m[2];
+      if (!Number.isFinite(h) || !Number.isFinite(mi)) return null;
+      return h * 60 + mi;
+    };
+
+    days.forEach(d => {
+      const slot = template[d];
+      if (!slot || !slot.start || !slot.end) return;
+      const startMin = toMinutes(slot.start);
+      let endMin    = toMinutes(slot.end);
+      if (startMin == null || endMin == null) return;
+      if (endMin < startMin) endMin += 24 * 60;
+      let mins = endMin - startMin;
+      const br = Number(slot.break_minutes || 0);
+      if (Number.isFinite(br) && br > 0) mins -= br;
+      if (mins <= 0) return;
+      hours[d] = +(mins / 60).toFixed(2);
+    });
+
+    try {
+      fs.main.__hours = Object.keys(hours).length ? hours : null;
+    } catch {}
   }
 
-  // 7) Recompute margins & mark dirty
+  // ──────────────────────────────────────────────────────────────
+  // Zone A – things we NEVER touch (candidate, client, WE, pay method,
+  // auto_invoice, mileage) → nothing to do here.
+  // ──────────────────────────────────────────────────────────────
+
+  // Recompute margins & mark modal dirty
   try { computeContractMargins(); } catch {}
+
+  try {
+    const fr = window.__getModalFrame?.();
+    if (fr && (fr.kind === 'contracts' || fr.entity === 'contracts')) {
+      fr.isDirty = true;
+      if (typeof fr._updateButtons === 'function') fr._updateButtons();
+    }
+  } catch {}
+
   try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
 }
-
-
 
 
 function computeContractMargins() {
