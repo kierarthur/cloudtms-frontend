@@ -4023,7 +4023,7 @@ if (chooseBtn && !chooseBtn.__wired) {
           }
         }
 
-      };
+       };
 
   setTimeout(() => {
         const fr = window.__getModalFrame?.();
@@ -4040,7 +4040,8 @@ if (chooseBtn && !chooseBtn.__wired) {
       }, 0);
       if (!window.__contractsWireBound) {
         window.__contractsWireBound = true;
-        window.addEventListener('contracts-main-rendered', () => {
+
+        const rewire = () => {
           const fr = window.__getModalFrame?.();
           const prevDirty = fr?.isDirty;
           if (fr) fr._suppressDirty = true;
@@ -4053,7 +4054,10 @@ if (chooseBtn && !chooseBtn.__wired) {
               fr._updateButtons && fr._updateButtons();
             }
           }, 0);
-        });
+        };
+
+        window.addEventListener('contracts-main-rendered', rewire);
+        window.addEventListener('contracts-rates-rendered', rewire);
       }
 
  // Re-wire when the user clicks between Main / Rates / Calendar
@@ -4078,6 +4082,7 @@ if (chooseBtn && !chooseBtn.__wired) {
       }
 
     },
+
 
     // 7th: options (now with noParentGate)
     {
@@ -5370,7 +5375,7 @@ function renderContractRatesTab(ctx) {
 
   if (LOGC) console.log('[CONTRACTS] renderContractRatesTab', { payMethod, hasRates: !!merged?.rates_json });
 
-  return `
+  const html = `
     <div class="tabc" id="contractRatesTab" data-pay-method="${payMethod}">
       <div class="row" style="display:flex;justify-content:space-between;align-items:center">
         <label class="section">Rates</label>
@@ -5434,7 +5439,25 @@ function renderContractRatesTab(ctx) {
         </tbody>
       </table>
     </div>`;
+
+  setTimeout(() => {
+    try {
+      const root = document.getElementById('contractRatesTab');
+      if (!root) return;
+      const ev = new CustomEvent('contracts-rates-rendered', {
+        detail: { payMethod }
+      });
+      if (LOGC) console.log('[CONTRACTS] dispatch contracts-rates-rendered', { payMethod });
+      window.dispatchEvent(ev);
+    } catch (e) {
+      if (LOGC) console.warn('[CONTRACTS] contracts-rates-rendered dispatch failed', e);
+    }
+  }, 0);
+
+  return html;
 }
+
+
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Week actions (drawer modals)
@@ -9861,6 +9884,9 @@ function mountContractRatesTab() {
 // Open preset picker (card grid) and return chosen data
 
 function openRatePresetPicker(applyCb, opts = {}) {
+  const LOG = (typeof window.__LOG_RATES === 'boolean') ? window.__LOG_RATES : true;
+  const L   = (...a)=> { if (LOG) console.log('[PRESETS]', ...a); };
+
   const {
     client_id = null,
     start_date = null,
@@ -9914,16 +9940,26 @@ function openRatePresetPicker(applyCb, opts = {}) {
     </div>`;
 
   const onApply = async () => {
-    if (!pickerRows || pickerSelectedIndex < 0) return false;
-    const chosen = pickerRows[pickerSelectedIndex];
-    if (!chosen) return false;
-    try {
-      if (typeof applyCb === 'function') applyCb(chosen);
-    } catch {
-      // swallow – modal will still close
+    if (!pickerRows || pickerSelectedIndex < 0) {
+      L('onApply: no selection; aborting');
+      return false;
     }
-    // returning true tells showModal it's OK to close
-    return true;
+    const chosen = pickerRows[pickerSelectedIndex];
+    if (!chosen) {
+      L('onApply: selected index has no row', { idx: pickerSelectedIndex });
+      return false;
+    }
+    L('onApply: applying preset row', { chosen });
+
+    try {
+      if (typeof applyCb === 'function') {
+        applyCb(chosen);
+      }
+    } catch (e) {
+      console.error('[PRESETS] applyCb threw, keeping picker open', e);
+      return false; // don’t close if applying blew up
+    }
+    return true; // OK to close
   };
 
   showModal(
@@ -9985,7 +10021,7 @@ function openRatePresetPicker(applyCb, opts = {}) {
 
       const paint = () => {
         const pm = currentPayMethod();
-        void pm; // pay method currently not used for display but kept for future logic
+        void pm; // currently unused but kept for future
 
         const activeIndex = pickerSelectedIndex;
         const body = pickerRows.map((r, i) => {
@@ -10036,7 +10072,9 @@ function openRatePresetPicker(applyCb, opts = {}) {
             active_on: start_date || null
           });
           pickerRows = Array.isArray(raw) ? sortPresetsForView(scope, raw) : [];
-        } catch {
+          L('fetchRows: got presets', { scope, q, count: pickerRows.length });
+        } catch (e) {
+          console.error('[PRESETS] fetchRows error', e);
           pickerRows = [];
         }
         pickerSelectedIndex = -1;
@@ -10051,6 +10089,7 @@ function openRatePresetPicker(applyCb, opts = {}) {
         if (!Number.isFinite(idx)) return;
         pickerSelectedIndex = idx;
         pickerSelectedId = pickerRows[idx]?.id || null;
+        L('row click → select', { idx, id: pickerSelectedId });
         paint();
       });
 
@@ -10061,6 +10100,7 @@ function openRatePresetPicker(applyCb, opts = {}) {
         if (!Number.isFinite(idx)) return;
         pickerSelectedIndex = idx;
         pickerSelectedId = pickerRows[idx]?.id || null;
+        L('row dblclick → apply', { idx, id: pickerSelectedId });
         (async () => {
           const ok = await onApply();
           if (ok !== false) {
@@ -10080,6 +10120,10 @@ function openRatePresetPicker(applyCb, opts = {}) {
       });
 
       await fetchRows();
+
+      // Rename Save button once DOM is ready
+      const btn = document.getElementById('btnSave');
+      if (btn) btn.textContent = 'Apply';
     },
     {
       kind: 'rate-presets-picker',
@@ -10088,12 +10132,18 @@ function openRatePresetPicker(applyCb, opts = {}) {
   );
 
   // Kick the picker’s onReturn so it doesn’t stay on “Loading…”
+  // and also ensure the frame has the correct _onSave handler.
   setTimeout(() => {
     const fr = window.__getModalFrame?.();
-    if (fr && fr.kind === 'rate-presets-picker' && typeof fr.onReturn === 'function' && !fr.__init__) {
+    if (!fr || fr.kind !== 'rate-presets-picker') return;
+
+    if (typeof fr.onReturn === 'function' && !fr.__init__) {
       fr.__init__ = true;
-      fr.onReturn();
+      fr.onReturn(fr);
     }
+
+    // Ensure the global Save button uses the same handler as dbl-click
+    fr._onSave = onApply;
   }, 0);
 }
 
