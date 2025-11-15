@@ -133,7 +133,7 @@
     .tabs button.active{ background:rgba(79,70,229,.18); color:var(--text); outline:2px solid var(--brand) }
     .tabc{ padding:14px }
 
-    /* Global form fields — restored to the “old, black input” feel everywhere */
+      /* Global form fields — restored to the “old, black input” feel everywhere */
     .form{ display:grid; grid-template-columns:repeat(2,minmax(220px,1fr)); gap:10px }
     .form .row{ display:flex; flex-direction:column; gap:6px }
     .form input, .form select, .form textarea{
@@ -146,11 +146,26 @@
     }
     .form textarea{ min-height:90px }
 
+    /* Dark inputs for any modal field using class="input" (e.g. Preset Rates search) */
+    #modal .input {
+      background:#000;
+      border:1px solid var(--line);
+      color:var(--text);
+      border-radius:8px;
+      padding:8px 10px;
+      width:100%;
+    }
+    #modal .input::placeholder {
+      color:var(--sub);
+      opacity:.75;
+    }
+
     /* ===== Button row ===== */
     .actions{
       padding:10px; border-top:1px solid var(--line);
       display:flex; gap:10px; justify-content:flex-end; background:#0c172d;
     }
+
     .actions button{ border:1px solid var(--line); background:#0b152a; color:#fff; padding:8px 12px; border-radius:10px; cursor:pointer }
     .actions .primary{ background:linear-gradient(180deg,#5146e5,#4038cc); border-color:#3730a3 }
     .hint{ color:#cbd5e1; font-size:12px }
