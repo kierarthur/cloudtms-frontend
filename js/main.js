@@ -9939,28 +9939,35 @@ function openRatePresetPicker(applyCb, opts = {}) {
       </div>
     </div>`;
 
-  const onApply = async () => {
-    if (!pickerRows || pickerSelectedIndex < 0) {
-      L('onApply: no selection; aborting');
-      return false;
-    }
-    const chosen = pickerRows[pickerSelectedIndex];
-    if (!chosen) {
-      L('onApply: selected index has no row', { idx: pickerSelectedIndex });
-      return false;
-    }
-    L('onApply: applying preset row', { chosen });
+const onApply = async () => {
+  if (!pickerRows || pickerSelectedIndex < 0) {
+    L('onApply: no selection; aborting');
+    return false;
+  }
+  const chosen = pickerRows[pickerSelectedIndex];
+  if (!chosen) {
+    L('onApply: selected index has no row', { idx: pickerSelectedIndex });
+    return false;
+  }
+  L('onApply: applying preset row', { chosen });
 
-    try {
-      if (typeof applyCb === 'function') {
-        applyCb(chosen);
-      }
-    } catch (e) {
-      console.error('[PRESETS] applyCb threw, keeping picker open', e);
-      return false; // don’t close if applying blew up
+  try {
+    // ▶ FIX: populate the parent modal form immediately
+    if (typeof applyRatePresetToContractForm === 'function') {
+      applyRatePresetToContractForm(chosen);
     }
-    return true; // OK to close
-  };
+
+    // Keep the existing callback if you still want it
+    if (typeof applyCb === 'function') {
+      applyCb(chosen);
+    }
+  } catch (e) {
+    console.error('[PRESETS] applyCb threw, keeping picker open', e);
+    return false; // don’t close if applying blew up
+  }
+  return true; // OK to close
+};
+
 
   showModal(
     'Rate Presets',
@@ -10172,16 +10179,16 @@ async function fetchCandidateRateOverrides({ candidate_id, client_id, role, band
   return rows;
 }
 
-
 function applyRatePresetToContractForm(preset, payMethod /* 'PAYE'|'UMBRELLA' */) {
+  // ▶ Get parent modal form
   const form = document.querySelector('#contractForm');
   if (!form || !preset) return;
 
-  // Ensure modalCtx + formState exist
+  // ▶ Ensure modalCtx + formState exist
   const mc = window.modalCtx || {};
   if (!window.modalCtx) window.modalCtx = mc;
   if (!mc.formState) {
-    const baseId = (mc.data && (mc.data.id || null)) || mc.openToken || null;
+    const baseId = (mc.data && mc.data.id) || mc.openToken || null;
     mc.formState = { __forId: baseId, main: {}, pay: {} };
   }
   const fs = mc.formState;
@@ -10194,256 +10201,104 @@ function applyRatePresetToContractForm(preset, payMethod /* 'PAYE'|'UMBRELLA' */
     mc.data?.pay_method_snapshot ||
     'PAYE'
   ).toUpperCase();
-  void effectivePayMethod; // current preset application ignores this but kept for future use
 
-  // ──────────────────────────────────────────────────────────────
-  // Zone B – Job identity (role / band / display_site)
-  // Fill only if currently blank, never clear an existing value.
-  // ──────────────────────────────────────────────────────────────
-  const roleEl = form.querySelector('[name="role"]');
-  const bandEl = form.querySelector('[name="band"]');
-  const siteEl = form.querySelector('[name="display_site"]');
-
-  if (roleEl) {
-    const cur = String(roleEl.value || '').trim();
-    const next = (preset.role == null ? '' : String(preset.role).trim());
-    if (!cur && next) {
-      roleEl.value = next;
-      setContractFormValue('role', next);
-      fs.main.role = next;
-    }
-  }
-
-  if (bandEl) {
-    const cur = String(bandEl.value || '').trim();
-    const next = (preset.band == null ? '' : String(preset.band).trim());
-    if (!cur && next) {
-      bandEl.value = next;
-      setContractFormValue('band', next);
-      fs.main.band = next;
-    }
-  }
-
-  if (siteEl) {
-    const cur = String(siteEl.value || '').trim();
-    const next = (preset.display_site == null ? '' : String(preset.display_site).trim());
-    if (!cur && next) {
-      siteEl.value = next;
-      setContractFormValue('display_site', next);
-      fs.main.display_site = next;
-    }
-  }
-
-  // ──────────────────────────────────────────────────────────────
-  // Zone C – Rates (all 15 buckets) – preset is authoritative:
-  // - If key is present and numeric/0 → overwrite.
-  // - If key is present and ''/null → clear.
-  // - If key is absent → leave existing.
-  // ──────────────────────────────────────────────────────────────
-  const BUCKETS = ['day', 'night', 'sat', 'sun', 'bh'];
-  const prefixes = ['paye', 'umb', 'charge'];
-
-  const applyBucket = (prefix, bucketKey) => {
-    const fieldName = `${prefix}_${bucketKey}`;
-    const el = form.querySelector(`[name="${fieldName}"]`);
+  // ── Zone B: Job identity ──
+  [['role','role'], ['band','band'], ['display_site','display_site']].forEach(([field, key]) => {
+    const el = form.querySelector(`[name="${field}"]`);
     if (!el) return;
-
-    if (!Object.prototype.hasOwnProperty.call(preset, fieldName)) {
-      // Preset says nothing about this bucket → keep existing
-      return;
-    }
-
-    const raw = preset[fieldName];
-
-    if (raw === null || raw === '') {
-      // Explicit clear
-      el.value = '';
-      setContractFormValue(fieldName, '');
-      try { delete fs.pay[fieldName]; } catch {}
-      return;
-    }
-
-    const n = Number(raw);
-    const finalVal = Number.isFinite(n) ? String(n) : String(raw);
-    el.value = finalVal;
-    setContractFormValue(fieldName, finalVal);
-    fs.pay[fieldName] = finalVal;
-  };
-
-  BUCKETS.forEach(b => {
-    prefixes.forEach(p => applyBucket(p, b));
+    const cur = String(el.value || '').trim();
+    const next = preset[key] != null ? String(preset[key]).trim() : '';
+    if (!cur && next) { el.value = next; setContractFormValue(field, next); fs.main[key] = next; }
   });
 
-  // ──────────────────────────────────────────────────────────────
-  // Zone C – Bucket labels (only if preset provides bucket_labels_json)
-  // - If key present: string/number → use; null/undefined → clear to ''.
-  // - If key missing for that bucket → keep current label.
-  // ──────────────────────────────────────────────────────────────
-  if (Object.prototype.hasOwnProperty.call(preset, 'bucket_labels_json')) {
-    const BL = preset.bucket_labels_json || {};
-    const buckets = ['day', 'night', 'sat', 'sun', 'bh'];
-    const stagedLabels = {};
+  // ── Zone C: Rates ──
+  const BUCKETS = ['day','night','sat','sun','bh'];
+  const prefixes = ['paye','umb','charge'];
 
-    buckets.forEach(k => {
+  BUCKETS.forEach(b => {
+    prefixes.forEach(p => {
+      const fieldName = `${p}_${b}`;
+      const el = form.querySelector(`[name="${fieldName}"]`);
+      if (!el) return;
+      if (!Object.prototype.hasOwnProperty.call(preset, fieldName)) return;
+
+      const raw = preset[fieldName];
+      if (raw === null || raw === '') { el.value = ''; setContractFormValue(fieldName,''); delete fs.pay[fieldName]; return; }
+
+      const finalVal = Number.isFinite(Number(raw)) ? String(Number(raw)) : String(raw);
+      el.value = finalVal;
+      setContractFormValue(fieldName, finalVal);
+      fs.pay[fieldName] = finalVal;
+    });
+  });
+
+  // ── Zone C: Bucket labels ──
+  if (preset.bucket_labels_json) {
+    const BL = preset.bucket_labels_json;
+    BUCKETS.forEach(k => {
       const el1 = form.querySelector(`[name="bucket_label_${k}"]`);
       const el2 = form.querySelector(`[name="bucket_${k}"]`);
-
-      const current =
-        (el1 && el1.value != null ? String(el1.value) :
-         el2 && el2.value != null ? String(el2.value) :
-         (k === 'day' ? 'Day' : k === 'night' ? 'Night' : k === 'sat' ? 'Sat' : k === 'sun' ? 'Sun' : 'BH'));
-
-      let next;
-      if (Object.prototype.hasOwnProperty.call(BL, k)) {
-        const raw = BL[k];
-        next = raw == null ? '' : String(raw).trim();
-      } else {
-        // No instruction for this bucket → keep whatever is currently shown
-        next = current;
-      }
-
-      stagedLabels[k] = next;
-
+      const raw = Object.prototype.hasOwnProperty.call(BL,k) ? BL[k] : (el1?.value || el2?.value || k);
+      const next = raw == null ? '' : String(raw).trim();
       if (el1) { el1.value = next; setContractFormValue(`bucket_label_${k}`, next); }
       if (el2) { el2.value = next; setContractFormValue(`bucket_${k}`, next); }
-
-      const mt = document.querySelector(`#marginsTable tr[data-b="${k}"] > td:first-child`);
-      if (mt) mt.textContent = next;
-
-      ['cardPAYE', 'cardUMB', 'cardCHG'].forEach(cid => {
-        const card = document.getElementById(cid);
-        if (!card) return;
-        const anyInput = card.querySelector(`input[name$="_${k}"]`);
-        if (!anyInput) return;
-        const row = anyInput.closest('.row');
-        if (!row) return;
-        const lab = row.querySelector('label');
-        if (lab) lab.textContent = next;
-      });
+      fs.main.__bucket_labels ||= {};
+      fs.main.__bucket_labels[k] = next;
     });
-
-    try {
-      fs.main.__bucket_labels = stagedLabels; // includes explicit blanks
-    } catch {}
   }
 
-  // ──────────────────────────────────────────────────────────────
-  // Zone C – Schedule (std_schedule_json)
-  // - If property present:
-  //   * valid start/end → copy
-  //   * invalid / null / missing → clear day
-  // - If property not present → leave schedule alone.
-  // ──────────────────────────────────────────────────────────────
-  const days = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
-  const hasSchedProp = Object.prototype.hasOwnProperty.call(preset, 'std_schedule_json');
-  let template = null;
-
-  if (hasSchedProp) {
+  // ── Zone C: Schedule ──
+  const days = ['mon','tue','wed','thu','fri','sat','sun'];
+  if (preset.std_schedule_json) {
     const sched = preset.std_schedule_json;
-    template = {};
+    const template = {};
+    days.forEach(d => {
+      const sEl = form.querySelector(`input[name="${d}_start"]`);
+      const eEl = form.querySelector(`input[name="${d}_end"]`);
+      const bEl = form.querySelector(`input[name="${d}_break"]`);
+      const src = sched[d] || {};
+      const start = String(src.start||'').trim();
+      const end   = String(src.end||'').trim();
+      const brNum = src.break_minutes != null ? Number(src.break_minutes) : 0;
+      const brStr = String(brNum);
 
-    if (sched && typeof sched === 'object') {
-      days.forEach(d => {
-        const sEl = form.querySelector(`input[name="${d}_start"]`);
-        const eEl = form.querySelector(`input[name="${d}_end"]`);
-        const bEl = form.querySelector(`input[name="${d}_break"]`);
-
-        const src = sched[d] || {};
-        const start = String(src.start || '').trim();
-        const end   = String(src.end   || '').trim();
-        const brRaw = src.break_minutes;
-
-        if (start && end) {
-          const brNum = (brRaw == null || brRaw === '') ? 0 : (Number(brRaw) || 0);
-          const brStr = String(brNum);
-
-          if (sEl) { sEl.value = start; setContractFormValue(`${d}_start`, start); }
-          if (eEl) { eEl.value = end;   setContractFormValue(`${d}_end`,   end); }
-          if (bEl) { bEl.value = brStr; setContractFormValue(`${d}_break`, brStr); }
-
-          template[d] = { start, end, break_minutes: brNum };
-        } else if (Object.prototype.hasOwnProperty.call(sched, d)) {
-          // Explicit instruction to clear this day
-          if (sEl) { sEl.value = ''; setContractFormValue(`${d}_start`, ''); }
-          if (eEl) { eEl.value = ''; setContractFormValue(`${d}_end`,   ''); }
-          if (bEl) { bEl.value = ''; setContractFormValue(`${d}_break`, ''); }
-        }
-      });
-    } else {
-      // Property present but null / non-object → clear all days
-      days.forEach(d => {
-        const sEl = form.querySelector(`input[name="${d}_start"]`);
-        const eEl = form.querySelector(`input[name="${d}_end"]`);
-        const bEl = form.querySelector(`input[name="${d}_break"]`);
+      if (start && end) {
+        if (sEl) { sEl.value = start; setContractFormValue(`${d}_start`, start); }
+        if (eEl) { eEl.value = end;   setContractFormValue(`${d}_end`,   end); }
+        if (bEl) { bEl.value = brStr; setContractFormValue(`${d}_break`, brStr); }
+        template[d] = { start, end, break_minutes: brNum };
+      } else if (Object.prototype.hasOwnProperty.call(sched,d)) {
         if (sEl) { sEl.value = ''; setContractFormValue(`${d}_start`, ''); }
         if (eEl) { eEl.value = ''; setContractFormValue(`${d}_end`,   ''); }
         if (bEl) { bEl.value = ''; setContractFormValue(`${d}_break`, ''); }
-      });
-      template = null;
-    }
-
-    try {
-      fs.main.__template = (template && Object.keys(template).length) ? template : null;
-    } catch {}
-  }
-
-  // ──────────────────────────────────────────────────────────────
-  // Zone C – Hours (std_hours_json)
-  // - If preset provides explicit std_hours_json, stage that.
-  // - Else, if we just set a template, derive hours from it.
-  // ──────────────────────────────────────────────────────────────
-  if (Object.prototype.hasOwnProperty.call(preset, 'std_hours_json')) {
-    const h = preset.std_hours_json;
-    try {
-      fs.main.__hours =
-        (h && typeof h === 'object' && Object.keys(h).length) ? h : null;
-    } catch {}
-  } else if (template && Object.keys(template).length) {
-    const hours = {};
-    const toMinutes = (hhmm) => {
-      const m = String(hhmm || '').match(/^(\d{1,2}):(\d{2})$/);
-      if (!m) return null;
-      const h = +m[1], mi = +m[2];
-      if (!Number.isFinite(h) || !Number.isFinite(mi)) return null;
-      return h * 60 + mi;
-    };
-
-    days.forEach(d => {
-      const slot = template[d];
-      if (!slot || !slot.start || !slot.end) return;
-      const startMin = toMinutes(slot.start);
-      let endMin    = toMinutes(slot.end);
-      if (startMin == null || endMin == null) return;
-      if (endMin < startMin) endMin += 24 * 60;
-      let mins = endMin - startMin;
-      const br = Number(slot.break_minutes || 0);
-      if (Number.isFinite(br) && br > 0) mins -= br;
-      if (mins <= 0) return;
-      hours[d] = +(mins / 60).toFixed(2);
+      }
     });
-
-    try {
-      fs.main.__hours = Object.keys(hours).length ? hours : null;
-    } catch {}
+    fs.main.__template = template;
   }
 
-  // ──────────────────────────────────────────────────────────────
-  // Zone A – things we NEVER touch (candidate, client, WE, pay method,
-  // auto_invoice, mileage) → nothing to do here.
-  // ──────────────────────────────────────────────────────────────
+  // ── Zone C: Hours ──
+  if (preset.std_hours_json) fs.main.__hours = preset.std_hours_json;
+  else if (fs.main.__template) {
+    const hours = {};
+    const toMinutes = (hhmm) => { const m = String(hhmm||'').match(/^(\d{1,2}):(\d{2})$/); return m ? (+m[1]*60+ +m[2]) : null; };
+    days.forEach(d => {
+      const slot = fs.main.__template[d]; if (!slot || !slot.start || !slot.end) return;
+      const startMin = toMinutes(slot.start), endMin = toMinutes(slot.end);
+      if (startMin==null || endMin==null) return;
+      let mins = endMin < startMin ? (endMin+1440-startMin) : (endMin-startMin);
+      mins -= Number(slot.break_minutes||0); if (mins<=0) return;
+      hours[d] = +(mins/60).toFixed(2);
+    });
+    fs.main.__hours = Object.keys(hours).length ? hours : null;
+  }
 
-  // Recompute margins & mark modal dirty
+  // ── Mark modal dirty & update buttons ──
   try { computeContractMargins(); } catch {}
-
   try {
     const fr = window.__getModalFrame?.();
-    if (fr && (fr.kind === 'contracts' || fr.entity === 'contracts')) {
-      fr.isDirty = true;
-      if (typeof fr._updateButtons === 'function') fr._updateButtons();
-    }
+    if (fr && (fr.kind==='contracts' || fr.entity==='contracts')) { fr.isDirty=true; fr._updateButtons?.(); }
+    window.dispatchEvent(new Event('modal-dirty'));
   } catch {}
-
-  try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
 }
 
 
