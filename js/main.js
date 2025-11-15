@@ -9903,7 +9903,7 @@ function openRatePresetPicker(applyCb, opts = {}) {
         <div class="controls">
           <label><input type="radio" name="rp_scope" value="ALL" ${defaultScope==='ALL'?'checked':''}/> All</label>
           <label><input type="radio" name="rp_scope" value="GLOBAL" ${defaultScope==='GLOBAL'?'checked':''}/> Global</label>
-          <label ${client_id?'':'title="Pick a client to enable Client presets"'}>
+          <label ${client_id?'':'title="Pick a client to enable Client presets"'} >
             <input type="radio" name="rp_scope" value="CLIENT" ${defaultScope==='CLIENT'?'checked':''} ${client_id?'':'disabled'}/> Client
           </label>
           <input type="text" id="rp_search" class="input" placeholder="Search…" style="margin-left:auto;min-width:200px"/>
@@ -9931,7 +9931,16 @@ function openRatePresetPicker(applyCb, opts = {}) {
       </div>
     </div>`;
 
-  // ▶ UPDATED onApply (use parent contracts frame, not the picker frame)
+  const getParentContractsFrame = () => {
+    const stack = window.__modalStack || [];
+    for (let i = stack.length - 2; i >= 0; i--) {
+      const f = stack[i];
+      if (f && (f.kind === 'contracts' || f.entity === 'contracts')) return f;
+    }
+    return null;
+  };
+
+  // ⬇️ APPLY FIRST so a missing setFrameMode can never block the write
   const onApply = async () => {
     if (!pickerRows || pickerSelectedIndex < 0) return false;
     const chosen = pickerRows[pickerSelectedIndex];
@@ -9940,43 +9949,37 @@ function openRatePresetPicker(applyCb, opts = {}) {
     L('onApply: applying preset row', { chosen });
 
     try {
-      // 🔹 Find parent frame under the picker (should be the contracts modal)
-      const stack = window.__modalStack || [];
-      const parent = stack.length > 1 ? stack[stack.length - 2] : null;
-      const contractsFrame =
-        parent && (parent.kind === 'contracts' || parent.entity === 'contracts')
-          ? parent
-          : null;
+      // 1) Always write to formState (and DOM if visible)
+      if (typeof applyRatePresetToContractForm === 'function') applyRatePresetToContractForm(chosen);
 
-      // 1️⃣ Ensure parent contracts modal is in edit mode so fields can be updated
-      if (contractsFrame) {
-        setFrameMode(contractsFrame, 'edit');   // make inputs editable
-        contractsFrame.isDirty = true;
-        contractsFrame._updateButtons?.();
-      }
+      // 2) Optionally flip parent to edit, but never throw if helper isn’t in scope
+      const fr = getParentContractsFrame();
+      try {
+        if (fr) {
+          // call if exported globally; otherwise, minimal fallback
+          if (typeof window.setFrameMode === 'function') {
+            window.setFrameMode(fr, 'edit');
+          } else {
+            fr.mode = 'edit';
+            fr._updateButtons && fr._updateButtons();
+          }
+        }
+      } catch { /* non-fatal */ }
 
-      // 2️⃣ Apply preset to contract form (populates DOM + formState)
-      if (typeof applyRatePresetToContractForm === 'function') {
-        applyRatePresetToContractForm(chosen);
-      }
-
-      // 3️⃣ Dispatch events so parent tabs re-render (rates / main)
+      // 3) Nudge parent to repaint rates if it’s mounted; otherwise it’ll repaint when the picker closes
       try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
-      try { window.dispatchEvent(new Event('contracts-rates-rendered')); } catch {}
+      try {
+        if (fr && fr._hasMountedOnce && typeof fr.setTab === 'function') fr.setTab('rates');
+      } catch {}
 
-      // 3b️⃣ If contracts frame is mounted, repaint the rates tab
-      if (contractsFrame && contractsFrame._hasMountedOnce && typeof contractsFrame.setTab === 'function') {
-        contractsFrame.setTab('rates');
-      }
-
-      // 4️⃣ Call any external callback if needed
+      // 4) external callback hook
       if (typeof applyCb === 'function') applyCb(chosen);
 
     } catch (e) {
-      console.error('[PRESETS] applyCb threw, keeping picker open', e);
+      console.error('[PRESETS] onApply failed; keeping picker open', e);
       return false;
     }
-    return true; // OK to close
+    return true; // tell showModal it’s OK to close
   };
 
   showModal(
@@ -9999,8 +10002,8 @@ function openRatePresetPicker(applyCb, opts = {}) {
 
       const rateRow = (p) => [
         `D:${pill(p.charge_day)} N:${pill(p.charge_night)} Sa:${pill(p.charge_sat)} Su:${pill(p.charge_sun)} BH:${pill(p.charge_bh)}`,
-        `D:${pill(p.paye_day)} N:${pill(p.paye_night)} Sa:${pill(p.paye_sat)} Su:${pill(p.paye_sun)} BH:${pill(p.paye_bh)}`,
-        `D:${pill(p.umb_day)} N:${pill(p.umb_night)} Sa:${pill(p.umb_sat)} Su:${pill(p.umb_sun)} BH:${pill(p.umb_bh)}`
+        `D:${pill(p.umb_day)   } N:${pill(p.umb_night)   } Sa:${pill(p.umb_sat)   } Su:${pill(p.umb_sun)   } BH:${pill(p.umb_bh)   }`,
+        `D:${pill(p.paye_day)  } N:${pill(p.paye_night)  } Sa:${pill(p.paye_sat)  } Su:${pill(p.paye_sun)  } BH:${pill(p.paye_bh)  }`
       ];
 
       const updateApplyState = () => {
@@ -10032,7 +10035,7 @@ function openRatePresetPicker(applyCb, opts = {}) {
             [r.role, r.band ? `Band ${r.band}` : ''].filter(Boolean).join(' / ') ||
             'Preset';
 
-          const [chg, paye, umb] = rateRow(r);
+          const [chg, umb, paye] = rateRow(r);
           const isActive = (i === activeIndex);
           const cls = isActive ? ' class="active selected"' : '';
 
@@ -10076,19 +10079,34 @@ function openRatePresetPicker(applyCb, opts = {}) {
         paint();
       };
 
+      // Single-click select
+      let lastClick = { idx: -1, t: 0 };
       tbody.addEventListener('click', (e) => {
         const tr = e.target.closest('tr[data-i]');
         if (!tr) return;
         const idx = +tr.getAttribute('data-i');
         if (!Number.isFinite(idx)) return;
+
+        const now = Date.now();
+        const isFastSecond = (lastClick.idx === idx && (now - lastClick.t) < 300);
+        lastClick = { idx, t: now };
+
         pickerSelectedIndex = idx;
         pickerSelectedId = pickerRows[idx]?.id || null;
         L('row click → select', { idx, id: pickerSelectedId });
         paint();
+
+        // Fallback “double-click”: two fast clicks on the same row
+        if (isFastSecond) {
+          (async () => {
+            const ok = await onApply();
+            if (ok !== false) setTimeout(() => document.getElementById('btnCloseModal')?.click(), 50);
+          })();
+        }
       });
 
-      // ▶ UPDATED double-click handler with small close delay
-      tbody.addEventListener('dblclick', async (e) => {
+      // Native dblclick (kept for environments where it fires reliably)
+      root.addEventListener('dblclick', (e) => {
         const tr = e.target.closest('tr[data-i]');
         if (!tr) return;
         const idx = +tr.getAttribute('data-i');
@@ -10096,14 +10114,11 @@ function openRatePresetPicker(applyCb, opts = {}) {
         pickerSelectedIndex = idx;
         pickerSelectedId = pickerRows[idx]?.id || null;
         L('row dblclick → apply', { idx, id: pickerSelectedId });
-
-        const ok = await onApply();
-        if (ok !== false) {
-          setTimeout(() => {
-            document.getElementById('btnCloseModal')?.click();
-          }, 50);
-        }
-      });
+        (async () => {
+          const ok = await onApply();
+          if (ok !== false) setTimeout(() => document.getElementById('btnCloseModal')?.click(), 50);
+        })();
+      }, true); // capture phase to avoid other listeners swallowing it
 
       search?.addEventListener('input', fetchRows);
       radios.forEach(r => r.addEventListener('change', fetchRows));
@@ -10117,7 +10132,7 @@ function openRatePresetPicker(applyCb, opts = {}) {
     { kind: 'rate-presets-picker', noParentGate: true }
   );
 
-  // Kick the picker’s onReturn & set _onSave
+  // Ensure the global Save button uses the same handler as dbl-click
   setTimeout(() => {
     const fr = window.__getModalFrame?.();
     if (!fr || fr.kind !== 'rate-presets-picker') return;
@@ -10126,7 +10141,6 @@ function openRatePresetPicker(applyCb, opts = {}) {
       fr.__init__ = true;
       fr.onReturn(fr);
     }
-
     fr._onSave = onApply;
   }, 0);
 }
@@ -10157,16 +10171,16 @@ async function fetchCandidateRateOverrides({ candidate_id, client_id, role, band
   return rows;
 }
 function applyRatePresetToContractForm(preset, payMethod /* 'PAYE'|'UMBRELLA' */) {
-  // ▶ Get parent modal form (prefer the one inside the active modal body)
+  if (!preset) return;
+
+  // Prefer the contract form in the active modal body; may be absent while the picker is on top.
   const form =
     document.querySelector('#modalBody #contractForm') ||
-    document.querySelector('#contractForm');
+    document.querySelector('#contractForm') || null;
+  const canTouchDom = !!form;
 
-  if (!form || !preset) return;
-
-  // ▶ Ensure modalCtx + formState exist
-  const mc = window.modalCtx || {};
-  if (!window.modalCtx) window.modalCtx = mc;
+  // ▶ Ensure modalCtx + formState exist (modalCtx here should already point to the parent frame’s ctxRef)
+  const mc = window.modalCtx || (window.modalCtx = {});
   if (!mc.formState) {
     const baseId = (mc.data && mc.data.id) || mc.openToken || null;
     mc.formState = { __forId: baseId, main: {}, pay: {} };
@@ -10182,13 +10196,32 @@ function applyRatePresetToContractForm(preset, payMethod /* 'PAYE'|'UMBRELLA' */
     'PAYE'
   ).toUpperCase();
 
+  // helper to write fs + (optionally) DOM + notify any watchers
+  const write = (name, val) => {
+    // update formState first (this is what renderers merge from)
+    if (/^(paye_|umb_|charge_)/.test(name)) fs.pay[name] = val;
+    else fs.main[name] = val;
+
+    // best-effort notify existing setter if present
+    try { typeof setContractFormValue === 'function' && setContractFormValue(name, val); } catch {}
+
+    // update the DOM if we can see it (parent frame visible)
+    if (canTouchDom) {
+      const el = form.querySelector(`[name="${name}"]`);
+      if (el) {
+        el.value = val;
+        try {
+          el.dispatchEvent(new Event('input',  { bubbles: true }));
+          el.dispatchEvent(new Event('change', { bubbles: true }));
+        } catch {}
+      }
+    }
+  };
+
   // ── Zone B: Job identity ──
   [['role','role'], ['band','band'], ['display_site','display_site']].forEach(([field, key]) => {
-    const el = form.querySelector(`[name="${field}"]`);
-    if (!el) return;
-    const cur = String(el.value || '').trim();
     const next = preset[key] != null ? String(preset[key]).trim() : '';
-    if (!cur && next) { el.value = next; setContractFormValue(field, next); fs.main[key] = next; }
+    if (next) write(field, next);
   });
 
   // ── Zone C: Rates ──
@@ -10198,36 +10231,23 @@ function applyRatePresetToContractForm(preset, payMethod /* 'PAYE'|'UMBRELLA' */
   BUCKETS.forEach(b => {
     prefixes.forEach(p => {
       const fieldName = `${p}_${b}`;
-      const el = form.querySelector(`[name="${fieldName}"]`);
-      if (!el) return;
       if (!Object.prototype.hasOwnProperty.call(preset, fieldName)) return;
-
       const raw = preset[fieldName];
-      if (raw === null || raw === '') {
-        el.value = '';
-        setContractFormValue(fieldName,'');
-        delete fs.pay[fieldName];
-        return;
-      }
-
-      const finalVal = Number.isFinite(Number(raw)) ? String(Number(raw)) : String(raw);
-      el.value = finalVal;
-      setContractFormValue(fieldName, finalVal);
-      fs.pay[fieldName] = finalVal;
+      const finalVal = (raw === null || raw === '') ? '' :
+                       (Number.isFinite(Number(raw)) ? String(Number(raw)) : String(raw));
+      write(fieldName, finalVal);
     });
   });
 
   // ── Zone C: Bucket labels ──
   if (preset.bucket_labels_json) {
     const BL = preset.bucket_labels_json;
+    fs.main.__bucket_labels ||= {};
     BUCKETS.forEach(k => {
-      const el1 = form.querySelector(`[name="bucket_label_${k}"]`);
-      const el2 = form.querySelector(`[name="bucket_${k}"]`);
-      const raw = Object.prototype.hasOwnProperty.call(BL,k) ? BL[k] : (el1?.value || el2?.value || k);
+      const raw  = Object.prototype.hasOwnProperty.call(BL, k) ? BL[k] : k;
       const next = raw == null ? '' : String(raw).trim();
-      if (el1) { el1.value = next; setContractFormValue(`bucket_label_${k}`, next); }
-      if (el2) { el2.value = next; setContractFormValue(`bucket_${k}`, next); }
-      fs.main.__bucket_labels ||= {};
+      write(`bucket_label_${k}`, next);
+      write(`bucket_${k}`,       next);
       fs.main.__bucket_labels[k] = next;
     });
   }
@@ -10237,38 +10257,35 @@ function applyRatePresetToContractForm(preset, payMethod /* 'PAYE'|'UMBRELLA' */
   if (preset.std_schedule_json) {
     const sched = preset.std_schedule_json;
     const template = {};
+    const toStr = (v) => (v == null ? '' : String(v).trim());
+
     days.forEach(d => {
-      const sEl = form.querySelector(`input[name="${d}_start"]`);
-      const eEl = form.querySelector(`input[name="${d}_end"]`);
-      const bEl = form.querySelector(`input[name="${d}_break"]`);
-      const src = sched[d] || {};
-      const start = String(src.start||'').trim();
-      const end   = String(src.end||'').trim();
+      const src   = sched[d] || {};
+      const start = toStr(src.start);
+      const end   = toStr(src.end);
       const brNum = src.break_minutes != null ? Number(src.break_minutes) : 0;
       const brStr = String(brNum);
 
       if (start && end) {
-        if (sEl) { sEl.value = start; setContractFormValue(`${d}_start`, start); }
-        if (eEl) { eEl.value = end;   setContractFormValue(`${d}_end`,   end); }
-        if (bEl) { bEl.value = brStr; setContractFormValue(`${d}_break`, brStr); }
+        write(`${d}_start`, start);
+        write(`${d}_end`,   end);
+        write(`${d}_break`, brStr);
         template[d] = { start, end, break_minutes: brNum };
-      } else if (Object.prototype.hasOwnProperty.call(sched,d)) {
-        if (sEl) { sEl.value = ''; setContractFormValue(`${d}_start`, ''); }
-        if (eEl) { eEl.value = ''; setContractFormValue(`${d}_end`,   ''); }
-        if (bEl) { bEl.value = ''; setContractFormValue(`${d}_break`, ''); }
+      } else if (Object.prototype.hasOwnProperty.call(sched, d)) {
+        write(`${d}_start`, '');
+        write(`${d}_end`,   '');
+        write(`${d}_break`, '');
       }
     });
     fs.main.__template = template;
   }
 
   // ── Zone C: Hours ──
-  if (preset.std_hours_json) fs.main.__hours = preset.std_hours_json;
-  else if (fs.main.__template) {
+  if (preset.std_hours_json) {
+    fs.main.__hours = preset.std_hours_json;
+  } else if (fs.main.__template) {
     const hours = {};
-    const toMinutes = (hhmm) => {
-      const m = String(hhmm||'').match(/^(\d{1,2}):(\d{2})$/);
-      return m ? (+m[1]*60+ +m[2]) : null;
-    };
+    const toMinutes = (hhmm) => { const m = String(hhmm||'').match(/^(\d{1,2}):(\d{2})$/); return m ? (+m[1]*60+ +m[2]) : null; };
     days.forEach(d => {
       const slot = fs.main.__template[d]; if (!slot || !slot.start || !slot.end) return;
       const startMin = toMinutes(slot.start), endMin = toMinutes(slot.end);
@@ -10281,13 +10298,10 @@ function applyRatePresetToContractForm(preset, payMethod /* 'PAYE'|'UMBRELLA' */
   }
 
   // ── Mark modal dirty & update buttons ──
-  try { computeContractMargins(); } catch {}
+  try { typeof computeContractMargins === 'function' && computeContractMargins(); } catch {}
   try {
     const fr = window.__getModalFrame?.();
-    if (fr && (fr.kind==='contracts' || fr.entity==='contracts')) {
-      fr.isDirty=true;
-      fr._updateButtons?.();
-    }
+    if (fr && (fr.kind==='contracts' || fr.entity==='contracts')) { fr.isDirty = true; fr._updateButtons?.(); }
     window.dispatchEvent(new Event('modal-dirty'));
   } catch {}
 }
