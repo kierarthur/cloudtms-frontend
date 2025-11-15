@@ -9882,7 +9882,6 @@ function mountContractRatesTab() {
 
 
 // Open preset picker (card grid) and return chosen data
-
 function openRatePresetPicker(applyCb, opts = {}) {
   const LOG = (typeof window.__LOG_RATES === 'boolean') ? window.__LOG_RATES : true;
   const L   = (...a)=> { if (LOG) console.log('[PRESETS]', ...a); };
@@ -9893,7 +9892,6 @@ function openRatePresetPicker(applyCb, opts = {}) {
     defaultScope = (client_id ? 'CLIENT' : 'GLOBAL')
   } = opts;
 
-  // Shared picker state so onApply can see it
   let pickerRows = [];
   let pickerSelectedIndex = -1;
   let pickerSelectedId = null;
@@ -9905,16 +9903,10 @@ function openRatePresetPicker(applyCb, opts = {}) {
         <div class="controls">
           <label><input type="radio" name="rp_scope" value="ALL" ${defaultScope==='ALL'?'checked':''}/> All</label>
           <label><input type="radio" name="rp_scope" value="GLOBAL" ${defaultScope==='GLOBAL'?'checked':''}/> Global</label>
-          <label ${client_id?'':'title="Pick a client to enable Client presets"'}>
+          <label ${client_id?'':'title="Pick a client to enable Client presets"'} >
             <input type="radio" name="rp_scope" value="CLIENT" ${defaultScope==='CLIENT'?'checked':''} ${client_id?'':'disabled'}/> Client
           </label>
-          <input
-            type="text"
-            id="rp_search"
-            class="input"
-            placeholder="Search…"
-            style="margin-left:auto;min-width:200px"
-          />
+          <input type="text" id="rp_search" class="input" placeholder="Search…" style="margin-left:auto;min-width:200px"/>
         </div>
       </div>
       <div class="hint" style="margin:6px 0 10px">
@@ -9939,35 +9931,43 @@ function openRatePresetPicker(applyCb, opts = {}) {
       </div>
     </div>`;
 
-const onApply = async () => {
-  if (!pickerRows || pickerSelectedIndex < 0) {
-    L('onApply: no selection; aborting');
-    return false;
-  }
-  const chosen = pickerRows[pickerSelectedIndex];
-  if (!chosen) {
-    L('onApply: selected index has no row', { idx: pickerSelectedIndex });
-    return false;
-  }
-  L('onApply: applying preset row', { chosen });
-
-  try {
-    // ▶ FIX: populate the parent modal form immediately
-    if (typeof applyRatePresetToContractForm === 'function') {
-      applyRatePresetToContractForm(chosen);
+  const onApply = async () => {
+    if (!pickerRows || pickerSelectedIndex < 0) {
+      L('onApply: no selection; aborting');
+      return false;
     }
-
-    // Keep the existing callback if you still want it
-    if (typeof applyCb === 'function') {
-      applyCb(chosen);
+    const chosen = pickerRows[pickerSelectedIndex];
+    if (!chosen) {
+      L('onApply: selected index has no row', { idx: pickerSelectedIndex });
+      return false;
     }
-  } catch (e) {
-    console.error('[PRESETS] applyCb threw, keeping picker open', e);
-    return false; // don’t close if applying blew up
-  }
-  return true; // OK to close
-};
+    L('onApply: applying preset row', { chosen });
 
+    try {
+      // ▶ FIX: populate the parent modal immediately
+      if (typeof applyRatePresetToContractForm === 'function') {
+        applyRatePresetToContractForm(chosen);
+      }
+
+      // Keep existing callback if needed
+      if (typeof applyCb === 'function') {
+        applyCb(chosen);
+      }
+
+      // Ensure parent modal is marked dirty and buttons updated
+      const fr = window.__getModalFrame?.();
+      if (fr && (fr.kind === 'contracts' || fr.entity === 'contracts')) {
+        fr.isDirty = true;
+        fr._updateButtons && fr._updateButtons();
+      }
+      window.dispatchEvent(new Event('modal-dirty'));
+
+    } catch (e) {
+      console.error('[PRESETS] applyCb threw, keeping picker open', e);
+      return false;
+    }
+    return true; // OK to close
+  };
 
   showModal(
     'Rate Presets',
@@ -9984,19 +9984,6 @@ const onApply = async () => {
 
       const scopeVal = () =>
         (radios.find(r => r.checked)?.value || (client_id ? 'CLIENT' : 'GLOBAL'));
-
-      const currentPayMethod = () => {
-        try {
-          const candDerived =
-            (window.modalCtx?.formState?.main?.pay_method_snapshot) ||
-            document.querySelector('select[name="pay_method_snapshot"], select[name="default_pay_method_snapshot"]')?.value ||
-            window.modalCtx?.data?.pay_method_snapshot ||
-            'PAYE';
-          return String(candDerived).toUpperCase();
-        } catch {
-          return 'PAYE';
-        }
-      };
 
       const pill = (v) => (v == null || v === '' ? '-' : String(v));
 
@@ -10027,9 +10014,6 @@ const onApply = async () => {
       };
 
       const paint = () => {
-        const pm = currentPayMethod();
-        void pm; // currently unused but kept for future
-
         const activeIndex = pickerSelectedIndex;
         const body = pickerRows.map((r, i) => {
           const scope = String(r.scope || (r.client_id ? 'CLIENT' : 'GLOBAL')).toUpperCase();
@@ -10045,9 +10029,7 @@ const onApply = async () => {
           const mileagePay = pill(r.mileage_pay_rate);
           const mileageCharge = pill(r.mileage_charge_rate);
           const mileageTxt =
-            (mileagePay === '-' && mileageCharge === '-') ?
-              '-' :
-              `Pay ${mileagePay} / Charge ${mileageCharge}`;
+            (mileagePay === '-' && mileageCharge === '-') ? '-' : `Pay ${mileagePay} / Charge ${mileageCharge}`;
 
           return `
             <tr data-i="${i}"${cls}>
@@ -10069,15 +10051,10 @@ const onApply = async () => {
       };
 
       const fetchRows = async () => {
-        const scope = scopeVal(); // 'ALL' | 'GLOBAL' | 'CLIENT'
+        const scope = scopeVal();
         const q = (search?.value || '').trim();
         try {
-          const raw = await listRatePresets({
-            scope,
-            client_id: client_id || null,
-            q,
-            active_on: start_date || null
-          });
+          const raw = await listRatePresets({ scope, client_id: client_id || null, q, active_on: start_date || null });
           pickerRows = Array.isArray(raw) ? sortPresetsForView(scope, raw) : [];
           L('fetchRows: got presets', { scope, q, count: pickerRows.length });
         } catch (e) {
@@ -10100,7 +10077,7 @@ const onApply = async () => {
         paint();
       });
 
-      tbody.addEventListener('dblclick', (e) => {
+      tbody.addEventListener('dblclick', async (e) => {
         const tr = e.target.closest('tr[data-i]');
         if (!tr) return;
         const idx = +tr.getAttribute('data-i');
@@ -10108,38 +10085,27 @@ const onApply = async () => {
         pickerSelectedIndex = idx;
         pickerSelectedId = pickerRows[idx]?.id || null;
         L('row dblclick → apply', { idx, id: pickerSelectedId });
-        (async () => {
-          const ok = await onApply();
-          if (ok !== false) {
-            document.getElementById('btnCloseModal')?.click();
-          }
-        })();
+
+        // ▶ FIX: Apply preset and close
+        const ok = await onApply();
+        if (ok !== false) {
+          document.getElementById('btnCloseModal')?.click();
+        }
       });
 
-      search?.addEventListener('input', async () => {
-        await fetchRows();
-      });
-
-      radios.forEach(r => {
-        r.addEventListener('change', async () => {
-          await fetchRows();
-        });
-      });
+      search?.addEventListener('input', fetchRows);
+      radios.forEach(r => r.addEventListener('change', fetchRows));
 
       await fetchRows();
 
-      // Rename Save button once DOM is ready
+      // Rename Save button
       const btn = document.getElementById('btnSave');
       if (btn) btn.textContent = 'Apply';
     },
-    {
-      kind: 'rate-presets-picker',
-      noParentGate: true
-    }
+    { kind: 'rate-presets-picker', noParentGate: true }
   );
 
-  // Kick the picker’s onReturn so it doesn’t stay on “Loading…”
-  // and also ensure the frame has the correct _onSave handler.
+  // Kick the picker’s onReturn & set _onSave
   setTimeout(() => {
     const fr = window.__getModalFrame?.();
     if (!fr || fr.kind !== 'rate-presets-picker') return;
@@ -10149,10 +10115,10 @@ const onApply = async () => {
       fr.onReturn(fr);
     }
 
-    // Ensure the global Save button uses the same handler as dbl-click
     fr._onSave = onApply;
   }, 0);
 }
+
 
 async function fetchClientRatePresets({ client_id, role, band, active_on }) {
   if (!client_id) return [];
