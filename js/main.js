@@ -3800,78 +3800,78 @@ try {
           }
         }
 
-        const ratesTab = document.querySelector('#contractRatesTab');
-        if (ratesTab && !ratesTab.__wiredStage) {
-          ratesTab.__wiredStage = true;
+           const ratesTab = document.querySelector('#contractRatesTab');
+        if (ratesTab) {
+          // One-time wiring for the tab container (stageRates, margins)
+          if (!ratesTab.__wiredStage) {
+            ratesTab.__wiredStage = true;
 
-          // Stage numeric rate fields + margins
-          const stageRates = (e) => {
-            const t = e.target;
-            if (!t || !t.name) return;
-            if (/^(paye_|umb_|charge_)/.test(t.name) || /^mileage_(charge|pay)_rate$/.test(t.name)) {
-              setContractFormValue(t.name, t.value);
-              if (/^(paye_|umb_|charge_)/.test(t.name)) computeContractMargins();
-              try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
-            }
-          };
-          ratesTab.addEventListener('input', stageRates, true);
-          ratesTab.addEventListener('change', stageRates, true);
-          computeContractMargins();
-
-          // NEW: Choose preset...
-                // NEW: Choose preset...
-    const chooseBtn = document.getElementById('btnChoosePreset');
-if (chooseBtn && !chooseBtn.__wired) {
-  chooseBtn.__wired = true;
-  chooseBtn.addEventListener('click', () => {
-    console.log('[CONTRACTS] Choose preset clicked');
-
-    const payMethod = (function () {
-      try {
-        const v =
-          (window.modalCtx?.formState?.main?.pay_method_snapshot) ||
-          document.querySelector('select[name="pay_method_snapshot"], select[name="default_pay_method_snapshot"]')?.value ||
-          window.modalCtx?.data?.pay_method_snapshot ||
-          'PAYE';
-        return String(v).toUpperCase();
-      } catch { return 'PAYE'; }
-    })();
-
-    const formEl   = document.querySelector('#contractForm');
-    const clientId = formEl?.querySelector('[name="client_id"]')?.value?.trim() || null;
-    const start    = formEl?.querySelector('[name="start_date"]')?.value?.trim() || null;
-
-    openRatePresetPicker(
-      (preset) => {
-        applyRatePresetToContractForm(preset, payMethod);
-        try {
-          const chip = document.getElementById('presetChip');
-          if (chip) {
-            chip.style.display = '';
-            const title =
-              preset.name ||
-              [preset.role, preset.band ? `Band ${preset.band}` : '']
-                .filter(Boolean)
-                .join(' / ') ||
-              'Preset';
-            chip.textContent = `Preset: ${title}`;
+            // Stage numeric rate fields + margins
+            const stageRates = (e) => {
+              const t = e.target;
+              if (!t || !t.name) return;
+              if (/^(paye_|umb_|charge_)/.test(t.name) || /^mileage_(charge|pay)_rate$/.test(t.name)) {
+                setContractFormValue(t.name, t.value);
+                if (/^(paye_|umb_|charge_)/.test(t.name)) computeContractMargins();
+                try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
+              }
+            };
+            ratesTab.addEventListener('input', stageRates, true);
+            ratesTab.addEventListener('change', stageRates, true);
+            computeContractMargins();
           }
-        } catch {}
-        try { computeContractMargins(); } catch {}
-        try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
-      },
-      {
-        client_id:    clientId,
-        start_date:   start,
-        defaultScope: clientId ? 'CLIENT' : 'GLOBAL'
-      }
-    );
-  });
-}
 
+          // Choose preset wiring: may run on every wire(), guarded per-button
+          const chooseBtn = document.getElementById('btnChoosePreset');
+          if (chooseBtn && !chooseBtn.__wired) {
+            chooseBtn.__wired = true;
+            chooseBtn.addEventListener('click', () => {
+              console.log('[CONTRACTS] Choose preset clicked');
 
+              const payMethod = (function () {
+                try {
+                  const v =
+                    (window.modalCtx?.formState?.main?.pay_method_snapshot) ||
+                    document.querySelector('select[name="pay_method_snapshot"], select[name="default_pay_method_snapshot"]')?.value ||
+                    window.modalCtx?.data?.pay_method_snapshot ||
+                    'PAYE';
+                  return String(v).toUpperCase();
+                } catch { return 'PAYE'; }
+              })();
 
-          // NEW: Full reset
+              const formEl   = document.querySelector('#contractForm');
+              const clientId = formEl?.querySelector('[name="client_id"]')?.value?.trim() || null;
+              const start    = formEl?.querySelector('[name="start_date"]')?.value?.trim() || null;
+
+              openRatePresetPicker(
+                (preset) => {
+                  applyRatePresetToContractForm(preset, payMethod);
+                  try {
+                    const chip = document.getElementById('presetChip');
+                    if (chip) {
+                      chip.style.display = '';
+                      const title =
+                        preset.name ||
+                        [preset.role, preset.band ? `Band ${preset.band}` : '']
+                          .filter(Boolean)
+                          .join(' / ') ||
+                        'Preset';
+                      chip.textContent = `Preset: ${title}`;
+                    }
+                  } catch {}
+                  try { computeContractMargins(); } catch {}
+                  try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
+                },
+                {
+                  client_id:    clientId,
+                  start_date:   start,
+                  defaultScope: clientId ? 'CLIENT' : 'GLOBAL'
+                }
+              );
+            });
+          }
+
+          // Full reset wiring: same pattern (per-button guard, not tied to __wiredStage)
           const resetBtn = document.getElementById('btnResetPreset');
           if (resetBtn && !resetBtn.__wired) {
             resetBtn.__wired = true;
@@ -3946,6 +3946,7 @@ if (chooseBtn && !chooseBtn.__wired) {
             });
           }
         }
+
       };
 
   setTimeout(() => {
