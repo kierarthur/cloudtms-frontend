@@ -655,42 +655,41 @@ function computeRatePresetMargins(state){
 
   if (!state || typeof state !== 'object') return out;
 
-  // Best-effort ERNI % lookup (fraction). Falls back to 0 if not found.
+  // Try to align with Contracts' ERNI usage
   let erniPct = 0;
+  try { if (typeof ensureErniMultiplier === 'function') ensureErniMultiplier(); } catch {}
   try {
     if (typeof getCurrentErniPct === 'function') {
       const v = getCurrentErniPct();
       if (typeof v === 'number' && Number.isFinite(v)) erniPct = v;
     } else if (typeof window !== 'undefined') {
       const maybe = (window.__erniPctForPresets ?? window.__erniPct ?? null);
-      if (typeof maybe === 'number' && Number.isFinite(maybe)) {
-        erniPct = maybe;
-      } else if (window.modalCtx && window.modalCtx.data) {
-        const d = window.modalCtx.data;
-        if (d.client_settings && typeof d.client_settings.erni_pct === 'number') {
-          erniPct = d.client_settings.erni_pct;
-        } else if (d.client && typeof d.client.erni_pct === 'number') {
-          erniPct = d.client.erni_pct;
-        }
-      }
+      if (typeof maybe === 'number' && Number.isFinite(maybe)) erniPct = maybe;
     }
-  } catch {
-    // ignore – fall back to 0
-  }
+  } catch {}
 
-  const applyMargin = (charge, pay, label) => {
+  const tryCalc = (charge, pay, label) => {
     if (!Number.isFinite(charge) || !Number.isFinite(pay)) return null;
 
+    // Prefer calcDailyMargin if present (matches contracts screen semantics)
+    if (typeof calcDailyMargin === 'function') {
+      try {
+        const res = calcDailyMargin(charge, pay, label || 'PAYE', erniPct);
+        if (typeof res === 'number' && Number.isFinite(res)) return res;
+        if (res && typeof res.margin === 'number' && Number.isFinite(res.margin)) return res.margin;
+      } catch { /* fall through */ }
+    }
+
+    // Fall back to calcMargin if available
     if (typeof calcMargin === 'function') {
       try {
         const res = calcMargin(charge, pay, label || 'PAYE', erniPct);
         if (typeof res === 'number' && Number.isFinite(res)) return res;
         if (res && typeof res.margin === 'number' && Number.isFinite(res.margin)) return res.margin;
-      } catch {
-        // fall back below
-      }
+      } catch { /* fall through */ }
     }
-    // Fallback: simple spread if calcMargin not available or misbehaves
+
+    // Final fallback: simple spread
     return charge - pay;
   };
 
@@ -702,8 +701,8 @@ function computeRatePresetMargins(state){
     const hasU   = !!state.enable_umbrella && Number.isFinite(umb);
     const hasC   = Number.isFinite(charge);
 
-    const marginP = (hasP && hasC) ? applyMargin(charge, paye, 'PAYE') : null;
-    const marginU = (hasU && hasC) ? applyMargin(charge, umb,  'UMB')  : null;
+    const marginP = (hasP && hasC) ? tryCalc(charge, paye, 'PAYE') : null;
+    const marginU = (hasU && hasC) ? tryCalc(charge, umb,  'UMB')  : null;
     const negP    = (marginP != null) && (marginP < 0);
     const negU    = (marginU != null) && (marginU < 0);
 
@@ -1056,15 +1055,18 @@ async function openRatePresetModal({ id, mode } = {}) {
     `;
   };
 
+  // UPDATED layout: one full row per day (Start | End | Break), copy/paste controls beneath
   const renderSchedule = () => {
-    const timeInput = (name, val) => `<input class="input" name="${name}" value="${val || ''}" placeholder="HH:MM" />`;
-    const breakInput = (name, val) => `<input class="input" type="number" min="0" step="1" name="${name}" value="${val || ''}" placeholder="0" />`;
+    const timeInput = (name, val) => `<input class="input rp-time" name="${name}" value="${val || ''}" placeholder="HH:MM" />`;
+    const breakInput = (name, val) => `<input class="input rp-break" type="number" min="0" step="1" name="${name}" value="${val || ''}" placeholder="0" />`;
     const row = (key, label) => `
-      <div class="grid-3" data-day="${key}">
-        <div class="split"><span class="mini">${label} start</span>${timeInput(`${key}_start`, st[`${key}_start`])}</div>
-        <div class="split"><span class="mini">${label} end</span>${timeInput(`${key}_end`, st[`${key}_end`])}</div>
-        <div class="split"><span class="mini">Break (min)</span>${breakInput(`${key}_break`, st[`${key}_break`])}</div>
-        <div class="split" style="margin-top:4px">
+      <div class="rp-day" data-day="${key}" style="margin-bottom:10px">
+        <div class="grid-3">
+          <div class="split"><span class="mini">${label} start</span>${timeInput(`${key}_start`, st[`${key}_start`])}</div>
+          <div class="split"><span class="mini">${label} end</span>${timeInput(`${key}_end`, st[`${key}_end`])}</div>
+          <div class="split"><span class="mini">Break (min)</span>${breakInput(`${key}_break`, st[`${key}_break`])}</div>
+        </div>
+        <div class="split" style="margin-top:6px">
           <button type="button" class="btn mini rp_copy" data-day="${key}">Copy</button>
           <button type="button" class="btn mini rp_paste" data-day="${key}">Paste</button>
         </div>
@@ -1073,11 +1075,9 @@ async function openRatePresetModal({ id, mode } = {}) {
       <div class="group">
         <label><input type="checkbox" id="rp_use_schedule" ${st.use_schedule ? 'checked' : ''}/> Default shift times</label>
         <div id="rp_sched_block" style="display:${st.use_schedule ? 'block' : 'none'}; margin-top:8px">
-          <div class="grid-3">
-            ${row('mon', 'Mon')}${row('tue', 'Tue')}${row('wed', 'Wed')}
-            ${row('thu', 'Thu')}${row('fri', 'Fri')}${row('sat', 'Sat')}
-            ${row('sun', 'Sun')}
-          </div>
+          ${row('mon', 'Mon')}${row('tue', 'Tue')}${row('wed', 'Wed')}
+          ${row('thu', 'Thu')}${row('fri', 'Fri')}${row('sat', 'Sat')}
+          ${row('sun', 'Sun')}
         </div>
       </div>`;
   };
@@ -1248,9 +1248,10 @@ async function openRatePresetModal({ id, mode } = {}) {
     const Lnorm = normaliseBucketLabelsInput(labels);
     if (Lnorm) payload.bucket_labels_json = Lnorm;
 
+    const bucketsList = ['day','night','sat','sun','bh'];
     const push5 = (prefix, enabled) => {
       if (!enabled) return;
-      buckets.forEach(b => {
+      bucketsList.forEach(b => {
         const key = `${prefix}_${b}`;
         const n = parseNumericFromRoot(root, key);
         if (n != null) payload[key] = n;
@@ -3892,7 +3893,7 @@ try {
      const chooseBtn = document.getElementById('btnChoosePreset');
 if (chooseBtn && !chooseBtn.__wired) {
   chooseBtn.__wired = true;
-  chooseBtn.addEventListener('click', () => {
+   chooseBtn.addEventListener('click', () => {
     console.log('[CONTRACTS] Choose preset clicked');
 
     const payMethod = (function () {
@@ -3912,6 +3913,20 @@ if (chooseBtn && !chooseBtn.__wired) {
 
     openRatePresetPicker(
       (preset) => {
+        // NEW: pre-apply snapshot for Reset
+        try {
+          if (typeof snapshotContractForm === 'function') snapshotContractForm();
+          const src = window.modalCtx && window.modalCtx.formState ? window.modalCtx.formState : null;
+          if (src) {
+            window.modalCtx.__presetBefore =
+              (typeof structuredClone === 'function')
+                ? structuredClone(src)
+                : JSON.parse(JSON.stringify(src));
+          }
+        } catch (e) {
+          console.warn('[CONTRACTS] pre-apply snapshot failed (non-fatal)', e);
+        }
+
         applyRatePresetToContractForm(preset, payMethod);
         try {
           const chip = document.getElementById('presetChip');
@@ -3944,15 +3959,108 @@ if (chooseBtn && !chooseBtn.__wired) {
       }
     );
   });
+
 }
 
 
           // Full reset wiring: same pattern (per-button guard, not tied to __wiredStage)
-          const resetBtn = document.getElementById('btnResetPreset');
+            const resetBtn = document.getElementById('btnResetPreset');
           if (resetBtn && !resetBtn.__wired) {
             resetBtn.__wired = true;
             resetBtn.addEventListener('click', () => {
-              // Clear PAYE, Umbrella, Charge
+              const snap = window.modalCtx && window.modalCtx.__presetBefore ? window.modalCtx.__presetBefore : null;
+              if (snap && typeof snap === 'object') {
+                // Restore from snapshot
+                try {
+                  const form = document.querySelector('#contractForm');
+                  const writeInput = (name, value) => {
+                    const el = document.querySelector(`#contractRatesTab input[name="${name}"]`) ||
+                               (form && form.querySelector(`[name="${name}"]`)) ||
+                               document.querySelector(`[name="${name}"]`);
+                    if (el) el.value = (value == null ? '' : String(value));
+                    setContractFormValue(name, (value == null ? '' : String(value)));
+                  };
+
+                  // Rates
+                  const rateKeys = ['paye_day','paye_night','paye_sat','paye_sun','paye_bh','umb_day','umb_night','umb_sat','umb_sun','umb_bh','charge_day','charge_night','charge_sat','charge_sun','charge_bh'];
+                  for (const k of rateKeys) writeInput(k, (snap.pay || {})[k] ?? '');
+
+                  // Mileage – try both main & pay snapshots
+                  const mp = (snap.main || {})['mileage_pay_rate'];
+                  const mc = (snap.main || {})['mileage_charge_rate'];
+                  const mp2= (snap.pay  || {})['mileage_pay_rate'];
+                  const mc2= (snap.pay  || {})['mileage_charge_rate'];
+                  writeInput('mileage_pay_rate',    mp  ?? mp2  ?? '');
+                  writeInput('mileage_charge_rate', mc  ?? mc2  ?? '');
+
+                  // Bucket labels (prefer consolidated labels map if present)
+                  const L = (snap.main && snap.main.__bucket_labels) ? snap.main.__bucket_labels : {
+                    day:   (snap.main || {})['bucket_day']   || '',
+                    night: (snap.main || {})['bucket_night'] || '',
+                    sat:   (snap.main || {})['bucket_sat']   || '',
+                    sun:   (snap.main || {})['bucket_sun']   || '',
+                    bh:    (snap.main || {})['bucket_bh']    || ''
+                  };
+                  [['day','bucket_label_day'],
+                   ['night','bucket_label_night'],
+                   ['sat','bucket_label_sat'],
+                   ['sun','bucket_label_sun'],
+                   ['bh','bucket_label_bh']].forEach(([k, field]) => {
+                    writeInput(field, L[k] || '');
+                    // mirror to any "bucket_" fields if present
+                    if (form) {
+                      const el2 = form.querySelector(`[name="bucket_${k}"]`);
+                      if (el2) el2.value = (L[k] || '');
+                    }
+                    const tr = document.querySelector(`#marginsTable tr[data-b="${k}"] > td:first-child`);
+                    if (tr) tr.textContent = (L[k] || '');
+                    ['cardPAYE','cardUMB','cardCHG'].forEach(cid=>{
+                      const card = document.getElementById(cid);
+                      const inp = card?.querySelector(`input[name$="_${k}"]`);
+                      if (card && inp) { const row = inp.closest('.row'); if (row) { const lab=row.querySelector('label'); if (lab) lab.textContent=(L[k] || ''); } }
+                    });
+                  });
+
+                  // Schedule
+                  const tpl = (snap.main || {}).__template || null;
+                  const days = ['mon','tue','wed','thu','fri','sat','sun'];
+                  if (tpl) {
+                    days.forEach(d => {
+                      const S = tpl[d] || {};
+                      writeInput(`${d}_start`, S.start || '');
+                      writeInput(`${d}_end`,   S.end   || '');
+                      writeInput(`${d}_break`, (S.break_minutes == null ? '' : String(S.break_minutes)));
+                    });
+                    const fs = (window.modalCtx.formState ||= { main:{}, pay:{} });
+                    fs.main.__template = tpl;
+                  } else {
+                    // fallback: if snapshot had raw fields
+                    days.forEach(d => {
+                      writeInput(`${d}_start`, (snap.main || {})[`${d}_start`] || '');
+                      writeInput(`${d}_end`,   (snap.main || {})[`${d}_end`]   || '');
+                      writeInput(`${d}_break`, (snap.main || {})[`${d}_break`] || '');
+                    });
+                    const fs = (window.modalCtx.formState ||= { main:{}, pay:{} });
+                    fs.main.__template = null;
+                  }
+
+                  // Role / band / display_site
+                  writeInput('role',         (snap.main || {}).role || '');
+                  writeInput('band',         (snap.main || {}).band || '');
+                  writeInput('display_site', (snap.main || {}).display_site || '');
+
+                  // Hide chip
+                  try { const chip=document.getElementById('presetChip'); if (chip) { chip.style.display='none'; chip.textContent=''; } } catch {}
+                } catch (err) {
+                  console.warn('[CONTRACTS] preset reset restore failed, falling back to clear', err);
+                }
+
+                try { computeContractMargins(); } catch {}
+                try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
+                return;
+              }
+
+              // Fallback: your previous clear-to-blank behavior
               const clear = (sel) => { ratesTab.querySelectorAll(sel).forEach(el => { el.value=''; setContractFormValue(el.name, ''); }); };
               clear('input[name^="paye_"]');
               clear('input[name^="umb_"]');
@@ -3966,8 +4074,8 @@ if (chooseBtn && !chooseBtn.__wired) {
               });
 
               // Reset bucket labels to defaults & update headings
-              const defaults = { day:'Day', night:'Night', sat:'Sat', sun:'Sun', bh:'BH' };
               try {
+                const defaults = { day:'Day', night:'Night', sat:'Sat', sun:'Sun', bh:'BH' };
                 const form = document.querySelector('#contractForm');
                 Object.entries(defaults).forEach(([k,v])=>{
                   setContractFormValue(`bucket_label_${k}`, v);
@@ -3979,7 +4087,6 @@ if (chooseBtn && !chooseBtn.__wired) {
                   }
                   const tr = document.querySelector(`#marginsTable tr[data-b="${k}"] > td:first-child`);
                   if (tr) tr.textContent = v;
-                  // Also refresh per-bucket labels in cards if visible
                   ['cardPAYE','cardUMB','cardCHG'].forEach(cid=>{
                     const card = document.getElementById(cid);
                     const inp = card?.querySelector(`input[name$="_${k}"]`);
@@ -4003,7 +4110,7 @@ if (chooseBtn && !chooseBtn.__wired) {
                 fs.main.__template = null;
               } catch {}
 
-              // Clear role/band/display_site (keep candidate/client/gates/submission)
+              // Clear role/band/display_site
               try {
                 const fs = (window.modalCtx.formState ||= { main:{}, pay:{} }).main ||= {};
                 fs.role = ''; fs.band = ''; fs.display_site = '';
@@ -4021,6 +4128,7 @@ if (chooseBtn && !chooseBtn.__wired) {
               try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
             });
           }
+
         }
 
        };
@@ -9949,6 +10057,21 @@ function openRatePresetPicker(applyCb, opts = {}) {
     L('onApply: applying preset row', { chosen });
 
     try {
+      // A) Capture a pre-apply snapshot so Reset can restore the previous state
+      try {
+        if (typeof snapshotContractForm === 'function') snapshotContractForm();
+        const src = window.modalCtx && window.modalCtx.formState ? window.modalCtx.formState : null;
+        if (src) {
+          window.modalCtx.__presetBefore =
+            (typeof structuredClone === 'function')
+              ? structuredClone(src)
+              : JSON.parse(JSON.stringify(src));
+          L('onApply: captured __presetBefore snapshot');
+        }
+      } catch (e) {
+        console.warn('[PRESETS] pre-apply snapshot failed (non-fatal)', e);
+      }
+
       // 1) Always write to formState (and DOM if visible)
       if (typeof applyRatePresetToContractForm === 'function') applyRatePresetToContractForm(chosen);
 
@@ -10128,6 +10251,15 @@ function openRatePresetPicker(applyCb, opts = {}) {
       // Rename Save button
       const btn = document.getElementById('btnSave');
       if (btn) btn.textContent = 'Apply';
+
+      // NEW: force the picker frame into 'view' mode so discard prompts never fire
+      try {
+        const fr = window.__getModalFrame?.();
+        if (fr && fr.kind === 'rate-presets-picker' && typeof setFrameMode === 'function') {
+          setFrameMode(fr, 'view');
+          fr._updateButtons && fr._updateButtons();
+        }
+      } catch {}
     },
     { kind: 'rate-presets-picker', noParentGate: true }
   );
@@ -14948,8 +15080,7 @@ const setCloseLabel = ()=>{
 };
 
 
-
-   top._updateButtons = ()=>{
+  top._updateButtons = ()=>{
     try {
       const h = document.getElementById('modalHint');
       if (h) {
@@ -14961,6 +15092,15 @@ const setCloseLabel = ()=>{
 
     const parentEditable = top.noParentGate ? true : (parent ? (parent.mode==='edit' || parent.mode==='create') : true);
     const relatedBtn = byId('btnRelated');
+
+    // NEW: hide Preset Manager's "New" button whenever a child is open or when the top frame isn't the manager
+    try {
+      const rpNew = byId('btnRpNew');
+      if (rpNew) {
+        const shouldShow = (!isChild && top.kind === 'rates-presets');
+        rpNew.style.display = shouldShow ? '' : 'none';
+      }
+    } catch {}
 
     if (top.kind === 'advanced-search') {
       btnEdit.style.display='none';
@@ -15056,6 +15196,7 @@ const setCloseLabel = ()=>{
   };
 
 
+
   top._updateButtons();
 btnEdit.onclick = ()=> {
   const isChildNow    = (stack().length > 1);
@@ -15114,8 +15255,9 @@ if (stack().length>0) {
 
       const isChildNow = (stack().length > 1);
 
-// Child frames with noParentGate: if dirty in edit/create, confirm discard before closing.
-  if (isChildNow && top.noParentGate && (top.mode === 'edit' || top.mode === 'create') && top.isDirty) {
+  // Child frames with noParentGate: if dirty in edit/create, confirm discard before closing.
+  // NEW: never prompt for the Rate Presets Picker — it must behave read-only for discard purposes.
+  if (isChildNow && top.noParentGate && (top.mode === 'edit' || top.mode === 'create') && top.isDirty && top.kind !== 'rate-presets-picker') {
     let ok = false;
     try {
       top._confirmingDiscard = true;
@@ -15127,6 +15269,7 @@ if (stack().length>0) {
     }
     if (!ok) return;
   }
+
 
   if (!isChildNow && !top.noParentGate && top.mode==='edit') {
   if (!top.isDirty) {
