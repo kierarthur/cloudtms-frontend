@@ -655,58 +655,51 @@ function computeRatePresetMargins(state){
 
   if (!state || typeof state !== 'object') return out;
 
-  // Try to align with Contracts' ERNI usage
-  let erniPct = 0;
+  // --- ERNI normalisation: mirror Contracts sources ---
+  const normalisePctToDecimal = (v) => {
+    if (!Number.isFinite(v)) return 0;
+    if (v > 1.2) return (v - 1);   // multiplier (e.g. 1.15) -> 0.15
+    if (v > 1.0) return (v / 100); // percent (e.g. 15) -> 0.15
+    if (v < 0) return 0;
+    return v;                      // already decimal
+  };
+
+  let erniDec = 0;
   try { if (typeof ensureErniMultiplier === 'function') ensureErniMultiplier(); } catch {}
   try {
-    if (typeof getCurrentErniPct === 'function') {
-      const v = getCurrentErniPct();
-      if (typeof v === 'number' && Number.isFinite(v)) erniPct = v;
+    if (typeof getCurrentErniMultiplier === 'function') {
+      const m = getCurrentErniMultiplier();
+      if (Number.isFinite(m)) erniDec = normalisePctToDecimal(m);
+    } else if (typeof getCurrentErniPct === 'function') {
+      const p = getCurrentErniPct();
+      if (Number.isFinite(p)) erniDec = normalisePctToDecimal(p);
     } else if (typeof window !== 'undefined') {
-      const maybe = (window.__erniPctForPresets ?? window.__erniPct ?? null);
-      if (typeof maybe === 'number' && Number.isFinite(maybe)) erniPct = maybe;
+      const fromWin = (window.__erniMultiplier ?? window.__erniPct ?? 0);
+      if (Number.isFinite(fromWin)) erniDec = normalisePctToDecimal(fromWin);
     }
   } catch {}
 
-  const tryCalc = (charge, pay, label) => {
-    if (!Number.isFinite(charge) || !Number.isFinite(pay)) return null;
+  const num = (v) => { const n = Number(v); return Number.isFinite(n) ? n : NaN; };
 
-    // Prefer calcDailyMargin if present (matches contracts screen semantics)
-    if (typeof calcDailyMargin === 'function') {
-      try {
-        const res = calcDailyMargin(charge, pay, label || 'PAYE', erniPct);
-        if (typeof res === 'number' && Number.isFinite(res)) return res;
-        if (res && typeof res.margin === 'number' && Number.isFinite(res.margin)) return res.margin;
-      } catch { /* fall through */ }
-    }
+  // Contracts-equivalent formulas:
+  // PAYE margin = charge − (paye + paye*ERNI)
+  // Umb margin  = charge − umb
+  buckets.forEach(b => {
+    const paye   = num(state[`paye_${b}`]);
+    const umb    = num(state[`umb_${b}`]);
+    const charge = num(state[`charge_${b}`]);
 
-    // Fall back to calcMargin if available
-    if (typeof calcMargin === 'function') {
-      try {
-        const res = calcMargin(charge, pay, label || 'PAYE', erniPct);
-        if (typeof res === 'number' && Number.isFinite(res)) return res;
-        if (res && typeof res.margin === 'number' && Number.isFinite(res.margin)) return res.margin;
-      } catch { /* fall through */ }
-    }
+    const hasP = !!state.enable_paye && Number.isFinite(paye);
+    const hasU = !!state.enable_umbrella && Number.isFinite(umb);
+    const hasC = Number.isFinite(charge);
 
-    // Final fallback: simple spread
-    return charge - pay;
-  };
+    const marginP = (hasP && hasC) ? (charge - (paye + (paye * erniDec))) : null;
+    const marginU = (hasU && hasC) ? (charge - umb) : null;
 
-  buckets.forEach(b=>{
-    const paye   = Number(state[`paye_${b}`]);
-    const umb    = Number(state[`umb_${b}`]);
-    const charge = Number(state[`charge_${b}`]);
-    const hasP   = !!state.enable_paye && Number.isFinite(paye);
-    const hasU   = !!state.enable_umbrella && Number.isFinite(umb);
-    const hasC   = Number.isFinite(charge);
-
-    const marginP = (hasP && hasC) ? tryCalc(charge, paye, 'PAYE') : null;
-    const marginU = (hasU && hasC) ? tryCalc(charge, umb,  'UMB')  : null;
-    const negP    = (marginP != null) && (marginP < 0);
-    const negU    = (marginU != null) && (marginU < 0);
-
+    const negP = (marginP != null) && (marginP < 0);
+    const negU = (marginU != null) && (marginU < 0);
     if (negP || negU) out.anyNegative = true;
+
     out.bucket[b] = {
       paye:        hasP ? paye   : null,
       umb:         hasU ? umb    : null,
@@ -717,9 +710,9 @@ function computeRatePresetMargins(state){
       negUmb:      negU
     };
   });
+
   return out;
 }
-
 
 async function openRatePresetModal({ id, mode } = {}) {
   const isCreate = !id;
@@ -1307,16 +1300,14 @@ async function openRatePresetModal({ id, mode } = {}) {
     }
   };
 
+  // 🔧 Use renderer as renderTab so Edit never falls back to "Loading…" and we control re-renders.
   showModal(
     isCreate ? 'Create preset' : 'Rate preset',
     [{ key: 'main', title: 'Main' }],
-    () => '<div class="tabc"><div class="hint">Loading…</div></div>',
+    () => renderer(),
     onSave,
     !!st.id,
     () => {
-      const mb = document.getElementById('modalBody');
-      if (mb) mb.innerHTML = renderer();
-
       const root = document.getElementById('rp_form');
 
       const saveBtn = document.getElementById('btnSave');
@@ -1332,7 +1323,8 @@ async function openRatePresetModal({ id, mode } = {}) {
       const btnClr = root?.querySelector('#rp_clear_cli_btn');
 
       const ensureMileagePrefill = async () => {
-        if (isCreate && st.scope === 'CLIENT' && st.client_id) {
+        const isCreateNow = !st.id; // only prefill on brand-new preset
+        if (isCreateNow && st.scope === 'CLIENT' && st.client_id) {
           try {
             const cli = await getClient(st.client_id);
             const ch = Number(cli?.mileage_charge_rate);
@@ -1340,8 +1332,8 @@ async function openRatePresetModal({ id, mode } = {}) {
               const pay = Math.max(0, ch - 0.10);
               const payEl = root.querySelector('[name="mileage_pay_rate"]');
               const chEl = root.querySelector('[name="mileage_charge_rate"]');
-              if (chEl && !chEl.value) chEl.value = String(ch);
-              if (payEl && !payEl.value) payEl.value = pay.toFixed(2);
+              if (chEl && !chEl.value) { chEl.value = String(ch); st.mileage_charge_rate = String(ch); }
+              if (payEl && !payEl.value) { payEl.value = pay.toFixed(2); st.mileage_pay_rate = payEl.value; }
             }
           } catch {}
         }
@@ -1479,12 +1471,13 @@ async function openRatePresetModal({ id, mode } = {}) {
       if (btnPick) {
         btnPick.onclick = () => {
           openClientPicker(({ id, label }) => {
+            // Only update client fields; do NOT reinitialise anything else.
             st.client_id = id;
             st.client_label = label || '';
             if (cliLbl) cliLbl.textContent = label ? `Chosen: ${label}` : 'No client chosen';
             ensureMileagePrefill();
             updatePresetSaveState();
-          });
+          }, { allowBackdropModal: true });
         };
       }
 
@@ -1549,13 +1542,18 @@ async function openRatePresetModal({ id, mode } = {}) {
         el.value = n.toFixed(2);
       };
 
+      // Keep st in sync with ALL numeric rate fields
       buckets.forEach(b => {
         ['paye', 'umb', 'charge'].forEach(prefix => {
           const inp = root?.querySelector(`[name="${prefix}_${b}"]`);
           if (inp) {
             inp.addEventListener('blur', () => {
               normalizeRateInput(inp);
+              st[`${prefix}_${b}`] = inp.value || '';
               updatePresetSaveState();
+            });
+            inp.addEventListener('input', () => {
+              st[`${prefix}_${b}`] = inp.value || '';
             });
           }
         });
@@ -1580,16 +1578,26 @@ async function openRatePresetModal({ id, mode } = {}) {
       if (mileagePayEl) {
         mileagePayEl.addEventListener('blur', () => {
           normalizeMileageInput(mileagePayEl);
-          if (isCreate && mileageChargeEl && !(mileageChargeEl.value || '').trim()) {
+          st.mileage_pay_rate = mileagePayEl.value || '';
+          const isCreateNow = !st.id;
+          if (isCreateNow && mileageChargeEl && !(mileageChargeEl.value || '').trim()) {
             mileageChargeEl.value = mileagePayEl.value;
+            st.mileage_charge_rate = mileageChargeEl.value || '';
           }
           updatePresetSaveState();
+        });
+        mileagePayEl.addEventListener('input', () => {
+          st.mileage_pay_rate = mileagePayEl.value || '';
         });
       }
       if (mileageChargeEl) {
         mileageChargeEl.addEventListener('blur', () => {
           normalizeMileageInput(mileageChargeEl);
+          st.mileage_charge_rate = mileageChargeEl.value || '';
           updatePresetSaveState();
+        });
+        mileageChargeEl.addEventListener('input', () => {
+          st.mileage_charge_rate = mileageChargeEl.value || '';
         });
       }
 
@@ -1620,6 +1628,7 @@ async function openRatePresetModal({ id, mode } = {}) {
             t.dispatchEvent(new Event('input', { bubbles: true }));
             t.dispatchEvent(new Event('change', { bubbles: true }));
           } catch {}
+          st[t.name] = '';
           return;
         }
 
@@ -1627,6 +1636,7 @@ async function openRatePresetModal({ id, mode } = {}) {
           t.value = norm;
           t.removeAttribute('data-invalid');
           t.removeAttribute('title');
+          st[t.name] = norm;
           try {
             t.dispatchEvent(new Event('input', { bubbles: true }));
             t.dispatchEvent(new Event('change', { bubbles: true }));
@@ -1663,20 +1673,36 @@ async function openRatePresetModal({ id, mode } = {}) {
             const sEl = root.querySelector(`[name="${day}_start"]`);
             const eEl = root.querySelector(`[name="${day}_end"]`);
             const bEl = root.querySelector(`[name="${day}_break"]`);
-            if (sEl) sEl.value = schedClipboard.start;
-            if (eEl) eEl.value = schedClipboard.end;
-            if (bEl) bEl.value = schedClipboard.br;
+            if (sEl) { sEl.value = schedClipboard.start; st[`${day}_start`] = sEl.value || ''; }
+            if (eEl) { eEl.value = schedClipboard.end;   st[`${day}_end`]   = eEl.value || ''; }
+            if (bEl) { bEl.value = schedClipboard.br;    st[`${day}_break`] = bEl.value || ''; }
+            updatePresetSaveState();
           }
         });
       }
 
+      // Keep st in sync for ALL other text inputs (name/role/band/display_site + labels)
       ['input', 'change'].forEach(evt => {
         root?.addEventListener(evt, (e) => {
           const t = e.target;
           if (!t?.name) return;
-          if (/^(paye|umb|charge)_(day|night|sat|sun|bh)$/.test(t.name) ||
-              /^(name|role|band|display_site|bucket_(day|night|sat|sun|bh)|mileage_(pay|charge)_rate)$/.test(t.name) ||
-              /^(mon|tue|wed|thu|fri|sat|sun)_(start|end|break)$/.test(t.name)) {
+          if (t.name === 'rp_pay_mode' || t.name === 'rp_rate_type') return; // handled elsewhere
+          if (/^(name|role|band|display_site)$/.test(t.name)) {
+            st[t.name] = t.value || '';
+          } else if (/^bucket_(day|night|sat|sun|bh)$/.test(t.name)) {
+            st[t.name] = t.value || '';
+          } else if (/^mileage_(pay|charge)_rate$/.test(t.name)) {
+            st[t.name] = t.value || '';
+          } else if (/^(mon|tue|wed|thu|fri|sat|sun)_(start|end|break)$/.test(t.name)) {
+            st[t.name] = t.value || '';
+          } else if (/^(paye|umb|charge)_(day|night|sat|sun|bh)$/.test(t.name)) {
+            st[t.name] = t.value || '';
+          }
+          if (
+            /^(paye|umb|charge)_(day|night|sat|sun|bh)$/.test(t.name) ||
+            /^(name|role|band|display_site|bucket_(day|night|sat|sun|bh)|mileage_(pay|charge)_rate)$/.test(t.name) ||
+            /^(mon|tue|wed|thu|fri|sat|sun)_(start|end|break)$/.test(t.name)
+          ) {
             updatePresetSaveState();
           }
         }, true);
@@ -3964,6 +3990,7 @@ if (chooseBtn && !chooseBtn.__wired) {
 
 
           // Full reset wiring: same pattern (per-button guard, not tied to __wiredStage)
+              // Full reset wiring: same pattern (per-button guard, not tied to __wiredStage)
             const resetBtn = document.getElementById('btnResetPreset');
           if (resetBtn && !resetBtn.__wired) {
             resetBtn.__wired = true;
@@ -4128,6 +4155,7 @@ if (chooseBtn && !chooseBtn.__wired) {
               try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
             });
           }
+
 
         }
 
@@ -10302,6 +10330,7 @@ async function fetchCandidateRateOverrides({ candidate_id, client_id, role, band
   const rows = toList(r) || [];
   return rows;
 }
+
 function applyRatePresetToContractForm(preset, payMethod /* 'PAYE'|'UMBRELLA' */) {
   if (!preset) return;
 
@@ -10351,9 +10380,24 @@ function applyRatePresetToContractForm(preset, payMethod /* 'PAYE'|'UMBRELLA' */
   };
 
   // ── Zone B: Job identity ──
+  // Only fill role/band/display_site if they are currently BLANK, so we don't override an existing contract.
   [['role','role'], ['band','band'], ['display_site','display_site']].forEach(([field, key]) => {
     const next = preset[key] != null ? String(preset[key]).trim() : '';
-    if (next) write(field, next);
+    if (!next) return;
+
+    // Check existing value from formState first, then DOM as fallback
+    let existing = '';
+    try {
+      existing = (fs.main && fs.main[field]) || '';
+      if (!existing && canTouchDom) {
+        const el = form.querySelector(`[name="${field}"]`);
+        if (el && typeof el.value === 'string') existing = el.value.trim();
+      }
+    } catch {}
+
+    if (!existing || String(existing).trim() === '') {
+      write(field, next);
+    }
   });
 
   // ── Zone C: Rates ──
@@ -10437,6 +10481,7 @@ function applyRatePresetToContractForm(preset, payMethod /* 'PAYE'|'UMBRELLA' */
     window.dispatchEvent(new Event('modal-dirty'));
   } catch {}
 }
+
 
 
 function computeContractMargins() {
@@ -14726,7 +14771,11 @@ mergedRowForTab(k) {
   try {
     if (!out.std_schedule_json && mainStaged.__template) out.std_schedule_json = mainStaged.__template;
     if (!out.std_hours_json   && mainStaged.__hours)    out.std_hours_json    = mainStaged.__hours;
-    if (!out.bucket_labels_json && mainStaged.__bucket_labels) out.bucket_labels_json = mainStaged.__bucket_labels;
+
+    // ▶ FIX: always prefer staged bucket labels (including explicit blanks)
+    if (Object.prototype.hasOwnProperty.call(mainStaged, '__bucket_labels')) {
+      out.bucket_labels_json = mainStaged.__bucket_labels;
+    }
   } catch {}
 
   try {
