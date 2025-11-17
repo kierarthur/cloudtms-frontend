@@ -1697,8 +1697,6 @@ async function openRatePresetModal({ id, mode } = {}) {
     }
   }, 0);
 }
-
-
 // ─────────────────────────────────────────────────────────────────────────────
 // Parent modal — Preset Rates manager
 // ─────────────────────────────────────────────────────────────────────────────
@@ -4967,10 +4965,25 @@ function setContractFormValue(name, value) {
     }
   } catch {}
 
-  const form = document.querySelector('#contractForm');
+  const form =
+    document.querySelector('#modalBody #contractForm') ||
+    document.querySelector('#contractForm') ||
+    null;
+  const ratesRoot =
+    document.getElementById('contractRatesTab') ||
+    document.querySelector('#contractRatesTab') ||
+    null;
+
   let el = null;
-  if (form) {
-    el = form.querySelector(`*[name="${CSS.escape(targetName)}"]`) || form.querySelector(`*[name="${CSS.escape(name)}"]`);
+  if (ratesRoot) {
+    el =
+      ratesRoot.querySelector(`*[name="${CSS.escape(targetName)}"]`) ||
+      ratesRoot.querySelector(`*[name="${CSS.escape(name)}"]`);
+  }
+  if (!el && form) {
+    el =
+      form.querySelector(`*[name="${CSS.escape(targetName)}"]`) ||
+      form.querySelector(`*[name="${CSS.escape(name)}"]`);
   }
 
   // Validate & normalise *_start/*_end (empty allowed)
@@ -4998,7 +5011,14 @@ function setContractFormValue(name, value) {
   }
 
   window.modalCtx = window.modalCtx || {};
-  const fs = (window.modalCtx.formState ||= { __forId: (window.modalCtx.data?.id ?? window.modalCtx.openToken ?? null), main:{}, pay:{} });
+  const fs = (window.modalCtx.formState ||= {
+    __forId: (window.modalCtx.data?.id ?? window.modalCtx.openToken ?? null),
+    main:{},
+    pay:{}
+  });
+
+  const isRate = /^(paye_|umb_|charge_)/.test(targetName);
+  const prev = isRate ? fs.pay[targetName] : fs.main[targetName];
 
   let stored;
   if (el && el.type === 'checkbox') {
@@ -5013,18 +5033,35 @@ function setContractFormValue(name, value) {
     if (el) el.value = stored;
   }
 
-  const isRate = /^(paye_|umb_|charge_)/.test(targetName);
-  const prev = isRate ? fs.pay[targetName] : fs.main[targetName];
-
   if (prev === stored) {
-    if (LOGC) console.log('[CONTRACTS] setContractFormValue no-op (unchanged)', { name: targetName, stored });
+    if (LOGC) {
+      console.log('[CONTRACTS] setContractFormValue no-op (unchanged)', {
+        name: targetName,
+        stored,
+        prev,
+        isRate
+      });
+    }
     return;
   }
 
   if (isRate) fs.pay[targetName] = stored;
   else        fs.main[targetName] = stored;
 
-  if (LOGC) console.log('[CONTRACTS] setContractFormValue', { name: targetName, value: (targetName.endsWith('_id') ? '(id)' : stored) });
+  if (LOGC) {
+    let scope = 'none';
+    try {
+      if (el && ratesRoot && ratesRoot.contains(el)) scope = 'rates';
+      else if (el && form && form.contains(el))      scope = 'form';
+    } catch {}
+    console.log('[CONTRACTS] setContractFormValue APPLY', {
+      name: targetName,
+      prev,
+      stored,
+      isRate,
+      scope
+    });
+  }
 
   if (isRate || targetName === 'pay_method_snapshot') {
     try { computeContractMargins(); } catch {}
@@ -5032,6 +5069,272 @@ function setContractFormValue(name, value) {
 
   try { window.dispatchEvent(new CustomEvent('modal-dirty')); } catch {}
 }
+
+function applyRatePresetToContractForm(preset, payMethod /* 'PAYE'|'UMBRELLA' */) {
+  if (!preset) return;
+
+  const LOGC = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : false;
+
+  const form =
+    document.querySelector('#modalBody #contractForm') ||
+    document.querySelector('#contractForm') ||
+    null;
+  const ratesRoot =
+    document.getElementById('contractRatesTab') ||
+    document.querySelector('#contractRatesTab') ||
+    null;
+  const canTouchDom = !!(form || ratesRoot);
+
+  const mc = window.modalCtx || (window.modalCtx = {});
+  if (!mc.formState) {
+    const baseId = (mc.data && mc.data.id) || mc.openToken || null;
+    mc.formState = { __forId: baseId, main: {}, pay: {} };
+  }
+  const fs = mc.formState;
+  fs.main = fs.main || {};
+  fs.pay  = fs.pay  || {};
+
+  const effectivePayMethod = String(
+    payMethod ||
+    fs.main.pay_method_snapshot ||
+    (mc.data && mc.data.pay_method_snapshot) ||
+    'PAYE'
+  ).toUpperCase();
+
+  if (LOGC) {
+    console.log('[CONTRACTS] applyRatePresetToContractForm ENTER', {
+      presetId: preset.id,
+      payMethodParam: payMethod,
+      effectivePayMethod
+    });
+  }
+
+  const write = (name, raw) => {
+    const v = (raw == null || raw === '') ? '' : String(raw);
+    const isRate = /^(paye_|umb_|charge_)/.test(name);
+    const prev = isRate ? fs.pay[name] : fs.main[name];
+
+    let el = null;
+    let hit = 'none';
+    if (ratesRoot) {
+      el = ratesRoot.querySelector(`[name="${CSS.escape(name)}"]`);
+      if (el) hit = 'rates';
+    }
+    if (!el && form) {
+      el = form.querySelector(`[name="${CSS.escape(name)}"]`);
+      if (el) hit = 'form';
+    }
+
+    if (LOGC) {
+      console.log('[CONTRACTS] preset write BEFORE', {
+        name,
+        prev,
+        next: v,
+        hit
+      });
+    }
+
+    if (el && canTouchDom) {
+      el.value = v;
+      try {
+        el.dispatchEvent(new Event('input',  { bubbles:true }));
+        el.dispatchEvent(new Event('change', { bubbles:true }));
+      } catch {}
+    }
+
+    // single source of truth: let setContractFormValue stage + fire margins/dirty
+    if (typeof setContractFormValue === 'function') {
+      try {
+        setContractFormValue(name, v);
+      } catch (e) {
+        if (LOGC) {
+          console.warn('[CONTRACTS] setContractFormValue from preset failed', {
+            name,
+            v,
+            err: e && e.message
+          });
+        }
+      }
+    }
+  };
+
+  // ─────────────────────────────────────────────────────────────
+  // Identity fields: always overwrite from preset
+  // ─────────────────────────────────────────────────────────────
+  [['role','role'], ['band','band'], ['display_site','display_site']].forEach(([field, key]) => {
+    const next = preset[key] != null ? String(preset[key]).trim() : '';
+    write(field, next);
+  });
+
+  // ─────────────────────────────────────────────────────────────
+  // Rates: copy all families the preset actually defines
+  // ─────────────────────────────────────────────────────────────
+  const BUCKETS  = ['day','night','sat','sun','bh'];
+  const prefixes = ['paye','umb','charge'];
+
+  BUCKETS.forEach(b => {
+    prefixes.forEach(p => {
+      const fieldName = `${p}_${b}`;
+      if (!Object.prototype.hasOwnProperty.call(preset, fieldName)) return;
+      const raw = preset[fieldName];
+      const finalVal =
+        (raw === null || raw === '') ? '' :
+        (Number.isFinite(Number(raw)) ? String(Number(raw)) : String(raw));
+      write(fieldName, finalVal);
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────
+  // Bucket labels: if any labels present, overwrite for those keys;
+  // even blank values wipe existing labels.
+  // ─────────────────────────────────────────────────────────────
+  if (preset.bucket_labels_json) {
+    const BL = preset.bucket_labels_json || {};
+    const hasAnyLabel = BUCKETS.some(k => Object.prototype.hasOwnProperty.call(BL, k));
+
+    if (hasAnyLabel) {
+      fs.main.__bucket_labels = fs.main.__bucket_labels || {};
+      BUCKETS.forEach(k => {
+        if (!Object.prototype.hasOwnProperty.call(BL, k)) return; // leave others as-is
+        const raw  = BL[k];
+        const next = raw == null ? '' : String(raw).trim();
+        write(`bucket_label_${k}`, next);
+        write(`bucket_${k}`,       next);
+        fs.main.__bucket_labels[k] = next;
+      });
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // Standard schedule:
+  // - If NO days at all in std_schedule_json → do nothing (leave as is)
+  // - If ANY day present → overwrite ALL 7 days
+  //   (including wiping existing values to blank where preset is empty)
+  // ─────────────────────────────────────────────────────────────
+  const days = ['mon','tue','wed','thu','fri','sat','sun'];
+
+  if (preset.std_schedule_json) {
+    const sched = preset.std_schedule_json || {};
+    const hasAnyDay = days.some(d => Object.prototype.hasOwnProperty.call(sched, d));
+
+    if (hasAnyDay) {
+      const template = {};
+      const toStr = (v) => (v == null ? '' : String(v).trim());
+
+      days.forEach(d => {
+        const hasThisDay = Object.prototype.hasOwnProperty.call(sched, d);
+        const src        = hasThisDay ? (sched[d] || {}) : {};
+        const start      = toStr(src.start);
+        const end        = toStr(src.end);
+
+        let brStr = '';
+        let brNum = 0;
+        if (src.break_minutes != null && start && end) {
+          brNum = Number(src.break_minutes) || 0;
+          brStr = String(brNum);
+        }
+
+        // Always overwrite all 7 days (even to blanks)
+        write(`${d}_start`, start);
+        write(`${d}_end`,   end);
+        write(`${d}_break`, brStr);
+
+        // Only add to template if we have a proper start/end pair
+        if (start && end) {
+          template[d] = { start, end, break_minutes: brNum };
+        }
+      });
+
+      fs.main.__template = template;
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // Hours snapshot (from preset or from template)
+  // ─────────────────────────────────────────────────────────────
+  if (preset.std_hours_json) {
+    fs.main.__hours = preset.std_hours_json;
+  } else if (fs.main.__template) {
+    const hours = {};
+    const toMinutes = (hhmm) => {
+      const m = String(hhmm || '').match(/^(\d{1,2}):(\d{2})$/);
+      return m ? (+m[1] * 60 + +m[2]) : null;
+    };
+
+    days.forEach(d => {
+      const slot = fs.main.__template[d];
+      if (!slot || !slot.start || !slot.end) return;
+
+      const startMin = toMinutes(slot.start);
+      const endMin   = toMinutes(slot.end);
+      if (startMin == null || endMin == null) return;
+
+      let mins = endMin < startMin ? (endMin + 1440 - startMin) : (endMin - startMin);
+      mins -= Number(slot.break_minutes || 0);
+      if (mins <= 0) return;
+
+      hours[d] = +(mins / 60).toFixed(2);
+    });
+
+    fs.main.__hours = Object.keys(hours).length ? hours : null;
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // Non-blocking warnings for pay-method / rate-family mismatches
+  // ─────────────────────────────────────────────────────────────
+  const hasFamily = (fam) => BUCKETS.some(k => {
+    const v = preset[`${fam}_${k}`];
+    return v !== undefined && v !== null && String(v).trim() !== '';
+  });
+
+  try {
+    if (effectivePayMethod === 'UMBRELLA' && !hasFamily('umb')) {
+      if (typeof showModalHint === 'function') {
+        showModalHint(
+          'No Umbrella rates are set for this preset rate card. Please enter the Umbrella pay rates manually',
+          'warn'
+        );
+      } else if (window.__toast) {
+        window.__toast('No Umbrella rates are set for this preset rate card. Please enter the Umbrella pay rates manually');
+      }
+    } else if (effectivePayMethod === 'PAYE' && !hasFamily('paye')) {
+      if (typeof showModalHint === 'function') {
+        showModalHint(
+          'No PAYE rates are set for this preset rate card. Please enter the PAYE pay rates manually',
+          'warn'
+        );
+      } else if (window.__toast) {
+        window.__toast('No PAYE rates are set for this preset rate card. Please enter the PAYE pay rates manually');
+      }
+    }
+  } catch {}
+
+  // ─────────────────────────────────────────────────────────────
+  // Recompute margins + mark modal dirty
+  // ─────────────────────────────────────────────────────────────
+  try {
+    if (typeof computeContractMargins === 'function') {
+      computeContractMargins();
+    }
+  } catch {}
+
+  try {
+    const fr = window.__getModalFrame && window.__getModalFrame();
+    if (fr && (fr.kind === 'contracts' || fr.entity === 'contracts')) {
+      fr.isDirty = true;
+      if (typeof fr._updateButtons === 'function') fr._updateButtons();
+    }
+    window.dispatchEvent(new Event('modal-dirty'));
+  } catch {}
+
+  if (LOGC) {
+    console.log('[CONTRACTS] applyRatePresetToContractForm EXIT', {
+      presetId: preset.id,
+      effectivePayMethod
+    });
+  }
+}
+
 
 
 function mergeContractStateIntoRow(row) {
@@ -10066,19 +10369,43 @@ function openRatePresetPicker(applyCb, opts = {}) {
             fr.mode = 'edit';
             fr._updateButtons && fr._updateButtons();
           }
+          if (LOG) {
+            const stack = window.__modalStack || [];
+            L('onApply: parent after setFrameMode', {
+              parentMode: fr.mode,
+              parentKind: fr.kind,
+              parentEntity: fr.entity,
+              stackDepth: stack.length
+            });
+          }
+        } else if (LOG) {
+          L('onApply: no parent contracts frame found');
         }
-      } catch {}
+      } catch (e) {
+        console.error('[PRESETS] onApply parent mode/setTab error', e);
+      }
 
       try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
       try {
         if (fr && fr._hasMountedOnce && typeof fr.setTab === 'function') {
           fr.setTab('rates');
         }
-      } catch {}
+      } catch (e) {
+        console.error('[PRESETS] onApply setTab(rates) failed', e);
+      }
 
       // Let the caller actually apply the preset (includes snapshot + form writes)
       if (typeof applyCb === 'function') {
         await applyCb(chosen);
+      }
+
+      if (LOG) {
+        const fr2 = getParentContractsFrame();
+        L('onApply: after applyCb', {
+          parentMode: fr2?.mode,
+          parentKind: fr2?.kind,
+          parentEntity: fr2?.entity
+        });
       }
 
     } catch (e) {
@@ -10281,8 +10608,6 @@ function openRatePresetPicker(applyCb, opts = {}) {
     fr._onSave = onApply;
   }, 0);
 }
-
-
 async function fetchClientRatePresets({ client_id, role, band, active_on }) {
   if (!client_id) return [];
   const qs = new URLSearchParams();
