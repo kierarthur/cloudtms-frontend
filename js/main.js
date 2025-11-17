@@ -649,41 +649,29 @@ function currentUserId(){
 // ─────────────────────────────────────────────────────────────────────────────
 
 function computeRatePresetMargins(state){
-  // returns { bucket:{ day:{paye,umb,charge,marginPaye,marginUmb,negPaye,negUmb}... }, anyNegative }
   const buckets = ['day','night','sat','sun','bh'];
   const out = { bucket:{}, anyNegative:false };
-
   if (!state || typeof state !== 'object') return out;
-
-  // --- ERNI normalisation: mirror Contracts sources ---
-  const normalisePctToDecimal = (v) => {
-    if (!Number.isFinite(v)) return 0;
-    if (v > 1.2) return (v - 1);   // multiplier (e.g. 1.15) -> 0.15
-    if (v > 1.0) return (v / 100); // percent (e.g. 15) -> 0.15
-    if (v < 0) return 0;
-    return v;                      // already decimal
-  };
 
   let erniDec = 0;
   try { if (typeof ensureErniMultiplier === 'function') ensureErniMultiplier(); } catch {}
-  try {
-    if (typeof getCurrentErniMultiplier === 'function') {
-      const m = getCurrentErniMultiplier();
-      if (Number.isFinite(m)) erniDec = normalisePctToDecimal(m);
-    } else if (typeof getCurrentErniPct === 'function') {
-      const p = getCurrentErniPct();
-      if (Number.isFinite(p)) erniDec = normalisePctToDecimal(p);
-    } else if (typeof window !== 'undefined') {
-      const fromWin = (window.__erniMultiplier ?? window.__erniPct ?? 0);
-      if (Number.isFinite(fromWin)) erniDec = normalisePctToDecimal(fromWin);
-    }
-  } catch {}
+
+  if (typeof window !== 'undefined' && Number.isFinite(window.__ERNI_MULT__)) {
+    erniDec = Math.max(0, Number(window.__ERNI_MULT__) - 1);
+  } else if (typeof getCurrentErniMultiplier === 'function') {
+    const m = getCurrentErniMultiplier();
+    if (Number.isFinite(m)) erniDec = Math.max(0, m - 1);
+  } else if (typeof getCurrentErniPct === 'function') {
+    const p = getCurrentErniPct();
+    if (Number.isFinite(p)) erniDec = Math.max(0, p / 100);
+  } else if (Number.isFinite(window?.__erniMultiplier)) {
+    erniDec = Math.max(0, Number(window.__erniMultiplier) - 1);
+  } else if (Number.isFinite(window?.__erniPct)) {
+    erniDec = Math.max(0, Number(window.__erniPct) / 100);
+  }
 
   const num = (v) => { const n = Number(v); return Number.isFinite(n) ? n : NaN; };
 
-  // Contracts-equivalent formulas:
-  // PAYE margin = charge − (paye + paye*ERNI)
-  // Umb margin  = charge − umb
   buckets.forEach(b => {
     const paye   = num(state[`paye_${b}`]);
     const umb    = num(state[`umb_${b}`]);
@@ -879,14 +867,12 @@ async function openRatePresetModal({ id, mode } = {}) {
     const result = { margin: null, eligible: false, rateState: null, scope: '', payMode: '', reasons: [] };
     if (!root) return result;
 
-    // Scope / Rate type
     const rtEl = root.querySelector('#rp_rate_type');
     let scopeVal = (rtEl && rtEl.value) ? String(rtEl.value).toUpperCase() : '';
     if (scopeVal !== 'GLOBAL' && scopeVal !== 'CLIENT') scopeVal = '';
     result.scope = scopeVal;
     if (scopeVal) st.scope = scopeVal;
 
-    // Pay mode (select)
     const pmEl = root.querySelector('#rp_pay_mode');
     let payModeVal = (pmEl && pmEl.value) ? String(pmEl.value).toUpperCase() : (st.payMode || '');
     if (!['PAYE', 'UMB', 'BOTH'].includes(payModeVal)) payModeVal = '';
@@ -909,27 +895,22 @@ async function openRatePresetModal({ id, mode } = {}) {
 
     let eligible = true;
 
-    // Name
     const nameVal = getFieldValue(root, 'name');
     if (!nameVal) { eligible = false; result.reasons.push('name'); }
 
-    // Role
     const roleVal = getFieldValue(root, 'role');
     if (!roleVal) { eligible = false; result.reasons.push('role'); }
 
-    // Scope + client
     if (!scopeVal) { eligible = false; result.reasons.push('scope'); }
     if (scopeVal === 'CLIENT') {
       const cid = st.client_id || '';
       if (!cid) { eligible = false; result.reasons.push('client'); }
     }
 
-    // Bucket labels (at least one non-empty)
     const labelNames = ['bucket_day', 'bucket_night', 'bucket_sat', 'bucket_sun', 'bucket_bh'];
     const anyLabel = labelNames.some(n => !!getFieldValue(root, n));
     if (!anyLabel) { eligible = false; result.reasons.push('labels'); }
 
-    // Pay mode + rates
     if (!payModeVal) { eligible = false; result.reasons.push('payMode'); }
 
     const hasCharge = buckets.some(b => Number.isFinite(rateState[`charge_${b}`]));
@@ -955,7 +936,6 @@ async function openRatePresetModal({ id, mode } = {}) {
       if (!okRow) { eligible = false; result.reasons.push('rates_both'); }
     }
 
-    // Schedule eligibility (if enabled, at least one *valid* HH:MM day)
     const useScheduleEl = root.querySelector('#rp_use_schedule');
     const useSchedule = !!useScheduleEl && !!useScheduleEl.checked;
     if (useSchedule) {
@@ -1048,7 +1028,6 @@ async function openRatePresetModal({ id, mode } = {}) {
     `;
   };
 
-  // UPDATED layout: one full row per day (Start | End | Break), copy/paste controls beneath
   const renderSchedule = () => {
     const timeInput = (name, val) => `<input class="input rp-time" name="${name}" value="${val || ''}" placeholder="HH:MM" />`;
     const breakInput = (name, val) => `<input class="input rp-break" type="number" min="0" step="1" name="${name}" value="${val || ''}" placeholder="0" />`;
@@ -1168,7 +1147,6 @@ async function openRatePresetModal({ id, mode } = {}) {
 
     const v = (n) => getFieldValue(root, n);
 
-    // Scope / rate type
     const rtEl = root.querySelector('#rp_rate_type');
     let scopeVal = (rtEl && rtEl.value) ? String(rtEl.value).toUpperCase() : '';
     const scopeIsClient = (scopeVal === 'CLIENT');
@@ -1197,7 +1175,6 @@ async function openRatePresetModal({ id, mode } = {}) {
       return false;
     }
 
-    // Pay mode
     const pmEl = root.querySelector('#rp_pay_mode');
     let payModeVal = (pmEl && pmEl.value) ? String(pmEl.value).toUpperCase() : (st.payMode || '');
     if (!['PAYE', 'UMB', 'BOTH'].includes(payModeVal)) {
@@ -1300,7 +1277,6 @@ async function openRatePresetModal({ id, mode } = {}) {
     }
   };
 
-  // 🔧 Use renderer as renderTab so Edit never falls back to "Loading…" and we control re-renders.
   showModal(
     isCreate ? 'Create preset' : 'Rate preset',
     [{ key: 'main', title: 'Main' }],
@@ -1323,7 +1299,7 @@ async function openRatePresetModal({ id, mode } = {}) {
       const btnClr = root?.querySelector('#rp_clear_cli_btn');
 
       const ensureMileagePrefill = async () => {
-        const isCreateNow = !st.id; // only prefill on brand-new preset
+        const isCreateNow = !st.id;
         if (isCreateNow && st.scope === 'CLIENT' && st.client_id) {
           try {
             const cli = await getClient(st.client_id);
@@ -1471,7 +1447,6 @@ async function openRatePresetModal({ id, mode } = {}) {
       if (btnPick) {
         btnPick.onclick = () => {
           openClientPicker(({ id, label }) => {
-            // Only update client fields; do NOT reinitialise anything else.
             st.client_id = id;
             st.client_label = label || '';
             if (cliLbl) cliLbl.textContent = label ? `Chosen: ${label}` : 'No client chosen';
@@ -1493,7 +1468,6 @@ async function openRatePresetModal({ id, mode } = {}) {
       const pmSelect = root?.querySelector('#rp_pay_mode');
       if (pmSelect) {
         pmSelect.addEventListener('change', () => syncPayModeFromDom({ clearPrev: true }));
-        // Seed from initial selection
         syncPayModeFromDom({ clearPrev: false });
       } else {
         st.payMode = st.payMode || 'PAYE';
@@ -1542,7 +1516,6 @@ async function openRatePresetModal({ id, mode } = {}) {
         el.value = n.toFixed(2);
       };
 
-      // Keep st in sync with ALL numeric rate fields
       buckets.forEach(b => {
         ['paye', 'umb', 'charge'].forEach(prefix => {
           const inp = root?.querySelector(`[name="${prefix}_${b}"]`);
@@ -1681,12 +1654,11 @@ async function openRatePresetModal({ id, mode } = {}) {
         });
       }
 
-      // Keep st in sync for ALL other text inputs (name/role/band/display_site + labels)
       ['input', 'change'].forEach(evt => {
         root?.addEventListener(evt, (e) => {
           const t = e.target;
           if (!t?.name) return;
-          if (t.name === 'rp_pay_mode' || t.name === 'rp_rate_type') return; // handled elsewhere
+          if (t.name === 'rp_pay_mode' || t.name === 'rp_rate_type') return;
           if (/^(name|role|band|display_site)$/.test(t.name)) {
             st[t.name] = t.value || '';
           } else if (/^bucket_(day|night|sat|sun|bh)$/.test(t.name)) {
@@ -10076,7 +10048,6 @@ function openRatePresetPicker(applyCb, opts = {}) {
     return null;
   };
 
-  // ⬇️ APPLY FIRST so a missing setFrameMode can never block the write
   const onApply = async () => {
     if (!pickerRows || pickerSelectedIndex < 0) return false;
     const chosen = pickerRows[pickerSelectedIndex];
@@ -10085,7 +10056,6 @@ function openRatePresetPicker(applyCb, opts = {}) {
     L('onApply: applying preset row', { chosen });
 
     try {
-      // A) Capture a pre-apply snapshot so Reset can restore the previous state
       try {
         if (typeof snapshotContractForm === 'function') snapshotContractForm();
         const src = window.modalCtx && window.modalCtx.formState ? window.modalCtx.formState : null;
@@ -10100,14 +10070,11 @@ function openRatePresetPicker(applyCb, opts = {}) {
         console.warn('[PRESETS] pre-apply snapshot failed (non-fatal)', e);
       }
 
-      // 1) Always write to formState (and DOM if visible)
       if (typeof applyRatePresetToContractForm === 'function') applyRatePresetToContractForm(chosen);
 
-      // 2) Optionally flip parent to edit, but never throw if helper isn’t in scope
       const fr = getParentContractsFrame();
       try {
         if (fr) {
-          // call if exported globally; otherwise, minimal fallback
           if (typeof window.setFrameMode === 'function') {
             window.setFrameMode(fr, 'edit');
           } else {
@@ -10115,22 +10082,20 @@ function openRatePresetPicker(applyCb, opts = {}) {
             fr._updateButtons && fr._updateButtons();
           }
         }
-      } catch { /* non-fatal */ }
+      } catch {}
 
-      // 3) Nudge parent to repaint rates if it’s mounted; otherwise it’ll repaint when the picker closes
       try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
       try {
         if (fr && fr._hasMountedOnce && typeof fr.setTab === 'function') fr.setTab('rates');
       } catch {}
 
-      // 4) external callback hook
       if (typeof applyCb === 'function') applyCb(chosen);
 
     } catch (e) {
       console.error('[PRESETS] onApply failed; keeping picker open', e);
       return false;
     }
-    return true; // tell showModal it’s OK to close
+    return true;
   };
 
   showModal(
@@ -10218,7 +10183,9 @@ function openRatePresetPicker(applyCb, opts = {}) {
         const scope = scopeVal();
         const q = (search?.value || '').trim();
         try {
-          const raw = await listRatePresets({ scope, client_id: client_id || null, q, active_on: start_date || null });
+          const args = { scope, q, active_on: start_date || null };
+          if (scope === 'CLIENT' && client_id) args.client_id = client_id;
+          const raw = await listRatePresets(args);
           pickerRows = Array.isArray(raw) ? sortPresetsForView(scope, raw) : [];
           L('fetchRows: got presets', { scope, q, count: pickerRows.length });
         } catch (e) {
@@ -10230,7 +10197,6 @@ function openRatePresetPicker(applyCb, opts = {}) {
         paint();
       };
 
-      // Single-click select
       let lastClick = { idx: -1, t: 0 };
       tbody.addEventListener('click', (e) => {
         const tr = e.target.closest('tr[data-i]');
@@ -10247,7 +10213,6 @@ function openRatePresetPicker(applyCb, opts = {}) {
         L('row click → select', { idx, id: pickerSelectedId });
         paint();
 
-        // Fallback “double-click”: two fast clicks on the same row
         if (isFastSecond) {
           (async () => {
             const ok = await onApply();
@@ -10256,7 +10221,6 @@ function openRatePresetPicker(applyCb, opts = {}) {
         }
       });
 
-      // Native dblclick (kept for environments where it fires reliably)
       root.addEventListener('dblclick', (e) => {
         const tr = e.target.closest('tr[data-i]');
         if (!tr) return;
@@ -10269,18 +10233,16 @@ function openRatePresetPicker(applyCb, opts = {}) {
           const ok = await onApply();
           if (ok !== false) setTimeout(() => document.getElementById('btnCloseModal')?.click(), 50);
         })();
-      }, true); // capture phase to avoid other listeners swallowing it
+      }, true);
 
       search?.addEventListener('input', fetchRows);
       radios.forEach(r => r.addEventListener('change', fetchRows));
 
       await fetchRows();
 
-      // Rename Save button
       const btn = document.getElementById('btnSave');
       if (btn) btn.textContent = 'Apply';
 
-      // NEW: force the picker frame into 'view' mode so discard prompts never fire
       try {
         const fr = window.__getModalFrame?.();
         if (fr && fr.kind === 'rate-presets-picker' && typeof setFrameMode === 'function') {
@@ -10292,7 +10254,6 @@ function openRatePresetPicker(applyCb, opts = {}) {
     { kind: 'rate-presets-picker', noParentGate: true }
   );
 
-  // Ensure the global Save button uses the same handler as dbl-click
   setTimeout(() => {
     const fr = window.__getModalFrame?.();
     if (!fr || fr.kind !== 'rate-presets-picker') return;
@@ -10330,17 +10291,14 @@ async function fetchCandidateRateOverrides({ candidate_id, client_id, role, band
   const rows = toList(r) || [];
   return rows;
 }
-
 function applyRatePresetToContractForm(preset, payMethod /* 'PAYE'|'UMBRELLA' */) {
   if (!preset) return;
 
-  // Prefer the contract form in the active modal body; may be absent while the picker is on top.
   const form =
     document.querySelector('#modalBody #contractForm') ||
     document.querySelector('#contractForm') || null;
   const canTouchDom = !!form;
 
-  // ▶ Ensure modalCtx + formState exist (modalCtx here should already point to the parent frame’s ctxRef)
   const mc = window.modalCtx || (window.modalCtx = {});
   if (!mc.formState) {
     const baseId = (mc.data && mc.data.id) || mc.openToken || null;
@@ -10357,16 +10315,12 @@ function applyRatePresetToContractForm(preset, payMethod /* 'PAYE'|'UMBRELLA' */
     'PAYE'
   ).toUpperCase();
 
-  // helper to write fs + (optionally) DOM + notify any watchers
   const write = (name, val) => {
-    // update formState first (this is what renderers merge from)
     if (/^(paye_|umb_|charge_)/.test(name)) fs.pay[name] = val;
     else fs.main[name] = val;
 
-    // best-effort notify existing setter if present
     try { typeof setContractFormValue === 'function' && setContractFormValue(name, val); } catch {}
 
-    // update the DOM if we can see it (parent frame visible)
     if (canTouchDom) {
       const el = form.querySelector(`[name="${name}"]`);
       if (el) {
@@ -10379,28 +10333,12 @@ function applyRatePresetToContractForm(preset, payMethod /* 'PAYE'|'UMBRELLA' */
     }
   };
 
-  // ── Zone B: Job identity ──
-  // Only fill role/band/display_site if they are currently BLANK, so we don't override an existing contract.
+  // Overwrite identity fields per new policy
   [['role','role'], ['band','band'], ['display_site','display_site']].forEach(([field, key]) => {
     const next = preset[key] != null ? String(preset[key]).trim() : '';
-    if (!next) return;
-
-    // Check existing value from formState first, then DOM as fallback
-    let existing = '';
-    try {
-      existing = (fs.main && fs.main[field]) || '';
-      if (!existing && canTouchDom) {
-        const el = form.querySelector(`[name="${field}"]`);
-        if (el && typeof el.value === 'string') existing = el.value.trim();
-      }
-    } catch {}
-
-    if (!existing || String(existing).trim() === '') {
-      write(field, next);
-    }
+    write(field, next);
   });
 
-  // ── Zone C: Rates ──
   const BUCKETS = ['day','night','sat','sun','bh'];
   const prefixes = ['paye','umb','charge'];
 
@@ -10415,7 +10353,6 @@ function applyRatePresetToContractForm(preset, payMethod /* 'PAYE'|'UMBRELLA' */
     });
   });
 
-  // ── Zone C: Bucket labels ──
   if (preset.bucket_labels_json) {
     const BL = preset.bucket_labels_json;
     fs.main.__bucket_labels ||= {};
@@ -10428,7 +10365,6 @@ function applyRatePresetToContractForm(preset, payMethod /* 'PAYE'|'UMBRELLA' */
     });
   }
 
-  // ── Zone C: Schedule ──
   const days = ['mon','tue','wed','thu','fri','sat','sun'];
   if (preset.std_schedule_json) {
     const sched = preset.std_schedule_json;
@@ -10456,7 +10392,6 @@ function applyRatePresetToContractForm(preset, payMethod /* 'PAYE'|'UMBRELLA' */
     fs.main.__template = template;
   }
 
-  // ── Zone C: Hours ──
   if (preset.std_hours_json) {
     fs.main.__hours = preset.std_hours_json;
   } else if (fs.main.__template) {
@@ -10473,7 +10408,22 @@ function applyRatePresetToContractForm(preset, payMethod /* 'PAYE'|'UMBRELLA' */
     fs.main.__hours = Object.keys(hours).length ? hours : null;
   }
 
-  // ── Mark modal dirty & update buttons ──
+  // Non-blocking warnings for pay-method/rate mismatches
+  const hasFamily = (fam) => BUCKETS.some(k => {
+    const v = preset[`${fam}_${k}`];
+    return v !== undefined && v !== null && String(v).trim() !== '';
+  });
+
+  try {
+    if (effectivePayMethod === 'UMBRELLA' && !hasFamily('umb')) {
+      if (typeof showModalHint === 'function') showModalHint('Preset has no Umbrella rates. Applied charges/labels/schedule only.', 'warn');
+      else if (window.__toast) window.__toast('Preset has no Umbrella rates. Applied charges/labels/schedule only.');
+    } else if (effectivePayMethod === 'PAYE' && !hasFamily('paye')) {
+      if (typeof showModalHint === 'function') showModalHint('Preset has no PAYE rates. Applied charges/labels/schedule only.', 'warn');
+      else if (window.__toast) window.__toast('Preset has no PAYE rates. Applied charges/labels/schedule only.');
+    }
+  } catch {}
+
   try { typeof computeContractMargins === 'function' && computeContractMargins(); } catch {}
   try {
     const fr = window.__getModalFrame?.();
@@ -14971,7 +14921,6 @@ function setFrameMode(frameObj, mode) {
   if (typeof frameObj._updateButtons === 'function') frameObj._updateButtons();
 
   try { const idx=stack().indexOf(frameObj); window.dispatchEvent(new CustomEvent('modal-frame-mode-changed',{detail:{frameIndex:idx,mode}})); } catch {}
-
   const repaint = !!(frameObj._hasMountedOnce && frameObj.currentTabKey);
   L('setFrameMode', { prevMode:prev, nextMode:mode, _hasMountedOnce:frameObj._hasMountedOnce, willRepaint:repaint });
   try {
@@ -14983,7 +14932,12 @@ function setFrameMode(frameObj, mode) {
     });
   } catch {}
   updateCalendarInteractivity(mode==='edit' || mode==='create');
-  if (repaint) frameObj.setTab(frameObj.currentTabKey);
+  if (repaint) {
+    Promise.resolve(frameObj.setTab(frameObj.currentTabKey)).then(() => {
+      try { frameObj.onReturn && frameObj.onReturn(); } catch {}
+    });
+  }
+
 }
 
 const parentOnOpen = currentFrame();
@@ -15592,8 +15546,9 @@ if (!top._wired) {
   window.addEventListener('contract-margins-updated', onMarginsEvt);
   const onEsc=e=>{ if(e.key==='Escape'){ if(top._confirmingDiscard||top._closing) return; e.preventDefault(); byId('btnCloseModal').click(); } };
   window.addEventListener('keydown', onEsc);
-  const onOverlayClick=e=>{ if(top._confirmingDiscard||top._closing) return; if(e.target===byId('modalBack')) byId('btnCloseModal').click(); };
+   const onOverlayClick=e=>{ if(top._confirmingDiscard||top._closing) return; if(e.target===byId('modalBack')) { e.preventDefault(); e.stopPropagation(); return; } };
   byId('modalBack').addEventListener('click', onOverlayClick, true);
+
   top._detachGlobal = ()=>{ try{window.removeEventListener('modal-dirty',onDirtyEvt);}catch{} try{window.removeEventListener('modal-apply-enabled',onApplyEvt);}catch{} try{window.removeEventListener('modal-frame-mode-changed',onModeChanged);}catch{} try{window.removeEventListener('contract-margins-updated',onMarginsEvt);}catch{} try{window.removeEventListener('keydown',onEsc);}catch{} try{byId('modalBack').removeEventListener('click', onOverlayClick, true);}catch{}; };
   top._wired = true;
   L('renderTop (global): listeners wired');
