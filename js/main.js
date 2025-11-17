@@ -10056,22 +10056,7 @@ function openRatePresetPicker(applyCb, opts = {}) {
     L('onApply: applying preset row', { chosen });
 
     try {
-      try {
-        if (typeof snapshotContractForm === 'function') snapshotContractForm();
-        const src = window.modalCtx && window.modalCtx.formState ? window.modalCtx.formState : null;
-        if (src) {
-          window.modalCtx.__presetBefore =
-            (typeof structuredClone === 'function')
-              ? structuredClone(src)
-              : JSON.parse(JSON.stringify(src));
-          L('onApply: captured __presetBefore snapshot');
-        }
-      } catch (e) {
-        console.warn('[PRESETS] pre-apply snapshot failed (non-fatal)', e);
-      }
-
-      if (typeof applyRatePresetToContractForm === 'function') applyRatePresetToContractForm(chosen);
-
+      // Ensure parent contract modal is in EDIT and on the Rates tab
       const fr = getParentContractsFrame();
       try {
         if (fr) {
@@ -10086,10 +10071,15 @@ function openRatePresetPicker(applyCb, opts = {}) {
 
       try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
       try {
-        if (fr && fr._hasMountedOnce && typeof fr.setTab === 'function') fr.setTab('rates');
+        if (fr && fr._hasMountedOnce && typeof fr.setTab === 'function') {
+          fr.setTab('rates');
+        }
       } catch {}
 
-      if (typeof applyCb === 'function') applyCb(chosen);
+      // Let the caller actually apply the preset (includes snapshot + form writes)
+      if (typeof applyCb === 'function') {
+        await applyCb(chosen);
+      }
 
     } catch (e) {
       console.error('[PRESETS] onApply failed; keeping picker open', e);
@@ -10182,10 +10172,36 @@ function openRatePresetPicker(applyCb, opts = {}) {
       const fetchRows = async () => {
         const scope = scopeVal();
         const q = (search?.value || '').trim();
+
         try {
-          const args = { scope, q, active_on: start_date || null };
-          if (scope === 'CLIENT' && client_id) args.client_id = client_id;
-          const raw = await listRatePresets(args);
+          // Helper: fetch a single scope
+          const fetchScope = async (scopeKey) => {
+            const args = { scope: scopeKey, q };
+            if (scopeKey === 'CLIENT' && client_id) args.client_id = client_id;
+            // start_date / active_on is not enforced server-side yet, so we omit for now
+            return await listRatePresets(args);
+          };
+
+          let raw = [];
+
+          if (scope === 'GLOBAL') {
+            // Only global presets
+            raw = await fetchScope('GLOBAL');
+          } else if (scope === 'CLIENT') {
+            // Only this client's presets
+            raw = client_id ? await fetchScope('CLIENT') : [];
+          } else { // ALL
+            if (client_id) {
+              // ALL = Global + this client's presets (but NOT other clients)
+              const globals = await fetchScope('GLOBAL');
+              const clients = await fetchScope('CLIENT');
+              raw = [...globals, ...clients];
+            } else {
+              // No client chosen: ALL behaves like GLOBAL in the picker
+              raw = await fetchScope('GLOBAL');
+            }
+          }
+
           pickerRows = Array.isArray(raw) ? sortPresetsForView(scope, raw) : [];
           L('fetchRows: got presets', { scope, q, count: pickerRows.length });
         } catch (e) {
@@ -10291,6 +10307,8 @@ async function fetchCandidateRateOverrides({ candidate_id, client_id, role, band
   const rows = toList(r) || [];
   return rows;
 }
+
+
 function applyRatePresetToContractForm(preset, payMethod /* 'PAYE'|'UMBRELLA' */) {
   if (!preset) return;
 
@@ -10311,7 +10329,7 @@ function applyRatePresetToContractForm(preset, payMethod /* 'PAYE'|'UMBRELLA' */
   const effectivePayMethod = String(
     payMethod ||
     fs.main.pay_method_snapshot ||
-    mc.data?.pay_method_snapshot ||
+    (mc.data && mc.data.pay_method_snapshot) ||
     'PAYE'
   ).toUpperCase();
 
@@ -10319,7 +10337,11 @@ function applyRatePresetToContractForm(preset, payMethod /* 'PAYE'|'UMBRELLA' */
     if (/^(paye_|umb_|charge_)/.test(name)) fs.pay[name] = val;
     else fs.main[name] = val;
 
-    try { typeof setContractFormValue === 'function' && setContractFormValue(name, val); } catch {}
+    try {
+      if (typeof setContractFormValue === 'function') {
+        setContractFormValue(name, val);
+      }
+    } catch {}
 
     if (canTouchDom) {
       const el = form.querySelector(`[name="${name}"]`);
@@ -10333,13 +10355,18 @@ function applyRatePresetToContractForm(preset, payMethod /* 'PAYE'|'UMBRELLA' */
     }
   };
 
-  // Overwrite identity fields per new policy
+  // ─────────────────────────────────────────────────────────────
+  // Identity fields: always overwrite from preset
+  // ─────────────────────────────────────────────────────────────
   [['role','role'], ['band','band'], ['display_site','display_site']].forEach(([field, key]) => {
     const next = preset[key] != null ? String(preset[key]).trim() : '';
     write(field, next);
   });
 
-  const BUCKETS = ['day','night','sat','sun','bh'];
+  // ─────────────────────────────────────────────────────────────
+  // Rates: copy all families the preset actually defines
+  // ─────────────────────────────────────────────────────────────
+  const BUCKETS  = ['day','night','sat','sun','bh'];
   const prefixes = ['paye','umb','charge'];
 
   BUCKETS.forEach(b => {
@@ -10347,68 +10374,111 @@ function applyRatePresetToContractForm(preset, payMethod /* 'PAYE'|'UMBRELLA' */
       const fieldName = `${p}_${b}`;
       if (!Object.prototype.hasOwnProperty.call(preset, fieldName)) return;
       const raw = preset[fieldName];
-      const finalVal = (raw === null || raw === '') ? '' :
-                       (Number.isFinite(Number(raw)) ? String(Number(raw)) : String(raw));
+      const finalVal =
+        (raw === null || raw === '') ? '' :
+        (Number.isFinite(Number(raw)) ? String(Number(raw)) : String(raw));
       write(fieldName, finalVal);
     });
   });
 
+  // ─────────────────────────────────────────────────────────────
+  // Bucket labels: if any labels present, overwrite for those keys;
+  // even blank values wipe existing labels.
+  // ─────────────────────────────────────────────────────────────
   if (preset.bucket_labels_json) {
-    const BL = preset.bucket_labels_json;
-    fs.main.__bucket_labels ||= {};
-    BUCKETS.forEach(k => {
-      const raw  = Object.prototype.hasOwnProperty.call(BL, k) ? BL[k] : k;
-      const next = raw == null ? '' : String(raw).trim();
-      write(`bucket_label_${k}`, next);
-      write(`bucket_${k}`,       next);
-      fs.main.__bucket_labels[k] = next;
-    });
+    const BL = preset.bucket_labels_json || {};
+    const hasAnyLabel = BUCKETS.some(k => Object.prototype.hasOwnProperty.call(BL, k));
+
+    if (hasAnyLabel) {
+      fs.main.__bucket_labels = fs.main.__bucket_labels || {};
+      BUCKETS.forEach(k => {
+        if (!Object.prototype.hasOwnProperty.call(BL, k)) return; // leave others as-is
+        const raw  = BL[k];
+        const next = raw == null ? '' : String(raw).trim();
+        write(`bucket_label_${k}`, next);
+        write(`bucket_${k}`,       next);
+        fs.main.__bucket_labels[k] = next;
+      });
+    }
   }
 
+  // ─────────────────────────────────────────────────────────────
+  // Standard schedule:
+  // - If NO days at all in std_schedule_json → do nothing (leave as is)
+  // - If ANY day present → overwrite ALL 7 days
+  //   (including wiping existing values to blank where preset is empty)
+  // ─────────────────────────────────────────────────────────────
   const days = ['mon','tue','wed','thu','fri','sat','sun'];
+
   if (preset.std_schedule_json) {
-    const sched = preset.std_schedule_json;
-    const template = {};
-    const toStr = (v) => (v == null ? '' : String(v).trim());
+    const sched = preset.std_schedule_json || {};
+    const hasAnyDay = days.some(d => Object.prototype.hasOwnProperty.call(sched, d));
 
-    days.forEach(d => {
-      const src   = sched[d] || {};
-      const start = toStr(src.start);
-      const end   = toStr(src.end);
-      const brNum = src.break_minutes != null ? Number(src.break_minutes) : 0;
-      const brStr = String(brNum);
+    if (hasAnyDay) {
+      const template = {};
+      const toStr = (v) => (v == null ? '' : String(v).trim());
 
-      if (start && end) {
+      days.forEach(d => {
+        const hasThisDay = Object.prototype.hasOwnProperty.call(sched, d);
+        const src        = hasThisDay ? (sched[d] || {}) : {};
+        const start      = toStr(src.start);
+        const end        = toStr(src.end);
+
+        let brStr = '';
+        let brNum = 0;
+        if (src.break_minutes != null && start && end) {
+          brNum = Number(src.break_minutes) || 0;
+          brStr = String(brNum);
+        }
+
+        // Always overwrite all 7 days (even to blanks)
         write(`${d}_start`, start);
         write(`${d}_end`,   end);
         write(`${d}_break`, brStr);
-        template[d] = { start, end, break_minutes: brNum };
-      } else if (Object.prototype.hasOwnProperty.call(sched, d)) {
-        write(`${d}_start`, '');
-        write(`${d}_end`,   '');
-        write(`${d}_break`, '');
-      }
-    });
-    fs.main.__template = template;
+
+        // Only add to template if we have a proper start/end pair
+        if (start && end) {
+          template[d] = { start, end, break_minutes: brNum };
+        }
+      });
+
+      fs.main.__template = template;
+    }
   }
 
+  // ─────────────────────────────────────────────────────────────
+  // Hours snapshot (from preset or from template)
+  // ─────────────────────────────────────────────────────────────
   if (preset.std_hours_json) {
     fs.main.__hours = preset.std_hours_json;
   } else if (fs.main.__template) {
     const hours = {};
-    const toMinutes = (hhmm) => { const m = String(hhmm||'').match(/^(\d{1,2}):(\d{2})$/); return m ? (+m[1]*60+ +m[2]) : null; };
+    const toMinutes = (hhmm) => {
+      const m = String(hhmm || '').match(/^(\d{1,2}):(\d{2})$/);
+      return m ? (+m[1] * 60 + +m[2]) : null;
+    };
+
     days.forEach(d => {
-      const slot = fs.main.__template[d]; if (!slot || !slot.start || !slot.end) return;
-      const startMin = toMinutes(slot.start), endMin = toMinutes(slot.end);
-      if (startMin==null || endMin==null) return;
-      let mins = endMin < startMin ? (endMin+1440-startMin) : (endMin-startMin);
-      mins -= Number(slot.break_minutes||0); if (mins<=0) return;
-      hours[d] = +(mins/60).toFixed(2);
+      const slot = fs.main.__template[d];
+      if (!slot || !slot.start || !slot.end) return;
+
+      const startMin = toMinutes(slot.start);
+      const endMin   = toMinutes(slot.end);
+      if (startMin == null || endMin == null) return;
+
+      let mins = endMin < startMin ? (endMin + 1440 - startMin) : (endMin - startMin);
+      mins -= Number(slot.break_minutes || 0);
+      if (mins <= 0) return;
+
+      hours[d] = +(mins / 60).toFixed(2);
     });
+
     fs.main.__hours = Object.keys(hours).length ? hours : null;
   }
 
-  // Non-blocking warnings for pay-method/rate mismatches
+  // ─────────────────────────────────────────────────────────────
+  // Non-blocking warnings for pay-method / rate-family mismatches
+  // ─────────────────────────────────────────────────────────────
   const hasFamily = (fam) => BUCKETS.some(k => {
     const v = preset[`${fam}_${k}`];
     return v !== undefined && v !== null && String(v).trim() !== '';
@@ -10416,18 +10486,41 @@ function applyRatePresetToContractForm(preset, payMethod /* 'PAYE'|'UMBRELLA' */
 
   try {
     if (effectivePayMethod === 'UMBRELLA' && !hasFamily('umb')) {
-      if (typeof showModalHint === 'function') showModalHint('Preset has no Umbrella rates. Applied charges/labels/schedule only.', 'warn');
-      else if (window.__toast) window.__toast('Preset has no Umbrella rates. Applied charges/labels/schedule only.');
+      if (typeof showModalHint === 'function') {
+        showModalHint(
+          'No Umbrella rates are set for this preset rate card. Please enter the Umbrella pay rates manually',
+          'warn'
+        );
+      } else if (window.__toast) {
+        window.__toast('No Umbrella rates are set for this preset rate card. Please enter the Umbrella pay rates manually');
+      }
     } else if (effectivePayMethod === 'PAYE' && !hasFamily('paye')) {
-      if (typeof showModalHint === 'function') showModalHint('Preset has no PAYE rates. Applied charges/labels/schedule only.', 'warn');
-      else if (window.__toast) window.__toast('Preset has no PAYE rates. Applied charges/labels/schedule only.');
+      if (typeof showModalHint === 'function') {
+        showModalHint(
+          'No PAYE rates are set for this preset rate card. Please enter the PAYE pay rates manually',
+          'warn'
+        );
+      } else if (window.__toast) {
+        window.__toast('No PAYE rates are set for this preset rate card. Please enter the PAYE pay rates manually');
+      }
     }
   } catch {}
 
-  try { typeof computeContractMargins === 'function' && computeContractMargins(); } catch {}
+  // ─────────────────────────────────────────────────────────────
+  // Recompute margins + mark modal dirty
+  // ─────────────────────────────────────────────────────────────
   try {
-    const fr = window.__getModalFrame?.();
-    if (fr && (fr.kind==='contracts' || fr.entity==='contracts')) { fr.isDirty = true; fr._updateButtons?.(); }
+    if (typeof computeContractMargins === 'function') {
+      computeContractMargins();
+    }
+  } catch {}
+
+  try {
+    const fr = window.__getModalFrame && window.__getModalFrame();
+    if (fr && (fr.kind === 'contracts' || fr.entity === 'contracts')) {
+      fr.isDirty = true;
+      if (typeof fr._updateButtons === 'function') fr._updateButtons();
+    }
     window.dispatchEvent(new Event('modal-dirty'));
   } catch {}
 }
@@ -15115,7 +15208,12 @@ const setCloseLabel = ()=>{
       btnSave.style.display='none';
       btnSave.disabled=true;
       if (relatedBtn) relatedBtn.disabled=true;
-      setCloseLabel();
+
+      // Always show “Close” for the Preset Rates manager (never “Discard”)
+      btnClose.textContent = 'Close';
+      btnClose.setAttribute('aria-label', 'Close');
+      btnClose.setAttribute('title', 'Close');
+
       L('_updateButtons snapshot (global)', {
         kind: top.kind, isChild, parentEditable, mode: top.mode,
         btnSave: { display: btnSave.style.display, disabled: btnSave.disabled },
@@ -15123,6 +15221,7 @@ const setCloseLabel = ()=>{
       });
       return;
     } else if (isChild && !top.noParentGate) {
+
       if (top.mode === 'view') {
         btnSave.style.display = 'none';
         btnSave.disabled = true;
@@ -15274,8 +15373,8 @@ if (stack().length>0) {
   }
 
 
-  if (!isChildNow && !top.noParentGate && top.mode==='edit') {
-  if (!top.isDirty) {
+  if (!isChildNow && !top.noParentGate && top.mode==='edit' && top.kind!=='rates-presets') {
+    if (!top.isDirty) {
     if (top._snapshot && window.modalCtx) {
       window.modalCtx.data                = deep(top._snapshot.data);
       window.modalCtx.formState           = deep(top._snapshot.formState);
@@ -15295,8 +15394,8 @@ if (stack().length>0) {
     top.isDirty=false; setFrameMode(top,'view'); top._snapshot=null;
     try{ window.__toast?.('No changes'); }catch{}; return;
   } else {
-    let ok=false; try{ top._confirmingDiscard=true; btnClose.disabled=true; ok=window.confirm('Discard changes and return to view?'); } finally { top._confirmingDiscard=false; btnClose.disabled=false; }
-    if (!ok) return;
+      let ok=false; try{ top._confirmingDiscard=true; btnClose.disabled=true; ok=window.confirm('Discard changes and return to view?'); } finally { top._confirmingDiscard=false; btnClose.disabled=false; }
+      if (!ok) return;
     if (top._snapshot && window.modalCtx) {
       window.modalCtx.data                = deep(top._snapshot.data);
       window.modalCtx.formState           = deep(top._snapshot.formState);
@@ -15322,10 +15421,11 @@ if (top._closing) return;
 top._closing=true;
 document.onmousemove=null; document.onmouseup=null; byId('modal')?.classList.remove('dragging');
 
-if (!isChildNow && !top.noParentGate && top.mode==='create' && top.isDirty) {
+if (!isChildNow && !top.noParentGate && top.mode==='create' && top.isDirty && top.kind!=='rates-presets') {
   let ok=false; try{ top._confirmingDiscard=true; btnClose.disabled=true; ok=window.confirm('You have unsaved changes. Discard them and close?'); } finally { top._confirmingDiscard=false; btnClose.disabled=false; }
   if (!ok) { top._closing=false; return; }
 }
+
 
 try {
   if (top.entity === 'contracts' && (top.mode==='edit' || top.mode==='create')) {
@@ -15340,15 +15440,19 @@ if (stack().length>0) {
   const p=currentFrame();
   // restore parent context to ensure actions (Clone & Extend) render correctly
   if (p && p._ctxRef) window.modalCtx = p._ctxRef;
-  // ▶ make sure parent resumes view-mode so calendar actions (Clone & Extend) return
- const resumeMode =
-  (typeof closing !== 'undefined' && closing && closing._parentModeOnOpen)
-    ? closing._parentModeOnOpen
-    : p.mode;
+  // ▶ for most children, resume the original parent mode; for the rate-presets picker,
+  //    keep whatever mode the parent is currently in (typically 'edit' after Apply).
+  const resumeMode =
+    (typeof closing !== 'undefined' &&
+     closing &&
+     closing._parentModeOnOpen &&
+     closing.kind !== 'rate-presets-picker')
+      ? closing._parentModeOnOpen
+      : p.mode;
 
-try { setFrameMode(p, resumeMode); } catch {}
-p._updateButtons && p._updateButtons();
-renderTop();
+  try { setFrameMode(p, resumeMode); } catch {}
+  p._updateButtons && p._updateButtons();
+  renderTop();
 
   try{ p.onReturn && p.onReturn(); }catch{}
 } else {
@@ -15438,7 +15542,7 @@ async function saveForFrame(fr) {
         renderTop();
       } catch {}
       L('saveForFrame EXIT (child kept open)');
-    } else {
+   } else {
       if (!fr.noParentGate) {
         try { window.dispatchEvent(new CustomEvent('modal-dirty')); } catch {}
       }
@@ -15446,15 +15550,19 @@ async function saveForFrame(fr) {
       if (window.__modalStack.length>0) {
         const p=window.__modalStack[window.__modalStack.length-1];
 
-        // ▶ ensure parent is back in view so actions (Clone & Extend) show
-       const resumeMode =
-  (typeof fr !== 'undefined' && fr && fr._parentModeOnOpen)
-    ? fr._parentModeOnOpen
-    : p.mode; // keep whatever the parent already was
+        // ▶ for most children, resume the original parent mode; for the rate-presets picker,
+        //    keep whatever mode the parent is currently in (typically 'edit' after Apply).
+        const resumeMode =
+          (typeof fr !== 'undefined' &&
+           fr &&
+           fr._parentModeOnOpen &&
+           fr.kind !== 'rate-presets-picker')
+            ? fr._parentModeOnOpen
+            : p.mode; // keep whatever the parent already was
 
-try { setFrameMode(p, resumeMode); } catch {}
-p._updateButtons && p._updateButtons();
-renderTop();
+        try { setFrameMode(p, resumeMode); } catch {}
+        p._updateButtons && p._updateButtons();
+        renderTop();
 
 
         // ▶ nudge calendar/action bar re-wire if needed
