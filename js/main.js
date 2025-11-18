@@ -14822,11 +14822,20 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
     L('showModal: reset #modal initial geometry');
   }
 
-    // Allow staging children (Clone & Extend) to be fully editable regardless of parent mode
+     // Allow staging children (Clone & Extend) to be fully editable regardless of parent mode
   if (opts && opts.kind === 'contract-clone-extend') {
     opts.noParentGate = true;
     if (!opts.forceEdit) opts.forceEdit = true;
     L('showModal(kind=contract-clone-extend): enable noParentGate + forceEdit', { noParentGate: opts.noParentGate, forceEdit: opts.forceEdit });
+  }
+
+  // Treat the Rate Presets **picker** as a load-only child:
+  // - noParentGate=true so the parent stays in EDIT and is not flipped to VIEW
+  // - mark it as _loadOnly so we can suppress dirty tracking for this child
+  if (opts && opts.kind === 'rate-presets-picker') {
+    opts.noParentGate = true;
+    opts._loadOnly = true;
+    L('showModal(kind=rate-presets-picker): load-only (noParentGate=true, suppress dirty)', { noParentGate: opts.noParentGate });
   }
 
 
@@ -14950,12 +14959,15 @@ mergedRowForTab(k) {
   return out;
 },
 
-
    _attachDirtyTracker() {
     if (this._detachDirty) { try { this._detachDirty(); } catch {} this._detachDirty = null; }
     const root = byId('modalBody'); if (!root) { L('_attachDirtyTracker(skip: no modalBody)'); return; }
     const onDirty = (ev) => {
       if (ev && !ev.isTrusted) return;
+
+      // ⛔️ Load-only child (rate-presets-picker) must not generate dirty state
+      if (this.kind === 'rate-presets-picker' || this._loadOnly === true) return;
+
       const isChild = (stack().length > 1);
       if (isChild) {
         if (this.noParentGate) {
@@ -14983,6 +14995,7 @@ mergedRowForTab(k) {
     this._detachDirty = ()=>{ root.removeEventListener('input',onDirty,true); root.removeEventListener('change',onDirty,true); };
     L('_attachDirtyTracker: attached');
   },
+
 
 
   async setTab(k) {
@@ -15263,7 +15276,7 @@ if (top && top._ctxRef) window.modalCtx = top._ctxRef;
     top._detachGlobal = ()=>{ try{header.removeEventListener('mousedown',onDown);}catch{} try{header.removeEventListener('dblclick',onDbl);}catch{} document.onmousemove=null; document.onmouseup=null; if(typeof prev==='function'){ try{prev();}catch{} } };
   })();
 const wantApply = (isChild && !top.noParentGate) ||
-                  (top.kind === 'client-rate' || top.kind === 'candidate-override');
+                  (top.kind === 'client-rate' || top.kind === 'candidate-override' || top.kind === 'rate-presets-picker');
 
 const defaultPrimary =
   (top.kind === 'contract-clone-extend') ? 'Create'
@@ -15709,11 +15722,13 @@ const onSaveClick = async (ev)=>{
 
 const bindSave = (btn,fr)=>{ if(!btn||!fr) return; btn.dataset.ownerToken = fr._token; btn.onclick = onSaveClick; if(LOG) console.log('[MODAL] bind #btnSave → (global)',{ownerToken:fr._token,kind:fr.kind||'(parent)',title:fr.title,mode:fr.mode}); };
 bindSave(btnSave, top);
-
 // FIX: ignore programmatic "dirty" while suppression is active
 const onDirtyEvt = ()=>{
   const fr = currentFrame();
   if (fr && fr._suppressDirty) return;
+
+  // ⛔️ Do not let the load-only presets picker mark anyone dirty
+  if (fr && (fr.kind === 'rate-presets-picker' || fr._loadOnly === true)) return;
 
   const isChildNow = (stack().length > 1);
   if (isChildNow) {
