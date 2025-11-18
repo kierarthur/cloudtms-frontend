@@ -4382,10 +4382,21 @@ function setContractFormValue(name, value) {
   try { window.dispatchEvent(new CustomEvent('modal-dirty')); } catch {}
 }
 
+
 function applyRatePresetToContractForm(preset, payMethod /* 'PAYE'|'UMBRELLA' */) {
   if (!preset) return;
 
   const LOGC = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : false;
+
+  // Helper: resolve the nearest/open Contracts frame (parent or higher)
+  const getContractsFrame = () => {
+    const s = window.__modalStack || [];
+    for (let i = s.length - 1; i >= 0; i--) {
+      const f = s[i];
+      if (f && (f.kind === 'contracts' || f.entity === 'contracts')) return f;
+    }
+    return null;
+  };
 
   const form =
     document.querySelector('#modalBody #contractForm') ||
@@ -4631,8 +4642,9 @@ function applyRatePresetToContractForm(preset, payMethod /* 'PAYE'|'UMBRELLA' */
   } catch {}
 
   try {
-    const fr = window.__getModalFrame && window.__getModalFrame();
-    if (fr && (fr.kind === 'contracts' || fr.entity === 'contracts')) {
+    // Directly mark the contracts frame dirty (don’t rely on top-of-stack)
+    const fr = getContractsFrame();
+    if (fr) {
       fr.isDirty = true;
       if (typeof fr._updateButtons === 'function') fr._updateButtons();
     }
@@ -9604,6 +9616,7 @@ function mountContractRatesTab() {
 
 
 // Open preset picker (card grid) and return chosen data
+
 function openRatePresetPicker(applyCb, opts = {}) {
   const LOG = (typeof window.__LOG_RATES === 'boolean') ? window.__LOG_RATES : true;
   const L   = (...a)=> { if (LOG) console.log('[PRESETS]', ...a); };
@@ -9689,6 +9702,9 @@ function openRatePresetPicker(applyCb, opts = {}) {
               stackDepth: stack.length
             });
           }
+          // Keep the parent explicitly dirty + on Rates before we write
+          try { fr.setTab && fr.setTab('rates'); } catch (e) { console.error('[PRESETS] onApply setTab(rates) failed', e); }
+          try { fr.isDirty = true; fr._updateButtons && fr._updateButtons(); } catch {}
         } else if (LOG) {
           L('onApply: no parent contracts frame found');
         }
@@ -9697,13 +9713,6 @@ function openRatePresetPicker(applyCb, opts = {}) {
       }
 
       try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
-      try {
-        if (fr && fr._hasMountedOnce && typeof fr.setTab === 'function') {
-          fr.setTab('rates');
-        }
-      } catch (e) {
-        console.error('[PRESETS] onApply setTab(rates) failed', e);
-      }
 
       // Let the caller actually apply the preset (includes snapshot + form writes)
       if (typeof applyCb === 'function') {
@@ -9718,6 +9727,15 @@ function openRatePresetPicker(applyCb, opts = {}) {
           parentEntity: fr2?.entity
         });
       }
+
+      // Mark parent dirty again after writes to ensure toolbar reflects it
+      try {
+        const fr3 = getParentContractsFrame();
+        if (fr3) {
+          fr3.isDirty = true;
+          fr3._updateButtons && fr3._updateButtons();
+        }
+      } catch {}
 
     } catch (e) {
       console.error('[PRESETS] onApply failed; keeping picker open', e);
@@ -9919,6 +9937,9 @@ function openRatePresetPicker(applyCb, opts = {}) {
     fr._onSave = onApply;
   }, 0);
 }
+
+
+
 async function fetchClientRatePresets({ client_id, role, band, active_on }) {
   if (!client_id) return [];
   const qs = new URLSearchParams();
@@ -14068,37 +14089,37 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
   const stripEmpty = (obj) => { const out={}; for (const [k,v] of Object.entries(obj||{})) { if (v===''||v==null) continue; out[k]=v; } return out; };
 
   function setFormReadOnly(root, ro) {
-    if (!root) { L('setFormReadOnly(skip: no root)', { ro }); }
-    if (!root) return;
-    const _allBefore = root.querySelectorAll('input, select, textarea, button');
-    const beforeDisabled = Array.from(_allBefore).filter(el => el.disabled).length;
-    root.querySelectorAll('input, select, textarea, button').forEach((el) => {
-      const isDisplayOnly = el.id === 'tms_ref_display' || el.id === 'cli_ref_display';
-      if (el.type === 'button') {
-        const allow = new Set(['btnCloseModal','btnDelete','btnEditModal','btnSave','btnRelated']);
-        if (!allow.has(el.id)) el.disabled = !!ro;
-        return;
+  if (!root || !document.contains(root)) { L('setFormReadOnly(skip: invalid root)', { ro }); return; }
+  const _allBefore = root.querySelectorAll('input, select, textarea, button');
+  const beforeDisabled = Array.from(_allBefore).filter(el => el.disabled).length;
+  root.querySelectorAll('input, select, textarea, button').forEach((el) => {
+    const isDisplayOnly = el.id === 'tms_ref_display' || el.id === 'cli_ref_display';
+    if (el.type === 'button') {
+      const allow = new Set(['btnCloseModal','btnDelete','btnEditModal','btnSave','btnRelated']);
+      if (!allow.has(el.id)) el.disabled = !!ro;
+      return;
+    }
+    if (isDisplayOnly) { el.setAttribute('disabled','true'); el.setAttribute('readonly','true'); return; }
+    if (ro) { el.setAttribute('disabled','true'); el.setAttribute('readonly','true'); }
+    else    { el.removeAttribute('disabled');   el.removeAttribute('readonly'); }
+  });
+  const _allAfter = root.querySelectorAll('input, select, textarea, button');
+  const afterDisabled = Array.from(_allAfter).filter(el => el.disabled).length;
+  try {
+    const pc = root.querySelector('#btnPickCandidate');
+    const pl = root.querySelector('#btnPickClient');
+    L('setFormReadOnly snapshot', {
+      ro,
+      beforeDisabled,
+      afterDisabled,
+      picks: {
+        btnPickCandidate: { exists: !!pc, disabled: !!(pc && pc.disabled) },
+        btnPickClient:    { exists: !!pl, disabled: !!(pl && pl.disabled) }
       }
-      if (isDisplayOnly) { el.setAttribute('disabled','true'); el.setAttribute('readonly','true'); return; }
-      if (ro) { el.setAttribute('disabled','true'); el.setAttribute('readonly','true'); }
-      else    { el.removeAttribute('disabled');   el.removeAttribute('readonly'); }
     });
-    const _allAfter = root.querySelectorAll('input, select, textarea, button');
-    const afterDisabled = Array.from(_allAfter).filter(el => el.disabled).length;
-    try {
-      const pc = root.querySelector('#btnPickCandidate');
-      const pl = root.querySelector('#btnPickClient');
-      L('setFormReadOnly snapshot', {
-        ro,
-        beforeDisabled,
-        afterDisabled,
-        picks: {
-          btnPickCandidate: { exists: !!pc, disabled: !!(pc && pc.disabled) },
-          btnPickClient:    { exists: !!pl, disabled: !!(pl && pl.disabled) }
-        }
-      });
-    } catch {}
-  }
+  } catch {}
+}
+
 
   function sanitizeModalGeometry() {
     const m = byId('modal');
@@ -14418,11 +14439,11 @@ if (this._loadOnly === true) return;
 }
 
 };
-
 function setFrameMode(frameObj, mode) {
   L('setFrameMode ENTER', { prevMode: frameObj.mode, nextMode: mode, isChild: (stack().length>1), noParentGate: frameObj.noParentGate });
   const prev = frameObj.mode; frameObj.mode = mode;
   const isChild = (stack().length > 1);
+  const isTop   = (currentFrame && currentFrame() === frameObj);
 
   // ▶ correct accidental 'view' on brand-new frames (e.g., successor create)
   if (!frameObj.hasId && mode === 'view') {
@@ -14430,17 +14451,23 @@ function setFrameMode(frameObj, mode) {
     frameObj.mode = mode;
   }
 
-  // ▶ never read-only for top-level create/edit
-  if (!isChild && (mode === 'create' || mode === 'edit')) {
-    setFormReadOnly(byId('modalBody'), false);
-  } else if (frameObj.noParentGate) {
-    setFormReadOnly(byId('modalBody'), (mode==='view'||mode==='saving'));
-  } else if (isChild) {
-    const p=parentFrame(); setFormReadOnly(byId('modalBody'), !(p && (p.mode==='edit'||p.mode==='create')));
+  // ▶ Only toggle read-only on the DOM that actually belongs to the top frame.
+  //    When updating a non-top frame (e.g., the parent while a picker is open),
+  //    do not flip the global #modalBody to avoid UI flicker/regressions.
+  if (isTop) {
+    if (!isChild && (mode === 'create' || mode === 'edit')) {
+      setFormReadOnly(byId('modalBody'), false);
+    } else if (frameObj.noParentGate) {
+      setFormReadOnly(byId('modalBody'), (mode==='view'||mode==='saving'));
+    } else if (isChild) {
+      const p = parentFrame();
+      setFormReadOnly(byId('modalBody'), !(p && (p.mode==='edit'||p.mode==='create')));
+    } else {
+      setFormReadOnly(byId('modalBody'), (mode==='view'||mode==='saving'));
+    }
   } else {
-    setFormReadOnly(byId('modalBody'), (mode==='view'||mode==='saving'));
+    L('setFrameMode (non-top): skipped read-only toggle to avoid affecting current child');
   }
-
 
   if (typeof frameObj._updateButtons === 'function') frameObj._updateButtons();
 
@@ -14461,7 +14488,6 @@ function setFrameMode(frameObj, mode) {
       try { frameObj.onReturn && frameObj.onReturn(); } catch {}
     });
   }
-
 }
 
 const parentOnOpen = currentFrame();
