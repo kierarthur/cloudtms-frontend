@@ -806,8 +806,9 @@ function openRatePresetPicker(applyCb, opts = {}) {
       try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
 
       try {
-        if (fr && fr._hasMountedOnce && typeof fr.setTab === 'function') {
-          fr.setTab('rates');
+        const fr2 = getParentContractsFrame();
+        if (fr2 && fr2._hasMountedOnce && typeof fr2.setTab === 'function') {
+          fr2.setTab('rates');
         }
       } catch (e) {
         console.error('[PRESETS] onApply setTab(rates) failed', e);
@@ -818,11 +819,11 @@ function openRatePresetPicker(applyCb, opts = {}) {
       }
 
       if (LOG) {
-        const fr2 = getParentContractsFrame();
+        const fr3 = getParentContractsFrame();
         L('onApply: after applyCb', {
-          parentMode: fr2?.mode,
-          parentKind: fr2?.kind,
-          parentEntity: fr2?.entity
+          parentMode: fr3?.mode,
+          parentKind: fr3?.kind,
+          parentEntity: fr3?.entity
         });
       }
 
@@ -974,6 +975,7 @@ function openRatePresetPicker(applyCb, opts = {}) {
         if (!Number.isFinite(idx)) return;
         pickerSelectedIndex = idx;
         pickerSelectedId = pickerRows[idx]?.id || null;
+        updateApplyState();
         L('row dblclick → apply', { idx, id: pickerSelectedId });
         const ok = await onApply();
         if (ok !== false) closeSelf();
@@ -4176,270 +4178,303 @@ try {
           }
         }
 
-           const ratesTab = document.querySelector('#contractRatesTab');
-        if (ratesTab) {
-          // One-time wiring for the tab container (stageRates, margins)
-          if (!ratesTab.__wiredStage) {
-            ratesTab.__wiredStage = true;
+    const ratesTab = document.querySelector('#contractRatesTab');
+if (ratesTab) {
+  // One-time wiring for the tab container (stageRates, margins)
+  if (!ratesTab.__wiredStage) {
+    ratesTab.__wiredStage = true;
 
-            // Stage numeric rate fields + margins
-            const stageRates = (e) => {
-              const t = e.target;
-              if (!t || !t.name) return;
-              if (/^(paye_|umb_|charge_)/.test(t.name) || /^mileage_(charge|pay)_rate$/.test(t.name)) {
-                setContractFormValue(t.name, t.value);
-                if (/^(paye_|umb_|charge_)/.test(t.name)) computeContractMargins();
-                try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
-              }
-            };
-            ratesTab.addEventListener('input', stageRates, true);
-            ratesTab.addEventListener('change', stageRates, true);
-            computeContractMargins();
-          }
+    // Stage numeric rate fields + margins
+    const stageRates = (e) => {
+      const t = e.target;
+      if (!t || !t.name) return;
+      if (/^(paye_|umb_|charge_)/.test(t.name) || /^mileage_(charge|pay)_rate$/.test(t.name)) {
+        setContractFormValue(t.name, t.value);
+        if (/^(paye_|umb_|charge_)/.test(t.name)) computeContractMargins();
+        try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
+      }
+    };
+    ratesTab.addEventListener('input', stageRates, true);
+    ratesTab.addEventListener('change', stageRates, true);
+    computeContractMargins();
+  }
 
-          // Choose preset wiring: may run on every wire(), guarded per-button
-     const chooseBtn = document.getElementById('btnChoosePreset');
-if (chooseBtn && !chooseBtn.__wired) {
-  chooseBtn.__wired = true;
-   chooseBtn.addEventListener('click', () => {
-    console.log('[CONTRACTS] Choose preset clicked');
+  // Choose preset wiring: may run on every wire(), guarded per-button
+  const chooseBtn = document.getElementById('btnChoosePreset');
+  if (chooseBtn && !chooseBtn.__wired) {
+    chooseBtn.__wired = true;
+    chooseBtn.addEventListener('click', () => {
+      console.log('[CONTRACTS] Choose preset clicked');
 
-    const payMethod = (function () {
-      try {
-        const v =
-          (window.modalCtx?.formState?.main?.pay_method_snapshot) ||
-          document.querySelector('select[name="pay_method_snapshot"], select[name="default_pay_method_snapshot"]')?.value ||
-          window.modalCtx?.data?.pay_method_snapshot ||
-          'PAYE';
-        return String(v).toUpperCase();
-      } catch { return 'PAYE'; }
-    })();
-
-    const formEl   = document.querySelector('#contractForm');
-    const clientId = formEl?.querySelector('[name="client_id"]')?.value?.trim() || null;
-    const start    = formEl?.querySelector('[name="start_date"]')?.value?.trim() || null;
-
-    openRatePresetPicker(
-      (preset) => {
-        // NEW: pre-apply snapshot for Reset
+      const payMethod = (function () {
         try {
-          if (typeof snapshotContractForm === 'function') snapshotContractForm();
-          const src = window.modalCtx && window.modalCtx.formState ? window.modalCtx.formState : null;
-          if (src) {
-            window.modalCtx.__presetBefore =
-              (typeof structuredClone === 'function')
-                ? structuredClone(src)
-                : JSON.parse(JSON.stringify(src));
+          const v =
+            (window.modalCtx?.formState?.main?.pay_method_snapshot) ||
+            document.querySelector('select[name="pay_method_snapshot"], select[name="default_pay_method_snapshot"]')?.value ||
+            window.modalCtx?.data?.pay_method_snapshot ||
+            'PAYE';
+          return String(v).toUpperCase();
+        } catch { return 'PAYE'; }
+      })();
+
+      const formEl   = document.querySelector('#contractForm');
+      const clientId = formEl?.querySelector('[name="client_id"]')?.value?.trim() || null;
+      const start    = formEl?.querySelector('[name="start_date"]')?.value?.trim() || null;
+
+      openRatePresetPicker(
+        (preset) => {
+          // pre-apply snapshot for Reset
+          try {
+            if (typeof snapshotContractForm === 'function') snapshotContractForm();
+            const src = window.modalCtx && window.modalCtx.formState ? window.modalCtx.formState : null;
+            if (src) {
+              window.modalCtx.__presetBefore =
+                (typeof structuredClone === 'function')
+                  ? structuredClone(src)
+                  : JSON.parse(JSON.stringify(src));
+            }
+          } catch (e) {
+            console.warn('[CONTRACTS] pre-apply snapshot failed (non-fatal)', e);
           }
-        } catch (e) {
-          console.warn('[CONTRACTS] pre-apply snapshot failed (non-fatal)', e);
+
+          applyRatePresetToContractForm(preset, payMethod);
+          try {
+            const chip = document.getElementById('presetChip');
+            if (chip) {
+              chip.style.display = '';
+              const title =
+                preset.name ||
+                [preset.role, preset.band ? `Band ${preset.band}` : '']
+                  .filter(Boolean)
+                  .join(' / ') ||
+                'Preset';
+              chip.textContent = `Preset: ${title}`;
+            }
+          } catch {}
+          try { computeContractMargins(); } catch {}
+          // Mark the contracts frame dirty so Save becomes available
+          try {
+            const fr = window.__getModalFrame?.();
+            if (fr && (fr.kind === 'contracts' || fr.entity === 'contracts')) {
+              fr.isDirty = true;
+              if (typeof fr._updateButtons === 'function') fr._updateButtons();
+            }
+          } catch {}
+          try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
+        },
+        {
+          client_id:    clientId,
+          start_date:   start,
+          defaultScope: clientId ? 'CLIENT' : 'GLOBAL'
+        }
+      );
+    });
+  }
+
+  // Full reset wiring: same pattern (per-button guard, not tied to __wiredStage)
+  const resetBtn = document.getElementById('btnResetPreset');
+  if (resetBtn && !resetBtn.__wired) {
+    resetBtn.__wired = true;
+    resetBtn.addEventListener('click', () => {
+      const snap = window.modalCtx && window.modalCtx.__presetBefore ? window.modalCtx.__presetBefore : null;
+      if (snap && typeof snap === 'object') {
+        // Restore from snapshot
+        try {
+          const form = document.querySelector('#contractForm');
+          const writeInput = (name, value) => {
+            const el = document.querySelector(`#contractRatesTab input[name="${name}"]`) ||
+                       (form && form.querySelector(`[name="${name}"]`)) ||
+                       document.querySelector(`[name="${name}"]`);
+            if (el) el.value = (value == null ? '' : String(value));
+            setContractFormValue(name, (value == null ? '' : String(value)));
+          };
+
+          // Rates
+          const rateKeys = ['paye_day','paye_night','paye_sat','paye_sun','paye_bh','umb_day','umb_night','umb_sat','umb_sun','umb_bh','charge_day','charge_night','charge_sat','charge_sun','charge_bh'];
+          for (const k of rateKeys) writeInput(k, (snap.pay || {})[k] ?? '');
+
+          // Mileage – try both main & pay snapshots
+          const mp  = (snap.main || {})['mileage_pay_rate'];
+          const mc  = (snap.main || {})['mileage_charge_rate'];
+          const mp2 = (snap.pay  || {})['mileage_pay_rate'];
+          const mc2 = (snap.pay  || {})['mileage_charge_rate'];
+          writeInput('mileage_pay_rate',    mp  ?? mp2  ?? '');
+          writeInput('mileage_charge_rate', mc  ?? mc2  ?? '');
+
+          // Bucket labels (prefer consolidated labels map if present)
+          const L = (snap.main && snap.main.__bucket_labels) ? snap.main.__bucket_labels : {
+            day:   (snap.main || {})['bucket_day']   || '',
+            night: (snap.main || {})['bucket_night'] || '',
+            sat:   (snap.main || {})['bucket_sat']   || '',
+            sun:   (snap.main || {})['bucket_sun']   || '',
+            bh:    (snap.main || {})['bucket_bh']    || ''
+          };
+
+          const fsStateMain = (window.modalCtx && window.modalCtx.formState && window.modalCtx.formState.main)
+            ? window.modalCtx.formState.main
+            : null;
+
+          [['day','bucket_label_day'],
+           ['night','bucket_label_night'],
+           ['sat','bucket_label_sat'],
+           ['sun','bucket_label_sun'],
+           ['bh','bucket_label_bh']].forEach(([k, field]) => {
+            const val = L[k] || '';
+            writeInput(field, val);
+            // mirror to any "bucket_" fields if present on the main tab
+            if (form) {
+              const el2 = form.querySelector(`[name="bucket_${k}"]`);
+              if (el2) el2.value = val;
+            }
+            // keep consolidated labels map in sync for future renders/saves
+            if (fsStateMain) {
+              fsStateMain.__bucket_labels = fsStateMain.__bucket_labels || {};
+              fsStateMain.__bucket_labels[k] = val;
+            }
+            // margins table label cell
+            const tr = document.querySelector(`#marginsTable tr[data-b="${k}"] > td:first-child`);
+            if (tr) tr.textContent = val;
+            // headings on the rate cards
+            ['cardPAYE','cardUMB','cardCHG'].forEach(cid => {
+              const card = document.getElementById(cid);
+              const inp  = card?.querySelector(`input[name$="_${k}"]`);
+              if (card && inp) {
+                const row = inp.closest('.row');
+                if (row) {
+                  const lab = row.querySelector('label');
+                  if (lab) lab.textContent = val;
+                }
+              }
+            });
+          });
+
+          // Schedule
+          const tpl = (snap.main || {}).__template || null;
+          const days = ['mon','tue','wed','thu','fri','sat','sun'];
+          if (tpl) {
+            days.forEach(d => {
+              const S = tpl[d] || {};
+              writeInput(`${d}_start`, S.start || '');
+              writeInput(`${d}_end`,   S.end   || '');
+              writeInput(`${d}_break`, (S.break_minutes == null ? '' : String(S.break_minutes)));
+            });
+            const fs = (window.modalCtx.formState ||= { main:{}, pay:{} });
+            fs.main.__template = tpl;
+          } else {
+            // fallback: if snapshot had raw fields
+            days.forEach(d => {
+              writeInput(`${d}_start`, (snap.main || {})[`${d}_start`] || '');
+              writeInput(`${d}_end`,   (snap.main || {})[`${d}_end`]   || '');
+              writeInput(`${d}_break`, (snap.main || {})[`${d}_break`] || '');
+            });
+            const fs = (window.modalCtx.formState ||= { main:{}, pay:{} });
+            fs.main.__template = null;
+          }
+
+          // Role / band / display_site
+          writeInput('role',         (snap.main || {}).role || '');
+          writeInput('band',         (snap.main || {}).band || '');
+          writeInput('display_site', (snap.main || {}).display_site || '');
+
+          // Hide chip
+          try {
+            const chip = document.getElementById('presetChip');
+            if (chip) {
+              chip.style.display = 'none';
+              chip.textContent   = '';
+            }
+          } catch {}
+        } catch (err) {
+          console.warn('[CONTRACTS] preset reset restore failed, falling back to clear', err);
         }
 
-        applyRatePresetToContractForm(preset, payMethod);
-        try {
-          const chip = document.getElementById('presetChip');
-          if (chip) {
-            chip.style.display = '';
-            const title =
-              preset.name ||
-              [preset.role, preset.band ? `Band ${preset.band}` : '']
-                .filter(Boolean)
-                .join(' / ') ||
-              'Preset';
-            chip.textContent = `Preset: ${title}`;
-          }
-        } catch {}
         try { computeContractMargins(); } catch {}
-        // Mark the contracts frame dirty so Save becomes available
-        try {
-          const fr = window.__getModalFrame?.();
-          if (fr && (fr.kind === 'contracts' || fr.entity === 'contracts')) {
-            fr.isDirty = true;
-            if (typeof fr._updateButtons === 'function') fr._updateButtons();
-          }
-        } catch {}
         try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
-      },
-      {
-        client_id:    clientId,
-        start_date:   start,
-        defaultScope: clientId ? 'CLIENT' : 'GLOBAL'
+        return;
       }
-    );
-  });
 
+      // Fallback: clear-to-blank behaviour if no snapshot present
+      const clear = (sel) => { ratesTab.querySelectorAll(sel).forEach(el => { el.value=''; setContractFormValue(el.name, ''); }); };
+      clear('input[name^="paye_"]');
+      clear('input[name^="umb_"]');
+      clear('input[name^="charge_"]');
+
+      // Clear mileage
+      ['mileage_charge_rate','mileage_pay_rate'].forEach(n => {
+        const el = ratesTab.querySelector(`input[name="${n}"]`);
+        if (el) el.value = '';
+        setContractFormValue(n, '');
+      });
+
+      // Reset bucket labels to defaults & update headings
+      try {
+        const defaults = { day:'Day', night:'Night', sat:'Sat', sun:'Sun', bh:'BH' };
+        const form = document.querySelector('#contractForm');
+        Object.entries(defaults).forEach(([k,v]) => {
+          setContractFormValue(`bucket_label_${k}`, v);
+          if (form) {
+            const el1 = form.querySelector(`[name="bucket_label_${k}"]`);
+            const el2 = form.querySelector(`[name="bucket_${k}"]`);
+            if (el1) el1.value = v;
+            if (el2) el2.value = v;
+          }
+          const tr = document.querySelector(`#marginsTable tr[data-b="${k}"] > td:first-child`);
+          if (tr) tr.textContent = v;
+          ['cardPAYE','cardUMB','cardCHG'].forEach(cid => {
+            const card = document.getElementById(cid);
+            const inp  = card?.querySelector(`input[name$="_${k}"]`);
+            if (card && inp) {
+              const row = inp.closest('.row');
+              if (row) {
+                const lab = row.querySelector('label');
+                if (lab) lab.textContent = v;
+              }
+            }
+          });
+        });
+      } catch {}
+
+      // Clear schedule grid and stage std_schedule_json=null
+      try {
+        const days = ['mon','tue','wed','thu','fri','sat','sun'];
+        days.forEach(d => {
+          const s = document.querySelector(`input[name="${d}_start"]`);
+          const e = document.querySelector(`input[name="${d}_end"]`);
+          const b = document.querySelector(`input[name="${d}_break"]`);
+          if (s) s.value = '';
+          if (e) e.value = '';
+          if (b) b.value = '';
+        });
+        const fs = (window.modalCtx.formState ||= { main:{}, pay:{} });
+        fs.main.__template = null;
+      } catch {}
+
+      // Clear role/band/display_site
+      try {
+        const fs = (window.modalCtx.formState ||= { main:{}, pay:{} }).main ||= {};
+        fs.role = ''; fs.band = ''; fs.display_site = '';
+        const form = document.querySelector('#contractForm');
+        if (form) {
+          const r=form.querySelector('[name="role"]'); if (r) r.value='';
+          const b=form.querySelector('[name="band"]'); if (b) b.value='';
+          const s=form.querySelector('[name="display_site"]'); if (s) s.value='';
+        }
+      } catch {}
+
+      // Clear chip & recompute margins
+      try {
+        const chip = document.getElementById('presetChip');
+        if (chip) {
+          chip.style.display = 'none';
+          chip.textContent   = '';
+        }
+      } catch {}
+      try { computeContractMargins(); } catch {}
+      try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
+    });
+  }
 }
 
-
-          // Full reset wiring: same pattern (per-button guard, not tied to __wiredStage)
-              // Full reset wiring: same pattern (per-button guard, not tied to __wiredStage)
-            const resetBtn = document.getElementById('btnResetPreset');
-          if (resetBtn && !resetBtn.__wired) {
-            resetBtn.__wired = true;
-            resetBtn.addEventListener('click', () => {
-              const snap = window.modalCtx && window.modalCtx.__presetBefore ? window.modalCtx.__presetBefore : null;
-              if (snap && typeof snap === 'object') {
-                // Restore from snapshot
-                try {
-                  const form = document.querySelector('#contractForm');
-                  const writeInput = (name, value) => {
-                    const el = document.querySelector(`#contractRatesTab input[name="${name}"]`) ||
-                               (form && form.querySelector(`[name="${name}"]`)) ||
-                               document.querySelector(`[name="${name}"]`);
-                    if (el) el.value = (value == null ? '' : String(value));
-                    setContractFormValue(name, (value == null ? '' : String(value)));
-                  };
-
-                  // Rates
-                  const rateKeys = ['paye_day','paye_night','paye_sat','paye_sun','paye_bh','umb_day','umb_night','umb_sat','umb_sun','umb_bh','charge_day','charge_night','charge_sat','charge_sun','charge_bh'];
-                  for (const k of rateKeys) writeInput(k, (snap.pay || {})[k] ?? '');
-
-                  // Mileage – try both main & pay snapshots
-                  const mp = (snap.main || {})['mileage_pay_rate'];
-                  const mc = (snap.main || {})['mileage_charge_rate'];
-                  const mp2= (snap.pay  || {})['mileage_pay_rate'];
-                  const mc2= (snap.pay  || {})['mileage_charge_rate'];
-                  writeInput('mileage_pay_rate',    mp  ?? mp2  ?? '');
-                  writeInput('mileage_charge_rate', mc  ?? mc2  ?? '');
-
-                  // Bucket labels (prefer consolidated labels map if present)
-                  const L = (snap.main && snap.main.__bucket_labels) ? snap.main.__bucket_labels : {
-                    day:   (snap.main || {})['bucket_day']   || '',
-                    night: (snap.main || {})['bucket_night'] || '',
-                    sat:   (snap.main || {})['bucket_sat']   || '',
-                    sun:   (snap.main || {})['bucket_sun']   || '',
-                    bh:    (snap.main || {})['bucket_bh']    || ''
-                  };
-                  [['day','bucket_label_day'],
-                   ['night','bucket_label_night'],
-                   ['sat','bucket_label_sat'],
-                   ['sun','bucket_label_sun'],
-                   ['bh','bucket_label_bh']].forEach(([k, field]) => {
-                    writeInput(field, L[k] || '');
-                    // mirror to any "bucket_" fields if present
-                    if (form) {
-                      const el2 = form.querySelector(`[name="bucket_${k}"]`);
-                      if (el2) el2.value = (L[k] || '');
-                    }
-                    const tr = document.querySelector(`#marginsTable tr[data-b="${k}"] > td:first-child`);
-                    if (tr) tr.textContent = (L[k] || '');
-                    ['cardPAYE','cardUMB','cardCHG'].forEach(cid=>{
-                      const card = document.getElementById(cid);
-                      const inp = card?.querySelector(`input[name$="_${k}"]`);
-                      if (card && inp) { const row = inp.closest('.row'); if (row) { const lab=row.querySelector('label'); if (lab) lab.textContent=(L[k] || ''); } }
-                    });
-                  });
-
-                  // Schedule
-                  const tpl = (snap.main || {}).__template || null;
-                  const days = ['mon','tue','wed','thu','fri','sat','sun'];
-                  if (tpl) {
-                    days.forEach(d => {
-                      const S = tpl[d] || {};
-                      writeInput(`${d}_start`, S.start || '');
-                      writeInput(`${d}_end`,   S.end   || '');
-                      writeInput(`${d}_break`, (S.break_minutes == null ? '' : String(S.break_minutes)));
-                    });
-                    const fs = (window.modalCtx.formState ||= { main:{}, pay:{} });
-                    fs.main.__template = tpl;
-                  } else {
-                    // fallback: if snapshot had raw fields
-                    days.forEach(d => {
-                      writeInput(`${d}_start`, (snap.main || {})[`${d}_start`] || '');
-                      writeInput(`${d}_end`,   (snap.main || {})[`${d}_end`]   || '');
-                      writeInput(`${d}_break`, (snap.main || {})[`${d}_break`] || '');
-                    });
-                    const fs = (window.modalCtx.formState ||= { main:{}, pay:{} });
-                    fs.main.__template = null;
-                  }
-
-                  // Role / band / display_site
-                  writeInput('role',         (snap.main || {}).role || '');
-                  writeInput('band',         (snap.main || {}).band || '');
-                  writeInput('display_site', (snap.main || {}).display_site || '');
-
-                  // Hide chip
-                  try { const chip=document.getElementById('presetChip'); if (chip) { chip.style.display='none'; chip.textContent=''; } } catch {}
-                } catch (err) {
-                  console.warn('[CONTRACTS] preset reset restore failed, falling back to clear', err);
-                }
-
-                try { computeContractMargins(); } catch {}
-                try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
-                return;
-              }
-
-              // Fallback: your previous clear-to-blank behavior
-              const clear = (sel) => { ratesTab.querySelectorAll(sel).forEach(el => { el.value=''; setContractFormValue(el.name, ''); }); };
-              clear('input[name^="paye_"]');
-              clear('input[name^="umb_"]');
-              clear('input[name^="charge_"]');
-
-              // Clear mileage
-              ['mileage_charge_rate','mileage_pay_rate'].forEach(n=>{
-                const el = ratesTab.querySelector(`input[name="${n}"]`);
-                if (el) el.value = '';
-                setContractFormValue(n, '');
-              });
-
-              // Reset bucket labels to defaults & update headings
-              try {
-                const defaults = { day:'Day', night:'Night', sat:'Sat', sun:'Sun', bh:'BH' };
-                const form = document.querySelector('#contractForm');
-                Object.entries(defaults).forEach(([k,v])=>{
-                  setContractFormValue(`bucket_label_${k}`, v);
-                  if (form) {
-                    const el1 = form.querySelector(`[name="bucket_label_${k}"]`);
-                    const el2 = form.querySelector(`[name="bucket_${k}"]`);
-                    if (el1) el1.value = v;
-                    if (el2) el2.value = v;
-                  }
-                  const tr = document.querySelector(`#marginsTable tr[data-b="${k}"] > td:first-child`);
-                  if (tr) tr.textContent = v;
-                  ['cardPAYE','cardUMB','cardCHG'].forEach(cid=>{
-                    const card = document.getElementById(cid);
-                    const inp = card?.querySelector(`input[name$="_${k}"]`);
-                    if (card && inp) { const row = inp.closest('.row'); if (row) { const lab=row.querySelector('label'); if (lab) lab.textContent=v; } }
-                  });
-                });
-              } catch {}
-
-              // Clear schedule grid and stage std_schedule_json=null
-              try {
-                const days = ['mon','tue','wed','thu','fri','sat','sun'];
-                days.forEach(d=>{
-                  const s = document.querySelector(`input[name="${d}_start"]`);
-                  const e = document.querySelector(`input[name="${d}_end"]`);
-                  const b = document.querySelector(`input[name="${d}_break"]`);
-                  if (s) s.value = '';
-                  if (e) e.value = '';
-                  if (b) b.value = '';
-                });
-                const fs = (window.modalCtx.formState ||= { main:{}, pay:{} });
-                fs.main.__template = null;
-              } catch {}
-
-              // Clear role/band/display_site
-              try {
-                const fs = (window.modalCtx.formState ||= { main:{}, pay:{} }).main ||= {};
-                fs.role = ''; fs.band = ''; fs.display_site = '';
-                const form = document.querySelector('#contractForm');
-                if (form) {
-                  const r=form.querySelector('[name="role"]'); if (r) r.value='';
-                  const b=form.querySelector('[name="band"]'); if (b) b.value='';
-                  const s=form.querySelector('[name="display_site"]'); if (s) s.value='';
-                }
-              } catch {}
-
-              // Clear chip & recompute margins
-              try { const chip=document.getElementById('presetChip'); if (chip) { chip.style.display='none'; chip.textContent=''; } } catch {}
-              try { computeContractMargins(); } catch {}
-              try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
-            });
-          }
-
-
-        }
 
        };
 
@@ -5383,282 +5418,330 @@ function setContractFormValue(name, value) {
 }
 
 
-function applyRatePresetToContractForm(preset, payMethod /* 'PAYE'|'UMBRELLA' */) {
-  if (!preset) return;
+function renderContractMainTab(ctx) {
+  const LOGC = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : true;
 
-  const LOGC = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : false;
+  const d = mergeContractStateIntoRow(ctx?.data || {});
+  const labelsBlock = renderBucketLabelsEditor({ data: d });
 
-  // Helper: resolve the nearest/open Contracts frame (parent or higher)
-  const getContractsFrame = () => {
-    const s = window.__modalStack || [];
-    for (let i = s.length - 1; i >= 0; i--) {
-      const f = s[i];
-      if (f && (f.kind === 'contracts' || f.entity === 'contracts')) return f;
+  const candVal   = d.candidate_id || '';
+  const clientVal = d.client_id || '';
+
+  const candLabel   = (d.candidate_display || '').trim();
+  const clientLabel = (d.client_name || '').trim();
+
+  // Derive labels from picker cache if missing but ids exist (and store into formState for persistence)
+  let derivedCand = '';
+  let derivedClient = '';
+  try {
+    const pickData = (window.__pickerData ||= {});
+    if (!candLabel && candVal && pickData.candidates && pickData.candidates.itemsById) {
+      const r = pickData.candidates.itemsById[candVal];
+      if (r) {
+        const first = (r.first_name||'').trim();
+        const last  = (r.last_name||'').trim();
+        const role  = ((r.roles_display||'').split(/[•;,]/)[0]||'').trim();
+        derivedCand = `${last}${last?', ':''}${first}${role?` ${role}`:''}`.trim();
+        const fs = (window.modalCtx.formState ||= { __forId:(window.modalCtx.data?.id ?? window.modalCtx.openToken ?? null), main:{}, pay:{} });
+        (fs.main ||= {}).candidate_display = derivedCand;
+      }
     }
-    return null;
+    if (!clientLabel && clientVal && pickData.clients && pickData.clients.itemsById) {
+      const r = pickData.clients.itemsById[clientVal];
+      if (r) {
+        derivedClient = (r.name||'').trim();
+        const fs = (window.modalCtx.formState ||= { __forId:(window.modalCtx.data?.id ?? window.modalCtx.openToken ?? null), main:{}, pay:{} });
+        (fs.main ||= {}).client_name = derivedClient;
+      }
+    }
+  } catch {}
+
+  const _candLabel   = candLabel   || derivedCand;
+  const _clientLabel = clientLabel || derivedClient;
+
+  const toUk = (iso) => {
+    try { return (typeof formatIsoToUk === 'function') ? (formatIsoToUk(iso) || '') : (iso || ''); }
+    catch { return iso || ''; }
+  };
+  const startUk = (d.start_date && /^\d{2}\/\d{2}\/\d{4}$/.test(d.start_date)) ? d.start_date : toUk(d.start_date);
+  const endUk   = (d.end_date && /^\d{2}\/\d{2}\/\d{4}$/.test(d.end_date)) ? d.end_date : toUk(d.end_date);
+
+  const SS = d.std_schedule_json || {};
+
+  // IMPORTANT: explicit staged values (including empty string) override the template.
+  const pick = (day, part) => {
+    const staged = d[`${day}_${part}`];
+
+    // If we have any staged value at all (even ''), use it and never fall back to SS.
+    if (staged !== undefined) {
+      if (staged === null) return '';
+      return String(staged);
+    }
+
+    // No staged value → fall back to template
+    if (part === 'break') {
+      const v = SS?.[day]?.break_minutes;
+      return (v === 0 || v) ? String(v) : '';
+    }
+    return (SS?.[day]?.[part] || '');
   };
 
-  const form =
-    document.querySelector('#modalBody #contractForm') ||
-    document.querySelector('#contractForm') ||
-    null;
-  const ratesRoot =
-    document.getElementById('contractRatesTab') ||
-    document.querySelector('#contractRatesTab') ||
-    null;
-  const canTouchDom = !!(form || ratesRoot);
+  const DAYS = [
+    ['mon','Mon'],['tue','Tue'],['wed','Wed'],['thu','Thu'],
+    ['fri','Fri'],['sat','Sat'],['sun','Sun']
+  ];
 
-  const mc = window.modalCtx || (window.modalCtx = {});
-  if (!mc.formState) {
-    const baseId = (mc.data && mc.data.id) || mc.openToken || null;
-    mc.formState = { __forId: baseId, main: {}, pay: {} };
-  }
-  const fs = mc.formState;
-  fs.main = fs.main || {};
-  fs.pay  = fs.pay  || {};
+  // Inline time normaliser/validator wired on blur + Tab (keydown)
+  const timeEvents = () => `
+    onblur="(function(el){
+      var v=(el.value||'').trim(); v=v.replace(/[^0-9:]/g,'');
+      if(!v){ try{ if(typeof setContractFormValue==='function') setContractFormValue(el.name,''); }catch(e){}; return; }
+      if(v.indexOf(':')<0){
+        if(v.length===3){ v='0'+v; }
+        if(v.length!==4){ el.value=''; try{ if(typeof setContractFormValue==='function') setContractFormValue(el.name,''); }catch(e){}; try{ el.dispatchEvent(new Event('input',{bubbles:true})); el.dispatchEvent(new Event('change',{bubbles:true})); }catch(e){}; return; }
+        v=v.slice(0,2)+':'+v.slice(2,4);
+      }
+      var p=v.split(':'), h=parseInt(p[0],10), m=parseInt(p[1],10);
+      if(isNaN(h)||isNaN(m)||h<0||h>23||m<0||m>59){ el.value=''; }
+      else { el.value=(h<10?'0'+h:h)+':' + (m<10?'0'+m:m); }
+      try{ if(typeof setContractFormValue==='function') setContractFormValue(el.name, el.value);}catch(e){}
+      try{ el.dispatchEvent(new Event('input',{bubbles:true})); el.dispatchEvent(new Event('change',{bubbles:true})); }catch(e){}
+    })(this)"
+    onkeydown="if(event.key==='Tab'){ (function(el){
+      var v=(el.value||'').trim(); v=v.replace(/[^0-9:]/g,'');
+      if(!v){ try{ if(typeof setContractFormValue==='function') setContractFormValue(el.name,''); }catch(e){}; return; }
+      if(v.indexOf(':')<0){
+        if(v.length===3){ v='0'+v; }
+        if(v.length!==4){ el.value=''; try{ if(typeof setContractFormValue==='function') setContractFormValue(el.name,''); }catch(e){}; try{ el.dispatchEvent(new Event('input',{bubbles:true})); el.dispatchEvent(new Event('change',{bubbles:true})); }catch(e){}; return; }
+        v=v.slice(0,2)+':'+v.slice(2,4);
+      }
+      var p=v.split(':'), h=parseInt(p[0],10), m=parseInt(p[1],10);
+      if(isNaN(h)||isNaN(m)||h<0||h>23||m<0||m>59){ el.value=''; }
+      else { el.value=(h<10?'0'+h:h)+':' + (m<10?'0'+m:m); }
+      try{ if(typeof setContractFormValue==='function') setContractFormValue(el.name, el.value);}catch(e){}
+      try{ el.dispatchEvent(new Event('input',{bubbles:true})); el.dispatchEvent(new Event('change',{bubbles:true})); }catch(e){}
+    })(this) }"
+  `;
 
-  const effectivePayMethod = String(
-    payMethod ||
-    fs.main.pay_method_snapshot ||
-    (mc.data && mc.data.pay_method_snapshot) ||
-    'PAYE'
-  ).toUpperCase();
+  const dayRow = (k, label) => {
+    const s  = pick(k,'start');
+    const e  = pick(k,'end');
+    const br = pick(k,'break');
+    const num = (v) => (v == null ? '' : String(v));
+    return `
+      <div class="row sched" data-day="${k}">
+        <label>${label}</label>
+        <div class="controls" style="display:flex;align-items:flex-end;gap:8px;flex-wrap:wrap">
+          <div class="grid-3" style="min-width:420px">
+            <div class="split">
+              <span class="mini">Start</span>
+              <input class="input" name="${k}_start" value="${s}" placeholder="HH:MM" ${timeEvents()} />
+            </div>
+            <div class="split">
+              <span class="mini">End</span>
+              <input class="input" name="${k}_end" value="${e}" placeholder="HH:MM" ${timeEvents()} />
+            </div>
+            <div class="split">
+              <span class="mini">Break (min)</span>
+              <input class="input" type="number" min="0" step="1" name="${k}_break" value="${num(br)}" placeholder="0"
+                oninput="try{ if(typeof setContractFormValue==='function') setContractFormValue(this.name, this.value); }catch(e){}" />
+            </div>
+          </div>
+          <div class="row-actions" style="display:flex;gap:6px">
+            <button type="button" class="btn mini"
+              title="Copy this row’s Start/End/Break"
+              onclick="(function(){
+                try{
+                  const f=document.querySelector('#contractForm'); if(!f) return;
+                  const s=f['${k}_start']?.value||''; const e=f['${k}_end']?.value||''; const b=f['${k}_break']?.value||'';
+                  window.__schedClipboard = { s, e, b };
+                  try {
+                    var day='${label}';
+                    var range=(s||'—') + ((s||e)?'–':'') + (e||'');
+                    var br=(b && String(b).trim()?(' + '+b+'m'):'');
+                    if (window.__toast) window.__toast('Copied ' + day + ' ' + range + br);
+                  } catch {}
+                }catch(e){ console.warn('sched copy failed', e); }
+              })()">Copy</button>
+            <button type="button" class="btn mini"
+              title="Paste to this row"
+              onclick="(function(){
+                try{
+                  const clip = window.__schedClipboard || {};
+                  const f=document.querySelector('#contractForm'); if(!f) return;
+                  const S=f['${k}_start'], E=f['${k}_end'], B=f['${k}_break'];
+                  if(S && clip.s!=null){ S.value = clip.s; S.dispatchEvent(new Event('blur', {bubbles:true})); }
+                  if(E && clip.e!=null){ E.value = clip.e; E.dispatchEvent(new Event('blur', {bubbles:true})); }
+                  if(B && clip.b!=null){
+                    B.value = clip.b;
+                    try{ if(typeof setContractFormValue==='function') setContractFormValue(B.name, B.value); }catch(e){}
+                    B.dispatchEvent(new Event('input',{bubbles:true})); B.dispatchEvent(new Event('change',{bubbles:true}));
+                  }
+                }catch(e){ console.warn('sched paste failed', e); }
+              })()">Paste</button>
+          </div>
+        </div>
+      </div>`;
+  };
 
-  if (LOGC) {
-    console.log('[CONTRACTS] applyRatePresetToContractForm ENTER', {
-      presetId: preset.id,
-      payMethodParam: payMethod,
-      effectivePayMethod
-    });
-  }
+  if (LOGC) console.log('[CONTRACTS] renderContractMainTab → Start/End/Breaks enabled + per-row Copy/Paste, auto-normalise on blur/Tab');
 
-  const write = (name, raw) => {
-    const v = (raw == null || raw === '') ? '' : String(raw);
-    const isRate = /^(paye_|umb_|charge_)/.test(name);
-    const prev = isRate ? fs.pay[name] : fs.main[name];
+  const weekNames = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
+  const weVal = Number(d.week_ending_weekday_snapshot ?? 0);
+  const weLabel = weekNames[isNaN(weVal) ? 0 : weVal];
 
-    let el = null;
-    let hit = 'none';
-    if (ratesRoot) {
-      el = ratesRoot.querySelector(`[name="${CSS.escape(name)}"]`);
-      if (el) hit = 'rates';
-    }
-    if (!el && form) {
-      el = form.querySelector(`[name="${CSS.escape(name)}"]`);
-      if (el) hit = 'form';
-    }
+  const schedGrid = `
+    <div class="row"><label class="section">Proposed schedule (Mon–Sun)</label></div>
+    <div class="sched-grid" style="min-width:0;flex:1">
+      ${DAYS.map(([k,l]) => dayRow(k,l)).join('')}
+    </div>
+  `;
 
-    if (LOGC) {
-      console.log('[CONTRACTS] preset write BEFORE', {
-        name,
-        prev,
-        next: v,
-        hit
-      });
-    }
+  if (LOGC) console.log('[CONTRACTS] renderContractMainTab snapshot', {
+    candidate_id: candVal, client_id: clientVal,
+    candidate_label: _candLabel, client_label: _clientLabel,
+    week_ending_weekday_snapshot: d.week_ending_weekday_snapshot,
+    mode: window.__getModalFrame?.()?.mode
+  });
 
-    if (el && canTouchDom) {
-      el.value = v;
-      try {
-        el.dispatchEvent(new Event('input',  { bubbles:true }));
-        el.dispatchEvent(new Event('change', { bubbles:true }));
-      } catch {}
-    }
+  // Inline, non-blocking overlap + timesheet-boundary checks on date changes
+  const overlapChangeAttr = `
+    onchange="(function(el){
+      try{
+        var form = document.querySelector('#contractForm');
+        var cid  = form ? (form.querySelector('[name=\\'candidate_id\\']')?.value||'') : '';
+        var sd   = form ? (form.querySelector('[name=\\'start_date\\']')?.value||'') : '';
+        var ed   = form ? (form.querySelector('[name=\\'end_date\\']')?.value||'')  : '';
+        var sIso = (window.parseUkDateToIso ? parseUkDateToIso(sd) : sd);
+        var eIso = (window.parseUkDateToIso ? parseUkDateToIso(ed) : ed);
+        var excl = (window.modalCtx && window.modalCtx.data && window.modalCtx.data.id) || null;
 
-    // single source of truth: let setContractFormValue stage + fire margins/dirty
-    if (typeof setContractFormValue === 'function') {
-      try {
-        setContractFormValue(name, v);
-      } catch (e) {
-        if (LOGC) {
-          console.warn('[CONTRACTS] setContractFormValue from preset failed', {
-            name,
-            v,
-            err: e && e.message
+        // Overlap (non-blocking)
+        if (cid && sIso && eIso && window.callCheckContractWindowOverlap) {
+          callCheckContractWindowOverlap(cid, sIso, eIso, excl).then(function(res){
+            if (res && res.has_overlap) {
+              var msg = (res.overlaps||[]).map(function(o){
+                var nm = o.client_name || o.client || 'Client';
+                var a = o.overlap_from || '';
+                var b = o.overlap_to   || '';
+                return nm + ' ' + a + '→' + b;
+              }).join(' • ');
+              if (window.showModalHint) { showModalHint('Overlap with: ' + msg, 'warn'); }
+              else if (window.__toast)  { __toast('Overlap with: ' + msg); }
+            }
           });
         }
-      }
-    }
-  };
 
-  // ─────────────────────────────────────────────────────────────
-  // Identity fields: always overwrite from preset
-  // ─────────────────────────────────────────────────────────────
-  [['role','role'], ['band','band'], ['display_site','display_site']].forEach(([field, key]) => {
-    const next = preset[key] != null ? String(preset[key]).trim() : '';
-    write(field, next);
-  });
-
-  // ─────────────────────────────────────────────────────────────
-  // Rates: copy all families the preset actually defines
-  // ─────────────────────────────────────────────────────────────
-  const BUCKETS  = ['day','night','sat','sun','bh'];
-  const prefixes = ['paye','umb','charge'];
-
-  BUCKETS.forEach(b => {
-    prefixes.forEach(p => {
-      const fieldName = `${p}_${b}`;
-      if (!Object.prototype.hasOwnProperty.call(preset, fieldName)) return;
-      const raw = preset[fieldName];
-      const finalVal =
-        (raw === null || raw === '') ? '' :
-        (Number.isFinite(Number(raw)) ? String(Number(raw)) : String(raw));
-      write(fieldName, finalVal);
-    });
-  });
-
-  // ─────────────────────────────────────────────────────────────
-  // Bucket labels: if any labels present, overwrite for those keys;
-  // even blank values wipe existing labels.
-  // ─────────────────────────────────────────────────────────────
-  if (preset.bucket_labels_json) {
-    const BL = preset.bucket_labels_json || {};
-    const hasAnyLabel = BUCKETS.some(k => Object.prototype.hasOwnProperty.call(BL, k));
-
-    if (hasAnyLabel) {
-      fs.main.__bucket_labels = fs.main.__bucket_labels || {};
-      BUCKETS.forEach(k => {
-        if (!Object.prototype.hasOwnProperty.call(BL, k)) return; // leave others as-is
-        const raw  = BL[k];
-        const next = raw == null ? '' : String(raw).trim();
-        write(`bucket_label_${k}`, next);
-        write(`bucket_${k}`,       next);
-        fs.main.__bucket_labels[k] = next;
-      });
-    }
-  }
-
-  // ─────────────────────────────────────────────────────────────
-  // Standard schedule:
-  // - If NO days at all in std_schedule_json → do nothing (leave as is)
-  // - If ANY day present → overwrite ALL 7 days
-  //   (including wiping existing values to blank where preset is empty)
-  // ─────────────────────────────────────────────────────────────
-  const days = ['mon','tue','wed','thu','fri','sat','sun'];
-
-  if (preset.std_schedule_json) {
-    const sched = preset.std_schedule_json || {};
-    const hasAnyDay = days.some(d => Object.prototype.hasOwnProperty.call(sched, d));
-
-    if (hasAnyDay) {
-      const template = {};
-      const toStr = (v) => (v == null ? '' : String(v).trim());
-
-      days.forEach(d => {
-        const hasThisDay = Object.prototype.hasOwnProperty.call(sched, d);
-        const src        = hasThisDay ? (sched[d] || {}) : {};
-        const start      = toStr(src.start);
-        const end        = toStr(src.end);
-
-        let brStr = '';
-        let brNum = 0;
-        if (src.break_minutes != null && start && end) {
-          brNum = Number(src.break_minutes) || 0;
-          brStr = String(brNum);
+        // Timesheet boundary (non-blocking hint + cache for save eligibility). Skip in create (no contract id yet)
+        if (excl && sIso && eIso && window.callCheckTimesheetBoundary) {
+          callCheckTimesheetBoundary(excl, sIso, eIso).then(function(bres){
+            window.__tsBoundaryResult = bres || null;
+            if (bres && bres.ok === false) {
+              var txt = 'Dates exclude existing timesheets.';
+              try {
+                var v = bres.violations || [];
+                if (v.length) {
+                  var sample = v.slice(0,3).map(function(x){
+                    var nm = x.client_name || 'Client';
+                    var dt = x.date || '';
+                    var st = x.status || '';
+                    return nm + ' ' + dt + (st?(' ('+st+')'):'');
+                  }).join(' • ');
+                  txt = 'Dates exclude existing timesheets: ' + sample + (v.length>3?'…':'');
+                } else if (bres.min_ts_date || bres.max_ts_date) {
+                  txt = 'Dates exclude timesheets in range ' + (bres.min_ts_date||'') + ' → ' + (bres.max_ts_date||'') + '.';
+                }
+              } catch {}
+              if (window.showModalHint) { showModalHint(txt, 'warn'); } else if (window.__toast) { __toast(txt); }
+            }
+          });
+        } else {
+          if (!excl) window.__tsBoundaryResult = null;
         }
+      }catch(e){}
+    })(this)"`;
 
-        // Always overwrite all 7 days (even to blanks)
-        write(`${d}_start`, start);
-        write(`${d}_end`,   end);
-        write(`${d}_break`, brStr);
+  return `
+    <form id="contractForm" class="tabc form">
+      <input type="hidden" name="candidate_id" value="${candVal}">
+      <input type="hidden" name="client_id"    value="${clientVal}">
+      <input type="hidden" name="week_ending_weekday_snapshot" value="${String(d.week_ending_weekday_snapshot ?? '')}">
 
-        // Only add to template if we have a proper start/end pair
-        if (start && end) {
-          template[d] = { start, end, break_minutes: brNum };
-        }
-      });
+      <div class="row">
+        <label>Candidate</label>
+        <div class="controls">
+          <div class="split">
+            <input class="input" type="text" id="candidate_name_display" value="${_candLabel}" placeholder="Type 3+ letters to search…" />
+            <span>
+              <button type="button" class="btn mini" id="btnPickCandidate">Pick…</button>
+              <button type="button" class="btn mini" id="btnClearCandidate">Clear</button>
+            </span>
+          </div>
+          <div class="mini" id="candidatePickLabel">${_candLabel ? `Chosen: ${_candLabel}` : ''}</div>
+        </div>
+      </div>
 
-      fs.main.__template = template;
-    }
-  }
+      <div class="row">
+        <label>Client</label>
+        <div class="controls">
+          <div class="split">
+            <input class="input" type="text" id="client_name_display" value="${_clientLabel}" placeholder="Type 3+ letters to search…" />
+            <span>
+              <button type="button" class="btn mini" id="btnPickClient">Pick…</button>
+              <button type="button" class="btn mini" id="btnClearClient">Clear</button>
+            </span>
+          </div>
+          <div class="mini" id="clientPickLabel">${_clientLabel ? `Chosen: ${_clientLabel}` : ''}</div>
+        </div>
+      </div>
 
-  // ─────────────────────────────────────────────────────────────
-  // Hours snapshot (from preset or from template)
-  // ─────────────────────────────────────────────────────────────
-  if (preset.std_hours_json) {
-    fs.main.__hours = preset.std_hours_json;
-  } else if (fs.main.__template) {
-    const hours = {};
-    const toMinutes = (hhmm) => {
-      const m = String(hhmm || '').match(/^(\d{1,2}):(\d{2})$/);
-      return m ? (+m[1] * 60 + +m[2]) : null;
-    };
+      <div class="grid-2">
+        <div class="row"><label>Display site</label><div class="controls"><input class="input" name="display_site" value="${d.display_site || ''}" /></div></div>
+        <div class="row"><label>Week-ending day</label><div class="controls"><div class="mini" id="weLabel">${weLabel}</div></div></div>
+      </div>
 
-    days.forEach(d => {
-      const slot = fs.main.__template[d];
-      if (!slot || !slot.start || !slot.end) return;
+      <div class="grid-2">
+        <div class="row"><label>Role</label><div class="controls"><input class="input" name="role" value="${d.role || ''}" /></div></div>
+        <div class="row"><label>Band</label><div class="controls"><input class="input" name="band" value="${d.band || ''}" /></div></div>
+      </div>
 
-      const startMin = toMinutes(slot.start);
-      const endMin   = toMinutes(slot.end);
-      if (startMin == null || endMin == null) return;
+      <div class="grid-2">
+        <div class="row"><label>Start date</label><div class="controls"><input class="input" name="start_date" value="${startUk}" placeholder="DD/MM/YYYY" required ${overlapChangeAttr} /></div></div>
+        <div class="row"><label>End date</label><div class="controls"><input class="input" name="end_date" value="${endUk}" placeholder="DD/MM/YYYY" required ${overlapChangeAttr} /></div></div>
+      </div>
 
-      let mins = endMin < startMin ? (endMin + 1440 - startMin) : (endMin - startMin);
-      mins -= Number(slot.break_minutes || 0);
-      if (mins <= 0) return;
+      <div class="grid-3">
+        <div class="row"><label>Pay method snapshot</label>
+          <div class="controls">
+            <select name="pay_method_snapshot" ${d.__pay_locked ? 'disabled' : ''}>
+              <option value="PAYE" ${String(d.pay_method_snapshot||'PAYE').toUpperCase()==='PAYE'?'selected':''}>PAYE</option>
+              <option value="UMBRELLA" ${String(d.pay_method_snapshot||'PAYE').toUpperCase()==='UMBRELLA'?'selected':''}>Umbrella</option>
+            </select>
+          </div>
+        </div>
+        <div class="row"><label>Default submission mode</label>
+          <div class="controls">
+            <select name="default_submission_mode">
+              <option value="ELECTRONIC" ${String(d.default_submission_mode||'ELECTRONIC').toUpperCase()==='ELECTRONIC'?'selected':''}>Electronic</option>
+              <option value="MANUAL" ${String(d.default_submission_mode||'ELECTRONIC').toUpperCase()==='MANUAL'?'selected':''}>Manual</option>
+            </select>
+          </div>
+        </div>
+        <div class="row"><label>Auto-invoice</label>
+          <div class="controls"><input type="checkbox" name="auto_invoice" ${d.auto_invoice ? 'checked' : ''} /></div>
+        </div>
+      </div>
 
-      hours[d] = +(mins / 60).toFixed(2);
-    });
+      <div class="grid-2">
+        <div class="row"><label>Require reference to PAY</label><div class="controls"><input type="checkbox" name="require_reference_to_pay" ${d.require_reference_to_pay ? 'checked':''} /></div></div>
+        <div class="row"><label>Require reference to INVOICE</label><div class="controls"><input type="checkbox" name="require_reference_to_invoice" ${d.require_reference_to_invoice ? 'checked':''} /></div></div>
+      </div>
 
-    fs.main.__hours = Object.keys(hours).length ? hours : null;
-  }
+      ${schedGrid}
 
-  // ─────────────────────────────────────────────────────────────
-  // Non-blocking warnings for pay-method / rate-family mismatches
-  // ─────────────────────────────────────────────────────────────
-  const hasFamily = (fam) => BUCKETS.some(k => {
-    const v = preset[`${fam}_${k}`];
-    return v !== undefined && v !== null && String(v).trim() !== '';
-  });
-
-  try {
-    if (effectivePayMethod === 'UMBRELLA' && !hasFamily('umb')) {
-      if (typeof showModalHint === 'function') {
-        showModalHint(
-          'No Umbrella rates are set for this preset rate card. Please enter the Umbrella pay rates manually',
-          'warn'
-        );
-      } else if (window.__toast) {
-        window.__toast('No Umbrella rates are set for this preset rate card. Please enter the Umbrella pay rates manually');
-      }
-    } else if (effectivePayMethod === 'PAYE' && !hasFamily('paye')) {
-      if (typeof showModalHint === 'function') {
-        showModalHint(
-          'No PAYE rates are set for this preset rate card. Please enter the PAYE pay rates manually',
-          'warn'
-        );
-      } else if (window.__toast) {
-        window.__toast('No PAYE rates are set for this preset rate card. Please enter the PAYE pay rates manually');
-      }
-    }
-  } catch {}
-
-  // ─────────────────────────────────────────────────────────────
-  // Recompute margins + mark modal dirty
-  // ─────────────────────────────────────────────────────────────
-  try {
-    if (typeof computeContractMargins === 'function') {
-      computeContractMargins();
-    }
-  } catch {}
-
-  try {
-    // Directly mark the contracts frame dirty (don’t rely on top-of-stack)
-    const fr = getContractsFrame();
-    if (fr) {
-      fr.isDirty = true;
-      if (typeof fr._updateButtons === 'function') fr._updateButtons();
-    }
-    window.dispatchEvent(new Event('modal-dirty'));
-  } catch {}
-
-  if (LOGC) {
-    console.log('[CONTRACTS] applyRatePresetToContractForm EXIT', {
-      presetId: preset.id,
-      effectivePayMethod
-    });
-  }
+      ${labelsBlock}
+    </form>`;
 }
-
 
 function mergeContractStateIntoRow(row) {
   const base = { ...(row || {}) };
