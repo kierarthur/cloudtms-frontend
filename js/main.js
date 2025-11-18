@@ -701,1002 +701,314 @@ function computeRatePresetMargins(state){
 
   return out;
 }
+function openRatePresetPicker(applyCb, opts = {}) {
+  const LOG = (typeof window.__LOG_RATES === 'boolean') ? window.__LOG_RATES : true;
+  const L   = (...a)=> { if (LOG) console.log('[PRESETS]', ...a); };
 
-async function openRatePresetModal({ id, mode } = {}) {
-  const isCreate = !id;
-  let initialMode = mode || (isCreate ? 'edit' : 'view');
-  initialMode = String(initialMode || '').toLowerCase();
-  if (initialMode === 'create') initialMode = 'edit';
-  if (initialMode !== 'edit' && initialMode !== 'view') {
-    initialMode = isCreate ? 'edit' : 'view';
-  }
+  const {
+    client_id = null,
+    start_date = null,
+    defaultScope = (client_id ? 'CLIENT' : 'GLOBAL')
+  } = opts;
 
-  const st = {
-    id: id || null,
-    scope: 'GLOBAL',
-    client_id: null,
-    client_label: '',
-    name: '',
-    role: '',
-    band: '',
-    display_site: '',
-    bucket_day: 'Day',
-    bucket_night: 'Night',
-    bucket_sat: 'Sat',
-    bucket_sun: 'Sun',
-    bucket_bh: 'BH',
-    enable_paye: false,
-    enable_umbrella: false,
-    payMode: 'PAYE', // 'PAYE' | 'UMB' | 'BOTH'
-    paye_day: '',
-    paye_night: '',
-    paye_sat: '',
-    paye_sun: '',
-    paye_bh: '',
-    umb_day: '',
-    umb_night: '',
-    umb_sat: '',
-    umb_sun: '',
-    umb_bh: '',
-    charge_day: '',
-    charge_night: '',
-    charge_sat: '',
-    charge_sun: '',
-    charge_bh: '',
-    mileage_pay_rate: '',
-    mileage_charge_rate: '',
-    use_schedule: false,
-    mon_start: '',
-    mon_end: '',
-    mon_break: '',
-    tue_start: '',
-    tue_end: '',
-    tue_break: '',
-    wed_start: '',
-    wed_end: '',
-    wed_break: '',
-    thu_start: '',
-    thu_end: '',
-    thu_break: '',
-    fri_start: '',
-    fri_end: '',
-    fri_break: '',
-    sat_start: '',
-    sat_end: '',
-    sat_break: '',
-    sun_start: '',
-    sun_end: '',
-    sun_break: ''
+  let pickerRows = [];
+  let pickerSelectedIndex = -1;
+  let pickerSelectedId = null;
+
+  const content = () => `
+    <div class="tabc" id="ratePresetPicker">
+      <div class="row">
+        <label>Scope</label>
+        <div class="controls">
+          <label><input type="radio" name="rp_scope" value="ALL" ${defaultScope==='ALL'?'checked':''}/> All</label>
+          <label><input type="radio" name="rp_scope" value="GLOBAL" ${defaultScope==='GLOBAL'?'checked':''}/> Global</label>
+          <label ${client_id?'':'title="Pick a client to enable Client presets"'} >
+            <input type="radio" name="rp_scope" value="CLIENT" ${defaultScope==='CLIENT'?'checked':''} ${client_id?'':'disabled'}/> Client
+          </label>
+          <input type="text" id="rp_search" class="input" placeholder="Search…" style="margin-left:auto;min-width:200px"/>
+        </div>
+      </div>
+      <div class="hint" style="margin:6px 0 10px">
+        Double-click a row to apply. Single-click selects; click <em>Apply</em> to use the selected preset.
+      </div>
+      <div style="border:1px solid var(--line);border-radius:10px;overflow:hidden">
+        <table class="grid" id="rp_table">
+          <thead>
+            <tr>
+              <th style="width:36px"></th>
+              <th>Name / Role / Band</th>
+              <th>Scope</th>
+              <th>Dates</th>
+              <th>Charge (D/N/Sa/Su/BH)</th>
+              <th>PAYE</th>
+              <th>Umbrella</th>
+              <th>Mileage</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>`;
+
+  const getParentContractsFrame = () => {
+    const stack = window.__modalStack || [];
+    for (let i = stack.length - 2; i >= 0; i--) {
+      const f = stack[i];
+      if (f && (f.kind === 'contracts' || f.entity === 'contracts')) return f;
+    }
+    return null;
   };
 
-  if (id) {
+  const onApply = async () => {
+    if (!pickerRows || pickerSelectedIndex < 0) return false;
+    const chosen = pickerRows[pickerSelectedIndex];
+    if (!chosen) return false;
+
+    L('onApply: applying preset row', { chosen });
+
     try {
-      const row = await loadRatePreset(id);
-      st.id = row.id || id;
-      st.scope = (String(row.scope || (row.client_id ? 'CLIENT' : 'GLOBAL')).toUpperCase() === 'CLIENT') ? 'CLIENT' : 'GLOBAL';
-      st.client_id = row.client_id || null;
-      st.client_label = (row.client && row.client.name) ? row.client.name : (row.client_name || '');
-      st.name = row.name || '';
-      st.role = row.role || '';
-      st.band = (row.band == null ? '' : String(row.band));
-      st.display_site = row.display_site || '';
-
-      const L = normaliseBucketLabelsInput(row.bucket_labels_json || null) || labelsDefault();
-      st.bucket_day = L.day;
-      st.bucket_night = L.night;
-      st.bucket_sat = L.sat;
-      st.bucket_sun = L.sun;
-      st.bucket_bh = L.bh;
-
-      st.enable_paye = !!row.enable_paye;
-      st.enable_umbrella = !!row.enable_umbrella;
-
-      if (st.enable_paye && st.enable_umbrella) {
-        st.payMode = 'BOTH';
-      } else if (st.enable_paye) {
-        st.payMode = 'PAYE';
-      } else if (st.enable_umbrella) {
-        st.payMode = 'UMB';
-      } else {
-        st.payMode = 'PAYE';
+      // Ensure parent contract modal is in EDIT and on the Rates tab
+      const fr = getParentContractsFrame();
+      try {
+        if (fr) {
+          if (typeof window.setFrameMode === 'function') {
+            window.setFrameMode(fr, 'edit');
+          } else {
+            fr.mode = 'edit';
+            fr._updateButtons && fr._updateButtons();
+          }
+          if (LOG) {
+            const stack = window.__modalStack || [];
+            L('onApply: parent after setFrameMode', {
+              parentMode: fr.mode,
+              parentKind: fr.kind,
+              parentEntity: fr.entity,
+              stackDepth: stack.length
+            });
+          }
+        } else if (LOG) {
+          L('onApply: no parent contracts frame found');
+        }
+      } catch (e) {
+        console.error('[PRESETS] onApply parent mode/setTab error', e);
       }
 
-      const put = (k, v) => { if (v === 0 || (v != null && v !== '')) st[k] = String(v); };
-      const R = row || {};
+      // mark parent dirty so buttons/guards behave correctly
+      try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
 
-      put('paye_day', R.paye_day);
-      put('paye_night', R.paye_night);
-      put('paye_sat', R.paye_sat);
-      put('paye_sun', R.paye_sun);
-      put('paye_bh', R.paye_bh);
+      try {
+        if (fr && fr._hasMountedOnce && typeof fr.setTab === 'function') {
+          fr.setTab('rates');
+        }
+      } catch (e) {
+        console.error('[PRESETS] onApply setTab(rates) failed', e);
+      }
 
-      put('umb_day', R.umb_day);
-      put('umb_night', R.umb_night);
-      put('umb_sat', R.umb_sat);
-      put('umb_sun', R.umb_sun);
-      put('umb_bh', R.umb_bh);
+      // Let the caller actually apply the preset (includes snapshot + form writes)
+      if (typeof applyCb === 'function') {
+        await applyCb(chosen);
+      }
 
-      put('charge_day', R.charge_day);
-      put('charge_night', R.charge_night);
-      put('charge_sat', R.charge_sat);
-      put('charge_sun', R.charge_sun);
-      put('charge_bh', R.charge_bh);
-
-      put('mileage_pay_rate', R.mileage_pay_rate);
-      put('mileage_charge_rate', R.mileage_charge_rate);
-
-      if (row.std_schedule_json && typeof row.std_schedule_json === 'object') {
-        st.use_schedule = true;
-        const S = row.std_schedule_json || {};
-        const days = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
-        days.forEach(d => {
-          if (S[d]) {
-            st[`${d}_start`] = S[d].start || '';
-            st[`${d}_end`] = S[d].end || '';
-            st[`${d}_break`] = (S[d].break_minutes == null ? '' : String(S[d].break_minutes));
-          }
+      if (LOG) {
+        const fr2 = getParentContractsFrame();
+        L('onApply: after applyCb', {
+          parentMode: fr2?.mode,
+          parentKind: fr2?.kind,
+          parentEntity: fr2?.entity
         });
       }
+
     } catch (e) {
-      alert(e?.message || 'Failed to load preset');
-      return;
-    }
-  }
-
-  const buckets = ['day', 'night', 'sat', 'sun', 'bh'];
-
-  function getFieldValue(root, name) {
-    if (!root) return '';
-    const el = root.querySelector(`[name="${name}"]`);
-    return (el && typeof el.value === 'string') ? el.value.trim() : '';
-  }
-
-  function parseNumeric(raw) {
-    if (raw == null) return null;
-    const s = String(raw).trim();
-    if (!s) return null;
-    const n = Number(s);
-    return Number.isFinite(n) ? n : null;
-  }
-
-  function parseNumericFromRoot(root, name) {
-    return parseNumeric(getFieldValue(root, name));
-  }
-
-  function computePresetEligibility(root, st) {
-    const result = { margin: null, eligible: false, rateState: null, scope: '', payMode: '', reasons: [] };
-    if (!root) return result;
-
-    const rtEl = root.querySelector('#rp_rate_type');
-    let scopeVal = (rtEl && rtEl.value) ? String(rtEl.value).toUpperCase() : '';
-    if (scopeVal !== 'GLOBAL' && scopeVal !== 'CLIENT') scopeVal = '';
-    result.scope = scopeVal;
-    if (scopeVal) st.scope = scopeVal;
-
-    const pmEl = root.querySelector('#rp_pay_mode');
-    let payModeVal = (pmEl && pmEl.value) ? String(pmEl.value).toUpperCase() : (st.payMode || '');
-    if (!['PAYE', 'UMB', 'BOTH'].includes(payModeVal)) payModeVal = '';
-    result.payMode = payModeVal;
-
-    const rateState = {
-      enable_paye: ['PAYE', 'BOTH'].includes(payModeVal),
-      enable_umbrella: ['UMB', 'BOTH'].includes(payModeVal)
-    };
-
-    buckets.forEach(b => {
-      ['paye', 'umb', 'charge'].forEach(prefix => {
-        rateState[`${prefix}_${b}`] = parseNumericFromRoot(root, `${prefix}_${b}`);
-      });
-    });
-
-    result.rateState = rateState;
-    const margin = computeRatePresetMargins(rateState);
-    result.margin = margin;
-
-    let eligible = true;
-
-    const nameVal = getFieldValue(root, 'name');
-    if (!nameVal) { eligible = false; result.reasons.push('name'); }
-
-    const roleVal = getFieldValue(root, 'role');
-    if (!roleVal) { eligible = false; result.reasons.push('role'); }
-
-    if (!scopeVal) { eligible = false; result.reasons.push('scope'); }
-    if (scopeVal === 'CLIENT') {
-      const cid = st.client_id || '';
-      if (!cid) { eligible = false; result.reasons.push('client'); }
-    }
-
-    const labelNames = ['bucket_day', 'bucket_night', 'bucket_sat', 'bucket_sun', 'bucket_bh'];
-    const anyLabel = labelNames.some(n => !!getFieldValue(root, n));
-    if (!anyLabel) { eligible = false; result.reasons.push('labels'); }
-
-    if (!payModeVal) { eligible = false; result.reasons.push('payMode'); }
-
-    const hasCharge = buckets.some(b => Number.isFinite(rateState[`charge_${b}`]));
-    if (!hasCharge) { eligible = false; result.reasons.push('rates_charge'); }
-
-    if (payModeVal === 'PAYE') {
-      const okRow = buckets.some(
-        b => Number.isFinite(rateState[`paye_${b}`]) && Number.isFinite(rateState[`charge_${b}`])
-      );
-      if (!okRow) { eligible = false; result.reasons.push('rates_paye'); }
-    } else if (payModeVal === 'UMB') {
-      const okRow = buckets.some(
-        b => Number.isFinite(rateState[`umb_${b}`]) && Number.isFinite(rateState[`charge_${b}`])
-      );
-      if (!okRow) { eligible = false; result.reasons.push('rates_umb'); }
-    } else if (payModeVal === 'BOTH') {
-      const okRow = buckets.some(
-        b =>
-          Number.isFinite(rateState[`paye_${b}`]) &&
-          Number.isFinite(rateState[`umb_${b}`]) &&
-          Number.isFinite(rateState[`charge_${b}`])
-      );
-      if (!okRow) { eligible = false; result.reasons.push('rates_both'); }
-    }
-
-    const useScheduleEl = root.querySelector('#rp_use_schedule');
-    const useSchedule = !!useScheduleEl && !!useScheduleEl.checked;
-    if (useSchedule) {
-      const days = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
-      const S = {};
-      const hhmm = (s) => {
-        if (!s) return '';
-        const m = String(s).match(/^(\d{1,2}):?(\d{2})$/);
-        if (!m) return '';
-        const h = +m[1], mi = +m[2];
-        if (h < 0 || h > 23 || mi < 0 || mi > 59) return '';
-        return String(h).padStart(2, '0') + ':' + String(mi).padStart(2, '0');
-      };
-      days.forEach(d => {
-        const s = hhmm(getFieldValue(root, `${d}_start`));
-        const e = hhmm(getFieldValue(root, `${d}_end`));
-        const br = getFieldValue(root, `${d}_break`);
-        if (s && e) {
-          S[d] = { start: s, end: e, break_minutes: Math.max(0, Number(br || 0)) };
-        }
-      });
-      if (Object.keys(S).length === 0) {
-        eligible = false;
-        result.reasons.push('schedule');
-      }
-    }
-
-    result.eligible = eligible;
-    return result;
-  }
-
-  const renderGrid = () => {
-    const tempState = {
-      enable_paye: ['PAYE', 'BOTH'].includes(st.payMode),
-      enable_umbrella: ['UMB', 'BOTH'].includes(st.payMode)
-    };
-    buckets.forEach(b => {
-      tempState[`paye_${b}`] = parseNumeric(st[`paye_${b}`]);
-      tempState[`umb_${b}`] = parseNumeric(st[`umb_${b}`]);
-      tempState[`charge_${b}`] = parseNumeric(st[`charge_${b}`]);
-    });
-    const margin = computeRatePresetMargins(tempState);
-
-    const row = (lab, key) => {
-      const MP = margin.bucket[key]?.marginPaye;
-      const MU = margin.bucket[key]?.marginUmb;
-      const negP = margin.bucket[key]?.negPaye;
-      const negU = margin.bucket[key]?.negUmb;
-      const mTxt = [
-        (tempState.enable_paye ? `PAYE: ${MP == null ? '—' : MP.toFixed(2)}${negP ? ' ⚠' : ''}` : ''),
-        (tempState.enable_umbrella ? `Umb: ${MU == null ? '—' : MU.toFixed(2)}${negU ? ' ⚠' : ''}` : '')
-      ].filter(Boolean).join(' • ');
-
-      return `
-        <div class="grid-5 rp-rate-row" data-bucket="${key}">
-          <div class="split"><span class="lbl">${lab}</span></div>
-          <div class="rp-col-paye">
-            <input class="input" name="paye_${key}" placeholder="PAYE" value="${st[`paye_${key}`] || ''}"/>
-          </div>
-          <div class="rp-col-umb">
-            <input class="input" name="umb_${key}" placeholder="Umbrella" value="${st[`umb_${key}`] || ''}"/>
-          </div>
-          <div class="rp-col-charge">
-            <input class="input" name="charge_${key}" placeholder="Charge" value="${st[`charge_${key}`] || ''}"/>
-          </div>
-          <div class="mini" data-role="margin">${mTxt || ''}</div>
-        </div>`;
-    };
-
-    return `
-      <div class="group">
-        <div class="row"><label>Rates</label>
-          <div class="controls small">
-            <div class="grid-5" id="rp_rates_header">
-              <div></div>
-              <div class="mini rp-col-paye">PAYE</div>
-              <div class="mini rp-col-umb">Umbrella</div>
-              <div class="mini rp-col-charge">Charge</div>
-              <div class="mini">Margin</div>
-            </div>
-            ${row(st.bucket_day, 'day')}
-            ${row(st.bucket_night, 'night')}
-            ${row(st.bucket_sat, 'sat')}
-            ${row(st.bucket_sun, 'sun')}
-            ${row(st.bucket_bh, 'bh')}
-            <div class="mini" id="rp_margin_warn" style="margin-top:6px;${margin.anyNegative ? '' : 'display:none'}">Margin can't be negative.</div>
-          </div>
-        </div>
-      </div>
-    `;
-  };
-
-  const renderSchedule = () => {
-    const timeInput = (name, val) => `<input class="input rp-time" name="${name}" value="${val || ''}" placeholder="HH:MM" />`;
-    const breakInput = (name, val) => `<input class="input rp-break" type="number" min="0" step="1" name="${name}" value="${val || ''}" placeholder="0" />`;
-    const row = (key, label) => `
-      <div class="rp-day" data-day="${key}" style="margin-bottom:10px">
-        <div class="grid-3">
-          <div class="split"><span class="mini">${label} start</span>${timeInput(`${key}_start`, st[`${key}_start`])}</div>
-          <div class="split"><span class="mini">${label} end</span>${timeInput(`${key}_end`, st[`${key}_end`])}</div>
-          <div class="split"><span class="mini">Break (min)</span>${breakInput(`${key}_break`, st[`${key}_break`])}</div>
-        </div>
-        <div class="split" style="margin-top:6px">
-          <button type="button" class="btn mini rp_copy" data-day="${key}">Copy</button>
-          <button type="button" class="btn mini rp_paste" data-day="${key}">Paste</button>
-        </div>
-      </div>`;
-    return `
-      <div class="group">
-        <label><input type="checkbox" id="rp_use_schedule" ${st.use_schedule ? 'checked' : ''}/> Default shift times</label>
-        <div id="rp_sched_block" style="display:${st.use_schedule ? 'block' : 'none'}; margin-top:8px">
-          ${row('mon', 'Mon')}${row('tue', 'Tue')}${row('wed', 'Wed')}
-          ${row('thu', 'Thu')}${row('fri', 'Fri')}${row('sat', 'Sat')}
-          ${row('sun', 'Sun')}
-        </div>
-      </div>`;
-  };
-
-  const renderLabels = () => `
-    <div class="group">
-      <div class="row"><label>Bucket labels</label>
-        <div class="controls small">
-          <div class="grid-5" id="rp_labels_grid">
-            <div><span class="mini">Standard</span><input class="input" name="bucket_day"   value="${st.bucket_day}"/></div>
-            <div><span class="mini">OT1</span>     <input class="input" name="bucket_night" value="${st.bucket_night}"/></div>
-            <div><span class="mini">OT2</span>     <input class="input" name="bucket_sat"   value="${st.bucket_sat}"/></div>
-            <div><span class="mini">OT3</span>     <input class="input" name="bucket_sun"   value="${st.bucket_sun}"/></div>
-            <div><span class="mini">OT4</span>     <input class="input" name="bucket_bh"    value="${st.bucket_bh}"/></div>
-          </div>
-          <div style="margin-top:8px">
-            <span class="mini">Pay mode</span>
-            <select class="input" name="rp_pay_mode" id="rp_pay_mode">
-              <option value="PAYE" ${st.payMode === 'PAYE' ? 'selected' : ''}>PAYE</option>
-              <option value="UMB" ${st.payMode === 'UMB' ? 'selected' : ''}>Umbrella</option>
-              <option value="BOTH" ${st.payMode === 'BOTH' ? 'selected' : ''}>PAYE &amp; Umbrella</option>
-            </select>
-          </div>
-        </div>
-      </div>
-    </div>`;
-
-  const renderTop = () => `
-    <div class="group">
-      <div class="row">
-        <label>Name</label>
-        <div class="controls"><input class="input" name="name" value="${st.name}"/></div>
-      </div>
-
-      <div class="row">
-        <label>Rate type</label>
-        <div class="controls">
-          <select id="rp_rate_type" class="input">
-            <option value="">Please select</option>
-            <option value="GLOBAL" ${st.scope === 'GLOBAL' ? 'selected' : ''}>Global</option>
-            <option value="CLIENT" ${st.scope === 'CLIENT' ? 'selected' : ''}>Client specific</option>
-          </select>
-        </div>
-      </div>
-
-      <div class="row" id="rp_client_row" style="margin-top:6px; display:${st.scope === 'CLIENT' ? 'block' : 'none'}">
-        <label>Client rate</label>
-        <div class="controls">
-          <div class="split">
-            <button type="button" class="btn mini" id="rp_pick_cli_btn">Pick…</button>
-            <button type="button" class="btn mini" id="rp_clear_cli_btn">Clear</button>
-            <span class="mini" id="rp_cli_lbl">${st.client_label ? `Chosen: ${st.client_label}` : 'No client chosen'}</span>
-          </div>
-        </div>
-      </div>
-
-      <div class="grid-3">
-        <div class="row"><label>Role</label><div class="controls"><input class="input" name="role" value="${st.role}"/></div></div>
-        <div class="row"><label>Band</label><div class="controls"><input class="input" name="band" value="${st.band}"/></div></div>
-        <div class="row"><label>Display site</label><div class="controls"><input class="input" name="display_site" value="${st.display_site}"/></div></div>
-      </div>
-    </div>`;
-
-  const renderMileage = () => `
-    <div class="group">
-      <div class="row"><label>Mileage</label>
-        <div class="controls">
-          <div class="grid-3">
-            <div class="split"><span class="mini">Pay</span>   <input class="input" name="mileage_pay_rate"    value="${st.mileage_pay_rate || ''}" placeholder="0.00"/></div>
-            <div class="split"><span class="mini">Charge</span><input class="input" name="mileage_charge_rate" value="${st.mileage_charge_rate || ''}" placeholder="0.00"/></div>
-          </div>
-        </div>
-      </div>
-    </div>`;
-
-  const renderer = () => `
-    <div class="tabc">
-      <div class="form" id="rp_form">
-        <div>
-          ${renderTop()}
-          ${renderLabels()}
-          ${renderGrid()}
-          ${renderMileage()}
-        </div>
-        <div>
-          ${renderSchedule()}
-        </div>
-      </div>
-    </div>
-  `;
-
-  const onSave = async () => {
-    const root = document.getElementById('rp_form');
-    if (!root) return false;
-
-    const v = (n) => getFieldValue(root, n);
-
-    const rtEl = root.querySelector('#rp_rate_type');
-    let scopeVal = (rtEl && rtEl.value) ? String(rtEl.value).toUpperCase() : '';
-    const scopeIsClient = (scopeVal === 'CLIENT');
-    const scopeIsGlobal = (scopeVal === 'GLOBAL');
-
-    if (!scopeIsClient && !scopeIsGlobal) {
-      showModalHint('Select a rate type (Global or Client specific).', 'warn');
+      console.error('[PRESETS] onApply failed; keeping picker open', e);
       return false;
     }
-
-    const name = v('name');
-    if (!name) {
-      showModalHint('Name is required.', 'warn');
-      return false;
-    }
-
-    const clientId = scopeIsClient ? (st.client_id || '') : '';
-    if (scopeIsClient && !clientId) {
-      showModalHint('Pick a client for a Client scope preset.', 'warn');
-      return false;
-    }
-
-    const roleVal = v('role');
-    if (!roleVal) {
-      showModalHint('Role is required.', 'warn');
-      return false;
-    }
-
-    const pmEl = root.querySelector('#rp_pay_mode');
-    let payModeVal = (pmEl && pmEl.value) ? String(pmEl.value).toUpperCase() : (st.payMode || '');
-    if (!['PAYE', 'UMB', 'BOTH'].includes(payModeVal)) {
-      showModalHint('Choose PAYE, Umbrella or PAYE & Umbrella.', 'warn');
-      return false;
-    }
-
-    const eligibility = computePresetEligibility(root, st);
-    const margin = eligibility.margin || { anyNegative: false };
-    if (margin.anyNegative) {
-      showModalHint('Margin can’t be negative.', 'warn');
-      return false;
-    }
-    if (!eligibility.eligible) {
-      showModalHint('Fill in all required fields (name, role, labels, rates and schedule if used).', 'warn');
-      return false;
-    }
-
-    const enable_paye = ['PAYE', 'BOTH'].includes(payModeVal);
-    const enable_umbrella = ['UMB', 'BOTH'].includes(payModeVal);
-
-    const payload = {
-      id: st.id || undefined,
-      name,
-      scope: scopeIsClient ? 'CLIENT' : 'GLOBAL',
-      client_id: scopeIsClient ? st.client_id : null,
-      role: roleVal || null,
-      band: (v('band') === '' ? null : v('band')),
-      display_site: v('display_site') || null,
-      enable_paye,
-      enable_umbrella
-    };
-
-    const labels = {
-      day: v('bucket_day'),
-      night: v('bucket_night'),
-      sat: v('bucket_sat'),
-      sun: v('bucket_sun'),
-      bh: v('bucket_bh')
-    };
-    const Lnorm = normaliseBucketLabelsInput(labels);
-    if (Lnorm) payload.bucket_labels_json = Lnorm;
-
-    const bucketsList = ['day','night','sat','sun','bh'];
-    const push5 = (prefix, enabled) => {
-      if (!enabled) return;
-      bucketsList.forEach(b => {
-        const key = `${prefix}_${b}`;
-        const n = parseNumericFromRoot(root, key);
-        if (n != null) payload[key] = n;
-      });
-    };
-    push5('paye', enable_paye);
-    push5('umb', enable_umbrella);
-    push5('charge', true);
-
-    const mileage_pay = parseNumericFromRoot(root, 'mileage_pay_rate');
-    const mileage_charge = parseNumericFromRoot(root, 'mileage_charge_rate');
-    if (mileage_pay != null && mileage_pay < 0) {
-      showModalHint('Mileage pay must be ≥ 0', 'warn');
-      return false;
-    }
-    if (mileage_charge != null && mileage_charge < 0) {
-      showModalHint('Mileage charge must be ≥ 0', 'warn');
-      return false;
-    }
-    if (mileage_pay != null) payload.mileage_pay_rate = mileage_pay;
-    if (mileage_charge != null) payload.mileage_charge_rate = mileage_charge;
-
-    const use_schedule = !!document.getElementById('rp_use_schedule')?.checked;
-    if (use_schedule) {
-      const days = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
-      const S = {};
-      const hhmm = (s) => {
-        if (!s) return '';
-        const m = String(s).match(/^(\d{1,2}):?(\d{2})$/);
-        if (!m) return '';
-        const h = +m[1], mi = +m[2];
-        if (h < 0 || h > 23 || mi < 0 || mi > 59) return '';
-        return String(h).padStart(2, '0') + ':' + String(mi).padStart(2, '0');
-      };
-      days.forEach(d => {
-        const s = hhmm(v(`${d}_start`));
-        const e = hhmm(v(`${d}_end`));
-        const br = v(`${d}_break`);
-        if (s && e) {
-          S[d] = { start: s, end: e, break_minutes: Math.max(0, Number(br || 0)) };
-        }
-      });
-      if (Object.keys(S).length) payload.std_schedule_json = S;
-    }
-
-    try {
-      await saveRatePreset(payload);
-      try { window.__ratesPresets__?.refresh && window.__ratesPresets__.refresh(); } catch {}
-      return true;
-    } catch (e) {
-      showModalHint(e?.message || 'Save failed', 'fail');
-      return false;
-    }
+    return true;
   };
 
   showModal(
-    isCreate ? 'Create preset' : 'Rate preset',
-    [{ key: 'main', title: 'Main' }],
-    () => renderer(),
-    onSave,
-    !!st.id,
-    () => {
-      const root = document.getElementById('rp_form');
+    'Rate Presets',
+    [{ key: 'p', title: 'Presets' }],
+    () => content(),
+    onApply,
+    false,
+    async () => {
+      const root   = document.getElementById('ratePresetPicker');
+      const tbody  = root?.querySelector('#rp_table tbody');
+      const search = root?.querySelector('#rp_search');
+      const radios = Array.from(root?.querySelectorAll('input[name="rp_scope"]') || []);
+      if (!tbody) return;
 
-      const saveBtn = document.getElementById('btnSave');
-      if (saveBtn && initialMode === 'view') {
-        saveBtn.disabled = true;
-        saveBtn.title = 'Click Edit to make changes';
-      }
+      const scopeVal = () =>
+        (radios.find(r => r.checked)?.value || (client_id ? 'CLIENT' : 'GLOBAL'));
 
-      const rateTypeSel = root?.querySelector('#rp_rate_type');
-      const cliRow = root?.querySelector('#rp_client_row');
-      const cliLbl = root?.querySelector('#rp_cli_lbl');
-      const btnPick = root?.querySelector('#rp_pick_cli_btn');
-      const btnClr = root?.querySelector('#rp_clear_cli_btn');
+      const pill = (v) => (v == null || v === '' ? '-' : String(v));
 
-      const ensureMileagePrefill = async () => {
-        const isCreateNow = !st.id;
-        if (isCreateNow && st.scope === 'CLIENT' && st.client_id) {
-          try {
-            const cli = await getClient(st.client_id);
-            const ch = Number(cli?.mileage_charge_rate);
-            if (Number.isFinite(ch)) {
-              const pay = Math.max(0, ch - 0.10);
-              const payEl = root.querySelector('[name="mileage_pay_rate"]');
-              const chEl = root.querySelector('[name="mileage_charge_rate"]');
-              if (chEl && !chEl.value) { chEl.value = String(ch); st.mileage_charge_rate = String(ch); }
-              if (payEl && !payEl.value) { payEl.value = pay.toFixed(2); st.mileage_pay_rate = payEl.value; }
-            }
-          } catch {}
-        }
-      };
+      const rateRow = (p) => [
+        `D:${pill(p.charge_day)} N:${pill(p.charge_night)} Sa:${pill(p.charge_sat)} Su:${pill(p.charge_sun)} BH:${pill(p.charge_bh)}`,
+        `D:${pill(p.umb_day)   } N:${pill(p.umb_night)   } Sa:${pill(p.umb_sat)   } Su:${pill(p.umb_sun)   } BH:${pill(p.umb_bh)   }`,
+        `D:${pill(p.paye_day)  } N:${pill(p.paye_night)  } Sa:${pill(p.paye_sat)  } Su:${pill(p.paye_sun)  } BH:${pill(p.paye_bh)  }`
+      ];
 
-      const toggleColDisplay = (selector, on) => {
-        root?.querySelectorAll(selector).forEach(el => {
-          el.style.display = on ? '' : 'none';
-        });
-      };
-
-      function refreshPayModeColumns() {
-        const payMode = st.payMode || 'PAYE';
-        st.enable_paye = (payMode === 'PAYE' || payMode === 'BOTH');
-        st.enable_umbrella = (payMode === 'UMB' || payMode === 'BOTH');
-
-        buckets.forEach(b => {
-          const paye = root?.querySelector(`[name="paye_${b}"]`);
-          const umb = root?.querySelector(`[name="umb_${b}"]`);
-          if (paye) paye.disabled = !st.enable_paye;
-          if (umb) umb.disabled = !st.enable_umbrella;
-        });
-
-        toggleColDisplay('#rp_form .rp-col-paye', st.enable_paye);
-        toggleColDisplay('#rp_form .rp-col-umb', st.enable_umbrella);
-      }
-
-      function updatePresetSaveState() {
-        const { margin, rateState, eligible } = computePresetEligibility(root, st);
-
-        const warn = root?.querySelector('#rp_margin_warn');
-        if (warn) warn.style.display = (margin && margin.anyNegative) ? '' : 'none';
-
-        buckets.forEach(b => {
-          const cell = root?.querySelector(`.rp-rate-row[data-bucket="${b}"] [data-role="margin"]`);
-          if (!cell) return;
-          const bucketMargin = margin?.bucket?.[b] || {};
-          const mp = bucketMargin.marginPaye;
-          const mu = bucketMargin.marginUmb;
-          const negP = bucketMargin.negPaye;
-          const negU = bucketMargin.negUmb;
-          const parts = [];
-          if (rateState.enable_paye) {
-            parts.push(`PAYE: ${mp == null || Number.isNaN(mp) ? '—' : mp.toFixed(2)}${negP ? ' ⚠' : ''}`);
-          }
-          if (rateState.enable_umbrella) {
-            parts.push(`Umb: ${mu == null || Number.isNaN(mu) ? '—' : mu.toFixed(2)}${negU ? ' ⚠' : ''}`);
-          }
-          cell.textContent = parts.filter(Boolean).join(' • ');
-        });
-
-        const fr = window.__getModalFrame?.();
+      const updateApplyState = () => {
+        const canApply = !!(pickerRows.length && pickerSelectedIndex >= 0);
         const btn = document.getElementById('btnSave');
-        const modeNow = fr?.mode || initialMode || 'view';
-        const canSave = !!(modeNow === 'edit' && margin && !margin.anyNegative && eligible);
+
+        pickerSelectedId =
+          pickerRows && pickerSelectedIndex >= 0 && pickerRows[pickerSelectedIndex]
+            ? (pickerRows[pickerSelectedIndex].id || null)
+            : null;
+
         if (btn) {
-          btn.disabled = !canSave;
-          if (modeNow !== 'edit') {
-            btn.title = 'Click Edit to make changes';
-          } else {
-            btn.title = canSave ? '' : 'Fill required fields and fix any negative margins';
-          }
+          btn.disabled = !canApply;
+          btn.title = canApply ? '' : 'Select a preset to apply';
         }
+        // Let the modal toolbar logic participate too
+        const fr = window.__getModalFrame?.();
         if (fr && typeof fr._updateButtons === 'function') {
-          fr.__canSave = canSave;
+          fr.__canSave = canApply;   // used by showModal._updateButtons()
           fr._updateButtons();
         }
-      }
-
-      function setPayMode(newMode, opts) {
-        const optsNorm = opts || {};
-        const clearPrev = !!optsNorm.clearPrev;
-        const prevMode = st.payMode || 'PAYE';
-        if (!newMode) return;
-        const modeNorm = String(newMode).toUpperCase();
-        if (!['PAYE', 'UMB', 'BOTH'].includes(modeNorm)) return;
-
-        if (clearPrev && prevMode !== modeNorm) {
-          if (prevMode === 'PAYE' && modeNorm === 'UMB') {
-            buckets.forEach(b => {
-              st[`paye_${b}`] = '';
-              const inp = root?.querySelector(`[name="paye_${b}"]`);
-              if (inp) inp.value = '';
-            });
-          } else if (prevMode === 'UMB' && modeNorm === 'PAYE') {
-            buckets.forEach(b => {
-              st[`umb_${b}`] = '';
-              const inp = root?.querySelector(`[name="umb_${b}"]`);
-              if (inp) inp.value = '';
-            });
-          }
-        }
-
-        st.payMode = modeNorm;
-        refreshPayModeColumns();
-        updatePresetSaveState();
-      }
-
-      function syncPayModeFromDom(opts) {
-        const pmEl = root?.querySelector('#rp_pay_mode');
-        const valRaw = pmEl?.value || st.payMode || 'PAYE';
-        const val = String(valRaw).toUpperCase();
-        const mode = ['PAYE', 'UMB', 'BOTH'].includes(val) ? val : 'PAYE';
-        setPayMode(mode, opts);
-      }
-
-      function applyScopeFromControl(isInit) {
-        if (!rateTypeSel) return;
-        const prevScope = st.scope || 'GLOBAL';
-        let val = String(rateTypeSel.value || '').toUpperCase();
-        if (val !== 'GLOBAL' && val !== 'CLIENT') val = 'GLOBAL';
-        const nextScope = val;
-
-        if (nextScope === 'CLIENT') {
-          st.scope = 'CLIENT';
-          if (cliRow) cliRow.style.display = 'block';
-          ensureMileagePrefill();
-        } else {
-          st.scope = 'GLOBAL';
-          if (cliRow) cliRow.style.display = 'none';
-          if (!isInit && prevScope === 'CLIENT') {
-            st.client_id = null;
-            st.client_label = '';
-            if (cliLbl) cliLbl.textContent = 'No client chosen';
-          }
-        }
-        updatePresetSaveState();
-      }
-
-      if (rateTypeSel) {
-        rateTypeSel.addEventListener('change', () => applyScopeFromControl(false));
-        applyScopeFromControl(true);
-      }
-
-      if (btnPick) {
-        btnPick.onclick = () => {
-          openClientPicker(({ id, label }) => {
-            st.client_id = id;
-            st.client_label = label || '';
-            if (cliLbl) cliLbl.textContent = label ? `Chosen: ${label}` : 'No client chosen';
-            ensureMileagePrefill();
-            updatePresetSaveState();
-          }, { allowBackdropModal: true });
-        };
-      }
-
-      if (btnClr) {
-        btnClr.onclick = () => {
-          st.client_id = null;
-          st.client_label = '';
-          if (cliLbl) cliLbl.textContent = 'No client chosen';
-          updatePresetSaveState();
-        };
-      }
-
-      const pmSelect = root?.querySelector('#rp_pay_mode');
-      if (pmSelect) {
-        pmSelect.addEventListener('change', () => syncPayModeFromDom({ clearPrev: true }));
-        syncPayModeFromDom({ clearPrev: false });
-      } else {
-        st.payMode = st.payMode || 'PAYE';
-        refreshPayModeColumns();
-      }
-
-      const lblMap = {
-        bucket_day: 'day',
-        bucket_night: 'night',
-        bucket_sat: 'sat',
-        bucket_sun: 'sun',
-        bucket_bh: 'bh'
       };
-      Object.keys(lblMap).forEach(n => {
-        const el = root?.querySelector(`#rp_labels_grid [name="${n}"]`);
-        if (!el) return;
-        el.addEventListener('input', () => {
-          const k = lblMap[n];
-          st[`bucket_${k}`] = el.value || '';
-          const cell = root?.querySelector(`.rp-rate-row[data-bucket="${k}"] .lbl`);
-          if (cell) cell.textContent = st[`bucket_${k}`] || cell.textContent;
-          updatePresetSaveState();
-        });
+
+      const paint = () => {
+        const activeIndex = pickerSelectedIndex;
+        const body = pickerRows.map((r, i) => {
+          const scope = String(r.scope || (r.client_id ? 'CLIENT' : 'GLOBAL')).toUpperCase();
+          const name =
+            r.name ||
+            [r.role, r.band ? `Band ${r.band}` : ''].filter(Boolean).join(' / ') ||
+            'Preset';
+
+          const [chg, umb, paye] = rateRow(r);
+          const isActive = (i === activeIndex);
+          const cls = isActive ? ' class="active selected"' : '';
+
+          const mileagePay = pill(r.mileage_pay_rate);
+          const mileageCharge = pill(r.mileage_charge_rate);
+          const mileageTxt =
+            (mileagePay === '-' && mileageCharge === '-') ? '-' : `Pay ${mileagePay} / Charge ${mileageCharge}`;
+
+          return `
+            <tr data-i="${i}"${cls}>
+              <td></td>
+              <td>${name}</td>
+              <td>${scope}</td>
+              <td>${r.from_date || '-'} → ${r.to_date || '-'}</td>
+              <td>${chg}</td>
+              <td>${paye}</td>
+              <td>${umb}</td>
+              <td>${mileageTxt}</td>
+            </tr>`;
+        }).join('');
+
+        tbody.innerHTML =
+          body || '<tr><td colspan="8" class="mini" style="text-align:center">No presets found</td></tr>';
+
+        updateApplyState();
+      };
+
+      const fetchRows = async () => {
+        const scope = scopeVal();
+        const q = (search?.value || '').trim();
+
+        try {
+          // Helper: fetch a single scope
+          const fetchScope = async (scopeKey) => {
+            const args = { scope: scopeKey, q };
+            if (scopeKey === 'CLIENT' && client_id) args.client_id = client_id;
+            // start_date / active_on is not enforced server-side yet, so we omit for now
+            return await listRatePresets(args);
+          };
+
+          let raw = [];
+
+          if (scope === 'GLOBAL') {
+            raw = await fetchScope('GLOBAL');
+          } else if (scope === 'CLIENT') {
+            raw = client_id ? await fetchScope('CLIENT') : [];
+          } else { // ALL
+            if (client_id) {
+              const globals = await fetchScope('GLOBAL');
+              const clients = await fetchScope('CLIENT');
+              raw = [...globals, ...clients];
+            } else {
+              raw = await fetchScope('GLOBAL');
+            }
+          }
+
+          pickerRows = Array.isArray(raw) ? sortPresetsForView(scope, raw) : [];
+          L('fetchRows: got presets', { scope, q, count: pickerRows.length });
+        } catch (e) {
+          console.error('[PRESETS] fetchRows error', e);
+          pickerRows = [];
+        }
+        pickerSelectedIndex = -1;
+        pickerSelectedId = null;
+        paint();
+      };
+
+      // Single-click: select only
+      tbody.addEventListener('click', (e) => {
+        const tr = e.target.closest('tr[data-i]');
+        if (!tr) return;
+        const idx = +tr.getAttribute('data-i');
+        if (!Number.isFinite(idx)) return;
+
+        pickerSelectedIndex = idx;
+        pickerSelectedId = pickerRows[idx]?.id || null;
+        L('row click → select', { idx, id: pickerSelectedId });
+        paint();
       });
 
-      const useSch = document.getElementById('rp_use_schedule');
-      const schBlk = document.getElementById('rp_sched_block');
-      if (useSch && schBlk) {
-        const togg = () => {
-          st.use_schedule = !!useSch.checked;
-          schBlk.style.display = st.use_schedule ? 'block' : 'none';
-          updatePresetSaveState();
-        };
-        useSch.addEventListener('change', togg);
-        togg();
-      }
-
-      const normalizeRateInput = (el) => {
-        if (!el) return;
-        let v = (el.value || '').trim();
-        if (!v) return;
-        v = v.replace(/\s+/g, '');
-        if (v.startsWith('.')) v = '0' + v;
-        const n = Number(v);
-        if (!Number.isFinite(n)) return;
-        el.value = n.toFixed(2);
-      };
-
-      buckets.forEach(b => {
-        ['paye', 'umb', 'charge'].forEach(prefix => {
-          const inp = root?.querySelector(`[name="${prefix}_${b}"]`);
-          if (inp) {
-            inp.addEventListener('blur', () => {
-              normalizeRateInput(inp);
-              st[`${prefix}_${b}`] = inp.value || '';
-              updatePresetSaveState();
-            });
-            inp.addEventListener('input', () => {
-              st[`${prefix}_${b}`] = inp.value || '';
-            });
-          }
-        });
+      // Double-click: apply once (authoritative)
+      tbody.addEventListener('dblclick', (e) => {
+        const tr = e.target.closest('tr[data-i]');
+        if (!tr) return;
+        const idx = +tr.getAttribute('data-i');
+        if (!Number.isFinite(idx)) return;
+        pickerSelectedIndex = idx;
+        pickerSelectedId = pickerRows[idx]?.id || null;
+        L('row dblclick → apply', { idx, id: pickerSelectedId });
+        (async () => {
+          const ok = await onApply();
+          if (ok !== false) setTimeout(() => document.getElementById('btnCloseModal')?.click(), 50);
+        })();
+        e.preventDefault();
+        e.stopPropagation();
       });
 
-      const mileagePayEl = root?.querySelector('[name="mileage_pay_rate"]');
-      const mileageChargeEl = root?.querySelector('[name="mileage_charge_rate"]');
-      const normalizeMileageInput = (el) => {
-        if (!el) return;
-        let v = (el.value || '').trim();
-        if (!v) return;
-        if (v.startsWith('.')) v = '0' + v;
-        let numVal;
-        if (v.includes('.')) {
-          numVal = Number(v);
-        } else {
-          numVal = Number(v) / 100;
+      search?.addEventListener('input', fetchRows);
+      radios.forEach(r => r.addEventListener('change', fetchRows));
+
+      await fetchRows();
+
+      const btn = document.getElementById('btnSave');
+      if (btn) btn.textContent = 'Apply';
+
+      try {
+        const fr = window.__getModalFrame?.();
+        if (fr && fr.kind === 'rate-presets-picker' && typeof setFrameMode === 'function') {
+          setFrameMode(fr, 'view'); // picker itself remains read-only UI
+          fr._updateButtons && fr._updateButtons();
         }
-        if (!Number.isFinite(numVal)) return;
-        el.value = numVal.toFixed(2);
-      };
-      if (mileagePayEl) {
-        mileagePayEl.addEventListener('blur', () => {
-          normalizeMileageInput(mileagePayEl);
-          st.mileage_pay_rate = mileagePayEl.value || '';
-          const isCreateNow = !st.id;
-          if (isCreateNow && mileageChargeEl && !(mileageChargeEl.value || '').trim()) {
-            mileageChargeEl.value = mileagePayEl.value;
-            st.mileage_charge_rate = mileageChargeEl.value || '';
-          }
-          updatePresetSaveState();
-        });
-        mileagePayEl.addEventListener('input', () => {
-          st.mileage_pay_rate = mileagePayEl.value || '';
-        });
-      }
-      if (mileageChargeEl) {
-        mileageChargeEl.addEventListener('blur', () => {
-          normalizeMileageInput(mileageChargeEl);
-          st.mileage_charge_rate = mileageChargeEl.value || '';
-          updatePresetSaveState();
-        });
-        mileageChargeEl.addEventListener('input', () => {
-          st.mileage_charge_rate = mileageChargeEl.value || '';
-        });
-      }
-
-      let schedClipboard = null;
-      const schedRoot = document.getElementById('rp_sched_block');
-
-      const normaliseTimeInput = (t) => {
-        if (!t || !/^(mon|tue|wed|thu|fri|sat|sun)_(start|end)$/.test(t.name)) return;
-        const raw = (t.value || '').trim();
-        const norm = (function (x) {
-          if (!x) return '';
-          const y = x.replace(/\s+/g, '');
-          let h, m;
-          if (/^\d{3,4}$/.test(y)) {
-            const s = y.padStart(4, '0'); h = +s.slice(0, 2); m = +s.slice(2, 4);
-          } else if (/^\d{1,2}:\d{1,2}$/.test(y)) {
-            const parts = y.split(':'); h = +parts[0]; m = +parts[1];
-          } else return '';
-          if (h < 0 || h > 23 || m < 0 || m > 59) return '';
-          return String(h).padStart(2, '0') + ':' + String(m).padStart(2, '0');
-        })(raw);
-
-        if (!norm && raw) {
-          t.value = '';
-          t.setAttribute('data-invalid', '1');
-          t.setAttribute('title', 'Enter a valid time HH:MM (00:00–23:59)');
-          try {
-            t.dispatchEvent(new Event('input', { bubbles: true }));
-            t.dispatchEvent(new Event('change', { bubbles: true }));
-          } catch {}
-          st[t.name] = '';
-          return;
-        }
-
-        if (norm) {
-          t.value = norm;
-          t.removeAttribute('data-invalid');
-          t.removeAttribute('title');
-          st[t.name] = norm;
-          try {
-            t.dispatchEvent(new Event('input', { bubbles: true }));
-            t.dispatchEvent(new Event('change', { bubbles: true }));
-          } catch {}
-        }
-      };
-
-      if (schedRoot) {
-        schedRoot.addEventListener('blur', (e) => {
-          normaliseTimeInput(e.target);
-        }, true);
-
-        schedRoot.addEventListener('keydown', (e) => {
-          if (e.key === 'Tab') normaliseTimeInput(e.target);
-        }, true);
-
-        schedRoot.addEventListener('click', (e) => {
-          const copyBtn = e.target.closest('button.rp_copy');
-          const pasteBtn = e.target.closest('button.rp_paste');
-          if (copyBtn) {
-            const day = copyBtn.dataset.day;
-            const sEl = root.querySelector(`[name="${day}_start"]`);
-            const eEl = root.querySelector(`[name="${day}_end"]`);
-            const bEl = root.querySelector(`[name="${day}_break"]`);
-            schedClipboard = {
-              start: sEl?.value || '',
-              end: eEl?.value || '',
-              br: bEl?.value || ''
-            };
-            return;
-          }
-          if (pasteBtn && schedClipboard) {
-            const day = pasteBtn.dataset.day;
-            const sEl = root.querySelector(`[name="${day}_start"]`);
-            const eEl = root.querySelector(`[name="${day}_end"]`);
-            const bEl = root.querySelector(`[name="${day}_break"]`);
-            if (sEl) { sEl.value = schedClipboard.start; st[`${day}_start`] = sEl.value || ''; }
-            if (eEl) { eEl.value = schedClipboard.end;   st[`${day}_end`]   = eEl.value || ''; }
-            if (bEl) { bEl.value = schedClipboard.br;    st[`${day}_break`] = bEl.value || ''; }
-            updatePresetSaveState();
-          }
-        });
-      }
-
-      ['input', 'change'].forEach(evt => {
-        root?.addEventListener(evt, (e) => {
-          const t = e.target;
-          if (!t?.name) return;
-          if (t.name === 'rp_pay_mode' || t.name === 'rp_rate_type') return;
-          if (/^(name|role|band|display_site)$/.test(t.name)) {
-            st[t.name] = t.value || '';
-          } else if (/^bucket_(day|night|sat|sun|bh)$/.test(t.name)) {
-            st[t.name] = t.value || '';
-          } else if (/^mileage_(pay|charge)_rate$/.test(t.name)) {
-            st[t.name] = t.value || '';
-          } else if (/^(mon|tue|wed|thu|fri|sat|sun)_(start|end|break)$/.test(t.name)) {
-            st[t.name] = t.value || '';
-          } else if (/^(paye|umb|charge)_(day|night|sat|sun|bh)$/.test(t.name)) {
-            st[t.name] = t.value || '';
-          }
-          if (
-            /^(paye|umb|charge)_(day|night|sat|sun|bh)$/.test(t.name) ||
-            /^(name|role|band|display_site|bucket_(day|night|sat|sun|bh)|mileage_(pay|charge)_rate)$/.test(t.name) ||
-            /^(mon|tue|wed|thu|fri|sat|sun)_(start|end|break)$/.test(t.name)
-          ) {
-            updatePresetSaveState();
-          }
-        }, true);
-      });
-
-      updatePresetSaveState();
+      } catch {}
     },
-    {
-      kind: 'rate-preset',
-      noParentGate: true,
-      forceEdit: initialMode === 'edit'
-    }
+    // IMPORTANT: acts as a normal child so dirty signals can flow to the parent
+    { kind: 'rate-presets-picker', noParentGate: false }
   );
 
   setTimeout(() => {
     const fr = window.__getModalFrame?.();
-    if (fr && fr.kind === 'rate-preset' && typeof fr.onReturn === 'function' && !fr.__init__) {
+    if (!fr || fr.kind !== 'rate-presets-picker') return;
+
+    if (typeof fr.onReturn === 'function' && !fr.__init__) {
       fr.__init__ = true;
-      fr.onReturn();
+      fr.onReturn(fr);
     }
+    fr._onSave = onApply;
   }, 0);
 }
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Parent modal — Preset Rates manager
 // ─────────────────────────────────────────────────────────────────────────────
@@ -14828,15 +14140,13 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
     if (!opts.forceEdit) opts.forceEdit = true;
     L('showModal(kind=contract-clone-extend): enable noParentGate + forceEdit', { noParentGate: opts.noParentGate, forceEdit: opts.forceEdit });
   }
+// Treat the Rate Presets **picker** as a normal, interactive child:
+// - do NOT set noParentGate or _loadOnly here
+// - dirty should propagate to the parent while the picker is open
+if (opts && opts.kind === 'rate-presets-picker') {
+  L('showModal(kind=rate-presets-picker): interactive child (noParentGate=false)');
+}
 
-  // Treat the Rate Presets **picker** as a load-only child:
-  // - noParentGate=true so the parent stays in EDIT and is not flipped to VIEW
-  // - mark it as _loadOnly so we can suppress dirty tracking for this child
-  if (opts && opts.kind === 'rate-presets-picker') {
-    opts.noParentGate = true;
-    opts._loadOnly = true;
-    L('showModal(kind=rate-presets-picker): load-only (noParentGate=true, suppress dirty)', { noParentGate: opts.noParentGate });
-  }
 
 
 const frame = {
@@ -14965,8 +14275,8 @@ mergedRowForTab(k) {
     const onDirty = (ev) => {
       if (ev && !ev.isTrusted) return;
 
-      // ⛔️ Load-only child (rate-presets-picker) must not generate dirty state
-      if (this.kind === 'rate-presets-picker' || this._loadOnly === true) return;
+     // Allow presets picker to mark the *parent* dirty (only ignore truly load-only frames)
+if (this._loadOnly === true) return;
 
       const isChild = (stack().length > 1);
       if (isChild) {
@@ -15341,22 +14651,30 @@ const setCloseLabel = ()=>{
         btnEdit: { display: btnEdit.style.display }
       });
       return;
-    } else if (isChild && !top.noParentGate) {
+ } else if (isChild && !top.noParentGate) {
 
-      if (top.mode === 'view') {
-        btnSave.style.display = 'none';
-        btnSave.disabled = true;
-        btnEdit.style.display = 'none';
-        if (relatedBtn) relatedBtn.disabled = !(top.hasId);
-      } else {
-        btnSave.style.display = parentEditable ? '' : 'none';
-        const wantApply = (top._applyDesired===true);
-        btnSave.disabled = (!parentEditable) || top._saving || !wantApply;
-        btnEdit.style.display='none';
-        if (relatedBtn) relatedBtn.disabled=true;
-        if (LOG) console.log('[MODAL] child _updateButtons()', { parentEditable, wantApply, disabled: btnSave.disabled });
-      }
-    } else {
+  if (top.mode === 'view') {
+    btnSave.style.display = 'none';
+    btnSave.disabled = true;
+    btnEdit.style.display = 'none';
+    if (relatedBtn) relatedBtn.disabled = !(top.hasId);
+  } else {
+    btnSave.style.display = parentEditable ? '' : 'none';
+    // For the rate-presets picker, gate Apply by the picker's selection state (__canSave).
+    // Other apply-style children still use the _applyDesired flag.
+    const wantApply = (top.kind === 'rate-presets-picker')
+      ? !!top.__canSave
+      : (top._applyDesired === true);
+
+    btnSave.disabled = (!parentEditable) || top._saving || !wantApply;
+    btnEdit.style.display='none';
+    if (relatedBtn) relatedBtn.disabled=true;
+    if (LOG) console.log('[MODAL] child _updateButtons()', {
+      parentEditable, wantApply, disabled: btnSave.disabled, kind: top.kind
+    });
+  }
+}
+ else {
 
       btnEdit.style.display = (top.mode==='view' && top.hasId) ? '' : 'none';
       if (relatedBtn) relatedBtn.disabled = !(top.mode==='view' && top.hasId);
@@ -15727,8 +15045,9 @@ const onDirtyEvt = ()=>{
   const fr = currentFrame();
   if (fr && fr._suppressDirty) return;
 
-  // ⛔️ Do not let the load-only presets picker mark anyone dirty
-  if (fr && (fr.kind === 'rate-presets-picker' || fr._loadOnly === true)) return;
+  // Allow presets picker dirty → parent (ignore only truly load-only frames)
+if (fr && fr._loadOnly === true) return;
+
 
   const isChildNow = (stack().length > 1);
   if (isChildNow) {
