@@ -752,9 +752,6 @@ function openRatePresetPicker(applyCb, opts = {}) {
       </div>
     </div>`;
 
-  // We no longer need to manually close or mutate the parent;
-  // the modal framework will do that via its Save pipeline.
-
   // onApply: just apply the preset and tell saveForFrame we're OK.
   const onApply = async () => {
     if (applyInFlight) return false;
@@ -863,37 +860,63 @@ function openRatePresetPicker(applyCb, opts = {}) {
 
       const fetchRows = async () => {
         const scope = scopeVal();
-        const q = (search?.value || '').trim();
+        const qRaw = (search?.value || '').trim();
+        const q = qRaw.toLowerCase();
+        const cid = client_id ? String(client_id) : null;
 
         try {
-          const fetchScope = async (scopeKey) => {
-            const args = { scope: scopeKey, q };
-            if (scopeKey === 'CLIENT' && client_id) args.client_id = client_id;
-            return await listRatePresets(args);
-          };
-
-          let raw = [];
+          let rows = [];
 
           if (scope === 'GLOBAL') {
-            raw = await fetchScope('GLOBAL');
+            // All GLOBAL presets (search handled client-side)
+            rows = await listRatePresets({ scope: 'GLOBAL' });
           } else if (scope === 'CLIENT') {
-            raw = client_id ? await fetchScope('CLIENT') : [];
-          } else {
-            if (client_id) {
-              const globals = await fetchScope('GLOBAL');
-              const clients = await fetchScope('CLIENT');
-              raw = [...globals, ...clients];
-            } else {
-              raw = await fetchScope('GLOBAL');
-            }
+            // All CLIENT presets for this client id
+            rows = cid ? await listRatePresets({ scope: 'CLIENT', client_id: cid }) : [];
+          } else { // ALL
+            const globals = await listRatePresets({ scope: 'GLOBAL' });
+            const clientRows = cid ? await listRatePresets({ scope: 'CLIENT', client_id: cid }) : [];
+            rows = [...globals, ...clientRows];
           }
 
-          pickerRows = Array.isArray(raw) ? sortPresetsForView(scope, raw) : [];
-          L('fetchRows: got presets', { scope, q, count: pickerRows.length });
+          rows = Array.isArray(rows) ? rows : [];
+
+          // Front-end search: match on name / role / band / display_site
+          if (q) {
+            rows = rows.filter(r => {
+              const name = String(r.name || '').toLowerCase();
+              const role = String(r.role || '').toLowerCase();
+              const band = String(r.band || '').toLowerCase();
+              const site = String(r.display_site || '').toLowerCase();
+              return (
+                name.includes(q) ||
+                role.includes(q) ||
+                band.includes(q) ||
+                site.includes(q)
+              );
+            });
+          }
+
+          // Alphabetical by Name, then Role/Band
+          rows.sort((a, b) => {
+            const aName = (a.name || a.role || '').toString().toLowerCase();
+            const bName = (b.name || b.role || '').toString().toLowerCase();
+            if (aName < bName) return -1;
+            if (aName > bName) return 1;
+            return 0;
+          });
+
+          // If you have sortPresetsForView, keep using it; otherwise rows as-is
+          pickerRows = (typeof sortPresetsForView === 'function')
+            ? sortPresetsForView(scope, rows)
+            : rows;
+
+          L('fetchRows: got presets', { scope, q: qRaw, count: pickerRows.length });
         } catch (e) {
           console.error('[PRESETS] fetchRows error', e);
           pickerRows = [];
         }
+
         // reset selection
         pickerSelectedIndex = -1;
         pickerSelectedId = null;
