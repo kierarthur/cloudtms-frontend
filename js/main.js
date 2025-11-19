@@ -3012,11 +3012,82 @@ function cancelOverlapSave(){ /* kept for API parity; handled in modal above */ 
 // ─────────────────────────────────────────────────────────────────────────────-
 
 function renderContractsTable(rows) {
-  // Optional custom renderer if you later want to override generic grid.
-  // For now, rely on generic renderSummary() table; keep this as a hook.
-  const div = document.createElement('div');
-  div.innerHTML = `<div class="hint">Using standard grid columns for Contracts (configure via “Columns”).</div>`;
-  return div;
+  // Custom lightweight renderer that highlights <Unassigned> in red.
+  // If your environment prefers the generic grid, you can still call that instead.
+  // This function simply returns a DOM node that your caller can insert.
+
+  const make = (tag, attrs = {}, children = []) => {
+    const el = document.createElement(tag);
+    Object.entries(attrs).forEach(([k, v]) => {
+      if (k === 'style' && typeof v === 'object') {
+        Object.assign(el.style, v);
+      } else if (k === 'className') {
+        el.className = v;
+      } else {
+        el.setAttribute(k, v);
+      }
+    });
+    (Array.isArray(children) ? children : [children]).forEach(ch => {
+      if (ch == null) return;
+      if (typeof ch === 'string') el.appendChild(document.createTextNode(ch));
+      else el.appendChild(ch);
+    });
+    return el;
+  };
+
+  const wrap = make('div');
+  const style = make('style', {}, `
+    .contracts-table { width:100%; border-collapse:collapse; font-size:13px; }
+    .contracts-table th, .contracts-table td { border:1px solid var(--line,#e5e5e5); padding:8px; text-align:left; }
+    .contracts-table th { background: var(--panel,#fafafa); }
+    .contracts-table .unassigned { color: var(--danger,#c0392b); font-weight: 600; }
+    .contracts-table .sm { color: var(--muted,#666); font-size: 12px; }
+  `);
+  wrap.appendChild(style);
+
+  const table = make('table', { className: 'contracts-table' });
+  const thead = make('thead');
+  const trh = make('tr');
+  ['ID','Candidate','Client','Role','Start','End'].forEach(h => trh.appendChild(make('th', {}, h)));
+  thead.appendChild(trh);
+  table.appendChild(thead);
+
+  const tbody = make('tbody');
+
+  (Array.isArray(rows) ? rows : []).forEach(r => {
+    const tr = make('tr');
+
+    // ID
+    tr.appendChild(make('td', {}, String(r.id ?? '')));
+
+    // Candidate (show <Unassigned> in red if missing)
+    const candLabel = (r.candidate_display || r.candidate_name || '').trim();
+    if (candLabel) {
+      tr.appendChild(make('td', {}, candLabel));
+    } else {
+      const td = make('td');
+      const span = make('span', { className: 'unassigned' }, '<Unassigned>');
+      td.appendChild(span);
+      tr.appendChild(td);
+    }
+
+    // Client
+    tr.appendChild(make('td', {}, (r.client_name || '').trim()));
+
+    // Role
+    tr.appendChild(make('td', {}, (r.role || '').trim()));
+
+    // Start / End (show raw ISO or formatted upstream)
+    tr.appendChild(make('td', {}, (r.start_date || '')));
+    tr.appendChild(make('td', {}, (r.end_date || '')));
+
+    tbody.appendChild(tr);
+  });
+
+  table.appendChild(tbody);
+  wrap.appendChild(table);
+
+  return wrap;
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -3342,11 +3413,23 @@ if (hasAnySchedule) {
           choose('week_ending_weekday_snapshot', (base.week_ending_weekday_snapshot ?? '0'))
         );
 
-        const candidate_id = choose('candidate_id', base.candidate_id ?? null) || null;
-        const client_id    = choose('client_id', base.client_id ?? null) || null;
-        const role         = choose('role', base.role ?? null);
-        const band         = choose('band', base.band ?? null);
-        const display_site = choose('display_site', base.display_site ?? '');
+    const candidate_id = choose('candidate_id', base.candidate_id ?? null) || null;
+
+// NEW: polite confirmation when saving with no candidate
+if (!candidate_id) {
+  const okProceed = window.confirm('No candidate is selected. Save this contract as “<Unassigned>”?');
+  if (!okProceed) {
+    window.modalCtx._saveInFlight = false;
+    if (LOGC) console.groupEnd?.();
+    return false;
+  }
+}
+
+const client_id    = choose('client_id', base.client_id ?? null) || null;
+const role         = choose('role', base.role ?? null);
+const band         = choose('band', base.band ?? null);
+const display_site = choose('display_site', base.display_site ?? '');
+
 
         const boolFromFS = (name, baseVal=false) => {
           if (fs && fs.main && Object.prototype.hasOwnProperty.call(fs.main, name)) {
@@ -4039,26 +4122,42 @@ console.warn('[AFTER UPSERT] reached post-save pre-gate', {
               });
               if (LOGC) console.log('[CONTRACTS] wired btnPickCandidate');
             }
-            if (btnCC && !btnCC.__wired) {
-              btnCC.__wired = true;
-              btnCC.addEventListener('click', () => {
-                if (LOGC) console.log('[CONTRACTS] Clear Candidate clicked');
-                setContractFormValue('candidate_id', '');
-                const lab = document.getElementById('candidatePickLabel'); if (lab) lab.textContent = '';
-                try {
-                  const fs2 = (window.modalCtx.formState ||= { __forId: (window.modalCtx.data?.id ?? window.modalCtx.openToken ?? null), main:{}, pay:{} });
-                  fs2.main ||= {}; delete fs2.main.candidate_id; delete fs2.main.candidate_display;
-                  fs2.main.__pay_locked = false;
-                  fs2.main.pay_method_snapshot = 'PAYE';
-                  const sel = document.querySelector('select[name="pay_method_snapshot"], select[name="default_pay_method_snapshot"]');
-                  if (sel) { sel.disabled = false; sel.value = 'PAYE'; }
-                  window.modalCtx.data = window.modalCtx.data || {};
-                  delete window.modalCtx.data.candidate_id; delete window.modalCtx.data.candidate_display;
-                } catch {}
-                try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
-              });
-              if (LOGC) console.log('[CONTRACTS] wired btnClearCandidate');
-            }
+      if (btnCC && !btnCC.__wired) {
+  btnCC.__wired = true;
+  btnCC.addEventListener('click', () => {
+    if (LOGC) console.log('[CONTRACTS] Clear Candidate clicked');
+    setContractFormValue('candidate_id', '');
+
+    // 🔹 Clear the visible candidate text input as well
+    const candInput = document.getElementById('candidate_name_display');
+    if (candInput) candInput.value = '';
+
+    const lab = document.getElementById('candidatePickLabel');
+    if (lab) lab.textContent = '';
+
+    try {
+      const fs2 = (window.modalCtx.formState ||= {
+        __forId: (window.modalCtx.data?.id ?? window.modalCtx.openToken ?? null),
+        main:{}, pay:{}
+      });
+      fs2.main ||= {};
+      delete fs2.main.candidate_id;
+      delete fs2.main.candidate_display;
+      fs2.main.__pay_locked = false;
+      fs2.main.pay_method_snapshot = 'PAYE';
+
+      const sel = document.querySelector('select[name="pay_method_snapshot"], select[name="default_pay_method_snapshot"]');
+      if (sel) { sel.disabled = false; sel.value = 'PAYE'; }
+
+      window.modalCtx.data = window.modalCtx.data || {};
+      delete window.modalCtx.data.candidate_id;
+      delete window.modalCtx.data.candidate_display;
+    } catch {}
+    try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
+  });
+  if (LOGC) console.log('[CONTRACTS] wired btnClearCandidate');
+}
+
 
             if (btnPL && !btnPL.__wired) {
               btnPL.__wired = true;
@@ -4145,24 +4244,44 @@ try {
               });
               if (LOGC) console.log('[CONTRACTS] wired btnPickClient');
             }
-            if (btnCL && !btnCL.__wired) {
-              btnCL.__wired = true;
-              btnCL.addEventListener('click', () => {
-                if (LOGC) console.log('[CONTRACTS] Clear Client clicked');
-                setContractFormValue('client_id', '');
-                const lab = document.getElementById('clientPickLabel'); if (lab) lab.textContent = '';
-                try {
-                  const fs2 = (window.modalCtx.formState ||= { __forId: (window.modalCtx.data?.id ?? window.modalCtx.openToken ?? null), main:{}, pay:{} });
-                  fs2.main ||= {}; delete fs2.main.client_id; delete fs2.main.client_name; delete fs2.main.week_ending_weekday_snapshot;
-                  window.modalCtx.data = window.modalCtx.data || {};
-                  delete window.modalCtx.data.client_id; delete window.modalCtx.data.client_name;
-                  const lbl = document.getElementById('weLabel'); if (lbl) lbl.textContent = 'Sunday';
-                  const hidden = form?.querySelector('input[name="week_ending_weekday_snapshot"]'); if (hidden) hidden.value = '';
-                } catch {}
-                try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
-              });
-              if (LOGC) console.log('[CONTRACTS] wired btnClearClient');
-            }
+        if (btnCL && !btnCL.__wired) {
+  btnCL.__wired = true;
+  btnCL.addEventListener('click', () => {
+    if (LOGC) console.log('[CONTRACTS] Clear Client clicked');
+    setContractFormValue('client_id', '');
+
+    // 🔹 Clear the visible client text input as well
+    const cliInput = document.getElementById('client_name_display');
+    if (cliInput) cliInput.value = '';
+
+    const lab = document.getElementById('clientPickLabel');
+    if (lab) lab.textContent = '';
+
+    try {
+      const fs2 = (window.modalCtx.formState ||= {
+        __forId: (window.modalCtx.data?.id ?? window.modalCtx.openToken ?? null),
+        main:{}, pay:{}
+      });
+      fs2.main ||= {};
+      delete fs2.main.client_id;
+      delete fs2.main.client_name;
+      delete fs2.main.week_ending_weekday_snapshot;
+
+      window.modalCtx.data = window.modalCtx.data || {};
+      delete window.modalCtx.data.client_id;
+      delete window.modalCtx.data.client_name;
+
+      const lbl = document.getElementById('weLabel');
+      if (lbl) lbl.textContent = 'Sunday';
+
+      const hidden = form?.querySelector('input[name="week_ending_weekday_snapshot"]');
+      if (hidden) hidden.value = '';
+    } catch {}
+    try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
+  });
+  if (LOGC) console.log('[CONTRACTS] wired btnClearClient');
+}
+
 
             const openOnType = (inputEl, openerName) => {
               if (!inputEl || inputEl.__wiredTyping) return;
@@ -12820,18 +12939,25 @@ function renderContractCalendarTab(ctx) {
   const fr = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
   const inViewMode = !!(fr && fr.mode === 'view');
 
+  // --- actions (now includes Duplicate)
   const actionsHtml = (c.id
-    ? `<div class="actions" style="margin-top:8px;display:flex;gap:8px">
+    ? `<div class="actions" style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">
          ${inViewMode ? `` : `<button id="btnAddMissing">Add missing weeks</button>
          <button id="btnRemoveAll">Remove all weeks</button>`}
-         ${inViewMode ? `<button id="btnCloneExtend">Clone & Extend…</button>` : ``}
+         ${inViewMode ? `<button id="btnCloneExtend">Clone & Extend…</button>
+         <button id="btnDuplicateContract">Duplicate Contract…</button>` : ``}
        </div>`
     : ``);
 
+  // --- early hint when no candidate yet
   if (!candId) {
-    if (LOGM) console.log('[CAL][contract] no candidate yet; render hint');
+    if (LOGM) console.log('[CAL][contract] no candidate yet; render hint (with unassigned label)');
     return `
       <div id="${holderId}" class="tabc">
+        <div class="info-row" style="margin:0 0 8px 0;font-size:13px;">
+          <strong>Candidate:</strong>
+          <span class="unassigned" style="color:var(--danger,#c0392b);margin-left:6px;">&lt;Unassigned&gt;</span>
+        </div>
         <div class="hint">Pick a candidate to view and stage calendar dates.</div>
         ${actionsHtml}
       </div>`;
@@ -12845,11 +12971,31 @@ function renderContractCalendarTab(ctx) {
 
       el.innerHTML = `
         <div class="tabc" style="display:flex;flex-direction:column;gap:8px;height:calc(72vh);max-height:calc(72vh)">
+          <div class="info-row" style="font-size:13px;">
+            <strong>Candidate:</strong>
+            <span id="__calCandidateName" style="margin-left:6px;"></span>
+          </div>
           <div id="__calScroll" style="flex:1;min-height:0;overflow:auto;border:1px solid var(--line,#e5e5e5);border-radius:8px;padding:4px;">
             <div id="__contractCal"></div>
           </div>
           ${actionsHtml}
         </div>`;
+
+      // Render the candidate label (supports <Unassigned>)
+      try {
+        const nameEl = el.querySelector('#__calCandidateName');
+        if (nameEl) {
+          const stagedLabel = (window.modalCtx?.formState?.main?.candidate_display || '').trim();
+          const rowLabel    = (c.candidate_display || c.candidate_name || '').trim();
+          const label       = stagedLabel || rowLabel || '';
+          if (label) {
+            nameEl.textContent = label;
+          } else {
+            nameEl.textContent = '<Unassigned>';
+            nameEl.style.color = 'var(--danger,#c0392b)';
+          }
+        }
+      } catch {}
 
       if (c.id) {
         if (LOGM) console.log('[CAL][contract] render with real contract id', { id: c.id, win });
@@ -12903,6 +13049,54 @@ function renderContractCalendarTab(ctx) {
             openContractCloneAndExtend(c.id);
           });
         }
+
+        // NEW: Duplicate Contract…
+             const btnDup = el.querySelector('#btnDuplicateContract');
+        if (btnDup && !btnDup.__wired) {
+          btnDup.__wired = true;
+          btnDup.addEventListener('click', async () => {
+            try {
+              const countStr = window.prompt(
+                'How many duplicate contracts do you require? (1–10)',
+                '1'
+              );
+              if (countStr == null) return; // user hit Cancel
+
+              const n = Number(countStr);
+              if (!Number.isInteger(n) || n < 1 || n > 10) {
+                alert('Please enter a whole number between 1 and 10.');
+                return;
+              }
+
+              if (typeof duplicateContract !== 'function') {
+                alert('Duplicate action is unavailable in this build.');
+                return;
+              }
+
+              const res = await duplicateContract(c.id, { count: n });
+              const ok  = !!(res && (res.ok === undefined ? true : res.ok));
+              if (!ok) {
+                const msg = res && res.message ? res.message : 'Duplicate failed';
+                alert(msg);
+                return;
+              }
+
+              const created = (res && Number.isInteger(res.count)) ? res.count : n;
+              try {
+                window.__toast?.(
+                  `${created} duplicate contract${created > 1 ? 's' : ''} created`
+                );
+              } catch {}
+
+              // Optional: refresh lists / calendar
+              try { await renderAll(); } catch {}
+            } catch (e) {
+              if (LOGM) console.warn('[CAL][contract] duplicate failed', e);
+              alert(e?.message || 'Duplicate failed');
+            }
+          });
+        }
+
       }
     } catch (e) {
       const el = byId(holderId); if (el) el.innerHTML = `<div class="error">Calendar load failed.</div>`;
@@ -12912,6 +13106,10 @@ function renderContractCalendarTab(ctx) {
 
   return `
     <div id="${holderId}" class="tabc">
+      <div class="info-row" style="margin:0 0 8px 0;font-size:13px;">
+        <strong>Candidate:</strong>
+        <span id="__calCandidateName" style="margin-left:6px;"></span>
+      </div>
       <div class="hint">Loading calendar…</div>
       ${actionsHtml}
     </div>`;
@@ -12985,7 +13183,6 @@ function adoptCalendarStageFromToken(openToken, contractId) {
 //    against currentKey (contract.id or openToken).
 //    (Used by renderContractCalendarTab and openContract repaint)
 // ───────────────────────────────────────────────────────────────
-
 
 function computeContractSaveEligibility() {
   try {
@@ -13170,8 +13367,10 @@ function computeContractSaveEligibility() {
       reasons.push({ code:'TS_BOUNDARY_VIOLATION', message: tsBoundaryMsg || 'Dates exclude existing timesheets.' });
     }
 
+    // ✅ FINAL ELIGIBILITY:
+    //   • Candidate is NO LONGER a hard requirement here (still warned via reasons).
     const ok =
-      candidateOk &&
+      /* candidateOk && */            // <-- removed from hard gate
       clientOk &&
       roleOk &&
       (
@@ -13210,6 +13409,7 @@ function computeContractSaveEligibility() {
     return false;
   }
 }
+
 
 // ───────────────────────────────────────────────────────────────
 // 1) Non-blocking date-window overlap checker (Main tab hint)
@@ -15511,53 +15711,62 @@ const setCloseLabel = ()=>{
       btnEdit.style.display = (top.mode==='view' && top.hasId) ? '' : 'none';
       if (relatedBtn) relatedBtn.disabled = !(top.mode==='view' && top.hasId);
 
-      if (top.mode === 'create') {
-        btnSave.style.display = '';
-        btnSave.disabled = top._saving;
-      } else if (top.mode==='view') {
-        btnSave.style.display = 'none';
-        btnSave.disabled = true;
-      } else {
-        btnSave.style.display='';
+    if (top.mode === 'create') {
+  btnSave.style.display = '';
+  btnSave.disabled = top._saving;
+} else if (top.mode==='view') {
+  btnSave.style.display = 'none';
+  btnSave.disabled = true;
+} else {
+  btnSave.style.display='';
 
-        let gateOK = true;
-        let elig   = null;
+  let gateOK = true;
+  let elig   = null;
 
-        if (top.entity === 'contracts') {
-          try {
-            gateOK = (typeof computeContractSaveEligibility === 'function') ? !!computeContractSaveEligibility() : true;
-            elig   = (typeof window !== 'undefined') ? (window.__contractEligibility || null) : null;
+  if (top.entity === 'contracts') {
+    try {
+      gateOK = (typeof computeContractSaveEligibility === 'function') ? !!computeContractSaveEligibility() : true;
+      elig   = (typeof window !== 'undefined') ? (window.__contractEligibility || null) : null;
 
-            if (elig && Array.isArray(elig.reasons)) {
-              const tsReason = elig.reasons.find(r => r && r.code === 'TS_BOUNDARY_VIOLATION');
-              if (tsReason) {
-                gateOK = false;
-                if (typeof showModalHint === 'function') showModalHint(tsReason.message || 'Dates exclude existing timesheets.', 'warn');
-              }
-            }
-
-            if (!gateOK && elig && elig.pendingTimeFormat && (!elig.reasons || elig.reasons.length === 0)) {
-              gateOK = true;
-            }
-
-            if (typeof showModalHint === 'function' && (top.mode==='edit' || top.mode==='create')) {
-              if (elig && Array.isArray(elig.reasons) && elig.reasons.length && !elig.ok) {
-                const hasTs = elig.reasons.some(r => r && r.code === 'TS_BOUNDARY_VIOLATION');
-                if (!hasTs) {
-                  const msg = elig.reasons.map(r => r && r.message).filter(Boolean).join(' • ');
-                  if (msg) showModalHint(msg, 'warn');
-                }
-              } else if (elig && elig.pendingTimeFormat && elig.tip) {
-                showModalHint(elig.tip, 'ok');
-              }
-            }
-          } catch { gateOK = true; }
+      if (elig && Array.isArray(elig.reasons)) {
+        const tsReason = elig.reasons.find(r => r && r.code === 'TS_BOUNDARY_VIOLATION');
+        if (tsReason) {
+          gateOK = false;
+          if (typeof showModalHint === 'function') showModalHint(tsReason.message || 'Dates exclude existing timesheets.', 'warn');
         }
-
-        btnSave.disabled = (top.entity === 'contracts')
-          ? (top._saving || ((top.kind !== 'contract-clone-extend') && !top.isDirty) || !gateOK)
-          : (top._saving);
       }
+
+      // If Save would otherwise be allowed, surface a *polite* warning when candidate is missing.
+      if ((top.mode==='edit' || top.mode==='create') && elig && elig.ok) {
+        const missingCand = (elig.reasons || []).some(r => r && r.code === 'MISSING_CANDIDATE');
+        if (missingCand && typeof showModalHint === 'function') {
+          showModalHint('No candidate selected — this contract will be saved as <Unassigned>.', 'warn');
+        }
+      }
+
+      if (!gateOK && elig && elig.pendingTimeFormat && (!elig.reasons || elig.reasons.length === 0)) {
+        gateOK = true;
+      }
+
+      if (typeof showModalHint === 'function' && (top.mode==='edit' || top.mode==='create')) {
+        if (elig && Array.isArray(elig.reasons) && elig.reasons.length && !elig.ok) {
+          const hasTs = elig.reasons.some(r => r && r.code === 'TS_BOUNDARY_VIOLATION');
+          if (!hasTs) {
+            const msg = elig.reasons.map(r => r && r.message).filter(Boolean).join(' • ');
+            if (msg) showModalHint(msg, 'warn');
+          }
+        } else if (elig && elig.pendingTimeFormat && elig.tip) {
+          showModalHint(elig.tip, 'ok');
+        }
+      }
+    } catch { gateOK = true; }
+  }
+
+  btnSave.disabled = (top.entity === 'contracts')
+    ? (top._saving || ((top.kind !== 'contract-clone-extend') && !top.isDirty) || !gateOK)
+    : (top._saving);
+}
+
     }
 
     setCloseLabel();
@@ -17697,6 +17906,51 @@ async function commitContractCalendarStage(contractId) {
   clearContractCalendarStageState(contractId);
   L('DONE: stage cleared for', contractId);
   return { ok: true, detail: 'calendar saved', removedAll: false };
+}
+
+
+async function duplicateContract(contractId, { count } = {}) {
+  const n = Number(count || 1);
+  if (!Number.isInteger(n) || n < 1 || n > 10) {
+    return { ok: false, message: 'count must be an integer between 1 and 10' };
+  }
+
+  try {
+    const url = API(`/api/contracts/${encodeURIComponent(contractId)}/duplicate`);
+    const res = await authFetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ count: n })
+    });
+
+    // Non-2xx → try to surface a useful error
+    if (!res.ok) {
+      let msg = `Duplicate failed (${res.status})`;
+      try {
+        const txt = await res.text();
+        if (txt) msg = txt;
+      } catch {}
+      return { ok: false, message: msg };
+    }
+
+    let data = null;
+    try {
+      data = await res.json();
+    } catch {
+      data = null;
+    }
+
+    // Backend returns: { source_contract_id, count, duplicates: [...] }
+    return {
+      ok: true,
+      ...(data || {}),
+    };
+  } catch (e) {
+    return {
+      ok: false,
+      message: e?.message || 'Duplicate failed'
+    };
+  }
 }
 
 
