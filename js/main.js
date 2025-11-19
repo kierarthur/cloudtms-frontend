@@ -3252,32 +3252,57 @@ function openContract(row) {
         let std_hours_json = ghFilled ? gh : (base.std_hours_json ?? null);
         if (!std_hours_json && fs.main && fs.main.__hours) std_hours_json = fs.main.__hours;
 
-        const days = ['mon','tue','wed','thu','fri','sat','sun'];
-        const get = (n) => fromFS(n, fromFD(n, ''));
-        const hhmmOk = (v) => /^\d{2}:\d{2}$/.test(String(v||'').trim());
-        const normHHMM = (v) => {
-          const t = String(v || '').trim();
-          if (!t) return '';
-          const m = t.match(/^(\d{1,2})(?::?(\d{2}))$/);
-          if (!m) return '';
-          const h = +m[1], mi = +m[2];
-          if (Number.isNaN(h) || Number.isNaN(mi) || h < 0 || h > 23 || mi < 0 || mi > 59) return '';
-          return String(h).padStart(2,'0') + ':' + String(mi).padStart(2,'0');
-        };
-        const schedule = {};
-        for (const d2 of days) {
-          const s = normHHMM(get(`${d2}_start`));
-          const e = normHHMM(get(`${d2}_end`));
-          const br = get(`${d2}_break`);
-          if (hhmmOk(s) && hhmmOk(e)) {
-            schedule[d2] = { start: s, end: e, break_minutes: Math.max(0, Number(br||0)) };
-          }
-        }
-        let std_schedule_json = Object.keys(schedule).length ? schedule : null;
-        if (!std_schedule_json) {
-          if (fs.main && fs.main.__template) std_schedule_json = fs.main.__template;
-          else if (base.std_schedule_json)   std_schedule_json = base.std_schedule_json;
-        }
+     const days = ['mon','tue','wed','thu','fri','sat','sun'];
+const get = (n) => fromFS(n, fromFD(n, ''));
+const hhmmOk = (v) => /^\d{2}:\d{2}$/.test(String(v||'').trim());
+const normHHMM = (v) => {
+  const t = String(v || '').trim();
+  if (!t) return '';
+  const m = t.match(/^(\d{1,2})(?::?(\d{2}))$/);
+  if (!m) return '';
+  const h = +m[1], mi = +m[2];
+  if (Number.isNaN(h) || Number.isNaN(mi) || h < 0 || h > 23 || mi < 0 || mi > 59) return '';
+  return String(h).padStart(2,'0') + ':' + String(mi).padStart(2,'0');
+};
+
+const schedule = {};
+let hasAnySchedule = false;
+
+for (const d2 of days) {
+  const s  = normHHMM(get(`${d2}_start`));
+  const e  = normHHMM(get(`${d2}_end`));
+  const br = get(`${d2}_break`);
+
+  if (hhmmOk(s) && hhmmOk(e)) {
+    hasAnySchedule = true;
+    schedule[d2] = {
+      start: s,
+      end:   e,
+      break_minutes: Math.max(0, Number(br || 0))
+    };
+  } else {
+    // Explicitly clear this day when we are sending a schedule
+    schedule[d2] = {
+      start: null,
+      end:   null,
+      break_minutes: 0
+    };
+  }
+}
+
+let std_schedule_json = null;
+// If we have ANY schedule defined (e.g. from preset or manual edits),
+// treat this as the full authoritative week and overwrite all days,
+// including blanks (Thu etc).
+if (hasAnySchedule) {
+  std_schedule_json = schedule;
+} else if (fs.main && fs.main.__template) {
+  // No times anywhere → fall back to existing template
+  std_schedule_json = fs.main.__template;
+} else if (base.std_schedule_json) {
+  std_schedule_json = base.std_schedule_json;
+}
+
 
         const prevStartIso = base.start_date || null;
         const prevEndIso   = base.end_date   || null;
@@ -14905,10 +14930,17 @@ mergedRowForTab(k) {
   // Default merge (drops empty strings via stripEmpty)
   const out = { ...base, ...stripEmpty(mainStaged) };
 
-  // Keep non-DOM baselines visible
+  // Keep non-DOM baselines visible, but let staged template override base schedule
   try {
-    if (!out.std_schedule_json && mainStaged.__template) out.std_schedule_json = mainStaged.__template;
-    if (!out.std_hours_json   && mainStaged.__hours)    out.std_hours_json    = mainStaged.__hours;
+    // 🔹 CHANGE: always prefer the staged __template if present
+    if (mainStaged.__template) {
+      out.std_schedule_json = mainStaged.__template;
+    }
+
+    if (!out.std_hours_json && mainStaged.__hours) {
+      out.std_hours_json = mainStaged.__hours;
+    }
+
     if (Object.prototype.hasOwnProperty.call(mainStaged, '__bucket_labels')) {
       out.bucket_labels_json = mainStaged.__bucket_labels;
     }
