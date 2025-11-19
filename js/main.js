@@ -14925,6 +14925,7 @@ persistCurrentTabState() {
   L('persistCurrentTabState EXIT', { forId: fs.__forId, mainKeys: Object.keys(fs.main||{}), payKeys: Object.keys(fs.pay||{}) });
 },
 
+// inside showModal(...), in the `const frame = { ... }` object:
 mergedRowForTab(k) {
   L('mergedRowForTab ENTER', { k });
   const base = { ...(window.modalCtx?.data || {}) };
@@ -14937,25 +14938,39 @@ mergedRowForTab(k) {
   const mainStaged = same ? (fs.main || {}) : {};
   const payStaged  = same ? (fs.pay  || {}) : {};
 
+  // Default merge (drops empty strings via stripEmpty)
   const out = { ...base, ...stripEmpty(mainStaged) };
 
-  // Ensure non-DOM baselines remain visible in the merged row
+  // Keep non-DOM baselines visible
   try {
     if (!out.std_schedule_json && mainStaged.__template) out.std_schedule_json = mainStaged.__template;
     if (!out.std_hours_json   && mainStaged.__hours)    out.std_hours_json    = mainStaged.__hours;
-
-    // ▶ FIX: always prefer staged bucket labels (including explicit blanks)
     if (Object.prototype.hasOwnProperty.call(mainStaged, '__bucket_labels')) {
       out.bucket_labels_json = mainStaged.__bucket_labels;
     }
   } catch {}
 
+  // ✨ NEW: preserve schedule fields even when blank
+  // (so an applied preset with missing days truly overwrites prior values to empty)
+  try {
+    const days = ['mon','tue','wed','thu','fri','sat','sun'];
+    const parts = ['start','end','break'];
+    days.forEach(d => {
+      parts.forEach(p => {
+        const key = `${d}_${p}`;
+        if (Object.prototype.hasOwnProperty.call(mainStaged, key)) {
+          // Use the staged value verbatim, including ''
+          out[key] = mainStaged[key];
+        }
+      });
+    });
+  } catch {}
+
+  // Rates: merge staged pay/charge families into view row
   try {
     const mergedRates = { ...(out.rates_json || base.rates_json || {}) };
     for (const [kk, vv] of Object.entries(payStaged)) {
-      if (/^(paye_|umb_|charge_)/.test(kk)) {
-        mergedRates[kk] = vv;
-      }
+      if (/^(paye_|umb_|charge_)/.test(kk)) mergedRates[kk] = vv;
     }
     out.rates_json = mergedRates;
   } catch (e) {
@@ -14970,6 +14985,7 @@ mergedRowForTab(k) {
   });
   return out;
 },
+
 
    _attachDirtyTracker() {
     if (this._detachDirty) { try { this._detachDirty(); } catch {} this._detachDirty = null; }
