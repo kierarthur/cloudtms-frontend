@@ -5406,10 +5406,20 @@ function applyRatePresetToContractForm(preset, payMethod /* 'PAYE'|'UMBRELLA' */
     });
   }
 
+  // Format helper: 2 decimal places if numeric, otherwise leave as-is
+  const as2dpRate = (raw) => {
+    if (raw == null || raw === '') return '';
+    const n = Number(raw);
+    return Number.isFinite(n) ? n.toFixed(2) : String(raw);
+  };
+
   const write = (name, raw) => {
-    const v = (raw == null || raw === '') ? '' : String(raw);
-    const isRate = /^(paye_|umb_|charge_)/.test(name);
-    const prev = isRate ? fs.pay[name] : fs.main[name];
+    const isRate = /^(paye_|umb_|charge_)/.test(name) || /^mileage_(pay|charge)_rate$/.test(name);
+    const v = (raw == null || raw === '')
+      ? ''
+      : (isRate ? as2dpRate(raw) : String(raw));
+
+    const prev = /^(paye_|umb_|charge_)/.test(name) ? fs.pay[name] : fs.main[name];
 
     let el = null;
     let hit = 'none';
@@ -5462,26 +5472,21 @@ function applyRatePresetToContractForm(preset, payMethod /* 'PAYE'|'UMBRELLA' */
       const fieldName = `${p}_${b}`;
       if (!Object.prototype.hasOwnProperty.call(preset, fieldName)) return;
       const raw = preset[fieldName];
-      const finalVal =
-        (raw === null || raw === '') ? '' :
-        (Number.isFinite(Number(raw)) ? String(Number(raw)) : String(raw));
+      const finalVal = as2dpRate(raw);
       write(fieldName, finalVal);
     });
   });
 
   // ─────────────────────────────────────────────────────────────
-  // NEW: Mileage — copy if present on the preset; leave untouched if absent
+  // Mileage — copy if present on the preset; leave untouched if absent
   // ─────────────────────────────────────────────────────────────
-  const as2dp = (raw) => {
-    if (raw == null || raw === '') return '';
-    const n = Number(raw);
-    return Number.isFinite(n) ? n.toFixed(2) : String(raw);
-  };
+  const as2dpMileage = as2dpRate; // same behaviour
+
   if (Object.prototype.hasOwnProperty.call(preset, 'mileage_pay_rate')) {
-    write('mileage_pay_rate', as2dp(preset.mileage_pay_rate));
+    write('mileage_pay_rate', as2dpMileage(preset.mileage_pay_rate));
   }
   if (Object.prototype.hasOwnProperty.call(preset, 'mileage_charge_rate')) {
-    write('mileage_charge_rate', as2dp(preset.mileage_charge_rate));
+    write('mileage_charge_rate', as2dpMileage(preset.mileage_charge_rate));
   }
 
   // ─────────────────────────────────────────────────────────────
@@ -10481,11 +10486,25 @@ async function mountCandidateRatesTab() {
 }
 
 // Mount logic for Contracts → Rates tab (hide/show groups, compute margins, handle preset buttons)
+
 function mountContractRatesTab() {
   const root = byId('contractRatesTab'); if (!root) return;
 
   const form = document.querySelector('#contractForm');
   const payMethodSel = form?.querySelector('select[name="pay_method_snapshot"], select[name="default_pay_method_snapshot"]');
+
+  // Helper: normalise to 2dp if numeric, leave as-is otherwise
+  const normaliseRateInput = (el) => {
+    if (!el) return;
+    let v = (el.value || '').trim();
+    if (!v) return;
+    const n = Number(v);
+    if (!Number.isFinite(n)) return;
+    const fixed = n.toFixed(2);
+    if (fixed !== v) {
+      el.value = fixed;
+    }
+  };
 
   try {
     const fs = (window.modalCtx.formState ||= { __forId:(window.modalCtx.data?.id ?? window.modalCtx.openToken ?? null), main:{}, pay:{} });
@@ -10495,7 +10514,10 @@ function mountContractRatesTab() {
       fs.pay = fs.pay || {};
       for (const k of buckets) {
         const v = saved[k];
-        if (v === 0 || (typeof v === 'number' && Number.isFinite(v))) fs.pay[k] = String(v);
+        if (v === 0 || (typeof v === 'number' && Number.isFinite(v))) {
+          // store as 2dp string
+          fs.pay[k] = Number(v).toFixed(2);
+        }
       }
     }
   } catch {}
@@ -10518,14 +10540,55 @@ function mountContractRatesTab() {
     });
   }
 
-  const inputs = root.querySelectorAll('input[name^="paye_"], input[name^="umb_"], input[name^="charge_"]');
-  inputs.forEach(el => {
+  const rateInputs = root.querySelectorAll('input[name^="paye_"], input[name^="umb_"], input[name^="charge_"]');
+
+  rateInputs.forEach(el => {
     if (!el.__wired_mg) {
       el.__wired_mg = true;
-      el.addEventListener('input', () => { if (typeof computeContractMargins === 'function') computeContractMargins(); });
+
+      // Live margins on input
+      el.addEventListener('input', () => {
+        if (typeof computeContractMargins === 'function') computeContractMargins();
+      });
+
+      // Snap to 2dp on blur/tab away
+      el.addEventListener('blur', () => {
+        const before = el.value;
+        normaliseRateInput(el);
+        if (el.value !== before && typeof setContractFormValue === 'function') {
+          setContractFormValue(el.name, el.value);
+        } else if (typeof setContractFormValue === 'function') {
+          // still stage even if unchanged, to keep formState in sync
+          setContractFormValue(el.name, el.value);
+        }
+        if (typeof computeContractMargins === 'function') computeContractMargins();
+      });
     }
   });
 
+  // Mileage inputs: same behaviour (2dp on blur)
+  const mileageInputs = root.querySelectorAll('input[name="mileage_pay_rate"], input[name="mileage_charge_rate"]');
+  mileageInputs.forEach(el => {
+    if (!el.__wired_mg) {
+      el.__wired_mg = true;
+
+      el.addEventListener('input', () => {
+        // margins may or may not depend on mileage; cheap to recompute anyway
+        if (typeof computeContractMargins === 'function') computeContractMargins();
+      });
+
+      el.addEventListener('blur', () => {
+        const before = el.value;
+        normaliseRateInput(el);
+        if (typeof setContractFormValue === 'function') {
+          setContractFormValue(el.name, el.value);
+        }
+        if (typeof computeContractMargins === 'function') computeContractMargins();
+      });
+    }
+  });
+
+  // One-time wiring for negative margin hints + bucket label updates
   if (!root.__wiredNeg) {
     root.__wiredNeg = true;
     window.addEventListener('contract-margins-updated', (ev) => {
@@ -10575,9 +10638,26 @@ function mountContractRatesTab() {
     });
   }
 
+  // Initial normalisation pass for values already in the DOM
+  try {
+    // Rates
+    rateInputs.forEach(el => {
+      normaliseRateInput(el);
+      if (typeof setContractFormValue === 'function') {
+        setContractFormValue(el.name, el.value);
+      }
+    });
+    // Mileage
+    mileageInputs.forEach(el => {
+      normaliseRateInput(el);
+      if (typeof setContractFormValue === 'function') {
+        setContractFormValue(el.name, el.value);
+      }
+    });
+  } catch {}
+
   if (typeof computeContractMargins === 'function') computeContractMargins();
 }
-
 
 // Open preset picker (card grid) and return chosen data
 
