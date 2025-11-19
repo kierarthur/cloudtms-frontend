@@ -769,77 +769,77 @@ function openRatePresetPicker(applyCb, opts = {}) {
     }
   };
 
- // REPLACE your existing onApply with this version
-const onApply = async () => {
-  if (applyInFlight) return false;
-  if (!pickerRows || pickerSelectedIndex < 0) return false;
-  const chosen = pickerRows[pickerSelectedIndex];
-  if (!chosen) return false;
+  // onApply closes the child first, then mutates the parent next tick, then runs applyCb
+  const onApply = async () => {
+    if (applyInFlight) return false;
+    if (!pickerRows || pickerSelectedIndex < 0) return false;
+    const chosen = pickerRows[pickerSelectedIndex];
+    if (!chosen) return false;
 
-  applyInFlight = true;
-  L('onApply: applying preset row', { chosen });
+    applyInFlight = true;
+    L('onApply: applying preset row', { chosen });
 
-  // Keep a stable reference to the parent BEFORE closing the child
-  const parentBeforeClose = getParentContractsFrame();
+    // Capture parent BEFORE closing the child
+    const parentBeforeClose = getParentContractsFrame();
 
-  try {
-    // 1) Apply changes to the parent
-    if (typeof applyCb === 'function') {
-      await applyCb(chosen);
-    }
-  } catch (e) {
-    console.error('[PRESETS] onApply failed during applyCb; keeping picker open', e);
-    applyInFlight = false;
-    return false; // keep open to let the user recover
-  }
-
-  // 2) Close the CHILD FIRST so the parent becomes the active/top frame
-  try {
-    if (typeof window.closeModal === 'function') {
-      window.closeModal();
-    } else if (typeof closeModal === 'function') {
-      closeModal();
-    }
-  } catch (e) {
-    console.error('[PRESETS] closeModal failed', e);
-    // fall-through: still try to focus the parent
-  }
-
-  // 3) Next tick, safely update the PARENT (now top-of-stack)
-  setTimeout(() => {
+    // 1) Close the CHILD FIRST so the parent becomes the active/top frame
     try {
-      const fr = parentBeforeClose || getParentContractsFrame();
-      if (!fr) return;
-
-      // Make sure parent is in edit mode (safe now the child is gone)
-      if (typeof window.setFrameMode === 'function') {
-        window.setFrameMode(fr, 'edit');
-      } else {
-        fr.mode = 'edit';
-        fr._updateButtons && fr._updateButtons();
+      if (typeof window.closeModal === 'function') {
+        window.closeModal();
+      } else if (typeof closeModal === 'function') {
+        closeModal();
       }
-
-      // Optional: focus the Rates tab so the user sees applied values
-      if (fr._hasMountedOnce && typeof fr.setTab === 'function') {
-        fr.setTab('rates');
-      }
-
-      // Ensure header/buttons are refreshed after regaining focus
-      fr._updateButtons && fr._updateButtons();
-
-      // Broadcast dirtiness AFTER child is closed
-      try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
     } catch (e) {
-      console.error('[PRESETS] post-close parent focus failed', e);
-    } finally {
-      applyInFlight = false;
+      console.error('[PRESETS] closeModal failed', e);
+      // we'll still proceed
     }
-  }, 0);
 
-  // Important: return FALSE so showModal won't also try to auto-close.
-  // We already closed the child ourselves, avoiding any double-close.
-  return false;
-};
+    // 2) Next tick, safely update the PARENT and then apply the preset
+    setTimeout(async () => {
+      try {
+        const fr = parentBeforeClose || getParentContractsFrame();
+        if (fr) {
+          // Ensure parent is in edit mode (safe now the child is gone)
+          try {
+            if (typeof window.setFrameMode === 'function') {
+              window.setFrameMode(fr, 'edit');
+            } else {
+              fr.mode = 'edit';
+              fr._updateButtons && fr._updateButtons();
+            }
+          } catch (e) {
+            console.error('[PRESETS] setFrameMode on parent failed', e);
+          }
+
+          // Focus the Rates tab so the user sees the applied values
+          try {
+            if (fr._hasMountedOnce && typeof fr.setTab === 'function') {
+              fr.setTab('rates');
+            }
+          } catch (e) {
+            console.error('[PRESETS] parent.setTab("rates") failed', e);
+          }
+        }
+
+        // 🔑 Apply AFTER the picker is closed and the parent is active
+        if (typeof applyCb === 'function') {
+          await applyCb(chosen);
+        }
+
+        // Refresh header/buttons and mark dirty AFTER child is closed
+        try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
+        fr?._updateButtons && fr._updateButtons();
+
+      } catch (e) {
+        console.error('[PRESETS] deferred onApply failed', e);
+      } finally {
+        applyInFlight = false;
+      }
+    }, 0);
+
+    // We closed the picker ourselves; return false to avoid a double-close
+    return false;
+  };
 
   showModal(
     'Rate Presets',
@@ -854,6 +854,9 @@ const onApply = async () => {
       const radios = Array.from(root?.querySelectorAll('input[name="rp_scope"]') || []);
       if (!tbody) return;
 
+      // Scope any header/button lookups to THIS picker modal
+      const pickerModalEl = root?.closest('.modal');
+
       const scopeVal = () =>
         (radios.find(r => r.checked)?.value || (client_id ? 'CLIENT' : 'GLOBAL'));
 
@@ -867,19 +870,17 @@ const onApply = async () => {
 
       const updateApplyState = () => {
         const canApply = !!(pickerRows.length && pickerSelectedIndex >= 0);
-        const btn = document.getElementById('btnSave');
 
-        pickerSelectedId =
-          pickerRows && pickerSelectedIndex >= 0 && pickerRows[pickerSelectedIndex]
-            ? (pickerRows[pickerSelectedIndex].id || null)
-            : null;
-
+        // Only touch the picker’s Save button
+        const btn = pickerModalEl?.querySelector('#btnSave');
         if (btn) {
           btn.disabled = !canApply;
           btn.title = canApply ? '' : 'Select a preset to apply';
         }
+
+        // Only update the picker frame (not the parent)
         const fr = window.__getModalFrame?.();
-        if (fr && typeof fr._updateButtons === 'function') {
+        if (fr?.kind === 'rate-presets-picker' && typeof fr._updateButtons === 'function') {
           fr.__canSave = canApply;
           fr._updateButtons();
         }
@@ -961,7 +962,7 @@ const onApply = async () => {
         paint();
       };
 
-      // ✅ Change: do NOT repaint on simple click; keep the row node for the 2nd click → dblclick
+      // Do NOT repaint on simple click; keep the row for dblclick
       tbody.addEventListener('click', (e) => {
         const tr = e.target.closest('tr[data-i]');
         if (!tr) return;
@@ -979,33 +980,29 @@ const onApply = async () => {
         updateApplyState();
       });
 
-      // ✅ Change: make dblclick robust; fall back to current selection if tr is not found
-   tbody.addEventListener('dblclick', async (e) => {
-  let idx = pickerSelectedIndex;
-  const tr = e.target.closest('tr[data-i]');
-  if (tr && Number.isFinite(+tr.getAttribute('data-i'))) {
-    idx = +tr.getAttribute('data-i');
-  }
-  if (!Number.isFinite(idx) || idx < 0) return;
+      // Dblclick → apply (onApply handles closing & parent updates)
+      tbody.addEventListener('dblclick', async (e) => {
+        let idx = pickerSelectedIndex;
+        const tr = e.target.closest('tr[data-i]');
+        if (tr && Number.isFinite(+tr.getAttribute('data-i'))) {
+          idx = +tr.getAttribute('data-i');
+        }
+        if (!Number.isFinite(idx) || idx < 0) return;
 
-  pickerSelectedIndex = idx;
-  pickerSelectedId = pickerRows[idx]?.id || null;
-  L('row dblclick → apply', { idx, id: pickerSelectedId });
+        pickerSelectedIndex = idx;
+        pickerSelectedId = pickerRows[idx]?.id || null;
+        L('row dblclick → apply', { idx, id: pickerSelectedId });
 
-  // onApply now handles closing the child and post-close parent updates
-  await onApply();
+        await onApply();
 
-  e.preventDefault();
-  e.stopPropagation();
-});
-
+        e.preventDefault();
+        e.stopPropagation();
+      });
 
       search?.addEventListener('input', fetchRows);
       radios.forEach(r => r.addEventListener('change', fetchRows));
 
       await fetchRows();
-
-    
 
       try {
         const fr = window.__getModalFrame?.();
