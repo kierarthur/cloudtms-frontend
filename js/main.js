@@ -701,6 +701,7 @@ function computeRatePresetMargins(state){
 
   return out;
 }
+
 function openRatePresetPicker(applyCb, opts = {}) {
   const LOG = (typeof window.__LOG_RATES === 'boolean') ? window.__LOG_RATES : true;
   const L   = (...a)=> { if (LOG) console.log('[PRESETS]', ...a); };
@@ -950,11 +951,13 @@ function openRatePresetPicker(applyCb, opts = {}) {
           console.error('[PRESETS] fetchRows error', e);
           pickerRows = [];
         }
+        // reset selection
         pickerSelectedIndex = -1;
         pickerSelectedId = null;
         paint();
       };
 
+      // ✅ Change: do NOT repaint on simple click; keep the row node for the 2nd click → dblclick
       tbody.addEventListener('click', (e) => {
         const tr = e.target.closest('tr[data-i]');
         if (!tr) return;
@@ -964,17 +967,27 @@ function openRatePresetPicker(applyCb, opts = {}) {
         pickerSelectedIndex = idx;
         pickerSelectedId = pickerRows[idx]?.id || null;
         L('row click → select', { idx, id: pickerSelectedId });
-        paint();
+
+        // Toggle selection classes without rebuilding the tbody
+        tbody.querySelectorAll('tr.active, tr.selected').forEach(n => n.classList.remove('active','selected'));
+        tr.classList.add('active','selected');
+
+        updateApplyState();
       });
 
+      // ✅ Change: make dblclick robust; fall back to current selection if tr is not found
       tbody.addEventListener('dblclick', async (e) => {
+        let idx = pickerSelectedIndex;
         const tr = e.target.closest('tr[data-i]');
-        if (!tr) return;
-        const idx = +tr.getAttribute('data-i');
-        if (!Number.isFinite(idx)) return;
+        if (tr && Number.isFinite(+tr.getAttribute('data-i'))) {
+          idx = +tr.getAttribute('data-i');
+        }
+        if (!Number.isFinite(idx) || idx < 0) return;
+
         pickerSelectedIndex = idx;
         pickerSelectedId = pickerRows[idx]?.id || null;
         L('row dblclick → apply', { idx, id: pickerSelectedId });
+
         const ok = await onApply();
         if (ok !== false) closeSelf();
         e.preventDefault();
@@ -1011,7 +1024,6 @@ function openRatePresetPicker(applyCb, opts = {}) {
     fr._onSave = onApply;
   }, 0);
 }
-
 
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -5382,7 +5394,6 @@ function setContractFormValue(name, value) {
   try { window.dispatchEvent(new CustomEvent('modal-dirty')); } catch {}
 }
 
-
 function applyRatePresetToContractForm(preset, payMethod /* 'PAYE'|'UMBRELLA' */) {
   if (!preset) return;
 
@@ -5449,12 +5460,7 @@ function applyRatePresetToContractForm(preset, payMethod /* 'PAYE'|'UMBRELLA' */
     }
 
     if (LOGC) {
-      console.log('[CONTRACTS] preset write BEFORE', {
-        name,
-        prev,
-        next: v,
-        hit
-      });
+      console.log('[CONTRACTS] preset write BEFORE', { name, prev, next: v, hit });
     }
 
     if (el && canTouchDom) {
@@ -5467,16 +5473,9 @@ function applyRatePresetToContractForm(preset, payMethod /* 'PAYE'|'UMBRELLA' */
 
     // single source of truth: let setContractFormValue stage + fire margins/dirty
     if (typeof setContractFormValue === 'function') {
-      try {
-        setContractFormValue(name, v);
-      } catch (e) {
-        if (LOGC) {
-          console.warn('[CONTRACTS] setContractFormValue from preset failed', {
-            name,
-            v,
-            err: e && e.message
-          });
-        }
+      try { setContractFormValue(name, v); }
+      catch (e) {
+        if (LOGC) console.warn('[CONTRACTS] setContractFormValue from preset failed', { name, v, err: e && e.message });
       }
     }
   };
@@ -5508,6 +5507,21 @@ function applyRatePresetToContractForm(preset, payMethod /* 'PAYE'|'UMBRELLA' */
   });
 
   // ─────────────────────────────────────────────────────────────
+  // NEW: Mileage — copy if present on the preset; leave untouched if absent
+  // ─────────────────────────────────────────────────────────────
+  const as2dp = (raw) => {
+    if (raw == null || raw === '') return '';
+    const n = Number(raw);
+    return Number.isFinite(n) ? n.toFixed(2) : String(raw);
+  };
+  if (Object.prototype.hasOwnProperty.call(preset, 'mileage_pay_rate')) {
+    write('mileage_pay_rate', as2dp(preset.mileage_pay_rate));
+  }
+  if (Object.prototype.hasOwnProperty.call(preset, 'mileage_charge_rate')) {
+    write('mileage_charge_rate', as2dp(preset.mileage_charge_rate));
+  }
+
+  // ─────────────────────────────────────────────────────────────
   // Bucket labels: if any labels present, overwrite for those keys;
   // even blank values wipe existing labels.
   // ─────────────────────────────────────────────────────────────
@@ -5530,9 +5544,8 @@ function applyRatePresetToContractForm(preset, payMethod /* 'PAYE'|'UMBRELLA' */
 
   // ─────────────────────────────────────────────────────────────
   // Standard schedule:
-  // - If NO days at all in std_schedule_json → do nothing (leave as is)
-  // - If ANY day present → overwrite ALL 7 days
-  //   (including wiping existing values to blank where preset is empty)
+  // - If NO days at all in std_schedule_json → do nothing
+  // - If ANY day present → overwrite ALL 7 days (blanks where absent)
   // ─────────────────────────────────────────────────────────────
   const days = ['mon','tue','wed','thu','fri','sat','sun'];
 
@@ -5562,7 +5575,6 @@ function applyRatePresetToContractForm(preset, payMethod /* 'PAYE'|'UMBRELLA' */
         write(`${d}_end`,   end);
         write(`${d}_break`, brStr);
 
-        // Only add to template if we have a proper start/end pair
         if (start && end) {
           template[d] = { start, end, break_minutes: brNum };
         }
@@ -5572,9 +5584,7 @@ function applyRatePresetToContractForm(preset, payMethod /* 'PAYE'|'UMBRELLA' */
     }
   }
 
-  // ─────────────────────────────────────────────────────────────
-  // Hours snapshot (from preset or from template)
-  // ─────────────────────────────────────────────────────────────
+  // Hours snapshot from preset or derived from template
   if (preset.std_hours_json) {
     fs.main.__hours = preset.std_hours_json;
   } else if (fs.main.__template) {
@@ -5602,9 +5612,7 @@ function applyRatePresetToContractForm(preset, payMethod /* 'PAYE'|'UMBRELLA' */
     fs.main.__hours = Object.keys(hours).length ? hours : null;
   }
 
-  // ─────────────────────────────────────────────────────────────
-  // Non-blocking warnings for pay-method / rate-family mismatches
-  // ─────────────────────────────────────────────────────────────
+  // Non-blocking warnings for pay-method / family mismatches
   const hasFamily = (fam) => BUCKETS.some(k => {
     const v = preset[`${fam}_${k}`];
     return v !== undefined && v !== null && String(v).trim() !== '';
@@ -5632,17 +5640,10 @@ function applyRatePresetToContractForm(preset, payMethod /* 'PAYE'|'UMBRELLA' */
     }
   } catch {}
 
-  // ─────────────────────────────────────────────────────────────
   // Recompute margins + mark modal dirty
-  // ─────────────────────────────────────────────────────────────
-  try {
-    if (typeof computeContractMargins === 'function') {
-      computeContractMargins();
-    }
-  } catch {}
+  try { if (typeof computeContractMargins === 'function') computeContractMargins(); } catch {}
 
   try {
-    // Directly mark the contracts frame dirty (don’t rely on top-of-stack)
     const fr = getContractsFrame();
     if (fr) {
       fr.isDirty = true;
