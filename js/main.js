@@ -4196,10 +4196,11 @@ try {
           }
 
           // Choose preset wiring: may run on every wire(), guarded per-button
-     const chooseBtn = document.getElementById('btnChoosePreset');
+ // Choose preset wiring: may run on every wire(), guarded per-button
+const chooseBtn = document.getElementById('btnChoosePreset');
 if (chooseBtn && !chooseBtn.__wired) {
   chooseBtn.__wired = true;
-   chooseBtn.addEventListener('click', () => {
+  chooseBtn.addEventListener('click', () => {
     console.log('[CONTRACTS] Choose preset clicked');
 
     const payMethod = (function () {
@@ -4213,9 +4214,23 @@ if (chooseBtn && !chooseBtn.__wired) {
       } catch { return 'PAYE'; }
     })();
 
-    const formEl   = document.querySelector('#contractForm');
-    const clientId = formEl?.querySelector('[name="client_id"]')?.value?.trim() || null;
-    const start    = formEl?.querySelector('[name="start_date"]')?.value?.trim() || null;
+    const formEl = document.querySelector('#contractForm');
+    const fsMain = window.modalCtx?.formState?.main || {};
+
+    // Prefer staged state and modalCtx.data for client_id; DOM is last resort
+    let clientId =
+      (fsMain.client_id && String(fsMain.client_id).trim()) ||
+      (window.modalCtx?.data?.client_id && String(window.modalCtx.data.client_id).trim()) ||
+      (formEl?.querySelector('[name="client_id"]')?.value?.trim()) ||
+      null;
+
+    clientId = clientId || null; // normalise empty string to null
+
+    const start =
+      (formEl?.querySelector('[name="start_date"]')?.value?.trim()) ||
+      (fsMain.start_date && String(fsMain.start_date)) ||
+      (window.modalCtx?.data?.start_date && String(window.modalCtx.data.start_date)) ||
+      null;
 
     openRatePresetPicker(
       (preset) => {
@@ -4265,8 +4280,8 @@ if (chooseBtn && !chooseBtn.__wired) {
       }
     );
   });
-
 }
+
 
 
           // Full reset wiring: same pattern (per-button guard, not tied to __wiredStage)
