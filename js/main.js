@@ -12949,9 +12949,10 @@ function renderContractCalendarTab(ctx) {
        </div>`
     : ``);
 
-  // --- early hint when no candidate yet
-  if (!candId) {
-    if (LOGM) console.log('[CAL][contract] no candidate yet; render hint (with unassigned label)');
+  // --- early hint ONLY for brand-new contracts with no candidate
+  const hasId = !!c.id;
+  if (!hasId && !candId) {
+    if (LOGM) console.log('[CAL][contract] no candidate yet for NEW contract; render hint');
     return `
       <div id="${holderId}" class="tabc">
         <div class="info-row" style="margin:0 0 8px 0;font-size:13px;">
@@ -12998,9 +12999,11 @@ function renderContractCalendarTab(ctx) {
       } catch {}
 
       if (c.id) {
+        // EXISTING contract → always render calendar, even if candidate_id is null
         if (LOGM) console.log('[CAL][contract] render with real contract id', { id: c.id, win });
         await fetchAndRenderContractCalendar(c.id, { from: win.from, to: win.to, view: 'year' });
       } else {
+        // CREATE mode with candidate → candidate-wide planner
         if (LOGM) console.log('[CAL][contract] render in CREATE mode (candidate-wide) with token bucket', { token: currentKey, candId, weekEnding });
         await fetchAndRenderCandidateCalendarForContract(
           currentKey,
@@ -13020,7 +13023,14 @@ function renderContractCalendarTab(ctx) {
               try { showModalHint?.('Missing weeks staged (preview only). Save to persist.', 'warn'); } catch {}
             }
             const prev = byId('__calScroll')?.scrollTop || 0;
-            await fetchAndRenderContractCalendar(c.id, { from: window.__calState[c.id]?.win?.from, to: window.__calState[c.id]?.win?.to, view: window.__calState[c.id]?.view });
+            await fetchAndRenderContractCalendar(
+              c.id,
+              {
+                from: window.__calState[c.id]?.win?.from,
+                to:   window.__calState[c.id]?.win?.to,
+                view: window.__calState[c.id]?.view
+              }
+            );
             const sb = byId('__calScroll'); if (sb) sb.scrollTop = prev;
           });
         }
@@ -13036,7 +13046,14 @@ function renderContractCalendarTab(ctx) {
               try { showModalHint?.('All unsubmitted weeks staged for removal (preview only). Save to persist.', 'warn'); } catch {}
             }
             const prev = byId('__calScroll')?.scrollTop || 0;
-            await fetchAndRenderContractCalendar(c.id, { from: window.__calState[c.id]?.win?.from, to: window.__calState[c.id]?.win?.to, view: window.__calState[c.id]?.view });
+            await fetchAndRenderContractCalendar(
+              c.id,
+              {
+                from: window.__calState[c.id]?.win?.from,
+                to:   window.__calState[c.id]?.win?.to,
+                view: window.__calState[c.id]?.view
+              }
+            );
             const sb = byId('__calScroll'); if (sb) sb.scrollTop = prev;
           });
         }
@@ -13051,7 +13068,7 @@ function renderContractCalendarTab(ctx) {
         }
 
         // NEW: Duplicate Contract…
-             const btnDup = el.querySelector('#btnDuplicateContract');
+        const btnDup = el.querySelector('#btnDuplicateContract');
         if (btnDup && !btnDup.__wired) {
           btnDup.__wired = true;
           btnDup.addEventListener('click', async () => {
@@ -13088,7 +13105,7 @@ function renderContractCalendarTab(ctx) {
                 );
               } catch {}
 
-              // Optional: refresh lists / calendar
+              // Refresh list (and hence calendars/rows)
               try { await renderAll(); } catch {}
             } catch (e) {
               if (LOGM) console.warn('[CAL][contract] duplicate failed', e);
@@ -13096,7 +13113,6 @@ function renderContractCalendarTab(ctx) {
             }
           });
         }
-
       }
     } catch (e) {
       const el = byId(holderId); if (el) el.innerHTML = `<div class="error">Calendar load failed.</div>`;
