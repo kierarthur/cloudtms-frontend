@@ -769,73 +769,77 @@ function openRatePresetPicker(applyCb, opts = {}) {
     }
   };
 
-  const onApply = async () => {
-    if (applyInFlight) return false;
-    if (!pickerRows || pickerSelectedIndex < 0) return false;
-    const chosen = pickerRows[pickerSelectedIndex];
-    if (!chosen) return false;
+ // REPLACE your existing onApply with this version
+const onApply = async () => {
+  if (applyInFlight) return false;
+  if (!pickerRows || pickerSelectedIndex < 0) return false;
+  const chosen = pickerRows[pickerSelectedIndex];
+  if (!chosen) return false;
 
-    applyInFlight = true;
-    L('onApply: applying preset row', { chosen });
+  applyInFlight = true;
+  L('onApply: applying preset row', { chosen });
 
-    try {
-      const fr = getParentContractsFrame();
-      try {
-        if (fr) {
-          if (typeof window.setFrameMode === 'function') {
-            window.setFrameMode(fr, 'edit');
-          } else {
-            fr.mode = 'edit';
-            fr._updateButtons && fr._updateButtons();
-          }
-          if (LOG) {
-            const stack = window.__modalStack || [];
-            L('onApply: parent after setFrameMode', {
-              parentMode: fr.mode,
-              parentKind: fr.kind,
-              parentEntity: fr.entity,
-              stackDepth: stack.length
-            });
-          }
-        } else if (LOG) {
-          L('onApply: no parent contracts frame found');
-        }
-      } catch (e) {
-        console.error('[PRESETS] onApply parent mode/setTab error', e);
-      }
+  // Keep a stable reference to the parent BEFORE closing the child
+  const parentBeforeClose = getParentContractsFrame();
 
-      try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
-
-      try {
-        if (fr && fr._hasMountedOnce && typeof fr.setTab === 'function') {
-          fr.setTab('rates');
-        }
-      } catch (e) {
-        console.error('[PRESETS] onApply setTab(rates) failed', e);
-      }
-
-      if (typeof applyCb === 'function') {
-        await applyCb(chosen);
-      }
-
-      if (LOG) {
-        const fr2 = getParentContractsFrame();
-        L('onApply: after applyCb', {
-          parentMode: fr2?.mode,
-          parentKind: fr2?.kind,
-          parentEntity: fr2?.entity
-        });
-      }
-
-    } catch (e) {
-      console.error('[PRESETS] onApply failed; keeping picker open', e);
-      applyInFlight = false;
-      return false;
+  try {
+    // 1) Apply changes to the parent
+    if (typeof applyCb === 'function') {
+      await applyCb(chosen);
     }
-
+  } catch (e) {
+    console.error('[PRESETS] onApply failed during applyCb; keeping picker open', e);
     applyInFlight = false;
-    return true;
-  };
+    return false; // keep open to let the user recover
+  }
+
+  // 2) Close the CHILD FIRST so the parent becomes the active/top frame
+  try {
+    if (typeof window.closeModal === 'function') {
+      window.closeModal();
+    } else if (typeof closeModal === 'function') {
+      closeModal();
+    }
+  } catch (e) {
+    console.error('[PRESETS] closeModal failed', e);
+    // fall-through: still try to focus the parent
+  }
+
+  // 3) Next tick, safely update the PARENT (now top-of-stack)
+  setTimeout(() => {
+    try {
+      const fr = parentBeforeClose || getParentContractsFrame();
+      if (!fr) return;
+
+      // Make sure parent is in edit mode (safe now the child is gone)
+      if (typeof window.setFrameMode === 'function') {
+        window.setFrameMode(fr, 'edit');
+      } else {
+        fr.mode = 'edit';
+        fr._updateButtons && fr._updateButtons();
+      }
+
+      // Optional: focus the Rates tab so the user sees applied values
+      if (fr._hasMountedOnce && typeof fr.setTab === 'function') {
+        fr.setTab('rates');
+      }
+
+      // Ensure header/buttons are refreshed after regaining focus
+      fr._updateButtons && fr._updateButtons();
+
+      // Broadcast dirtiness AFTER child is closed
+      try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
+    } catch (e) {
+      console.error('[PRESETS] post-close parent focus failed', e);
+    } finally {
+      applyInFlight = false;
+    }
+  }, 0);
+
+  // Important: return FALSE so showModal won't also try to auto-close.
+  // We already closed the child ourselves, avoiding any double-close.
+  return false;
+};
 
   showModal(
     'Rate Presets',
@@ -976,31 +980,32 @@ function openRatePresetPicker(applyCb, opts = {}) {
       });
 
       // ✅ Change: make dblclick robust; fall back to current selection if tr is not found
-      tbody.addEventListener('dblclick', async (e) => {
-        let idx = pickerSelectedIndex;
-        const tr = e.target.closest('tr[data-i]');
-        if (tr && Number.isFinite(+tr.getAttribute('data-i'))) {
-          idx = +tr.getAttribute('data-i');
-        }
-        if (!Number.isFinite(idx) || idx < 0) return;
+   tbody.addEventListener('dblclick', async (e) => {
+  let idx = pickerSelectedIndex;
+  const tr = e.target.closest('tr[data-i]');
+  if (tr && Number.isFinite(+tr.getAttribute('data-i'))) {
+    idx = +tr.getAttribute('data-i');
+  }
+  if (!Number.isFinite(idx) || idx < 0) return;
 
-        pickerSelectedIndex = idx;
-        pickerSelectedId = pickerRows[idx]?.id || null;
-        L('row dblclick → apply', { idx, id: pickerSelectedId });
+  pickerSelectedIndex = idx;
+  pickerSelectedId = pickerRows[idx]?.id || null;
+  L('row dblclick → apply', { idx, id: pickerSelectedId });
 
-        const ok = await onApply();
-        if (ok !== false) closeSelf();
-        e.preventDefault();
-        e.stopPropagation();
-      });
+  // onApply now handles closing the child and post-close parent updates
+  await onApply();
+
+  e.preventDefault();
+  e.stopPropagation();
+});
+
 
       search?.addEventListener('input', fetchRows);
       radios.forEach(r => r.addEventListener('change', fetchRows));
 
       await fetchRows();
 
-      const btn = document.getElementById('btnSave');
-      if (btn) btn.textContent = 'Apply';
+    
 
       try {
         const fr = window.__getModalFrame?.();
@@ -14876,7 +14881,6 @@ const frame = {
     isDirty:false, _snapshot:null, _detachDirty:null, _detachGlobal:null, _hasMountedOnce:false, _wired:false, _closing:false, _saving:false, _confirmingDiscard:false,
     _applyDesired:null,
 
-
 persistCurrentTabState() {
   L('persistCurrentTabState ENTER', { mode: this.mode, currentTabKey: this.currentTabKey });
   if (!window.modalCtx || this.mode === 'view') { L('persist(skip)', { reason:'mode=view or no modalCtx', mode:this.mode }); return; }
@@ -14886,11 +14890,30 @@ persistCurrentTabState() {
   const fs = window.modalCtx.formState || { __forId: initial, main:{}, pay:{} };
   if (fs.__forId == null) fs.__forId = initial;
 
+  // Preserve schedule inputs even when blank ('') so cleared days don't get dropped
+  const keepScheduleBlanks = (obj) => {
+    const out = {};
+    const days = ['mon','tue','wed','thu','fri','sat','sun'];
+    const parts = ['start','end','break'];
+    days.forEach(d => {
+      parts.forEach(p => {
+        const k = `${d}_${p}`;
+        if (Object.prototype.hasOwnProperty.call(obj, k)) {
+          out[k] = (obj[k] == null ? '' : String(obj[k]));
+        }
+      });
+    });
+    return out;
+  };
+
   if (this.currentTabKey === 'main') {
     const sel = byId('tab-main') ? '#tab-main' : (byId('contractForm') ? '#contractForm' : null);
     if (sel) {
       const c = collectForm(sel);
-      fs.main = { ...(fs.main||{}), ...stripEmpty(c) };
+      // keep existing behavior for most fields, then re-add schedule blanks explicitly
+      const merged = { ...stripEmpty(c) };
+      const sched  = keepScheduleBlanks(c);
+      fs.main = { ...(fs.main||{}), ...merged, ...sched };
     }
   }
 
@@ -14914,7 +14937,10 @@ persistCurrentTabState() {
       const mainSel = byId('contractForm') ? '#contractForm' : null;
       if (mainSel) {
         const m = collectForm(mainSel);
-        fs.main = { ...(fs.main || {}), ...stripEmpty(m) };
+        // keep existing behavior for most fields, then re-add schedule blanks explicitly
+        const mergedMain = { ...stripEmpty(m) };
+        const sched      = keepScheduleBlanks(m);
+        fs.main = { ...(fs.main || {}), ...mergedMain, ...sched };
       }
     } catch (e) {
       L('persistCurrentTabState contracts/rates failed', e);
@@ -14950,7 +14976,7 @@ mergedRowForTab(k) {
     }
   } catch {}
 
-  // ✨ NEW: preserve schedule fields even when blank
+  // ✨ Preserve schedule fields even when blank
   // (so an applied preset with missing days truly overwrites prior values to empty)
   try {
     const days = ['mon','tue','wed','thu','fri','sat','sun'];
