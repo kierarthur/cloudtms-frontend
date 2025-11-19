@@ -752,24 +752,10 @@ function openRatePresetPicker(applyCb, opts = {}) {
       </div>
     </div>`;
 
-  const getParentContractsFrame = () => {
-    const stack = window.__modalStack || [];
-    for (let i = stack.length - 2; i >= 0; i--) {
-      const f = stack[i];
-      if (f && (f.kind === 'contracts' || f.entity === 'contracts')) return f;
-    }
-    return null;
-  };
+  // We no longer need to manually close or mutate the parent;
+  // the modal framework will do that via its Save pipeline.
 
-  const closeSelf = () => {
-    if (typeof window.closeModal === 'function') {
-      window.closeModal();
-    } else if (typeof closeModal === 'function') {
-      closeModal();
-    }
-  };
-
-  // onApply closes the child first, then mutates the parent next tick, then runs applyCb
+  // onApply: just apply the preset and tell saveForFrame we're OK.
   const onApply = async () => {
     if (applyInFlight) return false;
     if (!pickerRows || pickerSelectedIndex < 0) return false;
@@ -779,66 +765,18 @@ function openRatePresetPicker(applyCb, opts = {}) {
     applyInFlight = true;
     L('onApply: applying preset row', { chosen });
 
-    // Capture parent BEFORE closing the child
-    const parentBeforeClose = getParentContractsFrame();
-
-    // 1) Close the CHILD FIRST so the parent becomes the active/top frame
     try {
-      if (typeof window.closeModal === 'function') {
-        window.closeModal();
-      } else if (typeof closeModal === 'function') {
-        closeModal();
+      if (typeof applyCb === 'function') {
+        await applyCb(chosen);
       }
+      // Let saveForFrame() close this child modal normally.
+      return { ok: true };
     } catch (e) {
-      console.error('[PRESETS] closeModal failed', e);
-      // we'll still proceed
+      console.error('[PRESETS] onApply failed', e);
+      return false;
+    } finally {
+      applyInFlight = false;
     }
-
-    // 2) Next tick, safely update the PARENT and then apply the preset
-    setTimeout(async () => {
-      try {
-        const fr = parentBeforeClose || getParentContractsFrame();
-        if (fr) {
-          // Ensure parent is in edit mode (safe now the child is gone)
-          try {
-            if (typeof window.setFrameMode === 'function') {
-              window.setFrameMode(fr, 'edit');
-            } else {
-              fr.mode = 'edit';
-              fr._updateButtons && fr._updateButtons();
-            }
-          } catch (e) {
-            console.error('[PRESETS] setFrameMode on parent failed', e);
-          }
-
-          // Focus the Rates tab so the user sees the applied values
-          try {
-            if (fr._hasMountedOnce && typeof fr.setTab === 'function') {
-              fr.setTab('rates');
-            }
-          } catch (e) {
-            console.error('[PRESETS] parent.setTab("rates") failed', e);
-          }
-        }
-
-        // 🔑 Apply AFTER the picker is closed and the parent is active
-        if (typeof applyCb === 'function') {
-          await applyCb(chosen);
-        }
-
-        // Refresh header/buttons and mark dirty AFTER child is closed
-        try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
-        fr?._updateButtons && fr._updateButtons();
-
-      } catch (e) {
-        console.error('[PRESETS] deferred onApply failed', e);
-      } finally {
-        applyInFlight = false;
-      }
-    }, 0);
-
-    // We closed the picker ourselves; return false to avoid a double-close
-    return false;
   };
 
   showModal(
@@ -871,14 +809,14 @@ function openRatePresetPicker(applyCb, opts = {}) {
       const updateApplyState = () => {
         const canApply = !!(pickerRows.length && pickerSelectedIndex >= 0);
 
-        // Only touch the picker’s Save button
+        // Only touch THIS picker’s Save/Apply button
         const btn = pickerModalEl?.querySelector('#btnSave');
         if (btn) {
           btn.disabled = !canApply;
           btn.title = canApply ? '' : 'Select a preset to apply';
         }
 
-        // Only update the picker frame (not the parent)
+        // Only update the picker frame (not the parent contracts frame)
         const fr = window.__getModalFrame?.();
         if (fr?.kind === 'rate-presets-picker' && typeof fr._updateButtons === 'function') {
           fr.__canSave = canApply;
@@ -962,7 +900,7 @@ function openRatePresetPicker(applyCb, opts = {}) {
         paint();
       };
 
-      // Do NOT repaint on simple click; keep the row for dblclick
+      // Single-click: just select the row; don't repaint tbody
       tbody.addEventListener('click', (e) => {
         const tr = e.target.closest('tr[data-i]');
         if (!tr) return;
@@ -980,8 +918,8 @@ function openRatePresetPicker(applyCb, opts = {}) {
         updateApplyState();
       });
 
-      // Dblclick → apply (onApply handles closing & parent updates)
-      tbody.addEventListener('dblclick', async (e) => {
+      // Double-click: select + programmatically press the picker’s Apply button
+      tbody.addEventListener('dblclick', (e) => {
         let idx = pickerSelectedIndex;
         const tr = e.target.closest('tr[data-i]');
         if (tr && Number.isFinite(+tr.getAttribute('data-i'))) {
@@ -993,7 +931,10 @@ function openRatePresetPicker(applyCb, opts = {}) {
         pickerSelectedId = pickerRows[idx]?.id || null;
         L('row dblclick → apply', { idx, id: pickerSelectedId });
 
-        await onApply();
+        const btn = pickerModalEl?.querySelector('#btnSave');
+        if (btn && !btn.disabled) {
+          btn.click();   // triggers saveForFrame → onApply → framework closes child properly
+        }
 
         e.preventDefault();
         e.stopPropagation();
