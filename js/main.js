@@ -3252,7 +3252,7 @@ function openContract(row) {
         let std_hours_json = ghFilled ? gh : (base.std_hours_json ?? null);
         if (!std_hours_json && fs.main && fs.main.__hours) std_hours_json = fs.main.__hours;
 
-     const days = ['mon','tue','wed','thu','fri','sat','sun'];
+ const days = ['mon','tue','wed','thu','fri','sat','sun'];
 const get = (n) => fromFS(n, fromFD(n, ''));
 const hhmmOk = (v) => /^\d{2}:\d{2}$/.test(String(v||'').trim());
 const normHHMM = (v) => {
@@ -3262,7 +3262,7 @@ const normHHMM = (v) => {
   if (!m) return '';
   const h = +m[1], mi = +m[2];
   if (Number.isNaN(h) || Number.isNaN(mi) || h < 0 || h > 23 || mi < 0 || mi > 59) return '';
-  return String(h).padStart(2,'0') + ':' + String(mi).padStart(2,'0');
+  return String(h).padStart(2,'0') + ':' + String(mi);
 };
 
 const schedule = {};
@@ -3280,24 +3280,19 @@ for (const d2 of days) {
       end:   e,
       break_minutes: Math.max(0, Number(br || 0))
     };
-  } else {
-    // Explicitly clear this day when we are sending a schedule
-    schedule[d2] = {
-      start: null,
-      end:   null,
-      break_minutes: 0
-    };
+    // 🔹 NOTE: if a day has no valid times, we simply do NOT add it
+    // to `schedule` – that clears the day when the whole JSON is replaced.
   }
 }
 
 let std_schedule_json = null;
-// If we have ANY schedule defined (e.g. from preset or manual edits),
-// treat this as the full authoritative week and overwrite all days,
-// including blanks (Thu etc).
+
+// If there is at least ONE valid day, this becomes the full schedule
+// and overwrites what was there (missing days = cleared).
 if (hasAnySchedule) {
   std_schedule_json = schedule;
 } else if (fs.main && fs.main.__template) {
-  // No times anywhere → fall back to existing template
+  // No valid times anywhere → fall back to existing template
   std_schedule_json = fs.main.__template;
 } else if (base.std_schedule_json) {
   std_schedule_json = base.std_schedule_json;
