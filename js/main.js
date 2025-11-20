@@ -18199,7 +18199,6 @@ function collectForm(sel, jsonTry=false){
 // - (Sorting of summary grid can be added here if/when you enable header clicks)
 // ─────────────────────────────────────────────────────────────────────────────
 
-
 function renderSummary(rows){
   currentRows = rows;
   currentSelection = null;
@@ -18279,6 +18278,9 @@ function renderSummary(rows){
     const data = await loadSection();
     renderSummary(data);
   });
+
+  topControls.appendChild(sizeLabel);
+  topControls.appendChild(sizeSel);
 
   // ── NEW: Contracts quick Status menu ────────────────────────────────────────
   let statusSel = null;
@@ -18592,7 +18594,6 @@ function renderSummary(rows){
   } catch {}
 
   // Initial states
-  function computeHeaderState(){ /* redefined above; closure keeps reference */ }
   computeHeaderState();
   updateButtons();
 
