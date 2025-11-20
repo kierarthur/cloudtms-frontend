@@ -14,6 +14,307 @@ window.__LOG_CONTRACTS = true;
 window.__LOG_MODAL  = true;   // logs from modal framework (showModal)
 const __LOG_API = true;   // turns on authFetch + rates/hospitals/client POST/PATCH logging
 
+// Default friendly labels (fallbacks if user hasn't set custom labels for a section)
+const DEFAULT_COLUMN_LABELS = {
+  candidates: {
+    first_name: 'First Name',
+    last_name: 'Last Name',
+    email: 'Email',
+    phone: 'Phone',
+    postcode: 'Postcode',
+    role: 'Role',
+    tms_ref: 'TMS Ref',
+    rev: 'Revision'
+  },
+  clients: {
+    name: 'Client Name',
+    primary_invoice_email: 'Invoice Email',
+    invoice_address: 'Invoice Address',
+    postcode: 'Postcode',
+    ap_phone: 'A/P Phone',
+    cli_ref: 'Client Ref',
+    rev: 'Revision'
+  },
+  contracts: {
+    candidate_display: 'Candidate',
+    client_name: 'Client',
+    role: 'Role',
+    band: 'Band',
+    pay_method_snapshot: 'Pay Method',
+    default_submission_mode: 'Submission Mode',
+    start_date: 'Start',
+    end_date: 'End',
+    bucket_labels_preview: 'Buckets'
+  },
+  audit: {
+    created_at_utc: 'Created (UTC)',
+    last_error: 'Last Error'
+  }
+};
+
+
+const GRID_COLUMN_META_DEFAULTS = {
+  // Candidate list (drawn from candidates + any summary fields you render)
+  candidates: {
+    id:                     { selectable: false },
+    tms_ref:                { selectable: true },
+    first_name:             { selectable: true },
+    last_name:              { selectable: true },
+    display_name:           { selectable: true },
+    email:                  { selectable: true },
+    phone:                  { selectable: true },
+    mobile:                 { selectable: true },
+    address_line1:          { selectable: false },
+    address_line2:          { selectable: false },
+    address_line3:          { selectable: false },
+    town_city:              { selectable: true },
+    county:                 { selectable: false },
+    postcode:               { selectable: true },
+    country:                { selectable: false },
+    ni_number:              { selectable: true },
+    date_of_birth:          { selectable: true },
+    gender:                 { selectable: true },
+    nationality:            { selectable: true },
+    right_to_work_status:   { selectable: false },
+    right_to_work_expiry:   { selectable: false },
+    pay_method:             { selectable: true },
+    umbrella_id:            { selectable: false },
+    bank_name:              { selectable: false },
+    bank_account_name:      { selectable: true },
+    bank_account_number:    { selectable: true },
+    bank_sort_code:         { selectable: true },
+    umbrella_name:          { selectable: true },
+    umbrella_reference:     { selectable: false },
+    notes:                  { selectable: true },
+    status:                 { selectable: true },
+    archived:               { selectable: true },
+    active:                 { selectable: true },
+    key_norm:               { selectable: false },
+    created_at:             { selectable: true },
+    updated_at:             { selectable: true },
+    rev:                    { selectable: false },
+    // derived / summary fields you show:
+    roles_display:          { selectable: true },
+    primary_role:           { selectable: true },
+    bands_display:          { selectable: true },
+    last_booking_date:      { selectable: true },
+    next_booking_date:      { selectable: true }
+  },
+
+  // Clients (public.clients)
+  clients: {
+    id:                       { selectable: false },
+    cli_ref:                  { selectable: true },
+    name:                     { selectable: true },
+    invoice_address:          { selectable: true },
+    primary_invoice_email:    { selectable: true },
+    ap_phone:                 { selectable: true },
+    vat_chargeable:           { selectable: true },
+    payment_terms_days:       { selectable: true },
+    created_at:               { selectable: true },
+    updated_at:               { selectable: true },
+    mileage_charge_rate:      { selectable: true },
+    ts_queries_email:         { selectable: true },
+    rev:                      { selectable: false },
+    // any extra client_settings snapshot fields you show in the grid:
+    default_submission_mode:  { selectable: true },
+    week_ending_weekday:      { selectable: true },
+    pay_reference_required:   { selectable: true },
+    invoice_reference_required:{ selectable: true },
+    auto_invoice_default:     { selectable: true }
+  },
+
+  // Contracts (public.contracts + summary fields)
+  contracts: {
+    id:                           { selectable: false },
+    tms_ref:                      { selectable: true },
+    candidate_id:                 { selectable: false },
+    client_id:                    { selectable: false },
+    candidate_display:            { selectable: true }, // your summary label
+    client_name:                  { selectable: true }, // joined from clients.name
+    role:                         { selectable: true },
+    band:                         { selectable: true },
+    display_site:                 { selectable: true },
+    ward_hint:                    { selectable: true },
+    start_date:                   { selectable: true },
+    end_date:                     { selectable: true },
+    pay_method_snapshot:          { selectable: true },
+    default_submission_mode:      { selectable: true },
+    week_ending_weekday_snapshot: { selectable: true },
+    auto_invoice:                 { selectable: true },
+    require_reference_to_pay:     { selectable: true },
+    require_reference_to_invoice: { selectable: true },
+    status:                       { selectable: true }, // high-level status you derive (e.g. Active/Unassigned/Completed)
+    status_detail:                { selectable: true }, // e.g. next action / next week
+    // bucket labels
+    bucket_labels_json:           { selectable: false },
+    bucket_day:                   { selectable: false },
+    bucket_night:                 { selectable: false },
+    bucket_sat:                   { selectable: false },
+    bucket_sun:                   { selectable: false },
+    bucket_bh:                    { selectable: false },
+    // convenience label columns you render:
+    bucket_label_day:             { selectable: true },
+    bucket_label_night:           { selectable: true },
+    bucket_label_sat:             { selectable: true },
+    bucket_label_sun:             { selectable: true },
+    bucket_label_bh:              { selectable: true },
+    // rates_json is complex; but you might expose individual buckets:
+    paye_day:                     { selectable: true },
+    paye_night:                   { selectable: true },
+    paye_sat:                     { selectable: true },
+    paye_sun:                     { selectable: true },
+    paye_bh:                      { selectable: true },
+    umb_day:                      { selectable: true },
+    umb_night:                    { selectable: true },
+    umb_sat:                      { selectable: true },
+    umb_sun:                      { selectable: true },
+    umb_bh:                       { selectable: true },
+    charge_day:                   { selectable: true },
+    charge_night:                 { selectable: true },
+    charge_sat:                   { selectable: true },
+    charge_sun:                   { selectable: true },
+    charge_bh:                    { selectable: true },
+    // mileage
+    mileage_pay_rate:             { selectable: true },
+    mileage_charge_rate:          { selectable: true },
+    // schedule / hours if ever surfaced:
+    std_schedule_json:            { selectable: false },
+    std_hours_json:               { selectable: false },
+    gh_mon:                       { selectable: false },
+    gh_tue:                       { selectable: false },
+    gh_wed:                       { selectable: false },
+    gh_thu:                       { selectable: false },
+    gh_fri:                       { selectable: false },
+    gh_sat:                     { selectable: false },
+    gh_sun:                       { selectable: false },
+    // meta
+    created_at:                   { selectable: true },
+    updated_at:                   { selectable: true },
+    rev:                         { selectable: false }
+  },
+
+  // Timesheets (likely from a view such as timesheets_hr_view or a join)
+  timesheets: {
+    id:                      { selectable: true },
+    timesheet_id:            { selectable: true },   // if using a view
+    booking_id:              { selectable: true },
+    candidate_id:            { selectable: true },
+    candidate_display:       { selectable: true },
+    client_id:               { selectable: true },
+    client_name:             { selectable: true },
+    hospital:                { selectable: true },
+    ward:                    { selectable: true },
+    unit:                    { selectable: true },
+    role_code:               { selectable: true },
+    band:                    { selectable: true },
+    start_utc:               { selectable: true },
+    end_utc:                 { selectable: true },
+    work_date:               { selectable: true },
+    week_ending_date:        { selectable: true },
+    submission_mode:         { selectable: true },
+    authorised:              { selectable: true },
+    authorised_at_utc:       { selectable: true },
+    status:                  { selectable: true },   // high-level status string
+    processing_status:       { selectable: true },   // ts_fin_processing_status_enum
+    fin_basis:               { selectable: true },   // timesheet_fin_basis_enum
+    pay_method:              { selectable: true },
+    hours_day:               { selectable: true },
+    hours_night:             { selectable: true },
+    hours_sat:               { selectable: true },
+    hours_sun:               { selectable: true },
+    hours_bh:                { selectable: true },
+    total_hours:             { selectable: true },
+    pay_rate_day:            { selectable: true },
+    pay_rate_night:          { selectable: true },
+    pay_rate_sat:            { selectable: true },
+    pay_rate_sun:            { selectable: true },
+    pay_rate_bh:             { selectable: true },
+    charge_rate_day:         { selectable: true },
+    charge_rate_night:       { selectable: true },
+    charge_rate_sat:         { selectable: true },
+    charge_rate_sun:         { selectable: true },
+    charge_rate_bh:          { selectable: true },
+    pay_total:               { selectable: true },
+    charge_total:            { selectable: true },
+    margin_total:            { selectable: true },
+    pay_on_hold:             { selectable: true },
+    remittance_last_sent_at: { selectable: true },
+    created_at:              { selectable: true },
+    updated_at:              { selectable: true }
+  },
+
+  // Invoices (public.invoices)
+  invoices: {
+    id:                     { selectable: true },
+    type:                   { selectable: true },
+    invoice_no:             { selectable: true },
+    client_id:              { selectable: true },
+    client_name:            { selectable: true }, // joined from clients
+    issued_at_utc:          { selectable: true },
+    due_at_utc:             { selectable: true },
+    paid_at_utc:            { selectable: true },
+    status:                 { selectable: true },
+    status_date_utc:        { selectable: true },
+    currency:               { selectable: true },
+    subtotal_ex_vat:        { selectable: true },
+    vat_rate_pct:           { selectable: true },
+    vat_amount:             { selectable: true },
+    total_inc_vat:          { selectable: true },
+    credit_note_total:      { selectable: true },
+    balance_outstanding:    { selectable: true },
+    on_hold:                { selectable: true },
+    on_hold_reason:         { selectable: true },
+    original_invoice_id:    { selectable: true },
+    created_at:             { selectable: true },
+    updated_at:             { selectable: true }
+  },
+
+  // Umbrellas (public.umbrellas)
+  umbrellas: {
+    id:             { selectable: false },
+    name:           { selectable: true },
+    email:          { selectable: true },
+    phone:          { selectable: true },
+    address_line1:  { selectable: false },
+    address_line2:  { selectable: false },
+    address_line3:  { selectable: false },
+    town_city:      { selectable: false },
+    county:         { selectable: false },
+    postcode:       { selectable: false },
+    country:        { selectable: false },
+    bank_name:      { selectable: true },
+    bank_account:   { selectable: true },
+    bank_sort_code: { selectable: true },
+    vat_number:     { selectable: true },
+    company_number: { selectable: true },
+    active:         { selectable: true },
+    created_at:     { selectable: true },
+    updated_at:     { selectable: true },
+    rev:            { selectable: false }
+  },
+
+  // Audit / mail_outbox (public.mail_outbox)
+  audit: {
+    id:           { selectable: true },
+    type:         { selectable: true },
+    to:           { selectable: true },
+    cc:           { selectable: true },
+    subject:      { selectable: true },
+    body_html:    { selectable: true },
+    body_text:    { selectable: true },
+    attachments:  { selectable: true },
+    status:       { selectable: true },
+    last_error:   { selectable: true },
+    provider:     { selectable: true },
+    provider_id:  { selectable: true },
+    created_at:   { selectable: true },
+    updated_at:   { selectable: true },
+    sent_at:      { selectable: true },
+    failed_at:    { selectable: true },
+    attempts:     { selectable: true }
+  }
+};
 
 
 // Quick DOM helper
@@ -29,6 +330,542 @@ function saveSession(sess){
   scheduleRefresh();
   renderUserChip();
 }
+async function loadUserGridPrefs(section) {
+  window.__gridPrefs = window.__gridPrefs || null;
+  if (window.__gridPrefs) return window.__gridPrefs;
+
+  // GET once per app session
+  const res = await authFetch(API('/api/users/me/grid-prefs'));
+  let prefs = {};
+  try { prefs = (await res.json()) || {}; } catch { prefs = {}; }
+  if (!prefs || typeof prefs !== 'object') prefs = { grid: {} };
+
+  // One-time import from legacy localStorage if present
+  try {
+    const legacy = localStorage.getItem('cloudtms.cols.'+section);
+    if (legacy && (!prefs.grid || !prefs.grid[section] || !prefs.grid[section].columns)) {
+      const cols = JSON.parse(legacy);
+      if (Array.isArray(cols)) {
+        // Convert to server prefs shape
+        const columns = {};
+        cols.forEach((k, i) => { columns[k] = { visible: true, order: i }; });
+        prefs.grid = prefs.grid || {};
+        prefs.grid[section] = { ...(prefs.grid[section]||{}), columns };
+        // Try to persist immediately
+        await saveUserGridPrefsDebounced(section, { columns }, true);
+      }
+    }
+    // Clear legacy
+    localStorage.removeItem('cloudtms.cols.'+section);
+  } catch {}
+
+  window.__gridPrefs = prefs;
+  return prefs;
+}
+
+const __saveTimers = new Map();
+async function saveUserGridPrefsDebounced(section, partial, immediate=false) {
+  window.__gridPrefs = window.__gridPrefs || { grid: {} };
+  window.__gridPrefs.grid[section] = { ...(window.__gridPrefs.grid[section]||{}), ...(partial||{}) };
+
+  const key = `grid:${section}`;
+  const fire = async () => {
+    const body = { section, prefs: window.__gridPrefs.grid[section] || {} };
+    try {
+      const res = await authFetch(API('/api/users/me/grid-prefs'), {
+        method:'PATCH',
+        headers:{ 'Content-Type':'application/json' },
+        body: JSON.stringify(body)
+      });
+      const saved = await res.json();
+      if (saved && saved.grid) window.__gridPrefs = saved;
+    } catch (e) {
+      console.error('Failed to save grid prefs', e);
+    }
+  };
+
+  if (immediate) return fire();
+
+  // 250–400ms debounce
+  if (__saveTimers.has(key)) clearTimeout(__saveTimers.get(key));
+  __saveTimers.set(key, setTimeout(fire, 300));
+}
+
+function getVisibleColumnsForSection(section, rows) {
+  const defaults = defaultColumnsFor(section);
+  const prefs = (window.modalCtx && window.modalCtx.grid && window.modalCtx.grid[section]) || {};
+  const colPrefs = prefs.columns || {};
+
+  const known = new Set(defaults);
+  if (Array.isArray(rows) && rows.length > 0) {
+    Object.keys(rows[0] || {}).forEach(k => known.add(k));
+  }
+
+  const entries = Array.from(known).map(k => {
+    const p = colPrefs[k] || {};
+    const visible = (p.visible !== false);
+    const order   = (typeof p.order === 'number') ? p.order : (defaults.indexOf(k) >= 0 ? defaults.indexOf(k) : 9999);
+    const width   = (typeof p.width === 'number') ? p.width : null;
+    return {
+      key:   k,
+      visible,
+      order,
+      width,
+      meta: (prefs.columns_meta && prefs.columns_meta[k]) || {}
+    };
+  });
+
+  // ✏️ You currently do this:
+  const filtered = entries.filter(e => e.visible !== false);
+  filtered.sort((a,b) => a.order - b.order);
+
+  return filtered.map(e => e.key);
+}
+
+
+function applyUserGridPrefs(section, tableEl, cols) {
+  const prefs = (window.__gridPrefs && window.__gridPrefs.grid && window.__gridPrefs.grid[section]) || {};
+  const colPrefs = prefs.columns || {};
+  const MIN_W = 80, MAX_W = 600;
+
+  const widthOf = (k) => {
+    let w = colPrefs[k]?.width;
+    if (typeof w !== 'number' || !(w > 0)) return null; // auto
+    if (w < MIN_W) w = MIN_W; if (w > MAX_W) w = MAX_W;
+    return w;
+  };
+
+  const setColWidthPx = (colKey, pxOrNull) => {
+    const th = tableEl.querySelector(`thead th[data-col-key="${CSS.escape(colKey)}"]`);
+    if (!th) return;
+    if (pxOrNull == null) { th.style.width = ''; } else { th.style.width = `${pxOrNull}px`; }
+    const tds = tableEl.querySelectorAll(`tbody td[data-col-key="${CSS.escape(colKey)}"]`);
+    tds.forEach(td => { td.style.width = (pxOrNull==null ? '' : `${pxOrNull}px`); });
+  };
+
+  (cols || []).forEach(k => setColWidthPx(k, widthOf(k)));
+}
+function wireGridColumnResizing(section, tableEl) {
+  const MIN_W = 80, MAX_W = 600;
+
+  const getPrefs = () => (window.__gridPrefs && window.__gridPrefs.grid && window.__gridPrefs.grid[section]) || {};
+  const ensurePrefs = () => {
+    window.__gridPrefs = window.__gridPrefs || { grid: {} };
+    window.__gridPrefs.grid[section] = window.__gridPrefs.grid[section] || {};
+    window.__gridPrefs.grid[section].columns = window.__gridPrefs.grid[section].columns || {};
+    return window.__gridPrefs.grid[section].columns;
+  };
+
+  let drag = null;
+
+  const onMove = (ev) => {
+    if (!drag) return;
+    const dx = (ev.clientX || 0) - drag.startX;
+    let w = Math.max(MIN_W, Math.min(MAX_W, drag.startW + dx));
+    drag.th.style.width = `${w}px`;
+    drag.cells.forEach(td => td.style.width = `${w}px`);
+  };
+
+  const onUp = () => {
+    if (!drag) return;
+    const th = drag.th;
+    const key = th.dataset.colKey;
+    const rect = th.getBoundingClientRect();
+    const w = Math.max(MIN_W, Math.min(MAX_W, Math.round(rect.width)));
+    const colsPrefs = ensurePrefs();
+    colsPrefs[key] = { ...(colsPrefs[key]||{}), width: w };
+    saveUserGridPrefsDebounced(section, { columns: colsPrefs });
+    drag = null;
+    document.removeEventListener('mousemove', onMove);
+    document.removeEventListener('mouseup', onUp, true);
+  };
+
+  tableEl.querySelectorAll('thead th').forEach(th => {
+    const handle = th.querySelector('.col-resizer');
+    if (!handle) return;
+
+    handle.addEventListener('mousedown', (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      const key = th.dataset.colKey;
+      const cells = Array.from(tableEl.querySelectorAll(`tbody td[data-col-key="${CSS.escape(key)}"]`));
+      drag = {
+        th, startX: ev.clientX || 0,
+        startW: Math.round((th.getBoundingClientRect().width)||MIN_W),
+        cells
+      };
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp, true);
+    });
+
+    // Double-click handle resets to Auto
+    handle.addEventListener('dblclick', (ev) => {
+      ev.preventDefault(); ev.stopPropagation();
+      const key = th.dataset.colKey;
+      th.style.width = '';
+      tableEl.querySelectorAll(`tbody td[data-col-key="${CSS.escape(key)}"]`).forEach(td => td.style.width = '');
+      const colsPrefs = ensurePrefs();
+      if (colsPrefs[key]) delete colsPrefs[key].width;
+      saveUserGridPrefsDebounced(section, { columns: colsPrefs });
+    });
+  });
+}
+function wireGridColumnReorder(section, tableEl) {
+  const getPrefs = () => (window.__gridPrefs && window.__gridPrefs.grid && window.__gridPrefs.grid[section]) || {};
+
+  let dragKey = null;
+
+  tableEl.querySelectorAll('thead th').forEach(th => {
+    if (!th.dataset.colKey) return;
+    th.addEventListener('dragstart', (ev) => {
+      dragKey = th.dataset.colKey;
+      ev.dataTransfer.setData('text/plain', dragKey);
+      ev.dataTransfer.effectAllowed = 'move';
+    });
+    th.addEventListener('dragover', (ev) => { ev.preventDefault(); ev.dataTransfer.dropEffect = 'move'; });
+    th.addEventListener('drop', async (ev) => {
+      ev.preventDefault();
+      const targetKey = th.dataset.colKey;
+      if (!dragKey || dragKey === targetKey) return;
+
+      // Compute new order array based on current DOM order
+      const headers = Array.from(tableEl.querySelectorAll('thead th[data-col-key]'));
+      const keys = headers.map(h => h.dataset.colKey);
+
+      // Move dragKey to the index of targetKey
+      const from = keys.indexOf(dragKey), to = keys.indexOf(targetKey);
+      if (from < 0 || to < 0) return;
+      keys.splice(to, 0, keys.splice(from,1)[0]);
+
+      // Persist order
+      const prefs = getPrefs();
+      const colPrefs = { ...(prefs.columns||{}) };
+      keys.forEach((k, i) => {
+        colPrefs[k] = { ...(colPrefs[k]||{}), order: i, visible: (colPrefs[k]?.visible !== false) };
+      });
+      await saveUserGridPrefsDebounced(section, { columns: colPrefs }, true);
+
+      // Re-render to apply new order
+      const data = await loadSection();
+      renderSummary(data);
+    });
+  });
+}
+function attachHeaderContextMenu(section, tableEl) {
+  let menu = document.createElement('div');
+  menu.style.cssText = 'position:fixed;z-index:10000;background:#0b152a;border:1px solid var(--line);padding:6px;border-radius:8px;display:none;min-width:180px;';
+  document.body.appendChild(menu);
+
+  const hide = ()=>{ menu.style.display='none'; };
+  document.addEventListener('click', hide);
+  document.addEventListener('keydown', (e)=>{ if (e.key==='Escape') hide(); });
+
+  const mkItem = (label, cb) => {
+    const it = document.createElement('div');
+    it.textContent = label;
+    it.style.cssText = 'padding:6px 10px;cursor:pointer;';
+    it.addEventListener('click', ()=>{ hide(); cb && cb(); });
+    it.addEventListener('mouseover', ()=> it.style.background='#101c36');
+    it.addEventListener('mouseout',  ()=> it.style.background='transparent');
+    return it;
+  };
+
+  const autoWidthThisColumn = (colKey) => {
+    // Measure content width
+    const th = tableEl.querySelector(`thead th[data-col-key="${CSS.escape(colKey)}"]`);
+    if (!th) return;
+    const cells = tableEl.querySelectorAll(`tbody td[data-col-key="${CSS.escape(colKey)}"]`);
+    const measure = (el) => Math.ceil(el.scrollWidth) + 16; // padding allowance
+    let maxW = measure(th);
+    cells.forEach(td => { maxW = Math.max(maxW, measure(td)); });
+    const w = Math.max(80, Math.min(600, maxW));
+    // Apply + persist
+    th.style.width = `${w}px`;
+    cells.forEach(td => td.style.width = `${w}px`);
+    const prefs = (window.__gridPrefs && window.__gridPrefs.grid && window.__gridPrefs.grid[section]) || {};
+    const cols = { ...((prefs.columns)||{}) };
+    cols[colKey] = { ...(cols[colKey]||{}), width: w };
+    saveUserGridPrefsDebounced(section, { columns: cols });
+  };
+
+  const resetAllWidths = () => {
+    const prefs = (window.__gridPrefs && window.__gridPrefs.grid && window.__gridPrefs.grid[section]) || {};
+    const cols = { ...((prefs.columns)||{}) };
+    Object.keys(cols).forEach(k => { if ('width' in cols[k]) delete cols[k].width; });
+    // Clear DOM widths
+    tableEl.querySelectorAll('thead th[data-col-key]').forEach(th => th.style.width='');
+    tableEl.querySelectorAll('tbody td[data-col-key]').forEach(td => td.style.width='');
+    saveUserGridPrefsDebounced(section, { columns: cols });
+  };
+
+  tableEl.addEventListener('contextmenu', (ev) => {
+    const th = ev.target && (ev.target.closest('th'));
+    if (!th || !th.dataset.colKey) return;
+    ev.preventDefault();
+
+    const colKey = th.dataset.colKey;
+    menu.innerHTML = '';
+    // First item: Reset View (auto widths for all)
+    menu.appendChild(mkItem('Reset View (Auto widths)', () => resetAllWidths()));
+    menu.appendChild(document.createElement('hr')).style.border = '1px solid var(--line)';
+
+    menu.appendChild(mkItem('Auto-size this column', () => autoWidthThisColumn(colKey)));
+    menu.appendChild(mkItem('Reset this column width', () => {
+      th.style.width = '';
+      tableEl.querySelectorAll(`tbody td[data-col-key="${CSS.escape(colKey)}"]`).forEach(td => td.style.width = '');
+      const prefs = (window.__gridPrefs && window.__gridPrefs.grid && window.__gridPrefs.grid[section]) || {};
+      const cols = { ...((prefs.columns)||{}) };
+      if (cols[colKey]) delete cols[colKey].width;
+      saveUserGridPrefsDebounced(section, { columns: cols });
+    }));
+    menu.appendChild(mkItem('Hide column', async () => {
+      const prefs = (window.__gridPrefs && window.__gridPrefs.grid && window.__gridPrefs.grid[section]) || {};
+      const cols = { ...((prefs.columns)||{}) };
+      cols[colKey] = { ...(cols[colKey]||{}), visible: false };
+      await saveUserGridPrefsDebounced(section, { columns: cols }, true);
+      const data = await loadSection();
+      renderSummary(data);
+    }));
+    menu.appendChild(mkItem('Columns…', () => openColumnsDialog(section)));
+
+    // position
+    menu.style.left = `${ev.clientX}px`;
+    menu.style.top  = `${ev.clientY}px`;
+    menu.style.display = 'block';
+  });
+}
+function openColumnsDialog(section) {
+  const prefs = (window.__gridPrefs && window.__gridPrefs.grid && window.__gridPrefs.grid[section]) || {};
+  const colPrefs = prefs.columns || {};
+  const userMeta = prefs.columns_meta || {};
+  const globalMeta = (GRID_COLUMN_META_DEFAULTS && GRID_COLUMN_META_DEFAULTS[section]) || {};
+
+  const mergeMetaFor = (key) => ({
+    ...(userMeta[key] || {}),
+    ...(globalMeta[key] || {})
+  });
+
+  const useFriendly = (prefs.use_friendly_labels !== false);
+  const labels = prefs.labels || {};
+
+  // Build master key list: visible columns, defaults, current row keys, and any global-meta keys
+  const known = new Set(
+    getVisibleColumnsForSection(section, currentRows).concat(defaultColumnsFor(section))
+  );
+  if (Array.isArray(currentRows) && currentRows[0]) {
+    Object.keys(currentRows[0]).forEach(k => known.add(k));
+  }
+  Object.keys(globalMeta).forEach(k => known.add(k));
+
+  // Filter out columns that are globally or per-user marked selectable:false
+  const list = Array.from(known).filter(k => {
+    const meta = mergeMetaFor(k);
+    return meta.selectable !== false;
+  });
+
+  const overlay = document.createElement('div');
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:10000;display:flex;align-items:center;justify-content:center;';
+  const modal = document.createElement('div');
+  modal.style.cssText = 'background:#0b152a;border:1px solid var(--line);border-radius:10px;min-width:600px;max-width:80vw;max-height:80vh;overflow:auto;padding:14px;';
+  overlay.appendChild(modal);
+
+  const title = document.createElement('div');
+  title.textContent = `Columns — ${section}`;
+  title.style.cssText = 'font-weight:600;margin-bottom:10px;';
+  modal.appendChild(title);
+
+  // Labels toggle
+  const lblWrap = document.createElement('label');
+  const lblCb = document.createElement('input');
+  lblCb.type = 'checkbox';
+  lblCb.checked = useFriendly;
+  lblWrap.appendChild(lblCb);
+  lblWrap.appendChild(document.createTextNode(' Use friendly header labels'));
+  lblWrap.style.cssText = 'display:flex;align-items:center;gap:8px;margin-bottom:8px;';
+  modal.appendChild(lblWrap);
+
+  lblCb.addEventListener('change', () => {
+    const newPrefs = { ...prefs, use_friendly_labels: !!lblCb.checked };
+    saveUserGridPrefsDebounced(section, newPrefs);
+  });
+
+  // Table of columns
+  const t = document.createElement('table');
+  t.style.cssText = 'width:100%;border-collapse:collapse;';
+  t.innerHTML = `
+    <thead>
+      <tr>
+        <th style="text-align:left;padding:6px;border-bottom:1px solid var(--line)">Visible</th>
+        <th style="text-align:left;padding:6px;border-bottom:1px solid var(--line)">Column key</th>
+        <th style="text-align:left;padding:6px;border-bottom:1px solid var(--line)">Display name</th>
+        <th style="text-align:left;padding:6px;border-bottom:1px solid var(--line)">Width (px)</th>
+        <th style="text-align:left;padding:6px;border-bottom:1px solid var(--line)">Selectable</th>
+        <th style="text-align:left;padding:6px;border-bottom:1px solid var(--line)">Order</th>
+      </tr>
+    </thead>
+    <tbody></tbody>
+  `;
+  modal.appendChild(t);
+  const tb = t.querySelector('tbody');
+
+  const orderOf = (k) => {
+    const cp = colPrefs[k];
+    if (cp && typeof cp.order === 'number') return cp.order;
+    const idx = defaultColumnsFor(section).indexOf(k);
+    return (idx >= 0 ? idx : 9999);
+  };
+
+  // Model rows: one per column
+  const rowsModel = list
+    .map(k => {
+      const mergedMeta = mergeMetaFor(k);
+      return {
+        key: k,
+        visible: (colPrefs[k]?.visible !== false),
+        label: labels[k] || (DEFAULT_COLUMN_LABELS[section] && DEFAULT_COLUMN_LABELS[section][k]) || k,
+        width: (typeof colPrefs[k]?.width === 'number') ? colPrefs[k].width : '',
+        selectable: (mergedMeta.selectable !== false),
+        order: orderOf(k)
+      };
+    })
+    .sort((a, b) => a.order - b.order);
+
+  const persist = () => {
+    const columns = {};
+    const labelsOut = {};
+    const metaOut = {};
+
+    rowsModel.forEach(r => {
+      columns[r.key] = { visible: !!r.visible, order: r.order };
+      if (r.width !== '') columns[r.key].width = Number(r.width);
+      labelsOut[r.key] = String(r.label || r.key);
+      metaOut[r.key] = { selectable: !!r.selectable };
+    });
+
+    saveUserGridPrefsDebounced(section, {
+      columns,
+      labels: labelsOut,
+      columns_meta: metaOut,
+      use_friendly_labels: !!lblCb.checked
+    });
+  };
+
+  const reindex = () => {
+    rowsModel.forEach((r, i) => (r.order = i));
+    persist();
+    refresh();
+  };
+
+  const refresh = () => {
+    tb.innerHTML = '';
+    rowsModel.sort((a, b) => a.order - b.order).forEach((r) => {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td style="padding:6px"><input type="checkbox" ${r.visible ? 'checked' : ''}></td>
+        <td style="padding:6px;font-family:monospace">${r.key}</td>
+        <td style="padding:6px"><input type="text"></td>
+        <td style="padding:6px"><input type="number" min="80" max="600" step="10"></td>
+        <td style="padding:6px"><input type="checkbox" ${r.selectable ? 'checked' : ''}></td>
+        <td style="padding:6px">
+          <button data-move="up">▲</button>
+          <button data-move="down">▼</button>
+        </td>
+      `;
+
+      const elVisible   = tr.querySelector('td:nth-child(1) input');
+      const elLabel     = tr.querySelector('td:nth-child(3) input');
+      const elWidth     = tr.querySelector('td:nth-child(4) input');
+      const elSelectable= tr.querySelector('td:nth-child(5) input');
+      const btnUp       = tr.querySelector('button[data-move="up"]');
+      const btnDown     = tr.querySelector('button[data-move="down"]');
+
+      elLabel.value = r.label;
+      elWidth.value = (r.width === '' ? '' : String(r.width));
+
+      elVisible.addEventListener('change', () => {
+        r.visible = !!elVisible.checked;
+        persist();
+      });
+
+      elLabel.addEventListener('change', () => {
+        r.label = elLabel.value;
+        persist();
+      });
+
+      elWidth.addEventListener('change', () => {
+        if (elWidth.value === '') {
+          r.width = '';
+        } else {
+          let v = Number(elWidth.value || 0);
+          if (!Number.isFinite(v)) v = '';
+          if (v !== '') {
+            if (v < 80) v = 80;
+            if (v > 600) v = 600;
+          }
+          r.width = v;
+        }
+        persist();
+      });
+
+      elSelectable.addEventListener('change', () => {
+        r.selectable = !!elSelectable.checked;
+        persist();
+      });
+
+      btnUp.addEventListener('click', () => {
+        const i = rowsModel.indexOf(r);
+        if (i > 0) {
+          [rowsModel[i - 1], rowsModel[i]] = [rowsModel[i], rowsModel[i - 1]];
+          reindex();
+        }
+      });
+
+      btnDown.addEventListener('click', () => {
+        const i = rowsModel.indexOf(r);
+        if (i >= 0 && i < rowsModel.length - 1) {
+          [rowsModel[i + 1], rowsModel[i]] = [rowsModel[i], rowsModel[i + 1]];
+          reindex();
+        }
+      });
+
+      tb.appendChild(tr);
+    });
+  };
+
+  refresh();
+
+  // footer actions
+  const footer = document.createElement('div');
+  footer.style.cssText = 'display:flex;justify-content:space-between;gap:8px;margin-top:10px;';
+  const left = document.createElement('div');
+  const right = document.createElement('div');
+  footer.appendChild(left);
+  footer.appendChild(right);
+
+  const btnResetWidths = document.createElement('button');
+  btnResetWidths.textContent = 'Reset all widths';
+  btnResetWidths.style.cssText = 'border:1px solid var(--line);background:#0b152a;color:var(--text);padding:6px 10px;border-radius:8px;cursor:pointer';
+  btnResetWidths.addEventListener('click', () => {
+    rowsModel.forEach(r => { r.width = ''; });
+    persist();
+    refresh();
+  });
+  left.appendChild(btnResetWidths);
+
+  const btnClose = document.createElement('button');
+  btnClose.textContent = 'Close';
+  btnClose.style.cssText = btnResetWidths.style.cssText;
+  btnClose.addEventListener('click', async () => {
+    document.body.removeChild(overlay);
+    const data = await loadSection();
+    renderSummary(data);
+  });
+  right.appendChild(btnClose);
+
+  modal.appendChild(footer);
+  document.body.appendChild(overlay);
+}
+
 
 function loadSession(){
   try {
@@ -40,14 +877,50 @@ function loadSession(){
   } catch { return false; }
 }
 
+
+// Get label honoring section prefs toggle and overrides
+function getFriendlyHeaderLabel(section, key) {
+  const prefs = (window.__gridPrefs && window.__gridPrefs.grid && window.__gridPrefs.grid[section]) || {};
+  const useFriendly = prefs.use_friendly_labels !== false; // default ON
+  if (!useFriendly) return key;
+  const overrides = prefs.labels || {};
+  const def = (DEFAULT_COLUMN_LABELS[section] || {});
+  return overrides[key] || def[key] || key;
+}
+
+
 // ─────────────────────────────────────────────────────────────────────────────
 // UPDATED: loadSection()
 // - After loading the visible page, triggers background priming of membership
 //   (ALL matching ids for current filters) regardless of page size.
 // ─────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// UPDATED: loadSection()
+// - Ensures grid prefs are loaded
+// - Defaults Contracts status quick filter to "active"
+// - After loading the visible page, triggers background priming of membership
+//   (ALL matching ids for current filters) regardless of page size.
+// ─────────────────────────────────────────────────────────────────────────────
 async function loadSection(){
   window.__listState = window.__listState || {};
-  const st = (window.__listState[currentSection] ||= { page: 1, pageSize: 50, total: null, hasMore: false, filters: null });
+  const st = (window.__listState[currentSection] ||= {
+    page: 1,
+    pageSize: 50,
+    total: null,
+    hasMore: false,
+    filters: null
+  });
+
+  // Default Contracts quick-filter to "active" if nothing specified
+  if (currentSection === 'contracts') {
+    if (!st.filters || typeof st.filters !== 'object') st.filters = {};
+    if (!('status' in st.filters) || !st.filters.status) {
+      st.filters.status = 'active';
+    }
+  }
+
+  // Ensure user grid prefs are loaded once per session (per section)
+  await loadUserGridPrefs(currentSection);
 
   const useSearch = !!st.filters && (Object.keys(st.filters).length > 0);
 
@@ -58,13 +931,13 @@ async function loadSection(){
     if (useSearch) {
       return await search(section, window.__listState[section].filters || {});
     } else {
-      switch(section){
+      switch (section) {
         case 'candidates': return await listCandidates();
         case 'clients':    return await listClients();
         case 'umbrellas':  return await listUmbrellas();
         case 'settings':   return await getSettings();
         case 'audit':      return await listOutbox();
-        case 'contracts':  return await search('contracts', {});
+        case 'contracts':  return await search('contracts', {}); // safety; normally useSearch===true
         default:           return [];
       }
     }
@@ -86,8 +959,9 @@ async function loadSection(){
     window.__listState[currentSection].hasMore = false;
     window.__listState[currentSection].total = acc.length;
 
-    // PRIME MEMBERSHIP in background (safe to await or fire-and-forget)
-    try { primeSummaryMembership(currentSection, getSummaryFingerprint(currentSection)); } catch {}
+    try {
+      primeSummaryMembership(currentSection, getSummaryFingerprint(currentSection));
+    } catch {}
     return acc;
   }
 
@@ -97,8 +971,9 @@ async function loadSection(){
   const hasMore = Array.isArray(rows) && rows.length === ps;
   window.__listState[currentSection].hasMore = hasMore;
 
-  // PRIME MEMBERSHIP in background (irrespective of page size)
-  try { primeSummaryMembership(currentSection, getSummaryFingerprint(currentSection)); } catch {}
+  try {
+    primeSummaryMembership(currentSection, getSummaryFingerprint(currentSection));
+  } catch {}
   return rows;
 }
 
@@ -2572,7 +3447,7 @@ async function search(section, filters = {}) {
     invoices:'/api/search/invoices'
   };
 
-  // Contracts use /api/contracts (admin list with filters) — not /api/search/contracts
+  // Contracts use /api/contracts (admin list)
   let p = (section === 'contracts') ? '/api/contracts' : map[section];
   if (!p) return [];
 
@@ -2591,20 +3466,25 @@ async function search(section, filters = {}) {
 }
 
 
-
 function defaultColumnsFor(section){
-  const ls = localStorage.getItem('cloudtms.cols.'+section);
-  if (ls) try { return JSON.parse(ls); } catch{}
+  // No longer read localStorage; server grid prefs are the source of truth.
   switch(section){
-    case 'candidates': return ['last_name','first_name','phone','role','postcode','email'];
-    case 'clients': return ['name','primary_invoice_email','invoice_address','postcode','ap_phone'];
-    case 'umbrellas': return ['name','vat_chargeable','bank_name','sort_code','account_number','enabled'];
-    case 'audit': return ['type','to','subject','status','created_at_utc','last_error'];
-    case 'contracts': // sensible defaults for the new section
-      return ['candidate_name','client_name','role','band','pay_method_snapshot','submission_mode','start_date','end_date','bucket_labels_preview'];
-    default: return ['id'];
+    case 'candidates':
+      return ['last_name','first_name','phone','role','postcode','email'];
+    case 'clients':
+      return ['name','primary_invoice_email','invoice_address','postcode','ap_phone'];
+    case 'umbrellas':
+      return ['name','vat_chargeable','bank_name','sort_code','account_number','enabled'];
+    case 'audit':
+      return ['type','to','subject','status','created_at_utc','last_error'];
+    case 'contracts':
+      // Sensible defaults for the new section
+      return ['candidate_display','client_name','role','band','pay_method_snapshot','default_submission_mode','start_date','end_date','bucket_labels_preview'];
+    default:
+      return ['id'];
   }
 }
+
 
 
 
@@ -2627,11 +3507,13 @@ async function listContracts(filters = {}) {
   if (filters.pay_method_snapshot) qs.set('pay_method_snapshot', String(filters.pay_method_snapshot).toUpperCase());
   if (filters.active_on)    qs.set('active_on',    filters.active_on);  // YYYY-MM-DD
   if (typeof filters.auto_invoice === 'boolean') qs.set('auto_invoice', String(filters.auto_invoice));
+  if (filters.status) qs.set('status', String(filters.status)); // NEW
 
   const url = qs.toString() ? `/api/contracts?${qs}` : `/api/contracts`;
   const r = await authFetch(API(url));
   return toList(r);
 }
+
 
 // ✅ CHANGED: add cache-busting and explicit no-cache header
 
@@ -7059,13 +7941,28 @@ async function openLoadSelectionModal(section) {
 // buildSearchQS (amended) — map submission_mode → default_submission_mode;
 // keep original too for safety; pass has_custom_labels through
 // ──────────────────────────────────────────────────────────────────────────────
-function buildSearchQS(section, filters={}){
+
+function buildSearchQS(section, filters = {}) {
   window.__listState = window.__listState || {};
-  const st = (window.__listState[section] ||= { page: 1, pageSize: 50, total: null, hasMore: false, filters: null });
+  const st = (window.__listState[section] ||= {
+    page: 1,
+    pageSize: 50,
+    total: null,
+    hasMore: false,
+    filters: null
+  });
 
   const qs = new URLSearchParams();
-  const add = (key, val) => { if (val==null || val==='') return; qs.append(key, String(val)); };
-  const addArr = (key, arr) => { if (!Array.isArray(arr)) return; arr.forEach(v => { if (v!=null && v!=='') qs.append(key, String(v)); }); };
+  const add = (key, val) => {
+    if (val == null || val === '') return;
+    qs.append(key, String(val));
+  };
+  const addArr = (key, arr) => {
+    if (!Array.isArray(arr)) return;
+    arr.forEach(v => {
+      if (v != null && v !== '') qs.append(key, String(v));
+    });
+  };
 
   // paging
   if (st.pageSize !== 'ALL') {
@@ -7084,31 +7981,60 @@ function buildSearchQS(section, filters={}){
 
   switch (section) {
     case 'candidates': {
-      const { first_name,last_name,email,phone,pay_method,roles_any,active,created_from,created_to } = filters;
+      const {
+        first_name,
+        last_name,
+        email,
+        phone,
+        pay_method,
+        roles_any,
+        active,
+        created_from,
+        created_to
+      } = filters;
       add('first_name', first_name);
-      add('last_name',  last_name);
-      add('email',      email);
-      add('phone',      phone);
+      add('last_name', last_name);
+      add('email', email);
+      add('phone', phone);
       add('pay_method', pay_method);
       if (typeof active === 'boolean') add('active', active);
       add('created_from', created_from);
-      add('created_to',   created_to);
+      add('created_to', created_to);
       addArr('roles_any', roles_any);
       break;
     }
+
     case 'clients': {
-      const { name, cli_ref, primary_invoice_email, ap_phone, vat_chargeable, created_from, created_to } = filters;
+      const {
+        name,
+        cli_ref,
+        primary_invoice_email,
+        ap_phone,
+        vat_chargeable,
+        created_from,
+        created_to
+      } = filters;
       if (name) add('q', name);
       add('cli_ref', cli_ref);
       add('primary_invoice_email', primary_invoice_email);
       add('ap_phone', ap_phone);
       if (typeof vat_chargeable === 'boolean') add('vat_chargeable', vat_chargeable);
       add('created_from', created_from);
-      add('created_to',   created_to);
+      add('created_to', created_to);
       break;
     }
+
     case 'umbrellas': {
-      const { name, bank_name, sort_code, account_number, vat_chargeable, enabled, created_from, created_to } = filters;
+      const {
+        name,
+        bank_name,
+        sort_code,
+        account_number,
+        vat_chargeable,
+        enabled,
+        created_from,
+        created_to
+      } = filters;
       if (name) add('q', name);
       add('bank_name', bank_name);
       add('sort_code', sort_code);
@@ -7116,42 +8042,77 @@ function buildSearchQS(section, filters={}){
       if (typeof vat_chargeable === 'boolean') add('vat_chargeable', vat_chargeable);
       if (typeof enabled === 'boolean') add('enabled', enabled);
       add('created_from', created_from);
-      add('created_to',   created_to);
+      add('created_to', created_to);
       break;
     }
+
     case 'timesheets': {
-      const { booking_id, occupant_key_norm, hospital_norm, worked_from, worked_to, week_ending_from, week_ending_to, status, created_from, created_to } = filters;
+      const {
+        booking_id,
+        occupant_key_norm,
+        hospital_norm,
+        worked_from,
+        worked_to,
+        week_ending_from,
+        week_ending_to,
+        status,
+        created_from,
+        created_to
+      } = filters;
       add('booking_id', booking_id);
       add('occupant_key_norm', occupant_key_norm);
       add('hospital_norm', hospital_norm);
       add('worked_from', worked_from);
-      add('worked_to',   worked_to);
+      add('worked_to', worked_to);
       add('week_ending_from', week_ending_from);
-      add('week_ending_to',   week_ending_to);
+      add('week_ending_to', week_ending_to);
       addArr('status', status);
       add('created_from', created_from);
-      add('created_to',   created_to);
+      add('created_to', created_to);
       break;
     }
+
     case 'invoices': {
-      const { invoice_no, client_id, status, issued_from, issued_to, due_from, due_to, created_from, created_to } = filters;
-      add('invoice_no',  invoice_no);
-      add('client_id',   client_id);
-      addArr('status',   status);
+      const {
+        invoice_no,
+        client_id,
+        status,
+        issued_from,
+        issued_to,
+        due_from,
+        due_to,
+        created_from,
+        created_to
+      } = filters;
+      add('invoice_no', invoice_no);
+      add('client_id', client_id);
+      addArr('status', status);
       add('issued_from', issued_from);
-      add('issued_to',   issued_to);
-      add('due_from',    due_from);
-      add('due_to',      due_to);
+      add('issued_to', issued_to);
+      add('due_from', due_from);
+      add('due_to', due_to);
       add('created_from', created_from);
-      add('created_to',   created_to);
+      add('created_to', created_to);
       break;
     }
+
     case 'contracts': {
       const {
-        q, candidate_id, client_id, roles_any, band,
-        pay_method_snapshot, submission_mode, week_ending_weekday_snapshot,
-        require_reference_to_pay, require_reference_to_invoice,
-        has_custom_labels, active_on, created_from, created_to
+        q,
+        candidate_id,
+        client_id,
+        roles_any,
+        band,
+        pay_method_snapshot,
+        submission_mode,
+        week_ending_weekday_snapshot,
+        require_reference_to_pay,
+        require_reference_to_invoice,
+        has_custom_labels,
+        active_on,
+        created_from,
+        created_to,
+        status
       } = filters;
 
       add('q', q);
@@ -7161,26 +8122,33 @@ function buildSearchQS(section, filters={}){
       add('band', band);
       add('pay_method_snapshot', pay_method_snapshot);
 
-      // NEW: send default_submission_mode (and keep legacy for safety)
+      // submission_mode → default_submission_mode (keep legacy alias too)
       if (submission_mode) {
         add('default_submission_mode', submission_mode);
         add('submission_mode', submission_mode);
       }
 
       add('week_ending_weekday_snapshot', week_ending_weekday_snapshot);
-      if (typeof require_reference_to_pay === 'boolean') add('require_reference_to_pay', require_reference_to_pay);
-      if (typeof require_reference_to_invoice === 'boolean') add('require_reference_to_invoice', require_reference_to_invoice);
+      if (typeof require_reference_to_pay === 'boolean') {
+        add('require_reference_to_pay', require_reference_to_pay);
+      }
+      if (typeof require_reference_to_invoice === 'boolean') {
+        add('require_reference_to_invoice', require_reference_to_invoice);
+      }
       if (typeof has_custom_labels === 'boolean') add('has_custom_labels', has_custom_labels);
       add('active_on', active_on);
       add('created_from', created_from);
-      add('created_to',   created_to);
+      add('created_to', created_to);
+
+      // Contracts status quick-filter (active / completed / unassigned)
+      if (status) add('status', status);
+
       break;
     }
   }
+
   return qs.toString();
 }
-
-
 
 
 
@@ -8367,17 +9335,6 @@ function attachUkDatePicker(inputEl, opts) {
 }
 
 
-function defaultColumnsFor(section){
-  const ls = localStorage.getItem('cloudtms.cols.'+section);
-  if (ls) try { return JSON.parse(ls); } catch{}
-  switch(section){
-    case 'candidates': return ['last_name','first_name','phone','role','postcode','email'];
-    case 'clients': return ['name','primary_invoice_email','invoice_address','postcode','ap_phone'];
-    case 'umbrellas': return ['name','vat_chargeable','bank_name','sort_code','account_number','enabled'];
-    case 'audit': return ['type','to','subject','status','created_at_utc','last_error'];
-    default: return ['id'];
-  }
-}
 function headersFromRows(rows){
   if (!rows.length) return [];
   const keys = new Set(Object.keys(rows[0]));
@@ -8500,28 +9457,14 @@ function renderAuditTable(content, rows){
 }
 
 // Column manager
-byId('btnColumns').onclick = ()=>{
-  const cols = headersFromRows(currentRows);
-  const cur = new Set(defaultColumnsFor(currentSection));
-  const dlg = document.createElement('div'); dlg.className='auth-card'; dlg.style.position='fixed'; dlg.style.right='16px'; dlg.style.bottom='16px';
-  dlg.innerHTML = `<div class="auth-h"><div class="ttl">Columns</div></div>`;
-  const wrap = document.createElement('div'); wrap.className='auth-f';
-  cols.forEach(k=>{
-    const id='col_'+k;
-    const row=document.createElement('div'); row.className='row';
-    row.innerHTML = `<label><input type="checkbox" ${cur.has(k)?'checked':''} id="${id}" /> ${k}</label>`;
-    wrap.appendChild(row);
-  });
-  const act=document.createElement('div'); act.className='actions';
-  const closeBtn=document.createElement('button'); closeBtn.textContent='Close'; closeBtn.onclick=()=>dlg.remove();
-  const saveBtn=document.createElement('button'); saveBtn.className='primary'; saveBtn.textContent='Save';
-  saveBtn.onclick=()=>{
-    const selected = Array.from(wrap.querySelectorAll('input[type=checkbox]')).filter(x=>x.checked).map(x=>x.id.replace('col_',''));
-    localStorage.setItem('cloudtms.cols.'+currentSection, JSON.stringify(selected));
-    dlg.remove(); renderSummary(currentRows);
+const globalColsBtn = byId('btnColumns');
+if (globalColsBtn) {
+  globalColsBtn.onclick = () => {
+    if (!currentSection || !Array.isArray(currentRows)) return;
+    openColumnsDialog(currentSection);
   };
-  act.append(closeBtn, saveBtn); wrap.appendChild(act); dlg.appendChild(wrap); document.body.appendChild(dlg);
-};
+}
+
 
 // ===== Data fetchers =====
 // ─────────────────────────────────────────────────────────────────────────────
@@ -17255,22 +18198,24 @@ function collectForm(sel, jsonTry=false){
 // - Triggers background membership priming (ALL IDs for current filters)
 // - (Sorting of summary grid can be added here if/when you enable header clicks)
 // ─────────────────────────────────────────────────────────────────────────────
+
+
 function renderSummary(rows){
   currentRows = rows;
   currentSelection = null;
 
-  // ── paging state (per section) ──────────────────────────────────────────────
+  // ── paging state (per section)
   window.__listState = window.__listState || {};
   const st = (window.__listState[currentSection] ||= { page: 1, pageSize: 50, total: null, hasMore: false, filters: null });
   const page     = Number(st.page || 1);
   const pageSize = st.pageSize; // 50 | 100 | 200 | 'ALL'
 
-  // ── selection state (per section) — explicit IDs only ──────────────────────
+  // ── selection state (per section) — explicit IDs only
   window.__selection = window.__selection || {};
   const ensureSel = (section)=>{ const init = { fingerprint:'', ids:new Set() }; return (window.__selection[section] ||= init); };
   const sel = ensureSel(currentSection);
 
-  const isRowSelected = (id)=> sel.ids.has(String(id||''));
+  const isRowSelected = (id)=> sel.ids.has(String(id||''));    
   const setRowSelected = (id, selected)=>{
     id = String(id||''); if (!id) return;
     if (selected) sel.ids.add(id); else sel.ids.delete(id);
@@ -17278,7 +18223,7 @@ function renderSummary(rows){
   const clearSelection = ()=>{ sel.ids.clear(); };
 
   // Tie selection to dataset via fingerprint (filters + section)
-  const computeFp = ()=> getSummaryFingerprint(currentSection); // ← NEW helper
+  const computeFp = ()=> getSummaryFingerprint(currentSection);
   const fp = computeFp();
   if (sel.fingerprint !== fp) { sel.fingerprint = fp; clearSelection(); }
 
@@ -17302,9 +18247,8 @@ function renderSummary(rows){
     });
   }
 
-  const cols = defaultColumnsFor(currentSection);
-  byId('title').textContent = sections.find(s=>s.key===currentSection)?.label || '';
   const content = byId('content');
+  byId('title').textContent = sections.find(s=>s.key===currentSection)?.label || '';
 
   // Preserve scroll position per section
   window.__scrollMemory = window.__scrollMemory || {};
@@ -17312,13 +18256,14 @@ function renderSummary(rows){
   const prevScrollY = content ? (window.__scrollMemory[memKey] ?? content.scrollTop ?? 0) : 0;
 
   content.innerHTML = '';
-
   if (currentSection === 'settings') return renderSettingsPanel(content);
   if (currentSection === 'audit')    return renderAuditTable(content, rows);
 
-  // ── top controls (page size selector + selection summary) ───────────────────
+  // ── top controls ────────────────────────────────────────────────────────────
   const topControls = document.createElement('div');
   topControls.style.cssText = 'display:flex;align-items:center;gap:10px;padding:8px 10px;border-bottom:1px solid var(--line)';
+
+  // Page size
   const sizeLabel = document.createElement('span'); sizeLabel.className = 'mini'; sizeLabel.textContent = 'Page size:';
   const sizeSel = document.createElement('select'); sizeSel.id = 'summaryPageSize';
   ['50','100','200','ALL'].forEach(optVal => {
@@ -17335,6 +18280,42 @@ function renderSummary(rows){
     renderSummary(data);
   });
 
+  // ── NEW: Contracts quick Status menu ────────────────────────────────────────
+  let statusSel = null;
+  if (currentSection === 'contracts') {
+    const stFilters = window.__listState[currentSection].filters || {};
+    if (!('status' in stFilters)) stFilters.status = 'active'; // default
+    window.__listState[currentSection].filters = stFilters;
+
+    const statusLabel = document.createElement('span'); statusLabel.className = 'mini'; statusLabel.textContent = 'Status:';
+    statusSel = document.createElement('select');
+    [['active','Active'], ['unassigned','Unassigned'], ['completed','Completed']].forEach(([v,l])=>{
+      const o = document.createElement('option'); o.value=v; o.textContent=l;
+      if ((stFilters.status||'').toLowerCase() === v) o.selected = true;
+      statusSel.appendChild(o);
+    });
+    statusSel.addEventListener('change', async () => {
+      window.__listState[currentSection].filters = { ...(window.__listState[currentSection].filters||{}), status: statusSel.value };
+      window.__listState[currentSection].page = 1;
+      const data = await loadSection();
+      renderSummary(data);
+    });
+
+    topControls.appendChild(statusLabel);
+    topControls.appendChild(statusSel);
+  }
+
+  // Columns button
+  const btnCols = document.createElement('button');
+  btnCols.textContent = 'Columns';
+  btnCols.style.cssText = 'border:1px solid var(--line);background:#0b152a;color:var(--text);padding:4px 8px;border-radius:8px;cursor:pointer';
+  btnCols.addEventListener('click', () => openColumnsDialog(currentSection));
+  topControls.appendChild(btnCols);
+
+  const spacerTop = document.createElement('div'); spacerTop.style.flex = '1';
+  topControls.appendChild(spacerTop);
+
+  // Selected info / clear
   const selInfo = document.createElement('div'); selInfo.className = 'mini';
   const renderSelInfo = ()=>{ selInfo.textContent = (sel.ids.size > 0) ? `${sel.ids.size} selected.` : ''; };
   renderSelInfo();
@@ -17349,10 +18330,6 @@ function renderSummary(rows){
     updateButtons();
   };
 
-  const spacerTop = document.createElement('div'); spacerTop.style.flex = '1';
-  topControls.appendChild(sizeLabel);
-  topControls.appendChild(sizeSel);
-  topControls.appendChild(spacerTop);
   topControls.appendChild(selInfo);
   topControls.appendChild(clearBtn);
   content.appendChild(topControls);
@@ -17380,7 +18357,7 @@ function renderSummary(rows){
     renderSelInfo();
   };
 
-  // Header checkbox: select/deselect visible rows only
+  // Header checkbox
   const thSel = document.createElement('th');
   const hdrCb = document.createElement('input'); hdrCb.type='checkbox'; hdrCb.id='summarySelectAll';
   hdrCb.addEventListener('click', (e)=>{
@@ -17394,7 +18371,28 @@ function renderSummary(rows){
   });
   thSel.appendChild(hdrCb); trh.appendChild(thSel);
 
-  cols.forEach(c=>{ const th=document.createElement('th'); th.textContent=c; trh.appendChild(th); });
+  // Determine columns (using server prefs)
+  const cols = getVisibleColumnsForSection(currentSection, rows);
+
+  // Build headers with friendly labels and resizer handles
+  cols.forEach(c=>{
+    const th = document.createElement('th');
+    th.dataset.colKey = String(c);
+    th.textContent = getFriendlyHeaderLabel(currentSection, c);
+    th.style.position = 'relative';
+
+    // resizer handle (wired later)
+    const res = document.createElement('div');
+    res.className = 'col-resizer';
+    res.title = 'Drag to resize. Double-click to reset.';
+    res.style.cssText = 'position:absolute;right:0;top:0;width:6px;height:100%;cursor:col-resize;user-select:none;';
+    th.appendChild(res);
+
+    // make header draggable for reorder (wired later)
+    th.draggable = true;
+
+    trh.appendChild(th);
+  });
   thead.appendChild(trh); tbl.appendChild(thead);
 
   const tb = document.createElement('tbody');
@@ -17414,7 +18412,13 @@ function renderSummary(rows){
     });
     tdSel.appendChild(cb); tr.appendChild(tdSel);
 
-    cols.forEach(c=>{ const td=document.createElement('td'); const v = r[c]; td.textContent = formatDisplayValue(c, v); tr.appendChild(td); });
+    cols.forEach(c=>{
+      const td=document.createElement('td');
+      const v = r[c];
+      td.dataset.colKey = String(c);
+      td.textContent = formatDisplayValue(c, v);
+      tr.appendChild(td);
+    });
 
     tb.appendChild(tr);
   });
@@ -17447,7 +18451,13 @@ function renderSummary(rows){
   tbl.appendChild(tb);
   content.appendChild(tbl);
 
-  // Footer/pager (unchanged)
+  // ── Apply widths + wire resize/reorder + header context menu ────────────────
+  applyUserGridPrefs(currentSection, tbl, cols);
+  wireGridColumnResizing(currentSection, tbl);
+  wireGridColumnReorder(currentSection, tbl);
+  attachHeaderContextMenu(currentSection, tbl);
+
+  // Footer/pager
   const pager = document.createElement('div');
   pager.style.cssText = 'display:flex;align-items:center;gap:6px;padding:8px 10px;border-top:1px solid var(--line);';
   const info = document.createElement('span'); info.className = 'mini';
@@ -17518,7 +18528,7 @@ function renderSummary(rows){
   pager.appendChild(spacer); pager.appendChild(info);
   content.appendChild(pager);
 
-  // Selection toolbar (unchanged wiring)
+  // Selection toolbar
   const selBar = document.createElement('div');
   selBar.style.cssText = 'display:flex;justify-content:flex-end;gap:8px;padding:6px 10px;border-top:1px dashed var(--line)';
   btnFocus = document.createElement('button');
@@ -17582,15 +18592,13 @@ function renderSummary(rows){
   } catch {}
 
   // Initial states
+  function computeHeaderState(){ /* redefined above; closure keeps reference */ }
   computeHeaderState();
   updateButtons();
 
-  // Focus highlight logic unchanged…
-
-  // ── NEW: kick background membership priming (ALL ids for current filters)
-  // This fills __summaryCache[currentSection][fingerprint] with the full id list
   try { primeSummaryMembership(currentSection, fp); } catch (e) { /* non-blocking */ }
 }
+
 
 // Close any existing floating menu
 function closeRelatedMenu(){
