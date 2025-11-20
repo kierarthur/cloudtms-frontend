@@ -3602,12 +3602,27 @@ function populateSearchFormFromFilters(filters={}, formSel='#searchForm'){
 // ──────────────────────────────────────────────────────────────────────────────
 async function search(section, filters = {}) {
   window.__listState = window.__listState || {};
-  const st = (window.__listState[section] ||= { page: 1, pageSize: 50, total: null, hasMore: false, filters: null });
+  const st = (window.__listState[section] ||= {
+    page: 1,
+    pageSize: 50,
+    total: null,
+    hasMore: false,
+    filters: null,
+    sort: { key: null, dir: 'asc' }
+  });
+
+  if (!st.sort || typeof st.sort !== 'object') {
+    st.sort = { key: null, dir: 'asc' };
+  }
 
   // Reset selection when applying a new dataset (fingerprint change)
   window.__selection = window.__selection || {};
   const sel = (window.__selection[section] ||= { fingerprint:'', ids:new Set() });
-  sel.fingerprint = JSON.stringify({ section, filters: filters || {} });
+  sel.fingerprint = JSON.stringify({
+    section,
+    filters: filters || {},
+    sort: st.sort
+  });
   sel.ids.clear();
 
   // Default mappings for existing sections
@@ -8121,8 +8136,14 @@ function buildSearchQS(section, filters = {}) {
     pageSize: 50,
     total: null,
     hasMore: false,
-    filters: null
+    filters: null,
+    sort: { key: null, dir: 'asc' }
   });
+
+  // Ensure we always have a sort object
+  if (!st.sort || typeof st.sort !== 'object') {
+    st.sort = { key: null, dir: 'asc' };
+  }
 
   const qs = new URLSearchParams();
   const add = (key, val) => {
@@ -8270,7 +8291,7 @@ function buildSearchQS(section, filters = {}) {
 
     case 'contracts': {
       const {
-        q,
+        q: qText,
         candidate_id,
         client_id,
         roles_any,
@@ -8287,14 +8308,13 @@ function buildSearchQS(section, filters = {}) {
         status
       } = filters;
 
-      add('q', q);
+      add('q', qText);
       add('candidate_id', candidate_id);
       add('client_id', client_id);
       addArr('roles_any', roles_any);
       add('band', band);
       add('pay_method_snapshot', pay_method_snapshot);
 
-      // submission_mode → default_submission_mode (keep legacy alias too)
       if (submission_mode) {
         add('default_submission_mode', submission_mode);
         add('submission_mode', submission_mode);
@@ -8312,16 +8332,21 @@ function buildSearchQS(section, filters = {}) {
       add('created_from', created_from);
       add('created_to', created_to);
 
-      // Contracts status quick-filter (active / completed / unassigned)
       if (status) add('status', status);
 
       break;
     }
   }
 
+  // Sorting (shared for all sections that support it)
+  const sort = st.sort && typeof st.sort === 'object' ? st.sort : null;
+  if (sort && sort.key) {
+    qs.set('order_by', String(sort.key));
+    qs.set('order_dir', sort.dir === 'desc' ? 'desc' : 'asc');
+  }
+
   return qs.toString();
 }
-
 
 
 // -----------------------------
@@ -18377,7 +18402,21 @@ function renderSummary(rows){
 
   // ── paging state (per section)
   window.__listState = window.__listState || {};
-  const st = (window.__listState[currentSection] ||= { page: 1, pageSize: 50, total: null, hasMore: false, filters: null });
+  const st = (window.__listState[currentSection] ||= {
+    page: 1,
+    pageSize: 50,
+    total: null,
+    hasMore: false,
+    filters: null,
+    sort: { key: null, dir: 'asc' }
+  });
+
+  // Ensure we always have a sort object
+  if (!st.sort || typeof st.sort !== 'object') {
+    st.sort = { key: null, dir: 'asc' };
+  }
+  const sortState = st.sort;
+
   const page     = Number(st.page || 1);
   const pageSize = st.pageSize; // 50 | 100 | 200 | 'ALL'
 
@@ -18510,7 +18549,10 @@ function renderSummary(rows){
 
   // ── data table ──────────────────────────────────────────────────────────────
   const tbl = document.createElement('table'); tbl.className='grid';
-  const thead = document.createElement('thead'); const trh=document.createElement('tr');
+  const thead = document.createElement('thead');
+  // Header-only horizontal border (for easier resize handle targeting)
+  thead.style.borderBottom = '1px solid var(--line)';
+  const trh = document.createElement('tr');
 
   let btnFocus, btnSave;
 
@@ -18548,12 +18590,17 @@ function renderSummary(rows){
   // Determine columns (using server prefs)
   const cols = getVisibleColumnsForSection(currentSection, rows);
 
-  // Build headers with friendly labels and resizer handles
+  // Build headers with friendly labels, resizer handles, and click-to-sort
   cols.forEach(c=>{
     const th = document.createElement('th');
     th.dataset.colKey = String(c);
-    th.textContent = getFriendlyHeaderLabel(currentSection, c);
     th.style.position = 'relative';
+    th.style.cursor = 'pointer';
+
+    const label = getFriendlyHeaderLabel(currentSection, c);
+    const isActive = sortState && sortState.key === c;
+    const arrow = isActive ? (sortState.dir === 'asc' ? ' ▲' : ' ▼') : '';
+    th.textContent = label + arrow;
 
     // resizer handle (wired later)
     const res = document.createElement('div');
@@ -18564,6 +18611,41 @@ function renderSummary(rows){
 
     // make header draggable for reorder (wired later)
     th.draggable = true;
+
+    // Click-to-sort (server-side) — ignore clicks that start on the resizer
+    th.addEventListener('click', async (ev) => {
+      if (ev.target && ev.target.closest && ev.target.closest('.col-resizer')) return;
+
+      const colKey = th.dataset.colKey;
+      if (!colKey) return;
+
+      window.__listState = window.__listState || {};
+      const st2 = (window.__listState[currentSection] ||= {
+        page: 1,
+        pageSize: 50,
+        total: null,
+        hasMore: false,
+        filters: null,
+        sort: { key: null, dir: 'asc' }
+      });
+
+      if (!st2.sort || typeof st2.sort !== 'object') {
+        st2.sort = { key: null, dir: 'asc' };
+      }
+
+      const prevDir = (st2.sort && st2.sort.key === colKey) ? st2.sort.dir : null;
+      const nextDir = (prevDir === 'asc') ? 'desc' : 'asc';
+
+      st2.sort = { key: colKey, dir: nextDir };
+      st2.page = 1;
+
+      try {
+        const data = await loadSection();
+        renderSummary(data);
+      } catch (e) {
+        console.error('Failed to apply sort', e);
+      }
+    });
 
     trh.appendChild(th);
   });
@@ -18728,7 +18810,7 @@ function renderSummary(rows){
         await applySelectionAsFilter(currentSection, { ids });
       } else {
         window.__listState = window.__listState || {};
-        const st2 = (window.__listState[currentSection] ||= { page:1, pageSize:50, total:null, hasMore:false, filters:null });
+        const st2 = (window.__listState[currentSection] ||= { page:1, pageSize:50, total:null, hasMore:false, filters:null, sort:{ key:null, dir:'asc' } });
         st2.page = 1; st2.filters = { ...(st2.filters||{}), ids };
         const rows2 = await search(currentSection, st2.filters);
         renderSummary(rows2);
@@ -19156,12 +19238,21 @@ async function renderAll(){
   // seed defaults for first login / first visit to section
   window.__listState = window.__listState || {};
   if (!window.__listState[currentSection]) {
-    window.__listState[currentSection] = { page: 1, pageSize: 50, total: null, hasMore: false, filters: null };
+    window.__listState[currentSection] = {
+      page: 1,
+      pageSize: 50,
+      total: null,
+      hasMore: false,
+      filters: null,
+      sort: { key: null, dir: 'asc' }
+    };
   }
-  renderTopNav(); renderTools();
+  renderTopNav();
+  renderTools();
   const data = await loadSection();
   renderSummary(data);
 }
+
 async function bootstrapApp(){
   // Belt & braces: if loadSession() ran but globals are not mirrored, mirror now
   try {
