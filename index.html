@@ -85,6 +85,20 @@
     .grid{ width:100%; border-collapse:collapse }
     .grid th,.grid td{ padding:10px 12px; border-bottom:1px solid var(--line); vertical-align:top }
     .grid th{ position:sticky; top:0; background:#0b1221; border-bottom:1px solid var(--line); text-align:left }
+    /* Header row box — only affects summary table headers */
+.grid thead tr {
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);  /* keeps the strong bottom edge */
+}
+
+/* Left/right edges of the header row only */
+.grid thead th:first-child {
+  border-left: 1px solid var(--line);
+}
+.grid thead th:last-child {
+  border-right: 1px solid var(--line);
+}
+
     .grid tr:hover{ background:rgba(255,255,255,.02) }
     .grid tr.active {
       background: var(--hover);
