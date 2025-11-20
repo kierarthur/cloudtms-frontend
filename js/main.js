@@ -825,7 +825,6 @@ function attachHeaderContextMenu(section, tableEl) {
 }
 
 
-
 function openColumnsDialog(section) {
   const rootPrefs =
     (window.__gridPrefs &&
@@ -915,9 +914,9 @@ function openColumnsDialog(section) {
     .map(k => ({
       key: k,
       visible: (colPrefs[k]?.visible !== false),
-      label: labels[k] ||
-             (DEFAULT_COLUMN_LABELS[section] && DEFAULT_COLUMN_LABELS[section][k]) ||
-             k,
+      // Now: server/user labels are authoritative (deep-merged in GET).
+      // Fallback only to the raw key if nothing defined at all.
+      label: labels[k] || k,
       order: orderOf(k)
     }))
     .sort((a, b) => a.order - b.order);
@@ -989,7 +988,7 @@ function openColumnsDialog(section) {
       btnDown.addEventListener('click', () => {
         const i = rowsModel.indexOf(r);
         if (i >= 0 && i < rowsModel.length - 1) {
-          [rowsModel[i + 1], rowsModel[i]] = [rowsModel[i], rowsModel[i + 1]];
+          [rowsModel[i + 1], rowsModel[i]] = [rowsModel[i], rowsModel[i - 1]];
           reindex();
         }
       });
@@ -1038,7 +1037,6 @@ function openColumnsDialog(section) {
   modal.appendChild(footer);
   document.body.appendChild(overlay);
 }
-
 
 
 function loadSession(){
