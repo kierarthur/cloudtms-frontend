@@ -330,45 +330,61 @@ function saveSession(sess){
   scheduleRefresh();
   renderUserChip();
 }
+// FRONTEND — loadUserGridPrefs
 async function loadUserGridPrefs(section) {
   // If already loaded and shaped correctly, just reuse
   if (window.__gridPrefs && typeof window.__gridPrefs === 'object') {
     if (!window.__gridPrefs.grid || typeof window.__gridPrefs.grid !== 'object') {
-      window.__gridPrefs.grid = {};
+      window.__gridPrefs = { grid: {} };
+    }
+    if (!window.__gridPrefs.grid[section] || typeof window.__gridPrefs.grid[section] !== 'object') {
+      window.__gridPrefs.grid[section] = {};
     }
     return window.__gridPrefs;
   }
 
-  // GET once per app session
-  let prefs = {};
+  // GET once per app session from backend (which applies defaults if needed)
+  let prefs;
   try {
     const res = await authFetch(API('/api/users/me/grid-prefs'));
     prefs = (await res.json()) || {};
-  } catch {
+  } catch (e) {
+    console.error('[GRID] failed to load user grid prefs', e);
     prefs = {};
   }
 
   // Normalise to at least { grid: {} }
-  if (!prefs || typeof prefs !== 'object') prefs = { grid: {} };
-  if (!prefs.grid || typeof prefs.grid !== 'object') prefs.grid = {};
+  if (!prefs || typeof prefs !== 'object') {
+    prefs = { grid: {} };
+  }
+  if (!prefs.grid || typeof prefs.grid !== 'object') {
+    prefs.grid = {};
+  }
+  // ensure object for this section
+  if (!prefs.grid[section] || typeof prefs.grid[section] !== 'object') {
+    prefs.grid[section] = {};
+  }
 
-  // ── One-time import from legacy localStorage if present ──
+  // One-time import from legacy localStorage, if present and no columns yet
   try {
-    const legacy = localStorage.getItem('cloudtms.cols.' + section);
-    if (legacy && (!prefs.grid[section] || !prefs.grid[section].columns)) {
+    const legacyKey = 'cloudtms.cols.' + section;
+    const legacy = localStorage.getItem(legacyKey);
+    if (legacy && !prefs.grid[section].columns) {
       const cols = JSON.parse(legacy);
       if (Array.isArray(cols)) {
         const columns = {};
-        cols.forEach((k, i) => { columns[k] = { visible: true, order: i }; });
-        prefs.grid[section] = { ...(prefs.grid[section] || {}), columns };
-        // Try to persist immediately – using the debounced saver in "immediate" mode
+        cols.forEach((k, i) => {
+          columns[k] = { visible: true, order: i };
+        });
+        prefs.grid[section].columns = columns;
+        // Persist immediately so backend has them
+        window.__gridPrefs = prefs;
         await saveUserGridPrefsDebounced(section, { columns }, true);
       }
+      try { localStorage.removeItem(legacyKey); } catch (_) {}
     }
-    // Clear legacy regardless of whether migration worked
-    localStorage.removeItem('cloudtms.cols.' + section);
-  } catch {
-    // non-fatal
+  } catch (e) {
+    console.warn('[GRID] legacy grid prefs import failed', e);
   }
 
   window.__gridPrefs = prefs;
@@ -386,16 +402,17 @@ async function saveUserGridPrefsDebounced(section, partial, immediate = false) {
   }
 
   const grid = window.__gridPrefs.grid;
-  const existing = grid[section] || {};
+  const existing = (grid[section] && typeof grid[section] === 'object') ? grid[section] : {};
   grid[section] = { ...existing, ...(partial || {}) };
 
   const key = `grid:${section}`;
 
   const fire = async () => {
-    const body = {
-      section,
-      prefs: grid[section] || {}
-    };
+   const body = {
+  section,
+  prefs: grid[section] || {}
+};
+
     try {
       const res = await authFetch(API('/api/users/me/grid-prefs'), {
         method: 'PATCH',
@@ -403,7 +420,7 @@ async function saveUserGridPrefsDebounced(section, partial, immediate = false) {
         body: JSON.stringify(body)
       });
       const saved = await res.json().catch(() => null);
-      // If server returned a full prefs object with .grid, adopt it
+      // If server returned a full prefs object with .grid, adopt it as source of truth
       if (saved && typeof saved === 'object' && saved.grid && typeof saved.grid === 'object') {
         window.__gridPrefs = saved;
       }
@@ -416,32 +433,36 @@ async function saveUserGridPrefsDebounced(section, partial, immediate = false) {
     return fire();
   }
 
-  // 250–400ms debounce
   window.__saveTimers = window.__saveTimers || new Map();
   if (window.__saveTimers.has(key)) {
     clearTimeout(window.__saveTimers.get(key));
   }
   window.__saveTimers.set(key, setTimeout(fire, 300));
 }
+
 function getVisibleColumnsForSection(section, rows) {
-  const defaults = defaultColumnsFor(section);
+  const defaults = (typeof defaultColumnKeysForSection === 'function')
+    ? defaultColumnKeysForSection(section)
+    : (typeof defaultColumnsFor === 'function'
+        ? defaultColumnsFor(section)
+        : []);
 
-  const prefsRoot =
-    (window.__gridPrefs &&
-     window.__gridPrefs.grid &&
-     window.__gridPrefs.grid[section]) || {};
+  const root = (window.__gridPrefs && window.__gridPrefs.grid) || {};
+  const prefsRoot = (root[section] && typeof root[section] === 'object') ? root[section] : {};
+  const colPrefs  = prefsRoot.columns      || {};
+  const userMeta  = prefsRoot.columns_meta || {};
 
-  const colPrefs   = prefsRoot.columns      || {};
-  const userMeta   = prefsRoot.columns_meta || {};
-  const globalMeta = (typeof GRID_COLUMN_META_DEFAULTS === 'object' && GRID_COLUMN_META_DEFAULTS[section]) || {};
+  const globalMeta =
+    (typeof GRID_COLUMN_META_DEFAULTS === 'object' &&
+     GRID_COLUMN_META_DEFAULTS[section]) || {};
 
   // Build catalog of known columns: defaults + first row's keys
   const known = new Set(defaults);
-  if (Array.isArray(rows) && rows.length > 0) {
-    Object.keys(rows[0] || {}).forEach(k => known.add(k));
+  if (Array.isArray(rows) && rows.length > 0 && rows[0] && typeof rows[0] === 'object') {
+    Object.keys(rows[0]).forEach((k) => known.add(k));
   }
 
-  const entries = Array.from(known).map(k => {
+  const entries = Array.from(known).map((k) => {
     const p = colPrefs[k] || {};
     const meta = {
       ...(globalMeta[k] || {}),
@@ -461,18 +482,17 @@ function getVisibleColumnsForSection(section, rows) {
   });
 
   // Only include columns that are globally/user-selectable AND marked visible
-  const filtered = entries.filter(e => e.selectable && e.visible);
+  const filtered = entries.filter((e) => e.selectable && e.visible);
   filtered.sort((a, b) => a.order - b.order);
 
-  return filtered.map(e => e.key);
+  return filtered.map((e) => e.key);
 }
 
-function applyUserGridPrefs(section, tableEl, cols) {
-  const prefsRoot =
-    (window.__gridPrefs &&
-     window.__gridPrefs.grid &&
-     window.__gridPrefs.grid[section]) || {};
 
+
+function applyUserGridPrefs(section, tableEl, cols) {
+  const root = (window.__gridPrefs && window.__gridPrefs.grid) || {};
+  const prefsRoot = root[section] || {};
   const colPrefs = prefsRoot.columns || {};
   const MIN_W = 80, MAX_W = 600;
 
@@ -498,8 +518,13 @@ function applyUserGridPrefs(section, tableEl, cols) {
     });
   };
 
-  (cols || []).forEach(k => setColWidthPx(k, widthOf(k)));
+  (cols || []).forEach((k) => {
+    const w = widthOf(k);
+    setColWidthPx(k, w);
+  });
 }
+
+
 function wireGridColumnResizing(section, tableEl) {
   const MIN_W = 80, MAX_W = 600;
 
@@ -540,7 +565,7 @@ function wireGridColumnResizing(section, tableEl) {
     document.removeEventListener('mouseup', onUp, true);
   };
 
-  tableEl.querySelectorAll('thead th').forEach(th => {
+  tableEl.querySelectorAll('thead th').forEach((th) => {
     const handle = th.querySelector('.col-resizer');
     if (!handle) return;
 
@@ -576,6 +601,8 @@ function wireGridColumnResizing(section, tableEl) {
     });
   });
 }
+
+// FRONTEND — wireGridColumnReorder
 function wireGridColumnReorder(section, tableEl) {
   const ensureSectionPrefs = () => {
     if (!window.__gridPrefs || typeof window.__gridPrefs !== 'object') {
@@ -592,18 +619,22 @@ function wireGridColumnReorder(section, tableEl) {
 
   let dragKey = null;
 
-  tableEl.querySelectorAll('thead th').forEach(th => {
+  tableEl.querySelectorAll('thead th[data-col-key]').forEach((th) => {
     if (!th.dataset.colKey) return;
 
     th.addEventListener('dragstart', (ev) => {
       dragKey = th.dataset.colKey;
-      ev.dataTransfer.setData('text/plain', dragKey);
-      ev.dataTransfer.effectAllowed = 'move';
+      if (ev.dataTransfer) {
+        ev.dataTransfer.setData('text/plain', dragKey);
+        ev.dataTransfer.effectAllowed = 'move';
+      }
     });
 
     th.addEventListener('dragover', (ev) => {
       ev.preventDefault();
-      ev.dataTransfer.dropEffect = 'move';
+      if (ev.dataTransfer) {
+        ev.dataTransfer.dropEffect = 'move';
+      }
     });
 
     th.addEventListener('drop', async (ev) => {
@@ -612,12 +643,13 @@ function wireGridColumnReorder(section, tableEl) {
       if (!dragKey || dragKey === targetKey) return;
 
       const headers = Array.from(tableEl.querySelectorAll('thead th[data-col-key]'));
-      const keys = headers.map(h => h.dataset.colKey);
+      const keys = headers.map((h) => h.dataset.colKey);
 
       const from = keys.indexOf(dragKey);
       const to   = keys.indexOf(targetKey);
       if (from < 0 || to < 0) return;
 
+      // Move dragKey to the index of targetKey
       keys.splice(to, 0, keys.splice(from, 1)[0]);
 
       const secPrefs = ensureSectionPrefs();
@@ -625,9 +657,6 @@ function wireGridColumnReorder(section, tableEl) {
 
       keys.forEach((k, i) => {
         colPrefs[k] = { ...(colPrefs[k] || {}), order: i };
-        if (!('visible' in colPrefs[k])) {
-          colPrefs[k].visible = true;
-        }
       });
 
       await saveUserGridPrefsDebounced(section, { columns: colPrefs }, true);
@@ -637,11 +666,35 @@ function wireGridColumnReorder(section, tableEl) {
     });
   });
 }
+
+
+async function restoreGridPrefsToDefault(section) {
+  try {
+    const res = await authFetch(API('/api/users/me/grid-prefs'), {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ section, reset: true })
+    });
+    const prefs = await res.json().catch(() => null);
+    if (prefs && typeof prefs === 'object' && prefs.grid) {
+      window.__gridPrefs = prefs;
+    } else {
+      window.__gridPrefs = prefs || { grid: {} };
+    }
+
+    await loadUserGridPrefs(section);
+    const data = await loadSection();
+    renderSummary(data);
+  } catch (e) {
+    console.error('[GRID] restoreGridPrefsToDefault failed', e);
+  }
+}
+// FRONTEND — attachHeaderContextMenu
 function attachHeaderContextMenu(section, tableEl) {
   let menu = document.createElement('div');
   menu.style.cssText =
-    'position:fixed;z-index:10000;background:#0b152a;border:1px solid var(--line);' +
-    'padding:6px;border-radius:8px;display:none;min-width:180px;';
+    'position:fixed;z-index:10000;background:#0b1528;border:1px solid var(--line);' +
+    'padding:6px;border-radius:8px;display:none;min-width:220px;';
   document.body.appendChild(menu);
 
   const hide = () => { menu.style.display = 'none'; };
@@ -658,19 +711,34 @@ function attachHeaderContextMenu(section, tableEl) {
     return it;
   };
 
+  const ensureSectionPrefs = () => {
+    if (!window.__gridPrefs || typeof window.__gridPrefs !== 'object') {
+      window.__gridPrefs = { grid: {} };
+    }
+    if (!window.__gridPrefs.grid || typeof window.__gridPrefs.grid !== 'object') {
+      window.__gridPrefs.grid = {};
+    }
+    const g = window.__gridPrefs.grid;
+    g[section] = g[section] || {};
+    g[section].columns = g[section].columns || {};
+    return g[section];
+  };
+
   const resetAllWidths = () => {
-    const prefsRoot =
-      (window.__gridPrefs &&
-       window.__gridPrefs.grid &&
-       window.__gridPrefs.grid[section]) || {};
+    const sec = ensureSectionPrefs();
+    const cols = { ...(sec.columns || {}) };
+    Object.keys(cols).forEach((k) => {
+      if ('width' in cols[k]) delete cols[k].width;
+    });
 
-    const cols = { ...(prefsRoot.columns || {}) };
-    Object.keys(cols).forEach(k => { if ('width' in cols[k]) delete cols[k].width; });
+    tableEl.querySelectorAll('thead th[data-col-key]').forEach((th) => {
+      th.style.width = '';
+    });
+    tableEl.querySelectorAll('tbody td[data-col-key]').forEach((td) => {
+      td.style.width = '';
+    });
 
-    tableEl.querySelectorAll('thead th[data-col-key]').forEach(th => { th.style.width = ''; });
-    tableEl.querySelectorAll('tbody td[data-col-key]').forEach(td => { td.style.width = ''; });
-
-    saveUserGridPrefsDebounced(section, { columns: cols });
+    saveUserGridPrefsDebounced(section, { columns: cols }, true);
   };
 
   const autoWidthThisColumn = (colKey) => {
@@ -680,70 +748,83 @@ function attachHeaderContextMenu(section, tableEl) {
     const cells = tableEl.querySelectorAll(`tbody td[data-col-key="${CSS.escape(colKey)}"]`);
     const measure = (el) => Math.ceil(el.scrollWidth) + 16;
     let maxW = measure(th);
-    cells.forEach(td => { maxW = Math.max(maxW, measure(td)); });
+    cells.forEach((td) => { maxW = Math.max(maxW, measure(td)); });
 
     const w = Math.max(80, Math.min(600, maxW));
     th.style.width = `${w}px`;
-    cells.forEach(td => { td.style.width = `${w}px`; });
+    cells.forEach((td) => { td.style.width = `${w}px`; });
 
-    const prefsRoot =
-      (window.__gridPrefs &&
-       window.__gridPrefs.grid &&
-       window.__gridPrefs.grid[section]) || {};
-
-    const cols = { ...(prefsRoot.columns || {}) };
+    const sec = ensureSectionPrefs();
+    const cols = { ...(sec.columns || {}) };
     cols[colKey] = { ...(cols[colKey] || {}), width: w };
-    saveUserGridPrefsDebounced(section, { columns: cols });
+    saveUserGridPrefsDebounced(section, { columns: cols }, true);
   };
 
   tableEl.addEventListener('contextmenu', (ev) => {
     const th = ev.target && ev.target.closest('th');
-    if (!th || !th.dataset.colKey) return;
+    if (!th || !th.dataset || !th.dataset.colKey) return;
     ev.preventDefault();
 
     const colKey = th.dataset.colKey;
     menu.innerHTML = '';
 
-    menu.appendChild(mkItem('Reset View (Auto widths)', () => resetAllWidths()));
+    // Restore full layout for this section from backend defaults
+    menu.appendChild(
+      mkItem('Restore layout to default', () => {
+        restoreGridPrefsToDefault(section);
+      })
+    );
+
+    // Reset only widths for this section
+    menu.appendChild(
+      mkItem('Reset View (Auto widths)', () => resetAllWidths())
+    );
+
     const hr = document.createElement('hr');
-    hr.style.border = '1px solid var(--line)';
+    hr.style.border = '1px solid var(' + '--line' + ')';
     menu.appendChild(hr);
 
-    menu.appendChild(mkItem('Auto-size this column', () => autoWidthThisColumn(colKey)));
-    menu.appendChild(mkItem('Reset this column width', () => {
-      th.style.width = '';
-      tableEl
-        .querySelectorAll(`tbody td[data-col-key="${CSS.escape(colKey)}"]`)
-        .forEach(td => { td.style.width = ''; });
+    menu.appendChild(
+      mkItem('Auto-size this column', () => autoWidthThisColumn(colKey))
+    );
 
-      const prefsRoot =
-        (window.__gridPrefs &&
-         window.__gridPrefs.grid &&
-         window.__gridPrefs.grid[section]) || {};
+    menu.appendChild(
+      mkItem('Reset this column width', () => {
+        th.style.width = '';
+        tableEl
+          .querySelectorAll(`tbody td[data-col-key="${CSS.escape(colKey)}"]`)
+          .forEach((td) => { td.style.width = ''; });
 
-      const cols = { ...(prefsRoot.columns || {}) };
-      if (cols[colKey]) delete cols[colKey].width;
-      saveUserGridPrefsDebounced(section, { columns: cols });
-    }));
-    menu.appendChild(mkItem('Hide column', async () => {
-      const prefsRoot =
-        (window.__gridPrefs &&
-         window.__gridPrefs.grid &&
-         window.__gridPrefs.grid[section]) || {};
+        const sec = ensureSectionPrefs();
+        const cols = { ...(sec.columns || {}) };
+        if (cols[colKey]) delete cols[colKey].width;
+        saveUserGridPrefsDebounced(section, { columns: cols }, true);
+      })
+    );
 
-      const cols = { ...(prefsRoot.columns || {}) };
-      cols[colKey] = { ...(cols[colKey] || {}), visible: false };
-      await saveUserGridPrefsDebounced(section, { columns: cols }, true);
-      const data = await loadSection();
-      renderSummary(data);
-    }));
-    menu.appendChild(mkItem('Columns…', () => openColumnsDialog(section)));
+    menu.appendChild(
+      mkItem('Hide column', async () => {
+        const sec = ensureSectionPrefs();
+        const cols = { ...(sec.columns || {}) };
+        cols[colKey] = { ...(cols[colKey] || {}), visible: false };
+        await saveUserGridPrefsDebounced(section, { columns: cols }, true);
+        const data = await loadSection();
+        renderSummary(data);
+      })
+    );
 
+    menu.appendChild(
+      mkItem('Columns…', () => openColumnsDialog(section))
+    );
+
+    // Position the context menu
     menu.style.left = `${ev.clientX}px`;
     menu.style.top  = `${ev.clientY}px`;
     menu.style.display = 'block';
   });
 }
+
+
 
 function openColumnsDialog(section) {
   const rootPrefs =
