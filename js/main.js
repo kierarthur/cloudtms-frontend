@@ -331,71 +331,111 @@ function saveSession(sess){
   renderUserChip();
 }
 async function loadUserGridPrefs(section) {
-  window.__gridPrefs = window.__gridPrefs || null;
-  if (window.__gridPrefs) return window.__gridPrefs;
+  // If already loaded and shaped correctly, just reuse
+  if (window.__gridPrefs && typeof window.__gridPrefs === 'object') {
+    if (!window.__gridPrefs.grid || typeof window.__gridPrefs.grid !== 'object') {
+      window.__gridPrefs.grid = {};
+    }
+    return window.__gridPrefs;
+  }
 
   // GET once per app session
-  const res = await authFetch(API('/api/users/me/grid-prefs'));
   let prefs = {};
-  try { prefs = (await res.json()) || {}; } catch { prefs = {}; }
-  if (!prefs || typeof prefs !== 'object') prefs = { grid: {} };
-
-  // One-time import from legacy localStorage if present
   try {
-    const legacy = localStorage.getItem('cloudtms.cols.'+section);
-    if (legacy && (!prefs.grid || !prefs.grid[section] || !prefs.grid[section].columns)) {
+    const res = await authFetch(API('/api/users/me/grid-prefs'));
+    prefs = (await res.json()) || {};
+  } catch {
+    prefs = {};
+  }
+
+  // Normalise to at least { grid: {} }
+  if (!prefs || typeof prefs !== 'object') prefs = { grid: {} };
+  if (!prefs.grid || typeof prefs.grid !== 'object') prefs.grid = {};
+
+  // ── One-time import from legacy localStorage if present ──
+  try {
+    const legacy = localStorage.getItem('cloudtms.cols.' + section);
+    if (legacy && (!prefs.grid[section] || !prefs.grid[section].columns)) {
       const cols = JSON.parse(legacy);
       if (Array.isArray(cols)) {
-        // Convert to server prefs shape
         const columns = {};
         cols.forEach((k, i) => { columns[k] = { visible: true, order: i }; });
-        prefs.grid = prefs.grid || {};
-        prefs.grid[section] = { ...(prefs.grid[section]||{}), columns };
-        // Try to persist immediately
+        prefs.grid[section] = { ...(prefs.grid[section] || {}), columns };
+        // Try to persist immediately – using the debounced saver in "immediate" mode
         await saveUserGridPrefsDebounced(section, { columns }, true);
       }
     }
-    // Clear legacy
-    localStorage.removeItem('cloudtms.cols.'+section);
-  } catch {}
+    // Clear legacy regardless of whether migration worked
+    localStorage.removeItem('cloudtms.cols.' + section);
+  } catch {
+    // non-fatal
+  }
 
   window.__gridPrefs = prefs;
   return prefs;
 }
 
 const __saveTimers = new Map();
-async function saveUserGridPrefsDebounced(section, partial, immediate=false) {
-  window.__gridPrefs = window.__gridPrefs || { grid: {} };
-  window.__gridPrefs.grid[section] = { ...(window.__gridPrefs.grid[section]||{}), ...(partial||{}) };
+async function saveUserGridPrefsDebounced(section, partial, immediate = false) {
+  // Ensure global shape
+  if (!window.__gridPrefs || typeof window.__gridPrefs !== 'object') {
+    window.__gridPrefs = { grid: {} };
+  }
+  if (!window.__gridPrefs.grid || typeof window.__gridPrefs.grid !== 'object') {
+    window.__gridPrefs.grid = {};
+  }
+
+  const grid = window.__gridPrefs.grid;
+  const existing = grid[section] || {};
+  grid[section] = { ...existing, ...(partial || {}) };
 
   const key = `grid:${section}`;
+
   const fire = async () => {
-    const body = { section, prefs: window.__gridPrefs.grid[section] || {} };
+    const body = {
+      section,
+      prefs: grid[section] || {}
+    };
     try {
       const res = await authFetch(API('/api/users/me/grid-prefs'), {
-        method:'PATCH',
-        headers:{ 'Content-Type':'application/json' },
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body)
       });
-      const saved = await res.json();
-      if (saved && saved.grid) window.__gridPrefs = saved;
+      const saved = await res.json().catch(() => null);
+      // If server returned a full prefs object with .grid, adopt it
+      if (saved && typeof saved === 'object' && saved.grid && typeof saved.grid === 'object') {
+        window.__gridPrefs = saved;
+      }
     } catch (e) {
       console.error('Failed to save grid prefs', e);
     }
   };
 
-  if (immediate) return fire();
+  if (immediate) {
+    return fire();
+  }
 
   // 250–400ms debounce
-  if (__saveTimers.has(key)) clearTimeout(__saveTimers.get(key));
-  __saveTimers.set(key, setTimeout(fire, 300));
+  window.__saveTimers = window.__saveTimers || new Map();
+  if (window.__saveTimers.has(key)) {
+    clearTimeout(window.__saveTimers.get(key));
+  }
+  window.__saveTimers.set(key, setTimeout(fire, 300));
 }
-
 function getVisibleColumnsForSection(section, rows) {
   const defaults = defaultColumnsFor(section);
-  const prefs = (window.modalCtx && window.modalCtx.grid && window.modalCtx.grid[section]) || {};
-  const colPrefs = prefs.columns || {};
 
+  const prefsRoot =
+    (window.__gridPrefs &&
+     window.__gridPrefs.grid &&
+     window.__gridPrefs.grid[section]) || {};
+
+  const colPrefs   = prefsRoot.columns      || {};
+  const userMeta   = prefsRoot.columns_meta || {};
+  const globalMeta = (typeof GRID_COLUMN_META_DEFAULTS === 'object' && GRID_COLUMN_META_DEFAULTS[section]) || {};
+
+  // Build catalog of known columns: defaults + first row's keys
   const known = new Set(defaults);
   if (Array.isArray(rows) && rows.length > 0) {
     Object.keys(rows[0] || {}).forEach(k => known.add(k));
@@ -403,44 +443,59 @@ function getVisibleColumnsForSection(section, rows) {
 
   const entries = Array.from(known).map(k => {
     const p = colPrefs[k] || {};
-    const visible = (p.visible !== false);
-    const order   = (typeof p.order === 'number') ? p.order : (defaults.indexOf(k) >= 0 ? defaults.indexOf(k) : 9999);
-    const width   = (typeof p.width === 'number') ? p.width : null;
-    return {
-      key:   k,
-      visible,
-      order,
-      width,
-      meta: (prefs.columns_meta && prefs.columns_meta[k]) || {}
+    const meta = {
+      ...(globalMeta[k] || {}),
+      ...(userMeta[k]   || {})
     };
+
+    const selectable = (meta.selectable !== false); // default true
+    const visible    = (p.visible !== false);       // default true
+
+    const order = (typeof p.order === 'number')
+      ? p.order
+      : (defaults.indexOf(k) >= 0 ? defaults.indexOf(k) : 9999);
+
+    const width = (typeof p.width === 'number') ? p.width : null;
+
+    return { key: k, selectable, visible, order, width };
   });
 
-  // ✏️ You currently do this:
-  const filtered = entries.filter(e => e.visible !== false);
-  filtered.sort((a,b) => a.order - b.order);
+  // Only include columns that are globally/user-selectable AND marked visible
+  const filtered = entries.filter(e => e.selectable && e.visible);
+  filtered.sort((a, b) => a.order - b.order);
 
   return filtered.map(e => e.key);
 }
 
-
 function applyUserGridPrefs(section, tableEl, cols) {
-  const prefs = (window.__gridPrefs && window.__gridPrefs.grid && window.__gridPrefs.grid[section]) || {};
-  const colPrefs = prefs.columns || {};
+  const prefsRoot =
+    (window.__gridPrefs &&
+     window.__gridPrefs.grid &&
+     window.__gridPrefs.grid[section]) || {};
+
+  const colPrefs = prefsRoot.columns || {};
   const MIN_W = 80, MAX_W = 600;
 
   const widthOf = (k) => {
     let w = colPrefs[k]?.width;
     if (typeof w !== 'number' || !(w > 0)) return null; // auto
-    if (w < MIN_W) w = MIN_W; if (w > MAX_W) w = MAX_W;
+    if (w < MIN_W) w = MIN_W;
+    if (w > MAX_W) w = MAX_W;
     return w;
   };
 
   const setColWidthPx = (colKey, pxOrNull) => {
     const th = tableEl.querySelector(`thead th[data-col-key="${CSS.escape(colKey)}"]`);
     if (!th) return;
-    if (pxOrNull == null) { th.style.width = ''; } else { th.style.width = `${pxOrNull}px`; }
+    if (pxOrNull == null) {
+      th.style.width = '';
+    } else {
+      th.style.width = `${pxOrNull}px`;
+    }
     const tds = tableEl.querySelectorAll(`tbody td[data-col-key="${CSS.escape(colKey)}"]`);
-    tds.forEach(td => { td.style.width = (pxOrNull==null ? '' : `${pxOrNull}px`); });
+    tds.forEach(td => {
+      td.style.width = (pxOrNull == null ? '' : `${pxOrNull}px`);
+    });
   };
 
   (cols || []).forEach(k => setColWidthPx(k, widthOf(k)));
@@ -448,12 +503,17 @@ function applyUserGridPrefs(section, tableEl, cols) {
 function wireGridColumnResizing(section, tableEl) {
   const MIN_W = 80, MAX_W = 600;
 
-  const getPrefs = () => (window.__gridPrefs && window.__gridPrefs.grid && window.__gridPrefs.grid[section]) || {};
-  const ensurePrefs = () => {
-    window.__gridPrefs = window.__gridPrefs || { grid: {} };
-    window.__gridPrefs.grid[section] = window.__gridPrefs.grid[section] || {};
-    window.__gridPrefs.grid[section].columns = window.__gridPrefs.grid[section].columns || {};
-    return window.__gridPrefs.grid[section].columns;
+  const ensureColsPrefs = () => {
+    if (!window.__gridPrefs || typeof window.__gridPrefs !== 'object') {
+      window.__gridPrefs = { grid: {} };
+    }
+    if (!window.__gridPrefs.grid || typeof window.__gridPrefs.grid !== 'object') {
+      window.__gridPrefs.grid = {};
+    }
+    const g = window.__gridPrefs.grid;
+    g[section] = g[section] || {};
+    g[section].columns = g[section].columns || {};
+    return g[section].columns;
   };
 
   let drag = null;
@@ -463,7 +523,7 @@ function wireGridColumnResizing(section, tableEl) {
     const dx = (ev.clientX || 0) - drag.startX;
     let w = Math.max(MIN_W, Math.min(MAX_W, drag.startW + dx));
     drag.th.style.width = `${w}px`;
-    drag.cells.forEach(td => td.style.width = `${w}px`);
+    drag.cells.forEach(td => { td.style.width = `${w}px`; });
   };
 
   const onUp = () => {
@@ -472,8 +532,8 @@ function wireGridColumnResizing(section, tableEl) {
     const key = th.dataset.colKey;
     const rect = th.getBoundingClientRect();
     const w = Math.max(MIN_W, Math.min(MAX_W, Math.round(rect.width)));
-    const colsPrefs = ensurePrefs();
-    colsPrefs[key] = { ...(colsPrefs[key]||{}), width: w };
+    const colsPrefs = ensureColsPrefs();
+    colsPrefs[key] = { ...(colsPrefs[key] || {}), width: w };
     saveUserGridPrefsDebounced(section, { columns: colsPrefs });
     drag = null;
     document.removeEventListener('mousemove', onMove);
@@ -488,64 +548,90 @@ function wireGridColumnResizing(section, tableEl) {
       ev.preventDefault();
       ev.stopPropagation();
       const key = th.dataset.colKey;
-      const cells = Array.from(tableEl.querySelectorAll(`tbody td[data-col-key="${CSS.escape(key)}"]`));
+      const cells = Array.from(
+        tableEl.querySelectorAll(`tbody td[data-col-key="${CSS.escape(key)}"]`)
+      );
       drag = {
-        th, startX: ev.clientX || 0,
-        startW: Math.round((th.getBoundingClientRect().width)||MIN_W),
+        th,
+        startX: ev.clientX || 0,
+        startW: Math.round(th.getBoundingClientRect().width || MIN_W),
         cells
       };
       document.addEventListener('mousemove', onMove);
       document.addEventListener('mouseup', onUp, true);
     });
 
-    // Double-click handle resets to Auto
+    // Double-click handle resets width for this column to auto
     handle.addEventListener('dblclick', (ev) => {
-      ev.preventDefault(); ev.stopPropagation();
+      ev.preventDefault();
+      ev.stopPropagation();
       const key = th.dataset.colKey;
       th.style.width = '';
-      tableEl.querySelectorAll(`tbody td[data-col-key="${CSS.escape(key)}"]`).forEach(td => td.style.width = '');
-      const colsPrefs = ensurePrefs();
+      tableEl
+        .querySelectorAll(`tbody td[data-col-key="${CSS.escape(key)}"]`)
+        .forEach(td => { td.style.width = ''; });
+      const colsPrefs = ensureColsPrefs();
       if (colsPrefs[key]) delete colsPrefs[key].width;
       saveUserGridPrefsDebounced(section, { columns: colsPrefs });
     });
   });
 }
 function wireGridColumnReorder(section, tableEl) {
-  const getPrefs = () => (window.__gridPrefs && window.__gridPrefs.grid && window.__gridPrefs.grid[section]) || {};
+  const ensureSectionPrefs = () => {
+    if (!window.__gridPrefs || typeof window.__gridPrefs !== 'object') {
+      window.__gridPrefs = { grid: {} };
+    }
+    if (!window.__gridPrefs.grid || typeof window.__gridPrefs.grid !== 'object') {
+      window.__gridPrefs.grid = {};
+    }
+    const g = window.__gridPrefs.grid;
+    g[section] = g[section] || {};
+    g[section].columns = g[section].columns || {};
+    return g[section];
+  };
 
   let dragKey = null;
 
   tableEl.querySelectorAll('thead th').forEach(th => {
     if (!th.dataset.colKey) return;
+
     th.addEventListener('dragstart', (ev) => {
       dragKey = th.dataset.colKey;
       ev.dataTransfer.setData('text/plain', dragKey);
       ev.dataTransfer.effectAllowed = 'move';
     });
-    th.addEventListener('dragover', (ev) => { ev.preventDefault(); ev.dataTransfer.dropEffect = 'move'; });
+
+    th.addEventListener('dragover', (ev) => {
+      ev.preventDefault();
+      ev.dataTransfer.dropEffect = 'move';
+    });
+
     th.addEventListener('drop', async (ev) => {
       ev.preventDefault();
       const targetKey = th.dataset.colKey;
       if (!dragKey || dragKey === targetKey) return;
 
-      // Compute new order array based on current DOM order
       const headers = Array.from(tableEl.querySelectorAll('thead th[data-col-key]'));
       const keys = headers.map(h => h.dataset.colKey);
 
-      // Move dragKey to the index of targetKey
-      const from = keys.indexOf(dragKey), to = keys.indexOf(targetKey);
+      const from = keys.indexOf(dragKey);
+      const to   = keys.indexOf(targetKey);
       if (from < 0 || to < 0) return;
-      keys.splice(to, 0, keys.splice(from,1)[0]);
 
-      // Persist order
-      const prefs = getPrefs();
-      const colPrefs = { ...(prefs.columns||{}) };
+      keys.splice(to, 0, keys.splice(from, 1)[0]);
+
+      const secPrefs = ensureSectionPrefs();
+      const colPrefs = { ...(secPrefs.columns || {}) };
+
       keys.forEach((k, i) => {
-        colPrefs[k] = { ...(colPrefs[k]||{}), order: i, visible: (colPrefs[k]?.visible !== false) };
+        colPrefs[k] = { ...(colPrefs[k] || {}), order: i };
+        if (!('visible' in colPrefs[k])) {
+          colPrefs[k].visible = true;
+        }
       });
+
       await saveUserGridPrefsDebounced(section, { columns: colPrefs }, true);
 
-      // Re-render to apply new order
       const data = await loadSection();
       renderSummary(data);
     });
@@ -553,120 +639,152 @@ function wireGridColumnReorder(section, tableEl) {
 }
 function attachHeaderContextMenu(section, tableEl) {
   let menu = document.createElement('div');
-  menu.style.cssText = 'position:fixed;z-index:10000;background:#0b152a;border:1px solid var(--line);padding:6px;border-radius:8px;display:none;min-width:180px;';
+  menu.style.cssText =
+    'position:fixed;z-index:10000;background:#0b152a;border:1px solid var(--line);' +
+    'padding:6px;border-radius:8px;display:none;min-width:180px;';
   document.body.appendChild(menu);
 
-  const hide = ()=>{ menu.style.display='none'; };
+  const hide = () => { menu.style.display = 'none'; };
   document.addEventListener('click', hide);
-  document.addEventListener('keydown', (e)=>{ if (e.key==='Escape') hide(); });
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') hide(); });
 
   const mkItem = (label, cb) => {
     const it = document.createElement('div');
     it.textContent = label;
     it.style.cssText = 'padding:6px 10px;cursor:pointer;';
-    it.addEventListener('click', ()=>{ hide(); cb && cb(); });
-    it.addEventListener('mouseover', ()=> it.style.background='#101c36');
-    it.addEventListener('mouseout',  ()=> it.style.background='transparent');
+    it.addEventListener('click', () => { hide(); cb && cb(); });
+    it.addEventListener('mouseover', () => { it.style.background = '#101c36'; });
+    it.addEventListener('mouseout',  () => { it.style.background = 'transparent'; });
     return it;
   };
 
-  const autoWidthThisColumn = (colKey) => {
-    // Measure content width
-    const th = tableEl.querySelector(`thead th[data-col-key="${CSS.escape(colKey)}"]`);
-    if (!th) return;
-    const cells = tableEl.querySelectorAll(`tbody td[data-col-key="${CSS.escape(colKey)}"]`);
-    const measure = (el) => Math.ceil(el.scrollWidth) + 16; // padding allowance
-    let maxW = measure(th);
-    cells.forEach(td => { maxW = Math.max(maxW, measure(td)); });
-    const w = Math.max(80, Math.min(600, maxW));
-    // Apply + persist
-    th.style.width = `${w}px`;
-    cells.forEach(td => td.style.width = `${w}px`);
-    const prefs = (window.__gridPrefs && window.__gridPrefs.grid && window.__gridPrefs.grid[section]) || {};
-    const cols = { ...((prefs.columns)||{}) };
-    cols[colKey] = { ...(cols[colKey]||{}), width: w };
+  const resetAllWidths = () => {
+    const prefsRoot =
+      (window.__gridPrefs &&
+       window.__gridPrefs.grid &&
+       window.__gridPrefs.grid[section]) || {};
+
+    const cols = { ...(prefsRoot.columns || {}) };
+    Object.keys(cols).forEach(k => { if ('width' in cols[k]) delete cols[k].width; });
+
+    tableEl.querySelectorAll('thead th[data-col-key]').forEach(th => { th.style.width = ''; });
+    tableEl.querySelectorAll('tbody td[data-col-key]').forEach(td => { td.style.width = ''; });
+
     saveUserGridPrefsDebounced(section, { columns: cols });
   };
 
-  const resetAllWidths = () => {
-    const prefs = (window.__gridPrefs && window.__gridPrefs.grid && window.__gridPrefs.grid[section]) || {};
-    const cols = { ...((prefs.columns)||{}) };
-    Object.keys(cols).forEach(k => { if ('width' in cols[k]) delete cols[k].width; });
-    // Clear DOM widths
-    tableEl.querySelectorAll('thead th[data-col-key]').forEach(th => th.style.width='');
-    tableEl.querySelectorAll('tbody td[data-col-key]').forEach(td => td.style.width='');
+  const autoWidthThisColumn = (colKey) => {
+    const th = tableEl.querySelector(`thead th[data-col-key="${CSS.escape(colKey)}"]`);
+    if (!th) return;
+
+    const cells = tableEl.querySelectorAll(`tbody td[data-col-key="${CSS.escape(colKey)}"]`);
+    const measure = (el) => Math.ceil(el.scrollWidth) + 16;
+    let maxW = measure(th);
+    cells.forEach(td => { maxW = Math.max(maxW, measure(td)); });
+
+    const w = Math.max(80, Math.min(600, maxW));
+    th.style.width = `${w}px`;
+    cells.forEach(td => { td.style.width = `${w}px`; });
+
+    const prefsRoot =
+      (window.__gridPrefs &&
+       window.__gridPrefs.grid &&
+       window.__gridPrefs.grid[section]) || {};
+
+    const cols = { ...(prefsRoot.columns || {}) };
+    cols[colKey] = { ...(cols[colKey] || {}), width: w };
     saveUserGridPrefsDebounced(section, { columns: cols });
   };
 
   tableEl.addEventListener('contextmenu', (ev) => {
-    const th = ev.target && (ev.target.closest('th'));
+    const th = ev.target && ev.target.closest('th');
     if (!th || !th.dataset.colKey) return;
     ev.preventDefault();
 
     const colKey = th.dataset.colKey;
     menu.innerHTML = '';
-    // First item: Reset View (auto widths for all)
+
     menu.appendChild(mkItem('Reset View (Auto widths)', () => resetAllWidths()));
-    menu.appendChild(document.createElement('hr')).style.border = '1px solid var(--line)';
+    const hr = document.createElement('hr');
+    hr.style.border = '1px solid var(--line)';
+    menu.appendChild(hr);
 
     menu.appendChild(mkItem('Auto-size this column', () => autoWidthThisColumn(colKey)));
     menu.appendChild(mkItem('Reset this column width', () => {
       th.style.width = '';
-      tableEl.querySelectorAll(`tbody td[data-col-key="${CSS.escape(colKey)}"]`).forEach(td => td.style.width = '');
-      const prefs = (window.__gridPrefs && window.__gridPrefs.grid && window.__gridPrefs.grid[section]) || {};
-      const cols = { ...((prefs.columns)||{}) };
+      tableEl
+        .querySelectorAll(`tbody td[data-col-key="${CSS.escape(colKey)}"]`)
+        .forEach(td => { td.style.width = ''; });
+
+      const prefsRoot =
+        (window.__gridPrefs &&
+         window.__gridPrefs.grid &&
+         window.__gridPrefs.grid[section]) || {};
+
+      const cols = { ...(prefsRoot.columns || {}) };
       if (cols[colKey]) delete cols[colKey].width;
       saveUserGridPrefsDebounced(section, { columns: cols });
     }));
     menu.appendChild(mkItem('Hide column', async () => {
-      const prefs = (window.__gridPrefs && window.__gridPrefs.grid && window.__gridPrefs.grid[section]) || {};
-      const cols = { ...((prefs.columns)||{}) };
-      cols[colKey] = { ...(cols[colKey]||{}), visible: false };
+      const prefsRoot =
+        (window.__gridPrefs &&
+         window.__gridPrefs.grid &&
+         window.__gridPrefs.grid[section]) || {};
+
+      const cols = { ...(prefsRoot.columns || {}) };
+      cols[colKey] = { ...(cols[colKey] || {}), visible: false };
       await saveUserGridPrefsDebounced(section, { columns: cols }, true);
       const data = await loadSection();
       renderSummary(data);
     }));
     menu.appendChild(mkItem('Columns…', () => openColumnsDialog(section)));
 
-    // position
     menu.style.left = `${ev.clientX}px`;
     menu.style.top  = `${ev.clientY}px`;
     menu.style.display = 'block';
   });
 }
+
 function openColumnsDialog(section) {
-  const prefs = (window.__gridPrefs && window.__gridPrefs.grid && window.__gridPrefs.grid[section]) || {};
-  const colPrefs = prefs.columns || {};
-  const userMeta = prefs.columns_meta || {};
-  const globalMeta = (GRID_COLUMN_META_DEFAULTS && GRID_COLUMN_META_DEFAULTS[section]) || {};
+  const rootPrefs =
+    (window.__gridPrefs &&
+     window.__gridPrefs.grid &&
+     window.__gridPrefs.grid[section]) || {};
+
+  const colPrefs  = rootPrefs.columns      || {};
+  const userMeta  = rootPrefs.columns_meta || {};
+  const globalMeta = (typeof GRID_COLUMN_META_DEFAULTS === 'object' && GRID_COLUMN_META_DEFAULTS[section]) || {};
 
   const mergeMetaFor = (key) => ({
-    ...(userMeta[key] || {}),
-    ...(globalMeta[key] || {})
+    ...(globalMeta[key] || {}),
+    ...(userMeta[key]   || {})
   });
 
-  const useFriendly = (prefs.use_friendly_labels !== false);
-  const labels = prefs.labels || {};
+  const useFriendly = (rootPrefs.use_friendly_labels !== false);
+  const labels      = rootPrefs.labels || {};
 
-  // Build master key list: visible columns, defaults, current row keys, and any global-meta keys
+  // Build master key list: visible columns, defaults, current row keys
   const known = new Set(
     getVisibleColumnsForSection(section, currentRows).concat(defaultColumnsFor(section))
   );
   if (Array.isArray(currentRows) && currentRows[0]) {
     Object.keys(currentRows[0]).forEach(k => known.add(k));
   }
-  Object.keys(globalMeta).forEach(k => known.add(k));
 
-  // Filter out columns that are globally or per-user marked selectable:false
+  // Filter out columns that are globally/user marked selectable:false
   const list = Array.from(known).filter(k => {
     const meta = mergeMetaFor(k);
     return meta.selectable !== false;
   });
 
   const overlay = document.createElement('div');
-  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:10000;display:flex;align-items:center;justify-content:center;';
+  overlay.style.cssText =
+    'position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:10000;' +
+    'display:flex;align-items:center;justify-content:center;';
   const modal = document.createElement('div');
-  modal.style.cssText = 'background:#0b152a;border:1px solid var(--line);border-radius:10px;min-width:600px;max-width:80vw;max-height:80vh;overflow:auto;padding:14px;';
+  modal.style.cssText =
+    'background:#0b152a;border:1px solid var(--line);border-radius:10px;' +
+    'min-width:480px;max-width:80vw;max-height:80vh;overflow:auto;padding:14px;';
   overlay.appendChild(modal);
 
   const title = document.createElement('div');
@@ -674,7 +792,7 @@ function openColumnsDialog(section) {
   title.style.cssText = 'font-weight:600;margin-bottom:10px;';
   modal.appendChild(title);
 
-  // Labels toggle
+  // Friendly labels toggle
   const lblWrap = document.createElement('label');
   const lblCb = document.createElement('input');
   lblCb.type = 'checkbox';
@@ -685,11 +803,10 @@ function openColumnsDialog(section) {
   modal.appendChild(lblWrap);
 
   lblCb.addEventListener('change', () => {
-    const newPrefs = { ...prefs, use_friendly_labels: !!lblCb.checked };
-    saveUserGridPrefsDebounced(section, newPrefs);
+    saveUserGridPrefsDebounced(section, { use_friendly_labels: !!lblCb.checked });
   });
 
-  // Table of columns
+  // Table: Visible + Column key + Display name
   const t = document.createElement('table');
   t.style.cssText = 'width:100%;border-collapse:collapse;';
   t.innerHTML = `
@@ -698,8 +815,6 @@ function openColumnsDialog(section) {
         <th style="text-align:left;padding:6px;border-bottom:1px solid var(--line)">Visible</th>
         <th style="text-align:left;padding:6px;border-bottom:1px solid var(--line)">Column key</th>
         <th style="text-align:left;padding:6px;border-bottom:1px solid var(--line)">Display name</th>
-        <th style="text-align:left;padding:6px;border-bottom:1px solid var(--line)">Width (px)</th>
-        <th style="text-align:left;padding:6px;border-bottom:1px solid var(--line)">Selectable</th>
         <th style="text-align:left;padding:6px;border-bottom:1px solid var(--line)">Order</th>
       </tr>
     </thead>
@@ -715,31 +830,26 @@ function openColumnsDialog(section) {
     return (idx >= 0 ? idx : 9999);
   };
 
-  // Model rows: one per column
   const rowsModel = list
-    .map(k => {
-      const mergedMeta = mergeMetaFor(k);
-      return {
-        key: k,
-        visible: (colPrefs[k]?.visible !== false),
-        label: labels[k] || (DEFAULT_COLUMN_LABELS[section] && DEFAULT_COLUMN_LABELS[section][k]) || k,
-        width: (typeof colPrefs[k]?.width === 'number') ? colPrefs[k].width : '',
-        selectable: (mergedMeta.selectable !== false),
-        order: orderOf(k)
-      };
-    })
+    .map(k => ({
+      key: k,
+      visible: (colPrefs[k]?.visible !== false),
+      label: labels[k] ||
+             (DEFAULT_COLUMN_LABELS[section] && DEFAULT_COLUMN_LABELS[section][k]) ||
+             k,
+      order: orderOf(k)
+    }))
     .sort((a, b) => a.order - b.order);
 
   const persist = () => {
-    const columns = {};
+    const columns   = {};
     const labelsOut = {};
-    const metaOut = {};
+    const metaOut   = { ...(rootPrefs.columns_meta || {}) }; // carry existing meta
 
-    rowsModel.forEach(r => {
+    rowsModel.forEach((r, idx) => {
       columns[r.key] = { visible: !!r.visible, order: r.order };
-      if (r.width !== '') columns[r.key].width = Number(r.width);
       labelsOut[r.key] = String(r.label || r.key);
-      metaOut[r.key] = { selectable: !!r.selectable };
+      // metaOut is not changed here; selectable remains driven by defaults/code
     });
 
     saveUserGridPrefsDebounced(section, {
@@ -751,36 +861,31 @@ function openColumnsDialog(section) {
   };
 
   const reindex = () => {
-    rowsModel.forEach((r, i) => (r.order = i));
+    rowsModel.forEach((r, i) => { r.order = i; });
     persist();
     refresh();
   };
 
   const refresh = () => {
     tb.innerHTML = '';
-    rowsModel.sort((a, b) => a.order - b.order).forEach((r) => {
+    rowsModel.sort((a, b) => a.order - b.order).forEach(r => {
       const tr = document.createElement('tr');
       tr.innerHTML = `
         <td style="padding:6px"><input type="checkbox" ${r.visible ? 'checked' : ''}></td>
         <td style="padding:6px;font-family:monospace">${r.key}</td>
         <td style="padding:6px"><input type="text"></td>
-        <td style="padding:6px"><input type="number" min="80" max="600" step="10"></td>
-        <td style="padding:6px"><input type="checkbox" ${r.selectable ? 'checked' : ''}></td>
         <td style="padding:6px">
           <button data-move="up">▲</button>
           <button data-move="down">▼</button>
         </td>
       `;
 
-      const elVisible   = tr.querySelector('td:nth-child(1) input');
-      const elLabel     = tr.querySelector('td:nth-child(3) input');
-      const elWidth     = tr.querySelector('td:nth-child(4) input');
-      const elSelectable= tr.querySelector('td:nth-child(5) input');
-      const btnUp       = tr.querySelector('button[data-move="up"]');
-      const btnDown     = tr.querySelector('button[data-move="down"]');
+      const elVisible = tr.querySelector('td:nth-child(1) input');
+      const elLabel   = tr.querySelector('td:nth-child(3) input');
+      const btnUp     = tr.querySelector('button[data-move="up"]');
+      const btnDown   = tr.querySelector('button[data-move="down"]');
 
       elLabel.value = r.label;
-      elWidth.value = (r.width === '' ? '' : String(r.width));
 
       elVisible.addEventListener('change', () => {
         r.visible = !!elVisible.checked;
@@ -789,26 +894,6 @@ function openColumnsDialog(section) {
 
       elLabel.addEventListener('change', () => {
         r.label = elLabel.value;
-        persist();
-      });
-
-      elWidth.addEventListener('change', () => {
-        if (elWidth.value === '') {
-          r.width = '';
-        } else {
-          let v = Number(elWidth.value || 0);
-          if (!Number.isFinite(v)) v = '';
-          if (v !== '') {
-            if (v < 80) v = 80;
-            if (v > 600) v = 600;
-          }
-          r.width = v;
-        }
-        persist();
-      });
-
-      elSelectable.addEventListener('change', () => {
-        r.selectable = !!elSelectable.checked;
         persist();
       });
 
@@ -834,21 +919,28 @@ function openColumnsDialog(section) {
 
   refresh();
 
-  // footer actions
+  // Footer: Reset widths (delegates to header context menu logic) + Close
   const footer = document.createElement('div');
   footer.style.cssText = 'display:flex;justify-content:space-between;gap:8px;margin-top:10px;';
-  const left = document.createElement('div');
+  const left  = document.createElement('div');
   const right = document.createElement('div');
   footer.appendChild(left);
   footer.appendChild(right);
 
   const btnResetWidths = document.createElement('button');
   btnResetWidths.textContent = 'Reset all widths';
-  btnResetWidths.style.cssText = 'border:1px solid var(--line);background:#0b152a;color:var(--text);padding:6px 10px;border-radius:8px;cursor:pointer';
+  btnResetWidths.style.cssText =
+    'border:1px solid var(--line);background:#0b152a;color:var(--text);' +
+    'padding:6px 10px;border-radius:8px;cursor:pointer';
   btnResetWidths.addEventListener('click', () => {
-    rowsModel.forEach(r => { r.width = ''; });
-    persist();
-    refresh();
+    const prefsRoot =
+      (window.__gridPrefs &&
+       window.__gridPrefs.grid &&
+       window.__gridPrefs.grid[section]) || {};
+
+    const cols = { ...(prefsRoot.columns || {}) };
+    Object.keys(cols).forEach(k => { if ('width' in cols[k]) delete cols[k].width; });
+    saveUserGridPrefsDebounced(section, { columns: cols });
   });
   left.appendChild(btnResetWidths);
 
@@ -865,6 +957,7 @@ function openColumnsDialog(section) {
   modal.appendChild(footer);
   document.body.appendChild(overlay);
 }
+
 
 
 function loadSession(){
