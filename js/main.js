@@ -1080,8 +1080,14 @@ async function loadSection(){
     pageSize: 50,
     total: null,
     hasMore: false,
-    filters: null
+    filters: null,
+    sort: { key: null, dir: 'asc' }
   });
+
+  // Ensure sort object exists (for older sessions where it wasn't seeded)
+  if (!st.sort || typeof st.sort !== 'object') {
+    st.sort = { key: null, dir: 'asc' };
+  }
 
   // Default Contracts quick-filter to "active" if nothing specified
   if (currentSection === 'contracts') {
@@ -1094,7 +1100,12 @@ async function loadSection(){
   // Ensure user grid prefs are loaded once per session (per section)
   await loadUserGridPrefs(currentSection);
 
-  const useSearch = !!st.filters && (Object.keys(st.filters).length > 0);
+  // Decide whether to use the search endpoints:
+  // - if there are any filters
+  // - OR if a sort key is active
+  const hasFilters = !!st.filters && Object.keys(st.filters).length > 0;
+  const hasSort    = !!(st.sort && st.sort.key);
+  const useSearch  = hasFilters || hasSort;
 
   const fetchOne = async (section, page, pageSize) => {
     window.__listState[section].page = page;
@@ -1109,12 +1120,13 @@ async function loadSection(){
         case 'umbrellas':  return await listUmbrellas();
         case 'settings':   return await getSettings();
         case 'audit':      return await listOutbox();
-        case 'contracts':  return await search('contracts', {}); // safety; normally useSearch===true
+        case 'contracts':  return await search('contracts', {}); // safety; normally useSearch===true for contracts
         default:           return [];
       }
     }
   };
 
+  // PageSize = ALL → fetch all pages sequentially (respecting filters + sort)
   if (st.pageSize === 'ALL') {
     const acc = [];
     let p = 1;
@@ -1137,6 +1149,7 @@ async function loadSection(){
     return acc;
   }
 
+  // Normal paged case
   const page = Number(st.page || 1);
   const ps   = Number(st.pageSize || 50);
   const rows = await fetchOne(currentSection, page, ps);
