@@ -82,7 +82,12 @@
     .toolbar input[type="text"]{ background:#0b1427; border:1px solid var(--line); color:#fff; border-radius:8px; padding:8px 10px; min-width:260px }
     .toolbar .mini{ font-size:12px; color:var(--sub) }
     #content{ flex:1; min-height:0; overflow:auto } /* old: content area is the scroll container */
-    .grid{ width:100%; border-collapse:collapse }
+.grid{
+  width:100%;
+  border-collapse:collapse;
+  table-layout:fixed;   /* <- add this line */
+}
+
     .grid th,.grid td{ padding:10px 12px; border-bottom:1px solid var(--line); vertical-align:top }
     .grid th{ position:sticky; top:0; background:#0b1221; border-bottom:1px solid var(--line); text-align:left }
 
