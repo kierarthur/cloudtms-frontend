@@ -63,16 +63,25 @@
       cursor:pointer;
     }
 
-    .layout{
+     .layout{
       display:grid;
       grid-template-columns:260px 1fr;
+      grid-template-rows: 1fr;           /* single row that fills the height */
       gap:16px;
-      height: calc(100vh - 58px); /* fixed to viewport below topbar */
-      min-height: 0;               /* allow inner flex children to size */
+      height: calc(100vh - 58px);        /* fixed to viewport below topbar */
+      min-height: 0;
       padding:16px;
     }
 
-    .panel{ background:linear-gradient(180deg,#0b1221,#0a1326); border:1px solid var(--line); border-radius:var(--radius); box-shadow:var(--shadow) }
+
+    .panel{
+      background:linear-gradient(180deg,#0b1221,#0a1326);
+      border:1px solid var(--line);
+      border-radius:var(--radius);
+      box-shadow:var(--shadow);
+      min-height: 0; /* allow panel to shrink inside the grid row */
+    }
+
     .tools{ padding:12px; position:sticky; top:76px; height:fit-content }
     .tools h3{ margin:6px 0 10px; font-size:12px; font-weight:600; color:var(--sub); text-transform:uppercase; letter-spacing:.06em }
     /* old index used a dashed divider here */
@@ -85,7 +94,13 @@
     .tools .note{ font-size:12px; color:var(--sub) }
 
     /* ===== Summary table ===== */
-    .main{ padding:0; display:flex; flex-direction:column }
+    .main{
+      padding:0;
+      display:flex;
+      flex-direction:column;
+      min-height: 0; /* allow #content to shrink so .summary-body can scroll */
+    }
+
     .toolbar{ display:flex; align-items:center; gap:8px; padding:10px; border-bottom:1px solid var(--line) }
     .toolbar .title{ font-weight:700 }
     .spacer{ flex:1 }
