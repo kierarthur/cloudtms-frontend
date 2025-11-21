@@ -8012,26 +8012,42 @@ async function openSaveSelectionModal(section) {
       }
 
       try { invalidatePresetCache(section, 'selection'); } catch {}
-      return true;
+      return true;  // ← tells saveForFrame to treat as success and close the modal
     },
     false,
     undefined,
     { noParentGate: true, forceEdit: true, kind: 'selection-save' }
   );
 
-  // Wire append toggling
+  // Wire append toggling + name field enable/disable
   setTimeout(() => {
     const formEl = document.getElementById('saveSelectionForm');
     if (!formEl || formEl.dataset.wired === '1') return;
     formEl.dataset.wired = '1';
 
     const appendWrap = document.getElementById('selAppendWrap');
+    const nameInput  = document.getElementById('selPresetName');
+
+    const syncModeUI = () => {
+      const modeEl = formEl.querySelector('input[name="mode"]:checked');
+      const isAppend = !!(modeEl && modeEl.value === 'append');
+
+      if (appendWrap) appendWrap.style.display = isAppend ? 'block' : 'none';
+
+      if (nameInput) {
+        nameInput.disabled = isAppend;
+        nameInput.readOnly = isAppend;
+      }
+    };
+
     formEl.querySelectorAll('input[name="mode"]').forEach(r => {
       r.addEventListener('change', () => {
-        const isAppend = r.value === 'append' && r.checked;
-        if (appendWrap) appendWrap.style.display = isAppend ? 'block' : 'none';
+        syncModeUI();
       });
     });
+
+    // Initialise UI (default is "new" so name should be editable)
+    syncModeUI();
   }, 0);
 }
 
@@ -16819,6 +16835,7 @@ const wantApply = (isChild && !top.noParentGate) ||
 const defaultPrimary =
   (top.kind === 'contract-clone-extend') ? 'Create'
 : (top.kind === 'advanced-search')       ? 'Search'
+: (top.kind === 'selection-load')        ? 'Load'
 : (wantApply ? 'Apply' : 'Save');
 
 
