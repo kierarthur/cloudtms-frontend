@@ -18408,7 +18408,6 @@ function collectForm(sel, jsonTry=false){
 // - Triggers background membership priming (ALL IDs for current filters)
 // - (Sorting of summary grid can be added here if/when you enable header clicks)
 // ─────────────────────────────────────────────────────────────────────────────
-
 function renderSummary(rows){
   currentRows = rows;
   currentSelection = null;
@@ -18561,7 +18560,15 @@ function renderSummary(rows){
   content.appendChild(topControls);
 
   // ── data table ──────────────────────────────────────────────────────────────
-  const tbl = document.createElement('table'); tbl.className='grid';
+  const tbl = document.createElement('table');
+  tbl.className = 'grid';
+
+  // For candidates, don't force 100% width so the fixed 40px tick column
+  // doesn't get stretched when there are fewer columns.
+  if (currentSection === 'candidates') {
+    tbl.style.width = 'auto';
+  }
+
   const thead = document.createElement('thead');
   // Header-only horizontal border (for easier resize handle targeting)
   thead.style.borderBottom = '1px solid var(--line)';
@@ -18588,6 +18595,11 @@ function renderSummary(rows){
 
   // Header checkbox
   const thSel = document.createElement('th');
+  // Hard-lock the selection column width so it cannot "breathe" when sorting
+  thSel.style.width = '40px';
+  thSel.style.minWidth = '40px';
+  thSel.style.maxWidth = '40px';
+
   const hdrCb = document.createElement('input'); hdrCb.type='checkbox'; hdrCb.id='summarySelectAll';
   hdrCb.addEventListener('click', (e)=>{
     e.stopPropagation();
@@ -18671,6 +18683,11 @@ function renderSummary(rows){
     tr.dataset.id = (r && r.id) ? String(r.id) : ''; tr.dataset.section = currentSection;
 
     const tdSel = document.createElement('td');
+    // Match the header tick column width explicitly at cell level too
+    tdSel.style.width = '40px';
+    tdSel.style.minWidth = '40px';
+    tdSel.style.maxWidth = '40px';
+
     const cb = document.createElement('input'); cb.type='checkbox'; cb.className='row-select';
     cb.checked = isRowSelected(tr.dataset.id);
     cb.addEventListener('click', (e)=>{
