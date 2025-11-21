@@ -18472,10 +18472,10 @@ function renderSummary(rows){
   const content = byId('content');
   byId('title').textContent = sections.find(s=>s.key===currentSection)?.label || '';
 
-  // Preserve scroll position per section
+  // Preserve scroll position per section (for inner scroll host, not #content)
   window.__scrollMemory = window.__scrollMemory || {};
   const memKey = `summary:${currentSection}`;
-  const prevScrollY = content ? (window.__scrollMemory[memKey] ?? content.scrollTop ?? 0) : 0;
+  const prevScrollY = window.__scrollMemory[memKey] ?? 0;
 
   content.innerHTML = '';
   if (currentSection === 'settings') return renderSettingsPanel(content);
@@ -18558,6 +18558,11 @@ function renderSummary(rows){
   topControls.appendChild(selInfo);
   topControls.appendChild(clearBtn);
   content.appendChild(topControls);
+
+  // ── inner scroll host for data rows ────────────────────────────────────────
+  const bodyWrap = document.createElement('div');
+  bodyWrap.className = 'summary-body';
+  content.appendChild(bodyWrap);
 
   // ── data table ──────────────────────────────────────────────────────────────
   const tbl = document.createElement('table');
@@ -18674,13 +18679,15 @@ function renderSummary(rows){
 
     trh.appendChild(th);
   });
-  thead.appendChild(trh); tbl.appendChild(thead);
+  thead.appendChild(trh);
+  tbl.appendChild(thead);
 
   const tb = document.createElement('tbody');
 
   rows.forEach(r=>{
     const tr = document.createElement('tr');
-    tr.dataset.id = (r && r.id) ? String(r.id) : ''; tr.dataset.section = currentSection;
+    tr.dataset.id = (r && r.id) ? String(r.id) : '';
+    tr.dataset.section = currentSection;
 
     const tdSel = document.createElement('td');
     // Match the header tick column width explicitly at cell level too
@@ -18735,7 +18742,7 @@ function renderSummary(rows){
   });
 
   tbl.appendChild(tb);
-  content.appendChild(tbl);
+  bodyWrap.appendChild(tbl);
 
   // ── Apply widths + wire resize/reorder + header context menu ────────────────
   applyUserGridPrefs(currentSection, tbl, cols);
@@ -18864,16 +18871,19 @@ function renderSummary(rows){
   selBar.appendChild(btnLoad);
   content.appendChild(selBar);
 
-  // Restore scroll memory
+  // Restore scroll memory on inner summary-body (data rows)
   try {
-    content.__activeMemKey = memKey;
-    content.scrollTop = prevScrollY;
-    if (!content.__scrollMemHooked) {
-      content.addEventListener('scroll', () => {
-        const k = content.__activeMemKey || memKey;
-        window.__scrollMemory[k] = content.scrollTop || 0;
-      });
-      content.__scrollMemHooked = true;
+    const scrollHost = content.querySelector('.summary-body');
+    if (scrollHost) {
+      scrollHost.__activeMemKey = memKey;
+      scrollHost.scrollTop = prevScrollY;
+      if (!scrollHost.__scrollMemHooked) {
+        scrollHost.addEventListener('scroll', () => {
+          const k = scrollHost.__activeMemKey || memKey;
+          window.__scrollMemory[k] = scrollHost.scrollTop || 0;
+        });
+        scrollHost.__scrollMemHooked = true;
+      }
     }
   } catch {}
 
@@ -18883,7 +18893,6 @@ function renderSummary(rows){
 
   try { primeSummaryMembership(currentSection, fp); } catch (e) { /* non-blocking */ }
 }
-
 
 // Close any existing floating menu
 function closeRelatedMenu(){
