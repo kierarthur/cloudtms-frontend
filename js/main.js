@@ -18472,7 +18472,7 @@ function renderSummary(rows){
   const content = byId('content');
   byId('title').textContent = sections.find(s=>s.key===currentSection)?.label || '';
 
-  // Preserve scroll position per section (for inner scroll host, not #content)
+  // Preserve scroll position per section — now for inner .summary-body, not #content
   window.__scrollMemory = window.__scrollMemory || {};
   const memKey = `summary:${currentSection}`;
   const prevScrollY = window.__scrollMemory[memKey] ?? 0;
@@ -18559,7 +18559,7 @@ function renderSummary(rows){
   topControls.appendChild(clearBtn);
   content.appendChild(topControls);
 
-  // ── inner scroll host for data rows ────────────────────────────────────────
+  // ── inner scroll host just for the data rows ───────────────────────────────
   const bodyWrap = document.createElement('div');
   bodyWrap.className = 'summary-body';
   content.appendChild(bodyWrap);
@@ -18742,7 +18742,7 @@ function renderSummary(rows){
   });
 
   tbl.appendChild(tb);
-  bodyWrap.appendChild(tbl);
+  bodyWrap.appendChild(tbl);   // <── table is now inside .summary-body
 
   // ── Apply widths + wire resize/reorder + header context menu ────────────────
   applyUserGridPrefs(currentSection, tbl, cols);
@@ -18871,7 +18871,7 @@ function renderSummary(rows){
   selBar.appendChild(btnLoad);
   content.appendChild(selBar);
 
-  // Restore scroll memory on inner summary-body (data rows)
+  // Restore scroll memory on inner summary-body (data rows only)
   try {
     const scrollHost = content.querySelector('.summary-body');
     if (scrollHost) {
