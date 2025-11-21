@@ -18472,7 +18472,7 @@ function renderSummary(rows){
   const content = byId('content');
   byId('title').textContent = sections.find(s=>s.key===currentSection)?.label || '';
 
-  // Preserve scroll position per section — now for inner .summary-body, not #content
+  // Preserve scroll position per section — for .summary-body, not #content
   window.__scrollMemory = window.__scrollMemory || {};
   const memKey = `summary:${currentSection}`;
   const prevScrollY = window.__scrollMemory[memKey] ?? 0;
@@ -18742,7 +18742,7 @@ function renderSummary(rows){
   });
 
   tbl.appendChild(tb);
-  bodyWrap.appendChild(tbl);   // <── table is now inside .summary-body
+  bodyWrap.appendChild(tbl);  // ⬅ table goes into scrollable summary-body
 
   // ── Apply widths + wire resize/reorder + header context menu ────────────────
   applyUserGridPrefs(currentSection, tbl, cols);
