@@ -85,6 +85,7 @@
     .grid{ width:100%; border-collapse:collapse }
     .grid th,.grid td{ padding:10px 12px; border-bottom:1px solid var(--line); vertical-align:top }
     .grid th{ position:sticky; top:0; background:#0b1221; border-bottom:1px solid var(--line); text-align:left }
+
     /* Header row box — only affects summary table headers */
 .grid thead tr {
   border-top: 1px solid var(--line);
@@ -101,6 +102,16 @@
 .grid thead th + th {
   border-left: 1px solid var(--line);  
 }
+
+/* Fix width of the selection checkbox column in summary tables */
+.main .grid thead th:first-child,
+.main .grid tbody td:first-child {
+  width: 40px;
+  min-width: 40px;
+  max-width: 40px;
+  text-align: center;
+}
+
 
     .grid tr:hover{ background:rgba(255,255,255,.02) }
     .grid tr.active {
