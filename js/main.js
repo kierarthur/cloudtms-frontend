@@ -488,9 +488,7 @@ function getVisibleColumnsForSection(section, rows) {
   return filtered.map((e) => e.key);
 }
 
-
-
-function applyUserGridPrefs(section, tableEl, cols) {
+function applyUserGridPrefs(section, tables, cols) {
   const root = (window.__gridPrefs && window.__gridPrefs.grid) || {};
   const prefsRoot = root[section] || {};
   const colPrefs = prefsRoot.columns || {};
@@ -504,18 +502,23 @@ function applyUserGridPrefs(section, tableEl, cols) {
     return w;
   };
 
+  const headTable = (tables && tables.head) ? tables.head : tables;
+  const bodyTable = (tables && tables.body) ? tables.body : tables;
+
   const setColWidthPx = (colKey, pxOrNull) => {
-    const th = tableEl.querySelector(`thead th[data-col-key="${CSS.escape(colKey)}"]`);
-    if (!th) return;
-    if (pxOrNull == null) {
-      th.style.width = '';
-    } else {
-      th.style.width = `${pxOrNull}px`;
+    if (headTable) {
+      const th = headTable.querySelector(`thead th[data-col-key="${CSS.escape(colKey)}"]`);
+      if (th) {
+        th.style.width = (pxOrNull == null ? '' : `${pxOrNull}px`);
+      }
     }
-    const tds = tableEl.querySelectorAll(`tbody td[data-col-key="${CSS.escape(colKey)}"]`);
-    tds.forEach(td => {
-      td.style.width = (pxOrNull == null ? '' : `${pxOrNull}px`);
-    });
+
+    if (bodyTable) {
+      const tds = bodyTable.querySelectorAll(`tbody td[data-col-key="${CSS.escape(colKey)}"]`);
+      tds.forEach(td => {
+        td.style.width = (pxOrNull == null ? '' : `${pxOrNull}px`);
+      });
+    }
   };
 
   (cols || []).forEach((k) => {
@@ -524,9 +527,11 @@ function applyUserGridPrefs(section, tableEl, cols) {
   });
 }
 
-
-function wireGridColumnResizing(section, tableEl) {
+function wireGridColumnResizing(section, tables) {
   const MIN_W = 80, MAX_W = 600;
+
+  const headTable = (tables && tables.head) ? tables.head : tables;
+  const bodyTable = (tables && tables.body) ? tables.body : tables;
 
   const ensureColsPrefs = () => {
     if (!window.__gridPrefs || typeof window.__gridPrefs !== 'object') {
@@ -565,7 +570,9 @@ function wireGridColumnResizing(section, tableEl) {
     document.removeEventListener('mouseup', onUp, true);
   };
 
-  tableEl.querySelectorAll('thead th').forEach((th) => {
+  if (!headTable) return;
+
+  headTable.querySelectorAll('thead th').forEach((th) => {
     const handle = th.querySelector('.col-resizer');
     if (!handle) return;
 
@@ -573,9 +580,9 @@ function wireGridColumnResizing(section, tableEl) {
       ev.preventDefault();
       ev.stopPropagation();
       const key = th.dataset.colKey;
-      const cells = Array.from(
-        tableEl.querySelectorAll(`tbody td[data-col-key="${CSS.escape(key)}"]`)
-      );
+      const cells = bodyTable
+        ? Array.from(bodyTable.querySelectorAll(`tbody td[data-col-key="${CSS.escape(key)}"]`))
+        : [];
       drag = {
         th,
         startX: ev.clientX || 0,
@@ -592,9 +599,11 @@ function wireGridColumnResizing(section, tableEl) {
       ev.stopPropagation();
       const key = th.dataset.colKey;
       th.style.width = '';
-      tableEl
-        .querySelectorAll(`tbody td[data-col-key="${CSS.escape(key)}"]`)
-        .forEach(td => { td.style.width = ''; });
+      if (bodyTable) {
+        bodyTable
+          .querySelectorAll(`tbody td[data-col-key="${CSS.escape(key)}"]`)
+          .forEach(td => { td.style.width = ''; });
+      }
       const colsPrefs = ensureColsPrefs();
       if (colsPrefs[key]) delete colsPrefs[key].width;
       saveUserGridPrefsDebounced(section, { columns: colsPrefs });
@@ -603,7 +612,9 @@ function wireGridColumnResizing(section, tableEl) {
 }
 
 // FRONTEND — wireGridColumnReorder
-function wireGridColumnReorder(section, tableEl) {
+function wireGridColumnReorder(section, tables) {
+  const headTable = (tables && tables.head) ? tables.head : tables;
+
   const ensureSectionPrefs = () => {
     if (!window.__gridPrefs || typeof window.__gridPrefs !== 'object') {
       window.__gridPrefs = { grid: {} };
@@ -617,9 +628,11 @@ function wireGridColumnReorder(section, tableEl) {
     return g[section];
   };
 
+  if (!headTable) return;
+
   let dragKey = null;
 
-  tableEl.querySelectorAll('thead th[data-col-key]').forEach((th) => {
+  headTable.querySelectorAll('thead th[data-col-key]').forEach((th) => {
     if (!th.dataset.colKey) return;
 
     th.addEventListener('dragstart', (ev) => {
@@ -642,7 +655,7 @@ function wireGridColumnReorder(section, tableEl) {
       const targetKey = th.dataset.colKey;
       if (!dragKey || dragKey === targetKey) return;
 
-      const headers = Array.from(tableEl.querySelectorAll('thead th[data-col-key]'));
+      const headers = Array.from(headTable.querySelectorAll('thead th[data-col-key]'));
       const keys = headers.map((h) => h.dataset.colKey);
 
       const from = keys.indexOf(dragKey);
@@ -667,7 +680,6 @@ function wireGridColumnReorder(section, tableEl) {
   });
 }
 
-
 async function restoreGridPrefsToDefault(section) {
   try {
     const res = await authFetch(API('/api/users/me/grid-prefs'), {
@@ -690,7 +702,10 @@ async function restoreGridPrefsToDefault(section) {
   }
 }
 // FRONTEND — attachHeaderContextMenu
-function attachHeaderContextMenu(section, tableEl) {
+function attachHeaderContextMenu(section, tables) {
+  const headTable = (tables && tables.head) ? tables.head : tables;
+  const bodyTable = (tables && tables.body) ? tables.body : tables;
+
   let menu = document.createElement('div');
   menu.style.cssText =
     'position:fixed;z-index:10000;background:#0b1528;border:1px solid var(--line);' +
@@ -731,21 +746,29 @@ function attachHeaderContextMenu(section, tableEl) {
       if ('width' in cols[k]) delete cols[k].width;
     });
 
-    tableEl.querySelectorAll('thead th[data-col-key]').forEach((th) => {
-      th.style.width = '';
-    });
-    tableEl.querySelectorAll('tbody td[data-col-key]').forEach((td) => {
-      td.style.width = '';
-    });
+    if (headTable) {
+      headTable.querySelectorAll('thead th[data-col-key]').forEach((th) => {
+        th.style.width = '';
+      });
+    }
+    if (bodyTable) {
+      bodyTable.querySelectorAll('tbody td[data-col-key]').forEach((td) => {
+        td.style.width = '';
+      });
+    }
 
     saveUserGridPrefsDebounced(section, { columns: cols }, true);
   };
 
   const autoWidthThisColumn = (colKey) => {
-    const th = tableEl.querySelector(`thead th[data-col-key="${CSS.escape(colKey)}"]`);
+    if (!headTable) return;
+    const th = headTable.querySelector(`thead th[data-col-key="${CSS.escape(colKey)}"]`);
     if (!th) return;
 
-    const cells = tableEl.querySelectorAll(`tbody td[data-col-key="${CSS.escape(colKey)}"]`);
+    const cells = bodyTable
+      ? bodyTable.querySelectorAll(`tbody td[data-col-key="${CSS.escape(colKey)}"]`)
+      : [];
+
     const measure = (el) => Math.ceil(el.scrollWidth) + 16;
     let maxW = measure(th);
     cells.forEach((td) => { maxW = Math.max(maxW, measure(td)); });
@@ -760,7 +783,9 @@ function attachHeaderContextMenu(section, tableEl) {
     saveUserGridPrefsDebounced(section, { columns: cols }, true);
   };
 
-  tableEl.addEventListener('contextmenu', (ev) => {
+  if (!headTable) return;
+
+  headTable.addEventListener('contextmenu', (ev) => {
     const th = ev.target && ev.target.closest('th');
     if (!th || !th.dataset || !th.dataset.colKey) return;
     ev.preventDefault();
@@ -791,9 +816,11 @@ function attachHeaderContextMenu(section, tableEl) {
     menu.appendChild(
       mkItem('Reset this column width', () => {
         th.style.width = '';
-        tableEl
-          .querySelectorAll(`tbody td[data-col-key="${CSS.escape(colKey)}"]`)
-          .forEach((td) => { td.style.width = ''; });
+        if (bodyTable) {
+          bodyTable
+            .querySelectorAll(`tbody td[data-col-key="${CSS.escape(colKey)}"]`)
+            .forEach(td => { td.style.width = ''; });
+        }
 
         const sec = ensureSectionPrefs();
         const cols = { ...(sec.columns || {}) };
@@ -18559,25 +18586,15 @@ function renderSummary(rows){
   topControls.appendChild(clearBtn);
   content.appendChild(topControls);
 
-  // ── inner scroll host just for the data rows ───────────────────────────────
-  const bodyWrap = document.createElement('div');
-  bodyWrap.className = 'summary-body';
-  content.appendChild(bodyWrap);
-
-  // ── data table ──────────────────────────────────────────────────────────────
-  const tbl = document.createElement('table');
-  tbl.className = 'grid';
-
-  // For candidates, don't force 100% width so the fixed 40px tick column
-  // doesn't get stretched when there are fewer columns.
-  if (currentSection === 'candidates') {
-    tbl.style.width = 'auto';
-  }
-
+  // ── header table (outside scroll area) ──────────────────────────────────────
+  const tblHead = document.createElement('table');
+  tblHead.className = 'grid';
   const thead = document.createElement('thead');
-  // Header-only horizontal border (for easier resize handle targeting)
   thead.style.borderBottom = '1px solid var(--line)';
   const trh = document.createElement('tr');
+  thead.appendChild(trh);
+  tblHead.appendChild(thead);
+  content.appendChild(tblHead);
 
   let btnFocus, btnSave;
 
@@ -18615,12 +18632,13 @@ function renderSummary(rows){
     computeHeaderState();
     updateButtons();
   });
-  thSel.appendChild(hdrCb); trh.appendChild(thSel);
+  thSel.appendChild(hdrCb);
+  trh.appendChild(thSel);
 
   // Determine columns (using server prefs)
   const cols = getVisibleColumnsForSection(currentSection, rows);
 
-  // Build headers with friendly labels, resizer handles, and click-to-sort
+  // Build header cells with friendly labels, resizer handles, and click-to-sort
   cols.forEach(c=>{
     const th = document.createElement('th');
     th.dataset.colKey = String(c);
@@ -18679,8 +18697,21 @@ function renderSummary(rows){
 
     trh.appendChild(th);
   });
-  thead.appendChild(trh);
-  tbl.appendChild(thead);
+
+  // ── inner scroll host just for the data rows ───────────────────────────────
+  const bodyWrap = document.createElement('div');
+  bodyWrap.className = 'summary-body';
+  content.appendChild(bodyWrap);
+
+  // ── body table (rows only) ─────────────────────────────────────────────────
+  const tblBody = document.createElement('table');
+  tblBody.className = 'grid';
+
+  // For candidates, don't force 100% width so the fixed 40px tick column
+  // doesn't get stretched when there are fewer columns.
+  if (currentSection === 'candidates') {
+    tblBody.style.width = 'auto';
+  }
 
   const tb = document.createElement('tbody');
 
@@ -18741,14 +18772,14 @@ function renderSummary(rows){
     }, 0);
   });
 
-  tbl.appendChild(tb);
-  bodyWrap.appendChild(tbl);  // ⬅ table goes into scrollable summary-body
+  tblBody.appendChild(tb);
+  bodyWrap.appendChild(tblBody);
 
   // ── Apply widths + wire resize/reorder + header context menu ────────────────
-  applyUserGridPrefs(currentSection, tbl, cols);
-  wireGridColumnResizing(currentSection, tbl);
-  wireGridColumnReorder(currentSection, tbl);
-  attachHeaderContextMenu(currentSection, tbl);
+  applyUserGridPrefs(currentSection, { head: tblHead, body: tblBody }, cols);
+  wireGridColumnResizing(currentSection, { head: tblHead, body: tblBody });
+  wireGridColumnReorder(currentSection, { head: tblHead, body: tblBody });
+  attachHeaderContextMenu(currentSection, { head: tblHead, body: tblBody });
 
   // Footer/pager
   const pager = document.createElement('div');
