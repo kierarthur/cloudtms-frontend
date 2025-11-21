@@ -14,12 +14,14 @@
     }
     *{box-sizing:border-box}
     html,body{height:100%}
-    body{
+  body{
       margin:0;
       background:linear-gradient(180deg,#0b1221,#0a1020 60%);
       color:var(--text);
-      font:14px/1.5 system-ui,Segoe UI,Roboto,Helvetica,Arial,"Apple Color Emoji","Segoe UI Emoji"
+      font:14px/1.5 system-ui,Segoe UI,Roboto,Helvetica,Arial,"Apple Color Emoji","Segoe UI Emoji";
+      overflow:hidden; /* prevent window scroll; inner panels will scroll */
     }
+
     a{color:inherit}
 
     /* ===== App chrome (old look) ===== */
@@ -61,7 +63,15 @@
       cursor:pointer;
     }
 
-    .layout{ display:grid; grid-template-columns:260px 1fr; gap:16px; min-height:calc(100vh - 58px); padding:16px }
+    .layout{
+      display:grid;
+      grid-template-columns:260px 1fr;
+      gap:16px;
+      height: calc(100vh - 58px); /* fixed to viewport below topbar */
+      min-height: 0;               /* allow inner flex children to size */
+      padding:16px;
+    }
+
     .panel{ background:linear-gradient(180deg,#0b1221,#0a1326); border:1px solid var(--line); border-radius:var(--radius); box-shadow:var(--shadow) }
     .tools{ padding:12px; position:sticky; top:76px; height:fit-content }
     .tools h3{ margin:6px 0 10px; font-size:12px; font-weight:600; color:var(--sub); text-transform:uppercase; letter-spacing:.06em }
