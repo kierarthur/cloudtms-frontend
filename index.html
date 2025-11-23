@@ -13,15 +13,16 @@
       --shadow: 0 6px 20px rgba(0,0,0,.25);
     }
     *{box-sizing:border-box}
-  html,body{height:100%}
-  body{
-      margin:0;
-      background:linear-gradient(180deg,#0b1221,#0a1020 60%);
-      color:var(--text);
-      font:14px/1.5 system-ui,Segoe UI,Roboto,Helvetica,Arial,"Apple Color Emoji","Segoe UI Emoji";
-      /* allow normal window scroll again */
-      /* overflow: auto;  <-- implicit default, so we can just omit it */
-    }
+html,body{height:100%}
+
+body{
+  margin:0;
+  background:linear-gradient(180deg,#0b1221,#0a1020 60%);
+  color:var(--text);
+  font:14px/1.5 system-ui,Segoe UI,Roboto,Helvetica,Arial,"Apple Color Emoji","Segoe UI Emoji";
+  overflow: hidden;        /* 👈 important: page itself doesn’t scroll */
+}
+
 
 
     a{color:inherit}
