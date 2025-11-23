@@ -119,13 +119,15 @@
     }    
     
 /* Content is a flex column; inner summary-body does the scrolling */
-    #content{
-      flex: 1;
-      min-height: 0;
-      display: flex;
-      flex-direction: column;
-      overflow: hidden;
-    }
+#content{
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  /* IMPORTANT: no overflow here, let .summary-body be the scroll container */
+  /* overflow: hidden;  <-- remove this line */
+}
+
 
      /* Inner scroll host for summary data rows */
     .summary-body{
