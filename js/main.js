@@ -18702,26 +18702,26 @@ function renderSummary(rows){
   trh.appendChild(thSel);
 
   // Build header cells with friendly labels, resizer handles, and click-to-sort
-  cols.forEach(c=>{
-    const th = document.createElement('th');
-    th.dataset.colKey = String(c);
-    th.style.position = 'relative';
-    th.style.cursor = 'pointer';
+ cols.forEach(c=>{
+  const th = document.createElement('th');
+  th.dataset.colKey = String(c);
+  // IMPORTANT: do NOT set th.style.position here; let CSS apply sticky
+  th.style.cursor = 'pointer';
 
-    const label = getFriendlyHeaderLabel(currentSection, c);
-    const isActive = sortState && sortState.key === c;
-    const arrow = isActive ? (sortState.dir === 'asc' ? ' ▲' : ' ▼') : '';
-    th.textContent = label + arrow;
+  const label = getFriendlyHeaderLabel(currentSection, c);
+  const isActive = sortState && sortState.key === c;
+  const arrow = isActive ? (sortState.dir === 'asc' ? ' ▲' : ' ▼') : '';
+  th.textContent = label + arrow;
 
-    // resizer handle (wired later)
-    const res = document.createElement('div');
-    res.className = 'col-resizer';
-    res.title = 'Drag to resize. Double-click to reset.';
-    res.style.cssText = 'position:absolute;right:0;top:0;width:6px;height:100%;cursor:col-resize;user-select:none;';
-    th.appendChild(res);
+  // resizer handle (wired later)
+  const res = document.createElement('div');
+  res.className = 'col-resizer';
+  res.title = 'Drag to resize. Double-click to reset.';
+  res.style.cssText = 'position:absolute;right:0;top:0;width:6px;height:100%;cursor:col-resize;user-select:none;';
+  th.appendChild(res);
 
-    // make header draggable for reorder (wired later)
-    th.draggable = true;
+  // make header draggable for reorder (wired later)
+  th.draggable = true;
 
     // Click-to-sort (server-side) — ignore clicks that start on the resizer
     th.addEventListener('click', async (ev) => {
