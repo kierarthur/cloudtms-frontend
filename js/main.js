@@ -18640,15 +18640,23 @@ function renderSummary(rows){
   topControls.appendChild(clearBtn);
   content.appendChild(topControls);
 
-  // ── header table (outside scroll area) ──────────────────────────────────────
-  const tblHead = document.createElement('table');
-  tblHead.className = 'grid';
+  // ── single table (header + body) inside scroll host ────────────────────────
+  const bodyWrap = document.createElement('div');
+  bodyWrap.className = 'summary-body';
+  content.appendChild(bodyWrap);
+
+  const tbl = document.createElement('table');
+  tbl.className = 'grid';
+
   const thead = document.createElement('thead');
   thead.style.borderBottom = '1px solid var(--line)';
   const trh = document.createElement('tr');
   thead.appendChild(trh);
-  tblHead.appendChild(thead);
-  content.appendChild(tblHead);
+  tbl.appendChild(thead);
+
+  const tb = document.createElement('tbody');
+  tbl.appendChild(tb);
+  bodyWrap.appendChild(tbl);
 
   let btnFocus, btnSave;
 
@@ -18661,6 +18669,7 @@ function renderSummary(rows){
       hdrCbEl.indeterminate = (selectedOfVisible > 0 && selectedOfVisible < idsVisible.length);
     }
   };
+
   const updateButtons = ()=>{
     const any = sel.ids.size > 0;
     if (btnFocus) btnFocus.disabled = !any;
@@ -18669,7 +18678,10 @@ function renderSummary(rows){
     renderSelInfo();
   };
 
-  // Header checkbox
+  // Determine columns (using server prefs)
+  const cols = getVisibleColumnsForSection(currentSection, rows);
+
+  // Header checkbox (first column)
   const thSel = document.createElement('th');
   // Hard-lock the selection column width so it cannot "breathe" when sorting
   thSel.style.width = '40px';
@@ -18688,9 +18700,6 @@ function renderSummary(rows){
   });
   thSel.appendChild(hdrCb);
   trh.appendChild(thSel);
-
-  // Determine columns (using server prefs)
-  const cols = getVisibleColumnsForSection(currentSection, rows);
 
   // Build header cells with friendly labels, resizer handles, and click-to-sort
   cols.forEach(c=>{
@@ -18752,22 +18761,12 @@ function renderSummary(rows){
     trh.appendChild(th);
   });
 
-  // ── inner scroll host just for the data rows ───────────────────────────────
-  const bodyWrap = document.createElement('div');
-  bodyWrap.className = 'summary-body';
-  content.appendChild(bodyWrap);
-
-  // ── body table (rows only) ─────────────────────────────────────────────────
-  const tblBody = document.createElement('table');
-  tblBody.className = 'grid';
-
-  // For candidates, don't force 100% width so the fixed 40px tick column
-  // doesn't get stretched when there are fewer columns.
+  // Body rows
   if (currentSection === 'candidates') {
-    tblBody.style.width = 'auto';
+    // For candidates, don't force 100% width so the fixed 40px tick column
+    // doesn't get stretched when there are fewer columns.
+    tbl.style.width = 'auto';
   }
-
-  const tb = document.createElement('tbody');
 
   rows.forEach(r=>{
     const tr = document.createElement('tr');
@@ -18826,21 +18825,11 @@ function renderSummary(rows){
     }, 0);
   });
 
-  tblBody.appendChild(tb);
-  bodyWrap.appendChild(tblBody);
-
   // ── Apply widths + wire resize/reorder + header context menu ────────────────
-applyUserGridPrefs(currentSection, { head: tblHead, body: tblBody }, cols);
-wireGridColumnResizing(currentSection, { head: tblHead, body: tblBody });
-wireGridColumnReorder(currentSection, { head: tblHead, body: tblBody });
-attachHeaderContextMenu(currentSection, { head: tblHead, body: tblBody });
-
-// NEW: keep header horizontally aligned with body when window is narrow
-bodyWrap.addEventListener('scroll', () => {
-  const x = bodyWrap.scrollLeft || 0;
-  tblHead.style.transform = `translateX(${-x}px)`;
-});
-
+  applyUserGridPrefs(currentSection, tbl, cols);
+  wireGridColumnResizing(currentSection, tbl);
+  wireGridColumnReorder(currentSection, tbl);
+  attachHeaderContextMenu(currentSection, tbl);
 
   // Footer/pager
   const pager = document.createElement('div');
@@ -18985,6 +18974,7 @@ bodyWrap.addEventListener('scroll', () => {
 
   try { primeSummaryMembership(currentSection, fp); } catch (e) { /* non-blocking */ }
 }
+
 
 // Close any existing floating menu
 function closeRelatedMenu(){
