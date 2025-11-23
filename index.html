@@ -156,16 +156,28 @@
       background: #334155;  /* slightly brighter on hover */
     }
 
-
 .grid{
-  border-collapse:collapse;
-  table-layout:fixed;
+  border-collapse: separate;   /* was: collapse */
+  border-spacing: 0;           /* keep the same visual look */
+  table-layout: fixed;
 }
 
+.grid th,
+.grid td {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
+  vertical-align: top;
+}
 
-    .grid th,.grid td{ padding:10px 12px; border-bottom:1px solid var(--line); vertical-align:top }
+.grid th {
+  position: sticky;
+  top: 0;
+  z-index: 1;                  /* keep header above scrolling rows */
+  background: #0b1221;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+}
 
-    .grid th{ position:sticky; top:0; background:#0b1221; border-bottom:1px solid var(--line); text-align:left }
 
     /* Header row box — only affects summary table headers */
 .grid thead tr {
