@@ -494,36 +494,73 @@ function applyUserGridPrefs(section, tables, cols) {
   const colPrefs = prefsRoot.columns || {};
   const MIN_W = 80, MAX_W = 600;
 
+  const headTable = (tables && tables.head) ? tables.head : tables;
+  const bodyTable = (tables && tables.body) ? tables.body : tables;
+
   const widthOf = (k) => {
     let w = colPrefs[k]?.width;
-    if (typeof w !== 'number' || !(w > 0)) return null; // auto
+    if (typeof w !== 'number' || !(w > 0)) return null; // auto → we’ll measure below
     if (w < MIN_W) w = MIN_W;
     if (w > MAX_W) w = MAX_W;
     return w;
   };
 
-  const headTable = (tables && tables.head) ? tables.head : tables;
-  const bodyTable = (tables && tables.body) ? tables.body : tables;
-
   const setColWidthPx = (colKey, pxOrNull) => {
     if (headTable) {
-      const th = headTable.querySelector(`thead th[data-col-key="${CSS.escape(colKey)}"]`);
+      const th = headTable.querySelector(
+        `thead th[data-col-key="${CSS.escape(colKey)}"]`
+      );
       if (th) {
         th.style.width = (pxOrNull == null ? '' : `${pxOrNull}px`);
       }
     }
 
     if (bodyTable) {
-      const tds = bodyTable.querySelectorAll(`tbody td[data-col-key="${CSS.escape(colKey)}"]`);
+      const tds = bodyTable.querySelectorAll(
+        `tbody td[data-col-key="${CSS.escape(colKey)}"]`
+      );
       tds.forEach(td => {
         td.style.width = (pxOrNull == null ? '' : `${pxOrNull}px`);
       });
     }
   };
 
+  // 🔑 NEW: ensure we have a mutable columns prefs object so we can persist
+  const ensureColsPrefs = () => {
+    window.__gridPrefs = window.__gridPrefs || { grid: {} };
+    window.__gridPrefs.grid = window.__gridPrefs.grid || {};
+    const g = window.__gridPrefs.grid;
+    g[section] = g[section] || {};
+    g[section].columns = g[section].columns || {};
+    return g[section].columns;
+  };
+
   (cols || []).forEach((k) => {
-    const w = widthOf(k);
-    setColWidthPx(k, w);
+    let w = widthOf(k);
+
+    // If no saved width, measure the header cell’s current width
+    if (w == null && headTable) {
+      const th = headTable.querySelector(
+        `thead th[data-col-key="${CSS.escape(k)}"]`
+      );
+      if (th) {
+        const rect = th.getBoundingClientRect();
+        w = Math.round(rect.width);
+        if (w < MIN_W) w = MIN_W;
+        if (w > MAX_W) w = MAX_W;
+
+        // Persist this as the column’s width so future renders stay aligned
+        const colsPrefs = ensureColsPrefs();
+        colsPrefs[k] = { ...(colsPrefs[k] || {}), width: w };
+        // Fire-and-forget; no need to await
+        saveUserGridPrefsDebounced(section, { columns: colsPrefs });
+      }
+    }
+
+    // Now apply the width (either from prefs or measured)
+    if (w != null) {
+      setColWidthPx(k, w);
+    }
   });
 }
 
