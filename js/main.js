@@ -18830,10 +18830,17 @@ function renderSummary(rows){
   bodyWrap.appendChild(tblBody);
 
   // ── Apply widths + wire resize/reorder + header context menu ────────────────
-  applyUserGridPrefs(currentSection, { head: tblHead, body: tblBody }, cols);
-  wireGridColumnResizing(currentSection, { head: tblHead, body: tblBody });
-  wireGridColumnReorder(currentSection, { head: tblHead, body: tblBody });
-  attachHeaderContextMenu(currentSection, { head: tblHead, body: tblBody });
+applyUserGridPrefs(currentSection, { head: tblHead, body: tblBody }, cols);
+wireGridColumnResizing(currentSection, { head: tblHead, body: tblBody });
+wireGridColumnReorder(currentSection, { head: tblHead, body: tblBody });
+attachHeaderContextMenu(currentSection, { head: tblHead, body: tblBody });
+
+// NEW: keep header horizontally aligned with body when window is narrow
+bodyWrap.addEventListener('scroll', () => {
+  const x = bodyWrap.scrollLeft || 0;
+  tblHead.style.transform = `translateX(${-x}px)`;
+});
+
 
   // Footer/pager
   const pager = document.createElement('div');
