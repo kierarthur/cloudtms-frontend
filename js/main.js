@@ -10745,9 +10745,34 @@ async function openCandidate(row) {
       } catch (e) {
         W('post-save rates refresh failed', e);
       }
-
       const mergedRoles = (saved && saved.roles) || payload.roles || window.modalCtx.data?.roles || [];
-      window.modalCtx.data       = { ...(window.modalCtx.data || {}), ...(saved || {}), id: candidateId, roles: mergedRoles };
+
+      // Build a fresh job_titles array for modalCtx.data, based on the staged model
+      let jobTitlesForCtx = [];
+      try {
+        const cm = window.modalCtx?.candidateMainModel;
+        if (cm && Array.isArray(cm.job_titles)) {
+          jobTitlesForCtx = cm.job_titles.map((t, idx) => ({
+            job_title_id: t.job_title_id,
+            is_primary: idx === 0
+          }));
+        } else if (Array.isArray(payload.job_titles)) {
+          jobTitlesForCtx = payload.job_titles.map((id, idx) => ({
+            job_title_id: id,
+            is_primary: idx === 0
+          }));
+        }
+      } catch (e) {
+        W('onSave: building jobTitlesForCtx failed', e);
+      }
+
+      window.modalCtx.data = {
+        ...(window.modalCtx.data || {}),
+        ...(saved || {}),
+        id: candidateId,
+        roles: mergedRoles,
+        job_titles: jobTitlesForCtx
+      };
       window.modalCtx.formState  = { __forId: candidateId, main: {}, pay: {} };
       window.modalCtx.rolesState = mergedRoles;
 
@@ -10760,6 +10785,7 @@ async function openCandidate(row) {
       if (isNew) window.__pendingFocus = { section: 'candidates', id: candidateId };
 
       return { ok: true, saved: window.modalCtx.data };
+
     },
     full?.id,
     () => {
