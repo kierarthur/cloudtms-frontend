@@ -1612,8 +1612,24 @@ function renderTopNav(){
         m.style.userSelect    = 'none';
 
         m.innerHTML = `
-          <button type="button" class="menu-item" data-k="global" style="display:flex;gap:8px;align-items:center;width:100%;background:#0b1427;border:1px solid var(--line);color:#fff;padding:8px 10px;border-radius:8px;cursor:pointer;margin:4px 0;">🌐 Global settings</button>
-          <button type="button" class="menu-item" data-k="rates"  style="display:flex;gap:8px;align-items:center;width:100%;background:#0b1427;border:1px solid var(--line);color:#fff;padding:8px 10px;border-radius:8px;cursor:pointer;margin:4px 0;">💱 Preset Rates</button>
+          <button type="button" class="menu-item" data-k="global"
+                  style="display:flex;gap:8px;align-items:center;width:100%;
+                         background:#0b1427;border:1px solid var(--line);color:#fff;
+                         padding:8px 10px;border-radius:8px;cursor:pointer;margin:4px 0;">
+            🌐 Global settings
+          </button>
+          <button type="button" class="menu-item" data-k="rates"
+                  style="display:flex;gap:8px;align-items:center;width:100%;
+                         background:#0b1427;border:1px solid var(--line);color:#fff;
+                         padding:8px 10px;border-radius:8px;cursor:pointer;margin:4px 0;">
+            💱 Preset Rates
+          </button>
+          <button type="button" class="menu-item" data-k="job-titles"
+                  style="display:flex;gap:8px;align-items:center;width:100%;
+                         background:#0b1427;border:1px solid var(--line);color:#fff;
+                         padding:8px 10px;border-radius:8px;cursor:pointer;margin:4px 0;">
+            🏷 Job Titles
+          </button>
         `;
 
         // Position under the button
@@ -1633,9 +1649,13 @@ function renderTopNav(){
             // keep current behaviour
             switchToSection('settings');
           } else if (k === 'rates') {
-            // new Preset Rates manager (parent modal)
+            // Preset Rates manager (parent modal)
             if (!confirmDiscardChangesIfDirty()) return;
             openPresetRatesManager();
+          } else if (k === 'job-titles') {
+            // New Job Titles manager (side-panel modal)
+            if (!confirmDiscardChangesIfDirty()) return;
+            openJobTitleSettingsModal();
           }
         });
 
@@ -1690,7 +1710,7 @@ function renderTopNav(){
         } else if (currentSection === 'clients' || currentSection === 'umbrellas') {
           filters = { name: text };
         } else if (currentSection === 'contracts') {
-          // NEW: free-text passthrough for contracts
+          // free-text passthrough for contracts
           filters = { q: text };
         } else {
           const data = await loadSection();
@@ -10395,6 +10415,7 @@ async function openDelete(){
 // ================== FRONTEND: openCandidate (UPDATED) ==================
 // ================== FIXED: openCandidate (hydrate before showModal) ==================
 // ================== FIXED: openCandidate (hydrate before showModal) ==================
+// ================== FIXED: openCandidate (hydrate before showModal) ==================
 async function openCandidate(row) {
   // ===== Logging helpers (toggle with window.__LOG_MODAL = true/false) =====
   const LOG = (typeof window.__LOG_MODAL === 'boolean') ? window.__LOG_MODAL : false;
@@ -10469,7 +10490,7 @@ async function openCandidate(row) {
     openToken: window.modalCtx.openToken
   });
 
-  // 3) Render modal (PASS onReturn so Bookings tab mounts the NEW candidate calendar)
+  // 3) Render modal
   L('calling showModal with hasId=', !!full?.id, 'rawHasIdArg=', full?.id);
   showModal(
     'Candidate',
@@ -10533,6 +10554,22 @@ async function openCandidate(row) {
       if (payload.umbrella_id === '') payload.umbrella_id = null;
 
       for (const k of Object.keys(payload)) if (payload[k] === '') delete payload[k];
+
+      // Sync Job Title + DOB from candidateMainModel (ISO date)
+      try {
+        const cm = window.modalCtx?.candidateMainModel;
+        if (cm && typeof cm === 'object') {
+          if (Object.prototype.hasOwnProperty.call(cm, 'job_title_id')) {
+            payload.job_title_id = cm.job_title_id || null;
+          }
+          if (Object.prototype.hasOwnProperty.call(cm, 'prof_reg_type')) {
+            payload.prof_reg_type = cm.prof_reg_type || null;
+          }
+          if (Object.prototype.hasOwnProperty.call(cm, 'date_of_birth')) {
+            payload.date_of_birth = cm.date_of_birth || null;
+          }
+        }
+      } catch {}
 
       const idForUpdate = window.modalCtx?.data?.id || full?.id || null;
       const tokenAtSave = window.modalCtx.openToken;
@@ -10717,7 +10754,6 @@ async function openCandidate(row) {
       return { ok: true, saved: window.modalCtx.data };
     },
     full?.id,
-    // onReturn: mount the Candidate Calendar when the Bookings tab is active
     () => {
       const fr = window.__getModalFrame?.();
       const isBookings = fr && fr.entity === 'candidates' && fr.currentTabKey === 'bookings';
@@ -10754,6 +10790,7 @@ async function openCandidate(row) {
   }
 }
 
+
 function renderCandidateTab(key, row = {}) {
   if (key === 'main') return html(`
     <div class="form" id="tab-main">
@@ -10777,14 +10814,108 @@ function renderCandidateTab(key, row = {}) {
 
       ${input('display_name','Display name', row.display_name)}
 
-      <!-- Roles editor -->
+      <!-- New: NI / DOB / Gender -->
+      ${input('ni_number','National Insurance Number', row.ni_number)}
+      ${input('date_of_birth','Date of birth', row.date_of_birth)}
+      ${select('gender','Gender', row.gender || '', ['', 'Male', 'Female', 'Other'])}
+
+      <!-- New: Job Title (hierarchy picker) -->
       <div class="row">
-        <label>Roles (ranked)</label>
-        <div id="rolesEditor" data-init="1"></div>
-        <div class="hint">Pick from global roles (from Client Default Rates). Drag to reorder. Remove to delete. No duplicates.</div>
+        <label>Job Title</label>
+        <div class="controls">
+          <div class="split">
+            <div data-field="job_title_display"
+                 class="pill"
+                 style="min-height:24px;display:flex;align-items:center;">
+              ${escapeHtml(row.job_title_path_display || row.job_title || '')}
+            </div>
+            <button type="button"
+                    class="btn mini"
+                    data-act="pick-job-title">
+              Pick…
+            </button>
+          </div>
+          <!-- Hidden fields so the backend gets the IDs/types -->
+          <input type="hidden"
+                 name="job_title_id"
+                 value="${row.job_title_id || ''}">
+          <input type="hidden"
+                 name="prof_reg_type"
+                 value="${row.prof_reg_type || ''}">
+        </div>
       </div>
 
-      <div class="row"><label>Notes</label><textarea name="notes" placeholder="Free text…">${row.notes || ''}</textarea></div>
+      <!-- New: Professional registration number (NMC/GMC/HCPC) -->
+      <div class="row"
+           data-block="prof_reg"
+           style="${row.prof_reg_type ? '' : 'display:none'}">
+        <label data-field="prof_reg_label">
+          ${row.prof_reg_type
+            ? escapeHtml(`${row.prof_reg_type} Number`)
+            : 'Registration Number'}
+        </label>
+        <div class="controls">
+          <input class="input"
+                 name="prof_reg_number"
+                 value="${escapeHtml(row.prof_reg_number || '')}">
+        </div>
+      </div>
+
+      <!-- New: Home address + postcode lookup -->
+      <div class="row">
+        <label>Home address</label>
+        <div class="controls">
+          <div class="grid-2">
+            <input class="input"
+                   name="address_line1"
+                   placeholder="Address line 1"
+                   value="${escapeHtml(row.address_line1 || '')}">
+            <input class="input"
+                   name="address_line2"
+                   placeholder="Address line 2"
+                   value="${escapeHtml(row.address_line2 || '')}">
+            <input class="input"
+                   name="address_line3"
+                   placeholder="Address line 3"
+                   value="${escapeHtml(row.address_line3 || '')}">
+            <input class="input"
+                   name="town_city"
+                   placeholder="City / Town"
+                   value="${escapeHtml(row.town_city || '')}">
+            <input class="input"
+                   name="county"
+                   placeholder="County"
+                   value="${escapeHtml(row.county || '')}">
+            <div class="split">
+              <input class="input"
+                     name="postcode"
+                     placeholder="Postcode"
+                     value="${escapeHtml(row.postcode || '')}">
+              <button type="button"
+                      class="btn mini"
+                      data-act="postcode-lookup"
+                      title="Lookup by postcode">
+                Lookup
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Rota Roles editor -->
+      <div class="row">
+        <label>Rota Roles</label>
+        <div id="rolesEditor" data-init="1"></div>
+        <div class="hint">
+          This links the candidate job role to a Care Package rota only.
+          If this candidate is not working on Care Packages, you can ignore this.
+        </div>
+      </div>
+
+      <div class="row">
+        <label>Notes</label>
+        <textarea name="notes" placeholder="Free text…">${row.notes || ''}</textarea>
+      </div>
     </div>
   `);
 
@@ -16622,7 +16753,7 @@ if (this._loadOnly === true) return;
     if (p && typeof p.then === 'function') { await p; }
   }
 
-  if (this.entity==='candidates' && k==='main') {
+   if (this.entity==='candidates' && k==='main') {
     const pmSel = document.querySelector('#pay-method');
     if (pmSel) {
       const stagedPm   = window.modalCtx?.formState?.main?.pay_method;
@@ -16649,7 +16780,34 @@ if (this._loadOnly === true) return;
         }
       })();
     }
+
+    // NEW: wire candidate main model + Job Title + NI/DOB/Gender + Address + Postcode lookup
+    try {
+      const container = document.getElementById('tab-main');
+      if (container && typeof buildCandidateMainDetailsModel === 'function' && typeof bindCandidateMainFormEvents === 'function') {
+        const model = buildCandidateMainDetailsModel(window.modalCtx?.data || {});
+        window.modalCtx.candidateMainModel = model;
+        bindCandidateMainFormEvents(container, model);
+        L('setTab(candidates/main): bound candidate main model', { keys: Object.keys(model||{}) });
+      }
+    } catch (e) {
+      console.error('[MODAL] bindCandidateMainFormEvents failed', e);
+    }
   }
+  if (this.entity === 'umbrellas' && k === 'main') {
+    try {
+      const container = document.getElementById('tab-main');
+      if (container && typeof buildUmbrellaDetailsModel === 'function' && typeof bindUmbrellaAddressEvents === 'function') {
+        const model = buildUmbrellaDetailsModel(window.modalCtx?.data || {});
+        window.modalCtx.umbrellaModel = model;
+        bindUmbrellaAddressEvents(container, model);
+        L('setTab(umbrellas/main): bound umbrella model', { keys: Object.keys(model||{}) });
+      }
+    } catch (e) {
+      console.error('[MODAL] bindUmbrellaAddressEvents failed', e);
+    }
+  }
+
 
   if (this.entity==='clients' && k==='rates')     { mountClientRatesTab?.(); }
   if (this.entity==='clients' && k==='hospitals') { mountClientHospitalsTab?.(); }
@@ -18015,23 +18173,79 @@ async function openUmbrella(row){
     [{ key:'main', label:'Main' }],
     (key, r)=> {
       L('[renderUmbrellaTab] tab=', key, 'rowKeys=', Object.keys(r||{}), 'sample=', { name: r?.name, id: r?.id });
+      const u = r || {};
       return html(`
         <div class="form" id="tab-main">
-          ${input('name','Name', r?.name)}
-          ${input('remittance_email','Remittance email', r?.remittance_email, 'email')}
-          ${input('bank_name','Bank', r?.bank_name)}
-          ${input('sort_code','Sort code', r?.sort_code)}
-          ${input('account_number','Account number', r?.account_number)}
-          ${select('vat_chargeable','VAT chargeable', (r?.vat_chargeable ? 'Yes' : 'No'), ['Yes','No'])}
-          ${select('enabled','Enabled', (r?.enabled === false) ? 'No' : 'Yes', ['Yes','No'])}
+          ${input('name','Name', u.name)}
+          ${input('remittance_email','Remittance email', u.remittance_email, 'email')}
+          ${input('bank_name','Bank', u.bank_name)}
+          ${input('sort_code','Sort code', u.sort_code)}
+          ${input('account_number','Account number', u.account_number)}
+
+          <div class="row">
+            <label>Company registration number</label>
+            <div class="controls">
+              <input class="input"
+                     name="company_number"
+                     value="${escapeHtml(u.company_number || '')}">
+            </div>
+          </div>
+
+          <div class="row">
+            <label>Address</label>
+            <div class="controls">
+              <div class="grid-2">
+                <input class="input"
+                       name="address_line1"
+                       placeholder="Address line 1"
+                       value="${escapeHtml(u.address_line1 || '')}">
+                <input class="input"
+                       name="address_line2"
+                       placeholder="Address line 2"
+                       value="${escapeHtml(u.address_line2 || '')}">
+                <input class="input"
+                       name="address_line3"
+                       placeholder="Address line 3"
+                       value="${escapeHtml(u.address_line3 || '')}">
+                <input class="input"
+                       name="town_city"
+                       placeholder="City / Town"
+                       value="${escapeHtml(u.town_city || '')}">
+                <input class="input"
+                       name="county"
+                       placeholder="County"
+                       value="${escapeHtml(u.county || '')}">
+                <div class="split">
+                  <input class="input"
+                         name="postcode"
+                         placeholder="Postcode"
+                         value="${escapeHtml(u.postcode || '')}">
+                  <button type="button"
+                          class="btn mini"
+                          data-act="umbrella-postcode-lookup"
+                          title="Lookup by postcode">
+                    Lookup
+                  </button>
+                </div>
+                <input class="input"
+                       name="country"
+                       placeholder="Country"
+                       value="${escapeHtml(u.country || '')}">
+              </div>
+            </div>
+          </div>
+
+          ${select('vat_chargeable','VAT chargeable', (u.vat_chargeable ? 'Yes' : 'No'), ['Yes','No'])}
+          ${select('enabled','Enabled', (u.enabled === false) ? 'No' : 'Yes', ['Yes','No'])}
         </div>
       `);
     },
-    async ()=>{
+    async ()=> {
       L('[onSave] begin', { dataId: window.modalCtx?.data?.id, forId: window.modalCtx?.formState?.__forId });
 
       const fs = window.modalCtx.formState || { __forId: null, main:{} };
-      const sameRecord = (!!window.modalCtx.data?.id && fs.__forId === window.modalCtx.data.id) || (!window.modalCtx.data?.id && fs.__forId == null);
+      const sameRecord = (!!window.modalCtx.data?.id && fs.__forId === window.modalCtx.data.id) ||
+                         (!window.modalCtx.data?.id && fs.__forId == null);
 
       const staged = sameRecord ? (fs.main || {}) : {};
       const live   = collectForm('#tab-main');
@@ -18039,10 +18253,16 @@ async function openUmbrella(row){
 
       L('[onSave] collected', { sameRecord, stagedKeys: Object.keys(staged||{}), liveKeys: Object.keys(live||{}) });
 
-      if (typeof payload.vat_chargeable !== 'boolean') payload.vat_chargeable = (payload.vat_chargeable === 'Yes' || payload.vat_chargeable === 'true');
-      if (typeof payload.enabled        !== 'boolean') payload.enabled        = (payload.enabled        === 'Yes' || payload.enabled        === 'true');
+      if (typeof payload.vat_chargeable !== 'boolean') {
+        payload.vat_chargeable = (payload.vat_chargeable === 'Yes' || payload.vat_chargeable === 'true');
+      }
+      if (typeof payload.enabled !== 'boolean') {
+        payload.enabled = (payload.enabled === 'Yes' || payload.enabled === 'true');
+      }
 
-      for (const k of Object.keys(payload)) if (payload[k] === '') delete payload[k];
+      for (const k of Object.keys(payload)) {
+        if (payload[k] === '') delete payload[k];
+      }
 
       const idForUpdate = window.modalCtx?.data?.id || full?.id || null;
       L('[onSave] upsertUmbrella', { idForUpdate, payloadKeys: Object.keys(payload||{}) });
@@ -18063,7 +18283,19 @@ async function openUmbrella(row){
 
       return { ok: true, saved: window.modalCtx.data };
     },
-    full?.id
+    full?.id,
+    // onReturn: (re)bind address + company number to model + postcode lookup
+    () => {
+      try {
+        const container = document.getElementById('tab-main');
+        if (!container) return;
+        const model = buildUmbrellaDetailsModel(window.modalCtx?.data || {});
+        window.modalCtx.umbrellaModel = model;
+        bindUmbrellaAddressEvents(container, model);
+      } catch (e) {
+        W('bindUmbrellaAddressEvents failed', e);
+      }
+    }
   );
 
   // (Umbrella has no heavy post-paint preloads in your snippet; if you add any later,
@@ -18466,6 +18698,1192 @@ function collectForm(sel, jsonTry=false){
   });
   return out;
 }
+
+
+// ================= NEW: Job titles client-side cache ==================
+window.__jobTitlesCache = window.__jobTitlesCache || {
+  items: [],
+  byId: {},
+  roots: [],
+  loadedAt: 0
+};
+
+function normaliseJobTitles(items) {
+  const byId = {};
+  const roots = [];
+  (items || []).forEach((r) => {
+    if (!r || !r.id) return;
+    const copy = { ...r, children: [] };
+    byId[r.id] = copy;
+  });
+  Object.values(byId).forEach((node) => {
+    if (node.parent_id && byId[node.parent_id]) {
+      byId[node.parent_id].children.push(node);
+    } else {
+      roots.push(node);
+    }
+  });
+  return { items, byId, roots };
+}
+
+// =============== NEW: loadJobTitlesTree (backend → cache) ===============
+// =============== NEW: loadJobTitlesTree (backend → cache) ===============
+async function loadJobTitlesTree(force = false, activeOnly = true) {
+  // Ensure cache shape
+  window.__jobTitlesCache = window.__jobTitlesCache || {
+    items: [],
+    byId: {},
+    roots: [],
+    loadedAt: 0
+  };
+  const C = window.__jobTitlesCache;
+  const now = Date.now();
+
+  // Reuse cache only for activeOnly=true
+  if (
+    activeOnly &&
+    !force &&
+    C.items &&
+    C.items.length &&
+    now - C.loadedAt < 60_000
+  ) {
+    return C;
+  }
+
+  const url = API(`/api/job-titles?activeOnly=${activeOnly ? 'true' : 'false'}`);
+  const res = await authFetch(url);
+  if (!res.ok) {
+    console.error('[JOB_TITLES] list failed', res.status);
+    throw new Error('Failed to load job titles');
+  }
+  const data = (await res.json().catch(() => ({}))) || {};
+  const items = data.items || [];
+  const norm = normaliseJobTitles(items);
+
+  // Only mutate global cache when we’re in activeOnly mode
+  if (activeOnly) {
+    C.items = items;
+    C.byId = norm.byId;
+    C.roots = norm.roots;
+    C.loadedAt = now;
+    return C;
+  }
+
+  // For Settings (activeOnly=false) return a separate snapshot
+  return {
+    items,
+    byId: norm.byId,
+    roots: norm.roots,
+    loadedAt: now
+  };
+}
+
+
+// =============== NEW: buildJobTitlePathLabels ==========================
+function buildJobTitlePathLabels(jobTitleId) {
+  const C = window.__jobTitlesCache || {};
+  const byId = C.byId || {};
+  const chain = [];
+  let cur = byId[jobTitleId];
+  while (cur && chain.length < 16) {
+    chain.push(cur.label || '');
+    cur = cur.parent_id ? byId[cur.parent_id] : null;
+  }
+  return chain.reverse().filter(Boolean);
+}
+
+// =============== NEW: Job titles API helpers ===========================
+async function apiCreateJobTitle(payload) {
+  const url = API('/api/job-titles');
+  const res = await authFetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload || {})
+  });
+  if (!res.ok) throw new Error('Failed to create job title');
+  const data = (await res.json().catch(() => ({}))) || {};
+  return data.item || null;
+}
+
+async function apiUpdateJobTitle(id, patch) {
+  const url = API(`/api/job-titles/${encodeURIComponent(id)}`);
+  const res = await authFetch(url, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(patch || {})
+  });
+  if (!res.ok) throw new Error('Failed to update job title');
+  const data = (await res.json().catch(() => ({}))) || {};
+  return data.item || null;
+}
+
+async function apiDeleteJobTitle(id) {
+  const url = API(`/api/job-titles/${encodeURIComponent(id)}`);
+  const res = await authFetch(url, { method: 'DELETE' });
+  if (!res.ok) throw new Error('Failed to delete job title');
+  const data = (await res.json().catch(() => ({}))) || {};
+  return data;
+}
+
+// =============== NEW: Job Titles Settings modal (side panel) ===========
+// =============== NEW: Job Titles Settings modal (side panel) ===========
+function openJobTitleSettingsModal() {
+  const S = {
+    loading: false,
+    error: '',
+    items: [],
+    byId: {},
+    roots: [],
+    selectedId: null,
+    editing: null // { id|null, parent_id|null, label, is_role, requires_prof_reg, prof_reg_type, active, isNew }
+  };
+
+  const profTypes = ['NMC', 'GMC', 'HCPC'];
+
+  const makeEditingFromNode = (node) => {
+    if (!node) return null;
+    return {
+      id: node.id,
+      parent_id: node.parent_id || null,
+      label: node.label || '',
+      is_role: !!node.is_role,
+      requires_prof_reg: !!node.requires_prof_reg,
+      prof_reg_type: node.prof_reg_type || '',
+      active: node.active !== false,
+      isNew: false
+    };
+  };
+
+  const makeEditingNew = (parentId) => ({
+    id: null,
+    parent_id: parentId || null,
+    label: '',
+    is_role: false, // default to Group/Category
+    requires_prof_reg: false,
+    prof_reg_type: '',
+    active: true,
+    isNew: true
+  });
+
+  const renderTree = (nodes, level) => {
+    if (!nodes || !nodes.length) return '';
+    const pad = level * 16;
+    return nodes
+      .map((n) => {
+        const isSelected = S.selectedId === n.id || (!S.selectedId && S.editing && S.editing.id === n.id);
+        const kindLabel = n.is_role ? 'Role' : 'Group';
+        const regBadge =
+          n.is_role && n.requires_prof_reg
+            ? `<span class="pill mini" style="margin-left:4px">${n.prof_reg_type || 'Reg'}</span>`
+            : '';
+        const inactiveTag = n.active === false ? `<span class="mini" style="margin-left:4px;opacity:.7">(inactive)</span>` : '';
+        return `
+          <div class="jt-node${isSelected ? ' jt-node-active' : ''}" data-id="${n.id}"
+               style="padding:4px 6px 4px ${pad + 6}px;cursor:pointer;border-radius:6px;">
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:6px">
+              <div>
+                <span class="jt-label" style="font-weight:600">${escapeHtml(n.label || '')}</span>
+                <span class="mini" style="margin-left:6px;opacity:.75">${kindLabel}</span>
+                ${regBadge}
+                ${inactiveTag}
+              </div>
+              <div class="mini">
+                <button type="button" data-act="add-child" data-id="${n.id}">+ Child</button>
+              </div>
+            </div>
+          </div>
+          ${renderTree(n.children || [], level + 1)}
+        `;
+      })
+      .join('');
+  };
+
+  const renderDetailsPanel = () => {
+    const e = S.editing;
+    if (!e) {
+      return `
+        <div class="hint" style="padding:8px">
+          Select a node on the left, or click <strong>Add family</strong> to create a new top-level group.
+        </div>
+      `;
+    }
+
+    const nodeTypeGroupChecked = !e.is_role ? 'checked' : '';
+    const nodeTypeRoleChecked = e.is_role ? 'checked' : '';
+
+    const requiresChecked = e.is_role && e.requires_prof_reg ? 'checked' : '';
+    const regBlockStyle = e.is_role ? '' : 'display:none';
+
+    const parentPath = (() => {
+      if (!e.parent_id) return '(top-level family)';
+      const chain = buildJobTitlePathLabels(e.parent_id);
+      return chain.length ? chain.join(' > ') : '(no parent)';
+    })();
+
+    const regOptions = profTypes
+      .map((t) => `<option value="${t}" ${e.prof_reg_type === t ? 'selected' : ''}>${t}</option>`)
+      .join('');
+
+    const activeChecked = e.active ? 'checked' : '';
+    const title = e.isNew ? 'New Job Title' : 'Edit Job Title';
+
+    const node = e.id ? S.byId[e.id] : null;
+    const hasChildren = !!(node && Array.isArray(node.children) && node.children.length);
+    const deleteDisabledAttr = (e.isNew || hasChildren) ? 'disabled' : '';
+
+    return `
+      <form id="jt_details_form" class="form" autocomplete="off">
+        <div class="row" style="grid-column:1/-1">
+          <div class="mini" style="opacity:.85">${title}</div>
+        </div>
+
+        <div class="row">
+          <label>Label</label>
+          <input type="text" name="label" value="${escapeAttr(e.label || '')}" required />
+        </div>
+
+        <div class="row">
+          <label>Node type</label>
+          <div class="mini">
+            <label>
+              <input type="radio" name="node_type" value="group" ${nodeTypeGroupChecked} />
+              Group / Category
+            </label><br/>
+            <label>
+              <input type="radio" name="node_type" value="role" ${nodeTypeRoleChecked} />
+              Role (assignable to candidates)
+            </label>
+          </div>
+        </div>
+
+        <div class="row">
+          <label>Parent</label>
+          <div class="mini" style="padding:6px 8px;border-radius:8px;background:#020617;border:1px solid var(--line)">
+            ${escapeHtml(parentPath)}
+          </div>
+        </div>
+
+        <div class="row" data-block="reg" style="${regBlockStyle}">
+          <label>
+            <input type="checkbox" name="requires_prof_reg" ${requiresChecked} />
+            Requires professional registration
+          </label>
+          <select name="prof_reg_type" style="margin-top:6px">
+            <option value="">-- Select type --</option>
+            ${regOptions}
+          </select>
+        </div>
+
+        <div class="row">
+          <label>
+            <input type="checkbox" name="active" ${activeChecked} />
+            Active (visible in pickers)
+          </label>
+        </div>
+
+        <div class="row" style="grid-column:1/-1;margin-top:8px;display:flex;gap:8px;justify-content:flex-end">
+          <button type="button" id="jt_btn_delete" ${deleteDisabledAttr}>Delete</button>
+          <button type="button" id="jt_btn_save" class="primary">Save</button>
+        </div>
+      </form>
+    `;
+  };
+
+  const buildBody = () => {
+    if (S.loading) {
+      return html(`
+        <div id="jobTitlesSettingsRoot" style="padding:10px">
+          <div class="hint">Loading job titles…</div>
+        </div>
+      `);
+    }
+
+    const treeHtml = renderTree(S.roots || [], 0);
+
+    return html(`
+      <div id="jobTitlesSettingsRoot" style="display:grid;grid-template-columns:minmax(0,1.4fr) minmax(0,1.8fr);gap:12px;min-height:260px">
+        <div>
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+            <div class="mini">Families / subfamilies / roles</div>
+            <button type="button" id="jt_add_root">+ Add family</button>
+          </div>
+          <div id="jt_tree"
+               style="border:1px solid var(--line);border-radius:10px;max-height:420px;overflow:auto;padding:4px">
+            ${
+              treeHtml ||
+              '<div class="hint" style="padding:8px">No job titles defined yet. Click <strong>Add family</strong> to create your first group.</div>'
+            }
+          </div>
+          ${S.error ? `<div class="error" style="margin-top:8px">${escapeHtml(S.error)}</div>` : ''}
+        </div>
+
+        <div style="border:1px solid var(--line);border-radius:10px;padding:8px;min-height:240px">
+          ${renderDetailsPanel()}
+        </div>
+      </div>
+    `);
+  };
+
+  const repaint = () => {
+    const frame = window.__getModalFrame?.();
+    if (!frame) return;
+    frame._setBody(buildBody());
+    wireEvents();
+  };
+
+  const refreshFromCache = async () => {
+    S.loading = true;
+    S.error = '';
+    repaint();
+    try {
+      // Load ALL titles (including inactive) for Settings
+      const cache = await loadJobTitlesTree(true, false);
+      S.items = cache.items;
+      S.byId = cache.byId;
+      S.roots = cache.roots;
+      // If nothing is selected, pick the first root if any
+      if (!S.selectedId && S.roots.length) {
+        S.selectedId = S.roots[0].id;
+      }
+      if (S.selectedId && S.byId[S.selectedId]) {
+        S.editing = makeEditingFromNode(S.byId[S.selectedId]);
+      } else {
+        S.editing = null;
+      }
+    } catch (e) {
+      console.error('[JOB_TITLES] load failed', e);
+      S.error = 'Failed to load job titles';
+    } finally {
+      S.loading = false;
+      repaint();
+    }
+  };
+
+  const wireEvents = () => {
+    const root = document.getElementById('jobTitlesSettingsRoot');
+    if (!root) return;
+
+    const treeBox = root.querySelector('#jt_tree');
+    const addRootBtn = root.querySelector('#jt_add_root');
+    const form = root.querySelector('#jt_details_form');
+    const saveBtn = root.querySelector('#jt_btn_save');
+    const deleteBtn = root.querySelector('#jt_btn_delete');
+
+    if (addRootBtn) {
+      addRootBtn.onclick = () => {
+        S.selectedId = null;
+        S.editing = makeEditingNew(null);
+        repaint();
+      };
+    }
+
+    if (treeBox) {
+      treeBox.onclick = (e) => {
+        const btn = e.target.closest('button[data-act]');
+        if (btn) {
+          const act = btn.getAttribute('data-act');
+          const id = btn.getAttribute('data-id');
+          const node = S.byId[id];
+          if (!node) return;
+
+          if (act === 'add-child') {
+            S.selectedId = null;
+            S.editing = makeEditingNew(node.id);
+            repaint();
+          }
+          return;
+        }
+
+        const nodeEl = e.target.closest('.jt-node[data-id]');
+        if (!nodeEl) return;
+        const id = nodeEl.getAttribute('data-id');
+        const node = S.byId[id];
+        if (!node) return;
+        S.selectedId = id;
+        S.editing = makeEditingFromNode(node);
+        repaint();
+      };
+    }
+
+    if (form && saveBtn) {
+      saveBtn.onclick = async () => {
+        const v = collectForm('#jt_details_form', false) || {};
+        const label = (v.label || '').trim();
+        if (!label) {
+          alert('Label is required');
+          return;
+        }
+
+        const nodeType = v.node_type === 'role' ? 'role' : 'group';
+        const isRole = nodeType === 'role';
+
+        const requiresProfReg = isRole && v.requires_prof_reg === 'on';
+        const profRegType = requiresProfReg ? (v.prof_reg_type || '').trim().toUpperCase() : null;
+        const active = v.active === 'on';
+
+        if (requiresProfReg && !profRegType) {
+          alert('Please choose a professional registration type (NMC / GMC / HCPC)');
+          return;
+        }
+
+        const isNew = !S.editing || !S.editing.id;
+        const parentId = S.editing ? S.editing.parent_id || null : null;
+
+        try {
+          let node;
+          if (isNew) {
+            node = await apiCreateJobTitle({
+              label,
+              parent_id: parentId,
+              is_role: isRole,
+              requires_prof_reg: requiresProfReg,
+              prof_reg_type: profRegType,
+              active
+            });
+          } else {
+            node = await apiUpdateJobTitle(S.editing.id, {
+              label,
+              is_role: isRole,
+              requires_prof_reg: requiresProfReg,
+              prof_reg_type: profRegType,
+              active
+            });
+          }
+          // Refresh cache & select this node
+          await refreshFromCache();
+          if (node && node.id) {
+            S.selectedId = node.id;
+            S.editing = makeEditingFromNode(node);
+            repaint();
+          }
+        } catch (err) {
+          console.error('job title save failed', err);
+          alert('Failed to save job title');
+        }
+      };
+    }
+
+    if (form && deleteBtn && !deleteBtn.disabled) {
+      deleteBtn.onclick = async () => {
+        if (!S.editing || !S.editing.id) return;
+        const node = S.byId[S.editing.id];
+        if (!node) return;
+
+        if (!window.confirm(`Delete "${node.label}"?`)) return;
+
+        try {
+          const res = await apiDeleteJobTitle(node.id);
+          if (res && res.softDeleted) {
+            alert(
+              'This job title is in use; it has been marked inactive instead of being deleted.'
+            );
+          }
+          await refreshFromCache();
+        } catch (err) {
+          console.error('job title delete failed', err);
+          alert('Failed to delete job title – it may still be in use.');
+        }
+      };
+    }
+
+    // Node type radio change toggles registration block visibility
+    if (form) {
+      const nodeTypeInputs = form.querySelectorAll('input[name="node_type"]');
+      const regBlock = form.querySelector('[data-block="reg"]');
+      nodeTypeInputs.forEach((el) => {
+        el.onchange = () => {
+          const v = collectForm('#jt_details_form', false) || {};
+          const isRole = v.node_type === 'role';
+          if (regBlock) {
+            regBlock.style.display = isRole ? '' : 'none';
+          }
+        };
+      });
+    }
+  };
+
+  showModal(
+    'Job Titles',
+    [{ key: 'main', label: 'Job Titles' }],
+    () => buildBody(),
+    async () => ({ ok: true }), // All job title actions are immediate
+    false,
+    async () => {
+      await refreshFromCache();
+    },
+    { kind: 'job-titles', noParentGate: false }
+  );
+}
+
+// =============== NEW: Candidate Job Title picker =======================
+function openJobTitlePickerModal(initialJobTitleId, onSelect) {
+  const cache = window.__jobTitlesCache || {};
+  let selectedId = initialJobTitleId || null;
+
+  const renderOptions = (nodes, depth) => {
+    if (!nodes || !nodes.length) return '';
+    const pad = depth * 16;
+    return nodes
+      .map((n) => {
+        const path = buildJobTitlePathLabels(n.id).join(' > ');
+        const isSelected = n.id === selectedId;
+        const isRole = !!n.is_role;
+        const regBadge =
+          isRole && n.requires_prof_reg
+            ? `<span class="pill mini" style="margin-left:4px">${n.prof_reg_type || 'Reg'}</span>`
+            : '';
+        const kind = isRole ? 'Role' : 'Group';
+        return `
+          <div data-id="${n.id}"
+               class="jt-pick-row${isSelected ? ' active' : ''}"
+               style="padding:4px 8px;margin-left:${pad}px;cursor:pointer;display:flex;justify-content:space-between;align-items:center;border-radius:6px;">
+            <div>
+              <strong>${escapeHtml(n.label || '')}</strong>
+              <span class="mini" style="margin-left:6px;opacity:.8">${escapeHtml(path)}</span>
+              <span class="mini" style="margin-left:6px;opacity:.7">${kind}</span>
+            </div>
+            <div>${regBadge}</div>
+          </div>
+          ${renderOptions(n.children || [], depth + 1)}
+        `;
+      })
+      .join('');
+  };
+
+  const buildBody = () => {
+    const C = window.__jobTitlesCache || {};
+    const roots = C.roots || [];
+    const byId = C.byId || {};
+    const node = selectedId ? byId[selectedId] : null;
+    const pathLabels = node ? buildJobTitlePathLabels(selectedId) : [];
+
+    const selectionSummary = (() => {
+      if (!node) {
+        return '<div class="mini">Nothing selected. Choose a <strong>Role</strong> from the left.</div>';
+      }
+      const isRole = !!node.is_role;
+      if (!isRole) {
+        return `
+          <div class="mini">
+            <div><strong>${escapeHtml(pathLabels.join(' > '))}</strong></div>
+            <div style="margin-top:4px;color:#f97316">
+              This is a <strong>Group</strong>. Please select a <strong>Role</strong> underneath to assign to a candidate.
+            </div>
+          </div>
+        `;
+      }
+      const regBit = node.requires_prof_reg
+        ? `Professional registration: ${node.prof_reg_type || ''} (number captured on candidate)`
+        : 'No professional registration required for this role.';
+      return `
+        <div class="mini">
+          <div><strong>${escapeHtml(pathLabels.join(' > '))}</strong></div>
+          <div style="margin-top:4px">${escapeHtml(regBit)}</div>
+        </div>
+      `;
+    })();
+
+    return html(`
+      <div id="jobTitlePickerRoot">
+        <div class="hint" style="margin-bottom:8px">
+          Choose <strong>Family → Subfamily → Role</strong>. Only <strong>Roles</strong> can be assigned to candidates.
+        </div>
+
+        <div style="display:grid;grid-template-columns:minmax(0,2fr) minmax(0,1.2fr);gap:10px;align-items:stretch">
+          <div style="border:1px solid var(--line);border-radius:10px;max-height:360px;overflow:auto">
+            ${
+              renderOptions(roots, 0) ||
+              '<div class="hint" style="padding:8px">No job titles defined yet. Add families and roles in Settings → Job Titles.</div>'
+            }
+          </div>
+          <div style="border:1px solid var(--line);border-radius:10px;padding:8px;font-size:12px">
+            <div style="font-weight:600;margin-bottom:4px">Selection</div>
+            ${selectionSummary}
+          </div>
+        </div>
+      </div>
+    `);
+  };
+
+  const onOpen = () => {
+    const root = document.getElementById('jobTitlePickerRoot');
+    if (!root) return;
+
+    const container = root.querySelector('div[style*="border:1px solid var(--line)"]');
+    if (!container) return;
+
+    container.onclick = (e) => {
+      const row = e.target.closest('.jt-pick-row[data-id]');
+      if (!row) return;
+      selectedId = row.getAttribute('data-id') || null;
+
+      // Toggle visual state
+      container.querySelectorAll('.jt-pick-row.active').forEach((n) => n.classList.remove('active'));
+      row.classList.add('active');
+
+      // Re-render right-hand summary only
+      const frame = window.__getModalFrame?.();
+      if (!frame) return;
+      frame._setBody(buildBody());
+      onOpen(); // re-wire the click handler for the new DOM
+    };
+  };
+
+  showModal(
+    'Select Job Title',
+    [{ key: 'main', label: 'Job Title' }],
+    () => buildBody(),
+    async () => {
+      const C = window.__jobTitlesCache || {};
+      const node = (C.byId || {})[selectedId];
+      if (!node) {
+        alert('Please select a job title first.');
+        return { ok: false };
+      }
+      if (!node.is_role) {
+        alert('Please select a Role (not just a Group/Category).');
+        return { ok: false };
+      }
+      const pathLabels = buildJobTitlePathLabels(selectedId);
+      if (typeof onSelect === 'function') {
+        await onSelect({
+          jobTitleId: selectedId,
+          pathLabels,
+          requiresProfReg: !!node.requires_prof_reg,
+          profRegType: node.prof_reg_type || null
+        });
+      }
+      return { ok: true };
+    },
+    false,
+    async () => {
+      try {
+        await loadJobTitlesTree(false);
+      } catch {
+        // ignore
+      }
+      onOpen();
+    },
+    { kind: 'job-title-picker', noParentGate: false }
+  );
+}
+
+// =============== NEW: applySelectedJobTitleToCandidate =================
+function applySelectedJobTitleToCandidate(candidateModel, selection) {
+  if (!candidateModel || !selection) return;
+  candidateModel.job_title_id = selection.jobTitleId;
+  candidateModel.job_title_path_display = (selection.pathLabels || []).join(' > ');
+  candidateModel.prof_reg_type = selection.profRegType || null;
+
+  if (!selection.requiresProfReg) {
+    candidateModel.prof_reg_number = '';
+  }
+}
+
+// =============== NEW: buildCandidateMainDetailsModel ===================
+function buildCandidateMainDetailsModel(row) {
+  const r = row || {};
+  const model = {
+    id: r.id || null,
+
+    // New fields
+    ni_number: r.ni_number || '',
+    date_of_birth: r.date_of_birth || null, // ISO date string
+    gender: r.gender || '',
+
+    job_title_id: r.job_title_id || null,
+    job_title_path_display: r.job_title_path_display || r.job_title || '',
+
+    prof_reg_type: r.prof_reg_type || null,
+    prof_reg_number: r.prof_reg_number || '',
+
+    address_line1: r.address_line1 || '',
+    address_line2: r.address_line2 || '',
+    address_line3: r.address_line3 || '',
+    town_city: r.town_city || '',
+    county: r.county || '',
+    postcode: r.postcode || '',
+    country: r.country || ''
+  };
+
+  return model;
+}
+
+// =============== NEW: bindCandidateMainFormEvents ======================
+// =============== NEW: bindCandidateMainFormEvents ======================
+function bindCandidateMainFormEvents(container, model) {
+  if (!container || !model) return;
+
+  const q = (sel) => container.querySelector(sel);
+
+  const bind = (selector, key) => {
+    const el = q(selector);
+    if (!el) return;
+    el.value = model[key] || '';
+    el.addEventListener('input', () => {
+      model[key] = el.value;
+    });
+  };
+
+  // NI
+  bind('input[name="ni_number"]', 'ni_number');
+
+  // DOB (assume type="text" or type="date"; model holds ISO)
+  const dobEl = q('input[name="date_of_birth"]');
+  if (dobEl) {
+    dobEl.value = model.date_of_birth
+      ? (typeof formatIsoToUk === 'function' ? formatIsoToUk(model.date_of_birth) : model.date_of_birth)
+      : '';
+    dobEl.addEventListener('change', () => {
+      const v = dobEl.value.trim();
+      if (!v) {
+        model.date_of_birth = null;
+        return;
+      }
+      if (typeof parseUkDateToIso === 'function') {
+        const iso = parseUkDateToIso(v);
+        model.date_of_birth = iso || null;
+      } else {
+        model.date_of_birth = v;
+      }
+    });
+  }
+
+  // Gender
+  const genderEl = q('select[name="gender"]');
+  if (genderEl) {
+    genderEl.value = model.gender || '';
+    genderEl.addEventListener('change', () => {
+      model.gender = genderEl.value || '';
+    });
+  }
+
+  // Professional registration number
+  bind('input[name="prof_reg_number"]', 'prof_reg_number');
+
+  // Address fields
+  bind('input[name="address_line1"]', 'address_line1');
+  bind('input[name="address_line2"]', 'address_line2');
+  bind('input[name="address_line3"]', 'address_line3');
+  bind('input[name="town_city"]', 'town_city');
+  bind('input[name="county"]', 'county');
+  bind('input[name="postcode"]', 'postcode');
+  bind('input[name="country"]', 'country');
+
+  // Job Title picker button
+  const jobBtn = q('[data-act="pick-job-title"]');
+  if (jobBtn && !jobBtn.__wired) {
+    jobBtn.__wired = true;
+    jobBtn.addEventListener('click', async () => {
+      await loadJobTitlesTree(false).catch(() => {});
+      openJobTitlePickerModal(model.job_title_id, (sel) => {
+        applySelectedJobTitleToCandidate(model, sel);
+
+        // Reflect into hidden inputs so collectForm() sees them
+        const idHidden = q('input[name="job_title_id"]');
+        if (idHidden) {
+          idHidden.value = model.job_title_id || '';
+        }
+        const typeHidden = q('input[name="prof_reg_type"]');
+        if (typeHidden) {
+          typeHidden.value = model.prof_reg_type || '';
+        }
+
+        // Update visible label
+        const labelEl = q('[data-field="job_title_display"]');
+        if (labelEl) {
+          labelEl.textContent = model.job_title_path_display || '';
+        }
+
+        // Toggle visibility / label for prof reg number field
+        const regWrapper = q('[data-block="prof_reg"]');
+        const regLabel = q('[data-field="prof_reg_label"]');
+        if (regWrapper) {
+          if (sel.requiresProfReg) {
+            regWrapper.style.display = '';
+            if (regLabel && sel.profRegType) {
+              regLabel.textContent = `${sel.profRegType} Number`;
+            }
+          } else {
+            regWrapper.style.display = 'none';
+            model.prof_reg_number = '';
+            const regInput = q('input[name="prof_reg_number"]');
+            if (regInput) regInput.value = '';
+          }
+        }
+      });
+    });
+  }
+
+  // Postcode lookup icon
+  const addrBtn = q('[data-act="postcode-lookup"]');
+  if (addrBtn && !addrBtn.__wired) {
+    addrBtn.__wired = true;
+    addrBtn.addEventListener('click', () => {
+      const current = {
+        line1: model.address_line1,
+        line2: model.address_line2,
+        line3: model.address_line3,
+        city: model.town_city,
+        postcode: model.postcode
+      };
+      openAddressLookupModal(current, (chosen) => {
+        applyAddressToCandidateModel(model, chosen);
+        // reflect in inputs
+        ['address_line1', 'address_line2', 'address_line3', 'town_city', 'postcode'].forEach((k) => {
+          const el = q(`input[name="${k}"]`);
+          if (el) el.value = model[k] || '';
+        });
+      });
+    });
+  }
+}
+
+
+// =============== NEW: apiPostcodeLookup (frontend → backend) ===========
+async function apiPostcodeLookup(postcode, house) {
+  const params = new URLSearchParams();
+  if (postcode) params.set('postcode', postcode);
+  if (house) params.set('house', house);
+
+  const url = API(`/api/tools/postcode-lookup?${params.toString()}`);
+  const res = await authFetch(url);
+  if (!res.ok) {
+    throw new Error('Postcode lookup failed');
+  }
+  const data = (await res.json().catch(() => ({}))) || {};
+  return data.addresses || [];
+}
+
+// =============== NEW: Address lookup modal (candidate/umbrella) ========
+function openAddressLookupModal(initialAddress, onSave) {
+  const S = {
+    line1: initialAddress?.line1 || '',
+    line2: initialAddress?.line2 || '',
+    line3: initialAddress?.line3 || '',
+    city: initialAddress?.city || '',
+    postcode: initialAddress?.postcode || '',
+    house: '',
+    lookupInFlight: false,
+    results: [],
+    error: ''
+  };
+
+  const body = html(`
+    <div id="addrLookupRoot" class="form">
+      <div class="row">
+        <label>Postcode</label>
+        <input type="text" name="lookup_postcode" />
+      </div>
+      <div class="row">
+        <label>House number / name (optional)</label>
+        <input type="text" name="lookup_house" />
+      </div>
+      <div class="row">
+        <button type="button" id="btnAddrLookup">Lookup</button>
+      </div>
+
+      <div class="row" style="grid-column:1/-1">
+        <label>Results</label>
+        <div id="addrLookupResults"
+             style="border:1px solid var(--line);border-radius:8px;max-height:200px;overflow:auto">
+          <div class="hint" style="padding:8px">No lookup results yet.</div>
+        </div>
+      </div>
+
+      <div class="row" style="grid-column:1/-1;margin-top:10px">
+        <label>Manual address (you can edit after choosing a result, or ignore lookup entirely)</label>
+      </div>
+      <div class="row">
+        <label>Address line 1</label>
+        <input type="text" name="addr_line1" />
+      </div>
+      <div class="row">
+        <label>Address line 2</label>
+        <input type="text" name="addr_line2" />
+      </div>
+      <div class="row">
+        <label>Address line 3</label>
+        <input type="text" name="addr_line3" />
+      </div>
+      <div class="row">
+        <label>City / Town</label>
+        <input type="text" name="addr_city" />
+      </div>
+      <div class="row">
+        <label>Postcode</label>
+        <input type="text" name="addr_postcode" />
+      </div>
+    </div>
+  `);
+
+  const renderResults = () => {
+    const root = document.getElementById('addrLookupRoot');
+    if (!root) return;
+    const box = root.querySelector('#addrLookupResults');
+    if (!box) return;
+
+    if (S.error) {
+      box.innerHTML = `<div class="error" style="padding:8px">${escapeHtml(S.error)}</div>`;
+      return;
+    }
+
+    if (!S.results.length) {
+      box.innerHTML = `<div class="hint" style="padding:8px">No lookup results yet.</div>`;
+      return;
+    }
+
+    box.innerHTML = S.results
+      .map(
+        (a, idx) => `
+        <div class="addr-row" data-i="${idx}"
+             style="padding:6px 8px;border-bottom:1px solid var(--line);cursor:pointer">
+          <div>${escapeHtml(a.line1 || '')}</div>
+          <div class="mini">${escapeHtml(
+            [a.line2, a.line3, a.city, a.postcode].filter(Boolean).join(', ')
+          )}</div>
+        </div>
+      `
+      )
+      .join('');
+  };
+
+  const syncStateToForm = () => {
+    const root = document.getElementById('addrLookupRoot');
+    if (!root) return;
+    const setVal = (name, v) => {
+      const el = root.querySelector(`input[name="${name}"]`);
+      if (el) el.value = v || '';
+    };
+
+    setVal('lookup_postcode', S.postcode);
+    setVal('lookup_house', S.house);
+    setVal('addr_line1', S.line1);
+    setVal('addr_line2', S.line2);
+    setVal('addr_line3', S.line3);
+    setVal('addr_city', S.city);
+    setVal('addr_postcode', S.postcode);
+  };
+
+  const syncFormToState = () => {
+    const root = document.getElementById('addrLookupRoot');
+    if (!root) return;
+    const getVal = (name) => {
+      const el = root.querySelector(`input[name="${name}"]`);
+      return el ? el.value.trim() : '';
+    };
+
+    S.postcode = getVal('lookup_postcode') || S.postcode;
+    S.house = getVal('lookup_house') || S.house;
+    S.line1 = getVal('addr_line1') || S.line1;
+    S.line2 = getVal('addr_line2') || S.line2;
+    S.line3 = getVal('addr_line3') || S.line3;
+    S.city = getVal('addr_city') || S.city;
+    S.postcode = getVal('addr_postcode') || S.postcode;
+  };
+
+  const onOpen = () => {
+    const root = document.getElementById('addrLookupRoot');
+    if (!root) return;
+
+    syncStateToForm();
+    renderResults();
+
+    const btn = root.querySelector('#btnAddrLookup');
+    if (btn && !btn.__wired) {
+      btn.__wired = true;
+      btn.addEventListener('click', async () => {
+        syncFormToState();
+        if (!S.postcode) {
+          alert('Please enter a postcode first');
+          return;
+        }
+        S.lookupInFlight = true;
+        S.error = '';
+        btn.disabled = true;
+        btn.textContent = 'Looking up…';
+
+        try {
+          const results = await apiPostcodeLookup(S.postcode, S.house);
+          S.results = results || [];
+          if (S.results.length === 1) {
+            const a = S.results[0];
+            S.line1 = a.line1 || S.line1;
+            S.line2 = a.line2 || S.line2;
+            S.line3 = a.line3 || S.line3;
+            S.city = a.city || S.city;
+            S.postcode = a.postcode || S.postcode;
+            syncStateToForm();
+          }
+        } catch (e) {
+          console.error('postcode lookup failed', e);
+          S.error = 'Lookup failed. Please check the postcode or try again.';
+        } finally {
+          S.lookupInFlight = false;
+          btn.disabled = false;
+          btn.textContent = 'Lookup';
+          renderResults();
+          wireResultClicks();
+        }
+      });
+    }
+
+    const wireResultClicks = () => {
+      const box = root.querySelector('#addrLookupResults');
+      if (!box || box.__wired) return;
+      box.__wired = true;
+      box.addEventListener('click', (e) => {
+        const row = e.target.closest('.addr-row[data-i]');
+        if (!row) return;
+        const idx = +row.getAttribute('data-i');
+        const a = S.results[idx];
+        if (!a) return;
+        S.line1 = a.line1 || '';
+        S.line2 = a.line2 || '';
+        S.line3 = a.line3 || '';
+        S.city = a.city || '';
+        S.postcode = a.postcode || '';
+        syncStateToForm();
+      });
+    };
+
+    wireResultClicks();
+  };
+
+  showModal(
+    'Address',
+    [{ key: 'main', label: 'Address' }],
+    () => body,
+    async () => {
+      const root = document.getElementById('addrLookupRoot');
+      if (!root) return { ok: false };
+      syncFormToState();
+      const addr = {
+        line1: S.line1 || '',
+        line2: S.line2 || '',
+        line3: S.line3 || '',
+        city: S.city || '',
+        postcode: S.postcode || ''
+      };
+      if (typeof onSave === 'function') {
+        onSave(addr);
+      }
+      return { ok: true };
+    },
+    false,
+    onOpen,
+    { kind: 'address-lookup', noParentGate: false }
+  );
+}
+
+// =============== NEW: applyAddress* helpers ============================
+function applyAddressToCandidateModel(model, addr) {
+  if (!model || !addr) return;
+  model.address_line1 = addr.line1 || '';
+  model.address_line2 = addr.line2 || '';
+  model.address_line3 = addr.line3 || '';
+  model.town_city = addr.city || '';
+  model.postcode = addr.postcode || '';
+}
+
+function applyAddressToUmbrellaModel(model, addr) {
+  if (!model || !addr) return;
+  model.address_line1 = addr.line1 || '';
+  model.address_line2 = addr.line2 || '';
+  model.address_line3 = addr.line3 || '';
+  model.town_city = addr.city || '';
+  model.postcode = addr.postcode || '';
+}
+
+// =============== NEW: buildUmbrellaDetailsModel ========================
+function buildUmbrellaDetailsModel(row) {
+  const r = row || {};
+  return {
+    id: r.id || null,
+    name: r.name || '',
+    remittance_email: r.remittance_email || '',
+    bank_name: r.bank_name || '',
+    sort_code: r.sort_code || '',
+    account_number: r.account_number || '',
+    vat_chargeable: !!r.vat_chargeable,
+    enabled: r.enabled === false ? false : true,
+
+    address_line1: r.address_line1 || '',
+    address_line2: r.address_line2 || '',
+    address_line3: r.address_line3 || '',
+    town_city: r.town_city || '',
+    county: r.county || '',
+    postcode: r.postcode || '',
+    country: r.country || '',
+    company_number: r.company_number || ''
+  };
+}
+
+// =============== NEW: bindUmbrellaAddressEvents ========================
+function bindUmbrellaAddressEvents(container, model) {
+  if (!container || !model) return;
+  const q = (sel) => container.querySelector(sel);
+
+  const bind = (selector, key) => {
+    const el = q(selector);
+    if (!el) return;
+    el.value = model[key] || '';
+    el.addEventListener('input', () => {
+      model[key] = el.value;
+    });
+  };
+
+  // Address fields
+  bind('input[name="address_line1"]', 'address_line1');
+  bind('input[name="address_line2"]', 'address_line2');
+  bind('input[name="address_line3"]', 'address_line3');
+  bind('input[name="town_city"]', 'town_city');
+  bind('input[name="county"]', 'county');
+  bind('input[name="postcode"]', 'postcode');
+  bind('input[name="country"]', 'country');
+
+  // Company registration number
+  bind('input[name="company_number"]', 'company_number');
+
+  // Optional postcode lookup
+  const btn = q('[data-act="umbrella-postcode-lookup"]');
+  if (btn && !btn.__wired) {
+    btn.__wired = true;
+    btn.addEventListener('click', () => {
+      const curr = {
+        line1: model.address_line1,
+        line2: model.address_line2,
+        line3: model.address_line3,
+        city: model.town_city,
+        postcode: model.postcode
+      };
+      openAddressLookupModal(curr, (addr) => {
+        applyAddressToUmbrellaModel(model, addr);
+        ['address_line1', 'address_line2', 'address_line3', 'town_city', 'postcode'].forEach((k) => {
+          const el = q(`input[name="${k}"]`);
+          if (el) el.value = model[k] || '';
+        });
+      });
+    });
+  }
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 // ==== FIXED MODAL FRAMEWORK: close only on explicit success from onSave ====
 // ==== FIXED MODAL FRAMEWORK: close only on explicit success from onSave ====
