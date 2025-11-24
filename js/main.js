@@ -1139,7 +1139,7 @@ function getFriendlyHeaderLabel(section, key) {
 // - After loading the visible page, triggers background priming of membership
 //   (ALL matching ids for current filters) regardless of page size.
 // ─────────────────────────────────────────────────────────────────────────────
-async function loadSection(){
+async function loadSection() {
   window.__listState = window.__listState || {};
   const st = (window.__listState[currentSection] ||= {
     page: 1,
@@ -1163,30 +1163,39 @@ async function loadSection(){
     }
   }
 
-  // Ensure user grid prefs are loaded once per session (per section)
+  // Ensure user grid prefs are loaded once per session (per section).
+  // These prefs come from tms_users.grid_prefs_json if present, else
+  // fall back to DEFAULT_GRID_PREFS on the backend.
   await loadUserGridPrefs(currentSection);
 
   // Decide whether to use the search endpoints:
-  // - if there are any filters
-  // - OR if a sort key is active
+  // - ALWAYS for 'candidates' and 'contracts' (so we hit candidates_summary /
+  //   contracts search and get all derived fields, including job_titles_display)
+  // - For other sections, only if there are filters or an active sort key.
   const hasFilters = !!st.filters && Object.keys(st.filters).length > 0;
   const hasSort    = !!(st.sort && st.sort.key);
-  const useSearch  = hasFilters || hasSort;
+
+  const useSearch =
+    (currentSection === 'candidates' || currentSection === 'contracts')
+      ? true
+      : (hasFilters || hasSort);
 
   const fetchOne = async (section, page, pageSize) => {
     window.__listState[section].page = page;
     window.__listState[section].pageSize = pageSize;
 
     if (useSearch) {
+      // For candidates + contracts this always runs, so candidates come from
+      // /api/search/candidates (candidates_summary) and include job_titles_display.
       return await search(section, window.__listState[section].filters || {});
     } else {
+      // Legacy/simple list endpoints for non-search sections
       switch (section) {
-        case 'candidates': return await listCandidates();
+        case 'candidates': return await listCandidates();   // used only when some other caller asks loadSection with useSearch=false for candidates (not the normal grid path now)
         case 'clients':    return await listClients();
         case 'umbrellas':  return await listUmbrellas();
         case 'settings':   return await getSettings();
         case 'audit':      return await listOutbox();
-        case 'contracts':  return await search('contracts', {}); // safety; normally useSearch===true for contracts
         default:           return [];
       }
     }
@@ -1227,7 +1236,6 @@ async function loadSection(){
   } catch {}
   return rows;
 }
-
 
 function clearSession(){
   localStorage.removeItem('cloudtms.session');
@@ -10563,11 +10571,29 @@ async function openCandidate(row) {
       try {
         const cm = window.modalCtx?.candidateMainModel;
         if (cm && typeof cm === 'object') {
-          const jobs = Array.isArray(cm.job_titles)
-            ? cm.job_titles.map((t) => t.job_title_id).filter(Boolean)
-            : [];
-          payload.job_titles = jobs;
-          payload.job_title_id = jobs.length ? jobs[0] : null;
+          // Normalise + order job titles so primary is first
+          let jobs = Array.isArray(cm.job_titles) ? cm.job_titles.slice() : [];
+          jobs = jobs.filter((t) => t && t.job_title_id);
+          if (jobs.length) {
+            let primaryIdx = jobs.findIndex((t) => t.is_primary);
+            if (primaryIdx === -1) primaryIdx = 0;
+
+            jobs = jobs.map((t, idx) => ({
+              ...t,
+              is_primary: idx === primaryIdx
+            }));
+
+            if (primaryIdx !== 0) {
+              const primary = jobs[primaryIdx];
+              jobs.splice(primaryIdx, 1);
+              jobs.unshift(primary);
+            }
+          }
+          cm.job_titles = jobs; // keep model in sync with the normalised order
+
+          const jobIds = jobs.map((t) => t.job_title_id);
+          payload.job_titles = jobIds;
+          payload.job_title_id = jobIds.length ? jobIds[0] : null;
 
           if (Object.prototype.hasOwnProperty.call(cm, 'prof_reg_type')) {
             payload.prof_reg_type = cm.prof_reg_type || null;
@@ -10632,11 +10658,11 @@ async function openCandidate(row) {
         if (eff.date_to && win.date_to && eff.date_to > win.date_to) { alert(`Client rate ends on ${formatIsoToUk(win.date_to)} — override must end on or before this date.`); return { ok:false }; }
 
         for (const b of ['day','night','sat','sun','bh']) {
-          const pay = eff[`pay_${b}`];
+          const payB = eff[`pay_${b}`];
           const chg = win[`charge_${b}`];
-          if (pay != null && chg == null) { alert(`No client charge for ${bucketLabel[b]} on ${formatIsoToUk(eff.date_from)}.`); return { ok:false }; }
-          if (pay != null && chg != null) {
-            const margin = (eff.rate_type==='PAYE') ? (chg - (pay * erniMult)) : (chg - pay);
+          if (payB != null && chg == null) { alert(`No client charge for ${bucketLabel[b]} on ${formatIsoToUk(eff.date_from)}.`); return { ok:false }; }
+          if (payB != null && chg != null) {
+            const margin = (eff.rate_type==='PAYE') ? (chg - (payB * erniMult)) : (chg - payB);
             if (margin < 0) { alert(`Margin would be negative for ${bucketLabel[b]}.`); return { ok:false }; }
           }
         }
@@ -10648,10 +10674,10 @@ async function openCandidate(row) {
         if (!win) { alert(`No active client default covers ${nv.role}${nv.band?` / ${nv.band}`:''} on ${formatIsoToUk(nv.date_from)}.`); return { ok:false }; }
         if (nv.date_to && win.date_to && nv.date_to > win.date_to) { alert(`Client rate ends on ${formatIsoToUk(win.date_to)} — override must end on or before this date.`); return { ok:false }; }
         for (const b of ['day','night','sat','sun','bh']) {
-          const pay = nv[`pay_${b}`]; const chg = win[`charge_${b}`];
-          if (pay != null && chg == null) { alert(`No client charge for ${bucketLabel[b]} on ${formatIsoToUk(win.date_from)}.`); return { ok:false }; }
-          if (pay != null && chg != null) {
-            const margin = (String(nv.rate_type).toUpperCase()==='PAYE') ? (chg - (pay * erniMult)) : (chg - pay);
+          const payB = nv[`pay_${b}`]; const chg = win[`charge_${b}`];
+          if (payB != null && chg == null) { alert(`No client charge for ${bucketLabel[b]} on ${formatIsoToUk(win.date_from)}.`); return { ok:false }; }
+          if (payB != null && chg != null) {
+            const margin = (String(nv.rate_type).toUpperCase()==='PAYE') ? (chg - (payB * erniMult)) : (chg - payB);
             if (margin < 0) { alert(`Margin would be negative for ${bucketLabel[b]}.`); return { ok:false }; }
           }
         }
@@ -10663,24 +10689,24 @@ async function openCandidate(row) {
 
       // Deletes — preferred by id; fallback to legacy filter keys
       for (const delId of OX.stagedDeletes || []) {
-        const row = (OX.existing || []).find(r => String(r.id) === String(delId));
-        if (!row) continue;
+        const rowDel = (OX.existing || []).find(r => String(r.id) === String(delId));
+        if (!rowDel) continue;
 
         const q = new URLSearchParams();
-        if (row.id) q.set('id', String(row.id));
+        if (rowDel.id) q.set('id', String(rowDel.id));
         else {
-          if (row.client_id) q.set('client_id', String(row.client_id));
-          if (row.role != null) q.set('role', String(row.role));
-          q.set('band', (row.band == null || row.band === '') ? '' : String(row.band));
-          if (row.rate_type) q.set('rate_type', String(row.rate_type).toUpperCase());
-          if (row.date_from) q.set('date_from', String(row.date_from));
+          if (rowDel.client_id) q.set('client_id', String(rowDel.client_id));
+          if (rowDel.role != null) q.set('role', String(rowDel.role));
+          q.set('band', (rowDel.band == null || rowDel.band === '') ? '' : String(rowDel.band));
+          if (rowDel.rate_type) q.set('rate_type', String(rowDel.rate_type).toUpperCase());
+          if (rowDel.date_from) q.set('date_from', String(rowDel.date_from));
         }
 
-        const url = API(`/api/rates/candidate-overrides/${encodeURIComponent(candidateId)}?${q.toString()}`);
-        L('[onSave][DELETE override]', url);
-        const res = await authFetch(url, { method: 'DELETE' });
-        if (!res.ok) {
-          const msg = await res.text().catch(()=> 'Delete override failed');
+        const urlDel = API(`/api/rates/candidate-overrides/${encodeURIComponent(candidateId)}?${q.toString()}`);
+        L('[onSave][DELETE override]', urlDel);
+        const resDel = await authFetch(urlDel, { method: 'DELETE' });
+        if (!resDel.ok) {
+          const msg = await resDel.text().catch(()=> 'Delete override failed');
           alert(msg);
           return { ok:false }; }
       }
@@ -10703,15 +10729,15 @@ async function openCandidate(row) {
         }
         body.candidate_id = candidateId;
 
-        const url = API(`/api/rates/candidate-overrides/${encodeURIComponent(candidateId)}?${q.toString()}`);
-        L('[onSave][PATCH override]', { url, body });
-        const res = await authFetch(url, {
+        const urlPatch = API(`/api/rates/candidate-overrides/${encodeURIComponent(candidateId)}?${q.toString()}`);
+        L('[onSave][PATCH override]', { url: urlPatch, body });
+        const resPatch = await authFetch(urlPatch, {
           method:'PATCH',
           headers:{ 'content-type':'application/json' },
           body: JSON.stringify(body)
         });
-        if (!res.ok) {
-          const msg = await res.text().catch(()=> 'Update override failed');
+        if (!resPatch.ok) {
+          const msg = await resPatch.text().catch(()=> 'Update override failed');
           alert(msg);
           return { ok:false }; }
       }
@@ -10724,11 +10750,11 @@ async function openCandidate(row) {
           if (k === '_tmpId' || v === '') continue;
           clean[k] = v;
         }
-        const res = await authFetch(
+        const resCreate = await authFetch(
           API(`/api/rates/candidate-overrides`),
           { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({ ...clean, candidate_id: candidateId }) }
         );
-        if (!res.ok) { const msg = await res.text().catch(()=> 'Create override failed'); alert(msg); return { ok:false }; }
+        if (!resCreate.ok) { const msg = await resCreate.text().catch(()=> 'Create override failed'); alert(msg); return { ok:false }; }
       }
 
       // Refresh overrides list from server and clear staging
@@ -10755,9 +10781,10 @@ async function openCandidate(row) {
       try {
         const cm = window.modalCtx?.candidateMainModel;
         if (cm && Array.isArray(cm.job_titles)) {
-          jobTitlesForCtx = cm.job_titles.map((t, idx) => ({
+          // Use the already normalised cm.job_titles with is_primary preserved
+          jobTitlesForCtx = cm.job_titles.map((t) => ({
             job_title_id: t.job_title_id,
-            is_primary: idx === 0
+            is_primary: !!t.is_primary
           }));
         } else if (Array.isArray(payload.job_titles)) {
           jobTitlesForCtx = payload.job_titles.map((id, idx) => ({
@@ -16893,20 +16920,22 @@ btnEdit.onclick = ()=> {
   // but allow Edit for rate-preset even when opened as a child.
   if (!isRatePreset && (isChildNow || top.kind === 'advanced-search')) return;
 
-  if (top.mode === 'view') {
-    top._snapshot = {
-      data               : deep(window.modalCtx?.data||null),
-      formState          : deep(window.modalCtx?.formState||null),
-      rolesState         : deep(window.modalCtx?.rolesState||null),
-      ratesState         : deep(window.modalCtx?.ratesState||null),
-      hospitalsState     : deep(window.modalCtx?.hospitalsState||null),
-      clientSettingsState: deep(window.modalCtx?.clientSettingsState||null),
-      overrides          : deep(window.modalCtx?.overrides || { existing:[], stagedNew:[], stagedEdits:{}, stagedDeletes:[] })
-    };
-    top.isDirty = false;
-    setFrameMode(top, 'edit');
-    L('btnEdit (global) → switch to edit');
-  }
+if (top.mode === 'view') {
+  top._snapshot = {
+    data               : deep(window.modalCtx?.data||null),
+    formState          : deep(window.modalCtx?.formState||null),
+    rolesState         : deep(window.modalCtx?.rolesState||null),
+    ratesState         : deep(window.modalCtx?.ratesState||null),
+    hospitalsState     : deep(window.modalCtx?.hospitalsState||null),
+    clientSettingsState: deep(window.modalCtx?.clientSettingsState||null),
+    overrides          : deep(window.modalCtx?.overrides || { existing:[], stagedNew:[], stagedEdits:{}, stagedDeletes:[] }),
+    candidateMainModel : deep(window.modalCtx?.candidateMainModel || null)
+  };
+  top.isDirty = false;
+  setFrameMode(top, 'edit');
+  L('btnEdit (global) → switch to edit');
+}
+
 };
 
 
@@ -16960,17 +16989,18 @@ if (stack().length>0) {
 
 
   if (!isChildNow && !top.noParentGate && top.mode==='edit' && top.kind!=='rates-presets') {
-    if (!top.isDirty) {
-    if (top._snapshot && window.modalCtx) {
-      window.modalCtx.data                = deep(top._snapshot.data);
-      window.modalCtx.formState           = deep(top._snapshot.formState);
-      window.modalCtx.rolesState          = deep(top._snapshot.rolesState);
-      window.modalCtx.ratesState          = deep(top._snapshot.ratesState);
-      window.modalCtx.hospitalsState      = deep(top._snapshot.hospitalsState);
-      window.modalCtx.clientSettingsState = deep(top._snapshot.clientSettingsState);
-      if (top._snapshot.overrides) window.modalCtx.overrides = deep(top._snapshot.overrides);
-      try { renderCandidateRatesTable?.(); } catch {}
-    }
+   if (!top.isDirty) {
+  if (top._snapshot && window.modalCtx) {
+    window.modalCtx.data                = deep(top._snapshot.data);
+    window.modalCtx.formState           = deep(top._snapshot.formState);
+    window.modalCtx.rolesState          = deep(top._snapshot.rolesState);
+    window.modalCtx.ratesState          = deep(top._snapshot.ratesState);
+    window.modalCtx.hospitalsState      = deep(top._snapshot.hospitalsState);
+    window.modalCtx.clientSettingsState = deep(top._snapshot.clientSettingsState);
+    if (top._snapshot.overrides) window.modalCtx.overrides = deep(top._snapshot.overrides);
+    window.modalCtx.candidateMainModel  = deep(top._snapshot.candidateMainModel || null);
+    try { renderCandidateRatesTable?.(); } catch {}
+  }
     try {
       if (top.entity === 'contracts') {
         const cid = window.modalCtx?.data?.id;
@@ -16982,7 +17012,7 @@ if (stack().length>0) {
   } else {
       let ok=false; try{ top._confirmingDiscard=true; btnClose.disabled=true; ok=window.confirm('Discard changes and return to view?'); } finally { top._confirmingDiscard=false; btnClose.disabled=false; }
       if (!ok) return;
-    if (top._snapshot && window.modalCtx) {
+   if (top._snapshot && window.modalCtx) {
       window.modalCtx.data                = deep(top._snapshot.data);
       window.modalCtx.formState           = deep(top._snapshot.formState);
       window.modalCtx.rolesState          = deep(top._snapshot.rolesState);
@@ -16990,6 +17020,8 @@ if (stack().length>0) {
       window.modalCtx.hospitalsState      = deep(top._snapshot.hospitalsState);
       window.modalCtx.clientSettingsState = deep(top._snapshot.clientSettingsState);
       if (top._snapshot.overrides) window.modalCtx.overrides = deep(top._snapshot.overrides);
+      // 🔹 restore candidateMainModel as well so job titles (and primary) roll back
+      window.modalCtx.candidateMainModel  = deep(top._snapshot.candidateMainModel || null);
       try { renderCandidateRatesTable?.(); } catch {}
     }
     try {
@@ -19306,13 +19338,38 @@ function buildCandidateMainDetailsModel(row) {
 
   // Multi job titles from backend (candidate_job_titles)
   // shape: [{ job_title_id, is_primary }, ...]
-  model.job_titles = Array.isArray(r.job_titles)
-    ? r.job_titles.map((jt) => ({
-        job_title_id: jt.job_title_id,
-        is_primary: !!jt.is_primary
-      }))
+  let jobs = Array.isArray(r.job_titles)
+    ? r.job_titles
+        .map((jt) => ({
+          job_title_id: jt.job_title_id,
+          is_primary: !!jt.is_primary
+        }))
+        .filter((t) => t.job_title_id)
     : [];
 
+  // Normalise:
+  // - if none is primary, make the first primary
+  // - if multiple are primary, keep the first as primary and clear the rest
+  // - always move the primary to index 0
+  if (jobs.length) {
+    let primaryIdx = jobs.findIndex((t) => t.is_primary);
+    if (primaryIdx === -1) {
+      primaryIdx = 0;
+    }
+
+    jobs = jobs.map((t, idx) => ({
+      ...t,
+      is_primary: idx === primaryIdx
+    }));
+
+    if (primaryIdx !== 0) {
+      const primary = jobs[primaryIdx];
+      jobs.splice(primaryIdx, 1);
+      jobs.unshift(primary);
+    }
+  }
+
+  model.job_titles = jobs;
   return model;
 }
 
@@ -19333,6 +19390,51 @@ function bindCandidateMainFormEvents(container, model) {
     });
   };
 
+  // Small helper to mark current candidate frame dirty
+  const markDirty = () => {
+    try {
+      const fr = window.__getModalFrame?.();
+      if (fr && (fr.mode === 'edit' || fr.mode === 'create')) {
+        fr.isDirty = true;
+        fr._updateButtons?.();
+      }
+      window.dispatchEvent(new Event('modal-dirty'));
+    } catch {}
+  };
+
+  // Normalise job_titles:
+  // - drop any entries without job_title_id
+  // - if none primary, first becomes primary
+  // - if multiple primaries, only first stays primary
+  // - primary always moved to index 0
+  const normaliseJobTitles = () => {
+    let items = Array.isArray(model.job_titles) ? model.job_titles.slice() : [];
+    items = items.filter((t) => t && t.job_title_id);
+
+    if (!items.length) {
+      model.job_titles = [];
+      return;
+    }
+
+    let primaryIdx = items.findIndex((t) => t.is_primary);
+    if (primaryIdx === -1) {
+      primaryIdx = 0;
+    }
+
+    items = items.map((t, idx) => ({
+      ...t,
+      is_primary: idx === primaryIdx
+    }));
+
+    if (primaryIdx !== 0) {
+      const primary = items[primaryIdx];
+      items.splice(primaryIdx, 1);
+      items.unshift(primary);
+    }
+
+    model.job_titles = items;
+  };
+
   // NI
   bind('input[name="ni_number"]', 'ni_number');
 
@@ -19346,6 +19448,7 @@ function bindCandidateMainFormEvents(container, model) {
       const v = dobEl.value.trim();
       if (!v) {
         model.date_of_birth = null;
+        markDirty();
         return;
       }
       if (typeof parseUkDateToIso === 'function') {
@@ -19354,6 +19457,7 @@ function bindCandidateMainFormEvents(container, model) {
       } else {
         model.date_of_birth = v;
       }
+      markDirty();
     });
 
     if (typeof attachUkDatePicker === 'function') {
@@ -19367,29 +19471,52 @@ function bindCandidateMainFormEvents(container, model) {
     genderEl.value = model.gender || '';
     genderEl.addEventListener('change', () => {
       model.gender = genderEl.value || '';
+      markDirty();
     });
   }
 
   // Professional registration number
-  bind('input[name="prof_reg_number"]', 'prof_reg_number');
+  const profEl = q('input[name="prof_reg_number"]');
+  if (profEl) {
+    profEl.value = model.prof_reg_number || '';
+    profEl.addEventListener('input', () => {
+      model.prof_reg_number = profEl.value || '';
+      markDirty();
+    });
+  }
 
   // Address fields
-  bind('input[name="address_line1"]', 'address_line1');
-  bind('input[name="address_line2"]', 'address_line2');
-  bind('input[name="address_line3"]', 'address_line3');
-  bind('input[name="town_city"]', 'town_city');
-  bind('input[name="county"]', 'county');
-  bind('input[name="postcode"]', 'postcode');
-  bind('input[name="country"]', 'country');
+  const addrKeys = [
+    'address_line1',
+    'address_line2',
+    'address_line3',
+    'town_city',
+    'county',
+    'postcode',
+    'country'
+  ];
+  addrKeys.forEach((k) => bind(`input[name="${k}"]`, k));
 
   // Helper to render current job_titles list
   const jobTitlesHost = q('#jobTitlesList');
 
   const renderJobTitlesList = () => {
     if (!jobTitlesHost) return;
+
+    // Normalise before rendering
+    normaliseJobTitles();
+
     const C = window.__jobTitlesCache || {};
     const byId = C.byId || {};
     const items = Array.isArray(model.job_titles) ? model.job_titles : [];
+
+    // Check if we are in edit/create mode (for bins + context menu)
+    const fr = window.__getModalFrame?.();
+    const canEdit =
+      !!fr &&
+      fr.entity === 'candidates' &&
+      fr.currentTabKey === 'main' &&
+      (fr.mode === 'edit' || fr.mode === 'create');
 
     if (!items.length) {
       jobTitlesHost.innerHTML = `<div class="hint">No job titles selected yet.</div>`;
@@ -19397,25 +19524,47 @@ function bindCandidateMainFormEvents(container, model) {
       jobTitlesHost.innerHTML = items
         .map((t) => {
           const node = byId[t.job_title_id];
+          const isPrimary = !!t.is_primary;
           // Just the leaf label (no full tree)
           const label = node ? (node.label || '') : String(t.job_title_id || '');
           const regBadge =
             node && node.requires_prof_reg
               ? `<span class="pill mini" style="margin-left:4px">${node.prof_reg_type || 'Reg'}</span>`
               : '';
-          return `
-            <div class="pill"
-                 data-role-id="${t.job_title_id}"
-                 style="display:inline-flex;align-items:center;gap:6px;margin:2px 4px 0 0;">
-              <span>${escapeHtml(label)}</span>
-              ${regBadge}
+
+          const pillBase =
+            'display:inline-flex;align-items:center;gap:6px;margin:2px 4px 0 0;padding:2px 6px;border-radius:999px;';
+          const pillStyle = isPrimary
+            ? `${pillBase}border:1px solid var(--ok,#22c55e);background:rgba(34,197,94,0.08);`
+            : `${pillBase}border:1px solid var(--line);`;
+
+          const labelHtml = isPrimary
+            ? `<span style="color:var(--ok,#22c55e);font-weight:600">${escapeHtml(label)}</span>`
+            : `<span>${escapeHtml(label)}</span>`;
+
+          const primaryTag = isPrimary
+            ? `<span class="mini" style="margin-left:4px;opacity:.85;color:var(--ok,#22c55e)">Primary</span>`
+            : '';
+
+          const binHtml = canEdit
+            ? `
               <button type="button"
                       class="btn mini"
                       data-act="remove-job-title"
                       data-id="${t.job_title_id}"
                       title="Remove">
                 🗑
-              </button>
+              </button>`
+            : '';
+
+          return `
+            <div class="pill"
+                 data-role-id="${t.job_title_id}"
+                 style="${pillStyle}">
+              ${labelHtml}
+              ${primaryTag}
+              ${regBadge}
+              ${binHtml}
             </div>
           `;
         })
@@ -19452,8 +19601,8 @@ function bindCandidateMainFormEvents(container, model) {
   })();
 
   // Wire bins (remove job title)
-  if (jobTitlesHost && !jobTitlesHost.__wired) {
-    jobTitlesHost.__wired = true;
+  if (jobTitlesHost && !jobTitlesHost.__wiredClick) {
+    jobTitlesHost.__wiredClick = true;
     jobTitlesHost.addEventListener('click', (e) => {
       const btn = e.target.closest('button[data-act="remove-job-title"]');
       if (!btn) return;
@@ -19464,16 +19613,88 @@ function bindCandidateMainFormEvents(container, model) {
         (t) => String(t.job_title_id) !== String(id)
       );
       renderJobTitlesList();
+      markDirty();
+    });
+  }
 
-      // Mark modal dirty when job title removed
-      try {
-        const fr = window.__getModalFrame?.();
-        if (fr && (fr.mode === 'edit' || fr.mode === 'create')) {
-          fr.isDirty = true;
-          fr._updateButtons?.();
+  // Right-click context menu for "Set Primary Job Title"
+  if (jobTitlesHost && !jobTitlesHost.__wiredCtx) {
+    jobTitlesHost.__wiredCtx = true;
+
+    jobTitlesHost.addEventListener('contextmenu', (e) => {
+      const pill = e.target.closest('.pill[data-role-id]');
+      if (!pill) return;
+
+      const fr = window.__getModalFrame?.();
+      const canEdit =
+        !!fr &&
+        fr.entity === 'candidates' &&
+        fr.currentTabKey === 'main' &&
+        (fr.mode === 'edit' || fr.mode === 'create');
+
+      if (!canEdit) return; // no menu in view mode
+
+      e.preventDefault();
+
+      const id = pill.getAttribute('data-role-id');
+      if (!id) return;
+
+      // Remove any existing job title context menu
+      if (window.__jtContextMenu) {
+        try { document.body.removeChild(window.__jtContextMenu); } catch {}
+        window.__jtContextMenu = null;
+      }
+
+      const menu = document.createElement('div');
+      menu.style.cssText =
+        'position:fixed;z-index:10000;background:#0b1528;border:1px solid var(--line);' +
+        'padding:6px;border-radius:8px;min-width:180px;font-size:12px;';
+      menu.innerHTML = `
+        <div data-act="set-primary"
+             style="padding:6px 10px;cursor:pointer;">
+          Set as primary job title
+        </div>
+      `;
+
+      const closeMenu = () => {
+        if (window.__jtContextMenu) {
+          try { document.body.removeChild(window.__jtContextMenu); } catch {}
+          window.__jtContextMenu = null;
+          document.removeEventListener('click', onDocClick, true);
         }
-        window.dispatchEvent(new Event('modal-dirty'));
-      } catch {}
+      };
+
+      const onDocClick = (ev) => {
+        if (ev.target && ev.target.closest && ev.target.closest('#__jtContextMenu')) return;
+        closeMenu();
+      };
+
+      menu.id = '__jtContextMenu';
+      window.__jtContextMenu = menu;
+      document.body.appendChild(menu);
+
+      const x = e.clientX;
+      const y = e.clientY;
+      menu.style.left = `${x}px`;
+      menu.style.top = `${y}px`;
+
+      menu.addEventListener('click', (ev) => {
+        const item = ev.target.closest('[data-act="set-primary"]');
+        if (!item) return;
+
+        // Set this job title as primary
+        let items = Array.isArray(model.job_titles) ? model.job_titles.slice() : [];
+        items = items.map((t) => ({
+          ...t,
+          is_primary: String(t.job_title_id) === String(id)
+        }));
+        model.job_titles = items;
+        renderJobTitlesList();
+        markDirty();
+        closeMenu();
+      });
+
+      document.addEventListener('click', onDocClick, true);
     });
   }
 
@@ -19487,7 +19708,7 @@ function bindCandidateMainFormEvents(container, model) {
         const id = sel.jobTitleId;
         if (!id) return;
 
-        const existing = Array.isArray(model.job_titles) ? model.job_titles : [];
+        const existing = Array.isArray(model.job_titles) ? model.job_titles.slice() : [];
         if (existing.some((t) => String(t.job_title_id) === String(id))) {
           alert('This role is already added for this candidate.');
           return;
@@ -19506,18 +19727,16 @@ function bindCandidateMainFormEvents(container, model) {
           }
         }
 
-        model.job_titles = [...existing, { job_title_id: id }];
-        renderJobTitlesList();
+        const hasPrimary = existing.some((t) => t.is_primary);
+        const newItem = {
+          job_title_id: id,
+          // First job title ever becomes primary; otherwise only if there was no primary for some reason
+          is_primary: !existing.length && !hasPrimary
+        };
 
-        // Mark modal dirty when job title added
-        try {
-          const fr = window.__getModalFrame?.();
-          if (fr && (fr.mode === 'edit' || fr.mode === 'create')) {
-            fr.isDirty = true;
-            fr._updateButtons?.();
-          }
-          window.dispatchEvent(new Event('modal-dirty'));
-        } catch {}
+        model.job_titles = [...existing, newItem];
+        renderJobTitlesList();
+        markDirty();
       });
     });
   }
@@ -19541,16 +19760,7 @@ function bindCandidateMainFormEvents(container, model) {
           const el = q(`input[name="${k}"]`);
           if (el) el.value = model[k] || '';
         });
-
-        // Mark modal dirty when address is applied from lookup
-        try {
-          const fr = window.__getModalFrame?.();
-          if (fr && (fr.mode === 'edit' || fr.mode === 'create')) {
-            fr.isDirty = true;
-            fr._updateButtons?.();
-          }
-          window.dispatchEvent(new Event('modal-dirty'));
-        } catch {}
+        markDirty();
       });
     });
   }
@@ -20000,6 +20210,8 @@ function renderSummary(rows){
       // can show it via prefs as its own column
       if (r.job_titles_display == null) {
         r.job_titles_display = '';
+      } else {
+        r.job_titles_display = String(r.job_titles_display);
       }
     });
   } else if (currentSection === 'contracts') {
@@ -20251,10 +20463,34 @@ function renderSummary(rows){
     tdSel.appendChild(cb); tr.appendChild(tdSel);
 
     cols.forEach(c=>{
-      const td=document.createElement('td');
-      const v = r[c];
+      const td = document.createElement('td');
       td.dataset.colKey = String(c);
-      td.textContent = formatDisplayValue(c, v);
+      const v = r[c];
+
+      if (currentSection === 'candidates' && c === 'job_titles_display') {
+        // Highlight primary job title (first segment) in green
+        const raw = typeof r.job_titles_display === 'string' ? r.job_titles_display : (v || '');
+        if (!raw.trim()) {
+          td.textContent = '';
+        } else {
+          const parts = raw.split(';').map(s => s.trim()).filter(Boolean);
+          if (!parts.length) {
+            td.textContent = formatDisplayValue(c, raw);
+          } else {
+            const primary = parts[0];
+            const rest = parts.slice(1);
+            const primaryHtml =
+              `<span style="color:var(--ok,#22c55e);font-weight:600">${escapeHtml(primary)}</span>`;
+            const restHtml = rest.length
+              ? `; ${escapeHtml(rest.join('; '))}`
+              : '';
+            td.innerHTML = primaryHtml + restHtml;
+          }
+        }
+      } else {
+        td.textContent = formatDisplayValue(c, v);
+      }
+
       tr.appendChild(td);
     });
 
