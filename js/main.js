@@ -19992,7 +19992,16 @@ function renderSummary(rows){
 
   // Section-specific pre-formatting
   if (currentSection === 'candidates') {
-    rows.forEach(r => { r.role = (r && Array.isArray(r.roles)) ? formatRolesSummary(r.roles) : ''; });
+    rows.forEach(r => {
+      // Rota roles only – do NOT use this for Job Titles
+      r.role = (r && Array.isArray(r.roles)) ? formatRolesSummary(r.roles) : '';
+
+      // Ensure job_titles_display exists as a string so the grid
+      // can show it via prefs as its own column
+      if (r.job_titles_display == null) {
+        r.job_titles_display = '';
+      }
+    });
   } else if (currentSection === 'contracts') {
     rows.forEach(r => {
       const j = r && r.bucket_labels_json;
@@ -20143,7 +20152,6 @@ function renderSummary(rows){
 
   // Header checkbox (first column)
   const thSel = document.createElement('th');
-  // Hard-lock the selection column width so it cannot "breathe" when sorting
   thSel.style.width = '40px';
   thSel.style.minWidth = '40px';
   thSel.style.maxWidth = '40px';
@@ -20162,28 +20170,24 @@ function renderSummary(rows){
   trh.appendChild(thSel);
 
   // Build header cells with friendly labels, resizer handles, and click-to-sort
- cols.forEach(c=>{
-  const th = document.createElement('th');
-  th.dataset.colKey = String(c);
-  // IMPORTANT: do NOT set th.style.position here; let CSS apply sticky
-  th.style.cursor = 'pointer';
+  cols.forEach(c=>{
+    const th = document.createElement('th');
+    th.dataset.colKey = String(c);
+    th.style.cursor = 'pointer';
 
-  const label = getFriendlyHeaderLabel(currentSection, c);
-  const isActive = sortState && sortState.key === c;
-  const arrow = isActive ? (sortState.dir === 'asc' ? ' ▲' : ' ▼') : '';
-  th.textContent = label + arrow;
+    const label = getFriendlyHeaderLabel(currentSection, c);
+    const isActive = sortState && sortState.key === c;
+    const arrow = isActive ? (sortState.dir === 'asc' ? ' ▲' : ' ▼') : '';
+    th.textContent = label + arrow;
 
-  // resizer handle (wired later)
-  const res = document.createElement('div');
-  res.className = 'col-resizer';
-  res.title = 'Drag to resize. Double-click to reset.';
-  res.style.cssText = 'position:absolute;right:0;top:0;width:6px;height:100%;cursor:col-resize;user-select:none;';
-  th.appendChild(res);
+    const res = document.createElement('div');
+    res.className = 'col-resizer';
+    res.title = 'Drag to resize. Double-click to reset.';
+    res.style.cssText = 'position:absolute;right:0;top:0;width:6px;height:100%;cursor:col-resize;user-select:none;';
+    th.appendChild(res);
 
-  // make header draggable for reorder (wired later)
-  th.draggable = true;
+    th.draggable = true;
 
-    // Click-to-sort (server-side) — ignore clicks that start on the resizer
     th.addEventListener('click', async (ev) => {
       if (ev.target && ev.target.closest && ev.target.closest('.col-resizer')) return;
 
@@ -20223,8 +20227,6 @@ function renderSummary(rows){
 
   // Body rows
   if (currentSection === 'candidates') {
-    // For candidates, don't force 100% width so the fixed 40px tick column
-    // doesn't get stretched when there are fewer columns.
     tbl.style.width = 'auto';
   }
 
@@ -20234,7 +20236,6 @@ function renderSummary(rows){
     tr.dataset.section = currentSection;
 
     const tdSel = document.createElement('td');
-    // Match the header tick column width explicitly at cell level too
     tdSel.style.width = '40px';
     tdSel.style.minWidth = '40px';
     tdSel.style.maxWidth = '40px';
