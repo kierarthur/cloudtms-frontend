@@ -17091,7 +17091,7 @@ const setCloseLabel = ()=>{
         btnEdit: { display: btnEdit.style.display }
       });
       return;
- } else if (isChild && !top.noParentGate) {
+     } else if (isChild && !top.noParentGate) {
 
   if (top.mode === 'view') {
     btnSave.style.display = 'none';
@@ -17100,11 +17100,20 @@ const setCloseLabel = ()=>{
     if (relatedBtn) relatedBtn.disabled = !(top.hasId);
   } else {
     btnSave.style.display = parentEditable ? '' : 'none';
-    // For the rate-presets picker, gate Apply by the picker's selection state (__canSave).
-    // Other apply-style children still use the _applyDesired flag.
-    const wantApply = (top.kind === 'rate-presets-picker')
-      ? !!top.__canSave
-      : (top._applyDesired === true);
+
+    // Child apply gating:
+    // - rate-presets-picker: gate by __canSave
+    // - client-rate / candidate-override: gate by _applyDesired
+    // - address-lookup (and other simple children): always allow Apply if parent is editable
+    let wantApply;
+    if (top.kind === 'rate-presets-picker') {
+      wantApply = !!top.__canSave;
+    } else if (top.kind === 'client-rate' || top.kind === 'candidate-override') {
+      wantApply = (top._applyDesired === true);
+    } else {
+      // e.g. address-lookup and other simple child modals
+      wantApply = true;
+    }
 
     btnSave.disabled = (!parentEditable) || top._saving || !wantApply;
     btnEdit.style.display='none';
@@ -17115,6 +17124,7 @@ const setCloseLabel = ()=>{
   }
 }
  else {
+
 
       btnEdit.style.display = (top.mode==='view' && top.hasId) ? '' : 'none';
       if (relatedBtn) relatedBtn.disabled = !(top.mode==='view' && top.hasId);
@@ -18939,7 +18949,8 @@ function openJobTitleSettingsModal() {
 
         <div class="row">
           <label>Label</label>
-          <input type="text" name="label" value="${escapeAttr(e.label || '')}" required />
+          <input type="text" name="label" value="${escapeHtml(e.label || '')}" required />
+
         </div>
 
         <div class="row">
