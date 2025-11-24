@@ -24,6 +24,7 @@ const DEFAULT_COLUMN_LABELS = {
     postcode: 'Postcode',
     role: 'Role',
     tms_ref: 'TMS Ref',
+    job_titles_display: 'Job Titles',
     rev: 'Revision'
   },
   clients: {
@@ -78,6 +79,7 @@ const GRID_COLUMN_META_DEFAULTS = {
     right_to_work_status:   { selectable: false },
     right_to_work_expiry:   { selectable: false },
     pay_method:             { selectable: true },
+    job_titles_display: { selectable: true },
     umbrella_id:            { selectable: false },
     bank_name:              { selectable: false },
     bank_account_name:      { selectable: true },
@@ -18798,6 +18800,43 @@ function openJobTitleSettingsModal() {
     wireEvents();
   };
 
+  const showRoleUsageInCandidates = async (candidateIds) => {
+    if (!Array.isArray(candidateIds) || !candidateIds.length) {
+      alert('This job title is in use, but no candidate IDs were returned.');
+      return;
+    }
+    const ok = window.confirm(
+      `This role is assigned to ${candidateIds.length} candidates. Show them in the Candidates list?`
+    );
+    if (!ok) return;
+
+    try {
+      // Switch to Candidates section and filter by ids
+      window.currentSection = 'candidates';
+      window.__listState = window.__listState || {};
+      const st = (window.__listState.candidates ||= {
+        page: 1,
+        pageSize: 50,
+        total: null,
+        hasMore: false,
+        filters: null,
+        sort: { key: null, dir: 'asc' }
+      });
+      st.page = 1;
+      st.filters = { ...(st.filters || {}), ids: candidateIds };
+
+      const rows = await search('candidates', st.filters);
+      renderSummary(rows);
+
+      // Close the Job Titles modal if it's open
+      const btnClose = document.getElementById('btnCloseModal');
+      if (btnClose) btnClose.click();
+    } catch (e) {
+      console.error('Failed to show candidates for job title', e);
+      alert('Failed to open Candidates list for this role.');
+    }
+  };
+
   const refreshFromCache = async () => {
     S.loading = true;
     S.error = '';
@@ -18934,6 +18973,13 @@ function openJobTitleSettingsModal() {
               active
             });
           }
+
+          // If backend signals that the role is in use, offer to show candidates
+          if (node && node.error === 'JOB_TITLE_IN_USE' && Array.isArray(node.candidate_ids)) {
+            await showRoleUsageInCandidates(node.candidate_ids);
+            return;
+          }
+
           // Refresh cache & select this node
           await refreshFromCache();
           if (node && node.id) {
@@ -18958,11 +19004,13 @@ function openJobTitleSettingsModal() {
 
         try {
           const res = await apiDeleteJobTitle(node.id);
-          if (res && res.softDeleted) {
-            alert(
-              'This job title is in use; it has been marked inactive instead of being deleted.'
-            );
+
+          // If backend says job title is in use, offer to show candidates
+          if (res && res.error === 'JOB_TITLE_IN_USE' && Array.isArray(res.candidate_ids)) {
+            await showRoleUsageInCandidates(res.candidate_ids);
+            return;
           }
+
           await refreshFromCache();
         } catch (err) {
           console.error('job title delete failed', err);
@@ -19349,9 +19397,8 @@ function bindCandidateMainFormEvents(container, model) {
       jobTitlesHost.innerHTML = items
         .map((t) => {
           const node = byId[t.job_title_id];
-          const path = node
-            ? buildJobTitlePathLabels(t.job_title_id).join(' > ')
-            : t.job_title_id;
+          // Just the leaf label (no full tree)
+          const label = node ? (node.label || '') : String(t.job_title_id || '');
           const regBadge =
             node && node.requires_prof_reg
               ? `<span class="pill mini" style="margin-left:4px">${node.prof_reg_type || 'Reg'}</span>`
@@ -19360,7 +19407,7 @@ function bindCandidateMainFormEvents(container, model) {
             <div class="pill"
                  data-role-id="${t.job_title_id}"
                  style="display:inline-flex;align-items:center;gap:6px;margin:2px 4px 0 0;">
-              <span>${escapeHtml(path)}</span>
+              <span>${escapeHtml(label)}</span>
               ${regBadge}
               <button type="button"
                       class="btn mini"
@@ -19417,6 +19464,16 @@ function bindCandidateMainFormEvents(container, model) {
         (t) => String(t.job_title_id) !== String(id)
       );
       renderJobTitlesList();
+
+      // Mark modal dirty when job title removed
+      try {
+        const fr = window.__getModalFrame?.();
+        if (fr && (fr.mode === 'edit' || fr.mode === 'create')) {
+          fr.isDirty = true;
+          fr._updateButtons?.();
+        }
+        window.dispatchEvent(new Event('modal-dirty'));
+      } catch {}
     });
   }
 
@@ -19451,6 +19508,16 @@ function bindCandidateMainFormEvents(container, model) {
 
         model.job_titles = [...existing, { job_title_id: id }];
         renderJobTitlesList();
+
+        // Mark modal dirty when job title added
+        try {
+          const fr = window.__getModalFrame?.();
+          if (fr && (fr.mode === 'edit' || fr.mode === 'create')) {
+            fr.isDirty = true;
+            fr._updateButtons?.();
+          }
+          window.dispatchEvent(new Event('modal-dirty'));
+        } catch {}
       });
     });
   }
@@ -19474,11 +19541,20 @@ function bindCandidateMainFormEvents(container, model) {
           const el = q(`input[name="${k}"]`);
           if (el) el.value = model[k] || '';
         });
+
+        // Mark modal dirty when address is applied from lookup
+        try {
+          const fr = window.__getModalFrame?.();
+          if (fr && (fr.mode === 'edit' || fr.mode === 'create')) {
+            fr.isDirty = true;
+            fr._updateButtons?.();
+          }
+          window.dispatchEvent(new Event('modal-dirty'));
+        } catch {}
       });
     });
   }
 }
-
 
 
 // =============== NEW: apiPostcodeLookup (frontend → backend) ===========
