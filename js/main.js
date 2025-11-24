@@ -16780,7 +16780,7 @@ if (this._loadOnly === true) return;
     if (p && typeof p.then === 'function') { await p; }
   }
 
-   if (this.entity==='candidates' && k==='main') {
+    if (this.entity==='candidates' && k==='main') {
     const pmSel = document.querySelector('#pay-method');
     if (pmSel) {
       const stagedPm   = window.modalCtx?.formState?.main?.pay_method;
@@ -16808,19 +16808,35 @@ if (this._loadOnly === true) return;
       })();
     }
 
-    // NEW: wire candidate main model + Job Title + NI/DOB/Gender + Address + Postcode lookup
+    // ✅ Reuse existing candidateMainModel if present, so child modals don't lose changes
     try {
       const container = document.getElementById('tab-main');
-      if (container && typeof buildCandidateMainDetailsModel === 'function' && typeof bindCandidateMainFormEvents === 'function') {
-        const model = buildCandidateMainDetailsModel(window.modalCtx?.data || {});
-        window.modalCtx.candidateMainModel = model;
+      if (container &&
+          typeof buildCandidateMainDetailsModel === 'function' &&
+          typeof bindCandidateMainFormEvents === 'function') {
+
+        let model = window.modalCtx?.candidateMainModel;
+        if (!model || typeof model !== 'object') {
+          // First time we hit the main tab: build from DB row
+          model = buildCandidateMainDetailsModel(window.modalCtx?.data || {});
+          window.modalCtx.candidateMainModel = model;
+          L('setTab(candidates/main): created candidate main model', {
+            keys: Object.keys(model || {})
+          });
+        } else {
+          L('setTab(candidates/main): reusing candidate main model', {
+            keys: Object.keys(model || {})
+          });
+        }
+
+        // (Re)bind DOM to the model – inputs and job titles list will reflect current model values
         bindCandidateMainFormEvents(container, model);
-        L('setTab(candidates/main): bound candidate main model', { keys: Object.keys(model||{}) });
       }
     } catch (e) {
       console.error('[MODAL] bindCandidateMainFormEvents failed', e);
     }
   }
+
   if (this.entity === 'umbrellas' && k === 'main') {
     try {
       const container = document.getElementById('tab-main');
@@ -19365,7 +19381,6 @@ function openJobTitleSettingsModal() {
 // =============== NEW: Job Titles Settings modal (side panel) ===========
 
 
-
 function openJobTitlePickerModal(initialJobTitleId, onSelect) {
   const C = window.__jobTitlesCache || {};
   const roots = C.roots || [];
@@ -19397,9 +19412,7 @@ function openJobTitlePickerModal(initialJobTitleId, onSelect) {
         const hasChildren = Array.isArray(n.children) && n.children.length > 0;
         const isCollapsed = !!collapsedById[n.id];
 
-        const labels = buildJobTitlePathLabels(n.id);
-        const pathLabel = labels.length ? labels[labels.length - 1] : (n.label || '');
-        const parentPath = labels.slice(0, -1).join(' > ');
+        const label = n.label || '';
         const regBadge =
           isRole && n.requires_prof_reg
             ? `<span class="pill mini" style="margin-left:4px">${n.prof_reg_type || 'Reg'}</span>`
@@ -19419,12 +19432,7 @@ function openJobTitlePickerModal(initialJobTitleId, onSelect) {
                style="padding:4px 8px;margin-left:${pad}px;cursor:pointer;display:flex;justify-content:space-between;align-items:center;border-radius:6px;">
             <div>
               ${toggleHtml}
-              <strong>${escapeHtml(pathLabel || '')}</strong>
-              ${
-                parentPath
-                  ? `<span class="mini" style="margin-left:6px;opacity:.8">${escapeHtml(parentPath)}</span>`
-                  : ''
-              }
+              <strong>${escapeHtml(label)}</strong>
               <span class="mini" style="margin-left:6px;opacity:.7">${kind}</span>
             </div>
             <div>${regBadge}</div>
