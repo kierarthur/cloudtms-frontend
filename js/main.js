@@ -18906,24 +18906,26 @@ function openJobTitleSettingsModal() {
     const pad = level * 16;
     return nodes
       .map((n) => {
-        const isSelected = S.selectedId === n.id || (!S.selectedId && S.editing && S.editing.id === n.id);
+        const isSelected =
+          S.selectedId === n.id || (!S.selectedId && S.editing && S.editing.id === n.id);
         const kindLabel = n.is_role ? 'Role' : 'Group';
         const regBadge =
           n.is_role && n.requires_prof_reg
             ? `<span class="pill mini" style="margin-left:4px">${n.prof_reg_type || 'Reg'}</span>`
             : '';
-        const inactiveTag = n.active === false
-          ? `<span class="mini" style="margin-left:4px;opacity:.7">(inactive)</span>`
-          : '';
+        const inactiveTag =
+          n.active === false
+            ? `<span class="mini" style="margin-left:4px;opacity:.7">(inactive)</span>`
+            : '';
 
         const hasChildren = Array.isArray(n.children) && n.children.length > 0;
         const isCollapsed = !!S.collapsed[n.id];
 
-        const toggleHtml = hasChildren && level === 0
+        const toggleHtml = hasChildren
           ? `<button type="button" data-act="toggle" data-id="${n.id}" style="margin-right:4px;width:20px">${isCollapsed ? '+' : '−'}</button>`
           : `<span style="display:inline-block;width:20px"></span>`;
 
-        const childrenHtml = (!isCollapsed ? renderTree(n.children || [], level + 1) : '');
+        const childrenHtml = !isCollapsed ? renderTree(n.children || [], level + 1) : '';
 
         return `
           <div class="jt-node${isSelected ? ' jt-node-active' : ''}" data-id="${n.id}"
@@ -19148,6 +19150,21 @@ function openJobTitleSettingsModal() {
       S.items = cache.items;
       S.byId = cache.byId;
       S.roots = cache.roots;
+
+      // Seed collapsed state: collapse all non-role nodes that have children
+      S.collapsed = {};
+      const seedCollapsed = (nodes) => {
+        if (!Array.isArray(nodes)) return;
+        for (const n of nodes) {
+          if (!n) continue;
+          if (!n.is_role && Array.isArray(n.children) && n.children.length > 0) {
+            S.collapsed[n.id] = true;
+            seedCollapsed(n.children);
+          }
+        }
+      };
+      seedCollapsed(S.roots);
+
       // If nothing is selected, pick the first root if any
       if (!S.selectedId && S.roots.length) {
         S.selectedId = S.roots[0].id;
@@ -19342,8 +19359,13 @@ function openJobTitleSettingsModal() {
   refreshFromCache().catch((e) => console.error('[JOB_TITLES] initial refresh failed', e));
 }
 
+
+
 // =============== NEW: Job Titles Settings modal (side panel) ===========
 // =============== NEW: Job Titles Settings modal (side panel) ===========
+
+
+
 function openJobTitlePickerModal(initialJobTitleId, onSelect) {
   const C = window.__jobTitlesCache || {};
   const roots = C.roots || [];
@@ -19375,7 +19397,9 @@ function openJobTitlePickerModal(initialJobTitleId, onSelect) {
         const hasChildren = Array.isArray(n.children) && n.children.length > 0;
         const isCollapsed = !!collapsedById[n.id];
 
-        const path = buildJobTitlePathLabels(n.id).join(' > ');
+        const labels = buildJobTitlePathLabels(n.id);
+        const pathLabel = labels.length ? labels[labels.length - 1] : (n.label || '');
+        const parentPath = labels.slice(0, -1).join(' > ');
         const regBadge =
           isRole && n.requires_prof_reg
             ? `<span class="pill mini" style="margin-left:4px">${n.prof_reg_type || 'Reg'}</span>`
@@ -19395,8 +19419,12 @@ function openJobTitlePickerModal(initialJobTitleId, onSelect) {
                style="padding:4px 8px;margin-left:${pad}px;cursor:pointer;display:flex;justify-content:space-between;align-items:center;border-radius:6px;">
             <div>
               ${toggleHtml}
-              <strong>${escapeHtml(n.label || '')}</strong>
-              <span class="mini" style="margin-left:6px;opacity:.8">${escapeHtml(path)}</span>
+              <strong>${escapeHtml(pathLabel || '')}</strong>
+              ${
+                parentPath
+                  ? `<span class="mini" style="margin-left:6px;opacity:.8">${escapeHtml(parentPath)}</span>`
+                  : ''
+              }
               <span class="mini" style="margin-left:6px;opacity:.7">${kind}</span>
             </div>
             <div>${regBadge}</div>
@@ -19536,6 +19564,7 @@ function openJobTitlePickerModal(initialJobTitleId, onSelect) {
   // Wire events on initial open
   wireEvents();
 }
+
 
 
 // =============== NEW: Candidate Job Title picker =======================
@@ -19935,13 +19964,14 @@ function openAddressLookupModal(initialAddress, onSave) {
       return el ? el.value.trim() : '';
     };
 
+    // For lookup purposes, postcode comes only from the lookup_postcode field
     S.postcode = getVal('lookup_postcode') || S.postcode;
     S.house = getVal('lookup_house') || S.house;
     S.line1 = getVal('addr_line1') || S.line1;
     S.line2 = getVal('addr_line2') || S.line2;
     S.line3 = getVal('addr_line3') || S.line3;
     S.city = getVal('addr_city') || S.city;
-    S.postcode = getVal('addr_postcode') || S.postcode;
+    // Do NOT overwrite S.postcode from addr_postcode here (Option A)
   };
 
   const onOpen = () => {
