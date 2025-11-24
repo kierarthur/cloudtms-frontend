@@ -10745,6 +10745,7 @@ async function openCandidate(row) {
       } catch (e) {
         W('post-save rates refresh failed', e);
       }
+
       const mergedRoles = (saved && saved.roles) || payload.roles || window.modalCtx.data?.roles || [];
 
       // Build a fresh job_titles array for modalCtx.data, based on the staged model
@@ -10773,7 +10774,7 @@ async function openCandidate(row) {
         roles: mergedRoles,
         job_titles: jobTitlesForCtx
       };
-      window.modalCtx.formState  = { __forId: candidateId, main: {}, pay: {} };
+      window.modalCtx.formState  = { __ForId: candidateId, main: {}, pay: {} };
       window.modalCtx.rolesState = mergedRoles;
 
       L('[onSave] final window.modalCtx', {
@@ -10823,7 +10824,6 @@ async function openCandidate(row) {
     L('skip companion loads (no full.id)');
   }
 }
-
 
 
 function renderCandidateTab(key, row = {}) {
@@ -18862,6 +18862,486 @@ async function apiDeleteJobTitle(id) {
   return data;
 }
 
+function openJobTitleSettingsModal() {
+  const S = {
+    loading: false,
+    error: '',
+    items: [],
+    byId: {},
+    roots: [],
+    selectedId: null,
+    editing: null, // { id|null, parent_id|null, label, is_role, requires_prof_reg, prof_reg_type, active, isNew }
+    collapsed: {}  // { [id]: true } for collapsed nodes
+  };
+
+  const profTypes = ['NMC', 'GMC', 'HCPC'];
+
+  const makeEditingFromNode = (node) => {
+    if (!node) return null;
+    return {
+      id: node.id,
+      parent_id: node.parent_id || null,
+      label: node.label || '',
+      is_role: !!node.is_role,
+      requires_prof_reg: !!node.requires_prof_reg,
+      prof_reg_type: node.prof_reg_type || '',
+      active: node.active !== false,
+      isNew: false
+    };
+  };
+
+  const makeEditingNew = (parentId) => ({
+    id: null,
+    parent_id: parentId || null,
+    label: '',
+    is_role: false, // default to Group/Category
+    requires_prof_reg: false,
+    prof_reg_type: '',
+    active: true,
+    isNew: true
+  });
+
+  const renderTree = (nodes, level) => {
+    if (!nodes || !nodes.length) return '';
+    const pad = level * 16;
+    return nodes
+      .map((n) => {
+        const isSelected = S.selectedId === n.id || (!S.selectedId && S.editing && S.editing.id === n.id);
+        const kindLabel = n.is_role ? 'Role' : 'Group';
+        const regBadge =
+          n.is_role && n.requires_prof_reg
+            ? `<span class="pill mini" style="margin-left:4px">${n.prof_reg_type || 'Reg'}</span>`
+            : '';
+        const inactiveTag = n.active === false
+          ? `<span class="mini" style="margin-left:4px;opacity:.7">(inactive)</span>`
+          : '';
+
+        const hasChildren = Array.isArray(n.children) && n.children.length > 0;
+        const isCollapsed = !!S.collapsed[n.id];
+
+        const toggleHtml = hasChildren && level === 0
+          ? `<button type="button" data-act="toggle" data-id="${n.id}" style="margin-right:4px;width:20px">${isCollapsed ? '+' : '−'}</button>`
+          : `<span style="display:inline-block;width:20px"></span>`;
+
+        const childrenHtml = (!isCollapsed ? renderTree(n.children || [], level + 1) : '');
+
+        return `
+          <div class="jt-node${isSelected ? ' jt-node-active' : ''}" data-id="${n.id}"
+               style="padding:4px 6px 4px ${pad + 6}px;cursor:pointer;border-radius:6px;">
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:6px">
+              <div style="display:flex;align-items:center;gap:4px">
+                ${toggleHtml}
+                <span class="jt-label" style="font-weight:600">${escapeHtml(n.label || '')}</span>
+                <span class="mini" style="margin-left:6px;opacity:.75">${kindLabel}</span>
+                ${regBadge}
+                ${inactiveTag}
+              </div>
+              <div class="mini">
+                <button type="button" data-act="add-child" data-id="${n.id}">+ Child</button>
+              </div>
+            </div>
+          </div>
+          ${childrenHtml}
+        `;
+      })
+      .join('');
+  };
+
+  const renderDetailsPanel = () => {
+    const e = S.editing;
+    if (!e) {
+      return `
+        <div class="hint" style="padding:8px">
+          Select a node on the left, or click <strong>Add family</strong> to create a new top-level group.
+        </div>
+      `;
+    }
+
+    const node = e.id ? S.byId[e.id] : null;
+
+    const hasRoleDescendants = (n) => {
+      if (!n || !Array.isArray(n.children)) return false;
+      const stack = [...n.children];
+      let guard = 0;
+      while (stack.length && guard++ < 1024) {
+        const cur = stack.pop();
+        if (!cur) continue;
+        if (cur.is_role) return true;
+        if (Array.isArray(cur.children) && cur.children.length) {
+          stack.push(...cur.children);
+        }
+      }
+      return false;
+    };
+
+    const depth = node ? (Number(node.depth) || 0) : (e.parent_id ? 1 : 0);
+    const hasRoleDesc = node && hasRoleDescendants(node);
+
+    // Determine title based on type + depth
+    let title;
+    if (e.isNew) {
+      if (!e.parent_id) {
+        title = 'New Family';
+      } else if (!e.is_role) {
+        title = 'New Sub Family';
+      } else {
+        title = 'New Role';
+      }
+    } else {
+      if (e.is_role) {
+        title = 'Edit Job Title';
+      } else if (depth > 0 || e.parent_id) {
+        title = 'Edit Sub Family Name';
+      } else {
+        title = 'Edit Family Name';
+      }
+    }
+
+    // Category Type radios
+    const nodeTypeGroupChecked = !e.is_role ? 'checked' : '';
+    const nodeTypeRoleChecked = e.is_role ? 'checked' : '';
+
+    // Show Role radio?
+    let showRoleRadio = true;
+    if (e.isNew && !e.parent_id) {
+      // Add Family → cannot create a Role at top level
+      showRoleRadio = false;
+    } else if (!e.isNew && !e.is_role && hasRoleDesc) {
+      // Existing Family/Subfamily with descendant Roles → cannot switch to Role
+      showRoleRadio = false;
+    }
+
+    const requiresChecked = !!(e.is_role && e.requires_prof_reg);
+    const regBlockStyle = e.is_role ? '' : 'display:none';
+
+    // Parent path using local state (families > subfamilies)
+    const parentPath = (() => {
+      if (!e.parent_id) return '(top-level family)';
+      const chain = [];
+      let cur = S.byId[e.parent_id];
+      let guard = 0;
+      while (cur && guard++ < 16) {
+        chain.push(cur.label || '');
+        cur = cur.parent_id ? S.byId[cur.parent_id] : null;
+      }
+      return chain.length ? chain.reverse().join(' > ') : '(no parent)';
+    })();
+
+    const regOptions = profTypes
+      .map((t) => `<option value="${t}" ${e.prof_reg_type === t ? 'selected' : ''}>${t}</option>`)
+      .join('');
+
+    const activeChecked = e.active ? 'checked' : '';
+
+    return `
+      <form id="jt_details_form" class="form" autocomplete="off">
+        <div class="row" style="grid-column:1/-1">
+          <div class="mini" style="opacity:.85">${title}</div>
+        </div>
+
+        <div class="row">
+          <label>Label</label>
+          <input type="text" name="label" value="${escapeHtml(e.label || '')}" required />
+        </div>
+
+        <div class="row">
+          <label>Category Type</label>
+          <div class="mini">
+            <label>
+              <input type="radio" name="node_type" value="group" ${nodeTypeGroupChecked} />
+              Group / Category
+            </label><br/>
+            ${
+              showRoleRadio
+                ? `
+            <label>
+              <input type="radio" name="node_type" value="role" ${nodeTypeRoleChecked} />
+              Role (assignable to candidates)
+            </label>`
+                : ''
+            }
+          </div>
+        </div>
+
+        <div class="row">
+          <label>Parent</label>
+          <div class="mini" style="padding:6px 8px;border-radius:8px;background:#020617;border:1px solid var(--line)">
+            ${escapeHtml(parentPath)}
+          </div>
+        </div>
+
+        <div class="row" data-block="reg" style="${regBlockStyle}">
+          <label>
+            <input type="checkbox" name="requires_prof_reg" ${requiresChecked ? 'checked' : ''} />
+            Requires professional registration
+          </label>
+          <select name="prof_reg_type" style="margin-top:6px;${requiresChecked ? '' : 'display:none'}">
+            <option value="">-- Select type --</option>
+            ${regOptions}
+          </select>
+        </div>
+
+        <div class="row">
+          <label>
+            <input type="checkbox" name="active" ${activeChecked} />
+            Active (visible in pickers)
+          </label>
+        </div>
+
+        <div class="row" style="grid-column:1/-1;margin-top:8px;display:flex;gap:8px;justify-content:flex-end">
+          <button type="button" id="jt_btn_delete" ${(e.isNew || (node && Array.isArray(node.children) && node.children.length)) ? 'disabled' : ''}>Delete</button>
+          <button type="button" id="jt_btn_save" class="primary">Save</button>
+        </div>
+      </form>
+    `;
+  };
+
+  const buildBody = () => {
+    if (S.loading) {
+      return html(`
+        <div id="jobTitlesSettingsRoot" style="padding:10px">
+          <div class="hint">Loading job titles…</div>
+        </div>
+      `);
+    }
+
+    const treeHtml = renderTree(S.roots || [], 0);
+
+    return html(`
+      <div id="jobTitlesSettingsRoot" style="display:grid;grid-template-columns:minmax(0,1.4fr) minmax(0,1.8fr);gap:12px;min-height:260px">
+        <div>
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+            <div class="mini">Families / subfamilies / roles</div>
+            <button type="button" id="jt_add_root">+ Add family</button>
+          </div>
+          <div id="jt_tree"
+               style="border:1px solid var(--line);border-radius:10px;max-height:420px;overflow:auto;padding:4px">
+            ${
+              treeHtml ||
+              '<div class="hint" style="padding:8px">No job titles defined yet. Click <strong>Add family</strong> to create your first group.</div>'
+            }
+          </div>
+          ${S.error ? `<div class="error" style="margin-top:8px">${escapeHtml(S.error)}</div>` : ''}
+        </div>
+
+        <div style="border:1px solid var(--line);border-radius:10px;padding:8px;min-height:240px">
+          ${renderDetailsPanel()}
+        </div>
+      </div>
+    `);
+  };
+
+  const repaint = () => {
+    const bodyEl = document.getElementById('modalBody');
+    if (!bodyEl) return;
+    bodyEl.innerHTML = buildBody();
+    wireEvents();
+  };
+
+  const refreshFromCache = async () => {
+    S.loading = true;
+    S.error = '';
+    repaint();
+    try {
+      // Load ALL titles (including inactive) for Settings
+      const cache = await loadJobTitlesTree(true, false);
+      S.items = cache.items;
+      S.byId = cache.byId;
+      S.roots = cache.roots;
+      // If nothing is selected, pick the first root if any
+      if (!S.selectedId && S.roots.length) {
+        S.selectedId = S.roots[0].id;
+      }
+      if (S.selectedId && S.byId[S.selectedId]) {
+        S.editing = makeEditingFromNode(S.byId[S.selectedId]);
+      } else {
+        S.editing = null;
+      }
+    } catch (e) {
+      console.error('[JOB_TITLES] load failed', e);
+      S.error = 'Failed to load job titles';
+    } finally {
+      S.loading = false;
+      repaint();
+    }
+  };
+
+  const wireEvents = () => {
+    const root = document.getElementById('jobTitlesSettingsRoot');
+    if (!root) return;
+
+    const treeBox = root.querySelector('#jt_tree');
+    const addRootBtn = root.querySelector('#jt_add_root');
+    const form = root.querySelector('#jt_details_form');
+    const saveBtn = root.querySelector('#jt_btn_save');
+    const deleteBtn = root.querySelector('#jt_btn_delete');
+
+    if (addRootBtn) {
+      addRootBtn.onclick = () => {
+        S.selectedId = null;
+        S.editing = makeEditingNew(null);
+        repaint();
+      };
+    }
+
+    if (treeBox) {
+      treeBox.onclick = (e) => {
+        const btn = e.target.closest('button[data-act]');
+        if (btn) {
+          const act = btn.getAttribute('data-act');
+          const id = btn.getAttribute('data-id');
+          const node = S.byId[id];
+          if (!node) return;
+
+          if (act === 'add-child') {
+            S.selectedId = null;
+            S.editing = makeEditingNew(node.id);
+            repaint();
+          } else if (act === 'toggle') {
+            S.collapsed[id] = !S.collapsed[id];
+            repaint();
+          }
+          return;
+        }
+
+        const nodeEl = e.target.closest('.jt-node[data-id]');
+        if (!nodeEl) return;
+        const id = nodeEl.getAttribute('data-id');
+        const node = S.byId[id];
+        if (!node) return;
+        S.selectedId = id;
+        S.editing = makeEditingFromNode(node);
+        repaint();
+      };
+    }
+
+    if (form && saveBtn) {
+      saveBtn.onclick = async () => {
+        const v = collectForm('#jt_details_form', false) || {};
+        const label = (v.label || '').trim();
+        if (!label) {
+          alert('Label is required');
+          return;
+        }
+
+        const nodeType = v.node_type === 'role' ? 'role' : 'group';
+        const isRole = nodeType === 'role';
+
+        const requiresProfReg = isRole && v.requires_prof_reg === 'on';
+        const profRegType = requiresProfReg ? (v.prof_reg_type || '').trim().toUpperCase() : null;
+        const active = v.active === 'on';
+
+        if (requiresProfReg && !profRegType) {
+          alert('Please choose a professional registration type (NMC / GMC / HCPC)');
+          return;
+        }
+
+        const isNew = !S.editing || !S.editing.id;
+        const parentId = S.editing ? S.editing.parent_id || null : null;
+
+        try {
+          let node;
+          if (isNew) {
+            node = await apiCreateJobTitle({
+              label,
+              parent_id: parentId,
+              is_role: isRole,
+              requires_prof_reg: requiresProfReg,
+              prof_reg_type: profRegType,
+              active
+            });
+          } else {
+            node = await apiUpdateJobTitle(S.editing.id, {
+              label,
+              is_role: isRole,
+              requires_prof_reg: requiresProfReg,
+              prof_reg_type: profRegType,
+              active
+            });
+          }
+          // Refresh cache & select this node
+          await refreshFromCache();
+          if (node && node.id) {
+            S.selectedId = node.id;
+            S.editing = makeEditingFromNode(node);
+            repaint();
+          }
+        } catch (err) {
+          console.error('job title save failed', err);
+          alert('Failed to save job title');
+        }
+      };
+    }
+
+    if (form && deleteBtn && !deleteBtn.disabled) {
+      deleteBtn.onclick = async () => {
+        if (!S.editing || !S.editing.id) return;
+        const node = S.byId[S.editing.id];
+        if (!node) return;
+
+        if (!window.confirm(`Delete "${node.label}"?`)) return;
+
+        try {
+          const res = await apiDeleteJobTitle(node.id);
+          if (res && res.softDeleted) {
+            alert(
+              'This job title is in use; it has been marked inactive instead of being deleted.'
+            );
+          }
+          await refreshFromCache();
+        } catch (err) {
+          console.error('job title delete failed', err);
+          alert('Failed to delete job title – it may still be in use.');
+        }
+      };
+    }
+
+    // Category Type + registration block behaviour
+    if (form) {
+      const nodeTypeInputs = form.querySelectorAll('input[name="node_type"]');
+      const regBlock = form.querySelector('[data-block="reg"]');
+      const reqCb = form.querySelector('input[name="requires_prof_reg"]');
+      const regSelect = form.querySelector('select[name="prof_reg_type"]');
+
+      nodeTypeInputs.forEach((el) => {
+        el.onchange = () => {
+          const v = collectForm('#jt_details_form', false) || {};
+          const isRole = v.node_type === 'role';
+          if (regBlock) {
+            regBlock.style.display = isRole ? '' : 'none';
+          }
+        };
+      });
+
+      if (reqCb && regSelect) {
+        reqCb.onchange = () => {
+          if (reqCb.checked) {
+            regSelect.style.display = '';
+          } else {
+            regSelect.style.display = 'none';
+            regSelect.value = '';
+          }
+        };
+      }
+    }
+  };
+
+  showModal(
+    'Job Titles',
+    [{ key: 'main', label: 'Job Titles' }],
+    () => buildBody(),
+    async () => ({ ok: true }), // All job title actions are immediate
+    false,
+    async () => {
+      await refreshFromCache();
+    },
+    { kind: 'job-titles', noParentGate: false }
+  );
+
+  // Initial load after modal is mounted
+  refreshFromCache().catch((e) => console.error('[JOB_TITLES] initial refresh failed', e));
+}
+
 // =============== NEW: Job Titles Settings modal (side panel) ===========
 // =============== NEW: Job Titles Settings modal (side panel) ===========
 function openJobTitlePickerModal(initialJobTitleId, onSelect) {
@@ -18872,10 +19352,18 @@ function openJobTitlePickerModal(initialJobTitleId, onSelect) {
   let selectedId = initialJobTitleId || null;
   const collapsedById = {};
 
-  // Initial state: collapse all top-level families (non-role roots)
-  roots.forEach((n) => {
-    if (!n.is_role) collapsedById[n.id] = true;
-  });
+  // Initial state: collapse all non-role nodes that have children
+  const seedCollapsed = (nodes) => {
+    if (!Array.isArray(nodes)) return;
+    for (const n of nodes) {
+      if (!n) continue;
+      if (!n.is_role && Array.isArray(n.children) && n.children.length > 0) {
+        collapsedById[n.id] = true;
+        seedCollapsed(n.children);
+      }
+    }
+  };
+  seedCollapsed(roots);
 
   const renderOptions = (nodes, depth) => {
     if (!nodes || !nodes.length) return '';
@@ -18996,7 +19484,6 @@ function openJobTitlePickerModal(initialJobTitleId, onSelect) {
         const bodyEl = document.getElementById('modalBody');
         if (!bodyEl) return;
         bodyEl.innerHTML = buildBody();
-        // re-wire events for new DOM
         const newRoot = document.getElementById('jobTitlePickerRoot');
         const newTree = newRoot && newRoot.querySelector('#jtPickerTree');
         if (newTree) newTree.__jtWired = false;
@@ -19463,7 +19950,6 @@ function bindCandidateMainFormEvents(container, model) {
     });
   }
 }
-
 
 
 
