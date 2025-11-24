@@ -19025,9 +19025,9 @@ function openJobTitleSettingsModal() {
   };
 
   const repaint = () => {
-    const frame = window.__getModalFrame?.();
-    if (!frame) return;
-    frame._setBody(buildBody());
+    const bodyEl = document.getElementById('modalBody');
+    if (!bodyEl) return;
+    bodyEl.innerHTML = buildBody();
     wireEvents();
   };
 
@@ -19213,7 +19213,11 @@ function openJobTitleSettingsModal() {
     },
     { kind: 'job-titles', noParentGate: false }
   );
+
+  // Initial load after modal is mounted
+  refreshFromCache().catch((e) => console.error('[JOB_TITLES] initial refresh failed', e));
 }
+
 
 // =============== NEW: Candidate Job Title picker =======================
 function openJobTitlePickerModal(initialJobTitleId, onSelect) {
@@ -19310,22 +19314,26 @@ function openJobTitlePickerModal(initialJobTitleId, onSelect) {
     if (!root) return;
 
     const container = root.querySelector('div[style*="border:1px solid var(--line)"]');
-    if (!container) return;
+    if (!container || container.__jtWired) return;
+    container.__jtWired = true;
 
     container.onclick = (e) => {
       const row = e.target.closest('.jt-pick-row[data-id]');
       if (!row) return;
       selectedId = row.getAttribute('data-id') || null;
 
-      // Toggle visual state
-      container.querySelectorAll('.jt-pick-row.active').forEach((n) => n.classList.remove('active'));
-      row.classList.add('active');
-
-      // Re-render right-hand summary only
-      const frame = window.__getModalFrame?.();
-      if (!frame) return;
-      frame._setBody(buildBody());
-      onOpen(); // re-wire the click handler for the new DOM
+      // Re-render full body (left list + right summary) and rewire
+      const bodyEl = document.getElementById('modalBody');
+      if (!bodyEl) return;
+      bodyEl.innerHTML = buildBody();
+      // clear old wiring flags and reattach
+      const newRoot = document.getElementById('jobTitlePickerRoot');
+      if (!newRoot) return;
+      const newContainer = newRoot.querySelector('div[style*="border:1px solid var(--line)"]');
+      if (newContainer) {
+        newContainer.__jtWired = false;
+      }
+      onOpen();
     };
   };
 
@@ -19356,16 +19364,12 @@ function openJobTitlePickerModal(initialJobTitleId, onSelect) {
       return { ok: true };
     },
     false,
-    async () => {
-      try {
-        await loadJobTitlesTree(false);
-      } catch {
-        // ignore
-      }
-      onOpen();
-    },
+    () => {}, // no special onReturn behaviour needed
     { kind: 'job-title-picker', noParentGate: false }
   );
+
+  // Wire events on initial open
+  onOpen();
 }
 
 // =============== NEW: applySelectedJobTitleToCandidate =================
@@ -19411,6 +19415,7 @@ function buildCandidateMainDetailsModel(row) {
 
 // =============== NEW: bindCandidateMainFormEvents ======================
 // =============== NEW: bindCandidateMainFormEvents ======================
+
 function bindCandidateMainFormEvents(container, model) {
   if (!container || !model) return;
 
@@ -19447,6 +19452,11 @@ function bindCandidateMainFormEvents(container, model) {
         model.date_of_birth = v;
       }
     });
+
+    // Hook up the UK date picker overlay if available
+    if (typeof attachUkDatePicker === 'function') {
+      attachUkDatePicker(dobEl);
+    }
   }
 
   // Gender
@@ -19703,6 +19713,25 @@ function openAddressLookupModal(initialAddress, onSave) {
         btn.disabled = true;
         btn.textContent = 'Looking up…';
 
+        const wireResultClicks = () => {
+          const box = root.querySelector('#addrLookupResults');
+          if (!box || box.__wired) return;
+          box.__wired = true;
+          box.addEventListener('click', (e) => {
+            const row = e.target.closest('.addr-row[data-i]');
+            if (!row) return;
+            const idx = +row.getAttribute('data-i');
+            const a = S.results[idx];
+            if (!a) return;
+            S.line1 = a.line1 || '';
+            S.line2 = a.line2 || '';
+            S.line3 = a.line3 || '';
+            S.city = a.city || '';
+            S.postcode = a.postcode || '';
+            syncStateToForm();
+          });
+        };
+
         try {
           const results = await apiPostcodeLookup(S.postcode, S.house);
           S.results = results || [];
@@ -19723,14 +19752,18 @@ function openAddressLookupModal(initialAddress, onSave) {
           btn.disabled = false;
           btn.textContent = 'Lookup';
           renderResults();
-          wireResultClicks();
+          // ensure row clicks wired after rendering
+          const box = root.querySelector('#addrLookupResults');
+          if (box && !box.__wired) {
+            wireResultClicks();
+          }
         }
       });
     }
 
-    const wireResultClicks = () => {
-      const box = root.querySelector('#addrLookupResults');
-      if (!box || box.__wired) return;
+    // Initial result click wiring (in case results are present already)
+    const box = root.querySelector('#addrLookupResults');
+    if (box && !box.__wired) {
       box.__wired = true;
       box.addEventListener('click', (e) => {
         const row = e.target.closest('.addr-row[data-i]');
@@ -19745,9 +19778,7 @@ function openAddressLookupModal(initialAddress, onSave) {
         S.postcode = a.postcode || '';
         syncStateToForm();
       });
-    };
-
-    wireResultClicks();
+    }
   };
 
   showModal(
@@ -19774,6 +19805,9 @@ function openAddressLookupModal(initialAddress, onSave) {
     onOpen,
     { kind: 'address-lookup', noParentGate: false }
   );
+
+  // Wire up button + results on first open
+  onOpen();
 }
 
 // =============== NEW: applyAddress* helpers ============================
