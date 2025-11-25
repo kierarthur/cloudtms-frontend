@@ -6,57 +6,102 @@
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <style>
     :root{
-      --bg:#0f172a; --panel:#111827; --muted:#1f2937; --text:#f8fafc; --sub:#cbd5e1; --brand:#4f46e5;
-      --ok:#16a34a; --warn:#f59e0b; --fail:#ef4444; --line:#334155; --chip:#0ea5e9;
+      --bg:#020617;
+      --panel:#0b1221;
+      --muted:#1f2937;
+      --text:#f8fafc;
+      --sub:#cbd5e1;
+      --brand:#4f46e5;
+      --ok:#16a34a;
+      --warn:#f59e0b;
+      --fail:#ef4444;
+      --line:#334155;
+      --chip:#0ea5e9;
       --hover: rgba(79,70,229,.12);
       --radius:12px;
       --shadow: 0 6px 20px rgba(0,0,0,.25);
     }
+
     *{box-sizing:border-box}
-html,body{height:100%}
+    html,body{height:100%}
 
-body{
-  margin:0;
-  background:linear-gradient(180deg,#0b1221,#0a1020 60%);
-  color:var(--text);
-  font:14px/1.5 system-ui,Segoe UI,Roboto,Helvetica,Arial,"Apple Color Emoji","Segoe UI Emoji";
-  overflow: hidden;        /* 👈 important: page itself doesn’t scroll */
-}
-
-
+    body{
+      margin:0;
+      background:#020617;
+      color:var(--text);
+      font:13px/1.5 system-ui,Segoe UI,Roboto,Helvetica,Arial,"Apple Color Emoji","Segoe UI Emoji";
+      overflow:hidden; /* page itself doesn’t scroll */
+    }
 
     a{color:inherit}
 
-    /* ===== App chrome (old look) ===== */
+    /* ===== App chrome ===== */
     .topbar{
       position:sticky; top:0; z-index:9;
       display:flex; align-items:center; gap:10px;
-      padding:10px 14px;
-      background:rgba(14,18,34,.72);
-      border-bottom:1px solid var(--line);
-      backdrop-filter:saturate(140%) blur(8px);
+      padding:8px 16px;
+      background:rgba(15,23,42,.9);
+      border-bottom:1px solid rgba(148,163,184,.35);
+      backdrop-filter:saturate(150%) blur(10px);
     }
-    .brand{display:flex;align-items:center;gap:10px;margin-right:8px;font-weight:700}
-    /* keep your .row-dot class name, style it like the old .dot */
-    .brand .row-dot{width:10px;height:10px;border-radius:50%;background:var(--brand);box-shadow:0 0 12px var(--brand)}
-    .nav{display:flex;gap:6px;flex-wrap:wrap}
+    .brand{
+      display:flex;align-items:center;gap:10px;
+      margin-right:8px;
+      font-weight:700;
+      font-size:14px;
+      letter-spacing:.02em;
+    }
+    .brand .row-dot{
+      width:10px;height:10px;border-radius:50%;
+      background:var(--brand);
+      box-shadow:0 0 12px var(--brand);
+    }
+
+    .nav{
+      display:flex;
+      gap:6px;
+      flex-wrap:wrap;
+    }
     .nav button{
-      display:flex;align-items:center;gap:8px;
-      border:1px solid var(--line);
-      background:#0b1221;
+      display:flex;
+      align-items:center;
+      gap:8px;
+      border:1px solid rgba(148,163,184,.4);
+      background:rgba(15,23,42,.95);
       color:var(--text);
-      padding:8px 10px;
-      border-radius:10px;
+      padding:6px 10px;
+      border-radius:999px;
       cursor:pointer;
-      transition:.15s;
-      box-shadow: inset 0 -1px 0 rgba(255,255,255,.03);
+      transition:background .12s ease,border-color .12s ease,transform .06s ease;
+      box-shadow:none;
+      font-size:12px;
     }
-    .nav button:hover{ background: var(--hover); }
-    .nav button.active{ outline:2px solid var(--brand); background:rgba(79,70,229,.18); }
+    .nav button:hover{
+      background:rgba(30,64,175,.35);
+      border-color:rgba(129,140,248,.7);
+      transform:translateY(-0.5px);
+    }
+    .nav button.active{
+      outline:none;
+      border-color:#6366f1;
+      background:rgba(79,70,229,.22);
+    }
     .nav .ico{ width:18px; height:18px; opacity:.9 }
 
-    .userbox{ display:flex; align-items:center; gap:10px; margin-left:auto; color:var(--sub) }
-    .userbox .chip{ background:#0a1427; border:1px solid var(--line); padding:4px 8px; border-radius:20px }
+    .userbox{
+      display:flex;
+      align-items:center;
+      gap:10px;
+      margin-left:auto;
+      color:var(--sub);
+      font-size:12px;
+    }
+    .userbox .chip{
+      background:#020617;
+      border:1px solid var(--line);
+      padding:4px 10px;
+      border-radius:20px;
+    }
     .userbox button{
       background:transparent;
       color:var(--sub);
@@ -64,331 +109,587 @@ body{
       padding:6px 10px;
       border-radius:10px;
       cursor:pointer;
+      font-size:12px;
+    }
+    .userbox button:hover{
+      background:var(--hover);
+      color:var(--text);
     }
 
-     .layout{
+    /* ===== Layout ===== */
+    .layout{
       display:grid;
       grid-template-columns:260px 1fr;
-      grid-template-rows: 1fr;           /* single row that fills the height */
+      grid-template-rows: 1fr;
       gap:16px;
-      height: calc(100vh - 58px);        /* fixed to viewport below topbar */
+      height: calc(100vh - 48px);
       min-height: 0;
       padding:16px;
     }
 
-
     .panel{
-      background:linear-gradient(180deg,#0b1221,#0a1326);
-      border:1px solid var(--line);
+      background:radial-gradient(circle at top left,#020617 0,#020617 45%,#020617 100%);
+      border:1px solid rgba(30,64,175,.35);
       border-radius:var(--radius);
-      box-shadow:var(--shadow);
-      min-height: 0; /* allow panel to shrink inside the grid row */
+      box-shadow:0 18px 40px rgba(15,23,42,.75);
+      min-height:0;
     }
 
-    .tools{ padding:12px; position:sticky; top:76px; height:fit-content }
-    .tools h3{ margin:6px 0 10px; font-size:12px; font-weight:600; color:var(--sub); text-transform:uppercase; letter-spacing:.06em }
-    /* old index used a dashed divider here */
-    .tools .group{ border-top:1px dashed var(--line); padding-top:10px; margin-top:8px }
-    .tools button,.tools .btn{
-      width:100%; text-align:left; display:flex; align-items:center; gap:10px;
-      background:#0c152a; border:1px solid var(--line); color:var(--text); padding:8px 10px; border-radius:10px; cursor:pointer; margin:6px 0;
+    .tools{
+      padding:12px;
+      position:sticky;
+      top:72px;
+      height:fit-content;
     }
-    .tools button:hover{ background: var(--hover) }
-    .tools .note{ font-size:12px; color:var(--sub) }
+    .tools h3{
+      margin:4px 0 8px;
+      font-size:11px;
+      font-weight:600;
+      color:var(--sub);
+      text-transform:uppercase;
+      letter-spacing:.12em;
+    }
+    .tools .group{
+      border-top:1px dashed var(--line);
+      padding-top:10px;
+      margin-top:8px;
+    }
+    .tools button,
+    .tools .btn{
+      width:100%;
+      text-align:left;
+      display:flex;
+      align-items:center;
+      gap:10px;
+      background:#020617;
+      border:1px solid var(--line);
+      color:var(--text);
+      padding:8px 10px;
+      border-radius:10px;
+      cursor:pointer;
+      margin:6px 0;
+      font-size:12px;
+    }
+    .tools button:hover{
+      background:var(--hover);
+    }
+    .tools .note{
+      font-size:12px;
+      color:#9ca3af;
+    }
 
-    /* ===== Summary table ===== */
+    /* ===== Summary / main panel ===== */
     .main{
       padding:0;
       display:flex;
       flex-direction:column;
-      min-height: 0; /* allow #content to shrink so .summary-body can scroll */
+      min-height:0;
     }
 
-    .toolbar{ display:flex; align-items:center; gap:8px; padding:10px; border-bottom:1px solid var(--line) }
-    .toolbar .title{ font-weight:700 }
+    .toolbar{
+      display:flex;
+      align-items:center;
+      gap:8px;
+      padding:10px 12px;
+      border-bottom:1px solid var(--line);
+    }
+    .toolbar .title{
+      font-weight:600;
+      font-size:15px;
+      letter-spacing:.01em;
+    }
     .spacer{ flex:1 }
-    .toolbar input[type="text"]{ background:#0b1427; border:1px solid var(--line); color:#fff; border-radius:8px; padding:8px 10px; min-width:260px }
-    .toolbar .mini{ font-size:12px; color:var(--sub) }
-
-/* Dark styling for summary toolbar selects (Page size, Status) */
-    .main select{
-      background: #050b16;
-      border: 1px solid rgba(255,255,255,.15);
-      color: #f8fafc;
-      border-radius: 6px;
-      padding: 2px 8px;
-    }    
-    
-/* Content is a flex column; inner summary-body does the scrolling */
-#content{
-  flex: 1;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-  /* IMPORTANT: no overflow here, let .summary-body be the scroll container */
-  /* overflow: hidden;  <-- remove this line */
-}
-
-
-     /* Inner scroll host for summary data rows */
-    .summary-body{
-      flex: 1;
-      min-height: 0;
-      overflow-y: auto;
-      overflow-x: auto; /* horizontal scroll if table is wider than panel */
-
-      /* Firefox scrollbar */
-      scrollbar-width: thin;
-      scrollbar-color: #1e293b #020617; /* thumb, track */
+    .toolbar input[type="text"]{
+      background:#0b1427;
+      border:1px solid var(--line);
+      color:#fff;
+      border-radius:8px;
+      padding:8px 10px;
+      min-width:260px;
+      font-size:12px;
+    }
+    .toolbar input[type="text"]::placeholder{
+      color:#64748b;
+    }
+    .toolbar .mini{
+      font-size:12px;
+      color:var(--sub);
     }
 
-    /* WebKit scrollbar (Chrome, Edge, Safari) */
+    .main select{
+      background:#050b16;
+      border:1px solid rgba(255,255,255,.15);
+      color:#f8fafc;
+      border-radius:6px;
+      padding:2px 8px;
+      font-size:12px;
+    }
+
+    #content{
+      flex:1;
+      min-height:0;
+      display:flex;
+      flex-direction:column;
+    }
+
+    .summary-body{
+      flex:1;
+      min-height:0;
+      overflow-y:auto;
+      overflow-x:auto;
+      scrollbar-width:thin;
+      scrollbar-color:#1e293b #020617;
+    }
     .summary-body::-webkit-scrollbar{
-      width: 8px;
-      height: 8px;
+      width:8px;
+      height:8px;
     }
     .summary-body::-webkit-scrollbar-track{
-      background: #020617; /* near-black track */
+      background:#020617;
     }
     .summary-body::-webkit-scrollbar-thumb{
-      background: #1e293b;  /* slate thumb */
-      border-radius: 999px;
-      border: 1px solid #020617;
+      background:#1e293b;
+      border-radius:999px;
+      border:1px solid #020617;
     }
     .summary-body::-webkit-scrollbar-thumb:hover{
-      background: #334155;  /* slightly brighter on hover */
+      background:#334155;
     }
 
-.grid{
-  border-collapse: separate;   /* was: collapse */
-  border-spacing: 0;           /* keep the same visual look */
-  table-layout: fixed;
-}
-
-.grid th,
-.grid td {
-  padding: 10px 12px;
-  border-bottom: 1px solid var(--line);
-  vertical-align: top;
-}
-
-.grid th {
-  position: sticky;
-  top: 0;
-  z-index: 1;                  /* keep header above scrolling rows */
-  background: #0b1221;
-  border-bottom: 1px solid var(--line);
-  text-align: left;
-}
-
-
-    /* Header row box — only affects summary table headers */
-.grid thead tr {
-  border-top: 1px solid var(--line);
-  border-bottom: 1px solid var(--line);  /* keeps the strong bottom edge */
-}
-
-/* Left/right edges of the header row only */
-.grid thead th:first-child {
-  border-left: 1px solid var(--line);
-}
-.grid thead th:last-child {
-  border-right: 1px solid var(--line);
-}
-.grid thead th + th {
-  border-left: 1px solid var(--line);  
-}
-
-/* Fix width of the selection checkbox column in summary tables */
-.main .grid thead th:first-child,
-.main .grid tbody td:first-child {
-  width: 40px;
-  min-width: 40px;
-  max-width: 40px;
-  text-align: center;
-}
-
-
-    .grid tr:hover{ background:rgba(255,255,255,.02) }
-    .grid tr.active {
-      background: var(--hover);
-      box-shadow: inset 0 0 0 1px rgba(79,70,229,.4);
+    /* ===== Grid / table ===== */
+    .grid{
+      border-collapse:separate;
+      border-spacing:0;
+      table-layout:fixed;
+      width:100%;
     }
-    .pill{ font-size:12px; border:1px solid var(--line); padding:2px 6px; border-radius:999px; background:#0e1a34; color:var(--sub) }
+    .grid th,
+    .grid td{
+      padding:10px 12px;
+      border-bottom:1px solid var(--line);
+      vertical-align:top;
+      font-size:12px;
+    }
+    .grid th{
+      position:sticky;
+      top:0;
+      z-index:1;
+      background:#020617;
+      border-bottom:1px solid var(--line);
+      text-align:left;
+    }
+
+    .grid thead tr{
+      border-top:1px solid var(--line);
+      border-bottom:1px solid var(--line);
+    }
+    .grid thead th:first-child{
+      border-left:1px solid var(--line);
+    }
+    .grid thead th:last-child{
+      border-right:1px solid var(--line);
+    }
+    .grid thead th + th{
+      border-left:1px solid var(--line);
+    }
+
+    .main .grid thead th:first-child,
+    .main .grid tbody td:first-child{
+      width:40px;
+      min-width:40px;
+      max-width:40px;
+      text-align:center;
+    }
+
+    .grid tbody tr:nth-child(2n){
+      background:rgba(15,23,42,.55);
+    }
+    .grid tbody tr:hover{
+      background:rgba(30,64,175,.25);
+    }
+    .grid tr.active{
+      background:var(--hover);
+      box-shadow:inset 0 0 0 1px rgba(79,70,229,.4);
+    }
+
+    .pill{
+      font-size:12px;
+      border:1px solid var(--line);
+      padding:2px 6px;
+      border-radius:999px;
+      background:#0e1a34;
+      color:var(--sub);
+    }
     .tag-ok{   background:rgba(22,163,74,.15);  color:#bbf7d0; border-color:rgba(16,185,129,.35) }
     .tag-warn{ background:rgba(245,158,11,.15); color:#fde68a;  border-color:rgba(251,191,36,.35) }
     .tag-fail{ background:rgba(239,68,68,.15);  color:#fecaca;  border-color:rgba(248,113,113,.35) }
 
-    /* ===== Modal (old feel) ===== */
+    /* ===== Modal ===== */
     .modal-back{
-      position:fixed; inset:0; background:rgba(2,6,23,.6);
-      display:none; align-items:center; justify-content:center; z-index:99;
+      position:fixed;
+      inset:0;
+      background:rgba(2,6,23,.6);
+      display:none;
+      align-items:center;
+      justify-content:center;
+      z-index:99;
     }
     .modal{
-      width: min(1100px, 95vw);
-      max-height: 90vh;
-      display: flex; flex-direction: column;
-      background: #0b1221;
-      border: 1px solid var(--line);
-      border-radius: 14px;
-      box-shadow: var(--shadow);
-      overflow: hidden; /* header/tabs fixed edge */
+      width:min(1100px,95vw);
+      max-height:90vh;
+      display:flex;
+      flex-direction:column;
+      background:radial-gradient(circle at top,#020617 0,#020617 55%,#020617 100%);
+      border:1px solid rgba(148,163,184,.4);
+      border-radius:16px;
+      box-shadow:0 24px 60px rgba(15,23,42,.85);
+      overflow:hidden;
     }
     .modal.dragging{ opacity:.95 }
+
     .modal-h{
-      display:flex; align-items:center; gap:10px;
-      padding:10px; border-bottom:1px solid var(--line);
+      display:flex;
+      align-items:center;
+      gap:10px;
+      padding:10px 14px;
+      border-bottom:1px solid rgba(51,65,85,.9);
       cursor:move;
-      background:linear-gradient(180deg,#0d1427,#0b1221)
+      background:linear-gradient(180deg,#020617,#020617);
     }
-    .modal-h .ttl{ font-weight:700 }
+    .modal-h .ttl{
+      font-weight:600;
+      font-size:15px;
+    }
     .modal-h .spacer{ flex:1 }
-    .modal-h button{ border:1px solid var(--line); background:#0c172d; color:#fff; padding:6px 10px; border-radius:10px }
-    /* old modal made the body the scrollable region, tabs weren’t sticky */
-    .modal-b{ padding:0; overflow:auto }
+    .modal-h button{
+      border:1px solid var(--line);
+      background:#0c172d;
+      color:#fff;
+      padding:6px 10px;
+      border-radius:10px;
+      font-size:12px;
+      cursor:pointer;
+    }
+
+    .modal-b{
+      padding:0;
+      overflow:auto;
+    }
+
     .tabs{
-      display:flex; gap:6px;
+      display:flex;
+      gap:6px;
       border-bottom:1px solid var(--line);
-      padding:8px;
-      /* remove the new sticky behavior to match old visual flow */
-      position: static; top:auto; z-index:auto; background:transparent;
+      padding:6px 10px;
+      position:static;
+      top:auto;
+      z-index:auto;
+      background:transparent;
     }
     .tabs button{
-      background:#0c172d; border:1px solid var(--line); border-bottom:none;
-      padding:8px 10px; border-top-left-radius:10px; border-top-right-radius:10px;
-      color:var(--sub); cursor:pointer;
+      background:#020617;
+      border:1px solid transparent;
+      border-bottom:none;
+      padding:6px 10px;
+      border-top-left-radius:999px;
+      border-top-right-radius:999px;
+      color:var(--sub);
+      cursor:pointer;
+      font-size:12px;
     }
-    .tabs button.active{ background:rgba(79,70,229,.18); color:var(--text); outline:2px solid var(--brand) }
+    .tabs button.active{
+      background:#0b1221;
+      color:var(--text);
+      border-color:rgba(79,70,229,.7);
+      box-shadow:0 -1px 0 #0b1221;
+    }
+
     .tabc{ padding:14px }
 
-      /* Global form fields — restored to the “old, black input” feel everywhere */
-    .form{ display:grid; grid-template-columns:repeat(2,minmax(220px,1fr)); gap:10px }
-    .form .row{ display:flex; flex-direction:column; gap:6px }
-    .form input, .form select, .form textarea{
-      background:#000;                  /* black inputs */
-      border:1px solid var(--line);
-      color:var(--text);
-      border-radius:8px;
-      padding:8px 10px;
-      width:100%;
+    /* Forms in modal */
+    .form{
+      display:grid;
+      grid-template-columns:repeat(2,minmax(240px,1fr));
+      column-gap:18px;
+      row-gap:8px;
     }
-    .form textarea{ min-height:90px }
-
-    /* Dark inputs for any modal field using class="input" (e.g. Preset Rates search) */
-    #modal .input {
+    .form .row{
+      display:flex;
+      flex-direction:column;
+      gap:4px;
+    }
+    .form .row label{
+      font-size:12px;
+      color:#e5e7eb;
+    }
+    .form input,
+    .form select,
+    .form textarea{
       background:#000;
       border:1px solid var(--line);
       color:var(--text);
       border-radius:8px;
       padding:8px 10px;
       width:100%;
+      font-size:12px;
     }
-    #modal .input::placeholder {
+    .form textarea{
+      min-height:90px;
+    }
+
+    #modal .input{
+      background:#000;
+      border:1px solid var(--line);
+      color:var(--text);
+      border-radius:8px;
+      padding:8px 10px;
+      width:100%;
+      font-size:12px;
+    }
+    #modal .input::placeholder{
       color:var(--sub);
       opacity:.75;
     }
 
-    /* ===== Button row ===== */
+    /* ===== Modal footer buttons ===== */
     .actions{
-      padding:10px; border-top:1px solid var(--line);
-      display:flex; gap:10px; justify-content:flex-end; background:#0c172d;
+      padding:10px;
+      border-top:1px solid var(--line);
+      display:flex;
+      gap:10px;
+      justify-content:flex-end;
+      background:#0c172d;
     }
-
-    .actions button{ border:1px solid var(--line); background:#0b152a; color:#fff; padding:8px 12px; border-radius:10px; cursor:pointer }
-    .actions .primary{ background:linear-gradient(180deg,#5146e5,#4038cc); border-color:#3730a3 }
-    .hint{ color:#cbd5e1; font-size:12px }
-/* Small dark buttons used in Advanced Search header */
-    .adv-btn{
+    .actions button{
       border:1px solid var(--line);
       background:#0b152a;
-      color:var(--sub);
-      padding:4px 8px;           /* roughly half-height of normal actions */
-      border-radius:8px;
+      color:#fff;
+      padding:8px 12px;
+      border-radius:10px;
       cursor:pointer;
       font-size:12px;
+    }
+    .actions .primary{
+      background:linear-gradient(180deg,#5146e5,#4038cc);
+      border-color:#3730a3;
+    }
+    .hint{
+      color:#cbd5e1;
+      font-size:12px;
+    }
+
+    /* Small dark buttons used in Advanced Search header */
+    #modal .adv-btn{
+      border:1px solid rgba(148,163,184,.45);
+      background:#020617;
+      color:#e5e7eb;
+      padding:4px 10px;
+      border-radius:999px;
+      cursor:pointer;
+      font-size:11px;
       line-height:1.2;
       white-space:nowrap;
     }
-    .adv-btn:hover{
-      background:var(--hover);
-      color:var(--text);
+    #modal .adv-btn:hover{
+      background:rgba(79,70,229,.25);
+      border-color:#6366f1;
+      color:#f9fafb;
     }
-    /* Disabled state (unchanged) */
+
     .actions button:disabled,
-    .actions button.disabled {
-      opacity: .45;
-      cursor: not-allowed !important;
-      filter: saturate(0.6) brightness(0.9);
-      pointer-events: none;
+    .actions button.disabled{
+      opacity:.45;
+      cursor:not-allowed !important;
+      filter:saturate(0.6) brightness(0.9);
+      pointer-events:none;
     }
     .actions .primary:disabled,
     .actions .primary.disabled{
-      background: #2d2a66;
-      border-color: #252258;
+      background:#2d2a66;
+      border-color:#252258;
     }
 
-    /* ===== Calendar (old palette) ===== */
-    .calendar{ display:grid; grid-template-columns:repeat(4,1fr); gap:10px }
-    .month{ border:1px solid var(--line); border-radius:10px; overflow:hidden }
-    .month h4{ margin:0; padding:8px 10px; background:#0c172d; display:block; border-bottom:1px solid var(--line) }
-    .days{ display:grid; grid-template-columns:repeat(7,1fr) }
-    .days .d{ padding:6px; border-right:1px solid var(--line); border-bottom:1px solid var(--line); min-height:32px }
-    .days.days-large .d{ min-height:46px; padding:8px }
-    /* legacy marks retained */
+    /* ===== Calendar ===== */
+    .calendar{
+      display:grid;
+      grid-template-columns:repeat(4,1fr);
+      gap:10px;
+    }
+    .month{
+      border:1px solid var(--line);
+      border-radius:10px;
+      overflow:hidden;
+    }
+    .month h4{
+      margin:0;
+      padding:8px 10px;
+      background:#0c172d;
+      display:block;
+      border-bottom:1px solid var(--line);
+      font-size:12px;
+      font-weight:500;
+    }
+    .days{
+      display:grid;
+      grid-template-columns:repeat(7,1fr);
+    }
+    .days .d{
+      padding:6px;
+      border-right:1px solid var(--line);
+      border-bottom:1px solid var(--line);
+      min-height:32px;
+    }
+    .days.days-large .d{
+      min-height:46px;
+      padding:8px;
+    }
     .d.mark-a{ background:rgba(245,158,11,.2) }
     .d.mark-i{ background:rgba(59,130,246,.2) }
     .d.mark-p{ background:rgba(34,197,94,.25) }
-    /* state classes */
+
     .cal-planned   { background: rgba(59,130,246,.18); }
     .cal-submitted { background: rgba(147,51,234,.22); }
     .cal-authorised{ background: rgba(34,197,94,.22); }
     .cal-invoiced  { background: rgba(245,158,11,.22); }
     .cal-paid      { background: rgba(20,184,166,.24); }
 
-    /* “Other contract only” days in the CONTRACT calendar */
-    .days .d.occupied-other {
-      background: rgba(148,163,184,.22) !important; /* slate-300 tint */
-      filter: saturate(0.6) brightness(0.98);
+    .days .d.occupied-other{
+      background:rgba(148,163,184,.22) !important;
+      filter:saturate(0.6) brightness(0.98);
     }
 
-    .d.selected{ outline:2px solid var(--brand); outline-offset:-2px; box-shadow: inset 0 0 0 1px rgba(255,255,255,.06) }
-    .d .ico{ display:flex; align-items:center; justify-content:space-between }
-    .d .ico .dow{ font-size:10px; letter-spacing:.02em; opacity:.8 }
-    .d .ico .num{ font-weight:700; font-size:12px }
+    .d.selected{
+      outline:2px solid var(--brand);
+      outline-offset:-2px;
+      box-shadow:inset 0 0 0 1px rgba(255,255,255,.06);
+    }
+    .d .ico{
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+    }
+    .d .ico .dow{
+      font-size:10px;
+      letter-spacing:.02em;
+      opacity:.8;
+    }
+    .d .ico .num{
+      font-weight:700;
+      font-size:12px;
+    }
     .days.days-large .ico .num{ font-size:16px }
     .days.days-large .ico .dow{ font-size:11px }
-    .legend{ display:flex; gap:8px; margin-top:8px }
-    .legend .lg{ display:flex; align-items:center; gap:6px }
-    .sq{ width:10px; height:10px; border-radius:2px }
-    .sq.a{ background:rgba(245,158,11,.7) } .sq.i{ background:rgba(59,130,246,.7) } .sq.p{ background:rgba(34,197,94,.7) }
 
-    /* ===== Auth overlays (old card tone) ===== */
-    .auth-overlay{position:fixed;inset:0;display:none;place-items:center;background:radial-gradient(800px 400px at 20% 0%,rgba(79,70,229,.2),transparent),rgba(2,6,23,.8);z-index:100}
-    .auth-card{width:min(520px,92vw);padding:16px;border-radius:16px;border:1px solid var(--line);background:linear-gradient(180deg,#0e1428,#0b1221);box-shadow:var(--shadow);color:#fff}
-    .auth-h{display:flex;align-items:center;gap:10px;margin:8px 0 10px}
-    .auth-h .ttl{font-weight:800;font-size:18px}
-    .auth-f .row{display:flex;flex-direction:column;gap:6px;margin:8px 0}
-    .auth-f label{font-size:12px;color:var(--sub)}
-    .auth-f input{background:#000;border:1px solid var(--line);color:#fff;padding:10px;border-radius:8px} /* black inputs */
-    .auth-f .actions{display:flex;justify-content:space-between;align-items:center;border-top:none;background:transparent;padding:8px 0}
-    .link{color:#93c5fd;cursor:pointer}
-    .error{color:#fecaca;background:rgba(239,68,68,.1);border:1px solid rgba(248,113,113,.35);padding:8px;border-radius:8px}
-    .success{color:#bbf7d0;background:rgba(16,185,129,.12);border:1px solid rgba(16,185,129,.3);padding:8px;border-radius:8px}
-    .split{display:flex;gap:10px}
-    .eye{cursor:pointer;font-size:12px;color:var(--sub)}
-    /* Date-picker portal visibility fix */
-    .uk-datepicker-portal { color: #111827; }
-    .uk-datepicker-portal .cal-head a {
-      color: #111827;
-      text-decoration: none;
-      cursor: pointer;
-      line-height: 1;
-      font-size: 16px;
+    .legend{
+      display:flex;
+      gap:8px;
+      margin-top:8px;
+    }
+    .legend .lg{
+      display:flex;
+      align-items:center;
+      gap:6px;
+      font-size:11px;
+      color:#e5e7eb;
+    }
+    .sq{ width:10px; height:10px; border-radius:2px }
+    .sq.a{ background:rgba(245,158,11,.7) }
+    .sq.i{ background:rgba(59,130,246,.7) }
+    .sq.p{ background:rgba(34,197,94,.7) }
+
+    /* ===== Auth overlays ===== */
+    .auth-overlay{
+      position:fixed;
+      inset:0;
+      display:none;
+      place-items:center;
+      background:radial-gradient(800px 400px at 20% 0%,rgba(79,70,229,.2),transparent),rgba(2,6,23,.8);
+      z-index:100;
+    }
+    .auth-card{
+      width:min(520px,92vw);
+      padding:16px;
+      border-radius:16px;
+      border:1px solid var(--line);
+      background:linear-gradient(180deg,#0e1428,#0b1221);
+      box-shadow:var(--shadow);
+      color:#fff;
+    }
+    .auth-h{
+      display:flex;
+      align-items:center;
+      gap:10px;
+      margin:8px 0 10px;
+    }
+    .auth-h .ttl{
+      font-weight:800;
+      font-size:18px;
+    }
+    .auth-f .row{
+      display:flex;
+      flex-direction:column;
+      gap:6px;
+      margin:8px 0;
+    }
+    .auth-f label{
+      font-size:12px;
+      color:var(--sub);
+    }
+    .auth-f input{
+      background:#000;
+      border:1px solid var(--line);
+      color:#fff;
+      padding:10px;
+      border-radius:8px;
+      font-size:13px;
+    }
+    .auth-f .actions{
+      display:flex;
+      justify-content:space-between;
+      align-items:center;
+      border-top:none;
+      background:transparent;
+      padding:8px 0;
+    }
+    .link{
+      color:#93c5fd;
+      cursor:pointer;
+      font-size:12px;
+    }
+    .error{
+      color:#fecaca;
+      background:rgba(239,68,68,.1);
+      border:1px solid rgba(248,113,113,.35);
+      padding:8px;
+      border-radius:8px;
+      font-size:12px;
+    }
+    .success{
+      color:#bbf7d0;
+      background:rgba(16,185,129,.12);
+      border:1px solid rgba(16,185,129,.3);
+      padding:8px;
+      border-radius:8px;
+      font-size:12px;
+    }
+    .split{ display:flex; gap:10px }
+    .eye{
+      cursor:pointer;
+      font-size:12px;
+      color:var(--sub);
+      white-space:nowrap;
     }
 
-    /* ─────────────────────────────────────────────────────────────
-       Contracts helpers & overrides (old behavior)
-       ───────────────────────────────────────────────────────────── */
+    .uk-datepicker-portal { color:#111827; }
+    .uk-datepicker-portal .cal-head a{
+      color:#111827;
+      text-decoration:none;
+      cursor:pointer;
+      line-height:1;
+      font-size:16px;
+    }
+
+    /* Contracts helpers */
     .tabc .card{
       background:#0c172d;
       border:1px solid var(--line);
@@ -404,7 +705,7 @@ body{
     #modal.contract-modal .form input,
     #modal.contract-modal .form select,
     #modal.contract-modal .form textarea{
-      background:#000;  /* hard black in Contracts modal, as before */
+      background:#000;
       color:var(--text);
       border:1px solid var(--line);
     }
@@ -421,6 +722,7 @@ body{
       padding:6px 10px;
       border-radius:10px;
       cursor:pointer;
+      font-size:12px;
     }
     #modal.contract-modal .btn.mini,
     #modal.contract-modal .tabc .btn.mini{
