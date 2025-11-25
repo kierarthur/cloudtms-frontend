@@ -8306,17 +8306,67 @@ function buildSearchQS(section, filters = {}) {
         roles_any,
         active,
         created_from,
-        created_to
-      } = filters;
+        created_to,
+
+        // new filters
+        primary_job_title_contains,
+        job_title_contains,
+        prof_reg_number,
+        prof_reg_type,
+        dob_from,
+        dob_to,
+        gender,
+        town_city,
+        postcode,
+        updated_from,
+        updated_to,
+        sort_code,
+        account_number,
+        umbrella_name,
+        tms_ref
+      } = filters || {};
+
       add('first_name', first_name);
       add('last_name', last_name);
       add('email', email);
       add('phone', phone);
-      add('pay_method', pay_method);
+      add('pay_method', pay_method); // PAYE / UMBRELLA / BLANK
+
+      // Care Package Roles (rota roles)
+      addArr('roles_any', roles_any);
+
       if (typeof active === 'boolean') add('active', active);
+
       add('created_from', created_from);
       add('created_to', created_to);
-      addArr('roles_any', roles_any);
+
+      // Primary vs all job titles
+      add('primary_job_title_contains', primary_job_title_contains);
+      add('job_title_contains', job_title_contains);
+
+      // Professional registration
+      add('prof_reg_number', prof_reg_number);
+      add('prof_reg_type', prof_reg_type);
+
+      // DOB range
+      add('dob_from', dob_from);
+      add('dob_to', dob_to);
+
+      // Demographics
+      add('gender', gender);
+      add('town_city', town_city);
+      add('postcode', postcode);
+
+      // Updated_at range
+      add('updated_from', updated_from);
+      add('updated_to', updated_to);
+
+      // Banking / umbrella / ref
+      add('sort_code', sort_code);
+      add('account_number', account_number);
+      add('umbrella_name', umbrella_name);
+      add('tms_ref', tms_ref);
+
       break;
     }
 
@@ -8329,7 +8379,7 @@ function buildSearchQS(section, filters = {}) {
         vat_chargeable,
         created_from,
         created_to
-      } = filters;
+      } = filters || {};
       if (name) add('q', name);
       add('cli_ref', cli_ref);
       add('primary_invoice_email', primary_invoice_email);
@@ -8350,7 +8400,7 @@ function buildSearchQS(section, filters = {}) {
         enabled,
         created_from,
         created_to
-      } = filters;
+      } = filters || {};
       if (name) add('q', name);
       add('bank_name', bank_name);
       add('sort_code', sort_code);
@@ -8374,7 +8424,7 @@ function buildSearchQS(section, filters = {}) {
         status,
         created_from,
         created_to
-      } = filters;
+      } = filters || {};
       add('booking_id', booking_id);
       add('occupant_key_norm', occupant_key_norm);
       add('hospital_norm', hospital_norm);
@@ -8399,7 +8449,7 @@ function buildSearchQS(section, filters = {}) {
         due_to,
         created_from,
         created_to
-      } = filters;
+      } = filters || {};
       add('invoice_no', invoice_no);
       add('client_id', client_id);
       addArr('status', status);
@@ -8429,7 +8479,7 @@ function buildSearchQS(section, filters = {}) {
         created_from,
         created_to,
         status
-      } = filters;
+      } = filters || {};
 
       add('q', qText);
       add('candidate_id', candidate_id);
@@ -8470,6 +8520,7 @@ function buildSearchQS(section, filters = {}) {
 
   return qs.toString();
 }
+
 
 
 // -----------------------------
@@ -8873,17 +8924,6 @@ async function loadSelectionPreset(section, idOrName) {
   document.head.appendChild(s);
 })();
 
-
-// === REPLACE: openSearchModal (icons only, legacy forced hidden, robust wiring) ===
-// === REPLACE: openSearchModal (compact text buttons + robust delegated wiring) ===
-// FRONTEND — UPDATED
-// openSearchModal: compact text buttons + delegated wiring + listens for preset-apply event
-// and re-applies filters AFTER parent repaint (onReturn hook).
-// ======================================
-// FRONTEND — openSearchModal (UPDATED)
-// Branches: if there's a selection in the summary → go straight to Save Selection.
-// Otherwise, open the Advanced Search (filters) modal as usual.
-// ======================================
 async function openSearchModal(opts = {}) {
   const TIMESHEET_STATUS = ['ERROR','RECEIVED','REVOKED','STORED','SAT','SUN','BH'];
   const INVOICE_STATUS   = ['DRAFT','ISSUED','ON_HOLD','PAID'];
@@ -8916,20 +8956,69 @@ async function openSearchModal(opts = {}) {
   if (currentSection === 'candidates') {
     let roleOptions = [];
     try { roleOptions = await loadGlobalRoleOptions(); } catch { roleOptions = []; }
+
     inner = [
+      // Basic identity / contact
       row('First name',           inputText('first_name')),
       row('Last name',            inputText('last_name')),
       row('Email',                `<input class="input" type="email" name="email" placeholder="name@domain" />`),
       row('Telephone',            inputText('phone')),
-      row('Pay method', `
+
+      // Pay type (including blank)
+      row('Pay type', `
         <select name="pay_method">
           <option value="">Any</option>
           <option value="PAYE">PAYE</option>
           <option value="UMBRELLA">UMBRELLA</option>
+          <option value="BLANK">Blank</option>
         </select>`),
-      row('Roles (any)',          `<select name="roles_any" multiple size="6">${roleOptions.map(r=>`<option value="${r}">${r}</option>`).join('')}</select>`),
-      row('Active',               boolSelect('active')),
-      datePair('created_from','Created from','created_to','Created to')
+
+      // Care Package Role (rota roles)
+      row('Care Package Role (any)', `
+        <select name="roles_any" multiple size="6">
+          ${roleOptions.map(r => `<option value="${r}">${r}</option>`).join('')}
+        </select>`),
+
+      // Job titles
+      row('Primary Job Title contains', inputText('primary_job_title_contains', 'e.g. CPN')),
+      row('Any Job Title contains',     inputText('job_title_contains', 'includes primary and secondary')),
+
+      // Professional registration
+      row('Professional Reg Number', inputText('prof_reg_number')),
+      row('Professional Reg Type', `
+        <select name="prof_reg_type">
+          <option value="">Any</option>
+          <option value="NMC">NMC</option>
+          <option value="GMC">GMC</option>
+          <option value="HCPC">HCPC</option>
+        </select>`),
+
+      // DOB range
+      datePair('dob_from', 'DOB from', 'dob_to', 'DOB to'),
+
+      // Gender / location
+      row('Gender', `
+        <select name="gender">
+          <option value="">Any</option>
+          <option value="Male">Male</option>
+          <option value="Female">Female</option>
+          <option value="Other">Other</option>
+        </select>`),
+      row('City',     inputText('town_city', 'Town / City')),
+      row('Postcode', inputText('postcode', 'e.g. W7 3EE')),
+
+      // Status + created range
+      row('Active', boolSelect('active')),
+      datePair('created_from','Created from','created_to','Created to'),
+
+      // Last updated range
+      datePair('updated_from','Last updated from','updated_to','Last updated to'),
+
+      // Banking / umbrella / ref
+      row('Sort Code',       inputText('sort_code', '12-34-56')),
+      row('Account Number',  inputText('account_number')),
+      row('Umbrella Name',   inputText('umbrella_name')),
+      row('TMS Ref',         inputText('tms_ref'))
     ].join('');
   } else if (currentSection === 'clients') {
     inner = [
@@ -8997,10 +9086,10 @@ async function openSearchModal(opts = {}) {
           <option value="">Any</option>
           ${weekdayOptions.map(x=>`<option value="${x.split(' ')[0]}">${x}</option>`).join('')}
         </select>`),
-      row('Require ref to pay',   boolSelect('require_reference_to_pay')),
+      row('Require ref to pay',     boolSelect('require_reference_to_pay')),
       row('Require ref to invoice', boolSelect('require_reference_to_invoice')),
-      row('Has custom labels',    boolSelect('has_custom_labels')),
-      row('Active on date',       `<input class="input" type="text" name="active_on" placeholder="DD/MM/YYYY" />`),
+      row('Has custom labels',      boolSelect('has_custom_labels')),
+      row('Active on date',         `<input class="input" type="text" name="active_on" placeholder="DD/MM/YYYY" />`),
       datePair('created_from','Created from','created_to','Created to')
     ].join('');
   } else {
@@ -9063,6 +9152,18 @@ async function openSearchModal(opts = {}) {
 
   setTimeout(wireAdvancedSearch, 0);
 }
+
+// === REPLACE: openSearchModal (icons only, legacy forced hidden, robust wiring) ===
+// === REPLACE: openSearchModal (compact text buttons + robust delegated wiring) ===
+// FRONTEND — UPDATED
+// openSearchModal: compact text buttons + delegated wiring + listens for preset-apply event
+// and re-applies filters AFTER parent repaint (onReturn hook).
+// ======================================
+// FRONTEND — openSearchModal (UPDATED)
+// Branches: if there's a selection in the summary → go straight to Save Selection.
+// Otherwise, open the Advanced Search (filters) modal as usual.
+// ======================================
+
 
 // ======================================
 // FRONTEND — wireAdvancedSearch (UPDATED only to call the updated save/load modals)
@@ -20468,24 +20569,14 @@ function renderSummary(rows){
       const v = r[c];
 
       if (currentSection === 'candidates' && c === 'job_titles_display') {
-        // Highlight primary job title (first segment) in green
+        // Show only secondary job titles (primary is shown separately)
         const raw = typeof r.job_titles_display === 'string' ? r.job_titles_display : (v || '');
         if (!raw.trim()) {
           td.textContent = '';
         } else {
           const parts = raw.split(';').map(s => s.trim()).filter(Boolean);
-          if (!parts.length) {
-            td.textContent = formatDisplayValue(c, raw);
-          } else {
-            const primary = parts[0];
-            const rest = parts.slice(1);
-            const primaryHtml =
-              `<span style="color:var(--ok,#22c55e);font-weight:600">${escapeHtml(primary)}</span>`;
-            const restHtml = rest.length
-              ? `; ${escapeHtml(rest.join('; '))}`
-              : '';
-            td.innerHTML = primaryHtml + restHtml;
-          }
+          const rest  = parts.slice(1); // drop primary
+          td.textContent = rest.join('; ');
         }
       } else {
         td.textContent = formatDisplayValue(c, v);
