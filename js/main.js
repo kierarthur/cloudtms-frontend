@@ -3645,13 +3645,25 @@ function extractFiltersFromForm(formSel='#searchForm'){
   });
 
   // Convert UK dates → ISO (backend expects ISO)
-  ['created_from','created_to','worked_from','worked_to','week_ending_from','week_ending_to','issued_from','issued_to','due_from','due_to']
-    .forEach(f => {
-      if (raw[f]) {
-        const iso = parseUkDateToIso(raw[f]);
-        if (iso) raw[f] = iso;
-      }
-    });
+  const dateFields = [
+    'created_from','created_to',
+    'updated_from','updated_to',
+    'worked_from','worked_to',
+    'week_ending_from','week_ending_to',
+    'issued_from','issued_to',
+    'due_from','due_to',
+    'dob_from','dob_to',
+    'start_date_from','start_date_to',
+    'end_date_from','end_date_to',
+    'active_on'
+  ];
+
+  dateFields.forEach(f => {
+    if (raw[f]) {
+      const iso = parseUkDateToIso(raw[f]);
+      if (iso) raw[f] = iso;
+    }
+  });
 
   return raw;
 }
@@ -3659,6 +3671,19 @@ function extractFiltersFromForm(formSel='#searchForm'){
 function populateSearchFormFromFilters(filters={}, formSel='#searchForm'){
   const form = document.querySelector(formSel);
   if (!form) return;
+
+  const dateFields = [
+    'created_from','created_to',
+    'updated_from','updated_to',
+    'worked_from','worked_to',
+    'week_ending_from','week_ending_to',
+    'issued_from','issued_to',
+    'due_from','due_to',
+    'dob_from','dob_to',
+    'start_date_from','start_date_to',
+    'end_date_from','end_date_to',
+    'active_on'
+  ];
 
   for (const [k,v] of Object.entries(filters || {})) {
     const el = form.querySelector(`[name="${k}"]`);
@@ -3675,8 +3700,7 @@ function populateSearchFormFromFilters(filters={}, formSel='#searchForm'){
       continue;
     }
 
-    // Dates: try to present as UK DD/MM/YYYY for text inputs we later parse
-    const isDateField = ['created_from','created_to','worked_from','worked_to','week_ending_from','week_ending_to','issued_from','issued_to','due_from','due_to'].includes(k);
+    const isDateField = dateFields.includes(k);
     if (isDateField && typeof v === 'string') {
       const uk = (typeof formatIsoToUk === 'function') ? formatIsoToUk(v) : v;
       el.value = uk || '';
@@ -3687,6 +3711,7 @@ function populateSearchFormFromFilters(filters={}, formSel='#searchForm'){
     el.value = (v == null ? '' : String(v));
   }
 }
+
 
 // Build querystring per section
 
@@ -8338,7 +8363,7 @@ function buildSearchQS(section, filters = {}) {
         created_from,
         created_to,
 
-        // new filters
+        // extra filters
         primary_job_title_contains,
         job_title_contains,
         prof_reg_number,
@@ -8405,18 +8430,33 @@ function buildSearchQS(section, filters = {}) {
         name,
         cli_ref,
         primary_invoice_email,
+        invoice_address,
+        postcode,
         ap_phone,
         vat_chargeable,
+        payment_terms_days,
+        mileage_charge_rate,
+        ts_queries_email,
         created_from,
-        created_to
+        created_to,
+        updated_from,
+        updated_to
       } = filters || {};
+
       if (name) add('q', name);
       add('cli_ref', cli_ref);
       add('primary_invoice_email', primary_invoice_email);
+      add('invoice_address', invoice_address);
+      add('postcode', postcode);
       add('ap_phone', ap_phone);
       if (typeof vat_chargeable === 'boolean') add('vat_chargeable', vat_chargeable);
+      add('payment_terms_days', payment_terms_days);
+      add('mileage_charge_rate', mileage_charge_rate);
+      add('ts_queries_email', ts_queries_email);
       add('created_from', created_from);
       add('created_to', created_to);
+      add('updated_from', updated_from);
+      add('updated_to', updated_to);
       break;
     }
 
@@ -8493,8 +8533,14 @@ function buildSearchQS(section, filters = {}) {
     }
 
     case 'contracts': {
+      const weekdayCodeMap = {
+        MON: 1, TUE: 2, WED: 3, THU: 4, FRI: 5, SAT: 6, SUN: 0
+      };
+
       const {
         q: qText,
+        candidate_name,
+        client_name,
         candidate_id,
         client_id,
         roles_any,
@@ -8506,12 +8552,23 @@ function buildSearchQS(section, filters = {}) {
         require_reference_to_invoice,
         has_custom_labels,
         active_on,
+        start_date_from,
+        start_date_to,
+        end_date_from,
+        end_date_to,
         created_from,
         created_to,
+        updated_from,
+        updated_to,
+        auto_invoice,
+        mileage_pay_rate,
+        mileage_charge_rate,
         status
       } = filters || {};
 
       add('q', qText);
+      add('candidate_name', candidate_name);
+      add('client_name', client_name);
       add('candidate_id', candidate_id);
       add('client_id', client_id);
       addArr('roles_any', roles_any);
@@ -8523,7 +8580,13 @@ function buildSearchQS(section, filters = {}) {
         add('submission_mode', submission_mode);
       }
 
-      add('week_ending_weekday_snapshot', week_ending_weekday_snapshot);
+      if (week_ending_weekday_snapshot) {
+        const codeUpper = String(week_ending_weekday_snapshot).toUpperCase();
+        const mapped = weekdayCodeMap[codeUpper];
+        add('week_ending_weekday_snapshot', mapped != null ? mapped : week_ending_weekday_snapshot);
+      }
+
+      if (typeof auto_invoice === 'boolean') add('auto_invoice', auto_invoice);
       if (typeof require_reference_to_pay === 'boolean') {
         add('require_reference_to_pay', require_reference_to_pay);
       }
@@ -8532,8 +8595,20 @@ function buildSearchQS(section, filters = {}) {
       }
       if (typeof has_custom_labels === 'boolean') add('has_custom_labels', has_custom_labels);
       add('active_on', active_on);
-      add('created_from', created_from);
-      add('created_to', created_to);
+
+      // Date ranges
+      add('start_date_from', start_date_from);
+      add('start_date_to',   start_date_to);
+      add('end_date_from',   end_date_from);
+      add('end_date_to',     end_date_to);
+      add('created_from',    created_from);
+      add('created_to',      created_to);
+      add('updated_from',    updated_from);
+      add('updated_to',      updated_to);
+
+      // Mileage
+      add('mileage_pay_rate',    mileage_pay_rate);
+      add('mileage_charge_rate', mileage_charge_rate);
 
       if (status) add('status', status);
 
@@ -8978,7 +9053,7 @@ async function openSearchModal(opts = {}) {
     ${row(fromLabel, `<input class="input" type="text" name="${fromName}" placeholder="DD/MM/YYYY" />`)}
     ${row(toLabel,   `<input class="input" type="text" name="${toName}"   placeholder="DD/MM/YYYY" />`)}`;
 
-  // NEW: inline date range (From / To on one row)
+  // Inline date range (From / To on one row)
   const dateRangeRow = (fromName, toName, label) => row(label, `
     <div class="split">
       <input class="input" type="text" name="${fromName}" placeholder="From DD/MM/YYYY" />
@@ -8987,6 +9062,16 @@ async function openSearchModal(opts = {}) {
 
   const multi = (name, values) =>
     `<select name="${name}" multiple size="6">${values.map(v=>`<option value="${v}">${v}</option>`).join('')}</select>`;
+
+  const friendly = (section, key, fallback) => {
+    try {
+      if (typeof getFriendlyHeaderLabel === 'function') {
+        const lbl = getFriendlyHeaderLabel(section, key);
+        if (lbl && typeof lbl === 'string') return lbl;
+      }
+    } catch {}
+    return fallback || key;
+  };
 
   // Section-specific filters
   let inner = '';
@@ -9030,7 +9115,7 @@ async function openSearchModal(opts = {}) {
           <option value="HCPC">HCPC</option>
         </select>`),
 
-      // DOB range (still in two rows; both get datepicker)
+      // DOB range (two rows; both get datepicker)
       datePair('dob_from', 'DOB from', 'dob_to', 'DOB to'),
 
       // Gender / location
@@ -9046,10 +9131,11 @@ async function openSearchModal(opts = {}) {
 
       // Status + created range (inline)
       row('Active', boolSelect('active')),
-      dateRangeRow('created_from','created_to','Created (from / to)'),
+      dateRangeRow('created_from','created_to','Created date (from / to)'),
 
       // Last updated range (inline)
       dateRangeRow('updated_from','updated_to','Last updated (from / to)'),
+
 
       // Banking / umbrella / ref
       row('Sort Code',       inputText('sort_code', '12-34-56')),
@@ -9058,13 +9144,26 @@ async function openSearchModal(opts = {}) {
       row('TMS Ref',         inputText('tms_ref'))
     ].join('');
   } else if (currentSection === 'clients') {
+    const lblName     = friendly('clients','name','Client name');
+    const lblCliRef   = friendly('clients','cli_ref','Client ref');
+    const lblEmail    = friendly('clients','primary_invoice_email','Invoice email');
+    const lblInvAddr  = friendly('clients','invoice_address','Invoice address');
+    const lblPost     = friendly('clients','postcode','Postcode');
+    const lblApPhone  = friendly('clients','ap_phone','A/P phone');
+
     inner = [
-      row('Client name',          inputText('name', 'partial match')),
-      row('Client Ref',           inputText('cli_ref')),
-      row('Primary invoice email',`<input class="input" type="email" name="primary_invoice_email" placeholder="ap@client" />`),
-      row('A/P phone',            inputText('ap_phone')),
-      row('VAT chargeable',       boolSelect('vat_chargeable')),
-      datePair('created_from','Created from','created_to','Created to')
+      row(lblName,          inputText('name', 'partial match')),
+      row(lblCliRef,        inputText('cli_ref')),
+      row(lblEmail,         `<input class="input" type="email" name="primary_invoice_email" placeholder="ap@client" />`),
+      row(lblInvAddr,       inputText('invoice_address')),
+      row(lblPost,          inputText('postcode')),
+      row(lblApPhone,       inputText('ap_phone')),
+      row('VAT chargeable (Yes/No)', boolSelect('vat_chargeable')),
+      row('Payment terms (days)', `<input class="input" type="number" name="payment_terms_days" min="0" />`),
+      row('Mileage charge rate',  `<input class="input" type="number" step="0.01" name="mileage_charge_rate" />`),
+      row('Timesheet queries email', `<input class="input" type="email" name="ts_queries_email" placeholder="ts@client" />`),
+      dateRangeRow('created_from','created_to','Created date (from / to)'),
+      dateRangeRow('updated_from','updated_to','Last updated (from / to)')
     ].join('');
   } else if (currentSection === 'umbrellas') {
     inner = [
@@ -9098,36 +9197,77 @@ async function openSearchModal(opts = {}) {
   } else if (currentSection === 'contracts') {
     let roleOptions = [];
     try { roleOptions = await loadGlobalRoleOptions(); } catch { roleOptions = []; }
-    const weekdayOptions = ['0 Sun','1 Mon','2 Tue','3 Wed','4 Thu','5 Fri','6 Sat'];
+
+    const weekdayOptions = [
+      { value: '',    label: 'Any'    },
+      { value: 'MON', label: 'Monday' },
+      { value: 'TUE', label: 'Tuesday' },
+      { value: 'WED', label: 'Wednesday' },
+      { value: 'THU', label: 'Thursday' },
+      { value: 'FRI', label: 'Friday' },
+      { value: 'SAT', label: 'Saturday' },
+      { value: 'SUN', label: 'Sunday' }
+    ];
+
+    const lblCandName  = friendly('contracts','candidate_display','Candidate name');
+    const lblClient    = friendly('contracts','client_name','Client name');
+    const lblBand      = friendly('contracts','band','Band');
+    const lblRole      = friendly('contracts','role','Role');
+    const lblPaySnap   = friendly('contracts','pay_method_snapshot','Pay method snapshot');
+    const lblSubMode   = friendly('contracts','default_submission_mode','Submission mode');
 
     inner = [
       row('Free text',            inputText('q', 'client / candidate / role')),
+
+      // Explicit name filters
+      row(`${lblCandName} contains`, inputText('candidate_name', 'partial name match')),
+      row(`${lblClient} contains`,   inputText('client_name', 'partial name match')),
+
       row('Candidate ID',         inputText('candidate_id', 'UUID')),
       row('Client ID',            inputText('client_id', 'UUID')),
-      row('Role (any)',           `<select name="roles_any" multiple size="6">${roleOptions.map(r=>`<option value="${r}">${r}</option>`).join('')}</select>`),
-      row('Band',                 inputText('band', 'e.g. 5 / 6 / 7')),
-      row('Pay method snapshot',  `
+      row(`${lblRole} (any)`,     `<select name="roles_any" multiple size="6">${roleOptions.map(r=>`<option value="${r}">${r}</option>`).join('')}</select>`),
+      row(lblBand,                inputText('band', 'e.g. 5 / 6 / 7')),
+      row(lblPaySnap,  `
         <select name="pay_method_snapshot">
           <option value="">Any</option>
           <option value="PAYE">PAYE</option>
           <option value="UMBRELLA">UMBRELLA</option>
         </select>`),
-      row('Submission mode',      `
+      row(lblSubMode,      `
         <select name="submission_mode">
           <option value="">Any</option>
           <option value="MANUAL">Manual</option>
           <option value="ELECTRONIC">Electronic</option>
         </select>`),
+
+      row('Start date (from / to)',
+        `<div class="split">
+           <input class="input" type="text" name="start_date_from" placeholder="From DD/MM/YYYY" />
+           <input class="input" type="text" name="start_date_to"   placeholder="To DD/MM/YYYY" />
+         </div>`),
+
+      row('End date (from / to)',
+        `<div class="split">
+           <input class="input" type="text" name="end_date_from" placeholder="From DD/MM/YYYY" />
+           <input class="input" type="text" name="end_date_to"   placeholder="To DD/MM/YYYY" />
+         </div>`),
+
       row('Week-ending weekday',  `
         <select name="week_ending_weekday_snapshot">
-          <option value="">Any</option>
-          ${weekdayOptions.map(x=>`<option value="${x.split(' ')[0]}">${x}</option>`).join('')}
+          ${weekdayOptions.map(o=>`<option value="${o.value}">${o.label}</option>`).join('')}
         </select>`),
+
+      row('Auto invoice',           boolSelect('auto_invoice')),
       row('Require ref to pay',     boolSelect('require_reference_to_pay')),
       row('Require ref to invoice', boolSelect('require_reference_to_invoice')),
       row('Has custom labels',      boolSelect('has_custom_labels')),
       row('Active on date',         `<input class="input" type="text" name="active_on" placeholder="DD/MM/YYYY" />`),
-      datePair('created_from','Created from','created_to','Created to')
+
+      dateRangeRow('created_from','created_to','Created date (from / to)'),
+      dateRangeRow('updated_from','updated_to','Last updated (from / to)'),
+
+      row('Mileage pay rate',    `<input class="input" type="number" step="0.01" name="mileage_pay_rate" />`),
+      row('Mileage charge rate', `<input class="input" type="number" step="0.01" name="mileage_charge_rate" />`)
     ].join('');
   } else {
     inner = `<div class="tabc">No filters for this section.</div>`;
@@ -9201,7 +9341,7 @@ async function openSearchModal(opts = {}) {
         populateSearchFormFromFilters(st.filters || {}, '#searchForm');
       } catch {}
 
-      // 🔹 Wire datepickers to *all* DD/MM/YYYY fields (including From/To ranges)
+      // Wire datepickers to *all* DD/MM/YYYY fields (including From/To ranges)
       try {
         if (typeof attachUkDatePicker === 'function') {
           const root = document.getElementById('searchForm');
@@ -17170,18 +17310,63 @@ const setCloseLabel = ()=>{
 
       btnEdit.style.display = (top.mode==='view' && top.hasId) ? '' : 'none';
 
-      if (relatedBtn) {
+           if (relatedBtn) {
+        // Map modal entity → backend /api/related entity key
+        const relatedEntity =
+          top.entity === 'candidates' ? 'candidate' :
+          top.entity === 'clients'    ? 'client'    :
+          top.entity === 'contracts'  ? 'contract'  : // backend doesn’t use this yet, but harmless
+          null;
+
         const showRelated =
           !isChild &&
           top.hasId &&
-          (top.entity === 'candidates' ||
-           top.entity === 'clients'   ||
-           top.entity === 'contracts');
+          !!relatedEntity;
 
         relatedBtn.style.display = showRelated ? '' : 'none';
-        // Enabled only when in view mode on a saved record
-        relatedBtn.disabled = !(showRelated && top.mode === 'view');
+
+        const canClick = showRelated && top.mode === 'view';
+        relatedBtn.disabled = !canClick;
+
+        if (canClick) {
+          relatedBtn.onclick = async (ev) => {
+            ev.preventDefault();
+            ev.stopPropagation();
+
+            // Guard against stale handlers if the top frame changed
+            const fr = currentFrame && currentFrame();
+            if (!fr || fr !== top) return;
+
+            const ctx    = window.modalCtx || {};
+            const entity = relatedEntity;
+            const id     = ctx && ctx.data && ctx.data.id;
+
+            if (!entity || !id) return;
+            if (typeof fetchRelatedCounts !== 'function' || typeof showRelatedMenu !== 'function') {
+              return;
+            }
+
+            let counts = {};
+            try {
+              counts = await fetchRelatedCounts(entity, id);
+            } catch (e) {
+              console.error('[RELATED] fetchRelatedCounts failed', e);
+            }
+
+            try {
+              const rect = relatedBtn.getBoundingClientRect();
+              const x = rect.left + rect.width / 2;
+              const y = rect.top + rect.height;
+              showRelatedMenu(x, y, counts || {}, entity, id);
+            } catch (e) {
+              console.error('[RELATED] showRelatedMenu failed', e);
+            }
+          };
+        } else {
+          relatedBtn.onclick = null;
+        }
       }
+
 
     if (top.mode === 'create') {
   btnSave.style.display = '';
@@ -18944,7 +19129,7 @@ function openJobTitleSettingsModal() {
     id: null,
     parent_id: parentId || null,
     label: '',
-    is_role: false, // default to Group/Category
+    is_role: false, // default to Category
     requires_prof_reg: false,
     prof_reg_type: '',
     active: true,
@@ -18958,7 +19143,7 @@ function openJobTitleSettingsModal() {
       .map((n) => {
         const isSelected =
           S.selectedId === n.id || (!S.selectedId && S.editing && S.editing.id === n.id);
-        const kindLabel = n.is_role ? 'Role' : 'Group';
+        const kindLabel = n.is_role ? 'Role' : 'Category';
         const regBadge =
           n.is_role && n.requires_prof_reg
             ? `<span class="pill mini" style="margin-left:4px">${n.prof_reg_type || 'Reg'}</span>`
@@ -19097,21 +19282,27 @@ function openJobTitleSettingsModal() {
         </div>
 
         <div class="row">
-          <label>Category Type</label>
-          <div class="mini">
-            <label class="inline">
-              <input type="radio" name="node_type" value="group" ${nodeTypeGroupChecked} />
-              <span>Group / Category</span>
-            </label><br/>
-            ${
-              showRoleRadio
-                ? `
-            <label class="inline">
-              <input type="radio" name="node_type" value="role" ${nodeTypeRoleChecked} />
-              <span>Role (assignable to candidates)</span>
-            </label>`
-                : ''
-            }
+          <label>Category &amp; visibility</label>
+          <div class="controls">
+            <div style="display:flex;flex-direction:column;gap:4px">
+              <label class="inline">
+                <input type="radio" name="node_type" value="group" ${nodeTypeGroupChecked} />
+                <span>Category</span>
+              </label>
+              ${
+                showRoleRadio
+                  ? `
+              <label class="inline">
+                <input type="radio" name="node_type" value="role" ${nodeTypeRoleChecked} />
+                <span>Role</span>
+              </label>`
+                  : ''
+              }
+              <label class="inline">
+                <input type="checkbox" name="active" ${activeChecked} />
+                <span>Visible to users</span>
+              </label>
+            </div>
           </div>
         </div>
 
@@ -19131,13 +19322,6 @@ function openJobTitleSettingsModal() {
             <option value="">-- Select type --</option>
             ${regOptions}
           </select>
-        </div>
-
-        <div class="row">
-          <label class="inline">
-            <input type="checkbox" name="active" ${activeChecked} />
-            <span>Active (visible in pickers)</span>
-          </label>
         </div>
 
         <div class="row" style="grid-column:1/-1;margin-top:8px;display:flex;gap:8px;justify-content:flex-end">
@@ -19311,10 +19495,10 @@ function openJobTitleSettingsModal() {
         const nodeEl = e.target.closest('.jt-node[data-id]');
         if (!nodeEl) return;
         const id = nodeEl.getAttribute('data-id');
-        const node = S.byId[id];
-        if (!node) return;
+        const n = S.byId[id];
+        if (!n) return;
         S.selectedId = id;
-        S.editing = makeEditingFromNode(node);
+        S.editing = makeEditingFromNode(n);
         repaint();
       };
     }
