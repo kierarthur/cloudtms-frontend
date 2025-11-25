@@ -446,6 +446,29 @@
       align-items:center;
       gap:6px;
     }
+
+    /* Job Titles details: single-column, clean alignment for Category/Role/Visible */
+    #jt_details_form{
+      grid-template-columns:minmax(0,1fr);
+    }
+    #jt_details_form .row{
+      align-items:flex-start;
+    }
+    #jt_details_form #jt_cat_vis_row{
+      display:flex;
+      gap:12px;
+      align-items:center;
+      flex-wrap:wrap;
+    }
+    #jt_details_form #jt_cat_vis_row label.inline{
+      margin:0;
+    }
+    #jt_details_form #jt_btn_delete,
+    #jt_details_form #jt_btn_save{
+      padding:4px 8px;
+      font-size:11px;
+    }
+
     .form input,
     .form select,
     .form textarea{
@@ -457,6 +480,7 @@
       width:100%;
       font-size:12px;
     }
+
     .form textarea{
       min-height:90px;
     }
