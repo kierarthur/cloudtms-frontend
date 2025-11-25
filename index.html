@@ -475,6 +475,16 @@
       opacity:.75;
     }
 
+    /* Keep postcode "Lookup" button compact, not 50/50 flex */
+    .split .btn.mini{
+      flex:0 0 auto;
+    }
+
+    /* Put a little breathing room under the Job Titles pills before "Add Job Title…" */
+    #jobTitlesList + .btn.mini{
+      margin-top:4px;
+    }
+
     /* Generic modal buttons (all small icon/utility buttons) */
     #modal .btn{
       border:1px solid var(--line);
@@ -492,6 +502,11 @@
     #modal .btn:hover{
       background:var(--hover);
       color:#f9fafb;
+    }
+
+    /* Make the little trash icons less weedy */
+    #modal .bin{
+      font-size:13px;
     }
 
     /* ===== Modal footer buttons ===== */
@@ -827,6 +842,7 @@
       <div class="actions" id="modalActions">
         <span class="hint" id="modalHint"></span>
         <div class="spacer"></div>
+        <button id="btnRelated" style="display:none">Related</button>
         <button id="btnDelete" class="danger" style="display:none">Delete</button>
         <button id="btnEditModal" style="display:none">Edit</button>
         <button id="btnSave" class="primary">Save</button>
