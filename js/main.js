@@ -17117,7 +17117,7 @@ stack().push(frame);
 byId('modalBack').style.display='flex';
 
 
- function renderTop() {
+function renderTop() {
   const LOG = (typeof window.__LOG_MODAL === 'boolean') ? window.__LOG_MODAL : true;
   const L  = (...a)=> { if (LOG) console.log('[MODAL]', ...a); };
   const GC = (label)=> { if (LOG) console.groupCollapsed('[MODAL]', label); };
@@ -17133,12 +17133,11 @@ byId('modalBack').style.display='flex';
   }
 
   const isChild = (stack().length > 1);
-const top     = currentFrame();
-const parent  = parentFrame();
+  const top     = currentFrame();
+  const parent  = parentFrame();
 
-// restore the parent/owner context for whatever frame is now on top
-if (top && top._ctxRef) window.modalCtx = top._ctxRef;
-
+  // restore the parent/owner context for whatever frame is now on top
+  if (top && top._ctxRef) window.modalCtx = top._ctxRef;
 
   if (typeof top._detachGlobal === 'function') { try { top._detachGlobal(); } catch {} top._wired = false; }
 
@@ -17171,6 +17170,10 @@ if (top && top._ctxRef) window.modalCtx = top._ctxRef;
     const isContracts = ((top.entity === 'contracts') || (top.kind === 'contracts') || parentIsContracts);
     modalNode.classList.toggle('contract-modal', !!isContracts);
     if (LOGC && isContracts) console.log('[CONTRACTS][MODAL] contract-modal class applied to #modal (inherited:', parentIsContracts, ')');
+
+    // Job Titles: apply narrower modal sizing
+    const isJobTitles = (top.kind === 'job-titles');
+    modalNode.classList.toggle('jobtitles-modal', !!isJobTitles);
   }
 
   if (modalNode) {
@@ -17231,27 +17234,27 @@ if (top && top._ctxRef) window.modalCtx = top._ctxRef;
     const prev=top._detachGlobal;
     top._detachGlobal = ()=>{ try{header.removeEventListener('mousedown',onDown);}catch{} try{header.removeEventListener('dblclick',onDbl);}catch{} document.onmousemove=null; document.onmouseup=null; if(typeof prev==='function'){ try{prev();}catch{} } };
   })();
-const wantApply = (isChild && !top.noParentGate) ||
-                  (top.kind === 'client-rate' || top.kind === 'candidate-override' || top.kind === 'rate-presets-picker');
+  const wantApply = (isChild && !top.noParentGate) ||
+                    (top.kind === 'client-rate' || top.kind === 'candidate-override' || top.kind === 'rate-presets-picker');
 
-const defaultPrimary =
-  (top.kind === 'contract-clone-extend') ? 'Create'
-: (top.kind === 'advanced-search')       ? 'Search'
-: (top.kind === 'selection-load')        ? 'Load'
-: (wantApply ? 'Apply' : 'Save');
+  const defaultPrimary =
+    (top.kind === 'contract-clone-extend') ? 'Create'
+  : (top.kind === 'advanced-search')       ? 'Search'
+  : (top.kind === 'selection-load')        ? 'Load'
+  : (wantApply ? 'Apply' : 'Save');
 
 
-    btnSave.textContent = defaultPrimary; btnSave.setAttribute('aria-label', defaultPrimary);
+  btnSave.textContent = defaultPrimary; btnSave.setAttribute('aria-label', defaultPrimary);
   L('showModal defaultPrimary', { kind: top.kind, defaultPrimary });
-const setCloseLabel = ()=>{
-  const label =
-    (top.kind === 'advanced-search')
-      ? 'Close'
-      : (top.isDirty ? 'Discard' : 'Close');
-  btnClose.textContent = label;
-  btnClose.setAttribute('aria-label', label);
-  btnClose.setAttribute('title', label);
-};
+  const setCloseLabel = ()=>{
+    const label =
+      (top.kind === 'advanced-search')
+        ? 'Close'
+        : (top.isDirty ? 'Discard' : 'Close');
+    btnClose.textContent = label;
+    btnClose.setAttribute('aria-label', label);
+    btnClose.setAttribute('title', label);
+  };
 
 
   top._updateButtons = ()=>{
@@ -17276,7 +17279,7 @@ const setCloseLabel = ()=>{
       }
     } catch {}
 
-       if (top.kind === 'advanced-search') {
+    if (top.kind === 'advanced-search') {
       btnEdit.style.display='none';
       btnSave.style.display='';
       btnSave.disabled=!!top._saving;
@@ -17284,7 +17287,7 @@ const setCloseLabel = ()=>{
         relatedBtn.style.display = 'none';
         relatedBtn.disabled = true;
       }
-        } else if (top.kind === 'rates-presets') {
+    } else if (top.kind === 'rates-presets') {
       btnEdit.style.display='none';
       btnSave.style.display='none';
       btnSave.disabled=true;
@@ -17305,50 +17308,48 @@ const setCloseLabel = ()=>{
         btnEdit: { display: btnEdit.style.display }
       });
       return;
-   } else if (isChild && !top.noParentGate) {
+    } else if (isChild && !top.noParentGate) {
 
-  if (top.mode === 'view') {
-    btnSave.style.display = 'none';
-    btnSave.disabled = true;
-    btnEdit.style.display = 'none';
-    if (relatedBtn) {
-      relatedBtn.style.display = 'none';
-      relatedBtn.disabled = true;
-    }
-  } else {
-    btnSave.style.display = parentEditable ? '' : 'none';
+      if (top.mode === 'view') {
+        btnSave.style.display = 'none';
+        btnSave.disabled = true;
+        btnEdit.style.display = 'none';
+        if (relatedBtn) {
+          relatedBtn.style.display = 'none';
+          relatedBtn.disabled = true;
+        }
+      } else {
+        btnSave.style.display = parentEditable ? '' : 'none';
 
-    // Child apply gating:
-    // - rate-presets-picker: gate by __canSave
-    // - client-rate / candidate-override: gate by _applyDesired
-    // - address-lookup (and other simple children): always allow Apply if parent is editable
-    let wantApply;
-    if (top.kind === 'rate-presets-picker') {
-      wantApply = !!top.__canSave;
-    } else if (top.kind === 'client-rate' || top.kind === 'candidate-override') {
-      wantApply = (top._applyDesired === true);
+        // Child apply gating:
+        // - rate-presets-picker: gate by __canSave
+        // - client-rate / candidate-override: gate by _applyDesired
+        // - address-lookup (and other simple children): always allow Apply if parent is editable
+        let wantApply;
+        if (top.kind === 'rate-presets-picker') {
+          wantApply = !!top.__canSave;
+        } else if (top.kind === 'client-rate' || top.kind === 'candidate-override') {
+          wantApply = (top._applyDesired === true);
+        } else {
+          // e.g. address-lookup and other simple child modals
+          wantApply = true;
+        }
+
+        btnSave.disabled = (!parentEditable) || top._saving || !wantApply;
+        btnEdit.style.display='none';
+        if (relatedBtn) {
+          relatedBtn.style.display = 'none';
+          relatedBtn.disabled = true;
+        }
+        if (LOG) console.log('[MODAL] child _updateButtons()', {
+          parentEditable, wantApply, disabled: btnSave.disabled, kind: top.kind
+        });
+      }
     } else {
-      // e.g. address-lookup and other simple child modals
-      wantApply = true;
-    }
-
-    btnSave.disabled = (!parentEditable) || top._saving || !wantApply;
-    btnEdit.style.display='none';
-    if (relatedBtn) {
-      relatedBtn.style.display = 'none';
-      relatedBtn.disabled = true;
-    }
-    if (LOG) console.log('[MODAL] child _updateButtons()', {
-      parentEditable, wantApply, disabled: btnSave.disabled, kind: top.kind
-    });
-  }
-}
- else {
-
 
       btnEdit.style.display = (top.mode==='view' && top.hasId) ? '' : 'none';
 
-           if (relatedBtn) {
+      if (relatedBtn) {
         // Map modal entity → backend /api/related entity key
         const relatedEntity =
           top.entity === 'candidates' ? 'candidate' :
@@ -17405,63 +17406,62 @@ const setCloseLabel = ()=>{
         }
       }
 
+      if (top.mode === 'create') {
+        btnSave.style.display = '';
+        btnSave.disabled = top._saving;
+      } else if (top.mode==='view') {
+        btnSave.style.display = 'none';
+        btnSave.disabled = true;
+      } else {
 
-    if (top.mode === 'create') {
-  btnSave.style.display = '';
-  btnSave.disabled = top._saving;
-} else if (top.mode==='view') {
-  btnSave.style.display = 'none';
-  btnSave.disabled = true;
-} else {
+        btnSave.style.display='';
 
-  btnSave.style.display='';
+        let gateOK = true;
+        let elig   = null;
 
-  let gateOK = true;
-  let elig   = null;
+        if (top.entity === 'contracts') {
+          try {
+            gateOK = (typeof computeContractSaveEligibility === 'function') ? !!computeContractSaveEligibility() : true;
+            elig   = (typeof window !== 'undefined') ? (window.__contractEligibility || null) : null;
 
-  if (top.entity === 'contracts') {
-    try {
-      gateOK = (typeof computeContractSaveEligibility === 'function') ? !!computeContractSaveEligibility() : true;
-      elig   = (typeof window !== 'undefined') ? (window.__contractEligibility || null) : null;
+            if (elig && Array.isArray(elig.reasons)) {
+              const tsReason = elig.reasons.find(r => r && r.code === 'TS_BOUNDARY_VIOLATION');
+              if (tsReason) {
+                gateOK = false;
+                if (typeof showModalHint === 'function') showModalHint(tsReason.message || 'Dates exclude existing timesheets.', 'warn');
+              }
+            }
 
-      if (elig && Array.isArray(elig.reasons)) {
-        const tsReason = elig.reasons.find(r => r && r.code === 'TS_BOUNDARY_VIOLATION');
-        if (tsReason) {
-          gateOK = false;
-          if (typeof showModalHint === 'function') showModalHint(tsReason.message || 'Dates exclude existing timesheets.', 'warn');
+            // If Save would otherwise be allowed, surface a *polite* warning when candidate is missing.
+            if ((top.mode==='edit' || top.mode==='create') && elig && elig.ok) {
+              const missingCand = (elig.reasons || []).some(r => r && r.code === 'MISSING_CANDIDATE');
+              if (missingCand && typeof showModalHint === 'function') {
+                showModalHint('No candidate selected — this contract will be saved as <Unassigned>.', 'warn');
+              }
+            }
+
+            if (!gateOK && elig && elig.pendingTimeFormat && (!elig.reasons || elig.reasons.length === 0)) {
+              gateOK = true;
+            }
+
+            if (typeof showModalHint === 'function' && (top.mode==='edit' || top.mode==='create')) {
+              if (elig && Array.isArray(elig.reasons) && elig.reasons.length && !elig.ok) {
+                const hasTs = elig.reasons.some(r => r && r.code === 'TS_BOUNDARY_VIOLATION');
+                if (!hasTs) {
+                  const msg = elig.reasons.map(r => r && r.message).filter(Boolean).join(' • ');
+                  if (msg) showModalHint(msg, 'warn');
+                }
+              } else if (elig && elig.pendingTimeFormat && elig.tip) {
+                showModalHint(elig.tip, 'ok');
+              }
+            }
+          } catch { gateOK = true; }
         }
-      }
 
-      // If Save would otherwise be allowed, surface a *polite* warning when candidate is missing.
-      if ((top.mode==='edit' || top.mode==='create') && elig && elig.ok) {
-        const missingCand = (elig.reasons || []).some(r => r && r.code === 'MISSING_CANDIDATE');
-        if (missingCand && typeof showModalHint === 'function') {
-          showModalHint('No candidate selected — this contract will be saved as <Unassigned>.', 'warn');
-        }
+        btnSave.disabled = (top.entity === 'contracts')
+          ? (top._saving || ((top.kind !== 'contract-clone-extend') && !top.isDirty) || !gateOK)
+          : (top._saving);
       }
-
-      if (!gateOK && elig && elig.pendingTimeFormat && (!elig.reasons || elig.reasons.length === 0)) {
-        gateOK = true;
-      }
-
-      if (typeof showModalHint === 'function' && (top.mode==='edit' || top.mode==='create')) {
-        if (elig && Array.isArray(elig.reasons) && elig.reasons.length && !elig.ok) {
-          const hasTs = elig.reasons.some(r => r && r.code === 'TS_BOUNDARY_VIOLATION');
-          if (!hasTs) {
-            const msg = elig.reasons.map(r => r && r.message).filter(Boolean).join(' • ');
-            if (msg) showModalHint(msg, 'warn');
-          }
-        } else if (elig && elig.pendingTimeFormat && elig.tip) {
-          showModalHint(elig.tip, 'ok');
-        }
-      }
-    } catch { gateOK = true; }
-  }
-
-  btnSave.disabled = (top.entity === 'contracts')
-    ? (top._saving || ((top.kind !== 'contract-clone-extend') && !top.isDirty) || !gateOK)
-    : (top._saving);
-}
 
     }
 
@@ -17476,189 +17476,188 @@ const setCloseLabel = ()=>{
 
 
   top._updateButtons();
-btnEdit.onclick = ()=> {
-  const isChildNow    = (stack().length > 1);
-  const isRatePreset  = (top.kind === 'rate-preset');
+  btnEdit.onclick = ()=> {
+    const isChildNow    = (stack().length > 1);
+    const isRatePreset  = (top.kind === 'rate-preset');
 
-  // Block Edit for search & normal child-apply modals,
-  // but allow Edit for rate-preset even when opened as a child.
-  if (!isRatePreset && (isChildNow || top.kind === 'advanced-search')) return;
+    // Block Edit for search & normal child-apply modals,
+    // but allow Edit for rate-preset even when opened as a child.
+    if (!isRatePreset && (isChildNow || top.kind === 'advanced-search')) return;
 
-if (top.mode === 'view') {
-  top._snapshot = {
-    data               : deep(window.modalCtx?.data||null),
-    formState          : deep(window.modalCtx?.formState||null),
-    rolesState         : deep(window.modalCtx?.rolesState||null),
-    ratesState         : deep(window.modalCtx?.ratesState||null),
-    hospitalsState     : deep(window.modalCtx?.hospitalsState||null),
-    clientSettingsState: deep(window.modalCtx?.clientSettingsState||null),
-    overrides          : deep(window.modalCtx?.overrides || { existing:[], stagedNew:[], stagedEdits:{}, stagedDeletes:[] }),
-    candidateMainModel : deep(window.modalCtx?.candidateMainModel || null)
+    if (top.mode === 'view') {
+      top._snapshot = {
+        data               : deep(window.modalCtx?.data||null),
+        formState          : deep(window.modalCtx?.formState||null),
+        rolesState         : deep(window.modalCtx?.rolesState||null),
+        ratesState         : deep(window.modalCtx?.ratesState||null),
+        hospitalsState     : deep(window.modalCtx?.hospitalsState||null),
+        clientSettingsState: deep(window.modalCtx?.clientSettingsState||null),
+        overrides          : deep(window.modalCtx?.overrides || { existing:[], stagedNew:[], stagedEdits:{}, stagedDeletes:[] }),
+        candidateMainModel : deep(window.modalCtx?.candidateMainModel || null)
+      };
+      top.isDirty = false;
+      setFrameMode(top, 'edit');
+      L('btnEdit (global) → switch to edit');
+    }
+
   };
-  top.isDirty = false;
-  setFrameMode(top, 'edit');
-  L('btnEdit (global) → switch to edit');
-}
-
-};
 
 
   const handleSecondary = (ev)=>{
-  if (currentFrame && currentFrame() !== top) return;
-  if (top._confirmingDiscard || top._closing) return;
+    if (currentFrame && currentFrame() !== top) return;
+    if (top._confirmingDiscard || top._closing) return;
 
     if (top.kind==='advanced-search') {
       top._closing=true;
       document.onmousemove=null; document.onmouseup=null; byId('modal')?.classList.remove('dragging'); sanitizeModalGeometry();
       const closing=stack().pop(); if (closing?._detachDirty){ try{closing._detachDirty();}catch{} closing._detachDirty=null; }
       if (closing?._detachGlobal){ try{closing._detachGlobal();}catch{} closing._detachGlobal=null; } top._wired=false;
-if (stack().length>0) {
-  const p = currentFrame();
-  if (p && p._ctxRef) window.modalCtx = p._ctxRef;
+      if (stack().length>0) {
+        const p = currentFrame();
+        if (p && p._ctxRef) window.modalCtx = p._ctxRef;
 
-  const resumeMode =
-    (typeof closing !== 'undefined' && closing && closing._parentModeOnOpen)
-      ? closing._parentModeOnOpen
-      : p.mode;
+        const resumeMode =
+          (typeof closing !== 'undefined' && closing && closing._parentModeOnOpen)
+            ? closing._parentModeOnOpen
+            : p.mode;
 
-  try { setFrameMode(p, resumeMode); } catch {}
-  p._updateButtons?.();
+        try { setFrameMode(p, resumeMode); } catch {}
+        p._updateButtons?.();
 
-  renderTop();
-  try { p.onReturn && p.onReturn(); } catch {}
-} else {
-
-
- discardAllModalsAndState(); if (window.__pendingFocus) { try{ renderAll(); } catch(e){ console.error('refresh after modal close failed',e); } } }
+        renderTop();
+        try { p.onReturn && p.onReturn(); } catch {}
+      } else {
+        discardAllModalsAndState(); if (window.__pendingFocus) { try{ renderAll(); } catch(e){ console.error('refresh after modal close failed',e); } }
+      }
       return;
     }
 
 
-      const isChildNow = (stack().length > 1);
+    const isChildNow = (stack().length > 1);
 
-  // Child frames with noParentGate: if dirty in edit/create, confirm discard before closing.
-  // NEW: never prompt for the Rate Presets Picker — it must behave read-only for discard purposes.
-  if (isChildNow && top.noParentGate && (top.mode === 'edit' || top.mode === 'create') && top.isDirty && top.kind !== 'rate-presets-picker') {
-    let ok = false;
-    try {
-      top._confirmingDiscard = true;
-      btnClose.disabled = true;
-      ok = window.confirm('Discard changes and close?');
-    } finally {
-      top._confirmingDiscard = false;
-      btnClose.disabled = false;
-    }
-    if (!ok) return;
-  }
-
-
-  if (!isChildNow && !top.noParentGate && top.mode==='edit' && top.kind!=='rates-presets') {
-   if (!top.isDirty) {
-  if (top._snapshot && window.modalCtx) {
-    window.modalCtx.data                = deep(top._snapshot.data);
-    window.modalCtx.formState           = deep(top._snapshot.formState);
-    window.modalCtx.rolesState          = deep(top._snapshot.rolesState);
-    window.modalCtx.ratesState          = deep(top._snapshot.ratesState);
-    window.modalCtx.hospitalsState      = deep(top._snapshot.hospitalsState);
-    window.modalCtx.clientSettingsState = deep(top._snapshot.clientSettingsState);
-    if (top._snapshot.overrides) window.modalCtx.overrides = deep(top._snapshot.overrides);
-    window.modalCtx.candidateMainModel  = deep(top._snapshot.candidateMainModel || null);
-    try { renderCandidateRatesTable?.(); } catch {}
-  }
-    try {
-      if (top.entity === 'contracts') {
-        const cid = window.modalCtx?.data?.id;
-        if (cid && typeof discardContractCalendarStage === 'function') discardContractCalendarStage(cid);
+    // Child frames with noParentGate: if dirty in edit/create, confirm discard before closing.
+    // NEW: never prompt for the Rate Presets Picker — it must behave read-only for discard purposes.
+    if (isChildNow && top.noParentGate && (top.mode === 'edit' || top.mode === 'create') && top.isDirty && top.kind !== 'rate-presets-picker') {
+      let ok = false;
+      try {
+        top._confirmingDiscard = true;
+        btnClose.disabled = true;
+        ok = window.confirm('Discard changes and close?');
+      } finally {
+        top._confirmingDiscard = false;
+        btnClose.disabled = false;
       }
-    } catch {}
-    top.isDirty=false; setFrameMode(top,'view'); top._snapshot=null;
-    try{ window.__toast?.('No changes'); }catch{}; return;
-  } else {
-      let ok=false; try{ top._confirmingDiscard=true; btnClose.disabled=true; ok=window.confirm('Discard changes and return to view?'); } finally { top._confirmingDiscard=false; btnClose.disabled=false; }
       if (!ok) return;
-   if (top._snapshot && window.modalCtx) {
-      window.modalCtx.data                = deep(top._snapshot.data);
-      window.modalCtx.formState           = deep(top._snapshot.formState);
-      window.modalCtx.rolesState          = deep(top._snapshot.rolesState);
-      window.modalCtx.ratesState          = deep(top._snapshot.ratesState);
-      window.modalCtx.hospitalsState      = deep(top._snapshot.hospitalsState);
-      window.modalCtx.clientSettingsState = deep(top._snapshot.clientSettingsState);
-      if (top._snapshot.overrides) window.modalCtx.overrides = deep(top._snapshot.overrides);
-      // 🔹 restore candidateMainModel as well so job titles (and primary) roll back
-      window.modalCtx.candidateMainModel  = deep(top._snapshot.candidateMainModel || null);
-      try { renderCandidateRatesTable?.(); } catch {}
     }
+
+
+    if (!isChildNow && !top.noParentGate && top.mode==='edit' && top.kind!=='rates-presets') {
+      if (!top.isDirty) {
+        if (top._snapshot && window.modalCtx) {
+          window.modalCtx.data                = deep(top._snapshot.data);
+          window.modalCtx.formState           = deep(top._snapshot.formState);
+          window.modalCtx.rolesState          = deep(top._snapshot.rolesState);
+          window.modalCtx.ratesState          = deep(top._snapshot.ratesState);
+          window.modalCtx.hospitalsState      = deep(top._snapshot.hospitalsState);
+          window.modalCtx.clientSettingsState = deep(top._snapshot.clientSettingsState);
+          if (top._snapshot.overrides) window.modalCtx.overrides = deep(top._snapshot.overrides);
+          window.modalCtx.candidateMainModel  = deep(top._snapshot.candidateMainModel || null);
+          try { renderCandidateRatesTable?.(); } catch {}
+        }
+        try {
+          if (top.entity === 'contracts') {
+            const cid = window.modalCtx?.data?.id;
+            if (cid && typeof discardContractCalendarStage === 'function') discardContractCalendarStage(cid);
+          }
+        } catch {}
+        top.isDirty=false; setFrameMode(top,'view'); top._snapshot=null;
+        try{ window.__toast?.('No changes'); }catch{}; return;
+      } else {
+        let ok=false; try{ top._confirmingDiscard=true; btnClose.disabled=true; ok=window.confirm('Discard changes and return to view?'); } finally { top._confirmingDiscard=false; btnClose.disabled=false; }
+        if (!ok) return;
+        if (top._snapshot && window.modalCtx) {
+          window.modalCtx.data                = deep(top._snapshot.data);
+          window.modalCtx.formState           = deep(top._snapshot.formState);
+          window.modalCtx.rolesState          = deep(top._snapshot.rolesState);
+          window.modalCtx.ratesState          = deep(top._snapshot.ratesState);
+          window.modalCtx.hospitalsState      = deep(top._snapshot.hospitalsState);
+          window.modalCtx.clientSettingsState = deep(top._snapshot.clientSettingsState);
+          if (top._snapshot.overrides) window.modalCtx.overrides = deep(top._snapshot.overrides);
+          // 🔹 restore candidateMainModel as well so job titles (and primary) roll back
+          window.modalCtx.candidateMainModel  = deep(top._snapshot.candidateMainModel || null);
+          try { renderCandidateRatesTable?.(); } catch {}
+        }
+        try {
+          if (top.entity === 'contracts') {
+            const cid = window.modalCtx?.data?.id;
+            if (cid && typeof discardContractCalendarStage === 'function') discardContractCalendarStage(cid);
+          }
+        } catch {}
+        top.isDirty=false; top._snapshot=null; setFrameMode(top,'view'); return;
+      }
+    }
+
+
+    if (top._closing) return;
+    top._closing=true;
+    document.onmousemove=null; document.onmouseup=null; byId('modal')?.classList.remove('dragging');
+
+    if (!isChildNow && !top.noParentGate && top.mode==='create' && top.isDirty && top.kind!=='rates-presets') {
+      let ok=false; try{ top._confirmingDiscard=true; btnClose.disabled=true; ok=window.confirm('You have unsaved changes. Discard them and close?'); } finally { top._confirmingDiscard=false; btnClose.disabled=false; }
+      if (!ok) { top._closing=false; return; }
+    }
+
+
     try {
-      if (top.entity === 'contracts') {
+      if (top.entity === 'contracts' && (top.mode==='edit' || top.mode==='create')) {
         const cid = window.modalCtx?.data?.id;
         if (cid && typeof discardContractCalendarStage === 'function') discardContractCalendarStage(cid);
       }
     } catch {}
-    top.isDirty=false; top._snapshot=null; setFrameMode(top,'view'); return;
-  }
-}
+    sanitizeModalGeometry();
+    const closing=stack().pop(); if (closing?._detachDirty){ try{closing._detachDirty();}catch{} closing._detachDirty=null; }
+    if (closing?._detachGlobal){ try{closing._detachGlobal();}catch{} closing._detachGlobal=null; } top._wired=false;
+    if (stack().length>0) {
+      const p=currentFrame();
+      // restore parent context to ensure actions (Clone & Extend) render correctly
+      if (p && p._ctxRef) window.modalCtx = p._ctxRef;
+      // ▶ for most children, resume the original parent mode; for the rate-presets picker,
+      //    keep whatever mode the parent is currently in (typically 'edit' after Apply).
+      const resumeMode =
+        (typeof closing !== 'undefined' &&
+         closing &&
+         closing._parentModeOnOpen &&
+         closing.kind !== 'rate-presets-picker')
+          ? closing._parentModeOnOpen
+          : p.mode;
 
+      try { setFrameMode(p, resumeMode); } catch {}
+      p._updateButtons && p._updateButtons();
+      renderTop();
 
-if (top._closing) return;
-top._closing=true;
-document.onmousemove=null; document.onmouseup=null; byId('modal')?.classList.remove('dragging');
+      try{ p.onReturn && p.onReturn(); }catch{}
+    } else {
+      discardAllModalsAndState();
+      if (window.__pendingFocus) { try{ renderAll(); } catch(e) { console.error('refresh after modal close failed', e); } }
+    }
 
-if (!isChildNow && !top.noParentGate && top.mode==='create' && top.isDirty && top.kind!=='rates-presets') {
-  let ok=false; try{ top._confirmingDiscard=true; btnClose.disabled=true; ok=window.confirm('You have unsaved changes. Discard them and close?'); } finally { top._confirmingDiscard=false; btnClose.disabled=false; }
-  if (!ok) { top._closing=false; return; }
-}
+  };
+  // AFTER
+  const onCloseClick = (ev) => {
+    const btn = ev?.currentTarget || byId('btnCloseModal');
+    const bound = btn?.dataset?.ownerToken;
+    const topNow = currentFrame();
+    if (!topNow || bound !== topNow._token) return;
+    handleSecondary(ev);
+  };
 
+  const bindClose = (btn, fr) => {
+    if (!btn || !fr) return;
+    btn.dataset.ownerToken = fr._token;
+    btn.onclick = onCloseClick;
+  };
 
-try {
-  if (top.entity === 'contracts' && (top.mode==='edit' || top.mode==='create')) {
-    const cid = window.modalCtx?.data?.id;
-    if (cid && typeof discardContractCalendarStage === 'function') discardContractCalendarStage(cid);
-  }
-} catch {}
-sanitizeModalGeometry();
-const closing=stack().pop(); if (closing?._detachDirty){ try{closing._detachDirty();}catch{} closing._detachDirty=null; }
-if (closing?._detachGlobal){ try{closing._detachGlobal();}catch{} closing._detachGlobal=null; } top._wired=false;
-if (stack().length>0) {
-  const p=currentFrame();
-  // restore parent context to ensure actions (Clone & Extend) render correctly
-  if (p && p._ctxRef) window.modalCtx = p._ctxRef;
-  // ▶ for most children, resume the original parent mode; for the rate-presets picker,
-  //    keep whatever mode the parent is currently in (typically 'edit' after Apply).
-  const resumeMode =
-    (typeof closing !== 'undefined' &&
-     closing &&
-     closing._parentModeOnOpen &&
-     closing.kind !== 'rate-presets-picker')
-      ? closing._parentModeOnOpen
-      : p.mode;
-
-  try { setFrameMode(p, resumeMode); } catch {}
-  p._updateButtons && p._updateButtons();
-  renderTop();
-
-  try{ p.onReturn && p.onReturn(); }catch{}
-} else {
-  discardAllModalsAndState();
-  if (window.__pendingFocus) { try{ renderAll(); } catch(e) { console.error('refresh after modal close failed', e); } }
-}
-
-};
-// AFTER
-const onCloseClick = (ev) => {
-  const btn = ev?.currentTarget || byId('btnCloseModal');
-  const bound = btn?.dataset?.ownerToken;
-  const topNow = currentFrame();
-  if (!topNow || bound !== topNow._token) return;
-  handleSecondary(ev);
-};
-
-const bindClose = (btn, fr) => {
-  if (!btn || !fr) return;
-  btn.dataset.ownerToken = fr._token;
-  btn.onclick = onCloseClick;
-};
-
-bindClose(btnClose, top);
+  bindClose(btnClose, top);
 
   const hasStagedClientDeletes = ()=> {
     try {
@@ -17669,205 +17668,204 @@ bindClose(btnClose, top);
     } catch { return false; }
   };
 
-async function saveForFrame(fr) {
-  if (!fr || fr._saving) return;
-  const onlyDel   = hasStagedClientDeletes();
-  const allowApply= (fr.kind==='candidate-override' || fr.kind==='client-rate') && fr._applyDesired===true;
+  async function saveForFrame(fr) {
+    if (!fr || fr._saving) return;
+    const onlyDel   = hasStagedClientDeletes();
+    const allowApply= (fr.kind==='candidate-override' || fr.kind==='client-rate') && fr._applyDesired===true;
 
-  L('saveForFrame ENTER (global)', { kind: fr.kind, mode: fr.mode, noParentGate: fr.noParentGate, isDirty: fr.isDirty, onlyDel, allowApply });
+    L('saveForFrame ENTER (global)', { kind: fr.kind, mode: fr.mode, noParentGate: fr.noParentGate, isDirty: fr.isDirty, onlyDel, allowApply });
 
-  // Changed: do NOT block create saves; only no-op in EDIT when nothing changed
-  const isChildNow = (window.__modalStack?.length > 1);
-  const shouldNoop =
-    (fr.kind!=='advanced-search') &&
-    !fr.noParentGate &&
-    fr.mode === 'edit' &&            // <-- was fr.mode!=='view'
-    !fr.isDirty &&
-    !onlyDel &&
-    !allowApply;
+    // Changed: do NOT block create saves; only no-op in EDIT when nothing changed
+    const isChildNow = (window.__modalStack?.length > 1);
+    const shouldNoop =
+      (fr.kind!=='advanced-search') &&
+      !fr.noParentGate &&
+      fr.mode === 'edit' &&            // <-- was fr.mode!=='view'
+      !fr.isDirty &&
+      !onlyDel &&
+      !allowApply;
 
-  if (shouldNoop) {
-    L('saveForFrame GUARD (global): no-op (no changes and apply not allowed)');
-    if (isChildNow) {
-      sanitizeModalGeometry(); window.__modalStack.pop();
-      if (window.__modalStack.length>0) { const p=window.__modalStack[window.__modalStack.length-1]; renderTop(); try{ p.onReturn && p.onReturn(); }catch{} }
-      else { /* keep open */ }
-    } else {
-      fr.isDirty=false; fr._snapshot=null; setFrameMode(fr,'view'); fr._updateButtons&&fr._updateButtons();
-    }
-    try{ window.__toast?.('No changes'); }catch{}; return;
-  }
-
-  fr.persistCurrentTabState();
-  if (isChildNow && !fr.noParentGate && fr.kind!=='advanced-search') {
-    const p=window.__modalStack[window.__modalStack.length-2];
-    if (!p || !(p.mode==='edit'||p.mode==='create')) { L('saveForFrame GUARD (global): parent not editable'); return; }
-  }
-  fr._saving=true; fr._updateButtons&&fr._updateButtons();
-
-  let ok=false, saved=null;
-  if (typeof fr.onSave==='function') {
-    try { const res=await fr.onSave(); ok = (res===true) || (res && res.ok===true); if (res&&res.saved) saved=res.saved; }
-    catch (e) { L('saveForFrame onSave threw (global)', e); ok=false; }
-  }
-  fr._saving=false; if (!ok) { L('saveForFrame RESULT not ok (global)'); fr._updateButtons&&fr._updateButtons(); return; }
-
-  if (fr.kind === 'advanced-search') {
-    sanitizeModalGeometry();
-    const closing = window.__modalStack.pop();
-    if (closing?._detachDirty){ try{closing._detachDirty();}catch{} closing._detachDirty=null; }
-    if (closing?._detachGlobal){ try{closing._detachGlobal();}catch{} closing._detachGlobal=null; }
-    fr._wired = false;
-
-    if (window.__modalStack.length > 0) {
-      const p = window.__modalStack[window.__modalStack.length - 1];
-      renderTop();
-      try { p.onReturn && p.onReturn(); } catch {}
-    } else {
-      // 🔹 No more frames → fully tear down the modal & overlay
-      discardAllModalsAndState();
-    }
-
-    L('saveForFrame EXIT (global advanced-search closed)');
-    return;
-  }
-
-  if (isChildNow) {
-    // If this child should remain open after save (successor contract),
-    // flip it in-place to view mode and keep it on screen.
-    if (fr.stayOpenOnSave) {
-      try {
-        if (saved && window.modalCtx) {
-          window.modalCtx.data = { ...(window.modalCtx.data||{}), ...(saved.contract || saved) };
-          fr.hasId = !!window.modalCtx.data?.id;
-        }
-        setFrameMode(fr, 'view');
-        fr._updateButtons && fr._updateButtons();
-        renderTop();
-      } catch {}
-      L('saveForFrame EXIT (child kept open)');
-   } else {
-      if (!fr.noParentGate) {
-        try { window.dispatchEvent(new CustomEvent('modal-dirty')); } catch {}
-      }
-      sanitizeModalGeometry(); window.__modalStack.pop();
-      if (window.__modalStack.length>0) {
-        const p=window.__modalStack[window.__modalStack.length-1];
-
-        // ▶ for most children, resume the original parent mode; for the rate-presets picker,
-        //    keep whatever mode the parent is currently in (typically 'edit' after Apply).
-        const resumeMode =
-          (typeof fr !== 'undefined' &&
-           fr &&
-           fr._parentModeOnOpen &&
-           fr.kind !== 'rate-presets-picker')
-            ? fr._parentModeOnOpen
-            : p.mode; // keep whatever the parent already was
-
-        try { setFrameMode(p, resumeMode); } catch {}
-        p._updateButtons && p._updateButtons();
-        renderTop();
-
-
-        // ▶ nudge calendar/action bar re-wire if needed
-        try { window.dispatchEvent(new Event('contracts-main-rendered')); } catch {}
-        try { p.onReturn && p.onReturn(); }catch{}
+    if (shouldNoop) {
+      L('saveForFrame GUARD (global): no-op (no changes and apply not allowed)');
+      if (isChildNow) {
+        sanitizeModalGeometry(); window.__modalStack.pop();
+        if (window.__modalStack.length>0) { const p=window.__modalStack[window.__modalStack.length-1]; renderTop(); try{ p.onReturn && p.onReturn(); }catch{} }
+        else { /* keep open */ }
       } else {
+        fr.isDirty=false; fr._snapshot=null; setFrameMode(fr,'view'); fr._updateButtons&&fr._updateButtons();
       }
-      L('saveForFrame EXIT (global child)');
+      try{ window.__toast?.('No changes'); }catch{}; return;
     }
-  } else {
 
+    fr.persistCurrentTabState();
+    if (isChildNow && !fr.noParentGate && fr.kind!=='advanced-search') {
+      const p=window.__modalStack[window.__modalStack.length-2];
+      if (!p || !(p.mode==='edit'||p.mode==='create')) { L('saveForFrame GUARD (global): parent not editable'); return; }
+    }
+    fr._saving=true; fr._updateButtons&&fr._updateButtons();
 
-    try {
-      const savedContract = (saved && (saved.contract || saved)) || null;
-      const id = savedContract?.id || window.modalCtx?.data?.id || null;
-      if (id && savedContract) {
-        const idx = Array.isArray(currentRows) ? currentRows.findIndex(x => String(x.id) === String(id)) : -1;
-        if (idx >= 0) currentRows[idx] = savedContract;
-        (window.__lastSavedAtById ||= {})[String(id)] = Date.now();
+    let ok=false, saved=null;
+    if (typeof fr.onSave==='function') {
+      try { const res=await fr.onSave(); ok = (res===true) || (res && res.ok===true); if (res&&res.saved) saved=res.saved; }
+      catch (e) { L('saveForFrame onSave threw (global)', e); ok=false; }
+    }
+    fr._saving=false; if (!ok) { L('saveForFrame RESULT not ok (global)'); fr._updateButtons&&fr._updateButtons(); return; }
+
+    if (fr.kind === 'advanced-search') {
+      sanitizeModalGeometry();
+      const closing = window.__modalStack.pop();
+      if (closing?._detachDirty){ try{closing._detachDirty();}catch{} closing._detachDirty=null; }
+      if (closing?._detachGlobal){ try{closing._detachGlobal();}catch{} closing._detachGlobal=null; }
+      fr._wired = false;
+
+      if (window.__modalStack.length > 0) {
+        const p = window.__modalStack[window.__modalStack.length - 1];
+        renderTop();
+        try { p.onReturn && p.onReturn(); } catch {}
+      } else {
+        // 🔹 No more frames → fully tear down the modal & overlay
+        discardAllModalsAndState();
       }
-    } catch (e) { console.warn('[SAVE] list cache merge failed', e); }
 
-    if (saved && window.modalCtx) { window.modalCtx.data = { ...(window.modalCtx.data||{}), ...(saved.contract || saved) }; fr.hasId = !!window.modalCtx.data?.id; }
-    fr.isDirty=false; fr._snapshot=null; setFrameMode(fr,'view');
-    L('saveForFrame EXIT (global parent, kept open)');
-  }
-}
+      L('saveForFrame EXIT (global advanced-search closed)');
+      return;
+    }
 
-const onSaveClick = async (ev)=>{
-  const btn=ev?.currentTarget || byId('btnSave');
-  const topNow=currentFrame(); const bound=btn?.dataset?.ownerToken;
-  if (LOG) console.log('[MODAL] click #btnSave (global)', {boundToken:bound, topToken:topNow?._token, topKind:topNow?.kind, topTitle:topNow?.title});
-  if(!topNow) return; if(bound!==topNow._token){ if(LOG) console.warn('[MODAL] token mismatch (global); using top frame'); }
-  await saveForFrame(topNow);
-};
+    if (isChildNow) {
+      // If this child should remain open after save (successor contract),
+      // flip it in-place to view mode and keep it on screen.
+      if (fr.stayOpenOnSave) {
+        try {
+          if (saved && window.modalCtx) {
+            window.modalCtx.data = { ...(window.modalCtx.data||{}), ...(saved.contract || saved) };
+            fr.hasId = !!window.modalCtx.data?.id;
+          }
+          setFrameMode(fr, 'view');
+          fr._updateButtons && fr._updateButtons();
+          renderTop();
+        } catch {}
+        L('saveForFrame EXIT (child kept open)');
+      } else {
+        if (!fr.noParentGate) {
+          try { window.dispatchEvent(new CustomEvent('modal-dirty')); } catch {}
+        }
+        sanitizeModalGeometry(); window.__modalStack.pop();
+        if (window.__modalStack.length>0) {
+          const p=window.__modalStack[window.__modalStack.length-1];
 
-const bindSave = (btn,fr)=>{ if(!btn||!fr) return; btn.dataset.ownerToken = fr._token; btn.onclick = onSaveClick; if(LOG) console.log('[MODAL] bind #btnSave → (global)',{ownerToken:fr._token,kind:fr.kind||'(parent)',title:fr.title,mode:fr.mode}); };
-bindSave(btnSave, top);
-// FIX: ignore programmatic "dirty" while suppression is active
-const onDirtyEvt = ()=>{
-  const fr = currentFrame();
-  if (fr && fr._suppressDirty) return;
+          // ▶ for most children, resume the original parent mode; for the rate-presets picker,
+          //    keep whatever mode the parent is currently in (typically 'edit' after Apply).
+          const resumeMode =
+            (typeof fr !== 'undefined' &&
+             fr &&
+             fr._parentModeOnOpen &&
+             fr.kind !== 'rate-presets-picker')
+              ? fr._parentModeOnOpen
+              : p.mode; // keep whatever the parent already was
 
-  // Allow presets picker dirty → parent (ignore only truly load-only frames)
-if (fr && fr._loadOnly === true) return;
+          try { setFrameMode(p, resumeMode); } catch {}
+          p._updateButtons && p._updateButtons();
+          renderTop();
 
 
-  const isChildNow = (stack().length > 1);
-  if (isChildNow) {
-    if (fr && fr.noParentGate) {
-      if (fr.mode === 'edit' || fr.mode === 'create') {
-        fr.isDirty = true;
-        fr._updateButtons && fr._updateButtons();
+          // ▶ nudge calendar/action bar re-wire if needed
+          try { window.dispatchEvent(new Event('contracts-main-rendered')); } catch {}
+          try { p.onReturn && p.onReturn(); }catch{}
+        } else {
+        }
+        L('saveForFrame EXIT (global child)');
       }
     } else {
-      const p = parentFrame();
-      if (p && (p.mode === 'edit' || p.mode === 'create')) {
-        p.isDirty = true;
-        p._updateButtons && p._updateButtons();
-      }
+
+      try {
+        const savedContract = (saved && (saved.contract || saved)) || null;
+        const id = savedContract?.id || window.modalCtx?.data?.id || null;
+        if (id && savedContract) {
+          const idx = Array.isArray(currentRows) ? currentRows.findIndex(x => String(x.id) === String(id)) : -1;
+          if (idx >= 0) currentRows[idx] = savedContract;
+          (window.__lastSavedAtById ||= {})[String(id)] = Date.now();
+        }
+      } catch (e) { console.warn('[SAVE] list cache merge failed', e); }
+
+      if (saved && window.modalCtx) { window.modalCtx.data = { ...(window.modalCtx.data||{}), ...(saved.contract || saved) }; fr.hasId = !!window.modalCtx.data?.id; }
+      fr.isDirty=false; fr._snapshot=null; setFrameMode(fr,'view');
+      L('saveForFrame EXIT (global parent, kept open)');
     }
-  } else if (fr && (fr.mode === 'edit' || fr.mode === 'create')) {
-    fr.isDirty = true;
-    fr._updateButtons && fr._updateButtons();
   }
-  try{ const t=currentFrame(); if(t && t.entity==='candidates' && t.currentTabKey==='rates'){ renderCandidateRatesTable?.(); } }catch{}
-};
+
+  const onSaveClick = async (ev)=>{
+    const btn=ev?.currentTarget || byId('btnSave');
+    const topNow=currentFrame(); const bound=btn?.dataset?.ownerToken;
+    if (LOG) console.log('[MODAL] click #btnSave (global)', {boundToken:bound, topToken:topNow?._token, topKind:topNow?.kind, topTitle:topNow?.title});
+    if(!topNow) return; if(bound!==topNow._token){ if(LOG) console.warn('[MODAL] token mismatch (global); using top frame'); }
+    await saveForFrame(topNow);
+  };
+
+  const bindSave = (btn,fr)=>{ if(!btn||!fr) return; btn.dataset.ownerToken = fr._token; btn.onclick = onSaveClick; if(LOG) console.log('[MODAL] bind #btnSave → (global)',{ownerToken:fr._token,kind:fr.kind||'(parent)',title:fr.title,mode:fr.mode}); };
+  bindSave(btnSave, top);
+  // FIX: ignore programmatic "dirty" while suppression is active
+  const onDirtyEvt = ()=>{
+    const fr = currentFrame();
+    if (fr && fr._suppressDirty) return;
+
+    // Allow presets picker dirty → parent (ignore only truly load-only frames)
+    if (fr && fr._loadOnly === true) return;
 
 
-const onApplyEvt = ev=>{
-  const isChildNow=(stack().length>1); if(!isChildNow) return;
-  const t=currentFrame(); if(!(t && (t.kind==='client-rate'||t.kind==='candidate-override'))) return;
-  const enabled=!!(ev && ev.detail && ev.detail.enabled);
-  t._applyDesired=enabled;
-  t._updateButtons&&t._updateButtons();
-  bindSave(byId('btnSave'), t);
-  if(LOG) console.log('[MODAL] onApplyEvt (global) → _applyDesired =', enabled,'rebound save to top frame');
-};
+    const isChildNow = (stack().length > 1);
+    if (isChildNow) {
+      if (fr && fr.noParentGate) {
+        if (fr.mode === 'edit' || fr.mode === 'create') {
+          fr.isDirty = true;
+          fr._updateButtons && fr._updateButtons();
+        }
+      } else {
+        const p = parentFrame();
+        if (p && (p.mode === 'edit' || p.mode === 'create')) {
+          p.isDirty = true;
+          p._updateButtons && p._updateButtons();
+        }
+      }
+    } else if (fr && (fr.mode === 'edit' || fr.mode === 'create')) {
+      fr.isDirty = true;
+      fr._updateButtons && fr._updateButtons();
+    }
+    try{ const t=currentFrame(); if(t && t.entity==='candidates' && t.currentTabKey==='rates'){ renderCandidateRatesTable?.(); } }catch{}
+  };
 
-const onModeChanged = ev=>{
-  const isChildNow=(stack().length>1); if(!isChildNow) return;
-  const parentIdx=stack().length-2, changed=ev?.detail?.frameIndex ?? -1;
-  if(changed===parentIdx){ if(LOG) console.log('[MODAL] parent mode changed (global) → child _updateButtons()'); const t=currentFrame(); t._updateButtons&&t._updateButtons(); bindSave(byId('btnSave'), t); }
-};
 
-const onMarginsEvt = ()=>{ try { const t=currentFrame(); if (t && (t.mode==='edit'||t.mode==='create')) t._updateButtons(); } catch {} };
+  const onApplyEvt = ev=>{
+    const isChildNow=(stack().length>1); if(!isChildNow) return;
+    const t=currentFrame(); if(!(t && (t.kind==='client-rate'||t.kind==='candidate-override'))) return;
+    const enabled=!!(ev && ev.detail && ev.detail.enabled);
+    t._applyDesired=enabled;
+    t._updateButtons&&t._updateButtons();
+    bindSave(byId('btnSave'), t);
+    if(LOG) console.log('[MODAL] onApplyEvt (global) → _applyDesired =', enabled,'rebound save to top frame');
+  };
 
-if (!top._wired) {
-  window.addEventListener('modal-dirty', onDirtyEvt);
-  window.addEventListener('modal-apply-enabled', onApplyEvt);
-  window.addEventListener('modal-frame-mode-changed', onModeChanged);
-  window.addEventListener('contract-margins-updated', onMarginsEvt);
-  const onEsc=e=>{ if(e.key==='Escape'){ if(top._confirmingDiscard||top._closing) return; e.preventDefault(); byId('btnCloseModal').click(); } };
-  window.addEventListener('keydown', onEsc);
-   const onOverlayClick=e=>{ if(top._confirmingDiscard||top._closing) return; if(e.target===byId('modalBack')) { e.preventDefault(); e.stopPropagation(); return; } };
-  byId('modalBack').addEventListener('click', onOverlayClick, true);
+  const onModeChanged = ev=>{
+    const isChildNow=(stack().length>1); if(!isChildNow) return;
+    const parentIdx=stack().length-2, changed=ev?.detail?.frameIndex ?? -1;
+    if(changed===parentIdx){ if(LOG) console.log('[MODAL] parent mode changed (global) → child _updateButtons()'); const t=currentFrame(); t._updateButtons&&t._updateButtons(); bindSave(byId('btnSave'), t); }
+  };
 
-  top._detachGlobal = ()=>{ try{window.removeEventListener('modal-dirty',onDirtyEvt);}catch{} try{window.removeEventListener('modal-apply-enabled',onApplyEvt);}catch{} try{window.removeEventListener('modal-frame-mode-changed',onModeChanged);}catch{} try{window.removeEventListener('contract-margins-updated',onMarginsEvt);}catch{} try{window.removeEventListener('keydown',onEsc);}catch{} try{byId('modalBack').removeEventListener('click', onOverlayClick, true);}catch{}; };
-  top._wired = true;
-  L('renderTop (global): listeners wired');
-}
+  const onMarginsEvt = ()=>{ try { const t=currentFrame(); if (t && (t.mode==='edit'||t.mode==='create')) t._updateButtons(); } catch {} };
+
+  if (!top._wired) {
+    window.addEventListener('modal-dirty', onDirtyEvt);
+    window.addEventListener('modal-apply-enabled', onApplyEvt);
+    window.addEventListener('modal-frame-mode-changed', onModeChanged);
+    window.addEventListener('contract-margins-updated', onMarginsEvt);
+    const onEsc=e=>{ if(e.key==='Escape'){ if(top._confirmingDiscard||top._closing) return; e.preventDefault(); byId('btnCloseModal').click(); } };
+    window.addEventListener('keydown', onEsc);
+    const onOverlayClick=e=>{ if(top._confirmingDiscard||top._closing) return; if(e.target===byId('modalBack')) { e.preventDefault(); e.stopPropagation(); return; } };
+    byId('modalBack').addEventListener('click', onOverlayClick, true);
+
+    top._detachGlobal = ()=>{ try{window.removeEventListener('modal-dirty',onDirtyEvt);}catch{} try{window.removeEventListener('modal-apply-enabled',onApplyEvt);}catch{} try{window.removeEventListener('modal-frame-mode-changed',onModeChanged);}catch{} try{window.removeEventListener('contract-margins-updated',onMarginsEvt);}catch{} try{window.removeEventListener('keydown',onEsc);}catch{} try{byId('modalBack').removeEventListener('click', onOverlayClick, true);}catch{}; };
+    top._wired = true;
+    L('renderTop (global): listeners wired');
+  }
 
 
   const parentEditable = parent && (parent.mode==='edit' || parent.mode==='create');
@@ -17892,6 +17890,7 @@ if (!top._wired) {
 
   GE();
 }
+
 
 
   byId('modalBack').style.display='flex';
@@ -19358,7 +19357,7 @@ function openJobTitleSettingsModal() {
           </select>
         </div>
 
-        <div class="row" style="grid-column:1/-1;margin-top:8px;display:flex;gap:6px;justify-content:flex-end">
+        <div class="row" style="grid-column:1/-1;margin-top:8px;display:flex;flex-direction:row;align-items:center;gap:6px;justify-content:flex-end">
           <button type="button" class="btn mini" style="padding:4px 8px" id="jt_btn_delete" ${(e.isNew || (node && Array.isArray(node.children) && node.children.length)) ? 'disabled' : ''}>Delete</button>
           <button type="button" class="btn mini primary" style="padding:4px 10px" id="jt_btn_save">Save</button>
         </div>
