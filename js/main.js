@@ -8948,6 +8948,13 @@ async function openSearchModal(opts = {}) {
     ${row(fromLabel, `<input class="input" type="text" name="${fromName}" placeholder="DD/MM/YYYY" />`)}
     ${row(toLabel,   `<input class="input" type="text" name="${toName}"   placeholder="DD/MM/YYYY" />`)}`;
 
+  // NEW: inline date range (From / To on one row)
+  const dateRangeRow = (fromName, toName, label) => row(label, `
+    <div class="split">
+      <input class="input" type="text" name="${fromName}" placeholder="From DD/MM/YYYY" />
+      <input class="input" type="text" name="${toName}"   placeholder="To DD/MM/YYYY" />
+    </div>`);
+
   const multi = (name, values) =>
     `<select name="${name}" multiple size="6">${values.map(v=>`<option value="${v}">${v}</option>`).join('')}</select>`;
 
@@ -9007,12 +9014,12 @@ async function openSearchModal(opts = {}) {
       row('City',     inputText('town_city', 'Town / City')),
       row('Postcode', inputText('postcode', 'e.g. W7 3EE')),
 
-      // Status + created range
+      // Status + created range (inline)
       row('Active', boolSelect('active')),
-      datePair('created_from','Created from','created_to','Created to'),
+      dateRangeRow('created_from','created_to','Created (from / to)'),
 
-      // Last updated range
-      datePair('updated_from','Last updated from','updated_to','Last updated to'),
+      // Last updated range (inline)
+      dateRangeRow('updated_from','updated_to','Last updated (from / to)'),
 
       // Banking / umbrella / ref
       row('Sort Code',       inputText('sort_code', '12-34-56')),
@@ -9096,10 +9103,13 @@ async function openSearchModal(opts = {}) {
     inner = `<div class="tabc">No filters for this section.</div>`;
   }
 
+  // Updated header: two small dark buttons, side by side
   const headerHtml = `
-    <div class="row" id="searchHeaderRow" style="justify-content:flex-end; gap=.35rem; margin-bottom:.5rem">
-      <button type="button" class="adv-btn" data-adv-act="load">Load Saved Search</button>
-      <button type="button" class="adv-btn" data-adv-act="save">Save Search</button>
+    <div class="row" id="searchHeaderRow" style="justify-content:flex-end;gap:6px;margin-bottom:.5rem">
+      <div class="controls" style="display:flex;justify-content:flex-end;gap:6px">
+        <button type="button" class="adv-btn" data-adv-act="load">Load saved search</button>
+        <button type="button" class="adv-btn" data-adv-act="save">Save search</button>
+      </div>
     </div>`;
 
   const formHtml = `
@@ -9115,7 +9125,13 @@ async function openSearchModal(opts = {}) {
     () => formHtml,
     async () => {
       window.__listState = window.__listState || {};
-      const st = (window.__listState[currentSection] ||= { page: 1, pageSize: 50, total: null, hasMore: false, filters: null });
+      const st = (window.__listState[currentSection] ||= {
+        page: 1,
+        pageSize: 50,
+        total: null,
+        hasMore: false,
+        filters: null
+      });
       st.page = 1;
 
       // Reset selection for the new dataset (IDs-only)
@@ -9127,7 +9143,7 @@ async function openSearchModal(opts = {}) {
 
       const rows = await search(currentSection, filters);
       if (rows) renderSummary(rows);
-      return true; // showModal will close this advanced-search frame on success
+      return true; // showModal / saveForFrame closes the advanced-search frame on success
     },
     false,
     () => {
@@ -9143,7 +9159,13 @@ async function openSearchModal(opts = {}) {
       // Prefill from current filters immediately on mount
       try {
         window.__listState = window.__listState || {};
-        const st = (window.__listState[currentSection] ||= { page:1, pageSize:50, total:null, hasMore:false, filters:null });
+        const st = (window.__listState[currentSection] ||= {
+          page:1,
+          pageSize:50,
+          total:null,
+          hasMore:false,
+          filters:null
+        });
         populateSearchFormFromFilters(st.filters || {}, '#searchForm');
       } catch {}
     },
@@ -17300,15 +17322,22 @@ async function saveForFrame(fr) {
     sanitizeModalGeometry();
     const closing = window.__modalStack.pop();
     if (closing?._detachDirty){ try{closing._detachDirty();}catch{} closing._detachDirty=null; }
-    if (closing?._detachGlobal){ try{closing._detachGlobal();}catch{} closing._detachGlobal=null; } fr._wired=false;
+    if (closing?._detachGlobal){ try{closing._detachGlobal();}catch{} closing._detachGlobal=null; }
+    fr._wired = false;
 
-    if (window.__modalStack.length>0) {
-      const p=window.__modalStack[window.__modalStack.length-1]; renderTop(); try{ p.onReturn && p.onReturn(); } catch{}
+    if (window.__modalStack.length > 0) {
+      const p = window.__modalStack[window.__modalStack.length - 1];
+      renderTop();
+      try { p.onReturn && p.onReturn(); } catch {}
     } else {
+      // 🔹 No more frames → fully tear down the modal & overlay
+      discardAllModalsAndState();
     }
+
     L('saveForFrame EXIT (global advanced-search closed)');
     return;
   }
+
   if (isChildNow) {
     // If this child should remain open after save (successor contract),
     // flip it in-place to view mode and keep it on screen.
