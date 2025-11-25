@@ -10609,7 +10609,7 @@ async function openCandidate(row) {
     'Candidate',
     [
       { key:'main',     label:'Main Details' },
-      { key:'rates',    label:'Rates' },
+      { key:'rates',    label:'Care Packages' },   // ← renamed
       { key:'pay',      label:'Payment details' },
       { key:'bookings', label:'Bookings' }
     ],
@@ -10770,7 +10770,7 @@ async function openCandidate(row) {
       }
 
       // Validate NEW rows
-      for (const nv of (O.stagedNew || [])) {
+      for (const nv of (OX.stagedNew || [])) {
         const win = await getCoveringDefault(nv.client_id, nv.role, nv.band ?? null, nv.date_from);
         if (!win) { alert(`No active client default covers ${nv.role}${nv.band?` / ${nv.band}`:''} on ${formatIsoToUk(nv.date_from)}.`); return { ok:false }; }
         if (nv.date_to && win.date_to && nv.date_to > win.date_to) { alert(`Client rate ends on ${formatIsoToUk(win.date_to)} — override must end on or before this date.`); return { ok:false }; }
@@ -10955,7 +10955,6 @@ async function openCandidate(row) {
   }
 }
 
-
 function renderCandidateTab(key, row = {}) {
   if (key === 'main') return html(`
     <div class="form" id="tab-main">
@@ -10964,8 +10963,6 @@ function renderCandidateTab(key, row = {}) {
       ${input('email','Email', row.email, 'email')}
       ${input('phone','Telephone', row.phone)}
       ${select('pay_method','Pay method', row.pay_method || 'PAYE', ['PAYE','UMBRELLA'], {id:'pay-method'})}
-
-      ${input('key_norm','Global Candidate Key (CGK)', row.key_norm)}
 
       <!-- CCR: display-only, never posted -->
       <div class="row">
@@ -11058,6 +11055,30 @@ function renderCandidateTab(key, row = {}) {
         </div>
       </div>
 
+      <div class="row">
+        <label>Notes</label>
+        <textarea name="notes" placeholder="Free text…">${row.notes || ''}</textarea>
+      </div>
+    </div>
+  `);
+
+  // Care Packages tab (was "Rates")
+  if (key === 'rates') return html(`
+    <div class="form" id="tab-rates">
+      <!-- Global Candidate Key (GCK) -->
+      <div class="row">
+        <label>Global Candidate Key (GCK)</label>
+        <div class="controls">
+          <input class="input"
+                 name="key_norm"
+                 value="${escapeHtml(row.key_norm || '')}"
+                 placeholder="" />
+          <div class="hint">
+            This links the candidate record to the Google Sheets Rota.
+          </div>
+        </div>
+      </div>
+
       <!-- Rota Roles editor -->
       <div class="row">
         <label>Rota Roles</label>
@@ -11068,16 +11089,11 @@ function renderCandidateTab(key, row = {}) {
         </div>
       </div>
 
+      <!-- Candidate rate overrides table (unchanged wiring) -->
       <div class="row">
-        <label>Notes</label>
-        <textarea name="notes" placeholder="Free text…">${row.notes || ''}</textarea>
+        <label>Care Package Rates</label>
+        <div id="ratesTable"></div>
       </div>
-    </div>
-  `);
-
-  if (key === 'rates') return html(`
-    <div id="tab-rates">
-      <div id="ratesTable"></div>
     </div>
   `);
 
@@ -16537,77 +16553,85 @@ if (this._loadOnly === true) return;
   byId('modalBody').innerHTML = this.renderTab(k, merged) || '';
 
   if (this.entity==='candidates' && k==='bookings') {
-    const candId = window.modalCtx?.data?.id;
-    if (candId) {
-      try { renderCandidateCalendarTab(candId); } catch(e) { console.warn('renderCandidateCalendarTab failed', e); }
-    }
+  const candId = window.modalCtx?.data?.id;
+  if (candId) {
+    try { renderCandidateCalendarTab(candId); } catch(e) { console.warn('renderCandidateCalendarTab failed', e); }
   }
-  if (this.entity==='candidates' && k==='rates') { mountCandidateRatesTab?.(); }
-  if (this.entity==='candidates' && k==='pay') {
-    if (!window.modalCtx?.payMethodState && window.modalCtx?.data?.pay_method) {
-      window.modalCtx.payMethodState = String(window.modalCtx.data.pay_method);
-      L('setTab(candidates/pay): seeded payMethodState', { payMethodState: window.modalCtx.payMethodState });
-    }
-    const p = mountCandidatePayTab?.();
-    if (p && typeof p.then === 'function') { await p; }
-  }
+}
 
-    if (this.entity==='candidates' && k==='main') {
-    const pmSel = document.querySelector('#pay-method');
-    if (pmSel) {
-      const stagedPm   = window.modalCtx?.formState?.main?.pay_method;
-      const preferred  = (window.modalCtx?.payMethodState || stagedPm || pmSel.value);
-      pmSel.value = preferred;
-      pmSel.addEventListener('change', () => {
-        window.modalCtx.payMethodState = pmSel.value;
-        try { window.dispatchEvent(new CustomEvent('pay-method-changed')); }
-        catch { window.dispatchEvent(new Event('pay-method-changed')); }
-      });
-      window.modalCtx.payMethodState = pmSel.value;
-      L('setTab(candidates/main): pay method wired', { preferred });
-    }
+// Care Packages tab (was 'rates'): mount rates table + Rota Roles
+if (this.entity==='candidates' && k==='rates') {
+  // Existing behaviour: mount candidate overrides / rates UI
+  mountCandidateRatesTab?.();
 
-    const rolesHost = document.querySelector('#rolesEditor');
-    if (rolesHost) {
-      (async () => {
-        try {
-          const roleOptions = await loadGlobalRoleOptions();
-          renderRolesEditor(rolesHost, window.modalCtx.rolesState || [], roleOptions);
-          L('setTab(candidates/main): roles editor mounted', { options: (roleOptions||[]).length });
-        } catch (e) {
-          console.error('[MODAL] roles mount failed', e);
-        }
-      })();
-    }
-
-    // ✅ Reuse existing candidateMainModel if present, so child modals don't lose changes
-    try {
-      const container = document.getElementById('tab-main');
-      if (container &&
-          typeof buildCandidateMainDetailsModel === 'function' &&
-          typeof bindCandidateMainFormEvents === 'function') {
-
-        let model = window.modalCtx?.candidateMainModel;
-        if (!model || typeof model !== 'object') {
-          // First time we hit the main tab: build from DB row
-          model = buildCandidateMainDetailsModel(window.modalCtx?.data || {});
-          window.modalCtx.candidateMainModel = model;
-          L('setTab(candidates/main): created candidate main model', {
-            keys: Object.keys(model || {})
-          });
-        } else {
-          L('setTab(candidates/main): reusing candidate main model', {
-            keys: Object.keys(model || {})
-          });
-        }
-
-        // (Re)bind DOM to the model – inputs and job titles list will reflect current model values
-        bindCandidateMainFormEvents(container, model);
+  // NEW: wire the Rota Roles editor here instead of on the main tab
+  const rolesHost = document.querySelector('#rolesEditor');
+  if (rolesHost) {
+    (async () => {
+      try {
+        const roleOptions = await loadGlobalRoleOptions();
+        renderRolesEditor(rolesHost, window.modalCtx.rolesState || [], roleOptions);
+        L('setTab(candidates/rates): roles editor mounted', { options: (roleOptions||[]).length });
+      } catch (e) {
+        console.error('[MODAL] roles mount failed', e);
       }
-    } catch (e) {
-      console.error('[MODAL] bindCandidateMainFormEvents failed', e);
-    }
+    })();
   }
+}
+
+if (this.entity==='candidates' && k==='pay') {
+  if (!window.modalCtx?.payMethodState && window.modalCtx?.data?.pay_method) {
+    window.modalCtx.payMethodState = String(window.modalCtx.data.pay_method);
+    L('setTab(candidates/pay): seeded payMethodState', { payMethodState: window.modalCtx.payMethodState });
+  }
+  const p = mountCandidatePayTab?.();
+  if (p && typeof p.then === 'function') { await p; }
+}
+
+if (this.entity==='candidates' && k==='main') {
+  const pmSel = document.querySelector('#pay-method');
+  if (pmSel) {
+    const stagedPm   = window.modalCtx?.formState?.main?.pay_method;
+    const preferred  = (window.modalCtx?.payMethodState || stagedPm || pmSel.value);
+    pmSel.value = preferred;
+    pmSel.addEventListener('change', () => {
+      window.modalCtx.payMethodState = pmSel.value;
+      try { window.dispatchEvent(new CustomEvent('pay-method-changed')); }
+      catch { window.dispatchEvent(new Event('pay-method-changed')); }
+    });
+    window.modalCtx.payMethodState = pmSel.value;
+    L('setTab(candidates/main): pay method wired', { preferred });
+  }
+
+  // ✅ Reuse existing candidateMainModel if present, so child modals don't lose changes
+  try {
+    const container = document.getElementById('tab-main');
+    if (container &&
+        typeof buildCandidateMainDetailsModel === 'function' &&
+        typeof bindCandidateMainFormEvents === 'function') {
+
+      let model = window.modalCtx?.candidateMainModel;
+      if (!model || typeof model !== 'object') {
+        // First time we hit the main tab: build from DB row
+        model = buildCandidateMainDetailsModel(window.modalCtx?.data || {});
+        window.modalCtx.candidateMainModel = model;
+        L('setTab(candidates/main): created candidate main model', {
+          keys: Object.keys(model || {})
+        });
+      } else {
+        L('setTab(candidates/main): reusing candidate main model', {
+          keys: Object.keys(model || {})
+        });
+      }
+
+      // (Re)bind DOM to the model – inputs and job titles list will reflect current model values
+      bindCandidateMainFormEvents(container, model);
+    }
+  } catch (e) {
+    console.error('[MODAL] bindCandidateMainFormEvents failed', e);
+  }
+}
+
 
   if (this.entity === 'umbrellas' && k === 'main') {
     try {
