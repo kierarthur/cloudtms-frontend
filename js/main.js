@@ -890,7 +890,6 @@ function attachHeaderContextMenu(section, tables) {
   });
 }
 
-
 function openColumnsDialog(section) {
   const rootPrefs =
     (window.__gridPrefs &&
@@ -945,16 +944,16 @@ function openColumnsDialog(section) {
   lblCb.checked = useFriendly;
   lblWrap.appendChild(lblCb);
   lblWrap.appendChild(document.createTextNode(' Use friendly header labels'));
-  lblWrap.style.cssText = 'display:flex;align-items:center;gap:8px;margin-bottom:8px;';
+  lblWrap.style.cssText = 'display:flex;align-items:center;gap:8px;margin-bottom:8px;font-size:12px;';
   modal.appendChild(lblWrap);
 
   lblCb.addEventListener('change', () => {
     saveUserGridPrefsDebounced(section, { use_friendly_labels: !!lblCb.checked });
   });
 
-  // Table: Visible + Column key + Display name
+  // Table: Visible + Column key + Display name + Order
   const t = document.createElement('table');
-  t.style.cssText = 'width:100%;border-collapse:collapse;';
+  t.style.cssText = 'width:100%;border-collapse:collapse;font-size:12px;';
   t.innerHTML = `
     <thead>
       <tr>
@@ -980,8 +979,6 @@ function openColumnsDialog(section) {
     .map(k => ({
       key: k,
       visible: (colPrefs[k]?.visible !== false),
-      // Now: server/user labels are authoritative (deep-merged in GET).
-      // Fallback only to the raw key if nothing defined at all.
       label: labels[k] || k,
       order: orderOf(k)
     }))
@@ -995,7 +992,6 @@ function openColumnsDialog(section) {
     rowsModel.forEach((r, idx) => {
       columns[r.key] = { visible: !!r.visible, order: r.order };
       labelsOut[r.key] = String(r.label || r.key);
-      // metaOut is not changed here; selectable remains driven by defaults/code
     });
 
     saveUserGridPrefsDebounced(section, {
@@ -1019,10 +1015,10 @@ function openColumnsDialog(section) {
       tr.innerHTML = `
         <td style="padding:6px"><input type="checkbox" ${r.visible ? 'checked' : ''}></td>
         <td style="padding:6px;font-family:monospace">${r.key}</td>
-        <td style="padding:6px"><input type="text"></td>
-        <td style="padding:6px">
-          <button data-move="up">▲</button>
-          <button data-move="down">▼</button>
+        <td style="padding:6px"><input type="text" style="width:100%;background:#000;border:1px solid var(--line);color:var(--text);border-radius:6px;padding:4px 8px;font-size:12px;"></td>
+        <td style="padding:6px;white-space:nowrap">
+          <button class="btn mini" data-move="up">▲</button>
+          <button class="btn mini" data-move="down">▼</button>
         </td>
       `;
 
@@ -1065,7 +1061,7 @@ function openColumnsDialog(section) {
 
   refresh();
 
-  // Footer: Reset widths (delegates to header context menu logic) + Close
+  // Footer: Reset widths + Close
   const footer = document.createElement('div');
   footer.style.cssText = 'display:flex;justify-content:space-between;gap:8px;margin-top:10px;';
   const left  = document.createElement('div');
@@ -1075,9 +1071,7 @@ function openColumnsDialog(section) {
 
   const btnResetWidths = document.createElement('button');
   btnResetWidths.textContent = 'Reset all widths';
-  btnResetWidths.style.cssText =
-    'border:1px solid var(--line);background:#0b152a;color:var(--text);' +
-    'padding:6px 10px;border-radius:8px;cursor:pointer';
+  btnResetWidths.className = 'btn mini';
   btnResetWidths.addEventListener('click', () => {
     const prefsRoot =
       (window.__gridPrefs &&
@@ -1092,7 +1086,7 @@ function openColumnsDialog(section) {
 
   const btnClose = document.createElement('button');
   btnClose.textContent = 'Close';
-  btnClose.style.cssText = btnResetWidths.style.cssText;
+  btnClose.className = 'btn mini';
   btnClose.addEventListener('click', async () => {
     document.body.removeChild(overlay);
     const data = await loadSection();
@@ -8003,15 +7997,22 @@ async function openSaveSelectionModal(section) {
         <label>Mode</label>
         <div class="controls" style="display:flex;flex-direction:column;gap:8px;min-width:0">
           <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
-            <label class="inline"><input type="radio" name="mode" value="new" checked> <span>Save as new selection</span></label>
+            <label class="inline">
+              <input type="radio" name="mode" value="new" checked>
+              <span>Save as new selection</span>
+            </label>
             <label class="inline">
               <input type="radio" name="mode" value="append" ${owned.length ? '' : 'disabled'}>
               <span>Append to existing selection</span>
             </label>
           </div>
           <div id="selAppendWrap" style="display:none; width:100%; max-width:100%">
-            <div class="hint" style="margin:2px 0 4px">${owned.length ? 'Choose selection to append to' : 'You don’t own any selections to append'}</div>
-            <select id="selAppendPresetId" class="select" style="width:100%; max-width:100%">${optionsHtml}</select>
+            <div class="hint" style="margin:2px 0 4px">
+              ${owned.length ? 'Choose selection to append to' : 'You don’t own any selections to append'}
+            </div>
+            <select id="selAppendPresetId" class="input" style="width:100%; max-width:100%">
+              ${optionsHtml}
+            </select>
           </div>
         </div>
       </div>
@@ -8019,7 +8020,10 @@ async function openSaveSelectionModal(section) {
       <div class="row">
         <label for="selPresetShared">Visibility</label>
         <div class="controls">
-          <label class="inline"><input id="selPresetShared" type="checkbox"> <span>Visible to all users</span></label>
+          <label class="inline">
+            <input id="selPresetShared" type="checkbox">
+            <span>Visible to all users</span>
+          </label>
         </div>
       </div>
     </div>
@@ -8119,6 +8123,7 @@ async function openSaveSelectionModal(section) {
 }
 
 
+
 async function openLoadSelectionModal(section) {
   const sanitize = (typeof window !== 'undefined' && typeof window.sanitize === 'function')
     ? window.sanitize
@@ -8142,12 +8147,12 @@ async function openLoadSelectionModal(section) {
       const nameHtml = `<span class="name">${sanitize(p.name || '(unnamed)')}</span>`;
       const creator  = (p.user && (p.user.display_name || p.user.email)) ? ` <span class="hint">• by ${sanitize(p.user.display_name || p.user.email)}</span>` : '';
       const badge    = p.is_shared ? `<span class="badge">shared</span>${creator}` : '';
-      const trashBtn = owned ? `<button class="bin btn btn-ghost btn-sm" title="Delete">🗑</button>` : '';
+      const trashBtn = owned ? `<button class="btn mini bin" title="Delete" data-act="delete">🗑</button>` : '';
       return `
         <tr data-id="${p.id}">
           <td class="pick">${nameHtml} ${badge}</td>
           <td>${new Date(p.updated_at || p.created_at).toLocaleString()}</td>
-          <td class="actions">${trashBtn}</td>
+          <td class="actions" style="text-align:right">${trashBtn}</td>
         </tr>`;
     }).join('') || `<tr><td colspan="3" class="hint">No saved selections</td></tr>`;
 
@@ -8159,7 +8164,13 @@ async function openLoadSelectionModal(section) {
         </div>
         <div class="row">
           <table class="grid compact" id="selPresetTable">
-            <thead><tr><th>Name</th><th>Updated</th><th></th></tr></thead>
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Updated</th>
+                <th style="text-align:right">Delete</th>
+              </tr>
+            </thead>
             <tbody>${rowsHtml}</tbody>
           </table>
         </div>
@@ -8172,12 +8183,27 @@ async function openLoadSelectionModal(section) {
     if (!tbl || tbl.__wired) return;
     tbl.__wired = true;
 
-    // click → select
+    const frame = window.__getModalFrame?.();
+    const updateButtons = () => {
+      try {
+        const fr = window.__getModalFrame?.();
+        if (!fr) return;
+        fr.isDirty = !!selectedId; // just to enable Save/Load
+        fr._updateButtons?.();
+      } catch {}
+    };
+
+    // click → select & enable Load
     tbl.addEventListener('click', (e) => {
       const tr = e.target && e.target.closest('tr[data-id]');
+      const bin = e.target && e.target.closest('button[data-act="delete"]');
+      if (bin) {
+        // deletion handled in separate listener below
+      }
       if (!tr) return;
       selectedId = tr.getAttribute('data-id');
       Array.from(tbl.querySelectorAll('tbody tr')).forEach(r => r.classList.toggle('selected', r === tr));
+      updateButtons();
     });
 
     // dblclick → apply immediately
@@ -8196,7 +8222,7 @@ async function openLoadSelectionModal(section) {
 
     // delete owned selection
     tbl.addEventListener('click', async (e) => {
-      const bin = e.target && e.target.closest('button.bin');
+      const bin = e.target && e.target.closest('button[data-act="delete"]');
       if (!bin) return;
       const tr = e.target && e.target.closest('tr[data-id]');
       const id = tr && tr.getAttribute('data-id');
@@ -8209,6 +8235,8 @@ async function openLoadSelectionModal(section) {
       try { await deleteReportPreset(id); } catch (err) { alert(String(err?.message || err || 'Failed to delete preset')); return; }
       try { invalidatePresetCache(section, 'selection'); } catch {}
       list = await listReportPresets({ section, kind:'selection', include_shared:true }).catch(()=>[]);
+      selectedId = null;
+      updateButtons();
 
       const body = document.getElementById('modalBody');
       if (body) {
@@ -8219,6 +8247,8 @@ async function openLoadSelectionModal(section) {
         wireTable();
       }
     });
+
+    updateButtons();
   }
 
   showModal(
@@ -10990,7 +11020,6 @@ async function openCandidate(row) {
   }
 }
 
-
 function renderCandidateTab(key, row = {}) {
   if (key === 'main') return html(`
     <div class="form" id="tab-main">
@@ -11135,9 +11164,11 @@ function renderCandidateTab(key, row = {}) {
 
   if (key === 'pay') return html(`
     <div class="form" id="tab-pay">
-      <div class="row"><label class="hint">
-        PAYE bank fields are editable. If UMBRELLA is selected, bank details are taken from the umbrella and locked.
-      </label></div>
+      <div class="row">
+        <label class="hint">
+          PAYE bank fields are editable. If UMBRELLA is selected, bank details are taken from the umbrella and locked.
+        </label>
+      </div>
 
       ${input('account_holder','Account holder', row.account_holder)}
       ${input('bank_name','Bank name', row.bank_name)}
@@ -11169,12 +11200,10 @@ function renderCandidateTab(key, row = {}) {
 }
 
 
-
 // ====================== mountCandidatePayTab (FIXED) ======================
 // FRONTEND — UPDATED
 // mountCandidatePayTab: also keeps Account Holder in sync with umbrella name when UMNRELLA pay.
 // ================== FIXED: openUmbrella (hydrate before showModal) ==================
-
 
 async function renderCandidateRatesTable() {
   const LOG = !!window.__LOG_RATES;
@@ -11235,12 +11264,16 @@ async function renderCandidateRatesTable() {
     div.innerHTML = `
       <div class="hint" style="margin-bottom:8px">No candidate-specific overrides. Client defaults will apply.</div>
       <div class="actions">
-        <button id="btnAddRate"${parentEditable ? '' : ' disabled'}>Add rate override</button>
-        ${parentEditable ? '<span class="hint">Changes are staged. Click “Save” in the main dialog to persist.</span>'
-                         : '<span class="hint">Read-only. Click “Edit” in the main dialog to add/modify overrides.</span>'}
+        <button id="btnAddRate" class="btn mini"${parentEditable ? '' : ' disabled'}>
+          Add rate override
+        </button>
+        ${parentEditable
+          ? '<span class="hint">Changes are staged. Click “Save” in the main dialog to persist.</span>'
+          : '<span class="hint">Read-only. Click “Edit” in the main dialog to add/modify overrides.</span>'}
       </div>
     `;
-    const addBtn = byId('btnAddRate'); if (addBtn && parentEditable) addBtn.onclick = () => openCandidateRateModal(window.modalCtx.data?.id);
+    const addBtn = byId('btnAddRate');
+    if (addBtn && parentEditable) addBtn.onclick = () => openCandidateRateModal(window.modalCtx.data?.id);
     if (LOG) console.log('[RATES][TABLE] rendered empty view');
     return;
   }
@@ -11261,7 +11294,13 @@ async function renderCandidateRatesTable() {
       const filtered = Array.isArray(list) ? list.filter(w=>!w.disabled_at_utc && w.role===role) : [];
       let win = filtered.find(w => (w.band ?? null) === (band ?? null));
       if (!win && (band == null)) win = filtered.find(w => w.band == null);
-      return win ? { day: win.charge_day ?? null, night: win.charge_night ?? null, sat: win.charge_sat ?? null, sun: win.charge_sun ?? null, bh: win.charge_bh ?? null } : null;
+      return win ? {
+        day:   win.charge_day   ?? null,
+        night: win.charge_night ?? null,
+        sat:   win.charge_sat   ?? null,
+        sun:   win.charge_sun   ?? null,
+        bh:    win.charge_bh    ?? null
+      } : null;
     } catch(e){ return null; }
   }
   await Promise.all(uniqueKeys.map(async k => { chargeMap[k] = await loadChargesForKey(k); }));
@@ -11354,9 +11393,12 @@ async function renderCandidateRatesTable() {
   const actions = document.createElement('div');
   actions.className = 'actions';
   actions.innerHTML = `
-    <button id="btnAddRate"${parentEditable ? '' : ' disabled'}>Add rate override</button>
-    ${parentEditable ? '<span class="hint">Changes are staged. Click “Save” in the main dialog to persist.</span>'
-                     : '<span class="hint">Read-only. Click “Edit” in the main dialog to add/modify overrides.</span>'}
+    <button id="btnAddRate" class="btn mini"${parentEditable ? '' : ' disabled'}>
+      Add rate override
+    </button>
+    ${parentEditable
+      ? '<span class="hint">Changes are staged. Click “Save” in the main dialog to persist.</span>'
+      : '<span class="hint">Read-only. Click “Edit” in the main dialog to add/modify overrides.</span>'}
   `;
 
   div.innerHTML = '';
@@ -11368,7 +11410,6 @@ async function renderCandidateRatesTable() {
 
   if (LOG) console.log('[RATES][TABLE rendered]', { rows: rows.length, firstState: rows[0]?._state || '(none)' });
 }
-
 
 
 
@@ -15849,9 +15890,12 @@ async function renderClientRatesTable() {
     div.innerHTML = `
       <div class="hint" style="margin-bottom:8px">No client default windows yet.</div>
       <div class="actions">
-        <button id="btnAddClientRate"${parentEditable ? '' : ' disabled'}>Add / Upsert client window</button>
-        ${parentEditable ? '<span class="hint">Changes are staged. Click “Save” in the main dialog to persist.</span>'
-                         : '<span class="hint">Read-only. Click “Edit” in the main dialog to add/modify windows.</span>'}
+        <button id="btnAddClientRate" class="btn mini"${parentEditable ? '' : ' disabled'}>
+          Add / Upsert client window
+        </button>
+        ${parentEditable
+          ? '<span class="hint">Changes are staged. Click “Save” in the main dialog to persist.</span>'
+          : '<span class="hint">Read-only. Click “Edit” in the main dialog to add/modify windows.</span>'}
       </div>
     `;
     const addBtn = byId('btnAddClientRate');
@@ -16011,7 +16055,9 @@ async function renderClientRatesTable() {
   const actions = document.createElement('div');
   actions.className = 'actions';
   actions.innerHTML = `
-    <button id="btnAddClientRate"${parentEditable ? '' : ' disabled'}>Add / Upsert client window</button>
+    <button id="btnAddClientRate" class="btn mini"${parentEditable ? '' : ' disabled'}>
+      Add / Upsert client window
+    </button>
     ${parentEditable ? '' : '<span class="hint">Read-only. Click “Edit” in the main dialog to add/modify windows.</span>'}
   `;
 
@@ -18731,6 +18777,7 @@ async function apiDeleteJobTitle(id) {
   return data;
 }
 
+
 function openJobTitleSettingsModal() {
   const S = {
     loading: false,
@@ -18791,8 +18838,8 @@ function openJobTitleSettingsModal() {
         const isCollapsed = !!S.collapsed[n.id];
 
         const toggleHtml = hasChildren
-          ? `<button type="button" data-act="toggle" data-id="${n.id}" style="margin-right:4px;width:20px">${isCollapsed ? '+' : '−'}</button>`
-          : `<span style="display:inline-block;width:20px"></span>`;
+          ? `<button type="button" class="btn mini" data-act="toggle" data-id="${n.id}" style="margin-right:4px;width:24px;text-align:center;padding:2px 0">${isCollapsed ? '+' : '−'}</button>`
+          : `<span style="display:inline-block;width:24px"></span>`;
 
         const childrenHtml = !isCollapsed ? renderTree(n.children || [], level + 1) : '';
 
@@ -18808,7 +18855,7 @@ function openJobTitleSettingsModal() {
                 ${inactiveTag}
               </div>
               <div class="mini">
-                <button type="button" data-act="add-child" data-id="${n.id}">+ Child</button>
+                <button type="button" class="btn mini" data-act="add-child" data-id="${n.id}">+ Child</button>
               </div>
             </div>
           </div>
@@ -18918,16 +18965,16 @@ function openJobTitleSettingsModal() {
         <div class="row">
           <label>Category Type</label>
           <div class="mini">
-            <label>
+            <label class="inline">
               <input type="radio" name="node_type" value="group" ${nodeTypeGroupChecked} />
-              Group / Category
+              <span>Group / Category</span>
             </label><br/>
             ${
               showRoleRadio
                 ? `
-            <label>
+            <label class="inline">
               <input type="radio" name="node_type" value="role" ${nodeTypeRoleChecked} />
-              Role (assignable to candidates)
+              <span>Role (assignable to candidates)</span>
             </label>`
                 : ''
             }
@@ -18942,9 +18989,9 @@ function openJobTitleSettingsModal() {
         </div>
 
         <div class="row" data-block="reg" style="${regBlockStyle}">
-          <label>
+          <label class="inline">
             <input type="checkbox" name="requires_prof_reg" ${requiresChecked ? 'checked' : ''} />
-            Requires professional registration
+            <span>Requires professional registration</span>
           </label>
           <select name="prof_reg_type" style="margin-top:6px;${requiresChecked ? '' : 'display:none'}">
             <option value="">-- Select type --</option>
@@ -18953,15 +19000,15 @@ function openJobTitleSettingsModal() {
         </div>
 
         <div class="row">
-          <label>
+          <label class="inline">
             <input type="checkbox" name="active" ${activeChecked} />
-            Active (visible in pickers)
+            <span>Active (visible in pickers)</span>
           </label>
         </div>
 
         <div class="row" style="grid-column:1/-1;margin-top:8px;display:flex;gap:8px;justify-content:flex-end">
-          <button type="button" id="jt_btn_delete" ${(e.isNew || (node && Array.isArray(node.children) && node.children.length)) ? 'disabled' : ''}>Delete</button>
-          <button type="button" id="jt_btn_save" class="primary">Save</button>
+          <button type="button" class="btn mini" id="jt_btn_delete" ${(e.isNew || (node && Array.isArray(node.children) && node.children.length)) ? 'disabled' : ''}>Delete</button>
+          <button type="button" class="btn mini primary" id="jt_btn_save">Save</button>
         </div>
       </form>
     `;
@@ -18983,7 +19030,7 @@ function openJobTitleSettingsModal() {
         <div>
           <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
             <div class="mini">Families / subfamilies / roles</div>
-            <button type="button" id="jt_add_root">+ Add family</button>
+            <button type="button" class="btn mini" id="jt_add_root">+ Add family</button>
           </div>
           <div id="jt_tree"
                style="border:1px solid var(--line);border-radius:10px;max-height:420px;overflow:auto;padding:4px">
@@ -19273,7 +19320,6 @@ function openJobTitleSettingsModal() {
   // Initial load after modal is mounted
   refreshFromCache().catch((e) => console.error('[JOB_TITLES] initial refresh failed', e));
 }
-
 
 
 // =============== NEW: Job Titles Settings modal (side panel) ===========
