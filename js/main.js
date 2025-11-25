@@ -17098,16 +17098,22 @@ const setCloseLabel = ()=>{
       }
     } catch {}
 
-    if (top.kind === 'advanced-search') {
+       if (top.kind === 'advanced-search') {
       btnEdit.style.display='none';
       btnSave.style.display='';
       btnSave.disabled=!!top._saving;
-      if (relatedBtn) relatedBtn.disabled=true;
-    } else if (top.kind === 'rates-presets') {
+      if (relatedBtn) {
+        relatedBtn.style.display = 'none';
+        relatedBtn.disabled = true;
+      }
+        } else if (top.kind === 'rates-presets') {
       btnEdit.style.display='none';
       btnSave.style.display='none';
       btnSave.disabled=true;
-      if (relatedBtn) relatedBtn.disabled=true;
+      if (relatedBtn) {
+        relatedBtn.style.display = 'none';
+        relatedBtn.disabled = true;
+      }
 
       // Always show “Close” for the Preset Rates manager (never “Discard”)
       btnClose.textContent = 'Close';
@@ -17115,18 +17121,22 @@ const setCloseLabel = ()=>{
       btnClose.setAttribute('title', 'Close');
 
       L('_updateButtons snapshot (global)', {
+
         kind: top.kind, isChild, parentEditable, mode: top.mode,
         btnSave: { display: btnSave.style.display, disabled: btnSave.disabled },
         btnEdit: { display: btnEdit.style.display }
       });
       return;
-     } else if (isChild && !top.noParentGate) {
+   } else if (isChild && !top.noParentGate) {
 
   if (top.mode === 'view') {
     btnSave.style.display = 'none';
     btnSave.disabled = true;
     btnEdit.style.display = 'none';
-    if (relatedBtn) relatedBtn.disabled = !(top.hasId);
+    if (relatedBtn) {
+      relatedBtn.style.display = 'none';
+      relatedBtn.disabled = true;
+    }
   } else {
     btnSave.style.display = parentEditable ? '' : 'none';
 
@@ -17146,7 +17156,10 @@ const setCloseLabel = ()=>{
 
     btnSave.disabled = (!parentEditable) || top._saving || !wantApply;
     btnEdit.style.display='none';
-    if (relatedBtn) relatedBtn.disabled=true;
+    if (relatedBtn) {
+      relatedBtn.style.display = 'none';
+      relatedBtn.disabled = true;
+    }
     if (LOG) console.log('[MODAL] child _updateButtons()', {
       parentEditable, wantApply, disabled: btnSave.disabled, kind: top.kind
     });
@@ -17156,7 +17169,19 @@ const setCloseLabel = ()=>{
 
 
       btnEdit.style.display = (top.mode==='view' && top.hasId) ? '' : 'none';
-      if (relatedBtn) relatedBtn.disabled = !(top.mode==='view' && top.hasId);
+
+      if (relatedBtn) {
+        const showRelated =
+          !isChild &&
+          top.hasId &&
+          (top.entity === 'candidates' ||
+           top.entity === 'clients'   ||
+           top.entity === 'contracts');
+
+        relatedBtn.style.display = showRelated ? '' : 'none';
+        // Enabled only when in view mode on a saved record
+        relatedBtn.disabled = !(showRelated && top.mode === 'view');
+      }
 
     if (top.mode === 'create') {
   btnSave.style.display = '';
@@ -17165,6 +17190,7 @@ const setCloseLabel = ()=>{
   btnSave.style.display = 'none';
   btnSave.disabled = true;
 } else {
+
   btnSave.style.display='';
 
   let gateOK = true;
