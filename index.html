@@ -341,6 +341,7 @@
     .tag-fail{ background:rgba(239,68,68,.15);  color:#fecaca;  border-color:rgba(248,113,113,.35) }
 
     /* ===== Modal ===== */
+      /* ===== Modal ===== */
     .modal-back{
       position:fixed;
       inset:0;
@@ -361,7 +362,12 @@
       box-shadow:0 24px 60px rgba(15,23,42,.85);
       overflow:hidden;
     }
+    /* Narrower modal just for Job Titles */
+    .modal.jobtitles-modal{
+      width:min(800px,95vw);
+    }
     .modal.dragging{ opacity:.95 }
+
 
     .modal-h{
       display:flex;
