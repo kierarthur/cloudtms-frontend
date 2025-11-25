@@ -297,7 +297,22 @@ body{
     .actions button{ border:1px solid var(--line); background:#0b152a; color:#fff; padding:8px 12px; border-radius:10px; cursor:pointer }
     .actions .primary{ background:linear-gradient(180deg,#5146e5,#4038cc); border-color:#3730a3 }
     .hint{ color:#cbd5e1; font-size:12px }
-
+/* Small dark buttons used in Advanced Search header */
+    .adv-btn{
+      border:1px solid var(--line);
+      background:#0b152a;
+      color:var(--sub);
+      padding:4px 8px;           /* roughly half-height of normal actions */
+      border-radius:8px;
+      cursor:pointer;
+      font-size:12px;
+      line-height:1.2;
+      white-space:nowrap;
+    }
+    .adv-btn:hover{
+      background:var(--hover);
+      color:var(--text);
+    }
     /* Disabled state (unchanged) */
     .actions button:disabled,
     .actions button.disabled {
