@@ -9030,7 +9030,7 @@ async function openSearchModal(opts = {}) {
           <option value="HCPC">HCPC</option>
         </select>`),
 
-      // DOB range
+      // DOB range (still in two rows; both get datepicker)
       datePair('dob_from', 'DOB from', 'dob_to', 'DOB to'),
 
       // Gender / location
@@ -9133,7 +9133,7 @@ async function openSearchModal(opts = {}) {
     inner = `<div class="tabc">No filters for this section.</div>`;
   }
 
-  // Updated header: two small dark buttons, side by side
+  // Header: two small dark buttons, side by side, using .adv-btn styling
   const headerHtml = `
     <div class="row" id="searchHeaderRow" style="justify-content:flex-end;gap:6px;margin-bottom:.5rem">
       <div class="controls" style="display:flex;justify-content:flex-end;gap:6px">
@@ -9173,14 +9173,16 @@ async function openSearchModal(opts = {}) {
 
       const rows = await search(currentSection, filters);
       if (rows) renderSummary(rows);
-      return true; // showModal / saveForFrame closes the advanced-search frame on success
+      return true; // saveForFrame will close this advanced-search frame on success
     },
     false,
     () => {
       // Apply pending preset (if a child "Load search" just set it)
       const pending = (typeof window !== 'undefined') ? window.__PENDING_ADV_PRESET : null;
       if (pending && pending.section) {
-        try { window.dispatchEvent(new CustomEvent('adv-search-apply-preset', { detail: pending })); } catch {}
+        try {
+          window.dispatchEvent(new CustomEvent('adv-search-apply-preset', { detail: pending }));
+        } catch {}
       }
       if (typeof window !== 'undefined') delete window.__PENDING_ADV_PRESET;
 
@@ -9198,12 +9200,33 @@ async function openSearchModal(opts = {}) {
         });
         populateSearchFormFromFilters(st.filters || {}, '#searchForm');
       } catch {}
+
+      // 🔹 Wire datepickers to *all* DD/MM/YYYY fields (including From/To ranges)
+      try {
+        if (typeof attachUkDatePicker === 'function') {
+          const root = document.getElementById('searchForm');
+          if (root) {
+            root.querySelectorAll('input[type="text"]').forEach(el => {
+              const ph = (el.getAttribute('placeholder') || '').toUpperCase();
+              if (ph.includes('DD/MM/YYYY')) {
+                // Avoid double-wiring, in case modal is reopened
+                if (!el.__ukPickerWired) {
+                  attachUkDatePicker(el);
+                  el.__ukPickerWired = true;
+                }
+              }
+            });
+          }
+        }
+      } catch {}
     },
     { noParentGate: true, forceEdit: true, kind: 'advanced-search' }
   );
 
+  // Extra wiring (eg. load/save presets actions)
   setTimeout(wireAdvancedSearch, 0);
 }
+
 
 // === REPLACE: openSearchModal (icons only, legacy forced hidden, robust wiring) ===
 // === REPLACE: openSearchModal (compact text buttons + robust delegated wiring) ===
@@ -11058,7 +11081,7 @@ function renderCandidateTab(key, row = {}) {
             Add Job Title…
           </button>
           <div class="hint">
-            Select one or more roles from the hierarchy. Only <strong>Roles</strong> (not Groups) can be assigned.
+            Right click a Job Title in Edit mode to select a Primary Job Role.
           </div>
         </div>
       </div>
@@ -12170,7 +12193,6 @@ function computeContractMargins() {
 
 // ========== PARENT TABLE RENDER (WITH LOUD LOGS + SAFETY NET) ==========
 
-
 async function openCandidateRateModal(candidate_id, existing) {
   const LOG = !!window.__LOG_RATES;
   const LOG_APPLY = (typeof window.__LOG_APPLY === 'boolean') ? window.__LOG_APPLY : LOG;
@@ -12194,6 +12216,10 @@ async function openCandidateRateModal(candidate_id, existing) {
     : String(window.modalCtx?.data?.pay_method || 'PAYE').toUpperCase();
 
   const bucketLabel = { day:'Day', night:'Night', sat:'Sat', sun:'Sun', bh:'BH' };
+
+  // Track the current in-form role/band so they don't reset when date/client changes
+  let currentRole = existing?.role || '';
+  let currentBand = (existing && existing.band != null) ? String(existing.band) : '';
 
   // ===== FORM =====
   const formHtml = html(`
@@ -12301,9 +12327,11 @@ async function openCandidateRateModal(candidate_id, existing) {
   async function resolveCoveringWindow(client_id, role, band, active_on){
     try {
       const list = await listClientRates(client_id, { active_on, only_enabled: true });
-      const rows = Array.isArray(list) ? list.filter(w => !w.disabled_at_utc && w.role === role) : [];
-      let win = rows.find(w => (w.band ?? null) === (band ?? null));
-      if (!win && (band == null)) win = rows.find(w => w.band == null);
+      const rows = Array.isArray(list) ? rows = list.filter(w => !w.disabled_at_utc && w.role === role) : [];
+      const wins = Array.isArray(list) ? list.filter(w => !w.disabled_at_utc && w.role === role) : [];
+      const filtered = wins;
+      let win = filtered.find(w => (w.band ?? null) === (band ?? null));
+      if (!win && (band == null)) win = filtered.find(w => w.band == null);
       return win ? {
         charges: { day:win.charge_day??null, night:win.charge_night??null, sat:win.charge_sat??null, sun:win.charge_sun??null, bh:win.charge_bh??null },
         capIso: win.date_to || null
@@ -12327,7 +12355,7 @@ async function openCandidateRateModal(candidate_id, existing) {
   // ===== driver: recompute state (validations + overlap + preview) =====
   async function recomputeOverrideState(){
     const clientId = byId('cr_client_id')?.value || '';
-       const role     = byId('cr_role')?.value || '';
+    const role     = byId('cr_role')?.value || '';
     const bandSel  = byId('cr_band')?.value ?? '';
     const band     = (bandSel === '' ? null : bandSel);
     const isoFrom  = parseUkDateToIso(byId('cr_date_from')?.value || '');
@@ -12444,8 +12472,8 @@ async function openCandidateRateModal(candidate_id, existing) {
       const cutOther = (()=>{ const d=new Date((isoFrom||'')+'T00:00:00Z'); if(!isNaN(d)) d.setUTCDate(d.getUTCDate()-1); return isNaN(d)?null:`${d.getUTCFullYear()}-${String(d.getUTCMonth()+1).padStart(2,'0')}-${String(d.getUTCDate()).padStart(2,'0')}`; })();
 
       let fixButtons = '';
-      if (cutThis)  fixButtons += `<button id="cr_fix_this"  class="btn" style="margin-right:8px">Fix: Shorten <b>THIS</b> to ${formatIsoToUk(cutThis)}</button>`;
-      if (cutOther) fixButtons += `<button id="cr_fix_other" class="btn">Fix: Shorten <b>OTHER</b> to ${formatIsoToUk(cutOther)}</button>`;
+      if (cutThis)  fixButtons += `<button id="cr_fix_this"  class="btn mini" style="margin-right:8px">Fix: Shorten <b>THIS</b> to ${formatIsoToUk(cutThis)}</button>`;
+      if (cutOther) fixButtons += `<button id="cr_fix_other" class="btn mini">Fix: Shorten <b>OTHER</b> to ${formatIsoToUk(cutOther)}</button>`;
 
       showInlineError(`
         <div style="font-weight:700;margin-bottom:6px">Overlap detected</div>
@@ -12588,42 +12616,113 @@ async function openCandidateRateModal(candidate_id, existing) {
     const list  = await listClientRates(clientId, { active_on, only_enabled: true }).catch(_=>[]);
     const wins  = (Array.isArray(list) ? list.filter(w => !w.disabled_at_utc) : []);
     const roles = new Set(); const bandsByRole = {};
-    wins.forEach(w => { if (!w.role) return; roles.add(w.role); (bandsByRole[w.role] ||= new Set()).add(w.band==null ? '' : String(w.band)); });
+    wins.forEach(w => {
+      if (!w.role) return;
+      roles.add(w.role);
+      (bandsByRole[w.role] ||= new Set()).add(w.band==null ? '' : String(w.band));
+    });
 
     const allowed = [...roles].sort((a,b)=> a.localeCompare(b));
     selRole.innerHTML = `<option value="">Select role…</option>` + allowed.map(code => `<option value="${code}">${code}</option>`).join('');
     selRole.disabled = !parentEditable;
 
-    if (existing?.role) {
-      selRole.value = existing.role;
-      const bandSet = [...(bandsByRole[existing.role] || new Set())];
+    // Choose a role in this order:
+    // 1) currentRole if still valid
+    // 2) existing.role if still valid
+    // 3) blank
+    let chosenRole = '';
+    if (currentRole && allowed.includes(currentRole)) {
+      chosenRole = currentRole;
+    } else if (existing?.role && allowed.includes(existing.role)) {
+      chosenRole = existing.role;
+    }
+
+    if (chosenRole) {
+      selRole.value = chosenRole;
+      currentRole = chosenRole;
+
+      const bandSet = [...(bandsByRole[chosenRole] || new Set())];
       const hasNull = bandSet.includes('');
       selBand.innerHTML =
         (hasNull ? `<option value="">(none)</option>` : '') +
-        bandSet.filter(b=>b!=='').sort((a,b)=> String(a).localeCompare(String(b)))
-               .map(b => `<option value="${b}">${b}</option>`).join('');
+        bandSet
+          .filter(b=>b!=='')
+          .sort((a,b)=> String(a).localeCompare(String(b)))
+          .map(b => `<option value="${b}">${b}</option>`).join('');
       selBand.disabled = !parentEditable;
-      if (existing?.band != null) selBand.value = String(existing.band);
+
+      // Pick band: prefer currentBand if still valid; else existing.band
+      let desiredBand = '';
+      if (currentBand && bandSet.includes(currentBand)) {
+        desiredBand = currentBand;
+      } else if (existing && existing.band != null) {
+        const asStr = String(existing.band);
+        if (bandSet.includes(asStr)) desiredBand = asStr;
+      }
+
+      if (desiredBand && bandSet.includes(desiredBand)) {
+        selBand.value = desiredBand;
+        currentBand = desiredBand;
+      } else {
+        // leave at (none)
+        currentBand = '';
+      }
     } else {
       selBand.innerHTML = `<option value=""></option>`;
       selBand.disabled  = true;
+      currentRole = '';
+      currentBand = '';
     }
 
     await recomputeOverrideState();
   }
 
-  selClient.addEventListener('change', async () => { L('[EVENT] client change'); if (parentEditable) await refreshClientRoles(selClient.value); });
-  selRateT .addEventListener('change',        () => { L('[EVENT] rate_type change'); if (parentEditable) recomputeOverrideState(); });
-  inFrom   .addEventListener('change',  async () => { L('[EVENT] date_from change'); if (parentEditable) await refreshClientRoles(selClient.value); });
-  selRole  .addEventListener('change',  async () => { L('[EVENT] role change'); if (parentEditable) await recomputeOverrideState(); });
-  selBand  .addEventListener('change',        () => { L('[EVENT] band change'); if (parentEditable) recomputeOverrideState(); });
+  selClient.addEventListener('change', async () => {
+    L('[EVENT] client change');
+    if (parentEditable) {
+      currentRole = ''; // changing client invalidates previous role
+      currentBand = '';
+      await refreshClientRoles(selClient.value);
+    }
+  });
+  selRateT .addEventListener('change',        () => {
+    L('[EVENT] rate_type change');
+    if (parentEditable) recomputeOverrideState();
+  });
+  inFrom   .addEventListener('change',  async () => {
+    L('[EVENT] date_from change');
+    if (parentEditable) {
+      // date change may change which client windows apply, but we keep role/band if still valid
+      await refreshClientRoles(selClient.value);
+    }
+  });
+  selRole  .addEventListener('change',  async () => {
+    L('[EVENT] role change');
+    if (!parentEditable) return;
+    currentRole = selRole.value || '';
+    // changing role recalculates margins
+    await recomputeOverrideState();
+  });
+  selBand  .addEventListener('change',        () => {
+    L('[EVENT] band change');
+    if (!parentEditable) return;
+    currentBand = selBand.value || '';
+    recomputeOverrideState();
+  });
   ['pay_day','pay_night','pay_sat','pay_sun','pay_bh'].forEach(n=>{
     const el = document.querySelector(`#candRateForm input[name="${n}"]`);
-    if (el) el.addEventListener('input', () => { if (LOG_APPLY) console.log('[RATES][EVENT] pay change', n, el.value); recomputeOverrideState(); });
+    if (el) el.addEventListener('input', () => {
+      if (LOG_APPLY) console.log('[RATES][EVENT] pay change', n, el.value);
+      recomputeOverrideState();
+    });
   });
 
-  await recomputeOverrideState();
-  if (initialClientId) { await refreshClientRoles(initialClientId); }
+  // Initial state: if there is a client, load its roles, otherwise just compute state
+  if (initialClientId) {
+    await refreshClientRoles(initialClientId);
+  } else {
+    await recomputeOverrideState();
+  }
 
   (function wireDeleteButton(){
     const delBtn = byId('btnDelete');
@@ -17912,8 +18011,18 @@ async function renderClientSettingsUI(settingsObj){
   // NEW: gates & default submission
   const gatesAndSubmission = () => {
     return `
-      <div class="row"><label><input type="checkbox" name="pay_reference_required" ${s.pay_reference_required?'checked':''}/> Reference No. required to PAY</label></div>
-      <div class="row"><label><input type="checkbox" name="invoice_reference_required" ${s.invoice_reference_required?'checked':''}/> Reference No. required to INVOICE</label></div>
+      <div class="row">
+        <label class="inline">
+          <input type="checkbox" name="pay_reference_required" ${s.pay_reference_required?'checked':''}/>
+          <span>Reference No. required to PAY</span>
+        </label>
+      </div>
+      <div class="row">
+        <label class="inline">
+          <input type="checkbox" name="invoice_reference_required" ${s.invoice_reference_required?'checked':''}/>
+          <span>Reference No. required to INVOICE</span>
+        </label>
+      </div>
       <div class="row">
         <label>Default Submission</label>
         <div class="controls">
@@ -18776,7 +18885,6 @@ async function apiDeleteJobTitle(id) {
   const data = (await res.json().catch(() => ({}))) || {};
   return data;
 }
-
 
 function openJobTitleSettingsModal() {
   const S = {
