@@ -10528,6 +10528,7 @@ async function openDelete(){
 // ================== FIXED: openCandidate (hydrate before showModal) ==================
 // ================== FIXED: openCandidate (hydrate before showModal) ==================
 
+
 async function openCandidate(row) {
   // ===== Logging helpers (toggle with window.__LOG_MODAL = true/false) =====
   const LOG = (typeof window.__LOG_MODAL === 'boolean') ? window.__LOG_MODAL : false;
@@ -10609,7 +10610,7 @@ async function openCandidate(row) {
     'Candidate',
     [
       { key:'main',     label:'Main Details' },
-      { key:'rates',    label:'Care Packages' },   // ← renamed
+      { key:'rates',    label:'Care Packages' },  // renamed tab
       { key:'pay',      label:'Payment details' },
       { key:'bookings', label:'Bookings' }
     ],
@@ -10770,7 +10771,7 @@ async function openCandidate(row) {
       }
 
       // Validate NEW rows
-      for (const nv of (OX.stagedNew || [])) {
+      for (const nv of (O.stagedNew || [])) {
         const win = await getCoveringDefault(nv.client_id, nv.role, nv.band ?? null, nv.date_from);
         if (!win) { alert(`No active client default covers ${nv.role}${nv.band?` / ${nv.band}`:''} on ${formatIsoToUk(nv.date_from)}.`); return { ok:false }; }
         if (nv.date_to && win.date_to && nv.date_to > win.date_to) { alert(`Client rate ends on ${formatIsoToUk(win.date_to)} — override must end on or before this date.`); return { ok:false }; }
@@ -10785,12 +10786,16 @@ async function openCandidate(row) {
       }
 
       // ===== Persist staged overrides (DELETE uses routed path with candidate_id) =====
-      const OX = window.modalCtx.overrides || { existing: [], stagedNew: [], stagedEdits: {}, stagedDeletes: new Set() };
-      L('[onSave] overrides', { deletes: Array.from(OX.stagedDeletes||[]), edits: Object.keys(OX.stagedEdits||{}), newCount: (OX.stagedNew||[]).length });
+      const overridesRef = window.modalCtx.overrides || { existing: [], stagedNew: [], stagedEdits: {}, stagedDeletes: new Set() };
+      L('[onSave] overrides', {
+        deletes: Array.from(overridesRef.stagedDeletes || []),
+        edits: Object.keys(overridesRef.stagedEdits || {}),
+        newCount: (overridesRef.stagedNew || []).length
+      });
 
       // Deletes — preferred by id; fallback to legacy filter keys
-      for (const delId of OX.stagedDeletes || []) {
-        const rowDel = (OX.existing || []).find(r => String(r.id) === String(delId));
+      for (const delId of overridesRef.stagedDeletes || []) {
+        const rowDel = (overridesRef.existing || []).find(r => String(r.id) === String(delId));
         if (!rowDel) continue;
 
         const q = new URLSearchParams();
@@ -10813,8 +10818,8 @@ async function openCandidate(row) {
       }
 
       // Edits — PATCH candidate_id in path + ORIGINAL keys in query, updates in body
-      for (const [editId, patchRaw] of Object.entries(OX.stagedEdits || {})) {
-        const original = (OX.existing || []).find(x => String(x.id) === String(editId));
+      for (const [editId, patchRaw] of Object.entries(overridesRef.stagedEdits || {})) {
+        const original = (overridesRef.existing || []).find(x => String(x.id) === String(editId));
         if (!original) { alert('Cannot locate original override to patch'); return { ok:false }; }
 
         const q = new URLSearchParams();
@@ -10844,7 +10849,7 @@ async function openCandidate(row) {
       }
 
       // Creates
-      for (const nv of (OX.stagedNew || [])) {
+      for (const nv of (overridesRef.stagedNew || [])) {
         if (!nv.client_id) { alert('Override must include client_id'); return { ok:false }; }
         const clean = {};
         for (const [k,v] of Object.entries(nv)) {
@@ -10954,6 +10959,7 @@ async function openCandidate(row) {
     L('skip companion loads (no full.id)');
   }
 }
+
 
 function renderCandidateTab(key, row = {}) {
   if (key === 'main') return html(`
@@ -16377,7 +16383,7 @@ persistCurrentTabState() {
     return out;
   };
 
-  if (this.currentTabKey === 'main') {
+   if (this.currentTabKey === 'main') {
     const sel = byId('tab-main') ? '#tab-main' : (byId('contractForm') ? '#contractForm' : null);
     if (sel) {
       const c = collectForm(sel);
@@ -16391,6 +16397,14 @@ persistCurrentTabState() {
   if (this.currentTabKey === 'pay' && byId('tab-pay')) {
     const c = collectForm('#tab-pay');
     fs.pay  = { ...(fs.pay||{}), ...stripEmpty(c) };
+  }
+
+  // NEW: capture Care Packages tab (candidates/rates) into main form state
+  if (this.entity === 'candidates' && this.currentTabKey === 'rates' && byId('tab-rates')) {
+    const c = collectForm('#tab-rates');
+    // GCK (key_norm) and any future Care Packages fields are treated
+    // as part of the candidate "main" payload
+    fs.main = { ...(fs.main || {}), ...stripEmpty(c) };
   }
 
   if (this.entity === 'contracts' && this.currentTabKey === 'rates') {
@@ -16417,6 +16431,7 @@ persistCurrentTabState() {
       L('persistCurrentTabState contracts/rates failed', e);
     }
   }
+
 
   window.modalCtx.formState = fs;
   L('persistCurrentTabState EXIT', { forId: fs.__forId, mainKeys: Object.keys(fs.main||{}), payKeys: Object.keys(fs.pay||{}) });
