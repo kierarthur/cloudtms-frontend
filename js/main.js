@@ -10670,30 +10670,37 @@ async function openCandidate(row) {
       for (const k of Object.keys(payload)) if (payload[k] === '') delete payload[k];
 
       // Sync Job Titles + Registration + DOB from candidateMainModel
+         // Sync Job Titles + Registration + DOB from candidateMainModel
       try {
         const cm = window.modalCtx?.candidateMainModel;
         if (cm && typeof cm === 'object') {
-          // Normalise + order job titles so primary is first
+          // Normalise + order job titles so primary comes first
           let jobs = Array.isArray(cm.job_titles) ? cm.job_titles.slice() : [];
-          jobs = jobs.filter((t) => t && t.job_title_id);
+          // drop any empty entries
+          jobs = jobs.filter(j => j && j.job_title_id);
           if (jobs.length) {
-            let primaryIdx = jobs.findIndex((t) => t.is_primary);
-            if (primaryIdx === -1) primaryIdx = 0;
-
-            jobs = jobs.map((t, idx) => ({
-              ...t,
+            let primaryIdx = jobs.findIndex(j => j.is_primary);
+            if (primaryIdx === -1) {
+              // if no explicit primary, make the first one primary
+              primaryIdx = 0;
+            }
+            // enforce exactly one primary at index 0
+            jobs = jobs.map((j, idx) => ({
+              ...j,
               is_primary: idx === primaryIdx
             }));
-
             if (primaryIdx !== 0) {
               const primary = jobs[primaryIdx];
               jobs.splice(primaryIdx, 1);
               jobs.unshift(primary);
             }
           }
-          cm.job_titles = jobs; // keep model in sync with the normalised order
 
-          const jobIds = jobs.map((t) => t.job_title_id);
+          // keep the normalised list (with is_primary) on the model
+          cm.job_titles = jobs;
+
+          // derive the ordered list of IDs for the payload
+          const jobIds = jobs.map(j => j.job_title_id).filter(Boolean);
           payload.job_titles = jobIds;
           payload.job_title_id = jobIds.length ? jobIds[0] : null;
 
@@ -10710,6 +10717,7 @@ async function openCandidate(row) {
       } catch (err) {
         W('sync from candidateMainModel failed', err);
       }
+
 
       const idForUpdate = window.modalCtx?.data?.id || full?.id || null;
       const tokenAtSave = window.modalCtx.openToken;
