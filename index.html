@@ -216,6 +216,22 @@
       color:var(--sub);
     }
 
+    /* "Columns" toolbar button */
+    .toolbar button{
+      border:1px solid rgba(148,163,184,.45);
+      background:#020617;
+      color:#e5e7eb;
+      padding:6px 10px;
+      border-radius:999px;
+      cursor:pointer;
+      font-size:12px;
+    }
+    .toolbar button:hover{
+      background:rgba(79,70,229,.25);
+      border-color:#6366f1;
+      color:#f9fafb;
+    }
+
     .main select{
       background:#050b16;
       border:1px solid rgba(255,255,255,.15);
@@ -419,8 +435,16 @@
       gap:4px;
     }
     .form .row label{
+      display:flex;
+      align-items:center;
+      gap:6px;
       font-size:12px;
       color:#e5e7eb;
+    }
+    .form label.inline{
+      display:inline-flex;
+      align-items:center;
+      gap:6px;
     }
     .form input,
     .form select,
@@ -449,6 +473,25 @@
     #modal .input::placeholder{
       color:var(--sub);
       opacity:.75;
+    }
+
+    /* Generic modal buttons (all small icon/utility buttons) */
+    #modal .btn{
+      border:1px solid var(--line);
+      background:#0b152a;
+      color:#f9fafb;
+      padding:6px 10px;
+      border-radius:8px;
+      cursor:pointer;
+      font-size:12px;
+    }
+    #modal .btn.mini{
+      padding:3px 8px;
+      font-size:11px;
+    }
+    #modal .btn:hover{
+      background:var(--hover);
+      color:#f9fafb;
     }
 
     /* ===== Modal footer buttons ===== */
