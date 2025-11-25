@@ -3652,7 +3652,7 @@ function extractFiltersFromForm(formSel='#searchForm'){
     'week_ending_from','week_ending_to',
     'issued_from','issued_to',
     'due_from','due_to',
-    'dob_from','dob_to',
+    'dob',
     'start_date_from','start_date_to',
     'end_date_from','end_date_to',
     'active_on'
@@ -3679,7 +3679,7 @@ function populateSearchFormFromFilters(filters={}, formSel='#searchForm'){
     'week_ending_from','week_ending_to',
     'issued_from','issued_to',
     'due_from','due_to',
-    'dob_from','dob_to',
+    'dob',
     'start_date_from','start_date_to',
     'end_date_from','end_date_to',
     'active_on'
@@ -3711,6 +3711,7 @@ function populateSearchFormFromFilters(filters={}, formSel='#searchForm'){
     el.value = (v == null ? '' : String(v));
   }
 }
+
 
 
 // Build querystring per section
@@ -3855,7 +3856,11 @@ async function upsertContract(payload, id /* optional */) {
     patch.bucket_labels_json = (norm === false) ? null : norm;
   }
 
-  const BUCKETS = ['paye_day','paye_night','paye_sat','paye_sun','paye_bh','umb_day','umb_night','umb_sat','umb_sun','umb_bh','charge_day','charge_night','charge_sat','charge_sun','charge_bh'];
+  const BUCKETS = [
+    'paye_day','paye_night','paye_sat','paye_sun','paye_bh',
+    'umb_day','umb_night','umb_sat','umb_sun','umb_bh',
+    'charge_day','charge_night','charge_sat','charge_sun','charge_bh'
+  ];
 
   const method = id ? 'PUT' : 'POST';
   const url = id ? `/api/contracts/${_enc(id)}` : `/api/contracts`;
@@ -3876,6 +3881,24 @@ async function upsertContract(payload, id /* optional */) {
         }
       }
       patch.rates_json = merged;
+    }
+
+    // Prune PAYE vs Umbrella buckets according to pay_method_snapshot
+    try {
+      const pm = String(patch.pay_method_snapshot || '').toUpperCase();
+      if (patch.rates_json && typeof patch.rates_json === 'object') {
+        const keepPrefixes =
+          pm === 'PAYE'     ? ['paye_','charge_'] :
+          pm === 'UMBRELLA' ? ['umb_','charge_'] :
+                              ['charge_'];
+        for (const key of Object.keys(patch.rates_json)) {
+          if (!keepPrefixes.some(pre => key.startsWith(pre))) {
+            delete patch.rates_json[key];
+          }
+        }
+      }
+    } catch (e) {
+      if (LOGC) console.warn('[CONTRACTS][UPSERT] rate pruning failed (non-fatal)', e);
     }
 
     if (LOGC) {
@@ -3929,6 +3952,7 @@ async function upsertContract(payload, id /* optional */) {
 
   return data;
 }
+
 
 // ✅ CHANGED: after successful upsert, also merge into currentRows and stamp recency
 
@@ -5843,7 +5867,7 @@ if (chooseBtn && !chooseBtn.__wired) {
       })
     }
   );
-  setTimeout(() => {
+   setTimeout(() => {
     try {
       const fr = window.__getModalFrame?.();
       if (fr && (fr.entity === 'contracts' || fr.kind === 'contracts') && typeof fr.onReturn === 'function' && !fr.__contractsInit) {
@@ -5855,6 +5879,20 @@ if (chooseBtn && !chooseBtn.__wired) {
           hasFrame: !!fr, entity: fr?.entity, kind: fr?.kind, hasOnReturn: typeof fr?.onReturn === 'function', init: !!fr?.__contractsInit
         });
       }
+
+      // 🔹 After wiring, surface any pay-method mismatch warnings returned by backend
+      try {
+        const baseData = (window.modalCtx && window.modalCtx.data)
+          ? window.modalCtx.data
+          : (row || {});
+        const warnings = Array.isArray(baseData.warnings) ? baseData.warnings : [];
+        if (warnings.length && typeof showModalHint === 'function') {
+          showModalHint(warnings.join(' '), 'warn');
+        }
+      } catch (warnErr) {
+        if (LOGC) console.warn('[CONTRACTS] show pay-method warnings failed', warnErr);
+      }
+
     } catch (e) {
       if (LOGC) console.warn('[CONTRACTS] initial onReturn failed', e);
     } finally {
@@ -5862,6 +5900,7 @@ if (chooseBtn && !chooseBtn.__wired) {
     }
   }, 0);
 }
+
 
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -7154,6 +7193,9 @@ function renderContractMainTab(ctx) {
     ['fri','Fri'],['sat','Sat'],['sun','Sun']
   ];
 
+  // disable Pay Method snapshot whenever a candidate is present or __pay_locked is set
+  const payLocked = !!(d.__pay_locked || d.candidate_id);
+
   // Inline time normaliser/validator wired on blur + Tab (keydown)
   const timeEvents = () => `
     onblur="(function(el){
@@ -7376,7 +7418,7 @@ function renderContractMainTab(ctx) {
       <div class="grid-3">
         <div class="row"><label>Pay method snapshot</label>
           <div class="controls">
-            <select name="pay_method_snapshot" ${d.__pay_locked ? 'disabled' : ''}>
+            <select name="pay_method_snapshot" ${payLocked ? 'disabled' : ''}>
               <option value="PAYE" ${String(d.pay_method_snapshot||'PAYE').toUpperCase()==='PAYE'?'selected':''}>PAYE</option>
               <option value="UMBRELLA" ${String(d.pay_method_snapshot||'PAYE').toUpperCase()==='UMBRELLA'?'selected':''}>Umbrella</option>
             </select>
@@ -7405,6 +7447,7 @@ function renderContractMainTab(ctx) {
       ${labelsBlock}
     </form>`;
 }
+
 
 // ─────────────────────────────────────────────────────────────────────────────
 // UPDATED: renderContractRatesTab (adds logging only)
@@ -8368,8 +8411,7 @@ function buildSearchQS(section, filters = {}) {
         job_title_contains,
         prof_reg_number,
         prof_reg_type,
-        dob_from,
-        dob_to,
+        dob,
         gender,
         town_city,
         postcode,
@@ -8403,9 +8445,8 @@ function buildSearchQS(section, filters = {}) {
       add('prof_reg_number', prof_reg_number);
       add('prof_reg_type', prof_reg_type);
 
-      // DOB range
-      add('dob_from', dob_from);
-      add('dob_to', dob_to);
+      // DOB exact
+      add('dob', dob);
 
       // Demographics
       add('gender', gender);
@@ -8543,7 +8584,7 @@ function buildSearchQS(section, filters = {}) {
         client_name,
         candidate_id,
         client_id,
-        roles_any,
+        role,
         band,
         pay_method_snapshot,
         submission_mode,
@@ -8571,7 +8612,7 @@ function buildSearchQS(section, filters = {}) {
       add('client_name', client_name);
       add('candidate_id', candidate_id);
       add('client_id', client_id);
-      addArr('roles_any', roles_any);
+      add('role', role);
       add('band', band);
       add('pay_method_snapshot', pay_method_snapshot);
 
@@ -9115,8 +9156,8 @@ async function openSearchModal(opts = {}) {
           <option value="HCPC">HCPC</option>
         </select>`),
 
-      // DOB range (two rows; both get datepicker)
-      datePair('dob_from', 'DOB from', 'dob_to', 'DOB to'),
+      // DOB exact
+      row('Date of birth', `<input class="input" type="text" name="dob" placeholder="DD/MM/YYYY" />`),
 
       // Gender / location
       row('Gender', `
@@ -9135,7 +9176,6 @@ async function openSearchModal(opts = {}) {
 
       // Last updated range (inline)
       dateRangeRow('updated_from','updated_to','Last updated (from / to)'),
-
 
       // Banking / umbrella / ref
       row('Sort Code',       inputText('sort_code', '12-34-56')),
@@ -9195,9 +9235,6 @@ async function openSearchModal(opts = {}) {
       datePair('created_from','Created from','created_to','Created to')
     ].join('');
   } else if (currentSection === 'contracts') {
-    let roleOptions = [];
-    try { roleOptions = await loadGlobalRoleOptions(); } catch { roleOptions = []; }
-
     const weekdayOptions = [
       { value: '',    label: 'Any'    },
       { value: 'MON', label: 'Monday' },
@@ -9225,7 +9262,7 @@ async function openSearchModal(opts = {}) {
 
       row('Candidate ID',         inputText('candidate_id', 'UUID')),
       row('Client ID',            inputText('client_id', 'UUID')),
-      row(`${lblRole} (any)`,     `<select name="roles_any" multiple size="6">${roleOptions.map(r=>`<option value="${r}">${r}</option>`).join('')}</select>`),
+      row(lblRole,                inputText('role', 'e.g. RMN')),
       row(lblBand,                inputText('band', 'e.g. 5 / 6 / 7')),
       row(lblPaySnap,  `
         <select name="pay_method_snapshot">
@@ -9366,6 +9403,7 @@ async function openSearchModal(opts = {}) {
   // Extra wiring (eg. load/save presets actions)
   setTimeout(wireAdvancedSearch, 0);
 }
+
 
 
 // === REPLACE: openSearchModal (icons only, legacy forced hidden, robust wiring) ===
@@ -19278,13 +19316,9 @@ function openJobTitleSettingsModal() {
 
         <div class="row">
           <label>Label</label>
-          <input type="text" name="label" value="${escapeHtml(e.label || '')}" required />
-        </div>
-
-        <div class="row">
-          <label>Category &amp; visibility</label>
           <div class="controls">
-            <div style="display:flex;flex-direction:column;gap:4px">
+            <input type="text" name="label" value="${escapeHtml(e.label || '')}" required />
+            <div id="jt_cat_vis_row" style="margin-top:6px;display:flex;gap:12px;align-items:center;flex-wrap:wrap">
               <label class="inline">
                 <input type="radio" name="node_type" value="group" ${nodeTypeGroupChecked} />
                 <span>Category</span>
@@ -19324,9 +19358,9 @@ function openJobTitleSettingsModal() {
           </select>
         </div>
 
-        <div class="row" style="grid-column:1/-1;margin-top:8px;display:flex;gap:8px;justify-content:flex-end">
-          <button type="button" class="btn mini" id="jt_btn_delete" ${(e.isNew || (node && Array.isArray(node.children) && node.children.length)) ? 'disabled' : ''}>Delete</button>
-          <button type="button" class="btn mini primary" id="jt_btn_save">Save</button>
+        <div class="row" style="grid-column:1/-1;margin-top:8px;display:flex;gap:6px;justify-content:flex-end">
+          <button type="button" class="btn mini" style="padding:4px 8px" id="jt_btn_delete" ${(e.isNew || (node && Array.isArray(node.children) && node.children.length)) ? 'disabled' : ''}>Delete</button>
+          <button type="button" class="btn mini primary" style="padding:4px 10px" id="jt_btn_save">Save</button>
         </div>
       </form>
     `;
