@@ -4743,57 +4743,126 @@ function openContract(row) {
           if (raw === '' || raw === null || raw === undefined) return null;
           const n = Number(raw); return Number.isFinite(n) ? n : null;
         };
-        const gh = { mon: numOrNull('gh_mon'), tue: numOrNull('gh_tue'), wed: numOrNull('gh_wed'),
+            const gh = { mon: numOrNull('gh_mon'), tue: numOrNull('gh_tue'), wed: numOrNull('gh_wed'),
                      thu: numOrNull('gh_thu'), fri: numOrNull('gh_fri'), sat: numOrNull('gh_sat'), sun: numOrNull('gh_sun') };
         const ghFilled = Object.values(gh).some(v => v != null && v !== 0);
         let std_hours_json = ghFilled ? gh : (base.std_hours_json ?? null);
         if (!std_hours_json && fs.main && fs.main.__hours) std_hours_json = fs.main.__hours;
 
- const days = ['mon','tue','wed','thu','fri','sat','sun'];
-const get = (n) => fromFS(n, fromFD(n, ''));
-const hhmmOk = (v) => /^\d{2}:\d{2}$/.test(String(v||'').trim());
-const normHHMM = (v) => {
-  const t = String(v || '').trim();
-  if (!t) return '';
-  const m = t.match(/^(\d{1,2})(?::?(\d{2}))$/);
-  if (!m) return '';
-  const h = +m[1], mi = +m[2];
-  if (Number.isNaN(h) || Number.isNaN(mi) || h < 0 || h > 23 || mi < 0 || mi > 59) return '';
-  return String(h).padStart(2,'0') + ':' + String(mi);
-};
+        // --- Build std_schedule_json from mon_start/end/break etc. ---
+        const buildScheduleJson = () => {
+          const formEl = document.querySelector('#contractForm');
+          const fd = formEl ? new FormData(formEl) : null;
+          const fsLocal = window.modalCtx?.formState || {};
+          const mainFS  = fsLocal.main || {};
+          const baseRow = window.modalCtx?.data || {};
 
-const schedule = {};
-let hasAnySchedule = false;
+          const fromFS = (k, fallback = '') => {
+            const v = mainFS[k];
+            return (v === undefined ? fallback : v);
+          };
+          const fromFD = (k, fallback = '') => {
+            if (!fd) return fallback;
+            const raw = fd.get(k);
+            return (raw == null ? fallback : String(raw).trim());
+          };
+          const val = (key, fallback = '') => {
+            const staged = fromFS(key, undefined);
+            if (staged !== undefined && staged !== null && String(staged).trim() !== '') {
+              return String(staged).trim();
+            }
+            const domVal = fromFD(key, undefined);
+            if (domVal !== undefined && domVal !== null && String(domVal).trim() !== '') {
+              return String(domVal).trim();
+            }
+            return fallback;
+          };
 
-for (const d2 of days) {
-  const s  = normHHMM(get(`${d2}_start`));
-  const e  = normHHMM(get(`${d2}_end`));
-  const br = get(`${d2}_break`);
+          const parseTime = (raw) => {
+            const s = String(raw || '').trim();
+            if (!s) return null;
 
-  if (hhmmOk(s) && hhmmOk(e)) {
-    hasAnySchedule = true;
-    schedule[d2] = {
-      start: s,
-      end:   e,
-      break_minutes: Math.max(0, Number(br || 0))
-    };
-    // 🔹 NOTE: if a day has no valid times, we simply do NOT add it
-    // to `schedule` – that clears the day when the whole JSON is replaced.
-  }
-}
+            // 3–4 digits → HHMM (800, 0830, 2000)
+            if (/^\d{3,4}$/.test(s)) {
+              const p = s.padStart(4, '0');
+              const h = +p.slice(0, 2);
+              const m = +p.slice(2, 4);
+              if (h < 0 || h > 23 || m < 0 || m > 59) return null;
+              return { h, m };
+            }
 
-let std_schedule_json = null;
+            // H:MM / HH:MM
+            if (/^\d{1,2}:\d{1,2}$/.test(s)) {
+              const [hh, mm] = s.split(':');
+              const h = +hh;
+              const m = +mm;
+              if (h < 0 || h > 23 || m < 0 || m > 59) return null;
+              return { h, m };
+            }
 
-// If there is at least ONE valid day, this becomes the full schedule
-// and overwrites what was there (missing days = cleared).
-if (hasAnySchedule) {
-  std_schedule_json = schedule;
-} else if (fs.main && fs.main.__template) {
-  // No valid times anywhere → fall back to existing template
-  std_schedule_json = fs.main.__template;
-} else if (base.std_schedule_json) {
-  std_schedule_json = base.std_schedule_json;
-}
+            return null;
+          };
+
+          const days   = ['mon','tue','wed','thu','fri','sat','sun'];
+          const sched  = {};
+          const issues = [];
+
+          for (const d of days) {
+            const startRaw = val(`${d}_start`, '');
+            const endRaw   = val(`${d}_end`, '');
+            const brRaw    = val(`${d}_break`, '');
+
+            // Completely blank day → skip
+            if (!startRaw && !endRaw && !brRaw) continue;
+
+            const start = parseTime(startRaw);
+            const end   = parseTime(endRaw);
+            const br    = brRaw ? (Number(brRaw) || 0) : 0;
+
+            if (!start || !end) {
+              issues.push(d.toUpperCase());
+              continue;
+            }
+
+            const startStr = `${String(start.h).padStart(2,'0')}:${String(start.m).padStart(2,'0')}`;
+            const endStr   = `${String(end.h).padStart(2,'0')}:${String(end.m).padStart(2,'0')}`;
+
+            sched[d] = {
+              start: startStr,
+              end:   endStr,
+              break_minutes: Math.max(0, br)
+            };
+          }
+
+          if (issues.length) {
+            const msg = `Fix invalid times on: ${issues.join(', ')}`;
+            if (typeof showModalHint === 'function') showModalHint(msg, 'warn');
+            else alert(msg);
+          }
+
+          return { schedule: sched, issues };
+        };
+
+        const { schedule, issues } = buildScheduleJson();
+        if (issues.length) {
+          // Block save; user must fix bad times first
+          window.modalCtx._saveInFlight = false;
+          if (LOGC) console.groupEnd?.();
+          return false;
+        }
+
+        let std_schedule_json = null;
+
+        if (schedule && Object.keys(schedule).length) {
+          // New schedule fully replaces previous one
+          std_schedule_json = schedule;
+        } else if (fs.main && fs.main.__template) {
+          // No rows entered this time → keep last template if present
+          std_schedule_json = fs.main.__template;
+        } else if (base.std_schedule_json) {
+          std_schedule_json = base.std_schedule_json;
+        }
+
 
 
         const prevStartIso = base.start_date || null;
@@ -5230,28 +5299,48 @@ console.warn('[AFTER UPSERT] reached post-save pre-gate', {
     const active = tabsEl?.querySelector('button.active')?.textContent?.toLowerCase() || 'main';
 
 
-    if (form) {
+     if (form) {
       if (!form.__wiredStage) {
         form.__wiredStage = true;
 const stage = (e) => {
   const t = e.target;
   if (!t || !t.name) return;
 
+  const name = t.name;
+
   // Base value: just read what’s in the field
   const v = t.type === 'checkbox'
     ? (t.checked ? 'on' : '')
     : t.value;
 
-  // Always stage the latest value into formState (including schedule fields)
-  setContractFormValue(t.name, v);
+  const isScheduleTime = /^(mon|tue|wed|thu|fri|sat|sun)_(start|end)$/.test(name);
 
-  // Recompute margins when rate / pay_method changes
-  if (t.name === 'pay_method_snapshot' || /^(paye_|umb_|charge_)/.test(t.name)) {
-    computeContractMargins();
+  if (isScheduleTime) {
+    // For schedule times, just stage raw text into formState; blur/Tab
+    // normalisers + explicit calls to setContractFormValue will handle
+    // validation and normalisation later.
+    window.modalCtx = window.modalCtx || {};
+    const fs = (window.modalCtx.formState ||= {
+      __forId: (window.modalCtx.data?.id ?? window.modalCtx.openToken ?? null),
+      main:{},
+      pay:{}
+    });
+    fs.main ||= {};
+    fs.main[name] = v;
+  } else {
+    // Everything else keeps current behaviour
+    setContractFormValue(name, v);
+
+    // Recompute margins when rate / pay_method changes
+    if (name === 'pay_method_snapshot' || /^(paye_|umb_|charge_)/.test(name)) {
+      computeContractMargins();
+    }
   }
 
   try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
 };
+
+
 
 
 
@@ -7030,6 +7119,7 @@ function setContractFormValue(name, value) {
 
   try { window.dispatchEvent(new CustomEvent('modal-dirty')); } catch {}
 }
+
 
 function applyRatePresetToContractForm(preset, payMethod /* 'PAYE'|'UMBRELLA' */) {
   if (!preset) return;
