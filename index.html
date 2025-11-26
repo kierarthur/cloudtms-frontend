@@ -23,16 +23,19 @@
     }
 
     *{box-sizing:border-box}
-    html,body{height:100%}
+html,body{
+  height:100%;
+}
 
-  body{
+body{
   margin:0;
   background:#020617;
   color:var(--text);
   font:13px/1.5 system-ui,Segoe UI,Roboto,Helvetica,Arial,"Apple Color Emoji","Segoe UI Emoji";
-  /* Allow the window to scroll when content overflows */
-  overflow:auto;
+  /* Default: no window scroll, we use inner scrolls (.summary-body, modals) */
+  overflow:hidden;
 }
+
 
 
     a{color:inherit}
@@ -119,15 +122,28 @@
     }
 
     /* ===== Layout ===== */
- .layout{
+.layout{
   display:grid;
   grid-template-columns:260px 1fr;
   grid-template-rows: 1fr;
   gap:16px;
-  height:auto;                          /* can grow */
-  min-height: calc(100vh - 48px);       /* but never smaller than viewport */
+  height:calc(100vh - 48px);  /* fill the viewport under the topbar */
+  min-height:0;
   padding:16px;
 }
+@media (max-height: 800px) {
+  html, body{
+    height:auto;
+    min-height:0;
+    overflow:auto;             /* allow outer window to scroll when screen is short */
+  }
+
+  .layout{
+    height:auto;               /* layout can grow taller than the viewport */
+    min-height:calc(100vh - 48px);
+  }
+}
+
 
     .panel{
       background:radial-gradient(circle at top left,#020617 0,#020617 45%,#020617 100%);
