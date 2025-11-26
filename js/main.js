@@ -5233,29 +5233,32 @@ console.warn('[AFTER UPSERT] reached post-save pre-gate', {
     if (form) {
       if (!form.__wiredStage) {
         form.__wiredStage = true;
-  const stage = (e) => {
+const stage = (e) => {
   const t = e.target;
   if (!t || !t.name) return;
-  let v = t.type === 'checkbox' ? (t.checked ? 'on' : '') : t.value;
 
+  // Base value
+  let v = t.type === 'checkbox'
+    ? (t.checked ? 'on' : '')
+    : t.value;
+
+  // Lightly clean time fields, but still ALWAYS stage them
   const isTimeField = /^(mon|tue|wed|thu|fri|sat|sun)_(start|end)$/.test(t.name);
   if (isTimeField) {
-    // Clean as you type
-    if (e.type === 'input') {
-      v = v.replace(/[^\d:]/g, '');
-      t.value = v;
-      // 🔹 NEW: also stage the cleaned value so it survives tab switches & Save
-      setContractFormValue(t.name, v);
-      try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
-      return;
-    }
+    v = String(v || '').replace(/[^\d:]/g, '');
+    t.value = v; // let the user see the cleaned value as they type
   }
 
-  // All other fields (and time fields on 'change')
+  // Always stage the latest value into formState
   setContractFormValue(t.name, v);
-  if (t.name === 'pay_method_snapshot' || /^(paye_|umb_|charge_)/.test(t.name)) computeContractMargins();
+
+  if (t.name === 'pay_method_snapshot' || /^(paye_|umb_|charge_)/.test(t.name)) {
+    computeContractMargins();
+  }
+
   try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
 };
+
 
         form.addEventListener('input', stage, true);
         form.addEventListener('change', stage, true);
