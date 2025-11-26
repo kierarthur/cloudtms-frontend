@@ -11331,7 +11331,9 @@ async function openCandidate(row) {
       const originalMethod = (full && full.pay_method) ? String(full.pay_method).toUpperCase() : null;
       const newMethod      = payload.pay_method ? String(payload.pay_method).toUpperCase() : null;
       const hasExistingId  = !!full?.id;
+      const alreadyFlipped = !!window.modalCtx?.__payFlipDone;
       const isFlip = !!(hasExistingId &&
+                        !alreadyFlipped &&
                         originalMethod &&
                         newMethod &&
                         (originalMethod === 'PAYE' || originalMethod === 'UMBRELLA') &&
@@ -11364,10 +11366,24 @@ async function openCandidate(row) {
             return { ok:false };
           }
 
-          // If confirmed, bulk endpoint has already updated candidate.pay_method and contracts;
-          // we can safely close this Candidate modal.
+          // Mark that we've already processed a flip in this modal
+          window.modalCtx.__payFlipDone = true;
+
+          // Update modalCtx.data to reflect the new method, so UI and future logic are consistent
+          try {
+            window.modalCtx.data = window.modalCtx.data || {};
+            window.modalCtx.data.pay_method = newMethod;
+            if (newMethod === 'PAYE') {
+              window.modalCtx.data.umbrella_id = null;
+            }
+          } catch (e) {
+            W('failed to sync modalCtx.data after pay-method change', e);
+          }
+
           L('[onSave] pay-method change confirmed; closing candidate modal');
-          return { ok:true };
+          // Treat this as a successful save so the frame switches to View mode
+          return { ok:true, saved: window.modalCtx.data };
+
         } catch (err) {
           W('pay-method change flow failed', err);
           alert(err?.message || 'Failed to process pay-method change.');
