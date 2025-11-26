@@ -11339,28 +11339,40 @@ async function openCandidate(row) {
                         originalMethod !== newMethod);
 
       if (isFlip) {
-        // Special flow: do NOT upsert pay_method directly here.
-        // Instead, hand over to the pay-method change modal which will:
-        //  - preview affected contracts
-        //  - call the bulk backend endpoint
-        //  - jump to Contracts and focus before/after contracts
         L('[onSave] detected PAYE↔UMBRELLA flip', { originalMethod, newMethod, candidateId: full.id });
 
+        // Reset dropdown back to original so UI reflects real state during the flow
         try {
-          await openCandidatePayMethodChangeModal(full, {
+          const pmSel = document.querySelector('select[name="pay_method"]');
+          if (pmSel && originalMethod) {
+            pmSel.value = originalMethod;
+          }
+        } catch (err) {
+          W('failed to reset pay_method select to originalMethod', err);
+        }
+
+        try {
+          const confirmed = await openCandidatePayMethodChangeModal(full, {
             originalMethod,
             newMethod,
             candidate_id: full.id
           });
+
+          // If user cancelled / nothing applied, keep candidate modal open
+          if (!confirmed) {
+            L('[onSave] pay-method change cancelled or failed, keeping candidate modal open');
+            return { ok:false };
+          }
+
+          // If confirmed, bulk endpoint has already updated candidate.pay_method and contracts;
+          // we can safely close this Candidate modal.
+          L('[onSave] pay-method change confirmed; closing candidate modal');
+          return { ok:true };
         } catch (err) {
           W('pay-method change flow failed', err);
           alert(err?.message || 'Failed to process pay-method change.');
           return { ok:false };
         }
-
-        // Allow this modal to close — the child/modal we opened will handle
-        // contracts focus and any navigation.
-        return { ok:true };
       }
 
       // ── Normal save path (no PAYE↔UMBRELLA flip) ───────────────────────────
@@ -11611,7 +11623,7 @@ async function openCandidate(row) {
       L('[onSave] final window.modalCtx', {
         dataId: window.modalCtx.data?.id,
         rolesCount: Array.isArray(window.modalCtx.data?.roles) ? window.modalCtx.data.roles.length : 0,
-        formStateForId: window.modalCtx.formState?.__forId
+        formStateForId: window.modalCtx.formState?.__ForId
       });
 
       if (isNew) window.__pendingFocus = { section: 'candidates', ids: [candidateId], primaryIds:[candidateId] };
@@ -11652,6 +11664,7 @@ async function openCandidate(row) {
     L('skip companion loads (no full.id)');
   }
 }
+
 
 // ====================== mountCandidatePayTab (FIXED) ======================
 // FRONTEND — UPDATED
@@ -14344,7 +14357,6 @@ async function applyCandidatePayMethodChange(candidate_id, body) {
   };
 }
 
-
 async function openChangeContractRatesModal(contractId) {
   const LOGC = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : true;
   const L    = (...a)=> { if (LOGC) console.log('[CONTRACTS][CHANGE-RATES]', ...a); };
@@ -14456,6 +14468,7 @@ async function openChangeContractRatesModal(contractId) {
             `).join('')}
           </select>
           <span class="mini">Weeks on or after this week-ending date will be moved to a new contract with the updated rates and schedule.</span>
+          <div class="mini" id="cutoffSummary" style="margin-top:4px;"></div>
         </div>
       </div>
     </div>
@@ -14483,7 +14496,7 @@ async function openChangeContractRatesModal(contractId) {
               <div class="mini" data-role="margin-note"></div>
             </div>
           `).join('')}
-          <div class="mini">You can change any pay/charge buckets here. Margins will be recomputed automatically in TSFIN after the change.</div>
+          <div class="mini">You can change any pay/charge buckets here. Margins will be checked before applying, and recomputed automatically in TSFIN after the change.</div>
         </div>
       </div>
     </div>
@@ -14614,6 +14627,69 @@ async function openChangeContractRatesModal(contractId) {
     };
   };
 
+  // Helper to ensure we have ERNI multiplier from settings (used for margin check)
+  const ensureErniMult = async () => {
+    if (typeof window.__ERNI_MULT__ === 'number' && window.__ERNI_MULT__ > 0) {
+      return window.__ERNI_MULT__;
+    }
+    try {
+      if (typeof getSettingsCached === 'function') {
+        const s = await getSettingsCached();
+        let p = s?.erni_pct ?? s?.employers_ni_percent ?? 0;
+        p = Number(p) || 0;
+        if (p > 1) p = p / 100;
+        window.__ERNI_MULT__ = 1 + p;
+        return window.__ERNI_MULT__;
+      }
+    } catch (e) {
+      W('ensureErniMult failed, defaulting to 1', e);
+    }
+    window.__ERNI_MULT__ = 1;
+    return 1;
+  };
+
+  // Margin validation before submit (per bucket)
+  const validateMargins = async (ratesOverride) => {
+    const BUCKETS = ['day','night','sat','sun','bh'];
+    const erniMult = await ensureErniMult();
+    const bad = [];
+
+    for (const b of BUCKETS) {
+      const chargeKey  = `charge_${b}`;
+      const payPayeKey = `paye_${b}`;
+      const payUmbKey  = `umb_${b}`;
+
+      const rawCharge =
+        (ratesOverride && ratesOverride.hasOwnProperty(chargeKey))
+          ? ratesOverride[chargeKey]
+          : R[chargeKey];
+
+      const rawPay =
+        payMethod === 'PAYE'
+          ? ((ratesOverride && ratesOverride.hasOwnProperty(payPayeKey)) ? ratesOverride[payPayeKey] : R[payPayeKey])
+          : ((ratesOverride && ratesOverride.hasOwnProperty(payUmbKey))  ? ratesOverride[payUmbKey]  : R[payUmbKey]);
+
+      const ch = Number(rawCharge);
+      const pa = Number(rawPay);
+
+      if (!Number.isFinite(ch) || !Number.isFinite(pa)) continue;
+
+      let margin;
+      if (payMethod === 'PAYE') {
+        margin = ch - pa * erniMult;
+      } else {
+        margin = ch - pa;
+      }
+
+      // Allow tiny floating point wiggle; treat anything < -0.001 as negative
+      if (margin < -0.001) {
+        bad.push(labelOf(b));
+      }
+    }
+
+    return bad;
+  };
+
   showModal(
     'Change Contract Rates',
     [{ key:'main', label:'Change' }],
@@ -14621,6 +14697,23 @@ async function openChangeContractRatesModal(contractId) {
     async () => {
       const payload = buildPayloadFromDom();
       if (!payload) return false;
+
+      // 🔹 Validate margins before applying
+      try {
+        const badBuckets = await validateMargins(payload.rates_json || {});
+        if (badBuckets.length) {
+          const msg =
+            'One or more buckets would have a negative margin with the new rates:\n\n' +
+            badBuckets.map(b => `• ${b}`).join('\n') +
+            '\n\nPlease adjust pay and/or charge so that margins remain non-negative.';
+          alert(msg);
+          return false;
+        }
+      } catch (err) {
+        W('margin validation failed (non-fatal, but blocking apply)', err);
+        alert('Could not validate margins. Please try again or adjust rates.');
+        return false;
+      }
 
       try {
         const resp = await applyChangeContractRates(contractId, payload);
@@ -14658,6 +14751,31 @@ async function openChangeContractRatesModal(contractId) {
     null,
     { kind:'contract-change-rates', noParentGate:true, forceEdit:true }
   );
+
+  // 🔹 After the modal is mounted, wire up the cut-off summary text
+  setTimeout(() => {
+    try {
+      const root = document.getElementById('changeContractRatesForm');
+      if (!root) return;
+      const sel = root.querySelector('select[name="cutoff_we"]');
+      const summary = root.querySelector('#cutoffSummary');
+      if (!sel || !summary) return;
+
+      const updateSummary = () => {
+        const v = sel.value || '';
+        if (!v) {
+          summary.textContent = 'Choose a week ending date for the new contract to start applying.';
+        } else {
+          summary.textContent = `New rates and schedule will apply to weeks on or after week ending ${v}.`;
+        }
+      };
+
+      sel.addEventListener('change', updateSummary);
+      updateSummary();
+    } catch (e) {
+      W('failed to wire cutoffSummary (non-fatal)', e);
+    }
+  }, 0);
 }
 
 async function openCandidatePayMethodChangeModal(candidate, context = {}) {
@@ -14672,7 +14790,7 @@ async function openCandidatePayMethodChangeModal(candidate, context = {}) {
   const candidateId = cand.id || context.candidate_id || context.id;
   if (!candidateId) {
     alert('Candidate id missing for pay-method change.');
-    return;
+    return false;
   }
 
   const origMethod = String(context.originalMethod || cand.pay_method || '').toUpperCase() || null;
@@ -14681,15 +14799,15 @@ async function openCandidatePayMethodChangeModal(candidate, context = {}) {
 
   if (!newMethod || (newMethod !== 'PAYE' && newMethod !== 'UMBRELLA')) {
     alert('New pay method must be PAYE or UMBRELLA.');
-    return;
+    return false;
   }
   if (!origMethod || (origMethod !== 'PAYE' && origMethod !== 'UMBRELLA')) {
     alert('Current pay method must be PAYE or UMBRELLA to use this change flow.');
-    return;
+    return false;
   }
   if (origMethod === newMethod) {
     alert('New pay method is the same as the current one.');
-    return;
+    return false;
   }
 
   let preview;
@@ -14698,7 +14816,7 @@ async function openCandidatePayMethodChangeModal(candidate, context = {}) {
   } catch (err) {
     E('preview failed', err);
     alert(err?.message || 'Failed to preview pay-method change.');
-    return;
+    return false;
   }
 
   const contracts = Array.isArray(preview?.contracts) ? preview.contracts.slice() : [];
@@ -14718,19 +14836,23 @@ async function openCandidatePayMethodChangeModal(candidate, context = {}) {
       'Do you want to proceed?'
     ].join('\n');
     const ok = window.confirm(msg);
-    if (!ok) return;
+    if (!ok) {
+      // User cancelled → caller should keep Candidate modal open
+      return false;
+    }
 
     try {
       const resp = await applyCandidatePayMethodChange(candidateId, { new_method: newMethod, contract_ids: [] });
       L('applyCandidatePayMethodChange success (no contracts)', resp);
-
-      // Focus contracts view if you still want to jump; there may be no contract_ids, but this sets filters.
       focusContractsAfterBulkChange(resp);
+      try { window.__toast && window.__toast('Pay method changed.'); } catch {}
+      // Flip confirmed
+      return true;
     } catch (err) {
       E('applyCandidatePayMethodChange failed', err);
       alert(err?.message || 'Failed to apply pay-method change.');
+      return false;
     }
-    return;
   }
 
   contracts.sort((a, b) => {
@@ -14812,35 +14934,54 @@ async function openCandidatePayMethodChangeModal(candidate, context = {}) {
 
   const contractIds = contracts.map(c => c.contract_id).filter(Boolean).map(String);
 
-  showModal(
-    `Change pay method — ${directionLabel}`,
-    [{ key:'main', label:'Summary' }],
-    () => bodyHtml,
-    async () => {
-      // Called when user clicks Apply/Save on this modal
-      try {
-        const resp = await applyCandidatePayMethodChange(candidateId, {
-          new_method: newMethod,
-          contract_ids: contractIds
-        });
-        L('applyCandidatePayMethodChange success', resp);
+  // Wrap showModal in a Promise so the caller can know if the user confirmed or cancelled
+  return await new Promise((resolve) => {
+    let settled = false;
+    const done = (ok) => {
+      if (settled) return;
+      settled = true;
+      resolve(!!ok);
+    };
 
-        // Prepare Contracts section to focus the before/after contracts
-        focusContractsAfterBulkChange(resp);
+    showModal(
+      `Change pay method — ${directionLabel}`,
+      [{ key:'main', label:'Summary' }],
+      () => bodyHtml,
+      async () => {
+        // Called when user clicks Apply/Save on this modal
+        try {
+          const resp = await applyCandidatePayMethodChange(candidateId, {
+            new_method: newMethod,
+            contract_ids: contractIds
+          });
+          L('applyCandidatePayMethodChange success', resp);
 
-        try { window.__toast && window.__toast('Pay method changed and contracts updated.'); } catch {}
-        return true; // close this modal only; parent closing / navigation is handled elsewhere
-      } catch (err) {
-        E('applyCandidatePayMethodChange failed', err);
-        alert(err?.message || 'Failed to apply pay-method change.');
-        return false;
-      }
-    },
-    false,
-    null,
-    { kind: 'candidate-pay-method-change', noParentGate: true, forceEdit: true }
-  );
+          // Prepare Contracts section to focus the before/after contracts
+          focusContractsAfterBulkChange(resp);
+
+          try { window.__toast && window.__toast('Pay method changed and contracts updated.'); } catch {}
+
+          done(true);   // flip confirmed
+          return true;  // close this modal
+        } catch (err) {
+          E('applyCandidatePayMethodChange failed', err);
+          alert(err?.message || 'Failed to apply pay-method change.');
+          done(false);  // treat as not-confirmed
+          return false; // keep this modal open
+        }
+      },
+      false,  // hasId
+      () => {
+        // onReturn is called when the modal is closed via X/Cancel etc.
+        // If we get here and haven't already resolved, treat it as cancel.
+        W('[CAND][PAY-METHOD][MODAL] closed without confirmation (cancel)');
+        done(false);
+      },
+      { kind: 'candidate-pay-method-change', noParentGate: true, forceEdit: true }
+    );
+  });
 }
+
 function focusContractsAfterBulkChange(info) {
   if (!info || typeof info !== 'object') info = {};
   const newIds = Array.isArray(info.new_contract_ids) ? info.new_contract_ids.map(String) : [];
@@ -14882,6 +15023,7 @@ function focusContractsAfterBulkChange(info) {
   }
   if (candId) {
     st.filters.candidate_id = String(candId);
+    st.page = 1; // ensure we start from the first page for this candidate
   }
 
   // Jump section to Contracts; renderAll() will be invoked either:
@@ -14894,7 +15036,6 @@ function focusContractsAfterBulkChange(info) {
   // We intentionally do NOT call renderAll() here so that
   // modal close logic can handle it once the stack is torn down.
 }
-
 
 
 
@@ -15586,7 +15727,7 @@ function renderContractCalendarTab(ctx) {
   const fr = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
   const inViewMode = !!(fr && fr.mode === 'view');
 
-  // --- actions (now includes Duplicate + Change Rates)
+  // --- actions (includes Duplicate + Change Rates)
   const actionsHtml = (c.id
     ? `<div class="actions" style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">
          ${inViewMode ? `` : `<button id="btnAddMissing">Add missing weeks</button>
