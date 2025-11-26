@@ -5225,35 +5225,62 @@ console.warn('[AFTER UPSERT] reached post-save pre-gate', {
       const wire = () => {
         snapshotContractForm();
 
-              const form   = document.querySelector('#contractForm');
-        const tabsEl = document.getElementById('modalTabs');
-        const active = tabsEl?.querySelector('button.active')?.textContent?.toLowerCase() || 'main';
+     const form   = document.querySelector('#contractForm');
+    const tabsEl = document.getElementById('modalTabs');
+    const active = tabsEl?.querySelector('button.active')?.textContent?.toLowerCase() || 'main';
 
 
-        if (form) {
-          if (!form.__wiredStage) {
-            form.__wiredStage = true;
-            const stage = (e) => {
-              const t = e.target;
-              if (!t || !t.name) return;
-              let v = t.type === 'checkbox' ? (t.checked ? 'on' : '') : t.value;
+    if (form) {
+      if (!form.__wiredStage) {
+        form.__wiredStage = true;
+        const stage = (e) => {
+          const t = e.target;
+          if (!t || !t.name) return;
+          let v = t.type === 'checkbox' ? (t.checked ? 'on' : '') : t.value;
 
-              const isTimeField = /^(mon|tue|wed|thu|fri|sat|sun)_(start|end)$/.test(t.name);
-              if (isTimeField) {
-                if (e.type === 'input') {
-                  v = v.replace(/[^\d:]/g,'');
-                  t.value = v;
-                  try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
-                  return;
-                }
-              }
-
-              setContractFormValue(t.name, v);
-              if (t.name === 'pay_method_snapshot' || /^(paye_|umb_|charge_)/.test(t.name)) computeContractMargins();
+          const isTimeField = /^(mon|tue|wed|thu|fri|sat|sun)_(start|end)$/.test(t.name);
+          if (isTimeField) {
+            if (e.type === 'input') {
+              v = v.replace(/[^\d:]/g,'');
+              t.value = v;
               try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
-            };
-            form.addEventListener('input', stage, true);
-            form.addEventListener('change', stage, true);
+              return;
+            }
+          }
+
+          setContractFormValue(t.name, v);
+          if (t.name === 'pay_method_snapshot' || /^(paye_|umb_|charge_)/.test(t.name)) computeContractMargins();
+          try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
+        };
+        form.addEventListener('input', stage, true);
+        form.addEventListener('change', stage, true);
+
+        // NEW: lock pay_method_snapshot select appropriately
+        try {
+          const sel = form.querySelector('select[name="pay_method_snapshot"], select[name="default_pay_method_snapshot"]');
+          const candId = window.modalCtx?.data?.candidate_id || null;
+          const hasId  = !!window.modalCtx?.data?.id;
+          const mainFs = (window.modalCtx?.formState && window.modalCtx.formState.main) || {};
+
+          if (sel) {
+            if (hasId) {
+              // Edit mode: always read-only – pay method comes from candidate / history
+              sel.disabled = true;
+            } else if (candId) {
+              // New contract with candidate already chosen:
+              // re-use derived snapshot and keep it locked
+              sel.disabled = true;
+            } else if (mainFs.__pay_locked) {
+              // Candidate picker has already derived & locked the snapshot
+              sel.disabled = true;
+            } else {
+              // Brand-new, no candidate yet → leave editable (rare case, but allowed)
+              sel.disabled = false;
+            }
+          }
+        } catch (e) {
+          if (LOGC) console.warn('[CONTRACTS] pay_method_snapshot lock wiring failed', e);
+        }
 
             const normaliseTimeInput = (t) => {
               if (!t || !/^(mon|tue|wed|thu|fri|sat|sun)_(start|end)$/.test(t.name)) return;
@@ -5499,30 +5526,50 @@ console.warn('[AFTER UPSERT] reached post-save pre-gate', {
 
             if (btnPC && !btnPC.__wired) {
               btnPC.__wired = true;
-              btnPC.addEventListener('click', async () => {
-                if (LOGC) console.log('[CONTRACTS] Pick Candidate clicked');
-                openCandidatePicker(async ({ id, label }) => {
-                  if (LOGC) console.log('[CONTRACTS] Pick Candidate → selected', { id, label });
-                  setContractFormValue('candidate_id', id);
-                  const lab = document.getElementById('candidatePickLabel'); if (lab) lab.textContent = `Chosen: ${label}`;
-                  try {
-                    const fs2 = (window.modalCtx.formState ||= { __forId: (window.modalCtx.data?.id ?? window.modalCtx.openToken ?? null), main:{}, pay:{} });
-                    fs2.main ||= {}; fs2.main.candidate_id = id; fs2.main.candidate_display = label;
-                    window.modalCtx.data = window.modalCtx.data || {};
-                    window.modalCtx.data.candidate_id = id; window.modalCtx.data.candidate_display = label;
-                  } catch {}
-                  try {
-                    const cand = await getCandidate(id);
-                    const derived = (String(cand?.pay_method || '').toUpperCase() === 'UMBRELLA' && cand?.umbrella_id) ? 'UMBRELLA' : 'PAYE';
-                    const fsm = (window.modalCtx.formState ||= { main:{}, pay:{} }).main ||= {};
-                    fsm.pay_method_snapshot = derived;
-                    fsm.__pay_locked = true;
-                    const sel = document.querySelector('select[name="pay_method_snapshot"], select[name="default_pay_method_snapshot"]');
-                    if (sel) { sel.value = derived; sel.disabled = true; }
-                    computeContractMargins();
-                  } catch (e) { if (LOGC) console.warn('[CONTRACTS] prefillPayMethodFromCandidate failed', e); }
-                });
-              });
+   btnPC.addEventListener('click', async () => {
+  if (LOGC) console.log('[CONTRACTS] Pick Candidate clicked');
+  openCandidatePicker(async ({ id, label }) => {
+    if (LOGC) console.log('[CONTRACTS] Pick Candidate → selected', { id, label });
+
+    let cand = null;
+    try {
+      cand = await getCandidate(id);
+    } catch (e) {
+      alert('Failed to load candidate details for this contract.');
+      if (LOGC) console.warn('[CONTRACTS] getCandidate failed', e);
+      return;
+    }
+
+    const pmRaw = (cand && cand.pay_method) ? String(cand.pay_method).toUpperCase() : '';
+    const pm    = (pmRaw === 'PAYE' || pmRaw === 'UMBRELLA') ? pmRaw : null;
+
+    if (!pm) {
+      alert('This candidate has no pay method set (Unknown). Please set their pay method to PAYE or UMBRELLA before creating a contract.');
+      if (LOGC) console.warn('[CONTRACTS] blocking contract create for candidate with Unknown pay_method', { candidate_id: id, pay_method: cand?.pay_method });
+      return;
+    }
+
+    // Only now do we bind candidate + snapshot into the contract form
+    setContractFormValue('candidate_id', id);
+    const lab = document.getElementById('candidatePickLabel'); if (lab) lab.textContent = `Chosen: ${label}`;
+    try {
+      const fs2 = (window.modalCtx.formState ||= { __forId: (window.modalCtx.data?.id ?? window.modalCtx.openToken ?? null), main:{}, pay:{} });
+      fs2.main ||= {}; fs2.main.candidate_id = id; fs2.main.candidate_display = label;
+      window.modalCtx.data = window.modalCtx.data || {};
+      window.modalCtx.data.candidate_id = id; window.modalCtx.data.candidate_display = label;
+    } catch {}
+
+    try {
+      const fsm = (window.modalCtx.formState ||= { main:{}, pay:{} }).main ||= {};
+      fsm.pay_method_snapshot = pm;
+      fsm.__pay_locked = true;
+      const sel = document.querySelector('select[name="pay_method_snapshot"], select[name="default_pay_method_snapshot"]');
+      if (sel) { sel.value = pm; sel.disabled = true; }
+      computeContractMargins();
+    } catch (e) { if (LOGC) console.warn('[CONTRACTS] prefillPayMethodFromCandidate failed', e); }
+  });
+});
+
               if (LOGC) console.log('[CONTRACTS] wired btnPickCandidate');
             }
       if (btnCC && !btnCC.__wired) {
@@ -11343,6 +11390,48 @@ async function openCandidate(row) {
       if (isFlip) {
         L('[onSave] detected PAYE↔UMBRELLA flip', { originalMethod, newMethod, candidateId: full.id });
 
+        const idForUpdate = window.modalCtx?.data?.id || full?.id || null;
+
+        // If we are going FROM PAYE → UMBRELLA, we must ensure umbrella_id is persisted first.
+        if (originalMethod === 'PAYE' && newMethod === 'UMBRELLA') {
+          const effectiveUmbrellaId = payload.umbrella_id || full.umbrella_id || null;
+
+          if (!effectiveUmbrellaId) {
+            alert('Before switching to UMBRELLA, select an umbrella company on the Payment details tab and save again.');
+            return { ok:false };
+          }
+
+          // Pre-save umbrella details (but keep pay_method as originalMethod) so the backend
+          // bulk change endpoint passes its umbrella_id check.
+          if (!full.umbrella_id && effectiveUmbrellaId && idForUpdate) {
+            L('[onSave] pre-saving umbrella details before PAYE→UMBRELLA flip', {
+              candidateId: idForUpdate,
+              umbrella_id: effectiveUmbrellaId
+            });
+
+            const prePayload = { ...payload };
+            // Ensure we do NOT change pay_method yet in this pre-save.
+            prePayload.pay_method = originalMethod;
+
+            const preSaved = await upsertCandidate(prePayload, idForUpdate).catch(err => {
+              E('pre upsertCandidate (umbrella before flip) failed', err);
+              return null;
+            });
+            if (!preSaved || !preSaved.id) {
+              alert('Failed to save umbrella details before pay-method change. Please try again.');
+              return { ok:false };
+            }
+
+            // Update full + modalCtx.data with the persisted candidate (still PAYE, but umbrella_id set)
+            full = { ...full, ...preSaved };
+            try {
+              window.modalCtx.data = { ...(window.modalCtx.data || {}), ...preSaved };
+            } catch (err) {
+              W('failed to sync modalCtx.data after pre-saving umbrella', err);
+            }
+          }
+        }
+
         // Reset dropdown back to original so UI reflects real state during the flow
         try {
           const pmSel = document.querySelector('select[name="pay_method"]');
@@ -12587,7 +12676,7 @@ async function fetchCandidateRateOverrides({ candidate_id, client_id, role, band
 
 
 
-function computeContractMargins() {
+async function computeContractMargins() {
   const fs = (window.modalCtx && window.modalCtx.formState) || { main:{}, pay:{} };
   const form = document.querySelector('#contractRatesTab')?.closest('form') || document.querySelector('#contractForm');
 
@@ -12595,48 +12684,108 @@ function computeContractMargins() {
   const payMethodSel = form ? form.querySelector('select[name="pay_method_snapshot"]') : null;
   const payMethod = ((payMethodSel && payMethodSel.value) || pmStaged || 'PAYE').toUpperCase();
 
+  // ─────────────────────────────────────────────────────────────
+  // Ensure we have a sensible ERNI multiplier (1 + erni_pct)
+  // ─────────────────────────────────────────────────────────────
+  let erniMult = 1;
+  try {
+    if (typeof window.__ERNI_MULT__ === 'number' && window.__ERNI_MULT__ > 0) {
+      erniMult = window.__ERNI_MULT__;
+    } else if (typeof window.getSettingsCached === 'function') {
+      const s = await window.getSettingsCached();
+      let p = s?.erni_pct ?? s?.employers_ni_percent ?? 0;
+      p = Number(p) || 0;
+      if (p > 1) p = p / 100; // support 15 vs 0.15
+      erniMult = 1 + p;
+      if (!Number.isFinite(erniMult) || erniMult <= 0) erniMult = 1;
+      window.__ERNI_MULT__ = erniMult;
+    }
+  } catch {
+    erniMult = 1;
+    window.__ERNI_MULT__ = 1;
+  }
+
   const get = (n) => {
     const domVal = form ? form.querySelector(`[name="${n}"]`)?.value : null;
     const staged = fs.pay ? fs.pay[n] : null;
     const v = (staged != null && staged !== '') ? staged : (domVal != null ? domVal : '');
-    return Number(v || 0);
+    const num = Number(v);
+    return Number.isFinite(num) ? num : 0;
   };
 
   const buckets = ['day','night','sat','sun','bh'];
   const negFlags = {};
+
   buckets.forEach(b => {
     const ch = get(`charge_${b}`);
-    const py = (payMethod==='PAYE') ? get(`paye_${b}`) : get(`umb_${b}`);
-    let mg = ch - py;
-    try { if (typeof window.calcDailyMargin === 'function') mg = window.calcDailyMargin({ bucket:b, charge:ch, pay:py, method:payMethod }); } catch {}
+    const py = (payMethod === 'PAYE') ? get(`paye_${b}`) : get(`umb_${b}`);
+
+    let mg;
+
+    // Prefer shared helper if present, but force ERNI in
+    if (typeof window.calcDailyMargin === 'function') {
+      try {
+        const v = window.calcDailyMargin({
+          bucket: b,
+          charge: ch,
+          pay:    py,
+          method: payMethod,
+          erniMultiplier: erniMult
+        });
+        mg = (v == null || !Number.isFinite(v)) ? null : v;
+      } catch {
+        mg = null;
+      }
+    }
+
+    // Fallback if helper missing or returned null
+    if (mg == null) {
+      if (payMethod === 'PAYE') {
+        mg = ch - (py * erniMult);
+      } else {
+        // UMBRELLA or unknown → no ERNI
+        mg = ch - py;
+      }
+    }
 
     const row = document.querySelector(`#marginsTable tbody tr[data-b="${b}"]`);
     if (row) {
-      const chEl = row.querySelector('.ch'), pyEl = row.querySelector('.py'), mgEl=row.querySelector('.mg');
-      if (pyEl) pyEl.textContent = (py || py===0) ? Number(py).toFixed(2) : '';
-      if (chEl) chEl.textContent = (ch || ch===0) ? Number(ch).toFixed(2) : '';
+      const chEl = row.querySelector('.ch');
+      const pyEl = row.querySelector('.py');
+      const mgEl = row.querySelector('.mg');
+
+      if (pyEl) pyEl.textContent = (py || py === 0) ? py.toFixed(2) : '';
+      if (chEl) chEl.textContent = (ch || ch === 0) ? ch.toFixed(2) : '';
+
       if (mgEl) {
-        mgEl.textContent = (mg || mg===0) ? Number(mg).toFixed(2) : '';
-        mgEl.style.color = (mg<0)? 'var(--fail)' : '';
-        if (mg < 0) {
+        const showMg = Number.isFinite(mg) ? mg : null;
+        mgEl.textContent = (showMg || showMg === 0) ? showMg.toFixed(2) : '';
+        mgEl.style.color = (showMg < 0) ? 'var(--fail)' : '';
+
+        if (showMg < 0) {
           mgEl.setAttribute('data-negative','1');
           if (!mgEl.querySelector('.mini')) {
-            const hint = document.createElement('div'); hint.className='mini'; hint.textContent = 'Margin can’t be negative';
+            const hint = document.createElement('div');
+            hint.className = 'mini';
+            hint.textContent = 'Margin can’t be negative';
             mgEl.appendChild(hint);
           }
           row.setAttribute('data-negative','1');
         } else {
           mgEl.removeAttribute('data-negative');
-          const hint = mgEl.querySelector('.mini'); if (hint) hint.remove();
+          const hint = mgEl.querySelector('.mini');
+          if (hint) hint.remove();
           row.removeAttribute('data-negative');
         }
       }
     }
+
     negFlags[b] = (mg < 0);
   });
 
   const hasNegativeMargins = Object.values(negFlags).some(Boolean);
   window.__contractMarginState = { hasNegativeMargins, negFlags, method: payMethod };
+
   try { window.dispatchEvent(new CustomEvent('contract-margins-updated', { detail: window.__contractMarginState })); } catch {}
   try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
 }
@@ -21347,6 +21496,86 @@ function bindCandidateMainFormEvents(container, model) {
     profEl.value = model.prof_reg_number || '';
     profEl.addEventListener('input', () => {
       model.prof_reg_number = profEl.value || '';
+      markDirty();
+    });
+  }
+
+  // 🔹 Pay method change handler — nuke bank details / umbrella_id in modal only
+  const payEl = q('select[name="pay_method"]');
+  if (payEl) {
+    // Normalise initial previous method
+    let lastMethod = (model.pay_method || payEl.value || 'UNKNOWN').toString().toUpperCase();
+    if (lastMethod === '' || lastMethod === 'UNKNOWN') lastMethod = null;
+
+    payEl.addEventListener('change', () => {
+      const raw = payEl.value || '';
+      let nextMethod = raw.toUpperCase();
+      if (nextMethod === '' || nextMethod === 'UNKNOWN') nextMethod = null;
+
+      const prev = lastMethod;
+      const next = nextMethod;
+
+      if (prev === next) return;
+
+      const wasPAYE     = prev === 'PAYE';
+      const wasUMBRELLA = prev === 'UMBRELLA';
+      const nowPAYE     = next === 'PAYE';
+      const nowUMBRELLA = next === 'UMBRELLA';
+
+      // Helper to clear bank fields in the Pay tab + model
+      const clearBankFields = () => {
+        const acc = document.querySelector('#tab-pay input[name="account_holder"]');
+        const bn  = document.querySelector('#tab-pay input[name="bank_name"]');
+        const sc  = document.querySelector('#tab-pay input[name="sort_code"]');
+        const an  = document.querySelector('#tab-pay input[name="account_number"]');
+        if (acc) acc.value = '';
+        if (bn)  bn.value  = '';
+        if (sc)  sc.value  = '';
+        if (an)  an.value  = '';
+        model.account_holder = '';
+        model.bank_name      = '';
+        model.sort_code      = '';
+        model.account_number = '';
+      };
+
+      // Helper to clear umbrella id + text field in Pay tab + model
+      const clearUmbrella = () => {
+        const umbId   = document.getElementById('umbrella_id');
+        const umbName = document.getElementById('umbrella_name');
+        if (umbId)   umbId.value   = '';
+        if (umbName) umbName.value = '';
+        model.umbrella_id = null;
+      };
+
+      // If we are switching channel (PAYE ↔ UMBRELLA), wipe bank details in the modal
+      if ((wasPAYE && nowUMBRELLA) || (wasUMBRELLA && nowPAYE)) {
+        clearBankFields();
+      }
+      // Specifically for UMBRELLA → PAYE, also clear umbrella_id
+      if (wasUMBRELLA && nowPAYE) {
+        clearUmbrella();
+      }
+
+      // Update model + modalCtx in-memory only (server-side nuking is handled by what we send)
+      model.pay_method = next;
+      try {
+        window.modalCtx = window.modalCtx || {};
+        window.modalCtx.data = window.modalCtx.data || {};
+        window.modalCtx.data.pay_method = next;
+        if (next === 'PAYE') {
+          // Keep umbrella_id null in the in-memory candidate once PAYE is chosen
+          window.modalCtx.data.umbrella_id = null;
+        }
+      } catch {}
+
+      // Broadcast so Pay tab can react if it wants to
+      try {
+        window.dispatchEvent(new CustomEvent('pay-method-changed', {
+          detail: { from: prev, to: next }
+        }));
+      } catch {}
+
+      lastMethod = next;
       markDirty();
     });
   }
