@@ -6916,27 +6916,58 @@ function setContractFormValue(name, value) {
       form.querySelector(`*[name="${CSS.escape(name)}"]`);
   }
 
-  // Validate & normalise *_start/*_end (empty allowed)
+  // Validate & normalise *_start/*_end (empty allowed) **without** wiping partial input
   if (/^(mon|tue|wed|thu|fri|sat|sun)_(start|end)$/.test(targetName)) {
     const raw = (value == null ? '' : String(value).trim());
-    const isValidHHMM = (s)=>{
-      if (!s) return true;
+
+    const isValidHHMM = (s) => {
+      if (!s) return true; // empty is allowed
       if (!/^(\d{1,2}:\d{1,2}|\d{3,4})$/.test(s)) return false;
-      let h,m;
-      if (/^\d{3,4}$/.test(s)) { const p=s.padStart(4,'0'); h=+p.slice(0,2); m=+p.slice(2,4); }
-      else { const a=s.split(':'); h=+a[0]; m=+a[1]; }
-      return (h>=0 && h<=23 && m>=0 && m<=59);
-    };
-    if (raw && !isValidHHMM(raw)) {
-      if (el) { el.value=''; el.setAttribute('data-invalid','1'); el.setAttribute('title','Enter HH:MM (00:00–23:59)'); }
-      value = '';
-    } else if (raw) {
-      // normalise to HH:MM
       let h, m;
-      if (/^\d{3,4}$/.test(raw)) { const p=raw.padStart(4,'0'); h=+p.slice(0,2); m=+p.slice(2,4); }
-      else { const a=raw.split(':'); h=+a[0]; m=+a[1]; }
-      value = String(h).padStart(2,'0') + ':' + String(m).padStart(2,'0');
-      if (el) { el.value = value; el.removeAttribute('data-invalid'); el.removeAttribute('title'); }
+      if (/^\d{3,4}$/.test(s)) {
+        const p = s.padStart(4, '0');
+        h = +p.slice(0, 2);
+        m = +p.slice(2, 4);
+      } else {
+        const a = s.split(':');
+        h = +a[0];
+        m = +a[1];
+      }
+      return (h >= 0 && h <= 23 && m >= 0 && m <= 59);
+    };
+
+    if (!raw) {
+      // Empty: clear error markers and treat as blank
+      if (el) {
+        el.removeAttribute('data-invalid');
+        el.removeAttribute('title');
+      }
+      value = '';
+    } else if (isValidHHMM(raw)) {
+      // Normalise to HH:MM (supports 3/4 digits or H:MM / HH:MM)
+      let h, m;
+      if (/^\d{3,4}$/.test(raw)) {
+        const p = raw.padStart(4, '0');
+        h = +p.slice(0, 2);
+        m = +p.slice(2, 4);
+      } else {
+        const a = raw.split(':');
+        h = +a[0];
+        m = +a[1];
+      }
+      value = String(h).padStart(2, '0') + ':' + String(m).padStart(2, '0');
+      if (el) {
+        el.value = value;
+        el.removeAttribute('data-invalid');
+        el.removeAttribute('title');
+      }
+    } else {
+      // Partially typed or invalid: keep what the user has typed, just mark it
+      if (el) {
+        el.setAttribute('data-invalid', '1');
+        el.setAttribute('title', 'Enter HH:MM (00:00–23:59)');
+      }
+      value = raw; // keep raw so typing is not wiped
     }
   }
 
