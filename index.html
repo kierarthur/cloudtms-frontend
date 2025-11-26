@@ -25,13 +25,15 @@
     *{box-sizing:border-box}
     html,body{height:100%}
 
-    body{
-      margin:0;
-      background:#020617;
-      color:var(--text);
-      font:13px/1.5 system-ui,Segoe UI,Roboto,Helvetica,Arial,"Apple Color Emoji","Segoe UI Emoji";
-      overflow:hidden; /* page itself doesn’t scroll */
-    }
+  body{
+  margin:0;
+  background:#020617;
+  color:var(--text);
+  font:13px/1.5 system-ui,Segoe UI,Roboto,Helvetica,Arial,"Apple Color Emoji","Segoe UI Emoji";
+  /* Allow the window to scroll when content overflows */
+  overflow:auto;
+}
+
 
     a{color:inherit}
 
@@ -117,15 +119,15 @@
     }
 
     /* ===== Layout ===== */
-    .layout{
-      display:grid;
-      grid-template-columns:260px 1fr;
-      grid-template-rows: 1fr;
-      gap:16px;
-      height: calc(100vh - 48px);
-      min-height: 0;
-      padding:16px;
-    }
+ .layout{
+  display:grid;
+  grid-template-columns:260px 1fr;
+  grid-template-rows: 1fr;
+  gap:16px;
+  height:auto;                          /* can grow */
+  min-height: calc(100vh - 48px);       /* but never smaller than viewport */
+  padding:16px;
+}
 
     .panel{
       background:radial-gradient(circle at top left,#020617 0,#020617 45%,#020617 100%);
