@@ -5456,21 +5456,31 @@ console.warn('[AFTER UPSERT] reached post-save pre-gate', {
                   if (hiddenName === 'candidate_id') { window.modalCtx.data.candidate_id = id; window.modalCtx.data.candidate_display = label; }
                   if (hiddenName === 'client_id')    { window.modalCtx.data.client_id    = id; window.modalCtx.data.client_name = label; }
                 } catch {}
+if (hiddenName === 'candidate_id') {
+  (async () => {
+    try {
+      const candRaw = await getCandidate(id);
+      // Support both shapes: { candidate:{...} } or flat row
+      const cand = (candRaw && candRaw.candidate) ? candRaw.candidate : candRaw;
 
-                if (hiddenName === 'candidate_id') {
-                  (async () => {
-                    try {
-                      const cand = await getCandidate(id);
-                      const derived = (String(cand?.pay_method || '').toUpperCase() === 'UMBRELLA' && cand?.umbrella_id) ? 'UMBRELLA' : 'PAYE';
-                      const fsm = (window.modalCtx.formState ||= { main:{}, pay:{} }).main ||= {};
-                      fsm.pay_method_snapshot = derived;
-                      fsm.__pay_locked = true;
-                      const sel = document.querySelector('select[name="pay_method_snapshot"], select[name="default_pay_method_snapshot"]');
-                      if (sel) { sel.value = derived; sel.disabled = true; }
-                      computeContractMargins();
-                    } catch (e) { if (LOGC) console.warn('[CONTRACTS] derive pay method failed', e); }
-                  })();
-                }
+      const pmRaw = cand && cand.pay_method ? String(cand.pay_method).toUpperCase() : '';
+      const derived =
+        (pmRaw === 'UMBRELLA' && cand && cand.umbrella_id)
+          ? 'UMBRELLA'
+          : 'PAYE';
+
+      const fsm = (window.modalCtx.formState ||= { main:{}, pay:{} }).main ||= {};
+      fsm.pay_method_snapshot = derived;
+      fsm.__pay_locked = true;
+      const sel = document.querySelector('select[name="pay_method_snapshot"], select[name="default_pay_method_snapshot"]');
+      if (sel) { sel.value = derived; sel.disabled = true; }
+      computeContractMargins();
+    } catch (e) {
+      if (LOGC) console.warn('[CONTRACTS] derive pay method failed', e);
+    }
+  })();
+}
+
 
                 closeMenu();
                 try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
@@ -5524,54 +5534,62 @@ console.warn('[AFTER UPSERT] reached post-save pre-gate', {
             wireTypeahead('candidates', candInput, 'candidate_id', 'candidatePickLabel');
             wireTypeahead('clients',    cliInput,  'client_id',    'clientPickLabel');
 
-            if (btnPC && !btnPC.__wired) {
-              btnPC.__wired = true;
-   btnPC.addEventListener('click', async () => {
-  if (LOGC) console.log('[CONTRACTS] Pick Candidate clicked');
-  openCandidatePicker(async ({ id, label }) => {
-    if (LOGC) console.log('[CONTRACTS] Pick Candidate → selected', { id, label });
+   if (btnPC && !btnPC.__wired) {
+  btnPC.__wired = true;
+  btnPC.addEventListener('click', async () => {
+    if (LOGC) console.log('[CONTRACTS] Pick Candidate clicked');
+    openCandidatePicker(async ({ id, label }) => {
+      if (LOGC) console.log('[CONTRACTS] Pick Candidate → selected', { id, label });
 
-    let cand = null;
-    try {
-      cand = await getCandidate(id);
-    } catch (e) {
-      alert('Failed to load candidate details for this contract.');
-      if (LOGC) console.warn('[CONTRACTS] getCandidate failed', e);
-      return;
-    }
+      let candRow = null;
+      try {
+        const candRaw = await getCandidate(id);
+        // Support both shapes: { candidate:{...} } or flat row
+        candRow = (candRaw && candRaw.candidate) ? candRaw.candidate : candRaw;
+      } catch (e) {
+        alert('Failed to load candidate details for this contract.');
+        if (LOGC) console.warn('[CONTRACTS] getCandidate failed', e);
+        return;
+      }
 
-    const pmRaw = (cand && cand.pay_method) ? String(cand.pay_method).toUpperCase() : '';
-    const pm    = (pmRaw === 'PAYE' || pmRaw === 'UMBRELLA') ? pmRaw : null;
+      const pmRaw = candRow && candRow.pay_method ? String(candRow.pay_method).toUpperCase() : '';
+      const pm    = (pmRaw === 'PAYE' || pmRaw === 'UMBRELLA') ? pmRaw : null;
 
-    if (!pm) {
-      alert('This candidate has no pay method set (Unknown). Please set their pay method to PAYE or UMBRELLA before creating a contract.');
-      if (LOGC) console.warn('[CONTRACTS] blocking contract create for candidate with Unknown pay_method', { candidate_id: id, pay_method: cand?.pay_method });
-      return;
-    }
+      if (!pm) {
+        alert('This candidate has no pay method set (Unknown). Please set their pay method to PAYE or UMBRELLA before creating a contract.');
+        if (LOGC) console.warn('[CONTRACTS] blocking contract create for candidate with Unknown pay_method', {
+          candidate_id: id,
+          pay_method: candRow?.pay_method
+        });
+        return;
+      }
 
-    // Only now do we bind candidate + snapshot into the contract form
-    setContractFormValue('candidate_id', id);
-    const lab = document.getElementById('candidatePickLabel'); if (lab) lab.textContent = `Chosen: ${label}`;
-    try {
-      const fs2 = (window.modalCtx.formState ||= { __forId: (window.modalCtx.data?.id ?? window.modalCtx.openToken ?? null), main:{}, pay:{} });
-      fs2.main ||= {}; fs2.main.candidate_id = id; fs2.main.candidate_display = label;
-      window.modalCtx.data = window.modalCtx.data || {};
-      window.modalCtx.data.candidate_id = id; window.modalCtx.data.candidate_display = label;
-    } catch {}
+      // Only now do we bind candidate + snapshot into the contract form
+      setContractFormValue('candidate_id', id);
+      const lab = document.getElementById('candidatePickLabel'); if (lab) lab.textContent = `Chosen: ${label}`;
+      try {
+        const fs2 = (window.modalCtx.formState ||= { __forId: (window.modalCtx.data?.id ?? window.modalCtx.openToken ?? null), main:{}, pay:{} });
+        fs2.main ||= {}; fs2.main.candidate_id = id; fs2.main.candidate_display = label;
+        window.modalCtx.data = window.modalCtx.data || {};
+        window.modalCtx.data.candidate_id = id; window.modalCtx.data.candidate_display = label;
+      } catch {}
 
-    try {
-      const fsm = (window.modalCtx.formState ||= { main:{}, pay:{} }).main ||= {};
-      fsm.pay_method_snapshot = pm;
-      fsm.__pay_locked = true;
-      const sel = document.querySelector('select[name="pay_method_snapshot"], select[name="default_pay_method_snapshot"]');
-      if (sel) { sel.value = pm; sel.disabled = true; }
-      computeContractMargins();
-    } catch (e) { if (LOGC) console.warn('[CONTRACTS] prefillPayMethodFromCandidate failed', e); }
+      try {
+        const fsm = (window.modalCtx.formState ||= { main:{}, pay:{} }).main ||= {};
+        fsm.pay_method_snapshot = pm;
+        fsm.__pay_locked = true;
+        const sel = document.querySelector('select[name="pay_method_snapshot"], select[name="default_pay_method_snapshot"]');
+        if (sel) { sel.value = pm; sel.disabled = true; }
+        computeContractMargins();
+      } catch (e) {
+        if (LOGC) console.warn('[CONTRACTS] prefillPayMethodFromCandidate failed', e);
+      }
+    });
   });
-});
 
-              if (LOGC) console.log('[CONTRACTS] wired btnPickCandidate');
-            }
+  if (LOGC) console.log('[CONTRACTS] wired btnPickCandidate');
+}
+
       if (btnCC && !btnCC.__wired) {
   btnCC.__wired = true;
   btnCC.addEventListener('click', () => {
