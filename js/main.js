@@ -719,6 +719,191 @@ function wireGridColumnReorder(section, tables) {
   });
 }
 
+// === Shared field error helpers (red highlight + ✖) =======================
+
+function clearFieldErrors(root) {
+  if (!root) return;
+  root.querySelectorAll('.field-error, .error').forEach(el => {
+    el.classList.remove('field-error');
+    el.classList.remove('error');
+  });
+  root.querySelectorAll('.field-error-msg').forEach(el => el.remove());
+  root.querySelectorAll('.field-error-icon').forEach(el => el.remove());
+}
+
+function markFieldError(root, fieldName, message) {
+  if (!root) return;
+  let field = root.querySelector(`[name="${fieldName}"]`);
+  if (!field) field = root.querySelector(`#${fieldName}`);
+  if (!field) return;
+
+  const row = field.closest('.row') || field.parentElement;
+  if (!row) return;
+
+  row.classList.add('field-error');
+  row.classList.add('error');
+  field.classList.add('field-error');
+
+  const label = row.querySelector('label');
+  if (label && !label.querySelector('.field-error-icon')) {
+    const icon = document.createElement('span');
+    icon.className = 'field-error-icon';
+    icon.textContent = '✖';
+    icon.style.color = 'red';
+    icon.style.marginLeft = '4px';
+    label.appendChild(icon);
+  }
+
+  if (message) {
+    let msg = row.querySelector('.field-error-msg');
+    if (!msg) {
+      msg = document.createElement('div');
+      msg.className = 'field-error-msg';
+      msg.style.color = 'red';
+      msg.style.fontSize = '0.8em';
+      msg.style.marginTop = '4px';
+      row.appendChild(msg);
+    }
+    msg.textContent = message;
+  }
+}
+
+// === Candidate main tab validation =======================================
+
+function validateCandidateMain(payload) {
+  const root = document.querySelector('#tab-main');
+  if (!root) return true;
+
+  clearFieldErrors(root);
+  let ok = true;
+
+  const first = (payload.first_name || '').trim();
+  const last  = (payload.last_name  || '').trim();
+  if (!first) {
+    ok = false;
+    markFieldError(root, 'first_name', 'First name is required');
+  }
+  if (!last) {
+    ok = false;
+    markFieldError(root, 'last_name', 'Last name is required');
+  }
+
+  // Telephone: required, optional leading +, digits only, >= 11 digits
+  const phoneRaw = (payload.phone || '').trim();
+  if (!phoneRaw) {
+    ok = false;
+    markFieldError(root, 'phone', 'Telephone number is required');
+  } else {
+    const phoneDigits = phoneRaw.replace(/\D/g, '');
+    const phonePattern = /^\+?\d+$/;
+    if (!phonePattern.test(phoneRaw) || phoneDigits.length < 11) {
+      ok = false;
+      markFieldError(root, 'phone', 'Telephone must be numbers only (optionally leading +) and at least 11 digits');
+    }
+  }
+
+  // Email: required, simple email format
+  const emailRaw = (payload.email || '').trim();
+  if (!emailRaw) {
+    ok = false;
+    markFieldError(root, 'email', 'Email is required');
+  } else {
+    const emailPattern = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+    if (!emailPattern.test(emailRaw)) {
+      ok = false;
+      markFieldError(root, 'email', 'Please enter a valid email address');
+    }
+  }
+
+  // NI: optional, but if present must be AA999999A (2 letters, 6 digits, 1 letter)
+  const niRaw = (payload.ni_number || '').trim();
+  if (niRaw) {
+    const normNi = niRaw.replace(/\s+/g, '').toUpperCase();
+    const niPattern = /^[A-Z]{2}\d{6}[A-Z]$/;
+    if (!niPattern.test(normNi)) {
+      ok = false;
+      markFieldError(root, 'ni_number', 'Format must be like JR547853B');
+    } else {
+      payload.ni_number = normNi; // normalise for save
+    }
+  }
+
+  // Gender: must be selected (not blank option)
+  const genderRaw = (payload.gender || '').trim();
+  if (!genderRaw) {
+    ok = false;
+    markFieldError(root, 'gender', 'Please select a gender');
+  }
+
+  // Address: either completely blank, or must have line 1 AND postcode
+  const address1 = (payload.address_line1 || '').trim();
+  const address2 = (payload.address_line2 || '').trim();
+  const address3 = (payload.address_line3 || '').trim();
+  const town     = (payload.town_city     || '').trim();
+  const county   = (payload.county        || '').trim();
+  const postcode = (payload.postcode      || '').trim();
+
+  const anyAddress = address1 || address2 || address3 || town || county || postcode;
+  if (anyAddress) {
+    if (!address1) {
+      ok = false;
+      markFieldError(root, 'address_line1', 'Address line 1 is required when an address is entered');
+    }
+    if (!postcode) {
+      ok = false;
+      markFieldError(root, 'postcode', 'Postcode is required when an address is entered');
+    }
+  }
+
+  return ok;
+}
+
+// === Client main tab validation ==========================================
+
+function validateClientMain(payload) {
+  const root = document.querySelector('#tab-main');
+  if (!root) return true;
+
+  clearFieldErrors(root);
+  let ok = true;
+
+  const name = (payload.name || '').trim();
+  if (!name) {
+    ok = false;
+    markFieldError(root, 'name', 'Client name is required');
+  }
+
+  // Primary invoice email: required, simple email format
+  const emailRaw = (payload.primary_invoice_email || '').trim();
+  if (!emailRaw) {
+    ok = false;
+    markFieldError(root, 'primary_invoice_email', 'Primary invoice email is required');
+  } else {
+    const emailPattern = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+    if (!emailPattern.test(emailRaw)) {
+      ok = false;
+      markFieldError(root, 'primary_invoice_email', 'Please enter a valid invoice email');
+    }
+  }
+
+  // A/P phone: blank OR >= 8 digits, numbers only (no letters)
+  const apPhoneRaw = (payload.ap_phone || '').trim();
+  if (apPhoneRaw) {
+    const digitsOnly = /^\d+$/;
+    const digits = apPhoneRaw.replace(/\D/g, '');
+    if (!digitsOnly.test(apPhoneRaw) || digits.length < 8) {
+      ok = false;
+      markFieldError(root, 'ap_phone', 'A/P phone must be numbers only and at least 8 digits if entered');
+    }
+  }
+
+  return ok;
+}
+
+
+
+
+
 async function restoreGridPrefsToDefault(section) {
   try {
     const res = await authFetch(API('/api/users/me/grid-prefs'), {
@@ -1277,22 +1462,20 @@ function _toHHMMSS(val) {
 function normalizeClientSettingsForSave(raw) {
   const src = raw || {};
   const out = {};
-  // Only normalise keys that were actually provided (form/baseline),
-  // and only flag invalid when a provided key fails HH:MM
   let invalid = false;
 
-  // Timezone + day/night times
-  ['day_start','day_end','night_start','night_end','timezone_id'].forEach(k => {
-    if (!(k in src)) return;            // not provided → ignore
+  // Timezone + day/night/weekend times
+  ['day_start','day_end','night_start','night_end','sat_start','sat_end','sun_start','sun_end','timezone_id'].forEach(k => {
+    if (!(k in src)) return;
     const v = src[k];
     if (k === 'timezone_id') { if (v) out[k] = String(v); return; }
-    if (v == null || v === '') return;  // empty → ignore (do not mark invalid)
-    const hhmmss = _toHHMMSS(v);        // returns null if fails
+    if (v == null || v === '') return;
+    const hhmmss = _toHHMMSS(v);
     if (hhmmss === null) { invalid = true; return; }
     out[k] = hhmmss;
   });
 
-  // NEW: gates + default submission mode
+  // Gates + default submission mode
   if ('pay_reference_required' in src) {
     out.pay_reference_required = !!(src.pay_reference_required === true || src.pay_reference_required === 'true' || src.pay_reference_required === 'on' || src.pay_reference_required === 1 || src.pay_reference_required === '1');
   }
@@ -1307,6 +1490,7 @@ function normalizeClientSettingsForSave(raw) {
 
   return { cleaned: out, invalid };
 }
+
 
 // ===== Auth fetch with refresh retry =====
 async function authFetch(input, init={}){
@@ -7415,7 +7599,7 @@ function renderContractMainTab(ctx) {
         <div class="row"><label>End date</label><div class="controls"><input class="input" name="end_date" value="${endUk}" placeholder="DD/MM/YYYY" required ${overlapChangeAttr} /></div></div>
       </div>
 
-      <div class="grid-3">
+        <div class="grid-2">
         <div class="row"><label>Pay method snapshot</label>
           <div class="controls">
             <select name="pay_method_snapshot" ${payLocked ? 'disabled' : ''}>
@@ -7432,17 +7616,28 @@ function renderContractMainTab(ctx) {
             </select>
           </div>
         </div>
-        <div class="row"><label>Auto-invoice</label>
-          <div class="controls"><input type="checkbox" name="auto_invoice" ${d.auto_invoice ? 'checked' : ''} /></div>
+      </div>
+
+      <div class="row">
+        <label>Billing & references</label>
+        <div class="controls" style="display:flex;flex-wrap:wrap;gap:12px;align-items:center">
+          <label class="inline">
+            <input type="checkbox" name="auto_invoice" ${d.auto_invoice ? 'checked' : ''} />
+            <span>Auto-invoice</span>
+          </label>
+          <label class="inline">
+            <input type="checkbox" name="require_reference_to_pay" ${d.require_reference_to_pay ? 'checked' : ''} />
+            <span>Require reference to PAY</span>
+          </label>
+          <label class="inline">
+            <input type="checkbox" name="require_reference_to_invoice" ${d.require_reference_to_invoice ? 'checked' : ''} />
+            <span>Require reference to INVOICE</span>
+          </label>
         </div>
       </div>
 
-      <div class="grid-2">
-        <div class="row"><label>Require reference to PAY</label><div class="controls"><input type="checkbox" name="require_reference_to_pay" ${d.require_reference_to_pay ? 'checked':''} /></div></div>
-        <div class="row"><label>Require reference to INVOICE</label><div class="controls"><input type="checkbox" name="require_reference_to_invoice" ${d.require_reference_to_invoice ? 'checked':''} /></div></div>
-      </div>
-
       ${schedGrid}
+
 
       ${labelsBlock}
     </form>`;
@@ -10835,7 +11030,7 @@ async function openCandidate(row) {
     L('no seedId — create mode');
   }
 
-  // 2) Build modal context from hydrated data — ***IMPORTANT: seed window.modalCtx***
+  // 2) Build modal context from hydrated data
   const fullKeys = Object.keys(full || {});
   L('seeding window.modalCtx', { entity: 'candidates', fullId: full?.id, fullKeys });
 
@@ -10863,7 +11058,7 @@ async function openCandidate(row) {
     'Candidate',
     [
       { key:'main',     label:'Main Details' },
-      { key:'rates',    label:'Care Packages' },  // renamed tab
+      { key:'rates',    label:'Care Packages' },
       { key:'pay',      label:'Payment details' },
       { key:'bookings', label:'Bookings' }
     ],
@@ -10898,12 +11093,30 @@ async function openCandidate(row) {
       if (!payload.last_name  && full?.last_name)  payload.last_name  = full.last_name;
       if (typeof payload.key_norm === 'undefined' && typeof full?.key_norm !== 'undefined') payload.key_norm = full.key_norm;
 
+      // Run main tab validation (first/last, phone, email, NI, gender, address)
+      const mainValid = validateCandidateMain(payload);
+      if (!mainValid) {
+        // Do not allow save; user can correct highlighted fields
+        return { ok:false };
+      }
+
       if (!payload.display_name) {
         const dn = [payload.first_name, payload.last_name].filter(Boolean).join(' ').trim();
         payload.display_name = dn || full?.display_name || null;
       }
 
-      if (!payload.pay_method) payload.pay_method = isNew ? 'PAYE' : (full?.pay_method || 'PAYE');
+      // Normalise pay_method, allow "Unknown" to mean "no pay method yet" (saved as null)
+      let pm = (payload.pay_method || '').trim();
+      if (!pm && full?.pay_method) pm = String(full.pay_method || '');
+      pm = pm ? pm.toUpperCase() : '';
+
+      if (pm === 'UNKNOWN' || pm === '') {
+        payload.pay_method = null;
+      } else if (pm === 'PAYE' || pm === 'UMBRELLA') {
+        payload.pay_method = pm;
+      } else {
+        payload.pay_method = null;
+      }
 
       if (payload.pay_method === 'UMBRELLA') {
         if ((!payload.umbrella_id || payload.umbrella_id === '') && full?.umbrella_id) {
@@ -10915,29 +11128,29 @@ async function openCandidate(row) {
         }
       }
 
-      if (isNew && !payload.first_name && !payload.last_name) { alert('Enter at least a first or last name.'); return { ok:false }; }
-      if (payload.pay_method === 'PAYE') payload.umbrella_id = null;
-      else if (!payload.umbrella_id || payload.umbrella_id === '') { alert('Select an umbrella company for UMBRELLA pay.'); return { ok:false }; }
+      // PAYE → clear umbrella; UMBRELLA → must have umbrella_id
+      if (payload.pay_method === 'PAYE') {
+        payload.umbrella_id = null;
+      } else if (payload.pay_method === 'UMBRELLA') {
+        if (!payload.umbrella_id || payload.umbrella_id === '') {
+          alert('Select an umbrella company for UMBRELLA pay.');
+          return { ok:false };
+        }
+      }
       if (payload.umbrella_id === '') payload.umbrella_id = null;
 
+      // Remove empty strings before sending
       for (const k of Object.keys(payload)) if (payload[k] === '') delete payload[k];
 
-      // Sync Job Titles + Registration + DOB from candidateMainModel
-         // Sync Job Titles + Registration + DOB from candidateMainModel
+      // Sync Job Titles + Registration + DOB from candidateMainModel (unchanged)
       try {
         const cm = window.modalCtx?.candidateMainModel;
         if (cm && typeof cm === 'object') {
-          // Normalise + order job titles so primary comes first
           let jobs = Array.isArray(cm.job_titles) ? cm.job_titles.slice() : [];
-          // drop any empty entries
           jobs = jobs.filter(j => j && j.job_title_id);
           if (jobs.length) {
             let primaryIdx = jobs.findIndex(j => j.is_primary);
-            if (primaryIdx === -1) {
-              // if no explicit primary, make the first one primary
-              primaryIdx = 0;
-            }
-            // enforce exactly one primary at index 0
+            if (primaryIdx === -1) primaryIdx = 0;
             jobs = jobs.map((j, idx) => ({
               ...j,
               is_primary: idx === primaryIdx
@@ -10949,10 +11162,8 @@ async function openCandidate(row) {
             }
           }
 
-          // keep the normalised list (with is_primary) on the model
           cm.job_titles = jobs;
 
-          // derive the ordered list of IDs for the payload
           const jobIds = jobs.map(j => j.job_title_id).filter(Boolean);
           payload.job_titles = jobIds;
           payload.job_title_id = jobIds.length ? jobIds[0] : null;
@@ -10971,7 +11182,6 @@ async function openCandidate(row) {
         W('sync from candidateMainModel failed', err);
       }
 
-
       const idForUpdate = window.modalCtx?.data?.id || full?.id || null;
       const tokenAtSave = window.modalCtx.openToken;
       L('[onSave] upsertCandidate', { idForUpdate, payloadKeys: Object.keys(payload||{}) });
@@ -10980,7 +11190,7 @@ async function openCandidate(row) {
       L('[onSave] saved', { ok: !!saved, candidateId, savedKeys: Array.isArray(saved)?[]:Object.keys(saved||{}) });
       if (!candidateId) { alert('Failed to save candidate'); return { ok:false }; }
 
-      // ===== Validate staged overrides (unchanged logic) =====
+      // ===== validate & persist overrides (unchanged from your version) =====
       const O = window.modalCtx.overrides || { existing: [], stagedNew: [], stagedEdits: {}, stagedDeletes: new Set() };
 
       async function getCoveringDefault(client_id, role, band, date_from) {
@@ -11196,7 +11406,7 @@ async function openCandidate(row) {
   );
   L('showModal returned (sync)', { currentOpenToken: window.modalCtx.openToken });
 
-  // 4) Optional async companion loads
+  // 4) Optional async companion loads (unchanged)
   if (full?.id) {
     const token = window.modalCtx.openToken;
     const id    = full.id;
@@ -11213,9 +11423,6 @@ async function openCandidate(row) {
         }
       }
     } catch (e) { E('listCandidateRates failed', e); }
-
-    // NOTE: Removed legacy fetchRelated('timesheets') + renderCalendar(ts) block.
-    // The new calendar fetches its own data when the Bookings tab is active.
   } else {
     L('skip companion loads (no full.id)');
   }
@@ -11228,7 +11435,16 @@ function renderCandidateTab(key, row = {}) {
       ${input('last_name','Last name', row.last_name)}
       ${input('email','Email', row.email, 'email')}
       ${input('phone','Telephone', row.phone)}
-      ${select('pay_method','Pay method', row.pay_method || 'PAYE', ['PAYE','UMBRELLA'], {id:'pay-method'})}
+
+      ${select(
+        'pay_method',
+        'Pay method',
+        (row.pay_method && row.pay_method !== 'Unknown' && row.pay_method !== 'UNKNOWN')
+          ? row.pay_method
+          : 'Unknown',
+        ['Unknown','PAYE','UMBRELLA'],
+        { id:'pay-method' }
+      )}
 
       <!-- CCR: display-only, never posted -->
       <div class="row">
@@ -13053,13 +13269,19 @@ async function openClient(row) {
 
       const stagedMain = same ? (fs.main || {}) : {};
       const liveMain   = byId('tab-main') ? collectForm('#tab-main') : {};
-      const payload    = { ...stagedMain, ...liveMain };
+           const payload    = { ...stagedMain, ...liveMain };
 
       L('[onSave] collected', { same, stagedKeys: Object.keys(stagedMain||{}), liveKeys: Object.keys(liveMain||{}) });
 
       delete payload.but_let_cli_ref;
       if (!payload.name && full?.name) payload.name = full.name;
-      if (!payload.name) { alert('Please enter a Client name.'); return { ok:false }; }
+
+      // Validate client main tab (name required, invoice email required + valid, A/P phone optional but numeric ≥ 8 digits)
+      const clientValid = validateClientMain(payload);
+      if (!clientValid) {
+        return { ok:false };
+      }
+
 
       // Settings normalization (unchanged)
       const baseline = window.modalCtx.clientSettingsState || {};
@@ -13070,15 +13292,16 @@ async function openClient(row) {
       let pendingSettings = null;
       if (shouldValidateSettings) {
         let csMerged = { ...(baseline || {}) };
-        if (hasFormMounted) {
+           if (hasFormMounted) {
           const liveSettings = collectForm('#clientSettingsForm', false);
-          ['day_start','day_end','night_start','night_end'].forEach(k=>{
+          ['day_start','day_end','night_start','night_end','sat_start','sat_end','sun_start','sun_end'].forEach(k=>{
             const v = _toHHMM(liveSettings[k]); if (v) csMerged[k] = v;
           });
           if (typeof liveSettings.timezone_id === 'string' && liveSettings.timezone_id.trim() !== '') {
             csMerged.timezone_id = liveSettings.timezone_id.trim();
           }
         }
+
         const { cleaned: csClean, invalid: csInvalid } = normalizeClientSettingsForSave(csMerged);
         if (APILOG) console.log('[OPEN_CLIENT] client_settings (merged→clean)', { csMerged, csClean, csInvalid, hasFormMounted, hasFullBaseline });
         if (csInvalid) { alert('Times must be HH:MM (24-hour).'); return { ok:false }; }
@@ -18215,7 +18438,6 @@ function renderClientHospitalsTable() {
 
 // =================== HOSPITALS TABLE (UPDATED: staged delete & edit) ===================
 
-
 async function renderClientSettingsUI(settingsObj){
   const div = byId('clientSettings'); if (!div) return;
 
@@ -18238,8 +18460,11 @@ async function renderClientSettingsUI(settingsObj){
     day_end     : _toHHMM(initial.day_end)     || '20:00',
     night_start : _toHHMM(initial.night_start) || '20:00',
     night_end   : _toHHMM(initial.night_end)   || '06:00',
+    sat_start   : _toHHMM(initial.sat_start)   || '00:00',
+    sat_end     : _toHHMM(initial.sat_end)     || '00:00',
+    sun_start   : _toHHMM(initial.sun_start)   || '00:00',
+    sun_end     : _toHHMM(initial.sun_end)     || '00:00',
     week_ending_weekday: Number.isInteger(Number(initial.week_ending_weekday)) ? String(Math.min(6, Math.max(0, Number(initial.week_ending_weekday)))) : '0',
-    // NEW defaults
     pay_reference_required: !!initial.pay_reference_required,
     invoice_reference_required: !!initial.invoice_reference_required,
     default_submission_mode: String(initial.default_submission_mode || 'ELECTRONIC').toUpperCase()
@@ -18256,7 +18481,6 @@ async function renderClientSettingsUI(settingsObj){
     return `<div class="row"><label>Week Ending Day</label><div class="controls"><select name="week_ending_weekday">${opts}</select></div></div>`;
   };
 
-  // NEW: gates & default submission
   const gatesAndSubmission = () => {
     return `
       <div class="row">
@@ -18290,12 +18514,18 @@ async function renderClientSettingsUI(settingsObj){
       ${input('day_end','Day shift ends (HH:MM)', s.day_end, 'time')}
       ${input('night_start','Night shift starts (HH:MM)', s.night_start, 'time')}
       ${input('night_end','Night shift ends (HH:MM)', s.night_end, 'time')}
+
+      ${input('sat_start','Saturday starts (HH:MM)', s.sat_start, 'time')}
+      ${input('sat_end','Saturday ends (HH:MM)', s.sat_end, 'time')}
+      ${input('sun_start','Sunday starts (HH:MM)', s.sun_start, 'time')}
+      ${input('sun_end','Sunday ends (HH:MM)', s.sun_end, 'time')}
+
       ${weekDaySelect()}
 
       ${gatesAndSubmission()}
 
       <div class="hint" style="grid-column:1/-1">
-        Example: Day 06:00–20:00, Night 20:00–06:00. These settings override global defaults for this client only.
+        Example: Day 06:00–20:00, Night 20:00–06:00. Saturday/Sunday windows can extend into the following day (e.g. Sunday ends 06:00 next day). These settings override global defaults for this client only.
       </div>
     </div>
   `;
@@ -18303,11 +18533,13 @@ async function renderClientSettingsUI(settingsObj){
   const root = document.getElementById('clientSettingsForm');
   const hhmm = /^([01]\d|2[0-3]):[0-5]\d$/;
 
+  const timeKeys = ['day_start','day_end','night_start','night_end','sat_start','sat_end','sun_start','sun_end'];
+
   let lastValid = { ...s };
   if (root.__wired) {
     root.removeEventListener('input', root.__syncSoft, true);
     root.removeEventListener('change', root.__syncValidate, true);
-    ['day_start','day_end','night_start','night_end'].forEach(k=>{
+    timeKeys.forEach(k=>{
       const el = root.querySelector(`input[name="${k}"]`);
       if (el && el.__syncValidate) el.removeEventListener('blur', el.__syncValidate, true);
     });
@@ -18318,15 +18550,13 @@ async function renderClientSettingsUI(settingsObj){
     if (!frame || frame.mode !== 'edit') return;
     const vals = collectForm('#clientSettingsForm', false);
     const next = { ...ctx.clientSettingsState, ...vals };
-    ['day_start','day_end','night_start','night_end'].forEach(k=>{
+    timeKeys.forEach(k=>{
       const v = String(vals[k] ?? '').trim();
       if (v && !hhmm.test(v)) next[k] = lastValid[k];
     });
-    // coerce week_ending_weekday to 0..6 (string)
     const w = Number(next.week_ending_weekday);
     next.week_ending_weekday = Number.isInteger(w) ? String(Math.min(6, Math.max(0, w))) : '0';
 
-    // NEW: checkboxes & select coercion
     next.pay_reference_required = !!(vals.pay_reference_required === 'on' || vals.pay_reference_required === true || vals.pay_reference_required === 'true');
     next.invoice_reference_required = !!(vals.invoice_reference_required === 'on' || vals.invoice_reference_required === true || vals.invoice_reference_required === 'true');
     next.default_submission_mode = String((vals.default_submission_mode || next.default_submission_mode || 'ELECTRONIC')).toUpperCase();
@@ -18342,7 +18572,7 @@ async function renderClientSettingsUI(settingsObj){
     const vals = collectForm('#clientSettingsForm', false);
     let hadError = false;
 
-    ['day_start','day_end','night_start','night_end'].forEach(k=>{
+    timeKeys.forEach(k=>{
       const v = String(vals[k] ?? '').trim();
       if (v && !hhmm.test(v)) {
         hadError = true;
@@ -18354,7 +18584,6 @@ async function renderClientSettingsUI(settingsObj){
     let w = Number(vals.week_ending_weekday);
     if (!Number.isInteger(w) || w<0 || w>6) { hadError = true; w = Number(lastValid.week_ending_weekday) || 0; }
 
-    // NEW coercions
     const payReq = !!(vals.pay_reference_required === 'on' || vals.pay_reference_required === true || vals.pay_reference_required === 'true');
     const invReq = !!(vals.invoice_reference_required === 'on' || vals.invoice_reference_required === true || vals.invoice_reference_required === 'true');
     const mode   = String(vals.default_submission_mode || '').toUpperCase();
@@ -18383,7 +18612,7 @@ async function renderClientSettingsUI(settingsObj){
   root.__syncValidate = syncValidate;
   root.addEventListener('input',  syncSoft, true);
   root.addEventListener('change', syncValidate, true);
-  ['day_start','day_end','night_start','night_end'].forEach(k=>{
+  timeKeys.forEach(k=>{
     const el = root.querySelector(`input[name="${k}"]`);
     if (el) {
       el.__syncValidate = syncValidate;
@@ -21417,10 +21646,17 @@ function renderSettingsTab(key, s = {}) {
   return html(`
     <div class="form" id="settingsForm">
       ${input('timezone_id','Timezone', s.timezone_id || 'Europe/London')}
-      ${input('day_start','Day start', s.day_start || '06:00')}
-      ${input('day_end','Day end', s.day_end || '20:00')}
-      ${input('night_start','Night start', s.night_start || '20:00')}
-      ${input('night_end','Night end', s.night_end || '06:00')}
+
+      ${input('day_start','Day shift starts',  s.day_start  || '06:00')}
+      ${input('day_end','Day shift ends',      s.day_end    || '20:00')}
+      ${input('night_start','Night shift starts', s.night_start || '20:00')}
+      ${input('night_end','Night shift ends',     s.night_end   || '06:00')}
+
+      ${input('sat_start','Saturday starts',  s.sat_start || '00:00')}
+      ${input('sat_end','Saturday ends',      s.sat_end   || '00:00')}
+      ${input('sun_start','Sunday starts',    s.sun_start || '00:00')}
+      ${input('sun_end','Sunday ends',        s.sun_end   || '00:00')}
+
       ${select('bh_source','Bank Holidays source', s.bh_source || 'MANUAL', ['MANUAL','FEED'])}
       <div class="row" style="grid-column:1/-1">
         <label>Bank Holidays list (JSON dates)</label>
