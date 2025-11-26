@@ -10977,457 +10977,6 @@ async function openDelete(){
 // ================== FIXED: openCandidate (hydrate before showModal) ==================
 
 
-async function openCandidate(row) {
-  // ===== Logging helpers (toggle with window.__LOG_MODAL = true/false) =====
-  const LOG = (typeof window.__LOG_MODAL === 'boolean') ? window.__LOG_MODAL : false;
-  const L  = (...a)=> { if (LOG) console.log('[OPEN_CANDIDATE]', ...a); };
-  const W  = (...a)=> { if (LOG) console.warn('[OPEN_CANDIDATE]', ...a); };
-  const E  = (...a)=> { if (LOG) console.error('[OPEN_CANDIDATE]', ...a); };
-
-  const deep = (o)=> JSON.parse(JSON.stringify(o || {}));
-  const incoming = deep(row || {});
-  const seedId   = incoming?.id || null;
-
-  L('ENTRY', { incomingKeys: Object.keys(incoming||{}), seedId });
-
-  // helper to unwrap a single record from many common backend shapes
-  const unwrapSingle = (data, key) => {
-    if (Array.isArray(data)) return data[0] || null;
-    if (data && key && data[key]) return unwrapSingle(data[key], null);
-    if (data && Array.isArray(data.rows))  return data.rows[0]  || null;
-    if (data && Array.isArray(data.items)) return data.items[0] || null;
-    if (data && Array.isArray(data.data))  return data.data[0]  || null;
-    return (data && typeof data === 'object') ? data : null;
-  };
-
-  // 1) Hydrate full record if we have an id
-  let full = incoming;
-  if (seedId) {
-    try {
-      const url = API(`/api/candidates/${encodeURIComponent(seedId)}`);
-      L('[HTTP] GET', url);
-      const res = await authFetch(url);
-      L('[HTTP] status', res?.status, res?.ok);
-
-      try {
-        const raw = await res.clone().text();
-        if (LOG) console.debug('[HTTP] raw body (≤2KB):', raw.slice(0, 2048));
-      } catch (peekErr) { W('[HTTP] raw peek failed', peekErr?.message || peekErr); }
-
-      if (res.ok) {
-        const data = await res.json().catch((jErr)=>{ W('res.json() failed, using {}', jErr); return {}; });
-        const candidate = data.candidate || unwrapSingle(data, 'candidate');
-        const job_titles = Array.isArray(data.job_titles) ? data.job_titles : [];
-        L('hydrated JSON keys', Object.keys(data||{}), 'candidate keys', Object.keys(candidate||{}));
-        full = candidate ? { ...candidate, job_titles } : incoming;
-      } else {
-        W('non-OK response, using incoming row');
-      }
-    } catch (e) {
-      W('hydrate failed; using summary row', e);
-    }
-  } else {
-    L('no seedId — create mode');
-  }
-
-  // 2) Build modal context from hydrated data
-  const fullKeys = Object.keys(full || {});
-  L('seeding window.modalCtx', { entity: 'candidates', fullId: full?.id, fullKeys });
-
-  window.modalCtx = {
-    entity: 'candidates',
-    data:   deep(full),
-    formState: { __forId: full?.id || null, main: {}, pay: {} },
-    rolesState: Array.isArray(full?.roles) ? normaliseRolesForSave(full.roles) : [],
-    overrides: { existing: [], stagedNew: [], stagedEdits: {}, stagedDeletes: new Set() },
-    clientSettingsState: null,
-    openToken: ((full?.id) || 'new') + ':' + Date.now()
-  };
-
-  L('window.modalCtx seeded', {
-    entity: window.modalCtx.entity,
-    dataId: window.modalCtx.data?.id,
-    dataKeys: Object.keys(window.modalCtx.data||{}),
-    formStateForId: window.modalCtx.formState?.__forId,
-    openToken: window.modalCtx.openToken
-  });
-
-  // 3) Render modal
-  L('calling showModal with hasId=', !!full?.id, 'rawHasIdArg=', full?.id);
-  showModal(
-    'Candidate',
-    [
-      { key:'main',     label:'Main Details' },
-      { key:'rates',    label:'Care Packages' },
-      { key:'pay',      label:'Payment details' },
-      { key:'bookings', label:'Bookings' }
-    ],
-    (k, r) => {
-      L('[renderCandidateTab] tab=', k, 'rowKeys=', Object.keys(r||{}), 'sample=', { first: r?.first_name, last: r?.last_name, id: r?.id });
-      return renderCandidateTab(k, r);
-    },
-    async () => {
-      L('[onSave] begin', { dataId: window.modalCtx?.data?.id, forId: window.modalCtx?.formState?.__forId });
-      const isNew = !window.modalCtx?.data?.id;
-
-      const fs   = window.modalCtx.formState || { __forId: null, main:{}, pay:{} };
-      const hasId = !!window.modalCtx.data?.id;
-      const same = hasId ? (fs.__forId === window.modalCtx.data.id)
-                         : (fs.__forId === window.modalCtx.openToken || fs.__forId == null);
-      const stateMain = same ? (fs.main || {}) : {};
-      const statePay  = same ? (fs.pay  || {}) : {};
-      const main      = document.querySelector('#tab-main') ? collectForm('#tab-main') : {};
-      const pay       = document.querySelector('#tab-pay')  ? collectForm('#tab-pay')  : {};
-      const roles     = normaliseRolesForSave(window.modalCtx.rolesState || window.modalCtx.data?.roles || []);
-      const payload   = { ...stateMain, ...statePay, ...main, ...pay, roles };
-
-      L('[onSave] collected', {
-        same, stateMainKeys: Object.keys(stateMain||{}), statePayKeys: Object.keys(statePay||{}),
-        mainKeys: Object.keys(main||{}), payKeys: Object.keys(pay||{}), rolesCount: roles?.length || 0
-      });
-
-      delete payload.umbrella_name;
-      delete payload.tms_ref;
-
-      if (!payload.first_name && full?.first_name) payload.first_name = full.first_name;
-      if (!payload.last_name  && full?.last_name)  payload.last_name  = full.last_name;
-      if (typeof payload.key_norm === 'undefined' && typeof full?.key_norm !== 'undefined') payload.key_norm = full.key_norm;
-
-      // Run main tab validation (first/last, phone, email, NI, gender, address)
-      const mainValid = validateCandidateMain(payload);
-      if (!mainValid) {
-        // Do not allow save; user can correct highlighted fields
-        return { ok:false };
-      }
-
-      if (!payload.display_name) {
-        const dn = [payload.first_name, payload.last_name].filter(Boolean).join(' ').trim();
-        payload.display_name = dn || full?.display_name || null;
-      }
-
-      // Normalise pay_method, allow "Unknown" to mean "no pay method yet" (saved as null)
-      let pm = (payload.pay_method || '').trim();
-      if (!pm && full?.pay_method) pm = String(full.pay_method || '');
-      pm = pm ? pm.toUpperCase() : '';
-
-      if (pm === 'UNKNOWN' || pm === '') {
-        payload.pay_method = null;
-      } else if (pm === 'PAYE' || pm === 'UMBRELLA') {
-        payload.pay_method = pm;
-      } else {
-        payload.pay_method = null;
-      }
-
-      if (payload.pay_method === 'UMBRELLA') {
-        if ((!payload.umbrella_id || payload.umbrella_id === '') && full?.umbrella_id) {
-          payload.umbrella_id = full.umbrella_id;
-        }
-        if (!payload.account_holder) {
-          const umbNameEl = document.querySelector('#tab-pay #umbrella_name');
-          if (umbNameEl && umbNameEl.value) payload.account_holder = umbNameEl.value;
-        }
-      }
-
-      // PAYE → clear umbrella; UMBRELLA → must have umbrella_id
-      if (payload.pay_method === 'PAYE') {
-        payload.umbrella_id = null;
-      } else if (payload.pay_method === 'UMBRELLA') {
-        if (!payload.umbrella_id || payload.umbrella_id === '') {
-          alert('Select an umbrella company for UMBRELLA pay.');
-          return { ok:false };
-        }
-      }
-      if (payload.umbrella_id === '') payload.umbrella_id = null;
-
-      // Remove empty strings before sending
-      for (const k of Object.keys(payload)) if (payload[k] === '') delete payload[k];
-
-      // Sync Job Titles + Registration + DOB from candidateMainModel (unchanged)
-      try {
-        const cm = window.modalCtx?.candidateMainModel;
-        if (cm && typeof cm === 'object') {
-          let jobs = Array.isArray(cm.job_titles) ? cm.job_titles.slice() : [];
-          jobs = jobs.filter(j => j && j.job_title_id);
-          if (jobs.length) {
-            let primaryIdx = jobs.findIndex(j => j.is_primary);
-            if (primaryIdx === -1) primaryIdx = 0;
-            jobs = jobs.map((j, idx) => ({
-              ...j,
-              is_primary: idx === primaryIdx
-            }));
-            if (primaryIdx !== 0) {
-              const primary = jobs[primaryIdx];
-              jobs.splice(primaryIdx, 1);
-              jobs.unshift(primary);
-            }
-          }
-
-          cm.job_titles = jobs;
-
-          const jobIds = jobs.map(j => j.job_title_id).filter(Boolean);
-          payload.job_titles = jobIds;
-          payload.job_title_id = jobIds.length ? jobIds[0] : null;
-
-          if (Object.prototype.hasOwnProperty.call(cm, 'prof_reg_type')) {
-            payload.prof_reg_type = cm.prof_reg_type || null;
-          }
-          if (Object.prototype.hasOwnProperty.call(cm, 'prof_reg_number')) {
-            payload.prof_reg_number = cm.prof_reg_number || '';
-          }
-          if (Object.prototype.hasOwnProperty.call(cm, 'date_of_birth')) {
-            payload.date_of_birth = cm.date_of_birth || null;
-          }
-        }
-      } catch (err) {
-        W('sync from candidateMainModel failed', err);
-      }
-
-      const idForUpdate = window.modalCtx?.data?.id || full?.id || null;
-      const tokenAtSave = window.modalCtx.openToken;
-      L('[onSave] upsertCandidate', { idForUpdate, payloadKeys: Object.keys(payload||{}) });
-      const saved = await upsertCandidate(payload, idForUpdate).catch(err => { E('upsertCandidate failed', err); return null; });
-      const candidateId = idForUpdate || (saved && saved.id);
-      L('[onSave] saved', { ok: !!saved, candidateId, savedKeys: Array.isArray(saved)?[]:Object.keys(saved||{}) });
-      if (!candidateId) { alert('Failed to save candidate'); return { ok:false }; }
-
-      // ===== validate & persist overrides (unchanged from your version) =====
-      const O = window.modalCtx.overrides || { existing: [], stagedNew: [], stagedEdits: {}, stagedDeletes: new Set() };
-
-      async function getCoveringDefault(client_id, role, band, date_from) {
-        try {
-          if (!client_id || !role || !date_from) return null;
-          const list = await listClientRates(client_id, { active_on: date_from, only_enabled: true });
-          const rows = Array.isArray(list) ? list.filter(w => !w.disabled_at_utc && String(w.role) === String(role)) : [];
-          let win = rows.find(w => (w.band ?? null) === (band ?? null));
-          if (!win && (band == null)) win = rows.find(w => w.band == null);
-          return win || null;
-        } catch { return null; }
-      }
-      const bucketLabel = { day:'Day', night:'Night', sat:'Sat', sun:'Sun', bh:'BH' };
-      const erniMult = await (async ()=>{ if (typeof window.__ERNI_MULT__ === 'number') return window.__ERNI_MULT__; try { if (typeof getSettingsCached === 'function') { const s = await getSettingsCached(); let p = s?.erni_pct ?? s?.employers_ni_percent ?? 0; p = Number(p)||0; if (p>1) p=p/100; window.__ERNI_MULT__ = 1 + p; return window.__ERNI_MULT__; } } catch{} window.__ERNI_MULT__ = 1; return 1; })();
-
-      // Validate EDITS
-      for (const [editId, patchRaw] of Object.entries(O.stagedEdits || {})) {
-        const original = (O.existing || []).find(x => String(x.id) === String(editId));
-        if (!original) { alert('Cannot locate original override to validate'); return { ok:false }; }
-
-        const eff = {
-          client_id: patchRaw.client_id ?? original.client_id,
-          role     : patchRaw.role      ?? original.role,
-          band     : (patchRaw.hasOwnProperty('band') ? patchRaw.band : original.band),
-          date_from: patchRaw.date_from ?? original.date_from,
-          date_to  : patchRaw.hasOwnProperty('date_to') ? patchRaw.date_to : original.date_to,
-          rate_type: (patchRaw.rate_type ?? original.rate_type ?? '').toUpperCase(),
-
-          pay_day  : patchRaw.hasOwnProperty('pay_day')   ? patchRaw.pay_day   : original.pay_day,
-          pay_night: patchRaw.hasOwnProperty('pay_night') ? patchRaw.pay_night : original.pay_night,
-          pay_sat  : patchRaw.hasOwnProperty('pay_sat')   ? patchRaw.pay_sat   : original.pay_sat,
-          pay_sun  : patchRaw.hasOwnProperty('pay_sun')   ? patchRaw.pay_sun   : original.pay_sun,
-          pay_bh   : patchRaw.hasOwnProperty('pay_bh')    ? patchRaw.pay_bh    : original.pay_bh
-        };
-
-        const win = await getCoveringDefault(eff.client_id, eff.role, eff.band, eff.date_from);
-        if (!win) { alert(`No active client default covers ${eff.role}${eff.band?` / ${eff.band}`:''} on ${formatIsoToUk(eff.date_from)}.`); return { ok:false }; }
-        if (eff.date_to && win.date_to && eff.date_to > win.date_to) { alert(`Client rate ends on ${formatIsoToUk(win.date_to)} — override must end on or before this date.`); return { ok:false }; }
-
-        for (const b of ['day','night','sat','sun','bh']) {
-          const payB = eff[`pay_${b}`];
-          const chg = win[`charge_${b}`];
-          if (payB != null && chg == null) { alert(`No client charge for ${bucketLabel[b]} on ${formatIsoToUk(eff.date_from)}.`); return { ok:false }; }
-          if (payB != null && chg != null) {
-            const margin = (eff.rate_type==='PAYE') ? (chg - (payB * erniMult)) : (chg - payB);
-            if (margin < 0) { alert(`Margin would be negative for ${bucketLabel[b]}.`); return { ok:false }; }
-          }
-        }
-      }
-
-      // Validate NEW rows
-      for (const nv of (O.stagedNew || [])) {
-        const win = await getCoveringDefault(nv.client_id, nv.role, nv.band ?? null, nv.date_from);
-        if (!win) { alert(`No active client default covers ${nv.role}${nv.band?` / ${nv.band}`:''} on ${formatIsoToUk(nv.date_from)}.`); return { ok:false }; }
-        if (nv.date_to && win.date_to && nv.date_to > win.date_to) { alert(`Client rate ends on ${formatIsoToUk(win.date_to)} — override must end on or before this date.`); return { ok:false }; }
-        for (const b of ['day','night','sat','sun','bh']) {
-          const payB = nv[`pay_${b}`]; const chg = win[`charge_${b}`];
-          if (payB != null && chg == null) { alert(`No client charge for ${bucketLabel[b]} on ${formatIsoToUk(win.date_from)}.`); return { ok:false }; }
-          if (payB != null && chg != null) {
-            const margin = (String(nv.rate_type).toUpperCase()==='PAYE') ? (chg - (payB * erniMult)) : (chg - payB);
-            if (margin < 0) { alert(`Margin would be negative for ${bucketLabel[b]}.`); return { ok:false }; }
-          }
-        }
-      }
-
-      // ===== Persist staged overrides (DELETE uses routed path with candidate_id) =====
-      const overridesRef = window.modalCtx.overrides || { existing: [], stagedNew: [], stagedEdits: {}, stagedDeletes: new Set() };
-      L('[onSave] overrides', {
-        deletes: Array.from(overridesRef.stagedDeletes || []),
-        edits: Object.keys(overridesRef.stagedEdits || {}),
-        newCount: (overridesRef.stagedNew || []).length
-      });
-
-      // Deletes — preferred by id; fallback to legacy filter keys
-      for (const delId of overridesRef.stagedDeletes || []) {
-        const rowDel = (overridesRef.existing || []).find(r => String(r.id) === String(delId));
-        if (!rowDel) continue;
-
-        const q = new URLSearchParams();
-        if (rowDel.id) q.set('id', String(rowDel.id));
-        else {
-          if (rowDel.client_id) q.set('client_id', String(rowDel.client_id));
-          if (rowDel.role != null) q.set('role', String(rowDel.role));
-          q.set('band', (rowDel.band == null || rowDel.band === '') ? '' : String(rowDel.band));
-          if (rowDel.rate_type) q.set('rate_type', String(rowDel.rate_type).toUpperCase());
-          if (rowDel.date_from) q.set('date_from', String(rowDel.date_from));
-        }
-
-        const urlDel = API(`/api/rates/candidate-overrides/${encodeURIComponent(candidateId)}?${q.toString()}`);
-        L('[onSave][DELETE override]', urlDel);
-        const resDel = await authFetch(urlDel, { method: 'DELETE' });
-        if (!resDel.ok) {
-          const msg = await resDel.text().catch(()=> 'Delete override failed');
-          alert(msg);
-          return { ok:false }; }
-      }
-
-      // Edits — PATCH candidate_id in path + ORIGINAL keys in query, updates in body
-      for (const [editId, patchRaw] of Object.entries(overridesRef.stagedEdits || {})) {
-        const original = (overridesRef.existing || []).find(x => String(x.id) === String(editId));
-        if (!original) { alert('Cannot locate original override to patch'); return { ok:false }; }
-
-        const q = new URLSearchParams();
-        if (original.client_id) q.set('client_id', original.client_id);
-        if (original.role != null) q.set('role', String(original.role));
-        q.set('band', (original.band == null || original.band === '') ? '' : String(original.band));
-        if (original.rate_type) q.set('rate_type', String(original.rate_type).toUpperCase());
-
-        const body = {};
-        for (const [k,v] of Object.entries(patchRaw || {})) {
-          if (v === '' || v === undefined) continue;
-          body[k] = v;
-        }
-        body.candidate_id = candidateId;
-
-        const urlPatch = API(`/api/rates/candidate-overrides/${encodeURIComponent(candidateId)}?${q.toString()}`);
-        L('[onSave][PATCH override]', { url: urlPatch, body });
-        const resPatch = await authFetch(urlPatch, {
-          method:'PATCH',
-          headers:{ 'content-type':'application/json' },
-          body: JSON.stringify(body)
-        });
-        if (!resPatch.ok) {
-          const msg = await resPatch.text().catch(()=> 'Update override failed');
-          alert(msg);
-          return { ok:false }; }
-      }
-
-      // Creates
-      for (const nv of (overridesRef.stagedNew || [])) {
-        if (!nv.client_id) { alert('Override must include client_id'); return { ok:false }; }
-        const clean = {};
-        for (const [k,v] of Object.entries(nv)) {
-          if (k === '_tmpId' || v === '') continue;
-          clean[k] = v;
-        }
-        const resCreate = await authFetch(
-          API(`/api/rates/candidate-overrides`),
-          { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({ ...clean, candidate_id: candidateId }) }
-        );
-        if (!resCreate.ok) { const msg = await resCreate.text().catch(()=> 'Create override failed'); alert(msg); return { ok:false }; }
-      }
-
-      // Refresh overrides list from server and clear staging
-      try {
-        const latest = await listCandidateRates(candidateId);
-        if (tokenAtSave === window.modalCtx.openToken && window.modalCtx.data?.id === candidateId) {
-          window.modalCtx.overrides.existing = Array.isArray(latest) ? latest : [];
-          window.modalCtx.overrides.stagedEdits = {};
-          window.modalCtx.overrides.stagedNew = [];
-          if (window.modalCtx.overrides.stagedDeletes?.clear) window.modalCtx.overrides.stagedDeletes.clear();
-          const fr1 = window.__getModalFrame?.();
-          if (fr1 && fr1.entity === 'candidates' && fr1.currentTabKey === 'rates') {
-            await renderCandidateRatesTable();
-          }
-        }
-      } catch (e) {
-        W('post-save rates refresh failed', e);
-      }
-
-      const mergedRoles = (saved && saved.roles) || payload.roles || window.modalCtx.data?.roles || [];
-
-      // Build a fresh job_titles array for modalCtx.data, based on the staged model
-      let jobTitlesForCtx = [];
-      try {
-        const cm = window.modalCtx?.candidateMainModel;
-        if (cm && Array.isArray(cm.job_titles)) {
-          // Use the already normalised cm.job_titles with is_primary preserved
-          jobTitlesForCtx = cm.job_titles.map((t) => ({
-            job_title_id: t.job_title_id,
-            is_primary: !!t.is_primary
-          }));
-        } else if (Array.isArray(payload.job_titles)) {
-          jobTitlesForCtx = payload.job_titles.map((id, idx) => ({
-            job_title_id: id,
-            is_primary: idx === 0
-          }));
-        }
-      } catch (e) {
-        W('onSave: building jobTitlesForCtx failed', e);
-      }
-
-      window.modalCtx.data = {
-        ...(window.modalCtx.data || {}),
-        ...(saved || {}),
-        id: candidateId,
-        roles: mergedRoles,
-        job_titles: jobTitlesForCtx
-      };
-      window.modalCtx.formState  = { __ForId: candidateId, main: {}, pay: {} };
-      window.modalCtx.rolesState = mergedRoles;
-
-      L('[onSave] final window.modalCtx', {
-        dataId: window.modalCtx.data?.id,
-        rolesCount: Array.isArray(window.modalCtx.data?.roles) ? window.modalCtx.data.roles.length : 0,
-        formStateForId: window.modalCtx.formState?.__forId
-      });
-
-      if (isNew) window.__pendingFocus = { section: 'candidates', id: candidateId };
-
-      return { ok: true, saved: window.modalCtx.data };
-
-    },
-    full?.id,
-    () => {
-      const fr = window.__getModalFrame?.();
-      const isBookings = fr && fr.entity === 'candidates' && fr.currentTabKey === 'bookings';
-      const candId = window.modalCtx?.data?.id;
-      if (isBookings && candId) {
-        try { renderCandidateCalendarTab(candId); } catch (e) { W('renderCandidateCalendarTab failed', e); }
-      }
-    }
-  );
-  L('showModal returned (sync)', { currentOpenToken: window.modalCtx.openToken });
-
-  // 4) Optional async companion loads (unchanged)
-  if (full?.id) {
-    const token = window.modalCtx.openToken;
-    const id    = full.id;
-
-    try {
-      L('[listCandidateRates] GET', { id, token });
-      const existing = await listCandidateRates(id);
-      L('[listCandidateRates] result', { count: Array.isArray(existing) ? existing.length : -1, sameToken: token === window.modalCtx.openToken, modalCtxId: window.modalCtx.data?.id });
-      if (token === window.modalCtx.openToken && window.modalCtx.data?.id === id) {
-        window.modalCtx.overrides.existing = Array.isArray(existing) ? existing : [];
-        const fr2 = window.__getModalFrame?.();
-        if (fr2 && fr2.entity === 'candidates' && fr2.currentTabKey === 'rates') {
-          await renderCandidateRatesTable();
-        }
-      }
-    } catch (e) { E('listCandidateRates failed', e); }
-  } else {
-    L('skip companion loads (no full.id)');
-  }
-}
-
 function renderCandidateTab(key, row = {}) {
   if (key === 'main') return html(`
     <div class="form" id="tab-main">
@@ -11616,6 +11165,493 @@ function renderCandidateTab(key, row = {}) {
   `);
 }
 
+async function openCandidate(row) {
+  // ===== Logging helpers (toggle with window.__LOG_MODAL = true/false) =====
+  const LOG = (typeof window.__LOG_MODAL === 'boolean') ? window.__LOG_MODAL : false;
+  const L  = (...a)=> { if (LOG) console.log('[OPEN_CANDIDATE]', ...a); };
+  const W  = (...a)=> { if (LOG) console.warn('[OPEN_CANDIDATE]', ...a); };
+  const E  = (...a)=> { if (LOG) console.error('[OPEN_CANDIDATE]', ...a); };
+
+  const deep = (o)=> JSON.parse(JSON.stringify(o || {}));
+  const incoming = deep(row || {});
+  const seedId   = incoming?.id || null;
+
+  L('ENTRY', { incomingKeys: Object.keys(incoming||{}), seedId });
+
+  // helper to unwrap a single record from many common backend shapes
+  const unwrapSingle = (data, key) => {
+    if (Array.isArray(data)) return data[0] || null;
+    if (data && key && data[key]) return unwrapSingle(data[key], null);
+    if (data && Array.isArray(data.rows))  return data.rows[0]  || null;
+    if (data && Array.isArray(data.items)) return data.items[0] || null;
+    if (data && Array.isArray(data.data))  return data.data[0]  || null;
+    return (data && typeof data === 'object') ? data : null;
+  };
+
+  // 1) Hydrate full record if we have an id
+  let full = incoming;
+  if (seedId) {
+    try {
+      const url = API(`/api/candidates/${encodeURIComponent(seedId)}`);
+      L('[HTTP] GET', url);
+      const res = await authFetch(url);
+      L('[HTTP] status', res?.status, res?.ok);
+
+      try {
+        const raw = await res.clone().text();
+        if (LOG) console.debug('[HTTP] raw body (≤2KB):', raw.slice(0, 2048));
+      } catch (peekErr) { W('[HTTP] raw peek failed', peekErr?.message || peekErr); }
+
+      if (res.ok) {
+        const data = await res.json().catch((jErr)=>{ W('res.json() failed, using {}', jErr); return {}; });
+        const candidate = data.candidate || unwrapSingle(data, 'candidate');
+        const job_titles = Array.isArray(data.job_titles) ? data.job_titles : [];
+        L('hydrated JSON keys', Object.keys(data||{}), 'candidate keys', Object.keys(candidate||{}));
+        full = candidate ? { ...candidate, job_titles } : incoming;
+      } else {
+        W('non-OK response, using incoming row');
+      }
+    } catch (e) {
+      W('hydrate failed; using summary row', e);
+    }
+  } else {
+    L('no seedId — create mode');
+  }
+
+  // 2) Build modal context from hydrated data
+  const fullKeys = Object.keys(full || {});
+  L('seeding window.modalCtx', { entity: 'candidates', fullId: full?.id, fullKeys });
+
+  window.modalCtx = {
+    entity: 'candidates',
+    data:   deep(full),
+    formState: { __forId: full?.id || null, main: {}, pay: {} },
+    rolesState: Array.isArray(full?.roles) ? normaliseRolesForSave(full.roles) : [],
+    overrides: { existing: [], stagedNew: [], stagedEdits: {}, stagedDeletes: new Set() },
+    clientSettingsState: null,
+    openToken: ((full?.id) || 'new') + ':' + Date.now()
+  };
+
+  L('window.modalCtx seeded', {
+    entity: window.modalCtx.entity,
+    dataId: window.modalCtx.data?.id,
+    dataKeys: Object.keys(window.modalCtx.data||{}),
+    formStateForId: window.modalCtx.formState?.__forId,
+    openToken: window.modalCtx.openToken
+  });
+
+  // 3) Render modal
+  L('calling showModal with hasId=', !!full?.id, 'rawHasIdArg=', full?.id);
+  showModal(
+    'Candidate',
+    [
+      { key:'main',     label:'Main Details' },
+      { key:'rates',    label:'Care Packages' },
+      { key:'pay',      label:'Payment details' },
+      { key:'bookings', label:'Bookings' }
+    ],
+    (k, r) => {
+      L('[renderCandidateTab] tab=', k, 'rowKeys=', Object.keys(r||{}), 'sample=', { first: r?.first_name, last: r?.last_name, id: r?.id });
+      return renderCandidateTab(k, r);
+    },
+    async () => {
+      L('[onSave] begin', { dataId: window.modalCtx?.data?.id, forId: window.modalCtx?.formState?.__forId });
+      const isNew = !window.modalCtx?.data?.id;
+
+      const fs   = window.modalCtx.formState || { __forId: null, main:{}, pay:{} };
+      const hasId = !!window.modalCtx.data?.id;
+      const same = hasId ? (fs.__forId === window.modalCtx.data.id)
+                         : (fs.__forId === window.modalCtx.openToken || fs.__forId == null);
+      const stateMain = same ? (fs.main || {}) : {};
+      const statePay  = same ? (fs.pay  || {}) : {};
+      const main      = document.querySelector('#tab-main') ? collectForm('#tab-main') : {};
+      const pay       = document.querySelector('#tab-pay')  ? collectForm('#tab-pay')  : {};
+      const roles     = normaliseRolesForSave(window.modalCtx.rolesState || window.modalCtx.data?.roles || []);
+      const payload   = { ...stateMain, ...statePay, ...main, ...pay, roles };
+
+      L('[onSave] collected', {
+        same, stateMainKeys: Object.keys(stateMain||{}), statePayKeys: Object.keys(statePay||{}),
+        mainKeys: Object.keys(main||{}), payKeys: Object.keys(pay||{}), rolesCount: roles?.length || 0
+      });
+
+      delete payload.umbrella_name;
+      delete payload.tms_ref;
+
+      if (!payload.first_name && full?.first_name) payload.first_name = full.first_name;
+      if (!payload.last_name  && full?.last_name)  payload.last_name  = full.last_name;
+      if (typeof payload.key_norm === 'undefined' && typeof full?.key_norm !== 'undefined') payload.key_norm = full.key_norm;
+
+      // Run main tab validation (first/last, phone, email, NI, gender, address)
+      const mainValid = validateCandidateMain(payload);
+      if (!mainValid) {
+        // Do not allow save; user can correct highlighted fields
+        return { ok:false };
+      }
+
+      if (!payload.display_name) {
+        const dn = [payload.first_name, payload.last_name].filter(Boolean).join(' ').trim();
+        payload.display_name = dn || full?.display_name || null;
+      }
+
+      // Normalise pay_method, allow "Unknown" to mean "no pay method yet" (saved as null)
+      let pm = (payload.pay_method || '').trim();
+      if (!pm && full?.pay_method) pm = String(full.pay_method || '');
+      pm = pm ? pm.toUpperCase() : '';
+
+      if (pm === 'UNKNOWN' || pm === '') {
+        payload.pay_method = null;
+      } else if (pm === 'PAYE' || pm === 'UMBRELLA') {
+        payload.pay_method = pm;
+      } else {
+        payload.pay_method = null;
+      }
+
+      if (payload.pay_method === 'UMBRELLA') {
+        if ((!payload.umbrella_id || payload.umbrella_id === '') && full?.umbrella_id) {
+          payload.umbrella_id = full.umbrella_id;
+        }
+        if (!payload.account_holder) {
+          const umbNameEl = document.querySelector('#tab-pay #umbrella_name');
+          if (umbNameEl && umbNameEl.value) payload.account_holder = umbNameEl.value;
+        }
+      }
+
+      // PAYE → clear umbrella; UMBRELLA → must have umbrella_id
+      if (payload.pay_method === 'PAYE') {
+        payload.umbrella_id = null;
+      } else if (payload.pay_method === 'UMBRELLA') {
+        if (!payload.umbrella_id || payload.umbrella_id === '') {
+          alert('Select an umbrella company for UMBRELLA pay.');
+          return { ok:false };
+        }
+      }
+      if (payload.umbrella_id === '') payload.umbrella_id = null;
+
+      // ── Detect PAYE ↔ UMBRELLA flip ────────────────────────────────────────
+      const originalMethod = (full && full.pay_method) ? String(full.pay_method).toUpperCase() : null;
+      const newMethod      = payload.pay_method ? String(payload.pay_method).toUpperCase() : null;
+      const hasExistingId  = !!full?.id;
+      const isFlip = !!(hasExistingId &&
+                        originalMethod &&
+                        newMethod &&
+                        (originalMethod === 'PAYE' || originalMethod === 'UMBRELLA') &&
+                        (newMethod === 'PAYE'     || newMethod === 'UMBRELLA') &&
+                        originalMethod !== newMethod);
+
+      if (isFlip) {
+        // Special flow: do NOT upsert pay_method directly here.
+        // Instead, hand over to the pay-method change modal which will:
+        //  - preview affected contracts
+        //  - call the bulk backend endpoint
+        //  - jump to Contracts and focus before/after contracts
+        L('[onSave] detected PAYE↔UMBRELLA flip', { originalMethod, newMethod, candidateId: full.id });
+
+        try {
+          await openCandidatePayMethodChangeModal(full, {
+            originalMethod,
+            newMethod,
+            candidate_id: full.id
+          });
+        } catch (err) {
+          W('pay-method change flow failed', err);
+          alert(err?.message || 'Failed to process pay-method change.');
+          return { ok:false };
+        }
+
+        // Allow this modal to close — the child/modal we opened will handle
+        // contracts focus and any navigation.
+        return { ok:true };
+      }
+
+      // ── Normal save path (no PAYE↔UMBRELLA flip) ───────────────────────────
+      // Remove empty strings before sending
+      for (const k of Object.keys(payload)) if (payload[k] === '') delete payload[k];
+
+      // Sync Job Titles + Registration + DOB from candidateMainModel (unchanged)
+      try {
+        const cm = window.modalCtx?.candidateMainModel;
+        if (cm && typeof cm === 'object') {
+          let jobs = Array.isArray(cm.job_titles) ? cm.job_titles.slice() : [];
+          jobs = jobs.filter(j => j && j.job_title_id);
+          if (jobs.length) {
+            let primaryIdx = jobs.findIndex(j => j.is_primary);
+            if (primaryIdx === -1) primaryIdx = 0;
+            jobs = jobs.map((j, idx) => ({
+              ...j,
+              is_primary: idx === primaryIdx
+            }));
+            if (primaryIdx !== 0) {
+              const primary = jobs[primaryIdx];
+              jobs.splice(primaryIdx, 1);
+              jobs.unshift(primary);
+            }
+          }
+
+          cm.job_titles = jobs;
+
+          const jobIds = jobs.map(j => j.job_title_id).filter(Boolean);
+          payload.job_titles = jobIds;
+          payload.job_title_id = jobIds.length ? jobIds[0] : null;
+
+          if (Object.prototype.hasOwnProperty.call(cm, 'prof_reg_type')) {
+            payload.prof_reg_type = cm.prof_reg_type || null;
+          }
+          if (Object.prototype.hasOwnProperty.call(cm, 'prof_reg_number')) {
+            payload.prof_reg_number = cm.prof_reg_number || '';
+          }
+          if (Object.prototype.hasOwnProperty.call(cm, 'date_of_birth')) {
+            payload.date_of_birth = cm.date_of_birth || null;
+          }
+        }
+      } catch (err) {
+        W('sync from candidateMainModel failed', err);
+      }
+
+      const idForUpdate = window.modalCtx?.data?.id || full?.id || null;
+      const tokenAtSave = window.modalCtx.openToken;
+      L('[onSave] upsertCandidate', { idForUpdate, payloadKeys: Object.keys(payload||{}) });
+      const saved = await upsertCandidate(payload, idForUpdate).catch(err => { E('upsertCandidate failed', err); return null; });
+      const candidateId = idForUpdate || (saved && saved.id);
+      L('[onSave] saved', { ok: !!saved, candidateId, savedKeys: Array.isArray(saved)?[]:Object.keys(saved||{}) });
+      if (!candidateId) { alert('Failed to save candidate'); return { ok:false }; }
+
+      // ===== validate & persist overrides (unchanged from your version) =====
+      const O = window.modalCtx.overrides || { existing: [], stagedNew: [], stagedEdits: {}, stagedDeletes: new Set() };
+
+      async function getCoveringDefault(client_id, role, band, date_from) {
+        try {
+          if (!client_id || !role || !date_from) return null;
+          const list = await listClientRates(client_id, { active_on: date_from, only_enabled: true });
+          const rows = Array.isArray(list) ? list.filter(w => !w.disabled_at_utc && String(w.role) === String(role)) : [];
+          let win = rows.find(w => (w.band ?? null) === (band ?? null));
+          if (!win && (band == null)) win = rows.find(w => w.band == null);
+          return win || null;
+        } catch { return null; }
+      }
+      const bucketLabel = { day:'Day', night:'Night', sat:'Sat', sun:'Sun', bh:'BH' };
+      const erniMult = await (async ()=>{ if (typeof window.__ERNI_MULT__ === 'number') return window.__ERNI_MULT__; try { if (typeof getSettingsCached === 'function') { const s = await getSettingsCached(); let p = s?.erni_pct ?? s?.employers_ni_percent ?? 0; p = Number(p)||0; if (p>1) p=p/100; window.__ERNI_MULT__ = 1 + p; return window.__ERNI_MULT__; } } catch{} window.__ERNI_MULT__ = 1; return 1; })();
+
+      // Validate EDITS
+      for (const [editId, patchRaw] of Object.entries(O.stagedEdits || {})) {
+        const original = (O.existing || []).find(x => String(x.id) === String(editId));
+        if (!original) { alert('Cannot locate original override to validate'); return { ok:false }; }
+
+        const eff = {
+          client_id: patchRaw.client_id ?? original.client_id,
+          role     : patchRaw.role      ?? original.role,
+          band     : (patchRaw.hasOwnProperty('band') ? patchRaw.band : original.band),
+          date_from: patchRaw.date_from ?? original.date_from,
+          date_to  : patchRaw.hasOwnProperty('date_to') ? patchRaw.date_to : original.date_to,
+          rate_type: (patchRaw.rate_type ?? original.rate_type ?? '').toUpperCase(),
+
+          pay_day  : patchRaw.hasOwnProperty('pay_day')   ? patchRaw.pay_day   : original.pay_day,
+          pay_night: patchRaw.hasOwnProperty('pay_night') ? patchRaw.pay_night : original.pay_night,
+          pay_sat  : patchRaw.hasOwnProperty('pay_sat')   ? patchRaw.pay_sat   : original.pay_sat,
+          pay_sun  : patchRaw.hasOwnProperty('pay_sun')   ? patchRaw.pay_sun   : original.pay_sun,
+          pay_bh   : patchRaw.hasOwnProperty('pay_bh')    ? patchRaw.pay_bh    : original.pay_bh
+        };
+
+        const win = await getCoveringDefault(eff.client_id, eff.role, eff.band, eff.date_from);
+        if (!win) { alert(`No active client default covers ${eff.role}${eff.band?` / ${eff.band}`:''} on ${formatIsoToUk(eff.date_from)}.`); return { ok:false }; }
+        if (eff.date_to && win.date_to && eff.date_to > win.date_to) { alert(`Client rate ends on ${formatIsoToUk(win.date_to)} — override must end on or before this date.`); return { ok:false }; }
+
+        for (const b of ['day','night','sat','sun','bh']) {
+          const payB = eff[`pay_${b}`];
+          const chg = win[`charge_${b}`];
+          if (payB != null && chg == null) { alert(`No client charge for ${bucketLabel[b]} on ${formatIsoToUk(eff.date_from)}.`); return { ok:false }; }
+          if (payB != null && chg != null) {
+            const margin = (eff.rate_type==='PAYE') ? (chg - (payB * erniMult)) : (chg - payB);
+            if (margin < 0) { alert(`Margin would be negative for ${bucketLabel[b]}.`); return { ok:false }; }
+          }
+        }
+      }
+
+      // Validate NEW rows
+      for (const nv of (O.stagedNew || [])) {
+        const win = await getCoveringDefault(nv.client_id, nv.role, nv.band ?? null, nv.date_from);
+        if (!win) { alert(`No active client default covers ${nv.role}${nv.band?` / ${nv.band}`:''} on ${formatIsoToUk(nv.date_from)}.`); return { ok:false }; }
+        if (nv.date_to && win.date_to && nv.date_to > win.date_to) { alert(`Client rate ends on ${formatIsoToUk(win.date_to)} — override must end on or before this date.`); return { ok:false }; }
+        for (const b of ['day','night','sat','sun','bh']) {
+          const payB = nv[`pay_${b}`]; const chg = win[`charge_${b}`];
+          if (payB != null && chg == null) { alert(`No client charge for ${bucketLabel[b]} on ${formatIsoToUk(win.date_from)}.`); return { ok:false }; }
+          if (payB != null && chg != null) {
+            const margin = (String(nv.rate_type).toUpperCase()==='PAYE') ? (chg - (payB * erniMult)) : (chg - payB);
+            if (margin < 0) { alert(`Margin would be negative for ${bucketLabel[b]}.`); return { ok:false }; }
+          }
+        }
+      }
+
+      // ===== Persist staged overrides (DELETE uses routed path with candidate_id) =====
+      const overridesRef = window.modalCtx.overrides || { existing: [], stagedNew: [], stagedEdits: {}, stagedDeletes: new Set() };
+      L('[onSave] overrides', {
+        deletes: Array.from(overridesRef.stagedDeletes || []),
+        edits: Object.keys(overridesRef.stagedEdits || {}),
+        newCount: (overridesRef.stagedNew || []).length
+      });
+
+      // Deletes — preferred by id; fallback to legacy filter keys
+      for (const delId of overridesRef.stagedDeletes || []) {
+        const rowDel = (overridesRef.existing || []).find(r => String(r.id) === String(delId));
+        if (!rowDel) continue;
+
+        const q = new URLSearchParams();
+        if (rowDel.id) q.set('id', String(rowDel.id));
+        else {
+          if (rowDel.client_id) q.set('client_id', String(rowDel.client_id));
+          if (rowDel.role != null) q.set('role', String(rowDel.role));
+          q.set('band', (rowDel.band == null || rowDel.band === '') ? '' : String(rowDel.band));
+          if (rowDel.rate_type) q.set('rate_type', String(rowDel.rate_type).toUpperCase());
+          if (rowDel.date_from) q.set('date_from', String(rowDel.date_from));
+        }
+
+        const urlDel = API(`/api/rates/candidate-overrides/${encodeURIComponent(candidateId)}?${q.toString()}`);
+        L('[onSave][DELETE override]', urlDel);
+        const resDel = await authFetch(urlDel, { method: 'DELETE' });
+        if (!resDel.ok) {
+          const msg = await resDel.text().catch(()=> 'Delete override failed');
+          alert(msg);
+          return { ok:false }; }
+      }
+
+      // Edits — PATCH candidate_id in path + ORIGINAL keys in query, updates in body
+      for (const [editId, patchRaw] of Object.entries(overridesRef.stagedEdits || {})) {
+        const original = (overridesRef.existing || []).find(x => String(x.id) === String(editId));
+        if (!original) { alert('Cannot locate original override to patch'); return { ok:false }; }
+
+        const q = new URLSearchParams();
+        if (original.client_id) q.set('client_id', original.client_id);
+        if (original.role != null) q.set('role', String(original.role));
+        q.set('band', (original.band == null || original.band === '') ? '' : String(original.band));
+        if (original.rate_type) q.set('rate_type', String(original.rate_type).toUpperCase());
+
+        const bodyPatch = {};
+        for (const [k,v] of Object.entries(patchRaw || {})) {
+          if (v === '' || v === undefined) continue;
+          bodyPatch[k] = v;
+        }
+        bodyPatch.candidate_id = candidateId;
+
+        const urlPatch = API(`/api/rates/candidate-overrides/${encodeURIComponent(candidateId)}?${q.toString()}`);
+        L('[onSave][PATCH override]', { url: urlPatch, body: bodyPatch });
+        const resPatch = await authFetch(urlPatch, {
+          method:'PATCH',
+          headers:{ 'content-type':'application/json' },
+          body: JSON.stringify(bodyPatch)
+        });
+        if (!resPatch.ok) {
+          const msg = await resPatch.text().catch(()=> 'Update override failed');
+          alert(msg);
+          return { ok:false }; }
+      }
+
+      // Creates
+      for (const nv of (overridesRef.stagedNew || [])) {
+        if (!nv.client_id) { alert('Override must include client_id'); return { ok:false }; }
+        const clean = {};
+        for (const [k,v] of Object.entries(nv)) {
+          if (k === '_tmpId' || v === '') continue;
+          clean[k] = v;
+        }
+        const resCreate = await authFetch(
+          API(`/api/rates/candidate-overrides`),
+          { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({ ...clean, candidate_id: candidateId }) }
+        );
+        if (!resCreate.ok) { const msg = await resCreate.text().catch(()=> 'Create override failed'); alert(msg); return { ok:false }; }
+      }
+
+      // Refresh overrides list from server and clear staging
+      try {
+        const latest = await listCandidateRates(candidateId);
+        if (tokenAtSave === window.modalCtx.openToken && window.modalCtx.data?.id === candidateId) {
+          window.modalCtx.overrides.existing = Array.isArray(latest) ? latest : [];
+          window.modalCtx.overrides.stagedEdits = {};
+          window.modalCtx.overrides.stagedNew = [];
+          if (window.modalCtx.overrides.stagedDeletes?.clear) window.modalCtx.overrides.stagedDeletes.clear();
+          const fr1 = window.__getModalFrame?.();
+          if (fr1 && fr1.entity === 'candidates' && fr1.currentTabKey === 'rates') {
+            await renderCandidateRatesTable();
+          }
+        }
+      } catch (e) {
+        W('post-save rates refresh failed', e);
+      }
+
+      const mergedRoles = (saved && saved.roles) || payload.roles || window.modalCtx.data?.roles || [];
+
+      // Build a fresh job_titles array for modalCtx.data, based on the staged model
+      let jobTitlesForCtx = [];
+      try {
+        const cm = window.modalCtx?.candidateMainModel;
+        if (cm && Array.isArray(cm.job_titles)) {
+          // Use the already normalised cm.job_titles with is_primary preserved
+          jobTitlesForCtx = cm.job_titles.map((t) => ({
+            job_title_id: t.job_title_id,
+            is_primary: !!t.is_primary
+          }));
+        } else if (Array.isArray(payload.job_titles)) {
+          jobTitlesForCtx = payload.job_titles.map((id, idx) => ({
+            job_title_id: id,
+            is_primary: idx === 0
+          }));
+        }
+      } catch (e) {
+        W('onSave: building jobTitlesForCtx failed', e);
+      }
+
+      window.modalCtx.data = {
+        ...(window.modalCtx.data || {}),
+        ...(saved || {}),
+        id: candidateId,
+        roles: mergedRoles,
+        job_titles: jobTitlesForCtx
+      };
+      window.modalCtx.formState  = { __ForId: candidateId, main: {}, pay: {} };
+      window.modalCtx.rolesState = mergedRoles;
+
+      L('[onSave] final window.modalCtx', {
+        dataId: window.modalCtx.data?.id,
+        rolesCount: Array.isArray(window.modalCtx.data?.roles) ? window.modalCtx.data.roles.length : 0,
+        formStateForId: window.modalCtx.formState?.__forId
+      });
+
+      if (isNew) window.__pendingFocus = { section: 'candidates', ids: [candidateId], primaryIds:[candidateId] };
+
+      return { ok: true, saved: window.modalCtx.data };
+
+    },
+    full?.id,
+    () => {
+      const fr = window.__getModalFrame?.();
+      const isBookings = fr && fr.entity === 'candidates' && fr.currentTabKey === 'bookings';
+      const candId = window.modalCtx?.data?.id;
+      if (isBookings && candId) {
+        try { renderCandidateCalendarTab(candId); } catch (e) { W('renderCandidateCalendarTab failed', e); }
+      }
+    }
+  );
+  L('showModal returned (sync)', { currentOpenToken: window.modalCtx.openToken });
+
+  // 4) Optional async companion loads (unchanged)
+  if (full?.id) {
+    const token = window.modalCtx.openToken;
+    const id    = full.id;
+
+    try {
+      L('[listCandidateRates] GET', { id, token });
+      const existing = await listCandidateRates(id);
+      L('[listCandidateRates] result', { count: Array.isArray(existing) ? existing.length : -1, sameToken: token === window.modalCtx.openToken, modalCtxId: window.modalCtx.data?.id });
+      if (token === window.modalCtx.openToken && window.modalCtx.data?.id === id) {
+        window.modalCtx.overrides.existing = Array.isArray(existing) ? existing : [];
+        const fr2 = window.__getModalFrame?.();
+        if (fr2 && fr2.entity === 'candidates' && fr2.currentTabKey === 'rates') {
+          await renderCandidateRatesTable();
+        }
+      }
+    } catch (e) { E('listCandidateRates failed', e); }
+  } else {
+    L('skip companion loads (no full.id)');
+  }
+}
 
 // ====================== mountCandidatePayTab (FIXED) ======================
 // FRONTEND — UPDATED
@@ -14047,6 +14083,861 @@ async function discardContractCalendarStage(contractId) {
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+async function fetchContractChangeRatesPreview(contract_id, cutoff_we) {
+  const LOGC = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : false;
+
+  if (!contract_id) {
+    throw new Error('fetchContractChangeRatesPreview: contract_id is required');
+  }
+
+  const qs = new URLSearchParams();
+  if (cutoff_we) {
+    qs.set('cutoff_week_ending_date', String(cutoff_we));
+  }
+
+  const path = `/api/contracts/${_enc(contract_id)}/change-rates-outstanding${qs.toString() ? `?${qs.toString()}` : ''}`;
+  const url  = API(path);
+
+  if (LOGC) {
+    console.log('[CONTRACTS] fetchContractChangeRatesPreview →', { contract_id, cutoff_we, url });
+  }
+
+  let res;
+  try {
+    res = await authFetch(url);
+  } catch (err) {
+    if (LOGC) console.error('[CONTRACTS] change-rates-outstanding preview network error', { url, err });
+    throw err;
+  }
+
+  const text = await res.text().catch(() => '');
+  if (!res.ok) {
+    if (LOGC) {
+      console.error('[CONTRACTS] change-rates-outstanding preview failed', {
+        status: res.status,
+        url,
+        body: text
+      });
+    }
+    throw new Error(text || 'Failed to load outstanding weeks for this contract');
+  }
+
+  let json;
+  try {
+    json = text ? JSON.parse(text) : null;
+  } catch (e) {
+    if (LOGC) console.warn('[CONTRACTS] change-rates-outstanding preview: non-JSON body', { text });
+    json = null;
+  }
+
+  if (LOGC) {
+    console.log('[CONTRACTS] fetchContractChangeRatesPreview ←', json);
+  }
+
+  // Backend returns { contract_id, weeks:[...], ... }; normalise to object
+  return json || { contract_id, weeks: [] };
+}
+
+async function applyChangeContractRates(contract_id, payload) {
+  const LOGC = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : false;
+
+  if (!contract_id) {
+    throw new Error('applyChangeContractRates: contract_id is required');
+  }
+
+  const path = `/api/contracts/${_enc(contract_id)}/change-rates-outstanding`;
+  const url  = API(path);
+
+  const body = payload || {};
+  if (LOGC) {
+    console.log('[CONTRACTS] applyChangeContractRates →', { contract_id, url, body });
+  }
+
+  let res;
+  try {
+    res = await authFetch(url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: _json(body)
+    });
+  } catch (err) {
+    if (LOGC) console.error('[CONTRACTS] applyChangeContractRates network error', { url, err });
+    throw err;
+  }
+
+  const text = await res.text().catch(() => '');
+  if (!res.ok) {
+    if (LOGC) {
+      console.error('[CONTRACTS] applyChangeContractRates failed', {
+        status: res.status,
+        url,
+        body: text
+      });
+    }
+    throw new Error(text || 'Failed to change contract rates for outstanding weeks');
+  }
+
+  let json;
+  try {
+    json = text ? JSON.parse(text) : null;
+  } catch (e) {
+    if (LOGC) console.warn('[CONTRACTS] applyChangeContractRates: non-JSON body', { text });
+    json = null;
+  }
+
+  if (LOGC) {
+    console.log('[CONTRACTS] applyChangeContractRates ←', json);
+  }
+
+  // Backend returns { old_contract_id, new_contract_id, weeks_migrated, timesheets_migrated, ... }
+  return json || {};
+}
+
+async function fetchCandidatePayMethodChangePreview(candidate_id, newMethod) {
+  const LOG = (typeof window.__LOG_CAND === 'boolean')
+    ? window.__LOG_CAND
+    : (typeof window.__LOG_CONTRACTS === 'boolean' ? window.__LOG_CONTRACTS : false);
+
+  if (!candidate_id) {
+    throw new Error('fetchCandidatePayMethodChangePreview: candidate_id is required');
+  }
+
+  const method = String(newMethod || '').toUpperCase();
+  if (method !== 'PAYE' && method !== 'UMBRELLA') {
+    throw new Error('fetchCandidatePayMethodChangePreview: newMethod must be PAYE or UMBRELLA');
+  }
+
+  const qs   = new URLSearchParams({ new_method: method });
+  const path = `/api/candidates/${_enc(candidate_id)}/pay-method-change-preview?${qs.toString()}`;
+  const url  = API(path);
+
+  if (LOG) {
+    console.log('[CAND][PAY-METHOD] preview →', { candidate_id, method, url });
+  }
+
+  let res;
+  try {
+    res = await authFetch(url);
+  } catch (err) {
+    if (LOG) console.error('[CAND][PAY-METHOD] preview network error', { url, err });
+    throw err;
+  }
+
+  const text = await res.text().catch(() => '');
+  if (!res.ok) {
+    if (LOG) {
+      console.error('[CAND][PAY-METHOD] preview failed', {
+        status: res.status,
+        url,
+        body: text
+      });
+    }
+    throw new Error(text || 'Failed to preview pay-method change');
+  }
+
+  let json;
+  try {
+    json = text ? JSON.parse(text) : null;
+  } catch (e) {
+    if (LOG) console.warn('[CAND][PAY-METHOD] preview: non-JSON body', { text });
+    json = null;
+  }
+
+  if (LOG) {
+    console.log('[CAND][PAY-METHOD] preview ←', json);
+  }
+
+  // Backend: { candidate_id, original_method, new_method, contracts:[...] }
+  return json || { candidate_id, original_method: null, new_method: method, contracts: [] };
+}
+
+async function applyCandidatePayMethodChange(candidate_id, body) {
+  const LOG = (typeof window.__LOG_CAND === 'boolean')
+    ? window.__LOG_CAND
+    : (typeof window.__LOG_CONTRACTS === 'boolean' ? window.__LOG_CONTRACTS : false);
+
+  if (!candidate_id) {
+    throw new Error('applyCandidatePayMethodChange: candidate_id is required');
+  }
+
+  const payload = body || {};
+  const method  = String(payload.new_method || '').toUpperCase();
+  if (method !== 'PAYE' && method !== 'UMBRELLA') {
+    throw new Error('applyCandidatePayMethodChange: payload.new_method must be PAYE or UMBRELLA');
+  }
+
+  const path = `/api/candidates/${_enc(candidate_id)}/pay-method-change`;
+  const url  = API(path);
+
+  if (LOG) {
+    console.log('[CAND][PAY-METHOD] apply →', {
+      candidate_id,
+      url,
+      payload: { ...payload, /* avoid logging huge arrays in full */ contract_ids_count: Array.isArray(payload.contract_ids) ? payload.contract_ids.length : 0 }
+    });
+  }
+
+  let res;
+  try {
+    res = await authFetch(url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: _json(payload)
+    });
+  } catch (err) {
+    if (LOG) console.error('[CAND][PAY-METHOD] apply network error', { url, err });
+    throw err;
+  }
+
+  const text = await res.text().catch(() => '');
+  if (!res.ok) {
+    if (LOG) {
+      console.error('[CAND][PAY-METHOD] apply failed', {
+        status: res.status,
+        url,
+        body: text
+      });
+    }
+    throw new Error(text || 'Failed to apply pay-method change');
+  }
+
+  let json;
+  try {
+    json = text ? JSON.parse(text) : null;
+  } catch (e) {
+    if (LOG) console.warn('[CAND][PAY-METHOD] apply: non-JSON body', { text });
+    json = null;
+  }
+
+  if (LOG) {
+    console.log('[CAND][PAY-METHOD] apply ←', json);
+  }
+
+  // Backend: { candidate_id, original_method, new_method, old_contract_ids, new_contract_ids, affected_timesheet_ids, summary:{...} }
+  return json || {
+    candidate_id,
+    original_method: null,
+    new_method: method,
+    old_contract_ids: [],
+    new_contract_ids: [],
+    affected_timesheet_ids: [],
+    summary: { contracts_changed: 0, weeks_migrated: 0 }
+  };
+}
+
+
+async function openChangeContractRatesModal(contractId) {
+  const LOGC = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : true;
+  const L    = (...a)=> { if (LOGC) console.log('[CONTRACTS][CHANGE-RATES]', ...a); };
+  const W    = (...a)=> { if (LOGC) console.warn('[CONTRACTS][CHANGE-RATES]', ...a); };
+  const E    = (...a)=> { if (LOGC) console.error('[CONTRACTS][CHANGE-RATES]', ...a); };
+
+  if (!contractId) {
+    alert('No contract selected.');
+    return;
+  }
+
+  let preview;
+  try {
+    preview = await fetchContractChangeRatesPreview(contractId, null);
+  } catch (err) {
+    E('preview failed', err);
+    alert(err?.message || 'Could not load outstanding weeks for this contract.');
+    return;
+  }
+
+  const weeks = Array.isArray(preview?.weeks) ? preview.weeks.slice() : [];
+  if (!weeks.length) {
+    alert('There are no outstanding weeks on this contract. Nothing to change.');
+    return;
+  }
+
+  weeks.sort((a, b) => String(a.week_ending_date).localeCompare(String(b.week_ending_date)));
+
+  const defaultCutoff = preview.cutoff_week_ending_date || weeks[0].week_ending_date;
+
+  // Seed rates + schedule from current contract modalCtx if available
+  const deep = (o)=> JSON.parse(JSON.stringify(o || {}));
+  const baseContract =
+    (window.modalCtx &&
+     window.modalCtx.entity === 'contracts' &&
+     window.modalCtx.data &&
+     String(window.modalCtx.data.id || '') === String(contractId))
+      ? deep(window.modalCtx.data)
+      : deep(preview || {});
+
+  const R = baseContract.rates_json || {};
+  const payMethod = String(baseContract.pay_method_snapshot || 'PAYE').toUpperCase();
+  const showPAYE = (payMethod === 'PAYE');
+  const LBL = baseContract.bucket_labels_json || {};
+  const labelOf = (k) => {
+    if (k==='day') return (LBL.day||'Day');
+    if (k==='night') return (LBL.night||'Night');
+    if (k==='sat') return (LBL.sat||'Sat');
+    if (k==='sun') return (LBL.sun||'Sun');
+    if (k==='bh') return (LBL.bh||'BH');
+    return k;
+  };
+  const numStr = (v) => (v == null ? '' : String(v));
+
+  const sched = (() => {
+    const src = baseContract.std_schedule_json || {};
+    const out = {};
+    ['mon','tue','wed','thu','fri','sat','sun'].forEach(d => {
+      const day = src[d] || {};
+      out[d] = {
+        start: day.start || '',
+        end:   day.end   || '',
+        break_minutes: (day.break_minutes != null ? String(day.break_minutes) : '')
+      };
+    });
+    return out;
+  })();
+
+  const weeksTableHtml = `
+    <div class="group">
+      <div class="row">
+        <label>Outstanding weeks</label>
+        <div class="controls">
+          <div class="hint">Only weeks that are not invoiced and not paid will be moved onto the new contract.</div>
+          <div style="max-height:220px;overflow:auto;border:1px solid var(--line);border-radius:10px;margin-top:6px">
+            <table class="grid compact">
+              <thead>
+                <tr>
+                  <th>Week ending</th>
+                  <th>Status</th>
+                  <th>Timesheet</th>
+                  <th>Invoiced?</th>
+                  <th>Paid?</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${weeks.map(w => `
+                  <tr>
+                    <td>${w.week_ending_date || ''}</td>
+                    <td>${w.status || ''}</td>
+                    <td>${w.timesheet_id ? 'Yes' : 'No'}</td>
+                    <td>${w.is_invoiced ? 'Yes' : 'No'}</td>
+                    <td>${w.is_paid ? 'Yes' : 'No'}</td>
+                  </tr>
+                `).join('')}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+      <div class="row">
+        <label>Apply new rates from</label>
+        <div class="controls">
+          <select class="input" name="cutoff_we">
+            ${weeks.map(w => `
+              <option value="${w.week_ending_date}" ${w.week_ending_date === defaultCutoff ? 'selected' : ''}>
+                ${w.week_ending_date}
+              </option>
+            `).join('')}
+          </select>
+          <span class="mini">Weeks on or after this week-ending date will be moved to a new contract with the updated rates and schedule.</span>
+        </div>
+      </div>
+    </div>
+  `;
+
+  const ratesHtml = `
+    <div class="group">
+      <div class="row">
+        <label>Rates</label>
+        <div class="controls small">
+          <div class="grid-5" style="margin-bottom:4px">
+            <div></div>
+            <div class="mini">PAYE</div>
+            <div class="mini">Umbrella</div>
+            <div class="mini">Charge</div>
+            <div class="mini">Margin (info only)</div>
+          </div>
+
+          ${['day','night','sat','sun','bh'].map(b => `
+            <div class="grid-5" data-bucket="${b}" style="margin-bottom:4px">
+              <div class="split"><span class="mini">${labelOf(b)}</span></div>
+              <div><input class="input" name="paye_${b}"   placeholder="PAYE"     value="${numStr(R[`paye_${b}`])}" ${showPAYE ? '' : 'disabled'} /></div>
+              <div><input class="input" name="umb_${b}"    placeholder="Umbrella" value="${numStr(R[`umb_${b}`])}"  ${showPAYE ? 'disabled' : ''} /></div>
+              <div><input class="input" name="charge_${b}" placeholder="Charge"   value="${numStr(R[`charge_${b}`])}" /></div>
+              <div class="mini" data-role="margin-note"></div>
+            </div>
+          `).join('')}
+          <div class="mini">You can change any pay/charge buckets here. Margins will be recomputed automatically in TSFIN after the change.</div>
+        </div>
+      </div>
+    </div>
+  `;
+
+  const scheduleHtml = `
+    <div class="group">
+      <div class="row"><label>Default weekly schedule (Mon–Sun)</label>
+        <div class="controls small">
+          <div class="grid-3">
+            ${['mon','tue','wed','thu','fri','sat','sun'].map(d => {
+              const lab = d.charAt(0).toUpperCase() + d.slice(1);
+              const day = sched[d] || {};
+              return `
+                <div class="rp-day" data-day="${d}" style="margin-bottom:6px">
+                  <div class="split">
+                    <span class="mini">${lab} start</span>
+                    <input class="input" name="${d}_start" value="${day.start || ''}" placeholder="HH:MM" />
+                  </div>
+                  <div class="split">
+                    <span class="mini">${lab} end</span>
+                    <input class="input" name="${d}_end" value="${day.end || ''}" placeholder="HH:MM" />
+                  </div>
+                  <div class="split">
+                    <span class="mini">Break (min)</span>
+                    <input class="input" type="number" min="0" step="1" name="${d}_break" value="${day.break_minutes || ''}" placeholder="0" />
+                  </div>
+                </div>
+              `;
+            }).join('')}
+          </div>
+          <div class="mini" style="margin-top:4px">Leave a day blank to clear it from the schedule on the new contract.</div>
+        </div>
+      </div>
+    </div>
+  `;
+
+  const modalHtml = html(`
+    <div class="tabc" id="changeContractRatesForm">
+      <div class="hint" style="margin-bottom:8px">
+        This will create a <strong>new successor contract</strong> with the updated rates and schedule.
+        All outstanding weeks from the chosen cut-off week onward will be moved to the new contract.
+        Historic (paid/invoiced) weeks stay on the original contract.
+      </div>
+      ${weeksTableHtml}
+      ${ratesHtml}
+      ${scheduleHtml}
+    </div>
+  `);
+
+  const timeNorm = (raw) => {
+    const t = String(raw || '').trim();
+    if (!t) return '';
+    const m = t.match(/^(\d{1,2})(?::?(\d{2}))$/);
+    if (!m) return '';
+    const h = +m[1], mi = +m[2];
+    if (!Number.isFinite(h) || !Number.isFinite(mi) || h < 0 || h > 23 || mi < 0 || mi > 59) return '';
+    return String(h).padStart(2, '0') + ':' + String(mi).padStart(2, '0');
+  };
+
+  const buildPayloadFromDom = () => {
+    const root = document.getElementById('changeContractRatesForm');
+    if (!root) return null;
+
+    const cutoffSel = root.querySelector('select[name="cutoff_we"]');
+    const cutoff_we = cutoffSel ? (cutoffSel.value || '').trim() : '';
+    if (!cutoff_we) {
+      if (typeof showModalHint === 'function') showModalHint('Choose a cut-off week ending date.', 'warn');
+      else alert('Choose a cut-off week ending date.');
+      return null;
+    }
+
+    // Collect rates
+    const BUCKETS = ['day','night','sat','sun','bh'];
+    const rateInputs = {};
+    BUCKETS.forEach(b => {
+      rateInputs[`paye_${b}`]   = root.querySelector(`input[name="paye_${b}"]`);
+      rateInputs[`umb_${b}`]    = root.querySelector(`input[name="umb_${b}"]`);
+      rateInputs[`charge_${b}`] = root.querySelector(`input[name="charge_${b}"]`);
+    });
+
+    const parseRate = (name) => {
+      const el = rateInputs[name];
+      if (!el) return null;
+      const raw = (el.value || '').trim();
+      if (!raw) return null;
+      const n = Number(raw);
+      return Number.isFinite(n) ? n : null;
+    };
+
+    const rates_json = {};
+    BUCKETS.forEach(b => {
+      const pd = parseRate(`paye_${b}`);
+      const ud = parseRate(`umb_${b}`);
+      const cd = parseRate(`charge_${b}`);
+      if (pd != null) rates_json[`paye_${b}`] = pd;
+      if (ud != null) rates_json[`umb_${b}`] = ud;
+      if (cd != null) rates_json[`charge_${b}`] = cd;
+    });
+
+    // Schedule
+    const days = ['mon','tue','wed','thu','fri','sat','sun'];
+    const schedOut = {};
+    let hasAny = false;
+
+    days.forEach(d => {
+      const sEl = root.querySelector(`input[name="${d}_start"]`);
+      const eEl = root.querySelector(`input[name="${d}_end"]`);
+      const bEl = root.querySelector(`input[name="${d}_break"]`);
+
+      const sNorm = timeNorm(sEl ? sEl.value : '');
+      const eNorm = timeNorm(eEl ? eEl.value : '');
+      const brRaw = bEl ? (bEl.value || '').trim() : '';
+
+      if (sNorm && eNorm) {
+        const brNum = Math.max(0, Number(brRaw || 0) || 0);
+        schedOut[d] = { start: sNorm, end: eNorm, break_minutes: brNum };
+        hasAny = true;
+      }
+    });
+
+    const std_schedule_json = hasAny ? schedOut : null;
+
+    return {
+      cutoff_week_ending_date: cutoff_we,
+      rates_json,
+      std_schedule_json
+    };
+  };
+
+  showModal(
+    'Change Contract Rates',
+    [{ key:'main', label:'Change' }],
+    () => modalHtml,
+    async () => {
+      const payload = buildPayloadFromDom();
+      if (!payload) return false;
+
+      try {
+        const resp = await applyChangeContractRates(contractId, payload);
+        L('applyChangeContractRates success', resp);
+
+        // Seed pending focus so when user closes out, Contracts summary highlights old/new contracts
+        try {
+          const oldId = resp?.old_contract_id;
+          const newId = resp?.new_contract_id;
+          const ids = [];
+          if (newId) ids.push(newId);
+          if (oldId && oldId !== newId) ids.push(oldId);
+
+          if (ids.length) {
+            window.__pendingFocus = {
+              section: 'contracts',
+              ids: ids,
+              primaryIds: newId ? [newId] : []
+            };
+          }
+        } catch (e) {
+          W('failed to set pending focus (non-fatal)', e);
+        }
+
+        try { window.__toast && window.__toast('New contract created; outstanding weeks moved.'); } catch {}
+
+        return true; // close child modal
+      } catch (err) {
+        E('applyChangeContractRates failed', err);
+        alert(err?.message || 'Failed to change contract rates.');
+        return false;
+      }
+    },
+    false,
+    null,
+    { kind:'contract-change-rates', noParentGate:true, forceEdit:true }
+  );
+}
+
+async function openCandidatePayMethodChangeModal(candidate, context = {}) {
+  const LOG = (typeof window.__LOG_CAND === 'boolean')
+    ? window.__LOG_CAND
+    : (typeof window.__LOG_MODAL === 'boolean' ? window.__LOG_MODAL : false);
+  const L  = (...a)=> { if (LOG) console.log('[CAND][PAY-METHOD][MODAL]', ...a); };
+  const W  = (...a)=> { if (LOG) console.warn('[CAND][PAY-METHOD][MODAL]', ...a); };
+  const E  = (...a)=> { if (LOG) console.error('[CAND][PAY-METHOD][MODAL]', ...a); };
+
+  const cand = candidate || {};
+  const candidateId = cand.id || context.candidate_id || context.id;
+  if (!candidateId) {
+    alert('Candidate id missing for pay-method change.');
+    return;
+  }
+
+  const origMethod = String(context.originalMethod || cand.pay_method || '').toUpperCase() || null;
+  const newMethodRaw = context.newMethod || context.new_method || '';
+  const newMethod = String(newMethodRaw).toUpperCase();
+
+  if (!newMethod || (newMethod !== 'PAYE' && newMethod !== 'UMBRELLA')) {
+    alert('New pay method must be PAYE or UMBRELLA.');
+    return;
+  }
+  if (!origMethod || (origMethod !== 'PAYE' && origMethod !== 'UMBRELLA')) {
+    alert('Current pay method must be PAYE or UMBRELLA to use this change flow.');
+    return;
+  }
+  if (origMethod === newMethod) {
+    alert('New pay method is the same as the current one.');
+    return;
+  }
+
+  let preview;
+  try {
+    preview = await fetchCandidatePayMethodChangePreview(candidateId, newMethod);
+  } catch (err) {
+    E('preview failed', err);
+    alert(err?.message || 'Failed to preview pay-method change.');
+    return;
+  }
+
+  const contracts = Array.isArray(preview?.contracts) ? preview.contracts.slice() : [];
+  const directionLabel = `${origMethod} → ${newMethod}`;
+  const candName =
+    (cand.display_name || `${cand.first_name || ''} ${cand.last_name || ''}`).trim() ||
+    (cand.tms_ref || cand.id || '');
+
+  // No contracts to touch → simple confirm, then call apply endpoint (which will just flip pay_method)
+  if (!contracts.length) {
+    const msg = [
+      `You are changing ${candName}'s pay method from ${origMethod} to ${newMethod}.`,
+      '',
+      'There are no weekly contracts with outstanding weeks that need adjusting.',
+      'Only the candidate’s pay method will be changed.',
+      '',
+      'Do you want to proceed?'
+    ].join('\n');
+    const ok = window.confirm(msg);
+    if (!ok) return;
+
+    try {
+      const resp = await applyCandidatePayMethodChange(candidateId, { new_method: newMethod, contract_ids: [] });
+      L('applyCandidatePayMethodChange success (no contracts)', resp);
+
+      // Focus contracts view if you still want to jump; there may be no contract_ids, but this sets filters.
+      focusContractsAfterBulkChange(resp);
+    } catch (err) {
+      E('applyCandidatePayMethodChange failed', err);
+      alert(err?.message || 'Failed to apply pay-method change.');
+    }
+    return;
+  }
+
+  contracts.sort((a, b) => {
+    const aFrom = String(a?.date_range?.start_date || '');
+    const bFrom = String(b?.date_range?.start_date || '');
+    return aFrom.localeCompare(bFrom);
+  });
+
+  const sanitize = (typeof window !== 'undefined' && typeof window.sanitize === 'function')
+    ? window.sanitize
+    : (s => String(s ?? '').replace(/&/g,'&amp;')
+                           .replace(/</g,'&lt;')
+                           .replace(/>/g,'&gt;')
+                           .replace(/"/g,'&quot;')
+                           .replace(/'/g,'&#39;'));
+
+  const tableHtml = `
+    <div class="group">
+      <div class="row">
+        <label>Affected weekly contracts</label>
+        <div class="controls">
+          <div class="hint">
+            The following contracts have outstanding weeks (not yet invoiced or paid) that will be moved
+            to successor contracts with pay method <strong>${newMethod}</strong>.
+          </div>
+          <div style="max-height:260px;overflow:auto;border:1px solid var(--line);border-radius:10px;margin-top:6px">
+            <table class="grid compact">
+              <thead>
+                <tr>
+                  <th>Client</th>
+                  <th>Role / Band</th>
+                  <th>Date range</th>
+                  <th>Current snapshot</th>
+                  <th>Outstanding weeks</th>
+                  <th>First W/E</th>
+                  <th>Last W/E</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${contracts.map(c => {
+                  const dr = c.date_range || {};
+                  const range = [dr.start_date || '', dr.end_date || ''].filter(Boolean).join(' → ');
+                  return `
+                    <tr>
+                      <td>${sanitize(c.client_name || '')}</td>
+                      <td>${sanitize(c.role || '')}${c.band ? ` (Band ${sanitize(c.band)})` : ''}</td>
+                      <td>${sanitize(range)}</td>
+                      <td>${sanitize(c.pay_method_snapshot || '')}</td>
+                      <td>${c.outstanding_weeks || 0}</td>
+                      <td>${c.first_outstanding_we || ''}</td>
+                      <td>${c.last_outstanding_we || ''}</td>
+                    </tr>
+                  `;
+                }).join('')}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+
+  const bodyHtml = html(`
+    <div class="tabc" id="candPayMethodChange">
+      <div class="hint" style="margin-bottom:8px">
+        You are changing <strong>${sanitize(candName)}</strong> from <strong>${sanitize(origMethod)}</strong> to
+        <strong>${sanitize(newMethod)}</strong>.
+        <br/>
+        For each contract below, a new successor contract will be created with the new pay method, and
+        all outstanding weeks will be moved over. Pay rates will be adjusted so that the <em>margin per bucket</em>
+        remains the same where possible.
+      </div>
+      ${tableHtml}
+      <div class="hint" style="margin-top:8px">
+        If you’d like different rates than the automatically calculated ones, you can adjust them later on the new contracts directly.
+      </div>
+    </div>
+  `);
+
+  const contractIds = contracts.map(c => c.contract_id).filter(Boolean).map(String);
+
+  showModal(
+    `Change pay method — ${directionLabel}`,
+    [{ key:'main', label:'Summary' }],
+    () => bodyHtml,
+    async () => {
+      // Called when user clicks Apply/Save on this modal
+      try {
+        const resp = await applyCandidatePayMethodChange(candidateId, {
+          new_method: newMethod,
+          contract_ids: contractIds
+        });
+        L('applyCandidatePayMethodChange success', resp);
+
+        // Prepare Contracts section to focus the before/after contracts
+        focusContractsAfterBulkChange(resp);
+
+        try { window.__toast && window.__toast('Pay method changed and contracts updated.'); } catch {}
+        return true; // close this modal only; parent closing / navigation is handled elsewhere
+      } catch (err) {
+        E('applyCandidatePayMethodChange failed', err);
+        alert(err?.message || 'Failed to apply pay-method change.');
+        return false;
+      }
+    },
+    false,
+    null,
+    { kind: 'candidate-pay-method-change', noParentGate: true, forceEdit: true }
+  );
+}
+function focusContractsAfterBulkChange(info) {
+  if (!info || typeof info !== 'object') info = {};
+  const newIds = Array.isArray(info.new_contract_ids) ? info.new_contract_ids.map(String) : [];
+  const oldIds = Array.isArray(info.old_contract_ids) ? info.old_contract_ids.map(String) : [];
+
+  const ids = [];
+  newIds.forEach(id => { if (id && !ids.includes(id)) ids.push(id); });
+  oldIds.forEach(id => { if (id && !ids.includes(id)) ids.push(id); });
+
+  const primaryIds = newIds.filter(id => !!id);
+
+  // Seed pending focus so renderSummary() can highlight once modals close
+  if (ids.length) {
+    window.__pendingFocus = {
+      section: 'contracts',
+      ids,
+      primaryIds
+    };
+  }
+
+  // Narrow Contracts list to this candidate (if provided)
+  const candId = info.candidate_id || info.candidateId || null;
+  window.__listState = window.__listState || {};
+  const st = (window.__listState.contracts ||= {
+    page: 1,
+    pageSize: 50,
+    total: null,
+    hasMore: false,
+    filters: null,
+    sort: { key: null, dir: 'asc' }
+  });
+
+  if (!st.sort || typeof st.sort !== 'object') {
+    st.sort = { key: null, dir: 'asc' };
+  }
+
+  if (!st.filters || typeof st.filters !== 'object') {
+    st.filters = {};
+  }
+  if (candId) {
+    st.filters.candidate_id = String(candId);
+  }
+
+  // Jump section to Contracts; renderAll() will be invoked either:
+  // - by caller explicitly, or
+  // - after the last modal is closed (see close logic that checks __pendingFocus).
+  try {
+    currentSection = 'contracts';
+  } catch {}
+
+  // We intentionally do NOT call renderAll() here so that
+  // modal close logic can handle it once the stack is torn down.
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 function stageContractCalendarBookings(contractId, dates /* array of ymd */) {
   const st = getContractCalendarStageState(contractId);
   for (const d of dates) { st.remove.delete(d); st.add.add(d); }
@@ -14695,13 +15586,14 @@ function renderContractCalendarTab(ctx) {
   const fr = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
   const inViewMode = !!(fr && fr.mode === 'view');
 
-  // --- actions (now includes Duplicate)
+  // --- actions (now includes Duplicate + Change Rates)
   const actionsHtml = (c.id
     ? `<div class="actions" style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">
          ${inViewMode ? `` : `<button id="btnAddMissing">Add missing weeks</button>
          <button id="btnRemoveAll">Remove all weeks</button>`}
          ${inViewMode ? `<button id="btnCloneExtend">Clone & Extend…</button>
-         <button id="btnDuplicateContract">Duplicate Contract…</button>` : ``}
+         <button id="btnDuplicateContract">Duplicate Contract…</button>
+         <button id="btnChangeRatesOutstanding">Change Contract Rates…</button>` : ``}
        </div>`
     : ``);
 
@@ -14823,7 +15715,21 @@ function renderContractCalendarTab(ctx) {
           });
         }
 
-        // NEW: Duplicate Contract…
+        // NEW: Change Contract Rates (outstanding weeks)
+        const btnCR = el.querySelector('#btnChangeRatesOutstanding');
+        if (btnCR && !btnCR.__wired) {
+          btnCR.__wired = true;
+          btnCR.addEventListener('click', () => {
+            if (typeof openChangeContractRatesModal === 'function') {
+              if (LOGM) console.log('[CAL][contract] open change contract rates', { id: c.id });
+              openChangeContractRatesModal(c.id);
+            } else {
+              alert('Change Contract Rates is not available in this build.');
+            }
+          });
+        }
+
+        // Duplicate Contract…
         const btnDup = el.querySelector('#btnDuplicateContract');
         if (btnDup && !btnDup.__wired) {
           btnDup.__wired = true;
@@ -20962,6 +21868,7 @@ function bindUmbrellaAddressEvents(container, model) {
 // - Triggers background membership priming (ALL IDs for current filters)
 // - (Sorting of summary grid can be added here if/when you enable header clicks)
 // ─────────────────────────────────────────────────────────────────────────────
+
 function renderSummary(rows){
   currentRows = rows;
   currentSelection = null;
@@ -21290,6 +22197,41 @@ function renderSummary(rows){
     tb.appendChild(tr);
   });
 
+  // ── Apply pending focus (from operations like pay-method change, change rates) ──
+  try {
+    if (window.__pendingFocus && window.__pendingFocus.section === currentSection) {
+      const pf   = window.__pendingFocus;
+      const ids  = Array.isArray(pf.ids) ? pf.ids.map(String) : [];
+      const pids = Array.isArray(pf.primaryIds) ? pf.primaryIds.map(String) : [];
+      const idSet   = new Set(ids);
+      const priSet  = new Set(pids);
+      let firstPrimaryRow = null;
+
+      tb.querySelectorAll('tr').forEach(tr => {
+        const id = String(tr.dataset.id || '');
+        if (idSet.has(id)) {
+          tr.classList.add('pending-focus');
+          if (priSet.has(id)) tr.classList.add('pending-focus-primary');
+          if (!firstPrimaryRow && priSet.has(id)) {
+            firstPrimaryRow = tr;
+          }
+        }
+      });
+
+      if (firstPrimaryRow) {
+        // Scroll primary row into view inside the summary body
+        try {
+          firstPrimaryRow.scrollIntoView({ block: 'center', behavior: 'smooth' });
+        } catch {}
+      }
+
+      // Consume focus so it doesn't re-apply on subsequent renders
+      window.__pendingFocus = null;
+    }
+  } catch (e) {
+    console.warn('pendingFocus application failed (non-fatal)', e);
+  }
+
   tb.addEventListener('click', (ev) => {
     const tr = ev.target && ev.target.closest('tr'); if (!tr) return;
     if (ev.target && ev.target.classList && ev.target.classList.contains('row-select')) return;
@@ -21464,7 +22406,6 @@ function renderSummary(rows){
 
   try { primeSummaryMembership(currentSection, fp); } catch (e) { /* non-blocking */ }
 }
-
 
 // Close any existing floating menu
 function closeRelatedMenu(){
