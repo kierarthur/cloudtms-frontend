@@ -14074,8 +14074,10 @@ async function mountCandidatePayTab(){
   const isEdit = (mode === 'edit' || mode === 'create');
   if (LOG) console.log('[PAYTAB] ENTRY', { mode, isEdit });
 
-  const payMethod   = (window.modalCtx?.payMethodState || window.modalCtx?.data?.pay_method || 'PAYE').toUpperCase();
-  const currentUmbId = window.modalCtx?.data?.umbrella_id || '';
+  const persistedMethod = (window.modalCtx?.data?.pay_method || '').toUpperCase();
+  const payMethod      = (window.modalCtx?.payMethodState || persistedMethod || 'PAYE').toUpperCase();
+  const currentUmbId   = window.modalCtx?.data?.umbrella_id || '';
+  const isStagedFlip   = !!(payMethod && persistedMethod && payMethod !== persistedMethod);
 
   const umbRow    = document.getElementById('umbRow');
   const nameInput = document.getElementById('umbrella_name');
@@ -14092,6 +14094,16 @@ async function mountCandidatePayTab(){
     const umbInput = document.getElementById('umbrella_name'); if (umbInput) umbInput.disabled = false;
     try { window.__BANK_FIELDS_DISABLED__ = !!disabled; } catch {}
     if (LOG) console.log('[PAYTAB] setBankDisabled', disabled);
+  }
+
+  function clearBankAndUmbrella() {
+    if (accHolder) accHolder.value = '';
+    if (bankName)  bankName.value  = '';
+    if (sortCode)  sortCode.value  = '';
+    if (accNum)    accNum.value    = '';
+    if (nameInput) nameInput.value = '';
+    if (idHidden)  idHidden.value  = '';
+    if (LOG) console.log('[PAYTAB] clearBankAndUmbrella');
   }
 
   const unwrapList = (data) => {
@@ -14114,7 +14126,12 @@ async function mountCandidatePayTab(){
     }
     return json;
   }
-  const normaliseSort = (v) => { if (!v) return ''; const digits = String(v).replace(/\D+/g, '').slice(0,6); if (digits.length !== 6) return v; return digits.replace(/(\d{2})(\d{2})(\d{2})/, '$1-$2-$3'); };
+  const normaliseSort = (v) => {
+    if (!v) return '';
+    const digits = String(v).replace(/\D+/g, '').slice(0,6);
+    if (digits.length !== 6) return v;
+    return digits.replace(/(\d{2})(\d{2})(\d{2})/, '$1-$2-$3');
+  };
 
   function fillFromCandidate() {
     const d = window.modalCtx?.data || {};
@@ -14122,7 +14139,12 @@ async function mountCandidatePayTab(){
     if (bankName)  bankName.value  = d.bank_name || '';
     if (sortCode)  sortCode.value  = normaliseSort(d.sort_code || '');
     if (accNum)    accNum.value    = d.account_number || '';
-    if (LOG) console.log('[PAYTAB] fillFromCandidate', { account_holder: accHolder?.value, bank_name: bankName?.value, sort_code: sortCode?.value, account_number: accNum?.value });
+    if (LOG) console.log('[PAYTAB] fillFromCandidate', {
+      account_holder: accHolder?.value,
+      bank_name: bankName?.value,
+      sort_code: sortCode?.value,
+      account_number: accNum?.value
+    });
   }
 
   async function fetchUmbrellaById(id) {
@@ -14134,6 +14156,7 @@ async function mountCandidatePayTab(){
       return row || null;
     } catch (_) { return null; }
   }
+
   function prefillUmbrellaBankFields(umb) {
     if (!umb) return;
     try {
@@ -14151,6 +14174,7 @@ async function mountCandidatePayTab(){
     if (nameInput && !nameInput.value) nameInput.placeholder = umb.name || nameInput.placeholder || '';
     if (LOG) console.log('[PAYTAB] prefillUmbrellaBankFields', { umb_id: umb.id, name: umb.name, bank, sc, an, ah });
   }
+
   async function fetchAndPrefill(id) {
     if (!id) return;
     const umb = await fetchUmbrellaById(id);
@@ -14186,22 +14210,51 @@ async function mountCandidatePayTab(){
   }
 
   // ─────────────────────────────────────────────────────────────
-  // Deterministic prefill: await known-umbrella fetch BEFORE returning
+  // Pay-method change handler (staged flip → clear details)
+  // ─────────────────────────────────────────────────────────────
+  const onPmChanged = () => {
+    const pm = (window.modalCtx?.payMethodState || window.modalCtx?.data?.pay_method || 'PAYE').toUpperCase();
+    if (LOG) console.log('[PAYTAB] pay-method-changed', pm);
+    clearBankAndUmbrella();
+
+    if (pm === 'UMBRELLA') {
+      if (umbRow) umbRow.style.display = '';
+      setBankDisabled(true);  // bank fields disabled until umbrella chosen
+      // User must now choose an umbrella; no auto-prefill from previous choice
+    } else {
+      if (umbRow) umbRow.style.display = 'none';
+      setBankDisabled(!isEdit);  // enable bank fields for PAYE
+      // Leave everything blank; user must enter new PAYE bank details
+    }
+  };
+
+  // Ensure only one listener is active at a time for this pay tab
+  try {
+    if (window.__payTabOnPmChanged) {
+      window.removeEventListener('pay-method-changed', window.__payTabOnPmChanged);
+    }
+    window.__payTabOnPmChanged = onPmChanged;
+    window.addEventListener('pay-method-changed', onPmChanged);
+  } catch {}
+
+  // ─────────────────────────────────────────────────────────────
+  // Initial render (before any pay-method change)
   // ─────────────────────────────────────────────────────────────
   if (payMethod === 'UMBRELLA') {
     if (umbRow) umbRow.style.display = '';
     setBankDisabled(true);
 
-    // Remember any typed label at mount (for later list-matching when NO id)
+    // Remember typed label at mount (for later list-matching when NO id)
     const typedAtMount = (nameInput && nameInput.value) ? nameInput.value.trim() : '';
 
-    // 1) If we KNOW the umbrella id, PREFILL and AWAIT before returning.
-    if (currentUmbId) {
+    // 1) If we have a persisted umbrella_id and this is NOT a staged flip,
+    //    prefill from the umbrella now.
+    if (currentUmbId && !isStagedFlip) {
       if (LOG) console.log('[PAYTAB] deterministic prefill by umbrella_id', currentUmbId);
       await fetchAndPrefill(currentUmbId);
     }
 
-    // 2) Load umbrella list in parallel (NOT awaited) for the datalist & label→id case.
+    // 2) Load umbrella list in parallel for the datalist & label→id case.
     (async () => {
       let umbrellas = [];
       try {
@@ -14220,8 +14273,9 @@ async function mountCandidatePayTab(){
         }).join('');
       }
 
-      // If we DIDN'T have an id at mount but user already had a typed label, try to map it now.
-      if (!currentUmbId && typedAtMount && umbrellas.length) {
+      // If we DIDN'T have an id at mount but user already had a typed label,
+      // try to map it now (only for non-flip initial load).
+      if (!currentUmbId && !isStagedFlip && typedAtMount && umbrellas.length) {
         const hit = umbrellas.find(u => (u.name || '').trim() === typedAtMount);
         if (hit) {
           if (LOG) console.log('[PAYTAB] post-list typed match', { typedAtMount, id: hit.id });
@@ -14239,28 +14293,19 @@ async function mountCandidatePayTab(){
     }
     if (idHidden) idHidden.addEventListener('change', () => fetchAndPrefill(idHidden.value));
 
-    const onPmChanged = () => {
-      const pm = (window.modalCtx?.payMethodState || window.modalCtx?.data?.pay_method || 'PAYE').toUpperCase();
-      if (LOG) console.log('[PAYTAB] pay-method-changed', pm);
-      if (pm !== 'UMBRELLA') {
-        if (umbRow) umbRow.style.display = 'none';
-        setBankDisabled(!isEdit);
-        fillFromCandidate();
-      } else {
-        if (umbRow) umbRow.style.display = '';
-        setBankDisabled(true);
-        const id = (idHidden && idHidden.value) ? idHidden.value : (window.modalCtx?.data?.umbrella_id || '');
-        if (id) fetchAndPrefill(id);
-      }
-    };
-    try { window.addEventListener('pay-method-changed', onPmChanged, { once: true }); } catch {}
-
   } else {
+    // PAYE initial: hide umbrella block; decide whether to prefill or blank
     if (umbRow) umbRow.style.display = 'none';
     setBankDisabled(!isEdit);
     if (nameInput && idHidden) { nameInput.value = ''; idHidden.value = ''; }
-    // PAYE path is immediate (no awaits needed)
-    fillFromCandidate();
+
+    if (!isStagedFlip) {
+      // No staged flip: show existing PAYE bank details from candidate record
+      fillFromCandidate();
+    } else {
+      // Staged flip (e.g. UMBRELLA → PAYE): start with completely blank bank details
+      clearBankAndUmbrella();
+    }
   }
 
   // IMPORTANT: The function is async; it resolves AFTER the umbrella prefill (when known).
