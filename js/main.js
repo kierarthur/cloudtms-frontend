@@ -11407,7 +11407,7 @@ async function openCandidate(row) {
   }
 
   // 2) Build modal context from hydrated data
-  const fullKeys = Object.keys(full || {});
+  const fullKeys    = Object.keys(full || {});
   const dbPayMethod = full && full.pay_method ? String(full.pay_method).toUpperCase() : null;
 
   L('seeding window.modalCtx', {
@@ -11458,34 +11458,37 @@ async function openCandidate(row) {
 
       const fs   = window.modalCtx.formState || { __forId: null, main:{}, pay:{} };
       const hasId = !!window.modalCtx.data?.id;
-      const same = hasId ? (fs.__forId === window.modalCtx.data.id)
-                         : (fs.__forId === window.modalCtx.openToken || fs.__forId == null);
+      const same = hasId
+        ? (fs.__forId === window.modalCtx.data.id)
+        : (fs.__forId === window.modalCtx.openToken || fs.__forId == null);
+
       const stateMain = same ? (fs.main || {}) : {};
       const statePay  = same ? (fs.pay  || {}) : {};
       const main      = document.querySelector('#tab-main') ? collectForm('#tab-main') : {};
       const pay       = document.querySelector('#tab-pay')  ? collectForm('#tab-pay')  : {};
       const roles     = normaliseRolesForSave(window.modalCtx.rolesState || window.modalCtx.data?.roles || []);
-    const payload   = { ...stateMain, ...statePay, ...main, ...pay, roles };
 
-// Strip internal-only fields before logging / sending to backend
-for (const k of Object.keys(payload)) {
-  // Anything starting with "__" is a front-end staging key (e.g. __forMethod)
-  if (k.startsWith('__')) {
-    delete payload[k];
-  }
-}
+      let payload   = { ...stateMain, ...statePay, ...main, ...pay, roles };
 
-L('[onSave] collected', {
-  same,
-  stateMainKeys: Object.keys(stateMain||{}),
-  statePayKeys:  Object.keys(statePay||{}),
-  mainKeys:      Object.keys(main||{}),
-  payKeys:       Object.keys(pay||{}),
-  rolesCount:    roles?.length || 0
-});
+      // Strip internal-only fields before logging / sending to backend
+      for (const k of Object.keys(payload)) {
+        // Anything starting with "__" is a front-end staging key (e.g. __forMethod)
+        if (k.startsWith('__')) {
+          delete payload[k];
+        }
+      }
 
-delete payload.umbrella_name;
-delete payload.tms_ref;
+      L('[onSave] collected', {
+        same,
+        stateMainKeys: Object.keys(stateMain||{}),
+        statePayKeys:  Object.keys(statePay||{}),
+        mainKeys:      Object.keys(main||{}),
+        payKeys:       Object.keys(pay||{}),
+        rolesCount:    roles?.length || 0
+      });
+
+      delete payload.umbrella_name;
+      delete payload.tms_ref;
 
       if (!payload.first_name && full?.first_name) payload.first_name = full.first_name;
       if (!payload.last_name  && full?.last_name)  payload.last_name  = full.last_name;
@@ -11537,25 +11540,35 @@ delete payload.tms_ref;
       }
       if (payload.umbrella_id === '') payload.umbrella_id = null;
 
-      // ── Detect PAYE ↔ UMBRELLA flip ────────────────────────────────────────
       const originalMethod = (full && full.pay_method) ? String(full.pay_method).toUpperCase() : null;
       const newMethod      = payload.pay_method ? String(payload.pay_method).toUpperCase() : null;
       const hasExistingId  = !!full?.id;
       const alreadyFlipped = !!window.modalCtx?.__payFlipDone;
-      const isFlip = !!(hasExistingId &&
-                        !alreadyFlipped &&
-                        originalMethod &&
-                        newMethod &&
-                        (originalMethod === 'PAYE' || originalMethod === 'UMBRELLA') &&
-                        (newMethod === 'PAYE'     || newMethod === 'UMBRELLA') &&
-                        originalMethod !== newMethod);
+
+      const isFlip = !!(
+        hasExistingId &&
+        !alreadyFlipped &&
+        originalMethod &&
+        newMethod &&
+        (originalMethod === 'PAYE' || originalMethod === 'UMBRELLA') &&
+        (newMethod     === 'PAYE' || newMethod     === 'UMBRELLA') &&
+        originalMethod !== newMethod
+      );
+
+      // Helper to force-clear candidate bank fields in a payload
+      const clearBankOnPayload = (obj) => {
+        obj.account_holder = null;
+        obj.bank_name      = null;
+        obj.sort_code      = null;
+        obj.account_number = null;
+      };
 
       if (isFlip) {
         L('[onSave] detected PAYE↔UMBRELLA flip', { originalMethod, newMethod, candidateId: full.id });
 
         const idForUpdate = window.modalCtx?.data?.id || full?.id || null;
 
-        // If we are going FROM PAYE → UMBRELLA, we must ensure umbrella_id is persisted first.
+        // ── PAYE → UMBRELLA special handling ────────────────────────────────
         if (originalMethod === 'PAYE' && newMethod === 'UMBRELLA') {
           const effectiveUmbrellaId = payload.umbrella_id || full.umbrella_id || null;
 
@@ -11593,61 +11606,159 @@ delete payload.tms_ref;
               W('failed to sync modalCtx.data after pre-saving umbrella', err);
             }
           }
-        }
 
-        // Reset dropdown back to original so UI reflects real state during the flow
-        try {
-          const pmSel = document.querySelector('select[name="pay_method"]');
-          if (pmSel && originalMethod) {
-            pmSel.value = originalMethod;
+          // Reset dropdown back to original so UI reflects real state during the flow
+          try {
+            const pmSel = document.querySelector('select[name="pay_method"]');
+            if (pmSel && originalMethod) {
+              pmSel.value = originalMethod;
+            }
+          } catch (err) {
+            W('failed to reset pay_method select to originalMethod', err);
           }
-        } catch (err) {
-          W('failed to reset pay_method select to originalMethod', err);
-        }
 
-        try {
-          const confirmed = await openCandidatePayMethodChangeModal(full, {
-            originalMethod,
-            newMethod,
-            candidate_id: full.id
-          });
+          try {
+            const confirmed = await openCandidatePayMethodChangeModal(full, {
+              originalMethod,
+              newMethod,
+              candidate_id: full.id
+            });
 
-          // If user cancelled / nothing applied, keep candidate modal open
-          if (!confirmed) {
-            L('[onSave] pay-method change cancelled or failed, keeping candidate modal open');
+            if (!confirmed) {
+              L('[onSave] pay-method change cancelled or failed, keeping candidate modal open');
+              return { ok:false };
+            }
+
+            window.modalCtx.__payFlipDone = true;
+
+            // After backend change, persist the final UMBRELLA state on candidate:
+            // - pay_method: 'UMBRELLA'
+            // - umbrella_id: effectiveUmbrellaId
+            // - CLEAR all bank fields
+            const postFlipUmbPayload = {
+              ...payload,
+              pay_method: 'UMBRELLA',
+              umbrella_id: effectiveUmbrellaId
+            };
+            clearBankOnPayload(postFlipUmbPayload);
+
+            // Strip any empty-string values for this call
+            for (const k of Object.keys(postFlipUmbPayload)) {
+              if (postFlipUmbPayload[k] === '') delete postFlipUmbPayload[k];
+            }
+
+            const savedUmb = await upsertCandidate(postFlipUmbPayload, idForUpdate).catch(err => {
+              E('upsertCandidate after PAYE→UMBRELLA flip failed', err);
+              return null;
+            });
+            if (!savedUmb || !savedUmb.id) {
+              alert('Pay-method changed, but failed to finalise UMBRELLA details. Please check and try again.');
+              return { ok:false };
+            }
+
+            full = { ...full, ...savedUmb };
+            try {
+              window.modalCtx.data = { ...(window.modalCtx.data || {}), ...savedUmb };
+              window.modalCtx.dbPayMethod = 'UMBRELLA';
+            } catch (e) {
+              W('failed to sync modalCtx.data/dbPayMethod after PAYE→UMBRELLA flip', e);
+            }
+
+            L('[onSave] PAYE→UMBRELLA change confirmed; closing candidate modal');
+            return { ok:true, saved: window.modalCtx.data };
+
+          } catch (err) {
+            W('pay-method change flow (PAYE→UMBRELLA) failed', err);
+            alert(err?.message || 'Failed to process pay-method change.');
             return { ok:false };
           }
+        }
 
-          // Mark that we've already processed a flip in this modal
-          window.modalCtx.__payFlipDone = true;
-
-          // Update modalCtx.data to reflect the new method, so UI and future logic are consistent
+        // ── UMBRELLA → PAYE special handling ────────────────────────────────
+        if (originalMethod === 'UMBRELLA' && newMethod === 'PAYE') {
+          // Ensure dropdown shows the old method during the child modal
           try {
-            window.modalCtx.data = window.modalCtx.data || {};
-            window.modalCtx.data.pay_method = newMethod;
-            if (newMethod === 'PAYE') {
-              window.modalCtx.data.umbrella_id = null;
+            const pmSel = document.querySelector('select[name="pay_method"]');
+            if (pmSel && originalMethod) {
+              pmSel.value = originalMethod;
             }
-            // 🔹 Also update dbPayMethod so future Pay-tab opens in this modal use the new persisted method
-            window.modalCtx.dbPayMethod = newMethod;
-          } catch (e) {
-            W('failed to sync modalCtx.data/dbPayMethod after pay-method change', e);
+          } catch (err) {
+            W('failed to reset pay_method select to originalMethod', err);
           }
 
-          L('[onSave] pay-method change confirmed; closing candidate modal');
-          // Treat this as a successful save so the frame switches to View mode
-          return { ok:true, saved: window.modalCtx.data };
+          try {
+            const confirmed = await openCandidatePayMethodChangeModal(full, {
+              originalMethod,
+              newMethod,
+              candidate_id: full.id
+            });
 
-        } catch (err) {
-          W('pay-method change flow failed', err);
-          alert(err?.message || 'Failed to process pay-method change.');
-          return { ok:false };
+            if (!confirmed) {
+              L('[onSave] pay-method change cancelled or failed (UMBRELLA→PAYE), keeping candidate modal open');
+              return { ok:false };
+            }
+
+            window.modalCtx.__payFlipDone = true;
+
+            // After backend change, we must now persist the *new PAYE bank details*
+            // that the user entered on the Pay tab.
+            const idForUpdate2 = window.modalCtx?.data?.id || full?.id || null;
+            const postFlipPayePayload = { ...payload };
+
+            // For PAYE, umbrella_id should be null
+            if (!postFlipPayePayload.umbrella_id) {
+              postFlipPayePayload.umbrella_id = null;
+            }
+            postFlipPayePayload.pay_method = 'PAYE';
+
+            // Strip empty-string values for this call
+            for (const k of Object.keys(postFlipPayePayload)) {
+              if (postFlipPayePayload[k] === '') delete postFlipPayePayload[k];
+            }
+
+            const savedPaye = await upsertCandidate(postFlipPayePayload, idForUpdate2).catch(err => {
+              E('upsertCandidate after UMBRELLA→PAYE flip failed', err);
+              return null;
+            });
+            if (!savedPaye || !savedPaye.id) {
+              alert('Pay-method changed, but failed to save new PAYE bank details. Please check and try again.');
+              return { ok:false };
+            }
+
+            full = { ...full, ...savedPaye };
+            try {
+              window.modalCtx.data = { ...(window.modalCtx.data || {}), ...savedPaye };
+              window.modalCtx.dbPayMethod = 'PAYE';
+            } catch (e) {
+              W('failed to sync modalCtx.data/dbPayMethod after UMBRELLA→PAYE flip', e);
+            }
+
+            L('[onSave] UMBRELLA→PAYE change confirmed; closing candidate modal');
+            return { ok:true, saved: window.modalCtx.data };
+
+          } catch (err) {
+            W('pay-method change flow (UMBRELLA→PAYE) failed', err);
+            alert(err?.message || 'Failed to process pay-method change.');
+            return { ok:false };
+          }
         }
+
+        // Fallback (should not usually hit here, but guard anyway)
+        W('[onSave] flip detected with unsupported direction', { originalMethod, newMethod });
       }
 
       // ── Normal save path (no PAYE↔UMBRELLA flip) ───────────────────────────
+
+      // If we are saving as UMBRELLA in a non-flip scenario, always clear bank
+      // details on the candidate record to avoid confusion with old PAYE data.
+      if (payload.pay_method === 'UMBRELLA') {
+        clearBankOnPayload(payload);
+      }
+
       // Remove empty strings before sending
-      for (const k of Object.keys(payload)) if (payload[k] === '') delete payload[k];
+      for (const k of Object.keys(payload)) {
+        if (payload[k] === '') delete payload[k];
+      }
 
       // Sync Job Titles + Registration + DOB from candidateMainModel (unchanged)
       try {
@@ -11672,7 +11783,7 @@ delete payload.tms_ref;
           cm.job_titles = jobs;
 
           const jobIds = jobs.map(j => j.job_title_id).filter(Boolean);
-          payload.job_titles = jobIds;
+          payload.job_titles   = jobIds;
           payload.job_title_id = jobIds.length ? jobIds[0] : null;
 
           if (Object.prototype.hasOwnProperty.call(cm, 'prof_reg_type')) {
@@ -11739,7 +11850,7 @@ delete payload.tms_ref;
 
         for (const b of ['day','night','sat','sun','bh']) {
           const payB = eff[`pay_${b}`];
-          const chg = win[`charge_${b}`];
+          const chg  = win[`charge_${b}`];
           if (payB != null && chg == null) { alert(`No client charge for ${bucketLabel[b]} on ${formatIsoToUk(eff.date_from)}.`); return { ok:false }; }
           if (payB != null && chg != null) {
             const margin = (eff.rate_type==='PAYE') ? (chg - (payB * erniMult)) : (chg - payB);
@@ -11767,7 +11878,7 @@ delete payload.tms_ref;
       const overridesRef = window.modalCtx.overrides || { existing: [], stagedNew: [], stagedEdits: {}, stagedDeletes: new Set() };
       L('[onSave] overrides', {
         deletes: Array.from(overridesRef.stagedDeletes || []),
-        edits: Object.keys(overridesRef.stagedEdits || {}),
+        edits:   Object.keys(overridesRef.stagedEdits || {}),
         newCount: (overridesRef.stagedNew || []).length
       });
 
@@ -11792,7 +11903,8 @@ delete payload.tms_ref;
         if (!resDel.ok) {
           const msg = await resDel.text().catch(()=> 'Delete override failed');
           alert(msg);
-          return { ok:false }; }
+          return { ok:false };
+        }
       }
 
       // Edits — PATCH candidate_id in path + ORIGINAL keys in query, updates in body
@@ -11823,7 +11935,8 @@ delete payload.tms_ref;
         if (!resPatch.ok) {
           const msg = await resPatch.text().catch(()=> 'Update override failed');
           alert(msg);
-          return { ok:false }; }
+          return { ok:false };
+        }
       }
 
       // Creates
@@ -11838,7 +11951,11 @@ delete payload.tms_ref;
           API(`/api/rates/candidate-overrides`),
           { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({ ...clean, candidate_id: candidateId }) }
         );
-        if (!resCreate.ok) { const msg = await resCreate.text().catch(()=> 'Create override failed'); alert(msg); return { ok:false }; }
+        if (!resCreate.ok) {
+          const msg = await resCreate.text().catch(()=> 'Create override failed');
+          alert(msg);
+          return { ok:false };
+        }
       }
 
       // Refresh overrides list from server and clear staging
@@ -11847,7 +11964,7 @@ delete payload.tms_ref;
         if (tokenAtSave === window.modalCtx.openToken && window.modalCtx.data?.id === candidateId) {
           window.modalCtx.overrides.existing = Array.isArray(latest) ? latest : [];
           window.modalCtx.overrides.stagedEdits = {};
-          window.modalCtx.overrides.stagedNew = [];
+          window.modalCtx.overrides.stagedNew   = [];
           if (window.modalCtx.overrides.stagedDeletes?.clear) window.modalCtx.overrides.stagedDeletes.clear();
           const fr1 = window.__getModalFrame?.();
           if (fr1 && fr1.entity === 'candidates' && fr1.currentTabKey === 'rates') {
