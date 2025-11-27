@@ -14210,7 +14210,7 @@ async function mountCandidatePayTab(){
   }
 
   // ─────────────────────────────────────────────────────────────
-  // Pay-method change handler (staged flip → clear details)
+  // Pay-method change handler (for flips while pay tab is open)
   // ─────────────────────────────────────────────────────────────
   const onPmChanged = () => {
     const pm = (window.modalCtx?.payMethodState || window.modalCtx?.data?.pay_method || 'PAYE').toUpperCase();
@@ -14220,11 +14220,9 @@ async function mountCandidatePayTab(){
     if (pm === 'UMBRELLA') {
       if (umbRow) umbRow.style.display = '';
       setBankDisabled(true);  // bank fields disabled until umbrella chosen
-      // User must now choose an umbrella; no auto-prefill from previous choice
     } else {
       if (umbRow) umbRow.style.display = 'none';
       setBankDisabled(!isEdit);  // enable bank fields for PAYE
-      // Leave everything blank; user must enter new PAYE bank details
     }
   };
 
@@ -14238,13 +14236,18 @@ async function mountCandidatePayTab(){
   } catch {}
 
   // ─────────────────────────────────────────────────────────────
-  // Initial render (before any pay-method change)
+  // Initial render (before any pay-method change while tab is open)
   // ─────────────────────────────────────────────────────────────
   if (payMethod === 'UMBRELLA') {
     if (umbRow) umbRow.style.display = '';
     setBankDisabled(true);
 
-    // Remember typed label at mount (for later list-matching when NO id)
+    // If this is a staged flip (PAYE → UMBRELLA), start from a blank slate.
+    if (isStagedFlip) {
+      clearBankAndUmbrella();
+    }
+
+    // Remember any typed label at mount (for later list-matching when NO id)
     const typedAtMount = (nameInput && nameInput.value) ? nameInput.value.trim() : '';
 
     // 1) If we have a persisted umbrella_id and this is NOT a staged flip,
@@ -14311,6 +14314,7 @@ async function mountCandidatePayTab(){
   // IMPORTANT: The function is async; it resolves AFTER the umbrella prefill (when known).
   // If no umbrella_id or pay method isn’t UMBRELLA, it resolves immediately here.
 }
+
 
 // ============================================================================
 // CALENDAR – SHARED HELPERS & STATE
