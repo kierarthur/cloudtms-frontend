@@ -877,26 +877,28 @@ body{
 
   <!-- ===== Draggable modal ===== -->
   <div class="modal-back" id="modalBack">
-    <div class="modal" id="modal">
-      <div class="modal-h" id="modalDrag">
-        <div class="ttl" id="modalTitle">Details</div>
-        <div class="spacer"></div>
-        <button id="btnCloseModal">Close</button>
-      </div>
-      <div class="modal-b">
-        <div class="tabs" id="modalTabs"></div>
-        <div class="tabc" id="modalBody"></div>
-      </div>
-      <div class="actions" id="modalActions">
-        <span class="hint" id="modalHint"></span>
-        <div class="spacer"></div>
-        <button id="btnRelated" style="display:none">Related</button>
-        <button id="btnDelete" class="danger" style="display:none">Delete</button>
-        <button id="btnEditModal" style="display:none">Edit</button>
-        <button id="btnSave" class="primary">Save</button>
-      </div>
+  <div class="modal" id="modal">
+    <div class="modal-h" id="modalDrag">
+      <div class="ttl" id="modalTitle">Details</div>
+      <div class="spacer"></div>
+      <!-- Related moved up next to Close -->
+      <button id="btnRelated" style="display:none">Related</button>
+      <button id="btnCloseModal">Close</button>
+    </div>
+    <div class="modal-b">
+      <div class="tabs" id="modalTabs"></div>
+      <div class="tabc" id="modalBody"></div>
+    </div>
+    <div class="actions" id="modalActions">
+      <span class="hint" id="modalHint"></span>
+      <div class="spacer"></div>
+      <!-- Bottom row now only core actions -->
+      <button id="btnDelete" class="danger" style="display:none">Delete</button>
+      <button id="btnEditModal" style="display:none">Edit</button>
+      <button id="btnSave" class="primary">Save</button>
     </div>
   </div>
+</div>
 
   <!-- ===== Auth overlays ===== -->
   <div class="auth-overlay" id="loginOverlay" aria-hidden="true">
