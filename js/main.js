@@ -4613,15 +4613,34 @@ function openContract(row) {
     }
   } catch {}
 
-  const extraButtons = [];
-  if (!isCreate && window.modalCtx.data?.id) {
+    const extraButtons = [];
+
+  // Only attach Delete Contract for existing contracts that the backend
+  // has marked as deletable (can_delete === true).
+  const hasId     = !!window.modalCtx.data?.id;
+  const canDelete = !!(hasId && window.modalCtx.data?.can_delete);
+
+  if (!isCreate && hasId && canDelete) {
     extraButtons.push({
       label: 'Delete contract',
       role: 'danger',
       onClick: async () => {
         const id = window.modalCtx.data?.id;
         if (!id) return;
-        if (!confirm('Delete this contract? (Only allowed if no timesheets exist)')) return;
+
+        // Only allow action in EDIT mode – if still in view mode,
+        // nudge the user to click Edit first.
+        const fr = (typeof window.__getModalFrame === 'function')
+          ? window.__getModalFrame()
+          : null;
+        if (fr && fr.mode !== 'edit') {
+          alert('Click Edit to make changes before deleting this contract.');
+          return;
+        }
+
+        const ok = window.confirm('Do you want to permanently delete this contract?');
+        if (!ok) return;
+
         try {
           if (LOGC) console.log('[CONTRACTS] deleteContract', { id });
           await deleteContract(id);
@@ -4633,6 +4652,7 @@ function openContract(row) {
       }
     });
   }
+
 
    const tabDefs = [
     { key: 'main',     title: 'Main' },
