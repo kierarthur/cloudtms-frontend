@@ -11558,18 +11558,16 @@ async function openCandidate(row) {
 
       const originalMethod = (full && full.pay_method) ? String(full.pay_method).toUpperCase() : null;
       const newMethod      = payload.pay_method ? String(payload.pay_method).toUpperCase() : null;
-      const hasExistingId  = !!full?.id;
-      const alreadyFlipped = !!window.modalCtx?.__payFlipDone;
+     const hasExistingId  = !!full?.id;
 
-      const isFlip = !!(
-        hasExistingId &&
-        !alreadyFlipped &&
-        originalMethod &&
-        newMethod &&
-        (originalMethod === 'PAYE' || originalMethod === 'UMBRELLA') &&
-        (newMethod     === 'PAYE' || newMethod     === 'UMBRELLA') &&
-        originalMethod !== newMethod
-      );
+const isFlip = !!(
+  hasExistingId &&
+  originalMethod &&
+  newMethod &&
+  (originalMethod === 'PAYE' || originalMethod === 'UMBRELLA') &&
+  (newMethod     === 'PAYE' || newMethod     === 'UMBRELLA') &&
+  originalMethod !== newMethod
+);
 
       // Helper to force-clear candidate bank fields in a payload
       const clearBankOnPayload = (obj) => {
