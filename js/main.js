@@ -14236,15 +14236,22 @@ async function mountCandidatePayTab(){
     }
   }
 
-  // ----- Staged state from formState.pay -----------------------------------
+   // ----- Staged state from formState.pay -----------------------------------
 
-  const fs = (window.modalCtx?.formState ||= {
-    __forId: (window.modalCtx?.data?.id ?? window.modalCtx?.openToken ?? null),
-    main:{},
-    pay:{}
-  });
-  fs.pay ||= {};
+  // Ensure modalCtx + formState exist (no optional-chaining on assignment!)
+  window.modalCtx = window.modalCtx || {};
+  if (!window.modalCtx.formState) {
+    window.modalCtx.formState = {
+      __forId: (window.modalCtx.data?.id ?? window.modalCtx.openToken ?? null),
+      main: {},
+      pay:  {}
+    };
+  }
+
+  const fs = window.modalCtx.formState;
+  fs.pay = fs.pay || {};
   const stagedPay = fs.pay;
+
 
   const hasStagedPay =
     ['account_holder','bank_name','sort_code','account_number','umbrella_id','umbrella_name']
