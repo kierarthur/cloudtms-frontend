@@ -11600,11 +11600,22 @@ async function openCandidate(row) {
             return { ok:false };
           }
 
+          // Normalise DOB so blank "" becomes null before any pre-save
+          if (Object.prototype.hasOwnProperty.call(payload, 'date_of_birth') &&
+              !payload.date_of_birth) {
+            payload.date_of_birth = null;
+          }
+
           // Pre-save umbrella details (but keep pay_method as originalMethod) so the backend
           // bulk change endpoint passes its umbrella_id check.
           if (!full.umbrella_id && effectiveUmbrellaId && idForUpdate) {
             const prePayload = { ...payload };
             prePayload.pay_method = originalMethod;
+
+            // Strip any remaining empty-string fields so we don't send "" to typed columns
+            for (const k of Object.keys(prePayload)) {
+              if (prePayload[k] === '') delete prePayload[k];
+            }
 
             L('[onSave][FLIP P→U] pre-saving umbrella details', {
               candidateId: idForUpdate,
@@ -11621,6 +11632,7 @@ async function openCandidate(row) {
               E('pre upsertCandidate (umbrella before flip) failed', err);
               return null;
             });
+
             if (!preSaved || !preSaved.id) {
               alert('Failed to save umbrella details before pay-method change. Please try again.');
               return { ok:false };
