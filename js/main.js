@@ -15854,7 +15854,6 @@ async function openCandidatePayMethodChangeModal(candidate, context = {}) {
     );
   });
 }
-
 function focusContractsAfterBulkChange(info) {
   if (!info || typeof info !== 'object') info = {};
   const newIds = Array.isArray(info.new_contract_ids) ? info.new_contract_ids.map(String) : [];
@@ -15875,7 +15874,8 @@ function focusContractsAfterBulkChange(info) {
     };
   }
 
-  // Narrow Contracts list to this candidate (if provided)
+  // Narrow Contracts list to just the affected contracts (old + new),
+  // falling back to candidate_id only if we somehow have no ids.
   const candId = info.candidate_id || info.candidateId || null;
   window.__listState = window.__listState || {};
   const st = (window.__listState.contracts ||= {
@@ -15894,13 +15894,21 @@ function focusContractsAfterBulkChange(info) {
   if (!st.filters || typeof st.filters !== 'object') {
     st.filters = {};
   }
-  if (candId) {
+
+  if (ids.length) {
+    // Use ids of affected contracts so we only see old+new
+    st.filters.ids = ids;          // loadSection should turn this into ?ids=uuid1,uuid2,...
+    st.page = 1;
+    // (candidate_id is redundant at this point, so we can drop it if present)
+    delete st.filters.candidate_id;
+  } else if (candId) {
+    // Fallback: narrow to candidate if no contract ids were provided
     st.filters.candidate_id = String(candId);
-    st.page = 1; // ensure we start from the first page for this candidate
+    st.page = 1;
   }
 
-  // 🔹 When jumping here from a bulk change, prefer "All" so the contract
-  // is visible regardless of previous status tab.
+  // When jumping here from a bulk change, prefer "All" so the affected
+  // contracts are visible regardless of previous status tab.
   st.filters.status = 'all';
 
   // Jump section to Contracts; renderAll() will be invoked either:
@@ -15913,7 +15921,6 @@ function focusContractsAfterBulkChange(info) {
   // We intentionally do NOT call renderAll() here so that
   // modal close logic can handle it once the stack is torn down.
 }
-
 
 
 
