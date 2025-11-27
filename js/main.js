@@ -14068,7 +14068,7 @@ function renderClientTab(key, row = {}){
 // This function now RESOLVES ONLY AFTER prefill (when umbrella_id is known).
 // In your modal's setTab/renderTab: `return mountCandidatePayTab();` and await it.
 
-async function mountCandidatePayTab(){
+async function mountCandidatePayTab() {
   const LOG = !!window.__LOG_PAYTAB;
   const fr  = (window.__modalStack || [])[ (window.__modalStack || []).length - 1 ] || null;
   const mode = fr ? fr.mode : 'view';
@@ -14089,26 +14089,22 @@ async function mountCandidatePayTab(){
   const sortCode  = document.querySelector('#tab-pay input[name="sort_code"]');
   const accNum    = document.querySelector('#tab-pay input[name="account_number"]');
 
+  // ----- Ensure modalCtx + formState/pay exist (no optional-chaining on assignment) -----
+
+  window.modalCtx = window.modalCtx || {};
+  if (!window.modalCtx.formState) {
+    window.modalCtx.formState = {
+      __forId: (window.modalCtx.data?.id ?? window.modalCtx.openToken ?? null),
+      main: {},
+      pay:  {}
+    };
+  }
+
+  const fs = window.modalCtx.formState;
+  fs.pay = fs.pay || {};
+  const stagedPay = fs.pay;
+
   // ----- Shared helpers ----------------------------------------------------
-
-  function setBankDisabled(disabled) {
-    [accHolder, bankName, sortCode, accNum].forEach(el => { if (el) el.disabled = !!disabled; });
-    const umbInput = document.getElementById('umbrella_name');
-    // Umbrella name should still be editable when we’re editing the candidate
-    if (umbInput) umbInput.disabled = !isEdit;
-    try { window.__BANK_FIELDS_DISABLED__ = !!disabled; } catch {}
-    if (LOG) console.log('[PAYTAB] setBankDisabled', disabled);
-  }
-
-  function clearBankAndUmbrella() {
-    if (accHolder) accHolder.value = '';
-    if (bankName)  bankName.value  = '';
-    if (sortCode)  sortCode.value  = '';
-    if (accNum)    accNum.value    = '';
-    if (nameInput) nameInput.value = '';
-    if (idHidden)  idHidden.value  = '';
-    if (LOG) console.log('[PAYTAB] clearBankAndUmbrella');
-  }
 
   const unwrapList = (data) => {
     if (Array.isArray(data)) return data;
@@ -14134,17 +14130,58 @@ async function mountCandidatePayTab(){
 
   const normaliseSort = (v) => {
     if (!v) return '';
-    const digits = String(v).replace(/\D+/g, '').slice(0,6);
+    const digits = String(v).replace(/\D+/g, '').slice(0, 6);
     if (digits.length !== 6) return v;
     return digits.replace(/(\d{2})(\d{2})(\d{2})/, '$1-$2-$3');
   };
 
+  function setBankDisabled(disabled) {
+    [accHolder, bankName, sortCode, accNum].forEach(el => { if (el) el.disabled = !!disabled; });
+    const umbInput = document.getElementById('umbrella_name');
+    // Umbrella name should still be editable when we’re editing the candidate
+    if (umbInput) umbInput.disabled = !isEdit;
+    try { window.__BANK_FIELDS_DISABLED__ = !!disabled; } catch {}
+    if (LOG) console.log('[PAYTAB] setBankDisabled', disabled);
+  }
+
+  function stageFromDom() {
+    // Mirror current DOM values into stagedPay so hops/flips see them
+    stagedPay.account_holder = accHolder ? accHolder.value : '';
+    stagedPay.bank_name      = bankName  ? bankName.value  : '';
+    stagedPay.sort_code      = sortCode  ? sortCode.value  : '';
+    stagedPay.account_number = accNum    ? accNum.value    : '';
+    stagedPay.umbrella_name  = nameInput ? nameInput.value : '';
+    stagedPay.umbrella_id    = idHidden  ? idHidden.value  : '';
+    if (LOG) console.log('[PAYTAB] stageFromDom', { ...stagedPay });
+  }
+
+  function clearBankAndUmbrella() {
+    if (accHolder) accHolder.value = '';
+    if (bankName)  bankName.value  = '';
+    if (sortCode)  sortCode.value  = '';
+    if (accNum)    accNum.value    = '';
+    if (nameInput) nameInput.value = '';
+    if (idHidden)  idHidden.value  = '';
+
+    // Clear staged values as well
+    stagedPay.account_holder = '';
+    stagedPay.bank_name      = '';
+    stagedPay.sort_code      = '';
+    stagedPay.account_number = '';
+    stagedPay.umbrella_name  = '';
+    stagedPay.umbrella_id    = '';
+
+    if (LOG) console.log('[PAYTAB] clearBankAndUmbrella');
+  }
+
   function fillFromCandidate() {
     const d = window.modalCtx?.data || {};
     if (accHolder) accHolder.value = d.account_holder || '';
-    if (bankName)  bankName.value  = d.bank_name || '';
+    if (bankName)  bankName.value  = d.bank_name      || '';
     if (sortCode)  sortCode.value  = normaliseSort(d.sort_code || '');
     if (accNum)    accNum.value    = d.account_number || '';
+
+    stageFromDom();
     if (LOG) console.log('[PAYTAB] fillFromCandidate', {
       account_holder: accHolder?.value,
       bank_name:      bankName?.value,
@@ -14160,7 +14197,7 @@ async function mountCandidatePayTab(){
       const json = await res.json().catch(() => null);
       const row = json && (json.umbrella || unwrapSingle(json));
       return row || null;
-    } catch (_) {
+    } catch {
       return null;
     }
   }
@@ -14171,16 +14208,32 @@ async function mountCandidatePayTab(){
       if (window.__LAST_UMB_PREFILL_ID__ && String(window.__LAST_UMB_PREFILL_ID__) === String(umb.id || '')) return;
       window.__LAST_UMB_PREFILL_ID__ = umb.id || null;
     } catch {}
+
     const bank = umb.bank_name || umb.bank || umb.bankName || '';
     const sc   = umb.sort_code || umb.bank_sort_code || umb.sortCode || '';
     const an   = umb.account_number || umb.bank_account_number || umb.accountNumber || '';
     const ah   = umb.name || umb.account_holder || umb.bank_account_name || umb.accountHolder || '';
+
     if (bankName)  bankName.value  = bank;
     if (sortCode)  sortCode.value  = normaliseSort(sc);
     if (accNum)    accNum.value    = an;
     if (accHolder) accHolder.value = ah;
     if (nameInput && !nameInput.value) nameInput.placeholder = umb.name || nameInput.placeholder || '';
-    if (LOG) console.log('[PAYTAB] prefillUmbrellaBankFields', { umb_id: umb.id, name: umb.name, bank, sc, an, ah });
+
+    // Stage full umbrella pay details
+    stagedPay.account_holder = accHolder ? accHolder.value : '';
+    stagedPay.bank_name      = bankName  ? bankName.value  : '';
+    stagedPay.sort_code      = sortCode  ? sortCode.value  : '';
+    stagedPay.account_number = accNum    ? accNum.value    : '';
+    stagedPay.umbrella_name  = nameInput ? (nameInput.value || umb.name || '') : (umb.name || '');
+    stagedPay.umbrella_id    = umb.id || '';
+
+    if (LOG) console.log('[PAYTAB] prefillUmbrellaBankFields', {
+      umb_id: umb.id,
+      name:   umb.name,
+      bank, sc, an, ah,
+      stagedPay
+    });
   }
 
   async function fetchAndPrefill(id) {
@@ -14199,10 +14252,12 @@ async function mountCandidatePayTab(){
     try {
       const res = await authFetch(API('/api/umbrellas'));
       if (res && res.ok) {
-        const j = await res.json().catch(()=>[]);
+        const j = await res.json().catch(() => []);
         umbrellas = unwrapList(j);
       }
-    } catch (_) { umbrellas = []; }
+    } catch {
+      umbrellas = [];
+    }
     if (LOG) console.log('[PAYTAB] umbrellas list loaded', umbrellas.length);
 
     if (listEl) {
@@ -14217,58 +14272,44 @@ async function mountCandidatePayTab(){
     const val = (nameInput && nameInput.value) ? nameInput.value.trim() : '';
     if (!val) {
       if (idHidden) idHidden.value = '';
+      // Clear staged umbrella bits, but do NOT touch bank details here
+      stagedPay.umbrella_name = '';
+      stagedPay.umbrella_id   = '';
       if (LOG) console.log('[PAYTAB] selection cleared');
       return;
     }
+
     const allOpts = Array.from((listEl && listEl.options) ? listEl.options : []);
     const hitOpt = allOpts.find(o => o.value === val);
     const id = hitOpt && hitOpt.getAttribute('data-id');
+
     if (id) {
       if (LOG) console.log('[PAYTAB] selected umbrella', { label: val, id });
       if (idHidden) idHidden.value = id;
+      stagedPay.umbrella_name = val;
+      stagedPay.umbrella_id   = id;
       fetchAndPrefill(id);
     } else {
+      // User typed a label that does not match any option – keep text, but clear id & bank
       if (LOG) console.warn('[PAYTAB] no exact label match; clearing id & bank fields');
       if (idHidden) idHidden.value = '';
+      stagedPay.umbrella_name = val;
+      stagedPay.umbrella_id   = '';
       if (bankName) bankName.value = '';
       if (sortCode) sortCode.value = '';
       if (accNum)   accNum.value   = '';
+      stagedPay.bank_name      = '';
+      stagedPay.sort_code      = '';
+      stagedPay.account_number = '';
     }
   }
 
-   // ----- Staged state from formState.pay -----------------------------------
-
-  // Ensure modalCtx + formState exist (no optional-chaining on assignment!)
-  window.modalCtx = window.modalCtx || {};
-  if (!window.modalCtx.formState) {
-    window.modalCtx.formState = {
-      __forId: (window.modalCtx.data?.id ?? window.modalCtx.openToken ?? null),
-      main: {},
-      pay:  {}
-    };
-  }
-
-  const fs = window.modalCtx.formState;
-  fs.pay = fs.pay || {};
-  const stagedPay = fs.pay;
-
+  // ----- Staged state flags -------------------------------------------------
 
   const hasStagedPay =
     ['account_holder','bank_name','sort_code','account_number','umbrella_id','umbrella_name']
-      .some(k => Object.prototype.hasOwnProperty.call(stagedPay, k));
+      .some(k => Object.prototype.hasOwnProperty.call(stagedPay, k) && stagedPay[k] !== undefined);
 
-  const applyStagedPay = () => {
-    if (LOG) console.log('[PAYTAB] applyStagedPay', stagedPay);
-    if (accHolder && 'account_holder' in stagedPay) accHolder.value = stagedPay.account_holder || '';
-    if (bankName  && 'bank_name'      in stagedPay) bankName.value  = stagedPay.bank_name      || '';
-    if (sortCode  && 'sort_code'      in stagedPay) sortCode.value  = normaliseSort(stagedPay.sort_code || '');
-    if (accNum    && 'account_number' in stagedPay) accNum.value    = stagedPay.account_number || '';
-
-    if (nameInput && 'umbrella_name' in stagedPay) nameInput.value  = stagedPay.umbrella_name || '';
-    if (idHidden  && 'umbrella_id'   in stagedPay) idHidden.value   = stagedPay.umbrella_id   || '';
-  };
-
-  // Flags about relation to persisted method (for “original” behaviour)
   const isFlipFromPersisted =
     !!(persistedMethod && payMethod && payMethod !== persistedMethod);
 
@@ -14321,7 +14362,7 @@ async function mountCandidatePayTab(){
     clearBankAndUmbrella();
 
     // Always ensure umbrella dropdown is populated
-    loadUmbrellaList().catch(()=>{});
+    loadUmbrellaList().catch(() => {});
 
     if (hasStagedPay) {
       // User has already typed/selected something this session – trust staged values.
@@ -14345,7 +14386,9 @@ async function mountCandidatePayTab(){
       nameInput.oninput  = syncUmbrellaSelection;
       nameInput.onchange = syncUmbrellaSelection;
     }
-    if (idHidden) idHidden.addEventListener('change', () => fetchAndPrefill(idHidden.value));
+    if (idHidden) {
+      idHidden.onchange = () => fetchAndPrefill(idHidden.value);
+    }
 
   } else {
     // PAYE branch
