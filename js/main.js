@@ -4661,7 +4661,6 @@ function openContract(row) {
   ];
   if (LOGC) console.log('[CONTRACTS] tabs', tabDefs.map(t => t.key));
 
- const hasId = !!window.modalCtx.data?.id;
   const isSuccessorCreate = isCreate && ( !!window.modalCtx?.__cloneIntent || !!preToken );
   if (LOGC) console.log('[CONTRACTS] showModal opts preview', {
     hasId, isCreate, isSuccessorCreate,
