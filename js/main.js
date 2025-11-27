@@ -11592,7 +11592,7 @@ async function openCandidate(row) {
         const idForUpdate = window.modalCtx?.data?.id || full?.id || null;
 
         // ── PAYE → UMBRELLA special handling ────────────────────────────────
-        if (originalMethod === 'PAYE' && newMethod === 'UMBRELLA') {
+               if (originalMethod === 'PAYE' && newMethod === 'UMBRELLA') {
           const effectiveUmbrellaId = payload.umbrella_id || full.umbrella_id || null;
 
           if (!effectiveUmbrellaId) {
@@ -11646,22 +11646,14 @@ async function openCandidate(row) {
             }
           }
 
-          // Reset dropdown back to original so UI reflects real state during the flow
-          try {
-            const pmSel = document.querySelector('select[name="pay_method"]');
-            if (pmSel && originalMethod) {
-              pmSel.value = originalMethod;
-            }
-          } catch (err) {
-            W('failed to reset pay_method select to originalMethod', err);
-          }
-
+          // Leave the dropdown showing the new method (UMBRELLA) while the flip runs
           try {
             const confirmed = await openCandidatePayMethodChangeModal(full, {
               originalMethod,
               newMethod,
               candidate_id: full.id
             });
+
 
             if (!confirmed) {
               L('[onSave] pay-method change cancelled or failed, keeping candidate modal open');
