@@ -14073,11 +14073,19 @@ async function mountCandidatePayTab() {
   const fr  = (window.__modalStack || [])[ (window.__modalStack || []).length - 1 ] || null;
   const mode = fr ? fr.mode : 'view';
   const isEdit = (mode === 'edit' || mode === 'create');
-  if (LOG) console.log('[PAYTAB] ENTRY', { mode, isEdit });
 
   const persistedMethod = (window.modalCtx?.data?.pay_method || '').toUpperCase();
   const payMethod       = (window.modalCtx?.payMethodState || persistedMethod || 'PAYE').toUpperCase();
   const currentUmbId    = window.modalCtx?.data?.umbrella_id || '';
+
+  if (LOG) {
+    console.log('[PAYTAB] ENTRY', {
+      mode,
+      isEdit,
+      persistedMethod,
+      payMethod
+    });
+  }
 
   const umbRow    = document.getElementById('umbRow');
   const nameInput = document.getElementById('umbrella_name');
