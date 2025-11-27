@@ -19326,13 +19326,15 @@ function renderTop() {
         if (!fr.noParentGate) {
           try { window.dispatchEvent(new CustomEvent('modal-dirty')); } catch {}
         }
-        sanitizeModalGeometry(); window.__modalStack.pop();
-        if (window.__modalStack.length>0) {
-          const p=window.__modalStack[window.__modalStack.length-1];
 
-          // ▶ for most children, resume the original parent mode; for the rate-presets picker,
-          //    keep whatever mode the parent is currently in (typically 'edit' after Apply).
-          const resumeMode =
+        sanitizeModalGeometry();
+        window.__modalStack.pop();
+
+        if (window.__modalStack.length > 0) {
+          const p = window.__modalStack[window.__modalStack.length - 1];
+
+          // Default behaviour: resume original parent mode (except preset picker).
+          let resumeMode =
             (typeof fr !== 'undefined' &&
              fr &&
              fr._parentModeOnOpen &&
@@ -19340,19 +19342,43 @@ function renderTop() {
               ? fr._parentModeOnOpen
               : p.mode; // keep whatever the parent already was
 
+          // 🔹 SPECIAL CASE: candidate pay-method change
+          // If the child we just saved is the pay-method-change modal and the parent
+          // is the Candidate modal, treat this as a successful parent save:
+          //   - clear dirty/snapshot
+          //   - force the parent into 'view' mode so Save disappears.
+          if (fr.kind === 'candidate-pay-method-change' && p.entity === 'candidates') {
+            resumeMode   = 'view';
+            p.isDirty    = false;
+            p._snapshot  = null;
+
+            try {
+              // If child ever returns a saved payload in future, merge it into modalCtx
+              if (saved && window.modalCtx && window.modalCtx.entity === 'candidates') {
+                window.modalCtx.data = {
+                  ...(window.modalCtx.data || {}),
+                  ...(saved || {})
+                };
+              }
+            } catch {}
+          }
+
           try { setFrameMode(p, resumeMode); } catch {}
           p._updateButtons && p._updateButtons();
           renderTop();
 
-
           // ▶ nudge calendar/action bar re-wire if needed
           try { window.dispatchEvent(new Event('contracts-main-rendered')); } catch {}
-          try { p.onReturn && p.onReturn(); }catch{}
+          try { p.onReturn && p.onReturn(); } catch {}
         } else {
+          // no parent frames left – nothing to do (modal teardown is handled elsewhere)
         }
+
         L('saveForFrame EXIT (global child)');
       }
     } else {
+      // parent branch...
+
 
       try {
         const savedContract = (saved && (saved.contract || saved)) || null;
