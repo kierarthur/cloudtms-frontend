@@ -15899,6 +15899,10 @@ function focusContractsAfterBulkChange(info) {
     st.page = 1; // ensure we start from the first page for this candidate
   }
 
+  // 🔹 When jumping here from a bulk change, prefer "All" so the contract
+  // is visible regardless of previous status tab.
+  st.filters.status = 'all';
+
   // Jump section to Contracts; renderAll() will be invoked either:
   // - by caller explicitly, or
   // - after the last modal is closed (see close logic that checks __pendingFocus).
@@ -23151,21 +23155,36 @@ function renderSummary(rows){
   topControls.appendChild(sizeSel);
 
   // ── NEW: Contracts quick Status menu ────────────────────────────────────────
+   // ── Contracts quick Status menu (All / Active / Unassigned / Completed) ────
   let statusSel = null;
   if (currentSection === 'contracts') {
     const stFilters = window.__listState[currentSection].filters || {};
-    if (!('status' in stFilters)) stFilters.status = 'active'; // default
+
+    // Default to "active" if no status has been chosen yet
+    if (!('status' in stFilters)) stFilters.status = 'active';
     window.__listState[currentSection].filters = stFilters;
 
-    const statusLabel = document.createElement('span'); statusLabel.className = 'mini'; statusLabel.textContent = 'Status:';
+    const statusLabel = document.createElement('span');
+    statusLabel.className = 'mini';
+    statusLabel.textContent = 'Status:';
+
     statusSel = document.createElement('select');
-    [['active','Active'], ['unassigned','Unassigned'], ['completed','Completed']].forEach(([v,l])=>{
-      const o = document.createElement('option'); o.value=v; o.textContent=l;
-      if ((stFilters.status||'').toLowerCase() === v) o.selected = true;
-      statusSel.appendChild(o);
-    });
+
+    // v = value sent as ?status=..., l = label shown in dropdown
+    [['all','All'], ['active','Active'], ['unassigned','Unassigned'], ['completed','Completed']]
+      .forEach(([v, l]) => {
+        const o = document.createElement('option');
+        o.value = v;
+        o.textContent = l;
+        if ((stFilters.status || '').toLowerCase() === v) o.selected = true;
+        statusSel.appendChild(o);
+      });
+
     statusSel.addEventListener('change', async () => {
-      window.__listState[currentSection].filters = { ...(window.__listState[currentSection].filters||{}), status: statusSel.value };
+      const val = statusSel.value; // 'all'|'active'|'unassigned'|'completed'
+      const curFilters = { ...(window.__listState[currentSection].filters || {}) };
+      curFilters.status = val;
+      window.__listState[currentSection].filters = curFilters;
       window.__listState[currentSection].page = 1;
       const data = await loadSection();
       renderSummary(data);
@@ -23174,6 +23193,7 @@ function renderSummary(rows){
     topControls.appendChild(statusLabel);
     topControls.appendChild(statusSel);
   }
+
 
   // Columns button
   const btnCols = document.createElement('button');
