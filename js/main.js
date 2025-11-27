@@ -14067,9 +14067,10 @@ function renderClientTab(key, row = {}){
 // ========== PAY TAB (just extra logs; logic unchanged) ==========
 // This function now RESOLVES ONLY AFTER prefill (when umbrella_id is known).
 // In your modal's setTab/renderTab: `return mountCandidatePayTab();` and await it.
+
 async function mountCandidatePayTab(){
   const LOG = !!window.__LOG_PAYTAB;
-  const fr = (window.__modalStack || [])[ (window.__modalStack || []).length - 1 ] || null;
+  const fr  = (window.__modalStack || [])[ (window.__modalStack || []).length - 1 ] || null;
   const mode = fr ? fr.mode : 'view';
   const isEdit = (mode === 'edit' || mode === 'create');
   if (LOG) console.log('[PAYTAB] ENTRY', { mode, isEdit });
@@ -14088,10 +14089,13 @@ async function mountCandidatePayTab(){
   const sortCode  = document.querySelector('#tab-pay input[name="sort_code"]');
   const accNum    = document.querySelector('#tab-pay input[name="account_number"]');
 
+  // ----- Shared helpers ----------------------------------------------------
+
   function setBankDisabled(disabled) {
     [accHolder, bankName, sortCode, accNum].forEach(el => { if (el) el.disabled = !!disabled; });
     const umbInput = document.getElementById('umbrella_name');
-    if (umbInput) umbInput.disabled = !isEdit ? true : false; // still allow typing when editing
+    // Umbrella name should still be editable when we’re editing the candidate
+    if (umbInput) umbInput.disabled = !isEdit;
     try { window.__BANK_FIELDS_DISABLED__ = !!disabled; } catch {}
     if (LOG) console.log('[PAYTAB] setBankDisabled', disabled);
   }
@@ -14143,8 +14147,8 @@ async function mountCandidatePayTab(){
     if (accNum)    accNum.value    = d.account_number || '';
     if (LOG) console.log('[PAYTAB] fillFromCandidate', {
       account_holder: accHolder?.value,
-      bank_name: bankName?.value,
-      sort_code: sortCode?.value,
+      bank_name:      bankName?.value,
+      sort_code:      sortCode?.value,
       account_number: accNum?.value
     });
   }
@@ -14156,7 +14160,9 @@ async function mountCandidatePayTab(){
       const json = await res.json().catch(() => null);
       const row = json && (json.umbrella || unwrapSingle(json));
       return row || null;
-    } catch (_) { return null; }
+    } catch (_) {
+      return null;
+    }
   }
 
   function prefillUmbrellaBankFields(umb) {
@@ -14226,21 +14232,46 @@ async function mountCandidatePayTab(){
       if (idHidden) idHidden.value = '';
       if (bankName) bankName.value = '';
       if (sortCode) sortCode.value = '';
-      if (accNum)   accNum.value = '';
+      if (accNum)   accNum.value   = '';
     }
   }
 
-  // Core rule: compare payMethod against the pay_method we loaded from DB
+  // ----- Staged state from formState.pay -----------------------------------
+
+  const fs = (window.modalCtx?.formState ||= {
+    __forId: (window.modalCtx?.data?.id ?? window.modalCtx?.openToken ?? null),
+    main:{},
+    pay:{}
+  });
+  fs.pay ||= {};
+  const stagedPay = fs.pay;
+
+  const hasStagedPay =
+    ['account_holder','bank_name','sort_code','account_number','umbrella_id','umbrella_name']
+      .some(k => Object.prototype.hasOwnProperty.call(stagedPay, k));
+
+  const applyStagedPay = () => {
+    if (LOG) console.log('[PAYTAB] applyStagedPay', stagedPay);
+    if (accHolder && 'account_holder' in stagedPay) accHolder.value = stagedPay.account_holder || '';
+    if (bankName  && 'bank_name'      in stagedPay) bankName.value  = stagedPay.bank_name      || '';
+    if (sortCode  && 'sort_code'      in stagedPay) sortCode.value  = normaliseSort(stagedPay.sort_code || '');
+    if (accNum    && 'account_number' in stagedPay) accNum.value    = stagedPay.account_number || '';
+
+    if (nameInput && 'umbrella_name' in stagedPay) nameInput.value  = stagedPay.umbrella_name || '';
+    if (idHidden  && 'umbrella_id'   in stagedPay) idHidden.value   = stagedPay.umbrella_id   || '';
+  };
+
+  // Flags about relation to persisted method (for “original” behaviour)
   const isFlipFromPersisted =
     !!(persistedMethod && payMethod && payMethod !== persistedMethod);
 
-  const flipFromPAYEtoUMBRELLA   = isFlipFromPersisted && persistedMethod === 'PAYE'     && payMethod === 'UMBRELLA';
-  const flipFromUMBRELLAtoPAYE   = isFlipFromPersisted && persistedMethod === 'UMBRELLA' && payMethod === 'PAYE';
-  const atOriginalPAYE           = !isFlipFromPersisted && persistedMethod === 'PAYE'     && payMethod === 'PAYE';
-  const atOriginalUMBRELLA       = !isFlipFromPersisted && persistedMethod === 'UMBRELLA' && payMethod === 'UMBRELLA';
+  const flipFromPAYEtoUMBRELLA =  isFlipFromPersisted && persistedMethod === 'PAYE'     && payMethod === 'UMBRELLA';
+  const flipFromUMBRELLAtoPAYE =  isFlipFromPersisted && persistedMethod === 'UMBRELLA' && payMethod === 'PAYE';
+  const atOriginalPAYE         = !isFlipFromPersisted && persistedMethod === 'PAYE'     && payMethod === 'PAYE';
+  const atOriginalUMBRELLA     = !isFlipFromPersisted && persistedMethod === 'UMBRELLA' && payMethod === 'UMBRELLA';
 
   // ─────────────────────────────────────────────────────────────
-  // Pay-method change handler (for flips while pay tab is open)
+  // Pay-method change handler (fires while this tab is open)
   // ─────────────────────────────────────────────────────────────
   const onPmChanged = () => {
     const pm = (window.modalCtx?.payMethodState || window.modalCtx?.data?.pay_method || 'PAYE').toUpperCase();
@@ -14250,17 +14281,17 @@ async function mountCandidatePayTab(){
     if (pm === 'UMBRELLA') {
       if (umbRow) umbRow.style.display = '';
       setBankDisabled(true);
-
-      // If this change leads back to the DB method (original UMBRELLA) repopulate.
-      if (persistedMethod === 'UMBRELLA') {
-        if (currentUmbId) fetchAndPrefill(currentUmbId);
+      // When flipping back to original UMBRELLA method and there is no staged pay,
+      // repopulate from the DB umbrella_id.
+      if (!hasStagedPay && persistedMethod === 'UMBRELLA' && currentUmbId) {
+        fetchAndPrefill(currentUmbId);
       }
     } else {
       if (umbRow) umbRow.style.display = 'none';
       setBankDisabled(!isEdit);
-
-      // If this change leads back to the DB method (original PAYE) repopulate.
-      if (persistedMethod === 'PAYE') {
+      // When flipping back to original PAYE method and there is no staged pay,
+      // repopulate from the candidate row.
+      if (!hasStagedPay && persistedMethod === 'PAYE') {
         fillFromCandidate();
       }
     }
@@ -14275,29 +14306,33 @@ async function mountCandidatePayTab(){
   } catch {}
 
   // ─────────────────────────────────────────────────────────────
-  // Initial render (first time the Pay tab mounts this session)
+  // Initial render (when Pay tab is entered)
   // ─────────────────────────────────────────────────────────────
   if (payMethod === 'UMBRELLA') {
     if (umbRow) umbRow.style.display = '';
     setBankDisabled(true);
     clearBankAndUmbrella();
 
-    // Always load umbrella list so dropdown is available
+    // Always ensure umbrella dropdown is populated
     loadUmbrellaList().catch(()=>{});
 
-    if (flipFromPAYEtoUMBRELLA) {
-      // PAYE → UMBRELLA: new umbrella for this candidate → stay blank
-      if (LOG) console.log('[PAYTAB] initial PAYE→UMBRELLA flip: keep blank');
-    } else if (atOriginalUMBRELLA) {
-      // Already UMBRELLA in DB (or we've flipped back) → restore original umbrella details
-      if (LOG) console.log('[PAYTAB] initial/original UMBRELLA: restore from candidate');
-      if (currentUmbId) await fetchAndPrefill(currentUmbId);
+    if (hasStagedPay) {
+      // User has already typed/selected something this session – trust staged values.
+      applyStagedPay();
+      if (LOG) console.log('[PAYTAB] initial UMBRELLA using staged pay');
+    } else if (atOriginalUMBRELLA && currentUmbId) {
+      // No staged values and DB method is already UMBRELLA → prefill from umbrella_id
+      if (LOG) console.log('[PAYTAB] initial/original UMBRELLA: prefill from candidate');
+      await fetchAndPrefill(currentUmbId);
+    } else if (flipFromPAYEtoUMBRELLA) {
+      // First flip from PAYE → UMBRELLA: keep a clean slate
+      if (LOG) console.log('[PAYTAB] PAYE→UMBRELLA flip: start blank');
     } else {
-      // Unknown origin: safest is to stay blank but still have dropdown
-      if (LOG) console.log('[PAYTAB] UMBRELLA with unknown origin: blank, dropdown only');
+      // Unknown origin – safest is just blank with dropdown populated
+      if (LOG) console.log('[PAYTAB] UMBRELLA/unknown origin: blank');
     }
 
-    // Wiring for user selection
+    // Wiring for user selection & future changes
     if (nameInput) {
       nameInput.disabled = !isEdit;
       nameInput.oninput  = syncUmbrellaSelection;
@@ -14306,26 +14341,29 @@ async function mountCandidatePayTab(){
     if (idHidden) idHidden.addEventListener('change', () => fetchAndPrefill(idHidden.value));
 
   } else {
-    // PAYE
+    // PAYE branch
     if (umbRow) umbRow.style.display = 'none';
     setBankDisabled(!isEdit);
     clearBankAndUmbrella();
     if (nameInput && idHidden) { nameInput.value = ''; idHidden.value = ''; }
 
-    if (flipFromUMBRELLAtoPAYE) {
-      // UMBRELLA → PAYE: new PAYE details must be entered → stay blank
-      if (LOG) console.log('[PAYTAB] UMBRELLA→PAYE flip: keep blank');
+    if (hasStagedPay) {
+      // Use staged PAYE bank details on tab hop
+      applyStagedPay();
+      if (LOG) console.log('[PAYTAB] initial PAYE using staged pay');
     } else if (atOriginalPAYE) {
-      // Already PAYE in DB (or we've flipped back) → restore original PAYE bank details
-      if (LOG) console.log('[PAYTAB] initial/original PAYE: restore from candidate');
+      // Original PAYE method from DB → show stored bank details
+      if (LOG) console.log('[PAYTAB] initial/original PAYE: fill from candidate');
       fillFromCandidate();
+    } else if (flipFromUMBRELLAtoPAYE) {
+      // First UMBRELLA → PAYE flip: require user to enter new PAYE details
+      if (LOG) console.log('[PAYTAB] UMBRELLA→PAYE flip: start blank');
     } else {
-      // Unknown origin → safest blank
-      if (LOG) console.log('[PAYTAB] PAYE with unknown origin: blank');
+      if (LOG) console.log('[PAYTAB] PAYE/unknown origin: blank');
     }
   }
 
-  // IMPORTANT: The function is async; it resolves AFTER any umbrella prefill (when known).
+  // IMPORTANT: async function – resolves AFTER any umbrella prefill.
 }
 
 
@@ -18386,10 +18424,14 @@ persistCurrentTabState() {
     }
   }
 
-  if (this.currentTabKey === 'pay' && byId('tab-pay')) {
+   if (this.currentTabKey === 'pay' && byId('tab-pay')) {
     const c = collectForm('#tab-pay');
-    fs.pay  = { ...(fs.pay||{}), ...stripEmpty(c) };
+    // For the Pay tab we must preserve blanks so cleared bank/umbrella fields
+    // don’t spring back from the DB when hopping between tabs.
+    // Do NOT strip empty values here.
+    fs.pay = { ...(fs.pay || {}), ...c };
   }
+
 
   // NEW: capture Care Packages tab (candidates/rates) into main form state
   if (this.entity === 'candidates' && this.currentTabKey === 'rates' && byId('tab-rates')) {
@@ -18604,7 +18646,9 @@ if (this.entity==='candidates' && k==='main') {
     pmSel.addEventListener('change', () => {
       window.modalCtx.payMethodState = pmSel.value;
 
-      // Mark pay details as cleared for this modal session
+      // On any PAYE↔UMBRELLA flip, drop staged Pay-tab values so the
+      // new method starts from a clean slate. (Original values come
+      // from the DB; new method values are re-staged as user types.)
       try {
         window.modalCtx = window.modalCtx || {};
         const fs = (window.modalCtx.formState ||= {
@@ -18613,7 +18657,7 @@ if (this.entity==='candidates' && k==='main') {
           pay:{}
         });
         fs.main ||= {};
-        fs.main.__pay_details_cleared = true;
+        fs.pay  = {}; // clear staged pay details on flip
       } catch {}
 
       try { window.dispatchEvent(new CustomEvent('pay-method-changed')); }
@@ -18622,6 +18666,7 @@ if (this.entity==='candidates' && k==='main') {
     window.modalCtx.payMethodState = pmSel.value;
     L('setTab(candidates/main): pay method wired', { preferred });
   }
+
 
   // ✅ Reuse existing candidateMainModel if present, so child modals don't lose changes
   try {
