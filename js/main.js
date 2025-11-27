@@ -11353,7 +11353,6 @@ function renderCandidateTab(key, row = {}) {
     </div>
   `);
 }
-
 async function openCandidate(row) {
   // ===== Logging helpers (toggle with window.__LOG_MODAL = true/false) =====
   const LOG = (typeof window.__LOG_MODAL === 'boolean') ? window.__LOG_MODAL : false;
@@ -11409,7 +11408,14 @@ async function openCandidate(row) {
 
   // 2) Build modal context from hydrated data
   const fullKeys = Object.keys(full || {});
-  L('seeding window.modalCtx', { entity: 'candidates', fullId: full?.id, fullKeys });
+  const dbPayMethod = full && full.pay_method ? String(full.pay_method).toUpperCase() : null;
+
+  L('seeding window.modalCtx', {
+    entity: 'candidates',
+    fullId: full?.id,
+    fullKeys,
+    dbPayMethod
+  });
 
   window.modalCtx = {
     entity: 'candidates',
@@ -11418,7 +11424,9 @@ async function openCandidate(row) {
     rolesState: Array.isArray(full?.roles) ? normaliseRolesForSave(full.roles) : [],
     overrides: { existing: [], stagedNew: [], stagedEdits: {}, stagedDeletes: new Set() },
     clientSettingsState: null,
-    openToken: ((full?.id) || 'new') + ':' + Date.now()
+    openToken: ((full?.id) || 'new') + ':' + Date.now(),
+    // 🔹 Freeze the DB pay method for the lifetime of this modal
+    dbPayMethod
   };
 
   L('window.modalCtx seeded', {
@@ -11426,7 +11434,8 @@ async function openCandidate(row) {
     dataId: window.modalCtx.data?.id,
     dataKeys: Object.keys(window.modalCtx.data||{}),
     formStateForId: window.modalCtx.formState?.__forId,
-    openToken: window.modalCtx.openToken
+    openToken: window.modalCtx.openToken,
+    dbPayMethod: window.modalCtx.dbPayMethod
   });
 
   // 3) Render modal
@@ -11607,8 +11616,10 @@ async function openCandidate(row) {
             if (newMethod === 'PAYE') {
               window.modalCtx.data.umbrella_id = null;
             }
+            // 🔹 Also update dbPayMethod so future Pay-tab opens in this modal use the new persisted method
+            window.modalCtx.dbPayMethod = newMethod;
           } catch (e) {
-            W('failed to sync modalCtx.data after pay-method change', e);
+            W('failed to sync modalCtx.data/dbPayMethod after pay-method change', e);
           }
 
           L('[onSave] pay-method change confirmed; closing candidate modal');
@@ -11842,7 +11853,6 @@ async function openCandidate(row) {
       try {
         const cm = window.modalCtx?.candidateMainModel;
         if (cm && Array.isArray(cm.job_titles)) {
-          // Use the already normalised cm.job_titles with is_primary preserved
           jobTitlesForCtx = cm.job_titles.map((t) => ({
             job_title_id: t.job_title_id,
             is_primary: !!t.is_primary
@@ -11867,10 +11877,17 @@ async function openCandidate(row) {
       window.modalCtx.formState  = { __ForId: candidateId, main: {}, pay: {} };
       window.modalCtx.rolesState = mergedRoles;
 
+      // 🔹 Keep dbPayMethod in sync with the latest persisted value (if any)
+      try {
+        const persistedPm = window.modalCtx.data?.pay_method || null;
+        window.modalCtx.dbPayMethod = persistedPm ? String(persistedPm).toUpperCase() : null;
+      } catch {}
+
       L('[onSave] final window.modalCtx', {
         dataId: window.modalCtx.data?.id,
         rolesCount: Array.isArray(window.modalCtx.data?.roles) ? window.modalCtx.data.roles.length : 0,
-        formStateForId: window.modalCtx.formState?.__ForId
+        formStateForId: window.modalCtx.formState?.__ForId,
+        dbPayMethod: window.modalCtx.dbPayMethod
       });
 
       if (isNew) window.__pendingFocus = { section: 'candidates', ids: [candidateId], primaryIds:[candidateId] };
@@ -11911,6 +11928,7 @@ async function openCandidate(row) {
     L('skip companion loads (no full.id)');
   }
 }
+
 
 
 // ====================== mountCandidatePayTab (FIXED) ======================
@@ -14074,14 +14092,23 @@ async function mountCandidatePayTab() {
   const mode = fr ? fr.mode : 'view';
   const isEdit = (mode === 'edit' || mode === 'create');
 
-  const persistedMethod = (window.modalCtx?.data?.pay_method || '').toUpperCase();
-  const payMethod       = (window.modalCtx?.payMethodState || persistedMethod || 'PAYE').toUpperCase();
-  const currentUmbId    = window.modalCtx?.data?.umbrella_id || '';
+  // 🔹 Use the *frozen* DB pay method when available
+  let persistedMethod = '';
+  if (window.modalCtx && window.modalCtx.dbPayMethod) {
+    persistedMethod = String(window.modalCtx.dbPayMethod || '').toUpperCase();
+  } else if (window.modalCtx && window.modalCtx.data && window.modalCtx.data.pay_method) {
+    persistedMethod = String(window.modalCtx.data.pay_method || '').toUpperCase();
+  }
+
+  const payMethod    = (window.modalCtx?.payMethodState || persistedMethod || 'PAYE').toUpperCase();
+  const currentUmbId = window.modalCtx?.data?.umbrella_id || '';
 
   if (LOG) {
     console.log('[PAYTAB] ENTRY', {
       mode,
       isEdit,
+      dbPayMethod: window.modalCtx?.dbPayMethod || null,
+      dataPayMethod: window.modalCtx?.data?.pay_method || null,
       persistedMethod,
       payMethod
     });
@@ -14295,6 +14322,7 @@ async function mountCandidatePayTab() {
       if (idHidden) idHidden.value = '';
       stagedPay.umbrella_name = '';
       stagedPay.umbrella_id   = '';
+      stagedPay.__forMethod   = payMethod || null;
       if (LOG) console.log('[PAYTAB] selection cleared (umbrella_name empty)', {
         stagedPay: { ...stagedPay }
       });
@@ -14352,6 +14380,8 @@ async function mountCandidatePayTab() {
 
   if (LOG) {
     console.log('[PAYTAB] FLAGS', {
+      dbPayMethod: window.modalCtx?.dbPayMethod || null,
+      dataPayMethod: window.modalCtx?.data?.pay_method || null,
       persistedMethod,
       payMethod,
       isFlipFromPersisted,
@@ -14510,6 +14540,7 @@ async function mountCandidatePayTab() {
 
   // IMPORTANT: async function – resolves AFTER any umbrella prefill.
 }
+
 
 // ============================================================================
 // CALENDAR – SHARED HELPERS & STATE
