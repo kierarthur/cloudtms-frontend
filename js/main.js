@@ -19296,10 +19296,9 @@ function setFrameMode(frameObj, mode) {
     });
   } catch {}
   updateCalendarInteractivity(mode==='edit' || mode==='create');
-  if (repaint) {
-    Promise.resolve(frameObj.setTab(frameObj.currentTabKey)).then(() => {
-      try { frameObj.onReturn && frameObj.onReturn(); } catch {}
-    });
+ if (repaint) {
+  // Just repaint the current tab; do NOT call onReturn here
+  Promise.resolve(frameObj.setTab(frameObj.currentTabKey)).catch(() => {});
   }
 }
 
