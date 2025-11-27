@@ -14153,6 +14153,8 @@ async function mountCandidatePayTab() {
     if (LOG) console.log('[PAYTAB] setBankDisabled', { disabled, isEdit });
   }
 
+  // ----- Staging helpers ---------------------------------------------------
+
   function stageFromDom() {
     stagedPay.account_holder = accHolder ? accHolder.value : '';
     stagedPay.bank_name      = bankName  ? bankName.value  : '';
@@ -14160,6 +14162,7 @@ async function mountCandidatePayTab() {
     stagedPay.account_number = accNum    ? accNum.value    : '';
     stagedPay.umbrella_name  = nameInput ? nameInput.value : '';
     stagedPay.umbrella_id    = idHidden  ? idHidden.value  : '';
+    stagedPay.__forMethod    = payMethod || null;   // tag staging with the *current* method
     if (LOG) console.log('[PAYTAB] stageFromDom', { ...stagedPay });
   }
 
@@ -14177,6 +14180,7 @@ async function mountCandidatePayTab() {
     stagedPay.account_number = '';
     stagedPay.umbrella_name  = '';
     stagedPay.umbrella_id    = '';
+    stagedPay.__forMethod    = null;
 
     if (LOG) console.log('[PAYTAB] clearBankAndUmbrella (DOM + staged)');
   }
@@ -14228,13 +14232,13 @@ async function mountCandidatePayTab() {
       nameInput.placeholder = umb.name || nameInput.placeholder || '';
     }
 
-    // Stage from DOM + umbrella meta
     stagedPay.account_holder = accHolder ? accHolder.value : '';
     stagedPay.bank_name      = bankName  ? bankName.value  : '';
     stagedPay.sort_code      = sortCode  ? sortCode.value  : '';
     stagedPay.account_number = accNum    ? accNum.value    : '';
     stagedPay.umbrella_name  = nameInput ? (nameInput.value || umb.name || '') : (umb.name || '');
     stagedPay.umbrella_id    = umb.id || '';
+    stagedPay.__forMethod    = payMethod || 'UMBRELLA';
 
     if (LOG) console.log('[PAYTAB] prefillUmbrellaBankFields', {
       umb_id: umb.id,
@@ -14298,6 +14302,7 @@ async function mountCandidatePayTab() {
       if (idHidden) idHidden.value = id;
       stagedPay.umbrella_name = val;
       stagedPay.umbrella_id   = id;
+      stagedPay.__forMethod   = payMethod || 'UMBRELLA';
       fetchAndPrefill(id);
     } else {
       // User typed a label that does not match any option – keep text, but clear id & bank
@@ -14311,14 +14316,22 @@ async function mountCandidatePayTab() {
       stagedPay.bank_name      = '';
       stagedPay.sort_code      = '';
       stagedPay.account_number = '';
+      stagedPay.__forMethod    = payMethod || null;
     }
   }
 
   // ----- Staged state helpers / flags --------------------------------------
 
-  function hasNonEmptyStagedPay() {
+  function hasAnyStagedPay() {
     return ['account_holder','bank_name','sort_code','account_number','umbrella_id','umbrella_name']
       .some(k => Object.prototype.hasOwnProperty.call(stagedPay, k) && stagedPay[k] !== '' && stagedPay[k] != null);
+  }
+
+  function hasStagedForCurrentMethod() {
+    if (!hasAnyStagedPay()) return false;
+    const m = stagedPay.__forMethod || null;
+    if (!m) return true;           // legacy/untagged – treat as for current method
+    return m === payMethod;
   }
 
   const isFlipFromPersisted =
@@ -14338,7 +14351,9 @@ async function mountCandidatePayTab() {
       flipFromUMBRELLAtoPAYE,
       atOriginalPAYE,
       atOriginalUMBRELLA,
-      hasNonEmptyStagedPay: hasNonEmptyStagedPay()
+      hasAnyStagedPay:      hasAnyStagedPay(),
+      hasStagedForCurrent:  hasStagedForCurrentMethod(),
+      stagedForMethod:      stagedPay.__forMethod || null
     });
   }
 
@@ -14347,8 +14362,13 @@ async function mountCandidatePayTab() {
   // ─────────────────────────────────────────────────────────────
   const onPmChanged = () => {
     const pm = (window.modalCtx?.payMethodState || window.modalCtx?.data?.pay_method || 'PAYE').toUpperCase();
-    const nowHasStaged = hasNonEmptyStagedPay();
-    if (LOG) console.log('[PAYTAB] pay-method-changed', { pm, persistedMethod, nowHasStaged });
+    const nowHasStaged = hasStagedForCurrentMethod();
+    if (LOG) console.log('[PAYTAB] pay-method-changed', {
+      pm,
+      persistedMethod,
+      nowHasStaged,
+      stagedForMethod: stagedPay.__forMethod || null
+    });
 
     // On a real flip, we DO want a clean slate for the new method
     clearBankAndUmbrella();
@@ -14388,7 +14408,7 @@ async function mountCandidatePayTab() {
   // Initial render (when Pay tab is entered)
   // ─────────────────────────────────────────────────────────────
 
-  const hadStagedAtEntry = hasNonEmptyStagedPay();
+  const hadStagedAtEntry = hasStagedForCurrentMethod();
 
   if (payMethod === 'UMBRELLA') {
     if (umbRow) umbRow.style.display = '';
@@ -14398,8 +14418,10 @@ async function mountCandidatePayTab() {
     loadUmbrellaList().catch(() => {});
 
     if (hadStagedAtEntry) {
-      // We already have staged values – do NOT clear them; just repaint DOM
-      if (LOG) console.log('[PAYTAB] initial UMBRELLA using staged pay', { stagedPay: { ...stagedPay } });
+      // We already have staged values *for UMBRELLA* – do NOT clear them; just repaint DOM
+      if (LOG) console.log('[PAYTAB] initial UMBRELLA using staged pay', {
+        stagedPay: { ...stagedPay }
+      });
       if (accHolder) accHolder.value = stagedPay.account_holder || '';
       if (bankName)  bankName.value  = stagedPay.bank_name      || '';
       if (sortCode)  sortCode.value  = normaliseSort(stagedPay.sort_code || '');
@@ -14407,7 +14429,7 @@ async function mountCandidatePayTab() {
       if (nameInput) nameInput.value = stagedPay.umbrella_name  || '';
       if (idHidden)  idHidden.value  = stagedPay.umbrella_id    || '';
     } else {
-      // No staged state → we can safely clear and rebuild from DB/blank
+      // No UMBRELLA-staged state → we can safely clear and rebuild from DB/blank
       clearBankAndUmbrella();
 
       if (atOriginalUMBRELLA && currentUmbId) {
@@ -14436,8 +14458,10 @@ async function mountCandidatePayTab() {
     setBankDisabled(!isEdit);
 
     if (hadStagedAtEntry) {
-      // Keep staged PAYE edits across tab hops
-      if (LOG) console.log('[PAYTAB] initial PAYE using staged pay', { stagedPay: { ...stagedPay } });
+      // Only re-use staged pay when it belongs to PAYE
+      if (LOG) console.log('[PAYTAB] initial PAYE using staged pay', {
+        stagedPay: { ...stagedPay }
+      });
       if (accHolder) accHolder.value = stagedPay.account_holder || '';
       if (bankName)  bankName.value  = stagedPay.bank_name      || '';
       if (sortCode)  sortCode.value  = normaliseSort(stagedPay.sort_code || '');
@@ -14445,7 +14469,7 @@ async function mountCandidatePayTab() {
       if (nameInput) nameInput.value = stagedPay.umbrella_name  || '';
       if (idHidden)  idHidden.value  = stagedPay.umbrella_id    || '';
     } else {
-      // No staged PAYE → we can clear and rebuild from DB/blank
+      // No PAYE-staged state → clear and rebuild from DB/blank
       clearBankAndUmbrella();
       if (nameInput && idHidden) { nameInput.value = ''; idHidden.value = ''; }
 
@@ -14453,6 +14477,8 @@ async function mountCandidatePayTab() {
         if (LOG) console.log('[PAYTAB] initial/original PAYE: fill from candidate');
         fillFromCandidate();
       } else if (flipFromUMBRELLAtoPAYE) {
+        // This is the case you care about:
+        // UMBRELLA → PAYE flip → always start BLANK, never reuse umbrella staging.
         if (LOG) console.log('[PAYTAB] UMBRELLA→PAYE flip: start blank');
       } else {
         if (LOG) console.log('[PAYTAB] PAYE/unknown origin: blank');
@@ -14476,7 +14502,6 @@ async function mountCandidatePayTab() {
 
   // IMPORTANT: async function – resolves AFTER any umbrella prefill.
 }
-
 
 // ============================================================================
 // CALENDAR – SHARED HELPERS & STATE
