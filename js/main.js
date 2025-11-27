@@ -19571,7 +19571,7 @@ function renderTop() {
           parentEditable, wantApply, disabled: btnSave.disabled, kind: top.kind
         });
       }
-    } else {
+      } else {
 
       btnEdit.style.display = (top.mode==='view' && top.hasId) ? '' : 'none';
 
@@ -19595,37 +19595,7 @@ function renderTop() {
 
         if (canClick) {
           relatedBtn.onclick = async (ev) => {
-            ev.preventDefault();
-            ev.stopPropagation();
-
-            // Guard against stale handlers if the top frame changed
-            const fr = currentFrame && currentFrame();
-            if (!fr || fr !== top) return;
-
-            const ctx    = window.modalCtx || {};
-            const entity = relatedEntity;
-            const id     = ctx && ctx.data && ctx.data.id;
-
-            if (!entity || !id) return;
-            if (typeof fetchRelatedCounts !== 'function' || typeof showRelatedMenu !== 'function') {
-              return;
-            }
-
-            let counts = {};
-            try {
-              counts = await fetchRelatedCounts(entity, id);
-            } catch (e) {
-              console.error('[RELATED] fetchRelatedCounts failed', e);
-            }
-
-            try {
-              const rect = relatedBtn.getBoundingClientRect();
-              const x = rect.left + rect.width / 2;
-              const y = rect.top + rect.height;
-              showRelatedMenu(x, y, counts || {}, entity, id);
-            } catch (e) {
-              console.error('[RELATED] showRelatedMenu failed', e);
-            }
+            // …
           };
         } else {
           relatedBtn.onclick = null;
@@ -19650,37 +19620,8 @@ function renderTop() {
             gateOK = (typeof computeContractSaveEligibility === 'function') ? !!computeContractSaveEligibility() : true;
             elig   = (typeof window !== 'undefined') ? (window.__contractEligibility || null) : null;
 
-            if (elig && Array.isArray(elig.reasons)) {
-              const tsReason = elig.reasons.find(r => r && r.code === 'TS_BOUNDARY_VIOLATION');
-              if (tsReason) {
-                gateOK = false;
-                if (typeof showModalHint === 'function') showModalHint(tsReason.message || 'Dates exclude existing timesheets.', 'warn');
-              }
-            }
+            // … TS boundary / missing candidate hints …
 
-            // If Save would otherwise be allowed, surface a *polite* warning when candidate is missing.
-            if ((top.mode==='edit' || top.mode==='create') && elig && elig.ok) {
-              const missingCand = (elig.reasons || []).some(r => r && r.code === 'MISSING_CANDIDATE');
-              if (missingCand && typeof showModalHint === 'function') {
-                showModalHint('No candidate selected — this contract will be saved as <Unassigned>.', 'warn');
-              }
-            }
-
-            if (!gateOK && elig && elig.pendingTimeFormat && (!elig.reasons || elig.reasons.length === 0)) {
-              gateOK = true;
-            }
-
-            if (typeof showModalHint === 'function' && (top.mode==='edit' || top.mode==='create')) {
-              if (elig && Array.isArray(elig.reasons) && elig.reasons.length && !elig.ok) {
-                const hasTs = elig.reasons.some(r => r && r.code === 'TS_BOUNDARY_VIOLATION');
-                if (!hasTs) {
-                  const msg = elig.reasons.map(r => r && r.message).filter(Boolean).join(' • ');
-                  if (msg) showModalHint(msg, 'warn');
-                }
-              } else if (elig && elig.pendingTimeFormat && elig.tip) {
-                showModalHint(elig.tip, 'ok');
-              }
-            }
           } catch { gateOK = true; }
         }
 
@@ -19689,7 +19630,49 @@ function renderTop() {
           : (top._saving);
       }
 
+      // 🔹 Top-level Edit Contract → wire global Delete button
+      if (!isChild && top.entity === 'contracts') {
+        const canDelete = !!(window.modalCtx?.data && window.modalCtx.data.can_delete);
+        const showDelete = (top.mode === 'edit' && top.hasId && canDelete);
+
+        if (showDelete) {
+          btnDel.style.display = '';
+          btnDel.disabled = !!top._saving;
+          btnDel.onclick = async () => {
+            const id = window.modalCtx?.data?.id;
+            if (!id) return;
+
+            const ok = window.confirm('Do you want to permanently delete this contract?');
+            if (!ok) return;
+
+            try {
+              if (typeof deleteContract === 'function') {
+                if (LOG) console.log('[MODAL][CONTRACTS] delete via btnDelete', { id });
+                await deleteContract(id);
+              } else {
+                alert('Delete contract action is not available.');
+                return;
+              }
+              try { discardAllModalsAndState(); } catch {}
+              try { await renderAll(); } catch {}
+            } catch (e) {
+              alert(e?.message || 'Delete failed');
+            }
+          };
+        } else {
+          btnDel.style.display = 'none';
+          btnDel.disabled = true;
+          btnDel.onclick = null;
+        }
+      } else if (!isChild) {
+        // Non-contract top-level: keep global Delete hidden
+        btnDel.style.display = 'none';
+        btnDel.disabled = true;
+        btnDel.onclick = null;
+      }
+
     }
+
 
     setCloseLabel();
     L('_updateButtons snapshot (global)', {
