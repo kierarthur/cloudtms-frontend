@@ -11465,15 +11465,27 @@ async function openCandidate(row) {
       const main      = document.querySelector('#tab-main') ? collectForm('#tab-main') : {};
       const pay       = document.querySelector('#tab-pay')  ? collectForm('#tab-pay')  : {};
       const roles     = normaliseRolesForSave(window.modalCtx.rolesState || window.modalCtx.data?.roles || []);
-      const payload   = { ...stateMain, ...statePay, ...main, ...pay, roles };
+    const payload   = { ...stateMain, ...statePay, ...main, ...pay, roles };
 
-      L('[onSave] collected', {
-        same, stateMainKeys: Object.keys(stateMain||{}), statePayKeys: Object.keys(statePay||{}),
-        mainKeys: Object.keys(main||{}), payKeys: Object.keys(pay||{}), rolesCount: roles?.length || 0
-      });
+// Strip internal-only fields before logging / sending to backend
+for (const k of Object.keys(payload)) {
+  // Anything starting with "__" is a front-end staging key (e.g. __forMethod)
+  if (k.startsWith('__')) {
+    delete payload[k];
+  }
+}
 
-      delete payload.umbrella_name;
-      delete payload.tms_ref;
+L('[onSave] collected', {
+  same,
+  stateMainKeys: Object.keys(stateMain||{}),
+  statePayKeys:  Object.keys(statePay||{}),
+  mainKeys:      Object.keys(main||{}),
+  payKeys:       Object.keys(pay||{}),
+  rolesCount:    roles?.length || 0
+});
+
+delete payload.umbrella_name;
+delete payload.tms_ref;
 
       if (!payload.first_name && full?.first_name) payload.first_name = full.first_name;
       if (!payload.last_name  && full?.last_name)  payload.last_name  = full.last_name;
