@@ -14075,9 +14075,12 @@ async function mountCandidatePayTab(){
   if (LOG) console.log('[PAYTAB] ENTRY', { mode, isEdit });
 
   const persistedMethod = (window.modalCtx?.data?.pay_method || '').toUpperCase();
-  const payMethod      = (window.modalCtx?.payMethodState || persistedMethod || 'PAYE').toUpperCase();
-  const currentUmbId   = window.modalCtx?.data?.umbrella_id || '';
-  const isStagedFlip   = !!(payMethod && persistedMethod && payMethod !== persistedMethod);
+  const payMethod       = (window.modalCtx?.payMethodState || persistedMethod || 'PAYE').toUpperCase();
+  const currentUmbId    = window.modalCtx?.data?.umbrella_id || '';
+
+  // Look at staged form state to see if pay details have been “cleared by flip”
+  const fsMain    = (window.modalCtx?.formState && window.modalCtx.formState.main) || {};
+  const payCleared = !!fsMain.__pay_details_cleared;
 
   const umbRow    = document.getElementById('umbRow');
   const nameInput = document.getElementById('umbrella_name');
@@ -14091,7 +14094,8 @@ async function mountCandidatePayTab(){
 
   function setBankDisabled(disabled) {
     [accHolder, bankName, sortCode, accNum].forEach(el => { if (el) el.disabled = !!disabled; });
-    const umbInput = document.getElementById('umbrella_name'); if (umbInput) umbInput.disabled = false;
+    const umbInput = document.getElementById('umbrella_name');
+    if (umbInput) umbInput.disabled = false;
     try { window.__BANK_FIELDS_DISABLED__ = !!disabled; } catch {}
     if (LOG) console.log('[PAYTAB] setBankDisabled', disabled);
   }
@@ -14113,6 +14117,7 @@ async function mountCandidatePayTab(){
     if (data && Array.isArray(data.data))  return data.data;
     return [];
   };
+
   function unwrapSingle(json) {
     if (!json) return null;
     if (Array.isArray(json)) return json[0] || null;
@@ -14126,6 +14131,7 @@ async function mountCandidatePayTab(){
     }
     return json;
   }
+
   const normaliseSort = (v) => {
     if (!v) return '';
     const digits = String(v).replace(/\D+/g, '').slice(0,6);
@@ -14204,8 +14210,8 @@ async function mountCandidatePayTab(){
       if (LOG) console.warn('[PAYTAB] no exact label match; clearing id & bank fields');
       if (idHidden) idHidden.value = '';
       if (bankName) bankName.value = '';
-      if (sortCode) sortCode.value = '';
-      if (accNum)   accNum.value = '';
+      if (sortCode)  sortCode.value  = '';
+      if (accNum)    accNum.value    = '';
     }
   }
 
@@ -14215,14 +14221,27 @@ async function mountCandidatePayTab(){
   const onPmChanged = () => {
     const pm = (window.modalCtx?.payMethodState || window.modalCtx?.data?.pay_method || 'PAYE').toUpperCase();
     if (LOG) console.log('[PAYTAB] pay-method-changed', pm);
+
+    // Mark this modal session as having cleared pay details
+    try {
+      window.modalCtx = window.modalCtx || {};
+      const fs = (window.modalCtx.formState ||= {
+        __forId: (window.modalCtx.data?.id ?? window.modalCtx.openToken ?? null),
+        main:{},
+        pay:{}
+      });
+      fs.main ||= {};
+      fs.main.__pay_details_cleared = true;
+    } catch {}
+
     clearBankAndUmbrella();
 
     if (pm === 'UMBRELLA') {
       if (umbRow) umbRow.style.display = '';
-      setBankDisabled(true);  // bank fields disabled until umbrella chosen
+      setBankDisabled(true);   // bank fields disabled until umbrella chosen
     } else {
       if (umbRow) umbRow.style.display = 'none';
-      setBankDisabled(!isEdit);  // enable bank fields for PAYE
+      setBankDisabled(!isEdit); // enable bank fields for PAYE
     }
   };
 
@@ -14236,78 +14255,72 @@ async function mountCandidatePayTab(){
   } catch {}
 
   // ─────────────────────────────────────────────────────────────
-  // Initial render (before any pay-method change while tab is open)
+  // Initial render
   // ─────────────────────────────────────────────────────────────
   if (payMethod === 'UMBRELLA') {
     if (umbRow) umbRow.style.display = '';
     setBankDisabled(true);
 
-    // If this is a staged flip (PAYE → UMBRELLA), start from a blank slate.
-    if (isStagedFlip) {
+    // If this session has been marked as "cleared", always start blank
+    if (payCleared) {
       clearBankAndUmbrella();
-    }
+    } else {
+      const typedAtMount = (nameInput && nameInput.value) ? nameInput.value.trim() : '';
 
-    // Remember any typed label at mount (for later list-matching when NO id)
-    const typedAtMount = (nameInput && nameInput.value) ? nameInput.value.trim() : '';
-
-    // 1) If we have a persisted umbrella_id and this is NOT a staged flip,
-    //    prefill from the umbrella now.
-    if (currentUmbId && !isStagedFlip) {
-      if (LOG) console.log('[PAYTAB] deterministic prefill by umbrella_id', currentUmbId);
-      await fetchAndPrefill(currentUmbId);
-    }
-
-    // 2) Load umbrella list in parallel for the datalist & label→id case.
-    (async () => {
-      let umbrellas = [];
-      try {
-        const res = await authFetch(API('/api/umbrellas'));
-        if (res && res.ok) {
-          const j = await res.json().catch(()=>[]);
-          umbrellas = unwrapList(j);
-        }
-      } catch (_) { umbrellas = []; }
-      if (LOG) console.log('[PAYTAB] umbrellas list loaded', umbrellas.length);
-
-      if (listEl) {
-        listEl.innerHTML = (umbrellas || []).map(u => {
-          const label = u.name || u.remittance_email || u.id;
-          return `<option data-id="${u.id}" value="${label}"></option>`;
-        }).join('');
+      // Only prefill from umbrella_id if we have not cleared in this modal
+      if (currentUmbId) {
+        if (LOG) console.log('[PAYTAB] deterministic prefill by umbrella_id', currentUmbId);
+        await fetchAndPrefill(currentUmbId);
       }
 
-      // If we DIDN'T have an id at mount but user already had a typed label,
-      // try to map it now (only for non-flip initial load).
-      if (!currentUmbId && !isStagedFlip && typedAtMount && umbrellas.length) {
-        const hit = umbrellas.find(u => (u.name || '').trim() === typedAtMount);
-        if (hit) {
-          if (LOG) console.log('[PAYTAB] post-list typed match', { typedAtMount, id: hit.id });
-          if (idHidden) idHidden.value = hit.id;
-          fetchAndPrefill(hit.id);
-        }
-      }
-    })().catch(()=>{});
+      (async () => {
+        let umbrellas = [];
+        try {
+          const res = await authFetch(API('/api/umbrellas'));
+          if (res && res.ok) {
+            const j = await res.json().catch(()=>[]);
+            umbrellas = unwrapList(j);
+          }
+        } catch (_) { umbrellas = []; }
+        if (LOG) console.log('[PAYTAB] umbrellas list loaded', umbrellas.length);
 
-    // Wiring for user selection & future changes
+        if (listEl) {
+          listEl.innerHTML = (umbrellas || []).map(u => {
+            const label = u.name || u.remittance_email || u.id;
+            return `<option data-id="${u.id}" value="${label}"></option>`;
+          }).join('');
+        }
+
+        if (!currentUmbId && typedAtMount && umbrellas.length) {
+          const hit = umbrellas.find(u => (u.name || '').trim() === typedAtMount);
+          if (hit) {
+            if (LOG) console.log('[PAYTAB] post-list typed match', { typedAtMount, id: hit.id });
+            if (idHidden) idHidden.value = hit.id;
+            fetchAndPrefill(hit.id);
+          }
+        }
+      })().catch(()=>{});
+    }
+
     if (nameInput) {
       nameInput.disabled = !isEdit;
-      nameInput.oninput = syncUmbrellaSelection;
+      nameInput.oninput  = syncUmbrellaSelection;
       nameInput.onchange = syncUmbrellaSelection;
     }
     if (idHidden) idHidden.addEventListener('change', () => fetchAndPrefill(idHidden.value));
 
   } else {
-    // PAYE initial: hide umbrella block; decide whether to prefill or blank
+    // PAYE
     if (umbRow) umbRow.style.display = 'none';
     setBankDisabled(!isEdit);
     if (nameInput && idHidden) { nameInput.value = ''; idHidden.value = ''; }
 
-    if (!isStagedFlip) {
-      // No staged flip: show existing PAYE bank details from candidate record
-      fillFromCandidate();
-    } else {
-      // Staged flip (e.g. UMBRELLA → PAYE): start with completely blank bank details
+    if (payCleared) {
+      // We’ve already cleared in this session – keep it blank
       clearBankAndUmbrella();
+    } else {
+      // Fresh PAYE view – show candidate bank details
+      fillFromCandidate();
     }
   }
 
@@ -18590,6 +18603,19 @@ if (this.entity==='candidates' && k==='main') {
     pmSel.value = preferred;
     pmSel.addEventListener('change', () => {
       window.modalCtx.payMethodState = pmSel.value;
+
+      // Mark pay details as cleared for this modal session
+      try {
+        window.modalCtx = window.modalCtx || {};
+        const fs = (window.modalCtx.formState ||= {
+          __forId: (window.modalCtx.data?.id ?? window.modalCtx.openToken ?? null),
+          main:{},
+          pay:{}
+        });
+        fs.main ||= {};
+        fs.main.__pay_details_cleared = true;
+      } catch {}
+
       try { window.dispatchEvent(new CustomEvent('pay-method-changed')); }
       catch { window.dispatchEvent(new Event('pay-method-changed')); }
     });
