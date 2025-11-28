@@ -13898,7 +13898,7 @@ async function openClient(row) {
     'Client',
     [
       {key:'main',     label:'Main'},
-      {key:'rates',    label:'Rates'},
+      {key:'rates',    label:'Care Package Rates'},
       {key:'settings', label:'Client settings'},
       {key:'hospitals',label:'Hospitals & wards'}
     ],
@@ -20449,7 +20449,6 @@ function renderClientHospitalsTable() {
 
 
 // =================== HOSPITALS TABLE (UPDATED: staged delete & edit) ===================
-
 async function renderClientSettingsUI(settingsObj){
   const div = byId('clientSettings'); if (!div) return;
 
@@ -20466,6 +20465,7 @@ async function renderClientSettingsUI(settingsObj){
     return s;
   };
 
+  // Normalised state with sensible defaults
   const s = {
     timezone_id : initial.timezone_id ?? 'Europe/London',
     day_start   : _toHHMM(initial.day_start)   || '06:00',
@@ -20476,12 +20476,26 @@ async function renderClientSettingsUI(settingsObj){
     sat_end     : _toHHMM(initial.sat_end)     || '00:00',
     sun_start   : _toHHMM(initial.sun_start)   || '00:00',
     sun_end     : _toHHMM(initial.sun_end)     || '00:00',
-    week_ending_weekday: Number.isInteger(Number(initial.week_ending_weekday)) ? String(Math.min(6, Math.max(0, Number(initial.week_ending_weekday)))) : '0',
+
+    week_ending_weekday:
+      Number.isInteger(Number(initial.week_ending_weekday))
+        ? String(Math.min(6, Math.max(0, Number(initial.week_ending_weekday))))
+        : '0',
+
+    // Existing toggles
     pay_reference_required: !!initial.pay_reference_required,
     invoice_reference_required: !!initial.invoice_reference_required,
-    default_submission_mode: String(initial.default_submission_mode || 'ELECTRONIC').toUpperCase()
+    default_submission_mode: String(initial.default_submission_mode || 'ELECTRONIC').toUpperCase(),
+
+    // NEW toggles – default to false if absent
+    is_nhsp: !!initial.is_nhsp,
+    self_bill_no_invoices_sent: !!initial.self_bill_no_invoices_sent,
+    daily_calc_of_invoices: !!initial.daily_calc_of_invoices,
+    no_timesheet_required: !!initial.no_timesheet_required,
+    group_nightsat_sunbh: !!initial.group_nightsat_sunbh
   };
 
+  // Persist back into modalCtx so openClient() sees the normalised values
   ctx.clientSettingsState = { ...initial, ...s };
 
   const input = (name,label,val,type='text') =>
@@ -20493,20 +20507,42 @@ async function renderClientSettingsUI(settingsObj){
     return `<div class="row"><label>Week Ending Day</label><div class="controls"><select name="week_ending_weekday">${opts}</select></div></div>`;
   };
 
+  // Small helper to render a tight checkbox + label
+  const yesNoToggle = (name, text, checked) => `
+    <label class="inline chk-tight"
+           style="display:inline-flex;align-items:center;gap:6px;margin-right:18px;white-space:nowrap;">
+      <input type="checkbox" name="${name}" ${checked ? 'checked' : ''}/>
+      <span>${text}</span>
+    </label>
+  `;
+
   const gatesAndSubmission = () => {
     return `
       <div class="row">
-        <label class="inline">
-          <input type="checkbox" name="pay_reference_required" ${s.pay_reference_required?'checked':''}/>
-          <span>Reference No. required to PAY</span>
-        </label>
+        <label>References & flags</label>
+        <div class="controls" style="display:flex;flex-direction:column;gap:4px;">
+
+          <!-- Row 1: existing ref flags + NHSP -->
+          <div class="toggle-row" style="display:flex;flex-wrap:wrap;gap:10px;">
+            ${yesNoToggle('pay_reference_required', 'Ref No. required to PAY', s.pay_reference_required)}
+            ${yesNoToggle('invoice_reference_required', 'Ref No. required to INVOICE', s.invoice_reference_required)}
+            ${yesNoToggle('is_nhsp', 'NHSP client', s.is_nhsp)}
+          </div>
+
+          <!-- Row 2: three of the new flags -->
+          <div class="toggle-row" style="display:flex;flex-wrap:wrap;gap:10px;">
+            ${yesNoToggle('self_bill_no_invoices_sent', 'Self-bill (no invoices sent)', s.self_bill_no_invoices_sent)}
+            ${yesNoToggle('daily_calc_of_invoices', 'Daily invoice calculation', s.daily_calc_of_invoices)}
+            ${yesNoToggle('no_timesheet_required', 'No timesheet required', s.no_timesheet_required)}
+          </div>
+
+          <!-- Row 3: last new flag (kept separate so the text isn’t crushed) -->
+          <div class="toggle-row" style="display:flex;flex-wrap:wrap;gap:10px;">
+            ${yesNoToggle('group_nightsat_sunbh', 'Group Night/Sat/Sun/BH', s.group_nightsat_sunbh)}
+          </div>
+        </div>
       </div>
-      <div class="row">
-        <label class="inline">
-          <input type="checkbox" name="invoice_reference_required" ${s.invoice_reference_required?'checked':''}/>
-          <span>Reference No. required to INVOICE</span>
-        </label>
-      </div>
+
       <div class="row">
         <label>Default Submission</label>
         <div class="controls">
@@ -20544,10 +20580,13 @@ async function renderClientSettingsUI(settingsObj){
 
   const root = document.getElementById('clientSettingsForm');
   const hhmm = /^([01]\d|2[0-3]):[0-5]\d$/;
-
   const timeKeys = ['day_start','day_end','night_start','night_end','sat_start','sat_end','sun_start','sun_end'];
 
+  // helper for checkbox values
+  const asBool = (v) => (v === 'on' || v === true || v === 'true');
+
   let lastValid = { ...s };
+
   if (root.__wired) {
     root.removeEventListener('input', root.__syncSoft, true);
     root.removeEventListener('change', root.__syncValidate, true);
@@ -20557,21 +20596,37 @@ async function renderClientSettingsUI(settingsObj){
     });
   }
 
+  const _currentFrame = window.__getModalFrame || (() => null);
+
   const syncSoft = ()=>{
     const frame = _currentFrame();
     if (!frame || frame.mode !== 'edit') return;
+
     const vals = collectForm('#clientSettingsForm', false);
     const next = { ...ctx.clientSettingsState, ...vals };
+
+    // Soft normalise times
     timeKeys.forEach(k=>{
       const v = String(vals[k] ?? '').trim();
       if (v && !hhmm.test(v)) next[k] = lastValid[k];
     });
-    const w = Number(next.week_ending_weekday);
-    next.week_ending_weekday = Number.isInteger(w) ? String(Math.min(6, Math.max(0, w))) : '0';
 
-    next.pay_reference_required = !!(vals.pay_reference_required === 'on' || vals.pay_reference_required === true || vals.pay_reference_required === 'true');
-    next.invoice_reference_required = !!(vals.invoice_reference_required === 'on' || vals.invoice_reference_required === true || vals.invoice_reference_required === 'true');
-    next.default_submission_mode = String((vals.default_submission_mode || next.default_submission_mode || 'ELECTRONIC')).toUpperCase();
+    // Soft normalise week ending
+    const w = Number(vals.week_ending_weekday);
+    next.week_ending_weekday = Number.isInteger(w) ? String(Math.min(6, Math.max(0, w))) : lastValid.week_ending_weekday;
+
+    // Soft normalise toggles → booleans
+    next.pay_reference_required        = asBool(vals.pay_reference_required);
+    next.invoice_reference_required    = asBool(vals.invoice_reference_required);
+    next.is_nhsp                       = asBool(vals.is_nhsp);
+    next.self_bill_no_invoices_sent    = asBool(vals.self_bill_no_invoices_sent);
+    next.daily_calc_of_invoices        = asBool(vals.daily_calc_of_invoices);
+    next.no_timesheet_required         = asBool(vals.no_timesheet_required);
+    next.group_nightsat_sunbh          = asBool(vals.group_nightsat_sunbh);
+
+    // Default submission mode
+    const mode = String(vals.default_submission_mode || next.default_submission_mode || 'ELECTRONIC').toUpperCase();
+    next.default_submission_mode = (mode === 'ELECTRONIC' || mode === 'MANUAL') ? mode : 'ELECTRONIC';
 
     ctx.clientSettingsState = next;
   };
@@ -20584,6 +20639,7 @@ async function renderClientSettingsUI(settingsObj){
     const vals = collectForm('#clientSettingsForm', false);
     let hadError = false;
 
+    // Strict validate times
     timeKeys.forEach(k=>{
       const v = String(vals[k] ?? '').trim();
       if (v && !hhmm.test(v)) {
@@ -20593,21 +20649,38 @@ async function renderClientSettingsUI(settingsObj){
       }
     });
 
+    // Strict validate week ending
     let w = Number(vals.week_ending_weekday);
-    if (!Number.isInteger(w) || w<0 || w>6) { hadError = true; w = Number(lastValid.week_ending_weekday) || 0; }
+    if (!Number.isInteger(w) || w<0 || w>6) {
+      hadError = true;
+      w = Number(lastValid.week_ending_weekday) || 0;
+    }
 
-    const payReq = !!(vals.pay_reference_required === 'on' || vals.pay_reference_required === true || vals.pay_reference_required === 'true');
-    const invReq = !!(vals.invoice_reference_required === 'on' || vals.invoice_reference_required === true || vals.invoice_reference_required === 'true');
-    const mode   = String(vals.default_submission_mode || '').toUpperCase();
-    const modeOk = (mode === 'ELECTRONIC' || mode === 'MANUAL') ? mode : 'ELECTRONIC';
+    // Booleans
+    const payReq   = asBool(vals.pay_reference_required);
+    const invReq   = asBool(vals.invoice_reference_required);
+    const isNhsp   = asBool(vals.is_nhsp);
+    const sbNoInv  = asBool(vals.self_bill_no_invoices_sent);
+    const dailyInv = asBool(vals.daily_calc_of_invoices);
+    const noTsReq  = asBool(vals.no_timesheet_required);
+    const groupNsb = asBool(vals.group_nightsat_sunbh);
+
+    // Default submission mode
+    const modeRaw = String(vals.default_submission_mode || '').toUpperCase();
+    const modeOk  = (modeRaw === 'ELECTRONIC' || modeRaw === 'MANUAL') ? modeRaw : 'ELECTRONIC';
 
     ctx.clientSettingsState = {
       ...ctx.clientSettingsState,
       ...vals,
       week_ending_weekday: String(w),
-      pay_reference_required: payReq,
-      invoice_reference_required: invReq,
-      default_submission_mode: modeOk
+      pay_reference_required:        payReq,
+      invoice_reference_required:    invReq,
+      default_submission_mode:       modeOk,
+      is_nhsp:                       isNhsp,
+      self_bill_no_invoices_sent:    sbNoInv,
+      daily_calc_of_invoices:        dailyInv,
+      no_timesheet_required:         noTsReq,
+      group_nightsat_sunbh:          groupNsb
     };
     lastValid = { ...ctx.clientSettingsState };
 
