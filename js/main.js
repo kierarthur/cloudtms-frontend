@@ -20863,7 +20863,7 @@ async function renderClientSettingsUI(settingsObj){
     invoice_reference_required: !!initial.invoice_reference_required,
     default_submission_mode: String(initial.default_submission_mode || 'ELECTRONIC').toUpperCase(),
 
-    // Existing “extra” flags (default false)
+    // Existing “extra” flags – default to false if absent
     is_nhsp: !!initial.is_nhsp,
     self_bill_no_invoices_sent: !!initial.self_bill_no_invoices_sent,
     daily_calc_of_invoices: !!initial.daily_calc_of_invoices,
@@ -20871,15 +20871,11 @@ async function renderClientSettingsUI(settingsObj){
     group_nightsat_sunbh: !!initial.group_nightsat_sunbh,
 
     // NEW flags
-    requires_hr: !!initial.requires_hr, // default false
-    hr_attach_to_invoice:
-      (typeof initial.hr_attach_to_invoice === 'boolean')
-        ? initial.hr_attach_to_invoice
-        : true,                           // default true
-    ts_attach_to_invoice:
-      (typeof initial.ts_attach_to_invoice === 'boolean')
-        ? initial.ts_attach_to_invoice
-        : true                            // default true
+    // requires_hr: default false
+    requires_hr: !!initial.requires_hr,
+    // Attachments: default TRUE when unset (so old clients behave as “attach by default”)
+    hr_attach_to_invoice: (initial.hr_attach_to_invoice !== false),
+    ts_attach_to_invoice: (initial.ts_attach_to_invoice !== false),
   };
 
   // Persist back into modalCtx so openClient() sees the normalised values
@@ -20909,30 +20905,26 @@ async function renderClientSettingsUI(settingsObj){
         <label>References & flags</label>
         <div class="controls" style="display:flex;flex-direction:column;gap:4px;">
 
-          <!-- Row 1: core reference flags + NHSP -->
+          <!-- Row 1: existing ref flags + NHSP -->
           <div class="toggle-row" style="display:flex;flex-wrap:wrap;gap:10px;">
-            ${yesNoToggle('pay_reference_required',    'Ref No. required to PAY',      s.pay_reference_required)}
-            ${yesNoToggle('invoice_reference_required','Ref No. required to INVOICE',  s.invoice_reference_required)}
-            ${yesNoToggle('is_nhsp',                   'NHSP client',                  s.is_nhsp)}
+            ${yesNoToggle('pay_reference_required', 'Ref No. required to PAY', s.pay_reference_required)}
+            ${yesNoToggle('invoice_reference_required', 'Ref No. required to INVOICE', s.invoice_reference_required)}
+            ${yesNoToggle('is_nhsp', 'NHSP client', s.is_nhsp)}
           </div>
 
-          <!-- Row 2: billing / frequency flags -->
+          <!-- Row 2: core process flags -->
           <div class="toggle-row" style="display:flex;flex-wrap:wrap;gap:10px;">
-            ${yesNoToggle('self_bill_no_invoices_sent','Self-bill (no invoices sent)', s.self_bill_no_invoices_sent)}
-            ${yesNoToggle('daily_calc_of_invoices',    'Daily invoice calculation',    s.daily_calc_of_invoices)}
-            ${yesNoToggle('no_timesheet_required',     'No timesheet required',        s.no_timesheet_required)}
+            ${yesNoToggle('self_bill_no_invoices_sent', 'Self-bill (no invoices sent)', s.self_bill_no_invoices_sent)}
+            ${yesNoToggle('daily_calc_of_invoices', 'Daily invoice calculation', s.daily_calc_of_invoices)}
+            ${yesNoToggle('no_timesheet_required', 'No timesheet required', s.no_timesheet_required)}
+            ${yesNoToggle('group_nightsat_sunbh', 'Group Night/Sat/Sun/BH', s.group_nightsat_sunbh)}
           </div>
 
-          <!-- Row 3: grouping + HR requirement -->
+          <!-- Row 3: HR + attachments -->
           <div class="toggle-row" style="display:flex;flex-wrap:wrap;gap:10px;">
-            ${yesNoToggle('group_nightsat_sunbh',      'Group Night/Sat/Sun/BH',       s.group_nightsat_sunbh)}
-            ${yesNoToggle('requires_hr',               'Requires HealthRoster check',  s.requires_hr)}
-          </div>
-
-          <!-- Row 4: attachment rules -->
-          <div class="toggle-row" style="display:flex;flex-wrap:wrap;gap:10px;">
-            ${yesNoToggle('hr_attach_to_invoice',      'Attach HealthRoster to invoice', s.hr_attach_to_invoice)}
-            ${yesNoToggle('ts_attach_to_invoice',      'Attach timesheets to invoice',   s.ts_attach_to_invoice)}
+            ${yesNoToggle('requires_hr', 'Requires HealthRoster cross-check', s.requires_hr)}
+            ${yesNoToggle('hr_attach_to_invoice', 'Attach HealthRoster to invoice', s.hr_attach_to_invoice)}
+            ${yesNoToggle('ts_attach_to_invoice', 'Attach timesheets to invoice', s.ts_attach_to_invoice)}
           </div>
         </div>
       </div>
@@ -21007,9 +20999,7 @@ async function renderClientSettingsUI(settingsObj){
 
     // Soft normalise week ending
     const w = Number(vals.week_ending_weekday);
-    next.week_ending_weekday = Number.isInteger(w)
-      ? String(Math.min(6, Math.max(0, w)))
-      : lastValid.week_ending_weekday;
+    next.week_ending_weekday = Number.isInteger(w) ? String(Math.min(6, Math.max(0, w))) : lastValid.week_ending_weekday;
 
     // Soft normalise toggles → booleans
     next.pay_reference_required        = asBool(vals.pay_reference_required);
@@ -21056,16 +21046,16 @@ async function renderClientSettingsUI(settingsObj){
     }
 
     // Booleans
-    const payReq    = asBool(vals.pay_reference_required);
-    const invReq    = asBool(vals.invoice_reference_required);
-    const isNhsp    = asBool(vals.is_nhsp);
-    const sbNoInv   = asBool(vals.self_bill_no_invoices_sent);
-    const dailyInv  = asBool(vals.daily_calc_of_invoices);
-    const noTsReq   = asBool(vals.no_timesheet_required);
-    const groupNsb  = asBool(vals.group_nightsat_sunbh);
-    const reqHr     = asBool(vals.requires_hr);
-    const hrAttach  = asBool(vals.hr_attach_to_invoice);
-    const tsAttach  = asBool(vals.ts_attach_to_invoice);
+    const payReq   = asBool(vals.pay_reference_required);
+    const invReq   = asBool(vals.invoice_reference_required);
+    const isNhsp   = asBool(vals.is_nhsp);
+    const sbNoInv  = asBool(vals.self_bill_no_invoices_sent);
+    const dailyInv = asBool(vals.daily_calc_of_invoices);
+    const noTsReq  = asBool(vals.no_timesheet_required);
+    const groupNsb = asBool(vals.group_nightsat_sunbh);
+    const reqHr    = asBool(vals.requires_hr);
+    const attHr    = asBool(vals.hr_attach_to_invoice);
+    const attTs    = asBool(vals.ts_attach_to_invoice);
 
     // Default submission mode
     const modeRaw = String(vals.default_submission_mode || '').toUpperCase();
@@ -21084,8 +21074,8 @@ async function renderClientSettingsUI(settingsObj){
       no_timesheet_required:         noTsReq,
       group_nightsat_sunbh:          groupNsb,
       requires_hr:                   reqHr,
-      hr_attach_to_invoice:          hrAttach,
-      ts_attach_to_invoice:          tsAttach
+      hr_attach_to_invoice:          attHr,
+      ts_attach_to_invoice:          attTs
     };
     lastValid = { ...ctx.clientSettingsState };
 
@@ -21112,6 +21102,7 @@ async function renderClientSettingsUI(settingsObj){
   });
   root.__wired = true;
 }
+
 
 
 // ---- Umbrella modal
