@@ -4025,20 +4025,28 @@ async function getContract(contract_id) {
 
 async function upsertContract(payload, id /* optional */) {
   const LOGC = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : true;
-  const patch = { ...payload };
+ const patch = { ...payload };
 
-  // Ensure required window fields are present for PUT without re-clobber.
-  if (id && patch.__userChangedDates !== true) {
-    const snap = (window.modalCtx && window.modalCtx.data) || {};
-    if (!patch.start_date && snap.start_date) patch.start_date = snap.start_date;
-    if (!patch.end_date   && snap.end_date)   patch.end_date   = snap.end_date;
-  }
-  if ('__userChangedDates' in patch) delete patch.__userChangedDates;
+// Ensure required window fields are present for PUT without re-clobber.
+if (id && patch.__userChangedDates !== true) {
+  const snap = (window.modalCtx && window.modalCtx.data) || {};
+  if (!patch.start_date && snap.start_date) patch.start_date = snap.start_date;
+  if (!patch.end_date   && snap.end_date)   patch.end_date   = snap.end_date;
 
-  if ('bucket_labels_json' in patch) {
-    const norm = normaliseBucketLabelsInput(patch.bucket_labels_json);
-    patch.bucket_labels_json = (norm === false) ? null : norm;
+  // NEW: if caller didn't include additional_rates_json on an edit,
+  // keep whatever is already stored on the contract instead of wiping it.
+  if (!Object.prototype.hasOwnProperty.call(patch, 'additional_rates_json') &&
+      Object.prototype.hasOwnProperty.call(snap, 'additional_rates_json')) {
+    patch.additional_rates_json = snap.additional_rates_json;
   }
+}
+
+if ('__userChangedDates' in patch) delete patch.__userChangedDates;
+
+if ('bucket_labels_json' in patch) {
+  const norm = normaliseBucketLabelsInput(patch.bucket_labels_json);
+  patch.bucket_labels_json = (norm === false) ? null : norm;
+}
 
   const BUCKETS = [
     'paye_day','paye_night','paye_sat','paye_sun','paye_bh',
@@ -4653,13 +4661,13 @@ function openContract(row) {
     });
   }
 
-
-   const tabDefs = [
-    { key: 'main',     title: 'Main' },
-    { key: 'rates',    title: 'Rates' },
-    { key: 'calendar', title: 'Calendar' }
-  ];
-  if (LOGC) console.log('[CONTRACTS] tabs', tabDefs.map(t => t.key));
+const tabDefs = [
+  { key: 'main',     title: 'Main' },
+  { key: 'rates',    title: 'Rates' },
+  { key: 'extras',   title: 'Additional Rates' }, // NEW TAB
+  { key: 'calendar', title: 'Calendar' }
+];
+if (LOGC) console.log('[CONTRACTS] tabs', tabDefs.map(t => t.key));
 
   const isSuccessorCreate = isCreate && ( !!window.modalCtx?.__cloneIntent || !!preToken );
   if (LOGC) console.log('[CONTRACTS] showModal opts preview', {
@@ -4670,16 +4678,17 @@ function openContract(row) {
 
   showModal(
 
-    isCreate ? 'Create Contract' : 'Edit Contract',
-    tabDefs,
-    (key, row) => {
-      const ctx = { data: row };
-      if (key === 'main')     return renderContractMainTab(ctx);
-      if (key === 'rates')    return renderContractRatesTab(ctx);
-      if (key === 'calendar') return renderContractCalendarTab(ctx);
-      return `<div class="tabc">Unknown tab.</div>`;
-    },
-    async () => {
+  isCreate ? 'Create Contract' : 'Edit Contract',
+  tabDefs,
+  (key, row) => {
+    const ctx = { data: row };
+    if (key === 'main')     return renderContractMainTab(ctx);
+    if (key === 'rates')    return renderContractRatesTab(ctx);
+    if (key === 'extras')   return renderContractAdditionalRatesTab(ctx); // NEW
+    if (key === 'calendar') return renderContractCalendarTab(ctx);
+    return `<div class="tabc">Unknown tab.</div>`;
+  },
+  async () => {
       if (window.modalCtx?._saveInFlight) return false;
       window.modalCtx._saveInFlight = true;
       try {
@@ -4950,40 +4959,112 @@ const display_site = choose('display_site', base.display_site ?? '');
           }
         }
 
-        // NEW: mileage values — prefer Rates tab DOM, then FS staging, else null
-        const mcrDom = document.querySelector('#contractRatesTab input[name="mileage_charge_rate"]');
-        const mprDom = document.querySelector('#contractRatesTab input[name="mileage_pay_rate"]');
-        const mileage_charge_rate = (mcrDom && mcrDom.value !== '') ? (Number(mcrDom.value) || null) : numOrNull('mileage_charge_rate');
-        const mileage_pay_rate    = (mprDom && mprDom.value !== '') ? (Number(mprDom.value) || null) : numOrNull('mileage_pay_rate');
+      // NEW: mileage values — prefer Rates tab DOM, then FS staging, else null
+const mcrDom = document.querySelector('#contractRatesTab input[name="mileage_charge_rate"]');
+const mprDom = document.querySelector('#contractRatesTab input[name="mileage_pay_rate"]');
+const mileage_charge_rate = (mcrDom && mcrDom.value !== '') ? (Number(mcrDom.value) || null) : numOrNull('mileage_charge_rate');
+const mileage_pay_rate    = (mprDom && mprDom.value !== '') ? (Number(mprDom.value) || null) : numOrNull('mileage_pay_rate');
 
-        const data = {
-          id: window.modalCtx.data?.id || null,
-          candidate_id,
-          client_id,
-          role,
-          band,
-          display_site,
-          start_date:   startIso,
-          end_date:     endIso,
-          pay_method_snapshot: payMethodSnap,
-          default_submission_mode,
-          week_ending_weekday_snapshot,
-          auto_invoice,
-          require_reference_to_pay,
-          require_reference_to_invoice,
-          rates_json: mergedRates,
-          std_hours_json,
-          std_schedule_json,
-          bucket_labels_json,
-          // NEW: mileage in payload
-          mileage_charge_rate: mileage_charge_rate,
-          mileage_pay_rate: mileage_pay_rate
-        };
+// NEW: collect Additional Rates (up to 5 slots) from "Additional Rates" tab
+let additional_rates_json = null;
+try {
+  const existing = Array.isArray(base.additional_rates_json) ? base.additional_rates_json : null;
+  const rows = [];
 
-        if (LOGC) {
-          const preview = { ...data, rates_json: '(object)', std_hours_json: std_hours_json ? '(object)' : null, std_schedule_json: std_schedule_json ? '(object)' : null };
-          console.log('[CONTRACTS] onSave payload (preview)', preview);
-        }
+  const normaliseFrequency = (raw) => {
+    if (!raw) return null;
+    const s = String(raw).trim().toUpperCase();
+    const ALLOWED = [
+      'ONE_PER_WEEK',
+      'ONE_PER_DAY',
+      'WEEKENDS_AND_BH_ONLY',
+      'WEEKDAYS_EXCL_BH_ONLY'
+    ];
+    return ALLOWED.includes(s) ? s : null;
+  };
+
+  const tab = document.getElementById('contractAdditionalRatesTab');
+  if (tab) {
+    for (let i = 1; i <= 5; i++) {
+      const code = `EX${i}`;
+      const bnEl = tab.querySelector(`input[name="extra_bucket_name_${i}"]`);
+      const unEl = tab.querySelector(`input[name="extra_unit_name_${i}"]`);
+      const frEl = tab.querySelector(`select[name="extra_frequency_${i}"]`);
+      const prEl = tab.querySelector(`input[name="extra_pay_${i}"]`);
+      const crEl = tab.querySelector(`input[name="extra_charge_${i}"]`);
+
+      const bucket_name = (bnEl?.value || '').trim();
+      const unit_name   = (unEl?.value || '').trim();
+      const freqRaw     = (frEl?.value || '').trim();
+      const payRaw      = (prEl?.value || '').trim();
+      const chargeRaw   = (crEl?.value || '').trim();
+
+      const hasAny = !!(bucket_name || unit_name || freqRaw || payRaw || chargeRaw);
+      if (!hasAny) continue;
+
+      const payNum    = payRaw === '' ? null : Number(payRaw);
+      const chargeNum = chargeRaw === '' ? null : Number(chargeRaw);
+      const frequency = normaliseFrequency(freqRaw) || 'ONE_PER_WEEK';
+
+      rows.push({
+        code,
+        bucket_name,
+        unit_name: unit_name || null,
+        frequency,
+        pay_rate: Number.isFinite(payNum) ? payNum : null,
+        charge_rate: Number.isFinite(chargeNum) ? chargeNum : null
+      });
+    }
+  }
+
+  if (rows.length) {
+    additional_rates_json = rows;
+  } else if (existing) {
+    // If the tab was never touched this session, keep what backend sent
+    additional_rates_json = existing;
+  } else {
+    additional_rates_json = null;
+  }
+} catch (e) {
+  if (LOGC) console.warn('[CONTRACTS] additional_rates_json build failed', e);
+  const fallback = Array.isArray(base.additional_rates_json) ? base.additional_rates_json : null;
+  additional_rates_json = fallback || null;
+}
+
+const data = {
+  id: window.modalCtx.data?.id || null,
+  candidate_id,
+  client_id,
+  role,
+  band,
+  display_site,
+  start_date:   startIso,
+  end_date:     endIso,
+  pay_method_snapshot: payMethodSnap,
+  default_submission_mode,
+  week_ending_weekday_snapshot,
+  auto_invoice,
+  require_reference_to_pay,
+  require_reference_to_invoice,
+  rates_json: mergedRates,
+  std_hours_json,
+  std_schedule_json,
+  bucket_labels_json,
+  additional_rates_json,                     // 🔹 NEW FIELD
+  mileage_charge_rate: mileage_charge_rate,
+  mileage_pay_rate:    mileage_pay_rate
+};
+
+if (LOGC) {
+  const preview = {
+    ...data,
+    rates_json: '(object)',
+    std_hours_json: std_hours_json ? '(object)' : null,
+    std_schedule_json: std_schedule_json ? '(object)' : null,
+    additional_rates_json: additional_rates_json ? '(object)' : null
+  };
+  console.log('[CONTRACTS] onSave payload (preview)', preview);
+}
 
         let overlapProceed = true;
         try {
@@ -7965,6 +8046,12 @@ function renderContractRatesTab(ctx) {
 // ─────────────────────────────────────────────────────────────────────────────-
 
 function openManualWeekEditor(week_id, contract_id /* optional but recommended */) {
+  const LOG = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : true;
+
+  // Extra-rate config + week dates live in this closure so onSave can see them
+  let extrasConfig = [];
+  let weekDates = []; // [{ ymd, label }...]
+
   const main = `
     <div class="tabc">
       <div id="hoursGrid" class="grid-5 tight">
@@ -7974,6 +8061,16 @@ function openManualWeekEditor(week_id, contract_id /* optional but recommended *
             <input class="input" type="number" step="0.01" min="0" name="h_${k}" placeholder="0.00" />
           </div>`).join('')}
       </div>
+
+      <div class="row" style="margin-top:16px">
+        <label class="section">Additional Rates</label>
+        <div class="controls">
+          <div id="additionalRatesSection">
+            <div class="hint">No additional rates configured for this contract.</div>
+          </div>
+        </div>
+      </div>
+
       <div class="row" style="margin-top:10px">
         <label>Reference (optional)</label>
         <div class="controls"><input class="input" name="reference_number" placeholder="PO / Ref" /></div>
@@ -7992,8 +8089,62 @@ function openManualWeekEditor(week_id, contract_id /* optional but recommended *
       const v = (n) => Number(root.querySelector(`input[name="${n}"]`)?.value || 0);
       const ref = root.querySelector('input[name="reference_number"]')?.value?.trim() || '';
 
-      const payload = { hours: { day:v('h_day'), night:v('h_night'), sat:v('h_sat'), sun:v('h_sun'), bh:v('h_bh') } };
+      const payload = {
+        hours: {
+          day:  v('h_day'),
+          night:v('h_night'),
+          sat:  v('h_sat'),
+          sun:  v('h_sun'),
+          bh:   v('h_bh')
+        }
+      };
       if (ref) payload.reference_number = ref;
+
+      // Additional weekly buckets – derive weekly totals (and optional per-day map)
+      if (extrasConfig && extrasConfig.length) {
+        const addWeek = {};
+        const addPerDay = {};
+
+        extrasConfig.forEach((cfg, idx) => {
+          const code = cfg.code || `EX${idx + 1}`;
+          const freq = String(cfg.frequency || 'ONE_PER_WEEK').toUpperCase();
+
+          if (freq === 'ONE_PER_WEEK') {
+            const inp = root.querySelector(`input[name="extra_week_${code}"]`);
+            const val = inp ? Number(inp.value || 0) : 0;
+            if (val && Number.isFinite(val)) {
+              addWeek[code] = val;
+            }
+          } else {
+            // Per-day modes (ONE_PER_DAY, WEEKENDS_AND_BH_ONLY, WEEKDAYS_EXCL_BH_ONLY)
+            // We collect units per displayed day and let the backend apply the BH/weekend rules.
+            const perDay = {};
+            let total = 0;
+            if (weekDates && weekDates.length === 7) {
+              for (let i = 0; i < 7; i++) {
+                const meta = weekDates[i];
+                const inp = root.querySelector(`input[name="extra_${code}_d${i}"]`);
+                if (!inp) continue;
+                const numVal = Number(inp.value || 0);
+                if (!numVal || !Number.isFinite(numVal)) continue;
+                perDay[meta.ymd] = numVal;
+                total += numVal;
+              }
+            }
+            if (total > 0) {
+              addWeek[code] = total;
+              if (Object.keys(perDay).length) addPerDay[code] = perDay;
+            }
+          }
+        });
+
+        if (Object.keys(addWeek).length) {
+          payload.additional_units_week = addWeek;
+        }
+        if (Object.keys(addPerDay).length) {
+          payload.additional_units_per_day = addPerDay;
+        }
+      }
 
       await contractWeekManualUpsert(week_id, payload);
       alert('Saved.');
@@ -8001,18 +8152,159 @@ function openManualWeekEditor(week_id, contract_id /* optional but recommended *
     },
     false,
     async () => {
-      // Post-render: apply bucket labels if we have contract_id
+      // Post-render: apply bucket labels and render Additional Rates if we have a contract
       try {
-        if (!contract_id) return;
-        const cr = await getContract(contract_id);
-        const L = getBucketLabelsForContract(cr?.contract || cr);
-        applyBucketLabelsToHoursGrid(document.querySelector('#hoursGrid'), L);
-      } catch {}
+        // First resolve the contract + week-ending date
+        let cw = null;
+        try {
+          const r = await authFetch(API(`/api/contract-weeks?id=eq.${_enc(week_id)}&select=contract_id,week_ending_date`));
+          if (r && r.ok) {
+            const rows = await r.json();
+            if (Array.isArray(rows) && rows.length) cw = rows[0];
+          }
+        } catch (e) {
+          if (LOG) console.warn('[MANUAL-WEEK] failed to load contract_week', e);
+        }
+
+        let cid = contract_id || (cw && cw.contract_id) || null;
+        if (!cid) return;
+
+        let cr;
+        try {
+          cr = await getContract(cid);
+        } catch (e) {
+          if (LOG) console.warn('[MANUAL-WEEK] getContract failed', e);
+          return;
+        }
+        const contract = cr?.contract || cr;
+        if (!contract) return;
+
+        // Apply bucket labels for the 5 standard hours buckets
+        try {
+          const L = getBucketLabelsForContract(contract);
+          applyBucketLabelsToHoursGrid(document.querySelector('#hoursGrid'), L);
+        } catch (e) {
+          if (LOG) console.warn('[MANUAL-WEEK] applyBucketLabels failed', e);
+        }
+
+        // Compute the 7 dates for this contract week (WE-6 .. WE)
+        weekDates = [];
+        if (cw && cw.week_ending_date) {
+          const weIso = String(cw.week_ending_date);
+          const baseDate = new Date(weIso + 'T00:00:00');
+          if (!isNaN(baseDate.getTime())) {
+            const dowNames = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+            for (let offset = 6; offset >= 0; offset--) {
+              const d = new Date(baseDate);
+              d.setDate(baseDate.getDate() - offset);
+              const yyyy = d.getFullYear();
+              const mm = String(d.getMonth() + 1).padStart(2, '0');
+              const dd = String(d.getDate()).padStart(2, '0');
+              const ymd = `${yyyy}-${mm}-${dd}`;
+              const label = `${dowNames[d.getDay()]} ${dd}/${mm}`;
+              weekDates.push({ ymd, label });
+            }
+          }
+        }
+
+        const host = document.getElementById('additionalRatesSection');
+        if (!host) return;
+
+        const extras = Array.isArray(contract.additional_rates_json)
+          ? contract.additional_rates_json
+          : [];
+
+        extrasConfig = (extras || []).filter(e => e && (e.bucket_name || e.unit_name || e.code));
+
+        if (!extrasConfig.length) {
+          host.innerHTML = '<div class="hint">No additional rates configured for this contract.</div>';
+          return;
+        }
+
+        const freqLabel = (f) => {
+          const s = String(f || '').toUpperCase();
+          if (s === 'ONE_PER_WEEK') return 'One per week';
+          if (s === 'ONE_PER_DAY') return 'One per day';
+          if (s === 'WEEKENDS_AND_BH_ONLY') return 'Weekends & BH only';
+          if (s === 'WEEKDAYS_EXCL_BH_ONLY') return 'Weekdays (excl BH) only';
+          return s || 'One per week';
+        };
+
+        const esc = (x) => String(x == null ? '' : x)
+          .replace(/&/g,'&amp;')
+          .replace(/</g,'&lt;')
+          .replace(/>/g,'&gt;')
+          .replace(/"/g,'&quot;')
+          .replace(/'/g,'&#39;');
+
+        let html = '';
+        extrasConfig.forEach((cfg, idx) => {
+          const code = cfg.code || `EX${idx + 1}`;
+          const name = esc(cfg.bucket_name || code);
+          const unitName = esc(cfg.unit_name || 'Units');
+          const freq = String(cfg.frequency || 'ONE_PER_WEEK').toUpperCase();
+          const pay = (cfg.pay_rate != null && Number.isFinite(Number(cfg.pay_rate))) ? Number(cfg.pay_rate) : null;
+          const chg = (cfg.charge_rate != null && Number.isFinite(Number(cfg.charge_rate))) ? Number(cfg.charge_rate) : null;
+          const payStr = pay != null ? pay.toFixed(2) : '0.00';
+          const chgStr = chg != null ? chg.toFixed(2) : '0.00';
+
+          if (freq === 'ONE_PER_WEEK') {
+            html += `
+              <div class="row extra-row" data-code="${esc(code)}">
+                <label>${name}</label>
+                <div class="controls">
+                  <div class="split">
+                    <span class="mini">${unitName} (${freqLabel(freq)})</span>
+                    <input class="input" type="number" min="0" step="0.01"
+                      name="extra_week_${esc(code)}" placeholder="0" />
+                  </div>
+                  <div class="mini" style="margin-top:4px;">
+                    Pay per unit £${payStr}, Charge per unit £${chgStr}
+                  </div>
+                </div>
+              </div>`;
+          } else {
+            const perDayInputs = (weekDates && weekDates.length === 7)
+              ? weekDates.map((d, i) => `
+                  <div class="split">
+                    <span class="mini">${esc(d.label)}</span>
+                    <input class="input" type="number" min="0" step="0.01"
+                      name="extra_${esc(code)}_d${i}" placeholder="0" />
+                  </div>
+                `).join('')
+              : '';
+
+            html += `
+              <div class="row extra-row" data-code="${esc(code)}">
+                <label>${name}</label>
+                <div class="controls" style="flex-direction:column;gap:4px;align-items:flex-start">
+                  <div class="mini">${unitName} (${freqLabel(freq)})</div>
+                  <div class="grid-7 tight" style="min-width:0;flex-wrap:wrap;gap:6px">
+                    ${perDayInputs}
+                  </div>
+                  <div class="mini" style="margin-top:4px;">
+                    Pay per unit £${payStr}, Charge per unit £${chgStr}
+                  </div>
+                </div>
+              </div>`;
+          }
+        });
+
+        host.innerHTML = `
+          <div class="card" id="manualExtrasCard" style="margin-top:4px">
+            <div class="row"><label class="section">Additional Rates — weekly units</label></div>
+            <div class="extras-body" style="display:flex;flex-direction:column;gap:8px">
+              ${html}
+            </div>
+          </div>
+        `;
+      } catch (e) {
+        if (LOG) console.warn('[MANUAL-WEEK] post-render wiring failed', e);
+      }
     },
     { kind:'manual-week' }
   );
 }
-
 // ──────────────────────────────────────────────────────────────────────────────
 // openContractWeekActions (amended) — “Add additional sheet” now calls additional;
 // add separate “Create expense sheet” button wired to expense-sheet endpoint
@@ -18950,30 +19242,45 @@ persistCurrentTabState() {
     fs.main = { ...(fs.main || {}), ...stripEmpty(c) };
   }
 
-  if (this.entity === 'contracts' && this.currentTabKey === 'rates') {
-    try {
+  // Persist contract-specific state when leaving Rates **or** Additional Rates
+if (this.entity === 'contracts' && (this.currentTabKey === 'rates' || this.currentTabKey === 'extras')) {
+  try {
+    // Only bother capturing the paye/umb/charge_* fields from the Rates tab itself
+    if (this.currentTabKey === 'rates') {
       const rt = byId('contractRatesTab');
       if (rt) {
         const rForm = {};
         rt.querySelectorAll('input, select, textarea').forEach(el => {
-          if (el.name) rForm[el.name] = (el.type === 'checkbox' ? (el.checked ? 'on' : '') : el.value);
+          if (el.name) {
+            rForm[el.name] = (el.type === 'checkbox'
+              ? (el.checked ? 'on' : '')
+              : el.value);
+          }
         });
         const onlyRates = {};
-        for (const [k, v] of Object.entries(rForm)) if (/^(paye_|umb_|charge_)/.test(k)) onlyRates[k] = v;
+        for (const [k, v] of Object.entries(rForm)) {
+          if (/^(paye_|umb_|charge_)/.test(k)) {
+            onlyRates[k] = v;
+          }
+        }
         fs.pay = { ...(fs.pay || {}), ...stripEmpty(onlyRates) };
       }
-      const mainSel = byId('contractForm') ? '#contractForm' : null;
-      if (mainSel) {
-        const m = collectForm(mainSel);
-        // keep existing behavior for most fields, then re-add schedule blanks explicitly
-        const mergedMain = { ...stripEmpty(m) };
-        const sched      = keepScheduleBlanks(m);
-        fs.main = { ...(fs.main || {}), ...mergedMain, ...sched };
-      }
-    } catch (e) {
-      L('persistCurrentTabState contracts/rates failed', e);
     }
+
+    // Always collect the full contract form so Main + Additional Rates fields are staged
+    const mainSel = byId('contractForm') ? '#contractForm' : null;
+    if (mainSel) {
+      const m = collectForm(mainSel);
+      // keep existing behavior for most fields, then re-add schedule blanks explicitly
+      const mergedMain = { ...stripEmpty(m) };
+      const sched      = keepScheduleBlanks(m);
+      fs.main = { ...(fs.main || {}), ...mergedMain, ...sched };
+    }
+  } catch (e) {
+    L('persistCurrentTabState contracts/rates+extras failed', e);
   }
+}
+
 
 
   window.modalCtx.formState = fs;
@@ -20487,12 +20794,23 @@ async function renderClientSettingsUI(settingsObj){
     invoice_reference_required: !!initial.invoice_reference_required,
     default_submission_mode: String(initial.default_submission_mode || 'ELECTRONIC').toUpperCase(),
 
-    // NEW toggles – default to false if absent
+    // Existing “extra” flags (default false)
     is_nhsp: !!initial.is_nhsp,
     self_bill_no_invoices_sent: !!initial.self_bill_no_invoices_sent,
     daily_calc_of_invoices: !!initial.daily_calc_of_invoices,
     no_timesheet_required: !!initial.no_timesheet_required,
-    group_nightsat_sunbh: !!initial.group_nightsat_sunbh
+    group_nightsat_sunbh: !!initial.group_nightsat_sunbh,
+
+    // NEW flags
+    requires_hr: !!initial.requires_hr, // default false
+    hr_attach_to_invoice:
+      (typeof initial.hr_attach_to_invoice === 'boolean')
+        ? initial.hr_attach_to_invoice
+        : true,                           // default true
+    ts_attach_to_invoice:
+      (typeof initial.ts_attach_to_invoice === 'boolean')
+        ? initial.ts_attach_to_invoice
+        : true                            // default true
   };
 
   // Persist back into modalCtx so openClient() sees the normalised values
@@ -20522,23 +20840,30 @@ async function renderClientSettingsUI(settingsObj){
         <label>References & flags</label>
         <div class="controls" style="display:flex;flex-direction:column;gap:4px;">
 
-          <!-- Row 1: existing ref flags + NHSP -->
+          <!-- Row 1: core reference flags + NHSP -->
           <div class="toggle-row" style="display:flex;flex-wrap:wrap;gap:10px;">
-            ${yesNoToggle('pay_reference_required', 'Ref No. required to PAY', s.pay_reference_required)}
-            ${yesNoToggle('invoice_reference_required', 'Ref No. required to INVOICE', s.invoice_reference_required)}
-            ${yesNoToggle('is_nhsp', 'NHSP client', s.is_nhsp)}
+            ${yesNoToggle('pay_reference_required',    'Ref No. required to PAY',      s.pay_reference_required)}
+            ${yesNoToggle('invoice_reference_required','Ref No. required to INVOICE',  s.invoice_reference_required)}
+            ${yesNoToggle('is_nhsp',                   'NHSP client',                  s.is_nhsp)}
           </div>
 
-          <!-- Row 2: three of the new flags -->
+          <!-- Row 2: billing / frequency flags -->
           <div class="toggle-row" style="display:flex;flex-wrap:wrap;gap:10px;">
-            ${yesNoToggle('self_bill_no_invoices_sent', 'Self-bill (no invoices sent)', s.self_bill_no_invoices_sent)}
-            ${yesNoToggle('daily_calc_of_invoices', 'Daily invoice calculation', s.daily_calc_of_invoices)}
-            ${yesNoToggle('no_timesheet_required', 'No timesheet required', s.no_timesheet_required)}
+            ${yesNoToggle('self_bill_no_invoices_sent','Self-bill (no invoices sent)', s.self_bill_no_invoices_sent)}
+            ${yesNoToggle('daily_calc_of_invoices',    'Daily invoice calculation',    s.daily_calc_of_invoices)}
+            ${yesNoToggle('no_timesheet_required',     'No timesheet required',        s.no_timesheet_required)}
           </div>
 
-          <!-- Row 3: last new flag (kept separate so the text isn’t crushed) -->
+          <!-- Row 3: grouping + HR requirement -->
           <div class="toggle-row" style="display:flex;flex-wrap:wrap;gap:10px;">
-            ${yesNoToggle('group_nightsat_sunbh', 'Group Night/Sat/Sun/BH', s.group_nightsat_sunbh)}
+            ${yesNoToggle('group_nightsat_sunbh',      'Group Night/Sat/Sun/BH',       s.group_nightsat_sunbh)}
+            ${yesNoToggle('requires_hr',               'Requires HealthRoster check',  s.requires_hr)}
+          </div>
+
+          <!-- Row 4: attachment rules -->
+          <div class="toggle-row" style="display:flex;flex-wrap:wrap;gap:10px;">
+            ${yesNoToggle('hr_attach_to_invoice',      'Attach HealthRoster to invoice', s.hr_attach_to_invoice)}
+            ${yesNoToggle('ts_attach_to_invoice',      'Attach timesheets to invoice',   s.ts_attach_to_invoice)}
           </div>
         </div>
       </div>
@@ -20613,7 +20938,9 @@ async function renderClientSettingsUI(settingsObj){
 
     // Soft normalise week ending
     const w = Number(vals.week_ending_weekday);
-    next.week_ending_weekday = Number.isInteger(w) ? String(Math.min(6, Math.max(0, w))) : lastValid.week_ending_weekday;
+    next.week_ending_weekday = Number.isInteger(w)
+      ? String(Math.min(6, Math.max(0, w)))
+      : lastValid.week_ending_weekday;
 
     // Soft normalise toggles → booleans
     next.pay_reference_required        = asBool(vals.pay_reference_required);
@@ -20623,6 +20950,9 @@ async function renderClientSettingsUI(settingsObj){
     next.daily_calc_of_invoices        = asBool(vals.daily_calc_of_invoices);
     next.no_timesheet_required         = asBool(vals.no_timesheet_required);
     next.group_nightsat_sunbh          = asBool(vals.group_nightsat_sunbh);
+    next.requires_hr                   = asBool(vals.requires_hr);
+    next.hr_attach_to_invoice          = asBool(vals.hr_attach_to_invoice);
+    next.ts_attach_to_invoice          = asBool(vals.ts_attach_to_invoice);
 
     // Default submission mode
     const mode = String(vals.default_submission_mode || next.default_submission_mode || 'ELECTRONIC').toUpperCase();
@@ -20657,13 +20987,16 @@ async function renderClientSettingsUI(settingsObj){
     }
 
     // Booleans
-    const payReq   = asBool(vals.pay_reference_required);
-    const invReq   = asBool(vals.invoice_reference_required);
-    const isNhsp   = asBool(vals.is_nhsp);
-    const sbNoInv  = asBool(vals.self_bill_no_invoices_sent);
-    const dailyInv = asBool(vals.daily_calc_of_invoices);
-    const noTsReq  = asBool(vals.no_timesheet_required);
-    const groupNsb = asBool(vals.group_nightsat_sunbh);
+    const payReq    = asBool(vals.pay_reference_required);
+    const invReq    = asBool(vals.invoice_reference_required);
+    const isNhsp    = asBool(vals.is_nhsp);
+    const sbNoInv   = asBool(vals.self_bill_no_invoices_sent);
+    const dailyInv  = asBool(vals.daily_calc_of_invoices);
+    const noTsReq   = asBool(vals.no_timesheet_required);
+    const groupNsb  = asBool(vals.group_nightsat_sunbh);
+    const reqHr     = asBool(vals.requires_hr);
+    const hrAttach  = asBool(vals.hr_attach_to_invoice);
+    const tsAttach  = asBool(vals.ts_attach_to_invoice);
 
     // Default submission mode
     const modeRaw = String(vals.default_submission_mode || '').toUpperCase();
@@ -20680,7 +21013,10 @@ async function renderClientSettingsUI(settingsObj){
       self_bill_no_invoices_sent:    sbNoInv,
       daily_calc_of_invoices:        dailyInv,
       no_timesheet_required:         noTsReq,
-      group_nightsat_sunbh:          groupNsb
+      group_nightsat_sunbh:          groupNsb,
+      requires_hr:                   reqHr,
+      hr_attach_to_invoice:          hrAttach,
+      ts_attach_to_invoice:          tsAttach
     };
     lastValid = { ...ctx.clientSettingsState };
 
@@ -21127,6 +21463,238 @@ async function renderSettingsPanel(content){
     }
   };
 }
+
+
+function renderContractAdditionalRatesTab(ctx) {
+  const LOGC = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : false;
+
+  const merged = mergeContractStateIntoRow(ctx?.data || {});
+  const payMethod = String(merged?.pay_method_snapshot || 'PAYE').toUpperCase();
+  const payLabel  = (payMethod === 'UMBRELLA') ? 'Pay (Umbrella)' : 'Pay (PAYE)';
+
+  const extras = Array.isArray(merged.additional_rates_json)
+    ? merged.additional_rates_json
+    : [];
+
+  const findSlot = (code) => extras.find(e => e && String(e.code || '').toUpperCase() === String(code).toUpperCase()) || null;
+  const num = (v) => (v == null || v === '') ? '' : String(v);
+
+  const freqOptions = [
+    ['ONE_PER_WEEK',         'One per week'],
+    ['ONE_PER_DAY',          'One per day'],
+    ['WEEKENDS_AND_BH_ONLY', 'Weekends & Bank Holidays only'],
+    ['WEEKDAYS_EXCL_BH_ONLY','Weekdays (excl Bank Holidays) only']
+  ];
+
+  const esc = (x) => String(x == null ? '' : x)
+    .replace(/&/g,'&amp;')
+    .replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;')
+    .replace(/'/g,'&#39;');
+
+  const rowsHtml = [];
+  for (let i = 1; i <= 5; i++) {
+    const code = `EX${i}`;
+    const cfg  = findSlot(code) || {};
+    const bucketName = cfg.bucket_name || '';
+    const unitName   = cfg.unit_name || '';
+    const freq       = (cfg.frequency || 'ONE_PER_WEEK').toUpperCase();
+    const payRate    = (cfg.pay_rate != null && Number.isFinite(Number(cfg.pay_rate))) ? Number(cfg.pay_rate) : null;
+    const chargeRate = (cfg.charge_rate != null && Number.isFinite(Number(cfg.charge_rate))) ? Number(cfg.charge_rate) : null;
+
+    let marginStr = '';
+    if (payRate != null && chargeRate != null) {
+      let erniMult = 1;
+      try {
+        if (typeof window.__ERNI_MULT__ === 'number' && window.__ERNI_MULT__ > 0) {
+          erniMult = window.__ERNI_MULT__;
+        }
+      } catch {}
+      let mg = chargeRate - (payMethod === 'PAYE' ? payRate * erniMult : payRate);
+      marginStr = mg.toFixed(2);
+    }
+
+    rowsHtml.push(`
+      <div class="row extra-rate-row" data-slot="${esc(code)}">
+        <label>Bucket ${i}</label>
+        <div class="controls" style="display:flex;flex-direction:column;gap:4px">
+          <div class="grid-6" style="min-width:0;gap:8px;align-items:flex-end;flex-wrap:wrap">
+            <div class="split">
+              <span class="mini">Bucket name</span>
+              <input class="input" name="extra_bucket_name_${i}" value="${esc(bucketName)}" placeholder="e.g. Patient visits" />
+            </div>
+            <div class="split">
+              <span class="mini">Unit name</span>
+              <input class="input" name="extra_unit_name_${i}" value="${esc(unitName)}" placeholder="e.g. Number of visits" />
+            </div>
+            <div class="split">
+              <span class="mini">Frequency</span>
+              <select class="input" name="extra_frequency_${i}">
+                ${freqOptions.map(([val,label]) => `
+                  <option value="${val}" ${val === freq ? 'selected' : ''}>${esc(label)}</option>
+                `).join('')}
+              </select>
+            </div>
+            <div class="split">
+              <span class="mini">${payLabel} (per unit)</span>
+              <input class="input" type="number" step="0.01" min="0" name="extra_pay_${i}" value="${payRate != null ? esc(payRate.toFixed(2)) : ''}" placeholder="0.00" />
+            </div>
+            <div class="split">
+              <span class="mini">Charge (per unit)</span>
+              <input class="input" type="number" step="0.01" min="0" name="extra_charge_${i}" value="${chargeRate != null ? esc(chargeRate.toFixed(2)) : ''}" placeholder="0.00" />
+            </div>
+            <div class="split">
+              <span class="mini">Margin / unit</span>
+              <span class="mini" data-role="extra-margin" data-slot="${esc(code)}">${marginStr ? `£${esc(marginStr)}` : ''}</span>
+            </div>
+          </div>
+          <div style="margin-top:4px">
+            <button type="button"
+                    class="btn mini"
+                    data-extra-clear="${esc(code)}"
+                    title="Clear bucket ${i}">
+              Clear
+            </button>
+          </div>
+        </div>
+      </div>
+    `);
+  }
+
+  const html = `
+    <div class="tabc" id="contractAdditionalRatesTab">
+      <div class="row">
+        <label class="section">Additional Rates</label>
+        <div class="controls">
+          <div class="hint">
+            Up to 5 optional additional pay buckets, billed by units (e.g. patient visits).<br/>
+            Margins are per-unit and follow the PAYE/Umbrella logic used on the Rates tab.
+          </div>
+        </div>
+      </div>
+      <div class="group">
+        ${rowsHtml.join('')}
+      </div>
+    </div>
+  `;
+
+  // Wire up margin recalculation + Clear buttons after DOM render
+  setTimeout(() => {
+    try {
+      const root = document.getElementById('contractAdditionalRatesTab');
+      if (!root) return;
+
+      const getErniMult = () => {
+        try {
+          if (typeof window.__ERNI_MULT__ === 'number' && window.__ERNI_MULT__ > 0) {
+            return window.__ERNI_MULT__;
+          }
+        } catch {}
+        return 1;
+      };
+
+      const getPayMethod = () => {
+        try {
+          const fs = (window.modalCtx && window.modalCtx.formState) || { main:{}, pay:{} };
+          const staged = (fs.main && fs.main.pay_method_snapshot) || '';
+          const sel = document.querySelector('select[name="pay_method_snapshot"], select[name="default_pay_method_snapshot"]');
+          const v = (sel && sel.value) || staged || 'PAYE';
+          return String(v).toUpperCase();
+        } catch {
+          return 'PAYE';
+        }
+      };
+
+      const recalcMargins = () => {
+        const pm = getPayMethod();
+        const erniMult = getErniMult();
+        for (let i = 1; i <= 5; i++) {
+          const code = `EX${i}`;
+          const payEl    = root.querySelector(`input[name="extra_pay_${i}"]`);
+          const chargeEl = root.querySelector(`input[name="extra_charge_${i}"]`);
+          const span     = root.querySelector(`span[data-role="extra-margin"][data-slot="${code}"]`);
+          if (!span) continue;
+
+          const payVal    = payEl ? Number(payEl.value || 0) : 0;
+          const chargeVal = chargeEl ? Number(chargeEl.value || 0) : 0;
+
+          if (!Number.isFinite(payVal) || !Number.isFinite(chargeVal) || (!payEl?.value && !chargeEl?.value)) {
+            span.textContent = '';
+            continue;
+          }
+
+          let mg;
+          if (pm === 'PAYE') {
+            mg = chargeVal - (payVal * erniMult);
+          } else {
+            mg = chargeVal - payVal;
+          }
+          span.textContent = `£${mg.toFixed(2)}`;
+        }
+      };
+
+      // Wire Clear buttons
+      root.querySelectorAll('button[data-extra-clear]').forEach(btn => {
+        if (btn.__wiredClear) return;
+        btn.__wiredClear = true;
+        btn.addEventListener('click', () => {
+          const slot = btn.getAttribute('data-extra-clear');
+          const idx  = slot && slot.replace(/^EX/, '');
+          if (!idx) return;
+          ['bucket_name','unit_name','pay','charge'].forEach(suffix => {
+            const name = suffix === 'bucket_name'
+              ? `extra_bucket_name_${idx}`
+              : suffix === 'unit_name'
+                ? `extra_unit_name_${idx}`
+                : suffix === 'pay'
+                  ? `extra_pay_${idx}`
+                  : `extra_charge_${idx}`;
+            const el = root.querySelector(`[name="${name}"]`);
+            if (el) {
+              el.value = '';
+              try { el.dispatchEvent(new Event('input', { bubbles:true })); } catch {}
+              try { el.dispatchEvent(new Event('change',{ bubbles:true })); } catch {}
+            }
+          });
+          const span = root.querySelector(`span[data-role="extra-margin"][data-slot="${slot}"]`);
+          if (span) span.textContent = '';
+          try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
+        });
+      });
+
+      // Recalc margins on input changes
+      const onChange = (ev) => {
+        const t = ev.target;
+        if (!t || !t.name) return;
+        if (/^extra_(pay|charge)_\d+$/.test(t.name)) {
+          recalcMargins();
+          try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
+        }
+      };
+      root.addEventListener('input', onChange, true);
+      root.addEventListener('change', onChange, true);
+
+      recalcMargins();
+
+      // Signal for any wiring that listens for this tab
+      try {
+        const ev = new CustomEvent('contracts-extras-rendered', { detail: {} });
+        window.dispatchEvent(ev);
+      } catch {
+        window.dispatchEvent(new Event('contracts-extras-rendered'));
+      }
+
+      if (LOGC) console.log('[CONTRACTS] renderContractAdditionalRatesTab wired');
+    } catch (e) {
+      if (LOGC) console.warn('[CONTRACTS] extras tab wiring failed', e);
+    }
+  }, 0);
+
+  return html;
+}
+
+
 
 // ===== Generic modal plumbing =====
 
