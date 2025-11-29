@@ -1464,28 +1464,97 @@ function normalizeClientSettingsForSave(raw) {
   const out = {};
   let invalid = false;
 
+  const asBool = (v) => {
+    if (v === true) return true;
+    if (v === false) return false;
+    const s = String(v ?? '').trim().toLowerCase();
+    return s === 'true' || s === 'yes' || s === 'y' || s === '1' || s === 'on';
+  };
+
+  // ─────────────────────────────
   // Timezone + day/night/weekend times
-  ['day_start','day_end','night_start','night_end','sat_start','sat_end','sun_start','sun_end','timezone_id'].forEach(k => {
+  // ─────────────────────────────
+  [
+    'day_start','day_end',
+    'night_start','night_end',
+    'sat_start','sat_end',
+    'sun_start','sun_end',
+    'timezone_id'
+  ].forEach(k => {
     if (!(k in src)) return;
     const v = src[k];
-    if (k === 'timezone_id') { if (v) out[k] = String(v); return; }
+
+    if (k === 'timezone_id') {
+      if (v != null && v !== '') out[k] = String(v);
+      return;
+    }
+
     if (v == null || v === '') return;
-    const hhmmss = _toHHMMSS(v);
-    if (hhmmss === null) { invalid = true; return; }
+    const hhmmss = _toHHMMSS(v);  // existing helper: returns 'HH:MM:SS' or null
+    if (hhmmss === null) {
+      invalid = true;
+      return;
+    }
     out[k] = hhmmss;
   });
 
+  // ─────────────────────────────
+  // Week ending weekday (0–6)
+  // ─────────────────────────────
+  if ('week_ending_weekday' in src) {
+    let we = Number(src.week_ending_weekday);
+    if (!Number.isInteger(we) || we < 0 || we > 6) {
+      invalid = true;
+    } else {
+      out.week_ending_weekday = we;
+    }
+  }
+
+  // ─────────────────────────────
   // Gates + default submission mode
+  // ─────────────────────────────
   if ('pay_reference_required' in src) {
-    out.pay_reference_required = !!(src.pay_reference_required === true || src.pay_reference_required === 'true' || src.pay_reference_required === 'on' || src.pay_reference_required === 1 || src.pay_reference_required === '1');
+    out.pay_reference_required = asBool(src.pay_reference_required);
   }
   if ('invoice_reference_required' in src) {
-    out.invoice_reference_required = !!(src.invoice_reference_required === true || src.invoice_reference_required === 'true' || src.invoice_reference_required === 'on' || src.invoice_reference_required === 1 || src.invoice_reference_required === '1');
+    out.invoice_reference_required = asBool(src.invoice_reference_required);
   }
   if ('default_submission_mode' in src) {
-    const mode = String(src.default_submission_mode || '').toUpperCase();
-    if (mode === 'ELECTRONIC' || mode === 'MANUAL') out.default_submission_mode = mode;
-    else out.default_submission_mode = 'ELECTRONIC';
+    let mode = String(src.default_submission_mode || '').toUpperCase();
+    if (mode !== 'ELECTRONIC' && mode !== 'MANUAL') mode = 'ELECTRONIC';
+    out.default_submission_mode = mode;
+  }
+
+  // ─────────────────────────────
+  // Existing “extra” flags
+  // ─────────────────────────────
+  if ('is_nhsp' in src) {
+    out.is_nhsp = asBool(src.is_nhsp);
+  }
+  if ('self_bill_no_invoices_sent' in src) {
+    out.self_bill_no_invoices_sent = asBool(src.self_bill_no_invoices_sent);
+  }
+  if ('daily_calc_of_invoices' in src) {
+    out.daily_calc_of_invoices = asBool(src.daily_calc_of_invoices);
+  }
+  if ('no_timesheet_required' in src) {
+    out.no_timesheet_required = asBool(src.no_timesheet_required);
+  }
+  if ('group_nightsat_sunbh' in src) {
+    out.group_nightsat_sunbh = asBool(src.group_nightsat_sunbh);
+  }
+
+  // ─────────────────────────────
+  // NEW HR / attachment flags
+  // ─────────────────────────────
+  if ('requires_hr' in src) {
+    out.requires_hr = asBool(src.requires_hr);
+  }
+  if ('hr_attach_to_invoice' in src) {
+    out.hr_attach_to_invoice = asBool(src.hr_attach_to_invoice);
+  }
+  if ('ts_attach_to_invoice' in src) {
+    out.ts_attach_to_invoice = asBool(src.ts_attach_to_invoice);
   }
 
   return { cleaned: out, invalid };
