@@ -346,7 +346,7 @@ body{
       box-shadow:inset 0 0 0 1px rgba(79,70,229,.4);
     }
 
-    .pill{
+     .pill{
       font-size:12px;
       border:1px solid var(--line);
       padding:2px 6px;
@@ -354,9 +354,69 @@ body{
       background:#0e1a34;
       color:var(--sub);
     }
+
+    /* Timesheet-specific pill variants */
+    .pill-ok{
+      background:rgba(22,163,74,.15);
+      color:#bbf7d0;
+      border-color:rgba(16,185,129,.35);
+    }
+    .pill-info{
+      background:rgba(59,130,246,.18);
+      color:#bfdbfe;
+      border-color:rgba(59,130,246,.45);
+    }
+    .pill-warn{
+      background:rgba(245,158,11,.15);
+      color:#fde68a;
+      border-color:rgba(251,191,36,.35);
+    }
+    .pill-bad{
+      background:rgba(239,68,68,.15);
+      color:#fecaca;
+      border-color:rgba(248,113,113,.4);
+    }
+
+    .pill-weekly{
+      background:rgba(79,70,229,.18);
+      color:#c7d2fe;
+      border-color:rgba(129,140,248,.5);
+    }
+    .pill-daily{
+      background:rgba(15,118,110,.18);
+      color:#a5f3fc;
+      border-color:rgba(45,212,191,.5);
+    }
+    .pill-elec{
+      background:rgba(56,189,248,.12);
+      color:#e0f2fe;
+      border-color:rgba(59,130,246,.5);
+    }
+    .pill-manual{
+      background:rgba(148,163,184,.18);
+      color:#e5e7eb;
+      border-color:rgba(148,163,184,.55);
+    }
+    .pill-hold{
+      background:rgba(202,138,4,.18);
+      color:#fef3c7;
+      border-color:rgba(245,158,11,.5);
+    }
+    .pill-nhsp{
+      background:rgba(59,130,246,.22);
+      color:#dbeafe;
+      border-color:rgba(37,99,235,.6);
+    }
+    .pill-hr{
+      background:rgba(34,197,94,.2);
+      color:#dcfce7;
+      border-color:rgba(22,163,74,.55);
+    }
+
     .tag-ok{   background:rgba(22,163,74,.15);  color:#bbf7d0; border-color:rgba(16,185,129,.35) }
     .tag-warn{ background:rgba(245,158,11,.15); color:#fde68a;  border-color:rgba(251,191,36,.35) }
     .tag-fail{ background:rgba(239,68,68,.15);  color:#fecaca;  border-color:rgba(248,113,113,.35) }
+
 
     /* ===== Modal ===== */
       /* ===== Modal ===== */
@@ -551,6 +611,23 @@ body{
       background:var(--hover);
       color:#f9fafb;
     }
+
+    /* Timesheet tab action buttons (Overview / Lines / Evidence) */
+    #modal .tabc .controls button[type="button"]{
+      border:1px solid var(--line);
+      background:#0b152a;
+      color:#f9fafb;
+      padding:5px 9px;
+      border-radius:999px;
+      cursor:pointer;
+      font-size:12px;
+      margin-right:4px;
+    }
+    #modal .tabc .controls button[type="button"]:hover{
+      background:var(--hover);
+      color:#f9fafb;
+    }
+
 
     /* Make the little trash icons less weedy */
     #modal .bin{
