@@ -27628,14 +27628,15 @@ async function listTimesheetsSummary(filters = {}) {
     pageSize: 50,
     total: null,
     hasMore: false,
-    filters: {}
+    filters: {},
+    sort: { key: null, dir: 'asc' }
   });
 
   const pageRaw     = st.page || 1;
   const pageSizeRaw = st.pageSize || 50;
   const page        = Number(pageRaw) || 1;
   const pageSize    = (pageSizeRaw === 'ALL')
-    ? 200
+    ? 200   // safety cap for "ALL"
     : Number(pageSizeRaw) || 50;
 
   const qs = new URLSearchParams();
@@ -27654,12 +27655,38 @@ async function listTimesheetsSummary(filters = {}) {
   const scope = (f.sheet_scope || '').toUpperCase();
   if (scope && scope !== 'ALL') qs.set('sheet_scope', scope);
 
-  // Flags
+  // Flags (view supports these; handler will eventually add these as filters)
   if (f.is_adjusted === true)     qs.set('is_adjusted', 'true');
   if (f.is_qr === true)           qs.set('is_qr', 'true');
   if (f.needs_attention === true) qs.set('needs_attention', 'true');
 
-  // (Client / candidate / WE range can be added here as needed)
+  // Sorting – mirror the pattern used by other sections (candidates/clients/contracts)
+  const sortState = st.sort || { key: null, dir: 'asc' };
+  const sortKeyRaw = (sortState.key || '').toLowerCase();
+  const sortDir    = (sortState.dir === 'desc') ? 'desc' : 'asc';
+
+  // Map grid column keys → backend order_by values (must match allowedSort in handleTimesheetsSummary)
+  const sortMap = {
+    week_ending_date:    'week_ending_date',
+    client_name:         'client_name',
+    candidate_name:      'candidate_name',
+    summary_stage:       'summary_stage',
+    route_type:          'route_type',
+    sheet_scope:         'sheet_scope',
+
+    total_pay_ex_vat:    'total_pay_ex_vat',
+    total_charge_ex_vat: 'total_charge_ex_vat',
+    margin_ex_vat:       'margin_ex_vat',
+
+    // legacy aliases if the grid uses them
+    pay:                 'total_pay_ex_vat',
+    charge:              'total_charge_ex_vat',
+    margin:              'margin_ex_vat'
+  };
+
+  const orderBy = sortMap[sortKeyRaw] || 'week_ending_date';
+  qs.set('order_by', orderBy);
+  qs.set('order_dir', sortDir);
 
   const url = `/api/timesheets/summary?${qs.toString()}`;
 
@@ -27675,7 +27702,7 @@ async function listTimesheetsSummary(filters = {}) {
   const rows  = Array.isArray(json.items) ? json.items : (json.rows || []);
   const total = (typeof json.count === 'number') ? json.count : rows.length;
 
-  // 🔹 Ensure each timesheet row has a stable id for the grid & openDetails
+  // Ensure each timesheet row has a stable id for the grid & openDetails
   rows.forEach(r => {
     if (!r.id && r.timesheet_id) {
       r.id = r.timesheet_id;
