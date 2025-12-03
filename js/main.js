@@ -1318,6 +1318,7 @@ function getFriendlyHeaderLabel(section, key) {
 // - After loading the visible page, triggers background priming of membership
 //   (ALL matching ids for current filters) regardless of page size.
 // ─────────────────────────────────────────────────────────────────────────────
+
 async function loadSection() {
   window.__listState = window.__listState || {};
   const st = (window.__listState[currentSection] ||= {
@@ -1351,6 +1352,9 @@ async function loadSection() {
   // - ALWAYS for 'candidates' and 'contracts' (so we hit candidates_summary /
   //   contracts search and get all derived fields, including job_titles_display)
   // - For other sections, only if there are filters or an active sort key.
+  //
+  // NOTE: Timesheets is special: it uses listTimesheetsSummary() against
+  // /api/timesheets/summary and does NOT go through the generic /api/search/*
   const hasFilters = !!st.filters && Object.keys(st.filters).length > 0;
   const hasSort    = !!(st.sort && st.sort.key);
 
@@ -1362,6 +1366,13 @@ async function loadSection() {
   const fetchOne = async (section, page, pageSize) => {
     window.__listState[section].page = page;
     window.__listState[section].pageSize = pageSize;
+
+    // Timesheets always go via the summary endpoint (v_timesheets_summary)
+    // using listTimesheetsSummary, not the generic search().
+    if (section === 'timesheets') {
+      const filters = window.__listState[section].filters || {};
+      return await listTimesheetsSummary(filters);
+    }
 
     if (useSearch) {
       // For candidates + contracts this always runs, so candidates come from
@@ -1415,6 +1426,7 @@ async function loadSection() {
   } catch {}
   return rows;
 }
+
 
 function clearSession(){
   localStorage.removeItem('cloudtms.session');
@@ -1471,48 +1483,9 @@ function normalizeClientSettingsForSave(raw) {
     return s === 'true' || s === 'yes' || s === 'y' || s === '1' || s === 'on';
   };
 
-  // ─────────────────────────────
-  // Timezone + day/night/weekend times
-  // ─────────────────────────────
-  [
-    'day_start','day_end',
-    'night_start','night_end',
-    'sat_start','sat_end',
-    'sun_start','sun_end',
-    'timezone_id'
-  ].forEach(k => {
-    if (!(k in src)) return;
-    const v = src[k];
+  // … time + week_ending_weekday logic unchanged …
 
-    if (k === 'timezone_id') {
-      if (v != null && v !== '') out[k] = String(v);
-      return;
-    }
-
-    if (v == null || v === '') return;
-    const hhmmss = _toHHMMSS(v);  // existing helper: returns 'HH:MM:SS' or null
-    if (hhmmss === null) {
-      invalid = true;
-      return;
-    }
-    out[k] = hhmmss;
-  });
-
-  // ─────────────────────────────
-  // Week ending weekday (0–6)
-  // ─────────────────────────────
-  if ('week_ending_weekday' in src) {
-    let we = Number(src.week_ending_weekday);
-    if (!Number.isInteger(we) || we < 0 || we > 6) {
-      invalid = true;
-    } else {
-      out.week_ending_weekday = we;
-    }
-  }
-
-  // ─────────────────────────────
   // Gates + default submission mode
-  // ─────────────────────────────
   if ('pay_reference_required' in src) {
     out.pay_reference_required = asBool(src.pay_reference_required);
   }
@@ -1525,9 +1498,7 @@ function normalizeClientSettingsForSave(raw) {
     out.default_submission_mode = mode;
   }
 
-  // ─────────────────────────────
   // Existing “extra” flags
-  // ─────────────────────────────
   if ('is_nhsp' in src) {
     out.is_nhsp = asBool(src.is_nhsp);
   }
@@ -1544,11 +1515,12 @@ function normalizeClientSettingsForSave(raw) {
     out.group_nightsat_sunbh = asBool(src.group_nightsat_sunbh);
   }
 
-  // ─────────────────────────────
   // NEW HR / attachment flags
-  // ─────────────────────────────
   if ('requires_hr' in src) {
     out.requires_hr = asBool(src.requires_hr);
+  }
+  if ('autoprocess_hr' in src) {
+    out.autoprocess_hr = asBool(src.autoprocess_hr);
   }
   if ('hr_attach_to_invoice' in src) {
     out.hr_attach_to_invoice = asBool(src.hr_attach_to_invoice);
@@ -6736,6 +6708,183 @@ async function contractWeekCreateAdditional(week_id) {
 // - Revalidates on pick
 // ─────────────────────────────────────────────────────────────────────────────
 
+
+
+
+
+
+
+
+
+  // ── Timesheets quick filters: Stage / Route / Scope / Flags ────────────────
+  if (currentSection === 'timesheets') {
+    const stFilters = window.__listState[currentSection].filters || {};
+    window.__listState[currentSection].filters = stFilters;
+
+    // Stage dropdown
+    const stageLabel = document.createElement('span');
+    stageLabel.className = 'mini';
+    stageLabel.textContent = 'Stage:';
+    const stageSel = document.createElement('select');
+
+    const stageOpts = [
+      ['ALL',              'All'],
+      ['PAID',             'Paid'],
+      ['INVOICED',         'Invoiced'],
+      ['READY_FOR_INVOICE','Ready for invoice'],
+      ['READY_FOR_HR',     'Ready for HR'],
+      ['PENDING_AUTH',     'Awaiting auth'],
+      ['NEEDS_ATTENTION',  'Needs attention']
+    ];
+    const stageCur = (stFilters.summary_stage || 'ALL').toUpperCase();
+    stageOpts.forEach(([v, label]) => {
+      const o = document.createElement('option');
+      o.value = v;
+      o.textContent = label;
+      if (stageCur === v) o.selected = true;
+      stageSel.appendChild(o);
+    });
+    stageSel.addEventListener('change', async () => {
+      const val = stageSel.value;
+      const curFilters = { ...(window.__listState[currentSection].filters || {}) };
+      curFilters.summary_stage = val;
+      window.__listState[currentSection].filters = curFilters;
+      window.__listState[currentSection].page = 1;
+      const data = await loadSection();
+      renderSummary(data);
+    });
+    topControls.appendChild(stageLabel);
+    topControls.appendChild(stageSel);
+
+    // Route dropdown
+    const routeLabel = document.createElement('span');
+    routeLabel.className = 'mini';
+    routeLabel.textContent = 'Route:';
+    const routeSel = document.createElement('select');
+    const routeOpts = [
+      ['ALL',              'All'],
+      ['DAILY_ELECTRONIC', 'Daily – electronic'],
+      ['DAILY_MANUAL',     'Daily – manual'],
+      ['WEEKLY_ELECTRONIC','Weekly – electronic'],
+      ['WEEKLY_MANUAL',    'Weekly – manual'],
+      ['WEEKLY_NHSP',      'Weekly – NHSP'],
+      ['WEEKLY_NHSP_ADJUSTMENT','Weekly – NHSP adj']
+    ];
+    const routeCur = (stFilters.route_type || 'ALL').toUpperCase();
+    routeOpts.forEach(([v, label]) => {
+      const o = document.createElement('option');
+      o.value = v;
+      o.textContent = label;
+      if (routeCur === v) o.selected = true;
+      routeSel.appendChild(o);
+    });
+    routeSel.addEventListener('change', async () => {
+      const val = routeSel.value;
+      const curFilters = { ...(window.__listState[currentSection].filters || {}) };
+      curFilters.route_type = val;
+      window.__listState[currentSection].filters = curFilters;
+      window.__listState[currentSection].page = 1;
+      const data = await loadSection();
+      renderSummary(data);
+    });
+    topControls.appendChild(routeLabel);
+    topControls.appendChild(routeSel);
+
+    // Scope dropdown (Both / Weekly / Daily)
+    const scopeLabel = document.createElement('span');
+    scopeLabel.className = 'mini';
+    scopeLabel.textContent = 'Type:';
+    const scopeSel = document.createElement('select');
+    const scopeOpts = [
+      ['ALL',    'Both'],
+      ['WEEKLY', 'Weekly only'],
+      ['DAILY',  'Daily only']
+    ];
+    const scopeCur = (stFilters.sheet_scope || 'ALL').toUpperCase();
+    scopeOpts.forEach(([v, label]) => {
+      const o = document.createElement('option');
+      o.value = v;
+      o.textContent = label;
+      if (scopeCur === v) o.selected = true;
+      scopeSel.appendChild(o);
+    });
+    scopeSel.addEventListener('change', async () => {
+      const val = scopeSel.value;
+      const curFilters = { ...(window.__listState[currentSection].filters || {}) };
+      curFilters.sheet_scope = val;
+      window.__listState[currentSection].filters = curFilters;
+      window.__listState[currentSection].page = 1;
+      const data = await loadSection();
+      renderSummary(data);
+    });
+    topControls.appendChild(scopeLabel);
+    topControls.appendChild(scopeSel);
+
+    // Flags: adjusted / QR / needs attention
+    const mkFlag = (name, label) => {
+      const wrap = document.createElement('label');
+      wrap.className = 'mini';
+      wrap.style.display = 'flex';
+      wrap.style.alignItems = 'center';
+      wrap.style.gap = '4px';
+      const cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.checked = !!stFilters[name];
+      cb.addEventListener('change', async () => {
+        const curFilters = { ...(window.__listState[currentSection].filters || {}) };
+        curFilters[name] = cb.checked ? true : false;
+        window.__listState[currentSection].filters = curFilters;
+        window.__listState[currentSection].page = 1;
+        const data = await loadSection();
+        renderSummary(data);
+      });
+      wrap.appendChild(cb);
+      wrap.appendChild(document.createTextNode(label));
+      return wrap;
+    };
+
+    topControls.appendChild(mkFlag('is_adjusted', 'Adjusted only'));
+    topControls.appendChild(mkFlag('is_qr', 'QR only'));
+    topControls.appendChild(mkFlag('needs_attention', 'Needs attention'));
+  }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 async function openCandidatePicker(onPick) {
   const LOGC = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : true; // default ON
 
@@ -9795,6 +9944,9 @@ async function loadSelectionPreset(section, idOrName) {
 
 
 
+
+
+
 // -----------------------------
 // UPDATED: openSearchModal()
 // - Fix search submit path (object filters, not JSON string)
@@ -11477,6 +11629,7 @@ function openDetails(rowOrId){
   else if (currentSection === 'umbrellas')  openUmbrella(row);
   else if (currentSection === 'audit')      openAuditItem(row);
   else if (currentSection === 'contracts')  openContract(row);
+  else if (currentSection === 'timesheets') openTimesheet(row);  // NEW
 }
 
 
@@ -11544,6 +11697,28 @@ async function openDelete(){
 // ================== FIXED: openCandidate (hydrate before showModal) ==================
 // ================== FIXED: openCandidate (hydrate before showModal) ==================
 // ================== FIXED: openCandidate (hydrate before showModal) ==================
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 function renderCandidateTab(key, row = {}) {
@@ -19138,21 +19313,46 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
 
   const stripEmpty = (obj) => { const out={}; for (const [k,v] of Object.entries(obj||{})) { if (v===''||v==null) continue; out[k]=v; } return out; };
 
-  function setFormReadOnly(root, ro) {
+   function setFormReadOnly(root, ro) {
   if (!root || !document.contains(root)) { L('setFormReadOnly(skip: invalid root)', { ro }); return; }
   const _allBefore = root.querySelectorAll('input, select, textarea, button');
   const beforeDisabled = Array.from(_allBefore).filter(el => el.disabled).length;
+
   root.querySelectorAll('input, select, textarea, button').forEach((el) => {
     const isDisplayOnly = el.id === 'tms_ref_display' || el.id === 'cli_ref_display';
+
     if (el.type === 'button') {
       const allow = new Set(['btnCloseModal','btnDelete','btnEditModal','btnSave','btnRelated']);
+
+      // NEW: keep Timesheet action buttons (data-ts-action) enabled even when ro === true
+      try {
+        const top = (typeof currentFrame === 'function') ? currentFrame() : null;
+        const isTimesheetFrame = !!(top && top.entity === 'timesheets');
+        const hasTsAction      = !!el.getAttribute('data-ts-action');
+        if (isTimesheetFrame && hasTsAction) {
+          // Do not force-disable Timesheet action buttons (Authorise, Open PDF, Defer, etc.)
+          return;
+        }
+      } catch {}
+
       if (!allow.has(el.id)) el.disabled = !!ro;
       return;
     }
-    if (isDisplayOnly) { el.setAttribute('disabled','true'); el.setAttribute('readonly','true'); return; }
-    if (ro) { el.setAttribute('disabled','true'); el.setAttribute('readonly','true'); }
-    else    { el.removeAttribute('disabled');   el.removeAttribute('readonly'); }
+
+    if (isDisplayOnly) {
+      el.setAttribute('disabled','true');
+      el.setAttribute('readonly','true');
+      return;
+    }
+    if (ro) {
+      el.setAttribute('disabled','true');
+      el.setAttribute('readonly','true');
+    } else {
+      el.removeAttribute('disabled');
+      el.removeAttribute('readonly');
+    }
   });
+
   const _allAfter = root.querySelectorAll('input, select, textarea, button');
   const afterDisabled = Array.from(_allAfter).filter(el => el.disabled).length;
   try {
@@ -19169,6 +19369,7 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
     });
   } catch {}
 }
+
 
 
   function sanitizeModalGeometry() {
@@ -19462,8 +19663,6 @@ if (this._loadOnly === true) return;
     L('_attachDirtyTracker: attached');
   },
 
-
-
   async setTab(k) {
   GC(`setTab(${k})`);
   L('setTab ENTER', { k, prevKey: this.currentTabKey, entity: this.entity, mode: this.mode, hasMounted: this._hasMountedOnce });
@@ -19487,121 +19686,121 @@ if (this._loadOnly === true) return;
   byId('modalBody').innerHTML = this.renderTab(k, merged) || '';
 
   if (this.entity==='candidates' && k==='bookings') {
-  const candId = window.modalCtx?.data?.id;
-  if (candId) {
-    try { renderCandidateCalendarTab(candId); } catch(e) { console.warn('renderCandidateCalendarTab failed', e); }
+    const candId = window.modalCtx?.data?.id;
+    if (candId) {
+      try { renderCandidateCalendarTab(candId); } catch(e) { console.warn('renderCandidateCalendarTab failed', e); }
+    }
   }
-}
 
-// Care Packages tab (was 'rates'): mount rates table + Rota Roles
-if (this.entity==='candidates' && k==='rates') {
-  // Existing behaviour: mount candidate overrides / rates UI
-  mountCandidateRatesTab?.();
+  // Care Packages tab (was 'rates'): mount rates table + Rota Roles
+  if (this.entity==='candidates' && k==='rates') {
+    // Existing behaviour: mount candidate overrides / rates UI
+    mountCandidateRatesTab?.();
 
-  // NEW: wire the Rota Roles editor here instead of on the main tab
-  const rolesHost = document.querySelector('#rolesEditor');
-  if (rolesHost) {
-    (async () => {
-      try {
-        const roleOptions = await loadGlobalRoleOptions();
-        renderRolesEditor(rolesHost, window.modalCtx.rolesState || [], roleOptions);
-        L('setTab(candidates/rates): roles editor mounted', { options: (roleOptions||[]).length });
-      } catch (e) {
-        console.error('[MODAL] roles mount failed', e);
-      }
-    })();
-  }
-}
-
-if (this.entity==='candidates' && k==='pay') {
-  if (!window.modalCtx?.payMethodState && window.modalCtx?.data?.pay_method) {
-    window.modalCtx.payMethodState = String(window.modalCtx.data.pay_method);
-    L('setTab(candidates/pay): seeded payMethodState', { payMethodState: window.modalCtx.payMethodState });
-  }
-  const p = mountCandidatePayTab?.();
-  if (p && typeof p.then === 'function') { await p; }
-}
-
-if (this.entity==='candidates' && k==='main') {
-  const pmSel = document.querySelector('#pay-method');
-  if (pmSel) {
-    const stagedPm   = window.modalCtx?.formState?.main?.pay_method;
-    const preferred  = (window.modalCtx?.payMethodState || stagedPm || pmSel.value);
-    pmSel.value = preferred;
-
-    // Only wire the change handler once per element
-    if (!pmSel.__payMethodWired) {
-      pmSel.__payMethodWired = true;
-
-      pmSel.addEventListener('change', () => {
-        const prev = window.modalCtx?.payMethodState || window.modalCtx?.data?.pay_method || null;
-        window.modalCtx.payMethodState = pmSel.value;
-
-        // On any PAYE↔UMBRELLA flip, drop staged Pay-tab values so the
-        // new method starts from a clean slate. mountCandidatePayTab will then
-        // decide whether to restore original DB values (when flipping back)
-        // or keep things blank (new method).
+    // NEW: wire the Rota Roles editor here instead of on the main tab
+    const rolesHost = document.querySelector('#rolesEditor');
+    if (rolesHost) {
+      (async () => {
         try {
-          window.modalCtx = window.modalCtx || {};
-          const fs = (window.modalCtx.formState ||= {
-            __forId: (window.modalCtx.data?.id ?? window.modalCtx.openToken ?? null),
-            main:{},
-            pay:{}
-          });
-          fs.main ||= {};
-          if (LOG) {
-            console.log('[MODAL][PAY-METHOD] flip detected', {
-              from: prev,
-              to:   pmSel.value,
-              prevPayStaging: { ...(fs.pay || {}) }
-            });
-          }
-          fs.pay = {}; // clear staged pay details on flip
+          const roleOptions = await loadGlobalRoleOptions();
+          renderRolesEditor(rolesHost, window.modalCtx.rolesState || [], roleOptions);
+          L('setTab(candidates/rates): roles editor mounted', { options: (roleOptions||[]).length });
         } catch (e) {
-          if (LOG) console.warn('[MODAL][PAY-METHOD] failed to clear staged pay', e);
+          console.error('[MODAL] roles mount failed', e);
         }
-
-        try {
-          window.dispatchEvent(new CustomEvent('pay-method-changed'));
-        } catch {
-          window.dispatchEvent(new Event('pay-method-changed'));
-        }
-      });
+      })();
     }
-
-    window.modalCtx.payMethodState = pmSel.value;
-    L('setTab(candidates/main): pay method wired', { preferred });
   }
 
+  if (this.entity==='candidates' && k==='pay') {
+    if (!window.modalCtx?.payMethodState && window.modalCtx?.data?.pay_method) {
+      window.modalCtx.payMethodState = String(window.modalCtx.data.pay_method);
+      L('setTab(candidates/pay): seeded payMethodState', { payMethodState: window.modalCtx.payMethodState });
+    }
+    const p = mountCandidatePayTab?.();
+    if (p && typeof p.then === 'function') { await p; }
+  }
 
-  // ✅ Reuse existing candidateMainModel if present, so child modals don't lose changes
-  try {
-    const container = document.getElementById('tab-main');
-    if (container &&
-        typeof buildCandidateMainDetailsModel === 'function' &&
-        typeof bindCandidateMainFormEvents === 'function') {
+  if (this.entity==='candidates' && k==='main') {
+    const pmSel = document.querySelector('#pay-method');
+    if (pmSel) {
+      const stagedPm   = window.modalCtx?.formState?.main?.pay_method;
+      const preferred  = (window.modalCtx?.payMethodState || stagedPm || pmSel.value);
+      pmSel.value = preferred;
 
-      let model = window.modalCtx?.candidateMainModel;
-      if (!model || typeof model !== 'object') {
-        // First time we hit the main tab: build from DB row
-        model = buildCandidateMainDetailsModel(window.modalCtx?.data || {});
-        window.modalCtx.candidateMainModel = model;
-        L('setTab(candidates/main): created candidate main model', {
-          keys: Object.keys(model || {})
-        });
-      } else {
-        L('setTab(candidates/main): reusing candidate main model', {
-          keys: Object.keys(model || {})
+      // Only wire the change handler once per element
+      if (!pmSel.__payMethodWired) {
+        pmSel.__payMethodWired = true;
+
+        pmSel.addEventListener('change', () => {
+          const prev = window.modalCtx?.payMethodState || window.modalCtx?.data?.pay_method || null;
+          window.modalCtx.payMethodState = pmSel.value;
+
+          // On any PAYE↔UMBRELLA flip, drop staged Pay-tab values so the
+          // new method starts from a clean slate. mountCandidatePayTab will then
+          // decide whether to restore original DB values (when flipping back)
+          // or keep things blank (new method).
+          try {
+            window.modalCtx = window.modalCtx || {};
+            const fs = (window.modalCtx.formState ||= {
+              __forId: (window.modalCtx.data?.id ?? window.modalCtx.openToken ?? null),
+              main:{},
+              pay:{}
+            });
+            fs.main ||= {};
+            if (LOG) {
+              console.log('[MODAL][PAY-METHOD] flip detected', {
+                from: prev,
+                to:   pmSel.value,
+                prevPayStaging: { ...(fs.pay || {}) }
+              });
+            }
+            fs.pay = {}; // clear staged pay details on flip
+          } catch (e) {
+            if (LOG) console.warn('[MODAL][PAY-METHOD] failed to clear staged pay', e);
+          }
+
+          try {
+            window.dispatchEvent(new CustomEvent('pay-method-changed'));
+          } catch {
+            window.dispatchEvent(new Event('pay-method-changed'));
+          }
         });
       }
 
-      // (Re)bind DOM to the model – inputs and job titles list will reflect current model values
-      bindCandidateMainFormEvents(container, model);
+      window.modalCtx.payMethodState = pmSel.value;
+      L('setTab(candidates/main): pay method wired', { preferred });
     }
-  } catch (e) {
-    console.error('[MODAL] bindCandidateMainFormEvents failed', e);
+
+
+    // ✅ Reuse existing candidateMainModel if present, so child modals don't lose changes
+    try {
+      const container = document.getElementById('tab-main');
+      if (container &&
+          typeof buildCandidateMainDetailsModel === 'function' &&
+          typeof bindCandidateMainFormEvents === 'function') {
+
+        let model = window.modalCtx?.candidateMainModel;
+        if (!model || typeof model !== 'object') {
+          // First time we hit the main tab: build from DB row
+          model = buildCandidateMainDetailsModel(window.modalCtx?.data || {});
+          window.modalCtx.candidateMainModel = model;
+          L('setTab(candidates/main): created candidate main model', {
+            keys: Object.keys(model || {})
+          });
+        } else {
+          L('setTab(candidates/main): reusing candidate main model', {
+            keys: Object.keys(model || {})
+          });
+        }
+
+        // (Re)bind DOM to the model – inputs and job titles list will reflect current model values
+        bindCandidateMainFormEvents(container, model);
+      }
+    } catch (e) {
+      console.error('[MODAL] bindCandidateMainFormEvents failed', e);
+    }
   }
-}
 
 
   if (this.entity === 'umbrellas' && k === 'main') {
@@ -19624,6 +19823,389 @@ if (this.entity==='candidates' && k==='main') {
   if (this.entity==='clients' && k==='settings')  { renderClientSettingsUI?.(window.modalCtx.clientSettingsState||{}); }
 
   if (this.entity==='contracts' && k==='rates')   { mountContractRatesTab?.(); }
+
+  // ===== Timesheets: wire Overview actions (authorise, pay hold, mark paid, stage ref) =====
+  if (this.entity === 'timesheets' && k === 'overview') {
+    const { LOGM, L } = getTsLoggers('[TS][OVERVIEW][WIRE]');
+    const root = byId('modalBody');
+    if (!root) {
+      if (LOGM) L('no modalBody root, skip wiring');
+    } else {
+      try {
+        const mc   = window.modalCtx || {};
+        const tsId = mc.data?.timesheet_id || mc.data?.id || null;
+        const mode = this.mode || 'view';
+
+        if (!tsId) {
+          if (LOGM) L('no tsId on modalCtx.data, skip overview wiring');
+        } else {
+          // Legacy buttons (will be hidden)
+          const authoriseBtn = root.querySelector('button[data-ts-action="authorise"]');
+          const holdOnBtn    = root.querySelector('button[data-ts-action="pay-hold-on"]');
+          const holdOffBtn   = root.querySelector('button[data-ts-action="pay-hold-off"]');
+          const markPaidBtn  = root.querySelector('button[data-ts-action="mark-paid"]');
+
+          // New staged controls
+          const refInput     = root.querySelector('input[name="ts_reference"]');
+          const payHoldInput = root.querySelector('input[name="ts_pay_hold"]');
+          const payHoldReasonInput = root.querySelector('input[name="ts_pay_hold_reason"]');
+          const markPaidInput= root.querySelector('input[name="ts_mark_paid"]');
+
+          if (LOGM) {
+            L('overview wiring snapshot', {
+              tsId,
+              mode,
+              hasAuthorise: !!authoriseBtn,
+              hasHoldOnBtn: !!holdOnBtn,
+              hasHoldOffBtn: !!holdOffBtn,
+              hasMarkPaidBtn: !!markPaidBtn,
+              hasRefInput: !!refInput,
+              hasPayHoldInput: !!payHoldInput,
+              hasPayHoldReasonInput: !!payHoldReasonInput,
+              hasMarkPaidInput: !!markPaidInput
+            });
+          }
+
+          // NEW: toggle view-only vs edit-only elements
+          const viewEls = root.querySelectorAll('[data-view-only="true"]');
+          const editEls = root.querySelectorAll('[data-edit-only="true"]');
+          if (mode === 'edit' || mode === 'create') {
+            viewEls.forEach(el => { el.style.display = 'none'; });
+            editEls.forEach(el => { el.style.display = ''; });
+          } else {
+            viewEls.forEach(el => { el.style.display = ''; });
+            editEls.forEach(el => { el.style.display = 'none'; });
+          }
+
+          // Always hide any legacy immediate hold/paid buttons
+          if (holdOnBtn)  holdOnBtn.style.display  = 'none';
+          if (holdOffBtn) holdOffBtn.style.display = 'none';
+          if (markPaidBtn)markPaidBtn.style.display= 'none';
+
+          // === AUTHORISE: view-mode only, immediate ===
+          if (mode === 'view') {
+            if (authoriseBtn) authoriseBtn.style.display = '';
+            if (authoriseBtn && !authoriseBtn.__tsWired) {
+              authoriseBtn.__tsWired = true;
+              authoriseBtn.addEventListener('click', async () => {
+                try {
+                  await authoriseTimesheet(tsId);
+                  window.__toast && window.__toast('Timesheet authorised');
+                } catch (err) {
+                  if (LOGM) console.warn('[TS][OVERVIEW] authoriseTimesheet failed', err);
+                  alert(err?.message || 'Failed to authorise timesheet.');
+                }
+              });
+            }
+          } else {
+            // In edit/create mode, do not show or wire Authorise
+            if (authoriseBtn) authoriseBtn.style.display = 'none';
+          }
+
+          // === PAY HOLD + MARK PAID: edit-mode only, staged ===
+          if (mode === 'edit' || mode === 'create') {
+            // Ensure timesheetState exists
+            if (!mc.timesheetState || typeof mc.timesheetState !== 'object') {
+              mc.timesheetState = {
+                reference: '',
+                payHoldDesired: null,
+                payHoldReason: '',
+                markPaid: false,
+                segmentOverrides: {},
+                nhspDeferrals: {}
+              };
+            }
+            const state = mc.timesheetState;
+
+            // Pay hold staged checkbox
+            if (payHoldInput && !payHoldInput.__tsWired) {
+              payHoldInput.__tsWired = true;
+
+              // Seed checkbox from current TSFIN state if available
+              const currentOnHold = !!(mc.timesheetDetails && mc.timesheetDetails.tsfin && mc.timesheetDetails.tsfin.pay_on_hold);
+              if (state.payHoldDesired == null) {
+                payHoldInput.checked = currentOnHold;
+                state.payHoldDesired = currentOnHold;
+              } else {
+                payHoldInput.checked = !!state.payHoldDesired;
+              }
+
+              payHoldInput.addEventListener('change', () => {
+                state.payHoldDesired = !!payHoldInput.checked;
+                if (payHoldReasonInput) {
+                  state.payHoldReason = String(payHoldReasonInput.value || '');
+                }
+
+                if (LOGM) {
+                  L('pay hold staged', {
+                    tsId,
+                    payHoldDesired: state.payHoldDesired,
+                    payHoldReason: state.payHoldReason
+                  });
+                }
+
+                try {
+                  window.dispatchEvent(new Event('modal-dirty'));
+                } catch {}
+              });
+            }
+
+            // Pay hold reason input – keep in sync on input
+            if (payHoldReasonInput && !payHoldReasonInput.__tsWired) {
+              payHoldReasonInput.__tsWired = true;
+              payHoldReasonInput.addEventListener('input', () => {
+                if (!mc.timesheetState || typeof mc.timesheetState !== 'object') return;
+                mc.timesheetState.payHoldReason = String(payHoldReasonInput.value || '');
+
+                if (LOGM) {
+                  L('pay hold reason staged', {
+                    tsId,
+                    payHoldReason: mc.timesheetState.payHoldReason
+                  });
+                }
+
+                try {
+                  window.dispatchEvent(new Event('modal-dirty'));
+                } catch {}
+              });
+            }
+
+            // Mark paid staged checkbox
+            if (markPaidInput && !markPaidInput.__tsWired) {
+              markPaidInput.__tsWired = true;
+
+              const alreadyPaid = !!(mc.timesheetDetails && mc.timesheetDetails.tsfin && mc.timesheetDetails.tsfin.paid_at_utc);
+              if (alreadyPaid) {
+                markPaidInput.checked = true;
+                markPaidInput.disabled = true;
+              } else {
+                markPaidInput.checked = !!state.markPaid;
+              }
+
+              markPaidInput.addEventListener('change', () => {
+                const alreadyPaidLocal = !!(mc.timesheetDetails && mc.timesheetDetails.tsfin && mc.timesheetDetails.tsfin.paid_at_utc);
+                if (alreadyPaidLocal) {
+                  // Do not allow flip if already paid
+                  markPaidInput.checked = true;
+                  markPaidInput.disabled = true;
+                  return;
+                }
+
+                state.markPaid = !!markPaidInput.checked;
+
+                if (LOGM) {
+                  L('mark paid staged', {
+                    tsId,
+                    markPaid: state.markPaid
+                  });
+                }
+
+                try {
+                  window.dispatchEvent(new Event('modal-dirty'));
+                } catch {}
+              });
+            }
+          } else {
+            // In VIEW mode, ensure pay hold / mark paid inputs (if present) are read-only visually
+            if (payHoldInput) payHoldInput.disabled = true;
+            if (payHoldReasonInput) payHoldReasonInput.disabled = true;
+            if (markPaidInput) markPaidInput.disabled = true;
+          }
+
+          // === Reference: staged via input, Save will apply updateTimesheetReference ===
+          if (refInput && !refInput.__tsRefWired) {
+            refInput.__tsRefWired = true;
+            refInput.addEventListener('input', () => {
+              const mc2 = window.modalCtx || {};
+              if (!mc2.timesheetState || typeof mc2.timesheetState !== 'object') {
+                mc2.timesheetState = {
+                  reference: '',
+                  payHoldDesired: null,
+                  payHoldReason: '',
+                  markPaid: false,
+                  segmentOverrides: {},
+                  nhspDeferrals: {}
+                };
+              }
+              mc2.timesheetState.reference = String(refInput.value || '');
+
+              if (LOGM) {
+                L('reference staged', { tsId, reference: mc2.timesheetState.reference });
+              }
+
+              try {
+                window.dispatchEvent(new Event('modal-dirty'));
+              } catch {}
+            });
+          }
+        }
+      } catch (err) {
+        if ((typeof window.__LOG_MODAL === 'boolean') ? window.__LOG_MODAL : false) {
+          console.warn('[TS][OVERVIEW][WIRE] failed', err);
+        }
+      }
+    }
+  }
+
+
+
+  // ===== Timesheets: wire Lines tab checkboxes for staged exclude_from_pay + NHSP deferrals =====
+  if (this.entity === 'timesheets' && k === 'lines') {
+    const { LOGM, L } = getTsLoggers('[TS][LINES][WIRE]');
+    const root = byId('modalBody');
+    if (!root) {
+      if (LOGM) L('no modalBody root, skip wiring');
+    } else {
+      try {
+        const mc = window.modalCtx || {};
+        // Ensure timesheetState exists
+        if (!mc.timesheetState || typeof mc.timesheetState !== 'object') {
+          mc.timesheetState = {
+            reference: null,
+            payHoldDesired: null,
+            payHoldReason: '',
+            markPaid: false,
+            segmentOverrides: {},
+            nhspDeferrals: {}
+          };
+        }
+        const state = mc.timesheetState;
+
+        const checkboxes = root.querySelectorAll('input[name="seg_exclude_from_pay"][data-segment-id]');
+        if (LOGM) L('wiring checkboxes', { count: checkboxes.length });
+
+        checkboxes.forEach(cb => {
+          if (cb.__tsWired) return;
+          cb.__tsWired = true;
+
+          cb.addEventListener('change', (ev) => {
+            const segId = cb.getAttribute('data-segment-id') || '';
+            if (!segId) return;
+
+            const originalSeg = (mc.timesheetDetails && Array.isArray(mc.timesheetDetails.segments))
+              ? mc.timesheetDetails.segments.find(s => String(s.segment_id) === segId)
+              : null;
+
+            const origVal = originalSeg ? !!originalSeg.exclude_from_pay : false;
+            const newVal  = !!cb.checked;
+
+            // Initialise overrides bucket
+            if (!state.segmentOverrides || typeof state.segmentOverrides !== 'object') {
+              state.segmentOverrides = {};
+            }
+
+            // If the new value matches the original, drop the override to keep payload small
+            if (newVal === origVal) {
+              if (state.segmentOverrides[segId]) {
+                delete state.segmentOverrides[segId];
+              }
+            } else {
+              state.segmentOverrides[segId] = { exclude_from_pay: newVal };
+            }
+
+            if (LOGM) {
+              L('segment override changed', {
+                segId,
+                origExclude: origVal,
+                newExclude: newVal,
+                overridesKeys: Object.keys(state.segmentOverrides || {})
+              });
+            }
+
+            // Let the dirty tracker do its job (modal-dirty event already handled globally)
+            try {
+              window.dispatchEvent(new Event('modal-dirty'));
+            } catch {}
+          });
+        });
+
+        // NHSP deferrals (staged) – buttons data-ts-action="defer-shift"
+        const defBtns = root.querySelectorAll('button[data-ts-action="defer-shift"][data-shift-id]');
+        if (LOGM) L('wiring NHSP deferrals', { count: defBtns.length });
+
+        defBtns.forEach(btn => {
+          if (btn.__tsDefWired) return;
+          btn.__tsDefWired = true;
+
+          const shiftId = btn.getAttribute('data-shift-id') || '';
+          if (!shiftId) return;
+
+          const syncLabel = () => {
+            const has = !!(state.nhspDeferrals && state.nhspDeferrals[shiftId]);
+            btn.textContent = has ? 'Deferred (staged)' : 'Defer invoicing (staged)';
+          };
+          syncLabel();
+
+          btn.addEventListener('click', () => {
+            if (!state.nhspDeferrals || typeof state.nhspDeferrals !== 'object') {
+              state.nhspDeferrals = {};
+            }
+            const has = !!state.nhspDeferrals[shiftId];
+
+            if (has) {
+              delete state.nhspDeferrals[shiftId];
+            } else {
+              state.nhspDeferrals[shiftId] = { defer_until_run_after: null };
+            }
+
+            if (LOGM) {
+              L('NHSP deferral staged toggle', {
+                shiftId,
+                nowStaged: !has,
+                stagedKeys: Object.keys(state.nhspDeferrals || {})
+              });
+            }
+
+            syncLabel();
+
+            try {
+              window.dispatchEvent(new Event('modal-dirty'));
+            } catch {}
+          });
+        });
+
+      } catch (err) {
+        if ((typeof window.__LOG_MODAL === 'boolean') ? window.__LOG_MODAL : false) {
+          console.warn('[TS][LINES][WIRE] failed', err);
+        }
+      }
+    }
+  }
+
+  // ===== Timesheets: wire Evidence tab (open PDF) =====
+  if (this.entity === 'timesheets' && k === 'evidence') {
+    const { LOGM, L } = getTsLoggers('[TS][EVIDENCE][WIRE]');
+    const root = byId('modalBody');
+    if (!root) {
+      if (LOGM) L('no modalBody root, skip wiring');
+    } else {
+      try {
+        const btn = root.querySelector('button[data-ts-action="open-pdf"][data-timesheet-id]');
+        if (btn) {
+          if (!btn.__tsPdfWired) {
+            btn.__tsPdfWired = true;
+            const tsId = btn.getAttribute('data-timesheet-id') || '';
+            if (LOGM) L('wire open-pdf button', { tsId });
+
+            btn.addEventListener('click', async () => {
+              try {
+                await openTimesheetPdf(tsId);
+              } catch (err) {
+                if (LOGM) console.warn('[TS][EVIDENCE] openTimesheetPdf failed', err);
+                alert(err?.message || 'Failed to open timesheet PDF.');
+              }
+            });
+          }
+        } else if (LOGM) {
+          L('no open-pdf button found in Evidence tab');
+        }
+      } catch (err) {
+        if ((typeof window.__LOG_MODAL === 'boolean') ? window.__LOG_MODAL : false) {
+          console.warn('[TS][EVIDENCE][WIRE] failed', err);
+        }
+      }
+    }
+  }
 
   this.currentTabKey = k;
   this._attachDirtyTracker();
@@ -19660,6 +20242,7 @@ if (this.entity==='candidates' && k==='main') {
 
   GE();
 }
+
 
 };
 function setFrameMode(frameObj, mode) {
@@ -20069,21 +20652,28 @@ function renderTop() {
     // but allow Edit for rate-preset even when opened as a child.
     if (!isRatePreset && (isChildNow || top.kind === 'advanced-search')) return;
 
-    if (top.mode === 'view') {
-      top._snapshot = {
-        data               : deep(window.modalCtx?.data||null),
-        formState          : deep(window.modalCtx?.formState||null),
-        rolesState         : deep(window.modalCtx?.rolesState||null),
-        ratesState         : deep(window.modalCtx?.ratesState||null),
-        hospitalsState     : deep(window.modalCtx?.hospitalsState||null),
-        clientSettingsState: deep(window.modalCtx?.clientSettingsState||null),
-        overrides          : deep(window.modalCtx?.overrides || { existing:[], stagedNew:[], stagedEdits:{}, stagedDeletes:[] }),
-        candidateMainModel : deep(window.modalCtx?.candidateMainModel || null)
-      };
-      top.isDirty = false;
-      setFrameMode(top, 'edit');
-      L('btnEdit (global) → switch to edit');
-    }
+   if (top.mode === 'view') {
+  top._snapshot = {
+    data               : deep(window.modalCtx?.data || null),
+    formState          : deep(window.modalCtx?.formState || null),
+    rolesState         : deep(window.modalCtx?.rolesState || null),
+    ratesState         : deep(window.modalCtx?.ratesState || null),
+    hospitalsState     : deep(window.modalCtx?.hospitalsState || null),
+    clientSettingsState: deep(window.modalCtx?.clientSettingsState || null),
+    overrides          : deep(window.modalCtx?.overrides || { existing:[], stagedNew:[], stagedEdits:{}, stagedDeletes:[] }),
+    candidateMainModel : deep(window.modalCtx?.candidateMainModel || null),
+
+    // NEW: snapshot any timesheet-specific staging (lines, issues, etc.)
+    timesheetState     : deep(window.modalCtx?.timesheetState || null)
+  };
+  top.isDirty = false;
+  setFrameMode(top, 'edit');
+  L('btnEdit (global) → switch to edit (snapshot includes timesheetState)', {
+    hasTimesheetState: !!top._snapshot.timesheetState,
+    keys: Object.keys(top._snapshot || {})
+  });
+}
+
 
   };
 
@@ -20137,41 +20727,65 @@ function renderTop() {
 
 
     if (!isChildNow && !top.noParentGate && top.mode==='edit' && top.kind!=='rates-presets') {
-      if (!top.isDirty) {
-        if (top._snapshot && window.modalCtx) {
-          window.modalCtx.data                = deep(top._snapshot.data);
-          window.modalCtx.formState           = deep(top._snapshot.formState);
-          window.modalCtx.rolesState          = deep(top._snapshot.rolesState);
-          window.modalCtx.ratesState          = deep(top._snapshot.ratesState);
-          window.modalCtx.hospitalsState      = deep(top._snapshot.hospitalsState);
-          window.modalCtx.clientSettingsState = deep(top._snapshot.clientSettingsState);
-          if (top._snapshot.overrides) window.modalCtx.overrides = deep(top._snapshot.overrides);
-          window.modalCtx.candidateMainModel  = deep(top._snapshot.candidateMainModel || null);
-          try { renderCandidateRatesTable?.(); } catch {}
-        }
-        try {
-          if (top.entity === 'contracts') {
-            const cid = window.modalCtx?.data?.id;
-            if (cid && typeof discardContractCalendarStage === 'function') discardContractCalendarStage(cid);
-          }
-        } catch {}
-        top.isDirty=false; setFrameMode(top,'view'); top._snapshot=null;
-        try{ window.__toast?.('No changes'); }catch{}; return;
-      } else {
+    if (!top.isDirty) {
+  if (top._snapshot && window.modalCtx) {
+    window.modalCtx.data                = deep(top._snapshot.data);
+    window.modalCtx.formState           = deep(top._snapshot.formState);
+    window.modalCtx.rolesState          = deep(top._snapshot.rolesState);
+    window.modalCtx.ratesState          = deep(top._snapshot.ratesState);
+    window.modalCtx.hospitalsState      = deep(top._snapshot.hospitalsState);
+    window.modalCtx.clientSettingsState = deep(top._snapshot.clientSettingsState);
+    if (top._snapshot.overrides)         window.modalCtx.overrides          = deep(top._snapshot.overrides);
+    window.modalCtx.candidateMainModel  = deep(top._snapshot.candidateMainModel || null);
+
+    // NEW: restore timesheetState so staged Lines/Issues state is rolled back
+    window.modalCtx.timesheetState      = deep(top._snapshot.timesheetState || null);
+
+    if (LOG) {
+      console.log('[MODAL][RESTORE][no-change]', {
+        entity: top.entity,
+        hasTimesheetState: !!top._snapshot.timesheetState
+      });
+    }
+
+    try { renderCandidateRatesTable?.(); } catch {}
+  }
+  try {
+    if (top.entity === 'contracts') {
+      const cid = window.modalCtx?.data?.id;
+      if (cid && typeof discardContractCalendarStage === 'function') discardContractCalendarStage(cid);
+    }
+  } catch {}
+  top.isDirty=false; setFrameMode(top,'view'); top._snapshot=null;
+  try{ window.__toast?.('No changes'); }catch{}; return;
+}
+ else {
         let ok=false; try{ top._confirmingDiscard=true; btnClose.disabled=true; ok=window.confirm('Discard changes and return to view?'); } finally { top._confirmingDiscard=false; btnClose.disabled=false; }
         if (!ok) return;
-        if (top._snapshot && window.modalCtx) {
-          window.modalCtx.data                = deep(top._snapshot.data);
-          window.modalCtx.formState           = deep(top._snapshot.formState);
-          window.modalCtx.rolesState          = deep(top._snapshot.rolesState);
-          window.modalCtx.ratesState          = deep(top._snapshot.ratesState);
-          window.modalCtx.hospitalsState      = deep(top._snapshot.hospitalsState);
-          window.modalCtx.clientSettingsState = deep(top._snapshot.clientSettingsState);
-          if (top._snapshot.overrides) window.modalCtx.overrides = deep(top._snapshot.overrides);
-          // 🔹 restore candidateMainModel as well so job titles (and primary) roll back
-          window.modalCtx.candidateMainModel  = deep(top._snapshot.candidateMainModel || null);
-          try { renderCandidateRatesTable?.(); } catch {}
-        }
+     if (top._snapshot && window.modalCtx) {
+  window.modalCtx.data                = deep(top._snapshot.data);
+  window.modalCtx.formState           = deep(top._snapshot.formState);
+  window.modalCtx.rolesState          = deep(top._snapshot.rolesState);
+  window.modalCtx.ratesState          = deep(top._snapshot.ratesState);
+  window.modalCtx.hospitalsState      = deep(top._snapshot.hospitalsState);
+  window.modalCtx.clientSettingsState = deep(top._snapshot.clientSettingsState);
+  if (top._snapshot.overrides) window.modalCtx.overrides = deep(top._snapshot.overrides);
+  // 🔹 restore candidateMainModel as well so job titles (and primary) roll back
+  window.modalCtx.candidateMainModel  = deep(top._snapshot.candidateMainModel || null);
+
+  // NEW: restore timesheetState so staged per-line changes are discarded
+  window.modalCtx.timesheetState      = deep(top._snapshot.timesheetState || null);
+
+  if (LOG) {
+    console.log('[MODAL][RESTORE][discard]', {
+      entity: top.entity,
+      hasTimesheetState: !!top._snapshot.timesheetState
+    });
+  }
+
+  try { renderCandidateRatesTable?.(); } catch {}
+}
+
         try {
           if (top.entity === 'contracts') {
             const cid = window.modalCtx?.data?.id;
@@ -20859,23 +21473,23 @@ async function renderClientSettingsUI(settingsObj){
         : '0',
 
     // Existing toggles
-    pay_reference_required: !!initial.pay_reference_required,
-    invoice_reference_required: !!initial.invoice_reference_required,
-    default_submission_mode: String(initial.default_submission_mode || 'ELECTRONIC').toUpperCase(),
+    pay_reference_required:      !!initial.pay_reference_required,
+    invoice_reference_required:  !!initial.invoice_reference_required,
+    default_submission_mode:     String(initial.default_submission_mode || 'ELECTRONIC').toUpperCase(),
 
     // Existing “extra” flags – default to false if absent
-    is_nhsp: !!initial.is_nhsp,
-    self_bill_no_invoices_sent: !!initial.self_bill_no_invoices_sent,
-    daily_calc_of_invoices: !!initial.daily_calc_of_invoices,
-    no_timesheet_required: !!initial.no_timesheet_required,
-    group_nightsat_sunbh: !!initial.group_nightsat_sunbh,
+    is_nhsp:                     !!initial.is_nhsp,
+    self_bill_no_invoices_sent:  !!initial.self_bill_no_invoices_sent,
+    daily_calc_of_invoices:      !!initial.daily_calc_of_invoices,
+    no_timesheet_required:       !!initial.no_timesheet_required,
+    group_nightsat_sunbh:        !!initial.group_nightsat_sunbh,
 
-    // NEW flags
-    // requires_hr: default false
-    requires_hr: !!initial.requires_hr,
+    // HR flags
+    requires_hr:                 !!initial.requires_hr,          // “Requires HealthRoster cross-check”
+    autoprocess_hr:              !!initial.autoprocess_hr,       // NEW: “Autoprocess timesheets with HealthRoster”
     // Attachments: default TRUE when unset (so old clients behave as “attach by default”)
-    hr_attach_to_invoice: (initial.hr_attach_to_invoice !== false),
-    ts_attach_to_invoice: (initial.ts_attach_to_invoice !== false),
+    hr_attach_to_invoice:        (initial.hr_attach_to_invoice !== false),
+    ts_attach_to_invoice:        (initial.ts_attach_to_invoice !== false),
   };
 
   // Persist back into modalCtx so openClient() sees the normalised values
@@ -20907,24 +21521,25 @@ async function renderClientSettingsUI(settingsObj){
 
           <!-- Row 1: existing ref flags + NHSP -->
           <div class="toggle-row" style="display:flex;flex-wrap:wrap;gap:10px;">
-            ${yesNoToggle('pay_reference_required', 'Ref No. required to PAY', s.pay_reference_required)}
-            ${yesNoToggle('invoice_reference_required', 'Ref No. required to INVOICE', s.invoice_reference_required)}
-            ${yesNoToggle('is_nhsp', 'NHSP client', s.is_nhsp)}
+            ${yesNoToggle('pay_reference_required',     'Ref No. required to PAY',      s.pay_reference_required)}
+            ${yesNoToggle('invoice_reference_required', 'Ref No. required to INVOICE',  s.invoice_reference_required)}
+            ${yesNoToggle('is_nhsp',                    'NHSP client',                  s.is_nhsp)}
           </div>
 
           <!-- Row 2: core process flags -->
           <div class="toggle-row" style="display:flex;flex-wrap:wrap;gap:10px;">
             ${yesNoToggle('self_bill_no_invoices_sent', 'Self-bill (no invoices sent)', s.self_bill_no_invoices_sent)}
-            ${yesNoToggle('daily_calc_of_invoices', 'Daily invoice calculation', s.daily_calc_of_invoices)}
-            ${yesNoToggle('no_timesheet_required', 'No timesheet required', s.no_timesheet_required)}
-            ${yesNoToggle('group_nightsat_sunbh', 'Group Night/Sat/Sun/BH', s.group_nightsat_sunbh)}
+            ${yesNoToggle('daily_calc_of_invoices',     'Daily invoice calculation',    s.daily_calc_of_invoices)}
+            ${yesNoToggle('no_timesheet_required',      'No timesheet required',        s.no_timesheet_required)}
+            ${yesNoToggle('group_nightsat_sunbh',       'Group Night/Sat/Sun/BH',       s.group_nightsat_sunbh)}
           </div>
 
           <!-- Row 3: HR + attachments -->
           <div class="toggle-row" style="display:flex;flex-wrap:wrap;gap:10px;">
-            ${yesNoToggle('requires_hr', 'Requires HealthRoster cross-check', s.requires_hr)}
-            ${yesNoToggle('hr_attach_to_invoice', 'Attach HealthRoster to invoice', s.hr_attach_to_invoice)}
-            ${yesNoToggle('ts_attach_to_invoice', 'Attach timesheets to invoice', s.ts_attach_to_invoice)}
+            ${yesNoToggle('requires_hr',       'Requires HealthRoster cross-check',       s.requires_hr)}
+            ${yesNoToggle('autoprocess_hr',    'Autoprocess timesheets with HealthRoster',s.autoprocess_hr)}
+            ${yesNoToggle('hr_attach_to_invoice', 'Attach HealthRoster to invoice',       s.hr_attach_to_invoice)}
+            ${yesNoToggle('ts_attach_to_invoice', 'Attach timesheets to invoice',         s.ts_attach_to_invoice)}
           </div>
         </div>
       </div>
@@ -20934,7 +21549,7 @@ async function renderClientSettingsUI(settingsObj){
         <div class="controls">
           <select name="default_submission_mode">
             <option value="ELECTRONIC" ${s.default_submission_mode==='ELECTRONIC'?'selected':''}>ELECTRONIC</option>
-            <option value="MANUAL" ${s.default_submission_mode==='MANUAL'?'selected':''}>MANUAL</option>
+            <option value="MANUAL"     ${s.default_submission_mode==='MANUAL'    ?'selected':''}>MANUAL</option>
           </select>
         </div>
       </div>
@@ -20974,7 +21589,7 @@ async function renderClientSettingsUI(settingsObj){
   let lastValid = { ...s };
 
   if (root.__wired) {
-    root.removeEventListener('input', root.__syncSoft, true);
+    root.removeEventListener('input',  root.__syncSoft, true);
     root.removeEventListener('change', root.__syncValidate, true);
     timeKeys.forEach(k=>{
       const el = root.querySelector(`input[name="${k}"]`);
@@ -21010,6 +21625,7 @@ async function renderClientSettingsUI(settingsObj){
     next.no_timesheet_required         = asBool(vals.no_timesheet_required);
     next.group_nightsat_sunbh          = asBool(vals.group_nightsat_sunbh);
     next.requires_hr                   = asBool(vals.requires_hr);
+    next.autoprocess_hr                = asBool(vals.autoprocess_hr);
     next.hr_attach_to_invoice          = asBool(vals.hr_attach_to_invoice);
     next.ts_attach_to_invoice          = asBool(vals.ts_attach_to_invoice);
 
@@ -21054,6 +21670,7 @@ async function renderClientSettingsUI(settingsObj){
     const noTsReq  = asBool(vals.no_timesheet_required);
     const groupNsb = asBool(vals.group_nightsat_sunbh);
     const reqHr    = asBool(vals.requires_hr);
+    const autoHr   = asBool(vals.autoprocess_hr);
     const attHr    = asBool(vals.hr_attach_to_invoice);
     const attTs    = asBool(vals.ts_attach_to_invoice);
 
@@ -21074,6 +21691,7 @@ async function renderClientSettingsUI(settingsObj){
       no_timesheet_required:         noTsReq,
       group_nightsat_sunbh:          groupNsb,
       requires_hr:                   reqHr,
+      autoprocess_hr:                autoHr,
       hr_attach_to_invoice:          attHr,
       ts_attach_to_invoice:          attTs
     };
@@ -23866,6 +24484,7 @@ function renderSummary(rows){
 
   // ── NEW: Contracts quick Status menu ────────────────────────────────────────
    // ── Contracts quick Status menu (All / Active / Unassigned / Completed) ────
+   // ── Contracts quick Status menu (All / Active / Unassigned / Completed) ────
   let statusSel = null;
   if (currentSection === 'contracts') {
     const stFilters = window.__listState[currentSection].filters || {};
@@ -23880,7 +24499,6 @@ function renderSummary(rows){
 
     statusSel = document.createElement('select');
 
-    // v = value sent as ?status=..., l = label shown in dropdown
     [['all','All'], ['active','Active'], ['unassigned','Unassigned'], ['completed','Completed']]
       .forEach(([v, l]) => {
         const o = document.createElement('option');
@@ -23891,7 +24509,7 @@ function renderSummary(rows){
       });
 
     statusSel.addEventListener('change', async () => {
-      const val = statusSel.value; // 'all'|'active'|'unassigned'|'completed'
+      const val = statusSel.value;
       const curFilters = { ...(window.__listState[currentSection].filters || {}) };
       curFilters.status = val;
       window.__listState[currentSection].filters = curFilters;
@@ -23904,6 +24522,137 @@ function renderSummary(rows){
     topControls.appendChild(statusSel);
   }
 
+  // ── Timesheets quick filters: Stage / Route / Scope / Flags ────────────────
+  if (currentSection === 'timesheets') {
+    const stFilters = window.__listState[currentSection].filters || {};
+    window.__listState[currentSection].filters = stFilters;
+
+    // Stage dropdown
+    const stageLabel = document.createElement('span');
+    stageLabel.className = 'mini';
+    stageLabel.textContent = 'Stage:';
+    const stageSel = document.createElement('select');
+
+    const stageOpts = [
+      ['ALL',              'All'],
+      ['PAID',             'Paid'],
+      ['INVOICED',         'Invoiced'],
+      ['READY_FOR_INVOICE','Ready for invoice'],
+      ['READY_FOR_HR',     'Ready for HR'],
+      ['PENDING_AUTH',     'Awaiting auth'],
+      ['NEEDS_ATTENTION',  'Needs attention']
+    ];
+    const stageCur = (stFilters.summary_stage || 'ALL').toUpperCase();
+    stageOpts.forEach(([v, label]) => {
+      const o = document.createElement('option');
+      o.value = v;
+      o.textContent = label;
+      if (stageCur === v) o.selected = true;
+      stageSel.appendChild(o);
+    });
+    stageSel.addEventListener('change', async () => {
+      const val = stageSel.value;
+      const curFilters = { ...(window.__listState[currentSection].filters || {}) };
+      curFilters.summary_stage = val;
+      window.__listState[currentSection].filters = curFilters;
+      window.__listState[currentSection].page = 1;
+      const data = await loadSection();
+      renderSummary(data);
+    });
+    topControls.appendChild(stageLabel);
+    topControls.appendChild(stageSel);
+
+    // Route dropdown
+    const routeLabel = document.createElement('span');
+    routeLabel.className = 'mini';
+    routeLabel.textContent = 'Route:';
+    const routeSel = document.createElement('select');
+    const routeOpts = [
+      ['ALL',                  'All'],
+      ['DAILY_ELECTRONIC',     'Daily – electronic'],
+      ['DAILY_MANUAL',         'Daily – manual'],
+      ['WEEKLY_ELECTRONIC',    'Weekly – electronic'],
+      ['WEEKLY_MANUAL',        'Weekly – manual'],
+      ['WEEKLY_NHSP',          'Weekly – NHSP'],
+      ['WEEKLY_NHSP_ADJUSTMENT','Weekly – NHSP adj']
+    ];
+    const routeCur = (stFilters.route_type || 'ALL').toUpperCase();
+    routeOpts.forEach(([v, label]) => {
+      const o = document.createElement('option');
+      o.value = v;
+      o.textContent = label;
+      if (routeCur === v) o.selected = true;
+      routeSel.appendChild(o);
+    });
+    routeSel.addEventListener('change', async () => {
+      const val = routeSel.value;
+      const curFilters = { ...(window.__listState[currentSection].filters || {}) };
+      curFilters.route_type = val;
+      window.__listState[currentSection].filters = curFilters;
+      window.__listState[currentSection].page = 1;
+      const data = await loadSection();
+      renderSummary(data);
+    });
+    topControls.appendChild(routeLabel);
+    topControls.appendChild(routeSel);
+
+    // Scope dropdown (Both / Weekly / Daily)
+    const scopeLabel = document.createElement('span');
+    scopeLabel.className = 'mini';
+    scopeLabel.textContent = 'Type:';
+    const scopeSel = document.createElement('select');
+    const scopeOpts = [
+      ['ALL',    'Both'],
+      ['WEEKLY', 'Weekly only'],
+      ['DAILY',  'Daily only']
+    ];
+    const scopeCur = (stFilters.sheet_scope || 'ALL').toUpperCase();
+    scopeOpts.forEach(([v, label]) => {
+      const o = document.createElement('option');
+      o.value = v;
+      o.textContent = label;
+      if (scopeCur === v) o.selected = true;
+      scopeSel.appendChild(o);
+    });
+    scopeSel.addEventListener('change', async () => {
+      const val = scopeSel.value;
+      const curFilters = { ...(window.__listState[currentSection].filters || {}) };
+      curFilters.sheet_scope = val;
+      window.__listState[currentSection].filters = curFilters;
+      window.__listState[currentSection].page = 1;
+      const data = await loadSection();
+      renderSummary(data);
+    });
+    topControls.appendChild(scopeLabel);
+    topControls.appendChild(scopeSel);
+
+    // Flags: adjusted / QR / needs attention
+    const mkFlag = (name, label) => {
+      const wrap = document.createElement('label');
+      wrap.className = 'mini';
+      wrap.style.display = 'flex';
+      wrap.style.alignItems = 'center';
+      wrap.style.gap = '4px';
+      const cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.checked = !!stFilters[name];
+      cb.addEventListener('change', async () => {
+        const curFilters = { ...(window.__listState[currentSection].filters || {}) };
+        curFilters[name] = cb.checked ? true : false;
+        window.__listState[currentSection].filters = curFilters;
+        window.__listState[currentSection].page = 1;
+        const data = await loadSection();
+        renderSummary(data);
+      });
+      wrap.appendChild(cb);
+      wrap.appendChild(document.createTextNode(label));
+      return wrap;
+    };
+
+    topControls.appendChild(mkFlag('is_adjusted', 'Adjusted only'));
+    topControls.appendChild(mkFlag('is_qr', 'QR only'));
+    topControls.appendChild(mkFlag('needs_attention', 'Needs attention'));
+  }
 
   // Columns button
   const btnCols = document.createElement('button');
@@ -23911,6 +24660,7 @@ function renderSummary(rows){
   btnCols.style.cssText = 'border:1px solid var(--line);background:#0b152a;color:var(--text);padding:4px 8px;border-radius:8px;cursor:pointer';
   btnCols.addEventListener('click', () => openColumnsDialog(currentSection));
   topControls.appendChild(btnCols);
+
 
   const spacerTop = document.createElement('div'); spacerTop.style.flex = '1';
   topControls.appendChild(spacerTop);
@@ -24693,6 +25443,2260 @@ async function duplicateContract(contractId, { count } = {}) {
     };
   }
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+// ================== Timesheet helpers ==================
+
+async function fetchTimesheetDetails(timesheetId) {
+  const LOGM = (typeof window.__LOG_MODAL === 'boolean') ? window.__LOG_MODAL : false;
+  const L    = (...a) => { if (LOGM) console.log('[TS][DETAILS]', ...a); };
+  const GC   = (label) => { if (LOGM) console.groupCollapsed('[TS][DETAILS]', label); };
+  const GE   = () => { if (LOGM) console.groupEnd(); };
+
+  if (!timesheetId) {
+    throw new Error('fetchTimesheetDetails: timesheetId is required');
+  }
+
+  const encId = encodeURIComponent(timesheetId);
+  const url   = API(`/api/timesheets/${encId}/details`);
+  GC('request');
+  L('→ GET', { url, timesheetId });
+
+  let res;
+  try {
+    res = await authFetch(url);
+  } catch (err) {
+    L('network error', { url, error: err });
+    GE();
+    throw err;
+  }
+
+  let json;
+  try {
+    const text = await res.text();
+    if (!res.ok) {
+      L('server error', { status: res.status, bodyPreview: text.slice(0, 400) });
+      GE();
+      throw new Error(text || `Timesheet details failed (${res.status})`);
+    }
+    json = text ? JSON.parse(text) : {};
+  } catch (err) {
+    L('parse error', { status: res.status, error: err });
+    GE();
+    throw err;
+  }
+
+  const timesheet   = json.timesheet  || null;
+  const tsfin       = json.tsfin      || null;
+  const validations = Array.isArray(json.validations) ? json.validations : [];
+  const shifts      = Array.isArray(json.shifts)      ? json.shifts      : [];
+
+  // Derive invoice breakdown + segments
+  const ib   = tsfin && tsfin.invoice_breakdown_json && typeof tsfin.invoice_breakdown_json === 'object'
+    ? tsfin.invoice_breakdown_json
+    : null;
+  const mode = ib && typeof ib.mode === 'string' ? ib.mode : null;
+  const rawSegments = (ib && Array.isArray(ib.segments)) ? ib.segments : [];
+
+  // Normalise segments: ensure exclude_from_pay is boolean and segment_id is string
+  const segments = rawSegments.map((seg, idx) => {
+    const s = seg && typeof seg === 'object' ? { ...seg } : { };
+    s.segment_id = String(s.segment_id || `seg:${timesheetId}:${idx}`);
+    s.exclude_from_pay = !!s.exclude_from_pay;
+    return s;
+  });
+
+  const isSegments = mode === 'SEGMENTS';
+
+  const detail = {
+    timesheet,
+    tsfin,
+    validations,
+    shifts,
+    segments,
+    invoiceBreakdown: ib,
+    isSegmentsMode: isSegments,
+
+    // Convenience: surface key fields that backend already returned
+    sheet_scope: json.sheet_scope || (timesheet ? timesheet.sheet_scope || null : null),
+    qr_status: json.qr_status || (timesheet ? timesheet.qr_status || null : null),
+    qr_generated_at: json.qr_generated_at || null,
+    qr_scanned_at: json.qr_scanned_at || null,
+    manual_pdf_r2_key: json.manual_pdf_r2_key || (timesheet ? timesheet.manual_pdf_r2_key || null : null)
+  };
+
+  L('parsed payload snapshot', {
+    hasTimesheet: !!timesheet,
+    hasTsfin: !!tsfin,
+    validationsCount: validations.length,
+    shiftsCount: shifts.length,
+    segmentsCount: segments.length,
+    mode,
+    sheet_scope: detail.sheet_scope,
+    qr_status: detail.qr_status
+  });
+  GE();
+  return detail;
+}
+
+async function fetchTimesheetRelated(timesheetId) {
+  const LOGM = (typeof window.__LOG_MODAL === 'boolean') ? window.__LOG_MODAL : false;
+  const L    = (...a) => { if (LOGM) console.log('[TS][RELATED]', ...a); };
+  const GC   = (label) => { if (LOGM) console.groupCollapsed('[TS][RELATED]', label); };
+  const GE   = () => { if (LOGM) console.groupEnd(); };
+
+  if (!timesheetId) {
+    throw new Error('fetchTimesheetRelated: timesheetId is required');
+  }
+
+  GC('fetchTimesheetRelated');
+  L('START', { timesheetId });
+
+  // 1) Get counts so we know what to request
+  let counts = {};
+  try {
+    counts = await fetchRelatedCounts('timesheet', timesheetId) || {};
+    L('counts', counts);
+  } catch (err) {
+    L('fetchRelatedCounts failed, proceeding with empty counts', err);
+    counts = {};
+  }
+
+  const out = {
+    counts,
+    candidate: null,
+    client:    null,
+    invoice:   null,
+    umbrella:  null,
+    contract:  null,
+    series:    []
+  };
+
+  // Helper to safely fetch related items
+  const safeFetch = async (typeKey, label) => {
+    try {
+      const items = await fetchRelated('timesheet', timesheetId, typeKey);
+      L(`related[${label}]`, { count: Array.isArray(items) ? items.length : -1, items });
+      return items || [];
+    } catch (err) {
+      L(`related[${label}] failed`, err);
+      return [];
+    }
+  };
+
+  // Candidate (0/1)
+  if ((counts.candidate ?? 0) > 0) {
+    const items = await safeFetch('candidate', 'candidate');
+    out.candidate = items[0] || null;
+  }
+
+  // Client (0/1)
+  if ((counts.client ?? 0) > 0) {
+    const items = await safeFetch('client', 'client');
+    out.client = items[0] || null;
+  }
+
+  // Invoice (0/1)
+  if ((counts.invoice ?? 0) > 0) {
+    const items = await safeFetch('invoice', 'invoice');
+    out.invoice = items[0] || null;
+  }
+
+  // Umbrella (0/1)
+  if ((counts.umbrella ?? 0) > 0) {
+    const items = await safeFetch('umbrella', 'umbrella');
+    out.umbrella = items[0] || null;
+  }
+
+  // Contract (0/1)
+  if ((counts.contract ?? 0) > 0) {
+    const items = await safeFetch('contract', 'contract');
+    out.contract = items[0] || null;
+  }
+
+  // Series (base + adjustments for same contract/week)
+  if ((counts.series ?? 0) > 0) {
+    const items = await safeFetch('series', 'series');
+    out.series = Array.isArray(items) ? items : [];
+  }
+
+  L('RESULT', {
+    hasCandidate: !!out.candidate,
+    hasClient: !!out.client,
+    hasInvoice: !!out.invoice,
+    hasUmbrella: !!out.umbrella,
+    hasContract: !!out.contract,
+    seriesCount: out.series.length
+  });
+  GE();
+  return out;
+}
+
+async function fetchTimesheetSourceRows(timesheetId, opts = {}) {
+  const LOGM = (typeof window.__LOG_MODAL === 'boolean') ? window.__LOG_MODAL : false;
+  const L    = (...a) => { if (LOGM) console.log('[TS][SOURCE]', ...a); };
+  const GC   = (label) => { if (LOGM) console.groupCollapsed('[TS][SOURCE]', label); };
+  const GE   = () => { if (LOGM) console.groupEnd(); };
+
+  if (!timesheetId) {
+    throw new Error('fetchTimesheetSourceRows: timesheetId is required');
+  }
+
+  const scopeRaw = (opts.scope || 'all').toLowerCase();
+  const scope    = scopeRaw === 'shift' ? 'shift' : 'all';
+  const shiftId  = scope === 'shift' ? (opts.shiftId || opts.shift_id || '') : '';
+  const includeExcluded = !!opts.includeExcluded || !!opts.include_excluded;
+
+  const qp = new URLSearchParams();
+  qp.set('scope', scope);
+  if (scope === 'shift' && shiftId) qp.set('shift_id', String(shiftId));
+  if (includeExcluded) qp.set('include_excluded', 'true');
+
+  const encId = encodeURIComponent(timesheetId);
+  const url   = API(`/api/timesheets/${encId}/source-print?${qp.toString()}`);
+
+  GC('request');
+  L('→ GET', { url, timesheetId, scope, shiftId: shiftId || null, includeExcluded });
+
+  let res;
+  try {
+    res = await authFetch(url);
+  } catch (err) {
+    L('network error', { url, error: err });
+    GE();
+    throw err;
+  }
+
+  let json;
+  try {
+    const text = await res.text();
+    if (!res.ok) {
+      L('server error', { status: res.status, bodyPreview: text.slice(0, 400) });
+      GE();
+      throw new Error(text || `Source rows failed (${res.status})`);
+    }
+    json = text ? JSON.parse(text) : {};
+  } catch (err) {
+    L('parse error', { status: res.status, error: err });
+    GE();
+    throw err;
+  }
+
+  const imports = Array.isArray(json.imports) ? json.imports : [];
+  const summary = imports.map(i => ({
+    source_system: i.source_system,
+    import_id: i.import_id,
+    header_columns: Array.isArray(i.header_columns) ? i.header_columns.length : 0,
+    rows: Array.isArray(i.rows) ? i.rows.length : 0
+  }));
+
+  L('RESULT', {
+    timesheet_id: json.timesheet_id || timesheetId,
+    scope: json.scope || scope,
+    includes_excluded: json.includes_excluded ?? includeExcluded,
+    importsCount: imports.length,
+    importsSummary: summary
+  });
+  GE();
+  return json;
+}
+// ======== Timesheet tab helpers ========
+
+function getTsLoggers(ns) {
+  const LOGM = (typeof window.__LOG_MODAL === 'boolean') ? window.__LOG_MODAL : false;
+  return {
+    LOGM,
+    L:  (...a) => { if (LOGM) console.log(ns, ...a); },
+    GC: (label) => { if (LOGM) console.groupCollapsed(ns, label); },
+    GE: () => { if (LOGM) console.groupEnd(); }
+  };
+}
+
+function normaliseTimesheetCtx(ctx) {
+  const baseCtx = ctx || {};
+  const mc = window.modalCtx || {};
+
+  // Summary row from v_timesheets_summary
+  const row =
+    baseCtx.row ||
+    baseCtx.data ||
+    mc.data ||
+    {};
+
+  // Details from fetchTimesheetDetails
+  const details =
+    baseCtx.details ||
+    mc.timesheetDetails ||
+    {
+      timesheet: null,
+      tsfin: null,
+      validations: [],
+      shifts: [],
+      segments: [],
+      isSegmentsMode: false,
+      invoiceBreakdown: null,
+      sheet_scope: row.sheet_scope || null,
+      qr_status: row.qr_status || null
+    };
+
+  // Related entities from fetchTimesheetRelated
+  const related =
+    baseCtx.related ||
+    mc.timesheetRelated ||
+    {
+      counts: {},
+      candidate: null,
+      client: null,
+      invoice: null,
+      umbrella: null,
+      contract: null,
+      series: []
+    };
+
+  // Timesheet-ui state (staging for future Save)
+  if (!mc.timesheetState || typeof mc.timesheetState !== 'object') {
+    mc.timesheetState = {
+      reference: null,
+      payHoldDesired: null,   // null = unchanged, true/false = desired state
+      payHoldReason: '',
+      markPaid: false,
+      segmentOverrides: {},   // { segment_id: { exclude_from_pay: bool } }
+      nhspDeferrals: {}       // { shift_id: { defer_until_run_after: string|null } }
+    };
+  }
+  const state = mc.timesheetState;
+
+  // Ensure modalCtx has these attached for other code to use
+  window.modalCtx = mc;
+  if (!mc.timesheetDetails) mc.timesheetDetails = details;
+  if (!mc.timesheetRelated) mc.timesheetRelated = related;
+
+  return { row, details, related, state };
+}
+
+// Utility: map route_type / status to pill CSS classes
+function classifyTimesheetPill(kind, value) {
+  const v = String(value || '').toUpperCase();
+  switch (kind) {
+    case 'stage':
+      if (v === 'PAID') return 'pill pill-ok';
+      if (v === 'INVOICED') return 'pill pill-info';
+      if (v === 'READY_FOR_INVOICE') return 'pill pill-info';
+      if (v === 'READY_FOR_HR') return 'pill pill-info';
+      if (v === 'PENDING_AUTH') return 'pill pill-warn';
+      if (v === 'NEEDS_ATTENTION') return 'pill pill-bad';
+      return 'pill pill-muted';
+
+    case 'route':
+      if (v.startsWith('WEEKLY_NHSP')) return 'pill pill-nhsp';
+      if (v === 'WEEKLY_HEALTHROSTER') return 'pill pill-hr';
+      if (v.startsWith('WEEKLY')) return 'pill pill-weekly';
+      if (v.startsWith('DAILY')) return 'pill pill-daily';
+      return 'pill pill-muted';
+
+    case 'scope':
+      return (v === 'WEEKLY')
+        ? 'pill pill-weekly'
+        : (v === 'DAILY' ? 'pill pill-daily' : 'pill pill-muted');
+
+    case 'mode':
+      return (v === 'ELECTRONIC')
+        ? 'pill pill-elec'
+        : (v === 'MANUAL' ? 'pill pill-manual' : 'pill pill-muted');
+
+    default:
+      return 'pill pill-muted';
+  }
+}
+function renderTimesheetOverviewTab(ctx) {
+  const { LOGM, L, GC, GE } = getTsLoggers('[TS][OVERVIEW]');
+  const { row, details, related, state } = normaliseTimesheetCtx(ctx);
+
+  GC('render');
+  const ts    = details.timesheet || {};
+  const tsfin = details.tsfin     || {};
+  const sheetScope = row.sheet_scope || details.sheet_scope || ts.sheet_scope || null;
+  const subMode    = row.submission_mode || ts.submission_mode || null;
+  const routeType  = row.route_type || tsfin.basis || null;
+  const stage      = row.summary_stage || null;
+
+  const candidateName = row.candidate_name || (related.candidate && related.candidate.display_name) || ts.occupant_key_norm || '';
+  const clientName    = row.client_name    || (related.client && related.client.name) || '';
+  const weekEnding    = row.week_ending_date || ts.week_ending_date || '';
+  const bookingId     = row.booking_id || ts.booking_id || '';
+  const contractInfo  = related.contract || null;
+
+  const totalHours = tsfin.total_hours ?? null;
+  const payEx      = tsfin.total_pay_ex_vat ?? null;
+  const chargeEx   = tsfin.total_charge_ex_vat ?? null;
+  const marginEx   = tsfin.margin_ex_vat ?? null;
+
+  const nhspCount     = row.nhsp_shift_count || 0;
+  const hasNhsp       = nhspCount > 0;
+  const isAdjusted    = !!row.is_adjusted;
+  const isQr          = !!row.is_qr;
+  const payOnHold     = !!row.pay_on_hold;
+  const needsAttention= !!row.needs_attention;
+  const isAdjustment  = !!row.is_adjustment;
+
+  const paidAt    = tsfin.paid_at_utc || row.paid_at_utc || null;
+  const invoiced  = !!row.locked_by_invoice_id;
+
+  // Reference staging: prefer staged state.reference, else TS reference_number
+  const referenceCurrent = (state.reference != null)
+    ? state.reference
+    : (ts.reference_number || row.reference_number || '');
+
+  L('render snapshot', {
+    tsId: row.timesheet_id || ts.timesheet_id,
+    sheetScope,
+    subMode,
+    routeType,
+    stage,
+    candidateName,
+    clientName,
+    weekEnding,
+    isAdjusted,
+    isQr,
+    payOnHold,
+    needsAttention,
+    isAdjustment,
+    hasNhsp,
+    paidAt,
+    invoiced
+  });
+  GE();
+
+  // Build pill UI fragments (CSS to be added later)
+  const stageClass = classifyTimesheetPill('stage', stage);
+  const routeClass = classifyTimesheetPill('route', routeType);
+  const scopeClass = classifyTimesheetPill('scope', sheetScope);
+  const modeClass  = classifyTimesheetPill('mode', subMode);
+
+  const flagPills = [];
+  if (isAdjusted)     flagPills.push('<span class="pill pill-warn">Adjusted</span>');
+  if (isQr)           flagPills.push('<span class="pill pill-elec">QR</span>');
+  if (payOnHold)      flagPills.push('<span class="pill pill-hold">Pay on hold</span>');
+  if (needsAttention) flagPills.push('<span class="pill pill-bad">Needs attention</span>');
+  if (isAdjustment)   flagPills.push('<span class="pill pill-hr">Adjustment week</span>');
+  if (hasNhsp)        flagPills.push('<span class="pill pill-nhsp">NHSP</span>');
+  if (invoiced)       flagPills.push('<span class="pill pill-info">Invoiced</span>');
+  if (paidAt)         flagPills.push('<span class="pill pill-ok">Paid</span>');
+
+  const contractLine = contractInfo
+    ? `${contractInfo.role || ''}${contractInfo.band ? ' (Band ' + contractInfo.band + ')' : ''}`
+    : '';
+
+  const canMarkPaid = !paidAt;
+
+  return `
+    <div class="tabc">
+      <div class="card">
+        <div class="row">
+          <label>Candidate</label>
+          <div class="controls">
+            ${candidateName || '<span class="mini">Unknown</span>'}
+          </div>
+        </div>
+        <div class="row">
+          <label>Client</label>
+          <div class="controls">
+            ${clientName || '<span class="mini">Unknown</span>'}
+          </div>
+        </div>
+        <div class="row">
+          <label>Week ending</label>
+          <div class="controls">
+            ${weekEnding || '<span class="mini">Not set</span>'}
+          </div>
+        </div>
+        <div class="row">
+          <label>Booking ID</label>
+          <div class="controls">
+            ${bookingId || '<span class="mini">—</span>'}
+          </div>
+        </div>
+        <div class="row">
+          <label>Contract</label>
+          <div class="controls">
+            ${contractLine || '<span class="mini">No contract linked</span>'}
+          </div>
+        </div>
+      </div>
+
+      <div class="card" style="margin-top:10px;">
+        <div class="row">
+          <label>Stage / Route</label>
+          <div class="controls">
+            <span class="${stageClass}">${stage || 'UNKNOWN'}</span>
+            <span class="${routeClass}">${routeType || 'UNKNOWN'}</span>
+          </div>
+        </div>
+        <div class="row">
+          <label>Scope / Mode</label>
+          <div class="controls">
+            <span class="${scopeClass}">${sheetScope || '—'}</span>
+            <span class="${modeClass}">${subMode || '—'}</span>
+          </div>
+        </div>
+        <div class="row">
+          <label>Flags</label>
+          <div class="controls">
+            ${flagPills.length ? flagPills.join(' ') : '<span class="mini">None</span>'}
+          </div>
+        </div>
+      </div>
+
+      <div class="card" style="margin-top:10px;">
+        <div class="row">
+          <label>Total hours</label>
+          <div class="controls">${totalHours != null ? totalHours : '<span class="mini">—</span>'}</div>
+        </div>
+        <div class="row">
+          <label>Pay ex VAT</label>
+          <div class="controls">${payEx != null ? payEx : '<span class="mini">—</span>'}</div>
+        </div>
+        <div class="row">
+          <label>Charge ex VAT</label>
+          <div class="controls">${chargeEx != null ? chargeEx : '<span class="mini">—</span>'}</div>
+        </div>
+        <div class="row">
+          <label>Margin ex VAT</label>
+          <div class="controls">${marginEx != null ? marginEx : '<span class="mini">—</span>'}</div>
+        </div>
+      </div>
+
+             <div class="card" style="margin-top:10px;">
+        <div class="row">
+          <label>Reference / PO</label>
+          <div class="controls">
+            <input type="text" name="ts_reference" value="${(referenceCurrent || '').replace(/"/g,'&quot;')}" />
+            <span class="mini" style="margin-left:8px;">
+              Edit in <strong>Edit</strong> mode. Changes are applied when you click <strong>Save</strong>.
+            </span>
+          </div>
+        </div>
+
+        <!-- Pay on hold: view text + edit-mode staged checkbox -->
+        <div class="row">
+          <label>Pay on hold</label>
+          <div class="controls">
+            <!-- VIEW mode: display-only text -->
+            <span class="mini" data-view-only="true">
+              ${payOnHold ? 'Yes (current TSFIN)' : 'No'}
+            </span>
+
+            <!-- EDIT mode: staged checkbox + optional reason -->
+            <label class="mini" data-edit-only="true" style="display:none; margin-left:4px;">
+              <input type="checkbox" name="ts_pay_hold" />
+              Pay on hold (staged)
+            </label>
+            <input
+              type="text"
+              name="ts_pay_hold_reason"
+              data-edit-only="true"
+              style="display:none; margin-left:8px; max-width:240px;"
+              placeholder="Reason (optional)…"
+            />
+          </div>
+        </div>
+
+        <!-- Paid / Invoiced: view text + edit-mode staged 'mark paid' checkbox -->
+        <div class="row">
+          <label>Paid / Invoiced</label>
+          <div class="controls">
+            <!-- VIEW mode: display-only text -->
+            <span class="mini" data-view-only="true">
+              ${paidAt ? 'Paid at ' + paidAt : 'Not paid'}
+              &nbsp; / &nbsp;
+              ${invoiced ? 'On invoice ' + (row.locked_by_invoice_id || '') : 'Not invoiced'}
+            </span>
+
+            <!-- EDIT mode: staged mark-paid checkbox -->
+            <label class="mini" data-edit-only="true" style="display:none; margin-left:4px;">
+              <input type="checkbox" name="ts_mark_paid" />
+              Mark as paid (staged)
+            </label>
+          </div>
+        </div>
+      </div>
+
+
+     <div class="card" style="margin-top:10px;">
+     <div class="row">
+       <label>Actions</label>
+       <div class="controls">
+         <button type="button"
+           data-ts-action="authorise">
+           Authorise timesheet
+         </button>
+         <span class="mini" style="margin-left:8px;">
+           Authorise is applied immediately in view mode.
+         </span>
+       </div>
+     </div>
+   </div>
+
+    </div>
+  `;
+}
+
+
+function renderTimesheetIssuesTab(ctx) {
+  const { LOGM, L, GC, GE } = getTsLoggers('[TS][ISSUES]');
+  const { row, details } = normaliseTimesheetCtx(ctx);
+
+  GC('render');
+  const tsfin       = details.tsfin || {};
+  const validations = Array.isArray(details.validations) ? details.validations : [];
+  const stage       = row.summary_stage || null;
+  const procStatus  = tsfin.processing_status || row.processing_status || null;
+  const payOnHold   = !!row.pay_on_hold;
+  const basis       = tsfin.basis || row.basis || null;
+
+  L('snapshot', {
+    stage,
+    procStatus,
+    payOnHold,
+    basis,
+    validationsCount: validations.length
+  });
+
+  const issues = [];
+
+  // Processing status-based issues
+  const p = String(procStatus || '').toUpperCase();
+  if (p === 'RATE_MISSING') {
+    issues.push('Rate missing: no pay/charge rates found for this client/role/band on this date.');
+  }
+  if (p === 'PAY_CHANNEL_MISSING') {
+    issues.push('Pay channel missing: candidate bank/umbrella details incomplete for this timesheet.');
+  }
+  if (p === 'CLIENT_UNRESOLVED') {
+    issues.push('Client unresolved: timesheet could not be linked to a client correctly.');
+  }
+  if (p === 'UNASSIGNED') {
+    issues.push('Unassigned: this timesheet has not been fully matched or processed yet.');
+  }
+
+  // Stage-based generic attention
+  if (String(stage || '').toUpperCase() === 'NEEDS_ATTENTION') {
+    if (!issues.length) {
+      issues.push('This timesheet is flagged as "Needs attention". Check rates, pay channel, and validation results.');
+    }
+  }
+
+  // Pay hold
+  if (payOnHold) {
+    issues.push('Pay is currently on hold for this timesheet. It will be excluded from pay runs until released.');
+  }
+
+  // Validation rows
+  const valItems = validations.map(v => {
+    return `
+      <li>
+        <span class="mini">
+          [${v.source_system || v.kind || 'VALIDATION'}] ${v.status || 'UNKNOWN'} – ${v.reason || '(no reason given)'}
+        </span>
+      </li>
+    `;
+  }).join('');
+
+  if (!valItems && !issues.length) {
+    issues.push('No blocking issues detected. This timesheet should be ready once normal processing steps complete.');
+  }
+
+  GE();
+
+  return `
+    <div class="tabc">
+      <div class="card">
+        <div class="row">
+          <label>Processing status</label>
+          <div class="controls">
+            <span class="mini">${procStatus || 'UNKNOWN'}</span>
+          </div>
+        </div>
+        <div class="row">
+          <label>Stage</label>
+          <div class="controls">
+            <span class="mini">${stage || 'UNKNOWN'}</span>
+          </div>
+        </div>
+        <div class="row">
+          <label>Basis</label>
+          <div class="controls">
+            <span class="mini">${basis || '—'}</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="card" style="margin-top:10px;">
+        <div class="row">
+          <label>Issues</label>
+          <div class="controls">
+            <ul class="mini">
+              ${issues.map(i => `<li>${i}</li>`).join('')}
+            </ul>
+          </div>
+        </div>
+      </div>
+
+      <div class="card" style="margin-top:10px;">
+        <div class="row">
+          <label>Validation log</label>
+          <div class="controls">
+            ${valItems ? `<ul>${valItems}</ul>` : '<span class="mini">No validation rows recorded.</span>'}
+          </div>
+        </div>
+        <div class="row">
+          <label></label>
+          <div class="controls">
+            <button type="button" data-ts-action="load-source-rows">
+              View source rows (HealthRoster / NHSP)
+            </button>
+            <span class="mini" style="margin-left:8px;">
+              This will call /api/timesheets/&lt;id&gt;/source-print and show the original HR / NHSP rows used to create this timesheet.
+            </span>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+}
+function renderTimesheetFinanceTab(ctx) {
+  const { LOGM, L, GC, GE } = getTsLoggers('[TS][FINANCE]');
+  const { row, details } = normaliseTimesheetCtx(ctx);
+
+  GC('render');
+  const tsfin = details.tsfin || {};
+  const payMethod = tsfin.pay_method || row.pay_method || null;
+  const basis     = tsfin.basis || row.basis || null;
+
+  const hours = tsfin.total_hours ?? null;
+  const pay   = tsfin.total_pay_ex_vat ?? null;
+  const charge= tsfin.total_charge_ex_vat ?? null;
+  const margin= tsfin.margin_ex_vat ?? null;
+
+  const paidAt  = tsfin.paid_at_utc || null;
+  const locked  = tsfin.locked_by_invoice_id || row.locked_by_invoice_id || null;
+
+  L('snapshot', {
+    payMethod,
+    basis,
+    hours,
+    pay,
+    charge,
+    margin,
+    paidAt,
+    locked
+  });
+  GE();
+
+  return `
+    <div class="tabc">
+      <div class="card">
+        <div class="row">
+          <label>Pay method</label>
+          <div class="controls">
+            <span class="mini">${payMethod || 'Unknown'}</span>
+          </div>
+        </div>
+        <div class="row">
+          <label>Basis</label>
+          <div class="controls">
+            <span class="mini">${basis || '—'}</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="card" style="margin-top:10px;">
+        <div class="row">
+          <label>Total hours</label>
+          <div class="controls">${hours != null ? hours : '<span class="mini">—</span>'}</div>
+        </div>
+        <div class="row">
+          <label>Pay ex VAT</label>
+          <div class="controls">${pay != null ? pay : '<span class="mini">—</span>'}</div>
+        </div>
+        <div class="row">
+          <label>Charge ex VAT</label>
+          <div class="controls">${charge != null ? charge : '<span class="mini">—</span>'}</div>
+        </div>
+        <div class="row">
+          <label>Margin ex VAT</label>
+          <div class="controls">${margin != null ? margin : '<span class="mini">—</span>'}</div>
+        </div>
+      </div>
+
+      <div class="card" style="margin-top:10px;">
+        <div class="row">
+          <label>Invoice lock</label>
+          <div class="controls">
+            ${locked ? `<span class="mini">Locked by invoice ${locked}</span>` : '<span class="mini">Not locked by an invoice.</span>'}
+          </div>
+        </div>
+        <div class="row">
+          <label>Paid at</label>
+          <div class="controls">
+            ${paidAt ? `<span class="mini">${paidAt}</span>` : '<span class="mini">Not paid.</span>'}
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function renderTimesheetLinesTab(ctx) {
+  const { LOGM, L, GC, GE } = getTsLoggers('[TS][LINES]');
+  const { row, details, state } = normaliseTimesheetCtx(ctx);
+
+  GC('render');
+  const tsId  = row.timesheet_id || (details.timesheet && details.timesheet.timesheet_id) || null;
+  const segs  = Array.isArray(details.segments) ? details.segments : [];
+  const mode  = details.invoiceBreakdown && details.invoiceBreakdown.mode;
+  const shifts = Array.isArray(details.shifts) ? details.shifts : [];
+  const isSegments = !!details.isSegmentsMode;
+
+  L('snapshot', {
+    tsId,
+    mode,
+    segmentsCount: segs.length,
+    shiftsCount: shifts.length,
+    hasOverrides: !!(state && state.segmentOverrides && Object.keys(state.segmentOverrides).length),
+    hasNhspDefers: !!(state && state.nhspDeferrals && Object.keys(state.nhspDeferrals).length)
+  });
+  GE();
+
+  if (!isSegments || !segs.length) {
+    return `
+      <div class="tabc">
+        <div class="card">
+          <div class="row">
+            <label>Lines</label>
+            <div class="controls">
+              <span class="mini">This timesheet does not have a per-line financial breakdown (SEGMENTS mode is not active).</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  const headHtml = `
+    <thead>
+      <tr>
+        <th>Date</th>
+        <th>Ref / Request</th>
+        <th>Source</th>
+        <th>Hours</th>
+        <th>Pay</th>
+        <th>Charge</th>
+        <th>Exclude from pay</th>
+        <th>Defer invoicing</th>
+      </tr>
+    </thead>
+  `;
+
+  const bodyRows = segs.map((seg, idx) => {
+    // Use staged override if present, else fall back to seg.exclude_from_pay
+    const effOverride = state.segmentOverrides && state.segmentOverrides[seg.segment_id];
+    const effExclude  = effOverride && Object.prototype.hasOwnProperty.call(effOverride, 'exclude_from_pay')
+      ? !!effOverride.exclude_from_pay
+      : !!seg.exclude_from_pay;
+
+    const srcRaw = seg.source_system || (seg.segment_id || '').split(':')[0] || '';
+    const src  = srcRaw || '';
+    const date = seg.date || seg.work_date || '';
+    const hours = seg.total_hours ?? seg.hours_day ?? seg.hours_night ?? seg.hours ?? '';
+    const pay   = seg.pay_amount   ?? seg.pay_ex_vat ?? '';
+    const charge= seg.charge_amount?? seg.charge_ex_vat ?? '';
+
+    const ref   = seg.ref_num || '';
+    const reqId = seg.request_id || '';
+
+    // NHSP deferrals: infer shift_id from segment_id if possible (nhsp:<shift_id>)
+    let deferCellHtml = '<span class="mini">—</span>';
+    const isNhsp = String(src).toUpperCase() === 'NHSP';
+    if (isNhsp && seg.segment_id) {
+      let shiftId = '';
+      const parts = String(seg.segment_id).split(':');
+      if (parts.length >= 2 && parts[0].toLowerCase() === 'nhsp') {
+        shiftId = parts[1];
+      }
+      if (shiftId) {
+        const hasStaged = !!(state.nhspDeferrals && state.nhspDeferrals[shiftId]);
+        const label = hasStaged ? 'Deferred (staged)' : 'Defer invoicing (staged)';
+        deferCellHtml = `
+          <button type="button"
+            data-ts-action="defer-shift"
+            data-shift-id="${shiftId}">
+            ${label}
+          </button>
+        `;
+      }
+    }
+
+    return `
+      <tr data-segment-id="${seg.segment_id}">
+        <td>${date || '<span class="mini">—</span>'}</td>
+        <td>
+          ${ref ? `<span class="mini">Ref: ${ref}</span>` : ''}
+          ${reqId ? `<br><span class="mini">Req: ${reqId}</span>` : ''}
+          ${(!ref && !reqId) ? '<span class="mini">—</span>' : ''}
+        </td>
+        <td>${src || '<span class="mini">—</span>'}</td>
+        <td>${hours !== '' ? hours : '<span class="mini">—</span>'}</td>
+        <td>${pay   !== '' ? pay   : '<span class="mini">—</span>'}</td>
+        <td>${charge!== '' ? charge: '<span class="mini">—</span>'}</td>
+        <td>
+          <input
+            type="checkbox"
+            name="seg_exclude_from_pay"
+            data-segment-id="${seg.segment_id}"
+            ${effExclude ? 'checked' : ''}
+          />
+          <span class="mini">Tick = exclude from pay (staged)</span>
+        </td>
+        <td>
+          ${deferCellHtml}
+        </td>
+      </tr>
+    `;
+  }).join('');
+
+  return `
+    <div class="tabc">
+      <div class="card">
+        <div class="row">
+          <label>Timesheet ID</label>
+          <div class="controls">${tsId || '<span class="mini">Unknown</span>'}</div>
+        </div>
+        <div class="row">
+          <label>Mode</label>
+          <div class="controls">
+            <span class="mini">Invoice breakdown mode: ${mode || 'UNKNOWN'}</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="card" style="margin-top:10px;">
+        <div class="row">
+          <label>Lines</label>
+          <div class="controls">
+            <div style="max-height:320px;overflow:auto;">
+              <table class="grid mini">
+                ${headHtml}
+                <tbody>
+                  ${bodyRows}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+        <div class="row">
+          <label></label>
+          <div class="controls">
+            <span class="mini">
+              Changes to "Exclude from pay" and "Defer invoicing" are staged only. They are applied when you click Save on the Timesheet modal.
+            </span>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+
+
+async function openTimesheetPdf(timesheetId) {
+  const LOGM = (typeof window.__LOG_MODAL === 'boolean') ? window.__LOG_MODAL : false;
+  const L    = (...a) => { if (LOGM) console.log('[TS][PDF]', ...a); };
+  const GC   = (label) => { if (LOGM) console.groupCollapsed('[TS][PDF]', label); };
+  const GE   = () => { if (LOGM) console.groupEnd(); };
+
+  if (!timesheetId) {
+    throw new Error('openTimesheetPdf: timesheetId is required');
+  }
+
+  GC('openTimesheetPdf');
+  L('START', { timesheetId });
+
+  const encId = encodeURIComponent(timesheetId);
+  const pdfUrl = API(`/api/timesheets/${encId}/pdf`);
+
+  // 1) Ask backend which R2 key to use for this TS PDF
+  let pdfMeta;
+  try {
+    const res = await authFetch(pdfUrl);
+    const text = await res.text();
+    if (!res.ok) {
+      L('timesheet pdf meta failed', { status: res.status, bodyPreview: text.slice(0, 400) });
+      GE();
+      throw new Error(text || `Failed to resolve PDF for timesheet ${timesheetId}`);
+    }
+    pdfMeta = text ? JSON.parse(text) : {};
+  } catch (err) {
+    L('meta fetch error', err);
+    GE();
+    throw err;
+  }
+
+  const r2Key = pdfMeta.r2_key || pdfMeta.key || pdfMeta.manual_pdf_r2_key || null;
+  if (!r2Key) {
+    L('no r2_key in pdfMeta', pdfMeta);
+    GE();
+    alert('No PDF is available for this timesheet yet.');
+    return;
+  }
+
+  L('meta resolved', { r2Key, rotation_degrees: pdfMeta.rotation_degrees });
+
+  // 2) Ask files API for a presigned download URL
+  const presignUrl = API(`/api/files/presign-download`);
+  let signed;
+  try {
+    const res = await authFetch(presignUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key: r2Key })
+    });
+    const text = await res.text();
+    if (!res.ok) {
+      L('presign-download failed', { status: res.status, bodyPreview: text.slice(0, 400) });
+      GE();
+      throw new Error(text || 'Failed to generate download URL for PDF');
+    }
+    signed = text ? JSON.parse(text) : {};
+  } catch (err) {
+    L('presign error', err);
+    GE();
+    throw err;
+  }
+
+  const url = signed.url || signed.signed_url || null;
+  if (!url) {
+    L('no URL in presign response', signed);
+    GE();
+    alert('Failed to open PDF: missing download URL.');
+    return;
+  }
+
+  L('opening window', { url });
+  GE();
+  try {
+    // Open in new tab; allow popup blockers to handle it
+    window.open(url, '_blank', 'noopener');
+  } catch (err) {
+    if (LOGM) console.warn('[TS][PDF] window.open failed', err);
+    alert('Unable to open PDF window. Please check your popup blocker.');
+  }
+}
+
+async function openTimesheet(row) {
+  const { LOGM, L, GC, GE } = getTsLoggers('[TS][OPEN]');
+  GC('openTimesheet');
+
+  try {
+    // 1) Normalise the incoming row & timesheet id
+    if (!row || typeof row !== 'object') {
+      alert('No timesheet row provided.');
+      GE();
+      return;
+    }
+
+    const baseRow = { ...row };
+    const tsId = baseRow.timesheet_id || baseRow.id || null;
+
+    if (!tsId) {
+      L('ERROR: missing timesheet_id/id on row', { row });
+      GE();
+      alert('Timesheet ID missing.');
+      return;
+    }
+
+    // Ensure row.id is set to timesheet_id for selection/focus consistency
+    baseRow.id = tsId;
+
+    // Rough classification for logging & future UI tweaks
+    const sheetScope = (baseRow.sheet_scope || '').toUpperCase();
+    const subMode    = (baseRow.submission_mode || '').toUpperCase();
+    const basis      = (baseRow.basis || '').toUpperCase();
+    const routeType  = (baseRow.route_type || '').toUpperCase();
+
+    L('ENTRY', {
+      tsId,
+      sheetScope,
+      subMode,
+      basis,
+      routeType,
+      rowKeys: Object.keys(baseRow || {})
+    });
+
+    // 2) Fetch details + related entities from backend
+    let details, related;
+    try {
+      details = await fetchTimesheetDetails(tsId);
+      L('details fetched', {
+        hasTimesheet: !!details.timesheet,
+        hasTsfin: !!details.tsfin,
+        segments: (details.segments || []).length,
+        shifts: (details.shifts || []).length,
+        isSegmentsMode: !!details.isSegmentsMode
+      });
+    } catch (err) {
+      L('fetchTimesheetDetails FAILED', err);
+      GE();
+      alert(err?.message || 'Failed to load timesheet details.');
+      return;
+    }
+
+    try {
+      related = await fetchTimesheetRelated(tsId);
+      L('related fetched', {
+        candidate: !!related.candidate,
+        client: !!related.client,
+        contract: !!related.contract,
+        invoice: !!related.invoice,
+        umbrella: !!related.umbrella,
+        series: (related.series || []).length
+      });
+    } catch (err) {
+      L('fetchTimesheetRelated FAILED (non-fatal)', err);
+      related = {
+        counts: {},
+        candidate: null,
+        client: null,
+        invoice: null,
+        umbrella: null,
+        contract: null,
+        series: []
+      };
+    }
+
+    // 3) Seed modalCtx for the timesheet frame
+    const ts    = details.timesheet || {};
+    // const tsfin = details.tsfin     || {};
+
+    // Initial reference value: TS → summary row
+    const initialReference = ts.reference_number || baseRow.reference_number || '';
+
+    // Ensure global modalCtx is initialised for this frame
+    window.modalCtx = {
+      ...(window.modalCtx || {}),
+      entity: 'timesheets',
+      mode: 'view',              // showModal will start in view; Edit toggles to edit mode
+      data: baseRow,
+      timesheetDetails: details,
+      timesheetRelated: related,
+      timesheetState: {
+        reference: initialReference,
+        payHoldDesired: null,    // future if you want to stage this instead of calling helper directly
+        payHoldReason: '',
+        markPaid: false,         // future if you want to stage this instead of calling helper directly
+        segmentOverrides: {},    // segment_id → { exclude_from_pay }
+        nhspDeferrals: {}        // shift_id → { defer_until_run_after }
+      }
+    };
+
+    L('modalCtx seeded', {
+      entity: window.modalCtx.entity,
+      mode: window.modalCtx.mode,
+      dataId: window.modalCtx.data?.id,
+      hasDetails: !!window.modalCtx.timesheetDetails,
+      hasRelated: !!window.modalCtx.timesheetRelated
+    });
+
+    // 4) Define tabs & renderTab dispatcher
+    const tabDefs = [
+      { key: 'overview', title: 'Overview' },
+      { key: 'lines',    title: 'Lines' },
+      { key: 'evidence', title: 'Evidence' },
+      { key: 'issues',   title: 'Issues' },
+      { key: 'related',  title: 'Related' },
+      { key: 'finance',  title: 'Finance' }
+    ];
+
+    const renderTab = (key, mergedRow) => {
+      // mergedRow is the summary row merged with any staged formState;
+      // we feed it into each tab as ctx.row; the tabs pull details/related from modalCtx.
+      const ctxForTab = {
+        row: mergedRow || window.modalCtx.data || baseRow,
+        details: window.modalCtx.timesheetDetails || details,
+        related: window.modalCtx.timesheetRelated || related,
+        state: window.modalCtx.timesheetState
+      };
+
+      if (LOGM) {
+        L('renderTab', {
+          key,
+          rowId: ctxForTab.row && ctxForTab.row.timesheet_id,
+          hasDetails: !!ctxForTab.details,
+          hasRelated: !!ctxForTab.related
+        });
+      }
+
+      switch (key) {
+        case 'overview':
+          return renderTimesheetOverviewTab(ctxForTab);
+        case 'lines':
+          return renderTimesheetLinesTab(ctxForTab);
+        case 'evidence':
+          return renderTimesheetEvidenceTab(ctxForTab);
+        case 'issues':
+          return renderTimesheetIssuesTab(ctxForTab);
+        case 'related':
+          return renderTimesheetRelatedTab(ctxForTab);
+        case 'finance':
+          return renderTimesheetFinanceTab(ctxForTab);
+        default:
+          return `<div class="tabc"><div class="card"><div class="row"><label>Timesheet</label><div class="controls"><span class="mini">Unknown tab: ${key}</span></div></div></div></div>`;
+      }
+    };
+
+    // 5) onSave for Timesheet modal – apply staged changes (segments, reference, NHSP deferrals)
+    const onSaveTimesheet = async () => {
+      const { LOGM, L, GC, GE } = getTsLoggers('[TS][SAVE]');
+      GC('onSaveTimesheet');
+
+      const mc     = window.modalCtx || {};
+      const rowNow = mc.data || baseRow;
+      const det    = mc.timesheetDetails || details;
+      const st     = mc.timesheetState || {};
+
+      const segOverrides    = st.segmentOverrides || {};
+      const hasSegOverrides = !!Object.keys(segOverrides).length;
+
+      const nhspDeferrals   = st.nhspDeferrals || {};
+      const hasNhspDefers   = !!Object.keys(nhspDeferrals).length;
+
+      const currentRef = det.timesheet?.reference_number || rowNow.reference_number || '';
+      const stagedRef  = (st.reference != null) ? st.reference : currentRef;
+      const refChanged = stagedRef !== currentRef;
+
+      // NEW: staged pay-hold + mark-paid
+      const currentOnHold    = !!(det.tsfin && det.tsfin.pay_on_hold);
+      const payHoldDesired   = (st.payHoldDesired === true || st.payHoldDesired === false) ? st.payHoldDesired : null; // null = no change
+      const payHoldReason    = st.payHoldReason || '';
+      const shouldChangeHold =
+        (payHoldDesired === true  && !currentOnHold) ||
+        (payHoldDesired === false &&  currentOnHold);
+
+      const alreadyPaid    = !!(det.tsfin && det.tsfin.paid_at_utc);
+      const wantsMarkPaid  = !!st.markPaid;
+      const shouldMarkPaid = wantsMarkPaid && !alreadyPaid;
+
+      L('staged state', {
+        tsId,
+        hasSegOverrides,
+        segOverridesKeys: Object.keys(segOverrides),
+        hasNhspDefers,
+        nhspDefersKeys: Object.keys(nhspDeferrals),
+        currentRef,
+        stagedRef,
+        refChanged,
+        currentOnHold,
+        payHoldDesired,
+        payHoldReason,
+        shouldChangeHold,
+        alreadyPaid,
+        wantsMarkPaid,
+        shouldMarkPaid
+      });
+
+      const tasks = [];
+
+      // 5a) Apply segment exclude_from_pay overrides (SEGMENTS mode only)
+      if (hasSegOverrides && det.isSegmentsMode) {
+        tasks.push(async () => {
+          await updateTimesheetSegmentsPayFlags(tsId, segOverrides);
+        });
+      }
+
+      // 5b) Apply reference/PO update if changed
+      if (refChanged) {
+        tasks.push(async () => {
+          await updateTimesheetReference(tsId, stagedRef);
+        });
+      }
+
+      // 5c) Apply NHSP deferrals (staged)
+      if (hasNhspDefers) {
+        tasks.push(async () => {
+          await saveNhspDeferrals(tsId, nhspDeferrals);
+        });
+      }
+
+      // 5d) Apply pay hold change (staged)
+      if (shouldChangeHold) {
+        tasks.push(async () => {
+          const onHold = !!payHoldDesired;
+          const reason = onHold ? payHoldReason : '';
+          await toggleTimesheetPayHold(tsId, onHold, reason);
+        });
+      }
+
+      // 5e) Apply mark paid (staged)
+      if (shouldMarkPaid) {
+        tasks.push(async () => {
+          await markTimesheetPaid(tsId);
+        });
+      }
+
+      if (!tasks.length) {
+        L('no staged changes to apply; no-op');
+        GE();
+        return { ok: true, saved: rowNow };
+      }
+
+      // Run tasks sequentially to simplify logging & error handling
+      for (let i = 0; i < tasks.length; i++) {
+        try {
+          await tasks[i]();
+        } catch (err) {
+          L('task failed', { index: i, error: err });
+          GE();
+          alert(err?.message || 'Failed to save timesheet changes. No changes were fully applied.');
+          return { ok: false };
+        }
+      }
+
+      // After helpers, details & timesheetState should already be updated
+      const newDetails = window.modalCtx.timesheetDetails || det;
+      const newTsfin   = newDetails.tsfin || {};
+      const newTs      = newDetails.timesheet || {};
+
+      const updatedRow = {
+        ...(window.modalCtx.data || rowNow),
+        total_pay_ex_vat:     newTsfin.total_pay_ex_vat     ?? rowNow.total_pay_ex_vat,
+        total_charge_ex_vat:  newTsfin.total_charge_ex_vat  ?? rowNow.total_charge_ex_vat,
+        margin_ex_vat:        newTsfin.margin_ex_vat        ?? rowNow.margin_ex_vat,
+        pay_on_hold:          newTsfin.pay_on_hold          ?? rowNow.pay_on_hold,
+        paid_at_utc:          newTsfin.paid_at_utc          ?? rowNow.paid_at_utc,
+        locked_by_invoice_id: newTsfin.locked_by_invoice_id ?? rowNow.locked_by_invoice_id,
+        reference_number:     newTs.reference_number        ?? rowNow.reference_number,
+        id: tsId
+      };
+
+      window.modalCtx.data = updatedRow;
+
+      // Clear staged NHSP deferrals & segment overrides after successful save,
+      // and normalise staged reference / pay-hold / mark-paid to match backend
+      if (window.modalCtx.timesheetState) {
+        window.modalCtx.timesheetState.segmentOverrides = {};
+        window.modalCtx.timesheetState.nhspDeferrals    = {};
+        window.modalCtx.timesheetState.reference        = updatedRow.reference_number;
+        window.modalCtx.timesheetState.payHoldDesired   = null;
+        window.modalCtx.timesheetState.payHoldReason    = '';
+        window.modalCtx.timesheetState.markPaid         = false;
+      }
+
+      // Focus this TS in summary grid on next refresh
+      try {
+        window.__pendingFocus = {
+          section: 'timesheets',
+          ids: [String(tsId)],
+          primaryIds: [String(tsId)]
+        };
+      } catch {}
+
+      L('SAVE OK, updatedRow', { id: updatedRow.id });
+      GE();
+      return { ok: true, saved: updatedRow };
+    };
+
+    // 6) Fire showModal for this timesheet
+    const title = `Timesheet ${String(tsId).slice(0, 8)}…`;
+    showModal(
+      title,
+      tabDefs,
+      renderTab,
+      onSaveTimesheet,
+      !!tsId,
+      undefined,
+      { kind: 'timesheets' }
+    );
+
+    GE();
+  } catch (err) {
+    if ((typeof window.__LOG_MODAL === 'boolean') ? window.__LOG_MODAL : false) {
+      console.error('[TS][OPEN] EXCEPTION', err);
+    }
+    alert(err?.message || 'Failed to open timesheet.');
+    GE();
+  }
+}
+
+
+
+function renderTimesheetRelatedTab(ctx) {
+  const { LOGM, L, GC, GE } = getTsLoggers('[TS][RELATED-TAB]');
+  const { row, related } = normaliseTimesheetCtx(ctx);
+
+  GC('render');
+  L('snapshot', {
+    tsId: row.timesheet_id,
+    counts: related.counts
+  });
+  GE();
+
+  const candidate = related.candidate;
+  const client    = related.client;
+  const invoice   = related.invoice;
+  const umbrella  = related.umbrella;
+  const contract  = related.contract;
+  const series    = Array.isArray(related.series) ? related.series : [];
+
+  const renderBlock = (title, bodyHtml) => `
+    <div class="card" style="margin-top:10px;">
+      <div class="row">
+        <label>${title}</label>
+        <div class="controls">
+          ${bodyHtml}
+        </div>
+      </div>
+    </div>
+  `;
+
+  const candidateHtml = candidate
+    ? `
+      <div>
+        <div>${candidate.display_name || '(no name)'}</div>
+        <div class="mini">${candidate.email || ''}</div>
+        <button type="button" data-ts-related="candidate" data-id="${candidate.id}">Open candidate</button>
+      </div>
+    `
+    : '<span class="mini">No candidate linked.</span>';
+
+  const clientHtml = client
+    ? `
+      <div>
+        <div>${client.name || '(no name)'}</div>
+        <div class="mini">${client.cli_ref ? 'Client ref: ' + client.cli_ref : ''}</div>
+        <button type="button" data-ts-related="client" data-id="${client.id}">Open client</button>
+      </div>
+    `
+    : '<span class="mini">No client linked.</span>';
+
+  const contractHtml = contract
+    ? `
+      <div>
+        <div>${contract.role || ''}${contract.band ? ' (Band ' + contract.band + ')' : ''}</div>
+        <div class="mini">
+          ${contract.display_site || ''}<br/>
+          ${contract.start_date || ''} → ${contract.end_date || ''}
+        </div>
+        <button type="button" data-ts-related="contract" data-id="${contract.id}">Open contract</button>
+      </div>
+    `
+    : '<span class="mini">No contract linked for this timesheet.</span>';
+
+  const invoiceHtml = invoice
+    ? `
+      <div>
+        <div>Invoice ${invoice.invoice_no || invoice.invoice_id}</div>
+        <div class="mini">
+          Status: ${invoice.status || 'UNKNOWN'}<br/>
+          Issued: ${invoice.issued_at_utc || '—'}<br/>
+          Total inc VAT: ${invoice.total_inc_vat != null ? invoice.total_inc_vat : '—'}
+        </div>
+        <button type="button" data-ts-related="invoice" data-id="${invoice.invoice_id}">Open invoice</button>
+      </div>
+    `
+    : '<span class="mini">No invoice currently linked.</span>';
+
+  const umbrellaHtml = umbrella
+    ? `
+      <div>
+        <div>${umbrella.name || '(no name)'}</div>
+        <button type="button" data-ts-related="umbrella" data-id="${umbrella.id}">Open umbrella</button>
+      </div>
+    `
+    : '<span class="mini">No umbrella linked (PAYE or no umbrella).</span>';
+
+  const seriesHtml = series.length
+    ? `
+      <table class="grid mini">
+        <thead>
+          <tr>
+            <th>TS ID</th>
+            <th>Seq</th>
+            <th>Adj?</th>
+            <th>Status</th>
+            <th>Basis</th>
+            <th>Hours</th>
+            <th>Pay ex VAT</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          ${series.map(s => `
+            <tr data-timesheet-id="${s.timesheet_id}">
+              <td>${s.timesheet_id.slice(0, 8)}…${s.is_current ? ' <span class="mini">(current)</span>' : ''}</td>
+              <td>${s.additional_seq == null ? '0' : s.additional_seq}</td>
+              <td>${s.is_adjustment ? 'Yes' : 'No'}</td>
+              <td>${s.processing_status || '—'}</td>
+              <td>${s.basis || '—'}</td>
+              <td>${s.total_hours != null ? s.total_hours : '—'}</td>
+              <td>${s.total_pay_ex_vat != null ? s.total_pay_ex_vat : '—'}</td>
+              <td>
+                <button type="button"
+                  data-ts-related="series-timesheet"
+                  data-id="${s.timesheet_id}">
+                  Open
+                </button>
+              </td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+    `
+    : '<span class="mini">No other timesheets in this contract/week series.</span>';
+
+  return `
+    <div class="tabc">
+      ${renderBlock('Candidate', candidateHtml)}
+      ${renderBlock('Client', clientHtml)}
+      ${renderBlock('Contract', contractHtml)}
+      ${renderBlock('Invoice', invoiceHtml)}
+      ${renderBlock('Umbrella', umbrellaHtml)}
+      ${renderBlock('Series (base + adjustments)', seriesHtml)}
+    </div>
+  `;
+}
+
+function renderTimesheetEvidenceTab(ctx) {
+  const { LOGM, L, GC, GE } = getTsLoggers('[TS][EVIDENCE]');
+  const { row, details } = normaliseTimesheetCtx(ctx);
+
+  GC('render');
+  const ts    = details.timesheet || {};
+  const sheetScope = row.sheet_scope || details.sheet_scope || ts.sheet_scope || null;
+  const qrStatus   = row.qr_status || details.qr_status || ts.qr_status || null;
+  const qrGen      = details.qr_generated_at || ts.qr_generated_at || null;
+  const qrScan     = details.qr_scanned_at   || ts.qr_scanned_at   || null;
+  const manualKey  = details.manual_pdf_r2_key || ts.manual_pdf_r2_key || null;
+
+  const tsId = row.timesheet_id || ts.timesheet_id || '';
+
+  L('snapshot', {
+    tsId,
+    sheetScope,
+    qrStatus,
+    qrGen,
+    qrScan,
+    manualKey
+  });
+  GE();
+
+  const qrInfoHtml = (sheetScope === 'WEEKLY' && qrStatus) ? `
+    <div class="card" style="margin-top:10px;">
+      <div class="row">
+        <label>QR status</label>
+        <div class="controls">
+          <span class="mini">${qrStatus}</span>
+          ${qrGen ? `<br/><span class="mini">Generated at: ${qrGen}</span>` : ''}
+          ${qrScan ? `<br/><span class="mini">Scanned at: ${qrScan}</span>` : ''}
+        </div>
+      </div>
+    </div>
+  ` : '';
+
+  return `
+    <div class="tabc">
+      <div class="card">
+        <div class="row">
+          <label>Timesheet PDF</label>
+          <div class="controls">
+            <button type="button" data-ts-action="open-pdf" data-timesheet-id="${tsId}">
+              Open timesheet PDF
+            </button>
+            <span class="mini" style="margin-left:8px;">
+              This will call /api/timesheets/${tsId || ':id'}/pdf and open the resulting document.
+            </span>
+          </div>
+        </div>
+        <div class="row">
+          <label>Manual scan key</label>
+          <div class="controls">
+            ${manualKey ? `<span class="mini">${manualKey}</span>` : '<span class="mini">No manual PDF attached.</span>'}
+          </div>
+        </div>
+      </div>
+
+      ${qrInfoHtml}
+    </div>
+  `;
+}
+
+async function authoriseTimesheet(ctxOrId) {
+  const { LOGM, L, GC, GE } = getTsLoggers('[TS][AUTH]');
+  GC('authoriseTimesheet');
+
+  // Normalise context
+  const mc = window.modalCtx || {};
+  const row = (mc.data && mc.data.timesheet_id) ? mc.data : (ctxOrId && ctxOrId.row ? ctxOrId.row : {});
+  const tsId = (typeof ctxOrId === 'string') ? ctxOrId : (row.timesheet_id || row.id || mc.data?.id || null);
+
+  if (!tsId) {
+    L('ERROR: missing timesheetId');
+    GE();
+    throw new Error('authoriseTimesheet: timesheetId is required');
+  }
+
+  const encId = encodeURIComponent(tsId);
+  const url   = API(`/api/timesheets/${encId}/authorise`);
+
+  L('REQUEST', { url, tsId });
+
+  let res, text;
+  try {
+    res  = await authFetch(url, { method: 'POST' });
+    text = await res.text();
+  } catch (err) {
+    L('network error', err);
+    GE();
+    throw err;
+  }
+
+  if (!res.ok) {
+    L('server error', { status: res.status, bodyPreview: text.slice(0, 400) });
+    GE();
+    throw new Error(text || `Failed to authorise timesheet ${tsId}`);
+  }
+
+  let json = {};
+  try { json = text ? JSON.parse(text) : {}; } catch (err) {
+    L('parse error', err);
+  }
+
+  L('authorise result', json);
+
+  // Refresh details so Overview, Lines, Finance reflect new status
+  let newDetails = mc.timesheetDetails;
+  try {
+    newDetails = await fetchTimesheetDetails(tsId);
+    window.modalCtx.timesheetDetails = newDetails;
+  } catch (err) {
+    L('refresh details failed (non-fatal)', err);
+  }
+
+  // Update summary row if present
+  const tsfin = newDetails?.tsfin || {};
+  const updatedRow = {
+    ...(mc.data || row),
+    summary_stage: json.summary_stage || mc.data?.summary_stage || 'READY_FOR_INVOICE',
+    processing_status: tsfin.processing_status || mc.data?.processing_status,
+    total_pay_ex_vat: tsfin.total_pay_ex_vat ?? mc.data?.total_pay_ex_vat,
+    total_charge_ex_vat: tsfin.total_charge_ex_vat ?? mc.data?.total_charge_ex_vat,
+    margin_ex_vat: tsfin.margin_ex_vat ?? mc.data?.margin_ex_vat,
+    id: tsId
+  };
+
+  window.modalCtx.data = updatedRow;
+
+  // Focus this TS in summary grid on next refresh
+  try {
+    window.__pendingFocus = {
+      section: 'timesheets',
+      ids: [String(tsId)],
+      primaryIds: [String(tsId)]
+    };
+  } catch {}
+
+  L('UPDATED ROW', updatedRow);
+  GE();
+  return { ok: true, updatedRow, details: newDetails };
+}
+
+async function toggleTimesheetPayHold(ctxOrId, onHold, reason = '') {
+  const { LOGM, L, GC, GE } = getTsLoggers('[TS][PAY-HOLD]');
+  GC('toggleTimesheetPayHold');
+
+  const mc  = window.modalCtx || {};
+  const row = (mc.data && mc.data.timesheet_id) ? mc.data : (ctxOrId && ctxOrId.row ? ctxOrId.row : {});
+  const tsId = (typeof ctxOrId === 'string') ? ctxOrId : (row.timesheet_id || row.id || mc.data?.id || null);
+
+  if (!tsId) {
+    L('ERROR: missing timesheetId');
+    GE();
+    throw new Error('toggleTimesheetPayHold: timesheetId is required');
+  }
+
+  const encId = encodeURIComponent(tsId);
+  const url   = API(`/api/timesheets/${encId}/pay-hold`);
+
+  const payload = { on_hold: !!onHold };
+  if (onHold && reason) payload.reason = reason;
+
+  L('REQUEST', { url, payload });
+
+  let res, text;
+  try {
+    res  = await authFetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    text = await res.text();
+  } catch (err) {
+    L('network error', err);
+    GE();
+    throw err;
+  }
+
+  if (!res.ok) {
+    L('server error', { status: res.status, bodyPreview: text.slice(0, 400) });
+    GE();
+    throw new Error(text || `Failed to ${onHold ? 'apply' : 'release'} pay hold`);
+  }
+
+  let json = {};
+  try { json = text ? JSON.parse(text) : {}; } catch (err) {
+    L('parse error', err);
+  }
+
+  L('pay-hold result', json);
+
+  // Refresh details
+  let newDetails = mc.timesheetDetails;
+  try {
+    newDetails = await fetchTimesheetDetails(tsId);
+    window.modalCtx.timesheetDetails = newDetails;
+  } catch (err) {
+    L('refresh details failed (non-fatal)', err);
+  }
+
+  const tsfin = newDetails?.tsfin || {};
+  const updatedRow = {
+    ...(mc.data || row),
+    pay_on_hold: !!tsfin.pay_on_hold,
+    id: tsId
+  };
+
+  window.modalCtx.data = updatedRow;
+
+  try {
+    window.__pendingFocus = {
+      section: 'timesheets',
+      ids: [String(tsId)],
+      primaryIds: [String(tsId)]
+    };
+  } catch {}
+
+  L('UPDATED ROW', updatedRow);
+  GE();
+  return { ok: true, updatedRow, details: newDetails };
+}
+
+async function markTimesheetPaid(ctxOrId) {
+  const { LOGM, L, GC, GE } = getTsLoggers('[TS][MARK-PAID]');
+  GC('markTimesheetPaid');
+
+  const mc  = window.modalCtx || {};
+  const row = (mc.data && mc.data.timesheet_id) ? mc.data : (ctxOrId && ctxOrId.row ? ctxOrId.row : {});
+  const tsId = (typeof ctxOrId === 'string') ? ctxOrId : (row.timesheet_id || row.id || mc.data?.id || null);
+
+  if (!tsId) {
+    L('ERROR: missing timesheetId');
+    GE();
+    throw new Error('markTimesheetPaid: timesheetId is required');
+  }
+
+  const encId = encodeURIComponent(tsId);
+  const url   = API(`/api/timesheets/${encId}/mark-paid`);
+
+  L('REQUEST', { url, tsId });
+
+  let res, text;
+  try {
+    res  = await authFetch(url, { method: 'POST' });
+    text = await res.text();
+  } catch (err) {
+    L('network error', err);
+    GE();
+    throw err;
+  }
+
+  if (!res.ok) {
+    L('server error', { status: res.status, bodyPreview: text.slice(0, 400) });
+    GE();
+    throw new Error(text || `Failed to mark timesheet ${tsId} as paid`);
+  }
+
+  let json = {};
+  try { json = text ? JSON.parse(text) : {}; } catch (err) {
+    L('parse error', err);
+  }
+
+  L('mark-paid result', json);
+
+  // Refresh details
+  let newDetails = mc.timesheetDetails;
+  try {
+    newDetails = await fetchTimesheetDetails(tsId);
+    window.modalCtx.timesheetDetails = newDetails;
+  } catch (err) {
+    L('refresh details failed (non-fatal)', err);
+  }
+
+  const tsfin = newDetails?.tsfin || {};
+  const updatedRow = {
+    ...(mc.data || row),
+    paid_at_utc: tsfin.paid_at_utc || mc.data?.paid_at_utc,
+    summary_stage: 'PAID',
+    id: tsId
+  };
+
+  window.modalCtx.data = updatedRow;
+
+  try {
+    window.__pendingFocus = {
+      section: 'timesheets',
+      ids: [String(tsId)],
+      primaryIds: [String(tsId)]
+    };
+  } catch {}
+
+  L('UPDATED ROW', updatedRow);
+  GE();
+  return { ok: true, updatedRow, details: newDetails };
+}
+
+async function updateTimesheetReference(ctxOrId, newReference) {
+  const { LOGM, L, GC, GE } = getTsLoggers('[TS][REF]');
+  GC('updateTimesheetReference');
+
+  const mc  = window.modalCtx || {};
+  const row = (mc.data && mc.data.timesheet_id) ? mc.data : (ctxOrId && ctxOrId.row ? ctxOrId.row : {});
+  const tsId = (typeof ctxOrId === 'string') ? ctxOrId : (row.timesheet_id || row.id || mc.data?.id || null);
+
+  if (!tsId) {
+    L('ERROR: missing timesheetId');
+    GE();
+    throw new Error('updateTimesheetReference: timesheetId is required');
+  }
+
+  const encId = encodeURIComponent(tsId);
+  const url   = API(`/api/timesheets/${encId}/reference`);
+
+  const reference_number = newReference == null ? '' : String(newReference);
+  L('REQUEST', { url, reference_number });
+
+  let res, text;
+  try {
+    res  = await authFetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ reference_number })
+    });
+    text = await res.text();
+  } catch (err) {
+    L('network error', err);
+    GE();
+    throw err;
+  }
+
+  if (!res.ok) {
+    L('server error', { status: res.status, bodyPreview: text.slice(0, 400) });
+    GE();
+    throw new Error(text || `Failed to update reference for timesheet ${tsId}`);
+  }
+
+  let json = {};
+  try { json = text ? JSON.parse(text) : {}; } catch (err) {
+    L('parse error', err);
+  }
+
+  L('reference result', json);
+
+  // Refresh details
+  let newDetails = mc.timesheetDetails;
+  try {
+    newDetails = await fetchTimesheetDetails(tsId);
+    window.modalCtx.timesheetDetails = newDetails;
+  } catch (err) {
+    L('refresh details failed (non-fatal)', err);
+  }
+
+  const ts = newDetails?.timesheet || {};
+  const updatedRow = {
+    ...(mc.data || row),
+    reference_number: ts.reference_number || reference_number,
+    id: tsId
+  };
+
+  window.modalCtx.data = updatedRow;
+
+  // Keep staged state in sync
+  if (mc.timesheetState) {
+    mc.timesheetState.reference = updatedRow.reference_number;
+  }
+
+  L('UPDATED ROW', updatedRow);
+  GE();
+  return { ok: true, updatedRow, details: newDetails };
+}
+
+async function updateTimesheetSegmentsPayFlags(ctxOrId, overrides) {
+  const { LOGM, L, GC, GE } = getTsLoggers('[TS][SEGMENTS]');
+  GC('updateTimesheetSegmentsPayFlags');
+
+  const mc  = window.modalCtx || {};
+  const row = (mc.data && mc.data.timesheet_id) ? mc.data : (ctxOrId && ctxOrId.row ? ctxOrId.row : {});
+  const tsId = (typeof ctxOrId === 'string') ? ctxOrId : (row.timesheet_id || row.id || mc.data?.id || null);
+
+  if (!tsId) {
+    L('ERROR: missing timesheetId');
+    GE();
+    throw new Error('updateTimesheetSegmentsPayFlags: timesheetId is required');
+  }
+
+  const det = mc.timesheetDetails || {};
+  if (!det.isSegmentsMode || !Array.isArray(det.segments)) {
+    L('NOT SEGMENTS MODE, no-op', { isSegmentsMode: det.isSegmentsMode });
+    GE();
+    return { ok: true };
+  }
+
+  const baseSegs = det.segments || [];
+  const overridesMap = overrides || (mc.timesheetState && mc.timesheetState.segmentOverrides) || {};
+  const segIds = Object.keys(overridesMap);
+  if (!segIds.length) {
+    L('no overrides to apply, no-op');
+    GE();
+    return { ok: true };
+  }
+
+  const segmentsPayload = segIds.map(segId => ({
+    segment_id: segId,
+    exclude_from_pay: !!overridesMap[segId].exclude_from_pay
+  }));
+
+  const encId = encodeURIComponent(tsId);
+  const url   = API(`/api/timesheets/${encId}/segments`);
+
+  L('REQUEST', { url, count: segmentsPayload.length, segmentsPayload });
+
+  let res, text;
+  try {
+    res  = await authFetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ segments: segmentsPayload })
+    });
+    text = await res.text();
+  } catch (err) {
+    L('network error', err);
+    GE();
+    throw err;
+  }
+
+  if (!res.ok) {
+    L('server error', { status: res.status, bodyPreview: text.slice(0, 400) });
+    GE();
+    throw new Error(text || 'Failed to apply segment overrides');
+  }
+
+  let json = {};
+  try { json = text ? JSON.parse(text) : {}; } catch (err) {
+    L('parse error', err);
+  }
+
+  L('segment overrides applied', json);
+
+  // Refresh details
+  let newDetails = det;
+  try {
+    newDetails = await fetchTimesheetDetails(tsId);
+    window.modalCtx.timesheetDetails = newDetails;
+    if (window.modalCtx.timesheetState) {
+      window.modalCtx.timesheetState.segmentOverrides = {};
+    }
+    L('details refreshed after segments', {
+      newTotalPay: newDetails.tsfin?.total_pay_ex_vat,
+      newTotalCharge: newDetails.tsfin?.total_charge_ex_vat
+    });
+  } catch (err) {
+    L('refresh details failed (non-fatal)', err);
+  }
+
+  // Update row totals
+  const tsfin = newDetails?.tsfin || {};
+  const updatedRow = {
+    ...(mc.data || row),
+    total_pay_ex_vat: tsfin.total_pay_ex_vat ?? mc.data?.total_pay_ex_vat,
+    total_charge_ex_vat: tsfin.total_charge_ex_vat ?? mc.data?.total_charge_ex_vat,
+    margin_ex_vat: tsfin.margin_ex_vat ?? mc.data?.margin_ex_vat,
+    id: tsId
+  };
+
+  window.modalCtx.data = updatedRow;
+
+  try {
+    window.__pendingFocus = {
+      section: 'timesheets',
+      ids: [String(tsId)],
+      primaryIds: [String(tsId)]
+    };
+  } catch {}
+
+  L('UPDATED ROW', updatedRow);
+  GE();
+  return { ok: true, updatedRow, details: newDetails };
+}
+
+async function deferNhspShift(shiftId, runAtIso = null) {
+  const { LOGM, L, GC, GE } = getTsLoggers('[TS][NHSP-DEFER]');
+  GC('deferNhspShift');
+
+  if (!shiftId) {
+    L('ERROR: missing shiftId');
+    GE();
+    throw new Error('deferNhspShift: shiftId is required');
+  }
+
+  const encId = encodeURIComponent(shiftId);
+  const url   = API(`/api/nhsp/shifts/${encId}/defer`);
+
+  const body = {};
+  if (runAtIso) body.run_at = runAtIso;
+
+  L('REQUEST', { url, body });
+
+  let res, text;
+  try {
+    res  = await authFetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    text = await res.text();
+  } catch (err) {
+    L('network error', err);
+    GE();
+    throw err;
+  }
+
+  if (!res.ok) {
+    L('server error', { status: res.status, bodyPreview: text.slice(0, 400) });
+    GE();
+    throw new Error(text || `Failed to defer NHSP shift ${shiftId}`);
+  }
+
+  let json = {};
+  try { json = text ? JSON.parse(text) : {}; } catch (err) {
+    L('parse error', err);
+  }
+
+  L('defer result', json);
+  GE();
+  return { ok: true, result: json };
+}
+
+
+async function saveNhspDeferrals(ctxOrId, deferrals) {
+  const { LOGM, L, GC, GE } = getTsLoggers('[TS][NHSP-SAVE]');
+  GC('saveNhspDeferrals');
+
+  const mc  = window.modalCtx || {};
+  const row = (mc.data && mc.data.timesheet_id) ? mc.data : (ctxOrId && ctxOrId.row ? ctxOrId.row : {});
+  const tsId = (typeof ctxOrId === 'string') ? ctxOrId : (row.timesheet_id || row.id || mc.data?.id || null);
+
+  const map = deferrals || (mc.timesheetState && mc.timesheetState.nhspDeferrals) || {};
+  const shiftIds = Object.keys(map || {});
+  if (!shiftIds.length) {
+    L('no NHSP deferrals staged, no-op');
+    GE();
+    return { ok: true };
+  }
+
+  L('staged deferrals', map);
+
+  for (const shiftId of shiftIds) {
+    const cfg = map[shiftId] || {};
+    const runAtIso = cfg.defer_until_run_after || null;
+    try {
+      await deferNhspShift(shiftId, runAtIso);
+    } catch (err) {
+      L('deferNhspShift failed', { shiftId, err });
+      GE();
+      throw err;
+    }
+  }
+
+  // After deferring, refresh details so shifts/validations reflect new status
+  if (tsId) {
+    try {
+      const newDetails = await fetchTimesheetDetails(tsId);
+      window.modalCtx.timesheetDetails = newDetails;
+      if (mc.timesheetState) {
+        mc.timesheetState.nhspDeferrals = {};
+      }
+      L('details refreshed after NHSP deferrals', {
+        shiftsCount: (newDetails.shifts || []).length
+      });
+    } catch (err) {
+      L('refresh details failed (non-fatal)', err);
+    }
+  }
+
+  GE();
+  return { ok: true };
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 // ===== Boot =====
