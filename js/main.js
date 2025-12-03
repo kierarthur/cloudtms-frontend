@@ -27621,6 +27621,122 @@ async function saveNhspDeferrals(ctxOrId, deferrals) {
   return { ok: true };
 }
 
+async function listTimesheetsSummary(filters = {}) {
+  // Ensure per-section listState exists
+  window.__listState = window.__listState || {};
+  const st = (window.__listState['timesheets'] ||= {
+    page: 1,
+    pageSize: 50,
+    total: null,
+    hasMore: false,
+    filters: {}
+  });
+
+  // Paging
+  const pageRaw     = st.page || 1;
+  const pageSizeRaw = st.pageSize || 50;
+  const page        = Number(pageRaw) || 1;
+  const pageSize    = (pageSizeRaw === 'ALL')
+    ? 200   // safety cap; UI should not request more than this at once
+    : Number(pageSizeRaw) || 50;
+
+  const qs = new URLSearchParams();
+  qs.set('page', String(page));
+  qs.set('page_size', String(pageSize));
+
+  const f = filters || {};
+
+  // Optional entity filters (not exposed in the UI yet but supported)
+  if (f.client_id) {
+    qs.set('client_id', String(f.client_id));
+  }
+  if (f.candidate_id) {
+    qs.set('candidate_id', String(f.candidate_id));
+  }
+
+  // Stage quick-filter
+  const stage = (f.summary_stage || '').toUpperCase();
+  if (stage && stage !== 'ALL') {
+    qs.set('summary_stage', stage);
+  }
+
+  // Route quick-filter
+  const route = (f.route_type || '').toUpperCase();
+  if (route && route !== 'ALL') {
+    qs.set('route_type', route);
+  }
+
+  // Scope quick-filter (Both / Weekly / Daily)
+  const scope = (f.sheet_scope || '').toUpperCase();
+  if (scope && scope !== 'ALL') {
+    qs.set('sheet_scope', scope);
+  }
+
+  // Optional QR-status filter (not wired in toolbar yet, but supported)
+  if (f.qr_status) {
+    qs.set('qr_status', String(f.qr_status).toUpperCase());
+  }
+
+  // Optional week-ending date range (YYYY-MM-DD) – not yet surfaced in UI
+  if (f.week_ending_from) {
+    qs.set('week_ending_from', String(f.week_ending_from));
+  }
+  if (f.week_ending_to) {
+    qs.set('week_ending_to', String(f.week_ending_to));
+  }
+
+  // Flags from the toolbar:
+  // "Adjusted only", "QR only", "Needs attention"
+  if (f.is_adjusted === true) {
+    qs.set('is_adjusted', 'true');
+  }
+  if (f.is_qr === true) {
+    qs.set('is_qr', 'true');
+  }
+  if (f.needs_attention === true) {
+    qs.set('needs_attention', 'true');
+  }
+
+  // Future flags (not yet wired in UI but supported in view/handler):
+  if (f.pay_on_hold === true) {
+    qs.set('pay_on_hold', 'true');
+  }
+  if (f.is_paid === true) {
+    qs.set('is_paid', 'true');
+  }
+  if (f.is_invoiced === true) {
+    qs.set('is_invoiced', 'true');
+  }
+  if (f.has_adjustments === true) {
+    qs.set('has_adjustments', 'true');
+  }
+
+  const url = `/api/timesheets/summary?${qs.toString()}`;
+
+  const res  = await authFetch(API(url));
+  const text = await res.text();
+  if (!res.ok) {
+    // Bubble a useful error so the UI can show it (and DevTools logs help debug)
+    throw new Error(text || `Failed to fetch timesheets summary (${res.status})`);
+  }
+
+  let json;
+  try {
+    json = text ? JSON.parse(text) : {};
+  } catch {
+    json = {};
+  }
+
+  const rows  = Array.isArray(json.items) ? json.items : (json.rows || []);
+  const total = (typeof json.count === 'number') ? json.count : rows.length;
+
+  // Update paging state
+  st.hasMore = rows.length === pageSize;
+  st.total   = total;
+  st.filters = { ...(f || {}) };
+
+  return rows;
+}
 
 
 
