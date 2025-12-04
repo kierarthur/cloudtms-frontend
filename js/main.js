@@ -15737,8 +15737,28 @@ function renderClientTab(key, row = {}){
     </div>
   `);
 
-  if (key==='rates')     return html(`<div id="clientRates"></div>`);
-  if (key==='settings')  return html(`<div id="clientSettings"></div>`);
+  if (key === 'rates') return html(`
+  <div class="form" id="tab-rates">
+    <div class="row">
+      <label>Care Package Rates</label>
+      <div class="controls">
+        <div id="clientRates"></div>
+      </div>
+    </div>
+  </div>
+`);
+
+if (key === 'settings') return html(`
+  <div class="form" id="tab-settings">
+    <div class="row">
+      <label>Client settings</label>
+      <div class="controls">
+        <div id="clientSettings"></div>
+      </div>
+    </div>
+  </div>
+`);
+
 
   if (key==='hospitals') {
     // Ensure initial render AND first-mount fetch if needed, then render the table
@@ -20329,10 +20349,24 @@ const frame = {
     currentTabKey: (Array.isArray(tabs) && tabs.length ? tabs[0].key : null),
 
     mode: (() => {
-      if (opts.forceEdit) return 'edit';
-      if (!hasId && opts.kind === 'rate-preset') return 'edit';
-      return hasId ? 'view' : 'create';
-    })(),
+   if (opts.forceEdit) return 'edit';
+    if (!hasId && opts.kind === 'rate-preset') return 'edit';
+
+    // Special case: planned timesheet week (no timesheet_id yet)
+    const ent = window.modalCtx?.entity || null;
+    if (!hasId && ent === 'timesheets') {
+      const d = window.modalCtx?.data || {};
+      const hasWeek  = !!(d.contract_week_id || d.week_id || d.week_ending_date);
+      const hasTsId  = !!d.timesheet_id;
+      if (hasWeek && !hasTsId) {
+        // Planned weekly/daily stub: open in VIEW mode, require explicit Edit
+        return 'view';
+      }
+    }
+
+    // Default for everything else
+    return hasId ? 'view' : 'create';
+  })(),
     isDirty:false, _snapshot:null, _detachDirty:null, _detachGlobal:null, _hasMountedOnce:false, _wired:false, _closing:false, _saving:false, _confirmingDiscard:false,
     _applyDesired:null,
 
@@ -20587,281 +20621,247 @@ async setTab(k) {
 
   byId('modalBody').innerHTML = this.renderTab(k, merged) || '';
 
-  // … all existing candidate / umbrella / client / contracts wiring unchanged …
-// ───────────────────── Candidates: Pay tab (Advances wiring) ─────────────────────
-// ───────────────────── Candidates: Pay tab (Advances wiring) ─────────────────────
-if (this.entity === 'candidates' && k === 'pay') {
-  try {
-    const candId =
-      window.modalCtx?.data?.id ||
-      merged.id ||
-      null;
-
-    if (candId) {
-      window.appState = window.appState || {};
-      const cache = (window.appState.candidateAdvances ||= {});
-
-      if (cache[candId]) {
-        // Already cached this session → repaint into fresh DOM
-        updateCandidateAdvancesUI(candId);
-      } else {
-        // First time on this candidate → fetch from backend
-        fetchCandidateAdvances(candId).catch(err => {
-          console.warn('[CAND][PAY][ADVANCES] fetch failed', err);
-        });
-      }
-
-      // 🔹 Wire general advances actions (Edit schedule / Pause/Resume / Mark paid off)
-      const generalContainer = document.getElementById('candidateGeneralAdvances');
-      if (generalContainer && !generalContainer.__advWired) {
-        generalContainer.__advWired = true;
-        generalContainer.addEventListener('click', async (ev) => {
-          const btn = ev.target.closest('button[data-act][data-advance-id]');
-          if (!btn) return;
-
-          const act   = btn.getAttribute('data-act') || '';
-          const advId = btn.getAttribute('data-advance-id') || '';
-          if (!advId) return;
-
-          const stateEntry = (window.appState.candidateAdvances || {})[candId] || {};
-          const list       = Array.isArray(stateEntry.list) ? stateEntry.list : [];
-          const advance    = list.find(a => String(a.id) === String(advId));
-          if (!advance) return;
-
-          if (act === 'adv-edit-schedule') {
-            openEditAdvanceScheduleModal(advance);
-          } else if (act === 'adv-toggle-pause') {
-            await toggleAdvancePause(advance);
-          } else if (act === 'adv-mark-paid-off') {
-            await markAdvancePaidOff(advance);
-          }
-        });
-      }
-    }
-  } catch (e) {
-    console.warn('[CAND][PAY][ADVANCES] wiring failed', e);
-  }
-}
-
-  // ───────────────────── Timesheets: Overview tab wiring ─────────────────────
-if (this.entity === 'timesheets' && k === 'overview') {
-  const { LOGM, L: LT } = getTsLoggers('[TS][OVERVIEW][WIRE]');
-  const root = byId('modalBody');
-  if (!root) {
-    if (LOGM) LT('no modalBody root, skip wiring');
-  } else {
+  // ───────────────────── Clients: Rates tab wiring ─────────────────────
+  if (this.entity === 'clients' && k === 'rates') {
     try {
-      const mc   = window.modalCtx || {};
-      const tsId = mc.data?.timesheet_id || mc.data?.id || null;
-      const mode = this.mode || 'view';
+      typeof renderClientRatesTable === 'function' && renderClientRatesTable();
+    } catch (e) {
+      console.warn('[CLIENT][RATES] renderClientRatesTable failed', e);
+    }
+  }
 
-      if (!tsId && !mc.data?.contract_week_id) {
-        if (LOGM) LT('no tsId/contract_week_id on modalCtx.data, skip overview wiring');
-      } else {
-        const authoriseBtn       = root.querySelector('button[data-ts-action="authorise"]');
-        const unauthoriseBtn     = root.querySelector('button[data-ts-action="unauthorise"]');
-        const switchManualBtn    = root.querySelector('button[data-ts-action="switch-manual"]');
-        const holdOnBtn          = root.querySelector('button[data-ts-action="pay-hold-on"]');
-        const holdOffBtn         = root.querySelector('button[data-ts-action="pay-hold-off"]');
-        const markPaidBtn        = root.querySelector('button[data-ts-action="mark-paid"]');
-        const refInput           = root.querySelector('input[name="ts_reference"]');
-        const payHoldInput       = root.querySelector('input[name="ts_pay_hold"]');
-        const payHoldReasonInput = root.querySelector('input[name="ts_pay_hold_reason"]');
-        const markPaidInput      = root.querySelector('input[name="ts_mark_paid"]');
+  // ───────────────────── Clients: Settings tab wiring ─────────────────────
+  if (this.entity === 'clients' && k === 'settings') {
+    try {
+      typeof renderClientSettingsForm === 'function' && renderClientSettingsForm();
+    } catch (e) {
+      console.warn('[CLIENT][SETTINGS] renderClientSettingsForm failed', e);
+    }
+  }
 
-        const det   = mc.timesheetDetails || {};
-        const ts    = det.timesheet || {};
-        const tsfin = det.tsfin || {};
-        const sheetScope = (det.sheet_scope || mc.data?.sheet_scope || ts.sheet_scope || '').toUpperCase();
-        const subMode    = (ts.submission_mode || mc.data?.submission_mode || '').toUpperCase();
+  // ───────────────────── Candidates: Bookings tab wiring ─────────────────────
+  if (this.entity === 'candidates' && k === 'bookings') {
+    try {
+      const candId =
+        window.modalCtx?.data?.id ||
+        merged.id ||
+        null;
 
-        const isAuthorised     = !!ts.authorised_at_server;
-        const locked           = !!(tsfin.locked_by_invoice_id || tsfin.paid_at_utc);
-        const weeklyElectronic = (sheetScope === 'WEEKLY' && subMode === 'ELECTRONIC');
-        const alreadyPaid      = !!tsfin.paid_at_utc;
+      if (candId && typeof loadCandidateCalendar === 'function') {
+        const holder = document.getElementById('candidateCalendarHolder');
+        if (holder) {
+          loadCandidateCalendar(holder, candId).catch(err => {
+            console.warn('[CAND][BOOKINGS] loadCandidateCalendar failed', err);
+            holder.innerHTML = '<span class="mini">Failed to load calendar.</span>';
+          });
+        }
+      }
+    } catch (e) {
+      console.warn('[CAND][BOOKINGS] wiring failed', e);
+    }
+  }
 
-        if (LOGM) {
-          LT('overview wiring snapshot', {
-            tsId,
-            mode,
-            sheetScope,
-            subMode,
-            isAuthorised,
-            locked,
-            weeklyElectronic,
-            hasAuthorise: !!authoriseBtn,
-            hasUnauthorise: !!unauthoriseBtn,
-            hasSwitchManual: !!switchManualBtn,
-            hasRefInput: !!refInput,
-            hasPayHoldInput: !!payHoldInput,
-            hasMarkPaidInput: !!markPaidInput
+  // ───────────────────── Candidates: Pay tab (Advances wiring) ─────────────────────
+  if (this.entity === 'candidates' && k === 'pay') {
+    try {
+      const candId =
+        window.modalCtx?.data?.id ||
+        merged.id ||
+        null;
+
+      if (candId) {
+        window.appState = window.appState || {};
+        const cache = (window.appState.candidateAdvances ||= {});
+
+        if (cache[candId]) {
+          // Already cached this session → repaint into fresh DOM
+          updateCandidateAdvancesUI(candId);
+        } else {
+          // First time on this candidate → fetch from backend
+          fetchCandidateAdvances(candId).catch(err => {
+            console.warn('[CAND][PAY][ADVANCES] fetch failed', err);
           });
         }
 
-        const viewEls = root.querySelectorAll('[data-view-only="true"]');
-        const editEls = root.querySelectorAll('[data-edit-only="true"]');
-        if (mode === 'edit' || mode === 'create') {
-          viewEls.forEach(el => { el.style.display = 'none'; });
-          editEls.forEach(el => { el.style.display = ''; });
-        } else {
-          viewEls.forEach(el => { el.style.display = ''; });
-          editEls.forEach(el => { el.style.display = 'none'; });
-        }
+        // Wire "New missing-shift advance" & "New advance / loan" buttons
+        const payTab = document.getElementById('tab-pay');
+        if (payTab && !payTab.__advNewWired) {
+          payTab.__advNewWired = true;
+          payTab.addEventListener('click', (ev) => {
+            const btn = ev.target.closest('button[data-act]');
+            if (!btn) return;
+            const act = btn.getAttribute('data-act') || '';
 
-        // Hide legacy buttons
-        if (holdOnBtn)   holdOnBtn.style.display  = 'none';
-        if (holdOffBtn)  holdOffBtn.style.display = 'none';
-        if (markPaidBtn) markPaidBtn.style.display= 'none';
-
-        // Authorise / Unauthorise gating
-        if (authoriseBtn) {
-          authoriseBtn.style.display = (!isAuthorised && !locked && mode === 'view') ? '' : 'none';
-          if (!authoriseBtn.__tsWired) {
-            authoriseBtn.__tsWired = true;
-            authoriseBtn.addEventListener('click', async () => {
-              try {
-                await authoriseTimesheet(tsId);
-                window.__toast && window.__toast('Timesheet authorised');
-              } catch (err) {
-                if (LOGM) console.warn('[TS][OVERVIEW] authoriseTimesheet failed', err);
-                alert(err?.message || 'Failed to authorise timesheet.');
-              }
-            });
-          }
-        }
-
-        if (unauthoriseBtn) {
-          unauthoriseBtn.style.display = (isAuthorised && !locked && mode === 'view') ? '' : 'none';
-          if (!unauthoriseBtn.__tsWired) {
-            unauthoriseBtn.__tsWired = true;
-            unauthoriseBtn.addEventListener('click', async () => {
-              const ok = window.confirm('Unauthorise this timesheet? It will return to a pending state.');
-              if (!ok) return;
-              try {
-                await unauthoriseTimesheet(tsId);
-                window.__toast && window.__toast('Timesheet unauthorised');
-              } catch (err) {
-                if (LOGM) console.warn('[TS][OVERVIEW] unauthoriseTimesheet failed', err);
-                alert(err?.message || 'Failed to unauthorise timesheet.');
-              }
-            });
-          }
-        }
-
-        if (switchManualBtn) {
-          switchManualBtn.style.display = (weeklyElectronic && !locked && !!tsId && mode === 'view') ? '' : 'none';
-          if (!switchManualBtn.__tsWired) {
-            switchManualBtn.__tsWired = true;
-            switchManualBtn.addEventListener('click', async () => {
-              const ok = window.confirm('Switch this weekly timesheet to manual? Electronic submission will be revoked.');
-              if (!ok) return;
-              try {
-                await switchTimesheetToManual(tsId);
-                window.__toast && window.__toast('Weekly week switched to manual. You can now enter manual hours.');
-                // Close this modal; summary list will be refreshed separately
-                try { byId('btnCloseModal').click(); } catch {}
-              } catch (err) {
-                if (LOGM) console.warn('[TS][OVERVIEW] switchTimesheetToManual failed', err);
-                alert(err?.message || 'Failed to switch timesheet to manual.');
-              }
-            });
-          }
-        }
-
-        // Pay-hold + mark-paid staging in edit/create
-        if (mode === 'edit' || mode === 'create') {
-          if (!mc.timesheetState || typeof mc.timesheetState !== 'object') {
-            mc.timesheetState = {
-              reference: '',
-              payHoldDesired: null,
-              payHoldReason: '',
-              markPaid: false,
-              segmentOverrides: {},
-              segmentInvoiceTargets: {},
-              manualHours: {},
-              additionalRates: (mc.timesheetState && mc.timesheetState.additionalRates) || {}
-            };
-          }
-          const state = mc.timesheetState;
-
-          if (payHoldInput && !payHoldInput.__tsWired) {
-            payHoldInput.__tsWired = true;
-            const currentOnHold = !!(tsfin && tsfin.pay_on_hold);
-            if (state.payHoldDesired == null) {
-              payHoldInput.checked = currentOnHold;
-              state.payHoldDesired = currentOnHold;
-            } else {
-              payHoldInput.checked = !!state.payHoldDesired;
+            if (act === 'adv-missing-new') {
+              const cand = window.modalCtx?.data || merged;
+              typeof openMissingShiftAdvanceModal === 'function' && openMissingShiftAdvanceModal(cand);
+            } else if (act === 'adv-manual-new') {
+              const cand = window.modalCtx?.data || merged;
+              typeof openManualAdvanceModal === 'function' && openManualAdvanceModal(cand);
             }
-
-            payHoldInput.addEventListener('change', () => {
-              state.payHoldDesired = !!payHoldInput.checked;
-              if (payHoldReasonInput) {
-                state.payHoldReason = String(payHoldReasonInput.value || '');
-              }
-              if (LOGM) {
-                LT('pay hold staged', {
-                  tsId,
-                  payHoldDesired: state.payHoldDesired,
-                  payHoldReason: state.payHoldReason
-                });
-              }
-              try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
-            });
-          }
-
-          if (payHoldReasonInput && !payHoldReasonInput.__tsWired) {
-            payHoldReasonInput.__tsWired = true;
-            payHoldReasonInput.addEventListener('input', () => {
-              if (!mc.timesheetState || typeof mc.timesheetState !== 'object') return;
-              mc.timesheetState.payHoldReason = String(payHoldReasonInput.value || '');
-              if (LOGM) {
-                LT('pay hold reason staged', {
-                  tsId,
-                  payHoldReason: mc.timesheetState.payHoldReason
-                });
-              }
-              try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
-            });
-          }
-
-          if (markPaidInput && !markPaidInput.__tsWired) {
-            markPaidInput.__tsWired = true;
-            if (alreadyPaid) {
-              markPaidInput.checked = true;
-              markPaidInput.disabled = true;
-            } else {
-              markPaidInput.checked = !!state.markPaid;
-            }
-            markPaidInput.addEventListener('change', () => {
-              const alreadyPaidLocal = !!(mc.timesheetDetails && mc.timesheetDetails.tsfin && mc.timesheetDetails.tsfin.paid_at_utc);
-              if (alreadyPaidLocal) {
-                markPaidInput.checked = true;
-                markPaidInput.disabled = true;
-                return;
-              }
-              state.markPaid = !!markPaidInput.checked;
-              if (LOGM) {
-                LT('mark paid staged', {
-                  tsId,
-                  markPaid: state.markPaid
-                });
-              }
-              try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
-            });
-          }
-        } else {
-          if (payHoldInput)       payHoldInput.disabled       = true;
-          if (payHoldReasonInput) payHoldReasonInput.disabled = true;
-          if (markPaidInput)      markPaidInput.disabled      = true;
+          });
         }
 
-        if (refInput && !refInput.__tsRefWired) {
-          refInput.__tsRefWired = true;
-          refInput.addEventListener('input', () => {
-            const mc2 = window.modalCtx || {};
-            if (!mc2.timesheetState || typeof mc2.timesheetState !== 'object') {
-              mc2.timesheetState = {
+        // Wire general advances actions (Edit schedule / Pause/Resume / Mark paid off)
+        const generalContainer = document.getElementById('candidateGeneralAdvances');
+        if (generalContainer && !generalContainer.__advWired) {
+          generalContainer.__advWired = true;
+          generalContainer.addEventListener('click', async (ev) => {
+            const btn = ev.target.closest('button[data-act][data-advance-id]');
+            if (!btn) return;
+
+            const act   = btn.getAttribute('data-act') || '';
+            const advId = btn.getAttribute('data-advance-id') || '';
+            if (!advId) return;
+
+            const stateEntry = (window.appState.candidateAdvances || {})[candId] || {};
+            const list       = Array.isArray(stateEntry.list) ? stateEntry.list : [];
+            const advance    = list.find(a => String(a.id) === String(advId));
+            if (!advance) return;
+
+            if (act === 'adv-edit-schedule') {
+              typeof openEditAdvanceScheduleModal === 'function' && openEditAdvanceScheduleModal(advance);
+            } else if (act === 'adv-toggle-pause') {
+              typeof toggleAdvancePause === 'function' && await toggleAdvancePause(advance);
+            } else if (act === 'adv-mark-paid-off') {
+              typeof markAdvancePaidOff === 'function' && await markAdvancePaidOff(advance);
+            }
+          });
+        }
+      }
+    } catch (e) {
+      console.warn('[CAND][PAY][ADVANCES] wiring failed', e);
+    }
+  }
+
+  // ───────────────────── Timesheets: Overview tab wiring ─────────────────────
+  if (this.entity === 'timesheets' && k === 'overview') {
+    const { LOGM, L: LT } = getTsLoggers('[TS][OVERVIEW][WIRE]');
+    const root = byId('modalBody');
+    if (!root) {
+      if (LOGM) LT('no modalBody root, skip wiring');
+    } else {
+      try {
+        const mc   = window.modalCtx || {};
+        const tsId = mc.data?.timesheet_id || mc.data?.id || null;
+        const mode = this.mode || 'view';
+
+        if (!tsId && !mc.data?.contract_week_id) {
+          if (LOGM) LT('no tsId/contract_week_id on modalCtx.data, skip overview wiring');
+        } else {
+          const authoriseBtn       = root.querySelector('button[data-ts-action="authorise"]');
+          const unauthoriseBtn     = root.querySelector('button[data-ts-action="unauthorise"]');
+          const switchManualBtn    = root.querySelector('button[data-ts-action="switch-manual"]');
+          const holdOnBtn          = root.querySelector('button[data-ts-action="pay-hold-on"]');
+          const holdOffBtn         = root.querySelector('button[data-ts-action="pay-hold-off"]');
+          const markPaidBtn        = root.querySelector('button[data-ts-action="mark-paid"]');
+          const refInput           = root.querySelector('input[name="ts_reference"]');
+          const payHoldInput       = root.querySelector('input[name="ts_pay_hold"]');
+          const payHoldReasonInput = root.querySelector('input[name="ts_pay_hold_reason"]');
+          const markPaidInput      = root.querySelector('input[name="ts_mark_paid"]');
+
+          const det   = mc.timesheetDetails || {};
+          const ts    = det.timesheet || {};
+          const tsfin = det.tsfin || {};
+          const sheetScope = (det.sheet_scope || mc.data?.sheet_scope || ts.sheet_scope || '').toUpperCase();
+          const subMode    = (ts.submission_mode || mc.data?.submission_mode || '').toUpperCase();
+
+          const isAuthorised     = !!ts.authorised_at_server;
+          const locked           = !!(tsfin.locked_by_invoice_id || tsfin.paid_at_utc);
+          const weeklyElectronic = (sheetScope === 'WEEKLY' && subMode === 'ELECTRONIC');
+          const alreadyPaid      = !!tsfin.paid_at_utc;
+
+          if (LOGM) {
+            LT('overview wiring snapshot', {
+              tsId,
+              mode,
+              sheetScope,
+              subMode,
+              isAuthorised,
+              locked,
+              weeklyElectronic,
+              hasAuthorise: !!authoriseBtn,
+              hasUnauthorise: !!unauthoriseBtn,
+              hasSwitchManual: !!switchManualBtn,
+              hasRefInput: !!refInput,
+              hasPayHoldInput: !!payHoldInput,
+              hasMarkPaidInput: !!markPaidInput
+            });
+          }
+
+          const viewEls = root.querySelectorAll('[data-view-only="true"]');
+          const editEls = root.querySelectorAll('[data-edit-only="true"]');
+          if (mode === 'edit' || mode === 'create') {
+            viewEls.forEach(el => { el.style.display = 'none'; });
+            editEls.forEach(el => { el.style.display = ''; });
+          } else {
+            viewEls.forEach(el => { el.style.display = ''; });
+            editEls.forEach(el => { el.style.display = 'none'; });
+          }
+
+          // Hide legacy buttons
+          if (holdOnBtn)   holdOnBtn.style.display  = 'none';
+          if (holdOffBtn)  holdOffBtn.style.display = 'none';
+          if (markPaidBtn) markPaidBtn.style.display= 'none';
+
+          // Authorise / Unauthorise gating
+          if (authoriseBtn) {
+            authoriseBtn.style.display = (!isAuthorised && !locked && mode === 'view') ? '' : 'none';
+            if (!authoriseBtn.__tsWired) {
+              authoriseBtn.__tsWired = true;
+              authoriseBtn.addEventListener('click', async () => {
+                try {
+                  await authoriseTimesheet(tsId);
+                  window.__toast && window.__toast('Timesheet authorised');
+                } catch (err) {
+                  if (LOGM) console.warn('[TS][OVERVIEW] authoriseTimesheet failed', err);
+                  alert(err?.message || 'Failed to authorise timesheet.');
+                }
+              });
+            }
+          }
+
+          if (unauthoriseBtn) {
+            unauthoriseBtn.style.display = (isAuthorised && !locked && mode === 'view') ? '' : 'none';
+            if (!unauthoriseBtn.__tsWired) {
+              unauthoriseBtn.__tsWired = true;
+              unauthoriseBtn.addEventListener('click', async () => {
+                const ok = window.confirm('Unauthorise this timesheet? It will return to a pending state.');
+                if (!ok) return;
+                try {
+                  await unauthoriseTimesheet(tsId);
+                  window.__toast && window.__toast('Timesheet unauthorised');
+                } catch (err) {
+                  if (LOGM) console.warn('[TS][OVERVIEW] unauthoriseTimesheet failed', err);
+                  alert(err?.message || 'Failed to unauthorise timesheet.');
+                }
+              });
+            }
+          }
+
+          if (switchManualBtn) {
+            switchManualBtn.style.display = (weeklyElectronic && !locked && !!tsId && mode === 'view') ? '' : 'none';
+            if (!switchManualBtn.__tsWired) {
+              switchManualBtn.__tsWired = true;
+              switchManualBtn.addEventListener('click', async () => {
+                const ok = window.confirm('Switch this weekly timesheet to manual? Electronic submission will be revoked.');
+                if (!ok) return;
+                try {
+                  await switchTimesheetToManual(tsId);
+                  window.__toast && window.__toast('Weekly week switched to manual. You can now enter manual hours.');
+                  try { byId('btnCloseModal').click(); } catch {}
+                } catch (err) {
+                  if (LOGM) console.warn('[TS][OVERVIEW] switchTimesheetToManual failed', err);
+                  alert(err?.message || 'Failed to switch timesheet to manual.');
+                }
+              });
+            }
+          }
+
+          // Pay-hold + mark-paid staging in edit/create
+          if (mode === 'edit' || mode === 'create') {
+            if (!mc.timesheetState || typeof mc.timesheetState !== 'object') {
+              mc.timesheetState = {
                 reference: '',
                 payHoldDesired: null,
                 payHoldReason: '',
@@ -20869,28 +20869,117 @@ if (this.entity === 'timesheets' && k === 'overview') {
                 segmentOverrides: {},
                 segmentInvoiceTargets: {},
                 manualHours: {},
-                additionalRates: {}
+                additionalRates: (mc.timesheetState && mc.timesheetState.additionalRates) || {}
               };
             }
-            mc2.timesheetState.reference = String(refInput.value || '');
-            if (LOGM) {
-              LT('reference staged', {
-                tsId,
-                reference: mc2.timesheetState.reference
+            const state = mc.timesheetState;
+
+            if (payHoldInput && !payHoldInput.__tsWired) {
+              payHoldInput.__tsWired = true;
+              const currentOnHold = !!(tsfin && tsfin.pay_on_hold);
+              if (state.payHoldDesired == null) {
+                payHoldInput.checked = currentOnHold;
+                state.payHoldDesired = currentOnHold;
+              } else {
+                payHoldInput.checked = !!state.payHoldDesired;
+              }
+
+              payHoldInput.addEventListener('change', () => {
+                state.payHoldDesired = !!payHoldInput.checked;
+                if (payHoldReasonInput) {
+                  state.payHoldReason = String(payHoldReasonInput.value || '');
+                }
+                if (LOGM) {
+                  LT('pay hold staged', {
+                    tsId,
+                    payHoldDesired: state.payHoldDesired,
+                    payHoldReason: state.payHoldReason
+                  });
+                }
+                try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
               });
             }
-            try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
-          });
+
+            if (payHoldReasonInput && !payHoldReasonInput.__tsWired) {
+              payHoldReasonInput.__tsWired = true;
+              payHoldReasonInput.addEventListener('input', () => {
+                if (!mc.timesheetState || typeof mc.timesheetState !== 'object') return;
+                mc.timesheetState.payHoldReason = String(payHoldReasonInput.value || '');
+                if (LOGM) {
+                  LT('pay hold reason staged', {
+                    tsId,
+                    payHoldReason: mc.timesheetState.payHoldReason
+                  });
+                }
+                try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
+              });
+            }
+
+            if (markPaidInput && !markPaidInput.__tsWired) {
+              markPaidInput.__tsWired = true;
+              if (alreadyPaid) {
+                markPaidInput.checked = true;
+                markPaidInput.disabled = true;
+              } else {
+                markPaidInput.checked = !!state.markPaid;
+              }
+              markPaidInput.addEventListener('change', () => {
+                const alreadyPaidLocal = !!(mc.timesheetDetails && mc.timesheetDetails.tsfin && mc.timesheetDetails.tsfin.paid_at_utc);
+                if (alreadyPaidLocal) {
+                  markPaidInput.checked = true;
+                  markPaidInput.disabled = true;
+                  return;
+                }
+                state.markPaid = !!markPaidInput.checked;
+                if (LOGM) {
+                  LT('mark paid staged', {
+                    tsId,
+                    markPaid: state.markPaid
+                  });
+                }
+                try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
+              });
+            }
+          } else {
+            if (payHoldInput)       payHoldInput.disabled       = true;
+            if (payHoldReasonInput) payHoldReasonInput.disabled = true;
+            if (markPaidInput)      markPaidInput.disabled      = true;
+          }
+
+          if (refInput && !refInput.__tsRefWired) {
+            refInput.__tsRefWired = true;
+            refInput.addEventListener('input', () => {
+              const mc2 = window.modalCtx || {};
+              if (!mc2.timesheetState || typeof mc2.timesheetState !== 'object') {
+                mc2.timesheetState = {
+                  reference: '',
+                  payHoldDesired: null,
+                  payHoldReason: '',
+                  markPaid: false,
+                  segmentOverrides: {},
+                  segmentInvoiceTargets: {},
+                  manualHours: {},
+                  additionalRates: {}
+                };
+              }
+              mc2.timesheetState.reference = String(refInput.value || '');
+              if (LOGM) {
+                LT('reference staged', {
+                  tsId,
+                  reference: mc2.timesheetState.reference
+                });
+              }
+              try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
+            });
+          }
         }
-      }
-    } catch (err) {
-      if ((typeof window.__LOG_MODAL === 'boolean') ? window.__LOG_MODAL : false) {
-        console.warn('[TS][OVERVIEW][WIRE] failed', err);
+      } catch (err) {
+        if ((typeof window.__LOG_MODAL === 'boolean') ? window.__LOG_MODAL : false) {
+          console.warn('[TS][OVERVIEW][WIRE] failed', err);
+        }
       }
     }
   }
-}
-
 
   // ───────────────────── Timesheets: Lines tab wiring ─────────────────────
   if (this.entity === 'timesheets' && k === 'lines') {
@@ -20900,21 +20989,20 @@ if (this.entity === 'timesheets' && k === 'overview') {
       if (LOGM) LT('no modalBody root, skip wiring');
     } else {
       try {
-   const mc = window.modalCtx || {};
-if (!mc.timesheetState || typeof mc.timesheetState !== 'object') {
-  mc.timesheetState = {
-    reference: null,
-    payHoldDesired: null,
-    payHoldReason: '',
-    markPaid: false,
-    segmentOverrides: {},
-    segmentInvoiceTargets: {},
-    manualHours: {},
-    additionalRates: {}
-  };
-}
-const state = mc.timesheetState;
-
+        const mc = window.modalCtx || {};
+        if (!mc.timesheetState || typeof mc.timesheetState !== 'object') {
+          mc.timesheetState = {
+            reference: null,
+            payHoldDesired: null,
+            payHoldReason: '',
+            markPaid: false,
+            segmentOverrides: {},
+            segmentInvoiceTargets: {},
+            manualHours: {},
+            additionalRates: {}
+          };
+        }
+        const state = mc.timesheetState;
 
         // Segments exclude_from_pay
         const checkboxes = root.querySelectorAll('input[name="seg_exclude_from_pay"][data-segment-id]');
@@ -20960,45 +21048,43 @@ const state = mc.timesheetState;
           });
         });
 
-        // NHSP deferrals
-   // Invoice week / Pause selects (per segment)
-const weekSelects = root.querySelectorAll('select[name="seg_invoice_week"][data-segment-id]');
-if (LOGM) LT('wiring invoice-week selects', { count: weekSelects.length });
+        // Invoice week / Pause selects (per segment)
+        const weekSelects = root.querySelectorAll('select[name="seg_invoice_week"][data-segment-id]');
+        if (LOGM) LT('wiring invoice-week selects', { count: weekSelects.length });
 
-weekSelects.forEach(sel => {
-  if (sel.__tsWeekWired) return;
-  sel.__tsWeekWired = true;
+        weekSelects.forEach(sel => {
+          if (sel.__tsWeekWired) return;
+          sel.__tsWeekWired = true;
 
-  const segId = sel.getAttribute('data-segment-id') || '';
-  if (!segId) return;
+          const segId = sel.getAttribute('data-segment-id') || '';
+          if (!segId) return;
 
-  // Seed from state (if user previously staged a change)
-  if (state.segmentInvoiceTargets && typeof state.segmentInvoiceTargets === 'object') {
-    const staged = state.segmentInvoiceTargets[segId];
-    if (staged) {
-      sel.value = staged;
-    }
-  }
+          // Seed from state (if user previously staged a change)
+          if (state.segmentInvoiceTargets && typeof state.segmentInvoiceTargets === 'object') {
+            const staged = state.segmentInvoiceTargets[segId];
+            if (staged) {
+              sel.value = staged;
+            }
+          }
 
-  sel.addEventListener('change', () => {
-    if (!state.segmentInvoiceTargets || typeof state.segmentInvoiceTargets !== 'object') {
-      state.segmentInvoiceTargets = {};
-    }
-    const newVal = (sel.value || '').trim();
-    state.segmentInvoiceTargets[segId] = newVal;
+          sel.addEventListener('change', () => {
+            if (!state.segmentInvoiceTargets || typeof state.segmentInvoiceTargets !== 'object') {
+              state.segmentInvoiceTargets = {};
+            }
+            const newVal = (sel.value || '').trim();
+            state.segmentInvoiceTargets[segId] = newVal;
 
-    if (LOGM) {
-      LT('invoice week staged', {
-        segId,
-        week_start: newVal,
-        keys: Object.keys(state.segmentInvoiceTargets || {})
-      });
-    }
+            if (LOGM) {
+              LT('invoice week staged', {
+                segId,
+                week_start: newVal,
+                keys: Object.keys(state.segmentInvoiceTargets || {})
+              });
+            }
 
-    try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
-  });
-});
-
+            try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
+          });
+        });
 
         // Manual weekly hours inputs (manual_hours_*)
         const hoursInputs = root.querySelectorAll('input[name^="manual_hours_"]');
@@ -21223,7 +21309,7 @@ weekSelects.forEach(sel => {
 
   GE();
 }
-    
+
 
 
 
@@ -21517,32 +21603,55 @@ function renderTop() {
 
       btnEdit.style.display = (top.mode==='view' && top.hasId) ? '' : 'none';
 
-      if (relatedBtn) {
-        // Map modal entity → backend /api/related entity key
-        const relatedEntity =
-          top.entity === 'candidates' ? 'candidate' :
-          top.entity === 'clients'    ? 'client'    :
-          top.entity === 'contracts'  ? 'contract'  : // backend doesn’t use this yet, but harmless
-          null;
+   if (relatedBtn) {
+  // Map modal entity → backend /api/related entity key
+  const relatedEntity =
+    top.entity === 'candidates' ? 'candidate' :
+    top.entity === 'clients'    ? 'client'    :
+    top.entity === 'contracts'  ? 'contract'  :
+    top.entity === 'timesheets' ? 'timesheet' :
+    top.entity === 'invoices'   ? 'invoice'   :
+    null;
 
-        const showRelated =
-          !isChild &&
-          top.hasId &&
-          !!relatedEntity;
+  const showRelated =
+    !isChild &&
+    top.hasId &&
+    !!relatedEntity;
 
-        relatedBtn.style.display = showRelated ? '' : 'none';
+  relatedBtn.style.display = showRelated ? '' : 'none';
 
-        const canClick = showRelated && top.mode === 'view';
-        relatedBtn.disabled = !canClick;
+  const canClick = showRelated && top.mode === 'view';
+  relatedBtn.disabled = !canClick;
 
-        if (canClick) {
-          relatedBtn.onclick = async (ev) => {
-            // …
-          };
-        } else {
-          relatedBtn.onclick = null;
+  if (canClick) {
+    relatedBtn.onclick = async (ev) => {
+      try {
+        ev.preventDefault();
+        ev.stopPropagation();
+
+        const ctxId = window.modalCtx?.data?.id || null;
+        if (!ctxId) {
+          console.warn('[RELATED] no id on modalCtx.data; cannot open related menu');
+          return;
         }
+
+        // Fetch counts per related type (timesheets, invoices, etc.)
+        const counts = await fetchRelatedCounts(relatedEntity, ctxId);
+
+        // Position menu just under the button click
+        const x = ev.clientX;
+        const y = ev.clientY + 8;
+
+        showRelatedMenu(x, y, counts, relatedEntity, ctxId);
+      } catch (e) {
+        console.warn('[RELATED] failed to open related menu', e);
       }
+    };
+  } else {
+    relatedBtn.onclick = null;
+  }
+}
+
 
       if (top.mode === 'create') {
         btnSave.style.display = '';
@@ -26091,16 +26200,17 @@ function showRelatedMenu(x, y, counts, entity, id){
     if (!disabled) it.onclick = async (ev)=>{
       ev.stopPropagation();
       const rows = await fetchRelated(entity, id, onClick.type);
-      if (rows) {
-        // When jumping sections via Related, tear down any open modal to avoid stale state
-        if ((window.__modalStack?.length || 0) > 0 || modalCtx?.entity) {
-          discardAllModalsAndState();
-        }
-        if (onClick.type === 'timesheets' || onClick.type === 'invoices') {
-          currentSection = onClick.type;
-        }
-        renderSummary(rows);
-      }
+   if (rows) {
+  // When jumping sections via Related, tear down any open modal to avoid stale state
+  if ((window.__modalStack?.length || 0) > 0 || window.modalCtx?.entity) {
+    discardAllModalsAndState();
+  }
+  if (onClick.type === 'timesheets' || onClick.type === 'invoices') {
+    currentSection = onClick.type;
+  }
+  renderSummary(rows);
+}
+
       closeRelatedMenu();
     };
     menu.appendChild(it);
@@ -26873,6 +26983,7 @@ function classifyTimesheetPill(kind, value) {
   }
 }
 
+
 function renderTimesheetOverviewTab(ctx) {
   const { LOGM, L, GC, GE } = getTsLoggers('[TS][OVERVIEW]');
   const { row, details, related, state } = normaliseTimesheetCtx(ctx);
@@ -26880,229 +26991,472 @@ function renderTimesheetOverviewTab(ctx) {
   GC('render');
   const ts    = details.timesheet || {};
   const tsfin = details.tsfin     || {};
-  const sheetScope = row.sheet_scope || details.sheet_scope || ts.sheet_scope || null;
-  const subMode    = row.submission_mode || ts.submission_mode || null;
-  const routeType  = row.route_type || tsfin.basis || null;
-  const stage      = row.summary_stage || null;
+  const cw    = details.contract_week || {};
+  const rCand = related.candidate || {};
+  const rCli  = related.client    || {};
+  const rCtr  = related.contract  || {};
+  const rInv  = related.invoice   || null;
 
-  const candidateName = row.candidate_name || (related.candidate && related.candidate.display_name) || ts.occupant_key_norm || '';
-  const clientName    = row.client_name    || (related.client && related.client.name) || '';
-  const weekEnding    = row.week_ending_date || ts.week_ending_date || '';
-  const bookingId     = row.booking_id || ts.booking_id || '';
-  const contractInfo  = related.contract || null;
+  const sheetScope = (details.sheet_scope ||
+                      row.sheet_scope ||
+                      ts.sheet_scope ||
+                      '').toUpperCase();
+  const subMode    = (ts.submission_mode ||
+                      row.submission_mode ||
+                      '').toUpperCase();
+  const basis      = (tsfin.basis || row.basis || '').toUpperCase();
 
-  const totalHours = tsfin.total_hours ?? null;
-  const payEx      = tsfin.total_pay_ex_vat ?? null;
-  const chargeEx   = tsfin.total_charge_ex_vat ?? null;
-  const marginEx   = tsfin.margin_ex_vat ?? null;
+  const tsId = ts.timesheet_id || row.timesheet_id || null;
 
-  const nhspCount     = row.nhsp_shift_count || 0;
-  const hasNhsp       = nhspCount > 0;
-  const isAdjusted    = !!row.is_adjusted;
-  const isQr          = !!row.is_qr;
-  const payOnHold     = !!row.pay_on_hold;
-  const needsAttention= !!row.needs_attention;
-  const isAdjustment  = !!row.is_adjustment;
+  const enc = escapeHtml;
 
-  const paidAt    = tsfin.paid_at_utc || row.paid_at_utc || null;
-  const invoiced  = !!row.locked_by_invoice_id;
+  const candidateName =
+    (rCand.display_name && enc(rCand.display_name)) ||
+    (row.occupant_key_norm && enc(row.occupant_key_norm)) ||
+    (rCand.first_name || rCand.last_name
+      ? enc([rCand.first_name, rCand.last_name].filter(Boolean).join(' ')) 
+      : 'Unknown candidate');
 
-  const referenceCurrent = (state.reference != null)
-    ? state.reference
-    : (ts.reference_number || row.reference_number || '');
+  const clientName =
+    (rCli.name && enc(rCli.name)) ||
+    (rCtr.display_site && enc(rCtr.display_site)) ||
+    (row.client_name && enc(row.client_name)) ||
+    (row.client_id ? enc(row.client_id) : 'Unknown client');
 
-  L('render snapshot', {
-    tsId: row.timesheet_id || ts.timesheet_id,
+  const jobTitle =
+    (rCtr.role && enc(rCtr.role)) ||
+    (row.job_title_norm && enc(row.job_title_norm)) ||
+    null;
+  const band =
+    (rCtr.band && String(rCtr.band).trim()) ||
+    (row.band && String(row.band).trim()) ||
+    null;
+
+  const weYmd = ts.week_ending_date || row.week_ending_date || null;
+
+  const fmtYmdToDmy = (ymd) => {
+    if (!ymd || typeof ymd !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(ymd)) return enc(ymd || '');
+    const [y, m, d] = ymd.split('-');
+    return `${d}-${m}-${y}`;
+  };
+
+  const fmtDow = (ymd) => {
+    if (!ymd) return '';
+    const d = new Date(`${ymd}T00:00:00Z`);
+    if (Number.isNaN(d.getTime())) return '';
+    return d.toLocaleDateString('en-GB', { weekday: 'short', timeZone: 'Europe/London' });
+  };
+
+  const fmtUkDateTime = (iso) => {
+    if (!iso) return '';
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return enc(iso);
+    const s = d.toLocaleString('en-GB', {
+      timeZone: 'Europe/London',
+      weekday: 'short',
+      day: '2-digit',
+      month: 'short',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false
+    });
+    const parts = s.replace(',', '').split(' ');
+    if (parts.length < 4) return enc(s);
+    const [dow, day, mon, year, time] = parts;
+    const hhmm = (time || '').replace(':', '');
+    return `${enc(dow)} ${enc(day)} ${enc(mon)} ${enc(year)} at ${enc(hhmm)}hrs`;
+  };
+
+  // Is there *any* real TSFIN snapshot?
+  const hasTsfin = !!(
+    tsfin &&
+    (
+      tsfin.timesheet_id ||
+      tsfin.total_hours != null ||
+      tsfin.total_pay_ex_vat != null ||
+      tsfin.processing_status
+    )
+  );
+  const hasContractWeek = !!(details.contract_week_id || cw.id || row.contract_week_id);
+  const isPlannedOnly   = !hasTsfin && hasContractWeek && !tsId; // planned/open week (no TS + no TSFIN)
+
+  const stageRaw      = (tsfin.processing_status || '').toUpperCase() || null;
+  const isPaid        = !!tsfin.paid_at_utc;
+  const isInvoiced    = !!tsfin.locked_by_invoice_id;
+  const payOnHold     = !!tsfin.pay_on_hold;
+  const authorised    = !!ts.authorised_at_server;
+  const qrStatus      = (details.qr_status || ts.qr_status || '').toUpperCase();
+
+  const amountPayEx   = Number(tsfin.total_pay_ex_vat || 0) || 0;
+  const amountChgEx   = Number(tsfin.total_charge_ex_vat || 0) || 0;
+  const amountMargin  = amountChgEx - amountPayEx;
+
+  const fmtMoney = (v) => isNaN(Number(v)) ? '—' : `£${(Math.round(Number(v) * 100) / 100).toFixed(2)}`;
+
+  L('snapshot', {
+    tsId,
     sheetScope,
     subMode,
-    routeType,
-    stage,
-    candidateName,
-    clientName,
-    weekEnding,
-    isAdjusted,
-    isQr,
+    basis,
+    stageRaw,
+    authorised,
+    isPaid,
+    isInvoiced,
     payOnHold,
-    needsAttention,
-    isAdjustment,
-    hasNhsp,
-    paidAt,
-    invoiced
+    qrStatus,
+    weYmd,
+    hasTsfin,
+    hasContractWeek,
+    isPlannedOnly
   });
   GE();
 
-  const stageClass = classifyTimesheetPill('stage', stage);
-  const routeClass = classifyTimesheetPill('route', routeType);
-  const scopeClass = classifyTimesheetPill('scope', sheetScope);
-  const modeClass  = classifyTimesheetPill('mode', subMode);
+  // ───────────────────────────── Box 1 – Header ─────────────────────────────
+  const headerHtml = `
+    <div class="card">
+      <div class="row">
+        <label>Timesheet</label>
+        <div class="controls">
+          <div style="font-size:15px;font-weight:600;margin-bottom:2px;">
+            ${candidateName}
+          </div>
+          <div class="mini">
+            Client: ${clientName}
+          </div>
+          <div class="mini">
+            Week ending: ${
+              weYmd
+                ? `${fmtDow(weYmd)} ${fmtYmdToDmy(weYmd)}`
+                : '<span class="mini">Unknown</span>'
+            }
+          </div>
+          <div class="mini">
+            ${
+              jobTitle
+                ? (band ? `${jobTitle} (Band ${enc(band)})` : jobTitle)
+                : (band ? `Band ${enc(band)}` : '<span class="mini">No job title</span>')
+            }
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
 
-  const flagPills = [];
-  if (isAdjusted)     flagPills.push('<span class="pill pill-warn">Adjusted</span>');
-  if (isQr)           flagPills.push('<span class="pill pill-elec">QR</span>');
-  if (payOnHold)      flagPills.push('<span class="pill pill-hold">Pay on hold</span>');
-  if (needsAttention) flagPills.push('<span class="pill pill-bad">Needs attention</span>');
-  if (isAdjustment)   flagPills.push('<span class="pill pill-hr">Adjustment week</span>');
-  if (hasNhsp)        flagPills.push('<span class="pill pill-nhsp">NHSP</span>');
-  if (invoiced)       flagPills.push('<span class="pill pill-info">Invoiced</span>');
-  if (paidAt)         flagPills.push('<span class="pill pill-ok">Paid</span>');
+  // ─────────────────────────── Box 2 – Route & status ───────────────────────
+  const stageLabel = (() => {
+    if (!hasTsfin) {
+      if (isPlannedOnly) return 'UNPROCESSED (planned week)';
+      return 'UNPROCESSED';
+    }
+    if (isPaid) return 'Paid';
+    if (isInvoiced) return 'Invoiced';
+    if (stageRaw === 'READY_FOR_INVOICE') return 'Ready for invoice';
+    if (stageRaw === 'PENDING_AUTH') return 'Pending authorisation';
+    if (stageRaw === 'RATE_MISSING') return 'Rate missing';
+    if (stageRaw === 'PAY_CHANNEL_MISSING') return 'Pay channel missing';
+    return stageRaw || 'Unknown';
+  })();
 
-  const contractLine = contractInfo
-    ? `${contractInfo.role || ''}${contractInfo.band ? ' (Band ' + contractInfo.band + ')' : ''}`
-    : '';
+  const stageClass = (() => {
+    if (!hasTsfin) return 'pill-bad';
+    if (isPaid) return 'pill-ok';
+    if (isInvoiced) return 'pill-warn';
+    if (stageRaw === 'RATE_MISSING' || stageRaw === 'PAY_CHANNEL_MISSING') return 'pill-bad';
+    if (stageRaw === 'READY_FOR_INVOICE') return 'pill-ok';
+    return 'pill-info';
+  })();
+
+  const scopePill = sheetScope === 'DAILY'
+    ? '<span class="pill pill-daily">Daily</span>'
+    : '<span class="pill pill-weekly">Weekly</span>';
+
+  const modePill = (() => {
+    if (basis === 'NHSP' || basis === 'NHSP_ADJUSTMENT') {
+      return '<span class="pill pill-nhsp">NHSP</span>';
+    }
+    if (basis.startsWith('HEALTHROSTER')) {
+      return '<span class="pill pill-hr">HealthRoster</span>';
+    }
+    if (subMode === 'ELECTRONIC') {
+      return '<span class="pill pill-elec">Electronic</span>';
+    }
+    if (subMode === 'MANUAL' && qrStatus) {
+      return `<span class="pill pill-manual">Manual (QR: ${enc(qrStatus)})</span>`;
+    }
+    if (subMode === 'MANUAL') {
+      return '<span class="pill pill-manual">Manual</span>';
+    }
+    return '<span class="pill">Unknown mode</span>';
+  })();
+
+  const paidLabel = isPaid
+    ? fmtUkDateTime(tsfin.paid_at_utc)
+    : 'Not paid';
+
+  const invLabel = isInvoiced
+    ? (rInv && rInv.invoice_number
+        ? `On invoice ${enc(rInv.invoice_number)}`
+        : 'Invoiced')
+    : 'Not invoiced';
+
+  const flagsHtml = `
+    <div class="mini" style="margin-top:4px;">
+      <span class="pill ${isPaid ? 'pill-ok' : 'pill-warn'}">
+        Paid: ${isPaid ? 'Yes' : 'No'}
+      </span>
+      <span class="pill ${isInvoiced ? 'pill-warn' : 'pill-info'}" style="margin-left:4px;">
+        Invoiced: ${isInvoiced ? 'Yes' : 'No'}
+      </span>
+      ${
+        payOnHold
+          ? '<span class="pill pill-hold" style="margin-left:4px;">Pay on hold</span>'
+          : ''
+      }
+    </div>
+    <div class="mini" style="margin-top:4px;">
+      ${isPaid ? `Paid at ${paidLabel}` : ''}
+      ${isInvoiced ? `<br/>${invLabel}` : ''}
+    </div>
+  `;
+
+  const refValue = state && typeof state.reference === 'string'
+    ? state.reference
+    : (ts.reference_number || row.reference_number || '');
+
+  const totalsHtml = hasTsfin
+    ? `
+      <div class="mini">
+        Candidate pay (ex VAT): <strong>${fmtMoney(amountPayEx)}</strong><br/>
+        Client charge (ex VAT): <strong>${fmtMoney(amountChgEx)}</strong><br/>
+        Margin (ex VAT): <strong>${fmtMoney(amountMargin)}</strong>
+      </div>
+    `
+    : `
+      <div class="mini">
+        <strong>No financial snapshot yet.</strong><br/>
+        This timesheet has not been processed. Once processed, pay and charge totals will appear here.
+      </div>
+    `;
+
+  const routeHtml = `
+    <div class="card" style="margin-top:10px;">
+      <div class="row">
+        <label>Stage</label>
+        <div class="controls">
+          <span class="pill ${stageClass}" style="font-weight:600;">
+            ${enc(stageLabel)}
+          </span>
+          <div class="mini" style="margin-top:4px;">
+            ${authorised ? 'Authorised' : 'Not authorised'}
+          </div>
+        </div>
+      </div>
+      <div class="row">
+        <label>Route</label>
+        <div class="controls">
+          ${scopePill}
+          ${modePill}
+          ${
+            basis
+              ? `<span class="pill pill-info" style="margin-left:4px;">Basis: ${enc(basis)}</span>`
+              : ''
+          }
+          ${flagsHtml}
+        </div>
+      </div>
+      <div class="row">
+        <label>Totals</label>
+        <div class="controls">
+          ${totalsHtml}
+        </div>
+      </div>
+      <div class="row" data-edit-only="true">
+        <label>Reference / PO</label>
+        <div class="controls">
+          <input
+            class="input"
+            name="ts_reference"
+            value="${enc(refValue || '')}"
+            placeholder="Reference or PO (optional)"
+          />
+          <span class="mini">
+            This is staged only and will be saved when you click <strong>Save</strong>.
+          </span>
+        </div>
+      </div>
+      <div class="row" data-view-only="true">
+        <label>Reference / PO</label>
+        <div class="controls">
+          ${
+            refValue
+              ? `<span>${enc(refValue)}</span>`
+              : '<span class="mini">None recorded</span>'
+          }
+        </div>
+      </div>
+    </div>
+  `;
+
+  // ─────────────────────────── Box 3 – Day / shift breakdown ────────────────
+  const segments = Array.isArray(details.segments) ? details.segments : [];
+  const hasSegments = !!segments.length;
+
+  const formatTimeUk = (iso) => {
+    if (!iso) return '';
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return '';
+    return d.toLocaleTimeString('en-GB', {
+      timeZone: 'Europe/London',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false
+    });
+  };
+
+  const calcPaidHours = (seg) => {
+    if (!seg.start_utc || !seg.end_utc) return '';
+    const start = new Date(seg.start_utc);
+    const end   = new Date(seg.end_utc);
+    if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return '';
+    const diffHrs = (end - start) / 3_600_000;
+    const breakM  = Number(seg.break_mins || 0) || 0;
+    const paid    = diffHrs - (breakM / 60);
+    if (paid < 0) return '';
+    return (Math.round(paid * 100) / 100).toFixed(2);
+  };
+
+  const buildRowsFromSegments = () => {
+    if (!hasSegments) return '';
+
+    const rowsHtml = segments.map(seg => {
+      const ymd   = seg.date || seg.work_date || ts.week_ending_date || '';
+      const dow   = fmtDow(ymd);
+      const dmy   = fmtYmdToDmy(ymd);
+      const start = formatTimeUk(seg.start_utc);
+      const end   = formatTimeUk(seg.end_utc);
+      const brkM  = Number(seg.break_mins || 0) || 0;
+      const paid  = calcPaidHours(seg);
+      const extra =
+        seg.additional_units &&
+        typeof seg.additional_units === 'object'
+          ? Object.entries(seg.additional_units)
+              .map(([code, ex]) => {
+                const u = ex && typeof ex === 'object'
+                  ? Number(ex.unit_count || ex.units || 0) || 0
+                  : 0;
+                if (!u) return '';
+                const name = (ex.bucket_name || ex.unit_name || code || '').trim();
+                return `${escapeHtml(name || code)}: ${u}`;
+              })
+              .filter(Boolean)
+              .join('<br/>')
+          : '';
+
+      return `
+        <tr>
+          <td>${dow || '&mdash;'}</td>
+          <td>${dmy || '&mdash;'}</td>
+          <td>${start || '&mdash;'}</td>
+          <td>${end   || '&mdash;'}</td>
+          <td>${brkM ? `${brkM} mins` : '&mdash;'}</td>
+          <td>${paid || '&mdash;'}</td>
+          <td>${extra || '<span class="mini">—</span>'}</td>
+        </tr>
+      `;
+    }).join('');
+
+    return `
+      <table class="grid mini">
+        <thead>
+          <tr>
+            <th>Day</th>
+            <th>Date</th>
+            <th>Start</th>
+            <th>End</th>
+            <th>Break</th>
+            <th>Paid hours</th>
+            <th>Additional rates</th>
+          </tr>
+        </thead>
+        <tbody>${rowsHtml}</tbody>
+      </table>
+    `;
+  };
+
+  const buildWeeklyBucketsFallback = () => {
+    const hours = {
+      day:   Number(tsfin.hours_day   || 0),
+      night: Number(tsfin.hours_night || 0),
+      sat:   Number(tsfin.hours_sat   || 0),
+      sun:   Number(tsfin.hours_sun   || 0),
+      bh:    Number(tsfin.hours_bh    || 0)
+    };
+    const any = Object.values(hours).some(v => v > 0);
+    if (!any) {
+      return `
+        <span class="mini">
+          No detailed breakdown is available for this timesheet.
+        </span>
+      `;
+    }
+    return `
+      <table class="grid mini">
+        <thead>
+          <tr>
+            <th>Bucket</th>
+            <th>Hours</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td>Day</td><td>${hours.day   || 0}</td></tr>
+          <tr><td>Night</td><td>${hours.night || 0}</td></tr>
+          <tr><td>Saturday</td><td>${hours.sat   || 0}</td></tr>
+          <tr><td>Sunday</td><td>${hours.sun   || 0}</td></tr>
+          <tr><td>Bank Holiday</td><td>${hours.bh    || 0}</td></tr>
+        </tbody>
+      </table>
+    `;
+  };
+
+  const breakdownHtml = hasSegments
+    ? buildRowsFromSegments()
+    : (hasTsfin
+        ? buildWeeklyBucketsFallback()
+        : `
+          <span class="mini">
+            No financial snapshot is available yet for this week.
+            ${
+              isPlannedOnly
+                ? 'This is a planned/open week and has not yet been processed.'
+                : 'This timesheet has not yet been processed into a snapshot.'
+            }
+          </span>
+        `);
+
+  const linesCardHtml = `
+    <div class="card" style="margin-top:10px;">
+      <div class="row">
+        <label>Shift breakdown</label>
+        <div class="controls">
+          ${breakdownHtml}
+          <span class="mini" style="display:block;margin-top:4px;">
+            Hours are calculated as shift length minus recorded break.
+            For weekly contract timesheets without detailed lines, only bucket totals are shown once processed.
+          </span>
+        </div>
+      </div>
+    </div>
+  `;
 
   return `
     <div class="tabc">
-      <div class="card">
-        <div class="row">
-          <label>Candidate</label>
-          <div class="controls">
-            ${candidateName || '<span class="mini">Unknown</span>'}
-          </div>
-        </div>
-        <div class="row">
-          <label>Client</label>
-          <div class="controls">
-            ${clientName || '<span class="mini">Unknown</span>'}
-          </div>
-        </div>
-        <div class="row">
-          <label>Week ending</label>
-          <div class="controls">
-            ${weekEnding || '<span class="mini">Not set</span>'}
-          </div>
-        </div>
-        <div class="row">
-          <label>Booking ID</label>
-          <div class="controls">
-            ${bookingId || '<span class="mini">—</span>'}
-          </div>
-        </div>
-        <div class="row">
-          <label>Contract</label>
-          <div class="controls">
-            ${contractLine || '<span class="mini">No contract linked</span>'}
-          </div>
-        </div>
-      </div>
-
-      <div class="card" style="margin-top:10px;">
-        <div class="row">
-          <label>Stage / Route</label>
-          <div class="controls">
-            <span class="${stageClass}">${stage || 'UNKNOWN'}</span>
-            <span class="${routeClass}">${routeType || 'UNKNOWN'}</span>
-          </div>
-        </div>
-        <div class="row">
-          <label>Scope / Mode</label>
-          <div class="controls">
-            <span class="${scopeClass}">${sheetScope || '—'}</span>
-            <span class="${modeClass}">${subMode || '—'}</span>
-          </div>
-        </div>
-        <div class="row">
-          <label>Flags</label>
-          <div class="controls">
-            ${flagPills.length ? flagPills.join(' ') : '<span class="mini">None</span>'}
-          </div>
-        </div>
-      </div>
-
-      <div class="card" style="margin-top:10px;">
-        <div class="row">
-          <label>Total hours</label>
-          <div class="controls">${totalHours != null ? totalHours : '<span class="mini">—</span>'}</div>
-        </div>
-        <div class="row">
-          <label>Pay ex VAT</label>
-          <div class="controls">${payEx != null ? payEx : '<span class="mini">—</span>'}</div>
-        </div>
-        <div class="row">
-          <label>Charge ex VAT</label>
-          <div class="controls">${chargeEx != null ? chargeEx : '<span class="mini">—</span>'}</div>
-        </div>
-        <div class="row">
-          <label>Margin ex VAT</label>
-          <div class="controls">${marginEx != null ? marginEx : '<span class="mini">—</span>'}</div>
-        </div>
-      </div>
-
-      <div class="card" style="margin-top:10px;">
-        <div class="row">
-          <label>Reference / PO</label>
-          <div class="controls">
-            <input type="text" name="ts_reference" value="${(referenceCurrent || '').replace(/"/g,'&quot;')}" />
-            <span class="mini" style="margin-left:8px;">
-              Edit in <strong>Edit</strong> mode. Changes are applied when you click <strong>Save</strong>.
-            </span>
-          </div>
-        </div>
-
-        <div class="row">
-          <label>Pay on hold</label>
-          <div class="controls">
-            <span class="mini" data-view-only="true">
-              ${payOnHold ? 'Yes (current TSFIN)' : 'No'}
-            </span>
-            <label class="mini" data-edit-only="true" style="display:none; margin-left:4px;">
-              <input type="checkbox" name="ts_pay_hold" />
-              Pay on hold (staged)
-            </label>
-            <input
-              type="text"
-              name="ts_pay_hold_reason"
-              data-edit-only="true"
-              style="display:none; margin-left:8px; max-width:240px;"
-              placeholder="Reason (optional)…"
-            />
-          </div>
-        </div>
-
-        <div class="row">
-          <label>Paid / Invoiced</label>
-          <div class="controls">
-            <span class="mini" data-view-only="true">
-              ${paidAt ? 'Paid at ' + paidAt : 'Not paid'}
-              &nbsp; / &nbsp;
-              ${invoiced ? 'On invoice ' + (row.locked_by_invoice_id || '') : 'Not invoiced'}
-            </span>
-            <label class="mini" data-edit-only="true" style="display:none; margin-left:4px;">
-              <input type="checkbox" name="ts_mark_paid" />
-              Mark as paid (staged)
-            </label>
-          </div>
-        </div>
-      </div>
-
-      <div class="card" style="margin-top:10px;">
-        <div class="row">
-          <label>Actions</label>
-          <div class="controls">
-            <button type="button"
-              data-ts-action="authorise">
-              Authorise timesheet
-            </button>
-            <button type="button"
-              data-ts-action="unauthorise"
-              style="margin-left:6px;">
-              Unauthorise
-            </button>
-            <button type="button"
-              data-ts-action="switch-manual"
-              style="margin-left:6px;">
-              Switch to manual (weekly)
-            </button>
-            <span class="mini" style="margin-left:8px;">
-              Authorise / unauthorise update the processing status immediately. Switch to manual revokes electronic submission for weekly timesheets.
-            </span>
-          </div>
-        </div>
-      </div>
-
+      ${headerHtml}
+      ${routeHtml}
+      ${linesCardHtml}
     </div>
   `;
 }
-
 
 
 function renderTimesheetIssuesTab(ctx) {
@@ -27230,164 +27584,186 @@ function renderTimesheetIssuesTab(ctx) {
 
 function renderTimesheetFinanceTab(ctx) {
   const { LOGM, L, GC, GE } = getTsLoggers('[TS][FINANCE]');
-  const { row, details } = normaliseTimesheetCtx(ctx);
+  const { row, details, related } = normaliseTimesheetCtx(ctx);
 
   GC('render');
-  const tsfin    = details.tsfin || {};
-  const payMethod = tsfin.pay_method || row.pay_method || null;
-  const basis     = tsfin.basis || row.basis || null;
+  const ts    = details.timesheet || {};
+  const tsfin = details.tsfin     || {};
+  const enc   = escapeHtml;
 
-  const hours  = tsfin.total_hours ?? null;
-  const pay    = tsfin.total_pay_ex_vat ?? null;
-  const charge = tsfin.total_charge_ex_vat ?? null;
-  const margin = tsfin.margin_ex_vat ?? null;
+  const fmtMoney = (v) =>
+    isNaN(Number(v)) ? '—' : `£${(Math.round(Number(v) * 100) / 100).toFixed(2)}`;
 
-  const paidAt = tsfin.paid_at_utc || null;
-  const locked = tsfin.locked_by_invoice_id || row.locked_by_invoice_id || null;
+  const hours = {
+    day:   Number(tsfin.hours_day   || 0),
+    night: Number(tsfin.hours_night || 0),
+    sat:   Number(tsfin.hours_sat   || 0),
+    sun:   Number(tsfin.hours_sun   || 0),
+    bh:    Number(tsfin.hours_bh    || 0)
+  };
 
-  // Extras from TSFIN (additional_units_json + additional_* totals)
-  let extras = tsfin.additional_units_json || {};
-  if (typeof extras === 'string') {
-    try { extras = JSON.parse(extras); } catch { extras = {}; }
+  const pay = {
+    day:   tsfin.pay_day,
+    night: tsfin.pay_night,
+    sat:   tsfin.pay_sat,
+    sun:   tsfin.pay_sun,
+    bh:    tsfin.pay_bh
+  };
+
+  const chg = {
+    day:   tsfin.charge_day,
+    night: tsfin.charge_night,
+    sat:   tsfin.charge_sat,
+    sun:   tsfin.charge_sun,
+    bh:    tsfin.charge_bh
+  };
+
+  const buckets = ['day','night','sat','sun','bh'];
+  const bucketLabel = {
+    day:  'Day',
+    night:'Night',
+    sat:  'Saturday',
+    sun:  'Sunday',
+    bh:   'Bank Holiday'
+  };
+
+  const bucketRows = buckets.map(b => {
+    const hrs   = hours[b] || 0;
+    const payR  = pay[b] != null ? Number(pay[b]) : null;
+    const chgR  = chg[b] != null ? Number(chg[b]) : null;
+    const payEx = payR != null ? hrs * payR : null;
+    const chgEx = chgR != null ? hrs * chgR : null;
+    const marEx = (payEx != null && chgEx != null) ? (chgEx - payEx) : null;
+
+    return `
+      <tr>
+        <td>${bucketLabel[b]}</td>
+        <td>${hrs || 0}</td>
+        <td>${payR != null ? fmtMoney(payR) : '—'}</td>
+        <td>${chgR != null ? fmtMoney(chgR) : '—'}</td>
+        <td>${payEx != null ? fmtMoney(payEx) : '—'}</td>
+        <td>${chgEx != null ? fmtMoney(chgEx) : '—'}</td>
+        <td>${marEx != null ? fmtMoney(marEx) : '—'}</td>
+      </tr>
+    `;
+  }).join('');
+
+  // Additional rates
+  let addUnits = tsfin.additional_units_json || {};
+  if (typeof addUnits === 'string') {
+    try { addUnits = JSON.parse(addUnits); } catch { addUnits = {}; }
   }
-  if (!extras || typeof extras !== 'object') extras = {};
+  if (!addUnits || typeof addUnits !== 'object') addUnits = {};
 
-  const extraCodes = Object.keys(extras);
-  const hasExtras  = extraCodes.length > 0;
+  const additionalRows = Object.entries(addUnits).map(([code, ex]) => {
+    if (!ex || typeof ex !== 'object') return '';
+    const bucketName = (ex.bucket_name || code || '').trim();
+    const unitName   = (ex.unit_name || 'units').trim();
+    const unitCount  = Number(ex.unit_count || 0) || 0;
+    const payEx      = Number(ex.pay_ex_vat    || 0);
+    const chgEx      = Number(ex.charge_ex_vat || 0);
+    const marEx      = chgEx - payEx;
 
-  const extraPay    = tsfin.additional_pay_ex_vat    ?? null;
-  const extraCharge = tsfin.additional_charge_ex_vat ?? null;
-  const extraMargin = tsfin.additional_margin_ex_vat ?? null;
+    if (!unitCount && !payEx && !chgEx) return '';
 
-  L('snapshot', {
-    payMethod,
-    basis,
-    hours,
-    pay,
-    charge,
-    margin,
-    paidAt,
-    locked,
-    hasExtras,
-    extraCodes
-  });
+    return `
+      <tr>
+        <td>${enc(bucketName || code)}</td>
+        <td>${unitCount}</td>
+        <td>${enc(unitName)}</td>
+        <td>${fmtMoney(ex.pay_rate    ?? null)}</td>
+        <td>${fmtMoney(ex.charge_rate ?? null)}</td>
+        <td>${fmtMoney(payEx)}</td>
+        <td>${fmtMoney(chgEx)}</td>
+        <td>${fmtMoney(marEx)}</td>
+      </tr>
+    `;
+  }).filter(Boolean).join('');
+
+  const hasAdditional = !!additionalRows;
+
+  const expensesPay   = Number(tsfin.expenses_pay_ex_vat  || 0) || 0;
+  const mileagePay    = Number(tsfin.mileage_pay_ex_vat   || 0) || 0;
+  const addPay        = Number(tsfin.additional_pay_ex_vat    || 0) || 0;
+  const addCharge     = Number(tsfin.additional_charge_ex_vat || 0) || 0;
+
+  const totalPayEx    = Number(tsfin.total_pay_ex_vat    || 0) || 0;
+  const totalChgEx    = Number(tsfin.total_charge_ex_vat || 0) || 0;
+  const totalMarginEx = totalChgEx - totalPayEx;
+
   GE();
-
-  // Only build the Extras card if there are actually units recorded.
-  let extrasCardHtml = '';
-  if (hasExtras) {
-    const extrasTableHtml = `
-      <table class="grid mini">
-        <thead>
-          <tr>
-            <th>Code</th>
-            <th>Bucket</th>
-            <th>Unit</th>
-            <th>Units</th>
-            <th>Pay ex VAT</th>
-            <th>Charge ex VAT</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${extraCodes.map(code => {
-            const e     = extras[code] || {};
-            const units = e.unit_count    != null ? e.unit_count    : '';
-            const pEx   = e.pay_ex_vat    != null ? e.pay_ex_vat    : '';
-            const cEx   = e.charge_ex_vat != null ? e.charge_ex_vat : '';
-            return `
-              <tr>
-                <td>${code}</td>
-                <td>${e.bucket_name || ''}</td>
-                <td>${e.unit_name || ''}</td>
-                <td>${units}</td>
-                <td>${pEx}</td>
-                <td>${cEx}</td>
-              </tr>
-            `;
-          }).join('')}
-        </tbody>
-      </table>
-    `;
-
-    const extrasSummaryHtml = (extraPay != null || extraCharge != null || extraMargin != null)
-      ? `
-        <div class="row">
-          <label>Extras summary</label>
-          <div class="controls">
-            <span class="mini">
-              Pay ex VAT (extras): ${extraPay   != null ? extraPay   : '—'}<br/>
-              Charge ex VAT (extras): ${extraCharge != null ? extraCharge : '—'}<br/>
-              Margin ex VAT (extras): ${extraMargin != null ? extraMargin : '—'}
-            </span>
-          </div>
-        </div>
-      `
-      : '';
-
-    extrasCardHtml = `
-      <div class="card" style="margin-top:10px;">
-        <div class="row">
-          <label>Additional rates</label>
-          <div class="controls">
-            ${extrasTableHtml}
-          </div>
-        </div>
-        ${extrasSummaryHtml}
-      </div>
-    `;
-  }
 
   return `
     <div class="tabc">
       <div class="card">
         <div class="row">
-          <label>Pay method</label>
+          <label>Core hours & rates</label>
           <div class="controls">
-            <span class="mini">${payMethod || 'Unknown'}</span>
-          </div>
-        </div>
-        <div class="row">
-          <label>Basis</label>
-          <div class="controls">
-            <span class="mini">${basis || '—'}</span>
+            <table class="grid mini">
+              <thead>
+                <tr>
+                  <th>Bucket</th>
+                  <th>Hours</th>
+                  <th>Pay rate</th>
+                  <th>Charge rate</th>
+                  <th>Pay (ex VAT)</th>
+                  <th>Charge (ex VAT)</th>
+                  <th>Margin (ex VAT)</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${bucketRows}
+              </tbody>
+            </table>
+            <span class="mini" style="display:block;margin-top:4px;">
+              These values come from the current financial snapshot (TSFIN).
+            </span>
           </div>
         </div>
       </div>
 
       <div class="card" style="margin-top:10px;">
         <div class="row">
-          <label>Total hours</label>
-          <div class="controls">${hours != null ? hours : '<span class="mini">—</span>'}</div>
-        </div>
-        <div class="row">
-          <label>Pay ex VAT</label>
-          <div class="controls">${pay != null ? pay : '<span class="mini">—</span>'}</div>
-        </div>
-        <div class="row">
-          <label>Charge ex VAT</label>
-          <div class="controls">${charge != null ? charge : '<span class="mini">—</span>'}</div>
-        </div>
-        <div class="row">
-          <label>Margin ex VAT</label>
-          <div class="controls">${margin != null ? margin : '<span class="mini">—</span>'}</div>
+          <label>Additional rates</label>
+          <div class="controls">
+            ${
+              hasAdditional
+                ? `
+                  <table class="grid mini">
+                    <thead>
+                      <tr>
+                        <th>Bucket</th>
+                        <th>Units</th>
+                        <th>Unit name</th>
+                        <th>Pay rate</th>
+                        <th>Charge rate</th>
+                        <th>Pay (ex VAT)</th>
+                        <th>Charge (ex VAT)</th>
+                        <th>Margin (ex VAT)</th>
+                      </tr>
+                    </thead>
+                    <tbody>${additionalRows}</tbody>
+                  </table>
+                `
+                : '<span class="mini">No additional rate units recorded on this snapshot.</span>'
+            }
+          </div>
         </div>
       </div>
 
-      ${extrasCardHtml}
-
       <div class="card" style="margin-top:10px;">
         <div class="row">
-          <label>Invoice lock</label>
+          <label>Summary</label>
           <div class="controls">
-            ${locked
-              ? `<span class="mini">Locked by invoice ${locked}</span>`
-              : '<span class="mini">Not locked by an invoice.</span>'}
-          </div>
-        </div>
-        <div class="row">
-          <label>Paid at</label>
-          <div class="controls">
-            ${paidAt ? `<span class="mini">${paidAt}</span>` : '<span class="mini">Not paid.</span>'}
+            <div class="mini">
+              Core pay (ex VAT): <strong>${fmtMoney(totalPayEx)}</strong><br/>
+              Core charge (ex VAT): <strong>${fmtMoney(totalChgEx)}</strong><br/>
+              Margin (ex VAT): <strong>${fmtMoney(totalMarginEx)}</strong><br/><br/>
+              Additional pay (ex VAT): <strong>${fmtMoney(addPay)}</strong><br/>
+              Additional charge (ex VAT): <strong>${fmtMoney(addCharge)}</strong><br/>
+              Expenses pay (ex VAT): <strong>${fmtMoney(expensesPay)}</strong><br/>
+              Mileage pay (ex VAT): <strong>${fmtMoney(mileagePay)}</strong>
+            </div>
           </div>
         </div>
       </div>
@@ -27422,7 +27798,6 @@ function renderTimesheetLinesTab(ctx) {
 
   const isWeeklyManual = (sheetScope === 'WEEKLY' && subMode === 'MANUAL');
 
-  // For NHSP / HR self-bill / adjustments we allow per-segment invoice-week targeting
   const isNhspOrHrSelfBillBasis = [
     'NHSP',
     'NHSP_ADJUSTMENT',
@@ -27432,6 +27807,18 @@ function renderTimesheetLinesTab(ctx) {
 
   const segTargets = state.segmentInvoiceTargets || {};
   state.segmentInvoiceTargets = segTargets;
+
+  const hasTsfin = !!(
+    tsfin &&
+    (
+      tsfin.timesheet_id ||
+      tsfin.total_hours != null ||
+      tsfin.total_pay_ex_vat != null ||
+      tsfin.processing_status
+    )
+  );
+  const hasContractWeek = !!(details.contract_week_id || row.contract_week_id);
+  const isPlannedOnly   = !hasTsfin && hasContractWeek && !tsId;
 
   L('snapshot', {
     tsId,
@@ -27444,6 +27831,9 @@ function renderTimesheetLinesTab(ctx) {
     subMode,
     basis,
     isWeeklyManual,
+    hasTsfin,
+    hasContractWeek,
+    isPlannedOnly,
     locked
   });
   GE();
@@ -27466,8 +27856,23 @@ function renderTimesheetLinesTab(ctx) {
     return `${yyyy}-${mm}-${dd}`;
   };
 
-  const tsWeekEnding = ts.week_ending_date || row.week_ending_date || null;
+  // Current invoice week = Monday of "today"
+  const computeCurrentWeekStart = () => {
+    const now = new Date();
+    const base = new Date(Date.UTC(
+      now.getUTCFullYear(),
+      now.getUTCMonth(),
+      now.getUTCDate()
+    ));
+    const day = base.getUTCDay();           // 0 = Sun .. 6 = Sat
+    const offset = (day + 6) % 7;           // days since Monday
+    base.setUTCDate(base.getUTCDate() - offset);
+    return toYmd(base);
+  };
+
+  const tsWeekEnding     = ts.week_ending_date || row.week_ending_date || null;
   const naturalWeekStart = tsWeekEnding ? computeWeekStartFromWeekEnding(tsWeekEnding) : null;
+  const currentWeekStart = computeCurrentWeekStart();
   const pauseWeekStart   = '2099-01-05'; // arbitrary far-future Monday used as "Pause"
 
   const disabledAttr = locked ? 'disabled' : '';
@@ -27479,50 +27884,77 @@ function renderTimesheetLinesTab(ctx) {
     const segId = String(seg.segment_id || '');
     if (!segId) return '<span class="mini">—</span>';
 
+    // Prefer any staged target, then stored target, then THIS week
     const currentTarget = segTargets[segId] ||
       seg.invoice_target_week_start ||
-      naturalWeekStart ||
+      currentWeekStart ||
       '';
 
-    // Build options: natural week + next 8 Mondays + Pause
     const opts = [];
+    const seen = new Set();
 
-    if (naturalWeekStart) {
+    // This week
+    if (currentWeekStart) {
+      opts.push({
+        value: currentWeekStart,
+        label: 'This week'
+      });
+      seen.add(currentWeekStart);
+    }
+
+    // Next week
+    if (currentWeekStart) {
+      const nextDate = new Date(`${currentWeekStart}T00:00:00Z`);
+      nextDate.setUTCDate(nextDate.getUTCDate() + 7);
+      const nextWeekStart = toYmd(nextDate);
+      opts.push({
+        value: nextWeekStart,
+        label: 'Next week'
+      });
+      seen.add(nextWeekStart);
+
+      // Further future weeks (3rd, 4th, ... up to +8 weeks)
+      for (let i = 2; i <= 8; i++) {
+        const d = new Date(`${currentWeekStart}T00:00:00Z`);
+        d.setUTCDate(d.getUTCDate() + i * 7);
+        const ws = toYmd(d);
+        if (!seen.has(ws)) {
+          opts.push({
+            value: ws,
+            label: `Week starting ${ws}`
+          });
+          seen.add(ws);
+        }
+      }
+    }
+
+    // Optional: natural week (worked week) as an extra reference option if different
+    if (naturalWeekStart && !seen.has(naturalWeekStart)) {
       opts.push({
         value: naturalWeekStart,
         label: `Natural week (${naturalWeekStart})`
       });
+      seen.add(naturalWeekStart);
     }
 
-    // Next 8 invoice weeks
-    if (naturalWeekStart) {
-      const baseDate = new Date(`${naturalWeekStart}T00:00:00Z`);
-      for (let i = 1; i <= 8; i++) {
-        const d = new Date(baseDate.getTime());
-        d.setUTCDate(d.getUTCDate() + i * 7);
-        const ws = toYmd(d);
-        opts.push({
-          value: ws,
-          label: `Week starting ${ws}`
-        });
-      }
+    // Pause / indefinite defer
+    if (!seen.has(pauseWeekStart)) {
+      opts.push({
+        value: pauseWeekStart,
+        label: 'Pause (defer)'
+      });
+      seen.add(pauseWeekStart);
     }
 
-    // Pause
-    opts.push({
-      value: pauseWeekStart,
-      label: 'Pause (defer)'
-    });
-
-    // Decide which option is selected
-    let selectedVal = currentTarget || (naturalWeekStart || '');
+    let selectedVal = currentTarget || currentWeekStart || '';
     const optionValues = opts.map(o => o.value);
     if (!optionValues.includes(selectedVal)) {
-      // If it's some other future date, treat it as paused
-      selectedVal = pauseWeekStart;
+      // If stored target is outside our range, default to "This week" if possible, else Pause
+      selectedVal = optionValues.includes(currentWeekStart)
+        ? currentWeekStart
+        : pauseWeekStart;
     }
 
-    // Keep state in sync
     segTargets[segId] = selectedVal;
 
     const optionsHtml = opts.map(o => {
@@ -27664,7 +28096,6 @@ function renderTimesheetLinesTab(ctx) {
       bh:    mh.bh    ?? tsfin.hours_bh    ?? 0
     };
 
-    // Keep state.manualHours in sync for future edits
     state.manualHours = { ...hours };
 
     const extrasMap = state.additionalRates || {};
@@ -27752,9 +28183,9 @@ function renderTimesheetLinesTab(ctx) {
                   <td>
                     <input type="number" step="1" min="0"
                       name="extra_units_${code}"
-                      data-extra-code="${code}"
-                      value="${units}"
-                      ${disabledAttrManual}
+                      data-extra-code="${code}"`
+                      + ` value="${units}"`
+                      + ` ${disabledAttrManual}
                     />
                   </td>
                 </tr>
@@ -27824,21 +28255,33 @@ function renderTimesheetLinesTab(ctx) {
   // ─────────────────────────────────────────────────────
   // C) Fallback – no detailed lines
   // ─────────────────────────────────────────────────────
+  const fallbackMsg = isPlannedOnly
+    ? `
+      <span class="mini">
+        This is a planned/open week without a financial snapshot yet.
+        Once the week is processed, a detailed line breakdown will appear here.
+      </span>
+    `
+    : `
+      <span class="mini">
+        This timesheet does not have a detailed line breakdown for editing in this view.
+      </span>
+    `;
+
   return `
     <div class="tabc">
       <div class="card">
         <div class="row">
           <label>Lines</label>
           <div class="controls">
-            <span class="mini">
-              This timesheet does not have a detailed line breakdown for editing in this view.
-            </span>
+            ${fallbackMsg}
           </div>
         </div>
       </div>
     </div>
   `;
 }
+
 
 async function getTimesheetPdfUrl(timesheetId) {
   const LOGM = (typeof window.__LOG_MODAL === 'boolean') ? window.__LOG_MODAL : false;
@@ -29003,22 +29446,23 @@ async function openTimesheetEvidenceReplaceDialog(file) {
       return { ok: false };
     }
   };
-
   showModal(
     title,
     tabs,
     () => bodyHtml,
     onSave,
-    true,
+    false, // treat as a create/edit-only child frame so Save is visible
     undefined,
     {
       kind: 'timesheet-evidence-replace',
-      noParentGate: true
+      noParentGate: true,
+      forceEdit: true   // start in edit mode instead of view
     }
   );
 
   GE();
 }
+
 async function uploadTimesheetEvidence(timesheetId, contractWeekId, file) {
   const { LOGM, L, GC, GE } = getTsLoggers('[TS][EVIDENCE][UPLOAD]');
   GC('uploadTimesheetEvidence');
