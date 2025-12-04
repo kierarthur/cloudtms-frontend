@@ -11795,8 +11795,6 @@ async function openDelete(){
 
 
 
-
-
 function renderCandidateTab(key, row = {}) {
   if (key === 'main') return html(`
     <div class="form" id="tab-main">
@@ -11949,7 +11947,7 @@ function renderCandidateTab(key, row = {}) {
   `);
 
   if (key === 'pay') return html(`
-    <div class="form" id="tab-pay">
+    <div class="form" id="tab-pay" data-candidate-id="${row.id || ''}">
       <div class="row">
         <label class="hint">
           PAYE bank fields are editable. If UMBRELLA is selected, bank details are taken from the umbrella and locked.
@@ -11974,6 +11972,44 @@ function renderCandidateTab(key, row = {}) {
         <datalist id="umbList"></datalist>
         <input type="hidden" name="umbrella_id" id="umbrella_id" value="${row.umbrella_id || ''}"/>
       </div>
+
+      <!-- Advances summary -->
+      <div class="row">
+        <label>Advances summary</label>
+        <div class="controls" id="candidateAdvancesSummary">
+          <span class="mini">No advances loaded yet.</span>
+        </div>
+      </div>
+
+      <!-- Missing-shift advances -->
+      <div class="row">
+        <label>Missing-shift advances</label>
+        <div class="controls">
+          <div id="candidateMissingShiftAdvances">
+            <span class="mini">No missing-shift advances.</span>
+          </div>
+          <button type="button"
+                  class="btn mini"
+                  data-act="adv-missing-new">
+            New missing-shift advance…
+          </button>
+        </div>
+      </div>
+
+      <!-- General advances / loans -->
+      <div class="row">
+        <label>Advances / loans</label>
+        <div class="controls">
+          <div id="candidateGeneralAdvances">
+            <span class="mini">No advances or loans.</span>
+          </div>
+          <button type="button"
+                  class="btn mini"
+                  data-act="adv-manual-new">
+            New advance / loan…
+          </button>
+        </div>
+      </div>
     </div>
   `);
 
@@ -11984,7 +12020,774 @@ function renderCandidateTab(key, row = {}) {
     </div>
   `);
 }
+async function fetchCandidateAdvances(candidateId) {
+  if (!candidateId) return;
 
+  window.appState = window.appState || {};
+  const S = (window.appState.candidateAdvances ||= {});
+
+  const advancesUrl = API(`/api/candidates/${encodeURIComponent(candidateId)}/advances`);
+  const summaryUrl  = API(`/api/candidates/${encodeURIComponent(candidateId)}/advances/summary`);
+
+  let advances = [];
+  let summary  = { total_owed_by_candidate: 0, total_advances_not_offset: 0 };
+
+  try {
+    const [resList, resSummary] = await Promise.all([
+      authFetch(advancesUrl),
+      authFetch(summaryUrl)
+    ]);
+
+    if (resList.ok) {
+      const j = await resList.json().catch(() => ({}));
+      advances = Array.isArray(j.advances) ? j.advances : (Array.isArray(j) ? j : []);
+    }
+
+    if (resSummary.ok) {
+      const s = await resSummary.json().catch(() => ({}));
+      if (typeof s.total_owed_by_candidate === 'number') {
+        summary.total_owed_by_candidate = s.total_owed_by_candidate;
+      }
+      if (typeof s.total_advances_not_offset === 'number') {
+        summary.total_advances_not_offset = s.total_advances_not_offset;
+      }
+    }
+  } catch (e) {
+    console.warn('[ADVANCES] fetchCandidateAdvances failed', e);
+  }
+
+  S[candidateId] = {
+    list: advances,
+    summary,
+    fetched_at: new Date().toISOString()
+  };
+
+  try {
+    updateCandidateAdvancesUI(candidateId);
+  } catch (e) {
+    console.warn('[ADVANCES] updateCandidateAdvancesUI failed', e);
+  }
+}
+
+function renderMissingShiftAdvancesList(list) {
+  const rows = Array.isArray(list) ? list : [];
+  if (!rows.length) {
+    return '<span class="mini">No missing-shift advances.</span>';
+  }
+
+  const body = rows.map(a => {
+    const client = escapeHtml(a.client_name || a.client_label || a.client_id || '');
+    const date   = escapeHtml(a.linked_shift_date || '');
+    const orig   = (Number(a.original_amount || 0)).toFixed(2);
+    const out    = (Number(a.outstanding_amount || 0)).toFixed(2);
+    const notes  = escapeHtml(a.notes || '');
+
+    return `
+      <tr data-advance-id="${a.id}">
+        <td>${client || '<span class="mini">—</span>'}</td>
+        <td>${date   || '<span class="mini">—</span>'}</td>
+        <td>£${orig}</td>
+        <td>£${out}</td>
+        <td>${notes || '<span class="mini">—</span>'}</td>
+      </tr>
+    `;
+  }).join('');
+
+  return `
+    <table class="grid mini">
+      <thead>
+        <tr>
+          <th>Client</th>
+          <th>Shift date</th>
+          <th>Original</th>
+          <th>Outstanding</th>
+          <th>Notes</th>
+        </tr>
+      </thead>
+      <tbody>${body}</tbody>
+    </table>
+  `;
+}
+
+function renderGeneralAdvancesList(list) {
+  const rows = Array.isArray(list) ? list : [];
+  if (!rows.length) {
+    return '<span class="mini">No advances or loans.</span>';
+  }
+
+  const body = rows.map(a => {
+    const client = escapeHtml(a.client_name || a.client_label || a.client_id || '');
+    const reason = escapeHtml(a.reason || '');
+    const origNum = Number(a.original_amount || 0);
+    const outNum  = Number(a.outstanding_amount || 0);
+    const orig    = origNum.toFixed(2);
+    const out     = outNum.toFixed(2);
+    const next    = escapeHtml(a.next_due_week_start || '');
+
+    const rawStatus = String(a.status || '');
+    const status    = escapeHtml(rawStatus);
+
+    const schedule = Array.isArray(a.schedule_json) ? a.schedule_json : [];
+
+    const schedSummary = schedule.length
+      ? schedule.map(e => `${escapeHtml(e.week_start || '')}: £${(Number(e.amount || 0)).toFixed(2)}`).join('<br>')
+      : '<span class="mini">No schedule</span>';
+
+    const paused     = rawStatus === 'PAUSED';
+    const pauseLabel = paused ? 'Resume' : 'Pause';
+
+    const showMarkPaidOff = (outNum > 0 && rawStatus !== 'PAID_OFF');
+
+    return `
+      <tr data-advance-id="${a.id}">
+        <td>${client || '<span class="mini">—</span>'}</td>
+        <td>${reason || '<span class="mini">—</span>'}</td>
+        <td>£${orig}</td>
+        <td>£${out}</td>
+        <td>${next || '<span class="mini">—</span>'}</td>
+        <td>${status}</td>
+        <td>${schedSummary}</td>
+        <td>
+          <button type="button"
+                  class="btn mini"
+                  data-act="adv-edit-schedule"
+                  data-advance-id="${a.id}">
+            Edit schedule
+          </button>
+          <button type="button"
+                  class="btn mini"
+                  data-act="adv-toggle-pause"
+                  data-advance-id="${a.id}">
+            ${pauseLabel}
+          </button>
+          ${
+            showMarkPaidOff
+              ? `<button type="button"
+                         class="btn mini"
+                         data-act="adv-mark-paid-off"
+                         data-advance-id="${a.id}">
+                   Mark paid off
+                 </button>`
+              : ''
+          }
+        </td>
+      </tr>
+    `;
+  }).join('');
+
+  return `
+    <table class="grid mini">
+      <thead>
+        <tr>
+          <th>Client</th>
+          <th>Reason</th>
+          <th>Original</th>
+          <th>Outstanding</th>
+          <th>Next due week</th>
+          <th>Status</th>
+          <th>Schedule</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody>${body}</tbody>
+    </table>
+  `;
+}
+
+async function markAdvancePaidOff(advance) {
+  if (!advance || !advance.id) {
+    alert('Advance record missing id.');
+    return;
+  }
+
+  const id     = advance.id;
+  const candId = advance.candidate_id || window.modalCtx?.data?.id || null;
+  const orig   = Number(advance.original_amount || 0);
+  const out    = Number(advance.outstanding_amount || 0);
+
+  const msg = [
+    `Mark this advance as fully paid off?`,
+    ``,
+    `Original amount: £${orig.toFixed(2)}`,
+    `Outstanding now: £${out.toFixed(2)}`,
+    ``,
+    `No further repayments will be taken in pay runs.`
+  ].join('\n');
+
+  const ok = window.confirm(msg);
+  if (!ok) return;
+
+  try {
+    const payload = {
+      status: 'PAID_OFF',
+      outstanding_amount: 0
+      // Backend can recompute next_due_week_start as needed
+    };
+
+    const res = await authFetch(
+      API(`/api/advances/${encodeURIComponent(id)}`),
+      {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(payload)
+      }
+    );
+
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      alert(text || 'Failed to mark advance as paid off.');
+      return;
+    }
+
+    if (candId) {
+      await fetchCandidateAdvances(candId);
+    }
+
+    window.__toast && window.__toast('Advance marked as paid off.');
+  } catch (e) {
+    console.warn('[ADVANCES] markAdvancePaidOff failed', e);
+    alert(e?.message || 'Failed to mark advance as paid off.');
+  }
+}
+
+function renderAdvancesSummary(summary) {
+  const totalOwed     = Number(summary?.total_owed_by_candidate || 0).toFixed(2);
+  const totalMissing  = Number(summary?.total_advances_not_offset || 0).toFixed(2);
+
+  return `
+    <div class="mini">
+      <div>Total owed by candidate (all advances): <strong>£${totalOwed}</strong></div>
+      <div>Total advances owed to candidate (not yet offset by shifts): <strong>£${totalMissing}</strong></div>
+    </div>
+  `;
+}
+
+
+function updateCandidateAdvancesUI(candidateId) {
+  const S = (window.appState && window.appState.candidateAdvances) || {};
+  const entry = S[candidateId] || { list: [], summary: {} };
+  const list  = Array.isArray(entry.list) ? entry.list : [];
+  const summary = entry.summary || {};
+
+  const missing = list.filter(a => (a.reason || '').toUpperCase() === 'MISSING_SHIFT');
+  const general = list.filter(a => (a.reason || '').toUpperCase() !== 'MISSING_SHIFT');
+
+  const sumEl  = document.getElementById('candidateAdvancesSummary');
+  const missEl = document.getElementById('candidateMissingShiftAdvances');
+  const genEl  = document.getElementById('candidateGeneralAdvances');
+
+  if (sumEl)  sumEl.innerHTML  = renderAdvancesSummary(summary);
+  if (missEl) missEl.innerHTML = renderMissingShiftAdvancesList(missing);
+  if (genEl)  genEl.innerHTML  = renderGeneralAdvancesList(general);
+}
+
+function openMissingShiftAdvanceModal(candidate) {
+  const candId = candidate?.id;
+  if (!candId) {
+    alert('Save the candidate first before adding advances.');
+    return;
+  }
+
+  const title = `New missing-shift advance for ${escapeHtml(candidate.display_name || `${candidate.first_name || ''} ${candidate.last_name || ''}`)}`;
+
+  const formHtml = `
+    <div class="form" id="missingShiftAdvanceForm">
+      <div class="row">
+        <label>Client</label>
+        <div class="controls">
+          <select name="client_id" id="msa_client_id">
+            <option value="">Select client…</option>
+          </select>
+        </div>
+      </div>
+      <div class="row">
+        <label>Shift date</label>
+        <div class="controls">
+          <input type="date" class="input" name="shift_date" />
+        </div>
+      </div>
+      <div class="row">
+        <label>Amount (£)</label>
+        <div class="controls">
+          <input type="number" step="0.01" min="0" class="input" name="amount" />
+        </div>
+      </div>
+      <div class="row">
+        <label>Best-guess hours</label>
+        <div class="controls split">
+          <input type="time" class="input" name="best_guess_start" placeholder="Start" />
+          <input type="time" class="input" name="best_guess_end" placeholder="End" />
+        </div>
+      </div>
+      <div class="row">
+        <label>Notes</label>
+        <div class="controls">
+          <textarea name="notes" rows="3" placeholder="Optional notes…"></textarea>
+        </div>
+      </div>
+    </div>
+  `;
+
+  showModal(
+    title,
+    [{ key: 'main', title: 'Advance' }],
+    () => formHtml,
+    async () => {
+      const form = document.getElementById('missingShiftAdvanceForm');
+      if (!form) return false;
+
+      const data = collectForm('#missingShiftAdvanceForm') || {};
+      const client_id = (data.client_id || '').trim();
+      const shift_date = (data.shift_date || '').trim();
+      const amount = Number(data.amount || 0);
+      const start  = (data.best_guess_start || '').trim();
+      const end    = (data.best_guess_end   || '').trim();
+      const notes  = (data.notes || '').trim();
+
+      if (!client_id) { alert('Client is required.'); return { ok:false }; }
+      if (!shift_date) { alert('Shift date is required.'); return { ok:false }; }
+      if (!amount || amount <= 0) { alert('Amount must be greater than zero.'); return { ok:false }; }
+
+      const payload = {
+        client_id,
+        shift_date,
+        amount,
+        best_guess_hours: (start || end) ? { start, end } : null,
+        notes
+      };
+
+      const url = API(`/api/candidates/${encodeURIComponent(candId)}/advances/missing-shift`);
+      const res = await authFetch(url, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      if (!res.ok) {
+        const msg = await res.text().catch(() => 'Failed to create missing-shift advance');
+        alert(msg || 'Failed to create missing-shift advance');
+        return { ok:false };
+      }
+
+      await fetchCandidateAdvances(candId);
+      return { ok:true };
+    },
+    false,
+    async () => {
+      // onReturn: populate clients in dropdown
+      try {
+        const sel = document.getElementById('msa_client_id');
+        if (!sel) return;
+        const clients = await listClients({ page_size:'ALL' }).catch(() => []);
+        sel.innerHTML = '<option value="">Select client…</option>' +
+          clients.map(c => `<option value="${escapeHtml(c.id || '')}">${escapeHtml(c.name || '')}</option>`).join('');
+      } catch (e) {
+        console.warn('[ADVANCES] failed to populate client list', e);
+      }
+    },
+    { kind: 'candidate-advance-missing' }
+  );
+}
+function openManualAdvanceModal(candidate) {
+  const candId = candidate?.id;
+  if (!candId) {
+    alert('Save the candidate first before adding advances.');
+    return;
+  }
+
+  const title = `New advance / loan for ${escapeHtml(candidate.display_name || `${candidate.first_name || ''} ${candidate.last_name || ''}`)}`;
+
+  const formHtml = `
+    <div class="form" id="manualAdvanceForm">
+      <div class="row">
+        <label>Client (optional)</label>
+        <div class="controls">
+          <select name="client_id" id="ma_client_id">
+            <option value="">(None / multiple clients)</option>
+          </select>
+        </div>
+      </div>
+      <div class="row">
+        <label>Amount (£)</label>
+        <div class="controls">
+          <input type="number" step="0.01" min="0" class="input" name="amount" />
+        </div>
+      </div>
+
+      <div class="row">
+        <label>Repayment mode</label>
+        <div class="controls">
+          <label class="mini">
+            <input type="radio" name="mode" value="simple" checked> Spread over N weeks
+          </label>
+          <label class="mini" style="margin-left:10px;">
+            <input type="radio" name="mode" value="custom"> Custom schedule
+          </label>
+        </div>
+      </div>
+
+      <div id="ma_simple_block">
+        <div class="row">
+          <label>Start week (Mon)</label>
+          <div class="controls">
+            <input type="date" class="input" name="start_week_start" />
+          </div>
+        </div>
+        <div class="row">
+          <label>Number of weeks</label>
+          <div class="controls">
+            <input type="number" class="input" name="weeks_count" min="1" value="4" />
+          </div>
+        </div>
+      </div>
+
+      <div id="ma_custom_block" style="display:none;">
+        <div class="row">
+          <label>Custom schedule</label>
+          <div class="controls">
+            <table class="grid mini" id="ma_schedule_table">
+              <thead>
+                <tr>
+                  <th>Week start</th>
+                  <th>Amount (£, deducted)</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+            <button type="button" class="btn mini" data-act="ma-add-row">Add row</button>
+            <div class="hint mini">
+              Amounts should be positive; they will be treated as deductions from net pay.
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="row">
+        <label>Notes</label>
+        <div class="controls">
+          <textarea name="notes" rows="3" placeholder="Optional notes…"></textarea>
+        </div>
+      </div>
+    </div>
+  `;
+
+  showModal(
+    title,
+    [{ key: 'main', title: 'Advance' }],
+    () => formHtml,
+    async () => {
+      const form = document.getElementById('manualAdvanceForm');
+      if (!form) return false;
+
+      const data = collectForm('#manualAdvanceForm') || {};
+      const client_id = (data.client_id || '').trim() || null;
+      const amount = Number(data.amount || 0);
+      const mode   = (data.mode || 'simple').toLowerCase();
+      const notes  = (data.notes || '').trim();
+
+      if (!amount || amount <= 0) {
+        alert('Amount must be greater than zero.');
+        return { ok:false };
+      }
+
+      const payload = { client_id, amount, notes };
+
+      if (mode === 'simple') {
+        const start = (data.start_week_start || '').trim();
+        const weeksCount = Number(data.weeks_count || 0);
+        if (!start) { alert('Start week is required for simple schedule.'); return { ok:false }; }
+        if (!weeksCount || weeksCount < 1) { alert('Number of weeks must be at least 1.'); return { ok:false }; }
+
+        const weeks = [];
+        const base = new Date(`${start}T00:00:00Z`);
+        if (Number.isNaN(base.getTime())) {
+          alert('Start week must be a valid date.');
+          return { ok:false };
+        }
+        for (let i = 0; i < weeksCount; i++) {
+          const d = new Date(base.getTime());
+          d.setUTCDate(d.getUTCDate() + i * 7);
+          const y = d.getUTCFullYear();
+          const m = String(d.getUTCMonth() + 1).padStart(2, '0');
+          const dd = String(d.getUTCDate()).padStart(2, '0');
+          weeks.push(`${y}-${m}-${dd}`);
+        }
+        payload.start_week_start = start;
+        payload.weeks = weeks;
+      } else {
+        // custom schedule
+        const tbody = document.querySelector('#ma_schedule_table tbody');
+        const rows = Array.from(tbody?.querySelectorAll('tr') || []);
+        if (!rows.length) {
+          alert('Add at least one custom schedule row.');
+          return { ok:false };
+        }
+
+        const custom_schedule = [];
+        for (const tr of rows) {
+          const wsInput = tr.querySelector('input[name="week_start"]');
+          const amtInput = tr.querySelector('input[name="amount"]');
+          const ws  = (wsInput?.value || '').trim();
+          const amt = Number(amtInput?.value || 0);
+          if (!ws) {
+            alert('Each custom row must have a week start date.');
+            return { ok:false };
+          }
+          if (!amt || amt <= 0) {
+            alert('Each custom row amount must be greater than zero.');
+            return { ok:false };
+          }
+          custom_schedule.push({ week_start: ws, amount: -Math.abs(amt) }); // negative for deduction
+        }
+
+        payload.custom_schedule = custom_schedule;
+      }
+
+      const url = API(`/api/candidates/${encodeURIComponent(candId)}/advances/manual`);
+      const res = await authFetch(url, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      if (!res.ok) {
+        const msg = await res.text().catch(() => 'Failed to create manual advance');
+        alert(msg || 'Failed to create manual advance');
+        return { ok:false };
+      }
+
+      await fetchCandidateAdvances(candId);
+      return { ok:true };
+    },
+    false,
+    async () => {
+      // onReturn: wire simple/custom toggle & add-row, populate clients
+      try {
+        const modeRadios = document.querySelectorAll('#manualAdvanceForm input[name="mode"]');
+        const simpleBlock = document.getElementById('ma_simple_block');
+        const customBlock = document.getElementById('ma_custom_block');
+        const tableBody   = document.querySelector('#ma_schedule_table tbody');
+        const addRowBtn   = document.querySelector('#ma_schedule_table').closest('.controls')?.querySelector('[data-act="ma-add-row"]');
+        const clientSel   = document.getElementById('ma_client_id');
+
+        // Populate clients
+        try {
+          if (clientSel) {
+            const clients = await listClients({ page_size:'ALL' }).catch(() => []);
+            clientSel.innerHTML = '<option value="">(None / multiple clients)</option>' +
+              clients.map(c => `<option value="${escapeHtml(c.id || '')}">${escapeHtml(c.name || '')}</option>`).join('');
+          }
+        } catch (e) {
+          console.warn('[ADVANCES] populate client list (manual) failed', e);
+        }
+
+        const switchMode = () => {
+          const cur = Array.from(modeRadios).find(r => r.checked)?.value || 'simple';
+          if (cur === 'custom') {
+            simpleBlock.style.display = 'none';
+            customBlock.style.display = '';
+          } else {
+            simpleBlock.style.display = '';
+            customBlock.style.display = 'none';
+          }
+        };
+
+        modeRadios.forEach(r => {
+          r.addEventListener('change', switchMode);
+        });
+        switchMode();
+
+        const addRow = () => {
+          if (!tableBody) return;
+          const tr = document.createElement('tr');
+          tr.innerHTML = `
+            <td><input type="date" class="input" name="week_start" /></td>
+            <td><input type="number" step="0.01" min="0" class="input" name="amount" /></td>
+            <td><button type="button" class="btn mini" data-act="ma-del-row">&times;</button></td>
+          `;
+          tableBody.appendChild(tr);
+        };
+
+        if (addRowBtn) {
+          addRowBtn.addEventListener('click', addRow);
+        }
+
+        if (tableBody && !tableBody.__wiredDel) {
+          tableBody.__wiredDel = true;
+          tableBody.addEventListener('click', (e) => {
+            const btn = e.target.closest('button[data-act="ma-del-row"]');
+            if (!btn) return;
+            const tr = btn.closest('tr');
+            if (tr) tr.remove();
+          });
+        }
+
+      } catch (e) {
+        console.warn('[ADVANCES] openManualAdvanceModal onReturn wiring failed', e);
+      }
+    },
+    { kind: 'candidate-advance-manual' }
+  );
+}
+function openEditAdvanceScheduleModal(advance) {
+  if (!advance || !advance.id) {
+    alert('Advance record missing id.');
+    return;
+  }
+
+  const advId = advance.id;
+  const schedule = Array.isArray(advance.schedule_json) ? advance.schedule_json : [];
+  const title = `Edit schedule – advance £${(Number(advance.original_amount || 0)).toFixed(2)}`;
+
+  const rowsHtml = schedule.map((e, idx) => `
+    <tr data-i="${idx}">
+      <td><input type="date" class="input" name="week_start" value="${escapeHtml(e.week_start || '')}"></td>
+      <td><input type="number" step="0.01" class="input" name="amount" value="${Number(e.amount || 0)}"></td>
+      <td><button type="button" class="btn mini" data-act="adv-row-del">&times;</button></td>
+    </tr>
+  `).join('');
+
+  const formHtml = `
+    <div class="form" id="advanceScheduleForm">
+      <div class="row">
+        <label>Schedule</label>
+        <div class="controls">
+          <table class="grid mini" id="adv_schedule_table">
+            <thead>
+              <tr>
+                <th>Week start</th>
+                <th>Amount (£)</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>${rowsHtml}</tbody>
+          </table>
+          <button type="button" class="btn mini" data-act="adv-row-add">Add row</button>
+          <div class="hint mini">
+            Amounts are stored as signed values (negative = deduction, positive = extra pay).
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+
+  showModal(
+    title,
+    [{ key: 'main', title: 'Schedule' }],
+    () => formHtml,
+    async () => {
+      const tbody = document.querySelector('#adv_schedule_table tbody');
+      if (!tbody) return false;
+
+      const rows = Array.from(tbody.querySelectorAll('tr[data-i]') || []);
+      const schedule_json = [];
+
+      for (const tr of rows) {
+        const ws = (tr.querySelector('input[name="week_start"]')?.value || '').trim();
+        const amt = Number(tr.querySelector('input[name="amount"]')?.value || 0);
+        if (!ws) {
+          alert('Each row must have a week start date.');
+          return { ok:false };
+        }
+        if (!amt && amt !== 0) {
+          alert('Each row must have an amount (0 allowed).');
+          return { ok:false };
+        }
+        schedule_json.push({ week_start: ws, amount: amt });
+      }
+
+      const payload = { schedule_json };
+
+      const url = API(`/api/advances/${encodeURIComponent(advId)}`);
+      const res = await authFetch(url, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      if (!res.ok) {
+        const msg = await res.text().catch(() => 'Failed to update advance schedule');
+        alert(msg || 'Failed to update advance schedule');
+        return { ok:false };
+      }
+
+      try {
+        const candId = advance.candidate_id || window.modalCtx?.data?.id;
+        if (candId) await fetchCandidateAdvances(candId);
+      } catch (e) {
+        console.warn('[ADVANCES] refresh after edit schedule failed', e);
+      }
+
+      return { ok:true };
+    },
+    false,
+    () => {
+      // onReturn: wire add/delete buttons
+      try {
+        const tbody = document.querySelector('#adv_schedule_table tbody');
+        const addBtn = document.querySelector('[data-act="adv-row-add"]');
+        if (addBtn && tbody) {
+          addBtn.addEventListener('click', () => {
+            const idx = tbody.querySelectorAll('tr[data-i]').length;
+            const tr = document.createElement('tr');
+            tr.setAttribute('data-i', String(idx));
+            tr.innerHTML = `
+              <td><input type="date" class="input" name="week_start"></td>
+              <td><input type="number" step="0.01" class="input" name="amount"></td>
+              <td><button type="button" class="btn mini" data-act="adv-row-del">&times;</button></td>
+            `;
+            tbody.appendChild(tr);
+          });
+        }
+        if (tbody && !tbody.__wiredDel) {
+          tbody.__wiredDel = true;
+          tbody.addEventListener('click', (e) => {
+            const btn = e.target.closest('button[data-act="adv-row-del"]');
+            if (!btn) return;
+            const tr = btn.closest('tr');
+            if (tr) tr.remove();
+          });
+        }
+      } catch (e) {
+        console.warn('[ADVANCES] openEditAdvanceScheduleModal wiring failed', e);
+      }
+    },
+    { kind: 'candidate-advance-schedule' }
+  );
+}
+async function toggleAdvancePause(advance) {
+  if (!advance || !advance.id) {
+    alert('Advance record missing id.');
+    return;
+  }
+
+  const id = advance.id;
+  const candId = advance.candidate_id || window.modalCtx?.data?.id || null;
+  const isActive = String(advance.status || '').toUpperCase() === 'ACTIVE';
+  const path = isActive ? `/api/advances/${encodeURIComponent(id)}/pause`
+                        : `/api/advances/${encodeURIComponent(id)}/resume`;
+
+  if (isActive) {
+    const ok = window.confirm('Pause repayments for this advance?');
+    if (!ok) return;
+  } else {
+    const ok = window.confirm('Resume repayments for this advance?');
+    if (!ok) return;
+  }
+
+  try {
+    const res = await authFetch(API(path), { method: 'POST' });
+    if (!res.ok) {
+      const msg = await res.text().catch(() => 'Failed to update advance status');
+      alert(msg || 'Failed to update advance status');
+      return;
+    }
+    if (candId) {
+      await fetchCandidateAdvances(candId);
+    }
+  } catch (e) {
+    console.warn('[ADVANCES] toggleAdvancePause failed', e);
+    alert(e?.message || 'Failed to update advance status');
+  }
+}
 
 async function openCandidate(row) {
   // ===== Logging helpers (toggle with window.__LOG_MODAL = true/false) =====
@@ -19389,7 +20192,7 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
 
   const stripEmpty = (obj) => { const out={}; for (const [k,v] of Object.entries(obj||{})) { if (v===''||v==null) continue; out[k]=v; } return out; };
 
-   function setFormReadOnly(root, ro) {
+function setFormReadOnly(root, ro) {
   if (!root || !document.contains(root)) { L('setFormReadOnly(skip: invalid root)', { ro }); return; }
   const _allBefore = root.querySelectorAll('input, select, textarea, button');
   const beforeDisabled = Array.from(_allBefore).filter(el => el.disabled).length;
@@ -19400,13 +20203,24 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
     if (el.type === 'button') {
       const allow = new Set(['btnCloseModal','btnDelete','btnEditModal','btnSave','btnRelated']);
 
-      // NEW: keep Timesheet action buttons (data-ts-action) enabled even when ro === true
+      // Keep Timesheet action buttons (data-ts-action) and Candidate advances buttons
+      // enabled even when ro === true
       try {
         const top = (typeof currentFrame === 'function') ? currentFrame() : null;
+
         const isTimesheetFrame = !!(top && top.entity === 'timesheets');
         const hasTsAction      = !!el.getAttribute('data-ts-action');
+
+        const isCandidateFrame = !!(top && top.entity === 'candidates');
+        const actAttr          = el.getAttribute('data-act') || '';
+        const isAdvButton      = isCandidateFrame && /^adv-/.test(actAttr);
+
         if (isTimesheetFrame && hasTsAction) {
-          // Do not force-disable Timesheet action buttons (Authorise, Open PDF, Defer, etc.)
+          // Do not force-disable Timesheet action buttons (Authorise, Open PDF, etc.)
+          return;
+        }
+        if (isAdvButton) {
+          // Do not force-disable advance buttons (new/edit/pause) even in view mode
           return;
         }
       } catch {}
@@ -19774,253 +20588,309 @@ async setTab(k) {
   byId('modalBody').innerHTML = this.renderTab(k, merged) || '';
 
   // … all existing candidate / umbrella / client / contracts wiring unchanged …
+// ───────────────────── Candidates: Pay tab (Advances wiring) ─────────────────────
+// ───────────────────── Candidates: Pay tab (Advances wiring) ─────────────────────
+if (this.entity === 'candidates' && k === 'pay') {
+  try {
+    const candId =
+      window.modalCtx?.data?.id ||
+      merged.id ||
+      null;
+
+    if (candId) {
+      window.appState = window.appState || {};
+      const cache = (window.appState.candidateAdvances ||= {});
+
+      if (cache[candId]) {
+        // Already cached this session → repaint into fresh DOM
+        updateCandidateAdvancesUI(candId);
+      } else {
+        // First time on this candidate → fetch from backend
+        fetchCandidateAdvances(candId).catch(err => {
+          console.warn('[CAND][PAY][ADVANCES] fetch failed', err);
+        });
+      }
+
+      // 🔹 Wire general advances actions (Edit schedule / Pause/Resume / Mark paid off)
+      const generalContainer = document.getElementById('candidateGeneralAdvances');
+      if (generalContainer && !generalContainer.__advWired) {
+        generalContainer.__advWired = true;
+        generalContainer.addEventListener('click', async (ev) => {
+          const btn = ev.target.closest('button[data-act][data-advance-id]');
+          if (!btn) return;
+
+          const act   = btn.getAttribute('data-act') || '';
+          const advId = btn.getAttribute('data-advance-id') || '';
+          if (!advId) return;
+
+          const stateEntry = (window.appState.candidateAdvances || {})[candId] || {};
+          const list       = Array.isArray(stateEntry.list) ? stateEntry.list : [];
+          const advance    = list.find(a => String(a.id) === String(advId));
+          if (!advance) return;
+
+          if (act === 'adv-edit-schedule') {
+            openEditAdvanceScheduleModal(advance);
+          } else if (act === 'adv-toggle-pause') {
+            await toggleAdvancePause(advance);
+          } else if (act === 'adv-mark-paid-off') {
+            await markAdvancePaidOff(advance);
+          }
+        });
+      }
+    }
+  } catch (e) {
+    console.warn('[CAND][PAY][ADVANCES] wiring failed', e);
+  }
+}
 
   // ───────────────────── Timesheets: Overview tab wiring ─────────────────────
-  if (this.entity === 'timesheets' && k === 'overview') {
-    const { LOGM, L: LT } = getTsLoggers('[TS][OVERVIEW][WIRE]');
-    const root = byId('modalBody');
-    if (!root) {
-      if (LOGM) LT('no modalBody root, skip wiring');
-    } else {
-      try {
-        const mc   = window.modalCtx || {};
-        const tsId = mc.data?.timesheet_id || mc.data?.id || null;
-        const mode = this.mode || 'view';
+if (this.entity === 'timesheets' && k === 'overview') {
+  const { LOGM, L: LT } = getTsLoggers('[TS][OVERVIEW][WIRE]');
+  const root = byId('modalBody');
+  if (!root) {
+    if (LOGM) LT('no modalBody root, skip wiring');
+  } else {
+    try {
+      const mc   = window.modalCtx || {};
+      const tsId = mc.data?.timesheet_id || mc.data?.id || null;
+      const mode = this.mode || 'view';
 
-        if (!tsId && !mc.data?.contract_week_id) {
-          if (LOGM) LT('no tsId/contract_week_id on modalCtx.data, skip overview wiring');
+      if (!tsId && !mc.data?.contract_week_id) {
+        if (LOGM) LT('no tsId/contract_week_id on modalCtx.data, skip overview wiring');
+      } else {
+        const authoriseBtn       = root.querySelector('button[data-ts-action="authorise"]');
+        const unauthoriseBtn     = root.querySelector('button[data-ts-action="unauthorise"]');
+        const switchManualBtn    = root.querySelector('button[data-ts-action="switch-manual"]');
+        const holdOnBtn          = root.querySelector('button[data-ts-action="pay-hold-on"]');
+        const holdOffBtn         = root.querySelector('button[data-ts-action="pay-hold-off"]');
+        const markPaidBtn        = root.querySelector('button[data-ts-action="mark-paid"]');
+        const refInput           = root.querySelector('input[name="ts_reference"]');
+        const payHoldInput       = root.querySelector('input[name="ts_pay_hold"]');
+        const payHoldReasonInput = root.querySelector('input[name="ts_pay_hold_reason"]');
+        const markPaidInput      = root.querySelector('input[name="ts_mark_paid"]');
+
+        const det   = mc.timesheetDetails || {};
+        const ts    = det.timesheet || {};
+        const tsfin = det.tsfin || {};
+        const sheetScope = (det.sheet_scope || mc.data?.sheet_scope || ts.sheet_scope || '').toUpperCase();
+        const subMode    = (ts.submission_mode || mc.data?.submission_mode || '').toUpperCase();
+
+        const isAuthorised     = !!ts.authorised_at_server;
+        const locked           = !!(tsfin.locked_by_invoice_id || tsfin.paid_at_utc);
+        const weeklyElectronic = (sheetScope === 'WEEKLY' && subMode === 'ELECTRONIC');
+        const alreadyPaid      = !!tsfin.paid_at_utc;
+
+        if (LOGM) {
+          LT('overview wiring snapshot', {
+            tsId,
+            mode,
+            sheetScope,
+            subMode,
+            isAuthorised,
+            locked,
+            weeklyElectronic,
+            hasAuthorise: !!authoriseBtn,
+            hasUnauthorise: !!unauthoriseBtn,
+            hasSwitchManual: !!switchManualBtn,
+            hasRefInput: !!refInput,
+            hasPayHoldInput: !!payHoldInput,
+            hasMarkPaidInput: !!markPaidInput
+          });
+        }
+
+        const viewEls = root.querySelectorAll('[data-view-only="true"]');
+        const editEls = root.querySelectorAll('[data-edit-only="true"]');
+        if (mode === 'edit' || mode === 'create') {
+          viewEls.forEach(el => { el.style.display = 'none'; });
+          editEls.forEach(el => { el.style.display = ''; });
         } else {
-          const authoriseBtn       = root.querySelector('button[data-ts-action="authorise"]');
-          const unauthoriseBtn     = root.querySelector('button[data-ts-action="unauthorise"]');
-          const switchManualBtn    = root.querySelector('button[data-ts-action="switch-manual"]');
-          const holdOnBtn          = root.querySelector('button[data-ts-action="pay-hold-on"]');
-          const holdOffBtn         = root.querySelector('button[data-ts-action="pay-hold-off"]');
-          const markPaidBtn        = root.querySelector('button[data-ts-action="mark-paid"]');
-          const refInput           = root.querySelector('input[name="ts_reference"]');
-          const payHoldInput       = root.querySelector('input[name="ts_pay_hold"]');
-          const payHoldReasonInput = root.querySelector('input[name="ts_pay_hold_reason"]');
-          const markPaidInput      = root.querySelector('input[name="ts_mark_paid"]');
+          viewEls.forEach(el => { el.style.display = ''; });
+          editEls.forEach(el => { el.style.display = 'none'; });
+        }
 
-          const det  = mc.timesheetDetails || {};
-          const ts   = det.timesheet || {};
-          const tsfin = det.tsfin || {};
-          const sheetScope = (det.sheet_scope || mc.data?.sheet_scope || ts.sheet_scope || '').toUpperCase();
-          const subMode    = (ts.submission_mode || mc.data?.submission_mode || '').toUpperCase();
+        // Hide legacy buttons
+        if (holdOnBtn)   holdOnBtn.style.display  = 'none';
+        if (holdOffBtn)  holdOffBtn.style.display = 'none';
+        if (markPaidBtn) markPaidBtn.style.display= 'none';
 
-          const isAuthorised = !!ts.authorised_at_server;
-          const locked       = !!(tsfin.locked_by_invoice_id || tsfin.paid_at_utc);
-          const weeklyElectronic = (sheetScope === 'WEEKLY' && subMode === 'ELECTRONIC');
-
-          if (LOGM) {
-            LT('overview wiring snapshot', {
-              tsId,
-              mode,
-              sheetScope,
-              subMode,
-              isAuthorised,
-              locked,
-              weeklyElectronic,
-              hasAuthorise: !!authoriseBtn,
-              hasUnauthorise: !!unauthoriseBtn,
-              hasSwitchManual: !!switchManualBtn,
-              hasRefInput: !!refInput,
-              hasPayHoldInput: !!payHoldInput,
-              hasMarkPaidInput: !!markPaidInput
+        // Authorise / Unauthorise gating
+        if (authoriseBtn) {
+          authoriseBtn.style.display = (!isAuthorised && !locked && mode === 'view') ? '' : 'none';
+          if (!authoriseBtn.__tsWired) {
+            authoriseBtn.__tsWired = true;
+            authoriseBtn.addEventListener('click', async () => {
+              try {
+                await authoriseTimesheet(tsId);
+                window.__toast && window.__toast('Timesheet authorised');
+              } catch (err) {
+                if (LOGM) console.warn('[TS][OVERVIEW] authoriseTimesheet failed', err);
+                alert(err?.message || 'Failed to authorise timesheet.');
+              }
             });
           }
+        }
 
-          const viewEls = root.querySelectorAll('[data-view-only="true"]');
-          const editEls = root.querySelectorAll('[data-edit-only="true"]');
-          if (mode === 'edit' || mode === 'create') {
-            viewEls.forEach(el => { el.style.display = 'none'; });
-            editEls.forEach(el => { el.style.display = ''; });
-          } else {
-            viewEls.forEach(el => { el.style.display = ''; });
-            editEls.forEach(el => { el.style.display = 'none'; });
-          }
-
-          // Hide legacy buttons
-          if (holdOnBtn)   holdOnBtn.style.display  = 'none';
-          if (holdOffBtn)  holdOffBtn.style.display = 'none';
-          if (markPaidBtn) markPaidBtn.style.display= 'none';
-
-          // Authorise / Unauthorise gating
-          if (authoriseBtn) {
-            authoriseBtn.style.display = (!isAuthorised && !locked && mode === 'view') ? '' : 'none';
-            if (!authoriseBtn.__tsWired) {
-              authoriseBtn.__tsWired = true;
-              authoriseBtn.addEventListener('click', async () => {
-                try {
-                  await authoriseTimesheet(tsId);
-                  window.__toast && window.__toast('Timesheet authorised');
-                } catch (err) {
-                  if (LOGM) console.warn('[TS][OVERVIEW] authoriseTimesheet failed', err);
-                  alert(err?.message || 'Failed to authorise timesheet.');
-                }
-              });
-            }
-          }
-
-          if (unauthoriseBtn) {
-            unauthoriseBtn.style.display = (isAuthorised && !locked && mode === 'view') ? '' : 'none';
-            if (!unauthoriseBtn.__tsWired) {
-              unauthoriseBtn.__tsWired = true;
-              unauthoriseBtn.addEventListener('click', async () => {
-                const ok = window.confirm('Unauthorise this timesheet? It will return to a pending state.');
-                if (!ok) return;
-                try {
-                  await unauthoriseTimesheet(tsId);
-                  window.__toast && window.__toast('Timesheet unauthorised');
-                } catch (err) {
-                  if (LOGM) console.warn('[TS][OVERVIEW] unauthoriseTimesheet failed', err);
-                  alert(err?.message || 'Failed to unauthorise timesheet.');
-                }
-              });
-            }
-          }
-
-          if (switchManualBtn) {
-            switchManualBtn.style.display = (weeklyElectronic && !locked && !!tsId && mode === 'view') ? '' : 'none';
-            if (!switchManualBtn.__tsWired) {
-              switchManualBtn.__tsWired = true;
-              switchManualBtn.addEventListener('click', async () => {
-                const ok = window.confirm('Switch this weekly timesheet to manual? Electronic submission will be revoked.');
-                if (!ok) return;
-                try {
-                  await switchTimesheetToManual(tsId);
-                  window.__toast && window.__toast('Weekly week switched to manual. You can now enter manual hours.');
-                  // Close this modal; summary list will be refreshed separately
-                  try { byId('btnCloseModal').click(); } catch {}
-                } catch (err) {
-                  if (LOGM) console.warn('[TS][OVERVIEW] switchTimesheetToManual failed', err);
-                  alert(err?.message || 'Failed to switch timesheet to manual.');
-                }
-              });
-            }
-          }
-
-          // Pay-hold + mark-paid staging in edit/create
-          if (mode === 'edit' || mode === 'create') {
-            if (!mc.timesheetState || typeof mc.timesheetState !== 'object') {
-              mc.timesheetState = {
-                reference: '',
-                payHoldDesired: null,
-                payHoldReason: '',
-                markPaid: false,
-                segmentOverrides: {},
-                nhspDeferrals: {},
-                manualHours: {},
-                additionalRates: (mc.timesheetState && mc.timesheetState.additionalRates) || {}
-              };
-            }
-            const state = mc.timesheetState;
-
-            if (payHoldInput && !payHoldInput.__tsWired) {
-              payHoldInput.__tsWired = true;
-              const currentOnHold = !!(tsfin && tsfin.pay_on_hold);
-              if (state.payHoldDesired == null) {
-                payHoldInput.checked = currentOnHold;
-                state.payHoldDesired = currentOnHold;
-              } else {
-                payHoldInput.checked = !!state.payHoldDesired;
+        if (unauthoriseBtn) {
+          unauthoriseBtn.style.display = (isAuthorised && !locked && mode === 'view') ? '' : 'none';
+          if (!unauthoriseBtn.__tsWired) {
+            unauthoriseBtn.__tsWired = true;
+            unauthoriseBtn.addEventListener('click', async () => {
+              const ok = window.confirm('Unauthorise this timesheet? It will return to a pending state.');
+              if (!ok) return;
+              try {
+                await unauthoriseTimesheet(tsId);
+                window.__toast && window.__toast('Timesheet unauthorised');
+              } catch (err) {
+                if (LOGM) console.warn('[TS][OVERVIEW] unauthoriseTimesheet failed', err);
+                alert(err?.message || 'Failed to unauthorise timesheet.');
               }
-
-              payHoldInput.addEventListener('change', () => {
-                state.payHoldDesired = !!payHoldInput.checked;
-                if (payHoldReasonInput) {
-                  state.payHoldReason = String(payHoldReasonInput.value || '');
-                }
-                if (LOGM) {
-                  LT('pay hold staged', {
-                    tsId,
-                    payHoldDesired: state.payHoldDesired,
-                    payHoldReason: state.payHoldReason
-                  });
-                }
-                try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
-              });
-            }
-
-            if (payHoldReasonInput && !payHoldReasonInput.__tsWired) {
-              payHoldReasonInput.__tsWired = true;
-              payHoldReasonInput.addEventListener('input', () => {
-                if (!mc.timesheetState || typeof mc.timesheetState !== 'object') return;
-                mc.timesheetState.payHoldReason = String(payHoldReasonInput.value || '');
-                if (LOGM) {
-                  LT('pay hold reason staged', {
-                    tsId,
-                    payHoldReason: mc.timesheetState.payHoldReason
-                  });
-                }
-                try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
-              });
-            }
-
-            if (markPaidInput && !markPaidInput.__tsWired) {
-              markPaidInput.__tsWired = true;
-              if (alreadyPaid) {
-                markPaidInput.checked = true;
-                markPaidInput.disabled = true;
-              } else {
-                markPaidInput.checked = !!state.markPaid;
-              }
-              markPaidInput.addEventListener('change', () => {
-                const alreadyPaidLocal = !!(mc.timesheetDetails && mc.timesheetDetails.tsfin && mc.timesheetDetails.tsfin.paid_at_utc);
-                if (alreadyPaidLocal) {
-                  markPaidInput.checked = true;
-                  markPaidInput.disabled = true;
-                  return;
-                }
-                state.markPaid = !!markPaidInput.checked;
-                if (LOGM) {
-                  LT('mark paid staged', {
-                    tsId,
-                    markPaid: state.markPaid
-                  });
-                }
-                try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
-              });
-            }
-          } else {
-            if (payHoldInput)       payHoldInput.disabled       = true;
-            if (payHoldReasonInput) payHoldReasonInput.disabled = true;
-            if (markPaidInput)      markPaidInput.disabled      = true;
+            });
           }
+        }
 
-          if (refInput && !refInput.__tsRefWired) {
-            refInput.__tsRefWired = true;
-            refInput.addEventListener('input', () => {
-              const mc2 = window.modalCtx || {};
-              if (!mc2.timesheetState || typeof mc2.timesheetState !== 'object') {
-                mc2.timesheetState = {
-                  reference: '',
-                  payHoldDesired: null,
-                  payHoldReason: '',
-                  markPaid: false,
-                  segmentOverrides: {},
-                  nhspDeferrals: {},
-                  manualHours: {},
-                  additionalRates: {}
-                };
+        if (switchManualBtn) {
+          switchManualBtn.style.display = (weeklyElectronic && !locked && !!tsId && mode === 'view') ? '' : 'none';
+          if (!switchManualBtn.__tsWired) {
+            switchManualBtn.__tsWired = true;
+            switchManualBtn.addEventListener('click', async () => {
+              const ok = window.confirm('Switch this weekly timesheet to manual? Electronic submission will be revoked.');
+              if (!ok) return;
+              try {
+                await switchTimesheetToManual(tsId);
+                window.__toast && window.__toast('Weekly week switched to manual. You can now enter manual hours.');
+                // Close this modal; summary list will be refreshed separately
+                try { byId('btnCloseModal').click(); } catch {}
+              } catch (err) {
+                if (LOGM) console.warn('[TS][OVERVIEW] switchTimesheetToManual failed', err);
+                alert(err?.message || 'Failed to switch timesheet to manual.');
               }
-              mc2.timesheetState.reference = String(refInput.value || '');
+            });
+          }
+        }
+
+        // Pay-hold + mark-paid staging in edit/create
+        if (mode === 'edit' || mode === 'create') {
+          if (!mc.timesheetState || typeof mc.timesheetState !== 'object') {
+            mc.timesheetState = {
+              reference: '',
+              payHoldDesired: null,
+              payHoldReason: '',
+              markPaid: false,
+              segmentOverrides: {},
+              segmentInvoiceTargets: {},
+              manualHours: {},
+              additionalRates: (mc.timesheetState && mc.timesheetState.additionalRates) || {}
+            };
+          }
+          const state = mc.timesheetState;
+
+          if (payHoldInput && !payHoldInput.__tsWired) {
+            payHoldInput.__tsWired = true;
+            const currentOnHold = !!(tsfin && tsfin.pay_on_hold);
+            if (state.payHoldDesired == null) {
+              payHoldInput.checked = currentOnHold;
+              state.payHoldDesired = currentOnHold;
+            } else {
+              payHoldInput.checked = !!state.payHoldDesired;
+            }
+
+            payHoldInput.addEventListener('change', () => {
+              state.payHoldDesired = !!payHoldInput.checked;
+              if (payHoldReasonInput) {
+                state.payHoldReason = String(payHoldReasonInput.value || '');
+              }
               if (LOGM) {
-                LT('reference staged', {
+                LT('pay hold staged', {
                   tsId,
-                  reference: mc2.timesheetState.reference
+                  payHoldDesired: state.payHoldDesired,
+                  payHoldReason: state.payHoldReason
                 });
               }
               try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
             });
           }
+
+          if (payHoldReasonInput && !payHoldReasonInput.__tsWired) {
+            payHoldReasonInput.__tsWired = true;
+            payHoldReasonInput.addEventListener('input', () => {
+              if (!mc.timesheetState || typeof mc.timesheetState !== 'object') return;
+              mc.timesheetState.payHoldReason = String(payHoldReasonInput.value || '');
+              if (LOGM) {
+                LT('pay hold reason staged', {
+                  tsId,
+                  payHoldReason: mc.timesheetState.payHoldReason
+                });
+              }
+              try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
+            });
+          }
+
+          if (markPaidInput && !markPaidInput.__tsWired) {
+            markPaidInput.__tsWired = true;
+            if (alreadyPaid) {
+              markPaidInput.checked = true;
+              markPaidInput.disabled = true;
+            } else {
+              markPaidInput.checked = !!state.markPaid;
+            }
+            markPaidInput.addEventListener('change', () => {
+              const alreadyPaidLocal = !!(mc.timesheetDetails && mc.timesheetDetails.tsfin && mc.timesheetDetails.tsfin.paid_at_utc);
+              if (alreadyPaidLocal) {
+                markPaidInput.checked = true;
+                markPaidInput.disabled = true;
+                return;
+              }
+              state.markPaid = !!markPaidInput.checked;
+              if (LOGM) {
+                LT('mark paid staged', {
+                  tsId,
+                  markPaid: state.markPaid
+                });
+              }
+              try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
+            });
+          }
+        } else {
+          if (payHoldInput)       payHoldInput.disabled       = true;
+          if (payHoldReasonInput) payHoldReasonInput.disabled = true;
+          if (markPaidInput)      markPaidInput.disabled      = true;
         }
-      } catch (err) {
-        if ((typeof window.__LOG_MODAL === 'boolean') ? window.__LOG_MODAL : false) {
-          console.warn('[TS][OVERVIEW][WIRE] failed', err);
+
+        if (refInput && !refInput.__tsRefWired) {
+          refInput.__tsRefWired = true;
+          refInput.addEventListener('input', () => {
+            const mc2 = window.modalCtx || {};
+            if (!mc2.timesheetState || typeof mc2.timesheetState !== 'object') {
+              mc2.timesheetState = {
+                reference: '',
+                payHoldDesired: null,
+                payHoldReason: '',
+                markPaid: false,
+                segmentOverrides: {},
+                segmentInvoiceTargets: {},
+                manualHours: {},
+                additionalRates: {}
+              };
+            }
+            mc2.timesheetState.reference = String(refInput.value || '');
+            if (LOGM) {
+              LT('reference staged', {
+                tsId,
+                reference: mc2.timesheetState.reference
+              });
+            }
+            try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
+          });
         }
+      }
+    } catch (err) {
+      if ((typeof window.__LOG_MODAL === 'boolean') ? window.__LOG_MODAL : false) {
+        console.warn('[TS][OVERVIEW][WIRE] failed', err);
       }
     }
   }
+}
+
 
   // ───────────────────── Timesheets: Lines tab wiring ─────────────────────
   if (this.entity === 'timesheets' && k === 'lines') {
@@ -20030,20 +20900,21 @@ async setTab(k) {
       if (LOGM) LT('no modalBody root, skip wiring');
     } else {
       try {
-        const mc = window.modalCtx || {};
-        if (!mc.timesheetState || typeof mc.timesheetState !== 'object') {
-          mc.timesheetState = {
-            reference: null,
-            payHoldDesired: null,
-            payHoldReason: '',
-            markPaid: false,
-            segmentOverrides: {},
-            nhspDeferrals: {},
-            manualHours: {},
-            additionalRates: {}
-          };
-        }
-        const state = mc.timesheetState;
+   const mc = window.modalCtx || {};
+if (!mc.timesheetState || typeof mc.timesheetState !== 'object') {
+  mc.timesheetState = {
+    reference: null,
+    payHoldDesired: null,
+    payHoldReason: '',
+    markPaid: false,
+    segmentOverrides: {},
+    segmentInvoiceTargets: {},
+    manualHours: {},
+    additionalRates: {}
+  };
+}
+const state = mc.timesheetState;
+
 
         // Segments exclude_from_pay
         const checkboxes = root.querySelectorAll('input[name="seg_exclude_from_pay"][data-segment-id]');
@@ -20090,47 +20961,44 @@ async setTab(k) {
         });
 
         // NHSP deferrals
-        const defBtns = root.querySelectorAll('button[data-ts-action="defer-shift"][data-shift-id]');
-        if (LOGM) LT('wiring NHSP deferrals', { count: defBtns.length });
+   // Invoice week / Pause selects (per segment)
+const weekSelects = root.querySelectorAll('select[name="seg_invoice_week"][data-segment-id]');
+if (LOGM) LT('wiring invoice-week selects', { count: weekSelects.length });
 
-        defBtns.forEach(btn => {
-          if (btn.__tsDefWired) return;
-          btn.__tsDefWired = true;
+weekSelects.forEach(sel => {
+  if (sel.__tsWeekWired) return;
+  sel.__tsWeekWired = true;
 
-          const shiftId = btn.getAttribute('data-shift-id') || '';
-          if (!shiftId) return;
+  const segId = sel.getAttribute('data-segment-id') || '';
+  if (!segId) return;
 
-          const syncLabel = () => {
-            const has = !!(state.nhspDeferrals && state.nhspDeferrals[shiftId]);
-            btn.textContent = has ? 'Deferred (staged)' : 'Defer invoicing (staged)';
-          };
-          syncLabel();
+  // Seed from state (if user previously staged a change)
+  if (state.segmentInvoiceTargets && typeof state.segmentInvoiceTargets === 'object') {
+    const staged = state.segmentInvoiceTargets[segId];
+    if (staged) {
+      sel.value = staged;
+    }
+  }
 
-          btn.addEventListener('click', () => {
-            if (!state.nhspDeferrals || typeof state.nhspDeferrals !== 'object') {
-              state.nhspDeferrals = {};
-            }
-            const has = !!state.nhspDeferrals[shiftId];
+  sel.addEventListener('change', () => {
+    if (!state.segmentInvoiceTargets || typeof state.segmentInvoiceTargets !== 'object') {
+      state.segmentInvoiceTargets = {};
+    }
+    const newVal = (sel.value || '').trim();
+    state.segmentInvoiceTargets[segId] = newVal;
 
-            if (has) {
-              delete state.nhspDeferrals[shiftId];
-            } else {
-              state.nhspDeferrals[shiftId] = { defer_until_run_after: null };
-            }
+    if (LOGM) {
+      LT('invoice week staged', {
+        segId,
+        week_start: newVal,
+        keys: Object.keys(state.segmentInvoiceTargets || {})
+      });
+    }
 
-            if (LOGM) {
-              LT('NHSP deferral staged toggle', {
-                shiftId,
-                nowStaged: !has,
-                stagedKeys: Object.keys(state.nhspDeferrals || {})
-              });
-            }
+    try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
+  });
+});
 
-            syncLabel();
-
-            try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
-          });
-        });
 
         // Manual weekly hours inputs (manual_hours_*)
         const hoursInputs = root.querySelectorAll('input[name^="manual_hours_"]');
@@ -26548,10 +27416,22 @@ function renderTimesheetLinesTab(ctx) {
                       ts.submission_mode ||
                       '').toUpperCase();
 
-  const tsfin = details.tsfin || {};
+  const tsfin  = details.tsfin || {};
   const locked = !!(tsfin.locked_by_invoice_id || tsfin.paid_at_utc);
+  const basis  = String(tsfin.basis || row.basis || '').toUpperCase();
 
   const isWeeklyManual = (sheetScope === 'WEEKLY' && subMode === 'MANUAL');
+
+  // For NHSP / HR self-bill / adjustments we allow per-segment invoice-week targeting
+  const isNhspOrHrSelfBillBasis = [
+    'NHSP',
+    'NHSP_ADJUSTMENT',
+    'HEALTHROSTER_SELF_BILL',
+    'HEALTHROSTER_ADJUSTMENT'
+  ].includes(basis);
+
+  const segTargets = state.segmentInvoiceTargets || {};
+  state.segmentInvoiceTargets = segTargets;
 
   L('snapshot', {
     tsId,
@@ -26559,13 +27439,108 @@ function renderTimesheetLinesTab(ctx) {
     segmentsCount: segs.length,
     shiftsCount: shifts.length,
     hasOverrides: !!(state && state.segmentOverrides && Object.keys(state.segmentOverrides).length),
-    hasNhspDefers: !!(state && state.nhspDeferrals && Object.keys(state.nhspDeferrals).length),
+    hasSegmentTargets: !!(state && state.segmentInvoiceTargets && Object.keys(state.segmentInvoiceTargets).length),
     sheetScope,
     subMode,
+    basis,
     isWeeklyManual,
     locked
   });
   GE();
+
+  const computeWeekStartFromWeekEnding = (weYmd) => {
+    if (!weYmd) return null;
+    const d = new Date(`${weYmd}T00:00:00Z`);
+    if (Number.isNaN(d.getTime())) return weYmd;
+    d.setUTCDate(d.getUTCDate() - 6);
+    const yyyy = d.getUTCFullYear();
+    const mm   = String(d.getUTCMonth() + 1).padStart(2, '0');
+    const dd   = String(d.getUTCDate()).toString().padStart(2, '0');
+    return `${yyyy}-${mm}-${dd}`;
+  };
+
+  const toYmd = (d) => {
+    const yyyy = d.getUTCFullYear();
+    const mm   = String(d.getUTCMonth() + 1).padStart(2, '0');
+    const dd   = String(d.getUTCDate()).toString().padStart(2, '0');
+    return `${yyyy}-${mm}-${dd}`;
+  };
+
+  const tsWeekEnding = ts.week_ending_date || row.week_ending_date || null;
+  const naturalWeekStart = tsWeekEnding ? computeWeekStartFromWeekEnding(tsWeekEnding) : null;
+  const pauseWeekStart   = '2099-01-05'; // arbitrary far-future Monday used as "Pause"
+
+  const disabledAttr = locked ? 'disabled' : '';
+
+  const buildInvoiceWeekSelectHtml = (seg) => {
+    if (!isNhspOrHrSelfBillBasis) {
+      return '<span class="mini">—</span>';
+    }
+    const segId = String(seg.segment_id || '');
+    if (!segId) return '<span class="mini">—</span>';
+
+    const currentTarget = segTargets[segId] ||
+      seg.invoice_target_week_start ||
+      naturalWeekStart ||
+      '';
+
+    // Build options: natural week + next 8 Mondays + Pause
+    const opts = [];
+
+    if (naturalWeekStart) {
+      opts.push({
+        value: naturalWeekStart,
+        label: `Natural week (${naturalWeekStart})`
+      });
+    }
+
+    // Next 8 invoice weeks
+    if (naturalWeekStart) {
+      const baseDate = new Date(`${naturalWeekStart}T00:00:00Z`);
+      for (let i = 1; i <= 8; i++) {
+        const d = new Date(baseDate.getTime());
+        d.setUTCDate(d.getUTCDate() + i * 7);
+        const ws = toYmd(d);
+        opts.push({
+          value: ws,
+          label: `Week starting ${ws}`
+        });
+      }
+    }
+
+    // Pause
+    opts.push({
+      value: pauseWeekStart,
+      label: 'Pause (defer)'
+    });
+
+    // Decide which option is selected
+    let selectedVal = currentTarget || (naturalWeekStart || '');
+    const optionValues = opts.map(o => o.value);
+    if (!optionValues.includes(selectedVal)) {
+      // If it's some other future date, treat it as paused
+      selectedVal = pauseWeekStart;
+    }
+
+    // Keep state in sync
+    segTargets[segId] = selectedVal;
+
+    const optionsHtml = opts.map(o => {
+      const sel = (o.value === selectedVal) ? 'selected' : '';
+      return `<option value="${o.value}" ${sel}>${o.label}</option>`;
+    }).join('');
+
+    return `
+      <select
+        name="seg_invoice_week"
+        data-segment-id="${segId}"
+        ${disabledAttr}
+      >
+        ${optionsHtml}
+      </select>
+      <span class="mini">Staged invoice week</span>
+    `;
+  };
 
   // ─────────────────────────────────────────────────────
   // A) SEGMENTS mode → existing imported breakdown
@@ -26581,7 +27556,7 @@ function renderTimesheetLinesTab(ctx) {
           <th>Pay</th>
           <th>Charge</th>
           <th>Exclude from pay</th>
-          <th>Defer invoicing</th>
+          <th>Invoice week / Pause</th>
         </tr>
       </thead>
     `;
@@ -26602,26 +27577,7 @@ function renderTimesheetLinesTab(ctx) {
       const ref   = seg.ref_num || '';
       const reqId = seg.request_id || '';
 
-      let deferCellHtml = '<span class="mini">—</span>';
-      const isNhsp = String(src).toUpperCase() === 'NHSP';
-      if (isNhsp && seg.segment_id) {
-        let shiftId = '';
-        const parts = String(seg.segment_id).split(':');
-        if (parts.length >= 2 && parts[0].toLowerCase() === 'nhsp') {
-          shiftId = parts[1];
-        }
-        if (shiftId) {
-          const hasStaged = !!(state.nhspDeferrals && state.nhspDeferrals[shiftId]);
-          const label = hasStaged ? 'Deferred (staged)' : 'Defer invoicing (staged)';
-          deferCellHtml = `
-            <button type="button"
-              data-ts-action="defer-shift"
-              data-shift-id="${shiftId}">
-              ${label}
-            </button>
-          `;
-        }
-      }
+      const invoiceWeekCellHtml = buildInvoiceWeekSelectHtml(seg);
 
       return `
         <tr data-segment-id="${seg.segment_id}">
@@ -26641,11 +27597,12 @@ function renderTimesheetLinesTab(ctx) {
               name="seg_exclude_from_pay"
               data-segment-id="${seg.segment_id}"
               ${effExclude ? 'checked' : ''}
+              ${disabledAttr}
             />
             <span class="mini">Tick = exclude from pay (staged)</span>
           </td>
           <td>
-            ${deferCellHtml}
+            ${invoiceWeekCellHtml}
           </td>
         </tr>
       `;
@@ -26661,7 +27618,7 @@ function renderTimesheetLinesTab(ctx) {
           <div class="row">
             <label>Mode</label>
             <div class="controls">
-              <span class="mini">Invoice breakdown mode: ${mode || 'UNKNOWN'}</span>
+              <span class="mini">Invoice breakdown mode: ${mode || 'UNKNOWN'} (basis: ${basis || 'UNKNOWN'})</span>
             </div>
           </div>
         </div>
@@ -26684,7 +27641,7 @@ function renderTimesheetLinesTab(ctx) {
             <label></label>
             <div class="controls">
               <span class="mini">
-                Changes to "Exclude from pay" and "Defer invoicing" are staged only. They are applied when you click Save on the Timesheet modal.
+                Changes to "Exclude from pay" and "Invoice week / Pause" are staged only. They are applied when you click Save on the Timesheet modal.
               </span>
             </div>
           </div>
@@ -26714,7 +27671,7 @@ function renderTimesheetLinesTab(ctx) {
     const extraCodes = Object.keys(extrasMap);
     const hasExtras  = extraCodes.length > 0;
 
-    const disabledAttr = locked ? 'disabled' : '';
+    const disabledAttrManual = locked ? 'disabled' : '';
 
     const hoursRowsHtml = `
       <tr>
@@ -26723,7 +27680,7 @@ function renderTimesheetLinesTab(ctx) {
           <input type="number" step="0.25" min="0"
             name="manual_hours_day"
             value="${hours.day}"
-            ${disabledAttr}
+            ${disabledAttrManual}
           />
         </td>
       </tr>
@@ -26733,7 +27690,7 @@ function renderTimesheetLinesTab(ctx) {
           <input type="number" step="0.25" min="0"
             name="manual_hours_night"
             value="${hours.night}"
-            ${disabledAttr}
+            ${disabledAttrManual}
           />
         </td>
       </tr>
@@ -26743,7 +27700,7 @@ function renderTimesheetLinesTab(ctx) {
           <input type="number" step="0.25" min="0"
             name="manual_hours_sat"
             value="${hours.sat}"
-            ${disabledAttr}
+            ${disabledAttrManual}
           />
         </td>
       </tr>
@@ -26753,7 +27710,7 @@ function renderTimesheetLinesTab(ctx) {
           <input type="number" step="0.25" min="0"
             name="manual_hours_sun"
             value="${hours.sun}"
-            ${disabledAttr}
+            ${disabledAttrManual}
           />
         </td>
       </tr>
@@ -26763,7 +27720,7 @@ function renderTimesheetLinesTab(ctx) {
           <input type="number" step="0.25" min="0"
             name="manual_hours_bh"
             value="${hours.bh}"
-            ${disabledAttr}
+            ${disabledAttrManual}
           />
         </td>
       </tr>
@@ -26797,7 +27754,7 @@ function renderTimesheetLinesTab(ctx) {
                       name="extra_units_${code}"
                       data-extra-code="${code}"
                       value="${units}"
-                      ${disabledAttr}
+                      ${disabledAttrManual}
                     />
                   </td>
                 </tr>
@@ -27218,7 +28175,7 @@ async function openTimesheet(row) {
         payHoldReason:    '',
         markPaid:         false, // staged; applied on Save via markTimesheetPaid
         segmentOverrides: {},    // segment_id → { exclude_from_pay }
-        nhspDeferrals:    {},    // shift_id → { defer_until_run_after }
+        segmentInvoiceTargets: {}, // segment_id → invoice_week_start
         manualHours,              // { day, night, sat, sun, bh } – manual weekly buckets
         additionalRates           // code → { bucket_name, unit_name, units_week, pay_rate, charge_rate, frequency }
       }
@@ -27279,7 +28236,7 @@ async function openTimesheet(row) {
       }
     };
 
-    // 5) onSave for Timesheet modal – segments, reference, NHSP deferrals, pay-hold, mark-paid, manual weekly hours/extras
+    // 5) onSave for Timesheet modal – segments, reference, pay-hold, mark-paid, manual weekly hours/extras
     const onSaveTimesheet = async () => {
       const { LOGM, L, GC, GE } = getTsLoggers('[TS][SAVE]');
       GC('onSaveTimesheet');
@@ -27292,10 +28249,7 @@ async function openTimesheet(row) {
       const segOverrides    = st.segmentOverrides || {};
       const hasSegOverrides = !!Object.keys(segOverrides).length;
 
-      const nhspDeferrals   = st.nhspDeferrals || {};
-      const hasNhspDefers   = !!Object.keys(nhspDeferrals).length;
-
-      const tsLocal = det.timesheet || {};
+      const tsLocal   = det.timesheet || {};
       const tsfinLocal = det.tsfin || {};
 
       const currentRef = tsLocal.reference_number || rowNow.reference_number || '';
@@ -27328,6 +28282,9 @@ async function openTimesheet(row) {
       const hasExtrasStaged  = extrasMap &&
         Object.values(extrasMap).some(r => r && Number(r.units_week || 0) !== 0);
 
+      const segTargets = st.segmentInvoiceTargets || {};
+      const hasSegTargets = !!Object.keys(segTargets).length;
+
       // Staged pay-hold + mark-paid
       const currentOnHold    = !!tsfinLocal.pay_on_hold;
       const payHoldDesired   =
@@ -27353,8 +28310,8 @@ async function openTimesheet(row) {
         hasExtrasStaged,
         hasSegOverrides,
         segOverridesKeys: Object.keys(segOverrides),
-        hasNhspDefers,
-        nhspDefersKeys: Object.keys(nhspDeferrals),
+        hasSegTargets,
+        segTargetKeys: Object.keys(segTargets),
         currentRef,
         stagedRef,
         refChanged,
@@ -27415,10 +28372,58 @@ async function openTimesheet(row) {
         });
       }
 
-      // 5b) Apply segment exclude_from_pay overrides (SEGMENTS mode only)
-      if (hasSegOverrides && det.isSegmentsMode) {
+      // 5b) Apply segment exclude_from_pay + invoice_target_week_start (SEGMENTS mode only)
+      if (det.isSegmentsMode && (hasSegOverrides || hasSegTargets) && (tsId || rowNow.timesheet_id)) {
         tasks.push(async () => {
-          await updateTimesheetSegmentsPayFlags(tsId || rowNow.timesheet_id, segOverrides);
+          const currentDetails = window.modalCtx.timesheetDetails || det;
+          const segments = Array.isArray(currentDetails.segments) ? currentDetails.segments : [];
+          if (!segments.length) return;
+
+          const updates = [];
+          const overrides = window.modalCtx.timesheetState.segmentOverrides || {};
+          const targets   = window.modalCtx.timesheetState.segmentInvoiceTargets || {};
+
+          for (const seg of segments) {
+            if (!seg || typeof seg !== 'object') continue;
+            const sid = String(seg.segment_id || '').trim();
+            if (!sid) continue;
+
+            const o = overrides[sid] || {};
+            const hasOverride = Object.prototype.hasOwnProperty.call(o, 'exclude_from_pay');
+            const exclude = hasOverride ? !!o.exclude_from_pay : !!seg.exclude_from_pay;
+
+            const originalTarget = seg.invoice_target_week_start || null;
+            const stagedTarget   = targets[sid] || originalTarget || null;
+
+            const update = { segment_id: sid };
+            let changed = false;
+
+            if (exclude !== !!seg.exclude_from_pay) {
+              update.exclude_from_pay = exclude;
+              changed = true;
+            } else {
+              // still send explicit exclude flag so backend recomputes totals coherently
+              update.exclude_from_pay = exclude;
+            }
+
+            if (stagedTarget && stagedTarget !== originalTarget) {
+              update.invoice_target_week_start = stagedTarget;
+              changed = true;
+            }
+
+            if (changed) {
+              updates.push(update);
+            }
+          }
+
+          if (!updates.length) return;
+
+          L('segment updates', { count: updates.length });
+
+          await apiPatchJson(
+            `/api/tsfin/${encodeURIComponent(tsId || rowNow.timesheet_id)}/segments`,
+            { segments: updates }
+          );
         });
       }
 
@@ -27426,13 +28431,6 @@ async function openTimesheet(row) {
       if (refChanged && tsId) {
         tasks.push(async () => {
           await updateTimesheetReference(tsId, stagedRef);
-        });
-      }
-
-      // 5d) Apply NHSP deferrals (staged)
-      if (hasNhspDefers && tsId) {
-        tasks.push(async () => {
-          await saveNhspDeferrals(tsId, nhspDeferrals);
         });
       }
 
@@ -27490,14 +28488,14 @@ async function openTimesheet(row) {
 
       window.modalCtx.data = updatedRow;
 
-      // Clear staged NHSP deferrals & segment overrides after successful save
+      // Clear staged segment state after successful save
       if (window.modalCtx.timesheetState) {
-        window.modalCtx.timesheetState.segmentOverrides = {};
-        window.modalCtx.timesheetState.nhspDeferrals    = {};
-        window.modalCtx.timesheetState.reference        = updatedRow.reference_number;
-        window.modalCtx.timesheetState.payHoldDesired   = null;
-        window.modalCtx.timesheetState.payHoldReason    = '';
-        window.modalCtx.timesheetState.markPaid         = false;
+        window.modalCtx.timesheetState.segmentOverrides      = {};
+        window.modalCtx.timesheetState.segmentInvoiceTargets = {};
+        window.modalCtx.timesheetState.reference             = updatedRow.reference_number;
+        window.modalCtx.timesheetState.payHoldDesired        = null;
+        window.modalCtx.timesheetState.payHoldReason         = '';
+        window.modalCtx.timesheetState.markPaid              = false;
         // manualHours / additionalRates remain staged for the next edit session
       }
 
