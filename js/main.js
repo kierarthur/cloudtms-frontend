@@ -21086,16 +21086,26 @@ if (this.entity === 'timesheets' && k === 'overview') {
                       mc2.timesheetDetails.timesheet.submission_mode = 'MANUAL';
                     }
                   } catch {}
-                } else if (weeklyElectronicPlanned2 && weekId2) {
-                  // Planned/open weekly slot → /api/contract-weeks/:id/switch-mode
-                  await switchContractWeekToManual(weekId2);
-                  try {
-                    mc2.data.submission_mode_snapshot = 'MANUAL';
-                    if (mc2.timesheetDetails && mc2.timesheetDetails.contract_week) {
-                      mc2.timesheetDetails.contract_week.submission_mode_snapshot = 'MANUAL';
-                    }
-                  } catch {}
-                } else {
+           } else if (weeklyElectronicPlanned2 && weekId2) {
+  // Planned/open weekly slot → /api/contract-weeks/:id/switch-mode
+  await switchContractWeekToManual(weekId2);
+  try {
+    mc2.data.submission_mode_snapshot = 'MANUAL';
+    if (mc2.timesheetDetails && mc2.timesheetDetails.contract_week) {
+      mc2.timesheetDetails.contract_week.submission_mode_snapshot = 'MANUAL';
+    }
+
+    // 🔹 Keep timesheetMeta in sync so Edit gating works *without* reopening
+    if (mc2.timesheetMeta && typeof mc2.timesheetMeta === 'object') {
+      mc2.timesheetMeta.cw_submission_mode_snapshot = 'MANUAL';
+      mc2.timesheetMeta.sheetScope  = 'WEEKLY';
+      mc2.timesheetMeta.subMode     = 'MANUAL';
+      mc2.timesheetMeta.isPlannedWeek = true;
+      mc2.timesheetMeta.hasTs      = false;
+    }
+  } catch {}
+}
+ else {
                   throw new Error('This week is not an electronic weekly slot; cannot convert to manual.');
                 }
 
