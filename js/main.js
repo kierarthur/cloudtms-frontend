@@ -21099,9 +21099,16 @@ if (this.entity === 'timesheets' && k === 'overview') {
                   throw new Error('This week is not an electronic weekly slot; cannot convert to manual.');
                 }
 
-                window.__toast && window.__toast(
+                             window.__toast && window.__toast(
                   'Weekly week is now in MANUAL mode. Click Edit to enter manual hours.'
                 );
+
+                // Refresh the summary grid so planned/real rows show MANUAL status
+                try {
+                  await renderAll();
+                } catch (e) {
+                  if (LOGM) LT('switchManual: renderAll() after convert failed (non-fatal)', e);
+                }
 
                 // Repaint Overview in VIEW mode so that pills & actions update;
                 // Edit button remains available to go into manual edit.
@@ -21119,6 +21126,7 @@ if (this.entity === 'timesheets' && k === 'overview') {
                 } catch (e) {
                   if (LOGM) LT('switchManual: repaint after convert failed (non-fatal)', e);
                 }
+
               } catch (err) {
                 if (LOGM) console.warn('[TS][OVERVIEW] switch to manual failed', err);
                 alert(err?.message || 'Failed to switch to manual.');
@@ -29394,7 +29402,6 @@ function renderTimesheetIssuesTab(ctx) {
     </div>
   `;
 }
-
 function renderTimesheetFinanceTab(ctx) {
   const { LOGM, L, GC, GE } = getTsLoggers('[TS][FINANCE]');
   const { row, details, related, state } = normaliseTimesheetCtx(ctx);
@@ -29581,7 +29588,10 @@ function renderTimesheetFinanceTab(ctx) {
   let bucketCardHtml = '';
 
   try {
-    const tsId = mc.data?.timesheet_id || row.timesheet_id || row.id || null;
+    // ✅ Real timesheet id only; no row.id fallback
+    const tsId   = mc.data?.timesheet_id || row.timesheet_id || null;
+    // ✅ Contract-week id for planned/open weeks
+    const weekId = mc.data?.contract_week_id || row.contract_week_id || null;
 
     if (schedule && schedule.length) {
       const hhmmToMinutes = (hhmm) => {
@@ -29631,7 +29641,7 @@ function renderTimesheetFinanceTab(ctx) {
       `;
 
       // If we're editing and have a schedule ⇒ Proposed buckets via backend
-      if (useProposedBuckets && tsId) {
+      if (useProposedBuckets && (tsId || weekId)) {
         const containerId = 'tsBucketPreview';
         const innerId = 'tsBucketPreviewInner';
 
@@ -29664,7 +29674,8 @@ function renderTimesheetFinanceTab(ctx) {
           }
 
           const payload = {
-            timesheet_id: tsId,
+            timesheet_id:       tsId || null,
+            contract_week_id:   tsId ? null : (weekId || null),
             actual_schedule_json: schedule,
             additional_units_week: additionalUnitsWeek
           };
@@ -29685,8 +29696,9 @@ function renderTimesheetFinanceTab(ctx) {
             })
             .then(data => {
               try {
+                const cacheKey = tsId || `cw:${weekId || 'unknown'}`;
                 window.__tsBucketPreviewCache = window.__tsBucketPreviewCache || {};
-                window.__tsBucketPreviewCache[String(tsId)] = { ok: true, data };
+                window.__tsBucketPreviewCache[String(cacheKey)] = { ok: true, data };
               } catch {}
               const container = document.getElementById(innerId);
               if (container) {
@@ -29696,13 +29708,13 @@ function renderTimesheetFinanceTab(ctx) {
             .catch(err => {
               const msg = err?.message || 'Bucket preview failed';
               try {
+                const cacheKey = tsId || `cw:${weekId || 'unknown'}`;
                 window.__tsBucketPreviewCache = window.__tsBucketPreviewCache || {};
-                window.__tsBucketPreviewCache[String(tsId)] = { error: msg };
+                window.__tsBucketPreviewCache[String(cacheKey)] = { error: msg };
               } catch {}
               const statusEl = document.getElementById('tsBucketPreviewStatus');
               if (statusEl) {
                 const safeMsg = enc(msg);
-                // Red warning triangle with tooltip (hover for full message)
                 statusEl.innerHTML = `
                   <span class="warn-icon" title="${safeMsg}">&#9888;</span>
                 `;
@@ -29807,6 +29819,7 @@ function renderTimesheetFinanceTab(ctx) {
     </div>
   `;
 }
+
 
 function renderTimesheetOverviewTab(ctx) {
   const { LOGM, L, GC, GE } = getTsLoggers('[TS][OVERVIEW]');
