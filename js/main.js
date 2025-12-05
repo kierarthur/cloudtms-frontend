@@ -20904,393 +20904,432 @@ if (this.entity === 'candidates' && k === 'pay') {
 
 
   // ───────────────────── Timesheets: Overview tab wiring ─────────────────────
-  if (this.entity === 'timesheets' && k === 'overview') {
-    const { LOGM, L: LT } = getTsLoggers('[TS][OVERVIEW][WIRE]');
-    const root = byId('modalBody');
-    if (!root) {
-      if (LOGM) LT('no modalBody root, skip wiring');
-    } else {
-      try {
-        const mc   = window.modalCtx || {};
-        const tsId = mc.data?.timesheet_id || mc.data?.id || null;
-        const mode = this.mode || 'view';
+ // ───────────────────── Timesheets: Overview tab wiring ─────────────────────
+if (this.entity === 'timesheets' && k === 'overview') {
+  const { LOGM, L: LT } = getTsLoggers('[TS][OVERVIEW][WIRE]');
+  const root = byId('modalBody');
+  if (!root) {
+    if (LOGM) LT('no modalBody root, skip wiring');
+  } else {
+    try {
+      const mc   = window.modalCtx || {};
+      const tsId   = mc.data?.timesheet_id || null;              // REAL timesheet id only
+      const weekId = mc.data?.contract_week_id || null;          // contract_week id for planned weeks
+      const mode   = this.mode || 'view';
 
-        if (!tsId && !mc.data?.contract_week_id) {
-          if (LOGM) LT('no tsId/contract_week_id on modalCtx.data, skip overview wiring');
+      if (!tsId && !weekId) {
+        if (LOGM) LT('no tsId/contract_week_id on modalCtx.data, skip overview wiring');
+      } else {
+        const authoriseBtn       = root.querySelector('button[data-ts-action="authorise"]');
+        const unauthoriseBtn     = root.querySelector('button[data-ts-action="unauthorise"]');
+        const switchManualBtn    = root.querySelector('button[data-ts-action="switch-manual"]');
+        const holdOnBtn          = root.querySelector('button[data-ts-action="pay-hold-on"]');
+        const holdOffBtn         = root.querySelector('button[data-ts-action="pay-hold-off"]');
+        const markPaidBtn        = root.querySelector('button[data-ts-action="mark-paid"]');
+        const refInput           = root.querySelector('input[name="ts_reference"]');
+        const payHoldInput       = root.querySelector('input[name="ts_pay_hold"]');
+        const payHoldReasonInput = root.querySelector('input[name="ts_pay_hold_reason"]');
+        const markPaidInput      = root.querySelector('input[name="ts_mark_paid"]');
+
+        // NEW: extra action buttons for timesheets
+        const revertElecBtn      = root.querySelector('button[data-ts-action="revert-electronic"]');
+        const deleteReopenBtn    = root.querySelector('button[data-ts-action="delete-manual-reopen"]');
+        const deletePermBtn      = root.querySelector('button[data-ts-action="delete-permanent"]');
+
+        const det   = mc.timesheetDetails || {};
+        const ts    = det.timesheet || {};
+        const tsfin = det.tsfin || {};
+        const sheetScope = (det.sheet_scope || mc.data?.sheet_scope || ts.sheet_scope || '').toUpperCase();
+        const subMode    = (ts.submission_mode || mc.data?.submission_mode || '').toUpperCase();
+
+        // contract-week context for weekly manual delete+reopen
+        const cwId            = det.contract_week_id || mc.data?.contract_week_id || null;
+        const hasContractWeek = !!cwId;
+
+        const isAuthorised     = !!ts.authorised_at_server;
+        const locked           = !!(tsfin.locked_by_invoice_id || tsfin.paid_at_utc);
+        const alreadyPaid      = !!tsfin.paid_at_utc;
+
+        const hasTs           = !!tsId;
+        const isWeekly        = (sheetScope === 'WEEKLY');
+        const isDaily         = (sheetScope === 'DAILY');
+        const weeklyElectronicWithTs =
+          isWeekly && subMode === 'ELECTRONIC' && hasTs;
+        const weeklyElectronicPlanned =
+          isWeekly && subMode === 'ELECTRONIC' && !hasTs && !!weekId;
+
+        // NEW: simple front-end gating; backend still enforces final rules
+        const canRevertElectronic =
+          !!tsId && !locked && subMode === 'MANUAL';
+
+        const canDeleteManualReopen =
+          !!tsId && !locked && isWeekly && subMode === 'MANUAL' && hasContractWeek;
+
+        const canDeletePermanent =
+          !!tsId && !locked;
+
+        if (LOGM) {
+          LT('overview wiring snapshot', {
+            tsId,
+            weekId,
+            mode,
+            sheetScope,
+            subMode,
+            isAuthorised,
+            locked,
+            weeklyElectronicWithTs,
+            weeklyElectronicPlanned,
+            hasAuthorise: !!authoriseBtn,
+            hasUnauthorise: !!unauthoriseBtn,
+            hasSwitchManual: !!switchManualBtn,
+            hasRefInput: !!refInput,
+            hasPayHoldInput: !!payHoldInput,
+            hasMarkPaidInput: !!markPaidInput
+          });
+        }
+
+        const viewEls = root.querySelectorAll('[data-view-only="true"]');
+        const editEls = root.querySelectorAll('[data-edit-only="true"]');
+        if (mode === 'edit' || mode === 'create') {
+          viewEls.forEach(el => { el.style.display = 'none'; });
+          editEls.forEach(el => { el.style.display = ''; });
         } else {
-            const authoriseBtn       = root.querySelector('button[data-ts-action="authorise"]');
-          const unauthoriseBtn     = root.querySelector('button[data-ts-action="unauthorise"]');
-          const switchManualBtn    = root.querySelector('button[data-ts-action="switch-manual"]');
-          const holdOnBtn          = root.querySelector('button[data-ts-action="pay-hold-on"]');
-          const holdOffBtn         = root.querySelector('button[data-ts-action="pay-hold-off"]');
-          const markPaidBtn        = root.querySelector('button[data-ts-action="mark-paid"]');
-          const refInput           = root.querySelector('input[name="ts_reference"]');
-          const payHoldInput       = root.querySelector('input[name="ts_pay_hold"]');
-          const payHoldReasonInput = root.querySelector('input[name="ts_pay_hold_reason"]');
-          const markPaidInput      = root.querySelector('input[name="ts_mark_paid"]');
+          viewEls.forEach(el => { el.style.display = ''; });
+          editEls.forEach(el => { el.style.display = 'none'; });
+        }
 
-          // NEW: extra action buttons for timesheets
-          const revertElecBtn      = root.querySelector('button[data-ts-action="revert-electronic"]');
-          const deleteReopenBtn    = root.querySelector('button[data-ts-action="delete-manual-reopen"]');
-          const deletePermBtn      = root.querySelector('button[data-ts-action="delete-permanent"]');
+        // Hide legacy buttons
+        if (holdOnBtn)   holdOnBtn.style.display  = 'none';
+        if (holdOffBtn)  holdOffBtn.style.display = 'none';
+        if (markPaidBtn) markPaidBtn.style.display= 'none';
 
-          const det   = mc.timesheetDetails || {};
-          const ts    = det.timesheet || {};
-          const tsfin = det.tsfin || {};
-          const sheetScope = (det.sheet_scope || mc.data?.sheet_scope || ts.sheet_scope || '').toUpperCase();
-          const subMode    = (ts.submission_mode || mc.data?.submission_mode || '').toUpperCase();
-
-          // contract-week context for weekly manual delete+reopen
-          const cwId            = det.contract_week_id || mc.data?.contract_week_id || null;
-          const hasContractWeek = !!cwId;
-
-          const isAuthorised     = !!ts.authorised_at_server;
-          const locked           = !!(tsfin.locked_by_invoice_id || tsfin.paid_at_utc);
-          const weeklyElectronic = (sheetScope === 'WEEKLY' && subMode === 'ELECTRONIC');
-          const alreadyPaid      = !!tsfin.paid_at_utc;
-
-          // NEW: simple front-end gating; backend still enforces final rules
-          const canRevertElectronic =
-            !!tsId && !locked && subMode === 'MANUAL';
-
-          const canDeleteManualReopen =
-            !!tsId && !locked && sheetScope === 'WEEKLY' && subMode === 'MANUAL' && hasContractWeek;
-
-          const canDeletePermanent =
-            !!tsId && !locked;
-
-
-          if (LOGM) {
-            LT('overview wiring snapshot', {
-              tsId,
-              mode,
-              sheetScope,
-              subMode,
-              isAuthorised,
-              locked,
-              weeklyElectronic,
-              hasAuthorise: !!authoriseBtn,
-              hasUnauthorise: !!unauthoriseBtn,
-              hasSwitchManual: !!switchManualBtn,
-              hasRefInput: !!refInput,
-              hasPayHoldInput: !!payHoldInput,
-              hasMarkPaidInput: !!markPaidInput
+        // ── Authorise / Unauthorise ──
+        if (authoriseBtn) {
+          authoriseBtn.style.display = (!isAuthorised && !locked && mode === 'view' && hasTs) ? '' : 'none';
+          if (!authoriseBtn.__tsWired) {
+            authoriseBtn.__tsWired = true;
+            authoriseBtn.addEventListener('click', async () => {
+              try {
+                await authoriseTimesheet(tsId);
+                window.__toast && window.__toast('Timesheet authorised');
+              } catch (err) {
+                if (LOGM) console.warn('[TS][OVERVIEW] authoriseTimesheet failed', err);
+                alert(err?.message || 'Failed to authorise timesheet.');
+              }
             });
           }
+        }
 
-          const viewEls = root.querySelectorAll('[data-view-only="true"]');
-          const editEls = root.querySelectorAll('[data-edit-only="true"]');
-          if (mode === 'edit' || mode === 'create') {
-            viewEls.forEach(el => { el.style.display = 'none'; });
-            editEls.forEach(el => { el.style.display = ''; });
-          } else {
-            viewEls.forEach(el => { el.style.display = ''; });
-            editEls.forEach(el => { el.style.display = 'none'; });
+        if (unauthoriseBtn) {
+          unauthoriseBtn.style.display = (isAuthorised && !locked && mode === 'view' && hasTs) ? '' : 'none';
+          if (!unauthoriseBtn.__tsWired) {
+            unauthoriseBtn.__tsWired = true;
+            unauthoriseBtn.addEventListener('click', async () => {
+              const ok = window.confirm('Unauthorise this timesheet? It will return to a pending state.');
+              if (!ok) return;
+              try {
+                await unauthoriseTimesheet(tsId);
+                window.__toast && window.__toast('Timesheet unauthorised');
+              } catch (err) {
+                if (LOGM) console.warn('[TS][OVERVIEW] unauthoriseTimesheet failed', err);
+                alert(err?.message || 'Failed to unauthorise timesheet.');
+              }
+            });
           }
+        }
 
-          // Hide legacy buttons
-          if (holdOnBtn)   holdOnBtn.style.display  = 'none';
-          if (holdOffBtn)  holdOffBtn.style.display = 'none';
-          if (markPaidBtn) markPaidBtn.style.display= 'none';
+        // ── Convert to manual (two paths) ──
+        if (switchManualBtn) {
+          // Show the button for:
+          // - existing weekly electronic TS, OR
+          // - planned weekly electronic week (no TS yet, but has contract_week_id)
+          const showSwitch =
+            mode === 'view' &&
+            !locked &&
+            isWeekly &&
+            subMode === 'ELECTRONIC' &&
+            (!!tsId || !!weekId);
 
-          // Authorise / Unauthorise gating
-          if (authoriseBtn) {
-            authoriseBtn.style.display = (!isAuthorised && !locked && mode === 'view') ? '' : 'none';
-            if (!authoriseBtn.__tsWired) {
-              authoriseBtn.__tsWired = true;
-              authoriseBtn.addEventListener('click', async () => {
-                try {
-                  await authoriseTimesheet(tsId);
-                  window.__toast && window.__toast('Timesheet authorised');
-                } catch (err) {
-                  if (LOGM) console.warn('[TS][OVERVIEW] authoriseTimesheet failed', err);
-                  alert(err?.message || 'Failed to authorise timesheet.');
-                }
-              });
-            }
-          }
+          switchManualBtn.style.display = showSwitch ? '' : 'none';
 
-          if (unauthoriseBtn) {
-            unauthoriseBtn.style.display = (isAuthorised && !locked && mode === 'view') ? '' : 'none';
-            if (!unauthoriseBtn.__tsWired) {
-              unauthoriseBtn.__tsWired = true;
-              unauthoriseBtn.addEventListener('click', async () => {
-                const ok = window.confirm('Unauthorise this timesheet? It will return to a pending state.');
-                if (!ok) return;
-                try {
-                  await unauthoriseTimesheet(tsId);
-                  window.__toast && window.__toast('Timesheet unauthorised');
-                } catch (err) {
-                  if (LOGM) console.warn('[TS][OVERVIEW] unauthoriseTimesheet failed', err);
-                  alert(err?.message || 'Failed to unauthorise timesheet.');
-                }
-              });
-            }
-          }
+          if (!switchManualBtn.__tsWired) {
+            switchManualBtn.__tsWired = true;
+            switchManualBtn.addEventListener('click', async () => {
+              const ok = window.confirm(
+                'Convert this weekly electronic timesheet to MANUAL?\n\n' +
+                'For existing timesheets, the signed electronic version is preserved as a separate version.\n' +
+                'For planned/open weeks, the week will be marked as MANUAL so you can enter manual hours.'
+              );
+              if (!ok) return;
 
-               if (switchManualBtn) {
-            // Only in VIEW mode, weekly electronic, not locked
-            switchManualBtn.style.display =
-              (mode === 'view' && weeklyElectronic && !locked && !!tsId) ? '' : 'none';
+              try {
+                const mc2    = window.modalCtx || {};
+                const tsId2  = mc2.data?.timesheet_id || null;
+                const weekId2= mc2.data?.contract_week_id || null;
+                const det2   = mc2.timesheetDetails || {};
+                const ts2    = det2.timesheet || {};
+                const sheetScope2 = (det2.sheet_scope || mc2.data?.sheet_scope || ts2.sheet_scope || '').toUpperCase();
+                const subMode2    = (ts2.submission_mode || mc2.data?.submission_mode || '').toUpperCase();
 
-            if (!switchManualBtn.__tsWired) {
-              switchManualBtn.__tsWired = true;
-              switchManualBtn.addEventListener('click', async () => {
-                const ok = window.confirm(
-                  'Convert this weekly electronic timesheet to MANUAL?\n\n' +
-                  'The signed electronic version will be preserved as a separate version,\n' +
-                  'but this manual override will become the current record.'
-                );
-                if (!ok) return;
+                const hasTs2           = !!tsId2;
+                const weeklyElectronicWithTs2 =
+                  sheetScope2 === 'WEEKLY' && subMode2 === 'ELECTRONIC' && hasTs2;
+                const weeklyElectronicPlanned2 =
+                  sheetScope2 === 'WEEKLY' && subMode2 === 'ELECTRONIC' && !hasTs2 && !!weekId2;
 
-                try {
-                  await switchTimesheetToManual(tsId);
-
-                  // Update local modal context to reflect MANUAL submission_mode
+                if (weeklyElectronicWithTs2 && tsId2) {
+                  // Existing electronic timesheet → /api/timesheets/:id/switch-to-manual
+                  await switchTimesheetToManual(tsId2);
                   try {
-                    const mc2 = window.modalCtx || {};
-                    if (mc2.data) {
-                      mc2.data.submission_mode = 'MANUAL';
-                    }
+                    mc2.data.submission_mode = 'MANUAL';
                     if (mc2.timesheetDetails && mc2.timesheetDetails.timesheet) {
                       mc2.timesheetDetails.timesheet.submission_mode = 'MANUAL';
                     }
-                  } catch (e) {
-                    if (LOGM) LT('switchManual: local modalCtx update failed (non-fatal)', e);
-                  }
-
-                  window.__toast && window.__toast(
-                    'Weekly timesheet switched to manual. Click Edit to adjust hours.'
-                  );
-
-                  // Repaint the Overview tab in VIEW mode so pills + actions update
+                  } catch {}
+                } else if (weeklyElectronicPlanned2 && weekId2) {
+                  // Planned/open weekly slot → /api/contract-weeks/:id/switch-mode
+                  await switchContractWeekToManual(weekId2);
                   try {
-                    if (typeof window.__getModalFrame === 'function') {
-                      const fr = window.__getModalFrame();
-                      if (fr && fr.entity === 'timesheets') {
-                        fr.mode = 'view';                 // stay in view; Edit button remains available
-                        fr._suppressDirty = true;
-                        fr.setTab('overview');            // re-render Overview with MANUAL state
-                        fr._suppressDirty = false;
-                        fr._updateButtons && fr._updateButtons();
-                      }
+                    mc2.data.submission_mode_snapshot = 'MANUAL';
+                    if (mc2.timesheetDetails && mc2.timesheetDetails.contract_week) {
+                      mc2.timesheetDetails.contract_week.submission_mode_snapshot = 'MANUAL';
                     }
-                  } catch (e) {
-                    if (LOGM) LT('switchManual: repaint after convert failed (non-fatal)', e);
+                  } catch {}
+                } else {
+                  throw new Error('This week is not an electronic weekly slot; cannot convert to manual.');
+                }
+
+                window.__toast && window.__toast(
+                  'Weekly week is now in MANUAL mode. Click Edit to enter manual hours.'
+                );
+
+                // Repaint Overview in VIEW mode so that pills & actions update;
+                // Edit button remains available to go into manual edit.
+                try {
+                  if (typeof window.__getModalFrame === 'function') {
+                    const fr = window.__getModalFrame();
+                    if (fr && fr.entity === 'timesheets') {
+                      fr.mode = 'view';
+                      fr._suppressDirty = true;
+                      fr.setTab('overview');
+                      fr._suppressDirty = false;
+                      fr._updateButtons && fr._updateButtons();
+                    }
                   }
-                } catch (err) {
-                  if (LOGM) console.warn('[TS][OVERVIEW] switchTimesheetToManual failed', err);
-                  alert(err?.message || 'Failed to switch timesheet to manual.');
+                } catch (e) {
+                  if (LOGM) LT('switchManual: repaint after convert failed (non-fatal)', e);
                 }
-              });
-            }
-          }
-
-
-          // NEW: Revert to original electronic (versioned) — VIEW mode only
-          if (revertElecBtn) {
-            revertElecBtn.style.display =
-              (mode === 'view' && canRevertElectronic) ? '' : 'none';
-
-            if (!revertElecBtn.__tsWired) {
-              revertElecBtn.__tsWired = true;
-              revertElecBtn.addEventListener('click', async () => {
-                const ok = window.confirm(
-                  'Restore the original signed electronic version of this timesheet?\n\n' +
-                  'Any manual overrides will be kept in history but no longer current.'
-                );
-                if (!ok) return;
-                try {
-                  await revertTimesheetToElectronic(tsId);   // expects you to provide this helper
-                  window.__toast && window.__toast('Original electronic timesheet restored.');
-                  try { byId('btnCloseModal').click(); } catch {}
-                  try { await renderAll(); } catch {}
-                } catch (err) {
-                  if (LOGM) console.warn('[TS][OVERVIEW] revertTimesheetToElectronic failed', err);
-                  alert(err?.message || 'Failed to restore electronic timesheet.');
-                }
-              });
-            }
-          }
-
-          // NEW: Delete manual TS & reopen week for electronic submission — VIEW mode only
-          if (deleteReopenBtn) {
-            deleteReopenBtn.style.display =
-              (mode === 'view' && canDeleteManualReopen) ? '' : 'none';
-
-            if (!deleteReopenBtn.__tsWired) {
-              deleteReopenBtn.__tsWired = true;
-              deleteReopenBtn.addEventListener('click', async () => {
-                const ok = window.confirm(
-                  'Delete this manual weekly timesheet and reopen the week for electronic submission?\n\n' +
-                  'The manual version and its financials will be removed. The week will appear as OPEN/PLANNED again.'
-                );
-                if (!ok) return;
-                try {
-                  await deleteManualTimesheetAndReopenWeek(tsId, cwId); // helper calling /api/contract-weeks/:id/timesheet DELETE
-                  window.__toast && window.__toast('Manual timesheet deleted and week reopened for electronic submission.');
-                  try { byId('btnCloseModal').click(); } catch {}
-                  try { await renderAll(); } catch {}
-                } catch (err) {
-                  if (LOGM) console.warn('[TS][OVERVIEW] deleteManualTimesheetAndReopenWeek failed', err);
-                  alert(err?.message || 'Failed to delete manual timesheet and reopen week.');
-                }
-              });
-            }
-          }
-
-          // NEW: Delete permanently — allowed for any unlocked TS (manual or electronic), VIEW mode only
-          if (deletePermBtn) {
-            deletePermBtn.style.display =
-              (mode === 'view' && canDeletePermanent) ? '' : 'none';
-
-            if (!deletePermBtn.__tsWired) {
-              deletePermBtn.__tsWired = true;
-              deletePermBtn.addEventListener('click', async () => {
-                const ok = window.confirm(
-                  'Permanently delete this timesheet?\n\n' +
-                  'This will remove all versions and financial snapshots for this timesheet_id.\n' +
-                  'This action cannot be undone.'
-                );
-                if (!ok) return;
-                try {
-                  await deleteTimesheetPermanent(tsId); // helper calling DELETE /api/timesheets/:id
-                  // Hard confirmation modal-style alert, then close + refresh
-                  alert('Timesheet record deleted.');
-                  try { byId('btnCloseModal').click(); } catch {}
-                  try { await renderAll(); } catch {}
-                } catch (err) {
-                  if (LOGM) console.warn('[TS][OVERVIEW] deleteTimesheetPermanent failed', err);
-                  alert(err?.message || 'Failed to delete timesheet.');
-                }
-              });
-            }
-          }
-
-       // Pay-hold + mark-paid staging in edit/create
-if (mode === 'edit' || mode === 'create') {
-  if (!mc.timesheetState || typeof mc.timesheetState !== 'object') {
-    mc.timesheetState = {
-      reference: '',
-      payHoldDesired: null,
-      payHoldReason: '',
-      markPaid: false,
-      segmentOverrides: {},
-      segmentInvoiceTargets: {},
-      manualHours: {},
-      additionalRates: (mc.timesheetState && mc.timesheetState.additionalRates) || {},
-      // NEW: preserve schedule if it already exists
-      schedule: (mc.timesheetState && mc.timesheetState.schedule) || null
-    };
-  }
-  const state = mc.timesheetState;
-
-            if (payHoldInput && !payHoldInput.__tsWired) {
-              payHoldInput.__tsWired = true;
-              const currentOnHold = !!(tsfin && tsfin.pay_on_hold);
-              if (state.payHoldDesired == null) {
-                payHoldInput.checked = currentOnHold;
-                state.payHoldDesired = currentOnHold;
-              } else {
-                payHoldInput.checked = !!state.payHoldDesired;
+              } catch (err) {
+                if (LOGM) console.warn('[TS][OVERVIEW] switch to manual failed', err);
+                alert(err?.message || 'Failed to switch to manual.');
               }
-
-              payHoldInput.addEventListener('change', () => {
-                state.payHoldDesired = !!payHoldInput.checked;
-                if (payHoldReasonInput) {
-                  state.payHoldReason = String(payHoldReasonInput.value || '');
-                }
-                if (LOGM) {
-                  LT('pay hold staged', {
-                    tsId,
-                    payHoldDesired: state.payHoldDesired,
-                    payHoldReason: state.payHoldReason
-                  });
-                }
-                try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
-              });
-            }
-
-            if (payHoldReasonInput && !payHoldReasonInput.__tsWired) {
-              payHoldReasonInput.__tsWired = true;
-              payHoldReasonInput.addEventListener('input', () => {
-                if (!mc.timesheetState || typeof mc.timesheetState !== 'object') return;
-                mc.timesheetState.payHoldReason = String(payHoldReasonInput.value || '');
-                if (LOGM) {
-                  LT('pay hold reason staged', {
-                    tsId,
-                    payHoldReason: mc.timesheetState.payHoldReason
-                  });
-                }
-                try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
-              });
-            }
-
-            if (markPaidInput && !markPaidInput.__tsWired) {
-              markPaidInput.__tsWired = true;
-              if (alreadyPaid) {
-                markPaidInput.checked = true;
-                markPaidInput.disabled = true;
-              } else {
-                markPaidInput.checked = !!state.markPaid;
-              }
-              markPaidInput.addEventListener('change', () => {
-                const alreadyPaidLocal = !!(mc.timesheetDetails && mc.timesheetDetails.tsfin && mc.timesheetDetails.tsfin.paid_at_utc);
-                if (alreadyPaidLocal) {
-                  markPaidInput.checked = true;
-                  markPaidInput.disabled = true;
-                  return;
-                }
-                state.markPaid = !!markPaidInput.checked;
-                if (LOGM) {
-                  LT('mark paid staged', {
-                    tsId,
-                    markPaid: state.markPaid
-                  });
-                }
-                try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
-              });
-            }
-          } else {
-            if (payHoldInput)       payHoldInput.disabled       = true;
-            if (payHoldReasonInput) payHoldReasonInput.disabled = true;
-            if (markPaidInput)      markPaidInput.disabled      = true;
+            });
           }
+        }
 
-          if (refInput && !refInput.__tsRefWired) {
-            refInput.__tsRefWired = true;
-            refInput.addEventListener('input', () => {
-              const mc2 = window.modalCtx || {};
-              if (!mc2.timesheetState || typeof mc2.timesheetState !== 'object') {
-                mc2.timesheetState = {
-                  reference: '',
-                  payHoldDesired: null,
-                  payHoldReason: '',
-                  markPaid: false,
-                  segmentOverrides: {},
-                  segmentInvoiceTargets: {},
-                  manualHours: {},
-                  additionalRates: {}
-                };
+        // ── Revert to original electronic (versioned) — VIEW mode only ──
+        if (revertElecBtn) {
+          revertElecBtn.style.display =
+            (mode === 'view' && canRevertElectronic) ? '' : 'none';
+
+          if (!revertElecBtn.__tsWired) {
+            revertElecBtn.__tsWired = true;
+            revertElecBtn.addEventListener('click', async () => {
+              const ok = window.confirm(
+                'Restore the original signed electronic version of this timesheet?\n\n' +
+                'Any manual overrides will be kept in history but no longer current.'
+              );
+              if (!ok) return;
+              try {
+                await revertTimesheetToElectronic(tsId);
+                window.__toast && window.__toast('Original electronic timesheet restored.');
+                try { byId('btnCloseModal').click(); } catch {}
+                try { await renderAll(); } catch {}
+              } catch (err) {
+                if (LOGM) console.warn('[TS][OVERVIEW] revertTimesheetToElectronic failed', err);
+                alert(err?.message || 'Failed to restore electronic timesheet.');
               }
-              mc2.timesheetState.reference = String(refInput.value || '');
+            });
+          }
+        }
+
+        // ── Delete manual TS & reopen week for e-submission — VIEW mode only ──
+        if (deleteReopenBtn) {
+          deleteReopenBtn.style.display =
+            (mode === 'view' && canDeleteManualReopen) ? '' : 'none';
+
+          if (!deleteReopenBtn.__tsWired) {
+            deleteReopenBtn.__tsWired = true;
+            deleteReopenBtn.addEventListener('click', async () => {
+              const ok = window.confirm(
+                'Delete this manual weekly timesheet and reopen the week for electronic submission?\n\n' +
+                'The manual version and its financials will be removed. The week will appear as OPEN/PLANNED again.'
+              );
+              if (!ok) return;
+              try {
+                await deleteManualTimesheetAndReopenWeek(tsId, cwId);
+                window.__toast && window.__toast('Manual timesheet deleted and week reopened for electronic submission.');
+                try { byId('btnCloseModal').click(); } catch {}
+                try { await renderAll(); } catch {}
+              } catch (err) {
+                if (LOGM) console.warn('[TS][OVERVIEW] deleteManualTimesheetAndReopenWeek failed', err);
+                alert(err?.message || 'Failed to delete manual timesheet and reopen week.');
+              }
+            });
+          }
+        }
+
+        // ── Delete permanently — any unlocked TS, VIEW mode only ──
+        if (deletePermBtn) {
+          deletePermBtn.style.display =
+            (mode === 'view' && canDeletePermanent) ? '' : 'none';
+
+          if (!deletePermBtn.__tsWired) {
+            deletePermBtn.__tsWired = true;
+            deletePermBtn.addEventListener('click', async () => {
+              const ok = window.confirm(
+                'Permanently delete this timesheet?\n\n' +
+                'This will remove all versions and financial snapshots for this timesheet_id.\n' +
+                'This action cannot be undone.'
+              );
+              if (!ok) return;
+              try {
+                await deleteTimesheetPermanent(tsId);
+                alert('Timesheet record deleted.');
+                try { byId('btnCloseModal').click(); } catch {}
+                try { await renderAll(); } catch {}
+              } catch (err) {
+                if (LOGM) console.warn('[TS][OVERVIEW] deleteTimesheetPermanent failed', err);
+                alert(err?.message || 'Failed to delete timesheet.');
+              }
+            });
+          }
+        }
+
+        // ── Pay-hold + mark-paid staging in edit/create (unchanged) ──
+        if (mode === 'edit' || mode === 'create') {
+          if (!mc.timesheetState || typeof mc.timesheetState !== 'object') {
+            mc.timesheetState = {
+              reference: '',
+              payHoldDesired: null,
+              payHoldReason: '',
+              markPaid: false,
+              segmentOverrides: {},
+              segmentInvoiceTargets: {},
+              manualHours: {},
+              additionalRates: (mc.timesheetState && mc.timesheetState.additionalRates) || {},
+              schedule: (mc.timesheetState && mc.timesheetState.schedule) || null
+            };
+          }
+          const state = mc.timesheetState;
+
+          if (payHoldInput && !payHoldInput.__tsWired) {
+            payHoldInput.__tsWired = true;
+            const currentOnHold = !!(tsfin && tsfin.pay_on_hold);
+            if (state.payHoldDesired == null) {
+              payHoldInput.checked = currentOnHold;
+              state.payHoldDesired = currentOnHold;
+            } else {
+              payHoldInput.checked = !!state.payHoldDesired;
+            }
+
+            payHoldInput.addEventListener('change', () => {
+              state.payHoldDesired = !!payHoldInput.checked;
+              if (payHoldReasonInput) {
+                state.payHoldReason = String(payHoldReasonInput.value || '');
+              }
               if (LOGM) {
-                LT('reference staged', {
+                LT('pay hold staged', {
                   tsId,
-                  reference: mc2.timesheetState.reference
+                  payHoldDesired: state.payHoldDesired,
+                  payHoldReason: state.payHoldReason
                 });
               }
               try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
             });
           }
+
+          if (payHoldReasonInput && !payHoldReasonInput.__tsWired) {
+            payHoldReasonInput.__tsWired = true;
+            payHoldReasonInput.addEventListener('input', () => {
+              if (!mc.timesheetState || typeof mc.timesheetState !== 'object') return;
+              mc.timesheetState.payHoldReason = String(payHoldReasonInput.value || '');
+              if (LOGM) {
+                LT('pay hold reason staged', {
+                  tsId,
+                  payHoldReason: mc.timesheetState.payHoldReason
+                });
+              }
+              try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
+            });
+          }
+
+          if (markPaidInput && !markPaidInput.__tsWired) {
+            markPaidInput.__tsWired = true;
+            if (alreadyPaid) {
+              markPaidInput.checked = true;
+              markPaidInput.disabled = true;
+            } else {
+              markPaidInput.checked = !!state.markPaid;
+            }
+            markPaidInput.addEventListener('change', () => {
+              const alreadyPaidLocal = !!(mc.timesheetDetails && mc.timesheetDetails.tsfin && mc.timesheetDetails.tsfin.paid_at_utc);
+              if (alreadyPaidLocal) {
+                markPaidInput.checked = true;
+                markPaidInput.disabled = true;
+                return;
+              }
+              state.markPaid = !!markPaidInput.checked;
+              if (LOGM) {
+                LT('mark paid staged', {
+                  tsId,
+                  markPaid: state.markPaid
+                });
+              }
+              try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
+            });
+          }
+        } else {
+          if (payHoldInput)       payHoldInput.disabled       = true;
+          if (payHoldReasonInput) payHoldReasonInput.disabled = true;
+          if (markPaidInput)      markPaidInput.disabled      = true;
         }
-      } catch (err) {
-        if ((typeof window.__LOG_MODAL === 'boolean') ? window.__LOG_MODAL : false) {
-          console.warn('[TS][OVERVIEW][WIRE] failed', err);
+
+        if (refInput && !refInput.__tsRefWired) {
+          refInput.__tsRefWired = true;
+          refInput.addEventListener('input', () => {
+            const mc2 = window.modalCtx || {};
+            if (!mc2.timesheetState || typeof mc2.timesheetState !== 'object') {
+              mc2.timesheetState = {
+                reference: '',
+                payHoldDesired: null,
+                payHoldReason: '',
+                markPaid: false,
+                segmentOverrides: {},
+                segmentInvoiceTargets: {},
+                manualHours: {},
+                additionalRates: {}
+              };
+            }
+            mc2.timesheetState.reference = String(refInput.value || '');
+            if (LOGM) {
+              LT('reference staged', {
+                tsId,
+                reference: mc2.timesheetState.reference
+              });
+            }
+            try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
+          });
         }
+      }
+    } catch (err) {
+      if ((typeof window.__LOG_MODAL === 'boolean') ? window.__LOG_MODAL : false) {
+        console.warn('[TS][OVERVIEW][WIRE] failed', err);
       }
     }
   }
+}
+
 
  // ───────────────────── Timesheets: Lines tab wiring ─────────────────────
 if (this.entity === 'timesheets' && k === 'lines') {
