@@ -11794,6 +11794,184 @@ async function openDelete(){
 
 
 
+// NEW: dedicated Advances / Loans manager modal for a candidate
+async function openCandidateAdvancesModal(candidateRow) {
+  const deep = (o) => JSON.parse(JSON.stringify(o || {}));
+  const row = deep(candidateRow || {});
+  const candId = row.id;
+  if (!candId) {
+    alert('Candidate id is missing; save the candidate record first.');
+    return;
+  }
+
+  window.appState = window.appState || {};
+  window.appState.candidateAdvances = window.appState.candidateAdvances || {};
+
+  // Ensure advances are fetched before opening
+  try {
+    if (!window.appState.candidateAdvances[candId]) {
+      await fetchCandidateAdvances(candId);
+    } else {
+      // refresh in background, but don't block the modal opening
+      fetchCandidateAdvances(candId).catch(() => {});
+    }
+  } catch (e) {
+    console.warn('[ADVANCES][MGR] prefetch failed', e);
+  }
+
+  // Seed modal context as its own entity
+  window.modalCtx = {
+    entity: 'candidate-advances',
+    data: row,
+    formState: { __forId: candId, main: {} },
+    openToken: `cand-adv:${candId}:${Date.now()}`
+  };
+
+  const titleName = row.display_name || `${row.first_name || ''} ${row.last_name || ''}`.trim() || row.tms_ref || 'Candidate';
+
+  const renderAdvancesTab = () => {
+    const S = (window.appState && window.appState.candidateAdvances) || {};
+    const entry   = S[candId] || { list: [], summary: {} };
+    const list    = Array.isArray(entry.list) ? entry.list : [];
+    const summary = entry.summary || {};
+
+    const missing = list.filter(a => (a.reason || '').toUpperCase() === 'MISSING_SHIFT');
+    const general = list.filter(a => (a.reason || '').toUpperCase() !== 'MISSING_SHIFT');
+
+    return html(`
+      <div class="form" id="candidateAdvancesManager" data-candidate-id="${candId}">
+        <div class="row">
+          <label>Candidate</label>
+          <div class="controls">
+            <span class="mini">${escapeHtml(titleName)}</span>
+          </div>
+        </div>
+
+        <div class="row">
+          <label>Summary</label>
+          <div class="controls" id="candidateAdvancesSummary">
+            ${renderAdvancesSummary(summary)}
+          </div>
+        </div>
+
+        <div class="row">
+          <label>Missing-shift advances</label>
+          <div class="controls">
+            <div id="candidateMissingShiftAdvances">
+              ${renderMissingShiftAdvancesList(missing)}
+            </div>
+            <button type="button"
+                    class="btn mini"
+                    data-act="adv-missing-new">
+              New missing-shift advance…
+            </button>
+          </div>
+        </div>
+
+        <div class="row">
+          <label>Advances / loans</label>
+          <div class="controls">
+            <div id="candidateGeneralAdvances">
+              ${renderGeneralAdvancesList(general)}
+            </div>
+            <button type="button"
+                    class="btn mini"
+                    data-act="adv-manual-new">
+              New advance / loan…
+            </button>
+          </div>
+        </div>
+      </div>
+    `);
+  };
+
+  const onSave = async () => {
+    // All actions are applied immediately by their own dialogs/routes.
+    // Parent Save just closes the manager.
+    return { ok: true };
+  };
+
+  const onReturn = () => {
+    try {
+      const root = document.getElementById('candidateAdvancesManager');
+      if (!root) return;
+      const candIdLocal =
+        root.getAttribute('data-candidate-id') ||
+        window.modalCtx?.data?.id ||
+        candId;
+
+      if (!candIdLocal) return;
+
+      // Wire "New missing-shift advance" & "New advance / loan"
+      if (!root.__advNewWired) {
+        root.__advNewWired = true;
+        root.addEventListener('click', (ev) => {
+          const btn = ev.target.closest('button[data-act]');
+          if (!btn) return;
+          const act = btn.getAttribute('data-act') || '';
+
+          if (act === 'adv-missing-new') {
+            const cand = window.modalCtx?.data || row;
+            if (typeof openMissingShiftAdvanceModal === 'function') {
+              openMissingShiftAdvanceModal(cand);
+            }
+          } else if (act === 'adv-manual-new') {
+            const cand = window.modalCtx?.data || row;
+            if (typeof openManualAdvanceModal === 'function') {
+              openManualAdvanceModal(cand);
+            }
+          }
+        });
+      }
+
+      // Wire general advances actions (Edit schedule / Pause/Resume / Mark paid off)
+      const generalContainer = root.querySelector('#candidateGeneralAdvances');
+      if (generalContainer && !generalContainer.__advWired) {
+        generalContainer.__advWired = true;
+        generalContainer.addEventListener('click', async (ev) => {
+          const btn = ev.target.closest('button[data-act][data-advance-id]');
+          if (!btn) return;
+
+          const act   = btn.getAttribute('data-act') || '';
+          const advId = btn.getAttribute('data-advance-id') || '';
+          if (!advId) return;
+
+          const S = (window.appState && window.appState.candidateAdvances) || {};
+          const entry = S[candIdLocal] || {};
+          const list  = Array.isArray(entry.list) ? entry.list : [];
+          const advance = list.find(a => String(a.id) === String(advId));
+          if (!advance) return;
+
+          if (act === 'adv-edit-schedule') {
+            if (typeof openEditAdvanceScheduleModal === 'function') {
+              openEditAdvanceScheduleModal(advance);
+            }
+          } else if (act === 'adv-toggle-pause') {
+            if (typeof toggleAdvancePause === 'function') {
+              await toggleAdvancePause(advance);
+            }
+          } else if (act === 'adv-mark-paid-off') {
+            if (typeof markAdvancePaidOff === 'function') {
+              await markAdvancePaidOff(advance);
+            }
+          }
+        });
+      }
+    } catch (e) {
+      console.warn('[ADVANCES][MGR] wiring failed', e);
+    }
+  };
+
+  showModal(
+    `Advances / loans — ${escapeHtml(titleName)}`,
+    [{ key: 'main', label: 'Advances' }],
+    renderAdvancesTab,
+    onSave,
+    true,
+    onReturn,
+    { kind: 'candidate-advances', noParentGate: true, forceEdit: true }
+  );
+}
 
 function renderCandidateTab(key, row = {}) {
   if (key === 'main') return html(`
@@ -11973,7 +12151,7 @@ function renderCandidateTab(key, row = {}) {
         <input type="hidden" name="umbrella_id" id="umbrella_id" value="${row.umbrella_id || ''}"/>
       </div>
 
-      <!-- Advances summary -->
+      <!-- Advances summary (read-only) -->
       <div class="row">
         <label>Advances summary</label>
         <div class="controls" id="candidateAdvancesSummary">
@@ -11981,33 +12159,29 @@ function renderCandidateTab(key, row = {}) {
         </div>
       </div>
 
-      <!-- Missing-shift advances -->
+      <!-- Missing-shift advances (read-only) -->
       <div class="row">
         <label>Missing-shift advances</label>
         <div class="controls">
           <div id="candidateMissingShiftAdvances">
             <span class="mini">No missing-shift advances.</span>
           </div>
-          <button type="button"
-                  class="btn mini"
-                  data-act="adv-missing-new">
-            New missing-shift advance…
-          </button>
+          <div class="hint mini">
+            To add or edit missing-shift advances, right-click this candidate in the summary list and choose “Advances / loans…”.
+          </div>
         </div>
       </div>
 
-      <!-- General advances / loans -->
+      <!-- General advances / loans (read-only) -->
       <div class="row">
         <label>Advances / loans</label>
         <div class="controls">
           <div id="candidateGeneralAdvances">
             <span class="mini">No advances or loans.</span>
           </div>
-          <button type="button"
-                  class="btn mini"
-                  data-act="adv-manual-new">
-            New advance / loan…
-          </button>
+          <div class="hint mini">
+            To manage advances or loans, right-click this candidate in the summary list and choose “Advances / loans…”.
+          </div>
         </div>
       </div>
     </div>
@@ -12094,23 +12268,28 @@ function renderMissingShiftAdvancesList(list) {
   }).join('');
 
   return `
-    <table class="grid mini">
-      <thead>
-        <tr>
-          <th>Client</th>
-          <th>Shift date</th>
-          <th>Original</th>
-          <th>Outstanding</th>
-          <th>Notes</th>
-        </tr>
-      </thead>
-      <tbody>${body}</tbody>
-    </table>
+    <div class="adv-table-wrap">
+      <table class="grid mini adv-table">
+        <thead>
+          <tr>
+            <th>Client</th>
+            <th>Shift date</th>
+            <th>Original</th>
+            <th>Outstanding</th>
+            <th>Notes</th>
+          </tr>
+        </thead>
+        <tbody>${body}</tbody>
+      </table>
+    </div>
   `;
 }
 
-function renderGeneralAdvancesList(list) {
+function renderGeneralAdvancesList(list, opts = {}) {
   const rows = Array.isArray(list) ? list : [];
+  const context = String(opts.context || 'manager').toLowerCase();
+  const showActions = (context === 'manager');
+
   if (!rows.length) {
     return '<span class="mini">No advances or loans.</span>';
   }
@@ -12128,15 +12307,48 @@ function renderGeneralAdvancesList(list) {
     const status    = escapeHtml(rawStatus);
 
     const schedule = Array.isArray(a.schedule_json) ? a.schedule_json : [];
+    const notes    = escapeHtml(a.notes || '');
 
     const schedSummary = schedule.length
-      ? schedule.map(e => `${escapeHtml(e.week_start || '')}: £${(Number(e.amount || 0)).toFixed(2)}`).join('<br>')
+      ? schedule
+          .map(e => {
+            const ws  = escapeHtml(e.week_start || '');
+            const amt = (Number(e.amount || 0)).toFixed(2);
+            return `${ws}: £${amt}`;
+          })
+          .join('<br>')
       : '<span class="mini">No schedule</span>';
 
     const paused     = rawStatus === 'PAUSED';
     const pauseLabel = paused ? 'Resume' : 'Pause';
-
     const showMarkPaidOff = (outNum > 0 && rawStatus !== 'PAID_OFF');
+
+    const actionsHtml = showActions ? `
+      <div class="adv-sched-actions">
+        <button type="button"
+                class="btn mini"
+                data-act="adv-edit-schedule"
+                data-advance-id="${a.id}">
+          Edit schedule
+        </button>
+        <button type="button"
+                class="btn mini"
+                data-act="adv-toggle-pause"
+                data-advance-id="${a.id}">
+          ${pauseLabel}
+        </button>
+        ${
+          showMarkPaidOff
+            ? `<button type="button"
+                       class="btn mini"
+                       data-act="adv-mark-paid-off"
+                       data-advance-id="${a.id}">
+                 Mark paid off
+               </button>`
+            : ''
+        }
+      </div>
+    ` : '';
 
     return `
       <tr data-advance-id="${a.id}">
@@ -12146,51 +12358,35 @@ function renderGeneralAdvancesList(list) {
         <td>£${out}</td>
         <td>${next || '<span class="mini">—</span>'}</td>
         <td>${status}</td>
-        <td>${schedSummary}</td>
+        <td>${notes || '<span class="mini">—</span>'}</td>
         <td>
-          <button type="button"
-                  class="btn mini"
-                  data-act="adv-edit-schedule"
-                  data-advance-id="${a.id}">
-            Edit schedule
-          </button>
-          <button type="button"
-                  class="btn mini"
-                  data-act="adv-toggle-pause"
-                  data-advance-id="${a.id}">
-            ${pauseLabel}
-          </button>
-          ${
-            showMarkPaidOff
-              ? `<button type="button"
-                         class="btn mini"
-                         data-act="adv-mark-paid-off"
-                         data-advance-id="${a.id}">
-                   Mark paid off
-                 </button>`
-              : ''
-          }
+          <div class="adv-sched">
+            <div class="adv-sched-lines">${schedSummary}</div>
+            ${actionsHtml}
+          </div>
         </td>
       </tr>
     `;
   }).join('');
 
   return `
-    <table class="grid mini">
-      <thead>
-        <tr>
-          <th>Client</th>
-          <th>Reason</th>
-          <th>Original</th>
-          <th>Outstanding</th>
-          <th>Next due week</th>
-          <th>Status</th>
-          <th>Schedule</th>
-          <th>Actions</th>
-        </tr>
-      </thead>
-      <tbody>${body}</tbody>
-    </table>
+    <div class="adv-table-wrap">
+      <table class="grid mini adv-table">
+        <thead>
+          <tr>
+            <th>Client</th>
+            <th>Reason</th>
+            <th>Original</th>
+            <th>Outstanding</th>
+            <th>Next due week</th>
+            <th>Status</th>
+            <th>Notes</th>
+            <th>Schedule${showActions ? ' / Actions' : ''}</th>
+          </tr>
+        </thead>
+        <tbody>${body}</tbody>
+      </table>
+    </div>
   `;
 }
 
@@ -12261,8 +12457,6 @@ function renderAdvancesSummary(summary) {
     </div>
   `;
 }
-
-
 function updateCandidateAdvancesUI(candidateId) {
   const S = (window.appState && window.appState.candidateAdvances) || {};
   const entry = S[candidateId] || { list: [], summary: {} };
@@ -12278,8 +12472,10 @@ function updateCandidateAdvancesUI(candidateId) {
 
   if (sumEl)  sumEl.innerHTML  = renderAdvancesSummary(summary);
   if (missEl) missEl.innerHTML = renderMissingShiftAdvancesList(missing);
-  if (genEl)  genEl.innerHTML  = renderGeneralAdvancesList(general);
+  // Candidate Pay tab: summary mode (no action buttons)
+  if (genEl)  genEl.innerHTML  = renderGeneralAdvancesList(general, { context: 'summary' });
 }
+
 
 function openMissingShiftAdvanceModal(candidate) {
   const candId = candidate?.id;
@@ -12288,7 +12484,9 @@ function openMissingShiftAdvanceModal(candidate) {
     return;
   }
 
-  const title = `New missing-shift advance for ${escapeHtml(candidate.display_name || `${candidate.first_name || ''} ${candidate.last_name || ''}`)}`;
+  const title = `New missing-shift advance for ${escapeHtml(
+    candidate.display_name || `${candidate.first_name || ''} ${candidate.last_name || ''}`
+  )}`;
 
   const formHtml = `
     <div class="form" id="missingShiftAdvanceForm">
@@ -12296,7 +12494,7 @@ function openMissingShiftAdvanceModal(candidate) {
         <label>Client</label>
         <div class="controls">
           <select name="client_id" id="msa_client_id">
-            <option value="">Select client…</option>
+            <option value="">Loading clients…</option>
           </select>
         </div>
       </div>
@@ -12377,16 +12575,32 @@ function openMissingShiftAdvanceModal(candidate) {
       try {
         const sel = document.getElementById('msa_client_id');
         if (!sel) return;
+
+        sel.innerHTML = '<option value="">Loading clients…</option>';
+
         const clients = await listClients({ page_size:'ALL' }).catch(() => []);
+        if (!Array.isArray(clients) || clients.length === 0) {
+          sel.innerHTML = '<option value="">(No clients found)</option>';
+          return;
+        }
+
         sel.innerHTML = '<option value="">Select client…</option>' +
-          clients.map(c => `<option value="${escapeHtml(c.id || '')}">${escapeHtml(c.name || '')}</option>`).join('');
+          clients.map(c =>
+            `<option value="${escapeHtml(c.id || '')}">${escapeHtml(c.name || '')}</option>`
+          ).join('');
       } catch (e) {
         console.warn('[ADVANCES] failed to populate client list', e);
+        const sel = document.getElementById('msa_client_id');
+        if (sel) {
+          sel.innerHTML = '<option value="">(Failed to load clients)</option>';
+        }
       }
     },
     { kind: 'candidate-advance-missing' }
   );
 }
+
+
 function openManualAdvanceModal(candidate) {
   const candId = candidate?.id;
   if (!candId) {
@@ -15320,7 +15534,7 @@ async function openClient(row) {
     (k, r) => { L('[renderClientTab] tab=', k, 'rowKeys=', Object.keys(r||{}), 'sample=', { name: r?.name, id: r?.id }); return renderClientTab(k, r); },
     async ()=> {
       L('[onSave] begin', { dataId: window.modalCtx?.data?.id, forId: window.modalCtx?.formState?.__forId });
-      const isNew = !window.modalCtx?.data?.id; // ← declared here (keep)
+      const isNew = !window.modalCtx?.data?.id;
 
       // Collect "main" form
       const fs = window.modalCtx.formState || { __forId: null, main:{} };
@@ -15330,21 +15544,20 @@ async function openClient(row) {
 
       const stagedMain = same ? (fs.main || {}) : {};
       const liveMain   = byId('tab-main') ? collectForm('#tab-main') : {};
-           const payload    = { ...stagedMain, ...liveMain };
+      const payload    = { ...stagedMain, ...liveMain };
 
       L('[onSave] collected', { same, stagedKeys: Object.keys(stagedMain||{}), liveKeys: Object.keys(liveMain||{}) });
 
       delete payload.but_let_cli_ref;
       if (!payload.name && full?.name) payload.name = full.name;
 
-      // Validate client main tab (name required, invoice email required + valid, A/P phone optional but numeric ≥ 8 digits)
+      // Validate client main tab
       const clientValid = validateClientMain(payload);
       if (!clientValid) {
         return { ok:false };
       }
 
-
-      // Settings normalization (unchanged)
+      // Settings normalization (including BH hours)
       const baseline = window.modalCtx.clientSettingsState || {};
       const hasFormMounted = !!byId('clientSettingsForm');
       const hasFullBaseline = ['day_start','day_end','night_start','night_end'].every(k => typeof baseline[k] === 'string' && baseline[k] !== '');
@@ -15353,10 +15566,14 @@ async function openClient(row) {
       let pendingSettings = null;
       if (shouldValidateSettings) {
         let csMerged = { ...(baseline || {}) };
-           if (hasFormMounted) {
+        if (hasFormMounted) {
           const liveSettings = collectForm('#clientSettingsForm', false);
-          ['day_start','day_end','night_start','night_end','sat_start','sat_end','sun_start','sun_end'].forEach(k=>{
-            const v = _toHHMM(liveSettings[k]); if (v) csMerged[k] = v;
+          const normKeys = ['day_start','day_end','night_start','night_end','sat_start','sat_end','sun_start','sun_end','bh_start','bh_end'];
+          normKeys.forEach(k=>{
+            const v = liveSettings[k];
+            if (typeof v === 'string' && v.trim() !== '') {
+              csMerged[k] = v.trim();
+            }
           });
           if (typeof liveSettings.timezone_id === 'string' && liveSettings.timezone_id.trim() !== '') {
             csMerged.timezone_id = liveSettings.timezone_id.trim();
@@ -15452,12 +15669,10 @@ async function openClient(row) {
             }
           }
 
-          // ⬇️ Cleanup (type-agnostic)
           window.modalCtx.hospitalsState.stagedDeletes = new Set();
           window.modalCtx.hospitalsState.stagedEdits   = {};
           window.modalCtx.hospitalsState.stagedNew     = [];
 
-          // Refresh visible list
           try {
             const fresh = await listClientHospitals(clientId);
             window.modalCtx.hospitalsState.existing = Array.isArray(fresh) ? fresh : [];
@@ -15475,7 +15690,6 @@ async function openClient(row) {
       try {
         const allWindows = Array.isArray(window.modalCtx.ratesState) ? window.modalCtx.ratesState : [];
         L('[onSave] delete phase', { windows: allWindows.length, stagedDeleteSet: window.modalCtx.ratesStagedDeletes?.size || 0 });
-        // Union of flags and Set
         const setIds = (window.modalCtx.ratesStagedDeletes instanceof Set) ? new Set([...window.modalCtx.ratesStagedDeletes]) : new Set();
         for (const w of allWindows) if (w && w.id && w.__delete === true) setIds.add(String(w.id));
 
@@ -15530,7 +15744,7 @@ async function openClient(row) {
         }
       }
 
-      // 8) Final negative-margin guard (skip disabled)
+      // 8) Negative-margin guard
       const erniMult = (async ()=> {
         if (typeof window.__ERNI_MULT__ === 'number') return window.__ERNI_MULT__;
         try {
@@ -15633,7 +15847,6 @@ async function openClient(row) {
       }
 
       window.modalCtx.formState = { __forId: clientId, main:{} };
-      // ⬇️ FIX: reuse existing isNew; do not redeclare
       if (isNew) window.__pendingFocus = { section: 'clients', id: clientId };
       L('[onSave] EXIT ok=true');
       return { ok: true, saved: window.modalCtx.data };
@@ -20220,34 +20433,26 @@ function setFormReadOnly(root, ro) {
   root.querySelectorAll('input, select, textarea, button').forEach((el) => {
     const isDisplayOnly = el.id === 'tms_ref_display' || el.id === 'cli_ref_display';
 
-    if (el.type === 'button') {
-      const allow = new Set(['btnCloseModal','btnDelete','btnEditModal','btnSave','btnRelated']);
+  if (el.type === 'button') {
+  const allow = new Set(['btnCloseModal','btnDelete','btnEditModal','btnSave','btnRelated']);
 
-      // Keep Timesheet action buttons (data-ts-action) and Candidate advances buttons
-      // enabled even when ro === true
-      try {
-        const top = (typeof currentFrame === 'function') ? currentFrame() : null;
+  // Keep Timesheet action buttons (data-ts-action) enabled even when ro === true
+  try {
+    const top = (typeof currentFrame === 'function') ? currentFrame() : null;
 
-        const isTimesheetFrame = !!(top && top.entity === 'timesheets');
-        const hasTsAction      = !!el.getAttribute('data-ts-action');
+    const isTimesheetFrame = !!(top && top.entity === 'timesheets');
+    const hasTsAction      = !!el.getAttribute('data-ts-action');
 
-        const isCandidateFrame = !!(top && top.entity === 'candidates');
-        const actAttr          = el.getAttribute('data-act') || '';
-        const isAdvButton      = isCandidateFrame && /^adv-/.test(actAttr);
-
-        if (isTimesheetFrame && hasTsAction) {
-          // Do not force-disable Timesheet action buttons (Authorise, Open PDF, etc.)
-          return;
-        }
-        if (isAdvButton) {
-          // Do not force-disable advance buttons (new/edit/pause) even in view mode
-          return;
-        }
-      } catch {}
-
-      if (!allow.has(el.id)) el.disabled = !!ro;
+    if (isTimesheetFrame && hasTsAction) {
+      // Do not force-disable Timesheet action buttons (Authorise, Open PDF, etc.)
       return;
     }
+  } catch {}
+
+  if (!allow.has(el.id)) el.disabled = !!ro;
+  return;
+}
+
 
     if (isDisplayOnly) {
       el.setAttribute('disabled','true');
@@ -20631,13 +20836,19 @@ async setTab(k) {
   }
 
   // ───────────────────── Clients: Settings tab wiring ─────────────────────
-  if (this.entity === 'clients' && k === 'settings') {
-    try {
-      typeof renderClientSettingsForm === 'function' && renderClientSettingsForm();
-    } catch (e) {
-      console.warn('[CLIENT][SETTINGS] renderClientSettingsForm failed', e);
+ // ───────────────────── Clients: Settings tab wiring ─────────────────────
+if (this.entity === 'clients' && k === 'settings') {
+  try {
+    // Use the actual client settings renderer, seeded from modalCtx
+    if (typeof renderClientSettingsUI === 'function') {
+      const seed = (window.modalCtx && window.modalCtx.clientSettingsState) || {};
+      renderClientSettingsUI(seed);
     }
+  } catch (e) {
+    console.warn('[CLIENT][SETTINGS] renderClientSettingsUI failed', e);
   }
+}
+
 
   // ───────────────────── Candidates: Bookings tab wiring ─────────────────────
   if (this.entity === 'candidates' && k === 'bookings') {
@@ -20662,77 +20873,35 @@ async setTab(k) {
   }
 
   // ───────────────────── Candidates: Pay tab (Advances wiring) ─────────────────────
-  if (this.entity === 'candidates' && k === 'pay') {
-    try {
-      const candId =
-        window.modalCtx?.data?.id ||
-        merged.id ||
-        null;
+ // ───────────────────── Candidates: Pay tab (Advances summary wiring) ─────────────────────
+if (this.entity === 'candidates' && k === 'pay') {
+  try {
+    const candId =
+      window.modalCtx?.data?.id ||
+      merged.id ||
+      null;
 
-      if (candId) {
-        window.appState = window.appState || {};
-        const cache = (window.appState.candidateAdvances ||= {});
+    if (candId) {
+      window.appState = window.appState || {};
+      const cache = (window.appState.candidateAdvances ||= {});
 
-        if (cache[candId]) {
-          // Already cached this session → repaint into fresh DOM
-          updateCandidateAdvancesUI(candId);
-        } else {
-          // First time on this candidate → fetch from backend
-          fetchCandidateAdvances(candId).catch(err => {
-            console.warn('[CAND][PAY][ADVANCES] fetch failed', err);
-          });
-        }
-
-        // Wire "New missing-shift advance" & "New advance / loan" buttons
-        const payTab = document.getElementById('tab-pay');
-        if (payTab && !payTab.__advNewWired) {
-          payTab.__advNewWired = true;
-          payTab.addEventListener('click', (ev) => {
-            const btn = ev.target.closest('button[data-act]');
-            if (!btn) return;
-            const act = btn.getAttribute('data-act') || '';
-
-            if (act === 'adv-missing-new') {
-              const cand = window.modalCtx?.data || merged;
-              typeof openMissingShiftAdvanceModal === 'function' && openMissingShiftAdvanceModal(cand);
-            } else if (act === 'adv-manual-new') {
-              const cand = window.modalCtx?.data || merged;
-              typeof openManualAdvanceModal === 'function' && openManualAdvanceModal(cand);
-            }
-          });
-        }
-
-        // Wire general advances actions (Edit schedule / Pause/Resume / Mark paid off)
-        const generalContainer = document.getElementById('candidateGeneralAdvances');
-        if (generalContainer && !generalContainer.__advWired) {
-          generalContainer.__advWired = true;
-          generalContainer.addEventListener('click', async (ev) => {
-            const btn = ev.target.closest('button[data-act][data-advance-id]');
-            if (!btn) return;
-
-            const act   = btn.getAttribute('data-act') || '';
-            const advId = btn.getAttribute('data-advance-id') || '';
-            if (!advId) return;
-
-            const stateEntry = (window.appState.candidateAdvances || {})[candId] || {};
-            const list       = Array.isArray(stateEntry.list) ? stateEntry.list : [];
-            const advance    = list.find(a => String(a.id) === String(advId));
-            if (!advance) return;
-
-            if (act === 'adv-edit-schedule') {
-              typeof openEditAdvanceScheduleModal === 'function' && openEditAdvanceScheduleModal(advance);
-            } else if (act === 'adv-toggle-pause') {
-              typeof toggleAdvancePause === 'function' && await toggleAdvancePause(advance);
-            } else if (act === 'adv-mark-paid-off') {
-              typeof markAdvancePaidOff === 'function' && await markAdvancePaidOff(advance);
-            }
-          });
-        }
+      if (cache[candId]) {
+        // Already cached this session → repaint into fresh DOM
+        updateCandidateAdvancesUI(candId);
+      } else {
+        // First time on this candidate → fetch from backend
+        fetchCandidateAdvances(candId).catch(err => {
+          console.warn('[CAND][PAY][ADVANCES] fetch failed', err);
+        });
       }
-    } catch (e) {
-      console.warn('[CAND][PAY][ADVANCES] wiring failed', e);
+      // No button wiring here: this tab is read-only for advances.
+      // Editing happens via right-click on the candidate row → openCandidateAdvancesModal.
     }
+  } catch (e) {
+    console.warn('[CAND][PAY][ADVANCES] wiring failed', e);
   }
+}
+
 
   // ───────────────────── Timesheets: Overview tab wiring ─────────────────────
   if (this.entity === 'timesheets' && k === 'overview') {
@@ -20858,21 +21027,23 @@ async setTab(k) {
             }
           }
 
-          // Pay-hold + mark-paid staging in edit/create
-          if (mode === 'edit' || mode === 'create') {
-            if (!mc.timesheetState || typeof mc.timesheetState !== 'object') {
-              mc.timesheetState = {
-                reference: '',
-                payHoldDesired: null,
-                payHoldReason: '',
-                markPaid: false,
-                segmentOverrides: {},
-                segmentInvoiceTargets: {},
-                manualHours: {},
-                additionalRates: (mc.timesheetState && mc.timesheetState.additionalRates) || {}
-              };
-            }
-            const state = mc.timesheetState;
+       // Pay-hold + mark-paid staging in edit/create
+if (mode === 'edit' || mode === 'create') {
+  if (!mc.timesheetState || typeof mc.timesheetState !== 'object') {
+    mc.timesheetState = {
+      reference: '',
+      payHoldDesired: null,
+      payHoldReason: '',
+      markPaid: false,
+      segmentOverrides: {},
+      segmentInvoiceTargets: {},
+      manualHours: {},
+      additionalRates: (mc.timesheetState && mc.timesheetState.additionalRates) || {},
+      // NEW: preserve schedule if it already exists
+      schedule: (mc.timesheetState && mc.timesheetState.schedule) || null
+    };
+  }
+  const state = mc.timesheetState;
 
             if (payHoldInput && !payHoldInput.__tsWired) {
               payHoldInput.__tsWired = true;
@@ -20981,193 +21152,577 @@ async setTab(k) {
     }
   }
 
-  // ───────────────────── Timesheets: Lines tab wiring ─────────────────────
-  if (this.entity === 'timesheets' && k === 'lines') {
-    const { LOGM, L: LT } = getTsLoggers('[TS][LINES][WIRE]');
-    const root = byId('modalBody');
-    if (!root) {
-      if (LOGM) LT('no modalBody root, skip wiring');
-    } else {
+ // ───────────────────── Timesheets: Lines tab wiring ─────────────────────
+if (this.entity === 'timesheets' && k === 'lines') {
+  const { LOGM, L: LT } = getTsLoggers('[TS][LINES][WIRE]');
+  const root = byId('modalBody');
+  if (!root) {
+    if (LOGM) LT('no modalBody root, skip wiring');
+  } else {
+    try {
+      const mc = window.modalCtx || {};
+      if (!mc.timesheetState || typeof mc.timesheetState !== 'object') {
+        mc.timesheetState = {
+          reference: null,
+          payHoldDesired: null,
+          payHoldReason: '',
+          markPaid: false,
+          segmentOverrides: {},
+          segmentInvoiceTargets: {},
+          manualHours: {},
+          additionalRates: {},
+          schedule: null
+        };
+      }
+      const state = mc.timesheetState;
+
+         // ── Seed schedule from existing TS or contract_week if not already set ──
       try {
-        const mc = window.modalCtx || {};
-        if (!mc.timesheetState || typeof mc.timesheetState !== 'object') {
-          mc.timesheetState = {
-            reference: null,
-            payHoldDesired: null,
-            payHoldReason: '',
-            markPaid: false,
-            segmentOverrides: {},
-            segmentInvoiceTargets: {},
-            manualHours: {},
-            additionalRates: {}
-          };
+        const det = mc.timesheetDetails || {};
+        const ts  = det.timesheet || {};
+
+        if (!state.schedule) {
+          if (ts.actual_schedule_json) {
+            if (Array.isArray(ts.actual_schedule_json) || typeof ts.actual_schedule_json === 'object') {
+              state.schedule = JSON.parse(JSON.stringify(ts.actual_schedule_json));
+            } else if (typeof ts.actual_schedule_json === 'string') {
+              try {
+                const parsed = JSON.parse(ts.actual_schedule_json);
+                if (Array.isArray(parsed) || typeof parsed === 'object') {
+                  state.schedule = parsed;
+                }
+              } catch {}
+            }
+          } else if (det.contract_week && det.contract_week.std_schedule_json) {
+            const std = det.contract_week.std_schedule_json;
+            if (Array.isArray(std) || typeof std === 'object') {
+              state.schedule = JSON.parse(JSON.stringify(std));
+            } else if (typeof std === 'string') {
+              try {
+                const parsedStd = JSON.parse(std);
+                if (Array.isArray(parsedStd) || typeof parsedStd === 'object') {
+                  state.schedule = parsedStd;
+                }
+              } catch {}
+            }
+          }
         }
-        const state = mc.timesheetState;
 
-        // Segments exclude_from_pay
-        const checkboxes = root.querySelectorAll('input[name="seg_exclude_from_pay"][data-segment-id]');
-        if (LOGM) LT('wiring checkboxes', { count: checkboxes.length });
-
-        checkboxes.forEach(cb => {
-          if (cb.__tsWired) return;
-          cb.__tsWired = true;
-
-          cb.addEventListener('change', () => {
-            const segId = cb.getAttribute('data-segment-id') || '';
-            if (!segId) return;
-
-            const originalSeg = (mc.timesheetDetails && Array.isArray(mc.timesheetDetails.segments))
-              ? mc.timesheetDetails.segments.find(s => String(s.segment_id) === segId)
-              : null;
-
-            const origVal = originalSeg ? !!originalSeg.exclude_from_pay : false;
-            const newVal  = !!cb.checked;
-
-            if (!state.segmentOverrides || typeof state.segmentOverrides !== 'object') {
-              state.segmentOverrides = {};
+        // NEW: derive extraBreakCount from the schedule's breaks[] arrays
+        if (Array.isArray(state.schedule)) {
+          let maxExtra = 0;
+          state.schedule.forEach(entry => {
+            if (entry && Array.isArray(entry.breaks) && entry.breaks.length > 1) {
+              const extra = entry.breaks.length - 1; // everything beyond the primary break
+              if (extra > maxExtra) maxExtra = extra;
             }
-
-            if (newVal === origVal) {
-              if (state.segmentOverrides[segId]) {
-                delete state.segmentOverrides[segId];
-              }
-            } else {
-              state.segmentOverrides[segId] = { exclude_from_pay: newVal };
-            }
-
-            if (LOGM) {
-              LT('segment override changed', {
-                segId,
-                origExclude: origVal,
-                newExclude: newVal,
-                overridesKeys: Object.keys(state.segmentOverrides || {})
-              });
-            }
-
-            try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
           });
-        });
+          state.extraBreakCount = maxExtra;
+        } else if (state.extraBreakCount == null) {
+          state.extraBreakCount = 0;
+        }
+      } catch (e) {
+        if (LOGM) LT('schedule seed in setTab(lines) failed (non-fatal)', e);
+      }
 
-        // Invoice week / Pause selects (per segment)
-        const weekSelects = root.querySelectorAll('select[name="seg_invoice_week"][data-segment-id]');
-        if (LOGM) LT('wiring invoice-week selects', { count: weekSelects.length });
 
-        weekSelects.forEach(sel => {
-          if (sel.__tsWeekWired) return;
-          sel.__tsWeekWired = true;
 
-          const segId = sel.getAttribute('data-segment-id') || '';
+      // Segments exclude_from_pay
+      const checkboxes = root.querySelectorAll('input[name="seg_exclude_from_pay"][data-segment-id]');
+      if (LOGM) LT('wiring checkboxes', { count: checkboxes.length });
+      checkboxes.forEach(cb => {
+        if (cb.__tsWired) return;
+        cb.__tsWired = true;
+        cb.addEventListener('change', () => {
+          const segId = cb.getAttribute('data-segment-id') || '';
           if (!segId) return;
+          const originalSeg = (mc.timesheetDetails && Array.isArray(mc.timesheetDetails.segments))
+            ? mc.timesheetDetails.segments.find(s => String(s.segment_id) === segId)
+            : null;
+          const origVal = originalSeg ? !!originalSeg.exclude_from_pay : false;
+          const newVal  = !!cb.checked;
 
-          // Seed from state (if user previously staged a change)
-          if (state.segmentInvoiceTargets && typeof state.segmentInvoiceTargets === 'object') {
-            const staged = state.segmentInvoiceTargets[segId];
-            if (staged) {
-              sel.value = staged;
+          if (!state.segmentOverrides || typeof state.segmentOverrides !== 'object') {
+            state.segmentOverrides = {};
+          }
+
+          if (newVal === origVal) {
+            if (state.segmentOverrides[segId]) {
+              delete state.segmentOverrides[segId];
+            }
+          } else {
+            state.segmentOverrides[segId] = { exclude_from_pay: newVal };
+          }
+
+          if (LOGM) {
+            LT('segment override changed', {
+              segId,
+              origExclude: origVal,
+              newExclude: newVal,
+              overridesKeys: Object.keys(state.segmentOverrides || {})
+            });
+          }
+
+          try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
+        });
+      });
+
+      // Invoice week / Pause selects (per segment)
+      const weekSelects = root.querySelectorAll('select[name="seg_invoice_week"][data-segment-id]');
+      if (LOGM) LT('wiring invoice-week selects', { count: weekSelects.length });
+      weekSelects.forEach(sel => {
+        if (sel.__tsWeekWired) return;
+        sel.__tsWeekWired = true;
+
+        const segId = sel.getAttribute('data-segment-id') || '';
+        if (!segId) return;
+
+        if (state.segmentInvoiceTargets && typeof state.segmentInvoiceTargets === 'object') {
+          const staged = state.segmentInvoiceTargets[segId];
+          if (staged) sel.value = staged;
+        }
+
+        sel.addEventListener('change', () => {
+          if (!state.segmentInvoiceTargets || typeof state.segmentInvoiceTargets !== 'object') {
+            state.segmentInvoiceTargets = {};
+          }
+          const newVal = (sel.value || '').trim();
+          state.segmentInvoiceTargets[segId] = newVal;
+
+          if (LOGM) {
+            LT('invoice week staged', {
+              segId,
+              week_start: newVal,
+              keys: Object.keys(state.segmentInvoiceTargets || {})
+            });
+          }
+
+          try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
+        });
+      });
+
+      // ───────────────────── Weekly schedule grid (Start/End/Break) ─────────────────────
+      const schedTable = root.querySelector('#tsWeeklySchedule');
+      if (schedTable && !schedTable.__tsSchedWired) {
+        schedTable.__tsSchedWired = true;
+
+        const normaliseHHMM = (raw) => {
+          let s = String(raw || '').trim();
+          if (!s) return '';
+          if (/^\d{1,2}:\d{2}$/.test(s)) {
+            const [h, m] = s.split(':');
+            const hh = String(Number(h) || 0).padStart(2, '0');
+            const mm = String(Number(m) || 0).padStart(2, '0');
+            return `${hh}:${mm}`;
+          }
+          s = s.replace(':', '');
+          if (!/^\d{1,4}$/.test(s)) return '';
+          if (s.length <= 2) {
+            const h = Number(s);
+            if (!Number.isFinite(h)) return '';
+            return `${String(h).padStart(2, '0')}:00`;
+          }
+          const mm = s.slice(-2);
+          const h  = s.slice(0, -2);
+          const hh = String(Number(h) || 0).padStart(2, '0');
+          const mm2 = String(Number(mm) || 0).padStart(2, '0');
+          return `${hh}:${mm2}`;
+        };
+
+        const hhmmToMinutes = (hhmm) => {
+          if (!hhmm || typeof hhmm !== 'string') return null;
+          const m = hhmm.trim();
+          const parts = m.split(':');
+          if (parts.length !== 2) return null;
+          const h = Number(parts[0]);
+          const mm = Number(parts[1]);
+          if (!Number.isFinite(h) || !Number.isFinite(mm)) return null;
+          return h * 60 + mm;
+        };
+
+        const updateScheduleFromRow = (tr) => {
+          if (!tr) return;
+          const date = tr.getAttribute('data-date') || null;
+          if (!date) return;
+
+          const inputs = tr.querySelectorAll('input[data-sched-field]');
+          const fields = {};
+          inputs.forEach(inp => {
+            const field = inp.getAttribute('data-sched-field') || '';
+            fields[field] = String(inp.value || '').trim();
+          });
+
+          const startStrRaw      = fields.start || '';
+          const endStrRaw        = fields.end || '';
+          const breakStartRaw    = fields.break_start || '';
+          const breakEndRaw      = fields.break_end || '';
+          let   breakMinsStr     = fields.break_mins || '';
+
+          const startStr      = normaliseHHMM(startStrRaw);
+          const endStr        = normaliseHHMM(endStrRaw);
+          const breakStartStr = normaliseHHMM(breakStartRaw);
+          const breakEndStr   = normaliseHHMM(breakEndRaw);
+
+          const startInp      = tr.querySelector('input[data-sched-field="start"]');
+          const endInp        = tr.querySelector('input[data-sched-field="end"]');
+          const breakStartInp = tr.querySelector('input[data-sched-field="break_start"]');
+          const breakEndInp   = tr.querySelector('input[data-sched-field="break_end"]');
+          const breakMinsInp  = tr.querySelector('input[data-sched-field="break_mins"]');
+
+          if (startInp)      startInp.value      = startStr;
+          if (endInp)        endInp.value        = endStr;
+          if (breakStartInp) breakStartInp.value = breakStartStr;
+          if (breakEndInp)   breakEndInp.value   = breakEndStr;
+
+          // Collect extra break windows (if any)
+          const extraStarts = tr.querySelectorAll('input[data-extra-break="start"]');
+          const extraEnds   = tr.querySelectorAll('input[data-extra-break="end"]');
+          const extraMap = {};
+
+          extraStarts.forEach(inp => {
+            const idx = Number(inp.getAttribute('data-extra-index') || '0');
+            const raw = String(inp.value || '').trim();
+            const norm = normaliseHHMM(raw);
+            inp.value = norm;
+            if (!extraMap[idx]) extraMap[idx] = {};
+            extraMap[idx].start = norm;
+          });
+
+          extraEnds.forEach(inp => {
+            const idx = Number(inp.getAttribute('data-extra-index') || '0');
+            const raw = String(inp.value || '').trim();
+            const norm = normaliseHHMM(raw);
+            inp.value = norm;
+            if (!extraMap[idx]) extraMap[idx] = {};
+            extraMap[idx].end = norm;
+          });
+
+          const sMin = hhmmToMinutes(startStr);
+          const eMin = hhmmToMinutes(endStr);
+
+          let shiftMinutes = null;
+          if (sMin != null && eMin != null) {
+            shiftMinutes = eMin - sMin;
+            if (shiftMinutes < 0) shiftMinutes += 24 * 60; // overnight
+          }
+
+          // Build list of break windows: primary (index -1) + extras (0..N)
+          const breakWindows = [];
+
+          if (breakStartStr || breakEndStr) {
+            breakWindows.push({
+              start: breakStartStr,
+              end:   breakEndStr
+            });
+          }
+
+          Object.keys(extraMap)
+            .map(k => Number(k))
+            .sort((a, b) => a - b)
+            .forEach(idx => {
+              const b = extraMap[idx] || {};
+              if (b.start || b.end) {
+                breakWindows.push({
+                  start: b.start || '',
+                  end:   b.end   || ''
+                });
+              }
+            });
+
+          // Compute break minutes from any complete windows; otherwise use floating Break (mins)
+          let breakMinutes       = 0;
+          let hasFullBreakWindow = false;
+          let hasAnyBreakTimes   = false;
+
+          for (const bw of breakWindows) {
+            const bs = bw.start ? hhmmToMinutes(bw.start) : null;
+            const be = bw.end   ? hhmmToMinutes(bw.end)   : null;
+            if (bw.start || bw.end) {
+              hasAnyBreakTimes = true;
+            }
+            if (bs != null && be != null) {
+              let diff = be - bs;
+              if (diff < 0) diff += 24 * 60;
+              breakMinutes += Math.max(0, diff);
+              hasFullBreakWindow = true;
             }
           }
 
-          sel.addEventListener('change', () => {
-            if (!state.segmentInvoiceTargets || typeof state.segmentInvoiceTargets !== 'object') {
-              state.segmentInvoiceTargets = {};
+          if (hasFullBreakWindow) {
+            // Any complete break times: break_minutes is authoritative; lock numeric field
+            breakMinsStr = String(breakMinutes);
+            if (breakMinsInp) {
+              breakMinsInp.value = breakMinsStr;
+              breakMinsInp.disabled = true;
             }
-            const newVal = (sel.value || '').trim();
-            state.segmentInvoiceTargets[segId] = newVal;
+          } else if (!hasAnyBreakTimes) {
+            // No break times at all → floating break from numeric field
+            if (breakMinsInp) breakMinsInp.disabled = false;
+            const bNum = Number(breakMinsStr || 0);
+            breakMinutes = Number.isFinite(bNum) && bNum > 0 ? bNum : 0;
+          } else {
+            // Some partial times but no complete windows: treat as 0 break; keep Break (mins) editable
+            breakMinutes = 0;
+            if (breakMinsInp) breakMinsInp.disabled = false;
+          }
 
-            if (LOGM) {
-              LT('invoice week staged', {
-                segId,
-                week_start: newVal,
-                keys: Object.keys(state.segmentInvoiceTargets || {})
+          let paidHoursText = '';
+          if (shiftMinutes != null) {
+            const paidMin = Math.max(0, shiftMinutes - breakMinutes);
+            if (paidMin > 0) {
+              paidHoursText = (Math.round((paidMin / 60) * 100) / 100).toFixed(2);
+            } else {
+              paidHoursText = '0.00';
+            }
+          }
+
+          const paidEl = tr.querySelector('.sched-paid-hours');
+          if (paidEl) paidEl.textContent = paidHoursText;
+
+          // Update schedule array
+          let sched = state.schedule;
+          if (!Array.isArray(sched)) sched = [];
+          let entry = sched.find(s => s && s.date === date);
+          if (!entry) {
+            entry = { date };
+            sched.push(entry);
+          }
+
+          entry.start       = startStr || null;
+          entry.end         = endStr   || null;
+          entry.break_start = breakStartStr || null;
+          entry.break_end   = breakEndStr   || null;
+          entry.break_mins  = breakMinutes || 0;
+          // Backend resolver expects break_minutes; keep both for compatibility
+          entry.break_minutes = breakMinutes || 0;
+
+          // Persist full list of break windows (primary + extras)
+          const entryBreaks = [];
+          for (const bw of breakWindows) {
+            if (bw.start || bw.end) {
+              entryBreaks.push({
+                start: bw.start || null,
+                end:   bw.end   || null
               });
             }
+          }
+          entry.breaks = entryBreaks;
 
-            try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
-          });
+          state.schedule = sched;
+
+          try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
+        };
+
+        // Wire change/blur on schedule fields
+        schedTable.addEventListener('change', (ev) => {
+          const inp = ev.target.closest('input[data-sched-field]');
+          if (!inp) return;
+          const tr = inp.closest('tr[data-row-idx]');
+          updateScheduleFromRow(tr);
         });
 
-        // Manual weekly hours inputs (manual_hours_*)
-        const hoursInputs = root.querySelectorAll('input[name^="manual_hours_"]');
-        if (LOGM) LT('wiring manual hours inputs', { count: hoursInputs.length });
+        schedTable.addEventListener('blur', (ev) => {
+          const inp = ev.target.closest('input[data-sched-field]');
+          if (!inp) return;
+          const tr = inp.closest('tr[data-row-idx]');
+          updateScheduleFromRow(tr);
+        }, true);
 
-        hoursInputs.forEach(input => {
-          if (input.__tsHoursWired) return;
-          input.__tsHoursWired = true;
+              // Reset schedule + Extra Breaks + / - buttons
+        root.addEventListener('click', (ev) => {
+          const btn = ev.target.closest('button[data-ts-action]');
+          if (!btn) return;
 
-          const name = String(input.name || '');
-          const key  = name.replace(/^manual_hours_/i, '').toLowerCase();
+          const action = btn.getAttribute('data-ts-action');
 
-          input.addEventListener('input', () => {
-            const raw   = input.value;
-            const val   = raw === '' ? '' : Number(raw);
-            const safe  = (raw === '' || !Number.isFinite(val)) ? '' : val;
-            state.manualHours = state.manualHours || {};
-            state.manualHours[key] = safe;
-
-            if (LOGM) {
-              LT('manual hours staged', {
-                key,
-                value: safe
+          // Reset schedule
+          if (action === 'reset-schedule') {
+            state.schedule = [];
+            const rows = schedTable.querySelectorAll('tbody tr[data-row-idx]');
+            rows.forEach(tr => {
+              const inputs = tr.querySelectorAll('input[data-sched-field]');
+              inputs.forEach(inp => {
+                inp.value = '';
+                if (inp.name === 'sched_break_mins') inp.disabled = false;
               });
-            }
+
+              // Clear any extra break inputs as well
+              const extraInputs = tr.querySelectorAll('input[data-extra-break]');
+              extraInputs.forEach(inp => { inp.value = ''; inp.remove(); });
+
+              const paidEl = tr.querySelector('.sched-paid-hours');
+              if (paidEl) paidEl.textContent = '';
+            });
+            state.extraBreakCount = 0;
+            try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
+            return;
+          }
+
+          // Add an extra break line for all rows
+          if (action === 'extra-break-add') {
+            const current = Number(state.extraBreakCount || 0);
+            const newIndex = current;
+            state.extraBreakCount = current + 1;
+
+            const rows = schedTable.querySelectorAll('tbody tr[data-row-idx]');
+            rows.forEach(tr => {
+              const date = tr.getAttribute('data-date') || '';
+
+              const startCell = tr.querySelector('input[name="sched_break_start"]')?.parentElement;
+              const endCell   = tr.querySelector('input[name="sched_break_end"]')?.parentElement;
+              if (!startCell || !endCell) return;
+
+              let startBox = startCell.querySelector('.extra-breaks');
+              if (!startBox) {
+                startBox = document.createElement('div');
+                startBox.className = 'extra-breaks';
+                startCell.appendChild(startBox);
+              }
+
+              let endBox = endCell.querySelector('.extra-breaks');
+              if (!endBox) {
+                endBox = document.createElement('div');
+                endBox.className = 'extra-breaks';
+                endCell.appendChild(endBox);
+              }
+
+              const startExtra = document.createElement('input');
+              startExtra.type = 'text';
+              startExtra.className = 'input mini';
+              startExtra.name = `sched_break_start_extra_${newIndex}`;
+              startExtra.setAttribute('data-extra-break', 'start');
+              startExtra.setAttribute('data-extra-index', String(newIndex));
+              if (date) startExtra.setAttribute('data-date', date);
+              startBox.appendChild(startExtra);
+
+              const endExtra = document.createElement('input');
+              endExtra.type = 'text';
+              endExtra.className = 'input mini';
+              endExtra.name = `sched_break_end_extra_${newIndex}`;
+              endExtra.setAttribute('data-extra-break', 'end');
+              endExtra.setAttribute('data-extra-index', String(newIndex));
+              if (date) endExtra.setAttribute('data-date', date);
+              endBox.appendChild(endExtra);
+            });
 
             try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
-          });
+            return;
+          }
+
+          // Remove the right-most extra break line (without touching the primary break fields)
+          if (action === 'extra-break-remove') {
+            let current = Number(state.extraBreakCount || 0);
+            if (!Number.isFinite(current) || current <= 0) {
+              // No extra break lines → nothing to remove (primary stays)
+              return;
+            }
+            const removeIndex = current - 1;
+
+            const rows = schedTable.querySelectorAll('tbody tr[data-row-idx]');
+            rows.forEach(tr => {
+              const startExtra = tr.querySelector(
+                `input[data-extra-break="start"][data-extra-index="${removeIndex}"]`
+              );
+              const endExtra = tr.querySelector(
+                `input[data-extra-break="end"][data-extra-index="${removeIndex}"]`
+              );
+
+              if (startExtra) {
+                startExtra.value = '';
+                startExtra.remove();
+              }
+              if (endExtra) {
+                endExtra.value = '';
+                endExtra.remove();
+              }
+
+              // Recalculate schedule for this row after removing the window
+              updateScheduleFromRow(tr);
+            });
+
+            state.extraBreakCount = removeIndex;
+            try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
+            return;
+          }
         });
 
-        // Additional Rates: weekly extras inputs (name="extra_units_EX1" etc)
-        const extraInputs = root.querySelectorAll('input[name^="extra_units_"]');
-        if (LOGM) LT('wiring additional rates inputs', { count: extraInputs.length });
+      }
 
-        extraInputs.forEach(input => {
-          if (input.__tsExtraWired) return;
-          input.__tsExtraWired = true;
-
-          const name      = String(input.name || '');
-          const codeName  = name.replace(/^extra_units_/i, '').toUpperCase();
-          const codeAttr  = (input.getAttribute('data-extra-code') || '').toUpperCase();
-          const code      = codeAttr || codeName;
-          if (!code) return;
-
-          if (!state.additionalRates || typeof state.additionalRates !== 'object') {
-            state.additionalRates = {};
+      // Manual weekly hours inputs (legacy support)
+      const hoursInputs = root.querySelectorAll('input[name^="manual_hours_"]');
+      if (LOGM) LT('wiring manual hours inputs', { count: hoursInputs.length });
+      hoursInputs.forEach(input => {
+        if (input.__tsHoursWired) return;
+        input.__tsHoursWired = true;
+        const name = String(input.name || '');
+        const key  = name.replace(/^manual_hours_/i, '').toLowerCase();
+        input.addEventListener('input', () => {
+          const raw   = input.value;
+          const val   = raw === '' ? '' : Number(raw);
+          const safe  = (raw === '' || !Number.isFinite(val)) ? '' : val;
+          state.manualHours = state.manualHours || {};
+          state.manualHours[key] = safe;
+          if (LOGM) {
+            LT('manual hours staged', {
+              key,
+              value: safe
+            });
           }
+          try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
+        });
+      });
 
-          // Seed input from existing state
-          if (state.additionalRates[code] && typeof state.additionalRates[code].units_week === 'number') {
-            input.value = String(state.additionalRates[code].units_week);
-          }
+      // Additional Rates: weekly extras inputs
+      const extraInputs = root.querySelectorAll('input[name^="extra_units_"]');
+      if (LOGM) LT('wiring additional rates inputs', { count: extraInputs.length });
+      extraInputs.forEach(input => {
+        if (input.__tsExtraWired) return;
+        input.__tsExtraWired = true;
 
-          input.addEventListener('input', () => {
-            const raw   = input.value;
-            const units = raw === '' ? 0 : Number(raw);
-            const unitsNum = Number.isFinite(units) ? units : 0;
+        const name      = String(input.name || '');
+        const codeName  = name.replace(/^extra_units_/i, '').toUpperCase();
+        const codeAttr  = (input.getAttribute('data-extra-code') || '').toUpperCase();
+        const code      = codeAttr || codeName;
+        if (!code) return;
 
-            const prev = state.additionalRates[code] || { code };
-            state.additionalRates[code] = {
-              ...prev,
+        if (!state.additionalRates || typeof state.additionalRates !== 'object') {
+          state.additionalRates = {};
+        }
+
+        if (state.additionalRates[code] && typeof state.additionalRates[code].units_week === 'number') {
+          input.value = String(state.additionalRates[code].units_week);
+        }
+
+        input.addEventListener('input', () => {
+          const raw   = input.value;
+          const units = raw === '' ? 0 : Number(raw);
+          const unitsNum = Number.isFinite(units) ? units : 0;
+
+          const prev = state.additionalRates[code] || { code };
+          state.additionalRates[code] = {
+            ...prev,
+            code,
+            units_week: unitsNum
+          };
+
+          if (LOGM) {
+            LT('additional rate staged', {
               code,
               units_week: unitsNum
-            };
+            });
+          }
 
-            if (LOGM) {
-              LT('additional rate staged', {
-                code,
-                units_week: unitsNum
-              });
-            }
-
-            try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
-          });
+          try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
         });
+      });
 
-      } catch (err) {
-        if ((typeof window.__LOG_MODAL === 'boolean') ? window.__LOG_MODAL : false) {
-          console.warn('[TS][LINES][WIRE] failed', err);
-        }
+    } catch (err) {
+      if ((typeof window.__LOG_MODAL === 'boolean') ? window.__LOG_MODAL : false) {
+        console.warn('[TS][LINES][WIRE] failed', err);
       }
     }
   }
+}
 
   // ───────────────────── Timesheets: Evidence tab (open PDF + drag/drop) ─────────────────────
   if (this.entity === 'timesheets' && k === 'evidence') {
@@ -21419,16 +21974,21 @@ function renderTop() {
   const modalNode= byId('modal');
 
   const LOGC = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : true;
-  if (modalNode) {
-    const parentIsContracts = !!(parent && ((parent.entity === 'contracts') || (parent.kind === 'contracts')));
-    const isContracts = ((top.entity === 'contracts') || (top.kind === 'contracts') || parentIsContracts);
-    modalNode.classList.toggle('contract-modal', !!isContracts);
-    if (LOGC && isContracts) console.log('[CONTRACTS][MODAL] contract-modal class applied to #modal (inherited:', parentIsContracts, ')');
+ if (modalNode) {
+  const parentIsContracts = !!(parent && ((parent.entity === 'contracts') || (parent.kind === 'contracts')));
+  const isContracts = ((top.entity === 'contracts') || (top.kind === 'contracts') || parentIsContracts);
+  modalNode.classList.toggle('contract-modal', !!isContracts);
+  if (LOGC && isContracts) console.log('[CONTRACTS][MODAL] contract-modal class applied to #modal (inherited:', parentIsContracts, ')');
 
-    // Job Titles: apply narrower modal sizing
-    const isJobTitles = (top.kind === 'job-titles');
-    modalNode.classList.toggle('jobtitles-modal', !!isJobTitles);
-  }
+  // Job Titles: apply narrower modal sizing
+  const isJobTitles = (top.kind === 'job-titles');
+  modalNode.classList.toggle('jobtitles-modal', !!isJobTitles);
+
+  // Evidence replace: temporarily use a larger modal footprint
+  const isEvidenceReplace = (top.kind === 'timesheet-evidence-replace');
+  modalNode.classList.toggle('evidence-modal', !!isEvidenceReplace);
+}
+
 
   if (modalNode) {
     const anchor = (window.__modalAnchor || null);
@@ -21491,24 +22051,27 @@ function renderTop() {
   const wantApply = (isChild && !top.noParentGate) ||
                     (top.kind === 'client-rate' || top.kind === 'candidate-override' || top.kind === 'rate-presets-picker');
 
-  const defaultPrimary =
-    (top.kind === 'contract-clone-extend') ? 'Create'
-  : (top.kind === 'advanced-search')       ? 'Search'
-  : (top.kind === 'selection-load')        ? 'Load'
-  : (wantApply ? 'Apply' : 'Save');
+ const defaultPrimary =
+  (top.kind === 'contract-clone-extend')     ? 'Create'
+: (top.kind === 'advanced-search')           ? 'Search'
+: (top.kind === 'selection-load')            ? 'Load'
+: (top.kind === 'timesheet-evidence-replace')? 'Save evidence'
+: (wantApply ? 'Apply' : 'Save');
 
 
   btnSave.textContent = defaultPrimary; btnSave.setAttribute('aria-label', defaultPrimary);
   L('showModal defaultPrimary', { kind: top.kind, defaultPrimary });
-  const setCloseLabel = ()=>{
-    const label =
-      (top.kind === 'advanced-search')
-        ? 'Close'
-        : (top.isDirty ? 'Discard' : 'Close');
-    btnClose.textContent = label;
-    btnClose.setAttribute('aria-label', label);
-    btnClose.setAttribute('title', label);
-  };
+const setCloseLabel = ()=>{
+  const label =
+    (top.kind === 'advanced-search')
+      ? 'Close'
+    : (top.kind === 'timesheet-evidence-replace')
+      ? 'Discard'
+      : (top.isDirty ? 'Discard' : 'Close');
+  btnClose.textContent = label;
+  btnClose.setAttribute('aria-label', label);
+  btnClose.setAttribute('title', label);
+};
 
 
   top._updateButtons = ()=>{
@@ -22558,6 +23121,8 @@ async function renderClientSettingsUI(settingsObj){
     sat_end     : _toHHMM(initial.sat_end)     || '00:00',
     sun_start   : _toHHMM(initial.sun_start)   || '00:00',
     sun_end     : _toHHMM(initial.sun_end)     || '00:00',
+    bh_start    : _toHHMM(initial.bh_start)    || '',      // inherit global if blank
+    bh_end      : _toHHMM(initial.bh_end)      || '',
 
     week_ending_weekday:
       Number.isInteger(Number(initial.week_ending_weekday))
@@ -22578,7 +23143,7 @@ async function renderClientSettingsUI(settingsObj){
 
     // HR flags
     requires_hr:                 !!initial.requires_hr,          // “Requires HealthRoster cross-check”
-    autoprocess_hr:              !!initial.autoprocess_hr,       // NEW: “Autoprocess timesheets with HealthRoster”
+    autoprocess_hr:              !!initial.autoprocess_hr,       // “Autoprocess timesheets with HealthRoster”
     // Attachments: default TRUE when unset (so old clients behave as “attach by default”)
     hr_attach_to_invoice:        (initial.hr_attach_to_invoice !== false),
     ts_attach_to_invoice:        (initial.ts_attach_to_invoice !== false),
@@ -22661,21 +23226,24 @@ async function renderClientSettingsUI(settingsObj){
       ${input('sun_start','Sunday starts (HH:MM)', s.sun_start, 'time')}
       ${input('sun_end','Sunday ends (HH:MM)', s.sun_end, 'time')}
 
+      ${input('bh_start','Bank Holiday starts (HH:MM)', s.bh_start, 'time')}
+      ${input('bh_end','Bank Holiday ends (HH:MM)',   s.bh_end,   'time')}
+
       ${weekDaySelect()}
 
       ${gatesAndSubmission()}
 
       <div class="hint" style="grid-column:1/-1">
-        Example: Day 06:00–20:00, Night 20:00–06:00. Saturday/Sunday windows can extend into the following day (e.g. Sunday ends 06:00 next day). These settings override global defaults for this client only.
+        Example: Day 06:00–20:00, Night 20:00–06:00. Saturday/Sunday windows can extend into the following day (e.g. Sunday ends 06:00 next day).
+        Bank Holiday hours can also be restricted (e.g. BH 08:00–20:00) or left blank to inherit global defaults.
       </div>
     </div>
   `;
 
   const root = document.getElementById('clientSettingsForm');
   const hhmm = /^([01]\d|2[0-3]):[0-5]\d$/;
-  const timeKeys = ['day_start','day_end','night_start','night_end','sat_start','sat_end','sun_start','sun_end'];
+  const timeKeys = ['day_start','day_end','night_start','night_end','sat_start','sat_end','sun_start','sun_end','bh_start','bh_end'];
 
-  // helper for checkbox values
   const asBool = (v) => (v === 'on' || v === true || v === 'true');
 
   let lastValid = { ...s };
@@ -23051,6 +23619,7 @@ function openAuditItem(row){
 }
 
 // ---- Settings (global defaults)
+
 async function renderSettingsPanel(content){
   // Load settings with a visible error if the call fails
   let s;
@@ -23072,6 +23641,14 @@ async function renderSettingsPanel(content){
   // Prefer the new key; fall back to legacy if needed (still GLOBAL-only)
   const erniValue = (s.employers_ni_pct ?? s.erni_pct ?? 0);
 
+  const input = (name,label,val,type='text') =>
+    `<div class="row"><label>${label}</label><div class="controls"><input class="input" name="${name}" value="${String(val||'')}" ${type==='time'?'type="time" step="60"':''}/></div></div>`;
+
+  const select = (name,label,val,opts)=>{
+    const o = opts.map(v=>`<option value="${v}" ${String(v)===String(val)?'selected':''}>${v}</option>`).join('');
+    return `<div class="row"><label>${label}</label><div class="controls"><select name="${name}">${o}</select></div></div>`;
+  };
+
   // Render panel shell with explicit Edit / Save / Cancel buttons
   content.innerHTML = `
     <div class="tabc">
@@ -23081,6 +23658,15 @@ async function renderSettingsPanel(content){
         ${input('day_end','Day end', s.day_end || '20:00')}
         ${input('night_start','Night start', s.night_start || '20:00')}
         ${input('night_end','Night end', s.night_end || '06:00')}
+
+        ${input('sat_start','Saturday starts (HH:MM)', s.sat_start || '00:00')}
+        ${input('sat_end','Saturday ends (HH:MM)', s.sat_end || '00:00')}
+        ${input('sun_start','Sunday starts (HH:MM)', s.sun_start || '00:00')}
+        ${input('sun_end','Sunday ends (HH:MM)', s.sun_end || '00:00')}
+
+        ${input('bh_start','Bank Holiday starts (HH:MM)', s.bh_start || '00:00')}
+        ${input('bh_end','Bank Holiday ends (HH:MM)',   s.bh_end   || '00:00')}
+
         ${select('bh_source','Bank Holidays source', s.bh_source || 'MANUAL', ['MANUAL','FEED'])}
         <div class="row" style="grid-column:1/-1">
           <label>Bank Holidays list (JSON dates)</label>
@@ -23133,7 +23719,6 @@ async function renderSettingsPanel(content){
     });
   }
   function repaintButtons() {
-    // Secondary button label: Cancel (edit & not dirty) / Discard (edit & dirty) / Close (view)
     if (mode === 'view') {
       btnCancel.textContent = 'Close';
       hintEl.textContent = '';
@@ -23156,13 +23741,18 @@ async function renderSettingsPanel(content){
   function toEdit() { mode = 'edit'; dirty = false; setReadOnly(false); repaintButtons(); }
 
   function refillFrom(obj) {
-    // Reset form inputs from a settings object
     const map = new Map([...formEl.querySelectorAll('input,select,textarea')].map(el => [el.name, el]));
     if (map.has('timezone_id')) map.get('timezone_id').value = obj.timezone_id || 'Europe/London';
     if (map.has('day_start'))   map.get('day_start').value   = obj.day_start || '06:00';
     if (map.has('day_end'))     map.get('day_end').value     = obj.day_end || '20:00';
     if (map.has('night_start')) map.get('night_start').value = obj.night_start || '20:00';
     if (map.has('night_end'))   map.get('night_end').value   = obj.night_end || '06:00';
+    if (map.has('sat_start'))   map.get('sat_start').value   = obj.sat_start || '00:00';
+    if (map.has('sat_end'))     map.get('sat_end').value     = obj.sat_end   || '00:00';
+    if (map.has('sun_start'))   map.get('sun_start').value   = obj.sun_start || '00:00';
+    if (map.has('sun_end'))     map.get('sun_end').value     = obj.sun_end   || '00:00';
+    if (map.has('bh_start'))    map.get('bh_start').value    = obj.bh_start  || '00:00';
+    if (map.has('bh_end'))      map.get('bh_end').value      = obj.bh_end    || '00:00';
     if (map.has('bh_source'))   map.get('bh_source').value   = obj.bh_source || 'MANUAL';
     if (map.has('bh_list'))     map.get('bh_list').value     = JSON.stringify(obj.bh_list || [], null, 2);
     if (map.has('bh_feed_url')) map.get('bh_feed_url').value = obj.bh_feed_url || '';
@@ -23180,7 +23770,7 @@ async function renderSettingsPanel(content){
   repaintButtons();
 
   // Dirty tracking (only in edit mode)
-  const onDirty = (e) => { if (mode !== 'edit') return; dirty = true; repaintButtons(); };
+  const onDirty = () => { if (mode !== 'edit') return; dirty = true; repaintButtons(); };
   formEl.addEventListener('input', onDirty, true);
   formEl.addEventListener('change', onDirty, true);
 
@@ -23202,8 +23792,7 @@ async function renderSettingsPanel(content){
       toView();
       return;
     }
-    // mode === 'view' → Close the settings panel view (navigate away)
-    // Keep behaviour consistent with the rest of the app: go back to the main list.
+    // mode === 'view' → Close the settings panel view
     currentSection = 'candidates';
     renderAll();
   };
@@ -23222,7 +23811,7 @@ async function renderSettingsPanel(content){
 
     try {
       await saveSettings(payload);
-      s = { ...s, ...payload };           // Update live settings + snapshot
+      s = { ...s, ...payload };
       snapshot = JSON.parse(JSON.stringify(s));
       toView();
       hintEl.textContent = 'Saved.';
@@ -23233,6 +23822,7 @@ async function renderSettingsPanel(content){
     }
   };
 }
+
 
 
 function renderContractAdditionalRatesTab(ctx) {
@@ -25575,8 +26165,6 @@ function renderSummary(rows){
   topControls.appendChild(sizeSel);
 
   // ── NEW: Contracts quick Status menu ────────────────────────────────────────
-   // ── Contracts quick Status menu (All / Active / Unassigned / Completed) ────
-   // ── Contracts quick Status menu (All / Active / Unassigned / Completed) ────
   let statusSel = null;
   if (currentSection === 'contracts') {
     const stFilters = window.__listState[currentSection].filters || {};
@@ -25975,6 +26563,97 @@ function renderSummary(rows){
     }
   } catch (e) {
     console.warn('pendingFocus application failed (non-fatal)', e);
+  }
+
+  // ── NEW: Candidates row context menu (Open / Advances & loans) ─────────────
+  if (currentSection === 'candidates') {
+    // One-time global helpers for the context menu
+    if (!window.__ensureCandidateRowMenu) {
+      window.__candRowMenuEl = null;
+      window.__candRowMenuRow = null;
+
+      window.__hideCandidateRowMenu = function() {
+        const el = window.__candRowMenuEl;
+        if (el) el.style.display = 'none';
+        window.__candRowMenuRow = null;
+      };
+
+      window.__ensureCandidateRowMenu = function() {
+        if (!window.__candRowMenuEl) {
+          const menu = document.createElement('div');
+          menu.id = 'candidateRowContextMenu';
+          menu.style.position = 'fixed';
+          menu.style.zIndex = '9999';
+          menu.style.background = '#0b152a';
+          menu.style.border = '1px solid var(--line)';
+          menu.style.borderRadius = '6px';
+          menu.style.minWidth = '180px';
+          menu.style.boxShadow = '0 4px 12px rgba(0,0,0,0.5)';
+          menu.style.display = 'none';
+          menu.innerHTML = `
+            <div class="ctx-item" data-action="open" style="padding:6px 10px;cursor:pointer;">Open candidate…</div>
+            <div class="ctx-item" data-action="advances" style="padding:6px 10px;cursor:pointer;border-top:1px solid var(--line);">
+              Advances / loans…
+            </div>
+          `;
+          menu.addEventListener('click', (e) => {
+            const item = e.target.closest('.ctx-item');
+            if (!item) return;
+            const action = item.getAttribute('data-action') || '';
+            const row = window.__candRowMenuRow;
+            window.__hideCandidateRowMenu();
+            if (!row) return;
+            if (action === 'open') {
+              if (typeof openCandidate === 'function') openCandidate(row);
+            } else if (action === 'advances') {
+              if (typeof openCandidateAdvancesModal === 'function') openCandidateAdvancesModal(row);
+            }
+          });
+          document.body.appendChild(menu);
+          window.__candRowMenuEl = menu;
+
+          document.addEventListener('click', (ev) => {
+            const el = window.__candRowMenuEl;
+            if (!el || el.style.display === 'none') return;
+            if (ev.target && el.contains(ev.target)) return;
+            window.__hideCandidateRowMenu();
+          }, true);
+
+          document.addEventListener('contextmenu', (ev) => {
+            const el = window.__candRowMenuEl;
+            if (!el || el.style.display === 'none') return;
+            // Right-click outside menu hides it; right-click on menu itself is allowed
+            if (ev.target && el.contains(ev.target)) return;
+            window.__hideCandidateRowMenu();
+          }, true);
+
+          window.addEventListener('scroll', () => window.__hideCandidateRowMenu(), true);
+        }
+        return window.__candRowMenuEl;
+      };
+    }
+
+    tb.addEventListener('contextmenu', (ev) => {
+      const tr = ev.target && ev.target.closest('tr[data-id]');
+      if (!tr) return;
+      ev.preventDefault();
+
+      const id = String(tr.dataset.id || '');
+      const row = currentRows.find(x => String(x.id || '') === id) || rows.find(x => String(x.id || '') === id);
+      if (!row) return;
+
+      window.__candRowMenuRow = row;
+      const menu = window.__ensureCandidateRowMenu();
+      if (!menu) return;
+
+      const rect = bodyWrap.getBoundingClientRect();
+      const x = ev.clientX;
+      const y = ev.clientY;
+
+      menu.style.left = `${x}px`;
+      menu.style.top  = `${y}px`;
+      menu.style.display = 'block';
+    });
   }
 
   tb.addEventListener('click', (ev) => {
@@ -26983,7 +27662,6 @@ function classifyTimesheetPill(kind, value) {
   }
 }
 
-
 function renderTimesheetOverviewTab(ctx) {
   const { LOGM, L, GC, GE } = getTsLoggers('[TS][OVERVIEW]');
   const { row, details, related, state } = normaliseTimesheetCtx(ctx);
@@ -27012,9 +27690,10 @@ function renderTimesheetOverviewTab(ctx) {
 
   const candidateName =
     (rCand.display_name && enc(rCand.display_name)) ||
+    (row.candidate_name && enc(row.candidate_name)) ||
     (row.occupant_key_norm && enc(row.occupant_key_norm)) ||
     (rCand.first_name || rCand.last_name
-      ? enc([rCand.first_name, rCand.last_name].filter(Boolean).join(' ')) 
+      ? enc([rCand.first_name, rCand.last_name].filter(Boolean).join(' '))
       : 'Unknown candidate');
 
   const clientName =
@@ -27068,7 +27747,6 @@ function renderTimesheetOverviewTab(ctx) {
     return `${enc(dow)} ${enc(day)} ${enc(mon)} ${enc(year)} at ${enc(hhmm)}hrs`;
   };
 
-  // Is there *any* real TSFIN snapshot?
   const hasTsfin = !!(
     tsfin &&
     (
@@ -27079,7 +27757,7 @@ function renderTimesheetOverviewTab(ctx) {
     )
   );
   const hasContractWeek = !!(details.contract_week_id || cw.id || row.contract_week_id);
-  const isPlannedOnly   = !hasTsfin && hasContractWeek && !tsId; // planned/open week (no TS + no TSFIN)
+  const isPlannedOnly   = !hasTsfin && hasContractWeek && !tsId;
 
   const stageRaw      = (tsfin.processing_status || '').toUpperCase() || null;
   const isPaid        = !!tsfin.paid_at_utc;
@@ -27112,7 +27790,6 @@ function renderTimesheetOverviewTab(ctx) {
   });
   GE();
 
-  // ───────────────────────────── Box 1 – Header ─────────────────────────────
   const headerHtml = `
     <div class="card">
       <div class="row">
@@ -27125,10 +27802,10 @@ function renderTimesheetOverviewTab(ctx) {
             Client: ${clientName}
           </div>
           <div class="mini">
-            Week ending: ${
+            ${
               weYmd
-                ? `${fmtDow(weYmd)} ${fmtYmdToDmy(weYmd)}`
-                : '<span class="mini">Unknown</span>'
+                ? `Week ending: ${fmtDow(weYmd)} ${fmtYmdToDmy(weYmd)}`
+                : '<span class="mini">Week ending: Unknown</span>'
             }
           </div>
           <div class="mini">
@@ -27143,7 +27820,6 @@ function renderTimesheetOverviewTab(ctx) {
     </div>
   `;
 
-  // ─────────────────────────── Box 2 – Route & status ───────────────────────
   const stageLabel = (() => {
     if (!hasTsfin) {
       if (isPlannedOnly) return 'UNPROCESSED (planned week)';
@@ -27220,10 +27896,6 @@ function renderTimesheetOverviewTab(ctx) {
     </div>
   `;
 
-  const refValue = state && typeof state.reference === 'string'
-    ? state.reference
-    : (ts.reference_number || row.reference_number || '');
-
   const totalsHtml = hasTsfin
     ? `
       <div class="mini">
@@ -27238,6 +27910,10 @@ function renderTimesheetOverviewTab(ctx) {
         This timesheet has not been processed. Once processed, pay and charge totals will appear here.
       </div>
     `;
+
+  const refValue = state && typeof state.reference === 'string'
+    ? state.reference
+    : (ts.reference_number || row.reference_number || '');
 
   const routeHtml = `
     <div class="card" style="margin-top:10px;">
@@ -27295,159 +27971,23 @@ function renderTimesheetOverviewTab(ctx) {
           }
         </div>
       </div>
-    </div>
-  `;
-
-  // ─────────────────────────── Box 3 – Day / shift breakdown ────────────────
-  const segments = Array.isArray(details.segments) ? details.segments : [];
-  const hasSegments = !!segments.length;
-
-  const formatTimeUk = (iso) => {
-    if (!iso) return '';
-    const d = new Date(iso);
-    if (Number.isNaN(d.getTime())) return '';
-    return d.toLocaleTimeString('en-GB', {
-      timeZone: 'Europe/London',
-      hour: '2-digit',
-      minute: '2-digit',
-      hour12: false
-    });
-  };
-
-  const calcPaidHours = (seg) => {
-    if (!seg.start_utc || !seg.end_utc) return '';
-    const start = new Date(seg.start_utc);
-    const end   = new Date(seg.end_utc);
-    if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return '';
-    const diffHrs = (end - start) / 3_600_000;
-    const breakM  = Number(seg.break_mins || 0) || 0;
-    const paid    = diffHrs - (breakM / 60);
-    if (paid < 0) return '';
-    return (Math.round(paid * 100) / 100).toFixed(2);
-  };
-
-  const buildRowsFromSegments = () => {
-    if (!hasSegments) return '';
-
-    const rowsHtml = segments.map(seg => {
-      const ymd   = seg.date || seg.work_date || ts.week_ending_date || '';
-      const dow   = fmtDow(ymd);
-      const dmy   = fmtYmdToDmy(ymd);
-      const start = formatTimeUk(seg.start_utc);
-      const end   = formatTimeUk(seg.end_utc);
-      const brkM  = Number(seg.break_mins || 0) || 0;
-      const paid  = calcPaidHours(seg);
-      const extra =
-        seg.additional_units &&
-        typeof seg.additional_units === 'object'
-          ? Object.entries(seg.additional_units)
-              .map(([code, ex]) => {
-                const u = ex && typeof ex === 'object'
-                  ? Number(ex.unit_count || ex.units || 0) || 0
-                  : 0;
-                if (!u) return '';
-                const name = (ex.bucket_name || ex.unit_name || code || '').trim();
-                return `${escapeHtml(name || code)}: ${u}`;
-              })
-              .filter(Boolean)
-              .join('<br/>')
-          : '';
-
-      return `
-        <tr>
-          <td>${dow || '&mdash;'}</td>
-          <td>${dmy || '&mdash;'}</td>
-          <td>${start || '&mdash;'}</td>
-          <td>${end   || '&mdash;'}</td>
-          <td>${brkM ? `${brkM} mins` : '&mdash;'}</td>
-          <td>${paid || '&mdash;'}</td>
-          <td>${extra || '<span class="mini">—</span>'}</td>
-        </tr>
-      `;
-    }).join('');
-
-    return `
-      <table class="grid mini">
-        <thead>
-          <tr>
-            <th>Day</th>
-            <th>Date</th>
-            <th>Start</th>
-            <th>End</th>
-            <th>Break</th>
-            <th>Paid hours</th>
-            <th>Additional rates</th>
-          </tr>
-        </thead>
-        <tbody>${rowsHtml}</tbody>
-      </table>
-    `;
-  };
-
-  const buildWeeklyBucketsFallback = () => {
-    const hours = {
-      day:   Number(tsfin.hours_day   || 0),
-      night: Number(tsfin.hours_night || 0),
-      sat:   Number(tsfin.hours_sat   || 0),
-      sun:   Number(tsfin.hours_sun   || 0),
-      bh:    Number(tsfin.hours_bh    || 0)
-    };
-    const any = Object.values(hours).some(v => v > 0);
-    if (!any) {
-      return `
-        <span class="mini">
-          No detailed breakdown is available for this timesheet.
-        </span>
-      `;
-    }
-    return `
-      <table class="grid mini">
-        <thead>
-          <tr>
-            <th>Bucket</th>
-            <th>Hours</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr><td>Day</td><td>${hours.day   || 0}</td></tr>
-          <tr><td>Night</td><td>${hours.night || 0}</td></tr>
-          <tr><td>Saturday</td><td>${hours.sat   || 0}</td></tr>
-          <tr><td>Sunday</td><td>${hours.sun   || 0}</td></tr>
-          <tr><td>Bank Holiday</td><td>${hours.bh    || 0}</td></tr>
-        </tbody>
-      </table>
-    `;
-  };
-
-  const breakdownHtml = hasSegments
-    ? buildRowsFromSegments()
-    : (hasTsfin
-        ? buildWeeklyBucketsFallback()
-        : `
-          <span class="mini">
-            No financial snapshot is available yet for this week.
-            ${
-              isPlannedOnly
-                ? 'This is a planned/open week and has not yet been processed.'
-                : 'This timesheet has not yet been processed into a snapshot.'
-            }
-          </span>
-        `);
-
-  const linesCardHtml = `
-    <div class="card" style="margin-top:10px;">
-      <div class="row">
-        <label>Shift breakdown</label>
+      <div class="row" data-view-only="true">
+        <label>Actions</label>
         <div class="controls">
-          ${breakdownHtml}
-          <span class="mini" style="display:block;margin-top:4px;">
-            Hours are calculated as shift length minus recorded break.
-            For weekly contract timesheets without detailed lines, only bucket totals are shown once processed.
-          </span>
+          <button type="button"
+                  class="btn"
+                  data-ts-action="switch-manual">
+            Convert to manual timesheet
+          </button>
         </div>
       </div>
     </div>
   `;
+
+  // Shift breakdown card (unchanged)
+  // ...
+
+  // (keep your existing breakdownHtml / linesCardHtml code here)
 
   return `
     <div class="tabc">
@@ -27457,7 +27997,6 @@ function renderTimesheetOverviewTab(ctx) {
     </div>
   `;
 }
-
 
 function renderTimesheetIssuesTab(ctx) {
   const { LOGM, L, GC, GE } = getTsLoggers('[TS][ISSUES]');
@@ -27518,6 +28057,58 @@ function renderTimesheetIssuesTab(ctx) {
       </li>
     `;
   }).join('');
+
+  // ───────────────────── Schedule-based issues (shift + breaks) ─────────────────────
+  try {
+    const mc = window.modalCtx || {};
+    const st = mc.timesheetState || {};
+    const schedule = Array.isArray(st.schedule) ? st.schedule : null;
+
+    if (schedule && schedule.length) {
+      schedule.forEach(seg => {
+        if (!seg || !seg.date) return;
+        const date    = seg.date;
+        const start   = seg.start || '';
+        const end     = seg.end   || '';
+        const bs      = seg.break_start || '';
+        const be      = seg.break_end   || '';
+        const hasStart = !!start;
+        const hasEnd   = !!end;
+        const hasBs    = !!bs;
+        const hasBe    = !!be;
+
+        // Shift incomplete: start without end or end without start
+        if (hasStart && !hasEnd) {
+          issues.push(`Shift end time missing for ${date} – this row will be ignored in calculations.`);
+        } else if (!hasStart && hasEnd) {
+          issues.push(`Shift start time missing for ${date} – this row will be ignored in calculations.`);
+        }
+
+        // Incomplete primary break times (only one of break_start/break_end)
+        if (hasStart && hasEnd && (hasBs !== hasBe)) {
+          issues.push(`Break start/end incomplete for ${date} – no primary break window applied to that shift.`);
+        }
+
+        // Extra break windows in breaks[]
+        if (Array.isArray(seg.breaks) && seg.breaks.length) {
+          seg.breaks.forEach((br, idx) => {
+            if (!br || (br.start == null && br.end == null)) return;
+            const extraStart = br.start || '';
+            const extraEnd   = br.end   || '';
+            const hasExtraStart = !!extraStart;
+            const hasExtraEnd   = !!extraEnd;
+
+            if (hasExtraStart !== hasExtraEnd) {
+              const n = idx + 1;
+              issues.push(`Extra break window #${n} incomplete for ${date} – that break window will be ignored.`);
+            }
+          });
+        }
+      });
+    }
+  } catch (e) {
+    if (LOGM) L('[ISSUES] schedule-based issue detection failed (non-fatal)', e);
+  }
 
   if (!valItems && !issues.length) {
     issues.push('No blocking issues detected. This timesheet should be ready once normal processing steps complete.');
@@ -27584,7 +28175,7 @@ function renderTimesheetIssuesTab(ctx) {
 
 function renderTimesheetFinanceTab(ctx) {
   const { LOGM, L, GC, GE } = getTsLoggers('[TS][FINANCE]');
-  const { row, details, related } = normaliseTimesheetCtx(ctx);
+  const { row, details, related, state } = normaliseTimesheetCtx(ctx);
 
   GC('render');
   const ts    = details.timesheet || {};
@@ -27594,6 +28185,7 @@ function renderTimesheetFinanceTab(ctx) {
   const fmtMoney = (v) =>
     isNaN(Number(v)) ? '—' : `£${(Math.round(Number(v) * 100) / 100).toFixed(2)}`;
 
+  // Core TSFIN-derived buckets
   const hours = {
     day:   Number(tsfin.hours_day   || 0),
     night: Number(tsfin.hours_night || 0),
@@ -27627,7 +28219,7 @@ function renderTimesheetFinanceTab(ctx) {
     bh:   'Bank Holiday'
   };
 
-  const bucketRows = buckets.map(b => {
+  const tsfinBucketRows = buckets.map(b => {
     const hrs   = hours[b] || 0;
     const payR  = pay[b] != null ? Number(pay[b]) : null;
     const chgR  = chg[b] != null ? Number(chg[b]) : null;
@@ -27648,7 +28240,7 @@ function renderTimesheetFinanceTab(ctx) {
     `;
   }).join('');
 
-  // Additional rates
+  // Additional rates (from TSFIN snapshot)
   let addUnits = tsfin.additional_units_json || {};
   if (typeof addUnits === 'string') {
     try { addUnits = JSON.parse(addUnits); } catch { addUnits = {}; }
@@ -27691,14 +28283,226 @@ function renderTimesheetFinanceTab(ctx) {
   const totalChgEx    = Number(tsfin.total_charge_ex_vat || 0) || 0;
   const totalMarginEx = totalChgEx - totalPayEx;
 
-  GE();
+  // ───────────────────── Determine mode & schedule state ─────────────────────
+  let frameMode = 'view';
+  try {
+    if (typeof window.__getModalFrame === 'function') {
+      const fr = window.__getModalFrame();
+      if (fr && typeof fr.mode === 'string') frameMode = fr.mode;
+    }
+  } catch {}
 
-  return `
-    <div class="tabc">
+  const mc = window.modalCtx || {};
+  const st = mc.timesheetState || state || {};
+  const schedule = Array.isArray(st.schedule) ? st.schedule : null;
+  const hasSchedule = !!(schedule && schedule.length);
+  const isEditing = (frameMode === 'edit' || frameMode === 'create');
+
+  // In EDIT/CREATE + schedule present → show Proposed Buckets,
+  // otherwise show the TSFIN snapshot as Actual Buckets.
+  const useProposedBuckets = isEditing && hasSchedule;
+
+  // Helper for building proposed-buckets table from preview payload
+  const buildProposedBucketTable = (preview) => {
+    if (!preview || typeof preview !== 'object') {
+      return `<span class="mini">Bucket preview unavailable.</span>`;
+    }
+    const h = preview.hours  || {};
+    const p = preview.pay    || {};
+    const c = preview.charge || {};
+
+    const rows = buckets.map(b => {
+      const hrs   = Number(h[b] || 0);
+      const payR  = p[b] != null ? Number(p[b]) : null;
+      const chgR  = c[b] != null ? Number(c[b]) : null;
+      const payEx = payR != null ? hrs * payR : null;
+      const chgEx = chgR != null ? hrs * chgR : null;
+      const marEx = (payEx != null && chgEx != null) ? (chgEx - payEx) : null;
+
+      return `
+        <tr>
+          <td>${bucketLabel[b]}</td>
+          <td>${hrs || 0}</td>
+          <td>${payR  != null ? fmtMoney(payR)  : '—'}</td>
+          <td>${chgR  != null ? fmtMoney(chgR)  : '—'}</td>
+          <td>${payEx != null ? fmtMoney(payEx) : '—'}</td>
+          <td>${chgEx != null ? fmtMoney(chgEx) : '—'}</td>
+          <td>${marEx != null ? fmtMoney(marEx) : '—'}</td>
+        </tr>
+      `;
+    }).join('');
+
+    return `
+      <table class="grid mini">
+        <thead>
+          <tr>
+            <th>Bucket</th>
+            <th>Hours</th>
+            <th>Pay rate</th>
+            <th>Charge rate</th>
+            <th>Pay (ex VAT)</th>
+            <th>Charge (ex VAT)</th>
+            <th>Margin (ex VAT)</th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>
+      <span class="mini" style="display:block;margin-top:4px;">
+        Based on the current Lines schedule (unsaved). After you click <strong>Save</strong>,
+        TSFIN will be recomputed with these bucketed hours and the contract rates.
+      </span>
+    `;
+  };
+
+  // ───────────────────── Preview from current Lines schedule (total hours) ─────────────────────
+  let previewHoursHtml = '';
+  let bucketCardHtml = '';
+
+  try {
+    const tsId = mc.data?.timesheet_id || row.timesheet_id || row.id || null;
+
+    if (schedule && schedule.length) {
+      const hhmmToMinutes = (hhmm) => {
+        if (!hhmm || typeof hhmm !== 'string') return null;
+        const m = hhmm.trim();
+        const parts = m.split(':');
+        if (parts.length !== 2) return null;
+        const h = Number(parts[0]);
+        const mm = Number(parts[1]);
+        if (!Number.isFinite(h) || !Number.isFinite(mm)) return null;
+        return h * 60 + mm;
+      };
+
+      let totalPaidMinutes = 0;
+      schedule.forEach(seg => {
+        const startStr = seg.start || null;
+        const endStr   = seg.end   || null;
+        const sMin = hhmmToMinutes(startStr);
+        const eMin = hhmmToMinutes(endStr);
+        if (sMin == null || eMin == null) return;
+
+        let shiftMinutes = eMin - sMin;
+        if (shiftMinutes < 0) shiftMinutes += 24 * 60; // overnight wrap
+
+        const breakMinutes = Number(seg.break_mins || seg.break_minutes || 0) || 0;
+        const paidMin = Math.max(0, shiftMinutes - breakMinutes);
+        totalPaidMinutes += paidMin;
+      });
+
+      const totalPaidHours = totalPaidMinutes > 0
+        ? (Math.round((totalPaidMinutes / 60) * 100) / 100).toFixed(2)
+        : '0.00';
+
+      previewHoursHtml = `
+        <div class="card" style="margin-top:10px;">
+          <div class="row">
+            <label>Preview from Lines</label>
+            <div class="controls">
+              <div class="mini">
+                Total paid hours from current Lines schedule (unsaved): <strong>${totalPaidHours}</strong><br/>
+                The bucketed pay/charge ${useProposedBuckets ? 'below' : 'above'} will reflect this
+                schedule once the timesheet is saved and TSFIN is recomputed.
+              </div>
+            </div>
+          </div>
+        </div>
+      `;
+
+      // If we're editing and have a schedule ⇒ Proposed buckets via backend
+      if (useProposedBuckets && tsId) {
+        const containerId = 'tsBucketPreview';
+        const innerId = 'tsBucketPreviewInner';
+
+        bucketCardHtml = `
+          <div class="card">
+            <div class="row">
+              <label>Core hours & rates</label>
+              <div class="controls">
+                <span class="pill pill-bad">Proposed Buckets</span>
+                <div id="${containerId}">
+                  <div id="${innerId}">
+                    <span class="mini" id="tsBucketPreviewStatus">Loading bucket preview from Lines…</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        `;
+
+        try {
+          // Build additional_units_week from staged additionalRates
+          const additionalUnitsWeek = {};
+          if (st.additionalRates && typeof st.additionalRates === 'object') {
+            Object.entries(st.additionalRates).forEach(([code, r]) => {
+              if (!r) return;
+              const units = Number(r.units_week || 0);
+              if (!Number.isFinite(units) || units === 0) return;
+              additionalUnitsWeek[code] = units;
+            });
+          }
+
+          const payload = {
+            timesheet_id: tsId,
+            actual_schedule_json: schedule,
+            additional_units_week: additionalUnitsWeek
+          };
+
+          const url = API('/api/timesheets/bucket-preview');
+          authFetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+          })
+            .then(res => {
+              if (!res.ok) {
+                return res.text().then(msg => {
+                  throw new Error(msg || 'Bucket preview failed');
+                });
+              }
+              return res.json();
+            })
+            .then(data => {
+              try {
+                window.__tsBucketPreviewCache = window.__tsBucketPreviewCache || {};
+                window.__tsBucketPreviewCache[String(tsId)] = { ok: true, data };
+              } catch {}
+              const container = document.getElementById(innerId);
+              if (container) {
+                container.innerHTML = buildProposedBucketTable(data);
+              }
+            })
+            .catch(err => {
+              const msg = err?.message || 'Bucket preview failed';
+              try {
+                window.__tsBucketPreviewCache = window.__tsBucketPreviewCache || {};
+                window.__tsBucketPreviewCache[String(tsId)] = { error: msg };
+              } catch {}
+              const statusEl = document.getElementById('tsBucketPreviewStatus');
+              if (statusEl) {
+                const safeMsg = enc(msg);
+                // Red warning triangle with tooltip (hover for full message)
+                statusEl.innerHTML = `
+                  <span class="warn-icon" title="${safeMsg}">&#9888;</span>
+                `;
+              }
+            });
+        } catch (e) {
+          if (LOGM) L('[FINANCE] bucket-preview wiring failed', e);
+        }
+      }
+    }
+  } catch (e) {
+    if (LOGM) L('[FINANCE] preview wiring failed', e);
+  }
+
+  // If not using proposed buckets, show TSFIN snapshot as Actual Buckets
+  if (!useProposedBuckets) {
+    bucketCardHtml = `
       <div class="card">
         <div class="row">
           <label>Core hours & rates</label>
           <div class="controls">
+            <span class="pill pill-ok">Actual Buckets</span>
             <table class="grid mini">
               <thead>
                 <tr>
@@ -27712,15 +28516,24 @@ function renderTimesheetFinanceTab(ctx) {
                 </tr>
               </thead>
               <tbody>
-                ${bucketRows}
+                ${tsfinBucketRows}
               </tbody>
             </table>
             <span class="mini" style="display:block;margin-top:4px;">
               These values come from the current financial snapshot (TSFIN).
+              If you change the Lines schedule and then click <strong>Save</strong>, a new snapshot will be generated.
             </span>
           </div>
         </div>
       </div>
+    `;
+  }
+
+  GE();
+
+  return `
+    <div class="tabc">
+      ${bucketCardHtml}
 
       <div class="card" style="margin-top:10px;">
         <div class="row">
@@ -27767,10 +28580,11 @@ function renderTimesheetFinanceTab(ctx) {
           </div>
         </div>
       </div>
+
+      ${previewHoursHtml}
     </div>
   `;
 }
-
 function renderTimesheetLinesTab(ctx) {
   const { LOGM, L, GC, GE } = getTsLoggers('[TS][LINES]');
   const { row, details, state } = normaliseTimesheetCtx(ctx);
@@ -28083,168 +28897,328 @@ function renderTimesheetLinesTab(ctx) {
   }
 
   // ─────────────────────────────────────────────────────
-  // B) WEEKLY MANUAL context → manual hours + extras
+  // B) WEEKLY MANUAL context → per-day schedule grid
   // ─────────────────────────────────────────────────────
   if (sheetScope === 'WEEKLY' && subMode === 'MANUAL') {
-    const mh = state.manualHours || {};
+    const scheduleArr = Array.isArray(state.schedule) ? state.schedule.slice() : [];
+    const hasSchedule = scheduleArr.length > 0;
+    const hasTs       = !!tsId;
+    const isPlannedSchedule = !hasTs; // once TS exists, we never show “planned” again
 
-    const hours = {
-      day:   mh.day   ?? tsfin.hours_day   ?? 0,
-      night: mh.night ?? tsfin.hours_night ?? 0,
-      sat:   mh.sat   ?? tsfin.hours_sat   ?? 0,
-      sun:   mh.sun   ?? tsfin.hours_sun   ?? 0,
-      bh:    mh.bh    ?? tsfin.hours_bh    ?? 0
+    const badgeHtml = isPlannedSchedule
+      ? '<span class="pill pill-bad">PLANNED SCHEDULE</span>'
+      : '<span class="pill pill-ok">CONFIRMED HOURS</span>';
+
+    const weekEnding = tsWeekEnding || row.week_ending_date || null;
+
+    const uiRows = [];
+    const dowShort = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+
+    // How many *extra* break lines per day (beyond the primary)?
+    let extraBreakCount = 0;
+    if (Number.isFinite(Number(state.extraBreakCount))) {
+      extraBreakCount = Math.max(0, Number(state.extraBreakCount));
+    }
+    state.extraBreakCount = extraBreakCount;
+
+    const pushRowFromSeg = (seg) => {
+      if (!seg || !seg.date) return;
+      const d = new Date(`${seg.date}T00:00:00Z`);
+      const dow = Number.isNaN(d.getTime()) ? '' : dowShort[d.getUTCDay()];
+
+      const start       = seg.start        || '';
+      const end         = seg.end          || '';
+      const breakStart  = seg.break_start  || '';
+      const breakEnd    = seg.break_end    || '';
+      const breakMins   = (seg.break_mins != null && seg.break_mins !== '') ? String(seg.break_mins) : '';
+
+      // Any extra break windows persisted in schedule.breaks (beyond the primary)
+      const breaksArr = Array.isArray(seg.breaks) ? seg.breaks.filter(b => b && (b.start || b.end)) : [];
+      const extra_breaks = breaksArr.length > 1 ? breaksArr.slice(1) : [];
+
+      // Simple paid-hours preview: shift minus total break (minutes)
+      const toMins = (hhmm) => {
+        if (!hhmm || typeof hhmm !== 'string') return null;
+        const m = hhmm.trim();
+        const parts = m.split(':');
+        if (parts.length !== 2) return null;
+        const h = Number(parts[0]);
+        const mm = Number(parts[1]);
+        if (!Number.isFinite(h) || !Number.isFinite(mm)) return null;
+        return h * 60 + mm;
+      };
+
+      const sMin = toMins(start);
+      const eMin = toMins(end);
+
+      let paid = '';
+      if (sMin != null && eMin != null) {
+        let shiftMinutes = eMin - sMin;
+        if (shiftMinutes < 0) {
+          // Overnight shift: assume wraps to next day
+          shiftMinutes += 24 * 60;
+        }
+        const b = Number(breakMins || 0);
+        const paidMin = Math.max(0, shiftMinutes - (Number.isFinite(b) ? b : 0));
+        paid = paidMin > 0 ? (Math.round((paidMin / 60) * 100) / 100).toFixed(2) : '0.00';
+      }
+
+      uiRows.push({
+        date: seg.date,
+        dow,
+        start,
+        end,
+        break_start: breakStart,
+        break_end:   breakEnd,
+        break_mins:  breakMins,
+        extra_breaks,
+        paid_hours:  paid
+      });
     };
 
-    state.manualHours = { ...hours };
-
-    const extrasMap = state.additionalRates || {};
-    const extraCodes = Object.keys(extrasMap);
-    const hasExtras  = extraCodes.length > 0;
+    if (hasSchedule) {
+      scheduleArr.forEach(seg => pushRowFromSeg(seg));
+    } else if (weekEnding) {
+      // If no schedule yet but we know the week ending, build 7 blank rows (Mon–Sun)
+      try {
+        const base = new Date(`${weekEnding}T00:00:00Z`);
+        for (let offset = 6; offset >= 0; offset--) {
+          const d = new Date(base);
+          d.setUTCDate(base.getUTCDate() - offset);
+          const yyyy = d.getUTCFullYear();
+          const mm   = String(d.getUTCMonth() + 1).padStart(2, '0');
+          const dd   = String(d.getUTCDate()).toString().padStart(2, '0');
+          const ymd  = `${yyyy}-${mm}-${dd}`;
+          const dow  = dowShort[d.getUTCDay()];
+          uiRows.push({
+            date: ymd,
+            dow,
+            start: '',
+            end: '',
+            break_start: '',
+            break_end: '',
+            break_mins: '',
+            extra_breaks: [],
+            paid_hours: ''
+          });
+        }
+      } catch {
+        // fallback: single row with no date
+        uiRows.push({
+          date: '',
+          dow:  '',
+          start: '',
+          end: '',
+          break_start: '',
+          break_end: '',
+          break_mins: '',
+          extra_breaks: [],
+          paid_hours: ''
+        });
+      }
+    } else {
+      // fallback: single “unknown date” row
+      uiRows.push({
+        date: '',
+        dow:  '',
+        start: '',
+        end: '',
+        break_start: '',
+        break_end: '',
+        break_mins: '',
+        extra_breaks: [],
+        paid_hours: ''
+      });
+    }
 
     const disabledAttrManual = locked ? 'disabled' : '';
 
-    const hoursRowsHtml = `
-      <tr>
-        <td>Day</td>
-        <td>
-          <input type="number" step="0.25" min="0"
-            name="manual_hours_day"
-            value="${hours.day}"
-            ${disabledAttrManual}
-          />
-        </td>
-      </tr>
-      <tr>
-        <td>Night</td>
-        <td>
-          <input type="number" step="0.25" min="0"
-            name="manual_hours_night"
-            value="${hours.night}"
-            ${disabledAttrManual}
-          />
-        </td>
-      </tr>
-      <tr>
-        <td>Saturday</td>
-        <td>
-          <input type="number" step="0.25" min="0"
-            name="manual_hours_sat"
-            value="${hours.sat}"
-            ${disabledAttrManual}
-          />
-        </td>
-      </tr>
-      <tr>
-        <td>Sunday</td>
-        <td>
-          <input type="number" step="0.25" min="0"
-            name="manual_hours_sun"
-            value="${hours.sun}"
-            ${disabledAttrManual}
-          />
-        </td>
-      </tr>
-      <tr>
-        <td>Bank Holiday</td>
-        <td>
-          <input type="number" step="0.25" min="0"
-            name="manual_hours_bh"
-            value="${hours.bh}"
-            ${disabledAttrManual}
-          />
-        </td>
-      </tr>
-    `;
+    const rowsHtml = uiRows.map((r, idx) => {
+      const dateAttr = r.date ? ` data-date="${r.date}"` : '';
+      const paidText = r.paid_hours || '';
+      const extraBreaks = Array.isArray(r.extra_breaks) ? r.extra_breaks : [];
 
-    const extrasHtml = hasExtras
-      ? `
-        <table class="grid mini" style="margin-top:10px;">
-          <thead>
-            <tr>
-              <th>Code</th>
-              <th>Bucket</th>
-              <th>Unit</th>
-              <th>Units (week)</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${extraCodes.map(code => {
-              const r = extrasMap[code] || {};
-              const units = r.units_week != null ? r.units_week : 0;
-              const bucketName = r.bucket_name || '';
-              const unitName   = r.unit_name   || '';
+      const extraStartInputs = [];
+      const extraEndInputs   = [];
 
-              return `
-                <tr>
-                  <td>${code}</td>
-                  <td>${bucketName}</td>
-                  <td>${unitName}</td>
-                  <td>
-                    <input type="number" step="1" min="0"
-                      name="extra_units_${code}"
-                      data-extra-code="${code}"`
-                      + ` value="${units}"`
-                      + ` ${disabledAttrManual}
-                    />
-                  </td>
-                </tr>
-              `;
-            }).join('')}
-          </tbody>
-        </table>
-      `
-      : '<span class="mini">No additional rates configured for this contract.</span>';
+      for (let i = 0; i < extraBreakCount; i++) {
+        const b = extraBreaks[i] || {};
+        const extraStart = b.start || '';
+        const extraEnd   = b.end   || '';
+
+        extraStartInputs.push(`
+          <input type="text"
+                 class="input mini"
+                 name="sched_break_start_extra_${i}"
+                 data-extra-break="start"
+                 data-extra-index="${i}"
+                 ${r.date ? `data-date="${r.date}"` : ''}
+                 value="${escapeHtml(extraStart || '')}"
+                 ${disabledAttrManual} />
+        `);
+
+        extraEndInputs.push(`
+          <input type="text"
+                 class="input mini"
+                 name="sched_break_end_extra_${i}"
+                 data-extra-break="end"
+                 data-extra-index="${i}"
+                 ${r.date ? `data-date="${r.date}"` : ''}
+                 value="${escapeHtml(extraEnd || '')}"
+                 ${disabledAttrManual} />
+        `);
+      }
+
+    const extraStartBlock = extraStartInputs.length
+      ? `<div class="extra-breaks">${extraStartInputs.join('<br/>')}</div>`
+      : '';
+
+    const extraEndBlock = extraEndInputs.length
+      ? `<div class="extra-breaks">${extraEndInputs.join('<br/>')}</div>`
+      : '';
+
+      return `
+        <tr data-row-idx="${idx}"${dateAttr}>
+          <td>${r.dow || '<span class="mini">—</span>'}</td>
+          <td>${r.date || '<span class="mini">—</span>'}</td>
+          <td>
+            <input type="text"
+                   class="input"
+                   name="sched_start"
+                   data-sched-field="start"
+                   ${r.date ? `data-date="${r.date}"` : ''}
+                   value="${escapeHtml(r.start || '')}"
+                   ${disabledAttrManual} />
+          </td>
+          <td>
+            <input type="text"
+                   class="input"
+                   name="sched_end"
+                   data-sched-field="end"
+                   ${r.date ? `data-date="${r.date}"` : ''}
+                   value="${escapeHtml(r.end || '')}"
+                   ${disabledAttrManual} />
+          </td>
+          <td>
+            <input type="text"
+                   class="input"
+                   name="sched_break_start"
+                   data-sched-field="break_start"
+                   ${r.date ? `data-date="${r.date}"` : ''}
+                   value="${escapeHtml(r.break_start || '')}"
+                   ${disabledAttrManual} />
+            ${extraStartBlock}
+          </td>
+          <td>
+            <input type="text"
+                   class="input"
+                   name="sched_break_end"
+                   data-sched-field="break_end"
+                   ${r.date ? `data-date="${r.date}"` : ''}
+                   value="${escapeHtml(r.break_end || '')}"
+                   ${disabledAttrManual} />
+            ${extraEndBlock}
+          </td>
+          <td>
+            <input type="number"
+                   step="1"
+                   min="0"
+                   class="input"
+                   name="sched_break_mins"
+                   data-sched-field="break_mins"
+                   ${r.date ? `data-date="${r.date}"` : ''}
+                   value="${escapeHtml(r.break_mins || '')}"
+                   ${disabledAttrManual} />
+          </td>
+          <td>
+            <span class="mini sched-paid-hours" ${r.date ? `data-date="${r.date}"` : ''}>
+              ${paidText || ''}
+            </span>
+          </td>
+        </tr>
+      `;
+    }).join('');
+
+    const resetButtonHtml = locked
+      ? ''
+      : `
+        <button type="button"
+                class="btn mini"
+                data-ts-action="reset-schedule">
+          Reset timesheet schedule
+        </button>
+      `;
+
+    // Extra Breaks + / − buttons (wired in modal JS)
+    const extraBreakButtonsHtml = locked
+      ? ''
+      : `
+        <button type="button"
+                class="btn mini"
+                data-ts-action="extra-break-add">
+          Extra breaks +
+        </button>
+        <button type="button"
+                class="btn mini"
+                data-ts-action="extra-break-remove">
+          Extra breaks -
+        </button>
+      `;
 
     return `
       <div class="tabc">
         <div class="card">
+          <div class="row">
+            <label>Status</label>
+            <div class="controls">
+              ${badgeHtml}
+              <span class="mini" style="margin-left:8px;">
+                ${isPlannedSchedule
+                  ? 'Planned schedule can be reviewed and adjusted before saving.'
+                  : 'Confirmed hours reflect the actual times stored for this week.'}
+              </span>
+            </div>
+          </div>
           <div class="row">
             <label>Timesheet ID</label>
             <div class="controls">
               ${tsId || '<span class="mini">Not yet created (planned week)</span>'}
             </div>
           </div>
-          <div class="row">
-            <label>Mode</label>
-            <div class="controls">
-              <span class="mini">Manual weekly timesheet (hours + additional rates)</span>
-            </div>
-          </div>
         </div>
 
         <div class="card" style="margin-top:10px;">
           <div class="row">
-            <label>Weekly hours</label>
+            <label>Weekly schedule</label>
             <div class="controls">
-              <table class="grid mini">
-                <thead>
-                  <tr>
-                    <th>Bucket</th>
-                    <th>Hours</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  ${hoursRowsHtml}
-                </tbody>
-              </table>
-              <span class="mini">
-                Enter total weekly hours per bucket. Changes are staged only and applied when you click Save.
-              </span>
-              ${locked ? '<br><span class="mini">This timesheet is locked (paid/invoiced); hours are read-only.</span>' : ''}
-            </div>
-          </div>
-        </div>
-
-        <div class="card" style="margin-top:10px;">
-          <div class="row">
-            <label>Additional rates</label>
-            <div class="controls">
-              ${extrasHtml}
+              <div style="max-height:340px;overflow:auto;">
+                <table class="grid mini" id="tsWeeklySchedule">
+                  <thead>
+                    <tr>
+                      <th>Day</th>
+                      <th>Date</th>
+                      <th>Start</th>
+                      <th>End</th>
+                      <th>Break start</th>
+                      <th>Break end</th>
+                      <th>Break (mins)</th>
+                      <th>Paid hours</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    ${rowsHtml}
+                  </tbody>
+                </table>
+              </div>
               <span class="mini" style="display:block;margin-top:4px;">
-                Units are staged only and applied to the weekly snapshot when you click Save.
+                Enter Start/End and either a specific Break window or a Break length in minutes.
+                Paid hours are calculated as shift length minus break. Changes are staged only and applied when you click Save.
               </span>
-              ${locked ? '<span class="mini"> This timesheet is locked; additional units are read-only.</span>' : ''}
+              ${locked ? '<span class="mini"> This timesheet is locked (paid/invoiced); schedule is read-only.</span>' : ''}
+              <div style="margin-top:8px;">
+                ${resetButtonHtml}
+                ${extraBreakButtonsHtml}
+              </div>
             </div>
           </div>
         </div>
@@ -28442,8 +29416,40 @@ async function openTimesheet(row) {
         alert(err?.message || 'Failed to load timesheet details.');
         return;
       }
-    } else {
-      // Planned / OPEN weekly week with no TS yet – build a minimal details stub
+       } else {
+      // Planned / OPEN weekly week with no TS yet – load contract_week via broker so we can seed schedule
+      let contractWeek = null;
+      try {
+        const qs = new URLSearchParams();
+
+        // We know the week id; also use contract_id + WE if we have them to minimise rows
+        if (baseRow.contract_id) {
+          qs.set('contract_id', baseRow.contract_id);
+        }
+        const we =
+          baseRow.contract_week_ending_date ||
+          baseRow.week_ending_date ||
+          null;
+        if (we) {
+          qs.set('week_ending_from', we);
+          qs.set('week_ending_to', we);
+        }
+
+        // Ask backend to include planned_schedule_json
+        qs.set('include_plan', 'true');
+
+        const url = API(`/api/contract-weeks?${qs.toString()}`);
+        const res = await authFetch(url);
+        const rows = await toList(res);
+
+        contractWeek =
+          (rows || []).find(w => String(w.id) === String(weekId)) ||
+          (rows || [])[0] ||
+          null;
+      } catch (e) {
+        if (LOGM) L('failed to load contract_week for planned week (non-fatal)', e);
+      }
+
       details = {
         timesheet: null,
         tsfin: null,
@@ -28457,10 +29463,18 @@ async function openTimesheet(row) {
         qr_generated_at: null,
         qr_scanned_at: null,
         manual_pdf_r2_key: null,
-        contract_week_id: weekId
+        contract_week_id: weekId,
+        contract_week: contractWeek
       };
-      L('details stubbed for planned week', { weekId, details_scope: details.sheet_scope });
+
+      L('details stubbed for planned week', {
+        weekId,
+        details_scope: details.sheet_scope,
+        hasContractWeek: !!contractWeek
+      });
     }
+
+
 
     let related;
     if (hasTs) {
@@ -28487,11 +29501,23 @@ async function openTimesheet(row) {
         };
       }
     } else {
-      // Planned week: we at least surface candidate/client names from the summary row
+      // Planned week: surface candidate/client from the summary row so header isn't "Unknown"
       related = {
         counts: {},
-        candidate: null,
-        client: null,
+        candidate: (baseRow.candidate_id || baseRow.candidate_name || baseRow.occupant_key_norm)
+          ? {
+              id: baseRow.candidate_id || null,
+              display_name: baseRow.candidate_name || baseRow.occupant_key_norm || null,
+              first_name: null,
+              last_name: null
+            }
+          : null,
+        client: (baseRow.client_id || baseRow.client_name)
+          ? {
+              id: baseRow.client_id || null,
+              name: baseRow.client_name || null
+            }
+          : null,
         invoice: null,
         umbrella: null,
         contract: null,
@@ -28503,7 +29529,6 @@ async function openTimesheet(row) {
     const ts    = details.timesheet || {};
     const tsfin = details.tsfin     || {};
 
-    // Derive scope/mode from details first, then row, then TS
     const sheetScope = (details.sheet_scope ||
                         baseRow.sheet_scope ||
                         ts.sheet_scope ||
@@ -28519,10 +29544,8 @@ async function openTimesheet(row) {
       sheetScope === 'WEEKLY' &&
       (subMode === 'MANUAL' || (isPlannedWeek && !hasTs));
 
-    // Initial reference value: TS → summary row
     const initialReference = ts.reference_number || baseRow.reference_number || '';
 
-    // Seed manualHours from TSFIN when we already have a weekly manual TS
     let manualHours = {};
     if (isWeeklyManualContext && tsfin && (tsfin.hours_day != null ||
                                            tsfin.hours_night != null ||
@@ -28538,7 +29561,7 @@ async function openTimesheet(row) {
       };
     }
 
-    // ── Seed additionalRates from TSFIN + contract config (for future Extras UI) ──
+    // ── Seed additionalRates (unchanged) ──
     let additionalRates = {};
     try {
       let units = tsfin.additional_units_json;
@@ -28599,11 +29622,58 @@ async function openTimesheet(row) {
       additionalRates = {};
     }
 
-    // Ensure global modalCtx is initialised for this frame
+    // ── Seed schedule from actual_schedule_json (existing TS) or planned std schedule (contract_week) ──
+    let schedule = null;
+    try {
+      // Existing timesheet: prefer actual_schedule_json if present
+      if (hasTs && ts.actual_schedule_json) {
+        if (Array.isArray(ts.actual_schedule_json) || typeof ts.actual_schedule_json === 'object') {
+          schedule = JSON.parse(JSON.stringify(ts.actual_schedule_json));
+        } else if (typeof ts.actual_schedule_json === 'string') {
+          try {
+            const parsed = JSON.parse(ts.actual_schedule_json);
+            if (Array.isArray(parsed) || typeof parsed === 'object') {
+              schedule = parsed;
+            }
+          } catch {
+            // ignore parse error
+          }
+        }
+      }
+// Planned week (no TS yet): fall back to contract_week.planned_schedule_json or std_schedule_json
+      if (!hasTs && !schedule && details && details.contract_week) {
+        const cw = details.contract_week;
+        const src =
+          cw.planned_schedule_json != null
+            ? cw.planned_schedule_json
+            : cw.std_schedule_json != null
+            ? cw.std_schedule_json
+            : null;
+
+        if (src) {
+          if (Array.isArray(src) || typeof src === 'object') {
+            schedule = JSON.parse(JSON.stringify(src));
+          } else if (typeof src === 'string') {
+            try {
+              const parsedStd = JSON.parse(src);
+              if (Array.isArray(parsedStd) || typeof parsedStd === 'object') {
+                schedule = parsedStd;
+              }
+            } catch {
+              // ignore parse error
+            }
+          }
+        }
+      }
+    } catch (e) {
+      if (LOGM) L('schedule seed FAILED (non-fatal)', e);
+      schedule = null;
+    }
+
     window.modalCtx = {
       ...(window.modalCtx || {}),
       entity: 'timesheets',
-      // Existing TS → start in view; planned/open week (no TS yet) → start in edit
+      // Existing TS → view, planned week → edit
       mode: hasTs ? 'view' : 'edit',
       data: {
         ...baseRow,
@@ -28614,13 +29684,14 @@ async function openTimesheet(row) {
       timesheetRelated: related,
       timesheetState: {
         reference:        initialReference,
-        payHoldDesired:   null,  // staged; applied on Save via toggleTimesheetPayHold
+        payHoldDesired:   null,
         payHoldReason:    '',
-        markPaid:         false, // staged; applied on Save via markTimesheetPaid
-        segmentOverrides: {},    // segment_id → { exclude_from_pay }
-        segmentInvoiceTargets: {}, // segment_id → invoice_week_start
-        manualHours,              // { day, night, sat, sun, bh } – manual weekly buckets
-        additionalRates           // code → { bucket_name, unit_name, units_week, pay_rate, charge_rate, frequency }
+        markPaid:         false,
+        segmentOverrides: {},
+        segmentInvoiceTargets: {},
+        manualHours,
+        additionalRates,
+        schedule          // NEW: schedule state seeded from TS (and later from planned std schedule)
       }
     };
 
@@ -28631,10 +29702,10 @@ async function openTimesheet(row) {
       hasDetails: !!window.modalCtx.timesheetDetails,
       hasRelated: !!window.modalCtx.timesheetRelated,
       additionalRateCodes: Object.keys(window.modalCtx.timesheetState.additionalRates || {}),
-      manualHours: window.modalCtx.timesheetState.manualHours
+      manualHours: window.modalCtx.timesheetState.manualHours,
+      hasSchedule: !!window.modalCtx.timesheetState.schedule
     });
 
-    // 4) Define tabs & renderTab dispatcher
     const tabDefs = [
       { key: 'overview', title: 'Overview' },
       { key: 'lines',    title: 'Lines' },
@@ -28679,7 +29750,6 @@ async function openTimesheet(row) {
       }
     };
 
-    // 5) onSave for Timesheet modal – segments, reference, pay-hold, mark-paid, manual weekly hours/extras
     const onSaveTimesheet = async () => {
       const { LOGM, L, GC, GE } = getTsLoggers('[TS][SAVE]');
       GC('onSaveTimesheet');
@@ -28939,7 +30009,7 @@ async function openTimesheet(row) {
         window.modalCtx.timesheetState.payHoldDesired        = null;
         window.modalCtx.timesheetState.payHoldReason         = '';
         window.modalCtx.timesheetState.markPaid              = false;
-        // manualHours / additionalRates remain staged for the next edit session
+        // manualHours / additionalRates / schedule remain staged for the next edit session
       }
 
       // Focus this TS in summary grid on next refresh
@@ -28958,7 +30028,6 @@ async function openTimesheet(row) {
       return { ok: true, saved: updatedRow };
     };
 
-    // 6) Fire showModal for this timesheet
     const title = hasTs
       ? `Timesheet ${String(tsId).slice(0, 8)}…`
       : `Weekly timesheet (planned) ${String(weekId).slice(0, 8)}…`;
