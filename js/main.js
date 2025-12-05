@@ -27779,6 +27779,855 @@ function normaliseTimesheetCtx(ctx) {
   return { row, details, related, state };
 }
 
+function renderTimesheetLinesTab(ctx) {
+  const { LOGM, L, GC, GE } = getTsLoggers('[TS][LINES]');
+  const { row, details, state } = normaliseTimesheetCtx(ctx);
+
+  GC('render');
+  const ts    = details.timesheet || {};
+  const tsId  = row.timesheet_id || ts.timesheet_id || null;
+  const segs  = Array.isArray(details.segments) ? details.segments : [];
+  const ib    = details.invoiceBreakdown || null;
+  const mode  = ib && typeof ib.mode === 'string' ? ib.mode : null;
+  const shifts = Array.isArray(details.shifts) ? details.shifts : [];
+  const isSegments = !!details.isSegmentsMode;
+
+  const sheetScope = (details.sheet_scope ||
+                      row.sheet_scope ||
+                      ts.sheet_scope ||
+                      '').toUpperCase();
+  const subMode    = (row.submission_mode ||
+                      ts.submission_mode ||
+                      '').toUpperCase();
+
+  const tsfin  = details.tsfin || {};
+  const locked = !!(tsfin.locked_by_invoice_id || tsfin.paid_at_utc);
+  const basis  = String(tsfin.basis || row.basis || '').toUpperCase();
+
+  const isWeeklyManual = (sheetScope === 'WEEKLY' && subMode === 'MANUAL');
+
+  const isNhspOrHrSelfBillBasis = [
+    'NHSP',
+    'NHSP_ADJUSTMENT',
+    'HEALTHROSTER_SELF_BILL',
+    'HEALTHROSTER_ADJUSTMENT'
+  ].includes(basis);
+
+  const segTargets = state.segmentInvoiceTargets || {};
+  state.segmentInvoiceTargets = segTargets;
+
+  const hasTsfin = !!(
+    tsfin &&
+    (
+      tsfin.timesheet_id ||
+      tsfin.total_hours != null ||
+      tsfin.total_pay_ex_vat != null ||
+      tsfin.processing_status
+    )
+  );
+  const hasContractWeek = !!(details.contract_week_id || row.contract_week_id);
+  const isPlannedOnly   = !hasTsfin && hasContractWeek && !tsId;
+
+  L('snapshot', {
+    tsId,
+    mode,
+    segmentsCount: segs.length,
+    shiftsCount: shifts.length,
+    hasOverrides: !!(state && state.segmentOverrides && Object.keys(state.segmentOverrides).length),
+    hasSegmentTargets: !!(state && state.segmentInvoiceTargets && Object.keys(state.segmentInvoiceTargets).length),
+    sheetScope,
+    subMode,
+    basis,
+    isWeeklyManual,
+    hasTsfin,
+    hasContractWeek,
+    isPlannedOnly,
+    locked
+  });
+  GE();
+
+  // UI helper: YYYY-MM-DD → DD-MM-YYYY
+  const fmtYmdDmy = (ymd) => {
+    if (!ymd || typeof ymd !== 'string') return ymd || '';
+    const m = ymd.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (!m) return ymd;
+    const [, y, mo, d] = m;
+    return `${d}-${mo}-${y}`;
+  };
+
+  const computeWeekStartFromWeekEnding = (weYmd) => {
+    if (!weYmd) return null;
+    const d = new Date(`${weYmd}T00:00:00Z`);
+    if (Number.isNaN(d.getTime())) return weYmd;
+    d.setUTCDate(d.getUTCDate() - 6);
+    const yyyy = d.getUTCFullYear();
+    const mm   = String(d.getUTCMonth() + 1).padStart(2, '0');
+    const dd   = String(d.getUTCDate()).toString().padStart(2, '0');
+    return `${yyyy}-${mm}-${dd}`; // internal YMD
+  };
+
+  const toYmd = (d) => {
+    const yyyy = d.getUTCFullYear();
+    const mm   = String(d.getUTCMonth() + 1).padStart(2, '0');
+    const dd   = String(d.getUTCDate()).toString().padStart(2, '0');
+    return `${yyyy}-${mm}-${dd}`; // internal YMD
+  };
+
+  // Current invoice week = Monday of "today"
+  const computeCurrentWeekStart = () => {
+    const now = new Date();
+    const base = new Date(Date.UTC(
+      now.getUTCFullYear(),
+      now.getUTCMonth(),
+      now.getUTCDate()
+    ));
+    const day = base.getUTCDay();           // 0 = Sun .. 6 = Sat
+    const offset = (day + 6) % 7;           // days since Monday
+    base.setUTCDate(base.getUTCDate() - offset);
+    return toYmd(base);
+  };
+
+  const tsWeekEnding     = ts.week_ending_date || row.week_ending_date || null;
+  const naturalWeekStart = tsWeekEnding ? computeWeekStartFromWeekEnding(tsWeekEnding) : null;
+  const currentWeekStart = computeCurrentWeekStart();
+  const pauseWeekStart   = '2099-01-05'; // arbitrary far-future Monday used as "Pause"
+
+  const disabledAttr = locked ? 'disabled' : '';
+
+  const buildInvoiceWeekSelectHtml = (seg) => {
+    if (!isNhspOrHrSelfBillBasis) {
+      return '<span class="mini">—</span>';
+    }
+    const segId = String(seg.segment_id || '');
+    if (!segId) return '<span class="mini">—</span>';
+
+    // Prefer any staged target, then stored target, then THIS week
+    const currentTarget = segTargets[segId] ||
+      seg.invoice_target_week_start ||
+      currentWeekStart ||
+      '';
+
+    const opts = [];
+    const seen = new Set();
+
+    // This week
+    if (currentWeekStart) {
+      opts.push({
+        value: currentWeekStart,
+        label: 'This week'
+      });
+      seen.add(currentWeekStart);
+    }
+
+    // Next week
+    if (currentWeekStart) {
+      const nextDate = new Date(`${currentWeekStart}T00:00:00Z`);
+      nextDate.setUTCDate(nextDate.getUTCDate() + 7);
+      const nextWeekStart = toYmd(nextDate);
+      opts.push({
+        value: nextWeekStart,
+        label: `Week starting ${fmtYmdDmy(nextWeekStart)}`
+      });
+      seen.add(nextWeekStart);
+
+      // Further future weeks (3rd, 4th, ... up to +8 weeks)
+      for (let i = 2; i <= 8; i++) {
+        const d = new Date(`${currentWeekStart}T00:00:00Z`);
+        d.setUTCDate(d.getUTCDate() + i * 7);
+        const ws = toYmd(d);
+        if (!seen.has(ws)) {
+          opts.push({
+            value: ws,
+            label: `Week starting ${fmtYmdDmy(ws)}`
+          });
+          seen.add(ws);
+        }
+      }
+    }
+
+    // Optional: natural week (worked week) as an extra reference option if different
+    if (naturalWeekStart && !seen.has(naturalWeekStart)) {
+      opts.push({
+        value: naturalWeekStart,
+        label: `Natural week (${fmtYmdDmy(naturalWeekStart)})`
+      });
+      seen.add(naturalWeekStart);
+    }
+
+    // Pause / indefinite defer
+    if (!seen.has(pauseWeekStart)) {
+      opts.push({
+        value: pauseWeekStart,
+        label: 'Pause (defer)'
+      });
+      seen.add(pauseWeekStart);
+    }
+
+    let selectedVal = currentTarget || currentWeekStart || '';
+    const optionValues = opts.map(o => o.value);
+    if (!optionValues.includes(selectedVal)) {
+      // If stored target is outside our range, default to "This week" if possible, else Pause
+      selectedVal = optionValues.includes(currentWeekStart)
+        ? currentWeekStart
+        : pauseWeekStart;
+    }
+
+    segTargets[segId] = selectedVal;
+
+    const optionsHtml = opts.map(o => {
+      const sel = (o.value === selectedVal) ? 'selected' : '';
+      return `<option value="${o.value}" ${sel}>${o.label}</option>`;
+    }).join('');
+
+    return `
+      <select
+        name="seg_invoice_week"
+        data-segment-id="${segId}"
+        ${disabledAttr}
+      >
+        ${optionsHtml}
+      </select>
+      <span class="mini">Staged invoice week</span>
+    `;
+  };
+
+  // ─────────────────────────────────────────────────────
+  // A) SEGMENTS mode → existing imported breakdown
+  // ─────────────────────────────────────────────────────
+  if (isSegments && segs.length) {
+    const headHtml = `
+      <thead>
+        <tr>
+          <th>Date</th>
+          <th>Ref / Request</th>
+          <th>Source</th>
+          <th>Hours</th>
+          <th>Pay</th>
+          <th>Charge</th>
+          <th>Exclude from pay</th>
+          <th>Invoice week / Pause</th>
+        </tr>
+      </thead>
+   `;
+
+    const bodyRows = segs.map((seg) => {
+      const effOverride = state.segmentOverrides && state.segmentOverrides[seg.segment_id];
+      const effExclude  = effOverride && Object.prototype.hasOwnProperty.call(effOverride, 'exclude_from_pay')
+        ? !!effOverride.exclude_from_pay
+        : !!seg.exclude_from_pay;
+
+      const srcRaw = seg.source_system || (seg.segment_id || '').split(':')[0] || '';
+      const src  = srcRaw || '';
+      const rawDate = seg.date || seg.work_date || '';
+      const displayDate = rawDate ? fmtYmdDmy(rawDate) : '';
+      const dateCellHtml = displayDate || '<span class="mini">—</span>';
+
+      const hours = seg.total_hours ?? seg.hours_day ?? seg.hours_night ?? seg.hours ?? '';
+      const pay   = seg.pay_amount   ?? seg.pay_ex_vat ?? '';
+      const charge= seg.charge_amount?? seg.charge_ex_vat ?? '';
+
+      const ref   = seg.ref_num || '';
+      const reqId = seg.request_id || '';
+
+      const invoiceWeekCellHtml = buildInvoiceWeekSelectHtml(seg);
+
+      return `
+        <tr data-segment-id="${seg.segment_id}">
+          <td>${dateCellHtml}</td>
+          <td>
+            ${ref ? `<span class="mini">Ref: ${ref}</span>` : ''}
+            ${reqId ? `<br><span class="mini">Req: ${reqId}</span>` : ''}
+            ${(!ref && !reqId) ? '<span class="mini">—</span>' : ''}
+          </td>
+          <td>${src || '<span class="mini">—</span>'}</td>
+          <td>${hours !== '' ? hours : '<span class="mini">—</span>'}</td>
+          <td>${pay   !== '' ? pay   : '<span class="mini">—</span>'}</td>
+          <td>${charge!== '' ? charge: '<span class="mini">—</span>'}</td>
+          <td>
+            <input
+              type="checkbox"
+              name="seg_exclude_from_pay"
+              data-segment-id="${seg.segment_id}"
+              ${effExclude ? 'checked' : ''}
+              ${disabledAttr}
+            />
+            <span class="mini">Tick = exclude from pay (staged)</span>
+          </td>
+          <td>
+            ${invoiceWeekCellHtml}
+          </td>
+        </tr>
+      `;
+    }).join('');
+
+    return `
+      <div class="tabc">
+        <div class="card">
+          <div class="row">
+            <label>Timesheet ID</label>
+            <div class="controls">${tsId || '<span class="mini">Unknown</span>'}</div>
+          </div>
+          <div class="row">
+            <label>Mode</label>
+            <div class="controls">
+              <span class="mini">Invoice breakdown mode: ${mode || 'UNKNOWN'} (basis: ${basis || 'UNKNOWN'})</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="card" style="margin-top:10px;">
+          <div class="row">
+            <label>Lines</label>
+            <div class="controls">
+              <div style="max-height:320px;overflow:auto;">
+                <table class="grid mini">
+                  ${headHtml}
+                  <tbody>
+                    ${bodyRows}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+          <div class="row">
+            <label></label>
+            <div class="controls">
+              <span class="mini">
+                Changes to "Exclude from pay" and "Invoice week / Pause" are staged only. They are applied when you click Save on the Timesheet modal.
+              </span>
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  // ─────────────────────────────────────────────────────
+  // B) WEEKLY context → per-day schedule grid
+  //     - MANUAL: editable (if not locked)
+  //     - ELECTRONIC: read-only, but shown in the same grid
+  // ─────────────────────────────────────────────────────
+  if (sheetScope === 'WEEKLY') {
+    const scheduleArr = Array.isArray(state.schedule) ? state.schedule.slice() : [];
+    const hasSchedule = scheduleArr.length > 0;
+    const hasTs       = !!tsId;
+    const isPlannedSchedule = !hasTs; // once TS exists, we never show “planned” again
+
+    const canEditSchedule = !locked && subMode === 'MANUAL';
+
+    const badgeHtml = isPlannedSchedule
+      ? (subMode === 'MANUAL'
+          ? '<span class="pill pill-bad">PLANNED (manual)</span>'
+          : '<span class="pill pill-info">PLANNED (electronic, read-only)</span>')
+      : (subMode === 'MANUAL'
+          ? '<span class="pill pill-ok">CONFIRMED HOURS (manual)</span>'
+          : '<span class="pill pill-elec">CONFIRMED HOURS (electronic, read-only)</span>');
+
+    const weekEnding = tsWeekEnding || row.week_ending_date || null;
+
+    const uiRows = [];
+    const dowShort = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+
+    // How many *extra* break lines per day (beyond the primary)?
+    let extraBreakCount = 0;
+    if (Number.isFinite(Number(state.extraBreakCount))) {
+      extraBreakCount = Math.max(0, Number(state.extraBreakCount));
+    }
+    state.extraBreakCount = extraBreakCount;
+
+    const pushRowFromSeg = (seg) => {
+      if (!seg || !seg.date) return;
+      const d = new Date(`${seg.date}T00:00:00Z`);
+      const dow = Number.isNaN(d.getTime()) ? '' : dowShort[d.getUTCDay()];
+
+      const start       = seg.start        || '';
+      const end         = seg.end          || '';
+      const breakStart  = seg.break_start  || '';
+      const breakEnd    = seg.break_end    || '';
+      const breakMins   = (seg.break_mins != null && seg.break_mins !== '') ? String(seg.break_mins) : '';
+
+      // Any extra break windows persisted in schedule.breaks (beyond the primary)
+      const breaksArr = Array.isArray(seg.breaks) ? seg.breaks.filter(b => b && (b.start || b.end)) : [];
+      const extra_breaks = breaksArr.length > 1 ? breaksArr.slice(1) : [];
+
+      // Simple paid-hours preview: shift minus total break (minutes)
+      const toMins = (hhmm) => {
+        if (!hhmm || typeof hhmm !== 'string') return null;
+        const m = hhmm.trim();
+        const parts = m.split(':');
+        if (parts.length !== 2) return null;
+        const h = Number(parts[0]);
+        const mm = Number(parts[1]);
+        if (!Number.isFinite(h) || !Number.isFinite(mm)) return null;
+        return h * 60 + mm;
+      };
+
+      const sMin = toMins(start);
+      const eMin = toMins(end);
+
+      let paid = '';
+      if (sMin != null && eMin != null) {
+        let shiftMinutes = eMin - sMin;
+        if (shiftMinutes < 0) {
+          // Overnight shift: assume wraps to next day
+          shiftMinutes += 24 * 60;
+        }
+        const b = Number(breakMins || 0);
+        const paidMin = Math.max(0, shiftMinutes - (Number.isFinite(b) ? b : 0));
+        paid = paidMin > 0 ? (Math.round((paidMin / 60) * 100) / 100).toFixed(2) : '0.00';
+      }
+
+      uiRows.push({
+        date: seg.date,
+        dow,
+        start,
+        end,
+        break_start: breakStart,
+        break_end:   breakEnd,
+        break_mins:  breakMins,
+        extra_breaks,
+        paid_hours:  paid
+      });
+    };
+
+    if (hasSchedule) {
+      scheduleArr.forEach(seg => pushRowFromSeg(seg));
+    } else if (weekEnding) {
+      // If no schedule yet but we know the week ending, build 7 blank rows (Mon–Sun)
+      try {
+        const base = new Date(`${weekEnding}T00:00:00Z`);
+        for (let offset = 6; offset >= 0; offset--) {
+          const d = new Date(base);
+          d.setUTCDate(base.getUTCDate() - offset);
+          const yyyy = d.getUTCFullYear();
+          const mm   = String(d.getUTCMonth() + 1).padStart(2, '0');
+          const dd   = String(d.getUTCDate()).toString().padStart(2, '0');
+          const ymd  = `${yyyy}-${mm}-${dd}`;
+          const dow  = dowShort[d.getUTCDay()];
+          uiRows.push({
+            date: ymd,
+            dow,
+            start: '',
+            end: '',
+            break_start: '',
+            break_end: '',
+            break_mins: '',
+            extra_breaks: [],
+            paid_hours: ''
+          });
+        }
+      } catch {
+        // fallback: single row with no date
+        uiRows.push({
+          date: '',
+          dow:  '',
+          start: '',
+          end: '',
+          break_start: '',
+          break_end: '',
+          break_mins: '',
+          extra_breaks: [],
+          paid_hours: ''
+        });
+      }
+    } else {
+      // fallback: single “unknown date” row
+      uiRows.push({
+        date: '',
+        dow:  '',
+        start: '',
+        end: '',
+        break_start: '',
+        break_end: '',
+        break_mins: '',
+        extra_breaks: [],
+        paid_hours: ''
+      });
+    }
+
+    const disabledAttrManual = (!canEditSchedule) ? 'disabled' : '';
+
+    const rowsHtml = uiRows.map((r, idx) => {
+      const dateAttr = r.date ? ` data-date="${r.date}"` : '';
+      const displayDate = r.date ? fmtYmdDmy(r.date) : '';
+      const dateCellHtml = displayDate || '<span class="mini">—</span>';
+      const paidText = r.paid_hours || '';
+      const extraBreaks = Array.isArray(r.extra_breaks) ? r.extra_breaks : [];
+
+      const extraStartInputs = [];
+      const extraEndInputs   = [];
+
+      for (let i = 0; i < extraBreakCount; i++) {
+        const b = extraBreaks[i] || {};
+        const extraStart = b.start || '';
+        const extraEnd   = b.end   || '';
+
+        extraStartInputs.push(`
+          <input type="text"
+                 class="input mini"
+                 name="sched_break_start_extra_${i}"
+                 data-extra-break="start"
+                 data-extra-index="${i}"
+                 ${r.date ? `data-date="${r.date}"` : ''}
+                 value="${escapeHtml(extraStart || '')}"
+                 ${disabledAttrManual} />
+        `);
+
+        extraEndInputs.push(`
+          <input type="text"
+                 class="input mini"
+                 name="sched_break_end_extra_${i}"
+                 data-extra-break="end"
+                 data-extra-index="${i}"
+                 ${r.date ? `data-date="${r.date}"` : ''}
+                 value="${escapeHtml(extraEnd || '')}"
+                 ${disabledAttrManual} />
+        `);
+      }
+
+      const extraStartBlock = extraStartInputs.length
+        ? `<div class="extra-breaks">${extraStartInputs.join('<br/>')}</div>`
+        : '';
+
+      const extraEndBlock = extraEndInputs.length
+        ? `<div class="extra-breaks">${extraEndInputs.join('<br/>')}</div>`
+        : '';
+
+      return `
+        <tr data-row-idx="${idx}"${dateAttr}>
+          <td>${r.dow || '<span class="mini">—</span>'}</td>
+          <td>${dateCellHtml}</td>
+          <td>
+            <input type="text"
+                   class="input"
+                   name="sched_start"
+                   data-sched-field="start"
+                   ${r.date ? `data-date="${r.date}"` : ''}
+                   value="${escapeHtml(r.start || '')}"
+                   ${disabledAttrManual} />
+          </td>
+          <td>
+            <input type="text"
+                   class="input"
+                   name="sched_end"
+                   data-sched-field="end"
+                   ${r.date ? `data-date="${r.date}"` : ''}
+                   value="${escapeHtml(r.end || '')}"
+                   ${disabledAttrManual} />
+          </td>
+          <td>
+            <input type="text"
+                   class="input"
+                   name="sched_break_start"
+                   data-sched-field="break_start"
+                   ${r.date ? `data-date="${r.date}"` : ''}
+                   value="${escapeHtml(r.break_start || '')}"
+                   ${disabledAttrManual} />
+            ${extraStartBlock}
+          </td>
+          <td>
+            <input type="text"
+                   class="input"
+                   name="sched_break_end"
+                   data-sched-field="break_end"
+                   ${r.date ? `data-date="${r.date}"` : ''}
+                   value="${escapeHtml(r.break_end || '')}"
+                   ${disabledAttrManual} />
+            ${extraEndBlock}
+          </td>
+          <td>
+            <input type="number"
+                   step="1"
+                   min="0"
+                   class="input"
+                   name="sched_break_mins"
+                   data-sched-field="break_mins"
+                   ${r.date ? `data-date="${r.date}"` : ''}
+                   value="${escapeHtml(r.break_mins || '')}"
+                   ${disabledAttrManual} />
+          </td>
+          <td>
+            <span class="mini sched-paid-hours" ${r.date ? `data-date="${r.date}"` : ''}>
+              ${paidText || ''}
+            </span>
+          </td>
+        </tr>
+      `;
+    }).join('');
+
+    const resetButtonHtml = (!canEditSchedule)
+      ? ''
+      : `
+        <button type="button"
+                class="btn mini"
+                data-ts-action="reset-schedule">
+          Reset timesheet schedule
+        </button>
+      `;
+
+    // Extra Breaks + / − buttons (wired in modal JS)
+    const extraBreakButtonsHtml = (!canEditSchedule)
+      ? ''
+      : `
+        <button type="button"
+                class="btn mini"
+                data-ts-action="extra-break-add">
+          Extra breaks +
+        </button>
+        <button type="button"
+                class="btn mini"
+                data-ts-action="extra-break-remove">
+          Extra breaks -
+        </button>
+      `;
+
+    const scheduleHelpText = canEditSchedule
+      ? 'Enter Start/End and either a specific Break window or a Break length in minutes. Paid hours are calculated as shift length minus break. Changes are staged only and applied when you click Save.'
+      : 'Electronic schedule is shown read-only. To override the hours, convert this timesheet to manual first.';
+
+    return `
+      <div class="tabc">
+        <div class="card">
+          <div class="row">
+            <label>Status</label>
+            <div class="controls">
+              ${badgeHtml}
+              <span class="mini" style="margin-left:8px;">
+                ${isPlannedSchedule
+                  ? 'Planned schedule is shown here. Editing is only allowed when this week is in MANUAL mode.'
+                  : 'Confirmed hours reflect the actual times stored for this timesheet.'}
+              </span>
+            </div>
+          </div>
+          <div class="row">
+            <label>Timesheet ID</label>
+            <div class="controls">
+              ${tsId || '<span class="mini">Not yet created (planned week)</span>'}
+            </div>
+          </div>
+        </div>
+
+        <div class="card" style="margin-top:10px;">
+          <div class="row">
+            <label>Weekly schedule</label>
+            <div class="controls">
+              <div style="max-height:340px;overflow:auto;">
+                <table class="grid mini" id="tsWeeklySchedule">
+                  <thead>
+                    <tr>
+                      <th>Day</th>
+                      <th>Date</th>
+                      <th>Start</th>
+                      <th>End</th>
+                      <th>Break start</th>
+                      <th>Break end</th>
+                      <th>Break (mins)</th>
+                      <th>Paid hours</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    ${rowsHtml}
+                  </tbody>
+                </table>
+              </div>
+              <span class="mini" style="display:block;margin-top:4px;">
+                ${scheduleHelpText}
+              </span>
+              ${locked ? '<span class="mini"> This timesheet is locked (paid/invoiced); schedule is read-only.</span>' : ''}
+              <div style="margin-top:8px;">
+                ${resetButtonHtml}
+                ${extraBreakButtonsHtml}
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  // ─────────────────────────────────────────────────────
+  // C) DAILY / SELF-REPORTED context → single shift row (read-only)
+  // ─────────────────────────────────────────────────────
+  if (sheetScope === 'DAILY') {
+    const enc = escapeHtml;
+
+    // Derive date from worked_start_iso or fallback to week_ending_date/row
+    const startIso = ts.worked_start_iso || null;
+    const endIso   = ts.worked_end_iso   || null;
+    const brStartIso = ts.break_start_iso || null;
+    const brEndIso   = ts.break_end_iso   || null;
+    const brMinsRaw  = ts.break_minutes   != null ? Number(ts.break_minutes) : null;
+
+    const toLocalHHMM = (iso) => {
+      if (!iso) return '';
+      const d = new Date(iso);
+      if (Number.isNaN(d.getTime())) return '';
+      try {
+        const s = d.toLocaleTimeString('en-GB', {
+          hour: '2-digit',
+          minute: '2-digit',
+          hour12: false,
+          timeZone: 'Europe/London'
+        });
+        return s;
+      } catch {
+        const hh = String(d.getHours()).padStart(2, '0');
+        const mm = String(d.getMinutes()).padStart(2, '0');
+        return `${hh}:${mm}`;
+      }
+    };
+
+    const toLocalDateYmd = (iso) => {
+      if (!iso) return tsWeekEnding || row.week_ending_date || '';
+      const d = new Date(iso);
+      if (Number.isNaN(d.getTime())) return tsWeekEnding || row.week_ending_date || '';
+      const yyyy = d.getFullYear();
+      const mm   = String(d.getMonth() + 1).padStart(2, '0');
+      const dd   = String(d.getDate()).toString().padStart(2, '0');
+      return `${yyyy}-${mm}-${dd}`; // YMD, will be formatted for UI
+    };
+
+    const toLocalDowShort = (isoOrYmd) => {
+      if (!isoOrYmd) return '';
+      let d;
+      if (/^\d{4}-\d{2}-\d{2}$/.test(isoOrYmd)) {
+        d = new Date(`${isoOrYmd}T00:00:00Z`);
+      } else {
+        d = new Date(isoOrYmd);
+      }
+      if (Number.isNaN(d.getTime())) return '';
+      return d.toLocaleDateString('en-GB', {
+        weekday: 'short',
+        timeZone: 'Europe/London'
+      });
+    };
+
+    const dateYmd = toLocalDateYmd(startIso);
+    const dateDmy = dateYmd ? fmtYmdDmy(dateYmd) : '';
+    const dowShort = toLocalDowShort(dateYmd);
+
+    const startHHMM = toLocalHHMM(startIso);
+    const endHHMM   = toLocalHHMM(endIso);
+    const brStartHHMM = toLocalHHMM(brStartIso);
+    const brEndHHMM   = toLocalHHMM(brEndIso);
+
+    // Paid hours preview (for display only)
+    let paidHoursText = '';
+    try {
+      if (startIso && endIso) {
+        const dStart = new Date(startIso);
+        const dEnd   = new Date(endIso);
+        if (!Number.isNaN(dStart.getTime()) && !Number.isNaN(dEnd.getTime())) {
+          let diffMin = (dEnd.getTime() - dStart.getTime()) / 60000;
+          if (diffMin < 0) diffMin = 0;
+          const brMin = Number.isFinite(brMinsRaw) && brMinsRaw > 0 ? brMinsRaw : 0;
+          const paidMin = Math.max(0, diffMin - brMin);
+          paidHoursText = paidMin > 0
+            ? (Math.round((paidMin / 60) * 100) / 100).toFixed(2)
+            : '0.00';
+        }
+      }
+    } catch {
+      paidHoursText = '';
+    }
+
+    const badgeHtml = `
+      <span class="pill pill-elec">Electronic daily shift</span>
+      <span class="mini" style="margin-left:8px;">
+        Start/End and break times are shown read-only. To override the hours, convert this timesheet to manual.
+      </span>
+    `;
+
+    return `
+      <div class="tabc">
+        <div class="card">
+          <div class="row">
+            <label>Status</label>
+            <div class="controls">
+              ${badgeHtml}
+            </div>
+          </div>
+          <div class="row">
+            <label>Timesheet ID</label>
+            <div class="controls">
+              ${tsId || '<span class="mini">Unknown</span>'}
+            </div>
+          </div>
+        </div>
+
+        <div class="card" style="margin-top:10px;">
+          <div class="row">
+            <label>Shift details</label>
+            <div class="controls">
+              <div style="max-height:240px;overflow:auto;">
+                <table class="grid mini">
+                  <thead>
+                    <tr>
+                      <th>Day</th>
+                      <th>Date</th>
+                      <th>Start</th>
+                      <th>End</th>
+                      <th>Break start</th>
+                      <th>Break end</th>
+                      <th>Break (mins)</th>
+                      <th>Paid hours</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr>
+                      <td>${dowShort || '<span class="mini">—</span>'}</td>
+                      <td>${dateDmy || '<span class="mini">—</span>'}</td>
+                      <td>${startHHMM || '<span class="mini">—</span>'}</td>
+                      <td>${endHHMM   || '<span class="mini">—</span>'}</td>
+                      <td>${brStartHHMM || '<span class="mini">—</span>'}</td>
+                      <td>${brEndHHMM   || '<span class="mini">—</span>'}</td>
+                      <td>${Number.isFinite(brMinsRaw) && brMinsRaw > 0 ? brMinsRaw : 0}</td>
+                      <td>${paidHoursText || '<span class="mini">—</span>'}</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+              <span class="mini" style="display:block;margin-top:4px;">
+                Bucketed hours and pay/charge for this shift are shown in the Finance tab.
+              </span>
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  // ─────────────────────────────────────────────────────
+  // D) Fallback – no detailed lines
+  // ─────────────────────────────────────────────────────
+  const fallbackMsg = isPlannedOnly
+    ? `
+      <span class="mini">
+        This is a planned/open week without a financial snapshot yet.
+        Once the week is processed, a detailed line breakdown will appear here.
+      </span>
+    `
+    : `
+      <span class="mini">
+        This timesheet does not have a detailed line breakdown for editing in this view.
+      </span>
+    `;
+
+  return `
+    <div class="tabc">
+      <div class="card">
+        <div class="row">
+          <label>Lines</label>
+          <div class="controls">
+            ${fallbackMsg}
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+
 // Utility: map route_type / status to pill CSS classes
 function classifyTimesheetPill(kind, value) {
   const v = String(value || '').toUpperCase();
