@@ -31354,19 +31354,23 @@ async function openTimesheet(row) {
       return { ok: true, saved: updatedRow };
     };
 
-    const title = hasTs
-      ? `Timesheet ${String(tsId).slice(0, 8)}…`
-      : `Weekly timesheet (planned) ${String(weekId).slice(0, 8)}…`;
+ const title = hasTs
+  ? `Timesheet ${String(tsId).slice(0, 8)}…`
+  : `Weekly timesheet (planned) ${String(weekId).slice(0, 8)}…`;
 
-    showModal(
-      title,
-      tabDefs,
-      renderTab,
-      onSaveTimesheet,
-      !!hasTs,
-      undefined,
-      { kind: 'timesheets' }
-    );
+// hasId should also be true for planned weeks (contract_week exists)
+const hasRecordId = !!(hasTs || isPlannedWeek);
+
+showModal(
+  title,
+  tabDefs,
+  renderTab,
+  onSaveTimesheet,
+  hasRecordId,        // ⬅️ now true for planned weeks as well
+  undefined,
+  { kind: 'timesheets' }
+);
+
 
     GE();
   } catch (err) {
