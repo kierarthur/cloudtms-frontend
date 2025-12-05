@@ -21042,10 +21042,42 @@ if (this.entity === 'candidates' && k === 'pay') {
                   'but this manual override will become the current record.'
                 );
                 if (!ok) return;
+
                 try {
                   await switchTimesheetToManual(tsId);
-                  window.__toast && window.__toast('Weekly timesheet switched to manual. You can now enter manual hours.');
-                  try { byId('btnCloseModal').click(); } catch {}
+
+                  // Update local modal context to reflect MANUAL submission_mode
+                  try {
+                    const mc2 = window.modalCtx || {};
+                    if (mc2.data) {
+                      mc2.data.submission_mode = 'MANUAL';
+                    }
+                    if (mc2.timesheetDetails && mc2.timesheetDetails.timesheet) {
+                      mc2.timesheetDetails.timesheet.submission_mode = 'MANUAL';
+                    }
+                  } catch (e) {
+                    if (LOGM) LT('switchManual: local modalCtx update failed (non-fatal)', e);
+                  }
+
+                  window.__toast && window.__toast(
+                    'Weekly timesheet switched to manual. Click Edit to adjust hours.'
+                  );
+
+                  // Repaint the Overview tab in VIEW mode so pills + actions update
+                  try {
+                    if (typeof window.__getModalFrame === 'function') {
+                      const fr = window.__getModalFrame();
+                      if (fr && fr.entity === 'timesheets') {
+                        fr.mode = 'view';                 // stay in view; Edit button remains available
+                        fr._suppressDirty = true;
+                        fr.setTab('overview');            // re-render Overview with MANUAL state
+                        fr._suppressDirty = false;
+                        fr._updateButtons && fr._updateButtons();
+                      }
+                    }
+                  } catch (e) {
+                    if (LOGM) LT('switchManual: repaint after convert failed (non-fatal)', e);
+                  }
                 } catch (err) {
                   if (LOGM) console.warn('[TS][OVERVIEW] switchTimesheetToManual failed', err);
                   alert(err?.message || 'Failed to switch timesheet to manual.');
@@ -21053,6 +21085,7 @@ if (this.entity === 'candidates' && k === 'pay') {
               });
             }
           }
+
 
           // NEW: Revert to original electronic (versioned) — VIEW mode only
           if (revertElecBtn) {
@@ -27887,6 +27920,7 @@ function renderTimesheetLinesTab(ctx) {
     return toYmd(base);
   };
 
+  // 🔹 internal WE used by weekly + daily display
   const tsWeekEnding     = ts.week_ending_date || row.week_ending_date || null;
   const naturalWeekStart = tsWeekEnding ? computeWeekStartFromWeekEnding(tsWeekEnding) : null;
   const currentWeekStart = computeCurrentWeekStart();
@@ -28693,7 +28727,7 @@ function renderTimesheetOverviewTab(ctx) {
     (row.candidate_name && enc(row.candidate_name)) ||
     (row.occupant_key_norm && enc(row.occupant_key_norm)) ||
     (rCand.first_name || rCand.last_name
-      ? enc([rCand.first_name, rCand.last_name].filter(Boolean).join(' ')) 
+      ? enc([rCand.first_name, rCand.last_name].filter(Boolean).join(' '))
       : 'Unknown candidate');
 
   const clientName =
@@ -28713,6 +28747,7 @@ function renderTimesheetOverviewTab(ctx) {
 
   const weYmd = ts.week_ending_date || row.week_ending_date || null;
 
+  // YYYY-MM-DD → DD-MM-YYYY (for UI)
   const fmtYmdToDmy = (ymd) => {
     if (!ymd || typeof ymd !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(ymd)) return enc(ymd || '');
     const [y, m, d] = ymd.split('-');
@@ -28772,6 +28807,11 @@ function renderTimesheetOverviewTab(ctx) {
 
   const fmtMoney = (v) => isNaN(Number(v)) ? '—' : `£${(Math.round(Number(v) * 100) / 100).toFixed(2)}`;
 
+  // contract_week context (for planned/manual weekly)
+  const cwId         = details.contract_week_id || cw.id || row.contract_week_id || null;
+  const cwSubSnapRaw = cw.submission_mode_snapshot || row.submission_mode || '';
+  const cwSubSnap    = String(cwSubSnapRaw || '').toUpperCase();
+
   L('snapshot', {
     tsId,
     sheetScope,
@@ -28786,7 +28826,9 @@ function renderTimesheetOverviewTab(ctx) {
     weYmd,
     hasTsfin,
     hasContractWeek,
-    isPlannedOnly
+    isPlannedOnly,
+    cwId,
+    cwSubSnap
   });
   GE();
 
@@ -28917,35 +28959,88 @@ function renderTimesheetOverviewTab(ctx) {
     : (ts.reference_number || row.reference_number || '');
 
   // ───── Action gating ─────
-  const hasTs          = !!tsId;
+  const hasTs = !!tsId;
+  const locked = isPaid || isInvoiced;
+
+  // Existing weekly electronic TS → MANUAL
   const canSwitchToManualWeekly =
     hasTs &&
     sheetScope === 'WEEKLY' &&
     subMode === 'ELECTRONIC' &&
-    !isPaid &&
-    !isInvoiced;
+    !locked;
+
+  // Planned/open weekly (no TS yet) → MANUAL via contract_week.switch-mode
+  const isPlannedWeekly = !hasTs && sheetScope === 'WEEKLY' && !!cwId;
+  const canSwitchWeekToManualPlanned =
+    isPlannedWeekly &&
+    cwSubSnap === 'ELECTRONIC' &&
+    !locked;
+
+  // Revert to original electronic (TS versioning) – backend enforces the real rules
+  const canRevertElectronic =
+    hasTs &&
+    sheetScope === 'WEEKLY' &&
+    subMode === 'MANUAL' &&
+    !locked;
+
+  // Delete manual TS and reopen week for electronic
+  const canDeleteManualReopen =
+    hasTs &&
+    sheetScope === 'WEEKLY' &&
+    subMode === 'MANUAL' &&
+    !!cwId &&
+    !locked;
 
   // Allow permanent delete for any non-paid, non-invoiced TS
   const canDeletePermanently =
     hasTs &&
-    !isPaid &&
-    !isInvoiced;
+    !locked;
 
   let actionsHtml = '';
 
-  if (hasTs) {
+  if (hasTs || isPlannedWeekly) {
     const buttons = [];
 
-    if (canSwitchToManualWeekly) {
+    // Convert to manual (existing TS or planned week)
+    if (canSwitchToManualWeekly || canSwitchWeekToManualPlanned) {
+      const label = hasTs
+        ? 'Convert to manual timesheet'
+        : 'Convert planned week to manual timesheet';
+
       buttons.push(`
         <button type="button"
                 class="btn"
                 data-ts-action="switch-manual">
-          Convert to manual timesheet
+          ${label}
         </button>
       `);
     }
 
+    // Revert to original electronic TS (if an electronic version exists)
+    if (canRevertElectronic) {
+      buttons.push(`
+        <button type="button"
+                class="btn"
+                style="margin-left:8px;"
+                data-ts-action="revert-electronic">
+          Restore original electronic timesheet
+        </button>
+      `);
+    }
+
+    // Delete manual + reopen week for electronic
+    if (canDeleteManualReopen) {
+      buttons.push(`
+        <button type="button"
+                class="btn"
+                style="margin-left:8px;"
+                data-ts-action="delete-manual-reopen">
+          Delete manual & reopen week for electronic
+        </button>
+      `);
+    }
+
+    // Permanent delete (any unlocked TS)
     if (canDeletePermanently) {
       buttons.push(`
         <button type="button"
@@ -28967,7 +29062,7 @@ function renderTimesheetOverviewTab(ctx) {
       `;
     }
   } else {
-    // Planned week (no TS yet) – no TS-level actions, only schedule-level in Lines
+    // Planned week (no TS yet, and no contract_week id – very edge case)
     actionsHtml = `
       <span class="mini">
         This is a planned/open week without a timesheet yet. Once a manual or electronic
@@ -29044,6 +29139,47 @@ function renderTimesheetOverviewTab(ctx) {
   `;
 }
 
+async function switchContractWeekToManual(weekId) {
+  const { LOGM, L, GC, GE } = getTsLoggers('[TS][CW-SWITCH-MANUAL]');
+  GC('switchContractWeekToManual');
+
+  if (!weekId) {
+    GE();
+    throw new Error('switchContractWeekToManual: weekId is required');
+  }
+
+  const encId = encodeURIComponent(weekId);
+  const url   = API(`/api/contract-weeks/${encId}/switch-mode`);
+
+  L('REQUEST', { url, weekId });
+
+  let res, text;
+  try {
+    res  = await authFetch(url, { method: 'POST' });
+    text = await res.text();
+  } catch (err) {
+    L('network error', err);
+    GE();
+    throw err;
+  }
+
+  if (!res.ok) {
+    L('server error', { status: res.status, bodyPreview: text.slice(0, 400) });
+    GE();
+    throw new Error(text || `Failed to switch contract week ${weekId} to manual`);
+  }
+
+  let json = {};
+  try {
+    json = text ? JSON.parse(text) : {};
+  } catch (err) {
+    L('parse error', err);
+  }
+
+  L('RESULT', json);
+  GE();
+  return json;
+}
 
 function renderTimesheetIssuesTab(ctx) {
   const { LOGM, L, GC, GE } = getTsLoggers('[TS][ISSUES]');
@@ -30785,15 +30921,28 @@ async function openTimesheet(row) {
       schedule = null;
     }
 
-    // Simple meta flags for downstream gating (delete etc.)
-    const isPaid        = !!tsfin.paid_at_utc;
-    const isInvoiced    = !!tsfin.locked_by_invoice_id;
+    // Simple meta flags for downstream gating (delete, revert, etc.)
+    const isPaid     = !!tsfin.paid_at_utc;
+    const isInvoiced = !!tsfin.locked_by_invoice_id;
     const canDeletePerm = !!(hasTs && !isPaid && !isInvoiced);
+
+    // Contract-week meta for actions on planned/open weeks
+    const cwId =
+      details.contract_week_id ||
+      (details.contract_week && details.contract_week.id) ||
+      baseRow.contract_week_id ||
+      null;
+
+    const cwSubSnapRaw =
+      (details.contract_week && details.contract_week.submission_mode_snapshot) ||
+      baseRow.submission_mode ||
+      '';
+    const cwSubSnap = String(cwSubSnapRaw || '').toUpperCase();
 
     window.modalCtx = {
       ...(window.modalCtx || {}),
       entity: 'timesheets',
-      // Existing TS → view, planned week → edit
+      // Existing TS → view, planned week → edit (actual modal frame mode is decided in showModal)
       mode: hasTs ? 'view' : 'edit',
       data: {
         ...baseRow,
@@ -30811,7 +30960,7 @@ async function openTimesheet(row) {
         segmentInvoiceTargets: {},
         manualHours,
         additionalRates,
-        schedule          // NEW: schedule state seeded from TS (and later from planned std schedule)
+        schedule          // schedule state seeded from TS or planned std schedule
       },
       timesheetMeta: {
         hasTs,
@@ -30820,7 +30969,9 @@ async function openTimesheet(row) {
         subMode,
         isPaid,
         isInvoiced,
-        canDeletePermanently: canDeletePerm
+        canDeletePermanently: canDeletePerm,
+        contract_week_id: cwId,
+        cw_submission_mode_snapshot: cwSubSnap
       }
     };
 
@@ -31187,7 +31338,6 @@ async function openTimesheet(row) {
     GE();
   }
 }
-
 
 
 function renderTimesheetRelatedTab(ctx) {
