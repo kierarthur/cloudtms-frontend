@@ -27661,7 +27661,6 @@ function classifyTimesheetPill(kind, value) {
       return 'pill pill-muted';
   }
 }
-
 function renderTimesheetOverviewTab(ctx) {
   const { LOGM, L, GC, GE } = getTsLoggers('[TS][OVERVIEW]');
   const { row, details, related, state } = normaliseTimesheetCtx(ctx);
@@ -27984,10 +27983,10 @@ function renderTimesheetOverviewTab(ctx) {
     </div>
   `;
 
-  // Shift breakdown card (unchanged)
-  // ...
-
-  // (keep your existing breakdownHtml / linesCardHtml code here)
+  // Shift breakdown / lines summary card
+  // For now we keep this as an optional section; if you later want to add
+  // a weekly summary (e.g. list of days/hours), build it into linesCardHtml.
+  let linesCardHtml = '';
 
   return `
     <div class="tabc">
@@ -27997,6 +27996,7 @@ function renderTimesheetOverviewTab(ctx) {
     </div>
   `;
 }
+
 
 function renderTimesheetIssuesTab(ctx) {
   const { LOGM, L, GC, GE } = getTsLoggers('[TS][ISSUES]');
