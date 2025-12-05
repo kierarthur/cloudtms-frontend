@@ -22396,7 +22396,44 @@ const setCloseLabel = ()=>{
       }
       } else {
 
-      btnEdit.style.display = (top.mode==='view' && top.hasId) ? '' : 'none';
+          // ── Edit button gating ──
+      let canEdit = false;
+
+      if (top.entity === 'timesheets') {
+        // Use meta seeded by openTimesheet
+        const meta = (window.modalCtx && window.modalCtx.timesheetMeta) || {};
+        const sheetScope = String(meta.sheetScope || '').toUpperCase();
+        const subMode    = String(meta.subMode    || '').toUpperCase();
+        const isWeekly   = (sheetScope === 'WEEKLY');
+        const hasTsMeta  = !!meta.hasTs;
+        const isPaid     = !!meta.isPaid;
+        const isInvoiced = !!meta.isInvoiced;
+        const cwMode     = String(meta.cw_submission_mode_snapshot || '').toUpperCase();
+        const isPlanned  = !!meta.isPlannedWeek;
+
+        // 1) Weekly MANUAL *real* timesheet, not paid/invoiced
+        const isWeeklyManualTs =
+          hasTsMeta &&
+          isWeekly &&
+          subMode === 'MANUAL' &&
+          !isPaid &&
+          !isInvoiced;
+
+        // 2) Planned/open weekly week whose contract_week snapshot is MANUAL
+        const isPlannedManualWeek =
+          !hasTsMeta &&
+          isPlanned &&
+          isWeekly &&
+          cwMode === 'MANUAL';
+
+        canEdit = (top.mode === 'view') && (isWeeklyManualTs || isPlannedManualWeek);
+      } else {
+        // Default for non-timesheet entities
+        canEdit = (top.mode === 'view' && top.hasId);
+      }
+
+      btnEdit.style.display = canEdit ? '' : 'none';
+
 
    if (relatedBtn) {
   // Map modal entity → backend /api/related entity key
@@ -30143,419 +30180,6 @@ function renderTimesheetOverviewTab(ctx) {
       ${headerHtml}
       ${routeHtml}
       ${linesCardHtml}
-    </div>
-  `;
-}
-
-function renderTimesheetFinanceTab(ctx) {
-  const { LOGM, L, GC, GE } = getTsLoggers('[TS][FINANCE]');
-  const { row, details, related, state } = normaliseTimesheetCtx(ctx);
-
-  GC('render');
-  const ts    = details.timesheet || {};
-  const tsfin = details.tsfin     || {};
-  const enc   = escapeHtml;
-
-  const fmtMoney = (v) =>
-    isNaN(Number(v)) ? '—' : `£${(Math.round(Number(v) * 100) / 100).toFixed(2)}`;
-
-  // Core TSFIN-derived buckets
-  const hours = {
-    day:   Number(tsfin.hours_day   || 0),
-    night: Number(tsfin.hours_night || 0),
-    sat:   Number(tsfin.hours_sat   || 0),
-    sun:   Number(tsfin.hours_sun   || 0),
-    bh:    Number(tsfin.hours_bh    || 0)
-  };
-
-  const pay = {
-    day:   tsfin.pay_day,
-    night: tsfin.pay_night,
-    sat:   tsfin.pay_sat,
-    sun:   tsfin.pay_sun,
-    bh:    tsfin.pay_bh
-  };
-
-  const chg = {
-    day:   tsfin.charge_day,
-    night: tsfin.charge_night,
-    sat:   tsfin.charge_sat,
-    sun:   tsfin.charge_sun,
-    bh:    tsfin.charge_bh
-  };
-
-  const buckets = ['day','night','sat','sun','bh'];
-  const bucketLabel = {
-    day:  'Day',
-    night:'Night',
-    sat:  'Saturday',
-    sun:  'Sunday',
-    bh:   'Bank Holiday'
-  };
-
-  const tsfinBucketRows = buckets.map(b => {
-    const hrs   = hours[b] || 0;
-    const payR  = pay[b] != null ? Number(pay[b]) : null;
-    const chgR  = chg[b] != null ? Number(chg[b]) : null;
-    const payEx = payR != null ? hrs * payR : null;
-    const chgEx = chgR != null ? hrs * chgR : null;
-    const marEx = (payEx != null && chgEx != null) ? (chgEx - payEx) : null;
-
-    return `
-      <tr>
-        <td>${bucketLabel[b]}</td>
-        <td>${hrs || 0}</td>
-        <td>${payR != null ? fmtMoney(payR) : '—'}</td>
-        <td>${chgR != null ? fmtMoney(chgR) : '—'}</td>
-        <td>${payEx != null ? fmtMoney(payEx) : '—'}</td>
-        <td>${chgEx != null ? fmtMoney(chgEx) : '—'}</td>
-        <td>${marEx != null ? fmtMoney(marEx) : '—'}</td>
-      </tr>
-    `;
-  }).join('');
-
-  // Additional rates (from TSFIN snapshot)
-  let addUnits = tsfin.additional_units_json || {};
-  if (typeof addUnits === 'string') {
-    try { addUnits = JSON.parse(addUnits); } catch { addUnits = {}; }
-  }
-  if (!addUnits || typeof addUnits !== 'object') addUnits = {};
-
-  const additionalRows = Object.entries(addUnits).map(([code, ex]) => {
-    if (!ex || typeof ex !== 'object') return '';
-    const bucketName = (ex.bucket_name || code || '').trim();
-    const unitName   = (ex.unit_name || 'units').trim();
-    const unitCount  = Number(ex.unit_count || 0) || 0;
-    const payEx      = Number(ex.pay_ex_vat    || 0);
-    const chgEx      = Number(ex.charge_ex_vat || 0);
-    const marEx      = chgEx - payEx;
-
-    if (!unitCount && !payEx && !chgEx) return '';
-
-    return `
-      <tr>
-        <td>${enc(bucketName || code)}</td>
-        <td>${unitCount}</td>
-        <td>${enc(unitName)}</td>
-        <td>${fmtMoney(ex.pay_rate    ?? null)}</td>
-        <td>${fmtMoney(ex.charge_rate ?? null)}</td>
-        <td>${fmtMoney(payEx)}</td>
-        <td>${fmtMoney(chgEx)}</td>
-        <td>${fmtMoney(marEx)}</td>
-      </tr>
-    `;
-  }).filter(Boolean).join('');
-
-  const hasAdditional = !!additionalRows;
-
-  const expensesPay   = Number(tsfin.expenses_pay_ex_vat  || 0) || 0;
-  const mileagePay    = Number(tsfin.mileage_pay_ex_vat   || 0) || 0;
-  const addPay        = Number(tsfin.additional_pay_ex_vat    || 0) || 0;
-  const addCharge     = Number(tsfin.additional_charge_ex_vat || 0) || 0;
-
-  const totalPayEx    = Number(tsfin.total_pay_ex_vat    || 0) || 0;
-  const totalChgEx    = Number(tsfin.total_charge_ex_vat || 0) || 0;
-  const totalMarginEx = totalChgEx - totalPayEx;
-
-  // ───────────────────── Determine mode & schedule state ─────────────────────
-  let frameMode = 'view';
-  try {
-    if (typeof window.__getModalFrame === 'function') {
-      const fr = window.__getModalFrame();
-      if (fr && typeof fr.mode === 'string') frameMode = fr.mode;
-    }
-  } catch {}
-
-  const mc = window.modalCtx || {};
-  const st = mc.timesheetState || state || {};
-  const schedule = Array.isArray(st.schedule) ? st.schedule : null;
-  const hasSchedule = !!(schedule && schedule.length);
-  const isEditing = (frameMode === 'edit' || frameMode === 'create');
-
-  // In EDIT/CREATE + schedule present → show Proposed Buckets,
-  // otherwise show the TSFIN snapshot as Actual Buckets.
-  const useProposedBuckets = isEditing && hasSchedule;
-
-  // Helper for building proposed-buckets table from preview payload
-  const buildProposedBucketTable = (preview) => {
-    if (!preview || typeof preview !== 'object') {
-      return `<span class="mini">Bucket preview unavailable.</span>`;
-    }
-    const h = preview.hours  || {};
-    const p = preview.pay    || {};
-    const c = preview.charge || {};
-
-    const rows = buckets.map(b => {
-      const hrs   = Number(h[b] || 0);
-      const payR  = p[b] != null ? Number(p[b]) : null;
-      const chgR  = c[b] != null ? Number(c[b]) : null;
-      const payEx = payR != null ? hrs * payR : null;
-      const chgEx = chgR != null ? hrs * chgR : null;
-      const marEx = (payEx != null && chgEx != null) ? (chgEx - payEx) : null;
-
-      return `
-        <tr>
-          <td>${bucketLabel[b]}</td>
-          <td>${hrs || 0}</td>
-          <td>${payR  != null ? fmtMoney(payR)  : '—'}</td>
-          <td>${chgR  != null ? fmtMoney(chgR)  : '—'}</td>
-          <td>${payEx != null ? fmtMoney(payEx) : '—'}</td>
-          <td>${chgEx != null ? fmtMoney(chgEx) : '—'}</td>
-          <td>${marEx != null ? fmtMoney(marEx) : '—'}</td>
-        </tr>
-      `;
-    }).join('');
-
-    return `
-      <table class="grid mini">
-        <thead>
-          <tr>
-            <th>Bucket</th>
-            <th>Hours</th>
-            <th>Pay rate</th>
-            <th>Charge rate</th>
-            <th>Pay (ex VAT)</th>
-            <th>Charge (ex VAT)</th>
-            <th>Margin (ex VAT)</th>
-          </tr>
-        </thead>
-        <tbody>${rows}</tbody>
-      </table>
-      <span class="mini" style="display:block;margin-top:4px;">
-        Based on the current Lines schedule (unsaved). After you click <strong>Save</strong>,
-        TSFIN will be recomputed with these bucketed hours and the contract rates.
-      </span>
-    `;
-  };
-
-  // ───────────────────── Preview from current Lines schedule (total hours) ─────────────────────
-  let previewHoursHtml = '';
-  let bucketCardHtml = '';
-
-  try {
-    const tsId = mc.data?.timesheet_id || row.timesheet_id || row.id || null;
-
-    if (schedule && schedule.length) {
-      const hhmmToMinutes = (hhmm) => {
-        if (!hhmm || typeof hhmm !== 'string') return null;
-        const m = hhmm.trim();
-        const parts = m.split(':');
-        if (parts.length !== 2) return null;
-        const h = Number(parts[0]);
-        const mm = Number(parts[1]);
-        if (!Number.isFinite(h) || !Number.isFinite(mm)) return null;
-        return h * 60 + mm;
-      };
-
-      let totalPaidMinutes = 0;
-      schedule.forEach(seg => {
-        const startStr = seg.start || null;
-        const endStr   = seg.end   || null;
-        const sMin = hhmmToMinutes(startStr);
-        const eMin = hhmmToMinutes(endStr);
-        if (sMin == null || eMin == null) return;
-
-        let shiftMinutes = eMin - sMin;
-        if (shiftMinutes < 0) shiftMinutes += 24 * 60; // overnight wrap
-
-        const breakMinutes = Number(seg.break_mins || seg.break_minutes || 0) || 0;
-        const paidMin = Math.max(0, shiftMinutes - breakMinutes);
-        totalPaidMinutes += paidMin;
-      });
-
-      const totalPaidHours = totalPaidMinutes > 0
-        ? (Math.round((totalPaidMinutes / 60) * 100) / 100).toFixed(2)
-        : '0.00';
-
-      previewHoursHtml = `
-        <div class="card" style="margin-top:10px;">
-          <div class="row">
-            <label>Preview from Lines</label>
-            <div class="controls">
-              <div class="mini">
-                Total paid hours from current Lines schedule (unsaved): <strong>${totalPaidHours}</strong><br/>
-                The bucketed pay/charge ${useProposedBuckets ? 'below' : 'above'} will reflect this
-                schedule once the timesheet is saved and TSFIN is recomputed.
-              </div>
-            </div>
-          </div>
-        </div>
-      `;
-
-      // If we're editing and have a schedule ⇒ Proposed buckets via backend
-      if (useProposedBuckets && tsId) {
-        const containerId = 'tsBucketPreview';
-        const innerId = 'tsBucketPreviewInner';
-
-        bucketCardHtml = `
-          <div class="card">
-            <div class="row">
-              <label>Core hours & rates</label>
-              <div class="controls">
-                <span class="pill pill-bad">Proposed Buckets</span>
-                <div id="${containerId}">
-                  <div id="${innerId}">
-                    <span class="mini" id="tsBucketPreviewStatus">Loading bucket preview from Lines…</span>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-        `;
-
-        try {
-          // Build additional_units_week from staged additionalRates
-          const additionalUnitsWeek = {};
-          if (st.additionalRates && typeof st.additionalRates === 'object') {
-            Object.entries(st.additionalRates).forEach(([code, r]) => {
-              if (!r) return;
-              const units = Number(r.units_week || 0);
-              if (!Number.isFinite(units) || units === 0) return;
-              additionalUnitsWeek[code] = units;
-            });
-          }
-
-          const payload = {
-            timesheet_id: tsId,
-            actual_schedule_json: schedule,
-            additional_units_week: additionalUnitsWeek
-          };
-
-          const url = API('/api/timesheets/bucket-preview');
-          authFetch(url, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload)
-          })
-            .then(res => {
-              if (!res.ok) {
-                return res.text().then(msg => {
-                  throw new Error(msg || 'Bucket preview failed');
-                });
-              }
-              return res.json();
-            })
-            .then(data => {
-              try {
-                window.__tsBucketPreviewCache = window.__tsBucketPreviewCache || {};
-                window.__tsBucketPreviewCache[String(tsId)] = { ok: true, data };
-              } catch {}
-              const container = document.getElementById(innerId);
-              if (container) {
-                container.innerHTML = buildProposedBucketTable(data);
-              }
-            })
-            .catch(err => {
-              const msg = err?.message || 'Bucket preview failed';
-              try {
-                window.__tsBucketPreviewCache = window.__tsBucketPreviewCache || {};
-                window.__tsBucketPreviewCache[String(tsId)] = { error: msg };
-              } catch {}
-              const statusEl = document.getElementById('tsBucketPreviewStatus');
-              if (statusEl) {
-                const safeMsg = enc(msg);
-                // Red warning triangle with tooltip (hover for full message)
-                statusEl.innerHTML = `
-                  <span class="warn-icon" title="${safeMsg}">&#9888;</span>
-                `;
-              }
-            });
-        } catch (e) {
-          if (LOGM) L('[FINANCE] bucket-preview wiring failed', e);
-        }
-      }
-    }
-  } catch (e) {
-    if (LOGM) L('[FINANCE] preview wiring failed', e);
-  }
-
-  // If not using proposed buckets, show TSFIN snapshot as Actual Buckets
-  if (!useProposedBuckets) {
-    bucketCardHtml = `
-      <div class="card">
-        <div class="row">
-          <label>Core hours & rates</label>
-          <div class="controls">
-            <span class="pill pill-ok">Actual Buckets</span>
-            <table class="grid mini">
-              <thead>
-                <tr>
-                  <th>Bucket</th>
-                  <th>Hours</th>
-                  <th>Pay rate</th>
-                  <th>Charge rate</th>
-                  <th>Pay (ex VAT)</th>
-                  <th>Charge (ex VAT)</th>
-                  <th>Margin (ex VAT)</th>
-                </tr>
-              </thead>
-              <tbody>
-                ${tsfinBucketRows}
-              </tbody>
-            </table>
-            <span class="mini" style="display:block;margin-top:4px;">
-              These values come from the current financial snapshot (TSFIN).
-              If you change the Lines schedule and then click <strong>Save</strong>, a new snapshot will be generated.
-            </span>
-          </div>
-        </div>
-      </div>
-    `;
-  }
-
-  GE();
-
-  return `
-    <div class="tabc">
-      ${bucketCardHtml}
-
-      <div class="card" style="margin-top:10px;">
-        <div class="row">
-          <label>Additional rates</label>
-          <div class="controls">
-            ${
-              hasAdditional
-                ? `
-                  <table class="grid mini">
-                    <thead>
-                      <tr>
-                        <th>Bucket</th>
-                        <th>Units</th>
-                        <th>Unit name</th>
-                        <th>Pay rate</th>
-                        <th>Charge rate</th>
-                        <th>Pay (ex VAT)</th>
-                        <th>Charge (ex VAT)</th>
-                        <th>Margin (ex VAT)</th>
-                      </tr>
-                    </thead>
-                    <tbody>${additionalRows}</tbody>
-                  </table>
-                `
-                : '<span class="mini">No additional rate units recorded on this snapshot.</span>'
-            }
-          </div>
-        </div>
-      </div>
-
-      <div class="card" style="margin-top:10px;">
-        <div class="row">
-          <label>Summary</label>
-          <div class="controls">
-            <div class="mini">
-              Core pay (ex VAT): <strong>${fmtMoney(totalPayEx)}</strong><br/>
-              Core charge (ex VAT): <strong>${fmtMoney(totalChgEx)}</strong><br/>
-              Margin (ex VAT): <strong>${fmtMoney(totalMarginEx)}</strong><br/><br/>
-              Additional pay (ex VAT): <strong>${fmtMoney(addPay)}</strong><br/>
-              Additional charge (ex VAT): <strong>${fmtMoney(addCharge)}</strong><br/>
-              Expenses pay (ex VAT): <strong>${fmtMoney(expensesPay)}</strong><br/>
-              Mileage pay (ex VAT): <strong>${fmtMoney(mileagePay)}</strong>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      ${previewHoursHtml}
     </div>
   `;
 }
