@@ -29574,9 +29574,13 @@ function renderTimesheetFinanceTab(ctx) {
   const hasSchedule = !!(schedule && schedule.length);
   const isEditing = (frameMode === 'edit' || frameMode === 'create');
 
-  // In EDIT/CREATE + schedule present → show Proposed Buckets,
-  // otherwise show the TSFIN snapshot as Actual Buckets.
-  const useProposedBuckets = isEditing && hasSchedule;
+  // Look at timesheetMeta to know if this is a planned/open week
+  const meta           = mc.timesheetMeta || {};
+  const isPlannedWeek  = !!meta.isPlannedWeek;
+
+  // In EDIT/CREATE + schedule present → Proposed Buckets
+  // Also: in VIEW + schedule present for planned weeks → Proposed Buckets
+  const useProposedBuckets = hasSchedule && (isEditing || isPlannedWeek);
 
   // Helper for building proposed-buckets table from preview payload
   const buildProposedBucketTable = (preview) => {
@@ -29624,8 +29628,8 @@ function renderTimesheetFinanceTab(ctx) {
         <tbody>${rows}</tbody>
       </table>
       <span class="mini" style="display:block;margin-top:4px;">
-        Based on the current Lines schedule (unsaved). After you click <strong>Save</strong>,
-        TSFIN will be recomputed with these bucketed hours and the contract rates.
+        Based on the current Lines schedule (unsaved). For planned weeks this is a live preview;
+        for existing timesheets it reflects any staged schedule changes once saved.
       </span>
     `;
   };
@@ -29635,9 +29639,9 @@ function renderTimesheetFinanceTab(ctx) {
   let bucketCardHtml = '';
 
   try {
-    // ✅ Real timesheet id only; no row.id fallback
+    // Real timesheet id only
     const tsId   = mc.data?.timesheet_id || row.timesheet_id || null;
-    // ✅ Contract-week id for planned/open weeks
+    // Contract-week id for planned/open weeks
     const weekId = mc.data?.contract_week_id || row.contract_week_id || null;
 
     if (schedule && schedule.length) {
@@ -29687,7 +29691,7 @@ function renderTimesheetFinanceTab(ctx) {
         </div>
       `;
 
-      // If we're editing and have a schedule ⇒ Proposed buckets via backend
+      // Proposed buckets via backend (now for edit/create AND planned weeks in view)
       if (useProposedBuckets && (tsId || weekId)) {
         const containerId = 'tsBucketPreview';
         const innerId = 'tsBucketPreviewInner';
@@ -29721,8 +29725,8 @@ function renderTimesheetFinanceTab(ctx) {
           }
 
           const payload = {
-            timesheet_id:       tsId || null,
-            contract_week_id:   tsId ? null : (weekId || null),
+            timesheet_id:         tsId || null,
+            contract_week_id:     tsId ? null : (weekId || null),
             actual_schedule_json: schedule,
             additional_units_week: additionalUnitsWeek
           };
