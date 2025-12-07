@@ -1776,7 +1776,8 @@ const sections = [
   {key:'clients', label:'Clients', icon:'🏥'},
   {key:'contracts', label:'Contracts', icon:'📄'},
   {key:'timesheets', label:'Timesheets', icon:'🗒️'},
-  {key:'healthroster', label:'Healthroster', icon:'📅'},
+ {key:'imports', label:'Imports', icon:'📥'},
+
   {key:'invoices', label:'Invoices', icon:'📄'},
   {key:'umbrellas', label:'Umbrellas', icon:'☂️'},
   {key:'settings', label:'Settings', icon:'⚙️'},
@@ -1844,7 +1845,18 @@ function renderTopNav(){
     b.innerHTML = `<span class="ico">${s.icon}</span> ${s.label}`;
     if (s.key === currentSection) b.classList.add('active');
 
-    if (s.key !== 'settings') {
+    if (s.key === 'imports') {
+      // IMPORTS: launch the Imports modal (NHSP / HR weekly / HR rota)
+      b.onclick = () => {
+        if (!confirmDiscardChangesIfDirty()) return;
+        try {
+          openImportsModal();          // <-- your existing imports UI entry point
+        } catch (e) {
+          console.error('[NAV][IMPORTS] openImportsModal failed', e);
+          alert(e?.message || 'Failed to open Imports.');
+        }
+      };
+    } else if (s.key !== 'settings') {
       // normal buttons keep the original click behaviour
       b.onclick = () => switchToSection(s.key);
     } else {
@@ -28817,7 +28829,7 @@ function renderSummary(rows){
     topControls.appendChild(statusSel);
   }
 
-  // ── Timesheets quick filters: Stage / Route / Scope / Flags ────────────────
+  // ── Timesheets quick filters: Stage / Status / Route / Scope / Flags ───────
   if (currentSection === 'timesheets') {
     const stFilters = window.__listState[currentSection].filters || {};
     window.__listState[currentSection].filters = stFilters;
@@ -28856,6 +28868,45 @@ function renderSummary(rows){
     });
     topControls.appendChild(stageLabel);
     topControls.appendChild(stageSel);
+
+    // NEW: Processing-status dropdown (UNASSIGNED, CLIENT_UNRESOLVED, etc.)
+    const procLabel = document.createElement('span');
+    procLabel.className = 'mini';
+    procLabel.textContent = 'Status:';
+    const procSel = document.createElement('select');
+
+    const procOpts = [
+      ['ALL',               'All statuses'],
+      ['UNASSIGNED',        'Unassigned'],
+      ['CLIENT_UNRESOLVED', 'Client unresolved'],
+      ['RATE_MISSING',      'Rate missing'],
+      ['PAY_CHANNEL_MISSING','Pay channel missing'],
+      ['READY_FOR_HR',      'Ready for HR'],
+      ['READY_FOR_INVOICE', 'Ready for invoice']
+    ];
+    const procCur = (stFilters.processing_status || 'ALL').toUpperCase();
+    procOpts.forEach(([v, label]) => {
+      const o = document.createElement('option');
+      o.value = v;
+      o.textContent = label;
+      if (procCur === v) o.selected = true;
+      procSel.appendChild(o);
+    });
+    procSel.addEventListener('change', async () => {
+      const val = procSel.value;
+      const curFilters = { ...(window.__listState[currentSection].filters || {}) };
+      if (val === 'ALL') {
+        delete curFilters.processing_status;
+      } else {
+        curFilters.processing_status = val;
+      }
+      window.__listState[currentSection].filters = curFilters;
+      window.__listState[currentSection].page = 1;
+      const data = await loadSection();
+      renderSummary(data);
+    });
+    topControls.appendChild(procLabel);
+    topControls.appendChild(procSel);
 
     // Route dropdown
     const routeLabel = document.createElement('span');
@@ -28997,7 +29048,7 @@ function renderSummary(rows){
   tbl.appendChild(tb);
   bodyWrap.appendChild(tbl);
 
-  let btnFocus, btnSave;
+  let btnFocus, btnSave, btnResolve;
 
   const computeHeaderState = ()=>{
     const idsVisible = rows.map(r => String(r.id || ''));
@@ -29011,8 +29062,9 @@ function renderSummary(rows){
 
   const updateButtons = ()=>{
     const any = sel.ids.size > 0;
-    if (btnFocus) btnFocus.disabled = !any;
-    if (btnSave)  btnSave .disabled = !any;
+    if (btnFocus)   btnFocus.disabled   = !any;
+    if (btnSave)    btnSave.disabled    = !any;
+    if (btnResolve) btnResolve.disabled = !any;
     clearBtn.style.display = any ? '' : 'none';
     renderSelInfo();
   };
@@ -29421,6 +29473,25 @@ function renderSummary(rows){
   selBar.appendChild(btnFocus);
   selBar.appendChild(btnSave);
   selBar.appendChild(btnLoad);
+
+  // NEW: Timesheets Resolve… button (uses current selection)
+  if (currentSection === 'timesheets' && typeof openTimesheetsResolveModal === 'function') {
+    btnResolve = document.createElement('button');
+    btnResolve.title = 'Resolve candidate/client for selected timesheets';
+    btnResolve.textContent = 'Resolve…';
+    btnResolve.style.cssText = btnFocus.style.cssText;
+    btnResolve.disabled = sel.ids.size === 0;
+
+    btnResolve.addEventListener('click', () => {
+      if (sel.ids.size === 0) return;
+      const selectedRows = currentRows.filter(r => sel.ids.has(String(r.id || '')));
+      if (!selectedRows.length) return;
+      openTimesheetsResolveModal(selectedRows);
+    });
+
+    selBar.appendChild(btnResolve);
+  }
+
   content.appendChild(selBar);
 
   // Restore scroll memory on inner summary-body (data rows only)
