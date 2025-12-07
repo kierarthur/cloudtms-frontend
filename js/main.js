@@ -21234,30 +21234,29 @@ if (this.entity === 'timesheets' && k === 'overview') {
                       mc2.timesheetDetails.timesheet.submission_mode = 'MANUAL';
                     }
                   } catch {}
-           } else if (weeklyElectronicPlanned2 && weekId2) {
-  // Planned/open weekly slot → /api/contract-weeks/:id/switch-mode
-  await switchContractWeekToManual(weekId2);
-  try {
-    mc2.data.submission_mode_snapshot = 'MANUAL';
-    if (mc2.timesheetDetails && mc2.timesheetDetails.contract_week) {
-      mc2.timesheetDetails.contract_week.submission_mode_snapshot = 'MANUAL';
-    }
+                } else if (weeklyElectronicPlanned2 && weekId2) {
+                  // Planned/open weekly slot → /api/contract-weeks/:id/switch-mode
+                  await switchContractWeekToManual(weekId2);
+                  try {
+                    mc2.data.submission_mode_snapshot = 'MANUAL';
+                    if (mc2.timesheetDetails && mc2.timesheetDetails.contract_week) {
+                      mc2.timesheetDetails.contract_week.submission_mode_snapshot = 'MANUAL';
+                    }
 
-    // 🔹 Keep timesheetMeta in sync so Edit gating works *without* reopening
-    if (mc2.timesheetMeta && typeof mc2.timesheetMeta === 'object') {
-      mc2.timesheetMeta.cw_submission_mode_snapshot = 'MANUAL';
-      mc2.timesheetMeta.sheetScope  = 'WEEKLY';
-      mc2.timesheetMeta.subMode     = 'MANUAL';
-      mc2.timesheetMeta.isPlannedWeek = true;
-      mc2.timesheetMeta.hasTs      = false;
-    }
-  } catch {}
-}
- else {
+                    // 🔹 Keep timesheetMeta in sync so Edit gating works *without* reopening
+                    if (mc2.timesheetMeta && typeof mc2.timesheetMeta === 'object') {
+                      mc2.timesheetMeta.cw_submission_mode_snapshot = 'MANUAL';
+                      mc2.timesheetMeta.sheetScope  = 'WEEKLY';
+                      mc2.timesheetMeta.subMode     = 'MANUAL';
+                      mc2.timesheetMeta.isPlannedWeek = true;
+                      mc2.timesheetMeta.hasTs      = false;
+                    }
+                  } catch {}
+                } else {
                   throw new Error('This week is not an electronic weekly slot; cannot convert to manual.');
                 }
 
-                             window.__toast && window.__toast(
+                window.__toast && window.__toast(
                   'Weekly week is now in MANUAL mode. Click Edit to enter manual hours.'
                 );
 
@@ -21293,7 +21292,7 @@ if (this.entity === 'timesheets' && k === 'overview') {
           }
         }
 
-  // ── Revert to original electronic (versioned) — VIEW mode only ──
+        // ── Revert to original electronic (versioned) — VIEW mode only ──
         if (revertElecBtn) {
           revertElecBtn.style.display =
             (mode === 'view' && canRevertElectronic) ? '' : 'none';
@@ -21372,56 +21371,92 @@ if (this.entity === 'timesheets' && k === 'overview') {
           }
         }
 
-        // ── Daily / Weekly QR send buttons ──
+        // ── Daily QR send button (DAILY, ELECTRONIC, unlocked, VIEW mode) ──
         try {
-       // DAILY QR – manual daily, not locked; backend will re-check
-const dailyQrBtn = root.querySelector('button[data-ts-action="send-daily-qr"]');
-if (dailyQrBtn && !dailyQrBtn.__tsWired) {
-  dailyQrBtn.__tsWired = true;
-  dailyQrBtn.addEventListener('click', async () => {
-    if (!tsId) {
-      alert('Timesheet id missing; cannot generate daily QR timesheet.');
-      return;
-    }
-    try {
-      const res = await authFetch(
-        API(`/api/timesheets/${encodeURIComponent(tsId)}/daily-qr-printable`),
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({})
-        }
-      );
-      if (!res.ok) {
-        const txt = await res.text().catch(() => '');
-        throw new Error(txt || 'Failed to generate daily QR timesheet.');
-      }
+          const dailyQrBtn = root.querySelector('button[data-ts-action="send-daily-qr"]');
 
-      window.__toast && window.__toast('Daily QR timesheet generated and emailed (if configured).');
-      try { await renderAll(); } catch (e) {
-        if (LOGM) LT('[TS][OVERVIEW] renderAll() after daily QR failed (non-fatal)', e);
-      }
-    } catch (err) {
-      if (LOGM) console.warn('[TS][OVERVIEW] send-daily-qr failed', err);
-      alert(err?.message || 'Failed to generate daily QR timesheet.');
-    }
-  });
-}
+          const canSendDailyQr =
+            !!tsId &&
+            mode === 'view' &&
+            isDaily &&
+            subMode === 'ELECTRONIC' &&
+            !locked;
 
+          if (dailyQrBtn) {
+            dailyQrBtn.style.display = canSendDailyQr ? '' : 'none';
 
-        async function apiPostJson(path, body) {
-  const res = await authFetch(API(path), {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body || {})
-  });
-  if (!res.ok) {
-    const txt = await res.text().catch(() => '');
-    throw new Error(txt || `Request failed (${res.status})`);
-  }
-  return res.json().catch(() => ({}));
-}
+            if (!dailyQrBtn.__tsWired) {
+              dailyQrBtn.__tsWired = true;
+              dailyQrBtn.addEventListener('click', async () => {
+                if (!tsId) {
+                  alert('Timesheet id missing; cannot generate daily QR timesheet.');
+                  return;
+                }
 
+                const ok = window.confirm(
+                  'Generate a DAILY QR timesheet for this shift?\n\n' +
+                  'This will switch the daily timesheet into MANUAL mode and generate a QR-coded PDF.'
+                );
+                if (!ok) return;
+
+                const encId = encodeURIComponent(tsId);
+
+                try {
+                  // 1) Switch DAILY electronic → MANUAL
+                  {
+                    const res = await authFetch(
+                      API(`/api/timesheets/${encId}/switch-daily-to-manual`),
+                      { method: 'POST' }
+                    );
+                    const txt = await res.text().catch(() => '');
+                    if (!res.ok) {
+                      throw new Error(txt || 'Failed to switch daily timesheet to manual.');
+                    }
+                  }
+
+                  // 2) Generate DAILY QR printable
+                  {
+                    const res = await authFetch(
+                      API(`/api/timesheets/${encId}/daily-qr-printable`),
+                      {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({})
+                      }
+                    );
+                    const txt = await res.text().catch(() => '');
+                    if (!res.ok) {
+                      throw new Error(txt || 'Failed to generate daily QR timesheet.');
+                    }
+                  }
+
+                  window.__toast && window.__toast('Daily QR timesheet generated. Evidence is now required via QR scan.');
+
+                  // Refresh summary and (optionally) repaint the modal
+                  try { await renderAll(); } catch (e) {
+                    if (LOGM) LT('[TS][OVERVIEW] renderAll() after daily QR failed (non-fatal)', e);
+                  }
+                  try {
+                    if (typeof window.__getModalFrame === 'function') {
+                      const fr = window.__getModalFrame();
+                      if (fr && fr.entity === 'timesheets') {
+                        fr.mode = 'view';
+                        fr._suppressDirty = true;
+                        fr.setTab('overview');
+                        fr._suppressDirty = false;
+                        fr._updateButtons && fr._updateButtons();
+                      }
+                    }
+                  } catch (e) {
+                    if (LOGM) LT('[TS][OVERVIEW] repaint after daily QR failed (non-fatal)', e);
+                  }
+                } catch (err) {
+                  if (LOGM) console.warn('[TS][OVERVIEW] send-daily-qr failed', err);
+                  alert(err?.message || 'Failed to generate daily QR timesheet.');
+                }
+              });
+            }
+          }
         } catch (e) {
           if (LOGM) LT('[TS][OVERVIEW] QR wiring failed (non-fatal)', e);
         }
@@ -24103,6 +24138,7 @@ async function apiResolveTimesheetClient(timesheetId, clientId) {
   }
 }
 
+
 async function openImportsModal() {
   // Seed a neutral modalCtx for this screen
   window.modalCtx = {
@@ -24226,6 +24262,19 @@ async function openImportsModal() {
     }
   );
 
+  // Install global drag/drop guards once so dropping files never opens them in a new tab
+  if (!window.__importsGlobalDragGuards) {
+    window.__importsGlobalDragGuards = true;
+
+    const preventGlobal = (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+    };
+
+    window.addEventListener('dragover', preventGlobal);
+    window.addEventListener('drop', preventGlobal);
+  }
+
   // Wire file inputs and dropzones after the modal is rendered
   setTimeout(() => {
     try {
@@ -24323,21 +24372,26 @@ function wireImportDropzones() {
 async function handleNhspFileDrop(file) {
   const summaryEl = document.getElementById('nhspImportSummary');
   if (summaryEl) {
-    summaryEl.textContent = 'Uploading and parsing NHSP file…';
+    summaryEl.textContent = 'Uploading NHSP file to storage…';
   }
 
-  // Adjust these endpoints if your backend uses different routes
-  const uploadUrl  = '/api/nhsp/imports/upload';
-  const previewUrl = (importId) => `/api/nhsp/imports/${encodeURIComponent(importId)}/preview`;
-
   try {
-    // 1) Upload/parse NHSP file
-    const formData = new FormData();
-    formData.append('file', file);
+    // 1) Upload file to R2 and get file_key
+    const { fileKey, filename } = await uploadImportFileToR2(file);
 
-    const resUpload = await authFetch(API(uploadUrl), {
+    if (summaryEl) {
+      summaryEl.textContent = 'Registering NHSP import and parsing workbook…';
+    }
+
+    // 2) Tell backend about the file so it can parse + classify
+    const resUpload = await authFetch(API('/api/nhsp/import'), {
       method: 'POST',
-      body: formData
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        original_name: filename,
+        file_key: fileKey,
+        tz_assumption: 'Europe/London'
+      })
     });
     const textUpload = await resUpload.text();
     if (!resUpload.ok) {
@@ -24355,8 +24409,8 @@ async function handleNhspFileDrop(file) {
       summaryEl.textContent = `File uploaded. Loading NHSP classification for import ${importId}…`;
     }
 
-    // 2) Fetch preview / classification
-    const resPrev  = await authFetch(API(previewUrl(importId)));
+    // 3) Fetch preview / classification
+    const resPrev  = await authFetch(API(`/api/nhsp/${encodeURIComponent(importId)}/preview`));
     const textPrev = await resPrev.text();
     if (!resPrev.ok) {
       throw new Error(textPrev || `NHSP import preview failed (${resPrev.status})`);
@@ -24365,7 +24419,7 @@ async function handleNhspFileDrop(file) {
     let summaryState;
     try { summaryState = textPrev ? JSON.parse(textPrev) : {}; } catch { summaryState = {}; }
 
-    // 3) Render summary modal
+    // 4) Persist and render summary modal
     window.modalCtx = window.modalCtx || {};
     window.modalCtx.importsState = window.modalCtx.importsState || {};
     window.modalCtx.importsState.nhsp = {
@@ -24373,8 +24427,13 @@ async function handleNhspFileDrop(file) {
       summary: summaryState
     };
 
+    const total =
+      (summaryState.summary && typeof summaryState.summary.total_rows === 'number')
+        ? summaryState.summary.total_rows
+        : Array.isArray(summaryState.rows) ? summaryState.rows.length : 0;
+
     if (summaryEl) {
-      summaryEl.textContent = `Import ${importId}: ${summaryState.total_rows || 0} rows parsed.`;
+      summaryEl.textContent = `Import ${importId}: ${total} rows parsed.`;
     }
 
     if (typeof renderImportSummaryModal === 'function') {
@@ -24391,24 +24450,222 @@ async function handleNhspFileDrop(file) {
   }
 }
 
+// Install once so dropping a file anywhere in the app never opens it in a new tab.
+function installGlobalFileDropGuards() {
+  if (window.__globalFileDropGuardsInstalled) return;
+  window.__globalFileDropGuardsInstalled = true;
+
+  const prevent = (ev) => {
+    ev.preventDefault();
+    ev.stopPropagation();
+  };
+
+  window.addEventListener('dragover', prevent);
+  window.addEventListener('drop', prevent);
+}
+
+// Attach weekly summary behaviour (Assign buttons + optional group selection)
+function wireWeeklyImportSummaryActions(type, importId) {
+  const t = String(type || '').toUpperCase();
+  if (t !== 'NHSP' && t !== 'HR_WEEKLY') return;
+
+  const root = document.getElementById('weeklyImportSummary');
+  if (!root) return;
+  if (root.__weeklyWired) return;
+  root.__weeklyWired = true;
+
+  window.__importSummaryState    = window.__importSummaryState    || {};
+  window.__weeklyImportMappings  = window.__weeklyImportMappings  || {};
+  window.__weeklySelectedGroups  = window.__weeklySelectedGroups  || {};
+
+  // Ensure mapping container exists for this type+importId
+  if (!window.__weeklyImportMappings[t]) {
+    window.__weeklyImportMappings[t] = {};
+  }
+  if (!window.__weeklySelectedGroups[t]) {
+    window.__weeklySelectedGroups[t] = {};
+  }
+
+  const ensureMappings = () => {
+    let m = window.__weeklyImportMappings[t][importId];
+    if (!m) {
+      m = {
+        candidate_mappings: [],
+        client_aliases: []
+      };
+      window.__weeklyImportMappings[t][importId] = m;
+    }
+    return m;
+  };
+
+  const ensureSelectedSet = () => {
+    let s = window.__weeklySelectedGroups[t][importId];
+    if (!(s instanceof Set)) {
+      s = new Set();
+      window.__weeklySelectedGroups[t][importId] = s;
+    }
+    return s;
+  };
+
+  const state = window.__importSummaryState[t];
+  const rows  = state && Array.isArray(state.rows) ? state.rows : [];
+
+  // Handle Assign candidate/client buttons and (optionally) checkbox selection
+  root.addEventListener('click', (ev) => {
+    const btn = ev.target.closest('button[data-act]');
+    if (!btn) return;
+
+    const act = btn.getAttribute('data-act');
+    if (act !== 'weekly-resolve-candidate' && act !== 'weekly-resolve-client') {
+      return;
+    }
+
+    const idx = Number(btn.getAttribute('data-row-idx') || '-1');
+    const row = (idx >= 0 && idx < rows.length) ? rows[idx] : null;
+    if (!row) return;
+
+    const mappings = ensureMappings();
+
+    if (act === 'weekly-resolve-candidate') {
+      const staffRaw = row.staff_name || row.staff_raw || '';
+      const hospRaw  = row.hospital_or_trust || row.unit || row.hospital_norm || '';
+
+      const candId = (prompt(
+        `Enter candidate_id to map staff "${staffRaw}" (hospital: "${hospRaw}") to:`,
+        row.candidate_id || ''
+      ) || '').trim();
+
+      if (!candId) return;
+
+      mappings.candidate_mappings.push({
+        staff_norm: row.staff_norm || staffRaw || '',
+        hospital_or_trust: hospRaw || null,
+        candidate_id: candId
+      });
+
+      window.__toast && window.__toast('Candidate mapping queued for this import.');
+    }
+
+    if (act === 'weekly-resolve-client') {
+      const hospRaw = row.hospital_or_trust || row.unit || row.hospital_norm || '';
+
+      const clientId = (prompt(
+        `Enter client_id to map hospital/site "${hospRaw}" to:`,
+        row.client_id || ''
+      ) || '').trim();
+
+      if (!clientId) return;
+
+      mappings.client_aliases.push({
+        hospital_norm: row.hospital_norm || hospRaw || '',
+        client_id: clientId
+      });
+
+      window.__toast && window.__toast('Client mapping queued for this import.');
+    }
+  });
+
+  // Optional: handle group selection checkboxes if you add them later
+  // (e.g. <input type="checkbox" data-act="weekly-select-group" data-group-id="...">)
+  root.addEventListener('change', (ev) => {
+    const cb = ev.target.closest('input[data-act="weekly-select-group"]');
+    if (!cb) return;
+
+    const groupId = cb.getAttribute('data-group-id') || '';
+    if (!groupId) return;
+
+    const sel = ensureSelectedSet();
+
+    if (cb.checked) {
+      sel.add(groupId);
+    } else {
+      sel.delete(groupId);
+    }
+  });
+}
+
+// Normalise mappings object for a given type/importId into the payload shape
+function getWeeklyImportMappings(type, importId) {
+  const t = String(type || '').toUpperCase();
+  const mRoot = (window.__weeklyImportMappings && window.__weeklyImportMappings[t]) || {};
+  const m     = mRoot[importId] || {};
+
+  const candidate_mappings = Array.isArray(m.candidate_mappings)
+    ? m.candidate_mappings.slice()
+    : [];
+
+  const client_aliases = Array.isArray(m.client_aliases)
+    ? m.client_aliases.slice()
+    : [];
+
+  return { candidate_mappings, client_aliases };
+}
+
+// Build an array of preview_group_ids selected in the weekly summary (if implemented)
+function getWeeklySelectedGroupIds(type, importId) {
+  const t = String(type || '').toUpperCase();
+
+  // Preferred way: honour the selected set maintained by wireWeeklyImportSummaryActions
+  if (window.__weeklySelectedGroups &&
+      window.__weeklySelectedGroups[t] &&
+      window.__weeklySelectedGroups[t][importId] instanceof Set) {
+    return Array.from(window.__weeklySelectedGroups[t][importId]);
+  }
+
+  // Fallback: read from DOM checkboxes if present
+  const root = document.getElementById('weeklyImportSummary');
+  if (!root) return [];
+
+  const selected = [];
+  const cbs = root.querySelectorAll('input[data-act="weekly-select-group"]');
+  cbs.forEach(cb => {
+    if (!cb.checked) return;
+    const gid = cb.getAttribute('data-group-id');
+    if (gid) selected.push(gid);
+  });
+
+  return selected;
+}
+
+
+
+
 async function handleHrWeeklyFileDrop(file) {
   const summaryEl = document.getElementById('hrWeeklyImportSummary');
   if (summaryEl) {
-    summaryEl.textContent = 'Uploading and parsing HealthRoster weekly file…';
+    summaryEl.textContent = 'Uploading HealthRoster weekly file to storage…';
   }
 
-  // Adjust these endpoints if your backend uses different routes
-  const uploadUrl  = '/api/healthroster/autoprocess/import';
-  const previewUrl = (importId) => `/api/healthroster/autoprocess/${encodeURIComponent(importId)}/preview`;
-
   try {
-    // 1) Upload/parse HR weekly file
-    const formData = new FormData();
-    formData.append('file', file);
+    // Require a client_id for HR autoprocess
+    const clientId =
+      window.modalCtx &&
+      window.modalCtx.importsState &&
+      window.modalCtx.importsState.hrWeeklyClientId
+        ? String(window.modalCtx.importsState.hrWeeklyClientId).trim()
+        : '';
 
-    const resUpload = await authFetch(API(uploadUrl), {
+    if (!clientId) {
+      throw new Error('Select a client for the HealthRoster weekly import before uploading.');
+    }
+
+    // 1) Upload file to R2
+    const { fileKey, filename } = await uploadImportFileToR2(file);
+
+    if (summaryEl) {
+      summaryEl.textContent = 'Registering HealthRoster weekly import and parsing workbook…';
+    }
+
+    // 2) Register HR autoprocess import
+    const resUpload = await authFetch(API('/api/healthroster/autoprocess/import'), {
       method: 'POST',
-      body: formData
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        original_name: filename,
+        file_key: fileKey,
+        client_id: clientId,
+        tz_assumption: 'Europe/London'
+      })
     });
     const textUpload = await resUpload.text();
     if (!resUpload.ok) {
@@ -24423,11 +24680,13 @@ async function handleHrWeeklyFileDrop(file) {
     }
 
     if (summaryEl) {
-      summaryEl.textContent = `File uploaded. Loading HealthRoster weekly classification for import ${importId}…`;
+      summaryEl.textContent =
+        `File uploaded. Loading HealthRoster weekly classification for import ${importId}…`;
     }
 
-    // 2) Fetch preview / classification
-    const resPrev  = await authFetch(API(previewUrl(importId)));
+    // 3) Fetch preview / classification
+    // NOTE: backend must expose GET /api/healthroster/autoprocess/:import_id/preview
+    const resPrev  = await authFetch(API(`/api/healthroster/autoprocess/${encodeURIComponent(importId)}/preview`));
     const textPrev = await resPrev.text();
     if (!resPrev.ok) {
       throw new Error(textPrev || `HealthRoster weekly preview failed (${resPrev.status})`);
@@ -24436,7 +24695,7 @@ async function handleHrWeeklyFileDrop(file) {
     let summaryState;
     try { summaryState = textPrev ? JSON.parse(textPrev) : {}; } catch { summaryState = {}; }
 
-    // 3) Render summary modal
+    // 4) Persist and render summary modal
     window.modalCtx = window.modalCtx || {};
     window.modalCtx.importsState = window.modalCtx.importsState || {};
     window.modalCtx.importsState.hrWeekly = {
@@ -24444,8 +24703,13 @@ async function handleHrWeeklyFileDrop(file) {
       summary: summaryState
     };
 
+    const total =
+      (summaryState.summary && typeof summaryState.summary.total_rows === 'number')
+        ? summaryState.summary.total_rows
+        : Array.isArray(summaryState.rows) ? summaryState.rows.length : 0;
+
     if (summaryEl) {
-      summaryEl.textContent = `Import ${importId}: ${summaryState.total_rows || 0} rows parsed.`;
+      summaryEl.textContent = `Import ${importId}: ${total} rows parsed.`;
     }
 
     if (typeof renderImportSummaryModal === 'function') {
@@ -24456,26 +24720,36 @@ async function handleHrWeeklyFileDrop(file) {
   } catch (err) {
     console.error('[IMPORTS][HR_WEEKLY] handleHrWeeklyFileDrop failed', err);
     if (summaryEl) {
-      summaryEl.textContent = `HealthRoster weekly import failed: ${err?.message || 'Unknown error'}`;
+      summaryEl.textContent =
+        `HealthRoster weekly import failed: ${err?.message || 'Unknown error'}`;
     }
     alert(err?.message || 'HealthRoster weekly import failed.');
   }
 }
 
+
 async function handleHrRotaFileDrop(file) {
   const summaryEl = document.getElementById('hrRotaImportSummary');
   if (summaryEl) {
-    summaryEl.textContent = 'Uploading and parsing HR rota daily file…';
+    summaryEl.textContent = 'Uploading HR rota daily file to storage…';
   }
 
   try {
-    // 1) Upload/parse the HR rota file
-    const formData = new FormData();
-    formData.append('file', file);
+    // 1) Upload file to R2
+    const { fileKey, filename } = await uploadImportFileToR2(file);
 
+    if (summaryEl) {
+      summaryEl.textContent = 'Registering HR rota daily import and parsing workbook…';
+    }
+
+    // 2) Call parse endpoint with JSON and file_r2_key
     const res = await authFetch(API('/api/imports/hr-rota/parse'), {
       method: 'POST',
-      body: formData
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        file_r2_key: fileKey,
+        original_name: filename
+      })
     });
     const text = await res.text();
     if (!res.ok) {
@@ -24490,10 +24764,11 @@ async function handleHrRotaFileDrop(file) {
     }
 
     if (summaryEl) {
-      summaryEl.textContent = `File uploaded. Loading HR rota classification for import ${importId}…`;
+      summaryEl.textContent =
+        `File uploaded. Loading HR rota classification for import ${importId}…`;
     }
 
-    // 2) Fetch preview / classification
+    // 3) Fetch preview / classification
     const previewRes  = await authFetch(API(`/api/imports/hr-rota/${encodeURIComponent(importId)}/preview`));
     const previewText = await previewRes.text();
     if (!previewRes.ok) {
@@ -24503,7 +24778,7 @@ async function handleHrRotaFileDrop(file) {
     let summaryState;
     try { summaryState = previewText ? JSON.parse(previewText) : {}; } catch { summaryState = {}; }
 
-    // 3) Persist into modalCtx and render summary modal
+    // 4) Persist into modalCtx and render summary modal
     window.modalCtx = window.modalCtx || {};
     window.modalCtx.importsState = window.modalCtx.importsState || {};
     window.modalCtx.importsState.hrRota = {
@@ -24511,10 +24786,12 @@ async function handleHrRotaFileDrop(file) {
       summary: summaryState
     };
 
-    if (summaryEl) {
-      const total = (summaryState.summary && typeof summaryState.summary.total_rows === 'number')
+    const total =
+      (summaryState.summary && typeof summaryState.summary.total_rows === 'number')
         ? summaryState.summary.total_rows
         : Array.isArray(summaryState.rows) ? summaryState.rows.length : 0;
+
+    if (summaryEl) {
       summaryEl.textContent = `Import ${importId}: ${total} rows parsed.`;
     }
 
@@ -24526,7 +24803,8 @@ async function handleHrRotaFileDrop(file) {
   } catch (err) {
     console.error('[IMPORTS][HR_ROTA] handleHrRotaFileDrop failed', err);
     if (summaryEl) {
-      summaryEl.textContent = `HR rota daily import failed: ${err?.message || 'Unknown error'}`;
+      summaryEl.textContent =
+        `HR rota daily import failed: ${err?.message || 'Unknown error'}`;
     }
     alert(err?.message || 'HR rota daily import failed.');
   }
@@ -24548,6 +24826,9 @@ function renderImportSummaryModal(importType, summaryState) {
     summary: ss,
     rows
   };
+
+  // Global store for weekly mappings (per type + importId)
+  window.__weeklyImportMappings = window.__weeklyImportMappings || {};
 
   const renderTab = (key) => {
     if (key !== 'main') return '';
@@ -24782,7 +25063,7 @@ function renderImportSummaryModal(importType, summaryState) {
     const total   = summary.total_rows || rows.length || 0;
 
     const rowsHtml = rows.length
-      ? rows.map(r => {
+      ? rows.map((r, idx) => {
           const staff  = r.staff_name || r.staff_raw || '';
           const unit   = r.unit || r.hospital_or_trust || r.hospital_norm || '';
           const date   = r.date_local || r.date || r.week_ending_date || '';
@@ -24809,6 +25090,7 @@ function renderImportSummaryModal(importType, summaryState) {
                     ? `<button type="button"
                                class="btn mini"
                                data-act="weekly-resolve-candidate"
+                               data-row-idx="${idx}"
                                data-staff="${enc(staff)}"
                                data-unit="${enc(unit)}">
                          Assign candidate…
@@ -24821,6 +25103,7 @@ function renderImportSummaryModal(importType, summaryState) {
                                class="btn mini"
                                style="margin-left:4px;"
                                data-act="weekly-resolve-client"
+                               data-row-idx="${idx}"
                                data-unit="${enc(unit)}">
                          Assign client…
                        </button>`
@@ -25001,30 +25284,99 @@ function renderImportSummaryModal(importType, summaryState) {
     }
   }, 0);
 
-  // Wiring for NHSP / HR_WEEKLY "Apply import" button
+  // Wiring for NHSP / HR_WEEKLY "Apply import" button + Assign buttons
   setTimeout(() => {
     try {
       const root = document.getElementById('weeklyImportSummary');
       if (!root || (type !== 'NHSP' && type !== 'HR_WEEKLY')) return;
+      if (root.__weeklyWired) return;
+      root.__weeklyWired = true;
 
-      const btnApply = root.querySelector('button[data-act="weekly-import-apply"]');
-      if (!btnApply || btnApply.__weeklyApplyWired) return;
-      btnApply.__weeklyApplyWired = true;
-
-      btnApply.addEventListener('click', async () => {
-        try {
-          // For now, we assume mappings were gathered in the summary UI and passed externally.
-          // If you store them in window.__weeklyImportMappings[type][importId], you can read them here.
-          const mappings = {
-            candidate_mappings: [], // TODO if you wire mapping UI
+      // Ensure mapping container exists for this type+import
+      if (!window.__weeklyImportMappings[type]) {
+        window.__weeklyImportMappings[type] = {};
+      }
+      const ensureMappings = () => {
+        let m = window.__weeklyImportMappings[type][importId];
+        if (!m) {
+          m = {
+            candidate_mappings: [],
             client_aliases: []
           };
-          await resolveImportConflicts(importId, type, mappings);
-        } catch (err) {
-          console.error('[IMPORTS][WEEKLY] apply failed', err);
-          alert(err?.message || 'Weekly import apply failed.');
+          window.__weeklyImportMappings[type][importId] = m;
+        }
+        return m;
+      };
+
+      const st = window.__importSummaryState && window.__importSummaryState[type];
+      const rows = st && Array.isArray(st.rows) ? st.rows : [];
+
+      // Click handler for weekly "Assign candidate/client…" buttons
+      root.addEventListener('click', (ev) => {
+        const btn = ev.target.closest('button[data-act]');
+        if (!btn) return;
+        const act = btn.getAttribute('data-act');
+        if (act !== 'weekly-resolve-candidate' && act !== 'weekly-resolve-client') return;
+
+        const idx = Number(btn.getAttribute('data-row-idx') || '-1');
+        const row = (idx >= 0 && idx < rows.length) ? rows[idx] : null;
+        if (!row) return;
+
+        const mappings = ensureMappings();
+
+        if (act === 'weekly-resolve-candidate') {
+          const staffRaw = row.staff_name || row.staff_raw || '';
+          const hospRaw  = row.hospital_or_trust || row.unit || row.hospital_norm || '';
+
+          const candId = (prompt(
+            `Enter candidate_id to map staff "${staffRaw}" (hospital: "${hospRaw}") to:`,
+            row.candidate_id || ''
+          ) || '').trim();
+
+          if (!candId) return;
+
+          mappings.candidate_mappings.push({
+            staff_norm: row.staff_norm || staffRaw || '',
+            hospital_or_trust: hospRaw || null,
+            candidate_id: candId
+          });
+
+          window.__toast && window.__toast('Candidate mapping queued for this import.');
+        }
+
+        if (act === 'weekly-resolve-client') {
+          const hospRaw = row.hospital_or_trust || row.unit || row.hospital_norm || '';
+
+          const clientId = (prompt(
+            `Enter client_id to map hospital/site "${hospRaw}" to:`,
+            row.client_id || ''
+          ) || '').trim();
+
+          if (!clientId) return;
+
+          mappings.client_aliases.push({
+            hospital_norm: row.hospital_norm || hospRaw || '',
+            client_id: clientId
+          });
+
+          window.__toast && window.__toast('Client mapping queued for this import.');
         }
       });
+
+      // Apply import button
+      const btnApply = root.querySelector('button[data-act="weekly-import-apply"]');
+      if (btnApply && !btnApply.__weeklyApplyWired) {
+        btnApply.__weeklyApplyWired = true;
+        btnApply.addEventListener('click', async () => {
+          try {
+            const mappings = ensureMappings();
+            await resolveImportConflicts(importId, type, mappings);
+          } catch (err) {
+            console.error('[IMPORTS][WEEKLY] apply failed', err);
+            alert(err?.message || 'Weekly import apply failed.');
+          }
+        });
+      }
     } catch (e) {
       console.warn('[IMPORTS] weekly import wiring failed', e);
     }
@@ -25035,18 +25387,19 @@ async function resolveImportConflicts(importId, importType, mappings) {
   const type = String(importType || '').toUpperCase();
   const encId = encodeURIComponent(String(importId || ''));
 
-  const body = mappings || {};
-  const payload = {
-    candidate_mappings: Array.isArray(body.candidate_mappings) ? body.candidate_mappings : [],
-    client_aliases: Array.isArray(body.client_aliases) ? body.client_aliases : []
-  };
-
   if (!encId) {
     throw new Error('Missing import_id for resolveImportConflicts.');
   }
 
+  const body = mappings || {};
+  const payload = {
+    candidate_mappings: Array.isArray(body.candidate_mappings) ? body.candidate_mappings : [],
+    client_aliases: Array.isArray(body.client_aliases) ? body.client_aliases : []
+    // selected_group_ids can be added here later if/when you add per-group checkboxes
+  };
+
   if (type === 'NHSP') {
-    const url = `/api/nhsp/imports/${encId}/apply`;
+    const url = `/api/nhsp/${encId}/apply`;
     const res = await authFetch(API(url), {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -25061,7 +25414,7 @@ async function resolveImportConflicts(importId, importType, mappings) {
   }
 
   if (type === 'HR_WEEKLY') {
-    const url = `/api/healthroster/autoprocess/${encId}/apply`;
+    const url = `/api/healthroster/${encId}/autoprocess-apply`;
     const res = await authFetch(API(url), {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -25076,14 +25429,68 @@ async function resolveImportConflicts(importId, importType, mappings) {
   }
 
   if (type === 'HR_ROTA_DAILY') {
-    // For HR_ROTA_DAILY, we rely on HR rota validation apply + alias resolution
-    // via the timesheet Resolve flows. Nothing special to do here.
+    // HR rota uses applyHrRotaValidation, not this helper.
     console.warn('[IMPORTS] resolveImportConflicts called for HR_ROTA_DAILY; nothing to apply here.');
     return;
   }
 
   throw new Error(`Unsupported import type for resolveImportConflicts: ${type}`);
 }
+
+
+async function uploadImportFileToR2(file) {
+  if (!file) {
+    throw new Error('No file provided for upload.');
+  }
+
+  const filename    = file.name || 'import.xlsx';
+  const contentType =
+    file.type ||
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+
+  // 1) Get presigned URL + key
+  const presignRes = await authFetch(API('/api/files/presign-upload'), {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      filename,
+      content_type: contentType,
+      use_case: 'IMPORT'
+    })
+  });
+  const presignText = await presignRes.text();
+  if (!presignRes.ok) {
+    throw new Error(
+      presignText || `Failed to presign upload (${presignRes.status})`
+    );
+  }
+
+  let presign;
+  try { presign = presignText ? JSON.parse(presignText) : {}; } catch { presign = {}; }
+
+  const uploadUrl = presign.upload_url;
+  const fileKey   = presign.key;
+
+  if (!uploadUrl || !fileKey) {
+    throw new Error('Presign response missing upload_url or key.');
+  }
+
+  // 2) PUT the file to R2
+  const putRes  = await fetch(uploadUrl, {
+    method: 'PUT',
+    headers: { 'content-type': contentType },
+    body: file
+  });
+  const putText = await putRes.text().catch(() => '');
+  if (!putRes.ok) {
+    throw new Error(putText || `File upload failed (${putRes.status})`);
+  }
+
+  return { fileKey, filename };
+}
+
+
+
 
 async function applyHrRotaValidation(importId, sendEmailRowIds) {
   const encId = encodeURIComponent(String(importId || ''));
