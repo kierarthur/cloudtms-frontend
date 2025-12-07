@@ -1534,6 +1534,35 @@ function normalizeClientSettingsForSave(raw) {
 
 
 // ===== Auth fetch with refresh retry =====
+
+async function apiPostJson(path, body) {
+  const res = await authFetch(API(path), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body || {})
+  });
+  if (!res.ok) {
+    const txt = await res.text().catch(() => '');
+    throw new Error(txt || `Request failed (${res.status})`);
+  }
+  return res.json().catch(() => ({}));
+}
+
+async function apiPatchJson(path, body) {
+  const res = await authFetch(API(path), {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body || {})
+  });
+  if (!res.ok) {
+    const txt = await res.text().catch(() => '');
+    throw new Error(txt || `Request failed (${res.status})`);
+  }
+  return res.json().catch(() => ({}));
+}
+
+
+
 async function authFetch(input, init={}){
   const APILOG = (typeof window !== 'undefined' && !!window.__LOG_API) || (typeof __LOG_API !== 'undefined' && !!__LOG_API);
   const headers = new Headers(init.headers || {});
@@ -21252,7 +21281,7 @@ if (this.entity === 'timesheets' && k === 'overview') {
           }
         }
 
-        // ── Revert to original electronic (versioned) — VIEW mode only ──
+  // ── Revert to original electronic (versioned) — VIEW mode only ──
         if (revertElecBtn) {
           revertElecBtn.style.display =
             (mode === 'view' && canRevertElectronic) ? '' : 'none';
@@ -21329,6 +21358,60 @@ if (this.entity === 'timesheets' && k === 'overview') {
               }
             });
           }
+        }
+
+        // ── Daily / Weekly QR send buttons ──
+        try {
+       // DAILY QR – manual daily, not locked; backend will re-check
+const dailyQrBtn = root.querySelector('button[data-ts-action="send-daily-qr"]');
+if (dailyQrBtn && !dailyQrBtn.__tsWired) {
+  dailyQrBtn.__tsWired = true;
+  dailyQrBtn.addEventListener('click', async () => {
+    if (!tsId) {
+      alert('Timesheet id missing; cannot generate daily QR timesheet.');
+      return;
+    }
+    try {
+      const res = await authFetch(
+        API(`/api/timesheets/${encodeURIComponent(tsId)}/daily-qr-printable`),
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({})
+        }
+      );
+      if (!res.ok) {
+        const txt = await res.text().catch(() => '');
+        throw new Error(txt || 'Failed to generate daily QR timesheet.');
+      }
+
+      window.__toast && window.__toast('Daily QR timesheet generated and emailed (if configured).');
+      try { await renderAll(); } catch (e) {
+        if (LOGM) LT('[TS][OVERVIEW] renderAll() after daily QR failed (non-fatal)', e);
+      }
+    } catch (err) {
+      if (LOGM) console.warn('[TS][OVERVIEW] send-daily-qr failed', err);
+      alert(err?.message || 'Failed to generate daily QR timesheet.');
+    }
+  });
+}
+
+
+        async function apiPostJson(path, body) {
+  const res = await authFetch(API(path), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body || {})
+  });
+  if (!res.ok) {
+    const txt = await res.text().catch(() => '');
+    throw new Error(txt || `Request failed (${res.status})`);
+  }
+  return res.json().catch(() => ({}));
+}
+
+        } catch (e) {
+          if (LOGM) LT('[TS][OVERVIEW] QR wiring failed (non-fatal)', e);
         }
 
         // ── Pay-hold + mark-paid staging in edit/create (unchanged) ──
@@ -22560,8 +22643,7 @@ const setCloseLabel = ()=> {
         });
       }
       } else {
-
-          // ── Edit button gating ──
+      // ── Edit button gating ──
       let canEdit = false;
 
       if (top.entity === 'timesheets') {
@@ -22570,6 +22652,7 @@ const setCloseLabel = ()=> {
         const sheetScope = String(meta.sheetScope || '').toUpperCase();
         const subMode    = String(meta.subMode    || '').toUpperCase();
         const isWeekly   = (sheetScope === 'WEEKLY');
+        const isDaily    = (sheetScope === 'DAILY');
         const hasTsMeta  = !!meta.hasTs;
         const isPaid     = !!meta.isPaid;
         const isInvoiced = !!meta.isInvoiced;
@@ -22591,13 +22674,22 @@ const setCloseLabel = ()=> {
           isWeekly &&
           cwMode === 'MANUAL';
 
-        canEdit = (top.mode === 'view') && (isWeeklyManualTs || isPlannedManualWeek);
+        // 3) Daily MANUAL *real* timesheet, not paid/invoiced
+        const isDailyManualTs =
+          hasTsMeta &&
+          isDaily &&
+          subMode === 'MANUAL' &&
+          !isPaid &&
+          !isInvoiced;
+
+        canEdit = (top.mode === 'view') && (isWeeklyManualTs || isPlannedManualWeek || isDailyManualTs);
       } else {
         // Default for non-timesheet entities
         canEdit = (top.mode === 'view' && top.hasId);
       }
 
       btnEdit.style.display = canEdit ? '' : 'none';
+
 
 
    if (relatedBtn) {
@@ -22956,156 +23048,251 @@ const setCloseLabel = ()=> {
     } catch { return false; }
   };
 
-  async function saveForFrame(fr) {
-    if (!fr || fr._saving) return;
-    const onlyDel   = hasStagedClientDeletes();
-    const allowApply= (fr.kind==='candidate-override' || fr.kind==='client-rate') && fr._applyDesired===true;
+async function saveForFrame(fr) {
+  if (!fr || fr._saving) return;
+  const onlyDel    = hasStagedClientDeletes();
+  const allowApply = (fr.kind === 'candidate-override' || fr.kind === 'client-rate') && fr._applyDesired === true;
 
-    L('saveForFrame ENTER (global)', { kind: fr.kind, mode: fr.mode, noParentGate: fr.noParentGate, isDirty: fr.isDirty, onlyDel, allowApply });
+  L('saveForFrame ENTER (global)', {
+    kind: fr.kind,
+    mode: fr.mode,
+    noParentGate: fr.noParentGate,
+    isDirty: fr.isDirty,
+    onlyDel,
+    allowApply
+  });
 
-    // Changed: do NOT block create saves; only no-op in EDIT when nothing changed
-    const isChildNow = (window.__modalStack?.length > 1);
-    const shouldNoop =
-      (fr.kind!=='advanced-search') &&
-      !fr.noParentGate &&
-      fr.mode === 'edit' &&            // <-- was fr.mode!=='view'
-      !fr.isDirty &&
-      !onlyDel &&
-      !allowApply;
+  const isChildNow = (window.__modalStack?.length > 1);
+  const shouldNoop =
+    (fr.kind !== 'advanced-search') &&
+    !fr.noParentGate &&
+    fr.mode === 'edit' &&
+    !fr.isDirty &&
+    !onlyDel &&
+    !allowApply;
 
-    if (shouldNoop) {
-      L('saveForFrame GUARD (global): no-op (no changes and apply not allowed)');
-      if (isChildNow) {
-        sanitizeModalGeometry(); window.__modalStack.pop();
-        if (window.__modalStack.length>0) { const p=window.__modalStack[window.__modalStack.length-1]; renderTop(); try{ p.onReturn && p.onReturn(); }catch{} }
-        else { /* keep open */ }
-      } else {
-        fr.isDirty=false; fr._snapshot=null; setFrameMode(fr,'view'); fr._updateButtons&&fr._updateButtons();
-      }
-      try{ window.__toast?.('No changes'); }catch{}; return;
-    }
-
-    fr.persistCurrentTabState();
-    if (isChildNow && !fr.noParentGate && fr.kind!=='advanced-search') {
-      const p=window.__modalStack[window.__modalStack.length-2];
-      if (!p || !(p.mode==='edit'||p.mode==='create')) { L('saveForFrame GUARD (global): parent not editable'); return; }
-    }
-    fr._saving=true; fr._updateButtons&&fr._updateButtons();
-
-    let ok=false, saved=null;
-    if (typeof fr.onSave==='function') {
-      try { const res=await fr.onSave(); ok = (res===true) || (res && res.ok===true); if (res&&res.saved) saved=res.saved; }
-      catch (e) { L('saveForFrame onSave threw (global)', e); ok=false; }
-    }
-    fr._saving=false; if (!ok) { L('saveForFrame RESULT not ok (global)'); fr._updateButtons&&fr._updateButtons(); return; }
-
-    if (fr.kind === 'advanced-search') {
+  if (shouldNoop) {
+    L('saveForFrame GUARD (global): no-op (no changes and apply not allowed)');
+    if (isChildNow) {
       sanitizeModalGeometry();
-      const closing = window.__modalStack.pop();
-      if (closing?._detachDirty){ try{closing._detachDirty();}catch{} closing._detachDirty=null; }
-      if (closing?._detachGlobal){ try{closing._detachGlobal();}catch{} closing._detachGlobal=null; }
-      fr._wired = false;
-
+      window.__modalStack.pop();
       if (window.__modalStack.length > 0) {
         const p = window.__modalStack[window.__modalStack.length - 1];
         renderTop();
         try { p.onReturn && p.onReturn(); } catch {}
-      } else {
-        // 🔹 No more frames → fully tear down the modal & overlay
-        discardAllModalsAndState();
-      }
-
-      L('saveForFrame EXIT (global advanced-search closed)');
-      return;
-    }
-
-    if (isChildNow) {
-      // If this child should remain open after save (successor contract),
-      // flip it in-place to view mode and keep it on screen.
-      if (fr.stayOpenOnSave) {
-        try {
-          if (saved && window.modalCtx) {
-            window.modalCtx.data = { ...(window.modalCtx.data||{}), ...(saved.contract || saved) };
-            fr.hasId = !!window.modalCtx.data?.id;
-          }
-          setFrameMode(fr, 'view');
-          fr._updateButtons && fr._updateButtons();
-          renderTop();
-        } catch {}
-        L('saveForFrame EXIT (child kept open)');
-      } else {
-        if (!fr.noParentGate) {
-          try { window.dispatchEvent(new CustomEvent('modal-dirty')); } catch {}
-        }
-
-        sanitizeModalGeometry();
-        window.__modalStack.pop();
-
-        if (window.__modalStack.length > 0) {
-          const p = window.__modalStack[window.__modalStack.length - 1];
-
-          // Default behaviour: resume original parent mode (except preset picker).
-          let resumeMode =
-            (typeof fr !== 'undefined' &&
-             fr &&
-             fr._parentModeOnOpen &&
-             fr.kind !== 'rate-presets-picker')
-              ? fr._parentModeOnOpen
-              : p.mode; // keep whatever the parent already was
-
-          // 🔹 SPECIAL CASE: candidate pay-method change
-          // If the child we just saved is the pay-method-change modal and the parent
-          // is the Candidate modal, treat this as a successful parent save:
-          //   - clear dirty/snapshot
-          //   - force the parent into 'view' mode so Save disappears.
-          if (fr.kind === 'candidate-pay-method-change' && p.entity === 'candidates') {
-            resumeMode   = 'view';
-            p.isDirty    = false;
-            p._snapshot  = null;
-
-            try {
-              // If child ever returns a saved payload in future, merge it into modalCtx
-              if (saved && window.modalCtx && window.modalCtx.entity === 'candidates') {
-                window.modalCtx.data = {
-                  ...(window.modalCtx.data || {}),
-                  ...(saved || {})
-                };
-              }
-            } catch {}
-          }
-
-          try { setFrameMode(p, resumeMode); } catch {}
-          p._updateButtons && p._updateButtons();
-          renderTop();
-
-          // ▶ nudge calendar/action bar re-wire if needed
-          try { window.dispatchEvent(new Event('contracts-main-rendered')); } catch {}
-          try { p.onReturn && p.onReturn(); } catch {}
-        } else {
-          // no parent frames left – nothing to do (modal teardown is handled elsewhere)
-        }
-
-        L('saveForFrame EXIT (global child)');
       }
     } else {
-      // parent branch...
+      fr.isDirty = false;
+      fr._snapshot = null;
+      setFrameMode(fr, 'view');
+      fr._updateButtons && fr._updateButtons();
+    }
+    try { window.__toast?.('No changes'); } catch {};
+    return;
+  }
 
+  // ─────────────────────────────────────────────
+  // NEW: QR-aware tri-choice for timesheets
+  // ─────────────────────────────────────────────
+  if (!isChildNow && fr.entity === 'timesheets' && fr.mode === 'edit' && fr.isDirty) {
+    try {
+      const mc   = window.modalCtx || {};
+      const det  = mc.timesheetDetails || {};
+      const ts   = det.timesheet || {};
+      const fin  = det.tsfin || {};
+      const qrStatus = String(det.qr_status || ts.qr_status || '').toUpperCase();
+      const locked   = !!(fin.locked_by_invoice_id || fin.paid_at_utc);
 
-      try {
-        const savedContract = (saved && (saved.contract || saved)) || null;
-        const id = savedContract?.id || window.modalCtx?.data?.id || null;
-        if (id && savedContract) {
-          const idx = Array.isArray(currentRows) ? currentRows.findIndex(x => String(x.id) === String(id)) : -1;
-          if (idx >= 0) currentRows[idx] = savedContract;
-          (window.__lastSavedAtById ||= {})[String(id)] = Date.now();
+      // Only prompt if this was already a QR timesheet and is still editable
+      if (qrStatus && !locked) {
+        const promptMsg =
+          'This timesheet already has a QR version.\n\n' +
+          'If you have changed the hours, you must decide what to do with the existing QR timesheet:\n\n' +
+          '1 – Save and REVOKE the existing QR timesheet only (do NOT send a new QR)\n' +
+          '2 – Save, REVOKE and REISSUE a NEW QR timesheet to the worker\n' +
+          '3 – Cancel (do not save changes)\n\n' +
+          'Please type 1, 2 or 3:';
+
+        const choice = window.prompt(promptMsg, '3');
+
+        if (choice === null || choice === '3') {
+          // Cancel – abort the save
+          L('saveForFrame QR prompt: user cancelled (3 or null)');
+          fr._saving = false;
+          fr._updateButtons && fr._updateButtons();
+          return;
         }
-      } catch (e) { console.warn('[SAVE] list cache merge failed', e); }
 
-      if (saved && window.modalCtx) { window.modalCtx.data = { ...(window.modalCtx.data||{}), ...(saved.contract || saved) }; fr.hasId = !!window.modalCtx.data?.id; }
-      fr.isDirty=false; fr._snapshot=null; setFrameMode(fr,'view');
-      L('saveForFrame EXIT (global parent, kept open)');
+        let revoke  = false;
+        let reissue = false;
+
+        if (choice === '1') {
+          revoke  = true;
+          reissue = false;
+        } else if (choice === '2') {
+          revoke  = true;
+          reissue = true;
+        } else {
+          alert('Please enter 1, 2 or 3. Save has been cancelled.');
+          fr._saving = false;
+          fr._updateButtons && fr._updateButtons();
+          return;
+        }
+
+        mc._revokeQrOnSave  = revoke;
+        mc._reissueQrOnSave = reissue;
+
+        L('saveForFrame QR prompt result', {
+          choice,
+          revoke_qr_on_save:  mc._revokeQrOnSave,
+          reissue_qr_on_save: mc._reissueQrOnSave
+        });
+      }
+    } catch (e) {
+      L('saveForFrame QR prompt: failed (non-fatal)', e);
     }
   }
+
+  fr.persistCurrentTabState();
+
+  if (isChildNow && !fr.noParentGate && fr.kind !== 'advanced-search') {
+    const p = window.__modalStack[window.__modalStack.length - 2];
+    if (!p || !(p.mode === 'edit' || p.mode === 'create')) {
+      L('saveForFrame GUARD (global): parent not editable');
+      return;
+    }
+  }
+
+  fr._saving = true;
+  fr._updateButtons && fr._updateButtons();
+
+  let ok = false, saved = null;
+  if (typeof fr.onSave === 'function') {
+    try {
+      const res = await fr.onSave();
+      ok = (res === true) || (res && res.ok === true);
+      if (res && res.saved) saved = res.saved;
+    } catch (e) {
+      L('saveForFrame onSave threw (global)', e);
+      ok = false;
+    }
+  }
+  fr._saving = false;
+  if (!ok) {
+    L('saveForFrame RESULT not ok (global)');
+    fr._updateButtons && fr._updateButtons();
+    return;
+  }
+
+  // ─────────────────────────────────────────────
+  // Existing post-save logic (unchanged)
+  // ─────────────────────────────────────────────
+
+  if (fr.kind === 'advanced-search') {
+    sanitizeModalGeometry();
+    const closing = window.__modalStack.pop();
+    if (closing?._detachDirty) { try { closing._detachDirty(); } catch {} closing._detachDirty = null; }
+    if (closing?._detachGlobal) { try { closing._detachGlobal(); } catch {} closing._detachGlobal = null; }
+    fr._wired = false;
+
+    if (window.__modalStack.length > 0) {
+      const p = window.__modalStack[window.__modalStack.length - 1];
+      renderTop();
+      try { p.onReturn && p.onReturn(); } catch {}
+    } else {
+      discardAllModalsAndState();
+    }
+
+    L('saveForFrame EXIT (global advanced-search closed)');
+    return;
+  }
+
+  if (isChildNow) {
+    // If this child should remain open after save (successor contract),
+    // flip it in-place to view mode and keep it on screen.
+    if (fr.stayOpenOnSave) {
+      try {
+        if (saved && window.modalCtx) {
+          window.modalCtx.data = { ...(window.modalCtx.data || {}), ...(saved.contract || saved) };
+          fr.hasId = !!window.modalCtx.data?.id;
+        }
+        setFrameMode(fr, 'view');
+        fr._updateButtons && fr._updateButtons();
+        renderTop();
+      } catch {}
+      L('saveForFrame EXIT (child kept open)');
+    } else {
+      if (!fr.noParentGate) {
+        try { window.dispatchEvent(new CustomEvent('modal-dirty')); } catch {}
+      }
+
+      sanitizeModalGeometry();
+      window.__modalStack.pop();
+
+      if (window.__modalStack.length > 0) {
+        const p = window.__modalStack[window.__modalStack.length - 1];
+
+        let resumeMode =
+          (typeof fr !== 'undefined' &&
+           fr &&
+           fr._parentModeOnOpen &&
+           fr.kind !== 'rate-presets-picker')
+            ? fr._parentModeOnOpen
+            : p.mode;
+
+        // SPECIAL CASE: candidate pay-method change → treat as successful parent save
+        if (fr.kind === 'candidate-pay-method-change' && p.entity === 'candidates') {
+          resumeMode   = 'view';
+          p.isDirty    = false;
+          p._snapshot  = null;
+
+          try {
+            if (saved && window.modalCtx && window.modalCtx.entity === 'candidates') {
+              window.modalCtx.data = {
+                ...(window.modalCtx.data || {}),
+                ...(saved || {})
+              };
+            }
+          } catch {}
+        }
+
+        try { setFrameMode(p, resumeMode); } catch {}
+        p._updateButtons && p._updateButtons();
+        renderTop();
+
+        try { window.dispatchEvent(new Event('contracts-main-rendered')); } catch {}
+        try { p.onReturn && p.onReturn(); } catch {}
+      }
+
+      L('saveForFrame EXIT (global child)');
+    }
+  } else {
+    // parent branch...
+    try {
+      const savedContract = (saved && (saved.contract || saved)) || null;
+      const id = savedContract?.id || window.modalCtx?.data?.id || null;
+      if (id && savedContract) {
+        const idx = Array.isArray(currentRows)
+          ? currentRows.findIndex(x => String(x.id) === String(id))
+          : -1;
+        if (idx >= 0) currentRows[idx] = savedContract;
+        (window.__lastSavedAtById ||= {})[String(id)] = Date.now();
+      }
+    } catch (e) {
+      console.warn('[SAVE] list cache merge failed', e);
+    }
+
+    if (saved && window.modalCtx) {
+      window.modalCtx.data = { ...(window.modalCtx.data || {}), ...(saved.contract || saved) };
+      fr.hasId = !!window.modalCtx.data?.id;
+    }
+    fr.isDirty = false;
+    fr._snapshot = null;
+    setFrameMode(fr, 'view');
+    L('saveForFrame EXIT (global parent, kept open)');
+  }
+}
+
 
   const onSaveClick = async (ev)=>{
     const btn=ev?.currentTarget || byId('btnSave');
@@ -23218,8 +23405,6 @@ const setCloseLabel = ()=> {
 // ──────────────────────────────────────────────────────────────────────────────
 // IDs-only selection helpers (single source of truth: Set of selected IDs)
 // ──────────────────────────────────────────────────────────────────────────────
-
-
 
 
 
@@ -30992,7 +31177,6 @@ function renderTimesheetOverviewTab(ctx) {
 
   const weYmd = ts.week_ending_date || row.week_ending_date || null;
 
-  // YYYY-MM-DD → DD-MM-YYYY (for UI)
   const fmtYmdToDmy = (ymd) => {
     if (!ymd || typeof ymd !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(ymd)) return enc(ymd || '');
     const [y, m, d] = ymd.split('-');
@@ -31053,21 +31237,19 @@ function renderTimesheetOverviewTab(ctx) {
 
   const fmtMoney = (v) => isNaN(Number(v)) ? '—' : `£${(Math.round(Number(v) * 100) / 100).toFixed(2)}`;
 
-  // contract_week context (for planned/manual weekly)
   const cwId         = details.contract_week_id || cw.id || row.contract_week_id || null;
   const cwSubSnapRaw = cw.submission_mode_snapshot || row.submission_mode || '';
   const cwSubSnap    = String(cwSubSnapRaw || '').toUpperCase();
 
-  const policy    = details.policy || {};
-  const requiresHr        = !!policy.requires_hr;
-  const autoprocessHr     = !!policy.autoprocess_hr;
-  const noTimesheetReq    = !!policy.no_timesheet_required;
-  const validations       = Array.isArray(details.validations) ? details.validations : [];
+  const policy          = details.policy || {};
+  const requiresHr      = !!policy.requires_hr;
+  const autoprocessHr   = !!policy.autoprocess_hr;
+  const noTimesheetReq  = !!policy.no_timesheet_required;
+  const validations     = Array.isArray(details.validations) ? details.validations : [];
   const latestValidation  = validations.length ? validations[0] : null;
   const validationStatus  = latestValidation ? String(latestValidation.status || '').toUpperCase() : null;
   const validationIsOk    = validationStatus === 'VALIDATION_OK' || validationStatus === 'OVERRIDDEN';
 
-  // Evidence flags (for timesheet-required pill)
   const r2NurseKey   = ts.r2_nurse_key || null;
   const r2AuthKey    = ts.r2_auth_key || null;
   const manualPdfKey = ts.manual_pdf_r2_key || details.manual_pdf_r2_key || null;
@@ -31149,7 +31331,6 @@ function renderTimesheetOverviewTab(ctx) {
     return 'pill-info';
   })();
 
-  // NEW: explicit processing_status pill
   const procStatusPillHtml = (() => {
     if (!procStatus) return '';
     let cls = 'pill-info';
@@ -31166,7 +31347,6 @@ function renderTimesheetOverviewTab(ctx) {
     return `<span class="pill ${cls}" style="margin-left:4px;">Status: ${enc(procStatus)}</span>`;
   })();
 
-  // NEW: HR hints under stage
   const hrHintsHtml = (() => {
     if (!requiresHr) return '';
     const lines = [];
@@ -31257,46 +31437,43 @@ function renderTimesheetOverviewTab(ctx) {
       </div>
     `;
 
-  // Timesheet-level reference (soft-editable, even for ELECTRONIC)
   const refValue = state && typeof state.reference === 'string'
     ? state.reference
     : (ts.reference_number || row.reference_number || '');
 
-  // ───── Action gating ─────
-  const hasTs = !!tsId;
-  const locked = isPaid || isInvoiced;
-
-  // NEW: daily QR action gating
+  const hasTs   = !!tsId;
+  const locked  = isPaid || isInvoiced;
   const isDaily = sheetScope === 'DAILY';
-  const hasQr   = !!qrStatus;
-  const canSendDailyQr =
-    isDaily &&
-    subMode === 'ELECTRONIC' &&
-    !locked &&
-    !hasQr;
+  const isWeekly = sheetScope === 'WEEKLY';
 
-  // Existing weekly electronic TS → MANUAL
+  const canSendDailyQr =
+    isDaily && hasTs && !locked;
+
+  const canSendWeeklyQr =
+    isWeekly &&
+    hasTs &&
+    subMode === 'MANUAL' &&
+    !!cwId &&
+    !locked;
+
   const canSwitchToManualWeekly =
     hasTs &&
     sheetScope === 'WEEKLY' &&
     subMode === 'ELECTRONIC' &&
     !locked;
 
-  // Planned/open weekly (no TS yet) → MANUAL via contract_week.switch-mode
   const isPlannedWeekly = !hasTs && sheetScope === 'WEEKLY' && !!cwId;
   const canSwitchWeekToManualPlanned =
     isPlannedWeekly &&
     cwSubSnap === 'ELECTRONIC' &&
     !locked;
 
-  // Revert to original electronic (TS versioning) – backend enforces the real rules
   const canRevertElectronic =
     hasTs &&
     sheetScope === 'WEEKLY' &&
     subMode === 'MANUAL' &&
     !locked;
 
-  // Delete manual TS and reopen week for electronic
   const canDeleteManualReopen =
     hasTs &&
     sheetScope === 'WEEKLY' &&
@@ -31304,12 +31481,10 @@ function renderTimesheetOverviewTab(ctx) {
     !!cwId &&
     !locked;
 
-  // Allow permanent delete for any non-paid, non-invoiced TS
   const canDeletePermanently =
     hasTs &&
     !locked;
 
-  // NEW: timesheet required pill (HR + evidence gate)
   const missingTsEvidence =
     requiresHr &&
     !noTimesheetReq &&
@@ -31326,10 +31501,24 @@ function renderTimesheetOverviewTab(ctx) {
     ? '<span class="pill pill-bad" style="margin-left:4px;">Timesheet required</span>'
     : '';
 
+  const hasQr = !!qrStatus;
+  const showQrAmendWarning = hasQr && !locked;
+  const qrAmendWarningHtml = showQrAmendWarning
+    ? `
+      <div class="mini" style="margin-top:8px;color:var(--warn);max-width:520px;">
+        Warning: this timesheet already has a QR version. If you amend the hours and save,
+        you will be asked whether to:
+        <br/>• save and revoke the existing QR only, or
+        <br/>• save, revoke and reissue a new QR timesheet to the worker.
+        <br/><br/>Please make sure the hours are correct before saving to avoid sending
+        multiple revised timesheets.
+      </div>
+    `
+    : '';
+
   let actionsHtml = '';
 
-  if (sheetScope === 'DAILY' && hasTs) {
-    // NEW: daily actions (QR route)
+  if (isDaily && hasTs) {
     const buttons = [];
 
     if (canSendDailyQr) {
@@ -31337,7 +31526,7 @@ function renderTimesheetOverviewTab(ctx) {
         <button type="button"
                 class="btn"
                 data-ts-action="send-daily-qr">
-          Send Daily QR Timesheet
+          Send daily QR timesheet
         </button>
       `);
     }
@@ -31345,17 +31534,25 @@ function renderTimesheetOverviewTab(ctx) {
     if (!buttons.length) {
       actionsHtml = `
         <span class="mini">
-          No structural actions are available for this daily timesheet (it may be paid, invoiced, or already in a QR flow).
+          No structural actions are available for this daily timesheet (it may be paid, invoiced, or otherwise locked).
         </span>
       `;
     } else {
       actionsHtml = buttons.join('');
     }
   } else if (hasTs || isPlannedWeekly) {
-    // Existing weekly actions
     const buttons = [];
 
-    // Convert to manual (existing TS or planned week)
+    if (canSendWeeklyQr) {
+      buttons.push(`
+        <button type="button"
+                class="btn"
+                data-ts-action="send-weekly-qr">
+          Send weekly QR timesheet
+        </button>
+      `);
+    }
+
     if (canSwitchToManualWeekly || canSwitchWeekToManualPlanned) {
       const label = hasTs
         ? 'Convert to manual timesheet'
@@ -31370,7 +31567,6 @@ function renderTimesheetOverviewTab(ctx) {
       `);
     }
 
-    // Revert to original electronic TS (if an electronic version exists)
     if (canRevertElectronic) {
       buttons.push(`
         <button type="button"
@@ -31382,7 +31578,6 @@ function renderTimesheetOverviewTab(ctx) {
       `);
     }
 
-    // Delete manual + reopen week for electronic
     if (canDeleteManualReopen) {
       buttons.push(`
         <button type="button"
@@ -31394,7 +31589,6 @@ function renderTimesheetOverviewTab(ctx) {
       `);
     }
 
-    // Permanent delete (any unlocked TS)
     if (canDeletePermanently) {
       buttons.push(`
         <button type="button"
@@ -31416,7 +31610,6 @@ function renderTimesheetOverviewTab(ctx) {
       `;
     }
   } else {
-    // Planned week (no TS yet, and no contract_week id – very edge case)
     actionsHtml = `
       <span class="mini">
         This is a planned/open week without a timesheet yet. Once a manual or electronic
@@ -31479,12 +31672,12 @@ function renderTimesheetOverviewTab(ctx) {
         <label>Actions</label>
         <div class="controls">
           ${actionsHtml}
+          ${qrAmendWarningHtml}
         </div>
       </div>
     </div>
   `;
 
-  // No per-shift breakdown here; Lines tab owns that for weekly & daily electronic
   let linesCardHtml = '';
 
   return `
@@ -33093,17 +33286,21 @@ async function openTimesheet(row) {
       }
     };
 
-    const onSaveTimesheet = async () => {
-      const { LOGM, L, GC, GE } = getTsLoggers('[TS][SAVE]');
-      GC('onSaveTimesheet');
+ const onSaveTimesheet = async () => {
+  const { LOGM, L, GC, GE } = getTsLoggers('[TS][SAVE]');
+  GC('onSaveTimesheet');
 
-      const mc     = window.modalCtx || {};
-      const rowNow = mc.data || baseRow;
-      const det    = mc.timesheetDetails || details;
-      const st     = mc.timesheetState || {};
+  const mc     = window.modalCtx || {};
+  const rowNow = mc.data || baseRow;
+  const det    = mc.timesheetDetails || details;
+  const st     = mc.timesheetState || {};
 
-      const segOverrides    = st.segmentOverrides || {};
-      const hasSegOverrides = !!Object.keys(segOverrides).length;
+  // NEW: QR-on-save flags (set by saveForFrame tri-choice)
+  const revokeQr  = !!mc._revokeQrOnSave;
+  const reissueQr = !!mc._reissueQrOnSave;
+
+  const segOverrides    = st.segmentOverrides || {};
+  const hasSegOverrides = !!Object.keys(segOverrides).length;
 
       const tsLocal    = det.timesheet || {};
       const tsfinLocal = det.tsfin     || {};
@@ -33112,26 +33309,34 @@ async function openTimesheet(row) {
       const stagedRef  = (st.reference != null) ? st.reference : currentRef;
       const refChanged = stagedRef !== currentRef;
 
-      const sheetScopeSave = (det.sheet_scope ||
-                              rowNow.sheet_scope ||
-                              tsLocal.sheet_scope ||
-                              '').toUpperCase();
-      const subModeSave    = (tsLocal.submission_mode ||
-                              rowNow.submission_mode ||
-                              '').toUpperCase();
+    const sheetScopeSave = (det.sheet_scope ||
+                        rowNow.sheet_scope ||
+                        tsLocal.sheet_scope ||
+                        '').toUpperCase();
+const subModeSave    = (tsLocal.submission_mode ||
+                        rowNow.submission_mode ||
+                        '').toUpperCase();
 
-      const weekIdSave     = rowNow.contract_week_id || det.contract_week_id || null;
+const weekIdSave     = rowNow.contract_week_id || det.contract_week_id || null;
 
-      // Treat BOTH true manual weeks and planned weekly weeks (no TS yet) as "weekly manual context"
-      const isPlannedWeeklyWithoutTs =
-        sheetScopeSave === 'WEEKLY' &&
-        !!weekIdSave &&
-        !tsLocal.timesheet_id;
+// Treat BOTH true manual weeks and planned weekly weeks (no TS yet) as "weekly manual context"
+const isPlannedWeeklyWithoutTs =
+  sheetScopeSave === 'WEEKLY' &&
+  !!weekIdSave &&
+  !tsLocal.timesheet_id;
 
-      const isWeeklyManualContext =
-        sheetScopeSave === 'WEEKLY' &&
-        !!weekIdSave &&
-        (subModeSave === 'MANUAL' || isPlannedWeeklyWithoutTs);
+const isWeeklyManualContext =
+  sheetScopeSave === 'WEEKLY' &&
+  !!weekIdSave &&
+  (subModeSave === 'MANUAL' || isPlannedWeeklyWithoutTs);
+
+// DAILY MANUAL context – editable daily TS in MANUAL mode
+const isDailyManualContext =
+  sheetScopeSave === 'DAILY' &&
+  subModeSave === 'MANUAL' &&
+  !!tsLocal.timesheet_id;
+
+
 
       const manualHours = st.manualHours || {};
       const hasManualHours =
@@ -33186,53 +33391,94 @@ async function openTimesheet(row) {
         shouldMarkPaid
       });
 
-      const tasks = [];
+  const tasks = [];
 
-      // 5a) Weekly MANUAL hours + additional units → contract-week manual upsert
-      if (isWeeklyManualContext && (hasManualHours || hasExtrasStaged)) {
-        tasks.push(async () => {
-          const payload = {
-            hours: {
-              day:   Number(manualHours.day   || 0) || 0,
-              night: Number(manualHours.night || 0) || 0,
-              sat:   Number(manualHours.sat   || 0) || 0,
-              sun:   Number(manualHours.sun   || 0) || 0,
-              bh:    Number(manualHours.bh    || 0) || 0
-            },
-            additional_units_week: {}
-          };
+// 5a) Weekly MANUAL hours + additional units → contract-week manual upsert
+if (isWeeklyManualContext && (hasManualHours || hasExtrasStaged)) {
+  tasks.push(async () => {
+    const payload = {
+      hours: {
+        day:   Number(manualHours.day   || 0) || 0,
+        night: Number(manualHours.night || 0) || 0,
+        sat:   Number(manualHours.sat   || 0) || 0,
+        sun:   Number(manualHours.sun   || 0) || 0,
+        bh:    Number(manualHours.bh    || 0) || 0
+      },
+      additional_units_week: {},
 
-          Object.entries(extrasMap || {}).forEach(([code, r]) => {
-            if (!r) return;
-            const u = Number(r.units_week || 0);
-            if (!Number.isFinite(u)) return;
-            payload.additional_units_week[code] = u;
-          });
+      // QR revoke/reissue hints to backend (weekly)
+      revoke_qr:  revokeQr,
+      reissue_qr: reissueQr
+    };
 
-          L('manual weekly upsert payload', { weekIdSave, payload });
-          const result = await manualUpsertContractWeek(weekIdSave, payload);
+    Object.entries(extrasMap || {}).forEach(([code, r]) => {
+      if (!r) return;
+      const u = Number(r.units_week || 0);
+      if (!Number.isFinite(u)) return;
+      payload.additional_units_week[code] = u;
+    });
 
-          const newTsId = result.timesheet_id || tsId;
-          if (!tsId && newTsId) {
-            // Planned week → newly created TS
-            window.modalCtx.data = {
-              ...(window.modalCtx.data || rowNow),
-              timesheet_id: newTsId,
-              id: newTsId
-            };
-          }
+    L('manual weekly upsert payload', { weekIdSave, payload });
+    const result = await manualUpsertContractWeek(weekIdSave, payload);
 
-          const finalTsId = newTsId || tsId;
-          if (finalTsId) {
-            try {
-              const freshDetails = await fetchTimesheetDetails(finalTsId);
-              window.modalCtx.timesheetDetails = freshDetails;
-            } catch (err) {
-              L('refresh details after manual upsert failed (non-fatal)', err);
-            }
-          }
-        });
+    const newTsId = result.timesheet_id || tsId;
+    if (!tsId && newTsId) {
+      // Planned week → newly created TS
+      window.modalCtx.data = {
+        ...(window.modalCtx.data || rowNow),
+        timesheet_id: newTsId,
+        id: newTsId
+      };
+    }
+
+    const finalTsId = newTsId || tsId;
+    if (finalTsId) {
+      try {
+        const freshDetails = await fetchTimesheetDetails(finalTsId);
+        window.modalCtx.timesheetDetails = freshDetails;
+      } catch (err) {
+        L('refresh details after manual upsert failed (non-fatal)', err);
       }
+    }
+  });
+}
+
+// 5a-daily) DAILY MANUAL – update worked/break + QR hints
+if (isDailyManualContext && tsId) {
+  tasks.push(async () => {
+    // We send the schedule blob; backend daily-manual-upsert will
+    // resolve it into worked_start/end + breaks and rebuild TSFIN.
+    const schedule = st.schedule || tsLocal.actual_schedule_json || null;
+
+    if (!schedule) {
+      L('daily-manual-upsert skipped: no schedule staged');
+      return;
+    }
+
+    const payload = {
+      schedule_json: schedule,
+      revoke_qr:  revokeQr,
+      reissue_qr: reissueQr
+    };
+
+    L('daily manual upsert payload', { tsId, payload });
+
+    await apiPostJson(
+      `/api/timesheets/${encodeURIComponent(tsId)}/daily-manual-upsert`,
+      payload
+    );
+
+    // Reload details so TSFIN + QR fields reflect the new hours
+    try {
+      const freshDetails = await fetchTimesheetDetails(tsId);
+      window.modalCtx.timesheetDetails = freshDetails;
+    } catch (err) {
+      L('refresh details after daily-manual-upsert failed (non-fatal)', err);
+    }
+  });
+}
+
+
 
       // 5b) Apply segment exclude_from_pay + invoice_target_week_start (SEGMENTS mode only)
       if (det.isSegmentsMode && (hasSegOverrides || hasSegTargets) && (tsId || rowNow.timesheet_id)) {
@@ -33335,7 +33581,7 @@ async function openTimesheet(row) {
       const newTs      = newDetails.timesheet || {};
       const finalTsId  = newTs.timesheet_id || tsId || rowNow.timesheet_id;
 
-      const updatedRow = {
+   const updatedRow = {
         ...(window.modalCtx.data || rowNow),
         timesheet_id:         finalTsId || null,
         total_pay_ex_vat:     newTsfin.total_pay_ex_vat     ?? rowNow.total_pay_ex_vat,
@@ -33347,6 +33593,12 @@ async function openTimesheet(row) {
         reference_number:     newTs.reference_number        ?? rowNow.reference_number,
         id:                   finalTsId || rowNow.id
       };
+
+      // NEW: clear QR-on-save flags after a successful save
+      if (window.modalCtx) {
+        window.modalCtx._revokeQrOnSave  = false;
+        window.modalCtx._reissueQrOnSave = false;
+      }
 
       window.modalCtx.data = updatedRow;
 
