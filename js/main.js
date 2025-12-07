@@ -8934,6 +8934,29 @@ function renderSelectionToolbar(section, mountAfterEl) {
   bar.appendChild(btnSave);
   bar.appendChild(btnLoad);
 
+  // NEW: Resolve button for timesheets selection only
+  if (section === 'timesheets') {
+    const btnResolve = mkBtn('Resolve selected timesheets (candidate/client mapping)', 'Resolve…');
+    btnResolve.disabled = !hasSelection;
+
+    btnResolve.addEventListener('click', async () => {
+      try {
+        if (!hasSelection) return;
+        if (typeof getSelectedSummaryRows !== 'function') {
+          console.warn('getSelectedSummaryRows() is not defined; cannot resolve selection');
+          return;
+        }
+        const rows = getSelectedSummaryRows('timesheets') || [];
+        if (!rows.length) return;
+        await openTimesheetsResolveModal(rows);
+      } catch (e) {
+        console.error('Resolve selection failed', e);
+      }
+    });
+
+    bar.appendChild(btnResolve);
+  }
+
   host.appendChild(bar);
   return bar;
 }
@@ -11974,120 +11997,191 @@ async function openCandidateAdvancesModal(candidateRow) {
 }
 
 function renderCandidateTab(key, row = {}) {
-  if (key === 'main') return html(`
-    <div class="form" id="tab-main">
-      ${input('first_name','First name', row.first_name)}
-      ${input('last_name','Last name', row.last_name)}
-      ${input('email','Email', row.email, 'email')}
-      ${input('phone','Telephone', row.phone)}
+  if (key === 'main') {
+    const enc = escapeHtml || ((s) => String(s || ''));
 
-      ${select(
-        'pay_method',
-        'Pay method',
-        (row.pay_method && row.pay_method !== 'Unknown' && row.pay_method !== 'UNKNOWN')
-          ? row.pay_method
-          : 'Unknown',
-        ['Unknown','PAYE','UMBRELLA'],
-        { id:'pay-method' }
-      )}
+    const aliasesArr = Array.isArray(row.nhsp_hr_name_aliases)
+      ? row.nhsp_hr_name_aliases
+      : (row.nhsp_hr_name_aliases ? [row.nhsp_hr_name_aliases] : []);
 
-      <!-- CCR: display-only, never posted -->
-      <div class="row">
-        <label>CloudTMS Candidate Reference (CCR)</label>
-        <input id="tms_ref_display"
-               value="${row.tms_ref ? String(row.tms_ref) : 'Awaiting CCR number from server'}"
-               disabled
-               readonly
-               style="opacity:.7" />
-      </div>
+    const aliasChipsHtml = aliasesArr
+      .filter(a => !!a)
+      .map(a => {
+        const v = enc(a);
+        return `
+          <span class="chip cand-alias-chip" data-alias="${v}">
+            <span class="chip-label">${v}</span>
+            <button type="button"
+                    class="chip-remove"
+                    data-act="remove-cand-alias"
+                    data-alias="${v}"
+                    title="Remove alias">
+              ×
+            </button>
+          </span>
+        `;
+      })
+      .join('');
 
-      ${input('display_name','Display name', row.display_name)}
+    const aliasesJson = enc(JSON.stringify(aliasesArr));
 
-      <!-- New: NI / DOB / Gender -->
-      ${input('ni_number','National Insurance Number', row.ni_number)}
-      ${input('date_of_birth','Date of birth', row.date_of_birth)}
-      ${select('gender','Gender', row.gender || '', ['', 'Male', 'Female', 'Other'])}
+    return html(`
+      <div class="form" id="tab-main">
+        ${input('first_name','First name', row.first_name)}
+        ${input('last_name','Last name', row.last_name)}
+        ${input('email','Email', row.email, 'email')}
+        ${input('phone','Telephone', row.phone)}
 
-      <!-- New: Job Titles (multi, with bins) -->
-      <div class="row">
-        <label>Job Titles</label>
-        <div class="controls">
-          <div id="jobTitlesList"
-               style="display:flex;flex-wrap:wrap;gap:4px;min-height:24px;align-items:flex-start;"></div>
-          <button type="button"
-                  class="btn mini"
-                  data-act="pick-job-title">
-            Add Job Title…
-          </button>
-          <div class="hint">
-            Right click a Job Title in Edit mode to select a Primary Job Role.
-          </div>
-        </div>
-      </div>
+        ${select(
+          'pay_method',
+          'Pay method',
+          (row.pay_method && row.pay_method !== 'Unknown' && row.pay_method !== 'UNKNOWN')
+            ? row.pay_method
+            : 'Unknown',
+          ['Unknown','PAYE','UMBRELLA'],
+          { id:'pay-method' }
+        )}
 
-      <!-- Professional registration number (NMC/GMC/HCPC) -->
-      <div class="row"
-           data-block="prof_reg"
-           style="${row.prof_reg_type ? '' : 'display:none'}">
-        <label data-field="prof_reg_label">
-          ${row.prof_reg_type
-            ? escapeHtml(`${row.prof_reg_type} Number`)
-            : 'Registration Number'}
-        </label>
-        <div class="controls">
-          <input class="input"
-                 name="prof_reg_number"
-                 value="${escapeHtml(row.prof_reg_number || '')}">
-        </div>
-      </div>
-
-      <!-- Home address + postcode lookup -->
-      <div class="row">
-        <label>Home address</label>
-        <div class="controls">
-          <div class="grid-2">
-            <input class="input"
-                   name="address_line1"
-                   placeholder="Address line 1"
-                   value="${escapeHtml(row.address_line1 || '')}">
-            <input class="input"
-                   name="address_line2"
-                   placeholder="Address line 2"
-                   value="${escapeHtml(row.address_line2 || '')}">
-            <input class="input"
-                   name="address_line3"
-                   placeholder="Address line 3"
-                   value="${escapeHtml(row.address_line3 || '')}">
-            <input class="input"
-                   name="town_city"
-                   placeholder="City / Town"
-                   value="${escapeHtml(row.town_city || '')}">
-            <input class="input"
-                   name="county"
-                   placeholder="County"
-                   value="${escapeHtml(row.county || '')}">
-            <div class="split">
-              <input class="input"
-                     name="postcode"
-                     placeholder="Postcode"
-                     value="${escapeHtml(row.postcode || '')}">
-              <button type="button"
-                      class="btn mini"
-                      data-act="postcode-lookup"
-                      title="Lookup by postcode">
-                Lookup
-              </button>
+        <!-- Rota key name: read-only, not posted -->
+        <div class="row">
+          <label>Rota key name</label>
+          <div class="controls">
+            <input
+              class="input"
+              value="${enc(row.key_norm || '')}"
+              disabled
+              readonly
+              style="opacity:.7"
+            />
+            <div class="hint">
+              This is the candidate's normalised rota key and is managed by the system / mappings.
             </div>
           </div>
         </div>
-      </div>
 
-      <div class="row">
-        <label>Notes</label>
-        <textarea name="notes" placeholder="Free text…">${row.notes || ''}</textarea>
+        <!-- NHSP / HealthRoster alias chips -->
+        <div class="row">
+          <label>Also known as in NHSP / HealthRoster</label>
+          <div class="controls">
+            <div class="chip-row"
+                 id="cand-alias-chips"
+                 data-field="nhsp_hr_name_aliases"
+                 data-aliases='${aliasesJson}'>
+              ${aliasChipsHtml || '<span class="mini">No aliases configured yet.</span>'}
+            </div>
+            <input
+              id="cand-alias-input"
+              class="input"
+              type="text"
+              placeholder="Add alias (e.g. J Smith)"
+              data-act="add-cand-alias"
+              style="margin-top:4px;"
+            />
+            <div class="hint">
+              Aliases help match NHSP / HealthRoster staff name variations (e.g. "SMITH, JOHN", "J Smith")
+              to this candidate. Changes here will be saved into nhsp_hr_name_aliases.
+            </div>
+          </div>
+        </div>
+
+        <!-- CCR: display-only, never posted -->
+        <div class="row">
+          <label>CloudTMS Candidate Reference (CCR)</label>
+          <input id="tms_ref_display"
+                 value="${row.tms_ref ? String(row.tms_ref) : 'Awaiting CCR number from server'}"
+                 disabled
+                 readonly
+                 style="opacity:.7" />
+        </div>
+
+        ${input('display_name','Display name', row.display_name)}
+
+        <!-- New: NI / DOB / Gender -->
+        ${input('ni_number','National Insurance Number', row.ni_number)}
+        ${input('date_of_birth','Date of birth', row.date_of_birth)}
+        ${select('gender','Gender', row.gender || '', ['', 'Male', 'Female', 'Other'])}
+
+        <!-- New: Job Titles (multi, with bins) -->
+        <div class="row">
+          <label>Job Titles</label>
+          <div class="controls">
+            <div id="jobTitlesList"
+                 style="display:flex;flex-wrap:wrap;gap:4px;min-height:24px;align-items:flex-start;"></div>
+            <button type="button"
+                    class="btn mini"
+                    data-act="pick-job-title">
+              Add Job Title…
+            </button>
+            <div class="hint">
+              Right click a Job Title in Edit mode to select a Primary Job Role.
+            </div>
+          </div>
+        </div>
+
+        <!-- Professional registration number (NMC/GMC/HCPC) -->
+        <div class="row"
+             data-block="prof_reg"
+             style="${row.prof_reg_type ? '' : 'display:none'}">
+          <label data-field="prof_reg_label">
+            ${row.prof_reg_type
+              ? escapeHtml(`${row.prof_reg_type} Number`)
+              : 'Registration Number'}
+          </label>
+          <div class="controls">
+            <input class="input"
+                   name="prof_reg_number"
+                   value="${escapeHtml(row.prof_reg_number || '')}">
+          </div>
+        </div>
+
+        <!-- Home address + postcode lookup -->
+        <div class="row">
+          <label>Home address</label>
+          <div class="controls">
+            <div class="grid-2">
+              <input class="input"
+                     name="address_line1"
+                     placeholder="Address line 1"
+                     value="${escapeHtml(row.address_line1 || '')}">
+              <input class="input"
+                     name="address_line2"
+                     placeholder="Address line 2"
+                     value="${escapeHtml(row.address_line2 || '')}">
+              <input class="input"
+                     name="address_line3"
+                     placeholder="Address line 3"
+                     value="${escapeHtml(row.address_line3 || '')}">
+              <input class="input"
+                     name="town_city"
+                     placeholder="City / Town"
+                     value="${escapeHtml(row.town_city || '')}">
+              <input class="input"
+                     name="county"
+                     placeholder="County"
+                     value="${escapeHtml(row.county || '')}">
+              <div class="split">
+                <input class="input"
+                       name="postcode"
+                       placeholder="Postcode"
+                       value="${escapeHtml(row.postcode || '')}">
+                <button type="button"
+                        class="btn mini"
+                        data-act="postcode-lookup"
+                        title="Lookup by postcode">
+                  Lookup
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="row">
+          <label>Notes</label>
+          <textarea name="notes" placeholder="Free text…">${row.notes || ''}</textarea>
+        </div>
       </div>
-    </div>
-  `);
+    `);
+  }
 
   // Care Packages tab (was "Rates")
   if (key === 'rates') return html(`
@@ -12194,6 +12288,8 @@ function renderCandidateTab(key, row = {}) {
     </div>
   `);
 }
+
+
 async function fetchCandidateAdvances(candidateId) {
   if (!candidateId) return;
 
@@ -20553,25 +20649,36 @@ const frame = {
   stayOpenOnSave: !!opts.stayOpenOnSave,
     currentTabKey: (Array.isArray(tabs) && tabs.length ? tabs[0].key : null),
 
-    mode: (() => {
-   if (opts.forceEdit) return 'edit';
-    if (!hasId && opts.kind === 'rate-preset') return 'edit';
+  mode: (() => {
+  if (opts.forceEdit) return 'edit';
+  if (!hasId && opts.kind === 'rate-preset') return 'edit';
 
-    // Special case: planned timesheet week (no timesheet_id yet)
-    const ent = window.modalCtx?.entity || null;
-    if (!hasId && ent === 'timesheets') {
-      const d = window.modalCtx?.data || {};
-      const hasWeek  = !!(d.contract_week_id || d.week_id || d.week_ending_date);
-      const hasTsId  = !!d.timesheet_id;
-      if (hasWeek && !hasTsId) {
-        // Planned weekly/daily stub: open in VIEW mode, require explicit Edit
-        return 'view';
-      }
+  // NEW: utility modals – always view-only, no Save/Edit
+  if (
+    opts.kind === 'timesheets-resolve' ||
+    opts.kind === 'resolve-candidate'  ||
+    opts.kind === 'resolve-client'     ||
+    opts.kind === 'import-summary'
+  ) {
+    return 'view';
+  }
+
+  // Special case: planned timesheet week (no timesheet_id yet)
+  const ent = window.modalCtx?.entity || null;
+  if (!hasId && ent === 'timesheets') {
+    const d = window.modalCtx?.data || {};
+    const hasWeek  = !!(d.contract_week_id || d.week_id || d.week_ending_date);
+    const hasTsId  = !!d.timesheet_id;
+    if (hasWeek && !hasTsId) {
+      // Planned weekly/daily stub: open in VIEW mode, require explicit Edit
+      return 'view';
     }
+  }
 
-    // Default for everything else
-    return hasId ? 'view' : 'create';
-  })(),
+  // Default for everything else
+  return hasId ? 'view' : 'create';
+})(),
+
     isDirty:false, _snapshot:null, _detachDirty:null, _detachGlobal:null, _hasMountedOnce:false, _wired:false, _closing:false, _saving:false, _confirmingDiscard:false,
     _applyDesired:null,
 
@@ -22099,12 +22206,19 @@ function setFrameMode(frameObj, mode) {
     isPlannedTimesheetStub = false;
   }
 
-  // ▶ correct accidental 'view' on brand-new frames (e.g., successor create)
-  //    but DO NOT do this for planned timesheet weeks where we *want* view+no id.
-  if (!frameObj.hasId && mode === 'view' && !isPlannedTimesheetStub) {
-    mode = frameObj.forceEdit ? 'edit' : 'create';
-    frameObj.mode = mode;
-  }
+ // ▶ correct accidental 'view' on brand-new frames (e.g., successor create)
+//    but DO NOT do this for planned timesheet weeks or utility modals where we *want* view+no id.
+const isUtilityKind =
+  frameObj.kind === 'timesheets-resolve' ||
+  frameObj.kind === 'resolve-candidate'  ||
+  frameObj.kind === 'resolve-client'     ||
+  frameObj.kind === 'import-summary';
+
+if (!frameObj.hasId && mode === 'view' && !isPlannedTimesheetStub && !isUtilityKind) {
+  mode = frameObj.forceEdit ? 'edit' : 'create';
+  frameObj.mode = mode;
+}
+
 
   // ▶ Only toggle read-only on the DOM that actually belongs to the top frame.
   //    When updating a non-top frame (e.g., the parent while a picker is open),
@@ -22303,17 +22417,27 @@ function renderTop() {
 
   btnSave.textContent = defaultPrimary; btnSave.setAttribute('aria-label', defaultPrimary);
   L('showModal defaultPrimary', { kind: top.kind, defaultPrimary });
-const setCloseLabel = ()=>{
+const setCloseLabel = ()=> {
+  const isUtilityKind =
+    top.kind === 'timesheets-resolve' ||
+    top.kind === 'resolve-candidate'  ||
+    top.kind === 'resolve-client'     ||
+    top.kind === 'import-summary';
+
   const label =
     (top.kind === 'advanced-search')
       ? 'Close'
     : (top.kind === 'timesheet-evidence-replace')
       ? 'Discard'
+    : isUtilityKind
+      ? 'Close'
       : (top.isDirty ? 'Discard' : 'Close');
+
   btnClose.textContent = label;
   btnClose.setAttribute('aria-label', label);
   btnClose.setAttribute('title', label);
 };
+
 
 
   top._updateButtons = ()=>{
@@ -22338,36 +22462,67 @@ const setCloseLabel = ()=>{
       }
     } catch {}
 
-    if (top.kind === 'advanced-search') {
-      btnEdit.style.display='none';
-      btnSave.style.display='';
-      btnSave.disabled=!!top._saving;
-      if (relatedBtn) {
-        relatedBtn.style.display = 'none';
-        relatedBtn.disabled = true;
-      }
-    } else if (top.kind === 'rates-presets') {
-      btnEdit.style.display='none';
-      btnSave.style.display='none';
-      btnSave.disabled=true;
-      if (relatedBtn) {
-        relatedBtn.style.display = 'none';
-        relatedBtn.disabled = true;
-      }
+  if (top.kind === 'advanced-search') {
+  btnEdit.style.display='none';
+  btnSave.style.display='';
+  btnSave.disabled=!!top._saving;
+  if (relatedBtn) {
+    relatedBtn.style.display = 'none';
+    relatedBtn.disabled = true;
+  }
+} else if (top.kind === 'rates-presets') {
+  btnEdit.style.display='none';
+  btnSave.style.display='none';
+  btnSave.disabled=true;
+  if (relatedBtn) {
+    relatedBtn.style.display = 'none';
+    relatedBtn.disabled = true;
+  }
 
-      // Always show “Close” for the Preset Rates manager (never “Discard”)
-      btnClose.textContent = 'Close';
-      btnClose.setAttribute('aria-label', 'Close');
-      btnClose.setAttribute('title', 'Close');
+  // Always show “Close” for the Preset Rates manager (never “Discard”)
+  btnClose.textContent = 'Close';
+  btnClose.setAttribute('aria-label', 'Close');
+  btnClose.setAttribute('title', 'Close');
 
-      L('_updateButtons snapshot (global)', {
+  L('_updateButtons snapshot (global)', {
+    kind: top.kind, isChild, parentEditable, mode: top.mode,
+    btnSave: { display: btnSave.style.display, disabled: btnSave.disabled },
+    btnEdit: { display: btnEdit.style.display }
+  });
+  return;
 
-        kind: top.kind, isChild, parentEditable, mode: top.mode,
-        btnSave: { display: btnSave.style.display, disabled: btnSave.disabled },
-        btnEdit: { display: btnEdit.style.display }
-      });
-      return;
-    } else if (isChild && !top.noParentGate) {
+  // NEW: utility modals (resolve/import) — hide Save/Edit, Close-only
+} else if (
+  top.kind === 'timesheets-resolve' ||
+  top.kind === 'resolve-candidate'  ||
+  top.kind === 'resolve-client'     ||
+  top.kind === 'import-summary'
+) {
+  // No Save/Edit on these; everything happens via inline buttons in the modal body
+  btnSave.style.display = 'none';
+  btnSave.disabled      = true;
+  btnEdit.style.display = 'none';
+
+  if (relatedBtn) {
+    relatedBtn.style.display = 'none';
+    relatedBtn.disabled = true;
+  }
+
+  // Always simple "Close" label (never "Discard")
+  btnClose.textContent = 'Close';
+  btnClose.setAttribute('aria-label', 'Close');
+  btnClose.setAttribute('title', 'Close');
+
+  L('_updateButtons snapshot (utility)', {
+    kind: top.kind,
+    isChild,
+    mode: top.mode,
+    btnSave: { display: btnSave.style.display, disabled: btnSave.disabled },
+    btnEdit: { display: btnEdit.style.display }
+  });
+  return;
+
+} else if (isChild && !top.noParentGate) {
 
       if (top.mode === 'view') {
         btnSave.style.display = 'none';
@@ -23066,6 +23221,1790 @@ const setCloseLabel = ()=>{
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+async function openTimesheetsResolveModal(selectedRows) {
+  const rowsIn = Array.isArray(selectedRows) ? selectedRows : [];
+  const ids = rowsIn
+    .map(r => String(r.timesheet_id || r.id || ''))
+    .filter(Boolean);
+
+  if (!ids.length) {
+    console.warn('[TS][RESOLVE] openTimesheetsResolveModal called with no ids');
+    return;
+  }
+
+  let rows = [];
+  try {
+    const res = await authFetch(API('/api/timesheets/resolve-preview'), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ timesheet_ids: ids })
+    });
+    const text = await res.text();
+    if (!res.ok) {
+      throw new Error(text || `Failed to load resolve preview (${res.status})`);
+    }
+    rows = text ? JSON.parse(text) : [];
+    if (!Array.isArray(rows)) rows = [];
+  } catch (err) {
+    console.error('[TS][RESOLVE] failed to fetch resolve-preview', err);
+    alert(err?.message || 'Failed to load resolve preview.');
+    return;
+  }
+
+  // Keep state globally so child modals (candidate/client resolve) can refresh
+  window.__resolveTimesheetsState = {
+    rows,
+    selectionIds: ids
+  };
+
+  // Show a simple modal with a single "Resolve" tab
+  showModal(
+    'Resolve timesheets',
+    [{ key: 'main', label: 'Resolve' }],
+    (key) => {
+      if (key !== 'main') return '';
+      return renderTimesheetsResolveModal(window.__resolveTimesheetsState || { rows: [] });
+    },
+    null,               // no onSave
+    false,              // hasId
+    null,               // onReturn
+    {
+      kind: 'timesheets-resolve',
+      noParentGate: true,    // editing aliases shouldn't be gated by parent mode
+      stayOpenOnSave: false  // there is no save, just close/child actions
+    }
+  );
+}
+
+function renderTimesheetsResolveModal(state) {
+  const enc = (typeof escapeHtml === 'function')
+    ? escapeHtml
+    : (s) => String(s == null ? '' : s);
+
+  const rows = state && Array.isArray(state.rows) ? state.rows : [];
+
+  const rowsHtml = rows.length
+    ? rows.map((r, idx) => {
+        const tsId   = r.timesheet_id || r.id || '';
+        const scope  = (r.sheet_scope || '').toUpperCase();
+        const weYmd  = r.week_ending_date || r.worked_date || r.date_ymd || '';
+        const occ    = r.occupant_key_norm || '';
+        const hosp   = r.hospital_norm || '';
+        const pRaw   = r.processing_status || '';
+        const p      = String(pRaw || '').toUpperCase();
+
+        let pillCls = 'pill-info';
+        if (p === 'UNASSIGNED' || p === 'CLIENT_UNRESOLVED') pillCls = 'pill-bad';
+        else if (p === 'READY_FOR_HR') pillCls = 'pill-warn';
+        else if (p === 'READY_FOR_INVOICE') pillCls = 'pill-ok';
+
+        const canAssignCand   = (p === 'UNASSIGNED');
+        const canAssignClient = (p === 'CLIENT_UNRESOLVED');
+
+        return `
+          <tr>
+            <td><span class="mini">${enc(tsId || '—')}</span></td>
+            <td><span class="mini">${enc(scope || '—')}</span></td>
+            <td><span class="mini">${weYmd ? enc(weYmd) : '—'}</span></td>
+            <td><span class="mini">${occ ? enc(occ) : '—'}</span></td>
+            <td><span class="mini">${hosp ? enc(hosp) : '—'}</span></td>
+            <td>
+              <span class="pill ${pillCls}">${p ? enc(p) : 'UNKNOWN'}</span>
+            </td>
+            <td>
+              ${
+                canAssignCand
+                  ? `<button type="button"
+                             class="btn mini"
+                             onclick="openResolveCandidateModal((window.__resolveTimesheetsState||{}).rows[${idx}])">
+                       Assign candidate…
+                     </button>`
+                  : ''
+              }
+              ${
+                canAssignClient
+                  ? `<button type="button"
+                             class="btn mini"
+                             style="margin-left:4px;"
+                             onclick="openResolveClientModal && openResolveClientModal((window.__resolveTimesheetsState||{}).rows[${idx}])">
+                       Assign client…
+                     </button>`
+                  : ''
+              }
+            </td>
+          </tr>
+        `;
+      }).join('')
+    : `
+      <tr>
+        <td colspan="7">
+          <span class="mini">No timesheets in this selection require candidate/client resolution.</span>
+        </td>
+      </tr>
+    `;
+
+  return html(`
+    <div class="form" id="ts-resolve-wrapper">
+      <div class="card">
+        <div class="row">
+          <label>Resolve timesheets</label>
+          <div class="controls">
+            <span class="mini">
+              Use this screen to fix unassigned candidates and unresolved clients
+              by teaching the system how rota/HR names map to database records.
+            </span>
+          </div>
+        </div>
+      </div>
+
+      <div class="card" style="margin-top:10px;">
+        <div class="row">
+          <label>Timesheets</label>
+          <div class="controls">
+            <table class="grid">
+              <thead>
+                <tr>
+                  <th>Timesheet ID</th>
+                  <th>Scope</th>
+                  <th>Week ending / Date</th>
+                  <th>Rota name</th>
+                  <th>Rota hospital</th>
+                  <th>Status</th>
+                  <th>Resolve</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${rowsHtml}
+              </tbody>
+            </table>
+          </div>
+        </div>
+        <div class="row">
+          <label></label>
+          <div class="controls">
+            <button type="button" class="btn" id="btnTsResolveClose">
+              Close
+            </button>
+            <span class="mini" style="margin-left:8px;">
+              Closing this dialog does not change any data; only the "Assign…" actions
+              update aliases and trigger financial recompute.
+            </span>
+          </div>
+        </div>
+      </div>
+    </div>
+  `);
+}
+
+// Wire up the "Close" button once the modal is rendered
+(function wireTsResolveCloseButtonOnce() {
+  // This will be re-run on each tab render, so guard with a small timeout
+  setTimeout(() => {
+    try {
+      const btn = document.getElementById('btnTsResolveClose');
+      if (btn && !btn.__tsResolveWired) {
+        btn.__tsResolveWired = true;
+        btn.addEventListener('click', () => {
+          const closeBtn = document.getElementById('btnCloseModal');
+          if (closeBtn) closeBtn.click();
+        });
+      }
+    } catch (e) {
+      console.warn('[TS][RESOLVE] failed wiring Close button', e);
+    }
+  }, 0);
+})();
+
+async function openResolveCandidateModal(resolveRow) {
+  if (!resolveRow || !resolveRow.timesheet_id) {
+    alert('Timesheet context missing for resolve.');
+    return;
+  }
+
+  const tsId    = resolveRow.timesheet_id;
+  const occName = resolveRow.occupant_key_norm || resolveRow.candidate_name || '(unknown)';
+
+  // Seed a small local state for this child modal
+  window.__resolveCandidateState = {
+    row: resolveRow,
+    results: [],
+    term: ''
+  };
+
+  const enc = (typeof escapeHtml === 'function')
+    ? escapeHtml
+    : (s) => String(s == null ? '' : s);
+
+  const renderResolveCandidateTab = (key) => {
+    if (key !== 'main') return '';
+    const state = window.__resolveCandidateState || {};
+    const results = Array.isArray(state.results) ? state.results : [];
+
+    const resultsHtml = results.length
+      ? `
+        <ul class="mini">
+          ${results.map(c => `
+            <li>
+              <strong>${enc(c.display_name || c.name || (c.first_name || '') + ' ' + (c.last_name || ''))}</strong>
+              ${c.tms_ref ? ` &nbsp; <span class="mono">(${enc(c.tms_ref)})</span>` : ''}
+              <button type="button"
+                      class="btn mini"
+                      data-act="resolve-cand-select"
+                      data-candidate-id="${enc(c.id)}">
+                Select
+              </button>
+            </li>
+          `).join('')}
+        </ul>
+      `
+      : '<span class="mini">No candidates loaded yet. Try a search.</span>';
+
+    return html(`
+      <div class="form" id="ts-resolve-cand">
+        <div class="card">
+          <div class="row">
+            <label>Assign candidate</label>
+            <div class="controls">
+              <div class="mini">
+                Assign candidate for <strong>${enc(occName)}</strong><br/>
+                Timesheet: <span class="mono">${enc(tsId)}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card" style="margin-top:10px;">
+          <div class="row">
+            <label>Search</label>
+            <div class="controls">
+              <input id="candResolveSearch"
+                     class="input"
+                     type="text"
+                     placeholder="Search by name, CCR, NI, etc."
+                     value="${enc(state.term || '')}" />
+              <button type="button"
+                      class="btn mini"
+                      data-act="resolve-cand-search">
+                Search
+              </button>
+              <div class="hint mini" style="margin-top:4px;">
+                This uses the same search as the Candidates summary (name, CCR, NI, etc.).
+              </div>
+            </div>
+          </div>
+          <div class="row">
+            <label>Matches</label>
+            <div class="controls" id="candResolveResults">
+              ${resultsHtml}
+            </div>
+          </div>
+        </div>
+      </div>
+    `);
+  };
+
+  // Open as child modal
+  showModal(
+    'Assign candidate',
+    [{ key: 'main', label: 'Assign candidate' }],
+    renderResolveCandidateTab,
+    null,
+    false,
+    null,
+    {
+      kind: 'timesheet-resolve-candidate',
+      noParentGate: true,
+      stayOpenOnSave: false
+    }
+  );
+
+  // Wire search + select after the modal is rendered
+  setTimeout(() => {
+    try {
+      const root = document.getElementById('modalBody');
+      if (!root) return;
+
+      const searchBtn = root.querySelector('button[data-act="resolve-cand-search"]');
+      const searchInput = root.querySelector('#candResolveSearch');
+
+      if (searchBtn && !searchBtn.__tsCandResolveWired) {
+        searchBtn.__tsCandResolveWired = true;
+        searchBtn.addEventListener('click', async () => {
+          const term = (searchInput && searchInput.value || '').trim();
+          if (!term) {
+            alert('Please enter something to search for.');
+            return;
+          }
+          try {
+            const results = await searchCandidatesForResolve(term);
+            window.__resolveCandidateState = window.__resolveCandidateState || {};
+            window.__resolveCandidateState.term = term;
+            window.__resolveCandidateState.results = Array.isArray(results) ? results : [];
+            // Re-render just the results area
+            const frame = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
+            if (frame && frame.kind === 'timesheet-resolve-candidate') {
+              frame.setTab('main');
+            }
+          } catch (err) {
+            console.error('[TS][RESOLVE] candidate search failed', err);
+            alert(err?.message || 'Candidate search failed.');
+          }
+        });
+      }
+
+      // Delegate click handler for "Select" buttons
+      const resultsHost = root.querySelector('#candResolveResults');
+      if (resultsHost && !resultsHost.__tsCandResolveSelectWired) {
+        resultsHost.__tsCandResolveSelectWired = true;
+        resultsHost.addEventListener('click', async (ev) => {
+          const btn = ev.target.closest('button[data-act="resolve-cand-select"]');
+          if (!btn) return;
+          const candId = btn.getAttribute('data-candidate-id') || '';
+          if (!candId) return;
+          try {
+            await apiResolveTimesheetCandidate(tsId, candId);
+            window.__toast && window.__toast('Candidate mapping updated for timesheet.');
+
+            // Close this child modal
+            const closeBtn = document.getElementById('btnCloseModal');
+            if (closeBtn) closeBtn.click();
+
+            // Refresh the parent "Resolve timesheets" modal using stored selectionIds
+            const state = window.__resolveTimesheetsState || {};
+            const ids = Array.isArray(state.selectionIds) ? state.selectionIds : (state.rows || []).map(r => String(r.timesheet_id || r.id || '')).filter(Boolean);
+            if (ids.length) {
+              try {
+                const res = await authFetch(API('/api/timesheets/resolve-preview'), {
+                  method: 'POST',
+                  headers: { 'content-type': 'application/json' },
+                  body: JSON.stringify({ timesheet_ids: ids })
+                });
+                const text = await res.text();
+                if (res.ok) {
+                  const newRows = text ? JSON.parse(text) : [];
+                  window.__resolveTimesheetsState.rows = Array.isArray(newRows) ? newRows : [];
+                  const frame = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
+                  if (frame && frame.kind === 'timesheets-resolve') {
+                    frame.setTab('main');
+                  }
+                }
+              } catch (e2) {
+                console.warn('[TS][RESOLVE] failed to refresh resolve-preview after candidate assignment', e2);
+              }
+            }
+          } catch (err) {
+            console.error('[TS][RESOLVE] apiResolveTimesheetCandidate failed', err);
+            alert(err?.message || 'Failed to assign candidate.');
+          }
+        });
+      }
+    } catch (e) {
+      console.warn('[TS][RESOLVE] wiring resolve-candidate modal failed', e);
+    }
+  }, 0);
+}
+
+async function searchCandidatesForResolve(term) {
+  const q = String(term || '').trim();
+  if (!q) return [];
+
+  const url = `/api/candidates?search=${encodeURIComponent(q)}`;
+
+  const res  = await authFetch(API(url));
+  const text = await res.text();
+
+  if (!res.ok) {
+    throw new Error(text || `Candidate search failed (${res.status})`);
+  }
+
+  let json;
+  try {
+    json = text ? JSON.parse(text) : [];
+  } catch {
+    json = [];
+  }
+
+  return Array.isArray(json) ? json : [];
+}
+
+async function apiResolveTimesheetCandidate(timesheetId, candidateId) {
+  const tsId = String(timesheetId || '').trim();
+  const candId = String(candidateId || '').trim();
+  if (!tsId || !candId) {
+    throw new Error('Missing timesheet_id or candidate_id for resolve.');
+  }
+
+  const res  = await authFetch(API(`/api/timesheets/${encodeURIComponent(tsId)}/resolve-candidate`), {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ candidate_id: candId })
+  });
+  const text = await res.text();
+
+  if (!res.ok) {
+    throw new Error(text || `Failed to resolve candidate for timesheet (${res.status})`);
+  }
+}
+
+async function openResolveClientModal(resolveRow) {
+  if (!resolveRow || !resolveRow.timesheet_id) {
+    alert('Timesheet context missing for client resolve.');
+    return;
+  }
+
+  const tsId   = resolveRow.timesheet_id;
+  const hosp   = resolveRow.hospital_norm || '(unknown hospital/site)';
+  const enc    = (typeof escapeHtml === 'function')
+    ? escapeHtml
+    : (s) => String(s == null ? '' : s);
+
+  // Seed local state for this child modal
+  window.__resolveClientState = {
+    row: resolveRow,
+    results: [],
+    term: ''
+  };
+
+  const renderResolveClientTab = (key) => {
+    if (key !== 'main') return '';
+    const state   = window.__resolveClientState || {};
+    const results = Array.isArray(state.results) ? state.results : [];
+
+    const resultsHtml = results.length
+      ? `
+        <ul class="mini">
+          ${results.map(c => `
+            <li>
+              <strong>${enc(c.name || c.client_name || '')}</strong>
+              ${c.cli_ref ? ` &nbsp; <span class="mono">(${enc(c.cli_ref)})</span>` : ''}
+              <button type="button"
+                      class="btn mini"
+                      data-act="resolve-client-select"
+                      data-client-id="${enc(c.id)}">
+                Select
+              </button>
+            </li>
+          `).join('')}
+        </ul>
+      `
+      : '<span class="mini">No clients loaded yet. Try a search.</span>';
+
+    return html(`
+      <div class="form" id="ts-resolve-client">
+        <div class="card">
+          <div class="row">
+            <label>Assign client</label>
+            <div class="controls">
+              <div class="mini">
+                Assign client / site for <strong>${enc(hosp)}</strong><br/>
+                Timesheet: <span class="mono">${enc(tsId)}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card" style="margin-top:10px;">
+          <div class="row">
+            <label>Search</label>
+            <div class="controls">
+              <input id="clientResolveSearch"
+                     class="input"
+                     type="text"
+                     placeholder="Search by client name or reference"
+                     value="${enc(state.term || '')}" />
+              <button type="button"
+                      class="btn mini"
+                      data-act="resolve-client-search">
+                Search
+              </button>
+              <div class="hint mini" style="margin-top:4px;">
+                This uses the same search as the Clients summary (name, CLI ref, etc.).
+              </div>
+            </div>
+          </div>
+          <div class="row">
+            <label>Matches</label>
+            <div class="controls" id="clientResolveResults">
+              ${resultsHtml}
+            </div>
+          </div>
+        </div>
+      </div>
+    `);
+  };
+
+  // Open as child modal
+  showModal(
+    'Assign client / site',
+    [{ key: 'main', label: 'Assign client' }],
+    renderResolveClientTab,
+    null,
+    false,
+    null,
+    {
+      kind: 'timesheet-resolve-client',
+      noParentGate: true,
+      stayOpenOnSave: false
+    }
+  );
+
+  // Wire search + select after render
+  setTimeout(() => {
+    try {
+      const root = document.getElementById('modalBody');
+      if (!root) return;
+
+      const searchBtn   = root.querySelector('button[data-act="resolve-client-search"]');
+      const searchInput = root.querySelector('#clientResolveSearch');
+
+      if (searchBtn && !searchBtn.__tsClientResolveWired) {
+        searchBtn.__tsClientResolveWired = true;
+        searchBtn.addEventListener('click', async () => {
+          const term = (searchInput && searchInput.value || '').trim();
+          if (!term) {
+            alert('Please enter something to search for.');
+            return;
+          }
+          try {
+            const results = await searchClientsForResolve(term);
+            window.__resolveClientState = window.__resolveClientState || {};
+            window.__resolveClientState.term = term;
+            window.__resolveClientState.results = Array.isArray(results) ? results : [];
+            const frame = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
+            if (frame && frame.kind === 'timesheet-resolve-client') {
+              frame.setTab('main');
+            }
+          } catch (err) {
+            console.error('[TS][RESOLVE] client search failed', err);
+            alert(err?.message || 'Client search failed.');
+          }
+        });
+      }
+
+      const resultsHost = root.querySelector('#clientResolveResults');
+      if (resultsHost && !resultsHost.__tsClientResolveSelectWired) {
+        resultsHost.__tsClientResolveSelectWired = true;
+        resultsHost.addEventListener('click', async (ev) => {
+          const btn = ev.target.closest('button[data-act="resolve-client-select"]');
+          if (!btn) return;
+          const clientId = btn.getAttribute('data-client-id') || '';
+          if (!clientId) return;
+
+          try {
+            await apiResolveTimesheetClient(tsId, clientId);
+            window.__toast && window.__toast('Client mapping updated for timesheet.');
+
+            // Close the child modal
+            const closeBtn = document.getElementById('btnCloseModal');
+            if (closeBtn) closeBtn.click();
+
+            // Refresh parent Resolve modal
+            const state = window.__resolveTimesheetsState || {};
+            const ids = Array.isArray(state.selectionIds)
+              ? state.selectionIds
+              : (state.rows || [])
+                  .map(r => String(r.timesheet_id || r.id || ''))
+                  .filter(Boolean);
+
+            if (ids.length) {
+              try {
+                const res = await authFetch(API('/api/timesheets/resolve-preview'), {
+                  method: 'POST',
+                  headers: { 'content-type': 'application/json' },
+                  body: JSON.stringify({ timesheet_ids: ids })
+                });
+                const text = await res.text();
+                if (res.ok) {
+                  const newRows = text ? JSON.parse(text) : [];
+                  window.__resolveTimesheetsState.rows = Array.isArray(newRows) ? newRows : [];
+                  const frame = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
+                  if (frame && frame.kind === 'timesheets-resolve') {
+                    frame.setTab('main');
+                  }
+                }
+              } catch (e2) {
+                console.warn('[TS][RESOLVE] failed to refresh resolve-preview after client assignment', e2);
+              }
+            }
+          } catch (err) {
+            console.error('[TS][RESOLVE] apiResolveTimesheetClient failed', err);
+            alert(err?.message || 'Failed to assign client.');
+          }
+        });
+      }
+    } catch (e) {
+      console.warn('[TS][RESOLVE] wiring resolve-client modal failed', e);
+    }
+  }, 0);
+}
+
+async function searchClientsForResolve(term) {
+  const q = String(term || '').trim();
+  if (!q) return [];
+
+  const url = `/api/clients?search=${encodeURIComponent(q)}`;
+
+  const res  = await authFetch(API(url));
+  const text = await res.text();
+
+  if (!res.ok) {
+    throw new Error(text || `Client search failed (${res.status})`);
+  }
+
+  let json;
+  try {
+    json = text ? JSON.parse(text) : [];
+  } catch {
+    json = [];
+  }
+
+  return Array.isArray(json) ? json : [];
+}
+
+
+async function apiResolveTimesheetClient(timesheetId, clientId) {
+  const tsId = String(timesheetId || '').trim();
+  const cliId = String(clientId || '').trim();
+  if (!tsId || !cliId) {
+    throw new Error('Missing timesheet_id or client_id for resolve.');
+  }
+
+  const res  = await authFetch(API(`/api/timesheets/${encodeURIComponent(tsId)}/resolve-client`), {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ client_id: cliId })
+  });
+  const text = await res.text();
+
+  if (!res.ok) {
+    throw new Error(text || `Failed to resolve client for timesheet (${res.status})`);
+  }
+}
+
+async function openImportsModal() {
+  // Seed a neutral modalCtx for this screen
+  window.modalCtx = {
+    entity: 'imports',
+    data: {},
+    importsState: {}
+  };
+
+  const renderImportsTab = (key) => {
+    if (key !== 'main') return '';
+    const enc = (typeof escapeHtml === 'function')
+      ? escapeHtml
+      : (s) => String(s == null ? '' : s);
+
+    return html(`
+      <div class="form" id="importsMain">
+        <div class="card">
+          <div class="row">
+            <label>Imports</label>
+            <div class="controls">
+              <span class="mini">
+                Use this screen to upload and process NHSP and HealthRoster files.
+                Each tile accepts an Excel export from the corresponding system.
+              </span>
+            </div>
+          </div>
+        </div>
+
+        <div class="grid-3" style="margin-top:10px;gap:12px;">
+          <!-- NHSP Weekly Import -->
+          <div class="card">
+            <div class="row">
+              <label>NHSP Weekly Import</label>
+              <div class="controls">
+                <div id="nhspImportDrop"
+                     class="dropzone"
+                     data-import-kind="nhsp">
+                  <span class="mini">
+                    Drop NHSP weekly export here or<br/>
+                    <input id="nhspImportFile"
+                           type="file"
+                           accept=".xls,.xlsx,.csv"
+                           style="margin-top:4px;" />
+                  </span>
+                </div>
+                <div class="hint mini" style="margin-top:4px;">
+                  NHSP weekly export (self-bill style). The system will parse, classify,
+                  let you resolve unmapped staff/clients, and then create weeks & timesheets.
+                </div>
+                <div id="nhspImportSummary" class="mini" style="margin-top:4px;"></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- HealthRoster Weekly Import -->
+          <div class="card">
+            <div class="row">
+              <label>HealthRoster Weekly Import</label>
+              <div class="controls">
+                <div id="hrWeeklyImportDrop"
+                     class="dropzone"
+                     data-import-kind="hr-weekly">
+                  <span class="mini">
+                    Drop HealthRoster weekly export here or<br/>
+                    <input id="hrWeeklyImportFile"
+                           type="file"
+                           accept=".xls,.xlsx,.csv"
+                           style="margin-top:4px;" />
+                  </span>
+                </div>
+                <div class="hint mini" style="margin-top:4px;">
+                  Weekly HealthRoster template shifts. These are auto-processed into
+                  nhsp_shifts / contract weeks, with optional candidate/client resolve.
+                </div>
+                <div id="hrWeeklyImportSummary" class="mini" style="margin-top:4px;"></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- HealthRoster Rota Validation (Daily) -->
+          <div class="card">
+            <div class="row">
+              <label>HealthRoster Rota Validation (Daily)</label>
+              <div class="controls">
+                <div id="hrRotaImportDrop"
+                     class="dropzone"
+                     data-import-kind="hr-rota">
+                  <span class="mini">
+                    Drop HR rota daily export here or<br/>
+                    <input id="hrRotaImportFile"
+                           type="file"
+                           accept=".xls,.xlsx,.csv"
+                           style="margin-top:4px;" />
+                  </span>
+                </div>
+                <div class="hint mini" style="margin-top:4px;">
+                  Daily HealthRoster rota used to validate self-reported daily timesheets.
+                  We’ll compare start/end/break/“Actual Hours”, check grade→role→rates, and
+                  let you queue mismatch emails to Temp Staffing.
+                </div>
+                <div id="hrRotaImportSummary" class="mini" style="margin-top:4px;"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    `);
+  };
+
+  showModal(
+    'Imports',
+    [{ key: 'main', label: 'Imports' }],
+    renderImportsTab,
+    null,         // no onSave
+    false,        // hasId
+    null,         // onReturn
+    {
+      kind: 'imports',
+      noParentGate: true,
+      stayOpenOnSave: false
+    }
+  );
+
+  // Wire file inputs and dropzones after the modal is rendered
+  setTimeout(() => {
+    try {
+      wireImportDropzones();
+    } catch (e) {
+      console.warn('[IMPORTS] wireImportDropzones failed', e);
+    }
+  }, 0);
+}
+
+function wireImportDropzones() {
+  const LOG = (typeof window.__LOG_IMPORTS === 'boolean') ? window.__LOG_IMPORTS : true;
+  const L   = (...a) => { if (LOG) console.log('[IMPORTS]', ...a); };
+
+  const root = document.getElementById('importsMain');
+  if (!root) {
+    if (LOG) L('wireImportDropzones: no importsMain root, skipping');
+    return;
+  }
+
+  // Small helper to prevent default drag behaviour
+  const prevent = (ev) => {
+    ev.preventDefault();
+    ev.stopPropagation();
+  };
+
+  const wireOneZone = (dropId, fileId, handler) => {
+    const dz   = document.getElementById(dropId);
+    const file = document.getElementById(fileId);
+
+    if (!dz && !file) {
+      if (LOG) L(`wireImportDropzones: missing elements for ${dropId}/${fileId}`);
+      return;
+    }
+
+    // File input select
+    if (file && !file.__importsWired) {
+      file.__importsWired = true;
+      file.addEventListener('change', async (ev) => {
+        try {
+          const files = ev.target.files ? Array.from(ev.target.files) : [];
+          const f = files[0] || null;
+          if (!f) return;
+          await handler(f);
+          ev.target.value = ''; // reset
+        } catch (err) {
+          console.error('[IMPORTS] file handler failed', err);
+          alert(err?.message || 'Import failed.');
+        }
+      });
+    }
+
+    // Drag & drop
+    if (dz && !dz.__importsWired) {
+      dz.__importsWired = true;
+
+      dz.addEventListener('dragenter', prevent);
+      dz.addEventListener('dragover', (ev) => {
+        prevent(ev);
+        dz.classList && dz.classList.add('drop-hover');
+      });
+      dz.addEventListener('dragleave', (ev) => {
+        prevent(ev);
+        dz.classList && dz.classList.remove('drop-hover');
+      });
+      dz.addEventListener('drop', async (ev) => {
+        prevent(ev);
+        dz.classList && dz.classList.remove('drop-hover');
+
+        try {
+          const files = (ev.dataTransfer && ev.dataTransfer.files)
+            ? Array.from(ev.dataTransfer.files)
+            : [];
+          const f = files[0] || null;
+          if (!f) return;
+          await handler(f);
+        } catch (err) {
+          console.error('[IMPORTS] drop handler failed', err);
+          alert(err?.message || 'Import failed.');
+        }
+      });
+    }
+  };
+
+  // NHSP Weekly
+  wireOneZone('nhspImportDrop', 'nhspImportFile', handleNhspFileDrop);
+
+  // HR Weekly autoprocess
+  wireOneZone('hrWeeklyImportDrop', 'hrWeeklyImportFile', handleHrWeeklyFileDrop);
+
+  // HR Rota daily
+  wireOneZone('hrRotaImportDrop', 'hrRotaImportFile', handleHrRotaFileDrop);
+}
+
+async function handleNhspFileDrop(file) {
+  const summaryEl = document.getElementById('nhspImportSummary');
+  if (summaryEl) {
+    summaryEl.textContent = 'Uploading and parsing NHSP file…';
+  }
+
+  // Adjust these endpoints if your backend uses different routes
+  const uploadUrl  = '/api/nhsp/imports/upload';
+  const previewUrl = (importId) => `/api/nhsp/imports/${encodeURIComponent(importId)}/preview`;
+
+  try {
+    // 1) Upload/parse NHSP file
+    const formData = new FormData();
+    formData.append('file', file);
+
+    const resUpload = await authFetch(API(uploadUrl), {
+      method: 'POST',
+      body: formData
+    });
+    const textUpload = await resUpload.text();
+    if (!resUpload.ok) {
+      throw new Error(textUpload || `NHSP import upload failed (${resUpload.status})`);
+    }
+
+    let parsed;
+    try { parsed = textUpload ? JSON.parse(textUpload) : {}; } catch { parsed = {}; }
+    const importId = parsed.import_id || parsed.id || null;
+    if (!importId) {
+      throw new Error('NHSP import did not return an import_id.');
+    }
+
+    if (summaryEl) {
+      summaryEl.textContent = `File uploaded. Loading NHSP classification for import ${importId}…`;
+    }
+
+    // 2) Fetch preview / classification
+    const resPrev  = await authFetch(API(previewUrl(importId)));
+    const textPrev = await resPrev.text();
+    if (!resPrev.ok) {
+      throw new Error(textPrev || `NHSP import preview failed (${resPrev.status})`);
+    }
+
+    let summaryState;
+    try { summaryState = textPrev ? JSON.parse(textPrev) : {}; } catch { summaryState = {}; }
+
+    // 3) Render summary modal
+    window.modalCtx = window.modalCtx || {};
+    window.modalCtx.importsState = window.modalCtx.importsState || {};
+    window.modalCtx.importsState.nhsp = {
+      import_id: importId,
+      summary: summaryState
+    };
+
+    if (summaryEl) {
+      summaryEl.textContent = `Import ${importId}: ${summaryState.total_rows || 0} rows parsed.`;
+    }
+
+    if (typeof renderImportSummaryModal === 'function') {
+      renderImportSummaryModal('NHSP', summaryState);
+    } else {
+      console.warn('[IMPORTS] renderImportSummaryModal is not defined; NHSP summary not shown.');
+    }
+  } catch (err) {
+    console.error('[IMPORTS][NHSP] handleNhspFileDrop failed', err);
+    if (summaryEl) {
+      summaryEl.textContent = `NHSP import failed: ${err?.message || 'Unknown error'}`;
+    }
+    alert(err?.message || 'NHSP import failed.');
+  }
+}
+
+async function handleHrWeeklyFileDrop(file) {
+  const summaryEl = document.getElementById('hrWeeklyImportSummary');
+  if (summaryEl) {
+    summaryEl.textContent = 'Uploading and parsing HealthRoster weekly file…';
+  }
+
+  // Adjust these endpoints if your backend uses different routes
+  const uploadUrl  = '/api/healthroster/autoprocess/import';
+  const previewUrl = (importId) => `/api/healthroster/autoprocess/${encodeURIComponent(importId)}/preview`;
+
+  try {
+    // 1) Upload/parse HR weekly file
+    const formData = new FormData();
+    formData.append('file', file);
+
+    const resUpload = await authFetch(API(uploadUrl), {
+      method: 'POST',
+      body: formData
+    });
+    const textUpload = await resUpload.text();
+    if (!resUpload.ok) {
+      throw new Error(textUpload || `HealthRoster weekly import upload failed (${resUpload.status})`);
+    }
+
+    let parsed;
+    try { parsed = textUpload ? JSON.parse(textUpload) : {}; } catch { parsed = {}; }
+    const importId = parsed.import_id || parsed.id || null;
+    if (!importId) {
+      throw new Error('HealthRoster weekly import did not return an import_id.');
+    }
+
+    if (summaryEl) {
+      summaryEl.textContent = `File uploaded. Loading HealthRoster weekly classification for import ${importId}…`;
+    }
+
+    // 2) Fetch preview / classification
+    const resPrev  = await authFetch(API(previewUrl(importId)));
+    const textPrev = await resPrev.text();
+    if (!resPrev.ok) {
+      throw new Error(textPrev || `HealthRoster weekly preview failed (${resPrev.status})`);
+    }
+
+    let summaryState;
+    try { summaryState = textPrev ? JSON.parse(textPrev) : {}; } catch { summaryState = {}; }
+
+    // 3) Render summary modal
+    window.modalCtx = window.modalCtx || {};
+    window.modalCtx.importsState = window.modalCtx.importsState || {};
+    window.modalCtx.importsState.hrWeekly = {
+      import_id: importId,
+      summary: summaryState
+    };
+
+    if (summaryEl) {
+      summaryEl.textContent = `Import ${importId}: ${summaryState.total_rows || 0} rows parsed.`;
+    }
+
+    if (typeof renderImportSummaryModal === 'function') {
+      renderImportSummaryModal('HR_WEEKLY', summaryState);
+    } else {
+      console.warn('[IMPORTS] renderImportSummaryModal is not defined; HR weekly summary not shown.');
+    }
+  } catch (err) {
+    console.error('[IMPORTS][HR_WEEKLY] handleHrWeeklyFileDrop failed', err);
+    if (summaryEl) {
+      summaryEl.textContent = `HealthRoster weekly import failed: ${err?.message || 'Unknown error'}`;
+    }
+    alert(err?.message || 'HealthRoster weekly import failed.');
+  }
+}
+
+async function handleHrRotaFileDrop(file) {
+  const summaryEl = document.getElementById('hrRotaImportSummary');
+  if (summaryEl) {
+    summaryEl.textContent = 'Uploading and parsing HR rota daily file…';
+  }
+
+  try {
+    // 1) Upload/parse the HR rota file
+    const formData = new FormData();
+    formData.append('file', file);
+
+    const res = await authFetch(API('/api/imports/hr-rota/parse'), {
+      method: 'POST',
+      body: formData
+    });
+    const text = await res.text();
+    if (!res.ok) {
+      throw new Error(text || `HR rota daily import upload failed (${res.status})`);
+    }
+
+    let parsed;
+    try { parsed = text ? JSON.parse(text) : {}; } catch { parsed = {}; }
+    const importId = parsed.import_id || parsed.id || null;
+    if (!importId) {
+      throw new Error('HR rota daily import did not return an import_id.');
+    }
+
+    if (summaryEl) {
+      summaryEl.textContent = `File uploaded. Loading HR rota classification for import ${importId}…`;
+    }
+
+    // 2) Fetch preview / classification
+    const previewRes  = await authFetch(API(`/api/imports/hr-rota/${encodeURIComponent(importId)}/preview`));
+    const previewText = await previewRes.text();
+    if (!previewRes.ok) {
+      throw new Error(previewText || `HR rota daily preview failed (${previewRes.status})`);
+    }
+
+    let summaryState;
+    try { summaryState = previewText ? JSON.parse(previewText) : {}; } catch { summaryState = {}; }
+
+    // 3) Persist into modalCtx and render summary modal
+    window.modalCtx = window.modalCtx || {};
+    window.modalCtx.importsState = window.modalCtx.importsState || {};
+    window.modalCtx.importsState.hrRota = {
+      import_id: importId,
+      summary: summaryState
+    };
+
+    if (summaryEl) {
+      const total = (summaryState.summary && typeof summaryState.summary.total_rows === 'number')
+        ? summaryState.summary.total_rows
+        : Array.isArray(summaryState.rows) ? summaryState.rows.length : 0;
+      summaryEl.textContent = `Import ${importId}: ${total} rows parsed.`;
+    }
+
+    if (typeof renderImportSummaryModal === 'function') {
+      renderImportSummaryModal('HR_ROTA_DAILY', summaryState);
+    } else {
+      console.warn('[IMPORTS] renderImportSummaryModal is not defined; HR rota summary not shown.');
+    }
+  } catch (err) {
+    console.error('[IMPORTS][HR_ROTA] handleHrRotaFileDrop failed', err);
+    if (summaryEl) {
+      summaryEl.textContent = `HR rota daily import failed: ${err?.message || 'Unknown error'}`;
+    }
+    alert(err?.message || 'HR rota daily import failed.');
+  }
+}
+
+function renderImportSummaryModal(importType, summaryState) {
+  const enc = (typeof escapeHtml === 'function')
+    ? escapeHtml
+    : (s) => String(s == null ? '' : s);
+
+  const type = String(importType || '').toUpperCase();
+  const ss   = summaryState || {};
+  const importId = ss.import_id || ss.id || (ss.summary && ss.summary.import_id) || null;
+  const rows = Array.isArray(ss.rows) ? ss.rows : [];
+
+  window.__importSummaryState = window.__importSummaryState || {};
+  window.__importSummaryState[type] = {
+    import_id: importId,
+    summary: ss,
+    rows
+  };
+
+  const renderTab = (key) => {
+    if (key !== 'main') return '';
+
+    if (type === 'HR_ROTA_DAILY') {
+      return renderHrRotaDailySummary(importId, rows, ss);
+    }
+
+    if (type === 'NHSP' || type === 'HR_WEEKLY') {
+      return renderWeeklyImportSummary(type, importId, rows, ss);
+    }
+
+    return html(`
+      <div class="form">
+        <div class="card">
+          <div class="row">
+            <label>Summary</label>
+            <div class="controls">
+              <span class="mini">Unsupported import type: ${enc(importType)}</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    `);
+  };
+
+  // Child modal for import summary
+  showModal(
+    (type === 'HR_ROTA_DAILY'
+      ? 'HR Rota Daily Validation'
+      : (type === 'NHSP'
+          ? 'NHSP Weekly Import Summary'
+          : 'HealthRoster Weekly Import Summary')),
+    [{ key: 'main', label: 'Summary' }],
+    renderTab,
+    null,
+    false,
+    null,
+    {
+      kind: `import-summary-${type.toLowerCase()}`,
+      noParentGate: true,
+      stayOpenOnSave: false
+    }
+  );
+
+  // ────────────────────── Helpers ──────────────────────
+
+  function renderHrRotaDailySummary(importId, rows, ss) {
+    const summary = ss.summary || {};
+    const total   = summary.total_rows || rows.length || 0;
+
+    // Derive counts by status if summary not given
+    const counts = {
+      OK: 0,
+      FAILED: 0,
+      UNMATCHED: 0
+    };
+    rows.forEach(r => {
+      const st = String(r.status || '').toUpperCase();
+      if (st === 'OK' || st === 'VALIDATION_OK') counts.OK++;
+      else if (st === 'UNMATCHED') counts.UNMATCHED++;
+      else counts.FAILED++;
+    });
+
+    // Pre-populated email selections map
+    window.__hrRotaEmailSelections = window.__hrRotaEmailSelections || {};
+    const emailSel = window.__hrRotaEmailSelections[importId] || new Set();
+    if (!(emailSel instanceof Set)) {
+      window.__hrRotaEmailSelections[importId] = new Set();
+    }
+
+    const rowsHtml = rows.length
+      ? rows.map((r, idx) => {
+          const staff = r.staff_name || r.staff_raw || '';
+          const unit  = r.unit || r.hospital_or_trust || r.hospital_norm || '';
+          const date  = r.date_local || r.date || r.shift_date || '';
+          const tsId  = r.timesheet_id || '';
+          const stRaw = r.status || '';
+          const st    = String(stRaw || '').toUpperCase();
+          const reasonCode = String(r.reason_code || r.failure_reason || r.reason || '').toLowerCase();
+
+          let stCls = 'pill-info';
+          if (st === 'OK' || st === 'VALIDATION_OK') stCls = 'pill-ok';
+          else if (st === 'UNMATCHED') stCls = 'pill-warn';
+          else stCls = 'pill-bad';
+
+          const canAssignCand   = (reasonCode === 'candidate_unresolved');
+          const canAssignClient = (reasonCode === 'client_unresolved');
+
+          const isTimeMismatch =
+            reasonCode === 'actual_hours_mismatch' ||
+            reasonCode === 'start_end_mismatch' ||
+            reasonCode === 'break_minutes_mismatch';
+
+          const canEmail = !!(isTimeMismatch && tsId);
+          const rowId    = r.hr_row_id || r.id || `${idx}`;
+
+          const checked = emailSel instanceof Set && emailSel.has(rowId);
+
+          // Detail: we just stringify the detail object if present
+          let detailText = '';
+          if (r.detail && typeof r.detail === 'object') {
+            try { detailText = JSON.stringify(r.detail); } catch { detailText = ''; }
+          }
+
+          return `
+            <tr>
+              <td><span class="mini">${enc(staff || '—')}</span></td>
+              <td><span class="mini">${enc(unit || '—')}</span></td>
+              <td><span class="mini">${enc(date || '—')}</span></td>
+              <td><span class="mini">${tsId ? enc(tsId) : '—'}</span></td>
+              <td><span class="pill ${stCls}">${enc(st || 'UNKNOWN')}</span></td>
+              <td><span class="mini">${reasonCode || '—'}</span></td>
+              <td>
+                ${
+                  canAssignCand
+                    ? `<button type="button"
+                               class="btn mini"
+                               data-act="resolve-candidate"
+                               data-row-idx="${idx}">
+                         Assign candidate…
+                       </button>`
+                    : ''
+                }
+                ${
+                  canAssignClient
+                    ? `<button type="button"
+                               class="btn mini"
+                               style="margin-left:4px;"
+                               data-act="resolve-client"
+                               data-row-idx="${idx}">
+                         Assign client…
+                       </button>`
+                    : ''
+                }
+              </td>
+              <td>
+                ${detailText ? `<span class="mini">${enc(detailText)}</span>` : ''}
+              </td>
+              <td>
+                ${
+                  canEmail
+                    ? `<label class="mini">
+                         <input type="checkbox"
+                                data-act="hr-rota-email"
+                                data-row-id="${enc(rowId)}"
+                                data-row-idx="${idx}"
+                                ${checked ? 'checked' : ''} />
+                         Send email
+                       </label>`
+                    : '<span class="mini">—</span>'
+                }
+              </td>
+            </tr>
+          `;
+        }).join('')
+      : `
+        <tr>
+          <td colspan="9">
+            <span class="mini">No rows to show.</span>
+          </td>
+        </tr>
+      `;
+
+    return html(`
+      <div class="form" id="hrRotaSummary">
+        <div class="card">
+          <div class="row">
+            <label>Overview</label>
+            <div class="controls">
+              <div class="mini">
+                Import ID: <span class="mono">${enc(importId || '—')}</span><br/>
+                Total rows: ${total}<br/>
+                OK: ${counts.OK} &nbsp; Failed: ${counts.FAILED} &nbsp; Unmatched: ${counts.UNMATCHED}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card" style="margin-top:10px;">
+          <div class="row">
+            <label>Rows</label>
+            <div class="controls">
+              <table class="grid">
+                <thead>
+                  <tr>
+                    <th>Staff</th>
+                    <th>Unit / Site</th>
+                    <th>Date</th>
+                    <th>Timesheet ID</th>
+                    <th>Status</th>
+                    <th>Reason</th>
+                    <th>Resolve</th>
+                    <th>Details</th>
+                    <th>Temp Staffing email</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${rowsHtml}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="row" style="margin-top:8px;">
+            <label></label>
+            <div class="controls">
+              <button type="button"
+                      class="btn"
+                      data-act="hr-rota-reclassify">
+                Reclassify
+              </button>
+              <button type="button"
+                      class="btn btn-primary"
+                      style="margin-left:8px;"
+                      data-act="hr-rota-apply">
+                Apply validations
+              </button>
+              <span class="mini" style="margin-left:8px;">
+                "Apply validations" will update validation status and reference numbers;
+                rows with "Send email" ticked will also queue query emails to Temp Staffing.
+              </span>
+            </div>
+          </div>
+        </div>
+      </div>
+    `);
+  }
+
+  function renderWeeklyImportSummary(type, importId, rows, ss) {
+    const summary = ss.summary || {};
+    const total   = summary.total_rows || rows.length || 0;
+
+    const rowsHtml = rows.length
+      ? rows.map(r => {
+          const staff  = r.staff_name || r.staff_raw || '';
+          const unit   = r.unit || r.hospital_or_trust || r.hospital_norm || '';
+          const date   = r.date_local || r.date || r.week_ending_date || '';
+          const action = String(r.resolution_status || r.action || '').toUpperCase();
+          const candId = r.candidate_id || null;
+          const cliId  = r.client_id || null;
+
+          let cls = 'pill-info';
+          if (action === 'OK' || action === 'APPLY') cls = 'pill-ok';
+          else if (action === 'NO_CANDIDATE' || action === 'NO_CLIENT') cls = 'pill-bad';
+
+          const canAssignCand   = (action === 'NO_CANDIDATE');
+          const canAssignClient = (action === 'NO_CLIENT');
+
+          return `
+            <tr>
+              <td><span class="mini">${enc(staff || '—')}</span></td>
+              <td><span class="mini">${enc(unit || '—')}</span></td>
+              <td><span class="mini">${enc(date || '—')}</span></td>
+              <td><span class="pill ${cls}">${enc(action || 'UNKNOWN')}</span></td>
+              <td>
+                ${
+                  canAssignCand
+                    ? `<button type="button"
+                               class="btn mini"
+                               data-act="weekly-resolve-candidate"
+                               data-staff="${enc(staff)}"
+                               data-unit="${enc(unit)}">
+                         Assign candidate…
+                       </button>`
+                    : ''
+                }
+                ${
+                  canAssignClient
+                    ? `<button type="button"
+                               class="btn mini"
+                               style="margin-left:4px;"
+                               data-act="weekly-resolve-client"
+                               data-unit="${enc(unit)}">
+                         Assign client…
+                       </button>`
+                    : ''
+                }
+              </td>
+            </tr>
+          `;
+        }).join('')
+      : `
+        <tr>
+          <td colspan="5">
+            <span class="mini">No rows to show.</span>
+          </td>
+        </tr>
+      `;
+
+    return html(`
+      <div class="form" id="weeklyImportSummary">
+        <div class="card">
+          <div class="row">
+            <label>Overview</label>
+            <div class="controls">
+              <div class="mini">
+                Import ID: <span class="mono">${enc(importId || '—')}</span><br/>
+                Total rows: ${total}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card" style="margin-top:10px;">
+          <div class="row">
+            <label>Rows</label>
+            <div class="controls">
+              <table class="grid">
+                <thead>
+                  <tr>
+                    <th>Staff</th>
+                    <th>Unit / Site</th>
+                    <th>Date / Week ending</th>
+                    <th>Resolution</th>
+                    <th>Resolve</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${rowsHtml}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="row" style="margin-top:8px;">
+            <label></label>
+            <div class="controls">
+              <button type="button"
+                      class="btn btn-primary"
+                      data-act="weekly-import-apply">
+                Apply import
+              </button>
+              <span class="mini" style="margin-left:8px;">
+                This will apply the classification and create/update weeks and timesheets.
+              </span>
+            </div>
+          </div>
+        </div>
+      </div>
+    `);
+  }
+
+  // Wiring for HR_ROTA_DAILY summary (buttons & checkboxes)
+  setTimeout(() => {
+    try {
+      const root = document.getElementById('hrRotaSummary');
+      if (!root || type !== 'HR_ROTA_DAILY') return;
+
+      // Resolve candidate / client buttons
+      root.addEventListener('click', (ev) => {
+        const btn = ev.target.closest('button[data-act]');
+        if (!btn) return;
+        const act = btn.getAttribute('data-act');
+
+        const st = window.__importSummaryState && window.__importSummaryState['HR_ROTA_DAILY'];
+        if (!st) return;
+
+        const rows = Array.isArray(st.rows) ? st.rows : [];
+        const idx  = Number(btn.getAttribute('data-row-idx') || '-1');
+        const row  = (idx >= 0 && idx < rows.length) ? rows[idx] : null;
+        if (!row) return;
+
+        if (act === 'resolve-candidate') {
+          // Use the main timesheet resolve modal only if we have a timesheet_id
+          if (row.timesheet_id) {
+            openResolveCandidateModal({
+              timesheet_id: row.timesheet_id,
+              occupant_key_norm: row.staff_name || row.staff_raw || '',
+              hospital_norm: row.unit || row.hospital_or_trust || row.hospital_norm || ''
+            });
+          } else {
+            alert('No timesheet matched for this row; resolve candidate via imports/aliases instead.');
+          }
+        }
+
+        if (act === 'resolve-client') {
+          if (row.timesheet_id) {
+            openResolveClientModal({
+              timesheet_id: row.timesheet_id,
+              hospital_norm: row.unit || row.hospital_or_trust || row.hospital_norm || ''
+            });
+          } else {
+            alert('No timesheet matched for this row; resolve client/site via imports/aliases instead.');
+          }
+        }
+      });
+
+      // Email checkboxes
+      root.addEventListener('change', (ev) => {
+        const cb = ev.target.closest('input[data-act="hr-rota-email"]');
+        if (!cb) return;
+
+        const rowId = cb.getAttribute('data-row-id') || '';
+        if (!rowId) return;
+
+        window.__hrRotaEmailSelections = window.__hrRotaEmailSelections || {};
+        const sel = window.__hrRotaEmailSelections[importId] || new Set();
+        if (!(sel instanceof Set)) {
+          window.__hrRotaEmailSelections[importId] = new Set();
+        }
+
+        if (cb.checked) {
+          window.__hrRotaEmailSelections[importId].add(rowId);
+        } else {
+          window.__hrRotaEmailSelections[importId].delete(rowId);
+        }
+      });
+
+      // Reclassify button
+      const btnReclass = root.querySelector('button[data-act="hr-rota-reclassify"]');
+      if (btnReclass && !btnReclass.__hrRotaReclassWired) {
+        btnReclass.__hrRotaReclassWired = true;
+        btnReclass.addEventListener('click', async () => {
+          try {
+            if (!importId) {
+              alert('No import_id in summary; cannot reclassify.');
+              return;
+            }
+            const res = await authFetch(API(`/api/imports/hr-rota/${encodeURIComponent(importId)}/preview`));
+            const text = await res.text();
+            if (!res.ok) {
+              throw new Error(text || `HR rota reclassify failed (${res.status})`);
+            }
+            const refreshed = text ? JSON.parse(text) : {};
+            renderImportSummaryModal('HR_ROTA_DAILY', refreshed);
+          } catch (err) {
+            console.error('[IMPORTS][HR_ROTA] reclassify failed', err);
+            alert(err?.message || 'Reclassify failed.');
+          }
+        });
+      }
+
+      // Apply validations button
+      const btnApply = root.querySelector('button[data-act="hr-rota-apply"]');
+      if (btnApply && !btnApply.__hrRotaApplyWired) {
+        btnApply.__hrRotaApplyWired = true;
+        btnApply.addEventListener('click', async () => {
+          try {
+            const sel = window.__hrRotaEmailSelections && window.__hrRotaEmailSelections[importId];
+            const sendEmailRowIds = (sel instanceof Set) ? Array.from(sel) : [];
+            await applyHrRotaValidation(importId, sendEmailRowIds);
+          } catch (err) {
+            console.error('[IMPORTS][HR_ROTA] apply failed', err);
+            alert(err?.message || 'Apply validations failed.');
+          }
+        });
+      }
+    } catch (e) {
+      console.warn('[IMPORTS] HR_ROTA wiring failed', e);
+    }
+  }, 0);
+
+  // Wiring for NHSP / HR_WEEKLY "Apply import" button
+  setTimeout(() => {
+    try {
+      const root = document.getElementById('weeklyImportSummary');
+      if (!root || (type !== 'NHSP' && type !== 'HR_WEEKLY')) return;
+
+      const btnApply = root.querySelector('button[data-act="weekly-import-apply"]');
+      if (!btnApply || btnApply.__weeklyApplyWired) return;
+      btnApply.__weeklyApplyWired = true;
+
+      btnApply.addEventListener('click', async () => {
+        try {
+          // For now, we assume mappings were gathered in the summary UI and passed externally.
+          // If you store them in window.__weeklyImportMappings[type][importId], you can read them here.
+          const mappings = {
+            candidate_mappings: [], // TODO if you wire mapping UI
+            client_aliases: []
+          };
+          await resolveImportConflicts(importId, type, mappings);
+        } catch (err) {
+          console.error('[IMPORTS][WEEKLY] apply failed', err);
+          alert(err?.message || 'Weekly import apply failed.');
+        }
+      });
+    } catch (e) {
+      console.warn('[IMPORTS] weekly import wiring failed', e);
+    }
+  }, 0);
+}
+
+async function resolveImportConflicts(importId, importType, mappings) {
+  const type = String(importType || '').toUpperCase();
+  const encId = encodeURIComponent(String(importId || ''));
+
+  const body = mappings || {};
+  const payload = {
+    candidate_mappings: Array.isArray(body.candidate_mappings) ? body.candidate_mappings : [],
+    client_aliases: Array.isArray(body.client_aliases) ? body.client_aliases : []
+  };
+
+  if (!encId) {
+    throw new Error('Missing import_id for resolveImportConflicts.');
+  }
+
+  if (type === 'NHSP') {
+    const url = `/api/nhsp/imports/${encId}/apply`;
+    const res = await authFetch(API(url), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    const text = await res.text();
+    if (!res.ok) {
+      throw new Error(text || `NHSP import apply failed (${res.status})`);
+    }
+    window.__toast && window.__toast('NHSP import applied.');
+    return;
+  }
+
+  if (type === 'HR_WEEKLY') {
+    const url = `/api/healthroster/autoprocess/${encId}/apply`;
+    const res = await authFetch(API(url), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    const text = await res.text();
+    if (!res.ok) {
+      throw new Error(text || `HealthRoster weekly apply failed (${res.status})`);
+    }
+    window.__toast && window.__toast('HealthRoster weekly import applied.');
+    return;
+  }
+
+  if (type === 'HR_ROTA_DAILY') {
+    // For HR_ROTA_DAILY, we rely on HR rota validation apply + alias resolution
+    // via the timesheet Resolve flows. Nothing special to do here.
+    console.warn('[IMPORTS] resolveImportConflicts called for HR_ROTA_DAILY; nothing to apply here.');
+    return;
+  }
+
+  throw new Error(`Unsupported import type for resolveImportConflicts: ${type}`);
+}
+
+async function applyHrRotaValidation(importId, sendEmailRowIds) {
+  const encId = encodeURIComponent(String(importId || ''));
+  if (!encId) {
+    throw new Error('Missing import_id for applyHrRotaValidation.');
+  }
+
+  const body = {
+    send_email_row_ids: Array.isArray(sendEmailRowIds) ? sendEmailRowIds : []
+  };
+
+  const res  = await authFetch(API(`/api/imports/hr-rota/${encId}/apply`), {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body)
+  });
+  const text = await res.text();
+  if (!res.ok) {
+    throw new Error(text || `HR rota apply failed (${res.status})`);
+  }
+
+  let payload;
+  try { payload = text ? JSON.parse(text) : {}; } catch { payload = {}; }
+
+  const ok     = payload.validations_ok    ?? 0;
+  const failed = payload.validations_failed ?? 0;
+  const emailed= payload.emails_queued     ?? (body.send_email_row_ids.length || 0);
+
+  const msg = `Applied HR rota validations (${ok} OK, ${failed} failed, ${emailed} emails queued).`;
+  window.__toast && window.__toast(msg);
+
+  // Optional: you could auto-close the summary modal here or re-render it.
+  return payload;
+}
+
+async function apiQueueHrRotaTsoEmail(row) {
+  if (!row || !row.timesheet_id) {
+    throw new Error('Missing timesheet_id for TSO email.');
+  }
+
+  const body = {
+    timesheet_id: row.timesheet_id,
+    hr_request_id: row.request_id || row.hr_request_id || null,
+    reason_code: row.failure_reason || row.reason_code || null,
+    mismatch_details: row.detail || null
+  };
+
+  const res  = await authFetch(API('/api/hr/rota/tso-email'), {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body)
+  });
+  const text = await res.text();
+
+  if (!res.ok) {
+    throw new Error(text || `Failed to queue HR rota TSO email (${res.status})`);
+  }
+
+  window.__toast && window.__toast('Query email queued to Temporary Staffing.');
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 function ensureSelection(section) {
   window.__selection = window.__selection || {};
   if (!window.__selection[section]) {
@@ -23263,33 +25202,220 @@ function openClientHospitalModal(client_id) {
 }
 
 function renderClientHospitalsTable() {
-  const el = byId('clientHospitals'); if (!el) return;
+  const el = byId('clientHospitals');
+  if (!el) return;
 
   const frame = _currentFrame();
-  // ✅ Allow create OR edit to add/edit hospitals
+  // Allow create OR edit to add/edit hospitals
   const parentEditable = frame && (frame.mode === 'edit' || frame.mode === 'create');
 
-  const ctx = window.modalCtx; // 🔧 use canonical context
-  const H = ctx.hospitalsState || (ctx.hospitalsState = { existing: [], stagedNew: [], stagedEdits: {}, stagedDeletes: new Set() });
+  const ctx = window.modalCtx || {};
+  const H = ctx.hospitalsState || (ctx.hospitalsState = {
+    existing: [],
+    stagedNew: [],
+    stagedEdits: {},
+    stagedDeletes: new Set()
+  });
 
-  // ⬇️ Key change: normalise stagedDeletes back to a Set if it was JSON-cloned to an Array/object
+  // Normalise stagedDeletes back to a Set if it was JSON-cloned
   if (!(H.stagedDeletes instanceof Set)) {
-    H.stagedDeletes = new Set(Array.isArray(H.stagedDeletes) ? H.stagedDeletes : Object.keys(H.stagedDeletes || {}));
+    H.stagedDeletes = new Set(
+      Array.isArray(H.stagedDeletes)
+        ? H.stagedDeletes
+        : Object.keys(H.stagedDeletes || {})
+    );
   }
-  H.stagedNew     = Array.isArray(H.stagedNew) ? H.stagedNew : [];
-  H.existing      = Array.isArray(H.existing) ? H.existing : [];
-  H.stagedEdits   = H.stagedEdits || {};
+  H.stagedNew   = Array.isArray(H.stagedNew)   ? H.stagedNew   : [];
+  H.existing    = Array.isArray(H.existing)    ? H.existing    : [];
+  H.stagedEdits = H.stagedEdits || {};
 
   el.innerHTML = '';
 
-  const tbl = document.createElement('table'); tbl.className = 'grid';
-  const cols = ['hospital_name_norm','ward_hint','status'];
+  const tbl = document.createElement('table');
+  tbl.className = 'grid';
+
   const thead = document.createElement('thead');
   const trh = document.createElement('tr');
-  cols.forEach(c => { const th = document.createElement('th'); th.textContent = c; trh.appendChild(th); });
-  thead.appendChild(trh); tbl.appendChild(thead);
+
+  // Columns: Aliases, Ward hint, Status / Actions
+  ['Aliases (HealthRoster / NHSP / Rota)','Ward / Unit hint','Status'].forEach(c => {
+    const th = document.createElement('th');
+    th.textContent = c;
+    trh.appendChild(th);
+  });
+  thead.appendChild(trh);
+  tbl.appendChild(thead);
 
   const tb = document.createElement('tbody');
+
+  // Helper to render alias cell (chips + input) for an existing row
+  function buildAliasCellForExisting(x) {
+    const td = document.createElement('td');
+    const wrap = document.createElement('div');
+    wrap.className = 'chip-row';
+    wrap.style.display = 'flex';
+    wrap.style.flexWrap = 'wrap';
+    wrap.style.gap = '4px';
+
+    // Normalise aliases
+    let aliases = Array.isArray(x.hospital_name_norm)
+      ? x.hospital_name_norm.slice()
+      : (x.hospital_name_norm ? [x.hospital_name_norm] : []);
+    aliases = aliases.filter(a => !!a).map(a => String(a));
+
+    const rowId = String(x.id);
+    const setDirty = () => {
+      H.stagedEdits[rowId] = {
+        ...(H.stagedEdits[rowId] || {}),
+        hospital_name_norm: aliases
+      };
+      try { window.dispatchEvent(new CustomEvent('modal-dirty')); } catch {}
+    };
+
+    const renderChips = () => {
+      wrap.innerHTML = '';
+      if (!aliases.length) {
+        const span = document.createElement('span');
+        span.className = 'mini';
+        span.textContent = 'No aliases configured yet.';
+        wrap.appendChild(span);
+        return;
+      }
+      aliases.forEach(alias => {
+        const chip = document.createElement('span');
+        chip.className = 'chip';
+        chip.dataset.alias = alias;
+
+        const label = document.createElement('span');
+        label.className = 'chip-label';
+        label.textContent = alias;
+
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'chip-remove';
+        btn.textContent = '×';
+        btn.title = 'Remove alias';
+        btn.disabled = !parentEditable;
+        btn.onclick = () => {
+          if (!parentEditable) return;
+          aliases = aliases.filter(a => a !== alias);
+          renderChips();
+          setDirty();
+        };
+
+        chip.appendChild(label);
+        chip.appendChild(btn);
+        wrap.appendChild(chip);
+      });
+    };
+
+    renderChips();
+    td.appendChild(wrap);
+
+    const inp = document.createElement('input');
+    inp.type = 'text';
+    inp.className = 'input alias-input';
+    inp.placeholder = 'Add alias (e.g. uhb qe)';
+    inp.disabled = !parentEditable;
+    inp.style.marginTop = '4px';
+    inp.onkeydown = (ev) => {
+      if (ev.key !== 'Enter') return;
+      const raw = (inp.value || '').trim();
+      if (!raw) return;
+      const alias = raw.toLowerCase();
+      if (!aliases.includes(alias)) {
+        aliases.push(alias);
+        renderChips();
+        setDirty();
+      }
+      inp.value = '';
+    };
+
+    td.appendChild(inp);
+    return td;
+  }
+
+  // Helper to render alias cell for a NEW (staged) row
+  function buildAliasCellForNew(stagedRow) {
+    const td = document.createElement('td');
+    const wrap = document.createElement('div');
+    wrap.className = 'chip-row';
+    wrap.style.display = 'flex';
+    wrap.style.flexWrap = 'wrap';
+    wrap.style.gap = '4px';
+
+    let aliases = Array.isArray(stagedRow.hospital_name_norm)
+      ? stagedRow.hospital_name_norm.slice()
+      : (stagedRow.hospital_name_norm ? [stagedRow.hospital_name_norm] : []);
+    aliases = aliases.filter(a => !!a).map(a => String(a));
+
+    const setDirty = () => {
+      stagedRow.hospital_name_norm = aliases;
+      try { window.dispatchEvent(new CustomEvent('modal-dirty')); } catch {}
+    };
+
+    const renderChips = () => {
+      wrap.innerHTML = '';
+      if (!aliases.length) {
+        const span = document.createElement('span');
+        span.className = 'mini';
+        span.textContent = 'No aliases configured yet.';
+        wrap.appendChild(span);
+        return;
+      }
+      aliases.forEach(alias => {
+        const chip = document.createElement('span');
+        chip.className = 'chip';
+        chip.dataset.alias = alias;
+
+        const label = document.createElement('span');
+        label.className = 'chip-label';
+        label.textContent = alias;
+
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'chip-remove';
+        btn.textContent = '×';
+        btn.title = 'Remove alias';
+        btn.disabled = !parentEditable;
+        btn.onclick = () => {
+          if (!parentEditable) return;
+          aliases = aliases.filter(a => a !== alias);
+          renderChips();
+          setDirty();
+        };
+
+        chip.appendChild(label);
+        chip.appendChild(btn);
+        wrap.appendChild(chip);
+      });
+    };
+
+    renderChips();
+    td.appendChild(wrap);
+
+    const inp = document.createElement('input');
+    inp.type = 'text';
+    inp.className = 'input alias-input';
+    inp.placeholder = 'Add alias (e.g. uhb qe)';
+    inp.disabled = !parentEditable;
+    inp.style.marginTop = '4px';
+    inp.onkeydown = (ev) => {
+      if (ev.key !== 'Enter') return;
+      const raw = (inp.value || '').trim();
+      if (!raw) return;
+      const alias = raw.toLowerCase();
+      if (!aliases.includes(alias)) {
+        aliases.push(alias);
+        renderChips();
+        setDirty();
+      }
+      inp.value = '';
+    };
+
+    td.appendChild(inp);
+    return td;
+  }
 
   // Existing rows (DB)
   (H.existing || []).forEach((x) => {
@@ -23297,26 +25423,27 @@ function renderClientHospitalsTable() {
 
     const tr = document.createElement('tr');
 
-    const nameTd = document.createElement('td');
-    const nameInp = document.createElement('input');
-    nameInp.type = 'text'; nameInp.value = x.hospital_name_norm || '';
-    nameInp.disabled = !parentEditable;
-    nameInp.oninput = () => {
-      H.stagedEdits[String(x.id)] = { ...(H.stagedEdits[String(x.id)] || {}), hospital_name_norm: nameInp.value };
-      try { window.dispatchEvent(new CustomEvent('modal-dirty')); } catch {}
-    };
-    nameTd.appendChild(nameInp);
+    // Aliases cell
+    const aliasTd = buildAliasCellForExisting(x);
 
+    // Ward hint cell
     const hintTd = document.createElement('td');
     const hintInp = document.createElement('input');
-    hintInp.type = 'text'; hintInp.value = x.ward_hint || '';
+    hintInp.type = 'text';
+    hintInp.className = 'input';
+    hintInp.value = x.ward_hint || '';
     hintInp.disabled = !parentEditable;
     hintInp.oninput = () => {
-      H.stagedEdits[String(x.id)] = { ...(H.stagedEdits[String(x.id)] || {}), ward_hint: hintInp.value || null };
+      const rowId = String(x.id);
+      H.stagedEdits[rowId] = {
+        ...(H.stagedEdits[rowId] || {}),
+        ward_hint: hintInp.value || null
+      };
       try { window.dispatchEvent(new CustomEvent('modal-dirty')); } catch {}
     };
     hintTd.appendChild(hintInp);
 
+    // Status / actions cell
     const actTd = document.createElement('td');
     const rmBtn = document.createElement('button');
     rmBtn.textContent = 'Remove';
@@ -23326,34 +25453,47 @@ function renderClientHospitalsTable() {
     rmBtn.className = 'btnDelHospital';
     actTd.appendChild(rmBtn);
 
-    tr.appendChild(nameTd); tr.appendChild(hintTd); tr.appendChild(actTd);
+    tr.appendChild(aliasTd);
+    tr.appendChild(hintTd);
+    tr.appendChild(actTd);
     tb.appendChild(tr);
   });
 
   // New (unsaved) rows
   (H.stagedNew || []).forEach((x, idx) => {
     const tr = document.createElement('tr');
-    const nameTd = document.createElement('td');
-    const nameInp = document.createElement('input');
-    nameInp.type = 'text'; nameInp.value = x.hospital_name_norm || '';
-    nameInp.disabled = !parentEditable;
-    nameInp.oninput = () => { x.hospital_name_norm = nameInp.value; try { window.dispatchEvent(new CustomEvent('modal-dirty')); } catch {} };
-    nameTd.appendChild(nameInp);
 
+    // Aliases cell for staged row
+    const aliasTd = buildAliasCellForNew(x);
+
+    // Ward hint
     const hintTd = document.createElement('td');
     const hintInp = document.createElement('input');
-    hintInp.type = 'text'; hintInp.value = x.ward_hint || '';
+    hintInp.type = 'text';
+    hintInp.className = 'input';
+    hintInp.value = x.ward_hint || '';
     hintInp.disabled = !parentEditable;
-    hintInp.oninput = () => { x.ward_hint = hintInp.value || null; try { window.dispatchEvent(new CustomEvent('modal-dirty')); } catch {} };
+    hintInp.oninput = () => {
+      x.ward_hint = hintInp.value || null;
+      try { window.dispatchEvent(new CustomEvent('modal-dirty')); } catch {}
+    };
     hintTd.appendChild(hintInp);
 
     const actTd = document.createElement('td');
-    const rm = document.createElement('button'); rm.textContent = 'Remove (staged)';
+    const rm = document.createElement('button');
+    rm.textContent = 'Remove (staged)';
     rm.disabled = !parentEditable;
-    rm.onclick = () => { if (!parentEditable) return; H.stagedNew.splice(idx, 1); renderClientHospitalsTable(); try { window.dispatchEvent(new CustomEvent('modal-dirty')); } catch {} };
+    rm.onclick = () => {
+      if (!parentEditable) return;
+      H.stagedNew.splice(idx, 1);
+      renderClientHospitalsTable();
+      try { window.dispatchEvent(new CustomEvent('modal-dirty')); } catch {}
+    };
     actTd.appendChild(rm);
 
-    tr.appendChild(nameTd); tr.appendChild(hintTd); tr.appendChild(actTd);
+    tr.appendChild(aliasTd);
+    tr.appendChild(hintTd);
+    tr.appendChild(actTd);
     tb.appendChild(tr);
   });
 
@@ -23361,15 +25501,26 @@ function renderClientHospitalsTable() {
 
   const actions = document.createElement('div');
   actions.className = 'actions';
-  actions.innerHTML = `<button id="btnAddClientHospital"${parentEditable ? '' : ' disabled'}>Add Hospital / Ward</button>
-    ${parentEditable ? '' : '<span class="hint">Read-only. Click “Edit” in the main dialog to add/modify hospitals.</span>'}`;
+  actions.innerHTML = `
+    <button id="btnAddClientHospital"${parentEditable ? '' : ' disabled'}>
+      Add Hospital / Ward
+    </button>
+    ${
+      parentEditable
+        ? ''
+        : '<span class="hint">Read-only. Click “Edit” in the main dialog to add/modify hospitals.</span>'
+    }
+  `;
 
   el.appendChild(tbl);
   el.appendChild(actions);
 
   const addBtn = byId('btnAddClientHospital');
-  if (addBtn && parentEditable) addBtn.onclick = () => openClientHospitalModal(ctx.data?.id);
+  if (addBtn && parentEditable) {
+    addBtn.onclick = () => openClientHospitalModal(ctx.data?.id);
+  }
 }
+
 
 
 // =================== HOSPITALS TABLE (UPDATED: staged delete & edit) ===================
@@ -28888,12 +31039,13 @@ function renderTimesheetOverviewTab(ctx) {
   const hasContractWeek = !!(details.contract_week_id || cw.id || row.contract_week_id);
   const isPlannedOnly   = !hasTsfin && hasContractWeek && !tsId;
 
-  const stageRaw      = (tsfin.processing_status || '').toUpperCase() || null;
-  const isPaid        = !!tsfin.paid_at_utc;
-  const isInvoiced    = !!tsfin.locked_by_invoice_id;
-  const payOnHold     = !!tsfin.pay_on_hold;
-  const authorised    = !!ts.authorised_at_server;
-  const qrStatus      = (details.qr_status || ts.qr_status || '').toUpperCase();
+  const stageRaw        = (tsfin.processing_status || '').toUpperCase() || null;
+  const procStatus      = stageRaw || (row.processing_status || '').toUpperCase() || null;
+  const isPaid          = !!tsfin.paid_at_utc;
+  const isInvoiced      = !!tsfin.locked_by_invoice_id;
+  const payOnHold       = !!tsfin.pay_on_hold;
+  const authorised      = !!ts.authorised_at_server;
+  const qrStatus        = (details.qr_status || ts.qr_status || '').toUpperCase();
 
   const amountPayEx   = Number(tsfin.total_pay_ex_vat || 0) || 0;
   const amountChgEx   = Number(tsfin.total_charge_ex_vat || 0) || 0;
@@ -28906,12 +31058,27 @@ function renderTimesheetOverviewTab(ctx) {
   const cwSubSnapRaw = cw.submission_mode_snapshot || row.submission_mode || '';
   const cwSubSnap    = String(cwSubSnapRaw || '').toUpperCase();
 
+  const policy    = details.policy || {};
+  const requiresHr        = !!policy.requires_hr;
+  const autoprocessHr     = !!policy.autoprocess_hr;
+  const noTimesheetReq    = !!policy.no_timesheet_required;
+  const validations       = Array.isArray(details.validations) ? details.validations : [];
+  const latestValidation  = validations.length ? validations[0] : null;
+  const validationStatus  = latestValidation ? String(latestValidation.status || '').toUpperCase() : null;
+  const validationIsOk    = validationStatus === 'VALIDATION_OK' || validationStatus === 'OVERRIDDEN';
+
+  // Evidence flags (for timesheet-required pill)
+  const r2NurseKey   = ts.r2_nurse_key || null;
+  const r2AuthKey    = ts.r2_auth_key || null;
+  const manualPdfKey = ts.manual_pdf_r2_key || details.manual_pdf_r2_key || null;
+
   L('snapshot', {
     tsId,
     sheetScope,
     subMode,
     basis,
     stageRaw,
+    procStatus,
     authorised,
     isPaid,
     isInvoiced,
@@ -28922,7 +31089,10 @@ function renderTimesheetOverviewTab(ctx) {
     hasContractWeek,
     isPlannedOnly,
     cwId,
-    cwSubSnap
+    cwSubSnap,
+    requiresHr,
+    autoprocessHr,
+    noTimesheetReq
   });
   GE();
 
@@ -28977,6 +31147,46 @@ function renderTimesheetOverviewTab(ctx) {
     if (stageRaw === 'RATE_MISSING' || stageRaw === 'PAY_CHANNEL_MISSING') return 'pill-bad';
     if (stageRaw === 'READY_FOR_INVOICE') return 'pill-ok';
     return 'pill-info';
+  })();
+
+  // NEW: explicit processing_status pill
+  const procStatusPillHtml = (() => {
+    if (!procStatus) return '';
+    let cls = 'pill-info';
+    if (procStatus === 'UNASSIGNED' ||
+        procStatus === 'CLIENT_UNRESOLVED' ||
+        procStatus === 'RATE_MISSING' ||
+        procStatus === 'PAY_CHANNEL_MISSING') {
+      cls = 'pill-bad';
+    } else if (procStatus === 'READY_FOR_HR') {
+      cls = 'pill-warn';
+    } else if (procStatus === 'READY_FOR_INVOICE') {
+      cls = 'pill-ok';
+    }
+    return `<span class="pill ${cls}" style="margin-left:4px;">Status: ${enc(procStatus)}</span>`;
+  })();
+
+  // NEW: HR hints under stage
+  const hrHintsHtml = (() => {
+    if (!requiresHr) return '';
+    const lines = [];
+
+    if (!validationIsOk) {
+      lines.push('HR validation required');
+    }
+
+    if (autoprocessHr) {
+      lines.push('HR auto-process: no team authorisation required after HR checks.');
+    } else {
+      lines.push('Manual team authorisation required after HR checks.');
+    }
+
+    if (!lines.length) return '';
+    return `
+      <div class="mini" style="margin-top:4px;">
+        ${lines.map(enc).join('<br/>')}
+      </div>
+    `;
   })();
 
   const scopePill = sheetScope === 'DAILY'
@@ -29056,6 +31266,15 @@ function renderTimesheetOverviewTab(ctx) {
   const hasTs = !!tsId;
   const locked = isPaid || isInvoiced;
 
+  // NEW: daily QR action gating
+  const isDaily = sheetScope === 'DAILY';
+  const hasQr   = !!qrStatus;
+  const canSendDailyQr =
+    isDaily &&
+    subMode === 'ELECTRONIC' &&
+    !locked &&
+    !hasQr;
+
   // Existing weekly electronic TS → MANUAL
   const canSwitchToManualWeekly =
     hasTs &&
@@ -29090,9 +31309,50 @@ function renderTimesheetOverviewTab(ctx) {
     hasTs &&
     !locked;
 
+  // NEW: timesheet required pill (HR + evidence gate)
+  const missingTsEvidence =
+    requiresHr &&
+    !noTimesheetReq &&
+    !isPaid &&
+    !isInvoiced &&
+    !(
+      subMode === 'ELECTRONIC' &&
+      r2NurseKey &&
+      r2AuthKey
+    ) &&
+    !manualPdfKey;
+
+  const timesheetRequiredPillHtml = missingTsEvidence
+    ? '<span class="pill pill-bad" style="margin-left:4px;">Timesheet required</span>'
+    : '';
+
   let actionsHtml = '';
 
-  if (hasTs || isPlannedWeekly) {
+  if (sheetScope === 'DAILY' && hasTs) {
+    // NEW: daily actions (QR route)
+    const buttons = [];
+
+    if (canSendDailyQr) {
+      buttons.push(`
+        <button type="button"
+                class="btn"
+                data-ts-action="send-daily-qr">
+          Send Daily QR Timesheet
+        </button>
+      `);
+    }
+
+    if (!buttons.length) {
+      actionsHtml = `
+        <span class="mini">
+          No structural actions are available for this daily timesheet (it may be paid, invoiced, or already in a QR flow).
+        </span>
+      `;
+    } else {
+      actionsHtml = buttons.join('');
+    }
+  } else if (hasTs || isPlannedWeekly) {
+    // Existing weekly actions
     const buttons = [];
 
     // Convert to manual (existing TS or planned week)
@@ -29173,9 +31433,11 @@ function renderTimesheetOverviewTab(ctx) {
           <span class="pill ${stageClass}" style="font-weight:600;">
             ${enc(stageLabel)}
           </span>
+          ${procStatusPillHtml}
           <div class="mini" style="margin-top:4px;">
             ${authorised ? 'Authorised' : 'Not authorised'}
           </div>
+          ${hrHintsHtml}
         </div>
       </div>
       <div class="row">
@@ -29188,6 +31450,7 @@ function renderTimesheetOverviewTab(ctx) {
               ? `<span class="pill pill-info" style="margin-left:4px;">Basis: ${enc(basis)}</span>`
               : ''
           }
+          ${timesheetRequiredPillHtml}
           ${flagsHtml}
         </div>
       </div>
@@ -29280,6 +31543,7 @@ function renderTimesheetIssuesTab(ctx) {
   const { row, details } = normaliseTimesheetCtx(ctx);
 
   GC('render');
+
   const tsfin       = details.tsfin || {};
   const validations = Array.isArray(details.validations) ? details.validations : [];
   const stage       = row.summary_stage || null;
@@ -29287,17 +31551,39 @@ function renderTimesheetIssuesTab(ctx) {
   const payOnHold   = !!row.pay_on_hold;
   const basis       = tsfin.basis || row.basis || null;
 
+  const ts          = details.timesheet || {};
+  const policy      = details.policy || {};
+  const requiresHr        = !!policy.requires_hr;
+  const autoprocessHr     = !!policy.autoprocess_hr;
+  const noTimesheetReq    = !!policy.no_timesheet_required;
+
+  const authoriseTs       = ts.authorised_at_server || row.authorised_at_server || null;
+  const authorised        = !!authoriseTs;
+
+  const validationRows    = validations.slice(); // assume already most-recent-first
+  const latestValidation  = validationRows.length ? validationRows[0] : null;
+  const latestValStatus   = latestValidation ? String(latestValidation.status || '').toUpperCase() : null;
+  const latestValReason   = latestValidation ? (latestValidation.reason_code || latestValidation.reason || '') : '';
+  const validationIsOk    = latestValStatus === 'VALIDATION_OK' || latestValStatus === 'OVERRIDDEN';
+  const validationFailed  = !!latestValidation && !validationIsOk;
+
   L('snapshot', {
     stage,
     procStatus,
     payOnHold,
     basis,
-    validationsCount: validations.length
+    validationsCount: validations.length,
+    requiresHr,
+    autoprocessHr,
+    noTimesheetReq,
+    authorised,
+    latestValStatus,
+    latestValReason
   });
 
   const issues = [];
 
-  // Processing status-based issues
+  // ───────────────────── Processing status-based issues ─────────────────────
   const p = String(procStatus || '').toUpperCase();
   if (p === 'RATE_MISSING') {
     issues.push('Rate missing: no pay/charge rates found for this client/role/band on this date.');
@@ -29324,16 +31610,89 @@ function renderTimesheetIssuesTab(ctx) {
     issues.push('Pay is currently on hold for this timesheet. It will be excluded from pay runs until released.');
   }
 
-  // Validation rows
-  const valItems = validations.map(v => {
-    return `
-      <li>
-        <span class="mini">
-          [${v.source_system || v.kind || 'VALIDATION'}] ${v.status || 'UNKNOWN'} – ${v.reason || '(no reason given)'}
-        </span>
-      </li>
-    `;
-  }).join('');
+  // ───────────────────── HR / HealthRoster gating ─────────────────────
+  // We only treat HR as a hard gate when requires_hr is true.
+  if (requiresHr) {
+    // HR cross-check required but not OK
+    if (!validationIsOk) {
+      if (!latestValidation) {
+        issues.push('Awaiting HealthRoster cross-check: this client requires HR validation before pay/invoice.');
+      } else if (validationFailed) {
+        const friendly = latestValReason || 'validation failed – see validation log for details.';
+        issues.push(`HealthRoster validation failed: ${friendly}`);
+      } else {
+        issues.push('Awaiting HealthRoster cross-check: this client requires HR validation before pay/invoice.');
+      }
+    }
+
+    // Awaiting team authorisation when autoprocess_hr = false
+    // We consider this blocking when:
+    // - HR is required
+    // - autoprocess is disabled
+    // - the TS is not yet authorised
+    // - TSFIN is in a pre-invoice state (PENDING_AUTH or READY_FOR_HR)
+    const p2 = p;
+    if (!autoprocessHr && !authorised && (p2 === 'PENDING_AUTH' || p2 === 'READY_FOR_HR')) {
+      issues.push('Awaiting authorisation by team: this client requires manual sign-off after HealthRoster checks.');
+    }
+
+    // Missing timesheet evidence when no_timesheet_required = false
+    // Only enforce for HR-driven flows and when not yet paid/invoiced.
+    const subMode    = String(ts.submission_mode || row.submission_mode || '').toUpperCase();
+    const r2NurseKey = ts.r2_nurse_key || null;
+    const r2AuthKey  = ts.r2_auth_key || null;
+    const manualKey  = ts.manual_pdf_r2_key || details.manual_pdf_r2_key || null;
+    const isPaid     = !!tsfin.paid_at_utc;
+    const isInvoiced = !!tsfin.locked_by_invoice_id;
+
+    const basisStr   = String(basis || '').toUpperCase();
+    const isHrBasis  =
+      basisStr.startsWith('HEALTHROSTER') ||
+      basisStr.startsWith('NHSP') ||
+      basisStr === 'SELF_REPORTED'; // self-reported but HR cross-check required
+
+    const hasElectronicEvidence =
+      subMode === 'ELECTRONIC' && !!(r2NurseKey && r2AuthKey);
+    const hasManualEvidence = !!manualKey;
+
+    if (!noTimesheetReq && isHrBasis && !isPaid && !isInvoiced) {
+      if (!hasElectronicEvidence && !hasManualEvidence) {
+        issues.push('Missing timesheet: this client requires a signed timesheet (electronic, QR or manual) even after HealthRoster validation.');
+      }
+    }
+  }
+
+  // ───────────────────── HR daily mismatch reasons (HealthRoster daily) ─────────────────────
+  try {
+    const seenReasons = new Set();
+    (validationRows || []).forEach(v => {
+      const src = String(v.source_system || v.kind || '').toUpperCase();
+      const st  = String(v.status || '').toUpperCase();
+      const rc  = String(v.reason_code || '').toLowerCase();
+
+      if (src !== 'HEALTHROSTER_DAILY') return;
+      if (!st || st === 'VALIDATION_OK' || st === 'OVERRIDDEN') return;
+
+      if (rc === 'start_end_mismatch' && !seenReasons.has(rc)) {
+        issues.push('HealthRoster start/end times differ from the timesheet.');
+        seenReasons.add(rc);
+      }
+      if (rc === 'break_minutes_mismatch' && !seenReasons.has(rc)) {
+        issues.push('HealthRoster break length differs from the timesheet.');
+        seenReasons.add(rc);
+      }
+      if (rc === 'actual_hours_mismatch' && !seenReasons.has(rc)) {
+        issues.push('HealthRoster “Actual Hours” differ from calculated timesheet hours.');
+        seenReasons.add(rc);
+      }
+      if (rc === 'rate_missing_for_grade' && !seenReasons.has(rc)) {
+        issues.push('No matching rate found for the requested grade – check grade → role → rates mapping.');
+        seenReasons.add(rc);
+      }
+    });
+  } catch (e) {
+    if (LOGM) L('[ISSUES] HR-daily mismatch detection failed (non-fatal)', e);
+  }
 
   // ───────────────────── Schedule-based issues (shift + breaks) ─────────────────────
   try {
@@ -29387,7 +31746,19 @@ function renderTimesheetIssuesTab(ctx) {
     if (LOGM) L('[ISSUES] schedule-based issue detection failed (non-fatal)', e);
   }
 
-  if (!valItems && !issues.length) {
+  // Validation rows → log (read-only)
+  const valItems = validations.map(v => {
+    return `
+      <li>
+        <span class="mini">
+          [${v.source_system || v.kind || 'VALIDATION'}] ${v.status || 'UNKNOWN'} – ${v.reason || v.reason_code || '(no reason given)'}
+        </span>
+      </li>
+    `;
+  }).join('');
+
+  // If there are truly no blocking issues, say so explicitly
+  if (!issues.length) {
     issues.push('No blocking issues detected. This timesheet should be ready once normal processing steps complete.');
   }
 
@@ -29449,6 +31820,7 @@ function renderTimesheetIssuesTab(ctx) {
     </div>
   `;
 }
+
 function renderTimesheetFinanceTab(ctx) {
   const { LOGM, L, GC, GE } = getTsLoggers('[TS][FINANCE]');
   const { row, details, related, state } = normaliseTimesheetCtx(ctx);
@@ -32223,14 +34595,27 @@ async function listTimesheetsSummary(filters = {}) {
 
   const f = filters || {};
 
+  // Stage filter
   const stage = (f.summary_stage || '').toUpperCase();
   if (stage && stage !== 'ALL') qs.set('summary_stage', stage);
 
+  // Route filter
   const route = (f.route_type || '').toUpperCase();
   if (route && route !== 'ALL') qs.set('route_type', route);
 
+  // Scope filter
   const scope = (f.sheet_scope || '').toUpperCase();
   if (scope && scope !== 'ALL') qs.set('sheet_scope', scope);
+
+  // NEW: processing_status filter (supports single or comma-joined list)
+  const procStatusRaw = f.processing_status || '';
+  if (procStatusRaw && procStatusRaw !== 'ALL') {
+    // If caller passed a comma-joined list, keep as-is; otherwise uppercase the single value
+    const procStatus = procStatusRaw.includes(',')
+      ? procStatusRaw
+      : procStatusRaw.toUpperCase();
+    qs.set('processing_status', procStatus);
+  }
 
   if (f.is_adjusted === true)     qs.set('is_adjusted', 'true');
   if (f.is_qr === true)           qs.set('is_qr', 'true');
