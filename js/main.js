@@ -7111,8 +7111,9 @@ async function openCandidatePicker(onPick) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 
-async function openClientPicker(onPick) {
+async function openClientPicker(onPick, opts) {
   const LOGC = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : true; // default ON
+  const nhspOnly = !!(opts && opts.nhspOnly);
 
   if (LOGC) console.log('[PICKER][clients] ensure dataset primed → start');
   await ensurePickerDatasetPrimed('clients').catch(e=>{ if (LOGC) console.warn('[PICKER][clients] priming failed', e); });
@@ -7126,11 +7127,26 @@ async function openClientPicker(onPick) {
     mem = getSummaryMembership('clients', fp);
   }
 
-  const ds  = (window.__pickerData ||= {}).clients || { since:null, itemsById:{} };
+  const ds    = (window.__pickerData ||= {}).clients || { since:null, itemsById:{} };
   const items = ds.itemsById || {};
 
-  const baseIds  = (mem?.ids && mem.ids.length) ? mem.ids : Object.keys(items);
-  const baseRows = baseIds.map(id => items[id]).filter(Boolean);
+  const baseIds    = (mem?.ids && mem.ids.length) ? mem.ids : Object.keys(items);
+  const baseRowsAll = baseIds.map(id => items[id]).filter(Boolean);
+
+  // Only show NHSP clients (is_nhsp true) when nhspOnly is set
+  const baseRows = nhspOnly
+    ? baseRowsAll.filter(r => r && (r.is_nhsp === true || r.is_nhsp === 'true'))
+    : baseRowsAll;
+
+  if (LOGC) console.log('[PICKER][clients] dataset snapshot', {
+    fingerprint: fp,
+    total: mem?.total,
+    ids: baseIds.length,
+    nhspOnly,
+    filtered: baseRows.length,
+    stale: !!mem?.stale,
+    since: ds?.since
+  });
 
   if (LOGC) console.log('[PICKER][clients] dataset snapshot', {
     fingerprint: fp, total: mem?.total, ids: baseIds.length, stale: !!mem?.stale, since: ds?.since,
@@ -26048,7 +26064,6 @@ function ensureWeeklyImportMappings(type, importId) {
   return m;
 }
 
-
 function renderImportSummaryModal(importType, summaryState) {
   const enc = (typeof escapeHtml === 'function')
     ? escapeHtml
@@ -26301,75 +26316,73 @@ function renderImportSummaryModal(importType, summaryState) {
     const summary = ss.summary || {};
     const total   = summary.total_rows || rows.length || 0;
 
-
     const rowsHtml = rows.length
-  ? rows.map((r, idx) => {
-      const staff  = r.staff_name || r.staff_raw || '';
-      const unit   = r.unit || r.hospital_or_trust || r.hospital_norm || '';
+      ? rows.map((r, idx) => {
+          const staff  = r.staff_name || r.staff_raw || '';
+          const unit   = r.unit || r.hospital_or_trust || r.hospital_norm || '';
 
-      // Prefer row work_date, fall back to week_ending_date and other fields
-      const rawDateYmd =
-        r.date_local ||
-        r.work_date ||
-        r.date ||
-        r.week_ending_date ||
-        '';
+          // Prefer row work_date, fall back to week_ending_date and other fields
+          const rawDateYmd =
+            r.date_local ||
+            r.work_date ||
+            r.date ||
+            r.week_ending_date ||
+            '';
 
-      const date   = formatYmdToNiceDate(rawDateYmd);
-      const action = String(r.resolution_status || r.action || '').toUpperCase();
-      const candId = r.candidate_id || null;
-      const cliId  = r.client_id || null;
+          const date   = formatYmdToNiceDate(rawDateYmd);
+          const action = String(r.resolution_status || r.action || '').toUpperCase();
+          const candId = r.candidate_id || null;
+          const cliId  = r.client_id || null;
 
-      let cls = 'pill-info';
-      if (action === 'OK' || action === 'APPLY') cls = 'pill-ok';
-      else if (action === 'NO_CANDIDATE' || action === 'NO_CLIENT') cls = 'pill-bad';
+          let cls = 'pill-info';
+          if (action === 'OK' || action === 'APPLY') cls = 'pill-ok';
+          else if (action === 'NO_CANDIDATE' || action === 'NO_CLIENT') cls = 'pill-bad';
 
-      const canAssignCand   = (action === 'NO_CANDIDATE');
-      const canAssignClient = (action === 'NO_CLIENT');
+          const canAssignCand   = (action === 'NO_CANDIDATE');
+          const canAssignClient = (action === 'NO_CLIENT');
 
-      return `
+          return `
+            <tr>
+              <td><span class="mini">${enc(staff || '—')}</span></td>
+              <td><span class="mini">${enc(unit || '—')}</span></td>
+              <td><span class="mini">${enc(date || '—')}</span></td>
+              <td><span class="pill ${cls}">${enc(action || 'UNKNOWN')}</span></td>
+              <td>
+                ${
+                  canAssignCand
+                    ? `<button type="button"
+                               class="btn mini"
+                               data-act="weekly-resolve-candidate"
+                               data-row-idx="${idx}"
+                               data-staff="${enc(staff)}"
+                               data-unit="${enc(unit)}">
+                         Assign candidate…
+                       </button>`
+                    : ''
+                }
+                ${
+                  canAssignClient
+                    ? `<button type="button"
+                               class="btn mini"
+                               style="margin-left:4px;"
+                               data-act="weekly-resolve-client"
+                               data-row-idx="${idx}"
+                               data-unit="${enc(unit)}">
+                         Assign client…
+                       </button>`
+                    : ''
+                }
+              </td>
+            </tr>
+          `;
+        }).join('')
+      : `
         <tr>
-          <td><span class="mini">${enc(staff || '—')}</span></td>
-          <td><span class="mini">${enc(unit || '—')}</span></td>
-          <td><span class="mini">${enc(date || '—')}</span></td>
-          <td><span class="pill ${cls}">${enc(action || 'UNKNOWN')}</span></td>
-          <td>
-            ${
-              canAssignCand
-                ? `<button type="button"
-                           class="btn mini"
-                           data-act="weekly-resolve-candidate"
-                           data-row-idx="${idx}"
-                           data-staff="${enc(staff)}"
-                           data-unit="${enc(unit)}">
-                     Assign candidate…
-                   </button>`
-                : ''
-            }
-            ${
-              canAssignClient
-                ? `<button type="button"
-                           class="btn mini"
-                           style="margin-left:4px;"
-                           data-act="weekly-resolve-client"
-                           data-row-idx="${idx}"
-                           data-unit="${enc(unit)}">
-                     Assign client…
-                   </button>`
-                : ''
-            }
+          <td colspan="5">
+            <span class="mini">No rows to show.</span>
           </td>
         </tr>
       `;
-    }).join('')
-  : `
-    <tr>
-      <td colspan="5">
-        <span class="mini">No rows to show.</span>
-      </td>
-    </tr>
-  `;
-
 
     return html(`
       <div class="form" id="weeklyImportSummary">
@@ -26545,6 +26558,44 @@ function renderImportSummaryModal(importType, summaryState) {
       const st = window.__importSummaryState && window.__importSummaryState[type];
       const rows = st && Array.isArray(st.rows) ? st.rows : [];
 
+      // Ensure mapping container exists for this type + import
+      const ensureWeeklyImportMappings = () => {
+        window.__weeklyImportMappings = window.__weeklyImportMappings || {};
+        if (!window.__weeklyImportMappings[type]) {
+          window.__weeklyImportMappings[type] = {};
+        }
+        let m = window.__weeklyImportMappings[type][importId];
+        if (!m) {
+          m = {
+            candidate_mappings: [],
+            client_aliases: []
+          };
+          window.__weeklyImportMappings[type][importId] = m;
+        }
+        return m;
+      };
+
+      // Helper: refresh weekly preview + modal after a mapping change
+      const refreshWeeklySummary = async () => {
+        try {
+          let url;
+          if (type === 'NHSP') {
+            url = `/api/nhsp/${encodeURIComponent(importId)}/preview`;
+          } else {
+            // HR_WEEKLY
+            url = `/api/healthroster/autoprocess/${encodeURIComponent(importId)}/preview`;
+          }
+          const res  = await authFetch(API(url));
+          const text = await res.text();
+          if (!res.ok) throw new Error(text || `Weekly import preview refresh failed (${res.status})`);
+          const refreshed = text ? JSON.parse(text) : {};
+          renderImportSummaryModal(type, refreshed);
+        } catch (e) {
+          console.error('[IMPORTS][WEEKLY] refreshWeeklySummary failed', e);
+          alert(e?.message || 'Failed to refresh weekly import summary.');
+        }
+      };
+
       // Click handler for weekly "Assign candidate/client…" buttons
       root.addEventListener('click', (ev) => {
         const btn = ev.target.closest('button[data-act]');
@@ -26555,12 +26606,41 @@ function renderImportSummaryModal(importType, summaryState) {
         const idx = Number(btn.getAttribute('data-row-idx') || '-1');
         if (idx < 0 || idx >= rows.length) return;
 
+        const row       = rows[idx];
+        const mappings  = ensureWeeklyImportMappings();
+        const staffRaw  = row.staff_name || row.staff_raw || '';
+        const hospRaw   = row.hospital_or_trust || row.unit || row.hospital_norm || '';
+
         if (act === 'weekly-resolve-candidate') {
-          openWeeklyCandidateResolveModal(type, importId, idx);
+          // Use global candidate picker with local filtering
+          openCandidatePicker(async ({ id, label }) => {
+            mappings.candidate_mappings.push({
+              staff_norm: row.staff_norm || staffRaw || '',
+              hospital_or_trust: hospRaw || null,
+              candidate_id: id
+            });
+
+            window.__toast && window.__toast(`Candidate ${label} linked. Reclassifying import…`);
+            await refreshWeeklySummary();
+          });
+          return;
         }
 
         if (act === 'weekly-resolve-client') {
-          openWeeklyClientResolveModal(type, importId, idx);
+          // Use NHSP-only client filter when type === 'NHSP'
+          const nhspOnly = (type === 'NHSP');
+
+          openClientPicker(async ({ id, label }) => {
+            mappings.client_aliases.push({
+              hospital_norm: row.hospital_norm || hospRaw || '',
+              client_id: id
+            });
+
+            window.__toast && window.__toast(`Client ${label} linked. Reclassifying import…`);
+            await refreshWeeklySummary();
+          }, { nhspOnly });
+
+          return;
         }
       });
 
@@ -26570,7 +26650,7 @@ function renderImportSummaryModal(importType, summaryState) {
         btnApply.__weeklyApplyWired = true;
         btnApply.addEventListener('click', async () => {
           try {
-            const mappings = ensureWeeklyImportMappings(type, importId);
+            const mappings = ensureWeeklyImportMappings();
             await resolveImportConflicts(importId, type, mappings);
           } catch (err) {
             console.error('[IMPORTS][WEEKLY] apply failed', err);
@@ -26583,7 +26663,6 @@ function renderImportSummaryModal(importType, summaryState) {
     }
   }, 0);
 }
-
 
 
 function renderClientHospitalsTable() {
