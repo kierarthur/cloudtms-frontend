@@ -22722,19 +22722,31 @@ if (this.entity === 'timesheets' && k === 'lines') {
     }
   }
 
-  // Finalise setTab
+    // Finalise setTab
   this.currentTabKey = k;
   this._attachDirtyTracker();
 
   const isChild = (stack().length > 1);
+
+  // Utility modals (resolve/import summaries) should keep inner buttons active
+  const isUtilityKindForThis =
+    this.kind === 'timesheets-resolve' ||
+    this.kind === 'resolve-candidate'  ||
+    this.kind === 'resolve-client'     ||
+    (typeof this.kind === 'string' && this.kind.startsWith('import-summary-'));
+
   if (this.noParentGate) {
-    setFormReadOnly(byId('modalBody'), (this.mode === 'view' || this.mode === 'saving'));
+    const ro = isUtilityKindForThis
+      ? false
+      : (this.mode === 'view' || this.mode === 'saving');
+    setFormReadOnly(byId('modalBody'), ro);
   } else if (isChild) {
     const p = parentFrame();
     setFormReadOnly(byId('modalBody'), !(p && (p.mode === 'edit' || p.mode === 'create')));
   } else {
     setFormReadOnly(byId('modalBody'), (this.mode === 'view' || this.mode === 'saving'));
   }
+
 
   try {
     const pc = document.getElementById('btnPickCandidate');
@@ -22814,14 +22826,23 @@ if (!frameObj.hasId && mode === 'view' && !isPlannedTimesheetStub && !isUtilityK
 }
 
 
-  // ▶ Only toggle read-only on the DOM that actually belongs to the top frame.
+   // ▶ Only toggle read-only on the DOM that actually belongs to the top frame.
   //    When updating a non-top frame (e.g., the parent while a picker is open),
   //    do not flip the global #modalBody to avoid UI flicker/regressions.
   if (isTop) {
+    const isUtilityKindForFrame =
+      frameObj.kind === 'timesheets-resolve' ||
+      frameObj.kind === 'resolve-candidate'  ||
+      frameObj.kind === 'resolve-client'     ||
+      (typeof frameObj.kind === 'string' && frameObj.kind.startsWith('import-summary-'));
+
     if (!isChild && (mode === 'create' || mode === 'edit')) {
       setFormReadOnly(byId('modalBody'), false);
     } else if (frameObj.noParentGate) {
-      setFormReadOnly(byId('modalBody'), (mode === 'view' || mode === 'saving'));
+      const ro = isUtilityKindForFrame
+        ? false
+        : (mode === 'view' || mode === 'saving');
+      setFormReadOnly(byId('modalBody'), ro);
     } else if (isChild) {
       const p = parentFrame();
       setFormReadOnly(byId('modalBody'), !(p && (p.mode === 'edit' || p.mode === 'create')));
@@ -22831,6 +22852,7 @@ if (!frameObj.hasId && mode === 'view' && !isPlannedTimesheetStub && !isUtilityK
   } else {
     L('setFrameMode (non-top): skipped read-only toggle to avoid affecting current child');
   }
+
 
   if (typeof frameObj._updateButtons === 'function') frameObj._updateButtons();
 
