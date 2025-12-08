@@ -10462,6 +10462,7 @@ function wireAdvancedSearch() {
 // - Keep Search…, add “Saved searches…” shortcut that opens Search modal pre-focused on loading presets
 // -----------------------------
 
+
 function renderTools(){
   const el = byId('toolButtons');
   const canCreate = ['candidates','clients','umbrellas','contracts'].includes(currentSection); // added contracts
@@ -10533,13 +10534,51 @@ function renderTools(){
     // Client Invoiced → client_invoiced = true → backend: locked_by_invoice_id NOT NULL
     box.appendChild(mkToolFlag('client_invoiced', 'Client invoiced'));
 
-    // Needs Attention → needs_attention = true → already used by backend
+    // Needs Attention → needs_attention = true → backend: needs_attention = true
     box.appendChild(mkToolFlag('needs_attention', 'Needs attention'));
+
+    // ── Stage selector (All / Unprocessed / Processed / Authorised) ──────────
+    const stageWrap = document.createElement('div');
+    stageWrap.style.marginTop = '8px';
+    stageWrap.className = 'mini';
+    const stageLabel = document.createElement('div');
+    stageLabel.textContent = 'Stage:';
+    stageLabel.style.marginBottom = '2px';
+    const stageSel = document.createElement('select');
+    stageSel.style.width = '100%';
+
+    const stageOpts = [
+      ['ALL',         'All'],
+      ['UNPROCESSED', 'Unprocessed'],
+      ['PROCESSED',   'Processed'],
+      ['AUTHORISED',  'Authorised']
+    ];
+    const curStage = (filters.ts_stage || 'ALL').toUpperCase();
+    stageOpts.forEach(([v, label]) => {
+      const o = document.createElement('option');
+      o.value = v;
+      o.textContent = label;
+      if (curStage === v) o.selected = true;
+      stageSel.appendChild(o);
+    });
+
+    stageSel.addEventListener('change', async () => {
+      const val = stageSel.value;
+      const curFilters = { ...(window.__listState['timesheets'].filters || {}) };
+      curFilters.ts_stage = val; // All/UNPROCESSED/PROCESSED/AUTHORISED
+      window.__listState['timesheets'].filters = curFilters;
+      window.__listState['timesheets'].page = 1;
+      const data = await loadSection();
+      renderSummary(data);
+    });
+
+    stageWrap.appendChild(stageLabel);
+    stageWrap.appendChild(stageSel);
+    box.appendChild(stageWrap);
 
     el.appendChild(box);
   }
 }
-
 
 
 async function showAllRecords(section = currentSection){
@@ -24686,25 +24725,38 @@ function getWeeklySelectedGroupIds(type, importId) {
 }
 
 
-
-
 async function handleHrWeeklyFileDrop(file) {
   const summaryEl = document.getElementById('hrWeeklyImportSummary');
   if (summaryEl) {
-    summaryEl.textContent = 'Uploading HealthRoster weekly file to storage…';
+    summaryEl.textContent = 'Preparing HealthRoster weekly import…';
   }
 
   try {
-    // Require a client_id for HR autoprocess
-    const clientId =
-      window.modalCtx &&
-      window.modalCtx.importsState &&
-      window.modalCtx.importsState.hrWeeklyClientId
-        ? String(window.modalCtx.importsState.hrWeeklyClientId).trim()
-        : '';
+    // Ensure modalCtx/importsState exist
+    window.modalCtx = window.modalCtx || {};
+    window.modalCtx.importsState = window.modalCtx.importsState || {};
+    const st = window.modalCtx.importsState;
+
+    // 0) Ensure a client_id is selected (use picker if missing)
+    let clientId =
+      st.hrWeeklyClientId ? String(st.hrWeeklyClientId).trim() : '';
+    let clientName = st.hrWeeklyClientName || '';
 
     if (!clientId) {
-      throw new Error('Select a client for the HealthRoster weekly import before uploading.');
+      const picked = await openHrWeeklyClientPicker();
+      if (!picked) {
+        throw new Error('Select a client for the HealthRoster weekly import before uploading.');
+      }
+      clientId   = String(picked.clientId || '').trim();
+      clientName = picked.clientName || '';
+
+      st.hrWeeklyClientId   = clientId;
+      st.hrWeeklyClientName = clientName;
+    }
+
+    if (summaryEl) {
+      summaryEl.textContent =
+        `Client: ${clientName || clientId} — uploading HealthRoster weekly file to storage…`;
     }
 
     // 1) Upload file to R2
@@ -24743,7 +24795,6 @@ async function handleHrWeeklyFileDrop(file) {
     }
 
     // 3) Fetch preview / classification
-    // NOTE: backend must expose GET /api/healthroster/autoprocess/:import_id/preview
     const resPrev  = await authFetch(API(`/api/healthroster/autoprocess/${encodeURIComponent(importId)}/preview`));
     const textPrev = await resPrev.text();
     if (!resPrev.ok) {
@@ -24767,7 +24818,8 @@ async function handleHrWeeklyFileDrop(file) {
         : Array.isArray(summaryState.rows) ? summaryState.rows.length : 0;
 
     if (summaryEl) {
-      summaryEl.textContent = `Import ${importId}: ${total} rows parsed.`;
+      summaryEl.textContent =
+        `Import ${importId} (${clientName || clientId}): ${total} rows parsed.`;
     }
 
     if (typeof renderImportSummaryModal === 'function') {
@@ -24784,6 +24836,7 @@ async function handleHrWeeklyFileDrop(file) {
     alert(err?.message || 'HealthRoster weekly import failed.');
   }
 }
+
 
 
 async function handleHrRotaFileDrop(file) {
@@ -25812,6 +25865,94 @@ function dedupeIds(arr) {
   return Array.from(new Set((arr || []).map(String)));
 }
 
+async function openHrWeeklyClientPicker() {
+  // Ensure modalCtx + importsState exist
+  window.modalCtx = window.modalCtx || {};
+  window.modalCtx.importsState = window.modalCtx.importsState || {};
+  const st = window.modalCtx.importsState;
+
+  // If we already have a choice cached, just return it
+  if (st.hrWeeklyClientId) {
+    return {
+      clientId: st.hrWeeklyClientId,
+      clientName: st.hrWeeklyClientName || ''
+    };
+  }
+
+  // 1) Load list of HR autoprocess clients from backend
+  let items = [];
+  try {
+    const res  = await authFetch(API('/api/healthroster/autoprocess/clients'));
+    const text = await res.text();
+    if (!res.ok) {
+      throw new Error(text || `Failed to load HealthRoster clients (${res.status})`);
+    }
+    const json = text ? JSON.parse(text) : {};
+    items = Array.isArray(json.items) ? json.items : [];
+  } catch (e) {
+    console.error('[IMPORTS][HR_WEEKLY] failed to load clients', e);
+    alert(e?.message || 'Failed to load HealthRoster clients for weekly import.');
+    return null;
+  }
+
+  if (!items.length) {
+    alert('No HealthRoster weekly import clients are configured.');
+    return null;
+  }
+
+  // 2) Show a small modal to pick one client
+  return new Promise((resolve) => {
+    // Build options HTML (use escapeHtml if you have it; otherwise keep it simple)
+    const optionsHtml = items.map((c) => {
+      const name = (c.client_name || '').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      return `<option value="${c.client_id}">${name}</option>`;
+    }).join('');
+
+    showModal(
+      'Select HealthRoster client',
+      [{ key: 'main', label: 'Select client' }],
+      ($root) => {
+        $root.innerHTML = `
+          <div class="form">
+            <div class="row">
+              <label>Client</label>
+              <div class="controls">
+                <select id="hrWeeklyClientSelect">
+                  <option value="">-- choose a client --</option>
+                  ${optionsHtml}
+                </select>
+              </div>
+            </div>
+            <p class="hint">
+              This client will be used for parsing and applying this HealthRoster
+              weekly export. You can change it in future imports.
+            </p>
+          </div>
+        `;
+      },
+      async () => {
+        const sel = document.getElementById('hrWeeklyClientSelect');
+        if (!sel || !sel.value) {
+          alert('Please select a client to continue.');
+          return false; // keep modal open
+        }
+
+        const clientId   = sel.value;
+        const clientName = sel.options[sel.selectedIndex].textContent;
+
+        // Cache in modalCtx so subsequent imports can reuse the same choice
+        st.hrWeeklyClientId   = clientId;
+        st.hrWeeklyClientName = clientName;
+
+        resolve({ clientId, clientName });
+        return true; // close modal
+      },
+      false,
+      null,
+      { kind: 'hr-weekly-client-picker', noParentGate: true }
+    );
+  });
+}
 
 
 
@@ -29466,45 +29607,10 @@ function renderSummary(rows){
     topControls.appendChild(statusSel);
   }
 
-  // ── Timesheets quick filters: Stage / Status / Route / Scope / Flags ───────
+  // ── Timesheets quick filters: Status / Route / Scope / Flags ───────────────
   if (currentSection === 'timesheets') {
     const stFilters = window.__listState[currentSection].filters || {};
     window.__listState[currentSection].filters = stFilters;
-
-    // Stage dropdown (summary_stage)
-    const stageLabel = document.createElement('span');
-    stageLabel.className = 'mini';
-    stageLabel.textContent = 'Stage:';
-    const stageSel = document.createElement('select');
-
-    const stageOpts = [
-      ['ALL',              'All'],
-      ['PAID',             'Paid'],
-      ['INVOICED',         'Invoiced'],
-      ['READY_FOR_INVOICE','Ready for invoice'],
-      ['READY_FOR_HR',     'Ready for HR'],
-      ['PENDING_AUTH',     'Awaiting auth'],
-      ['NEEDS_ATTENTION',  'Needs attention']
-    ];
-    const stageCur = (stFilters.summary_stage || 'ALL').toUpperCase();
-    stageOpts.forEach(([v, label]) => {
-      const o = document.createElement('option');
-      o.value = v;
-      o.textContent = label;
-      if (stageCur === v) o.selected = true;
-      stageSel.appendChild(o);
-    });
-    stageSel.addEventListener('change', async () => {
-      const val = stageSel.value;
-      const curFilters = { ...(window.__listState[currentSection].filters || {}) };
-      curFilters.summary_stage = val;
-      window.__listState[currentSection].filters = curFilters;
-      window.__listState[currentSection].page = 1;
-      const data = await loadSection();
-      renderSummary(data);
-    });
-    topControls.appendChild(stageLabel);
-    topControls.appendChild(stageSel);
 
     // Status dropdown (ID unresolved / rate / pay-channel / ready)
     const statusLabel2 = document.createElement('span');
@@ -29624,7 +29730,7 @@ function renderSummary(rows){
     topControls.appendChild(scopeLabel);
     topControls.appendChild(scopeSel);
 
-    // Flags: adjusted / needs attention (QR now covered by Route=QR)
+    // Flags: Adjusted only (Needs attention now lives in Tools)
     const mkFlag = (name, label) => {
       const wrap = document.createElement('label');
       wrap.className = 'mini';
@@ -29648,7 +29754,7 @@ function renderSummary(rows){
     };
 
     topControls.appendChild(mkFlag('is_adjusted', 'Adjusted only'));
-    topControls.appendChild(mkFlag('needs_attention', 'Needs attention'));
+    // top-level Needs attention flag removed; handled via Tools tickbox
   }
 
   // Columns button
