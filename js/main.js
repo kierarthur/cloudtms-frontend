@@ -25507,33 +25507,9 @@ async function openWeeklyCandidateResolveModal(importType, importId, rowIdx) {
   const renderTab = (key) => {
     if (key !== 'main') return '';
     const s = state();
-    const results = Array.isArray(s.results) ? s.results : [];
     const term    = s.term || '';
-    const selectedId = s.selectedCandidateId || '';
 
-    const resultsHtml = results.length
-      ? `
-        <div class="card" style="max-height:250px;overflow:auto;border:1px solid #ddd;margin-top:4px;">
-          <ul class="mini">
-            ${results.map(c => {
-              const id   = c.id;
-              const name = c.display_name || c.name || ((c.first_name || '') + ' ' + (c.last_name || ''));
-              const selected = String(id) === String(selectedId);
-              const style = selected ? ' style="background:#007bff;color:#fff;cursor:pointer;"' : ' style="cursor:pointer;"';
-              return `
-                <li class="weekly-candidate-option"${style}
-                    data-act="weekly-cand-select"
-                    data-candidate-id="${enc(id)}">
-                  <strong>${enc(name || '')}</strong>
-                  ${c.tms_ref ? ` &nbsp; <span class="mono">(${enc(c.tms_ref)})</span>` : ''}
-                </li>
-              `;
-            }).join('')}
-          </ul>
-        </div>
-      `
-      : '<span class="mini">No candidates matched. Try typing a different name.</span>';
-
+    // Results box will be filled dynamically
     return html(`
       <div class="form" id="weeklyResolveCandidate">
         <div class="card">
@@ -25566,7 +25542,8 @@ async function openWeeklyCandidateResolveModal(importType, importId, rowIdx) {
           <div class="row">
             <label>Matches</label>
             <div class="controls" id="weeklyCandResults">
-              ${resultsHtml}
+              <!-- results injected dynamically -->
+              <span class="mini">Type a name to search for candidates.</span>
             </div>
           </div>
           <div class="row" style="margin-top:8px;">
@@ -25605,44 +25582,86 @@ async function openWeeklyCandidateResolveModal(importType, importId, rowIdx) {
     }
   );
 
-  // Helper: run search and re-render
+  // Helper: render results into the existing results container
+  function renderCandidateResults() {
+    const s = state();
+    const results    = Array.isArray(s.results) ? s.results : [];
+    const selectedId = s.selectedCandidateId || '';
+
+    const root = document.getElementById('modalBody');
+    if (!root) return;
+    const host = root.querySelector('#weeklyCandResults');
+    if (!host) return;
+
+    if (!results.length) {
+      host.innerHTML = '<span class="mini">No candidates matched. Try typing a different name.</span>';
+      return;
+    }
+
+    const listHtml = `
+      <div class="card" style="max-height:250px;overflow:auto;border:1px solid #ddd;margin-top:4px;">
+        <ul class="mini">
+          ${results.map(c => {
+            const id   = c.id;
+            const name = c.display_name || c.name || ((c.first_name || '') + ' ' + (c.last_name || ''));
+            const selected = String(id) === String(selectedId);
+            const style = selected ? ' style="background:#007bff;color:#fff;cursor:pointer;"' : ' style="cursor:pointer;"';
+            return `
+              <li class="weekly-candidate-option"${style}
+                  data-act="weekly-cand-select"
+                  data-candidate-id="${enc(id)}">
+                <strong>${enc(name || '')}</strong>
+                ${c.tms_ref ? ` &nbsp; <span class="mono">(${enc(c.tms_ref)})</span>` : ''}
+              </li>
+            `;
+          }).join('')}
+        </ul>
+      </div>
+    `;
+
+    host.innerHTML = listHtml;
+  }
+
+  // Helper: run search and update results
   async function searchAndRender(term) {
     const q = String(term || '').trim();
     window.__weeklyResolveCandidateState = state();
     window.__weeklyResolveCandidateState.term = q;
     if (!q) {
       window.__weeklyResolveCandidateState.results = [];
-    } else {
-      try {
-        const results = await searchCandidatesForResolve(q);
-        window.__weeklyResolveCandidateState.results = Array.isArray(results) ? results : [];
-      } catch (err) {
-        console.error('[WEEKLY][RESOLVE] candidate search failed', err);
-        alert(err?.message || 'Candidate search failed.');
-        window.__weeklyResolveCandidateState.results = [];
+      window.__weeklyResolveCandidateState.selectedCandidateId = null;
+      renderCandidateResults();
+      return;
+    }
+    try {
+      const results = await searchCandidatesForResolve(q);
+      window.__weeklyResolveCandidateState.results = Array.isArray(results) ? results : [];
+      // Auto-select if exactly one result
+      if (results && results.length === 1) {
+        window.__weeklyResolveCandidateState.selectedCandidateId = results[0].id;
       }
+    } catch (err) {
+      console.error('[WEEKLY][RESOLVE] candidate search failed', err);
+      alert(err?.message || 'Candidate search failed.');
+      window.__weeklyResolveCandidateState.results = [];
+      window.__weeklyResolveCandidateState.selectedCandidateId = null;
     }
-    const frame = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
-    if (frame && frame.kind === 'weekly-resolve-candidate') {
-      frame.setTab('main');
-    }
+    renderCandidateResults();
   }
 
-  // Initial search once modal is open
+  // Wire input + click handlers after first render
   setTimeout(() => {
     const root = document.getElementById('modalBody');
     if (!root) return;
+
     const input = root.querySelector('#weeklyCandSearch');
-    if (input) {
-      // Wire live search
-      if (!input.__weeklyCandInputWired) {
-        input.__weeklyCandInputWired = true;
-        input.addEventListener('input', () => {
-          const term = (input.value || '').trim();
-          searchAndRender(term);
-        });
-      }
-      // Kick off initial search with prefilled name
+    if (input && !input.__weeklyCandInputWired) {
+      input.__weeklyCandInputWired = true;
+      input.addEventListener('input', () => {
+        const term = (input.value || '').trim();
+        searchAndRender(term);
+      });
+      // Initial search with pre-filled name
       searchAndRender(input.value || '');
     }
 
@@ -25656,14 +25675,11 @@ async function openWeeklyCandidateResolveModal(importType, importId, rowIdx) {
         if (!candId) return;
         window.__weeklyResolveCandidateState = state();
         window.__weeklyResolveCandidateState.selectedCandidateId = candId;
-        const frame = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
-        if (frame && frame.kind === 'weekly-resolve-candidate') {
-          frame.setTab('main');
-        }
+        renderCandidateResults();
       });
     }
 
-    root.addEventListener('click', async (ev) => {
+    root.addEventListener('click', (ev) => {
       const btn = ev.target.closest('button[data-act]');
       if (!btn) return;
       const act = btn.getAttribute('data-act');
@@ -25730,6 +25746,29 @@ async function openWeeklyCandidateResolveModal(importType, importId, rowIdx) {
   }, 0);
 }
 
+async function weeklySearchClientsForResolve(importType, term) {
+  const q = String(term || '').trim();
+  if (!q) return [];
+
+  let results = [];
+  try {
+    results = await searchClientsForResolve(q);
+    if (!Array.isArray(results)) results = [];
+  } catch (e) {
+    console.error('[WEEKLY][RESOLVE] client search failed', e);
+    throw e;
+  }
+
+  const t = String(importType || '').toUpperCase();
+
+  // For NHSP, only show clients with is_nhsp === true
+  if (t === 'NHSP') {
+    results = results.filter(c => c && (c.is_nhsp === true || c.client_is_nhsp === true));
+  }
+
+  return results;
+}
+
 async function openWeeklyClientResolveModal(importType, importId, rowIdx) {
   const type = String(importType || '').toUpperCase();
   const enc  = (typeof escapeHtml === 'function')
@@ -25761,32 +25800,7 @@ async function openWeeklyClientResolveModal(importType, importId, rowIdx) {
   const renderTab = (key) => {
     if (key !== 'main') return '';
     const s = state();
-    const results = Array.isArray(s.results) ? s.results : [];
     const term    = s.term || '';
-    const selectedId = s.selectedClientId || '';
-
-    const resultsHtml = results.length
-      ? `
-        <div class="card" style="max-height:250px;overflow:auto;border:1px solid #ddd;margin-top:4px;">
-          <ul class="mini">
-            ${results.map(c => {
-              const id   = c.id;
-              const name = c.name || c.client_name || '';
-              const selected = String(id) === String(selectedId);
-              const style = selected ? ' style="background:#007bff;color:#fff;cursor:pointer;"' : ' style="cursor:pointer;"';
-              return `
-                <li class="weekly-client-option"${style}
-                    data-act="weekly-client-select"
-                    data-client-id="${enc(id)}">
-                  <strong>${enc(name || '')}</strong>
-                  ${c.cli_ref ? ` &nbsp; <span class="mono">(${enc(c.cli_ref)})</span>` : ''}
-                </li>
-              `;
-            }).join('')}
-          </ul>
-        </div>
-      `
-      : '<span class="mini">No clients matched. Try typing a different name.</span>';
 
     return html(`
       <div class="form" id="weeklyResolveClient">
@@ -25820,7 +25834,8 @@ async function openWeeklyClientResolveModal(importType, importId, rowIdx) {
           <div class="row">
             <label>Matches</label>
             <div class="controls" id="weeklyClientResults">
-              ${resultsHtml}
+              <!-- results injected dynamically -->
+              <span class="mini">Type a name to search for clients.</span>
             </div>
           </div>
           <div class="row" style="margin-top:8px;">
@@ -25844,7 +25859,6 @@ async function openWeeklyClientResolveModal(importType, importId, rowIdx) {
     `);
   };
 
-  // Open child modal
   showModal(
     'Assign client (weekly import)',
     [{ key: 'main', label: 'Assign client' }],
@@ -25859,40 +25873,81 @@ async function openWeeklyClientResolveModal(importType, importId, rowIdx) {
     }
   );
 
+  function renderClientResults() {
+    const s = state();
+    const results    = Array.isArray(s.results) ? s.results : [];
+    const selectedId = s.selectedClientId || '';
+
+    const root = document.getElementById('modalBody');
+    if (!root) return;
+    const host = root.querySelector('#weeklyClientResults');
+    if (!host) return;
+
+    if (!results.length) {
+      host.innerHTML = '<span class="mini">No clients matched. Try typing a different name.</span>';
+      return;
+    }
+
+    const listHtml = `
+      <div class="card" style="max-height:250px;overflow:auto;border:1px solid #ddd;margin-top:4px;">
+        <ul class="mini">
+          ${results.map(c => {
+            const id   = c.id;
+            const name = c.name || c.client_name || '';
+            const selected = String(id) === String(selectedId);
+            const style = selected ? ' style="background:#007bff;color:#fff;cursor:pointer;"' : ' style="cursor:pointer;"';
+            return `
+              <li class="weekly-client-option"${style}
+                  data-act="weekly-client-select"
+                  data-client-id="${enc(id)}">
+                <strong>${enc(name || '')}</strong>
+                ${c.cli_ref ? ` &nbsp; <span class="mono">(${enc(c.cli_ref)})</span>` : ''}
+              </li>
+            `;
+          }).join('')}
+        </ul>
+      </div>
+    `;
+
+    host.innerHTML = listHtml;
+  }
+
   async function searchAndRender(term) {
     const q = String(term || '').trim();
     window.__weeklyResolveClientState = state();
     window.__weeklyResolveClientState.term = q;
     if (!q) {
       window.__weeklyResolveClientState.results = [];
-    } else {
-      try {
-        const results = await weeklySearchClientsForResolve(type, q);
-        window.__weeklyResolveClientState.results = Array.isArray(results) ? results : [];
-      } catch (err) {
-        console.error('[WEEKLY][RESOLVE] client search failed', err);
-        alert(err?.message || 'Client search failed.');
-        window.__weeklyResolveClientState.results = [];
+      window.__weeklyResolveClientState.selectedClientId = null;
+      renderClientResults();
+      return;
+    }
+    try {
+      const results = await weeklySearchClientsForResolve(type, q);
+      window.__weeklyResolveClientState.results = Array.isArray(results) ? results : [];
+      if (results && results.length === 1) {
+        window.__weeklyResolveClientState.selectedClientId = results[0].id;
       }
+    } catch (err) {
+      console.error('[WEEKLY][RESOLVE] client search failed', err);
+      alert(err?.message || 'Client search failed.');
+      window.__weeklyResolveClientState.results = [];
+      window.__weeklyResolveClientState.selectedClientId = null;
     }
-    const frame = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
-    if (frame && frame.kind === 'weekly-resolve-client') {
-      frame.setTab('main');
-    }
+    renderClientResults();
   }
 
   setTimeout(() => {
     const root = document.getElementById('modalBody');
     if (!root) return;
+
     const input = root.querySelector('#weeklyClientSearch');
-    if (input) {
-      if (!input.__weeklyClientInputWired) {
-        input.__weeklyClientInputWired = true;
-        input.addEventListener('input', () => {
-          const term = (input.value || '').trim();
-          searchAndRender(term);
-        });
-      }
+    if (input && !input.__weeklyClientInputWired) {
+      input.__weeklyClientInputWired = true;
+      input.addEventListener('input', () => {
+        const term = (input.value || '').trim();
+        searchAndRender(term);
+      });
       searchAndRender(input.value || '');
     }
 
@@ -25906,10 +25961,7 @@ async function openWeeklyClientResolveModal(importType, importId, rowIdx) {
         if (!clientId) return;
         window.__weeklyResolveClientState = state();
         window.__weeklyResolveClientState.selectedClientId = clientId;
-        const frame = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
-        if (frame && frame.kind === 'weekly-resolve-client') {
-          frame.setTab('main');
-        }
+        renderClientResults();
       });
     }
 
@@ -25974,6 +26026,7 @@ async function openWeeklyClientResolveModal(importType, importId, rowIdx) {
     });
   }, 0);
 }
+
 
 
 
