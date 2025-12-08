@@ -1561,7 +1561,311 @@ async function apiPatchJson(path, body) {
   return res.json().catch(() => ({}));
 }
 
+// ─────────────────────────────────────────────────────────────
+// Weekly import helpers
+// ─────────────────────────────────────────────────────────────
 
+async function refreshWeeklyImportSummary(type, importId) {
+  const LOG = (typeof window.__LOG_IMPORTS === 'boolean') ? window.__LOG_IMPORTS : true;
+  const L   = (...a) => { if (LOG) console.log('[IMPORTS][WEEKLY][REFRESH]', ...a); };
+
+  try {
+    if (!type || !importId) {
+      throw new Error('Missing type or importId for refreshWeeklyImportSummary');
+    }
+
+    const t = String(type || '').toUpperCase();
+    let url;
+    if (t === 'NHSP') {
+      url = `/api/nhsp/${encodeURIComponent(importId)}/preview`;
+    } else if (t === 'HR_WEEKLY') {
+      url = `/api/healthroster/autoprocess/${encodeURIComponent(importId)}/preview`;
+    } else {
+      throw new Error(`Unsupported weekly import type: ${t}`);
+    }
+
+    if (typeof authFetch !== 'function' || typeof API !== 'function') {
+      throw new Error('authFetch/API helper missing in refreshWeeklyImportSummary');
+    }
+
+    L('fetching preview', { type: t, importId, url: API(url) });
+    const res  = await authFetch(API(url));
+    const text = await res.text();
+    if (!res.ok) {
+      throw new Error(text || `Weekly import preview refresh failed (${res.status})`);
+    }
+
+    const summaryState = text ? JSON.parse(text) : {};
+    if (typeof renderImportSummaryModal === 'function') {
+      renderImportSummaryModal(t, summaryState);
+    } else {
+      throw new Error('renderImportSummaryModal is not defined');
+    }
+  } catch (e) {
+    console.error('[IMPORTS][WEEKLY][REFRESH] failed', e);
+    const msg = e?.message || 'Failed to refresh weekly import summary.';
+    if (window.__toast) window.__toast(msg); else alert(msg);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
+// HR Rota Daily helpers
+// ─────────────────────────────────────────────────────────────
+
+async function refreshHrRotaSummary(importId) {
+  const LOG = (typeof window.__LOG_IMPORTS === 'boolean') ? window.__LOG_IMPORTS : true;
+  const L   = (...a) => { if (LOG) console.log('[IMPORTS][HR_ROTA][REFRESH]', ...a); };
+
+  try {
+    if (!importId) {
+      throw new Error('Missing importId for refreshHrRotaSummary');
+    }
+
+    if (typeof authFetch !== 'function' || typeof API !== 'function') {
+      throw new Error('authFetch/API helper missing in refreshHrRotaSummary');
+    }
+
+    const url = `/api/imports/hr-rota/${encodeURIComponent(importId)}/preview`;
+    L('fetching HR rota preview', { importId, url: API(url) });
+
+    const res  = await authFetch(API(url));
+    const text = await res.text();
+    if (!res.ok) {
+      throw new Error(text || `HR rota preview refresh failed (${res.status})`);
+    }
+
+    const summaryState = text ? JSON.parse(text) : {};
+    if (typeof renderImportSummaryModal === 'function') {
+      renderImportSummaryModal('HR_ROTA_DAILY', summaryState);
+    } else {
+      throw new Error('renderImportSummaryModal is not defined');
+    }
+  } catch (e) {
+    console.error('[IMPORTS][HR_ROTA][REFRESH] failed', e);
+    const msg = e?.message || 'Failed to refresh HR rota daily summary.';
+    if (window.__toast) window.__toast(msg); else alert(msg);
+  }
+}
+
+async function postHrRotaResolveMappings(importId, payload) {
+  const LOG = (typeof window.__LOG_IMPORTS === 'boolean') ? window.__LOG_IMPORTS : true;
+  const L   = (...a) => { if (LOG) console.log('[IMPORTS][HR_ROTA][RESOLVE]', ...a); };
+
+  if (!importId) {
+    throw new Error('Missing importId for postHrRotaResolveMappings');
+  }
+
+  const body = payload || {};
+  const candidate_mappings = Array.isArray(body.candidate_mappings) ? body.candidate_mappings : [];
+  const client_aliases     = Array.isArray(body.client_aliases)     ? body.client_aliases     : [];
+
+  if (!candidate_mappings.length && !client_aliases.length) {
+    L('no mappings to send; returning early', { importId });
+    return { ok: true, candidate_mappings_applied: 0, client_aliases_applied: 0 };
+  }
+
+  if (typeof authFetch !== 'function' || typeof API !== 'function') {
+    throw new Error('authFetch/API helper missing in postHrRotaResolveMappings');
+  }
+
+  const url = `/api/imports/hr-rota/${encodeURIComponent(importId)}/resolve-conflicts`;
+  L('posting HR rota resolve-conflicts', {
+    importId,
+    url: API(url),
+    candidate_mappings_count: candidate_mappings.length,
+    client_aliases_count: client_aliases.length
+  });
+
+  const res  = await authFetch(API(url), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ candidate_mappings, client_aliases })
+  });
+
+  const text = await res.text().catch(() => '');
+  if (!res.ok) {
+    const msg = text || `HR rota resolve-conflicts failed (${res.status})`;
+    throw new Error(msg);
+  }
+
+  let json = {};
+  try { json = text ? JSON.parse(text) : {}; } catch {}
+
+  L('resolve-conflicts OK', json);
+  return json;
+}
+
+function openHrRotaAssignCandidateModal(importId, rowIndex) {
+  const LOG = (typeof window.__LOG_IMPORTS === 'boolean') ? window.__LOG_IMPORTS : true;
+  const L   = (...a) => { if (LOG) console.log('[IMPORTS][HR_ROTA][ASSIGN_CAND]', ...a); };
+
+  try {
+    if (!importId && importId !== 0) {
+      throw new Error('Missing importId in openHrRotaAssignCandidateModal');
+    }
+
+    const st = window.__importSummaryState && window.__importSummaryState['HR_ROTA_DAILY'];
+    const rows = st && Array.isArray(st.rows) ? st.rows : [];
+    const idx  = Number(rowIndex);
+    const row  = (idx >= 0 && idx < rows.length) ? rows[idx] : null;
+
+    if (!row) {
+      throw new Error(`Row index ${rowIndex} is out of range for HR_ROTA_DAILY summary`);
+    }
+
+    const staffRaw = row.staff_name || row.staff_raw || '';
+    const unitRaw  = row.unit || row.hospital_or_trust || row.hospital_norm || '';
+
+    if (typeof openCandidatePicker !== 'function') {
+      throw new Error('openCandidatePicker is not defined');
+    }
+
+    L('opening Assign Candidate picker', { importId, rowIndex, staffRaw, unitRaw });
+
+    openCandidatePicker(async ({ id, label }) => {
+      try {
+        const staff_norm =
+          row.staff_norm ||
+          staffRaw ||
+          '';
+
+        const hospital_or_trust =
+          unitRaw
+            ? unitRaw
+            : (row.hospital_or_trust || row.unit || row.hospital_norm || null);
+
+        const payload = {
+          candidate_mappings: [
+            {
+              staff_norm,
+              hospital_or_trust,
+              candidate_id: id
+            }
+          ],
+          client_aliases: []
+        };
+
+        await postHrRotaResolveMappings(importId, payload);
+
+        if (window.__toast) {
+          window.__toast(`Candidate ${label} linked. Reclassifying HR rota…`);
+        }
+
+        await refreshHrRotaSummary(importId);
+      } catch (err) {
+        console.error('[IMPORTS][HR_ROTA][ASSIGN_CAND] failed', err);
+        const msg = err?.message || 'Failed to assign candidate for HR rota row.';
+        if (window.__toast) window.__toast(msg); else alert(msg);
+      }
+    });
+  } catch (e) {
+    console.error('[IMPORTS][HR_ROTA][ASSIGN_CAND] open failed', e);
+    const msg = e?.message || 'Failed to open Assign candidate dialog.';
+    if (window.__toast) window.__toast(msg); else alert(msg);
+  }
+}
+
+function openHrRotaAssignClientModal(importId, rowIndex) {
+  const LOG = (typeof window.__LOG_IMPORTS === 'boolean') ? window.__LOG_IMPORTS : true;
+  const L   = (...a) => { if (LOG) console.log('[IMPORTS][HR_ROTA][ASSIGN_CLIENT]', ...a); };
+
+  try {
+    if (!importId && importId !== 0) {
+      throw new Error('Missing importId in openHrRotaAssignClientModal');
+    }
+
+    const st = window.__importSummaryState && window.__importSummaryState['HR_ROTA_DAILY'];
+    const rows = st && Array.isArray(st.rows) ? st.rows : [];
+    const idx  = Number(rowIndex);
+    const row  = (idx >= 0 && idx < rows.length) ? rows[idx] : null;
+
+    if (!row) {
+      throw new Error(`Row index ${rowIndex} is out of range for HR_ROTA_DAILY summary`);
+    }
+
+    const unitRaw =
+      row.unit ||
+      row.hospital_or_trust ||
+      row.hospital_norm ||
+      '';
+
+    if (typeof openClientPicker !== 'function') {
+      throw new Error('openClientPicker is not defined');
+    }
+
+    L('opening Assign Client/Site picker', { importId, rowIndex, unitRaw });
+
+    openClientPicker(async ({ id, label }) => {
+      try {
+        const hospital_norm =
+          row.hospital_norm ||
+          unitRaw ||
+          '';
+
+        const payload = {
+          candidate_mappings: [],
+          client_aliases: [
+            {
+              hospital_norm,
+              client_id: id
+            }
+          ]
+        };
+
+        await postHrRotaResolveMappings(importId, payload);
+
+        if (window.__toast) {
+          window.__toast(`Client ${label} linked. Reclassifying HR rota…`);
+        }
+
+        await refreshHrRotaSummary(importId);
+      } catch (err) {
+        console.error('[IMPORTS][HR_ROTA][ASSIGN_CLIENT] failed', err);
+        const msg = err?.message || 'Failed to assign client/site for HR rota row.';
+        if (window.__toast) window.__toast(msg); else alert(msg);
+      }
+    });
+  } catch (e) {
+    console.error('[IMPORTS][HR_ROTA][ASSIGN_CLIENT] open failed', e);
+    const msg = e?.message || 'Failed to open Assign client/site dialog.';
+    if (window.__toast) window.__toast(msg); else alert(msg);
+  }
+}
+
+async function refreshOpenWeeklyImportSummariesAfterContractSave() {
+  const LOG = (typeof window.__LOG_IMPORTS === 'boolean') ? window.__LOG_IMPORTS : true;
+  const L   = (...a) => { if (LOG) console.log('[IMPORTS][WEEKLY][REFRESH_AFTER_CONTRACT]', ...a); };
+
+  try {
+    const state = window.__importSummaryState || null;
+    if (!state || typeof refreshWeeklyImportSummary !== 'function') {
+      L('no importSummaryState or refreshWeeklyImportSummary not defined; nothing to refresh');
+      return;
+    }
+
+    const types = ['NHSP', 'HR_WEEKLY'];
+
+    for (const t of types) {
+      const st = state[t];
+      if (!st || !st.import_id) continue;
+
+      const importId = st.import_id;
+      L('auto-refreshing weekly import after contract save', { type: t, importId });
+
+      try {
+        await refreshWeeklyImportSummary(t, importId);
+      } catch (e) {
+        console.warn('[IMPORTS][WEEKLY][REFRESH_AFTER_CONTRACT] single refresh failed', {
+          type: t,
+          importId,
+          err: e?.message || String(e)
+        });
+      }
+    }
+  } catch (e) {
+    console.warn('[IMPORTS][WEEKLY][REFRESH_AFTER_CONTRACT] wrapper failed', e);
+  }
+}
 
 async function authFetch(input, init={}){
   const APILOG = (typeof window !== 'undefined' && !!window.__LOG_API) || (typeof __LOG_API !== 'undefined' && !!__LOG_API);
@@ -4107,28 +4411,28 @@ async function getContract(contract_id) {
 
 async function upsertContract(payload, id /* optional */) {
   const LOGC = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : true;
- const patch = { ...payload };
+  const patch = { ...payload };
 
-// Ensure required window fields are present for PUT without re-clobber.
-if (id && patch.__userChangedDates !== true) {
-  const snap = (window.modalCtx && window.modalCtx.data) || {};
-  if (!patch.start_date && snap.start_date) patch.start_date = snap.start_date;
-  if (!patch.end_date   && snap.end_date)   patch.end_date   = snap.end_date;
+  // Ensure required window fields are present for PUT without re-clobber.
+  if (id && patch.__userChangedDates !== true) {
+    const snap = (window.modalCtx && window.modalCtx.data) || {};
+    if (!patch.start_date && snap.start_date) patch.start_date = snap.start_date;
+    if (!patch.end_date   && snap.end_date)   patch.end_date   = snap.end_date;
 
-  // NEW: if caller didn't include additional_rates_json on an edit,
-  // keep whatever is already stored on the contract instead of wiping it.
-  if (!Object.prototype.hasOwnProperty.call(patch, 'additional_rates_json') &&
-      Object.prototype.hasOwnProperty.call(snap, 'additional_rates_json')) {
-    patch.additional_rates_json = snap.additional_rates_json;
+    // NEW: if caller didn't include additional_rates_json on an edit,
+    // keep whatever is already stored on the contract instead of wiping it.
+    if (!Object.prototype.hasOwnProperty.call(patch, 'additional_rates_json') &&
+        Object.prototype.hasOwnProperty.call(snap, 'additional_rates_json')) {
+      patch.additional_rates_json = snap.additional_rates_json;
+    }
   }
-}
 
-if ('__userChangedDates' in patch) delete patch.__userChangedDates;
+  if ('__userChangedDates' in patch) delete patch.__userChangedDates;
 
-if ('bucket_labels_json' in patch) {
-  const norm = normaliseBucketLabelsInput(patch.bucket_labels_json);
-  patch.bucket_labels_json = (norm === false) ? null : norm;
-}
+  if ('bucket_labels_json' in patch) {
+    const norm = normaliseBucketLabelsInput(patch.bucket_labels_json);
+    patch.bucket_labels_json = (norm === false) ? null : norm;
+  }
 
   const BUCKETS = [
     'paye_day','paye_night','paye_sat','paye_sun','paye_bh',
@@ -4222,6 +4526,19 @@ if ('bucket_labels_json' in patch) {
     }
   } catch (e) {
     if (LOGC) console.warn('[CONTRACTS][UPSERT] list cache merge failed', e);
+  }
+
+  // ────────────────────────────────────────────────────────────
+  // Auto-refresh any open weekly import resolve panels (NHSP / HR_WEEKLY)
+  // so that newly created/extended contracts are immediately reflected
+  // in the weekly import summary without re-uploading files.
+  // ────────────────────────────────────────────────────────────
+  try {
+    if (typeof refreshOpenWeeklyImportSummariesAfterContractSave === 'function') {
+      await refreshOpenWeeklyImportSummariesAfterContractSave();
+    }
+  } catch (e) {
+    if (LOGC) console.warn('[CONTRACTS][UPSERT] weekly import auto-refresh failed', e);
   }
 
   return data;
@@ -20792,18 +21109,29 @@ function setFormReadOnly(root, ro) {
     L('showModal: reset #modal initial geometry');
   }
 
-     // Allow staging children (Clone & Extend) to be fully editable regardless of parent mode
+  // Allow staging children (Clone & Extend) to be fully editable regardless of parent mode
   if (opts && opts.kind === 'contract-clone-extend') {
     opts.noParentGate = true;
     if (!opts.forceEdit) opts.forceEdit = true;
     L('showModal(kind=contract-clone-extend): enable noParentGate + forceEdit', { noParentGate: opts.noParentGate, forceEdit: opts.forceEdit });
   }
-// Treat the Rate Presets **picker** as a normal, interactive child:
-// - do NOT set noParentGate or _loadOnly here
-// - dirty should propagate to the parent while the picker is open
-if (opts && opts.kind === 'rate-presets-picker') {
-  L('showModal(kind=rate-presets-picker): interactive child (noParentGate=false)');
-}
+
+  // Import summary modals: always behave as independent utility panels
+  // - they must NOT gate the parent
+  // - they stack under contract edit modals but stay open across navigation
+  if (opts && typeof opts.kind === 'string' && opts.kind.startsWith('import-summary-')) {
+    opts.noParentGate   = true;
+    opts.stayOpenOnSave = false;
+    L('showModal(kind=import-summary-*) → utility modal (noParentGate=true)', { kind: opts.kind });
+  }
+
+  // Treat the Rate Presets **picker** as a normal, interactive child:
+  // - do NOT set noParentGate or _loadOnly here
+  // - dirty should propagate to the parent while the picker is open
+  if (opts && opts.kind === 'rate-presets-picker') {
+    L('showModal(kind=rate-presets-picker): interactive child (noParentGate=false)');
+  }
+
 
 
 
@@ -20829,14 +21157,16 @@ const frame = {
   if (!hasId && opts.kind === 'rate-preset') return 'edit';
 
   // NEW: utility modals – always view-only, no Save/Edit
-  if (
+  const isUtilityKind =
     opts.kind === 'timesheets-resolve' ||
     opts.kind === 'resolve-candidate'  ||
     opts.kind === 'resolve-client'     ||
-    opts.kind === 'import-summary'
-  ) {
+    (typeof opts.kind === 'string' && opts.kind.startsWith('import-summary-'));
+
+  if (isUtilityKind) {
     return 'view';
   }
+
 
   // Special case: planned timesheet week (no timesheet_id yet)
   const ent = window.modalCtx?.entity || null;
@@ -22476,7 +22806,7 @@ const isUtilityKind =
   frameObj.kind === 'timesheets-resolve' ||
   frameObj.kind === 'resolve-candidate'  ||
   frameObj.kind === 'resolve-client'     ||
-  frameObj.kind === 'import-summary';
+  (typeof frameObj.kind === 'string' && frameObj.kind.startsWith('import-summary-'));
 
 if (!frameObj.hasId && mode === 'view' && !isPlannedTimesheetStub && !isUtilityKind) {
   mode = frameObj.forceEdit ? 'edit' : 'create';
@@ -22593,21 +22923,34 @@ function renderTop() {
   const header   = byId('modalDrag');
   const modalNode= byId('modal');
 
-  const LOGC = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : true;
- if (modalNode) {
-  const parentIsContracts = !!(parent && ((parent.entity === 'contracts') || (parent.kind === 'contracts')));
-  const isContracts = ((top.entity === 'contracts') || (top.kind === 'contracts') || parentIsContracts);
-  modalNode.classList.toggle('contract-modal', !!isContracts);
-  if (LOGC && isContracts) console.log('[CONTRACTS][MODAL] contract-modal class applied to #modal (inherited:', parentIsContracts, ')');
+   const LOGC = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : true;
+  if (modalNode) {
+    const parentIsContracts =
+      !!(parent && ((parent.entity === 'contracts') || (parent.kind === 'contracts')));
+    const isContracts =
+      (top.entity === 'contracts') ||
+      (top.kind === 'contracts')  ||
+      parentIsContracts;
 
-  // Job Titles: apply narrower modal sizing
-  const isJobTitles = (top.kind === 'job-titles');
-  modalNode.classList.toggle('jobtitles-modal', !!isJobTitles);
+    // Import summary utility panels must not be styled as "contract" modals,
+    // even if opened from Contracts.
+    const isImportSummary =
+      typeof top.kind === 'string' && top.kind.startsWith('import-summary-');
 
-  // Evidence replace: temporarily use a larger modal footprint
-  const isEvidenceReplace = (top.kind === 'timesheet-evidence-replace');
-  modalNode.classList.toggle('evidence-modal', !!isEvidenceReplace);
-}
+    modalNode.classList.toggle('contract-modal', !!(isContracts && !isImportSummary));
+    if (LOGC && isContracts && !isImportSummary) {
+      console.log('[CONTRACTS][MODAL] contract-modal class applied to #modal (inherited:', parentIsContracts, ')');
+    }
+
+    // Job Titles: apply narrower modal sizing
+    const isJobTitles = (top.kind === 'job-titles');
+    modalNode.classList.toggle('jobtitles-modal', !!isJobTitles);
+
+    // Evidence replace: temporarily use a larger modal footprint
+    const isEvidenceReplace = (top.kind === 'timesheet-evidence-replace');
+    modalNode.classList.toggle('evidence-modal', !!isEvidenceReplace);
+  }
+
 
 
   if (modalNode) {
@@ -22682,11 +23025,12 @@ function renderTop() {
   btnSave.textContent = defaultPrimary; btnSave.setAttribute('aria-label', defaultPrimary);
   L('showModal defaultPrimary', { kind: top.kind, defaultPrimary });
 const setCloseLabel = ()=> {
-  const isUtilityKind =
-    top.kind === 'timesheets-resolve' ||
-    top.kind === 'resolve-candidate'  ||
-    top.kind === 'resolve-client'     ||
-    top.kind === 'import-summary';
+const isUtilityKind =
+  top.kind === 'timesheets-resolve' ||
+  top.kind === 'resolve-candidate'  ||
+  top.kind === 'resolve-client'     ||
+  (typeof top.kind === 'string' && top.kind.startsWith('import-summary-'));
+
 
   const label =
     (top.kind === 'advanced-search')
@@ -22760,8 +23104,9 @@ const setCloseLabel = ()=> {
   top.kind === 'timesheets-resolve' ||
   top.kind === 'resolve-candidate'  ||
   top.kind === 'resolve-client'     ||
-  top.kind === 'import-summary'
+  (typeof top.kind === 'string' && top.kind.startsWith('import-summary-'))
 ) {
+
   // No Save/Edit on these; everything happens via inline buttons in the modal body
   btnSave.style.display = 'none';
   btnSave.disabled      = true;
@@ -26169,6 +26514,7 @@ function renderImportSummaryModal(importType, summaryState) {
           else if (st === 'UNMATCHED') stCls = 'pill-warn';
           else stCls = 'pill-bad';
 
+          // New reason-code driven flags for daily resolve
           const canAssignCand   = (reasonCode === 'candidate_unresolved');
           const canAssignClient = (reasonCode === 'client_unresolved');
 
@@ -26299,10 +26645,11 @@ function renderImportSummaryModal(importType, summaryState) {
                       class="btn btn-primary"
                       style="margin-left:8px;"
                       data-act="hr-rota-apply">
-                Apply validations
+                Finalise validations
               </button>
               <span class="mini" style="margin-left:8px;">
-                "Apply validations" will update validation status and reference numbers;
+                "Reclassify" will re-run checks / refresh this summary.
+                "Finalise validations" will update validation status and reference numbers;
                 rows with "Send email" ticked will also queue query emails to Temp Staffing.
               </span>
             </div>
@@ -26423,9 +26770,15 @@ function renderImportSummaryModal(importType, summaryState) {
             <label></label>
             <div class="controls">
               <button type="button"
+                      class="btn"
+                      data-act="weekly-import-refresh">
+                Refresh
+              </button>
+              <button type="button"
                       class="btn btn-primary"
+                      style="margin-left:8px;"
                       data-act="weekly-import-apply">
-                Apply import
+                Finalise import
               </button>
               <span class="mini" style="margin-left:8px;">
                 This will apply the classification and create/update weeks and timesheets.
@@ -26457,9 +26810,18 @@ function renderImportSummaryModal(importType, summaryState) {
         const row  = (idx >= 0 && idx < rows.length) ? rows[idx] : null;
         if (!row) return;
 
+        const reasonCode = String(row.reason_code || row.failure_reason || row.reason || '').toLowerCase();
+        const hasTimesheet = !!row.timesheet_id;
+
         if (act === 'resolve-candidate') {
-          // Use the main timesheet resolve modal only if we have a timesheet_id
-          if (row.timesheet_id) {
+          // If the problem is "candidate_unresolved" (or no timesheet), use HR-daily resolve helper
+          if (reasonCode === 'candidate_unresolved' || !hasTimesheet) {
+            openHrRotaAssignCandidateModal(importId, idx);
+            return;
+          }
+
+          // Otherwise, use the main timesheet resolve modal if we have a timesheet_id
+          if (hasTimesheet) {
             openResolveCandidateModal({
               timesheet_id: row.timesheet_id,
               occupant_key_norm: row.staff_name || row.staff_raw || '',
@@ -26471,7 +26833,14 @@ function renderImportSummaryModal(importType, summaryState) {
         }
 
         if (act === 'resolve-client') {
-          if (row.timesheet_id) {
+          // If the problem is "client_unresolved" (or no timesheet), use HR-daily resolve helper
+          if (reasonCode === 'client_unresolved' || !hasTimesheet) {
+            openHrRotaAssignClientModal(importId, idx);
+            return;
+          }
+
+          // Otherwise, use the main timesheet resolve modal if we have a timesheet_id
+          if (hasTimesheet) {
             openResolveClientModal({
               timesheet_id: row.timesheet_id,
               hospital_norm: row.unit || row.hospital_or_trust || row.hospital_norm || ''
@@ -26503,7 +26872,7 @@ function renderImportSummaryModal(importType, summaryState) {
         }
       });
 
-      // Reclassify button
+      // Reclassify button → use helper
       const btnReclass = root.querySelector('button[data-act="hr-rota-reclassify"]');
       if (btnReclass && !btnReclass.__hrRotaReclassWired) {
         btnReclass.__hrRotaReclassWired = true;
@@ -26513,13 +26882,7 @@ function renderImportSummaryModal(importType, summaryState) {
               alert('No import_id in summary; cannot reclassify.');
               return;
             }
-            const res = await authFetch(API(`/api/imports/hr-rota/${encodeURIComponent(importId)}/preview`));
-            const text = await res.text();
-            if (!res.ok) {
-              throw new Error(text || `HR rota reclassify failed (${res.status})`);
-            }
-            const refreshed = text ? JSON.parse(text) : {};
-            renderImportSummaryModal('HR_ROTA_DAILY', refreshed);
+            await refreshHrRotaSummary(importId);
           } catch (err) {
             console.error('[IMPORTS][HR_ROTA] reclassify failed', err);
             alert(err?.message || 'Reclassify failed.');
@@ -26527,7 +26890,7 @@ function renderImportSummaryModal(importType, summaryState) {
         });
       }
 
-      // Apply validations button
+      // Apply validations / Finalise button
       const btnApply = root.querySelector('button[data-act="hr-rota-apply"]');
       if (btnApply && !btnApply.__hrRotaApplyWired) {
         btnApply.__hrRotaApplyWired = true;
@@ -26575,27 +26938,6 @@ function renderImportSummaryModal(importType, summaryState) {
         return m;
       };
 
-      // Helper: refresh weekly preview + modal after a mapping change
-      const refreshWeeklySummary = async () => {
-        try {
-          let url;
-          if (type === 'NHSP') {
-            url = `/api/nhsp/${encodeURIComponent(importId)}/preview`;
-          } else {
-            // HR_WEEKLY
-            url = `/api/healthroster/autoprocess/${encodeURIComponent(importId)}/preview`;
-          }
-          const res  = await authFetch(API(url));
-          const text = await res.text();
-          if (!res.ok) throw new Error(text || `Weekly import preview refresh failed (${res.status})`);
-          const refreshed = text ? JSON.parse(text) : {};
-          renderImportSummaryModal(type, refreshed);
-        } catch (e) {
-          console.error('[IMPORTS][WEEKLY] refreshWeeklySummary failed', e);
-          alert(e?.message || 'Failed to refresh weekly import summary.');
-        }
-      };
-
       // Click handler for weekly "Assign candidate/client…" buttons
       root.addEventListener('click', (ev) => {
         const btn = ev.target.closest('button[data-act]');
@@ -26614,14 +26956,19 @@ function renderImportSummaryModal(importType, summaryState) {
         if (act === 'weekly-resolve-candidate') {
           // Use global candidate picker with local filtering
           openCandidatePicker(async ({ id, label }) => {
-            mappings.candidate_mappings.push({
-              staff_norm: row.staff_norm || staffRaw || '',
-              hospital_or_trust: hospRaw || null,
-              candidate_id: id
-            });
+            try {
+              mappings.candidate_mappings.push({
+                staff_norm: row.staff_norm || staffRaw || '',
+                hospital_or_trust: hospRaw || null,
+                candidate_id: id
+              });
 
-            window.__toast && window.__toast(`Candidate ${label} linked. Reclassifying import…`);
-            await refreshWeeklySummary();
+              window.__toast && window.__toast(`Candidate ${label} linked. Reclassifying import…`);
+              await refreshWeeklyImportSummary(type, importId);
+            } catch (err) {
+              console.error('[IMPORTS][WEEKLY] resolve-candidate failed', err);
+              alert(err?.message || 'Failed to resolve candidate for weekly import row.');
+            }
           });
           return;
         }
@@ -26631,20 +26978,39 @@ function renderImportSummaryModal(importType, summaryState) {
           const nhspOnly = (type === 'NHSP');
 
           openClientPicker(async ({ id, label }) => {
-            mappings.client_aliases.push({
-              hospital_norm: row.hospital_norm || hospRaw || '',
-              client_id: id
-            });
+            try {
+              mappings.client_aliases.push({
+                hospital_norm: row.hospital_norm || hospRaw || '',
+                client_id: id
+              });
 
-            window.__toast && window.__toast(`Client ${label} linked. Reclassifying import…`);
-            await refreshWeeklySummary();
+              window.__toast && window.__toast(`Client ${label} linked. Reclassifying import…`);
+              await refreshWeeklyImportSummary(type, importId);
+            } catch (err) {
+              console.error('[IMPORTS][WEEKLY] resolve-client failed', err);
+              alert(err?.message || 'Failed to resolve client for weekly import row.');
+            }
           }, { nhspOnly });
 
           return;
         }
       });
 
-      // Apply import button
+      // Refresh button → use helper
+      const btnRefresh = root.querySelector('button[data-act="weekly-import-refresh"]');
+      if (btnRefresh && !btnRefresh.__weeklyRefreshWired) {
+        btnRefresh.__weeklyRefreshWired = true;
+        btnRefresh.addEventListener('click', async () => {
+          try {
+            await refreshWeeklyImportSummary(type, importId);
+          } catch (err) {
+            console.error('[IMPORTS][WEEKLY] manual refresh failed', err);
+            alert(err?.message || 'Weekly import refresh failed.');
+          }
+        });
+      }
+
+      // Apply / Finalise import button
       const btnApply = root.querySelector('button[data-act="weekly-import-apply"]');
       if (btnApply && !btnApply.__weeklyApplyWired) {
         btnApply.__weeklyApplyWired = true;
@@ -26663,6 +27029,7 @@ function renderImportSummaryModal(importType, summaryState) {
     }
   }, 0);
 }
+
 
 
 function renderClientHospitalsTable() {
