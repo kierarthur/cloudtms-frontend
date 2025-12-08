@@ -26248,7 +26248,7 @@ function renderImportSummaryModal(importType, summaryState) {
     const summary = ss.summary || {};
     const total   = summary.total_rows || rows.length || 0;
 
-    const rowsHtml = rows.length
+
     const rowsHtml = rows.length
   ? rows.map((r, idx) => {
       const staff  = r.staff_name || r.staff_raw || '';
