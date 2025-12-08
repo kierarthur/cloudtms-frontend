@@ -10868,6 +10868,27 @@ async function listClientHospitals(clientId){
   return list;
 }
 
+function formatYmdToNiceDate(ymd) {
+  const s = String(ymd || '').trim();
+  if (!s) return '';
+  const parts = s.split('-');
+  if (parts.length !== 3) return s;
+
+  const [Y, M, D] = parts.map(Number);
+  if (!Y || !M || !D) return s;
+
+  // Use UTC so it doesn't shift with timezone
+  const d = new Date(Date.UTC(Y, M - 1, D));
+  const days   = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+  const dayName = days[d.getUTCDay()];
+  const dayNum  = d.getUTCDate();       // 1..31
+  const month   = months[d.getUTCMonth()];
+  const year    = d.getUTCFullYear();
+
+  return `${dayName} ${dayNum} ${month} ${year}`;
+}
 
 
 function formatRolesSummary(roles){
@@ -24921,577 +24942,27 @@ async function handleHrRotaFileDrop(file) {
   }
 }
 
-function renderImportSummaryModal(importType, summaryState) {
-  const enc = (typeof escapeHtml === 'function')
-    ? escapeHtml
-    : (s) => String(s == null ? '' : s);
+async function searchClientsForResolve(term) {
+  const q = String(term || '').trim();
+  if (!q) return [];
 
-  const type = String(importType || '').toUpperCase();
-  const ss   = summaryState || {};
-  const importId = ss.import_id || ss.id || (ss.summary && ss.summary.import_id) || null;
-  const rows = Array.isArray(ss.rows) ? ss.rows : [];
+  const url = `/api/clients?search=${encodeURIComponent(q)}`;
 
-  window.__importSummaryState = window.__importSummaryState || {};
-  window.__importSummaryState[type] = {
-    import_id: importId,
-    summary: ss,
-    rows
-  };
+  const res  = await authFetch(API(url));
+  const text = await res.text();
 
-  // Global store for weekly mappings (per type + importId)
-  window.__weeklyImportMappings = window.__weeklyImportMappings || {};
-
-  const renderTab = (key) => {
-    if (key !== 'main') return '';
-
-    if (type === 'HR_ROTA_DAILY') {
-      return renderHrRotaDailySummary(importId, rows, ss);
-    }
-
-    if (type === 'NHSP' || type === 'HR_WEEKLY') {
-      return renderWeeklyImportSummary(type, importId, rows, ss);
-    }
-
-    return html(`
-      <div class="form">
-        <div class="card">
-          <div class="row">
-            <label>Summary</label>
-            <div class="controls">
-              <span class="mini">Unsupported import type: ${enc(importType)}</span>
-            </div>
-          </div>
-        </div>
-      </div>
-    `);
-  };
-
-  // Child modal for import summary
-  showModal(
-    (type === 'HR_ROTA_DAILY'
-      ? 'HR Rota Daily Validation'
-      : (type === 'NHSP'
-          ? 'NHSP Weekly Import Summary'
-          : 'HealthRoster Weekly Import Summary')),
-    [{ key: 'main', label: 'Summary' }],
-    renderTab,
-    null,
-    false,
-    null,
-    {
-      kind: `import-summary-${type.toLowerCase()}`,
-      noParentGate: true,
-      stayOpenOnSave: false
-    }
-  );
-
-  // ────────────────────── Helpers ──────────────────────
-
-  function renderHrRotaDailySummary(importId, rows, ss) {
-    const summary = ss.summary || {};
-    const total   = summary.total_rows || rows.length || 0;
-
-    // Derive counts by status if summary not given
-    const counts = {
-      OK: 0,
-      FAILED: 0,
-      UNMATCHED: 0
-    };
-    rows.forEach(r => {
-      const st = String(r.status || '').toUpperCase();
-      if (st === 'OK' || st === 'VALIDATION_OK') counts.OK++;
-      else if (st === 'UNMATCHED') counts.UNMATCHED++;
-      else counts.FAILED++;
-    });
-
-    // Pre-populated email selections map
-    window.__hrRotaEmailSelections = window.__hrRotaEmailSelections || {};
-    const emailSel = window.__hrRotaEmailSelections[importId] || new Set();
-    if (!(emailSel instanceof Set)) {
-      window.__hrRotaEmailSelections[importId] = new Set();
-    }
-
-    const rowsHtml = rows.length
-      ? rows.map((r, idx) => {
-          const staff = r.staff_name || r.staff_raw || '';
-          const unit  = r.unit || r.hospital_or_trust || r.hospital_norm || '';
-          const date  = r.date_local || r.date || r.shift_date || '';
-          const tsId  = r.timesheet_id || '';
-          const stRaw = r.status || '';
-          const st    = String(stRaw || '').toUpperCase();
-          const reasonCode = String(r.reason_code || r.failure_reason || r.reason || '').toLowerCase();
-
-          let stCls = 'pill-info';
-          if (st === 'OK' || st === 'VALIDATION_OK') stCls = 'pill-ok';
-          else if (st === 'UNMATCHED') stCls = 'pill-warn';
-          else stCls = 'pill-bad';
-
-          const canAssignCand   = (reasonCode === 'candidate_unresolved');
-          const canAssignClient = (reasonCode === 'client_unresolved');
-
-          const isTimeMismatch =
-            reasonCode === 'actual_hours_mismatch' ||
-            reasonCode === 'start_end_mismatch' ||
-            reasonCode === 'break_minutes_mismatch';
-
-          const canEmail = !!(isTimeMismatch && tsId);
-          const rowId    = r.hr_row_id || r.id || `${idx}`;
-
-          const checked = emailSel instanceof Set && emailSel.has(rowId);
-
-          // Detail: we just stringify the detail object if present
-          let detailText = '';
-          if (r.detail && typeof r.detail === 'object') {
-            try { detailText = JSON.stringify(r.detail); } catch { detailText = ''; }
-          }
-
-          return `
-            <tr>
-              <td><span class="mini">${enc(staff || '—')}</span></td>
-              <td><span class="mini">${enc(unit || '—')}</span></td>
-              <td><span class="mini">${enc(date || '—')}</span></td>
-              <td><span class="mini">${tsId ? enc(tsId) : '—'}</span></td>
-              <td><span class="pill ${stCls}">${enc(st || 'UNKNOWN')}</span></td>
-              <td><span class="mini">${reasonCode || '—'}</span></td>
-              <td>
-                ${
-                  canAssignCand
-                    ? `<button type="button"
-                               class="btn mini"
-                               data-act="resolve-candidate"
-                               data-row-idx="${idx}">
-                         Assign candidate…
-                       </button>`
-                    : ''
-                }
-                ${
-                  canAssignClient
-                    ? `<button type="button"
-                               class="btn mini"
-                               style="margin-left:4px;"
-                               data-act="resolve-client"
-                               data-row-idx="${idx}">
-                         Assign client…
-                       </button>`
-                    : ''
-                }
-              </td>
-              <td>
-                ${detailText ? `<span class="mini">${enc(detailText)}</span>` : ''}
-              </td>
-              <td>
-                ${
-                  canEmail
-                    ? `<label class="mini">
-                         <input type="checkbox"
-                                data-act="hr-rota-email"
-                                data-row-id="${enc(rowId)}"
-                                data-row-idx="${idx}"
-                                ${checked ? 'checked' : ''} />
-                         Send email
-                       </label>`
-                    : '<span class="mini">—</span>'
-                }
-              </td>
-            </tr>
-          `;
-        }).join('')
-      : `
-        <tr>
-          <td colspan="9">
-            <span class="mini">No rows to show.</span>
-          </td>
-        </tr>
-      `;
-
-    return html(`
-      <div class="form" id="hrRotaSummary">
-        <div class="card">
-          <div class="row">
-            <label>Overview</label>
-            <div class="controls">
-              <div class="mini">
-                Import ID: <span class="mono">${enc(importId || '—')}</span><br/>
-                Total rows: ${total}<br/>
-                OK: ${counts.OK} &nbsp; Failed: ${counts.FAILED} &nbsp; Unmatched: ${counts.UNMATCHED}
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div class="card" style="margin-top:10px;">
-          <div class="row">
-            <label>Rows</label>
-            <div class="controls">
-              <table class="grid">
-                <thead>
-                  <tr>
-                    <th>Staff</th>
-                    <th>Unit / Site</th>
-                    <th>Date</th>
-                    <th>Timesheet ID</th>
-                    <th>Status</th>
-                    <th>Reason</th>
-                    <th>Resolve</th>
-                    <th>Details</th>
-                    <th>Temp Staffing email</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  ${rowsHtml}
-                </tbody>
-              </table>
-            </div>
-          </div>
-
-          <div class="row" style="margin-top:8px;">
-            <label></label>
-            <div class="controls">
-              <button type="button"
-                      class="btn"
-                      data-act="hr-rota-reclassify">
-                Reclassify
-              </button>
-              <button type="button"
-                      class="btn btn-primary"
-                      style="margin-left:8px;"
-                      data-act="hr-rota-apply">
-                Apply validations
-              </button>
-              <span class="mini" style="margin-left:8px;">
-                "Apply validations" will update validation status and reference numbers;
-                rows with "Send email" ticked will also queue query emails to Temp Staffing.
-              </span>
-            </div>
-          </div>
-        </div>
-      </div>
-    `);
+  if (!res.ok) {
+    throw new Error(text || `Client search failed (${res.status})`);
   }
 
-  function renderWeeklyImportSummary(type, importId, rows, ss) {
-    const summary = ss.summary || {};
-    const total   = summary.total_rows || rows.length || 0;
-
-    const rowsHtml = rows.length
-      ? rows.map((r, idx) => {
-          const staff  = r.staff_name || r.staff_raw || '';
-          const unit   = r.unit || r.hospital_or_trust || r.hospital_norm || '';
-          const date   = r.date_local || r.date || r.week_ending_date || '';
-          const action = String(r.resolution_status || r.action || '').toUpperCase();
-          const candId = r.candidate_id || null;
-          const cliId  = r.client_id || null;
-
-          let cls = 'pill-info';
-          if (action === 'OK' || action === 'APPLY') cls = 'pill-ok';
-          else if (action === 'NO_CANDIDATE' || action === 'NO_CLIENT') cls = 'pill-bad';
-
-          const canAssignCand   = (action === 'NO_CANDIDATE');
-          const canAssignClient = (action === 'NO_CLIENT');
-
-          return `
-            <tr>
-              <td><span class="mini">${enc(staff || '—')}</span></td>
-              <td><span class="mini">${enc(unit || '—')}</span></td>
-              <td><span class="mini">${enc(date || '—')}</span></td>
-              <td><span class="pill ${cls}">${enc(action || 'UNKNOWN')}</span></td>
-              <td>
-                ${
-                  canAssignCand
-                    ? `<button type="button"
-                               class="btn mini"
-                               data-act="weekly-resolve-candidate"
-                               data-row-idx="${idx}"
-                               data-staff="${enc(staff)}"
-                               data-unit="${enc(unit)}">
-                         Assign candidate…
-                       </button>`
-                    : ''
-                }
-                ${
-                  canAssignClient
-                    ? `<button type="button"
-                               class="btn mini"
-                               style="margin-left:4px;"
-                               data-act="weekly-resolve-client"
-                               data-row-idx="${idx}"
-                               data-unit="${enc(unit)}">
-                         Assign client…
-                       </button>`
-                    : ''
-                }
-              </td>
-            </tr>
-          `;
-        }).join('')
-      : `
-        <tr>
-          <td colspan="5">
-            <span class="mini">No rows to show.</span>
-          </td>
-        </tr>
-      `;
-
-    return html(`
-      <div class="form" id="weeklyImportSummary">
-        <div class="card">
-          <div class="row">
-            <label>Overview</label>
-            <div class="controls">
-              <div class="mini">
-                Import ID: <span class="mono">${enc(importId || '—')}</span><br/>
-                Total rows: ${total}
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div class="card" style="margin-top:10px;">
-          <div class="row">
-            <label>Rows</label>
-            <div class="controls">
-              <table class="grid">
-                <thead>
-                  <tr>
-                    <th>Staff</th>
-                    <th>Unit / Site</th>
-                    <th>Date / Week ending</th>
-                    <th>Resolution</th>
-                    <th>Resolve</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  ${rowsHtml}
-                </tbody>
-              </table>
-            </div>
-          </div>
-
-          <div class="row" style="margin-top:8px;">
-            <label></label>
-            <div class="controls">
-              <button type="button"
-                      class="btn btn-primary"
-                      data-act="weekly-import-apply">
-                Apply import
-              </button>
-              <span class="mini" style="margin-left:8px;">
-                This will apply the classification and create/update weeks and timesheets.
-              </span>
-            </div>
-          </div>
-        </div>
-      </div>
-    `);
+  let json;
+  try {
+    json = text ? JSON.parse(text) : [];
+  } catch {
+    json = [];
   }
 
-  // Wiring for HR_ROTA_DAILY summary (buttons & checkboxes)
-  setTimeout(() => {
-    try {
-      const root = document.getElementById('hrRotaSummary');
-      if (!root || type !== 'HR_ROTA_DAILY') return;
-
-      // Resolve candidate / client buttons
-      root.addEventListener('click', (ev) => {
-        const btn = ev.target.closest('button[data-act]');
-        if (!btn) return;
-        const act = btn.getAttribute('data-act');
-
-        const st = window.__importSummaryState && window.__importSummaryState['HR_ROTA_DAILY'];
-        if (!st) return;
-
-        const rows = Array.isArray(st.rows) ? st.rows : [];
-        const idx  = Number(btn.getAttribute('data-row-idx') || '-1');
-        const row  = (idx >= 0 && idx < rows.length) ? rows[idx] : null;
-        if (!row) return;
-
-        if (act === 'resolve-candidate') {
-          // Use the main timesheet resolve modal only if we have a timesheet_id
-          if (row.timesheet_id) {
-            openResolveCandidateModal({
-              timesheet_id: row.timesheet_id,
-              occupant_key_norm: row.staff_name || row.staff_raw || '',
-              hospital_norm: row.unit || row.hospital_or_trust || row.hospital_norm || ''
-            });
-          } else {
-            alert('No timesheet matched for this row; resolve candidate via imports/aliases instead.');
-          }
-        }
-
-        if (act === 'resolve-client') {
-          if (row.timesheet_id) {
-            openResolveClientModal({
-              timesheet_id: row.timesheet_id,
-              hospital_norm: row.unit || row.hospital_or_trust || row.hospital_norm || ''
-            });
-          } else {
-            alert('No timesheet matched for this row; resolve client/site via imports/aliases instead.');
-          }
-        }
-      });
-
-      // Email checkboxes
-      root.addEventListener('change', (ev) => {
-        const cb = ev.target.closest('input[data-act="hr-rota-email"]');
-        if (!cb) return;
-
-        const rowId = cb.getAttribute('data-row-id') || '';
-        if (!rowId) return;
-
-        window.__hrRotaEmailSelections = window.__hrRotaEmailSelections || {};
-        const sel = window.__hrRotaEmailSelections[importId] || new Set();
-        if (!(sel instanceof Set)) {
-          window.__hrRotaEmailSelections[importId] = new Set();
-        }
-
-        if (cb.checked) {
-          window.__hrRotaEmailSelections[importId].add(rowId);
-        } else {
-          window.__hrRotaEmailSelections[importId].delete(rowId);
-        }
-      });
-
-      // Reclassify button
-      const btnReclass = root.querySelector('button[data-act="hr-rota-reclassify"]');
-      if (btnReclass && !btnReclass.__hrRotaReclassWired) {
-        btnReclass.__hrRotaReclassWired = true;
-        btnReclass.addEventListener('click', async () => {
-          try {
-            if (!importId) {
-              alert('No import_id in summary; cannot reclassify.');
-              return;
-            }
-            const res = await authFetch(API(`/api/imports/hr-rota/${encodeURIComponent(importId)}/preview`));
-            const text = await res.text();
-            if (!res.ok) {
-              throw new Error(text || `HR rota reclassify failed (${res.status})`);
-            }
-            const refreshed = text ? JSON.parse(text) : {};
-            renderImportSummaryModal('HR_ROTA_DAILY', refreshed);
-          } catch (err) {
-            console.error('[IMPORTS][HR_ROTA] reclassify failed', err);
-            alert(err?.message || 'Reclassify failed.');
-          }
-        });
-      }
-
-      // Apply validations button
-      const btnApply = root.querySelector('button[data-act="hr-rota-apply"]');
-      if (btnApply && !btnApply.__hrRotaApplyWired) {
-        btnApply.__hrRotaApplyWired = true;
-        btnApply.addEventListener('click', async () => {
-          try {
-            const sel = window.__hrRotaEmailSelections && window.__hrRotaEmailSelections[importId];
-            const sendEmailRowIds = (sel instanceof Set) ? Array.from(sel) : [];
-            await applyHrRotaValidation(importId, sendEmailRowIds);
-          } catch (err) {
-            console.error('[IMPORTS][HR_ROTA] apply failed', err);
-            alert(err?.message || 'Apply validations failed.');
-          }
-        });
-      }
-    } catch (e) {
-      console.warn('[IMPORTS] HR_ROTA wiring failed', e);
-    }
-  }, 0);
-
-  // Wiring for NHSP / HR_WEEKLY "Apply import" button + Assign buttons
-  setTimeout(() => {
-    try {
-      const root = document.getElementById('weeklyImportSummary');
-      if (!root || (type !== 'NHSP' && type !== 'HR_WEEKLY')) return;
-      if (root.__weeklyWired) return;
-      root.__weeklyWired = true;
-
-      // Ensure mapping container exists for this type+import
-      if (!window.__weeklyImportMappings[type]) {
-        window.__weeklyImportMappings[type] = {};
-      }
-      const ensureMappings = () => {
-        let m = window.__weeklyImportMappings[type][importId];
-        if (!m) {
-          m = {
-            candidate_mappings: [],
-            client_aliases: []
-          };
-          window.__weeklyImportMappings[type][importId] = m;
-        }
-        return m;
-      };
-
-      const st = window.__importSummaryState && window.__importSummaryState[type];
-      const rows = st && Array.isArray(st.rows) ? st.rows : [];
-
-      // Click handler for weekly "Assign candidate/client…" buttons
-      root.addEventListener('click', (ev) => {
-        const btn = ev.target.closest('button[data-act]');
-        if (!btn) return;
-        const act = btn.getAttribute('data-act');
-        if (act !== 'weekly-resolve-candidate' && act !== 'weekly-resolve-client') return;
-
-        const idx = Number(btn.getAttribute('data-row-idx') || '-1');
-        const row = (idx >= 0 && idx < rows.length) ? rows[idx] : null;
-        if (!row) return;
-
-        const mappings = ensureMappings();
-
-        if (act === 'weekly-resolve-candidate') {
-          const staffRaw = row.staff_name || row.staff_raw || '';
-          const hospRaw  = row.hospital_or_trust || row.unit || row.hospital_norm || '';
-
-          const candId = (prompt(
-            `Enter candidate_id to map staff "${staffRaw}" (hospital: "${hospRaw}") to:`,
-            row.candidate_id || ''
-          ) || '').trim();
-
-          if (!candId) return;
-
-          mappings.candidate_mappings.push({
-            staff_norm: row.staff_norm || staffRaw || '',
-            hospital_or_trust: hospRaw || null,
-            candidate_id: candId
-          });
-
-          window.__toast && window.__toast('Candidate mapping queued for this import.');
-        }
-
-        if (act === 'weekly-resolve-client') {
-          const hospRaw = row.hospital_or_trust || row.unit || row.hospital_norm || '';
-
-          const clientId = (prompt(
-            `Enter client_id to map hospital/site "${hospRaw}" to:`,
-            row.client_id || ''
-          ) || '').trim();
-
-          if (!clientId) return;
-
-          mappings.client_aliases.push({
-            hospital_norm: row.hospital_norm || hospRaw || '',
-            client_id: clientId
-          });
-
-          window.__toast && window.__toast('Client mapping queued for this import.');
-        }
-      });
-
-      // Apply import button
-      const btnApply = root.querySelector('button[data-act="weekly-import-apply"]');
-      if (btnApply && !btnApply.__weeklyApplyWired) {
-        btnApply.__weeklyApplyWired = true;
-        btnApply.addEventListener('click', async () => {
-          try {
-            const mappings = ensureMappings();
-            await resolveImportConflicts(importId, type, mappings);
-          } catch (err) {
-            console.error('[IMPORTS][WEEKLY] apply failed', err);
-            alert(err?.message || 'Weekly import apply failed.');
-          }
-        });
-      }
-    } catch (e) {
-      console.warn('[IMPORTS] weekly import wiring failed', e);
-    }
-  }, 0);
+  return Array.isArray(json) ? json : [];
 }
 
 async function resolveImportConflicts(importId, importType, mappings) {
@@ -26003,6 +25474,1064 @@ function openClientHospitalModal(client_id) {
     { noParentGate: true, forceEdit: true, kind: 'client-hospital' }
   );
 }
+
+async function openWeeklyCandidateResolveModal(importType, importId, rowIdx) {
+  const type = String(importType || '').toUpperCase();
+  const enc  = (typeof escapeHtml === 'function')
+    ? escapeHtml
+    : (s) => String(s == null ? '' : s);
+
+  const st   = window.__importSummaryState && window.__importSummaryState[type];
+  const rows = st && Array.isArray(st.rows) ? st.rows : [];
+  const row  = (rowIdx >= 0 && rowIdx < rows.length) ? rows[rowIdx] : null;
+  if (!row) {
+    alert('Row not found for candidate resolve.');
+    return;
+  }
+
+  const staffRaw = row.staff_name || row.staff_raw || '';
+  const unitRaw  = row.unit || row.hospital_or_trust || row.hospital_norm || '';
+
+  // Local state for this modal
+  window.__weeklyResolveCandidateState = {
+    type,
+    importId,
+    rowIdx,
+    term: staffRaw,
+    results: [],
+    selectedCandidateId: null
+  };
+
+  const state = () => window.__weeklyResolveCandidateState || {};
+
+  const renderTab = (key) => {
+    if (key !== 'main') return '';
+    const s = state();
+    const results = Array.isArray(s.results) ? s.results : [];
+    const term    = s.term || '';
+    const selectedId = s.selectedCandidateId || '';
+
+    const resultsHtml = results.length
+      ? `
+        <div class="card" style="max-height:250px;overflow:auto;border:1px solid #ddd;margin-top:4px;">
+          <ul class="mini">
+            ${results.map(c => {
+              const id   = c.id;
+              const name = c.display_name || c.name || ((c.first_name || '') + ' ' + (c.last_name || ''));
+              const selected = String(id) === String(selectedId);
+              const style = selected ? ' style="background:#007bff;color:#fff;cursor:pointer;"' : ' style="cursor:pointer;"';
+              return `
+                <li class="weekly-candidate-option"${style}
+                    data-act="weekly-cand-select"
+                    data-candidate-id="${enc(id)}">
+                  <strong>${enc(name || '')}</strong>
+                  ${c.tms_ref ? ` &nbsp; <span class="mono">(${enc(c.tms_ref)})</span>` : ''}
+                </li>
+              `;
+            }).join('')}
+          </ul>
+        </div>
+      `
+      : '<span class="mini">No candidates matched. Try typing a different name.</span>';
+
+    return html(`
+      <div class="form" id="weeklyResolveCandidate">
+        <div class="card">
+          <div class="row">
+            <label>Assign candidate</label>
+            <div class="controls">
+              <div class="mini">
+                Import: <span class="mono">${enc(importId || '')}</span><br/>
+                Staff (from import): <strong>${enc(staffRaw || '—')}</strong><br/>
+                Unit / Site: <span class="mini">${enc(unitRaw || '—')}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card" style="margin-top:10px;">
+          <div class="row">
+            <label>Candidate name</label>
+            <div class="controls">
+              <input id="weeklyCandSearch"
+                     class="input"
+                     type="text"
+                     placeholder="Type to search by first or surname"
+                     value="${enc(term)}" />
+              <div class="hint mini" style="margin-top:4px;">
+                Start typing the candidate's name. The list on the right will filter as you type.
+              </div>
+            </div>
+          </div>
+          <div class="row">
+            <label>Matches</label>
+            <div class="controls" id="weeklyCandResults">
+              ${resultsHtml}
+            </div>
+          </div>
+          <div class="row" style="margin-top:8px;">
+            <label></label>
+            <div class="controls">
+              <button type="button"
+                      class="btn btn-primary"
+                      data-act="weekly-cand-link">
+                Link to this candidate
+              </button>
+              <button type="button"
+                      class="btn"
+                      style="margin-left:8px;"
+                      data-act="weekly-cand-cancel">
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    `);
+  };
+
+  // Open child modal
+  showModal(
+    'Assign candidate (weekly import)',
+    [{ key: 'main', label: 'Assign candidate' }],
+    renderTab,
+    null,
+    false,
+    null,
+    {
+      kind: 'weekly-resolve-candidate',
+      noParentGate: true,
+      stayOpenOnSave: false
+    }
+  );
+
+  // Helper: run search and re-render
+  async function searchAndRender(term) {
+    const q = String(term || '').trim();
+    window.__weeklyResolveCandidateState = state();
+    window.__weeklyResolveCandidateState.term = q;
+    if (!q) {
+      window.__weeklyResolveCandidateState.results = [];
+    } else {
+      try {
+        const results = await searchCandidatesForResolve(q);
+        window.__weeklyResolveCandidateState.results = Array.isArray(results) ? results : [];
+      } catch (err) {
+        console.error('[WEEKLY][RESOLVE] candidate search failed', err);
+        alert(err?.message || 'Candidate search failed.');
+        window.__weeklyResolveCandidateState.results = [];
+      }
+    }
+    const frame = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
+    if (frame && frame.kind === 'weekly-resolve-candidate') {
+      frame.setTab('main');
+    }
+  }
+
+  // Initial search once modal is open
+  setTimeout(() => {
+    const root = document.getElementById('modalBody');
+    if (!root) return;
+    const input = root.querySelector('#weeklyCandSearch');
+    if (input) {
+      // Wire live search
+      if (!input.__weeklyCandInputWired) {
+        input.__weeklyCandInputWired = true;
+        input.addEventListener('input', () => {
+          const term = (input.value || '').trim();
+          searchAndRender(term);
+        });
+      }
+      // Kick off initial search with prefilled name
+      searchAndRender(input.value || '');
+    }
+
+    const resultsHost = root.querySelector('#weeklyCandResults');
+    if (resultsHost && !resultsHost.__weeklyCandSelectWired) {
+      resultsHost.__weeklyCandSelectWired = true;
+      resultsHost.addEventListener('click', (ev) => {
+        const li = ev.target.closest('li[data-act="weekly-cand-select"]');
+        if (!li) return;
+        const candId = li.getAttribute('data-candidate-id') || '';
+        if (!candId) return;
+        window.__weeklyResolveCandidateState = state();
+        window.__weeklyResolveCandidateState.selectedCandidateId = candId;
+        const frame = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
+        if (frame && frame.kind === 'weekly-resolve-candidate') {
+          frame.setTab('main');
+        }
+      });
+    }
+
+    root.addEventListener('click', async (ev) => {
+      const btn = ev.target.closest('button[data-act]');
+      if (!btn) return;
+      const act = btn.getAttribute('data-act');
+      const s   = state();
+
+      if (act === 'weekly-cand-cancel') {
+        const closeBtn = document.getElementById('btnCloseModal');
+        if (closeBtn) closeBtn.click();
+        return;
+      }
+
+      if (act === 'weekly-cand-link') {
+        const selectedId = s.selectedCandidateId;
+        if (!selectedId) {
+          alert('Select a candidate from the list on the right first.');
+          return;
+        }
+
+        // Build mapping
+        const mappings = ensureWeeklyImportMappings(type, importId);
+        const staffNorm = row.staff_norm || String(staffRaw || '').trim().toLowerCase();
+        const hospRaw   = row.hospital_or_trust || row.unit || row.hospital_norm || '';
+        const hospNorm  = String(hospRaw || '').trim().toLowerCase();
+
+        mappings.candidate_mappings.push({
+          staff_norm: staffNorm,
+          hospital_or_trust: hospNorm || null,
+          candidate_id: selectedId
+        });
+
+        // Optimistically update summary row in-memory
+        const all = window.__importSummaryState && window.__importSummaryState[type];
+        if (all && Array.isArray(all.rows)) {
+          const newRows = all.rows.slice();
+          const cur = { ...(newRows[rowIdx] || {}) };
+          cur.candidate_id = selectedId;
+
+          // If client is still missing, flip to NO_CLIENT; otherwise mark OK
+          if (!cur.client_id) {
+            cur.resolution_status = 'NO_CLIENT';
+          } else {
+            cur.resolution_status = 'OK';
+          }
+
+          newRows[rowIdx] = cur;
+          window.__importSummaryState[type] = {
+            import_id: all.import_id,
+            summary: all.summary,
+            rows: newRows
+          };
+          renderImportSummaryModal(type, {
+            import_id: all.import_id,
+            summary: all.summary.summary || all.summary,
+            rows: newRows
+          });
+        }
+
+        window.__toast && window.__toast('Candidate mapping queued for this import.');
+
+        const closeBtn = document.getElementById('btnCloseModal');
+        if (closeBtn) closeBtn.click();
+      }
+    });
+  }, 0);
+}
+
+async function openWeeklyClientResolveModal(importType, importId, rowIdx) {
+  const type = String(importType || '').toUpperCase();
+  const enc  = (typeof escapeHtml === 'function')
+    ? escapeHtml
+    : (s) => String(s == null ? '' : s);
+
+  const st   = window.__importSummaryState && window.__importSummaryState[type];
+  const rows = st && Array.isArray(st.rows) ? st.rows : [];
+  const row  = (rowIdx >= 0 && rowIdx < rows.length) ? rows[rowIdx] : null;
+  if (!row) {
+    alert('Row not found for client resolve.');
+    return;
+  }
+
+  const staffRaw = row.staff_name || row.staff_raw || '';
+  const unitRaw  = row.unit || row.hospital_or_trust || row.hospital_norm || '';
+
+  window.__weeklyResolveClientState = {
+    type,
+    importId,
+    rowIdx,
+    term: unitRaw,
+    results: [],
+    selectedClientId: null
+  };
+
+  const state = () => window.__weeklyResolveClientState || {};
+
+  const renderTab = (key) => {
+    if (key !== 'main') return '';
+    const s = state();
+    const results = Array.isArray(s.results) ? s.results : [];
+    const term    = s.term || '';
+    const selectedId = s.selectedClientId || '';
+
+    const resultsHtml = results.length
+      ? `
+        <div class="card" style="max-height:250px;overflow:auto;border:1px solid #ddd;margin-top:4px;">
+          <ul class="mini">
+            ${results.map(c => {
+              const id   = c.id;
+              const name = c.name || c.client_name || '';
+              const selected = String(id) === String(selectedId);
+              const style = selected ? ' style="background:#007bff;color:#fff;cursor:pointer;"' : ' style="cursor:pointer;"';
+              return `
+                <li class="weekly-client-option"${style}
+                    data-act="weekly-client-select"
+                    data-client-id="${enc(id)}">
+                  <strong>${enc(name || '')}</strong>
+                  ${c.cli_ref ? ` &nbsp; <span class="mono">(${enc(c.cli_ref)})</span>` : ''}
+                </li>
+              `;
+            }).join('')}
+          </ul>
+        </div>
+      `
+      : '<span class="mini">No clients matched. Try typing a different name.</span>';
+
+    return html(`
+      <div class="form" id="weeklyResolveClient">
+        <div class="card">
+          <div class="row">
+            <label>Assign client / site</label>
+            <div class="controls">
+              <div class="mini">
+                Import: <span class="mono">${enc(importId || '')}</span><br/>
+                Unit / Site (from import): <strong>${enc(unitRaw || '—')}</strong><br/>
+                Staff: <span class="mini">${enc(staffRaw || '—')}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card" style="margin-top:10px;">
+          <div class="row">
+            <label>Client name</label>
+            <div class="controls">
+              <input id="weeklyClientSearch"
+                     class="input"
+                     type="text"
+                     placeholder="Type to search by client name"
+                     value="${enc(term)}" />
+              <div class="hint mini" style="margin-top:4px;">
+                For NHSP, only NHSP-enabled clients will be shown.
+              </div>
+            </div>
+          </div>
+          <div class="row">
+            <label>Matches</label>
+            <div class="controls" id="weeklyClientResults">
+              ${resultsHtml}
+            </div>
+          </div>
+          <div class="row" style="margin-top:8px;">
+            <label></label>
+            <div class="controls">
+              <button type="button"
+                      class="btn btn-primary"
+                      data-act="weekly-client-link">
+                Link to this client
+              </button>
+              <button type="button"
+                      class="btn"
+                      style="margin-left:8px;"
+                      data-act="weekly-client-cancel">
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    `);
+  };
+
+  // Open child modal
+  showModal(
+    'Assign client (weekly import)',
+    [{ key: 'main', label: 'Assign client' }],
+    renderTab,
+    null,
+    false,
+    null,
+    {
+      kind: 'weekly-resolve-client',
+      noParentGate: true,
+      stayOpenOnSave: false
+    }
+  );
+
+  async function searchAndRender(term) {
+    const q = String(term || '').trim();
+    window.__weeklyResolveClientState = state();
+    window.__weeklyResolveClientState.term = q;
+    if (!q) {
+      window.__weeklyResolveClientState.results = [];
+    } else {
+      try {
+        const results = await weeklySearchClientsForResolve(type, q);
+        window.__weeklyResolveClientState.results = Array.isArray(results) ? results : [];
+      } catch (err) {
+        console.error('[WEEKLY][RESOLVE] client search failed', err);
+        alert(err?.message || 'Client search failed.');
+        window.__weeklyResolveClientState.results = [];
+      }
+    }
+    const frame = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
+    if (frame && frame.kind === 'weekly-resolve-client') {
+      frame.setTab('main');
+    }
+  }
+
+  setTimeout(() => {
+    const root = document.getElementById('modalBody');
+    if (!root) return;
+    const input = root.querySelector('#weeklyClientSearch');
+    if (input) {
+      if (!input.__weeklyClientInputWired) {
+        input.__weeklyClientInputWired = true;
+        input.addEventListener('input', () => {
+          const term = (input.value || '').trim();
+          searchAndRender(term);
+        });
+      }
+      searchAndRender(input.value || '');
+    }
+
+    const resultsHost = root.querySelector('#weeklyClientResults');
+    if (resultsHost && !resultsHost.__weeklyClientSelectWired) {
+      resultsHost.__weeklyClientSelectWired = true;
+      resultsHost.addEventListener('click', (ev) => {
+        const li = ev.target.closest('li[data-act="weekly-client-select"]');
+        if (!li) return;
+        const clientId = li.getAttribute('data-client-id') || '';
+        if (!clientId) return;
+        window.__weeklyResolveClientState = state();
+        window.__weeklyResolveClientState.selectedClientId = clientId;
+        const frame = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
+        if (frame && frame.kind === 'weekly-resolve-client') {
+          frame.setTab('main');
+        }
+      });
+    }
+
+    root.addEventListener('click', (ev) => {
+      const btn = ev.target.closest('button[data-act]');
+      if (!btn) return;
+      const act = btn.getAttribute('data-act');
+      const s   = state();
+
+      if (act === 'weekly-client-cancel') {
+        const closeBtn = document.getElementById('btnCloseModal');
+        if (closeBtn) closeBtn.click();
+        return;
+      }
+
+      if (act === 'weekly-client-link') {
+        const selectedId = s.selectedClientId;
+        if (!selectedId) {
+          alert('Select a client from the list on the right first.');
+          return;
+        }
+
+        const mappings = ensureWeeklyImportMappings(type, importId);
+        const hospRaw  = row.hospital_or_trust || row.unit || row.hospital_norm || '';
+        const hospNorm = String(hospRaw || '').trim().toLowerCase();
+
+        mappings.client_aliases.push({
+          hospital_norm: hospNorm || '',
+          client_id: selectedId
+        });
+
+        const all = window.__importSummaryState && window.__importSummaryState[type];
+        if (all && Array.isArray(all.rows)) {
+          const newRows = all.rows.slice();
+          const cur = { ...(newRows[rowIdx] || {}) };
+          cur.client_id = selectedId;
+
+          if (!cur.candidate_id) {
+            cur.resolution_status = 'NO_CANDIDATE';
+          } else {
+            cur.resolution_status = 'OK';
+          }
+
+          newRows[rowIdx] = cur;
+          window.__importSummaryState[type] = {
+            import_id: all.import_id,
+            summary: all.summary,
+            rows: newRows
+          };
+          renderImportSummaryModal(type, {
+            import_id: all.import_id,
+            summary: all.summary.summary || all.summary,
+            rows: newRows
+          });
+        }
+
+        window.__toast && window.__toast('Client mapping queued for this import.');
+
+        const closeBtn = document.getElementById('btnCloseModal');
+        if (closeBtn) closeBtn.click();
+      }
+    });
+  }, 0);
+}
+
+
+
+function ensureWeeklyImportMappings(type, importId) {
+  const t = String(type || '').toUpperCase();
+  const id = String(importId || '');
+  window.__weeklyImportMappings = window.__weeklyImportMappings || {};
+  if (!window.__weeklyImportMappings[t]) {
+    window.__weeklyImportMappings[t] = {};
+  }
+  let m = window.__weeklyImportMappings[t][id];
+  if (!m) {
+    m = {
+      candidate_mappings: [],
+      client_aliases: []
+    };
+    window.__weeklyImportMappings[t][id] = m;
+  }
+  return m;
+}
+
+
+function renderImportSummaryModal(importType, summaryState) {
+  const enc = (typeof escapeHtml === 'function')
+    ? escapeHtml
+    : (s) => String(s == null ? '' : s);
+
+  const type = String(importType || '').toUpperCase();
+  const ss   = summaryState || {};
+  const importId = ss.import_id || ss.id || (ss.summary && ss.summary.import_id) || null;
+  const rows = Array.isArray(ss.rows) ? ss.rows : [];
+
+  window.__importSummaryState = window.__importSummaryState || {};
+  window.__importSummaryState[type] = {
+    import_id: importId,
+    summary: ss,
+    rows
+  };
+
+  // Global store for weekly mappings (per type + importId)
+  window.__weeklyImportMappings = window.__weeklyImportMappings || {};
+
+  const renderTab = (key) => {
+    if (key !== 'main') return '';
+
+    if (type === 'HR_ROTA_DAILY') {
+      return renderHrRotaDailySummary(importId, rows, ss);
+    }
+
+    if (type === 'NHSP' || type === 'HR_WEEKLY') {
+      return renderWeeklyImportSummary(type, importId, rows, ss);
+    }
+
+    return html(`
+      <div class="form">
+        <div class="card">
+          <div class="row">
+            <label>Summary</label>
+            <div class="controls">
+              <span class="mini">Unsupported import type: ${enc(importType)}</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    `);
+  };
+
+  // Child modal for import summary
+  showModal(
+    (type === 'HR_ROTA_DAILY'
+      ? 'HR Rota Daily Validation'
+      : (type === 'NHSP'
+          ? 'NHSP Weekly Import Summary'
+          : 'HealthRoster Weekly Import Summary')),
+    [{ key: 'main', label: 'Summary' }],
+    renderTab,
+    null,
+    false,
+    null,
+    {
+      kind: `import-summary-${type.toLowerCase()}`,
+      noParentGate: true,
+      stayOpenOnSave: false
+    }
+  );
+
+  // ────────────────────── Helpers ──────────────────────
+
+  function renderHrRotaDailySummary(importId, rows, ss) {
+    const summary = ss.summary || {};
+    const total   = summary.total_rows || rows.length || 0;
+
+    // Derive counts by status if summary not given
+    const counts = {
+      OK: 0,
+      FAILED: 0,
+      UNMATCHED: 0
+    };
+    rows.forEach(r => {
+      const st = String(r.status || '').toUpperCase();
+      if (st === 'OK' || st === 'VALIDATION_OK') counts.OK++;
+      else if (st === 'UNMATCHED') counts.UNMATCHED++;
+      else counts.FAILED++;
+    });
+
+    // Pre-populated email selections map
+    window.__hrRotaEmailSelections = window.__hrRotaEmailSelections || {};
+    const emailSel = window.__hrRotaEmailSelections[importId] || new Set();
+    if (!(emailSel instanceof Set)) {
+      window.__hrRotaEmailSelections[importId] = new Set();
+    }
+
+    const rowsHtml = rows.length
+      ? rows.map((r, idx) => {
+          const staff = r.staff_name || r.staff_raw || '';
+          const unit  = r.unit || r.hospital_or_trust || r.hospital_norm || '';
+          const date  = r.date_local || r.date || r.shift_date || '';
+          const tsId  = r.timesheet_id || '';
+          const stRaw = r.status || '';
+          const st    = String(stRaw || '').toUpperCase();
+          const reasonCode = String(r.reason_code || r.failure_reason || r.reason || '').toLowerCase();
+
+          let stCls = 'pill-info';
+          if (st === 'OK' || st === 'VALIDATION_OK') stCls = 'pill-ok';
+          else if (st === 'UNMATCHED') stCls = 'pill-warn';
+          else stCls = 'pill-bad';
+
+          const canAssignCand   = (reasonCode === 'candidate_unresolved');
+          const canAssignClient = (reasonCode === 'client_unresolved');
+
+          const isTimeMismatch =
+            reasonCode === 'actual_hours_mismatch' ||
+            reasonCode === 'start_end_mismatch' ||
+            reasonCode === 'break_minutes_mismatch';
+
+          const canEmail = !!(isTimeMismatch && tsId);
+          const rowId    = r.hr_row_id || r.id || `${idx}`;
+
+          const checked = emailSel instanceof Set && emailSel.has(rowId);
+
+          // Detail: we just stringify the detail object if present
+          let detailText = '';
+          if (r.detail && typeof r.detail === 'object') {
+            try { detailText = JSON.stringify(r.detail); } catch { detailText = ''; }
+          }
+
+          return `
+            <tr>
+              <td><span class="mini">${enc(staff || '—')}</span></td>
+              <td><span class="mini">${enc(unit || '—')}</span></td>
+              <td><span class="mini">${enc(date || '—')}</span></td>
+              <td><span class="mini">${tsId ? enc(tsId) : '—'}</span></td>
+              <td><span class="pill ${stCls}">${enc(st || 'UNKNOWN')}</span></td>
+              <td><span class="mini">${reasonCode || '—'}</span></td>
+              <td>
+                ${
+                  canAssignCand
+                    ? `<button type="button"
+                               class="btn mini"
+                               data-act="resolve-candidate"
+                               data-row-idx="${idx}">
+                         Assign candidate…
+                       </button>`
+                    : ''
+                }
+                ${
+                  canAssignClient
+                    ? `<button type="button"
+                               class="btn mini"
+                               style="margin-left:4px;"
+                               data-act="resolve-client"
+                               data-row-idx="${idx}">
+                         Assign client…
+                       </button>`
+                    : ''
+                }
+              </td>
+              <td>
+                ${detailText ? `<span class="mini">${enc(detailText)}</span>` : ''}
+              </td>
+              <td>
+                ${
+                  canEmail
+                    ? `<label class="mini">
+                         <input type="checkbox"
+                                data-act="hr-rota-email"
+                                data-row-id="${enc(rowId)}"
+                                data-row-idx="${idx}"
+                                ${checked ? 'checked' : ''} />
+                         Send email
+                       </label>`
+                    : '<span class="mini">—</span>'
+                }
+              </td>
+            </tr>
+          `;
+        }).join('')
+      : `
+        <tr>
+          <td colspan="9">
+            <span class="mini">No rows to show.</span>
+          </td>
+        </tr>
+      `;
+
+    return html(`
+      <div class="form" id="hrRotaSummary">
+        <div class="card">
+          <div class="row">
+            <label>Overview</label>
+            <div class="controls">
+              <div class="mini">
+                Import ID: <span class="mono">${enc(importId || '—')}</span><br/>
+                Total rows: ${total}<br/>
+                OK: ${counts.OK} &nbsp; Failed: ${counts.FAILED} &nbsp; Unmatched: ${counts.UNMATCHED}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card" style="margin-top:10px;">
+          <div class="row">
+            <label>Rows</label>
+            <div class="controls">
+              <table class="grid">
+                <thead>
+                  <tr>
+                    <th>Staff</th>
+                    <th>Unit / Site</th>
+                    <th>Date</th>
+                    <th>Timesheet ID</th>
+                    <th>Status</th>
+                    <th>Reason</th>
+                    <th>Resolve</th>
+                    <th>Details</th>
+                    <th>Temp Staffing email</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${rowsHtml}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="row" style="margin-top:8px;">
+            <label></label>
+            <div class="controls">
+              <button type="button"
+                      class="btn"
+                      data-act="hr-rota-reclassify">
+                Reclassify
+              </button>
+              <button type="button"
+                      class="btn btn-primary"
+                      style="margin-left:8px;"
+                      data-act="hr-rota-apply">
+                Apply validations
+              </button>
+              <span class="mini" style="margin-left:8px;">
+                "Apply validations" will update validation status and reference numbers;
+                rows with "Send email" ticked will also queue query emails to Temp Staffing.
+              </span>
+            </div>
+          </div>
+        </div>
+      </div>
+    `);
+  }
+
+  function renderWeeklyImportSummary(type, importId, rows, ss) {
+    const summary = ss.summary || {};
+    const total   = summary.total_rows || rows.length || 0;
+
+    const rowsHtml = rows.length
+    const rowsHtml = rows.length
+  ? rows.map((r, idx) => {
+      const staff  = r.staff_name || r.staff_raw || '';
+      const unit   = r.unit || r.hospital_or_trust || r.hospital_norm || '';
+
+      // Prefer row work_date, fall back to week_ending_date and other fields
+      const rawDateYmd =
+        r.date_local ||
+        r.work_date ||
+        r.date ||
+        r.week_ending_date ||
+        '';
+
+      const date   = formatYmdToNiceDate(rawDateYmd);
+      const action = String(r.resolution_status || r.action || '').toUpperCase();
+      const candId = r.candidate_id || null;
+      const cliId  = r.client_id || null;
+
+      let cls = 'pill-info';
+      if (action === 'OK' || action === 'APPLY') cls = 'pill-ok';
+      else if (action === 'NO_CANDIDATE' || action === 'NO_CLIENT') cls = 'pill-bad';
+
+      const canAssignCand   = (action === 'NO_CANDIDATE');
+      const canAssignClient = (action === 'NO_CLIENT');
+
+      return `
+        <tr>
+          <td><span class="mini">${enc(staff || '—')}</span></td>
+          <td><span class="mini">${enc(unit || '—')}</span></td>
+          <td><span class="mini">${enc(date || '—')}</span></td>
+          <td><span class="pill ${cls}">${enc(action || 'UNKNOWN')}</span></td>
+          <td>
+            ${
+              canAssignCand
+                ? `<button type="button"
+                           class="btn mini"
+                           data-act="weekly-resolve-candidate"
+                           data-row-idx="${idx}"
+                           data-staff="${enc(staff)}"
+                           data-unit="${enc(unit)}">
+                     Assign candidate…
+                   </button>`
+                : ''
+            }
+            ${
+              canAssignClient
+                ? `<button type="button"
+                           class="btn mini"
+                           style="margin-left:4px;"
+                           data-act="weekly-resolve-client"
+                           data-row-idx="${idx}"
+                           data-unit="${enc(unit)}">
+                     Assign client…
+                   </button>`
+                : ''
+            }
+          </td>
+        </tr>
+      `;
+    }).join('')
+  : `
+    <tr>
+      <td colspan="5">
+        <span class="mini">No rows to show.</span>
+      </td>
+    </tr>
+  `;
+
+
+    return html(`
+      <div class="form" id="weeklyImportSummary">
+        <div class="card">
+          <div class="row">
+            <label>Overview</label>
+            <div class="controls">
+              <div class="mini">
+                Import ID: <span class="mono">${enc(importId || '—')}</span><br/>
+                Total rows: ${total}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card" style="margin-top:10px;">
+          <div class="row">
+            <label>Rows</label>
+            <div class="controls">
+              <table class="grid">
+                <thead>
+                  <tr>
+                    <th>Staff</th>
+                    <th>Unit / Site</th>
+                    <th>Date / Week ending</th>
+                    <th>Resolution</th>
+                    <th>Resolve</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${rowsHtml}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="row" style="margin-top:8px;">
+            <label></label>
+            <div class="controls">
+              <button type="button"
+                      class="btn btn-primary"
+                      data-act="weekly-import-apply">
+                Apply import
+              </button>
+              <span class="mini" style="margin-left:8px;">
+                This will apply the classification and create/update weeks and timesheets.
+              </span>
+            </div>
+          </div>
+        </div>
+      </div>
+    `);
+  }
+
+  // Wiring for HR_ROTA_DAILY summary (buttons & checkboxes)
+  setTimeout(() => {
+    try {
+      const root = document.getElementById('hrRotaSummary');
+      if (!root || type !== 'HR_ROTA_DAILY') return;
+
+      // Resolve candidate / client buttons
+      root.addEventListener('click', (ev) => {
+        const btn = ev.target.closest('button[data-act]');
+        if (!btn) return;
+        const act = btn.getAttribute('data-act');
+
+        const st = window.__importSummaryState && window.__importSummaryState['HR_ROTA_DAILY'];
+        if (!st) return;
+
+        const rows = Array.isArray(st.rows) ? st.rows : [];
+        const idx  = Number(btn.getAttribute('data-row-idx') || '-1');
+        const row  = (idx >= 0 && idx < rows.length) ? rows[idx] : null;
+        if (!row) return;
+
+        if (act === 'resolve-candidate') {
+          // Use the main timesheet resolve modal only if we have a timesheet_id
+          if (row.timesheet_id) {
+            openResolveCandidateModal({
+              timesheet_id: row.timesheet_id,
+              occupant_key_norm: row.staff_name || row.staff_raw || '',
+              hospital_norm: row.unit || row.hospital_or_trust || row.hospital_norm || ''
+            });
+          } else {
+            alert('No timesheet matched for this row; resolve candidate via imports/aliases instead.');
+          }
+        }
+
+        if (act === 'resolve-client') {
+          if (row.timesheet_id) {
+            openResolveClientModal({
+              timesheet_id: row.timesheet_id,
+              hospital_norm: row.unit || row.hospital_or_trust || row.hospital_norm || ''
+            });
+          } else {
+            alert('No timesheet matched for this row; resolve client/site via imports/aliases instead.');
+          }
+        }
+      });
+
+      // Email checkboxes
+      root.addEventListener('change', (ev) => {
+        const cb = ev.target.closest('input[data-act="hr-rota-email"]');
+        if (!cb) return;
+
+        const rowId = cb.getAttribute('data-row-id') || '';
+        if (!rowId) return;
+
+        window.__hrRotaEmailSelections = window.__hrRotaEmailSelections || {};
+        const sel = window.__hrRotaEmailSelections[importId] || new Set();
+        if (!(sel instanceof Set)) {
+          window.__hrRotaEmailSelections[importId] = new Set();
+        }
+
+        if (cb.checked) {
+          window.__hrRotaEmailSelections[importId].add(rowId);
+        } else {
+          window.__hrRotaEmailSelections[importId].delete(rowId);
+        }
+      });
+
+      // Reclassify button
+      const btnReclass = root.querySelector('button[data-act="hr-rota-reclassify"]');
+      if (btnReclass && !btnReclass.__hrRotaReclassWired) {
+        btnReclass.__hrRotaReclassWired = true;
+        btnReclass.addEventListener('click', async () => {
+          try {
+            if (!importId) {
+              alert('No import_id in summary; cannot reclassify.');
+              return;
+            }
+            const res = await authFetch(API(`/api/imports/hr-rota/${encodeURIComponent(importId)}/preview`));
+            const text = await res.text();
+            if (!res.ok) {
+              throw new Error(text || `HR rota reclassify failed (${res.status})`);
+            }
+            const refreshed = text ? JSON.parse(text) : {};
+            renderImportSummaryModal('HR_ROTA_DAILY', refreshed);
+          } catch (err) {
+            console.error('[IMPORTS][HR_ROTA] reclassify failed', err);
+            alert(err?.message || 'Reclassify failed.');
+          }
+        });
+      }
+
+      // Apply validations button
+      const btnApply = root.querySelector('button[data-act="hr-rota-apply"]');
+      if (btnApply && !btnApply.__hrRotaApplyWired) {
+        btnApply.__hrRotaApplyWired = true;
+        btnApply.addEventListener('click', async () => {
+          try {
+            const sel = window.__hrRotaEmailSelections && window.__hrRotaEmailSelections[importId];
+            const sendEmailRowIds = (sel instanceof Set) ? Array.from(sel) : [];
+            await applyHrRotaValidation(importId, sendEmailRowIds);
+          } catch (err) {
+            console.error('[IMPORTS][HR_ROTA] apply failed', err);
+            alert(err?.message || 'Apply validations failed.');
+          }
+        });
+      }
+    } catch (e) {
+      console.warn('[IMPORTS] HR_ROTA wiring failed', e);
+    }
+  }, 0);
+
+  // Wiring for NHSP / HR_WEEKLY "Apply import" button + Assign buttons
+  setTimeout(() => {
+    try {
+      const root = document.getElementById('weeklyImportSummary');
+      if (!root || (type !== 'NHSP' && type !== 'HR_WEEKLY')) return;
+      if (root.__weeklyWired) return;
+      root.__weeklyWired = true;
+
+      const st = window.__importSummaryState && window.__importSummaryState[type];
+      const rows = st && Array.isArray(st.rows) ? st.rows : [];
+
+      // Click handler for weekly "Assign candidate/client…" buttons
+      root.addEventListener('click', (ev) => {
+        const btn = ev.target.closest('button[data-act]');
+        if (!btn) return;
+        const act = btn.getAttribute('data-act');
+        if (act !== 'weekly-resolve-candidate' && act !== 'weekly-resolve-client') return;
+
+        const idx = Number(btn.getAttribute('data-row-idx') || '-1');
+        if (idx < 0 || idx >= rows.length) return;
+
+        if (act === 'weekly-resolve-candidate') {
+          openWeeklyCandidateResolveModal(type, importId, idx);
+        }
+
+        if (act === 'weekly-resolve-client') {
+          openWeeklyClientResolveModal(type, importId, idx);
+        }
+      });
+
+      // Apply import button
+      const btnApply = root.querySelector('button[data-act="weekly-import-apply"]');
+      if (btnApply && !btnApply.__weeklyApplyWired) {
+        btnApply.__weeklyApplyWired = true;
+        btnApply.addEventListener('click', async () => {
+          try {
+            const mappings = ensureWeeklyImportMappings(type, importId);
+            await resolveImportConflicts(importId, type, mappings);
+          } catch (err) {
+            console.error('[IMPORTS][WEEKLY] apply failed', err);
+            alert(err?.message || 'Weekly import apply failed.');
+          }
+        });
+      }
+    } catch (e) {
+      console.warn('[IMPORTS] weekly import wiring failed', e);
+    }
+  }, 0);
+}
+
+
 
 function renderClientHospitalsTable() {
   const el = byId('clientHospitals');
