@@ -10480,6 +10480,64 @@ function renderTools(){
   addBtn('Search…', () => openSearchModal()); // left toolbar search
 
   if (!canCreate) btnCreate.disabled = true;
+
+  // ── Timesheet filters box (only when in Timesheets summary) ────────────────
+  if (currentSection === 'timesheets') {
+    window.__listState = window.__listState || {};
+    const st = (window.__listState['timesheets'] ||= {
+      page: 1,
+      pageSize: 50,
+      total: null,
+      hasMore: false,
+      filters: {},
+      sort: { key: null, dir: 'asc' }
+    });
+    const filters = st.filters || {};
+    window.__listState['timesheets'].filters = filters;
+
+    const box = document.createElement('div');
+    box.style.cssText = 'margin-top:10px;padding:8px;border:1px solid var(--line);border-radius:6px;background:#0b152a;';
+    const title = document.createElement('div');
+    title.textContent = 'Timesheet Filters';
+    title.className = 'mini';
+    title.style.fontWeight = 'bold';
+    title.style.marginBottom = '4px';
+    box.appendChild(title);
+
+    const mkToolFlag = (name, label) => {
+      const wrap = document.createElement('label');
+      wrap.className = 'mini';
+      wrap.style.display = 'flex';
+      wrap.style.alignItems = 'center';
+      wrap.style.gap = '4px';
+      wrap.style.marginTop = '4px';
+      const cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.checked = !!filters[name];
+      cb.addEventListener('change', async () => {
+        const curFilters = { ...(window.__listState['timesheets'].filters || {}) };
+        curFilters[name] = cb.checked ? true : false;
+        window.__listState['timesheets'].filters = curFilters;
+        window.__listState['timesheets'].page = 1;
+        const data = await loadSection();
+        renderSummary(data);
+      });
+      wrap.appendChild(cb);
+      wrap.appendChild(document.createTextNode(label));
+      return wrap;
+    };
+
+    // Candidate Paid  → candidate_paid = true → backend: paid_at_utc NOT NULL
+    box.appendChild(mkToolFlag('candidate_paid', 'Candidate paid'));
+
+    // Client Invoiced → client_invoiced = true → backend: locked_by_invoice_id NOT NULL
+    box.appendChild(mkToolFlag('client_invoiced', 'Client invoiced'));
+
+    // Needs Attention → needs_attention = true → already used by backend
+    box.appendChild(mkToolFlag('needs_attention', 'Needs attention'));
+
+    el.appendChild(box);
+  }
 }
 
 
@@ -29090,839 +29148,154 @@ function bindUmbrellaAddressEvents(container, model) {
 // - (Sorting of summary grid can be added here if/when you enable header clicks)
 // ─────────────────────────────────────────────────────────────────────────────
 
-function renderSummary(rows){
-  currentRows = rows;
-  currentSelection = null;
+export async function handleTimesheetsSummary(env, req) {
+  const user = await requireUser(env, req, ['admin']);
+  if (!user) return withCORS(env, req, unauthorized());
 
-  // ── paging state (per section)
-  window.__listState = window.__listState || {};
-  const st = (window.__listState[currentSection] ||= {
-    page: 1,
-    pageSize: 50,
-    total: null,
-    hasMore: false,
-    filters: null,
-    sort: { key: null, dir: 'asc' }
-  });
+  const enc    = encodeURIComponent;
+  const urlObj = new URL(req.url);
+  const q      = (k) => urlObj.searchParams.get(k);
 
-  // Ensure we always have a sort object
-  if (!st.sort || typeof st.sort !== 'object') {
-    st.sort = { key: null, dir: 'asc' };
-  }
-  const sortState = st.sort;
+  const page     = Math.max(1, parseInt(q('page') || '1', 10));
+  const pageSize = Math.max(1, Math.min(200, parseInt(q('page_size') || '50', 10)));
 
-  const page     = Number(st.page || 1);
-  const pageSize = st.pageSize; // 50 | 100 | 200 | 'ALL'
+  const clientId    = q('client_id');
+  const candidateId = q('candidate_id');
+  const stage       = q('summary_stage');
 
-  // ── selection state (per section) — explicit IDs only
-  window.__selection = window.__selection || {};
-  const ensureSel = (section)=>{ const init = { fingerprint:'', ids:new Set() }; return (window.__selection[section] ||= init); };
-  const sel = ensureSel(currentSection);
+  const routeTypeRaw = q('route_type');
+  const routeType    = routeTypeRaw ? routeTypeRaw.toUpperCase() : null;
 
-  const isRowSelected = (id)=> sel.ids.has(String(id||''));    
-  const setRowSelected = (id, selected)=>{
-    id = String(id||''); if (!id) return;
-    if (selected) sel.ids.add(id); else sel.ids.delete(id);
-  };
-  const clearSelection = ()=>{ sel.ids.clear(); };
+  const sheetScopeRaw = q('sheet_scope');
+  const sheetScope    = sheetScopeRaw ? sheetScopeRaw.toUpperCase() : null;
 
-  // Tie selection to dataset via fingerprint (filters + section)
-  const computeFp = ()=> getSummaryFingerprint(currentSection);
-  const fp = computeFp();
-  if (sel.fingerprint !== fp) { sel.fingerprint = fp; clearSelection(); }
+  const qrStatusRaw   = q('qr_status');
+  const qrStatus      = qrStatusRaw ? qrStatusRaw.toUpperCase() : null;
 
-  // Section-specific pre-formatting
-  if (currentSection === 'candidates') {
-    rows.forEach(r => {
-      // Rota roles only – do NOT use this for Job Titles
-      r.role = (r && Array.isArray(r.roles)) ? formatRolesSummary(r.roles) : '';
+  const isAdjusted     = q('is_adjusted');
+  const isQr           = q('is_qr');
+  const needsAttention = q('needs_attention');
 
-      // Ensure job_titles_display exists as a string so the grid
-      // can show it via prefs as its own column
-      if (r.job_titles_display == null) {
-        r.job_titles_display = '';
-      } else {
-        r.job_titles_display = String(r.job_titles_display);
-      }
-    });
-  } else if (currentSection === 'contracts') {
-    rows.forEach(r => {
-      const j = r && r.bucket_labels_json;
-      if (j && typeof j === 'object') {
-        const day   = (j.day   || '').trim();
-        const night = (j.night || '').trim();
-        const sat   = (j.sat   || '').trim();
-        const sun   = (j.sun   || '').trim();
-        const bh    = (j.bh    || '').trim();
-        const parts = [day,night,sat,sun,bh].filter(Boolean);
-        r.bucket_labels_preview = parts.length === 5 ? parts.join('/') : '';
-      } else {
-        r.bucket_labels_preview = '';
-      }
-    });
-  }
+  // NEW: Tools filters – candidate/client payment & invoicing
+  const candidatePaid   = q('candidate_paid');
+  const clientInvoiced  = q('client_invoiced');
 
-  const content = byId('content');
-  byId('title').textContent = sections.find(s=>s.key===currentSection)?.label || '';
+  const weFrom      = q('week_ending_from');
+  const weTo        = q('week_ending_to');
 
-  // Preserve scroll position per section — for .summary-body, not #content
-  window.__scrollMemory = window.__scrollMemory || {};
-  const memKey = `summary:${currentSection}`;
-  const prevScrollY = window.__scrollMemory[memKey] ?? 0;
+  const orderByParam  = (q('order_by') || '').toLowerCase();
+  const orderDirParam = (q('order_dir') || '').toLowerCase();
 
-  content.innerHTML = '';
-  if (currentSection === 'settings') return renderSettingsPanel(content);
-  if (currentSection === 'audit')    return renderAuditTable(content, rows);
-
-  // ── top controls ────────────────────────────────────────────────────────────
-  const topControls = document.createElement('div');
-  topControls.style.cssText = 'display:flex;align-items:center;gap:10px;padding:8px 10px;border-bottom:1px solid var(--line)';
-
-  // Page size
-  const sizeLabel = document.createElement('span'); sizeLabel.className = 'mini'; sizeLabel.textContent = 'Page size:';
-  const sizeSel = document.createElement('select'); sizeSel.id = 'summaryPageSize';
-  ['50','100','200','ALL'].forEach(optVal => {
-    const opt = document.createElement('option');
-    opt.value = optVal; opt.textContent = (optVal === 'ALL') ? 'All' : `First ${optVal}`;
-    if (String(pageSize) === optVal) opt.selected = true;
-    sizeSel.appendChild(opt);
-  });
-  sizeSel.addEventListener('change', async () => {
-    const val = sizeSel.value;
-    window.__listState[currentSection].pageSize = (val === 'ALL') ? 'ALL' : Number(val);
-    window.__listState[currentSection].page = 1;
-    const data = await loadSection();
-    renderSummary(data);
-  });
-
-  topControls.appendChild(sizeLabel);
-  topControls.appendChild(sizeSel);
-
-  // ── NEW: Contracts quick Status menu ────────────────────────────────────────
-  let statusSel = null;
-  if (currentSection === 'contracts') {
-    const stFilters = window.__listState[currentSection].filters || {};
-
-    // Default to "active" if no status has been chosen yet
-    if (!('status' in stFilters)) stFilters.status = 'active';
-    window.__listState[currentSection].filters = stFilters;
-
-    const statusLabel = document.createElement('span');
-    statusLabel.className = 'mini';
-    statusLabel.textContent = 'Status:';
-
-    statusSel = document.createElement('select');
-
-    [['all','All'], ['active','Active'], ['unassigned','Unassigned'], ['completed','Completed']]
-      .forEach(([v, l]) => {
-        const o = document.createElement('option');
-        o.value = v;
-        o.textContent = l;
-        if ((stFilters.status || '').toLowerCase() === v) o.selected = true;
-        statusSel.appendChild(o);
-      });
-
-    statusSel.addEventListener('change', async () => {
-      const val = statusSel.value;
-      const curFilters = { ...(window.__listState[currentSection].filters || {}) };
-      curFilters.status = val;
-      window.__listState[currentSection].filters = curFilters;
-      window.__listState[currentSection].page = 1;
-      const data = await loadSection();
-      renderSummary(data);
-    });
-
-    topControls.appendChild(statusLabel);
-    topControls.appendChild(statusSel);
-  }
-
-  // ── Timesheets quick filters: Stage / Status / Route / Scope / Flags ───────
-  if (currentSection === 'timesheets') {
-    const stFilters = window.__listState[currentSection].filters || {};
-    window.__listState[currentSection].filters = stFilters;
-
-    // Stage dropdown
-    const stageLabel = document.createElement('span');
-    stageLabel.className = 'mini';
-    stageLabel.textContent = 'Stage:';
-    const stageSel = document.createElement('select');
-
-    const stageOpts = [
-      ['ALL',              'All'],
-      ['PAID',             'Paid'],
-      ['INVOICED',         'Invoiced'],
-      ['READY_FOR_INVOICE','Ready for invoice'],
-      ['READY_FOR_HR',     'Ready for HR'],
-      ['PENDING_AUTH',     'Awaiting auth'],
-      ['NEEDS_ATTENTION',  'Needs attention']
-    ];
-    const stageCur = (stFilters.summary_stage || 'ALL').toUpperCase();
-    stageOpts.forEach(([v, label]) => {
-      const o = document.createElement('option');
-      o.value = v;
-      o.textContent = label;
-      if (stageCur === v) o.selected = true;
-      stageSel.appendChild(o);
-    });
-    stageSel.addEventListener('change', async () => {
-      const val = stageSel.value;
-      const curFilters = { ...(window.__listState[currentSection].filters || {}) };
-      curFilters.summary_stage = val;
-      window.__listState[currentSection].filters = curFilters;
-      window.__listState[currentSection].page = 1;
-      const data = await loadSection();
-      renderSummary(data);
-    });
-    topControls.appendChild(stageLabel);
-    topControls.appendChild(stageSel);
-
-    // NEW: Processing-status dropdown (UNASSIGNED, CLIENT_UNRESOLVED, etc.)
-    const procLabel = document.createElement('span');
-    procLabel.className = 'mini';
-    procLabel.textContent = 'Status:';
-    const procSel = document.createElement('select');
-
-    const procOpts = [
-      ['ALL',               'All statuses'],
-      ['UNASSIGNED',        'Unassigned'],
-      ['CLIENT_UNRESOLVED', 'Client unresolved'],
-      ['RATE_MISSING',      'Rate missing'],
-      ['PAY_CHANNEL_MISSING','Pay channel missing'],
-      ['READY_FOR_HR',      'Ready for HR'],
-      ['READY_FOR_INVOICE', 'Ready for invoice']
-    ];
-    const procCur = (stFilters.processing_status || 'ALL').toUpperCase();
-    procOpts.forEach(([v, label]) => {
-      const o = document.createElement('option');
-      o.value = v;
-      o.textContent = label;
-      if (procCur === v) o.selected = true;
-      procSel.appendChild(o);
-    });
-    procSel.addEventListener('change', async () => {
-      const val = procSel.value;
-      const curFilters = { ...(window.__listState[currentSection].filters || {}) };
-      if (val === 'ALL') {
-        delete curFilters.processing_status;
-      } else {
-        curFilters.processing_status = val;
-      }
-      window.__listState[currentSection].filters = curFilters;
-      window.__listState[currentSection].page = 1;
-      const data = await loadSection();
-      renderSummary(data);
-    });
-    topControls.appendChild(procLabel);
-    topControls.appendChild(procSel);
-
-    // Route dropdown
-    const routeLabel = document.createElement('span');
-    routeLabel.className = 'mini';
-    routeLabel.textContent = 'Route:';
-    const routeSel = document.createElement('select');
-    const routeOpts = [
-      ['ALL',                  'All'],
-      ['DAILY_ELECTRONIC',     'Daily – electronic'],
-      ['DAILY_MANUAL',         'Daily – manual'],
-      ['WEEKLY_ELECTRONIC',    'Weekly – electronic'],
-      ['WEEKLY_MANUAL',        'Weekly – manual'],
-      ['WEEKLY_NHSP',          'Weekly – NHSP'],
-      ['WEEKLY_NHSP_ADJUSTMENT','Weekly – NHSP adj']
-    ];
-    const routeCur = (stFilters.route_type || 'ALL').toUpperCase();
-    routeOpts.forEach(([v, label]) => {
-      const o = document.createElement('option');
-      o.value = v;
-      o.textContent = label;
-      if (routeCur === v) o.selected = true;
-      routeSel.appendChild(o);
-    });
-    routeSel.addEventListener('change', async () => {
-      const val = routeSel.value;
-      const curFilters = { ...(window.__listState[currentSection].filters || {}) };
-      curFilters.route_type = val;
-      window.__listState[currentSection].filters = curFilters;
-      window.__listState[currentSection].page = 1;
-      const data = await loadSection();
-      renderSummary(data);
-    });
-    topControls.appendChild(routeLabel);
-    topControls.appendChild(routeSel);
-
-    // Scope dropdown (Both / Weekly / Daily)
-    const scopeLabel = document.createElement('span');
-    scopeLabel.className = 'mini';
-    scopeLabel.textContent = 'Type:';
-    const scopeSel = document.createElement('select');
-    const scopeOpts = [
-      ['ALL',    'Both'],
-      ['WEEKLY', 'Weekly only'],
-      ['DAILY',  'Daily only']
-    ];
-    const scopeCur = (stFilters.sheet_scope || 'ALL').toUpperCase();
-    scopeOpts.forEach(([v, label]) => {
-      const o = document.createElement('option');
-      o.value = v;
-      o.textContent = label;
-      if (scopeCur === v) o.selected = true;
-      scopeSel.appendChild(o);
-    });
-    scopeSel.addEventListener('change', async () => {
-      const val = scopeSel.value;
-      const curFilters = { ...(window.__listState[currentSection].filters || {}) };
-      curFilters.sheet_scope = val;
-      window.__listState[currentSection].filters = curFilters;
-      window.__listState[currentSection].page = 1;
-      const data = await loadSection();
-      renderSummary(data);
-    });
-    topControls.appendChild(scopeLabel);
-    topControls.appendChild(scopeSel);
-
-    // Flags: adjusted / QR / needs attention
-    const mkFlag = (name, label) => {
-      const wrap = document.createElement('label');
-      wrap.className = 'mini';
-      wrap.style.display = 'flex';
-      wrap.style.alignItems = 'center';
-      wrap.style.gap = '4px';
-      const cb = document.createElement('input');
-      cb.type = 'checkbox';
-      cb.checked = !!stFilters[name];
-      cb.addEventListener('change', async () => {
-        const curFilters = { ...(window.__listState[currentSection].filters || {}) };
-        curFilters[name] = cb.checked ? true : false;
-        window.__listState[currentSection].filters = curFilters;
-        window.__listState[currentSection].page = 1;
-        const data = await loadSection();
-        renderSummary(data);
-      });
-      wrap.appendChild(cb);
-      wrap.appendChild(document.createTextNode(label));
-      return wrap;
-    };
-
-    topControls.appendChild(mkFlag('is_adjusted', 'Adjusted only'));
-    topControls.appendChild(mkFlag('is_qr', 'QR only'));
-    topControls.appendChild(mkFlag('needs_attention', 'Needs attention'));
-  }
-
-  // Columns button
-  const btnCols = document.createElement('button');
-  btnCols.textContent = 'Columns';
-  btnCols.style.cssText = 'border:1px solid var(--line);background:#0b152a;color:var(--text);padding:4px 8px;border-radius:8px;cursor:pointer';
-  btnCols.addEventListener('click', () => openColumnsDialog(currentSection));
-  topControls.appendChild(btnCols);
-
-
-  const spacerTop = document.createElement('div'); spacerTop.style.flex = '1';
-  topControls.appendChild(spacerTop);
-
-  // Selected info / clear
-  const selInfo = document.createElement('div'); selInfo.className = 'mini';
-  const renderSelInfo = ()=>{ selInfo.textContent = (sel.ids.size > 0) ? `${sel.ids.size} selected.` : ''; };
-  renderSelInfo();
-
-  const clearBtn = document.createElement('button');
-  clearBtn.textContent = 'Clear selection';
-  clearBtn.style.cssText = 'border:1px solid var(--line);background:#0b152a;color:var(--text);padding:4px 8px;border-radius:8px;cursor:pointer;display:none';
-  clearBtn.onclick = ()=>{
-    clearSelection(); renderSelInfo();
-    Array.from(document.querySelectorAll('input.row-select')).forEach(cb=>{ cb.checked = false; });
-    const hdr = byId('summarySelectAll'); if (hdr) { hdr.checked=false; hdr.indeterminate=false; }
-    updateButtons();
-  };
-
-  topControls.appendChild(selInfo);
-  topControls.appendChild(clearBtn);
-  content.appendChild(topControls);
-
-  // ── single table (header + body) inside scroll host ────────────────────────
-  const bodyWrap = document.createElement('div');
-  bodyWrap.className = 'summary-body';
-  content.appendChild(bodyWrap);
-
-  const tbl = document.createElement('table');
-  tbl.className = 'grid';
-
-  const thead = document.createElement('thead');
-  thead.style.borderBottom = '1px solid var(--line)';
-  const trh = document.createElement('tr');
-  thead.appendChild(trh);
-  tbl.appendChild(thead);
-
-  const tb = document.createElement('tbody');
-  tbl.appendChild(tb);
-  bodyWrap.appendChild(tbl);
-
-  let btnFocus, btnSave, btnResolve;
-
-  const computeHeaderState = ()=>{
-    const idsVisible = rows.map(r => String(r.id || ''));
-    const selectedOfVisible = idsVisible.filter(id => sel.ids.has(id)).length;
-    const hdrCbEl = byId('summarySelectAll');
-    if (hdrCbEl) {
-      hdrCbEl.checked = (idsVisible.length > 0 && selectedOfVisible === idsVisible.length);
-      hdrCbEl.indeterminate = (selectedOfVisible > 0 && selectedOfVisible < idsVisible.length);
+  // processing_status filter
+  const procStatusParamRaw = q('processing_status');
+  let procStatusList = null;
+  if (procStatusParamRaw) {
+    const v = procStatusParamRaw.trim();
+    if (v && v.toUpperCase() !== 'ALL') {
+      procStatusList = v
+        .split(',')
+        .map(s => s.trim().toUpperCase())
+        .filter(Boolean);
     }
-  };
-
-  const updateButtons = ()=>{
-    const any = sel.ids.size > 0;
-    if (btnFocus)   btnFocus.disabled   = !any;
-    if (btnSave)    btnSave.disabled    = !any;
-    if (btnResolve) btnResolve.disabled = !any;
-    clearBtn.style.display = any ? '' : 'none';
-    renderSelInfo();
-  };
-
-  // Determine columns (using server prefs)
-  const cols = getVisibleColumnsForSection(currentSection, rows);
-
-  // Header checkbox (first column)
-  const thSel = document.createElement('th');
-  thSel.style.width = '40px';
-  thSel.style.minWidth = '40px';
-  thSel.style.maxWidth = '40px';
-
-  const hdrCb = document.createElement('input'); hdrCb.type='checkbox'; hdrCb.id='summarySelectAll';
-  hdrCb.addEventListener('click', (e)=>{
-    e.stopPropagation();
-    const idsVisible = rows.map(r => String(r.id || ''));
-    const wantOn = !!hdrCb.checked;
-    idsVisible.forEach(id => { if (wantOn) sel.ids.add(id); else sel.ids.delete(id); });
-    Array.from(document.querySelectorAll('input.row-select')).forEach(cb=>{ cb.checked = wantOn; });
-    computeHeaderState();
-    updateButtons();
-  });
-  thSel.appendChild(hdrCb);
-  trh.appendChild(thSel);
-
-  // Build header cells with friendly labels, resizer handles, and click-to-sort
-  cols.forEach(c=>{
-    const th = document.createElement('th');
-    th.dataset.colKey = String(c);
-    th.style.cursor = 'pointer';
-
-    const label = getFriendlyHeaderLabel(currentSection, c);
-    const isActive = sortState && sortState.key === c;
-    const arrow = isActive ? (sortState.dir === 'asc' ? ' ▲' : ' ▼') : '';
-    th.textContent = label + arrow;
-
-    const res = document.createElement('div');
-    res.className = 'col-resizer';
-    res.title = 'Drag to resize. Double-click to reset.';
-    res.style.cssText = 'position:absolute;right:0;top:0;width:6px;height:100%;cursor:col-resize;user-select:none;';
-    th.appendChild(res);
-
-    th.draggable = true;
-
-    th.addEventListener('click', async (ev) => {
-      if (ev.target && ev.target.closest && ev.target.closest('.col-resizer')) return;
-
-      const colKey = th.dataset.colKey;
-      if (!colKey) return;
-
-      window.__listState = window.__listState || {};
-      const st2 = (window.__listState[currentSection] ||= {
-        page: 1,
-        pageSize: 50,
-        total: null,
-        hasMore: false,
-        filters: null,
-        sort: { key: null, dir: 'asc' }
-      });
-
-      if (!st2.sort || typeof st2.sort !== 'object') {
-        st2.sort = { key: null, dir: 'asc' };
-      }
-
-      const prevDir = (st2.sort && st2.sort.key === colKey) ? st2.sort.dir : null;
-      const nextDir = (prevDir === 'asc') ? 'desc' : 'asc';
-
-      st2.sort = { key: colKey, dir: nextDir };
-      st2.page = 1;
-
-      try {
-        const data = await loadSection();
-        renderSummary(data);
-      } catch (e) {
-        console.error('Failed to apply sort', e);
-      }
-    });
-
-    trh.appendChild(th);
-  });
-
-  // Body rows
-  if (currentSection === 'candidates') {
-    tbl.style.width = 'auto';
   }
 
-  rows.forEach(r=>{
-    const tr = document.createElement('tr');
-    tr.dataset.id = (r && r.id) ? String(r.id) : '';
-    tr.dataset.section = currentSection;
+  const allowedSort = {
+    week_ending_date:    'week_ending_date',
+    client_name:         'client_name',
+    candidate_name:      'candidate_name',
+    summary_stage:       'summary_stage',
+    route_type:          'route_type',
+    sheet_scope:         'sheet_scope',
+    total_pay_ex_vat:    'total_pay_ex_vat',
+    total_charge_ex_vat: 'total_charge_ex_vat',
+    margin_ex_vat:       'margin_ex_vat',
+    pay:                 'total_pay_ex_vat',
+    charge:              'total_charge_ex_vat',
+    margin:              'margin_ex_vat'
+  };
 
-    const tdSel = document.createElement('td');
-    tdSel.style.width = '40px';
-    tdSel.style.minWidth = '40px';
-    tdSel.style.maxWidth = '40px';
+  const defaultOrderCol = 'week_ending_date';
+  const orderCol = allowedSort[orderByParam] || defaultOrderCol;
+  const orderDir = (orderDirParam === 'asc') ? 'asc' : 'desc';
 
-    const cb = document.createElement('input'); cb.type='checkbox'; cb.className='row-select';
-    cb.checked = isRowSelected(tr.dataset.id);
-    cb.addEventListener('click', (e)=>{
-      e.stopPropagation();
-      const id = tr.dataset.id; setRowSelected(id, cb.checked);
-      computeHeaderState();
-      updateButtons();
-    });
-    tdSel.appendChild(cb); tr.appendChild(tdSel);
+  let api =
+    `${env.SUPABASE_URL}/rest/v1/v_timesheets_summary?select=*` +
+    `&limit=${pageSize}&offset=${(page-1)*pageSize}`;
 
-    cols.forEach(c=>{
-      const td = document.createElement('td');
-      td.dataset.colKey = String(c);
-      const v = r[c];
+  if (clientId)    api += `&client_id=eq.${enc(clientId)}`;
+  if (candidateId) api += `&candidate_id=eq.${enc(candidateId)}`;
+  if (stage && stage.toUpperCase() !== 'ALL') api += `&summary_stage=eq.${enc(stage)}`;
 
-      if (currentSection === 'candidates' && c === 'job_titles_display') {
-        // Show only secondary job titles (primary is shown separately)
-        const raw = typeof r.job_titles_display === 'string' ? r.job_titles_display : (v || '');
-        if (!raw.trim()) {
-          td.textContent = '';
-        } else {
-          const parts = raw.split(';').map(s => s.trim()).filter(Boolean);
-          const rest  = parts.slice(1); // drop primary
-          td.textContent = rest.join('; ');
-        }
-      } else {
-        td.textContent = formatDisplayValue(c, v);
-      }
-
-      tr.appendChild(td);
-    });
-
-    tb.appendChild(tr);
-  });
-
-  // ── Apply pending focus (from operations like pay-method change, change rates) ──
-  try {
-    if (window.__pendingFocus && window.__pendingFocus.section === currentSection) {
-      const pf   = window.__pendingFocus;
-      const ids  = Array.isArray(pf.ids) ? pf.ids.map(String) : [];
-      const pids = Array.isArray(pf.primaryIds) ? pf.primaryIds.map(String) : [];
-      const idSet   = new Set(ids);
-      const priSet  = new Set(pids);
-      let firstPrimaryRow = null;
-
-      tb.querySelectorAll('tr').forEach(tr => {
-        const id = String(tr.dataset.id || '');
-        if (idSet.has(id)) {
-          tr.classList.add('pending-focus');
-          if (priSet.has(id)) tr.classList.add('pending-focus-primary');
-          if (!firstPrimaryRow && priSet.has(id)) {
-            firstPrimaryRow = tr;
-          }
-        }
-      });
-
-      if (firstPrimaryRow) {
-        // Scroll primary row into view inside the summary body
-        try {
-          firstPrimaryRow.scrollIntoView({ block: 'center', behavior: 'smooth' });
-        } catch {}
-      }
-
-      // Consume focus so it doesn't re-apply on subsequent renders
-      window.__pendingFocus = null;
+  // NEW: aggregated Route handling
+  if (routeType && routeType !== 'ALL') {
+    if (routeType === 'ELECTRONIC') {
+      api += `&route_type=in.(DAILY_ELECTRONIC,WEEKLY_ELECTRONIC)`;
+    } else if (routeType === 'MANUAL') {
+      api += `&route_type=in.(DAILY_MANUAL,WEEKLY_MANUAL)`;
+    } else if (routeType === 'NHSP') {
+      api += `&route_type=in.(WEEKLY_NHSP,WEEKLY_NHSP_ADJUSTMENT)`;
+    } else if (routeType === 'HEALTHROSTER') {
+      api += `&route_type=eq.WEEKLY_HEALTHROSTER`;
+    } else {
+      // fallback – treat as direct match if we ever pass a raw route_type
+      api += `&route_type=eq.${enc(routeType)}`;
     }
-  } catch (e) {
-    console.warn('pendingFocus application failed (non-fatal)', e);
   }
 
-  // ── NEW: Candidates row context menu (Open / Advances & loans) ─────────────
-  if (currentSection === 'candidates') {
-    // One-time global helpers for the context menu
-    if (!window.__ensureCandidateRowMenu) {
-      window.__candRowMenuEl = null;
-      window.__candRowMenuRow = null;
+  if (sheetScope && sheetScope !== 'ALL') api += `&sheet_scope=eq.${enc(sheetScope)}`;
+  if (qrStatus)    api += `&qr_status=eq.${enc(qrStatus)}`;
+  if (weFrom)      api += `&week_ending_date=gte.${enc(weFrom)}`;
+  if (weTo)        api += `&week_ending_date=lte.${enc(weTo)}`;
 
-      window.__hideCandidateRowMenu = function() {
-        const el = window.__candRowMenuEl;
-        if (el) el.style.display = 'none';
-        window.__candRowMenuRow = null;
-      };
+  if (isAdjusted === 'true')  api += `&is_adjusted=eq.true`;
+  if (isAdjusted === 'false') api += `&is_adjusted=eq.false`;
 
-      window.__ensureCandidateRowMenu = function() {
-        if (!window.__candRowMenuEl) {
-          const menu = document.createElement('div');
-          menu.id = 'candidateRowContextMenu';
-          menu.style.position = 'fixed';
-          menu.style.zIndex = '9999';
-          menu.style.background = '#0b152a';
-          menu.style.border = '1px solid var(--line)';
-          menu.style.borderRadius = '6px';
-          menu.style.minWidth = '180px';
-          menu.style.boxShadow = '0 4px 12px rgba(0,0,0,0.5)';
-          menu.style.display = 'none';
-          menu.innerHTML = `
-            <div class="ctx-item" data-action="open" style="padding:6px 10px;cursor:pointer;">Open candidate…</div>
-            <div class="ctx-item" data-action="advances" style="padding:6px 10px;cursor:pointer;border-top:1px solid var(--line);">
-              Advances / loans…
-            </div>
-          `;
-          menu.addEventListener('click', (e) => {
-            const item = e.target.closest('.ctx-item');
-            if (!item) return;
-            const action = item.getAttribute('data-action') || '';
-            const row = window.__candRowMenuRow;
-            window.__hideCandidateRowMenu();
-            if (!row) return;
-            if (action === 'open') {
-              if (typeof openCandidate === 'function') openCandidate(row);
-            } else if (action === 'advances') {
-              if (typeof openCandidateAdvancesModal === 'function') openCandidateAdvancesModal(row);
-            }
-          });
-          document.body.appendChild(menu);
-          window.__candRowMenuEl = menu;
+  // QR-only filter is still supported if explicitly requested via query,
+  // but Route=QR now comes via is_qr on the query string.
+  if (isQr === 'true')        api += `&is_qr=eq.true`;
+  if (isQr === 'false')       api += `&is_qr=eq.false`;
 
-          document.addEventListener('click', (ev) => {
-            const el = window.__candRowMenuEl;
-            if (!el || el.style.display === 'none') return;
-            if (ev.target && el.contains(ev.target)) return;
-            window.__hideCandidateRowMenu();
-          }, true);
+  if (needsAttention === 'true')  api += `&needs_attention=eq.true`;
+  if (needsAttention === 'false') api += `&needs_attention=eq.false`;
 
-          document.addEventListener('contextmenu', (ev) => {
-            const el = window.__candRowMenuEl;
-            if (!el || el.style.display === 'none') return;
-            // Right-click outside menu hides it; right-click on menu itself is allowed
-            if (ev.target && el.contains(ev.target)) return;
-            window.__hideCandidateRowMenu();
-          }, true);
+  // NEW: Candidate Paid / Client Invoiced filters from Tools
+  if (candidatePaid === 'true') {
+    // Any TSFIN with paid_at_utc NOT NULL → fully paid
+    api += `&paid_at_utc=is.not.null`;
+  }
+  if (clientInvoiced === 'true') {
+    // Any TSFIN with locked_by_invoice_id NOT NULL → fully invoiced
+    api += `&locked_by_invoice_id=is.not.null`;
+  }
 
-          window.addEventListener('scroll', () => window.__hideCandidateRowMenu(), true);
-        }
-        return window.__candRowMenuEl;
-      };
+  // processing_status filter
+  if (procStatusList && procStatusList.length) {
+    if (procStatusList.length === 1) {
+      api += `&processing_status=eq.${enc(procStatusList[0])}`;
+    } else {
+      api += `&processing_status=in.(${procStatusList.map(enc).join(',')})`;
     }
-
-    tb.addEventListener('contextmenu', (ev) => {
-      const tr = ev.target && ev.target.closest('tr[data-id]');
-      if (!tr) return;
-      ev.preventDefault();
-
-      const id = String(tr.dataset.id || '');
-      const row = currentRows.find(x => String(x.id || '') === id) || rows.find(x => String(x.id || '') === id);
-      if (!row) return;
-
-      window.__candRowMenuRow = row;
-      const menu = window.__ensureCandidateRowMenu();
-      if (!menu) return;
-
-      const rect = bodyWrap.getBoundingClientRect();
-      const x = ev.clientX;
-      const y = ev.clientY;
-
-      menu.style.left = `${x}px`;
-      menu.style.top  = `${y}px`;
-      menu.style.display = 'block';
-    });
   }
 
-  tb.addEventListener('click', (ev) => {
-    const tr = ev.target && ev.target.closest('tr'); if (!tr) return;
-    if (ev.target && ev.target.classList && ev.target.classList.contains('row-select')) return;
-    tb.querySelectorAll('tr.selected').forEach(n => n.classList.remove('selected'));
-    tr.classList.add('selected');
-    const id = tr.dataset.id;
-    currentSelection = currentRows.find(x => String(x.id) === id) || null;
-  });
-
-  tb.addEventListener('dblclick', (ev) => {
-    const tr = ev.target && ev.target.closest('tr'); if (!tr) return;
-    if (!confirmDiscardChangesIfDirty()) return;
-    tb.querySelectorAll('tr.selected').forEach(n => n.classList.remove('selected'));
-    tr.classList.add('selected');
-    const id = tr.dataset.id;
-    const row = currentRows.find(x => String(x.id) === id) || null;
-    if (!row) return;
-    const beforeDepth = (window.__modalStack && window.__modalStack.length) || 0;
-    openDetails(row);
-    setTimeout(() => {
-      const afterDepth = (window.__modalStack && window.__modalStack.length) || 0;
-      if (afterDepth > beforeDepth) tb.querySelectorAll('tr.selected').forEach(n => n.classList.remove('selected'));
-    }, 0);
-  });
-
-  // ── Apply widths + wire resize/reorder + header context menu ────────────────
-  applyUserGridPrefs(currentSection, tbl, cols);
-  wireGridColumnResizing(currentSection, tbl);
-  wireGridColumnReorder(currentSection, tbl);
-  attachHeaderContextMenu(currentSection, tbl);
-
-  // Footer/pager
-  const pager = document.createElement('div');
-  pager.style.cssText = 'display:flex;align-items:center;gap:6px;padding:8px 10px;border-top:1px solid var(--line);';
-  const info = document.createElement('span'); info.className = 'mini';
-
-  const mkBtn = (label, disabled, onClick) => {
-    const b = document.createElement('button');
-    b.textContent = label; b.disabled = !!disabled;
-    b.style.cssText = 'border:1px solid var(--line);background:#0b152a;color:var(--text);padding:4px 8px;border-radius:8px;cursor:pointer';
-    if (!disabled) b.addEventListener('click', onClick);
-    return b;
-  };
-
-  const hasMore = !!st.hasMore;
-  const totalKnown = (typeof st.total === 'number');
-  const current = page;
-  let maxPageToShow;
-  if (totalKnown && pageSize !== 'ALL') maxPageToShow = Math.max(1, Math.ceil(st.total / Number(pageSize)));
-  else if (pageSize === 'ALL') maxPageToShow = 1;
-  else maxPageToShow = hasMore ? (current + 1) : current;
-
-  const prevBtn = mkBtn('Prev', current <= 1, async () => {
-    window.__listState[currentSection].page = Math.max(1, current - 1);
-    const data = await loadSection();
-    renderSummary(data);
-  });
-  pager.appendChild(prevBtn);
-
-  const makePageLink = (n) => mkBtn(String(n), n === current, async () => {
-    window.__listState[currentSection].page = n;
-    const data = await loadSection();
-    renderSummary(data);
-  });
-
-  const pages = [];
-  if (maxPageToShow <= 7) { for (let n=1; n<=maxPageToShow; n++) pages.push(n); }
-  else {
-    pages.push(1);
-    if (current > 3) pages.push('…');
-    for (let n=Math.max(2, current-1); n<=Math.min(maxPageToShow-1, current+1); n++) pages.push(n);
-    if (hasMore || current+1 < maxPageToShow) pages.push('…');
-    pages.push(maxPageToShow);
-  }
-  pages.forEach(pn => {
-    if (pn === '…') { const span = document.createElement('span'); span.textContent = '…'; span.className = 'mini'; pager.appendChild(span); }
-    else pager.appendChild(makePageLink(pn));
-  });
-
-  const nextBtn = mkBtn('Next', (pageSize === 'ALL') || (!hasMore && (!totalKnown || current >= maxPageToShow)), async () => {
-    window.__listState[currentSection].page = current + 1;
-    const data = await loadSection();
-    renderSummary(data);
-  });
-  pager.appendChild(nextBtn);
-
-  if (pageSize === 'ALL') info.textContent = `Showing all ${rows.length} ${currentSection}.`;
-  else if (totalKnown) {
-    const ps = Number(pageSize);
-    const start = (current-1)*ps + 1;
-    const end = Math.min(start + rows.length - 1, st.total || start - 1);
-    info.textContent = `Showing ${start}–${end}${st.total!=null ? ` of ${st.total}` : ''}`;
+  if (orderByParam && allowedSort[orderByParam]) {
+    api += `&order=${enc(orderCol)}.${orderDir},client_name.asc,candidate_name.asc`;
   } else {
-    const ps = Number(pageSize);
-    const start = (current-1)*ps + 1;
-    const end = start + rows.length - 1;
-    info.textContent = `Showing ${start}–${end}${hasMore ? '+' : ''}`;
-  }
-  const spacer = document.createElement('div'); spacer.style.flex = '1';
-  pager.appendChild(spacer); pager.appendChild(info);
-  content.appendChild(pager);
-
-  // Selection toolbar
-  const selBar = document.createElement('div');
-  selBar.style.cssText = 'display:flex;justify-content:flex-end;gap:8px;padding:6px 10px;border-top:1px dashed var(--line)';
-  btnFocus = document.createElement('button');
-  btnFocus.title = 'Focus on records';
-  btnFocus.textContent = '🔍 Focus';
-  btnFocus.style.cssText = 'border:1px solid var(--line);background:#0b152a;color:var(--text);padding:4px 8px;border-radius:8px;cursor:pointer';
-
-  btnSave = document.createElement('button');
-  btnSave.title = 'Save selection';
-  btnSave.textContent = '🔍 Save';
-  btnSave.style.cssText = btnFocus.style.cssText;
-
-  const btnLoad = document.createElement('button');
-  btnLoad.title = 'Load selection';
-  btnLoad.textContent = '🔍 Load';
-  btnLoad.style.cssText = btnFocus.style.cssText;
-
-  btnFocus.addEventListener('click', async () => {
-    if (sel.ids.size === 0) return;
-    const ids = Array.from(sel.ids);
-    try {
-      if (typeof applySelectionAsFilter === 'function') {
-        await applySelectionAsFilter(currentSection, { ids });
-      } else {
-        window.__listState = window.__listState || {};
-        const st2 = (window.__listState[currentSection] ||= { page:1, pageSize:50, total:null, hasMore:false, filters:null, sort:{ key:null, dir:'asc' } });
-        st2.page = 1; st2.filters = { ...(st2.filters||{}), ids };
-        const rows2 = await search(currentSection, st2.filters);
-        renderSummary(rows2);
-      }
-    } catch (e) { console.error('Focus failed', e); }
-  });
-
-  btnSave.addEventListener('click', async () => {
-    if (sel.ids.size === 0) return;
-    try { await openSaveSelectionModal ? openSaveSelectionModal(currentSection) : null; } catch {}
-  });
-
-  btnLoad.addEventListener('click', async () => {
-    try {
-      if (typeof openLoadSelectionModal === 'function') await openLoadSelectionModal(currentSection);
-    } catch {}
-  });
-
-  selBar.appendChild(btnFocus);
-  selBar.appendChild(btnSave);
-  selBar.appendChild(btnLoad);
-
-  // NEW: Timesheets Resolve… button (uses current selection)
-  if (currentSection === 'timesheets' && typeof openTimesheetsResolveModal === 'function') {
-    btnResolve = document.createElement('button');
-    btnResolve.title = 'Resolve candidate/client for selected timesheets';
-    btnResolve.textContent = 'Resolve…';
-    btnResolve.style.cssText = btnFocus.style.cssText;
-    btnResolve.disabled = sel.ids.size === 0;
-
-    btnResolve.addEventListener('click', () => {
-      if (sel.ids.size === 0) return;
-      const selectedRows = currentRows.filter(r => sel.ids.has(String(r.id || '')));
-      if (!selectedRows.length) return;
-      openTimesheetsResolveModal(selectedRows);
-    });
-
-    selBar.appendChild(btnResolve);
+    api += `&order=week_ending_date.desc,client_name.asc,candidate_name.asc`;
   }
 
-  content.appendChild(selBar);
-
-  // Restore scroll memory on inner summary-body (data rows only)
   try {
-    const scrollHost = content.querySelector('.summary-body');
-    if (scrollHost) {
-      scrollHost.__activeMemKey = memKey;
-      scrollHost.scrollTop = prevScrollY;
-      if (!scrollHost.__scrollMemHooked) {
-        scrollHost.addEventListener('scroll', () => {
-          const k = scrollHost.__activeMemKey || memKey;
-          window.__scrollMemory[k] = scrollHost.scrollTop || 0;
-        });
-        scrollHost.__scrollMemHooked = true;
-      }
-    }
-  } catch {}
-
-  // Initial states
-  computeHeaderState();
-  updateButtons();
-
-  try { primeSummaryMembership(currentSection, fp); } catch (e) { /* non-blocking */ }
+    const { rows } = await sbFetch(env, api);
+    return withCORS(env, req, ok({
+      items: rows || [],
+      page,
+      page_size: pageSize,
+      count: (rows || []).length
+    }));
+  } catch (e) {
+    return withCORS(env, req, serverError(`Failed to fetch timesheets summary: ${e?.message || e}`));
+  }
 }
+
 
 // Close any existing floating menu
 function closeRelatedMenu(){
@@ -35329,27 +34702,43 @@ async function listTimesheetsSummary(filters = {}) {
   const stage = (f.summary_stage || '').toUpperCase();
   if (stage && stage !== 'ALL') qs.set('summary_stage', stage);
 
-  // Route filter
+  // Route filter (aggregated: ELECTRONIC / MANUAL / NHSP / HEALTHROSTER / QR)
   const route = (f.route_type || '').toUpperCase();
-  if (route && route !== 'ALL') qs.set('route_type', route);
+  if (route && route !== 'ALL') {
+    if (route === 'QR') {
+      // Route = QR timesheets → filter via is_qr=true
+      qs.set('is_qr', 'true');
+    } else {
+      // Other route codes handled by backend switch (ELECTRONIC/MANUAL/NHSP/HEALTHROSTER)
+      qs.set('route_type', route);
+    }
+  }
 
   // Scope filter
   const scope = (f.sheet_scope || '').toUpperCase();
   if (scope && scope !== 'ALL') qs.set('sheet_scope', scope);
 
-  // NEW: processing_status filter (supports single or comma-joined list)
+  // processing_status filter (supports single or comma-joined list)
   const procStatusRaw = f.processing_status || '';
   if (procStatusRaw && procStatusRaw !== 'ALL') {
-    // If caller passed a comma-joined list, keep as-is; otherwise uppercase the single value
     const procStatus = procStatusRaw.includes(',')
       ? procStatusRaw
       : procStatusRaw.toUpperCase();
     qs.set('processing_status', procStatus);
   }
 
-  if (f.is_adjusted === true)     qs.set('is_adjusted', 'true');
-  if (f.is_qr === true)           qs.set('is_qr', 'true');
+  // Adjusted-only flag
+  if (f.is_adjusted === true)  qs.set('is_adjusted', 'true');
+
+  // QR-only flag still supported if someone uses it directly (though Route=QR is preferred)
+  if (f.is_qr === true)        qs.set('is_qr', 'true');
+
+  // Needs attention (also wired from Tools)
   if (f.needs_attention === true) qs.set('needs_attention', 'true');
+
+  // NEW: Tools filters – Candidate Paid / Client Invoiced
+  if (f.candidate_paid === true)   qs.set('candidate_paid', 'true');
+  if (f.client_invoiced === true)  qs.set('client_invoiced', 'true');
 
   const sortState = st.sort || { key: null, dir: 'asc' };
   const sortKeyRaw = (sortState.key || '').toLowerCase();
@@ -35403,6 +34792,8 @@ async function listTimesheetsSummary(filters = {}) {
 
   return rows;
 }
+
+
 
 // ======== Manual weekly upsert (contract weeks) ========
 
