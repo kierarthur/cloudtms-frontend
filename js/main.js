@@ -22987,7 +22987,7 @@ function renderTop() {
     L('renderTop (global): created btnEdit');
   }
 
-  (function dragWire(){
+   (function dragWire(){
     if(!header||!modalNode) return;
     const onDown = e=>{
       if ((e.button!==0 && e.type==='mousedown') || e.target.closest('button')) return;
@@ -22995,7 +22995,27 @@ function renderTop() {
       modalNode.style.position='fixed'; modalNode.style.left=R.left+'px'; modalNode.style.top=R.top+'px';
       modalNode.style.right='auto'; modalNode.style.bottom='auto'; modalNode.style.transform='none'; modalNode.classList.add('dragging');
       const ox=e.clientX-R.left, oy=e.clientY-R.top;
-      document.onmousemove = ev=>{ let l=ev.clientX-ox, t=ev.clientY-oy; const ml=Math.max(0,window.innerWidth-R.width), mt=Math.max(0,window.innerHeight-R.height); if(l<0)l=0; if(t<0)t=0; if(l>ml)l=ml; if(t>mt)t=mt; modalNode.style.left=l+'px'; modalNode.style.top=t+'px'; };
+      document.onmousemove = ev=>{
+        let l = ev.clientX - ox;
+        let t = ev.clientY - oy;
+
+        const vw = window.innerWidth;
+        const vh = window.innerHeight;
+
+        // Allow the modal to go mostly off-screen, but keep ~20% visible
+        const minLeft = -R.width * 0.8;                 // up to ~80% off the left
+        const maxLeft = vw - R.width * 0.2;             // leave ~20% visible on the right
+        const minTop  = -R.height * 0.8;                // up to ~80% off the top
+        const maxTop  = vh - R.height * 0.2;            // leave ~20% visible at the bottom
+
+        if (l < minLeft) l = minLeft;
+        if (l > maxLeft) l = maxLeft;
+        if (t < minTop)  t = minTop;
+        if (t > maxTop)  t = maxTop;
+
+        modalNode.style.left = l + 'px';
+        modalNode.style.top  = t + 'px';
+      };
       document.onmouseup   = ()=>{
         modalNode.classList.remove('dragging');
         const R2 = modalNode.getBoundingClientRect();
@@ -23011,6 +23031,7 @@ function renderTop() {
     const prev=top._detachGlobal;
     top._detachGlobal = ()=>{ try{header.removeEventListener('mousedown',onDown);}catch{} try{header.removeEventListener('dblclick',onDbl);}catch{} document.onmousemove=null; document.onmouseup=null; if(typeof prev==='function'){ try{prev();}catch{} } };
   })();
+
   const wantApply = (isChild && !top.noParentGate) ||
                     (top.kind === 'client-rate' || top.kind === 'candidate-override' || top.kind === 'rate-presets-picker');
 
