@@ -25170,6 +25170,7 @@ function installGlobalFileDropGuards() {
 }
 
 // Attach weekly summary behaviour (Assign buttons + optional group selection)
+// Attach weekly summary behaviour (Assign buttons + optional group selection)
 function wireWeeklyImportSummaryActions(type, importId) {
   const t = String(type || '').toUpperCase();
   if (t !== 'NHSP' && t !== 'HR_WEEKLY') return;
@@ -25179,9 +25180,9 @@ function wireWeeklyImportSummaryActions(type, importId) {
   if (root.__weeklyWired) return;
   root.__weeklyWired = true;
 
-  window.__importSummaryState    = window.__importSummaryState    || {};
-  window.__weeklyImportMappings  = window.__weeklyImportMappings  || {};
-  window.__weeklySelectedGroups  = window.__weeklySelectedGroups  || {};
+  window.__importSummaryState   = window.__importSummaryState   || {};
+  window.__weeklyImportMappings = window.__weeklyImportMappings || {};
+  window.__weeklySelectedGroups = window.__weeklySelectedGroups || {};
 
   // Ensure mapping container exists for this type+importId
   if (!window.__weeklyImportMappings[t]) {
@@ -25191,32 +25192,64 @@ function wireWeeklyImportSummaryActions(type, importId) {
     window.__weeklySelectedGroups[t] = {};
   }
 
-  const ensureMappings = () => {
-    let m = window.__weeklyImportMappings[t][importId];
+  const ensureMappings = (id) => {
+    const key = String(id || importId || '');
+    let mRoot = window.__weeklyImportMappings[t];
+    let m = mRoot[key];
     if (!m) {
       m = {
         candidate_mappings: [],
         client_aliases: []
       };
-      window.__weeklyImportMappings[t][importId] = m;
+      mRoot[key] = m;
     }
     return m;
   };
 
-  const ensureSelectedSet = () => {
-    let s = window.__weeklySelectedGroups[t][importId];
+  const ensureSelectedSet = (id) => {
+    const key = String(id || importId || '');
+    let sRoot = window.__weeklySelectedGroups[t];
+    let s = sRoot[key];
     if (!(s instanceof Set)) {
       s = new Set();
-      window.__weeklySelectedGroups[t][importId] = s;
+      sRoot[key] = s;
     }
     return s;
   };
 
-  const state = window.__importSummaryState[t];
-  const rows  = state && Array.isArray(state.rows) ? state.rows : [];
+  // Always read the latest state/rows so refreshes & re-renders work
+  const getState = () => {
+    const state = window.__importSummaryState[t] || {};
+    const rows  = Array.isArray(state.rows) ? state.rows : [];
+    const id    = state.import_id || importId;
+    return { state, rows, importId: id };
+  };
+
+  const norm = (s) => String(s || '').trim().toLowerCase();
+
+  // Helper: best-effort fetch of candidate name for warning
+  async function fetchCandidateName(candId) {
+    try {
+      if (typeof authFetch !== 'function' || typeof API !== 'function') return null;
+      const res  = await authFetch(API(`/api/candidates/${encodeURIComponent(candId)}`));
+      const text = await res.text();
+      if (!res.ok || !text) return null;
+      const json = JSON.parse(text);
+      const c = json && json.candidate ? json.candidate : json;
+      if (!c) return null;
+      return (
+        c.display_name ||
+        c.name ||
+        `${c.first_name || ''} ${c.last_name || ''}`.trim() ||
+        null
+      );
+    } catch {
+      return null;
+    }
+  }
 
   // Handle Assign candidate/client buttons and (optionally) checkbox selection
-  root.addEventListener('click', (ev) => {
+  root.addEventListener('click', async (ev) => {
     const btn = ev.target.closest('button[data-act]');
     if (!btn) return;
 
@@ -25225,30 +25258,79 @@ function wireWeeklyImportSummaryActions(type, importId) {
       return;
     }
 
+    const { rows, importId: currentImportId } = getState();
     const idx = Number(btn.getAttribute('data-row-idx') || '-1');
     const row = (idx >= 0 && idx < rows.length) ? rows[idx] : null;
     if (!row) return;
 
-    const mappings = ensureMappings();
+    const mappings = ensureMappings(currentImportId);
 
     if (act === 'weekly-resolve-candidate') {
       const staffRaw = row.staff_name || row.staff_raw || '';
       const hospRaw  = row.hospital_or_trust || row.unit || row.hospital_norm || '';
 
       const candId = (prompt(
-        `Enter candidate_id to map staff "${staffRaw}" (hospital: "${hospRaw}") to:`,
+        `Enter candidate_id to map staff "${staffRaw}" (site: "${hospRaw}") to:`,
         row.candidate_id || ''
       ) || '').trim();
 
       if (!candId) return;
 
+      // Try to fetch candidate name for a smarter warning
+      let candName = await fetchCandidateName(candId);
+      const staffNorm = norm(staffRaw);
+      const candNorm  = norm(candName || '');
+      const staffTokens = staffNorm ? staffNorm.split(/\s+/).filter(Boolean) : [];
+      const candTokens  = candNorm  ? candNorm.split(/\s+/).filter(Boolean)  : [];
+
+      let confirmMsg;
+      if (candName && staffTokens.length && candTokens.length) {
+        const hasSharedToken = staffTokens.some(t => candTokens.includes(t));
+        const workDateYmd =
+          row.work_date ||
+          row.date_local ||
+          row.date ||
+          row.week_ending_date ||
+          null;
+
+        if (!hasSharedToken) {
+          confirmMsg =
+            `⚠ WARNING:\n` +
+            `Imported staff name: "${staffRaw}"\n` +
+            `Chosen candidate:    "${candName}" (id: ${candId})\n\n` +
+            `These names do not share any words.\n\n` +
+            `Are you sure you want to link this candidate for ` +
+            `${workDateYmd || 'this date'} at "${hospRaw || 'unknown site'}"?`;
+        } else {
+          confirmMsg =
+            `Confirm linking:\n\n` +
+            `  Staff (import): "${staffRaw}"\n` +
+            `  Candidate:      "${candName}" (id: ${candId})\n` +
+            `  Site:           "${hospRaw || 'unknown site'}"\n\n` +
+            `Proceed?`;
+        }
+      } else {
+        // Fallback confirm when we don't have a nice name
+        confirmMsg =
+          `Link imported staff "${staffRaw}" at "${hospRaw || 'unknown site'}"\n` +
+          `to candidate_id "${candId}"?\n\n` +
+          `This will create/update an alias used for future imports.`;
+      }
+
+      if (!window.confirm(confirmMsg)) {
+        return;
+      }
+
       mappings.candidate_mappings.push({
-        staff_norm: row.staff_norm || staffRaw || '',
+        staff_norm:       row.staff_norm || staffRaw || '',
         hospital_or_trust: hospRaw || null,
-        candidate_id: candId
+        candidate_id:     candId
       });
 
-      window.__toast && window.__toast('Candidate mapping queued for this import.');
+      if (window.__toast) {
+        window.__toast('Candidate mapping queued for this import.');
+      }
+      return;
     }
 
     if (act === 'weekly-resolve-client') {
@@ -25261,12 +25343,23 @@ function wireWeeklyImportSummaryActions(type, importId) {
 
       if (!clientId) return;
 
+      const confirmMsg =
+        `Link import site "${hospRaw || 'unknown site'}"\n` +
+        `to client_id "${clientId}"?\n\n` +
+        `This will create/update a client_hospitals alias for future imports.`;
+
+      if (!window.confirm(confirmMsg)) {
+        return;
+      }
+
       mappings.client_aliases.push({
         hospital_norm: row.hospital_norm || hospRaw || '',
-        client_id: clientId
+        client_id:     clientId
       });
 
-      window.__toast && window.__toast('Client mapping queued for this import.');
+      if (window.__toast) {
+        window.__toast('Client mapping queued for this import.');
+      }
     }
   });
 
@@ -25276,10 +25369,11 @@ function wireWeeklyImportSummaryActions(type, importId) {
     const cb = ev.target.closest('input[data-act="weekly-select-group"]');
     if (!cb) return;
 
+    const { importId: currentImportId } = getState();
+    const sel = ensureSelectedSet(currentImportId);
+
     const groupId = cb.getAttribute('data-group-id') || '';
     if (!groupId) return;
-
-    const sel = ensureSelectedSet();
 
     if (cb.checked) {
       sel.add(groupId);
