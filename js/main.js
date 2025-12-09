@@ -53,7 +53,6 @@ const DEFAULT_COLUMN_LABELS = {
   }
 };
 
-
 const GRID_COLUMN_META_DEFAULTS = {
   // Candidate list (drawn from candidates + any summary fields you render)
   candidates: {
@@ -79,7 +78,7 @@ const GRID_COLUMN_META_DEFAULTS = {
     right_to_work_status:   { selectable: false },
     right_to_work_expiry:   { selectable: false },
     pay_method:             { selectable: true },
-    job_titles_display: { selectable: true },
+    job_titles_display:     { selectable: true },
     umbrella_id:            { selectable: false },
     bank_name:              { selectable: false },
     bank_account_name:      { selectable: true },
@@ -105,25 +104,25 @@ const GRID_COLUMN_META_DEFAULTS = {
 
   // Clients (public.clients)
   clients: {
-    id:                       { selectable: false },
-    cli_ref:                  { selectable: true },
-    name:                     { selectable: true },
-    invoice_address:          { selectable: true },
-    primary_invoice_email:    { selectable: true },
-    ap_phone:                 { selectable: true },
-    vat_chargeable:           { selectable: true },
-    payment_terms_days:       { selectable: true },
-    created_at:               { selectable: true },
-    updated_at:               { selectable: true },
-    mileage_charge_rate:      { selectable: true },
-    ts_queries_email:         { selectable: true },
-    rev:                      { selectable: false },
+    id:                        { selectable: false },
+    cli_ref:                   { selectable: true },
+    name:                      { selectable: true },
+    invoice_address:           { selectable: true },
+    primary_invoice_email:     { selectable: true },
+    ap_phone:                  { selectable: true },
+    vat_chargeable:            { selectable: true },
+    payment_terms_days:        { selectable: true },
+    created_at:                { selectable: true },
+    updated_at:                { selectable: true },
+    mileage_charge_rate:       { selectable: true },
+    ts_queries_email:          { selectable: true },
+    rev:                       { selectable: false },
     // any extra client_settings snapshot fields you show in the grid:
-    default_submission_mode:  { selectable: true },
-    week_ending_weekday:      { selectable: true },
-    pay_reference_required:   { selectable: true },
+    default_submission_mode:   { selectable: true },
+    week_ending_weekday:       { selectable: true },
+    pay_reference_required:    { selectable: true },
     invoice_reference_required:{ selectable: true },
-    auto_invoice_default:     { selectable: true }
+    auto_invoice_default:      { selectable: true }
   },
 
   // Contracts (public.contracts + summary fields)
@@ -188,18 +187,18 @@ const GRID_COLUMN_META_DEFAULTS = {
     gh_wed:                       { selectable: false },
     gh_thu:                       { selectable: false },
     gh_fri:                       { selectable: false },
-    gh_sat:                     { selectable: false },
+    gh_sat:                       { selectable: false },
     gh_sun:                       { selectable: false },
     // meta
     created_at:                   { selectable: true },
     updated_at:                   { selectable: true },
-    rev:                         { selectable: false }
+    rev:                          { selectable: false }
   },
 
-  // Timesheets (likely from a view such as timesheets_hr_view or a join)
+  // Timesheets (timesheet summary view)
   timesheets: {
     id:                      { selectable: true },
-    timesheet_id:            { selectable: true },   // if using a view
+    timesheet_id:            { selectable: true },
     booking_id:              { selectable: true },
     candidate_id:            { selectable: true },
     candidate_display:       { selectable: true },
@@ -243,7 +242,10 @@ const GRID_COLUMN_META_DEFAULTS = {
     pay_on_hold:             { selectable: true },
     remittance_last_sent_at: { selectable: true },
     created_at:              { selectable: true },
-    updated_at:              { selectable: true }
+    updated_at:              { selectable: true },
+
+    // NEW: Issues badges column from v_timesheets_summary
+    issue_codes:             { selectable: true }
   },
 
   // Invoices (public.invoices)
@@ -1564,6 +1566,103 @@ async function apiPatchJson(path, body) {
 // ─────────────────────────────────────────────────────────────
 // Weekly import helpers
 // ─────────────────────────────────────────────────────────────
+
+
+// ─────────────────────────────────────────────────────────────
+// Weekly resolve helpers (NHSP + HR_WEEKLY)
+// ─────────────────────────────────────────────────────────────
+
+async function postWeeklyResolveMappings(importId, type, payload) {
+  const LOG = (typeof window.__LOG_IMPORTS === 'boolean') ? window.__LOG_IMPORTS : true;
+  const L   = (...a) => { if (LOG) console.log('[IMPORTS][WEEKLY][RESOLVE]', ...a); };
+
+  if (!importId) {
+    throw new Error('Missing importId for postWeeklyResolveMappings');
+  }
+  if (!type) {
+    throw new Error('Missing type for postWeeklyResolveMappings');
+  }
+
+  const t = String(type || '').toUpperCase();
+
+  let urlPath;
+  if (t === 'NHSP') {
+    urlPath = `/api/nhsp/${encodeURIComponent(importId)}/resolve-conflicts`;
+  } else if (t === 'HR_WEEKLY') {
+    urlPath = `/api/healthroster/autoprocess/${encodeURIComponent(importId)}/resolve-conflicts`;
+  } else {
+    throw new Error(`Unsupported weekly import type for resolve-conflicts: ${t}`);
+  }
+
+  const candidate_mappings = Array.isArray(payload?.candidate_mappings)
+    ? payload.candidate_mappings
+    : [];
+
+  const client_aliases = Array.isArray(payload?.client_aliases)
+    ? payload.client_aliases
+    : [];
+
+  if (!candidate_mappings.length && !client_aliases.length) {
+    L('no mappings to send; returning early', { importId, type: t });
+    return { ok: true, candidate_mappings_applied: 0, client_aliases_applied: 0 };
+  }
+
+  if (typeof authFetch !== 'function' || typeof API !== 'function') {
+    throw new Error('authFetch/API helper missing in postWeeklyResolveMappings');
+  }
+
+  const url = API(urlPath);
+
+  L('posting weekly resolve-conflicts', {
+    importId,
+    type: t,
+    url,
+    candidate_mappings_count: candidate_mappings.length,
+    client_aliases_count: client_aliases.length
+  });
+
+  const res  = await authFetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ candidate_mappings, client_aliases })
+  });
+
+  const text = await res.text().catch(() => '');
+
+  if (!res.ok) {
+    let msg = text || `Weekly resolve-conflicts failed (${res.status})`;
+
+    // Try to pull a nicer message from JSON
+    try {
+      if (text) {
+        const parsed = JSON.parse(text);
+        if (parsed && typeof parsed === 'object') {
+          if (parsed.message && typeof parsed.message === 'string') {
+            msg = parsed.message;
+          } else if (parsed.error && typeof parsed.error === 'string') {
+            msg = parsed.error;
+          }
+        }
+      }
+    } catch {
+      // ignore JSON parse errors, fall back to text/default
+    }
+
+    L('resolve-conflicts ERROR', { status: res.status, msg, raw: text });
+    throw new Error(msg);
+  }
+
+  let json = {};
+  try { json = text ? JSON.parse(text) : {}; } catch {
+    json = { ok: true };
+  }
+
+  L('resolve-conflicts OK', json);
+  return json;
+}
+
+
+
 
 async function refreshWeeklyImportSummary(type, importId) {
   const LOG = (typeof window.__LOG_IMPORTS === 'boolean') ? window.__LOG_IMPORTS : true;
@@ -22074,7 +22173,7 @@ if (this.entity === 'timesheets' && k === 'lines') {
       }
       const state = mc.timesheetState;
 
-         // ── Seed schedule from existing TS or contract_week if not already set ──
+      // ── Seed schedule from existing TS or contract_week if not already set ──
       try {
         const det = mc.timesheetDetails || {};
         const ts  = det.timesheet || {};
@@ -22123,10 +22222,37 @@ if (this.entity === 'timesheets' && k === 'lines') {
         if (LOGM) LT('schedule seed in setTab(lines) failed (non-fatal)', e);
       }
 
+      // NEW: wiring per-day reference ("Ref #") inputs
+      try {
+        if (!state.dayReferences || typeof state.dayReferences !== 'object') {
+          state.dayReferences = {};
+        }
+        const refInputs = root.querySelectorAll('input[data-day-ref]');
+        if (LOGM) LT('wiring day-ref inputs', { count: refInputs.length });
 
+        refInputs.forEach(inp => {
+          if (inp.__tsDayRefWired) return;
+          inp.__tsDayRefWired = true;
+
+          inp.addEventListener('input', () => {
+            const ymd = inp.dataset.dayRef || '';
+            if (!ymd) return;
+            if (!state.dayReferences || typeof state.dayReferences !== 'object') {
+              state.dayReferences = {};
+            }
+            const val = String(inp.value || '').trim();
+            state.dayReferences[ymd] = val || null;
+
+            try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
+          });
+        });
+      } catch (e) {
+        if (LOGM) LT('day-ref wiring failed (non-fatal)', e);
+      }
 
       // Segments exclude_from_pay
       const checkboxes = root.querySelectorAll('input[name="seg_exclude_from_pay"][data-segment-id]');
+
       if (LOGM) LT('wiring checkboxes', { count: checkboxes.length });
       checkboxes.forEach(cb => {
         if (cb.__tsWired) return;
@@ -22623,6 +22749,7 @@ if (this.entity === 'timesheets' && k === 'lines') {
 }
 
   // ───────────────────── Timesheets: Evidence tab (open PDF + drag/drop) ─────────────────────
+   // ───────────────────── Timesheets: Evidence tab (open PDF + drag/drop + remove) ─────────────────────
   if (this.entity === 'timesheets' && k === 'evidence') {
     const { LOGM, L: LT } = getTsLoggers('[TS][EVIDENCE][WIRE]');
     const root = byId('modalBody');
@@ -22713,6 +22840,24 @@ if (this.entity === 'timesheets' && k === 'lines') {
         } else if (LOGM && !dz) {
           LT('no evidence drop zone found (data-ts-drop-zone="evidence")');
         }
+
+        // NEW: wire evidence Remove buttons (multi-evidence list)
+        const removeBtns = root.querySelectorAll('button[data-evidence-remove]');
+        if (LOGM) LT('wiring evidence remove buttons', { count: removeBtns.length });
+        removeBtns.forEach(btn => {
+          if (btn.__tsEvRemoveWired) return;
+          btn.__tsEvRemoveWired = true;
+          btn.addEventListener('click', async (ev) => {
+            ev.preventDefault();
+            try {
+              // Uses the global handler we defined earlier
+              await handleTimesheetEvidenceRemoveClick(ev);
+            } catch (err) {
+              if (LOGM) console.warn('[TS][EVIDENCE] remove evidence failed', err);
+              alert(err?.message || 'Failed to remove evidence item.');
+            }
+          });
+        });
 
       } catch (err) {
         if ((typeof window.__LOG_MODAL === 'boolean') ? window.__LOG_MODAL : false) {
@@ -23009,26 +23154,48 @@ function renderTop() {
     L('renderTop (global): created btnEdit');
   }
 
-   (function dragWire(){
-    if(!header||!modalNode) return;
-    const onDown = e=>{
-      if ((e.button!==0 && e.type==='mousedown') || e.target.closest('button')) return;
-      const R=modalNode.getBoundingClientRect();
-      modalNode.style.position='fixed'; modalNode.style.left=R.left+'px'; modalNode.style.top=R.top+'px';
-      modalNode.style.right='auto'; modalNode.style.bottom='auto'; modalNode.style.transform='none'; modalNode.classList.add('dragging');
-      const ox=e.clientX-R.left, oy=e.clientY-R.top;
-      document.onmousemove = ev=>{
+  (function dragWire() {
+    if (!header || !modalNode) return;
+
+    const onDown = (e) => {
+      if ((e.button !== 0 && e.type === 'mousedown') || e.target.closest('button')) return;
+
+      const R = modalNode.getBoundingClientRect();
+      modalNode.style.position = 'fixed';
+      modalNode.style.left     = R.left + 'px';
+      modalNode.style.top      = R.top  + 'px';
+      modalNode.style.right    = 'auto';
+      modalNode.style.bottom   = 'auto';
+      modalNode.style.transform= 'none';
+      modalNode.classList.add('dragging');
+
+      const ox = e.clientX - R.left;
+      const oy = e.clientY - R.top;
+
+      // Measure header relative to the modal so we can keep it mostly visible
+      const headerRect    = header.getBoundingClientRect();
+      const headerOffsetY = headerRect.top - R.top;   // distance from modal top to header top
+      const headerHeight  = headerRect.height || 0;
+
+      document.onmousemove = (ev) => {
         let l = ev.clientX - ox;
         let t = ev.clientY - oy;
 
         const vw = window.innerWidth;
         const vh = window.innerHeight;
 
-        // Allow the modal to go mostly off-screen, but keep ~20% visible
-        const minLeft = -R.width * 0.8;                 // up to ~80% off the left
-        const maxLeft = vw - R.width * 0.2;             // leave ~20% visible on the right
-        const minTop  = -R.height * 0.8;                // up to ~80% off the top
-        const maxTop  = vh - R.height * 0.2;            // leave ~20% visible at the bottom
+        // Horizontal: allow up to ~80% off-screen, keep ~20% visible
+        const minLeft = -R.width * 0.8;         // up to ~80% off the left
+        const maxLeft = vw - R.width * 0.2;     // leave ~20% visible on the right
+
+        // Vertical (critical bit):
+        // Ensure the header top never goes above -20% of its height.
+        // i.e. at least 80% of the header remains visible.
+        // headerTopInViewport = t + headerOffsetY
+        const minTop = -headerOffsetY - headerHeight * 0.2;
+
+        // Bottom clamp: keep the whole modal roughly within the viewport height
+        const maxTop = vh - R.height;
 
         if (l < minLeft) l = minLeft;
         if (l > maxLeft) l = maxLeft;
@@ -23038,20 +23205,36 @@ function renderTop() {
         modalNode.style.left = l + 'px';
         modalNode.style.top  = t + 'px';
       };
-      document.onmouseup   = ()=>{
+
+      document.onmouseup = () => {
         modalNode.classList.remove('dragging');
         const R2 = modalNode.getBoundingClientRect();
         window.__modalAnchor = { left: R2.left, top: R2.top };
-        document.onmousemove=null; document.onmouseup=null;
+        document.onmousemove = null;
+        document.onmouseup   = null;
         L('dragWire (global): saved new anchor', window.__modalAnchor);
       };
+
       e.preventDefault();
     };
-    const onDbl = e=>{ if(!e.target.closest('button')) sanitizeModalGeometry(); };
+
+    const onDbl = (e) => {
+      if (!e.target.closest('button')) sanitizeModalGeometry();
+    };
+
     header.addEventListener('mousedown', onDown);
     header.addEventListener('dblclick',  onDbl);
-    const prev=top._detachGlobal;
-    top._detachGlobal = ()=>{ try{header.removeEventListener('mousedown',onDown);}catch{} try{header.removeEventListener('dblclick',onDbl);}catch{} document.onmousemove=null; document.onmouseup=null; if(typeof prev==='function'){ try{prev();}catch{} } };
+
+    const prev = top._detachGlobal;
+    top._detachGlobal = () => {
+      try { header.removeEventListener('mousedown', onDown); } catch {}
+      try { header.removeEventListener('dblclick',  onDbl); } catch {}
+      document.onmousemove = null;
+      document.onmouseup   = null;
+      if (typeof prev === 'function') {
+        try { prev(); } catch {}
+      }
+    };
   })();
 
   const wantApply = (isChild && !top.noParentGate) ||
@@ -26991,20 +27174,43 @@ function renderImportSummaryModal(importType, summaryState) {
         const idx = Number(btn.getAttribute('data-row-idx') || '-1');
         if (idx < 0 || idx >= rows.length) return;
 
-        const row       = rows[idx];
-        const mappings  = ensureWeeklyImportMappings();
-        const staffRaw  = row.staff_name || row.staff_raw || '';
-        const hospRaw   = row.hospital_or_trust || row.unit || row.hospital_norm || '';
+        const row      = rows[idx];
+        const staffRaw = row.staff_name || row.staff_raw || '';
+        const hospRaw  = row.hospital_or_trust || row.unit || row.hospital_norm || '';
 
         if (act === 'weekly-resolve-candidate') {
           // Use global candidate picker with local filtering
           openCandidatePicker(async ({ id, label }) => {
+            const mappings = ensureWeeklyImportMappings();
+            const staffNorm = row.staff_norm || staffRaw || '';
+            const hospitalOrTrust = hospRaw || null;
+            const clientId = row.client_id || null;
+            const workDateYmd =
+              row.work_date ||
+              row.date_local ||
+              row.date ||
+              row.week_ending_date ||
+              null;
+
+            const mapping = {
+              staff_norm:       staffNorm,
+              hospital_or_trust:hospitalOrTrust,
+              candidate_id:     id,
+              client_id:        clientId,
+              work_date:        workDateYmd
+            };
+
+            const payload = {
+              candidate_mappings: [mapping],
+              client_aliases: []
+            };
+
             try {
-              mappings.candidate_mappings.push({
-                staff_norm: row.staff_norm || staffRaw || '',
-                hospital_or_trust: hospRaw || null,
-                candidate_id: id
-              });
+              // Option A: immediate persist + contract check on the server
+              await postWeeklyResolveMappings(importId, type, payload);
+
+              // Only stage mapping locally for /apply if server accepted it
+              mappings.candidate_mappings.push(mapping);
 
               window.__toast && window.__toast(`Candidate ${label} linked. Reclassifying import…`);
               await refreshWeeklyImportSummary(type, importId);
@@ -27021,11 +27227,25 @@ function renderImportSummaryModal(importType, summaryState) {
           const nhspOnly = (type === 'NHSP');
 
           openClientPicker(async ({ id, label }) => {
+            const mappings = ensureWeeklyImportMappings();
+            const hospitalNorm = row.hospital_norm || hospRaw || '';
+
+            const mapping = {
+              hospital_norm: hospitalNorm,
+              client_id:     id
+            };
+
+            const payload = {
+              candidate_mappings: [],
+              client_aliases: [mapping]
+            };
+
             try {
-              mappings.client_aliases.push({
-                hospital_norm: row.hospital_norm || hospRaw || '',
-                client_id: id
-              });
+              // Option A: immediate persist of hospital → client alias
+              await postWeeklyResolveMappings(importId, type, payload);
+
+              // Stage mapping locally for /apply after success
+              mappings.client_aliases.push(mapping);
 
               window.__toast && window.__toast(`Client ${label} linked. Reclassifying import…`);
               await refreshWeeklyImportSummary(type, importId);
@@ -30531,7 +30751,6 @@ async function openSettings() {
     true // hasId → opens in View mode
   );
 }
-
 function renderSummary(rows){
   currentRows = rows;
   currentSelection = null;
@@ -30567,6 +30786,43 @@ function renderSummary(rows){
     if (selected) sel.ids.add(id); else sel.ids.delete(id);
   };
   const clearSelection = ()=>{ sel.ids.clear(); };
+
+  // Small helper: render red issue badges or green OK for the Issues column
+  const renderIssueBadges = (codes) => {
+    const wrap = document.createElement('div');
+    wrap.className = 'issue-badges';
+
+    const arr = Array.isArray(codes) ? codes.filter(Boolean) : [];
+
+    if (!arr.length) {
+      // No issues → green OK badge
+      const ok = document.createElement('span');
+      ok.className = 'pill pill-ok';
+      ok.textContent = 'OK';
+      wrap.appendChild(ok);
+      return wrap;
+    }
+
+    arr.forEach(code => {
+      const span = document.createElement('span');
+      const label = String(code || '').trim() || 'Issue';
+
+      // Default: red (issue)
+      let cls = 'pill pill-bad';
+
+      // Slightly softer amber for "On hold" / "Validation" / "Authorisation"
+      const up = label.toUpperCase();
+      if (up === 'ON HOLD' || up === 'VALIDATION' || up === 'AUTHORISATION') {
+        cls = 'pill pill-warn';
+      }
+
+      span.className = cls;
+      span.textContent = label;
+      wrap.appendChild(span);
+    });
+
+    return wrap;
+  };
 
   // Tie selection to dataset via fingerprint (filters + section)
   const computeFp = ()=> getSummaryFingerprint(currentSection);
@@ -30683,19 +30939,20 @@ function renderSummary(rows){
     const stFilters = window.__listState[currentSection].filters || {};
     window.__listState[currentSection].filters = stFilters;
 
-    // Status dropdown (ID unresolved / rate / pay-channel / ready)
+    // Status dropdown
     const statusLabel2 = document.createElement('span');
     statusLabel2.className = 'mini';
     statusLabel2.textContent = 'Status:';
     const statusSel2 = document.createElement('select');
 
     const statusOpts = [
-      ['ALL',           'All'],
-      ['NO_MATCH_ID',   'No match to Candidate/Client'],
-      ['RATE_MISSING',  'Rate missing'],
-      ['PAY_CHAN_MISS', 'Pay channel missing'],
-      ['READY_FOR_HR',  'Ready for Healthroster validation'],
-      ['READY_FOR_INV', 'Ready for invoice']
+      ['ALL',               'All'],
+      ['NO_MATCH_ID',       'No match to Candidate/Client'],
+      ['RATE_MISSING',      'Rate missing'],
+      ['PAY_CHAN_MISS',     'Pay channel missing'],
+      ['READY_FOR_HR',      'Ready for Healthroster validation'],
+      ['READY_FOR_INV',     'Ready for invoice'],
+      ['HR_HOURS_MISMATCH', 'Timesheet hours mismatch with Healthroster']
     ];
     const statusCur2 = (stFilters.status_code || 'ALL').toUpperCase();
     statusOpts.forEach(([v, label]) => {
@@ -30712,10 +30969,14 @@ function renderSummary(rows){
       // Remember UI choice
       curFilters.status_code = val;
 
-      // Map to backend processing_status only when it helps
+      // Reset hr_issue by default
+      if ('hr_issue' in curFilters) {
+        delete curFilters.hr_issue;
+      }
+
+      // Map to backend processing_status / hr_issue only when it helps
       switch (val) {
         case 'NO_MATCH_ID':
-          // Candidate OR client unresolved
           curFilters.processing_status = 'UNASSIGNED,CLIENT_UNRESOLVED';
           break;
         case 'READY_FOR_HR':
@@ -30724,7 +30985,10 @@ function renderSummary(rows){
         case 'READY_FOR_INV':
           curFilters.processing_status = 'READY_FOR_INVOICE';
           break;
-        // For RATE_MISSING / PAY_CHAN_MISS / ALL we rely partly on client-side flags
+        case 'HR_HOURS_MISMATCH':
+          curFilters.processing_status = 'ALL';
+          curFilters.hr_issue = 'HOURS_MISMATCH_HR';
+          break;
         default:
           curFilters.processing_status = 'ALL';
           break;
@@ -30738,7 +31002,7 @@ function renderSummary(rows){
     topControls.appendChild(statusLabel2);
     topControls.appendChild(statusSel2);
 
-    // Route dropdown (simplified: All / Electronic / Manual / NHSP / Healthroster / QR)
+    // Route dropdown
     const routeLabel = document.createElement('span');
     routeLabel.className = 'mini';
     routeLabel.textContent = 'Route:';
@@ -30771,7 +31035,7 @@ function renderSummary(rows){
     topControls.appendChild(routeLabel);
     topControls.appendChild(routeSel);
 
-    // Scope dropdown (Both / Weekly / Daily)
+    // Scope dropdown
     const scopeLabel = document.createElement('span');
     scopeLabel.className = 'mini';
     scopeLabel.textContent = 'Type:';
@@ -30801,7 +31065,7 @@ function renderSummary(rows){
     topControls.appendChild(scopeLabel);
     topControls.appendChild(scopeSel);
 
-    // Flags: Adjusted only (Needs attention now lives in Tools)
+    // Flags: Adjusted only (Needs attention lives in Tools)
     const mkFlag = (name, label) => {
       const wrap = document.createElement('label');
       wrap.className = 'mini';
@@ -30825,7 +31089,6 @@ function renderSummary(rows){
     };
 
     topControls.appendChild(mkFlag('is_adjusted', 'Adjusted only'));
-    // top-level Needs attention flag removed; handled via Tools tickbox
   }
 
   // Columns button
@@ -30834,7 +31097,6 @@ function renderSummary(rows){
   btnCols.style.cssText = 'border:1px solid var(--line);background:#0b152a;color:var(--text);padding:4px 8px;border-radius:8px;cursor:pointer';
   btnCols.addEventListener('click', () => openColumnsDialog(currentSection));
   topControls.appendChild(btnCols);
-
 
   const spacerTop = document.createElement('div'); spacerTop.style.flex = '1';
   topControls.appendChild(spacerTop);
@@ -30865,13 +31127,10 @@ function renderSummary(rows){
     const statusCode = (stFilters.status_code || 'ALL').toUpperCase();
 
     if (statusCode === 'NO_MATCH_ID') {
-      // Candidate OR client unresolved
       effectiveRows = effectiveRows.filter(r => !r.candidate_id || !r.client_id);
     } else if (statusCode === 'RATE_MISSING') {
-      // Any TS with rate issue flag true
       effectiveRows = effectiveRows.filter(r => r.has_rate_issue === true);
     } else if (statusCode === 'PAY_CHAN_MISS') {
-      // Any TS with pay-channel issue flag true
       effectiveRows = effectiveRows.filter(r => r.has_pay_channel_issue === true);
     } else if (statusCode === 'READY_FOR_HR') {
       effectiveRows = effectiveRows.filter(r =>
@@ -30882,6 +31141,7 @@ function renderSummary(rows){
         String(r.processing_status || '').toUpperCase() === 'READY_FOR_INVOICE'
       );
     }
+    // HR_HOURS_MISMATCH relies on backend hr_issue filter only
   }
   currentRows = effectiveRows;
 
@@ -30927,6 +31187,14 @@ function renderSummary(rows){
   // Determine columns (using server prefs)
   const cols = getVisibleColumnsForSection(currentSection, effectiveRows);
 
+  // ── Force Issues column into timesheets view ───────────────────────────────
+  if (currentSection === 'timesheets') {
+    if (!cols.includes('issue_codes')) {
+      // Put Issues near the left so it’s visible by default
+      cols.unshift('issue_codes');
+    }
+  }
+
   // Header checkbox (first column)
   const thSel = document.createElement('th');
   thSel.style.width = '40px';
@@ -30952,7 +31220,11 @@ function renderSummary(rows){
     th.dataset.colKey = String(c);
     th.style.cursor = 'pointer';
 
-    const label = getFriendlyHeaderLabel(currentSection, c);
+    let label = getFriendlyHeaderLabel(currentSection, c);
+    if (currentSection === 'timesheets' && c === 'issue_codes') {
+      label = 'Issues';
+    }
+
     const isActive = sortState && sortState.key === c;
     const arrow = isActive ? (sortState.dir === 'asc' ? ' ▲' : ' ▼') : '';
     th.textContent = label + arrow;
@@ -31033,7 +31305,6 @@ function renderSummary(rows){
       const v = r[c];
 
       if (currentSection === 'candidates' && c === 'job_titles_display') {
-        // Show only secondary job titles (primary is shown separately)
         const raw = typeof r.job_titles_display === 'string' ? r.job_titles_display : (v || '');
         if (!raw.trim()) {
           td.textContent = '';
@@ -31041,6 +31312,20 @@ function renderSummary(rows){
           const parts = raw.split(';').map(s => s.trim()).filter(Boolean);
           const rest  = parts.slice(1); // drop primary
           td.textContent = rest.join('; ');
+        }
+      } else if (currentSection === 'timesheets' && c === 'issue_codes') {
+        // ── Issues column: badges ─────────────────────────────────────────────
+        td.classList.add('mini');
+
+        const hasTs = !!r.timesheet_id;
+        const codes = Array.isArray(v) ? v.filter(Boolean) : [];
+
+        if (!hasTs) {
+          // No timesheet yet (planned week only) – show nothing
+          td.textContent = '';
+        } else {
+          // Timesheet exists – use shared helper (green OK or red/amber badges)
+          td.appendChild(renderIssueBadges(codes));
         }
       } else {
         td.textContent = formatDisplayValue(c, v);
@@ -31074,13 +31359,11 @@ function renderSummary(rows){
       });
 
       if (firstPrimaryRow) {
-        // Scroll primary row into view inside the summary body
         try {
           firstPrimaryRow.scrollIntoView({ block: 'center', behavior: 'smooth' });
         } catch {}
       }
 
-      // Consume focus so it doesn't re-apply on subsequent renders
       window.__pendingFocus = null;
     }
   } catch (e) {
@@ -31089,7 +31372,6 @@ function renderSummary(rows){
 
   // ── NEW: Candidates row context menu (Open / Advances & loans) ─────────────
   if (currentSection === 'candidates') {
-    // One-time global helpers for the context menu
     if (!window.__ensureCandidateRowMenu) {
       window.__candRowMenuEl = null;
       window.__candRowMenuRow = null;
@@ -31144,7 +31426,6 @@ function renderSummary(rows){
           document.addEventListener('contextmenu', (ev) => {
             const el = window.__candRowMenuEl;
             if (!el || el.style.display === 'none') return;
-            // Right-click outside menu hides it; right-click on menu itself is allowed
             if (ev.target && el.contains(ev.target)) return;
             window.__hideCandidateRowMenu();
           }, true);
@@ -31168,7 +31449,6 @@ function renderSummary(rows){
       const menu = window.__ensureCandidateRowMenu();
       if (!menu) return;
 
-      const rect = bodyWrap.getBoundingClientRect();
       const x = ev.clientX;
       const y = ev.clientY;
 
@@ -31371,6 +31651,7 @@ function renderSummary(rows){
 
   try { primeSummaryMembership(currentSection, fp); } catch (e) { /* non-blocking */ }
 }
+
 
 
 // ================== NEW: renderSettingsTab (tab renderer; showModal controls read-only) ==================
@@ -32031,6 +32312,47 @@ function renderTimesheetLinesTab(ctx) {
     'HEALTHROSTER_ADJUSTMENT'
   ].includes(basis);
 
+  // ── NEW: initialise per-day references state for weekly Timesheet Lines tab ─────────────
+  // state.dayReferences will be used to render and capture per-day "Ref #" values.
+  if (!state.dayReferences || typeof state.dayReferences !== 'object') {
+    state.dayReferences = {};
+  }
+  const dayReferences = state.dayReferences;
+
+  // Seed from timesheet.day_references_json if present
+  try {
+    const tsDayRefs = ts && ts.day_references_json && typeof ts.day_references_json === 'object'
+      ? ts.day_references_json
+      : null;
+    if (tsDayRefs) {
+      Object.keys(tsDayRefs).forEach(ymd => {
+        if (!dayReferences[ymd]) {
+          dayReferences[ymd] = tsDayRefs[ymd];
+        }
+      });
+    }
+  } catch {
+    // ignore seed failure, we'll still use state.dayReferences as-is
+  }
+
+  // If still empty, seed from TSFIN external_source_rows_json.HR_WEEKLY / NHSP_WEEKLY
+  try {
+    if (!Object.keys(dayReferences).length && tsfin && tsfin.external_source_rows_json) {
+      const ext = tsfin.external_source_rows_json || {};
+      const hrRows   = Array.isArray(ext.HR_WEEKLY)   ? ext.HR_WEEKLY   : [];
+      const nhspRows = Array.isArray(ext.NHSP_WEEKLY) ? ext.NHSP_WEEKLY : [];
+      [...hrRows, ...nhspRows].forEach(row => {
+        const date = row && row.date;
+        const ref  = row && row.reference;
+        if (date && ref && !dayReferences[date]) {
+          dayReferences[date] = ref;
+        }
+      });
+    }
+  } catch {
+    // non-fatal; dayReferences may remain empty
+  }
+
   const segTargets = state.segmentInvoiceTargets || {};
   state.segmentInvoiceTargets = segTargets;
 
@@ -32396,6 +32718,9 @@ function renderTimesheetLinesTab(ctx) {
         paid = paidMin > 0 ? (Math.round((paidMin / 60) * 100) / 100).toFixed(2) : '0.00';
       }
 
+      // NEW: Pre-fill per-day reference from state.dayReferences
+      const dayRef = seg.date && dayReferences[seg.date] ? String(dayReferences[seg.date]) : '';
+
       uiRows.push({
         date: seg.date,
         dow,
@@ -32405,7 +32730,8 @@ function renderTimesheetLinesTab(ctx) {
         break_end:   breakEnd,
         break_mins:  breakMins,
         extra_breaks,
-        paid_hours:  paid
+        paid_hours:  paid,
+        day_ref:     dayRef
       });
     };
 
@@ -32423,6 +32749,7 @@ function renderTimesheetLinesTab(ctx) {
           const dd   = String(d.getUTCDate()).toString().padStart(2, '0');
           const ymd  = `${yyyy}-${mm}-${dd}`;
           const dow  = dowShort[d.getUTCDay()];
+          const dayRef = dayReferences[ymd] ? String(dayReferences[ymd]) : '';
           uiRows.push({
             date: ymd,
             dow,
@@ -32432,7 +32759,8 @@ function renderTimesheetLinesTab(ctx) {
             break_end: '',
             break_mins: '',
             extra_breaks: [],
-            paid_hours: ''
+            paid_hours: '',
+            day_ref: dayRef
           });
         }
       } catch {
@@ -32446,7 +32774,8 @@ function renderTimesheetLinesTab(ctx) {
           break_end: '',
           break_mins: '',
           extra_breaks: [],
-          paid_hours: ''
+          paid_hours: '',
+          day_ref: ''
         });
       }
     } else {
@@ -32460,7 +32789,8 @@ function renderTimesheetLinesTab(ctx) {
         break_end: '',
         break_mins: '',
         extra_breaks: [],
-        paid_hours: ''
+        paid_hours: '',
+        day_ref: ''
       });
     }
 
@@ -32512,10 +32842,20 @@ function renderTimesheetLinesTab(ctx) {
         ? `<div class="extra-breaks">${extraEndInputs.join('<br/>')}</div>`
         : '';
 
+      const refVal = r.day_ref || '';
+
       return `
         <tr data-row-idx="${idx}"${dateAttr}>
           <td>${r.dow || '<span class="mini">—</span>'}</td>
           <td>${dateCellHtml}</td>
+          <td>
+            <input type="text"
+                   class="input mini"
+                   name="day_ref_${escapeHtml(r.date || '')}"
+                   data-day-ref="${escapeHtml(r.date || '')}"
+                   value="${escapeHtml(refVal)}"
+                   ${disabledAttrManual} />
+          </td>
           <td>
             <input type="text"
                    class="input"
@@ -32636,6 +32976,7 @@ function renderTimesheetLinesTab(ctx) {
                     <tr>
                       <th>Day</th>
                       <th>Date</th>
+                      <th>Ref #</th>
                       <th>Start</th>
                       <th>End</th>
                       <th>Break start</th>
@@ -32845,7 +33186,6 @@ function renderTimesheetLinesTab(ctx) {
     </div>
   `;
 }
-
 
 // Utility: map route_type / status to pill CSS classes
 function classifyTimesheetPill(kind, value) {
@@ -33515,6 +33855,12 @@ function renderTimesheetIssuesTab(ctx) {
   const validationIsOk    = latestValStatus === 'VALIDATION_OK' || latestValStatus === 'OVERRIDDEN';
   const validationFailed  = !!latestValidation && !validationIsOk;
 
+  // NEW: HR cross-check fields from TSFIN
+  const hrStatusRaw  = tsfin.hr_crosscheck_status || null;
+  const hrStatus     = hrStatusRaw ? String(hrStatusRaw).toUpperCase() : null;
+  const hrIssuesArr  = Array.isArray(tsfin.hr_crosscheck_issues) ? tsfin.hr_crosscheck_issues : [];
+  const hrIssues     = hrIssuesArr.map(c => String(c || '').toUpperCase()).filter(Boolean);
+
   L('snapshot', {
     stage,
     procStatus,
@@ -33526,7 +33872,9 @@ function renderTimesheetIssuesTab(ctx) {
     noTimesheetReq,
     authorised,
     latestValStatus,
-    latestValReason
+    latestValReason,
+    hrStatus,
+    hrIssuesCount: hrIssues.length
   });
 
   const issues = [];
@@ -33608,6 +33956,28 @@ function renderTimesheetIssuesTab(ctx) {
         issues.push('Missing timesheet: this client requires a signed timesheet (electronic, QR or manual) even after HealthRoster validation.');
       }
     }
+  }
+
+  // ───────────────────── HR cross-check issues (from TSFIN) ─────────────────────
+  try {
+    const seenHrCodes = new Set();
+
+    for (const codeRaw of hrIssues) {
+      const code = String(codeRaw || '').toUpperCase();
+      if (!code || seenHrCodes.has(code)) continue;
+      seenHrCodes.add(code);
+
+      if (code === 'HOURS_MISMATCH_HR') {
+        issues.push('Timesheet hours mismatch with Healthroster – amend/resubmit timesheet or reupload HealthRoster with matching hours.');
+      } else if (code === 'HR_HOURS_MISSING') {
+        issues.push('Timesheet has hours which are not yet on HealthRoster – confirm the worker worked these hours and request them to be added on HealthRoster.');
+      } else if (code === 'DUPLICATE_CONTRACTS') {
+        issues.push('Multiple contracts cover the same period for this client – resolve duplicate contracts before proceeding.');
+      }
+      // If new HR codes are added in future, they can be mapped here.
+    }
+  } catch (e) {
+    if (LOGM) L('[ISSUES] HR cross-check issues mapping failed (non-fatal)', e);
   }
 
   // ───────────────────── HR daily mismatch reasons (HealthRoster daily) ─────────────────────
@@ -34662,6 +35032,8 @@ async function openTimesheet(row) {
 
     // 2) Fetch details + related entities from backend
     let details;
+    let evidence = []; // NEW: evidence list for this timesheet
+
     if (hasTs) {
       try {
         details = await fetchTimesheetDetails(tsId);
@@ -34678,6 +35050,18 @@ async function openTimesheet(row) {
         GE();
         alert(err?.message || 'Failed to load timesheet details.');
         return;
+      }
+
+      // NEW: fetch evidence list for this timesheet so Evidence tab can render it
+      try {
+        const encTsId = encodeURIComponent(tsId);
+        const res  = await authFetch(API(`/api/timesheets/${encTsId}/evidence`));
+        const json = await res.json().catch(() => []);
+        evidence   = Array.isArray(json) ? json : [];
+        L('evidence fetched', { timesheet_id: tsId, count: evidence.length });
+      } catch (err) {
+        L('fetch evidence FAILED (non-fatal)', err);
+        evidence = [];
       }
     } else {
       // Planned / OPEN weekly week with no TS yet – load contract_week via broker so we can seed schedule
@@ -34729,6 +35113,9 @@ async function openTimesheet(row) {
         contract_week_id: weekId,
         contract_week: contractWeek
       };
+
+      // No evidence for planned week without a TS
+      evidence = [];
 
       L('details stubbed for planned week', {
         weekId,
@@ -34931,6 +35318,38 @@ async function openTimesheet(row) {
       schedule = null;
     }
 
+    // ── NEW: Seed per-day references (dayReferences) for weekly Lines tab ──
+    let dayReferences = {};
+    try {
+      const tsDayRefs = ts && ts.day_references_json && typeof ts.day_references_json === 'object'
+        ? ts.day_references_json
+        : null;
+      if (tsDayRefs) {
+        dayReferences = { ...tsDayRefs };
+      }
+    } catch {
+      dayReferences = {};
+    }
+
+    // If still empty, seed from TSFIN external_source_rows_json.HR_WEEKLY / NHSP_WEEKLY
+    try {
+      if (!Object.keys(dayReferences).length && tsfin && tsfin.external_source_rows_json) {
+        const ext      = tsfin.external_source_rows_json || {};
+        const hrRows   = Array.isArray(ext.HR_WEEKLY)   ? ext.HR_WEEKLY   : [];
+        const nhspRows = Array.isArray(ext.NHSP_WEEKLY) ? ext.NHSP_WEEKLY : [];
+        [...hrRows, ...nhspRows].forEach(row => {
+          const date = row && row.date;
+          const ref  = row && row.reference;
+          if (date && ref && !dayReferences[date]) {
+            dayReferences[date] = ref;
+          }
+        });
+      }
+    } catch (e) {
+      if (LOGM) L('dayReferences seed FAILED (non-fatal)', e);
+      dayReferences = dayReferences || {};
+    }
+
     // Simple meta flags for downstream gating (delete, revert, etc.)
     const isPaid     = !!tsfin.paid_at_utc;
     const isInvoiced = !!tsfin.locked_by_invoice_id;
@@ -34970,7 +35389,9 @@ async function openTimesheet(row) {
         segmentInvoiceTargets: {},
         manualHours,
         additionalRates,
-        schedule          // schedule state seeded from TS or planned std schedule
+        schedule,          // schedule state seeded from TS or planned std schedule
+        dayReferences,     // NEW: per-day references for weekly Lines tab
+        evidence           // NEW: evidence list for Evidence tab
       },
       timesheetMeta: {
         hasTs,
@@ -34994,6 +35415,8 @@ async function openTimesheet(row) {
       additionalRateCodes: Object.keys(window.modalCtx.timesheetState.additionalRates || {}),
       manualHours: window.modalCtx.timesheetState.manualHours,
       hasSchedule: !!window.modalCtx.timesheetState.schedule,
+      dayReferencesKeys: Object.keys(window.modalCtx.timesheetState.dayReferences || {}),
+      evidenceCount: (window.modalCtx.timesheetState.evidence || []).length,
       timesheetMeta: window.modalCtx.timesheetMeta || null
     });
 
@@ -35041,21 +35464,21 @@ async function openTimesheet(row) {
       }
     };
 
- const onSaveTimesheet = async () => {
-  const { LOGM, L, GC, GE } = getTsLoggers('[TS][SAVE]');
-  GC('onSaveTimesheet');
+    const onSaveTimesheet = async () => {
+      const { LOGM, L, GC, GE } = getTsLoggers('[TS][SAVE]');
+      GC('onSaveTimesheet');
 
-  const mc     = window.modalCtx || {};
-  const rowNow = mc.data || baseRow;
-  const det    = mc.timesheetDetails || details;
-  const st     = mc.timesheetState || {};
+      const mc     = window.modalCtx || {};
+      const rowNow = mc.data || baseRow;
+      const det    = mc.timesheetDetails || details;
+      const st     = mc.timesheetState || {};
 
-  // NEW: QR-on-save flags (set by saveForFrame tri-choice)
-  const revokeQr  = !!mc._revokeQrOnSave;
-  const reissueQr = !!mc._reissueQrOnSave;
+      // NEW: QR-on-save flags (set by saveForFrame tri-choice)
+      const revokeQr  = !!mc._revokeQrOnSave;
+      const reissueQr = !!mc._reissueQrOnSave;
 
-  const segOverrides    = st.segmentOverrides || {};
-  const hasSegOverrides = !!Object.keys(segOverrides).length;
+      const segOverrides    = st.segmentOverrides || {};
+      const hasSegOverrides = !!Object.keys(segOverrides).length;
 
       const tsLocal    = det.timesheet || {};
       const tsfinLocal = det.tsfin     || {};
@@ -35064,34 +35487,32 @@ async function openTimesheet(row) {
       const stagedRef  = (st.reference != null) ? st.reference : currentRef;
       const refChanged = stagedRef !== currentRef;
 
-    const sheetScopeSave = (det.sheet_scope ||
-                        rowNow.sheet_scope ||
-                        tsLocal.sheet_scope ||
-                        '').toUpperCase();
-const subModeSave    = (tsLocal.submission_mode ||
-                        rowNow.submission_mode ||
-                        '').toUpperCase();
+      const sheetScopeSave = (det.sheet_scope ||
+                          rowNow.sheet_scope ||
+                          tsLocal.sheet_scope ||
+                          '').toUpperCase();
+      const subModeSave    = (tsLocal.submission_mode ||
+                          rowNow.submission_mode ||
+                          '').toUpperCase();
 
-const weekIdSave     = rowNow.contract_week_id || det.contract_week_id || null;
+      const weekIdSave     = rowNow.contract_week_id || det.contract_week_id || null;
 
-// Treat BOTH true manual weeks and planned weekly weeks (no TS yet) as "weekly manual context"
-const isPlannedWeeklyWithoutTs =
-  sheetScopeSave === 'WEEKLY' &&
-  !!weekIdSave &&
-  !tsLocal.timesheet_id;
+      // Treat BOTH true manual weeks and planned weekly weeks (no TS yet) as "weekly manual context"
+      const isPlannedWeeklyWithoutTs =
+        sheetScopeSave === 'WEEKLY' &&
+        !!weekIdSave &&
+        !tsLocal.timesheet_id;
 
-const isWeeklyManualContext =
-  sheetScopeSave === 'WEEKLY' &&
-  !!weekIdSave &&
-  (subModeSave === 'MANUAL' || isPlannedWeeklyWithoutTs);
+      const isWeeklyManualContext =
+        sheetScopeSave === 'WEEKLY' &&
+        !!weekIdSave &&
+        (subModeSave === 'MANUAL' || isPlannedWeeklyWithoutTs);
 
-// DAILY MANUAL context – editable daily TS in MANUAL mode
-const isDailyManualContext =
-  sheetScopeSave === 'DAILY' &&
-  subModeSave === 'MANUAL' &&
-  !!tsLocal.timesheet_id;
-
-
+      // DAILY MANUAL context – editable daily TS in MANUAL mode
+      const isDailyManualContext =
+        sheetScopeSave === 'DAILY' &&
+        subModeSave === 'MANUAL' &&
+        !!tsLocal.timesheet_id;
 
       const manualHours = st.manualHours || {};
       const hasManualHours =
@@ -35146,9 +35567,9 @@ const isDailyManualContext =
         shouldMarkPaid
       });
 
-  const tasks = [];
+      const tasks = [];
 
-// 5a) Weekly MANUAL hours + additional units → contract-week manual upsert
+     // 5a) Weekly MANUAL hours + additional units → contract-week manual upsert
 if (isWeeklyManualContext && (hasManualHours || hasExtrasStaged)) {
   tasks.push(async () => {
     const payload = {
@@ -35160,6 +35581,9 @@ if (isWeeklyManualContext && (hasManualHours || hasExtrasStaged)) {
         bh:    Number(manualHours.bh    || 0) || 0
       },
       additional_units_week: {},
+
+      // NEW: per-day NHSP/HR references for this week
+      day_references_json: st.dayReferences || {},
 
       // QR revoke/reissue hints to backend (weekly)
       revoke_qr:  revokeQr,
@@ -35176,64 +35600,62 @@ if (isWeeklyManualContext && (hasManualHours || hasExtrasStaged)) {
     L('manual weekly upsert payload', { weekIdSave, payload });
     const result = await manualUpsertContractWeek(weekIdSave, payload);
 
-    const newTsId = result.timesheet_id || tsId;
-    if (!tsId && newTsId) {
-      // Planned week → newly created TS
-      window.modalCtx.data = {
-        ...(window.modalCtx.data || rowNow),
-        timesheet_id: newTsId,
-        id: newTsId
-      };
-    }
+          const newTsId = result.timesheet_id || tsId;
+          if (!tsId && newTsId) {
+            // Planned week → newly created TS
+            window.modalCtx.data = {
+              ...(window.modalCtx.data || rowNow),
+              timesheet_id: newTsId,
+              id: newTsId
+            };
+          }
 
-    const finalTsId = newTsId || tsId;
-    if (finalTsId) {
-      try {
-        const freshDetails = await fetchTimesheetDetails(finalTsId);
-        window.modalCtx.timesheetDetails = freshDetails;
-      } catch (err) {
-        L('refresh details after manual upsert failed (non-fatal)', err);
+          const finalTsId = newTsId || tsId;
+          if (finalTsId) {
+            try {
+              const freshDetails = await fetchTimesheetDetails(finalTsId);
+              window.modalCtx.timesheetDetails = freshDetails;
+            } catch (err) {
+              L('refresh details after manual upsert failed (non-fatal)', err);
+            }
+          }
+        });
       }
-    }
-  });
-}
 
-// 5a-daily) DAILY MANUAL – update worked/break + QR hints
-if (isDailyManualContext && tsId) {
-  tasks.push(async () => {
-    // We send the schedule blob; backend daily-manual-upsert will
-    // resolve it into worked_start/end + breaks and rebuild TSFIN.
-    const schedule = st.schedule || tsLocal.actual_schedule_json || null;
+      // 5a-daily) DAILY MANUAL – update worked/break + QR hints
+      if (isDailyManualContext && tsId) {
+        tasks.push(async () => {
+          // We send the schedule blob; backend daily-manual-upsert will
+          // resolve it into worked_start/end + breaks and rebuild TSFIN.
+          const schedule = st.schedule || tsLocal.actual_schedule_json || null;
 
-    if (!schedule) {
-      L('daily-manual-upsert skipped: no schedule staged');
-      return;
-    }
+          if (!schedule) {
+            L('daily-manual-upsert skipped: no schedule staged');
+            return;
+          }
 
-    const payload = {
-      schedule_json: schedule,
-      revoke_qr:  revokeQr,
-      reissue_qr: reissueQr
-    };
+          const payload = {
+            schedule_json: schedule,
+            revoke_qr:  revokeQr,
+            reissue_qr: reissueQr
+          };
 
-    L('daily manual upsert payload', { tsId, payload });
+          L('daily manual upsert payload', { tsId, payload });
 
-    await apiPostJson(
-      `/api/timesheets/${encodeURIComponent(tsId)}/daily-manual-upsert`,
-      payload
-    );
+          await apiPostJson(
+            `/api/timesheets/${encodeURIComponent(tsId)}/daily-manual-upsert`,
+            payload
+          );
 
-    // Reload details so TSFIN + QR fields reflect the new hours
-    try {
-      const freshDetails = await fetchTimesheetDetails(tsId);
-      window.modalCtx.timesheetDetails = freshDetails;
-    } catch (err) {
-      L('refresh details after daily-manual-upsert failed (non-fatal)', err);
-    }
-  });
-}
-
-
+          // Reload details so TSFIN + QR fields reflect the new hours
+          try {
+            const freshDetails = await fetchTimesheetDetails(tsId);
+            window.modalCtx.timesheetDetails = freshDetails;
+          } catch (err) {
+            L('refresh details after daily-manual-upsert failed (non-fatal)', err);
+          }
+        });
+      }
 
       // 5b) Apply segment exclude_from_pay + invoice_target_week_start (SEGMENTS mode only)
       if (det.isSegmentsMode && (hasSegOverrides || hasSegTargets) && (tsId || rowNow.timesheet_id)) {
@@ -35336,7 +35758,7 @@ if (isDailyManualContext && tsId) {
       const newTs      = newDetails.timesheet || {};
       const finalTsId  = newTs.timesheet_id || tsId || rowNow.timesheet_id;
 
-   const updatedRow = {
+      const updatedRow = {
         ...(window.modalCtx.data || rowNow),
         timesheet_id:         finalTsId || null,
         total_pay_ex_vat:     newTsfin.total_pay_ex_vat     ?? rowNow.total_pay_ex_vat,
@@ -35365,7 +35787,7 @@ if (isDailyManualContext && tsId) {
         window.modalCtx.timesheetState.payHoldDesired        = null;
         window.modalCtx.timesheetState.payHoldReason         = '';
         window.modalCtx.timesheetState.markPaid              = false;
-        // manualHours / additionalRates / schedule remain staged for the next edit session
+        // manualHours / additionalRates / schedule / dayReferences / evidence remain staged for the next edit session
       }
 
       // Focus this TS in summary grid on next refresh
@@ -35384,23 +35806,22 @@ if (isDailyManualContext && tsId) {
       return { ok: true, saved: updatedRow };
     };
 
- const title = hasTs
-  ? `Timesheet ${String(tsId).slice(0, 8)}…`
-  : `Weekly timesheet (planned) ${String(weekId).slice(0, 8)}…`;
+    const title = hasTs
+      ? `Timesheet ${String(tsId).slice(0, 8)}…`
+      : `Weekly timesheet (planned) ${String(weekId).slice(0, 8)}…`;
 
-// hasId should also be true for planned weeks (contract_week exists)
-const hasRecordId = !!(hasTs || isPlannedWeek);
+    // hasId should also be true for planned weeks (contract_week exists)
+    const hasRecordId = !!(hasTs || isPlannedWeek);
 
-showModal(
-  title,
-  tabDefs,
-  renderTab,
-  onSaveTimesheet,
-  hasRecordId,        // ⬅️ now true for planned weeks as well
-  undefined,
-  { kind: 'timesheets' }
-);
-
+    showModal(
+      title,
+      tabDefs,
+      renderTab,
+      onSaveTimesheet,
+      hasRecordId,        // ⬅️ now true for planned weeks as well
+      undefined,
+      { kind: 'timesheets' }
+    );
 
     GE();
   } catch (err) {
@@ -35551,10 +35972,10 @@ function renderTimesheetRelatedTab(ctx) {
 
 function renderTimesheetEvidenceTab(ctx) {
   const { LOGM, L, GC, GE } = getTsLoggers('[TS][EVIDENCE]');
-  const { row, details } = normaliseTimesheetCtx(ctx);
+  const { row, details, state } = normaliseTimesheetCtx(ctx);
 
   GC('render');
-  const ts    = details.timesheet || {};
+  const ts         = details.timesheet || {};
   const sheetScope = row.sheet_scope || details.sheet_scope || ts.sheet_scope || null;
   const qrStatus   = row.qr_status || details.qr_status || ts.qr_status || null;
   const qrGen      = details.qr_generated_at || ts.qr_generated_at || null;
@@ -35563,13 +35984,17 @@ function renderTimesheetEvidenceTab(ctx) {
 
   const tsId = row.timesheet_id || ts.timesheet_id || '';
 
+  // Evidence state – populated by the tab open handler via /api/timesheets/:id/evidence
+  const evList = Array.isArray(state.evidence) ? state.evidence : [];
+
   L('snapshot', {
     tsId,
     sheetScope,
     qrStatus,
     qrGen,
     qrScan,
-    manualKey
+    manualKey,
+    evidenceCount: evList.length
   });
   GE();
 
@@ -35586,9 +36011,42 @@ function renderTimesheetEvidenceTab(ctx) {
     </div>
   ` : '';
 
-  const dropHint = manualKey
-    ? 'Drag a PDF or image here to replace the existing scan.'
-    : 'No manual scan on file. Drag a PDF or image here to upload one.';
+  // Base URL for public R2 access (configured globally)
+  const r2Base = (window && (window.R2_PUBLIC_URL || (window.__config && window.__config.R2_PUBLIC_URL))) || '';
+
+  const evidenceListHtml = evList.length
+    ? `
+      <ul class="ts-evidence-list">
+        ${evList.map(ev => {
+          const name = escapeHtml(ev.display_name || ev.kind || 'Evidence');
+          const key  = ev.storage_key || '';
+          const href = (r2Base && key)
+            ? `${r2Base}/${encodeURIComponent(key)}`
+            : '#';
+          const id   = ev.id || '';
+          return `
+            <li data-evidence-id="${escapeHtml(String(id))}">
+              <span class="mini">${name}</span>
+              ${key ? ` – <a href="${href}" target="_blank" rel="noopener noreferrer">Open</a>` : ''}
+              <button type="button"
+                      class="btn mini"
+                      data-evidence-remove="${escapeHtml(String(id))}">
+                Remove
+              </button>
+            </li>
+          `;
+        }).join('')}
+      </ul>
+    `
+    : `
+      <span class="mini">
+        No evidence uploaded yet. Use the dropzone below to add scanned timesheets or other supporting documents.
+      </span>
+    `;
+
+  const dropHint = evList.length
+    ? 'Drag a PDF or image here to add further evidence. Existing files will remain attached.'
+    : 'Drag a PDF or image here to upload your first evidence file (e.g. a scanned timesheet).';
 
   return `
     <div class="tabc">
@@ -35607,14 +36065,26 @@ function renderTimesheetEvidenceTab(ctx) {
         <div class="row">
           <label>Manual scan key</label>
           <div class="controls">
-            ${manualKey ? `<span class="mini">${manualKey}</span>` : '<span class="mini">No manual PDF attached.</span>'}
+            ${manualKey ? `<span class="mini">${manualKey}</span>` : '<span class="mini">No manual PDF attached (legacy field).</span>'}
+            <span class="mini" style="display:block;margin-top:4px;">
+              New uploads are recorded as evidence items below; this field remains for legacy compatibility.
+            </span>
+          </div>
+        </div>
+      </div>
+
+      <div class="card" style="margin-top:10px;">
+        <div class="row">
+          <label>Evidence</label>
+          <div class="controls">
+            ${evidenceListHtml}
           </div>
         </div>
       </div>
 
       <div class="card" style="margin-top:10px;" data-ts-drop-zone="evidence">
         <div class="row">
-          <label>Upload / replace</label>
+          <label>Add evidence</label>
           <div class="controls">
             <div class="mini">
               ${dropHint}<br/>
@@ -35844,36 +36314,51 @@ async function openTimesheetEvidenceReplaceDialog(file) {
 
   const tabs = [{ key: 'compare', title: 'Evidence' }];
 
-  const onSave = async () => {
-    const { LOGM, L, GC, GE } = getTsLoggers('[TS][EVIDENCE][DIALOG][SAVE]');
-    GC('onSave (evidence replace)');
+ const onSave = async () => {
+  const { LOGM, L, GC, GE } = getTsLoggers('[TS][EVIDENCE][DIALOG][SAVE]');
+  GC('onSave (evidence replace)');
 
+  try {
+    const encTsId = encodeURIComponent(tsId);
+
+    // 1) Upload evidence (timesheet-level) or legacy contract-week replace
+    await uploadTimesheetEvidence(tsId, weekId, file);
+
+    // 2) Refresh evidence list so the Evidence tab shows the new items
     try {
-      // 1) Upload + replace evidence
-      await uploadTimesheetEvidence(tsId, weekId, file);
+      const res  = await authFetch(API(`/api/timesheets/${encTsId}/evidence`));
+      const json = await res.json().catch(() => []);
+      const evidence = Array.isArray(json) ? json : [];
 
-      // 2) Refresh details so Evidence tab sees the new key
-      try {
-        const newDetails = await fetchTimesheetDetails(tsId);
-        window.modalCtx = window.modalCtx || {};
-        window.modalCtx.timesheetDetails = newDetails;
-      } catch (err) {
-        L('refresh details after evidence replace failed (non-fatal)', err);
+      window.modalCtx = window.modalCtx || {};
+      const st = (window.modalCtx.timesheetState ||= {});
+      st.evidence = evidence;
+
+      // If the main timesheet modal is currently on the Evidence tab, repaint it
+      if (typeof window.__getModalFrame === 'function') {
+        const fr = window.__getModalFrame();
+        if (fr && fr.entity === 'timesheets' && fr.currentTabKey === 'evidence') {
+          fr.setTab('evidence');
+        }
       }
-
-      if (window.__toast) {
-        window.__toast(isReplacement ? 'Timesheet scan replaced' : 'Timesheet scan uploaded');
-      }
-
-      GE();
-      return { ok: true, saved: { timesheet_id: tsId } };
     } catch (err) {
-      L('uploadTimesheetEvidence failed', err);
-      alert(err?.message || 'Failed to update timesheet evidence.');
-      GE();
-      return { ok: false };
+      L('refresh evidence after upload failed (non-fatal)', err);
     }
-  };
+
+    if (window.__toast) {
+      window.__toast(isReplacement ? 'Timesheet scan replaced' : 'Timesheet scan uploaded');
+    }
+
+    GE();
+    return { ok: true, saved: { timesheet_id: tsId } };
+  } catch (err) {
+    L('uploadTimesheetEvidence failed', err);
+    alert(err?.message || 'Failed to update timesheet evidence.');
+    GE();
+    return { ok: false };
+  }
+};
+
   showModal(
     title,
     tabs,
@@ -35890,7 +36375,6 @@ async function openTimesheetEvidenceReplaceDialog(file) {
 
   GE();
 }
-
 async function uploadTimesheetEvidence(timesheetId, contractWeekId, file) {
   const { LOGM, L, GC, GE } = getTsLoggers('[TS][EVIDENCE][UPLOAD]');
   GC('uploadTimesheetEvidence');
@@ -35913,6 +36397,9 @@ async function uploadTimesheetEvidence(timesheetId, contractWeekId, file) {
   // ─────────────────────────────────────────────────────────────
   // Weekly manual path: use contract-week presign + replace
   // ─────────────────────────────────────────────────────────────
+  // We keep this legacy path for existing weekly/manual flows that still rely on
+  // contract_weeks.manual_pdf_r2_key. The Evidence tab itself now uses
+  // /api/timesheets/:id/evidence; contract-week replace remains for compatibility.
   if (contractWeekId) {
     const weekEnc = enc(contractWeekId);
 
@@ -35963,7 +36450,7 @@ async function uploadTimesheetEvidence(timesheetId, contractWeekId, file) {
       throw err;
     }
 
-    // 3) Confirm replacement on the week
+    // 3) Confirm replacement on the week (legacy manual_pdf_r2_key flow)
     try {
       const res  = await authFetch(API(`/api/contract-weeks/${weekEnc}/replace-manual-pdf`), {
         method: 'POST',
@@ -35987,7 +36474,7 @@ async function uploadTimesheetEvidence(timesheetId, contractWeekId, file) {
   }
 
   // ─────────────────────────────────────────────────────────────
-  // Timesheet-level path: files presign + timesheet replace
+  // Timesheet-level path: files presign + evidence POST
   // ─────────────────────────────────────────────────────────────
   let presignJson;
   try {
@@ -36038,29 +36525,113 @@ async function uploadTimesheetEvidence(timesheetId, contractWeekId, file) {
     throw err;
   }
 
-  // 3) Patch timesheet to point at new manual_pdf_r2_key
+  // 3) Create a timesheet_evidence row (new behaviour)
   try {
     const encTsId = enc(timesheetId);
-    const res  = await authFetch(API(`/api/timesheets/${encTsId}/replace-manual-pdf`), {
+    const res  = await authFetch(API(`/api/timesheets/${encTsId}/evidence`), {
       method: 'POST',
       headers: { 'Content-Type':'application/json' },
-      body: JSON.stringify({ manual_pdf_r2_key: fileKey })
+      body: JSON.stringify({
+        kind: 'MANUAL_PDF',
+        display_name: file.name || filename,
+        storage_key: fileKey
+      })
     });
     const text = await res.text();
     if (!res.ok) {
-      L('timesheet replace-manual-pdf failed', { status: res.status, bodyPreview: text.slice(0, 400) });
-      throw new Error(text || 'Failed to update timesheet evidence key');
+      L('timesheet evidence POST failed', { status: res.status, bodyPreview: text.slice(0, 400) });
+      throw new Error(text || 'Failed to record timesheet evidence');
     }
   } catch (err) {
-    L('timesheet replace-manual-pdf error', err);
+    L('timesheet evidence POST error', err);
     GE();
     throw err;
   }
 
-  L('UPLOAD OK (timesheet-level)', { timesheetId, manual_pdf_r2_key: fileKey });
+  L('UPLOAD OK (timesheet-level, evidence)', { timesheetId, storage_key: fileKey });
   GE();
-  return { ok: true, manual_pdf_r2_key: fileKey };
+  return { ok: true, storage_key: fileKey };
 }
+async function handleTimesheetEvidenceRemoveClick(ev) {
+  const { LOGM, L, GC, GE } = getTsLoggers('[TS][EVIDENCE][REMOVE]');
+  GC('handleTimesheetEvidenceRemoveClick');
+
+  const btn = ev.target.closest('[data-evidence-remove]');
+  if (!btn) {
+    GE();
+    return;
+  }
+
+  const eid = btn.dataset.evidenceRemove;
+  if (!eid) {
+    GE();
+    return;
+  }
+
+  const mc = window.modalCtx || {};
+  const tsId =
+    mc.data?.timesheet_id ||
+    mc.data?.id ||
+    (mc.timesheetDetails && mc.timesheetDetails.timesheet && mc.timesheetDetails.timesheet.timesheet_id) ||
+    null;
+
+  if (!tsId) {
+    GE();
+    alert('Timesheet context missing; cannot remove evidence.');
+    return;
+  }
+
+  const enc = encodeURIComponent;
+  const encTsId = enc(tsId);
+  const encEid  = enc(eid);
+
+  L('REMOVE ENTRY', { timesheetId: tsId, evidenceId: eid });
+
+  try {
+    // DELETE the evidence row
+    const res = await authFetch(API(`/api/timesheets/${encTsId}/evidence/${encEid}`), {
+      method: 'DELETE'
+    });
+    const text = await res.text();
+    if (!res.ok) {
+      L('DELETE evidence failed', { status: res.status, bodyPreview: text.slice(0, 400) });
+      throw new Error(text || 'Failed to delete evidence item');
+    }
+
+    // Refetch evidence list
+    const res2  = await authFetch(API(`/api/timesheets/${encTsId}/evidence`));
+    const json2 = await res2.json().catch(() => []);
+    const evidence = Array.isArray(json2) ? json2 : [];
+
+    // Update modal state
+    window.modalCtx = window.modalCtx || {};
+    const st = (window.modalCtx.timesheetState ||= {});
+    st.evidence = evidence;
+
+    // Re-render the Evidence tab – the exact function name depends on your modal
+    // renderer. If you have a central render like `renderTimesheetModalTabs`,
+    // you can call it here. Otherwise, you can force a full modal re-render.
+    if (typeof renderTimesheetModal === 'function') {
+      renderTimesheetModal('evidence');
+    } else if (typeof renderTimesheetModalTabs === 'function') {
+      renderTimesheetModalTabs('evidence');
+    } else {
+      // Fallback: if no central renderer, you can manually replace the Evidence tab
+      // container's innerHTML with renderTimesheetEvidenceTab({ row, details, state }).
+      // This is left minimal to avoid inventing unknown helpers.
+    }
+
+    if (window.__toast) {
+      window.__toast('Evidence removed');
+    }
+  } catch (err) {
+    L('evidence remove error', err);
+    alert(err?.message || 'Failed to remove evidence item.');
+  }
+
+  GE();
+}
+
 
 async function authoriseTimesheet(ctxOrId) {
   const { LOGM, L, GC, GE } = getTsLoggers('[TS][AUTH]');
@@ -36602,8 +37173,8 @@ async function listTimesheetsSummary(filters = {}) {
 
   const f = filters || {};
 
-  // Stage filter
-  const stage = (f.summary_stage || '').toUpperCase();
+  // Stage filter (Tools use ts_stage; we also support summary_stage for future calls)
+  const stage = (f.ts_stage || f.summary_stage || '').toUpperCase();
   if (stage && stage !== 'ALL') qs.set('summary_stage', stage);
 
   // Route filter (aggregated: ELECTRONIC / MANUAL / NHSP / HEALTHROSTER / QR)
@@ -36643,6 +37214,11 @@ async function listTimesheetsSummary(filters = {}) {
   // NEW: Tools filters – Candidate Paid / Client Invoiced
   if (f.candidate_paid === true)   qs.set('candidate_paid', 'true');
   if (f.client_invoiced === true)  qs.set('client_invoiced', 'true');
+
+  // NEW: HR issue filter – e.g. 'HOURS_MISMATCH_HR'
+  if (f.hr_issue) {
+    qs.set('hr_issue', f.hr_issue);
+  }
 
   const sortState = st.sort || { key: null, dir: 'asc' };
   const sortKeyRaw = (sortState.key || '').toLowerCase();
