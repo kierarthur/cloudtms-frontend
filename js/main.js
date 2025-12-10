@@ -13988,40 +13988,50 @@ async function openCandidate(row) {
       };
 
       // Helper: apply staged HR alias deletions for this candidate
+         // Helper: apply staged HR alias deletions for this candidate
       const applyAliasDeletes = async (candId) => {
         try {
           const aliasState = window.modalCtx?.hrAliasState || null;
-          const staged = (aliasState && Array.isArray(aliasState.stagedDeletes))
+          const stagedRaw = (aliasState && Array.isArray(aliasState.stagedDeletes))
             ? aliasState.stagedDeletes
             : [];
 
-          if (!candId || !staged.length) return { ok: true };
+          // Normalise to a clean list of mapping_ids (strings)
+          const mappingIds = stagedRaw
+            .map((id) => (id == null ? '' : String(id).trim()))
+            .filter(Boolean);
+
+          if (!candId || !mappingIds.length) return { ok: true };
 
           L('[onSave] deleting staged HR aliases', {
             candidateId: candId,
-            stagedCount: staged.length
+            stagedCount: mappingIds.length
           });
 
-          for (const rawId of staged) {
-            const aliasId = rawId && String(rawId);
-            if (!aliasId) continue;
+          const urlAliasDel = API(
+            `/api/candidates/${encodeURIComponent(candId)}/aliases`
+          );
 
-            const urlAliasDel = API(
-              `/api/candidates/${encodeURIComponent(candId)}` +
-              `/hr-aliases/${encodeURIComponent(aliasId)}`
-            );
-            L('[onSave][DELETE hr_alias]', urlAliasDel);
+          L('[onSave][DELETE hr_aliases batch]', {
+            url: urlAliasDel,
+            mapping_ids: mappingIds
+          });
 
-            const resAlias = await authFetch(urlAliasDel, { method: 'DELETE' });
-            if (!resAlias.ok) {
-              const msg = await resAlias.text().catch(() => 'Failed to delete alias mapping');
-              alert(msg);
-              return { ok:false };
-            }
+          const resAlias = await authFetch(urlAliasDel, {
+            method: 'DELETE',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ mapping_ids: mappingIds })
+          });
+
+          if (!resAlias.ok) {
+            const msg = await resAlias.text().catch(() => 'Failed to delete alias mappings');
+            alert(msg);
+            return { ok:false };
           }
 
+          // Update local aliasState to reflect deletions
           if (aliasState) {
-            const stagedSet = new Set(staged.map(String));
+            const stagedSet = new Set(mappingIds.map(String));
             const remaining = Array.isArray(aliasState.existing)
               ? aliasState.existing.filter(a => a && !stagedSet.has(String(a.id)))
               : [];
@@ -14034,9 +14044,11 @@ async function openCandidate(row) {
           return { ok:true };
         } catch (e) {
           W('applyAliasDeletes failed (non-fatal)', e);
+          // Non-fatal: aliases are “nice to have”; don’t hard-block the candidate save
           return { ok:true };
         }
       };
+
 
       if (isFlip) {
         L('[onSave] detected PAYE↔UMBRELLA flip', {
@@ -21729,7 +21741,7 @@ async setTab(k) {
   }
 
   // ───────────────────── Candidates: Bookings tab wiring ─────────────────────
-  if (this.entity === 'candidates' && k === 'bookings') {
+   if (this.entity === 'candidates' && k === 'bookings') {
     try {
       const candId =
         window.modalCtx?.data?.id ||
@@ -21750,9 +21762,14 @@ async setTab(k) {
     }
   }
 
-  // ───────────────────── Candidates: Pay tab (Advances summary wiring) ─────────────────────
+   // ───────────────────── Candidates: Pay tab (Advances summary + Umbrella wiring) ─────────────────────
   if (this.entity === 'candidates' && k === 'pay') {
     try {
+      // Wire Umbrella input + datalist (searchable picker)
+      if (typeof mountCandidatePayTab === 'function') {
+        await mountCandidatePayTab();
+      }
+
       const candId =
         window.modalCtx?.data?.id ||
         merged.id ||
@@ -21776,6 +21793,47 @@ async setTab(k) {
       }
     } catch (e) {
       console.warn('[CAND][PAY][ADVANCES] wiring failed', e);
+    }
+  }
+
+
+  // ───────────────────── Candidates: Rates tab (Rota Roles + overrides) ─────────────────────
+  if (this.entity === 'candidates' && k === 'rates') {
+    try {
+      // Rota Roles editor
+      const container = document.getElementById('rolesEditor');
+      if (container && typeof loadGlobalRoleOptions === 'function' && typeof renderRolesEditor === 'function') {
+        const allRoles = await loadGlobalRoleOptions();
+
+        const currentRoles =
+          (Array.isArray(window.modalCtx?.rolesState) && window.modalCtx.rolesState.length)
+            ? window.modalCtx.rolesState
+            : (Array.isArray(window.modalCtx?.data?.roles) ? window.modalCtx.data.roles : []);
+
+        renderRolesEditor(container, currentRoles, allRoles);
+
+        // Optional: keep options fresh if global roles list changes
+        if (!window.modalCtx._rolesUpdatedHandler) {
+          window.modalCtx._rolesUpdatedHandler = async () => {
+            try {
+              const updated = await loadGlobalRoleOptions();
+              if (container.__rolesEditor && typeof container.__rolesEditor.updateOptions === 'function') {
+                container.__rolesEditor.updateOptions(updated);
+              }
+            } catch {
+              // non-fatal
+            }
+          };
+          window.addEventListener('global-roles-updated', window.modalCtx._rolesUpdatedHandler);
+        }
+      }
+
+      // Candidate-specific rate overrides table
+      if (typeof mountCandidateRatesTab === 'function') {
+        await mountCandidateRatesTab();
+      }
+    } catch (e) {
+      console.warn('[CAND][RATES] wiring failed', e);
     }
   }
 
@@ -25019,106 +25077,125 @@ async function openImportsModal() {
     importsState: {}
   };
 
-  const renderImportsTab = (key) => {
-    if (key !== 'main') return '';
-    const enc = (typeof escapeHtml === 'function')
-      ? escapeHtml
-      : (s) => String(s == null ? '' : s);
+const renderImportsTab = (key) => {
+  if (key !== 'main') return '';
+  const enc = (typeof escapeHtml === 'function')
+    ? escapeHtml
+    : (s) => String(s == null ? '' : s);
 
-    return html(`
-      <div class="form" id="importsMain">
-        <div class="card">
+  return html(`
+    <div class="form" id="importsMain">
+      <div class="card">
+        <div class="row">
+          <label>Imports</label>
+          <div class="controls">
+            <span class="mini">
+              Use this screen to upload and process NHSP and HealthRoster files.
+              Each tile accepts an Excel export from the corresponding system.
+            </span>
+          </div>
+        </div>
+      </div>
+
+      <div class="grid-3" style="margin-top:10px;gap:12px;">
+        <!-- NHSP Weekly Import -->
+        <div class="card dropzone"
+             id="nhspImportDrop"
+             data-import-kind="nhsp">
           <div class="row">
-            <label>Imports</label>
+            <label>NHSP Weekly Import</label>
             <div class="controls">
               <span class="mini">
-                Use this screen to upload and process NHSP and HealthRoster files.
-                Each tile accepts an Excel export from the corresponding system.
+                Drop NHSP weekly export anywhere in this tile or<br/>
+                <input id="nhspImportFile"
+                       type="file"
+                       accept=".xls,.xlsx,.csv"
+                       style="
+                         margin-top:4px;
+                         background:#020617;
+                         border:1px solid var(--line);
+                         color:var(--text);
+                         border-radius:8px;
+                         padding:6px 8px;
+                         font-size:12px;
+                       " />
               </span>
+              <div class="hint mini" style="margin-top:4px;">
+                NHSP weekly export (self-bill style). The system will parse, classify,
+                let you resolve unmapped staff/clients, and then create weeks & timesheets.
+              </div>
+              <div id="nhspImportSummary" class="mini" style="margin-top:4px;"></div>
             </div>
           </div>
         </div>
 
-        <div class="grid-3" style="margin-top:10px;gap:12px;">
-          <!-- NHSP Weekly Import -->
-          <div class="card">
-            <div class="row">
-              <label>NHSP Weekly Import</label>
-              <div class="controls">
-                <div id="nhspImportDrop"
-                     class="dropzone"
-                     data-import-kind="nhsp">
-                  <span class="mini">
-                    Drop NHSP weekly export here or<br/>
-                    <input id="nhspImportFile"
-                           type="file"
-                           accept=".xls,.xlsx,.csv"
-                           style="margin-top:4px;" />
-                  </span>
-                </div>
-                <div class="hint mini" style="margin-top:4px;">
-                  NHSP weekly export (self-bill style). The system will parse, classify,
-                  let you resolve unmapped staff/clients, and then create weeks & timesheets.
-                </div>
-                <div id="nhspImportSummary" class="mini" style="margin-top:4px;"></div>
+        <!-- HealthRoster Weekly Import -->
+        <div class="card dropzone"
+             id="hrWeeklyImportDrop"
+             data-import-kind="hr-weekly">
+          <div class="row">
+            <label>HealthRoster Weekly Import</label>
+            <div class="controls">
+              <span class="mini">
+                Drop HealthRoster weekly export anywhere in this tile or<br/>
+                <input id="hrWeeklyImportFile"
+                       type="file"
+                       accept=".xls,.xlsx,.csv"
+                       style="
+                         margin-top:4px;
+                         background:#020617;
+                         border:1px solid var(--line);
+                         color:var(--text);
+                         border-radius:8px;
+                         padding:6px 8px;
+                         font-size:12px;
+                       " />
+              </span>
+              <div class="hint mini" style="margin-top:4px;">
+                Weekly HealthRoster template shifts. These are auto-processed into
+                nhsp_shifts / contract weeks, with optional candidate/client resolve.
               </div>
+              <div id="hrWeeklyImportSummary" class="mini" style="margin-top:4px;"></div>
             </div>
           </div>
+        </div>
 
-          <!-- HealthRoster Weekly Import -->
-          <div class="card">
-            <div class="row">
-              <label>HealthRoster Weekly Import</label>
-              <div class="controls">
-                <div id="hrWeeklyImportDrop"
-                     class="dropzone"
-                     data-import-kind="hr-weekly">
-                  <span class="mini">
-                    Drop HealthRoster weekly export here or<br/>
-                    <input id="hrWeeklyImportFile"
-                           type="file"
-                           accept=".xls,.xlsx,.csv"
-                           style="margin-top:4px;" />
-                  </span>
-                </div>
-                <div class="hint mini" style="margin-top:4px;">
-                  Weekly HealthRoster template shifts. These are auto-processed into
-                  nhsp_shifts / contract weeks, with optional candidate/client resolve.
-                </div>
-                <div id="hrWeeklyImportSummary" class="mini" style="margin-top:4px;"></div>
+        <!-- HealthRoster Rota Validation (Daily) -->
+        <div class="card dropzone"
+             id="hrRotaImportDrop"
+             data-import-kind="hr-rota">
+          <div class="row">
+            <label>HealthRoster Rota Validation (Daily)</label>
+            <div class="controls">
+              <span class="mini">
+                Drop HR rota daily export anywhere in this tile or<br/>
+                <input id="hrRotaImportFile"
+                       type="file"
+                       accept=".xls,.xlsx,.csv"
+                       style="
+                         margin-top:4px;
+                         background:#020617;
+                         border:1px solid var(--line);
+                         color:var(--text);
+                         border-radius:8px;
+                         padding:6px 8px;
+                         font-size:12px;
+                       " />
+              </span>
+              <div class="hint mini" style="margin-top:4px;">
+                Daily HealthRoster rota used to validate self-reported daily timesheets.
+                We’ll compare start/end/break/“Actual Hours”, check grade→role→rates, and
+                let you queue mismatch emails to Temp Staffing.
               </div>
-            </div>
-          </div>
-
-          <!-- HealthRoster Rota Validation (Daily) -->
-          <div class="card">
-            <div class="row">
-              <label>HealthRoster Rota Validation (Daily)</label>
-              <div class="controls">
-                <div id="hrRotaImportDrop"
-                     class="dropzone"
-                     data-import-kind="hr-rota">
-                  <span class="mini">
-                    Drop HR rota daily export here or<br/>
-                    <input id="hrRotaImportFile"
-                           type="file"
-                           accept=".xls,.xlsx,.csv"
-                           style="margin-top:4px;" />
-                  </span>
-                </div>
-                <div class="hint mini" style="margin-top:4px;">
-                  Daily HealthRoster rota used to validate self-reported daily timesheets.
-                  We’ll compare start/end/break/“Actual Hours”, check grade→role→rates, and
-                  let you queue mismatch emails to Temp Staffing.
-                </div>
-                <div id="hrRotaImportSummary" class="mini" style="margin-top:4px;"></div>
-              </div>
+              <div id="hrRotaImportSummary" class="mini" style="margin-top:4px;"></div>
             </div>
           </div>
         </div>
       </div>
-    `);
-  };
+    </div>
+  `);
+};
+
 
   showModal(
     'Imports',
@@ -26907,6 +26984,15 @@ function renderImportSummaryModal(importType, summaryState) {
   const rows = Array.isArray(ss.rows) ? ss.rows : [];
 
   window.__importSummaryState = window.__importSummaryState || {};
+  // Identify the summary kind and current top frame so we can avoid stacking
+  const summaryKind = `import-summary-${type.toLowerCase()}`;
+  const stack       = window.__modalStack || [];
+  const topFrame    = stack[stack.length - 1] || null;
+  const reusingExistingSummary =
+    !!topFrame &&
+    topFrame.kind === summaryKind;
+
+  // Update the global import summary cache for this type
   window.__importSummaryState[type] = {
     import_id: importId,
     summary: ss,
@@ -26941,24 +27027,39 @@ function renderImportSummaryModal(importType, summaryState) {
     `);
   };
 
-  // Child modal for import summary
-  showModal(
-    (type === 'HR_ROTA_DAILY'
-      ? 'HR Rota Daily Validation'
-      : (type === 'NHSP'
-          ? 'NHSP Weekly Import Summary'
-          : 'HealthRoster Weekly Import Summary')),
-    [{ key: 'main', label: 'Summary' }],
-    renderTab,
-    null,
-    false,
-    null,
-    {
-      kind: `import-summary-${type.toLowerCase()}`,
-      noParentGate: true,
-      stayOpenOnSave: false
+  // ───────────────────── Import summary modal ─────────────────────
+  // If a summary of this type is already on top of the stack, just re-render it
+  // instead of pushing another frame. This avoids "multiple Close clicks" and
+  // keeps drag-and-drop behaviour sane.
+  if (!reusingExistingSummary) {
+    // Child modal for import summary
+    showModal(
+      (type === 'HR_ROTA_DAILY'
+        ? 'HR Rota Daily Validation'
+        : (type === 'NHSP'
+            ? 'NHSP Weekly Import Summary'
+            : 'HealthRoster Weekly Import Summary')),
+      [{ key: 'main', label: 'Summary' }],
+      renderTab,
+      null,
+      false,
+      null,
+      {
+        kind: summaryKind,
+        noParentGate: true,
+        stayOpenOnSave: false
+      }
+    );
+  } else {
+    // Reuse the existing summary frame: repaint the current tab (always "main")
+    try {
+      if (typeof topFrame.setTab === 'function') {
+        topFrame.setTab('main');
+      }
+    } catch (e) {
+      console.warn('[IMPORTS] failed to re-render existing import summary frame', e);
     }
-  );
+  }
 
   // ────────────────────── Helpers ──────────────────────
 
@@ -27605,10 +27706,10 @@ function renderImportSummaryModal(importType, summaryState) {
       }
 
       // Apply / Finalise import button
-      const btnApply = root.querySelector('button[data-act="weekly-import-apply"]');
-      if (btnApply && !btnApply.__weeklyApplyWired) {
-        btnApply.__weeklyApplyWired = true;
-        btnApply.addEventListener('click', async () => {
+      const btnApplyWeekly = root.querySelector('button[data-act="weekly-import-apply"]');
+      if (btnApplyWeekly && !btnApplyWeekly.__weeklyApplyWired) {
+        btnApplyWeekly.__weeklyApplyWired = true;
+        btnApplyWeekly.addEventListener('click', async () => {
           try {
             if (!importId) {
               alert('No import_id in summary; cannot finalise.');
@@ -30176,19 +30277,43 @@ function bindCandidateMainFormEvents(container, model) {
       }
 
       const delBtn = q('[data-act="delete-cand-alias"]');
-      if (delBtn && !delBtn.__wired) {
-        delBtn.__wired = true;
-        delBtn.addEventListener('click', () => {
-          const id = state.selectedId && String(state.selectedId);
-          if (!id) return;
-
-          if (!state.stagedDeletes.map(String).includes(id)) {
-            state.stagedDeletes.push(id);
+      if (delBtn) {
+        // Visibility controller: only show the Remove mapping button in edit/create
+        const updateAliasDeleteVisibility = () => {
+          try {
+            const stack = (window.__modalStack || []);
+            const fr    = stack[stack.length - 1] || null;
+            const mode  = fr ? fr.mode : 'view';
+            delBtn.style.display = (mode === 'edit' || mode === 'create') ? '' : 'none';
+          } catch {
+            // If anything goes wrong, fall back to hiding in view mode conservatively
+            delBtn.style.display = 'none';
           }
+        };
 
-          renderAliases();
-          markDirty();
-        });
+        // Run once on init
+        updateAliasDeleteVisibility();
+
+        if (!delBtn.__visWired) {
+          delBtn.__visWired = true;
+          // Re-run whenever the frame mode changes
+          window.addEventListener('modal-frame-mode-changed', updateAliasDeleteVisibility);
+        }
+
+        if (!delBtn.__wired) {
+          delBtn.__wired = true;
+          delBtn.addEventListener('click', () => {
+            const id = state.selectedId && String(state.selectedId);
+            if (!id) return;
+
+            if (!state.stagedDeletes.map(String).includes(id)) {
+              state.stagedDeletes.push(id);
+            }
+
+            renderAliases();
+            markDirty();
+          });
+        }
       }
     }
   } catch (e) {
