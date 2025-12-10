@@ -12591,31 +12591,6 @@ function renderCandidateTab(key, row = {}) {
   if (key === 'main') {
     const enc = escapeHtml || ((s) => String(s || ''));
 
-    const aliasesArr = Array.isArray(row.nhsp_hr_name_aliases)
-      ? row.nhsp_hr_name_aliases
-      : (row.nhsp_hr_name_aliases ? [row.nhsp_hr_name_aliases] : []);
-
-    const aliasChipsHtml = aliasesArr
-      .filter(a => !!a)
-      .map(a => {
-        const v = enc(a);
-        return `
-          <span class="chip cand-alias-chip" data-alias="${v}">
-            <span class="chip-label">${v}</span>
-            <button type="button"
-                    class="chip-remove"
-                    data-act="remove-cand-alias"
-                    data-alias="${v}"
-                    title="Remove alias">
-              ×
-            </button>
-          </span>
-        `;
-      })
-      .join('');
-
-    const aliasesJson = enc(JSON.stringify(aliasesArr));
-
     return html(`
       <div class="form" id="tab-main">
         ${input('first_name','First name', row.first_name)}
@@ -12650,27 +12625,26 @@ function renderCandidateTab(key, row = {}) {
           </div>
         </div>
 
-        <!-- NHSP / HealthRoster alias chips -->
+        <!-- NHSP / HealthRoster aliases (from hr_name_mappings) -->
         <div class="row">
           <label>Also known as in NHSP / HealthRoster</label>
           <div class="controls">
-            <div class="chip-row"
-                 id="cand-alias-chips"
-                 data-field="nhsp_hr_name_aliases"
-                 data-aliases='${aliasesJson}'>
-              ${aliasChipsHtml || '<span class="mini">No aliases configured yet.</span>'}
+            <div class="split" id="cand-alias-select-row" style="display:none;">
+              <select id="cand-alias-select" class="input"></select>
+              <button type="button"
+                      class="btn mini"
+                      data-act="delete-cand-alias"
+                      title="Remove this mapping">
+                🗑 Remove mapping
+              </button>
             </div>
-            <input
-              id="cand-alias-input"
-              class="input"
-              type="text"
-              placeholder="Add alias (e.g. J Smith)"
-              data-act="add-cand-alias"
-              style="margin-top:4px;"
-            />
+            <div id="cand-alias-empty" class="mini">
+              No aliases configured yet.
+            </div>
             <div class="hint">
-              Aliases help match NHSP / HealthRoster staff name variations (e.g. "SMITH, JOHN", "J Smith")
-              to this candidate. Changes here will be saved into nhsp_hr_name_aliases.
+              Aliases come from previous NHSP / HealthRoster imports where this staff name
+              was resolved to this candidate. Removing a mapping will prevent future rotas
+              using that name from auto-linking to this candidate.
             </div>
           </div>
         </div>
@@ -13725,17 +13699,26 @@ async function openCandidate(row) {
       try {
         const raw = await res.clone().text();
         if (LOG) console.debug('[HTTP] raw body (≤2KB):', raw.slice(0, 2048));
-      } catch (peekErr) { W('[HTTP] raw peek failed', peekErr?.message || peekErr); }
+      } catch (peekErr) {
+        W('[HTTP] raw peek failed', peekErr?.message || peekErr);
+      }
 
       if (res.ok) {
-        const data = await res.json().catch((jErr)=>{ W('res.json() failed, using {}', jErr); return {}; });
-        const candidate = data.candidate || unwrapSingle(data, 'candidate');
+        const data       = await res.json().catch((jErr)=>{ W('res.json() failed, using {}', jErr); return {}; });
+        const candidate  = data.candidate || unwrapSingle(data, 'candidate');
         const job_titles = Array.isArray(data.job_titles) ? data.job_titles : [];
+        const hr_aliases = Array.isArray(data.hr_aliases) ? data.hr_aliases : [];
         L('hydrated JSON keys', Object.keys(data||{}), 'candidate keys', Object.keys(candidate||{}));
-        full = candidate ? { ...candidate, job_titles } : incoming;
+
+        // Store hr_aliases on the hydrated object under a private key,
+        // so we can seed modalCtx later without changing the DB schema.
+        full = candidate
+          ? { ...candidate, job_titles, __hr_aliases: hr_aliases }
+          : incoming;
       } else {
         W('non-OK response, using incoming row');
       }
+
     } catch (e) {
       W('hydrate failed; using summary row', e);
     }
@@ -13829,6 +13812,14 @@ async function openCandidate(row) {
     dbPayMethod
   });
 
+  // Normalise hr_name_mappings aliases into modalCtx.hrAliasState
+  const hrAliasesExisting = Array.isArray(full.__hr_aliases)
+    ? full.__hr_aliases
+    : [];
+  const selectedAliasId = hrAliasesExisting.length
+    ? (hrAliasesExisting[0].id ?? null)
+    : null;
+
   window.modalCtx = {
     entity: 'candidates',
     data:   deep(full),
@@ -13840,7 +13831,13 @@ async function openCandidate(row) {
     // 🔹 Freeze the DB pay method for the lifetime of this modal
     dbPayMethod,
     // 🔹 Main candidate model used by bindCandidateMainFormEvents (create + edit)
-    candidateMainModel: buildCandidateMainModel(full)
+    candidateMainModel: buildCandidateMainModel(full),
+    // 🔹 HR name mappings (NHSP / HealthRoster) for this candidate
+    hrAliasState: {
+      existing: hrAliasesExisting,   // [{ id, hr_name_norm, hospital_or_trust, ... }, ...]
+      stagedDeletes: [],             // alias IDs staged for delete
+      selectedId: selectedAliasId    // currently selected alias in the dropdown
+    }
   };
 
   L('window.modalCtx seeded', {
@@ -13990,6 +13987,57 @@ async function openCandidate(row) {
         obj.account_number = null;
       };
 
+      // Helper: apply staged HR alias deletions for this candidate
+      const applyAliasDeletes = async (candId) => {
+        try {
+          const aliasState = window.modalCtx?.hrAliasState || null;
+          const staged = (aliasState && Array.isArray(aliasState.stagedDeletes))
+            ? aliasState.stagedDeletes
+            : [];
+
+          if (!candId || !staged.length) return { ok: true };
+
+          L('[onSave] deleting staged HR aliases', {
+            candidateId: candId,
+            stagedCount: staged.length
+          });
+
+          for (const rawId of staged) {
+            const aliasId = rawId && String(rawId);
+            if (!aliasId) continue;
+
+            const urlAliasDel = API(
+              `/api/candidates/${encodeURIComponent(candId)}` +
+              `/hr-aliases/${encodeURIComponent(aliasId)}`
+            );
+            L('[onSave][DELETE hr_alias]', urlAliasDel);
+
+            const resAlias = await authFetch(urlAliasDel, { method: 'DELETE' });
+            if (!resAlias.ok) {
+              const msg = await resAlias.text().catch(() => 'Failed to delete alias mapping');
+              alert(msg);
+              return { ok:false };
+            }
+          }
+
+          if (aliasState) {
+            const stagedSet = new Set(staged.map(String));
+            const remaining = Array.isArray(aliasState.existing)
+              ? aliasState.existing.filter(a => a && !stagedSet.has(String(a.id)))
+              : [];
+
+            aliasState.existing      = remaining;
+            aliasState.stagedDeletes = [];
+            aliasState.selectedId    = remaining.length ? (remaining[0].id ?? null) : null;
+          }
+
+          return { ok:true };
+        } catch (e) {
+          W('applyAliasDeletes failed (non-fatal)', e);
+          return { ok:true };
+        }
+      };
+
       if (isFlip) {
         L('[onSave] detected PAYE↔UMBRELLA flip', {
           originalMethod,
@@ -14121,6 +14169,12 @@ async function openCandidate(row) {
                 account_number: window.modalCtx.data?.account_number ?? null
               }
             });
+
+            const aliasResultFlipPU = await applyAliasDeletes(full.id || window.modalCtx.data?.id);
+            if (!aliasResultFlipPU.ok) {
+              return { ok:false };
+            }
+
             return { ok:true, saved: window.modalCtx.data };
 
           } catch (err) {
@@ -14239,6 +14293,11 @@ async function openCandidate(row) {
               }
             });
 
+            const aliasResultFlipUP = await applyAliasDeletes(full.id || window.modalCtx.data?.id);
+            if (!aliasResultFlipUP.ok) {
+              return { ok:false };
+            }
+
             return { ok:true, saved: window.modalCtx.data };
 
           } catch (err) {
@@ -14350,7 +14409,21 @@ async function openCandidate(row) {
         } catch { return null; }
       }
       const bucketLabel = { day:'Day', night:'Night', sat:'Sat', sun:'Sun', bh:'BH' };
-      const erniMult = await (async ()=>{ if (typeof window.__ERNI_MULT__ === 'number') return window.__ERNI_MULT__; try { if (typeof getSettingsCached === 'function') { const s = await getSettingsCached(); let p = s?.erni_pct ?? s?.employers_ni_percent ?? 0; p = Number(p)||0; if (p>1) p=p/100; window.__ERNI_MULT__ = 1 + p; return window.__ERNI_MULT__; } } catch{} window.__ERNI_MULT__ = 1; return 1; })();
+      const erniMult = await (async ()=>{
+        if (typeof window.__ERNI_MULT__ === 'number') return window.__ERNI_MULT__;
+        try {
+          if (typeof getSettingsCached === 'function') {
+            const s = await getSettingsCached();
+            let p = s?.erni_pct ?? s?.employers_ni_percent ?? 0;
+            p = Number(p)||0;
+            if (p>1) p=p/100;
+            window.__ERNI_MULT__ = 1 + p;
+            return window.__ERNI_MULT__;
+          }
+        } catch{}
+        window.__ERNI_MULT__ = 1;
+        return 1;
+      })();
 
       // Validate EDITS
       for (const [editId, patchRaw] of Object.entries(O.stagedEdits || {})) {
@@ -14503,6 +14576,12 @@ async function openCandidate(row) {
         W('post-save rates refresh failed', e);
       }
 
+      // ===== Persist staged HR name alias deletions ========================
+      const aliasResult = await applyAliasDeletes(candidateId);
+      if (!aliasResult.ok) {
+        return { ok:false };
+      }
+
       const mergedRoles = (saved && saved.roles) || payload.roles || window.modalCtx.data?.roles || [];
 
       // Build a fresh job_titles array for modalCtx.data, based on the staged model
@@ -14591,7 +14670,6 @@ async function openCandidate(row) {
     L('skip companion loads (no full.id)');
   }
 }
-
 
 
 // ====================== mountCandidatePayTab (FIXED) ======================
@@ -30031,6 +30109,91 @@ function bindCandidateMainFormEvents(container, model) {
       window.dispatchEvent(new Event('modal-dirty'));
     } catch {}
   };
+
+  // ───────────────────── NHSP / HR aliases (hr_name_mappings) ─────────────────────
+  try {
+    const aliasRow    = q('#cand-alias-select-row');
+    const aliasSelect = q('#cand-alias-select');
+    const aliasEmpty  = q('#cand-alias-empty');
+
+    if (aliasRow && aliasSelect && aliasEmpty) {
+      const state = (window.modalCtx && window.modalCtx.hrAliasState) || {
+        existing: [],
+        stagedDeletes: [],
+        selectedId: null
+      };
+
+      // Normalise state structure in case it came through a snapshot
+      if (!Array.isArray(state.existing))      state.existing      = [];
+      if (!Array.isArray(state.stagedDeletes)) state.stagedDeletes = [];
+      if (!window.modalCtx.hrAliasState) {
+        window.modalCtx.hrAliasState = state;
+      }
+
+      const renderAliases = () => {
+        const stagedSet = new Set(state.stagedDeletes.map(String));
+        const visible   = state.existing.filter(a => a && !stagedSet.has(String(a.id)));
+
+        aliasSelect.innerHTML = '';
+
+        if (!visible.length) {
+          aliasRow.style.display   = 'none';
+          aliasEmpty.style.display = '';
+          state.selectedId         = null;
+          return;
+        }
+
+        visible.forEach((a) => {
+          const opt = document.createElement('option');
+          const pieces = [];
+          if (a.hr_name_norm) pieces.push(String(a.hr_name_norm));
+          if (a.hospital_or_trust) pieces.push(`@ ${a.hospital_or_trust}`);
+          opt.value = String(a.id);
+          opt.textContent = pieces.join(' ') || String(a.id);
+          aliasSelect.appendChild(opt);
+        });
+
+        // Choose a sensible selectedId if current is gone
+        let currentId = state.selectedId && !stagedSet.has(String(state.selectedId))
+          ? String(state.selectedId)
+          : (visible[0] && String(visible[0].id)) || '';
+
+        aliasSelect.value = currentId;
+        state.selectedId  = currentId || null;
+
+        aliasRow.style.display   = '';
+        aliasEmpty.style.display = 'none';
+      };
+
+      renderAliases();
+
+      if (!aliasSelect.__wired) {
+        aliasSelect.__wired = true;
+        aliasSelect.addEventListener('change', () => {
+          state.selectedId = aliasSelect.value || null;
+          markDirty();
+        });
+      }
+
+      const delBtn = q('[data-act="delete-cand-alias"]');
+      if (delBtn && !delBtn.__wired) {
+        delBtn.__wired = true;
+        delBtn.addEventListener('click', () => {
+          const id = state.selectedId && String(state.selectedId);
+          if (!id) return;
+
+          if (!state.stagedDeletes.map(String).includes(id)) {
+            state.stagedDeletes.push(id);
+          }
+
+          renderAliases();
+          markDirty();
+        });
+      }
+    }
+  } catch (e) {
+    console.warn('[CAND][MAIN] alias wiring failed', e);
+  }
 
   // Normalise job_titles:
   // - drop any entries without job_title_id
