@@ -13743,6 +13743,81 @@ async function openCandidate(row) {
     L('no seedId — create mode');
   }
 
+  // Helper: build candidateMainModel used by bindCandidateMainFormEvents
+  const buildCandidateMainModel = (srcRaw) => {
+    const src = srcRaw || {};
+    const toStr = (v) => (v == null ? '' : String(v));
+
+    // Normalise job_titles into { job_title_id, is_primary } objects
+    let jt = [];
+    if (Array.isArray(src.job_titles)) {
+      jt = src.job_titles
+        .map(t => {
+          if (!t) return null;
+          const id =
+            t.job_title_id ??
+            t.id ??
+            t.default_job_title_id ??
+            null;
+          if (!id) return null;
+          return {
+            job_title_id: id,
+            is_primary: !!t.is_primary
+          };
+        })
+        .filter(Boolean);
+    }
+
+    // Normalise NHSP/HR aliases into an array of strings
+    let aliases = [];
+    if (Array.isArray(src.nhsp_hr_name_aliases)) {
+      aliases = src.nhsp_hr_name_aliases.filter(Boolean).map(toStr);
+    } else if (src.nhsp_hr_name_aliases) {
+      aliases = [toStr(src.nhsp_hr_name_aliases)];
+    }
+
+    return {
+      // Core identity / contact
+      first_name:       toStr(src.first_name),
+      last_name:        toStr(src.last_name),
+      email:            toStr(src.email),
+      phone:            toStr(src.phone),
+      display_name:     toStr(src.display_name),
+
+      // Pay / rota fields
+      pay_method:       src.pay_method || null,
+      key_norm:         toStr(src.key_norm),
+
+      // Aliases for NHSP / HealthRoster
+      nhsp_hr_name_aliases: aliases,
+
+      // CCR and NI / DOB / gender
+      tms_ref:          src.tms_ref ?? null,
+      ni_number:        toStr(src.ni_number),
+      date_of_birth:    src.date_of_birth || null, // stored as ISO; binder will format
+      gender:           toStr(src.gender),
+
+      // Professional registration
+      prof_reg_type:    src.prof_reg_type || null,
+      prof_reg_number:  toStr(src.prof_reg_number),
+
+      // Address
+      address_line1:    toStr(src.address_line1),
+      address_line2:    toStr(src.address_line2),
+      address_line3:    toStr(src.address_line3),
+      town_city:        toStr(src.town_city),
+      county:           toStr(src.county),
+      postcode:         toStr(src.postcode),
+      country:          toStr(src.country),
+
+      // Notes
+      notes:            toStr(src.notes),
+
+      // Job titles (normalised, primary will be enforced by binder)
+      job_titles:       jt
+    };
+  };
+
   // 2) Build modal context from hydrated data
   const fullKeys    = Object.keys(full || {});
   const dbPayMethod = full && full.pay_method ? String(full.pay_method).toUpperCase() : null;
@@ -13763,7 +13838,9 @@ async function openCandidate(row) {
     clientSettingsState: null,
     openToken: ((full?.id) || 'new') + ':' + Date.now(),
     // 🔹 Freeze the DB pay method for the lifetime of this modal
-    dbPayMethod
+    dbPayMethod,
+    // 🔹 Main candidate model used by bindCandidateMainFormEvents (create + edit)
+    candidateMainModel: buildCandidateMainModel(full)
   };
 
   L('window.modalCtx seeded', {
@@ -13772,7 +13849,8 @@ async function openCandidate(row) {
     dataKeys: Object.keys(window.modalCtx.data||{}),
     formStateForId: window.modalCtx.formState?.__forId,
     openToken: window.modalCtx.openToken,
-    dbPayMethod: window.modalCtx.dbPayMethod
+    dbPayMethod: window.modalCtx.dbPayMethod,
+    candidateMainModelKeys: Object.keys(window.modalCtx.candidateMainModel || {})
   });
 
   // 3) Render modal
@@ -13893,16 +13971,16 @@ async function openCandidate(row) {
 
       const originalMethod = (full && full.pay_method) ? String(full.pay_method).toUpperCase() : null;
       const newMethod      = payload.pay_method ? String(payload.pay_method).toUpperCase() : null;
-     const hasExistingId  = !!full?.id;
+      const hasExistingId  = !!full?.id;
 
-const isFlip = !!(
-  hasExistingId &&
-  originalMethod &&
-  newMethod &&
-  (originalMethod === 'PAYE' || originalMethod === 'UMBRELLA') &&
-  (newMethod     === 'PAYE' || newMethod     === 'UMBRELLA') &&
-  originalMethod !== newMethod
-);
+      const isFlip = !!(
+        hasExistingId &&
+        originalMethod &&
+        newMethod &&
+        (originalMethod === 'PAYE' || originalMethod === 'UMBRELLA') &&
+        (newMethod     === 'PAYE' || newMethod     === 'UMBRELLA') &&
+        originalMethod !== newMethod
+      );
 
       // Helper to force-clear candidate bank fields in a payload
       const clearBankOnPayload = (obj) => {
@@ -13925,7 +14003,7 @@ const isFlip = !!(
         const idForUpdate = window.modalCtx?.data?.id || full?.id || null;
 
         // ── PAYE → UMBRELLA special handling ────────────────────────────────
-                    if (originalMethod === 'PAYE' && newMethod === 'UMBRELLA') {
+        if (originalMethod === 'PAYE' && newMethod === 'UMBRELLA') {
           const effectiveUmbrellaId = payload.umbrella_id || full.umbrella_id || null;
 
           if (!effectiveUmbrellaId) {
@@ -13986,9 +14064,6 @@ const isFlip = !!(
               newMethod,
               candidate_id: full.id
             });
-
-
-
 
             if (!confirmed) {
               L('[onSave] pay-method change cancelled or failed, keeping candidate modal open');
@@ -21547,19 +21622,33 @@ async setTab(k) {
   }
 
   // ───────────────────── Clients: Settings tab wiring ─────────────────────
- // ───────────────────── Clients: Settings tab wiring ─────────────────────
-if (this.entity === 'clients' && k === 'settings') {
-  try {
-    // Use the actual client settings renderer, seeded from modalCtx
-    if (typeof renderClientSettingsUI === 'function') {
-      const seed = (window.modalCtx && window.modalCtx.clientSettingsState) || {};
-      renderClientSettingsUI(seed);
+  if (this.entity === 'clients' && k === 'settings') {
+    try {
+      // Use the actual client settings renderer, seeded from modalCtx
+      if (typeof renderClientSettingsUI === 'function') {
+        const seed = (window.modalCtx && window.modalCtx.clientSettingsState) || {};
+        renderClientSettingsUI(seed);
+      }
+    } catch (e) {
+      console.warn('[CLIENT][SETTINGS] renderClientSettingsUI failed', e);
     }
-  } catch (e) {
-    console.warn('[CLIENT][SETTINGS] renderClientSettingsUI failed', e);
   }
-}
 
+  // ───────────────────── Candidates: Main tab wiring (NI / DOB / aliases / job titles) ─────────────────────
+  if (this.entity === 'candidates' && k === 'main') {
+    try {
+      const container = document.getElementById('tab-main');
+      if (container && typeof bindCandidateMainFormEvents === 'function') {
+        // Ensure we have a candidateMainModel (openCandidate now seeds this)
+        if (!window.modalCtx.candidateMainModel || typeof window.modalCtx.candidateMainModel !== 'object') {
+          window.modalCtx.candidateMainModel = {};
+        }
+        bindCandidateMainFormEvents(container, window.modalCtx.candidateMainModel);
+      }
+    } catch (e) {
+      console.warn('[CAND][MAIN] bindCandidateMainFormEvents failed', e);
+    }
+  }
 
   // ───────────────────── Candidates: Bookings tab wiring ─────────────────────
   if (this.entity === 'candidates' && k === 'bookings') {
@@ -21583,35 +21672,35 @@ if (this.entity === 'clients' && k === 'settings') {
     }
   }
 
-  // ───────────────────── Candidates: Pay tab (Advances wiring) ─────────────────────
- // ───────────────────── Candidates: Pay tab (Advances summary wiring) ─────────────────────
-if (this.entity === 'candidates' && k === 'pay') {
-  try {
-    const candId =
-      window.modalCtx?.data?.id ||
-      merged.id ||
-      null;
+  // ───────────────────── Candidates: Pay tab (Advances summary wiring) ─────────────────────
+  if (this.entity === 'candidates' && k === 'pay') {
+    try {
+      const candId =
+        window.modalCtx?.data?.id ||
+        merged.id ||
+        null;
 
-    if (candId) {
-      window.appState = window.appState || {};
-      const cache = (window.appState.candidateAdvances ||= {});
+      if (candId) {
+        window.appState = window.appState || {};
+        const cache = (window.appState.candidateAdvances ||= {});
 
-      if (cache[candId]) {
-        // Already cached this session → repaint into fresh DOM
-        updateCandidateAdvancesUI(candId);
-      } else {
-        // First time on this candidate → fetch from backend
-        fetchCandidateAdvances(candId).catch(err => {
-          console.warn('[CAND][PAY][ADVANCES] fetch failed', err);
-        });
+        if (cache[candId]) {
+          // Already cached this session → repaint into fresh DOM
+          updateCandidateAdvancesUI(candId);
+        } else {
+          // First time on this candidate → fetch from backend
+          fetchCandidateAdvances(candId).catch(err => {
+            console.warn('[CAND][PAY][ADVANCES] fetch failed', err);
+          });
+        }
+        // No button wiring here: this tab is read-only for advances.
+        // Editing happens via right-click on the candidate row → openCandidateAdvancesModal.
       }
-      // No button wiring here: this tab is read-only for advances.
-      // Editing happens via right-click on the candidate row → openCandidateAdvancesModal.
+    } catch (e) {
+      console.warn('[CAND][PAY][ADVANCES] wiring failed', e);
     }
-  } catch (e) {
-    console.warn('[CAND][PAY][ADVANCES] wiring failed', e);
   }
-}
+
 
 
   // ───────────────────── Timesheets: Overview tab wiring ─────────────────────
@@ -26812,29 +26901,21 @@ function renderImportSummaryModal(importType, summaryState) {
       else counts.FAILED++;
     });
 
-    // Pre-populated email selections map
+    // Reset email selections for this import on every render
     window.__hrRotaEmailSelections = window.__hrRotaEmailSelections || {};
-    const emailSel = window.__hrRotaEmailSelections[importId] || new Set();
-    if (!(emailSel instanceof Set)) {
-      window.__hrRotaEmailSelections[importId] = new Set();
-    }
+    window.__hrRotaEmailSelections[importId] = new Set();
+    const emailSel = window.__hrRotaEmailSelections[importId];
 
     const rowsHtml = rows.length
       ? rows.map((r, idx) => {
           const staff = r.staff_name || r.staff_raw || '';
           const unit  = r.unit || r.hospital_or_trust || r.hospital_norm || '';
           const date  = r.date_local || r.date || r.shift_date || '';
-          const tsId  = r.timesheet_id || '';
           const stRaw = r.status || '';
           const st    = String(stRaw || '').toUpperCase();
           const reasonCode = String(r.reason_code || r.failure_reason || r.reason || '').toLowerCase();
 
-          let stCls = 'pill-info';
-          if (st === 'OK' || st === 'VALIDATION_OK') stCls = 'pill-ok';
-          else if (st === 'UNMATCHED') stCls = 'pill-warn';
-          else stCls = 'pill-bad';
-
-          // New reason-code driven flags for daily resolve
+          // Reason-code driven flags for daily resolve
           const canAssignCand   = (reasonCode === 'candidate_unresolved');
           const canAssignClient = (reasonCode === 'client_unresolved');
 
@@ -26843,15 +26924,65 @@ function renderImportSummaryModal(importType, summaryState) {
             reasonCode === 'start_end_mismatch' ||
             reasonCode === 'break_minutes_mismatch';
 
-          const canEmail = !!(isTimeMismatch && tsId);
-          const rowId    = r.hr_row_id || r.id || `${idx}`;
+          // Pill class
+          let stCls = 'pill-info';
+          if (st === 'OK' || st === 'VALIDATION_OK') {
+            stCls = 'pill-ok';
+          } else if (reasonCode === 'candidate_unresolved' || reasonCode === 'client_unresolved') {
+            stCls = 'pill-bad';
+          } else if (isTimeMismatch) {
+            stCls = 'pill-warn';
+          }
 
-          const checked = emailSel instanceof Set && emailSel.has(rowId);
+          // Human-friendly, two-line labels for common reasons
+          let labelHtml;
+          if (st === 'OK' || st === 'VALIDATION_OK') {
+            labelHtml = 'OK';
+          } else if (reasonCode === 'candidate_unresolved') {
+            labelHtml = 'CANDIDATE<br/>UNMATCHED';
+          } else if (reasonCode === 'client_unresolved') {
+            labelHtml = 'CLIENT<br/>UNMATCHED';
+          } else if (reasonCode === 'actual_hours_mismatch') {
+            labelHtml = 'HOURS<br/>MISMATCH';
+          } else if (reasonCode === 'start_end_mismatch') {
+            labelHtml = 'START/END<br/>MISMATCH';
+          } else if (reasonCode === 'break_minutes_mismatch') {
+            labelHtml = 'BREAK<br/>MISMATCH';
+          } else {
+            const raw = (reasonCode || 'UNKNOWN').replace(/_/g, ' ').toUpperCase();
+            const firstSpace = raw.indexOf(' ');
+            if (firstSpace > 0) {
+              labelHtml = `${enc(raw.slice(0, firstSpace))}<br/>${enc(raw.slice(firstSpace + 1))}`;
+            } else {
+              labelHtml = enc(raw);
+            }
+          }
 
-          // Detail: we just stringify the detail object if present
-          let detailText = '';
-          if (r.detail && typeof r.detail === 'object') {
-            try { detailText = JSON.stringify(r.detail); } catch { detailText = ''; }
+          // Email eligibility & already-sent flags (from backend preview)
+          const emailEligible    = r.email_eligible === true;
+          const emailAlreadySent = r.email_already_sent === true;
+
+          const rowId = r.hr_row_id || r.id || `${idx}`;
+
+          let emailCellHtml;
+          if (!emailEligible) {
+            emailCellHtml = '<span class="mini">—</span>';
+          } else {
+            const checked = (emailSel instanceof Set && emailSel.has(rowId)) ? 'checked' : '';
+            const iconHtml = emailAlreadySent
+              ? `<span class="email-icon" title="Email previously sent" style="font-size:0.8rem;opacity:0.7;">&#x2709;&#x2713;</span>`
+              : '';
+
+            emailCellHtml = `
+              <div class="hr-email-cell" style="display:flex;align-items:center;justify-content:center;gap:4px;">
+                <input type="checkbox"
+                       data-act="hr-rota-email"
+                       data-row-id="${enc(rowId)}"
+                       data-row-idx="${idx}"
+                       ${checked} />
+                ${iconHtml}
+              </div>
+            `;
           }
 
           return `
@@ -26859,9 +26990,11 @@ function renderImportSummaryModal(importType, summaryState) {
               <td><span class="mini">${enc(staff || '—')}</span></td>
               <td><span class="mini">${enc(unit || '—')}</span></td>
               <td><span class="mini">${enc(date || '—')}</span></td>
-              <td><span class="mini">${tsId ? enc(tsId) : '—'}</span></td>
-              <td><span class="pill ${stCls}">${enc(st || 'UNKNOWN')}</span></td>
-              <td><span class="mini">${reasonCode || '—'}</span></td>
+              <td>
+                <span class="pill ${stCls}">
+                  ${labelHtml}
+                </span>
+              </td>
               <td>
                 ${
                   canAssignCand
@@ -26885,29 +27018,13 @@ function renderImportSummaryModal(importType, summaryState) {
                     : ''
                 }
               </td>
-              <td>
-                ${detailText ? `<span class="mini">${enc(detailText)}</span>` : ''}
-              </td>
-              <td>
-                ${
-                  canEmail
-                    ? `<label class="mini">
-                         <input type="checkbox"
-                                data-act="hr-rota-email"
-                                data-row-id="${enc(rowId)}"
-                                data-row-idx="${idx}"
-                                ${checked ? 'checked' : ''} />
-                         Send email
-                       </label>`
-                    : '<span class="mini">—</span>'
-                }
-              </td>
+              <td>${emailCellHtml}</td>
             </tr>
           `;
         }).join('')
       : `
         <tr>
-          <td colspan="9">
+          <td colspan="6">
             <span class="mini">No rows to show.</span>
           </td>
         </tr>
@@ -26915,7 +27032,7 @@ function renderImportSummaryModal(importType, summaryState) {
 
     return html(`
       <div class="form" id="hrRotaSummary">
-        <div class="card">
+        <div class="card hr-rota-full">
           <div class="row">
             <label>Overview</label>
             <div class="controls">
@@ -26926,34 +27043,31 @@ function renderImportSummaryModal(importType, summaryState) {
               </div>
             </div>
           </div>
-        </div>
 
-        <div class="card" style="margin-top:10px;">
-          <div class="row">
+          <div class="row" style="margin-top:10px;">
             <label>Rows</label>
             <div class="controls">
-              <table class="grid">
-                <thead>
-                  <tr>
-                    <th>Staff</th>
-                    <th>Unit / Site</th>
-                    <th>Date</th>
-                    <th>Timesheet ID</th>
-                    <th>Status</th>
-                    <th>Reason</th>
-                    <th>Resolve</th>
-                    <th>Details</th>
-                    <th>Temp Staffing email</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  ${rowsHtml}
-                </tbody>
-              </table>
+              <div class="hr-rota-table-wrap" style="max-height:420px; overflow-y:auto;">
+                <table class="grid">
+                  <thead>
+                    <tr>
+                      <th>Staff</th>
+                      <th>Unit / Site</th>
+                      <th>Date</th>
+                      <th>Status</th>
+                      <th>Resolve</th>
+                      <th>Send email</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    ${rowsHtml}
+                  </tbody>
+                </table>
+              </div>
             </div>
           </div>
 
-          <div class="row" style="margin-top:8px;">
+          <div class="row hr-rota-footer" style="margin-top:8px;">
             <label></label>
             <div class="controls">
               <button type="button"
@@ -26968,9 +27082,9 @@ function renderImportSummaryModal(importType, summaryState) {
                 Finalise validations
               </button>
               <span class="mini" style="margin-left:8px;">
-                "Reclassify" will re-run checks / refresh this summary.
-                "Finalise validations" will update validation status and reference numbers;
-                rows with "Send email" ticked will also queue query emails to Temp Staffing.
+                "Reclassify" re-runs checks and refreshes this summary.
+                "Finalise validations" updates validation status and, if boxes are ticked,
+                queues emails to Temp Staffing.
               </span>
             </div>
           </div>
@@ -27216,9 +27330,54 @@ function renderImportSummaryModal(importType, summaryState) {
         btnApply.__hrRotaApplyWired = true;
         btnApply.addEventListener('click', async () => {
           try {
+            if (!importId) {
+              alert('No import_id in summary; cannot finalise.');
+              return;
+            }
+
+            const ok = window.confirm('Are you sure you are ready to finalise?');
+            if (!ok) return;
+
             const sel = window.__hrRotaEmailSelections && window.__hrRotaEmailSelections[importId];
             const sendEmailRowIds = (sel instanceof Set) ? Array.from(sel) : [];
-            await applyHrRotaValidation(importId, sendEmailRowIds);
+
+            // Run server-side validation/apply and capture result summary
+            const result = await applyHrRotaValidation(importId, sendEmailRowIds) || {};
+
+            const lines = [];
+            lines.push(`HR Rota validations for import ${result.import_id || importId} have been processed.`);
+
+            if (typeof result.validations_ok === 'number') {
+              lines.push(`Valid rows: ${result.validations_ok}`);
+            }
+            if (typeof result.validations_failed === 'number') {
+              lines.push(`Rows still unresolved: ${result.validations_failed}`);
+            }
+            if (typeof result.emails_queued === 'number') {
+              lines.push(`Emails queued: ${result.emails_queued}`);
+            }
+
+            if (Array.isArray(result.reasons) && result.reasons.length) {
+              lines.push('');
+              lines.push('Remaining issues:');
+              for (const r of result.reasons) {
+                const rc = String(r.reason_code || '').toLowerCase();
+                const count = r.count ?? 0;
+                let nice;
+                if (rc === 'candidate_unresolved')         nice = 'Candidate unmatched';
+                else if (rc === 'client_unresolved')      nice = 'Client unmatched';
+                else if (rc === 'actual_hours_mismatch')  nice = 'Hours mismatch';
+                else if (rc === 'start_end_mismatch')     nice = 'Start/end mismatch';
+                else if (rc === 'break_minutes_mismatch') nice = 'Break mismatch';
+                else nice = (rc || 'other').replace(/_/g, ' ');
+                lines.push(`- ${nice}: ${count}`);
+              }
+            }
+
+            alert(lines.join('\n'));
+
+            // Refresh the HR Rota Daily Validation view so badges/rows are up to date
+            await refreshHrRotaSummary(importId);
           } catch (err) {
             console.error('[IMPORTS][HR_ROTA] apply failed', err);
             alert(err?.message || 'Apply validations failed.');
@@ -27300,7 +27459,7 @@ function renderImportSummaryModal(importType, summaryState) {
             };
 
             try {
-              // Option A: immediate persist + contract check on the server
+              // immediate persist + contract check on the server
               await postWeeklyResolveMappings(importId, type, payload);
 
               // Only stage mapping locally for /apply if server accepted it
@@ -27335,7 +27494,7 @@ function renderImportSummaryModal(importType, summaryState) {
             };
 
             try {
-              // Option A: immediate persist of hospital → client alias
+              // immediate persist of hospital → client alias
               await postWeeklyResolveMappings(importId, type, payload);
 
               // Stage mapping locally for /apply after success
@@ -27373,8 +27532,45 @@ function renderImportSummaryModal(importType, summaryState) {
         btnApply.__weeklyApplyWired = true;
         btnApply.addEventListener('click', async () => {
           try {
+            if (!importId) {
+              alert('No import_id in summary; cannot finalise.');
+              return;
+            }
+
+            // 1) Confirm with the user before finalising
+            const ok = window.confirm('Are you sure you want to finalise now?');
+            if (!ok) return;
+
             const mappings = ensureWeeklyImportMappings();
-            await resolveImportConflicts(importId, type, mappings);
+
+            // 2) Run the apply endpoint and capture the result summary
+            const result = await resolveImportConflicts(importId, type, mappings) || {};
+
+            // 3) Build a human-readable summary using the fields we’re given
+            const lines = [];
+            lines.push(`Import ${result.import_id || importId} has been finalised.`);
+
+            if (typeof result.shifts_created === 'number') {
+              lines.push(`Shifts created: ${result.shifts_created}`);
+            }
+            if (typeof result.shifts_updated === 'number') {
+              lines.push(`Shifts updated: ${result.shifts_updated}`);
+            }
+            if (typeof result.mapped_candidates === 'number') {
+              lines.push(`Candidates mapped: ${result.mapped_candidates}`);
+            }
+            if (typeof result.mapped_clients === 'number') {
+              lines.push(`Clients mapped: ${result.mapped_clients}`);
+            }
+            if (typeof result.groups_applied === 'number') {
+              lines.push(`Groups applied: ${result.groups_applied}`);
+            }
+
+            // 4) Modal-style summary: user clicks OK to continue
+            alert(lines.join('\n'));
+
+            // 5) After OK, refresh the weekly import summary modal so rows are up to date
+            await refreshWeeklyImportSummary(type, importId);
           } catch (err) {
             console.error('[IMPORTS][WEEKLY] apply failed', err);
             alert(err?.message || 'Weekly import apply failed.');
