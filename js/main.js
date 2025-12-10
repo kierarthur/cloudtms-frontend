@@ -21698,7 +21698,7 @@ async setTab(k) {
   const persist = this._hasMountedOnce;
   if (persist) this.persistCurrentTabState();
 
-  const merged = this.mergedRowForTab(k);
+   const merged = this.mergedRowForTab(k);
   if (this.entity === 'contracts' && k === 'main' && this.mode !== 'edit' && this.mode !== 'create') {
     if (window.modalCtx?.data?.start_date) merged.start_date = window.modalCtx.data.start_date;
     if (window.modalCtx?.data?.end_date)   merged.end_date   = window.modalCtx.data.end_date;
@@ -21716,6 +21716,17 @@ async setTab(k) {
 
   byId('modalBody').innerHTML = this.renderTab(k, merged) || '';
 
+  // ───────────────────── Imports: Main tab wiring (dropzones) ─────────────────────
+  if (this.entity === 'imports' && this.kind === 'imports' && k === 'main') {
+    try {
+      if (typeof wireImportDropzones === 'function') {
+        wireImportDropzones();
+      }
+    } catch (e) {
+      console.warn('[IMPORTS][WIRE] wireImportDropzones failed', e);
+    }
+  }
+
   // ───────────────────── Clients: Rates tab wiring ─────────────────────
   if (this.entity === 'clients' && k === 'rates') {
     try {
@@ -21724,6 +21735,8 @@ async setTab(k) {
       console.warn('[CLIENT][RATES] renderClientRatesTable failed', e);
     }
   }
+
+
 
   // ───────────────────── Clients: Settings tab wiring ─────────────────────
   if (this.entity === 'clients' && k === 'settings') {
@@ -27025,7 +27038,7 @@ function renderImportSummaryModal(importType, summaryState) {
     if (key !== 'main') return '';
 
     if (type === 'HR_ROTA_DAILY') {
-      return renderHrRotaDailySummary(importId, rows, ss);
+      return renderHrRotaDailySummary(type, importId, rows, ss);
     }
 
     if (type === 'NHSP' || type === 'HR_WEEKLY') {
@@ -27094,7 +27107,7 @@ function renderImportSummaryModal(importType, summaryState) {
 
   // ────────────────────── Helpers ──────────────────────
 
-  function renderHrRotaDailySummary(importId, rows, ss) {
+  function renderHrRotaDailySummary(type, importId, rows, ss) {
     const summary = ss.summary || {};
     const total   = summary.total_rows || rows.length || 0;
 
@@ -27240,7 +27253,7 @@ function renderImportSummaryModal(importType, summaryState) {
         </tr>
       `;
 
-    return html(`
+    const markup = html(`
       <div class="form" id="hrRotaSummary">
         <div class="card hr-rota-full">
           <div class="row">
@@ -27301,6 +27314,173 @@ function renderImportSummaryModal(importType, summaryState) {
         </div>
       </div>
     `);
+
+    // Wiring for HR_ROTA_DAILY summary (buttons & checkboxes)
+    setTimeout(() => {
+      try {
+        const root = document.getElementById('hrRotaSummary');
+        if (!root || type !== 'HR_ROTA_DAILY') return;
+
+        // Resolve candidate / client buttons
+        root.addEventListener('click', (ev) => {
+          const btn = ev.target.closest('button[data-act]');
+          if (!btn) return;
+          const act = btn.getAttribute('data-act');
+
+          const st = window.__importSummaryState && window.__importSummaryState['HR_ROTA_DAILY'];
+          if (!st) return;
+
+          const rows = Array.isArray(st.rows) ? st.rows : [];
+          const idx  = Number(btn.getAttribute('data-row-idx') || '-1');
+          const row  = (idx >= 0 && idx < rows.length) ? rows[idx] : null;
+          if (!row) return;
+
+          const reasonCode   = String(row.reason_code || row.failure_reason || row.reason || '').toLowerCase();
+          const hasTimesheet = !!row.timesheet_id;
+
+          if (act === 'resolve-candidate') {
+            // If the problem is "candidate_unresolved" (or no timesheet), use HR-daily resolve helper
+            if (reasonCode === 'candidate_unresolved' || !hasTimesheet) {
+              openHrRotaAssignCandidateModal(importId, idx);
+              return;
+            }
+
+            // Otherwise, use the main timesheet resolve modal if we have a timesheet_id
+            if (hasTimesheet) {
+              openResolveCandidateModal({
+                timesheet_id:      row.timesheet_id,
+                occupant_key_norm: row.staff_name || row.staff_raw || '',
+                hospital_norm:     row.unit || row.hospital_or_trust || row.hospital_norm || ''
+              });
+            } else {
+              alert('No timesheet matched for this row; resolve candidate via imports/aliases instead.');
+            }
+          }
+
+          if (act === 'resolve-client') {
+            // If the problem is "client_unresolved" (or no timesheet), use HR-daily resolve helper
+            if (reasonCode === 'client_unresolved' || !hasTimesheet) {
+              openHrRotaAssignClientModal(importId, idx);
+              return;
+            }
+
+            // Otherwise, use the main timesheet resolve modal if we have a timesheet_id
+            if (hasTimesheet) {
+              openResolveClientModal({
+                timesheet_id:  row.timesheet_id,
+                hospital_norm: row.unit || row.hospital_or_trust || row.hospital_norm || ''
+              });
+            } else {
+              alert('No timesheet matched for this row; resolve client/site via imports/aliases instead.');
+            }
+          }
+        });
+
+        // Email checkboxes
+        root.addEventListener('change', (ev) => {
+          const cb = ev.target.closest('input[data-act="hr-rota-email"]');
+          if (!cb) return;
+
+          const rowId = cb.getAttribute('data-row-id') || '';
+          if (!rowId) return;
+
+          window.__hrRotaEmailSelections = window.__hrRotaEmailSelections || {};
+          const sel = window.__hrRotaEmailSelections[importId] || new Set();
+          if (!(sel instanceof Set)) {
+            window.__hrRotaEmailSelections[importId] = new Set();
+          }
+
+          if (cb.checked) {
+            window.__hrRotaEmailSelections[importId].add(rowId);
+          } else {
+            window.__hrRotaEmailSelections[importId].delete(rowId);
+          }
+        });
+
+        // Reclassify button → use helper
+        const btnReclass = root.querySelector('button[data-act="hr-rota-reclassify"]');
+        if (btnReclass && !btnReclass.__hrRotaReclassWired) {
+          btnReclass.__hrRotaReclassWired = true;
+          btnReclass.addEventListener('click', async () => {
+            try {
+              if (!importId) {
+                alert('No import_id in summary; cannot reclassify.');
+                return;
+              }
+              await refreshHrRotaSummary(importId);
+            } catch (err) {
+              console.error('[IMPORTS][HR_ROTA] reclassify failed', err);
+              alert(err?.message || 'Reclassify failed.');
+            }
+          });
+        }
+
+        // Apply validations / Finalise button
+        const btnApply = root.querySelector('button[data-act="hr-rota-apply"]');
+        if (btnApply && !btnApply.__hrRotaApplyWired) {
+          btnApply.__hrRotaApplyWired = true;
+          btnApply.addEventListener('click', async () => {
+            try {
+              if (!importId) {
+                alert('No import_id in summary; cannot finalise.');
+                return;
+              }
+
+              const ok = window.confirm('Are you sure you are ready to finalise?');
+              if (!ok) return;
+
+              const sel = window.__hrRotaEmailSelections && window.__hrRotaEmailSelections[importId];
+              const sendEmailRowIds = (sel instanceof Set) ? Array.from(sel) : [];
+
+              // Run server-side validation/apply and capture result summary
+              const result = await applyHrRotaValidation(importId, sendEmailRowIds) || {};
+
+              const lines = [];
+              lines.push(`HR Rota validations for import ${result.import_id || importId} have been processed.`);
+
+              if (typeof result.validations_ok === 'number') {
+                lines.push(`Valid rows: ${result.validations_ok}`);
+              }
+              if (typeof result.validations_failed === 'number') {
+                lines.push(`Rows still unresolved: ${result.validations_failed}`);
+              }
+              if (typeof result.emails_queued === 'number') {
+                lines.push(`Emails queued: ${result.emails_queued}`);
+              }
+
+              if (Array.isArray(result.reasons) && result.reasons.length) {
+                lines.push('');
+                lines.push('Remaining issues:');
+                for (const r of result.reasons) {
+                  const rc    = String(r.reason_code || '').toLowerCase();
+                  const count = r.count ?? 0;
+                  let nice;
+                  if      (rc === 'candidate_unresolved')         nice = 'Candidate unmatched';
+                  else if (rc === 'client_unresolved')            nice = 'Client unmatched';
+                  else if (rc === 'actual_hours_mismatch')       nice = 'Hours mismatch';
+                  else if (rc === 'start_end_mismatch')          nice = 'Start/end mismatch';
+                  else if (rc === 'break_minutes_mismatch')      nice = 'Break mismatch';
+                  else                                           nice = (rc || 'other').replace(/_/g, ' ');
+                  lines.push(`- ${nice}: ${count}`);
+                }
+              }
+
+              alert(lines.join('\n'));
+
+              // Refresh the HR Rota Daily Validation view so badges/rows are up to date
+              await refreshHrRotaSummary(importId);
+            } catch (err) {
+              console.error('[IMPORTS][HR_ROTA] apply failed', err);
+              alert(err?.message || 'Apply validations failed.');
+            }
+          });
+        }
+      } catch (e) {
+        console.warn('[IMPORTS] HR_ROTA wiring failed', e);
+      }
+    }, 0);
+
+    return markup;
   }
 
   function renderWeeklyImportSummary(type, importId, rows, ss) {
@@ -27375,7 +27555,7 @@ function renderImportSummaryModal(importType, summaryState) {
         </tr>
       `;
 
-    return html(`
+    const markup = html(`
       <div class="form" id="weeklyImportSummary">
         <div class="card">
           <div class="row">
@@ -27432,365 +27612,202 @@ function renderImportSummaryModal(importType, summaryState) {
         </div>
       </div>
     `);
-  }
 
-  // Wiring for HR_ROTA_DAILY summary (buttons & checkboxes)
-  setTimeout(() => {
-    try {
-      const root = document.getElementById('hrRotaSummary');
-      if (!root || type !== 'HR_ROTA_DAILY') return;
+    // Wiring for NHSP / HR_WEEKLY "Apply import" button + Assign buttons
+    setTimeout(() => {
+      try {
+        const root = document.getElementById('weeklyImportSummary');
+        if (!root || (type !== 'NHSP' && type !== 'HR_WEEKLY')) return;
+        if (root.__weeklyWired) return;
+        root.__weeklyWired = true;
 
-      // Resolve candidate / client buttons
-      root.addEventListener('click', (ev) => {
-        const btn = ev.target.closest('button[data-act]');
-        if (!btn) return;
-        const act = btn.getAttribute('data-act');
+        const st = window.__importSummaryState && window.__importSummaryState[type];
+        const rows = st && Array.isArray(st.rows) ? st.rows : [];
 
-        const st = window.__importSummaryState && window.__importSummaryState['HR_ROTA_DAILY'];
-        if (!st) return;
-
-        const rows = Array.isArray(st.rows) ? st.rows : [];
-        const idx  = Number(btn.getAttribute('data-row-idx') || '-1');
-        const row  = (idx >= 0 && idx < rows.length) ? rows[idx] : null;
-        if (!row) return;
-
-        const reasonCode = String(row.reason_code || row.failure_reason || row.reason || '').toLowerCase();
-        const hasTimesheet = !!row.timesheet_id;
-
-        if (act === 'resolve-candidate') {
-          // If the problem is "candidate_unresolved" (or no timesheet), use HR-daily resolve helper
-          if (reasonCode === 'candidate_unresolved' || !hasTimesheet) {
-            openHrRotaAssignCandidateModal(importId, idx);
-            return;
+        // Ensure mapping container exists for this type + import
+        const ensureWeeklyImportMappings = () => {
+          window.__weeklyImportMappings = window.__weeklyImportMappings || {};
+          if (!window.__weeklyImportMappings[type]) {
+            window.__weeklyImportMappings[type] = {};
           }
-
-          // Otherwise, use the main timesheet resolve modal if we have a timesheet_id
-          if (hasTimesheet) {
-            openResolveCandidateModal({
-              timesheet_id: row.timesheet_id,
-              occupant_key_norm: row.staff_name || row.staff_raw || '',
-              hospital_norm: row.unit || row.hospital_or_trust || row.hospital_norm || ''
-            });
-          } else {
-            alert('No timesheet matched for this row; resolve candidate via imports/aliases instead.');
-          }
-        }
-
-        if (act === 'resolve-client') {
-          // If the problem is "client_unresolved" (or no timesheet), use HR-daily resolve helper
-          if (reasonCode === 'client_unresolved' || !hasTimesheet) {
-            openHrRotaAssignClientModal(importId, idx);
-            return;
-          }
-
-          // Otherwise, use the main timesheet resolve modal if we have a timesheet_id
-          if (hasTimesheet) {
-            openResolveClientModal({
-              timesheet_id: row.timesheet_id,
-              hospital_norm: row.unit || row.hospital_or_trust || row.hospital_norm || ''
-            });
-          } else {
-            alert('No timesheet matched for this row; resolve client/site via imports/aliases instead.');
-          }
-        }
-      });
-
-      // Email checkboxes
-      root.addEventListener('change', (ev) => {
-        const cb = ev.target.closest('input[data-act="hr-rota-email"]');
-        if (!cb) return;
-
-        const rowId = cb.getAttribute('data-row-id') || '';
-        if (!rowId) return;
-
-        window.__hrRotaEmailSelections = window.__hrRotaEmailSelections || {};
-        const sel = window.__hrRotaEmailSelections[importId] || new Set();
-        if (!(sel instanceof Set)) {
-          window.__hrRotaEmailSelections[importId] = new Set();
-        }
-
-        if (cb.checked) {
-          window.__hrRotaEmailSelections[importId].add(rowId);
-        } else {
-          window.__hrRotaEmailSelections[importId].delete(rowId);
-        }
-      });
-
-      // Reclassify button → use helper
-      const btnReclass = root.querySelector('button[data-act="hr-rota-reclassify"]');
-      if (btnReclass && !btnReclass.__hrRotaReclassWired) {
-        btnReclass.__hrRotaReclassWired = true;
-        btnReclass.addEventListener('click', async () => {
-          try {
-            if (!importId) {
-              alert('No import_id in summary; cannot reclassify.');
-              return;
-            }
-            await refreshHrRotaSummary(importId);
-          } catch (err) {
-            console.error('[IMPORTS][HR_ROTA] reclassify failed', err);
-            alert(err?.message || 'Reclassify failed.');
-          }
-        });
-      }
-
-      // Apply validations / Finalise button
-      const btnApply = root.querySelector('button[data-act="hr-rota-apply"]');
-      if (btnApply && !btnApply.__hrRotaApplyWired) {
-        btnApply.__hrRotaApplyWired = true;
-        btnApply.addEventListener('click', async () => {
-          try {
-            if (!importId) {
-              alert('No import_id in summary; cannot finalise.');
-              return;
-            }
-
-            const ok = window.confirm('Are you sure you are ready to finalise?');
-            if (!ok) return;
-
-            const sel = window.__hrRotaEmailSelections && window.__hrRotaEmailSelections[importId];
-            const sendEmailRowIds = (sel instanceof Set) ? Array.from(sel) : [];
-
-            // Run server-side validation/apply and capture result summary
-            const result = await applyHrRotaValidation(importId, sendEmailRowIds) || {};
-
-            const lines = [];
-            lines.push(`HR Rota validations for import ${result.import_id || importId} have been processed.`);
-
-            if (typeof result.validations_ok === 'number') {
-              lines.push(`Valid rows: ${result.validations_ok}`);
-            }
-            if (typeof result.validations_failed === 'number') {
-              lines.push(`Rows still unresolved: ${result.validations_failed}`);
-            }
-            if (typeof result.emails_queued === 'number') {
-              lines.push(`Emails queued: ${result.emails_queued}`);
-            }
-
-            if (Array.isArray(result.reasons) && result.reasons.length) {
-              lines.push('');
-              lines.push('Remaining issues:');
-              for (const r of result.reasons) {
-                const rc = String(r.reason_code || '').toLowerCase();
-                const count = r.count ?? 0;
-                let nice;
-                if (rc === 'candidate_unresolved')         nice = 'Candidate unmatched';
-                else if (rc === 'client_unresolved')      nice = 'Client unmatched';
-                else if (rc === 'actual_hours_mismatch')  nice = 'Hours mismatch';
-                else if (rc === 'start_end_mismatch')     nice = 'Start/end mismatch';
-                else if (rc === 'break_minutes_mismatch') nice = 'Break mismatch';
-                else nice = (rc || 'other').replace(/_/g, ' ');
-                lines.push(`- ${nice}: ${count}`);
-              }
-            }
-
-            alert(lines.join('\n'));
-
-            // Refresh the HR Rota Daily Validation view so badges/rows are up to date
-            await refreshHrRotaSummary(importId);
-          } catch (err) {
-            console.error('[IMPORTS][HR_ROTA] apply failed', err);
-            alert(err?.message || 'Apply validations failed.');
-          }
-        });
-      }
-    } catch (e) {
-      console.warn('[IMPORTS] HR_ROTA wiring failed', e);
-    }
-  }, 0);
-
-  // Wiring for NHSP / HR_WEEKLY "Apply import" button + Assign buttons
-  setTimeout(() => {
-    try {
-      const root = document.getElementById('weeklyImportSummary');
-      if (!root || (type !== 'NHSP' && type !== 'HR_WEEKLY')) return;
-      if (root.__weeklyWired) return;
-      root.__weeklyWired = true;
-
-      const st = window.__importSummaryState && window.__importSummaryState[type];
-      const rows = st && Array.isArray(st.rows) ? st.rows : [];
-
-      // Ensure mapping container exists for this type + import
-      const ensureWeeklyImportMappings = () => {
-        window.__weeklyImportMappings = window.__weeklyImportMappings || {};
-        if (!window.__weeklyImportMappings[type]) {
-          window.__weeklyImportMappings[type] = {};
-        }
-        let m = window.__weeklyImportMappings[type][importId];
-        if (!m) {
-          m = {
-            candidate_mappings: [],
-            client_aliases: []
-          };
-          window.__weeklyImportMappings[type][importId] = m;
-        }
-        return m;
-      };
-
-      // Click handler for weekly "Assign candidate/client…" buttons
-      root.addEventListener('click', (ev) => {
-        const btn = ev.target.closest('button[data-act]');
-        if (!btn) return;
-        const act = btn.getAttribute('data-act');
-        if (act !== 'weekly-resolve-candidate' && act !== 'weekly-resolve-client') return;
-
-        const idx = Number(btn.getAttribute('data-row-idx') || '-1');
-        if (idx < 0 || idx >= rows.length) return;
-
-        const row      = rows[idx];
-        const staffRaw = row.staff_name || row.staff_raw || '';
-        const hospRaw  = row.hospital_or_trust || row.unit || row.hospital_norm || '';
-
-        if (act === 'weekly-resolve-candidate') {
-          // Use global candidate picker with local filtering
-          openCandidatePicker(async ({ id, label }) => {
-            const mappings = ensureWeeklyImportMappings();
-            const staffNorm = row.staff_norm || staffRaw || '';
-            const hospitalOrTrust = hospRaw || null;
-            const clientId = row.client_id || null;
-            const workDateYmd =
-              row.work_date ||
-              row.date_local ||
-              row.date ||
-              row.week_ending_date ||
-              null;
-
-            const mapping = {
-              staff_norm:       staffNorm,
-              hospital_or_trust:hospitalOrTrust,
-              candidate_id:     id,
-              client_id:        clientId,
-              work_date:        workDateYmd
-            };
-
-            const payload = {
-              candidate_mappings: [mapping],
+          let m = window.__weeklyImportMappings[type][importId];
+          if (!m) {
+            m = {
+              candidate_mappings: [],
               client_aliases: []
             };
+            window.__weeklyImportMappings[type][importId] = m;
+          }
+          return m;
+        };
 
+        // Click handler for weekly "Assign candidate/client…" buttons
+        root.addEventListener('click', (ev) => {
+          const btn = ev.target.closest('button[data-act]');
+          if (!btn) return;
+          const act = btn.getAttribute('data-act');
+          if (act !== 'weekly-resolve-candidate' && act !== 'weekly-resolve-client') return;
+
+          const idx = Number(btn.getAttribute('data-row-idx') || '-1');
+          if (idx < 0 || idx >= rows.length) return;
+
+          const row      = rows[idx];
+          const staffRaw = row.staff_name || row.staff_raw || '';
+          const hospRaw  = row.hospital_or_trust || row.unit || row.hospital_norm || '';
+
+          if (act === 'weekly-resolve-candidate') {
+            // Use global candidate picker with local filtering
+            openCandidatePicker(async ({ id, label }) => {
+              const mappings        = ensureWeeklyImportMappings();
+              const staffNorm       = row.staff_norm || staffRaw || '';
+              const hospitalOrTrust = hospRaw || null;
+              const clientId        = row.client_id || null;
+              const workDateYmd =
+                row.work_date ||
+                row.date_local ||
+                row.date ||
+                row.week_ending_date ||
+                null;
+
+              const mapping = {
+                staff_norm:       staffNorm,
+                hospital_or_trust:hospitalOrTrust,
+                candidate_id:     id,
+                client_id:        clientId,
+                work_date:        workDateYmd
+              };
+
+              const payload = {
+                candidate_mappings: [mapping],
+                client_aliases: []
+              };
+
+              try {
+                // immediate persist + contract check on the server
+                await postWeeklyResolveMappings(importId, type, payload);
+
+                // Only stage mapping locally for /apply if server accepted it
+                mappings.candidate_mappings.push(mapping);
+
+                window.__toast && window.__toast(`Candidate ${label} linked. Reclassifying import…`);
+                await refreshWeeklyImportSummary(type, importId);
+              } catch (err) {
+                console.error('[IMPORTS][WEEKLY] resolve-candidate failed', err);
+                alert(err?.message || 'Failed to resolve candidate for weekly import row.');
+              }
+            });
+            return;
+          }
+
+          if (act === 'weekly-resolve-client') {
+            // Use NHSP-only client filter when type === 'NHSP'
+            const nhspOnly = (type === 'NHSP');
+
+            openClientPicker(async ({ id, label }) => {
+              const mappings    = ensureWeeklyImportMappings();
+              const hospitalNorm= row.hospital_norm || hospRaw || '';
+
+              const mapping = {
+                hospital_norm: hospitalNorm,
+                client_id:     id
+              };
+
+              const payload = {
+                candidate_mappings: [],
+                client_aliases: [mapping]
+              };
+
+              try {
+                // immediate persist of hospital → client alias
+                await postWeeklyResolveMappings(importId, type, payload);
+
+                // Stage mapping locally for /apply after success
+                mappings.client_aliases.push(mapping);
+
+                window.__toast && window.__toast(`Client ${label} linked. Reclassifying import…`);
+                await refreshWeeklyImportSummary(type, importId);
+              } catch (err) {
+                console.error('[IMPORTS][WEEKLY] resolve-client failed', err);
+                alert(err?.message || 'Failed to resolve client for weekly import row.');
+              }
+            }, { nhspOnly });
+
+            return;
+          }
+        });
+
+        // Refresh button → use helper
+        const btnRefresh = root.querySelector('button[data-act="weekly-import-refresh"]');
+        if (btnRefresh && !btnRefresh.__weeklyRefreshWired) {
+          btnRefresh.__weeklyRefreshWired = true;
+          btnRefresh.addEventListener('click', async () => {
             try {
-              // immediate persist + contract check on the server
-              await postWeeklyResolveMappings(importId, type, payload);
-
-              // Only stage mapping locally for /apply if server accepted it
-              mappings.candidate_mappings.push(mapping);
-
-              window.__toast && window.__toast(`Candidate ${label} linked. Reclassifying import…`);
               await refreshWeeklyImportSummary(type, importId);
             } catch (err) {
-              console.error('[IMPORTS][WEEKLY] resolve-candidate failed', err);
-              alert(err?.message || 'Failed to resolve candidate for weekly import row.');
+              console.error('[IMPORTS][WEEKLY] manual refresh failed', err);
+              alert(err?.message || 'Weekly import refresh failed.');
             }
           });
-          return;
         }
 
-        if (act === 'weekly-resolve-client') {
-          // Use NHSP-only client filter when type === 'NHSP'
-          const nhspOnly = (type === 'NHSP');
-
-          openClientPicker(async ({ id, label }) => {
-            const mappings = ensureWeeklyImportMappings();
-            const hospitalNorm = row.hospital_norm || hospRaw || '';
-
-            const mapping = {
-              hospital_norm: hospitalNorm,
-              client_id:     id
-            };
-
-            const payload = {
-              candidate_mappings: [],
-              client_aliases: [mapping]
-            };
-
+        // Apply / Finalise import button
+        const btnApplyWeekly = root.querySelector('button[data-act="weekly-import-apply"]');
+        if (btnApplyWeekly && !btnApplyWeekly.__weeklyApplyWired) {
+          btnApplyWeekly.__weeklyApplyWired = true;
+          btnApplyWeekly.addEventListener('click', async () => {
             try {
-              // immediate persist of hospital → client alias
-              await postWeeklyResolveMappings(importId, type, payload);
+              if (!importId) {
+                alert('No import_id in summary; cannot finalise.');
+                return;
+              }
 
-              // Stage mapping locally for /apply after success
-              mappings.client_aliases.push(mapping);
+              // 1) Confirm with the user before finalising
+              const ok = window.confirm('Are you sure you want to finalise now?');
+              if (!ok) return;
 
-              window.__toast && window.__toast(`Client ${label} linked. Reclassifying import…`);
+              const mappings = ensureWeeklyImportMappings();
+
+              // 2) Run the apply endpoint and capture the result summary
+              const result = await resolveImportConflicts(importId, type, mappings) || {};
+
+              // 3) Build a human-readable summary using the fields we’re given
+              const lines = [];
+              lines.push(`Import ${result.import_id || importId} has been finalised.`);
+
+              if (typeof result.shifts_created === 'number') {
+                lines.push(`Shifts created: ${result.shifts_created}`);
+              }
+              if (typeof result.shifts_updated === 'number') {
+                lines.push(`Shifts updated: ${result.shifts_updated}`);
+              }
+              if (typeof result.mapped_candidates === 'number') {
+                lines.push(`Candidates mapped: ${result.mapped_candidates}`);
+              }
+              if (typeof result.mapped_clients === 'number') {
+                lines.push(`Clients mapped: ${result.mapped_clients}`);
+              }
+              if (typeof result.groups_applied === 'number') {
+                lines.push(`Groups applied: ${result.groups_applied}`);
+              }
+
+              // 4) Modal-style summary: user clicks OK to continue
+              alert(lines.join('\n'));
+
+              // 5) After OK, refresh the weekly import summary modal so rows are up to date
               await refreshWeeklyImportSummary(type, importId);
             } catch (err) {
-              console.error('[IMPORTS][WEEKLY] resolve-client failed', err);
-              alert(err?.message || 'Failed to resolve client for weekly import row.');
+              console.error('[IMPORTS][WEEKLY] apply failed', err);
+              alert(err?.message || 'Weekly import apply failed.');
             }
-          }, { nhspOnly });
-
-          return;
+          });
         }
-      });
-
-      // Refresh button → use helper
-      const btnRefresh = root.querySelector('button[data-act="weekly-import-refresh"]');
-      if (btnRefresh && !btnRefresh.__weeklyRefreshWired) {
-        btnRefresh.__weeklyRefreshWired = true;
-        btnRefresh.addEventListener('click', async () => {
-          try {
-            await refreshWeeklyImportSummary(type, importId);
-          } catch (err) {
-            console.error('[IMPORTS][WEEKLY] manual refresh failed', err);
-            alert(err?.message || 'Weekly import refresh failed.');
-          }
-        });
+      } catch (e) {
+        console.warn('[IMPORTS] weekly import wiring failed', e);
       }
+    }, 0);
 
-      // Apply / Finalise import button
-      const btnApplyWeekly = root.querySelector('button[data-act="weekly-import-apply"]');
-      if (btnApplyWeekly && !btnApplyWeekly.__weeklyApplyWired) {
-        btnApplyWeekly.__weeklyApplyWired = true;
-        btnApplyWeekly.addEventListener('click', async () => {
-          try {
-            if (!importId) {
-              alert('No import_id in summary; cannot finalise.');
-              return;
-            }
-
-            // 1) Confirm with the user before finalising
-            const ok = window.confirm('Are you sure you want to finalise now?');
-            if (!ok) return;
-
-            const mappings = ensureWeeklyImportMappings();
-
-            // 2) Run the apply endpoint and capture the result summary
-            const result = await resolveImportConflicts(importId, type, mappings) || {};
-
-            // 3) Build a human-readable summary using the fields we’re given
-            const lines = [];
-            lines.push(`Import ${result.import_id || importId} has been finalised.`);
-
-            if (typeof result.shifts_created === 'number') {
-              lines.push(`Shifts created: ${result.shifts_created}`);
-            }
-            if (typeof result.shifts_updated === 'number') {
-              lines.push(`Shifts updated: ${result.shifts_updated}`);
-            }
-            if (typeof result.mapped_candidates === 'number') {
-              lines.push(`Candidates mapped: ${result.mapped_candidates}`);
-            }
-            if (typeof result.mapped_clients === 'number') {
-              lines.push(`Clients mapped: ${result.mapped_clients}`);
-            }
-            if (typeof result.groups_applied === 'number') {
-              lines.push(`Groups applied: ${result.groups_applied}`);
-            }
-
-            // 4) Modal-style summary: user clicks OK to continue
-            alert(lines.join('\n'));
-
-            // 5) After OK, refresh the weekly import summary modal so rows are up to date
-            await refreshWeeklyImportSummary(type, importId);
-          } catch (err) {
-            console.error('[IMPORTS][WEEKLY] apply failed', err);
-            alert(err?.message || 'Weekly import apply failed.');
-          }
-        });
-      }
-    } catch (e) {
-      console.warn('[IMPORTS] weekly import wiring failed', e);
-    }
-  }, 0);
+    return markup;
+  }
 }
 
 
