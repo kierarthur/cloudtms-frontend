@@ -12441,7 +12441,11 @@ async function openCandidateAdvancesModal(candidateRow) {
     openToken: `cand-adv:${candId}:${Date.now()}`
   };
 
-  const titleName = row.display_name || `${row.first_name || ''} ${row.last_name || ''}`.trim() || row.tms_ref || 'Candidate';
+  const titleName =
+    row.display_name ||
+    `${row.first_name || ''} ${row.last_name || ''}`.trim() ||
+    row.tms_ref ||
+    'Candidate';
 
   const renderAdvancesTab = () => {
     const S = (window.appState && window.appState.candidateAdvances) || {};
@@ -12583,8 +12587,15 @@ async function openCandidateAdvancesModal(candidateRow) {
     onSave,
     true,
     onReturn,
-    { kind: 'candidate-advances', noParentGate: true, forceEdit: true }
+    { kind: 'candidate-advances', noParentGate: true }
   );
+
+  // Ensure the advances manager is wired immediately on first open
+  try {
+    onReturn();
+  } catch (e) {
+    console.warn('[ADVANCES][MGR] initial wiring failed', e);
+  }
 }
 
 function renderCandidateTab(key, row = {}) {
@@ -12904,6 +12915,7 @@ async function fetchCandidateAdvances(candidateId) {
   }
 }
 
+
 function renderMissingShiftAdvancesList(list) {
   const rows = Array.isArray(list) ? list : [];
   if (!rows.length) {
@@ -12930,7 +12942,7 @@ function renderMissingShiftAdvancesList(list) {
 
   return `
     <div class="adv-table-wrap">
-      <table class="grid mini adv-table">
+      <table class="grid mini adv-table" style="table-layout:auto;width:100%;">
         <thead>
           <tr>
             <th>Client</th>
@@ -13020,7 +13032,7 @@ function renderGeneralAdvancesList(list, opts = {}) {
         <td>${next || '<span class="mini">—</span>'}</td>
         <td>${status}</td>
         <td>${notes || '<span class="mini">—</span>'}</td>
-        <td>
+        <td style="min-width:260px;">
           <div class="adv-sched">
             <div class="adv-sched-lines">${schedSummary}</div>
             ${actionsHtml}
@@ -13032,7 +13044,7 @@ function renderGeneralAdvancesList(list, opts = {}) {
 
   return `
     <div class="adv-table-wrap">
-      <table class="grid mini adv-table">
+      <table class="grid mini adv-table" style="table-layout:auto;width:100%;">
         <thead>
           <tr>
             <th>Client</th>
@@ -13050,6 +13062,7 @@ function renderGeneralAdvancesList(list, opts = {}) {
     </div>
   `;
 }
+
 
 async function markAdvancePaidOff(advance) {
   if (!advance || !advance.id) {
@@ -23317,7 +23330,7 @@ function renderTop() {
   const modalNode= byId('modal');
 
    const LOGC = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : true;
-  if (modalNode) {
+   if (modalNode) {
     const parentIsContracts =
       !!(parent && ((parent.entity === 'contracts') || (parent.kind === 'contracts')));
     const isContracts =
@@ -23342,7 +23355,12 @@ function renderTop() {
     // Evidence replace: temporarily use a larger modal footprint
     const isEvidenceReplace = (top.kind === 'timesheet-evidence-replace');
     modalNode.classList.toggle('evidence-modal', !!isEvidenceReplace);
+
+    // Candidate Advances: use a slightly wider modal footprint
+    const isAdvances = (top.kind === 'candidate-advances');
+    modalNode.classList.toggle('advances-modal', !!isAdvances);
   }
+
 
 
 
@@ -27028,18 +27046,21 @@ function renderImportSummaryModal(importType, summaryState) {
     `);
   };
 
+  const summaryTitle =
+    (type === 'HR_ROTA_DAILY'
+      ? 'HR Rota Daily Validation'
+      : (type === 'NHSP'
+          ? 'NHSP Weekly Import Summary'
+          : 'HealthRoster Weekly Import Summary'));
+
   // ───────────────────── Import summary modal ─────────────────────
-  // If a summary of this type is already on top of the stack, just re-render it
-  // instead of pushing another frame. This avoids "multiple Close clicks" and
-  // keeps drag-and-drop behaviour sane.
+  // If a summary of this type is already on top of the stack, reuse that
+  // frame but update its renderTab + tab list + title and repaint. This
+  // avoids stacking identical modals and ensures refreshed rows are used.
   if (!reusingExistingSummary) {
     // Child modal for import summary
     showModal(
-      (type === 'HR_ROTA_DAILY'
-        ? 'HR Rota Daily Validation'
-        : (type === 'NHSP'
-            ? 'NHSP Weekly Import Summary'
-            : 'HealthRoster Weekly Import Summary')),
+      summaryTitle,
       [{ key: 'main', label: 'Summary' }],
       renderTab,
       null,
@@ -27051,9 +27072,18 @@ function renderImportSummaryModal(importType, summaryState) {
         stayOpenOnSave: false
       }
     );
-  } else {
-    // Reuse the existing summary frame: repaint the current tab (always "main")
+  } else if (topFrame) {
     try {
+      // Keep title and tabs in sync with the latest render
+      topFrame.title = summaryTitle;
+      topFrame.tabs  = [{ key: 'main', label: 'Summary' }];
+
+      // IMPORTANT: update the frame's renderTab so future setTab() calls
+      // use the fresh rows/summary we just fetched.
+      topFrame.renderTab = renderTab;
+
+      // Make sure we are on the main tab and repaint it
+      topFrame.currentTabKey = 'main';
       if (typeof topFrame.setTab === 'function') {
         topFrame.setTab('main');
       }
