@@ -15848,8 +15848,7 @@ async function openCandidateRateModal(candidate_id, existing) {
   async function resolveCoveringWindow(client_id, role, band, active_on){
     try {
       const list = await listClientRates(client_id, { active_on, only_enabled: true });
-      const rows = Array.isArray(list) ? rows = list.filter(w => !w.disabled_at_utc && w.role === role) : [];
-      const wins = Array.isArray(list) ? list.filter(w => !w.disabled_at_utc && w.role === role) : [];
+      const wins  = (Array.isArray(list) ? list.filter(w => !w.disabled_at_utc && w.role === role) : []);
       const filtered = wins;
       let win = filtered.find(w => (w.band ?? null) === (band ?? null));
       if (!win && (band == null)) win = filtered.find(w => w.band == null);
@@ -15862,15 +15861,15 @@ async function openCandidateRateModal(candidate_id, existing) {
 
   let lastApplyState = null;
   function setApplyEnabled(enabled, reasonSummary){
-    try {
-      const btn = document.querySelector('#btnSave, #modal .actions .primary, #modal .btn-save, .modal .btn-save');
-      if (btn) { btn.disabled = !enabled; btn.classList.toggle('disabled', !enabled); }
-    } catch {}
+    // DO NOT directly toggle #btnSave here – leave that to the modal framework
+    // via _applyDesired and _updateButtons. We only broadcast the state.
     if (LOG_APPLY && lastApplyState !== enabled) {
       console.log('[RATES][APPLY] state →', enabled ? 'ENABLED' : 'DISABLED', reasonSummary || '');
       lastApplyState = enabled;
     }
-    try { window.dispatchEvent(new CustomEvent('modal-apply-enabled', { detail:{ enabled } })); } catch {}
+    try {
+      window.dispatchEvent(new CustomEvent('modal-apply-enabled', { detail:{ enabled } }));
+    } catch {}
   }
 
   // ===== driver: recompute state (validations + overlap + preview) =====
@@ -16010,11 +16009,12 @@ async function openCandidateRateModal(candidate_id, existing) {
         if (fixOther && cutOther) fixOther.onclick = ()=> {
           try {
             const target = conflicts[0];
+            const O2 = window.modalCtx.overrides || { existing: [], stagedNew: [], stagedEdits: {}, stagedDeletes: new Set() };
             if (target.id) {
-              O.stagedEdits[target.id] = { ...(O.stagedEdits[target.id]||{}), date_to: cutOther };
+              O2.stagedEdits[target.id] = { ...(O2.stagedEdits[target.id]||{}), date_to: cutOther };
             } else if (target._tmpId) {
-              const ix = (O.stagedNew||[]).findIndex(r=>r._tmpId===target._tmpId);
-              if (ix>=0) O.stagedNew[ix] = { ...O.stagedNew[ix], date_to: cutOther };
+              const ix = (O2.stagedNew||[]).findIndex(r=>r._tmpId===target._tmpId);
+              if (ix>=0) O2.stagedNew[ix] = { ...O2.stagedNew[ix], date_to: cutOther };
             }
             renderCandidateRatesTable();
             recomputeOverrideState();
@@ -16024,10 +16024,11 @@ async function openCandidateRateModal(candidate_id, existing) {
     }
 
     // Preview margins (never NaN)
+    const mult2 = mult;
     buckets.forEach(b => {
       const sp  = byId(`cr_m_${b}`), el = inputEl(b), chg = win.charges[b];
       const pay = (el && !el.disabled) ? numOrNull(el.value) : null;
-      const m   = (chg != null && pay != null) ? ((rateType === 'PAYE') ? (chg - (pay * mult)) : (chg - pay)) : null;
+      const m   = (chg != null && pay != null) ? ((rateType === 'PAYE') ? (chg - (pay * mult2)) : (chg - pay)) : null;
       if (sp) sp.textContent = (m==null ? '—' : fmt(m));
     });
 
