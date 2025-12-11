@@ -7343,8 +7343,6 @@ async function contractWeekCreateAdditional(week_id) {
 
 
 
-
-
 async function openCandidatePicker(onPick, options) {
   const LOGC = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : true; // default ON
   const ctx  = options && options.context ? options.context : null;
@@ -7493,14 +7491,16 @@ async function openCandidatePicker(onPick, options) {
         });
       };
 
+      // 🔹 Always filter from the full baseRows (not the previously filtered subset)
       const doFilter = (q) => {
-        const fn = (window.pickersLocalFilterAndSort || pickersLocalFilterAndSort);
-        const out = fn('candidates', currentRows.length ? currentRows : baseRows, q, sortKey, sortDir);
+        const fn  = (window.pickersLocalFilterAndSort || pickersLocalFilterAndSort);
+        const out = fn('candidates', baseRows, q, sortKey, sortDir);
         if (LOGC) console.log('[PICKER][candidates] doFilter()', {
           q,
-          in: (currentRows.length || baseRows.length),
+          in: baseRows.length,
           out: out.length
         });
+        currentRows = out;
         return out;
       };
 
