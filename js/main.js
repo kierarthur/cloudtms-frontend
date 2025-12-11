@@ -31812,7 +31812,7 @@ function renderSummary(rows){
   const fp = computeFp();
   if (sel.fingerprint !== fp) { sel.fingerprint = fp; clearSelection(); }
 
-  // Section-specific pre-formatting
+  // Section-specific pre-formatting / normalisation
   if (currentSection === 'candidates') {
     rows.forEach(r => {
       // Rota roles only – do NOT use this for Job Titles
@@ -31839,6 +31839,19 @@ function renderSummary(rows){
         r.bucket_labels_preview = parts.length === 5 ? parts.join('/') : '';
       } else {
         r.bucket_labels_preview = '';
+      }
+    });
+  } else if (currentSection === 'timesheets') {
+    // Normalise timesheet rows so they always have a stable id:
+    // - real TS → id = timesheet_id
+    // - planned/contract_week only → id = contract_week_id
+    rows.forEach(r => {
+      if (!r || typeof r !== 'object') return;
+      const tsId = r.timesheet_id || null;
+      const cwId = r.contract_week_id || null;
+      const stableId = tsId || cwId || r.id || null;
+      if (stableId) {
+        r.id = stableId;
       }
     });
   }
