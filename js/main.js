@@ -7368,8 +7368,6 @@ async function contractWeekCreateAdditional(week_id) {
 
 
 
-
-
 async function openCandidatePicker(onPick, options) {
   const LOGC = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : true; // default ON
   const ctx  = options && options.context ? options.context : null;
@@ -7518,7 +7516,7 @@ async function openCandidatePicker(onPick, options) {
         });
       };
 
-      // Always filter from the full baseRows
+      // Always filter from full baseRows
       const doFilter = (q) => {
         const fn  = (window.pickersLocalFilterAndSort || pickersLocalFilterAndSort);
         const out = fn('candidates', baseRows, q, sortKey, sortDir);
@@ -7674,7 +7672,7 @@ async function openCandidatePicker(onPick, options) {
         } catch {}
       }, 0);
     },
-    { kind: 'candidate-picker' }  // 🔹 noParentGate removed
+    { kind: 'candidate-picker', noParentGate: true } // ← important: child modal, but doesn’t re-own global save
   );
 
   // Post-render kick: ensure the picker's onReturn wiring runs once on first open
@@ -7699,7 +7697,6 @@ async function openCandidatePicker(onPick, options) {
     }
   }, 0);
 }
-
 
 async function openClientPicker(onPick, opts) {
   const LOGC      = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : true; // default ON
@@ -7855,7 +7852,7 @@ async function openClientPicker(onPick, opts) {
         });
       };
 
-      // 🔹 Always filter from full baseRows, not currentRows subset
+      // Always filter from full baseRows (so backspacing widens results again)
       const doFilter = (q) => {
         const fn  = (window.pickersLocalFilterAndSort || pickersLocalFilterAndSort);
         const out = fn('clients', baseRows, q, sortKey, sortDir);
@@ -8011,7 +8008,7 @@ async function openClientPicker(onPick, opts) {
         } catch {}
       }, 0);
     },
-    { kind: 'client-picker' }  // 🔹 noParentGate removed
+    { kind: 'client-picker', noParentGate: true } // ← child modal that doesn’t steal global save/close
   );
 
   // Post-render kick: ensure the picker's onReturn wiring runs once on first open
