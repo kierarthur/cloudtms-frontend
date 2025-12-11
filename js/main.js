@@ -1613,12 +1613,20 @@ async function postWeeklyResolveMappings(importId, type, payload) {
 
   const url = API(urlPath);
 
+  // Debug log of hr_row_ids being sent for client aliases
+  const aliasDebug = client_aliases.map(a => ({
+    client_id: a.client_id || null,
+    hr_row_ids: Array.isArray(a.hr_row_ids) ? a.hr_row_ids : [],
+    hospital_norm: a.hospital_norm || null
+  }));
+
   L('posting weekly resolve-conflicts', {
     importId,
     type: t,
     url,
     candidate_mappings_count: candidate_mappings.length,
-    client_aliases_count: client_aliases.length
+    client_aliases_count: client_aliases.length,
+    client_aliases_hr_row_ids: aliasDebug
   });
 
   const res  = await authFetch(url, {
@@ -1768,11 +1776,19 @@ async function postHrRotaResolveMappings(importId, payload) {
   }
 
   const url = `/api/imports/hr-rota/${encodeURIComponent(importId)}/resolve-conflicts`;
+
+  const aliasDebug = client_aliases.map(a => ({
+    client_id: a.client_id || null,
+    hr_row_ids: Array.isArray(a.hr_row_ids) ? a.hr_row_ids : [],
+    hospital_norm: a.hospital_norm || null
+  }));
+
   L('posting HR rota resolve-conflicts', {
     importId,
     url: API(url),
     candidate_mappings_count: candidate_mappings.length,
-    client_aliases_count: client_aliases.length
+    client_aliases_count: client_aliases.length,
+    client_aliases_hr_row_ids: aliasDebug
   });
 
   const res  = await authFetch(API(url), {
@@ -1901,15 +1917,29 @@ function openHrRotaAssignClientModal(importId, rowIndex) {
           unitRaw ||
           '';
 
+        // NEW: derive hr_row_ids for this rota row so the backend can
+        // compute the canonical alias from hr_rows.
+        const hrRowId = row.hr_row_id || row.id || null;
+        const hr_row_ids = hrRowId ? [String(hrRowId).trim()] : [];
+
         const payload = {
           candidate_mappings: [],
           client_aliases: [
             {
               hospital_norm,
-              client_id: id
+              client_id: id,
+              hr_row_ids
             }
           ]
         };
+
+        L('ASSIGN_CLIENT payload', {
+          importId,
+          rowIndex,
+          client_id: id,
+          hr_row_ids,
+          hospital_norm
+        });
 
         await postHrRotaResolveMappings(importId, payload);
 
@@ -27347,7 +27377,6 @@ function ensureWeeklyImportMappings(type, importId) {
   return m;
 }
 
-
 function renderImportSummaryModal(importType, summaryState) {
   const enc = (typeof escapeHtml === 'function')
     ? escapeHtml
@@ -27934,6 +27963,9 @@ function renderImportSummaryModal(importType, summaryState) {
         if (root.__weeklyWired) return;
         root.__weeklyWired = true;
 
+        const LOGW = (typeof window.__LOG_IMPORTS === 'boolean') ? window.__LOG_IMPORTS : true;
+        const LW   = (...a) => { if (LOGW) console.log('[IMPORTS][WEEKLY]', ...a); };
+
         const st = window.__importSummaryState && window.__importSummaryState[type];
         const rows = st && Array.isArray(st.rows) ? st.rows : [];
 
@@ -28009,6 +28041,13 @@ function renderImportSummaryModal(importType, summaryState) {
                 client_aliases: []
               };
 
+              LW('resolve-candidate mapping', {
+                importId,
+                type,
+                rowIndex: idx,
+                mapping
+              });
+
               try {
                 await postWeeklyResolveMappings(importId, type, payload);
                 mappings.candidate_mappings.push(mapping);
@@ -28032,15 +28071,38 @@ function renderImportSummaryModal(importType, summaryState) {
               const mappings     = ensureWeeklyImportMappings();
               const hospitalNorm = row.hospital_norm || hospRaw || '';
 
+              // NEW: derive hr_row_ids to send to the backend so it can
+              // compute trust_raw from hr_rows exactly as SQL does.
+              const hrRowIds = [];
+              if (Array.isArray(row.hr_row_ids) && row.hr_row_ids.length) {
+                row.hr_row_ids
+                  .map(String)
+                  .map((v) => v.trim())
+                  .filter(Boolean)
+                  .forEach((v) => hrRowIds.push(v));
+              } else if (row.hr_row_id) {
+                hrRowIds.push(String(row.hr_row_id).trim());
+              }
+
               const mapping = {
-                hospital_norm: hospitalNorm,
-                client_id:     id
+                client_id:     id,
+                hr_row_ids:    hrRowIds,
+                hospital_norm: hospitalNorm   // kept as fallback hint
               };
 
               const payload = {
                 candidate_mappings: [],
                 client_aliases: [mapping]
               };
+
+              LW('resolve-client mapping', {
+                importId,
+                type,
+                rowIndex: idx,
+                client_id: id,
+                hr_row_ids: hrRowIds,
+                hospital_norm: hospitalNorm
+              });
 
               try {
                 await postWeeklyResolveMappings(importId, type, payload);
