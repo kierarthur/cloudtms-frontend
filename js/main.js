@@ -27388,13 +27388,34 @@ function renderImportSummaryModal(importType, summaryState) {
   const rows = Array.isArray(ss.rows) ? ss.rows : [];
 
   window.__importSummaryState = window.__importSummaryState || {};
-  // Identify the summary kind and current top frame so we can avoid stacking
+
+  // Identify the summary kind and search the full modal stack for an existing
+  // summary frame of this type (NHSP / HR_WEEKLY / HR_ROTA_DAILY).
   const summaryKind = `import-summary-${type.toLowerCase()}`;
   const stack       = window.__modalStack || [];
-  const topFrame    = stack[stack.length - 1] || null;
-  const reusingExistingSummary =
-    !!topFrame &&
-    topFrame.kind === summaryKind;
+
+  let existingSummaryFrame = null;
+  for (let i = stack.length - 1; i >= 0; i--) {
+    const fr = stack[i];
+    if (fr && fr.kind === summaryKind) {
+      existingSummaryFrame = fr;
+      break;
+    }
+  }
+
+  // For debugging: see when we reuse vs create a new summary frame.
+  try {
+    const LOG = (typeof window.__LOG_IMPORTS === 'boolean') ? window.__LOG_IMPORTS : true;
+    if (LOG) {
+      console.log('[IMPORTS][SUMMARY] renderImportSummaryModal', {
+        type,
+        importId,
+        summaryKind,
+        stackLength: stack.length,
+        foundExisting: !!existingSummaryFrame
+      });
+    }
+  } catch {}
 
   // Update the global import summary cache for this type
   window.__importSummaryState[type] = {
@@ -27439,7 +27460,8 @@ function renderImportSummaryModal(importType, summaryState) {
           : 'HealthRoster Weekly Import Summary'));
 
   // ───────────────────── Import summary modal ─────────────────────
-  if (!reusingExistingSummary) {
+  if (!existingSummaryFrame) {
+    // No existing summary frame for this type → create a new one.
     showModal(
       summaryTitle,
       [{ key: 'main', label: 'Summary' }],
@@ -27453,14 +27475,16 @@ function renderImportSummaryModal(importType, summaryState) {
         stayOpenOnSave: false
       }
     );
-  } else if (topFrame) {
+  } else {
+    // Reuse the existing frame: update its title/tabs/renderTab and repaint.
     try {
-      topFrame.title = summaryTitle;
-      topFrame.tabs  = [{ key: 'main', label: 'Summary' }];
-      topFrame.renderTab = renderTab;
-      topFrame.currentTabKey = 'main';
-      if (typeof topFrame.setTab === 'function') {
-        topFrame.setTab('main');
+      existingSummaryFrame.title         = summaryTitle;
+      existingSummaryFrame.tabs          = [{ key: 'main', label: 'Summary' }];
+      existingSummaryFrame.renderTab     = renderTab;
+      existingSummaryFrame.currentTabKey = 'main';
+
+      if (typeof existingSummaryFrame.setTab === 'function') {
+        existingSummaryFrame.setTab('main');
       }
     } catch (e) {
       console.warn('[IMPORTS] failed to re-render existing import summary frame', e);
@@ -28071,8 +28095,8 @@ function renderImportSummaryModal(importType, summaryState) {
               const mappings     = ensureWeeklyImportMappings();
               const hospitalNorm = row.hospital_norm || hospRaw || '';
 
-              // NEW: derive hr_row_ids to send to the backend so it can
-              // compute trust_raw from hr_rows exactly as SQL does.
+              // Derive hr_row_ids to send to the backend so it can compute
+              // trust_raw from hr_rows exactly as SQL does.
               const hrRowIds = [];
               if (Array.isArray(row.hr_row_ids) && row.hr_row_ids.length) {
                 row.hr_row_ids
