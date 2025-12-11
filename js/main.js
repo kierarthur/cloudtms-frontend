@@ -7366,8 +7366,6 @@ async function contractWeekCreateAdditional(week_id) {
 
 
 
-
-
 async function openCandidatePicker(onPick, options) {
   const LOGC = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : true; // default ON
   const ctx  = options && options.context ? options.context : null;
@@ -7418,10 +7416,10 @@ async function openCandidatePicker(onPick, options) {
   // Context block above the search (which shift we’re resolving)
   let ctxHtml = '';
   if (ctx) {
-    const staff  = ctx.staffName || '';
-    const unit   = ctx.unit || ctx.hospital || '';
-    const ymd    = ctx.dateYmd || '';
-    const nice   = ctx.dateNice || (typeof formatYmdToNiceDate === 'function' ? formatYmdToNiceDate(ymd) : ymd);
+    const staff    = ctx.staffName || '';
+    const unit     = ctx.unit || ctx.hospital || '';
+    const ymd      = ctx.dateYmd || '';
+    const nice     = ctx.dateNice || (typeof formatYmdToNiceDate === 'function' ? formatYmdToNiceDate(ymd) : ymd);
     const importId = ctx.importId || '';
 
     ctxHtml = `
@@ -7466,8 +7464,8 @@ async function openCandidatePicker(onPick, options) {
       </div>
     </div>`;
 
-  let selectedId    = null;
-  let selectedLabel = '';
+  let selectedId     = null;
+  let selectedLabel  = '';
   let applySelection = null;
 
   const renderTab = () => html;
@@ -7494,7 +7492,8 @@ async function openCandidatePicker(onPick, options) {
       if (LOGC) console.log('[PICKER][candidates] onReturn', { hasTBody: !!tbody, hasSearch: !!search, hasTable: !!table });
       if (!tbody || !search || !table) return;
 
-      let sortKey = 'last_name', sortDir = 'asc';
+      let sortKey    = 'last_name';
+      let sortDir    = 'asc';
       let currentRows = baseRows.slice();
 
       const frame = window.__getModalFrame?.();
@@ -7505,7 +7504,6 @@ async function openCandidatePicker(onPick, options) {
 
       const applyRows = (rows) => {
         tbody.innerHTML = renderRows(rows);
-        // Reapply active highlight if we have a selectedId
         if (selectedId) {
           const match = tbody.querySelector(`tr[data-id="${selectedId}"]`);
           if (match) match.classList.add('active');
@@ -7516,7 +7514,7 @@ async function openCandidatePicker(onPick, options) {
         });
       };
 
-      // Always filter from full baseRows
+      // Always filter from the full baseRows
       const doFilter = (q) => {
         const fn  = (window.pickersLocalFilterAndSort || pickersLocalFilterAndSort);
         const out = fn('candidates', baseRows, q, sortKey, sortDir);
@@ -7548,7 +7546,7 @@ async function openCandidatePicker(onPick, options) {
         }
       };
 
-      applySelection = async (triggerClose) => {
+      applySelection = async (_triggerClose) => {
         if (!selectedId) {
           alert('Please select a candidate first.');
           return false;
@@ -7565,10 +7563,8 @@ async function openCandidatePicker(onPick, options) {
           return false;
         }
 
-        if (triggerClose) {
-          const closeBtn = document.getElementById('btnCloseModal');
-          if (closeBtn) closeBtn.click();
-        }
+        // IMPORTANT: do NOT manually click Close here.
+        // saveForFrame (child branch) will pop this frame and repaint the parent.
         return true;
       };
 
@@ -7614,7 +7610,6 @@ async function openCandidatePicker(onPick, options) {
           t = setTimeout(() => {
             currentRows = doFilter(q);
             applyRows(currentRows);
-            // clear current selection on new search
             setActiveRow(null);
           }, 150);
         });
@@ -7672,7 +7667,7 @@ async function openCandidatePicker(onPick, options) {
         } catch {}
       }, 0);
     },
-    { kind: 'candidate-picker', noParentGate: true } // ← important: child modal, but doesn’t re-own global save
+    { kind: 'candidate-picker', noParentGate: true }
   );
 
   // Post-render kick: ensure the picker's onReturn wiring runs once on first open
@@ -7697,6 +7692,7 @@ async function openCandidatePicker(onPick, options) {
     }
   }, 0);
 }
+
 
 async function openClientPicker(onPick, opts) {
   const LOGC      = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : true; // default ON
@@ -7803,8 +7799,8 @@ async function openClientPicker(onPick, opts) {
       </div>
     </div>`;
 
-  let selectedId    = null;
-  let selectedLabel = '';
+  let selectedId     = null;
+  let selectedLabel  = '';
   let applySelection = null;
 
   const renderTab = () => html;
@@ -7831,7 +7827,8 @@ async function openClientPicker(onPick, opts) {
       if (LOGC) console.log('[PICKER][clients] onReturn', { hasTBody: !!tbody, hasSearch: !!search, hasTable: !!table });
       if (!tbody || !search || !table) return;
 
-      let sortKey = 'name', sortDir = 'asc';
+      let sortKey     = 'name';
+      let sortDir     = 'asc';
       let currentRows = baseRows.slice();
 
       const frame = window.__getModalFrame?.();
@@ -7852,7 +7849,7 @@ async function openClientPicker(onPick, opts) {
         });
       };
 
-      // Always filter from full baseRows (so backspacing widens results again)
+      // Always filter from full baseRows
       const doFilter = (q) => {
         const fn  = (window.pickersLocalFilterAndSort || pickersLocalFilterAndSort);
         const out = fn('clients', baseRows, q, sortKey, sortDir);
@@ -7884,7 +7881,7 @@ async function openClientPicker(onPick, opts) {
         }
       };
 
-      applySelection = async (triggerClose) => {
+      applySelection = async (_triggerClose) => {
         if (!selectedId) {
           alert('Please select a client first.');
           return false;
@@ -7901,10 +7898,7 @@ async function openClientPicker(onPick, opts) {
           return false;
         }
 
-        if (triggerClose) {
-          const closeBtn = document.getElementById('btnCloseModal');
-          if (closeBtn) closeBtn.click();
-        }
+        // Do NOT manually close; let saveForFrame handle popping this child frame.
         return true;
       };
 
@@ -8008,7 +8002,7 @@ async function openClientPicker(onPick, opts) {
         } catch {}
       }, 0);
     },
-    { kind: 'client-picker', noParentGate: true } // ← child modal that doesn’t steal global save/close
+    { kind: 'client-picker', noParentGate: true }
   );
 
   // Post-render kick: ensure the picker's onReturn wiring runs once on first open
@@ -8033,7 +8027,6 @@ async function openClientPicker(onPick, opts) {
     }
   }, 0);
 }
-
 
 
 // ─────────────────────────────────────────────────────────────────────────────
