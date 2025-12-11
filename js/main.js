@@ -24031,7 +24031,7 @@ const isUtilityKind =
 
 
 
-   if (relatedBtn) {
+     if (relatedBtn) {
   // Map modal entity → backend /api/related entity key
   const relatedEntity =
     top.entity === 'candidates' ? 'candidate' :
@@ -24039,6 +24039,7 @@ const isUtilityKind =
     top.entity === 'contracts'  ? 'contract'  :
     top.entity === 'timesheets' ? 'timesheet' :
     top.entity === 'invoices'   ? 'invoice'   :
+    top.entity === 'umbrellas'  ? 'umbrella'  :
     null;
 
   const showRelated =
@@ -24079,6 +24080,7 @@ const isUtilityKind =
     relatedBtn.onclick = null;
   }
 }
+
 
 
       if (top.mode === 'create') {
@@ -31521,11 +31523,12 @@ function escCloseRelatedMenu(ev){
 
 // Create & show a context menu near (x,y)
 // ========================= showRelatedMenu (FIXED) =========================
+// Create & show a context menu near (x,y)
 function showRelatedMenu(x, y, counts, entity, id){
   closeRelatedMenu();
 
   const entries = counts && typeof counts === 'object'
-    ? Object.entries(counts).filter(([k])=>k && k.trim().length>0)
+    ? Object.entries(counts).filter(([k]) => k && k.trim().length > 0)
     : [];
 
   const menu = document.createElement('div');
@@ -31553,22 +31556,56 @@ function showRelatedMenu(x, y, counts, entity, id){
     it.style.opacity = disabled ? '.6' : '1';
     it.onmouseenter = ()=>{ if (!disabled) it.style.background = 'rgba(255,255,255,.06)'; };
     it.onmouseleave = ()=>{ it.style.background = 'transparent'; };
-    if (!disabled) it.onclick = async (ev)=>{
-      ev.stopPropagation();
-      const rows = await fetchRelated(entity, id, onClick.type);
-   if (rows) {
-  // When jumping sections via Related, tear down any open modal to avoid stale state
-  if ((window.__modalStack?.length || 0) > 0 || window.modalCtx?.entity) {
-    discardAllModalsAndState();
-  }
-  if (onClick.type === 'timesheets' || onClick.type === 'invoices') {
-    currentSection = onClick.type;
-  }
-  renderSummary(rows);
-}
+    if (!disabled) {
+      it.onclick = async (ev)=>{
+        ev.stopPropagation();
+        const rows = await fetchRelated(entity, id, onClick.type);
 
-      closeRelatedMenu();
-    };
+        if (rows && Array.isArray(rows)) {
+          // Tear down any open modal before switching section
+          if ((window.__modalStack?.length || 0) > 0 || window.modalCtx?.entity) {
+            discardAllModalsAndState();
+          }
+
+          // Decide which summary section to show
+          let targetSection = currentSection;
+
+          switch (onClick.type) {
+            case 'timesheets':
+            case 'series':         // Adjustments series for a timesheet
+              targetSection = 'timesheets';
+              break;
+            case 'invoices':
+              targetSection = 'invoices';
+              break;
+            case 'clients':
+              targetSection = 'clients';
+              break;
+            case 'candidates':
+              targetSection = 'candidates';
+              break;
+            case 'umbrella':
+            case 'umbrellas':
+              targetSection = 'umbrellas';
+              break;
+            case 'contracts':
+              targetSection = 'contracts';
+              break;
+            default:
+              // leave currentSection as-is
+              break;
+          }
+
+          if (targetSection) {
+            currentSection = targetSection;
+          }
+
+          renderSummary(rows);
+        }
+
+        closeRelatedMenu();
+      };
+    }
     menu.appendChild(it);
   }
 
@@ -31576,9 +31613,28 @@ function showRelatedMenu(x, y, counts, entity, id){
     item('No related records', true, {});
   } else {
     entries.sort((a,b)=> (b[1]||0)-(a[1]||0));
-    entries.forEach(([type, count])=>{
-      const label = `${count} related ${type}`;
-      item(label, count===0, { type });
+    entries.forEach(([rawType, rawCount])=>{
+      const type = rawType;
+      let count = typeof rawCount === 'number' ? rawCount : 0;
+
+      let niceType = type;
+      let displayCount = count;
+
+      // Rename "series" → "Adjustments" and show "other timesheets" only
+      if (type === 'series') {
+        niceType = 'Adjustments';
+        displayCount = Math.max(count - 1, 0);
+      } else if (type === 'umbrella') {
+        niceType = 'Umbrella';
+      } else if (type === 'umbrellas') {
+        niceType = 'Umbrellas';
+      } else if (type === 'timesheets') {
+        niceType = 'timesheets';
+      }
+
+      const label = `${displayCount} related ${niceType}`;
+      const disabled = displayCount === 0;
+      item(label, disabled, { type });
     });
   }
 
