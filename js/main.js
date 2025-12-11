@@ -7128,14 +7128,22 @@ async function revalidateClientOnPick(id){
   const resp = await authFetch(url);
   if (!resp || !resp.ok) throw new Error('Could not fetch client.');
   const r = await resp.json();
+
   window.__pickerData = window.__pickerData || { clients:{ itemsById:{} } };
-  const ds = window.__pickerData.clients ||= { itemsById:{} };
+  const ds = (window.__pickerData.clients ||= { itemsById:{} });
+
+  const cs = r.client_settings || {};
+
   const proj = {
-    id: r.id,
+    id:   r.id,
     name: r.name || '',
     primary_invoice_email: r.primary_invoice_email || '',
-    active: r.active !== false
+    active: r.active !== false,
+    // Preserve flags used by the NHSP-only / HR-autoprocess filters
+    is_nhsp:       !!(r.is_nhsp ?? cs.is_nhsp),
+    autoprocess_hr: !!(r.autoprocess_hr ?? cs.autoprocess_hr)
   };
+
   ds.itemsById[String(r.id)] = proj;
 }
 
@@ -7337,8 +7345,6 @@ async function contractWeekCreateAdditional(week_id) {
 
 
 
-
-
 async function openCandidatePicker(onPick, options) {
   const LOGC = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : true; // default ON
   const ctx  = options && options.context ? options.context : null;
@@ -7422,17 +7428,19 @@ async function openCandidatePicker(onPick, options) {
       <div class="hint">
         Showing candidates from the current summary list${mem?.total ? ` (${mem.total} total)` : ''}.
       </div>
-      <table class="grid" id="pickerTable">
-        <thead>
-          <tr>
-            <th data-sort="last_name">Surname</th>
-            <th data-sort="first_name">First name</th>
-            <th data-sort="roles_display">Role</th>
-            <th data-sort="email">Email</th>
-          </tr>
-        </thead>
-        <tbody id="pickerTBody">${renderRows(baseRows)}</tbody>
-      </table>
+      <div class="picker-table-wrap">
+        <table class="grid" id="pickerTable">
+          <thead>
+            <tr>
+              <th data-sort="last_name">Surname</th>
+              <th data-sort="first_name">First name</th>
+              <th data-sort="roles_display">Role</th>
+              <th data-sort="email">Email</th>
+            </tr>
+          </thead>
+          <tbody id="pickerTBody">${renderRows(baseRows)}</tbody>
+        </table>
+      </div>
     </div>`;
 
   let selectedId    = null;
@@ -7770,15 +7778,17 @@ async function openClientPicker(onPick, opts) {
         Showing clients from the current summary list${mem?.total ? ` (${mem.total} total)` : ''}.
         ${nhspOnly ? ' (NHSP-only filter)' : ''}${hrAutoOnly ? ' (Auto-process HR only)' : ''}
       </div>
-      <table class="grid" id="pickerTable">
-        <thead>
-          <tr>
-            <th data-sort="name">Name</th>
-            <th data-sort="primary_invoice_email">Email</th>
-          </tr>
-        </thead>
-        <tbody id="pickerTBody">${renderRows(baseRows)}</tbody>
-      </table>
+      <div class="picker-table-wrap">
+        <table class="grid" id="pickerTable">
+          <thead>
+            <tr>
+              <th data-sort="name">Name</th>
+              <th data-sort="primary_invoice_email">Email</th>
+            </tr>
+          </thead>
+          <tbody id="pickerTBody">${renderRows(baseRows)}</tbody>
+        </table>
+      </div>
     </div>`;
 
   let selectedId    = null;
