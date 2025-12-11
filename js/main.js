@@ -30816,6 +30816,8 @@ function bindCandidateMainFormEvents(container, model) {
         window.modalCtx = window.modalCtx || {};
         window.modalCtx.data = window.modalCtx.data || {};
         window.modalCtx.data.pay_method = next;
+        window.modalCtx.payMethodState = next; // ✅ NEW: track the current (unsaved) pay method
+
         if (next === 'PAYE') {
           // Keep umbrella_id null in the in-memory candidate once PAYE is chosen
           window.modalCtx.data.umbrella_id = null;
