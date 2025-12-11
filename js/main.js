@@ -7339,16 +7339,16 @@ async function contractWeekCreateAdditional(week_id) {
 
 
 
-
-
-
-async function openCandidatePicker(onPick) {
+async function openCandidatePicker(onPick, options) {
   const LOGC = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : true; // default ON
+  const ctx  = options && options.context ? options.context : null;
 
   if (LOGC) console.log('[PICKER][candidates] ensure dataset primed → start');
-  await ensurePickerDatasetPrimed('candidates').catch(e=>{ if (LOGC) console.warn('[PICKER][candidates] priming failed', e); });
+  await ensurePickerDatasetPrimed('candidates').catch(e => {
+    if (LOGC) console.warn('[PICKER][candidates] priming failed', e);
+  });
 
-  let fp = getSummaryFingerprint('candidates');
+  let fp  = getSummaryFingerprint('candidates');
   let mem = getSummaryMembership('candidates', fp);
   if (!mem?.ids?.length || mem?.stale) {
     if (LOGC) console.log('[PICKER][candidates] membership empty/stale → priming', { fp, mem });
@@ -7357,22 +7357,26 @@ async function openCandidatePicker(onPick) {
     mem = getSummaryMembership('candidates', fp);
   }
 
-  const ds  = (window.__pickerData ||= {}).candidates || { since:null, itemsById:{} };
+  const ds    = (window.__pickerData ||= {}).candidates || { since: null, itemsById: {} };
   const items = ds.itemsById || {};
 
   const baseIds  = (mem?.ids && mem.ids.length) ? mem.ids : Object.keys(items);
   const baseRows = baseIds.map(id => items[id]).filter(Boolean);
 
   if (LOGC) console.log('[PICKER][candidates] dataset snapshot', {
-    fingerprint: fp, total: mem?.total, ids: baseIds.length, stale: !!mem?.stale, since: ds?.since,
-    rowsBase: baseRows.length, missingItems: baseIds.length - baseRows.length
+    fingerprint: fp,
+    total: mem?.total,
+    ids: baseIds.length,
+    stale: !!mem?.stale,
+    since: ds?.since,
+    rowsBase: baseRows.length,
+    missingItems: baseIds.length - baseRows.length
   });
 
   const renderRows = (rows) => rows.map(r => {
     const first = r.first_name || '';
     const last  = r.last_name || '';
     const label = (r.display_name || `${first} ${last}`).trim() || (r.tms_ref || r.id || '');
-    const sub   = [r.email, r.roles_display].filter(Boolean).join(' • ');
     return `
       <tr data-id="${r.id||''}" data-label="${(label||'').replace(/"/g,'&quot;')}" class="pick-row">
         <td data-k="last_name">${(last)}</td>
@@ -7382,12 +7386,42 @@ async function openCandidatePicker(onPick) {
       </tr>`;
   }).join('');
 
+  // Context block above the search (which shift we’re resolving)
+  let ctxHtml = '';
+  if (ctx) {
+    const staff  = ctx.staffName || '';
+    const unit   = ctx.unit || ctx.hospital || '';
+    const ymd    = ctx.dateYmd || '';
+    const nice   = ctx.dateNice || (typeof formatYmdToNiceDate === 'function' ? formatYmdToNiceDate(ymd) : ymd);
+    const importId = ctx.importId || '';
+
+    ctxHtml = `
+      <div class="row">
+        <label>Resolving</label>
+        <div class="controls">
+          <div class="mini">
+            Candidate: <span class="mono">${escapeHtml ? escapeHtml(staff) : staff}</span><br/>
+            Unit / Site: <span class="mono">${escapeHtml ? escapeHtml(unit) : unit}</span><br/>
+            Date: <span class="mono">${escapeHtml ? escapeHtml(nice || '—') : (nice || '—')}</span><br/>
+            Import ID: <span class="mono">${escapeHtml ? escapeHtml(importId || '—') : (importId || '—')}</span>
+          </div>
+        </div>
+      </div>`;
+  }
+
   const html = `
     <div class="tabc">
-      <div class="row"><label>Search</label><div class="controls">
-        <input class="input" type="text" id="pickerSearch" placeholder="${mem?.stale ? 'Priming list… type to narrow' : 'Type a first name, surname, role or email…'}"/>
-      </div></div>
-      <div class="hint">Showing candidates from the current summary list${mem?.total ? ` (${mem.total} total)` : ''}.</div>
+      ${ctxHtml}
+      <div class="row">
+        <label>Search</label>
+        <div class="controls">
+          <input class="input" type="text" id="pickerSearch"
+                 placeholder="${mem?.stale ? 'Priming list… type to narrow' : 'Type a first name, surname, role or email…'}"/>
+        </div>
+      </div>
+      <div class="hint">
+        Showing candidates from the current summary list${mem?.total ? ` (${mem.total} total)` : ''}.
+      </div>
       <table class="grid" id="pickerTable">
         <thead>
           <tr>
@@ -7401,119 +7435,237 @@ async function openCandidatePicker(onPick) {
       </table>
     </div>`;
 
+  let selectedId    = null;
+  let selectedLabel = '';
+  let applySelection = null;
+
+  const renderTab = () => html;
+
+  const onSave = async () => {
+    if (typeof applySelection !== 'function') {
+      if (LOGC) console.warn('[PICKER][candidates] onSave called before wiring');
+      return false;
+    }
+    return await applySelection(true);
+  };
+
   if (LOGC) console.log('[PICKER][candidates] opening modal');
-  showModal('Pick Candidate',[{key:'p',title:'Candidates'}],()=>html,async()=>true,false,()=>{
+  showModal(
+    'Pick Candidate',
+    [{ key: 'p', title: 'Candidates' }],
+    renderTab,
+    onSave,
+    false,
+    () => {
+      const tbody  = document.getElementById('pickerTBody');
+      const search = document.getElementById('pickerSearch');
+      const table  = document.getElementById('pickerTable');
+      if (LOGC) console.log('[PICKER][candidates] onReturn', { hasTBody: !!tbody, hasSearch: !!search, hasTable: !!table });
+      if (!tbody || !search || !table) return;
 
-    const tbody   = document.getElementById('pickerTBody');
-    const search  = document.getElementById('pickerSearch');
-    const table   = document.getElementById('pickerTable');
-    if (LOGC) console.log('[PICKER][candidates] onReturn', { hasTBody: !!tbody, hasSearch: !!search, hasTable: !!table });
-    if (!tbody || !search || !table) return;
+      let sortKey = 'last_name', sortDir = 'asc';
+      let currentRows = baseRows.slice();
 
-    let sortKey = 'last_name', sortDir = 'asc';
-    let currentRows = baseRows.slice();
+      const frame = window.__getModalFrame?.();
+      if (frame && frame.kind === 'candidate-picker') {
+        frame._pickerHasSelection = false;
+        frame._updateButtons && frame._updateButtons();
+      }
 
-    const applyRows = (rows) => {
-      tbody.innerHTML = renderRows(rows);
-      if (LOGC) console.log('[PICKER][candidates] render()', { count: rows.length, sample: rows.slice(0,6).map(r=>r.display_name||`${r.first_name} ${r.last_name}`) });
-      const first = tbody.querySelector('tr[data-id]');
-      if (first) { first.classList.add('active'); }
-    };
-    const doFilter  = (q) => {
-      const fn = (window.pickersLocalFilterAndSort || pickersLocalFilterAndSort);
-      const out = fn('candidates', currentRows.length ? currentRows : baseRows, q, sortKey, sortDir);
-      if (LOGC) console.log('[PICKER][candidates] doFilter()', { q, in: (currentRows.length||baseRows.length), out: out.length });
-      return out;
-    };
-
-    if (!tbody.__wiredClick) {
-      tbody.__wiredClick = true;
-      const choose = async (tr) => {
-        const id    = tr.getAttribute('data-id');
-        const label = tr.getAttribute('data-label') || tr.textContent.trim();
-        if (LOGC) console.log('[PICKER][candidates] select()', { id, label });
-        try {
-          await revalidateCandidateOnPick(id);
-          if (typeof onPick==='function') onPick({ id, label });
-        } catch (err) {
-          console.warn('[PICKER][candidates] select() validation failed', err);
-          alert(err?.message || 'Selection could not be validated.');
-          return;
+      const applyRows = (rows) => {
+        tbody.innerHTML = renderRows(rows);
+        // Reapply active highlight if we have a selectedId
+        if (selectedId) {
+          const match = tbody.querySelector(`tr[data-id="${selectedId}"]`);
+          if (match) match.classList.add('active');
         }
-        const closeBtn = document.getElementById('btnCloseModal'); if (closeBtn) closeBtn.click();
+        if (LOGC) console.log('[PICKER][candidates] render()', {
+          count: rows.length,
+          sample: rows.slice(0, 6).map(r => r.display_name || `${r.first_name} ${r.last_name}`)
+        });
       };
-      tbody.addEventListener('click', async (e) => {
-        const tr = e.target && e.target.closest('tr[data-id]'); if (!tr) return;
-        await choose(tr);
-      });
-      tbody.addEventListener('dblclick', async (e) => {
-        const tr = e.target && e.target.closest('tr[data-id]'); if (!tr) return;
-        await choose(tr);
-      });
-      if (LOGC) console.log('[PICKER][candidates] wired click + dblclick handler');
-    }
 
-    if (!table.__wiredSort) {
-      table.__wiredSort = true;
-      table.querySelector('thead').addEventListener('click', (e) => {
-        const th = e.target && e.target.closest('th[data-sort]'); if (!th) return;
-        const key = th.getAttribute('data-sort');
-        sortDir = (sortKey === key && sortDir === 'asc') ? 'desc' : 'asc';
-        sortKey = key;
-        currentRows = doFilter(search.value.trim());
-        applyRows(currentRows);
-        if (LOGC) console.log('[PICKER][candidates] sort', { sortKey, sortDir, count: currentRows.length });
-      });
-      if (LOGC) console.log('[PICKER][candidates] wired sort header');
-    }
+      const doFilter = (q) => {
+        const fn = (window.pickersLocalFilterAndSort || pickersLocalFilterAndSort);
+        const out = fn('candidates', currentRows.length ? currentRows : baseRows, q, sortKey, sortDir);
+        if (LOGC) console.log('[PICKER][candidates] doFilter()', {
+          q,
+          in: (currentRows.length || baseRows.length),
+          out: out.length
+        });
+        return out;
+      };
 
-    let t = 0;
-    if (!search.__wiredInput) {
-      search.__wiredInput = true;
-      search.addEventListener('input', () => {
-        const q = search.value.trim();
-        if (LOGC) console.log('[PICKER][candidates] search input', { q });
-        if (t) clearTimeout(t);
-        t = setTimeout(() => { currentRows = doFilter(q); applyRows(currentRows); }, 150);
-      });
-      if (LOGC) console.log('[PICKER][candidates] wired search input');
-    }
-
-    if (!search.__wiredKey) {
-      search.__wiredKey = true;
-      search.addEventListener('keydown', async (e) => {
-        const itemsEls = Array.from(tbody.querySelectorAll('tr[data-id]'));
-        if (!itemsEls.length) {
-          if (e.key === 'Escape') { const closeBtn = document.getElementById('btnCloseModal'); if (closeBtn) closeBtn.click(); }
-          return;
+      const setActiveRow = (tr) => {
+        const all = tbody.querySelectorAll('tr[data-id]');
+        all.forEach(r => r.classList.remove('active'));
+        if (!tr) {
+          selectedId = null;
+          selectedLabel = '';
+        } else {
+          tr.classList.add('active');
+          selectedId    = tr.getAttribute('data-id');
+          selectedLabel = tr.getAttribute('data-label') || tr.textContent.trim();
         }
-        const idx = itemsEls.findIndex(tr => tr.classList.contains('active'));
-        const setActive = (i) => {
-          itemsEls.forEach(tr=>tr.classList.remove('active'));
-          itemsEls[i].classList.add('active');
-          itemsEls[i].scrollIntoView({block:'nearest'});
-        };
-        if (e.key === 'ArrowDown') { e.preventDefault(); setActive(Math.min((idx<0?0:idx+1), itemsEls.length-1)); }
-        if (e.key === 'ArrowUp')   { e.preventDefault(); setActive(Math.max((idx<0?0:idx-1), 0)); }
-        if (e.key === 'Enter')     { e.preventDefault(); const target = itemsEls[Math.max(idx,0)]; if (target) target.click(); }
-        if (e.key === 'Escape')    { e.preventDefault(); const closeBtn = document.getElementById('btnCloseModal'); if (closeBtn) closeBtn.click(); }
-      });
-      if (LOGC) console.log('[PICKER][candidates] wired search keydown');
-    }
 
-    setTimeout(() => { try { search.focus(); if (LOGC) console.log('[PICKER][candidates] search focused'); } catch {} }, 0);
-  },{kind:'picker'});
+        const fr = window.__getModalFrame?.();
+        if (fr && fr.kind === 'candidate-picker') {
+          fr._pickerHasSelection = !!selectedId;
+          fr._updateButtons && fr._updateButtons();
+        }
+      };
 
-  // 🔧 Post-render kick: ensure the picker's onReturn wiring runs once on first open
+      applySelection = async (triggerClose) => {
+        if (!selectedId) {
+          alert('Please select a candidate first.');
+          return false;
+        }
+        if (LOGC) console.log('[PICKER][candidates] applySelection()', { selectedId, selectedLabel });
+        try {
+          await revalidateCandidateOnPick(selectedId);
+          if (typeof onPick === 'function') {
+            await onPick({ id: selectedId, label: selectedLabel });
+          }
+        } catch (err) {
+          console.warn('[PICKER][candidates] selection validation failed', err);
+          alert(err?.message || 'Selection could not be validated.');
+          return false;
+        }
+
+        if (triggerClose) {
+          const closeBtn = document.getElementById('btnCloseModal');
+          if (closeBtn) closeBtn.click();
+        }
+        return true;
+      };
+
+      if (!tbody.__wiredClick) {
+        tbody.__wiredClick = true;
+        tbody.addEventListener('click', (e) => {
+          const tr = e.target && e.target.closest('tr[data-id]');
+          if (!tr) return;
+          setActiveRow(tr);
+        });
+        tbody.addEventListener('dblclick', async (e) => {
+          const tr = e.target && e.target.closest('tr[data-id]');
+          if (!tr) return;
+          setActiveRow(tr);
+          const btnSave = document.getElementById('btnSave');
+          if (btnSave && !btnSave.disabled) btnSave.click();
+        });
+        if (LOGC) console.log('[PICKER][candidates] wired click + dblclick handler');
+      }
+
+      if (!table.__wiredSort) {
+        table.__wiredSort = true;
+        table.querySelector('thead').addEventListener('click', (e) => {
+          const th = e.target && e.target.closest('th[data-sort]');
+          if (!th) return;
+          const key = th.getAttribute('data-sort');
+          sortDir = (sortKey === key && sortDir === 'asc') ? 'desc' : 'asc';
+          sortKey = key;
+          currentRows = doFilter(search.value.trim());
+          applyRows(currentRows);
+          if (LOGC) console.log('[PICKER][candidates] sort', { sortKey, sortDir, count: currentRows.length });
+        });
+        if (LOGC) console.log('[PICKER][candidates] wired sort header');
+      }
+
+      let t = 0;
+      if (!search.__wiredInput) {
+        search.__wiredInput = true;
+        search.addEventListener('input', () => {
+          const q = search.value.trim();
+          if (LOGC) console.log('[PICKER][candidates] search input', { q });
+          if (t) clearTimeout(t);
+          t = setTimeout(() => {
+            currentRows = doFilter(q);
+            applyRows(currentRows);
+            // clear current selection on new search
+            setActiveRow(null);
+          }, 150);
+        });
+        if (LOGC) console.log('[PICKER][candidates] wired search input');
+      }
+
+      if (!search.__wiredKey) {
+        search.__wiredKey = true;
+        search.addEventListener('keydown', (e) => {
+          const itemsEls = Array.from(tbody.querySelectorAll('tr[data-id]'));
+          if (!itemsEls.length) {
+            if (e.key === 'Escape') {
+              const closeBtn = document.getElementById('btnCloseModal');
+              if (closeBtn) closeBtn.click();
+            }
+            return;
+          }
+          const idx = itemsEls.findIndex(tr => tr.classList.contains('active'));
+          const setActiveIdx = (i) => {
+            const safe = Math.max(0, Math.min(i, itemsEls.length - 1));
+            setActiveRow(itemsEls[safe]);
+            itemsEls[safe].scrollIntoView({ block: 'nearest' });
+          };
+
+          if (e.key === 'ArrowDown') {
+            e.preventDefault();
+            setActiveIdx(idx < 0 ? 0 : idx + 1);
+          }
+          if (e.key === 'ArrowUp') {
+            e.preventDefault();
+            setActiveIdx(idx < 0 ? 0 : idx - 1);
+          }
+          if (e.key === 'Enter') {
+            e.preventDefault();
+            const target = itemsEls[Math.max(idx, 0)];
+            if (target) {
+              setActiveRow(target);
+              const btnSave = document.getElementById('btnSave');
+              if (btnSave && !btnSave.disabled) btnSave.click();
+            }
+          }
+          if (e.key === 'Escape') {
+            e.preventDefault();
+            const closeBtn = document.getElementById('btnCloseModal');
+            if (closeBtn) closeBtn.click();
+          }
+        });
+        if (LOGC) console.log('[PICKER][candidates] wired search keydown');
+      }
+
+      setTimeout(() => {
+        try {
+          search.focus();
+          if (LOGC) console.log('[PICKER][candidates] search focused');
+        } catch {}
+      }, 0);
+    },
+    { kind: 'candidate-picker', noParentGate: true }
+  );
+
+  // Post-render kick: ensure the picker's onReturn wiring runs once on first open
   setTimeout(() => {
     try {
       const fr = window.__getModalFrame?.();
-      const willCall = !!(fr && fr.kind === 'picker' && typeof fr.onReturn === 'function' && !fr.__pickerInit);
-      if (LOGC) console.log('[PICKER][candidates] post-render kick', { hasFrame: !!fr, kind: fr?.kind, hasOnReturn: typeof fr?.onReturn === 'function', already: !!fr?.__pickerInit, willCall });
-      if (willCall) { fr.__pickerInit = true; fr.onReturn(); if (LOGC) console.log('[PICKER][candidates] initial onReturn() executed'); }
-    } catch (e) { if (LOGC) console.warn('[PICKER][candidates] post-render kick failed', e); }
+      const willCall = !!(fr && fr.kind === 'candidate-picker' && typeof fr.onReturn === 'function' && !fr.__pickerInit);
+      if (LOGC) console.log('[PICKER][candidates] post-render kick', {
+        hasFrame: !!fr,
+        kind: fr?.kind,
+        hasOnReturn: typeof fr?.onReturn === 'function',
+        already: !!fr?.__pickerInit,
+        willCall
+      });
+      if (willCall) {
+        fr.__pickerInit = true;
+        fr.onReturn();
+        if (LOGC) console.log('[PICKER][candidates] initial onReturn() executed');
+      }
+    } catch (e) {
+      if (LOGC) console.warn('[PICKER][candidates] post-render kick failed', e);
+    }
   }, 0);
 }
+
+
 
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -7526,15 +7678,18 @@ async function openCandidatePicker(onPick) {
 // - Revalidates on pick
 // ─────────────────────────────────────────────────────────────────────────────
 
-
 async function openClientPicker(onPick, opts) {
-  const LOGC = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : true; // default ON
-  const nhspOnly = !!(opts && opts.nhspOnly);
+  const LOGC      = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : true; // default ON
+  const nhspOnly  = !!(opts && opts.nhspOnly);
+  const hrAutoOnly= !!(opts && opts.hrAutoOnly);
+  const ctx       = opts && opts.context ? opts.context : null;
 
   if (LOGC) console.log('[PICKER][clients] ensure dataset primed → start');
-  await ensurePickerDatasetPrimed('clients').catch(e=>{ if (LOGC) console.warn('[PICKER][clients] priming failed', e); });
+  await ensurePickerDatasetPrimed('clients').catch(e => {
+    if (LOGC) console.warn('[PICKER][clients] priming failed', e);
+  });
 
-  let fp = getSummaryFingerprint('clients');
+  let fp  = getSummaryFingerprint('clients');
   let mem = getSummaryMembership('clients', fp);
   if (!mem?.ids?.length || mem?.stale) {
     if (LOGC) console.log('[PICKER][clients] membership empty/stale → priming', { fp, mem });
@@ -7543,30 +7698,30 @@ async function openClientPicker(onPick, opts) {
     mem = getSummaryMembership('clients', fp);
   }
 
-  const ds    = (window.__pickerData ||= {}).clients || { since:null, itemsById:{} };
+  const ds    = (window.__pickerData ||= {}).clients || { since: null, itemsById: {} };
   const items = ds.itemsById || {};
 
-  const baseIds    = (mem?.ids && mem.ids.length) ? mem.ids : Object.keys(items);
+  const baseIds     = (mem?.ids && mem.ids.length) ? mem.ids : Object.keys(items);
   const baseRowsAll = baseIds.map(id => items[id]).filter(Boolean);
 
-  // Only show NHSP clients (is_nhsp true) when nhspOnly is set
-  const baseRows = nhspOnly
-    ? baseRowsAll.filter(r => r && (r.is_nhsp === true || r.is_nhsp === 'true'))
-    : baseRowsAll;
+  let baseRows = baseRowsAll;
+  if (nhspOnly) {
+    baseRows = baseRows.filter(r => r && (r.is_nhsp === true || r.is_nhsp === 'true'));
+  }
+  if (hrAutoOnly) {
+    baseRows = baseRows.filter(r => r && (r.autoprocess_hr === true || r.autoprocess_hr === 'true'));
+  }
 
   if (LOGC) console.log('[PICKER][clients] dataset snapshot', {
     fingerprint: fp,
     total: mem?.total,
     ids: baseIds.length,
-    nhspOnly,
-    filtered: baseRows.length,
     stale: !!mem?.stale,
-    since: ds?.since
-  });
-
-  if (LOGC) console.log('[PICKER][clients] dataset snapshot', {
-    fingerprint: fp, total: mem?.total, ids: baseIds.length, stale: !!mem?.stale, since: ds?.since,
-    rowsBase: baseRows.length, missingItems: baseIds.length - baseRows.length
+    since: ds?.since,
+    rowsBase: baseRows.length,
+    missingItems: baseIds.length - baseRows.length,
+    nhspOnly,
+    hrAutoOnly
   });
 
   const renderRows = (rows) => rows.map(r => {
@@ -7579,12 +7734,42 @@ async function openClientPicker(onPick, opts) {
       </tr>`;
   }).join('');
 
+  let ctxHtml = '';
+  if (ctx) {
+    const staff   = ctx.staffName || '';
+    const unit    = ctx.unit || ctx.hospital || '';
+    const ymd     = ctx.dateYmd || '';
+    const nice    = ctx.dateNice || (typeof formatYmdToNiceDate === 'function' ? formatYmdToNiceDate(ymd) : ymd);
+    const importId= ctx.importId || '';
+
+    ctxHtml = `
+      <div class="row">
+        <label>Resolving</label>
+        <div class="controls">
+          <div class="mini">
+            Candidate: <span class="mono">${escapeHtml ? escapeHtml(staff) : staff}</span><br/>
+            Unit / Site: <span class="mono">${escapeHtml ? escapeHtml(unit) : unit}</span><br/>
+            Date: <span class="mono">${escapeHtml ? escapeHtml(nice || '—') : (nice || '—')}</span><br/>
+            Import ID: <span class="mono">${escapeHtml ? escapeHtml(importId || '—') : (importId || '—')}</span>
+          </div>
+        </div>
+      </div>`;
+  }
+
   const html = `
     <div class="tabc">
-      <div class="row"><label>Search</label><div class="controls">
-        <input class="input" type="text" id="pickerSearch" placeholder="${mem?.stale ? 'Priming list… type to narrow' : 'Type a client name or email…'}"/>
-      </div></div>
-      <div class="hint">Showing clients from the current summary list${mem?.total ? ` (${mem.total} total)` : ''}.</div>
+      ${ctxHtml}
+      <div class="row">
+        <label>Search</label>
+        <div class="controls">
+          <input class="input" type="text" id="pickerSearch"
+                 placeholder="${mem?.stale ? 'Priming list… type to narrow' : 'Type a client name or email…'}"/>
+        </div>
+      </div>
+      <div class="hint">
+        Showing clients from the current summary list${mem?.total ? ` (${mem.total} total)` : ''}.
+        ${nhspOnly ? ' (NHSP-only filter)' : ''}${hrAutoOnly ? ' (Auto-process HR only)' : ''}
+      </div>
       <table class="grid" id="pickerTable">
         <thead>
           <tr>
@@ -7596,119 +7781,235 @@ async function openClientPicker(onPick, opts) {
       </table>
     </div>`;
 
+  let selectedId    = null;
+  let selectedLabel = '';
+  let applySelection = null;
+
+  const renderTab = () => html;
+
+  const onSave = async () => {
+    if (typeof applySelection !== 'function') {
+      if (LOGC) console.warn('[PICKER][clients] onSave called before wiring');
+      return false;
+    }
+    return await applySelection(true);
+  };
+
   if (LOGC) console.log('[PICKER][clients] opening modal');
-  showModal('Pick Client',[{key:'p',title:'Clients'}],()=>html,async()=>true,false,()=>{
+  showModal(
+    'Pick Client',
+    [{ key: 'p', title: 'Clients' }],
+    renderTab,
+    onSave,
+    false,
+    () => {
+      const tbody  = document.getElementById('pickerTBody');
+      const search = document.getElementById('pickerSearch');
+      const table  = document.getElementById('pickerTable');
+      if (LOGC) console.log('[PICKER][clients] onReturn', { hasTBody: !!tbody, hasSearch: !!search, hasTable: !!table });
+      if (!tbody || !search || !table) return;
 
-    const tbody   = document.getElementById('pickerTBody');
-    const search  = document.getElementById('pickerSearch');
-    const table   = document.getElementById('pickerTable');
-    if (LOGC) console.log('[PICKER][clients] onReturn', { hasTBody: !!tbody, hasSearch: !!search, hasTable: !!table });
-    if (!tbody || !search || !table) return;
+      let sortKey = 'name', sortDir = 'asc';
+      let currentRows = baseRows.slice();
 
-    let sortKey = 'name', sortDir = 'asc';
-    let currentRows = baseRows.slice();
+      const frame = window.__getModalFrame?.();
+      if (frame && frame.kind === 'client-picker') {
+        frame._pickerHasSelection = false;
+        frame._updateButtons && frame._updateButtons();
+      }
 
-    const applyRows = (rows) => {
-      tbody.innerHTML = renderRows(rows);
-      if (LOGC) console.log('[PICKER][clients] render()', { count: rows.length, sample: rows.slice(0,6).map(r=>r.name) });
-      const first = tbody.querySelector('tr[data-id]');
-      if (first) { first.classList.add('active'); }
-    };
-    const doFilter  = (q) => {
-      const fn = (window.pickersLocalFilterAndSort || pickersLocalFilterAndSort);
-      const out = fn('clients', currentRows.length ? currentRows : baseRows, q, sortKey, sortDir);
-      if (LOGC) console.log('[PICKER][clients] doFilter()', { q, in: (currentRows.length||baseRows.length), out: out.length });
-      return out;
-    };
-
-    if (!tbody.__wiredClick) {
-      tbody.__wiredClick = true;
-      const choose = async (tr) => {
-        const id    = tr.getAttribute('data-id');
-        const label = tr.getAttribute('data-label') || tr.textContent.trim();
-        if (LOGC) console.log('[PICKER][clients] select()', { id, label });
-        try {
-          await revalidateClientOnPick(id);
-          if (typeof onPick==='function') onPick({ id, label });
-        } catch (err) {
-          console.warn('[PICKER][clients] select() validation failed', err);
-          alert(err?.message || 'Selection could not be validated.');
-          return;
+      const applyRows = (rows) => {
+        tbody.innerHTML = renderRows(rows);
+        if (selectedId) {
+          const match = tbody.querySelector(`tr[data-id="${selectedId}"]`);
+          if (match) match.classList.add('active');
         }
-        const closeBtn = document.getElementById('btnCloseModal'); if (closeBtn) closeBtn.click();
+        if (LOGC) console.log('[PICKER][clients] render()', {
+          count: rows.length,
+          sample: rows.slice(0, 6).map(r => r.name)
+        });
       };
-      tbody.addEventListener('click', async (e) => {
-        const tr = e.target && e.target.closest('tr[data-id]'); if (!tr) return;
-        await choose(tr);
-      });
-      tbody.addEventListener('dblclick', async (e) => {
-        const tr = e.target && e.target.closest('tr[data-id]'); if (!tr) return;
-        await choose(tr);
-      });
-      if (LOGC) console.log('[PICKER][clients] wired click + dblclick handler');
-    }
 
-    if (!table.__wiredSort) {
-      table.__wiredSort = true;
-      table.querySelector('thead').addEventListener('click', (e) => {
-        const th = e.target && e.target.closest('th[data-sort]'); if (!th) return;
-        const key = th.getAttribute('data-sort');
-        sortDir = (sortKey === key && sortDir === 'asc') ? 'desc' : 'asc';
-        sortKey = key;
-        currentRows = doFilter(search.value.trim());
-        applyRows(currentRows);
-        if (LOGC) console.log('[PICKER][clients] sort', { sortKey, sortDir, count: currentRows.length });
-      });
-      if (LOGC) console.log('[PICKER][clients] wired sort header');
-    }
+      const doFilter = (q) => {
+        const fn = (window.pickersLocalFilterAndSort || pickersLocalFilterAndSort);
+        const out = fn('clients', currentRows.length ? currentRows : baseRows, q, sortKey, sortDir);
+        if (LOGC) console.log('[PICKER][clients] doFilter()', {
+          q,
+          in: (currentRows.length || baseRows.length),
+          out: out.length
+        });
+        return out;
+      };
 
-    let t = 0;
-    if (!search.__wiredInput) {
-      search.__wiredInput = true;
-      search.addEventListener('input', () => {
-        const q = search.value.trim();
-        if (LOGC) console.log('[PICKER][clients] search input', { q });
-        if (t) clearTimeout(t);
-        t = setTimeout(() => { currentRows = doFilter(q); applyRows(currentRows); }, 150);
-      });
-      if (LOGC) console.log('[PICKER][clients] wired search input');
-    }
-
-    if (!search.__wiredKey) {
-      search.__wiredKey = true;
-      search.addEventListener('keydown', async (e) => {
-        const itemsEls = Array.from(tbody.querySelectorAll('tr[data-id]'));
-        if (!itemsEls.length) {
-          if (e.key === 'Escape') { const closeBtn = document.getElementById('btnCloseModal'); if (closeBtn) closeBtn.click(); }
-          return;
+      const setActiveRow = (tr) => {
+        const all = tbody.querySelectorAll('tr[data-id]');
+        all.forEach(r => r.classList.remove('active'));
+        if (!tr) {
+          selectedId = null;
+          selectedLabel = '';
+        } else {
+          tr.classList.add('active');
+          selectedId    = tr.getAttribute('data-id');
+          selectedLabel = tr.getAttribute('data-label') || tr.textContent.trim();
         }
-        const idx = itemsEls.findIndex(tr => tr.classList.contains('active'));
-        const setActive = (i) => {
-          itemsEls.forEach(tr=>tr.classList.remove('active'));
-          itemsEls[i].classList.add('active');
-          itemsEls[i].scrollIntoView({ block:'nearest' });
-        };
-        if (e.key === 'ArrowDown') { e.preventDefault(); setActive(Math.min((idx<0?0:idx+1), itemsEls.length-1)); }
-        if (e.key === 'ArrowUp')   { e.preventDefault(); setActive(Math.max((idx<0?0:idx-1), 0)); }
-        if (e.key === 'Enter')     { e.preventDefault(); const target = itemsEls[Math.max(idx,0)]; if (target) target.click(); }
-        if (e.key === 'Escape')    { e.preventDefault(); const closeBtn = document.getElementById('btnCloseModal'); if (closeBtn) closeBtn.click(); }
-      });
-      if (LOGC) console.log('[PICKER][clients] wired search keydown');
-    }
 
-    setTimeout(() => { try { search.focus(); if (LOGC) console.log('[PICKER][clients] search focused'); } catch {} }, 0);
-  },{kind:'picker'});
+        const fr = window.__getModalFrame?.();
+        if (fr && fr.kind === 'client-picker') {
+          fr._pickerHasSelection = !!selectedId;
+          fr._updateButtons && fr._updateButtons();
+        }
+      };
 
-  // 🔧 Post-render kick: ensure the picker's onReturn wiring runs once on first open
+      applySelection = async (triggerClose) => {
+        if (!selectedId) {
+          alert('Please select a client first.');
+          return false;
+        }
+        if (LOGC) console.log('[PICKER][clients] applySelection()', { selectedId, selectedLabel });
+        try {
+          await revalidateClientOnPick(selectedId);
+          if (typeof onPick === 'function') {
+            await onPick({ id: selectedId, label: selectedLabel });
+          }
+        } catch (err) {
+          console.warn('[PICKER][clients] selection validation failed', err);
+          alert(err?.message || 'Selection could not be validated.');
+          return false;
+        }
+
+        if (triggerClose) {
+          const closeBtn = document.getElementById('btnCloseModal');
+          if (closeBtn) closeBtn.click();
+        }
+        return true;
+      };
+
+      if (!tbody.__wiredClick) {
+        tbody.__wiredClick = true;
+        tbody.addEventListener('click', (e) => {
+          const tr = e.target && e.target.closest('tr[data-id]');
+          if (!tr) return;
+          setActiveRow(tr);
+        });
+        tbody.addEventListener('dblclick', (e) => {
+          const tr = e.target && e.target.closest('tr[data-id]');
+          if (!tr) return;
+          setActiveRow(tr);
+          const btnSave = document.getElementById('btnSave');
+          if (btnSave && !btnSave.disabled) btnSave.click();
+        });
+        if (LOGC) console.log('[PICKER][clients] wired click + dblclick handler');
+      }
+
+      if (!table.__wiredSort) {
+        table.__wiredSort = true;
+        table.querySelector('thead').addEventListener('click', (e) => {
+          const th = e.target && e.target.closest('th[data-sort]');
+          if (!th) return;
+          const key = th.getAttribute('data-sort');
+          sortDir = (sortKey === key && sortDir === 'asc') ? 'desc' : 'asc';
+          sortKey = key;
+          currentRows = doFilter(search.value.trim());
+          applyRows(currentRows);
+          if (LOGC) console.log('[PICKER][clients] sort', { sortKey, sortDir, count: currentRows.length });
+        });
+        if (LOGC) console.log('[PICKER][clients] wired sort header');
+      }
+
+      let t = 0;
+      if (!search.__wiredInput) {
+        search.__wiredInput = true;
+        search.addEventListener('input', () => {
+          const q = search.value.trim();
+          if (LOGC) console.log('[PICKER][clients] search input', { q });
+          if (t) clearTimeout(t);
+          t = setTimeout(() => {
+            currentRows = doFilter(q);
+            applyRows(currentRows);
+            setActiveRow(null);
+          }, 150);
+        });
+        if (LOGC) console.log('[PICKER][clients] wired search input');
+      }
+
+      if (!search.__wiredKey) {
+        search.__wiredKey = true;
+        search.addEventListener('keydown', (e) => {
+          const itemsEls = Array.from(tbody.querySelectorAll('tr[data-id]'));
+          if (!itemsEls.length) {
+            if (e.key === 'Escape') {
+              const closeBtn = document.getElementById('btnCloseModal');
+              if (closeBtn) closeBtn.click();
+            }
+            return;
+          }
+
+          const idx = itemsEls.findIndex(tr => tr.classList.contains('active'));
+          const setActiveIdx = (i) => {
+            const safe = Math.max(0, Math.min(i, itemsEls.length - 1));
+            setActiveRow(itemsEls[safe]);
+            itemsEls[safe].scrollIntoView({ block: 'nearest' });
+          };
+
+          if (e.key === 'ArrowDown') {
+            e.preventDefault();
+            setActiveIdx(idx < 0 ? 0 : idx + 1);
+          }
+          if (e.key === 'ArrowUp') {
+            e.preventDefault();
+            setActiveIdx(idx < 0 ? 0 : idx - 1);
+          }
+          if (e.key === 'Enter') {
+            e.preventDefault();
+            const target = itemsEls[Math.max(idx, 0)];
+            if (target) {
+              setActiveRow(target);
+              const btnSave = document.getElementById('btnSave');
+              if (btnSave && !btnSave.disabled) btnSave.click();
+            }
+          }
+          if (e.key === 'Escape') {
+            e.preventDefault();
+            const closeBtn = document.getElementById('btnCloseModal');
+            if (closeBtn) closeBtn.click();
+          }
+        });
+        if (LOGC) console.log('[PICKER][clients] wired search keydown');
+      }
+
+      setTimeout(() => {
+        try {
+          search.focus();
+          if (LOGC) console.log('[PICKER][clients] search focused');
+        } catch {}
+      }, 0);
+    },
+    { kind: 'client-picker', noParentGate: true }
+  );
+
+  // Post-render kick: ensure the picker's onReturn wiring runs once on first open
   setTimeout(() => {
     try {
       const fr = window.__getModalFrame?.();
-      const willCall = !!(fr && fr.kind === 'picker' && typeof fr.onReturn === 'function' && !fr.__pickerInit);
-      if (LOGC) console.log('[PICKER][clients] post-render kick', { hasFrame: !!fr, kind: fr?.kind, hasOnReturn: typeof fr?.onReturn === 'function', already: !!fr?.__pickerInit, willCall });
-      if (willCall) { fr.__pickerInit = true; fr.onReturn(); if (LOGC) console.log('[PICKER][clients] initial onReturn() executed'); }
-    } catch (e) { if (LOGC) console.warn('[PICKER][clients] post-render kick failed', e); }
+      const willCall = !!(fr && fr.kind === 'client-picker' && typeof fr.onReturn === 'function' && !fr.__pickerInit);
+      if (LOGC) console.log('[PICKER][clients] post-render kick', {
+        hasFrame: !!fr,
+        kind: fr?.kind,
+        hasOnReturn: typeof fr?.onReturn === 'function',
+        already: !!fr?.__pickerInit,
+        willCall
+      });
+      if (willCall) {
+        fr.__pickerInit = true;
+        fr.onReturn();
+        if (LOGC) console.log('[PICKER][clients] initial onReturn() executed');
+      }
+    } catch (e) {
+      if (LOGC) console.warn('[PICKER][clients] post-render kick failed', e);
+    }
   }, 0);
 }
+
 
 
 // ===== NEW HELPERS / WRAPPERS =====
@@ -23494,15 +23795,23 @@ function renderTop() {
     };
   })();
 
-  const wantApply = (isChild && !top.noParentGate) ||
-                    (top.kind === 'client-rate' || top.kind === 'candidate-override' || top.kind === 'rate-presets-picker');
+   const wantApply =
+    (isChild && !top.noParentGate) ||
+    (
+      top.kind === 'client-rate'       ||
+      top.kind === 'candidate-override'||
+      top.kind === 'rate-presets-picker' ||
+      top.kind === 'candidate-picker'  ||
+      top.kind === 'client-picker'
+    );
 
- const defaultPrimary =
-  (top.kind === 'contract-clone-extend')     ? 'Create'
-: (top.kind === 'advanced-search')           ? 'Search'
-: (top.kind === 'selection-load')            ? 'Load'
-: (top.kind === 'timesheet-evidence-replace')? 'Save evidence'
-: (wantApply ? 'Apply' : 'Save');
+  const defaultPrimary =
+    (top.kind === 'contract-clone-extend')      ? 'Create'
+  : (top.kind === 'advanced-search')            ? 'Search'
+  : (top.kind === 'selection-load')             ? 'Load'
+  : (top.kind === 'timesheet-evidence-replace') ? 'Save evidence'
+  : (wantApply ? 'Apply' : 'Save');
+
 
 
   btnSave.textContent = defaultPrimary; btnSave.setAttribute('aria-label', defaultPrimary);
@@ -23553,42 +23862,63 @@ const isUtilityKind =
       }
     } catch {}
 
-  if (top.kind === 'advanced-search') {
-  btnEdit.style.display='none';
-  btnSave.style.display='';
-  btnSave.disabled=!!top._saving;
-  if (relatedBtn) {
-    relatedBtn.style.display = 'none';
-    relatedBtn.disabled = true;
-  }
-} else if (top.kind === 'rates-presets') {
-  btnEdit.style.display='none';
-  btnSave.style.display='none';
-  btnSave.disabled=true;
-  if (relatedBtn) {
-    relatedBtn.style.display = 'none';
-    relatedBtn.disabled = true;
-  }
+   if (top.kind === 'advanced-search') {
+    btnEdit.style.display='none';
+    btnSave.style.display='';
+    btnSave.disabled=!!top._saving;
+    if (relatedBtn) {
+      relatedBtn.style.display = 'none';
+      relatedBtn.disabled = true;
+    }
 
-  // Always show “Close” for the Preset Rates manager (never “Discard”)
-  btnClose.textContent = 'Close';
-  btnClose.setAttribute('aria-label', 'Close');
-  btnClose.setAttribute('title', 'Close');
+  } else if (top.kind === 'rates-presets') {
+    btnEdit.style.display='none';
+    btnSave.style.display='none';
+    btnSave.disabled=true;
+    if (relatedBtn) {
+      relatedBtn.style.display = 'none';
+      relatedBtn.disabled = true;
+    }
 
-  L('_updateButtons snapshot (global)', {
-    kind: top.kind, isChild, parentEditable, mode: top.mode,
-    btnSave: { display: btnSave.style.display, disabled: btnSave.disabled },
-    btnEdit: { display: btnEdit.style.display }
-  });
-  return;
+    // Always show “Close” for the Preset Rates manager (never “Discard”)
+    btnClose.textContent = 'Close';
+    btnClose.setAttribute('aria-label', 'Close');
+    btnClose.setAttribute('title', 'Close');
+
+    L('_updateButtons snapshot (global)', {
+      kind: top.kind, isChild, parentEditable, mode: top.mode,
+      btnSave: { display: btnSave.style.display, disabled: btnSave.disabled },
+      btnEdit: { display: btnEdit.style.display }
+    });
+    return;
+
+  // NEW: candidate/client pickers – explicit Apply, gated by row selection
+  } else if (top.kind === 'candidate-picker' || top.kind === 'client-picker') {
+    btnEdit.style.display = 'none';
+    btnSave.style.display = '';
+    btnSave.disabled = !!top._saving || !top._pickerHasSelection;
+
+    if (relatedBtn) {
+      relatedBtn.style.display = 'none';
+      relatedBtn.disabled = true;
+    }
+
+    L('_updateButtons snapshot (picker)', {
+      kind: top.kind,
+      isChild,
+      hasSelection: !!top._pickerHasSelection,
+      btnSave: { display: btnSave.style.display, disabled: btnSave.disabled }
+    });
+    return;
 
   // NEW: utility modals (resolve/import) — hide Save/Edit, Close-only
-} else if (
-  top.kind === 'timesheets-resolve' ||
-  top.kind === 'resolve-candidate'  ||
-  top.kind === 'resolve-client'     ||
-  (typeof top.kind === 'string' && top.kind.startsWith('import-summary-'))
-) {
+  } else if (
+    top.kind === 'timesheets-resolve' ||
+    top.kind === 'resolve-candidate'  ||
+    top.kind === 'resolve-client'     ||
+    (typeof top.kind === 'string' && top.kind.startsWith('import-summary-'))
+  ) {
+
 
   // No Save/Edit on these; everything happens via inline buttons in the modal body
   btnSave.style.display = 'none';
@@ -27005,6 +27335,7 @@ function ensureWeeklyImportMappings(type, importId) {
   return m;
 }
 
+
 function renderImportSummaryModal(importType, summaryState) {
   const enc = (typeof escapeHtml === 'function')
     ? escapeHtml
@@ -27067,11 +27398,7 @@ function renderImportSummaryModal(importType, summaryState) {
           : 'HealthRoster Weekly Import Summary'));
 
   // ───────────────────── Import summary modal ─────────────────────
-  // If a summary of this type is already on top of the stack, reuse that
-  // frame but update its renderTab + tab list + title and repaint. This
-  // avoids stacking identical modals and ensures refreshed rows are used.
   if (!reusingExistingSummary) {
-    // Child modal for import summary
     showModal(
       summaryTitle,
       [{ key: 'main', label: 'Summary' }],
@@ -27087,15 +27414,9 @@ function renderImportSummaryModal(importType, summaryState) {
     );
   } else if (topFrame) {
     try {
-      // Keep title and tabs in sync with the latest render
       topFrame.title = summaryTitle;
       topFrame.tabs  = [{ key: 'main', label: 'Summary' }];
-
-      // IMPORTANT: update the frame's renderTab so future setTab() calls
-      // use the fresh rows/summary we just fetched.
       topFrame.renderTab = renderTab;
-
-      // Make sure we are on the main tab and repaint it
       topFrame.currentTabKey = 'main';
       if (typeof topFrame.setTab === 'function') {
         topFrame.setTab('main');
@@ -27111,7 +27432,6 @@ function renderImportSummaryModal(importType, summaryState) {
     const summary = ss.summary || {};
     const total   = summary.total_rows || rows.length || 0;
 
-    // Derive counts by status if summary not given
     const counts = {
       OK: 0,
       FAILED: 0,
@@ -27124,7 +27444,6 @@ function renderImportSummaryModal(importType, summaryState) {
       else counts.FAILED++;
     });
 
-    // Reset email selections for this import on every render
     window.__hrRotaEmailSelections = window.__hrRotaEmailSelections || {};
     window.__hrRotaEmailSelections[importId] = new Set();
     const emailSel = window.__hrRotaEmailSelections[importId];
@@ -27138,7 +27457,6 @@ function renderImportSummaryModal(importType, summaryState) {
           const st    = String(stRaw || '').toUpperCase();
           const reasonCode = String(r.reason_code || r.failure_reason || r.reason || '').toLowerCase();
 
-          // Reason-code driven flags for daily resolve
           const canAssignCand   = (reasonCode === 'candidate_unresolved');
           const canAssignClient = (reasonCode === 'client_unresolved');
 
@@ -27147,7 +27465,6 @@ function renderImportSummaryModal(importType, summaryState) {
             reasonCode === 'start_end_mismatch' ||
             reasonCode === 'break_minutes_mismatch';
 
-          // Pill class
           let stCls = 'pill-info';
           if (st === 'OK' || st === 'VALIDATION_OK') {
             stCls = 'pill-ok';
@@ -27157,7 +27474,6 @@ function renderImportSummaryModal(importType, summaryState) {
             stCls = 'pill-warn';
           }
 
-          // Human-friendly, two-line labels for common reasons
           let labelHtml;
           if (st === 'OK' || st === 'VALIDATION_OK') {
             labelHtml = 'OK';
@@ -27181,7 +27497,6 @@ function renderImportSummaryModal(importType, summaryState) {
             }
           }
 
-          // Email eligibility & already-sent flags (from backend preview)
           const emailEligible    = r.email_eligible === true;
           const emailAlreadySent = r.email_already_sent === true;
 
@@ -27315,13 +27630,12 @@ function renderImportSummaryModal(importType, summaryState) {
       </div>
     `);
 
-    // Wiring for HR_ROTA_DAILY summary (buttons & checkboxes)
+    // Wiring (unchanged in spirit)
     setTimeout(() => {
       try {
         const root = document.getElementById('hrRotaSummary');
         if (!root || type !== 'HR_ROTA_DAILY') return;
 
-        // Resolve candidate / client buttons
         root.addEventListener('click', (ev) => {
           const btn = ev.target.closest('button[data-act]');
           if (!btn) return;
@@ -27339,13 +27653,11 @@ function renderImportSummaryModal(importType, summaryState) {
           const hasTimesheet = !!row.timesheet_id;
 
           if (act === 'resolve-candidate') {
-            // If the problem is "candidate_unresolved" (or no timesheet), use HR-daily resolve helper
             if (reasonCode === 'candidate_unresolved' || !hasTimesheet) {
               openHrRotaAssignCandidateModal(importId, idx);
               return;
             }
 
-            // Otherwise, use the main timesheet resolve modal if we have a timesheet_id
             if (hasTimesheet) {
               openResolveCandidateModal({
                 timesheet_id:      row.timesheet_id,
@@ -27358,13 +27670,11 @@ function renderImportSummaryModal(importType, summaryState) {
           }
 
           if (act === 'resolve-client') {
-            // If the problem is "client_unresolved" (or no timesheet), use HR-daily resolve helper
             if (reasonCode === 'client_unresolved' || !hasTimesheet) {
               openHrRotaAssignClientModal(importId, idx);
               return;
             }
 
-            // Otherwise, use the main timesheet resolve modal if we have a timesheet_id
             if (hasTimesheet) {
               openResolveClientModal({
                 timesheet_id:  row.timesheet_id,
@@ -27376,7 +27686,6 @@ function renderImportSummaryModal(importType, summaryState) {
           }
         });
 
-        // Email checkboxes
         root.addEventListener('change', (ev) => {
           const cb = ev.target.closest('input[data-act="hr-rota-email"]');
           if (!cb) return;
@@ -27397,7 +27706,6 @@ function renderImportSummaryModal(importType, summaryState) {
           }
         });
 
-        // Reclassify button → use helper
         const btnReclass = root.querySelector('button[data-act="hr-rota-reclassify"]');
         if (btnReclass && !btnReclass.__hrRotaReclassWired) {
           btnReclass.__hrRotaReclassWired = true;
@@ -27415,7 +27723,6 @@ function renderImportSummaryModal(importType, summaryState) {
           });
         }
 
-        // Apply validations / Finalise button
         const btnApply = root.querySelector('button[data-act="hr-rota-apply"]');
         if (btnApply && !btnApply.__hrRotaApplyWired) {
           btnApply.__hrRotaApplyWired = true;
@@ -27432,7 +27739,6 @@ function renderImportSummaryModal(importType, summaryState) {
               const sel = window.__hrRotaEmailSelections && window.__hrRotaEmailSelections[importId];
               const sendEmailRowIds = (sel instanceof Set) ? Array.from(sel) : [];
 
-              // Run server-side validation/apply and capture result summary
               const result = await applyHrRotaValidation(importId, sendEmailRowIds) || {};
 
               const lines = [];
@@ -27466,8 +27772,6 @@ function renderImportSummaryModal(importType, summaryState) {
               }
 
               alert(lines.join('\n'));
-
-              // Refresh the HR Rota Daily Validation view so badges/rows are up to date
               await refreshHrRotaSummary(importId);
             } catch (err) {
               console.error('[IMPORTS][HR_ROTA] apply failed', err);
@@ -27492,7 +27796,6 @@ function renderImportSummaryModal(importType, summaryState) {
           const staff  = r.staff_name || r.staff_raw || '';
           const unit   = r.unit || r.hospital_or_trust || r.hospital_norm || '';
 
-          // Prefer row work_date, fall back to week_ending_date and other fields
           const rawDateYmd =
             r.date_local ||
             r.work_date ||
@@ -27502,8 +27805,6 @@ function renderImportSummaryModal(importType, summaryState) {
 
           const date   = formatYmdToNiceDate(rawDateYmd);
           const action = String(r.resolution_status || r.action || '').toUpperCase();
-          const candId = r.candidate_id || null;
-          const cliId  = r.client_id || null;
 
           let cls = 'pill-info';
           if (action === 'OK' || action === 'APPLY') cls = 'pill-ok';
@@ -27613,7 +27914,7 @@ function renderImportSummaryModal(importType, summaryState) {
       </div>
     `);
 
-    // Wiring for NHSP / HR_WEEKLY "Apply import" button + Assign buttons
+    // Wiring for NHSP / HR_WEEKLY "Apply import" + Assign buttons
     setTimeout(() => {
       try {
         const root = document.getElementById('weeklyImportSummary');
@@ -27624,7 +27925,6 @@ function renderImportSummaryModal(importType, summaryState) {
         const st = window.__importSummaryState && window.__importSummaryState[type];
         const rows = st && Array.isArray(st.rows) ? st.rows : [];
 
-        // Ensure mapping container exists for this type + import
         const ensureWeeklyImportMappings = () => {
           window.__weeklyImportMappings = window.__weeklyImportMappings || {};
           if (!window.__weeklyImportMappings[type]) {
@@ -27641,7 +27941,6 @@ function renderImportSummaryModal(importType, summaryState) {
           return m;
         };
 
-        // Click handler for weekly "Assign candidate/client…" buttons
         root.addEventListener('click', (ev) => {
           const btn = ev.target.closest('button[data-act]');
           if (!btn) return;
@@ -27651,12 +27950,28 @@ function renderImportSummaryModal(importType, summaryState) {
           const idx = Number(btn.getAttribute('data-row-idx') || '-1');
           if (idx < 0 || idx >= rows.length) return;
 
-          const row      = rows[idx];
-          const staffRaw = row.staff_name || row.staff_raw || '';
-          const hospRaw  = row.hospital_or_trust || row.unit || row.hospital_norm || '';
+          const row         = rows[idx];
+          const staffRaw    = row.staff_name || row.staff_raw || '';
+          const hospRaw     = row.hospital_or_trust || row.unit || row.hospital_norm || '';
+          const rawDateYmd  =
+            row.date_local ||
+            row.work_date ||
+            row.date ||
+            row.week_ending_date ||
+            '';
+          const niceDate    = formatYmdToNiceDate(rawDateYmd);
+
+          const context = {
+            importId,
+            staffName: staffRaw,
+            unit: hospRaw,
+            dateYmd: rawDateYmd,
+            dateNice: niceDate,
+            source_system: type,
+            rowIndex: idx
+          };
 
           if (act === 'weekly-resolve-candidate') {
-            // Use global candidate picker with local filtering
             openCandidatePicker(async ({ id, label }) => {
               const mappings        = ensureWeeklyImportMappings();
               const staffNorm       = row.staff_norm || staffRaw || '';
@@ -27683,10 +27998,7 @@ function renderImportSummaryModal(importType, summaryState) {
               };
 
               try {
-                // immediate persist + contract check on the server
                 await postWeeklyResolveMappings(importId, type, payload);
-
-                // Only stage mapping locally for /apply if server accepted it
                 mappings.candidate_mappings.push(mapping);
 
                 window.__toast && window.__toast(`Candidate ${label} linked. Reclassifying import…`);
@@ -27695,17 +28007,18 @@ function renderImportSummaryModal(importType, summaryState) {
                 console.error('[IMPORTS][WEEKLY] resolve-candidate failed', err);
                 alert(err?.message || 'Failed to resolve candidate for weekly import row.');
               }
-            });
+            }, { context });
+
             return;
           }
 
           if (act === 'weekly-resolve-client') {
-            // Use NHSP-only client filter when type === 'NHSP'
-            const nhspOnly = (type === 'NHSP');
+            const nhspOnly  = (type === 'NHSP');
+            const hrAutoOnly= (type === 'HR_WEEKLY');
 
             openClientPicker(async ({ id, label }) => {
-              const mappings    = ensureWeeklyImportMappings();
-              const hospitalNorm= row.hospital_norm || hospRaw || '';
+              const mappings     = ensureWeeklyImportMappings();
+              const hospitalNorm = row.hospital_norm || hospRaw || '';
 
               const mapping = {
                 hospital_norm: hospitalNorm,
@@ -27718,10 +28031,7 @@ function renderImportSummaryModal(importType, summaryState) {
               };
 
               try {
-                // immediate persist of hospital → client alias
                 await postWeeklyResolveMappings(importId, type, payload);
-
-                // Stage mapping locally for /apply after success
                 mappings.client_aliases.push(mapping);
 
                 window.__toast && window.__toast(`Client ${label} linked. Reclassifying import…`);
@@ -27730,13 +28040,12 @@ function renderImportSummaryModal(importType, summaryState) {
                 console.error('[IMPORTS][WEEKLY] resolve-client failed', err);
                 alert(err?.message || 'Failed to resolve client for weekly import row.');
               }
-            }, { nhspOnly });
+            }, { nhspOnly, hrAutoOnly, context });
 
             return;
           }
         });
 
-        // Refresh button → use helper
         const btnRefresh = root.querySelector('button[data-act="weekly-import-refresh"]');
         if (btnRefresh && !btnRefresh.__weeklyRefreshWired) {
           btnRefresh.__weeklyRefreshWired = true;
@@ -27750,7 +28059,6 @@ function renderImportSummaryModal(importType, summaryState) {
           });
         }
 
-        // Apply / Finalise import button
         const btnApplyWeekly = root.querySelector('button[data-act="weekly-import-apply"]');
         if (btnApplyWeekly && !btnApplyWeekly.__weeklyApplyWired) {
           btnApplyWeekly.__weeklyApplyWired = true;
@@ -27761,16 +28069,13 @@ function renderImportSummaryModal(importType, summaryState) {
                 return;
               }
 
-              // 1) Confirm with the user before finalising
               const ok = window.confirm('Are you sure you want to finalise now?');
               if (!ok) return;
 
               const mappings = ensureWeeklyImportMappings();
 
-              // 2) Run the apply endpoint and capture the result summary
               const result = await resolveImportConflicts(importId, type, mappings) || {};
 
-              // 3) Build a human-readable summary using the fields we’re given
               const lines = [];
               lines.push(`Import ${result.import_id || importId} has been finalised.`);
 
@@ -27790,10 +28095,7 @@ function renderImportSummaryModal(importType, summaryState) {
                 lines.push(`Groups applied: ${result.groups_applied}`);
               }
 
-              // 4) Modal-style summary: user clicks OK to continue
               alert(lines.join('\n'));
-
-              // 5) After OK, refresh the weekly import summary modal so rows are up to date
               await refreshWeeklyImportSummary(type, importId);
             } catch (err) {
               console.error('[IMPORTS][WEEKLY] apply failed', err);
@@ -27809,7 +28111,6 @@ function renderImportSummaryModal(importType, summaryState) {
     return markup;
   }
 }
-
 
 
 function renderClientHospitalsTable() {
