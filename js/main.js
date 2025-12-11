@@ -31569,28 +31569,40 @@ function showRelatedMenu(x, y, counts, entity, id){
 
           // Decide which summary section to show
           let targetSection = currentSection;
+          const t = String(onClick.type || '').toLowerCase();
 
-          switch (onClick.type) {
+          switch (t) {
+            case 'timesheet':
             case 'timesheets':
             case 'series':         // Adjustments series for a timesheet
               targetSection = 'timesheets';
               break;
+
+            case 'invoice':
             case 'invoices':
               targetSection = 'invoices';
               break;
+
+            case 'client':
             case 'clients':
               targetSection = 'clients';
               break;
+
+            case 'candidate':
             case 'candidates':
               targetSection = 'candidates';
               break;
+
             case 'umbrella':
             case 'umbrellas':
               targetSection = 'umbrellas';
               break;
+
+            case 'contract':
             case 'contracts':
               targetSection = 'contracts';
               break;
+
             default:
               // leave currentSection as-is
               break;
@@ -31646,6 +31658,7 @@ function showRelatedMenu(x, y, counts, entity, id){
 
   menu.addEventListener('click', ev => ev.stopPropagation());
 }
+
 
 // ===== Quick search =====
 // ✅ Quick search: build minimal per-section filters (with timesheet heuristic)
