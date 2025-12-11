@@ -27459,7 +27459,7 @@ function renderImportSummaryModal(importType, summaryState) {
           ? 'NHSP Weekly Import Summary'
           : 'HealthRoster Weekly Import Summary'));
 
-  // ───────────────────── Import summary modal ─────────────────────
+   // ───────────────────── Import summary modal ─────────────────────
   if (!existingSummaryFrame) {
     // No existing summary frame for this type → create a new one.
     showModal(
@@ -27476,20 +27476,23 @@ function renderImportSummaryModal(importType, summaryState) {
       }
     );
   } else {
-    // Reuse the existing frame: update its title/tabs/renderTab and repaint.
+    // Reuse the existing frame: update its title/tabs/renderTab.
     try {
       existingSummaryFrame.title         = summaryTitle;
       existingSummaryFrame.tabs          = [{ key: 'main', label: 'Summary' }];
       existingSummaryFrame.renderTab     = renderTab;
       existingSummaryFrame.currentTabKey = 'main';
 
-      if (typeof existingSummaryFrame.setTab === 'function') {
+      // Only repaint if this summary is actually the top-most frame.
+      const top = (window.__modalStack || [])[ (window.__modalStack || []).length - 1 ] || null;
+      if (top === existingSummaryFrame && typeof existingSummaryFrame.setTab === 'function') {
         existingSummaryFrame.setTab('main');
       }
     } catch (e) {
       console.warn('[IMPORTS] failed to re-render existing import summary frame', e);
     }
   }
+
 
   // ────────────────────── Helpers ──────────────────────
 
