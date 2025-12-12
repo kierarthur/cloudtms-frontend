@@ -29109,21 +29109,63 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
   const summary = ss.summary || {};
   const total   = summary.total_rows || rows.length || 0;
 
-  const rowsHtml = rows.length
+  const normUpper = (s) => String(s || '').trim().toUpperCase();
+
+  // Actions which mean the group is actionable / “ready to process”
+  const READY_ACTIONS = new Set([
+    'NEW_AUTOPROC_TIMESHEET',
+    'UPDATE_AUTOPROC_TS',
+    'UPDATE_MANUAL_WEEK',
+    'UPDATE_ADJUSTMENT_TS',
+    'CREATE_ADJUSTMENT_TS',
+    'CREATE_PAY_ADJUSTMENT_ONLY'
+  ]);
+
+  const isIssueAction = (a) => {
+    const x = normUpper(a);
+    if (!x) return true;
+    if (READY_ACTIONS.has(x)) return false;
+    if (x === 'OK' || x === 'APPLY' || x === 'SKIP_ALREADY_PROCESSED') return false;
+    if (x.startsWith('REJECT_')) return true;
+    if (x.startsWith('BLOCK_'))  return true;
+    if (x === 'NO_CANDIDATE' || x === 'NO_CLIENT') return true;
+    if (x === 'UNKNOWN') return true;
+    return false;
+  };
+
+  // For the overview summary
+  let readyCount = 0;
+  let issueCount = 0;
+
+  for (const r of rows || []) {
+    const actionRaw = normUpper(r.resolution_status || r.action || '');
+    if (READY_ACTIONS.has(actionRaw)) readyCount++;
+    else if (isIssueAction(actionRaw)) issueCount++;
+  }
+
+  const rowsHtml = (rows && rows.length)
     ? rows.map((r, idx) => {
-        const staff  = r.staff_name || r.staff_raw || '';
-        const unit   = r.unit || r.hospital_or_trust || r.hospital_norm || '';
+        const level = String(r.level || '').toLowerCase();
+
+        // Prefer nice display for group rows (these are your “timesheet groups”)
+        const staff =
+          (level === 'group')
+            ? (r.candidate_name || r.candidate_id || r.staff_name || r.staff_raw || '')
+            : (r.staff_name || r.staff_raw || '');
+
+        const unit =
+          (level === 'group')
+            ? (r.client_name || r.client_id || r.unit || r.hospital_or_trust || r.hospital_norm || '')
+            : (r.unit || r.hospital_or_trust || r.hospital_norm || '');
 
         const rawDateYmd =
-          r.date_local ||
-          r.work_date ||
-          r.date ||
-          r.week_ending_date ||
-          '';
+          (level === 'group')
+            ? (r.week_ending_date || r.work_date || r.date_local || r.date || '')
+            : (r.date_local || r.work_date || r.date || r.week_ending_date || '');
 
         const date = formatYmdToNiceDate(rawDateYmd);
 
-        // NEW: incoming code (assignment/grade)
+        // Incoming code (assignment/grade) — mostly useful for row-level rejects
         const code =
           (r.incoming_code ||
            r.assignment_code ||
@@ -29131,20 +29173,21 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
            r.assignment_grade_norm ||
            '').toString();
 
-        // NEW: reason (human text from backend)
         const reasonText = (r.reason || '').toString();
 
-        // Raw action from backend
-        const actionRaw = String(r.resolution_status || r.action || '').toUpperCase().trim();
+        const actionRaw = normUpper(r.resolution_status || r.action || '');
 
-        // Display label: replace underscores with spaces so it wraps nicely
-        const displayAction = actionRaw
-          ? actionRaw.replace(/_/g, ' ')
-          : 'UNKNOWN';
+        // Display label
+        let displayAction = actionRaw ? actionRaw.replace(/_/g, ' ') : 'UNKNOWN';
+
+        // Special label requested
+        if (actionRaw === 'NEW_AUTOPROC_TIMESHEET') {
+          displayAction = 'READY TO PROCESS';
+        }
 
         // Pill colouring
         let cls = 'pill-info';
-        if (actionRaw === 'OK' || actionRaw === 'APPLY') cls = 'pill-ok';
+        if (actionRaw === 'OK' || actionRaw === 'APPLY' || actionRaw === 'NEW_AUTOPROC_TIMESHEET') cls = 'pill-ok';
         else if (
           actionRaw === 'NO_CANDIDATE' ||
           actionRaw === 'REJECT_NO_CANDIDATE' ||
@@ -29153,88 +29196,70 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
         ) cls = 'pill-bad';
         else if (
           actionRaw === 'REJECT_NO_CONTRACT' ||
-          actionRaw === 'REJECT_NO_CONTRACT_BAND_MISMATCH'
+          actionRaw === 'REJECT_NO_CONTRACT_BAND_MISMATCH' ||
+          actionRaw.startsWith('REJECT_') ||
+          actionRaw.startsWith('BLOCK_') ||
+          actionRaw === 'UNKNOWN'
         ) cls = 'pill-warn';
+
+        // Row background class
+        const rowClass =
+          READY_ACTIONS.has(actionRaw) ? 'wi-row-ready'
+          : (isIssueAction(actionRaw) ? 'wi-row-issue' : '');
 
         const canAssignCand   = (actionRaw === 'NO_CANDIDATE' || actionRaw === 'REJECT_NO_CANDIDATE');
         const canAssignClient = (actionRaw === 'NO_CLIENT'    || actionRaw === 'REJECT_NO_CLIENT');
 
-        const canManageBandMapping =
-          (actionRaw === 'REJECT_NO_CONTRACT_BAND_MISMATCH') &&
-          !!String(code || '').trim();
-
         return `
-          <tr>
-            <td><span class="mini">${enc(staff || '—')}</span></td>
-            <td><span class="mini">${enc(unit || '—')}</span></td>
-            <td><span class="mini">${enc(date || '—')}</span></td>
+          <tr class="${rowClass}">
+            <td class="wi-col-staff"><span class="mini">${enc(staff || '—')}</span></td>
+            <td class="wi-col-unit"><span class="mini">${enc(unit || '—')}</span></td>
+            <td class="wi-col-date"><span class="mini">${enc(date || '—')}</span></td>
 
-            <td>
-              <span class="mini"
-                    style="white-space: normal; word-break: break-word; display:inline-block; max-width:140px;">
+            <td class="wi-col-code">
+              <span class="mini" style="white-space: normal; word-break: break-word; display:inline-block;">
                 ${enc(code || '—')}
               </span>
             </td>
 
-            <td>
-              <span
-                class="pill ${cls}"
-                style="
-                  white-space: normal;
-                  word-break: break-word;
-                  display: inline-block;
-                  max-width: 180px;
-                  text-align: center;
-                "
-              >
+            <td class="wi-col-status">
+              <span class="pill ${cls}" style="white-space: normal; word-break: break-word; display:inline-block; text-align:center;">
                 ${enc(displayAction || 'UNKNOWN')}
               </span>
             </td>
 
-            <td>
-              <span class="mini"
-                    style="white-space: normal; word-break: break-word; display:inline-block; max-width:320px;">
+            <td class="wi-col-reason">
+              <span class="mini" style="white-space: normal; word-break: break-word; display:inline-block;">
                 ${enc(reasonText || '')}
               </span>
             </td>
 
-            <td>
-              ${
-                canAssignCand
-                  ? `<button type="button"
-                             class="btn mini"
-                             data-act="weekly-resolve-candidate"
-                             data-row-idx="${idx}"
-                             data-staff="${enc(staff)}"
-                             data-unit="${enc(unit)}">
-                       Assign candidate…
-                     </button>`
-                  : ''
-              }
-              ${
-                canAssignClient
-                  ? `<button type="button"
-                             class="btn mini"
-                             style="margin-left:4px;"
-                             data-act="weekly-resolve-client"
-                             data-row-idx="${idx}"
-                             data-unit="${enc(unit)}">
-                       Assign client…
-                     </button>`
-                  : ''
-              }
-              ${
-                canManageBandMapping
-                  ? `<button type="button"
-                             class="btn mini"
-                             style="margin-left:4px;"
-                             data-act="weekly-open-band-mapping"
-                             data-row-idx="${idx}"
-                             data-code="${enc(code)}">
-                       Manage band mapping…
-                     </button>`
-                  : ''
-              }
+            <td class="wi-col-actions">
+              <div class="wi-actions">
+                ${
+                  canAssignCand
+                    ? `<button type="button"
+                               class="btn mini"
+                               data-act="weekly-resolve-candidate"
+                               data-row-idx="${idx}"
+                               data-staff="${enc(staff)}"
+                               data-unit="${enc(unit)}">
+                         Assign candidate…
+                       </button>`
+                    : ''
+                }
+                ${
+                  canAssignClient
+                    ? `<button type="button"
+                               class="btn mini"
+                               data-act="weekly-resolve-client"
+                               data-row-idx="${idx}"
+                               data-unit="${enc(unit)}">
+                         Assign client…
+                       </button>`
+                    : ''
+                }
+              </div>
             </td>
           </tr>
         `;
@@ -29248,66 +29273,53 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
     `;
 
   const markup = html(`
-    <div class="form" id="weeklyImportSummary">
-      <div class="card">
+    <div id="weeklyImportSummary">
+      <div class="card weekly-import-card">
+        <!-- Overview -->
         <div class="row">
           <label>Overview</label>
           <div class="controls">
             <div class="mini">
               Import ID: <span class="mono">${enc(importId || '—')}</span><br/>
-              Total rows: ${total}
-            </div>
-
-            <div style="margin-top:8px;">
-              <button type="button"
-                      class="btn mini"
-                      data-act="weekly-open-band-mapping-overview"
-                      style="margin-right:6px;">
-                Manage mappings…
-              </button>
-              <span class="mini" style="opacity:.85;">
-                Opens the band mapping tool for ${enc(String(type || '').toUpperCase())}.
-              </span>
+              Total rows: ${total}<br/>
+              Ready to process: ${readyCount} &nbsp;|&nbsp; Needs attention: ${issueCount}
             </div>
           </div>
         </div>
-      </div>
 
-      <div class="card" style="margin-top:10px;">
-        <div class="row">
+        <!-- Table (only this area scrolls) -->
+        <div class="row" style="margin-top:10px;">
           <label>Rows</label>
           <div class="controls">
-            <table class="grid">
-              <thead>
-                <tr>
-                  <th>Staff</th>
-                  <th>Unit / Site</th>
-                  <th>Date / Week ending</th>
-                  <th>Code</th>
-                  <th>Resolution</th>
-                  <th>Reason</th>
-                  <th>Resolve</th>
-                </tr>
-              </thead>
-              <tbody>
-                ${rowsHtml}
-              </tbody>
-            </table>
+            <div class="wi-table-wrap">
+              <table class="grid wi-grid">
+                <thead>
+                  <tr>
+                    <th class="wi-col-staff">Staff</th>
+                    <th class="wi-col-unit">Unit / Site</th>
+                    <th class="wi-col-date">Date / Week ending</th>
+                    <th class="wi-col-code">Code</th>
+                    <th class="wi-col-status">Resolution</th>
+                    <th class="wi-col-reason">Reason</th>
+                    <th class="wi-col-actions">Resolve</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${rowsHtml}
+                </tbody>
+              </table>
+            </div>
           </div>
         </div>
 
-        <div class="row" style="margin-top:8px;">
+        <!-- Footer (locked, not scrolling) -->
+        <div class="row weekly-import-footer" style="margin-top:10px;">
           <label></label>
           <div class="controls">
-            <button type="button"
-                    class="btn"
-                    data-act="weekly-import-refresh">
+            <button type="button" class="btn" data-act="weekly-import-refresh">
               Refresh
             </button>
-            <button type="button"
-                    class="btn btn-primary"
-                    style="margin-left:8px;"
-                    data-act="weekly-import-apply">
+            <button type="button" class="btn" style="margin-left:8px;" data-act="weekly-import-apply">
               Finalise import
             </button>
             <span class="mini" style="margin-left:8px;">
@@ -29319,7 +29331,7 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
     </div>
   `);
 
-  // Wiring for NHSP / HR_WEEKLY "Apply import" + Assign buttons
+  // Wiring for NHSP / HR_WEEKLY Apply + Assign buttons
   setTimeout(() => {
     try {
       const root = document.getElementById('weeklyImportSummary');
@@ -29340,10 +29352,7 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
         }
         let m = window.__weeklyImportMappings[type][importId];
         if (!m) {
-          m = {
-            candidate_mappings: [],
-            client_aliases: []
-          };
+          m = { candidate_mappings: [], client_aliases: [] };
           window.__weeklyImportMappings[type][importId] = m;
         }
         return m;
@@ -29353,63 +29362,6 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
         const btn = ev.target.closest('button[data-act]');
         if (!btn) return;
         const act = btn.getAttribute('data-act');
-
-        // NEW: overview button → open mapping modal without a specific code
-        if (act === 'weekly-open-band-mapping-overview') {
-          const system_type = (String(type || '').toUpperCase() === 'NHSP') ? 'NHSP' : 'HR_WEEKLY';
-          if (typeof openAssignmentBandMappingsModal !== 'function') {
-            alert('Band mappings modal not yet implemented.');
-            return;
-          }
-          try {
-            openAssignmentBandMappingsModal({
-              system_type,
-              incoming_code: null,
-              candidate_id: null,
-              client_id: null,
-              import_id: importId || null
-            });
-          } catch (e) {
-            console.error('[IMPORTS][WEEKLY] openAssignmentBandMappingsModal (overview) failed', e);
-            alert(e?.message || 'Failed to open band mappings.');
-          }
-          return;
-        }
-
-        // Existing: row-level band mapping shortcut
-        if (act === 'weekly-open-band-mapping') {
-          const idx = Number(btn.getAttribute('data-row-idx') || '-1');
-          if (idx < 0 || idx >= rows.length) return;
-
-          const row = rows[idx] || {};
-          const code =
-            (row.incoming_code ||
-             row.assignment_code ||
-             row.assignment ||
-             row.assignment_grade_norm ||
-             '').toString().trim();
-
-          const system_type = (String(type || '').toUpperCase() === 'NHSP') ? 'NHSP' : 'HR_WEEKLY';
-
-          if (typeof openAssignmentBandMappingsModal !== 'function') {
-            alert('Band mappings modal not yet implemented.');
-            return;
-          }
-
-          try {
-            openAssignmentBandMappingsModal({
-              system_type,
-              incoming_code: code || null,
-              candidate_id: row.candidate_id || null,
-              client_id: row.client_id || null,
-              import_id: importId || null
-            });
-          } catch (e) {
-            console.error('[IMPORTS][WEEKLY] openAssignmentBandMappingsModal failed', e);
-            alert(e?.message || 'Failed to open band mappings.');
-          }
-          return;
-        }
 
         if (act !== 'weekly-resolve-candidate' && act !== 'weekly-resolve-client') return;
 
@@ -29451,24 +29403,16 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
               null;
 
             const mapping = {
-              staff_norm:       staffNorm,
-              hospital_or_trust:hospitalOrTrust,
-              candidate_id:     id,
-              client_id:        clientId,
-              work_date:        workDateYmd
+              staff_norm:        staffNorm,
+              hospital_or_trust: hospitalOrTrust,
+              candidate_id:      id,
+              client_id:         clientId,
+              work_date:         workDateYmd
             };
 
-            const payload = {
-              candidate_mappings: [mapping],
-              client_aliases: []
-            };
+            const payload = { candidate_mappings: [mapping], client_aliases: [] };
 
-            LW('resolve-candidate mapping', {
-              importId,
-              type,
-              rowIndex: idx,
-              mapping
-            });
+            LW('resolve-candidate mapping', { importId, type, rowIndex: idx, mapping });
 
             try {
               await postWeeklyResolveMappings(importId, type, payload);
@@ -29493,14 +29437,9 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
             const mappings     = ensureWeeklyImportMappings();
             const hospitalNorm = row.hospital_norm || hospRaw || '';
 
-            // Derive hr_row_ids to send to the backend so it can compute trust_raw from hr_rows exactly as SQL does.
             const hrRowIds = [];
             if (Array.isArray(row.hr_row_ids) && row.hr_row_ids.length) {
-              row.hr_row_ids
-                .map(String)
-                .map((v) => v.trim())
-                .filter(Boolean)
-                .forEach((v) => hrRowIds.push(v));
+              row.hr_row_ids.map(String).map(v => v.trim()).filter(Boolean).forEach(v => hrRowIds.push(v));
             } else if (row.hr_row_id) {
               hrRowIds.push(String(row.hr_row_id).trim());
             }
@@ -29511,18 +29450,11 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
               hospital_norm: hospitalNorm
             };
 
-            const payload = {
-              candidate_mappings: [],
-              client_aliases: [mapping]
-            };
+            const payload = { candidate_mappings: [], client_aliases: [mapping] };
 
             LW('resolve-client mapping', {
-              importId,
-              type,
-              rowIndex: idx,
-              client_id: id,
-              hr_row_ids: hrRowIds,
-              hospital_norm: hospitalNorm
+              importId, type, rowIndex: idx,
+              client_id: id, hr_row_ids: hrRowIds, hospital_norm: hospitalNorm
             });
 
             try {
@@ -29574,21 +29506,11 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
             const lines = [];
             lines.push(`Import ${result.import_id || importId} has been finalised.`);
 
-            if (typeof result.shifts_created === 'number') {
-              lines.push(`Shifts created: ${result.shifts_created}`);
-            }
-            if (typeof result.shifts_updated === 'number') {
-              lines.push(`Shifts updated: ${result.shifts_updated}`);
-            }
-            if (typeof result.mapped_candidates === 'number') {
-              lines.push(`Candidates mapped: ${result.mapped_candidates}`);
-            }
-            if (typeof result.mapped_clients === 'number') {
-              lines.push(`Clients mapped: ${result.mapped_clients}`);
-            }
-            if (typeof result.groups_applied === 'number') {
-              lines.push(`Groups applied: ${result.groups_applied}`);
-            }
+            if (typeof result.shifts_created === 'number')      lines.push(`Shifts created: ${result.shifts_created}`);
+            if (typeof result.shifts_updated === 'number')      lines.push(`Shifts updated: ${result.shifts_updated}`);
+            if (typeof result.mapped_candidates === 'number')   lines.push(`Candidates mapped: ${result.mapped_candidates}`);
+            if (typeof result.mapped_clients === 'number')      lines.push(`Clients mapped: ${result.mapped_clients}`);
+            if (typeof result.groups_applied === 'number')      lines.push(`Groups applied: ${result.groups_applied}`);
 
             alert(lines.join('\n'));
             await refreshWeeklyImportSummary(type, importId);
@@ -29609,12 +29531,22 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
 
 
 }
-
 function openAssignmentBandMappingsModal(opts) {
   const seed = (opts && typeof opts === 'object') ? opts : {};
   const initSystem = String(seed.system_type || seed.systemType || 'NHSP').toUpperCase();
 
-  // Per your decision: band/grade matching is weekly-only, so keep this modal weekly-only.
+  // Local encoder (your app has escapeHtml; keep this modal self-contained)
+  const enc = (v) => {
+    try {
+      return (typeof escapeHtml === 'function')
+        ? escapeHtml(String(v ?? ''))
+        : String(v ?? '');
+    } catch {
+      return String(v ?? '');
+    }
+  };
+
+  // Weekly-only mapping manager (per your decision: no HR_DAILY band matching)
   const SYSTEMS = ['NHSP', 'HR_WEEKLY'];
 
   const state = {
@@ -29870,9 +29802,9 @@ function openAssignmentBandMappingsModal(opts) {
             <label>Edit mapping</label>
             <div class="controls" style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-start;">
               <div class="mini" style="width:100%;">
-                Editing ID: <span class="mono" id="abm_edit_id">${enc(state.editing?.id || '')}</span>
+                Editing ID: <span class="mono" id="abm_edit_id">${enc(state.editing && state.editing.id ? state.editing.id : '')}</span>
                 &nbsp;•&nbsp;
-                Code: <span class="mono">${enc(state.editing?.incoming_code || '')}</span>
+                Code: <span class="mono">${enc(state.editing && state.editing.incoming_code ? state.editing.incoming_code : '')}</span>
                 &nbsp;•&nbsp;
                 Scope: <span class="mono">${enc(state.editing ? scopeLabelForRow(state.editing) : '')}</span>
               </div>
@@ -29946,9 +29878,7 @@ function openAssignmentBandMappingsModal(opts) {
     try {
       repaint();
 
-      const scope =
-        state.scope_filter === 'ANY' ? null :
-        state.scope_filter;
+      const scope = (state.scope_filter === 'ANY') ? null : state.scope_filter;
 
       const rows = await apiListAssignmentBandMappings({
         system_type: state.system_type,
@@ -29990,14 +29920,12 @@ function openAssignmentBandMappingsModal(opts) {
     const root = document.getElementById('assignmentBandMappingsModal');
     if (!root) return;
 
-    // Filters
     const selSystem = document.getElementById('abm_system');
     const selScope  = document.getElementById('abm_scope_filter');
     const inpLike   = document.getElementById('abm_incoming_like');
     const chkInact  = document.getElementById('abm_include_inactive');
     const btnRef    = document.getElementById('abm_refresh');
 
-    // Add
     const addScope  = document.getElementById('abm_add_scope');
     const addIn     = document.getElementById('abm_add_incoming');
     const addPat    = document.getElementById('abm_add_pattern');
@@ -30005,14 +29933,12 @@ function openAssignmentBandMappingsModal(opts) {
     const addAct    = document.getElementById('abm_add_active');
     const addSave   = document.getElementById('abm_add_save');
 
-    // Edit
     const editPat   = document.getElementById('abm_edit_pattern');
     const editNotes = document.getElementById('abm_edit_notes');
     const editAct   = document.getElementById('abm_edit_active');
     const editSave  = document.getElementById('abm_edit_save');
     const editCancel= document.getElementById('abm_edit_cancel');
 
-    // Wire filter changes
     if (selSystem && !selSystem.__abmWired) {
       selSystem.__abmWired = true;
       selSystem.addEventListener('change', () => {
@@ -30021,17 +29947,18 @@ function openAssignmentBandMappingsModal(opts) {
         loadList();
       });
     }
+
     if (selScope && !selScope.__abmWired) {
       selScope.__abmWired = true;
       selScope.addEventListener('change', () => {
         state.scope_filter = String(selScope.value || 'ANY').toUpperCase();
-        // Clear scoped ids when switching scope
         if (state.scope_filter !== 'CANDIDATE') { state.filter_candidate_id = null; state.filter_candidate_label = ''; }
         if (state.scope_filter !== 'CLIENT')    { state.filter_client_id = null; state.filter_client_label = ''; }
         cancelEdit();
         repaint();
       });
     }
+
     if (inpLike && !inpLike.__abmWired) {
       inpLike.__abmWired = true;
       inpLike.addEventListener('input', () => { state.filter_incoming_like = String(inpLike.value || ''); });
@@ -30039,6 +29966,7 @@ function openAssignmentBandMappingsModal(opts) {
         if (e.key === 'Enter') { e.preventDefault(); loadList(); }
       });
     }
+
     if (chkInact && !chkInact.__abmWired) {
       chkInact.__abmWired = true;
       chkInact.addEventListener('change', () => {
@@ -30047,12 +29975,12 @@ function openAssignmentBandMappingsModal(opts) {
         loadList();
       });
     }
+
     if (btnRef && !btnRef.__abmWired) {
       btnRef.__abmWired = true;
       btnRef.addEventListener('click', () => loadList());
     }
 
-    // Wire add fields
     if (addScope && !addScope.__abmWired) {
       addScope.__abmWired = true;
       addScope.addEventListener('change', () => {
@@ -30062,6 +29990,7 @@ function openAssignmentBandMappingsModal(opts) {
         repaint();
       });
     }
+
     if (addIn && !addIn.__abmWired) {
       addIn.__abmWired = true;
       addIn.addEventListener('input', () => { state.add_incoming_code = String(addIn.value || ''); });
@@ -30078,6 +30007,7 @@ function openAssignmentBandMappingsModal(opts) {
       addAct.__abmWired = true;
       addAct.addEventListener('change', () => { state.add_active = !!addAct.checked; });
     }
+
     if (addSave && !addSave.__abmWired) {
       addSave.__abmWired = true;
       addSave.addEventListener('click', async () => {
@@ -30116,7 +30046,6 @@ function openAssignmentBandMappingsModal(opts) {
 
           window.__toast && window.__toast('Mapping added.');
 
-          // Reset only the pattern/notes; keep incoming_code (useful for adding multiple patterns)
           state.add_band_match_pattern = '';
           state.add_notes = '';
           state.add_active = true;
@@ -30131,7 +30060,6 @@ function openAssignmentBandMappingsModal(opts) {
       });
     }
 
-    // Wire edit fields
     if (editPat && !editPat.__abmWired) {
       editPat.__abmWired = true;
       editPat.addEventListener('input', () => { state.edit_band_match_pattern = String(editPat.value || ''); });
@@ -30144,6 +30072,7 @@ function openAssignmentBandMappingsModal(opts) {
       editAct.__abmWired = true;
       editAct.addEventListener('change', () => { state.edit_active = !!editAct.checked; });
     }
+
     if (editSave && !editSave.__abmWired) {
       editSave.__abmWired = true;
       editSave.addEventListener('click', async () => {
@@ -30175,18 +30104,17 @@ function openAssignmentBandMappingsModal(opts) {
         }
       });
     }
+
     if (editCancel && !editCancel.__abmWired) {
       editCancel.__abmWired = true;
       editCancel.addEventListener('click', () => cancelEdit());
     }
 
-    // Button actions + pickers
     if (!root.__abmWiredActions) {
       root.__abmWiredActions = true;
       root.addEventListener('click', async (ev) => {
         const btn = ev.target.closest('button[data-act]');
         if (!btn) return;
-
         const act = btn.getAttribute('data-act');
 
         // Filter pickers
@@ -30324,7 +30252,6 @@ function openAssignmentBandMappingsModal(opts) {
     { kind, noParentGate: true }
   );
 
-  // Initial wiring + load
   setTimeout(() => {
     try {
       const fr = window.__getModalFrame?.();
