@@ -7355,16 +7355,6 @@ async function contractWeekCreateAdditional(week_id) {
 
 
 
-
-
-
-
-
-
-
-
-
-
 async function openCandidatePicker(onPick, options) {
   const LOGC = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : true; // default ON
   const ctx  = options && options.context ? options.context : null;
@@ -7415,10 +7405,10 @@ async function openCandidatePicker(onPick, options) {
   // Context block above the search (which shift we’re resolving)
   let ctxHtml = '';
   if (ctx) {
-    const staff  = ctx.staffName || '';
-    const unit   = ctx.unit || ctx.hospital || '';
-    const ymd    = ctx.dateYmd || '';
-    const nice   = ctx.dateNice || (typeof formatYmdToNiceDate === 'function' ? formatYmdToNiceDate(ymd) : ymd);
+    const staff    = ctx.staffName || '';
+    const unit     = ctx.unit || ctx.hospital || '';
+    const ymd      = ctx.dateYmd || '';
+    const nice     = ctx.dateNice || (typeof formatYmdToNiceDate === 'function' ? formatYmdToNiceDate(ymd) : ymd);
     const importId = ctx.importId || '';
 
     ctxHtml = `
@@ -7463,8 +7453,8 @@ async function openCandidatePicker(onPick, options) {
       </div>
     </div>`;
 
-  let selectedId    = null;
-  let selectedLabel = '';
+  let selectedId     = null;
+  let selectedLabel  = '';
   let applySelection = null;
 
   const renderTab = () => html;
@@ -7491,7 +7481,8 @@ async function openCandidatePicker(onPick, options) {
       if (LOGC) console.log('[PICKER][candidates] onReturn', { hasTBody: !!tbody, hasSearch: !!search, hasTable: !!table });
       if (!tbody || !search || !table) return;
 
-      let sortKey = 'last_name', sortDir = 'asc';
+      let sortKey    = 'last_name';
+      let sortDir    = 'asc';
       let currentRows = baseRows.slice();
 
       const frame = window.__getModalFrame?.();
@@ -7502,7 +7493,6 @@ async function openCandidatePicker(onPick, options) {
 
       const applyRows = (rows) => {
         tbody.innerHTML = renderRows(rows);
-        // Reapply active highlight if we have a selectedId
         if (selectedId) {
           const match = tbody.querySelector(`tr[data-id="${selectedId}"]`);
           if (match) match.classList.add('active');
@@ -7513,7 +7503,7 @@ async function openCandidatePicker(onPick, options) {
         });
       };
 
-      // Always filter from full baseRows
+      // Always filter from the full baseRows
       const doFilter = (q) => {
         const fn  = (window.pickersLocalFilterAndSort || pickersLocalFilterAndSort);
         const out = fn('candidates', baseRows, q, sortKey, sortDir);
@@ -7545,7 +7535,7 @@ async function openCandidatePicker(onPick, options) {
         }
       };
 
-      applySelection = async (triggerClose) => {
+      applySelection = async (_triggerClose) => {
         if (!selectedId) {
           alert('Please select a candidate first.');
           return false;
@@ -7556,36 +7546,14 @@ async function openCandidatePicker(onPick, options) {
           if (typeof onPick === 'function') {
             await onPick({ id: selectedId, label: selectedLabel });
           }
-
-          // 🔹 Mark parent frame dirty so Save is enabled (e.g. in contracts editor)
-          try {
-            const stack = window.__modalStack || [];
-            if (stack.length >= 2) {
-              const parent = stack[stack.length - 2];
-              if (parent && (parent.mode === 'edit' || parent.mode === 'create')) {
-                parent.isDirty = true;
-                parent._updateButtons && parent._updateButtons();
-                if (LOGC) console.log('[PICKER][candidates] marked parent dirty after selection', {
-                  parentKind: parent.kind,
-                  parentEntity: parent.entity,
-                  parentMode: parent.mode
-                });
-              }
-            }
-          } catch (e) {
-            if (LOGC) console.warn('[PICKER][candidates] failed to mark parent dirty', e);
-          }
-
         } catch (err) {
           console.warn('[PICKER][candidates] selection validation failed', err);
           alert(err?.message || 'Selection could not be validated.');
           return false;
         }
 
-        if (triggerClose) {
-          const closeBtn = document.getElementById('btnCloseModal');
-          if (closeBtn) closeBtn.click();
-        }
+        // IMPORTANT: do NOT manually click Close here.
+        // saveForFrame (child branch) will pop this frame and repaint the parent.
         return true;
       };
 
@@ -7631,7 +7599,6 @@ async function openCandidatePicker(onPick, options) {
           t = setTimeout(() => {
             currentRows = doFilter(q);
             applyRows(currentRows);
-            // clear current selection on new search
             setActiveRow(null);
           }, 150);
         });
@@ -7689,7 +7656,7 @@ async function openCandidatePicker(onPick, options) {
         } catch {}
       }, 0);
     },
-    { kind: 'candidate-picker', noParentGate: true } // child modal, but doesn’t re-own global save
+    { kind: 'candidate-picker', noParentGate: true }
   );
 
   // Post-render kick: ensure the picker's onReturn wiring runs once on first open
@@ -7714,6 +7681,8 @@ async function openCandidatePicker(onPick, options) {
     }
   }, 0);
 }
+
+
 
 
 async function openClientPicker(onPick, opts) {
@@ -7821,8 +7790,8 @@ async function openClientPicker(onPick, opts) {
       </div>
     </div>`;
 
-  let selectedId    = null;
-  let selectedLabel = '';
+  let selectedId     = null;
+  let selectedLabel  = '';
   let applySelection = null;
 
   const renderTab = () => html;
@@ -7849,7 +7818,8 @@ async function openClientPicker(onPick, opts) {
       if (LOGC) console.log('[PICKER][clients] onReturn', { hasTBody: !!tbody, hasSearch: !!search, hasTable: !!table });
       if (!tbody || !search || !table) return;
 
-      let sortKey = 'name', sortDir = 'asc';
+      let sortKey     = 'name';
+      let sortDir     = 'asc';
       let currentRows = baseRows.slice();
 
       const frame = window.__getModalFrame?.();
@@ -7870,7 +7840,7 @@ async function openClientPicker(onPick, opts) {
         });
       };
 
-      // Always filter from full baseRows (so backspacing widens results again)
+      // Always filter from full baseRows
       const doFilter = (q) => {
         const fn  = (window.pickersLocalFilterAndSort || pickersLocalFilterAndSort);
         const out = fn('clients', baseRows, q, sortKey, sortDir);
@@ -7902,7 +7872,7 @@ async function openClientPicker(onPick, opts) {
         }
       };
 
-      applySelection = async (triggerClose) => {
+      applySelection = async (_triggerClose) => {
         if (!selectedId) {
           alert('Please select a client first.');
           return false;
@@ -7913,36 +7883,13 @@ async function openClientPicker(onPick, opts) {
           if (typeof onPick === 'function') {
             await onPick({ id: selectedId, label: selectedLabel });
           }
-
-          // 🔹 Mark parent frame dirty so Save is enabled (e.g. in contracts editor)
-          try {
-            const stack = window.__modalStack || [];
-            if (stack.length >= 2) {
-              const parent = stack[stack.length - 2];
-              if (parent && (parent.mode === 'edit' || parent.mode === 'create')) {
-                parent.isDirty = true;
-                parent._updateButtons && parent._updateButtons();
-                if (LOGC) console.log('[PICKER][clients] marked parent dirty after selection', {
-                  parentKind: parent.kind,
-                  parentEntity: parent.entity,
-                  parentMode: parent.mode
-                });
-              }
-            }
-          } catch (e) {
-            if (LOGC) console.warn('[PICKER][clients] failed to mark parent dirty', e);
-          }
-
         } catch (err) {
           console.warn('[PICKER][clients] selection validation failed', err);
           alert(err?.message || 'Selection could not be validated.');
           return false;
         }
 
-        if (triggerClose) {
-          const closeBtn = document.getElementById('btnCloseModal');
-          if (closeBtn) closeBtn.click();
-        }
+        // Do NOT manually close; let saveForFrame handle popping this child frame.
         return true;
       };
 
@@ -8046,7 +7993,7 @@ async function openClientPicker(onPick, opts) {
         } catch {}
       }, 0);
     },
-    { kind: 'client-picker', noParentGate: true } // child modal that doesn’t steal global save/close
+    { kind: 'client-picker', noParentGate: true }
   );
 
   // Post-render kick: ensure the picker's onReturn wiring runs once on first open
@@ -8076,27 +8023,9 @@ async function openClientPicker(onPick, opts) {
 
 
 
-// ─────────────────────────────────────────────────────────────────────────────
-// UPDATED: openClientPicker — delegated clicks + debounced live search
-// ─────────────────────────────────────────────────────────────────────────────
-// ─────────────────────────────────────────────────────────────────────────────
-// UPDATED: openClientPicker(onPick)
-// - Uses summary-membership cache + dataset cache (clients)
-// - Type-to-filter + header sort (Name/Email) locally
-// - Revalidates on pick
-// ─────────────────────────────────────────────────────────────────────────────
 
 
 
-// ===== NEW HELPERS / WRAPPERS =====
-
-// Fetch one candidate by id (adjust endpoint to your API if needed)
-async function getCandidate(candidate_id) {
-  if (!candidate_id) throw new Error('candidate_id required');
-  const r = await authFetch(API(`/api/candidates/${encodeURIComponent(String(candidate_id))}`));
-  if (!r?.ok) throw new Error('Failed to load candidate');
-  return r.json();
-}
 
 // Fetch one client by id (adjust endpoint to your API if needed)
 async function getClient(client_id) {
@@ -24305,12 +24234,21 @@ const isUtilityKind =
       return;
     }
 
-
     const isChildNow = (stack().length > 1);
 
     // Child frames with noParentGate: if dirty in edit/create, confirm discard before closing.
-    // NEW: never prompt for the Rate Presets Picker — it must behave read-only for discard purposes.
-    if (isChildNow && top.noParentGate && (top.mode === 'edit' || top.mode === 'create') && top.isDirty && top.kind !== 'rate-presets-picker') {
+    // Never prompt for the Rate Presets picker or the candidate/client pickers – they are
+    // selection utilities, not real edit forms.
+    const suppressChildDiscardPrompt =
+      top.kind === 'rate-presets-picker' ||
+      top.kind === 'candidate-picker'    ||
+      top.kind === 'client-picker';
+
+    if (isChildNow &&
+        top.noParentGate &&
+        (top.mode === 'edit' || top.mode === 'create') &&
+        top.isDirty &&
+        !suppressChildDiscardPrompt) {
       let ok = false;
       try {
         top._confirmingDiscard = true;
@@ -24322,6 +24260,7 @@ const isUtilityKind =
       }
       if (!ok) return;
     }
+
 
 
     if (!isChildNow && !top.noParentGate && top.mode==='edit' && top.kind!=='rates-presets') {
@@ -24722,17 +24661,32 @@ async function saveForFrame(fr) {
   const bindSave = (btn,fr)=>{ if(!btn||!fr) return; btn.dataset.ownerToken = fr._token; btn.onclick = onSaveClick; if(LOG) console.log('[MODAL] bind #btnSave → (global)',{ownerToken:fr._token,kind:fr.kind||'(parent)',title:fr.title,mode:fr.mode}); };
   bindSave(btnSave, top);
   // FIX: ignore programmatic "dirty" while suppression is active
-  const onDirtyEvt = ()=>{
+   const onDirtyEvt = ()=> {
     const fr = currentFrame();
-    if (fr && fr._suppressDirty) return;
+    if (!fr) return;
+    if (fr._suppressDirty) return;
+
+    // Special case: candidate/client pickers
+    // When they fire a `modal-dirty` (e.g. via setContractFormValue in the
+    // Contracts editor), we want the *parent* frame to become dirty so its
+    // Save button enables – the picker itself is just a selector.
+    if (fr.kind === 'candidate-picker' || fr.kind === 'client-picker') {
+      const p = parentFrame();
+      if (p && (p.mode === 'edit' || p.mode === 'create')) {
+        p.isDirty = true;
+        p._updateButtons && p._updateButtons();
+      }
+      // Do NOT mark the picker dirty – that avoids “Discard changes?” prompts
+      // when closing the picker.
+      return;
+    }
 
     // Allow presets picker dirty → parent (ignore only truly load-only frames)
-    if (fr && fr._loadOnly === true) return;
-
+    if (fr._loadOnly === true) return;
 
     const isChildNow = (stack().length > 1);
     if (isChildNow) {
-      if (fr && fr.noParentGate) {
+      if (fr.noParentGate) {
         if (fr.mode === 'edit' || fr.mode === 'create') {
           fr.isDirty = true;
           fr._updateButtons && fr._updateButtons();
@@ -24744,12 +24698,18 @@ async function saveForFrame(fr) {
           p._updateButtons && p._updateButtons();
         }
       }
-    } else if (fr && (fr.mode === 'edit' || fr.mode === 'create')) {
+    } else if (fr.mode === 'edit' || fr.mode === 'create') {
       fr.isDirty = true;
       fr._updateButtons && fr._updateButtons();
     }
-    try{ const t=currentFrame(); if(t && t.entity==='candidates' && t.currentTabKey==='rates'){ renderCandidateRatesTable?.(); } }catch{}
+    try {
+      const t = currentFrame();
+      if (t && t.entity === 'candidates' && t.currentTabKey === 'rates') {
+        renderCandidateRatesTable?.();
+      }
+    } catch {}
   };
+
 
 
   const onApplyEvt = ev=>{
