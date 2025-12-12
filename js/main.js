@@ -25017,6 +25017,17 @@ async function saveForFrame(fr) {
 // ──────────────────────────────────────────────────────────────────────────────
 
 function openImportColumnAliasesModal(opts) {
+  // ✅ FIX: ensure we have a local HTML-escape helper in this closure
+  // (prevents "ReferenceError: enc is not defined")
+  const enc = (typeof escapeHtml === 'function')
+    ? escapeHtml
+    : (x) => String(x || '')
+        .replaceAll('&','&amp;')
+        .replaceAll('<','&lt;')
+        .replaceAll('>','&gt;')
+        .replaceAll('"','&quot;')
+        .replaceAll("'",'&#39;');
+
   const seed = (opts && typeof opts === 'object') ? opts : {};
   const initSystem = String(seed.system_type || 'NHSP').toUpperCase();
   const initField  = String(seed.field_key   || 'ASSIGNMENT').toUpperCase();
@@ -25526,514 +25537,6 @@ function openImportColumnAliasesModal(opts) {
     }
   }, 0);
 }
-
-function openImportColumnAliasesModal(opts) {
-  const seed = (opts && typeof opts === 'object') ? opts : {};
-  const initSystem = String(seed.system_type || 'NHSP').toUpperCase();
-  const initField  = String(seed.field_key   || 'ASSIGNMENT').toUpperCase();
-
-  // Local modal state (closure)
-  const state = {
-    system_type: (['NHSP','HR_WEEKLY','HR_DAILY'].includes(initSystem) ? initSystem : 'NHSP'),
-    field_key:   (['ASSIGNMENT','GRADE'].includes(initField) ? initField : 'ASSIGNMENT'),
-    include_inactive: !!seed.include_inactive,
-    rows: [],
-    loading: false,
-    error: '',
-
-    // Add form
-    add_alias_name: '',
-    add_notes: '',
-    add_active: true,
-
-    // Edit form
-    editing: null,   // row object
-    edit_alias_name: '',
-    edit_notes: '',
-    edit_active: true
-  };
-
-  // Make this a utility modal so showModal hides Save/Edit and avoids gating parent
-  const kind = 'import-summary-import-column-aliases';
-
-  const renderTab = () => {
-    const sys = state.system_type;
-    const fk  = state.field_key;
-
-    const errHtml = state.error
-      ? `<div class="hint" style="color:#ffb4b4;">${enc(state.error)}</div>`
-      : '';
-
-    const listBody = (state.rows && state.rows.length)
-      ? state.rows.map(r => {
-          const id     = r.id || '';
-          const alias  = (r.alias_name || r.alias_text || '').toString(); // supports either key
-          const notes  = (r.notes || '').toString();
-          const active = (r.active !== false);
-
-          const pill    = active ? 'pill-ok' : 'pill-warn';
-          const pillTxt = active ? 'ACTIVE' : 'INACTIVE';
-
-          return `
-            <tr data-id="${enc(id)}">
-              <td><span class="mini mono">${enc(alias || '—')}</span></td>
-              <td><span class="pill ${pill}" style="padding:2px 8px;font-size:12px;">${enc(pillTxt)}</span></td>
-              <td>
-                <span class="mini" style="white-space:normal;word-break:break-word;display:inline-block;max-width:360px;">
-                  ${enc(notes || '')}
-                </span>
-              </td>
-              <td style="white-space:nowrap;">
-                <button type="button" class="btn mini" data-act="ica-edit" data-id="${enc(id)}">Edit</button>
-                <button type="button" class="btn mini" style="margin-left:4px;" data-act="ica-toggle" data-id="${enc(id)}">
-                  ${active ? 'Disable' : 'Enable'}
-                </button>
-                <button type="button" class="btn mini" style="margin-left:4px;" data-act="ica-delete" data-id="${enc(id)}">
-                  Remove
-                </button>
-              </td>
-            </tr>
-          `;
-        }).join('')
-      : `
-        <tr>
-          <td colspan="4"><span class="mini">${state.loading ? 'Loading…' : 'No aliases found for this filter.'}</span></td>
-        </tr>
-      `;
-
-    const editOpen = !!state.editing;
-
-    return `
-      <div class="form" id="importColumnAliasesModal">
-        <div class="card">
-          <div class="row">
-            <label>Filters</label>
-            <div class="controls" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
-              <select class="input" id="ica_system" style="max-width:220px;">
-                <option value="NHSP" ${sys==='NHSP'?'selected':''}>NHSP</option>
-                <option value="HR_WEEKLY" ${sys==='HR_WEEKLY'?'selected':''}>HR weekly</option>
-                <option value="HR_DAILY" ${sys==='HR_DAILY'?'selected':''}>HR daily</option>
-              </select>
-
-              <select class="input" id="ica_field" style="max-width:220px;">
-                <option value="ASSIGNMENT" ${fk==='ASSIGNMENT'?'selected':''}>ASSIGNMENT (NHSP)</option>
-                <option value="GRADE" ${fk==='GRADE'?'selected':''}>GRADE (HR)</option>
-              </select>
-
-              <label class="mini" style="display:flex;gap:6px;align-items:center;">
-                <input type="checkbox" id="ica_include_inactive" ${state.include_inactive ? 'checked' : ''}/>
-                Show inactive
-              </label>
-
-              <button type="button" class="btn" id="ica_refresh" ${state.loading ? 'disabled' : ''}>Refresh</button>
-
-              <span class="mini" style="opacity:.85;">
-                ${state.loading ? 'Loading…' : `${(state.rows||[]).length} row(s)`}
-              </span>
-            </div>
-          </div>
-          ${errHtml}
-        </div>
-
-        <div class="card" style="margin-top:10px;">
-          <div class="row">
-            <label>Add alias</label>
-            <div class="controls" style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-start;">
-              <div style="min-width:260px;flex:1;">
-                <div class="mini" style="margin-bottom:4px;">Alias name</div>
-                <input class="input" id="ica_add_alias" type="text"
-                       placeholder="e.g. Assignment, Request Grade, Grade…"
-                       value="${enc(state.add_alias_name||'')}" />
-              </div>
-
-              <div style="min-width:260px;flex:2;">
-                <div class="mini" style="margin-bottom:4px;">Notes (optional)</div>
-                <input class="input" id="ica_add_notes" type="text"
-                       placeholder="Optional note…"
-                       value="${enc(state.add_notes||'')}" />
-              </div>
-
-              <div style="min-width:140px;">
-                <div class="mini" style="margin-bottom:4px;">Active</div>
-                <label class="mini" style="display:flex;gap:6px;align-items:center;">
-                  <input type="checkbox" id="ica_add_active" ${state.add_active ? 'checked' : ''}/>
-                  Active
-                </label>
-              </div>
-
-              <div style="min-width:140px;padding-top:18px;">
-                <button type="button" class="btn btn-primary" id="ica_add_save" ${state.loading ? 'disabled' : ''}>
-                  Add
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div class="card" style="margin-top:10px; display:${editOpen ? '' : 'none'};" id="ica_edit_card">
-          <div class="row">
-            <label>Edit alias</label>
-            <div class="controls" style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-start;">
-              <div class="mini" style="width:100%;">
-                Editing ID: <span class="mono" id="ica_edit_id">${enc(state.editing?.id || '')}</span>
-              </div>
-
-              <div style="min-width:260px;flex:1;">
-                <div class="mini" style="margin-bottom:4px;">Alias name</div>
-                <input class="input" id="ica_edit_alias" type="text" value="${enc(state.edit_alias_name||'')}" />
-              </div>
-
-              <div style="min-width:260px;flex:2;">
-                <div class="mini" style="margin-bottom:4px;">Notes</div>
-                <input class="input" id="ica_edit_notes" type="text" value="${enc(state.edit_notes||'')}" />
-              </div>
-
-              <div style="min-width:140px;">
-                <div class="mini" style="margin-bottom:4px;">Active</div>
-                <label class="mini" style="display:flex;gap:6px;align-items:center;">
-                  <input type="checkbox" id="ica_edit_active" ${state.edit_active ? 'checked' : ''}/>
-                  Active
-                </label>
-              </div>
-
-              <div style="min-width:220px;padding-top:18px;">
-                <button type="button" class="btn btn-primary" id="ica_edit_save" ${state.loading ? 'disabled' : ''}>
-                  Save changes
-                </button>
-                <button type="button" class="btn" id="ica_edit_cancel" style="margin-left:6px;">
-                  Cancel
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div class="card" style="margin-top:10px;">
-          <div class="row">
-            <label>Aliases</label>
-            <div class="controls">
-              <table class="grid">
-                <thead>
-                  <tr>
-                    <th>Alias</th>
-                    <th>Active</th>
-                    <th>Notes</th>
-                    <th>Actions</th>
-                  </tr>
-                </thead>
-                <tbody id="ica_tbody">
-                  ${listBody}
-                </tbody>
-              </table>
-              <div class="hint">
-                These aliases are used by parsers to find the right column even if suppliers rename headers.
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-    `;
-  };
-
-  const repaint = () => {
-    const fr = window.__getModalFrame?.();
-    if (!fr) return;
-    try { fr.setTab(fr.currentTabKey || 'p'); } catch {}
-    try {
-      const fr2 = window.__getModalFrame?.();
-      if (fr2 && typeof fr2.onReturn === 'function') fr2.onReturn();
-    } catch {}
-  };
-
-  const loadList = async () => {
-    state.loading = true;
-    state.error = '';
-    try {
-      repaint();
-      const rows = await apiListImportColumnAliases({
-        system_type: state.system_type,
-        field_key: state.field_key,
-        include_inactive: state.include_inactive
-      });
-      state.rows = Array.isArray(rows) ? rows : [];
-    } catch (e) {
-      state.rows = [];
-      state.error = e?.message || String(e);
-    } finally {
-      state.loading = false;
-      repaint();
-    }
-  };
-
-  const startEdit = (row) => {
-    if (!row) return;
-    state.editing = row;
-    state.edit_alias_name = (row.alias_name || row.alias_text || '').toString();
-    state.edit_notes = (row.notes || '').toString();
-    state.edit_active = (row.active !== false);
-    repaint();
-  };
-
-  const cancelEdit = () => {
-    state.editing = null;
-    state.edit_alias_name = '';
-    state.edit_notes = '';
-    state.edit_active = true;
-    repaint();
-  };
-
-  const onReturn = () => {
-    const root = document.getElementById('importColumnAliasesModal');
-    if (!root) return;
-
-    const selSystem = document.getElementById('ica_system');
-    const selField  = document.getElementById('ica_field');
-    const chkInact  = document.getElementById('ica_include_inactive');
-    const btnRef    = document.getElementById('ica_refresh');
-
-    const addAlias  = document.getElementById('ica_add_alias');
-    const addNotes  = document.getElementById('ica_add_notes');
-    const addAct    = document.getElementById('ica_add_active');
-    const addSave   = document.getElementById('ica_add_save');
-
-    const editAlias = document.getElementById('ica_edit_alias');
-    const editNotes = document.getElementById('ica_edit_notes');
-    const editAct   = document.getElementById('ica_edit_active');
-    const editSave  = document.getElementById('ica_edit_save');
-    const editCancel= document.getElementById('ica_edit_cancel');
-
-    if (selSystem && !selSystem.__icaWired) {
-      selSystem.__icaWired = true;
-      selSystem.addEventListener('change', () => {
-        state.system_type = String(selSystem.value || 'NHSP').toUpperCase();
-        cancelEdit();
-        loadList();
-      });
-    }
-
-    if (selField && !selField.__icaWired) {
-      selField.__icaWired = true;
-      selField.addEventListener('change', () => {
-        state.field_key = String(selField.value || 'ASSIGNMENT').toUpperCase();
-        cancelEdit();
-        loadList();
-      });
-    }
-
-    if (chkInact && !chkInact.__icaWired) {
-      chkInact.__icaWired = true;
-      chkInact.addEventListener('change', () => {
-        state.include_inactive = !!chkInact.checked;
-        cancelEdit();
-        loadList();
-      });
-    }
-
-    if (btnRef && !btnRef.__icaWired) {
-      btnRef.__icaWired = true;
-      btnRef.addEventListener('click', () => loadList());
-    }
-
-    if (addAlias && !addAlias.__icaWired) {
-      addAlias.__icaWired = true;
-      addAlias.addEventListener('input', () => { state.add_alias_name = String(addAlias.value || ''); });
-      addAlias.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter') {
-          e.preventDefault();
-          const btn = document.getElementById('ica_add_save');
-          if (btn && !btn.disabled) btn.click();
-        }
-      });
-    }
-    if (addNotes && !addNotes.__icaWired) {
-      addNotes.__icaWired = true;
-      addNotes.addEventListener('input', () => { state.add_notes = String(addNotes.value || ''); });
-    }
-    if (addAct && !addAct.__icaWired) {
-      addAct.__icaWired = true;
-      addAct.addEventListener('change', () => { state.add_active = !!addAct.checked; });
-    }
-
-    if (addSave && !addSave.__icaWired) {
-      addSave.__icaWired = true;
-      addSave.addEventListener('click', async () => {
-        const aliasName = String(state.add_alias_name || '').trim();
-        if (!aliasName) {
-          alert('Alias name is required.');
-          return;
-        }
-        try {
-          state.loading = true;
-          state.error = '';
-          repaint();
-
-          await apiCreateImportColumnAlias({
-            system_type: state.system_type,
-            field_key: state.field_key,
-            alias_name: aliasName,
-            active: !!state.add_active,
-            notes: String(state.add_notes || '').trim() || null
-          });
-
-          window.__toast && window.__toast('Alias added.');
-          state.add_alias_name = '';
-          state.add_notes = '';
-          state.add_active = true;
-
-          await loadList();
-        } catch (e) {
-          state.error = e?.message || String(e);
-          state.loading = false;
-          repaint();
-          alert(state.error);
-        }
-      });
-    }
-
-    if (editAlias && !editAlias.__icaWired) {
-      editAlias.__icaWired = true;
-      editAlias.addEventListener('input', () => { state.edit_alias_name = String(editAlias.value || ''); });
-    }
-    if (editNotes && !editNotes.__icaWired) {
-      editNotes.__icaWired = true;
-      editNotes.addEventListener('input', () => { state.edit_notes = String(editNotes.value || ''); });
-    }
-    if (editAct && !editAct.__icaWired) {
-      editAct.__icaWired = true;
-      editAct.addEventListener('change', () => { state.edit_active = !!editAct.checked; });
-    }
-
-    if (editSave && !editSave.__icaWired) {
-      editSave.__icaWired = true;
-      editSave.addEventListener('click', async () => {
-        if (!state.editing || !state.editing.id) return;
-        const id = state.editing.id;
-
-        const aliasName = String(state.edit_alias_name || '').trim();
-        if (!aliasName) {
-          alert('Alias name is required.');
-          return;
-        }
-
-        try {
-          state.loading = true;
-          state.error = '';
-          repaint();
-
-          await apiUpdateImportColumnAlias(id, {
-            alias_name: aliasName,
-            notes: String(state.edit_notes || '').trim() || null,
-            active: !!state.edit_active
-          });
-
-          window.__toast && window.__toast('Alias updated.');
-          cancelEdit();
-          await loadList();
-        } catch (e) {
-          state.error = e?.message || String(e);
-          state.loading = false;
-          repaint();
-          alert(state.error);
-        }
-      });
-    }
-
-    if (editCancel && !editCancel.__icaWired) {
-      editCancel.__icaWired = true;
-      editCancel.addEventListener('click', () => cancelEdit());
-    }
-
-    // Row actions (Edit / Toggle / Remove)
-    if (!root.__icaWiredTable) {
-      root.__icaWiredTable = true;
-      root.addEventListener('click', async (ev) => {
-        const btn = ev.target.closest('button[data-act]');
-        if (!btn) return;
-
-        const act = btn.getAttribute('data-act');
-        const id  = btn.getAttribute('data-id');
-        if (!id) return;
-
-        const row = (state.rows || []).find(x => String(x.id) === String(id)) || null;
-
-        if (act === 'ica-edit') {
-          startEdit(row);
-          return;
-        }
-
-        if (act === 'ica-toggle') {
-          if (!row) return;
-          const next = !(row.active !== false);
-          try {
-            state.loading = true;
-            state.error = '';
-            repaint();
-
-            await apiUpdateImportColumnAlias(id, { active: next });
-
-            window.__toast && window.__toast(next ? 'Alias enabled.' : 'Alias disabled.');
-            cancelEdit();
-            await loadList();
-          } catch (e) {
-            state.error = e?.message || String(e);
-            state.loading = false;
-            repaint();
-            alert(state.error);
-          }
-          return;
-        }
-
-        if (act === 'ica-delete') {
-          const ok = window.confirm('Remove this alias? (It will be deactivated for safety)');
-          if (!ok) return;
-
-          try {
-            state.loading = true;
-            state.error = '';
-            repaint();
-
-            await apiDeleteImportColumnAlias(id);
-
-            window.__toast && window.__toast('Alias removed.');
-            cancelEdit();
-            await loadList();
-          } catch (e) {
-            state.error = e?.message || String(e);
-            state.loading = false;
-            repaint();
-            alert(state.error);
-          }
-          return;
-        }
-      });
-    }
-  };
-
-  showModal(
-    'Import Column Aliases',
-    [{ key: 'p', title: 'Aliases' }],
-    () => renderTab(),
-    async () => true,
-    false,
-    onReturn,
-    { kind, noParentGate: true }
-  );
-
-  // Initial wiring + first load
-  setTimeout(() => {
-    try {
-      const fr = window.__getModalFrame?.();
-      if (fr && fr.kind === kind && typeof fr.onReturn === 'function' && !fr.__icaInit) {
-        fr.__icaInit = true;
-        fr.onReturn();
-        loadList();
-      }
-    } catch (e) {
-      console.warn('[IMPORT_COL_ALIASES] init failed', e);
-    }
-  }, 0);
-}
-
 
 
 
@@ -27561,12 +27064,20 @@ async function resolveImportConflicts(importId, importType, mappings) {
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(payload)
     });
+
     const text = await res.text();
     if (!res.ok) {
       throw new Error(text || `NHSP import apply failed (${res.status})`);
     }
+
     window.__toast && window.__toast('NHSP import applied.');
-    return;
+
+    // ✅ FIX: return parsed JSON (or empty object) so caller can show counts
+    try {
+      return text ? JSON.parse(text) : {};
+    } catch {
+      return {};
+    }
   }
 
   if (type === 'HR_WEEKLY') {
@@ -27576,18 +27087,26 @@ async function resolveImportConflicts(importId, importType, mappings) {
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(payload)
     });
+
     const text = await res.text();
     if (!res.ok) {
       throw new Error(text || `HealthRoster weekly apply failed (${res.status})`);
     }
+
     window.__toast && window.__toast('HealthRoster weekly import applied.');
-    return;
+
+    // ✅ FIX: return parsed JSON (or empty object) so caller can show counts
+    try {
+      return text ? JSON.parse(text) : {};
+    } catch {
+      return {};
+    }
   }
 
   if (type === 'HR_ROTA_DAILY') {
     // HR rota uses applyHrRotaValidation, not this helper.
     console.warn('[IMPORTS] resolveImportConflicts called for HR_ROTA_DAILY; nothing to apply here.');
-    return;
+    return {};
   }
 
   throw new Error(`Unsupported import type for resolveImportConflicts: ${type}`);
@@ -29531,22 +29050,24 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
 
 
 }
+
+
 function openAssignmentBandMappingsModal(opts) {
+  // Ensure we have a local HTML-escape helper in this closure
+  // (prevents "ReferenceError: enc is not defined")
+  const enc = (typeof escapeHtml === 'function')
+    ? escapeHtml
+    : (x) => String(x || '')
+        .replaceAll('&','&amp;')
+        .replaceAll('<','&lt;')
+        .replaceAll('>','&gt;')
+        .replaceAll('"','&quot;')
+        .replaceAll("'",'&#39;');
+
   const seed = (opts && typeof opts === 'object') ? opts : {};
   const initSystem = String(seed.system_type || seed.systemType || 'NHSP').toUpperCase();
 
-  // Local encoder (your app has escapeHtml; keep this modal self-contained)
-  const enc = (v) => {
-    try {
-      return (typeof escapeHtml === 'function')
-        ? escapeHtml(String(v ?? ''))
-        : String(v ?? '');
-    } catch {
-      return String(v ?? '');
-    }
-  };
-
-  // Weekly-only mapping manager (per your decision: no HR_DAILY band matching)
+  // Weekly-only (per your decision)
   const SYSTEMS = ['NHSP', 'HR_WEEKLY'];
 
   const state = {
@@ -29606,6 +29127,17 @@ function openAssignmentBandMappingsModal(opts) {
       ? `<div class="hint" style="color:#ffb4b4;">${enc(state.error)}</div>`
       : '';
 
+    const editOpen = !!state.editing;
+
+    const addScope = state.add_scope;
+    const showAddCand = (addScope === 'CANDIDATE');
+    const showAddCli  = (addScope === 'CLIENT');
+
+    const filterScope = state.scope_filter;
+    const showFilterCand = (filterScope === 'CANDIDATE');
+    const showFilterCli  = (filterScope === 'CLIENT');
+
+    // Buttons in the Actions column are wrapped so they never spill out
     const listBody = (state.rows && state.rows.length)
       ? state.rows.map(r => {
           const id = r.id || '';
@@ -29623,29 +29155,31 @@ function openAssignmentBandMappingsModal(opts) {
             <tr data-id="${enc(id)}">
               <td><span class="mini mono">${enc(incoming || '—')}</span></td>
               <td>
-                <span class="mini" style="white-space:normal;word-break:break-word;display:inline-block;max-width:220px;">
+                <span class="mini" style="white-space:normal;word-break:break-word;display:inline-block;max-width:280px;">
                   ${enc(patt || '—')}
                 </span>
               </td>
               <td>
-                <span class="mini" style="white-space:normal;word-break:break-word;display:inline-block;max-width:240px;">
+                <span class="mini" style="white-space:normal;word-break:break-word;display:inline-block;max-width:260px;">
                   ${enc(scopeTxt)}
                 </span>
               </td>
               <td><span class="pill ${pill}" style="padding:2px 8px;font-size:12px;">${enc(pillTxt)}</span></td>
               <td>
-                <span class="mini" style="white-space:normal;word-break:break-word;display:inline-block;max-width:320px;">
+                <span class="mini" style="white-space:normal;word-break:break-word;display:inline-block;max-width:380px;">
                   ${enc(notes || '')}
                 </span>
               </td>
-              <td style="white-space:nowrap;">
-                <button type="button" class="btn mini" data-act="abm-edit" data-id="${enc(id)}">Edit</button>
-                <button type="button" class="btn mini" style="margin-left:4px;" data-act="abm-toggle" data-id="${enc(id)}">
-                  ${active ? 'Disable' : 'Enable'}
-                </button>
-                <button type="button" class="btn mini" style="margin-left:4px;" data-act="abm-delete" data-id="${enc(id)}">
-                  Remove
-                </button>
+              <td>
+                <div style="display:flex;flex-wrap:wrap;gap:6px;align-items:flex-start;">
+                  <button type="button" class="btn mini" data-act="abm-edit" data-id="${enc(id)}">Edit</button>
+                  <button type="button" class="btn mini" data-act="abm-toggle" data-id="${enc(id)}">
+                    ${active ? 'Disable' : 'Enable'}
+                  </button>
+                  <button type="button" class="btn mini" data-act="abm-delete" data-id="${enc(id)}">
+                    Remove
+                  </button>
+                </div>
               </td>
             </tr>
           `;
@@ -29656,18 +29190,10 @@ function openAssignmentBandMappingsModal(opts) {
         </tr>
       `;
 
-    const editOpen = !!state.editing;
-
-    const addScope = state.add_scope;
-    const showAddCand = (addScope === 'CANDIDATE');
-    const showAddCli  = (addScope === 'CLIENT');
-
-    const filterScope = state.scope_filter;
-    const showFilterCand = (filterScope === 'CANDIDATE');
-    const showFilterCli  = (filterScope === 'CLIENT');
-
+    // ✅ IMPORTANT: no ".form" wrapper (which would split into 2 columns).
+    // This makes the whole modal body full-width.
     return `
-      <div class="form" id="assignmentBandMappingsModal">
+      <div id="assignmentBandMappingsModal">
         <div class="card">
           <div class="row">
             <label>Filters</label>
@@ -29802,9 +29328,9 @@ function openAssignmentBandMappingsModal(opts) {
             <label>Edit mapping</label>
             <div class="controls" style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-start;">
               <div class="mini" style="width:100%;">
-                Editing ID: <span class="mono" id="abm_edit_id">${enc(state.editing && state.editing.id ? state.editing.id : '')}</span>
+                Editing ID: <span class="mono" id="abm_edit_id">${enc(state.editing?.id || '')}</span>
                 &nbsp;•&nbsp;
-                Code: <span class="mono">${enc(state.editing && state.editing.incoming_code ? state.editing.incoming_code : '')}</span>
+                Code: <span class="mono">${enc(state.editing?.incoming_code || '')}</span>
                 &nbsp;•&nbsp;
                 Scope: <span class="mono">${enc(state.editing ? scopeLabelForRow(state.editing) : '')}</span>
               </div>
@@ -29835,24 +29361,34 @@ function openAssignmentBandMappingsModal(opts) {
           </div>
         </div>
 
+        <!-- ✅ FULL-WIDTH MAPPINGS BOX -->
         <div class="card" style="margin-top:10px;">
           <div class="row">
             <label>Mappings</label>
             <div class="controls">
-              <table class="grid">
-                <thead>
-                  <tr>
-                    <th>Incoming code</th>
-                    <th>Band pattern</th>
-                    <th>Scope</th>
-                    <th>Active</th>
-                    <th>Notes</th>
-                    <th>Actions</th>
-                  </tr>
-                </thead>
-                <tbody id="abm_tbody">${listBody}</tbody>
-              </table>
-              <div class="hint">
+              <!-- ✅ Only the rows scroll; header + hint stay fixed -->
+              <div style="
+                max-height: 46vh;
+                overflow: auto;
+                border: 1px solid var(--line);
+                border-radius: 10px;
+              ">
+                <table class="grid" style="table-layout:auto; width:100%;">
+                  <thead>
+                    <tr>
+                      <th style="width:140px;">Incoming code</th>
+                      <th style="width:220px;">Band pattern</th>
+                      <th style="width:220px;">Scope</th>
+                      <th style="width:90px;">Active</th>
+                      <th>Notes</th>
+                      <th style="width:260px;">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody id="abm_tbody">${listBody}</tbody>
+                </table>
+              </div>
+
+              <div class="hint" style="margin-top:8px;">
                 Precedence: Candidate overrides Client overrides Global. Matching is a simple “band contains pattern” check.
               </div>
             </div>
@@ -29878,7 +29414,9 @@ function openAssignmentBandMappingsModal(opts) {
     try {
       repaint();
 
-      const scope = (state.scope_filter === 'ANY') ? null : state.scope_filter;
+      const scope =
+        state.scope_filter === 'ANY' ? null :
+        state.scope_filter;
 
       const rows = await apiListAssignmentBandMappings({
         system_type: state.system_type,
@@ -29920,12 +29458,14 @@ function openAssignmentBandMappingsModal(opts) {
     const root = document.getElementById('assignmentBandMappingsModal');
     if (!root) return;
 
+    // Filters
     const selSystem = document.getElementById('abm_system');
     const selScope  = document.getElementById('abm_scope_filter');
     const inpLike   = document.getElementById('abm_incoming_like');
     const chkInact  = document.getElementById('abm_include_inactive');
     const btnRef    = document.getElementById('abm_refresh');
 
+    // Add
     const addScope  = document.getElementById('abm_add_scope');
     const addIn     = document.getElementById('abm_add_incoming');
     const addPat    = document.getElementById('abm_add_pattern');
@@ -29933,12 +29473,14 @@ function openAssignmentBandMappingsModal(opts) {
     const addAct    = document.getElementById('abm_add_active');
     const addSave   = document.getElementById('abm_add_save');
 
+    // Edit
     const editPat   = document.getElementById('abm_edit_pattern');
     const editNotes = document.getElementById('abm_edit_notes');
     const editAct   = document.getElementById('abm_edit_active');
     const editSave  = document.getElementById('abm_edit_save');
     const editCancel= document.getElementById('abm_edit_cancel');
 
+    // Wire filter changes
     if (selSystem && !selSystem.__abmWired) {
       selSystem.__abmWired = true;
       selSystem.addEventListener('change', () => {
@@ -29947,7 +29489,6 @@ function openAssignmentBandMappingsModal(opts) {
         loadList();
       });
     }
-
     if (selScope && !selScope.__abmWired) {
       selScope.__abmWired = true;
       selScope.addEventListener('change', () => {
@@ -29958,7 +29499,6 @@ function openAssignmentBandMappingsModal(opts) {
         repaint();
       });
     }
-
     if (inpLike && !inpLike.__abmWired) {
       inpLike.__abmWired = true;
       inpLike.addEventListener('input', () => { state.filter_incoming_like = String(inpLike.value || ''); });
@@ -29966,7 +29506,6 @@ function openAssignmentBandMappingsModal(opts) {
         if (e.key === 'Enter') { e.preventDefault(); loadList(); }
       });
     }
-
     if (chkInact && !chkInact.__abmWired) {
       chkInact.__abmWired = true;
       chkInact.addEventListener('change', () => {
@@ -29975,12 +29514,12 @@ function openAssignmentBandMappingsModal(opts) {
         loadList();
       });
     }
-
     if (btnRef && !btnRef.__abmWired) {
       btnRef.__abmWired = true;
       btnRef.addEventListener('click', () => loadList());
     }
 
+    // Wire add fields
     if (addScope && !addScope.__abmWired) {
       addScope.__abmWired = true;
       addScope.addEventListener('change', () => {
@@ -29990,7 +29529,6 @@ function openAssignmentBandMappingsModal(opts) {
         repaint();
       });
     }
-
     if (addIn && !addIn.__abmWired) {
       addIn.__abmWired = true;
       addIn.addEventListener('input', () => { state.add_incoming_code = String(addIn.value || ''); });
@@ -30007,7 +29545,6 @@ function openAssignmentBandMappingsModal(opts) {
       addAct.__abmWired = true;
       addAct.addEventListener('change', () => { state.add_active = !!addAct.checked; });
     }
-
     if (addSave && !addSave.__abmWired) {
       addSave.__abmWired = true;
       addSave.addEventListener('click', async () => {
@@ -30060,6 +29597,7 @@ function openAssignmentBandMappingsModal(opts) {
       });
     }
 
+    // Wire edit fields
     if (editPat && !editPat.__abmWired) {
       editPat.__abmWired = true;
       editPat.addEventListener('input', () => { state.edit_band_match_pattern = String(editPat.value || ''); });
@@ -30072,7 +29610,6 @@ function openAssignmentBandMappingsModal(opts) {
       editAct.__abmWired = true;
       editAct.addEventListener('change', () => { state.edit_active = !!editAct.checked; });
     }
-
     if (editSave && !editSave.__abmWired) {
       editSave.__abmWired = true;
       editSave.addEventListener('click', async () => {
@@ -30104,17 +29641,18 @@ function openAssignmentBandMappingsModal(opts) {
         }
       });
     }
-
     if (editCancel && !editCancel.__abmWired) {
       editCancel.__abmWired = true;
       editCancel.addEventListener('click', () => cancelEdit());
     }
 
+    // Button actions + pickers + row actions
     if (!root.__abmWiredActions) {
       root.__abmWiredActions = true;
       root.addEventListener('click', async (ev) => {
         const btn = ev.target.closest('button[data-act]');
         if (!btn) return;
+
         const act = btn.getAttribute('data-act');
 
         // Filter pickers
@@ -30252,6 +29790,7 @@ function openAssignmentBandMappingsModal(opts) {
     { kind, noParentGate: true }
   );
 
+  // Initial wiring + load
   setTimeout(() => {
     try {
       const fr = window.__getModalFrame?.();
