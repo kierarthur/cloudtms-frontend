@@ -1442,6 +1442,201 @@ function scheduleRefresh(){
   refreshTimer = setTimeout(refreshToken, ms);
 }
 
+// ─────────────────────────────────────────────────────────────
+// API helpers: Assignment ↔ Band mappings
+// Endpoints (backend):
+//  GET    /api/assignment-band-mappings
+//  POST   /api/assignment-band-mappings
+//  PATCH  /api/assignment-band-mappings/:id
+//  DELETE /api/assignment-band-mappings/:id   (soft delete on backend)
+// ─────────────────────────────────────────────────────────────
+
+function __qs(params) {
+  const q = new URLSearchParams();
+  Object.entries(params || {}).forEach(([k, v]) => {
+    if (v === undefined || v === null) return;
+    const s = String(v);
+    if (!s.trim()) return;
+    q.set(k, s);
+  });
+  const out = q.toString();
+  return out ? `?${out}` : '';
+}
+
+function __unwrapRows(json) {
+  if (!json) return [];
+  if (Array.isArray(json)) return json;
+  if (Array.isArray(json.rows)) return json.rows;
+  if (Array.isArray(json.items)) return json.items;
+  if (Array.isArray(json.data)) return json.data;
+  return [];
+}
+
+function __unwrapSingle(json) {
+  if (!json) return null;
+  if (json.row && typeof json.row === 'object') return json.row;
+  if (json.item && typeof json.item === 'object') return json.item;
+  if (json.data && typeof json.data === 'object') return json.data;
+  if (typeof json === 'object' && !Array.isArray(json)) return json;
+  return null;
+}
+
+async function apiListAssignmentBandMappings(params) {
+  const p = params || {};
+  const query = __qs({
+    system_type: p.system_type,
+    candidate_id: p.candidate_id,
+    client_id: p.client_id,
+    incoming_like: p.incoming_like,                 // backend supports this (if you used my handler)
+    scope: p.scope,                                 // GLOBAL|CLIENT|CANDIDATE (optional)
+    include_inactive: p.include_inactive ? 'true' : undefined
+  });
+
+  const res = await authFetch(API(`/api/assignment-band-mappings${query}`), { method: 'GET' });
+  const txt = await res.text().catch(() => '');
+  if (!res.ok) throw new Error(txt || `Failed to list assignment-band-mappings (${res.status})`);
+
+  let json;
+  try { json = txt ? JSON.parse(txt) : null; } catch { json = null; }
+
+  return __unwrapRows(json);
+}
+
+async function apiCreateAssignmentBandMapping(payload) {
+  const res = await authFetch(API(`/api/assignment-band-mappings`), {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(payload || {})
+  });
+
+  const txt = await res.text().catch(() => '');
+  if (!res.ok) throw new Error(txt || `Failed to create assignment-band-mapping (${res.status})`);
+
+  let json;
+  try { json = txt ? JSON.parse(txt) : null; } catch { json = null; }
+
+  return __unwrapSingle(json);
+}
+
+async function apiUpdateAssignmentBandMapping(id, patch) {
+  if (!id) throw new Error('Missing id for apiUpdateAssignmentBandMapping');
+  const encId = encodeURIComponent(String(id));
+
+  const res = await authFetch(API(`/api/assignment-band-mappings/${encId}`), {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(patch || {})
+  });
+
+  const txt = await res.text().catch(() => '');
+  if (!res.ok) throw new Error(txt || `Failed to update assignment-band-mapping (${res.status})`);
+
+  let json;
+  try { json = txt ? JSON.parse(txt) : null; } catch { json = null; }
+
+  return __unwrapSingle(json);
+}
+
+async function apiDeleteAssignmentBandMapping(id) {
+  if (!id) throw new Error('Missing id for apiDeleteAssignmentBandMapping');
+  const encId = encodeURIComponent(String(id));
+
+  const res = await authFetch(API(`/api/assignment-band-mappings/${encId}`), {
+    method: 'DELETE'
+  });
+
+  const txt = await res.text().catch(() => '');
+  if (!res.ok) throw new Error(txt || `Failed to delete assignment-band-mapping (${res.status})`);
+
+  let json;
+  try { json = txt ? JSON.parse(txt) : null; } catch { json = null; }
+
+  // backend returns the updated row (active=false) if using soft delete
+  return __unwrapSingle(json) || { id };
+}
+
+
+// ─────────────────────────────────────────────────────────────
+// API helpers: Import Column Aliases
+// Endpoints (backend):
+//  GET    /api/import-column-aliases
+//  POST   /api/import-column-aliases
+//  PATCH  /api/import-column-aliases/:id
+//  DELETE /api/import-column-aliases/:id   (soft delete on backend)
+// ─────────────────────────────────────────────────────────────
+
+async function apiListImportColumnAliases(params) {
+  const p = params || {};
+  const query = __qs({
+    system_type: p.system_type,
+    field_key: p.field_key,
+    include_inactive: p.include_inactive ? 'true' : undefined
+  });
+
+  const res = await authFetch(API(`/api/import-column-aliases${query}`), { method: 'GET' });
+  const txt = await res.text().catch(() => '');
+  if (!res.ok) throw new Error(txt || `Failed to list import-column-aliases (${res.status})`);
+
+  let json;
+  try { json = txt ? JSON.parse(txt) : null; } catch { json = null; }
+
+  return __unwrapRows(json);
+}
+
+async function apiCreateImportColumnAlias(payload) {
+  const res = await authFetch(API(`/api/import-column-aliases`), {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(payload || {})
+  });
+
+  const txt = await res.text().catch(() => '');
+  if (!res.ok) throw new Error(txt || `Failed to create import-column-alias (${res.status})`);
+
+  let json;
+  try { json = txt ? JSON.parse(txt) : null; } catch { json = null; }
+
+  return __unwrapSingle(json);
+}
+
+async function apiUpdateImportColumnAlias(id, patch) {
+  if (!id) throw new Error('Missing id for apiUpdateImportColumnAlias');
+  const encId = encodeURIComponent(String(id));
+
+  const res = await authFetch(API(`/api/import-column-aliases/${encId}`), {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(patch || {})
+  });
+
+  const txt = await res.text().catch(() => '');
+  if (!res.ok) throw new Error(txt || `Failed to update import-column-alias (${res.status})`);
+
+  let json;
+  try { json = txt ? JSON.parse(txt) : null; } catch { json = null; }
+
+  return __unwrapSingle(json);
+}
+
+async function apiDeleteImportColumnAlias(id) {
+  if (!id) throw new Error('Missing id for apiDeleteImportColumnAlias');
+  const encId = encodeURIComponent(String(id));
+
+  const res = await authFetch(API(`/api/import-column-aliases/${encId}`), {
+    method: 'DELETE'
+  });
+
+  const txt = await res.text().catch(() => '');
+  if (!res.ok) throw new Error(txt || `Failed to delete import-column-alias (${res.status})`);
+
+  let json;
+  try { json = txt ? JSON.parse(txt) : null; } catch { json = null; }
+
+  return __unwrapSingle(json) || { id };
+}
+
+
+
 // Unwrap list/envelope responses into arrays
 async function toList(res) {
   if (!res.ok) throw new Error(`Request failed: ${res.status}`);
@@ -2225,6 +2420,7 @@ let currentSelection = null;
 // ──────────────────────────────────────────────────────────────────────────────
 // renderTopNav (amended) — adds Contracts quick-search branch { q: text }
 // ──────────────────────────────────────────────────────────────────────────────
+
 function renderTopNav(){
   const nav = byId('nav'); nav.innerHTML = '';
 
@@ -2311,7 +2507,7 @@ function renderTopNav(){
         m.style.borderRadius  = '10px';
         m.style.boxShadow     = 'var(--shadow, 0 6px 20px rgba(0,0,0,.25))';
         m.style.padding       = '6px';
-        m.style.minWidth      = '180px';
+        m.style.minWidth      = '220px';
         m.style.userSelect    = 'none';
 
         m.innerHTML = `
@@ -2333,6 +2529,21 @@ function renderTopNav(){
                          padding:8px 10px;border-radius:8px;cursor:pointer;margin:4px 0;">
             🏷 Job Titles
           </button>
+
+          <div style="height:1px;background:var(--line,#334155);margin:8px 4px;"></div>
+
+          <button type="button" class="menu-item" data-k="band-mappings"
+                  style="display:flex;gap:8px;align-items:center;width:100%;
+                         background:#0b1427;border:1px solid var(--line);color:#fff;
+                         padding:8px 10px;border-radius:8px;cursor:pointer;margin:4px 0;">
+            🧩 Weekly band mappings
+          </button>
+          <button type="button" class="menu-item" data-k="import-col-aliases"
+                  style="display:flex;gap:8px;align-items:center;width:100%;
+                         background:#0b1427;border:1px solid var(--line);color:#fff;
+                         padding:8px 10px;border-radius:8px;cursor:pointer;margin:4px 0;">
+            🧾 Import column aliases
+          </button>
         `;
 
         // Position under the button
@@ -2351,14 +2562,34 @@ function renderTopNav(){
           if (k === 'global') {
             // keep current behaviour
             switchToSection('settings');
+
           } else if (k === 'rates') {
             // Preset Rates manager (parent modal)
             if (!confirmDiscardChangesIfDirty()) return;
             openPresetRatesManager();
+
           } else if (k === 'job-titles') {
             // New Job Titles manager (side-panel modal)
             if (!confirmDiscardChangesIfDirty()) return;
             openJobTitleSettingsModal();
+
+          } else if (k === 'band-mappings') {
+            // NEW: Weekly band mappings (assignment/grade ↔ contract band)
+            if (!confirmDiscardChangesIfDirty()) return;
+            if (typeof openAssignmentBandMappingsModal !== 'function') {
+              alert('Band mappings modal not yet implemented.');
+              return;
+            }
+            openAssignmentBandMappingsModal();
+
+          } else if (k === 'import-col-aliases') {
+            // NEW: Import column aliases (header name mapping)
+            if (!confirmDiscardChangesIfDirty()) return;
+            if (typeof openImportColumnAliasesModal !== 'function') {
+              alert('Import column aliases modal not yet implemented.');
+              return;
+            }
+            openImportColumnAliasesModal();
           }
         });
 
@@ -2431,6 +2662,8 @@ function renderTopNav(){
     }
   } catch {}
 }
+
+
 
 // NEW: advanced, section-aware search modal
 // === UPDATED: Advanced Search — add Roles (any) multi-select, use UK date pickers ===
@@ -24783,7 +25016,1023 @@ async function saveForFrame(fr) {
 // IDs-only selection helpers (single source of truth: Set of selected IDs)
 // ──────────────────────────────────────────────────────────────────────────────
 
+function openImportColumnAliasesModal(opts) {
+  const seed = (opts && typeof opts === 'object') ? opts : {};
+  const initSystem = String(seed.system_type || 'NHSP').toUpperCase();
+  const initField  = String(seed.field_key   || 'ASSIGNMENT').toUpperCase();
 
+  // Local modal state (kept in closure; no persistence needed)
+  const state = {
+    system_type: (['NHSP','HR_WEEKLY','HR_DAILY'].includes(initSystem) ? initSystem : 'NHSP'),
+    field_key:   (['ASSIGNMENT','GRADE'].includes(initField) ? initField : 'ASSIGNMENT'),
+    include_inactive: !!seed.include_inactive,
+    rows: [],
+    loading: false,
+    error: '',
+    // add form
+    add_alias_name: '',
+    add_notes: '',
+    add_active: true,
+    // edit panel
+    editing: null,   // row object
+    edit_alias_name: '',
+    edit_notes: '',
+    edit_active: true
+  };
+
+  const kind = 'import-summary-import-column-aliases';
+
+  const renderTab = () => {
+    const sys = state.system_type;
+    const fk  = state.field_key;
+
+    const listBody = (state.rows && state.rows.length)
+      ? state.rows.map(r => {
+          const id    = r.id || '';
+          const alias = (r.alias_name || '').toString();
+          const notes = (r.notes || '').toString();
+          const active = (r.active !== false);
+
+          const pill = active ? 'pill-ok' : 'pill-warn';
+          const pillTxt = active ? 'ACTIVE' : 'INACTIVE';
+
+          return `
+            <tr data-id="${enc(id)}" class="ica-row">
+              <td><span class="mini mono">${enc(alias || '—')}</span></td>
+              <td>
+                <span class="pill ${pill}" style="padding:2px 8px; font-size:12px;">${enc(pillTxt)}</span>
+              </td>
+              <td>
+                <span class="mini" style="white-space: normal; word-break: break-word; display:inline-block; max-width:320px;">
+                  ${enc(notes || '')}
+                </span>
+              </td>
+              <td style="white-space:nowrap;">
+                <button type="button" class="btn mini" data-act="ica-edit" data-id="${enc(id)}">Edit</button>
+                <button type="button" class="btn mini" style="margin-left:4px;" data-act="ica-toggle" data-id="${enc(id)}">
+                  ${active ? 'Disable' : 'Enable'}
+                </button>
+                <button type="button" class="btn mini" style="margin-left:4px;" data-act="ica-delete" data-id="${enc(id)}">
+                  Remove
+                </button>
+              </td>
+            </tr>
+          `;
+        }).join('')
+      : `
+        <tr>
+          <td colspan="4">
+            <span class="mini">${state.loading ? 'Loading…' : 'No aliases found for this filter.'}</span>
+          </td>
+        </tr>
+      `;
+
+    const errHtml = state.error
+      ? `<div class="hint" style="color:#ffb4b4;">${enc(state.error)}</div>`
+      : '';
+
+    const editOpen = !!state.editing;
+
+    return `
+      <div class="form" id="importColumnAliasesModal">
+        <div class="card">
+          <div class="row">
+            <label>Filters</label>
+            <div class="controls" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+              <select class="input" id="ica_system" style="max-width:220px;">
+                <option value="NHSP" ${sys==='NHSP'?'selected':''}>NHSP</option>
+                <option value="HR_WEEKLY" ${sys==='HR_WEEKLY'?'selected':''}>HR weekly</option>
+                <option value="HR_DAILY" ${sys==='HR_DAILY'?'selected':''}>HR daily</option>
+              </select>
+
+              <select class="input" id="ica_field" style="max-width:220px;">
+                <option value="ASSIGNMENT" ${fk==='ASSIGNMENT'?'selected':''}>ASSIGNMENT (NHSP)</option>
+                <option value="GRADE" ${fk==='GRADE'?'selected':''}>GRADE (HR)</option>
+              </select>
+
+              <label class="mini" style="display:flex;gap:6px;align-items:center;">
+                <input type="checkbox" id="ica_include_inactive" ${state.include_inactive ? 'checked' : ''}/>
+                Show inactive
+              </label>
+
+              <button type="button" class="btn" id="ica_refresh" ${state.loading ? 'disabled' : ''}>
+                Refresh
+              </button>
+
+              <span class="mini" style="opacity:.85;">
+                ${state.loading ? 'Loading…' : `${(state.rows||[]).length} row(s)`}
+              </span>
+            </div>
+          </div>
+          ${errHtml}
+        </div>
+
+        <div class="card" style="margin-top:10px;">
+          <div class="row">
+            <label>Add alias</label>
+            <div class="controls" style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-start;">
+              <div style="min-width:260px;flex:1;">
+                <div class="mini" style="margin-bottom:4px;">Alias name</div>
+                <input class="input" id="ica_add_alias" type="text" placeholder="e.g. Assignment, Request Grade, Grade…" value="${enc(state.add_alias_name||'')}" />
+              </div>
+
+              <div style="min-width:260px;flex:2;">
+                <div class="mini" style="margin-bottom:4px;">Notes (optional)</div>
+                <input class="input" id="ica_add_notes" type="text" placeholder="Optional note…" value="${enc(state.add_notes||'')}" />
+              </div>
+
+              <div style="min-width:140px;">
+                <div class="mini" style="margin-bottom:4px;">Active</div>
+                <label class="mini" style="display:flex;gap:6px;align-items:center;">
+                  <input type="checkbox" id="ica_add_active" ${state.add_active ? 'checked' : ''}/>
+                  Active
+                </label>
+              </div>
+
+              <div style="min-width:140px;padding-top:18px;">
+                <button type="button" class="btn btn-primary" id="ica_add_save" ${state.loading ? 'disabled' : ''}>
+                  Add
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card" style="margin-top:10px; display:${editOpen ? '' : 'none'};" id="ica_edit_card">
+          <div class="row">
+            <label>Edit alias</label>
+            <div class="controls" style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-start;">
+              <div class="mini" style="width:100%;">
+                Editing ID: <span class="mono" id="ica_edit_id">${enc(state.editing?.id || '')}</span>
+              </div>
+
+              <div style="min-width:260px;flex:1;">
+                <div class="mini" style="margin-bottom:4px;">Alias name</div>
+                <input class="input" id="ica_edit_alias" type="text" value="${enc(state.edit_alias_name||'')}" />
+              </div>
+
+              <div style="min-width:260px;flex:2;">
+                <div class="mini" style="margin-bottom:4px;">Notes</div>
+                <input class="input" id="ica_edit_notes" type="text" value="${enc(state.edit_notes||'')}" />
+              </div>
+
+              <div style="min-width:140px;">
+                <div class="mini" style="margin-bottom:4px;">Active</div>
+                <label class="mini" style="display:flex;gap:6px;align-items:center;">
+                  <input type="checkbox" id="ica_edit_active" ${state.edit_active ? 'checked' : ''}/>
+                  Active
+                </label>
+              </div>
+
+              <div style="min-width:220px;padding-top:18px;">
+                <button type="button" class="btn btn-primary" id="ica_edit_save" ${state.loading ? 'disabled' : ''}>
+                  Save changes
+                </button>
+                <button type="button" class="btn" id="ica_edit_cancel" style="margin-left:6px;">
+                  Cancel
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card" style="margin-top:10px;">
+          <div class="row">
+            <label>Aliases</label>
+            <div class="controls">
+              <table class="grid">
+                <thead>
+                  <tr>
+                    <th>Alias</th>
+                    <th>Active</th>
+                    <th>Notes</th>
+                    <th>Actions</th>
+                  </tr>
+                </thead>
+                <tbody id="ica_tbody">
+                  ${listBody}
+                </tbody>
+              </table>
+              <div class="hint">
+                These aliases are used by the parsers to find the correct column even if the supplier renames headers.
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
+  };
+
+  const loadList = async () => {
+    state.loading = true;
+    state.error = '';
+    try {
+      repaint();
+      const rows = await apiListImportColumnAliases({
+        system_type: state.system_type,
+        field_key: state.field_key,
+        include_inactive: state.include_inactive
+      });
+      state.rows = Array.isArray(rows) ? rows : [];
+    } catch (e) {
+      state.rows = [];
+      state.error = e?.message || String(e);
+    } finally {
+      state.loading = false;
+      repaint();
+    }
+  };
+
+  const startEdit = (row) => {
+    if (!row) return;
+    state.editing = row;
+    state.edit_alias_name = (row.alias_name || '').toString();
+    state.edit_notes = (row.notes || '').toString();
+    state.edit_active = (row.active !== false);
+    repaint();
+  };
+
+  const cancelEdit = () => {
+    state.editing = null;
+    state.edit_alias_name = '';
+    state.edit_notes = '';
+    state.edit_active = true;
+    repaint();
+  };
+
+  const repaint = () => {
+    const fr = window.__getModalFrame?.();
+    if (!fr) return;
+    // Re-render the only tab to reflect state changes
+    try { fr.setTab(fr.currentTabKey || 'p'); } catch {}
+    // Re-run wiring after repaint (setTab re-writes DOM)
+    try {
+      const fr2 = window.__getModalFrame?.();
+      if (fr2 && typeof fr2.onReturn === 'function') fr2.onReturn();
+    } catch {}
+  };
+
+  const onReturn = () => {
+    const root = document.getElementById('importColumnAliasesModal');
+    if (!root) return;
+
+    const selSystem = document.getElementById('ica_system');
+    const selField  = document.getElementById('ica_field');
+    const chkInact  = document.getElementById('ica_include_inactive');
+    const btnRef    = document.getElementById('ica_refresh');
+
+    const addAlias  = document.getElementById('ica_add_alias');
+    const addNotes  = document.getElementById('ica_add_notes');
+    const addAct    = document.getElementById('ica_add_active');
+    const addSave   = document.getElementById('ica_add_save');
+
+    const editAlias = document.getElementById('ica_edit_alias');
+    const editNotes = document.getElementById('ica_edit_notes');
+    const editAct   = document.getElementById('ica_edit_active');
+    const editSave  = document.getElementById('ica_edit_save');
+    const editCancel= document.getElementById('ica_edit_cancel');
+
+    if (selSystem && !selSystem.__icaWired) {
+      selSystem.__icaWired = true;
+      selSystem.addEventListener('change', () => {
+        state.system_type = String(selSystem.value || 'NHSP').toUpperCase();
+        cancelEdit();
+        loadList();
+      });
+    }
+
+    if (selField && !selField.__icaWired) {
+      selField.__icaWired = true;
+      selField.addEventListener('change', () => {
+        state.field_key = String(selField.value || 'ASSIGNMENT').toUpperCase();
+        cancelEdit();
+        loadList();
+      });
+    }
+
+    if (chkInact && !chkInact.__icaWired) {
+      chkInact.__icaWired = true;
+      chkInact.addEventListener('change', () => {
+        state.include_inactive = !!chkInact.checked;
+        cancelEdit();
+        loadList();
+      });
+    }
+
+    if (btnRef && !btnRef.__icaWired) {
+      btnRef.__icaWired = true;
+      btnRef.addEventListener('click', () => loadList());
+    }
+
+    if (addAlias && !addAlias.__icaWired) {
+      addAlias.__icaWired = true;
+      addAlias.addEventListener('input', () => { state.add_alias_name = String(addAlias.value || ''); });
+      addAlias.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          const btn = document.getElementById('ica_add_save');
+          if (btn && !btn.disabled) btn.click();
+        }
+      });
+    }
+    if (addNotes && !addNotes.__icaWired) {
+      addNotes.__icaWired = true;
+      addNotes.addEventListener('input', () => { state.add_notes = String(addNotes.value || ''); });
+    }
+    if (addAct && !addAct.__icaWired) {
+      addAct.__icaWired = true;
+      addAct.addEventListener('change', () => { state.add_active = !!addAct.checked; });
+    }
+
+    if (addSave && !addSave.__icaWired) {
+      addSave.__icaWired = true;
+      addSave.addEventListener('click', async () => {
+        const aliasName = String(state.add_alias_name || '').trim();
+        if (!aliasName) {
+          alert('Alias name is required.');
+          return;
+        }
+        try {
+          state.loading = true;
+          state.error = '';
+          repaint();
+
+          await apiCreateImportColumnAlias({
+            system_type: state.system_type,
+            field_key: state.field_key,
+            alias_name: aliasName,
+            active: !!state.add_active,
+            notes: String(state.add_notes || '').trim() || null
+          });
+
+          window.__toast && window.__toast('Alias added.');
+          state.add_alias_name = '';
+          state.add_notes = '';
+          state.add_active = true;
+
+          await loadList();
+        } catch (e) {
+          state.error = e?.message || String(e);
+          state.loading = false;
+          repaint();
+          alert(state.error);
+        }
+      });
+    }
+
+    if (editAlias && !editAlias.__icaWired) {
+      editAlias.__icaWired = true;
+      editAlias.addEventListener('input', () => { state.edit_alias_name = String(editAlias.value || ''); });
+    }
+    if (editNotes && !editNotes.__icaWired) {
+      editNotes.__icaWired = true;
+      editNotes.addEventListener('input', () => { state.edit_notes = String(editNotes.value || ''); });
+    }
+    if (editAct && !editAct.__icaWired) {
+      editAct.__icaWired = true;
+      editAct.addEventListener('change', () => { state.edit_active = !!editAct.checked; });
+    }
+
+    if (editSave && !editSave.__icaWired) {
+      editSave.__icaWired = true;
+      editSave.addEventListener('click', async () => {
+        if (!state.editing || !state.editing.id) return;
+        const id = state.editing.id;
+
+        const aliasName = String(state.edit_alias_name || '').trim();
+        if (!aliasName) {
+          alert('Alias name is required.');
+          return;
+        }
+
+        try {
+          state.loading = true;
+          state.error = '';
+          repaint();
+
+          await apiUpdateImportColumnAlias(id, {
+            alias_name: aliasName,
+            notes: String(state.edit_notes || '').trim() || null,
+            active: !!state.edit_active
+          });
+
+          window.__toast && window.__toast('Alias updated.');
+          cancelEdit();
+          await loadList();
+        } catch (e) {
+          state.error = e?.message || String(e);
+          state.loading = false;
+          repaint();
+          alert(state.error);
+        }
+      });
+    }
+
+    if (editCancel && !editCancel.__icaWired) {
+      editCancel.__icaWired = true;
+      editCancel.addEventListener('click', () => cancelEdit());
+    }
+
+    // Row actions (Edit / Toggle / Remove)
+    if (!root.__icaWiredTable) {
+      root.__icaWiredTable = true;
+      root.addEventListener('click', async (ev) => {
+        const btn = ev.target.closest('button[data-act]');
+        if (!btn) return;
+
+        const act = btn.getAttribute('data-act');
+        const id  = btn.getAttribute('data-id');
+
+        if (!id) return;
+
+        const row = (state.rows || []).find(x => String(x.id) === String(id)) || null;
+
+        if (act === 'ica-edit') {
+          startEdit(row);
+          return;
+        }
+
+        if (act === 'ica-toggle') {
+          if (!row) return;
+          const next = !(row.active !== false);
+          try {
+            state.loading = true;
+            state.error = '';
+            repaint();
+
+            await apiUpdateImportColumnAlias(id, { active: next });
+
+            window.__toast && window.__toast(next ? 'Alias enabled.' : 'Alias disabled.');
+            cancelEdit();
+            await loadList();
+          } catch (e) {
+            state.error = e?.message || String(e);
+            state.loading = false;
+            repaint();
+            alert(state.error);
+          }
+          return;
+        }
+
+        if (act === 'ica-delete') {
+          const ok = window.confirm('Remove this alias? (It will be deactivated for safety)');
+          if (!ok) return;
+
+          try {
+            state.loading = true;
+            state.error = '';
+            repaint();
+
+            await apiDeleteImportColumnAlias(id);
+
+            window.__toast && window.__toast('Alias removed.');
+            cancelEdit();
+            await loadList();
+          } catch (e) {
+            state.error = e?.message || String(e);
+            state.loading = false;
+            repaint();
+            alert(state.error);
+          }
+          return;
+        }
+      });
+    }
+  };
+
+  // Utility modal: Close-only, no Save/Edit buttons in header.
+  // We also ensure it never gates the parent.
+  showModal(
+    'Import Column Aliases',
+    [{ key: 'p', title: 'Aliases' }],
+    () => renderTab(),
+    async () => true,
+    false,
+    onReturn,
+    { kind, noParentGate: true }
+  );
+
+  // Initial onReturn + initial load (same “post-render kick” pattern used by pickers)
+  setTimeout(() => {
+    try {
+      const fr = window.__getModalFrame?.();
+      if (fr && fr.kind === kind && typeof fr.onReturn === 'function' && !fr.__icaInit) {
+        fr.__icaInit = true;
+        fr.onReturn();
+        loadList();
+      }
+    } catch (e) {
+      console.warn('[IMPORT_COL_ALIASES] init failed', e);
+    }
+  }, 0);
+}
+
+function openImportColumnAliasesModal(opts) {
+  const seed = (opts && typeof opts === 'object') ? opts : {};
+  const initSystem = String(seed.system_type || 'NHSP').toUpperCase();
+  const initField  = String(seed.field_key   || 'ASSIGNMENT').toUpperCase();
+
+  // Local modal state (closure)
+  const state = {
+    system_type: (['NHSP','HR_WEEKLY','HR_DAILY'].includes(initSystem) ? initSystem : 'NHSP'),
+    field_key:   (['ASSIGNMENT','GRADE'].includes(initField) ? initField : 'ASSIGNMENT'),
+    include_inactive: !!seed.include_inactive,
+    rows: [],
+    loading: false,
+    error: '',
+
+    // Add form
+    add_alias_name: '',
+    add_notes: '',
+    add_active: true,
+
+    // Edit form
+    editing: null,   // row object
+    edit_alias_name: '',
+    edit_notes: '',
+    edit_active: true
+  };
+
+  // Make this a utility modal so showModal hides Save/Edit and avoids gating parent
+  const kind = 'import-summary-import-column-aliases';
+
+  const renderTab = () => {
+    const sys = state.system_type;
+    const fk  = state.field_key;
+
+    const errHtml = state.error
+      ? `<div class="hint" style="color:#ffb4b4;">${enc(state.error)}</div>`
+      : '';
+
+    const listBody = (state.rows && state.rows.length)
+      ? state.rows.map(r => {
+          const id     = r.id || '';
+          const alias  = (r.alias_name || r.alias_text || '').toString(); // supports either key
+          const notes  = (r.notes || '').toString();
+          const active = (r.active !== false);
+
+          const pill    = active ? 'pill-ok' : 'pill-warn';
+          const pillTxt = active ? 'ACTIVE' : 'INACTIVE';
+
+          return `
+            <tr data-id="${enc(id)}">
+              <td><span class="mini mono">${enc(alias || '—')}</span></td>
+              <td><span class="pill ${pill}" style="padding:2px 8px;font-size:12px;">${enc(pillTxt)}</span></td>
+              <td>
+                <span class="mini" style="white-space:normal;word-break:break-word;display:inline-block;max-width:360px;">
+                  ${enc(notes || '')}
+                </span>
+              </td>
+              <td style="white-space:nowrap;">
+                <button type="button" class="btn mini" data-act="ica-edit" data-id="${enc(id)}">Edit</button>
+                <button type="button" class="btn mini" style="margin-left:4px;" data-act="ica-toggle" data-id="${enc(id)}">
+                  ${active ? 'Disable' : 'Enable'}
+                </button>
+                <button type="button" class="btn mini" style="margin-left:4px;" data-act="ica-delete" data-id="${enc(id)}">
+                  Remove
+                </button>
+              </td>
+            </tr>
+          `;
+        }).join('')
+      : `
+        <tr>
+          <td colspan="4"><span class="mini">${state.loading ? 'Loading…' : 'No aliases found for this filter.'}</span></td>
+        </tr>
+      `;
+
+    const editOpen = !!state.editing;
+
+    return `
+      <div class="form" id="importColumnAliasesModal">
+        <div class="card">
+          <div class="row">
+            <label>Filters</label>
+            <div class="controls" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+              <select class="input" id="ica_system" style="max-width:220px;">
+                <option value="NHSP" ${sys==='NHSP'?'selected':''}>NHSP</option>
+                <option value="HR_WEEKLY" ${sys==='HR_WEEKLY'?'selected':''}>HR weekly</option>
+                <option value="HR_DAILY" ${sys==='HR_DAILY'?'selected':''}>HR daily</option>
+              </select>
+
+              <select class="input" id="ica_field" style="max-width:220px;">
+                <option value="ASSIGNMENT" ${fk==='ASSIGNMENT'?'selected':''}>ASSIGNMENT (NHSP)</option>
+                <option value="GRADE" ${fk==='GRADE'?'selected':''}>GRADE (HR)</option>
+              </select>
+
+              <label class="mini" style="display:flex;gap:6px;align-items:center;">
+                <input type="checkbox" id="ica_include_inactive" ${state.include_inactive ? 'checked' : ''}/>
+                Show inactive
+              </label>
+
+              <button type="button" class="btn" id="ica_refresh" ${state.loading ? 'disabled' : ''}>Refresh</button>
+
+              <span class="mini" style="opacity:.85;">
+                ${state.loading ? 'Loading…' : `${(state.rows||[]).length} row(s)`}
+              </span>
+            </div>
+          </div>
+          ${errHtml}
+        </div>
+
+        <div class="card" style="margin-top:10px;">
+          <div class="row">
+            <label>Add alias</label>
+            <div class="controls" style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-start;">
+              <div style="min-width:260px;flex:1;">
+                <div class="mini" style="margin-bottom:4px;">Alias name</div>
+                <input class="input" id="ica_add_alias" type="text"
+                       placeholder="e.g. Assignment, Request Grade, Grade…"
+                       value="${enc(state.add_alias_name||'')}" />
+              </div>
+
+              <div style="min-width:260px;flex:2;">
+                <div class="mini" style="margin-bottom:4px;">Notes (optional)</div>
+                <input class="input" id="ica_add_notes" type="text"
+                       placeholder="Optional note…"
+                       value="${enc(state.add_notes||'')}" />
+              </div>
+
+              <div style="min-width:140px;">
+                <div class="mini" style="margin-bottom:4px;">Active</div>
+                <label class="mini" style="display:flex;gap:6px;align-items:center;">
+                  <input type="checkbox" id="ica_add_active" ${state.add_active ? 'checked' : ''}/>
+                  Active
+                </label>
+              </div>
+
+              <div style="min-width:140px;padding-top:18px;">
+                <button type="button" class="btn btn-primary" id="ica_add_save" ${state.loading ? 'disabled' : ''}>
+                  Add
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card" style="margin-top:10px; display:${editOpen ? '' : 'none'};" id="ica_edit_card">
+          <div class="row">
+            <label>Edit alias</label>
+            <div class="controls" style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-start;">
+              <div class="mini" style="width:100%;">
+                Editing ID: <span class="mono" id="ica_edit_id">${enc(state.editing?.id || '')}</span>
+              </div>
+
+              <div style="min-width:260px;flex:1;">
+                <div class="mini" style="margin-bottom:4px;">Alias name</div>
+                <input class="input" id="ica_edit_alias" type="text" value="${enc(state.edit_alias_name||'')}" />
+              </div>
+
+              <div style="min-width:260px;flex:2;">
+                <div class="mini" style="margin-bottom:4px;">Notes</div>
+                <input class="input" id="ica_edit_notes" type="text" value="${enc(state.edit_notes||'')}" />
+              </div>
+
+              <div style="min-width:140px;">
+                <div class="mini" style="margin-bottom:4px;">Active</div>
+                <label class="mini" style="display:flex;gap:6px;align-items:center;">
+                  <input type="checkbox" id="ica_edit_active" ${state.edit_active ? 'checked' : ''}/>
+                  Active
+                </label>
+              </div>
+
+              <div style="min-width:220px;padding-top:18px;">
+                <button type="button" class="btn btn-primary" id="ica_edit_save" ${state.loading ? 'disabled' : ''}>
+                  Save changes
+                </button>
+                <button type="button" class="btn" id="ica_edit_cancel" style="margin-left:6px;">
+                  Cancel
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card" style="margin-top:10px;">
+          <div class="row">
+            <label>Aliases</label>
+            <div class="controls">
+              <table class="grid">
+                <thead>
+                  <tr>
+                    <th>Alias</th>
+                    <th>Active</th>
+                    <th>Notes</th>
+                    <th>Actions</th>
+                  </tr>
+                </thead>
+                <tbody id="ica_tbody">
+                  ${listBody}
+                </tbody>
+              </table>
+              <div class="hint">
+                These aliases are used by parsers to find the right column even if suppliers rename headers.
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
+  };
+
+  const repaint = () => {
+    const fr = window.__getModalFrame?.();
+    if (!fr) return;
+    try { fr.setTab(fr.currentTabKey || 'p'); } catch {}
+    try {
+      const fr2 = window.__getModalFrame?.();
+      if (fr2 && typeof fr2.onReturn === 'function') fr2.onReturn();
+    } catch {}
+  };
+
+  const loadList = async () => {
+    state.loading = true;
+    state.error = '';
+    try {
+      repaint();
+      const rows = await apiListImportColumnAliases({
+        system_type: state.system_type,
+        field_key: state.field_key,
+        include_inactive: state.include_inactive
+      });
+      state.rows = Array.isArray(rows) ? rows : [];
+    } catch (e) {
+      state.rows = [];
+      state.error = e?.message || String(e);
+    } finally {
+      state.loading = false;
+      repaint();
+    }
+  };
+
+  const startEdit = (row) => {
+    if (!row) return;
+    state.editing = row;
+    state.edit_alias_name = (row.alias_name || row.alias_text || '').toString();
+    state.edit_notes = (row.notes || '').toString();
+    state.edit_active = (row.active !== false);
+    repaint();
+  };
+
+  const cancelEdit = () => {
+    state.editing = null;
+    state.edit_alias_name = '';
+    state.edit_notes = '';
+    state.edit_active = true;
+    repaint();
+  };
+
+  const onReturn = () => {
+    const root = document.getElementById('importColumnAliasesModal');
+    if (!root) return;
+
+    const selSystem = document.getElementById('ica_system');
+    const selField  = document.getElementById('ica_field');
+    const chkInact  = document.getElementById('ica_include_inactive');
+    const btnRef    = document.getElementById('ica_refresh');
+
+    const addAlias  = document.getElementById('ica_add_alias');
+    const addNotes  = document.getElementById('ica_add_notes');
+    const addAct    = document.getElementById('ica_add_active');
+    const addSave   = document.getElementById('ica_add_save');
+
+    const editAlias = document.getElementById('ica_edit_alias');
+    const editNotes = document.getElementById('ica_edit_notes');
+    const editAct   = document.getElementById('ica_edit_active');
+    const editSave  = document.getElementById('ica_edit_save');
+    const editCancel= document.getElementById('ica_edit_cancel');
+
+    if (selSystem && !selSystem.__icaWired) {
+      selSystem.__icaWired = true;
+      selSystem.addEventListener('change', () => {
+        state.system_type = String(selSystem.value || 'NHSP').toUpperCase();
+        cancelEdit();
+        loadList();
+      });
+    }
+
+    if (selField && !selField.__icaWired) {
+      selField.__icaWired = true;
+      selField.addEventListener('change', () => {
+        state.field_key = String(selField.value || 'ASSIGNMENT').toUpperCase();
+        cancelEdit();
+        loadList();
+      });
+    }
+
+    if (chkInact && !chkInact.__icaWired) {
+      chkInact.__icaWired = true;
+      chkInact.addEventListener('change', () => {
+        state.include_inactive = !!chkInact.checked;
+        cancelEdit();
+        loadList();
+      });
+    }
+
+    if (btnRef && !btnRef.__icaWired) {
+      btnRef.__icaWired = true;
+      btnRef.addEventListener('click', () => loadList());
+    }
+
+    if (addAlias && !addAlias.__icaWired) {
+      addAlias.__icaWired = true;
+      addAlias.addEventListener('input', () => { state.add_alias_name = String(addAlias.value || ''); });
+      addAlias.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          const btn = document.getElementById('ica_add_save');
+          if (btn && !btn.disabled) btn.click();
+        }
+      });
+    }
+    if (addNotes && !addNotes.__icaWired) {
+      addNotes.__icaWired = true;
+      addNotes.addEventListener('input', () => { state.add_notes = String(addNotes.value || ''); });
+    }
+    if (addAct && !addAct.__icaWired) {
+      addAct.__icaWired = true;
+      addAct.addEventListener('change', () => { state.add_active = !!addAct.checked; });
+    }
+
+    if (addSave && !addSave.__icaWired) {
+      addSave.__icaWired = true;
+      addSave.addEventListener('click', async () => {
+        const aliasName = String(state.add_alias_name || '').trim();
+        if (!aliasName) {
+          alert('Alias name is required.');
+          return;
+        }
+        try {
+          state.loading = true;
+          state.error = '';
+          repaint();
+
+          await apiCreateImportColumnAlias({
+            system_type: state.system_type,
+            field_key: state.field_key,
+            alias_name: aliasName,
+            active: !!state.add_active,
+            notes: String(state.add_notes || '').trim() || null
+          });
+
+          window.__toast && window.__toast('Alias added.');
+          state.add_alias_name = '';
+          state.add_notes = '';
+          state.add_active = true;
+
+          await loadList();
+        } catch (e) {
+          state.error = e?.message || String(e);
+          state.loading = false;
+          repaint();
+          alert(state.error);
+        }
+      });
+    }
+
+    if (editAlias && !editAlias.__icaWired) {
+      editAlias.__icaWired = true;
+      editAlias.addEventListener('input', () => { state.edit_alias_name = String(editAlias.value || ''); });
+    }
+    if (editNotes && !editNotes.__icaWired) {
+      editNotes.__icaWired = true;
+      editNotes.addEventListener('input', () => { state.edit_notes = String(editNotes.value || ''); });
+    }
+    if (editAct && !editAct.__icaWired) {
+      editAct.__icaWired = true;
+      editAct.addEventListener('change', () => { state.edit_active = !!editAct.checked; });
+    }
+
+    if (editSave && !editSave.__icaWired) {
+      editSave.__icaWired = true;
+      editSave.addEventListener('click', async () => {
+        if (!state.editing || !state.editing.id) return;
+        const id = state.editing.id;
+
+        const aliasName = String(state.edit_alias_name || '').trim();
+        if (!aliasName) {
+          alert('Alias name is required.');
+          return;
+        }
+
+        try {
+          state.loading = true;
+          state.error = '';
+          repaint();
+
+          await apiUpdateImportColumnAlias(id, {
+            alias_name: aliasName,
+            notes: String(state.edit_notes || '').trim() || null,
+            active: !!state.edit_active
+          });
+
+          window.__toast && window.__toast('Alias updated.');
+          cancelEdit();
+          await loadList();
+        } catch (e) {
+          state.error = e?.message || String(e);
+          state.loading = false;
+          repaint();
+          alert(state.error);
+        }
+      });
+    }
+
+    if (editCancel && !editCancel.__icaWired) {
+      editCancel.__icaWired = true;
+      editCancel.addEventListener('click', () => cancelEdit());
+    }
+
+    // Row actions (Edit / Toggle / Remove)
+    if (!root.__icaWiredTable) {
+      root.__icaWiredTable = true;
+      root.addEventListener('click', async (ev) => {
+        const btn = ev.target.closest('button[data-act]');
+        if (!btn) return;
+
+        const act = btn.getAttribute('data-act');
+        const id  = btn.getAttribute('data-id');
+        if (!id) return;
+
+        const row = (state.rows || []).find(x => String(x.id) === String(id)) || null;
+
+        if (act === 'ica-edit') {
+          startEdit(row);
+          return;
+        }
+
+        if (act === 'ica-toggle') {
+          if (!row) return;
+          const next = !(row.active !== false);
+          try {
+            state.loading = true;
+            state.error = '';
+            repaint();
+
+            await apiUpdateImportColumnAlias(id, { active: next });
+
+            window.__toast && window.__toast(next ? 'Alias enabled.' : 'Alias disabled.');
+            cancelEdit();
+            await loadList();
+          } catch (e) {
+            state.error = e?.message || String(e);
+            state.loading = false;
+            repaint();
+            alert(state.error);
+          }
+          return;
+        }
+
+        if (act === 'ica-delete') {
+          const ok = window.confirm('Remove this alias? (It will be deactivated for safety)');
+          if (!ok) return;
+
+          try {
+            state.loading = true;
+            state.error = '';
+            repaint();
+
+            await apiDeleteImportColumnAlias(id);
+
+            window.__toast && window.__toast('Alias removed.');
+            cancelEdit();
+            await loadList();
+          } catch (e) {
+            state.error = e?.message || String(e);
+            state.loading = false;
+            repaint();
+            alert(state.error);
+          }
+          return;
+        }
+      });
+    }
+  };
+
+  showModal(
+    'Import Column Aliases',
+    [{ key: 'p', title: 'Aliases' }],
+    () => renderTab(),
+    async () => true,
+    false,
+    onReturn,
+    { kind, noParentGate: true }
+  );
+
+  // Initial wiring + first load
+  setTimeout(() => {
+    try {
+      const fr = window.__getModalFrame?.();
+      if (fr && fr.kind === kind && typeof fr.onReturn === 'function' && !fr.__icaInit) {
+        fr.__icaInit = true;
+        fr.onReturn();
+        loadList();
+      }
+    } catch (e) {
+      console.warn('[IMPORT_COL_ALIASES] init failed', e);
+    }
+  }, 0);
+}
 
 
 
@@ -27492,460 +28741,178 @@ function renderImportSummaryModal(importType, summaryState) {
 
   // ────────────────────── Helpers ──────────────────────
 
-  function renderHrRotaDailySummary(type, importId, rows, ss) {
-    const summary = ss.summary || {};
-    const total   = summary.total_rows || rows.length || 0;
+ function renderHrRotaDailySummary(type, importId, rows, ss) {
+  const summary = ss.summary || {};
+  const total   = summary.total_rows || rows.length || 0;
 
-    const counts = {
-      OK: 0,
-      FAILED: 0,
-      UNMATCHED: 0
-    };
-    rows.forEach(r => {
-      const st = String(r.status || '').toUpperCase();
-      if (st === 'OK' || st === 'VALIDATION_OK') counts.OK++;
-      else if (st === 'UNMATCHED') counts.UNMATCHED++;
-      else counts.FAILED++;
-    });
+  const counts = {
+    OK: 0,
+    FAILED: 0,
+    UNMATCHED: 0
+  };
+  rows.forEach(r => {
+    const st = String(r.status || '').toUpperCase();
+    if (st === 'OK' || st === 'VALIDATION_OK') counts.OK++;
+    else if (st === 'UNMATCHED') counts.UNMATCHED++;
+    else counts.FAILED++;
+  });
 
-    window.__hrRotaEmailSelections = window.__hrRotaEmailSelections || {};
-    window.__hrRotaEmailSelections[importId] = new Set();
-    const emailSel = window.__hrRotaEmailSelections[importId];
+  window.__hrRotaEmailSelections = window.__hrRotaEmailSelections || {};
+  window.__hrRotaEmailSelections[importId] = new Set();
+  const emailSel = window.__hrRotaEmailSelections[importId];
 
-    const rowsHtml = rows.length
-      ? rows.map((r, idx) => {
-          const staff = r.staff_name || r.staff_raw || '';
-          const unit  = r.unit || r.hospital_or_trust || r.hospital_norm || '';
-          const date  = r.date_local || r.date || r.shift_date || '';
-          const stRaw = r.status || '';
-          const st    = String(stRaw || '').toUpperCase();
-          const reasonCode = String(r.reason_code || r.failure_reason || r.reason || '').toLowerCase();
+  const rowsHtml = rows.length
+    ? rows.map((r, idx) => {
+        const staff = r.staff_name || r.staff_raw || '';
+        const unit  = r.unit || r.hospital_or_trust || r.hospital_norm || '';
+        const date  = r.date_local || r.date || r.shift_date || '';
+        const stRaw = r.status || '';
+        const st    = String(stRaw || '').toUpperCase();
+        const reasonCode = String(r.reason_code || r.failure_reason || r.reason || '').toLowerCase();
 
-          const canAssignCand   = (reasonCode === 'candidate_unresolved');
-          const canAssignClient = (reasonCode === 'client_unresolved');
+        const canAssignCand   = (reasonCode === 'candidate_unresolved');
+        const canAssignClient = (reasonCode === 'client_unresolved');
 
-          const isTimeMismatch =
-            reasonCode === 'actual_hours_mismatch' ||
-            reasonCode === 'start_end_mismatch' ||
-            reasonCode === 'break_minutes_mismatch';
+        const isTimeMismatch =
+          reasonCode === 'actual_hours_mismatch' ||
+          reasonCode === 'start_end_mismatch' ||
+          reasonCode === 'break_minutes_mismatch';
 
-          let stCls = 'pill-info';
-          if (st === 'OK' || st === 'VALIDATION_OK') {
-            stCls = 'pill-ok';
-          } else if (reasonCode === 'candidate_unresolved' || reasonCode === 'client_unresolved') {
-            stCls = 'pill-bad';
-          } else if (isTimeMismatch) {
-            stCls = 'pill-warn';
-          }
+        let stCls = 'pill-info';
+        if (st === 'OK' || st === 'VALIDATION_OK') {
+          stCls = 'pill-ok';
+        } else if (reasonCode === 'candidate_unresolved' || reasonCode === 'client_unresolved') {
+          stCls = 'pill-bad';
+        } else if (isTimeMismatch) {
+          stCls = 'pill-warn';
+        }
 
-          let labelHtml;
-          if (st === 'OK' || st === 'VALIDATION_OK') {
-            labelHtml = 'OK';
-          } else if (reasonCode === 'candidate_unresolved') {
-            labelHtml = 'CANDIDATE<br/>UNMATCHED';
-          } else if (reasonCode === 'client_unresolved') {
-            labelHtml = 'CLIENT<br/>UNMATCHED';
-          } else if (reasonCode === 'actual_hours_mismatch') {
-            labelHtml = 'HOURS<br/>MISMATCH';
-          } else if (reasonCode === 'start_end_mismatch') {
-            labelHtml = 'START/END<br/>MISMATCH';
-          } else if (reasonCode === 'break_minutes_mismatch') {
-            labelHtml = 'BREAK<br/>MISMATCH';
-          } else {
-            const raw = (reasonCode || 'UNKNOWN').replace(/_/g, ' ').toUpperCase();
-            const firstSpace = raw.indexOf(' ');
-            if (firstSpace > 0) {
-              labelHtml = `${enc(raw.slice(0, firstSpace))}<br/>${enc(raw.slice(firstSpace + 1))}`;
-            } else {
-              labelHtml = enc(raw);
-            }
-          }
+        // Normalised, human-readable label text (no <br/>, allow browser wrapping)
+        let pillLabel;
+        if (st === 'OK' || st === 'VALIDATION_OK') {
+          pillLabel = 'OK';
+        } else if (reasonCode === 'candidate_unresolved') {
+          pillLabel = 'CANDIDATE UNMATCHED';
+        } else if (reasonCode === 'client_unresolved') {
+          pillLabel = 'CLIENT UNMATCHED';
+        } else if (reasonCode === 'actual_hours_mismatch') {
+          pillLabel = 'HOURS MISMATCH';
+        } else if (reasonCode === 'start_end_mismatch') {
+          pillLabel = 'START/END MISMATCH';
+        } else if (reasonCode === 'break_minutes_mismatch') {
+          pillLabel = 'BREAK MISMATCH';
+        } else {
+          // Generic: reason_code like "reject_no_contract_band_mismatch"
+          pillLabel = (reasonCode || 'UNKNOWN').replace(/_/g, ' ').toUpperCase();
+        }
 
-          const emailEligible    = r.email_eligible === true;
-          const emailAlreadySent = r.email_already_sent === true;
+        const emailEligible    = r.email_eligible === true;
+        const emailAlreadySent = r.email_already_sent === true;
 
-          const rowId = r.hr_row_id || r.id || `${idx}`;
+        const rowId = r.hr_row_id || r.id || `${idx}`;
 
-          let emailCellHtml;
-          if (!emailEligible) {
-            emailCellHtml = '<span class="mini">—</span>';
-          } else {
-            const checked = (emailSel instanceof Set && emailSel.has(rowId)) ? 'checked' : '';
-            const iconHtml = emailAlreadySent
-              ? `<span class="email-icon" title="Email previously sent" style="font-size:0.8rem;opacity:0.7;">&#x2709;&#x2713;</span>`
-              : '';
+        let emailCellHtml;
+        if (!emailEligible) {
+          emailCellHtml = '<span class="mini">—</span>';
+        } else {
+          const checked = (emailSel instanceof Set && emailSel.has(rowId)) ? 'checked' : '';
+          const iconHtml = emailAlreadySent
+            ? `<span class="email-icon" title="Email previously sent" style="font-size:0.8rem;opacity:0.7;">&#x2709;&#x2713;</span>`
+            : '';
 
-            emailCellHtml = `
-              <div class="hr-email-cell" style="display:flex;align-items:center;justify-content:center;gap:4px;">
-                <input type="checkbox"
-                       data-act="hr-rota-email"
-                       data-row-id="${enc(rowId)}"
-                       data-row-idx="${idx}"
-                       ${checked} />
-                ${iconHtml}
-              </div>
-            `;
-          }
-
-          return `
-            <tr>
-              <td><span class="mini">${enc(staff || '—')}</span></td>
-              <td><span class="mini">${enc(unit || '—')}</span></td>
-              <td><span class="mini">${enc(date || '—')}</span></td>
-              <td>
-                <span class="pill ${stCls}">
-                  ${labelHtml}
-                </span>
-              </td>
-              <td>
-                ${
-                  canAssignCand
-                    ? `<button type="button"
-                               class="btn mini"
-                               data-act="resolve-candidate"
-                               data-row-idx="${idx}">
-                         Assign candidate…
-                       </button>`
-                    : ''
-                }
-                ${
-                  canAssignClient
-                    ? `<button type="button"
-                               class="btn mini"
-                               style="margin-left:4px;"
-                               data-act="resolve-client"
-                               data-row-idx="${idx}">
-                         Assign client…
-                       </button>`
-                    : ''
-                }
-              </td>
-              <td>${emailCellHtml}</td>
-            </tr>
+          emailCellHtml = `
+            <div class="hr-email-cell" style="display:flex;align-items:center;justify-content:center;gap:4px;">
+              <input type="checkbox"
+                     data-act="hr-rota-email"
+                     data-row-id="${enc(rowId)}"
+                     data-row-idx="${idx}"
+                     ${checked} />
+              ${iconHtml}
+            </div>
           `;
-        }).join('')
-      : `
-        <tr>
-          <td colspan="6">
-            <span class="mini">No rows to show.</span>
-          </td>
-        </tr>
-      `;
+        }
 
-    const markup = html(`
-      <div class="form" id="hrRotaSummary">
-        <div class="card hr-rota-full">
-          <div class="row">
-            <label>Overview</label>
-            <div class="controls">
-              <div class="mini">
-                Import ID: <span class="mono">${enc(importId || '—')}</span><br/>
-                Total rows: ${total}<br/>
-                OK: ${counts.OK} &nbsp; Failed: ${counts.FAILED} &nbsp; Unmatched: ${counts.UNMATCHED}
-              </div>
-            </div>
-          </div>
-
-          <div class="row" style="margin-top:10px;">
-            <label>Rows</label>
-            <div class="controls">
-              <div class="hr-rota-table-wrap" style="max-height:420px; overflow-y:auto;">
-                <table class="grid">
-                  <thead>
-                    <tr>
-                      <th>Staff</th>
-                      <th>Unit / Site</th>
-                      <th>Date</th>
-                      <th>Status</th>
-                      <th>Resolve</th>
-                      <th>Send email</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    ${rowsHtml}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          </div>
-
-          <div class="row hr-rota-footer" style="margin-top:8px;">
-            <label></label>
-            <div class="controls">
-              <button type="button"
-                      class="btn"
-                      data-act="hr-rota-reclassify">
-                Reclassify
-              </button>
-              <button type="button"
-                      class="btn btn-primary"
-                      style="margin-left:8px;"
-                      data-act="hr-rota-apply">
-                Finalise validations
-              </button>
-              <span class="mini" style="margin-left:8px;">
-                "Reclassify" re-runs checks and refreshes this summary.
-                "Finalise validations" updates validation status and, if boxes are ticked,
-                queues emails to Temp Staffing.
+        return `
+          <tr>
+            <td><span class="mini">${enc(staff || '—')}</span></td>
+            <td><span class="mini">${enc(unit || '—')}</span></td>
+            <td><span class="mini">${enc(date || '—')}</span></td>
+            <td>
+              <span
+                class="pill ${stCls}"
+                style="
+                  white-space: normal;
+                  word-break: break-word;
+                  display: inline-block;
+                  max-width: 160px;
+                  text-align: center;
+                "
+              >
+                ${enc(pillLabel || 'UNKNOWN')}
               </span>
-            </div>
-          </div>
-        </div>
-      </div>
-    `);
-
-    // Wiring (unchanged in spirit)
-    setTimeout(() => {
-      try {
-        const root = document.getElementById('hrRotaSummary');
-        if (!root || type !== 'HR_ROTA_DAILY') return;
-
-        root.addEventListener('click', (ev) => {
-          const btn = ev.target.closest('button[data-act]');
-          if (!btn) return;
-          const act = btn.getAttribute('data-act');
-
-          const st = window.__importSummaryState && window.__importSummaryState['HR_ROTA_DAILY'];
-          if (!st) return;
-
-          const rows = Array.isArray(st.rows) ? st.rows : [];
-          const idx  = Number(btn.getAttribute('data-row-idx') || '-1');
-          const row  = (idx >= 0 && idx < rows.length) ? rows[idx] : null;
-          if (!row) return;
-
-          const reasonCode   = String(row.reason_code || row.failure_reason || row.reason || '').toLowerCase();
-          const hasTimesheet = !!row.timesheet_id;
-
-          if (act === 'resolve-candidate') {
-            if (reasonCode === 'candidate_unresolved' || !hasTimesheet) {
-              openHrRotaAssignCandidateModal(importId, idx);
-              return;
-            }
-
-            if (hasTimesheet) {
-              openResolveCandidateModal({
-                timesheet_id:      row.timesheet_id,
-                occupant_key_norm: row.staff_name || row.staff_raw || '',
-                hospital_norm:     row.unit || row.hospital_or_trust || row.hospital_norm || ''
-              });
-            } else {
-              alert('No timesheet matched for this row; resolve candidate via imports/aliases instead.');
-            }
-          }
-
-          if (act === 'resolve-client') {
-            if (reasonCode === 'client_unresolved' || !hasTimesheet) {
-              openHrRotaAssignClientModal(importId, idx);
-              return;
-            }
-
-            if (hasTimesheet) {
-              openResolveClientModal({
-                timesheet_id:  row.timesheet_id,
-                hospital_norm: row.unit || row.hospital_or_trust || row.hospital_norm || ''
-              });
-            } else {
-              alert('No timesheet matched for this row; resolve client/site via imports/aliases instead.');
-            }
-          }
-        });
-
-        root.addEventListener('change', (ev) => {
-          const cb = ev.target.closest('input[data-act="hr-rota-email"]');
-          if (!cb) return;
-
-          const rowId = cb.getAttribute('data-row-id') || '';
-          if (!rowId) return;
-
-          window.__hrRotaEmailSelections = window.__hrRotaEmailSelections || {};
-          const sel = window.__hrRotaEmailSelections[importId] || new Set();
-          if (!(sel instanceof Set)) {
-            window.__hrRotaEmailSelections[importId] = new Set();
-          }
-
-          if (cb.checked) {
-            window.__hrRotaEmailSelections[importId].add(rowId);
-          } else {
-            window.__hrRotaEmailSelections[importId].delete(rowId);
-          }
-        });
-
-        const btnReclass = root.querySelector('button[data-act="hr-rota-reclassify"]');
-        if (btnReclass && !btnReclass.__hrRotaReclassWired) {
-          btnReclass.__hrRotaReclassWired = true;
-          btnReclass.addEventListener('click', async () => {
-            try {
-              if (!importId) {
-                alert('No import_id in summary; cannot reclassify.');
-                return;
+            </td>
+            <td>
+              ${
+                canAssignCand
+                  ? `<button type="button"
+                             class="btn mini"
+                             data-act="resolve-candidate"
+                             data-row-idx="${idx}">
+                       Assign candidate…
+                     </button>`
+                  : ''
               }
-              await refreshHrRotaSummary(importId);
-            } catch (err) {
-              console.error('[IMPORTS][HR_ROTA] reclassify failed', err);
-              alert(err?.message || 'Reclassify failed.');
-            }
-          });
-        }
-
-        const btnApply = root.querySelector('button[data-act="hr-rota-apply"]');
-        if (btnApply && !btnApply.__hrRotaApplyWired) {
-          btnApply.__hrRotaApplyWired = true;
-          btnApply.addEventListener('click', async () => {
-            try {
-              if (!importId) {
-                alert('No import_id in summary; cannot finalise.');
-                return;
+              ${
+                canAssignClient
+                  ? `<button type="button"
+                             class="btn mini"
+                             style="margin-left:4px;"
+                             data-act="resolve-client"
+                             data-row-idx="${idx}">
+                       Assign client…
+                     </button>`
+                  : ''
               }
+            </td>
+            <td>${emailCellHtml}</td>
+          </tr>
+        `;
+      }).join('')
+    : `
+      <tr>
+        <td colspan="6">
+          <span class="mini">No rows to show.</span>
+        </td>
+      </tr>
+    `;
 
-              const ok = window.confirm('Are you sure you are ready to finalise?');
-              if (!ok) return;
-
-              const sel = window.__hrRotaEmailSelections && window.__hrRotaEmailSelections[importId];
-              const sendEmailRowIds = (sel instanceof Set) ? Array.from(sel) : [];
-
-              const result = await applyHrRotaValidation(importId, sendEmailRowIds) || {};
-
-              const lines = [];
-              lines.push(`HR Rota validations for import ${result.import_id || importId} have been processed.`);
-
-              if (typeof result.validations_ok === 'number') {
-                lines.push(`Valid rows: ${result.validations_ok}`);
-              }
-              if (typeof result.validations_failed === 'number') {
-                lines.push(`Rows still unresolved: ${result.validations_failed}`);
-              }
-              if (typeof result.emails_queued === 'number') {
-                lines.push(`Emails queued: ${result.emails_queued}`);
-              }
-
-              if (Array.isArray(result.reasons) && result.reasons.length) {
-                lines.push('');
-                lines.push('Remaining issues:');
-                for (const r of result.reasons) {
-                  const rc    = String(r.reason_code || '').toLowerCase();
-                  const count = r.count ?? 0;
-                  let nice;
-                  if      (rc === 'candidate_unresolved')         nice = 'Candidate unmatched';
-                  else if (rc === 'client_unresolved')            nice = 'Client unmatched';
-                  else if (rc === 'actual_hours_mismatch')       nice = 'Hours mismatch';
-                  else if (rc === 'start_end_mismatch')          nice = 'Start/end mismatch';
-                  else if (rc === 'break_minutes_mismatch')      nice = 'Break mismatch';
-                  else                                           nice = (rc || 'other').replace(/_/g, ' ');
-                  lines.push(`- ${nice}: ${count}`);
-                }
-              }
-
-              alert(lines.join('\n'));
-              await refreshHrRotaSummary(importId);
-            } catch (err) {
-              console.error('[IMPORTS][HR_ROTA] apply failed', err);
-              alert(err?.message || 'Apply validations failed.');
-            }
-          });
-        }
-      } catch (e) {
-        console.warn('[IMPORTS] HR_ROTA wiring failed', e);
-      }
-    }, 0);
-
-    return markup;
-  }
-
-  function renderWeeklyImportSummary(type, importId, rows, ss) {
-    const summary = ss.summary || {};
-    const total   = summary.total_rows || rows.length || 0;
-
-    const rowsHtml = rows.length
-      ? rows.map((r, idx) => {
-          const staff  = r.staff_name || r.staff_raw || '';
-          const unit   = r.unit || r.hospital_or_trust || r.hospital_norm || '';
-
-          const rawDateYmd =
-            r.date_local ||
-            r.work_date ||
-            r.date ||
-            r.week_ending_date ||
-            '';
-
-          const date   = formatYmdToNiceDate(rawDateYmd);
-          const action = String(r.resolution_status || r.action || '').toUpperCase();
-
-          let cls = 'pill-info';
-          if (action === 'OK' || action === 'APPLY') cls = 'pill-ok';
-          else if (action === 'NO_CANDIDATE' || action === 'NO_CLIENT') cls = 'pill-bad';
-
-          const canAssignCand   = (action === 'NO_CANDIDATE');
-          const canAssignClient = (action === 'NO_CLIENT');
-
-          return `
-            <tr>
-              <td><span class="mini">${enc(staff || '—')}</span></td>
-              <td><span class="mini">${enc(unit || '—')}</span></td>
-              <td><span class="mini">${enc(date || '—')}</span></td>
-              <td><span class="pill ${cls}">${enc(action || 'UNKNOWN')}</span></td>
-              <td>
-                ${
-                  canAssignCand
-                    ? `<button type="button"
-                               class="btn mini"
-                               data-act="weekly-resolve-candidate"
-                               data-row-idx="${idx}"
-                               data-staff="${enc(staff)}"
-                               data-unit="${enc(unit)}">
-                         Assign candidate…
-                       </button>`
-                    : ''
-                }
-                ${
-                  canAssignClient
-                    ? `<button type="button"
-                               class="btn mini"
-                               style="margin-left:4px;"
-                               data-act="weekly-resolve-client"
-                               data-row-idx="${idx}"
-                               data-unit="${enc(unit)}">
-                         Assign client…
-                       </button>`
-                    : ''
-                }
-              </td>
-            </tr>
-          `;
-        }).join('')
-      : `
-        <tr>
-          <td colspan="5">
-            <span class="mini">No rows to show.</span>
-          </td>
-        </tr>
-      `;
-
-    const markup = html(`
-      <div class="form" id="weeklyImportSummary">
-        <div class="card">
-          <div class="row">
-            <label>Overview</label>
-            <div class="controls">
-              <div class="mini">
-                Import ID: <span class="mono">${enc(importId || '—')}</span><br/>
-                Total rows: ${total}
-              </div>
+  const markup = html(`
+    <div class="form" id="hrRotaSummary">
+      <div class="card hr-rota-full">
+        <div class="row">
+          <label>Overview</label>
+          <div class="controls">
+            <div class="mini">
+              Import ID: <span class="mono">${enc(importId || '—')}</span><br/>
+              Total rows: ${total}<br/>
+              OK: ${counts.OK} &nbsp; Failed: ${counts.FAILED} &nbsp; Unmatched: ${counts.UNMATCHED}
             </div>
           </div>
         </div>
 
-        <div class="card" style="margin-top:10px;">
-          <div class="row">
-            <label>Rows</label>
-            <div class="controls">
+        <div class="row" style="margin-top:10px;">
+          <label>Rows</label>
+          <div class="controls">
+            <div class="hr-rota-table-wrap" style="max-height:420px; overflow-y:auto;">
               <table class="grid">
                 <thead>
                   <tr>
                     <th>Staff</th>
                     <th>Unit / Site</th>
-                    <th>Date / Week ending</th>
-                    <th>Resolution</th>
+                    <th>Date</th>
+                    <th>Status</th>
                     <th>Resolve</th>
+                    <th>Send email</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -27954,260 +28921,1424 @@ function renderImportSummaryModal(importType, summaryState) {
               </table>
             </div>
           </div>
+        </div>
 
-          <div class="row" style="margin-top:8px;">
-            <label></label>
-            <div class="controls">
+        <div class="row hr-rota-footer" style="margin-top:8px;">
+          <label></label>
+          <div class="controls">
+            <button type="button"
+                    class="btn"
+                    data-act="hr-rota-reclassify">
+              Reclassify
+            </button>
+            <button type="button"
+                    class="btn btn-primary"
+                    style="margin-left:8px;"
+                    data-act="hr-rota-apply">
+              Finalise validations
+            </button>
+            <span class="mini" style="margin-left:8px;">
+              "Reclassify" re-runs checks and refreshes this summary.
+              "Finalise validations" updates validation status and, if boxes are ticked,
+              queues emails to Temp Staffing.
+            </span>
+          </div>
+        </div>
+      </div>
+    </div>
+  `);
+
+  // Wiring (unchanged in spirit)
+  setTimeout(() => {
+    try {
+      const root = document.getElementById('hrRotaSummary');
+      if (!root || type !== 'HR_ROTA_DAILY') return;
+
+      root.addEventListener('click', (ev) => {
+        const btn = ev.target.closest('button[data-act]');
+        if (!btn) return;
+        const act = btn.getAttribute('data-act');
+
+        const st = window.__importSummaryState && window.__importSummaryState['HR_ROTA_DAILY'];
+        if (!st) return;
+
+        const rows = Array.isArray(st.rows) ? st.rows : [];
+        const idx  = Number(btn.getAttribute('data-row-idx') || '-1');
+        const row  = (idx >= 0 && idx < rows.length) ? rows[idx] : null;
+        if (!row) return;
+
+        const reasonCode   = String(row.reason_code || row.failure_reason || row.reason || '').toLowerCase();
+        const hasTimesheet = !!row.timesheet_id;
+
+        if (act === 'resolve-candidate') {
+          if (reasonCode === 'candidate_unresolved' || !hasTimesheet) {
+            openHrRotaAssignCandidateModal(importId, idx);
+            return;
+          }
+
+          if (hasTimesheet) {
+            openResolveCandidateModal({
+              timesheet_id:      row.timesheet_id,
+              occupant_key_norm: row.staff_name || row.staff_raw || '',
+              hospital_norm:     row.unit || row.hospital_or_trust || row.hospital_norm || ''
+            });
+          } else {
+            alert('No timesheet matched for this row; resolve candidate via imports/aliases instead.');
+          }
+        }
+
+        if (act === 'resolve-client') {
+          if (reasonCode === 'client_unresolved' || !hasTimesheet) {
+            openHrRotaAssignClientModal(importId, idx);
+            return;
+          }
+
+          if (hasTimesheet) {
+            openResolveClientModal({
+              timesheet_id:  row.timesheet_id,
+              hospital_norm: row.unit || row.hospital_or_trust || row.hospital_norm || ''
+            });
+          } else {
+            alert('No timesheet matched for this row; resolve client/site via imports/aliases instead.');
+          }
+        }
+      });
+
+      root.addEventListener('change', (ev) => {
+        const cb = ev.target.closest('input[data-act="hr-rota-email"]');
+        if (!cb) return;
+
+        const rowId = cb.getAttribute('data-row-id') || '';
+        if (!rowId) return;
+
+        window.__hrRotaEmailSelections = window.__hrRotaEmailSelections || {};
+        const sel = window.__hrRotaEmailSelections[importId] || new Set();
+        if (!(sel instanceof Set)) {
+          window.__hrRotaEmailSelections[importId] = new Set();
+        }
+
+        if (cb.checked) {
+          window.__hrRotaEmailSelections[importId].add(rowId);
+        } else {
+          window.__hrRotaEmailSelections[importId].delete(rowId);
+        }
+      });
+
+      const btnReclass = root.querySelector('button[data-act="hr-rota-reclassify"]');
+      if (btnReclass && !btnReclass.__hrRotaReclassWired) {
+        btnReclass.__hrRotaReclassWired = true;
+        btnReclass.addEventListener('click', async () => {
+          try {
+            if (!importId) {
+              alert('No import_id in summary; cannot reclassify.');
+              return;
+            }
+            await refreshHrRotaSummary(importId);
+          } catch (err) {
+            console.error('[IMPORTS][HR_ROTA] reclassify failed', err);
+            alert(err?.message || 'Reclassify failed.');
+          }
+        });
+      }
+
+      const btnApply = root.querySelector('button[data-act="hr-rota-apply"]');
+      if (btnApply && !btnApply.__hrRotaApplyWired) {
+        btnApply.__hrRotaApplyWired = true;
+        btnApply.addEventListener('click', async () => {
+          try {
+            if (!importId) {
+              alert('No import_id in summary; cannot finalise.');
+              return;
+            }
+
+            const ok = window.confirm('Are you sure you are ready to finalise?');
+            if (!ok) return;
+
+            const sel = window.__hrRotaEmailSelections && window.__hrRotaEmailSelections[importId];
+            const sendEmailRowIds = (sel instanceof Set) ? Array.from(sel) : [];
+
+            const result = await applyHrRotaValidation(importId, sendEmailRowIds) || {};
+
+            const lines = [];
+            lines.push(`HR Rota validations for import ${result.import_id || importId} have been processed.`);
+
+            if (typeof result.validations_ok === 'number') {
+              lines.push(`Valid rows: ${result.validations_ok}`);
+            }
+            if (typeof result.validations_failed === 'number') {
+              lines.push(`Rows still unresolved: ${result.validations_failed}`);
+            }
+            if (typeof result.emails_queued === 'number') {
+              lines.push(`Emails queued: ${result.emails_queued}`);
+            }
+
+            if (Array.isArray(result.reasons) && result.reasons.length) {
+              lines.push('');
+              lines.push('Remaining issues:');
+              for (const r of result.reasons) {
+                const rc    = String(r.reason_code || '').toLowerCase();
+                const count = r.count ?? 0;
+                let nice;
+                if      (rc === 'candidate_unresolved')         nice = 'Candidate unmatched';
+                else if (rc === 'client_unresolved')            nice = 'Client unmatched';
+                else if (rc === 'actual_hours_mismatch')       nice = 'Hours mismatch';
+                else if (rc === 'start_end_mismatch')          nice = 'Start/end mismatch';
+                else if (rc === 'break_minutes_mismatch')      nice = 'Break mismatch';
+                else                                           nice = (rc || 'other').replace(/_/g, ' ');
+                lines.push(`- ${nice}: ${count}`);
+              }
+            }
+
+            alert(lines.join('\n'));
+            await refreshHrRotaSummary(importId);
+          } catch (err) {
+            console.error('[IMPORTS][HR_ROTA] apply failed', err);
+            alert(err?.message || 'Apply validations failed.');
+          }
+        });
+      }
+    } catch (e) {
+      console.warn('[IMPORTS] HR_ROTA wiring failed', e);
+    }
+  }, 0);
+
+  return markup;
+}
+
+function renderWeeklyImportSummary(type, importId, rows, ss) {
+  const summary = ss.summary || {};
+  const total   = summary.total_rows || rows.length || 0;
+
+  const rowsHtml = rows.length
+    ? rows.map((r, idx) => {
+        const staff  = r.staff_name || r.staff_raw || '';
+        const unit   = r.unit || r.hospital_or_trust || r.hospital_norm || '';
+
+        const rawDateYmd =
+          r.date_local ||
+          r.work_date ||
+          r.date ||
+          r.week_ending_date ||
+          '';
+
+        const date = formatYmdToNiceDate(rawDateYmd);
+
+        // NEW: incoming code (assignment/grade)
+        const code =
+          (r.incoming_code ||
+           r.assignment_code ||
+           r.assignment ||
+           r.assignment_grade_norm ||
+           '').toString();
+
+        // NEW: reason (human text from backend)
+        const reasonText = (r.reason || '').toString();
+
+        // Raw action from backend
+        const actionRaw = String(r.resolution_status || r.action || '').toUpperCase().trim();
+
+        // Display label: replace underscores with spaces so it wraps nicely
+        const displayAction = actionRaw
+          ? actionRaw.replace(/_/g, ' ')
+          : 'UNKNOWN';
+
+        // Pill colouring
+        let cls = 'pill-info';
+        if (actionRaw === 'OK' || actionRaw === 'APPLY') cls = 'pill-ok';
+        else if (
+          actionRaw === 'NO_CANDIDATE' ||
+          actionRaw === 'REJECT_NO_CANDIDATE' ||
+          actionRaw === 'NO_CLIENT' ||
+          actionRaw === 'REJECT_NO_CLIENT'
+        ) cls = 'pill-bad';
+        else if (
+          actionRaw === 'REJECT_NO_CONTRACT' ||
+          actionRaw === 'REJECT_NO_CONTRACT_BAND_MISMATCH'
+        ) cls = 'pill-warn';
+
+        const canAssignCand   = (actionRaw === 'NO_CANDIDATE' || actionRaw === 'REJECT_NO_CANDIDATE');
+        const canAssignClient = (actionRaw === 'NO_CLIENT'    || actionRaw === 'REJECT_NO_CLIENT');
+
+        const canManageBandMapping =
+          (actionRaw === 'REJECT_NO_CONTRACT_BAND_MISMATCH') &&
+          !!String(code || '').trim();
+
+        return `
+          <tr>
+            <td><span class="mini">${enc(staff || '—')}</span></td>
+            <td><span class="mini">${enc(unit || '—')}</span></td>
+            <td><span class="mini">${enc(date || '—')}</span></td>
+
+            <td>
+              <span class="mini"
+                    style="white-space: normal; word-break: break-word; display:inline-block; max-width:140px;">
+                ${enc(code || '—')}
+              </span>
+            </td>
+
+            <td>
+              <span
+                class="pill ${cls}"
+                style="
+                  white-space: normal;
+                  word-break: break-word;
+                  display: inline-block;
+                  max-width: 180px;
+                  text-align: center;
+                "
+              >
+                ${enc(displayAction || 'UNKNOWN')}
+              </span>
+            </td>
+
+            <td>
+              <span class="mini"
+                    style="white-space: normal; word-break: break-word; display:inline-block; max-width:320px;">
+                ${enc(reasonText || '')}
+              </span>
+            </td>
+
+            <td>
+              ${
+                canAssignCand
+                  ? `<button type="button"
+                             class="btn mini"
+                             data-act="weekly-resolve-candidate"
+                             data-row-idx="${idx}"
+                             data-staff="${enc(staff)}"
+                             data-unit="${enc(unit)}">
+                       Assign candidate…
+                     </button>`
+                  : ''
+              }
+              ${
+                canAssignClient
+                  ? `<button type="button"
+                             class="btn mini"
+                             style="margin-left:4px;"
+                             data-act="weekly-resolve-client"
+                             data-row-idx="${idx}"
+                             data-unit="${enc(unit)}">
+                       Assign client…
+                     </button>`
+                  : ''
+              }
+              ${
+                canManageBandMapping
+                  ? `<button type="button"
+                             class="btn mini"
+                             style="margin-left:4px;"
+                             data-act="weekly-open-band-mapping"
+                             data-row-idx="${idx}"
+                             data-code="${enc(code)}">
+                       Manage band mapping…
+                     </button>`
+                  : ''
+              }
+            </td>
+          </tr>
+        `;
+      }).join('')
+    : `
+      <tr>
+        <td colspan="7">
+          <span class="mini">No rows to show.</span>
+        </td>
+      </tr>
+    `;
+
+  const markup = html(`
+    <div class="form" id="weeklyImportSummary">
+      <div class="card">
+        <div class="row">
+          <label>Overview</label>
+          <div class="controls">
+            <div class="mini">
+              Import ID: <span class="mono">${enc(importId || '—')}</span><br/>
+              Total rows: ${total}
+            </div>
+
+            <div style="margin-top:8px;">
               <button type="button"
-                      class="btn"
-                      data-act="weekly-import-refresh">
-                Refresh
+                      class="btn mini"
+                      data-act="weekly-open-band-mapping-overview"
+                      style="margin-right:6px;">
+                Manage mappings…
               </button>
-              <button type="button"
-                      class="btn btn-primary"
-                      style="margin-left:8px;"
-                      data-act="weekly-import-apply">
-                Finalise import
-              </button>
-              <span class="mini" style="margin-left:8px;">
-                This will apply the classification and create/update weeks and timesheets.
+              <span class="mini" style="opacity:.85;">
+                Opens the band mapping tool for ${enc(String(type || '').toUpperCase())}.
               </span>
             </div>
           </div>
         </div>
       </div>
-    `);
 
-    // Wiring for NHSP / HR_WEEKLY "Apply import" + Assign buttons
-    setTimeout(() => {
-      try {
-        const root = document.getElementById('weeklyImportSummary');
-        if (!root || (type !== 'NHSP' && type !== 'HR_WEEKLY')) return;
-        if (root.__weeklyWired) return;
-        root.__weeklyWired = true;
+      <div class="card" style="margin-top:10px;">
+        <div class="row">
+          <label>Rows</label>
+          <div class="controls">
+            <table class="grid">
+              <thead>
+                <tr>
+                  <th>Staff</th>
+                  <th>Unit / Site</th>
+                  <th>Date / Week ending</th>
+                  <th>Code</th>
+                  <th>Resolution</th>
+                  <th>Reason</th>
+                  <th>Resolve</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${rowsHtml}
+              </tbody>
+            </table>
+          </div>
+        </div>
 
-        const LOGW = (typeof window.__LOG_IMPORTS === 'boolean') ? window.__LOG_IMPORTS : true;
-        const LW   = (...a) => { if (LOGW) console.log('[IMPORTS][WEEKLY]', ...a); };
+        <div class="row" style="margin-top:8px;">
+          <label></label>
+          <div class="controls">
+            <button type="button"
+                    class="btn"
+                    data-act="weekly-import-refresh">
+              Refresh
+            </button>
+            <button type="button"
+                    class="btn btn-primary"
+                    style="margin-left:8px;"
+                    data-act="weekly-import-apply">
+              Finalise import
+            </button>
+            <span class="mini" style="margin-left:8px;">
+              This will apply the classification and create/update weeks and timesheets.
+            </span>
+          </div>
+        </div>
+      </div>
+    </div>
+  `);
 
-        const st = window.__importSummaryState && window.__importSummaryState[type];
-        const rows = st && Array.isArray(st.rows) ? st.rows : [];
+  // Wiring for NHSP / HR_WEEKLY "Apply import" + Assign buttons
+  setTimeout(() => {
+    try {
+      const root = document.getElementById('weeklyImportSummary');
+      if (!root || (type !== 'NHSP' && type !== 'HR_WEEKLY')) return;
+      if (root.__weeklyWired) return;
+      root.__weeklyWired = true;
 
-        const ensureWeeklyImportMappings = () => {
-          window.__weeklyImportMappings = window.__weeklyImportMappings || {};
-          if (!window.__weeklyImportMappings[type]) {
-            window.__weeklyImportMappings[type] = {};
+      const LOGW = (typeof window.__LOG_IMPORTS === 'boolean') ? window.__LOG_IMPORTS : true;
+      const LW   = (...a) => { if (LOGW) console.log('[IMPORTS][WEEKLY]', ...a); };
+
+      const st   = window.__importSummaryState && window.__importSummaryState[type];
+      const rows = st && Array.isArray(st.rows) ? st.rows : [];
+
+      const ensureWeeklyImportMappings = () => {
+        window.__weeklyImportMappings = window.__weeklyImportMappings || {};
+        if (!window.__weeklyImportMappings[type]) {
+          window.__weeklyImportMappings[type] = {};
+        }
+        let m = window.__weeklyImportMappings[type][importId];
+        if (!m) {
+          m = {
+            candidate_mappings: [],
+            client_aliases: []
+          };
+          window.__weeklyImportMappings[type][importId] = m;
+        }
+        return m;
+      };
+
+      root.addEventListener('click', (ev) => {
+        const btn = ev.target.closest('button[data-act]');
+        if (!btn) return;
+        const act = btn.getAttribute('data-act');
+
+        // NEW: overview button → open mapping modal without a specific code
+        if (act === 'weekly-open-band-mapping-overview') {
+          const system_type = (String(type || '').toUpperCase() === 'NHSP') ? 'NHSP' : 'HR_WEEKLY';
+          if (typeof openAssignmentBandMappingsModal !== 'function') {
+            alert('Band mappings modal not yet implemented.');
+            return;
           }
-          let m = window.__weeklyImportMappings[type][importId];
-          if (!m) {
-            m = {
-              candidate_mappings: [],
-              client_aliases: []
-            };
-            window.__weeklyImportMappings[type][importId] = m;
+          try {
+            openAssignmentBandMappingsModal({
+              system_type,
+              incoming_code: null,
+              candidate_id: null,
+              client_id: null,
+              import_id: importId || null
+            });
+          } catch (e) {
+            console.error('[IMPORTS][WEEKLY] openAssignmentBandMappingsModal (overview) failed', e);
+            alert(e?.message || 'Failed to open band mappings.');
           }
-          return m;
-        };
+          return;
+        }
 
-        root.addEventListener('click', (ev) => {
-          const btn = ev.target.closest('button[data-act]');
-          if (!btn) return;
-          const act = btn.getAttribute('data-act');
-          if (act !== 'weekly-resolve-candidate' && act !== 'weekly-resolve-client') return;
-
+        // Existing: row-level band mapping shortcut
+        if (act === 'weekly-open-band-mapping') {
           const idx = Number(btn.getAttribute('data-row-idx') || '-1');
           if (idx < 0 || idx >= rows.length) return;
 
-          const row         = rows[idx];
-          const staffRaw    = row.staff_name || row.staff_raw || '';
-          const hospRaw     = row.hospital_or_trust || row.unit || row.hospital_norm || '';
-          const rawDateYmd  =
-            row.date_local ||
-            row.work_date ||
-            row.date ||
-            row.week_ending_date ||
-            '';
-          const niceDate    = formatYmdToNiceDate(rawDateYmd);
+          const row = rows[idx] || {};
+          const code =
+            (row.incoming_code ||
+             row.assignment_code ||
+             row.assignment ||
+             row.assignment_grade_norm ||
+             '').toString().trim();
 
-          const context = {
-            importId,
-            staffName: staffRaw,
-            unit: hospRaw,
-            dateYmd: rawDateYmd,
-            dateNice: niceDate,
-            source_system: type,
-            rowIndex: idx
-          };
+          const system_type = (String(type || '').toUpperCase() === 'NHSP') ? 'NHSP' : 'HR_WEEKLY';
 
-          if (act === 'weekly-resolve-candidate') {
-            openCandidatePicker(async ({ id, label }) => {
-              const mappings        = ensureWeeklyImportMappings();
-              const staffNorm       = row.staff_norm || staffRaw || '';
-              const hospitalOrTrust = hospRaw || null;
-              const clientId        = row.client_id || null;
-              const workDateYmd =
-                row.work_date ||
-                row.date_local ||
-                row.date ||
-                row.week_ending_date ||
-                null;
-
-              const mapping = {
-                staff_norm:       staffNorm,
-                hospital_or_trust:hospitalOrTrust,
-                candidate_id:     id,
-                client_id:        clientId,
-                work_date:        workDateYmd
-              };
-
-              const payload = {
-                candidate_mappings: [mapping],
-                client_aliases: []
-              };
-
-              LW('resolve-candidate mapping', {
-                importId,
-                type,
-                rowIndex: idx,
-                mapping
-              });
-
-              try {
-                await postWeeklyResolveMappings(importId, type, payload);
-                mappings.candidate_mappings.push(mapping);
-
-                window.__toast && window.__toast(`Candidate ${label} linked. Reclassifying import…`);
-                await refreshWeeklyImportSummary(type, importId);
-              } catch (err) {
-                console.error('[IMPORTS][WEEKLY] resolve-candidate failed', err);
-                alert(err?.message || 'Failed to resolve candidate for weekly import row.');
-              }
-            }, { context });
-
+          if (typeof openAssignmentBandMappingsModal !== 'function') {
+            alert('Band mappings modal not yet implemented.');
             return;
           }
 
-          if (act === 'weekly-resolve-client') {
-            const nhspOnly  = (type === 'NHSP');
-            const hrAutoOnly= (type === 'HR_WEEKLY');
+          try {
+            openAssignmentBandMappingsModal({
+              system_type,
+              incoming_code: code || null,
+              candidate_id: row.candidate_id || null,
+              client_id: row.client_id || null,
+              import_id: importId || null
+            });
+          } catch (e) {
+            console.error('[IMPORTS][WEEKLY] openAssignmentBandMappingsModal failed', e);
+            alert(e?.message || 'Failed to open band mappings.');
+          }
+          return;
+        }
 
-            openClientPicker(async ({ id, label }) => {
-              const mappings     = ensureWeeklyImportMappings();
-              const hospitalNorm = row.hospital_norm || hospRaw || '';
+        if (act !== 'weekly-resolve-candidate' && act !== 'weekly-resolve-client') return;
 
-              // Derive hr_row_ids to send to the backend so it can compute
-              // trust_raw from hr_rows exactly as SQL does.
-              const hrRowIds = [];
-              if (Array.isArray(row.hr_row_ids) && row.hr_row_ids.length) {
-                row.hr_row_ids
-                  .map(String)
-                  .map((v) => v.trim())
-                  .filter(Boolean)
-                  .forEach((v) => hrRowIds.push(v));
-              } else if (row.hr_row_id) {
-                hrRowIds.push(String(row.hr_row_id).trim());
-              }
+        const idx = Number(btn.getAttribute('data-row-idx') || '-1');
+        if (idx < 0 || idx >= rows.length) return;
 
-              const mapping = {
-                client_id:     id,
-                hr_row_ids:    hrRowIds,
-                hospital_norm: hospitalNorm   // kept as fallback hint
-              };
+        const row         = rows[idx];
+        const staffRaw    = row.staff_name || row.staff_raw || '';
+        const hospRaw     = row.hospital_or_trust || row.unit || row.hospital_norm || '';
+        const rawDateYmd  =
+          row.date_local ||
+          row.work_date ||
+          row.date ||
+          row.week_ending_date ||
+          '';
+        const niceDate    = formatYmdToNiceDate(rawDateYmd);
 
-              const payload = {
-                candidate_mappings: [],
-                client_aliases: [mapping]
-              };
+        const context = {
+          importId,
+          staffName: staffRaw,
+          unit: hospRaw,
+          dateYmd: rawDateYmd,
+          dateNice: niceDate,
+          source_system: type,
+          rowIndex: idx
+        };
 
-              LW('resolve-client mapping', {
-                importId,
-                type,
-                rowIndex: idx,
-                client_id: id,
-                hr_row_ids: hrRowIds,
-                hospital_norm: hospitalNorm
-              });
+        if (act === 'weekly-resolve-candidate') {
+          openCandidatePicker(async ({ id, label }) => {
+            const mappings        = ensureWeeklyImportMappings();
+            const staffNorm       = row.staff_norm || staffRaw || '';
+            const hospitalOrTrust = hospRaw || null;
+            const clientId        = row.client_id || null;
+            const workDateYmd =
+              row.work_date ||
+              row.date_local ||
+              row.date ||
+              row.week_ending_date ||
+              null;
 
-              try {
-                await postWeeklyResolveMappings(importId, type, payload);
-                mappings.client_aliases.push(mapping);
+            const mapping = {
+              staff_norm:       staffNorm,
+              hospital_or_trust:hospitalOrTrust,
+              candidate_id:     id,
+              client_id:        clientId,
+              work_date:        workDateYmd
+            };
 
-                window.__toast && window.__toast(`Client ${label} linked. Reclassifying import…`);
-                await refreshWeeklyImportSummary(type, importId);
-              } catch (err) {
-                console.error('[IMPORTS][WEEKLY] resolve-client failed', err);
-                alert(err?.message || 'Failed to resolve client for weekly import row.');
-              }
-            }, { nhspOnly, hrAutoOnly, context });
+            const payload = {
+              candidate_mappings: [mapping],
+              client_aliases: []
+            };
 
-            return;
+            LW('resolve-candidate mapping', {
+              importId,
+              type,
+              rowIndex: idx,
+              mapping
+            });
+
+            try {
+              await postWeeklyResolveMappings(importId, type, payload);
+              mappings.candidate_mappings.push(mapping);
+
+              window.__toast && window.__toast(`Candidate ${label} linked. Reclassifying import…`);
+              await refreshWeeklyImportSummary(type, importId);
+            } catch (err) {
+              console.error('[IMPORTS][WEEKLY] resolve-candidate failed', err);
+              alert(err?.message || 'Failed to resolve candidate for weekly import row.');
+            }
+          }, { context });
+
+          return;
+        }
+
+        if (act === 'weekly-resolve-client') {
+          const nhspOnly   = (type === 'NHSP');
+          const hrAutoOnly = (type === 'HR_WEEKLY');
+
+          openClientPicker(async ({ id, label }) => {
+            const mappings     = ensureWeeklyImportMappings();
+            const hospitalNorm = row.hospital_norm || hospRaw || '';
+
+            // Derive hr_row_ids to send to the backend so it can compute trust_raw from hr_rows exactly as SQL does.
+            const hrRowIds = [];
+            if (Array.isArray(row.hr_row_ids) && row.hr_row_ids.length) {
+              row.hr_row_ids
+                .map(String)
+                .map((v) => v.trim())
+                .filter(Boolean)
+                .forEach((v) => hrRowIds.push(v));
+            } else if (row.hr_row_id) {
+              hrRowIds.push(String(row.hr_row_id).trim());
+            }
+
+            const mapping = {
+              client_id:     id,
+              hr_row_ids:    hrRowIds,
+              hospital_norm: hospitalNorm
+            };
+
+            const payload = {
+              candidate_mappings: [],
+              client_aliases: [mapping]
+            };
+
+            LW('resolve-client mapping', {
+              importId,
+              type,
+              rowIndex: idx,
+              client_id: id,
+              hr_row_ids: hrRowIds,
+              hospital_norm: hospitalNorm
+            });
+
+            try {
+              await postWeeklyResolveMappings(importId, type, payload);
+              mappings.client_aliases.push(mapping);
+
+              window.__toast && window.__toast(`Client ${label} linked. Reclassifying import…`);
+              await refreshWeeklyImportSummary(type, importId);
+            } catch (err) {
+              console.error('[IMPORTS][WEEKLY] resolve-client failed', err);
+              alert(err?.message || 'Failed to resolve client for weekly import row.');
+            }
+          }, { nhspOnly, hrAutoOnly, context });
+
+          return;
+        }
+      });
+
+      const btnRefresh = root.querySelector('button[data-act="weekly-import-refresh"]');
+      if (btnRefresh && !btnRefresh.__weeklyRefreshWired) {
+        btnRefresh.__weeklyRefreshWired = true;
+        btnRefresh.addEventListener('click', async () => {
+          try {
+            await refreshWeeklyImportSummary(type, importId);
+          } catch (err) {
+            console.error('[IMPORTS][WEEKLY] manual refresh failed', err);
+            alert(err?.message || 'Weekly import refresh failed.');
           }
         });
-
-        const btnRefresh = root.querySelector('button[data-act="weekly-import-refresh"]');
-        if (btnRefresh && !btnRefresh.__weeklyRefreshWired) {
-          btnRefresh.__weeklyRefreshWired = true;
-          btnRefresh.addEventListener('click', async () => {
-            try {
-              await refreshWeeklyImportSummary(type, importId);
-            } catch (err) {
-              console.error('[IMPORTS][WEEKLY] manual refresh failed', err);
-              alert(err?.message || 'Weekly import refresh failed.');
-            }
-          });
-        }
-
-        const btnApplyWeekly = root.querySelector('button[data-act="weekly-import-apply"]');
-        if (btnApplyWeekly && !btnApplyWeekly.__weeklyApplyWired) {
-          btnApplyWeekly.__weeklyApplyWired = true;
-          btnApplyWeekly.addEventListener('click', async () => {
-            try {
-              if (!importId) {
-                alert('No import_id in summary; cannot finalise.');
-                return;
-              }
-
-              const ok = window.confirm('Are you sure you want to finalise now?');
-              if (!ok) return;
-
-              const mappings = ensureWeeklyImportMappings();
-
-              const result = await resolveImportConflicts(importId, type, mappings) || {};
-
-              const lines = [];
-              lines.push(`Import ${result.import_id || importId} has been finalised.`);
-
-              if (typeof result.shifts_created === 'number') {
-                lines.push(`Shifts created: ${result.shifts_created}`);
-              }
-              if (typeof result.shifts_updated === 'number') {
-                lines.push(`Shifts updated: ${result.shifts_updated}`);
-              }
-              if (typeof result.mapped_candidates === 'number') {
-                lines.push(`Candidates mapped: ${result.mapped_candidates}`);
-              }
-              if (typeof result.mapped_clients === 'number') {
-                lines.push(`Clients mapped: ${result.mapped_clients}`);
-              }
-              if (typeof result.groups_applied === 'number') {
-                lines.push(`Groups applied: ${result.groups_applied}`);
-              }
-
-              alert(lines.join('\n'));
-              await refreshWeeklyImportSummary(type, importId);
-            } catch (err) {
-              console.error('[IMPORTS][WEEKLY] apply failed', err);
-              alert(err?.message || 'Weekly import apply failed.');
-            }
-          });
-        }
-      } catch (e) {
-        console.warn('[IMPORTS] weekly import wiring failed', e);
       }
-    }, 0);
 
-    return markup;
-  }
+      const btnApplyWeekly = root.querySelector('button[data-act="weekly-import-apply"]');
+      if (btnApplyWeekly && !btnApplyWeekly.__weeklyApplyWired) {
+        btnApplyWeekly.__weeklyApplyWired = true;
+        btnApplyWeekly.addEventListener('click', async () => {
+          try {
+            if (!importId) {
+              alert('No import_id in summary; cannot finalise.');
+              return;
+            }
+
+            const ok = window.confirm('Are you sure you want to finalise now?');
+            if (!ok) return;
+
+            const mappings = ensureWeeklyImportMappings();
+
+            const result = await resolveImportConflicts(importId, type, mappings) || {};
+
+            const lines = [];
+            lines.push(`Import ${result.import_id || importId} has been finalised.`);
+
+            if (typeof result.shifts_created === 'number') {
+              lines.push(`Shifts created: ${result.shifts_created}`);
+            }
+            if (typeof result.shifts_updated === 'number') {
+              lines.push(`Shifts updated: ${result.shifts_updated}`);
+            }
+            if (typeof result.mapped_candidates === 'number') {
+              lines.push(`Candidates mapped: ${result.mapped_candidates}`);
+            }
+            if (typeof result.mapped_clients === 'number') {
+              lines.push(`Clients mapped: ${result.mapped_clients}`);
+            }
+            if (typeof result.groups_applied === 'number') {
+              lines.push(`Groups applied: ${result.groups_applied}`);
+            }
+
+            alert(lines.join('\n'));
+            await refreshWeeklyImportSummary(type, importId);
+          } catch (err) {
+            console.error('[IMPORTS][WEEKLY] apply failed', err);
+            alert(err?.message || 'Weekly import apply failed.');
+          }
+        });
+      }
+    } catch (e) {
+      console.warn('[IMPORTS] weekly import wiring failed', e);
+    }
+  }, 0);
+
+  return markup;
 }
+
+
+
+}
+
+function openAssignmentBandMappingsModal(opts) {
+  const seed = (opts && typeof opts === 'object') ? opts : {};
+  const initSystem = String(seed.system_type || seed.systemType || 'NHSP').toUpperCase();
+
+  // Per your decision: band/grade matching is weekly-only, so keep this modal weekly-only.
+  const SYSTEMS = ['NHSP', 'HR_WEEKLY'];
+
+  const state = {
+    // Filters
+    system_type: SYSTEMS.includes(initSystem) ? initSystem : 'NHSP',
+    scope_filter: 'ANY', // ANY | GLOBAL | CLIENT | CANDIDATE
+    filter_incoming_like: String(seed.incoming_code || seed.incomingCode || '').trim(),
+    filter_candidate_id: seed.candidate_id || seed.candidateId || null,
+    filter_candidate_label: '',
+    filter_client_id: seed.client_id || seed.clientId || null,
+    filter_client_label: '',
+    include_inactive: false,
+
+    // List
+    rows: [],
+    loading: false,
+    error: '',
+
+    // Add form
+    add_scope: (() => {
+      const cid = seed.candidate_id || seed.candidateId || null;
+      const lid = seed.client_id || seed.clientId || null;
+      if (cid) return 'CANDIDATE';
+      if (lid) return 'CLIENT';
+      return 'GLOBAL';
+    })(),
+    add_incoming_code: String(seed.incoming_code || seed.incomingCode || '').trim(),
+    add_band_match_pattern: '',
+    add_notes: '',
+    add_active: true,
+    add_candidate_id: seed.candidate_id || seed.candidateId || null,
+    add_candidate_label: '',
+    add_client_id: seed.client_id || seed.clientId || null,
+    add_client_label: '',
+
+    // Edit form
+    editing: null,
+    edit_band_match_pattern: '',
+    edit_notes: '',
+    edit_active: true
+  };
+
+  const kind = 'import-summary-assignment-band-mappings';
+
+  const scopeLabelForRow = (r) => {
+    const hasCand = !!r.candidate_id;
+    const hasCli  = !!r.client_id;
+    if (hasCand) return `Candidate${r.candidate_name ? `: ${r.candidate_name}` : ''}`;
+    if (hasCli)  return `Client${r.client_name ? `: ${r.client_name}` : ''}`;
+    return 'Global';
+  };
+
+  const renderTab = () => {
+    const sys = state.system_type;
+
+    const errHtml = state.error
+      ? `<div class="hint" style="color:#ffb4b4;">${enc(state.error)}</div>`
+      : '';
+
+    const listBody = (state.rows && state.rows.length)
+      ? state.rows.map(r => {
+          const id = r.id || '';
+          const incoming = (r.incoming_code || '').toString();
+          const patt = (r.band_match_pattern || '').toString();
+          const notes = (r.notes || '').toString();
+          const active = (r.active !== false);
+
+          const pill    = active ? 'pill-ok' : 'pill-warn';
+          const pillTxt = active ? 'ACTIVE' : 'INACTIVE';
+
+          const scopeTxt = scopeLabelForRow(r);
+
+          return `
+            <tr data-id="${enc(id)}">
+              <td><span class="mini mono">${enc(incoming || '—')}</span></td>
+              <td>
+                <span class="mini" style="white-space:normal;word-break:break-word;display:inline-block;max-width:220px;">
+                  ${enc(patt || '—')}
+                </span>
+              </td>
+              <td>
+                <span class="mini" style="white-space:normal;word-break:break-word;display:inline-block;max-width:240px;">
+                  ${enc(scopeTxt)}
+                </span>
+              </td>
+              <td><span class="pill ${pill}" style="padding:2px 8px;font-size:12px;">${enc(pillTxt)}</span></td>
+              <td>
+                <span class="mini" style="white-space:normal;word-break:break-word;display:inline-block;max-width:320px;">
+                  ${enc(notes || '')}
+                </span>
+              </td>
+              <td style="white-space:nowrap;">
+                <button type="button" class="btn mini" data-act="abm-edit" data-id="${enc(id)}">Edit</button>
+                <button type="button" class="btn mini" style="margin-left:4px;" data-act="abm-toggle" data-id="${enc(id)}">
+                  ${active ? 'Disable' : 'Enable'}
+                </button>
+                <button type="button" class="btn mini" style="margin-left:4px;" data-act="abm-delete" data-id="${enc(id)}">
+                  Remove
+                </button>
+              </td>
+            </tr>
+          `;
+        }).join('')
+      : `
+        <tr>
+          <td colspan="6"><span class="mini">${state.loading ? 'Loading…' : 'No mappings found for this filter.'}</span></td>
+        </tr>
+      `;
+
+    const editOpen = !!state.editing;
+
+    const addScope = state.add_scope;
+    const showAddCand = (addScope === 'CANDIDATE');
+    const showAddCli  = (addScope === 'CLIENT');
+
+    const filterScope = state.scope_filter;
+    const showFilterCand = (filterScope === 'CANDIDATE');
+    const showFilterCli  = (filterScope === 'CLIENT');
+
+    return `
+      <div class="form" id="assignmentBandMappingsModal">
+        <div class="card">
+          <div class="row">
+            <label>Filters</label>
+            <div class="controls" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+              <select class="input" id="abm_system" style="max-width:220px;">
+                <option value="NHSP" ${sys==='NHSP'?'selected':''}>NHSP</option>
+                <option value="HR_WEEKLY" ${sys==='HR_WEEKLY'?'selected':''}>HR weekly</option>
+              </select>
+
+              <select class="input" id="abm_scope_filter" style="max-width:200px;">
+                <option value="ANY" ${filterScope==='ANY'?'selected':''}>Any scope</option>
+                <option value="GLOBAL" ${filterScope==='GLOBAL'?'selected':''}>Global only</option>
+                <option value="CLIENT" ${filterScope==='CLIENT'?'selected':''}>Client only</option>
+                <option value="CANDIDATE" ${filterScope==='CANDIDATE'?'selected':''}>Candidate only</option>
+              </select>
+
+              <input class="input" id="abm_incoming_like" type="text"
+                     style="max-width:260px;"
+                     placeholder="Filter by code (e.g. CPN120)…"
+                     value="${enc(state.filter_incoming_like || '')}"/>
+
+              <label class="mini" style="display:flex;gap:6px;align-items:center;">
+                <input type="checkbox" id="abm_include_inactive" ${state.include_inactive ? 'checked' : ''}/>
+                Show inactive
+              </label>
+
+              <button type="button" class="btn" id="abm_refresh" ${state.loading ? 'disabled' : ''}>Refresh</button>
+
+              <span class="mini" style="opacity:.85;">
+                ${state.loading ? 'Loading…' : `${(state.rows||[]).length} row(s)`}
+              </span>
+            </div>
+          </div>
+
+          <div class="row" style="margin-top:6px; display:${(showFilterCand || showFilterCli) ? '' : 'none'};">
+            <label>Scope target</label>
+            <div class="controls" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+              <div style="display:${showFilterCand ? '' : 'none'};">
+                <span class="mini">Candidate:</span>
+                <span class="mini mono" id="abm_filter_candidate_label">${enc(state.filter_candidate_label || state.filter_candidate_id || '—')}</span>
+                <button type="button" class="btn mini" style="margin-left:6px;" data-act="abm-pick-filter-candidate">Pick…</button>
+                <button type="button" class="btn mini" style="margin-left:4px;" data-act="abm-clear-filter-candidate">Clear</button>
+              </div>
+
+              <div style="display:${showFilterCli ? '' : 'none'};">
+                <span class="mini">Client:</span>
+                <span class="mini mono" id="abm_filter_client_label">${enc(state.filter_client_label || state.filter_client_id || '—')}</span>
+                <button type="button" class="btn mini" style="margin-left:6px;" data-act="abm-pick-filter-client">Pick…</button>
+                <button type="button" class="btn mini" style="margin-left:4px;" data-act="abm-clear-filter-client">Clear</button>
+              </div>
+
+              <span class="mini" style="opacity:.75;">
+                (Scope filters are optional; they help you narrow the table.)
+              </span>
+            </div>
+          </div>
+
+          ${errHtml}
+        </div>
+
+        <div class="card" style="margin-top:10px;">
+          <div class="row">
+            <label>Add mapping</label>
+            <div class="controls" style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-start;">
+              <div style="min-width:180px;">
+                <div class="mini" style="margin-bottom:4px;">Scope</div>
+                <select class="input" id="abm_add_scope" style="max-width:180px;">
+                  <option value="GLOBAL" ${addScope==='GLOBAL'?'selected':''}>Global</option>
+                  <option value="CLIENT" ${addScope==='CLIENT'?'selected':''}>Client</option>
+                  <option value="CANDIDATE" ${addScope==='CANDIDATE'?'selected':''}>Candidate</option>
+                </select>
+              </div>
+
+              <div style="min-width:220px;flex:1;">
+                <div class="mini" style="margin-bottom:4px;">Incoming code</div>
+                <input class="input" id="abm_add_incoming" type="text"
+                       placeholder="e.g. CPN120"
+                       value="${enc(state.add_incoming_code || '')}"/>
+              </div>
+
+              <div style="min-width:260px;flex:2;">
+                <div class="mini" style="margin-bottom:4px;">Band match pattern</div>
+                <input class="input" id="abm_add_pattern" type="text"
+                       placeholder="e.g. Band 6, CPN, 6"
+                       value="${enc(state.add_band_match_pattern || '')}"/>
+              </div>
+
+              <div style="min-width:260px;flex:2;">
+                <div class="mini" style="margin-bottom:4px;">Notes (optional)</div>
+                <input class="input" id="abm_add_notes" type="text"
+                       placeholder="Optional note…"
+                       value="${enc(state.add_notes || '')}"/>
+              </div>
+
+              <div style="min-width:140px;">
+                <div class="mini" style="margin-bottom:4px;">Active</div>
+                <label class="mini" style="display:flex;gap:6px;align-items:center;">
+                  <input type="checkbox" id="abm_add_active" ${state.add_active ? 'checked' : ''}/>
+                  Active
+                </label>
+              </div>
+
+              <div style="min-width:140px;padding-top:18px;">
+                <button type="button" class="btn btn-primary" id="abm_add_save" ${state.loading ? 'disabled' : ''}>
+                  Add
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <div class="row" style="margin-top:6px; display:${showAddCand ? '' : 'none'};">
+            <label>Candidate</label>
+            <div class="controls" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+              <span class="mini mono" id="abm_add_candidate_label">${enc(state.add_candidate_label || state.add_candidate_id || '—')}</span>
+              <button type="button" class="btn mini" data-act="abm-pick-add-candidate">Pick…</button>
+              <button type="button" class="btn mini" data-act="abm-clear-add-candidate">Clear</button>
+            </div>
+          </div>
+
+          <div class="row" style="margin-top:6px; display:${showAddCli ? '' : 'none'};">
+            <label>Client</label>
+            <div class="controls" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+              <span class="mini mono" id="abm_add_client_label">${enc(state.add_client_label || state.add_client_id || '—')}</span>
+              <button type="button" class="btn mini" data-act="abm-pick-add-client">Pick…</button>
+              <button type="button" class="btn mini" data-act="abm-clear-add-client">Clear</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="card" style="margin-top:10px; display:${editOpen ? '' : 'none'};" id="abm_edit_card">
+          <div class="row">
+            <label>Edit mapping</label>
+            <div class="controls" style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-start;">
+              <div class="mini" style="width:100%;">
+                Editing ID: <span class="mono" id="abm_edit_id">${enc(state.editing?.id || '')}</span>
+                &nbsp;•&nbsp;
+                Code: <span class="mono">${enc(state.editing?.incoming_code || '')}</span>
+                &nbsp;•&nbsp;
+                Scope: <span class="mono">${enc(state.editing ? scopeLabelForRow(state.editing) : '')}</span>
+              </div>
+
+              <div style="min-width:260px;flex:2;">
+                <div class="mini" style="margin-bottom:4px;">Band match pattern</div>
+                <input class="input" id="abm_edit_pattern" type="text" value="${enc(state.edit_band_match_pattern||'')}" />
+              </div>
+
+              <div style="min-width:260px;flex:2;">
+                <div class="mini" style="margin-bottom:4px;">Notes</div>
+                <input class="input" id="abm_edit_notes" type="text" value="${enc(state.edit_notes||'')}" />
+              </div>
+
+              <div style="min-width:140px;">
+                <div class="mini" style="margin-bottom:4px;">Active</div>
+                <label class="mini" style="display:flex;gap:6px;align-items:center;">
+                  <input type="checkbox" id="abm_edit_active" ${state.edit_active ? 'checked' : ''}/>
+                  Active
+                </label>
+              </div>
+
+              <div style="min-width:220px;padding-top:18px;">
+                <button type="button" class="btn btn-primary" id="abm_edit_save" ${state.loading ? 'disabled' : ''}>Save changes</button>
+                <button type="button" class="btn" id="abm_edit_cancel" style="margin-left:6px;">Cancel</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card" style="margin-top:10px;">
+          <div class="row">
+            <label>Mappings</label>
+            <div class="controls">
+              <table class="grid">
+                <thead>
+                  <tr>
+                    <th>Incoming code</th>
+                    <th>Band pattern</th>
+                    <th>Scope</th>
+                    <th>Active</th>
+                    <th>Notes</th>
+                    <th>Actions</th>
+                  </tr>
+                </thead>
+                <tbody id="abm_tbody">${listBody}</tbody>
+              </table>
+              <div class="hint">
+                Precedence: Candidate overrides Client overrides Global. Matching is a simple “band contains pattern” check.
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
+  };
+
+  const repaint = () => {
+    const fr = window.__getModalFrame?.();
+    if (!fr) return;
+    try { fr.setTab(fr.currentTabKey || 'p'); } catch {}
+    try {
+      const fr2 = window.__getModalFrame?.();
+      if (fr2 && typeof fr2.onReturn === 'function') fr2.onReturn();
+    } catch {}
+  };
+
+  const loadList = async () => {
+    state.loading = true;
+    state.error = '';
+    try {
+      repaint();
+
+      const scope =
+        state.scope_filter === 'ANY' ? null :
+        state.scope_filter;
+
+      const rows = await apiListAssignmentBandMappings({
+        system_type: state.system_type,
+        incoming_like: state.filter_incoming_like || null,
+        scope: scope || null,
+        candidate_id: (state.scope_filter === 'CANDIDATE') ? (state.filter_candidate_id || null) : null,
+        client_id:    (state.scope_filter === 'CLIENT')    ? (state.filter_client_id || null)    : null,
+        include_inactive: state.include_inactive
+      });
+
+      state.rows = Array.isArray(rows) ? rows : [];
+    } catch (e) {
+      state.rows = [];
+      state.error = e?.message || String(e);
+    } finally {
+      state.loading = false;
+      repaint();
+    }
+  };
+
+  const startEdit = (row) => {
+    if (!row) return;
+    state.editing = row;
+    state.edit_band_match_pattern = (row.band_match_pattern || '').toString();
+    state.edit_notes = (row.notes || '').toString();
+    state.edit_active = (row.active !== false);
+    repaint();
+  };
+
+  const cancelEdit = () => {
+    state.editing = null;
+    state.edit_band_match_pattern = '';
+    state.edit_notes = '';
+    state.edit_active = true;
+    repaint();
+  };
+
+  const onReturn = () => {
+    const root = document.getElementById('assignmentBandMappingsModal');
+    if (!root) return;
+
+    // Filters
+    const selSystem = document.getElementById('abm_system');
+    const selScope  = document.getElementById('abm_scope_filter');
+    const inpLike   = document.getElementById('abm_incoming_like');
+    const chkInact  = document.getElementById('abm_include_inactive');
+    const btnRef    = document.getElementById('abm_refresh');
+
+    // Add
+    const addScope  = document.getElementById('abm_add_scope');
+    const addIn     = document.getElementById('abm_add_incoming');
+    const addPat    = document.getElementById('abm_add_pattern');
+    const addNotes  = document.getElementById('abm_add_notes');
+    const addAct    = document.getElementById('abm_add_active');
+    const addSave   = document.getElementById('abm_add_save');
+
+    // Edit
+    const editPat   = document.getElementById('abm_edit_pattern');
+    const editNotes = document.getElementById('abm_edit_notes');
+    const editAct   = document.getElementById('abm_edit_active');
+    const editSave  = document.getElementById('abm_edit_save');
+    const editCancel= document.getElementById('abm_edit_cancel');
+
+    // Wire filter changes
+    if (selSystem && !selSystem.__abmWired) {
+      selSystem.__abmWired = true;
+      selSystem.addEventListener('change', () => {
+        state.system_type = String(selSystem.value || 'NHSP').toUpperCase();
+        cancelEdit();
+        loadList();
+      });
+    }
+    if (selScope && !selScope.__abmWired) {
+      selScope.__abmWired = true;
+      selScope.addEventListener('change', () => {
+        state.scope_filter = String(selScope.value || 'ANY').toUpperCase();
+        // Clear scoped ids when switching scope
+        if (state.scope_filter !== 'CANDIDATE') { state.filter_candidate_id = null; state.filter_candidate_label = ''; }
+        if (state.scope_filter !== 'CLIENT')    { state.filter_client_id = null; state.filter_client_label = ''; }
+        cancelEdit();
+        repaint();
+      });
+    }
+    if (inpLike && !inpLike.__abmWired) {
+      inpLike.__abmWired = true;
+      inpLike.addEventListener('input', () => { state.filter_incoming_like = String(inpLike.value || ''); });
+      inpLike.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') { e.preventDefault(); loadList(); }
+      });
+    }
+    if (chkInact && !chkInact.__abmWired) {
+      chkInact.__abmWired = true;
+      chkInact.addEventListener('change', () => {
+        state.include_inactive = !!chkInact.checked;
+        cancelEdit();
+        loadList();
+      });
+    }
+    if (btnRef && !btnRef.__abmWired) {
+      btnRef.__abmWired = true;
+      btnRef.addEventListener('click', () => loadList());
+    }
+
+    // Wire add fields
+    if (addScope && !addScope.__abmWired) {
+      addScope.__abmWired = true;
+      addScope.addEventListener('change', () => {
+        state.add_scope = String(addScope.value || 'GLOBAL').toUpperCase();
+        if (state.add_scope !== 'CANDIDATE') { state.add_candidate_id = null; state.add_candidate_label = ''; }
+        if (state.add_scope !== 'CLIENT')    { state.add_client_id = null; state.add_client_label = ''; }
+        repaint();
+      });
+    }
+    if (addIn && !addIn.__abmWired) {
+      addIn.__abmWired = true;
+      addIn.addEventListener('input', () => { state.add_incoming_code = String(addIn.value || ''); });
+    }
+    if (addPat && !addPat.__abmWired) {
+      addPat.__abmWired = true;
+      addPat.addEventListener('input', () => { state.add_band_match_pattern = String(addPat.value || ''); });
+    }
+    if (addNotes && !addNotes.__abmWired) {
+      addNotes.__abmWired = true;
+      addNotes.addEventListener('input', () => { state.add_notes = String(addNotes.value || ''); });
+    }
+    if (addAct && !addAct.__abmWired) {
+      addAct.__abmWired = true;
+      addAct.addEventListener('change', () => { state.add_active = !!addAct.checked; });
+    }
+    if (addSave && !addSave.__abmWired) {
+      addSave.__abmWired = true;
+      addSave.addEventListener('click', async () => {
+        const incoming = String(state.add_incoming_code || '').trim();
+        const pattern  = String(state.add_band_match_pattern || '').trim();
+
+        if (!incoming) { alert('Incoming code is required.'); return; }
+        if (!pattern)  { alert('Band match pattern is required.'); return; }
+
+        const scope = String(state.add_scope || 'GLOBAL').toUpperCase();
+        let candidate_id = null;
+        let client_id = null;
+
+        if (scope === 'CANDIDATE') {
+          candidate_id = state.add_candidate_id || null;
+          if (!candidate_id) { alert('Pick a candidate for a candidate-specific rule.'); return; }
+        } else if (scope === 'CLIENT') {
+          client_id = state.add_client_id || null;
+          if (!client_id) { alert('Pick a client for a client-specific rule.'); return; }
+        }
+
+        try {
+          state.loading = true;
+          state.error = '';
+          repaint();
+
+          await apiCreateAssignmentBandMapping({
+            system_type: state.system_type,
+            incoming_code: incoming,
+            candidate_id,
+            client_id,
+            band_match_pattern: pattern,
+            active: !!state.add_active,
+            notes: String(state.add_notes || '').trim() || null
+          });
+
+          window.__toast && window.__toast('Mapping added.');
+
+          // Reset only the pattern/notes; keep incoming_code (useful for adding multiple patterns)
+          state.add_band_match_pattern = '';
+          state.add_notes = '';
+          state.add_active = true;
+
+          await loadList();
+        } catch (e) {
+          state.error = e?.message || String(e);
+          state.loading = false;
+          repaint();
+          alert(state.error);
+        }
+      });
+    }
+
+    // Wire edit fields
+    if (editPat && !editPat.__abmWired) {
+      editPat.__abmWired = true;
+      editPat.addEventListener('input', () => { state.edit_band_match_pattern = String(editPat.value || ''); });
+    }
+    if (editNotes && !editNotes.__abmWired) {
+      editNotes.__abmWired = true;
+      editNotes.addEventListener('input', () => { state.edit_notes = String(editNotes.value || ''); });
+    }
+    if (editAct && !editAct.__abmWired) {
+      editAct.__abmWired = true;
+      editAct.addEventListener('change', () => { state.edit_active = !!editAct.checked; });
+    }
+    if (editSave && !editSave.__abmWired) {
+      editSave.__abmWired = true;
+      editSave.addEventListener('click', async () => {
+        if (!state.editing || !state.editing.id) return;
+        const id = state.editing.id;
+
+        const pattern = String(state.edit_band_match_pattern || '').trim();
+        if (!pattern) { alert('Band match pattern is required.'); return; }
+
+        try {
+          state.loading = true;
+          state.error = '';
+          repaint();
+
+          await apiUpdateAssignmentBandMapping(id, {
+            band_match_pattern: pattern,
+            notes: String(state.edit_notes || '').trim() || null,
+            active: !!state.edit_active
+          });
+
+          window.__toast && window.__toast('Mapping updated.');
+          cancelEdit();
+          await loadList();
+        } catch (e) {
+          state.error = e?.message || String(e);
+          state.loading = false;
+          repaint();
+          alert(state.error);
+        }
+      });
+    }
+    if (editCancel && !editCancel.__abmWired) {
+      editCancel.__abmWired = true;
+      editCancel.addEventListener('click', () => cancelEdit());
+    }
+
+    // Button actions + pickers
+    if (!root.__abmWiredActions) {
+      root.__abmWiredActions = true;
+      root.addEventListener('click', async (ev) => {
+        const btn = ev.target.closest('button[data-act]');
+        if (!btn) return;
+
+        const act = btn.getAttribute('data-act');
+
+        // Filter pickers
+        if (act === 'abm-pick-filter-candidate') {
+          openCandidatePicker(async ({ id, label }) => {
+            state.filter_candidate_id = id;
+            state.filter_candidate_label = label || '';
+            repaint();
+            await loadList();
+          }, { context: { staffName: 'Filter scope', unit: 'Candidate', importId: seed.import_id || '' } });
+          return;
+        }
+        if (act === 'abm-clear-filter-candidate') {
+          state.filter_candidate_id = null;
+          state.filter_candidate_label = '';
+          repaint();
+          await loadList();
+          return;
+        }
+        if (act === 'abm-pick-filter-client') {
+          openClientPicker(async ({ id, label }) => {
+            state.filter_client_id = id;
+            state.filter_client_label = label || '';
+            repaint();
+            await loadList();
+          }, { context: { staffName: 'Filter scope', unit: 'Client', importId: seed.import_id || '' } });
+          return;
+        }
+        if (act === 'abm-clear-filter-client') {
+          state.filter_client_id = null;
+          state.filter_client_label = '';
+          repaint();
+          await loadList();
+          return;
+        }
+
+        // Add pickers
+        if (act === 'abm-pick-add-candidate') {
+          openCandidatePicker(async ({ id, label }) => {
+            state.add_candidate_id = id;
+            state.add_candidate_label = label || '';
+            repaint();
+          }, { context: { staffName: 'Mapping scope', unit: 'Candidate', importId: seed.import_id || '' } });
+          return;
+        }
+        if (act === 'abm-clear-add-candidate') {
+          state.add_candidate_id = null;
+          state.add_candidate_label = '';
+          repaint();
+          return;
+        }
+        if (act === 'abm-pick-add-client') {
+          openClientPicker(async ({ id, label }) => {
+            state.add_client_id = id;
+            state.add_client_label = label || '';
+            repaint();
+          }, { context: { staffName: 'Mapping scope', unit: 'Client', importId: seed.import_id || '' } });
+          return;
+        }
+        if (act === 'abm-clear-add-client') {
+          state.add_client_id = null;
+          state.add_client_label = '';
+          repaint();
+          return;
+        }
+
+        // Row actions
+        if (act === 'abm-edit') {
+          const id = btn.getAttribute('data-id');
+          const row = (state.rows || []).find(x => String(x.id) === String(id)) || null;
+          startEdit(row);
+          return;
+        }
+
+        if (act === 'abm-toggle') {
+          const id = btn.getAttribute('data-id');
+          const row = (state.rows || []).find(x => String(x.id) === String(id)) || null;
+          if (!row) return;
+
+          const nextActive = !(row.active !== false);
+
+          try {
+            state.loading = true;
+            state.error = '';
+            repaint();
+
+            await apiUpdateAssignmentBandMapping(id, { active: nextActive });
+
+            window.__toast && window.__toast(nextActive ? 'Mapping enabled.' : 'Mapping disabled.');
+            cancelEdit();
+            await loadList();
+          } catch (e) {
+            state.error = e?.message || String(e);
+            state.loading = false;
+            repaint();
+            alert(state.error);
+          }
+          return;
+        }
+
+        if (act === 'abm-delete') {
+          const id = btn.getAttribute('data-id');
+          const ok = window.confirm('Remove this mapping? (It will be deactivated for safety)');
+          if (!ok) return;
+
+          try {
+            state.loading = true;
+            state.error = '';
+            repaint();
+
+            await apiDeleteAssignmentBandMapping(id);
+
+            window.__toast && window.__toast('Mapping removed.');
+            cancelEdit();
+            await loadList();
+          } catch (e) {
+            state.error = e?.message || String(e);
+            state.loading = false;
+            repaint();
+            alert(state.error);
+          }
+          return;
+        }
+      });
+    }
+  };
+
+  showModal(
+    'Weekly Band Mappings',
+    [{ key: 'p', title: 'Mappings' }],
+    () => renderTab(),
+    async () => true,
+    false,
+    onReturn,
+    { kind, noParentGate: true }
+  );
+
+  // Initial wiring + load
+  setTimeout(() => {
+    try {
+      const fr = window.__getModalFrame?.();
+      if (fr && fr.kind === kind && typeof fr.onReturn === 'function' && !fr.__abmInit) {
+        fr.__abmInit = true;
+        fr.onReturn();
+        loadList();
+      }
+    } catch (e) {
+      console.warn('[ASSIGNMENT_BAND_MAPPINGS] init failed', e);
+    }
+  }, 0);
+}
+
 
 
 function renderClientHospitalsTable() {
