@@ -29025,11 +29025,33 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
             const lines = [];
             lines.push(`Import ${result.import_id || importId} has been finalised.`);
 
+            // Phase 1 stats (still useful, but NOT “timesheets processed”)
             if (typeof result.shifts_created === 'number')      lines.push(`Shifts created: ${result.shifts_created}`);
             if (typeof result.shifts_updated === 'number')      lines.push(`Shifts updated: ${result.shifts_updated}`);
             if (typeof result.mapped_candidates === 'number')   lines.push(`Candidates mapped: ${result.mapped_candidates}`);
             if (typeof result.mapped_clients === 'number')      lines.push(`Clients mapped: ${result.mapped_clients}`);
+
+            // New: group outcome stats (this is the truth you want to see)
+            if (typeof result.groups_total === 'number')        lines.push(`Groups (considered): ${result.groups_total}`);
+            if (typeof result.groups_attempted === 'number')    lines.push(`Groups (ready/attempted): ${result.groups_attempted}`);
+            if (typeof result.groups_succeeded === 'number')    lines.push(`Groups (succeeded): ${result.groups_succeeded}`);
+            if (typeof result.groups_failed === 'number')       lines.push(`Groups (failed): ${result.groups_failed}`);
+
+            // Backward-compat (older backend)
             if (typeof result.groups_applied === 'number')      lines.push(`Groups applied: ${result.groups_applied}`);
+
+            // Failure samples (first few)
+            const fails = Array.isArray(result.group_fail_samples) ? result.group_fail_samples : [];
+            if (fails.length) {
+              lines.push('');
+              lines.push('Failures (sample):');
+              for (const f of fails.slice(0, 10)) {
+                const pg = f && (f.preview_group_id || f.group_id || '') ? String(f.preview_group_id || f.group_id) : '';
+                const ac = f && f.action ? String(f.action) : '';
+                const rs = f && f.reason ? String(f.reason) : '';
+                lines.push(`- ${pg}${ac ? ` (${ac})` : ''}${rs ? ` — ${rs}` : ''}`);
+              }
+            }
 
             alert(lines.join('\n'));
             await refreshWeeklyImportSummary(type, importId);
