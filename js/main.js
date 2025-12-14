@@ -19584,6 +19584,7 @@ function openCalendarContextMenu({ anchorEl, bucketKey, selection, capabilities,
 // ============================================================================
 // CALENDAR – GENERIC DAY GRID
 // ============================================================================
+
 function renderDayGrid(hostEl, opts) {
   if (!hostEl) return;
   const { from, to, itemsByDate, view, bucketKey } = opts;
@@ -19623,17 +19624,43 @@ function renderDayGrid(hostEl, opts) {
     months.push({ y: d0.getUTCFullYear(), m: d0.getUTCMonth() });
   }
 
+  // Monday-first weekday labels (Mon..Sun)
+  const DOW_LONG  = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+  const DOW_SHORT = ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
+
   for (const { y, m } of months) {
     const box = document.createElement('div');
     box.className = 'month';
     box.innerHTML = `<h4>${new Date(Date.UTC(y, m, 1)).toLocaleString(undefined, { month: 'long' })} ${y}</h4>`;
+
+    // Weekday header row (Mon..Sun)
+    const hdr = document.createElement('div');
+    hdr.className = 'days dow-head';
+    const labels = (view === 'year') ? DOW_SHORT : DOW_LONG;
+    for (let i = 0; i < 7; i++) {
+      const h = document.createElement('div');
+      h.className = 'dow-h';
+      h.textContent = labels[i];
+      hdr.appendChild(h);
+    }
+    box.appendChild(hdr);
+
+    // Day grid
     const days = document.createElement('div');
     days.className = (view === 'year') ? 'days' : 'days days-large';
 
+    // Monday-first offset:
+    // JS: Sun=0..Sat=6  →  Mon-first index: Mon=0..Sun=6
     const first = new Date(Date.UTC(y, m, 1));
-    for (let i = 0; i < first.getUTCDay(); i++) {
-      days.appendChild(document.createElement('div'));
+    const jsDow = first.getUTCDay();           // 0..6 (Sun..Sat)
+    const monIndex = (jsDow + 6) % 7;          // 0..6 (Mon..Sun)
+
+    for (let i = 0; i < monIndex; i++) {
+      const blank = document.createElement('div');
+      blank.className = 'd blank';
+      days.appendChild(blank);
     }
+
     const daysInMonth = new Date(Date.UTC(y, m + 1, 0)).getUTCDate();
 
     for (let d = 1; d <= daysInMonth; d++) {
@@ -19682,9 +19709,16 @@ function renderDayGrid(hostEl, opts) {
 
       if (sel.set.has(dYmd)) cell.className += ' selected';
 
-      const dow = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][new Date(Date.UTC(y, m, d)).getUTCDay()];
-      cell.innerHTML = `<div class="ico"><div class="dow">${dow.slice(0, 3)}</div><div class="num">${d}</div></div>`;
+      // Cell content: ONLY the date number
+      cell.innerHTML = `<div class="ico"><div class="num">${d}</div></div>`;
       cell.setAttribute('data-date', dYmd);
+
+      // Optional: keep a tooltip with the weekday (Mon..Sun) for quick hover
+      try {
+        const jsDay = new Date(Date.UTC(y, m, d)).getUTCDay();
+        const monDay = (jsDay + 6) % 7;
+        cell.title = `${DOW_LONG[monDay]} ${dYmd}`;
+      } catch {}
 
       if (interactive) {
         const onClick = (ev) => {
@@ -19739,7 +19773,6 @@ function renderDayGrid(hostEl, opts) {
     if (!controller.signal.aborted) opts.onToggleView && opts.onToggleView();
   }, { signal: controller.signal });
 }
-
 
 // ============================================================================
 // CALENDAR – LEGEND
