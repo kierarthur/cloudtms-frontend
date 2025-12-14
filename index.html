@@ -797,69 +797,132 @@ body{
       display:grid;
       grid-template-columns:repeat(7,1fr);
     }
-    .days .d{
-      padding:6px;
-      border-right:1px solid var(--line);
-      border-bottom:1px solid var(--line);
-      min-height:32px;
-    }
-    .days.days-large .d{
-      min-height:46px;
-      padding:8px;
-    }
-    .d.mark-a{ background:rgba(245,158,11,.2) }
-    .d.mark-i{ background:rgba(59,130,246,.2) }
-    .d.mark-p{ background:rgba(34,197,94,.25) }
+ .days .d{
+  padding:6px;
+  border-right:1px solid var(--line);
+  border-bottom:1px solid var(--line);
+  min-height:32px;
 
-    .cal-planned   { background: rgba(59,130,246,.18); }
-    .cal-submitted { background: rgba(147,51,234,.22); }
-    .cal-authorised{ background: rgba(34,197,94,.22); }
-    .cal-invoiced  { background: rgba(245,158,11,.22); }
-    .cal-paid      { background: rgba(20,184,166,.24); }
+  /* NEW: allow corner markers */
+  position:relative;
+  overflow:hidden;
+}
+.days.days-large .d{
+  min-height:46px;
+  padding:8px;
+}
+.d.mark-a{ background:rgba(245,158,11,.2) }
+.d.mark-i{ background:rgba(59,130,246,.2) }
+.d.mark-p{ background:rgba(34,197,94,.25) }
 
-    .days .d.occupied-other{
-      background:rgba(148,163,184,.22) !important;
-      filter:saturate(0.6) brightness(0.98);
-    }
+/* Existing states */
+.cal-planned    { background: rgba(59,130,246,.18); }
+.cal-submitted  { background: rgba(147,51,234,.22); }  /* legacy */
+.cal-authorised { background: rgba(34,197,94,.22); }   /* legacy */
+.cal-invoiced   { background: rgba(245,158,11,.22); }
+.cal-paid       { background: rgba(20,184,166,.24); }
 
-    .d.selected{
-      outline:2px solid var(--brand);
-      outline-offset:-2px;
-      box-shadow:inset 0 0 0 1px rgba(255,255,255,.06);
-    }
-    .d .ico{
-      display:flex;
-      align-items:center;
-      justify-content:space-between;
-    }
-    .d .ico .dow{
-      font-size:10px;
-      letter-spacing:.02em;
-      opacity:.8;
-    }
-    .d .ico .num{
-      font-weight:700;
-      font-size:12px;
-    }
-    .days.days-large .ico .num{ font-size:16px }
-    .days.days-large .ico .dow{ font-size:11px }
+/* NEW: pipeline states */
+.cal-processed        { background: rgba(148,163,184,.16); }   /* processed, not ready */
+.cal-ready            { background: rgba(79,70,229,.20); }     /* ready */
+.cal-invoice-hold     { background: rgba(239,68,68,.18); }     /* invoice header ON_HOLD */
+.cal-pay-hold         { background: rgba(250,204,21,.18); }    /* pay_on_hold */
+.cal-pay-invoice-hold { background: rgba(147,51,234,.18); }    /* both holds */
 
-    .legend{
-      display:flex;
-      gap:8px;
-      margin-top:8px;
-    }
-    .legend .lg{
-      display:flex;
-      align-items:center;
-      gap:6px;
-      font-size:11px;
-      color:#e5e7eb;
-    }
-    .sq{ width:10px; height:10px; border-radius:2px }
-    .sq.a{ background:rgba(245,158,11,.7) }
-    .sq.i{ background:rgba(59,130,246,.7) }
-    .sq.p{ background:rgba(34,197,94,.7) }
+/* Grey “occupied by other contract” */
+.days .d.occupied-other{
+  background:rgba(148,163,184,.22) !important;
+  filter:saturate(0.6) brightness(0.98);
+}
+
+/* NEW: per-line hold overlays (corner markers) */
+.days .d.flag-payline-hold::before{
+  content:'';
+  position:absolute;
+  top:0; left:0;
+  width:0; height:0;
+  border-top:12px solid rgba(245,158,11,.95);  /* amber */
+  border-right:12px solid transparent;
+  pointer-events:none;
+}
+.days .d.flag-invoiceline-hold::after{
+  content:'';
+  position:absolute;
+  top:0; right:0;
+  width:0; height:0;
+  border-top:12px solid rgba(147,51,234,.95);  /* purple */
+  border-left:12px solid transparent;
+  pointer-events:none;
+}
+
+.d.selected{
+  outline:2px solid var(--brand);
+  outline-offset:-2px;
+  box-shadow:inset 0 0 0 1px rgba(255,255,255,.06);
+}
+.d .ico{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+}
+.d .ico .dow{
+  font-size:10px;
+  letter-spacing:.02em;
+  opacity:.8;
+}
+.d .ico .num{
+  font-weight:700;
+  font-size:12px;
+}
+.days.days-large .ico .num{ font-size:16px }
+.days.days-large .ico .dow{ font-size:11px }
+
+/* Legend */
+.legend{
+  display:flex;
+  gap:8px;
+  margin-top:8px;
+  flex-wrap:wrap;
+  align-items:center;
+}
+
+/* NEW: make legend “chips” look like chips without overriding cal-* backgrounds */
+.legend .chip{
+  display:inline-flex;
+  align-items:center;
+  gap:6px;
+  padding:4px 8px;
+  border-radius:999px;
+  border:1px solid rgba(148,163,184,.35);
+  font-size:11px;
+  color:#e5e7eb;
+  background:transparent; /* IMPORTANT: do not override cal-* background colours */
+}
+
+/* NEW: legend-only marker chips (not day backgrounds) */
+.legend .chip.cal-flag-payline{
+  background: rgba(245,158,11,.22);
+}
+.legend .chip.cal-flag-invoiceline{
+  background: rgba(147,51,234,.22);
+}
+.legend .chip.occupied-other{
+  background: rgba(148,163,184,.22);
+}
+
+/* (kept) old square legend styles (safe even if unused now) */
+.legend .lg{
+  display:flex;
+  align-items:center;
+  gap:6px;
+  font-size:11px;
+  color:#e5e7eb;
+}
+.sq{ width:10px; height:10px; border-radius:2px }
+.sq.a{ background:rgba(245,158,11,.7) }
+.sq.i{ background:rgba(59,130,246,.7) }
+.sq.p{ background:rgba(34,197,94,.7) }
+
 
     /* ===== Auth overlays ===== */
     .auth-overlay{
