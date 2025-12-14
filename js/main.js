@@ -15208,14 +15208,29 @@ async function openCandidate(row) {
 
     },
     full?.id,
-    () => {
-      const fr = window.__getModalFrame?.();
-      const isBookings = fr && fr.entity === 'candidates' && fr.currentTabKey === 'bookings';
-      const candId = window.modalCtx?.data?.id;
-      if (isBookings && candId) {
-        try { renderCandidateCalendarTab(candId); } catch (e) { W('renderCandidateCalendarTab failed', e); }
+   () => {
+  const fr = window.__getModalFrame?.();
+  const isBookings = fr && fr.entity === 'candidates' && fr.currentTabKey === 'bookings';
+  const candId = window.modalCtx?.data?.id;
+
+  if (isBookings && candId) {
+    try {
+      const holder = document.getElementById('candidateCalendarHolder');
+      if (holder && typeof loadCandidateCalendar === 'function') {
+        // Repaint using cached data if available (keeps filter state stable)
+        loadCandidateCalendar(holder, candId, { _reuseLast: true }).catch(e => {
+          W('loadCandidateCalendar(onReturn) failed', e);
+        });
+      } else {
+        // Fallback
+        renderCandidateCalendarTab(candId);
       }
+    } catch (e) {
+      W('calendar onReturn refresh failed', e);
     }
+  }
+}
+
   );
   L('showModal returned (sync)', { currentOpenToken: window.modalCtx.openToken });
 
@@ -17925,13 +17940,26 @@ function computeWeekEnding(ymdStr, weekEndingWeekday /* 0=Sun..6=Sat */) {
 // ---------- Colors / states ----------
 function colorForState(state) {
   const s = String(state || 'EMPTY').toUpperCase();
-  if (s === 'PLANNED')    return 'cal-planned';
-  if (s === 'SUBMITTED')  return 'cal-submitted';
-  if (s === 'AUTHORISED') return 'cal-authorised';
-  if (s === 'INVOICED')   return 'cal-invoiced';
-  if (s === 'PAID')       return 'cal-paid';
+
+  if (s === 'PLANNED')                return 'cal-planned';
+  if (s === 'PROCESSED_NOT_READY')    return 'cal-processed';
+  if (s === 'READY')                  return 'cal-ready';
+
+  if (s === 'INVOICED')               return 'cal-invoiced';
+  if (s === 'INVOICE_ON_HOLD')        return 'cal-invoice-hold';
+
+  if (s === 'PAY_ON_HOLD')            return 'cal-pay-hold';
+  if (s === 'PAY_AND_INVOICE_ON_HOLD')return 'cal-pay-invoice-hold';
+
+  if (s === 'PAID')                   return 'cal-paid';
+
+  // legacy (optional)
+  if (s === 'SUBMITTED')              return 'cal-submitted';
+  if (s === 'AUTHORISED')             return 'cal-authorised';
+
   return ''; // EMPTY -> white
 }
+
 
 // ---------- Selection helpers ----------
 function initSelBucket(bucketKey) {
@@ -17969,11 +17997,17 @@ function computeSelectionBounds(selection /* array of ymd */) {
 function buildDateIndex(items) { const map = new Map(); for (const it of (items||[])) { const k = it.date; const arr = map.get(k) || []; arr.push(it); map.set(k, arr); } return map; }
 function buildWeekIndex(weeks) {
   const m = new Map();
-  for (const w of (weeks||[])) {
+  for (const w of (weeks || [])) {
     const key = w.week_ending_date;
     const e = m.get(key) || { baseWeekId: null, baseHasTs: false, baseMode: 'ELECTRONIC', siblings: [] };
     e.siblings.push(w);
-    if (Number(w.additional_seq||0) === 0) { e.baseWeekId = w.id; e.baseHasTs  = !!w.timesheet_id; e.baseMode   = w.submission_mode_snapshot || 'ELECTRONIC'; }
+
+    if (Number(w.additional_seq || 0) === 0) {
+      e.baseWeekId = w.id;
+      e.baseHasTs  = !!(w.timesheet_id || w.has_timesheet);
+      e.baseMode   = w.submission_mode_snapshot || 'ELECTRONIC';
+    }
+
     m.set(key, e);
   }
   return m;
@@ -19063,12 +19097,29 @@ function applyStagedContractCalendarOverlay(contractId, itemsByDate /* Map<date,
   const remDates = [...st.remove];
 
   const ensureArr = (k) => { const a = overlay.get(k) || []; overlay.set(k, a); return a; };
-  const strong = (x) => ['SUBMITTED','AUTHORISED','INVOICED','PAID'].includes(String(x.state||'EMPTY').toUpperCase());
+
+  const strong = (x) => {
+    const s = String(x?.state || 'EMPTY').toUpperCase();
+    return [
+      'PROCESSED_NOT_READY',
+      'READY',
+      'PAY_ON_HOLD',
+      'INVOICE_ON_HOLD',
+      'PAY_AND_INVOICE_ON_HOLD',
+      'INVOICED',
+      'PAID',
+
+      // legacy safety
+      'SUBMITTED',
+      'AUTHORISED'
+    ].includes(s);
+  };
 
   if (st.removeAll && (st.removeAll.from || st.removeAll.to)) {
     const from = st.removeAll.from || '0000-01-01';
     const to   = st.removeAll.to   || '9999-12-31';
     const dates = enumerateDates(from, to);
+
     for (const d of dates) {
       const we = computeWeekEnding(d, st.weekEndingWeekday || 0);
       let wi = weekIndex.get(we);
@@ -19076,22 +19127,24 @@ function applyStagedContractCalendarOverlay(contractId, itemsByDate /* Map<date,
       if (!wi) {
         const weStart = addDays(we, -6);
         let hasStrongForThis = false;
-        for (let i=0;i<7;i++){
+        for (let i = 0; i < 7; i++) {
           const dd = addDays(weStart, i);
           const arr = overlay.get(dd) || [];
-          if (arr.some(x => String(x.contract_id||'')===String(contractId) && strong(x))) { hasStrongForThis = true; break; }
+          if (arr.some(x => String(x.contract_id || '') === String(contractId) && strong(x))) {
+            hasStrongForThis = true;
+            break;
+          }
         }
-        if (hasStrongForThis) {
-          wi = { baseHasTs: true };
-        } else {
-          wi = { baseHasTs: false };
-        }
+        wi = { baseHasTs: hasStrongForThis ? true : false };
       }
 
       const arr = ensureArr(d);
       if (wi.baseHasTs) continue;
-      const filtered = arr.filter(x => !(String(x.contract_id || '') === String(contractId)
-                                      && String(x.state || 'EMPTY').toUpperCase() === 'PLANNED'));
+
+      const filtered = arr.filter(x => !(
+        String(x.contract_id || '') === String(contractId) &&
+        String(x.state || 'EMPTY').toUpperCase() === 'PLANNED'
+      ));
       overlay.set(d, filtered);
     }
   }
@@ -19100,7 +19153,7 @@ function applyStagedContractCalendarOverlay(contractId, itemsByDate /* Map<date,
     const arr = ensureArr(d);
     const hasStrong = arr.some(strong);
     if (!hasStrong) {
-      arr.push({ date:d, state:'PLANNED', contract_id: contractId });
+      arr.push({ date: d, state: 'PLANNED', contract_id: contractId });
     }
   }
 
@@ -19115,13 +19168,14 @@ function applyStagedContractCalendarOverlay(contractId, itemsByDate /* Map<date,
       const arr = ensureArr(d);
       const hasStrong = arr.some(strong);
       if (!hasStrong) {
-        arr.push({ date:d, state:'PLANNED', contract_id: contractId });
+        arr.push({ date: d, state: 'PLANNED', contract_id: contractId });
       }
     }
   }
 
   return overlay;
 }
+
 
 // NEW — stage "Add missing weeks" (preview only)
 // Decides dates from bounds and current template (std_schedule_json / __template),
@@ -19176,14 +19230,43 @@ async function stageAddMissingWeeks(contractId, bounds) {
   return { ok:true, added, from, to };
 }
 
-
 function topState(arr) {
   if (!arr?.length) return 'EMPTY';
-  const prio = { EMPTY:0, PLANNED:1, SUBMITTED:2, AUTHORISED:3, INVOICED:4, PAID:5 };
-  let s = 'EMPTY';
-  for (const it of arr) { const st = String(it.state||'EMPTY').toUpperCase(); if ((prio[st]||0) > (prio[s]||0)) s = st; }
-  return s;
+
+  // Highest wins
+  const order = [
+    'EMPTY',
+    'PLANNED',
+
+    // legacy workflow states (kept for safety)
+    'SUBMITTED',
+    'AUTHORISED',
+
+    // new pipeline states
+    'PROCESSED_NOT_READY',
+    'READY',
+
+    'INVOICED',
+    'INVOICE_ON_HOLD',
+    'PAY_ON_HOLD',
+    'PAY_AND_INVOICE_ON_HOLD',
+    'PAID'
+  ];
+
+  const prio = Object.fromEntries(order.map((s, i) => [s, i]));
+
+  let best = 'EMPTY';
+  for (const it of arr) {
+    const st = String(it?.state || 'EMPTY').toUpperCase();
+
+    // If a totally unknown state appears, keep it low (above EMPTY only if planned exists elsewhere)
+    const p = (prio[st] != null) ? prio[st] : 0;
+
+    if (p > (prio[best] || 0)) best = st;
+  }
+  return best;
 }
+
 
 // Build payloads for commit
 function buildPlanRangesFromStage(contractId) {
@@ -19366,19 +19449,34 @@ async function getContractCalendarRange(contract_id, from, to, granularity = 'da
 // Thin wrapper to match existing call sites.
 // Backend returns day-level items; granularity is ignored for now.
 async function getCandidateCalendarRange(candidate_id, from, to, granularity = 'day') {
-  const qs = new URLSearchParams(); qs.set('from', from); qs.set('to', to);
+  const qs = new URLSearchParams();
+  qs.set('from', from);
+  qs.set('to', to);
+
   try {
     const r = await authFetch(API(`/api/candidates/${_enc(candidate_id)}/calendar?` + qs.toString()));
     if (!r || !r.ok) {
       try { const err = await r.json(); console.warn('[CAL][candidate] non-200', err); } catch {}
-      return { from, to, items: [] };
+      return { candidate_id, from, to, contracts: [], items: [] };
     }
-    const data = await r.json().catch(()=>null);
-    if (!data || !Array.isArray(data.items)) return { from, to, items: [] };
-    return data;
+
+    const data = await r.json().catch(() => null);
+    if (!data) return { candidate_id, from, to, contracts: [], items: [] };
+
+    // Expect: { candidate_id, from, to, contracts: [...], items: [...] }
+    const items = Array.isArray(data.items) ? data.items : [];
+    const contracts = Array.isArray(data.contracts) ? data.contracts : [];
+
+    return {
+      candidate_id: data.candidate_id || candidate_id,
+      from: data.from || from,
+      to: data.to || to,
+      contracts,
+      items
+    };
   } catch (e) {
     console.warn('[CAL][candidate] fetch failed', e);
-    return { from, to, items: [] };
+    return { candidate_id, from, to, contracts: [], items: [] };
   }
 }
 
@@ -19544,31 +19642,31 @@ function renderDayGrid(hostEl, opts) {
       const dYmd = `${y}-${String(m + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
       const items = itemsByDate.get(dYmd) || [];
 
-      // ── NEW: colour source selection
-      // Candidate view → derive colour from ALL items (unchanged).
-      // Contract view  → derive colour ONLY from current contract's items.
-      let finalState = 'EMPTY';
+      // Decide which items are relevant for colouring + overlays
+      let relevant = items;
       let ownedByCurrent = false;
+
       if (isContractBucket) {
         const keyStr = String(currentKey || '');
-        const owned = items.filter(it => String(it?.contract_id || '') === keyStr);
-        ownedByCurrent = owned.length > 0;
-        if (ownedByCurrent) {
-          finalState = (typeof topState === 'function') ? topState(owned) : 'EMPTY';
-        } else {
-          // When a day is occupied only by other contracts, we keep the state as EMPTY
-          // (no coloured class) and add a light-grey overlay class below.
-          finalState = 'EMPTY';
-        }
-      } else {
-        finalState = (typeof topState === 'function') ? topState(items) : 'EMPTY';
+        relevant = items.filter(it => String(it?.contract_id || '') === keyStr);
+        ownedByCurrent = relevant.length > 0;
       }
+
+      // Base state from relevant items (candidate unfiltered = all items; filtered/contract = owned)
+      const finalState = (relevant.length > 0)
+        ? ((typeof topState === 'function') ? topState(relevant) : 'EMPTY')
+        : 'EMPTY';
 
       const stateClass = (typeof colorForState === 'function') ? colorForState(finalState) : null;
       if (stateClass) cell.classList.add(stateClass);
 
-      // Only apply “occupied-other” greying in *contract* calendars and only when the day has
-      // items but NONE belong to the current contract.
+      // Per-line hold overlays (only for relevant items)
+      const hasPayLineHold = relevant.some(it => it && it.pay_line_on_hold === true);
+      const hasInvoiceLineHold = relevant.some(it => it && it.invoice_line_on_hold === true);
+      if (hasPayLineHold) cell.classList.add('flag-payline-hold');
+      if (hasInvoiceLineHold) cell.classList.add('flag-invoiceline-hold');
+
+      // Grey “occupied by other contract” days in contract-centric views
       if (isContractBucket) {
         const keyStr = String(currentKey || '');
         const occupiedByOtherOnly =
@@ -19578,7 +19676,7 @@ function renderDayGrid(hostEl, opts) {
             return !!cid && cid !== keyStr;
           });
         if (occupiedByOtherOnly) {
-          cell.classList.add('occupied-other'); // style this as your light grey
+          cell.classList.add('occupied-other');
         }
       }
 
@@ -19642,19 +19740,29 @@ function renderDayGrid(hostEl, opts) {
   }, { signal: controller.signal });
 }
 
+
 // ============================================================================
 // CALENDAR – LEGEND
 // ============================================================================
 function renderCalendarLegend(container) {
   if (!container) return;
+
   container.innerHTML = `
     <div class="legend">
       <span class="chip cal-planned">Planned</span>
-      <span class="chip cal-submitted">Submitted</span>
-      <span class="chip cal-authorised">Authorised</span>
+      <span class="chip cal-processed">Processed (not ready)</span>
+      <span class="chip cal-ready">Ready</span>
       <span class="chip cal-invoiced">Invoiced</span>
+      <span class="chip cal-invoice-hold">Invoice on hold</span>
+      <span class="chip cal-pay-hold">Pay on hold</span>
+      <span class="chip cal-pay-invoice-hold">Pay + invoice on hold</span>
       <span class="chip cal-paid">Paid</span>
+
       <span class="chip">Not booked</span>
+
+      <span class="chip cal-flag-payline">Pay line held</span>
+      <span class="chip cal-flag-invoiceline">Invoice line delayed</span>
+      <span class="chip occupied-other">Other contract (occupied)</span>
     </div>`;
 }
 
@@ -20587,50 +20695,42 @@ async function renderCandidateCalendarTab(candidateId) {
 
   // Compute initial window (year view)
   const y = (new Date()).getUTCFullYear();
-  const win = typeof computeYearWindow === 'function'
+  const win = (typeof computeYearWindow === 'function')
     ? computeYearWindow(y)
     : { from: `${y}-01-01`, to: `${y}-12-31` };
 
-  // Build inner scaffold: scroll box + grid mount + legend
+  // Build inner scaffold: contracts list + scroll box + grid mount + legend
   host.innerHTML = `
     <div class="tabc" style="display:flex;flex-direction:column;gap:8px;height:calc(72vh);max-height:calc(72vh)">
+      <div id="__candCalContracts" style="flex:0 0 auto;border:1px solid var(--line,#e5e5e5);border-radius:8px;padding:8px;"></div>
+
       <div id="__candCalScroll" style="flex:1;min-height:0;overflow:auto;border:1px solid var(--line,#e5e5e5);border-radius:8px;padding:4px;">
         <div id="__candCal"></div>
       </div>
+
       <div id="__candCalLegend"></div>
     </div>
   `;
 
-  // Render legend
+  // Render legend (always overwrite)
   const legendHost = byId('__candCalLegend');
-  if (legendHost && typeof renderCalendar === 'undefined') {
-    // Reuse existing legend helper (does full overwrite of target node)
-    if (typeof renderCalendarLegend === 'function') {
-      renderCalendarLegend(legendHost);
-    } else {
-      // Fallback: minimal legend if helper is missing
-      legendHost.innerHTML = `
-        <div class="legend">
-          <span class="chip cal-planned">Planned</span>
-          <span class="chip cal-submitted">Submitted</span>
-          <span class="chip cal-authorised">Certified</span>
-          <span class="chip cal-invoiced">Invoiced</span>
-          <span class="chip cal-paid">Paid</span>
-          <span class="chip">Not booked</span>
-        </div>`;
-    }
+  if (legendHost && typeof renderCalendarLegend === 'function') {
+    renderCalendarLegend(legendHost);
   }
 
   // Draw initial window
   await fetchAndRenderCandidateCalendar(candidateId, { from: win.from, to: win.to, view: 'year' });
 }
+
 async function fetchAndRenderCandidateCalendar(candidateId, opts) {
   const LOG_CAL = (typeof window.__LOG_CAL === 'boolean') ? window.__LOG_CAL : true;
   const L = (...a)=> { if (LOG_CAL) console.log('[CAL][candidate]', ...a); };
 
+  window.__calState = window.__calState || {};
+
   const key = `cand:${candidateId}`;
 
-  // Persist per-view state (separate from any contract bucket).
+  // Persist per-view state (candidate-wide)
   const state = (window.__calState[key] ||= {
     view: (opts && typeof opts.view === 'string') ? opts.view : 'year',
     win:  (opts && opts.from && opts.to)
@@ -20638,7 +20738,11 @@ async function fetchAndRenderCandidateCalendar(candidateId, opts) {
             : (typeof computeYearWindow === 'function'
                 ? computeYearWindow((new Date()).getUTCFullYear())
                 : { from: `${(new Date()).getFullYear()}-01-01`, to: `${(new Date()).getFullYear()}-12-31` }),
-    scrollTop: 0
+    scrollTop: 0,
+
+    // NEW:
+    filterContractId: null,
+    last: null // { items:[], contracts:[] } cache for filter toggles
   });
 
   // Allow caller to change view/window
@@ -20648,30 +20752,34 @@ async function fetchAndRenderCandidateCalendar(candidateId, opts) {
   const holder = byId('candidateCalendarHolder');
   if (!holder) return;
 
-  // Correct scroll box id (and legacy fallback to container)
   const scrollBox = byId('__candCalScroll') || holder;
 
-  // Remember current scroll
+  // Remember scroll
   try { state.scrollTop = (typeof scrollBox.scrollTop === 'number') ? scrollBox.scrollTop : 0; } catch {}
 
-  // Fetch candidate-wide day feed (all contracts; read-only render)
+  // Fetch candidate-wide day feed + contract list
   let items = [];
-  try {
-    if (typeof getCandidateCalendarRange === 'function') {
+  let contracts = [];
+
+  const reuse = !!(opts && opts._reuseLast);
+  if (reuse && state.last) {
+    items = Array.isArray(state.last.items) ? state.last.items : [];
+    contracts = Array.isArray(state.last.contracts) ? state.last.contracts : [];
+  } else {
+    try {
       const r = await getCandidateCalendarRange(candidateId, state.win.from, state.win.to, 'day');
       items = Array.isArray(r?.items) ? r.items : [];
-    } else if (typeof fetchCandidateCalendarForRange === 'function') {
-      const r = await fetchCandidateCalendarForRange(candidateId, state.win.from, state.win.to);
-      items = Array.isArray(r?.items) ? r.items : [];
-    } else if (typeof getCandidateCalendar === 'function') {
-      const r = await getCandidateCalendar(candidateId, state.win.from, state.win.to);
-      items = Array.isArray(r?.items) ? r.items : [];
+      contracts = Array.isArray(r?.contracts) ? r.contracts : [];
+      state.last = { items, contracts };
+    } catch (e) {
+      L('candidate calendar fetch failed', e);
+      items = [];
+      contracts = [];
+      state.last = { items, contracts };
     }
-  } catch (e) {
-    L('candidate calendar fetch failed', e);
   }
 
-  // Build map: date → [items]
+  // Build date index: date → [items]
   const itemsByDate = (typeof buildDateIndex === 'function')
     ? buildDateIndex(items)
     : (() => {
@@ -20685,6 +20793,40 @@ async function fetchAndRenderCandidateCalendar(candidateId, opts) {
         return m;
       })();
 
+  // Build contractMap for the list: Map(contract_id -> {client_name,role,band,from,to,...})
+  const contractMap = new Map();
+  for (const c of (contracts || [])) {
+    const cid = c?.contract_id || c?.id;
+    if (!cid) continue;
+    contractMap.set(String(cid), c);
+  }
+
+  // Render contract list + filter handlers
+  const contractsHost = byId('__candCalContracts');
+  if (contractsHost && typeof renderCandidateContractList === 'function') {
+    renderCandidateContractList(contractsHost, contractMap, {
+      onClick: async (cid) => {
+        state.filterContractId = String(cid || '');
+        await fetchAndRenderCandidateCalendar(candidateId, { from: state.win.from, to: state.win.to, view: state.view, _reuseLast: true });
+      },
+      onDblClick: (cid) => {
+        // Open contract modal (id-only row is fine)
+        try {
+          if (typeof openContract === 'function') openContract({ id: String(cid) });
+        } catch (e) {
+          console.warn('[CAL][candidate] openContract failed', e);
+        }
+      },
+      onClear: async () => {
+        state.filterContractId = null;
+        await fetchAndRenderCandidateCalendar(candidateId, { from: state.win.from, to: state.win.to, view: state.view, _reuseLast: true });
+      }
+    });
+  } else if (contractsHost) {
+    // Minimal fallback if renderCandidateContractList is missing
+    contractsHost.innerHTML = `<div class="hint">Contracts list renderer not available.</div>`;
+  }
+
   // Render grid (read-only)
   const gridHost = byId('__candCal') || (() => {
     const d = document.createElement('div'); d.id = '__candCal'; holder.appendChild(d); return d;
@@ -20696,12 +20838,17 @@ async function fetchAndRenderCandidateCalendar(candidateId, opts) {
     return;
   }
 
+  // IMPORTANT:
+  // - unfiltered candidate view: bucketKey stays "cand:<id>" (no greying)
+  // - filtered candidate view: bucketKey becomes "c:<contractId>" (contract-centric + greying)
+  const bucketKey = state.filterContractId ? `c:${state.filterContractId}` : key;
+
   renderDayGrid(gridHost, {
     from: state.win.from,
     to:   state.win.to,
     itemsByDate,
-    view: state.view,          // 'year' | 'month'
-    bucketKey: key,            // not a contract id → no “other” greying
+    view: state.view,
+    bucketKey,                // drives contract-centric behaviour when filtered
     isInteractive: false,      // candidate view is read-only
     onNav: async (delta) => {
       if (state.view === 'year') {
@@ -20746,6 +20893,7 @@ async function fetchAndRenderCandidateCalendar(candidateId, opts) {
   // Restore scroll
   try { if (typeof scrollBox.scrollTop === 'number') scrollBox.scrollTop = state.scrollTop; } catch {}
 }
+
 
 
 function renderCandidateContractList(container, contractMap, handlers) {
@@ -25014,6 +25162,61 @@ async function saveForFrame(fr) {
   window.__getModalFrame = currentFrame;
   L('showModal ENTER', { title, tabs: (tabs||[]).map(t=>t.key||t.title), hasId, entity: window.modalCtx?.entity, kind: opts.kind, forceEdit: !!opts.forceEdit });
   renderTop();
+}
+// Candidate calendar loader (Bookings tab)
+// Safe to call on every tab switch; it will either build the scaffold or just refresh.
+// Candidate calendar loader (Bookings tab)
+// Safe to call on every tab switch; it will either build the scaffold or just refresh.
+async function loadCandidateCalendar(holder, candidateId, opts) {
+  try {
+    if (!holder) return;
+    if (!candidateId) {
+      holder.innerHTML = `<div class="hint">No candidate selected.</div>`;
+      return;
+    }
+
+    // Ensure the expected mount id exists (renderCandidateCalendarTab uses this id)
+    if (holder.id !== 'candidateCalendarHolder') {
+      try { holder.id = 'candidateCalendarHolder'; } catch {}
+    }
+
+    // Ensure state container exists
+    window.__calState = window.__calState || {};
+
+    // If scaffold already exists, just refresh; otherwise create it.
+    const hasScaffold =
+      !!byId('__candCalScroll') &&
+      !!byId('__candCal') &&
+      !!byId('__candCalLegend') &&
+      !!byId('__candCalContracts');
+
+    if (!hasScaffold) {
+      // Fast visual feedback while the tab loads
+      holder.innerHTML = `<div class="hint">Loading calendar…</div>`;
+
+      if (typeof renderCandidateCalendarTab === 'function') {
+        await renderCandidateCalendarTab(candidateId);
+      } else {
+        holder.innerHTML = `<div class="hint">Calendar renderer not available.</div>`;
+        return;
+      }
+    }
+
+    // Refresh
+    if (typeof fetchAndRenderCandidateCalendar === 'function') {
+      if (opts && opts.from && opts.to) {
+        // explicit window request
+        await fetchAndRenderCandidateCalendar(candidateId, opts);
+      } else {
+        // default: reuse cached feed if requested, otherwise refetch
+        const reuse = !!(opts && opts._reuseLast);
+        await fetchAndRenderCandidateCalendar(candidateId, { _reuseLast: reuse });
+      }
+    }
+  } catch (e) {
+    try { console.warn('[CAL][candidate] load failed', e); } catch {}
+    try { holder.innerHTML = `<div class="hint">Failed to load calendar.</div>`; } catch {}
+  }
 }
 
 // Selection state helpers — simplified to explicit IDs only
