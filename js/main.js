@@ -8256,6 +8256,12 @@ async function openClientPicker(onPick, opts) {
 
 
 
+async function getCandidate(candidate_id) {
+  if (!candidate_id) throw new Error('candidate_id required');
+  const r = await authFetch(API(`/api/candidates/${encodeURIComponent(String(candidate_id))}`));
+  if (!r?.ok) throw new Error('Failed to load candidate');
+  return r.json();
+}
 
 
 
