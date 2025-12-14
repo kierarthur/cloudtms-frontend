@@ -855,6 +855,17 @@ body{
   pointer-events:none;
 }
 
+/* OPTIONAL: bigger markers in month view (days-large) */
+.days.days-large .d.flag-payline-hold::before{
+  border-top-width:14px;
+  border-right-width:14px;
+}
+.days.days-large .d.flag-invoiceline-hold::after{
+  border-top-width:14px;
+  border-left-width:14px;
+}
+
+
 .d.selected{
   outline:2px solid var(--brand);
   outline-offset:-2px;
@@ -896,8 +907,24 @@ body{
   border:1px solid rgba(148,163,184,.35);
   font-size:11px;
   color:#e5e7eb;
-  background:transparent; /* IMPORTANT: do not override cal-* background colours */
+
+  /* default chip background (for "Not booked" etc.) */
+  background: rgba(2,6,23,.35);
 }
+
+/* Ensure state chips keep their colours inside the legend */
+.legend .chip.cal-planned         { background: rgba(59,130,246,.18); }
+.legend .chip.cal-submitted       { background: rgba(147,51,234,.22); }  /* legacy */
+.legend .chip.cal-authorised      { background: rgba(34,197,94,.22); }   /* legacy */
+.legend .chip.cal-invoiced        { background: rgba(245,158,11,.22); }
+.legend .chip.cal-paid            { background: rgba(20,184,166,.24); }
+
+.legend .chip.cal-processed       { background: rgba(148,163,184,.16); }
+.legend .chip.cal-ready           { background: rgba(79,70,229,.20); }
+.legend .chip.cal-invoice-hold    { background: rgba(239,68,68,.18); }
+.legend .chip.cal-pay-hold        { background: rgba(250,204,21,.18); }
+.legend .chip.cal-pay-invoice-hold{ background: rgba(147,51,234,.18); }
+
 
 /* NEW: legend-only marker chips (not day backgrounds) */
 .legend .chip.cal-flag-payline{
