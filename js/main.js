@@ -1680,50 +1680,38 @@ function normalizeClientSettingsForSave(raw) {
     return s === 'true' || s === 'yes' || s === 'y' || s === '1' || s === 'on';
   };
 
-  // … time + week_ending_weekday logic unchanged …
+  // NOTE: keep your existing time + week_ending_weekday + validation logic here (unchanged)
+  // ... time + week_ending_weekday logic unchanged ...
 
-  // Gates + default submission mode
-  if ('pay_reference_required' in src) {
-    out.pay_reference_required = asBool(src.pay_reference_required);
+  // When settings are coming from the mounted UI, we can safely default missing boolean keys to false.
+  // This prevents “unchecked” boxes becoming “missing key”.
+  const fromUi = (src && src.__from_ui === true);
+
+  const BOOL_KEYS = [
+    'pay_reference_required',
+    'invoice_reference_required',
+    'requires_hr',
+    'autoprocess_hr',
+    'hr_attach_to_invoice',
+    'ts_attach_to_invoice',
+    'is_nhsp',
+    'self_bill_no_invoices_sent',
+    'daily_calc_of_invoices',
+    'no_timesheet_required',
+    'group_nightsat_sunbh'
+  ];
+
+  for (const k of BOOL_KEYS) {
+    if (fromUi || (k in src)) {
+      out[k] = asBool(src[k]);
+    }
   }
-  if ('invoice_reference_required' in src) {
-    out.invoice_reference_required = asBool(src.invoice_reference_required);
-  }
-  if ('default_submission_mode' in src) {
+
+  // default submission mode (only include if UI provided it or it exists)
+  if (fromUi || ('default_submission_mode' in src)) {
     let mode = String(src.default_submission_mode || '').toUpperCase();
     if (mode !== 'ELECTRONIC' && mode !== 'MANUAL') mode = 'ELECTRONIC';
     out.default_submission_mode = mode;
-  }
-
-  // Existing “extra” flags
-  if ('is_nhsp' in src) {
-    out.is_nhsp = asBool(src.is_nhsp);
-  }
-  if ('self_bill_no_invoices_sent' in src) {
-    out.self_bill_no_invoices_sent = asBool(src.self_bill_no_invoices_sent);
-  }
-  if ('daily_calc_of_invoices' in src) {
-    out.daily_calc_of_invoices = asBool(src.daily_calc_of_invoices);
-  }
-  if ('no_timesheet_required' in src) {
-    out.no_timesheet_required = asBool(src.no_timesheet_required);
-  }
-  if ('group_nightsat_sunbh' in src) {
-    out.group_nightsat_sunbh = asBool(src.group_nightsat_sunbh);
-  }
-
-  // NEW HR / attachment flags
-  if ('requires_hr' in src) {
-    out.requires_hr = asBool(src.requires_hr);
-  }
-  if ('autoprocess_hr' in src) {
-    out.autoprocess_hr = asBool(src.autoprocess_hr);
-  }
-  if ('hr_attach_to_invoice' in src) {
-    out.hr_attach_to_invoice = asBool(src.hr_attach_to_invoice);
-  }
-  if ('ts_attach_to_invoice' in src) {
-    out.ts_attach_to_invoice = asBool(src.ts_attach_to_invoice);
   }
 
   return { cleaned: out, invalid };
@@ -16994,19 +16982,55 @@ async function openClient(row) {
       let pendingSettings = null;
       if (shouldValidateSettings) {
         let csMerged = { ...(baseline || {}) };
-        if (hasFormMounted) {
-          const liveSettings = collectForm('#clientSettingsForm', false);
-          const normKeys = ['day_start','day_end','night_start','night_end','sat_start','sat_end','sun_start','sun_end','bh_start','bh_end'];
-          normKeys.forEach(k=>{
-            const v = liveSettings[k];
-            if (typeof v === 'string' && v.trim() !== '') {
-              csMerged[k] = v.trim();
-            }
-          });
-          if (typeof liveSettings.timezone_id === 'string' && liveSettings.timezone_id.trim() !== '') {
-            csMerged.timezone_id = liveSettings.timezone_id.trim();
-          }
-        }
+   if (hasFormMounted) {
+  const liveSettings = collectForm('#clientSettingsForm', false);
+  const normKeys = ['day_start','day_end','night_start','night_end','sat_start','sat_end','sun_start','sun_end','bh_start','bh_end'];
+
+  // merge HH:MM fields (existing behaviour)
+  normKeys.forEach(k=>{
+    const v = liveSettings[k];
+    if (typeof v === 'string' && v.trim() !== '') {
+      csMerged[k] = v.trim();
+    }
+  });
+
+  // timezone (existing behaviour)
+  if (typeof liveSettings.timezone_id === 'string' && liveSettings.timezone_id.trim() !== '') {
+    csMerged.timezone_id = liveSettings.timezone_id.trim();
+  }
+
+  // ✅ NEW: force checkbox booleans to be explicit true/false
+  // (unchecked must become false, never “missing key”)
+  const formEl = byId('clientSettingsForm');
+  const BOOL_KEYS = [
+    'pay_reference_required',
+    'invoice_reference_required',
+    'requires_hr',
+    'autoprocess_hr',
+    'hr_attach_to_invoice',
+    'ts_attach_to_invoice',
+    'is_nhsp',
+    'self_bill_no_invoices_sent',
+    'daily_calc_of_invoices',
+    'no_timesheet_required',
+    'group_nightsat_sunbh'
+  ];
+
+  if (formEl) {
+    // tag this merge as “from UI” so normalizeClientSettingsForSave can safely default missing bools
+    csMerged.__from_ui = true;
+
+    for (const key of BOOL_KEYS) {
+      const el = formEl.querySelector(`input[type="checkbox"][name="${key}"]`);
+      if (el) csMerged[key] = !!el.checked;
+    }
+
+    // also grab default_submission_mode if present in the settings form
+    const sel = formEl.querySelector(`select[name="default_submission_mode"]`);
+    if (sel) csMerged.default_submission_mode = String(sel.value || '').trim();
+  }
+}
+
 
         const { cleaned: csClean, invalid: csInvalid } = normalizeClientSettingsForSave(csMerged);
         if (APILOG) console.log('[OPEN_CLIENT] client_settings (merged→clean)', { csMerged, csClean, csInvalid, hasFormMounted, hasFullBaseline });
@@ -22704,6 +22728,9 @@ const frame = {
   hasId: !!hasId,
   entity: (window.modalCtx && window.modalCtx.entity) || null,
 
+  // NEW: optional dismiss hook (called when user closes the modal via Close/ESC)
+  _onDismiss: (opts && typeof opts.onDismiss === 'function') ? opts.onDismiss : null,
+
   noParentGate: !!opts.noParentGate,
   forceEdit:    !!opts.forceEdit,
   kind:         opts.kind || null,
@@ -22872,6 +22899,14 @@ mergedRowForTab(k) {
   // Default merge (drops empty strings via stripEmpty)
   const out = { ...base, ...stripEmpty(mainStaged) };
 
+  // ✅ FIX: when rendering the Pay tab, rehydrate staged pay fields verbatim
+  // (do NOT strip empties, otherwise clearing a bank field will snap back)
+  if (k === 'pay') {
+    for (const [pk, pv] of Object.entries(payStaged || {})) {
+      out[pk] = pv;
+    }
+  }
+
   // Keep non-DOM baselines visible, but let staged template override base schedule
   try {
     // 🔹 CHANGE: always prefer the staged __template if present
@@ -22923,6 +22958,7 @@ mergedRowForTab(k) {
   });
   return out;
 },
+
 
 
    _attachDirtyTracker() {
@@ -23439,32 +23475,38 @@ if (this.entity === 'timesheets' && k === 'overview') {
           }
         }
 
-        // ── Delete permanently — any unlocked TS, VIEW mode only ──
-        if (deletePermBtn) {
-          deletePermBtn.style.display =
-            (mode === 'view' && canDeletePermanent) ? '' : 'none';
+     // ── Delete permanently — any unlocked TS, allowed in VIEW or EDIT ──
+if (deletePermBtn) {
+  const showDeletePerm =
+    !!tsId &&
+    !locked &&
+    (mode === 'view' || mode === 'edit') &&
+    canDeletePermanent;
 
-          if (!deletePermBtn.__tsWired) {
-            deletePermBtn.__tsWired = true;
-            deletePermBtn.addEventListener('click', async () => {
-              const ok = window.confirm(
-                'Permanently delete this timesheet?\n\n' +
-                'This will remove all versions and financial snapshots for this timesheet_id.\n' +
-                'This action cannot be undone.'
-              );
-              if (!ok) return;
-              try {
-                await deleteTimesheetPermanent(tsId);
-                alert('Timesheet record deleted.');
-                try { byId('btnCloseModal').click(); } catch {}
-                try { await renderAll(); } catch {}
-              } catch (err) {
-                if (LOGM) console.warn('[TS][OVERVIEW] deleteTimesheetPermanent failed', err);
-                alert(err?.message || 'Failed to delete timesheet.');
-              }
-            });
-          }
-        }
+  deletePermBtn.style.display = showDeletePerm ? '' : 'none';
+
+  if (!deletePermBtn.__tsWired) {
+    deletePermBtn.__tsWired = true;
+    deletePermBtn.addEventListener('click', async () => {
+      const ok = window.confirm(
+        'Permanently delete this timesheet?\n\n' +
+        'This will remove all versions and financial snapshots for this timesheet_id.\n' +
+        'This action cannot be undone.'
+      );
+      if (!ok) return;
+      try {
+        await deleteTimesheetPermanent(tsId);
+        alert('Timesheet record deleted.');
+        try { byId('btnCloseModal').click(); } catch {}
+        try { await renderAll(); } catch {}
+      } catch (err) {
+        if (LOGM) console.warn('[TS][OVERVIEW] deleteTimesheetPermanent failed', err);
+        alert(err?.message || 'Failed to delete timesheet.');
+      }
+    });
+  }
+}
+
 
         // ── Daily QR send button (DAILY, ELECTRONIC, unlocked, VIEW mode) ──
         try {
@@ -24774,15 +24816,17 @@ function renderTop() {
     };
   })();
 
-   const wantApply =
-    (isChild && !top.noParentGate) ||
-    (
-      top.kind === 'client-rate'       ||
-      top.kind === 'candidate-override'||
-      top.kind === 'rate-presets-picker' ||
-      top.kind === 'candidate-picker'  ||
-      top.kind === 'client-picker'
-    );
+ const wantApply =
+  (isChild && !top.noParentGate) ||
+  (
+    top.kind === 'client-rate'       ||
+    top.kind === 'candidate-override'||
+    top.kind === 'rate-presets-picker' ||
+    top.kind === 'candidate-picker'  ||
+    top.kind === 'client-picker'     ||
+    top.kind === 'qr-decision'       // NEW
+  );
+
 
   const defaultPrimary =
     (top.kind === 'contract-clone-extend')      ? 'Create'
@@ -24871,7 +24915,7 @@ const isUtilityKind =
     });
     return;
 
-  // NEW: candidate/client pickers – explicit Apply, gated by row selection
+   // NEW: candidate/client pickers – explicit Apply, gated by row selection
   } else if (top.kind === 'candidate-picker' || top.kind === 'client-picker') {
     btnEdit.style.display = 'none';
     btnSave.style.display = '';
@@ -24890,6 +24934,22 @@ const isUtilityKind =
     });
     return;
 
+  // NEW: QR decision modal – Apply gated by selected radio
+  } else if (top.kind === 'qr-decision') {
+    btnEdit.style.display = 'none';
+    btnSave.style.display = '';
+    btnSave.disabled      = !!top._saving || !top._qrChoice;
+
+    if (relatedBtn) {
+      relatedBtn.style.display = 'none';
+      relatedBtn.disabled = true;
+    }
+
+    btnClose.textContent = 'Cancel';
+    btnClose.setAttribute('aria-label', 'Cancel');
+    btnClose.setAttribute('title', 'Cancel');
+    return;
+
   // NEW: utility modals (resolve/import) — hide Save/Edit, Close-only
   } else if (
     top.kind === 'timesheets-resolve' ||
@@ -24897,6 +24957,7 @@ const isUtilityKind =
     top.kind === 'resolve-client'     ||
     (typeof top.kind === 'string' && top.kind.startsWith('import-summary-'))
   ) {
+
 
 
   // No Save/Edit on these; everything happens via inline buttons in the modal body
@@ -25186,7 +25247,11 @@ const isUtilityKind =
     if (top.kind==='advanced-search') {
       top._closing=true;
       document.onmousemove=null; document.onmouseup=null; byId('modal')?.classList.remove('dragging'); sanitizeModalGeometry();
-      const closing=stack().pop(); if (closing?._detachDirty){ try{closing._detachDirty();}catch{} closing._detachDirty=null; }
+      const closing=stack().pop(); 
+      try { if (closing && typeof closing._onDismiss === 'function') closing._onDismiss(); } catch {}
+
+try { if (closing && typeof closing._onDismiss === 'function') closing._onDismiss(); } catch {}
+      if (closing?._detachDirty){ try{closing._detachDirty();}catch{} closing._detachDirty=null; }
       if (closing?._detachGlobal){ try{closing._detachGlobal();}catch{} closing._detachGlobal=null; } top._wired=false;
       if (stack().length>0) {
         const p = currentFrame();
@@ -25213,10 +25278,11 @@ const isUtilityKind =
     // Child frames with noParentGate: if dirty in edit/create, confirm discard before closing.
     // Never prompt for the Rate Presets picker or the candidate/client pickers – they are
     // selection utilities, not real edit forms.
-    const suppressChildDiscardPrompt =
-      top.kind === 'rate-presets-picker' ||
-      top.kind === 'candidate-picker'    ||
-      top.kind === 'client-picker';
+ const suppressChildDiscardPrompt =
+  top.kind === 'rate-presets-picker' ||
+  top.kind === 'candidate-picker'    ||
+  top.kind === 'client-picker'       ||
+  top.kind === 'qr-decision';
 
     if (isChildNow &&
         top.noParentGate &&
@@ -25421,67 +25487,7 @@ async function saveForFrame(fr) {
     return;
   }
 
-  // ─────────────────────────────────────────────
-  // NEW: QR-aware tri-choice for timesheets
-  // ─────────────────────────────────────────────
-  if (!isChildNow && fr.entity === 'timesheets' && fr.mode === 'edit' && fr.isDirty) {
-    try {
-      const mc   = window.modalCtx || {};
-      const det  = mc.timesheetDetails || {};
-      const ts   = det.timesheet || {};
-      const fin  = det.tsfin || {};
-      const qrStatus = String(det.qr_status || ts.qr_status || '').toUpperCase();
-      const locked   = !!(fin.locked_by_invoice_id || fin.paid_at_utc);
-
-      // Only prompt if this was already a QR timesheet and is still editable
-      if (qrStatus && !locked) {
-        const promptMsg =
-          'This timesheet already has a QR version.\n\n' +
-          'If you have changed the hours, you must decide what to do with the existing QR timesheet:\n\n' +
-          '1 – Save and REVOKE the existing QR timesheet only (do NOT send a new QR)\n' +
-          '2 – Save, REVOKE and REISSUE a NEW QR timesheet to the worker\n' +
-          '3 – Cancel (do not save changes)\n\n' +
-          'Please type 1, 2 or 3:';
-
-        const choice = window.prompt(promptMsg, '3');
-
-        if (choice === null || choice === '3') {
-          // Cancel – abort the save
-          L('saveForFrame QR prompt: user cancelled (3 or null)');
-          fr._saving = false;
-          fr._updateButtons && fr._updateButtons();
-          return;
-        }
-
-        let revoke  = false;
-        let reissue = false;
-
-        if (choice === '1') {
-          revoke  = true;
-          reissue = false;
-        } else if (choice === '2') {
-          revoke  = true;
-          reissue = true;
-        } else {
-          alert('Please enter 1, 2 or 3. Save has been cancelled.');
-          fr._saving = false;
-          fr._updateButtons && fr._updateButtons();
-          return;
-        }
-
-        mc._revokeQrOnSave  = revoke;
-        mc._reissueQrOnSave = reissue;
-
-        L('saveForFrame QR prompt result', {
-          choice,
-          revoke_qr_on_save:  mc._revokeQrOnSave,
-          reissue_qr_on_save: mc._reissueQrOnSave
-        });
-      }
-    } catch (e) {
-      L('saveForFrame QR prompt: failed (non-fatal)', e);
-    }
-  }
+ 
 
   fr.persistCurrentTabState();
 
@@ -38963,7 +38969,6 @@ async function openTimesheet(row) {
       { key: 'lines',    title: 'Lines' },
       { key: 'evidence', title: 'Evidence' },
       { key: 'issues',   title: 'Issues' },
-      { key: 'related',  title: 'Related' },
       { key: 'finance',  title: 'Finance' }
     ];
 
@@ -38984,22 +38989,21 @@ async function openTimesheet(row) {
         });
       }
 
-      switch (key) {
-        case 'overview':
-          return renderTimesheetOverviewTab(ctxForTab);
-        case 'lines':
-          return renderTimesheetLinesTab(ctxForTab);
-        case 'evidence':
-          return renderTimesheetEvidenceTab(ctxForTab);
-        case 'issues':
-          return renderTimesheetIssuesTab(ctxForTab);
-        case 'related':
-          return renderTimesheetRelatedTab(ctxForTab);
-        case 'finance':
-          return renderTimesheetFinanceTab(ctxForTab);
-        default:
-          return `<div class="tabc"><div class="card"><div class="row"><label>Timesheet</label><div class="controls"><span class="mini">Unknown tab: ${key}</span></div></div></div></div>`;
-      }
+ switch (key) {
+  case 'overview':
+    return renderTimesheetOverviewTab(ctxForTab);
+  case 'lines':
+    return renderTimesheetLinesTab(ctxForTab);
+  case 'evidence':
+    return renderTimesheetEvidenceTab(ctxForTab);
+  case 'issues':
+    return renderTimesheetIssuesTab(ctxForTab);
+  case 'finance':
+    return renderTimesheetFinanceTab(ctxForTab);
+  default:
+    return `<div class="tabc"><div class="card"><div class="row"><label>Timesheet</label><div class="controls"><span class="mini">Unknown tab: ${key}</span></div></div></div></div>`;
+}
+
     };
 
     const onSaveTimesheet = async () => {
@@ -39011,9 +39015,10 @@ async function openTimesheet(row) {
       const det    = mc.timesheetDetails || details;
       const st     = mc.timesheetState || {};
 
-      // NEW: QR-on-save flags (set by saveForFrame tri-choice)
-      const revokeQr  = !!mc._revokeQrOnSave;
-      const reissueQr = !!mc._reissueQrOnSave;
+    // QR decision is computed here only if the save is QR-sensitive
+let revokeQr  = false;
+let reissueQr = false;
+
 
       const segOverrides    = st.segmentOverrides || {};
       const hasSegOverrides = !!Object.keys(segOverrides).length;
@@ -39059,15 +39064,45 @@ async function openTimesheet(row) {
           k => manualHours[k] != null && manualHours[k] !== ''
         );
 
-      const extrasMap        = st.additionalRates || {};
-      const hasExtrasStaged  = extrasMap &&
-        Object.values(extrasMap).some(r => r && Number(r.units_week || 0) !== 0);
+    const extrasMap        = st.additionalRates || {};
+const hasExtrasStaged  = extrasMap &&
+  Object.values(extrasMap).some(r => r && Number(r.units_week || 0) !== 0);
 
-      const segTargets = st.segmentInvoiceTargets || {};
-      const hasSegTargets = !!Object.keys(segTargets).length;
+// Detect whether this save changes QR-relevant content
+const qrStatus = String(det?.qr_status || tsLocal?.qr_status || '').toUpperCase();
+const locked   = !!(tsfinLocal.locked_by_invoice_id || tsfinLocal.paid_at_utc);
 
-      // Staged pay-hold + mark-paid
-      const currentOnHold    = !!tsfinLocal.pay_on_hold;
+// Weekly QR relevance = manual hours or extras (because that triggers manualUpsertContractWeek)
+// Daily  QR relevance = schedule_json being staged (because that triggers /daily-manual-upsert)
+const qrSensitiveChange =
+  (isWeeklyManualContext && (hasManualHours || hasExtrasStaged)) ||
+  (isDailyManualContext && !!(st.schedule));
+
+if (qrStatus && !locked && qrSensitiveChange) {
+  const decision = await openQrDecisionModal({
+    defaultChoice: null, // force explicit selection (or use 'revoke' to default)
+    context: {
+      timesheet_id: tsId || rowNow.timesheet_id || null,
+      sheet_scope: sheetScopeSave,
+      submission_mode: subModeSave
+    }
+  });
+
+  if (!decision || decision.cancelled) {
+    GE();
+    return { ok: false }; // cancel save cleanly
+  }
+
+  revokeQr  = !!decision.revoke;
+  reissueQr = !!decision.reissue;
+}
+
+const segTargets = st.segmentInvoiceTargets || {};
+const hasSegTargets = !!Object.keys(segTargets).length;
+
+// Staged pay-hold + mark-paid
+const currentOnHold    = !!tsfinLocal.pay_on_hold;
+
       const payHoldDesired   =
         (st.payHoldDesired === true || st.payHoldDesired === false)
           ? st.payHoldDesired
@@ -39309,11 +39344,7 @@ if (isWeeklyManualContext && (hasManualHours || hasExtrasStaged)) {
         id:                   finalTsId || rowNow.id
       };
 
-      // NEW: clear QR-on-save flags after a successful save
-      if (window.modalCtx) {
-        window.modalCtx._revokeQrOnSave  = false;
-        window.modalCtx._reissueQrOnSave = false;
-      }
+  
 
       window.modalCtx.data = updatedRow;
 
@@ -39371,6 +39402,128 @@ if (isWeeklyManualContext && (hasManualHours || hasExtrasStaged)) {
   }
 }
 
+function openQrDecisionModal({ defaultChoice = null, context = {} } = {}) {
+  // defaultChoice: null | 'revoke' | 'revoke_reissue'
+  const allowed = new Set([null, 'revoke', 'revoke_reissue']);
+  const initial = allowed.has(defaultChoice) ? defaultChoice : null;
+
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (v) => { if (done) return; done = true; resolve(v); };
+
+    // Minimal esc helper (use your existing escapeHtml if present)
+    const enc = (typeof escapeHtml === 'function')
+      ? escapeHtml
+      : (s) => String(s ?? '');
+
+    const renderTab = () => {
+      const hint = context?.timesheet_id ? `Timesheet: ${String(context.timesheet_id).slice(0, 8)}…` : '';
+
+      return `
+        <div id="qrDecisionRoot" class="form">
+          <div class="card">
+            <div class="row">
+              <label>QR timesheet</label>
+              <div class="controls">
+                <div class="mini" style="color:#bbb;margin-bottom:8px;">
+                  ${enc(hint)}
+                </div>
+
+                <div class="mini" style="margin-bottom:10px;">
+                  This timesheet already has a QR version. Choose what to do:
+                </div>
+
+                <div style="display:flex;flex-direction:column;gap:10px;">
+                  <label class="mini" style="display:flex;gap:10px;align-items:flex-start;">
+                    <input type="radio" name="qr_choice" value="revoke" ${initial === 'revoke' ? 'checked' : ''}/>
+                    <span>
+                      <span style="font-size:16px;">🛑</span>
+                      <strong>Revoke existing QR</strong><br/>
+                      <span style="color:#aaa;">Keep changes, invalidate the old QR. Do not send a new QR.</span>
+                    </span>
+                  </label>
+
+                  <label class="mini" style="display:flex;gap:10px;align-items:flex-start;">
+                    <input type="radio" name="qr_choice" value="revoke_reissue" ${initial === 'revoke_reissue' ? 'checked' : ''}/>
+                    <span>
+                      <span style="font-size:16px;">♻️</span>
+                      <strong>Revoke & reissue new QR</strong><br/>
+                      <span style="color:#aaa;">Invalidate the old QR and send a new QR for the updated hours.</span>
+                    </span>
+                  </label>
+                </div>
+
+                <div class="mini" style="margin-top:12px;color:#aaa;">
+                  Cancel will stop the save.
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      `;
+    };
+
+    const onSave = async () => {
+      const fr = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
+      const choice = fr && fr._qrChoice ? String(fr._qrChoice) : null;
+
+      if (choice !== 'revoke' && choice !== 'revoke_reissue') {
+        // keep modal open; Apply should already be disabled, but double safety
+        alert('Please select an option.');
+        return { ok: false };
+      }
+
+      finish({
+        cancelled: false,
+        revoke:  choice === 'revoke' || choice === 'revoke_reissue',
+        reissue: choice === 'revoke_reissue'
+      });
+
+      return { ok: true };
+    };
+
+    // Open as a child modal; Close/ESC triggers opts.onDismiss (wired in showModal changes)
+    showModal(
+      'QR timesheet update',
+      [{ key: 'main', label: 'Decision' }],
+      renderTab,
+      onSave,
+      false,
+      undefined,
+      {
+        kind: 'qr-decision',
+        noParentGate: true,
+        forceEdit: true,
+
+        // NEW: requires showModal support for opts.onDismiss
+        onDismiss: () => finish({ cancelled: true })
+      }
+    );
+
+    // Wire selection → enable Apply immediately
+    setTimeout(() => {
+      const root = document.getElementById('qrDecisionRoot');
+      if (!root) return;
+
+      const fr = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
+      if (fr && initial) fr._qrChoice = initial;
+
+      root.addEventListener('change', (ev) => {
+        const inp = ev.target && ev.target.closest('input[name="qr_choice"]');
+        if (!inp) return;
+
+        const top = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
+        if (!top) return;
+
+        top._qrChoice = String(inp.value || '');
+        top._updateButtons && top._updateButtons();
+      });
+
+      // ensure buttons reflect initial state
+      if (fr && typeof fr._updateButtons === 'function') fr._updateButtons();
+    }, 0);
+  });
+}
 
 function renderTimesheetRelatedTab(ctx) {
   const { LOGM, L, GC, GE } = getTsLoggers('[TS][RELATED-TAB]');
