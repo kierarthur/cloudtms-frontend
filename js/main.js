@@ -21997,6 +21997,558 @@ async function refreshOldContractAfterTruncate(oldContractId) {
     if (LOGC) console.warn('[CONTRACTS] refreshOldContractAfterTruncate calendar refresh failed', e);
   }
 }
+function renderWeeklyImportSummary(type, importId, rows, ss) {
+  // ─────────────────────────────────────────────────────────────
+  // Robust preview / summary shape handling
+  // ─────────────────────────────────────────────────────────────
+  const rootObj = ss || {};
+  const summary = (rootObj && typeof rootObj.summary === 'object' && rootObj.summary)
+    ? rootObj.summary
+    : (rootObj || {});
+
+  const total = summary.total_rows || (rows ? rows.length : 0) || 0;
+
+  const changedShifts =
+    Array.isArray(rootObj.changed_shifts) ? rootObj.changed_shifts :
+    Array.isArray(summary.changed_shifts) ? summary.changed_shifts :
+    Array.isArray(rootObj?.summary?.changed_shifts) ? rootObj.summary.changed_shifts :
+    [];
+
+  const changedCount =
+    (typeof summary.changed_shifts_count === 'number') ? summary.changed_shifts_count :
+    (typeof rootObj.changed_shifts_count === 'number') ? rootObj.changed_shifts_count :
+    (changedShifts?.length || 0);
+
+  const asBool = (v) => (v === true || v === 'true' || v === 1 || v === '1');
+  const asNum  = (v) => (v == null || v === '' ? 0 : (Number(v) || 0));
+  const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+  const normUpper = (s) => String(s || '').trim().toUpperCase();
+
+  const changedDecisionNeededCount =
+    (typeof summary.changed_shifts_decision_needed_count === 'number') ? summary.changed_shifts_decision_needed_count :
+    (typeof rootObj.changed_shifts_decision_needed_count === 'number') ? rootObj.changed_shifts_decision_needed_count :
+    (changedShifts || []).filter(x => asBool(x?.requires_any_decision)).length;
+
+  // Actions which mean the group is actionable / “ready to process”
+  const READY_ACTIONS = new Set([
+    'NEW_AUTOPROC_TIMESHEET',
+    'UPDATE_AUTOPROC_TS',
+    'UPDATE_MANUAL_WEEK',
+    'UPDATE_ADJUSTMENT_TS',
+    'CREATE_ADJUSTMENT_TS',
+    'CREATE_PAY_ADJUSTMENT_ONLY'
+  ]);
+
+  const isIssueAction = (a) => {
+    const x = normUpper(a);
+    if (!x) return true;
+    if (READY_ACTIONS.has(x)) return false;
+    if (x === 'OK' || x === 'APPLY' || x === 'SKIP_ALREADY_PROCESSED') return false;
+    if (x.startsWith('REJECT_')) return true;
+    if (x.startsWith('BLOCK_'))  return true;
+    if (x === 'NO_CANDIDATE' || x === 'NO_CLIENT') return true;
+    if (x === 'UNKNOWN') return true;
+    return false;
+  };
+
+  // Overview counts
+  let readyCount = 0;
+  let issueCount = 0;
+  for (const r of rows || []) {
+    const actionRaw = normUpper(r.resolution_status || r.action || '');
+    if (READY_ACTIONS.has(actionRaw)) readyCount++;
+    else if (isIssueAction(actionRaw)) issueCount++;
+  }
+
+  const fmtMoney = (n) => {
+    const x = round2(Number(n || 0));
+    const s = x.toFixed(2);
+    return (x > 0 ? `+${s}` : s);
+  };
+
+  const fmtTime = (isoOrYmdHm) => {
+    const s = String(isoOrYmdHm || '').trim();
+    if (!s) return '—';
+    const d = new Date(s);
+    if (!Number.isNaN(d.getTime())) {
+      const hh = String(d.getUTCHours()).padStart(2, '0');
+      const mm = String(d.getUTCMinutes()).padStart(2, '0');
+      return `${hh}:${mm}Z`;
+    }
+    return s;
+  };
+
+  // ─────────────────────────────────────────────────────────────
+  // Canonical decisions store (survives rerenders, defaults init safe)
+  // ─────────────────────────────────────────────────────────────
+  const decisionStore =
+    (typeof getOrInitWeeklyImportDecisionsStore === 'function')
+      ? getOrInitWeeklyImportDecisionsStore(type, importId, rootObj)
+      : null;
+
+  // Ensure defaults are initialised (safe; doesn't overwrite edits)
+  try { decisionStore && decisionStore.initFromPreview && decisionStore.initFromPreview(rootObj); } catch {}
+
+  const changedHtml = (() => {
+    if (!changedShifts || !changedShifts.length) {
+      return `<div class="mini" style="color:#666;">No changed-hours shifts detected for this import.</div>`;
+    }
+
+    const head = `
+      <div class="mini" style="margin-bottom:6px;">
+        Detected changed hours for <strong>${enc(String(changedCount))}</strong> shift(s).
+        Decision required for <strong>${enc(String(changedDecisionNeededCount))}</strong>.
+      </div>
+      <div class="mini" style="color:#666;margin-bottom:10px;">
+        For paid/invoiced shifts you must choose <em>Skip</em> or allow the correction artefacts to be created.
+        Invoiced shifts require a credit week + reinvoice week.
+      </div>
+    `;
+
+    const rowsHtml = changedShifts.map((cs) => {
+      const ek = String(cs?.external_row_key || '').trim();
+      const shiftId = cs?.shift_id || '';
+      const we = cs?.week_ending_date || '';
+
+      const paid = asBool(cs?.is_paid);
+      const invoiced = asBool(cs?.is_invoiced);
+      const requires = asBool(cs?.requires_any_decision);
+
+      const oldStart = cs?.old_start_utc || cs?.old_start || '';
+      const oldEnd   = cs?.old_end_utc   || cs?.old_end   || '';
+      const oldBreak = Number(cs?.old_break_mins ?? cs?.old_break_minutes ?? 0) || 0;
+
+      const newStart = cs?.new_start_utc || cs?.new_start || '';
+      const newEnd   = cs?.new_end_utc   || cs?.new_end   || '';
+      const newBreak = Number(cs?.new_break_mins ?? cs?.new_break_minutes ?? 0) || 0;
+
+      const oldPay    = asNum(cs?.old_pay_ex ?? cs?.old_pay_ex_vat ?? cs?.old_pay);
+      const newPay    = asNum(cs?.new_pay_ex ?? cs?.new_pay_ex_vat ?? cs?.new_pay);
+      const deltaPay  = asNum(cs?.delta_pay_ex ?? cs?.delta_pay_ex_vat ?? cs?.delta_pay);
+
+      const oldCharge   = asNum(cs?.old_charge_ex ?? cs?.old_charge_ex_vat ?? cs?.old_charge);
+      const newCharge   = asNum(cs?.new_charge_ex ?? cs?.new_charge_ex_vat ?? cs?.new_charge);
+      const deltaCharge = asNum(cs?.delta_charge_ex ?? cs?.delta_charge_ex_vat ?? cs?.delta_charge);
+
+      const d = decisionStore && decisionStore.get ? (decisionStore.get(ek) || {}) : {};
+      const skip = asBool(d?.skip);
+
+      const opts = (typeof getWeeklyMondayOptions === 'function')
+        ? getWeeklyMondayOptions(cs?.week_start || cs?.week_ending_date || '')
+        : [];
+
+      const creditVal = d?.credit_week_start || '';
+      const reinvVal  = d?.reinvoice_week_start || '';
+
+      const payDir =
+        paid
+          ? (deltaPay > 0 ? `Underpay ${fmtMoney(deltaPay)} (will be paid next pay CSV run)` :
+             deltaPay < 0 ? `Overpay ${fmtMoney(deltaPay)} (recovery scheduled)` :
+             `No pay delta`)
+          : '—';
+
+      return `
+        <tr class="${requires ? 'wi-row-issue' : ''}">
+          <td class="mini">${enc(ek || '—')}</td>
+          <td class="mini">${enc(shiftId || '—')}</td>
+          <td class="mini">${enc(formatYmdToNiceDate(String(we || '')) || '—')}</td>
+
+          <td class="mini">${enc(fmtTime(oldStart))} → ${enc(fmtTime(newStart))}</td>
+          <td class="mini">${enc(fmtTime(oldEnd))} → ${enc(fmtTime(newEnd))}</td>
+          <td class="mini">${enc(String(oldBreak))} → ${enc(String(newBreak))}</td>
+
+          <td class="mini">${enc(fmtMoney(oldPay))} → ${enc(fmtMoney(newPay))}<br/><span style="color:#666">Δ ${enc(fmtMoney(deltaPay))}</span></td>
+          <td class="mini">${enc(fmtMoney(oldCharge))} → ${enc(fmtMoney(newCharge))}<br/><span style="color:#666">Δ ${enc(fmtMoney(deltaCharge))}</span></td>
+
+          <td class="mini">${paid ? 'Yes' : 'No'}</td>
+          <td class="mini">${invoiced ? 'Yes' : 'No'}</td>
+
+          <td class="mini">${requires ? '<strong>Yes</strong>' : 'No'}</td>
+
+          <td class="mini">
+            ${
+              requires
+                ? `
+                  <label class="mini" style="display:flex;gap:6px;align-items:center;">
+                    <input type="checkbox" data-act="chg-skip" data-ek="${enc(ek)}" ${skip ? 'checked' : ''}/>
+                    Skip
+                  </label>
+                `
+                : '—'
+            }
+          </td>
+
+          <td class="mini">
+            ${
+              (requires && invoiced)
+                ? `
+                  <select data-act="chg-credit-week" data-ek="${enc(ek)}" class="mini">
+                    ${opts.map(o => `<option value="${enc(o.value)}" ${String(o.value)===String(creditVal) ? 'selected' : ''}>${enc(o.label)}</option>`).join('')}
+                  </select>
+                `
+                : '—'
+            }
+          </td>
+
+          <td class="mini">
+            ${
+              (requires && invoiced)
+                ? `
+                  <select data-act="chg-reinvoice-week" data-ek="${enc(ek)}" class="mini">
+                    ${opts.map(o => `<option value="${enc(o.value)}" ${String(o.value)===String(reinvVal) ? 'selected' : ''}>${enc(o.label)}</option>`).join('')}
+                  </select>
+                `
+                : '—'
+            }
+          </td>
+
+          <td class="mini">
+            ${requires && paid ? enc(payDir) : '—'}
+          </td>
+        </tr>
+      `;
+    }).join('');
+
+    return `
+      ${head}
+      <div class="wi-table-wrap" style="max-height:240px;">
+        <table class="grid wi-grid">
+          <thead>
+            <tr>
+              <th class="mini">External key</th>
+              <th class="mini">Shift</th>
+              <th class="mini">Week ending</th>
+              <th class="mini">Start</th>
+              <th class="mini">End</th>
+              <th class="mini">Break</th>
+              <th class="mini">Pay</th>
+              <th class="mini">Charge</th>
+              <th class="mini">Paid</th>
+              <th class="mini">Invoiced</th>
+              <th class="mini">Decision?</th>
+              <th class="mini">Skip</th>
+              <th class="mini">Credit week</th>
+              <th class="mini">Reinvoice week</th>
+              <th class="mini">Pay correction</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${rowsHtml}
+          </tbody>
+        </table>
+      </div>
+    `;
+  })();
+
+  const rowsHtml = (rows && rows.length)
+    ? rows.map((r, idx) => {
+        const level = String(r.level || '').toLowerCase();
+
+        const staff =
+          (level === 'group')
+            ? (r.candidate_name || r.candidate_id || r.staff_name || r.staff_raw || '')
+            : (r.staff_name || r.staff_raw || '');
+
+        const unit =
+          (level === 'group')
+            ? (r.client_name || r.client_id || r.unit || r.hospital_or_trust || r.hospital_norm || '')
+            : (r.unit || r.hospital_or_trust || r.hospital_norm || '');
+
+        const rawDateYmd =
+          (level === 'group')
+            ? (r.week_ending_date || r.work_date || r.date_local || r.date || '')
+            : (r.date_local || r.work_date || r.date || r.week_ending_date || '');
+
+        const date = formatYmdToNiceDate(rawDateYmd);
+
+        const code =
+          (r.incoming_code ||
+           r.assignment_code ||
+           r.assignment ||
+           r.assignment_grade_norm ||
+           '').toString();
+
+        const reasonText = (r.reason || '').toString();
+        const actionRaw = normUpper(r.resolution_status || r.action || '');
+
+        let displayAction = actionRaw ? actionRaw.replace(/_/g, ' ') : 'UNKNOWN';
+        if (actionRaw === 'NEW_AUTOPROC_TIMESHEET') displayAction = 'READY TO PROCESS';
+
+        let cls = 'pill-info';
+        if (actionRaw === 'OK' || actionRaw === 'APPLY' || actionRaw === 'NEW_AUTOPROC_TIMESHEET') cls = 'pill-ok';
+        else if (
+          actionRaw === 'NO_CANDIDATE' ||
+          actionRaw === 'REJECT_NO_CANDIDATE' ||
+          actionRaw === 'NO_CLIENT' ||
+          actionRaw === 'REJECT_NO_CLIENT'
+        ) cls = 'pill-bad';
+        else if (
+          actionRaw === 'REJECT_NO_CONTRACT' ||
+          actionRaw === 'REJECT_NO_CONTRACT_BAND_MISMATCH' ||
+          actionRaw.startsWith('REJECT_') ||
+          actionRaw.startsWith('BLOCK_') ||
+          actionRaw === 'UNKNOWN'
+        ) cls = 'pill-warn';
+
+        const rowClass =
+          READY_ACTIONS.has(actionRaw) ? 'wi-row-ready'
+          : (isIssueAction(actionRaw) ? 'wi-row-issue' : '');
+
+        const canAssignCand   = (actionRaw === 'NO_CANDIDATE' || actionRaw === 'REJECT_NO_CANDIDATE');
+        const canAssignClient = (actionRaw === 'NO_CLIENT'    || actionRaw === 'REJECT_NO_CLIENT');
+
+        return `
+          <tr class="${rowClass}">
+            <td class="wi-col-staff"><span class="mini">${enc(staff || '—')}</span></td>
+            <td class="wi-col-unit"><span class="mini">${enc(unit || '—')}</span></td>
+            <td class="wi-col-date"><span class="mini">${enc(date || '—')}</span></td>
+            <td class="wi-col-code"><span class="mini" style="white-space: normal; word-break: break-word; display:inline-block;">${enc(code || '—')}</span></td>
+            <td class="wi-col-status"><span class="pill ${cls}" style="white-space: normal; word-break: break-word; display:inline-block; text-align:center;">${enc(displayAction || 'UNKNOWN')}</span></td>
+            <td class="wi-col-reason"><span class="mini" style="white-space: normal; word-break: break-word; display:inline-block;">${enc(reasonText || '')}</span></td>
+            <td class="wi-col-actions">
+              <div class="wi-actions">
+                ${canAssignCand ? `<button type="button" class="btn mini" data-act="weekly-resolve-candidate" data-row-idx="${idx}" data-staff="${enc(staff)}" data-unit="${enc(unit)}">Assign candidate…</button>` : ''}
+                ${canAssignClient ? `<button type="button" class="btn mini" data-act="weekly-resolve-client" data-row-idx="${idx}" data-unit="${enc(unit)}">Assign client…</button>` : ''}
+              </div>
+            </td>
+          </tr>
+        `;
+      }).join('')
+    : `
+      <tr>
+        <td colspan="7"><span class="mini">No rows to show.</span></td>
+      </tr>
+    `;
+
+  const markup = html(`
+    <div id="weeklyImportSummary">
+      <div class="card weekly-import-card">
+        <div class="row">
+          <label>Overview</label>
+          <div class="controls">
+            <div class="mini">
+              Import ID: <span class="mono">${enc(importId || '—')}</span><br/>
+              Total rows: ${total}<br/>
+              Ready to process: ${readyCount} &nbsp;|&nbsp; Needs attention: ${issueCount}<br/>
+              Changed shifts: ${enc(String(changedCount))} &nbsp;|&nbsp; Decision required: ${enc(String(changedDecisionNeededCount))}
+            </div>
+          </div>
+        </div>
+
+        <div class="row" style="margin-top:10px;">
+          <label>Changed shifts</label>
+          <div class="controls">${changedHtml}</div>
+        </div>
+
+        <div class="row" style="margin-top:10px;">
+          <label>Rows</label>
+          <div class="controls">
+            <div class="wi-table-wrap">
+              <table class="grid wi-grid">
+                <thead>
+                  <tr>
+                    <th class="wi-col-staff">Staff</th>
+                    <th class="wi-col-unit">Unit / Site</th>
+                    <th class="wi-col-date">Date / Week ending</th>
+                    <th class="wi-col-code">Code</th>
+                    <th class="wi-col-status">Resolution</th>
+                    <th class="wi-col-reason">Reason</th>
+                    <th class="wi-col-actions">Resolve</th>
+                  </tr>
+                </thead>
+                <tbody>${rowsHtml}</tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+
+        <div class="row weekly-import-footer" style="margin-top:10px;">
+          <label></label>
+          <div class="controls">
+            <button type="button" class="btn" data-act="weekly-import-refresh">Refresh</button>
+            <button type="button" class="btn" style="margin-left:8px;" data-act="weekly-import-apply">Finalise import</button>
+            <span class="mini" style="margin-left:8px;">
+              Changed-hours decisions are validated client-side before finalise.
+            </span>
+          </div>
+        </div>
+      </div>
+    </div>
+  `);
+
+  // Wiring: decisions updates + apply validation + existing resolve actions
+  setTimeout(() => {
+    try {
+      const root = document.getElementById('weeklyImportSummary');
+      if (!root || (type !== 'NHSP' && type !== 'HR_WEEKLY')) return;
+      if (root.__weeklyWired) return;
+      root.__weeklyWired = true;
+
+      const LOGW = (typeof window.__LOG_IMPORTS === 'boolean') ? window.__LOG_IMPORTS : true;
+      const LW   = (...a) => { if (LOGW) console.log('[IMPORTS][WEEKLY]', ...a); };
+
+      const getPreview = () => (window.__importSummaryState && window.__importSummaryState[type]) ? window.__importSummaryState[type] : rootObj;
+
+      const ensureWeeklyImportMappings = () => {
+        window.__weeklyImportMappings = window.__weeklyImportMappings || {};
+        window.__weeklyImportMappings[type] = window.__weeklyImportMappings[type] || {};
+        let m = window.__weeklyImportMappings[type][importId];
+        if (!m) {
+          m = { candidate_mappings: [], client_aliases: [] };
+          window.__weeklyImportMappings[type][importId] = m;
+        }
+        return m;
+      };
+
+      // decision changes update canonical store
+      root.addEventListener('change', (ev) => {
+        const el = ev.target;
+        if (!el) return;
+        const act = el.getAttribute && el.getAttribute('data-act');
+        if (!act) return;
+        const ek = (el.getAttribute('data-ek') || '').trim();
+        if (!ek) return;
+
+        const previewNow = getPreview();
+        const ds = (typeof getOrInitWeeklyImportDecisionsStore === 'function')
+          ? getOrInitWeeklyImportDecisionsStore(type, importId, previewNow)
+          : null;
+
+        if (!ds || !ds.set) return;
+
+        if (act === 'chg-skip') {
+          ds.set(ek, { skip: !!el.checked });
+          LW('decision set', { ek, skip: !!el.checked });
+          return;
+        }
+        if (act === 'chg-credit-week') {
+          ds.set(ek, { credit_week_start: String(el.value || '') });
+          LW('decision set', { ek, credit_week_start: String(el.value || '') });
+          return;
+        }
+        if (act === 'chg-reinvoice-week') {
+          ds.set(ek, { reinvoice_week_start: String(el.value || '') });
+          LW('decision set', { ek, reinvoice_week_start: String(el.value || '') });
+          return;
+        }
+      });
+
+      // Existing resolve buttons (unchanged)
+      root.addEventListener('click', (ev) => {
+        const btn = ev.target.closest('button[data-act]');
+        if (!btn) return;
+        const act = btn.getAttribute('data-act');
+        if (act !== 'weekly-resolve-candidate' && act !== 'weekly-resolve-client') return;
+
+        const st = window.__importSummaryState && window.__importSummaryState[type];
+        const rowsState = st && Array.isArray(st.rows) ? st.rows : (Array.isArray(rows) ? rows : []);
+        const idx = Number(btn.getAttribute('data-row-idx') || '-1');
+        if (idx < 0 || idx >= rowsState.length) return;
+
+        const row = rowsState[idx];
+        const staffRaw = row.staff_name || row.staff_raw || '';
+        const hospRaw  = row.hospital_or_trust || row.unit || row.hospital_norm || '';
+
+        if (act === 'weekly-resolve-candidate') {
+          openCandidatePicker(async ({ id, label }) => {
+            const mappings = ensureWeeklyImportMappings();
+            const mapping = {
+              staff_norm:        row.staff_norm || staffRaw || '',
+              hospital_or_trust: hospRaw || null,
+              candidate_id:      id,
+              client_id:         row.client_id || null,
+              work_date:         row.work_date || row.date_local || row.date || row.week_ending_date || null
+            };
+
+            try {
+              await postWeeklyResolveMappings(importId, type, { candidate_mappings: [mapping], client_aliases: [] });
+              mappings.candidate_mappings.push(mapping);
+              window.__toast && window.__toast(`Candidate ${label} linked. Reclassifying…`);
+              await refreshWeeklyImportSummary(type, importId);
+            } catch (err) {
+              console.error('[IMPORTS][WEEKLY] resolve-candidate failed', err);
+              alert(err?.message || 'Failed to resolve candidate.');
+            }
+          }, { context: { importId, staffName: staffRaw, unit: hospRaw, source_system: type, rowIndex: idx } });
+        }
+
+        if (act === 'weekly-resolve-client') {
+          openClientPicker(async ({ id, label }) => {
+            const mappings = ensureWeeklyImportMappings();
+            const hrRowIds = Array.isArray(row.hr_row_ids) ? row.hr_row_ids.map(String) : (row.hr_row_id ? [String(row.hr_row_id)] : []);
+            const mapping = { client_id: id, hr_row_ids: hrRowIds.filter(Boolean), hospital_norm: row.hospital_norm || hospRaw || '' };
+
+            try {
+              await postWeeklyResolveMappings(importId, type, { candidate_mappings: [], client_aliases: [mapping] });
+              mappings.client_aliases.push(mapping);
+              window.__toast && window.__toast(`Client ${label} linked. Reclassifying…`);
+              await refreshWeeklyImportSummary(type, importId);
+            } catch (err) {
+              console.error('[IMPORTS][WEEKLY] resolve-client failed', err);
+              alert(err?.message || 'Failed to resolve client.');
+            }
+          }, { nhspOnly: (type === 'NHSP'), hrAutoOnly: (type === 'HR_WEEKLY'), context: { importId, unit: hospRaw } });
+        }
+      });
+
+      const btnRefresh = root.querySelector('button[data-act="weekly-import-refresh"]');
+      if (btnRefresh && !btnRefresh.__weeklyRefreshWired) {
+        btnRefresh.__weeklyRefreshWired = true;
+        btnRefresh.addEventListener('click', async () => {
+          try { await refreshWeeklyImportSummary(type, importId); }
+          catch (err) { console.error('[IMPORTS][WEEKLY] refresh failed', err); alert(err?.message || 'Refresh failed.'); }
+        });
+      }
+
+      const btnApply = root.querySelector('button[data-act="weekly-import-apply"]');
+      if (btnApply && !btnApply.__weeklyApplyWired) {
+        btnApply.__weeklyApplyWired = true;
+        btnApply.addEventListener('click', async () => {
+          try {
+            const ok = window.confirm('Are you sure you want to finalise now?');
+            if (!ok) return;
+
+            const previewNow = getPreview();
+            const ds = (typeof getOrInitWeeklyImportDecisionsStore === 'function')
+              ? getOrInitWeeklyImportDecisionsStore(type, importId, previewNow)
+              : null;
+
+            // Client-side validation (required by brief)
+            if (ds && ds.validate) {
+              const v = ds.validate(previewNow);
+              if (!v.ok) {
+                alert(
+                  `Cannot finalise: missing/invalid decisions for changed-hours shifts:\n\n` +
+                  v.errors.slice(0, 20).map(x => `- ${x}`).join('\n') +
+                  (v.errors.length > 20 ? `\n\n(and ${v.errors.length - 20} more)` : '')
+                );
+                return;
+              }
+            }
+
+            const mappings = ensureWeeklyImportMappings();
+            const payload = {
+              candidate_mappings: mappings.candidate_mappings || [],
+              client_aliases: mappings.client_aliases || [],
+              decisions: ds && ds.serialize ? ds.serialize(previewNow) : {}
+            };
+
+            const result = await resolveImportConflicts(importId, type, payload) || {};
+            alert(`Import ${result.import_id || importId} has been finalised.`);
+            await refreshWeeklyImportSummary(type, importId);
+          } catch (err) {
+            console.error('[IMPORTS][WEEKLY] apply failed', err);
+            alert(err?.message || 'Weekly import apply failed.');
+          }
+        });
+      }
+    } catch (e) {
+      console.warn('[IMPORTS] weekly wiring failed', e);
+    }
+  }, 0);
+
+  return markup;
+}
 
 
 // ─────────────────────────────────────────────────────────────────────────────
