@@ -1866,7 +1866,6 @@ async function postWeeklyResolveMappings(importId, type, payload) {
 
 
 
-
 async function refreshWeeklyImportSummary(type, importId) {
   const LOG = (typeof window.__LOG_IMPORTS === 'boolean') ? window.__LOG_IMPORTS : true;
   const L   = (...a) => { if (LOG) console.log('[IMPORTS][WEEKLY][REFRESH]', ...a); };
@@ -1897,9 +1896,11 @@ async function refreshWeeklyImportSummary(type, importId) {
       throw new Error(text || `Weekly import preview refresh failed (${res.status})`);
     }
 
-    const summaryState = text ? JSON.parse(text) : {};
+    const preview = text ? JSON.parse(text) : {};
+
+    // IMPORTANT: renderImportSummaryModal will now normalize + store canonical preview.
     if (typeof renderImportSummaryModal === 'function') {
-      renderImportSummaryModal(t, summaryState);
+      renderImportSummaryModal(t, preview);
     } else {
       throw new Error('renderImportSummaryModal is not defined');
     }
@@ -1909,6 +1910,7 @@ async function refreshWeeklyImportSummary(type, importId) {
     if (window.__toast) window.__toast(msg); else alert(msg);
   }
 }
+
 
 // ─────────────────────────────────────────────────────────────
 // HR Rota Daily helpers
@@ -26809,6 +26811,8 @@ function installGlobalFileDropGuards() {
 
 // Attach weekly summary behaviour (Assign buttons + optional group selection)
 // Attach weekly summary behaviour (Assign buttons + optional group selection)
+
+
 function wireWeeklyImportSummaryActions(type, importId) {
   const t = String(type || '').toUpperCase();
   if (t !== 'NHSP' && t !== 'HR_WEEKLY') return;
@@ -26822,23 +26826,15 @@ function wireWeeklyImportSummaryActions(type, importId) {
   window.__weeklyImportMappings = window.__weeklyImportMappings || {};
   window.__weeklySelectedGroups = window.__weeklySelectedGroups || {};
 
-  // Ensure mapping container exists for this type+importId
-  if (!window.__weeklyImportMappings[t]) {
-    window.__weeklyImportMappings[t] = {};
-  }
-  if (!window.__weeklySelectedGroups[t]) {
-    window.__weeklySelectedGroups[t] = {};
-  }
+  if (!window.__weeklyImportMappings[t]) window.__weeklyImportMappings[t] = {};
+  if (!window.__weeklySelectedGroups[t]) window.__weeklySelectedGroups[t] = {};
 
   const ensureMappings = (id) => {
     const key = String(id || importId || '');
     let mRoot = window.__weeklyImportMappings[t];
     let m = mRoot[key];
     if (!m) {
-      m = {
-        candidate_mappings: [],
-        client_aliases: []
-      };
+      m = { candidate_mappings: [], client_aliases: [] };
       mRoot[key] = m;
     }
     return m;
@@ -26855,17 +26851,16 @@ function wireWeeklyImportSummaryActions(type, importId) {
     return s;
   };
 
-  // Always read the latest state/rows so refreshes & re-renders work
-  const getState = () => {
-    const state = window.__importSummaryState[t] || {};
-    const rows  = Array.isArray(state.rows) ? state.rows : [];
-    const id    = state.import_id || importId;
-    return { state, rows, importId: id };
+  // Always read the latest canonical preview stored by renderImportSummaryModal
+  const getPreview = () => {
+    const preview = window.__importSummaryState[t] || {};
+    const id = preview.import_id || importId;
+    const rows = Array.isArray(preview.rows) ? preview.rows : [];
+    return { preview, rows, importId: id };
   };
 
   const norm = (s) => String(s || '').trim().toLowerCase();
 
-  // Helper: best-effort fetch of candidate name for warning
   async function fetchCandidateName(candId) {
     try {
       if (typeof authFetch !== 'function' || typeof API !== 'function') return null;
@@ -26875,28 +26870,22 @@ function wireWeeklyImportSummaryActions(type, importId) {
       const json = JSON.parse(text);
       const c = json && json.candidate ? json.candidate : json;
       if (!c) return null;
-      return (
-        c.display_name ||
-        c.name ||
-        `${c.first_name || ''} ${c.last_name || ''}`.trim() ||
-        null
-      );
+      return c.display_name || c.name || `${c.first_name || ''} ${c.last_name || ''}`.trim() || null;
     } catch {
       return null;
     }
   }
 
-  // Handle Assign candidate/client buttons and (optionally) checkbox selection
+  // Assign candidate/client (unchanged behaviour, still uses prompts here)
   root.addEventListener('click', async (ev) => {
     const btn = ev.target.closest('button[data-act]');
     if (!btn) return;
 
     const act = btn.getAttribute('data-act');
-    if (act !== 'weekly-resolve-candidate' && act !== 'weekly-resolve-client') {
-      return;
-    }
 
-    const { rows, importId: currentImportId } = getState();
+    if (act !== 'weekly-resolve-candidate' && act !== 'weekly-resolve-client') return;
+
+    const { rows, importId: currentImportId } = getPreview();
     const idx = Number(btn.getAttribute('data-row-idx') || '-1');
     const row = (idx >= 0 && idx < rows.length) ? rows[idx] : null;
     if (!row) return;
@@ -26914,7 +26903,6 @@ function wireWeeklyImportSummaryActions(type, importId) {
 
       if (!candId) return;
 
-      // Try to fetch candidate name for a smarter warning
       let candName = await fetchCandidateName(candId);
       const staffNorm = norm(staffRaw);
       const candNorm  = norm(candName || '');
@@ -26924,21 +26912,14 @@ function wireWeeklyImportSummaryActions(type, importId) {
       let confirmMsg;
       if (candName && staffTokens.length && candTokens.length) {
         const hasSharedToken = staffTokens.some(t => candTokens.includes(t));
-        const workDateYmd =
-          row.work_date ||
-          row.date_local ||
-          row.date ||
-          row.week_ending_date ||
-          null;
-
+        const workDateYmd = row.work_date || row.date_local || row.date || row.week_ending_date || null;
         if (!hasSharedToken) {
           confirmMsg =
             `⚠ WARNING:\n` +
             `Imported staff name: "${staffRaw}"\n` +
             `Chosen candidate:    "${candName}" (id: ${candId})\n\n` +
             `These names do not share any words.\n\n` +
-            `Are you sure you want to link this candidate for ` +
-            `${workDateYmd || 'this date'} at "${hospRaw || 'unknown site'}"?`;
+            `Are you sure you want to link this candidate for ${workDateYmd || 'this date'} at "${hospRaw || 'unknown site'}"?`;
         } else {
           confirmMsg =
             `Confirm linking:\n\n` +
@@ -26948,26 +26929,21 @@ function wireWeeklyImportSummaryActions(type, importId) {
             `Proceed?`;
         }
       } else {
-        // Fallback confirm when we don't have a nice name
         confirmMsg =
           `Link imported staff "${staffRaw}" at "${hospRaw || 'unknown site'}"\n` +
           `to candidate_id "${candId}"?\n\n` +
           `This will create/update an alias used for future imports.`;
       }
 
-      if (!window.confirm(confirmMsg)) {
-        return;
-      }
+      if (!window.confirm(confirmMsg)) return;
 
       mappings.candidate_mappings.push({
-        staff_norm:       row.staff_norm || staffRaw || '',
+        staff_norm:        row.staff_norm || staffRaw || '',
         hospital_or_trust: hospRaw || null,
-        candidate_id:     candId
+        candidate_id:      candId
       });
 
-      if (window.__toast) {
-        window.__toast('Candidate mapping queued for this import.');
-      }
+      window.__toast && window.__toast('Candidate mapping queued for this import.');
       return;
     }
 
@@ -26986,40 +26962,314 @@ function wireWeeklyImportSummaryActions(type, importId) {
         `to client_id "${clientId}"?\n\n` +
         `This will create/update a client_hospitals alias for future imports.`;
 
-      if (!window.confirm(confirmMsg)) {
-        return;
-      }
+      if (!window.confirm(confirmMsg)) return;
 
       mappings.client_aliases.push({
         hospital_norm: row.hospital_norm || hospRaw || '',
         client_id:     clientId
       });
 
-      if (window.__toast) {
-        window.__toast('Client mapping queued for this import.');
-      }
+      window.__toast && window.__toast('Client mapping queued for this import.');
     }
   });
 
-  // Optional: handle group selection checkboxes if you add them later
-  // (e.g. <input type="checkbox" data-act="weekly-select-group" data-group-id="...">)
+  // Optional: group selection checkboxes (if present)
   root.addEventListener('change', (ev) => {
     const cb = ev.target.closest('input[data-act="weekly-select-group"]');
     if (!cb) return;
 
-    const { importId: currentImportId } = getState();
+    const { importId: currentImportId } = getPreview();
     const sel = ensureSelectedSet(currentImportId);
 
     const groupId = cb.getAttribute('data-group-id') || '';
     if (!groupId) return;
 
-    if (cb.checked) {
-      sel.add(groupId);
-    } else {
-      sel.delete(groupId);
-    }
+    if (cb.checked) sel.add(groupId);
+    else sel.delete(groupId);
   });
+
+  // APPLY button (include decisions + validation)
+  const btnApply = root.querySelector('button[data-act="weekly-import-apply"]');
+  if (btnApply && !btnApply.__applyWired) {
+    btnApply.__applyWired = true;
+    btnApply.addEventListener('click', async () => {
+      try {
+        const { preview, importId: currentImportId } = getPreview();
+        if (!currentImportId) throw new Error('Missing import_id');
+
+        const ok = window.confirm('Are you sure you want to finalise now?');
+        if (!ok) return;
+
+        const mappings = ensureMappings(currentImportId);
+        const selSet = ensureSelectedSet(currentImportId);
+
+        const decisionStore = getOrInitWeeklyImportDecisionsStore(t, currentImportId, preview);
+
+        // client-side validation of decisions (skip ok; invoiced requires weeks)
+        const v = decisionStore.validate(preview);
+        if (!v.ok) {
+          const msg =
+            `Cannot finalise: missing/invalid decisions for changed-hours shifts:\n\n` +
+            v.errors.slice(0, 20).map(x => `- ${x}`).join('\n') +
+            (v.errors.length > 20 ? `\n\n(and ${v.errors.length - 20} more)` : '');
+          alert(msg);
+          return;
+        }
+
+        const payload = {
+          candidate_mappings: mappings.candidate_mappings || [],
+          client_aliases: mappings.client_aliases || [],
+          decisions: decisionStore.serialize(preview),
+          selected_group_ids: (selSet && selSet.size) ? Array.from(selSet) : null
+        };
+
+        const result = await resolveImportConflicts(currentImportId, t, payload) || {};
+        alert(`Import ${result.import_id || currentImportId} finalised.`);
+        await refreshWeeklyImportSummary(t, currentImportId);
+      } catch (e) {
+        console.error('[IMPORTS][WEEKLY] apply failed', e);
+        alert(e?.message || 'Weekly import apply failed.');
+      }
+    });
+  }
 }
+
+
+
+
+
+function getWeeklyMondayOptions(baseWeekRefYmd) {
+  // Returns ±4 Monday week-start options.
+  // Input: a base week reference (typically week_ending_date OR week_start Monday)
+  // Output: [{ value:'YYYY-MM-DD', label:'Mon 01 Jan 2025' }, ...]
+
+  const parseYmd = (ymd) => {
+    if (!ymd || typeof ymd !== 'string') return null;
+    const m = ymd.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (!m) return null;
+    const d = new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3])));
+    return Number.isNaN(d.getTime()) ? null : d;
+  };
+
+  const toYmd = (d) => {
+    if (!(d instanceof Date) || Number.isNaN(d.getTime())) return null;
+    return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2,'0')}-${String(d.getUTCDate()).padStart(2,'0')}`;
+  };
+
+  const isMondayYmd = (ymd) => {
+    const d = parseYmd(ymd);
+    return !!(d && d.getUTCDay() === 1);
+  };
+
+  const weekStartFromWeekEnding = (weYmd) => {
+    const d = parseYmd(weYmd);
+    if (!d) return null;
+    // week_ending_date is usually Sunday -> Monday is -6
+    d.setUTCDate(d.getUTCDate() - 6);
+    return toYmd(d);
+  };
+
+  const addDaysYmd = (ymd, days) => {
+    const d = parseYmd(ymd);
+    if (!d) return null;
+    d.setUTCDate(d.getUTCDate() + Number(days || 0));
+    return toYmd(d);
+  };
+
+  const labelFor = (ymd) => {
+    if (typeof formatYmdToNiceDate === 'function') {
+      // You already have this helper; use it for consistency
+      return formatYmdToNiceDate(ymd);
+    }
+    // fallback: Mon 01 Jan 2025
+    const d = parseYmd(ymd);
+    if (!d) return ymd;
+    const days = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+    const mons = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    return `${days[d.getUTCDay()]} ${String(d.getUTCDate()).padStart(2,'0')} ${mons[d.getUTCMonth()]} ${d.getUTCFullYear()}`;
+  };
+
+  // Determine base Monday
+  let base = String(baseWeekRefYmd || '').trim();
+  if (!base) return [];
+
+  if (!isMondayYmd(base)) {
+    // treat as week_ending_date and derive Monday
+    const derived = weekStartFromWeekEnding(base);
+    base = derived || base;
+  }
+  if (!isMondayYmd(base)) return [];
+
+  const out = [];
+  for (let i = -4; i <= 4; i++) {
+    const ymd = addDaysYmd(base, i * 7);
+    if (!ymd) continue;
+    out.push({ value: ymd, label: labelFor(ymd) });
+  }
+  return out;
+}
+
+
+// In-memory store keyed by (type, importId, external_row_key), survives re-renders.
+// - initFromPreview(preview) adds defaults ONLY for new keys
+// - serialize(preview) only includes keys that exist in current preview (prevents backend "unknown key" rejection)
+function getOrInitWeeklyImportDecisionsStore(type, importId, preview) {
+  const t = String(type || '').toUpperCase();
+  const id = String(importId || '').trim();
+
+  window.__weeklyImportDecisions = window.__weeklyImportDecisions || {};
+  window.__weeklyImportDecisions[t] = window.__weeklyImportDecisions[t] || {};
+
+  let state = window.__weeklyImportDecisions[t][id];
+  if (!state || typeof state !== 'object') {
+    state = { byKey: {}, lastPreviewKeys: [] };
+    window.__weeklyImportDecisions[t][id] = state;
+  }
+
+  const asBool = (v) => (v === true || v === 'true' || v === 1 || v === '1');
+
+  const getChanged = (p) => {
+    const root = p || {};
+    const sum  = (root && typeof root.summary === 'object' && root.summary) ? root.summary : root;
+    return (
+      (Array.isArray(root.changed_shifts) ? root.changed_shifts :
+       Array.isArray(sum.changed_shifts)  ? sum.changed_shifts  :
+       Array.isArray(root?.summary?.changed_shifts) ? root.summary.changed_shifts :
+       [])
+    );
+  };
+
+  const getKeySetFromPreview = (p) => {
+    const arr = getChanged(p);
+    return new Set(arr.map(x => String(x?.external_row_key || '').trim()).filter(Boolean));
+  };
+
+  const computeDefaultWeeks = (row) => {
+    // prefer explicit week_start if present, otherwise derive from week_ending_date
+    const we = String(row?.week_ending_date || '').trim();
+    const ws = String(row?.week_start || '').trim();
+    const base = ws || we;
+    const opts = getWeeklyMondayOptions(base);
+    const first = opts && opts[4] ? opts[4].value : (opts[0] ? opts[0].value : null); // centre if present
+    return { baseWeekStart: first, options: opts };
+  };
+
+  const initFromPreview = (p) => {
+    const arr = getChanged(p);
+
+    for (const row of arr) {
+      const ek = String(row?.external_row_key || '').trim();
+      if (!ek) continue;
+
+      // only required rows MUST have decisions
+      const requires = asBool(row?.requires_any_decision);
+      if (!requires) continue;
+
+      state.byKey[ek] = (state.byKey[ek] && typeof state.byKey[ek] === 'object') ? state.byKey[ek] : { skip: false };
+      const d = state.byKey[ek];
+
+      if (typeof d.skip !== 'boolean') d.skip = !!d.skip;
+
+      if (asBool(row?.is_invoiced)) {
+        const { baseWeekStart } = computeDefaultWeeks(row);
+        if (baseWeekStart) {
+          if (!d.credit_week_start) d.credit_week_start = baseWeekStart;
+          if (!d.reinvoice_week_start) d.reinvoice_week_start = baseWeekStart;
+        }
+      }
+    }
+
+    // remember the keys present for this preview (used to filter serialize)
+    state.lastPreviewKeys = Array.from(getKeySetFromPreview(p));
+  };
+
+  const set = (externalKey, patch) => {
+    const ek = String(externalKey || '').trim();
+    if (!ek) return;
+    state.byKey[ek] = (state.byKey[ek] && typeof state.byKey[ek] === 'object') ? state.byKey[ek] : {};
+    Object.assign(state.byKey[ek], patch || {});
+  };
+
+  const get = (externalKey) => {
+    const ek = String(externalKey || '').trim();
+    return ek ? state.byKey[ek] : null;
+  };
+
+  const serialize = (p) => {
+    const allowed = getKeySetFromPreview(p);
+    const out = {};
+    for (const [k, v] of Object.entries(state.byKey || {})) {
+      if (!allowed.has(String(k))) continue; // prevent backend unknown-key rejection
+      if (!v || typeof v !== 'object') continue;
+
+      const row = {};
+      row.skip = asBool(v.skip);
+
+      if (!row.skip) {
+        if (v.credit_week_start) row.credit_week_start = String(v.credit_week_start);
+        if (v.reinvoice_week_start) row.reinvoice_week_start = String(v.reinvoice_week_start);
+      }
+      out[String(k)] = row;
+    }
+    return out;
+  };
+
+  const validate = (p) => {
+    const changed = getChanged(p);
+
+    // Build lookup for decisions
+    const decisions = serialize(p);
+
+    const errors = [];
+    const badKeys = [];
+
+    for (const row of changed) {
+      const ek = String(row?.external_row_key || '').trim();
+      if (!ek) continue;
+
+      const requires = asBool(row?.requires_any_decision);
+      if (!requires) continue;
+
+      const d = decisions[ek];
+      if (!d || typeof d !== 'object') {
+        errors.push(`Missing decision for ${ek}`);
+        badKeys.push(ek);
+        continue;
+      }
+
+      if (asBool(d.skip)) continue; // skip means no more required fields
+
+      if (asBool(row?.is_invoiced)) {
+        if (!d.credit_week_start || !d.reinvoice_week_start) {
+          errors.push(`Invoiced shift ${ek} requires credit_week_start and reinvoice_week_start`);
+          badKeys.push(ek);
+          continue;
+        }
+
+        // Enforce Monday-ness client-side (same rule backend enforces)
+        const opts = getWeeklyMondayOptions(row?.week_start || row?.week_ending_date || '');
+        const allowed = new Set(opts.map(o => o.value));
+        if (!allowed.has(String(d.credit_week_start)) || !allowed.has(String(d.reinvoice_week_start))) {
+          errors.push(`Invoiced shift ${ek} has invalid credit/reinvoice week (must be a Monday within ±4 weeks).`);
+          badKeys.push(ek);
+        }
+      }
+    }
+
+    return { ok: errors.length === 0, errors, badKeys };
+  };
+
+  // init on demand if preview provided
+  if (preview) initFromPreview(preview);
+
+  return { byKey: state.byKey, initFromPreview, set, get, serialize, validate };
+}
+
+
+
+
+
+
 
 // Normalise mappings object for a given type/importId into the payload shape
 function getWeeklyImportMappings(type, importId) {
@@ -27284,7 +27534,7 @@ async function searchClientsForResolve(term) {
   return Array.isArray(json) ? json : [];
 }
 
-async function resolveImportConflicts(importId, importType, mappings) {
+async function resolveImportConflicts(importId, importType, payloadIn) {
   const type = String(importType || '').toUpperCase();
   const encId = encodeURIComponent(String(importId || ''));
 
@@ -27292,11 +27542,13 @@ async function resolveImportConflicts(importId, importType, mappings) {
     throw new Error('Missing import_id for resolveImportConflicts.');
   }
 
-  const body = mappings || {};
+  const p = payloadIn && typeof payloadIn === 'object' ? payloadIn : {};
+
   const payload = {
-    candidate_mappings: Array.isArray(body.candidate_mappings) ? body.candidate_mappings : [],
-    client_aliases: Array.isArray(body.client_aliases) ? body.client_aliases : []
-    // selected_group_ids can be added here later if/when you add per-group checkboxes
+    candidate_mappings: Array.isArray(p.candidate_mappings) ? p.candidate_mappings : [],
+    client_aliases:     Array.isArray(p.client_aliases)     ? p.client_aliases     : [],
+    decisions:          (p.decisions && typeof p.decisions === 'object' && !Array.isArray(p.decisions)) ? p.decisions : {},
+    selected_group_ids: Array.isArray(p.selected_group_ids) ? p.selected_group_ids : null
   };
 
   if (type === 'NHSP') {
@@ -27313,13 +27565,7 @@ async function resolveImportConflicts(importId, importType, mappings) {
     }
 
     window.__toast && window.__toast('NHSP import applied.');
-
-    // ✅ FIX: return parsed JSON (or empty object) so caller can show counts
-    try {
-      return text ? JSON.parse(text) : {};
-    } catch {
-      return {};
-    }
+    try { return text ? JSON.parse(text) : {}; } catch { return {}; }
   }
 
   if (type === 'HR_WEEKLY') {
@@ -27336,24 +27582,16 @@ async function resolveImportConflicts(importId, importType, mappings) {
     }
 
     window.__toast && window.__toast('HealthRoster weekly import applied.');
-
-    // ✅ FIX: return parsed JSON (or empty object) so caller can show counts
-    try {
-      return text ? JSON.parse(text) : {};
-    } catch {
-      return {};
-    }
+    try { return text ? JSON.parse(text) : {}; } catch { return {}; }
   }
 
   if (type === 'HR_ROTA_DAILY') {
-    // HR rota uses applyHrRotaValidation, not this helper.
     console.warn('[IMPORTS] resolveImportConflicts called for HR_ROTA_DAILY; nothing to apply here.');
     return {};
   }
 
   throw new Error(`Unsupported import type for resolveImportConflicts: ${type}`);
 }
-
 
 async function uploadImportFileToR2(file) {
   if (!file) {
@@ -28389,14 +28627,71 @@ function renderImportSummaryModal(importType, summaryState) {
     : (s) => String(s == null ? '' : s);
 
   const type = String(importType || '').toUpperCase();
-  const ss   = summaryState || {};
-  const importId = ss.import_id || ss.id || (ss.summary && ss.summary.import_id) || null;
-  const rows = Array.isArray(ss.rows) ? ss.rows : [];
+
+  // ─────────────────────────────────────────────────────────────
+  // Normalize preview wrapper vs summary-only payload into a canonical object.
+  // This ensures top-level extensions like changed_shifts are never dropped.
+  // ─────────────────────────────────────────────────────────────
+  const normalizePreview = (ss) => {
+    const raw = ss || {};
+    const sum = (raw && typeof raw.summary === 'object' && raw.summary) ? raw.summary : raw;
+
+    const importId =
+      raw.import_id || raw.id ||
+      sum.import_id || sum.id ||
+      (raw.summary && (raw.summary.import_id || raw.summary.id)) ||
+      null;
+
+    const rows =
+      Array.isArray(raw.rows) ? raw.rows :
+      Array.isArray(sum.rows) ? sum.rows :
+      [];
+
+    const changed_shifts =
+      Array.isArray(raw.changed_shifts) ? raw.changed_shifts :
+      Array.isArray(sum.changed_shifts) ? sum.changed_shifts :
+      [];
+
+    const asBool = (v) => (v === true || v === 'true' || v === 1 || v === '1');
+    const decisionNeededCount = changed_shifts.filter(x => asBool(x?.requires_any_decision)).length;
+
+    const summary = Object.assign({}, sum);
+    // Put changed_shifts into summary too, so any code path using only summary still sees them.
+    if (!Array.isArray(summary.changed_shifts)) summary.changed_shifts = changed_shifts;
+    if (typeof summary.changed_shifts_count !== 'number') summary.changed_shifts_count = changed_shifts.length;
+    if (typeof summary.changed_shifts_decision_needed_count !== 'number') summary.changed_shifts_decision_needed_count = decisionNeededCount;
+
+    const canonical = Object.assign({}, raw);
+    canonical.import_id = importId;
+    canonical.summary = summary;
+    canonical.rows = rows;
+    canonical.changed_shifts = changed_shifts;
+    canonical.changed_shifts_count = summary.changed_shifts_count;
+    canonical.changed_shifts_decision_needed_count = summary.changed_shifts_decision_needed_count;
+
+    return canonical;
+  };
+
+  const preview = normalizePreview(summaryState);
+  const importId = preview.import_id || null;
+  const rows = Array.isArray(preview.rows) ? preview.rows : [];
 
   window.__importSummaryState = window.__importSummaryState || {};
 
-  // Identify the summary kind and search the full modal stack for an existing
-  // summary frame of this type (NHSP / HR_WEEKLY / HR_ROTA_DAILY).
+  // Store canonical preview object (NOT just summary+rows)
+  window.__importSummaryState[type] = preview;
+
+  // Ensure decisions store exists and init defaults for newly-seen decision-needed keys.
+  if ((type === 'NHSP' || type === 'HR_WEEKLY') && importId) {
+    try {
+      const ds = getOrInitWeeklyImportDecisionsStore(type, importId, preview);
+      ds.initFromPreview(preview); // safe: doesn't overwrite existing edits
+    } catch (e) {
+      console.warn('[IMPORTS][SUMMARY] decision store init failed', e);
+    }
+  }
+
+  // Identify existing summary frame
   const summaryKind = `import-summary-${type.toLowerCase()}`;
   const stack       = window.__modalStack || [];
 
@@ -28409,39 +28704,16 @@ function renderImportSummaryModal(importType, summaryState) {
     }
   }
 
-  // For debugging: see when we reuse vs create a new summary frame.
-  try {
-    const LOG = (typeof window.__LOG_IMPORTS === 'boolean') ? window.__LOG_IMPORTS : true;
-    if (LOG) {
-      console.log('[IMPORTS][SUMMARY] renderImportSummaryModal', {
-        type,
-        importId,
-        summaryKind,
-        stackLength: stack.length,
-        foundExisting: !!existingSummaryFrame
-      });
-    }
-  } catch {}
-
-  // Update the global import summary cache for this type
-  window.__importSummaryState[type] = {
-    import_id: importId,
-    summary: ss,
-    rows
-  };
-
-  // Global store for weekly mappings (per type + importId)
-  window.__weeklyImportMappings = window.__weeklyImportMappings || {};
-
   const renderTab = (key) => {
     if (key !== 'main') return '';
 
     if (type === 'HR_ROTA_DAILY') {
-      return renderHrRotaDailySummary(type, importId, rows, ss);
+      return renderHrRotaDailySummary(type, importId, rows, preview);
     }
 
     if (type === 'NHSP' || type === 'HR_WEEKLY') {
-      return renderWeeklyImportSummary(type, importId, rows, ss);
+      // Pass canonical preview so renderWeeklyImportSummary can always find changed shifts.
+      return renderWeeklyImportSummary(type, importId, rows, preview);
     }
 
     return html(`
@@ -28465,9 +28737,8 @@ function renderImportSummaryModal(importType, summaryState) {
           ? 'NHSP Weekly Import Summary'
           : 'HealthRoster Weekly Import Summary'));
 
-   // ───────────────────── Import summary modal ─────────────────────
+  // Create or reuse modal frame
   if (!existingSummaryFrame) {
-    // No existing summary frame for this type → create a new one.
     showModal(
       summaryTitle,
       [{ key: 'main', label: 'Summary' }],
@@ -28482,14 +28753,12 @@ function renderImportSummaryModal(importType, summaryState) {
       }
     );
   } else {
-    // Reuse the existing frame: update its title/tabs/renderTab.
     try {
       existingSummaryFrame.title         = summaryTitle;
       existingSummaryFrame.tabs          = [{ key: 'main', label: 'Summary' }];
       existingSummaryFrame.renderTab     = renderTab;
       existingSummaryFrame.currentTabKey = 'main';
 
-      // Only repaint if this summary is actually the top-most frame.
       const top = (window.__modalStack || [])[ (window.__modalStack || []).length - 1 ] || null;
       if (top === existingSummaryFrame && typeof existingSummaryFrame.setTab === 'function') {
         existingSummaryFrame.setTab('main');
@@ -28499,820 +28768,12 @@ function renderImportSummaryModal(importType, summaryState) {
     }
   }
 
-
-  // ────────────────────── Helpers ──────────────────────
-
- function renderHrRotaDailySummary(type, importId, rows, ss) {
-  const summary = ss.summary || {};
-  const total   = summary.total_rows || rows.length || 0;
-
-  const counts = {
-    OK: 0,
-    FAILED: 0,
-    UNMATCHED: 0
-  };
-  rows.forEach(r => {
-    const st = String(r.status || '').toUpperCase();
-    if (st === 'OK' || st === 'VALIDATION_OK') counts.OK++;
-    else if (st === 'UNMATCHED') counts.UNMATCHED++;
-    else counts.FAILED++;
-  });
-
-  window.__hrRotaEmailSelections = window.__hrRotaEmailSelections || {};
-  window.__hrRotaEmailSelections[importId] = new Set();
-  const emailSel = window.__hrRotaEmailSelections[importId];
-
-  const rowsHtml = rows.length
-    ? rows.map((r, idx) => {
-        const staff = r.staff_name || r.staff_raw || '';
-        const unit  = r.unit || r.hospital_or_trust || r.hospital_norm || '';
-        const date  = r.date_local || r.date || r.shift_date || '';
-        const stRaw = r.status || '';
-        const st    = String(stRaw || '').toUpperCase();
-        const reasonCode = String(r.reason_code || r.failure_reason || r.reason || '').toLowerCase();
-
-        const canAssignCand   = (reasonCode === 'candidate_unresolved');
-        const canAssignClient = (reasonCode === 'client_unresolved');
-
-        const isTimeMismatch =
-          reasonCode === 'actual_hours_mismatch' ||
-          reasonCode === 'start_end_mismatch' ||
-          reasonCode === 'break_minutes_mismatch';
-
-        let stCls = 'pill-info';
-        if (st === 'OK' || st === 'VALIDATION_OK') {
-          stCls = 'pill-ok';
-        } else if (reasonCode === 'candidate_unresolved' || reasonCode === 'client_unresolved') {
-          stCls = 'pill-bad';
-        } else if (isTimeMismatch) {
-          stCls = 'pill-warn';
-        }
-
-        // Normalised, human-readable label text (no <br/>, allow browser wrapping)
-        let pillLabel;
-        if (st === 'OK' || st === 'VALIDATION_OK') {
-          pillLabel = 'OK';
-        } else if (reasonCode === 'candidate_unresolved') {
-          pillLabel = 'CANDIDATE UNMATCHED';
-        } else if (reasonCode === 'client_unresolved') {
-          pillLabel = 'CLIENT UNMATCHED';
-        } else if (reasonCode === 'actual_hours_mismatch') {
-          pillLabel = 'HOURS MISMATCH';
-        } else if (reasonCode === 'start_end_mismatch') {
-          pillLabel = 'START/END MISMATCH';
-        } else if (reasonCode === 'break_minutes_mismatch') {
-          pillLabel = 'BREAK MISMATCH';
-        } else {
-          // Generic: reason_code like "reject_no_contract_band_mismatch"
-          pillLabel = (reasonCode || 'UNKNOWN').replace(/_/g, ' ').toUpperCase();
-        }
-
-        const emailEligible    = r.email_eligible === true;
-        const emailAlreadySent = r.email_already_sent === true;
-
-        const rowId = r.hr_row_id || r.id || `${idx}`;
-
-        let emailCellHtml;
-        if (!emailEligible) {
-          emailCellHtml = '<span class="mini">—</span>';
-        } else {
-          const checked = (emailSel instanceof Set && emailSel.has(rowId)) ? 'checked' : '';
-          const iconHtml = emailAlreadySent
-            ? `<span class="email-icon" title="Email previously sent" style="font-size:0.8rem;opacity:0.7;">&#x2709;&#x2713;</span>`
-            : '';
-
-          emailCellHtml = `
-            <div class="hr-email-cell" style="display:flex;align-items:center;justify-content:center;gap:4px;">
-              <input type="checkbox"
-                     data-act="hr-rota-email"
-                     data-row-id="${enc(rowId)}"
-                     data-row-idx="${idx}"
-                     ${checked} />
-              ${iconHtml}
-            </div>
-          `;
-        }
-
-        return `
-          <tr>
-            <td><span class="mini">${enc(staff || '—')}</span></td>
-            <td><span class="mini">${enc(unit || '—')}</span></td>
-            <td><span class="mini">${enc(date || '—')}</span></td>
-            <td>
-              <span
-                class="pill ${stCls}"
-                style="
-                  white-space: normal;
-                  word-break: break-word;
-                  display: inline-block;
-                  max-width: 160px;
-                  text-align: center;
-                "
-              >
-                ${enc(pillLabel || 'UNKNOWN')}
-              </span>
-            </td>
-            <td>
-              ${
-                canAssignCand
-                  ? `<button type="button"
-                             class="btn mini"
-                             data-act="resolve-candidate"
-                             data-row-idx="${idx}">
-                       Assign candidate…
-                     </button>`
-                  : ''
-              }
-              ${
-                canAssignClient
-                  ? `<button type="button"
-                             class="btn mini"
-                             style="margin-left:4px;"
-                             data-act="resolve-client"
-                             data-row-idx="${idx}">
-                       Assign client…
-                     </button>`
-                  : ''
-              }
-            </td>
-            <td>${emailCellHtml}</td>
-          </tr>
-        `;
-      }).join('')
-    : `
-      <tr>
-        <td colspan="6">
-          <span class="mini">No rows to show.</span>
-        </td>
-      </tr>
-    `;
-
-  const markup = html(`
-    <div class="form" id="hrRotaSummary">
-      <div class="card hr-rota-full">
-        <div class="row">
-          <label>Overview</label>
-          <div class="controls">
-            <div class="mini">
-              Import ID: <span class="mono">${enc(importId || '—')}</span><br/>
-              Total rows: ${total}<br/>
-              OK: ${counts.OK} &nbsp; Failed: ${counts.FAILED} &nbsp; Unmatched: ${counts.UNMATCHED}
-            </div>
-          </div>
-        </div>
-
-        <div class="row" style="margin-top:10px;">
-          <label>Rows</label>
-          <div class="controls">
-            <div class="hr-rota-table-wrap" style="max-height:420px; overflow-y:auto;">
-              <table class="grid">
-                <thead>
-                  <tr>
-                    <th>Staff</th>
-                    <th>Unit / Site</th>
-                    <th>Date</th>
-                    <th>Status</th>
-                    <th>Resolve</th>
-                    <th>Send email</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  ${rowsHtml}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        </div>
-
-        <div class="row hr-rota-footer" style="margin-top:8px;">
-          <label></label>
-          <div class="controls">
-            <button type="button"
-                    class="btn"
-                    data-act="hr-rota-reclassify">
-              Reclassify
-            </button>
-            <button type="button"
-                    class="btn btn-primary"
-                    style="margin-left:8px;"
-                    data-act="hr-rota-apply">
-              Finalise validations
-            </button>
-            <span class="mini" style="margin-left:8px;">
-              "Reclassify" re-runs checks and refreshes this summary.
-              "Finalise validations" updates validation status and, if boxes are ticked,
-              queues emails to Temp Staffing.
-            </span>
-          </div>
-        </div>
-      </div>
-    </div>
-  `);
-
-  // Wiring (unchanged in spirit)
-  setTimeout(() => {
-    try {
-      const root = document.getElementById('hrRotaSummary');
-      if (!root || type !== 'HR_ROTA_DAILY') return;
-
-      root.addEventListener('click', (ev) => {
-        const btn = ev.target.closest('button[data-act]');
-        if (!btn) return;
-        const act = btn.getAttribute('data-act');
-
-        const st = window.__importSummaryState && window.__importSummaryState['HR_ROTA_DAILY'];
-        if (!st) return;
-
-        const rows = Array.isArray(st.rows) ? st.rows : [];
-        const idx  = Number(btn.getAttribute('data-row-idx') || '-1');
-        const row  = (idx >= 0 && idx < rows.length) ? rows[idx] : null;
-        if (!row) return;
-
-        const reasonCode   = String(row.reason_code || row.failure_reason || row.reason || '').toLowerCase();
-        const hasTimesheet = !!row.timesheet_id;
-
-        if (act === 'resolve-candidate') {
-          if (reasonCode === 'candidate_unresolved' || !hasTimesheet) {
-            openHrRotaAssignCandidateModal(importId, idx);
-            return;
-          }
-
-          if (hasTimesheet) {
-            openResolveCandidateModal({
-              timesheet_id:      row.timesheet_id,
-              occupant_key_norm: row.staff_name || row.staff_raw || '',
-              hospital_norm:     row.unit || row.hospital_or_trust || row.hospital_norm || ''
-            });
-          } else {
-            alert('No timesheet matched for this row; resolve candidate via imports/aliases instead.');
-          }
-        }
-
-        if (act === 'resolve-client') {
-          if (reasonCode === 'client_unresolved' || !hasTimesheet) {
-            openHrRotaAssignClientModal(importId, idx);
-            return;
-          }
-
-          if (hasTimesheet) {
-            openResolveClientModal({
-              timesheet_id:  row.timesheet_id,
-              hospital_norm: row.unit || row.hospital_or_trust || row.hospital_norm || ''
-            });
-          } else {
-            alert('No timesheet matched for this row; resolve client/site via imports/aliases instead.');
-          }
-        }
-      });
-
-      root.addEventListener('change', (ev) => {
-        const cb = ev.target.closest('input[data-act="hr-rota-email"]');
-        if (!cb) return;
-
-        const rowId = cb.getAttribute('data-row-id') || '';
-        if (!rowId) return;
-
-        window.__hrRotaEmailSelections = window.__hrRotaEmailSelections || {};
-        const sel = window.__hrRotaEmailSelections[importId] || new Set();
-        if (!(sel instanceof Set)) {
-          window.__hrRotaEmailSelections[importId] = new Set();
-        }
-
-        if (cb.checked) {
-          window.__hrRotaEmailSelections[importId].add(rowId);
-        } else {
-          window.__hrRotaEmailSelections[importId].delete(rowId);
-        }
-      });
-
-      const btnReclass = root.querySelector('button[data-act="hr-rota-reclassify"]');
-      if (btnReclass && !btnReclass.__hrRotaReclassWired) {
-        btnReclass.__hrRotaReclassWired = true;
-        btnReclass.addEventListener('click', async () => {
-          try {
-            if (!importId) {
-              alert('No import_id in summary; cannot reclassify.');
-              return;
-            }
-            await refreshHrRotaSummary(importId);
-          } catch (err) {
-            console.error('[IMPORTS][HR_ROTA] reclassify failed', err);
-            alert(err?.message || 'Reclassify failed.');
-          }
-        });
-      }
-
-      const btnApply = root.querySelector('button[data-act="hr-rota-apply"]');
-      if (btnApply && !btnApply.__hrRotaApplyWired) {
-        btnApply.__hrRotaApplyWired = true;
-        btnApply.addEventListener('click', async () => {
-          try {
-            if (!importId) {
-              alert('No import_id in summary; cannot finalise.');
-              return;
-            }
-
-            const ok = window.confirm('Are you sure you are ready to finalise?');
-            if (!ok) return;
-
-            const sel = window.__hrRotaEmailSelections && window.__hrRotaEmailSelections[importId];
-            const sendEmailRowIds = (sel instanceof Set) ? Array.from(sel) : [];
-
-            const result = await applyHrRotaValidation(importId, sendEmailRowIds) || {};
-
-            const lines = [];
-            lines.push(`HR Rota validations for import ${result.import_id || importId} have been processed.`);
-
-            if (typeof result.validations_ok === 'number') {
-              lines.push(`Valid rows: ${result.validations_ok}`);
-            }
-            if (typeof result.validations_failed === 'number') {
-              lines.push(`Rows still unresolved: ${result.validations_failed}`);
-            }
-            if (typeof result.emails_queued === 'number') {
-              lines.push(`Emails queued: ${result.emails_queued}`);
-            }
-
-            if (Array.isArray(result.reasons) && result.reasons.length) {
-              lines.push('');
-              lines.push('Remaining issues:');
-              for (const r of result.reasons) {
-                const rc    = String(r.reason_code || '').toLowerCase();
-                const count = r.count ?? 0;
-                let nice;
-                if      (rc === 'candidate_unresolved')         nice = 'Candidate unmatched';
-                else if (rc === 'client_unresolved')            nice = 'Client unmatched';
-                else if (rc === 'actual_hours_mismatch')       nice = 'Hours mismatch';
-                else if (rc === 'start_end_mismatch')          nice = 'Start/end mismatch';
-                else if (rc === 'break_minutes_mismatch')      nice = 'Break mismatch';
-                else                                           nice = (rc || 'other').replace(/_/g, ' ');
-                lines.push(`- ${nice}: ${count}`);
-              }
-            }
-
-            alert(lines.join('\n'));
-            await refreshHrRotaSummary(importId);
-          } catch (err) {
-            console.error('[IMPORTS][HR_ROTA] apply failed', err);
-            alert(err?.message || 'Apply validations failed.');
-          }
-        });
-      }
-    } catch (e) {
-      console.warn('[IMPORTS] HR_ROTA wiring failed', e);
+  // Wire actions if weekly summary (safe to call; it guards internally)
+  try {
+    if (type === 'NHSP' || type === 'HR_WEEKLY') {
+      wireWeeklyImportSummaryActions(type, importId);
     }
-  }, 0);
-
-  return markup;
-}
-
-function renderWeeklyImportSummary(type, importId, rows, ss) {
-  const summary = ss.summary || {};
-  const total   = summary.total_rows || rows.length || 0;
-
-  const normUpper = (s) => String(s || '').trim().toUpperCase();
-
-  // Actions which mean the group is actionable / “ready to process”
-  const READY_ACTIONS = new Set([
-    'NEW_AUTOPROC_TIMESHEET',
-    'UPDATE_AUTOPROC_TS',
-    'UPDATE_MANUAL_WEEK',
-    'UPDATE_ADJUSTMENT_TS',
-    'CREATE_ADJUSTMENT_TS',
-    'CREATE_PAY_ADJUSTMENT_ONLY'
-  ]);
-
-  const isIssueAction = (a) => {
-    const x = normUpper(a);
-    if (!x) return true;
-    if (READY_ACTIONS.has(x)) return false;
-    if (x === 'OK' || x === 'APPLY' || x === 'SKIP_ALREADY_PROCESSED') return false;
-    if (x.startsWith('REJECT_')) return true;
-    if (x.startsWith('BLOCK_'))  return true;
-    if (x === 'NO_CANDIDATE' || x === 'NO_CLIENT') return true;
-    if (x === 'UNKNOWN') return true;
-    return false;
-  };
-
-  // For the overview summary
-  let readyCount = 0;
-  let issueCount = 0;
-
-  for (const r of rows || []) {
-    const actionRaw = normUpper(r.resolution_status || r.action || '');
-    if (READY_ACTIONS.has(actionRaw)) readyCount++;
-    else if (isIssueAction(actionRaw)) issueCount++;
-  }
-
-  const rowsHtml = (rows && rows.length)
-    ? rows.map((r, idx) => {
-        const level = String(r.level || '').toLowerCase();
-
-        // Prefer nice display for group rows (these are your “timesheet groups”)
-        const staff =
-          (level === 'group')
-            ? (r.candidate_name || r.candidate_id || r.staff_name || r.staff_raw || '')
-            : (r.staff_name || r.staff_raw || '');
-
-        const unit =
-          (level === 'group')
-            ? (r.client_name || r.client_id || r.unit || r.hospital_or_trust || r.hospital_norm || '')
-            : (r.unit || r.hospital_or_trust || r.hospital_norm || '');
-
-        const rawDateYmd =
-          (level === 'group')
-            ? (r.week_ending_date || r.work_date || r.date_local || r.date || '')
-            : (r.date_local || r.work_date || r.date || r.week_ending_date || '');
-
-        const date = formatYmdToNiceDate(rawDateYmd);
-
-        // Incoming code (assignment/grade) — mostly useful for row-level rejects
-        const code =
-          (r.incoming_code ||
-           r.assignment_code ||
-           r.assignment ||
-           r.assignment_grade_norm ||
-           '').toString();
-
-        const reasonText = (r.reason || '').toString();
-
-        const actionRaw = normUpper(r.resolution_status || r.action || '');
-
-        // Display label
-        let displayAction = actionRaw ? actionRaw.replace(/_/g, ' ') : 'UNKNOWN';
-
-        // Special label requested
-        if (actionRaw === 'NEW_AUTOPROC_TIMESHEET') {
-          displayAction = 'READY TO PROCESS';
-        }
-
-        // Pill colouring
-        let cls = 'pill-info';
-        if (actionRaw === 'OK' || actionRaw === 'APPLY' || actionRaw === 'NEW_AUTOPROC_TIMESHEET') cls = 'pill-ok';
-        else if (
-          actionRaw === 'NO_CANDIDATE' ||
-          actionRaw === 'REJECT_NO_CANDIDATE' ||
-          actionRaw === 'NO_CLIENT' ||
-          actionRaw === 'REJECT_NO_CLIENT'
-        ) cls = 'pill-bad';
-        else if (
-          actionRaw === 'REJECT_NO_CONTRACT' ||
-          actionRaw === 'REJECT_NO_CONTRACT_BAND_MISMATCH' ||
-          actionRaw.startsWith('REJECT_') ||
-          actionRaw.startsWith('BLOCK_') ||
-          actionRaw === 'UNKNOWN'
-        ) cls = 'pill-warn';
-
-        // Row background class
-        const rowClass =
-          READY_ACTIONS.has(actionRaw) ? 'wi-row-ready'
-          : (isIssueAction(actionRaw) ? 'wi-row-issue' : '');
-
-        const canAssignCand   = (actionRaw === 'NO_CANDIDATE' || actionRaw === 'REJECT_NO_CANDIDATE');
-        const canAssignClient = (actionRaw === 'NO_CLIENT'    || actionRaw === 'REJECT_NO_CLIENT');
-
-        return `
-          <tr class="${rowClass}">
-            <td class="wi-col-staff"><span class="mini">${enc(staff || '—')}</span></td>
-            <td class="wi-col-unit"><span class="mini">${enc(unit || '—')}</span></td>
-            <td class="wi-col-date"><span class="mini">${enc(date || '—')}</span></td>
-
-            <td class="wi-col-code">
-              <span class="mini" style="white-space: normal; word-break: break-word; display:inline-block;">
-                ${enc(code || '—')}
-              </span>
-            </td>
-
-            <td class="wi-col-status">
-              <span class="pill ${cls}" style="white-space: normal; word-break: break-word; display:inline-block; text-align:center;">
-                ${enc(displayAction || 'UNKNOWN')}
-              </span>
-            </td>
-
-            <td class="wi-col-reason">
-              <span class="mini" style="white-space: normal; word-break: break-word; display:inline-block;">
-                ${enc(reasonText || '')}
-              </span>
-            </td>
-
-            <td class="wi-col-actions">
-              <div class="wi-actions">
-                ${
-                  canAssignCand
-                    ? `<button type="button"
-                               class="btn mini"
-                               data-act="weekly-resolve-candidate"
-                               data-row-idx="${idx}"
-                               data-staff="${enc(staff)}"
-                               data-unit="${enc(unit)}">
-                         Assign candidate…
-                       </button>`
-                    : ''
-                }
-                ${
-                  canAssignClient
-                    ? `<button type="button"
-                               class="btn mini"
-                               data-act="weekly-resolve-client"
-                               data-row-idx="${idx}"
-                               data-unit="${enc(unit)}">
-                         Assign client…
-                       </button>`
-                    : ''
-                }
-              </div>
-            </td>
-          </tr>
-        `;
-      }).join('')
-    : `
-      <tr>
-        <td colspan="7">
-          <span class="mini">No rows to show.</span>
-        </td>
-      </tr>
-    `;
-
-  const markup = html(`
-    <div id="weeklyImportSummary">
-      <div class="card weekly-import-card">
-        <!-- Overview -->
-        <div class="row">
-          <label>Overview</label>
-          <div class="controls">
-            <div class="mini">
-              Import ID: <span class="mono">${enc(importId || '—')}</span><br/>
-              Total rows: ${total}<br/>
-              Ready to process: ${readyCount} &nbsp;|&nbsp; Needs attention: ${issueCount}
-            </div>
-          </div>
-        </div>
-
-        <!-- Table (only this area scrolls) -->
-        <div class="row" style="margin-top:10px;">
-          <label>Rows</label>
-          <div class="controls">
-            <div class="wi-table-wrap">
-              <table class="grid wi-grid">
-                <thead>
-                  <tr>
-                    <th class="wi-col-staff">Staff</th>
-                    <th class="wi-col-unit">Unit / Site</th>
-                    <th class="wi-col-date">Date / Week ending</th>
-                    <th class="wi-col-code">Code</th>
-                    <th class="wi-col-status">Resolution</th>
-                    <th class="wi-col-reason">Reason</th>
-                    <th class="wi-col-actions">Resolve</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  ${rowsHtml}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        </div>
-
-        <!-- Footer (locked, not scrolling) -->
-        <div class="row weekly-import-footer" style="margin-top:10px;">
-          <label></label>
-          <div class="controls">
-            <button type="button" class="btn" data-act="weekly-import-refresh">
-              Refresh
-            </button>
-            <button type="button" class="btn" style="margin-left:8px;" data-act="weekly-import-apply">
-              Finalise import
-            </button>
-            <span class="mini" style="margin-left:8px;">
-              This will apply the classification and create/update weeks and timesheets.
-            </span>
-          </div>
-        </div>
-      </div>
-    </div>
-  `);
-
-  // Wiring for NHSP / HR_WEEKLY Apply + Assign buttons
-  setTimeout(() => {
-    try {
-      const root = document.getElementById('weeklyImportSummary');
-      if (!root || (type !== 'NHSP' && type !== 'HR_WEEKLY')) return;
-      if (root.__weeklyWired) return;
-      root.__weeklyWired = true;
-
-      const LOGW = (typeof window.__LOG_IMPORTS === 'boolean') ? window.__LOG_IMPORTS : true;
-      const LW   = (...a) => { if (LOGW) console.log('[IMPORTS][WEEKLY]', ...a); };
-
-      const st   = window.__importSummaryState && window.__importSummaryState[type];
-      const rows = st && Array.isArray(st.rows) ? st.rows : [];
-
-      const ensureWeeklyImportMappings = () => {
-        window.__weeklyImportMappings = window.__weeklyImportMappings || {};
-        if (!window.__weeklyImportMappings[type]) {
-          window.__weeklyImportMappings[type] = {};
-        }
-        let m = window.__weeklyImportMappings[type][importId];
-        if (!m) {
-          m = { candidate_mappings: [], client_aliases: [] };
-          window.__weeklyImportMappings[type][importId] = m;
-        }
-        return m;
-      };
-
-      root.addEventListener('click', (ev) => {
-        const btn = ev.target.closest('button[data-act]');
-        if (!btn) return;
-        const act = btn.getAttribute('data-act');
-
-        if (act !== 'weekly-resolve-candidate' && act !== 'weekly-resolve-client') return;
-
-        const idx = Number(btn.getAttribute('data-row-idx') || '-1');
-        if (idx < 0 || idx >= rows.length) return;
-
-        const row         = rows[idx];
-        const staffRaw    = row.staff_name || row.staff_raw || '';
-        const hospRaw     = row.hospital_or_trust || row.unit || row.hospital_norm || '';
-        const rawDateYmd  =
-          row.date_local ||
-          row.work_date ||
-          row.date ||
-          row.week_ending_date ||
-          '';
-        const niceDate    = formatYmdToNiceDate(rawDateYmd);
-
-        const context = {
-          importId,
-          staffName: staffRaw,
-          unit: hospRaw,
-          dateYmd: rawDateYmd,
-          dateNice: niceDate,
-          source_system: type,
-          rowIndex: idx
-        };
-
-        if (act === 'weekly-resolve-candidate') {
-          openCandidatePicker(async ({ id, label }) => {
-            const mappings        = ensureWeeklyImportMappings();
-            const staffNorm       = row.staff_norm || staffRaw || '';
-            const hospitalOrTrust = hospRaw || null;
-            const clientId        = row.client_id || null;
-            const workDateYmd =
-              row.work_date ||
-              row.date_local ||
-              row.date ||
-              row.week_ending_date ||
-              null;
-
-            const mapping = {
-              staff_norm:        staffNorm,
-              hospital_or_trust: hospitalOrTrust,
-              candidate_id:      id,
-              client_id:         clientId,
-              work_date:         workDateYmd
-            };
-
-            const payload = { candidate_mappings: [mapping], client_aliases: [] };
-
-            LW('resolve-candidate mapping', { importId, type, rowIndex: idx, mapping });
-
-            try {
-              await postWeeklyResolveMappings(importId, type, payload);
-              mappings.candidate_mappings.push(mapping);
-
-              window.__toast && window.__toast(`Candidate ${label} linked. Reclassifying import…`);
-              await refreshWeeklyImportSummary(type, importId);
-            } catch (err) {
-              console.error('[IMPORTS][WEEKLY] resolve-candidate failed', err);
-              alert(err?.message || 'Failed to resolve candidate for weekly import row.');
-            }
-          }, { context });
-
-          return;
-        }
-
-        if (act === 'weekly-resolve-client') {
-          const nhspOnly   = (type === 'NHSP');
-          const hrAutoOnly = (type === 'HR_WEEKLY');
-
-          openClientPicker(async ({ id, label }) => {
-            const mappings     = ensureWeeklyImportMappings();
-            const hospitalNorm = row.hospital_norm || hospRaw || '';
-
-            const hrRowIds = [];
-            if (Array.isArray(row.hr_row_ids) && row.hr_row_ids.length) {
-              row.hr_row_ids.map(String).map(v => v.trim()).filter(Boolean).forEach(v => hrRowIds.push(v));
-            } else if (row.hr_row_id) {
-              hrRowIds.push(String(row.hr_row_id).trim());
-            }
-
-            const mapping = {
-              client_id:     id,
-              hr_row_ids:    hrRowIds,
-              hospital_norm: hospitalNorm
-            };
-
-            const payload = { candidate_mappings: [], client_aliases: [mapping] };
-
-            LW('resolve-client mapping', {
-              importId, type, rowIndex: idx,
-              client_id: id, hr_row_ids: hrRowIds, hospital_norm: hospitalNorm
-            });
-
-            try {
-              await postWeeklyResolveMappings(importId, type, payload);
-              mappings.client_aliases.push(mapping);
-
-              window.__toast && window.__toast(`Client ${label} linked. Reclassifying import…`);
-              await refreshWeeklyImportSummary(type, importId);
-            } catch (err) {
-              console.error('[IMPORTS][WEEKLY] resolve-client failed', err);
-              alert(err?.message || 'Failed to resolve client for weekly import row.');
-            }
-          }, { nhspOnly, hrAutoOnly, context });
-
-          return;
-        }
-      });
-
-      const btnRefresh = root.querySelector('button[data-act="weekly-import-refresh"]');
-      if (btnRefresh && !btnRefresh.__weeklyRefreshWired) {
-        btnRefresh.__weeklyRefreshWired = true;
-        btnRefresh.addEventListener('click', async () => {
-          try {
-            await refreshWeeklyImportSummary(type, importId);
-          } catch (err) {
-            console.error('[IMPORTS][WEEKLY] manual refresh failed', err);
-            alert(err?.message || 'Weekly import refresh failed.');
-          }
-        });
-      }
-
-      const btnApplyWeekly = root.querySelector('button[data-act="weekly-import-apply"]');
-      if (btnApplyWeekly && !btnApplyWeekly.__weeklyApplyWired) {
-        btnApplyWeekly.__weeklyApplyWired = true;
-        btnApplyWeekly.addEventListener('click', async () => {
-          try {
-            if (!importId) {
-              alert('No import_id in summary; cannot finalise.');
-              return;
-            }
-
-            const ok = window.confirm('Are you sure you want to finalise now?');
-            if (!ok) return;
-
-            const mappings = ensureWeeklyImportMappings();
-
-            const result = await resolveImportConflicts(importId, type, mappings) || {};
-
-            const lines = [];
-            lines.push(`Import ${result.import_id || importId} has been finalised.`);
-
-            // Phase 1 stats (still useful, but NOT “timesheets processed”)
-            if (typeof result.shifts_created === 'number')      lines.push(`Shifts created: ${result.shifts_created}`);
-            if (typeof result.shifts_updated === 'number')      lines.push(`Shifts updated: ${result.shifts_updated}`);
-            if (typeof result.mapped_candidates === 'number')   lines.push(`Candidates mapped: ${result.mapped_candidates}`);
-            if (typeof result.mapped_clients === 'number')      lines.push(`Clients mapped: ${result.mapped_clients}`);
-
-            // New: group outcome stats (this is the truth you want to see)
-            if (typeof result.groups_total === 'number')        lines.push(`Groups (considered): ${result.groups_total}`);
-            if (typeof result.groups_attempted === 'number')    lines.push(`Groups (ready/attempted): ${result.groups_attempted}`);
-            if (typeof result.groups_succeeded === 'number')    lines.push(`Groups (succeeded): ${result.groups_succeeded}`);
-            if (typeof result.groups_failed === 'number')       lines.push(`Groups (failed): ${result.groups_failed}`);
-
-            // Backward-compat (older backend)
-            if (typeof result.groups_applied === 'number')      lines.push(`Groups applied: ${result.groups_applied}`);
-
-            // Failure samples (first few)
-            const fails = Array.isArray(result.group_fail_samples) ? result.group_fail_samples : [];
-            if (fails.length) {
-              lines.push('');
-              lines.push('Failures (sample):');
-              for (const f of fails.slice(0, 10)) {
-                const pg = f && (f.preview_group_id || f.group_id || '') ? String(f.preview_group_id || f.group_id) : '';
-                const ac = f && f.action ? String(f.action) : '';
-                const rs = f && f.reason ? String(f.reason) : '';
-                lines.push(`- ${pg}${ac ? ` (${ac})` : ''}${rs ? ` — ${rs}` : ''}`);
-              }
-            }
-
-            alert(lines.join('\n'));
-            await refreshWeeklyImportSummary(type, importId);
-          } catch (err) {
-            console.error('[IMPORTS][WEEKLY] apply failed', err);
-            alert(err?.message || 'Weekly import apply failed.');
-          }
-        });
-      }
-    } catch (e) {
-      console.warn('[IMPORTS] weekly import wiring failed', e);
-    }
-  }, 0);
-
-  return markup;
-}
-
-
-
+  } catch {}
 }
 
 
@@ -30069,6 +29530,558 @@ function openAssignmentBandMappingsModal(opts) {
   }, 0);
 }
 
+function renderWeeklyImportSummary(type, importId, rows, ss) {
+  // ─────────────────────────────────────────────────────────────
+  // Robust preview / summary shape handling
+  // ─────────────────────────────────────────────────────────────
+  const rootObj = ss || {};
+  const summary = (rootObj && typeof rootObj.summary === 'object' && rootObj.summary)
+    ? rootObj.summary
+    : (rootObj || {});
+
+  const total = summary.total_rows || (rows ? rows.length : 0) || 0;
+
+  const changedShifts =
+    Array.isArray(rootObj.changed_shifts) ? rootObj.changed_shifts :
+    Array.isArray(summary.changed_shifts) ? summary.changed_shifts :
+    Array.isArray(rootObj?.summary?.changed_shifts) ? rootObj.summary.changed_shifts :
+    [];
+
+  const changedCount =
+    (typeof summary.changed_shifts_count === 'number') ? summary.changed_shifts_count :
+    (typeof rootObj.changed_shifts_count === 'number') ? rootObj.changed_shifts_count :
+    (changedShifts?.length || 0);
+
+  const asBool = (v) => (v === true || v === 'true' || v === 1 || v === '1');
+  const asNum  = (v) => (v == null || v === '' ? 0 : (Number(v) || 0));
+  const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+  const normUpper = (s) => String(s || '').trim().toUpperCase();
+
+  const changedDecisionNeededCount =
+    (typeof summary.changed_shifts_decision_needed_count === 'number') ? summary.changed_shifts_decision_needed_count :
+    (typeof rootObj.changed_shifts_decision_needed_count === 'number') ? rootObj.changed_shifts_decision_needed_count :
+    (changedShifts || []).filter(x => asBool(x?.requires_any_decision)).length;
+
+  // Actions which mean the group is actionable / “ready to process”
+  const READY_ACTIONS = new Set([
+    'NEW_AUTOPROC_TIMESHEET',
+    'UPDATE_AUTOPROC_TS',
+    'UPDATE_MANUAL_WEEK',
+    'UPDATE_ADJUSTMENT_TS',
+    'CREATE_ADJUSTMENT_TS',
+    'CREATE_PAY_ADJUSTMENT_ONLY'
+  ]);
+
+  const isIssueAction = (a) => {
+    const x = normUpper(a);
+    if (!x) return true;
+    if (READY_ACTIONS.has(x)) return false;
+    if (x === 'OK' || x === 'APPLY' || x === 'SKIP_ALREADY_PROCESSED') return false;
+    if (x.startsWith('REJECT_')) return true;
+    if (x.startsWith('BLOCK_'))  return true;
+    if (x === 'NO_CANDIDATE' || x === 'NO_CLIENT') return true;
+    if (x === 'UNKNOWN') return true;
+    return false;
+  };
+
+  // Overview counts
+  let readyCount = 0;
+  let issueCount = 0;
+  for (const r of rows || []) {
+    const actionRaw = normUpper(r.resolution_status || r.action || '');
+    if (READY_ACTIONS.has(actionRaw)) readyCount++;
+    else if (isIssueAction(actionRaw)) issueCount++;
+  }
+
+  const fmtMoney = (n) => {
+    const x = round2(Number(n || 0));
+    const s = x.toFixed(2);
+    return (x > 0 ? `+${s}` : s);
+  };
+
+  const fmtTime = (isoOrYmdHm) => {
+    const s = String(isoOrYmdHm || '').trim();
+    if (!s) return '—';
+    const d = new Date(s);
+    if (!Number.isNaN(d.getTime())) {
+      const hh = String(d.getUTCHours()).padStart(2, '0');
+      const mm = String(d.getUTCMinutes()).padStart(2, '0');
+      return `${hh}:${mm}Z`;
+    }
+    return s;
+  };
+
+  // ─────────────────────────────────────────────────────────────
+  // Canonical decisions store (survives rerenders, defaults init safe)
+  // ─────────────────────────────────────────────────────────────
+  const decisionStore =
+    (typeof getOrInitWeeklyImportDecisionsStore === 'function')
+      ? getOrInitWeeklyImportDecisionsStore(type, importId, rootObj)
+      : null;
+
+  // Ensure defaults are initialised (safe; doesn't overwrite edits)
+  try { decisionStore && decisionStore.initFromPreview && decisionStore.initFromPreview(rootObj); } catch {}
+
+  const changedHtml = (() => {
+    if (!changedShifts || !changedShifts.length) {
+      return `<div class="mini" style="color:#666;">No changed-hours shifts detected for this import.</div>`;
+    }
+
+    const head = `
+      <div class="mini" style="margin-bottom:6px;">
+        Detected changed hours for <strong>${enc(String(changedCount))}</strong> shift(s).
+        Decision required for <strong>${enc(String(changedDecisionNeededCount))}</strong>.
+      </div>
+      <div class="mini" style="color:#666;margin-bottom:10px;">
+        For paid/invoiced shifts you must choose <em>Skip</em> or allow the correction artefacts to be created.
+        Invoiced shifts require a credit week + reinvoice week.
+      </div>
+    `;
+
+    const rowsHtml = changedShifts.map((cs) => {
+      const ek = String(cs?.external_row_key || '').trim();
+      const shiftId = cs?.shift_id || '';
+      const we = cs?.week_ending_date || '';
+
+      const paid = asBool(cs?.is_paid);
+      const invoiced = asBool(cs?.is_invoiced);
+      const requires = asBool(cs?.requires_any_decision);
+
+      const oldStart = cs?.old_start_utc || cs?.old_start || '';
+      const oldEnd   = cs?.old_end_utc   || cs?.old_end   || '';
+      const oldBreak = Number(cs?.old_break_mins ?? cs?.old_break_minutes ?? 0) || 0;
+
+      const newStart = cs?.new_start_utc || cs?.new_start || '';
+      const newEnd   = cs?.new_end_utc   || cs?.new_end   || '';
+      const newBreak = Number(cs?.new_break_mins ?? cs?.new_break_minutes ?? 0) || 0;
+
+      const oldPay    = asNum(cs?.old_pay_ex ?? cs?.old_pay_ex_vat ?? cs?.old_pay);
+      const newPay    = asNum(cs?.new_pay_ex ?? cs?.new_pay_ex_vat ?? cs?.new_pay);
+      const deltaPay  = asNum(cs?.delta_pay_ex ?? cs?.delta_pay_ex_vat ?? cs?.delta_pay);
+
+      const oldCharge   = asNum(cs?.old_charge_ex ?? cs?.old_charge_ex_vat ?? cs?.old_charge);
+      const newCharge   = asNum(cs?.new_charge_ex ?? cs?.new_charge_ex_vat ?? cs?.new_charge);
+      const deltaCharge = asNum(cs?.delta_charge_ex ?? cs?.delta_charge_ex_vat ?? cs?.delta_charge);
+
+      const d = decisionStore && decisionStore.get ? (decisionStore.get(ek) || {}) : {};
+      const skip = asBool(d?.skip);
+
+      const opts = (typeof getWeeklyMondayOptions === 'function')
+        ? getWeeklyMondayOptions(cs?.week_start || cs?.week_ending_date || '')
+        : [];
+
+      const creditVal = d?.credit_week_start || '';
+      const reinvVal  = d?.reinvoice_week_start || '';
+
+      const payDir =
+        paid
+          ? (deltaPay > 0 ? `Underpay ${fmtMoney(deltaPay)} (will be paid next pay CSV run)` :
+             deltaPay < 0 ? `Overpay ${fmtMoney(deltaPay)} (recovery scheduled)` :
+             `No pay delta`)
+          : '—';
+
+      return `
+        <tr class="${requires ? 'wi-row-issue' : ''}">
+          <td class="mini">${enc(ek || '—')}</td>
+          <td class="mini">${enc(shiftId || '—')}</td>
+          <td class="mini">${enc(formatYmdToNiceDate(String(we || '')) || '—')}</td>
+
+          <td class="mini">${enc(fmtTime(oldStart))} → ${enc(fmtTime(newStart))}</td>
+          <td class="mini">${enc(fmtTime(oldEnd))} → ${enc(fmtTime(newEnd))}</td>
+          <td class="mini">${enc(String(oldBreak))} → ${enc(String(newBreak))}</td>
+
+          <td class="mini">${enc(fmtMoney(oldPay))} → ${enc(fmtMoney(newPay))}<br/><span style="color:#666">Δ ${enc(fmtMoney(deltaPay))}</span></td>
+          <td class="mini">${enc(fmtMoney(oldCharge))} → ${enc(fmtMoney(newCharge))}<br/><span style="color:#666">Δ ${enc(fmtMoney(deltaCharge))}</span></td>
+
+          <td class="mini">${paid ? 'Yes' : 'No'}</td>
+          <td class="mini">${invoiced ? 'Yes' : 'No'}</td>
+
+          <td class="mini">${requires ? '<strong>Yes</strong>' : 'No'}</td>
+
+          <td class="mini">
+            ${
+              requires
+                ? `
+                  <label class="mini" style="display:flex;gap:6px;align-items:center;">
+                    <input type="checkbox" data-act="chg-skip" data-ek="${enc(ek)}" ${skip ? 'checked' : ''}/>
+                    Skip
+                  </label>
+                `
+                : '—'
+            }
+          </td>
+
+          <td class="mini">
+            ${
+              (requires && invoiced)
+                ? `
+                  <select data-act="chg-credit-week" data-ek="${enc(ek)}" class="mini">
+                    ${opts.map(o => `<option value="${enc(o.value)}" ${String(o.value)===String(creditVal) ? 'selected' : ''}>${enc(o.label)}</option>`).join('')}
+                  </select>
+                `
+                : '—'
+            }
+          </td>
+
+          <td class="mini">
+            ${
+              (requires && invoiced)
+                ? `
+                  <select data-act="chg-reinvoice-week" data-ek="${enc(ek)}" class="mini">
+                    ${opts.map(o => `<option value="${enc(o.value)}" ${String(o.value)===String(reinvVal) ? 'selected' : ''}>${enc(o.label)}</option>`).join('')}
+                  </select>
+                `
+                : '—'
+            }
+          </td>
+
+          <td class="mini">
+            ${requires && paid ? enc(payDir) : '—'}
+          </td>
+        </tr>
+      `;
+    }).join('');
+
+    return `
+      ${head}
+      <div class="wi-table-wrap" style="max-height:240px;">
+        <table class="grid wi-grid">
+          <thead>
+            <tr>
+              <th class="mini">External key</th>
+              <th class="mini">Shift</th>
+              <th class="mini">Week ending</th>
+              <th class="mini">Start</th>
+              <th class="mini">End</th>
+              <th class="mini">Break</th>
+              <th class="mini">Pay</th>
+              <th class="mini">Charge</th>
+              <th class="mini">Paid</th>
+              <th class="mini">Invoiced</th>
+              <th class="mini">Decision?</th>
+              <th class="mini">Skip</th>
+              <th class="mini">Credit week</th>
+              <th class="mini">Reinvoice week</th>
+              <th class="mini">Pay correction</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${rowsHtml}
+          </tbody>
+        </table>
+      </div>
+    `;
+  })();
+
+  const rowsHtml = (rows && rows.length)
+    ? rows.map((r, idx) => {
+        const level = String(r.level || '').toLowerCase();
+
+        const staff =
+          (level === 'group')
+            ? (r.candidate_name || r.candidate_id || r.staff_name || r.staff_raw || '')
+            : (r.staff_name || r.staff_raw || '');
+
+        const unit =
+          (level === 'group')
+            ? (r.client_name || r.client_id || r.unit || r.hospital_or_trust || r.hospital_norm || '')
+            : (r.unit || r.hospital_or_trust || r.hospital_norm || '');
+
+        const rawDateYmd =
+          (level === 'group')
+            ? (r.week_ending_date || r.work_date || r.date_local || r.date || '')
+            : (r.date_local || r.work_date || r.date || r.week_ending_date || '');
+
+        const date = formatYmdToNiceDate(rawDateYmd);
+
+        const code =
+          (r.incoming_code ||
+           r.assignment_code ||
+           r.assignment ||
+           r.assignment_grade_norm ||
+           '').toString();
+
+        const reasonText = (r.reason || '').toString();
+        const actionRaw = normUpper(r.resolution_status || r.action || '');
+
+        let displayAction = actionRaw ? actionRaw.replace(/_/g, ' ') : 'UNKNOWN';
+        if (actionRaw === 'NEW_AUTOPROC_TIMESHEET') displayAction = 'READY TO PROCESS';
+
+        let cls = 'pill-info';
+        if (actionRaw === 'OK' || actionRaw === 'APPLY' || actionRaw === 'NEW_AUTOPROC_TIMESHEET') cls = 'pill-ok';
+        else if (
+          actionRaw === 'NO_CANDIDATE' ||
+          actionRaw === 'REJECT_NO_CANDIDATE' ||
+          actionRaw === 'NO_CLIENT' ||
+          actionRaw === 'REJECT_NO_CLIENT'
+        ) cls = 'pill-bad';
+        else if (
+          actionRaw === 'REJECT_NO_CONTRACT' ||
+          actionRaw === 'REJECT_NO_CONTRACT_BAND_MISMATCH' ||
+          actionRaw.startsWith('REJECT_') ||
+          actionRaw.startsWith('BLOCK_') ||
+          actionRaw === 'UNKNOWN'
+        ) cls = 'pill-warn';
+
+        const rowClass =
+          READY_ACTIONS.has(actionRaw) ? 'wi-row-ready'
+          : (isIssueAction(actionRaw) ? 'wi-row-issue' : '');
+
+        const canAssignCand   = (actionRaw === 'NO_CANDIDATE' || actionRaw === 'REJECT_NO_CANDIDATE');
+        const canAssignClient = (actionRaw === 'NO_CLIENT'    || actionRaw === 'REJECT_NO_CLIENT');
+
+        return `
+          <tr class="${rowClass}">
+            <td class="wi-col-staff"><span class="mini">${enc(staff || '—')}</span></td>
+            <td class="wi-col-unit"><span class="mini">${enc(unit || '—')}</span></td>
+            <td class="wi-col-date"><span class="mini">${enc(date || '—')}</span></td>
+            <td class="wi-col-code"><span class="mini" style="white-space: normal; word-break: break-word; display:inline-block;">${enc(code || '—')}</span></td>
+            <td class="wi-col-status"><span class="pill ${cls}" style="white-space: normal; word-break: break-word; display:inline-block; text-align:center;">${enc(displayAction || 'UNKNOWN')}</span></td>
+            <td class="wi-col-reason"><span class="mini" style="white-space: normal; word-break: break-word; display:inline-block;">${enc(reasonText || '')}</span></td>
+            <td class="wi-col-actions">
+              <div class="wi-actions">
+                ${canAssignCand ? `<button type="button" class="btn mini" data-act="weekly-resolve-candidate" data-row-idx="${idx}" data-staff="${enc(staff)}" data-unit="${enc(unit)}">Assign candidate…</button>` : ''}
+                ${canAssignClient ? `<button type="button" class="btn mini" data-act="weekly-resolve-client" data-row-idx="${idx}" data-unit="${enc(unit)}">Assign client…</button>` : ''}
+              </div>
+            </td>
+          </tr>
+        `;
+      }).join('')
+    : `
+      <tr>
+        <td colspan="7"><span class="mini">No rows to show.</span></td>
+      </tr>
+    `;
+
+  const markup = html(`
+    <div id="weeklyImportSummary">
+      <div class="card weekly-import-card">
+        <div class="row">
+          <label>Overview</label>
+          <div class="controls">
+            <div class="mini">
+              Import ID: <span class="mono">${enc(importId || '—')}</span><br/>
+              Total rows: ${total}<br/>
+              Ready to process: ${readyCount} &nbsp;|&nbsp; Needs attention: ${issueCount}<br/>
+              Changed shifts: ${enc(String(changedCount))} &nbsp;|&nbsp; Decision required: ${enc(String(changedDecisionNeededCount))}
+            </div>
+          </div>
+        </div>
+
+        <div class="row" style="margin-top:10px;">
+          <label>Changed shifts</label>
+          <div class="controls">${changedHtml}</div>
+        </div>
+
+        <div class="row" style="margin-top:10px;">
+          <label>Rows</label>
+          <div class="controls">
+            <div class="wi-table-wrap">
+              <table class="grid wi-grid">
+                <thead>
+                  <tr>
+                    <th class="wi-col-staff">Staff</th>
+                    <th class="wi-col-unit">Unit / Site</th>
+                    <th class="wi-col-date">Date / Week ending</th>
+                    <th class="wi-col-code">Code</th>
+                    <th class="wi-col-status">Resolution</th>
+                    <th class="wi-col-reason">Reason</th>
+                    <th class="wi-col-actions">Resolve</th>
+                  </tr>
+                </thead>
+                <tbody>${rowsHtml}</tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+
+        <div class="row weekly-import-footer" style="margin-top:10px;">
+          <label></label>
+          <div class="controls">
+            <button type="button" class="btn" data-act="weekly-import-refresh">Refresh</button>
+            <button type="button" class="btn" style="margin-left:8px;" data-act="weekly-import-apply">Finalise import</button>
+            <span class="mini" style="margin-left:8px;">
+              Changed-hours decisions are validated client-side before finalise.
+            </span>
+          </div>
+        </div>
+      </div>
+    </div>
+  `);
+
+  // Wiring: decisions updates + apply validation + existing resolve actions
+  setTimeout(() => {
+    try {
+      const root = document.getElementById('weeklyImportSummary');
+      if (!root || (type !== 'NHSP' && type !== 'HR_WEEKLY')) return;
+      if (root.__weeklyWired) return;
+      root.__weeklyWired = true;
+
+      const LOGW = (typeof window.__LOG_IMPORTS === 'boolean') ? window.__LOG_IMPORTS : true;
+      const LW   = (...a) => { if (LOGW) console.log('[IMPORTS][WEEKLY]', ...a); };
+
+      const getPreview = () => (window.__importSummaryState && window.__importSummaryState[type]) ? window.__importSummaryState[type] : rootObj;
+
+      const ensureWeeklyImportMappings = () => {
+        window.__weeklyImportMappings = window.__weeklyImportMappings || {};
+        window.__weeklyImportMappings[type] = window.__weeklyImportMappings[type] || {};
+        let m = window.__weeklyImportMappings[type][importId];
+        if (!m) {
+          m = { candidate_mappings: [], client_aliases: [] };
+          window.__weeklyImportMappings[type][importId] = m;
+        }
+        return m;
+      };
+
+      // decision changes update canonical store
+      root.addEventListener('change', (ev) => {
+        const el = ev.target;
+        if (!el) return;
+        const act = el.getAttribute && el.getAttribute('data-act');
+        if (!act) return;
+        const ek = (el.getAttribute('data-ek') || '').trim();
+        if (!ek) return;
+
+        const previewNow = getPreview();
+        const ds = (typeof getOrInitWeeklyImportDecisionsStore === 'function')
+          ? getOrInitWeeklyImportDecisionsStore(type, importId, previewNow)
+          : null;
+
+        if (!ds || !ds.set) return;
+
+        if (act === 'chg-skip') {
+          ds.set(ek, { skip: !!el.checked });
+          LW('decision set', { ek, skip: !!el.checked });
+          return;
+        }
+        if (act === 'chg-credit-week') {
+          ds.set(ek, { credit_week_start: String(el.value || '') });
+          LW('decision set', { ek, credit_week_start: String(el.value || '') });
+          return;
+        }
+        if (act === 'chg-reinvoice-week') {
+          ds.set(ek, { reinvoice_week_start: String(el.value || '') });
+          LW('decision set', { ek, reinvoice_week_start: String(el.value || '') });
+          return;
+        }
+      });
+
+      // Existing resolve buttons (unchanged)
+      root.addEventListener('click', (ev) => {
+        const btn = ev.target.closest('button[data-act]');
+        if (!btn) return;
+        const act = btn.getAttribute('data-act');
+        if (act !== 'weekly-resolve-candidate' && act !== 'weekly-resolve-client') return;
+
+        const st = window.__importSummaryState && window.__importSummaryState[type];
+        const rowsState = st && Array.isArray(st.rows) ? st.rows : (Array.isArray(rows) ? rows : []);
+        const idx = Number(btn.getAttribute('data-row-idx') || '-1');
+        if (idx < 0 || idx >= rowsState.length) return;
+
+        const row = rowsState[idx];
+        const staffRaw = row.staff_name || row.staff_raw || '';
+        const hospRaw  = row.hospital_or_trust || row.unit || row.hospital_norm || '';
+
+        if (act === 'weekly-resolve-candidate') {
+          openCandidatePicker(async ({ id, label }) => {
+            const mappings = ensureWeeklyImportMappings();
+            const mapping = {
+              staff_norm:        row.staff_norm || staffRaw || '',
+              hospital_or_trust: hospRaw || null,
+              candidate_id:      id,
+              client_id:         row.client_id || null,
+              work_date:         row.work_date || row.date_local || row.date || row.week_ending_date || null
+            };
+
+            try {
+              await postWeeklyResolveMappings(importId, type, { candidate_mappings: [mapping], client_aliases: [] });
+              mappings.candidate_mappings.push(mapping);
+              window.__toast && window.__toast(`Candidate ${label} linked. Reclassifying…`);
+              await refreshWeeklyImportSummary(type, importId);
+            } catch (err) {
+              console.error('[IMPORTS][WEEKLY] resolve-candidate failed', err);
+              alert(err?.message || 'Failed to resolve candidate.');
+            }
+          }, { context: { importId, staffName: staffRaw, unit: hospRaw, source_system: type, rowIndex: idx } });
+        }
+
+        if (act === 'weekly-resolve-client') {
+          openClientPicker(async ({ id, label }) => {
+            const mappings = ensureWeeklyImportMappings();
+            const hrRowIds = Array.isArray(row.hr_row_ids) ? row.hr_row_ids.map(String) : (row.hr_row_id ? [String(row.hr_row_id)] : []);
+            const mapping = { client_id: id, hr_row_ids: hrRowIds.filter(Boolean), hospital_norm: row.hospital_norm || hospRaw || '' };
+
+            try {
+              await postWeeklyResolveMappings(importId, type, { candidate_mappings: [], client_aliases: [mapping] });
+              mappings.client_aliases.push(mapping);
+              window.__toast && window.__toast(`Client ${label} linked. Reclassifying…`);
+              await refreshWeeklyImportSummary(type, importId);
+            } catch (err) {
+              console.error('[IMPORTS][WEEKLY] resolve-client failed', err);
+              alert(err?.message || 'Failed to resolve client.');
+            }
+          }, { nhspOnly: (type === 'NHSP'), hrAutoOnly: (type === 'HR_WEEKLY'), context: { importId, unit: hospRaw } });
+        }
+      });
+
+      const btnRefresh = root.querySelector('button[data-act="weekly-import-refresh"]');
+      if (btnRefresh && !btnRefresh.__weeklyRefreshWired) {
+        btnRefresh.__weeklyRefreshWired = true;
+        btnRefresh.addEventListener('click', async () => {
+          try { await refreshWeeklyImportSummary(type, importId); }
+          catch (err) { console.error('[IMPORTS][WEEKLY] refresh failed', err); alert(err?.message || 'Refresh failed.'); }
+        });
+      }
+
+      const btnApply = root.querySelector('button[data-act="weekly-import-apply"]');
+      if (btnApply && !btnApply.__weeklyApplyWired) {
+        btnApply.__weeklyApplyWired = true;
+        btnApply.addEventListener('click', async () => {
+          try {
+            const ok = window.confirm('Are you sure you want to finalise now?');
+            if (!ok) return;
+
+            const previewNow = getPreview();
+            const ds = (typeof getOrInitWeeklyImportDecisionsStore === 'function')
+              ? getOrInitWeeklyImportDecisionsStore(type, importId, previewNow)
+              : null;
+
+            // Client-side validation (required by brief)
+            if (ds && ds.validate) {
+              const v = ds.validate(previewNow);
+              if (!v.ok) {
+                alert(
+                  `Cannot finalise: missing/invalid decisions for changed-hours shifts:\n\n` +
+                  v.errors.slice(0, 20).map(x => `- ${x}`).join('\n') +
+                  (v.errors.length > 20 ? `\n\n(and ${v.errors.length - 20} more)` : '')
+                );
+                return;
+              }
+            }
+
+            const mappings = ensureWeeklyImportMappings();
+            const payload = {
+              candidate_mappings: mappings.candidate_mappings || [],
+              client_aliases: mappings.client_aliases || [],
+              decisions: ds && ds.serialize ? ds.serialize(previewNow) : {}
+            };
+
+            const result = await resolveImportConflicts(importId, type, payload) || {};
+            alert(`Import ${result.import_id || importId} has been finalised.`);
+            await refreshWeeklyImportSummary(type, importId);
+          } catch (err) {
+            console.error('[IMPORTS][WEEKLY] apply failed', err);
+            alert(err?.message || 'Weekly import apply failed.');
+          }
+        });
+      }
+    } catch (e) {
+      console.warn('[IMPORTS] weekly wiring failed', e);
+    }
+  }, 0);
+
+  return markup;
+}
 
 
 function renderClientHospitalsTable() {
