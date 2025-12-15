@@ -30086,12 +30086,18 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
   // ─────────────────────────────────────────────────────────────
   // Robust preview / summary shape handling
   // ─────────────────────────────────────────────────────────────
+  
   const rootObj = ss || {};
   const summary = (rootObj && typeof rootObj.summary === 'object' && rootObj.summary)
     ? rootObj.summary
     : (rootObj || {});
 
   const total = summary.total_rows || (rows ? rows.length : 0) || 0;
+const enc = (typeof escapeHtml === 'function')
+  ? escapeHtml
+  : (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({
+      '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+    }[c]));
 
   const changedShifts =
     Array.isArray(rootObj.changed_shifts) ? rootObj.changed_shifts :
