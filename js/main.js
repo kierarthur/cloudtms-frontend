@@ -24725,13 +24725,98 @@ function renderTop() {
   const showChildDelete = isChild && (top.kind==='client-rate' || top.kind==='candidate-override') && top.hasId;
   btnDel.style.display = showChildDelete ? '' : 'none'; btnDel.onclick = null;
 
-  let btnEdit = byId('btnEditModal');
-  if (!btnEdit) {
-    btnEdit=document.createElement('button');
-    btnEdit.id='btnEditModal'; btnEdit.type='button'; btnEdit.className='btn btn-outline btn-sm'; btnEdit.textContent='Edit';
-    const bar = btnSave?.parentElement || btnClose?.parentElement; if (bar) bar.insertBefore(btnEdit, btnSave);
-    L('renderTop (global): created btnEdit');
+let btnEdit = byId('btnEditModal');
+if (!btnEdit) {
+  btnEdit = document.createElement('button');
+  btnEdit.id = 'btnEditModal';
+  btnEdit.type = 'button';
+  btnEdit.className = 'btn btn-outline btn-sm';
+  btnEdit.textContent = 'Edit';
+  const bar = btnSave?.parentElement || btnClose?.parentElement;
+  if (bar) bar.insertBefore(btnEdit, btnSave);
+  L('renderTop (global): created btnEdit');
+}
+
+// ─────────────────────────────────────────────────────────────
+// NEW: Timesheet footer buttons (created once; shown/hidden in _updateButtons)
+// ─────────────────────────────────────────────────────────────
+const bar = btnSave?.parentElement || btnClose?.parentElement;
+
+const ensureFooterBtn = (id, text, className, beforeEl) => {
+  let b = byId(id);
+  if (!b) {
+    b = document.createElement('button');
+    b.id = id;
+    b.type = 'button';
+    b.className = className || 'btn btn-outline btn-sm';
+    b.textContent = text;
+    if (bar) bar.insertBefore(b, beforeEl || btnSave);
+    L('renderTop: created footer button', { id });
   }
+  return b;
+};
+
+const hintEl2 = document.getElementById('modalHint');
+const setHint = (txt, tone) => {
+  if (!hintEl2) return;
+  hintEl2.textContent = String(txt || '');
+  if (tone) hintEl2.setAttribute('data-tone', tone);
+  else hintEl2.removeAttribute('data-tone');
+  try { hintEl2.classList.remove('ok','warn','err'); } catch {}
+  if (tone === 'warn') try { hintEl2.classList.add('warn'); } catch {}
+  if (tone === 'err')  try { hintEl2.classList.add('err'); } catch {}
+  if (tone === 'ok')   try { hintEl2.classList.add('ok'); } catch {}
+};
+
+// View-mode (replaces Edit when Edit is not available)
+const btnTsConvert = ensureFooterBtn(
+  'btnTsConvertManual',
+  'Convert to manual',
+  'btn btn-outline btn-sm',
+  btnEdit // sits where Edit lives
+);
+
+// Edit-mode (next to Save)
+const btnTsRestore = ensureFooterBtn(
+  'btnTsRestoreElectronic',
+  'Restore original electronic',
+  'btn btn-outline btn-sm',
+  btnSave
+);
+
+const btnTsRequest = ensureFooterBtn(
+  'btnTsRequestNewElectronic',
+  'Request new electronic',
+  'btn btn-outline btn-sm',
+  btnSave
+);
+
+const btnTsDelete = ensureFooterBtn(
+  'btnTsDeleteTimesheet',
+  'Delete timesheet',
+  'btn btn-warn',
+  btnSave
+);
+
+// Default hidden; _updateButtons decides
+btnTsConvert.style.display = 'none';
+btnTsRestore.style.display = 'none';
+btnTsRequest.style.display = 'none';
+btnTsDelete.style.display  = 'none';
+
+// Hover hints (requested)
+btnTsRestore.onmouseenter = () => setHint(
+  'If you restore the original timesheet we will discard all changes you have made and restore the electronic timesheet to the exact values that the candidate submited and the manager authorised.',
+  'warn'
+);
+btnTsRestore.onmouseleave = () => setHint('', null);
+
+btnTsRequest.onmouseenter = () => setHint(
+  'If you request a new electronic timesheet we will permanently delete the electronic timesheeet on file and allow the user to submit a band new electronic timesheet via the app, only do this is you definitely do not need the original signed electronic timesheet ever again',
+  'err'
+);
+btnTsRequest.onmouseleave = () => setHint('', null);
+
 
   (function dragWire() {
     if (!header || !modalNode) return;
@@ -25022,52 +25107,251 @@ const isUtilityKind =
         });
       }
       } else {
-      // ── Edit button gating ──
-      let canEdit = false;
+     // ── Edit / Convert (Timesheets) gating ──
+let canEdit = false;
+let canConvert = false;
 
-      if (top.entity === 'timesheets') {
-        // Use meta seeded by openTimesheet
-        const meta = (window.modalCtx && window.modalCtx.timesheetMeta) || {};
-        const sheetScope = String(meta.sheetScope || '').toUpperCase();
-        const subMode    = String(meta.subMode    || '').toUpperCase();
-        const isWeekly   = (sheetScope === 'WEEKLY');
-        const isDaily    = (sheetScope === 'DAILY');
-        const hasTsMeta  = !!meta.hasTs;
-        const isPaid     = !!meta.isPaid;
-        const isInvoiced = !!meta.isInvoiced;
-        const cwMode     = String(meta.cw_submission_mode_snapshot || '').toUpperCase();
-        const isPlanned  = !!meta.isPlannedWeek;
+const mcTs = (window.modalCtx || {});
+const meta = (mcTs && mcTs.timesheetMeta) || {};
+const det  = (mcTs && mcTs.timesheetDetails) || {};
+const ts   = det.timesheet || {};
+const tsfin= det.tsfin || {};
 
-        // 1) Weekly MANUAL *real* timesheet, not paid/invoiced
-        const isWeeklyManualTs =
-          hasTsMeta &&
-          isWeekly &&
-          subMode === 'MANUAL' &&
-          !isPaid &&
-          !isInvoiced;
+// Timesheet identity + status
+const tsId = mcTs?.data?.timesheet_id || null;
+const weekId = mcTs?.data?.contract_week_id || null;
 
-        // 2) Planned/open weekly week whose contract_week snapshot is MANUAL
-        const isPlannedManualWeek =
-          !hasTsMeta &&
-          isPlanned &&
-          isWeekly &&
-          cwMode === 'MANUAL';
+const sheetScope = String(meta.sheetScope || '').toUpperCase();
+const subMode    = String(meta.subMode    || '').toUpperCase();
+const cwMode     = String(meta.cw_submission_mode_snapshot || '').toUpperCase();
 
-        // 3) Daily MANUAL *real* timesheet, not paid/invoiced
-        const isDailyManualTs =
-          hasTsMeta &&
-          isDaily &&
-          subMode === 'MANUAL' &&
-          !isPaid &&
-          !isInvoiced;
+const isWeekly   = (sheetScope === 'WEEKLY');
+const isDaily    = (sheetScope === 'DAILY');
 
-        canEdit = (top.mode === 'view') && (isWeeklyManualTs || isPlannedManualWeek || isDailyManualTs);
-      } else {
-        // Default for non-timesheet entities
-        canEdit = (top.mode === 'view' && top.hasId);
+const isPaid     = !!meta.isPaid;
+const isInvoiced = !!meta.isInvoiced;
+const locked     = isPaid || isInvoiced;
+
+// Editable in-place (your existing rule)
+if (top.entity === 'timesheets') {
+  const hasTsMeta  = !!meta.hasTs;
+  const isPlanned  = !!meta.isPlannedWeek;
+
+  const isWeeklyManualTs =
+    hasTsMeta && isWeekly && subMode === 'MANUAL' && !locked;
+
+  const isPlannedManualWeek =
+    !hasTsMeta && isPlanned && isWeekly && cwMode === 'MANUAL';
+
+  const isDailyManualTs =
+    hasTsMeta && isDaily && subMode === 'MANUAL' && !locked;
+
+  canEdit = (top.mode === 'view') && (isWeeklyManualTs || isPlannedManualWeek || isDailyManualTs);
+
+  // ✅ Convert-to-manual eligibility (FINAL RULES)
+  // common: not locked, and ELECTRONIC context
+  if (!locked && top.mode === 'view') {
+    // Weekly existing TS: ELECTRONIC → MANUAL
+    const weeklyExistingOk =
+      isWeekly && !!tsId && subMode === 'ELECTRONIC';
+
+    // Weekly planned slot: contract_week exists + snapshot ELECTRONIC
+    const weeklyPlannedOk =
+      isWeekly && !tsId && !!weekId && cwMode === 'ELECTRONIC';
+
+    // Daily existing TS: ELECTRONIC → MANUAL (NEW)
+    const dailyExistingOk =
+      isDaily && !!tsId && subMode === 'ELECTRONIC';
+
+    canConvert = (weeklyExistingOk || weeklyPlannedOk || dailyExistingOk);
+  }
+} else {
+  canEdit = (top.mode === 'view' && top.hasId);
+  canConvert = false;
+}
+
+// Footer placement: Convert replaces Edit when Edit isn't available
+btnEdit.style.display = (canEdit ? '' : 'none');
+
+const btnTsConvert = byId('btnTsConvertManual');
+if (btnTsConvert) {
+  const showConvert = (!isChild && top.entity === 'timesheets' && top.mode === 'view' && !canEdit && canConvert);
+  btnTsConvert.style.display = showConvert ? '' : 'none';
+  btnTsConvert.disabled = !!top._saving;
+
+  // Wire once
+  if (!btnTsConvert.__tsWired) {
+    btnTsConvert.__tsWired = true;
+    btnTsConvert.addEventListener('click', async () => {
+      const fr = currentFrame();
+      if (!fr || fr.entity !== 'timesheets') return;
+
+      const mc = window.modalCtx || {};
+      const meta2 = mc.timesheetMeta || {};
+      const det2  = mc.timesheetDetails || {};
+      const ts2   = det2.timesheet || {};
+      const tsfin2= det2.tsfin || {};
+
+      const tsId2   = mc.data?.timesheet_id || null;
+      const weekId2 = mc.data?.contract_week_id || null;
+
+      const sheetScope2 = String(meta2.sheetScope || '').toUpperCase();
+      const subMode2    = String(meta2.subMode    || '').toUpperCase();
+      const cwMode2     = String(meta2.cw_submission_mode_snapshot || '').toUpperCase();
+
+      const locked2 = !!(meta2.isPaid || meta2.isInvoiced || tsfin2.locked_by_invoice_id || tsfin2.paid_at_utc);
+      if (locked2) { alert('This timesheet is locked (paid or invoiced).'); return; }
+
+      const ok = window.confirm('Convert to MANUAL timesheet?');
+      if (!ok) return;
+
+      try {
+        // DAILY: /switch-daily-to-manual (NO QR printable)
+        if (sheetScope2 === 'DAILY' && tsId2 && subMode2 === 'ELECTRONIC') {
+          const encId = encodeURIComponent(tsId2);
+          const res = await authFetch(API(`/api/timesheets/${encId}/switch-daily-to-manual`), { method: 'POST' });
+          const txt = await res.text().catch(()=> '');
+          if (!res.ok) throw new Error(txt || 'Failed to convert daily timesheet to manual.');
+        }
+
+        // WEEKLY existing TS: /api/timesheets/:id/switch-to-manual
+        else if (sheetScope2 === 'WEEKLY' && tsId2 && subMode2 === 'ELECTRONIC') {
+          await switchTimesheetToManual(tsId2);
+        }
+
+        // WEEKLY planned slot: /api/contract-weeks/:id/switch-mode
+        else if (sheetScope2 === 'WEEKLY' && !tsId2 && weekId2 && cwMode2 === 'ELECTRONIC') {
+          await switchContractWeekToManual(weekId2);
+        }
+
+        else {
+          throw new Error('This item is not eligible for Convert to Manual.');
+        }
+
+        // Refresh list + repaint modal
+        try { await renderAll(); } catch {}
+        try {
+          // keep meta roughly in sync so footer gating updates immediately
+          if (window.modalCtx?.timesheetMeta) {
+            window.modalCtx.timesheetMeta.subMode = 'MANUAL';
+            if (sheetScope2 === 'WEEKLY' && !tsId2) window.modalCtx.timesheetMeta.cw_submission_mode_snapshot = 'MANUAL';
+          }
+          if (window.modalCtx?.data) window.modalCtx.data.submission_mode = 'MANUAL';
+        } catch {}
+
+        try {
+          fr.mode = 'view';
+          fr._suppressDirty = true;
+          await fr.setTab('overview');
+          fr._suppressDirty = false;
+          fr._updateButtons && fr._updateButtons();
+        } catch {}
+
+        window.__toast && window.__toast('Converted to MANUAL.');
+      } catch (e) {
+        alert(e?.message || 'Convert failed');
       }
+    });
+  }
+}
 
-      btnEdit.style.display = canEdit ? '' : 'none';
+// Edit-mode buttons next to Save: Restore / Request New / Delete Timesheet
+const btnTsRestore = byId('btnTsRestoreElectronic');
+const btnTsRequest = byId('btnTsRequestNewElectronic');
+const btnTsDelete  = byId('btnTsDeleteTimesheet');
+
+if (!isChild && top.entity === 'timesheets') {
+  // You will wire backend “has electronic version?” later.
+  // For now we key off an optional flag that you can add to /details.
+  const hasElecFlag =
+    !!meta.hasElectronicOriginal ||
+    !!det.has_electronic_version ||
+    !!det.has_electronic_original;
+
+  const canRestore = (top.mode === 'edit' && !!tsId && !locked && hasElecFlag);
+  const canRequest = (top.mode === 'edit' && !!tsId && !!weekId && !locked && hasElecFlag);
+  const canDeleteTs = (top.mode === 'edit' && !!tsId && !locked);
+
+  if (btnTsRestore) {
+    btnTsRestore.style.display = canRestore ? '' : 'none';
+    btnTsRestore.disabled = !!top._saving;
+    if (!btnTsRestore.__tsWired) {
+      btnTsRestore.__tsWired = true;
+      btnTsRestore.addEventListener('click', async () => {
+        const ok = window.confirm('Restore the original signed electronic timesheet? This discards all current manual edits.');
+        if (!ok) return;
+        try {
+          await revertTimesheetToElectronic(tsId);
+
+          // Refresh details so UI reflects the restored version
+          try {
+            const fresh = await fetchTimesheetDetails(tsId);
+            if (window.modalCtx) window.modalCtx.timesheetDetails = fresh;
+          } catch {}
+
+          // Reset to view
+          top.isDirty = false;
+          top._snapshot = null;
+          setFrameMode(top, 'view');
+          renderTop();
+          try { await renderAll(); } catch {}
+        } catch (e) {
+          alert(e?.message || 'Restore failed');
+        }
+      });
+    }
+  }
+
+  if (btnTsRequest) {
+    btnTsRequest.style.display = canRequest ? '' : 'none';
+    btnTsRequest.disabled = !!top._saving;
+    if (!btnTsRequest.__tsWired) {
+      btnTsRequest.__tsWired = true;
+      btnTsRequest.addEventListener('click', async () => {
+        const ok = window.confirm(
+          'REQUEST A NEW ELECTRONIC TIMESHEET?\n\n' +
+          'This will permanently delete the electronic timesheet on file and reopen the week for a brand new submission.\n' +
+          'Only do this if you definitely do not need the original signed electronic timesheet ever again.\n\n' +
+          'Continue?'
+        );
+        if (!ok) return;
+
+        try {
+          // Uses your existing weekly “reopen” delete (deletes ALL versions today)
+          await deleteManualTimesheetAndReopenWeek(tsId, weekId);
+          try { byId('btnCloseModal').click(); } catch {}
+          try { await renderAll(); } catch {}
+        } catch (e) {
+          alert(e?.message || 'Request new electronic failed');
+        }
+      });
+    }
+  }
+
+  if (btnTsDelete) {
+    btnTsDelete.style.display = canDeleteTs ? '' : 'none';
+    btnTsDelete.disabled = !!top._saving;
+    if (!btnTsDelete.__tsWired) {
+      btnTsDelete.__tsWired = true;
+      btnTsDelete.addEventListener('click', async () => {
+        const ok = window.confirm(
+          'Permanently delete this timesheet?\n\n' +
+          'This will remove all versions and financial snapshots for this timesheet_id.\n' +
+          'This action cannot be undone.'
+        );
+        if (!ok) return;
+        try {
+          await deleteTimesheetPermanent(tsId);
+          try { byId('btnCloseModal').click(); } catch {}
+          try { await renderAll(); } catch {}
+        } catch (e) {
+          alert(e?.message || 'Delete failed');
+        }
+      });
+    }
+  }
+}
+
 
 
 
@@ -36765,6 +37049,7 @@ function classifyTimesheetPill(kind, value) {
       return 'pill pill-muted';
   }
 }
+
 function renderTimesheetOverviewTab(ctx) {
   const { LOGM, L, GC, GE } = getTsLoggers('[TS][OVERVIEW]');
   const { row, details, related, state } = normaliseTimesheetCtx(ctx);
@@ -36778,17 +37063,11 @@ function renderTimesheetOverviewTab(ctx) {
   const rCtr  = related.contract  || {};
   const rInv  = related.invoice   || null;
 
-  const sheetScope = (details.sheet_scope ||
-                      row.sheet_scope ||
-                      ts.sheet_scope ||
-                      '').toUpperCase();
-  const subMode    = (ts.submission_mode ||
-                      row.submission_mode ||
-                      '').toUpperCase();
+  const sheetScope = (details.sheet_scope || row.sheet_scope || ts.sheet_scope || '').toUpperCase();
+  const subMode    = (ts.submission_mode || row.submission_mode || '').toUpperCase();
   const basis      = (tsfin.basis || row.basis || '').toUpperCase();
 
   const tsId = ts.timesheet_id || row.timesheet_id || null;
-
   const enc = escapeHtml;
 
   const candidateName =
@@ -36809,6 +37088,7 @@ function renderTimesheetOverviewTab(ctx) {
     (rCtr.role && enc(rCtr.role)) ||
     (row.job_title_norm && enc(row.job_title_norm)) ||
     null;
+
   const band =
     (rCtr.band && String(rCtr.band).trim()) ||
     (row.band && String(row.band).trim()) ||
@@ -36852,68 +37132,50 @@ function renderTimesheetOverviewTab(ctx) {
 
   const hasTsfin = !!(
     tsfin &&
-    (
-      tsfin.timesheet_id ||
-      tsfin.total_hours != null ||
-      tsfin.total_pay_ex_vat != null ||
-      tsfin.processing_status
-    )
+    (tsfin.timesheet_id || tsfin.total_hours != null || tsfin.total_pay_ex_vat != null || tsfin.processing_status)
   );
+
   const hasContractWeek = !!(details.contract_week_id || cw.id || row.contract_week_id);
   const isPlannedOnly   = !hasTsfin && hasContractWeek && !tsId;
 
-  const stageRaw        = (tsfin.processing_status || '').toUpperCase() || null;
-  const procStatus      = stageRaw || (row.processing_status || '').toUpperCase() || null;
-  const isPaid          = !!tsfin.paid_at_utc;
-  const isInvoiced      = !!tsfin.locked_by_invoice_id;
-  const payOnHold       = !!tsfin.pay_on_hold;
-  const authorised      = !!ts.authorised_at_server;
-  const qrStatus        = (details.qr_status || ts.qr_status || '').toUpperCase();
+  const stageRaw   = (tsfin.processing_status || '').toUpperCase() || null;
+  const procStatus = stageRaw || (row.processing_status || '').toUpperCase() || null;
 
-  const amountPayEx   = Number(tsfin.total_pay_ex_vat || 0) || 0;
-  const amountChgEx   = Number(tsfin.total_charge_ex_vat || 0) || 0;
-  const amountMargin  = amountChgEx - amountPayEx;
+  const isPaid     = !!tsfin.paid_at_utc;
+  const isInvoiced = !!tsfin.locked_by_invoice_id;
+  const locked     = isPaid || isInvoiced;
+
+  const payOnHold  = !!tsfin.pay_on_hold;
+  const authorised = !!ts.authorised_at_server;
+  const qrStatus   = (details.qr_status || ts.qr_status || '').toUpperCase();
+
+  const amountPayEx  = Number(tsfin.total_pay_ex_vat || 0) || 0;
+  const amountChgEx  = Number(tsfin.total_charge_ex_vat || 0) || 0;
+  const amountMargin = amountChgEx - amountPayEx;
 
   const fmtMoney = (v) => isNaN(Number(v)) ? '—' : `£${(Math.round(Number(v) * 100) / 100).toFixed(2)}`;
 
   const cwId         = details.contract_week_id || cw.id || row.contract_week_id || null;
-  const cwSubSnapRaw = cw.submission_mode_snapshot || row.submission_mode || '';
-  const cwSubSnap    = String(cwSubSnapRaw || '').toUpperCase();
+  const policy       = details.policy || {};
+  const requiresHr   = !!policy.requires_hr;
+  const autoprocessHr= !!policy.autoprocess_hr;
+  const noTimesheetReq = !!policy.no_timesheet_required;
 
-  const policy          = details.policy || {};
-  const requiresHr      = !!policy.requires_hr;
-  const autoprocessHr   = !!policy.autoprocess_hr;
-  const noTimesheetReq  = !!policy.no_timesheet_required;
-  const validations     = Array.isArray(details.validations) ? details.validations : [];
-  const latestValidation  = validations.length ? validations[0] : null;
-  const validationStatus  = latestValidation ? String(latestValidation.status || '').toUpperCase() : null;
-  const validationIsOk    = validationStatus === 'VALIDATION_OK' || validationStatus === 'OVERRIDDEN';
+  const validations = Array.isArray(details.validations) ? details.validations : [];
+  const latestValidation = validations.length ? validations[0] : null;
+  const validationStatus = latestValidation ? String(latestValidation.status || '').toUpperCase() : null;
+  const validationIsOk = validationStatus === 'VALIDATION_OK' || validationStatus === 'OVERRIDDEN';
 
   const r2NurseKey   = ts.r2_nurse_key || null;
   const r2AuthKey    = ts.r2_auth_key || null;
   const manualPdfKey = ts.manual_pdf_r2_key || details.manual_pdf_r2_key || null;
 
   L('snapshot', {
-    tsId,
-    sheetScope,
-    subMode,
-    basis,
-    stageRaw,
-    procStatus,
-    authorised,
-    isPaid,
-    isInvoiced,
-    payOnHold,
-    qrStatus,
-    weYmd,
-    hasTsfin,
-    hasContractWeek,
-    isPlannedOnly,
-    cwId,
-    cwSubSnap,
-    requiresHr,
-    autoprocessHr,
-    noTimesheetReq
+    tsId, sheetScope, subMode, basis,
+    stageRaw, procStatus, authorised,
+    isPaid, isInvoiced, payOnHold, qrStatus,
+    weYmd, hasTsfin, hasContractWeek, isPlannedOnly,
+    cwId, requiresHr, autoprocessHr, noTimesheetReq
   });
   GE();
 
@@ -36922,12 +37184,8 @@ function renderTimesheetOverviewTab(ctx) {
       <div class="row">
         <label>Timesheet</label>
         <div class="controls">
-          <div style="font-size:15px;font-weight:600;margin-bottom:2px;">
-            ${candidateName}
-          </div>
-          <div class="mini">
-            Client: ${clientName}
-          </div>
+          <div style="font-size:15px;font-weight:600;margin-bottom:2px;">${candidateName}</div>
+          <div class="mini">Client: ${clientName}</div>
           <div class="mini">
             ${
               weYmd
@@ -36948,10 +37206,7 @@ function renderTimesheetOverviewTab(ctx) {
   `;
 
   const stageLabel = (() => {
-    if (!hasTsfin) {
-      if (isPlannedOnly) return 'UNPROCESSED (planned week)';
-      return 'UNPROCESSED';
-    }
+    if (!hasTsfin) return (isPlannedOnly ? 'UNPROCESSED (planned week)' : 'UNPROCESSED');
     if (isPaid) return 'Paid';
     if (isInvoiced) return 'Invoiced';
     if (stageRaw === 'READY_FOR_INVOICE') return 'Ready for invoice';
@@ -36973,34 +37228,20 @@ function renderTimesheetOverviewTab(ctx) {
   const procStatusPillHtml = (() => {
     if (!procStatus) return '';
     let cls = 'pill-info';
-    if (procStatus === 'UNASSIGNED' ||
-        procStatus === 'CLIENT_UNRESOLVED' ||
-        procStatus === 'RATE_MISSING' ||
-        procStatus === 'PAY_CHANNEL_MISSING') {
-      cls = 'pill-bad';
-    } else if (procStatus === 'READY_FOR_HR') {
-      cls = 'pill-warn';
-    } else if (procStatus === 'READY_FOR_INVOICE') {
-      cls = 'pill-ok';
-    }
+    if (procStatus === 'UNASSIGNED' || procStatus === 'CLIENT_UNRESOLVED' || procStatus === 'RATE_MISSING' || procStatus === 'PAY_CHANNEL_MISSING') cls = 'pill-bad';
+    else if (procStatus === 'READY_FOR_HR') cls = 'pill-warn';
+    else if (procStatus === 'READY_FOR_INVOICE') cls = 'pill-ok';
     return `<span class="pill ${cls}" style="margin-left:4px;">Status: ${enc(procStatus)}</span>`;
   })();
 
   const hrHintsHtml = (() => {
     if (!requiresHr) return '';
     const lines = [];
-
-    if (!validationIsOk) {
-      lines.push('HR validation required');
-    }
-
-    if (autoprocessHr) {
-      lines.push('HR auto-process: no team authorisation required after HR checks.');
-    } else {
-      lines.push('Manual team authorisation required after HR checks.');
-    }
-
-    if (!lines.length) return '';
+    if (!validationIsOk) lines.push('HR validation required');
+    lines.push(autoprocessHr
+      ? 'HR auto-process: no team authorisation required after HR checks.'
+      : 'Manual team authorisation required after HR checks.'
+    );
     return `
       <div class="mini" style="margin-top:4px;">
         ${lines.map(enc).join('<br/>')}
@@ -37013,47 +37254,24 @@ function renderTimesheetOverviewTab(ctx) {
     : '<span class="pill pill-weekly">Weekly</span>';
 
   const modePill = (() => {
-    if (basis === 'NHSP' || basis === 'NHSP_ADJUSTMENT') {
-      return '<span class="pill pill-nhsp">NHSP</span>';
-    }
-    if (basis.startsWith('HEALTHROSTER')) {
-      return '<span class="pill pill-hr">HealthRoster</span>';
-    }
-    if (subMode === 'ELECTRONIC') {
-      return '<span class="pill pill-elec">Electronic</span>';
-    }
-    if (subMode === 'MANUAL' && qrStatus) {
-      return `<span class="pill pill-manual">Manual (QR: ${enc(qrStatus)})</span>`;
-    }
-    if (subMode === 'MANUAL') {
-      return '<span class="pill pill-manual">Manual</span>';
-    }
+    if (basis === 'NHSP' || basis === 'NHSP_ADJUSTMENT') return '<span class="pill pill-nhsp">NHSP</span>';
+    if (basis.startsWith('HEALTHROSTER')) return '<span class="pill pill-hr">HealthRoster</span>';
+    if (subMode === 'ELECTRONIC') return '<span class="pill pill-elec">Electronic</span>';
+    if (subMode === 'MANUAL' && qrStatus) return `<span class="pill pill-manual">Manual (QR: ${enc(qrStatus)})</span>`;
+    if (subMode === 'MANUAL') return '<span class="pill pill-manual">Manual</span>';
     return '<span class="pill">Unknown mode</span>';
   })();
 
-  const paidLabel = isPaid
-    ? fmtUkDateTime(tsfin.paid_at_utc)
-    : 'Not paid';
-
-  const invLabel = isInvoiced
-    ? (rInv && rInv.invoice_number
-        ? `On invoice ${enc(rInv.invoice_number)}`
-        : 'Invoiced')
+  const paidLabel = isPaid ? fmtUkDateTime(tsfin.paid_at_utc) : 'Not paid';
+  const invLabel  = isInvoiced
+    ? (rInv && rInv.invoice_number ? `On invoice ${enc(rInv.invoice_number)}` : 'Invoiced')
     : 'Not invoiced';
 
   const flagsHtml = `
     <div class="mini" style="margin-top:4px;">
-      <span class="pill ${isPaid ? 'pill-ok' : 'pill-warn'}">
-        Paid: ${isPaid ? 'Yes' : 'No'}
-      </span>
-      <span class="pill ${isInvoiced ? 'pill-warn' : 'pill-info'}" style="margin-left:4px;">
-        Invoiced: ${isInvoiced ? 'Yes' : 'No'}
-      </span>
-      ${
-        payOnHold
-          ? '<span class="pill pill-hold" style="margin-left:4px;">Pay on hold</span>'
-          : ''
-      }
+      <span class="pill ${isPaid ? 'pill-ok' : 'pill-warn'}">Paid: ${isPaid ? 'Yes' : 'No'}</span>
+      <span class="pill ${isInvoiced ? 'pill-warn' : 'pill-info'}" style="margin-left:4px;">Invoiced: ${isInvoiced ? 'Yes' : 'No'}</span>
+      ${payOnHold ? '<span class="pill pill-hold" style="margin-left:4px;">Pay on hold</span>' : ''}
     </div>
     <div class="mini" style="margin-top:4px;">
       ${isPaid ? `Paid at ${paidLabel}` : ''}
@@ -37076,195 +37294,54 @@ function renderTimesheetOverviewTab(ctx) {
       </div>
     `;
 
-  const refValue = state && typeof state.reference === 'string'
+  const refValue = (state && typeof state.reference === 'string')
     ? state.reference
     : (ts.reference_number || row.reference_number || '');
-
-  const hasTs   = !!tsId;
-  const locked  = isPaid || isInvoiced;
-  const isDaily = sheetScope === 'DAILY';
-  const isWeekly = sheetScope === 'WEEKLY';
-
-  const canSendDailyQr =
-    isDaily && hasTs && !locked;
-
-  const canSendWeeklyQr =
-    isWeekly &&
-    hasTs &&
-    subMode === 'MANUAL' &&
-    !!cwId &&
-    !locked;
-
-  const canSwitchToManualWeekly =
-    hasTs &&
-    sheetScope === 'WEEKLY' &&
-    subMode === 'ELECTRONIC' &&
-    !locked;
-
-  const isPlannedWeekly = !hasTs && sheetScope === 'WEEKLY' && !!cwId;
-  const canSwitchWeekToManualPlanned =
-    isPlannedWeekly &&
-    cwSubSnap === 'ELECTRONIC' &&
-    !locked;
-
-  const canRevertElectronic =
-    hasTs &&
-    sheetScope === 'WEEKLY' &&
-    subMode === 'MANUAL' &&
-    !locked;
-
-  const canDeleteManualReopen =
-    hasTs &&
-    sheetScope === 'WEEKLY' &&
-    subMode === 'MANUAL' &&
-    !!cwId &&
-    !locked;
-
-  const canDeletePermanently =
-    hasTs &&
-    !locked;
 
   const missingTsEvidence =
     requiresHr &&
     !noTimesheetReq &&
     !isPaid &&
     !isInvoiced &&
-    !(
-      subMode === 'ELECTRONIC' &&
-      r2NurseKey &&
-      r2AuthKey
-    ) &&
+    !(subMode === 'ELECTRONIC' && r2NurseKey && r2AuthKey) &&
     !manualPdfKey;
 
   const timesheetRequiredPillHtml = missingTsEvidence
     ? '<span class="pill pill-bad" style="margin-left:4px;">Timesheet required</span>'
     : '';
 
+  // Keep the QR amend warning (still useful context)
   const hasQr = !!qrStatus;
-  const showQrAmendWarning = hasQr && !locked;
-  const qrAmendWarningHtml = showQrAmendWarning
+  const qrAmendWarningHtml = (hasQr && !locked)
     ? `
       <div class="mini" style="margin-top:8px;color:var(--warn);max-width:520px;">
         Warning: this timesheet already has a QR version. If you amend the hours and save,
         you will be asked whether to:
         <br/>• save and revoke the existing QR only, or
         <br/>• save, revoke and reissue a new QR timesheet to the worker.
-        <br/><br/>Please make sure the hours are correct before saving to avoid sending
-        multiple revised timesheets.
       </div>
     `
     : '';
 
-  let actionsHtml = '';
-
-  if (isDaily && hasTs) {
-    const buttons = [];
-
-    if (canSendDailyQr) {
-      buttons.push(`
-        <button type="button"
-                class="btn"
-                data-ts-action="send-daily-qr">
+  // ✅ NEW: Overview “Actions” no longer contains structural controls (Convert / Restore / Request / Delete)
+  // Those live in the footer now. Keep only genuinely view-mode quick actions.
+  const actionsHtml = (() => {
+    if (sheetScope === 'DAILY' && tsId && subMode === 'ELECTRONIC' && !locked) {
+      return `
+        <button type="button" class="btn" data-ts-action="send-daily-qr">
           Send daily QR timesheet
         </button>
-      `);
-    }
-
-    if (!buttons.length) {
-      actionsHtml = `
-        <span class="mini">
-          No structural actions are available for this daily timesheet (it may be paid, invoiced, or otherwise locked).
-        </span>
-      `;
-    } else {
-      actionsHtml = buttons.join('');
-    }
-  } else if (hasTs || isPlannedWeekly) {
-    const buttons = [];
-
-    if (canSendWeeklyQr) {
-      buttons.push(`
-        <button type="button"
-                class="btn"
-                data-ts-action="send-weekly-qr">
-          Send weekly QR timesheet
-        </button>
-      `);
-    }
-
-    if (canSwitchToManualWeekly || canSwitchWeekToManualPlanned) {
-      const label = hasTs
-        ? 'Convert to manual timesheet'
-        : 'Convert planned week to manual timesheet';
-
-      buttons.push(`
-        <button type="button"
-                class="btn"
-                data-ts-action="switch-manual">
-          ${label}
-        </button>
-      `);
-    }
-
-    if (canRevertElectronic) {
-      buttons.push(`
-        <button type="button"
-                class="btn"
-                style="margin-left:8px;"
-                data-ts-action="revert-electronic">
-          Restore original electronic timesheet
-        </button>
-      `);
-    }
-
-    if (canDeleteManualReopen) {
-      buttons.push(`
-        <button type="button"
-                class="btn"
-                style="margin-left:8px;"
-                data-ts-action="delete-manual-reopen">
-          Delete manual & reopen week for electronic
-        </button>
-      `);
-    }
-
-    if (canDeletePermanently) {
-      buttons.push(`
-        <button type="button"
-                class="btn btn-warn"
-                style="margin-left:8px;"
-                data-ts-action="delete-permanent">
-          Delete permanently
-        </button>
-      `);
-    }
-
-    if (buttons.length) {
-      actionsHtml = buttons.join('');
-    } else {
-      actionsHtml = `
-        <span class="mini">
-          No structural actions are available for this timesheet (it may be paid or invoiced).
-        </span>
       `;
     }
-  } else {
-    actionsHtml = `
-      <span class="mini">
-        This is a planned/open week without a timesheet yet. Once a manual or electronic
-        timesheet exists, actions will appear here.
-      </span>
-    `;
-  }
+    return `<span class="mini">No quick actions here. Use the footer buttons where available.</span>`;
+  })();
 
   const routeHtml = `
     <div class="card" style="margin-top:10px;">
       <div class="row">
         <label>Stage</label>
         <div class="controls">
-          <span class="pill ${stageClass}" style="font-weight:600;">
-            ${enc(stageLabel)}
-          </span>
+          <span class="pill ${stageClass}" style="font-weight:600;">${enc(stageLabel)}</span>
           ${procStatusPillHtml}
           <div class="mini" style="margin-top:4px;">
             ${authorised ? 'Authorised' : 'Not authorised'}
@@ -37272,61 +37349,50 @@ function renderTimesheetOverviewTab(ctx) {
           ${hrHintsHtml}
         </div>
       </div>
+
       <div class="row">
         <label>Route</label>
         <div class="controls">
           ${scopePill}
           ${modePill}
-          ${
-            basis
-              ? `<span class="pill pill-info" style="margin-left:4px;">Basis: ${enc(basis)}</span>`
-              : ''
-          }
+          ${basis ? `<span class="pill pill-info" style="margin-left:4px;">Basis: ${enc(basis)}</span>` : ''}
           ${timesheetRequiredPillHtml}
           ${flagsHtml}
         </div>
       </div>
+
       <div class="row">
         <label>Totals</label>
-        <div class="controls">
-          ${totalsHtml}
-        </div>
+        <div class="controls">${totalsHtml}</div>
       </div>
+
       <div class="row">
         <label>Reference / PO</label>
         <div class="controls">
-          <input
-            class="input"
-            name="ts_reference"
-            value="${enc(refValue || '')}"
-            placeholder="Reference or PO (optional)"
-          />
+          <input class="input" name="ts_reference" value="${enc(refValue || '')}" placeholder="Reference or PO (optional)" />
           <span class="mini">
             This is staged only and will be saved when you click <strong>Save</strong>.
             You can update this even for electronic timesheets.
           </span>
-        </div>
-      </div>
-      <div class="row" data-view-only="true">
-        <label>Actions</label>
-        <div class="controls">
-          ${actionsHtml}
           ${qrAmendWarningHtml}
         </div>
       </div>
+
+      <div class="row" data-view-only="true">
+        <label>Actions</label>
+        <div class="controls">${actionsHtml}</div>
+      </div>
     </div>
   `;
-
-  let linesCardHtml = '';
 
   return `
     <div class="tabc">
       ${headerHtml}
       ${routeHtml}
-      ${linesCardHtml}
     </div>
   `;
 }
+
 
 async function switchContractWeekToManual(weekId) {
   const { LOGM, L, GC, GE } = getTsLoggers('[TS][CW-SWITCH-MANUAL]');
@@ -38106,332 +38172,6 @@ function renderTimesheetFinanceTab(ctx) {
 }
 
 
-function renderTimesheetOverviewTab(ctx) {
-  const { LOGM, L, GC, GE } = getTsLoggers('[TS][OVERVIEW]');
-  const { row, details, related, state } = normaliseTimesheetCtx(ctx);
-
-  GC('render');
-  const ts    = details.timesheet || {};
-  const tsfin = details.tsfin     || {};
-  const cw    = details.contract_week || {};
-  const rCand = related.candidate || {};
-  const rCli  = related.client    || {};
-  const rCtr  = related.contract  || {};
-  const rInv  = related.invoice   || null;
-
-  const sheetScope = (details.sheet_scope ||
-                      row.sheet_scope ||
-                      ts.sheet_scope ||
-                      '').toUpperCase();
-  const subMode    = (ts.submission_mode ||
-                      row.submission_mode ||
-                      '').toUpperCase();
-  const basis      = (tsfin.basis || row.basis || '').toUpperCase();
-
-  const tsId = ts.timesheet_id || row.timesheet_id || null;
-
-  const enc = escapeHtml;
-
-  const candidateName =
-    (rCand.display_name && enc(rCand.display_name)) ||
-    (row.candidate_name && enc(row.candidate_name)) ||
-    (row.occupant_key_norm && enc(row.occupant_key_norm)) ||
-    (rCand.first_name || rCand.last_name
-      ? enc([rCand.first_name, rCand.last_name].filter(Boolean).join(' '))
-      : 'Unknown candidate');
-
-  const clientName =
-    (rCli.name && enc(rCli.name)) ||
-    (rCtr.display_site && enc(rCtr.display_site)) ||
-    (row.client_name && enc(row.client_name)) ||
-    (row.client_id ? enc(row.client_id) : 'Unknown client');
-
-  const jobTitle =
-    (rCtr.role && enc(rCtr.role)) ||
-    (row.job_title_norm && enc(row.job_title_norm)) ||
-    null;
-  const band =
-    (rCtr.band && String(rCtr.band).trim()) ||
-    (row.band && String(row.band).trim()) ||
-    null;
-
-  const weYmd = ts.week_ending_date || row.week_ending_date || null;
-
-  // YYYY-MM-DD → DD-MM-YYYY for UI
-  const fmtYmdToDmy = (ymd) => {
-    if (!ymd || typeof ymd !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(ymd)) return enc(ymd || '');
-    const [y, m, d] = ymd.split('-');
-    return `${d}-${m}-${y}`;
-  };
-
-  const fmtDow = (ymd) => {
-    if (!ymd) return '';
-    const d = new Date(`${ymd}T00:00:00Z`);
-    if (Number.isNaN(d.getTime())) return '';
-    return d.toLocaleDateString('en-GB', { weekday: 'short', timeZone: 'Europe/London' });
-  };
-
-  const fmtUkDateTime = (iso) => {
-    if (!iso) return '';
-    const d = new Date(iso);
-    if (Number.isNaN(d.getTime())) return enc(iso);
-    const s = d.toLocaleString('en-GB', {
-      timeZone: 'Europe/London',
-      weekday: 'short',
-      day: '2-digit',
-      month: 'short',
-      year: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit',
-      hour12: false
-    });
-    const parts = s.replace(',', '').split(' ');
-    if (parts.length < 4) return enc(s);
-    const [dow, day, mon, year, time] = parts;
-    const hhmm = (time || '').replace(':', '');
-    return `${enc(dow)} ${enc(day)} ${enc(mon)} ${enc(year)} at ${enc(hhmm)}hrs`;
-  };
-
-  const hasTsfin = !!(
-    tsfin &&
-    (
-      tsfin.timesheet_id ||
-      tsfin.total_hours != null ||
-      tsfin.total_pay_ex_vat != null ||
-      tsfin.processing_status
-    )
-  );
-  const hasContractWeek = !!(details.contract_week_id || cw.id || row.contract_week_id);
-  const isPlannedOnly   = !hasTsfin && hasContractWeek && !tsId;
-
-  const stageRaw      = (tsfin.processing_status || '').toUpperCase() || null;
-  const isPaid        = !!tsfin.paid_at_utc;
-  const isInvoiced    = !!tsfin.locked_by_invoice_id;
-  const payOnHold     = !!tsfin.pay_on_hold;
-  const authorised    = !!ts.authorised_at_server;
-  const qrStatus      = (details.qr_status || ts.qr_status || '').toUpperCase();
-
-  const amountPayEx   = Number(tsfin.total_pay_ex_vat || 0) || 0;
-  const amountChgEx   = Number(tsfin.total_charge_ex_vat || 0) || 0;
-  const amountMargin  = amountChgEx - amountPayEx;
-
-  const fmtMoney = (v) => isNaN(Number(v)) ? '—' : `£${(Math.round(Number(v) * 100) / 100).toFixed(2)}`;
-
-  L('snapshot', {
-    tsId,
-    sheetScope,
-    subMode,
-    basis,
-    stageRaw,
-    authorised,
-    isPaid,
-    isInvoiced,
-    payOnHold,
-    qrStatus,
-    weYmd,
-    hasTsfin,
-    hasContractWeek,
-    isPlannedOnly
-  });
-  GE();
-
-  const headerHtml = `
-    <div class="card">
-      <div class="row">
-        <label>Timesheet</label>
-        <div class="controls">
-          <div style="font-size:15px;font-weight:600;margin-bottom:2px;">
-            ${candidateName}
-          </div>
-          <div class="mini">
-            Client: ${clientName}
-          </div>
-          <div class="mini">
-            ${
-              weYmd
-                ? `Week ending: ${fmtDow(weYmd)} ${fmtYmdToDmy(weYmd)}`
-                : '<span class="mini">Week ending: Unknown</span>'
-            }
-          </div>
-          <div class="mini">
-            ${
-              jobTitle
-                ? (band ? `${jobTitle} (Band ${enc(band)})` : jobTitle)
-                : (band ? `Band ${enc(band)}` : '<span class="mini">No job title</span>')
-            }
-          </div>
-        </div>
-      </div>
-    </div>
-  `;
-
-  const stageLabel = (() => {
-    if (!hasTsfin) {
-      if (isPlannedOnly) return 'UNPROCESSED (planned week)';
-      return 'UNPROCESSED';
-    }
-    if (isPaid) return 'Paid';
-    if (isInvoiced) return 'Invoiced';
-    if (stageRaw === 'READY_FOR_INVOICE') return 'Ready for invoice';
-    if (stageRaw === 'PENDING_AUTH') return 'Pending authorisation';
-    if (stageRaw === 'RATE_MISSING') return 'Rate missing';
-    if (stageRaw === 'PAY_CHANNEL_MISSING') return 'Pay channel missing';
-    return stageRaw || 'Unknown';
-  })();
-
-  const stageClass = (() => {
-    if (!hasTsfin) return 'pill-bad';
-    if (isPaid) return 'pill-ok';
-    if (isInvoiced) return 'pill-warn';
-    if (stageRaw === 'RATE_MISSING' || stageRaw === 'PAY_CHANNEL_MISSING') return 'pill-bad';
-    if (stageRaw === 'READY_FOR_INVOICE') return 'pill-ok';
-    return 'pill-info';
-  })();
-
-  const scopePill = sheetScope === 'DAILY'
-    ? '<span class="pill pill-daily">Daily</span>'
-    : '<span class="pill pill-weekly">Weekly</span>';
-
-  const modePill = (() => {
-    if (basis === 'NHSP' || basis === 'NHSP_ADJUSTMENT') {
-      return '<span class="pill pill-nhsp">NHSP</span>';
-    }
-    if (basis.startsWith('HEALTHROSTER')) {
-      return '<span class="pill pill-hr">HealthRoster</span>';
-    }
-    if (subMode === 'ELECTRONIC') {
-      return '<span class="pill pill-elec">Electronic</span>';
-    }
-    if (subMode === 'MANUAL' && qrStatus) {
-      return `<span class="pill pill-manual">Manual (QR: ${enc(qrStatus)})</span>`;
-    }
-    if (subMode === 'MANUAL') {
-      return '<span class="pill pill-manual">Manual</span>';
-    }
-    return '<span class="pill">Unknown mode</span>';
-  })();
-
-  const paidLabel = isPaid
-    ? fmtUkDateTime(tsfin.paid_at_utc)
-    : 'Not paid';
-
-  const invLabel = isInvoiced
-    ? (rInv && rInv.invoice_number
-        ? `On invoice ${enc(rInv.invoice_number)}`
-        : 'Invoiced')
-    : 'Not invoiced';
-
-  const flagsHtml = `
-    <div class="mini" style="margin-top:4px;">
-      <span class="pill ${isPaid ? 'pill-ok' : 'pill-warn'}">
-        Paid: ${isPaid ? 'Yes' : 'No'}
-      </span>
-      <span class="pill ${isInvoiced ? 'pill-warn' : 'pill-info'}" style="margin-left:4px;">
-        Invoiced: ${isInvoiced ? 'Yes' : 'No'}
-      </span>
-      ${
-        payOnHold
-          ? '<span class="pill pill-hold" style="margin-left:4px;">Pay on hold</span>'
-          : ''
-      }
-    </div>
-    <div class="mini" style="margin-top:4px;">
-      ${isPaid ? `Paid at ${paidLabel}` : ''}
-      ${isInvoiced ? `<br/>${invLabel}` : ''}
-    </div>
-  `;
-
-  const totalsHtml = hasTsfin
-    ? `
-      <div class="mini">
-        Candidate pay (ex VAT): <strong>${fmtMoney(amountPayEx)}</strong><br/>
-        Client charge (ex VAT): <strong>${fmtMoney(amountChgEx)}</strong><br/>
-        Margin (ex VAT): <strong>${fmtMoney(amountMargin)}</strong>
-      </div>
-    `
-    : `
-      <div class="mini">
-        <strong>No financial snapshot yet.</strong><br/>
-        This timesheet has not been processed. Once processed, pay and charge totals will appear here.
-      </div>
-    `;
-
-  // Timesheet-level reference (safe to edit even for electronic – this is NOT the hours)
-  const refValue = state && typeof state.reference === 'string'
-    ? state.reference
-    : (ts.reference_number || row.reference_number || '');
-
-  const routeHtml = `
-    <div class="card" style="margin-top:10px;">
-      <div class="row">
-        <label>Stage</label>
-        <div class="controls">
-          <span class="pill ${stageClass}" style="font-weight:600;">
-            ${enc(stageLabel)}
-          </span>
-          <div class="mini" style="margin-top:4px;">
-            ${authorised ? 'Authorised' : 'Not authorised'}
-          </div>
-        </div>
-      </div>
-      <div class="row">
-        <label>Route</label>
-        <div class="controls">
-          ${scopePill}
-          ${modePill}
-          ${
-            basis
-              ? `<span class="pill pill-info" style="margin-left:4px;">Basis: ${enc(basis)}</span>`
-              : ''
-          }
-          ${flagsHtml}
-        </div>
-      </div>
-      <div class="row">
-        <label>Totals</label>
-        <div class="controls">
-          ${totalsHtml}
-        </div>
-      </div>
-      <div class="row">
-        <label>Reference / PO</label>
-        <div class="controls">
-          <input
-            class="input"
-            name="ts_reference"
-            value="${enc(refValue || '')}"
-            placeholder="Reference or PO (optional)"
-          />
-          <span class="mini">
-            This is staged only and will be saved when you click <strong>Save</strong>.
-          </span>
-        </div>
-      </div>
-      <div class="row" data-view-only="true">
-        <label>Actions</label>
-        <div class="controls">
-          <button type="button"
-                  class="btn"
-                  data-ts-action="switch-manual">
-            Convert to manual timesheet
-          </button>
-        </div>
-      </div>
-    </div>
-  `;
-
-  // No shift breakdown here — all detailed lines (weekly & daily) are on the Lines tab.
-  const linesCardHtml = '';
-
-  return `
-    <div class="tabc">
-      ${headerHtml}
-      ${routeHtml}
-      ${linesCardHtml}
-    </div>
-  `;
-}
-
 
 
 async function getTimesheetPdfUrl(timesheetId) {
@@ -38531,7 +38271,6 @@ async function openTimesheet(row) {
   GC('openTimesheet');
 
   try {
-    // 1) Normalise the incoming row & timesheet / week ids
     if (!row || typeof row !== 'object') {
       alert('No timesheet row provided.');
       GE();
@@ -38543,7 +38282,7 @@ async function openTimesheet(row) {
     const realTsId = baseRow.timesheet_id || null;
     const weekId   = baseRow.contract_week_id || null;
     const hasTs    = !!realTsId;
-    const isPlannedWeek = !hasTs && !!weekId; // PLANNED / OPEN weekly (no TS yet)
+    const isPlannedWeek = !hasTs && !!weekId;
 
     if (!hasTs && !isPlannedWeek) {
       L('ERROR: missing timesheet_id / contract_week_id on row', { row });
@@ -38552,31 +38291,18 @@ async function openTimesheet(row) {
       return;
     }
 
-    // For existing TS, the stable grid id should be the timesheet_id.
-    // For planned/open weeks (no TS yet), grid id will be contract_week_id.
     const tsId = hasTs ? realTsId : null;
     baseRow.id = hasTs ? realTsId : (weekId || baseRow.id);
 
-    // Rough classification for logging & future UI tweaks
     const sheetScopeRaw = (baseRow.sheet_scope || '').toUpperCase();
     const subModeRaw    = (baseRow.submission_mode || '').toUpperCase();
     const basisRaw      = (baseRow.basis || '').toUpperCase();
     const routeTypeRaw  = (baseRow.route_type || '').toUpperCase();
 
-    L('ENTRY', {
-      tsId,
-      weekId,
-      isPlannedWeek,
-      sheetScopeRaw,
-      subModeRaw,
-      basisRaw,
-      routeTypeRaw,
-      rowKeys: Object.keys(baseRow || {})
-    });
+    L('ENTRY', { tsId, weekId, isPlannedWeek, sheetScopeRaw, subModeRaw, basisRaw, routeTypeRaw, rowKeys: Object.keys(baseRow || {}) });
 
-    // 2) Fetch details + related entities from backend
     let details;
-    let evidence = []; // NEW: evidence list for this timesheet
+    let evidence = [];
 
     if (hasTs) {
       try {
@@ -38596,7 +38322,6 @@ async function openTimesheet(row) {
         return;
       }
 
-      // NEW: fetch evidence list for this timesheet so Evidence tab can render it
       try {
         const encTsId = encodeURIComponent(tsId);
         const res  = await authFetch(API(`/api/timesheets/${encTsId}/evidence`));
@@ -38608,25 +38333,14 @@ async function openTimesheet(row) {
         evidence = [];
       }
     } else {
-      // Planned / OPEN weekly week with no TS yet – load contract_week via broker so we can seed schedule
       let contractWeek = null;
       try {
         const qs = new URLSearchParams();
+        if (baseRow.contract_id) qs.set('contract_id', baseRow.contract_id);
 
-        // We know the week id; also use contract_id + WE if we have them to minimise rows
-        if (baseRow.contract_id) {
-          qs.set('contract_id', baseRow.contract_id);
-        }
-        const we =
-          baseRow.contract_week_ending_date ||
-          baseRow.week_ending_date ||
-          null;
-        if (we) {
-          qs.set('week_ending_from', we);
-          qs.set('week_ending_to', we);
-        }
+        const we = baseRow.contract_week_ending_date || baseRow.week_ending_date || null;
+        if (we) { qs.set('week_ending_from', we); qs.set('week_ending_to', we); }
 
-        // Ask backend to include planned_schedule_json
         qs.set('include_plan', 'true');
 
         const url = API(`/api/contract-weeks?${qs.toString()}`);
@@ -38658,14 +38372,8 @@ async function openTimesheet(row) {
         contract_week: contractWeek
       };
 
-      // No evidence for planned week without a TS
       evidence = [];
-
-      L('details stubbed for planned week', {
-        weekId,
-        details_scope: details.sheet_scope,
-        hasContractWeek: !!contractWeek
-      });
+      L('details stubbed for planned week', { weekId, details_scope: details.sheet_scope, hasContractWeek: !!contractWeek });
     }
 
     let related;
@@ -38682,33 +38390,16 @@ async function openTimesheet(row) {
         });
       } catch (err) {
         L('fetchTimesheetRelated FAILED (non-fatal)', err);
-        related = {
-          counts: {},
-          candidate: null,
-          client: null,
-          invoice: null,
-          umbrella: null,
-          contract: null,
-          series: []
-        };
+        related = { counts: {}, candidate: null, client: null, invoice: null, umbrella: null, contract: null, series: [] };
       }
     } else {
-      // Planned week: surface candidate/client from the summary row so header isn't "Unknown"
       related = {
         counts: {},
         candidate: (baseRow.candidate_id || baseRow.candidate_name || baseRow.occupant_key_norm)
-          ? {
-              id: baseRow.candidate_id || null,
-              display_name: baseRow.candidate_name || baseRow.occupant_key_norm || null,
-              first_name: null,
-              last_name: null
-            }
+          ? { id: baseRow.candidate_id || null, display_name: baseRow.candidate_name || baseRow.occupant_key_norm || null, first_name: null, last_name: null }
           : null,
         client: (baseRow.client_id || baseRow.client_name)
-          ? {
-              id: baseRow.client_id || null,
-              name: baseRow.client_name || null
-            }
+          ? { id: baseRow.client_id || null, name: baseRow.client_name || null }
           : null,
         invoice: null,
         umbrella: null,
@@ -38717,70 +38408,47 @@ async function openTimesheet(row) {
       };
     }
 
-    // 3) Seed modalCtx for the timesheet frame
-    const ts    = details.timesheet || {};
-    const tsfin = details.tsfin     || {};
+    const tsLocal    = details.timesheet || {};
+    const tsfinLocal = details.tsfin     || {};
 
-    const sheetScope = (details.sheet_scope ||
-                        baseRow.sheet_scope ||
-                        ts.sheet_scope ||
-                        sheetScopeRaw ||
-                        '').toUpperCase();
-
-    const subMode    = ((ts.submission_mode ||
-                         baseRow.submission_mode ||
-                         subModeRaw ||
-                         '')).toUpperCase();
+    const sheetScope = (details.sheet_scope || baseRow.sheet_scope || tsLocal.sheet_scope || sheetScopeRaw || '').toUpperCase();
+    const subMode    = ((tsLocal.submission_mode || baseRow.submission_mode || subModeRaw || '')).toUpperCase();
+    const basis      = ((tsfinLocal.basis || baseRow.basis || basisRaw || '')).toUpperCase();
+    const qrStatus   = String(details.qr_status || tsLocal.qr_status || '').toUpperCase();
 
     const isWeeklyManualContext =
       sheetScope === 'WEEKLY' &&
       (subMode === 'MANUAL' || (isPlannedWeek && !hasTs));
 
-    const initialReference = ts.reference_number || baseRow.reference_number || '';
+    const initialReference = tsLocal.reference_number || baseRow.reference_number || '';
 
     let manualHours = {};
-    if (isWeeklyManualContext && tsfin && (tsfin.hours_day != null ||
-                                           tsfin.hours_night != null ||
-                                           tsfin.hours_sat != null ||
-                                           tsfin.hours_sun != null ||
-                                           tsfin.hours_bh != null)) {
+    if (isWeeklyManualContext && tsfinLocal && (tsfinLocal.hours_day != null || tsfinLocal.hours_night != null || tsfinLocal.hours_sat != null || tsfinLocal.hours_sun != null || tsfinLocal.hours_bh != null)) {
       manualHours = {
-        day:   Number(tsfin.hours_day   ?? 0),
-        night: Number(tsfin.hours_night ?? 0),
-        sat:   Number(tsfin.hours_sat   ?? 0),
-        sun:   Number(tsfin.hours_sun   ?? 0),
-        bh:    Number(tsfin.hours_bh    ?? 0)
+        day:   Number(tsfinLocal.hours_day   ?? 0),
+        night: Number(tsfinLocal.hours_night ?? 0),
+        sat:   Number(tsfinLocal.hours_sat   ?? 0),
+        sun:   Number(tsfinLocal.hours_sun   ?? 0),
+        bh:    Number(tsfinLocal.hours_bh    ?? 0)
       };
     }
 
-    // ── Seed additionalRates (unchanged) ──
     let additionalRates = {};
     try {
-      let units = tsfin.additional_units_json;
-      if (!units && tsfin.invoice_breakdown_json && typeof tsfin.invoice_breakdown_json === 'object') {
-        units = tsfin.invoice_breakdown_json.additional &&
-                tsfin.invoice_breakdown_json.additional.units;
+      let units = tsfinLocal.additional_units_json;
+      if (!units && tsfinLocal.invoice_breakdown_json && typeof tsfinLocal.invoice_breakdown_json === 'object') {
+        units = tsfinLocal.invoice_breakdown_json.additional && tsfinLocal.invoice_breakdown_json.additional.units;
       }
-      if (typeof units === 'string') {
-        try { units = JSON.parse(units); } catch { units = {}; }
-      }
+      if (typeof units === 'string') { try { units = JSON.parse(units); } catch { units = {}; } }
       if (!units || typeof units !== 'object') units = {};
 
       let cfgArr = related && related.contract && related.contract.additional_rates_json;
-      if (typeof cfgArr === 'string') {
-        try { cfgArr = JSON.parse(cfgArr); } catch { cfgArr = []; }
-      }
+      if (typeof cfgArr === 'string') { try { cfgArr = JSON.parse(cfgArr); } catch { cfgArr = []; } }
       if (!Array.isArray(cfgArr)) cfgArr = [];
 
       const codes = new Set();
-      Object.keys(units || {}).forEach(k => {
-        if (!k) return;
-        codes.add(String(k).toUpperCase());
-      });
-      cfgArr.forEach(cfg => {
-        if (!cfg || !cfg.code) return;
-        codes.add(String(cfg.code).toUpperCase());
-      });
+      Object.keys(units || {}).forEach(k => { if (k) codes.add(String(k).toUpperCase()); });
+      cfgArr.forEach(cfg => { if (cfg && cfg.code) codes.add(String(cfg.code).toUpperCase()); });
 
       codes.forEach(code => {
         const cfg = cfgArr.find(c => c && String(c.code).toUpperCase() === code) || {};
@@ -38790,7 +38458,6 @@ async function openTimesheet(row) {
           if (matchKey) existing = units[matchKey];
         }
         existing = existing || {};
-
         additionalRates[code] = {
           code,
           bucket_name: existing.bucket_name ?? cfg.bucket_name ?? null,
@@ -38801,105 +38468,61 @@ async function openTimesheet(row) {
           charge_rate: existing.charge_rate ?? cfg.charge_rate ?? null
         };
       });
-
-      if (LOGM) {
-        L('additionalRates seeded', {
-          codes: Object.keys(additionalRates),
-          fromTsfin: !!tsfin.additional_units_json,
-          fromContractCfg: Array.isArray(related?.contract?.additional_rates_json)
-        });
-      }
-    } catch (e) {
-      if (LOGM) L('additionalRates seed FAILED (non-fatal)', e);
+    } catch {
       additionalRates = {};
     }
 
-    // ── Seed schedule from actual_schedule_json (existing TS) or planned std schedule (contract_week) ──
     let schedule = null;
     try {
-      // Existing timesheet: prefer actual_schedule_json if present
-      if (hasTs && ts.actual_schedule_json) {
-        if (Array.isArray(ts.actual_schedule_json) || typeof ts.actual_schedule_json === 'object') {
-          schedule = JSON.parse(JSON.stringify(ts.actual_schedule_json));
-        } else if (typeof ts.actual_schedule_json === 'string') {
+      if (hasTs && tsLocal.actual_schedule_json) {
+        if (Array.isArray(tsLocal.actual_schedule_json) || typeof tsLocal.actual_schedule_json === 'object') {
+          schedule = JSON.parse(JSON.stringify(tsLocal.actual_schedule_json));
+        } else if (typeof tsLocal.actual_schedule_json === 'string') {
           try {
-            const parsed = JSON.parse(ts.actual_schedule_json);
-            if (Array.isArray(parsed) || typeof parsed === 'object') {
-              schedule = parsed;
-            }
-          } catch {
-            // ignore parse error
-          }
+            const parsed = JSON.parse(tsLocal.actual_schedule_json);
+            if (Array.isArray(parsed) || typeof parsed === 'object') schedule = parsed;
+          } catch {}
         }
       }
-      // Planned week (no TS yet): fall back to contract_week.planned_schedule_json or std_schedule_json
       if (!hasTs && !schedule && details && details.contract_week) {
-        const cw = details.contract_week;
-        const src =
-          cw.planned_schedule_json != null
-            ? cw.planned_schedule_json
-            : cw.std_schedule_json != null
-            ? cw.std_schedule_json
-            : null;
-
+        const cw2 = details.contract_week;
+        const src = (cw2.planned_schedule_json != null) ? cw2.planned_schedule_json
+                 : (cw2.std_schedule_json != null) ? cw2.std_schedule_json
+                 : null;
         if (src) {
-          if (Array.isArray(src) || typeof src === 'object') {
-            schedule = JSON.parse(JSON.stringify(src));
-          } else if (typeof src === 'string') {
-            try {
-              const parsedStd = JSON.parse(src);
-              if (Array.isArray(parsedStd) || typeof parsedStd === 'object') {
-                schedule = parsedStd;
-              }
-            } catch {
-              // ignore parse error
-            }
-          }
+          if (Array.isArray(src) || typeof src === 'object') schedule = JSON.parse(JSON.stringify(src));
+          else if (typeof src === 'string') { try { const p = JSON.parse(src); if (Array.isArray(p) || typeof p === 'object') schedule = p; } catch {} }
         }
       }
-    } catch (e) {
-      if (LOGM) L('schedule seed FAILED (non-fatal)', e);
+    } catch {
       schedule = null;
     }
 
-    // ── NEW: Seed per-day references (dayReferences) for weekly Lines tab ──
     let dayReferences = {};
     try {
-      const tsDayRefs = ts && ts.day_references_json && typeof ts.day_references_json === 'object'
-        ? ts.day_references_json
+      const tsDayRefs = tsLocal && tsLocal.day_references_json && typeof tsLocal.day_references_json === 'object'
+        ? tsLocal.day_references_json
         : null;
-      if (tsDayRefs) {
-        dayReferences = { ...tsDayRefs };
-      }
-    } catch {
-      dayReferences = {};
-    }
+      if (tsDayRefs) dayReferences = { ...tsDayRefs };
+    } catch { dayReferences = {}; }
 
-    // If still empty, seed from TSFIN external_source_rows_json.HR_WEEKLY / NHSP_WEEKLY
     try {
-      if (!Object.keys(dayReferences).length && tsfin && tsfin.external_source_rows_json) {
-        const ext      = tsfin.external_source_rows_json || {};
+      if (!Object.keys(dayReferences).length && tsfinLocal && tsfinLocal.external_source_rows_json) {
+        const ext = tsfinLocal.external_source_rows_json || {};
         const hrRows   = Array.isArray(ext.HR_WEEKLY)   ? ext.HR_WEEKLY   : [];
         const nhspRows = Array.isArray(ext.NHSP_WEEKLY) ? ext.NHSP_WEEKLY : [];
-        [...hrRows, ...nhspRows].forEach(row => {
-          const date = row && row.date;
-          const ref  = row && row.reference;
-          if (date && ref && !dayReferences[date]) {
-            dayReferences[date] = ref;
-          }
+        [...hrRows, ...nhspRows].forEach(r => {
+          const date = r && r.date;
+          const ref  = r && r.reference;
+          if (date && ref && !dayReferences[date]) dayReferences[date] = ref;
         });
       }
-    } catch (e) {
-      if (LOGM) L('dayReferences seed FAILED (non-fatal)', e);
-      dayReferences = dayReferences || {};
-    }
+    } catch { /* non-fatal */ }
 
-    // Simple meta flags for downstream gating (delete, revert, etc.)
-    const isPaid     = !!tsfin.paid_at_utc;
-    const isInvoiced = !!tsfin.locked_by_invoice_id;
+    const isPaid     = !!tsfinLocal.paid_at_utc;
+    const isInvoiced = !!tsfinLocal.locked_by_invoice_id;
     const canDeletePerm = !!(hasTs && !isPaid && !isInvoiced);
 
-    // Contract-week meta for actions on planned/open weeks
     const cwId =
       details.contract_week_id ||
       (details.contract_week && details.contract_week.id) ||
@@ -38915,54 +38538,41 @@ async function openTimesheet(row) {
     window.modalCtx = {
       ...(window.modalCtx || {}),
       entity: 'timesheets',
-      // Existing TS → view, planned week → edit (actual modal frame mode is decided in showModal)
       mode: hasTs ? 'view' : 'edit',
-      data: {
-        ...baseRow,
-        timesheet_id: tsId || null,
-        contract_week_id: weekId || baseRow.contract_week_id || null
-      },
+      data: { ...baseRow, timesheet_id: tsId || null, contract_week_id: weekId || baseRow.contract_week_id || null },
       timesheetDetails: details,
       timesheetRelated: related,
       timesheetState: {
-        reference:        initialReference,
-        payHoldDesired:   null,
-        payHoldReason:    '',
-        markPaid:         false,
+        reference: initialReference,
+        payHoldDesired: null,
+        payHoldReason: '',
+        markPaid: false,
         segmentOverrides: {},
         segmentInvoiceTargets: {},
         manualHours,
         additionalRates,
-        schedule,          // schedule state seeded from TS or planned std schedule
-        dayReferences,     // NEW: per-day references for weekly Lines tab
-        evidence           // NEW: evidence list for Evidence tab
+        schedule,
+        dayReferences,
+        evidence
       },
       timesheetMeta: {
         hasTs,
         isPlannedWeek,
         sheetScope,
         subMode,
+        basis,
+        qrStatus,
         isPaid,
         isInvoiced,
+        isLocked: (isPaid || isInvoiced),
         canDeletePermanently: canDeletePerm,
         contract_week_id: cwId,
-        cw_submission_mode_snapshot: cwSubSnap
+        cw_submission_mode_snapshot: cwSubSnap,
+
+        // NEW (placeholder): wire backend later to fill this reliably
+        hasElectronicOriginal: !!details.has_electronic_version || !!details.has_electronic_original
       }
     };
-
-    L('modalCtx seeded', {
-      entity: window.modalCtx.entity,
-      mode: window.modalCtx.mode,
-      dataId: window.modalCtx.data?.id,
-      hasDetails: !!window.modalCtx.timesheetDetails,
-      hasRelated: !!window.modalCtx.timesheetRelated,
-      additionalRateCodes: Object.keys(window.modalCtx.timesheetState.additionalRates || {}),
-      manualHours: window.modalCtx.timesheetState.manualHours,
-      hasSchedule: !!window.modalCtx.timesheetState.schedule,
-      dayReferencesKeys: Object.keys(window.modalCtx.timesheetState.dayReferences || {}),
-      evidenceCount: (window.modalCtx.timesheetState.evidence || []).length,
-      timesheetMeta: window.modalCtx.timesheetMeta || null
-    });
 
     const tabDefs = [
       { key: 'overview', title: 'Overview' },
@@ -38980,30 +38590,15 @@ async function openTimesheet(row) {
         state: window.modalCtx.timesheetState
       };
 
-      if (LOGM) {
-        L('renderTab', {
-          key,
-          rowId: ctxForTab.row && ctxForTab.row.timesheet_id,
-          hasDetails: !!ctxForTab.details,
-          hasRelated: !!ctxForTab.related
-        });
+      switch (key) {
+        case 'overview': return renderTimesheetOverviewTab(ctxForTab);
+        case 'lines':    return renderTimesheetLinesTab(ctxForTab);
+        case 'evidence': return renderTimesheetEvidenceTab(ctxForTab);
+        case 'issues':   return renderTimesheetIssuesTab(ctxForTab);
+        case 'finance':  return renderTimesheetFinanceTab(ctxForTab);
+        default:
+          return `<div class="tabc"><div class="card"><div class="row"><label>Timesheet</label><div class="controls"><span class="mini">Unknown tab: ${key}</span></div></div></div></div>`;
       }
-
- switch (key) {
-  case 'overview':
-    return renderTimesheetOverviewTab(ctxForTab);
-  case 'lines':
-    return renderTimesheetLinesTab(ctxForTab);
-  case 'evidence':
-    return renderTimesheetEvidenceTab(ctxForTab);
-  case 'issues':
-    return renderTimesheetIssuesTab(ctxForTab);
-  case 'finance':
-    return renderTimesheetFinanceTab(ctxForTab);
-  default:
-    return `<div class="tabc"><div class="card"><div class="row"><label>Timesheet</label><div class="controls"><span class="mini">Unknown tab: ${key}</span></div></div></div></div>`;
-}
-
     };
 
     const onSaveTimesheet = async () => {
@@ -39015,10 +38610,9 @@ async function openTimesheet(row) {
       const det    = mc.timesheetDetails || details;
       const st     = mc.timesheetState || {};
 
-    // QR decision is computed here only if the save is QR-sensitive
-let revokeQr  = false;
-let reissueQr = false;
-
+      // QR decision is computed here only if the save is QR-sensitive
+      let revokeQr  = false;
+      let reissueQr = false;
 
       const segOverrides    = st.segmentOverrides || {};
       const hasSegOverrides = !!Object.keys(segOverrides).length;
@@ -39064,44 +38658,44 @@ let reissueQr = false;
           k => manualHours[k] != null && manualHours[k] !== ''
         );
 
-    const extrasMap        = st.additionalRates || {};
-const hasExtrasStaged  = extrasMap &&
-  Object.values(extrasMap).some(r => r && Number(r.units_week || 0) !== 0);
+      const extrasMap        = st.additionalRates || {};
+      const hasExtrasStaged  = extrasMap &&
+        Object.values(extrasMap).some(r => r && Number(r.units_week || 0) !== 0);
 
-// Detect whether this save changes QR-relevant content
-const qrStatus = String(det?.qr_status || tsLocal?.qr_status || '').toUpperCase();
-const locked   = !!(tsfinLocal.locked_by_invoice_id || tsfinLocal.paid_at_utc);
+      // Detect whether this save changes QR-relevant content
+      const qrStatus = String(det?.qr_status || tsLocal?.qr_status || '').toUpperCase();
+      const locked   = !!(tsfinLocal.locked_by_invoice_id || tsfinLocal.paid_at_utc);
 
-// Weekly QR relevance = manual hours or extras (because that triggers manualUpsertContractWeek)
-// Daily  QR relevance = schedule_json being staged (because that triggers /daily-manual-upsert)
-const qrSensitiveChange =
-  (isWeeklyManualContext && (hasManualHours || hasExtrasStaged)) ||
-  (isDailyManualContext && !!(st.schedule));
+      // Weekly QR relevance = manual hours or extras (because that triggers manualUpsertContractWeek)
+      // Daily  QR relevance = schedule_json being staged (because that triggers /daily-manual-upsert)
+      const qrSensitiveChange =
+        (isWeeklyManualContext && (hasManualHours || hasExtrasStaged)) ||
+        (isDailyManualContext && !!(st.schedule));
 
-if (qrStatus && !locked && qrSensitiveChange) {
-  const decision = await openQrDecisionModal({
-    defaultChoice: null, // force explicit selection (or use 'revoke' to default)
-    context: {
-      timesheet_id: tsId || rowNow.timesheet_id || null,
-      sheet_scope: sheetScopeSave,
-      submission_mode: subModeSave
-    }
-  });
+      if (qrStatus && !locked && qrSensitiveChange) {
+        const decision = await openQrDecisionModal({
+          defaultChoice: null, // force explicit selection (or use 'revoke' to default)
+          context: {
+            timesheet_id: tsId || rowNow.timesheet_id || null,
+            sheet_scope: sheetScopeSave,
+            submission_mode: subModeSave
+          }
+        });
 
-  if (!decision || decision.cancelled) {
-    GE();
-    return { ok: false }; // cancel save cleanly
-  }
+        if (!decision || decision.cancelled) {
+          GE();
+          return { ok: false }; // cancel save cleanly
+        }
 
-  revokeQr  = !!decision.revoke;
-  reissueQr = !!decision.reissue;
-}
+        revokeQr  = !!decision.revoke;
+        reissueQr = !!decision.reissue;
+      }
 
-const segTargets = st.segmentInvoiceTargets || {};
-const hasSegTargets = !!Object.keys(segTargets).length;
+      const segTargets = st.segmentInvoiceTargets || {};
+      const hasSegTargets = !!Object.keys(segTargets).length;
 
-// Staged pay-hold + mark-paid
-const currentOnHold    = !!tsfinLocal.pay_on_hold;
+      // Staged pay-hold + mark-paid
+      const currentOnHold    = !!tsfinLocal.pay_on_hold;
 
       const payHoldDesired   =
         (st.payHoldDesired === true || st.payHoldDesired === false)
@@ -39142,36 +38736,36 @@ const currentOnHold    = !!tsfinLocal.pay_on_hold;
 
       const tasks = [];
 
-     // 5a) Weekly MANUAL hours + additional units → contract-week manual upsert
-if (isWeeklyManualContext && (hasManualHours || hasExtrasStaged)) {
-  tasks.push(async () => {
-    const payload = {
-      hours: {
-        day:   Number(manualHours.day   || 0) || 0,
-        night: Number(manualHours.night || 0) || 0,
-        sat:   Number(manualHours.sat   || 0) || 0,
-        sun:   Number(manualHours.sun   || 0) || 0,
-        bh:    Number(manualHours.bh    || 0) || 0
-      },
-      additional_units_week: {},
+      // 5a) Weekly MANUAL hours + additional units → contract-week manual upsert
+      if (isWeeklyManualContext && (hasManualHours || hasExtrasStaged)) {
+        tasks.push(async () => {
+          const payload = {
+            hours: {
+              day:   Number(manualHours.day   || 0) || 0,
+              night: Number(manualHours.night || 0) || 0,
+              sat:   Number(manualHours.sat   || 0) || 0,
+              sun:   Number(manualHours.sun   || 0) || 0,
+              bh:    Number(manualHours.bh    || 0) || 0
+            },
+            additional_units_week: {},
 
-      // NEW: per-day NHSP/HR references for this week
-      day_references_json: st.dayReferences || {},
+            // NEW: per-day NHSP/HR references for this week
+            day_references_json: st.dayReferences || {},
 
-      // QR revoke/reissue hints to backend (weekly)
-      revoke_qr:  revokeQr,
-      reissue_qr: reissueQr
-    };
+            // QR revoke/reissue hints to backend (weekly)
+            revoke_qr:  revokeQr,
+            reissue_qr: reissueQr
+          };
 
-    Object.entries(extrasMap || {}).forEach(([code, r]) => {
-      if (!r) return;
-      const u = Number(r.units_week || 0);
-      if (!Number.isFinite(u)) return;
-      payload.additional_units_week[code] = u;
-    });
+          Object.entries(extrasMap || {}).forEach(([code, r]) => {
+            if (!r) return;
+            const u = Number(r.units_week || 0);
+            if (!Number.isFinite(u)) return;
+            payload.additional_units_week[code] = u;
+          });
 
-    L('manual weekly upsert payload', { weekIdSave, payload });
-    const result = await manualUpsertContractWeek(weekIdSave, payload);
+          L('manual weekly upsert payload', { weekIdSave, payload });
+          const result = await manualUpsertContractWeek(weekIdSave, payload);
 
           const newTsId = result.timesheet_id || tsId;
           if (!tsId && newTsId) {
@@ -39344,8 +38938,6 @@ if (isWeeklyManualContext && (hasManualHours || hasExtrasStaged)) {
         id:                   finalTsId || rowNow.id
       };
 
-  
-
       window.modalCtx.data = updatedRow;
 
       // Clear staged segment state after successful save
@@ -39379,7 +38971,6 @@ if (isWeeklyManualContext && (hasManualHours || hasExtrasStaged)) {
       ? `Timesheet ${String(tsId).slice(0, 8)}…`
       : `Weekly timesheet (planned) ${String(weekId).slice(0, 8)}…`;
 
-    // hasId should also be true for planned weeks (contract_week exists)
     const hasRecordId = !!(hasTs || isPlannedWeek);
 
     showModal(
@@ -39387,14 +38978,14 @@ if (isWeeklyManualContext && (hasManualHours || hasExtrasStaged)) {
       tabDefs,
       renderTab,
       onSaveTimesheet,
-      hasRecordId,        // ⬅️ now true for planned weeks as well
+      hasRecordId,
       undefined,
       { kind: 'timesheets' }
     );
 
     GE();
   } catch (err) {
-    if ((typeof window.__LOG_MODAL === 'boolean') ? window.__LOG_MODAL : false) {
+    if (((typeof window.__LOG_MODAL === 'boolean') ? window.__LOG_MODAL : false)) {
       console.error('[TS][OPEN] EXCEPTION', err);
     }
     alert(err?.message || 'Failed to open timesheet.');
