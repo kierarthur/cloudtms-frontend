@@ -25462,248 +25462,179 @@ const btnTsRestore = byId('btnTsRestoreElectronic');
 const btnTsRequest = byId('btnTsRequestNewElectronic');
 const btnTsDelete  = byId('btnTsDeleteTimesheet');
 if (!isChild && top.entity === 'timesheets') {
+  // Always derive gating from the CURRENT modalCtx (do not trust old locals)
+  const mcNow    = window.modalCtx || {};
+  const metaNow  = (mcNow && mcNow.timesheetMeta) || {};
+  const detNow   = (mcNow && mcNow.timesheetDetails) || {};
+  const tsNow    = detNow.timesheet || {};
+  const tsfinNow = detNow.tsfin || {};
+
+  const tsIdNow   = mcNow.data?.timesheet_id || null;
+  const weekIdNow = mcNow.data?.contract_week_id || null;
+
+  const lockedNow = !!(
+    metaNow.isPaid ||
+    metaNow.isInvoiced ||
+    tsfinNow.locked_by_invoice_id ||
+    tsfinNow.paid_at_utc
+  );
+
   // You will wire backend “has electronic version?” later.
-  // For now we key off an optional flag that you can add to /details.
-  const hasElecFlag =
-    !!meta.hasElectronicOriginal ||
-    !!det.has_electronic_version ||
-    !!det.has_electronic_original;
+  // For now we key off optional flags in meta/details.
+  const hasElecFlagNow =
+    !!metaNow.hasElectronicOriginal ||
+    !!detNow.has_electronic_version ||
+    !!detNow.has_electronic_original;
 
-  const canRestore = (top.mode === 'edit' && !!tsId && !locked && hasElecFlag);
-  const canRequest = (top.mode === 'edit' && !!tsId && !!weekId && !locked && hasElecFlag);
+  const canRestoreNow = (top.mode === 'edit' && !!tsIdNow && !lockedNow && hasElecFlagNow);
+  const canRequestNow = (top.mode === 'edit' && !!tsIdNow && !!weekIdNow && !lockedNow && hasElecFlagNow);
 
-  // ✅ Delete Timesheet footer button handles BOTH real timesheets and planned-only weeks,
-  // but only in EDIT mode (because footer buttons get disabled in VIEW mode).
-  // Planned weeks are now editable (so user can click Edit first).
-  const canDeleteTs = (top.mode === 'edit' && !locked && (!!tsId || !!weekId));
+  // Delete Timesheet footer button handles BOTH real timesheets and planned-only weeks,
+  // but only in EDIT mode (footer buttons are disabled in VIEW mode by setFormReadOnly).
+  const canDeleteNow = (top.mode === 'edit' && !lockedNow && (!!tsIdNow || !!weekIdNow));
 
+  // ── Restore original electronic ──
   if (btnTsRestore) {
-    btnTsRestore.style.display = canRestore ? '' : 'none';
-    btnTsRestore.disabled = !!top._saving;
-    if (!btnTsRestore.__tsWired) {
-      btnTsRestore.__tsWired = true;
-      btnTsRestore.addEventListener('click', async () => {
-        const ok = window.confirm(
-          'Restore the original signed electronic timesheet?\n\n' +
-          'This discards all current manual edits.'
-        );
-        if (!ok) return;
-        try {
-          await revertTimesheetToElectronic(tsId);
+    btnTsRestore.style.display = canRestoreNow ? '' : 'none';
+    btnTsRestore.disabled      = !!top._saving;
 
-          // Refresh details so UI reflects the restored version
-          try {
-            const fresh = await fetchTimesheetDetails(tsId);
-            if (window.modalCtx) window.modalCtx.timesheetDetails = fresh;
-          } catch {}
+    // ✅ stale-safe wiring
+    btnTsRestore.dataset.ownerToken = top._token;
+    btnTsRestore.onclick = async () => {
+      const fr = (typeof currentFrame === 'function') ? currentFrame() : null;
+      if (!fr || btnTsRestore.dataset.ownerToken !== fr._token) return;
 
-          // Reset to view
-          top.isDirty = false;
-          top._snapshot = null;
-          setFrameMode(top, 'view');
-          renderTop();
-          try { await renderAll(); } catch {}
-        } catch (e) {
-          alert(e?.message || 'Restore failed');
-        }
-      });
-    }
-  }
+      const mc = window.modalCtx || {};
+      const det = mc.timesheetDetails || {};
+      const tsfin = det.tsfin || {};
+      const tsId = mc.data?.timesheet_id || null;
 
-  if (btnTsRequest) {
-    btnTsRequest.style.display = canRequest ? '' : 'none';
-    btnTsRequest.disabled = !!top._saving;
-    if (!btnTsRequest.__tsWired) {
-      btnTsRequest.__tsWired = true;
-      btnTsRequest.addEventListener('click', async () => {
-        const ok = window.confirm(
-          'REQUEST A NEW ELECTRONIC TIMESHEET?\n\n' +
-          'This will permanently delete the electronic timesheet on file and reopen the week for a brand new submission.\n' +
-          'Only do this if you definitely do not need the original signed electronic timesheet ever again.\n\n' +
-          'Continue?'
-        );
-        if (!ok) return;
+      const locked = !!(tsfin.locked_by_invoice_id || tsfin.paid_at_utc);
+      if (locked) { alert('This timesheet is locked (paid or invoiced).'); return; }
+      if (!tsId)  { alert('Timesheet id missing.'); return; }
 
-        try {
-          // Uses your existing weekly “reopen” delete (deletes ALL versions today)
-          await deleteManualTimesheetAndReopenWeek(tsId, weekId);
-          try { byId('btnCloseModal').click(); } catch {}
-          try { await renderAll(); } catch {}
-        } catch (e) {
-          alert(e?.message || 'Request new electronic failed');
-        }
-      });
-    }
-  }
+      const ok = window.confirm(
+        'Restore the original signed electronic timesheet?\n\n' +
+        'This discards all current manual edits.'
+      );
+      if (!ok) return;
 
-  if (btnTsDelete) {
-    btnTsDelete.style.display = canDeleteTs ? '' : 'none';
-    btnTsDelete.disabled = !!top._saving;
-
-    if (!btnTsDelete.__tsWired) {
-      btnTsDelete.__tsWired = true;
-      btnTsDelete.addEventListener('click', async () => {
-        const isPlannedOnly = (!tsId && !!weekId);
-
-        const ok = window.confirm(
-          isPlannedOnly
-            ? (
-                'Delete this timesheet?\n\n' +
-                'This is a planned week (no timesheet has been created yet).\n' +
-                'Deleting will remove the planned contract week.\n\n' +
-                'This action cannot be undone.'
-              )
-            : (
-                'Permanently delete this timesheet?\n\n' +
-                'This will remove all versions and financial snapshots for this timesheet_id.\n' +
-                'This action cannot be undone.'
-              )
-        );
-        if (!ok) return;
-
-        try {
-          if (isPlannedOnly) {
-            // ✅ Planned week delete path
-            await deletePlannedContractWeek(weekId);
-          } else {
-            // ✅ Real timesheet delete path
-            await deleteTimesheetPermanent(tsId);
-          }
-
-          try { byId('btnCloseModal').click(); } catch {}
-          try { await renderAll(); } catch {}
-        } catch (e) {
-          alert(e?.message || 'Delete failed');
-        }
-      });
-    }
-  }
-}
-
-
-
-     if (relatedBtn) {
-  // Map modal entity → backend /api/related entity key
-  const relatedEntity =
-    top.entity === 'candidates' ? 'candidate' :
-    top.entity === 'clients'    ? 'client'    :
-    top.entity === 'contracts'  ? 'contract'  :
-    top.entity === 'timesheets' ? 'timesheet' :
-    top.entity === 'invoices'   ? 'invoice'   :
-    top.entity === 'umbrellas'  ? 'umbrella'  :
-    null;
-
-  const showRelated =
-    !isChild &&
-    top.hasId &&
-    !!relatedEntity;
-
-  relatedBtn.style.display = showRelated ? '' : 'none';
-
-  const canClick = showRelated && top.mode === 'view';
-  relatedBtn.disabled = !canClick;
-
-  if (canClick) {
-    relatedBtn.onclick = async (ev) => {
       try {
-        ev.preventDefault();
-        ev.stopPropagation();
+        await revertTimesheetToElectronic(tsId);
 
-        const ctxId = window.modalCtx?.data?.id || null;
-        if (!ctxId) {
-          console.warn('[RELATED] no id on modalCtx.data; cannot open related menu');
-          return;
-        }
+        // Refresh details so UI reflects the restored version
+        try {
+          const fresh = await fetchTimesheetDetails(tsId);
+          if (window.modalCtx) window.modalCtx.timesheetDetails = fresh;
+        } catch {}
 
-        // Fetch counts per related type (timesheets, invoices, etc.)
-        const counts = await fetchRelatedCounts(relatedEntity, ctxId);
+        // Reset to view (no stale "top" usage)
+        fr.isDirty = false;
+        fr._snapshot = null;
+        setFrameMode(fr, 'view');
+        renderTop();
 
-        // Position menu just under the button click
-        const x = ev.clientX;
-        const y = ev.clientY + 8;
-
-        showRelatedMenu(x, y, counts, relatedEntity, ctxId);
+        try { await renderAll(); } catch {}
       } catch (e) {
-        console.warn('[RELATED] failed to open related menu', e);
+        alert(e?.message || 'Restore failed');
       }
     };
-  } else {
-    relatedBtn.onclick = null;
+  }
+
+  // ── Request new electronic ──
+  if (btnTsRequest) {
+    btnTsRequest.style.display = canRequestNow ? '' : 'none';
+    btnTsRequest.disabled      = !!top._saving;
+
+    // ✅ stale-safe wiring
+    btnTsRequest.dataset.ownerToken = top._token;
+    btnTsRequest.onclick = async () => {
+      const fr = (typeof currentFrame === 'function') ? currentFrame() : null;
+      if (!fr || btnTsRequest.dataset.ownerToken !== fr._token) return;
+
+      const mc = window.modalCtx || {};
+      const det = mc.timesheetDetails || {};
+      const tsfin = det.tsfin || {};
+      const tsId = mc.data?.timesheet_id || null;
+      const weekId = mc.data?.contract_week_id || null;
+
+      const locked = !!(tsfin.locked_by_invoice_id || tsfin.paid_at_utc);
+      if (locked) { alert('This timesheet is locked (paid or invoiced).'); return; }
+      if (!tsId || !weekId) { alert('Timesheet/week id missing.'); return; }
+
+      const ok = window.confirm(
+        'REQUEST A NEW ELECTRONIC TIMESHEET?\n\n' +
+        'This will permanently delete the electronic timesheet on file and reopen the week for a brand new submission.\n' +
+        'Only do this if you definitely do not need the original signed electronic timesheet ever again.\n\n' +
+        'Continue?'
+      );
+      if (!ok) return;
+
+      try {
+        // Uses your existing weekly “reopen” delete (deletes ALL versions today)
+        await deleteManualTimesheetAndReopenWeek(tsId, weekId);
+        try { byId('btnCloseModal').click(); } catch {}
+        try { await renderAll(); } catch {}
+      } catch (e) {
+        alert(e?.message || 'Request new electronic failed');
+      }
+    };
+  }
+
+  // ── Delete timesheet (real OR planned) ──
+  if (btnTsDelete) {
+    btnTsDelete.style.display = canDeleteNow ? '' : 'none';
+    btnTsDelete.disabled      = !!top._saving;
+
+    // ✅ stale-safe wiring
+    btnTsDelete.dataset.ownerToken = top._token;
+    btnTsDelete.onclick = async () => {
+      const fr = (typeof currentFrame === 'function') ? currentFrame() : null;
+      if (!fr || btnTsDelete.dataset.ownerToken !== fr._token) return;
+
+      const mc = window.modalCtx || {};
+      const det = mc.timesheetDetails || {};
+      const tsfin = det.tsfin || {};
+      const tsId = mc.data?.timesheet_id || null;
+      const weekId = mc.data?.contract_week_id || null;
+
+      const locked = !!(tsfin.locked_by_invoice_id || tsfin.paid_at_utc);
+      if (locked) { alert('This timesheet is locked (paid or invoiced).'); return; }
+
+      const isPlannedOnly = (!tsId && !!weekId);
+
+      const ok = window.confirm(
+        isPlannedOnly
+          ? (
+              'Delete this timesheet?\n\n' +
+              'This is a planned week (no timesheet has been created yet).\n' +
+              'Deleting will remove the planned contract week.\n\n' +
+              'This action cannot be undone.'
+            )
+          : (
+              'Permanently delete this timesheet?\n\n' +
+              'This will remove all versions and financial snapshots for this timesheet_id.\n' +
+              'This action cannot be undone.'
+            )
+      );
+      if (!ok) return;
+
+      try {
+        if (isPlannedOnly) {
+          await deletePlannedContractWeek(weekId);
+        } else {
+          if (!tsId) throw new Error('Timesheet id missing.');
+          await deleteTimesheetPermanent(tsId);
+        }
+
+        try { byId('btnCloseModal').click(); } catch {}
+        try { await renderAll(); } catch {}
+      } catch (e) {
+        alert(e?.message || 'Delete failed');
+      }
+    };
   }
 }
-
-
-
-      if (top.mode === 'create') {
-        btnSave.style.display = '';
-        btnSave.disabled = top._saving;
-      } else if (top.mode==='view') {
-        btnSave.style.display = 'none';
-        btnSave.disabled = true;
-      } else {
-
-        btnSave.style.display='';
-
-        let gateOK = true;
-        let elig   = null;
-
-        if (top.entity === 'contracts') {
-          try {
-            gateOK = (typeof computeContractSaveEligibility === 'function') ? !!computeContractSaveEligibility() : true;
-            elig   = (typeof window !== 'undefined') ? (window.__contractEligibility || null) : null;
-
-            // … TS boundary / missing candidate hints …
-
-          } catch { gateOK = true; }
-        }
-
-        btnSave.disabled = (top.entity === 'contracts')
-          ? (top._saving || ((top.kind !== 'contract-clone-extend') && !top.isDirty) || !gateOK)
-          : (top._saving);
-      }
-
-      // 🔹 Top-level Edit Contract → wire global Delete button
-      if (!isChild && top.entity === 'contracts') {
-        const canDelete = !!(window.modalCtx?.data && window.modalCtx.data.can_delete);
-        const showDelete = (top.mode === 'edit' && top.hasId && canDelete);
-
-        if (showDelete) {
-          btnDel.style.display = '';
-          btnDel.disabled = !!top._saving;
-          btnDel.onclick = async () => {
-            const id = window.modalCtx?.data?.id;
-            if (!id) return;
-
-            const ok = window.confirm('Do you want to permanently delete this contract?');
-            if (!ok) return;
-
-            try {
-              if (typeof deleteContract === 'function') {
-                if (LOG) console.log('[MODAL][CONTRACTS] delete via btnDelete', { id });
-                await deleteContract(id);
-              } else {
-                alert('Delete contract action is not available.');
-                return;
-              }
-              try { discardAllModalsAndState(); } catch {}
-              try { await renderAll(); } catch {}
-            } catch (e) {
-              alert(e?.message || 'Delete failed');
-            }
-          };
-        } else {
-          btnDel.style.display = 'none';
-          btnDel.disabled = true;
-          btnDel.onclick = null;
-        }
-      } else if (!isChild) {
-        // Non-contract top-level: keep global Delete hidden
-        btnDel.style.display = 'none';
-        btnDel.disabled = true;
-        btnDel.onclick = null;
-      }
-
-    }
 
 
     setCloseLabel();
