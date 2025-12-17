@@ -25145,33 +25145,30 @@ const isUtilityKind =
   btnClose.setAttribute('title', label);
 };
 
-const parentEditable =
-  top.noParentGate ? true : (parent ? (parent.mode === 'edit' || parent.mode === 'create') : true);
 
+top._updateButtons = ()=> {
+  try {
+    const h = document.getElementById('modalHint');
+    if (h) {
+      h.textContent = '';
+      h.removeAttribute('data-tone');
+      h.classList.remove('ok','warn','err');
+    }
+  } catch {}
 
-  top._updateButtons = ()=>{
-    try {
-      const h = document.getElementById('modalHint');
-      if (h) {
-        h.textContent = '';
-        h.removeAttribute('data-tone');
-        h.classList.remove('ok','warn','err');
-      }
-    } catch {}
+  const parentEditable = top.noParentGate ? true : (parent ? (parent.mode==='edit' || parent.mode==='create') : true);
+  const relatedBtn = byId('btnRelated');
 
- 
-    const relatedBtn = byId('btnRelated');
+  // NEW: hide Preset Manager's "New" button whenever a child is open or when the top frame isn't the manager
+  try {
+    const rpNew = byId('btnRpNew');
+    if (rpNew) {
+      const shouldShow = (!isChild && top.kind === 'rates-presets');
+      rpNew.style.display = shouldShow ? '' : 'none';
+    }
+  } catch {}
 
-    // NEW: hide Preset Manager's "New" button whenever a child is open or when the top frame isn't the manager
-    try {
-      const rpNew = byId('btnRpNew');
-      if (rpNew) {
-        const shouldShow = (!isChild && top.kind === 'rates-presets');
-        rpNew.style.display = shouldShow ? '' : 'none';
-      }
-    } catch {}
-
-   if (top.kind === 'advanced-search') {
+  if (top.kind === 'advanced-search') {
     btnEdit.style.display='none';
     btnSave.style.display='';
     btnSave.disabled=!!top._saving;
@@ -25201,8 +25198,8 @@ const parentEditable =
     });
     return;
 
-   // NEW: candidate/client pickers – explicit Apply, gated by row selection
   } else if (top.kind === 'candidate-picker' || top.kind === 'client-picker') {
+    // NEW: candidate/client pickers – explicit Apply, gated by row selection
     btnEdit.style.display = 'none';
     btnSave.style.display = '';
     btnSave.disabled = !!top._saving || !top._pickerHasSelection;
@@ -25220,8 +25217,8 @@ const parentEditable =
     });
     return;
 
-  // NEW: QR decision modal – Apply gated by selected radio
   } else if (top.kind === 'qr-decision') {
+    // NEW: QR decision modal – Apply gated by selected radio
     btnEdit.style.display = 'none';
     btnSave.style.display = '';
     btnSave.disabled      = !!top._saving || !top._qrChoice;
@@ -25236,416 +25233,511 @@ const parentEditable =
     btnClose.setAttribute('title', 'Cancel');
     return;
 
-  // NEW: utility modals (resolve/import) — hide Save/Edit, Close-only
   } else if (
     top.kind === 'timesheets-resolve' ||
     top.kind === 'resolve-candidate'  ||
     top.kind === 'resolve-client'     ||
     (typeof top.kind === 'string' && top.kind.startsWith('import-summary-'))
   ) {
-
-
-
-  // No Save/Edit on these; everything happens via inline buttons in the modal body
-  btnSave.style.display = 'none';
-  btnSave.disabled      = true;
-  btnEdit.style.display = 'none';
-
-  if (relatedBtn) {
-    relatedBtn.style.display = 'none';
-    relatedBtn.disabled = true;
-  }
-
-  // Always simple "Close" label (never "Discard")
-  btnClose.textContent = 'Close';
-  btnClose.setAttribute('aria-label', 'Close');
-  btnClose.setAttribute('title', 'Close');
-
-  L('_updateButtons snapshot (utility)', {
-    kind: top.kind,
-    isChild,
-    mode: top.mode,
-    btnSave: { display: btnSave.style.display, disabled: btnSave.disabled },
-    btnEdit: { display: btnEdit.style.display }
-  });
-  return;
-
-} else if (isChild && !top.noParentGate) {
-
-      if (top.mode === 'view') {
-        btnSave.style.display = 'none';
-        btnSave.disabled = true;
-        btnEdit.style.display = 'none';
-        if (relatedBtn) {
-          relatedBtn.style.display = 'none';
-          relatedBtn.disabled = true;
-        }
-      } else {
-        btnSave.style.display = parentEditable ? '' : 'none';
-
-        // Child apply gating:
-        // - rate-presets-picker: gate by __canSave
-        // - client-rate / candidate-override: gate by _applyDesired
-        // - address-lookup (and other simple children): always allow Apply if parent is editable
-        let wantApply;
-        if (top.kind === 'rate-presets-picker') {
-          wantApply = !!top.__canSave;
-        } else if (top.kind === 'client-rate' || top.kind === 'candidate-override') {
-          wantApply = (top._applyDesired === true);
-        } else {
-          // e.g. address-lookup and other simple child modals
-          wantApply = true;
-        }
-
-        btnSave.disabled = (!parentEditable) || top._saving || !wantApply;
-        btnEdit.style.display='none';
-        if (relatedBtn) {
-          relatedBtn.style.display = 'none';
-          relatedBtn.disabled = true;
-        }
-        if (LOG) console.log('[MODAL] child _updateButtons()', {
-          parentEditable, wantApply, disabled: btnSave.disabled, kind: top.kind
-        });
-      }
-      } else {
-     // ── Edit / Convert (Timesheets) gating ──
-let canEdit = false;
-let canConvert = false;
-
-const mcTs = (window.modalCtx || {});
-const meta = (mcTs && mcTs.timesheetMeta) || {};
-const det  = (mcTs && mcTs.timesheetDetails) || {};
-const ts   = det.timesheet || {};
-const tsfin= det.tsfin || {};
-
-// Timesheet identity + status
-const tsId = mcTs?.data?.timesheet_id || null;
-const weekId = mcTs?.data?.contract_week_id || null;
-
-const sheetScope = String(meta.sheetScope || '').toUpperCase();
-const subMode    = String(meta.subMode    || '').toUpperCase();
-const cwMode     = String(meta.cw_submission_mode_snapshot || '').toUpperCase();
-
-const isWeekly   = (sheetScope === 'WEEKLY');
-const isDaily    = (sheetScope === 'DAILY');
-
-const isPaid     = !!meta.isPaid;
-const isInvoiced = !!meta.isInvoiced;
-const locked     = isPaid || isInvoiced;
-
-// Editable in-place (your existing rule)
-if (top.entity === 'timesheets') {
-  const hasTsMeta  = !!meta.hasTs;
-  const isPlanned  = !!meta.isPlannedWeek;
-
-  const isWeeklyManualTs =
-    hasTsMeta && isWeekly && subMode === 'MANUAL' && !locked;
-
-  // Allow Edit for ANY planned weekly slot (so footer Delete can be used),
-// not only planned MANUAL weeks.
-const isPlannedWeek =
-  !hasTsMeta && isPlanned && isWeekly && !!weekId && !locked;
-
-const isDailyManualTs =
-  hasTsMeta && isDaily && subMode === 'MANUAL' && !locked;
-
-canEdit = (top.mode === 'view') && (isWeeklyManualTs || isPlannedWeek || isDailyManualTs);
-
-
-  // ✅ Convert-to-manual eligibility (FINAL RULES)
-  // common: not locked, and ELECTRONIC context
-  if (!locked && top.mode === 'view') {
-    // Weekly existing TS: ELECTRONIC → MANUAL
-    const weeklyExistingOk =
-      isWeekly && !!tsId && subMode === 'ELECTRONIC';
-
-    // Weekly planned slot: contract_week exists + snapshot ELECTRONIC
-    const weeklyPlannedOk =
-      isWeekly && !tsId && !!weekId && cwMode === 'ELECTRONIC';
-
-    // Daily existing TS: ELECTRONIC → MANUAL (NEW)
-    const dailyExistingOk =
-      isDaily && !!tsId && subMode === 'ELECTRONIC';
-
-    canConvert = (weeklyExistingOk || weeklyPlannedOk || dailyExistingOk);
-  }
-} else {
-  canEdit = (top.mode === 'view' && top.hasId);
-  canConvert = false;
-}
-
-// Footer placement: Convert replaces Edit when Edit isn't available
-btnEdit.style.display = (canEdit ? '' : 'none');
-
-const btnTsConvert = byId('btnTsConvertManual');
-if (btnTsConvert) {
-  const showConvert = (!isChild && top.entity === 'timesheets' && top.mode === 'view' && !canEdit && canConvert);
-  btnTsConvert.style.display = showConvert ? '' : 'none';
-  btnTsConvert.disabled = !!top._saving;
-
-  // Wire once
-  if (!btnTsConvert.__tsWired) {
-    btnTsConvert.__tsWired = true;
-    btnTsConvert.addEventListener('click', async () => {
-      const fr = currentFrame();
-      if (!fr || fr.entity !== 'timesheets') return;
-
-      const mc = window.modalCtx || {};
-      const meta2 = mc.timesheetMeta || {};
-      const det2  = mc.timesheetDetails || {};
-      const ts2   = det2.timesheet || {};
-      const tsfin2= det2.tsfin || {};
-
-      const tsId2   = mc.data?.timesheet_id || null;
-      const weekId2 = mc.data?.contract_week_id || null;
-
-      const sheetScope2 = String(meta2.sheetScope || '').toUpperCase();
-      const subMode2    = String(meta2.subMode    || '').toUpperCase();
-      const cwMode2     = String(meta2.cw_submission_mode_snapshot || '').toUpperCase();
-
-      const locked2 = !!(meta2.isPaid || meta2.isInvoiced || tsfin2.locked_by_invoice_id || tsfin2.paid_at_utc);
-      if (locked2) { alert('This timesheet is locked (paid or invoiced).'); return; }
-
-      const ok = window.confirm('Convert to MANUAL timesheet?');
-      if (!ok) return;
-
-      try {
-        // DAILY: /switch-daily-to-manual (NO QR printable)
-        if (sheetScope2 === 'DAILY' && tsId2 && subMode2 === 'ELECTRONIC') {
-          const encId = encodeURIComponent(tsId2);
-          const res = await authFetch(API(`/api/timesheets/${encId}/switch-daily-to-manual`), { method: 'POST' });
-          const txt = await res.text().catch(()=> '');
-          if (!res.ok) throw new Error(txt || 'Failed to convert daily timesheet to manual.');
-        }
-
-        // WEEKLY existing TS: /api/timesheets/:id/switch-to-manual
-        else if (sheetScope2 === 'WEEKLY' && tsId2 && subMode2 === 'ELECTRONIC') {
-          await switchTimesheetToManual(tsId2);
-        }
-
-        // WEEKLY planned slot: /api/contract-weeks/:id/switch-mode
-        else if (sheetScope2 === 'WEEKLY' && !tsId2 && weekId2 && cwMode2 === 'ELECTRONIC') {
-          await switchContractWeekToManual(weekId2);
-        }
-
-        else {
-          throw new Error('This item is not eligible for Convert to Manual.');
-        }
-
-        // Refresh list + repaint modal
-        try { await renderAll(); } catch {}
-        try {
-          // keep meta roughly in sync so footer gating updates immediately
-          if (window.modalCtx?.timesheetMeta) {
-            window.modalCtx.timesheetMeta.subMode = 'MANUAL';
-            if (sheetScope2 === 'WEEKLY' && !tsId2) window.modalCtx.timesheetMeta.cw_submission_mode_snapshot = 'MANUAL';
-          }
-          if (window.modalCtx?.data) window.modalCtx.data.submission_mode = 'MANUAL';
-        } catch {}
-
-        try {
-          fr.mode = 'view';
-          fr._suppressDirty = true;
-          await fr.setTab('overview');
-          fr._suppressDirty = false;
-          fr._updateButtons && fr._updateButtons();
-        } catch {}
-
-        window.__toast && window.__toast('Converted to MANUAL.');
-      } catch (e) {
-        alert(e?.message || 'Convert failed');
-      }
-    });
-  }
-}
-
-// Edit-mode buttons next to Save: Restore / Request New / Delete Timesheet
-const btnTsRestore = byId('btnTsRestoreElectronic');
-const btnTsRequest = byId('btnTsRequestNewElectronic');
-const btnTsDelete  = byId('btnTsDeleteTimesheet');
-if (!isChild && top.entity === 'timesheets') {
-  // Always derive gating from the CURRENT modalCtx (do not trust old locals)
-  const mcNow    = window.modalCtx || {};
-  const metaNow  = (mcNow && mcNow.timesheetMeta) || {};
-  const detNow   = (mcNow && mcNow.timesheetDetails) || {};
-  const tsNow    = detNow.timesheet || {};
-  const tsfinNow = detNow.tsfin || {};
-
-  const tsIdNow   = mcNow.data?.timesheet_id || null;
-  const weekIdNow = mcNow.data?.contract_week_id || null;
-
-  const lockedNow = !!(
-    metaNow.isPaid ||
-    metaNow.isInvoiced ||
-    tsfinNow.locked_by_invoice_id ||
-    tsfinNow.paid_at_utc
-  );
-
-  // You will wire backend “has electronic version?” later.
-  // For now we key off optional flags in meta/details.
-  const hasElecFlagNow =
-    !!metaNow.hasElectronicOriginal ||
-    !!detNow.has_electronic_version ||
-    !!detNow.has_electronic_original;
-
-  const canRestoreNow = (top.mode === 'edit' && !!tsIdNow && !lockedNow && hasElecFlagNow);
-  const canRequestNow = (top.mode === 'edit' && !!tsIdNow && !!weekIdNow && !lockedNow && hasElecFlagNow);
-
-  // Delete Timesheet footer button handles BOTH real timesheets and planned-only weeks,
-  // but only in EDIT mode (footer buttons are disabled in VIEW mode by setFormReadOnly).
-  const canDeleteNow = (top.mode === 'edit' && !lockedNow && (!!tsIdNow || !!weekIdNow));
-
-  // ── Restore original electronic ──
-  if (btnTsRestore) {
-    btnTsRestore.style.display = canRestoreNow ? '' : 'none';
-    btnTsRestore.disabled      = !!top._saving;
-
-    // ✅ stale-safe wiring
-    btnTsRestore.dataset.ownerToken = top._token;
-    btnTsRestore.onclick = async () => {
-      const fr = (typeof currentFrame === 'function') ? currentFrame() : null;
-      if (!fr || btnTsRestore.dataset.ownerToken !== fr._token) return;
-
-      const mc = window.modalCtx || {};
-      const det = mc.timesheetDetails || {};
-      const tsfin = det.tsfin || {};
-      const tsId = mc.data?.timesheet_id || null;
-
-      const locked = !!(tsfin.locked_by_invoice_id || tsfin.paid_at_utc);
-      if (locked) { alert('This timesheet is locked (paid or invoiced).'); return; }
-      if (!tsId)  { alert('Timesheet id missing.'); return; }
-
-      const ok = window.confirm(
-        'Restore the original signed electronic timesheet?\n\n' +
-        'This discards all current manual edits.'
-      );
-      if (!ok) return;
-
-      try {
-        await revertTimesheetToElectronic(tsId);
-
-        // Refresh details so UI reflects the restored version
-        try {
-          const fresh = await fetchTimesheetDetails(tsId);
-          if (window.modalCtx) window.modalCtx.timesheetDetails = fresh;
-        } catch {}
-
-        // Reset to view (no stale "top" usage)
-        fr.isDirty = false;
-        fr._snapshot = null;
-        setFrameMode(fr, 'view');
-        renderTop();
-
-        try { await renderAll(); } catch {}
-      } catch (e) {
-        alert(e?.message || 'Restore failed');
-      }
-    };
-  }
-
-  // ── Request new electronic ──
-  if (btnTsRequest) {
-    btnTsRequest.style.display = canRequestNow ? '' : 'none';
-    btnTsRequest.disabled      = !!top._saving;
-
-    // ✅ stale-safe wiring
-    btnTsRequest.dataset.ownerToken = top._token;
-    btnTsRequest.onclick = async () => {
-      const fr = (typeof currentFrame === 'function') ? currentFrame() : null;
-      if (!fr || btnTsRequest.dataset.ownerToken !== fr._token) return;
-
-      const mc = window.modalCtx || {};
-      const det = mc.timesheetDetails || {};
-      const tsfin = det.tsfin || {};
-      const tsId = mc.data?.timesheet_id || null;
-      const weekId = mc.data?.contract_week_id || null;
-
-      const locked = !!(tsfin.locked_by_invoice_id || tsfin.paid_at_utc);
-      if (locked) { alert('This timesheet is locked (paid or invoiced).'); return; }
-      if (!tsId || !weekId) { alert('Timesheet/week id missing.'); return; }
-
-      const ok = window.confirm(
-        'REQUEST A NEW ELECTRONIC TIMESHEET?\n\n' +
-        'This will permanently delete the electronic timesheet on file and reopen the week for a brand new submission.\n' +
-        'Only do this if you definitely do not need the original signed electronic timesheet ever again.\n\n' +
-        'Continue?'
-      );
-      if (!ok) return;
-
-      try {
-        // Uses your existing weekly “reopen” delete (deletes ALL versions today)
-        await deleteManualTimesheetAndReopenWeek(tsId, weekId);
-        try { byId('btnCloseModal').click(); } catch {}
-        try { await renderAll(); } catch {}
-      } catch (e) {
-        alert(e?.message || 'Request new electronic failed');
-      }
-    };
-  }
-
-  // ── Delete timesheet (real OR planned) ──
-  if (btnTsDelete) {
-    btnTsDelete.style.display = canDeleteNow ? '' : 'none';
-    btnTsDelete.disabled      = !!top._saving;
-
-    // ✅ stale-safe wiring
-    btnTsDelete.dataset.ownerToken = top._token;
-    btnTsDelete.onclick = async () => {
-      const fr = (typeof currentFrame === 'function') ? currentFrame() : null;
-      if (!fr || btnTsDelete.dataset.ownerToken !== fr._token) return;
-
-      const mc = window.modalCtx || {};
-      const det = mc.timesheetDetails || {};
-      const tsfin = det.tsfin || {};
-      const tsId = mc.data?.timesheet_id || null;
-      const weekId = mc.data?.contract_week_id || null;
-
-      const locked = !!(tsfin.locked_by_invoice_id || tsfin.paid_at_utc);
-      if (locked) { alert('This timesheet is locked (paid or invoiced).'); return; }
-
-      const isPlannedOnly = (!tsId && !!weekId);
-
-      const ok = window.confirm(
-        isPlannedOnly
-          ? (
-              'Delete this timesheet?\n\n' +
-              'This is a planned week (no timesheet has been created yet).\n' +
-              'Deleting will remove the planned contract week.\n\n' +
-              'This action cannot be undone.'
-            )
-          : (
-              'Permanently delete this timesheet?\n\n' +
-              'This will remove all versions and financial snapshots for this timesheet_id.\n' +
-              'This action cannot be undone.'
-            )
-      );
-      if (!ok) return;
-
-      try {
-        if (isPlannedOnly) {
-          await deletePlannedContractWeek(weekId);
-        } else {
-          if (!tsId) throw new Error('Timesheet id missing.');
-          await deleteTimesheetPermanent(tsId);
-        }
-
-        try { byId('btnCloseModal').click(); } catch {}
-        try { await renderAll(); } catch {}
-      } catch (e) {
-        alert(e?.message || 'Delete failed');
-      }
-    };
-  }
-}
-
-
-    setCloseLabel();
-    L('_updateButtons snapshot (global)', {
-      kind: top.kind, isChild, parentEditable, mode: top.mode,
+    // NEW: utility modals (resolve/import) — hide Save/Edit, Close-only
+
+    // No Save/Edit on these; everything happens via inline buttons in the modal body
+    btnSave.style.display = 'none';
+    btnSave.disabled      = true;
+    btnEdit.style.display = 'none';
+
+    if (relatedBtn) {
+      relatedBtn.style.display = 'none';
+      relatedBtn.disabled = true;
+    }
+
+    // Always simple "Close" label (never "Discard")
+    btnClose.textContent = 'Close';
+    btnClose.setAttribute('aria-label', 'Close');
+    btnClose.setAttribute('title', 'Close');
+
+    L('_updateButtons snapshot (utility)', {
+      kind: top.kind,
+      isChild,
+      mode: top.mode,
       btnSave: { display: btnSave.style.display, disabled: btnSave.disabled },
       btnEdit: { display: btnEdit.style.display }
     });
-  };
+    return;
+
+  } else if (isChild && !top.noParentGate) {
+
+    if (top.mode === 'view') {
+      btnSave.style.display = 'none';
+      btnSave.disabled = true;
+      btnEdit.style.display = 'none';
+      if (relatedBtn) {
+        relatedBtn.style.display = 'none';
+        relatedBtn.disabled = true;
+      }
+    } else {
+      btnSave.style.display = parentEditable ? '' : 'none';
+
+      // Child apply gating:
+      // - rate-presets-picker: gate by __canSave
+      // - client-rate / candidate-override: gate by _applyDesired
+      // - address-lookup (and other simple children): always allow Apply if parent is editable
+      let wantApply;
+      if (top.kind === 'rate-presets-picker') {
+        wantApply = !!top.__canSave;
+      } else if (top.kind === 'client-rate' || top.kind === 'candidate-override') {
+        wantApply = (top._applyDesired === true);
+      } else {
+        wantApply = true;
+      }
+
+      btnSave.disabled = (!parentEditable) || top._saving || !wantApply;
+      btnEdit.style.display='none';
+      if (relatedBtn) {
+        relatedBtn.style.display = 'none';
+        relatedBtn.disabled = true;
+      }
+      if (LOG) console.log('[MODAL] child _updateButtons()', {
+        parentEditable, wantApply, disabled: btnSave.disabled, kind: top.kind
+      });
+    }
+
+  } else {
+
+    // ── Edit / Convert (Timesheets) gating ──
+    let canEdit = false;
+    let canConvert = false;
+
+    const mcTs = (window.modalCtx || {});
+    const meta = (mcTs && mcTs.timesheetMeta) || {};
+    const det  = (mcTs && mcTs.timesheetDetails) || {};
+    const tsfin= det.tsfin || {};
+
+    // Timesheet identity + status
+    const tsId   = mcTs?.data?.timesheet_id || null;
+    const weekId = mcTs?.data?.contract_week_id || null;
+
+    const sheetScope = String(meta.sheetScope || '').toUpperCase();
+    const subMode    = String(meta.subMode    || '').toUpperCase();
+    const cwMode     = String(meta.cw_submission_mode_snapshot || '').toUpperCase();
+
+    const isWeekly   = (sheetScope === 'WEEKLY');
+    const isDaily    = (sheetScope === 'DAILY');
+
+    const isPaid     = !!meta.isPaid;
+    const isInvoiced = !!meta.isInvoiced;
+    const locked     = isPaid || isInvoiced;
+
+    if (top.entity === 'timesheets') {
+      const hasTsMeta  = !!meta.hasTs;
+      const isPlanned  = !!meta.isPlannedWeek;
+
+      const isWeeklyManualTs =
+        hasTsMeta && isWeekly && subMode === 'MANUAL' && !locked;
+
+      // Allow Edit for ANY planned weekly slot (so footer Delete can be used)
+      const isPlannedWeek =
+        !hasTsMeta && isPlanned && isWeekly && !!weekId && !locked;
+
+      const isDailyManualTs =
+        hasTsMeta && isDaily && subMode === 'MANUAL' && !locked;
+
+      canEdit = (top.mode === 'view') && (isWeeklyManualTs || isPlannedWeek || isDailyManualTs);
+
+      // Convert-to-manual eligibility
+      if (!locked && top.mode === 'view') {
+        const weeklyExistingOk =
+          isWeekly && !!tsId && subMode === 'ELECTRONIC';
+
+        const weeklyPlannedOk =
+          isWeekly && !tsId && !!weekId && cwMode === 'ELECTRONIC';
+
+        const dailyExistingOk =
+          isDaily && !!tsId && subMode === 'ELECTRONIC';
+
+        canConvert = (weeklyExistingOk || weeklyPlannedOk || dailyExistingOk);
+      }
+    } else {
+      canEdit = (top.mode === 'view' && top.hasId);
+      canConvert = false;
+    }
+
+    // Footer placement: Convert replaces Edit when Edit isn't available
+    btnEdit.style.display = (canEdit ? '' : 'none');
+
+    // Helper: kill old addEventListener closures by cloning once, then use onclick + ownerToken forever
+    const staleSafeBtn = (btn) => {
+      if (!btn) return null;
+      if (btn.dataset && btn.dataset.staleSafe === '1') return btn;
+      const clone = btn.cloneNode(true);
+      btn.parentNode && btn.parentNode.replaceChild(clone, btn);
+      clone.dataset.staleSafe = '1';
+      return clone;
+    };
+
+    // Convert (view-mode)
+    let btnTsConvert = byId('btnTsConvertManual');
+    btnTsConvert = staleSafeBtn(btnTsConvert);
+
+    if (btnTsConvert) {
+      const showConvert = (!isChild && top.entity === 'timesheets' && top.mode === 'view' && !canEdit && canConvert);
+      btnTsConvert.style.display = showConvert ? '' : 'none';
+      btnTsConvert.disabled = !!top._saving;
+
+      btnTsConvert.dataset.ownerToken = top._token;
+      btnTsConvert.onclick = async () => {
+        const fr = (typeof currentFrame === 'function') ? currentFrame() : null;
+        if (!fr || btnTsConvert.dataset.ownerToken !== fr._token) return;
+
+        const mc = window.modalCtx || {};
+        const meta2 = mc.timesheetMeta || {};
+        const det2  = mc.timesheetDetails || {};
+        const tsfin2= det2.tsfin || {};
+
+        const tsId2   = mc.data?.timesheet_id || null;
+        const weekId2 = mc.data?.contract_week_id || null;
+
+        const sheetScope2 = String(meta2.sheetScope || '').toUpperCase();
+        const subMode2    = String(meta2.subMode    || '').toUpperCase();
+        const cwMode2     = String(meta2.cw_submission_mode_snapshot || '').toUpperCase();
+
+        const locked2 = !!(meta2.isPaid || meta2.isInvoiced || tsfin2.locked_by_invoice_id || tsfin2.paid_at_utc);
+        if (locked2) { alert('This timesheet is locked (paid or invoiced).'); return; }
+
+        const ok = window.confirm('Convert to MANUAL timesheet?');
+        if (!ok) return;
+
+        try {
+          if (sheetScope2 === 'DAILY' && tsId2 && subMode2 === 'ELECTRONIC') {
+            const encId = encodeURIComponent(tsId2);
+            const res = await authFetch(API(`/api/timesheets/${encId}/switch-daily-to-manual`), { method: 'POST' });
+            const txt = await res.text().catch(()=> '');
+            if (!res.ok) throw new Error(txt || 'Failed to convert daily timesheet to manual.');
+          } else if (sheetScope2 === 'WEEKLY' && tsId2 && subMode2 === 'ELECTRONIC') {
+            await switchTimesheetToManual(tsId2);
+          } else if (sheetScope2 === 'WEEKLY' && !tsId2 && weekId2 && cwMode2 === 'ELECTRONIC') {
+            await switchContractWeekToManual(weekId2);
+          } else {
+            throw new Error('This item is not eligible for Convert to Manual.');
+          }
+
+          try { await renderAll(); } catch {}
+          try {
+            if (window.modalCtx?.timesheetMeta) {
+              window.modalCtx.timesheetMeta.subMode = 'MANUAL';
+              if (sheetScope2 === 'WEEKLY' && !tsId2) window.modalCtx.timesheetMeta.cw_submission_mode_snapshot = 'MANUAL';
+            }
+            if (window.modalCtx?.data) window.modalCtx.data.submission_mode = 'MANUAL';
+          } catch {}
+
+          try {
+            fr.mode = 'view';
+            fr._suppressDirty = true;
+            await fr.setTab('overview');
+            fr._suppressDirty = false;
+            fr._updateButtons && fr._updateButtons();
+          } catch {}
+
+          window.__toast && window.__toast('Converted to MANUAL.');
+        } catch (e) {
+          alert(e?.message || 'Convert failed');
+        }
+      };
+    }
+
+    // ── Footer buttons next to Save: Restore / Request New / Delete Timesheet (stale-safe) ──
+    let btnTsRestore = byId('btnTsRestoreElectronic');
+    let btnTsRequest = byId('btnTsRequestNewElectronic');
+    let btnTsDelete  = byId('btnTsDeleteTimesheet');
+
+    btnTsRestore = staleSafeBtn(btnTsRestore);
+    btnTsRequest = staleSafeBtn(btnTsRequest);
+    btnTsDelete  = staleSafeBtn(btnTsDelete);
+
+    if (!isChild && top.entity === 'timesheets') {
+      const mcNow    = window.modalCtx || {};
+      const metaNow  = (mcNow && mcNow.timesheetMeta) || {};
+      const detNow   = (mcNow && mcNow.timesheetDetails) || {};
+      const tsfinNow = detNow.tsfin || {};
+
+      const tsIdNow   = mcNow.data?.timesheet_id || null;
+      const weekIdNow = mcNow.data?.contract_week_id || null;
+
+      const lockedNow = !!(
+        metaNow.isPaid ||
+        metaNow.isInvoiced ||
+        tsfinNow.locked_by_invoice_id ||
+        tsfinNow.paid_at_utc
+      );
+
+      const hasElecFlagNow =
+        !!metaNow.hasElectronicOriginal ||
+        !!detNow.has_electronic_version ||
+        !!detNow.has_electronic_original;
+
+      const canRestoreNow = (top.mode === 'edit' && !!tsIdNow && !lockedNow && hasElecFlagNow);
+      const canRequestNow = (top.mode === 'edit' && !!tsIdNow && !!weekIdNow && !lockedNow && hasElecFlagNow);
+      const canDeleteNow  = (top.mode === 'edit' && !lockedNow && (!!tsIdNow || !!weekIdNow));
+
+      // Restore
+      if (btnTsRestore) {
+        btnTsRestore.style.display = canRestoreNow ? '' : 'none';
+        btnTsRestore.disabled      = !!top._saving;
+
+        btnTsRestore.dataset.ownerToken = top._token;
+        btnTsRestore.onclick = async () => {
+          const fr = (typeof currentFrame === 'function') ? currentFrame() : null;
+          if (!fr || btnTsRestore.dataset.ownerToken !== fr._token) return;
+
+          const mc = window.modalCtx || {};
+          const det = mc.timesheetDetails || {};
+          const tsfin = det.tsfin || {};
+          const tsIdX = mc.data?.timesheet_id || null;
+
+          const lockedX = !!(tsfin.locked_by_invoice_id || tsfin.paid_at_utc);
+          if (lockedX) { alert('This timesheet is locked (paid or invoiced).'); return; }
+          if (!tsIdX)  { alert('Timesheet id missing.'); return; }
+
+          const ok = window.confirm(
+            'Restore the original signed electronic timesheet?\n\n' +
+            'This discards all current manual edits.'
+          );
+          if (!ok) return;
+
+          try {
+            await revertTimesheetToElectronic(tsIdX);
+
+            try {
+              const fresh = await fetchTimesheetDetails(tsIdX);
+              if (window.modalCtx) window.modalCtx.timesheetDetails = fresh;
+            } catch {}
+
+            fr.isDirty = false;
+            fr._snapshot = null;
+            setFrameMode(fr, 'view');
+            renderTop();
+
+            try { await renderAll(); } catch {}
+          } catch (e) {
+            alert(e?.message || 'Restore failed');
+          }
+        };
+      }
+
+      // Request new electronic
+      if (btnTsRequest) {
+        btnTsRequest.style.display = canRequestNow ? '' : 'none';
+        btnTsRequest.disabled      = !!top._saving;
+
+        btnTsRequest.dataset.ownerToken = top._token;
+        btnTsRequest.onclick = async () => {
+          const fr = (typeof currentFrame === 'function') ? currentFrame() : null;
+          if (!fr || btnTsRequest.dataset.ownerToken !== fr._token) return;
+
+          const mc = window.modalCtx || {};
+          const det = mc.timesheetDetails || {};
+          const tsfin = det.tsfin || {};
+          const tsIdX = mc.data?.timesheet_id || null;
+          const weekIdX = mc.data?.contract_week_id || null;
+
+          const lockedX = !!(tsfin.locked_by_invoice_id || tsfin.paid_at_utc);
+          if (lockedX) { alert('This timesheet is locked (paid or invoiced).'); return; }
+          if (!tsIdX || !weekIdX) { alert('Timesheet/week id missing.'); return; }
+
+          const ok = window.confirm(
+            'REQUEST A NEW ELECTRONIC TIMESHEET?\n\n' +
+            'This will permanently delete the electronic timesheet on file and reopen the week for a brand new submission.\n' +
+            'Only do this if you definitely do not need the original signed electronic timesheet ever again.\n\n' +
+            'Continue?'
+          );
+          if (!ok) return;
+
+          try {
+            await deleteManualTimesheetAndReopenWeek(tsIdX, weekIdX);
+            try { byId('btnCloseModal').click(); } catch {}
+            try { await renderAll(); } catch {}
+          } catch (e) {
+            alert(e?.message || 'Request new electronic failed');
+          }
+        };
+      }
+
+      // Delete (real OR planned)
+      if (btnTsDelete) {
+        btnTsDelete.style.display = canDeleteNow ? '' : 'none';
+        btnTsDelete.disabled      = !!top._saving;
+
+        btnTsDelete.dataset.ownerToken = top._token;
+        btnTsDelete.onclick = async () => {
+          const fr = (typeof currentFrame === 'function') ? currentFrame() : null;
+          if (!fr || btnTsDelete.dataset.ownerToken !== fr._token) return;
+
+          const mc = window.modalCtx || {};
+          const det = mc.timesheetDetails || {};
+          const tsfin = det.tsfin || {};
+          const tsIdX = mc.data?.timesheet_id || null;
+          const weekIdX = mc.data?.contract_week_id || null;
+
+          const lockedX = !!(tsfin.locked_by_invoice_id || tsfin.paid_at_utc);
+          if (lockedX) { alert('This timesheet is locked (paid or invoiced).'); return; }
+
+          const isPlannedOnly = (!tsIdX && !!weekIdX);
+
+          const ok = window.confirm(
+            isPlannedOnly
+              ? (
+                  'Delete this timesheet?\n\n' +
+                  'This is a planned week (no timesheet has been created yet).\n' +
+                  'Deleting will remove the planned contract week.\n\n' +
+                  'This action cannot be undone.'
+                )
+              : (
+                  'Permanently delete this timesheet?\n\n' +
+                  'This will remove all versions and financial snapshots for this timesheet_id.\n' +
+                  'This action cannot be undone.'
+                )
+          );
+          if (!ok) return;
+
+          try {
+            if (isPlannedOnly) {
+              if (!weekIdX) throw new Error('Contract week id missing.');
+              await deletePlannedContractWeek(weekIdX);
+            } else {
+              if (!tsIdX) throw new Error('Timesheet id missing.');
+              await deleteTimesheetPermanent(tsIdX);
+            }
+
+            try { byId('btnCloseModal').click(); } catch {}
+            try { await renderAll(); } catch {}
+          } catch (e) {
+            alert(e?.message || 'Delete failed');
+          }
+        };
+      }
+    }
+
+    // Related button (unchanged)
+    if (relatedBtn) {
+      const relatedEntity =
+        top.entity === 'candidates' ? 'candidate' :
+        top.entity === 'clients'    ? 'client'    :
+        top.entity === 'contracts'  ? 'contract'  :
+        top.entity === 'timesheets' ? 'timesheet' :
+        top.entity === 'invoices'   ? 'invoice'   :
+        top.entity === 'umbrellas'  ? 'umbrella'  :
+        null;
+
+      const showRelated =
+        !isChild &&
+        top.hasId &&
+        !!relatedEntity;
+
+      relatedBtn.style.display = showRelated ? '' : 'none';
+
+      const canClick = showRelated && top.mode === 'view';
+      relatedBtn.disabled = !canClick;
+
+      if (canClick) {
+        relatedBtn.onclick = async (ev) => {
+          try {
+            ev.preventDefault();
+            ev.stopPropagation();
+
+            const ctxId = window.modalCtx?.data?.id || null;
+            if (!ctxId) {
+              console.warn('[RELATED] no id on modalCtx.data; cannot open related menu');
+              return;
+            }
+
+            const counts = await fetchRelatedCounts(relatedEntity, ctxId);
+
+            const x = ev.clientX;
+            const y = ev.clientY + 8;
+
+            showRelatedMenu(x, y, counts, relatedEntity, ctxId);
+          } catch (e) {
+            console.warn('[RELATED] failed to open related menu', e);
+          }
+        };
+      } else {
+        relatedBtn.onclick = null;
+      }
+    }
+
+    // Default Save/Edit display logic (unchanged)
+    if (top.mode === 'create') {
+      btnSave.style.display = '';
+      btnSave.disabled = top._saving;
+    } else if (top.mode === 'view') {
+      btnSave.style.display = 'none';
+      btnSave.disabled = true;
+    } else {
+      btnSave.style.display = '';
+
+      let gateOK = true;
+      let elig   = null;
+
+      if (top.entity === 'contracts') {
+        try {
+          gateOK = (typeof computeContractSaveEligibility === 'function') ? !!computeContractSaveEligibility() : true;
+          elig   = (typeof window !== 'undefined') ? (window.__contractEligibility || null) : null;
+        } catch { gateOK = true; }
+      }
+
+      btnSave.disabled = (top.entity === 'contracts')
+        ? (top._saving || ((top.kind !== 'contract-clone-extend') && !top.isDirty) || !gateOK)
+        : (top._saving);
+    }
+
+    // 🔹 Top-level Edit Contract → wire global Delete button
+    if (!isChild && top.entity === 'contracts') {
+      const canDelete = !!(window.modalCtx?.data && window.modalCtx.data.can_delete);
+      const showDelete = (top.mode === 'edit' && top.hasId && canDelete);
+
+      if (showDelete) {
+        btnDel.style.display = '';
+        btnDel.disabled = !!top._saving;
+        btnDel.onclick = async () => {
+          const id = window.modalCtx?.data?.id;
+          if (!id) return;
+
+          const ok = window.confirm('Do you want to permanently delete this contract?');
+          if (!ok) return;
+
+          try {
+            if (typeof deleteContract === 'function') {
+              if (LOG) console.log('[MODAL][CONTRACTS] delete via btnDelete', { id });
+              await deleteContract(id);
+            } else {
+              alert('Delete contract action is not available.');
+              return;
+            }
+            try { discardAllModalsAndState(); } catch {}
+            try { await renderAll(); } catch {}
+          } catch (e) {
+            alert(e?.message || 'Delete failed');
+          }
+        };
+      } else {
+        btnDel.style.display = 'none';
+        btnDel.disabled = true;
+        btnDel.onclick = null;
+      }
+    } else if (!isChild) {
+      btnDel.style.display = 'none';
+      btnDel.disabled = true;
+      btnDel.onclick = null;
+    }
+  }
+
+  setCloseLabel();
+  L('_updateButtons snapshot (global)', {
+    kind: top.kind, isChild, parentEditable, mode: top.mode,
+    btnSave: { display: btnSave.style.display, disabled: btnSave.disabled },
+    btnEdit: { display: btnEdit.style.display }
+  });
+};
 
 
 
@@ -26169,6 +26261,7 @@ async function saveForFrame(fr) {
   }
 
 
+  const parentEditable = parent && (parent.mode==='edit' || parent.mode==='create');
   const isChildNow = (stack().length > 1);
   if (isChildNow && !top.noParentGate) setFormReadOnly(byId('modalBody'), !parentEditable);
   else                                 setFrameMode(top, top.mode);
