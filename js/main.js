@@ -22603,32 +22603,53 @@ function setFormReadOnly(root, ro) {
   root.querySelectorAll('input, select, textarea, button').forEach((el) => {
     const isDisplayOnly = el.id === 'tms_ref_display' || el.id === 'cli_ref_display';
 
-  if (el.type === 'button') {
-  const allow = new Set(['btnCloseModal','btnDelete','btnEditModal','btnSave','btnRelated']);
-
-  // Keep Timesheet action buttons (data-ts-action) enabled even when ro === true
-  try {
-    const top = (typeof currentFrame === 'function') ? currentFrame() : null;
-
-    const isTimesheetFrame = !!(top && top.entity === 'timesheets');
-    const hasTsAction      = !!el.getAttribute('data-ts-action');
-
-    if (isTimesheetFrame && hasTsAction) {
-      // Do not force-disable Timesheet action buttons (Authorise, Open PDF, etc.)
-      return;
-    }
-  } catch {}
-
-  if (!allow.has(el.id)) el.disabled = !!ro;
-  return;
-}
-
-
+    // Always lock display-only fields
     if (isDisplayOnly) {
       el.setAttribute('disabled','true');
       el.setAttribute('readonly','true');
       return;
     }
+
+    // Buttons: in ro mode, keep specific IDs + any timesheet action buttons enabled
+    if (el.type === 'button' || el.tagName === 'BUTTON') {
+      const allow = new Set([
+        'btnCloseModal',
+        'btnDelete',
+        'btnEditModal',
+        'btnSave',
+        'btnRelated',
+
+        // ✅ Timesheet footer buttons you want clickable even in VIEW mode
+        'btnTsDeleteTimesheet',
+        'btnTsConvertManual',
+        'btnTsRestoreElectronic',
+        'btnTsRequestNewElectronic'
+      ]);
+
+      // Keep Timesheet action buttons (data-ts-action) enabled even when ro === true
+      try {
+        const top = (typeof currentFrame === 'function') ? currentFrame() : null;
+
+        const isTimesheetFrame = !!(top && top.entity === 'timesheets');
+        const hasTsAction      = !!el.getAttribute('data-ts-action');
+
+        if (isTimesheetFrame && hasTsAction) {
+          // Do not force-disable Timesheet action buttons (Authorise, Open PDF, etc.)
+          el.disabled = false;
+          return;
+        }
+      } catch {}
+
+      // In read-only mode, disable everything except allow-listed buttons
+      if (ro) {
+        el.disabled = !allow.has(el.id);
+      } else {
+        el.disabled = false;
+      }
+      return;
+    }
+
+    // Non-button inputs/selects/textareas
     if (ro) {
       el.setAttribute('disabled','true');
       el.setAttribute('readonly','true');
@@ -25335,14 +25356,15 @@ top._updateButtons = ()=> {
       const isWeeklyManualTs =
         hasTsMeta && isWeekly && subMode === 'MANUAL' && !locked;
 
-      // Allow Edit for ANY planned weekly slot (so footer Delete can be used)
-      const isPlannedWeek =
-        !hasTsMeta && isPlanned && isWeekly && !!weekId && !locked;
+   // Allow Edit only for PLANNED weekly slots that are already MANUAL
+const isPlannedManualWeek =
+  !hasTsMeta && isPlanned && isWeekly && !!weekId && !locked && (cwMode === 'MANUAL');
 
-      const isDailyManualTs =
-        hasTsMeta && isDaily && subMode === 'MANUAL' && !locked;
+const isDailyManualTs =
+  hasTsMeta && isDaily && subMode === 'MANUAL' && !locked;
 
-      canEdit = (top.mode === 'view') && (isWeeklyManualTs || isPlannedWeek || isDailyManualTs);
+canEdit = (top.mode === 'view') && (isWeeklyManualTs || isPlannedManualWeek || isDailyManualTs);
+
 
       // Convert-to-manual eligibility
       if (!locked && top.mode === 'view') {
@@ -25477,7 +25499,9 @@ top._updateButtons = ()=> {
 
       const canRestoreNow = (top.mode === 'edit' && !!tsIdNow && !lockedNow && hasElecFlagNow);
       const canRequestNow = (top.mode === 'edit' && !!tsIdNow && !!weekIdNow && !lockedNow && hasElecFlagNow);
-      const canDeleteNow  = (top.mode === 'edit' && !lockedNow && (!!tsIdNow || !!weekIdNow));
+      const canDeleteNow =
+  ((top.mode === 'edit' || top.mode === 'view') && !lockedNow && (!!tsIdNow || !!weekIdNow));
+
 
       // Restore
       if (btnTsRestore) {
@@ -25599,20 +25623,25 @@ top._updateButtons = ()=> {
           );
           if (!ok) return;
 
-          try {
-            if (isPlannedOnly) {
-              if (!weekIdX) throw new Error('Contract week id missing.');
-              await deletePlannedContractWeek(weekIdX);
-            } else {
-              if (!tsIdX) throw new Error('Timesheet id missing.');
-              await deleteTimesheetPermanent(tsIdX);
-            }
+   try {
+  if (isPlannedOnly) {
+    if (!weekIdX) throw new Error('Contract week id missing.');
+    await deletePlannedContractWeek(weekIdX);
+  } else {
+    if (!tsIdX) throw new Error('Timesheet id missing.');
+    await deleteTimesheetPermanent(tsIdX);
+  }
 
-            try { byId('btnCloseModal').click(); } catch {}
-            try { await renderAll(); } catch {}
-          } catch (e) {
-            alert(e?.message || 'Delete failed');
-          }
+  // ✅ success acknowledgement first (user clicks OK)
+  alert('This timesheet has been deleted.');
+
+  // ✅ then close + refresh
+  try { byId('btnCloseModal').click(); } catch {}
+  try { await renderAll(); } catch {}
+} catch (e) {
+  alert(e?.message || 'Delete failed');
+}
+
         };
       }
     }
