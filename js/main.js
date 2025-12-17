@@ -23191,10 +23191,10 @@ if (this.entity === 'timesheets' && k === 'overview') {
     if (LOGM) LT('no modalBody root, skip wiring');
   } else {
     try {
-      const mc   = window.modalCtx || {};
-      const tsId   = mc.data?.timesheet_id || null;              // REAL timesheet id only
-      const weekId = mc.data?.contract_week_id || null;          // contract_week id for planned weeks
-      const mode   = this.mode || 'view';
+      const mc    = window.modalCtx || {};
+      const tsId  = mc.data?.timesheet_id || null;       // REAL timesheet id only
+      const weekId= mc.data?.contract_week_id || null;   // contract_week id for planned weeks
+      const mode  = this.mode || 'view';
 
       if (!tsId && !weekId) {
         if (LOGM) LT('no tsId/contract_week_id on modalCtx.data, skip overview wiring');
@@ -23210,14 +23210,32 @@ if (this.entity === 'timesheets' && k === 'overview') {
         const payHoldReasonInput = root.querySelector('input[name="ts_pay_hold_reason"]');
         const markPaidInput      = root.querySelector('input[name="ts_mark_paid"]');
 
-        // NEW: extra action buttons for timesheets
-        const revertElecBtn      = root.querySelector('button[data-ts-action="revert-electronic"]');
-        const deleteReopenBtn    = root.querySelector('button[data-ts-action="delete-manual-reopen"]');
-        const deletePermBtn      = root.querySelector('button[data-ts-action="delete-permanent"]');
+        // Extra action buttons for timesheets
+        const revertElecBtn   = root.querySelector('button[data-ts-action="revert-electronic"]');
+        const deleteReopenBtn = root.querySelector('button[data-ts-action="delete-manual-reopen"]');
+        const deletePermBtn   = root.querySelector('button[data-ts-action="delete-permanent"]');
 
-        const det   = mc.timesheetDetails || {};
-        const ts    = det.timesheet || {};
-        const tsfin = det.tsfin || {};
+        // QR / route action buttons
+        const qrResendBtn        = root.querySelector('button[data-ts-action="qr-resend"]');
+        const qrRefuseBtn        = root.querySelector('button[data-ts-action="qr-refuse"]');
+        const qrReissueReqBtn    = root.querySelector('button[data-ts-action="qr-reissue-request"]');
+        const qrConvertManualBtn = root.querySelector('button[data-ts-action="qr-convert-manual-only"]');
+        const qrRestorePendBtn   = root.querySelector('button[data-ts-action="qr-restore-pending"]');
+        const qrRestoreSignedBtn = root.querySelector('button[data-ts-action="qr-restore-signed"]');
+        const allowQrAgainBtn    = root.querySelector('button[data-ts-action="allow-qr-again"]');
+        const allowElecAgainBtn  = root.querySelector('button[data-ts-action="allow-electronic-again"]');
+
+        // ✅ REMOVED: planned-only delete button wiring from Overview tab.
+        // Planned-only weeks are now deleted via the *footer* "Delete timesheet" button (btnTsDeleteTimesheet)
+        // which routes:
+        //   - tsId present → deleteTimesheetPermanent(tsId)
+        //   - tsId null + weekId present → deleteTimesheetPermanent(null, { contractWeekId: weekId })
+
+        const det         = mc.timesheetDetails || {};
+        const ts          = det.timesheet || {};
+        const tsfin        = det.tsfin || {};
+        const actionFlags  = (det.action_flags && typeof det.action_flags === 'object') ? det.action_flags : {};
+
         const sheetScope = (det.sheet_scope || mc.data?.sheet_scope || ts.sheet_scope || '').toUpperCase();
         const subMode    = (ts.submission_mode || mc.data?.submission_mode || '').toUpperCase();
 
@@ -23225,21 +23243,26 @@ if (this.entity === 'timesheets' && k === 'overview') {
         const cwId            = det.contract_week_id || mc.data?.contract_week_id || null;
         const hasContractWeek = !!cwId;
 
-        const isAuthorised     = !!ts.authorised_at_server;
-        const locked           = !!(tsfin.locked_by_invoice_id || tsfin.paid_at_utc);
-        const alreadyPaid      = !!tsfin.paid_at_utc;
+        const isAuthorised = !!ts.authorised_at_server;
+        const locked       = !!(tsfin.locked_by_invoice_id || tsfin.paid_at_utc);
+        const alreadyPaid  = !!tsfin.paid_at_utc;
 
-        const hasTs           = !!tsId;
-        const isWeekly        = (sheetScope === 'WEEKLY');
-        const isDaily         = (sheetScope === 'DAILY');
+        const hasTs    = !!tsId;
+        const isWeekly = (sheetScope === 'WEEKLY');
+        const isDaily  = (sheetScope === 'DAILY');
+
         const weeklyElectronicWithTs =
           isWeekly && subMode === 'ELECTRONIC' && hasTs;
+
         const weeklyElectronicPlanned =
           isWeekly && subMode === 'ELECTRONIC' && !hasTs && !!weekId;
 
-        // NEW: simple front-end gating; backend still enforces final rules
+        // Prefer backend-computed flags (details.action_flags), fallback to basic checks
         const canRevertElectronic =
-          !!tsId && !locked && subMode === 'MANUAL';
+          !!tsId && !locked && (
+            actionFlags.can_revert_to_electronic === true ||
+            subMode === 'MANUAL'
+          );
 
         const canDeleteManualReopen =
           !!tsId && !locked && isWeekly && subMode === 'MANUAL' && hasContractWeek;
@@ -23266,6 +23289,12 @@ if (this.entity === 'timesheets' && k === 'overview') {
             hasMarkPaidInput: !!markPaidInput
           });
         }
+
+        // Action-flag derived enables
+        const canRestorePending = !!actionFlags.can_restore_qr_pending;
+        const canRestoreSigned  = !!actionFlags.can_restore_qr_signed;
+        const canAllowQrAgain   = !!actionFlags.can_allow_qr_again;
+        const canAllowElecAgain = !!actionFlags.can_allow_electronic_again;
 
         const viewEls = root.querySelectorAll('[data-view-only="true"]');
         const editEls = root.querySelectorAll('[data-edit-only="true"]');
@@ -23319,9 +23348,6 @@ if (this.entity === 'timesheets' && k === 'overview') {
 
         // ── Convert to manual (two paths) ──
         if (switchManualBtn) {
-          // Show the button for:
-          // - existing weekly electronic TS, OR
-          // - planned weekly electronic week (no TS yet, but has contract_week_id)
           const showSwitch =
             mode === 'view' &&
             !locked &&
@@ -23350,14 +23376,15 @@ if (this.entity === 'timesheets' && k === 'overview') {
                 const sheetScope2 = (det2.sheet_scope || mc2.data?.sheet_scope || ts2.sheet_scope || '').toUpperCase();
                 const subMode2    = (ts2.submission_mode || mc2.data?.submission_mode || '').toUpperCase();
 
-                const hasTs2           = !!tsId2;
+                const hasTs2 = !!tsId2;
+
                 const weeklyElectronicWithTs2 =
                   sheetScope2 === 'WEEKLY' && subMode2 === 'ELECTRONIC' && hasTs2;
+
                 const weeklyElectronicPlanned2 =
                   sheetScope2 === 'WEEKLY' && subMode2 === 'ELECTRONIC' && !hasTs2 && !!weekId2;
 
                 if (weeklyElectronicWithTs2 && tsId2) {
-                  // Existing electronic timesheet → /api/timesheets/:id/switch-to-manual
                   await switchTimesheetToManual(tsId2);
                   try {
                     mc2.data.submission_mode = 'MANUAL';
@@ -23366,15 +23393,12 @@ if (this.entity === 'timesheets' && k === 'overview') {
                     }
                   } catch {}
                 } else if (weeklyElectronicPlanned2 && weekId2) {
-                  // Planned/open weekly slot → /api/contract-weeks/:id/switch-mode
                   await switchContractWeekToManual(weekId2);
                   try {
                     mc2.data.submission_mode_snapshot = 'MANUAL';
                     if (mc2.timesheetDetails && mc2.timesheetDetails.contract_week) {
                       mc2.timesheetDetails.contract_week.submission_mode_snapshot = 'MANUAL';
                     }
-
-                    // 🔹 Keep timesheetMeta in sync so Edit gating works *without* reopening
                     if (mc2.timesheetMeta && typeof mc2.timesheetMeta === 'object') {
                       mc2.timesheetMeta.cw_submission_mode_snapshot = 'MANUAL';
                       mc2.timesheetMeta.sheetScope  = 'WEEKLY';
@@ -23387,19 +23411,12 @@ if (this.entity === 'timesheets' && k === 'overview') {
                   throw new Error('This week is not an electronic weekly slot; cannot convert to manual.');
                 }
 
-                window.__toast && window.__toast(
-                  'Weekly week is now in MANUAL mode. Click Edit to enter manual hours.'
-                );
+                window.__toast && window.__toast('Weekly week is now in MANUAL mode. Click Edit to enter manual hours.');
 
-                // Refresh the summary grid so planned/real rows show MANUAL status
-                try {
-                  await renderAll();
-                } catch (e) {
+                try { await renderAll(); } catch (e) {
                   if (LOGM) LT('switchManual: renderAll() after convert failed (non-fatal)', e);
                 }
 
-                // Repaint Overview in VIEW mode so that pills & actions update;
-                // Edit button remains available to go into manual edit.
                 try {
                   if (typeof window.__getModalFrame === 'function') {
                     const fr = window.__getModalFrame();
@@ -23425,8 +23442,7 @@ if (this.entity === 'timesheets' && k === 'overview') {
 
         // ── Revert to original electronic (versioned) — VIEW mode only ──
         if (revertElecBtn) {
-          revertElecBtn.style.display =
-            (mode === 'view' && canRevertElectronic) ? '' : 'none';
+          revertElecBtn.style.display = (mode === 'view' && canRevertElectronic) ? '' : 'none';
 
           if (!revertElecBtn.__tsWired) {
             revertElecBtn.__tsWired = true;
@@ -23451,8 +23467,7 @@ if (this.entity === 'timesheets' && k === 'overview') {
 
         // ── Delete manual TS & reopen week for e-submission — VIEW mode only ──
         if (deleteReopenBtn) {
-          deleteReopenBtn.style.display =
-            (mode === 'view' && canDeleteManualReopen) ? '' : 'none';
+          deleteReopenBtn.style.display = (mode === 'view' && canDeleteManualReopen) ? '' : 'none';
 
           if (!deleteReopenBtn.__tsWired) {
             deleteReopenBtn.__tsWired = true;
@@ -23475,38 +23490,244 @@ if (this.entity === 'timesheets' && k === 'overview') {
           }
         }
 
-     // ── Delete permanently — any unlocked TS, allowed in VIEW or EDIT ──
-if (deletePermBtn) {
-  const showDeletePerm =
-    !!tsId &&
-    !locked &&
-    (mode === 'view' || mode === 'edit') &&
-    canDeletePermanent;
+        // ── Delete permanently — any unlocked TS, allowed in VIEW or EDIT ──
+        if (deletePermBtn) {
+          const showDeletePerm =
+            !!tsId &&
+            !locked &&
+            (mode === 'view' || mode === 'edit') &&
+            canDeletePermanent;
 
-  deletePermBtn.style.display = showDeletePerm ? '' : 'none';
+          deletePermBtn.style.display = showDeletePerm ? '' : 'none';
 
-  if (!deletePermBtn.__tsWired) {
-    deletePermBtn.__tsWired = true;
-    deletePermBtn.addEventListener('click', async () => {
-      const ok = window.confirm(
-        'Permanently delete this timesheet?\n\n' +
-        'This will remove all versions and financial snapshots for this timesheet_id.\n' +
-        'This action cannot be undone.'
-      );
-      if (!ok) return;
-      try {
-        await deleteTimesheetPermanent(tsId);
-        alert('Timesheet record deleted.');
-        try { byId('btnCloseModal').click(); } catch {}
-        try { await renderAll(); } catch {}
-      } catch (err) {
-        if (LOGM) console.warn('[TS][OVERVIEW] deleteTimesheetPermanent failed', err);
-        alert(err?.message || 'Failed to delete timesheet.');
-      }
-    });
-  }
-}
+          if (!deletePermBtn.__tsWired) {
+            deletePermBtn.__tsWired = true;
+            deletePermBtn.addEventListener('click', async () => {
+              const ok = window.confirm(
+                'Permanently delete this timesheet?\n\n' +
+                'This will remove all versions and financial snapshots for this timesheet_id.\n' +
+                'This action cannot be undone.'
+              );
+              if (!ok) return;
+              try {
+                await deleteTimesheetPermanent(tsId);
+                alert('Timesheet record deleted.');
+                try { byId('btnCloseModal').click(); } catch {}
+                try { await renderAll(); } catch {}
+              } catch (err) {
+                if (LOGM) console.warn('[TS][OVERVIEW] deleteTimesheetPermanent failed', err);
+                alert(err?.message || 'Failed to delete timesheet.');
+              }
+            });
+          }
+        }
 
+        // ─────────────────────────────────────────────────────────────
+        // QR / route actions wiring (buttons rendered by renderTimesheetOverviewTab)
+        // ─────────────────────────────────────────────────────────────
+
+        const refreshAndRepaintOverview = async () => {
+          try {
+            if (tsId) {
+              const fresh = await fetchTimesheetDetails(tsId);
+              window.modalCtx.timesheetDetails = fresh;
+            }
+          } catch {}
+
+          try { await renderAll(); } catch {}
+
+          try {
+            if (typeof window.__getModalFrame === 'function') {
+              const fr = window.__getModalFrame();
+              if (fr && fr.entity === 'timesheets') {
+                fr.mode = 'view';
+                fr._suppressDirty = true;
+                fr.setTab('overview');
+                fr._suppressDirty = false;
+                fr._updateButtons && fr._updateButtons();
+              }
+            }
+          } catch {}
+        };
+
+        // Resend QR email (Scenario 2)
+        if (qrResendBtn) {
+          qrResendBtn.style.display = (!!tsId && !locked) ? '' : 'none';
+          if (!qrResendBtn.__tsWired) {
+            qrResendBtn.__tsWired = true;
+            qrResendBtn.addEventListener('click', async () => {
+              try {
+                await resendQrTimesheetEmail(tsId);
+                window.__toast && window.__toast('QR email queued for resend.');
+                await refreshAndRepaintOverview();
+              } catch (err) {
+                if (LOGM) console.warn('[TS][OVERVIEW] qr-resend failed', err);
+                alert(err?.message || 'Failed to resend QR email.');
+              }
+            });
+          }
+        }
+
+        // Refuse QR hours (Scenario 2)
+        if (qrRefuseBtn) {
+          qrRefuseBtn.style.display = (!!tsId && !locked) ? '' : 'none';
+          if (!qrRefuseBtn.__tsWired) {
+            qrRefuseBtn.__tsWired = true;
+            qrRefuseBtn.addEventListener('click', async () => {
+              try {
+                const r = await refuseQrHours(tsId);
+                if (r && r.cancelled) return;
+                window.__toast && window.__toast('Timesheet refused and candidate notified.');
+                await refreshAndRepaintOverview();
+              } catch (err) {
+                if (LOGM) console.warn('[TS][OVERVIEW] qr-refuse failed', err);
+                alert(err?.message || 'Failed to refuse QR hours.');
+              }
+            });
+          }
+        }
+
+        // Revoke signed QR & request resubmission (Scenario 3) → reissue via Save
+        if (qrReissueReqBtn) {
+          qrReissueReqBtn.style.display = (!!tsId && !locked) ? '' : 'none';
+          if (!qrReissueReqBtn.__tsWired) {
+            qrReissueReqBtn.__tsWired = true;
+            qrReissueReqBtn.addEventListener('click', async () => {
+              const ok = window.confirm(
+                'Revoke the signed QR submission and request resubmission?\n\n' +
+                'This will require a new signature and upload. You will be taken to Edit mode to confirm hours then Save.'
+              );
+              if (!ok) return;
+
+              try {
+                window.modalCtx = window.modalCtx || {};
+                window.modalCtx.timesheetState = window.modalCtx.timesheetState || {};
+                window.modalCtx.timesheetState.__forceQrActionEnum = 'REISSUE_QR';
+
+                if (typeof window.__getModalFrame === 'function') {
+                  const fr = window.__getModalFrame();
+                  if (fr && fr.entity === 'timesheets') {
+                    fr.mode = 'edit';
+                    fr._suppressDirty = true;
+                    fr.setTab('overview');
+                    fr._suppressDirty = false;
+                    fr._updateButtons && fr._updateButtons();
+                  }
+                }
+
+                window.__toast && window.__toast('Edit mode enabled. Click Save to reissue a new QR.');
+              } catch (err) {
+                if (LOGM) console.warn('[TS][OVERVIEW] qr-reissue-request failed', err);
+                alert(err?.message || 'Failed to enter reissue flow.');
+              }
+            });
+          }
+        }
+
+        // Convert QR → manual-only
+        if (qrConvertManualBtn) {
+          qrConvertManualBtn.style.display = (!!tsId && !locked) ? '' : 'none';
+          if (!qrConvertManualBtn.__tsWired) {
+            qrConvertManualBtn.__tsWired = true;
+            qrConvertManualBtn.addEventListener('click', async () => {
+              const ok = window.confirm(
+                'Convert this QR timesheet to manual-only?\n\n' +
+                'This disables candidate QR/electronic submission. Admin will manage evidence manually.'
+              );
+              if (!ok) return;
+
+              try {
+                await apiPostJson(`/api/timesheets/${encodeURIComponent(tsId)}/convert-qr-to-manual`, {});
+                window.__toast && window.__toast('Converted to manual-only.');
+                await refreshAndRepaintOverview();
+              } catch (err) {
+                if (LOGM) console.warn('[TS][OVERVIEW] convert-qr-to-manual failed', err);
+                alert(err?.message || 'Failed to convert to manual-only.');
+              }
+            });
+          }
+        }
+
+        // Restore revoked QR (pending)
+        if (qrRestorePendBtn) {
+          qrRestorePendBtn.style.display = (!!tsId && !locked && canRestorePending) ? '' : 'none';
+          if (!qrRestorePendBtn.__tsWired) {
+            qrRestorePendBtn.__tsWired = true;
+            qrRestorePendBtn.addEventListener('click', async () => {
+              const ok = window.confirm('Restore the most recently revoked pending QR version?');
+              if (!ok) return;
+              try {
+                await restoreRevokedQr(tsId, 'PENDING');
+                window.__toast && window.__toast('Pending QR restored.');
+                await refreshAndRepaintOverview();
+              } catch (err) {
+                if (LOGM) console.warn('[TS][OVERVIEW] restore pending failed', err);
+                alert(err?.message || 'Failed to restore pending QR.');
+              }
+            });
+          }
+        }
+
+        // Restore revoked QR (signed)
+        if (qrRestoreSignedBtn) {
+          qrRestoreSignedBtn.style.display = (!!tsId && !locked && canRestoreSigned) ? '' : 'none';
+          if (!qrRestoreSignedBtn.__tsWired) {
+            qrRestoreSignedBtn.__tsWired = true;
+            qrRestoreSignedBtn.addEventListener('click', async () => {
+              const ok = window.confirm(
+                'Restore the most recently revoked signed QR version?\n\n' +
+                'This will restore the signed evidence as current.'
+              );
+              if (!ok) return;
+              try {
+                await restoreRevokedQr(tsId, 'SIGNED');
+                window.__toast && window.__toast('Signed QR restored.');
+                await refreshAndRepaintOverview();
+              } catch (err) {
+                if (LOGM) console.warn('[TS][OVERVIEW] restore signed failed', err);
+                alert(err?.message || 'Failed to restore signed QR.');
+              }
+            });
+          }
+        }
+
+        // Allow QR again
+        if (allowQrAgainBtn) {
+          allowQrAgainBtn.style.display = (!!tsId && !locked && canAllowQrAgain) ? '' : 'none';
+          if (!allowQrAgainBtn.__tsWired) {
+            allowQrAgainBtn.__tsWired = true;
+            allowQrAgainBtn.addEventListener('click', async () => {
+              try {
+                const r = await allowQrAgain(tsId);
+                if (r && r.cancelled) return;
+                window.__toast && window.__toast('QR enabled again.');
+                await refreshAndRepaintOverview();
+              } catch (err) {
+                if (LOGM) console.warn('[TS][OVERVIEW] allow-qr-again failed', err);
+                alert(err?.message || 'Failed to allow QR again.');
+              }
+            });
+          }
+        }
+
+        // Allow electronic again
+        if (allowElecAgainBtn) {
+          allowElecAgainBtn.style.display = (!!tsId && !locked && canAllowElecAgain) ? '' : 'none';
+          if (!allowElecAgainBtn.__tsWired) {
+            allowElecAgainBtn.__tsWired = true;
+            allowElecAgainBtn.addEventListener('click', async () => {
+              try {
+                const r = await allowElectronicAgain(tsId);
+                if (r && r.cancelled) return;
+                window.__toast && window.__toast('Electronic enabled again.');
+                await refreshAndRepaintOverview();
+              } catch (err) {
+                if (LOGM) console.warn('[TS][OVERVIEW] allow-electronic-again failed', err);
+                alert(err?.message || 'Failed to allow electronic again.');
+              }
+            });
+          }
+        }
 
         // ── Daily QR send button (DAILY, ELECTRONIC, unlocked, VIEW mode) ──
         try {
@@ -23532,47 +23753,38 @@ if (deletePermBtn) {
 
                 const ok = window.confirm(
                   'Generate a DAILY QR timesheet for this shift?\n\n' +
-                  'This will switch the daily timesheet into MANUAL mode and generate a QR-coded PDF.'
+                  'This will generate a QR-coded PDF and email it to the candidate. ' +
+                  'Any previous QR for this timesheet will be invalidated.'
                 );
                 if (!ok) return;
 
                 const encId = encodeURIComponent(tsId);
 
                 try {
-                  // 1) Switch DAILY electronic → MANUAL
-                  {
-                    const res = await authFetch(
-                      API(`/api/timesheets/${encId}/switch-daily-to-manual`),
-                      { method: 'POST' }
-                    );
-                    const txt = await res.text().catch(() => '');
-                    if (!res.ok) {
-                      throw new Error(txt || 'Failed to switch daily timesheet to manual.');
+                  const res = await authFetch(
+                    API(`/api/timesheets/${encId}/daily-qr-printable`),
+                    {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({})
                     }
+                  );
+                  const txt = await res.text().catch(() => '');
+                  if (!res.ok) {
+                    throw new Error(txt || 'Failed to generate daily QR timesheet.');
                   }
 
-                  // 2) Generate DAILY QR printable
-                  {
-                    const res = await authFetch(
-                      API(`/api/timesheets/${encId}/daily-qr-printable`),
-                      {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({})
-                      }
-                    );
-                    const txt = await res.text().catch(() => '');
-                    if (!res.ok) {
-                      throw new Error(txt || 'Failed to generate daily QR timesheet.');
-                    }
-                  }
+                  window.__toast && window.__toast('Daily QR timesheet generated and emailed. Evidence is now required via QR scan.');
 
-                  window.__toast && window.__toast('Daily QR timesheet generated. Evidence is now required via QR scan.');
+                  try {
+                    const fresh = await fetchTimesheetDetails(tsId);
+                    window.modalCtx.timesheetDetails = fresh;
+                  } catch {}
 
-                  // Refresh summary and (optionally) repaint the modal
                   try { await renderAll(); } catch (e) {
                     if (LOGM) LT('[TS][OVERVIEW] renderAll() after daily QR failed (non-fatal)', e);
                   }
+
                   try {
                     if (typeof window.__getModalFrame === 'function') {
                       const fr = window.__getModalFrame();
@@ -23647,10 +23859,7 @@ if (deletePermBtn) {
               if (!mc.timesheetState || typeof mc.timesheetState !== 'object') return;
               mc.timesheetState.payHoldReason = String(payHoldReasonInput.value || '');
               if (LOGM) {
-                LT('pay hold reason staged', {
-                  tsId,
-                  payHoldReason: mc.timesheetState.payHoldReason
-                });
+                LT('pay hold reason staged', { tsId, payHoldReason: mc.timesheetState.payHoldReason });
               }
               try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
             });
@@ -23672,12 +23881,7 @@ if (deletePermBtn) {
                 return;
               }
               state.markPaid = !!markPaidInput.checked;
-              if (LOGM) {
-                LT('mark paid staged', {
-                  tsId,
-                  markPaid: state.markPaid
-                });
-              }
+              if (LOGM) LT('mark paid staged', { tsId, markPaid: state.markPaid });
               try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
             });
           }
@@ -23704,12 +23908,7 @@ if (deletePermBtn) {
               };
             }
             mc2.timesheetState.reference = String(refInput.value || '');
-            if (LOGM) {
-              LT('reference staged', {
-                tsId,
-                reference: mc2.timesheetState.reference
-              });
-            }
+            if (LOGM) LT('reference staged', { tsId, reference: mc2.timesheetState.reference });
             try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
           });
         }
@@ -25140,13 +25339,16 @@ if (top.entity === 'timesheets') {
   const isWeeklyManualTs =
     hasTsMeta && isWeekly && subMode === 'MANUAL' && !locked;
 
-  const isPlannedManualWeek =
-    !hasTsMeta && isPlanned && isWeekly && cwMode === 'MANUAL';
+  // Allow Edit for ANY planned weekly slot (so footer Delete can be used),
+// not only planned MANUAL weeks.
+const isPlannedWeek =
+  !hasTsMeta && isPlanned && isWeekly && !!weekId && !locked;
 
-  const isDailyManualTs =
-    hasTsMeta && isDaily && subMode === 'MANUAL' && !locked;
+const isDailyManualTs =
+  hasTsMeta && isDaily && subMode === 'MANUAL' && !locked;
 
-  canEdit = (top.mode === 'view') && (isWeeklyManualTs || isPlannedManualWeek || isDailyManualTs);
+canEdit = (top.mode === 'view') && (isWeeklyManualTs || isPlannedWeek || isDailyManualTs);
+
 
   // ✅ Convert-to-manual eligibility (FINAL RULES)
   // common: not locked, and ELECTRONIC context
@@ -25259,7 +25461,6 @@ if (btnTsConvert) {
 const btnTsRestore = byId('btnTsRestoreElectronic');
 const btnTsRequest = byId('btnTsRequestNewElectronic');
 const btnTsDelete  = byId('btnTsDeleteTimesheet');
-
 if (!isChild && top.entity === 'timesheets') {
   // You will wire backend “has electronic version?” later.
   // For now we key off an optional flag that you can add to /details.
@@ -25270,7 +25471,11 @@ if (!isChild && top.entity === 'timesheets') {
 
   const canRestore = (top.mode === 'edit' && !!tsId && !locked && hasElecFlag);
   const canRequest = (top.mode === 'edit' && !!tsId && !!weekId && !locked && hasElecFlag);
-  const canDeleteTs = (top.mode === 'edit' && !!tsId && !locked);
+
+  // ✅ Delete Timesheet footer button handles BOTH real timesheets and planned-only weeks,
+  // but only in EDIT mode (because footer buttons get disabled in VIEW mode).
+  // Planned weeks are now editable (so user can click Edit first).
+  const canDeleteTs = (top.mode === 'edit' && !locked && (!!tsId || !!weekId));
 
   if (btnTsRestore) {
     btnTsRestore.style.display = canRestore ? '' : 'none';
@@ -25278,7 +25483,10 @@ if (!isChild && top.entity === 'timesheets') {
     if (!btnTsRestore.__tsWired) {
       btnTsRestore.__tsWired = true;
       btnTsRestore.addEventListener('click', async () => {
-        const ok = window.confirm('Restore the original signed electronic timesheet? This discards all current manual edits.');
+        const ok = window.confirm(
+          'Restore the original signed electronic timesheet?\n\n' +
+          'This discards all current manual edits.'
+        );
         if (!ok) return;
         try {
           await revertTimesheetToElectronic(tsId);
@@ -25331,17 +25539,37 @@ if (!isChild && top.entity === 'timesheets') {
   if (btnTsDelete) {
     btnTsDelete.style.display = canDeleteTs ? '' : 'none';
     btnTsDelete.disabled = !!top._saving;
+
     if (!btnTsDelete.__tsWired) {
       btnTsDelete.__tsWired = true;
       btnTsDelete.addEventListener('click', async () => {
+        const isPlannedOnly = (!tsId && !!weekId);
+
         const ok = window.confirm(
-          'Permanently delete this timesheet?\n\n' +
-          'This will remove all versions and financial snapshots for this timesheet_id.\n' +
-          'This action cannot be undone.'
+          isPlannedOnly
+            ? (
+                'Delete this timesheet?\n\n' +
+                'This is a planned week (no timesheet has been created yet).\n' +
+                'Deleting will remove the planned contract week.\n\n' +
+                'This action cannot be undone.'
+              )
+            : (
+                'Permanently delete this timesheet?\n\n' +
+                'This will remove all versions and financial snapshots for this timesheet_id.\n' +
+                'This action cannot be undone.'
+              )
         );
         if (!ok) return;
+
         try {
-          await deleteTimesheetPermanent(tsId);
+          if (isPlannedOnly) {
+            // ✅ Planned week delete path
+            await deletePlannedContractWeek(weekId);
+          } else {
+            // ✅ Real timesheet delete path
+            await deleteTimesheetPermanent(tsId);
+          }
+
           try { byId('btnCloseModal').click(); } catch {}
           try { await renderAll(); } catch {}
         } catch (e) {
@@ -25351,7 +25579,6 @@ if (!isChild && top.entity === 'timesheets') {
     }
   }
 }
-
 
 
 
@@ -25532,7 +25759,6 @@ if (!isChild && top.entity === 'timesheets') {
       top._closing=true;
       document.onmousemove=null; document.onmouseup=null; byId('modal')?.classList.remove('dragging'); sanitizeModalGeometry();
       const closing=stack().pop(); 
-      try { if (closing && typeof closing._onDismiss === 'function') closing._onDismiss(); } catch {}
 
 try { if (closing && typeof closing._onDismiss === 'function') closing._onDismiss(); } catch {}
       if (closing?._detachDirty){ try{closing._detachDirty();}catch{} closing._detachDirty=null; }
@@ -26625,9 +26851,245 @@ function openImportColumnAliasesModal(opts) {
 }
 
 
+function renderTimesheetAuditTab(ctx) {
+  const { LOGM, L, GC, GE } = getTsLoggers('[TS][AUDIT][TAB]');
+  const { row, details } = normaliseTimesheetCtx(ctx);
 
+  GC('render');
 
+  const ts    = details.timesheet || {};
+  const tsId  = ts.timesheet_id || row.timesheet_id || null;
+  const enc   = (typeof escapeHtml === 'function') ? escapeHtml : (s)=>String(s ?? '');
 
+  const mc = window.modalCtx || {};
+  const cache = (mc.timesheetAuditCache && typeof mc.timesheetAuditCache === 'object')
+    ? mc.timesheetAuditCache
+    : {};
+  const items = (tsId && cache[String(tsId)]) ? cache[String(tsId)] : null;
+
+  const fmtUkDateTime = (iso) => {
+    if (!iso) return '';
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return enc(iso);
+    return enc(d.toLocaleString('en-GB', {
+      timeZone: 'Europe/London',
+      weekday: 'short',
+      day: '2-digit',
+      month: 'short',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false
+    }).replace(',', ''));
+  };
+
+  const fmtJsonInline = (v, maxLen = 260) => {
+    if (v == null) return '';
+    try {
+      let s = '';
+      if (typeof v === 'string') {
+        s = v.trim();
+      } else {
+        s = JSON.stringify(v);
+      }
+      if (!s) return '';
+      if (s.length <= maxLen) return enc(s);
+      return enc(s.slice(0, maxLen) + '…');
+    } catch {
+      return enc(String(v));
+    }
+  };
+
+  // RPC returns fixed columns:
+  // id, ts_utc, object_type, object_id_text, action, reason, actor_user_id,
+  // actor_display, actor_role_at_time, before_json, after_json, correlation_id
+  const actorLabel = (it) => {
+    const a =
+      it?.actor_display ||
+      it?.actor_user_id ||
+      null;
+    return a ? enc(String(a)) : '—';
+  };
+
+  const actorRoleLabel = (it) => {
+    const r = it?.actor_role_at_time || null;
+    return r ? enc(String(r)) : '—';
+  };
+
+  const eventLabel = (it) => {
+    const e = it?.action || 'EVENT';
+    return enc(String(e));
+  };
+
+  const timeLabel = (it) => {
+    const t = it?.ts_utc || null;
+    return fmtUkDateTime(t) || '—';
+  };
+
+  const objectLabel = (it) => {
+    const ot = it?.object_type ? String(it.object_type) : '';
+    const oid = it?.object_id_text ? String(it.object_id_text) : '';
+    if (!ot && !oid) return '—';
+    if (oid && oid.length > 12) return enc(`${ot}:${oid.slice(0, 8)}…`);
+    return enc(`${ot}:${oid}`);
+  };
+
+  const reasonLabel = (it) => {
+    const s = it?.reason || '';
+    return enc(String(s || ''));
+  };
+
+  const beforeJson = (it) => it?.before_json ?? null;
+  const afterJson  = (it) => it?.after_json  ?? null;
+
+  const hasTs = !!tsId;
+
+  const headerHtml = `
+    <div class="card">
+      <div class="row">
+        <label>Audit</label>
+        <div class="controls">
+          <div class="mini">
+            Timesheet ID: <strong>${hasTs ? enc(tsId) : '—'}</strong>
+          </div>
+          <div class="mini" style="margin-top:4px;color:#aaa;">
+            Read-only log from audit_events (timesheet + linked contract_week where applicable).
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+
+  if (!hasTs) {
+    GE();
+    return `
+      <div class="tabc">
+        ${headerHtml}
+        <div class="card" style="margin-top:10px;">
+          <div class="row">
+            <label>Events</label>
+            <div class="controls">
+              <span class="mini">No timesheet exists yet for this planned week, so there is no audit feed.</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  if (!items) {
+    GE();
+    return `
+      <div class="tabc">
+        ${headerHtml}
+        <div class="card" style="margin-top:10px;">
+          <div class="row">
+            <label>Events</label>
+            <div class="controls">
+              <span class="mini">Loading audit events…</span>
+              <div class="mini" style="margin-top:6px;color:#888;">
+                If this does not load, click the Audit tab again.
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  if (!Array.isArray(items) || items.length === 0) {
+    GE();
+    return `
+      <div class="tabc">
+        ${headerHtml}
+        <div class="card" style="margin-top:10px;">
+          <div class="row">
+            <label>Events</label>
+            <div class="controls">
+              <span class="mini">No audit events found for this timesheet.</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  const rowsHtml = items.map((it) => {
+    const t    = timeLabel(it);
+    const ev   = eventLabel(it);
+    const who  = actorLabel(it);
+    const role = actorRoleLabel(it);
+    const obj  = objectLabel(it);
+
+    const reason = reasonLabel(it);
+
+    const corr = it?.correlation_id ? String(it.correlation_id) : '';
+    const corrShort = corr ? (corr.length > 16 ? `${corr.slice(0, 16)}…` : corr) : '';
+
+    // Show before/after as compact snippets
+    const beforeStr = fmtJsonInline(beforeJson(it), 220);
+    const afterStr  = fmtJsonInline(afterJson(it),  220);
+
+    return `
+      <tr>
+        <td class="mini" style="white-space:nowrap;">${t}</td>
+        <td class="mini" style="white-space:nowrap;"><strong>${ev}</strong></td>
+        <td class="mini" style="white-space:nowrap;">${who}</td>
+        <td class="mini" style="white-space:nowrap;">${role}</td>
+        <td class="mini" style="white-space:nowrap;">${obj}</td>
+        <td class="mini">${reason || '<span style="color:#777;">—</span>'}</td>
+        <td class="mini">
+          ${beforeStr ? `<code style="white-space:pre-wrap;">${beforeStr}</code>` : '<span style="color:#777;">—</span>'}
+        </td>
+        <td class="mini">
+          ${afterStr ? `<code style="white-space:pre-wrap;">${afterStr}</code>` : '<span style="color:#777;">—</span>'}
+        </td>
+        <td class="mini" style="white-space:nowrap;">
+          ${corrShort ? `<code>${enc(corrShort)}</code>` : '<span style="color:#777;">—</span>'}
+        </td>
+      </tr>
+    `;
+  }).join('');
+
+  const tableHtml = `
+    <div class="card" style="margin-top:10px;">
+      <div class="row">
+        <label>Events</label>
+        <div class="controls" style="overflow:auto;">
+          <table class="tbl" style="width:100%;min-width:1200px;">
+            <thead>
+              <tr>
+                <th class="mini">When</th>
+                <th class="mini">Action</th>
+                <th class="mini">Actor</th>
+                <th class="mini">Role</th>
+                <th class="mini">Object</th>
+                <th class="mini">Reason</th>
+                <th class="mini">Before</th>
+                <th class="mini">After</th>
+                <th class="mini">Corr</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${rowsHtml}
+            </tbody>
+          </table>
+          <div class="mini" style="margin-top:8px;color:#888;">
+            Showing ${items.length} event${items.length === 1 ? '' : 's'}.
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+
+  GE();
+  return `
+    <div class="tabc">
+      ${headerHtml}
+      ${tableHtml}
+    </div>
+  `;
+}
 
 
 
@@ -37063,6 +37525,10 @@ function renderTimesheetOverviewTab(ctx) {
   const rCtr  = related.contract  || {};
   const rInv  = related.invoice   || null;
 
+  const actionFlags = (details.action_flags && typeof details.action_flags === 'object')
+    ? details.action_flags
+    : {};
+
   const sheetScope = (details.sheet_scope || row.sheet_scope || ts.sheet_scope || '').toUpperCase();
   const subMode    = (ts.submission_mode || row.submission_mode || '').toUpperCase();
   const basis      = (tsfin.basis || row.basis || '').toUpperCase();
@@ -37147,7 +37613,9 @@ function renderTimesheetOverviewTab(ctx) {
 
   const payOnHold  = !!tsfin.pay_on_hold;
   const authorised = !!ts.authorised_at_server;
+
   const qrStatus   = (details.qr_status || ts.qr_status || '').toUpperCase();
+  const qrScenario = (actionFlags.qr_scenario || '').toUpperCase() || null;
 
   const amountPayEx  = Number(tsfin.total_pay_ex_vat || 0) || 0;
   const amountChgEx  = Number(tsfin.total_charge_ex_vat || 0) || 0;
@@ -37174,8 +37642,10 @@ function renderTimesheetOverviewTab(ctx) {
     tsId, sheetScope, subMode, basis,
     stageRaw, procStatus, authorised,
     isPaid, isInvoiced, payOnHold, qrStatus,
+    qrScenario,
     weYmd, hasTsfin, hasContractWeek, isPlannedOnly,
-    cwId, requiresHr, autoprocessHr, noTimesheetReq
+    cwId, requiresHr, autoprocessHr, noTimesheetReq,
+    actionFlags
   });
   GE();
 
@@ -37310,30 +37780,130 @@ function renderTimesheetOverviewTab(ctx) {
     ? '<span class="pill pill-bad" style="margin-left:4px;">Timesheet required</span>'
     : '';
 
-  // Keep the QR amend warning (still useful context)
   const hasQr = !!qrStatus;
   const qrAmendWarningHtml = (hasQr && !locked)
     ? `
       <div class="mini" style="margin-top:8px;color:var(--warn);max-width:520px;">
         Warning: this timesheet already has a QR version. If you amend the hours and save,
-        you will be asked whether to:
-        <br/>• save and revoke the existing QR only, or
-        <br/>• save, revoke and reissue a new QR timesheet to the worker.
+        you will be asked what to do (reissue QR or convert to manual-only).
       </div>
     `
     : '';
 
-  // ✅ NEW: Overview “Actions” no longer contains structural controls (Convert / Restore / Request / Delete)
-  // Those live in the footer now. Keep only genuinely view-mode quick actions.
+  const isManualOnly = !!actionFlags.is_manual_only;
+
+  const canRestorePending = !!actionFlags.can_restore_qr_pending;
+  const canRestoreSigned  = !!actionFlags.can_restore_qr_signed;
+  const canRevertToElec   = !!actionFlags.can_revert_to_electronic;
+
+  const canAllowQrAgain   = !!actionFlags.can_allow_qr_again;
+  const canAllowElecAgain = !!actionFlags.can_allow_electronic_again;
+
+  const isScenario1 = (qrScenario === 'SCENARIO_1');
+  const isScenario2 = (qrScenario === 'SCENARIO_2');
+  const isScenario3 = (qrScenario === 'SCENARIO_3');
+  const isExpired   = (qrScenario === 'EXPIRED');
+  const isCancelled = (qrScenario === 'CANCELLED');
+
   const actionsHtml = (() => {
+    const btns = [];
+
+    // DAILY: send QR (backend handles ELECTRONIC→QR + email)
     if (sheetScope === 'DAILY' && tsId && subMode === 'ELECTRONIC' && !locked) {
-      return `
+      btns.push(`
         <button type="button" class="btn" data-ts-action="send-daily-qr">
           Send daily QR timesheet
         </button>
-      `;
+      `);
     }
-    return `<span class="mini">No quick actions here. Use the footer buttons where available.</span>`;
+
+    // QR Scenario 2: resend existing QR email
+    if (tsId && !locked && isScenario2 && qrStatus === 'PENDING') {
+      btns.push(`
+        <button type="button" class="btn" data-ts-action="qr-resend">
+          Resend QR email
+        </button>
+      `);
+    }
+
+    // QR Scenario 2: refuse hours
+    if (tsId && !locked && isScenario2 && qrStatus === 'PENDING') {
+      btns.push(`
+        <button type="button" class="btn btn-warn" data-ts-action="qr-refuse">
+          Refuse hours & request resubmission
+        </button>
+      `);
+    }
+
+    // QR Scenario 3: revoke and request resubmission (maps to REISSUE)
+    if (tsId && !locked && isScenario3 && qrStatus === 'USED') {
+      btns.push(`
+        <button type="button" class="btn btn-warn" data-ts-action="qr-reissue-request">
+          Revoke signed QR & request resubmission
+        </button>
+      `);
+    }
+
+    // Any QR scenario: convert to manual-only
+    if (tsId && !locked && (isScenario1 || isScenario2 || isScenario3 || isExpired || isCancelled) && qrStatus) {
+      btns.push(`
+        <button type="button" class="btn" data-ts-action="qr-convert-manual-only">
+          Convert to manual-only
+        </button>
+      `);
+    }
+
+    // Restore revoked versions
+    if (tsId && !locked && canRestorePending) {
+      btns.push(`
+        <button type="button" class="btn" data-ts-action="qr-restore-pending">
+          Restore revoked QR (pending)
+        </button>
+      `);
+    }
+    if (tsId && !locked && canRestoreSigned) {
+      btns.push(`
+        <button type="button" class="btn" data-ts-action="qr-restore-signed">
+          Restore revoked QR (signed)
+        </button>
+      `);
+    }
+
+    // Manual-only re-enable options
+    if (tsId && !locked && isManualOnly && canAllowQrAgain) {
+      btns.push(`
+        <button type="button" class="btn" data-ts-action="allow-qr-again">
+          Allow QR again
+        </button>
+      `);
+    }
+    if (tsId && !locked && isManualOnly && canAllowElecAgain) {
+      btns.push(`
+        <button type="button" class="btn" data-ts-action="allow-electronic-again">
+          Allow electronic again
+        </button>
+      `);
+    }
+
+    // Revert to electronic (admin) if available
+    if (tsId && !locked && canRevertToElec) {
+      btns.push(`
+        <button type="button" class="btn" data-ts-action="revert-electronic">
+          Revert to electronic
+        </button>
+      `);
+    }
+
+    // IMPORTANT CHANGE:
+    // We no longer render a planned-only "Delete planned week" button here.
+    // Deletion is handled via the footer "Delete timesheet" button, which will
+    // take the planned-delete path when timesheet_id is null.
+    // (So the UI looks identical to a normal timesheet.)
+    if (!btns.length) {
+      return `<span class="mini">No actions available.</span>`;
+    }
+
+    return btns.join('\n');
   })();
 
   const routeHtml = `
@@ -38535,437 +39105,767 @@ async function openTimesheet(row) {
       '';
     const cwSubSnap = String(cwSubSnapRaw || '').toUpperCase();
 
-    window.modalCtx = {
-      ...(window.modalCtx || {}),
-      entity: 'timesheets',
-      mode: hasTs ? 'view' : 'edit',
-      data: { ...baseRow, timesheet_id: tsId || null, contract_week_id: weekId || baseRow.contract_week_id || null },
-      timesheetDetails: details,
-      timesheetRelated: related,
-      timesheetState: {
-        reference: initialReference,
-        payHoldDesired: null,
-        payHoldReason: '',
-        markPaid: false,
-        segmentOverrides: {},
-        segmentInvoiceTargets: {},
-        manualHours,
-        additionalRates,
-        schedule,
-        dayReferences,
-        evidence
-      },
-      timesheetMeta: {
-        hasTs,
-        isPlannedWeek,
-        sheetScope,
-        subMode,
-        basis,
-        qrStatus,
-        isPaid,
-        isInvoiced,
-        isLocked: (isPaid || isInvoiced),
-        canDeletePermanently: canDeletePerm,
-        contract_week_id: cwId,
-        cw_submission_mode_snapshot: cwSubSnap,
+  window.modalCtx = {
+  ...(window.modalCtx || {}),
+  entity: 'timesheets',
 
-        // NEW (placeholder): wire backend later to fill this reliably
-        hasElectronicOriginal: !!details.has_electronic_version || !!details.has_electronic_original
+  // ✅ Always open in VIEW; Edit gating (including planned weeks) is handled by showModal/_updateButtons.
+  mode: 'view',
+
+  data: {
+    ...baseRow,
+    timesheet_id: tsId || null,
+    contract_week_id: weekId || baseRow.contract_week_id || null
+  },
+
+  timesheetDetails: details,
+  timesheetRelated: related,
+
+  timesheetState: {
+    reference: initialReference,
+    payHoldDesired: null,
+    payHoldReason: '',
+    markPaid: false,
+    segmentOverrides: {},
+    segmentInvoiceTargets: {},
+    manualHours,
+    additionalRates,
+    schedule,
+    dayReferences,
+    evidence
+  },
+
+  timesheetMeta: {
+    hasTs,
+    isPlannedWeek,
+    sheetScope,
+    subMode,
+    basis,
+    qrStatus,
+    isPaid,
+    isInvoiced,
+    isLocked: (isPaid || isInvoiced),
+    canDeletePermanently: canDeletePerm,
+    contract_week_id: cwId,
+    cw_submission_mode_snapshot: cwSubSnap,
+
+    // NEW (placeholder): wire backend later to fill this reliably
+    hasElectronicOriginal: !!details.has_electronic_version || !!details.has_electronic_original
+  }
+};
+
+
+const tabDefs = [
+  { key: 'overview', title: 'Overview' },
+  { key: 'lines',    title: 'Lines' },
+  { key: 'evidence', title: 'Evidence' },
+  { key: 'issues',   title: 'Issues' },
+  { key: 'finance',  title: 'Finance' },
+
+  // NEW
+  { key: 'audit',    title: 'Audit' }
+];
+
+const renderTab = (key, mergedRow) => {
+  const ctxForTab = {
+    row: mergedRow || window.modalCtx.data || baseRow,
+    details: window.modalCtx.timesheetDetails || details,
+    related: window.modalCtx.timesheetRelated || related,
+    state: window.modalCtx.timesheetState
+  };
+
+  // NEW: audit fetch on tab open (best-effort, non-fatal)
+  if (key === 'audit') {
+    try {
+      const mc = window.modalCtx || {};
+      const tsId = mc.data?.timesheet_id || ctxForTab.row?.timesheet_id || null;
+      if (tsId && typeof fetchTimesheetAudit === 'function') {
+        const cacheKey = String(tsId);
+
+        // Create cache store
+        mc.timesheetAuditCache ||= {};
+
+        // Fetch only if not already cached for this timesheet id
+        if (!mc.timesheetAuditCache[cacheKey]) {
+          // Fire and forget; rerender once loaded
+          Promise.resolve()
+            .then(async () => {
+              const items = await fetchTimesheetAudit(tsId);
+              mc.timesheetAuditCache[cacheKey] = Array.isArray(items) ? items : (items?.items || []);
+            })
+            .then(() => {
+              // Repaint current tab if still on audit
+              try {
+                if (typeof window.__getModalFrame === 'function') {
+                  const fr = window.__getModalFrame();
+                  if (fr && fr.entity === 'timesheets' && fr.currentTabKey === 'audit') {
+                    fr._suppressDirty = true;
+                    fr.setTab('audit');
+                    fr._suppressDirty = false;
+                  }
+                }
+              } catch {}
+            })
+            .catch(() => {});
+        }
       }
+    } catch {}
+  }
+
+  switch (key) {
+    case 'overview': return renderTimesheetOverviewTab(ctxForTab);
+    case 'lines':    return renderTimesheetLinesTab(ctxForTab);
+    case 'evidence': return renderTimesheetEvidenceTab(ctxForTab);
+    case 'issues':   return renderTimesheetIssuesTab(ctxForTab);
+    case 'finance':  return renderTimesheetFinanceTab(ctxForTab);
+
+    // NEW
+    case 'audit':    return renderTimesheetAuditTab(ctxForTab);
+
+    default:
+      return `<div class="tabc"><div class="card"><div class="row"><label>Timesheet</label><div class="controls"><span class="mini">Unknown tab: ${key}</span></div></div></div></div>`;
+  }
+};
+
+
+   const onSaveTimesheet = async () => {
+  const { LOGM, L, GC, GE } = getTsLoggers('[TS][SAVE]');
+  GC('onSaveTimesheet');
+
+  const mc     = window.modalCtx || {};
+  const rowNow = mc.data || baseRow;
+  const det    = mc.timesheetDetails || details;
+  const st     = mc.timesheetState || {};
+
+  // ─────────────────────────────────────────────────────────────
+  // Helpers: normalize + compare
+  // ─────────────────────────────────────────────────────────────
+  const n2 = (v) => {
+    const x = Number(v);
+    if (!Number.isFinite(x)) return 0;
+    return Math.round(x * 100) / 100;
+  };
+
+  const normHours5 = (h) => ({
+    day:   n2(h?.day),
+    night: n2(h?.night),
+    sat:   n2(h?.sat),
+    sun:   n2(h?.sun),
+    bh:    n2(h?.bh)
+  });
+
+  const getCurrentWeeklyHours = () => {
+    // Prefer TSFIN hours if present, else fall back to contract_week totals_json.hours, else zeroes
+    const tsfin = (det && det.tsfin) ? det.tsfin : {};
+    const cw    = det && det.contract_week ? det.contract_week : null;
+
+    const fromTsfin = {
+      day:   tsfin?.hours_day,
+      night: tsfin?.hours_night,
+      sat:   tsfin?.hours_sat,
+      sun:   tsfin?.hours_sun,
+      bh:    tsfin?.hours_bh
     };
 
-    const tabDefs = [
-      { key: 'overview', title: 'Overview' },
-      { key: 'lines',    title: 'Lines' },
-      { key: 'evidence', title: 'Evidence' },
-      { key: 'issues',   title: 'Issues' },
-      { key: 'finance',  title: 'Finance' }
-    ];
+    const hasAnyTsfin = ['day','night','sat','sun','bh'].some(k => fromTsfin[k] != null);
+    if (hasAnyTsfin) return normHours5(fromTsfin);
 
-    const renderTab = (key, mergedRow) => {
-      const ctxForTab = {
-        row: mergedRow || window.modalCtx.data || baseRow,
-        details: window.modalCtx.timesheetDetails || details,
-        related: window.modalCtx.timesheetRelated || related,
-        state: window.modalCtx.timesheetState
+    const fromCw = cw?.totals_json?.hours || null;
+    if (fromCw && typeof fromCw === 'object') return normHours5(fromCw);
+
+    return normHours5({ day: 0, night: 0, sat: 0, sun: 0, bh: 0 });
+  };
+
+  const getStagedWeeklyHours = () => {
+    // If user staged nothing, treat as "no change intent" (we'll compare below)
+    const mh = st.manualHours || {};
+    return normHours5({
+      day:   mh.day,
+      night: mh.night,
+      sat:   mh.sat,
+      sun:   mh.sun,
+      bh:    mh.bh
+    });
+  };
+
+  const normExtrasWeek = (extrasMapOrUnitsWeek) => {
+    const out = {};
+    const src = extrasMapOrUnitsWeek || {};
+    for (const [codeRaw, r] of Object.entries(src)) {
+      const code = String(codeRaw || '').toUpperCase().trim();
+      if (!code) continue;
+
+      // FE staged shape: { units_week }
+      if (r && typeof r === 'object' && Object.prototype.hasOwnProperty.call(r, 'units_week')) {
+        const u = Number(r.units_week || 0);
+        out[code] = Number.isFinite(u) ? u : 0;
+        continue;
+      }
+
+      // If already a code->number map
+      const u2 = Number(r || 0);
+      out[code] = Number.isFinite(u2) ? u2 : 0;
+    }
+
+    // strip zeroes
+    for (const k of Object.keys(out)) {
+      if (!out[k]) delete out[k];
+    }
+    return out;
+  };
+
+  const getCurrentExtrasWeek = () => {
+    // Prefer TSFIN additional_units_json if present.
+    const tsfin = (det && det.tsfin) ? det.tsfin : {};
+    const au = tsfin?.additional_units_json;
+
+    if (au && typeof au === 'object') {
+      const out = {};
+      for (const [codeRaw, v] of Object.entries(au)) {
+        const code = String(codeRaw || '').toUpperCase().trim();
+        if (!code) continue;
+        // backend snapshot stores { unit_count } (your weekly manual snapshot builder does this)
+        const u = Number(v?.unit_count ?? v?.units_week ?? 0);
+        if (Number.isFinite(u) && u) out[code] = u;
+      }
+      return out;
+    }
+
+    return {};
+  };
+
+  const stableStringify = (obj) => {
+    try {
+      return JSON.stringify(obj);
+    } catch {
+      return '';
+    }
+  };
+
+  const deepEqualJson = (a, b) => stableStringify(a) === stableStringify(b);
+
+  const computeQrScenario = (tsLocal, detLocal) => {
+    const qr_status = String(detLocal?.qr_status || tsLocal?.qr_status || '').toUpperCase();
+    const token = tsLocal?.qr_token || null;
+    const gen   = tsLocal?.qr_generated_at || detLocal?.qr_generated_at || null;
+    const scan  = tsLocal?.qr_scanned_at || detLocal?.qr_scanned_at || null;
+
+    const hasToken = !!(token && String(token).trim());
+
+    // Scenario mapping from brief:
+    // scenario1: PENDING + token null + generated_at null
+    // scenario2: PENDING + token present + generated_at present + scanned_at null
+    // scenario3: USED + scanned_at present
+    if (qr_status === 'CANCELLED') return 'CANCELLED';
+    if (qr_status === 'EXPIRED')   return 'EXPIRED';
+
+    if (qr_status === 'PENDING') {
+      if (!hasToken && !gen) return 'SCENARIO_1';
+      if (hasToken && gen && !scan) return 'SCENARIO_2';
+      // Defensive: treat any PENDING as scenario2-ish (awaiting upload)
+      return 'SCENARIO_2';
+    }
+
+    if (qr_status === 'USED') {
+      if (scan) return 'SCENARIO_3';
+      return 'SCENARIO_3';
+    }
+
+    return null;
+  };
+
+  const mapDecisionToAction = (decision, scenario) => {
+    // Preferred new shape from updated openQrDecisionModal:
+    // { action: 'ISSUE_QR'|'REISSUE_QR'|'CONVERT_TO_MANUAL_ONLY'|'SAVE_WITHOUT_ISSUE' }
+    if (decision && typeof decision === 'object') {
+      const a = String(decision.action || '').toUpperCase();
+      if (a === 'ISSUE_QR' || a === 'REISSUE_QR' || a === 'CONVERT_TO_MANUAL_ONLY' || a === 'SAVE_WITHOUT_ISSUE') {
+        return a;
+      }
+    }
+
+    // Backwards compatible mapping for current modal that returns { revoke, reissue }
+    const revoke  = !!decision?.revoke;
+    const reissue = !!decision?.reissue;
+
+    if (scenario === 'SCENARIO_1') {
+      // Old modal can't express ISSUE vs CONVERT cleanly; historically revoke=false & reissue=false meant "issue"
+      if (revoke) return 'CONVERT_TO_MANUAL_ONLY';
+      return 'ISSUE_QR';
+    }
+
+    if (scenario === 'SCENARIO_2' || scenario === 'SCENARIO_3' || scenario === 'EXPIRED') {
+      if (reissue) return 'REISSUE_QR';
+      if (revoke) return 'CONVERT_TO_MANUAL_ONLY';
+      // Default safe: cancel would be handled earlier; otherwise do nothing
+      return null;
+    }
+
+    return null;
+  };
+
+  const mapActionToBackend = (actionEnum) => {
+    // Backend-friendly qr_action values (string)
+    // Our backend handlers accept (or can accept) 'ISSUE' | 'REISSUE' | 'REVOKE_TO_MANUAL'
+    const a = String(actionEnum || '').toUpperCase();
+    if (a === 'ISSUE_QR') return 'ISSUE';
+    if (a === 'REISSUE_QR') return 'REISSUE';
+    if (a === 'CONVERT_TO_MANUAL_ONLY') return 'REVOKE_TO_MANUAL';
+    if (a === 'SAVE_WITHOUT_ISSUE') return 'SAVE_WITHOUT_ISSUE';
+    return null;
+  };
+
+  // ─────────────────────────────────────────────────────────────
+  // Gather state + detect changes
+  // ─────────────────────────────────────────────────────────────
+  const segOverrides    = st.segmentOverrides || {};
+  const hasSegOverrides = !!Object.keys(segOverrides).length;
+
+  const tsLocal    = det.timesheet || {};
+  const tsfinLocal = det.tsfin     || {};
+
+  const currentRef = tsLocal.reference_number || rowNow.reference_number || '';
+  const stagedRef  = (st.reference != null) ? st.reference : currentRef;
+  const refChanged = stagedRef !== currentRef;
+
+  const sheetScopeSave = (det.sheet_scope || rowNow.sheet_scope || tsLocal.sheet_scope || '').toUpperCase();
+  const subModeSave    = (tsLocal.submission_mode || rowNow.submission_mode || '').toUpperCase();
+
+  const weekIdSave     = rowNow.contract_week_id || det.contract_week_id || null;
+
+  const isPlannedWeeklyWithoutTs =
+    sheetScopeSave === 'WEEKLY' &&
+    !!weekIdSave &&
+    !tsLocal.timesheet_id;
+
+  const isWeeklyManualContext =
+    sheetScopeSave === 'WEEKLY' &&
+    !!weekIdSave &&
+    (subModeSave === 'MANUAL' || isPlannedWeeklyWithoutTs);
+
+  const isDailyManualContext =
+    sheetScopeSave === 'DAILY' &&
+    subModeSave === 'MANUAL' &&
+    !!tsLocal.timesheet_id;
+
+  const manualHours = st.manualHours || {};
+  const hasManualHours =
+    manualHours &&
+    ['day', 'night', 'sat', 'sun', 'bh'].some(k => manualHours[k] != null && manualHours[k] !== '');
+
+  const extrasMap       = st.additionalRates || {};
+  const hasExtrasStaged = extrasMap &&
+    Object.values(extrasMap).some(r => r && Number(r.units_week || 0) !== 0);
+
+  // Detect hour/extras changes accurately
+  const currentWeeklyHours = getCurrentWeeklyHours();
+  const stagedWeeklyHours  = getStagedWeeklyHours();
+  const hoursChangedWeekly = isWeeklyManualContext && (
+    // If planned week, any staged values imply change
+    (isPlannedWeeklyWithoutTs && (hasManualHours || hasExtrasStaged)) ||
+    (
+      hasManualHours &&
+      (
+        stagedWeeklyHours.day   !== currentWeeklyHours.day ||
+        stagedWeeklyHours.night !== currentWeeklyHours.night ||
+        stagedWeeklyHours.sat   !== currentWeeklyHours.sat ||
+        stagedWeeklyHours.sun   !== currentWeeklyHours.sun ||
+        stagedWeeklyHours.bh    !== currentWeeklyHours.bh
+      )
+    )
+  );
+
+  const currentExtrasWeek = getCurrentExtrasWeek();
+  const stagedExtrasWeek  = normExtrasWeek(extrasMap);
+  const extrasChangedWeekly = isWeeklyManualContext && (
+    (isPlannedWeeklyWithoutTs && hasExtrasStaged) ||
+    (hasExtrasStaged && stableStringify(currentExtrasWeek) !== stableStringify(stagedExtrasWeek))
+  );
+
+  // Daily schedule change detection
+  const stagedSchedule = (st.schedule != null) ? st.schedule : null;
+  const currentSchedule = tsLocal.actual_schedule_json || null;
+  const scheduleChangedDaily =
+    isDailyManualContext &&
+    !!stagedSchedule &&
+    !deepEqualJson(stagedSchedule, currentSchedule);
+
+  // QR-related change only when actual hours/schedule/extras changed
+  const qrSensitiveChange =
+    (hoursChangedWeekly || extrasChangedWeekly) ||
+    scheduleChangedDaily;
+
+  // Locks
+  const locked = !!(tsfinLocal.locked_by_invoice_id || tsfinLocal.paid_at_utc);
+
+  // If locked, block content changes that affect hours/schedule/extras/segments/reference (but allow pay-hold/mark-paid tasks below)
+  const segTargets = st.segmentInvoiceTargets || {};
+  const hasSegTargets = !!Object.keys(segTargets).length;
+
+  const isContentChangeAttempt =
+    !!qrSensitiveChange ||
+    (det.isSegmentsMode && (hasSegOverrides || hasSegTargets)) ||
+    refChanged;
+
+  if (locked && isContentChangeAttempt) {
+    GE();
+    alert('This timesheet is locked (invoiced or paid). You cannot change hours, schedule, references, or segments.');
+    return { ok: false };
+  }
+
+  // QR scenario + decision enum
+  const qrStatusRaw = String(det?.qr_status || tsLocal?.qr_status || '').toUpperCase();
+  const qrScenario  = computeQrScenario(tsLocal, det);
+
+  let qrActionEnum = null;          // UI enum: ISSUE_QR | REISSUE_QR | CONVERT_TO_MANUAL_ONLY | SAVE_WITHOUT_ISSUE | null
+  let qrActionBackend = null;       // backend mapping: ISSUE | REISSUE | REVOKE_TO_MANUAL | SAVE_WITHOUT_ISSUE | null
+
+  if (qrStatusRaw && !locked && qrSensitiveChange) {
+    const decision = await openQrDecisionModal({
+      defaultChoice: null,
+      scenario: qrScenario, // NEW: caller supplies scenario so modal can render correctly
+      context: {
+        timesheet_id: tsId || rowNow.timesheet_id || null,
+        sheet_scope: sheetScopeSave,
+        submission_mode: subModeSave,
+        qr_status: qrStatusRaw,
+        qr_token: tsLocal.qr_token || null,
+        qr_generated_at: tsLocal.qr_generated_at || det?.qr_generated_at || null,
+        qr_scanned_at: tsLocal.qr_scanned_at || det?.qr_scanned_at || null
+      }
+    });
+
+    if (!decision || decision.cancelled) {
+      GE();
+      return { ok: false };
+    }
+
+    qrActionEnum = mapDecisionToAction(decision, qrScenario);
+    if (!qrActionEnum) {
+      GE();
+      return { ok: false };
+    }
+
+    // If QR expired, force reissue (do not allow "convert to manual-only" silently)
+    if (qrScenario === 'EXPIRED' && qrActionEnum !== 'REISSUE_QR') {
+      GE();
+      alert('This QR has expired. You must reissue a new QR.');
+      return { ok: false };
+    }
+
+    qrActionBackend = mapActionToBackend(qrActionEnum);
+
+    // If scenario 1 and user chose SAVE_WITHOUT_ISSUE (only if you later enable it),
+    // then we do not pass any QR action hints to backend.
+   if (qrActionEnum === 'SAVE_WITHOUT_ISSUE') {
+  qrActionBackend = null;
+}
+}
+
+// ─────────────────────────────────────────────────────────────
+// NEW: Forced QR action (e.g. "Revoke signed QR & request resubmission")
+// Allows reissue even if hours/schedule didn’t change.
+// ─────────────────────────────────────────────────────────────
+const forced = String(st.__forceQrActionEnum || '').toUpperCase();
+if (!qrActionEnum && !locked && tsId && forced === 'REISSUE_QR') {
+  qrActionEnum = 'REISSUE_QR';
+  qrActionBackend = 'REISSUE';
+  try { st.__forceQrActionEnum = null; } catch {}
+}
+
+  // Staged pay-hold + mark-paid (allowed even when locked_by_invoice_id is set, but not when already paid)
+  const currentOnHold    = !!tsfinLocal.pay_on_hold;
+
+  const payHoldDesired   =
+    (st.payHoldDesired === true || st.payHoldDesired === false)
+      ? st.payHoldDesired
+      : null;
+  const payHoldReason    = st.payHoldReason || '';
+  const shouldChangeHold =
+    (payHoldDesired === true  && !currentOnHold) ||
+    (payHoldDesired === false &&  currentOnHold);
+
+  const alreadyPaid      = !!tsfinLocal.paid_at_utc;
+  const wantsMarkPaid    = !!st.markPaid;
+  const shouldMarkPaid   = wantsMarkPaid && !alreadyPaid;
+
+  L('staged state', {
+    tsId,
+    weekIdSave,
+    sheetScopeSave,
+    subModeSave,
+    isWeeklyManualContext,
+    isDailyManualContext,
+    hasManualHours,
+    hasExtrasStaged,
+    hoursChangedWeekly,
+    extrasChangedWeekly,
+    scheduleChangedDaily,
+    qrSensitiveChange,
+    qrStatusRaw,
+    qrScenario,
+    qrActionEnum,
+    qrActionBackend,
+    hasSegOverrides,
+    segOverridesKeys: Object.keys(segOverrides),
+    hasSegTargets,
+    segTargetKeys: Object.keys(segTargets),
+    currentRef,
+    stagedRef,
+    refChanged,
+    locked,
+    currentOnHold,
+    payHoldDesired,
+    payHoldReason,
+    shouldChangeHold,
+    alreadyPaid,
+    wantsMarkPaid,
+    shouldMarkPaid
+  });
+
+  const tasks = [];
+
+  // 5a) Weekly MANUAL hours + additional units → contract-week manual upsert
+  if (isWeeklyManualContext && (hoursChangedWeekly || extrasChangedWeekly)) {
+    tasks.push(async () => {
+      const payload = {
+        hours: {
+          day:   n2(stagedWeeklyHours.day),
+          night: n2(stagedWeeklyHours.night),
+          sat:   n2(stagedWeeklyHours.sat),
+          sun:   n2(stagedWeeklyHours.sun),
+          bh:    n2(stagedWeeklyHours.bh)
+        },
+        additional_units_week: {},
+
+        // per-day NHSP/HR references for this week
+        day_references_json: st.dayReferences || {},
+
+        // NEW: single action enum for QR decisions
+        qr_action: qrActionBackend || null,
+
+        // Legacy compatibility (in case backend still expects booleans)
+        issue_qr:            qrActionBackend === 'ISSUE',
+        reissue_qr:          qrActionBackend === 'REISSUE',
+        revoke_to_manual:    qrActionBackend === 'REVOKE_TO_MANUAL',
+        revoke_qr:           qrActionBackend === 'REVOKE_TO_MANUAL',
+        disable_qr:          false
       };
 
-      switch (key) {
-        case 'overview': return renderTimesheetOverviewTab(ctxForTab);
-        case 'lines':    return renderTimesheetLinesTab(ctxForTab);
-        case 'evidence': return renderTimesheetEvidenceTab(ctxForTab);
-        case 'issues':   return renderTimesheetIssuesTab(ctxForTab);
-        case 'finance':  return renderTimesheetFinanceTab(ctxForTab);
-        default:
-          return `<div class="tabc"><div class="card"><div class="row"><label>Timesheet</label><div class="controls"><span class="mini">Unknown tab: ${key}</span></div></div></div></div>`;
-      }
-    };
-
-    const onSaveTimesheet = async () => {
-      const { LOGM, L, GC, GE } = getTsLoggers('[TS][SAVE]');
-      GC('onSaveTimesheet');
-
-      const mc     = window.modalCtx || {};
-      const rowNow = mc.data || baseRow;
-      const det    = mc.timesheetDetails || details;
-      const st     = mc.timesheetState || {};
-
-      // QR decision is computed here only if the save is QR-sensitive
-      let revokeQr  = false;
-      let reissueQr = false;
-
-      const segOverrides    = st.segmentOverrides || {};
-      const hasSegOverrides = !!Object.keys(segOverrides).length;
-
-      const tsLocal    = det.timesheet || {};
-      const tsfinLocal = det.tsfin     || {};
-
-      const currentRef = tsLocal.reference_number || rowNow.reference_number || '';
-      const stagedRef  = (st.reference != null) ? st.reference : currentRef;
-      const refChanged = stagedRef !== currentRef;
-
-      const sheetScopeSave = (det.sheet_scope ||
-                          rowNow.sheet_scope ||
-                          tsLocal.sheet_scope ||
-                          '').toUpperCase();
-      const subModeSave    = (tsLocal.submission_mode ||
-                          rowNow.submission_mode ||
-                          '').toUpperCase();
-
-      const weekIdSave     = rowNow.contract_week_id || det.contract_week_id || null;
-
-      // Treat BOTH true manual weeks and planned weekly weeks (no TS yet) as "weekly manual context"
-      const isPlannedWeeklyWithoutTs =
-        sheetScopeSave === 'WEEKLY' &&
-        !!weekIdSave &&
-        !tsLocal.timesheet_id;
-
-      const isWeeklyManualContext =
-        sheetScopeSave === 'WEEKLY' &&
-        !!weekIdSave &&
-        (subModeSave === 'MANUAL' || isPlannedWeeklyWithoutTs);
-
-      // DAILY MANUAL context – editable daily TS in MANUAL mode
-      const isDailyManualContext =
-        sheetScopeSave === 'DAILY' &&
-        subModeSave === 'MANUAL' &&
-        !!tsLocal.timesheet_id;
-
-      const manualHours = st.manualHours || {};
-      const hasManualHours =
-        manualHours &&
-        ['day', 'night', 'sat', 'sun', 'bh'].some(
-          k => manualHours[k] != null && manualHours[k] !== ''
-        );
-
-      const extrasMap        = st.additionalRates || {};
-      const hasExtrasStaged  = extrasMap &&
-        Object.values(extrasMap).some(r => r && Number(r.units_week || 0) !== 0);
-
-      // Detect whether this save changes QR-relevant content
-      const qrStatus = String(det?.qr_status || tsLocal?.qr_status || '').toUpperCase();
-      const locked   = !!(tsfinLocal.locked_by_invoice_id || tsfinLocal.paid_at_utc);
-
-      // Weekly QR relevance = manual hours or extras (because that triggers manualUpsertContractWeek)
-      // Daily  QR relevance = schedule_json being staged (because that triggers /daily-manual-upsert)
-      const qrSensitiveChange =
-        (isWeeklyManualContext && (hasManualHours || hasExtrasStaged)) ||
-        (isDailyManualContext && !!(st.schedule));
-
-      if (qrStatus && !locked && qrSensitiveChange) {
-        const decision = await openQrDecisionModal({
-          defaultChoice: null, // force explicit selection (or use 'revoke' to default)
-          context: {
-            timesheet_id: tsId || rowNow.timesheet_id || null,
-            sheet_scope: sheetScopeSave,
-            submission_mode: subModeSave
-          }
-        });
-
-        if (!decision || decision.cancelled) {
-          GE();
-          return { ok: false }; // cancel save cleanly
-        }
-
-        revokeQr  = !!decision.revoke;
-        reissueQr = !!decision.reissue;
-      }
-
-      const segTargets = st.segmentInvoiceTargets || {};
-      const hasSegTargets = !!Object.keys(segTargets).length;
-
-      // Staged pay-hold + mark-paid
-      const currentOnHold    = !!tsfinLocal.pay_on_hold;
-
-      const payHoldDesired   =
-        (st.payHoldDesired === true || st.payHoldDesired === false)
-          ? st.payHoldDesired
-          : null;
-      const payHoldReason    = st.payHoldReason || '';
-      const shouldChangeHold =
-        (payHoldDesired === true  && !currentOnHold) ||
-        (payHoldDesired === false &&  currentOnHold);
-
-      const alreadyPaid      = !!tsfinLocal.paid_at_utc;
-      const wantsMarkPaid    = !!st.markPaid;
-      const shouldMarkPaid   = wantsMarkPaid && !alreadyPaid;
-
-      L('staged state', {
-        tsId,
-        weekIdSave,
-        sheetScopeSave,
-        subModeSave,
-        isWeeklyManualContext,
-        hasManualHours,
-        hasExtrasStaged,
-        hasSegOverrides,
-        segOverridesKeys: Object.keys(segOverrides),
-        hasSegTargets,
-        segTargetKeys: Object.keys(segTargets),
-        currentRef,
-        stagedRef,
-        refChanged,
-        currentOnHold,
-        payHoldDesired,
-        payHoldReason,
-        shouldChangeHold,
-        alreadyPaid,
-        wantsMarkPaid,
-        shouldMarkPaid
+      // staged extras
+      Object.entries(stagedExtrasWeek || {}).forEach(([code, u]) => {
+        const x = Number(u || 0);
+        if (!Number.isFinite(x)) return;
+        payload.additional_units_week[String(code).toUpperCase()] = x;
       });
 
-      const tasks = [];
+      L('manual weekly upsert payload', { weekIdSave, payload });
+      const result = await manualUpsertContractWeek(weekIdSave, payload);
 
-      // 5a) Weekly MANUAL hours + additional units → contract-week manual upsert
-      if (isWeeklyManualContext && (hasManualHours || hasExtrasStaged)) {
-        tasks.push(async () => {
-          const payload = {
-            hours: {
-              day:   Number(manualHours.day   || 0) || 0,
-              night: Number(manualHours.night || 0) || 0,
-              sat:   Number(manualHours.sat   || 0) || 0,
-              sun:   Number(manualHours.sun   || 0) || 0,
-              bh:    Number(manualHours.bh    || 0) || 0
-            },
-            additional_units_week: {},
-
-            // NEW: per-day NHSP/HR references for this week
-            day_references_json: st.dayReferences || {},
-
-            // QR revoke/reissue hints to backend (weekly)
-            revoke_qr:  revokeQr,
-            reissue_qr: reissueQr
-          };
-
-          Object.entries(extrasMap || {}).forEach(([code, r]) => {
-            if (!r) return;
-            const u = Number(r.units_week || 0);
-            if (!Number.isFinite(u)) return;
-            payload.additional_units_week[code] = u;
-          });
-
-          L('manual weekly upsert payload', { weekIdSave, payload });
-          const result = await manualUpsertContractWeek(weekIdSave, payload);
-
-          const newTsId = result.timesheet_id || tsId;
-          if (!tsId && newTsId) {
-            // Planned week → newly created TS
-            window.modalCtx.data = {
-              ...(window.modalCtx.data || rowNow),
-              timesheet_id: newTsId,
-              id: newTsId
-            };
-          }
-
-          const finalTsId = newTsId || tsId;
-          if (finalTsId) {
-            try {
-              const freshDetails = await fetchTimesheetDetails(finalTsId);
-              window.modalCtx.timesheetDetails = freshDetails;
-            } catch (err) {
-              L('refresh details after manual upsert failed (non-fatal)', err);
-            }
-          }
-        });
+      const newTsId = result.timesheet_id || tsId;
+      if (!tsId && newTsId) {
+        // Planned week → newly created TS
+        window.modalCtx.data = {
+          ...(window.modalCtx.data || rowNow),
+          timesheet_id: newTsId,
+          id: newTsId
+        };
       }
 
-      // 5a-daily) DAILY MANUAL – update worked/break + QR hints
-      if (isDailyManualContext && tsId) {
-        tasks.push(async () => {
-          // We send the schedule blob; backend daily-manual-upsert will
-          // resolve it into worked_start/end + breaks and rebuild TSFIN.
-          const schedule = st.schedule || tsLocal.actual_schedule_json || null;
-
-          if (!schedule) {
-            L('daily-manual-upsert skipped: no schedule staged');
-            return;
-          }
-
-          const payload = {
-            schedule_json: schedule,
-            revoke_qr:  revokeQr,
-            reissue_qr: reissueQr
-          };
-
-          L('daily manual upsert payload', { tsId, payload });
-
-          await apiPostJson(
-            `/api/timesheets/${encodeURIComponent(tsId)}/daily-manual-upsert`,
-            payload
-          );
-
-          // Reload details so TSFIN + QR fields reflect the new hours
-          try {
-            const freshDetails = await fetchTimesheetDetails(tsId);
-            window.modalCtx.timesheetDetails = freshDetails;
-          } catch (err) {
-            L('refresh details after daily-manual-upsert failed (non-fatal)', err);
-          }
-        });
-      }
-
-      // 5b) Apply segment exclude_from_pay + invoice_target_week_start (SEGMENTS mode only)
-      if (det.isSegmentsMode && (hasSegOverrides || hasSegTargets) && (tsId || rowNow.timesheet_id)) {
-        tasks.push(async () => {
-          const currentDetails = window.modalCtx.timesheetDetails || det;
-          const segments = Array.isArray(currentDetails.segments) ? currentDetails.segments : [];
-          if (!segments.length) return;
-
-          const updates = [];
-          const overrides = window.modalCtx.timesheetState.segmentOverrides || {};
-          const targets   = window.modalCtx.timesheetState.segmentInvoiceTargets || {};
-
-          for (const seg of segments) {
-            if (!seg || typeof seg !== 'object') continue;
-            const sid = String(seg.segment_id || '').trim();
-            if (!sid) continue;
-
-            const o = overrides[sid] || {};
-            const hasOverride = Object.prototype.hasOwnProperty.call(o, 'exclude_from_pay');
-            const exclude = hasOverride ? !!o.exclude_from_pay : !!seg.exclude_from_pay;
-
-            const originalTarget = seg.invoice_target_week_start || null;
-            const stagedTarget   = targets[sid] || originalTarget || null;
-
-            const update = { segment_id: sid };
-            let changed = false;
-
-            if (exclude !== !!seg.exclude_from_pay) {
-              update.exclude_from_pay = exclude;
-              changed = true;
-            } else {
-              // still send explicit exclude flag so backend recomputes totals coherently
-              update.exclude_from_pay = exclude;
-            }
-
-            if (stagedTarget && stagedTarget !== originalTarget) {
-              update.invoice_target_week_start = stagedTarget;
-              changed = true;
-            }
-
-            if (changed) {
-              updates.push(update);
-            }
-          }
-
-          if (!updates.length) return;
-
-          L('segment updates', { count: updates.length });
-
-          await apiPatchJson(
-            `/api/tsfin/${encodeURIComponent(tsId || rowNow.timesheet_id)}/segments`,
-            { segments: updates }
-          );
-        });
-      }
-
-      // 5c) Apply reference/PO update if changed
-      if (refChanged && tsId) {
-        tasks.push(async () => {
-          await updateTimesheetReference(tsId, stagedRef);
-        });
-      }
-
-      // 5e) Apply pay hold change (staged)
-      if (shouldChangeHold && tsId) {
-        tasks.push(async () => {
-          const onHold = !!payHoldDesired;
-          const reason = onHold ? payHoldReason : '';
-          await toggleTimesheetPayHold(tsId, onHold, reason);
-        });
-      }
-
-      // 5f) Apply mark paid (staged)
-      if (shouldMarkPaid && tsId) {
-        tasks.push(async () => {
-          await markTimesheetPaid(tsId);
-        });
-      }
-
-      if (!tasks.length) {
-        L('no staged changes to apply; no-op');
-        GE();
-        return { ok: true, saved: rowNow };
-      }
-
-      for (let i = 0; i < tasks.length; i++) {
+      const finalTsId = newTsId || tsId;
+      if (finalTsId) {
         try {
-          await tasks[i]();
+          const freshDetails = await fetchTimesheetDetails(finalTsId);
+          window.modalCtx.timesheetDetails = freshDetails;
         } catch (err) {
-          L('task failed', { index: i, error: err });
-          GE();
-          alert(err?.message || 'Failed to save timesheet changes. No changes were fully applied.');
-          return { ok: false };
+          L('refresh details after manual upsert failed (non-fatal)', err);
+        }
+      }
+    });
+  }
+
+  // 5a-daily) DAILY MANUAL – update schedule + QR action enum
+  if (isDailyManualContext && tsId) {
+    // Only run if schedule actually changed
+    if (scheduleChangedDaily) {
+      tasks.push(async () => {
+        const schedule = stagedSchedule || null;
+        if (!schedule) {
+          L('daily-manual-upsert skipped: no schedule staged');
+          return;
+        }
+
+        const payload = {
+          schedule_json: schedule,
+
+          // NEW: single action enum for QR decisions
+          qr_action: qrActionBackend || null,
+
+          // Legacy compatibility
+          reissue_qr:       qrActionBackend === 'REISSUE',
+          revoke_to_manual: qrActionBackend === 'REVOKE_TO_MANUAL',
+          revoke_qr:        qrActionBackend === 'REVOKE_TO_MANUAL'
+        };
+
+        L('daily manual upsert payload', { tsId, payload });
+
+        await apiPostJson(
+          `/api/timesheets/${encodeURIComponent(tsId)}/daily-manual-upsert`,
+          payload
+        );
+
+        // Reload details so TSFIN + QR fields reflect the new hours
+        try {
+          const freshDetails = await fetchTimesheetDetails(tsId);
+          window.modalCtx.timesheetDetails = freshDetails;
+        } catch (err) {
+          L('refresh details after daily-manual-upsert failed (non-fatal)', err);
+        }
+      });
+    }
+  }
+
+  // 5b) Apply segment exclude_from_pay + invoice_target_week_start (SEGMENTS mode only)
+  if (det.isSegmentsMode && (hasSegOverrides || hasSegTargets) && (tsId || rowNow.timesheet_id)) {
+    tasks.push(async () => {
+      const currentDetails = window.modalCtx.timesheetDetails || det;
+      const segments = Array.isArray(currentDetails.segments) ? currentDetails.segments : [];
+      if (!segments.length) return;
+
+      const updates = [];
+      const overrides = window.modalCtx.timesheetState.segmentOverrides || {};
+      const targets   = window.modalCtx.timesheetState.segmentInvoiceTargets || {};
+
+      for (const seg of segments) {
+        if (!seg || typeof seg !== 'object') continue;
+        const sid = String(seg.segment_id || '').trim();
+        if (!sid) continue;
+
+        const o = overrides[sid] || {};
+        const hasOverride = Object.prototype.hasOwnProperty.call(o, 'exclude_from_pay');
+        const exclude = hasOverride ? !!o.exclude_from_pay : !!seg.exclude_from_pay;
+
+        const originalTarget = seg.invoice_target_week_start || null;
+        const stagedTarget   = targets[sid] || originalTarget || null;
+
+        const update = { segment_id: sid };
+        let changed = false;
+
+        if (exclude !== !!seg.exclude_from_pay) {
+          update.exclude_from_pay = exclude;
+          changed = true;
+        } else {
+          update.exclude_from_pay = exclude;
+        }
+
+        if (stagedTarget && stagedTarget !== originalTarget) {
+          update.invoice_target_week_start = stagedTarget;
+          changed = true;
+        }
+
+        if (changed) {
+          updates.push(update);
         }
       }
 
-      // After helpers, details & timesheetState should already be updated
-      const newDetails = window.modalCtx.timesheetDetails || det;
-      const newTsfin   = newDetails.tsfin || {};
-      const newTs      = newDetails.timesheet || {};
-      const finalTsId  = newTs.timesheet_id || tsId || rowNow.timesheet_id;
+      if (!updates.length) return;
 
-      const updatedRow = {
-        ...(window.modalCtx.data || rowNow),
-        timesheet_id:         finalTsId || null,
-        total_pay_ex_vat:     newTsfin.total_pay_ex_vat     ?? rowNow.total_pay_ex_vat,
-        total_charge_ex_vat:  newTsfin.total_charge_ex_vat  ?? rowNow.total_charge_ex_vat,
-        margin_ex_vat:        newTsfin.margin_ex_vat        ?? rowNow.margin_ex_vat,
-        pay_on_hold:          newTsfin.pay_on_hold          ?? rowNow.pay_on_hold,
-        paid_at_utc:          newTsfin.paid_at_utc          ?? rowNow.paid_at_utc,
-        locked_by_invoice_id: newTsfin.locked_by_invoice_id ?? rowNow.locked_by_invoice_id,
-        reference_number:     newTs.reference_number        ?? rowNow.reference_number,
-        id:                   finalTsId || rowNow.id
-      };
+      L('segment updates', { count: updates.length });
 
-      window.modalCtx.data = updatedRow;
+      await apiPatchJson(
+        `/api/tsfin/${encodeURIComponent(tsId || rowNow.timesheet_id)}/segments`,
+        { segments: updates }
+      );
+    });
+  }
 
-      // Clear staged segment state after successful save
-      if (window.modalCtx.timesheetState) {
-        window.modalCtx.timesheetState.segmentOverrides      = {};
-        window.modalCtx.timesheetState.segmentInvoiceTargets = {};
-        window.modalCtx.timesheetState.reference             = updatedRow.reference_number;
-        window.modalCtx.timesheetState.payHoldDesired        = null;
-        window.modalCtx.timesheetState.payHoldReason         = '';
-        window.modalCtx.timesheetState.markPaid              = false;
-        // manualHours / additionalRates / schedule / dayReferences / evidence remain staged for the next edit session
-      }
+  // 5c) Apply reference update if changed
+  if (refChanged && tsId) {
+    tasks.push(async () => {
+      await updateTimesheetReference(tsId, stagedRef);
+    });
+  }
 
-      // Focus this TS in summary grid on next refresh
-      try {
-        if (finalTsId) {
-          window.__pendingFocus = {
-            section: 'timesheets',
-            ids: [String(finalTsId)],
-            primaryIds: [String(finalTsId)]
-          };
-        }
-      } catch {}
+  // 5e) Apply pay hold change (staged)
+  if (shouldChangeHold && tsId) {
+    tasks.push(async () => {
+      const onHold = !!payHoldDesired;
+      const reason = onHold ? payHoldReason : '';
+      await toggleTimesheetPayHold(tsId, onHold, reason);
+    });
+  }
 
-      L('SAVE OK, updatedRow', { id: updatedRow.id });
+  // 5f) Apply mark paid (staged)
+  if (shouldMarkPaid && tsId) {
+    tasks.push(async () => {
+      await markTimesheetPaid(tsId);
+    });
+  }
+
+  if (!tasks.length) {
+    L('no staged changes to apply; no-op');
+    GE();
+    return { ok: true, saved: rowNow };
+  }
+
+  for (let i = 0; i < tasks.length; i++) {
+    try {
+      await tasks[i]();
+    } catch (err) {
+      L('task failed', { index: i, error: err });
       GE();
-      return { ok: true, saved: updatedRow };
-    };
+      alert(err?.message || 'Failed to save timesheet changes. No changes were fully applied.');
+      return { ok: false };
+    }
+  }
+
+  // After helpers, details & timesheetState should already be updated
+  const newDetails = window.modalCtx.timesheetDetails || det;
+  const newTsfin   = newDetails.tsfin || {};
+  const newTs      = newDetails.timesheet || {};
+  const finalTsId  = newTs.timesheet_id || tsId || rowNow.timesheet_id;
+
+  const updatedRow = {
+    ...(window.modalCtx.data || rowNow),
+    timesheet_id:         finalTsId || null,
+    total_pay_ex_vat:     newTsfin.total_pay_ex_vat     ?? rowNow.total_pay_ex_vat,
+    total_charge_ex_vat:  newTsfin.total_charge_ex_vat  ?? rowNow.total_charge_ex_vat,
+    margin_ex_vat:        newTsfin.margin_ex_vat        ?? rowNow.margin_ex_vat,
+    pay_on_hold:          newTsfin.pay_on_hold          ?? rowNow.pay_on_hold,
+    paid_at_utc:          newTsfin.paid_at_utc          ?? rowNow.paid_at_utc,
+    locked_by_invoice_id: newTsfin.locked_by_invoice_id ?? rowNow.locked_by_invoice_id,
+    reference_number:     newTs.reference_number        ?? rowNow.reference_number,
+    id:                   finalTsId || rowNow.id
+  };
+
+  window.modalCtx.data = updatedRow;
+
+  // Clear staged segment state after successful save
+  if (window.modalCtx.timesheetState) {
+    window.modalCtx.timesheetState.segmentOverrides      = {};
+    window.modalCtx.timesheetState.segmentInvoiceTargets = {};
+    window.modalCtx.timesheetState.reference             = updatedRow.reference_number;
+    window.modalCtx.timesheetState.payHoldDesired        = null;
+    window.modalCtx.timesheetState.payHoldReason         = '';
+    window.modalCtx.timesheetState.markPaid              = false;
+    // manualHours / additionalRates / schedule / dayReferences / evidence remain staged for the next edit session
+  }
+
+  // Focus this TS in summary grid on next refresh
+  try {
+    if (finalTsId) {
+      window.__pendingFocus = {
+        section: 'timesheets',
+        ids: [String(finalTsId)],
+        primaryIds: [String(finalTsId)]
+      };
+    }
+  } catch {}
+
+  L('SAVE OK, updatedRow', { id: updatedRow.id });
+  GE();
+  return { ok: true, saved: updatedRow };
+};
 
     const title = hasTs
       ? `Timesheet ${String(tsId).slice(0, 8)}…`
@@ -38993,22 +39893,180 @@ async function openTimesheet(row) {
   }
 }
 
-function openQrDecisionModal({ defaultChoice = null, context = {} } = {}) {
+
+function openQrDecisionModal({ defaultChoice = null, scenario = null, context = {} } = {}) {
+  // scenario: 'SCENARIO_1' | 'SCENARIO_2' | 'SCENARIO_3' | 'EXPIRED' | 'CANCELLED' | null
+  // Return: { cancelled: true } OR { cancelled:false, action: 'ISSUE_QR'|'REISSUE_QR'|'CONVERT_TO_MANUAL_ONLY'|'SAVE_WITHOUT_ISSUE' }
+  //
+  // NOTE: Refuse flows require a reason prompt and are handled elsewhere (separate modal),
+  // so we do not include "Refuse" here.
+
+  const allowedActions = new Set(['ISSUE_QR', 'REISSUE_QR', 'CONVERT_TO_MANUAL_ONLY', 'SAVE_WITHOUT_ISSUE']);
+  const normScenario = String(scenario || '').toUpperCase() || null;
+
+  // Minimal esc helper (use your existing escapeHtml if present)
+  const enc = (typeof escapeHtml === 'function')
+    ? escapeHtml
+    : (s) => String(s ?? '');
+
+  // Decide which actions are available based on QR scenario
+  // Scenario 1: QR enabled but not issued (PENDING, no token, no generated_at)
+  //   - Issue QR (ISSUE_QR)
+  //   - Convert to manual-only (CONVERT_TO_MANUAL_ONLY)
+  //   - Optional: Save without issuing (SAVE_WITHOUT_ISSUE) — only if you want this route
+  //
+  // Scenario 2: QR issued, awaiting upload (PENDING, token, generated_at, scanned null)
+  //   - Reissue QR (REISSUE_QR)
+  //   - Convert to manual-only (CONVERT_TO_MANUAL_ONLY)
+  //
+  // Scenario 3: Signed upload received (USED, scanned_at)
+  //   - Reissue QR (REISSUE_QR)
+  //   - Convert to manual-only (CONVERT_TO_MANUAL_ONLY)
+  //
+  // EXPIRED: treat like scenario 2 but must reissue
+  // CANCELLED: treated as "not usable" — user must either issue again (if allowed) or convert to manual-only.
+  const allowSaveWithoutIssue = false; // set true only if you explicitly want scenario1 "save without issuing"
+
+  const actionsForScenario = () => {
+    if (normScenario === 'SCENARIO_1') {
+      const arr = ['ISSUE_QR', 'CONVERT_TO_MANUAL_ONLY'];
+      if (allowSaveWithoutIssue) arr.splice(1, 0, 'SAVE_WITHOUT_ISSUE');
+      return arr;
+    }
+    if (normScenario === 'SCENARIO_2') {
+      return ['REISSUE_QR', 'CONVERT_TO_MANUAL_ONLY'];
+    }
+    if (normScenario === 'SCENARIO_3') {
+      return ['REISSUE_QR', 'CONVERT_TO_MANUAL_ONLY'];
+    }
+    if (normScenario === 'EXPIRED') {
+      return ['REISSUE_QR', 'CONVERT_TO_MANUAL_ONLY'];
+    }
+    if (normScenario === 'CANCELLED') {
+      // If cancelled, "issue" may be appropriate if you treat it as scenario1-like.
+      // We default to: ISSUE + manual-only
+      const arr = ['ISSUE_QR', 'CONVERT_TO_MANUAL_ONLY'];
+      if (allowSaveWithoutIssue) arr.splice(1, 0, 'SAVE_WITHOUT_ISSUE');
+      return arr;
+    }
+    // Unknown scenario: conservative default
+    return ['REISSUE_QR', 'CONVERT_TO_MANUAL_ONLY'];
+  };
+
+  const available = actionsForScenario();
+
+  // Default selection mapping (legacy compatibility)
   // defaultChoice: null | 'revoke' | 'revoke_reissue'
-  const allowed = new Set([null, 'revoke', 'revoke_reissue']);
-  const initial = allowed.has(defaultChoice) ? defaultChoice : null;
+  const initialActionFromDefaultChoice = () => {
+    const dc = String(defaultChoice || '').toLowerCase();
+    if (dc === 'revoke') return 'CONVERT_TO_MANUAL_ONLY';
+    if (dc === 'revoke_reissue') return 'REISSUE_QR';
+
+    // If no defaultChoice, pick null (force explicit selection)
+    return null;
+  };
+
+  const initialAction = (() => {
+    const a = initialActionFromDefaultChoice();
+    if (a && available.includes(a)) return a;
+    return null;
+  })();
+
+  // UI strings
+  const hint = context?.timesheet_id
+    ? `Timesheet: ${String(context.timesheet_id).slice(0, 8)}…`
+    : '';
+
+  const scenarioLabel = (() => {
+    if (normScenario === 'SCENARIO_1') return 'QR enabled (not issued yet)';
+    if (normScenario === 'SCENARIO_2') return 'QR issued (awaiting signed upload)';
+    if (normScenario === 'SCENARIO_3') return 'Signed upload received';
+    if (normScenario === 'EXPIRED')    return 'QR expired';
+    if (normScenario === 'CANCELLED')  return 'QR cancelled';
+    return 'QR update';
+  })();
+
+  const actionCard = (action, checked) => {
+    const a = String(action || '').toUpperCase();
+    if (!allowedActions.has(a)) return '';
+
+    if (a === 'ISSUE_QR') {
+      return `
+        <label class="mini" style="display:flex;gap:10px;align-items:flex-start;">
+          <input type="radio" name="qr_choice" value="ISSUE_QR" ${checked ? 'checked' : ''}/>
+          <span>
+            <span style="font-size:16px;">📩</span>
+            <strong>Issue QR timesheet</strong><br/>
+            <span style="color:#aaa;">Generate and send a QR timesheet for these updated hours.</span>
+          </span>
+        </label>
+      `;
+    }
+
+    if (a === 'REISSUE_QR') {
+      const extra = (normScenario === 'EXPIRED')
+        ? `<span style="color:#ffbdbd;">This QR is expired — reissue is required.</span>`
+        : `<span style="color:#aaa;">Invalidate the old QR and send a new QR for the updated hours.</span>`;
+
+      return `
+        <label class="mini" style="display:flex;gap:10px;align-items:flex-start;">
+          <input type="radio" name="qr_choice" value="REISSUE_QR" ${checked ? 'checked' : ''}/>
+          <span>
+            <span style="font-size:16px;">♻️</span>
+            <strong>Reissue new QR</strong><br/>
+            ${extra}
+          </span>
+        </label>
+      `;
+    }
+
+    if (a === 'CONVERT_TO_MANUAL_ONLY') {
+      return `
+        <label class="mini" style="display:flex;gap:10px;align-items:flex-start;">
+          <input type="radio" name="qr_choice" value="CONVERT_TO_MANUAL_ONLY" ${checked ? 'checked' : ''}/>
+          <span>
+            <span style="font-size:16px;">🛑</span>
+            <strong>Convert to manual-only</strong><br/>
+            <span style="color:#aaa;">Disable candidate QR/electronic submission for this timesheet. Admin will handle evidence manually.</span>
+          </span>
+        </label>
+      `;
+    }
+
+    if (a === 'SAVE_WITHOUT_ISSUE') {
+      return `
+        <label class="mini" style="display:flex;gap:10px;align-items:flex-start;">
+          <input type="radio" name="qr_choice" value="SAVE_WITHOUT_ISSUE" ${checked ? 'checked' : ''}/>
+          <span>
+            <span style="font-size:16px;">💾</span>
+            <strong>Save without issuing</strong><br/>
+            <span style="color:#aaa;">Save these changes but do not issue a QR yet.</span>
+          </span>
+        </label>
+      `;
+    }
+
+    return '';
+  };
 
   return new Promise((resolve) => {
     let done = false;
     const finish = (v) => { if (done) return; done = true; resolve(v); };
 
-    // Minimal esc helper (use your existing escapeHtml if present)
-    const enc = (typeof escapeHtml === 'function')
-      ? escapeHtml
-      : (s) => String(s ?? '');
-
     const renderTab = () => {
-      const hint = context?.timesheet_id ? `Timesheet: ${String(context.timesheet_id).slice(0, 8)}…` : '';
+      const cards = available
+        .map(a => actionCard(a, initialAction === a))
+        .join('');
+
+      const warning = (normScenario === 'SCENARIO_3')
+        ? `<div class="mini" style="margin-top:10px;color:#ffbdbd;">
+             A signed upload has already been received. Reissuing means it must be re-signed and re-uploaded.
+           </div>`
+        : (normScenario === 'EXPIRED')
+          ? `<div class="mini" style="margin-top:10px;color:#ffbdbd;">
+               This QR is expired. You must reissue a new QR to proceed.
+             </div>`
+          : '';
 
       return `
         <div id="qrDecisionRoot" class="form">
@@ -39021,28 +40079,15 @@ function openQrDecisionModal({ defaultChoice = null, context = {} } = {}) {
                 </div>
 
                 <div class="mini" style="margin-bottom:10px;">
-                  This timesheet already has a QR version. Choose what to do:
+                  <strong>${enc(scenarioLabel)}</strong><br/>
+                  Choose what to do with the QR route after saving these changes:
                 </div>
 
                 <div style="display:flex;flex-direction:column;gap:10px;">
-                  <label class="mini" style="display:flex;gap:10px;align-items:flex-start;">
-                    <input type="radio" name="qr_choice" value="revoke" ${initial === 'revoke' ? 'checked' : ''}/>
-                    <span>
-                      <span style="font-size:16px;">🛑</span>
-                      <strong>Revoke existing QR</strong><br/>
-                      <span style="color:#aaa;">Keep changes, invalidate the old QR. Do not send a new QR.</span>
-                    </span>
-                  </label>
-
-                  <label class="mini" style="display:flex;gap:10px;align-items:flex-start;">
-                    <input type="radio" name="qr_choice" value="revoke_reissue" ${initial === 'revoke_reissue' ? 'checked' : ''}/>
-                    <span>
-                      <span style="font-size:16px;">♻️</span>
-                      <strong>Revoke & reissue new QR</strong><br/>
-                      <span style="color:#aaa;">Invalidate the old QR and send a new QR for the updated hours.</span>
-                    </span>
-                  </label>
+                  ${cards}
                 </div>
+
+                ${warning}
 
                 <div class="mini" style="margin-top:12px;color:#aaa;">
                   Cancel will stop the save.
@@ -39056,24 +40101,21 @@ function openQrDecisionModal({ defaultChoice = null, context = {} } = {}) {
 
     const onSave = async () => {
       const fr = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
-      const choice = fr && fr._qrChoice ? String(fr._qrChoice) : null;
+      const choice = fr && fr._qrChoice ? String(fr._qrChoice).toUpperCase() : null;
 
-      if (choice !== 'revoke' && choice !== 'revoke_reissue') {
-        // keep modal open; Apply should already be disabled, but double safety
+      if (!choice || !allowedActions.has(choice) || !available.includes(choice)) {
         alert('Please select an option.');
         return { ok: false };
       }
 
       finish({
         cancelled: false,
-        revoke:  choice === 'revoke' || choice === 'revoke_reissue',
-        reissue: choice === 'revoke_reissue'
+        action: choice
       });
 
       return { ok: true };
     };
 
-    // Open as a child modal; Close/ESC triggers opts.onDismiss (wired in showModal changes)
     showModal(
       'QR timesheet update',
       [{ key: 'main', label: 'Decision' }],
@@ -39085,19 +40127,16 @@ function openQrDecisionModal({ defaultChoice = null, context = {} } = {}) {
         kind: 'qr-decision',
         noParentGate: true,
         forceEdit: true,
-
-        // NEW: requires showModal support for opts.onDismiss
         onDismiss: () => finish({ cancelled: true })
       }
     );
 
-    // Wire selection → enable Apply immediately
     setTimeout(() => {
       const root = document.getElementById('qrDecisionRoot');
       if (!root) return;
 
       const fr = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
-      if (fr && initial) fr._qrChoice = initial;
+      if (fr && initialAction) fr._qrChoice = initialAction;
 
       root.addEventListener('change', (ev) => {
         const inp = ev.target && ev.target.closest('input[name="qr_choice"]');
@@ -39106,11 +40145,10 @@ function openQrDecisionModal({ defaultChoice = null, context = {} } = {}) {
         const top = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
         if (!top) return;
 
-        top._qrChoice = String(inp.value || '');
+        top._qrChoice = String(inp.value || '').toUpperCase();
         top._updateButtons && top._updateButtons();
       });
 
-      // ensure buttons reflect initial state
       if (fr && typeof fr._updateButtons === 'function') fr._updateButtons();
     }, 0);
   });
@@ -40741,15 +41779,56 @@ async function deleteManualTimesheetAndReopenWeek(timesheetId, contractWeekId) {
   return json;
 }
 
-async function deleteTimesheetPermanent(timesheetId) {
+async function deleteTimesheetPermanent(timesheetId, opts = {}) {
   const { LOGM, L, GC, GE } = getTsLoggers('[TS][DELETE-PERM]');
   GC('deleteTimesheetPermanent');
 
+  // opts:
+  // - contractWeekId: if provided and timesheetId is null, we treat this as a planned-week delete
+  const contractWeekId = opts && opts.contractWeekId ? String(opts.contractWeekId) : null;
+
+  // Planned-week delete path (no timesheet_id yet)
   if (!timesheetId) {
+    if (!contractWeekId) {
+      GE();
+      throw new Error('deleteTimesheetPermanent: timesheetId is required (or provide opts.contractWeekId for planned-week delete)');
+    }
+
+    const encCw = encodeURIComponent(contractWeekId);
+    const url   = API(`/api/contract-weeks/${encCw}/delete-planned`);
+
+    L('REQUEST (planned delete)', { url, contractWeekId });
+
+    let res;
+    let text = '';
+    try {
+      res  = await authFetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) });
+      text = await res.text().catch(() => '');
+    } catch (err) {
+      L('network error (planned delete)', err);
+      GE();
+      throw err;
+    }
+
+    if (!res.ok) {
+      L('server error (planned delete)', { status: res.status, bodyPreview: (text || '').slice(0, 400) });
+      GE();
+      throw new Error(text || `Failed to delete planned week ${contractWeekId}`);
+    }
+
+    let json = {};
+    try {
+      json = text ? JSON.parse(text) : {};
+    } catch (err) {
+      L('parse error (non-fatal, planned delete)', err);
+    }
+
+    L('RESULT (planned delete)', json);
     GE();
-    throw new Error('deleteTimesheetPermanent: timesheetId is required');
+    return json;
   }
 
+  // Normal timesheet delete path
   const encId = encodeURIComponent(timesheetId);
   const url   = API(`/api/timesheets/${encId}`);
 
@@ -40759,7 +41838,7 @@ async function deleteTimesheetPermanent(timesheetId) {
   let text = '';
   try {
     res  = await authFetch(url, { method: 'DELETE' });
-    text = await res.text();
+    text = await res.text().catch(() => '');
   } catch (err) {
     L('network error', err);
     GE();
@@ -40784,15 +41863,384 @@ async function deleteTimesheetPermanent(timesheetId) {
   return json;
 }
 
+async function resendQrTimesheetEmail(timesheetId) {
+  const { LOGM, L, GC, GE } = getTsLoggers('[TS][QR][RESEND]');
+  GC('resendQrTimesheetEmail');
+
+  if (!timesheetId) {
+    GE();
+    throw new Error('resendQrTimesheetEmail: timesheetId is required');
+  }
+
+  const encId = encodeURIComponent(timesheetId);
+  const url = API(`/api/timesheets/${encId}/qr-resend`);
+
+  L('REQUEST', { url, timesheetId });
+
+  let res;
+  let text = '';
+  try {
+    res = await authFetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({})
+    });
+    text = await res.text().catch(() => '');
+  } catch (err) {
+    L('network error', err);
+    GE();
+    throw err;
+  }
+
+  if (!res.ok) {
+    L('server error', { status: res.status, bodyPreview: (text || '').slice(0, 400) });
+    GE();
+    throw new Error(text || 'Failed to resend QR email');
+  }
+
+  let json = {};
+  try { json = text ? JSON.parse(text) : {}; } catch {}
+
+  L('RESULT', json);
+  GE();
+  return json;
+}
+
+async function refuseQrHours(timesheetId) {
+  const { LOGM, L, GC, GE } = getTsLoggers('[TS][QR][REFUSE]');
+  GC('refuseQrHours');
+
+  if (!timesheetId) {
+    GE();
+    throw new Error('refuseQrHours: timesheetId is required');
+  }
+
+  const reason = window.prompt('Reason for refusing this timesheet? (This will be emailed to the candidate)', '');
+  if (reason == null) {
+    GE();
+    return { cancelled: true };
+  }
+
+  const reasonTrim = String(reason || '').trim();
+  if (!reasonTrim) {
+    GE();
+    throw new Error('Refusal reason is required');
+  }
+
+  const encId = encodeURIComponent(timesheetId);
+  const url = API(`/api/timesheets/${encId}/qr-refuse`);
+
+  L('REQUEST', { url, timesheetId, reasonPreview: reasonTrim.slice(0, 80) });
+
+  let res;
+  let text = '';
+  try {
+    res = await authFetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ reason: reasonTrim })
+    });
+    text = await res.text().catch(() => '');
+  } catch (err) {
+    L('network error', err);
+    GE();
+    throw err;
+  }
+
+  if (!res.ok) {
+    L('server error', { status: res.status, bodyPreview: (text || '').slice(0, 400) });
+    GE();
+    throw new Error(text || 'Failed to refuse QR hours');
+  }
+
+  let json = {};
+  try { json = text ? JSON.parse(text) : {}; } catch {}
+
+  // Refresh details in modal if open
+  try {
+    if (window.modalCtx && window.modalCtx.data && window.modalCtx.data.timesheet_id === timesheetId) {
+      const fresh = await fetchTimesheetDetails(timesheetId);
+      window.modalCtx.timesheetDetails = fresh;
+    }
+  } catch {}
+
+  L('RESULT', json);
+  GE();
+  return json;
+}
+
+async function restoreRevokedQr(timesheetId, kind) {
+  const { LOGM, L, GC, GE } = getTsLoggers('[TS][QR][RESTORE]');
+  GC('restoreRevokedQr');
+
+  if (!timesheetId) {
+    GE();
+    throw new Error('restoreRevokedQr: timesheetId is required');
+  }
+
+  const k = String(kind || '').toUpperCase();
+  const restoreKind = (k === 'PENDING' || k === 'SIGNED') ? k : null;
+  if (!restoreKind) {
+    GE();
+    throw new Error('restoreRevokedQr: kind must be PENDING or SIGNED');
+  }
+
+  const encId = encodeURIComponent(timesheetId);
+  const url = API(`/api/timesheets/${encId}/qr-restore`);
+
+  L('REQUEST', { url, timesheetId, kind: restoreKind });
+
+  let res;
+  let text = '';
+  try {
+    res = await authFetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ kind: restoreKind })
+    });
+    text = await res.text().catch(() => '');
+  } catch (err) {
+    L('network error', err);
+    GE();
+    throw err;
+  }
+
+  if (!res.ok) {
+    L('server error', { status: res.status, bodyPreview: (text || '').slice(0, 400) });
+    GE();
+    throw new Error(text || 'Failed to restore revoked QR');
+  }
+
+  let json = {};
+  try { json = text ? JSON.parse(text) : {}; } catch {}
+
+  // Refresh details in modal if open
+  try {
+    if (window.modalCtx && window.modalCtx.data && window.modalCtx.data.timesheet_id === timesheetId) {
+      const fresh = await fetchTimesheetDetails(timesheetId);
+      window.modalCtx.timesheetDetails = fresh;
+    }
+  } catch {}
+
+  L('RESULT', json);
+  GE();
+  return json;
+}
 
 
+async function allowQrAgain(timesheetId) {
+  const { LOGM, L, GC, GE } = getTsLoggers('[TS][ALLOW][QR]');
+  GC('allowQrAgain');
+
+  if (!timesheetId) {
+    GE();
+    throw new Error('allowQrAgain: timesheetId is required');
+  }
+
+  const ok = window.confirm(
+    'Allow QR submission again for this timesheet?\n\n' +
+    'This will create a new current version and re-enable the QR route (Scenario 1).'
+  );
+  if (!ok) {
+    GE();
+    return { cancelled: true };
+  }
+
+  const encId = encodeURIComponent(timesheetId);
+  const url = API(`/api/timesheets/${encId}/allow-qr-again`);
+
+  L('REQUEST', { url, timesheetId });
+
+  let res;
+  let text = '';
+  try {
+    res = await authFetch(url, { method: 'POST' });
+    text = await res.text().catch(() => '');
+  } catch (err) {
+    L('network error', err);
+    GE();
+    throw err;
+  }
+
+  if (!res.ok) {
+    L('server error', { status: res.status, bodyPreview: (text || '').slice(0, 400) });
+    GE();
+    throw new Error(text || 'Failed to allow QR again');
+  }
+
+  let json = {};
+  try { json = text ? JSON.parse(text) : {}; } catch {}
+
+  // Refresh details in modal if open
+  try {
+    if (window.modalCtx && window.modalCtx.data && window.modalCtx.data.timesheet_id === timesheetId) {
+      const fresh = await fetchTimesheetDetails(timesheetId);
+      window.modalCtx.timesheetDetails = fresh;
+    }
+  } catch {}
+
+  L('RESULT', json);
+  GE();
+  return json;
+}
 
 
+async function allowQrAgain(timesheetId) {
+  const { LOGM, L, GC, GE } = getTsLoggers('[TS][ALLOW][QR]');
+  GC('allowQrAgain');
+
+  if (!timesheetId) {
+    GE();
+    throw new Error('allowQrAgain: timesheetId is required');
+  }
+
+  const ok = window.confirm(
+    'Allow QR submission again for this timesheet?\n\n' +
+    'This will create a new current version and re-enable the QR route (Scenario 1).'
+  );
+  if (!ok) {
+    GE();
+    return { cancelled: true };
+  }
+
+  const encId = encodeURIComponent(timesheetId);
+  const url = API(`/api/timesheets/${encId}/allow-qr-again`);
+
+  L('REQUEST', { url, timesheetId });
+
+  let res;
+  let text = '';
+  try {
+    res = await authFetch(url, { method: 'POST' });
+    text = await res.text().catch(() => '');
+  } catch (err) {
+    L('network error', err);
+    GE();
+    throw err;
+  }
+
+  if (!res.ok) {
+    L('server error', { status: res.status, bodyPreview: (text || '').slice(0, 400) });
+    GE();
+    throw new Error(text || 'Failed to allow QR again');
+  }
+
+  let json = {};
+  try { json = text ? JSON.parse(text) : {}; } catch {}
+
+  // Refresh details in modal if open
+  try {
+    if (window.modalCtx && window.modalCtx.data && window.modalCtx.data.timesheet_id === timesheetId) {
+      const fresh = await fetchTimesheetDetails(timesheetId);
+      window.modalCtx.timesheetDetails = fresh;
+    }
+  } catch {}
+
+  L('RESULT', json);
+  GE();
+  return json;
+}
 
 
+async function allowElectronicAgain(timesheetId) {
+  const { LOGM, L, GC, GE } = getTsLoggers('[TS][ALLOW][ELECTRONIC]');
+  GC('allowElectronicAgain');
+
+  if (!timesheetId) {
+    GE();
+    throw new Error('allowElectronicAgain: timesheetId is required');
+  }
+
+  const ok = window.confirm(
+    'Allow electronic submission again for this timesheet?\n\n' +
+    'This will create a new current ELECTRONIC version. The candidate will need to re-submit signatures/hours.'
+  );
+  if (!ok) {
+    GE();
+    return { cancelled: true };
+  }
+
+  const encId = encodeURIComponent(timesheetId);
+  const url = API(`/api/timesheets/${encId}/allow-electronic-again`);
+
+  L('REQUEST', { url, timesheetId });
+
+  let res;
+  let text = '';
+  try {
+    res = await authFetch(url, { method: 'POST' });
+    text = await res.text().catch(() => '');
+  } catch (err) {
+    L('network error', err);
+    GE();
+    throw err;
+  }
+
+  if (!res.ok) {
+    L('server error', { status: res.status, bodyPreview: (text || '').slice(0, 400) });
+    GE();
+    throw new Error(text || 'Failed to allow electronic again');
+  }
+
+  let json = {};
+  try { json = text ? JSON.parse(text) : {}; } catch {}
+
+  // Refresh details in modal if open
+  try {
+    if (window.modalCtx && window.modalCtx.data && window.modalCtx.data.timesheet_id === timesheetId) {
+      const fresh = await fetchTimesheetDetails(timesheetId);
+      window.modalCtx.timesheetDetails = fresh;
+    }
+  } catch {}
+
+  L('RESULT', json);
+  GE();
+  return json;
+}
 
 
+async function deletePlannedContractWeek(contractWeekId) {
+  const { LOGM, L, GC, GE } = getTsLoggers('[TS][DELETE][PLANNED]');
+  GC('deletePlannedContractWeek');
 
+  if (!contractWeekId) {
+    GE();
+    throw new Error('deletePlannedContractWeek: contractWeekId is required');
+  }
+
+  const encId = encodeURIComponent(contractWeekId);
+  const url = API(`/api/contract-weeks/${encId}/delete-planned`);
+
+  L('REQUEST', { url, contractWeekId });
+
+  let res;
+  let text = '';
+  try {
+    res = await authFetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({})
+    });
+    text = await res.text().catch(() => '');
+  } catch (err) {
+    L('network error', err);
+    GE();
+    throw err;
+  }
+
+  if (!res.ok) {
+    L('server error', { status: res.status, bodyPreview: (text || '').slice(0, 400) });
+    GE();
+    throw new Error(text || `Failed to delete planned contract week ${contractWeekId}`);
+  }
+
+  let json = {};
+  try { json = text ? JSON.parse(text) : {}; } catch {}
+
+  L('RESULT', json);
+  GE();
+  return json;
+}
 
 
 
