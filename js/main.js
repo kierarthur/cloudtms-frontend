@@ -25145,6 +25145,8 @@ const isUtilityKind =
   btnClose.setAttribute('title', label);
 };
 
+const parentEditable =
+  top.noParentGate ? true : (parent ? (parent.mode === 'edit' || parent.mode === 'create') : true);
 
 
   top._updateButtons = ()=>{
@@ -25157,7 +25159,7 @@ const isUtilityKind =
       }
     } catch {}
 
-    const parentEditable = top.noParentGate ? true : (parent ? (parent.mode==='edit' || parent.mode==='create') : true);
+ 
     const relatedBtn = byId('btnRelated');
 
     // NEW: hide Preset Manager's "New" button whenever a child is open or when the top frame isn't the manager
@@ -26167,7 +26169,6 @@ async function saveForFrame(fr) {
   }
 
 
-  const parentEditable = parent && (parent.mode==='edit' || parent.mode==='create');
   const isChildNow = (stack().length > 1);
   if (isChildNow && !top.noParentGate) setFormReadOnly(byId('modalBody'), !parentEditable);
   else                                 setFrameMode(top, top.mode);
