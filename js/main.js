@@ -37091,23 +37091,24 @@ function renderTimesheetLinesTab(ctx) {
   };
 
   // ─────────────────────────────────────────────────────
-  // A) SEGMENTS mode → existing imported breakdown
-  // ─────────────────────────────────────────────────────
-  if (isSegments && segs.length) {
-    const headHtml = `
-      <thead>
-        <tr>
-          <th>Date</th>
-          <th>Ref / Request</th>
-          <th>Source</th>
-          <th>Hours</th>
-          <th>Pay</th>
-          <th>Charge</th>
-          <th>Exclude from pay</th>
-          <th>Invoice week / Pause</th>
-        </tr>
-      </thead>
-   `;
+// A) SEGMENTS mode → imported/self-bill breakdown ONLY
+//    (NHSP / HR self-bill / adjustments)
+// ─────────────────────────────────────────────────────
+if (isSegments && segs.length && isNhspOrHrSelfBillBasis) {
+  const headHtml = `
+    <thead>
+      <tr>
+        <th>Date</th>
+        <th>Ref / Request</th>
+        <th>Source</th>
+        <th>Hours</th>
+        <th>Pay</th>
+        <th>Charge</th>
+        <th>Exclude from pay</th>
+        <th>Invoice week / Pause</th>
+      </tr>
+    </thead>
+ `;
 
     const bodyRows = segs.map((seg) => {
       const effOverride = state.segmentOverrides && state.segmentOverrides[seg.segment_id];
@@ -37206,11 +37207,43 @@ function renderTimesheetLinesTab(ctx) {
   //     - MANUAL: editable (if not locked)
   //     - ELECTRONIC: read-only, but shown in the same grid
   // ─────────────────────────────────────────────────────
-  if (sheetScope === 'WEEKLY') {
-    const scheduleArr = Array.isArray(state.schedule) ? state.schedule.slice() : [];
-    const hasSchedule = scheduleArr.length > 0;
-    const hasTs       = !!tsId;
-    const isPlannedSchedule = !hasTs; // once TS exists, we never show “planned” again
+ if (sheetScope === 'WEEKLY') {
+  // ✅ NEW: Ensure state.schedule is seeded (so weekly grid always renders Start/End/Break fields)
+  try {
+    const tryParse = (src) => {
+      if (!src) return null;
+      if (Array.isArray(src) || typeof src === 'object') return JSON.parse(JSON.stringify(src));
+      if (typeof src === 'string') { try { const p = JSON.parse(src); if (Array.isArray(p) || typeof p === 'object') return p; } catch {} }
+      return null;
+    };
+
+    // If schedule not already staged, seed from the timesheet record (actual_schedule_json)
+    if (!Array.isArray(state.schedule) || state.schedule.length === 0) {
+      const fromTs = tryParse(ts && ts.actual_schedule_json);
+      if (Array.isArray(fromTs) && fromTs.length) {
+        state.schedule = fromTs;
+      }
+    }
+
+    // If still empty and this is a planned week (no TS), seed from contract_week planned/std schedule
+    if ((!Array.isArray(state.schedule) || state.schedule.length === 0) && details && details.contract_week) {
+      const cw2 = details.contract_week;
+      const src = (cw2.planned_schedule_json != null) ? cw2.planned_schedule_json
+               : (cw2.std_schedule_json != null)     ? cw2.std_schedule_json
+               : null;
+      const fromCw = tryParse(src);
+      if (Array.isArray(fromCw) && fromCw.length) {
+        state.schedule = fromCw;
+      }
+    }
+  } catch {
+    // non-fatal
+  }
+
+  const scheduleArr = Array.isArray(state.schedule) ? state.schedule.slice() : [];
+  const hasSchedule = scheduleArr.length > 0;
+  const hasTs       = !!tsId;
+  const isPlannedSchedule = !hasTs; // once TS exists, we never show “planned” again
 
     const canEditSchedule = !locked && subMode === 'MANUAL';
 
