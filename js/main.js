@@ -24349,123 +24349,257 @@ if (this.entity === 'timesheets' && k === 'lines') {
           updateScheduleFromRow(tr);
         }, true);
 
-              // Reset schedule + Extra Breaks + / - buttons
-        root.addEventListener('click', (ev) => {
-          const btn = ev.target.closest('button[data-ts-action]');
-          if (!btn) return;
+      // Reset schedule + Extra Breaks + / - buttons
+// ✅ FIXED:
+//   1) Hide + block these actions unless Timesheet modal is in EDIT/CREATE
+//   2) Inject existing extra breaks from state.schedule[].breaks[] on load
+//   3) Wire extra-break inputs so they recalc the row (they are NOT data-sched-field inputs)
 
-          const action = btn.getAttribute('data-ts-action');
+const __tsIsEditMode = () => {
+  try {
+    const fr = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
+    return !!(fr && fr.entity === 'timesheets' && (fr.mode === 'edit' || fr.mode === 'create'));
+  } catch { return false; }
+};
 
-          // Reset schedule
-          if (action === 'reset-schedule') {
-            state.schedule = [];
-            const rows = schedTable.querySelectorAll('tbody tr[data-row-idx]');
-            rows.forEach(tr => {
-              const inputs = tr.querySelectorAll('input[data-sched-field]');
-              inputs.forEach(inp => {
-                inp.value = '';
-                if (inp.name === 'sched_break_mins') inp.disabled = false;
-              });
+const __tsShowSchedActionButtons = (show) => {
+  try {
+    root.querySelectorAll(
+      'button[data-ts-action="reset-schedule"],' +
+      'button[data-ts-action="extra-break-add"],' +
+      'button[data-ts-action="extra-break-remove"]'
+    ).forEach(b => { b.style.display = show ? '' : 'none'; });
+  } catch {}
+};
 
-              // Clear any extra break inputs as well
-              const extraInputs = tr.querySelectorAll('input[data-extra-break]');
-              extraInputs.forEach(inp => { inp.value = ''; inp.remove(); });
+const __tsRemoveWithBr = (inp) => {
+  if (!inp) return;
+  const prev = inp.previousSibling;
+  const next = inp.nextSibling;
+  if (prev && prev.nodeType === 1 && prev.tagName === 'BR') { try { prev.remove(); } catch {} }
+  else if (next && next.nodeType === 1 && next.tagName === 'BR') { try { next.remove(); } catch {} }
+  try { inp.remove(); } catch {}
+};
 
-              const paidEl = tr.querySelector('.sched-paid-hours');
-              if (paidEl) paidEl.textContent = '';
-            });
-            state.extraBreakCount = 0;
-            try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
-            return;
-          }
+const __tsWireExtraInp = (inp, tr) => {
+  if (!inp || inp.__tsExtraBreakWired) return;
+  inp.__tsExtraBreakWired = true;
+  const recalc = () => { try { updateScheduleFromRow(tr); } catch {} };
+  inp.addEventListener('change', recalc);
+  inp.addEventListener('blur', recalc, true);
+};
 
-          // Add an extra break line for all rows
-          if (action === 'extra-break-add') {
-            const current = Number(state.extraBreakCount || 0);
-            const newIndex = current;
-            state.extraBreakCount = current + 1;
+const __tsEnsureExtraBreakInputs = () => {
+  const table = root.querySelector('#tsWeeklySchedule');
+  if (!table) return;
 
-            const rows = schedTable.querySelectorAll('tbody tr[data-row-idx]');
-            rows.forEach(tr => {
-              const date = tr.getAttribute('data-date') || '';
+  const count = Number(state.extraBreakCount || 0);
+  if (!Number.isFinite(count) || count <= 0) return;
 
-              const startCell = tr.querySelector('input[name="sched_break_start"]')?.parentElement;
-              const endCell   = tr.querySelector('input[name="sched_break_end"]')?.parentElement;
-              if (!startCell || !endCell) return;
+  const sched = Array.isArray(state.schedule) ? state.schedule : [];
+  const rows = table.querySelectorAll('tbody tr[data-row-idx]');
 
-              let startBox = startCell.querySelector('.extra-breaks');
-              if (!startBox) {
-                startBox = document.createElement('div');
-                startBox.className = 'extra-breaks';
-                startCell.appendChild(startBox);
-              }
+  rows.forEach(tr => {
+    const date = tr.getAttribute('data-date') || '';
+    if (!date) return;
 
-              let endBox = endCell.querySelector('.extra-breaks');
-              if (!endBox) {
-                endBox = document.createElement('div');
-                endBox.className = 'extra-breaks';
-                endCell.appendChild(endBox);
-              }
+    const entry = sched.find(s => s && String(s.date) === String(date)) || null;
+    const breaks = Array.isArray(entry?.breaks) ? entry.breaks : []; // [0] primary, [1..] extras
 
-              const startExtra = document.createElement('input');
-              startExtra.type = 'text';
-              startExtra.className = 'input mini';
-              startExtra.name = `sched_break_start_extra_${newIndex}`;
-              startExtra.setAttribute('data-extra-break', 'start');
-              startExtra.setAttribute('data-extra-index', String(newIndex));
-              if (date) startExtra.setAttribute('data-date', date);
-              startBox.appendChild(startExtra);
+    const startCell = tr.querySelector('input[name="sched_break_start"]')?.parentElement;
+    const endCell   = tr.querySelector('input[name="sched_break_end"]')?.parentElement;
+    if (!startCell || !endCell) return;
 
-              const endExtra = document.createElement('input');
-              endExtra.type = 'text';
-              endExtra.className = 'input mini';
-              endExtra.name = `sched_break_end_extra_${newIndex}`;
-              endExtra.setAttribute('data-extra-break', 'end');
-              endExtra.setAttribute('data-extra-index', String(newIndex));
-              if (date) endExtra.setAttribute('data-date', date);
-              endBox.appendChild(endExtra);
-            });
+    let startBox = startCell.querySelector('.extra-breaks');
+    if (!startBox) {
+      startBox = document.createElement('div');
+      startBox.className = 'extra-breaks';
+      startCell.appendChild(startBox);
+    }
 
-            try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
-            return;
-          }
+    let endBox = endCell.querySelector('.extra-breaks');
+    if (!endBox) {
+      endBox = document.createElement('div');
+      endBox.className = 'extra-breaks';
+      endCell.appendChild(endBox);
+    }
 
-          // Remove the right-most extra break line (without touching the primary break fields)
-          if (action === 'extra-break-remove') {
-            let current = Number(state.extraBreakCount || 0);
-            if (!Number.isFinite(current) || current <= 0) {
-              // No extra break lines → nothing to remove (primary stays)
-              return;
-            }
-            const removeIndex = current - 1;
+    for (let i = 0; i < count; i++) {
+      const idxStr = String(i);
 
-            const rows = schedTable.querySelectorAll('tbody tr[data-row-idx]');
-            rows.forEach(tr => {
-              const startExtra = tr.querySelector(
-                `input[data-extra-break="start"][data-extra-index="${removeIndex}"]`
-              );
-              const endExtra = tr.querySelector(
-                `input[data-extra-break="end"][data-extra-index="${removeIndex}"]`
-              );
+      let startExtra = tr.querySelector(`input[data-extra-break="start"][data-extra-index="${idxStr}"]`);
+      let endExtra   = tr.querySelector(`input[data-extra-break="end"][data-extra-index="${idxStr}"]`);
 
-              if (startExtra) {
-                startExtra.value = '';
-                startExtra.remove();
-              }
-              if (endExtra) {
-                endExtra.value = '';
-                endExtra.remove();
-              }
+      if (!startExtra) {
+        if (startBox.childNodes.length) startBox.appendChild(document.createElement('br'));
+        startExtra = document.createElement('input');
+        startExtra.type = 'text';
+        startExtra.className = 'input mini';
+        startExtra.name = `sched_break_start_extra_${i}`;
+        startExtra.setAttribute('data-extra-break', 'start');
+        startExtra.setAttribute('data-extra-index', idxStr);
+        startExtra.setAttribute('data-date', date);
+        startBox.appendChild(startExtra);
+      }
 
-              // Recalculate schedule for this row after removing the window
-              updateScheduleFromRow(tr);
-            });
+      if (!endExtra) {
+        if (endBox.childNodes.length) endBox.appendChild(document.createElement('br'));
+        endExtra = document.createElement('input');
+        endExtra.type = 'text';
+        endExtra.className = 'input mini';
+        endExtra.name = `sched_break_end_extra_${i}`;
+        endExtra.setAttribute('data-extra-break', 'end');
+        endExtra.setAttribute('data-extra-index', idxStr);
+        endExtra.setAttribute('data-date', date);
+        endBox.appendChild(endExtra);
+      }
 
-            state.extraBreakCount = removeIndex;
-            try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
-            return;
-          }
+      const b = breaks[i + 1] || null;
+      const sVal = (b && b.start) ? String(b.start) : '';
+      const eVal = (b && b.end)   ? String(b.end)   : '';
+
+      try { startExtra.value = (typeof normaliseHHMM === 'function') ? normaliseHHMM(sVal) : sVal; } catch { startExtra.value = sVal; }
+      try { endExtra.value   = (typeof normaliseHHMM === 'function') ? normaliseHHMM(eVal) : eVal; } catch { endExtra.value = eVal; }
+
+      __tsWireExtraInp(startExtra, tr);
+      __tsWireExtraInp(endExtra, tr);
+    }
+  });
+};
+
+// Hide in view mode; show in edit/create
+__tsShowSchedActionButtons(__tsIsEditMode());
+
+// Inject existing extra breaks immediately (so multi-break days render on load)
+__tsEnsureExtraBreakInputs();
+
+// Attach ONE delegated click handler (uses current DOM each time)
+if (!root.__tsSchedActionsWired) {
+  root.__tsSchedActionsWired = true;
+
+  root.addEventListener('click', (ev) => {
+    const btn = ev.target.closest('button[data-ts-action]');
+    if (!btn) return;
+
+    const action = btn.getAttribute('data-ts-action');
+
+    // Only handle these three actions here
+    if (action !== 'reset-schedule' && action !== 'extra-break-add' && action !== 'extra-break-remove') return;
+
+    if (!__tsIsEditMode()) {
+      try { window.__toast && window.__toast('Click Edit to change the schedule.'); } catch {}
+      return;
+    }
+
+    const table = root.querySelector('#tsWeeklySchedule');
+    if (!table) return;
+
+    // Reset schedule
+    if (action === 'reset-schedule') {
+      state.schedule = [];
+
+      const rows = table.querySelectorAll('tbody tr[data-row-idx]');
+      rows.forEach(tr => {
+        const inputs = tr.querySelectorAll('input[data-sched-field]');
+        inputs.forEach(inp => {
+          inp.value = '';
+          if (inp.name === 'sched_break_mins') inp.disabled = false;
         });
+
+        const extraInputs = tr.querySelectorAll('input[data-extra-break]');
+        extraInputs.forEach(inp => __tsRemoveWithBr(inp));
+
+        const paidEl = tr.querySelector('.sched-paid-hours');
+        if (paidEl) paidEl.textContent = '';
+      });
+
+      state.extraBreakCount = 0;
+      try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
+      return;
+    }
+
+    // Add an extra break line for all rows
+    if (action === 'extra-break-add') {
+      const current = Number(state.extraBreakCount || 0);
+      const newIndex = current;
+      state.extraBreakCount = current + 1;
+
+      const rows = table.querySelectorAll('tbody tr[data-row-idx]');
+      rows.forEach(tr => {
+        const date = tr.getAttribute('data-date') || '';
+
+        const startCell = tr.querySelector('input[name="sched_break_start"]')?.parentElement;
+        const endCell   = tr.querySelector('input[name="sched_break_end"]')?.parentElement;
+        if (!startCell || !endCell) return;
+
+        let startBox = startCell.querySelector('.extra-breaks');
+        if (!startBox) {
+          startBox = document.createElement('div');
+          startBox.className = 'extra-breaks';
+          startCell.appendChild(startBox);
+        }
+
+        let endBox = endCell.querySelector('.extra-breaks');
+        if (!endBox) {
+          endBox = document.createElement('div');
+          endBox.className = 'extra-breaks';
+          endCell.appendChild(endBox);
+        }
+
+        if (startBox.childNodes.length) startBox.appendChild(document.createElement('br'));
+        if (endBox.childNodes.length)   endBox.appendChild(document.createElement('br'));
+
+        const startExtra = document.createElement('input');
+        startExtra.type = 'text';
+        startExtra.className = 'input mini';
+        startExtra.name = `sched_break_start_extra_${newIndex}`;
+        startExtra.setAttribute('data-extra-break', 'start');
+        startExtra.setAttribute('data-extra-index', String(newIndex));
+        if (date) startExtra.setAttribute('data-date', date);
+        startBox.appendChild(startExtra);
+
+        const endExtra = document.createElement('input');
+        endExtra.type = 'text';
+        endExtra.className = 'input mini';
+        endExtra.name = `sched_break_end_extra_${newIndex}`;
+        endExtra.setAttribute('data-extra-break', 'end');
+        endExtra.setAttribute('data-extra-index', String(newIndex));
+        if (date) endExtra.setAttribute('data-date', date);
+        endBox.appendChild(endExtra);
+
+        __tsWireExtraInp(startExtra, tr);
+        __tsWireExtraInp(endExtra, tr);
+      });
+
+      try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
+      return;
+    }
+
+    // Remove the right-most extra break line (without touching the primary break fields)
+    if (action === 'extra-break-remove') {
+      let current = Number(state.extraBreakCount || 0);
+      if (!Number.isFinite(current) || current <= 0) return;
+
+      const removeIndex = current - 1;
+
+      const rows = table.querySelectorAll('tbody tr[data-row-idx]');
+      rows.forEach(tr => {
+        const startExtra = tr.querySelector(`input[data-extra-break="start"][data-extra-index="${removeIndex}"]`);
+        const endExtra   = tr.querySelector(`input[data-extra-break="end"][data-extra-index="${removeIndex}"]`);
+
+        __tsRemoveWithBr(startExtra);
+        __tsRemoveWithBr(endExtra);
+
+        try { updateScheduleFromRow(tr); } catch {}
+      });
+
+      state.extraBreakCount = removeIndex;
+      try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
+      return;
+    }
+  });
+}
+
 
       }
 
@@ -37245,7 +37379,13 @@ if (isSegments && segs.length && isNhspOrHrSelfBillBasis) {
   const hasTs       = !!tsId;
   const isPlannedSchedule = !hasTs; // once TS exists, we never show “planned” again
 
-    const canEditSchedule = !locked && subMode === 'MANUAL';
+  const frameMode =
+  (typeof window.__getModalFrame === 'function' ? window.__getModalFrame()?.mode : null) ||
+  'view';
+
+const isEditMode = (frameMode === 'edit' || frameMode === 'create');
+const canEditSchedule = isEditMode && !locked && subMode === 'MANUAL';
+
 
     const badgeHtml = isPlannedSchedule
       ? (subMode === 'MANUAL'
@@ -37260,12 +37400,22 @@ if (isSegments && segs.length && isNhspOrHrSelfBillBasis) {
     const uiRows = [];
     const dowShort = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
 
-    // How many *extra* break lines per day (beyond the primary)?
-    let extraBreakCount = 0;
-    if (Number.isFinite(Number(state.extraBreakCount))) {
-      extraBreakCount = Math.max(0, Number(state.extraBreakCount));
-    }
-    state.extraBreakCount = extraBreakCount;
+ // How many *extra* break lines per day (beyond the primary)?
+const maxExtraFromSchedule = (Array.isArray(scheduleArr) ? scheduleArr : []).reduce((m, seg) => {
+  const n = Array.isArray(seg?.breaks) ? Math.max(0, seg.breaks.length - 1) : 0;
+  return Math.max(m, n);
+}, 0);
+
+let extraBreakCount = 0;
+if (Number.isFinite(Number(state.extraBreakCount))) {
+  extraBreakCount = Math.max(0, Number(state.extraBreakCount));
+}
+
+// ensure we render any existing extra breaks even in view mode
+extraBreakCount = Math.max(extraBreakCount, maxExtraFromSchedule);
+
+state.extraBreakCount = extraBreakCount;
+
 
     const pushRowFromSeg = (seg) => {
       if (!seg || !seg.date) return;
