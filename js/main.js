@@ -37274,14 +37274,55 @@ if (isSegments && segs.length && isNhspOrHrSelfBillBasis) {
 
       const start       = seg.start        || '';
       const end         = seg.end          || '';
-      const breakStart  = seg.break_start  || '';
-      const breakEnd    = seg.break_end    || '';
-      const breakMins   = (seg.break_mins != null && seg.break_mins !== '') ? String(seg.break_mins) : '';
+   // Prefer explicit fields, but also support schedule.breaks[0]
+const breaksArr = Array.isArray(seg.breaks) ? seg.breaks.filter(b => b && (b.start || b.end)) : [];
+const primary   = breaksArr[0] || null;
+// Any extra break windows persisted in schedule.breaks (beyond the primary)
+const extra_breaks = breaksArr.length > 1 ? breaksArr.slice(1) : [];
 
-      // Any extra break windows persisted in schedule.breaks (beyond the primary)
-      const breaksArr = Array.isArray(seg.breaks) ? seg.breaks.filter(b => b && (b.start || b.end)) : [];
-      const extra_breaks = breaksArr.length > 1 ? breaksArr.slice(1) : [];
+const breakStart = seg.break_start || primary?.start || '';
+const breakEnd   = seg.break_end   || primary?.end   || '';
 
+// Compute break minutes from (break_mins || break_minutes || sum(breaks) || (break_start/end))
+const parseHHMM = (hhmm) => {
+  const m = String(hhmm || '').trim().match(/^(\d{1,2}):(\d{2})$/);
+  if (!m) return null;
+  const h = Number(m[1]), mm = Number(m[2]);
+  if (!Number.isFinite(h) || !Number.isFinite(mm)) return null;
+  return h * 60 + mm;
+};
+
+const diffMins = (a, b) => {
+  const am = parseHHMM(a), bm = parseHHMM(b);
+  if (am == null || bm == null) return null;
+  let d = bm - am;
+  if (d < 0) d += 24 * 60;
+  return d;
+};
+
+let breakMinsNum =
+  (seg.break_mins != null)    ? Number(seg.break_mins) :
+  (seg.break_minutes != null) ? Number(seg.break_minutes) :
+  NaN;
+
+if (!Number.isFinite(breakMinsNum)) {
+  // sum explicit break windows if present
+  let sum = 0;
+  for (const b of breaksArr) {
+    const d = diffMins(b.start, b.end);
+    if (Number.isFinite(d) && d > 0) sum += d;
+  }
+  if (sum > 0) breakMinsNum = sum;
+}
+
+if (!Number.isFinite(breakMinsNum)) {
+  const d = diffMins(breakStart, breakEnd);
+  breakMinsNum = Number.isFinite(d) && d > 0 ? d : 0;
+}
+
+const breakMins = String(Math.max(0, Math.round(breakMinsNum)));
+
+   
       // Simple paid-hours preview: shift minus total break (minutes)
       const toMins = (hhmm) => {
         if (!hhmm || typeof hhmm !== 'string') return null;
@@ -37304,8 +37345,9 @@ if (isSegments && segs.length && isNhspOrHrSelfBillBasis) {
           // Overnight shift: assume wraps to next day
           shiftMinutes += 24 * 60;
         }
-        const b = Number(breakMins || 0);
-        const paidMin = Math.max(0, shiftMinutes - (Number.isFinite(b) ? b : 0));
+  const b = Number.isFinite(breakMinsNum) ? breakMinsNum : Number(breakMins || 0);
+const paidMin = Math.max(0, shiftMinutes - (Number.isFinite(b) ? b : 0));
+
         paid = paidMin > 0 ? (Math.round((paidMin / 60) * 100) / 100).toFixed(2) : '0.00';
       }
 
