@@ -40510,6 +40510,75 @@ const onSaveTimesheet = async () => {
   }
 }
 
+async function fetchTimesheetAudit(timesheetId) {
+  const { LOGM, L, GC, GE } = getTsLoggers('[TS][AUDIT][FETCH]');
+  GC('fetchTimesheetAudit');
+
+  try {
+    if (!timesheetId) {
+      throw new Error('fetchTimesheetAudit: timesheetId is required');
+    }
+
+    const encId = encodeURIComponent(String(timesheetId));
+    const url = API(`/api/timesheets/${encId}/audit-feed`);
+
+    L('REQUEST', { url, timesheetId: String(timesheetId) });
+
+    const res = await authFetch(url, { method: 'GET' });
+
+    // Prefer JSON parse, but fall back to text (so we can show useful errors)
+    const ct = String(res.headers?.get?.('content-type') || '');
+    let payload = null;
+    let text = '';
+
+    try {
+      if (ct.includes('application/json')) {
+        payload = await res.json();
+      } else {
+        text = await res.text().catch(() => '');
+        payload = text ? JSON.parse(text) : null;
+      }
+    } catch {
+      // If JSON parsing fails, keep raw text for errors
+      if (!text) text = await res.text().catch(() => '');
+      payload = null;
+    }
+
+    if (!res.ok) {
+      // Try to extract a meaningful error message
+      const msg =
+        (payload && typeof payload === 'object' && (payload.message || payload.error)) ||
+        (typeof payload === 'string' && payload) ||
+        (text && text) ||
+        `Failed to fetch audit feed (HTTP ${res.status})`;
+
+      L('server error', { status: res.status, msg, bodyPreview: String(text || msg).slice(0, 500) });
+      throw new Error(String(msg));
+    }
+
+    // Accept either { items: [...] } or a raw array response
+    const items = Array.isArray(payload?.items)
+      ? payload.items
+      : (Array.isArray(payload) ? payload : []);
+
+    L('RESULT', { count: items.length });
+
+    // Store in modal cache (used by audit tab builder)
+    try {
+      const mc = window.modalCtx || {};
+      mc.timesheetAuditCache ||= {};
+      mc.timesheetAuditCache[String(timesheetId)] = items;
+    } catch {}
+
+    return items;
+  } catch (err) {
+    L('error', { err: err?.message || String(err) });
+    throw err;
+  } finally {
+    GE();
+  }
+}
+
 
 function openQrDecisionModal({ defaultChoice = null, scenario = null, context = {} } = {}) {
   // scenario: 'SCENARIO_1' | 'SCENARIO_2' | 'SCENARIO_3' | 'EXPIRED' | 'CANCELLED' | null
