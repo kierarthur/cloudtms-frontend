@@ -23439,9 +23439,12 @@ if (this.entity === 'timesheets' && k === 'overview') {
         const qrReissueReqBtn    = root.querySelector('button[data-ts-action="qr-reissue-request"]');
         const qrConvertManualBtn = root.querySelector('button[data-ts-action="qr-convert-manual-only"]');
         const qrRestorePendBtn   = root.querySelector('button[data-ts-action="qr-restore-pending"]');
-        const qrRestoreSignedBtn = root.querySelector('button[data-ts-action="qr-restore-signed"]');
-        const allowQrAgainBtn    = root.querySelector('button[data-ts-action="allow-qr-again"]');
-        const allowElecAgainBtn  = root.querySelector('button[data-ts-action="allow-electronic-again"]');
+const qrRestoreSignedBtn = root.querySelector('button[data-ts-action="qr-restore-signed"]');
+const allowQrAgainBtn    = root.querySelector('button[data-ts-action="allow-qr-again"]');
+const allowElecAgainBtn  = root.querySelector('button[data-ts-action="allow-electronic-again"]');
+
+const switchElecPlannedBtn = root.querySelector('button[data-ts-action="switch-electronic-planned"]');
+
 
         // ✅ REMOVED: planned-only delete button wiring from Overview tab.
         // Planned-only weeks are now deleted via the *footer* "Delete timesheet" button (btnTsDeleteTimesheet)
@@ -23465,15 +23468,27 @@ if (this.entity === 'timesheets' && k === 'overview') {
         const locked       = !!(tsfin.locked_by_invoice_id || tsfin.paid_at_utc);
         const alreadyPaid  = !!tsfin.paid_at_utc;
 
-        const hasTs    = !!tsId;
-        const isWeekly = (sheetScope === 'WEEKLY');
-        const isDaily  = (sheetScope === 'DAILY');
+ const hasTs    = !!tsId;
+const isWeekly = (sheetScope === 'WEEKLY');
+const isDaily  = (sheetScope === 'DAILY');
 
-        const weeklyElectronicWithTs =
-          isWeekly && subMode === 'ELECTRONIC' && hasTs;
+const weeklyElectronicWithTs =
+  isWeekly && subMode === 'ELECTRONIC' && hasTs;
 
-        const weeklyElectronicPlanned =
-          isWeekly && subMode === 'ELECTRONIC' && !hasTs && !!weekId;
+const weeklyElectronicPlanned =
+  isWeekly && subMode === 'ELECTRONIC' && !hasTs && !!weekId;
+
+const cwModeSnapshot =
+  String(
+    actionFlags.cw_submission_mode_snapshot ||
+    (det.contract_week && det.contract_week.submission_mode_snapshot) ||
+    mc.data?.submission_mode_snapshot ||
+    ''
+  ).toUpperCase();
+
+const weeklyManualPlanned =
+  isWeekly && !hasTs && !!weekId && (cwModeSnapshot === 'MANUAL');
+
 
         // Prefer backend-computed flags (details.action_flags), fallback to basic checks
         const canRevertElectronic =
@@ -23743,6 +23758,68 @@ if (this.entity === 'timesheets' && k === 'overview') {
         // ─────────────────────────────────────────────────────────────
         // QR / route actions wiring (buttons rendered by renderTimesheetOverviewTab)
         // ─────────────────────────────────────────────────────────────
+
+
+if (switchElecPlannedBtn) {
+  const showSwitchBack =
+    mode === 'view' &&
+    !locked &&
+    weeklyManualPlanned;
+
+  switchElecPlannedBtn.style.display = showSwitchBack ? '' : 'none';
+
+  if (!switchElecPlannedBtn.__tsWired) {
+    switchElecPlannedBtn.__tsWired = true;
+    switchElecPlannedBtn.addEventListener('click', async () => {
+      const ok = window.confirm('Switch this planned weekly week back to ELECTRONIC submission?');
+      if (!ok) return;
+
+      try {
+        const mc2 = window.modalCtx || {};
+        const weekId2 = mc2.data?.contract_week_id || null;
+        if (!weekId2) throw new Error('Contract week id missing.');
+
+        await switchContractWeekToElectronic(weekId2);
+
+        try {
+          mc2.data.submission_mode_snapshot = 'ELECTRONIC';
+          if (mc2.timesheetDetails && mc2.timesheetDetails.contract_week) {
+            mc2.timesheetDetails.contract_week.submission_mode_snapshot = 'ELECTRONIC';
+          }
+          if (mc2.timesheetMeta && typeof mc2.timesheetMeta === 'object') {
+            mc2.timesheetMeta.cw_submission_mode_snapshot = 'ELECTRONIC';
+            mc2.timesheetMeta.sheetScope = 'WEEKLY';
+            mc2.timesheetMeta.subMode = 'ELECTRONIC';
+            mc2.timesheetMeta.isPlannedWeek = true;
+            mc2.timesheetMeta.hasTs = false;
+          }
+        } catch {}
+
+        window.__toast && window.__toast('Week is now ELECTRONIC.');
+
+        try { await renderAll(); } catch {}
+
+        try {
+          if (typeof window.__getModalFrame === 'function') {
+            const fr = window.__getModalFrame();
+            if (fr && fr.entity === 'timesheets') {
+              fr.mode = 'view';
+              fr._suppressDirty = true;
+              fr.setTab('overview');
+              fr._suppressDirty = false;
+              fr._updateButtons && fr._updateButtons();
+            }
+          }
+        } catch {}
+      } catch (err) {
+        alert(err?.message || 'Failed to switch week back to electronic.');
+      }
+    });
+  }
+}
+
+
+
 
         const refreshAndRepaintOverview = async () => {
           try {
@@ -39119,7 +39196,6 @@ function renderTimesheetOverviewTab(ctx) {
 
   const payOnHold  = !!(tsfin.pay_on_hold ?? row.pay_on_hold);
 
-  // ✅ ready_to_pay comes from v_timesheets_summary (row.ready_to_pay) and is also mirrored into details by normaliseTimesheetCtx
   const readyToPay =
     (typeof details.ready_to_pay === 'boolean') ? details.ready_to_pay :
     (typeof row.ready_to_pay === 'boolean')     ? row.ready_to_pay :
@@ -39129,9 +39205,6 @@ function renderTimesheetOverviewTab(ctx) {
   const requiresHr    = !!policy.requires_hr;
   const autoprocessHr = !!policy.autoprocess_hr;
 
-  // ─────────────────────────────────────────────────────────────
-  // Authorisation helper (single source for "Awaiting Authorisation" badge)
-  // ─────────────────────────────────────────────────────────────
   let authInfo = { requires: false, authorised: false, showAwaitingBadge: false };
   if (typeof computeRequiresTimesheetAuthorisation === 'function') {
     try {
@@ -39147,9 +39220,6 @@ function renderTimesheetOverviewTab(ctx) {
     authInfo = { requires: requiresAuth, authorised, showAwaitingBadge: (requiresAuth && !authorised) };
   }
 
-  // ─────────────────────────────────────────────────────────────
-  // Stage badges (multiple, independent; never duplicate "Awaiting Authorisation")
-  // ─────────────────────────────────────────────────────────────
   const stageBadges = [];
   const seenStage   = new Set();
 
@@ -39166,39 +39236,28 @@ function renderTimesheetOverviewTab(ctx) {
     );
   };
 
-  // Unprocessed / Planned
   if (!hasTsfin) addStage('Unprocessed', 'pill-info');
 
-  // Paid / Invoiced can co-exist (you explicitly want that)
   if (isPaid)     addStage('Paid', 'pill-ok');
   if (isInvoiced) addStage('Invoiced', 'pill-warn');
 
-  // Processing stage flags (can co-exist with Paid/Invoiced if DB says so)
   if (stageRaw === 'READY_FOR_INVOICE')     addStage('Ready for Invoicing', 'pill-ok');
   if (stageRaw === 'READY_FOR_HR')          addStage('Ready for HR', 'pill-info');
   if (stageRaw === 'RATE_MISSING')          addStage('Rate Missing', 'pill-bad');
   if (stageRaw === 'PAY_CHANNEL_MISSING')   addStage('Pay Channel Missing', 'pill-bad');
 
-  // Awaiting Authorisation: ONLY from authInfo (prevents duplicates)
   if (authInfo.showAwaitingBadge) addStage('Awaiting Authorisation', 'pill-warn');
 
-  // Pay on hold: must be RED + only in Stage
   if (payOnHold) addStage('Pay on hold', 'pill-bad');
 
-  // Ready to Pay: only if ready_to_pay is true AND not on hold AND not paid
   if (readyToPay && !payOnHold && !isPaid) addStage('Ready to Pay', 'pill-ok');
 
-  // If TSFIN exists but stageRaw is something else, surface it (optional but helpful)
   if (hasTsfin && stageRaw && !seenStage.has(stageRaw)) {
-    // Don’t re-add PENDING_AUTH (we already represent it via authInfo)
     if (stageRaw !== 'PENDING_AUTH') addStage(stageRaw, 'pill-info');
   }
 
   if (!stageBadges.length) addStage('Unknown', 'pill-info');
 
-  // ─────────────────────────────────────────────────────────────
-  // Route pills: exactly 2 (Route + Scope)
-  // ─────────────────────────────────────────────────────────────
   const qrStatus   = String(details.qr_status || ts.qr_status || '').toUpperCase();
   const qrScenario = String(actionFlags.qr_scenario || '').toUpperCase() || null;
 
@@ -39236,9 +39295,6 @@ function renderTimesheetOverviewTab(ctx) {
     (sheetScope === 'DAILY')  ? 'pill-daily'  :
     'pill-info';
 
-  // ─────────────────────────────────────────────────────────────
-  // Header
-  // ─────────────────────────────────────────────────────────────
   const headerHtml = `
     <div class="card">
       <div class="row">
@@ -39284,7 +39340,35 @@ function renderTimesheetOverviewTab(ctx) {
     const canAllowQrAgain   = !!actionFlags.can_allow_qr_again;
     const canAllowElecAgain = !!actionFlags.can_allow_electronic_again;
 
-    // DAILY: send QR (backend handles ELECTRONIC→QR + email)
+    const cwMode =
+      String(
+        cw.submission_mode_snapshot ||
+        details.cw_submission_mode_snapshot ||
+        row.submission_mode_snapshot ||
+        ''
+      ).toUpperCase();
+
+    const weekId =
+      details.contract_week_id ||
+      cw.id ||
+      row.contract_week_id ||
+      null;
+
+    const isPlannedWeeklyManual =
+      (sheetScope === 'WEEKLY') &&
+      !tsId &&
+      !!weekId &&
+      !locked &&
+      (cwMode === 'MANUAL');
+
+    if (isPlannedWeeklyManual) {
+      btns.push(`
+        <button type="button" class="pill pill-info" style="${badgeBtnStyle}" data-ts-action="switch-electronic-planned">
+          Switch week back to electronic
+        </button>
+      `);
+    }
+
     if (sheetScope === 'DAILY' && tsId && subMode === 'ELECTRONIC' && !locked) {
       btns.push(`
         <button type="button" class="pill pill-info" style="${badgeBtnStyle}" data-ts-action="send-daily-qr">
@@ -39293,7 +39377,6 @@ function renderTimesheetOverviewTab(ctx) {
       `);
     }
 
-    // QR Scenario 2: resend existing QR email
     if (tsId && !locked && isScenario2 && qrStatus === 'PENDING') {
       btns.push(`
         <button type="button" class="pill pill-info" style="${badgeBtnStyle}" data-ts-action="qr-resend">
@@ -39302,7 +39385,6 @@ function renderTimesheetOverviewTab(ctx) {
       `);
     }
 
-    // QR Scenario 2: refuse hours
     if (tsId && !locked && isScenario2 && qrStatus === 'PENDING') {
       btns.push(`
         <button type="button" class="pill pill-warn" style="${badgeBtnStyle}" data-ts-action="qr-refuse">
@@ -39311,7 +39393,6 @@ function renderTimesheetOverviewTab(ctx) {
       `);
     }
 
-    // QR Scenario 3: revoke and request resubmission (maps to REISSUE)
     if (tsId && !locked && isScenario3 && qrStatus === 'USED') {
       btns.push(`
         <button type="button" class="pill pill-warn" style="${badgeBtnStyle}" data-ts-action="qr-reissue-request">
@@ -39320,7 +39401,6 @@ function renderTimesheetOverviewTab(ctx) {
       `);
     }
 
-    // Any QR scenario: convert to manual-only
     if (tsId && !locked && (isScenario1 || isScenario2 || isScenario3 || isExpired || isCancelled) && qrStatus) {
       btns.push(`
         <button type="button" class="pill pill-info" style="${badgeBtnStyle}" data-ts-action="qr-convert-manual-only">
@@ -39329,7 +39409,6 @@ function renderTimesheetOverviewTab(ctx) {
       `);
     }
 
-    // Restore revoked versions
     if (tsId && !locked && canRestorePending) {
       btns.push(`
         <button type="button" class="pill pill-info" style="${badgeBtnStyle}" data-ts-action="qr-restore-pending">
@@ -39345,7 +39424,6 @@ function renderTimesheetOverviewTab(ctx) {
       `);
     }
 
-    // Manual-only re-enable options
     if (tsId && !locked && isManualOnly && canAllowQrAgain) {
       btns.push(`
         <button type="button" class="pill pill-info" style="${badgeBtnStyle}" data-ts-action="allow-qr-again">
@@ -39361,7 +39439,6 @@ function renderTimesheetOverviewTab(ctx) {
       `);
     }
 
-    // Revert to electronic (admin) if available
     if (tsId && !locked && canRevertToElec) {
       btns.push(`
         <button type="button" class="pill pill-info" style="${badgeBtnStyle}" data-ts-action="revert-electronic">
@@ -42066,17 +42143,16 @@ if (st && st.scheduleHasErrors) {
       ? `Timesheet ${String(tsId).slice(0, 8)}…`
       : `Weekly timesheet (planned) ${String(weekId).slice(0, 8)}…`;
 
-    const hasRecordId = !!(hasTs || isPlannedWeek);
+ showModal(
+  title,
+  tabDefs,
+  renderTab,
+  onSaveTimesheet,
+  hasTs,
+  undefined,
+  { kind: 'timesheets' }
+);
 
-    showModal(
-      title,
-      tabDefs,
-      renderTab,
-      onSaveTimesheet,
-      hasRecordId,
-      undefined,
-      { kind: 'timesheets' }
-    );
 
     GE();
   } catch (err) {
@@ -44339,7 +44415,6 @@ async function switchTimesheetToManual(timesheetId) {
   return json;
 }
 
-
 async function revertTimesheetToElectronic(timesheetId) {
   const { LOGM, L, GC, GE } = getTsLoggers('[TS][REVERT-ELEC]');
   GC('revertTimesheetToElectronic');
@@ -44358,7 +44433,7 @@ async function revertTimesheetToElectronic(timesheetId) {
   let text = '';
   try {
     res  = await authFetch(url, { method: 'POST' });
-    text = await res.text();
+    text = await res.text().catch(() => '');
   } catch (err) {
     L('network error', err);
     GE();
@@ -44372,13 +44447,38 @@ async function revertTimesheetToElectronic(timesheetId) {
   }
 
   let json = {};
-  try {
-    json = text ? JSON.parse(text) : {};
-  } catch (err) {
-    L('parse error (non-fatal)', err);
-  }
+  try { json = text ? JSON.parse(text) : {}; } catch {}
 
-  L('RESULT', json);
+  const newId =
+    json.current_timesheet_id ||
+    json.new_timesheet_id ||
+    json.timesheet_id ||
+    null;
+
+  // If modal is open on this TS, refresh using returned current id
+  try {
+    if (window.modalCtx && window.modalCtx.data) {
+      const isSame =
+        String(window.modalCtx.data.timesheet_id || '') === String(timesheetId || '');
+
+      if (isSame) {
+        if (newId && String(newId) !== String(timesheetId)) {
+          window.modalCtx.data.timesheet_id = newId;
+          window.modalCtx.data.id = newId;
+        }
+
+        const fetchId = (newId || timesheetId);
+        const fresh = await fetchTimesheetDetails(fetchId);
+        window.modalCtx.timesheetDetails = fresh;
+
+        try {
+          if (window.modalCtx.data) window.modalCtx.data.submission_mode = 'ELECTRONIC';
+        } catch {}
+      }
+    }
+  } catch {}
+
+  L('RESULT', { json, newId });
   GE();
   return json;
 }
@@ -44617,6 +44717,7 @@ async function refuseQrHours(timesheetId) {
   return json;
 }
 
+
 async function restoreRevokedQr(timesheetId, kind) {
   const { LOGM, L, GC, GE } = getTsLoggers('[TS][QR][RESTORE]');
   GC('restoreRevokedQr');
@@ -44662,19 +44763,34 @@ async function restoreRevokedQr(timesheetId, kind) {
   let json = {};
   try { json = text ? JSON.parse(text) : {}; } catch {}
 
-  // Refresh details in modal if open
+  const newId =
+    json.current_timesheet_id ||
+    json.new_timesheet_id ||
+    json.timesheet_id ||
+    null;
+
+  // Refresh details in modal if open (use NEW current id if provided)
   try {
-    if (window.modalCtx && window.modalCtx.data && window.modalCtx.data.timesheet_id === timesheetId) {
-      const fresh = await fetchTimesheetDetails(timesheetId);
-      window.modalCtx.timesheetDetails = fresh;
+    if (window.modalCtx && window.modalCtx.data) {
+      const isSame =
+        String(window.modalCtx.data.timesheet_id || '') === String(timesheetId || '');
+
+      if (isSame) {
+        if (newId && String(newId) !== String(timesheetId)) {
+          window.modalCtx.data.timesheet_id = newId;
+          window.modalCtx.data.id = newId;
+        }
+        const fetchId = (newId || timesheetId);
+        const fresh = await fetchTimesheetDetails(fetchId);
+        window.modalCtx.timesheetDetails = fresh;
+      }
     }
   } catch {}
 
-  L('RESULT', json);
+  L('RESULT', { json, newId });
   GE();
   return json;
 }
-
 
 async function allowQrAgain(timesheetId) {
   const { LOGM, L, GC, GE } = getTsLoggers('[TS][ALLOW][QR]');
@@ -44719,72 +44835,38 @@ async function allowQrAgain(timesheetId) {
   let json = {};
   try { json = text ? JSON.parse(text) : {}; } catch {}
 
-  // Refresh details in modal if open
+  const newId =
+    json.current_timesheet_id ||
+    json.new_timesheet_id ||
+    json.timesheet_id ||
+    null;
+
+  // Refresh details in modal if open (use NEW current id if provided)
   try {
-    if (window.modalCtx && window.modalCtx.data && window.modalCtx.data.timesheet_id === timesheetId) {
-      const fresh = await fetchTimesheetDetails(timesheetId);
-      window.modalCtx.timesheetDetails = fresh;
+    if (window.modalCtx && window.modalCtx.data) {
+      const isSame =
+        String(window.modalCtx.data.timesheet_id || '') === String(timesheetId || '');
+
+      if (isSame) {
+        if (newId && String(newId) !== String(timesheetId)) {
+          window.modalCtx.data.timesheet_id = newId;
+          window.modalCtx.data.id = newId;
+        }
+
+        const fetchId = (newId || timesheetId);
+        const fresh = await fetchTimesheetDetails(fetchId);
+        window.modalCtx.timesheetDetails = fresh;
+
+        try {
+          if (window.modalCtx.timesheetMeta && typeof window.modalCtx.timesheetMeta === 'object') {
+            window.modalCtx.timesheetMeta.hasTs = true;
+          }
+        } catch {}
+      }
     }
   } catch {}
 
-  L('RESULT', json);
-  GE();
-  return json;
-}
-
-
-async function allowQrAgain(timesheetId) {
-  const { LOGM, L, GC, GE } = getTsLoggers('[TS][ALLOW][QR]');
-  GC('allowQrAgain');
-
-  if (!timesheetId) {
-    GE();
-    throw new Error('allowQrAgain: timesheetId is required');
-  }
-
-  const ok = window.confirm(
-    'Allow QR submission again for this timesheet?\n\n' +
-    'This will create a new current version and re-enable the QR route (Scenario 1).'
-  );
-  if (!ok) {
-    GE();
-    return { cancelled: true };
-  }
-
-  const encId = encodeURIComponent(timesheetId);
-  const url = API(`/api/timesheets/${encId}/allow-qr-again`);
-
-  L('REQUEST', { url, timesheetId });
-
-  let res;
-  let text = '';
-  try {
-    res = await authFetch(url, { method: 'POST' });
-    text = await res.text().catch(() => '');
-  } catch (err) {
-    L('network error', err);
-    GE();
-    throw err;
-  }
-
-  if (!res.ok) {
-    L('server error', { status: res.status, bodyPreview: (text || '').slice(0, 400) });
-    GE();
-    throw new Error(text || 'Failed to allow QR again');
-  }
-
-  let json = {};
-  try { json = text ? JSON.parse(text) : {}; } catch {}
-
-  // Refresh details in modal if open
-  try {
-    if (window.modalCtx && window.modalCtx.data && window.modalCtx.data.timesheet_id === timesheetId) {
-      const fresh = await fetchTimesheetDetails(timesheetId);
-      window.modalCtx.timesheetDetails = fresh;
-    }
-  } catch {}
-
-  L('RESULT', json);
+  L('RESULT', { json, newId });
   GE();
   return json;
 }
@@ -44833,15 +44915,38 @@ async function allowElectronicAgain(timesheetId) {
   let json = {};
   try { json = text ? JSON.parse(text) : {}; } catch {}
 
-  // Refresh details in modal if open
+  const newId =
+    json.current_timesheet_id ||
+    json.new_timesheet_id ||
+    json.timesheet_id ||
+    null;
+
+  // Refresh details in modal if open (use NEW current id if provided)
   try {
-    if (window.modalCtx && window.modalCtx.data && window.modalCtx.data.timesheet_id === timesheetId) {
-      const fresh = await fetchTimesheetDetails(timesheetId);
-      window.modalCtx.timesheetDetails = fresh;
+    if (window.modalCtx && window.modalCtx.data) {
+      const isSame =
+        String(window.modalCtx.data.timesheet_id || '') === String(timesheetId || '');
+
+      if (isSame) {
+        if (newId && String(newId) !== String(timesheetId)) {
+          window.modalCtx.data.timesheet_id = newId;
+          window.modalCtx.data.id = newId;
+        }
+
+        const fetchId = (newId || timesheetId);
+        const fresh = await fetchTimesheetDetails(fetchId);
+        window.modalCtx.timesheetDetails = fresh;
+
+        try {
+          if (window.modalCtx.timesheetMeta && typeof window.modalCtx.timesheetMeta === 'object') {
+            window.modalCtx.timesheetMeta.hasTs = true;
+          }
+        } catch {}
+      }
     }
   } catch {}
 
-  L('RESULT', json);
+  L('RESULT', { json, newId });
   GE();
   return json;
 }
