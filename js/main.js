@@ -38269,6 +38269,7 @@ function computeTimesheetProcessingState(details, row) {
   return { key: 'UNPROCESSED', label: 'Unprocessed' };
 }
 
+
 async function openTimesheetEvidenceViewerExisting(evidenceItem) {
   const { LOGM, L, GC, GE } = getTsLoggers('[TS][EVIDENCE][VIEWER]');
   GC('openTimesheetEvidenceViewerExisting');
@@ -38387,7 +38388,7 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
         <select
           id="${selId}"
           class="input"
-          style="min-width:220px;background:transparent;border:1px solid rgba(255,255,255,.18);"
+          style="min-width:220px;color-scheme:dark;"
         >
           <option value="Timesheet" ${initialSelect === 'Timesheet' ? 'selected' : ''}>Timesheet</option>
           <option value="Mileage" ${initialSelect === 'Mileage' ? 'selected' : ''}>Mileage</option>
@@ -38401,7 +38402,7 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
           type="text"
           class="input"
           placeholder="Enter evidence type"
-          style="min-width:260px;background:transparent;border:1px solid rgba(255,255,255,.18);${initialSelect === 'Other' ? '' : 'display:none;'}"
+          style="min-width:260px;${initialSelect === 'Other' ? '' : 'display:none;'}"
           value="${escapeHtml(initialOther)}"
         />
         <span class="mini" style="opacity:.85;">Change type then click Save.</span>
@@ -41971,7 +41972,6 @@ function renderTimesheetEvidenceTab(ctx) {
 }
 
 
-
 async function openTimesheetEvidenceUploadDialog(file) {
   const { LOGM, L, GC, GE } = getTsLoggers('[TS][EVIDENCE][UPLOAD_DIALOG]');
   GC('openTimesheetEvidenceUploadDialog');
@@ -42042,7 +42042,7 @@ async function openTimesheetEvidenceUploadDialog(file) {
             <select
               id="${selId}"
               class="input"
-              style="min-width:220px;background:transparent;border:1px solid rgba(255,255,255,.18);"
+              style="min-width:220px;color-scheme:dark;"
             >
               <option value="Timesheet">Timesheet</option>
               <option value="Mileage">Mileage</option>
@@ -42056,7 +42056,7 @@ async function openTimesheetEvidenceUploadDialog(file) {
               type="text"
               class="input"
               placeholder="Enter evidence type"
-              style="display:none;min-width:260px;background:transparent;border:1px solid rgba(255,255,255,.18);"
+              style="display:none;min-width:260px;"
               value=""
             />
           </div>
