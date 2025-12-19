@@ -32530,37 +32530,31 @@ async function renderClientSettingsUI(settingsObj){
   let s = canonicalizeClientSettings(seed);
   ctx.clientSettingsState = { ...initial, ...s };
 
-  const yesNoToggle = (name, text, checked) => `
-    <label class="inline chk-tight"
-           style="display:inline-flex;align-items:flex-start;gap:6px;margin-right:18px;white-space:normal;">
-      <input type="checkbox" name="${name}" ${checked ? 'checked' : ''}/>
-      <span style="white-space:normal;overflow-wrap:anywhere;">${text}</span>
-    </label>
-  `;
-
-  const radioToggle = (name, value, text, checked) => `
-    <label class="inline chk-tight"
-           style="display:inline-flex;align-items:flex-start;gap:6px;margin-right:18px;white-space:normal;">
-      <input type="radio" name="${name}" value="${value}" ${checked ? 'checked' : ''}/>
-      <span style="white-space:normal;overflow-wrap:anywhere;">${text}</span>
-    </label>
-  `;
-
-  const pairTimeRow = (label, aName, aVal, bName, bVal) => `
-    <div class="row">
-      <label style="white-space:normal">${label}</label>
-      <div class="controls" style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;min-width:0;">
-        <div style="display:flex;flex-direction:column;gap:4px;min-width:140px;flex:1;">
-          <span class="mini" style="opacity:0.9">Start</span>
-          <input class="input" type="time" step="60" name="${aName}" value="${String(aVal||'')}" />
-        </div>
-        <div style="display:flex;flex-direction:column;gap:4px;min-width:140px;flex:1;">
-          <span class="mini" style="opacity:0.9">End</span>
-          <input class="input" type="time" step="60" name="${bName}" value="${String(bVal||'')}" />
+  const pairTimeRow = (label, aName, aVal, bName, bVal, rightSlotId) => {
+    const slot = rightSlotId ? `<div id="${rightSlotId}" style="min-width:0;"></div>` : '';
+    return `
+      <div class="row">
+        <label style="white-space:normal">${label}</label>
+        <div class="controls" style="
+          display:grid;
+          grid-template-columns: minmax(160px, 220px) minmax(160px, 220px) ${rightSlotId ? '1fr' : '0'};
+          column-gap:12px;
+          align-items:start;
+          min-width:0;
+        ">
+          <div style="display:flex;flex-direction:column;gap:4px;min-width:0;">
+            <span class="mini" style="opacity:0.9">Start</span>
+            <input class="input" type="time" step="60" name="${aName}" value="${String(aVal||'')}" />
+          </div>
+          <div style="display:flex;flex-direction:column;gap:4px;min-width:0;">
+            <span class="mini" style="opacity:0.9">End</span>
+            <input class="input" type="time" step="60" name="${bName}" value="${String(bVal||'')}" />
+          </div>
+          ${slot}
         </div>
       </div>
-    </div>
-  `;
+    `;
+  };
 
   const weekEndingAndDefaultRow = () => {
     const opts = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday']
@@ -32585,7 +32579,49 @@ async function renderClientSettingsUI(settingsObj){
     `;
   };
 
-  const weeklyPanelHTML = (st) => {
+  const radioPill = (name, value, text, checked) => `
+    <label class="inline chk-tight"
+      style="display:inline-flex;align-items:center;gap:6px;margin-right:10px;white-space:nowrap;">
+      <input type="radio" name="${name}" value="${value}" ${checked ? 'checked' : ''}/>
+      <span style="white-space:nowrap;">${text}</span>
+    </label>
+  `;
+
+  const radioChoice = (name, value, title, desc, checked) => `
+    <label style="
+      display:grid;
+      grid-template-columns: 18px 1fr;
+      column-gap:8px;
+      row-gap:4px;
+      align-items:start;
+      cursor:pointer;
+      margin:0;
+    ">
+      <input type="radio" name="${name}" value="${value}" ${checked ? 'checked' : ''} style="margin-top:2px;" />
+      <div style="min-width:0;">
+        <div style="line-height:1.2;white-space:normal;word-break:normal;overflow-wrap:break-word;">
+          ${title}
+        </div>
+        ${desc ? `<div class="mini" style="opacity:0.9;line-height:1.25;white-space:normal;word-break:normal;overflow-wrap:break-word;">${desc}</div>` : ``}
+      </div>
+    </label>
+  `;
+
+  const checkChoice = (name, title, checked) => `
+    <label style="
+      display:grid;
+      grid-template-columns: 18px 1fr;
+      column-gap:8px;
+      align-items:start;
+      cursor:pointer;
+      margin:0;
+    ">
+      <input type="checkbox" name="${name}" ${checked ? 'checked' : ''} style="margin-top:2px;" />
+      <div style="line-height:1.2;white-space:normal;word-break:normal;overflow-wrap:break-word;min-width:0;">${title}</div>
+    </label>
+  `;
+
+  const weeklySlotHTML = (st) => {
     const mode = String(st.weekly_mode || 'NONE').toUpperCase();
     const msg =
       (mode === 'NONE')
@@ -32594,64 +32630,42 @@ async function renderClientSettingsUI(settingsObj){
         ? 'NHSP weekly imports will be used for this client. Candidates will not submit any timesheets.'
       : 'HealthRoster weekly imports will be used for this client.';
 
-    return `
-      <div class="row" style="margin:0;">
-        <label style="white-space:normal">Weekly timesheet source</label>
-        <div class="controls" style="display:flex;flex-direction:column;gap:10px;min-width:0;">
-          <div style="display:flex;flex-wrap:wrap;gap:10px;min-width:0;">
-            ${radioToggle('weekly_mode', 'NONE', 'None (manual)', mode === 'NONE')}
-            ${radioToggle('weekly_mode', 'NHSP', 'NHSP', mode === 'NHSP')}
-            ${radioToggle('weekly_mode', 'HEALTHROSTER', 'HealthRoster', mode === 'HEALTHROSTER')}
-          </div>
-          <div class="mini" style="opacity:0.9;line-height:1.25;white-space:normal;overflow-wrap:anywhere;">${msg}</div>
-        </div>
-      </div>
-
-      <div id="csHrBehaviourSlot"></div>
-    `;
-  };
-
-  const hrBehaviourHTML = (st) => {
-    const mode = String(st.weekly_mode || 'NONE').toUpperCase();
-    if (mode !== 'HEALTHROSTER') return '';
-
     const beh = String(st.hr_weekly_behaviour || 'VERIFY').toUpperCase();
     const isVerify = (beh !== 'CREATE');
 
+    const hrBlock =
+      (mode !== 'HEALTHROSTER')
+        ? ''
+        : `
+          <div style="margin-top:10px;display:flex;flex-direction:column;gap:12px;">
+            <div class="mini" style="opacity:0.9;">Weekly HealthRoster behaviour</div>
+            ${radioChoice(
+              'hr_weekly_behaviour',
+              'VERIFY',
+              'Worker will provide timesheets; the agency will also import healthroster data to verify workers hours',
+              'Import will validate that HealthRoster hours match the worker’s weekly timesheet. Mismatches fail validation and healthroster or timesheet will need amending before it can be paid.',
+              isVerify
+            )}
+            ${radioChoice(
+              'hr_weekly_behaviour',
+              'CREATE',
+              'Worker will not provide timesheets; imports create them if a contract exists',
+              'Import will create/update weekly timesheets from HealthRoster hours when a contract exists. Healthroster hours will not require any seperate checks.',
+              !isVerify
+            )}
+          </div>
+        `;
+
     return `
-      <div class="row" style="margin-top:12px;">
-        <label style="white-space:normal">Weekly HealthRoster behaviour</label>
-        <div class="controls" style="display:flex;flex-direction:column;gap:10px;min-width:0;">
-
-          <div style="display:flex;flex-direction:column;gap:6px;min-width:0;">
-            <div>
-              ${radioToggle(
-                'hr_weekly_behaviour',
-                'VERIFY',
-                'Worker will provide timesheets; the agency will also import healthroster data to verify workers hours',
-                isVerify
-              )}
-            </div>
-            <div class="mini" style="opacity:0.9;line-height:1.25;margin-left:26px;white-space:normal;overflow-wrap:anywhere;">
-              Import will validate that HealthRoster hours match the worker’s weekly timesheet. Mismatches fail validation and healthroster or timesheet will need amending before it can be paid.
-            </div>
-          </div>
-
-          <div style="display:flex;flex-direction:column;gap:6px;min-width:0;">
-            <div>
-              ${radioToggle(
-                'hr_weekly_behaviour',
-                'CREATE',
-                'Worker will not provide timesheets; imports create them if a contract exists',
-                !isVerify
-              )}
-            </div>
-            <div class="mini" style="opacity:0.9;line-height:1.25;margin-left:26px;white-space:normal;overflow-wrap:anywhere;">
-              Import will create/update weekly timesheets from HealthRoster hours when a contract exists. Healthroster hours will not require any seperate checks.
-            </div>
-          </div>
-
+      <div style="min-width:0;">
+        <div class="mini" style="opacity:0.9;">Weekly timesheet source</div>
+        <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-top:6px;">
+          ${radioPill('weekly_mode', 'NONE', 'None (manual)', mode === 'NONE')}
+          ${radioPill('weekly_mode', 'NHSP', 'NHSP', mode === 'NHSP')}
+          ${radioPill('weekly_mode', 'HEALTHROSTER', 'HealthRoster', mode === 'HEALTHROSTER')}
         </div>
+        <div class="mini" style="opacity:0.9;line-height:1.25;margin-top:6px;white-space:normal;overflow-wrap:break-word;">${msg}</div>
+        ${hrBlock}
       </div>
     `;
   };
@@ -32666,7 +32680,7 @@ async function renderClientSettingsUI(settingsObj){
         <div class="row" style="margin:0;">
           <label style="white-space:normal">References & flags</label>
           <div class="controls" style="min-width:0;">
-            <div class="mini" style="opacity:0.9;line-height:1.25;white-space:normal;overflow-wrap:anywhere;">
+            <div class="mini" style="opacity:0.9;line-height:1.25;white-space:normal;overflow-wrap:break-word;">
               NHSP mode controls references, invoicing behaviour and attachments automatically.
             </div>
           </div>
@@ -32678,45 +32692,40 @@ async function renderClientSettingsUI(settingsObj){
       return `
         <div class="row" style="margin:0;">
           <label style="white-space:normal">References & flags</label>
-          <div class="controls" style="display:flex;flex-direction:column;gap:10px;min-width:0;">
-
-            <div style="display:flex;flex-wrap:wrap;gap:10px;min-width:0;">
-              ${yesNoToggle('pay_reference_required', 'Ref No. required to PAY', !!st.pay_reference_required)}
-              ${yesNoToggle('invoice_reference_required', 'Ref No. required to INVOICE', !!st.invoice_reference_required)}
+          <div class="controls" style="display:flex;flex-direction:column;gap:12px;min-width:0;">
+            <div style="display:grid;grid-template-columns:1fr;gap:8px;">
+              ${checkChoice('pay_reference_required', 'Ref No. required to PAY', !!st.pay_reference_required)}
+              ${checkChoice('invoice_reference_required', 'Ref No. required to INVOICE', !!st.invoice_reference_required)}
             </div>
 
-            <div style="display:flex;flex-wrap:wrap;gap:10px;min-width:0;">
-              ${yesNoToggle('self_bill_no_invoices_sent', 'Self-bill (no invoices sent)', !!st.self_bill_no_invoices_sent)}
-              ${yesNoToggle('daily_calc_of_invoices', 'Daily invoice calculation', !!st.daily_calc_of_invoices)}
-              ${yesNoToggle('group_nightsat_sunbh', 'Group Night/Sat/Sun/BH', !!st.group_nightsat_sunbh)}
+            <div style="display:grid;grid-template-columns:1fr;gap:8px;">
+              ${checkChoice('self_bill_no_invoices_sent', 'Self-bill (no invoices sent)', !!st.self_bill_no_invoices_sent)}
+              ${checkChoice('daily_calc_of_invoices', 'Daily invoice calculation', !!st.daily_calc_of_invoices)}
+              ${checkChoice('group_nightsat_sunbh', 'Group Night/Sat/Sun/BH', !!st.group_nightsat_sunbh)}
             </div>
 
-            <div class="mini" style="opacity:0.9;line-height:1.25;white-space:normal;overflow-wrap:anywhere;">
+            <div class="mini" style="opacity:0.9;line-height:1.25;white-space:normal;overflow-wrap:break-word;">
               Timesheets will always be attached to invoices for manual clients.
             </div>
-
           </div>
         </div>
       `;
     }
 
-    // HEALTHROSTER
     return `
       <div class="row" style="margin:0;">
         <label style="white-space:normal">References & flags</label>
-        <div class="controls" style="display:flex;flex-direction:column;gap:10px;min-width:0;">
-
-          <div style="display:flex;flex-wrap:wrap;gap:10px;min-width:0;">
-            ${yesNoToggle('self_bill_no_invoices_sent', 'Self-bill (no invoices sent)', !!st.self_bill_no_invoices_sent)}
-            ${yesNoToggle('daily_calc_of_invoices', 'Daily invoice calculation', !!st.daily_calc_of_invoices)}
-            ${yesNoToggle('group_nightsat_sunbh', 'Group Night/Sat/Sun/BH', !!st.group_nightsat_sunbh)}
+        <div class="controls" style="display:flex;flex-direction:column;gap:12px;min-width:0;">
+          <div style="display:grid;grid-template-columns:1fr;gap:8px;">
+            ${checkChoice('self_bill_no_invoices_sent', 'Self-bill (no invoices sent)', !!st.self_bill_no_invoices_sent)}
+            ${checkChoice('daily_calc_of_invoices', 'Daily invoice calculation', !!st.daily_calc_of_invoices)}
+            ${checkChoice('group_nightsat_sunbh', 'Group Night/Sat/Sun/BH', !!st.group_nightsat_sunbh)}
           </div>
 
-          <div style="display:flex;flex-wrap:wrap;gap:10px;min-width:0;">
-            ${yesNoToggle('hr_attach_to_invoice', 'Attach HealthRoster to invoice', !!st.hr_attach_to_invoice)}
-            ${isCreate ? '' : yesNoToggle('ts_attach_to_invoice', 'Attach timesheets to invoice', !!st.ts_attach_to_invoice)}
+          <div style="display:grid;grid-template-columns:1fr;gap:8px;">
+            ${checkChoice('hr_attach_to_invoice', 'Attach HealthRoster to invoice', !!st.hr_attach_to_invoice)}
+            ${isCreate ? '' : checkChoice('ts_attach_to_invoice', 'Attach timesheets to invoice', !!st.ts_attach_to_invoice)}
           </div>
-
         </div>
       </div>
     `;
@@ -32731,9 +32740,13 @@ async function renderClientSettingsUI(settingsObj){
         align-items:start;
         width:100%;
       ">
-        <div style="min-width:0;overflow-wrap:anywhere;">
-          ${inputText('timezone_id','Timezone', s.timezone_id)}
-          ${pairTimeRow('Day shift',   'day_start',   s.day_start,   'day_end',   s.day_end)}
+        <div style="min-width:0;overflow-wrap:break-word;">
+          <div class="row">
+            <label>Timezone</label>
+            <div class="controls"><input class="input" name="timezone_id" value="${String(s.timezone_id||'')}" /></div>
+          </div>
+
+          ${pairTimeRow('Day shift',   'day_start',   s.day_start,   'day_end',   s.day_end, 'csWeeklyInlineSlot')}
           ${pairTimeRow('Night shift', 'night_start', s.night_start, 'night_end', s.night_end)}
           ${pairTimeRow('Saturday',    'sat_start',   s.sat_start,   'sat_end',   s.sat_end)}
           ${pairTimeRow('Sunday',      'sun_start',   s.sun_start,   'sun_end',   s.sun_end)}
@@ -32741,8 +32754,7 @@ async function renderClientSettingsUI(settingsObj){
           ${weekEndingAndDefaultRow()}
         </div>
 
-        <div style="min-width:0;overflow-wrap:anywhere;display:flex;flex-direction:column;gap:14px;">
-          <div id="csWeeklyPanel"></div>
+        <div style="min-width:0;overflow-wrap:break-word;display:flex;flex-direction:column;gap:14px;">
           <div id="csFlagsPanel"></div>
         </div>
       </div>
@@ -32755,17 +32767,15 @@ async function renderClientSettingsUI(settingsObj){
 
   let lastValid = { ...s };
 
-  const paintRightPanels = () => {
+  const paintPanels = () => {
     const st = ctx.clientSettingsState || {};
-    const weeklyEl = root.querySelector('#csWeeklyPanel');
-    const flagsEl  = root.querySelector('#csFlagsPanel');
-    if (weeklyEl) weeklyEl.innerHTML = weeklyPanelHTML(st);
-    const hrSlot = root.querySelector('#csHrBehaviourSlot');
-    if (hrSlot) hrSlot.innerHTML = hrBehaviourHTML(st);
+    const slot = root.querySelector('#csWeeklyInlineSlot');
+    if (slot) slot.innerHTML = weeklySlotHTML(st);
+    const flagsEl = root.querySelector('#csFlagsPanel');
     if (flagsEl) flagsEl.innerHTML = flagsPanelHTML(st);
   };
 
-  paintRightPanels();
+  paintPanels();
 
   if (root.__wired) {
     root.removeEventListener('input',  root.__syncSoft, true);
@@ -32796,7 +32806,6 @@ async function renderClientSettingsUI(settingsObj){
     const vals = collectForm('#clientSettingsForm', false);
     let next = { ...prev, ...vals };
 
-    // times
     timeKeys.forEach(k=>{
       const v = String(vals[k] ?? '').trim();
       if (v && !hhmm.test(v)) {
@@ -32808,22 +32817,18 @@ async function renderClientSettingsUI(settingsObj){
       }
     });
 
-    // week ending
     const w = Number(vals.week_ending_weekday);
     next.week_ending_weekday = Number.isInteger(w) ? String(Math.min(6, Math.max(0, w))) : lastValid.week_ending_weekday;
 
-    // default submission
     const dsm = String(vals.default_submission_mode || next.default_submission_mode || 'ELECTRONIC').toUpperCase();
     next.default_submission_mode = (dsm === 'ELECTRONIC' || dsm === 'MANUAL') ? dsm : 'ELECTRONIC';
 
-    // gated radios (exist in right panel)
     const wm = getRadio('weekly_mode');
     if (wm) next.weekly_mode = wm;
 
     const hb = getRadio('hr_weekly_behaviour');
     if (hb) next.hr_weekly_behaviour = hb;
 
-    // optional checkboxes in flags panel
     const cbKeys = [
       'pay_reference_required',
       'invoice_reference_required',
@@ -32847,7 +32852,7 @@ async function renderClientSettingsUI(settingsObj){
     lastValid = { ...next };
 
     if (gatePrev !== gateNext) {
-      paintRightPanels();
+      paintPanels();
       try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
     }
   };
@@ -32894,13 +32899,7 @@ async function renderClientSettingsUI(settingsObj){
     }
   });
   root.__wired = true;
-
-  // helper used above but kept local for this function
-  function inputText(name,label,val){
-    return `<div class="row"><label>${label}</label><div class="controls"><input class="input" name="${name}" value="${String(val||'')}" /></div></div>`;
-  }
 }
-
 
 
 
