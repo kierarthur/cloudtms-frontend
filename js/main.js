@@ -25462,14 +25462,17 @@ const isUtilityKind =
   (typeof top.kind === 'string' && top.kind.startsWith('import-summary-'));
 
 
-  const label =
-    (top.kind === 'advanced-search')
-      ? 'Close'
-    : (top.kind === 'timesheet-evidence-replace')
-      ? 'Discard'
-    : isUtilityKind
-      ? 'Close'
-      : (top.isDirty ? 'Discard' : 'Close');
+ const label =
+  (top.kind === 'advanced-search')
+    ? 'Close'
+  : (top.kind === 'timesheet-evidence-replace')
+    ? 'Discard'
+  : (top.kind === 'timesheet-evidence-viewer')
+    ? (top.isDirty ? 'Discard' : 'Close')
+  : isUtilityKind
+    ? 'Close'
+    : (top.isDirty ? 'Discard' : 'Close');
+
 
   btnClose.textContent = label;
   btnClose.setAttribute('aria-label', label);
@@ -38294,7 +38297,9 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
     throw new Error('Evidence item missing storage_key.');
   }
 
-  const isSystem = (typeof evidenceItem.system === 'boolean') ? evidenceItem.system : String(evidenceId).startsWith('SYS:');
+  const isSystem =
+    (typeof evidenceItem.system === 'boolean') ? evidenceItem.system : String(evidenceId).startsWith('SYS:');
+
   const canDelete = (typeof evidenceItem.can_delete === 'boolean')
     ? evidenceItem.can_delete
     : !isSystem;
@@ -38346,14 +38351,14 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
   const signedUrl = await presignDownload(storageKey);
 
   const instanceId = `ts-ev-view-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-  const iframeId   = `${instanceId}-iframe`;
-  const deleteBtnId= `${instanceId}-delete`;
-  const selId      = `${instanceId}-type`;
-  const otherId    = `${instanceId}-other`;
+  const iframeId    = `${instanceId}-iframe`;
+  const deleteBtnId = `${instanceId}-delete`;
+  const selId       = `${instanceId}-type`;
+  const otherId     = `${instanceId}-other`;
 
   const title = `Evidence ${String(tsId).slice(0, 8)}…`;
 
-  const OPTIONS = ['Timesheet','Mileage','Accommodation','Expenses'];
+  const OPTIONS = ['Timesheet', 'Mileage', 'Accommodation', 'Expenses'];
   const kindTrim = String(kind || '').trim();
   const kindLower = kindTrim.toLowerCase();
 
@@ -38445,11 +38450,42 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
 
   const tabs = [{ key: 'view', title: 'Evidence' }];
 
+  // ─────────────────────────────────────────────────────────────
+  // ✅ Hide Delete Timesheet button while viewer is open (avoid confusion)
+  // and ensure closing returns the parent to the Evidence tab.
+  // NOTE: we do NOT keep a stale element reference because showModal may clone/replace buttons.
+  // ─────────────────────────────────────────────────────────────
+  let __tsDelPrev = null;
+  const __hideTsDelete = () => {
+    try {
+      const b = document.getElementById('btnTsDeleteTimesheet');
+      if (!b) return;
+      if (__tsDelPrev == null) __tsDelPrev = b.style.display;
+      b.style.display = 'none';
+    } catch {}
+  };
+
+  __hideTsDelete();
+
+  const onDismiss = () => {
+    // Restore Delete Timesheet button
+    try {
+      const b = document.getElementById('btnTsDeleteTimesheet');
+      if (b) b.style.display = (__tsDelPrev != null ? __tsDelPrev : '');
+    } catch {}
+
+    // Ensure parent returns to Evidence tab
+    try {
+      const st = (window.__modalStack && Array.isArray(window.__modalStack)) ? window.__modalStack : null;
+      const fr = (st && st.length) ? st[st.length - 1] : null; // after child pop, parent is top
+      if (fr && fr.entity === 'timesheets') fr.currentTabKey = 'evidence';
+    } catch {}
+  };
+
   const onSave = async () => {
     const { LOGM, L, GC, GE } = getTsLoggers('[TS][EVIDENCE][VIEWER][SAVE]');
     GC('onSave (evidence viewer)');
 
-    // If not editable, treat as no-op save
     if (!canEditType) {
       GE();
       return { ok: true };
@@ -38478,13 +38514,11 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
         return { ok: false };
       }
 
-      // No change
       if (String(newKind) === String(kindTrim)) {
         GE();
         return { ok: true };
       }
 
-      // PATCH evidence kind
       const enc = encodeURIComponent;
       const res = await authFetch(API(`/api/timesheets/${enc(tsId)}/evidence/${enc(evidenceId)}`), {
         method: 'PATCH',
@@ -38493,9 +38527,7 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
       });
 
       const text = await res.text().catch(() => '');
-      if (!res.ok) {
-        throw new Error(text || 'Failed to update evidence type.');
-      }
+      if (!res.ok) throw new Error(text || 'Failed to update evidence type.');
 
       // Refresh evidence list in parent modal state
       try {
@@ -38506,7 +38538,6 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
           const json2 = await res2.json().catch(() => []);
           const list2 = Array.isArray(json2) ? json2 : [];
 
-          // best-effort normalise flags for FE
           const normalised = list2.map(ev2 => {
             const out = { ...(ev2 || {}) };
             if (typeof out.system !== 'boolean') out.system = false;
@@ -38557,9 +38588,12 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
       kind: 'timesheet-evidence-viewer',
       noParentGate: true,
       forceEdit: true,
-      onDismiss: () => {}
+      onDismiss
     }
   );
+
+  // Hide again after viewer render (defensive: showModal may re-run _updateButtons and re-show it)
+  try { requestAnimationFrame(() => __hideTsDelete()); } catch {}
 
   // Wire: show/hide Other + ensure dirty triggers correctly
   try {
