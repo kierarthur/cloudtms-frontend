@@ -32527,7 +32527,7 @@ async function renderClientSettingsUI(settingsObj){
     hr_weekly_behaviour: initial.hr_weekly_behaviour || ''
   };
 
-  // Canonicalise the whole settings state (enforces gate + forced values)
+  // Canonicalise gated state (forces derived/hidden values)
   const s = canonicalizeClientSettings(seed);
 
   // Persist back into modalCtx so openClient() can save from any tab
@@ -32558,6 +32558,18 @@ async function renderClientSettingsUI(settingsObj){
     </label>
   `;
 
+  const submissionRow = () => `
+    <div class="row">
+      <label>Default Submission</label>
+      <div class="controls">
+        <select name="default_submission_mode">
+          <option value="ELECTRONIC" ${String(s.default_submission_mode||'').toUpperCase()==='ELECTRONIC'?'selected':''}>ELECTRONIC</option>
+          <option value="MANUAL"     ${String(s.default_submission_mode||'').toUpperCase()==='MANUAL'?'selected':''}>MANUAL</option>
+        </select>
+      </div>
+    </div>
+  `;
+
   const weeklyModeRow = () => {
     const mode = String(s.weekly_mode || 'NONE').toUpperCase();
 
@@ -32573,9 +32585,9 @@ async function renderClientSettingsUI(settingsObj){
         <label>Weekly timesheet source</label>
         <div class="controls" style="display:flex;flex-direction:column;gap:6px;">
           <div class="toggle-row" style="display:flex;flex-wrap:wrap;gap:10px;">
-            ${radioToggle('weekly_mode', 'NONE',         'None (manual)',     mode === 'NONE')}
-            ${radioToggle('weekly_mode', 'NHSP',         'NHSP',              mode === 'NHSP')}
-            ${radioToggle('weekly_mode', 'HEALTHROSTER', 'HealthRoster',      mode === 'HEALTHROSTER')}
+            ${radioToggle('weekly_mode', 'NONE',         'None (manual)', mode === 'NONE')}
+            ${radioToggle('weekly_mode', 'NHSP',         'NHSP',          mode === 'NHSP')}
+            ${radioToggle('weekly_mode', 'HEALTHROSTER', 'HealthRoster',  mode === 'HEALTHROSTER')}
           </div>
           <div class="mini" style="opacity:0.9;line-height:1.25">${msg}</div>
         </div>
@@ -32596,7 +32608,9 @@ async function renderClientSettingsUI(settingsObj){
         <div class="controls" style="display:flex;flex-direction:column;gap:8px;">
           <div style="display:flex;flex-direction:column;gap:6px;">
             <div>
-              ${radioToggle('hr_weekly_behaviour', 'VERIFY',
+              ${radioToggle(
+                'hr_weekly_behaviour',
+                'VERIFY',
                 'Worker will provide timesheets; the agency will also import healthroster data to verify workers hours',
                 isVerify
               )}
@@ -32608,7 +32622,9 @@ async function renderClientSettingsUI(settingsObj){
 
           <div style="display:flex;flex-direction:column;gap:6px;">
             <div>
-              ${radioToggle('hr_weekly_behaviour', 'CREATE',
+              ${radioToggle(
+                'hr_weekly_behaviour',
+                'CREATE',
                 'Worker will not provide timesheets; imports create them if a contract exists',
                 !isVerify
               )}
@@ -32626,6 +32642,7 @@ async function renderClientSettingsUI(settingsObj){
     const mode = String(s.weekly_mode || 'NONE').toUpperCase();
     const beh  = String(s.hr_weekly_behaviour || 'VERIFY').toUpperCase();
 
+    // NHSP: everything implied by mode; show nothing configurable
     if (mode === 'NHSP') {
       return `
         <div class="row">
@@ -32639,6 +32656,7 @@ async function renderClientSettingsUI(settingsObj){
       `;
     }
 
+    // Manual: show user-configurable flags; force TS attach true and HR attach false internally
     if (mode === 'NONE') {
       return `
         <div class="row">
@@ -32646,8 +32664,8 @@ async function renderClientSettingsUI(settingsObj){
           <div class="controls" style="display:flex;flex-direction:column;gap:4px;">
 
             <div class="toggle-row" style="display:flex;flex-wrap:wrap;gap:10px;">
-              ${yesNoToggle('pay_reference_required',     'Ref No. required to PAY',      !!s.pay_reference_required)}
-              ${yesNoToggle('invoice_reference_required', 'Ref No. required to INVOICE',  !!s.invoice_reference_required)}
+              ${yesNoToggle('pay_reference_required',     'Ref No. required to PAY',     !!s.pay_reference_required)}
+              ${yesNoToggle('invoice_reference_required', 'Ref No. required to INVOICE', !!s.invoice_reference_required)}
             </div>
 
             <div class="toggle-row" style="display:flex;flex-wrap:wrap;gap:10px;">
@@ -32665,7 +32683,7 @@ async function renderClientSettingsUI(settingsObj){
       `;
     }
 
-    // HEALTHROSTER
+    // HealthRoster
     const isCreate = (beh === 'CREATE');
 
     return `
@@ -32684,24 +32702,6 @@ async function renderClientSettingsUI(settingsObj){
             ${isCreate ? '' : yesNoToggle('ts_attach_to_invoice', 'Attach timesheets to invoice', !!s.ts_attach_to_invoice)}
           </div>
 
-          <div class="mini" style="opacity:0.9;line-height:1.25">
-            Reference requirements are controlled by HealthRoster imports for this mode.
-          </div>
-
-        </div>
-      </div>
-    `;
-  };
-
-  const submissionRow = () => {
-    return `
-      <div class="row">
-        <label>Default Submission</label>
-        <div class="controls">
-          <select name="default_submission_mode">
-            <option value="ELECTRONIC" ${String(s.default_submission_mode||'').toUpperCase()==='ELECTRONIC'?'selected':''}>ELECTRONIC</option>
-            <option value="MANUAL"     ${String(s.default_submission_mode||'').toUpperCase()==='MANUAL'?'selected':''}>MANUAL</option>
-          </select>
         </div>
       </div>
     `;
@@ -32725,16 +32725,11 @@ async function renderClientSettingsUI(settingsObj){
 
       ${weekDaySelect()}
 
+      ${submissionRow()}
+
       ${weeklyModeRow()}
       ${hrBehaviourRow()}
       ${flagsBlock()}
-
-      ${submissionRow()}
-
-      <div class="hint" style="grid-column:1/-1">
-        Example: Day 06:00–20:00, Night 20:00–06:00. Saturday/Sunday windows can extend into the following day (e.g. Sunday ends 06:00 next day).
-        Bank Holiday hours can also be restricted (e.g. BH 08:00–20:00) or left blank to inherit global defaults.
-      </div>
     </div>
   `;
 
@@ -32766,14 +32761,39 @@ async function renderClientSettingsUI(settingsObj){
     return !!el.checked;
   };
 
+  const gateKey = (st) => {
+    const m = String(st?.weekly_mode || '').toUpperCase();
+    const b = String(st?.hr_weekly_behaviour || '').toUpperCase();
+    return `${m}|${b}`;
+  };
+
+  const maybeRerenderForGateChange = (prevState, nextState) => {
+    const prevK = gateKey(prevState);
+    const nextK = gateKey(nextState);
+    if (prevK === nextK) return false;
+
+    if (ctx.__clientSettingsRerendering) return true;
+    ctx.__clientSettingsRerendering = true;
+    try {
+      ctx.clientSettingsState = nextState;
+      renderClientSettingsUI(nextState);
+      try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
+    } finally {
+      ctx.__clientSettingsRerendering = false;
+    }
+    return true;
+  };
+
   const syncSoft = ()=> {
     const frame = _currentFrame();
     if (!frame || frame.mode !== 'edit') return;
 
-    const vals = collectForm('#clientSettingsForm', false);
-    let next = { ...ctx.clientSettingsState, ...vals };
+    const prev = ctx.clientSettingsState || {};
 
-    // Soft normalise times (don’t accept invalid while typing)
+    const vals = collectForm('#clientSettingsForm', false);
+    let next = { ...prev, ...vals };
+
+    // Soft normalise times
     timeKeys.forEach(k=>{
       const v = String(vals[k] ?? '').trim();
       if (v && !hhmm.test(v)) next[k] = lastValid[k];
@@ -32791,7 +32811,7 @@ async function renderClientSettingsUI(settingsObj){
     next.weekly_mode = readRadio('weekly_mode') || next.weekly_mode || 'NONE';
     next.hr_weekly_behaviour = readRadio('hr_weekly_behaviour') || next.hr_weekly_behaviour || 'VERIFY';
 
-    // Only overwrite checkboxes if they exist in DOM (because many are hidden by gate)
+    // Conditional checkboxes
     next.pay_reference_required     = readCheckboxIfPresent('pay_reference_required',     !!next.pay_reference_required);
     next.invoice_reference_required = readCheckboxIfPresent('invoice_reference_required', !!next.invoice_reference_required);
     next.self_bill_no_invoices_sent = readCheckboxIfPresent('self_bill_no_invoices_sent', !!next.self_bill_no_invoices_sent);
@@ -32800,10 +32820,13 @@ async function renderClientSettingsUI(settingsObj){
     next.hr_attach_to_invoice       = readCheckboxIfPresent('hr_attach_to_invoice',       !!next.hr_attach_to_invoice);
     next.ts_attach_to_invoice       = readCheckboxIfPresent('ts_attach_to_invoice',       !!next.ts_attach_to_invoice);
 
-    // Canonicalise gate → forces hidden values and derived flags
+    // Canonicalise
     next = canonicalizeClientSettings(next);
 
     ctx.clientSettingsState = next;
+
+    // Re-render only when the gate changes so UI adapts
+    maybeRerenderForGateChange(prev, next);
   };
 
   let lastAlertAt = 0;
@@ -32811,10 +32834,12 @@ async function renderClientSettingsUI(settingsObj){
     const frame = _currentFrame();
     if (!frame || frame.mode !== 'edit') return;
 
+    const prev = ctx.clientSettingsState || {};
+
     const vals = collectForm('#clientSettingsForm', false);
     let hadError = false;
 
-    // Strict validate times on change/blur
+    // Strict validate times
     timeKeys.forEach(k=>{
       const v = String(vals[k] ?? '').trim();
       if (v && !hhmm.test(v)) {
@@ -32824,9 +32849,9 @@ async function renderClientSettingsUI(settingsObj){
       }
     });
 
-    // Strict validate week ending
+    // Week ending
     let w = Number(vals.week_ending_weekday);
-    if (!Number.isInteger(w) || w<0 || w>6) {
+    if (!Number.isInteger(w) || w < 0 || w > 6) {
       hadError = true;
       w = Number(lastValid.week_ending_weekday) || 0;
     }
@@ -32836,17 +32861,15 @@ async function renderClientSettingsUI(settingsObj){
     const modeOk  = (modeRaw === 'ELECTRONIC' || modeRaw === 'MANUAL') ? modeRaw : 'ELECTRONIC';
 
     let next = {
-      ...ctx.clientSettingsState,
+      ...prev,
       ...vals,
       week_ending_weekday: String(w),
       default_submission_mode: modeOk
     };
 
-    // Gate radios
     next.weekly_mode = readRadio('weekly_mode') || next.weekly_mode || 'NONE';
     next.hr_weekly_behaviour = readRadio('hr_weekly_behaviour') || next.hr_weekly_behaviour || 'VERIFY';
 
-    // Conditional checkboxes
     next.pay_reference_required     = readCheckboxIfPresent('pay_reference_required',     !!next.pay_reference_required);
     next.invoice_reference_required = readCheckboxIfPresent('invoice_reference_required', !!next.invoice_reference_required);
     next.self_bill_no_invoices_sent = readCheckboxIfPresent('self_bill_no_invoices_sent', !!next.self_bill_no_invoices_sent);
@@ -32859,6 +32882,8 @@ async function renderClientSettingsUI(settingsObj){
 
     ctx.clientSettingsState = next;
     lastValid = { ...ctx.clientSettingsState };
+
+    maybeRerenderForGateChange(prev, next);
 
     if (hadError) {
       const now = Date.now();
@@ -32883,6 +32908,7 @@ async function renderClientSettingsUI(settingsObj){
   });
   root.__wired = true;
 }
+
 
 
 // ---- Umbrella modal
