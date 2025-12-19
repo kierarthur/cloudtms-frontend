@@ -32530,31 +32530,22 @@ async function renderClientSettingsUI(settingsObj){
   let s = canonicalizeClientSettings(seed);
   ctx.clientSettingsState = { ...initial, ...s };
 
-  const pairTimeRow = (label, aName, aVal, bName, bVal, rightSlotId) => {
-    const slot = rightSlotId ? `<div id="${rightSlotId}" style="min-width:0;"></div>` : '';
-    return `
-      <div class="row">
-        <label style="white-space:normal">${label}</label>
-        <div class="controls" style="
-          display:grid;
-          grid-template-columns: minmax(160px, 220px) minmax(160px, 220px) ${rightSlotId ? '1fr' : '0'};
-          column-gap:12px;
-          align-items:start;
-          min-width:0;
-        ">
-          <div style="display:flex;flex-direction:column;gap:4px;min-width:0;">
-            <span class="mini" style="opacity:0.9">Start</span>
-            <input class="input" type="time" step="60" name="${aName}" value="${String(aVal||'')}" />
-          </div>
-          <div style="display:flex;flex-direction:column;gap:4px;min-width:0;">
-            <span class="mini" style="opacity:0.9">End</span>
-            <input class="input" type="time" step="60" name="${bName}" value="${String(bVal||'')}" />
-          </div>
-          ${slot}
+  // Tight, non-stretching Start/End row to remove the big empty “controls desert”
+  const pairTimeRow = (label, aName, aVal, bName, bVal) => `
+    <div class="row">
+      <label style="white-space:normal">${label}</label>
+      <div class="controls" style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end;min-width:0;">
+        <div style="display:flex;flex-direction:column;gap:4px;width:170px;min-width:170px;">
+          <span class="mini" style="opacity:0.9">Start</span>
+          <input class="input" type="time" step="60" name="${aName}" value="${String(aVal||'')}" />
+        </div>
+        <div style="display:flex;flex-direction:column;gap:4px;width:170px;min-width:170px;">
+          <span class="mini" style="opacity:0.9">End</span>
+          <input class="input" type="time" step="60" name="${bName}" value="${String(bVal||'')}" />
         </div>
       </div>
-    `;
-  };
+    </div>
+  `;
 
   const weekEndingAndDefaultRow = () => {
     const opts = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday']
@@ -32562,12 +32553,12 @@ async function renderClientSettingsUI(settingsObj){
     return `
       <div class="row">
         <label style="white-space:normal">Week ending / Default submission</label>
-        <div class="controls" style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-start;min-width:0;">
-          <div style="display:flex;flex-direction:column;gap:4px;min-width:180px;flex:1;">
+        <div class="controls" style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end;min-width:0;">
+          <div style="display:flex;flex-direction:column;gap:4px;width:220px;min-width:220px;">
             <span class="mini" style="opacity:0.9">Week ending day</span>
             <select name="week_ending_weekday">${opts}</select>
           </div>
-          <div style="display:flex;flex-direction:column;gap:4px;min-width:180px;flex:1;">
+          <div style="display:flex;flex-direction:column;gap:4px;width:220px;min-width:220px;">
             <span class="mini" style="opacity:0.9">Default submission</span>
             <select name="default_submission_mode">
               <option value="ELECTRONIC" ${String(s.default_submission_mode||'').toUpperCase()==='ELECTRONIC'?'selected':''}>ELECTRONIC</option>
@@ -32579,6 +32570,7 @@ async function renderClientSettingsUI(settingsObj){
     `;
   };
 
+  // Weekly source “pill” radios (no mid-word breaking)
   const radioPill = (name, value, text, checked) => `
     <label class="inline chk-tight"
       style="display:inline-flex;align-items:center;gap:6px;margin-right:10px;white-space:nowrap;">
@@ -32587,6 +32579,7 @@ async function renderClientSettingsUI(settingsObj){
     </label>
   `;
 
+  // Neat grid choice: aligns icon + title + description (no huge gaps)
   const radioChoice = (name, value, title, desc, checked) => `
     <label style="
       display:grid;
@@ -32599,9 +32592,7 @@ async function renderClientSettingsUI(settingsObj){
     ">
       <input type="radio" name="${name}" value="${value}" ${checked ? 'checked' : ''} style="margin-top:2px;" />
       <div style="min-width:0;">
-        <div style="line-height:1.2;white-space:normal;word-break:normal;overflow-wrap:break-word;">
-          ${title}
-        </div>
+        <div style="line-height:1.2;white-space:normal;word-break:normal;overflow-wrap:break-word;">${title}</div>
         ${desc ? `<div class="mini" style="opacity:0.9;line-height:1.25;white-space:normal;word-break:normal;overflow-wrap:break-word;">${desc}</div>` : ``}
       </div>
     </label>
@@ -32621,7 +32612,7 @@ async function renderClientSettingsUI(settingsObj){
     </label>
   `;
 
-  const weeklySlotHTML = (st) => {
+  const weeklyPanelHTML = (st) => {
     const mode = String(st.weekly_mode || 'NONE').toUpperCase();
     const msg =
       (mode === 'NONE')
@@ -32630,42 +32621,48 @@ async function renderClientSettingsUI(settingsObj){
         ? 'NHSP weekly imports will be used for this client. Candidates will not submit any timesheets.'
       : 'HealthRoster weekly imports will be used for this client.';
 
+    return `
+      <div class="row" style="margin:0;">
+        <label style="white-space:normal">Weekly timesheet source</label>
+        <div class="controls" style="display:flex;flex-direction:column;gap:8px;min-width:0;">
+          <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;">
+            ${radioPill('weekly_mode', 'NONE', 'None (manual)', mode === 'NONE')}
+            ${radioPill('weekly_mode', 'NHSP', 'NHSP', mode === 'NHSP')}
+            ${radioPill('weekly_mode', 'HEALTHROSTER', 'HealthRoster', mode === 'HEALTHROSTER')}
+          </div>
+          <div class="mini" style="opacity:0.9;line-height:1.25;white-space:normal;overflow-wrap:break-word;">${msg}</div>
+        </div>
+      </div>
+      <div id="csHrBehaviourSlot"></div>
+    `;
+  };
+
+  const hrBehaviourHTML = (st) => {
+    const mode = String(st.weekly_mode || 'NONE').toUpperCase();
+    if (mode !== 'HEALTHROSTER') return '';
+
     const beh = String(st.hr_weekly_behaviour || 'VERIFY').toUpperCase();
     const isVerify = (beh !== 'CREATE');
 
-    const hrBlock =
-      (mode !== 'HEALTHROSTER')
-        ? ''
-        : `
-          <div style="margin-top:10px;display:flex;flex-direction:column;gap:12px;">
-            <div class="mini" style="opacity:0.9;">Weekly HealthRoster behaviour</div>
-            ${radioChoice(
-              'hr_weekly_behaviour',
-              'VERIFY',
-              'Worker will provide timesheets; the agency will also import healthroster data to verify workers hours',
-              'Import will validate that HealthRoster hours match the worker’s weekly timesheet. Mismatches fail validation and healthroster or timesheet will need amending before it can be paid.',
-              isVerify
-            )}
-            ${radioChoice(
-              'hr_weekly_behaviour',
-              'CREATE',
-              'Worker will not provide timesheets; imports create them if a contract exists',
-              'Import will create/update weekly timesheets from HealthRoster hours when a contract exists. Healthroster hours will not require any seperate checks.',
-              !isVerify
-            )}
-          </div>
-        `;
-
     return `
-      <div style="min-width:0;">
-        <div class="mini" style="opacity:0.9;">Weekly timesheet source</div>
-        <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-top:6px;">
-          ${radioPill('weekly_mode', 'NONE', 'None (manual)', mode === 'NONE')}
-          ${radioPill('weekly_mode', 'NHSP', 'NHSP', mode === 'NHSP')}
-          ${radioPill('weekly_mode', 'HEALTHROSTER', 'HealthRoster', mode === 'HEALTHROSTER')}
+      <div class="row" style="margin-top:12px;">
+        <label style="white-space:normal">Weekly HealthRoster behaviour</label>
+        <div class="controls" style="display:flex;flex-direction:column;gap:12px;min-width:0;">
+          ${radioChoice(
+            'hr_weekly_behaviour',
+            'VERIFY',
+            'Worker will provide timesheets; the agency will also import healthroster data to verify workers hours',
+            'Import will validate that HealthRoster hours match the worker’s weekly timesheet. Mismatches fail validation and healthroster or timesheet will need amending before it can be paid.',
+            isVerify
+          )}
+          ${radioChoice(
+            'hr_weekly_behaviour',
+            'CREATE',
+            'Worker will not provide timesheets; imports create them if a contract exists',
+            'Import will create/update weekly timesheets from HealthRoster hours when a contract exists. Healthroster hours will not require any seperate checks.',
+            !isVerify
+          )}
         </div>
-        <div class="mini" style="opacity:0.9;line-height:1.25;margin-top:6px;white-space:normal;overflow-wrap:break-word;">${msg}</div>
-        ${hrBlock}
       </div>
     `;
   };
@@ -32731,8 +32728,10 @@ async function renderClientSettingsUI(settingsObj){
     `;
   };
 
+  // FIX 1: Avoid clashing with index.html `.form { display:grid; ... }`
+  // Do NOT use class="form" on the outer wrapper.
   div.innerHTML = `
-    <div id="clientSettingsForm" class="form">
+    <div id="clientSettingsForm" style="display:block;">
       <div style="
         display:grid;
         grid-template-columns: repeat(auto-fit, minmax(520px, 1fr));
@@ -32746,7 +32745,7 @@ async function renderClientSettingsUI(settingsObj){
             <div class="controls"><input class="input" name="timezone_id" value="${String(s.timezone_id||'')}" /></div>
           </div>
 
-          ${pairTimeRow('Day shift',   'day_start',   s.day_start,   'day_end',   s.day_end, 'csWeeklyInlineSlot')}
+          ${pairTimeRow('Day shift',   'day_start',   s.day_start,   'day_end',   s.day_end)}
           ${pairTimeRow('Night shift', 'night_start', s.night_start, 'night_end', s.night_end)}
           ${pairTimeRow('Saturday',    'sat_start',   s.sat_start,   'sat_end',   s.sat_end)}
           ${pairTimeRow('Sunday',      'sun_start',   s.sun_start,   'sun_end',   s.sun_end)}
@@ -32755,6 +32754,7 @@ async function renderClientSettingsUI(settingsObj){
         </div>
 
         <div style="min-width:0;overflow-wrap:break-word;display:flex;flex-direction:column;gap:14px;">
+          <div id="csWeeklyPanel"></div>
           <div id="csFlagsPanel"></div>
         </div>
       </div>
@@ -32767,15 +32767,17 @@ async function renderClientSettingsUI(settingsObj){
 
   let lastValid = { ...s };
 
-  const paintPanels = () => {
+  const paintRightPanels = () => {
     const st = ctx.clientSettingsState || {};
-    const slot = root.querySelector('#csWeeklyInlineSlot');
-    if (slot) slot.innerHTML = weeklySlotHTML(st);
-    const flagsEl = root.querySelector('#csFlagsPanel');
+    const weeklyEl = root.querySelector('#csWeeklyPanel');
+    const flagsEl  = root.querySelector('#csFlagsPanel');
+    if (weeklyEl) weeklyEl.innerHTML = weeklyPanelHTML(st);
+    const hrSlot = root.querySelector('#csHrBehaviourSlot');
+    if (hrSlot) hrSlot.innerHTML = hrBehaviourHTML(st);
     if (flagsEl) flagsEl.innerHTML = flagsPanelHTML(st);
   };
 
-  paintPanels();
+  paintRightPanels();
 
   if (root.__wired) {
     root.removeEventListener('input',  root.__syncSoft, true);
@@ -32852,7 +32854,7 @@ async function renderClientSettingsUI(settingsObj){
     lastValid = { ...next };
 
     if (gatePrev !== gateNext) {
-      paintPanels();
+      paintRightPanels();
       try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
     }
   };
@@ -32900,7 +32902,6 @@ async function renderClientSettingsUI(settingsObj){
   });
   root.__wired = true;
 }
-
 
 
 // ---- Umbrella modal
