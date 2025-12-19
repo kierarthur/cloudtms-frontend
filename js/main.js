@@ -32484,6 +32484,7 @@ function renderClientHospitalsTable() {
 
 // =================== HOSPITALS TABLE (UPDATED: staged delete & edit) ===================
 
+
 async function renderClientSettingsUI(settingsObj){
   const div = byId('clientSettings'); if (!div) return;
 
@@ -32526,37 +32527,8 @@ async function renderClientSettingsUI(settingsObj){
     hr_weekly_behaviour: initial.hr_weekly_behaviour || ''
   };
 
-  const s = canonicalizeClientSettings(seed);
+  let s = canonicalizeClientSettings(seed);
   ctx.clientSettingsState = { ...initial, ...s };
-
-  const inputText = (name,label,val) =>
-    `<div class="row"><label>${label}</label><div class="controls"><input class="input" name="${name}" value="${String(val||'')}" /></div></div>`;
-
-  const pairTimeRow = (label, aName, aVal, bName, bVal) => `
-    <div class="row">
-      <label style="white-space:normal">${label}</label>
-      <div class="controls" style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;">
-        <div style="display:flex;flex-direction:column;gap:4px;min-width:120px;flex:1;">
-          <span class="mini" style="opacity:0.9">Start</span>
-          <input class="input" type="time" step="60" name="${aName}" value="${String(aVal||'')}" />
-        </div>
-        <div style="display:flex;flex-direction:column;gap:4px;min-width:120px;flex:1;">
-          <span class="mini" style="opacity:0.9">End</span>
-          <input class="input" type="time" step="60" name="${bName}" value="${String(bVal||'')}" />
-        </div>
-      </div>
-    </div>
-  `;
-
-  const weekDaySelect = () => {
-    const opts = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday']
-      .map((lab,idx)=>`<option value="${idx}" ${String(idx)===String(s.week_ending_weekday)?'selected':''}>${lab}</option>`).join('');
-    return `
-      <select name="week_ending_weekday">
-        ${opts}
-      </select>
-    `;
-  };
 
   const yesNoToggle = (name, text, checked) => `
     <label class="inline chk-tight"
@@ -32574,77 +32546,121 @@ async function renderClientSettingsUI(settingsObj){
     </label>
   `;
 
-  const mode = String(s.weekly_mode || 'NONE').toUpperCase();
-  const beh  = String(s.hr_weekly_behaviour || 'VERIFY').toUpperCase();
-  const isCreate = (beh === 'CREATE');
-
-  const weeklyMsg =
-    (mode === 'NONE')
-      ? 'Weekly timesheets are managed manually (no external weekly import source). Candidates will submit timesheets electronically or using a QR Timesheet.'
-    : (mode === 'NHSP')
-      ? 'NHSP weekly imports will be used for this client. Candidates will not submit any timesheets.'
-    : 'HealthRoster weekly imports will be used for this client.';
-
-  const weeklySourceBlock = () => `
-    <div style="display:flex;flex-direction:column;gap:10px;min-width:0;">
-      <div class="row" style="margin:0;">
-        <label style="white-space:normal">Weekly timesheet source</label>
-        <div class="controls" style="display:flex;flex-direction:column;gap:8px;min-width:0;">
-          <div class="toggle-row" style="display:flex;flex-wrap:wrap;gap:10px;min-width:0;">
-            ${radioToggle('weekly_mode', 'NONE',         'None (manual)', mode === 'NONE')}
-            ${radioToggle('weekly_mode', 'NHSP',         'NHSP',          mode === 'NHSP')}
-            ${radioToggle('weekly_mode', 'HEALTHROSTER', 'HealthRoster',  mode === 'HEALTHROSTER')}
-          </div>
-          <div class="mini" style="opacity:0.9;line-height:1.25;white-space:normal;overflow-wrap:anywhere;">${weeklyMsg}</div>
+  const pairTimeRow = (label, aName, aVal, bName, bVal) => `
+    <div class="row">
+      <label style="white-space:normal">${label}</label>
+      <div class="controls" style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;min-width:0;">
+        <div style="display:flex;flex-direction:column;gap:4px;min-width:140px;flex:1;">
+          <span class="mini" style="opacity:0.9">Start</span>
+          <input class="input" type="time" step="60" name="${aName}" value="${String(aVal||'')}" />
+        </div>
+        <div style="display:flex;flex-direction:column;gap:4px;min-width:140px;flex:1;">
+          <span class="mini" style="opacity:0.9">End</span>
+          <input class="input" type="time" step="60" name="${bName}" value="${String(bVal||'')}" />
         </div>
       </div>
     </div>
   `;
 
-  const hrBehaviourBlock = () => {
-    if (mode !== 'HEALTHROSTER') return '';
-    const isVerify = (beh !== 'CREATE');
+  const weekEndingAndDefaultRow = () => {
+    const opts = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday']
+      .map((lab,idx)=>`<option value="${idx}" ${String(idx)===String(s.week_ending_weekday)?'selected':''}>${lab}</option>`).join('');
     return `
-      <div style="display:flex;flex-direction:column;gap:10px;min-width:0;">
-        <div class="row" style="margin:0;">
-          <label style="white-space:normal">Weekly HealthRoster behaviour</label>
-          <div class="controls" style="display:flex;flex-direction:column;gap:10px;min-width:0;">
-
-            <div style="display:flex;flex-direction:column;gap:6px;min-width:0;">
-              <div>
-                ${radioToggle(
-                  'hr_weekly_behaviour',
-                  'VERIFY',
-                  'Worker will provide timesheets; the agency will also import healthroster data to verify workers hours',
-                  isVerify
-                )}
-              </div>
-              <div class="mini" style="opacity:0.9;line-height:1.25;margin-left:26px;white-space:normal;overflow-wrap:anywhere;">
-                Import will validate that HealthRoster hours match the worker’s weekly timesheet. Mismatches fail validation and healthroster or timesheet will need amending before it can be paid.
-              </div>
-            </div>
-
-            <div style="display:flex;flex-direction:column;gap:6px;min-width:0;">
-              <div>
-                ${radioToggle(
-                  'hr_weekly_behaviour',
-                  'CREATE',
-                  'Worker will not provide timesheets; imports create them if a contract exists',
-                  !isVerify
-                )}
-              </div>
-              <div class="mini" style="opacity:0.9;line-height:1.25;margin-left:26px;white-space:normal;overflow-wrap:anywhere;">
-                Import will create/update weekly timesheets from HealthRoster hours when a contract exists. Healthroster hours will not require any seperate checks.
-              </div>
-            </div>
-
+      <div class="row">
+        <label style="white-space:normal">Week ending / Default submission</label>
+        <div class="controls" style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-start;min-width:0;">
+          <div style="display:flex;flex-direction:column;gap:4px;min-width:180px;flex:1;">
+            <span class="mini" style="opacity:0.9">Week ending day</span>
+            <select name="week_ending_weekday">${opts}</select>
+          </div>
+          <div style="display:flex;flex-direction:column;gap:4px;min-width:180px;flex:1;">
+            <span class="mini" style="opacity:0.9">Default submission</span>
+            <select name="default_submission_mode">
+              <option value="ELECTRONIC" ${String(s.default_submission_mode||'').toUpperCase()==='ELECTRONIC'?'selected':''}>ELECTRONIC</option>
+              <option value="MANUAL"     ${String(s.default_submission_mode||'').toUpperCase()==='MANUAL'?'selected':''}>MANUAL</option>
+            </select>
           </div>
         </div>
       </div>
     `;
   };
 
-  const flagsBlock = () => {
+  const weeklyPanelHTML = (st) => {
+    const mode = String(st.weekly_mode || 'NONE').toUpperCase();
+    const msg =
+      (mode === 'NONE')
+        ? 'Weekly timesheets are managed manually (no external weekly import source). Candidates will submit timesheets electronically or using a QR Timesheet.'
+      : (mode === 'NHSP')
+        ? 'NHSP weekly imports will be used for this client. Candidates will not submit any timesheets.'
+      : 'HealthRoster weekly imports will be used for this client.';
+
+    return `
+      <div class="row" style="margin:0;">
+        <label style="white-space:normal">Weekly timesheet source</label>
+        <div class="controls" style="display:flex;flex-direction:column;gap:10px;min-width:0;">
+          <div style="display:flex;flex-wrap:wrap;gap:10px;min-width:0;">
+            ${radioToggle('weekly_mode', 'NONE', 'None (manual)', mode === 'NONE')}
+            ${radioToggle('weekly_mode', 'NHSP', 'NHSP', mode === 'NHSP')}
+            ${radioToggle('weekly_mode', 'HEALTHROSTER', 'HealthRoster', mode === 'HEALTHROSTER')}
+          </div>
+          <div class="mini" style="opacity:0.9;line-height:1.25;white-space:normal;overflow-wrap:anywhere;">${msg}</div>
+        </div>
+      </div>
+
+      <div id="csHrBehaviourSlot"></div>
+    `;
+  };
+
+  const hrBehaviourHTML = (st) => {
+    const mode = String(st.weekly_mode || 'NONE').toUpperCase();
+    if (mode !== 'HEALTHROSTER') return '';
+
+    const beh = String(st.hr_weekly_behaviour || 'VERIFY').toUpperCase();
+    const isVerify = (beh !== 'CREATE');
+
+    return `
+      <div class="row" style="margin-top:12px;">
+        <label style="white-space:normal">Weekly HealthRoster behaviour</label>
+        <div class="controls" style="display:flex;flex-direction:column;gap:10px;min-width:0;">
+
+          <div style="display:flex;flex-direction:column;gap:6px;min-width:0;">
+            <div>
+              ${radioToggle(
+                'hr_weekly_behaviour',
+                'VERIFY',
+                'Worker will provide timesheets; the agency will also import healthroster data to verify workers hours',
+                isVerify
+              )}
+            </div>
+            <div class="mini" style="opacity:0.9;line-height:1.25;margin-left:26px;white-space:normal;overflow-wrap:anywhere;">
+              Import will validate that HealthRoster hours match the worker’s weekly timesheet. Mismatches fail validation and healthroster or timesheet will need amending before it can be paid.
+            </div>
+          </div>
+
+          <div style="display:flex;flex-direction:column;gap:6px;min-width:0;">
+            <div>
+              ${radioToggle(
+                'hr_weekly_behaviour',
+                'CREATE',
+                'Worker will not provide timesheets; imports create them if a contract exists',
+                !isVerify
+              )}
+            </div>
+            <div class="mini" style="opacity:0.9;line-height:1.25;margin-left:26px;white-space:normal;overflow-wrap:anywhere;">
+              Import will create/update weekly timesheets from HealthRoster hours when a contract exists. Healthroster hours will not require any seperate checks.
+            </div>
+          </div>
+
+        </div>
+      </div>
+    `;
+  };
+
+  const flagsPanelHTML = (st) => {
+    const mode = String(st.weekly_mode || 'NONE').toUpperCase();
+    const beh  = String(st.hr_weekly_behaviour || 'VERIFY').toUpperCase();
+    const isCreate = (beh === 'CREATE');
+
     if (mode === 'NHSP') {
       return `
         <div class="row" style="margin:0;">
@@ -32664,15 +32680,15 @@ async function renderClientSettingsUI(settingsObj){
           <label style="white-space:normal">References & flags</label>
           <div class="controls" style="display:flex;flex-direction:column;gap:10px;min-width:0;">
 
-            <div class="toggle-row" style="display:flex;flex-wrap:wrap;gap:10px;min-width:0;">
-              ${yesNoToggle('pay_reference_required',      'Ref No. required to PAY',     !!s.pay_reference_required)}
-              ${yesNoToggle('invoice_reference_required',  'Ref No. required to INVOICE', !!s.invoice_reference_required)}
+            <div style="display:flex;flex-wrap:wrap;gap:10px;min-width:0;">
+              ${yesNoToggle('pay_reference_required', 'Ref No. required to PAY', !!st.pay_reference_required)}
+              ${yesNoToggle('invoice_reference_required', 'Ref No. required to INVOICE', !!st.invoice_reference_required)}
             </div>
 
-            <div class="toggle-row" style="display:flex;flex-wrap:wrap;gap:10px;min-width:0;">
-              ${yesNoToggle('self_bill_no_invoices_sent',  'Self-bill (no invoices sent)', !!s.self_bill_no_invoices_sent)}
-              ${yesNoToggle('daily_calc_of_invoices',      'Daily invoice calculation',    !!s.daily_calc_of_invoices)}
-              ${yesNoToggle('group_nightsat_sunbh',        'Group Night/Sat/Sun/BH',       !!s.group_nightsat_sunbh)}
+            <div style="display:flex;flex-wrap:wrap;gap:10px;min-width:0;">
+              ${yesNoToggle('self_bill_no_invoices_sent', 'Self-bill (no invoices sent)', !!st.self_bill_no_invoices_sent)}
+              ${yesNoToggle('daily_calc_of_invoices', 'Daily invoice calculation', !!st.daily_calc_of_invoices)}
+              ${yesNoToggle('group_nightsat_sunbh', 'Group Night/Sat/Sun/BH', !!st.group_nightsat_sunbh)}
             </div>
 
             <div class="mini" style="opacity:0.9;line-height:1.25;white-space:normal;overflow-wrap:anywhere;">
@@ -32690,15 +32706,15 @@ async function renderClientSettingsUI(settingsObj){
         <label style="white-space:normal">References & flags</label>
         <div class="controls" style="display:flex;flex-direction:column;gap:10px;min-width:0;">
 
-          <div class="toggle-row" style="display:flex;flex-wrap:wrap;gap:10px;min-width:0;">
-            ${yesNoToggle('self_bill_no_invoices_sent', 'Self-bill (no invoices sent)', !!s.self_bill_no_invoices_sent)}
-            ${yesNoToggle('daily_calc_of_invoices',     'Daily invoice calculation',    !!s.daily_calc_of_invoices)}
-            ${yesNoToggle('group_nightsat_sunbh',       'Group Night/Sat/Sun/BH',       !!s.group_nightsat_sunbh)}
+          <div style="display:flex;flex-wrap:wrap;gap:10px;min-width:0;">
+            ${yesNoToggle('self_bill_no_invoices_sent', 'Self-bill (no invoices sent)', !!st.self_bill_no_invoices_sent)}
+            ${yesNoToggle('daily_calc_of_invoices', 'Daily invoice calculation', !!st.daily_calc_of_invoices)}
+            ${yesNoToggle('group_nightsat_sunbh', 'Group Night/Sat/Sun/BH', !!st.group_nightsat_sunbh)}
           </div>
 
-          <div class="toggle-row" style="display:flex;flex-wrap:wrap;gap:10px;min-width:0;">
-            ${yesNoToggle('hr_attach_to_invoice', 'Attach HealthRoster to invoice', !!s.hr_attach_to_invoice)}
-            ${isCreate ? '' : yesNoToggle('ts_attach_to_invoice', 'Attach timesheets to invoice', !!s.ts_attach_to_invoice)}
+          <div style="display:flex;flex-wrap:wrap;gap:10px;min-width:0;">
+            ${yesNoToggle('hr_attach_to_invoice', 'Attach HealthRoster to invoice', !!st.hr_attach_to_invoice)}
+            ${isCreate ? '' : yesNoToggle('ts_attach_to_invoice', 'Attach timesheets to invoice', !!st.ts_attach_to_invoice)}
           </div>
 
         </div>
@@ -32706,57 +32722,29 @@ async function renderClientSettingsUI(settingsObj){
     `;
   };
 
-  const weekEndingAndDefaultRow = () => `
-    <div class="row">
-      <label style="white-space:normal">Week ending / Default submission</label>
-      <div class="controls" style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;min-width:0;">
-        <div style="display:flex;flex-direction:column;gap:4px;min-width:160px;flex:1;">
-          <span class="mini" style="opacity:0.9">Week ending day</span>
-          ${weekDaySelect()}
-        </div>
-        <div style="display:flex;flex-direction:column;gap:4px;min-width:160px;flex:1;">
-          <span class="mini" style="opacity:0.9">Default submission</span>
-          <select name="default_submission_mode">
-            <option value="ELECTRONIC" ${String(s.default_submission_mode||'').toUpperCase()==='ELECTRONIC'?'selected':''}>ELECTRONIC</option>
-            <option value="MANUAL"     ${String(s.default_submission_mode||'').toUpperCase()==='MANUAL'?'selected':''}>MANUAL</option>
-          </select>
-        </div>
-      </div>
-    </div>
-  `;
-
   div.innerHTML = `
-    <div id="clientSettingsForm" class="form" style="display:block;">
+    <div id="clientSettingsForm" class="form">
       <div style="
         display:grid;
-        grid-template-columns: repeat(4, minmax(260px, 1fr));
+        grid-template-columns: repeat(auto-fit, minmax(520px, 1fr));
         gap: 18px;
         align-items:start;
         width:100%;
       ">
-
         <div style="min-width:0;overflow-wrap:anywhere;">
           ${inputText('timezone_id','Timezone', s.timezone_id)}
           ${pairTimeRow('Day shift',   'day_start',   s.day_start,   'day_end',   s.day_end)}
           ${pairTimeRow('Night shift', 'night_start', s.night_start, 'night_end', s.night_end)}
-        </div>
-
-        <div style="min-width:0;overflow-wrap:anywhere;">
-          ${pairTimeRow('Saturday',    'sat_start', s.sat_start, 'sat_end', s.sat_end)}
-          ${pairTimeRow('Sunday',      'sun_start', s.sun_start, 'sun_end', s.sun_end)}
-          ${pairTimeRow('Bank holiday','bh_start',  s.bh_start,  'bh_end',  s.bh_end)}
+          ${pairTimeRow('Saturday',    'sat_start',   s.sat_start,   'sat_end',   s.sat_end)}
+          ${pairTimeRow('Sunday',      'sun_start',   s.sun_start,   'sun_end',   s.sun_end)}
+          ${pairTimeRow('Bank holiday','bh_start',    s.bh_start,    'bh_end',    s.bh_end)}
           ${weekEndingAndDefaultRow()}
         </div>
 
         <div style="min-width:0;overflow-wrap:anywhere;display:flex;flex-direction:column;gap:14px;">
-          ${weeklySourceBlock()}
-          ${hrBehaviourBlock()}
+          <div id="csWeeklyPanel"></div>
+          <div id="csFlagsPanel"></div>
         </div>
-
-        <div style="min-width:0;overflow-wrap:anywhere;">
-          ${flagsBlock()}
-        </div>
-
       </div>
     </div>
   `;
@@ -32766,6 +32754,18 @@ async function renderClientSettingsUI(settingsObj){
   const timeKeys = ['day_start','day_end','night_start','night_end','sat_start','sat_end','sun_start','sun_end','bh_start','bh_end'];
 
   let lastValid = { ...s };
+
+  const paintRightPanels = () => {
+    const st = ctx.clientSettingsState || {};
+    const weeklyEl = root.querySelector('#csWeeklyPanel');
+    const flagsEl  = root.querySelector('#csFlagsPanel');
+    if (weeklyEl) weeklyEl.innerHTML = weeklyPanelHTML(st);
+    const hrSlot = root.querySelector('#csHrBehaviourSlot');
+    if (hrSlot) hrSlot.innerHTML = hrBehaviourHTML(st);
+    if (flagsEl) flagsEl.innerHTML = flagsPanelHTML(st);
+  };
+
+  paintRightPanels();
 
   if (root.__wired) {
     root.removeEventListener('input',  root.__syncSoft, true);
@@ -32778,41 +32778,17 @@ async function renderClientSettingsUI(settingsObj){
 
   const _currentFrame = window.__getModalFrame || (() => null);
 
-  const readRadio = (name) => {
+  const getRadio = (name) => {
     const el = root.querySelector(`input[type="radio"][name="${name}"]:checked`);
     return el ? String(el.value || '').trim() : '';
   };
 
-  const readCheckboxIfPresent = (name, fallback) => {
+  const getCheckbox = (name) => {
     const el = root.querySelector(`input[type="checkbox"][name="${name}"]`);
-    if (!el) return fallback;
-    return !!el.checked;
+    return el ? !!el.checked : null;
   };
 
-  const gateKey = (st) => {
-    const m = String(st?.weekly_mode || '').toUpperCase();
-    const b = String(st?.hr_weekly_behaviour || '').toUpperCase();
-    return `${m}|${b}`;
-  };
-
-  const maybeRerenderForGateChange = (prevState, nextState) => {
-    const prevK = gateKey(prevState);
-    const nextK = gateKey(nextState);
-    if (prevK === nextK) return false;
-
-    if (ctx.__clientSettingsRerendering) return true;
-    ctx.__clientSettingsRerendering = true;
-    try {
-      ctx.clientSettingsState = nextState;
-      renderClientSettingsUI(nextState);
-      try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
-    } finally {
-      ctx.__clientSettingsRerendering = false;
-    }
-    return true;
-  };
-
-  const syncSoft = ()=> {
+  const applyFromDOM = (soft) => {
     const frame = _currentFrame();
     if (!frame || frame.mode !== 'edit') return;
 
@@ -32820,85 +32796,81 @@ async function renderClientSettingsUI(settingsObj){
     const vals = collectForm('#clientSettingsForm', false);
     let next = { ...prev, ...vals };
 
+    // times
     timeKeys.forEach(k=>{
       const v = String(vals[k] ?? '').trim();
-      if (v && !hhmm.test(v)) next[k] = lastValid[k];
+      if (v && !hhmm.test(v)) {
+        if (soft) next[k] = lastValid[k];
+        else {
+          const el = root.querySelector(`input[name="${k}"]`);
+          if (el) el.value = lastValid[k] || '';
+        }
+      }
     });
 
+    // week ending
     const w = Number(vals.week_ending_weekday);
     next.week_ending_weekday = Number.isInteger(w) ? String(Math.min(6, Math.max(0, w))) : lastValid.week_ending_weekday;
 
+    // default submission
     const dsm = String(vals.default_submission_mode || next.default_submission_mode || 'ELECTRONIC').toUpperCase();
     next.default_submission_mode = (dsm === 'ELECTRONIC' || dsm === 'MANUAL') ? dsm : 'ELECTRONIC';
 
-    next.weekly_mode = readRadio('weekly_mode') || next.weekly_mode || 'NONE';
-    next.hr_weekly_behaviour = readRadio('hr_weekly_behaviour') || next.hr_weekly_behaviour || 'VERIFY';
+    // gated radios (exist in right panel)
+    const wm = getRadio('weekly_mode');
+    if (wm) next.weekly_mode = wm;
 
-    next.pay_reference_required     = readCheckboxIfPresent('pay_reference_required',     !!next.pay_reference_required);
-    next.invoice_reference_required = readCheckboxIfPresent('invoice_reference_required', !!next.invoice_reference_required);
-    next.self_bill_no_invoices_sent = readCheckboxIfPresent('self_bill_no_invoices_sent', !!next.self_bill_no_invoices_sent);
-    next.daily_calc_of_invoices     = readCheckboxIfPresent('daily_calc_of_invoices',     !!next.daily_calc_of_invoices);
-    next.group_nightsat_sunbh       = readCheckboxIfPresent('group_nightsat_sunbh',       !!next.group_nightsat_sunbh);
-    next.hr_attach_to_invoice       = readCheckboxIfPresent('hr_attach_to_invoice',       !!next.hr_attach_to_invoice);
-    next.ts_attach_to_invoice       = readCheckboxIfPresent('ts_attach_to_invoice',       !!next.ts_attach_to_invoice);
+    const hb = getRadio('hr_weekly_behaviour');
+    if (hb) next.hr_weekly_behaviour = hb;
+
+    // optional checkboxes in flags panel
+    const cbKeys = [
+      'pay_reference_required',
+      'invoice_reference_required',
+      'self_bill_no_invoices_sent',
+      'daily_calc_of_invoices',
+      'group_nightsat_sunbh',
+      'hr_attach_to_invoice',
+      'ts_attach_to_invoice'
+    ];
+    cbKeys.forEach(k=>{
+      const v = getCheckbox(k);
+      if (v !== null) next[k] = v;
+    });
 
     next = canonicalizeClientSettings(next);
 
+    const gatePrev = `${String(prev.weekly_mode||'').toUpperCase()}|${String(prev.hr_weekly_behaviour||'').toUpperCase()}`;
+    const gateNext = `${String(next.weekly_mode||'').toUpperCase()}|${String(next.hr_weekly_behaviour||'').toUpperCase()}`;
+
     ctx.clientSettingsState = next;
-    maybeRerenderForGateChange(prev, next);
+    lastValid = { ...next };
+
+    if (gatePrev !== gateNext) {
+      paintRightPanels();
+      try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
+    }
   };
+
+  const syncSoft = ()=> applyFromDOM(true);
 
   let lastAlertAt = 0;
   const syncValidate = ()=> {
     const frame = _currentFrame();
     if (!frame || frame.mode !== 'edit') return;
 
-    const prev = ctx.clientSettingsState || {};
     const vals = collectForm('#clientSettingsForm', false);
     let hadError = false;
 
     timeKeys.forEach(k=>{
       const v = String(vals[k] ?? '').trim();
-      if (v && !hhmm.test(v)) {
-        hadError = true;
-        const el = root.querySelector(`input[name="${k}"]`);
-        if (el) el.value = lastValid[k] || '';
-      }
+      if (v && !hhmm.test(v)) hadError = true;
     });
 
-    let w = Number(vals.week_ending_weekday);
-    if (!Number.isInteger(w) || w < 0 || w > 6) {
-      hadError = true;
-      w = Number(lastValid.week_ending_weekday) || 0;
-    }
+    const w = Number(vals.week_ending_weekday);
+    if (!Number.isInteger(w) || w < 0 || w > 6) hadError = true;
 
-    const dsmRaw = String(vals.default_submission_mode || '').toUpperCase();
-    const dsmOk  = (dsmRaw === 'ELECTRONIC' || dsmRaw === 'MANUAL') ? dsmRaw : 'ELECTRONIC';
-
-    let next = {
-      ...prev,
-      ...vals,
-      week_ending_weekday: String(w),
-      default_submission_mode: dsmOk
-    };
-
-    next.weekly_mode = readRadio('weekly_mode') || next.weekly_mode || 'NONE';
-    next.hr_weekly_behaviour = readRadio('hr_weekly_behaviour') || next.hr_weekly_behaviour || 'VERIFY';
-
-    next.pay_reference_required     = readCheckboxIfPresent('pay_reference_required',     !!next.pay_reference_required);
-    next.invoice_reference_required = readCheckboxIfPresent('invoice_reference_required', !!next.invoice_reference_required);
-    next.self_bill_no_invoices_sent = readCheckboxIfPresent('self_bill_no_invoices_sent', !!next.self_bill_no_invoices_sent);
-    next.daily_calc_of_invoices     = readCheckboxIfPresent('daily_calc_of_invoices',     !!next.daily_calc_of_invoices);
-    next.group_nightsat_sunbh       = readCheckboxIfPresent('group_nightsat_sunbh',       !!next.group_nightsat_sunbh);
-    next.hr_attach_to_invoice       = readCheckboxIfPresent('hr_attach_to_invoice',       !!next.hr_attach_to_invoice);
-    next.ts_attach_to_invoice       = readCheckboxIfPresent('ts_attach_to_invoice',       !!next.ts_attach_to_invoice);
-
-    next = canonicalizeClientSettings(next);
-
-    ctx.clientSettingsState = next;
-    lastValid = { ...ctx.clientSettingsState };
-
-    maybeRerenderForGateChange(prev, next);
+    applyFromDOM(false);
 
     if (hadError) {
       const now = Date.now();
@@ -32922,7 +32894,13 @@ async function renderClientSettingsUI(settingsObj){
     }
   });
   root.__wired = true;
+
+  // helper used above but kept local for this function
+  function inputText(name,label,val){
+    return `<div class="row"><label>${label}</label><div class="controls"><input class="input" name="${name}" value="${String(val||'')}" /></div></div>`;
+  }
 }
+
 
 
 
