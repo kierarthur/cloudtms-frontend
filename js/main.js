@@ -41783,6 +41783,7 @@ function renderTimesheetRelatedTab(ctx) {
 }
 
 
+
 function renderTimesheetEvidenceTab(ctx) {
   const { LOGM, L, GC, GE } = getTsLoggers('[TS][EVIDENCE]');
   const { row, details, state } = normaliseTimesheetCtx(ctx);
@@ -41807,7 +41808,6 @@ function renderTimesheetEvidenceTab(ctx) {
     if (Number.isNaN(d.getTime())) return String(iso);
 
     try {
-      // en-GB often returns "Mon, 1 December 2025" → remove comma
       const s = d.toLocaleDateString('en-GB', {
         timeZone: 'Europe/London',
         weekday: 'short',
@@ -41818,6 +41818,27 @@ function renderTimesheetEvidenceTab(ctx) {
       return String(s).replace(',', '').replace(/\s+/g, ' ').trim();
     } catch {
       return d.toISOString().slice(0, 10);
+    }
+  };
+
+  // Format: "23:01hrs" (Europe/London)
+  const formatEvidenceTime = (iso) => {
+    if (!iso) return '—';
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return '—';
+
+    try {
+      const t = d.toLocaleTimeString('en-GB', {
+        timeZone: 'Europe/London',
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: false
+      });
+      const clean = String(t).replace(/\s+/g, '').trim();
+      return clean ? `${clean}hrs` : '—';
+    } catch {
+      const hhmm = d.toISOString().slice(11, 16);
+      return hhmm ? `${hhmm}hrs` : '—';
     }
   };
 
@@ -41837,6 +41858,21 @@ function renderTimesheetEvidenceTab(ctx) {
     return n ? n : '';
   };
 
+  // "Uploaded by" comes from backend enrichment (preferred), otherwise falls back
+  const uploadedByLabel = (ev) => {
+    const isSystem = !!ev?.system;
+    if (isSystem) return 'System';
+
+    const by =
+      (ev && typeof ev.uploaded_by_display === 'string' && ev.uploaded_by_display.trim())
+        ? ev.uploaded_by_display.trim()
+        : (ev && typeof ev.created_by_display === 'string' && ev.created_by_display.trim())
+          ? ev.created_by_display.trim()
+          : null;
+
+    return by || '—';
+  };
+
   const rowsHtml = evList.length
     ? evList.map(ev => {
         const id = (ev && ev.id != null) ? String(ev.id) : '';
@@ -41844,10 +41880,13 @@ function renderTimesheetEvidenceTab(ctx) {
         const canDelete = isDeletable(ev);
 
         const dt = getUploadedDt(ev);
-        const uploaded = escapeHtml(formatEvidenceDate(dt));
+        const uploadedDate = escapeHtml(formatEvidenceDate(dt));
+        const uploadedTime = escapeHtml(formatEvidenceTime(dt));
 
         const type = escapeHtml(typeLabel(ev));
         const tooltip = nameLabel(ev) ? ` title="${escapeHtml(nameLabel(ev))}"` : '';
+
+        const uploadedBy = escapeHtml(uploadedByLabel(ev));
 
         const viewBtn = `
           <button type="button"
@@ -41874,7 +41913,9 @@ function renderTimesheetEvidenceTab(ctx) {
               class="${system ? 'system-evidence' : ''}"
               ${tooltip}>
             <td>${type}</td>
-            <td>${uploaded}</td>
+            <td>${uploadedDate}</td>
+            <td>${uploadedTime}</td>
+            <td>${uploadedBy}</td>
             <td style="text-align:right; white-space:nowrap;">
               ${viewBtn}
               ${delBtn}
@@ -41884,7 +41925,7 @@ function renderTimesheetEvidenceTab(ctx) {
       }).join('')
     : `
       <tr>
-        <td colspan="3" class="mini" style="opacity:.85;">
+        <td colspan="5" class="mini" style="opacity:.85;">
           No evidence uploaded yet. Drag a file anywhere inside this tab to upload.
         </td>
       </tr>
@@ -41897,6 +41938,8 @@ function renderTimesheetEvidenceTab(ctx) {
           <tr>
             <th style="text-align:left;">Evidence Type</th>
             <th style="text-align:left;">Date Uploaded</th>
+            <th style="text-align:left;">Time</th>
+            <th style="text-align:left;">Uploaded by</th>
             <th style="text-align:right;">Actions</th>
           </tr>
         </thead>
