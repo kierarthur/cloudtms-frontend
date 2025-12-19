@@ -32725,12 +32725,11 @@ async function renderClientSettingsUI(settingsObj){
     `;
   };
 
-  // IMPORTANT: avoid index.html `.form { display:grid; ... }` interference
   div.innerHTML = `
     <div id="clientSettingsForm" style="display:block;">
       <div style="
         display:grid;
-        grid-template-columns: repeat(auto-fit, minmax(520px, 1fr));
+        grid-template-columns: minmax(520px, 1.15fr) minmax(420px, 0.85fr);
         gap: 18px;
         align-items:start;
         width:100%;
