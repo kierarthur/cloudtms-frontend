@@ -39101,6 +39101,371 @@ function renderTimesheetOverviewTab(ctx) {
   `;
 }
 
+function renderHrRotaDailySummary(type, importId, rows, ss) {
+  const summary = ss.summary || {};
+  const total   = summary.total_rows || rows.length || 0;
+
+  const counts = {
+    OK: 0,
+    FAILED: 0,
+    UNMATCHED: 0
+  };
+  rows.forEach(r => {
+    const st = String(r.status || '').toUpperCase();
+    if (st === 'OK' || st === 'VALIDATION_OK') counts.OK++;
+    else if (st === 'UNMATCHED') counts.UNMATCHED++;
+    else counts.FAILED++;
+  });
+
+  window.__hrRotaEmailSelections = window.__hrRotaEmailSelections || {};
+  window.__hrRotaEmailSelections[importId] = new Set();
+  const emailSel = window.__hrRotaEmailSelections[importId];
+
+  const rowsHtml = rows.length
+    ? rows.map((r, idx) => {
+        const staff = r.staff_name || r.staff_raw || '';
+        const unit  = r.unit || r.hospital_or_trust || r.hospital_norm || '';
+        const date  = r.date_local || r.date || r.shift_date || '';
+        const stRaw = r.status || '';
+        const st    = String(stRaw || '').toUpperCase();
+        const reasonCode = String(r.reason_code || r.failure_reason || r.reason || '').toLowerCase();
+
+        const canAssignCand   = (reasonCode === 'candidate_unresolved');
+        const canAssignClient = (reasonCode === 'client_unresolved');
+
+        const isTimeMismatch =
+          reasonCode === 'actual_hours_mismatch' ||
+          reasonCode === 'start_end_mismatch' ||
+          reasonCode === 'break_minutes_mismatch';
+
+        let stCls = 'pill-info';
+        if (st === 'OK' || st === 'VALIDATION_OK') {
+          stCls = 'pill-ok';
+        } else if (reasonCode === 'candidate_unresolved' || reasonCode === 'client_unresolved') {
+          stCls = 'pill-bad';
+        } else if (isTimeMismatch) {
+          stCls = 'pill-warn';
+        }
+
+        // Normalised, human-readable label text (no <br/>, allow browser wrapping)
+        let pillLabel;
+        if (st === 'OK' || st === 'VALIDATION_OK') {
+          pillLabel = 'OK';
+        } else if (reasonCode === 'candidate_unresolved') {
+          pillLabel = 'CANDIDATE UNMATCHED';
+        } else if (reasonCode === 'client_unresolved') {
+          pillLabel = 'CLIENT UNMATCHED';
+        } else if (reasonCode === 'actual_hours_mismatch') {
+          pillLabel = 'HOURS MISMATCH';
+        } else if (reasonCode === 'start_end_mismatch') {
+          pillLabel = 'START/END MISMATCH';
+        } else if (reasonCode === 'break_minutes_mismatch') {
+          pillLabel = 'BREAK MISMATCH';
+        } else {
+          // Generic: reason_code like "reject_no_contract_band_mismatch"
+          pillLabel = (reasonCode || 'UNKNOWN').replace(/_/g, ' ').toUpperCase();
+        }
+
+        const emailEligible    = r.email_eligible === true;
+        const emailAlreadySent = r.email_already_sent === true;
+
+        const rowId = r.hr_row_id || r.id || `${idx}`;
+
+        let emailCellHtml;
+        if (!emailEligible) {
+          emailCellHtml = '<span class="mini">—</span>';
+        } else {
+          const checked = (emailSel instanceof Set && emailSel.has(rowId)) ? 'checked' : '';
+          const iconHtml = emailAlreadySent
+            ? `<span class="email-icon" title="Email previously sent" style="font-size:0.8rem;opacity:0.7;">&#x2709;&#x2713;</span>`
+            : '';
+
+          emailCellHtml = `
+            <div class="hr-email-cell" style="display:flex;align-items:center;justify-content:center;gap:4px;">
+              <input type="checkbox"
+                     data-act="hr-rota-email"
+                     data-row-id="${enc(rowId)}"
+                     data-row-idx="${idx}"
+                     ${checked} />
+              ${iconHtml}
+            </div>
+          `;
+        }
+
+        return `
+          <tr>
+            <td><span class="mini">${enc(staff || '—')}</span></td>
+            <td><span class="mini">${enc(unit || '—')}</span></td>
+            <td><span class="mini">${enc(date || '—')}</span></td>
+            <td>
+              <span
+                class="pill ${stCls}"
+                style="
+                  white-space: normal;
+                  word-break: break-word;
+                  display: inline-block;
+                  max-width: 160px;
+                  text-align: center;
+                "
+              >
+                ${enc(pillLabel || 'UNKNOWN')}
+              </span>
+            </td>
+            <td>
+              ${
+                canAssignCand
+                  ? `<button type="button"
+                             class="btn mini"
+                             data-act="resolve-candidate"
+                             data-row-idx="${idx}">
+                       Assign candidate…
+                     </button>`
+                  : ''
+              }
+              ${
+                canAssignClient
+                  ? `<button type="button"
+                             class="btn mini"
+                             style="margin-left:4px;"
+                             data-act="resolve-client"
+                             data-row-idx="${idx}">
+                       Assign client…
+                     </button>`
+                  : ''
+              }
+            </td>
+            <td>${emailCellHtml}</td>
+          </tr>
+        `;
+      }).join('')
+    : `
+      <tr>
+        <td colspan="6">
+          <span class="mini">No rows to show.</span>
+        </td>
+      </tr>
+    `;
+
+  const markup = html(`
+    <div class="form" id="hrRotaSummary">
+      <div class="card hr-rota-full">
+        <div class="row">
+          <label>Overview</label>
+          <div class="controls">
+            <div class="mini">
+              Import ID: <span class="mono">${enc(importId || '—')}</span><br/>
+              Total rows: ${total}<br/>
+              OK: ${counts.OK} &nbsp; Failed: ${counts.FAILED} &nbsp; Unmatched: ${counts.UNMATCHED}
+            </div>
+          </div>
+        </div>
+
+        <div class="row" style="margin-top:10px;">
+          <label>Rows</label>
+          <div class="controls">
+            <div class="hr-rota-table-wrap" style="max-height:420px; overflow-y:auto;">
+              <table class="grid">
+                <thead>
+                  <tr>
+                    <th>Staff</th>
+                    <th>Unit / Site</th>
+                    <th>Date</th>
+                    <th>Status</th>
+                    <th>Resolve</th>
+                    <th>Send email</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${rowsHtml}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+
+        <div class="row hr-rota-footer" style="margin-top:8px;">
+          <label></label>
+          <div class="controls">
+            <button type="button"
+                    class="btn"
+                    data-act="hr-rota-reclassify">
+              Reclassify
+            </button>
+            <button type="button"
+                    class="btn btn-primary"
+                    style="margin-left:8px;"
+                    data-act="hr-rota-apply">
+              Finalise validations
+            </button>
+            <span class="mini" style="margin-left:8px;">
+              "Reclassify" re-runs checks and refreshes this summary.
+              "Finalise validations" updates validation status and, if boxes are ticked,
+              queues emails to Temp Staffing.
+            </span>
+          </div>
+        </div>
+      </div>
+    </div>
+  `);
+
+  // Wiring (unchanged in spirit)
+  setTimeout(() => {
+    try {
+      const root = document.getElementById('hrRotaSummary');
+      if (!root || type !== 'HR_ROTA_DAILY') return;
+
+      root.addEventListener('click', (ev) => {
+        const btn = ev.target.closest('button[data-act]');
+        if (!btn) return;
+        const act = btn.getAttribute('data-act');
+
+        const st = window.__importSummaryState && window.__importSummaryState['HR_ROTA_DAILY'];
+        if (!st) return;
+
+        const rows = Array.isArray(st.rows) ? st.rows : [];
+        const idx  = Number(btn.getAttribute('data-row-idx') || '-1');
+        const row  = (idx >= 0 && idx < rows.length) ? rows[idx] : null;
+        if (!row) return;
+
+        const reasonCode   = String(row.reason_code || row.failure_reason || row.reason || '').toLowerCase();
+        const hasTimesheet = !!row.timesheet_id;
+
+        if (act === 'resolve-candidate') {
+          if (reasonCode === 'candidate_unresolved' || !hasTimesheet) {
+            openHrRotaAssignCandidateModal(importId, idx);
+            return;
+          }
+
+          if (hasTimesheet) {
+            openResolveCandidateModal({
+              timesheet_id:      row.timesheet_id,
+              occupant_key_norm: row.staff_name || row.staff_raw || '',
+              hospital_norm:     row.unit || row.hospital_or_trust || row.hospital_norm || ''
+            });
+          } else {
+            alert('No timesheet matched for this row; resolve candidate via imports/aliases instead.');
+          }
+        }
+
+        if (act === 'resolve-client') {
+          if (reasonCode === 'client_unresolved' || !hasTimesheet) {
+            openHrRotaAssignClientModal(importId, idx);
+            return;
+          }
+
+          if (hasTimesheet) {
+            openResolveClientModal({
+              timesheet_id:  row.timesheet_id,
+              hospital_norm: row.unit || row.hospital_or_trust || row.hospital_norm || ''
+            });
+          } else {
+            alert('No timesheet matched for this row; resolve client/site via imports/aliases instead.');
+          }
+        }
+      });
+
+      root.addEventListener('change', (ev) => {
+        const cb = ev.target.closest('input[data-act="hr-rota-email"]');
+        if (!cb) return;
+
+        const rowId = cb.getAttribute('data-row-id') || '';
+        if (!rowId) return;
+
+        window.__hrRotaEmailSelections = window.__hrRotaEmailSelections || {};
+        const sel = window.__hrRotaEmailSelections[importId] || new Set();
+        if (!(sel instanceof Set)) {
+          window.__hrRotaEmailSelections[importId] = new Set();
+        }
+
+        if (cb.checked) {
+          window.__hrRotaEmailSelections[importId].add(rowId);
+        } else {
+          window.__hrRotaEmailSelections[importId].delete(rowId);
+        }
+      });
+
+      const btnReclass = root.querySelector('button[data-act="hr-rota-reclassify"]');
+      if (btnReclass && !btnReclass.__hrRotaReclassWired) {
+        btnReclass.__hrRotaReclassWired = true;
+        btnReclass.addEventListener('click', async () => {
+          try {
+            if (!importId) {
+              alert('No import_id in summary; cannot reclassify.');
+              return;
+            }
+            await refreshHrRotaSummary(importId);
+          } catch (err) {
+            console.error('[IMPORTS][HR_ROTA] reclassify failed', err);
+            alert(err?.message || 'Reclassify failed.');
+          }
+        });
+      }
+
+      const btnApply = root.querySelector('button[data-act="hr-rota-apply"]');
+      if (btnApply && !btnApply.__hrRotaApplyWired) {
+        btnApply.__hrRotaApplyWired = true;
+        btnApply.addEventListener('click', async () => {
+          try {
+            if (!importId) {
+              alert('No import_id in summary; cannot finalise.');
+              return;
+            }
+
+            const ok = window.confirm('Are you sure you are ready to finalise?');
+            if (!ok) return;
+
+            const sel = window.__hrRotaEmailSelections && window.__hrRotaEmailSelections[importId];
+            const sendEmailRowIds = (sel instanceof Set) ? Array.from(sel) : [];
+
+            const result = await applyHrRotaValidation(importId, sendEmailRowIds) || {};
+
+            const lines = [];
+            lines.push(`HR Rota validations for import ${result.import_id || importId} have been processed.`);
+
+            if (typeof result.validations_ok === 'number') {
+              lines.push(`Valid rows: ${result.validations_ok}`);
+            }
+            if (typeof result.validations_failed === 'number') {
+              lines.push(`Rows still unresolved: ${result.validations_failed}`);
+            }
+            if (typeof result.emails_queued === 'number') {
+              lines.push(`Emails queued: ${result.emails_queued}`);
+            }
+
+            if (Array.isArray(result.reasons) && result.reasons.length) {
+              lines.push('');
+              lines.push('Remaining issues:');
+              for (const r of result.reasons) {
+                const rc    = String(r.reason_code || '').toLowerCase();
+                const count = r.count ?? 0;
+                let nice;
+                if      (rc === 'candidate_unresolved')         nice = 'Candidate unmatched';
+                else if (rc === 'client_unresolved')            nice = 'Client unmatched';
+                else if (rc === 'actual_hours_mismatch')       nice = 'Hours mismatch';
+                else if (rc === 'start_end_mismatch')          nice = 'Start/end mismatch';
+                else if (rc === 'break_minutes_mismatch')      nice = 'Break mismatch';
+                else                                           nice = (rc || 'other').replace(/_/g, ' ');
+                lines.push(`- ${nice}: ${count}`);
+              }
+            }
+
+            alert(lines.join('\n'));
+            await refreshHrRotaSummary(importId);
+          } catch (err) {
+            console.error('[IMPORTS][HR_ROTA] apply failed', err);
+            alert(err?.message || 'Apply validations failed.');
+          }
+        });
+      }
+    } catch (e) {
+      console.warn('[IMPORTS] HR_ROTA wiring failed', e);
+    }
+  }, 0);
+
+  return markup;
+}
+
+
 
 async function switchContractWeekToManual(weekId) {
   const { LOGM, L, GC, GE } = getTsLoggers('[TS][CW-SWITCH-MANUAL]');
