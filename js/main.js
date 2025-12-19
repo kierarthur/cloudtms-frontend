@@ -27049,6 +27049,47 @@ async function saveForFrame(fr) {
 //   - optionally hours (fallback) / additional_units_week / day_references_json / qr_action
 // Return:
 //   - backend should return updated contract_week (recommended) or { hours } / similar
+
+
+async function switchContractWeekToElectronic(contractWeekId) {
+  const LOGM = (typeof window.__LOG_MODAL === 'boolean') ? window.__LOG_MODAL : false;
+  const L = (...a) => { if (LOGM) console.log('[TS][CW-SWITCH-ELEC]', ...a); };
+
+  if (!contractWeekId) {
+    throw new Error('switchContractWeekToElectronic: contractWeekId is required');
+  }
+
+  const enc = encodeURIComponent(String(contractWeekId));
+  const url = API(`/api/contract-weeks/${enc}/switch-mode`);
+
+  L('REQUEST', { url, contractWeekId });
+
+  let res;
+  let text = '';
+  try {
+    res = await authFetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ submission_mode_snapshot: 'ELECTRONIC' })
+    });
+    text = await res.text().catch(() => '');
+  } catch (err) {
+    L('network error', err);
+    throw err;
+  }
+
+  if (!res.ok) {
+    L('server error', { status: res.status, bodyPreview: (text || '').slice(0, 400) });
+    throw new Error(text || 'Failed to switch contract week to ELECTRONIC');
+  }
+
+  let json = null;
+  try { json = text ? JSON.parse(text) : null; } catch { json = null; }
+
+  L('RESULT', json);
+  return json;
+}
+
 async function contractWeekManualDraftUpsert(weekId, payload) {
   const { LOGM, L, GC, GE } = getTsLoggers('[TS][MANUAL-DRAFT-UPsert]');
   GC('contractWeekManualDraftUpsert');
