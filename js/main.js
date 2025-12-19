@@ -32530,7 +32530,6 @@ async function renderClientSettingsUI(settingsObj){
   let s = canonicalizeClientSettings(seed);
   ctx.clientSettingsState = { ...initial, ...s };
 
-  // Tight, non-stretching Start/End row to remove the big empty “controls desert”
   const pairTimeRow = (label, aName, aVal, bName, bVal) => `
     <div class="row">
       <label style="white-space:normal">${label}</label>
@@ -32570,7 +32569,6 @@ async function renderClientSettingsUI(settingsObj){
     `;
   };
 
-  // Weekly source “pill” radios (no mid-word breaking)
   const radioPill = (name, value, text, checked) => `
     <label class="inline chk-tight"
       style="display:inline-flex;align-items:center;gap:6px;margin-right:10px;white-space:nowrap;">
@@ -32579,7 +32577,6 @@ async function renderClientSettingsUI(settingsObj){
     </label>
   `;
 
-  // Neat grid choice: aligns icon + title + description (no huge gaps)
   const radioChoice = (name, value, title, desc, checked) => `
     <label style="
       display:grid;
@@ -32612,31 +32609,6 @@ async function renderClientSettingsUI(settingsObj){
     </label>
   `;
 
-  const weeklyPanelHTML = (st) => {
-    const mode = String(st.weekly_mode || 'NONE').toUpperCase();
-    const msg =
-      (mode === 'NONE')
-        ? 'Weekly timesheets are managed manually (no external weekly import source). Candidates will submit timesheets electronically or using a QR Timesheet.'
-      : (mode === 'NHSP')
-        ? 'NHSP weekly imports will be used for this client. Candidates will not submit any timesheets.'
-      : 'HealthRoster weekly imports will be used for this client.';
-
-    return `
-      <div class="row" style="margin:0;">
-        <label style="white-space:normal">Weekly timesheet source</label>
-        <div class="controls" style="display:flex;flex-direction:column;gap:8px;min-width:0;">
-          <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;">
-            ${radioPill('weekly_mode', 'NONE', 'None (manual)', mode === 'NONE')}
-            ${radioPill('weekly_mode', 'NHSP', 'NHSP', mode === 'NHSP')}
-            ${radioPill('weekly_mode', 'HEALTHROSTER', 'HealthRoster', mode === 'HEALTHROSTER')}
-          </div>
-          <div class="mini" style="opacity:0.9;line-height:1.25;white-space:normal;overflow-wrap:break-word;">${msg}</div>
-        </div>
-      </div>
-      <div id="csHrBehaviourSlot"></div>
-    `;
-  };
-
   const hrBehaviourHTML = (st) => {
     const mode = String(st.weekly_mode || 'NONE').toUpperCase();
     if (mode !== 'HEALTHROSTER') return '';
@@ -32664,6 +32636,31 @@ async function renderClientSettingsUI(settingsObj){
           )}
         </div>
       </div>
+    `;
+  };
+
+  const weeklyPanelHTML = (st) => {
+    const mode = String(st.weekly_mode || 'NONE').toUpperCase();
+    const msg =
+      (mode === 'NONE')
+        ? 'Weekly timesheets are managed manually (no external weekly import source). Candidates will submit timesheets electronically or using a QR Timesheet.'
+      : (mode === 'NHSP')
+        ? 'NHSP weekly imports will be used for this client. Candidates will not submit any timesheets.'
+      : 'HealthRoster weekly imports will be used for this client.';
+
+    return `
+      <div class="row" style="margin:0;">
+        <label style="white-space:normal">Weekly timesheet source</label>
+        <div class="controls" style="display:flex;flex-direction:column;gap:8px;min-width:0;">
+          <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;">
+            ${radioPill('weekly_mode', 'NONE', 'None (manual)', mode === 'NONE')}
+            ${radioPill('weekly_mode', 'NHSP', 'NHSP', mode === 'NHSP')}
+            ${radioPill('weekly_mode', 'HEALTHROSTER', 'HealthRoster', mode === 'HEALTHROSTER')}
+          </div>
+          <div class="mini" style="opacity:0.9;line-height:1.25;white-space:normal;overflow-wrap:break-word;">${msg}</div>
+        </div>
+      </div>
+      ${hrBehaviourHTML(st)}
     `;
   };
 
@@ -32728,8 +32725,7 @@ async function renderClientSettingsUI(settingsObj){
     `;
   };
 
-  // FIX 1: Avoid clashing with index.html `.form { display:grid; ... }`
-  // Do NOT use class="form" on the outer wrapper.
+  // IMPORTANT: avoid index.html `.form { display:grid; ... }` interference
   div.innerHTML = `
     <div id="clientSettingsForm" style="display:block;">
       <div style="
@@ -32754,8 +32750,8 @@ async function renderClientSettingsUI(settingsObj){
         </div>
 
         <div style="min-width:0;overflow-wrap:break-word;display:flex;flex-direction:column;gap:14px;">
-          <div id="csWeeklyPanel"></div>
-          <div id="csFlagsPanel"></div>
+          <div id="csWeeklyPanel">${weeklyPanelHTML(s)}</div>
+          <div id="csFlagsPanel">${flagsPanelHTML(s)}</div>
         </div>
       </div>
     </div>
@@ -32766,18 +32762,6 @@ async function renderClientSettingsUI(settingsObj){
   const timeKeys = ['day_start','day_end','night_start','night_end','sat_start','sat_end','sun_start','sun_end','bh_start','bh_end'];
 
   let lastValid = { ...s };
-
-  const paintRightPanels = () => {
-    const st = ctx.clientSettingsState || {};
-    const weeklyEl = root.querySelector('#csWeeklyPanel');
-    const flagsEl  = root.querySelector('#csFlagsPanel');
-    if (weeklyEl) weeklyEl.innerHTML = weeklyPanelHTML(st);
-    const hrSlot = root.querySelector('#csHrBehaviourSlot');
-    if (hrSlot) hrSlot.innerHTML = hrBehaviourHTML(st);
-    if (flagsEl) flagsEl.innerHTML = flagsPanelHTML(st);
-  };
-
-  paintRightPanels();
 
   if (root.__wired) {
     root.removeEventListener('input',  root.__syncSoft, true);
@@ -32798,6 +32782,14 @@ async function renderClientSettingsUI(settingsObj){
   const getCheckbox = (name) => {
     const el = root.querySelector(`input[type="checkbox"][name="${name}"]`);
     return el ? !!el.checked : null;
+  };
+
+  const paintRightPanels = () => {
+    const st = ctx.clientSettingsState || {};
+    const weeklyEl = root.querySelector('#csWeeklyPanel');
+    const flagsEl  = root.querySelector('#csFlagsPanel');
+    if (weeklyEl) weeklyEl.innerHTML = weeklyPanelHTML(st);
+    if (flagsEl)  flagsEl.innerHTML  = flagsPanelHTML(st);
   };
 
   const applyFromDOM = (soft) => {
@@ -32902,7 +32894,6 @@ async function renderClientSettingsUI(settingsObj){
   });
   root.__wired = true;
 }
-
 
 // ---- Umbrella modal
 // ========================= openUmbrella (FIXED) =========================
