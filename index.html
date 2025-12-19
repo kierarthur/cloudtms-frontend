@@ -36,6 +36,24 @@ body{
   overflow:hidden;
 }
 
+/* Force native form controls in modal to use dark UI */
+#modal, .modal { 
+  color-scheme: dark;
+}
+
+/* Evidence dropdowns use class="input" but were rendering "white menu + white text" */
+#modal select.input,
+#modal .tabc select.input{
+  background:#000 !important;                 /* overrides inline background:transparent */
+  color:var(--text) !important;
+  border:1px solid var(--line) !important;
+}
+
+/* Try to force dropdown option palette dark as well (works in Chrome/Edge; varies by OS) */
+#modal select.input option{
+  background:#020617;
+  color:var(--text);
+}
 
 
     a{color:inherit}
