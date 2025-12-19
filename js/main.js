@@ -36812,7 +36812,6 @@ async function duplicateContract(contractId, { count } = {}) {
 
 
 // ================== Timesheet helpers ==================
-
 async function fetchTimesheetDetails(timesheetId) {
   const LOGM = (typeof window.__LOG_MODAL === 'boolean') ? window.__LOG_MODAL : false;
   const L    = (...a) => { if (LOGM) console.log('[TS][DETAILS]', ...a); };
@@ -36866,7 +36865,7 @@ async function fetchTimesheetDetails(timesheetId) {
 
   // Normalise segments: ensure exclude_from_pay is boolean and segment_id is string
   const segments = rawSegments.map((seg, idx) => {
-    const s = seg && typeof seg === 'object' ? { ...seg } : { };
+    const s = seg && typeof seg === 'object' ? { ...seg } : {};
     s.segment_id = String(s.segment_id || `seg:${timesheetId}:${idx}`);
     s.exclude_from_pay = !!s.exclude_from_pay;
     return s;
@@ -36874,6 +36873,7 @@ async function fetchTimesheetDetails(timesheetId) {
 
   const isSegments = mode === 'SEGMENTS';
 
+  // ✅ NEW: pass-through fields we need elsewhere (so openTimesheet doesn't need a second fetch)
   const detail = {
     timesheet,
     tsfin,
@@ -36888,7 +36888,16 @@ async function fetchTimesheetDetails(timesheetId) {
     qr_status: json.qr_status || (timesheet ? timesheet.qr_status || null : null),
     qr_generated_at: json.qr_generated_at || null,
     qr_scanned_at: json.qr_scanned_at || null,
-    manual_pdf_r2_key: json.manual_pdf_r2_key || (timesheet ? timesheet.manual_pdf_r2_key || null : null)
+    manual_pdf_r2_key: json.manual_pdf_r2_key || (timesheet ? timesheet.manual_pdf_r2_key || null : null),
+
+    // ✅ NEW: ready_to_pay (from view-backed details response)
+    ready_to_pay: (typeof json.ready_to_pay === 'boolean') ? json.ready_to_pay : null,
+
+    // ✅ NEW: also keep these if backend returns them (it does in your handler)
+    contract_week_id: json.contract_week_id || null,
+    contract_week: json.contract_week || null,
+    policy: json.policy || null,
+    action_flags: (json.action_flags && typeof json.action_flags === 'object') ? json.action_flags : null
   };
 
   L('parsed payload snapshot', {
@@ -36899,11 +36908,20 @@ async function fetchTimesheetDetails(timesheetId) {
     segmentsCount: segments.length,
     mode,
     sheet_scope: detail.sheet_scope,
-    qr_status: detail.qr_status
+    qr_status: detail.qr_status,
+
+    // ✅ NEW
+    ready_to_pay: detail.ready_to_pay,
+    hasPolicy: !!detail.policy,
+    hasActionFlags: !!detail.action_flags,
+    contract_week_id: detail.contract_week_id || null,
+    hasContractWeek: !!detail.contract_week
   });
+
   GE();
   return detail;
 }
+
 
 async function fetchTimesheetRelated(timesheetId) {
   const LOGM = (typeof window.__LOG_MODAL === 'boolean') ? window.__LOG_MODAL : false;
@@ -37102,8 +37120,22 @@ function normaliseTimesheetCtx(ctx) {
       isSegmentsMode: false,
       invoiceBreakdown: null,
       sheet_scope: row.sheet_scope || null,
-      qr_status: row.qr_status || null
+      qr_status: row.qr_status || null,
+
+      // ✅ NEW: carry-through ready_to_pay so Overview can use it even without TSFIN
+      ready_to_pay: (typeof row.ready_to_pay === 'boolean') ? row.ready_to_pay : null,
+
+      // ✅ NEW: keep optional enriched fields consistent with fetchTimesheetDetails()
+      contract_week_id: row.contract_week_id || null,
+      contract_week: null,
+      policy: null,
+      action_flags: null
     };
+
+  // ✅ NEW: if details didn't include ready_to_pay (older backend), fall back to row
+  if (typeof details.ready_to_pay !== 'boolean' && typeof row.ready_to_pay === 'boolean') {
+    details.ready_to_pay = row.ready_to_pay;
+  }
 
   // Related entities from fetchTimesheetRelated
   const related =
@@ -37128,11 +37160,23 @@ function normaliseTimesheetCtx(ctx) {
       markPaid: false,
       segmentOverrides: {},   // { segment_id: { exclude_from_pay: bool } }
       nhspDeferrals: {},      // { shift_id: { defer_until_run_after: string|null } }
-      additionalRates: {}     // { CODE: { bucket_name, unit_name, units_week, ... } }
+      additionalRates: {},    // { CODE: { bucket_name, unit_name, units_week, ... } }
+
+      // ✅ NEW: schedule validation state needs to exist so Save + UI can rely on it
+      scheduleHasErrors: false,
+      scheduleErrorsByDate: {}
     };
-  } else if (!mc.timesheetState.additionalRates || typeof mc.timesheetState.additionalRates !== 'object') {
-    // Preserve existing staging fields but ensure additionalRates exists
-    mc.timesheetState.additionalRates = {};
+  } else {
+    // Preserve existing staging fields but ensure required sub-objects exist
+    if (!mc.timesheetState.additionalRates || typeof mc.timesheetState.additionalRates !== 'object') {
+      mc.timesheetState.additionalRates = {};
+    }
+    if (typeof mc.timesheetState.scheduleHasErrors !== 'boolean') {
+      mc.timesheetState.scheduleHasErrors = false;
+    }
+    if (!mc.timesheetState.scheduleErrorsByDate || typeof mc.timesheetState.scheduleErrorsByDate !== 'object') {
+      mc.timesheetState.scheduleErrorsByDate = {};
+    }
   }
 
   const state = mc.timesheetState;
@@ -38690,7 +38734,6 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
   GE();
 }
 
-
 function renderTimesheetOverviewTab(ctx) {
   const { LOGM, L, GC, GE } = getTsLoggers('[TS][OVERVIEW]');
   const { row, details, related, state } = normaliseTimesheetCtx(ctx);
@@ -38769,13 +38812,18 @@ function renderTimesheetOverviewTab(ctx) {
 
   const payOnHold  = !!(tsfin.pay_on_hold ?? row.pay_on_hold);
 
-  const policy       = details.policy || {};
-  const requiresHr   = !!policy.requires_hr;
-  const autoprocessHr= !!policy.autoprocess_hr;
+  // ✅ ready_to_pay comes from v_timesheets_summary (row.ready_to_pay) and is also mirrored into details by normaliseTimesheetCtx
+  const readyToPay =
+    (typeof details.ready_to_pay === 'boolean') ? details.ready_to_pay :
+    (typeof row.ready_to_pay === 'boolean')     ? row.ready_to_pay :
+    false;
+
+  const policy        = details.policy || {};
+  const requiresHr    = !!policy.requires_hr;
+  const autoprocessHr = !!policy.autoprocess_hr;
 
   // ─────────────────────────────────────────────────────────────
-  // Authorisation badge rule (only show when authorisation is required)
-  // Prefer shared helper if present; otherwise compute inline.
+  // Authorisation helper (single source for "Awaiting Authorisation" badge)
   // ─────────────────────────────────────────────────────────────
   let authInfo = { requires: false, authorised: false, showAwaitingBadge: false };
   if (typeof computeRequiresTimesheetAuthorisation === 'function') {
@@ -38792,29 +38840,58 @@ function renderTimesheetOverviewTab(ctx) {
     authInfo = { requires: requiresAuth, authorised, showAwaitingBadge: (requiresAuth && !authorised) };
   }
 
-  const stageLabel = (() => {
-    if (!hasTsfin) return 'Unprocessed';
-    if (isPaid) return 'Paid';
-    if (isInvoiced) return 'Invoiced';
-    if (stageRaw === 'READY_FOR_INVOICE') return 'Ready for Invoice';
-    if (stageRaw === 'PENDING_AUTH') return 'Awaiting Authorisation';
-    if (stageRaw === 'READY_FOR_HR') return 'Ready for HR';
-    if (stageRaw === 'RATE_MISSING') return 'Rate Missing';
-    if (stageRaw === 'PAY_CHANNEL_MISSING') return 'Pay Channel Missing';
-    if (stageRaw) return stageRaw;
-    return 'Unknown';
-  })();
+  // ─────────────────────────────────────────────────────────────
+  // Stage badges (multiple, independent; never duplicate "Awaiting Authorisation")
+  // ─────────────────────────────────────────────────────────────
+  const stageBadges = [];
+  const seenStage   = new Set();
 
-  const stageClass = (() => {
-    if (!hasTsfin) return 'pill-bad';
-    if (isPaid) return 'pill-ok';
-    if (isInvoiced) return 'pill-warn';
-    if (stageRaw === 'RATE_MISSING' || stageRaw === 'PAY_CHANNEL_MISSING') return 'pill-bad';
-    if (stageRaw === 'READY_FOR_INVOICE') return 'pill-ok';
-    if (stageRaw === 'PENDING_AUTH') return 'pill-warn';
-    return 'pill-info';
-  })();
+  const addStage = (label, cls, title) => {
+    const key = String(label || '').trim();
+    if (!key) return;
+    if (seenStage.has(key)) return;
+    seenStage.add(key);
 
+    stageBadges.push(
+      `<span class="pill ${cls || 'pill-info'}" ` +
+      `style="font-weight:600;${title ? `" title="${enc(title)}"` : '"'}>` +
+      `${enc(key)}</span>`
+    );
+  };
+
+  // Unprocessed / Planned
+  if (!hasTsfin) addStage('Unprocessed', 'pill-info');
+
+  // Paid / Invoiced can co-exist (you explicitly want that)
+  if (isPaid)     addStage('Paid', 'pill-ok');
+  if (isInvoiced) addStage('Invoiced', 'pill-warn');
+
+  // Processing stage flags (can co-exist with Paid/Invoiced if DB says so)
+  if (stageRaw === 'READY_FOR_INVOICE')     addStage('Ready for Invoicing', 'pill-ok');
+  if (stageRaw === 'READY_FOR_HR')          addStage('Ready for HR', 'pill-info');
+  if (stageRaw === 'RATE_MISSING')          addStage('Rate Missing', 'pill-bad');
+  if (stageRaw === 'PAY_CHANNEL_MISSING')   addStage('Pay Channel Missing', 'pill-bad');
+
+  // Awaiting Authorisation: ONLY from authInfo (prevents duplicates)
+  if (authInfo.showAwaitingBadge) addStage('Awaiting Authorisation', 'pill-warn');
+
+  // Pay on hold: must be RED + only in Stage
+  if (payOnHold) addStage('Pay on hold', 'pill-bad');
+
+  // Ready to Pay: only if ready_to_pay is true AND not on hold AND not paid
+  if (readyToPay && !payOnHold && !isPaid) addStage('Ready to Pay', 'pill-ok');
+
+  // If TSFIN exists but stageRaw is something else, surface it (optional but helpful)
+  if (hasTsfin && stageRaw && !seenStage.has(stageRaw)) {
+    // Don’t re-add PENDING_AUTH (we already represent it via authInfo)
+    if (stageRaw !== 'PENDING_AUTH') addStage(stageRaw, 'pill-info');
+  }
+
+  if (!stageBadges.length) addStage('Unknown', 'pill-info');
+
+  // ─────────────────────────────────────────────────────────────
+  // Route pills: exactly 2 (Route + Scope)
+  // ─────────────────────────────────────────────────────────────
   const qrStatus   = String(details.qr_status || ts.qr_status || '').toUpperCase();
   const qrScenario = String(actionFlags.qr_scenario || '').toUpperCase() || null;
 
@@ -38822,22 +38899,39 @@ function renderTimesheetOverviewTab(ctx) {
   const r2AuthKey  = ts.r2_auth_key || null;
 
   const routeLabel = (() => {
-    const isQrRoute = (subMode !== 'MANUAL') || !!qrStatus;
+    const hasQr = !!qrStatus;
 
-    if (!isQrRoute) return 'Manual';
-
-    const scenario = qrScenario;
-
-    // If we have a used QR or scenario3, decide between "awaiting signed" vs "completed" using evidence keys we already have.
-    if (qrStatus === 'USED' || scenario === 'SCENARIO_3') {
-      if (r2NurseKey && r2AuthKey) return 'QR Completed';
-      return 'QR Hours Submitted - awaiting signed timesheet';
+    if (hasQr) {
+      const scenario = qrScenario;
+      if (qrStatus === 'USED' || scenario === 'SCENARIO_3') {
+        if (r2NurseKey && r2AuthKey) return 'QR Completed';
+        return 'QR Hours Submitted - awaiting signed timesheet';
+      }
+      return 'QR - Nothing submitted yet';
     }
 
-    // For pending/expired/cancelled/unknown, keep it simple per brief:
-    return 'QR - Nothing submitted yet';
+    if (subMode === 'ELECTRONIC') return 'Electronic';
+    return 'Manual';
   })();
 
+  const routePillClass =
+    (routeLabel === 'Manual')     ? 'pill-manual' :
+    (routeLabel === 'Electronic') ? 'pill-elec'   :
+    'pill-info';
+
+  const scopeLabel =
+    (sheetScope === 'WEEKLY') ? 'Weekly' :
+    (sheetScope === 'DAILY')  ? 'Daily'  :
+    (sheetScope ? sheetScope : 'Unknown');
+
+  const scopePillClass =
+    (sheetScope === 'WEEKLY') ? 'pill-weekly' :
+    (sheetScope === 'DAILY')  ? 'pill-daily'  :
+    'pill-info';
+
+  // ─────────────────────────────────────────────────────────────
+  // Header
+  // ─────────────────────────────────────────────────────────────
   const headerHtml = `
     <div class="card">
       <div class="row">
@@ -38969,36 +39063,24 @@ function renderTimesheetOverviewTab(ctx) {
       `);
     }
 
-    if (!btns.length) {
-      return `<span class="mini">No actions available.</span>`;
-    }
-
+    if (!btns.length) return `<span class="mini">No actions available.</span>`;
     return `<div style="display:flex;flex-wrap:wrap;gap:8px;">${btns.join('')}</div>`;
   })();
-
-  const awaitingAuthBadge = authInfo.showAwaitingBadge
-    ? `<span class="pill pill-bad" style="margin-left:6px;">Awaiting Authorisation</span>`
-    : '';
-
-  const routePillClass = (routeLabel === 'Manual') ? 'pill-manual' : 'pill-info';
 
   const routeHtml = `
     <div class="card" style="margin-top:10px;">
       <div class="row">
         <label>Stage</label>
-        <div class="controls">
-          <span class="pill ${stageClass}" style="font-weight:600;">${enc(stageLabel)}</span>
-          ${awaitingAuthBadge}
+        <div class="controls" style="display:flex;flex-wrap:wrap;gap:6px;">
+          ${stageBadges.join('')}
         </div>
       </div>
 
       <div class="row">
         <label>Route</label>
-        <div class="controls">
+        <div class="controls" style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;">
           <span class="pill ${routePillClass}" style="font-weight:600;">${enc(routeLabel)}</span>
-          ${payOnHold ? `<span class="pill pill-hold" style="margin-left:6px;">Pay on hold</span>` : ''}
-          ${isInvoiced ? `<span class="pill pill-warn" style="margin-left:6px;">Invoiced</span>` : ''}
-          ${isPaid ? `<span class="pill pill-ok" style="margin-left:6px;">Paid</span>` : ''}
+          <span class="pill ${scopePillClass}" style="font-weight:600;">${enc(scopeLabel)}</span>
         </div>
       </div>
 
@@ -39790,12 +39872,22 @@ async function openTimesheet(row) {
               details.action_flags = details.action_flags || raw.action_flags || null;
             }
 
-            // Also keep these aligned if backend provided them
-            details.sheet_scope     = details.sheet_scope     || raw.sheet_scope     || null;
-            details.qr_status       = details.qr_status       || raw.qr_status       || null;
-            details.qr_generated_at = details.qr_generated_at || raw.qr_generated_at || null;
-            details.qr_scanned_at   = details.qr_scanned_at   || raw.qr_scanned_at   || null;
-            details.manual_pdf_r2_key = details.manual_pdf_r2_key || raw.manual_pdf_r2_key || null;
+         // Also keep these aligned if backend provided them
+details.sheet_scope     = details.sheet_scope     || raw.sheet_scope     || null;
+details.qr_status       = details.qr_status       || raw.qr_status       || null;
+details.qr_generated_at = details.qr_generated_at || raw.qr_generated_at || null;
+details.qr_scanned_at   = details.qr_scanned_at   || raw.qr_scanned_at   || null;
+details.manual_pdf_r2_key = details.manual_pdf_r2_key || raw.manual_pdf_r2_key || null;
+
+// ✅ NEW: ready_to_pay (from v_timesheets_summary / details endpoint)
+if (!Object.prototype.hasOwnProperty.call(details, 'ready_to_pay')) {
+  details.ready_to_pay = !!raw.ready_to_pay;
+} else {
+  details.ready_to_pay = (details.ready_to_pay === true || details.ready_to_pay === false)
+    ? details.ready_to_pay
+    : !!raw.ready_to_pay;
+}
+
           } else {
             // Non-fatal: keep the normalised details object
             if (LOGM) L('raw details enrich failed (non-fatal)', { status: resRaw.status, body: txtRaw.slice(0, 300) });
@@ -39804,17 +39896,21 @@ async function openTimesheet(row) {
           if (LOGM) L('raw details enrich exception (non-fatal)', e);
         }
 
-        L('details fetched', {
-          hasTimesheet: !!details.timesheet,
-          hasTsfin: !!details.tsfin,
-          segments: (details.segments || []).length,
-          shifts: (details.shifts || []).length,
-          isSegmentsMode: !!details.isSegmentsMode,
-          contract_week_id: details.contract_week_id || null,
-          hasPolicy: !!details.policy,
-          hasActionFlags: !!details.action_flags,
-          hasContractWeek: !!details.contract_week
-        });
+    L('details fetched', {
+  hasTimesheet: !!details.timesheet,
+  hasTsfin: !!details.tsfin,
+  segments: (details.segments || []).length,
+  shifts: (details.shifts || []).length,
+  isSegmentsMode: !!details.isSegmentsMode,
+  contract_week_id: details.contract_week_id || null,
+  hasPolicy: !!details.policy,
+  hasActionFlags: !!details.action_flags,
+  hasContractWeek: !!details.contract_week,
+
+  // ✅ NEW
+  ready_to_pay: (details && typeof details.ready_to_pay === 'boolean') ? details.ready_to_pay : null
+});
+
       } catch (err) {
         L('fetchTimesheetDetails FAILED', err);
         GE();
