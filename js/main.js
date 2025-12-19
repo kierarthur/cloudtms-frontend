@@ -39101,6 +39101,7 @@ function renderTimesheetOverviewTab(ctx) {
   `;
 }
 
+
 function renderHrRotaDailySummary(type, importId, rows, ss) {
   const summary = ss.summary || {};
   const total   = summary.total_rows || rows.length || 0;
@@ -39184,7 +39185,7 @@ function renderHrRotaDailySummary(type, importId, rows, ss) {
             <div class="hr-email-cell" style="display:flex;align-items:center;justify-content:center;gap:4px;">
               <input type="checkbox"
                      data-act="hr-rota-email"
-                     data-row-id="${enc(rowId)}"
+                     data-row-id="${escapeHtml(rowId)}"
                      data-row-idx="${idx}"
                      ${checked} />
               ${iconHtml}
@@ -39194,9 +39195,9 @@ function renderHrRotaDailySummary(type, importId, rows, ss) {
 
         return `
           <tr>
-            <td><span class="mini">${enc(staff || '—')}</span></td>
-            <td><span class="mini">${enc(unit || '—')}</span></td>
-            <td><span class="mini">${enc(date || '—')}</span></td>
+            <td><span class="mini">${escapeHtml(staff || '—')}</span></td>
+            <td><span class="mini">${escapeHtml(unit || '—')}</span></td>
+            <td><span class="mini">${escapeHtml(date || '—')}</span></td>
             <td>
               <span
                 class="pill ${stCls}"
@@ -39208,7 +39209,7 @@ function renderHrRotaDailySummary(type, importId, rows, ss) {
                   text-align: center;
                 "
               >
-                ${enc(pillLabel || 'UNKNOWN')}
+                ${escapeHtml(pillLabel || 'UNKNOWN')}
               </span>
             </td>
             <td>
@@ -39253,7 +39254,7 @@ function renderHrRotaDailySummary(type, importId, rows, ss) {
           <label>Overview</label>
           <div class="controls">
             <div class="mini">
-              Import ID: <span class="mono">${enc(importId || '—')}</span><br/>
+              Import ID: <span class="mono">${escapeHtml(importId || '—')}</span><br/>
               Total rows: ${total}<br/>
               OK: ${counts.OK} &nbsp; Failed: ${counts.FAILED} &nbsp; Unmatched: ${counts.UNMATCHED}
             </div>
@@ -39464,7 +39465,6 @@ function renderHrRotaDailySummary(type, importId, rows, ss) {
 
   return markup;
 }
-
 
 
 async function switchContractWeekToManual(weekId) {
