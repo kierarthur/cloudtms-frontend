@@ -16928,6 +16928,11 @@ async function openClient(row) {
       : new Set()
   };
 
+  // Canonicalise immediately so UI always starts in a consistent state
+  try {
+    window.modalCtx.clientSettingsState = canonicalizeClientSettings(window.modalCtx.clientSettingsState || {});
+  } catch {}
+
   L('window.modalCtx seeded', {
     entity: window.modalCtx.entity,
     dataId: window.modalCtx.data?.id,
@@ -16982,60 +16987,82 @@ async function openClient(row) {
       let pendingSettings = null;
       if (shouldValidateSettings) {
         let csMerged = { ...(baseline || {}) };
-   if (hasFormMounted) {
-  const liveSettings = collectForm('#clientSettingsForm', false);
-  const normKeys = ['day_start','day_end','night_start','night_end','sat_start','sat_end','sun_start','sun_end','bh_start','bh_end'];
 
-  // merge HH:MM fields (existing behaviour)
-  normKeys.forEach(k=>{
-    const v = liveSettings[k];
-    if (typeof v === 'string' && v.trim() !== '') {
-      csMerged[k] = v.trim();
-    }
-  });
+        if (hasFormMounted) {
+          const formEl = byId('clientSettingsForm');
+          const liveSettings = collectForm('#clientSettingsForm', false);
 
-  // timezone (existing behaviour)
-  if (typeof liveSettings.timezone_id === 'string' && liveSettings.timezone_id.trim() !== '') {
-    csMerged.timezone_id = liveSettings.timezone_id.trim();
-  }
+          const normKeys = ['day_start','day_end','night_start','night_end','sat_start','sat_end','sun_start','sun_end','bh_start','bh_end'];
 
-  // ✅ NEW: force checkbox booleans to be explicit true/false
-  // (unchecked must become false, never “missing key”)
-  const formEl = byId('clientSettingsForm');
-  const BOOL_KEYS = [
-    'pay_reference_required',
-    'invoice_reference_required',
-    'requires_hr',
-    'autoprocess_hr',
-    'hr_attach_to_invoice',
-    'ts_attach_to_invoice',
-    'is_nhsp',
-    'self_bill_no_invoices_sent',
-    'daily_calc_of_invoices',
-    'no_timesheet_required',
-    'group_nightsat_sunbh'
-  ];
+          // merge HH:MM fields (existing behaviour)
+          normKeys.forEach(k=>{
+            const v = liveSettings[k];
+            if (typeof v === 'string' && v.trim() !== '') {
+              csMerged[k] = v.trim();
+            }
+          });
 
-  if (formEl) {
-    // tag this merge as “from UI” so normalizeClientSettingsForSave can safely default missing bools
-    csMerged.__from_ui = true;
+          // timezone (existing behaviour)
+          if (typeof liveSettings.timezone_id === 'string' && liveSettings.timezone_id.trim() !== '') {
+            csMerged.timezone_id = liveSettings.timezone_id.trim();
+          }
 
-    for (const key of BOOL_KEYS) {
-      const el = formEl.querySelector(`input[type="checkbox"][name="${key}"]`);
-      if (el) csMerged[key] = !!el.checked;
-    }
+          // week ending day
+          if (typeof liveSettings.week_ending_weekday !== 'undefined') {
+            csMerged.week_ending_weekday = String(liveSettings.week_ending_weekday || '').trim();
+          }
 
-    // also grab default_submission_mode if present in the settings form
-    const sel = formEl.querySelector(`select[name="default_submission_mode"]`);
-    if (sel) csMerged.default_submission_mode = String(sel.value || '').trim();
-  }
-}
+          // default submission mode
+          if (typeof liveSettings.default_submission_mode !== 'undefined') {
+            csMerged.default_submission_mode = String(liveSettings.default_submission_mode || '').trim();
+          }
 
+          // Weekly mode radios (UI helper keys)
+          if (formEl) {
+            const wm = formEl.querySelector('input[type="radio"][name="weekly_mode"]:checked');
+            const hp = formEl.querySelector('input[type="radio"][name="hr_weekly_behaviour"]:checked');
+            if (wm) csMerged.weekly_mode = String(wm.value || '').trim();
+            if (hp) csMerged.hr_weekly_behaviour = String(hp.value || '').trim();
 
-        const { cleaned: csClean, invalid: csInvalid } = normalizeClientSettingsForSave(csMerged);
-        if (APILOG) console.log('[OPEN_CLIENT] client_settings (merged→clean)', { csMerged, csClean, csInvalid, hasFormMounted, hasFullBaseline });
+            // Checkboxes that may be present depending on gate
+            const BOOL_KEYS = [
+              'pay_reference_required',
+              'invoice_reference_required',
+              'self_bill_no_invoices_sent',
+              'daily_calc_of_invoices',
+              'group_nightsat_sunbh',
+              'hr_attach_to_invoice',
+              'ts_attach_to_invoice'
+            ];
+            csMerged.__from_ui = true;
+            for (const key of BOOL_KEYS) {
+              const el = formEl.querySelector(`input[type="checkbox"][name="${key}"]`);
+              if (el) csMerged[key] = !!el.checked;
+            }
+          }
+        }
+
+        // ✅ Canonicalise gated settings so they are consistent even if saved from another tab
+        try {
+          csMerged = canonicalizeClientSettings(csMerged);
+        } catch {}
+
+        // Clean + validate HH:MM etc (existing)
+        const { cleaned: csCleanRaw, invalid: csInvalid } = normalizeClientSettingsForSave(csMerged);
+
+        // Ensure we never send UI helper fields to DB
+        const csClean = { ...(csCleanRaw || {}) };
+        delete csClean.weekly_mode;
+        delete csClean.hr_weekly_behaviour;
+        delete csClean.__from_ui;
+
+        if (APILOG) console.log('[OPEN_CLIENT] client_settings (merged→canon→clean)', { csMerged, csClean, csInvalid, hasFormMounted, hasFullBaseline });
         if (csInvalid) { alert('Times must be HH:MM (24-hour).'); return { ok:false }; }
+
         if (Object.keys(csClean).length) pendingSettings = csClean;
+
+        // Keep staged state canonical in memory too
+        try { window.modalCtx.clientSettingsState = { ...(window.modalCtx.clientSettingsState || {}), ...csMerged }; } catch {}
       }
 
       // 3) Upsert client
@@ -17355,6 +17382,7 @@ async function openClient(row) {
     L('skip companion loads (no full.id)');
   }
 }
+
 
 
 function ensureSelectionStyles(){
@@ -22574,6 +22602,137 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
   return markup;
 }
 
+function canonicalizeClientSettings(input) {
+  const cs = { ...(input || {}) };
+
+  const toBool = (v, def = false) => {
+    if (typeof v === 'boolean') return v;
+    if (v === 'on' || v === 'true' || v === true || v === 1 || v === '1') return true;
+    if (v === 'false' || v === false || v === 0 || v === '0' || v == null || v === '') return false;
+    return def;
+  };
+
+  const up = (v) => String(v || '').trim().toUpperCase();
+
+  // Determine weekly mode (UI helper first; else derive from legacy flags)
+  let weeklyMode = up(cs.weekly_mode);
+  if (!weeklyMode) {
+    if (toBool(cs.is_nhsp, false)) weeklyMode = 'NHSP';
+    else if (toBool(cs.autoprocess_hr, false)) weeklyMode = 'HEALTHROSTER';
+    else weeklyMode = 'NONE';
+  }
+  if (weeklyMode !== 'NHSP' && weeklyMode !== 'HEALTHROSTER') weeklyMode = 'NONE';
+
+  // Determine HR behaviour when weeklyMode=HEALTHROSTER
+  let hrBehaviour = up(cs.hr_weekly_behaviour);
+  if (!hrBehaviour) {
+    hrBehaviour = toBool(cs.no_timesheet_required, false) ? 'CREATE' : 'VERIFY';
+  }
+  if (hrBehaviour !== 'CREATE') hrBehaviour = 'VERIFY';
+
+  // Base booleans (defaults)
+  const payRef    = toBool(cs.pay_reference_required, false);
+  const invRef    = toBool(cs.invoice_reference_required, false);
+  const selfBill  = toBool(cs.self_bill_no_invoices_sent, false);
+  const dailyInv  = toBool(cs.daily_calc_of_invoices, false);
+  const groupNsb  = toBool(cs.group_nightsat_sunbh, false);
+
+  // Attach defaults: historically default true if unset, but mode rules can override
+  let hrAttach = toBool(cs.hr_attach_to_invoice, true);
+  let tsAttach = toBool(cs.ts_attach_to_invoice, true);
+
+  // Apply gated rules
+  if (weeklyMode === 'NHSP') {
+    cs.is_nhsp = true;
+
+    cs.autoprocess_hr = false;
+    cs.requires_hr = false;
+    cs.no_timesheet_required = false;
+
+    cs.pay_reference_required = false;
+    cs.invoice_reference_required = false;
+
+    cs.self_bill_no_invoices_sent = true;
+    cs.daily_calc_of_invoices = true;
+    cs.group_nightsat_sunbh = false;
+
+    cs.hr_attach_to_invoice = false;
+    cs.ts_attach_to_invoice = false;
+
+    cs.weekly_mode = 'NHSP';
+    cs.hr_weekly_behaviour = ''; // irrelevant in NHSP
+
+    return cs;
+  }
+
+  if (weeklyMode === 'NONE') {
+    cs.is_nhsp = false;
+
+    cs.autoprocess_hr = false;
+    cs.requires_hr = false;
+    cs.no_timesheet_required = false;
+
+    // Manual: keep these user-configurable defaults (false if unset)
+    cs.pay_reference_required = payRef;
+    cs.invoice_reference_required = invRef;
+    cs.self_bill_no_invoices_sent = selfBill;
+    cs.daily_calc_of_invoices = dailyInv;
+    cs.group_nightsat_sunbh = groupNsb;
+
+    // Manual: forced
+    cs.hr_attach_to_invoice = false;
+    cs.ts_attach_to_invoice = true;
+
+    cs.weekly_mode = 'NONE';
+    cs.hr_weekly_behaviour = ''; // irrelevant
+
+    return cs;
+  }
+
+  // HEALTHROSTER
+  cs.is_nhsp = false;
+  cs.autoprocess_hr = true;
+
+  if (hrBehaviour === 'CREATE') {
+    cs.requires_hr = false;
+    cs.no_timesheet_required = true;
+
+    // Hidden + forced
+    cs.pay_reference_required = false;
+    cs.invoice_reference_required = false;
+
+    // Attachments: HR attachment user choice, TS attachment forced off
+    cs.hr_attach_to_invoice = hrAttach;
+    cs.ts_attach_to_invoice = false;
+
+    cs.weekly_mode = 'HEALTHROSTER';
+    cs.hr_weekly_behaviour = 'CREATE';
+
+    return cs;
+  }
+
+  // VERIFY
+  cs.requires_hr = true;
+  cs.no_timesheet_required = false;
+
+  // Hidden + forced
+  cs.pay_reference_required = false;
+  cs.invoice_reference_required = false;
+
+  // Attachments: both user choice
+  cs.hr_attach_to_invoice = hrAttach;
+  cs.ts_attach_to_invoice = tsAttach;
+
+  // Keep other flags as-is (still meaningful operationally)
+  cs.self_bill_no_invoices_sent = selfBill;
+  cs.daily_calc_of_invoices = dailyInv;
+  cs.group_nightsat_sunbh = groupNsb;
+
+  cs.weekly_mode = 'HEALTHROSTER';
+  cs.hr_weekly_behaviour = 'VERIFY';
+
+  return cs;
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // UPDATED: showModal (adds contract-modal class toggling for Contracts dialogs)
@@ -22906,6 +23065,36 @@ if (this.entity === 'contracts' && (this.currentTabKey === 'rates' || this.curre
   }
 }
 
+  if (this.entity === 'clients' && this.currentTabKey === 'settings') {
+    try {
+      const formEl = byId('clientSettingsForm');
+      if (formEl && typeof canonicalizeClientSettings === 'function') {
+        const vals = collectForm('#clientSettingsForm', false);
+        let merged = { ...(window.modalCtx?.clientSettingsState || {}), ...(vals || {}) };
+
+        const wm = formEl.querySelector('input[type="radio"][name="weekly_mode"]:checked');
+        const hp = formEl.querySelector('input[type="radio"][name="hr_weekly_behaviour"]:checked');
+        if (wm) merged.weekly_mode = String(wm.value || '').trim();
+        if (hp) merged.hr_weekly_behaviour = String(hp.value || '').trim();
+
+        const BOOL_KEYS = [
+          'pay_reference_required',
+          'invoice_reference_required',
+          'self_bill_no_invoices_sent',
+          'daily_calc_of_invoices',
+          'group_nightsat_sunbh',
+          'hr_attach_to_invoice',
+          'ts_attach_to_invoice'
+        ];
+        for (const key of BOOL_KEYS) {
+          const el = formEl.querySelector(`input[type="checkbox"][name="${key}"]`);
+          if (el) merged[key] = !!el.checked;
+        }
+
+        window.modalCtx.clientSettingsState = canonicalizeClientSettings(merged);
+      }
+    } catch {}
+  }
 
 
   window.modalCtx.formState = fs;
@@ -32294,6 +32483,7 @@ function renderClientHospitalsTable() {
 
 
 // =================== HOSPITALS TABLE (UPDATED: staged delete & edit) ===================
+
 async function renderClientSettingsUI(settingsObj){
   const div = byId('clientSettings'); if (!div) return;
 
@@ -32310,8 +32500,9 @@ async function renderClientSettingsUI(settingsObj){
     return s;
   };
 
-  // Normalised state with sensible defaults
-  const s = {
+  const seed = {
+    ...initial,
+
     timezone_id : initial.timezone_id ?? 'Europe/London',
     day_start   : _toHHMM(initial.day_start)   || '06:00',
     day_end     : _toHHMM(initial.day_end)     || '20:00',
@@ -32321,7 +32512,7 @@ async function renderClientSettingsUI(settingsObj){
     sat_end     : _toHHMM(initial.sat_end)     || '00:00',
     sun_start   : _toHHMM(initial.sun_start)   || '00:00',
     sun_end     : _toHHMM(initial.sun_end)     || '00:00',
-    bh_start    : _toHHMM(initial.bh_start)    || '',      // inherit global if blank
+    bh_start    : _toHHMM(initial.bh_start)    || '',
     bh_end      : _toHHMM(initial.bh_end)      || '',
 
     week_ending_weekday:
@@ -32329,27 +32520,17 @@ async function renderClientSettingsUI(settingsObj){
         ? String(Math.min(6, Math.max(0, Number(initial.week_ending_weekday))))
         : '0',
 
-    // Existing toggles
-    pay_reference_required:      !!initial.pay_reference_required,
-    invoice_reference_required:  !!initial.invoice_reference_required,
-    default_submission_mode:     String(initial.default_submission_mode || 'ELECTRONIC').toUpperCase(),
+    default_submission_mode: String(initial.default_submission_mode || 'ELECTRONIC').toUpperCase(),
 
-    // Existing “extra” flags – default to false if absent
-    is_nhsp:                     !!initial.is_nhsp,
-    self_bill_no_invoices_sent:  !!initial.self_bill_no_invoices_sent,
-    daily_calc_of_invoices:      !!initial.daily_calc_of_invoices,
-    no_timesheet_required:       !!initial.no_timesheet_required,
-    group_nightsat_sunbh:        !!initial.group_nightsat_sunbh,
-
-    // HR flags
-    requires_hr:                 !!initial.requires_hr,          // “Requires HealthRoster cross-check”
-    autoprocess_hr:              !!initial.autoprocess_hr,       // “Autoprocess timesheets with HealthRoster”
-    // Attachments: default TRUE when unset (so old clients behave as “attach by default”)
-    hr_attach_to_invoice:        (initial.hr_attach_to_invoice !== false),
-    ts_attach_to_invoice:        (initial.ts_attach_to_invoice !== false),
+    // UI helper keys (not stored in DB; used for gating)
+    weekly_mode: initial.weekly_mode || '',
+    hr_weekly_behaviour: initial.hr_weekly_behaviour || ''
   };
 
-  // Persist back into modalCtx so openClient() sees the normalised values
+  // Canonicalise the whole settings state (enforces gate + forced values)
+  const s = canonicalizeClientSettings(seed);
+
+  // Persist back into modalCtx so openClient() can save from any tab
   ctx.clientSettingsState = { ...initial, ...s };
 
   const input = (name,label,val,type='text') =>
@@ -32361,7 +32542,6 @@ async function renderClientSettingsUI(settingsObj){
     return `<div class="row"><label>Week Ending Day</label><div class="controls"><select name="week_ending_weekday">${opts}</select></div></div>`;
   };
 
-  // Small helper to render a tight checkbox + label
   const yesNoToggle = (name, text, checked) => `
     <label class="inline chk-tight"
            style="display:inline-flex;align-items:center;gap:6px;margin-right:18px;white-space:nowrap;">
@@ -32370,43 +32550,157 @@ async function renderClientSettingsUI(settingsObj){
     </label>
   `;
 
-  const gatesAndSubmission = () => {
+  const radioToggle = (name, value, text, checked) => `
+    <label class="inline chk-tight"
+           style="display:inline-flex;align-items:center;gap:6px;margin-right:18px;white-space:nowrap;">
+      <input type="radio" name="${name}" value="${value}" ${checked ? 'checked' : ''}/>
+      <span>${text}</span>
+    </label>
+  `;
+
+  const weeklyModeRow = () => {
+    const mode = String(s.weekly_mode || 'NONE').toUpperCase();
+
+    const msg =
+      (mode === 'NONE')
+        ? 'Weekly timesheets are managed manually (no external weekly import source). Candidates will submit timesheets electronically or using a QR Timesheet.'
+      : (mode === 'NHSP')
+        ? 'NHSP weekly imports will be used for this client. Candidates will not submit any timesheets.'
+      : 'HealthRoster weekly imports will be used for this client.';
+
+    return `
+      <div class="row">
+        <label>Weekly timesheet source</label>
+        <div class="controls" style="display:flex;flex-direction:column;gap:6px;">
+          <div class="toggle-row" style="display:flex;flex-wrap:wrap;gap:10px;">
+            ${radioToggle('weekly_mode', 'NONE',         'None (manual)',     mode === 'NONE')}
+            ${radioToggle('weekly_mode', 'NHSP',         'NHSP',              mode === 'NHSP')}
+            ${radioToggle('weekly_mode', 'HEALTHROSTER', 'HealthRoster',      mode === 'HEALTHROSTER')}
+          </div>
+          <div class="mini" style="opacity:0.9;line-height:1.25">${msg}</div>
+        </div>
+      </div>
+    `;
+  };
+
+  const hrBehaviourRow = () => {
+    const mode = String(s.weekly_mode || 'NONE').toUpperCase();
+    if (mode !== 'HEALTHROSTER') return '';
+
+    const beh = String(s.hr_weekly_behaviour || 'VERIFY').toUpperCase();
+    const isVerify = (beh !== 'CREATE');
+
+    return `
+      <div class="row">
+        <label>Weekly HealthRoster behaviour</label>
+        <div class="controls" style="display:flex;flex-direction:column;gap:8px;">
+          <div style="display:flex;flex-direction:column;gap:6px;">
+            <div>
+              ${radioToggle('hr_weekly_behaviour', 'VERIFY',
+                'Worker will provide timesheets; the agency will also import healthroster data to verify workers hours',
+                isVerify
+              )}
+            </div>
+            <div class="mini" style="opacity:0.9;line-height:1.25;margin-left:26px;">
+              Import will validate that HealthRoster hours match the worker’s weekly timesheet. Mismatches fail validation and healthroster or timesheet will need amending before it can be paid.
+            </div>
+          </div>
+
+          <div style="display:flex;flex-direction:column;gap:6px;">
+            <div>
+              ${radioToggle('hr_weekly_behaviour', 'CREATE',
+                'Worker will not provide timesheets; imports create them if a contract exists',
+                !isVerify
+              )}
+            </div>
+            <div class="mini" style="opacity:0.9;line-height:1.25;margin-left:26px;">
+              Import will create/update weekly timesheets from HealthRoster hours when a contract exists. Healthroster hours will not require any seperate checks.
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
+  };
+
+  const flagsBlock = () => {
+    const mode = String(s.weekly_mode || 'NONE').toUpperCase();
+    const beh  = String(s.hr_weekly_behaviour || 'VERIFY').toUpperCase();
+
+    if (mode === 'NHSP') {
+      return `
+        <div class="row">
+          <label>References & flags</label>
+          <div class="controls">
+            <div class="mini" style="opacity:0.9;line-height:1.25">
+              NHSP mode controls references, invoicing behaviour and attachments automatically.
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    if (mode === 'NONE') {
+      return `
+        <div class="row">
+          <label>References & flags</label>
+          <div class="controls" style="display:flex;flex-direction:column;gap:4px;">
+
+            <div class="toggle-row" style="display:flex;flex-wrap:wrap;gap:10px;">
+              ${yesNoToggle('pay_reference_required',     'Ref No. required to PAY',      !!s.pay_reference_required)}
+              ${yesNoToggle('invoice_reference_required', 'Ref No. required to INVOICE',  !!s.invoice_reference_required)}
+            </div>
+
+            <div class="toggle-row" style="display:flex;flex-wrap:wrap;gap:10px;">
+              ${yesNoToggle('self_bill_no_invoices_sent', 'Self-bill (no invoices sent)', !!s.self_bill_no_invoices_sent)}
+              ${yesNoToggle('daily_calc_of_invoices',     'Daily invoice calculation',    !!s.daily_calc_of_invoices)}
+              ${yesNoToggle('group_nightsat_sunbh',       'Group Night/Sat/Sun/BH',       !!s.group_nightsat_sunbh)}
+            </div>
+
+            <div class="mini" style="opacity:0.9;line-height:1.25">
+              Timesheets will always be attached to invoices for manual clients.
+            </div>
+
+          </div>
+        </div>
+      `;
+    }
+
+    // HEALTHROSTER
+    const isCreate = (beh === 'CREATE');
+
     return `
       <div class="row">
         <label>References & flags</label>
         <div class="controls" style="display:flex;flex-direction:column;gap:4px;">
 
-          <!-- Row 1: existing ref flags + NHSP -->
           <div class="toggle-row" style="display:flex;flex-wrap:wrap;gap:10px;">
-            ${yesNoToggle('pay_reference_required',     'Ref No. required to PAY',      s.pay_reference_required)}
-            ${yesNoToggle('invoice_reference_required', 'Ref No. required to INVOICE',  s.invoice_reference_required)}
-            ${yesNoToggle('is_nhsp',                    'NHSP client',                  s.is_nhsp)}
+            ${yesNoToggle('self_bill_no_invoices_sent', 'Self-bill (no invoices sent)', !!s.self_bill_no_invoices_sent)}
+            ${yesNoToggle('daily_calc_of_invoices',     'Daily invoice calculation',    !!s.daily_calc_of_invoices)}
+            ${yesNoToggle('group_nightsat_sunbh',       'Group Night/Sat/Sun/BH',       !!s.group_nightsat_sunbh)}
           </div>
 
-          <!-- Row 2: core process flags -->
           <div class="toggle-row" style="display:flex;flex-wrap:wrap;gap:10px;">
-            ${yesNoToggle('self_bill_no_invoices_sent', 'Self-bill (no invoices sent)', s.self_bill_no_invoices_sent)}
-            ${yesNoToggle('daily_calc_of_invoices',     'Daily invoice calculation',    s.daily_calc_of_invoices)}
-            ${yesNoToggle('no_timesheet_required',      'No timesheet required',        s.no_timesheet_required)}
-            ${yesNoToggle('group_nightsat_sunbh',       'Group Night/Sat/Sun/BH',       s.group_nightsat_sunbh)}
+            ${yesNoToggle('hr_attach_to_invoice', 'Attach HealthRoster to invoice', !!s.hr_attach_to_invoice)}
+            ${isCreate ? '' : yesNoToggle('ts_attach_to_invoice', 'Attach timesheets to invoice', !!s.ts_attach_to_invoice)}
           </div>
 
-          <!-- Row 3: HR + attachments -->
-          <div class="toggle-row" style="display:flex;flex-wrap:wrap;gap:10px;">
-            ${yesNoToggle('requires_hr',       'Requires HealthRoster cross-check',       s.requires_hr)}
-            ${yesNoToggle('autoprocess_hr',    'Autoprocess timesheets with HealthRoster',s.autoprocess_hr)}
-            ${yesNoToggle('hr_attach_to_invoice', 'Attach HealthRoster to invoice',       s.hr_attach_to_invoice)}
-            ${yesNoToggle('ts_attach_to_invoice', 'Attach timesheets to invoice',         s.ts_attach_to_invoice)}
+          <div class="mini" style="opacity:0.9;line-height:1.25">
+            Reference requirements are controlled by HealthRoster imports for this mode.
           </div>
+
         </div>
       </div>
+    `;
+  };
 
+  const submissionRow = () => {
+    return `
       <div class="row">
         <label>Default Submission</label>
         <div class="controls">
           <select name="default_submission_mode">
-            <option value="ELECTRONIC" ${s.default_submission_mode==='ELECTRONIC'?'selected':''}>ELECTRONIC</option>
-            <option value="MANUAL"     ${s.default_submission_mode==='MANUAL'    ?'selected':''}>MANUAL</option>
+            <option value="ELECTRONIC" ${String(s.default_submission_mode||'').toUpperCase()==='ELECTRONIC'?'selected':''}>ELECTRONIC</option>
+            <option value="MANUAL"     ${String(s.default_submission_mode||'').toUpperCase()==='MANUAL'?'selected':''}>MANUAL</option>
           </select>
         </div>
       </div>
@@ -32431,7 +32725,11 @@ async function renderClientSettingsUI(settingsObj){
 
       ${weekDaySelect()}
 
-      ${gatesAndSubmission()}
+      ${weeklyModeRow()}
+      ${hrBehaviourRow()}
+      ${flagsBlock()}
+
+      ${submissionRow()}
 
       <div class="hint" style="grid-column:1/-1">
         Example: Day 06:00–20:00, Night 20:00–06:00. Saturday/Sunday windows can extend into the following day (e.g. Sunday ends 06:00 next day).
@@ -32443,8 +32741,6 @@ async function renderClientSettingsUI(settingsObj){
   const root = document.getElementById('clientSettingsForm');
   const hhmm = /^([01]\d|2[0-3]):[0-5]\d$/;
   const timeKeys = ['day_start','day_end','night_start','night_end','sat_start','sat_end','sun_start','sun_end','bh_start','bh_end'];
-
-  const asBool = (v) => (v === 'on' || v === true || v === 'true');
 
   let lastValid = { ...s };
 
@@ -32459,52 +32755,66 @@ async function renderClientSettingsUI(settingsObj){
 
   const _currentFrame = window.__getModalFrame || (() => null);
 
-  const syncSoft = ()=>{
+  const readRadio = (name) => {
+    const el = root.querySelector(`input[type="radio"][name="${name}"]:checked`);
+    return el ? String(el.value || '').trim() : '';
+  };
+
+  const readCheckboxIfPresent = (name, fallback) => {
+    const el = root.querySelector(`input[type="checkbox"][name="${name}"]`);
+    if (!el) return fallback;
+    return !!el.checked;
+  };
+
+  const syncSoft = ()=> {
     const frame = _currentFrame();
     if (!frame || frame.mode !== 'edit') return;
 
     const vals = collectForm('#clientSettingsForm', false);
-    const next = { ...ctx.clientSettingsState, ...vals };
+    let next = { ...ctx.clientSettingsState, ...vals };
 
-    // Soft normalise times
+    // Soft normalise times (don’t accept invalid while typing)
     timeKeys.forEach(k=>{
       const v = String(vals[k] ?? '').trim();
       if (v && !hhmm.test(v)) next[k] = lastValid[k];
     });
 
-    // Soft normalise week ending
+    // Week ending
     const w = Number(vals.week_ending_weekday);
     next.week_ending_weekday = Number.isInteger(w) ? String(Math.min(6, Math.max(0, w))) : lastValid.week_ending_weekday;
-
-    // Soft normalise toggles → booleans
-    next.pay_reference_required        = asBool(vals.pay_reference_required);
-    next.invoice_reference_required    = asBool(vals.invoice_reference_required);
-    next.is_nhsp                       = asBool(vals.is_nhsp);
-    next.self_bill_no_invoices_sent    = asBool(vals.self_bill_no_invoices_sent);
-    next.daily_calc_of_invoices        = asBool(vals.daily_calc_of_invoices);
-    next.no_timesheet_required         = asBool(vals.no_timesheet_required);
-    next.group_nightsat_sunbh          = asBool(vals.group_nightsat_sunbh);
-    next.requires_hr                   = asBool(vals.requires_hr);
-    next.autoprocess_hr                = asBool(vals.autoprocess_hr);
-    next.hr_attach_to_invoice          = asBool(vals.hr_attach_to_invoice);
-    next.ts_attach_to_invoice          = asBool(vals.ts_attach_to_invoice);
 
     // Default submission mode
     const mode = String(vals.default_submission_mode || next.default_submission_mode || 'ELECTRONIC').toUpperCase();
     next.default_submission_mode = (mode === 'ELECTRONIC' || mode === 'MANUAL') ? mode : 'ELECTRONIC';
 
+    // Gate radios
+    next.weekly_mode = readRadio('weekly_mode') || next.weekly_mode || 'NONE';
+    next.hr_weekly_behaviour = readRadio('hr_weekly_behaviour') || next.hr_weekly_behaviour || 'VERIFY';
+
+    // Only overwrite checkboxes if they exist in DOM (because many are hidden by gate)
+    next.pay_reference_required     = readCheckboxIfPresent('pay_reference_required',     !!next.pay_reference_required);
+    next.invoice_reference_required = readCheckboxIfPresent('invoice_reference_required', !!next.invoice_reference_required);
+    next.self_bill_no_invoices_sent = readCheckboxIfPresent('self_bill_no_invoices_sent', !!next.self_bill_no_invoices_sent);
+    next.daily_calc_of_invoices     = readCheckboxIfPresent('daily_calc_of_invoices',     !!next.daily_calc_of_invoices);
+    next.group_nightsat_sunbh       = readCheckboxIfPresent('group_nightsat_sunbh',       !!next.group_nightsat_sunbh);
+    next.hr_attach_to_invoice       = readCheckboxIfPresent('hr_attach_to_invoice',       !!next.hr_attach_to_invoice);
+    next.ts_attach_to_invoice       = readCheckboxIfPresent('ts_attach_to_invoice',       !!next.ts_attach_to_invoice);
+
+    // Canonicalise gate → forces hidden values and derived flags
+    next = canonicalizeClientSettings(next);
+
     ctx.clientSettingsState = next;
   };
 
   let lastAlertAt = 0;
-  const syncValidate = (ev)=>{
+  const syncValidate = ()=> {
     const frame = _currentFrame();
     if (!frame || frame.mode !== 'edit') return;
 
     const vals = collectForm('#clientSettingsForm', false);
     let hadError = false;
 
-    // Strict validate times
+    // Strict validate times on change/blur
     timeKeys.forEach(k=>{
       const v = String(vals[k] ?? '').trim();
       if (v && !hhmm.test(v)) {
@@ -32521,40 +32831,33 @@ async function renderClientSettingsUI(settingsObj){
       w = Number(lastValid.week_ending_weekday) || 0;
     }
 
-    // Booleans
-    const payReq   = asBool(vals.pay_reference_required);
-    const invReq   = asBool(vals.invoice_reference_required);
-    const isNhsp   = asBool(vals.is_nhsp);
-    const sbNoInv  = asBool(vals.self_bill_no_invoices_sent);
-    const dailyInv = asBool(vals.daily_calc_of_invoices);
-    const noTsReq  = asBool(vals.no_timesheet_required);
-    const groupNsb = asBool(vals.group_nightsat_sunbh);
-    const reqHr    = asBool(vals.requires_hr);
-    const autoHr   = asBool(vals.autoprocess_hr);
-    const attHr    = asBool(vals.hr_attach_to_invoice);
-    const attTs    = asBool(vals.ts_attach_to_invoice);
-
     // Default submission mode
     const modeRaw = String(vals.default_submission_mode || '').toUpperCase();
     const modeOk  = (modeRaw === 'ELECTRONIC' || modeRaw === 'MANUAL') ? modeRaw : 'ELECTRONIC';
 
-    ctx.clientSettingsState = {
+    let next = {
       ...ctx.clientSettingsState,
       ...vals,
       week_ending_weekday: String(w),
-      pay_reference_required:        payReq,
-      invoice_reference_required:    invReq,
-      default_submission_mode:       modeOk,
-      is_nhsp:                       isNhsp,
-      self_bill_no_invoices_sent:    sbNoInv,
-      daily_calc_of_invoices:        dailyInv,
-      no_timesheet_required:         noTsReq,
-      group_nightsat_sunbh:          groupNsb,
-      requires_hr:                   reqHr,
-      autoprocess_hr:                autoHr,
-      hr_attach_to_invoice:          attHr,
-      ts_attach_to_invoice:          attTs
+      default_submission_mode: modeOk
     };
+
+    // Gate radios
+    next.weekly_mode = readRadio('weekly_mode') || next.weekly_mode || 'NONE';
+    next.hr_weekly_behaviour = readRadio('hr_weekly_behaviour') || next.hr_weekly_behaviour || 'VERIFY';
+
+    // Conditional checkboxes
+    next.pay_reference_required     = readCheckboxIfPresent('pay_reference_required',     !!next.pay_reference_required);
+    next.invoice_reference_required = readCheckboxIfPresent('invoice_reference_required', !!next.invoice_reference_required);
+    next.self_bill_no_invoices_sent = readCheckboxIfPresent('self_bill_no_invoices_sent', !!next.self_bill_no_invoices_sent);
+    next.daily_calc_of_invoices     = readCheckboxIfPresent('daily_calc_of_invoices',     !!next.daily_calc_of_invoices);
+    next.group_nightsat_sunbh       = readCheckboxIfPresent('group_nightsat_sunbh',       !!next.group_nightsat_sunbh);
+    next.hr_attach_to_invoice       = readCheckboxIfPresent('hr_attach_to_invoice',       !!next.hr_attach_to_invoice);
+    next.ts_attach_to_invoice       = readCheckboxIfPresent('ts_attach_to_invoice',       !!next.ts_attach_to_invoice);
+
+    next = canonicalizeClientSettings(next);
+
+    ctx.clientSettingsState = next;
     lastValid = { ...ctx.clientSettingsState };
 
     if (hadError) {
@@ -32580,7 +32883,6 @@ async function renderClientSettingsUI(settingsObj){
   });
   root.__wired = true;
 }
-
 
 
 // ---- Umbrella modal
