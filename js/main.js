@@ -29980,12 +29980,10 @@ function dedupeIds(arr) {
 }
 
 async function openHrWeeklyClientPicker() {
-  // Ensure modalCtx + importsState exist
   window.modalCtx = window.modalCtx || {};
   window.modalCtx.importsState = window.modalCtx.importsState || {};
   const st = window.modalCtx.importsState;
 
-  // If we already have a choice cached, just return it
   if (st.hrWeeklyClientId) {
     return {
       clientId: st.hrWeeklyClientId,
@@ -29993,14 +29991,11 @@ async function openHrWeeklyClientPicker() {
     };
   }
 
-  // 1) Load list of HR autoprocess clients from backend
   let items = [];
   try {
     const res  = await authFetch(API('/api/healthroster/autoprocess/clients'));
     const text = await res.text();
-    if (!res.ok) {
-      throw new Error(text || `Failed to load HealthRoster clients (${res.status})`);
-    }
+    if (!res.ok) throw new Error(text || `Failed to load HealthRoster clients (${res.status})`);
     const json = text ? JSON.parse(text) : {};
     items = Array.isArray(json.items) ? json.items : [];
   } catch (e) {
@@ -30014,33 +30009,33 @@ async function openHrWeeklyClientPicker() {
     return null;
   }
 
-  // 2) Show a small modal to pick one client
   return new Promise((resolve) => {
-    // Build options HTML (use escapeHtml if you have it; otherwise keep it simple)
     const optionsHtml = items.map((c) => {
-      const name = (c.client_name || '').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-      return `<option value="${c.client_id}">${name}</option>`;
+      const id = String(c.client_id || '');
+      const name = String(c.client_name || '').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      return `<option value="${id}">${name}</option>`;
     }).join('');
 
     showModal(
       'Select HealthRoster client',
       [{ key: 'main', label: 'Select client' }],
-      ($root) => {
-        $root.innerHTML = `
-          <div class="form">
+      (k) => {
+        if (k !== 'main') return '';
+        return `
+          <div style="display:block;">
             <div class="row">
               <label>Client</label>
               <div class="controls">
-                <select id="hrWeeklyClientSelect">
+                <select class="input" id="hrWeeklyClientSelect">
                   <option value="">-- choose a client --</option>
                   ${optionsHtml}
                 </select>
               </div>
             </div>
-            <p class="hint">
-              This client will be used for parsing and applying this HealthRoster
-              weekly export. You can change it in future imports.
-            </p>
+            <div class="hint" style="grid-column:1/-1">
+              This client will be used for parsing and applying this HealthRoster weekly export.
+              You can change it in future imports.
+            </div>
           </div>
         `;
       },
@@ -30051,11 +30046,12 @@ async function openHrWeeklyClientPicker() {
           return false; // keep modal open
         }
 
-        const clientId   = sel.value;
-        const clientName = sel.options[sel.selectedIndex].textContent;
+        const clientId = String(sel.value || '').trim();
+        const clientName = (sel.options && sel.selectedIndex >= 0)
+          ? String(sel.options[sel.selectedIndex].textContent || '')
+          : '';
 
-        // Cache in modalCtx so subsequent imports can reuse the same choice
-        st.hrWeeklyClientId   = clientId;
+        st.hrWeeklyClientId = clientId;
         st.hrWeeklyClientName = clientName;
 
         resolve({ clientId, clientName });
