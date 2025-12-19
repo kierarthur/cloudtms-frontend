@@ -22629,19 +22629,24 @@ function setFormReadOnly(root, ro) {
         'btnTsProcessTimesheet'
       ]);
 
-      // Keep Timesheet action buttons (data-ts-action) enabled even when ro === true
+           // Keep Timesheet action buttons (data-ts-action) AND Evidence table buttons enabled even when ro === true
       try {
         const top = (typeof currentFrame === 'function') ? currentFrame() : null;
 
         const isTimesheetFrame = !!(top && top.entity === 'timesheets');
         const hasTsAction      = !!el.getAttribute('data-ts-action');
 
-        if (isTimesheetFrame && hasTsAction) {
-          // Do not force-disable Timesheet action buttons (Authorise, Open PDF, etc.)
+        // NEW: Evidence table actions (View/Delete) are not data-ts-action
+        const hasEvidenceAction =
+          !!el.getAttribute('data-evidence-view') ||
+          !!el.getAttribute('data-evidence-remove');
+
+        if (isTimesheetFrame && (hasTsAction || hasEvidenceAction)) {
           el.disabled = false;
           return;
         }
       } catch {}
+
 
       // In read-only mode, disable everything except allow-listed buttons
       if (ro) {
@@ -23229,7 +23234,7 @@ if (this.entity === 'timesheets' && k === 'overview') {
         const holdOnBtn          = root.querySelector('button[data-ts-action="pay-hold-on"]');
         const holdOffBtn         = root.querySelector('button[data-ts-action="pay-hold-off"]');
         const markPaidBtn        = root.querySelector('button[data-ts-action="mark-paid"]');
-        const refInput           = root.querySelector('input[name="ts_reference"]');
+    
         const payHoldInput       = root.querySelector('input[name="ts_pay_hold"]');
         const payHoldReasonInput = root.querySelector('input[name="ts_pay_hold_reason"]');
         const markPaidInput      = root.querySelector('input[name="ts_mark_paid"]');
@@ -23308,7 +23313,7 @@ if (this.entity === 'timesheets' && k === 'overview') {
             hasAuthorise: !!authoriseBtn,
             hasUnauthorise: !!unauthoriseBtn,
             hasSwitchManual: !!switchManualBtn,
-            hasRefInput: !!refInput,
+        
             hasPayHoldInput: !!payHoldInput,
             hasMarkPaidInput: !!markPaidInput
           });
@@ -23915,27 +23920,7 @@ if (this.entity === 'timesheets' && k === 'overview') {
           if (markPaidInput)      markPaidInput.disabled      = true;
         }
 
-        if (refInput && !refInput.__tsRefWired) {
-          refInput.__tsRefWired = true;
-          refInput.addEventListener('input', () => {
-            const mc2 = window.modalCtx || {};
-            if (!mc2.timesheetState || typeof mc2.timesheetState !== 'object') {
-              mc2.timesheetState = {
-                reference: '',
-                payHoldDesired: null,
-                payHoldReason: '',
-                markPaid: false,
-                segmentOverrides: {},
-                segmentInvoiceTargets: {},
-                manualHours: {},
-                additionalRates: {}
-              };
-            }
-            mc2.timesheetState.reference = String(refInput.value || '');
-            if (LOGM) LT('reference staged', { tsId, reference: mc2.timesheetState.reference });
-            try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
-          });
-        }
+     
       }
     } catch (err) {
       if ((typeof window.__LOG_MODAL === 'boolean') ? window.__LOG_MODAL : false) {
@@ -24002,13 +23987,16 @@ if (this.entity === 'timesheets' && k === 'lines') {
           }
         }
 
-        // NEW: derive extraBreakCount from the schedule's breaks[] arrays
+        // ✅ FIX: derive extraBreakCount from *meaningful* extra breaks (beyond primary)
         if (Array.isArray(state.schedule)) {
           let maxExtra = 0;
           state.schedule.forEach(entry => {
             if (entry && Array.isArray(entry.breaks) && entry.breaks.length > 1) {
-              const extra = entry.breaks.length - 1; // everything beyond the primary break
-              if (extra > maxExtra) maxExtra = extra;
+              const meaningfulExtra =
+                entry.breaks
+                  .slice(1)
+                  .filter(b => b && (b.start || b.end)).length;
+              if (meaningfulExtra > maxExtra) maxExtra = meaningfulExtra;
             }
           });
           state.extraBreakCount = maxExtra;
@@ -24049,8 +24037,8 @@ if (this.entity === 'timesheets' && k === 'lines') {
 
       // Segments exclude_from_pay
       const checkboxes = root.querySelectorAll('input[name="seg_exclude_from_pay"][data-segment-id]');
-
       if (LOGM) LT('wiring checkboxes', { count: checkboxes.length });
+
       checkboxes.forEach(cb => {
         if (cb.__tsWired) return;
         cb.__tsWired = true;
@@ -24068,9 +24056,7 @@ if (this.entity === 'timesheets' && k === 'lines') {
           }
 
           if (newVal === origVal) {
-            if (state.segmentOverrides[segId]) {
-              delete state.segmentOverrides[segId];
-            }
+            if (state.segmentOverrides[segId]) delete state.segmentOverrides[segId];
           } else {
             state.segmentOverrides[segId] = { exclude_from_pay: newVal };
           }
@@ -24091,6 +24077,7 @@ if (this.entity === 'timesheets' && k === 'lines') {
       // Invoice week / Pause selects (per segment)
       const weekSelects = root.querySelectorAll('select[name="seg_invoice_week"][data-segment-id]');
       if (LOGM) LT('wiring invoice-week selects', { count: weekSelects.length });
+
       weekSelects.forEach(sel => {
         if (sel.__tsWeekWired) return;
         sel.__tsWeekWired = true;
@@ -24190,115 +24177,248 @@ if (this.entity === 'timesheets' && k === 'lines') {
           const breakEndInp   = tr.querySelector('input[data-sched-field="break_end"]');
           const breakMinsInp  = tr.querySelector('input[data-sched-field="break_mins"]');
 
+
+// ── validation store + helpers ─────────────────────────────────────────────
+state.scheduleErrorsByDate ||= {};
+
+const setInvalid = (el, on) => {
+  if (!el) return;
+  try { el.classList.toggle('is-invalid', !!on); } catch {}
+};
+
+const clearInvalidRow = () => {
+  setInvalid(startInp, false);
+  setInvalid(endInp, false);
+  setInvalid(breakStartInp, false);
+  setInvalid(breakEndInp, false);
+  try {
+    tr.querySelectorAll('input[data-extra-break]').forEach(x => setInvalid(x, false));
+  } catch {}
+};
+
+const commitErrors = (errs) => {
+  if (errs && Object.keys(errs).length) state.scheduleErrorsByDate[date] = errs;
+  else delete state.scheduleErrorsByDate[date];
+  state.scheduleHasErrors = Object.keys(state.scheduleErrorsByDate).length > 0;
+};
+
+// (optionally call this right away so old red clears when user edits)
+clearInvalidRow();
+
           if (startInp)      startInp.value      = startStr;
           if (endInp)        endInp.value        = endStr;
           if (breakStartInp) breakStartInp.value = breakStartStr;
           if (breakEndInp)   breakEndInp.value   = breakEndStr;
 
-          // Collect extra break windows (if any)
-          const extraStarts = tr.querySelectorAll('input[data-extra-break="start"]');
-          const extraEnds   = tr.querySelectorAll('input[data-extra-break="end"]');
-          const extraMap = {};
+   
+    // ─────────────────────────────────────────────────────────────
+// VALIDATION + NORMALISED TIMELINE (supports overnight)
+// ─────────────────────────────────────────────────────────────
+const errs = {}; // map of error codes -> true
 
-          extraStarts.forEach(inp => {
-            const idx = Number(inp.getAttribute('data-extra-index') || '0');
-            const raw = String(inp.value || '').trim();
-            const norm = normaliseHHMM(raw);
-            inp.value = norm;
-            if (!extraMap[idx]) extraMap[idx] = {};
-            extraMap[idx].start = norm;
-          });
+const markPair = (a, b, code) => {
+  setInvalid(a, true);
+  setInvalid(b, true);
+  errs[code] = true;
+};
 
-          extraEnds.forEach(inp => {
-            const idx = Number(inp.getAttribute('data-extra-index') || '0');
-            const raw = String(inp.value || '').trim();
-            const norm = normaliseHHMM(raw);
-            inp.value = norm;
-            if (!extraMap[idx]) extraMap[idx] = {};
-            extraMap[idx].end = norm;
-          });
+const markEl = (a, code) => {
+  setInvalid(a, true);
+  errs[code] = true;
+};
 
-          const sMin = hhmmToMinutes(startStr);
-          const eMin = hhmmToMinutes(endStr);
+const hasA = (v) => !!String(v || '').trim();
 
-          let shiftMinutes = null;
-          if (sMin != null && eMin != null) {
-            shiftMinutes = eMin - sMin;
-            if (shiftMinutes < 0) shiftMinutes += 24 * 60; // overnight
-          }
+// Shift: must be both-or-neither; reject start==end; allow overnight
+const sMin0 = hhmmToMinutes(startStr);
+const eMin0 = hhmmToMinutes(endStr);
 
-          // Build list of break windows: primary (index -1) + extras (0..N)
-          const breakWindows = [];
+const shiftHasStart = hasA(startStr);
+const shiftHasEnd   = hasA(endStr);
 
-          if (breakStartStr || breakEndStr) {
-            breakWindows.push({
-              start: breakStartStr,
-              end:   breakEndStr
-            });
-          }
+let shiftOk = false;
+let shiftStart = null;      // minutes
+let shiftEnd   = null;      // minutes (possibly +1440)
+let shiftMinutes = null;
 
-          Object.keys(extraMap)
-            .map(k => Number(k))
-            .sort((a, b) => a - b)
-            .forEach(idx => {
-              const b = extraMap[idx] || {};
-              if (b.start || b.end) {
-                breakWindows.push({
-                  start: b.start || '',
-                  end:   b.end   || ''
-                });
-              }
-            });
+if (shiftHasStart || shiftHasEnd) {
+  if (!(shiftHasStart && shiftHasEnd)) {
+    // partial shift
+    markPair(startInp, endInp, 'SHIFT_PARTIAL');
+  } else if (sMin0 == null || eMin0 == null) {
+    markPair(startInp, endInp, 'SHIFT_BAD_TIME');
+  } else if (sMin0 === eMin0) {
+    markPair(startInp, endInp, 'SHIFT_ZERO_LENGTH');
+  } else {
+    shiftStart = sMin0;
+    shiftEnd   = (eMin0 > sMin0) ? eMin0 : (eMin0 + 1440); // overnight ok
+    shiftMinutes = shiftEnd - shiftStart;
+    shiftOk = true;
+  }
+}
 
-          // Compute break minutes from any complete windows; otherwise use floating Break (mins)
-          let breakMinutes       = 0;
-          let hasFullBreakWindow = false;
-          let hasAnyBreakTimes   = false;
+// Break windows: build with input refs so we can mark the *right* boxes red
+const breakWindows = [];
+// primary
+if (hasA(breakStartStr) || hasA(breakEndStr)) {
+  breakWindows.push({
+    kind: 'primary',
+    idx: -1,
+    startStr: breakStartStr,
+    endStr: breakEndStr,
+    startEl: breakStartInp,
+    endEl: breakEndInp
+  });
+}
+// extras (keep input element refs)
+const extraStarts = tr.querySelectorAll('input[data-extra-break="start"]');
+const extraEnds   = tr.querySelectorAll('input[data-extra-break="end"]');
+const extraElMap = {}; // idx -> { startEl, endEl, startStr, endStr }
 
-          for (const bw of breakWindows) {
-            const bs = bw.start ? hhmmToMinutes(bw.start) : null;
-            const be = bw.end   ? hhmmToMinutes(bw.end)   : null;
-            if (bw.start || bw.end) {
-              hasAnyBreakTimes = true;
-            }
-            if (bs != null && be != null) {
-              let diff = be - bs;
-              if (diff < 0) diff += 24 * 60;
-              breakMinutes += Math.max(0, diff);
-              hasFullBreakWindow = true;
-            }
-          }
+extraStarts.forEach(inp => {
+  const idx = Number(inp.getAttribute('data-extra-index') || '0');
+  if (!Number.isFinite(idx) || idx < 0) return;
+  extraElMap[idx] ||= {};
+  extraElMap[idx].startEl = inp;
+  extraElMap[idx].startStr = normaliseHHMM(String(inp.value || '').trim());
+  inp.value = extraElMap[idx].startStr || '';
+});
 
-          if (hasFullBreakWindow) {
-            // Any complete break times: break_minutes is authoritative; lock numeric field
-            breakMinsStr = String(breakMinutes);
-            if (breakMinsInp) {
-              breakMinsInp.value = breakMinsStr;
-              breakMinsInp.disabled = true;
-            }
-          } else if (!hasAnyBreakTimes) {
-            // No break times at all → floating break from numeric field
-            if (breakMinsInp) breakMinsInp.disabled = false;
-            const bNum = Number(breakMinsStr || 0);
-            breakMinutes = Number.isFinite(bNum) && bNum > 0 ? bNum : 0;
-          } else {
-            // Some partial times but no complete windows: treat as 0 break; keep Break (mins) editable
-            breakMinutes = 0;
-            if (breakMinsInp) breakMinsInp.disabled = false;
-          }
+extraEnds.forEach(inp => {
+  const idx = Number(inp.getAttribute('data-extra-index') || '0');
+  if (!Number.isFinite(idx) || idx < 0) return;
+  extraElMap[idx] ||= {};
+  extraElMap[idx].endEl = inp;
+  extraElMap[idx].endStr = normaliseHHMM(String(inp.value || '').trim());
+  inp.value = extraElMap[idx].endStr || '';
+});
 
-          let paidHoursText = '';
-          if (shiftMinutes != null) {
-            const paidMin = Math.max(0, shiftMinutes - breakMinutes);
-            if (paidMin > 0) {
-              paidHoursText = (Math.round((paidMin / 60) * 100) / 100).toFixed(2);
-            } else {
-              paidHoursText = '0.00';
-            }
-          }
+// push extras in order
+Object.keys(extraElMap).map(n => Number(n)).sort((a,b)=>a-b).forEach(idx => {
+  const e = extraElMap[idx] || {};
+  if (hasA(e.startStr) || hasA(e.endStr)) {
+    breakWindows.push({
+      kind: 'extra',
+      idx,
+      startStr: e.startStr || '',
+      endStr: e.endStr || '',
+      startEl: e.startEl || null,
+      endEl: e.endEl || null
+    });
+  }
+});
 
-          const paidEl = tr.querySelector('.sched-paid-hours');
-          if (paidEl) paidEl.textContent = paidHoursText;
+// Validate breaks (partials, bad times, zero length, within shift), compute adjusted ranges
+const validBreakRanges = []; // { bsAdj, beAdj, win }
+
+for (const win of breakWindows) {
+  const bHasStart = hasA(win.startStr);
+  const bHasEnd   = hasA(win.endStr);
+
+  if (bHasStart || bHasEnd) {
+    if (!(bHasStart && bHasEnd)) {
+      // partial break (allowed to continue typing, but red + blocks Save)
+      markPair(win.startEl, win.endEl, `BREAK_PARTIAL_${win.kind}_${win.idx}`);
+      continue;
+    }
+
+    const bs0 = hhmmToMinutes(win.startStr);
+    const be0 = hhmmToMinutes(win.endStr);
+
+    if (bs0 == null || be0 == null) {
+      markPair(win.startEl, win.endEl, `BREAK_BAD_TIME_${win.kind}_${win.idx}`);
+      continue;
+    }
+
+    if (bs0 === be0) {
+      markPair(win.startEl, win.endEl, `BREAK_ZERO_LENGTH_${win.kind}_${win.idx}`);
+      continue;
+    }
+
+    if (!shiftOk) {
+      // cannot place break without a valid shift
+      markPair(startInp, endInp, 'BREAK_REQUIRES_SHIFT');
+      markPair(win.startEl, win.endEl, `BREAK_WITHOUT_SHIFT_${win.kind}_${win.idx}`);
+      continue;
+    }
+
+    // Place break on same “timeline” as shiftStart/shiftEnd (supports overnight shifts)
+    let bsAdj = bs0;
+    if (bsAdj < shiftStart) bsAdj += 1440;
+
+    let beAdj = be0;
+    if (beAdj < bsAdj) beAdj += 1440; // overnight break window ok
+
+    // Must be within the shift span
+    if (bsAdj < shiftStart || beAdj > shiftEnd || beAdj <= bsAdj) {
+      markPair(win.startEl, win.endEl, `BREAK_OUTSIDE_SHIFT_${win.kind}_${win.idx}`);
+      continue;
+    }
+
+    validBreakRanges.push({ bsAdj, beAdj, win });
+  }
+}
+
+// Overlap check (on adjusted ranges)
+validBreakRanges.sort((a,b)=>a.bsAdj - b.bsAdj);
+for (let i = 1; i < validBreakRanges.length; i++) {
+  const prev = validBreakRanges[i-1];
+  const cur  = validBreakRanges[i];
+  if (cur.bsAdj < prev.beAdj) {
+    // overlap: mark both windows
+    markPair(prev.win.startEl, prev.win.endEl, `BREAK_OVERLAP_${prev.win.kind}_${prev.win.idx}`);
+    markPair(cur.win.startEl,  cur.win.endEl,  `BREAK_OVERLAP_${cur.win.kind}_${cur.win.idx}`);
+  }
+}
+
+// Compute breakMinutes:
+// - If we have valid break windows, sum them
+// - Else use numeric break mins if no break times were entered
+let breakMinutes = 0;
+const anyBreakTimes = breakWindows.length > 0;
+const anyValidBreaks = validBreakRanges.length > 0;
+
+if (anyValidBreaks) {
+  for (const r of validBreakRanges) breakMinutes += Math.max(0, (r.beAdj - r.bsAdj));
+  if (breakMinsInp) {
+    breakMinsInp.value = String(Math.round(breakMinutes));
+    breakMinsInp.disabled = true;
+  }
+} else {
+  if (breakMinsInp) breakMinsInp.disabled = false;
+  if (!anyBreakTimes) {
+    const bNum = Number(breakMinsStr || 0);
+    breakMinutes = Number.isFinite(bNum) && bNum > 0 ? bNum : 0;
+    // Optional sanity: break mins cannot exceed shift mins
+    if (shiftOk && breakMinutes >= shiftMinutes) {
+      markEl(breakMinsInp, 'BREAK_MINS_TOO_BIG');
+      markPair(startInp, endInp, 'SHIFT_BREAK_MINS_TOO_BIG');
+    }
+  } else {
+    // user typed some break times but none valid yet -> keep breakMinutes=0 and show red already
+    breakMinutes = 0;
+  }
+}
+
+// Paid hours display: blank if there are errors on this row; else show computed
+const paidEl = tr.querySelector('.sched-paid-hours');
+if (paidEl) {
+  if (Object.keys(errs).length) {
+    paidEl.textContent = '';
+  } else if (shiftOk) {
+    const paidMin = Math.max(0, shiftMinutes - breakMinutes);
+    paidEl.textContent = paidMin > 0
+      ? (Math.round((paidMin / 60) * 100) / 100).toFixed(2)
+      : '0.00';
+  } else {
+    paidEl.textContent = '';
+  }
+}
+
+// Commit errors for this date (drives Save blocking later)
+commitErrors(errs);
+
+  
 
           // Update schedule array
           let sched = state.schedule;
@@ -24314,17 +24434,12 @@ if (this.entity === 'timesheets' && k === 'lines') {
           entry.break_start = breakStartStr || null;
           entry.break_end   = breakEndStr   || null;
           entry.break_mins  = breakMinutes || 0;
-          // Backend resolver expects break_minutes; keep both for compatibility
           entry.break_minutes = breakMinutes || 0;
 
-          // Persist full list of break windows (primary + extras)
           const entryBreaks = [];
           for (const bw of breakWindows) {
             if (bw.start || bw.end) {
-              entryBreaks.push({
-                start: bw.start || null,
-                end:   bw.end   || null
-              });
+              entryBreaks.push({ start: bw.start || null, end: bw.end || null });
             }
           }
           entry.breaks = entryBreaks;
@@ -24349,258 +24464,256 @@ if (this.entity === 'timesheets' && k === 'lines') {
           updateScheduleFromRow(tr);
         }, true);
 
-      // Reset schedule + Extra Breaks + / - buttons
-// ✅ FIXED:
-//   1) Hide + block these actions unless Timesheet modal is in EDIT/CREATE
-//   2) Inject existing extra breaks from state.schedule[].breaks[] on load
-//   3) Wire extra-break inputs so they recalc the row (they are NOT data-sched-field inputs)
+        // ─────────────────────────────────────────────────────────────
+        // ✅ FIXED: extra-break rendering + action button gating
+        // ─────────────────────────────────────────────────────────────
 
-const __tsIsEditMode = () => {
-  try {
-    const fr = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
-    return !!(fr && fr.entity === 'timesheets' && (fr.mode === 'edit' || fr.mode === 'create'));
-  } catch { return false; }
-};
+        const __tsIsEditMode = () => {
+          try {
+            const fr = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
+            return !!(fr && fr.entity === 'timesheets' && (fr.mode === 'edit' || fr.mode === 'create'));
+          } catch { return false; }
+        };
 
-const __tsShowSchedActionButtons = (show) => {
-  try {
-    root.querySelectorAll(
-      'button[data-ts-action="reset-schedule"],' +
-      'button[data-ts-action="extra-break-add"],' +
-      'button[data-ts-action="extra-break-remove"]'
-    ).forEach(b => { b.style.display = show ? '' : 'none'; });
-  } catch {}
-};
+        const __tsShowSchedActionButtons = (show) => {
+          try {
+            root.querySelectorAll(
+              'button[data-ts-action="reset-schedule"],' +
+              'button[data-ts-action="extra-break-add"],' +
+              'button[data-ts-action="extra-break-remove"]'
+            ).forEach(b => { b.style.display = show ? '' : 'none'; });
+          } catch {}
+        };
 
-const __tsRemoveWithBr = (inp) => {
-  if (!inp) return;
-  const prev = inp.previousSibling;
-  const next = inp.nextSibling;
-  if (prev && prev.nodeType === 1 && prev.tagName === 'BR') { try { prev.remove(); } catch {} }
-  else if (next && next.nodeType === 1 && next.tagName === 'BR') { try { next.remove(); } catch {} }
-  try { inp.remove(); } catch {}
-};
+        const __tsRemoveWithBr = (inp) => {
+          if (!inp) return;
+          const prev = inp.previousSibling;
+          const next = inp.nextSibling;
+          if (prev && prev.nodeType === 1 && prev.tagName === 'BR') { try { prev.remove(); } catch {} }
+          else if (next && next.nodeType === 1 && next.tagName === 'BR') { try { next.remove(); } catch {} }
+          try { inp.remove(); } catch {}
+        };
 
-const __tsWireExtraInp = (inp, tr) => {
-  if (!inp || inp.__tsExtraBreakWired) return;
-  inp.__tsExtraBreakWired = true;
-  const recalc = () => { try { updateScheduleFromRow(tr); } catch {} };
-  inp.addEventListener('change', recalc);
-  inp.addEventListener('blur', recalc, true);
-};
+        const __tsWireExtraInp = (inp, tr) => {
+          if (!inp || inp.__tsExtraBreakWired) return;
+          inp.__tsExtraBreakWired = true;
+          const recalc = () => { try { updateScheduleFromRow(tr); } catch {} };
+          inp.addEventListener('change', recalc);
+          inp.addEventListener('blur', recalc, true);
+        };
 
-const __tsEnsureExtraBreakInputs = () => {
-  const table = root.querySelector('#tsWeeklySchedule');
-  if (!table) return;
+        const __tsEnsureExtraBreakInputs = () => {
+          const table = root.querySelector('#tsWeeklySchedule');
+          if (!table) return;
 
-  const count = Number(state.extraBreakCount || 0);
-  if (!Number.isFinite(count) || count <= 0) return;
+          const count = Number(state.extraBreakCount || 0);
+          if (!Number.isFinite(count) || count <= 0) return;
 
-  const sched = Array.isArray(state.schedule) ? state.schedule : [];
-  const rows = table.querySelectorAll('tbody tr[data-row-idx]');
+          const sched = Array.isArray(state.schedule) ? state.schedule : [];
+          const rows = table.querySelectorAll('tbody tr[data-row-idx]');
 
-  rows.forEach(tr => {
-    const date = tr.getAttribute('data-date') || '';
-    if (!date) return;
+          rows.forEach(tr => {
+            const date = tr.getAttribute('data-date') || '';
+            if (!date) return;
 
-    const entry = sched.find(s => s && String(s.date) === String(date)) || null;
-    const breaks = Array.isArray(entry?.breaks) ? entry.breaks : []; // [0] primary, [1..] extras
+            const entry = sched.find(s => s && String(s.date) === String(date)) || null;
+            const breaks = Array.isArray(entry?.breaks) ? entry.breaks : []; // [0] primary, [1..] extras
 
-    const startCell = tr.querySelector('input[name="sched_break_start"]')?.parentElement;
-    const endCell   = tr.querySelector('input[name="sched_break_end"]')?.parentElement;
-    if (!startCell || !endCell) return;
+            const startCell = tr.querySelector('input[name="sched_break_start"]')?.parentElement;
+            const endCell   = tr.querySelector('input[name="sched_break_end"]')?.parentElement;
+            if (!startCell || !endCell) return;
 
-    let startBox = startCell.querySelector('.extra-breaks');
-    if (!startBox) {
-      startBox = document.createElement('div');
-      startBox.className = 'extra-breaks';
-      startCell.appendChild(startBox);
-    }
+            let startBox = startCell.querySelector('.extra-breaks');
+            if (!startBox) {
+              startBox = document.createElement('div');
+              startBox.className = 'extra-breaks';
+              startCell.appendChild(startBox);
+            }
 
-    let endBox = endCell.querySelector('.extra-breaks');
-    if (!endBox) {
-      endBox = document.createElement('div');
-      endBox.className = 'extra-breaks';
-      endCell.appendChild(endBox);
-    }
+            let endBox = endCell.querySelector('.extra-breaks');
+            if (!endBox) {
+              endBox = document.createElement('div');
+              endBox.className = 'extra-breaks';
+              endCell.appendChild(endBox);
+            }
 
-    for (let i = 0; i < count; i++) {
-      const idxStr = String(i);
+            for (let i = 0; i < count; i++) {
+              const idxStr = String(i);
 
-      let startExtra = tr.querySelector(`input[data-extra-break="start"][data-extra-index="${idxStr}"]`);
-      let endExtra   = tr.querySelector(`input[data-extra-break="end"][data-extra-index="${idxStr}"]`);
+              let startExtra = tr.querySelector(`input[data-extra-break="start"][data-extra-index="${idxStr}"]`);
+              let endExtra   = tr.querySelector(`input[data-extra-break="end"][data-extra-index="${idxStr}"]`);
 
-      if (!startExtra) {
-        if (startBox.childNodes.length) startBox.appendChild(document.createElement('br'));
-        startExtra = document.createElement('input');
-        startExtra.type = 'text';
-        startExtra.className = 'input mini';
-        startExtra.name = `sched_break_start_extra_${i}`;
-        startExtra.setAttribute('data-extra-break', 'start');
-        startExtra.setAttribute('data-extra-index', idxStr);
-        startExtra.setAttribute('data-date', date);
-        startBox.appendChild(startExtra);
-      }
+              if (!startExtra) {
+                if (startBox.childNodes.length) startBox.appendChild(document.createElement('br'));
+                startExtra = document.createElement('input');
+                startExtra.type = 'text';
+                startExtra.className = 'input mini';
+                startExtra.name = `sched_break_start_extra_${i}`;
+                startExtra.setAttribute('data-extra-break', 'start');
+                startExtra.setAttribute('data-extra-index', idxStr);
+                startExtra.setAttribute('data-date', date);
+                startBox.appendChild(startExtra);
+              }
 
-      if (!endExtra) {
-        if (endBox.childNodes.length) endBox.appendChild(document.createElement('br'));
-        endExtra = document.createElement('input');
-        endExtra.type = 'text';
-        endExtra.className = 'input mini';
-        endExtra.name = `sched_break_end_extra_${i}`;
-        endExtra.setAttribute('data-extra-break', 'end');
-        endExtra.setAttribute('data-extra-index', idxStr);
-        endExtra.setAttribute('data-date', date);
-        endBox.appendChild(endExtra);
-      }
+              if (!endExtra) {
+                if (endBox.childNodes.length) endBox.appendChild(document.createElement('br'));
+                endExtra = document.createElement('input');
+                endExtra.type = 'text';
+                endExtra.className = 'input mini';
+                endExtra.name = `sched_break_end_extra_${i}`;
+                endExtra.setAttribute('data-extra-break', 'end');
+                endExtra.setAttribute('data-extra-index', idxStr);
+                endExtra.setAttribute('data-date', date);
+                endBox.appendChild(endExtra);
+              }
 
-      const b = breaks[i + 1] || null;
-      const sVal = (b && b.start) ? String(b.start) : '';
-      const eVal = (b && b.end)   ? String(b.end)   : '';
+              const b = breaks[i + 1] || null;
+              const sVal = (b && b.start) ? String(b.start) : '';
+              const eVal = (b && b.end)   ? String(b.end)   : '';
 
-      try { startExtra.value = (typeof normaliseHHMM === 'function') ? normaliseHHMM(sVal) : sVal; } catch { startExtra.value = sVal; }
-      try { endExtra.value   = (typeof normaliseHHMM === 'function') ? normaliseHHMM(eVal) : eVal; } catch { endExtra.value = eVal; }
+              try { startExtra.value = normaliseHHMM(sVal); } catch { startExtra.value = sVal; }
+              try { endExtra.value   = normaliseHHMM(eVal); } catch { endExtra.value = eVal; }
 
-      __tsWireExtraInp(startExtra, tr);
-      __tsWireExtraInp(endExtra, tr);
-    }
-  });
-};
+              __tsWireExtraInp(startExtra, tr);
+              __tsWireExtraInp(endExtra, tr);
+            }
+          });
+        };
 
-// Hide in view mode; show in edit/create
-__tsShowSchedActionButtons(__tsIsEditMode());
+        // ✅ Hide in view mode; show in edit/create (visual fix)
+        __tsShowSchedActionButtons(__tsIsEditMode());
 
-// Inject existing extra breaks immediately (so multi-break days render on load)
-__tsEnsureExtraBreakInputs();
+        // ✅ Inject existing extra breaks immediately (fixes “not showing extra breaks on load”)
+        __tsEnsureExtraBreakInputs();
 
-// Attach ONE delegated click handler (uses current DOM each time)
-if (!root.__tsSchedActionsWired) {
-  root.__tsSchedActionsWired = true;
+        // ✅ Also wire any extra-break inputs already present in DOM (safety)
+        try {
+          root.querySelectorAll('input[data-extra-break]').forEach(inp => {
+            const tr = inp.closest('tr[data-row-idx]');
+            if (tr) __tsWireExtraInp(inp, tr);
+          });
+        } catch {}
 
-  root.addEventListener('click', (ev) => {
-    const btn = ev.target.closest('button[data-ts-action]');
-    if (!btn) return;
+        // Attach ONE delegated click handler (hard blocks view mode + works across re-renders)
+        if (!root.__tsSchedActionsWired) {
+          root.__tsSchedActionsWired = true;
 
-    const action = btn.getAttribute('data-ts-action');
+          root.addEventListener('click', (ev) => {
+            const btn = ev.target.closest('button[data-ts-action]');
+            if (!btn) return;
 
-    // Only handle these three actions here
-    if (action !== 'reset-schedule' && action !== 'extra-break-add' && action !== 'extra-break-remove') return;
+            const action = btn.getAttribute('data-ts-action');
+            if (action !== 'reset-schedule' && action !== 'extra-break-add' && action !== 'extra-break-remove') return;
 
-    if (!__tsIsEditMode()) {
-      try { window.__toast && window.__toast('Click Edit to change the schedule.'); } catch {}
-      return;
-    }
+            // ✅ Hard block in view mode (behavioural fix)
+            if (!__tsIsEditMode()) {
+              try { window.__toast && window.__toast('Click Edit to change the schedule.'); } catch {}
+              return;
+            }
 
-    const table = root.querySelector('#tsWeeklySchedule');
-    if (!table) return;
+            const table = root.querySelector('#tsWeeklySchedule');
+            if (!table) return;
 
-    // Reset schedule
-    if (action === 'reset-schedule') {
-      state.schedule = [];
+            if (action === 'reset-schedule') {
+              state.schedule = [];
 
-      const rows = table.querySelectorAll('tbody tr[data-row-idx]');
-      rows.forEach(tr => {
-        const inputs = tr.querySelectorAll('input[data-sched-field]');
-        inputs.forEach(inp => {
-          inp.value = '';
-          if (inp.name === 'sched_break_mins') inp.disabled = false;
-        });
+              const rows = table.querySelectorAll('tbody tr[data-row-idx]');
+              rows.forEach(tr => {
+                tr.querySelectorAll('input[data-sched-field]').forEach(inp => {
+                  inp.value = '';
+                  if (inp.name === 'sched_break_mins') inp.disabled = false;
+                });
 
-        const extraInputs = tr.querySelectorAll('input[data-extra-break]');
-        extraInputs.forEach(inp => __tsRemoveWithBr(inp));
+                tr.querySelectorAll('input[data-extra-break]').forEach(inp => __tsRemoveWithBr(inp));
 
-        const paidEl = tr.querySelector('.sched-paid-hours');
-        if (paidEl) paidEl.textContent = '';
-      });
+                const paidEl = tr.querySelector('.sched-paid-hours');
+                if (paidEl) paidEl.textContent = '';
+              });
 
-      state.extraBreakCount = 0;
-      try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
-      return;
-    }
+              state.extraBreakCount = 0;
+              try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
+              return;
+            }
 
-    // Add an extra break line for all rows
-    if (action === 'extra-break-add') {
-      const current = Number(state.extraBreakCount || 0);
-      const newIndex = current;
-      state.extraBreakCount = current + 1;
+            if (action === 'extra-break-add') {
+              const current = Number(state.extraBreakCount || 0);
+              const newIndex = current;
+              state.extraBreakCount = current + 1;
 
-      const rows = table.querySelectorAll('tbody tr[data-row-idx]');
-      rows.forEach(tr => {
-        const date = tr.getAttribute('data-date') || '';
+              const rows = table.querySelectorAll('tbody tr[data-row-idx]');
+              rows.forEach(tr => {
+                const date = tr.getAttribute('data-date') || '';
 
-        const startCell = tr.querySelector('input[name="sched_break_start"]')?.parentElement;
-        const endCell   = tr.querySelector('input[name="sched_break_end"]')?.parentElement;
-        if (!startCell || !endCell) return;
+                const startCell = tr.querySelector('input[name="sched_break_start"]')?.parentElement;
+                const endCell   = tr.querySelector('input[name="sched_break_end"]')?.parentElement;
+                if (!startCell || !endCell) return;
 
-        let startBox = startCell.querySelector('.extra-breaks');
-        if (!startBox) {
-          startBox = document.createElement('div');
-          startBox.className = 'extra-breaks';
-          startCell.appendChild(startBox);
+                let startBox = startCell.querySelector('.extra-breaks');
+                if (!startBox) {
+                  startBox = document.createElement('div');
+                  startBox.className = 'extra-breaks';
+                  startCell.appendChild(startBox);
+                }
+
+                let endBox = endCell.querySelector('.extra-breaks');
+                if (!endBox) {
+                  endBox = document.createElement('div');
+                  endBox.className = 'extra-breaks';
+                  endCell.appendChild(endBox);
+                }
+
+                if (startBox.childNodes.length) startBox.appendChild(document.createElement('br'));
+                if (endBox.childNodes.length)   endBox.appendChild(document.createElement('br'));
+
+                const startExtra = document.createElement('input');
+                startExtra.type = 'text';
+                startExtra.className = 'input mini';
+                startExtra.name = `sched_break_start_extra_${newIndex}`;
+                startExtra.setAttribute('data-extra-break', 'start');
+                startExtra.setAttribute('data-extra-index', String(newIndex));
+                if (date) startExtra.setAttribute('data-date', date);
+                startBox.appendChild(startExtra);
+
+                const endExtra = document.createElement('input');
+                endExtra.type = 'text';
+                endExtra.className = 'input mini';
+                endExtra.name = `sched_break_end_extra_${newIndex}`;
+                endExtra.setAttribute('data-extra-break', 'end');
+                endExtra.setAttribute('data-extra-index', String(newIndex));
+                if (date) endExtra.setAttribute('data-date', date);
+                endBox.appendChild(endExtra);
+
+                __tsWireExtraInp(startExtra, tr);
+                __tsWireExtraInp(endExtra, tr);
+              });
+
+              try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
+              return;
+            }
+
+            if (action === 'extra-break-remove') {
+              let current = Number(state.extraBreakCount || 0);
+              if (!Number.isFinite(current) || current <= 0) return;
+
+              const removeIndex = current - 1;
+
+              const rows = table.querySelectorAll('tbody tr[data-row-idx]');
+              rows.forEach(tr => {
+                const startExtra = tr.querySelector(`input[data-extra-break="start"][data-extra-index="${removeIndex}"]`);
+                const endExtra   = tr.querySelector(`input[data-extra-break="end"][data-extra-index="${removeIndex}"]`);
+
+                __tsRemoveWithBr(startExtra);
+                __tsRemoveWithBr(endExtra);
+
+                try { updateScheduleFromRow(tr); } catch {}
+              });
+
+              state.extraBreakCount = removeIndex;
+              try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
+              return;
+            }
+          });
         }
-
-        let endBox = endCell.querySelector('.extra-breaks');
-        if (!endBox) {
-          endBox = document.createElement('div');
-          endBox.className = 'extra-breaks';
-          endCell.appendChild(endBox);
-        }
-
-        if (startBox.childNodes.length) startBox.appendChild(document.createElement('br'));
-        if (endBox.childNodes.length)   endBox.appendChild(document.createElement('br'));
-
-        const startExtra = document.createElement('input');
-        startExtra.type = 'text';
-        startExtra.className = 'input mini';
-        startExtra.name = `sched_break_start_extra_${newIndex}`;
-        startExtra.setAttribute('data-extra-break', 'start');
-        startExtra.setAttribute('data-extra-index', String(newIndex));
-        if (date) startExtra.setAttribute('data-date', date);
-        startBox.appendChild(startExtra);
-
-        const endExtra = document.createElement('input');
-        endExtra.type = 'text';
-        endExtra.className = 'input mini';
-        endExtra.name = `sched_break_end_extra_${newIndex}`;
-        endExtra.setAttribute('data-extra-break', 'end');
-        endExtra.setAttribute('data-extra-index', String(newIndex));
-        if (date) endExtra.setAttribute('data-date', date);
-        endBox.appendChild(endExtra);
-
-        __tsWireExtraInp(startExtra, tr);
-        __tsWireExtraInp(endExtra, tr);
-      });
-
-      try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
-      return;
-    }
-
-    // Remove the right-most extra break line (without touching the primary break fields)
-    if (action === 'extra-break-remove') {
-      let current = Number(state.extraBreakCount || 0);
-      if (!Number.isFinite(current) || current <= 0) return;
-
-      const removeIndex = current - 1;
-
-      const rows = table.querySelectorAll('tbody tr[data-row-idx]');
-      rows.forEach(tr => {
-        const startExtra = tr.querySelector(`input[data-extra-break="start"][data-extra-index="${removeIndex}"]`);
-        const endExtra   = tr.querySelector(`input[data-extra-break="end"][data-extra-index="${removeIndex}"]`);
-
-        __tsRemoveWithBr(startExtra);
-        __tsRemoveWithBr(endExtra);
-
-        try { updateScheduleFromRow(tr); } catch {}
-      });
-
-      state.extraBreakCount = removeIndex;
-      try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
-      return;
-    }
-  });
-}
-
-
       }
 
       // Manual weekly hours inputs (legacy support)
@@ -24618,10 +24731,7 @@ if (!root.__tsSchedActionsWired) {
           state.manualHours = state.manualHours || {};
           state.manualHours[key] = safe;
           if (LOGM) {
-            LT('manual hours staged', {
-              key,
-              value: safe
-            });
+            LT('manual hours staged', { key, value: safe });
           }
           try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
         });
@@ -24654,17 +24764,10 @@ if (!root.__tsSchedActionsWired) {
           const unitsNum = Number.isFinite(units) ? units : 0;
 
           const prev = state.additionalRates[code] || { code };
-          state.additionalRates[code] = {
-            ...prev,
-            code,
-            units_week: unitsNum
-          };
+          state.additionalRates[code] = { ...prev, code, units_week: unitsNum };
 
           if (LOGM) {
-            LT('additional rate staged', {
-              code,
-              units_week: unitsNum
-            });
+            LT('additional rate staged', { code, units_week: unitsNum });
           }
 
           try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
@@ -24679,124 +24782,179 @@ if (!root.__tsSchedActionsWired) {
   }
 }
 
-  // ───────────────────── Timesheets: Evidence tab (open PDF + drag/drop) ─────────────────────
-   // ───────────────────── Timesheets: Evidence tab (open PDF + drag/drop + remove) ─────────────────────
-  if (this.entity === 'timesheets' && k === 'evidence') {
-    const { LOGM, L: LT } = getTsLoggers('[TS][EVIDENCE][WIRE]');
-    const root = byId('modalBody');
-    if (!root) {
-      if (LOGM) LT('no modalBody root, skip wiring');
-    } else {
-      try {
-        const btn = root.querySelector('button[data-ts-action="open-pdf"][data-timesheet-id]');
-        if (btn && !btn.__tsPdfWired) {
-          btn.__tsPdfWired = true;
-          const tsId = btn.getAttribute('data-timesheet-id') || '';
-          if (LOGM) LT('wire open-pdf button', { tsId });
-          btn.addEventListener('click', async () => {
-            try {
-              await openTimesheetPdf(tsId);
-            } catch (err) {
-              if (LOGM) console.warn('[TS][EVIDENCE] openTimesheetPdf failed', err);
-              alert(err?.message || 'Failed to open timesheet PDF.');
-            }
-          });
-        } else if (LOGM && !btn) {
-          LT('no open-pdf button found in Evidence tab');
+
+  // ───────────────────── Timesheets: Evidence tab (refresh + drop-anywhere + view/delete) ─────────────────────
+if (this.entity === 'timesheets' && k === 'evidence') {
+  const { LOGM, L: LT } = getTsLoggers('[TS][EVIDENCE][WIRE]');
+  let root = byId('modalBody');
+  if (!root) {
+    if (LOGM) LT('no modalBody root, skip wiring');
+  } else {
+    try {
+      const mc  = window.modalCtx || {};
+      const tsId = mc.data?.timesheet_id || mc.data?.id || null;
+
+      // 1) Refresh evidence on tab open (source of truth)
+      //    Re-render the tab after refresh so the table reflects the latest state.
+      if (tsId && typeof refreshTimesheetEvidenceIntoModalState === 'function' && !this.__tsEvidenceRefreshInFlight) {
+        this.__tsEvidenceRefreshInFlight = true;
+        try {
+          await refreshTimesheetEvidenceIntoModalState(tsId);
+
+          // Re-render Evidence tab HTML with updated modalCtx.timesheetState.evidence
+          byId('modalBody').innerHTML = this.renderTab('evidence', this.mergedRowForTab('evidence')) || '';
+          root = byId('modalBody');
+        } catch (e) {
+          if (LOGM) console.warn('[TS][EVIDENCE] refresh failed (non-fatal)', e);
+        } finally {
+          this.__tsEvidenceRefreshInFlight = false;
         }
+      }
 
-        const dz = root.querySelector('[data-ts-drop-zone="evidence"]');
-        if (dz && !dz.__tsDropWired) {
-          dz.__tsDropWired = true;
+      if (!root) return;
 
-          const prevent = (ev) => {
-            ev.preventDefault();
-            ev.stopPropagation();
-          };
+      const tabRoot =
+        root.querySelector('[data-ts-drop-zone-root="evidence"]') ||
+        root.querySelector('.ts-evidence-tab') ||
+        root;
 
-          const onDragOver = (ev) => {
-            prevent(ev);
-            dz.classList && dz.classList.add('ts-drop-hover');
-          };
+      // 2) Drop-anywhere wiring (within Evidence tab root)
+      if (tabRoot && !tabRoot.__tsEvDropWired) {
+        tabRoot.__tsEvDropWired = true;
 
-          const onDragLeave = (ev) => {
-            prevent(ev);
-            dz.classList && dz.classList.remove('ts-drop-hover');
-          };
+        const prevent = (ev) => { ev.preventDefault(); ev.stopPropagation(); };
 
-          const onDrop = async (ev) => {
-            prevent(ev);
-            dz.classList && dz.classList.remove('ts-drop-hover');
+        const isAllowedEvidenceFile = (file) => {
+          if (!file) return false;
+          const type = String(file.type || '').toLowerCase();
+          const name = String(file.name || '').toLowerCase();
 
-            const files = (ev.dataTransfer && ev.dataTransfer.files)
-              ? Array.from(ev.dataTransfer.files)
-              : [];
-            const file = files[0] || null;
-            if (!file) return;
+          const isPdf = (type === 'application/pdf') || name.endsWith('.pdf');
+          const isImg = type.startsWith('image/') || /\.(jpe?g|png|gif|webp|heic|heif)$/i.test(name);
+          return isPdf || isImg;
+        };
 
-            const type = String(file.type || '').toLowerCase();
-            if (!type.startsWith('image/') && type !== 'application/pdf') {
-              alert('Please drop a PDF or image file.');
-              return;
-            }
+        const onDragOver = (ev) => {
+          prevent(ev);
+          try { tabRoot.classList.add('ts-drop-hover'); } catch {}
+        };
 
-            const mc = window.modalCtx || {};
-            const tsId = mc.data?.timesheet_id || mc.data?.id || null;
-            if (!tsId) {
-              alert('Timesheet context missing; cannot replace evidence.');
-              return;
-            }
+        const onDragLeave = (ev) => {
+          prevent(ev);
+          try { tabRoot.classList.remove('ts-drop-hover'); } catch {}
+        };
 
-            const tsfin = mc.timesheetDetails && mc.timesheetDetails.tsfin ? mc.timesheetDetails.tsfin : {};
-            const locked = !!(tsfin.locked_by_invoice_id || tsfin.paid_at_utc);
-            if (locked) {
-              alert('This timesheet is locked (paid or invoiced); evidence cannot be replaced.');
-              return;
-            }
+        const onDrop = async (ev) => {
+          prevent(ev);
+          try { tabRoot.classList.remove('ts-drop-hover'); } catch {}
 
+          const files = (ev.dataTransfer && ev.dataTransfer.files) ? Array.from(ev.dataTransfer.files) : [];
+          const file  = files[0] || null;
+          if (!file) return;
+
+          if (!isAllowedEvidenceFile(file)) {
+            alert('Please drop a PDF or an image file (JPEG/PNG/HEIC/etc).');
+            return;
+          }
+
+          if (typeof openTimesheetEvidenceUploadDialog !== 'function') {
+            alert('Upload viewer is not available yet (openTimesheetEvidenceUploadDialog missing).');
+            return;
+          }
+
+          try {
+            await openTimesheetEvidenceUploadDialog(file);
+          } catch (err) {
+            if (LOGM) console.warn('[TS][EVIDENCE][DROP] upload dialog failed', err);
+            alert(err?.message || 'Failed to open upload viewer.');
+          }
+        };
+
+        tabRoot.addEventListener('dragenter', onDragOver);
+        tabRoot.addEventListener('dragover',  onDragOver);
+        tabRoot.addEventListener('dragleave', onDragLeave);
+        tabRoot.addEventListener('drop',      onDrop);
+
+        if (LOGM) LT('drop-anywhere wired on evidence tab root');
+      }
+
+      // 3) Wire View buttons
+      const viewBtns = root.querySelectorAll('button[data-evidence-view]');
+      if (LOGM) LT('wiring evidence view buttons', { count: viewBtns.length });
+
+      viewBtns.forEach(btn => {
+        if (btn.__tsEvViewWired) return;
+        btn.__tsEvViewWired = true;
+
+        btn.addEventListener('click', async (ev) => {
+          ev.preventDefault();
+
+          const id = btn.getAttribute('data-evidence-view') || '';
+          if (!id) return;
+
+          if (typeof openTimesheetEvidenceViewerExisting !== 'function') {
+            alert('Evidence viewer is not available yet (openTimesheetEvidenceViewerExisting missing).');
+            return;
+          }
+
+          // Find evidence item from modal state
+          const list = Array.isArray(window.modalCtx?.timesheetState?.evidence)
+            ? window.modalCtx.timesheetState.evidence
+            : [];
+
+          let item = list.find(x => x && String(x.id) === String(id)) || null;
+
+          // If not found, attempt a refresh once (best-effort)
+          if (!item && tsId && typeof refreshTimesheetEvidenceIntoModalState === 'function') {
             try {
-              await openTimesheetEvidenceReplaceDialog(file);
-            } catch (err) {
-              if (LOGM) console.warn('[TS][EVIDENCE][DROP] replace dialog failed', err);
-              alert(err?.message || 'Failed to process dropped file.');
-            }
-          };
+              await refreshTimesheetEvidenceIntoModalState(tsId);
+              const list2 = Array.isArray(window.modalCtx?.timesheetState?.evidence)
+                ? window.modalCtx.timesheetState.evidence
+                : [];
+              item = list2.find(x => x && String(x.id) === String(id)) || null;
+            } catch {}
+          }
 
-          dz.addEventListener('dragenter', onDragOver);
-          dz.addEventListener('dragover', onDragOver);
-          dz.addEventListener('dragleave', onDragLeave);
-          dz.addEventListener('drop', onDrop);
+          if (!item) {
+            alert('Evidence item not found.');
+            return;
+          }
 
-          if (LOGM) LT('drag/drop wired on evidence drop zone');
-        } else if (LOGM && !dz) {
-          LT('no evidence drop zone found (data-ts-drop-zone="evidence")');
-        }
-
-        // NEW: wire evidence Remove buttons (multi-evidence list)
-        const removeBtns = root.querySelectorAll('button[data-evidence-remove]');
-        if (LOGM) LT('wiring evidence remove buttons', { count: removeBtns.length });
-        removeBtns.forEach(btn => {
-          if (btn.__tsEvRemoveWired) return;
-          btn.__tsEvRemoveWired = true;
-          btn.addEventListener('click', async (ev) => {
-            ev.preventDefault();
-            try {
-              // Uses the global handler we defined earlier
-              await handleTimesheetEvidenceRemoveClick(ev);
-            } catch (err) {
-              if (LOGM) console.warn('[TS][EVIDENCE] remove evidence failed', err);
-              alert(err?.message || 'Failed to remove evidence item.');
-            }
-          });
+          try {
+            await openTimesheetEvidenceViewerExisting(item);
+          } catch (err) {
+            if (LOGM) console.warn('[TS][EVIDENCE] view failed', err);
+            alert(err?.message || 'Failed to open evidence viewer.');
+          }
         });
+      });
 
-      } catch (err) {
-        if ((typeof window.__LOG_MODAL === 'boolean') ? window.__LOG_MODAL : false) {
-          console.warn('[TS][EVIDENCE][WIRE] failed', err);
-        }
+      // 4) Wire Delete buttons (user evidence only; system rows should not render delete)
+      const removeBtns = root.querySelectorAll('button[data-evidence-remove]');
+      if (LOGM) LT('wiring evidence delete buttons', { count: removeBtns.length });
+
+      removeBtns.forEach(btn => {
+        if (btn.__tsEvRemoveWired) return;
+        btn.__tsEvRemoveWired = true;
+
+        btn.addEventListener('click', async (ev) => {
+          ev.preventDefault();
+          try {
+            await handleTimesheetEvidenceRemoveClick(ev);
+          } catch (err) {
+            if (LOGM) console.warn('[TS][EVIDENCE] delete failed', err);
+            alert(err?.message || 'Failed to delete evidence item.');
+          }
+        });
+      });
+
+    } catch (err) {
+      if ((typeof window.__LOG_MODAL === 'boolean') ? window.__LOG_MODAL : false) {
+        console.warn('[TS][EVIDENCE][WIRE] failed', err);
       }
     }
   }
+}
 
     // Finalise setTab
   this.currentTabKey = k;
@@ -25987,9 +26145,14 @@ if (!isChild && top.entity === 'timesheets') {
         } catch { gateOK = true; }
       }
 
-      btnSave.disabled = (top.entity === 'contracts')
-        ? (top._saving || ((top.kind !== 'contract-clone-extend') && !top.isDirty) || !gateOK)
-        : (top._saving);
+    btnSave.disabled = (top.entity === 'contracts')
+  ? (top._saving || ((top.kind !== 'contract-clone-extend') && !top.isDirty) || !gateOK)
+  : (
+      top._saving ||
+      // ✅ Evidence viewer: Save only enabled once dirty (evidence type changed)
+      (top.kind === 'timesheet-evidence-viewer' && !top.isDirty)
+    );
+
     }
 
     // 🔹 Top-level Edit Contract → wire global Delete button
@@ -37225,24 +37388,24 @@ function renderTimesheetLinesTab(ctx) {
   };
 
   // ─────────────────────────────────────────────────────
-// A) SEGMENTS mode → imported/self-bill breakdown ONLY
-//    (NHSP / HR self-bill / adjustments)
-// ─────────────────────────────────────────────────────
-if (isSegments && segs.length && isNhspOrHrSelfBillBasis) {
-  const headHtml = `
-    <thead>
-      <tr>
-        <th>Date</th>
-        <th>Ref / Request</th>
-        <th>Source</th>
-        <th>Hours</th>
-        <th>Pay</th>
-        <th>Charge</th>
-        <th>Exclude from pay</th>
-        <th>Invoice week / Pause</th>
-      </tr>
-    </thead>
- `;
+  // A) SEGMENTS mode → imported/self-bill breakdown ONLY
+  //    (NHSP / HR self-bill / adjustments)
+  // ─────────────────────────────────────────────────────
+  if (isSegments && segs.length && isNhspOrHrSelfBillBasis) {
+    const headHtml = `
+      <thead>
+        <tr>
+          <th>Date</th>
+          <th>Ref / Request</th>
+          <th>Source</th>
+          <th>Hours</th>
+          <th>Pay</th>
+          <th>Charge</th>
+          <th>Exclude from pay</th>
+          <th>Invoice week / Pause</th>
+        </tr>
+      </thead>
+    `;
 
     const bodyRows = segs.map((seg) => {
       const effOverride = state.segmentOverrides && state.segmentOverrides[seg.segment_id];
@@ -37341,51 +37504,50 @@ if (isSegments && segs.length && isNhspOrHrSelfBillBasis) {
   //     - MANUAL: editable (if not locked)
   //     - ELECTRONIC: read-only, but shown in the same grid
   // ─────────────────────────────────────────────────────
- if (sheetScope === 'WEEKLY') {
-  // ✅ NEW: Ensure state.schedule is seeded (so weekly grid always renders Start/End/Break fields)
-  try {
-    const tryParse = (src) => {
-      if (!src) return null;
-      if (Array.isArray(src) || typeof src === 'object') return JSON.parse(JSON.stringify(src));
-      if (typeof src === 'string') { try { const p = JSON.parse(src); if (Array.isArray(p) || typeof p === 'object') return p; } catch {} }
-      return null;
-    };
+  if (sheetScope === 'WEEKLY') {
+    // ✅ NEW: Ensure state.schedule is seeded (so weekly grid always renders Start/End/Break fields)
+    try {
+      const tryParse = (src) => {
+        if (!src) return null;
+        if (Array.isArray(src) || typeof src === 'object') return JSON.parse(JSON.stringify(src));
+        if (typeof src === 'string') { try { const p = JSON.parse(src); if (Array.isArray(p) || typeof p === 'object') return p; } catch {} }
+        return null;
+      };
 
-    // If schedule not already staged, seed from the timesheet record (actual_schedule_json)
-    if (!Array.isArray(state.schedule) || state.schedule.length === 0) {
-      const fromTs = tryParse(ts && ts.actual_schedule_json);
-      if (Array.isArray(fromTs) && fromTs.length) {
-        state.schedule = fromTs;
+      // If schedule not already staged, seed from the timesheet record (actual_schedule_json)
+      if (!Array.isArray(state.schedule) || state.schedule.length === 0) {
+        const fromTs = tryParse(ts && ts.actual_schedule_json);
+        if (Array.isArray(fromTs) && fromTs.length) {
+          state.schedule = fromTs;
+        }
       }
+
+      // If still empty and this is a planned week (no TS), seed from contract_week planned/std schedule
+      if ((!Array.isArray(state.schedule) || state.schedule.length === 0) && details && details.contract_week) {
+        const cw2 = details.contract_week;
+        const src = (cw2.planned_schedule_json != null) ? cw2.planned_schedule_json
+                 : (cw2.std_schedule_json != null)     ? cw2.std_schedule_json
+                 : null;
+        const fromCw = tryParse(src);
+        if (Array.isArray(fromCw) && fromCw.length) {
+          state.schedule = fromCw;
+        }
+      }
+    } catch {
+      // non-fatal
     }
 
-    // If still empty and this is a planned week (no TS), seed from contract_week planned/std schedule
-    if ((!Array.isArray(state.schedule) || state.schedule.length === 0) && details && details.contract_week) {
-      const cw2 = details.contract_week;
-      const src = (cw2.planned_schedule_json != null) ? cw2.planned_schedule_json
-               : (cw2.std_schedule_json != null)     ? cw2.std_schedule_json
-               : null;
-      const fromCw = tryParse(src);
-      if (Array.isArray(fromCw) && fromCw.length) {
-        state.schedule = fromCw;
-      }
-    }
-  } catch {
-    // non-fatal
-  }
+    const scheduleArr = Array.isArray(state.schedule) ? state.schedule.slice() : [];
+    const hasSchedule = scheduleArr.length > 0;
+    const hasTs       = !!tsId;
+    const isPlannedSchedule = !hasTs; // once TS exists, we never show “planned” again
 
-  const scheduleArr = Array.isArray(state.schedule) ? state.schedule.slice() : [];
-  const hasSchedule = scheduleArr.length > 0;
-  const hasTs       = !!tsId;
-  const isPlannedSchedule = !hasTs; // once TS exists, we never show “planned” again
+    const frameMode =
+      (typeof window.__getModalFrame === 'function' ? window.__getModalFrame()?.mode : null) ||
+      'view';
 
-  const frameMode =
-  (typeof window.__getModalFrame === 'function' ? window.__getModalFrame()?.mode : null) ||
-  'view';
-
-const isEditMode = (frameMode === 'edit' || frameMode === 'create');
-const canEditSchedule = isEditMode && !locked && subMode === 'MANUAL';
-
+    const isEditMode = (frameMode === 'edit' || frameMode === 'create');
+    const canEditSchedule = isEditMode && !locked && subMode === 'MANUAL';
 
     const badgeHtml = isPlannedSchedule
       ? (subMode === 'MANUAL'
@@ -37400,79 +37562,78 @@ const canEditSchedule = isEditMode && !locked && subMode === 'MANUAL';
     const uiRows = [];
     const dowShort = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
 
- // How many *extra* break lines per day (beyond the primary)?
-const maxExtraFromSchedule = (Array.isArray(scheduleArr) ? scheduleArr : []).reduce((m, seg) => {
-  const n = Array.isArray(seg?.breaks) ? Math.max(0, seg.breaks.length - 1) : 0;
-  return Math.max(m, n);
-}, 0);
+    // How many *extra* break lines per day (beyond the primary)?
+    const maxExtraFromSchedule = (Array.isArray(scheduleArr) ? scheduleArr : []).reduce((m, seg) => {
+      const n = Array.isArray(seg?.breaks) ? Math.max(0, seg.breaks.length - 1) : 0;
+      return Math.max(m, n);
+    }, 0);
 
-let extraBreakCount = 0;
-if (Number.isFinite(Number(state.extraBreakCount))) {
-  extraBreakCount = Math.max(0, Number(state.extraBreakCount));
-}
+    let extraBreakCount = 0;
+    if (Number.isFinite(Number(state.extraBreakCount))) {
+      extraBreakCount = Math.max(0, Number(state.extraBreakCount));
+    }
 
-// ensure we render any existing extra breaks even in view mode
-extraBreakCount = Math.max(extraBreakCount, maxExtraFromSchedule);
+    // ensure we render any existing extra breaks even in view mode
+    extraBreakCount = Math.max(extraBreakCount, maxExtraFromSchedule);
 
-state.extraBreakCount = extraBreakCount;
-
+    state.extraBreakCount = extraBreakCount;
 
     const pushRowFromSeg = (seg) => {
       if (!seg || !seg.date) return;
       const d = new Date(`${seg.date}T00:00:00Z`);
       const dow = Number.isNaN(d.getTime()) ? '' : dowShort[d.getUTCDay()];
 
-      const start       = seg.start        || '';
-      const end         = seg.end          || '';
-   // Prefer explicit fields, but also support schedule.breaks[0]
-const breaksArr = Array.isArray(seg.breaks) ? seg.breaks.filter(b => b && (b.start || b.end)) : [];
-const primary   = breaksArr[0] || null;
-// Any extra break windows persisted in schedule.breaks (beyond the primary)
-const extra_breaks = breaksArr.length > 1 ? breaksArr.slice(1) : [];
+      const start = seg.start || '';
+      const end   = seg.end   || '';
 
-const breakStart = seg.break_start || primary?.start || '';
-const breakEnd   = seg.break_end   || primary?.end   || '';
+      // Prefer explicit fields, but also support schedule.breaks[0]
+      const breaksArr = Array.isArray(seg.breaks) ? seg.breaks.filter(b => b && (b.start || b.end)) : [];
+      const primary   = breaksArr[0] || null;
+      // Any extra break windows persisted in schedule.breaks (beyond the primary)
+      const extra_breaks = breaksArr.length > 1 ? breaksArr.slice(1) : [];
 
-// Compute break minutes from (break_mins || break_minutes || sum(breaks) || (break_start/end))
-const parseHHMM = (hhmm) => {
-  const m = String(hhmm || '').trim().match(/^(\d{1,2}):(\d{2})$/);
-  if (!m) return null;
-  const h = Number(m[1]), mm = Number(m[2]);
-  if (!Number.isFinite(h) || !Number.isFinite(mm)) return null;
-  return h * 60 + mm;
-};
+      const breakStart = seg.break_start || primary?.start || '';
+      const breakEnd   = seg.break_end   || primary?.end   || '';
 
-const diffMins = (a, b) => {
-  const am = parseHHMM(a), bm = parseHHMM(b);
-  if (am == null || bm == null) return null;
-  let d = bm - am;
-  if (d < 0) d += 24 * 60;
-  return d;
-};
+      // Compute break minutes from (break_mins || break_minutes || sum(breaks) || (break_start/end))
+      const parseHHMM = (hhmm) => {
+        const m = String(hhmm || '').trim().match(/^(\d{1,2}):(\d{2})$/);
+        if (!m) return null;
+        const h = Number(m[1]), mm = Number(m[2]);
+        if (!Number.isFinite(h) || !Number.isFinite(mm)) return null;
+        return h * 60 + mm;
+      };
 
-let breakMinsNum =
-  (seg.break_mins != null)    ? Number(seg.break_mins) :
-  (seg.break_minutes != null) ? Number(seg.break_minutes) :
-  NaN;
+      const diffMins = (a, b) => {
+        const am = parseHHMM(a), bm = parseHHMM(b);
+        if (am == null || bm == null) return null;
+        let d = bm - am;
+        if (d < 0) d += 24 * 60;
+        return d;
+      };
 
-if (!Number.isFinite(breakMinsNum)) {
-  // sum explicit break windows if present
-  let sum = 0;
-  for (const b of breaksArr) {
-    const d = diffMins(b.start, b.end);
-    if (Number.isFinite(d) && d > 0) sum += d;
-  }
-  if (sum > 0) breakMinsNum = sum;
-}
+      let breakMinsNum =
+        (seg.break_mins != null)    ? Number(seg.break_mins) :
+        (seg.break_minutes != null) ? Number(seg.break_minutes) :
+        NaN;
 
-if (!Number.isFinite(breakMinsNum)) {
-  const d = diffMins(breakStart, breakEnd);
-  breakMinsNum = Number.isFinite(d) && d > 0 ? d : 0;
-}
+      if (!Number.isFinite(breakMinsNum)) {
+        // sum explicit break windows if present
+        let sum = 0;
+        for (const b of breaksArr) {
+          const d = diffMins(b.start, b.end);
+          if (Number.isFinite(d) && d > 0) sum += d;
+        }
+        if (sum > 0) breakMinsNum = sum;
+      }
 
-const breakMins = String(Math.max(0, Math.round(breakMinsNum)));
+      if (!Number.isFinite(breakMinsNum)) {
+        const d = diffMins(breakStart, breakEnd);
+        breakMinsNum = Number.isFinite(d) && d > 0 ? d : 0;
+      }
 
-   
+      const breakMins = String(Math.max(0, Math.round(breakMinsNum)));
+
       // Simple paid-hours preview: shift minus total break (minutes)
       const toMins = (hhmm) => {
         if (!hhmm || typeof hhmm !== 'string') return null;
@@ -37495,8 +37656,8 @@ const breakMins = String(Math.max(0, Math.round(breakMinsNum)));
           // Overnight shift: assume wraps to next day
           shiftMinutes += 24 * 60;
         }
-  const b = Number.isFinite(breakMinsNum) ? breakMinsNum : Number(breakMins || 0);
-const paidMin = Math.max(0, shiftMinutes - (Number.isFinite(b) ? b : 0));
+        const b = Number.isFinite(breakMinsNum) ? breakMinsNum : Number(breakMins || 0);
+        const paidMin = Math.max(0, shiftMinutes - (Number.isFinite(b) ? b : 0));
 
         paid = paidMin > 0 ? (Math.round((paidMin / 60) * 100) / 100).toFixed(2) : '0.00';
       }
@@ -37725,7 +37886,7 @@ const paidMin = Math.max(0, shiftMinutes - (Number.isFinite(b) ? b : 0));
 
     const scheduleHelpText = canEditSchedule
       ? 'Enter Start/End and either a specific Break window or a Break length in minutes. Paid hours are calculated as shift length minus break. Changes are staged only and applied when you click Save.'
-      : 'Electronic schedule is shown read-only. To override the hours, convert this timesheet to manual first.';
+      : 'Electronic schedule is shown read-only.';
 
     return `
       <div class="tabc">
@@ -37877,7 +38038,7 @@ const paidMin = Math.max(0, shiftMinutes - (Number.isFinite(b) ? b : 0));
     const badgeHtml = `
       <span class="pill pill-elec">Electronic daily shift</span>
       <span class="mini" style="margin-left:8px;">
-        Start/End and break times are shown read-only. To override the hours, convert this timesheet to manual.
+        Start/End and break times are shown read-only.
       </span>
     `;
 
@@ -38005,18 +38166,485 @@ function classifyTimesheetPill(kind, value) {
   }
 }
 
+function computeRequiresTimesheetAuthorisation(details, row) {
+  const ts = (details && details.timesheet) ? details.timesheet : {};
+  const tsfin = (details && details.tsfin) ? details.tsfin : {};
+
+  const authorisedAt =
+    (ts && ts.authorised_at_server) ||
+    (row && row.authorised_at_server) ||
+    null;
+
+  const authorised = !!authorisedAt;
+
+  const procStatusRaw =
+    (tsfin && tsfin.processing_status) ||
+    (details && details.processing_status) ||
+    (row && row.processing_status) ||
+    '';
+
+  const procStatus = String(procStatusRaw || '').toUpperCase();
+
+  const policy =
+    (details && details.policy) ||
+    (details && details.tsfin_policy) ||
+    {};
+
+  const requiresHr = !!(policy && policy.requires_hr);
+  const autoprocessHr = !!(policy && policy.autoprocess_hr);
+
+  const requires =
+    (procStatus === 'PENDING_AUTH') ||
+    (requiresHr && !autoprocessHr && procStatus === 'READY_FOR_HR');
+
+  const showAwaitingBadge = requires && !authorised;
+
+  return { requires, authorised, showAwaitingBadge };
+}
+
+function computeTimesheetProcessingState(details, row) {
+  const ts = (details && details.timesheet) ? details.timesheet : {};
+  const tsfin = (details && details.tsfin) ? details.tsfin : {};
+
+  const authInfo = (typeof computeRequiresTimesheetAuthorisation === 'function')
+    ? computeRequiresTimesheetAuthorisation(details, row)
+    : { requires: false, authorised: false, showAwaitingBadge: false };
+
+  const requiresAuth = !!authInfo.requires;
+  const authorised = !!authInfo.authorised;
+
+  const invoiced =
+    !!((tsfin && tsfin.locked_by_invoice_id) || (row && row.locked_by_invoice_id));
+
+  const paid =
+    !!((tsfin && tsfin.paid_at_utc) || (row && row.paid_at_utc));
+
+  // Determine if this is a planned/unprocessed week (no real timesheet exists)
+  // We treat “real timesheet exists” as: timesheet_id present either on details.timesheet or row.
+  const hasRealTs =
+    !!((ts && ts.timesheet_id) || (row && row.timesheet_id));
+
+  // Priority order (must be mutually exclusive)
+  if (requiresAuth && !authorised) {
+    return { key: 'AWAITING_AUTHORISATION', label: 'Awaiting Authorisation' };
+  }
+
+  if (authorised && invoiced && paid) {
+    return { key: 'AUTH_INVOICED_PAID', label: 'Authorised, Invoiced & Paid' };
+  }
+
+  if (authorised && invoiced && !paid) {
+    return { key: 'AUTH_INVOICED_NOT_PAID', label: 'Authorised, Invoiced but not yet Paid' };
+  }
+
+  if (authorised && paid && !invoiced) {
+    return { key: 'AUTH_PAID_NOT_INVOICED', label: 'Authorised, Paid but not yet Invoiced' };
+  }
+
+  if (authorised && !invoiced && !paid) {
+    return { key: 'AUTH_NOT_INVOICED_NOT_PAID', label: 'Authorised, not invoiced, not paid' };
+  }
+
+  if (invoiced && !authorised) {
+    return { key: 'INVOICED', label: 'Invoiced' };
+  }
+
+  if (paid && !authorised) {
+    return { key: 'PAID', label: 'Paid' };
+  }
+
+  if (hasRealTs) {
+    return { key: 'PROCESSED', label: 'Processed' };
+  }
+
+  return { key: 'UNPROCESSED', label: 'Unprocessed' };
+}
+
+async function openTimesheetEvidenceViewerExisting(evidenceItem) {
+  const { LOGM, L, GC, GE } = getTsLoggers('[TS][EVIDENCE][VIEWER]');
+  GC('openTimesheetEvidenceViewerExisting');
+
+  if (!evidenceItem || typeof evidenceItem !== 'object') {
+    GE();
+    throw new Error('Evidence item is required.');
+  }
+
+  const mc = window.modalCtx || {};
+  const tsId =
+    mc.data?.timesheet_id ||
+    mc.data?.id ||
+    (mc.timesheetDetails && mc.timesheetDetails.timesheet && mc.timesheetDetails.timesheet.timesheet_id) ||
+    null;
+
+  if (!tsId) {
+    GE();
+    throw new Error('Timesheet context missing; cannot view evidence.');
+  }
+
+  const evidenceId = evidenceItem.id != null ? String(evidenceItem.id) : '';
+  const storageKey = evidenceItem.storage_key ? String(evidenceItem.storage_key).trim() : '';
+  if (!storageKey) {
+    GE();
+    throw new Error('Evidence item missing storage_key.');
+  }
+
+  const isSystem = (typeof evidenceItem.system === 'boolean') ? evidenceItem.system : String(evidenceId).startsWith('SYS:');
+  const canDelete = (typeof evidenceItem.can_delete === 'boolean')
+    ? evidenceItem.can_delete
+    : !isSystem;
+
+  // Allow type editing only for real user evidence (uuid ids + not system)
+  const uuidRe =
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  const canEditType = (!isSystem) && uuidRe.test(String(evidenceId));
+
+  const kind = (evidenceItem.kind != null) ? String(evidenceItem.kind) : 'Evidence';
+  const dtRaw = evidenceItem.uploaded_at_utc || evidenceItem.uploaded_at || evidenceItem.created_at || null;
+
+  const fmtUkDateTime = (iso) => {
+    if (!iso) return '—';
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return String(iso);
+    try {
+      return d.toLocaleString('en-GB', {
+        timeZone: 'Europe/London',
+        weekday: 'short',
+        day: '2-digit',
+        month: 'short',
+        year: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: false
+      });
+    } catch {
+      return d.toISOString();
+    }
+  };
+
+  L('ENTRY', { tsId, evidenceId, storageKey, kind, canDelete, canEditType, dt: dtRaw });
+
+  const presignDownload = async (key) => {
+    const res = await authFetch(API('/api/files/presign-download'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key })
+    });
+    const text = await res.text().catch(() => '');
+    if (!res.ok) throw new Error(text || 'Failed to presign download URL');
+    const json = text ? JSON.parse(text) : {};
+    const url = json.url || json.signed_url || null;
+    if (!url) throw new Error('No URL returned from presign-download');
+    return url;
+  };
+
+  const signedUrl = await presignDownload(storageKey);
+
+  const instanceId = `ts-ev-view-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const iframeId   = `${instanceId}-iframe`;
+  const deleteBtnId= `${instanceId}-delete`;
+  const selId      = `${instanceId}-type`;
+  const otherId    = `${instanceId}-other`;
+
+  const title = `Evidence ${String(tsId).slice(0, 8)}…`;
+
+  const OPTIONS = ['Timesheet','Mileage','Accommodation','Expenses'];
+  const kindTrim = String(kind || '').trim();
+  const kindLower = kindTrim.toLowerCase();
+
+  const matchOpt = OPTIONS.find(o => o.toLowerCase() === kindLower) || null;
+  const initialSelect = matchOpt ? matchOpt : 'Other';
+  const initialOther  = matchOpt ? '' : kindTrim;
+
+  const typeControlHtml = canEditType ? `
+    <div class="row">
+      <label>Evidence Type</label>
+      <div class="controls" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+        <select
+          id="${selId}"
+          class="input"
+          style="min-width:220px;background:transparent;border:1px solid rgba(255,255,255,.18);"
+        >
+          <option value="Timesheet" ${initialSelect === 'Timesheet' ? 'selected' : ''}>Timesheet</option>
+          <option value="Mileage" ${initialSelect === 'Mileage' ? 'selected' : ''}>Mileage</option>
+          <option value="Accommodation" ${initialSelect === 'Accommodation' ? 'selected' : ''}>Accommodation</option>
+          <option value="Expenses" ${initialSelect === 'Expenses' ? 'selected' : ''}>Expenses</option>
+          <option value="Other" ${initialSelect === 'Other' ? 'selected' : ''}>Other</option>
+        </select>
+
+        <input
+          id="${otherId}"
+          type="text"
+          class="input"
+          placeholder="Enter evidence type"
+          style="min-width:260px;background:transparent;border:1px solid rgba(255,255,255,.18);${initialSelect === 'Other' ? '' : 'display:none;'}"
+          value="${escapeHtml(initialOther)}"
+        />
+        <span class="mini" style="opacity:.85;">Change type then click Save.</span>
+      </div>
+    </div>
+  ` : `
+    <div class="row">
+      <label>Evidence Type</label>
+      <div class="controls">
+        <span class="mini">${escapeHtml(kindTrim || 'Evidence')}</span>
+        <div class="mini" style="margin-top:4px;opacity:.85;">
+          ${isSystem ? 'System evidence (NHSP/HealthRoster) cannot be re-typed.' : 'This evidence item cannot be edited.'}
+        </div>
+      </div>
+    </div>
+  `;
+
+  const bodyHtml = `
+    <div class="tabc">
+      <div class="card">
+        ${typeControlHtml}
+        <div class="row">
+          <label>Date Uploaded</label>
+          <div class="controls">
+            <span class="mini">${escapeHtml(fmtUkDateTime(dtRaw))}</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="card" style="margin-top:10px;">
+        <div class="row">
+          <label>Preview</label>
+          <div class="controls">
+            <iframe
+              id="${iframeId}"
+              src="${signedUrl}"
+              style="width:100%;height:520px;border:1px solid var(--line);border-radius:8px;background:#000;"
+            ></iframe>
+
+            ${canDelete ? `
+              <div style="margin-top:10px;display:flex;gap:8px;align-items:center;">
+                <button type="button"
+                        id="${deleteBtnId}"
+                        class="pill pill-warn"
+                        style="cursor:pointer;border:1px solid var(--line);background:transparent;color:inherit;padding:6px 10px;border-radius:999px;">
+                  Delete evidence
+                </button>
+                <span class="mini" style="opacity:.85;">This will permanently remove this evidence item.</span>
+              </div>
+            ` : `
+              <div class="mini" style="margin-top:10px;opacity:.85;">
+                This evidence item cannot be deleted.
+              </div>
+            `}
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+
+  const tabs = [{ key: 'view', title: 'Evidence' }];
+
+  const onSave = async () => {
+    const { LOGM, L, GC, GE } = getTsLoggers('[TS][EVIDENCE][VIEWER][SAVE]');
+    GC('onSave (evidence viewer)');
+
+    // If not editable, treat as no-op save
+    if (!canEditType) {
+      GE();
+      return { ok: true };
+    }
+
+    try {
+      const sel = document.getElementById(selId);
+      const other = document.getElementById(otherId);
+
+      const selVal = sel ? String(sel.value || '').trim() : '';
+      let newKind = selVal;
+
+      if (selVal.toLowerCase() === 'other') {
+        const txt = other ? String(other.value || '').trim() : '';
+        if (!txt) {
+          alert('Please enter an evidence type.');
+          GE();
+          return { ok: false };
+        }
+        newKind = txt;
+      }
+
+      if (!newKind) {
+        alert('Please select an evidence type.');
+        GE();
+        return { ok: false };
+      }
+
+      // No change
+      if (String(newKind) === String(kindTrim)) {
+        GE();
+        return { ok: true };
+      }
+
+      // PATCH evidence kind
+      const enc = encodeURIComponent;
+      const res = await authFetch(API(`/api/timesheets/${enc(tsId)}/evidence/${enc(evidenceId)}`), {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ kind: newKind })
+      });
+
+      const text = await res.text().catch(() => '');
+      if (!res.ok) {
+        throw new Error(text || 'Failed to update evidence type.');
+      }
+
+      // Refresh evidence list in parent modal state
+      try {
+        if (typeof refreshTimesheetEvidenceIntoModalState === 'function') {
+          await refreshTimesheetEvidenceIntoModalState(tsId);
+        } else {
+          const res2 = await authFetch(API(`/api/timesheets/${enc(tsId)}/evidence`));
+          const json2 = await res2.json().catch(() => []);
+          const list2 = Array.isArray(json2) ? json2 : [];
+
+          // best-effort normalise flags for FE
+          const normalised = list2.map(ev2 => {
+            const out = { ...(ev2 || {}) };
+            if (typeof out.system !== 'boolean') out.system = false;
+            if (typeof out.can_delete !== 'boolean') out.can_delete = !out.system;
+            if (!out.uploaded_at_utc && out.created_at) out.uploaded_at_utc = out.created_at;
+            return out;
+          });
+
+          window.modalCtx = window.modalCtx || {};
+          window.modalCtx.timesheetState = window.modalCtx.timesheetState || {};
+          window.modalCtx.timesheetState.evidence = normalised;
+        }
+      } catch {}
+
+      // Repaint parent Evidence tab
+      try {
+        if (typeof window.__getModalFrame === 'function') {
+          const fr = window.__getModalFrame();
+          if (fr && fr.entity === 'timesheets') {
+            fr._suppressDirty = true;
+            await fr.setTab('evidence');
+            fr._suppressDirty = false;
+            fr._updateButtons && fr._updateButtons();
+          }
+        }
+      } catch {}
+
+      if (window.__toast) window.__toast('Evidence type updated');
+
+      GE();
+      return { ok: true };
+    } catch (err) {
+      L('update kind failed', err);
+      alert(err?.message || 'Failed to update evidence type.');
+      GE();
+      return { ok: false };
+    }
+  };
+
+  showModal(
+    title,
+    tabs,
+    () => bodyHtml,
+    onSave,
+    false,
+    undefined,
+    {
+      kind: 'timesheet-evidence-viewer',
+      noParentGate: true,
+      forceEdit: true,
+      onDismiss: () => {}
+    }
+  );
+
+  // Wire: show/hide Other + ensure dirty triggers correctly
+  try {
+    if (canEditType) {
+      const sel = document.getElementById(selId);
+      const other = document.getElementById(otherId);
+
+      if (sel && !sel.__tsEvViewerTypeWired) {
+        sel.__tsEvViewerTypeWired = true;
+
+        const sync = () => {
+          const v = String(sel.value || '').trim().toLowerCase();
+          const isOther = (v === 'other');
+          if (other) {
+            other.style.display = isOther ? '' : 'none';
+            if (!isOther) other.value = '';
+          }
+        };
+
+        sel.addEventListener('change', sync);
+        sync();
+      }
+    }
+
+    if (canDelete) {
+      const delBtn = document.getElementById(deleteBtnId);
+      if (delBtn && !delBtn.__tsEvDelWired) {
+        delBtn.__tsEvDelWired = true;
+
+        delBtn.addEventListener('click', async () => {
+          const ok = window.confirm('Delete this evidence item?');
+          if (!ok) return;
+
+          try {
+            const enc = encodeURIComponent;
+            const res = await authFetch(API(`/api/timesheets/${enc(tsId)}/evidence/${enc(evidenceId)}`), {
+              method: 'DELETE'
+            });
+            const text = await res.text().catch(() => '');
+            if (!res.ok) throw new Error(text || 'Failed to delete evidence item');
+
+            // Refresh + repaint parent evidence tab
+            try {
+              if (typeof refreshTimesheetEvidenceIntoModalState === 'function') {
+                await refreshTimesheetEvidenceIntoModalState(tsId);
+              }
+            } catch {}
+
+            try {
+              if (typeof window.__getModalFrame === 'function') {
+                const fr = window.__getModalFrame();
+                if (fr && fr.entity === 'timesheets') {
+                  fr._suppressDirty = true;
+                  await fr.setTab('evidence');
+                  fr._suppressDirty = false;
+                  fr._updateButtons && fr._updateButtons();
+                }
+              }
+            } catch {}
+
+            if (window.__toast) window.__toast('Evidence removed');
+
+            // Close viewer
+            try { document.getElementById('btnCloseModal')?.click(); } catch {}
+          } catch (err) {
+            L('delete from viewer failed', err);
+            alert(err?.message || 'Failed to delete evidence item.');
+          }
+        });
+      }
+    }
+  } catch (e) {
+    L('viewer wiring failed (non-fatal)', e);
+  }
+
+  GE();
+}
+
+
 function renderTimesheetOverviewTab(ctx) {
   const { LOGM, L, GC, GE } = getTsLoggers('[TS][OVERVIEW]');
   const { row, details, related, state } = normaliseTimesheetCtx(ctx);
 
   GC('render');
+
   const ts    = details.timesheet || {};
   const tsfin = details.tsfin     || {};
   const cw    = details.contract_week || {};
   const rCand = related.candidate || {};
   const rCli  = related.client    || {};
   const rCtr  = related.contract  || {};
-  const rInv  = related.invoice   || null;
 
   const actionFlags = (details.action_flags && typeof details.action_flags === 'object')
     ? details.action_flags
@@ -38024,7 +38652,6 @@ function renderTimesheetOverviewTab(ctx) {
 
   const sheetScope = (details.sheet_scope || row.sheet_scope || ts.sheet_scope || '').toUpperCase();
   const subMode    = (ts.submission_mode || row.submission_mode || '').toUpperCase();
-  const basis      = (tsfin.basis || row.basis || '').toUpperCase();
 
   const tsId = ts.timesheet_id || row.timesheet_id || null;
   const enc = escapeHtml;
@@ -38068,27 +38695,6 @@ function renderTimesheetOverviewTab(ctx) {
     return d.toLocaleDateString('en-GB', { weekday: 'short', timeZone: 'Europe/London' });
   };
 
-  const fmtUkDateTime = (iso) => {
-    if (!iso) return '';
-    const d = new Date(iso);
-    if (Number.isNaN(d.getTime())) return enc(iso);
-    const s = d.toLocaleString('en-GB', {
-      timeZone: 'Europe/London',
-      weekday: 'short',
-      day: '2-digit',
-      month: 'short',
-      year: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit',
-      hour12: false
-    });
-    const parts = s.replace(',', '').split(' ');
-    if (parts.length < 4) return enc(s);
-    const [dow, day, mon, year, time] = parts;
-    const hhmm = (time || '').replace(':', '');
-    return `${enc(dow)} ${enc(day)} ${enc(mon)} ${enc(year)} at ${enc(hhmm)}hrs`;
-  };
-
   const hasTsfin = !!(
     tsfin &&
     (tsfin.timesheet_id || tsfin.total_hours != null || tsfin.total_pay_ex_vat != null || tsfin.processing_status)
@@ -38097,50 +38703,82 @@ function renderTimesheetOverviewTab(ctx) {
   const hasContractWeek = !!(details.contract_week_id || cw.id || row.contract_week_id);
   const isPlannedOnly   = !hasTsfin && hasContractWeek && !tsId;
 
-  const stageRaw   = (tsfin.processing_status || '').toUpperCase() || null;
-  const procStatus = stageRaw || (row.processing_status || '').toUpperCase() || null;
+  const stageRaw = String(tsfin.processing_status || row.processing_status || '').toUpperCase() || null;
 
-  const isPaid     = !!tsfin.paid_at_utc;
-  const isInvoiced = !!tsfin.locked_by_invoice_id;
+  const isPaid     = !!(tsfin.paid_at_utc || row.paid_at_utc);
+  const isInvoiced = !!(tsfin.locked_by_invoice_id || row.locked_by_invoice_id);
   const locked     = isPaid || isInvoiced;
 
-  const payOnHold  = !!tsfin.pay_on_hold;
-  const authorised = !!ts.authorised_at_server;
+  const payOnHold  = !!(tsfin.pay_on_hold ?? row.pay_on_hold);
 
-  const qrStatus   = (details.qr_status || ts.qr_status || '').toUpperCase();
-  const qrScenario = (actionFlags.qr_scenario || '').toUpperCase() || null;
-
-  const amountPayEx  = Number(tsfin.total_pay_ex_vat || 0) || 0;
-  const amountChgEx  = Number(tsfin.total_charge_ex_vat || 0) || 0;
-  const amountMargin = amountChgEx - amountPayEx;
-
-  const fmtMoney = (v) => isNaN(Number(v)) ? '—' : `£${(Math.round(Number(v) * 100) / 100).toFixed(2)}`;
-
-  const cwId         = details.contract_week_id || cw.id || row.contract_week_id || null;
   const policy       = details.policy || {};
   const requiresHr   = !!policy.requires_hr;
   const autoprocessHr= !!policy.autoprocess_hr;
-  const noTimesheetReq = !!policy.no_timesheet_required;
 
-  const validations = Array.isArray(details.validations) ? details.validations : [];
-  const latestValidation = validations.length ? validations[0] : null;
-  const validationStatus = latestValidation ? String(latestValidation.status || '').toUpperCase() : null;
-  const validationIsOk = validationStatus === 'VALIDATION_OK' || validationStatus === 'OVERRIDDEN';
+  // ─────────────────────────────────────────────────────────────
+  // Authorisation badge rule (only show when authorisation is required)
+  // Prefer shared helper if present; otherwise compute inline.
+  // ─────────────────────────────────────────────────────────────
+  let authInfo = { requires: false, authorised: false, showAwaitingBadge: false };
+  if (typeof computeRequiresTimesheetAuthorisation === 'function') {
+    try {
+      const x = computeRequiresTimesheetAuthorisation(details, row);
+      if (x && typeof x === 'object') authInfo = { ...authInfo, ...x };
+    } catch {}
+  } else {
+    const authorisedAt = ts.authorised_at_server || row.authorised_at_server || null;
+    const authorised   = !!authorisedAt;
+    const requiresAuth =
+      (stageRaw === 'PENDING_AUTH') ||
+      (requiresHr && !autoprocessHr && stageRaw === 'READY_FOR_HR');
+    authInfo = { requires: requiresAuth, authorised, showAwaitingBadge: (requiresAuth && !authorised) };
+  }
 
-  const r2NurseKey   = ts.r2_nurse_key || null;
-  const r2AuthKey    = ts.r2_auth_key || null;
-  const manualPdfKey = ts.manual_pdf_r2_key || details.manual_pdf_r2_key || null;
+  const stageLabel = (() => {
+    if (!hasTsfin) return 'Unprocessed';
+    if (isPaid) return 'Paid';
+    if (isInvoiced) return 'Invoiced';
+    if (stageRaw === 'READY_FOR_INVOICE') return 'Ready for Invoice';
+    if (stageRaw === 'PENDING_AUTH') return 'Awaiting Authorisation';
+    if (stageRaw === 'READY_FOR_HR') return 'Ready for HR';
+    if (stageRaw === 'RATE_MISSING') return 'Rate Missing';
+    if (stageRaw === 'PAY_CHANNEL_MISSING') return 'Pay Channel Missing';
+    if (stageRaw) return stageRaw;
+    return 'Unknown';
+  })();
 
-  L('snapshot', {
-    tsId, sheetScope, subMode, basis,
-    stageRaw, procStatus, authorised,
-    isPaid, isInvoiced, payOnHold, qrStatus,
-    qrScenario,
-    weYmd, hasTsfin, hasContractWeek, isPlannedOnly,
-    cwId, requiresHr, autoprocessHr, noTimesheetReq,
-    actionFlags
-  });
-  GE();
+  const stageClass = (() => {
+    if (!hasTsfin) return 'pill-bad';
+    if (isPaid) return 'pill-ok';
+    if (isInvoiced) return 'pill-warn';
+    if (stageRaw === 'RATE_MISSING' || stageRaw === 'PAY_CHANNEL_MISSING') return 'pill-bad';
+    if (stageRaw === 'READY_FOR_INVOICE') return 'pill-ok';
+    if (stageRaw === 'PENDING_AUTH') return 'pill-warn';
+    return 'pill-info';
+  })();
+
+  const qrStatus   = String(details.qr_status || ts.qr_status || '').toUpperCase();
+  const qrScenario = String(actionFlags.qr_scenario || '').toUpperCase() || null;
+
+  const r2NurseKey = ts.r2_nurse_key || null;
+  const r2AuthKey  = ts.r2_auth_key || null;
+
+  const routeLabel = (() => {
+    const isQrRoute = (subMode !== 'MANUAL') || !!qrStatus;
+
+    if (!isQrRoute) return 'Manual';
+
+    const scenario = qrScenario;
+
+    // If we have a used QR or scenario3, decide between "awaiting signed" vs "completed" using evidence keys we already have.
+    if (qrStatus === 'USED' || scenario === 'SCENARIO_3') {
+      if (r2NurseKey && r2AuthKey) return 'QR Completed';
+      return 'QR Hours Submitted - awaiting signed timesheet';
+    }
+
+    // For pending/expired/cancelled/unknown, keep it simple per brief:
+    return 'QR - Nothing submitted yet';
+  })();
 
   const headerHtml = `
     <div class="card">
@@ -38168,143 +38806,29 @@ function renderTimesheetOverviewTab(ctx) {
     </div>
   `;
 
-  const stageLabel = (() => {
-    if (!hasTsfin) return (isPlannedOnly ? 'UNPROCESSED (planned week)' : 'UNPROCESSED');
-    if (isPaid) return 'Paid';
-    if (isInvoiced) return 'Invoiced';
-    if (stageRaw === 'READY_FOR_INVOICE') return 'Ready for invoice';
-    if (stageRaw === 'PENDING_AUTH') return 'Pending authorisation';
-    if (stageRaw === 'RATE_MISSING') return 'Rate missing';
-    if (stageRaw === 'PAY_CHANNEL_MISSING') return 'Pay channel missing';
-    return stageRaw || 'Unknown';
-  })();
-
-  const stageClass = (() => {
-    if (!hasTsfin) return 'pill-bad';
-    if (isPaid) return 'pill-ok';
-    if (isInvoiced) return 'pill-warn';
-    if (stageRaw === 'RATE_MISSING' || stageRaw === 'PAY_CHANNEL_MISSING') return 'pill-bad';
-    if (stageRaw === 'READY_FOR_INVOICE') return 'pill-ok';
-    return 'pill-info';
-  })();
-
-  const procStatusPillHtml = (() => {
-    if (!procStatus) return '';
-    let cls = 'pill-info';
-    if (procStatus === 'UNASSIGNED' || procStatus === 'CLIENT_UNRESOLVED' || procStatus === 'RATE_MISSING' || procStatus === 'PAY_CHANNEL_MISSING') cls = 'pill-bad';
-    else if (procStatus === 'READY_FOR_HR') cls = 'pill-warn';
-    else if (procStatus === 'READY_FOR_INVOICE') cls = 'pill-ok';
-    return `<span class="pill ${cls}" style="margin-left:4px;">Status: ${enc(procStatus)}</span>`;
-  })();
-
-  const hrHintsHtml = (() => {
-    if (!requiresHr) return '';
-    const lines = [];
-    if (!validationIsOk) lines.push('HR validation required');
-    lines.push(autoprocessHr
-      ? 'HR auto-process: no team authorisation required after HR checks.'
-      : 'Manual team authorisation required after HR checks.'
-    );
-    return `
-      <div class="mini" style="margin-top:4px;">
-        ${lines.map(enc).join('<br/>')}
-      </div>
-    `;
-  })();
-
-  const scopePill = sheetScope === 'DAILY'
-    ? '<span class="pill pill-daily">Daily</span>'
-    : '<span class="pill pill-weekly">Weekly</span>';
-
-  const modePill = (() => {
-    if (basis === 'NHSP' || basis === 'NHSP_ADJUSTMENT') return '<span class="pill pill-nhsp">NHSP</span>';
-    if (basis.startsWith('HEALTHROSTER')) return '<span class="pill pill-hr">HealthRoster</span>';
-    if (subMode === 'ELECTRONIC') return '<span class="pill pill-elec">Electronic</span>';
-    if (subMode === 'MANUAL' && qrStatus) return `<span class="pill pill-manual">Manual (QR: ${enc(qrStatus)})</span>`;
-    if (subMode === 'MANUAL') return '<span class="pill pill-manual">Manual</span>';
-    return '<span class="pill">Unknown mode</span>';
-  })();
-
-  const paidLabel = isPaid ? fmtUkDateTime(tsfin.paid_at_utc) : 'Not paid';
-  const invLabel  = isInvoiced
-    ? (rInv && rInv.invoice_number ? `On invoice ${enc(rInv.invoice_number)}` : 'Invoiced')
-    : 'Not invoiced';
-
-  const flagsHtml = `
-    <div class="mini" style="margin-top:4px;">
-      <span class="pill ${isPaid ? 'pill-ok' : 'pill-warn'}">Paid: ${isPaid ? 'Yes' : 'No'}</span>
-      <span class="pill ${isInvoiced ? 'pill-warn' : 'pill-info'}" style="margin-left:4px;">Invoiced: ${isInvoiced ? 'Yes' : 'No'}</span>
-      ${payOnHold ? '<span class="pill pill-hold" style="margin-left:4px;">Pay on hold</span>' : ''}
-    </div>
-    <div class="mini" style="margin-top:4px;">
-      ${isPaid ? `Paid at ${paidLabel}` : ''}
-      ${isInvoiced ? `<br/>${invLabel}` : ''}
-    </div>
-  `;
-
-  const totalsHtml = hasTsfin
-    ? `
-      <div class="mini">
-        Candidate pay (ex VAT): <strong>${fmtMoney(amountPayEx)}</strong><br/>
-        Client charge (ex VAT): <strong>${fmtMoney(amountChgEx)}</strong><br/>
-        Margin (ex VAT): <strong>${fmtMoney(amountMargin)}</strong>
-      </div>
-    `
-    : `
-      <div class="mini">
-        <strong>No financial snapshot yet.</strong><br/>
-        This timesheet has not been processed. Once processed, pay and charge totals will appear here.
-      </div>
-    `;
-
-  const refValue = (state && typeof state.reference === 'string')
-    ? state.reference
-    : (ts.reference_number || row.reference_number || '');
-
-  const missingTsEvidence =
-    requiresHr &&
-    !noTimesheetReq &&
-    !isPaid &&
-    !isInvoiced &&
-    !(subMode === 'ELECTRONIC' && r2NurseKey && r2AuthKey) &&
-    !manualPdfKey;
-
-  const timesheetRequiredPillHtml = missingTsEvidence
-    ? '<span class="pill pill-bad" style="margin-left:4px;">Timesheet required</span>'
-    : '';
-
-  const hasQr = !!qrStatus;
-  const qrAmendWarningHtml = (hasQr && !locked)
-    ? `
-      <div class="mini" style="margin-top:8px;color:var(--warn);max-width:520px;">
-        Warning: this timesheet already has a QR version. If you amend the hours and save,
-        you will be asked what to do (reissue QR or convert to manual-only).
-      </div>
-    `
-    : '';
-
-  const isManualOnly = !!actionFlags.is_manual_only;
-
-  const canRestorePending = !!actionFlags.can_restore_qr_pending;
-  const canRestoreSigned  = !!actionFlags.can_restore_qr_signed;
-  const canRevertToElec   = !!actionFlags.can_revert_to_electronic;
-
-  const canAllowQrAgain   = !!actionFlags.can_allow_qr_again;
-  const canAllowElecAgain = !!actionFlags.can_allow_electronic_again;
-
-  const isScenario1 = (qrScenario === 'SCENARIO_1');
-  const isScenario2 = (qrScenario === 'SCENARIO_2');
-  const isScenario3 = (qrScenario === 'SCENARIO_3');
-  const isExpired   = (qrScenario === 'EXPIRED');
-  const isCancelled = (qrScenario === 'CANCELLED');
+  const badgeBtnStyle = 'cursor:pointer;border:1px solid var(--line);background:transparent;color:inherit;padding:6px 10px;border-radius:999px;';
 
   const actionsHtml = (() => {
     const btns = [];
 
+    const isScenario1 = (qrScenario === 'SCENARIO_1');
+    const isScenario2 = (qrScenario === 'SCENARIO_2');
+    const isScenario3 = (qrScenario === 'SCENARIO_3');
+    const isExpired   = (qrScenario === 'EXPIRED');
+    const isCancelled = (qrScenario === 'CANCELLED');
+
+    const canRestorePending = !!actionFlags.can_restore_qr_pending;
+    const canRestoreSigned  = !!actionFlags.can_restore_qr_signed;
+    const canRevertToElec   = !!actionFlags.can_revert_to_electronic;
+
+    const isManualOnly = !!actionFlags.is_manual_only;
+    const canAllowQrAgain   = !!actionFlags.can_allow_qr_again;
+    const canAllowElecAgain = !!actionFlags.can_allow_electronic_again;
+
     // DAILY: send QR (backend handles ELECTRONIC→QR + email)
     if (sheetScope === 'DAILY' && tsId && subMode === 'ELECTRONIC' && !locked) {
       btns.push(`
-        <button type="button" class="btn" data-ts-action="send-daily-qr">
+        <button type="button" class="pill pill-info" style="${badgeBtnStyle}" data-ts-action="send-daily-qr">
           Send daily QR timesheet
         </button>
       `);
@@ -38313,7 +38837,7 @@ function renderTimesheetOverviewTab(ctx) {
     // QR Scenario 2: resend existing QR email
     if (tsId && !locked && isScenario2 && qrStatus === 'PENDING') {
       btns.push(`
-        <button type="button" class="btn" data-ts-action="qr-resend">
+        <button type="button" class="pill pill-info" style="${badgeBtnStyle}" data-ts-action="qr-resend">
           Resend QR email
         </button>
       `);
@@ -38322,7 +38846,7 @@ function renderTimesheetOverviewTab(ctx) {
     // QR Scenario 2: refuse hours
     if (tsId && !locked && isScenario2 && qrStatus === 'PENDING') {
       btns.push(`
-        <button type="button" class="btn btn-warn" data-ts-action="qr-refuse">
+        <button type="button" class="pill pill-warn" style="${badgeBtnStyle}" data-ts-action="qr-refuse">
           Refuse hours & request resubmission
         </button>
       `);
@@ -38331,7 +38855,7 @@ function renderTimesheetOverviewTab(ctx) {
     // QR Scenario 3: revoke and request resubmission (maps to REISSUE)
     if (tsId && !locked && isScenario3 && qrStatus === 'USED') {
       btns.push(`
-        <button type="button" class="btn btn-warn" data-ts-action="qr-reissue-request">
+        <button type="button" class="pill pill-warn" style="${badgeBtnStyle}" data-ts-action="qr-reissue-request">
           Revoke signed QR & request resubmission
         </button>
       `);
@@ -38340,7 +38864,7 @@ function renderTimesheetOverviewTab(ctx) {
     // Any QR scenario: convert to manual-only
     if (tsId && !locked && (isScenario1 || isScenario2 || isScenario3 || isExpired || isCancelled) && qrStatus) {
       btns.push(`
-        <button type="button" class="btn" data-ts-action="qr-convert-manual-only">
+        <button type="button" class="pill pill-info" style="${badgeBtnStyle}" data-ts-action="qr-convert-manual-only">
           Convert to manual-only
         </button>
       `);
@@ -38349,14 +38873,14 @@ function renderTimesheetOverviewTab(ctx) {
     // Restore revoked versions
     if (tsId && !locked && canRestorePending) {
       btns.push(`
-        <button type="button" class="btn" data-ts-action="qr-restore-pending">
+        <button type="button" class="pill pill-info" style="${badgeBtnStyle}" data-ts-action="qr-restore-pending">
           Restore revoked QR (pending)
         </button>
       `);
     }
     if (tsId && !locked && canRestoreSigned) {
       btns.push(`
-        <button type="button" class="btn" data-ts-action="qr-restore-signed">
+        <button type="button" class="pill pill-info" style="${badgeBtnStyle}" data-ts-action="qr-restore-signed">
           Restore revoked QR (signed)
         </button>
       `);
@@ -38365,14 +38889,14 @@ function renderTimesheetOverviewTab(ctx) {
     // Manual-only re-enable options
     if (tsId && !locked && isManualOnly && canAllowQrAgain) {
       btns.push(`
-        <button type="button" class="btn" data-ts-action="allow-qr-again">
+        <button type="button" class="pill pill-info" style="${badgeBtnStyle}" data-ts-action="allow-qr-again">
           Allow QR again
         </button>
       `);
     }
     if (tsId && !locked && isManualOnly && canAllowElecAgain) {
       btns.push(`
-        <button type="button" class="btn" data-ts-action="allow-electronic-again">
+        <button type="button" class="pill pill-info" style="${badgeBtnStyle}" data-ts-action="allow-electronic-again">
           Allow electronic again
         </button>
       `);
@@ -38381,23 +38905,24 @@ function renderTimesheetOverviewTab(ctx) {
     // Revert to electronic (admin) if available
     if (tsId && !locked && canRevertToElec) {
       btns.push(`
-        <button type="button" class="btn" data-ts-action="revert-electronic">
+        <button type="button" class="pill pill-info" style="${badgeBtnStyle}" data-ts-action="revert-electronic">
           Revert to electronic
         </button>
       `);
     }
 
-    // IMPORTANT CHANGE:
-    // We no longer render a planned-only "Delete planned week" button here.
-    // Deletion is handled via the footer "Delete timesheet" button, which will
-    // take the planned-delete path when timesheet_id is null.
-    // (So the UI looks identical to a normal timesheet.)
     if (!btns.length) {
       return `<span class="mini">No actions available.</span>`;
     }
 
-    return btns.join('\n');
+    return `<div style="display:flex;flex-wrap:wrap;gap:8px;">${btns.join('')}</div>`;
   })();
+
+  const awaitingAuthBadge = authInfo.showAwaitingBadge
+    ? `<span class="pill pill-bad" style="margin-left:6px;">Awaiting Authorisation</span>`
+    : '';
+
+  const routePillClass = (routeLabel === 'Manual') ? 'pill-manual' : 'pill-info';
 
   const routeHtml = `
     <div class="card" style="margin-top:10px;">
@@ -38405,39 +38930,17 @@ function renderTimesheetOverviewTab(ctx) {
         <label>Stage</label>
         <div class="controls">
           <span class="pill ${stageClass}" style="font-weight:600;">${enc(stageLabel)}</span>
-          ${procStatusPillHtml}
-          <div class="mini" style="margin-top:4px;">
-            ${authorised ? 'Authorised' : 'Not authorised'}
-          </div>
-          ${hrHintsHtml}
+          ${awaitingAuthBadge}
         </div>
       </div>
 
       <div class="row">
         <label>Route</label>
         <div class="controls">
-          ${scopePill}
-          ${modePill}
-          ${basis ? `<span class="pill pill-info" style="margin-left:4px;">Basis: ${enc(basis)}</span>` : ''}
-          ${timesheetRequiredPillHtml}
-          ${flagsHtml}
-        </div>
-      </div>
-
-      <div class="row">
-        <label>Totals</label>
-        <div class="controls">${totalsHtml}</div>
-      </div>
-
-      <div class="row">
-        <label>Reference / PO</label>
-        <div class="controls">
-          <input class="input" name="ts_reference" value="${enc(refValue || '')}" placeholder="Reference or PO (optional)" />
-          <span class="mini">
-            This is staged only and will be saved when you click <strong>Save</strong>.
-            You can update this even for electronic timesheets.
-          </span>
-          ${qrAmendWarningHtml}
+          <span class="pill ${routePillClass}" style="font-weight:600;">${enc(routeLabel)}</span>
+          ${payOnHold ? `<span class="pill pill-hold" style="margin-left:6px;">Pay on hold</span>` : ''}
+          ${isInvoiced ? `<span class="pill pill-warn" style="margin-left:6px;">Invoiced</span>` : ''}
+          ${isPaid ? `<span class="pill pill-ok" style="margin-left:6px;">Paid</span>` : ''}
         </div>
       </div>
 
@@ -38447,6 +38950,8 @@ function renderTimesheetOverviewTab(ctx) {
       </div>
     </div>
   `;
+
+  GE();
 
   return `
     <div class="tabc">
@@ -38505,312 +39010,129 @@ function renderTimesheetIssuesTab(ctx) {
 
   GC('render');
 
-  const tsfin       = details.tsfin || {};
-  const validations = Array.isArray(details.validations) ? details.validations : [];
-  const stage       = row.summary_stage || null;
-  const procStatus  = tsfin.processing_status || row.processing_status || null;
-  const payOnHold   = !!row.pay_on_hold;
-  const basis       = tsfin.basis || row.basis || null;
+  const tsfin  = details.tsfin || {};
+  const ts     = details.timesheet || {};
 
-  const ts          = details.timesheet || {};
-  const policy      = details.policy || {};
-  const requiresHr        = !!policy.requires_hr;
-  const autoprocessHr     = !!policy.autoprocess_hr;
-  const noTimesheetReq    = !!policy.no_timesheet_required;
+  // ✅ Use the shared helper for requiresAuth/authorised/badge rule (per spec)
+  let authInfo = { requires: false, authorised: false, showAwaitingBadge: false };
+  if (typeof computeRequiresTimesheetAuthorisation === 'function') {
+    try {
+      authInfo = computeRequiresTimesheetAuthorisation(details, row) || authInfo;
+    } catch (e) {
+      if (LOGM) L('[ISSUES] computeRequiresTimesheetAuthorisation failed (non-fatal)', e);
+    }
+  }
 
-  const authoriseTs       = ts.authorised_at_server || row.authorised_at_server || null;
-  const authorised        = !!authoriseTs;
+  // ✅ Use the shared helper for the mutually-exclusive Processing State label (per spec)
+  let ps = { key: '', label: 'Unprocessed' };
+  if (typeof computeTimesheetProcessingState === 'function') {
+    try {
+      ps = computeTimesheetProcessingState(details, row) || ps;
+    } catch (e) {
+      if (LOGM) L('[ISSUES] computeTimesheetProcessingState failed (non-fatal)', e);
+    }
+  } else {
+    // If helper is not yet implemented, do not invent alternate state logic here.
+    // The tab must still render without crashing.
+    ps = { key: 'UNPROCESSED', label: 'Unprocessed' };
+  }
 
-  const validationRows    = validations.slice(); // assume already most-recent-first
-  const latestValidation  = validationRows.length ? validationRows[0] : null;
-  const latestValStatus   = latestValidation ? String(latestValidation.status || '').toUpperCase() : null;
-  const latestValReason   = latestValidation ? (latestValidation.reason_code || latestValidation.reason || '') : '';
-  const validationIsOk    = latestValStatus === 'VALIDATION_OK' || latestValStatus === 'OVERRIDDEN';
-  const validationFailed  = !!latestValidation && !validationIsOk;
+  // Facts used only for issues list (not for Processing State label)
+  const procStatusRaw =
+    tsfin.processing_status ||
+    details.processing_status ||
+    row.processing_status ||
+    null;
 
-  // NEW: HR cross-check fields from TSFIN
-  const hrStatusRaw  = tsfin.hr_crosscheck_status || null;
-  const hrStatus     = hrStatusRaw ? String(hrStatusRaw).toUpperCase() : null;
-  const hrIssuesArr  = Array.isArray(tsfin.hr_crosscheck_issues) ? tsfin.hr_crosscheck_issues : [];
-  const hrIssues     = hrIssuesArr.map(c => String(c || '').toUpperCase()).filter(Boolean);
+  const procStatus = String(procStatusRaw || '').toUpperCase();
 
   L('snapshot', {
-    stage,
     procStatus,
-    payOnHold,
-    basis,
-    validationsCount: validations.length,
-    requiresHr,
-    autoprocessHr,
-    noTimesheetReq,
-    authorised,
-    latestValStatus,
-    latestValReason,
-    hrStatus,
-    hrIssuesCount: hrIssues.length
+    requiresAuth: !!authInfo.requires,
+    authorised: !!authInfo.authorised,
+    processingState: ps
   });
 
   const issues = [];
 
-  // ───────────────────── Processing status-based issues ─────────────────────
-  const p = String(procStatus || '').toUpperCase();
-  if (p === 'RATE_MISSING') {
+  // Processing-status based issues (keep concise)
+  if (procStatus === 'RATE_MISSING') {
     issues.push('Rate missing: no pay/charge rates found for this client/role/band on this date.');
   }
-  if (p === 'PAY_CHANNEL_MISSING') {
+  if (procStatus === 'PAY_CHANNEL_MISSING') {
     issues.push('Pay channel missing: candidate bank/umbrella details incomplete for this timesheet.');
   }
-  if (p === 'CLIENT_UNRESOLVED') {
+  if (procStatus === 'CLIENT_UNRESOLVED') {
     issues.push('Client unresolved: timesheet could not be linked to a client correctly.');
   }
-  if (p === 'UNASSIGNED') {
+  if (procStatus === 'UNASSIGNED') {
     issues.push('Unassigned: this timesheet has not been fully matched or processed yet.');
   }
 
-  // Stage-based generic attention
-  if (String(stage || '').toUpperCase() === 'NEEDS_ATTENTION') {
-    if (!issues.length) {
-      issues.push('This timesheet is flagged as "Needs attention". Check rates, pay channel, and validation results.');
-    }
-  }
-
-  // Pay hold
+  // Pay hold (from row or tsfin)
+  const payOnHold = !!(tsfin.pay_on_hold ?? row.pay_on_hold);
   if (payOnHold) {
     issues.push('Pay is currently on hold for this timesheet. It will be excluded from pay runs until released.');
   }
 
-  // ───────────────────── HR / HealthRoster gating ─────────────────────
-  // We only treat HR as a hard gate when requires_hr is true.
-  if (requiresHr) {
-    // HR cross-check required but not OK
-    if (!validationIsOk) {
-      if (!latestValidation) {
-        issues.push('Awaiting HealthRoster cross-check: this client requires HR validation before pay/invoice.');
-      } else if (validationFailed) {
-        const friendly = latestValReason || 'validation failed – see validation log for details.';
-        issues.push(`HealthRoster validation failed: ${friendly}`);
-      } else {
-        issues.push('Awaiting HealthRoster cross-check: this client requires HR validation before pay/invoice.');
-      }
-    }
-
-    // Awaiting team authorisation when autoprocess_hr = false
-    // We consider this blocking when:
-    // - HR is required
-    // - autoprocess is disabled
-    // - the TS is not yet authorised
-    // - TSFIN is in a pre-invoice state (PENDING_AUTH or READY_FOR_HR)
-    const p2 = p;
-    if (!autoprocessHr && !authorised && (p2 === 'PENDING_AUTH' || p2 === 'READY_FOR_HR')) {
-      issues.push('Awaiting authorisation by team: this client requires manual sign-off after HealthRoster checks.');
-    }
-
-    // Missing timesheet evidence when no_timesheet_required = false
-    // Only enforce for HR-driven flows and when not yet paid/invoiced.
-    const subMode    = String(ts.submission_mode || row.submission_mode || '').toUpperCase();
-    const r2NurseKey = ts.r2_nurse_key || null;
-    const r2AuthKey  = ts.r2_auth_key || null;
-    const manualKey  = ts.manual_pdf_r2_key || details.manual_pdf_r2_key || null;
-    const isPaid     = !!tsfin.paid_at_utc;
-    const isInvoiced = !!tsfin.locked_by_invoice_id;
-
-    const basisStr   = String(basis || '').toUpperCase();
-    const isHrBasis  =
-      basisStr.startsWith('HEALTHROSTER') ||
-      basisStr.startsWith('NHSP') ||
-      basisStr === 'SELF_REPORTED'; // self-reported but HR cross-check required
-
-    const hasElectronicEvidence =
-      subMode === 'ELECTRONIC' && !!(r2NurseKey && r2AuthKey);
-    const hasManualEvidence = !!manualKey;
-
-    if (!noTimesheetReq && isHrBasis && !isPaid && !isInvoiced) {
-      if (!hasElectronicEvidence && !hasManualEvidence) {
-        issues.push('Missing timesheet: this client requires a signed timesheet (electronic, QR or manual) even after HealthRoster validation.');
-      }
-    }
-  }
-
-  // ───────────────────── HR cross-check issues (from TSFIN) ─────────────────────
+  // HR cross-check issues (from TSFIN) — keep as “issues flagged”, but no Validation Log UI
   try {
-    const seenHrCodes = new Set();
+    const hrIssuesArr = Array.isArray(tsfin.hr_crosscheck_issues) ? tsfin.hr_crosscheck_issues : [];
+    const hrIssues = hrIssuesArr.map(c => String(c || '').toUpperCase()).filter(Boolean);
 
-    for (const codeRaw of hrIssues) {
-      const code = String(codeRaw || '').toUpperCase();
-      if (!code || seenHrCodes.has(code)) continue;
-      seenHrCodes.add(code);
+    const seen = new Set();
+    for (const code of hrIssues) {
+      if (seen.has(code)) continue;
+      seen.add(code);
 
       if (code === 'HOURS_MISMATCH_HR') {
-        issues.push('Timesheet hours mismatch with Healthroster – amend/resubmit timesheet or reupload HealthRoster with matching hours.');
+        issues.push('Timesheet hours mismatch with HealthRoster.');
       } else if (code === 'HR_HOURS_MISSING') {
-        issues.push('Timesheet has hours which are not yet on HealthRoster – confirm the worker worked these hours and request them to be added on HealthRoster.');
+        issues.push('Timesheet has hours not yet on HealthRoster.');
       } else if (code === 'DUPLICATE_CONTRACTS') {
-        issues.push('Multiple contracts cover the same period for this client – resolve duplicate contracts before proceeding.');
+        issues.push('Multiple contracts cover the same period for this client.');
       }
-      // If new HR codes are added in future, they can be mapped here.
     }
   } catch (e) {
-    if (LOGM) L('[ISSUES] HR cross-check issues mapping failed (non-fatal)', e);
+    if (LOGM) L('[ISSUES] hr_crosscheck_issues mapping failed (non-fatal)', e);
   }
 
-  // ───────────────────── HR daily mismatch reasons (HealthRoster daily) ─────────────────────
-  try {
-    const seenReasons = new Set();
-    (validationRows || []).forEach(v => {
-      const src = String(v.source_system || v.kind || '').toUpperCase();
-      const st  = String(v.status || '').toUpperCase();
-      const rc  = String(v.reason_code || '').toLowerCase();
-
-      if (src !== 'HEALTHROSTER_DAILY') return;
-      if (!st || st === 'VALIDATION_OK' || st === 'OVERRIDDEN') return;
-
-      if (rc === 'start_end_mismatch' && !seenReasons.has(rc)) {
-        issues.push('HealthRoster start/end times differ from the timesheet.');
-        seenReasons.add(rc);
-      }
-      if (rc === 'break_minutes_mismatch' && !seenReasons.has(rc)) {
-        issues.push('HealthRoster break length differs from the timesheet.');
-        seenReasons.add(rc);
-      }
-      if (rc === 'actual_hours_mismatch' && !seenReasons.has(rc)) {
-        issues.push('HealthRoster “Actual Hours” differ from calculated timesheet hours.');
-        seenReasons.add(rc);
-      }
-      if (rc === 'rate_missing_for_grade' && !seenReasons.has(rc)) {
-        issues.push('No matching rate found for the requested grade – check grade → role → rates mapping.');
-        seenReasons.add(rc);
-      }
-    });
-  } catch (e) {
-    if (LOGM) L('[ISSUES] HR-daily mismatch detection failed (non-fatal)', e);
+  // Authorisation required but not yet authorised (issue line)
+  if (authInfo.requires && !authInfo.authorised) {
+    issues.push('Awaiting authorisation by team.');
   }
 
-  // ───────────────────── Schedule-based issues (shift + breaks) ─────────────────────
-  try {
-    const mc = window.modalCtx || {};
-    const st = mc.timesheetState || {};
-    const schedule = Array.isArray(st.schedule) ? st.schedule : null;
-
-    if (schedule && schedule.length) {
-      schedule.forEach(seg => {
-        if (!seg || !seg.date) return;
-        const date    = seg.date;
-        const start   = seg.start || '';
-        const end     = seg.end   || '';
-        const bs      = seg.break_start || '';
-        const be      = seg.break_end   || '';
-        const hasStart = !!start;
-        const hasEnd   = !!end;
-        const hasBs    = !!bs;
-        const hasBe    = !!be;
-
-        // Shift incomplete: start without end or end without start
-        if (hasStart && !hasEnd) {
-          issues.push(`Shift end time missing for ${date} – this row will be ignored in calculations.`);
-        } else if (!hasStart && hasEnd) {
-          issues.push(`Shift start time missing for ${date} – this row will be ignored in calculations.`);
-        }
-
-        // Incomplete primary break times (only one of break_start/break_end)
-        if (hasStart && hasEnd && (hasBs !== hasBe)) {
-          issues.push(`Break start/end incomplete for ${date} – no primary break window applied to that shift.`);
-        }
-
-        // Extra break windows in breaks[]
-        if (Array.isArray(seg.breaks) && seg.breaks.length) {
-          seg.breaks.forEach((br, idx) => {
-            if (!br || (br.start == null && br.end == null)) return;
-            const extraStart = br.start || '';
-            const extraEnd   = br.end   || '';
-            const hasExtraStart = !!extraStart;
-            const hasExtraEnd   = !!extraEnd;
-
-            if (hasExtraStart !== hasExtraEnd) {
-              const n = idx + 1;
-              issues.push(`Extra break window #${n} incomplete for ${date} – that break window will be ignored.`);
-            }
-          });
-        }
-      });
-    }
-  } catch (e) {
-    if (LOGM) L('[ISSUES] schedule-based issue detection failed (non-fatal)', e);
-  }
-
-  // Validation rows → log (read-only)
-  const valItems = validations.map(v => {
-    return `
-      <li>
-        <span class="mini">
-          [${v.source_system || v.kind || 'VALIDATION'}] ${v.status || 'UNKNOWN'} – ${v.reason || v.reason_code || '(no reason given)'}
-        </span>
-      </li>
-    `;
-  }).join('');
-
-  // If there are truly no blocking issues, say so explicitly
-  if (!issues.length) {
-    issues.push('No blocking issues detected. This timesheet should be ready once normal processing steps complete.');
-  }
+  // NOTE: No Validation Log UI and no schedule advisory messages here (per spec).
 
   GE();
+
+  const issuesHtml = issues.length
+    ? `<ul class="mini">${issues.map(i => `<li>${escapeHtml(i)}</li>`).join('')}</ul>`
+    : `<span class="mini">No issues detected.</span>`;
 
   return `
     <div class="tabc">
       <div class="card">
         <div class="row">
-          <label>Processing status</label>
+          <label>Processing State</label>
           <div class="controls">
-            <span class="mini">${procStatus || 'UNKNOWN'}</span>
-          </div>
-        </div>
-        <div class="row">
-          <label>Stage</label>
-          <div class="controls">
-            <span class="mini">${stage || 'UNKNOWN'}</span>
-          </div>
-        </div>
-        <div class="row">
-          <label>Basis</label>
-          <div class="controls">
-            <span class="mini">${basis || '—'}</span>
+            <span class="mini">${escapeHtml(ps.label || 'Unprocessed')}</span>
           </div>
         </div>
       </div>
 
       <div class="card" style="margin-top:10px;">
         <div class="row">
-          <label>Issues</label>
+          <label>Issues Flagged</label>
           <div class="controls">
-            <ul class="mini">
-              ${issues.map(i => `<li>${i}</li>`).join('')}
-            </ul>
-          </div>
-        </div>
-      </div>
-
-      <div class="card" style="margin-top:10px;">
-        <div class="row">
-          <label>Validation log</label>
-          <div class="controls">
-            ${valItems ? `<ul>${valItems}</ul>` : '<span class="mini">No validation rows recorded.</span>'}
-          </div>
-        </div>
-        <div class="row">
-          <label></label>
-          <div class="controls">
-            <button type="button" data-ts-action="load-source-rows">
-              View source rows (HealthRoster / NHSP)
-            </button>
-            <span class="mini" style="margin-left:8px;">
-              This will call /api/timesheets/&lt;id&gt;/source-print and show the original HR / NHSP rows used to create this timesheet.
-            </span>
+            ${issuesHtml}
           </div>
         </div>
       </div>
     </div>
   `;
 }
+
 
 function renderTimesheetFinanceTab(ctx) {
   const { LOGM, L, GC, GE } = getTsLoggers('[TS][FINANCE]');
@@ -39368,15 +39690,72 @@ async function openTimesheet(row) {
     let evidence = [];
 
     if (hasTs) {
-      try {
+        try {
         details = await fetchTimesheetDetails(tsId);
+
+        // ─────────────────────────────────────────────────────────────
+        // IMPORTANT: fetchTimesheetDetails() currently normalises a subset of
+        // /api/timesheets/:id/details and does NOT include policy/contract_week/action_flags.
+        // We need those for requiresAuth logic + planned/manual behaviours.
+        // So we enrich details with a best-effort raw fetch (non-fatal).
+        // ─────────────────────────────────────────────────────────────
+        try {
+          const encTsId = encodeURIComponent(tsId);
+          const resRaw = await authFetch(API(`/api/timesheets/${encTsId}/details`));
+          const txtRaw = await resRaw.text().catch(() => '');
+          if (resRaw.ok) {
+            const raw = txtRaw ? JSON.parse(txtRaw) : {};
+
+            // Add fields that the backend already returns but the FE helper drops.
+            // These are needed later by computeRequiresTimesheetAuthorisation() and other UI logic.
+            if (!Object.prototype.hasOwnProperty.call(details, 'contract_week_id')) {
+              details.contract_week_id = raw.contract_week_id || null;
+            } else {
+              details.contract_week_id = details.contract_week_id || raw.contract_week_id || null;
+            }
+
+            if (!Object.prototype.hasOwnProperty.call(details, 'contract_week')) {
+              details.contract_week = raw.contract_week || null;
+            } else {
+              details.contract_week = details.contract_week || raw.contract_week || null;
+            }
+
+            if (!Object.prototype.hasOwnProperty.call(details, 'policy')) {
+              details.policy = raw.policy || null;
+            } else {
+              details.policy = details.policy || raw.policy || null;
+            }
+
+            if (!Object.prototype.hasOwnProperty.call(details, 'action_flags')) {
+              details.action_flags = raw.action_flags || null;
+            } else {
+              details.action_flags = details.action_flags || raw.action_flags || null;
+            }
+
+            // Also keep these aligned if backend provided them
+            details.sheet_scope     = details.sheet_scope     || raw.sheet_scope     || null;
+            details.qr_status       = details.qr_status       || raw.qr_status       || null;
+            details.qr_generated_at = details.qr_generated_at || raw.qr_generated_at || null;
+            details.qr_scanned_at   = details.qr_scanned_at   || raw.qr_scanned_at   || null;
+            details.manual_pdf_r2_key = details.manual_pdf_r2_key || raw.manual_pdf_r2_key || null;
+          } else {
+            // Non-fatal: keep the normalised details object
+            if (LOGM) L('raw details enrich failed (non-fatal)', { status: resRaw.status, body: txtRaw.slice(0, 300) });
+          }
+        } catch (e) {
+          if (LOGM) L('raw details enrich exception (non-fatal)', e);
+        }
+
         L('details fetched', {
           hasTimesheet: !!details.timesheet,
           hasTsfin: !!details.tsfin,
           segments: (details.segments || []).length,
           shifts: (details.shifts || []).length,
           isSegmentsMode: !!details.isSegmentsMode,
-          contract_week_id: details.contract_week_id || null
+          contract_week_id: details.contract_week_id || null,
+          hasPolicy: !!details.policy,
+          hasActionFlags: !!details.action_flags,
+          hasContractWeek: !!details.contract_week
         });
       } catch (err) {
         L('fetchTimesheetDetails FAILED', err);
@@ -39385,16 +39764,35 @@ async function openTimesheet(row) {
         return;
       }
 
-      try {
+
+          try {
         const encTsId = encodeURIComponent(tsId);
         const res  = await authFetch(API(`/api/timesheets/${encTsId}/evidence`));
         const json = await res.json().catch(() => []);
-        evidence   = Array.isArray(json) ? json : [];
+        const list = Array.isArray(json) ? json : [];
+
+        // Normalise evidence rows so the Evidence tab can reliably decide:
+        // - system rows (NHSP/HealthRoster): no delete
+        // - user rows: delete allowed
+        evidence = list.map(ev => {
+          const out = { ...(ev || {}) };
+
+          // Ensure boolean flags exist (so buttons render correctly even before backend adds flags)
+          if (typeof out.system !== 'boolean') out.system = false;
+          if (typeof out.can_delete !== 'boolean') out.can_delete = !out.system;
+
+          // Ensure uploaded timestamp has a predictable field
+          if (!out.uploaded_at_utc && out.created_at) out.uploaded_at_utc = out.created_at;
+
+          return out;
+        });
+
         L('evidence fetched', { timesheet_id: tsId, count: evidence.length });
       } catch (err) {
         L('fetch evidence FAILED (non-fatal)', err);
         evidence = [];
       }
+
     } else {
       let contractWeek = null;
       try {
@@ -39638,11 +40036,12 @@ async function openTimesheet(row) {
     const isInvoiced = !!tsfinLocal.locked_by_invoice_id;
     const canDeletePerm = !!(hasTs && !isPaid && !isInvoiced);
 
-    const cwId =
-      details.contract_week_id ||
-      (details.contract_week && details.contract_week.id) ||
+     const cwId =
+      (details && details.contract_week_id) ||
+      (details && details.contract_week && details.contract_week.id) ||
       baseRow.contract_week_id ||
       null;
+
 
     const cwSubSnapRaw =
       (details.contract_week && details.contract_week.submission_mode_snapshot) ||
@@ -39694,8 +40093,9 @@ async function openTimesheet(row) {
     contract_week_id: cwId,
     cw_submission_mode_snapshot: cwSubSnap,
 
-    // NEW (placeholder): wire backend later to fill this reliably
-    hasElectronicOriginal: !!details.has_electronic_version || !!details.has_electronic_original
+     // Use backend-derived action flags (enriched above). This is what your footer gating expects.
+    hasElectronicOriginal: !!(details && details.action_flags && details.action_flags.can_revert_to_electronic)
+
   }
 };
 
@@ -40018,6 +40418,185 @@ const onSaveTimesheet = async () => {
   };
 
   // ─────────────────────────────────────────────────────────────
+  // ✅ NEW: final schedule validation pass (blocks Save)
+  // ─────────────────────────────────────────────────────────────
+  const parseHHMM = (s) => {
+    const m = String(s || '').trim().match(/^(\d{1,2}):(\d{2})$/);
+    if (!m) return null;
+    const hh = Number(m[1]);
+    const mm = Number(m[2]);
+    if (!Number.isFinite(hh) || !Number.isFinite(mm)) return null;
+    if (hh < 0 || hh > 23 || mm < 0 || mm > 59) return null;
+    return hh * 60 + mm;
+  };
+
+  const finalValidateSchedule = (scheduleArr, extraBreakCount) => {
+    const errorsByDate = {};
+    const cleaned = [];
+
+    const maxExtra = Number.isFinite(Number(extraBreakCount)) ? Math.max(0, Number(extraBreakCount)) : 0;
+
+    const pushErr = (date, code) => {
+      const d = String(date || 'UNKNOWN');
+      (errorsByDate[d] ||= {})[code] = true;
+    };
+
+    const hasVal = (v) => !!String(v || '').trim();
+
+    const normEntry = (e) => {
+      // normalize to {date,start,end,breaks:[{start,end}...], break_mins/break_minutes}
+      const out = { ...(e || {}) };
+      out.date = out.date || null;
+
+      out.start = out.start ? String(out.start).trim() : '';
+      out.end   = out.end   ? String(out.end).trim()   : '';
+
+      // Primary break from legacy fields OR breaks[0]
+      const breaks = Array.isArray(out.breaks) ? out.breaks : [];
+      const primary = {
+        start: (out.break_start != null && String(out.break_start).trim() !== '')
+          ? String(out.break_start).trim()
+          : (breaks[0]?.start ? String(breaks[0].start).trim() : ''),
+        end: (out.break_end != null && String(out.break_end).trim() !== '')
+          ? String(out.break_end).trim()
+          : (breaks[0]?.end ? String(breaks[0].end).trim() : '')
+      };
+
+      const extras = breaks.slice(1).map(b => ({
+        start: b?.start ? String(b.start).trim() : '',
+        end:   b?.end   ? String(b.end).trim()   : ''
+      }));
+
+      // Trim removed extra breaks from memory (important!)
+      const trimmedExtras = extras.slice(0, maxExtra);
+
+      // Keep only meaningful windows (but still keep partial windows for validation)
+      out.breaks = [primary, ...trimmedExtras];
+
+      // Ensure legacy fields stay aligned to primary
+      out.break_start = primary.start || '';
+      out.break_end   = primary.end   || '';
+
+      // Normalize break mins
+      const bm =
+        (out.break_mins != null && out.break_mins !== '') ? Number(out.break_mins) :
+        (out.break_minutes != null && out.break_minutes !== '') ? Number(out.break_minutes) :
+        null;
+
+      out.break_mins = Number.isFinite(bm) ? bm : 0;
+      out.break_minutes = out.break_mins;
+
+      return out;
+    };
+
+    for (const raw of (Array.isArray(scheduleArr) ? scheduleArr : [])) {
+      const e = normEntry(raw);
+      cleaned.push(e);
+
+      const d = e.date || 'UNKNOWN';
+
+      // Shift validation: both-or-neither, start!=end, allow overnight
+      const hasS = hasVal(e.start);
+      const hasE = hasVal(e.end);
+
+      if (hasS || hasE) {
+        if (!(hasS && hasE)) {
+          pushErr(d, 'SHIFT_PARTIAL');
+        } else {
+          const s0 = parseHHMM(e.start);
+          const e0 = parseHHMM(e.end);
+          if (s0 == null || e0 == null) {
+            pushErr(d, 'SHIFT_BAD_TIME');
+          } else if (s0 === e0) {
+            pushErr(d, 'SHIFT_ZERO_LENGTH');
+          }
+        }
+      }
+
+      const s0 = (hasS && hasE) ? parseHHMM(e.start) : null;
+      const e0 = (hasS && hasE) ? parseHHMM(e.end)   : null;
+
+      const shiftOk = (s0 != null && e0 != null && s0 !== e0);
+      const shiftStart = shiftOk ? s0 : null;
+      const shiftEnd   = shiftOk ? ((e0 > s0) ? e0 : (e0 + 1440)) : null;
+      const shiftMinutes = shiftOk ? (shiftEnd - shiftStart) : null;
+
+      // Break windows validation (partials, start!=end, within shift, overlap), allow overnight
+      const ranges = [];
+
+      // If break mins used without a valid shift -> reject (you said breaks must be within working hours)
+      if (!shiftOk && e.break_mins > 0) {
+        pushErr(d, 'BREAK_MINS_WITHOUT_SHIFT');
+      }
+
+      for (let i = 0; i < (e.breaks || []).length; i++) {
+        const bw = e.breaks[i] || {};
+        const bs = bw.start ? String(bw.start).trim() : '';
+        const be = bw.end   ? String(bw.end).trim()   : '';
+
+        const bHasS = hasVal(bs);
+        const bHasE = hasVal(be);
+
+        if (!(bHasS || bHasE)) continue;
+
+        if (!(bHasS && bHasE)) {
+          pushErr(d, `BREAK_PARTIAL_${i}`);
+          continue;
+        }
+
+        const bs0 = parseHHMM(bs);
+        const be0 = parseHHMM(be);
+
+        if (bs0 == null || be0 == null) {
+          pushErr(d, `BREAK_BAD_TIME_${i}`);
+          continue;
+        }
+
+        if (bs0 === be0) {
+          pushErr(d, `BREAK_ZERO_LENGTH_${i}`);
+          continue;
+        }
+
+        if (!shiftOk) {
+          pushErr(d, `BREAK_WITHOUT_SHIFT_${i}`);
+          continue;
+        }
+
+        // Place on shift timeline
+        let bsAdj = bs0;
+        if (bsAdj < shiftStart) bsAdj += 1440;
+
+        let beAdj = be0;
+        if (beAdj < bsAdj) beAdj += 1440;
+
+        if (bsAdj < shiftStart || beAdj > shiftEnd || beAdj <= bsAdj) {
+          pushErr(d, `BREAK_OUTSIDE_SHIFT_${i}`);
+          continue;
+        }
+
+        ranges.push({ bsAdj, beAdj, idx: i });
+      }
+
+      ranges.sort((a, b) => a.bsAdj - b.bsAdj);
+      for (let i = 1; i < ranges.length; i++) {
+        const prev = ranges[i - 1];
+        const cur  = ranges[i];
+        if (cur.bsAdj < prev.beAdj) {
+          pushErr(d, `BREAK_OVERLAP_${prev.idx}_${cur.idx}`);
+        }
+      }
+
+      // Optional sanity: break mins cannot exceed shift mins
+      if (shiftOk && Number.isFinite(shiftMinutes) && e.break_mins >= shiftMinutes) {
+        pushErr(d, 'BREAK_MINS_TOO_BIG');
+      }
+    }
+
+    const ok = Object.keys(errorsByDate).length === 0;
+    return { ok, errorsByDate, cleaned };
+  };
+
+  // ─────────────────────────────────────────────────────────────
   // Gather state + detect changes
   // ─────────────────────────────────────────────────────────────
   const segOverrides    = st.segmentOverrides || {};
@@ -40132,6 +40711,29 @@ const onSaveTimesheet = async () => {
     GE();
     alert('This timesheet is locked (invoiced or paid). You cannot change hours, schedule, references, or segments.');
     return { ok: false };
+  }
+
+  // ✅ NEW: hard reject Save if any schedule errors exist OR final validation fails.
+  // Also sanitises removed extra breaks from memory before sending to backend.
+  const needsScheduleValidation =
+    !!st.scheduleHasErrors ||
+    (scheduleChangedWeekly || scheduleChangedDaily);
+
+  if (needsScheduleValidation) {
+    const v = finalValidateSchedule(stagedSchedule, st.extraBreakCount);
+
+    // persist errors back to state (so Save stays blocked until fixed)
+    st.scheduleErrorsByDate = v.errorsByDate || {};
+    st.scheduleHasErrors = !v.ok;
+
+    if (!v.ok) {
+      GE();
+      alert('Fix highlighted shift/break times first.\n\nIssues: partial times, start/end = same, breaks outside shift, or overlapping breaks.');
+      return { ok: false };
+    }
+
+    // Use cleaned schedule going forward (removes deleted extra breaks!)
+    st.schedule = v.cleaned;
   }
 
   // QR scenario + decision enum
@@ -40252,7 +40854,7 @@ const onSaveTimesheet = async () => {
     tasks.push(async () => {
       const payload = {
         // Schedule is the source of truth for bucket hours
-        actual_schedule_json: stagedSchedule || null,
+        actual_schedule_json: st.schedule || null, // ✅ use cleaned schedule
 
         // NEW: single action enum for QR decisions
         qr_action: qrActionBackend || null,
@@ -40455,7 +41057,7 @@ const onSaveTimesheet = async () => {
     // Only run if schedule actually changed
     if (scheduleChangedDaily) {
       tasks.push(async () => {
-        const schedule = stagedSchedule || null;
+        const schedule = st.schedule || null; // ✅ use cleaned schedule
         if (!schedule) {
           L('daily-manual-upsert skipped: no schedule staged');
           return;
@@ -41125,135 +41727,426 @@ function renderTimesheetRelatedTab(ctx) {
     </div>
   `;
 }
-
 function renderTimesheetEvidenceTab(ctx) {
   const { LOGM, L, GC, GE } = getTsLoggers('[TS][EVIDENCE]');
   const { row, details, state } = normaliseTimesheetCtx(ctx);
-
   GC('render');
-  const ts         = details.timesheet || {};
-  const sheetScope = row.sheet_scope || details.sheet_scope || ts.sheet_scope || null;
-  const qrStatus   = row.qr_status || details.qr_status || ts.qr_status || null;
-  const qrGen      = details.qr_generated_at || ts.qr_generated_at || null;
-  const qrScan     = details.qr_scanned_at   || ts.qr_scanned_at   || null;
-  const manualKey  = details.manual_pdf_r2_key || ts.manual_pdf_r2_key || null;
 
+  const ts   = details.timesheet || {};
   const tsId = row.timesheet_id || ts.timesheet_id || '';
 
-  // Evidence state – populated by the tab open handler via /api/timesheets/:id/evidence
+  // Evidence state – populated by /api/timesheets/:id/evidence
+  // Expected to include BOTH:
+  // - user evidence rows: { id, kind, created_at, storage_key, display_name, system:false, can_delete:true }
+  // - system evidence rows (NHSP/HealthRoster): { id, kind:'NHSP'|'HealthRoster', uploaded_at_utc|created_at, storage_key, display_name, system:true, can_delete:false }
   const evList = Array.isArray(state.evidence) ? state.evidence : [];
 
-  L('snapshot', {
-    tsId,
-    sheetScope,
-    qrStatus,
-    qrGen,
-    qrScan,
-    manualKey,
-    evidenceCount: evList.length
-  });
+  L('renderEvidenceTab', { tsId, evidenceCount: evList.length });
   GE();
 
-  const qrInfoHtml = (sheetScope === 'WEEKLY' && qrStatus) ? `
-    <div class="card" style="margin-top:10px;">
-      <div class="row">
-        <label>QR status</label>
-        <div class="controls">
-          <span class="mini">${qrStatus}</span>
-          ${qrGen ? `<br/><span class="mini">Generated at: ${qrGen}</span>` : ''}
-          ${qrScan ? `<br/><span class="mini">Scanned at: ${qrScan}</span>` : ''}
-        </div>
-      </div>
-    </div>
-  ` : '';
+  const getUploadedDt = (ev) => {
+    // support multiple backend field names; prefer import uploaded timestamps when present
+    return ev?.uploaded_at_utc || ev?.uploaded_at || ev?.created_at || null;
+  };
 
-  // Base URL for public R2 access (configured globally)
-  const r2Base = (window && (window.R2_PUBLIC_URL || (window.__config && window.__config.R2_PUBLIC_URL))) || '';
+  const isDeletable = (ev) => {
+    if (ev && typeof ev.can_delete === 'boolean') return !!ev.can_delete;
+    if (ev && typeof ev.system === 'boolean') return !ev.system;
+    return false;
+  };
 
-  const evidenceListHtml = evList.length
-    ? `
-      <ul class="ts-evidence-list">
-        ${evList.map(ev => {
-          const name = escapeHtml(ev.display_name || ev.kind || 'Evidence');
-          const key  = ev.storage_key || '';
-          const href = (r2Base && key)
-            ? `${r2Base}/${encodeURIComponent(key)}`
-            : '#';
-          const id   = ev.id || '';
-          return `
-            <li data-evidence-id="${escapeHtml(String(id))}">
-              <span class="mini">${name}</span>
-              ${key ? ` – <a href="${href}" target="_blank" rel="noopener noreferrer">Open</a>` : ''}
-              <button type="button"
-                      class="btn mini"
-                      data-evidence-remove="${escapeHtml(String(id))}">
-                Remove
-              </button>
-            </li>
-          `;
-        }).join('')}
-      </ul>
-    `
+  const typeLabel = (ev) => {
+    const k = String(ev?.kind || '').trim();
+    return k ? k : 'Unknown';
+  };
+
+  const nameLabel = (ev) => {
+    // Not shown as a column per your spec, but useful as a tooltip so the user can see filename on hover.
+    const n = String(ev?.display_name || '').trim();
+    return n ? n : '';
+  };
+
+  // Build table rows
+  const rowsHtml = evList.length
+    ? evList.map(ev => {
+        const id = (ev && ev.id != null) ? String(ev.id) : '';
+        const system = !!ev?.system;
+        const canDelete = isDeletable(ev);
+
+        const dt = getUploadedDt(ev);
+        const uploaded = dt ? escapeHtml(formatDateLocal(dt)) : '-';
+
+        const type = escapeHtml(typeLabel(ev));
+        const tooltip = nameLabel(ev) ? ` title="${escapeHtml(nameLabel(ev))}"` : '';
+
+        // Buttons: not-white styling — use "subtle" class if you have it; otherwise inline style fallback.
+        // (Do not rely on .btn default white background.)
+        const viewBtn = `
+          <button type="button"
+                  class="btn mini subtle"
+                  style="background:transparent;border:1px solid rgba(255,255,255,.18);"
+                  data-evidence-view="${escapeHtml(id)}">
+            View
+          </button>
+        `;
+
+        const delBtn = canDelete
+          ? `
+            <button type="button"
+                    class="btn mini subtle danger"
+                    style="background:transparent;border:1px solid rgba(255,80,80,.35);"
+                    data-evidence-remove="${escapeHtml(id)}">
+              Delete
+            </button>
+          `
+          : '';
+
+        return `
+          <tr data-evidence-id="${escapeHtml(id)}"
+              class="${system ? 'system-evidence' : ''}"
+              ${tooltip}>
+            <td>${type}</td>
+            <td>${uploaded}</td>
+            <td style="text-align:right; white-space:nowrap;">
+              ${viewBtn}
+              ${delBtn}
+            </td>
+          </tr>
+        `;
+      }).join('')
     : `
-      <span class="mini">
-        No evidence uploaded yet. Use the dropzone below to add scanned timesheets or other supporting documents.
-      </span>
+      <tr>
+        <td colspan="3" class="mini" style="opacity:.85;">
+          No evidence uploaded yet. Drag a file anywhere inside this tab to upload.
+        </td>
+      </tr>
     `;
 
-  const dropHint = evList.length
-    ? 'Drag a PDF or image here to add further evidence. Existing files will remain attached.'
-    : 'Drag a PDF or image here to upload your first evidence file (e.g. a scanned timesheet).';
+  const tableHtml = `
+    <div class="scrollable-evidence" style="max-height:380px; overflow-y:auto;">
+      <table class="ts-evidence-table" style="width:100%; border-collapse:collapse;">
+        <thead>
+          <tr>
+            <th style="text-align:left;">Evidence Type</th>
+            <th style="text-align:left;">Date Uploaded</th>
+            <th style="text-align:right;">Actions</th>
+          </tr>
+        </thead>
+        <tbody>${rowsHtml}</tbody>
+      </table>
+    </div>
+  `;
 
   return `
-    <div class="tabc">
-      <div class="card">
-        <div class="row">
-          <label>Timesheet PDF</label>
-          <div class="controls">
-            <button type="button" data-ts-action="open-pdf" data-timesheet-id="${tsId}">
-              Open timesheet PDF
-            </button>
-            <span class="mini" style="margin-left:8px;">
-              This will call /api/timesheets/${tsId || ':id'}/pdf and open the resulting document.
-            </span>
-          </div>
-        </div>
-        <div class="row">
-          <label>Manual scan key</label>
-          <div class="controls">
-            ${manualKey ? `<span class="mini">${manualKey}</span>` : '<span class="mini">No manual PDF attached (legacy field).</span>'}
-            <span class="mini" style="display:block;margin-top:4px;">
-              New uploads are recorded as evidence items below; this field remains for legacy compatibility.
-            </span>
-          </div>
-        </div>
-      </div>
+    <div class="tabc ts-evidence-tab"
+         data-ts-drop-zone-root="evidence"
+         style="height:100%; display:flex; flex-direction:column;">
 
-      <div class="card" style="margin-top:10px;">
+      <div class="card" style="flex:1; overflow:hidden;">
         <div class="row">
           <label>Evidence</label>
-          <div class="controls">
-            ${evidenceListHtml}
+          <div class="controls" style="width:100%;">
+            ${tableHtml}
           </div>
         </div>
       </div>
 
-      <div class="card" style="margin-top:10px;" data-ts-drop-zone="evidence">
-        <div class="row">
-          <label>Add evidence</label>
-          <div class="controls">
-            <div class="mini">
-              ${dropHint}<br/>
-              <span class="mini">Accepted file types: PDF, JPEG, PNG, HEIC/HEIF.</span>
-            </div>
-          </div>
-        </div>
+      <div class="mini" style="margin-top:10px; opacity:.85; text-align:center;">
+        Drag a PDF or image anywhere inside this tab to upload new evidence.
       </div>
 
-      ${qrInfoHtml}
     </div>
   `;
 }
+
+async function openTimesheetEvidenceUploadDialog(file) {
+  const { LOGM, L, GC, GE } = getTsLoggers('[TS][EVIDENCE][UPLOAD_DIALOG]');
+  GC('openTimesheetEvidenceUploadDialog');
+
+  const mc = window.modalCtx || {};
+  const tsId =
+    mc.data?.timesheet_id ||
+    mc.data?.id ||
+    (mc.timesheetDetails && mc.timesheetDetails.timesheet && mc.timesheetDetails.timesheet.timesheet_id) ||
+    null;
+
+  if (!tsId) {
+    GE();
+    throw new Error('Timesheet context missing; cannot upload evidence.');
+  }
+
+  if (!file) {
+    GE();
+    throw new Error('File is required for evidence upload.');
+  }
+
+  const type = String(file.type || '').toLowerCase();
+  const name = String(file.name || '').toLowerCase();
+  const isPdf = (type === 'application/pdf') || name.endsWith('.pdf');
+  const isImg = type.startsWith('image/') || /\.(jpe?g|png|gif|webp|heic|heif)$/i.test(name);
+
+  if (!isPdf && !isImg) {
+    GE();
+    throw new Error('Please upload a PDF or image file.');
+  }
+
+  L('ENTRY', {
+    tsId,
+    name: file.name,
+    type: file.type,
+    size: file.size
+  });
+
+  const instanceId = `ts-ev-up-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const selId = `${instanceId}-type`;
+  const otherId = `${instanceId}-other`;
+  const previewId = `${instanceId}-preview`;
+
+  const blobUrl = URL.createObjectURL(file);
+
+  const title = `Upload evidence ${String(tsId).slice(0, 8)}…`;
+
+  const bodyHtml = `
+    <div class="tabc">
+      <div class="card">
+        <div class="row">
+          <label>Preview</label>
+          <div class="controls">
+            <iframe
+              id="${previewId}"
+              src="${blobUrl}"
+              style="width:100%;height:460px;border:1px solid var(--line);border-radius:8px;background:#000;"
+            ></iframe>
+            <div class="mini" style="margin-top:8px;opacity:.85;">
+              ${escapeHtml(file.name || 'Evidence file')} (${Math.round((file.size || 0) / 1024)} KB)
+            </div>
+          </div>
+        </div>
+
+        <div class="row" style="margin-top:10px;">
+          <label>Evidence Type</label>
+          <div class="controls" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+            <select
+              id="${selId}"
+              class="input"
+              style="min-width:220px;background:transparent;border:1px solid rgba(255,255,255,.18);"
+            >
+              <option value="Timesheet">Timesheet</option>
+              <option value="Mileage">Mileage</option>
+              <option value="Accommodation">Accommodation</option>
+              <option value="Expenses">Expenses</option>
+              <option value="Other">Other</option>
+            </select>
+
+            <input
+              id="${otherId}"
+              type="text"
+              class="input"
+              placeholder="Enter evidence type"
+              style="display:none;min-width:260px;background:transparent;border:1px solid rgba(255,255,255,.18);"
+              value=""
+            />
+          </div>
+        </div>
+
+        <div class="row" style="margin-top:10px;">
+          <label></label>
+          <div class="controls">
+            <span class="mini" style="opacity:.85;">
+              Upload adds a new evidence item to the timesheet. You can view/delete items from the Evidence tab table.
+            </span>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+
+  const tabs = [{ key: 'upload', title: 'Evidence' }];
+
+  const cleanup = () => {
+    try { URL.revokeObjectURL(blobUrl); } catch {}
+  };
+
+  const onSave = async () => {
+    const { LOGM, L, GC, GE } = getTsLoggers('[TS][EVIDENCE][UPLOAD_DIALOG][SAVE]');
+    GC('onSave (evidence upload dialog)');
+
+    try {
+      const sel = document.getElementById(selId);
+      const other = document.getElementById(otherId);
+
+      const selVal = sel ? String(sel.value || '').trim() : '';
+      let kind = selVal;
+
+      if (selVal.toLowerCase() === 'other') {
+        const txt = other ? String(other.value || '').trim() : '';
+        if (!txt) {
+          alert('Please enter an evidence type.');
+          GE();
+          return { ok: false };
+        }
+        kind = txt;
+      }
+
+      if (!kind) {
+        alert('Please select an evidence type.');
+        GE();
+        return { ok: false };
+      }
+
+      if (typeof uploadTimesheetEvidence !== 'function') {
+        throw new Error('uploadTimesheetEvidence is not defined.');
+      }
+
+      await uploadTimesheetEvidence(tsId, file, kind);
+
+      // Refresh evidence list + repaint Evidence tab
+      try {
+        if (typeof refreshTimesheetEvidenceIntoModalState === 'function') {
+          await refreshTimesheetEvidenceIntoModalState(tsId);
+        } else {
+          const enc = encodeURIComponent;
+          const res = await authFetch(API(`/api/timesheets/${enc(tsId)}/evidence`));
+          const json = await res.json().catch(() => []);
+          const list = Array.isArray(json) ? json : [];
+
+          const normalised = list.map(ev2 => {
+            const out = { ...(ev2 || {}) };
+            if (typeof out.system !== 'boolean') out.system = false;
+            if (typeof out.can_delete !== 'boolean') out.can_delete = !out.system;
+            if (!out.uploaded_at_utc && out.created_at) out.uploaded_at_utc = out.created_at;
+            return out;
+          });
+
+          window.modalCtx = window.modalCtx || {};
+          window.modalCtx.timesheetState = window.modalCtx.timesheetState || {};
+          window.modalCtx.timesheetState.evidence = normalised;
+        }
+      } catch (e) {
+        L('refresh evidence after upload failed (non-fatal)', e);
+      }
+
+      try {
+        if (typeof window.__getModalFrame === 'function') {
+          const fr = window.__getModalFrame();
+          if (fr && fr.entity === 'timesheets') {
+            fr._suppressDirty = true;
+            await fr.setTab('evidence');
+            fr._suppressDirty = false;
+            fr._updateButtons && fr._updateButtons();
+          }
+        }
+      } catch (e) {
+        L('repaint evidence tab failed (non-fatal)', e);
+      }
+
+      if (window.__toast) window.__toast('Evidence uploaded');
+
+      cleanup();
+      GE();
+      return { ok: true, saved: { timesheet_id: tsId } };
+    } catch (err) {
+      L('upload failed', err);
+      alert(err?.message || 'Failed to upload evidence.');
+      GE();
+      return { ok: false };
+    }
+  };
+
+  const onDismiss = () => {
+    cleanup();
+  };
+
+  showModal(
+    title,
+    tabs,
+    () => bodyHtml,
+    onSave,
+    false,
+    undefined,
+    {
+      kind: 'timesheet-evidence-replace',
+      noParentGate: true,
+      forceEdit: true,
+      onDismiss
+    }
+  );
+
+  // Wire show/hide of "Other" textbox after modal renders
+  try {
+    const sel = document.getElementById(selId);
+    const other = document.getElementById(otherId);
+    if (sel && !sel.__tsEvTypeWired) {
+      sel.__tsEvTypeWired = true;
+
+      const sync = () => {
+        const v = String(sel.value || '').trim().toLowerCase();
+        const isOther = (v === 'other');
+        if (other) {
+          other.style.display = isOther ? '' : 'none';
+          if (!isOther) other.value = '';
+        }
+      };
+
+      sel.addEventListener('change', sync);
+      sync();
+    }
+  } catch (e) {
+    if (LOGM) L('type dropdown wiring failed (non-fatal)', e);
+  }
+
+  GE();
+}
+
+
+async function refreshTimesheetEvidenceIntoModalState(timesheetId) {
+  const { LOGM, L, GC, GE } = getTsLoggers('[TS][EVIDENCE][REFRESH]');
+  GC('refreshTimesheetEvidenceIntoModalState');
+
+  if (!timesheetId) {
+    GE();
+    throw new Error('refreshTimesheetEvidenceIntoModalState: timesheetId is required');
+  }
+
+  const encTsId = encodeURIComponent(String(timesheetId));
+
+  L('ENTRY', { timesheetId });
+
+  try {
+    const res = await authFetch(API(`/api/timesheets/${encTsId}/evidence`));
+    const text = await res.text().catch(() => '');
+
+    if (!res.ok) {
+      L('GET evidence failed', { status: res.status, bodyPreview: text.slice(0, 400) });
+      throw new Error(text || 'Failed to load timesheet evidence');
+    }
+
+    const json = text ? JSON.parse(text) : [];
+    const list = Array.isArray(json) ? json : [];
+
+    // Normalise evidence rows so UI can rely on flags
+    const normalised = list.map(ev => {
+      const out = { ...(ev || {}) };
+      if (typeof out.system !== 'boolean') out.system = false;
+      if (typeof out.can_delete !== 'boolean') out.can_delete = !out.system;
+      if (!out.uploaded_at_utc && out.created_at) out.uploaded_at_utc = out.created_at;
+      return out;
+    });
+
+    window.modalCtx = window.modalCtx || {};
+    window.modalCtx.timesheetState = window.modalCtx.timesheetState || {};
+    window.modalCtx.timesheetState.evidence = normalised;
+
+    L('OK', { count: normalised.length });
+    GE();
+    return normalised;
+  } catch (err) {
+    L('ERROR', err);
+    GE();
+    throw err;
+  }
+}
+
 
 async function getTimesheetPdfUrl(timesheetId) {
   const LOGM = (typeof window.__LOG_MODAL === 'boolean') ? window.__LOG_MODAL : false;
@@ -41374,146 +42267,178 @@ async function openTimesheetEvidenceReplaceDialog(file) {
   GC('openTimesheetEvidenceReplaceDialog');
 
   const mc = window.modalCtx || {};
-  const tsId   = mc.data?.timesheet_id || mc.data?.id || null;
-  const weekId = mc.data?.contract_week_id || mc.timesheetDetails?.contract_week_id || null;
+  const tsId = mc.data?.timesheet_id || mc.data?.id || null;
 
   if (!tsId) {
     GE();
-    throw new Error('Timesheet context missing; cannot replace evidence.');
+    throw new Error('Timesheet context missing; cannot upload evidence.');
   }
   if (!file) {
     GE();
-    throw new Error('File is required for evidence replacement dialog.');
+    throw new Error('File is required for evidence upload dialog.');
+  }
+
+  const type = String(file.type || '').toLowerCase();
+  const name = String(file.name || '').toLowerCase();
+  const isPdf = (type === 'application/pdf') || name.endsWith('.pdf');
+  const isImg = type.startsWith('image/') || /\.(jpe?g|png|gif|webp|heic|heif)$/i.test(name);
+
+  if (!isPdf && !isImg) {
+    GE();
+    throw new Error('Please upload a PDF or image file.');
   }
 
   L('ENTRY', {
     tsId,
-    weekId,
     name: file.name,
     type: file.type,
     size: file.size
   });
 
-  // 1) Determine whether there is CURRENT evidence via getTimesheetPdfUrl
-  const current = await getTimesheetPdfUrl(tsId);
-  const hasCurrent = !!(current && current.url);
-  const currentUrl = hasCurrent ? current.url : null;
+  const instanceId = `ts-ev-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const selId = `${instanceId}-type`;
+  const otherId = `${instanceId}-other`;
+  const previewId = `${instanceId}-preview`;
 
-  // 2) Blob URL for NEW file
   const newUrl = URL.createObjectURL(file);
 
-  const isReplacement = !!hasCurrent;
-  const title = isReplacement
-    ? `Replace timesheet evidence ${String(tsId).slice(0, 8)}…`
-    : `Upload timesheet evidence ${String(tsId).slice(0, 8)}…`;
+  const title = `Upload evidence ${String(tsId).slice(0, 8)}…`;
 
-  const bodyHtml = (() => {
-    if (isReplacement && currentUrl) {
-      // CURRENT vs NEW side-by-side
-      return `
-        <div class="tabc">
-          <div class="card">
-            <div class="row">
-              <label>Compare</label>
-              <div class="controls">
-                <div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;max-height:450px;overflow:auto;">
-                  <div>
-                    <div class="mini" style="margin-bottom:4px;">CURRENT</div>
-                    <iframe
-                      src="${currentUrl}"
-                      style="width:100%;height:380px;border:1px solid var(--line);border-radius:8px;background:#000;"
-                    ></iframe>
-                  </div>
-                  <div>
-                    <div class="mini" style="margin-bottom:4px;">NEW</div>
-                    <iframe
-                      src="${newUrl}"
-                      style="width:100%;height:380px;border:1px solid var(--line);border-radius:8px;background:#000;"
-                    ></iframe>
-                  </div>
-                </div>
-                <div class="mini" style="margin-top:8px;">
-                  Confirm to replace the existing scan for this timesheet with the new file.
-                </div>
-              </div>
+  const bodyHtml = `
+    <div class="tabc">
+      <div class="card">
+        <div class="row">
+          <label>Preview</label>
+          <div class="controls">
+            <iframe
+              id="${previewId}"
+              src="${newUrl}"
+              style="width:100%;height:420px;border:1px solid var(--line);border-radius:8px;background:#000;"
+            ></iframe>
+            <div class="mini" style="margin-top:8px;opacity:.85;">
+              ${escapeHtml(file.name || 'Evidence file')} (${Math.round((file.size || 0) / 1024)} KB)
             </div>
           </div>
         </div>
-      `;
-    }
 
-    // FIRST UPLOAD: NEW only
-    return `
-      <div class="tabc">
-        <div class="card">
-          <div class="row">
-            <label>Preview</label>
-            <div class="controls">
-              <iframe
-                src="${newUrl}"
-                style="width:100%;height:400px;border:1px solid var(--line);border-radius:8px;background:#000;"
-              ></iframe>
-            </div>
+        <div class="row" style="margin-top:10px;">
+          <label>Evidence Type</label>
+          <div class="controls" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+            <select
+              id="${selId}"
+              class="input"
+              style="min-width:220px;background:transparent;border:1px solid rgba(255,255,255,.18);"
+            >
+              <option value="Timesheet">Timesheet</option>
+              <option value="Mileage">Mileage</option>
+              <option value="Accommodation">Accommodation</option>
+              <option value="Expenses">Expenses</option>
+              <option value="Other">Other</option>
+            </select>
+
+            <input
+              id="${otherId}"
+              type="text"
+              class="input"
+              placeholder="Enter evidence type"
+              style="display:none;min-width:260px;background:transparent;border:1px solid rgba(255,255,255,.18);"
+              value=""
+            />
           </div>
-          <div class="row">
-            <label></label>
-            <div class="controls">
-              <span class="mini">
-                No existing timesheet scan is on file. Confirm to upload this file as the current evidence.
-              </span>
-            </div>
+        </div>
+
+        <div class="row" style="margin-top:10px;">
+          <label></label>
+          <div class="controls">
+            <span class="mini" style="opacity:.85;">
+              This will add a new evidence item to the timesheet. Use the Evidence tab table to view or delete items later.
+            </span>
           </div>
         </div>
       </div>
-    `;
-  })();
+    </div>
+  `;
 
-  const tabs = [{ key: 'compare', title: 'Evidence' }];
+  const tabs = [{ key: 'upload', title: 'Evidence' }];
 
- const onSave = async () => {
-  const { LOGM, L, GC, GE } = getTsLoggers('[TS][EVIDENCE][DIALOG][SAVE]');
-  GC('onSave (evidence replace)');
+  const onSave = async () => {
+    const { LOGM, L, GC, GE } = getTsLoggers('[TS][EVIDENCE][DIALOG][SAVE]');
+    GC('onSave (evidence upload)');
 
-  try {
-    const encTsId = encodeURIComponent(tsId);
-
-    // 1) Upload evidence (timesheet-level) or legacy contract-week replace
-    await uploadTimesheetEvidence(tsId, weekId, file);
-
-    // 2) Refresh evidence list so the Evidence tab shows the new items
     try {
-      const res  = await authFetch(API(`/api/timesheets/${encTsId}/evidence`));
-      const json = await res.json().catch(() => []);
-      const evidence = Array.isArray(json) ? json : [];
+      const sel = document.getElementById(selId);
+      const other = document.getElementById(otherId);
 
-      window.modalCtx = window.modalCtx || {};
-      const st = (window.modalCtx.timesheetState ||= {});
-      st.evidence = evidence;
+      const selVal = sel ? String(sel.value || '').trim() : '';
+      let kind = selVal;
 
-      // If the main timesheet modal is currently on the Evidence tab, repaint it
-      if (typeof window.__getModalFrame === 'function') {
-        const fr = window.__getModalFrame();
-        if (fr && fr.entity === 'timesheets' && fr.currentTabKey === 'evidence') {
-          fr.setTab('evidence');
+      if (selVal.toLowerCase() === 'other') {
+        const txt = other ? String(other.value || '').trim() : '';
+        if (!txt) {
+          alert('Please enter an evidence type.');
+          GE();
+          return { ok: false };
         }
+        kind = txt;
       }
+
+      if (!kind) {
+        alert('Please select an evidence type.');
+        GE();
+        return { ok: false };
+      }
+
+      // Upload evidence using the new timesheet-level path
+      await uploadTimesheetEvidence(tsId, file, kind);
+
+      // Refresh evidence list in modal state so parent Evidence tab updates immediately
+      try {
+        const encTsId = encodeURIComponent(tsId);
+
+        // Prefer the canonical refresh helper if it exists
+        if (typeof refreshTimesheetEvidenceIntoModalState === 'function') {
+          await refreshTimesheetEvidenceIntoModalState(tsId);
+        } else {
+          const res = await authFetch(API(`/api/timesheets/${encTsId}/evidence`));
+          const json = await res.json().catch(() => []);
+          const list = Array.isArray(json) ? json : [];
+
+          const normalised = list.map(ev => {
+            const out = { ...(ev || {}) };
+            if (typeof out.system !== 'boolean') out.system = false;
+            if (typeof out.can_delete !== 'boolean') out.can_delete = !out.system;
+            if (!out.uploaded_at_utc && out.created_at) out.uploaded_at_utc = out.created_at;
+            return out;
+          });
+
+          window.modalCtx = window.modalCtx || {};
+          window.modalCtx.timesheetState = window.modalCtx.timesheetState || {};
+          window.modalCtx.timesheetState.evidence = normalised;
+        }
+      } catch (err) {
+        L('refresh evidence after upload failed (non-fatal)', err);
+      }
+
+      if (window.__toast) {
+        window.__toast('Evidence uploaded');
+      }
+
+      try { URL.revokeObjectURL(newUrl); } catch {}
+
+      GE();
+      return { ok: true, saved: { timesheet_id: tsId } };
     } catch (err) {
-      L('refresh evidence after upload failed (non-fatal)', err);
+      L('uploadTimesheetEvidence failed', err);
+      alert(err?.message || 'Failed to upload evidence.');
+      GE();
+      return { ok: false };
     }
+  };
 
-    if (window.__toast) {
-      window.__toast(isReplacement ? 'Timesheet scan replaced' : 'Timesheet scan uploaded');
-    }
-
-    GE();
-    return { ok: true, saved: { timesheet_id: tsId } };
-  } catch (err) {
-    L('uploadTimesheetEvidence failed', err);
-    alert(err?.message || 'Failed to update timesheet evidence.');
-    GE();
-    return { ok: false };
-  }
-};
+  // Wire show/hide of "Other" textbox after modal renders (best-effort, non-fatal)
+  const onDismiss = () => {
+    try { URL.revokeObjectURL(newUrl); } catch {}
+  };
 
   showModal(
     title,
@@ -41525,13 +42450,36 @@ async function openTimesheetEvidenceReplaceDialog(file) {
     {
       kind: 'timesheet-evidence-replace',
       noParentGate: true,
-      forceEdit: true   // start in edit mode instead of view
+      forceEdit: true,
+      onDismiss
     }
   );
 
+  // Best-effort UI wiring after render
+  try {
+    const sel = document.getElementById(selId);
+    const other = document.getElementById(otherId);
+    if (sel && !sel.__tsEvTypeWired) {
+      sel.__tsEvTypeWired = true;
+
+      const sync = () => {
+        const v = String(sel.value || '').trim().toLowerCase();
+        const isOther = (v === 'other');
+        if (other) {
+          other.style.display = isOther ? '' : 'none';
+          if (!isOther) other.value = '';
+        }
+      };
+
+      sel.addEventListener('change', sync);
+      sync();
+    }
+  } catch {}
+
   GE();
 }
-async function uploadTimesheetEvidence(timesheetId, contractWeekId, file) {
+
+async function uploadTimesheetEvidence(timesheetId, file, evidenceTypeLabel) {
   const { LOGM, L, GC, GE } = getTsLoggers('[TS][EVIDENCE][UPLOAD]');
   GC('uploadTimesheetEvidence');
 
@@ -41544,99 +42492,31 @@ async function uploadTimesheetEvidence(timesheetId, contractWeekId, file) {
     throw new Error('uploadTimesheetEvidence: file is required');
   }
 
+  const kind = String(evidenceTypeLabel || '').trim();
+  if (!kind) {
+    GE();
+    throw new Error('uploadTimesheetEvidence: evidenceTypeLabel is required');
+  }
+
   const enc = encodeURIComponent;
   const contentType = file.type || 'application/octet-stream';
   const filename    = file.name || 'timesheet-evidence';
 
-  L('ENTRY', { timesheetId, contractWeekId, contentType, filename, size: file.size });
+  L('ENTRY', { timesheetId, kind, contentType, filename, size: file.size });
 
   // ─────────────────────────────────────────────────────────────
-  // Weekly manual path: use contract-week presign + replace
+  // Timesheet-level path ONLY:
+  // 1) /api/files/presign-upload
+  // 2) PUT to upload_url
+  // 3) POST /api/timesheets/:id/evidence with { kind, display_name, storage_key }
   // ─────────────────────────────────────────────────────────────
-  // We keep this legacy path for existing weekly/manual flows that still rely on
-  // contract_weeks.manual_pdf_r2_key. The Evidence tab itself now uses
-  // /api/timesheets/:id/evidence; contract-week replace remains for compatibility.
-  if (contractWeekId) {
-    const weekEnc = enc(contractWeekId);
 
-    // 1) Presign upload for this contract_week
-    let presignJson;
-    try {
-      const res  = await authFetch(API(`/api/contract-weeks/${weekEnc}/presign-manual-pdf`), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({})
-      });
-      const text = await res.text();
-      if (!res.ok) {
-        L('presign-manual-pdf failed', { status: res.status, bodyPreview: text.slice(0, 400) });
-        throw new Error(text || 'Failed to presign manual PDF upload');
-      }
-      presignJson = text ? JSON.parse(text) : {};
-    } catch (err) {
-      L('presign-manual-pdf error', err);
-      GE();
-      throw err;
-    }
-
-    const uploadUrl = presignJson.upload_url || null;
-    const r2Key     = presignJson.key || presignJson.r2_key || null;
-    if (!uploadUrl || !r2Key) {
-      GE();
-      throw new Error('Presign response missing upload_url or key');
-    }
-
-    L('presign (contract-week) OK', { uploadUrl, r2Key });
-
-    // 2) Upload file to R2
-    try {
-      const res = await fetch(uploadUrl, {
-        method: 'PUT',
-        headers: { 'Content-Type': contentType },
-        body: file
-      });
-      if (!res.ok) {
-        const text = await res.text().catch(() => '');
-        L('contract-week upload failed', { status: res.status, bodyPreview: text.slice(0, 400) });
-        throw new Error(text || 'Failed to upload manual PDF');
-      }
-    } catch (err) {
-      L('contract-week upload error', err);
-      GE();
-      throw err;
-    }
-
-    // 3) Confirm replacement on the week (legacy manual_pdf_r2_key flow)
-    try {
-      const res  = await authFetch(API(`/api/contract-weeks/${weekEnc}/replace-manual-pdf`), {
-        method: 'POST',
-        headers: { 'Content-Type':'application/json' },
-        body: JSON.stringify({ r2_key: r2Key })
-      });
-      const text = await res.text();
-      if (!res.ok) {
-        L('replace-manual-pdf failed', { status: res.status, bodyPreview: text.slice(0, 400) });
-        throw new Error(text || 'Failed to update contract-week scan');
-      }
-    } catch (err) {
-      L('replace-manual-pdf error', err);
-      GE();
-      throw err;
-    }
-
-    L('UPLOAD OK (contract-week)', { timesheetId, contractWeekId, r2Key });
-    GE();
-    return { ok: true, manual_pdf_r2_key: r2Key };
-  }
-
-  // ─────────────────────────────────────────────────────────────
-  // Timesheet-level path: files presign + evidence POST
-  // ─────────────────────────────────────────────────────────────
+  // 1) Presign upload
   let presignJson;
   try {
-    const res  = await authFetch(API('/api/files/presign-upload'), {
+    const res = await authFetch(API('/api/files/presign-upload'), {
       method: 'POST',
-      headers: { 'Content-Type':'application/json' },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         content_type: contentType,
         filename
@@ -41661,9 +42541,9 @@ async function uploadTimesheetEvidence(timesheetId, contractWeekId, file) {
     throw new Error('Presign-upload response missing upload_url or key');
   }
 
-  L('presign (timesheet-level) OK', { uploadUrl, fileKey });
+  L('presign OK', { uploadUrl, fileKey });
 
-  // 2) Upload file to R2
+  // 2) Upload file to R2 (via signed URL)
   try {
     const res = await fetch(uploadUrl, {
       method: 'PUT',
@@ -41672,23 +42552,23 @@ async function uploadTimesheetEvidence(timesheetId, contractWeekId, file) {
     });
     if (!res.ok) {
       const text = await res.text().catch(() => '');
-      L('timesheet-level upload failed', { status: res.status, bodyPreview: text.slice(0, 400) });
+      L('upload failed', { status: res.status, bodyPreview: text.slice(0, 400) });
       throw new Error(text || 'Failed to upload timesheet evidence');
     }
   } catch (err) {
-    L('timesheet-level upload error', err);
+    L('upload error', err);
     GE();
     throw err;
   }
 
-  // 3) Create a timesheet_evidence row (new behaviour)
+  // 3) Record evidence row
   try {
     const encTsId = enc(timesheetId);
-    const res  = await authFetch(API(`/api/timesheets/${encTsId}/evidence`), {
+    const res = await authFetch(API(`/api/timesheets/${encTsId}/evidence`), {
       method: 'POST',
-      headers: { 'Content-Type':'application/json' },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        kind: 'MANUAL_PDF',
+        kind,
         display_name: file.name || filename,
         storage_key: fileKey
       })
@@ -41704,15 +42584,17 @@ async function uploadTimesheetEvidence(timesheetId, contractWeekId, file) {
     throw err;
   }
 
-  L('UPLOAD OK (timesheet-level, evidence)', { timesheetId, storage_key: fileKey });
+  L('UPLOAD OK (timesheet-level, evidence)', { timesheetId, kind, storage_key: fileKey });
   GE();
   return { ok: true, storage_key: fileKey };
 }
+
+
 async function handleTimesheetEvidenceRemoveClick(ev) {
   const { LOGM, L, GC, GE } = getTsLoggers('[TS][EVIDENCE][REMOVE]');
   GC('handleTimesheetEvidenceRemoveClick');
 
-  const btn = ev.target.closest('[data-evidence-remove]');
+  const btn = ev?.target?.closest?.('[data-evidence-remove]');
   if (!btn) {
     GE();
     return;
@@ -41737,6 +42619,29 @@ async function handleTimesheetEvidenceRemoveClick(ev) {
     return;
   }
 
+  // Defensive guard: block system evidence / non-deletable rows
+  try {
+    const list = Array.isArray(mc?.timesheetState?.evidence) ? mc.timesheetState.evidence : [];
+    const item = list.find(x => x && String(x.id) === String(eid)) || null;
+
+    const isSystem = (item && typeof item.system === 'boolean') ? item.system : false;
+    const canDelete = (item && typeof item.can_delete === 'boolean') ? item.can_delete : !isSystem;
+
+    if (isSystem || !canDelete) {
+      GE();
+      alert('This evidence item cannot be deleted.');
+      return;
+    }
+  } catch {
+    // If we cannot determine, continue with delete attempt (backend will still enforce)
+  }
+
+  const ok = window.confirm('Delete this evidence item?');
+  if (!ok) {
+    GE();
+    return;
+  }
+
   const enc = encodeURIComponent;
   const encTsId = enc(tsId);
   const encEid  = enc(eid);
@@ -41744,37 +42649,59 @@ async function handleTimesheetEvidenceRemoveClick(ev) {
   L('REMOVE ENTRY', { timesheetId: tsId, evidenceId: eid });
 
   try {
-    // DELETE the evidence row
+    // 1) DELETE the evidence row
     const res = await authFetch(API(`/api/timesheets/${encTsId}/evidence/${encEid}`), {
       method: 'DELETE'
     });
-    const text = await res.text();
+    const text = await res.text().catch(() => '');
     if (!res.ok) {
       L('DELETE evidence failed', { status: res.status, bodyPreview: text.slice(0, 400) });
       throw new Error(text || 'Failed to delete evidence item');
     }
 
-    // Refetch evidence list
-    const res2  = await authFetch(API(`/api/timesheets/${encTsId}/evidence`));
-    const json2 = await res2.json().catch(() => []);
-    const evidence = Array.isArray(json2) ? json2 : [];
+    // 2) Refresh evidence list into modal state (canonical helper if present)
+    let newEvidence = null;
 
-    // Update modal state
+    if (typeof refreshTimesheetEvidenceIntoModalState === 'function') {
+      try {
+        newEvidence = await refreshTimesheetEvidenceIntoModalState(tsId);
+      } catch (e) {
+        L('refreshTimesheetEvidenceIntoModalState failed (non-fatal)', e);
+        newEvidence = null;
+      }
+    }
+
+    if (!Array.isArray(newEvidence)) {
+      const res2 = await authFetch(API(`/api/timesheets/${encTsId}/evidence`));
+      const json2 = await res2.json().catch(() => []);
+      const list2 = Array.isArray(json2) ? json2 : [];
+
+      newEvidence = list2.map(ev2 => {
+        const out = { ...(ev2 || {}) };
+        if (typeof out.system !== 'boolean') out.system = false;
+        if (typeof out.can_delete !== 'boolean') out.can_delete = !out.system;
+        if (!out.uploaded_at_utc && out.created_at) out.uploaded_at_utc = out.created_at;
+        return out;
+      });
+    }
+
     window.modalCtx = window.modalCtx || {};
-    const st = (window.modalCtx.timesheetState ||= {});
-    st.evidence = evidence;
+    window.modalCtx.timesheetState = window.modalCtx.timesheetState || {};
+    window.modalCtx.timesheetState.evidence = Array.isArray(newEvidence) ? newEvidence : [];
 
-    // Re-render the Evidence tab – the exact function name depends on your modal
-    // renderer. If you have a central render like `renderTimesheetModalTabs`,
-    // you can call it here. Otherwise, you can force a full modal re-render.
-    if (typeof renderTimesheetModal === 'function') {
-      renderTimesheetModal('evidence');
-    } else if (typeof renderTimesheetModalTabs === 'function') {
-      renderTimesheetModalTabs('evidence');
-    } else {
-      // Fallback: if no central renderer, you can manually replace the Evidence tab
-      // container's innerHTML with renderTimesheetEvidenceTab({ row, details, state }).
-      // This is left minimal to avoid inventing unknown helpers.
+    // 3) Repaint Evidence tab if currently visible
+    try {
+      if (typeof window.__getModalFrame === 'function') {
+        const fr = window.__getModalFrame();
+        if (fr && fr.entity === 'timesheets' && fr.currentTabKey === 'evidence') {
+          fr._suppressDirty = true;
+          await fr.setTab('evidence');
+          fr._suppressDirty = false;
+          fr._updateButtons && fr._updateButtons();
+        }
+      }
+    } catch (e) {
+      L('repaint evidence tab failed (non-fatal)', e);
     }
 
     if (window.__toast) {
@@ -41787,6 +42714,7 @@ async function handleTimesheetEvidenceRemoveClick(ev) {
 
   GE();
 }
+
 
 
 async function authoriseTimesheet(ctxOrId) {
