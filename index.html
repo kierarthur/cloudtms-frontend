@@ -681,6 +681,30 @@ body{
       color:var(--sub);
       opacity:.75;
     }
+#modal .input{
+  background:#000;
+  border:1px solid var(--line);
+  color:var(--text);
+  border-radius:8px;
+  padding:8px 10px;
+  width:100%;
+  font-size:12px;
+}
+#modal .input::placeholder{
+  color:var(--sub);
+  opacity:.75;
+}
+
+/* ✅ Make validation errors very visible in the Timesheet modal */
+#modal input.is-invalid,
+#modal select.is-invalid,
+#modal textarea.is-invalid,
+#modal .input.is-invalid{
+  border-color: #ff1f1f !important; /* bright red */
+  box-shadow:
+    0 0 0 2px rgba(255,31,31,.95) inset,
+    0 0 0 3px rgba(255,31,31,.35) !important;
+}
 
     /* Keep postcode "Lookup" button compact, not 50/50 flex */
     .split .btn.mini{
