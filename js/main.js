@@ -26390,8 +26390,14 @@ try { if (closing && typeof closing._onDismiss === 'function') closing._onDismis
         if (cid && typeof discardContractCalendarStage === 'function') discardContractCalendarStage(cid);
       }
     } catch {}
-    sanitizeModalGeometry();
-    const closing=stack().pop(); if (closing?._detachDirty){ try{closing._detachDirty();}catch{} closing._detachDirty=null; }
+   sanitizeModalGeometry();
+const closing = stack().pop();
+
+// ✅ NEW: call onDismiss for ALL modal kinds (not just advanced-search)
+try { if (closing && typeof closing._onDismiss === 'function') closing._onDismiss(); } catch {}
+
+if (closing?._detachDirty){ try{closing._detachDirty();}catch{} closing._detachDirty=null; }
+
     if (closing?._detachGlobal){ try{closing._detachGlobal();}catch{} closing._detachGlobal=null; } top._wired=false;
     if (stack().length>0) {
       const p=currentFrame();
@@ -41727,6 +41733,8 @@ function renderTimesheetRelatedTab(ctx) {
     </div>
   `;
 }
+
+
 function renderTimesheetEvidenceTab(ctx) {
   const { LOGM, L, GC, GE } = getTsLoggers('[TS][EVIDENCE]');
   const { row, details, state } = normaliseTimesheetCtx(ctx);
@@ -41735,18 +41743,34 @@ function renderTimesheetEvidenceTab(ctx) {
   const ts   = details.timesheet || {};
   const tsId = row.timesheet_id || ts.timesheet_id || '';
 
-  // Evidence state – populated by /api/timesheets/:id/evidence
-  // Expected to include BOTH:
-  // - user evidence rows: { id, kind, created_at, storage_key, display_name, system:false, can_delete:true }
-  // - system evidence rows (NHSP/HealthRoster): { id, kind:'NHSP'|'HealthRoster', uploaded_at_utc|created_at, storage_key, display_name, system:true, can_delete:false }
   const evList = Array.isArray(state.evidence) ? state.evidence : [];
 
   L('renderEvidenceTab', { tsId, evidenceCount: evList.length });
   GE();
 
   const getUploadedDt = (ev) => {
-    // support multiple backend field names; prefer import uploaded timestamps when present
     return ev?.uploaded_at_utc || ev?.uploaded_at || ev?.created_at || null;
+  };
+
+  // Format: "Mon 1 December 2025" (Europe/London), no time
+  const formatEvidenceDate = (iso) => {
+    if (!iso) return '—';
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return String(iso);
+
+    try {
+      // en-GB often returns "Mon, 1 December 2025" → remove comma
+      const s = d.toLocaleDateString('en-GB', {
+        timeZone: 'Europe/London',
+        weekday: 'short',
+        day: 'numeric',
+        month: 'long',
+        year: 'numeric'
+      });
+      return String(s).replace(',', '').replace(/\s+/g, ' ').trim();
+    } catch {
+      return d.toISOString().slice(0, 10);
+    }
   };
 
   const isDeletable = (ev) => {
@@ -41761,12 +41785,10 @@ function renderTimesheetEvidenceTab(ctx) {
   };
 
   const nameLabel = (ev) => {
-    // Not shown as a column per your spec, but useful as a tooltip so the user can see filename on hover.
     const n = String(ev?.display_name || '').trim();
     return n ? n : '';
   };
 
-  // Build table rows
   const rowsHtml = evList.length
     ? evList.map(ev => {
         const id = (ev && ev.id != null) ? String(ev.id) : '';
@@ -41774,13 +41796,11 @@ function renderTimesheetEvidenceTab(ctx) {
         const canDelete = isDeletable(ev);
 
         const dt = getUploadedDt(ev);
-        const uploaded = dt ? escapeHtml(formatDateLocal(dt)) : '-';
+        const uploaded = escapeHtml(formatEvidenceDate(dt));
 
         const type = escapeHtml(typeLabel(ev));
         const tooltip = nameLabel(ev) ? ` title="${escapeHtml(nameLabel(ev))}"` : '';
 
-        // Buttons: not-white styling — use "subtle" class if you have it; otherwise inline style fallback.
-        // (Do not rely on .btn default white background.)
         const viewBtn = `
           <button type="button"
                   class="btn mini subtle"
@@ -41858,6 +41878,8 @@ function renderTimesheetEvidenceTab(ctx) {
     </div>
   `;
 }
+
+
 
 async function openTimesheetEvidenceUploadDialog(file) {
   const { LOGM, L, GC, GE } = getTsLoggers('[TS][EVIDENCE][UPLOAD_DIALOG]');
