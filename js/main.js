@@ -24436,13 +24436,16 @@ commitErrors(errs);
           entry.break_mins  = breakMinutes || 0;
           entry.break_minutes = breakMinutes || 0;
 
-          const entryBreaks = [];
-          for (const bw of breakWindows) {
-            if (bw.start || bw.end) {
-              entryBreaks.push({ start: bw.start || null, end: bw.end || null });
-            }
-          }
-          entry.breaks = entryBreaks;
+    const entryBreaks = [];
+for (const bw of breakWindows) {
+  const s = (bw && bw.startStr != null) ? String(bw.startStr).trim() : '';
+  const e = (bw && bw.endStr   != null) ? String(bw.endStr).trim()   : '';
+  if (s || e) {
+    entryBreaks.push({ start: s || null, end: e || null });
+  }
+}
+entry.breaks = entryBreaks;
+
 
           state.schedule = sched;
 
@@ -40230,11 +40233,17 @@ const renderTab = (key, mergedRow) => {
 const onSaveTimesheet = async () => {
   const { LOGM, L, GC, GE } = getTsLoggers('[TS][SAVE]');
   GC('onSaveTimesheet');
+const mc     = window.modalCtx || {};
+const rowNow = mc.data || baseRow;
+const det    = mc.timesheetDetails || details;
+const st     = mc.timesheetState || {};
 
-  const mc     = window.modalCtx || {};
-  const rowNow = mc.data || baseRow;
-  const det    = mc.timesheetDetails || details;
-  const st     = mc.timesheetState || {};
+// ✅ HARD BLOCK: never allow save while scheduleHasErrors is true
+if (st && st.scheduleHasErrors) {
+  alert('Fix the highlighted shift/break times first (overlaps, partial times, or breaks outside the shift).');
+  return { ok: false };
+}
+
 
   // ─────────────────────────────────────────────────────────────
   // Helpers: normalize + compare
@@ -40770,26 +40779,20 @@ const onSaveTimesheet = async () => {
 
   // ✅ NEW: hard reject Save if any schedule errors exist OR final validation fails.
   // Also sanitises removed extra breaks from memory before sending to backend.
-  const needsScheduleValidation =
-    !!st.scheduleHasErrors ||
-    (scheduleChangedWeekly || scheduleChangedDaily);
+  if (scheduleChangedWeekly || scheduleChangedDaily) {
+  const v = finalValidateSchedule(stagedSchedule, st.extraBreakCount);
 
-  if (needsScheduleValidation) {
-    const v = finalValidateSchedule(stagedSchedule, st.extraBreakCount);
+  st.scheduleErrorsByDate = v.errorsByDate || {};
+  st.scheduleHasErrors = !v.ok;
 
-    // persist errors back to state (so Save stays blocked until fixed)
-    st.scheduleErrorsByDate = v.errorsByDate || {};
-    st.scheduleHasErrors = !v.ok;
-
-    if (!v.ok) {
-      GE();
-      alert('Fix highlighted shift/break times first.\n\nIssues: partial times, start/end = same, breaks outside shift, or overlapping breaks.');
-      return { ok: false };
-    }
-
-    // Use cleaned schedule going forward (removes deleted extra breaks!)
-    st.schedule = v.cleaned;
+  if (!v.ok) {
+    GE();
+    alert('Fix highlighted shift/break times first.\n\nIssues: partial times, start/end = same, breaks outside shift, or overlapping breaks.');
+    return { ok: false };
   }
+
+  st.schedule = v.cleaned;
+}
 
   // QR scenario + decision enum
   const qrStatusRaw = String(det?.qr_status || tsLocal?.qr_status || '').toUpperCase();
