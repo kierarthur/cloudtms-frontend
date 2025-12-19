@@ -38291,11 +38291,14 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
   }
 
   const evidenceId = evidenceItem.id != null ? String(evidenceItem.id) : '';
-  const storageKey = evidenceItem.storage_key ? String(evidenceItem.storage_key).trim() : '';
-  if (!storageKey) {
+
+  // ✅ FIX: normalise evidence storage keys (DB may store "/files/..." but R2 key is "files/...")
+  const storageKeyRaw = evidenceItem.storage_key ? String(evidenceItem.storage_key).trim() : '';
+  if (!storageKeyRaw) {
     GE();
     throw new Error('Evidence item missing storage_key.');
   }
+  const storageKey = storageKeyRaw.replace(/^\/+/, '');
 
   const isSystem =
     (typeof evidenceItem.system === 'boolean') ? evidenceItem.system : String(evidenceId).startsWith('SYS:');
@@ -38332,13 +38335,24 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
     }
   };
 
-  L('ENTRY', { tsId, evidenceId, storageKey, kind, canDelete, canEditType, dt: dtRaw });
+  L('ENTRY', {
+    tsId,
+    evidenceId,
+    storageKeyRaw,
+    storageKey,
+    kind,
+    canDelete,
+    canEditType,
+    dt: dtRaw
+  });
 
   const presignDownload = async (key) => {
+    // ✅ FIX: always normalise before presign-download
+    const cleanKey = String(key || '').trim().replace(/^\/+/, '');
     const res = await authFetch(API('/api/files/presign-download'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ key })
+      body: JSON.stringify({ key: cleanKey })
     });
     const text = await res.text().catch(() => '');
     if (!res.ok) throw new Error(text || 'Failed to presign download URL');
