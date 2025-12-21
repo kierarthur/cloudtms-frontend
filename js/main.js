@@ -1721,29 +1721,78 @@ function normalizeClientSettingsForSave(raw) {
 // ===== Auth fetch with refresh retry =====
 
 async function apiPostJson(path, body) {
-  const res = await authFetch(API(path), {
+  const url = API(path);
+
+  const hasBody = (body !== undefined && body !== null);
+  const init = {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body || {})
-  });
-  if (!res.ok) {
-    const txt = await res.text().catch(() => '');
-    throw new Error(txt || `Request failed (${res.status})`);
+    headers: { 'Content-Type': 'application/json' }
+  };
+  if (hasBody) init.body = JSON.stringify(body);
+
+  let res, txt = '', parsed = null;
+
+  try {
+    res = await authFetch(url, init);
+    txt = await res.text().catch(() => '');
+  } catch (e) {
+    // network / CORS / authFetch failure (no HTTP status)
+    throw e;
   }
-  return res.json().catch(() => ({}));
+
+  try { parsed = txt ? JSON.parse(txt) : null; } catch { parsed = null; }
+
+  if (!res.ok) {
+    const msg =
+      (parsed && typeof parsed === 'object' && (parsed.message || parsed.error))
+        ? String(parsed.message || parsed.error)
+        : (txt || `Request failed (${res.status})`);
+
+    const err = new Error(msg);
+    err.status = res.status;
+    err.body = txt || '';
+    err.json = parsed;
+    throw err;
+  }
+
+  return (parsed != null) ? parsed : {};
 }
 
 async function apiPatchJson(path, body) {
-  const res = await authFetch(API(path), {
+  const url = API(path);
+
+  const hasBody = (body !== undefined && body !== null);
+  const init = {
     method: 'PATCH',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body || {})
-  });
-  if (!res.ok) {
-    const txt = await res.text().catch(() => '');
-    throw new Error(txt || `Request failed (${res.status})`);
+    headers: { 'Content-Type': 'application/json' }
+  };
+  if (hasBody) init.body = JSON.stringify(body);
+
+  let res, txt = '', parsed = null;
+
+  try {
+    res = await authFetch(url, init);
+    txt = await res.text().catch(() => '');
+  } catch (e) {
+    throw e;
   }
-  return res.json().catch(() => ({}));
+
+  try { parsed = txt ? JSON.parse(txt) : null; } catch { parsed = null; }
+
+  if (!res.ok) {
+    const msg =
+      (parsed && typeof parsed === 'object' && (parsed.message || parsed.error))
+        ? String(parsed.message || parsed.error)
+        : (txt || `Request failed (${res.status})`);
+
+    const err = new Error(msg);
+    err.status = res.status;
+    err.body = txt || '';
+    err.json = parsed;
+    throw err;
+  }
+
+  return (parsed != null) ? parsed : {};
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -4966,39 +5015,73 @@ async function contractWeekReplacePdf(week_id, r2_key) {
   return r.json();
 }
 
-async function contractWeekManualUpsert(week_id, payload /* { hours or day_entries_json, reference_number? } */) {
+
+
+// FE FIX: rotation-safe manual upsert (uses apiPostJson + includes expected_timesheet_id when available)
+async function contractWeekManualUpsert(week_id, payload /* { hours or day_entries_json, reference_number?, expected_timesheet_id? } */) {
+  const out = { ...(payload || {}) };
+
   // Ensure numeric 5-bucket totals if passed in
-  if (payload?.hours) {
-    const h = payload.hours;
-    payload.hours = {
+  if (out?.hours) {
+    const h = out.hours;
+    out.hours = {
       day: Number(h?.day || 0), night: Number(h?.night || 0),
       sat: Number(h?.sat || 0), sun: Number(h?.sun || 0), bh: Number(h?.bh || 0)
     };
   }
-  const r = await authFetch(API(`/api/contract-weeks/${_enc(week_id)}/manual-upsert`), {
-    method:'POST', headers:{'content-type':'application/json'}, body:_json(payload)
+
+  // Attach expected id if caller didn't provide one (modal path)
+  const expected =
+    (out.expected_timesheet_id != null ? String(out.expected_timesheet_id) : '') ||
+    (window.modalCtx?.timesheetMeta?.expected_timesheet_id
+      ? String(window.modalCtx.timesheetMeta.expected_timesheet_id)
+      : '');
+
+  if (expected && !out.expected_timesheet_id) out.expected_timesheet_id = expected;
+
+  // ✅ apiPostJson ensures thrown errors have .status + .json (409 TIMESHEET_MOVED supported)
+  return apiPostJson(`/api/contract-weeks/${_enc(week_id)}/manual-upsert`, out);
+}
+
+
+// FE FIX: authorise must be expected-guarded (uses apiPostJson)
+async function contractWeekAuthorise(week_id, expectedTimesheetId /* optional */) {
+  const expected =
+    (expectedTimesheetId != null ? String(expectedTimesheetId) : '') ||
+    (window.modalCtx?.timesheetMeta?.expected_timesheet_id
+      ? String(window.modalCtx.timesheetMeta.expected_timesheet_id)
+      : '');
+
+  if (!expected) throw new Error('contractWeekAuthorise: expected_timesheet_id is required');
+
+  return apiPostJson(`/api/contract-weeks/${_enc(week_id)}/manual-authorise`, {
+    expected_timesheet_id: expected
   });
-  if (!r?.ok) throw new Error('Manual upsert failed');
-  return r.json(); // { timesheet_id, processing_status, hours, had_day_entries }
 }
 
-async function contractWeekAuthorise(week_id) {
-  const r = await authFetch(API(`/api/contract-weeks/${_enc(week_id)}/manual-authorise`), { method:'POST' });
-  if (!r?.ok) throw new Error('Authorise failed');
-  return r.json();
-}
+// FE FIX: delete timesheet must be expected-guarded (uses apiDeleteJson)
+async function contractWeekDeleteTimesheet(week_id, expectedTimesheetId /* optional */) {
+  const expected =
+    (expectedTimesheetId != null ? String(expectedTimesheetId) : '') ||
+    (window.modalCtx?.timesheetMeta?.expected_timesheet_id
+      ? String(window.modalCtx.timesheetMeta.expected_timesheet_id)
+      : '');
 
-async function contractWeekDeleteTimesheet(week_id) {
-  const r = await authFetch(API(`/api/contract-weeks/${_enc(week_id)}/timesheet`), { method:'DELETE' });
-  if (!r?.ok) throw new Error('Delete timesheet failed');
-  return r.json();
-}
+  if (!expected) throw new Error('contractWeekDeleteTimesheet: expected_timesheet_id is required');
 
+  return apiDeleteJson(`/api/contract-weeks/${_enc(week_id)}/timesheet`, {
+    expected_timesheet_id: expected
+  });
+}
+// FE FIX: mutation should not use raw authFetch; use apiPostJson for consistent error shape
 async function contractWeekCreateExpenseSheet(week_id) {
-  const r = await authFetch(API(`/api/contract-weeks/${_enc(week_id)}/create-expense-sheet`), { method:'POST' });
-  if (!r?.ok) throw new Error('Create expense sheet failed');
-  return r.json();
+  return apiPostJson(`/api/contract-weeks/${_enc(week_id)}/create-expense-sheet`, {});
 }
+
+
+
+
+
 
 // Minimal picker feed
 async function listContractsBasic() {
@@ -12779,7 +12862,7 @@ function openDetails(rowOrId) {
   else if (currentSection === 'timesheets') openTimesheet(row);
 }
 
-async function unauthoriseTimesheet(ctxOrId) {
+async function unauthoriseTimesheet(ctxOrId, expectedTimesheetId) {
   const { LOGM, L, GC, GE } = getTsLoggers('[TS][UNAUTH]');
   GC('unauthoriseTimesheet');
 
@@ -12796,37 +12879,33 @@ async function unauthoriseTimesheet(ctxOrId) {
     throw new Error('unauthoriseTimesheet: timesheetId is required');
   }
 
-  const encId = encodeURIComponent(tsId);
-  const url   = API(`/api/timesheets/${encId}/unauthorise`);
+  const expected =
+    (expectedTimesheetId != null ? String(expectedTimesheetId) : '') ||
+    (mc.timesheetMeta && mc.timesheetMeta.expected_timesheet_id) ||
+    String(tsId);
 
-  L('REQUEST', { url, tsId });
+  const encId   = encodeURIComponent(tsId);
+  const urlPath = `/api/timesheets/${encId}/unauthorise`;
 
-  let res, text;
-  try {
-    res  = await authFetch(url, { method: 'POST' });
-    text = await res.text();
-  } catch (err) {
-    L('network error', err);
-    GE();
-    throw err;
-  }
+  const payload = { expected_timesheet_id: expected };
 
-  if (!res.ok) {
-    L('server error', { status: res.status, bodyPreview: text.slice(0, 400) });
-    GE();
-    throw new Error(text || `Failed to unauthorise timesheet ${tsId}`);
-  }
+  L('REQUEST', { url: API(urlPath), tsId, payload });
 
-  let json = {};
-  try { json = text ? JSON.parse(text) : {}; } catch (err) {
-    L('parse error', err);
-  }
+  // ✅ Use apiPostJson so 409 errors preserve err.status + err.json for TIMESHEET_MOVED handling
+  const json = await apiPostJson(urlPath, payload);
 
   L('unauthorise result', json);
 
+  const newId =
+    (json && (json.current_timesheet_id || json.new_timesheet_id || json.timesheet_id))
+      ? (json.current_timesheet_id || json.new_timesheet_id || json.timesheet_id)
+      : null;
+
+  const resolvedId = (newId && String(newId).trim()) ? String(newId) : String(tsId);
+
   let newDetails = mc.timesheetDetails;
   try {
-    newDetails = await fetchTimesheetDetails(tsId);
+    newDetails = await fetchTimesheetDetails(resolvedId);
     window.modalCtx.timesheetDetails = newDetails;
   } catch (err) {
     L('refresh details failed (non-fatal)', err);
@@ -12840,23 +12919,40 @@ async function unauthoriseTimesheet(ctxOrId) {
     total_pay_ex_vat: tsfin.total_pay_ex_vat ?? mc.data?.total_pay_ex_vat,
     total_charge_ex_vat: tsfin.total_charge_ex_vat ?? mc.data?.total_charge_ex_vat,
     margin_ex_vat: tsfin.margin_ex_vat ?? mc.data?.margin_ex_vat,
-    id: tsId
+    timesheet_id: resolvedId,
+    id: resolvedId
   };
 
   window.modalCtx.data = updatedRow;
 
+  // ✅ keep guarded-write expected id aligned
+  if (window.modalCtx?.timesheetMeta && typeof window.modalCtx.timesheetMeta === 'object') {
+    window.modalCtx.timesheetMeta.expected_timesheet_id = resolvedId;
+  }
+
   try {
     window.__pendingFocus = {
       section: 'timesheets',
-      ids: [String(tsId)],
-      primaryIds: [String(tsId)]
+      ids: [String(resolvedId)],
+      primaryIds: [String(resolvedId)]
     };
   } catch {}
 
+  // ✅ Keep the summary grid consistent
+  try {
+    if (typeof refreshTimesheetsSummaryAfterRotation === 'function') {
+      await refreshTimesheetsSummaryAfterRotation(resolvedId);
+    }
+  } catch (e) {
+    L('summary refresh failed (non-fatal)', e);
+  }
+
   L('UPDATED ROW', updatedRow);
   GE();
-  return { ok: true, updatedRow, details: newDetails };
+  return { ok: true, updatedRow, details: newDetails, json };
 }
+
+
 
 function openCreate(){
   if (!confirmDiscardChangesIfDirty()) return;
@@ -23409,10 +23505,31 @@ if (this.entity === 'timesheets' && k === 'overview') {
     if (LOGM) LT('no modalBody root, skip wiring');
   } else {
     try {
-      const mc    = window.modalCtx || {};
-      const tsId  = mc.data?.timesheet_id || null;       // REAL timesheet id only
-      const weekId= mc.data?.contract_week_id || null;   // contract_week id for planned weeks
-      const mode  = this.mode || 'view';
+   const mc    = window.modalCtx || {};
+const tsId  = mc.data?.timesheet_id || null;       // REAL timesheet id only (may rotate)
+const weekId= mc.data?.contract_week_id || null;   // contract_week id for planned weeks
+const mode  = this.mode || 'view';
+
+// ─────────────────────────────────────────────────────────────
+// Rotation-safety helpers (standalone overview actions)
+// ─────────────────────────────────────────────────────────────
+const tsNow = () => (window.modalCtx?.data?.timesheet_id || null);
+const expectedNow = () => (
+  window.modalCtx?.timesheetMeta?.expected_timesheet_id ||
+  window.modalCtx?.data?.timesheet_id ||
+  null
+);
+
+// Standard 409 moved handler for ALL overview actions
+const handleMoved = async (err, label) => {
+  // Global helper (defined below) adopts new id + refreshes details + refreshes summary + repaints
+  return await tsHandleMoved409Modal(err, {
+    tabKey: 'overview',
+    toast: 'This timesheet changed while you were editing; review and try again.',
+    label: label || 'timesheet-action'
+  });
+};
+
 
       if (!tsId && !weekId) {
         if (LOGM) LT('no tsId/contract_week_id on modalCtx.data, skip overview wiring');
@@ -23544,16 +23661,19 @@ const weeklyManualPlanned =
         if (holdOffBtn)  holdOffBtn.style.display = 'none';
         if (markPaidBtn) markPaidBtn.style.display= 'none';
 
-        // ── Authorise / Unauthorise ──
+       // ── Authorise / Unauthorise ──
         if (authoriseBtn) {
           authoriseBtn.style.display = (!isAuthorised && !locked && mode === 'view' && hasTs) ? '' : 'none';
           if (!authoriseBtn.__tsWired) {
             authoriseBtn.__tsWired = true;
             authoriseBtn.addEventListener('click', async () => {
               try {
-                await authoriseTimesheet(tsId);
-                window.__toast && window.__toast('Timesheet authorised');
+          await authoriseTimesheet(tsNow());
+window.__toast && window.__toast('Timesheet authorised');
+await refreshAndRepaintOverview();
+
               } catch (err) {
+                if (await handleMoved(err, 'authorise')) return;
                 if (LOGM) console.warn('[TS][OVERVIEW] authoriseTimesheet failed', err);
                 alert(err?.message || 'Failed to authorise timesheet.');
               }
@@ -23568,13 +23688,16 @@ const weeklyManualPlanned =
             unauthoriseBtn.addEventListener('click', async () => {
               const ok = window.confirm('Unauthorise this timesheet? It will return to a pending state.');
               if (!ok) return;
-              try {
-                await unauthoriseTimesheet(tsId);
-                window.__toast && window.__toast('Timesheet unauthorised');
-              } catch (err) {
-                if (LOGM) console.warn('[TS][OVERVIEW] unauthoriseTimesheet failed', err);
-                alert(err?.message || 'Failed to unauthorise timesheet.');
-              }
+          try {
+  await unauthoriseTimesheet(tsNow());
+  window.__toast && window.__toast('Timesheet unauthorised');
+  await refreshAndRepaintOverview();
+} catch (err) {
+  if (await handleMoved(err, 'unauthorise')) return;
+  if (LOGM) console.warn('[TS][OVERVIEW] unauthoriseTimesheet failed', err);
+  alert(err?.message || 'Failed to unauthorise timesheet.');
+}
+
             });
           }
         }
@@ -23666,6 +23789,7 @@ const weeklyManualPlanned =
                 }
 
               } catch (err) {
+                if (await handleMoved(err, 'switch-manual')) return;
                 if (LOGM) console.warn('[TS][OVERVIEW] switch to manual failed', err);
                 alert(err?.message || 'Failed to switch to manual.');
               }
@@ -23691,6 +23815,7 @@ const weeklyManualPlanned =
                 try { byId('btnCloseModal').click(); } catch {}
                 try { await renderAll(); } catch {}
               } catch (err) {
+                if (await handleMoved(err, 'revert-electronic')) return;
                 if (LOGM) console.warn('[TS][OVERVIEW] revertTimesheetToElectronic failed', err);
                 alert(err?.message || 'Failed to restore electronic timesheet.');
               }
@@ -23716,6 +23841,7 @@ const weeklyManualPlanned =
                 try { byId('btnCloseModal').click(); } catch {}
                 try { await renderAll(); } catch {}
               } catch (err) {
+                if (await handleMoved(err, 'delete-manual-reopen')) return;
                 if (LOGM) console.warn('[TS][OVERVIEW] deleteManualTimesheetAndReopenWeek failed', err);
                 alert(err?.message || 'Failed to delete manual timesheet and reopen week.');
               }
@@ -23748,6 +23874,7 @@ const weeklyManualPlanned =
                 try { byId('btnCloseModal').click(); } catch {}
                 try { await renderAll(); } catch {}
               } catch (err) {
+                if (await handleMoved(err, 'delete-permanent')) return;
                 if (LOGM) console.warn('[TS][OVERVIEW] deleteTimesheetPermanent failed', err);
                 alert(err?.message || 'Failed to delete timesheet.');
               }
@@ -23821,31 +23948,41 @@ if (switchElecPlannedBtn) {
 
 
 
-        const refreshAndRepaintOverview = async () => {
-          try {
-            if (tsId) {
-              const fresh = await fetchTimesheetDetails(tsId);
-              window.modalCtx.timesheetDetails = fresh;
-            }
-          } catch {}
+   const refreshAndRepaintOverview = async () => {
+  const idNow = (window.modalCtx?.data?.timesheet_id || null);
 
-          try { await renderAll(); } catch {}
+  try {
+    if (idNow) {
+      const fresh = await fetchTimesheetDetails(idNow);
+      window.modalCtx.timesheetDetails = fresh;
+    }
+  } catch {}
 
-          try {
-            if (typeof window.__getModalFrame === 'function') {
-              const fr = window.__getModalFrame();
-              if (fr && fr.entity === 'timesheets') {
-                fr.mode = 'view';
-                fr._suppressDirty = true;
-                fr.setTab('overview');
-                fr._suppressDirty = false;
-                fr._updateButtons && fr._updateButtons();
-              }
-            }
-          } catch {}
-        };
+  // Keep summary row in sync with the adopted/current id
+  try {
+    if (idNow && typeof refreshTimesheetsSummaryAfterRotation === 'function') {
+      refreshTimesheetsSummaryAfterRotation(idNow);
+    }
+  } catch {}
 
-        // Resend QR email (Scenario 2)
+  try { await renderAll(); } catch {}
+
+  try {
+    if (typeof window.__getModalFrame === 'function') {
+      const fr = window.__getModalFrame();
+      if (fr && fr.entity === 'timesheets') {
+        fr.mode = 'view';
+        fr._suppressDirty = true;
+        await fr.setTab('overview');
+        fr._suppressDirty = false;
+        fr._updateButtons && fr._updateButtons();
+      }
+    }
+  } catch {}
+};
+
+
+      // Resend QR email (Scenario 2)
         if (qrResendBtn) {
           qrResendBtn.style.display = (!!tsId && !locked) ? '' : 'none';
           if (!qrResendBtn.__tsWired) {
@@ -23856,14 +23993,14 @@ if (switchElecPlannedBtn) {
                 window.__toast && window.__toast('QR email queued for resend.');
                 await refreshAndRepaintOverview();
               } catch (err) {
+                if (await handleMoved(err, 'qr-resend')) return;
                 if (LOGM) console.warn('[TS][OVERVIEW] qr-resend failed', err);
                 alert(err?.message || 'Failed to resend QR email.');
               }
             });
           }
         }
-
-        // Refuse QR hours (Scenario 2)
+      // Refuse QR hours (Scenario 2)
         if (qrRefuseBtn) {
           qrRefuseBtn.style.display = (!!tsId && !locked) ? '' : 'none';
           if (!qrRefuseBtn.__tsWired) {
@@ -23875,6 +24012,7 @@ if (switchElecPlannedBtn) {
                 window.__toast && window.__toast('Timesheet refused and candidate notified.');
                 await refreshAndRepaintOverview();
               } catch (err) {
+                if (await handleMoved(err, 'qr-refuse')) return;
                 if (LOGM) console.warn('[TS][OVERVIEW] qr-refuse failed', err);
                 alert(err?.message || 'Failed to refuse QR hours.');
               }
@@ -23932,16 +24070,27 @@ if (switchElecPlannedBtn) {
               if (!ok) return;
 
               try {
-                await apiPostJson(`/api/timesheets/${encodeURIComponent(tsId)}/convert-qr-to-manual`, {});
-                window.__toast && window.__toast('Converted to manual-only.');
-                await refreshAndRepaintOverview();
-              } catch (err) {
-                if (LOGM) console.warn('[TS][OVERVIEW] convert-qr-to-manual failed', err);
-                alert(err?.message || 'Failed to convert to manual-only.');
-              }
+           const idNow = tsNow();
+if (!idNow) throw new Error('Timesheet id missing.');
+
+await apiPostJson(
+  `/api/timesheets/${encodeURIComponent(idNow)}/convert-qr-to-manual`,
+  { expected_timesheet_id: expectedNow() }
+);
+
+window.__toast && window.__toast('Converted to manual-only.');
+await refreshAndRepaintOverview();
+
+            } catch (err) {
+  if (await handleMoved(err, 'convert-qr-to-manual')) return;
+  if (LOGM) console.warn('[TS][OVERVIEW] convert-qr-to-manual failed', err);
+  alert(err?.message || 'Failed to convert to manual-only.');
+}
+
             });
           }
         }
+
 
         // Restore revoked QR (pending)
         if (qrRestorePendBtn) {
@@ -23956,6 +24105,7 @@ if (switchElecPlannedBtn) {
                 window.__toast && window.__toast('Pending QR restored.');
                 await refreshAndRepaintOverview();
               } catch (err) {
+                if (await handleMoved(err, 'qr-restore-pending')) return;
                 if (LOGM) console.warn('[TS][OVERVIEW] restore pending failed', err);
                 alert(err?.message || 'Failed to restore pending QR.');
               }
@@ -23963,7 +24113,7 @@ if (switchElecPlannedBtn) {
           }
         }
 
-        // Restore revoked QR (signed)
+       // Restore revoked QR (signed)
         if (qrRestoreSignedBtn) {
           qrRestoreSignedBtn.style.display = (!!tsId && !locked && canRestoreSigned) ? '' : 'none';
           if (!qrRestoreSignedBtn.__tsWired) {
@@ -23979,6 +24129,7 @@ if (switchElecPlannedBtn) {
                 window.__toast && window.__toast('Signed QR restored.');
                 await refreshAndRepaintOverview();
               } catch (err) {
+                if (await handleMoved(err, 'qr-restore-signed')) return;
                 if (LOGM) console.warn('[TS][OVERVIEW] restore signed failed', err);
                 alert(err?.message || 'Failed to restore signed QR.');
               }
@@ -23998,6 +24149,7 @@ if (switchElecPlannedBtn) {
                 window.__toast && window.__toast('QR enabled again.');
                 await refreshAndRepaintOverview();
               } catch (err) {
+                if (await handleMoved(err, 'allow-qr-again')) return;
                 if (LOGM) console.warn('[TS][OVERVIEW] allow-qr-again failed', err);
                 alert(err?.message || 'Failed to allow QR again.');
               }
@@ -24005,7 +24157,7 @@ if (switchElecPlannedBtn) {
           }
         }
 
-        // Allow electronic again
+       // Allow electronic again
         if (allowElecAgainBtn) {
           allowElecAgainBtn.style.display = (!!tsId && !locked && canAllowElecAgain) ? '' : 'none';
           if (!allowElecAgainBtn.__tsWired) {
@@ -24017,6 +24169,7 @@ if (switchElecPlannedBtn) {
                 window.__toast && window.__toast('Electronic enabled again.');
                 await refreshAndRepaintOverview();
               } catch (err) {
+                if (await handleMoved(err, 'allow-electronic-again')) return;
                 if (LOGM) console.warn('[TS][OVERVIEW] allow-electronic-again failed', err);
                 alert(err?.message || 'Failed to allow electronic again.');
               }
@@ -24056,48 +24209,26 @@ if (switchElecPlannedBtn) {
                 const encId = encodeURIComponent(tsId);
 
                 try {
-                  const res = await authFetch(
-                    API(`/api/timesheets/${encId}/daily-qr-printable`),
-                    {
-                      method: 'POST',
-                      headers: { 'Content-Type': 'application/json' },
-                      body: JSON.stringify({})
-                    }
-                  );
-                  const txt = await res.text().catch(() => '');
-                  if (!res.ok) {
-                    throw new Error(txt || 'Failed to generate daily QR timesheet.');
-                  }
+             const idNow = tsNow();
+if (!idNow) throw new Error('Timesheet id missing; cannot generate daily QR timesheet.');
 
-                  window.__toast && window.__toast('Daily QR timesheet generated and emailed. Evidence is now required via QR scan.');
+await apiPostJson(
+  `/api/timesheets/${encodeURIComponent(idNow)}/daily-qr-printable`,
+  { expected_timesheet_id: expectedNow() }
+);
 
-                  try {
-                    const fresh = await fetchTimesheetDetails(tsId);
-                    window.modalCtx.timesheetDetails = fresh;
-                  } catch {}
+window.__toast && window.__toast(
+  'Daily QR timesheet generated and emailed. Evidence is now required via QR scan.'
+);
 
-                  try { await renderAll(); } catch (e) {
-                    if (LOGM) LT('[TS][OVERVIEW] renderAll() after daily QR failed (non-fatal)', e);
-                  }
+await refreshAndRepaintOverview();
 
-                  try {
-                    if (typeof window.__getModalFrame === 'function') {
-                      const fr = window.__getModalFrame();
-                      if (fr && fr.entity === 'timesheets') {
-                        fr.mode = 'view';
-                        fr._suppressDirty = true;
-                        fr.setTab('overview');
-                        fr._suppressDirty = false;
-                        fr._updateButtons && fr._updateButtons();
-                      }
-                    }
-                  } catch (e) {
-                    if (LOGM) LT('[TS][OVERVIEW] repaint after daily QR failed (non-fatal)', e);
-                  }
-                } catch (err) {
-                  if (LOGM) console.warn('[TS][OVERVIEW] send-daily-qr failed', err);
-                  alert(err?.message || 'Failed to generate daily QR timesheet.');
-                }
+         } catch (err) {
+  if (await handleMoved(err, 'send-daily-qr')) return;
+  if (LOGM) console.warn('[TS][OVERVIEW] send-daily-qr failed', err);
+  alert(err?.message || 'Failed to generate daily QR timesheet.');
+}
+
               });
             }
           }
@@ -26011,41 +26142,54 @@ canEdit = (top.mode === 'view') && (isWeeklyManualTs || isPlannedManualWeek || i
         const ok = window.confirm('Convert to MANUAL timesheet?');
         if (!ok) return;
 
-        try {
-          if (sheetScope2 === 'DAILY' && tsId2 && subMode2 === 'ELECTRONIC') {
-            const encId = encodeURIComponent(tsId2);
-            const res = await authFetch(API(`/api/timesheets/${encId}/switch-daily-to-manual`), { method: 'POST' });
-            const txt = await res.text().catch(()=> '');
-            if (!res.ok) throw new Error(txt || 'Failed to convert daily timesheet to manual.');
-          } else if (sheetScope2 === 'WEEKLY' && tsId2 && subMode2 === 'ELECTRONIC') {
-            await switchTimesheetToManual(tsId2);
-          } else if (sheetScope2 === 'WEEKLY' && !tsId2 && weekId2 && cwMode2 === 'ELECTRONIC') {
-            await switchContractWeekToManual(weekId2);
-          } else {
-            throw new Error('This item is not eligible for Convert to Manual.');
-          }
+     // inside showModal → renderTop → top._updateButtons → btnTsConvert.onclick
 
-          try { await renderAll(); } catch {}
-          try {
-            if (window.modalCtx?.timesheetMeta) {
-              window.modalCtx.timesheetMeta.subMode = 'MANUAL';
-              if (sheetScope2 === 'WEEKLY' && !tsId2) window.modalCtx.timesheetMeta.cw_submission_mode_snapshot = 'MANUAL';
-            }
-            if (window.modalCtx?.data) window.modalCtx.data.submission_mode = 'MANUAL';
-          } catch {}
+try {
+  if (sheetScope2 === 'DAILY' && tsId2 && subMode2 === 'ELECTRONIC') {
+    // ✅ NEW: helper handles expected_timesheet_id + 409 shape + adopt current id + refresh details + refresh summary
+    await switchDailyTimesheetToManual(tsId2);
+  } else if (sheetScope2 === 'WEEKLY' && tsId2 && subMode2 === 'ELECTRONIC') {
+    await switchTimesheetToManual(tsId2);
+  } else if (sheetScope2 === 'WEEKLY' && !tsId2 && weekId2 && cwMode2 === 'ELECTRONIC') {
+    await switchContractWeekToManual(weekId2);
+  } else {
+    throw new Error('This item is not eligible for Convert to Manual.');
+  }
 
-          try {
-            fr.mode = 'view';
-            fr._suppressDirty = true;
-            await fr.setTab('overview');
-            fr._suppressDirty = false;
-            fr._updateButtons && fr._updateButtons();
-          } catch {}
+  // Keep existing repaint behaviour (non-fatal)
+  try { await renderAll(); } catch {}
+  try {
+    if (window.modalCtx?.timesheetMeta) {
+      window.modalCtx.timesheetMeta.subMode = 'MANUAL';
+      if (sheetScope2 === 'WEEKLY' && !tsId2) window.modalCtx.timesheetMeta.cw_submission_mode_snapshot = 'MANUAL';
+    }
+    if (window.modalCtx?.data) window.modalCtx.data.submission_mode = 'MANUAL';
+  } catch {}
 
-          window.__toast && window.__toast('Converted to MANUAL.');
-        } catch (e) {
-          alert(e?.message || 'Convert failed');
-        }
+  try {
+    fr.mode = 'view';
+    fr._suppressDirty = true;
+    await fr.setTab('overview');
+    fr._suppressDirty = false;
+    fr._updateButtons && fr._updateButtons();
+  } catch {}
+
+  window.__toast && window.__toast('Converted to MANUAL.');
+} catch (e) {
+  try {
+    if (typeof tsHandleMoved409Modal === 'function') {
+      const handled = await tsHandleMoved409Modal(e, {
+        tabKey: (currentFrame?.() && currentFrame().currentTabKey) ? currentFrame().currentTabKey : 'overview',
+        label: 'footer-convert-manual',
+        toast: 'This timesheet changed while you were editing; review and try again.'
+      });
+      if (handled) return;
+    }
+  } catch {}
+  alert(e?.message || 'Convert failed');
+}
+
+
       };
     }
 
@@ -26245,9 +26389,20 @@ if (!isChild && top.entity === 'timesheets') {
         renderTop();
 
         try { await renderAll(); } catch {}
-      } catch (e) {
-        alert(e?.message || 'Restore failed');
-      }
+  } catch (e) {
+  try {
+    if (typeof tsHandleMoved409Modal === 'function') {
+      const handled = await tsHandleMoved409Modal(e, {
+        tabKey: (currentFrame?.() && currentFrame().currentTabKey) ? currentFrame().currentTabKey : 'overview',
+        label: 'footer-restore-electronic',
+        toast: 'This timesheet changed while you were editing; review and try again.'
+      });
+      if (handled) return;
+    }
+  } catch {}
+  alert(e?.message || 'Restore failed');
+}
+
     };
   }
 
@@ -26283,9 +26438,20 @@ if (!isChild && top.entity === 'timesheets') {
         await deleteManualTimesheetAndReopenWeek(tsIdX, weekIdX);
         try { byId('btnCloseModal').click(); } catch {}
         try { await renderAll(); } catch {}
-      } catch (e) {
-        alert(e?.message || 'Request new electronic failed');
-      }
+    } catch (e) {
+  try {
+    if (typeof tsHandleMoved409Modal === 'function') {
+      const handled = await tsHandleMoved409Modal(e, {
+        tabKey: (currentFrame?.() && currentFrame().currentTabKey) ? currentFrame().currentTabKey : 'overview',
+        label: 'footer-request-new-electronic',
+        toast: 'This timesheet changed while you were editing; review and try again.'
+      });
+      if (handled) return;
+    }
+  } catch {}
+  alert(e?.message || 'Request new electronic failed');
+}
+
     };
   }
 
@@ -26341,9 +26507,20 @@ if (!isChild && top.entity === 'timesheets') {
         // ✅ then close + refresh
         try { byId('btnCloseModal').click(); } catch {}
         try { await renderAll(); } catch {}
-      } catch (e) {
-        alert(e?.message || 'Delete failed');
-      }
+   } catch (e) {
+  try {
+    if (typeof tsHandleMoved409Modal === 'function') {
+      const handled = await tsHandleMoved409Modal(e, {
+        tabKey: (currentFrame?.() && currentFrame().currentTabKey) ? currentFrame().currentTabKey : 'overview',
+        label: 'footer-delete-timesheet',
+        toast: 'This timesheet changed while you were editing; review and try again.'
+      });
+      if (handled) return;
+    }
+  } catch {}
+  alert(e?.message || 'Delete failed');
+}
+
     };
   }
 }
@@ -26736,34 +26913,38 @@ async function saveForFrame(fr) {
     allowApply
   });
 
-  const isChildNow = (window.__modalStack?.length > 1);
-  const shouldNoop =
-    (fr.kind !== 'advanced-search') &&
-    !fr.noParentGate &&
-    fr.mode === 'edit' &&
-    !fr.isDirty &&
-    !onlyDel &&
-    !allowApply;
+ const isChildNow = (window.__modalStack?.length > 1);
+const isTimesheetFrame = (fr.entity === 'timesheets');
 
-  if (shouldNoop) {
-    L('saveForFrame GUARD (global): no-op (no changes and apply not allowed)');
-    if (isChildNow) {
-      sanitizeModalGeometry();
-      window.__modalStack.pop();
-      if (window.__modalStack.length > 0) {
-        const p = window.__modalStack[window.__modalStack.length - 1];
-        renderTop();
-        try { p.onReturn && p.onReturn(); } catch {}
-      }
-    } else {
-      fr.isDirty = false;
-      fr._snapshot = null;
-      setFrameMode(fr, 'view');
-      fr._updateButtons && fr._updateButtons();
+const shouldNoop =
+  (fr.kind !== 'advanced-search') &&
+  !fr.noParentGate &&
+  fr.mode === 'edit' &&
+  !fr.isDirty &&
+  !onlyDel &&
+  !allowApply &&
+  !isTimesheetFrame;
+
+if (shouldNoop) {
+  L('saveForFrame GUARD (global): no-op (no changes and apply not allowed)');
+  if (isChildNow) {
+    sanitizeModalGeometry();
+    window.__modalStack.pop();
+    if (window.__modalStack.length > 0) {
+      const p = window.__modalStack[window.__modalStack.length - 1];
+      renderTop();
+      try { p.onReturn && p.onReturn(); } catch {}
     }
-    try { window.__toast?.('No changes'); } catch {};
-    return;
+  } else {
+    fr.isDirty = false;
+    fr._snapshot = null;
+    setFrameMode(fr, 'view');
+    fr._updateButtons && fr._updateButtons();
   }
+  try { window.__toast?.('No changes'); } catch {};
+  return;
+}
+
 
  
 
@@ -27034,6 +27215,75 @@ async function saveForFrame(fr) {
   L('showModal ENTER', { title, tabs: (tabs||[]).map(t=>t.key||t.title), hasId, entity: window.modalCtx?.entity, kind: opts.kind, forceEdit: !!opts.forceEdit });
   renderTop();
 }
+
+function tsExtractMoved409(err) {
+  const status = err?.status ?? err?.statusCode ?? null;
+  const j = err?.json || null;
+
+  if (status === 409 && j && j.error === 'TIMESHEET_MOVED' && j.current_timesheet_id) {
+    return { moved: true, current_timesheet_id: String(j.current_timesheet_id) };
+  }
+  return { moved: false, current_timesheet_id: null };
+}
+
+async function tsModalAdoptTimesheetId(newId, opts = {}) {
+  const tabKey = opts.tabKey || 'overview';
+  const toastMsg = opts.toast || null;
+
+  if (!newId) return;
+
+  // Update modalCtx identity + expected snapshot
+  const mc = (window.modalCtx ||= {});
+  mc.data ||= {};
+  mc.timesheetMeta ||= {};
+
+  mc.data.timesheet_id = newId;
+  mc.data.id = newId;
+  mc.timesheetMeta.expected_timesheet_id = newId;
+
+  // Refresh details for the newly-current id
+  try {
+    if (typeof fetchTimesheetDetails === 'function') {
+      const fresh = await fetchTimesheetDetails(newId);
+      mc.timesheetDetails = fresh;
+    }
+  } catch {}
+
+  // Refresh summary row behind the modal (if helper exists)
+  try {
+    if (typeof refreshTimesheetsSummaryAfterRotation === 'function') {
+      refreshTimesheetsSummaryAfterRotation(newId);
+    }
+  } catch {}
+
+  // Toast
+  try { toastMsg && window.__toast && window.__toast(toastMsg); } catch {}
+
+  // Repaint modal tab (best-effort)
+  try {
+    if (typeof window.__getModalFrame === 'function') {
+      const fr = window.__getModalFrame();
+      if (fr && fr.entity === 'timesheets') {
+        fr._suppressDirty = true;
+        await fr.setTab(tabKey);
+        fr._suppressDirty = false;
+        fr._updateButtons && fr._updateButtons();
+      }
+    }
+  } catch {}
+
+  // Optional: refresh grids globally
+  try { typeof renderAll === 'function' && await renderAll(); } catch {}
+}
+
+async function tsHandleMoved409Modal(err, opts = {}) {
+  const x = tsExtractMoved409(err);
+  if (!x.moved) return false;
+
+  await tsModalAdoptTimesheetId(x.current_timesheet_id, opts);
+  return true;
+}
+
 // Candidate calendar loader (Bookings tab)
 // Safe to call on every tab switch; it will either build the scaffold or just refresh.
 // Candidate calendar loader (Bookings tab)
@@ -27050,6 +27300,105 @@ async function saveForFrame(fr) {
 // Return:
 //   - backend should return updated contract_week (recommended) or { hours } / similar
 
+async function switchDailyTimesheetToManual(ctxOrId, expectedTimesheetId) {
+  const { LOGM, L, GC, GE } = getTsLoggers('[TS][SWITCH-DAILY->MANUAL]');
+  GC('switchDailyTimesheetToManual');
+
+  const mc  = window.modalCtx || {};
+  const row = (mc.data && mc.data.timesheet_id) ? mc.data : (ctxOrId && ctxOrId.row ? ctxOrId.row : {});
+  const tsId = (typeof ctxOrId === 'string') ? ctxOrId : (row.timesheet_id || row.id || mc.data?.id || null);
+
+  if (!tsId) {
+    L('ERROR: missing timesheetId');
+    GE();
+    throw new Error('switchDailyTimesheetToManual: timesheetId is required');
+  }
+
+  const expected =
+    (expectedTimesheetId != null ? String(expectedTimesheetId) : '') ||
+    (mc.timesheetMeta && mc.timesheetMeta.expected_timesheet_id) ||
+    String(tsId);
+
+  const encId   = encodeURIComponent(tsId);
+  const urlPath = `/api/timesheets/${encId}/switch-daily-to-manual`;
+
+  const payload = { expected_timesheet_id: expected };
+
+  L('REQUEST', { url: API(urlPath), tsId, payload });
+
+  // ✅ Use apiPostJson so 409 errors preserve err.status + err.json (TIMESHEET_MOVED)
+  const json = await apiPostJson(urlPath, payload);
+
+  const newId =
+    (json && (json.current_timesheet_id || json.new_timesheet_id || json.timesheet_id))
+      ? (json.current_timesheet_id || json.new_timesheet_id || json.timesheet_id)
+      : null;
+
+  const resolvedId = (newId && String(newId).trim()) ? String(newId) : String(tsId);
+
+  // Adopt id + refresh details if this TS is open
+  try {
+    if (window.modalCtx && window.modalCtx.data) {
+      const cur = window.modalCtx.data.timesheet_id || window.modalCtx.data.id || null;
+      const isSame = String(cur || '') === String(tsId || '');
+
+      if (isSame) {
+        if (String(resolvedId) !== String(cur || '')) {
+          window.modalCtx.data.timesheet_id = resolvedId;
+          window.modalCtx.data.id = resolvedId;
+        }
+
+        try {
+          window.modalCtx.data.submission_mode = 'MANUAL';
+        } catch {}
+
+        // keep meta aligned
+        if (window.modalCtx.timesheetMeta && typeof window.modalCtx.timesheetMeta === 'object') {
+          window.modalCtx.timesheetMeta.expected_timesheet_id = resolvedId;
+          window.modalCtx.timesheetMeta.hasTs = true;
+          window.modalCtx.timesheetMeta.sheetScope = 'DAILY';
+          window.modalCtx.timesheetMeta.subMode = 'MANUAL';
+          window.modalCtx.timesheetMeta.isPlannedWeek = false;
+        }
+
+        try {
+          const fresh = await fetchTimesheetDetails(resolvedId);
+          window.modalCtx.timesheetDetails = fresh;
+
+          // also ensure the details copy reflects MANUAL
+          try {
+            if (window.modalCtx.timesheetDetails?.timesheet) {
+              window.modalCtx.timesheetDetails.timesheet.submission_mode = 'MANUAL';
+            }
+          } catch {}
+        } catch (e) {
+          L('refresh details failed (non-fatal)', e);
+        }
+      }
+    }
+  } catch {}
+
+  // Focus + summary refresh
+  try {
+    window.__pendingFocus = {
+      section: 'timesheets',
+      ids: [String(resolvedId)],
+      primaryIds: [String(resolvedId)]
+    };
+  } catch {}
+
+  try {
+    if (typeof refreshTimesheetsSummaryAfterRotation === 'function') {
+      await refreshTimesheetsSummaryAfterRotation(resolvedId);
+    }
+  } catch (e) {
+    L('summary refresh failed (non-fatal)', e);
+  }
+
+  L('RESULT', { json, resolvedId });
+  GE();
+  return { ok: true, json, resolvedId };
+}
 
 async function switchContractWeekToElectronic(contractWeekId) {
   const LOGM = (typeof window.__LOG_MODAL === 'boolean') ? window.__LOG_MODAL : false;
@@ -28192,15 +28541,16 @@ async function openResolveCandidateModal(resolveRow) {
     return;
   }
 
-  const tsId    = resolveRow.timesheet_id;
-  const occName = resolveRow.occupant_key_norm || resolveRow.candidate_name || '(unknown)';
-
   // Seed a small local state for this child modal
   window.__resolveCandidateState = {
-    row: resolveRow,
+    row: { ...(resolveRow || {}) },
     results: [],
-    term: ''
+    term: '',
+    // Track the "expected" id for rotation safety (updated if we detect a move)
+    expected_timesheet_id: String(resolveRow.timesheet_id || '')
   };
+
+  const occName = resolveRow.occupant_key_norm || resolveRow.candidate_name || '(unknown)';
 
   const enc = (typeof escapeHtml === 'function')
     ? escapeHtml
@@ -28210,6 +28560,7 @@ async function openResolveCandidateModal(resolveRow) {
     if (key !== 'main') return '';
     const state = window.__resolveCandidateState || {};
     const results = Array.isArray(state.results) ? state.results : [];
+    const tsIdNow = String(state?.row?.timesheet_id || '');
 
     const resultsHtml = results.length
       ? `
@@ -28238,7 +28589,7 @@ async function openResolveCandidateModal(resolveRow) {
             <div class="controls">
               <div class="mini">
                 Assign candidate for <strong>${enc(occName)}</strong><br/>
-                Timesheet: <span class="mono">${enc(tsId)}</span>
+                Timesheet: <span class="mono">${enc(tsIdNow)}</span>
               </div>
             </div>
           </div>
@@ -28311,7 +28662,6 @@ async function openResolveCandidateModal(resolveRow) {
             window.__resolveCandidateState = window.__resolveCandidateState || {};
             window.__resolveCandidateState.term = term;
             window.__resolveCandidateState.results = Array.isArray(results) ? results : [];
-            // Re-render just the results area
             const frame = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
             if (frame && frame.kind === 'timesheet-resolve-candidate') {
               frame.setTab('main');
@@ -28323,6 +28673,82 @@ async function openResolveCandidateModal(resolveRow) {
         });
       }
 
+      const adoptMovedInResolveUI = async (oldId, movedTo) => {
+        const state = window.__resolveCandidateState || {};
+        if (!state.row || typeof state.row !== 'object') state.row = {};
+        state.row.timesheet_id = movedTo;
+        state.row.id = movedTo;
+        state.expected_timesheet_id = movedTo;
+
+        // Keep the shared modalCtx expected aligned (apiResolveTimesheetCandidate reads this)
+        try {
+          window.modalCtx ||= {};
+          window.modalCtx.timesheetMeta ||= {};
+          window.modalCtx.timesheetMeta.expected_timesheet_id = movedTo;
+        } catch {}
+
+        // Update parent resolve selections so preview doesn’t keep referencing stale ids
+        try {
+          const rs = window.__resolveTimesheetsState || {};
+          if (Array.isArray(rs.selectionIds) && rs.selectionIds.length) {
+            rs.selectionIds = rs.selectionIds.map(x => (String(x) === String(oldId) ? String(movedTo) : x));
+          }
+          if (Array.isArray(rs.rows) && rs.rows.length) {
+            rs.rows = rs.rows.map(r => {
+              const rid = String(r?.timesheet_id || r?.id || '');
+              if (rid === String(oldId)) {
+                return { ...(r || {}), timesheet_id: movedTo, id: movedTo };
+              }
+              return r;
+            });
+          }
+        } catch {}
+
+        // Repaint this child modal so the displayed TS id updates
+        try {
+          const fr = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
+          if (fr && fr.kind === 'timesheet-resolve-candidate') {
+            fr.setTab('main');
+          }
+        } catch {}
+
+        // Best-effort refresh of parent Resolve modal rows (preview)
+        try {
+          const rs = window.__resolveTimesheetsState || {};
+          const ids = Array.isArray(rs.selectionIds)
+            ? rs.selectionIds
+            : (rs.rows || []).map(r => String(r.timesheet_id || r.id || '')).filter(Boolean);
+
+          if (ids.length) {
+            const res = await authFetch(API('/api/timesheets/resolve-preview'), {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ timesheet_ids: ids })
+            });
+            const text = await res.text();
+            if (res.ok) {
+              const newRows = text ? JSON.parse(text) : [];
+              window.__resolveTimesheetsState ||= {};
+              window.__resolveTimesheetsState.rows = Array.isArray(newRows) ? newRows : [];
+              const fr2 = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
+              if (fr2 && fr2.kind === 'timesheets-resolve') {
+                fr2.setTab('main');
+              }
+            }
+          }
+        } catch (e2) {
+          console.warn('[TS][RESOLVE] failed to refresh resolve-preview after moved adoption', e2);
+        }
+
+        try {
+          if (typeof refreshTimesheetsSummaryAfterRotation === 'function') {
+            await refreshTimesheetsSummaryAfterRotation(movedTo);
+          }
+        } catch {}
+
+        window.__toast && window.__toast('This timesheet changed while you were editing. Please review and try again.');
+      };
+
       // Delegate click handler for "Select" buttons
       const resultsHost = root.querySelector('#candResolveResults');
       if (resultsHost && !resultsHost.__tsCandResolveSelectWired) {
@@ -28332,8 +28758,24 @@ async function openResolveCandidateModal(resolveRow) {
           if (!btn) return;
           const candId = btn.getAttribute('data-candidate-id') || '';
           if (!candId) return;
+
+          const state = window.__resolveCandidateState || {};
+          const tsIdNow = String(state?.row?.timesheet_id || '');
+          if (!tsIdNow) {
+            alert('Timesheet id missing; cannot assign candidate.');
+            return;
+          }
+
+          // Ensure apiResolveTimesheetCandidate uses the right expected id (it reads modalCtx.timesheetMeta)
           try {
-            await apiResolveTimesheetCandidate(tsId, candId);
+            window.modalCtx ||= {};
+            window.modalCtx.timesheetMeta ||= {};
+            window.modalCtx.timesheetMeta.expected_timesheet_id =
+              String(state.expected_timesheet_id || tsIdNow);
+          } catch {}
+
+          try {
+            await apiResolveTimesheetCandidate(tsIdNow, candId);
             window.__toast && window.__toast('Candidate mapping updated for timesheet.');
 
             // Close this child modal
@@ -28341,8 +28783,11 @@ async function openResolveCandidateModal(resolveRow) {
             if (closeBtn) closeBtn.click();
 
             // Refresh the parent "Resolve timesheets" modal using stored selectionIds
-            const state = window.__resolveTimesheetsState || {};
-            const ids = Array.isArray(state.selectionIds) ? state.selectionIds : (state.rows || []).map(r => String(r.timesheet_id || r.id || '')).filter(Boolean);
+            const rs = window.__resolveTimesheetsState || {};
+            const ids = Array.isArray(rs.selectionIds)
+              ? rs.selectionIds
+              : (rs.rows || []).map(r => String(r.timesheet_id || r.id || '')).filter(Boolean);
+
             if (ids.length) {
               try {
                 const res = await authFetch(API('/api/timesheets/resolve-preview'), {
@@ -28353,6 +28798,7 @@ async function openResolveCandidateModal(resolveRow) {
                 const text = await res.text();
                 if (res.ok) {
                   const newRows = text ? JSON.parse(text) : [];
+                  window.__resolveTimesheetsState ||= {};
                   window.__resolveTimesheetsState.rows = Array.isArray(newRows) ? newRows : [];
                   const frame = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
                   if (frame && frame.kind === 'timesheets-resolve') {
@@ -28364,6 +28810,13 @@ async function openResolveCandidateModal(resolveRow) {
               }
             }
           } catch (err) {
+            // ✅ Rotation safety: adopt moved id + refresh + let user retry
+            const movedTo = err?.json?.current_timesheet_id || null;
+            if (err?.status === 409 && err?.json?.error === 'TIMESHEET_MOVED' && movedTo) {
+              await adoptMovedInResolveUI(tsIdNow, String(movedTo));
+              return;
+            }
+
             console.error('[TS][RESOLVE] apiResolveTimesheetCandidate failed', err);
             alert(err?.message || 'Failed to assign candidate.');
           }
@@ -28374,6 +28827,7 @@ async function openResolveCandidateModal(resolveRow) {
     }
   }, 0);
 }
+
 
 async function searchCandidatesForResolve(term) {
   const q = String(term || '').trim();
@@ -28399,22 +28853,37 @@ async function searchCandidatesForResolve(term) {
 }
 
 async function apiResolveTimesheetCandidate(timesheetId, candidateId) {
-  const tsId = String(timesheetId || '').trim();
+  const tsId   = String(timesheetId || '').trim();
   const candId = String(candidateId || '').trim();
   if (!tsId || !candId) {
     throw new Error('Missing timesheet_id or candidate_id for resolve.');
   }
 
-  const res  = await authFetch(API(`/api/timesheets/${encodeURIComponent(tsId)}/resolve-candidate`), {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ candidate_id: candId })
-  });
-  const text = await res.text();
+  const urlPath = `/api/timesheets/${encodeURIComponent(tsId)}/resolve-candidate`;
 
-  if (!res.ok) {
-    throw new Error(text || `Failed to resolve candidate for timesheet (${res.status})`);
-  }
+  // ✅ Required for guard
+  const expected =
+    window.modalCtx?.timesheetMeta?.expected_timesheet_id ||
+    tsId;
+
+  const json = await apiPostJson(urlPath, {
+    candidate_id: candId,
+    expected_timesheet_id: expected
+  });
+
+  // ✅ Defensive adoption on success (if backend returns current_timesheet_id)
+  try {
+    const movedTo = json?.current_timesheet_id || null;
+    if (movedTo && window.modalCtx) {
+      window.modalCtx.data ||= {};
+      window.modalCtx.timesheetMeta ||= {};
+      window.modalCtx.data.timesheet_id = movedTo;
+      window.modalCtx.data.id = movedTo;
+      window.modalCtx.timesheetMeta.expected_timesheet_id = movedTo;
+    }
+  } catch {}
+
+  return json;
 }
 
 async function openResolveClientModal(resolveRow) {
@@ -28423,7 +28892,6 @@ async function openResolveClientModal(resolveRow) {
     return;
   }
 
-  const tsId   = resolveRow.timesheet_id;
   const hosp   = resolveRow.hospital_norm || '(unknown hospital/site)';
   const enc    = (typeof escapeHtml === 'function')
     ? escapeHtml
@@ -28431,15 +28899,17 @@ async function openResolveClientModal(resolveRow) {
 
   // Seed local state for this child modal
   window.__resolveClientState = {
-    row: resolveRow,
+    row: { ...(resolveRow || {}) },
     results: [],
-    term: ''
+    term: '',
+    expected_timesheet_id: String(resolveRow.timesheet_id || '')
   };
 
   const renderResolveClientTab = (key) => {
     if (key !== 'main') return '';
     const state   = window.__resolveClientState || {};
     const results = Array.isArray(state.results) ? state.results : [];
+    const tsIdNow = String(state?.row?.timesheet_id || '');
 
     const resultsHtml = results.length
       ? `
@@ -28468,7 +28938,7 @@ async function openResolveClientModal(resolveRow) {
             <div class="controls">
               <div class="mini">
                 Assign client / site for <strong>${enc(hosp)}</strong><br/>
-                Timesheet: <span class="mono">${enc(tsId)}</span>
+                Timesheet: <span class="mono">${enc(tsIdNow)}</span>
               </div>
             </div>
           </div>
@@ -28552,6 +29022,82 @@ async function openResolveClientModal(resolveRow) {
         });
       }
 
+      const adoptMovedInResolveUI = async (oldId, movedTo) => {
+        const state = window.__resolveClientState || {};
+        if (!state.row || typeof state.row !== 'object') state.row = {};
+        state.row.timesheet_id = movedTo;
+        state.row.id = movedTo;
+        state.expected_timesheet_id = movedTo;
+
+        // Keep the shared modalCtx expected aligned (apiResolveTimesheetClient reads this)
+        try {
+          window.modalCtx ||= {};
+          window.modalCtx.timesheetMeta ||= {};
+          window.modalCtx.timesheetMeta.expected_timesheet_id = movedTo;
+        } catch {}
+
+        // Update parent resolve selections
+        try {
+          const rs = window.__resolveTimesheetsState || {};
+          if (Array.isArray(rs.selectionIds) && rs.selectionIds.length) {
+            rs.selectionIds = rs.selectionIds.map(x => (String(x) === String(oldId) ? String(movedTo) : x));
+          }
+          if (Array.isArray(rs.rows) && rs.rows.length) {
+            rs.rows = rs.rows.map(r => {
+              const rid = String(r?.timesheet_id || r?.id || '');
+              if (rid === String(oldId)) {
+                return { ...(r || {}), timesheet_id: movedTo, id: movedTo };
+              }
+              return r;
+            });
+          }
+        } catch {}
+
+        // Repaint this child modal
+        try {
+          const fr = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
+          if (fr && fr.kind === 'timesheet-resolve-client') {
+            fr.setTab('main');
+          }
+        } catch {}
+
+        // Best-effort refresh parent Resolve modal rows
+        try {
+          const rs = window.__resolveTimesheetsState || {};
+          const ids = Array.isArray(rs.selectionIds)
+            ? rs.selectionIds
+            : (rs.rows || []).map(r => String(r.timesheet_id || r.id || '')).filter(Boolean);
+
+          if (ids.length) {
+            const res = await authFetch(API('/api/timesheets/resolve-preview'), {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ timesheet_ids: ids })
+            });
+            const text = await res.text();
+            if (res.ok) {
+              const newRows = text ? JSON.parse(text) : [];
+              window.__resolveTimesheetsState ||= {};
+              window.__resolveTimesheetsState.rows = Array.isArray(newRows) ? newRows : [];
+              const fr2 = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
+              if (fr2 && fr2.kind === 'timesheets-resolve') {
+                fr2.setTab('main');
+              }
+            }
+          }
+        } catch (e2) {
+          console.warn('[TS][RESOLVE] failed to refresh resolve-preview after moved adoption', e2);
+        }
+
+        try {
+          if (typeof refreshTimesheetsSummaryAfterRotation === 'function') {
+            await refreshTimesheetsSummaryAfterRotation(movedTo);
+          }
+        } catch {}
+
+        window.__toast && window.__toast('This timesheet changed while you were editing. Please review and try again.');
+      };
+
       const resultsHost = root.querySelector('#clientResolveResults');
       if (resultsHost && !resultsHost.__tsClientResolveSelectWired) {
         resultsHost.__tsClientResolveSelectWired = true;
@@ -28561,8 +29107,23 @@ async function openResolveClientModal(resolveRow) {
           const clientId = btn.getAttribute('data-client-id') || '';
           if (!clientId) return;
 
+          const state = window.__resolveClientState || {};
+          const tsIdNow = String(state?.row?.timesheet_id || '');
+          if (!tsIdNow) {
+            alert('Timesheet id missing; cannot assign client.');
+            return;
+          }
+
+          // Ensure apiResolveTimesheetClient uses the right expected id (it reads modalCtx.timesheetMeta)
           try {
-            await apiResolveTimesheetClient(tsId, clientId);
+            window.modalCtx ||= {};
+            window.modalCtx.timesheetMeta ||= {};
+            window.modalCtx.timesheetMeta.expected_timesheet_id =
+              String(state.expected_timesheet_id || tsIdNow);
+          } catch {}
+
+          try {
+            await apiResolveTimesheetClient(tsIdNow, clientId);
             window.__toast && window.__toast('Client mapping updated for timesheet.');
 
             // Close the child modal
@@ -28570,12 +29131,10 @@ async function openResolveClientModal(resolveRow) {
             if (closeBtn) closeBtn.click();
 
             // Refresh parent Resolve modal
-            const state = window.__resolveTimesheetsState || {};
-            const ids = Array.isArray(state.selectionIds)
-              ? state.selectionIds
-              : (state.rows || [])
-                  .map(r => String(r.timesheet_id || r.id || ''))
-                  .filter(Boolean);
+            const rs = window.__resolveTimesheetsState || {};
+            const ids = Array.isArray(rs.selectionIds)
+              ? rs.selectionIds
+              : (rs.rows || []).map(r => String(r.timesheet_id || r.id || '')).filter(Boolean);
 
             if (ids.length) {
               try {
@@ -28587,6 +29146,7 @@ async function openResolveClientModal(resolveRow) {
                 const text = await res.text();
                 if (res.ok) {
                   const newRows = text ? JSON.parse(text) : [];
+                  window.__resolveTimesheetsState ||= {};
                   window.__resolveTimesheetsState.rows = Array.isArray(newRows) ? newRows : [];
                   const frame = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
                   if (frame && frame.kind === 'timesheets-resolve') {
@@ -28598,6 +29158,13 @@ async function openResolveClientModal(resolveRow) {
               }
             }
           } catch (err) {
+            // ✅ Rotation safety: adopt moved id + refresh + let user retry
+            const movedTo = err?.json?.current_timesheet_id || null;
+            if (err?.status === 409 && err?.json?.error === 'TIMESHEET_MOVED' && movedTo) {
+              await adoptMovedInResolveUI(tsIdNow, String(movedTo));
+              return;
+            }
+
             console.error('[TS][RESOLVE] apiResolveTimesheetClient failed', err);
             alert(err?.message || 'Failed to assign client.');
           }
@@ -28632,24 +29199,37 @@ async function searchClientsForResolve(term) {
   return Array.isArray(json) ? json : [];
 }
 
-
 async function apiResolveTimesheetClient(timesheetId, clientId) {
-  const tsId = String(timesheetId || '').trim();
-  const cliId = String(clientId || '').trim();
+  const tsId    = String(timesheetId || '').trim();
+  const cliId   = String(clientId || '').trim();
   if (!tsId || !cliId) {
     throw new Error('Missing timesheet_id or client_id for resolve.');
   }
 
-  const res  = await authFetch(API(`/api/timesheets/${encodeURIComponent(tsId)}/resolve-client`), {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ client_id: cliId })
-  });
-  const text = await res.text();
+  const urlPath = `/api/timesheets/${encodeURIComponent(tsId)}/resolve-client`;
 
-  if (!res.ok) {
-    throw new Error(text || `Failed to resolve client for timesheet (${res.status})`);
-  }
+  const expected =
+    window.modalCtx?.timesheetMeta?.expected_timesheet_id ||
+    tsId;
+
+  const json = await apiPostJson(urlPath, {
+    client_id: cliId,
+    expected_timesheet_id: expected
+  });
+
+  // ✅ Defensive adoption on success
+  try {
+    const movedTo = json?.current_timesheet_id || null;
+    if (movedTo && window.modalCtx) {
+      window.modalCtx.data ||= {};
+      window.modalCtx.timesheetMeta ||= {};
+      window.modalCtx.data.timesheet_id = movedTo;
+      window.modalCtx.data.id = movedTo;
+      window.modalCtx.timesheetMeta.expected_timesheet_id = movedTo;
+    }
+  } catch {}
+
+  return json;
 }
 
 
@@ -28999,229 +29579,6 @@ function installGlobalFileDropGuards() {
 
 // Attach weekly summary behaviour (Assign buttons + optional group selection)
 // Attach weekly summary behaviour (Assign buttons + optional group selection)
-
-
-function wireWeeklyImportSummaryActions(type, importId) {
-  const t = String(type || '').toUpperCase();
-  if (t !== 'NHSP' && t !== 'HR_WEEKLY') return;
-
-  const root = document.getElementById('weeklyImportSummary');
-  if (!root) return;
-  if (root.__weeklyWired) return;
-  root.__weeklyWired = true;
-
-  window.__importSummaryState   = window.__importSummaryState   || {};
-  window.__weeklyImportMappings = window.__weeklyImportMappings || {};
-  window.__weeklySelectedGroups = window.__weeklySelectedGroups || {};
-
-  if (!window.__weeklyImportMappings[t]) window.__weeklyImportMappings[t] = {};
-  if (!window.__weeklySelectedGroups[t]) window.__weeklySelectedGroups[t] = {};
-
-  const ensureMappings = (id) => {
-    const key = String(id || importId || '');
-    let mRoot = window.__weeklyImportMappings[t];
-    let m = mRoot[key];
-    if (!m) {
-      m = { candidate_mappings: [], client_aliases: [] };
-      mRoot[key] = m;
-    }
-    return m;
-  };
-
-  const ensureSelectedSet = (id) => {
-    const key = String(id || importId || '');
-    let sRoot = window.__weeklySelectedGroups[t];
-    let s = sRoot[key];
-    if (!(s instanceof Set)) {
-      s = new Set();
-      sRoot[key] = s;
-    }
-    return s;
-  };
-
-  // Always read the latest canonical preview stored by renderImportSummaryModal
-  const getPreview = () => {
-    const preview = window.__importSummaryState[t] || {};
-    const id = preview.import_id || importId;
-    const rows = Array.isArray(preview.rows) ? preview.rows : [];
-    return { preview, rows, importId: id };
-  };
-
-  const norm = (s) => String(s || '').trim().toLowerCase();
-
-  async function fetchCandidateName(candId) {
-    try {
-      if (typeof authFetch !== 'function' || typeof API !== 'function') return null;
-      const res  = await authFetch(API(`/api/candidates/${encodeURIComponent(candId)}`));
-      const text = await res.text();
-      if (!res.ok || !text) return null;
-      const json = JSON.parse(text);
-      const c = json && json.candidate ? json.candidate : json;
-      if (!c) return null;
-      return c.display_name || c.name || `${c.first_name || ''} ${c.last_name || ''}`.trim() || null;
-    } catch {
-      return null;
-    }
-  }
-
-  // Assign candidate/client (unchanged behaviour, still uses prompts here)
-  root.addEventListener('click', async (ev) => {
-    const btn = ev.target.closest('button[data-act]');
-    if (!btn) return;
-
-    const act = btn.getAttribute('data-act');
-
-    if (act !== 'weekly-resolve-candidate' && act !== 'weekly-resolve-client') return;
-
-    const { rows, importId: currentImportId } = getPreview();
-    const idx = Number(btn.getAttribute('data-row-idx') || '-1');
-    const row = (idx >= 0 && idx < rows.length) ? rows[idx] : null;
-    if (!row) return;
-
-    const mappings = ensureMappings(currentImportId);
-
-    if (act === 'weekly-resolve-candidate') {
-      const staffRaw = row.staff_name || row.staff_raw || '';
-      const hospRaw  = row.hospital_or_trust || row.unit || row.hospital_norm || '';
-
-      const candId = (prompt(
-        `Enter candidate_id to map staff "${staffRaw}" (site: "${hospRaw}") to:`,
-        row.candidate_id || ''
-      ) || '').trim();
-
-      if (!candId) return;
-
-      let candName = await fetchCandidateName(candId);
-      const staffNorm = norm(staffRaw);
-      const candNorm  = norm(candName || '');
-      const staffTokens = staffNorm ? staffNorm.split(/\s+/).filter(Boolean) : [];
-      const candTokens  = candNorm  ? candNorm.split(/\s+/).filter(Boolean)  : [];
-
-      let confirmMsg;
-      if (candName && staffTokens.length && candTokens.length) {
-        const hasSharedToken = staffTokens.some(t => candTokens.includes(t));
-        const workDateYmd = row.work_date || row.date_local || row.date || row.week_ending_date || null;
-        if (!hasSharedToken) {
-          confirmMsg =
-            `⚠ WARNING:\n` +
-            `Imported staff name: "${staffRaw}"\n` +
-            `Chosen candidate:    "${candName}" (id: ${candId})\n\n` +
-            `These names do not share any words.\n\n` +
-            `Are you sure you want to link this candidate for ${workDateYmd || 'this date'} at "${hospRaw || 'unknown site'}"?`;
-        } else {
-          confirmMsg =
-            `Confirm linking:\n\n` +
-            `  Staff (import): "${staffRaw}"\n` +
-            `  Candidate:      "${candName}" (id: ${candId})\n` +
-            `  Site:           "${hospRaw || 'unknown site'}"\n\n` +
-            `Proceed?`;
-        }
-      } else {
-        confirmMsg =
-          `Link imported staff "${staffRaw}" at "${hospRaw || 'unknown site'}"\n` +
-          `to candidate_id "${candId}"?\n\n` +
-          `This will create/update an alias used for future imports.`;
-      }
-
-      if (!window.confirm(confirmMsg)) return;
-
-      mappings.candidate_mappings.push({
-        staff_norm:        row.staff_norm || staffRaw || '',
-        hospital_or_trust: hospRaw || null,
-        candidate_id:      candId
-      });
-
-      window.__toast && window.__toast('Candidate mapping queued for this import.');
-      return;
-    }
-
-    if (act === 'weekly-resolve-client') {
-      const hospRaw = row.hospital_or_trust || row.unit || row.hospital_norm || '';
-
-      const clientId = (prompt(
-        `Enter client_id to map hospital/site "${hospRaw}" to:`,
-        row.client_id || ''
-      ) || '').trim();
-
-      if (!clientId) return;
-
-      const confirmMsg =
-        `Link import site "${hospRaw || 'unknown site'}"\n` +
-        `to client_id "${clientId}"?\n\n` +
-        `This will create/update a client_hospitals alias for future imports.`;
-
-      if (!window.confirm(confirmMsg)) return;
-
-      mappings.client_aliases.push({
-        hospital_norm: row.hospital_norm || hospRaw || '',
-        client_id:     clientId
-      });
-
-      window.__toast && window.__toast('Client mapping queued for this import.');
-    }
-  });
-
-  // Optional: group selection checkboxes (if present)
-  root.addEventListener('change', (ev) => {
-    const cb = ev.target.closest('input[data-act="weekly-select-group"]');
-    if (!cb) return;
-
-    const { importId: currentImportId } = getPreview();
-    const sel = ensureSelectedSet(currentImportId);
-
-    const groupId = cb.getAttribute('data-group-id') || '';
-    if (!groupId) return;
-
-    if (cb.checked) sel.add(groupId);
-    else sel.delete(groupId);
-  });
-
-  // APPLY button (include decisions + validation)
-  const btnApply = root.querySelector('button[data-act="weekly-import-apply"]');
-  if (btnApply && !btnApply.__applyWired) {
-    btnApply.__applyWired = true;
-    btnApply.addEventListener('click', async () => {
-      try {
-        const { preview, importId: currentImportId } = getPreview();
-        if (!currentImportId) throw new Error('Missing import_id');
-
-        const ok = window.confirm('Are you sure you want to finalise now?');
-        if (!ok) return;
-
-        const mappings = ensureMappings(currentImportId);
-        const selSet = ensureSelectedSet(currentImportId);
-
-        const decisionStore = getOrInitWeeklyImportDecisionsStore(t, currentImportId, preview);
-
-        // client-side validation of decisions (skip ok; invoiced requires weeks)
-        const v = decisionStore.validate(preview);
-        if (!v.ok) {
-          const msg =
-            `Cannot finalise: missing/invalid decisions for changed-hours shifts:\n\n` +
-            v.errors.slice(0, 20).map(x => `- ${x}`).join('\n') +
-            (v.errors.length > 20 ? `\n\n(and ${v.errors.length - 20} more)` : '');
-          alert(msg);
-          return;
-        }
-
-        const payload = {
-          candidate_mappings: mappings.candidate_mappings || [],
-          client_aliases: mappings.client_aliases || [],
-          decisions: decisionStore.serialize(preview),
-          selected_group_ids: (selSet && selSet.size) ? Array.from(selSet) : null
-        };
-
-        const result = await resolveImportConflicts(currentImportId, t, payload) || {};
-        alert(`Import ${result.import_id || currentImportId} finalised.`);
-        await refreshWeeklyImportSummary(t, currentImportId);
-      } catch (e) {
-        console.error('[IMPORTS][WEEKLY] apply failed', e);
-        alert(e?.message || 'Weekly import apply failed.');
-      }
-    });
-  }
-}
-
 
 
 
@@ -30232,276 +30589,7 @@ function openClientHospitalModal(client_id) {
   );
 }
 
-async function openWeeklyCandidateResolveModal(importType, importId, rowIdx) {
-  const type = String(importType || '').toUpperCase();
-  const enc  = (typeof escapeHtml === 'function')
-    ? escapeHtml
-    : (s) => String(s == null ? '' : s);
 
-  const st   = window.__importSummaryState && window.__importSummaryState[type];
-  const rows = st && Array.isArray(st.rows) ? st.rows : [];
-  const row  = (rowIdx >= 0 && rowIdx < rows.length) ? rows[rowIdx] : null;
-  if (!row) {
-    alert('Row not found for candidate resolve.');
-    return;
-  }
-
-  const staffRaw = row.staff_name || row.staff_raw || '';
-  const unitRaw  = row.unit || row.hospital_or_trust || row.hospital_norm || '';
-
-  // Local state for this modal
-  window.__weeklyResolveCandidateState = {
-    type,
-    importId,
-    rowIdx,
-    term: staffRaw,
-    results: [],
-    selectedCandidateId: null
-  };
-
-  const state = () => window.__weeklyResolveCandidateState || {};
-
-  const renderTab = (key) => {
-    if (key !== 'main') return '';
-    const s = state();
-    const term    = s.term || '';
-
-    // Results box will be filled dynamically
-    return html(`
-      <div class="form" id="weeklyResolveCandidate">
-        <div class="card">
-          <div class="row">
-            <label>Assign candidate</label>
-            <div class="controls">
-              <div class="mini">
-                Import: <span class="mono">${enc(importId || '')}</span><br/>
-                Staff (from import): <strong>${enc(staffRaw || '—')}</strong><br/>
-                Unit / Site: <span class="mini">${enc(unitRaw || '—')}</span>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div class="card" style="margin-top:10px;">
-          <div class="row">
-            <label>Candidate name</label>
-            <div class="controls">
-              <input id="weeklyCandSearch"
-                     class="input"
-                     type="text"
-                     placeholder="Type to search by first or surname"
-                     value="${enc(term)}" />
-              <div class="hint mini" style="margin-top:4px;">
-                Start typing the candidate's name. The list on the right will filter as you type.
-              </div>
-            </div>
-          </div>
-          <div class="row">
-            <label>Matches</label>
-            <div class="controls" id="weeklyCandResults">
-              <!-- results injected dynamically -->
-              <span class="mini">Type a name to search for candidates.</span>
-            </div>
-          </div>
-          <div class="row" style="margin-top:8px;">
-            <label></label>
-            <div class="controls">
-              <button type="button"
-                      class="btn btn-primary"
-                      data-act="weekly-cand-link">
-                Link to this candidate
-              </button>
-              <button type="button"
-                      class="btn"
-                      style="margin-left:8px;"
-                      data-act="weekly-cand-cancel">
-                Cancel
-              </button>
-            </div>
-          </div>
-        </div>
-      </div>
-    `);
-  };
-
-  // Open child modal
-  showModal(
-    'Assign candidate (weekly import)',
-    [{ key: 'main', label: 'Assign candidate' }],
-    renderTab,
-    null,
-    false,
-    null,
-    {
-      kind: 'weekly-resolve-candidate',
-      noParentGate: true,
-      stayOpenOnSave: false
-    }
-  );
-
-  // Helper: render results into the existing results container
-  function renderCandidateResults() {
-    const s = state();
-    const results    = Array.isArray(s.results) ? s.results : [];
-    const selectedId = s.selectedCandidateId || '';
-
-    const root = document.getElementById('modalBody');
-    if (!root) return;
-    const host = root.querySelector('#weeklyCandResults');
-    if (!host) return;
-
-    if (!results.length) {
-      host.innerHTML = '<span class="mini">No candidates matched. Try typing a different name.</span>';
-      return;
-    }
-
-    const listHtml = `
-      <div class="card" style="max-height:250px;overflow:auto;border:1px solid #ddd;margin-top:4px;">
-        <ul class="mini">
-          ${results.map(c => {
-            const id   = c.id;
-            const name = c.display_name || c.name || ((c.first_name || '') + ' ' + (c.last_name || ''));
-            const selected = String(id) === String(selectedId);
-            const style = selected ? ' style="background:#007bff;color:#fff;cursor:pointer;"' : ' style="cursor:pointer;"';
-            return `
-              <li class="weekly-candidate-option"${style}
-                  data-act="weekly-cand-select"
-                  data-candidate-id="${enc(id)}">
-                <strong>${enc(name || '')}</strong>
-                ${c.tms_ref ? ` &nbsp; <span class="mono">(${enc(c.tms_ref)})</span>` : ''}
-              </li>
-            `;
-          }).join('')}
-        </ul>
-      </div>
-    `;
-
-    host.innerHTML = listHtml;
-  }
-
-  // Helper: run search and update results
-  async function searchAndRender(term) {
-    const q = String(term || '').trim();
-    window.__weeklyResolveCandidateState = state();
-    window.__weeklyResolveCandidateState.term = q;
-    if (!q) {
-      window.__weeklyResolveCandidateState.results = [];
-      window.__weeklyResolveCandidateState.selectedCandidateId = null;
-      renderCandidateResults();
-      return;
-    }
-    try {
-      const results = await searchCandidatesForResolve(q);
-      window.__weeklyResolveCandidateState.results = Array.isArray(results) ? results : [];
-      // Auto-select if exactly one result
-      if (results && results.length === 1) {
-        window.__weeklyResolveCandidateState.selectedCandidateId = results[0].id;
-      }
-    } catch (err) {
-      console.error('[WEEKLY][RESOLVE] candidate search failed', err);
-      alert(err?.message || 'Candidate search failed.');
-      window.__weeklyResolveCandidateState.results = [];
-      window.__weeklyResolveCandidateState.selectedCandidateId = null;
-    }
-    renderCandidateResults();
-  }
-
-  // Wire input + click handlers after first render
-  setTimeout(() => {
-    const root = document.getElementById('modalBody');
-    if (!root) return;
-
-    const input = root.querySelector('#weeklyCandSearch');
-    if (input && !input.__weeklyCandInputWired) {
-      input.__weeklyCandInputWired = true;
-      input.addEventListener('input', () => {
-        const term = (input.value || '').trim();
-        searchAndRender(term);
-      });
-      // Initial search with pre-filled name
-      searchAndRender(input.value || '');
-    }
-
-    const resultsHost = root.querySelector('#weeklyCandResults');
-    if (resultsHost && !resultsHost.__weeklyCandSelectWired) {
-      resultsHost.__weeklyCandSelectWired = true;
-      resultsHost.addEventListener('click', (ev) => {
-        const li = ev.target.closest('li[data-act="weekly-cand-select"]');
-        if (!li) return;
-        const candId = li.getAttribute('data-candidate-id') || '';
-        if (!candId) return;
-        window.__weeklyResolveCandidateState = state();
-        window.__weeklyResolveCandidateState.selectedCandidateId = candId;
-        renderCandidateResults();
-      });
-    }
-
-    root.addEventListener('click', (ev) => {
-      const btn = ev.target.closest('button[data-act]');
-      if (!btn) return;
-      const act = btn.getAttribute('data-act');
-      const s   = state();
-
-      if (act === 'weekly-cand-cancel') {
-        const closeBtn = document.getElementById('btnCloseModal');
-        if (closeBtn) closeBtn.click();
-        return;
-      }
-
-      if (act === 'weekly-cand-link') {
-        const selectedId = s.selectedCandidateId;
-        if (!selectedId) {
-          alert('Select a candidate from the list on the right first.');
-          return;
-        }
-
-        // Build mapping
-        const mappings = ensureWeeklyImportMappings(type, importId);
-        const staffNorm = row.staff_norm || String(staffRaw || '').trim().toLowerCase();
-        const hospRaw   = row.hospital_or_trust || row.unit || row.hospital_norm || '';
-        const hospNorm  = String(hospRaw || '').trim().toLowerCase();
-
-        mappings.candidate_mappings.push({
-          staff_norm: staffNorm,
-          hospital_or_trust: hospNorm || null,
-          candidate_id: selectedId
-        });
-
-        // Optimistically update summary row in-memory
-        const all = window.__importSummaryState && window.__importSummaryState[type];
-        if (all && Array.isArray(all.rows)) {
-          const newRows = all.rows.slice();
-          const cur = { ...(newRows[rowIdx] || {}) };
-          cur.candidate_id = selectedId;
-
-          // If client is still missing, flip to NO_CLIENT; otherwise mark OK
-          if (!cur.client_id) {
-            cur.resolution_status = 'NO_CLIENT';
-          } else {
-            cur.resolution_status = 'OK';
-          }
-
-          newRows[rowIdx] = cur;
-          window.__importSummaryState[type] = {
-            import_id: all.import_id,
-            summary: all.summary,
-            rows: newRows
-          };
-          renderImportSummaryModal(type, {
-            import_id: all.import_id,
-            summary: all.summary.summary || all.summary,
-            rows: newRows
-          });
-        }
-
-        window.__toast && window.__toast('Candidate mapping queued for this import.');
-
-        const closeBtn = document.getElementById('btnCloseModal');
-        if (closeBtn) closeBtn.click();
-      }
-    });
-  }, 0);
-}
 
 async function weeklySearchClientsForResolve(importType, term) {
   const q = String(term || '').trim();
@@ -30557,7 +30645,7 @@ async function openWeeklyClientResolveModal(importType, importId, rowIdx) {
   const renderTab = (key) => {
     if (key !== 'main') return '';
     const s = state();
-    const term    = s.term || '';
+    const term = s.term || '';
 
     return html(`
       <div class="form" id="weeklyResolveClient">
@@ -30591,7 +30679,6 @@ async function openWeeklyClientResolveModal(importType, importId, rowIdx) {
           <div class="row">
             <label>Matches</label>
             <div class="controls" id="weeklyClientResults">
-              <!-- results injected dynamically -->
               <span class="mini">Type a name to search for clients.</span>
             </div>
           </div>
@@ -30624,7 +30711,7 @@ async function openWeeklyClientResolveModal(importType, importId, rowIdx) {
     false,
     null,
     {
-      kind: 'weekly-resolve-client',
+      kind: 'import-summary-weekly-resolve-client',
       noParentGate: true,
       stayOpenOnSave: false
     }
@@ -30673,12 +30760,14 @@ async function openWeeklyClientResolveModal(importType, importId, rowIdx) {
     const q = String(term || '').trim();
     window.__weeklyResolveClientState = state();
     window.__weeklyResolveClientState.term = q;
+
     if (!q) {
       window.__weeklyResolveClientState.results = [];
       window.__weeklyResolveClientState.selectedClientId = null;
       renderClientResults();
       return;
     }
+
     try {
       const results = await weeklySearchClientsForResolve(type, q);
       window.__weeklyResolveClientState.results = Array.isArray(results) ? results : [];
@@ -30691,12 +30780,16 @@ async function openWeeklyClientResolveModal(importType, importId, rowIdx) {
       window.__weeklyResolveClientState.results = [];
       window.__weeklyResolveClientState.selectedClientId = null;
     }
+
     renderClientResults();
   }
 
   setTimeout(() => {
     const root = document.getElementById('modalBody');
     if (!root) return;
+
+    const fr = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
+    if (!fr || fr.kind !== 'import-summary-weekly-resolve-client') return;
 
     const input = root.querySelector('#weeklyClientSearch');
     if (input && !input.__weeklyClientInputWired) {
@@ -30722,69 +30815,346 @@ async function openWeeklyClientResolveModal(importType, importId, rowIdx) {
       });
     }
 
-    root.addEventListener('click', (ev) => {
-      const btn = ev.target.closest('button[data-act]');
-      if (!btn) return;
-      const act = btn.getAttribute('data-act');
-      const s   = state();
+    // ✅ FIX: guard against stacking duplicate click listeners on #modalBody
+    root.__wkResolveActionsWired ||= new Set();
+    if (!root.__wkResolveActionsWired.has('import-summary-weekly-resolve-client')) {
+      root.__wkResolveActionsWired.add('import-summary-weekly-resolve-client');
 
-      if (act === 'weekly-client-cancel') {
-        const closeBtn = document.getElementById('btnCloseModal');
-        if (closeBtn) closeBtn.click();
-        return;
-      }
+      root.addEventListener('click', (ev) => {
+        const frNow = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
+        if (!frNow || frNow.kind !== 'import-summary-weekly-resolve-client') return;
 
-      if (act === 'weekly-client-link') {
-        const selectedId = s.selectedClientId;
-        if (!selectedId) {
-          alert('Select a client from the list on the right first.');
+        const btn = ev.target.closest('button[data-act]');
+        if (!btn) return;
+
+        const act = btn.getAttribute('data-act');
+        const s   = state();
+
+        if (act === 'weekly-client-cancel') {
+          const closeBtn = document.getElementById('btnCloseModal');
+          if (closeBtn) closeBtn.click();
           return;
         }
 
-        const mappings = ensureWeeklyImportMappings(type, importId);
-        const hospRaw  = row.hospital_or_trust || row.unit || row.hospital_norm || '';
-        const hospNorm = String(hospRaw || '').trim().toLowerCase();
-
-        mappings.client_aliases.push({
-          hospital_norm: hospNorm || '',
-          client_id: selectedId
-        });
-
-        const all = window.__importSummaryState && window.__importSummaryState[type];
-        if (all && Array.isArray(all.rows)) {
-          const newRows = all.rows.slice();
-          const cur = { ...(newRows[rowIdx] || {}) };
-          cur.client_id = selectedId;
-
-          if (!cur.candidate_id) {
-            cur.resolution_status = 'NO_CANDIDATE';
-          } else {
-            cur.resolution_status = 'OK';
+        if (act === 'weekly-client-link') {
+          const selectedId = s.selectedClientId;
+          if (!selectedId) {
+            alert('Select a client from the list on the right first.');
+            return;
           }
 
-          newRows[rowIdx] = cur;
-          window.__importSummaryState[type] = {
-            import_id: all.import_id,
-            summary: all.summary,
-            rows: newRows
-          };
-          renderImportSummaryModal(type, {
-            import_id: all.import_id,
-            summary: all.summary.summary || all.summary,
-            rows: newRows
+          const mappings = ensureWeeklyImportMappings(type, importId);
+          const hospRaw  = row.hospital_or_trust || row.unit || row.hospital_norm || '';
+          const hospNorm = String(hospRaw || '').trim().toLowerCase();
+
+          mappings.client_aliases.push({
+            hospital_norm: hospNorm || '',
+            client_id: selectedId
           });
+
+          const all = window.__importSummaryState && window.__importSummaryState[type];
+          if (all && Array.isArray(all.rows)) {
+            const newRows = all.rows.slice();
+            const cur = { ...(newRows[rowIdx] || {}) };
+            cur.client_id = selectedId;
+
+            if (!cur.candidate_id) cur.resolution_status = 'NO_CANDIDATE';
+            else cur.resolution_status = 'OK';
+
+            newRows[rowIdx] = cur;
+            window.__importSummaryState[type] = {
+              import_id: all.import_id,
+              summary: all.summary,
+              rows: newRows
+            };
+            renderImportSummaryModal(type, {
+              import_id: all.import_id,
+              summary: all.summary.summary || all.summary,
+              rows: newRows
+            });
+          }
+
+          window.__toast && window.__toast('Client mapping queued for this import.');
+
+          const closeBtn = document.getElementById('btnCloseModal');
+          if (closeBtn) closeBtn.click();
         }
-
-        window.__toast && window.__toast('Client mapping queued for this import.');
-
-        const closeBtn = document.getElementById('btnCloseModal');
-        if (closeBtn) closeBtn.click();
-      }
-    });
+      });
+    }
   }, 0);
 }
 
+async function openWeeklyCandidateResolveModal(importType, importId, rowIdx) {
+  const type = String(importType || '').toUpperCase();
+  const enc  = (typeof escapeHtml === 'function')
+    ? escapeHtml
+    : (s) => String(s == null ? '' : s);
 
+  const st   = window.__importSummaryState && window.__importSummaryState[type];
+  const rows = st && Array.isArray(st.rows) ? st.rows : [];
+  const row  = (rowIdx >= 0 && rowIdx < rows.length) ? rows[rowIdx] : null;
+  if (!row) {
+    alert('Row not found for candidate resolve.');
+    return;
+  }
+
+  const staffRaw = row.staff_name || row.staff_raw || '';
+  const unitRaw  = row.unit || row.hospital_or_trust || row.hospital_norm || '';
+
+  window.__weeklyResolveCandidateState = {
+    type,
+    importId,
+    rowIdx,
+    term: staffRaw,
+    results: [],
+    selectedCandidateId: null
+  };
+
+  const state = () => window.__weeklyResolveCandidateState || {};
+
+  const renderTab = (key) => {
+    if (key !== 'main') return '';
+    const s = state();
+    const term = s.term || '';
+
+    return html(`
+      <div class="form" id="weeklyResolveCandidate">
+        <div class="card">
+          <div class="row">
+            <label>Assign candidate</label>
+            <div class="controls">
+              <div class="mini">
+                Import: <span class="mono">${enc(importId || '')}</span><br/>
+                Staff (from import): <strong>${enc(staffRaw || '—')}</strong><br/>
+                Unit / Site: <span class="mini">${enc(unitRaw || '—')}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card" style="margin-top:10px;">
+          <div class="row">
+            <label>Candidate name</label>
+            <div class="controls">
+              <input id="weeklyCandSearch"
+                     class="input"
+                     type="text"
+                     placeholder="Type to search by first or surname"
+                     value="${enc(term)}" />
+              <div class="hint mini" style="margin-top:4px;">
+                Start typing the candidate's name. The list on the right will filter as you type.
+              </div>
+            </div>
+          </div>
+          <div class="row">
+            <label>Matches</label>
+            <div class="controls" id="weeklyCandResults">
+              <span class="mini">Type a name to search for candidates.</span>
+            </div>
+          </div>
+          <div class="row" style="margin-top:8px;">
+            <label></label>
+            <div class="controls">
+              <button type="button"
+                      class="btn btn-primary"
+                      data-act="weekly-cand-link">
+                Link to this candidate
+              </button>
+              <button type="button"
+                      class="btn"
+                      style="margin-left:8px;"
+                      data-act="weekly-cand-cancel">
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    `);
+  };
+
+  showModal(
+    'Assign candidate (weekly import)',
+    [{ key: 'main', label: 'Assign candidate' }],
+    renderTab,
+    null,
+    false,
+    null,
+    {
+      kind: 'import-summary-weekly-resolve-candidate',
+      noParentGate: true,
+      stayOpenOnSave: false
+    }
+  );
+
+  function renderCandidateResults() {
+    const s = state();
+    const results    = Array.isArray(s.results) ? s.results : [];
+    const selectedId = s.selectedCandidateId || '';
+
+    const root = document.getElementById('modalBody');
+    if (!root) return;
+    const host = root.querySelector('#weeklyCandResults');
+    if (!host) return;
+
+    if (!results.length) {
+      host.innerHTML = '<span class="mini">No candidates matched. Try typing a different name.</span>';
+      return;
+    }
+
+    const listHtml = `
+      <div class="card" style="max-height:250px;overflow:auto;border:1px solid #ddd;margin-top:4px;">
+        <ul class="mini">
+          ${results.map(c => {
+            const id   = c.id;
+            const name = c.display_name || c.name || ((c.first_name || '') + ' ' + (c.last_name || ''));
+            const selected = String(id) === String(selectedId);
+            const style = selected ? ' style="background:#007bff;color:#fff;cursor:pointer;"' : ' style="cursor:pointer;"';
+            return `
+              <li class="weekly-candidate-option"${style}
+                  data-act="weekly-cand-select"
+                  data-candidate-id="${enc(id)}">
+                <strong>${enc(name || '')}</strong>
+                ${c.tms_ref ? ` &nbsp; <span class="mono">(${enc(c.tms_ref)})</span>` : ''}
+              </li>
+            `;
+          }).join('')}
+        </ul>
+      </div>
+    `;
+
+    host.innerHTML = listHtml;
+  }
+
+  async function searchAndRender(term) {
+    const q = String(term || '').trim();
+    window.__weeklyResolveCandidateState = state();
+    window.__weeklyResolveCandidateState.term = q;
+
+    if (!q) {
+      window.__weeklyResolveCandidateState.results = [];
+      window.__weeklyResolveCandidateState.selectedCandidateId = null;
+      renderCandidateResults();
+      return;
+    }
+
+    try {
+      const results = await searchCandidatesForResolve(q);
+      window.__weeklyResolveCandidateState.results = Array.isArray(results) ? results : [];
+      if (results && results.length === 1) {
+        window.__weeklyResolveCandidateState.selectedCandidateId = results[0].id;
+      }
+    } catch (err) {
+      console.error('[WEEKLY][RESOLVE] candidate search failed', err);
+      alert(err?.message || 'Candidate search failed.');
+      window.__weeklyResolveCandidateState.results = [];
+      window.__weeklyResolveCandidateState.selectedCandidateId = null;
+    }
+
+    renderCandidateResults();
+  }
+
+  setTimeout(() => {
+    const root = document.getElementById('modalBody');
+    if (!root) return;
+
+    const fr = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
+    if (!fr || fr.kind !== 'import-summary-weekly-resolve-candidate') return;
+
+    const input = root.querySelector('#weeklyCandSearch');
+    if (input && !input.__weeklyCandInputWired) {
+      input.__weeklyCandInputWired = true;
+      input.addEventListener('input', () => {
+        const term = (input.value || '').trim();
+        searchAndRender(term);
+      });
+      searchAndRender(input.value || '');
+    }
+
+    const resultsHost = root.querySelector('#weeklyCandResults');
+    if (resultsHost && !resultsHost.__weeklyCandSelectWired) {
+      resultsHost.__weeklyCandSelectWired = true;
+      resultsHost.addEventListener('click', (ev) => {
+        const li = ev.target.closest('li[data-act="weekly-cand-select"]');
+        if (!li) return;
+        const candId = li.getAttribute('data-candidate-id') || '';
+        if (!candId) return;
+        window.__weeklyResolveCandidateState = state();
+        window.__weeklyResolveCandidateState.selectedCandidateId = candId;
+        renderCandidateResults();
+      });
+    }
+
+    // ✅ FIX: guard against stacking duplicate click listeners on #modalBody
+    root.__wkResolveActionsWired ||= new Set();
+    if (!root.__wkResolveActionsWired.has('import-summary-weekly-resolve-candidate')) {
+      root.__wkResolveActionsWired.add('import-summary-weekly-resolve-candidate');
+
+      root.addEventListener('click', (ev) => {
+        const frNow = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
+        if (!frNow || frNow.kind !== 'import-summary-weekly-resolve-candidate') return;
+
+        const btn = ev.target.closest('button[data-act]');
+        if (!btn) return;
+
+        const act = btn.getAttribute('data-act');
+        const s   = state();
+
+        if (act === 'weekly-cand-cancel') {
+          const closeBtn = document.getElementById('btnCloseModal');
+          if (closeBtn) closeBtn.click();
+          return;
+        }
+
+        if (act === 'weekly-cand-link') {
+          const selectedId = s.selectedCandidateId;
+          if (!selectedId) {
+            alert('Select a candidate from the list on the right first.');
+            return;
+          }
+
+          const mappings = ensureWeeklyImportMappings(type, importId);
+          const staffNorm = row.staff_norm || String(staffRaw || '').trim().toLowerCase();
+          const hospRaw   = row.hospital_or_trust || row.unit || row.hospital_norm || '';
+          const hospNorm  = String(hospRaw || '').trim().toLowerCase();
+
+          mappings.candidate_mappings.push({
+            staff_norm: staffNorm,
+            hospital_or_trust: hospNorm || null,
+            candidate_id: selectedId
+          });
+
+          const all = window.__importSummaryState && window.__importSummaryState[type];
+          if (all && Array.isArray(all.rows)) {
+            const newRows = all.rows.slice();
+            const cur = { ...(newRows[rowIdx] || {}) };
+            cur.candidate_id = selectedId;
+
+            if (!cur.client_id) cur.resolution_status = 'NO_CLIENT';
+            else cur.resolution_status = 'OK';
+
+            newRows[rowIdx] = cur;
+            window.__importSummaryState[type] = {
+              import_id: all.import_id,
+              summary: all.summary,
+              rows: newRows
+            };
+            renderImportSummaryModal(type, {
+              import_id: all.import_id,
+              summary: all.summary.summary || all.summary,
+              rows: newRows
+            });
+          }
+
+          window.__toast && window.__toast('Candidate mapping queued for this import.');
+
+          const closeBtn = document.getElementById('btnCloseModal');
+          if (closeBtn) closeBtn.click();
+        }
+      });
+    }
+  }, 0);
+}
 
 
 function ensureWeeklyImportMappings(type, importId) {
@@ -33992,6 +34362,29 @@ async function apiUpdateJobTitle(id, patch) {
   const data = (await res.json().catch(() => ({}))) || {};
   return data.item || null;
 }
+
+async function apiDeleteJson(urlPath, bodyObj) {
+  const res = await authFetch(API(urlPath), {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(bodyObj || {})
+  });
+
+  const text = await res.text().catch(() => '');
+  let json = null;
+  try { json = text ? JSON.parse(text) : null; } catch { json = null; }
+
+  if (!res.ok) {
+    const err = new Error((json && json.error) ? String(json.error) : (text || `Request failed (${res.status})`));
+    err.status = res.status;
+    err.json = json;
+    err.body = text;
+    throw err;
+  }
+
+  return (json != null ? json : {});
+}
+
 
 async function apiDeleteJobTitle(id) {
   const url = API(`/api/job-titles/${encodeURIComponent(id)}`);
@@ -37261,44 +37654,71 @@ async function fetchTimesheetDetails(timesheetId) {
     throw err;
   }
 
-  let json;
-  try {
-    const text = await res.text();
-    if (!res.ok) {
-      L('server error', { status: res.status, bodyPreview: text.slice(0, 400) });
-      GE();
-      throw new Error(text || `Timesheet details failed (${res.status})`);
-    }
-    json = text ? JSON.parse(text) : {};
-  } catch (err) {
-    L('parse error', { status: res.status, error: err });
+  const text = await res.text().catch(() => '');
+  let json = null;
+  try { json = text ? JSON.parse(text) : {}; } catch { json = null; }
+
+  if (!res.ok) {
+    const msg =
+      (json && typeof json === 'object' && (json.message || json.error))
+        ? String(json.message || json.error)
+        : (text || `Timesheet details failed (${res.status})`);
+
+    const err = new Error(msg);
+    err.status = res.status;
+    err.body = text || '';
+    err.json = json;
+    L('server error', { status: res.status, bodyPreview: (text || '').slice(0, 400), json });
     GE();
     throw err;
   }
+
+  // If parse failed but HTTP was OK, treat as empty object (defensive)
+  if (!json || typeof json !== 'object') json = {};
 
   const timesheet   = json.timesheet  || null;
   const tsfin       = json.tsfin      || null;
   const validations = Array.isArray(json.validations) ? json.validations : [];
   const shifts      = Array.isArray(json.shifts)      ? json.shifts      : [];
 
+  // ✅ Rotation resolution metadata from backend
+  const booking_id             = json.booking_id || (timesheet ? (timesheet.booking_id || null) : null);
+  const requested_timesheet_id = json.requested_timesheet_id || timesheetId;
+  const current_timesheet_id   =
+    json.current_timesheet_id ||
+    (timesheet ? (timesheet.timesheet_id || null) : null) ||
+    timesheetId;
+
+  const current_version =
+    (json.current_version != null)
+      ? json.current_version
+      : (timesheet ? (timesheet.version ?? null) : null);
+
+  const was_stale = !!json.was_stale;
+
   // Derive invoice breakdown + segments
   const ib   = tsfin && tsfin.invoice_breakdown_json && typeof tsfin.invoice_breakdown_json === 'object'
     ? tsfin.invoice_breakdown_json
     : null;
+
   const mode = ib && typeof ib.mode === 'string' ? ib.mode : null;
   const rawSegments = (ib && Array.isArray(ib.segments)) ? ib.segments : [];
 
-  // Normalise segments: ensure exclude_from_pay is boolean and segment_id is string
+  // Normalise segments:
+  // - keep segment_id stable if backend provides one
+  // - else create a stable fallback based on booking_id + index (NOT timesheet id)
   const segments = rawSegments.map((seg, idx) => {
-    const s = seg && typeof seg === 'object' ? { ...seg } : {};
-    s.segment_id = String(s.segment_id || `seg:${timesheetId}:${idx}`);
+    const s = (seg && typeof seg === 'object') ? { ...seg } : {};
+    const existingId = (s.segment_id != null) ? String(s.segment_id).trim() : '';
+    const fallbackId = `seg:${booking_id || 'noBooking'}:${idx}`;
+    s.segment_id = existingId || fallbackId;
     s.exclude_from_pay = !!s.exclude_from_pay;
     return s;
   });
 
-  const isSegments = mode === 'SEGMENTS';
+  const isSegments = (mode === 'SEGMENTS');
 
-  // ✅ NEW: pass-through fields we need elsewhere (so openTimesheet doesn't need a second fetch)
+  // ✅ Pass-through + include resolver metadata
   const detail = {
     timesheet,
     tsfin,
@@ -37309,20 +37729,25 @@ async function fetchTimesheetDetails(timesheetId) {
     isSegmentsMode: isSegments,
 
     // Convenience: surface key fields that backend already returned
-    sheet_scope: json.sheet_scope || (timesheet ? timesheet.sheet_scope || null : null),
-    qr_status: json.qr_status || (timesheet ? timesheet.qr_status || null : null),
+    sheet_scope: json.sheet_scope || (timesheet ? (timesheet.sheet_scope || null) : null),
+    qr_status: json.qr_status || (timesheet ? (timesheet.qr_status || null) : null),
     qr_generated_at: json.qr_generated_at || null,
     qr_scanned_at: json.qr_scanned_at || null,
-    manual_pdf_r2_key: json.manual_pdf_r2_key || (timesheet ? timesheet.manual_pdf_r2_key || null : null),
+    manual_pdf_r2_key: json.manual_pdf_r2_key || (timesheet ? (timesheet.manual_pdf_r2_key || null) : null),
 
-    // ✅ NEW: ready_to_pay (from view-backed details response)
     ready_to_pay: (typeof json.ready_to_pay === 'boolean') ? json.ready_to_pay : null,
 
-    // ✅ NEW: also keep these if backend returns them (it does in your handler)
     contract_week_id: json.contract_week_id || null,
     contract_week: json.contract_week || null,
     policy: json.policy || null,
-    action_flags: (json.action_flags && typeof json.action_flags === 'object') ? json.action_flags : null
+    action_flags: (json.action_flags && typeof json.action_flags === 'object') ? json.action_flags : null,
+
+    // ✅ Rotation metadata for callers (openTimesheet + guarded writes)
+    booking_id,
+    requested_timesheet_id,
+    current_timesheet_id,
+    current_version,
+    was_stale
   };
 
   L('parsed payload snapshot', {
@@ -37335,12 +37760,17 @@ async function fetchTimesheetDetails(timesheetId) {
     sheet_scope: detail.sheet_scope,
     qr_status: detail.qr_status,
 
-    // ✅ NEW
     ready_to_pay: detail.ready_to_pay,
     hasPolicy: !!detail.policy,
     hasActionFlags: !!detail.action_flags,
     contract_week_id: detail.contract_week_id || null,
-    hasContractWeek: !!detail.contract_week
+    hasContractWeek: !!detail.contract_week,
+
+    booking_id: detail.booking_id,
+    requested_timesheet_id: detail.requested_timesheet_id,
+    current_timesheet_id: detail.current_timesheet_id,
+    current_version: detail.current_version,
+    was_stale: detail.was_stale
   });
 
   GE();
@@ -38741,7 +39171,6 @@ function computeTimesheetProcessingState(details, row) {
   return { key: 'UNPROCESSED', label: 'Unprocessed' };
 }
 
-
 async function openTimesheetEvidenceViewerExisting(evidenceItem) {
   const { LOGM, L, GC, GE } = getTsLoggers('[TS][EVIDENCE][VIEWER]');
   GC('openTimesheetEvidenceViewerExisting');
@@ -38762,6 +39191,61 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
     GE();
     throw new Error('Timesheet context missing; cannot view evidence.');
   }
+
+  const tsIdNow = () =>
+    window.modalCtx?.data?.timesheet_id ||
+    window.modalCtx?.data?.id ||
+    null;
+
+  const expectedNow = () =>
+    window.modalCtx?.timesheetMeta?.expected_timesheet_id ||
+    tsIdNow();
+
+  const handleMovedInViewer = async (err, label) => {
+    const st = err?.status ?? null;
+    const j  = err?.json || null;
+
+    if (!(st === 409 && j && j.error === 'TIMESHEET_MOVED' && j.current_timesheet_id)) {
+      return false;
+    }
+
+    const newId = String(j.current_timesheet_id);
+
+    try {
+      window.modalCtx ||= {};
+      window.modalCtx.data ||= {};
+      window.modalCtx.timesheetMeta ||= {};
+
+      window.modalCtx.data.timesheet_id = newId;
+      window.modalCtx.data.id = newId;
+      window.modalCtx.timesheetMeta.expected_timesheet_id = newId;
+    } catch {}
+
+    // Refresh details + evidence list on the new id
+    try {
+      const fresh = await fetchTimesheetDetails(newId);
+      window.modalCtx.timesheetDetails = fresh;
+    } catch {}
+
+    try {
+      if (typeof refreshTimesheetEvidenceIntoModalState === 'function') {
+        await refreshTimesheetEvidenceIntoModalState(newId);
+      }
+    } catch {}
+
+    try {
+      if (typeof refreshTimesheetsSummaryAfterRotation === 'function') {
+        refreshTimesheetsSummaryAfterRotation(newId);
+      }
+    } catch {}
+
+    try { window.__toast && window.__toast('This timesheet changed while you were editing; review and try again.'); } catch {}
+
+    // Close viewer (parent will be set to Evidence tab by onDismiss)
+    try { document.getElementById('btnCloseModal')?.click(); } catch {}
+
+    return true;
+  };
 
   const evidenceId = evidenceItem.id != null ? String(evidenceItem.id) : '';
 
@@ -38820,7 +39304,7 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
   });
 
   const presignDownload = async (key) => {
-    // ✅ FIX: always normalise before presign-download
+    // ✅ always normalise before presign-download
     const cleanKey = String(key || '').trim().replace(/^\/+/, '');
     const res = await authFetch(API('/api/files/presign-download'), {
       method: 'POST',
@@ -38937,11 +39421,7 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
 
   const tabs = [{ key: 'view', title: 'Evidence' }];
 
-  // ─────────────────────────────────────────────────────────────
-  // ✅ Hide Delete Timesheet button while viewer is open (avoid confusion)
-  // and ensure closing returns the parent to the Evidence tab.
-  // NOTE: we do NOT keep a stale element reference because showModal may clone/replace buttons.
-  // ─────────────────────────────────────────────────────────────
+  // Hide Delete Timesheet button while viewer open
   let __tsDelPrev = null;
   const __hideTsDelete = () => {
     try {
@@ -38951,20 +39431,17 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
       b.style.display = 'none';
     } catch {}
   };
-
   __hideTsDelete();
 
   const onDismiss = () => {
-    // Restore Delete Timesheet button
     try {
       const b = document.getElementById('btnTsDeleteTimesheet');
       if (b) b.style.display = (__tsDelPrev != null ? __tsDelPrev : '');
     } catch {}
 
-    // Ensure parent returns to Evidence tab
     try {
       const st = (window.__modalStack && Array.isArray(window.__modalStack)) ? window.__modalStack : null;
-      const fr = (st && st.length) ? st[st.length - 1] : null; // after child pop, parent is top
+      const fr = (st && st.length) ? st[st.length - 1] : null;
       if (fr && fr.entity === 'timesheets') fr.currentTabKey = 'evidence';
     } catch {}
   };
@@ -39007,49 +39484,27 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
       }
 
       const enc = encodeURIComponent;
-      const res = await authFetch(API(`/api/timesheets/${enc(tsId)}/evidence/${enc(evidenceId)}`), {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ kind: newKind })
-      });
+      const idNow = tsIdNow();
+      if (!idNow) throw new Error('Timesheet id missing.');
 
-      const text = await res.text().catch(() => '');
-      if (!res.ok) throw new Error(text || 'Failed to update evidence type.');
+      // ✅ Guarded PATCH with expected_timesheet_id
+      await apiPatchJson(
+        `/api/timesheets/${enc(idNow)}/evidence/${enc(evidenceId)}`,
+        { expected_timesheet_id: expectedNow(), kind: newKind }
+      );
 
-      // Refresh evidence list in parent modal state
+      // Refresh evidence list in parent modal state (use current id)
       try {
         if (typeof refreshTimesheetEvidenceIntoModalState === 'function') {
-          await refreshTimesheetEvidenceIntoModalState(tsId);
-        } else {
-          const res2 = await authFetch(API(`/api/timesheets/${enc(tsId)}/evidence`));
-          const json2 = await res2.json().catch(() => []);
-          const list2 = Array.isArray(json2) ? json2 : [];
-
-          const normalised = list2.map(ev2 => {
-            const out = { ...(ev2 || {}) };
-            if (typeof out.system !== 'boolean') out.system = false;
-            if (typeof out.can_delete !== 'boolean') out.can_delete = !out.system;
-            if (!out.uploaded_at_utc && out.created_at) out.uploaded_at_utc = out.created_at;
-            return out;
-          });
-
-          window.modalCtx = window.modalCtx || {};
-          window.modalCtx.timesheetState = window.modalCtx.timesheetState || {};
-          window.modalCtx.timesheetState.evidence = normalised;
+          await refreshTimesheetEvidenceIntoModalState(idNow);
         }
       } catch {}
 
       // Repaint parent Evidence tab
       try {
-        if (typeof window.__getModalFrame === 'function') {
-          const fr = window.__getModalFrame();
-          if (fr && fr.entity === 'timesheets') {
-            fr._suppressDirty = true;
-            await fr.setTab('evidence');
-            fr._suppressDirty = false;
-            fr._updateButtons && fr._updateButtons();
-          }
-        }
+        const st = (window.__modalStack && Array.isArray(window.__modalStack)) ? window.__modalStack : null;
+        const parentFr = (st && st.length > 1) ? st[st.length - 2] : null;
+        if (parentFr && parentFr.entity === 'timesheets') parentFr.currentTabKey = 'evidence';
       } catch {}
 
       if (window.__toast) window.__toast('Evidence type updated');
@@ -39057,6 +39512,10 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
       GE();
       return { ok: true };
     } catch (err) {
+      if (await handleMovedInViewer(err, 'evidence-viewer-save')) {
+        GE();
+        return { ok: false };
+      }
       L('update kind failed', err);
       alert(err?.message || 'Failed to update evidence type.');
       GE();
@@ -39079,10 +39538,9 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
     }
   );
 
-  // Hide again after viewer render (defensive: showModal may re-run _updateButtons and re-show it)
   try { requestAnimationFrame(() => __hideTsDelete()); } catch {}
 
-  // Wire: show/hide Other + ensure dirty triggers correctly
+  // Wire: show/hide Other + delete evidence
   try {
     if (canEditType) {
       const sel = document.getElementById(selId);
@@ -39116,28 +39574,26 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
 
           try {
             const enc = encodeURIComponent;
-            const res = await authFetch(API(`/api/timesheets/${enc(tsId)}/evidence/${enc(evidenceId)}`), {
-              method: 'DELETE'
-            });
-            const text = await res.text().catch(() => '');
-            if (!res.ok) throw new Error(text || 'Failed to delete evidence item');
+            const idNow = tsIdNow();
+            if (!idNow) throw new Error('Timesheet id missing.');
 
-            // Refresh + repaint parent evidence tab
+            // ✅ Guarded DELETE with expected_timesheet_id
+            await apiDeleteJson(
+              `/api/timesheets/${enc(idNow)}/evidence/${enc(evidenceId)}`,
+              { expected_timesheet_id: expectedNow() }
+            );
+
+            // Refresh evidence list for current id
             try {
               if (typeof refreshTimesheetEvidenceIntoModalState === 'function') {
-                await refreshTimesheetEvidenceIntoModalState(tsId);
+                await refreshTimesheetEvidenceIntoModalState(idNow);
               }
             } catch {}
 
+            // Refresh summary behind modal (defensive)
             try {
-              if (typeof window.__getModalFrame === 'function') {
-                const fr = window.__getModalFrame();
-                if (fr && fr.entity === 'timesheets') {
-                  fr._suppressDirty = true;
-                  await fr.setTab('evidence');
-                  fr._suppressDirty = false;
-                  fr._updateButtons && fr._updateButtons();
-                }
+              if (typeof refreshTimesheetsSummaryAfterRotation === 'function') {
+                refreshTimesheetsSummaryAfterRotation(idNow);
               }
             } catch {}
 
@@ -39146,6 +39602,7 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
             // Close viewer
             try { document.getElementById('btnCloseModal')?.click(); } catch {}
           } catch (err) {
+            if (await handleMovedInViewer(err, 'evidence-viewer-delete')) return;
             L('delete from viewer failed', err);
             alert(err?.message || 'Failed to delete evidence item.');
           }
@@ -39158,6 +39615,7 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
 
   GE();
 }
+
 
 function renderTimesheetOverviewTab(ctx) {
   const { LOGM, L, GC, GE } = getTsLoggers('[TS][OVERVIEW]');
@@ -39177,9 +39635,26 @@ function renderTimesheetOverviewTab(ctx) {
     : {};
 
   const sheetScope = (details.sheet_scope || row.sheet_scope || ts.sheet_scope || '').toUpperCase();
-  const subMode    = (ts.submission_mode || row.submission_mode || '').toUpperCase();
 
-  const tsId = ts.timesheet_id || row.timesheet_id || null;
+  // ✅ FIX: planned weeks use submission_mode_snapshot (not ts.submission_mode)
+  const cwModeSnapshot =
+    String(
+      cw.submission_mode_snapshot ||
+      details.cw_submission_mode_snapshot ||
+      row.submission_mode_snapshot ||
+      ''
+    ).toUpperCase();
+
+  const subMode =
+    (ts.submission_mode || row.submission_mode || cwModeSnapshot || '').toUpperCase();
+
+  // ✅ FIX: prefer backend-resolved current id
+  const tsId =
+    ts.timesheet_id ||
+    details.current_timesheet_id ||
+    row.timesheet_id ||
+    null;
+
   const enc = escapeHtml;
 
   const candidateName =
@@ -39277,6 +39752,7 @@ function renderTimesheetOverviewTab(ctx) {
     );
   };
 
+  // ✅ CHANGE: planned weeks must still show "Unprocessed"
   if (!hasTsfin) addStage('Unprocessed', 'pill-info');
 
   if (isPaid)     addStage('Paid', 'pill-ok');
@@ -39299,22 +39775,65 @@ function renderTimesheetOverviewTab(ctx) {
 
   if (!stageBadges.length) addStage('Unknown', 'pill-info');
 
-  const qrStatus   = String(details.qr_status || ts.qr_status || '').toUpperCase();
-  const qrScenario = String(actionFlags.qr_scenario || '').toUpperCase() || null;
+  const qrStatus = String(details.qr_status || ts.qr_status || '').toUpperCase();
 
-  const r2NurseKey = ts.r2_nurse_key || null;
-  const r2AuthKey  = ts.r2_auth_key || null;
+  // ✅ FIX: scenario fallback if actionFlags missing
+  const computeQrScenarioFallback = () => {
+    const qr_status = String(qrStatus || '').toUpperCase();
+    const token = ts.qr_token || null;
+    const gen   = ts.qr_generated_at || details.qr_generated_at || null;
+    const scan  = ts.qr_scanned_at || details.qr_scanned_at || null;
+
+    const hasToken = !!(token && String(token).trim());
+    if (!qr_status) return null;
+
+    if (qr_status === 'CANCELLED') return 'CANCELLED';
+    if (qr_status === 'EXPIRED')   return 'EXPIRED';
+
+    if (qr_status === 'PENDING') {
+      if (!hasToken && !gen) return 'SCENARIO_1';
+      if (hasToken && gen && !scan) return 'SCENARIO_2';
+      return 'SCENARIO_2';
+    }
+
+    if (qr_status === 'USED') return 'SCENARIO_3';
+
+    return null;
+  };
+
+  const qrScenario =
+    String(actionFlags.qr_scenario || '').toUpperCase() ||
+    computeQrScenarioFallback();
+
+  // ✅ FIX: "QR Completed" should key off the signed PDF key (manual_pdf_r2_key), not legacy r2_* keys
+  const signedPdfKey =
+    details.manual_pdf_r2_key ||
+    ts.manual_pdf_r2_key ||
+    null;
+
+  const hasSignedPdf = !!(signedPdfKey && String(signedPdfKey).trim());
+  const hasScan      = !!(details.qr_scanned_at || ts.qr_scanned_at);
 
   const routeLabel = (() => {
-    const hasQr = !!qrStatus;
+    const isManualOnly = !!actionFlags.is_manual_only;
 
-    if (hasQr) {
-      const scenario = qrScenario;
-      if (qrStatus === 'USED' || scenario === 'SCENARIO_3') {
-        if (r2NurseKey && r2AuthKey) return 'QR Completed';
-        return 'QR Hours Submitted - awaiting signed timesheet';
+    if (isManualOnly) return 'Manual-only';
+
+    if (qrStatus) {
+      if (qrScenario === 'CANCELLED') return 'QR Cancelled';
+      if (qrScenario === 'EXPIRED')   return 'QR Expired';
+
+      if (qrScenario === 'SCENARIO_1') return 'QR Enabled (not issued)';
+      if (qrScenario === 'SCENARIO_2') return 'QR Issued - awaiting scan';
+
+      // SCENARIO_3
+      if (qrScenario === 'SCENARIO_3' || qrStatus === 'USED') {
+        if (hasScan && hasSignedPdf) return 'QR Completed';
+        if (hasScan && !hasSignedPdf) return 'QR Scanned - awaiting signed evidence';
+        return 'QR Hours Submitted';
       }
-      return 'QR - Nothing submitted yet';
+
+      return 'QR';
     }
 
     if (subMode === 'ELECTRONIC') return 'Electronic';
@@ -39322,8 +39841,8 @@ function renderTimesheetOverviewTab(ctx) {
   })();
 
   const routePillClass =
-    (routeLabel === 'Manual')     ? 'pill-manual' :
-    (routeLabel === 'Electronic') ? 'pill-elec'   :
+    (routeLabel === 'Manual' || routeLabel === 'Manual-only') ? 'pill-manual' :
+    (routeLabel === 'Electronic') ? 'pill-elec' :
     'pill-info';
 
   const scopeLabel =
@@ -39381,14 +39900,6 @@ function renderTimesheetOverviewTab(ctx) {
     const canAllowQrAgain   = !!actionFlags.can_allow_qr_again;
     const canAllowElecAgain = !!actionFlags.can_allow_electronic_again;
 
-    const cwMode =
-      String(
-        cw.submission_mode_snapshot ||
-        details.cw_submission_mode_snapshot ||
-        row.submission_mode_snapshot ||
-        ''
-      ).toUpperCase();
-
     const weekId =
       details.contract_week_id ||
       cw.id ||
@@ -39400,7 +39911,7 @@ function renderTimesheetOverviewTab(ctx) {
       !tsId &&
       !!weekId &&
       !locked &&
-      (cwMode === 'MANUAL');
+      (cwModeSnapshot === 'MANUAL');
 
     if (isPlannedWeeklyManual) {
       btns.push(`
@@ -40605,9 +41116,9 @@ async function openTimesheet(row) {
       alert('Timesheet or week id missing.');
       return;
     }
+let tsId = hasTs ? realTsId : null;
+baseRow.id = hasTs ? realTsId : (weekId || baseRow.id);
 
-    const tsId = hasTs ? realTsId : null;
-    baseRow.id = hasTs ? realTsId : (weekId || baseRow.id);
 
     const sheetScopeRaw = (baseRow.sheet_scope || '').toUpperCase();
     const subModeRaw    = (baseRow.submission_mode || '').toUpperCase();
@@ -40621,70 +41132,32 @@ async function openTimesheet(row) {
 
     if (hasTs) {
         try {
-        details = await fetchTimesheetDetails(tsId);
+       details = await fetchTimesheetDetails(tsId);
 
-        // ─────────────────────────────────────────────────────────────
-        // IMPORTANT: fetchTimesheetDetails() currently normalises a subset of
-        // /api/timesheets/:id/details and does NOT include policy/contract_week/action_flags.
-        // We need those for requiresAuth logic + planned/manual behaviours.
-        // So we enrich details with a best-effort raw fetch (non-fatal).
-        // ─────────────────────────────────────────────────────────────
-        try {
-          const encTsId = encodeURIComponent(tsId);
-          const resRaw = await authFetch(API(`/api/timesheets/${encTsId}/details`));
-          const txtRaw = await resRaw.text().catch(() => '');
-          if (resRaw.ok) {
-            const raw = txtRaw ? JSON.parse(txtRaw) : {};
+// ✅ adopt resolved current id (stale-safe)
+if (details && details.current_timesheet_id && String(details.current_timesheet_id) !== String(tsId)) {
+  const newId = String(details.current_timesheet_id);
+  tsId = newId;
+  baseRow.timesheet_id = newId;
+  baseRow.id = newId;
 
-            // Add fields that the backend already returns but the FE helper drops.
-            // These are needed later by computeRequiresTimesheetAuthorisation() and other UI logic.
-            if (!Object.prototype.hasOwnProperty.call(details, 'contract_week_id')) {
-              details.contract_week_id = raw.contract_week_id || null;
-            } else {
-              details.contract_week_id = details.contract_week_id || raw.contract_week_id || null;
-            }
+  if (details.timesheet && typeof details.timesheet === 'object') {
+    details.timesheet.timesheet_id = newId;
+  }
 
-            if (!Object.prototype.hasOwnProperty.call(details, 'contract_week')) {
-              details.contract_week = raw.contract_week || null;
-            } else {
-              details.contract_week = details.contract_week || raw.contract_week || null;
-            }
+  details.current_timesheet_id = newId;
 
-            if (!Object.prototype.hasOwnProperty.call(details, 'policy')) {
-              details.policy = raw.policy || null;
-            } else {
-              details.policy = details.policy || raw.policy || null;
-            }
-
-            if (!Object.prototype.hasOwnProperty.call(details, 'action_flags')) {
-              details.action_flags = raw.action_flags || null;
-            } else {
-              details.action_flags = details.action_flags || raw.action_flags || null;
-            }
-
-         // Also keep these aligned if backend provided them
-details.sheet_scope     = details.sheet_scope     || raw.sheet_scope     || null;
-details.qr_status       = details.qr_status       || raw.qr_status       || null;
-details.qr_generated_at = details.qr_generated_at || raw.qr_generated_at || null;
-details.qr_scanned_at   = details.qr_scanned_at   || raw.qr_scanned_at   || null;
-details.manual_pdf_r2_key = details.manual_pdf_r2_key || raw.manual_pdf_r2_key || null;
-
-// ✅ NEW: ready_to_pay (from v_timesheets_summary / details endpoint)
-if (!Object.prototype.hasOwnProperty.call(details, 'ready_to_pay')) {
-  details.ready_to_pay = !!raw.ready_to_pay;
-} else {
-  details.ready_to_pay = (details.ready_to_pay === true || details.ready_to_pay === false)
-    ? details.ready_to_pay
-    : !!raw.ready_to_pay;
+  try { await refreshTimesheetsSummaryAfterRotation(newId); } catch {}
 }
 
-          } else {
-            // Non-fatal: keep the normalised details object
-            if (LOGM) L('raw details enrich failed (non-fatal)', { status: resRaw.status, body: txtRaw.slice(0, 300) });
-          }
-        } catch (e) {
-          if (LOGM) L('raw details enrich exception (non-fatal)', e);
-        }
+
+
+
+
+      // fetchTimesheetDetails() now returns policy / contract_week / action_flags and rotation metadata.
+// No additional enrichment fetch needed here.
+
+       
 
     L('details fetched', {
   hasTimesheet: !!details.timesheet,
@@ -40710,28 +41183,50 @@ if (!Object.prototype.hasOwnProperty.call(details, 'ready_to_pay')) {
 
 
           try {
-        const encTsId = encodeURIComponent(tsId);
-        const res  = await authFetch(API(`/api/timesheets/${encTsId}/evidence`));
-        const json = await res.json().catch(() => []);
-        const list = Array.isArray(json) ? json : [];
+    const encTsId = encodeURIComponent(tsId);
+const res  = await authFetch(API(`/api/timesheets/${encTsId}/evidence`));
+const txt  = await res.text().catch(() => '');
+if (!res.ok) {
+  L('fetch evidence FAILED', { status: res.status, bodyPreview: (txt || '').slice(0, 400) });
+  throw new Error(txt || 'Failed to fetch evidence');
+}
 
-        // Normalise evidence rows so the Evidence tab can reliably decide:
-        // - system rows (NHSP/HealthRoster): no delete
-        // - user rows: delete allowed
-        evidence = list.map(ev => {
-          const out = { ...(ev || {}) };
+let parsed = null;
+try { parsed = txt ? JSON.parse(txt) : null; } catch { parsed = null; }
 
-          // Ensure boolean flags exist (so buttons render correctly even before backend adds flags)
-          if (typeof out.system !== 'boolean') out.system = false;
-          if (typeof out.can_delete !== 'boolean') out.can_delete = !out.system;
+// ✅ Support both legacy list response and future object response
+const movedId =
+  parsed && typeof parsed === 'object' && !Array.isArray(parsed) && parsed.current_timesheet_id
+    ? String(parsed.current_timesheet_id)
+    : null;
 
-          // Ensure uploaded timestamp has a predictable field
-          if (!out.uploaded_at_utc && out.created_at) out.uploaded_at_utc = out.created_at;
+if (movedId && String(movedId) !== String(tsId)) {
+  tsId = movedId;
+  baseRow.timesheet_id = movedId;
+  baseRow.id = movedId;
+  try { await refreshTimesheetsSummaryAfterRotation(movedId); } catch {}
+}
 
-          return out;
-        });
+const list =
+  Array.isArray(parsed)
+    ? parsed
+    : (parsed && typeof parsed === 'object' && Array.isArray(parsed.evidence))
+      ? parsed.evidence
+      : [];
 
-        L('evidence fetched', { timesheet_id: tsId, count: evidence.length });
+evidence = list.map(ev => {
+  const out = { ...(ev || {}) };
+
+  if (typeof out.system !== 'boolean') out.system = false;
+  if (typeof out.can_delete !== 'boolean') out.can_delete = !out.system;
+
+  if (!out.uploaded_at_utc && out.created_at) out.uploaded_at_utc = out.created_at;
+
+  return out;
+});
+
+L('evidence fetched', { timesheet_id: tsId, count: evidence.length });
+
       } catch (err) {
         L('fetch evidence FAILED (non-fatal)', err);
         evidence = [];
@@ -40993,7 +41488,7 @@ if (!Object.prototype.hasOwnProperty.call(details, 'ready_to_pay')) {
       '';
     const cwSubSnap = String(cwSubSnapRaw || '').toUpperCase();
 
-  window.modalCtx = {
+ window.modalCtx = {
   ...(window.modalCtx || {}),
   entity: 'timesheets',
 
@@ -41037,11 +41532,14 @@ if (!Object.prototype.hasOwnProperty.call(details, 'ready_to_pay')) {
     contract_week_id: cwId,
     cw_submission_mode_snapshot: cwSubSnap,
 
-     // Use backend-derived action flags (enriched above). This is what your footer gating expects.
-    hasElectronicOriginal: !!(details && details.action_flags && details.action_flags.can_revert_to_electronic)
+    // ✅ NEW: required for guarded-write endpoints (optimistic concurrency)
+    expected_timesheet_id: (hasTs ? (tsId || null) : null),
 
+    // Use backend-derived action flags (enriched above). This is what your footer gating expects.
+    hasElectronicOriginal: !!(details && details.action_flags && details.action_flags.can_revert_to_electronic)
   }
 };
+
 
 
 const tabDefs = [
@@ -41796,20 +42294,20 @@ if (st && st.scheduleHasErrors) {
   // 5a-weekly-schedule) WEEKLY MANUAL – schedule save path (draft weeks must NOT create a timesheet)
   if (isWeeklyManualContext && scheduleChangedWeekly) {
     tasks.push(async () => {
-      const payload = {
-        // Schedule is the source of truth for bucket hours
-        actual_schedule_json: st.schedule || null, // ✅ use cleaned schedule
+     const expected = window.modalCtx?.timesheetMeta?.expected_timesheet_id || tsId || null;
 
-        // NEW: single action enum for QR decisions
-        qr_action: qrActionBackend || null,
+const payload = {
+  expected_timesheet_id: expected,
 
-        // Legacy compatibility (in case backend still expects booleans)
-        issue_qr:            qrActionBackend === 'ISSUE',
-        reissue_qr:          qrActionBackend === 'REISSUE',
-        revoke_to_manual:    qrActionBackend === 'REVOKE_TO_MANUAL',
-        revoke_qr:           qrActionBackend === 'REVOKE_TO_MANUAL',
-        disable_qr:          false
-      };
+  actual_schedule_json: st.schedule || null,
+  qr_action: qrActionBackend || null,
+  issue_qr:            qrActionBackend === 'ISSUE',
+  reissue_qr:          qrActionBackend === 'REISSUE',
+  revoke_to_manual:    qrActionBackend === 'REVOKE_TO_MANUAL',
+  revoke_qr:           qrActionBackend === 'REVOKE_TO_MANUAL',
+  disable_qr:          false
+};
+
 
       // ✅ CHANGE: only include additional_units_week if extras actually changed
       if (extrasChangedWeekly) {
@@ -41873,43 +42371,66 @@ if (st && st.scheduleHasErrors) {
 
       // Processed weekly manual timesheet: use existing endpoint and refresh TS details
       L('manual weekly schedule upsert payload', { weekIdSave, payload });
-      const result = await manualUpsertContractWeek(weekIdSave, payload);
+    const result = await manualUpsertContractWeek(weekIdSave, payload);
 
-      const newTsId = result.timesheet_id || tsId;
-      const finalTsId = newTsId || tsId;
-      if (finalTsId) {
-        try {
-          const freshDetails = await fetchTimesheetDetails(finalTsId);
-          window.modalCtx.timesheetDetails = freshDetails;
-        } catch (err) {
-          L('refresh details after weekly schedule upsert failed (non-fatal)', err);
-        }
-      }
+// ✅ adopt new current id if backend returned one
+const oldId = tsId;
+const newTsId = result?.timesheet_id || null;
+
+if (newTsId && String(newTsId) !== String(oldId)) {
+  tsId = newTsId;
+
+  if (window.modalCtx?.data) {
+    window.modalCtx.data.timesheet_id = newTsId;
+    window.modalCtx.data.id = newTsId;
+  }
+  if (window.modalCtx?.timesheetMeta) {
+    window.modalCtx.timesheetMeta.expected_timesheet_id = newTsId;
+    window.modalCtx.timesheetMeta.hasTs = true;
+    window.modalCtx.timesheetMeta.isPlannedWeek = false;
+  }
+
+  // ✅ keep summary grid in sync
+  try { await refreshTimesheetsSummaryAfterRotation(newTsId); } catch {}
+}
+
+// Refresh TS details for the (possibly updated) id
+if (tsId) {
+  try {
+    const freshDetails = await fetchTimesheetDetails(tsId);
+    window.modalCtx.timesheetDetails = freshDetails;
+  } catch (err) {
+    L('refresh details after weekly schedule upsert failed (non-fatal)', err);
+  }
+}
+
     });
   }
 
   // 5a) Weekly MANUAL hours + additional units → upsert (but if planned week, must be DRAFT-only; also skip if scheduleChangedWeekly)
   if (isWeeklyManualContext && !scheduleChangedWeekly && (hoursChangedWeekly || extrasChangedWeekly || dayRefsChangedWeekly)) {
     tasks.push(async () => {
-      const payload = {
-        hours: {
-          day:   n2(stagedWeeklyHours.day),
-          night: n2(stagedWeeklyHours.night),
-          sat:   n2(stagedWeeklyHours.sat),
-          sun:   n2(stagedWeeklyHours.sun),
-          bh:    n2(stagedWeeklyHours.bh)
-        },
+  const expected = window.modalCtx?.timesheetMeta?.expected_timesheet_id || tsId || null;
 
-        // NEW: single action enum for QR decisions
-        qr_action: qrActionBackend || null,
+const payload = {
+  expected_timesheet_id: expected,
 
-        // Legacy compatibility (in case backend still expects booleans)
-        issue_qr:            qrActionBackend === 'ISSUE',
-        reissue_qr:          qrActionBackend === 'REISSUE',
-        revoke_to_manual:    qrActionBackend === 'REVOKE_TO_MANUAL',
-        revoke_qr:           qrActionBackend === 'REVOKE_TO_MANUAL',
-        disable_qr:          false
-      };
+  hours: {
+    day:   n2(stagedWeeklyHours.day),
+    night: n2(stagedWeeklyHours.night),
+    sat:   n2(stagedWeeklyHours.sat),
+    sun:   n2(stagedWeeklyHours.sun),
+    bh:    n2(stagedWeeklyHours.bh)
+  },
+
+  qr_action: qrActionBackend || null,
+  issue_qr:            qrActionBackend === 'ISSUE',
+  reissue_qr:          qrActionBackend === 'REISSUE',
+  revoke_to_manual:    qrActionBackend === 'REVOKE_TO_MANUAL',
+  revoke_qr:           qrActionBackend === 'REVOKE_TO_MANUAL',
+  disable_qr:          false
+};
+
 
       // ✅ CHANGE: only include additional_units_week if extras actually changed
       if (extrasChangedWeekly) {
@@ -41972,27 +42493,47 @@ if (st && st.scheduleHasErrors) {
       }
 
       L('manual weekly upsert payload', { weekIdSave, payload });
-      const result = await manualUpsertContractWeek(weekIdSave, payload);
+     const result = await manualUpsertContractWeek(weekIdSave, payload);
 
-      const newTsId = result.timesheet_id || tsId;
-      if (!tsId && newTsId) {
-        // Planned week → newly created TS (should not happen anymore for planned weeks; kept defensively for safety)
-        window.modalCtx.data = {
-          ...(window.modalCtx.data || rowNow),
-          timesheet_id: newTsId,
-          id: newTsId
-        };
-      }
+// ✅ adopt new current id if backend returned one
+const oldId = tsId;
+const newTsId = result?.timesheet_id || null;
 
-      const finalTsId = newTsId || tsId;
-      if (finalTsId) {
-        try {
-          const freshDetails = await fetchTimesheetDetails(finalTsId);
-          window.modalCtx.timesheetDetails = freshDetails;
-        } catch (err) {
-          L('refresh details after manual upsert failed (non-fatal)', err);
-        }
-      }
+if (newTsId && String(newTsId) !== String(oldId)) {
+  tsId = newTsId;
+
+  if (window.modalCtx?.data) {
+    window.modalCtx.data.timesheet_id = newTsId;
+    window.modalCtx.data.id = newTsId;
+  }
+  if (window.modalCtx?.timesheetMeta) {
+    window.modalCtx.timesheetMeta.expected_timesheet_id = newTsId;
+    window.modalCtx.timesheetMeta.hasTs = true;
+    window.modalCtx.timesheetMeta.isPlannedWeek = false;
+  }
+
+  // ✅ keep summary grid in sync
+  try { await refreshTimesheetsSummaryAfterRotation(newTsId); } catch {}
+}
+
+// If this was somehow a "create" (defensive)
+if (!oldId && newTsId && window.modalCtx?.data) {
+  window.modalCtx.data.timesheet_id = newTsId;
+  window.modalCtx.data.id = newTsId;
+  if (window.modalCtx?.timesheetMeta) window.modalCtx.timesheetMeta.expected_timesheet_id = newTsId;
+  try { await refreshTimesheetsSummaryAfterRotation(newTsId); } catch {}
+}
+
+// Refresh details for the (possibly updated) id
+if (tsId) {
+  try {
+    const freshDetails = await fetchTimesheetDetails(tsId);
+    window.modalCtx.timesheetDetails = freshDetails;
+  } catch (err) {
+    L('refresh details after manual upsert failed (non-fatal)', err);
+  }
+}
+
     });
   }
 
@@ -42021,18 +42562,45 @@ if (st && st.scheduleHasErrors) {
 
         L('daily manual upsert payload', { tsId, payload });
 
-        await apiPostJson(
-          `/api/timesheets/${encodeURIComponent(tsId)}/daily-manual-upsert`,
-          payload
-        );
+payload.expected_timesheet_id = window.modalCtx?.timesheetMeta?.expected_timesheet_id || tsId;
 
-        // Reload details so TSFIN + QR fields reflect the new hours
-        try {
-          const freshDetails = await fetchTimesheetDetails(tsId);
-          window.modalCtx.timesheetDetails = freshDetails;
-        } catch (err) {
-          L('refresh details after daily-manual-upsert failed (non-fatal)', err);
-        }
+let upsertRes = null;
+try {
+  upsertRes = await apiPostJson(
+    `/api/timesheets/${encodeURIComponent(tsId)}/daily-manual-upsert`,
+    payload
+  );
+} catch (e) {
+  // If backend returned 409 with JSON, apiPostJson likely throws; let the main task runner handle it.
+  throw e;
+}
+
+// ✅ Adopt new current id if backend rotated
+const newId =
+  (upsertRes && (upsertRes.current_timesheet_id || upsertRes.timesheet_id)) ||
+  null;
+
+if (newId && String(newId) !== String(tsId)) {
+  tsId = newId;
+  if (window.modalCtx?.data) {
+    window.modalCtx.data.timesheet_id = newId;
+    window.modalCtx.data.id = newId;
+  }
+  if (window.modalCtx?.timesheetMeta) window.modalCtx.timesheetMeta.expected_timesheet_id = newId;
+
+  // ✅ keep summary grid in sync
+  try { await refreshTimesheetsSummaryAfterRotation(newId); } catch {}
+}
+
+
+// Reload details for the (possibly new) timesheet id
+try {
+  const freshDetails = await fetchTimesheetDetails(tsId);
+  window.modalCtx.timesheetDetails = freshDetails;
+} catch (err) {
+  L('refresh details after daily-manual-upsert failed (non-fatal)', err);
+}
+
       });
     }
   }
@@ -42084,35 +42652,41 @@ if (st && st.scheduleHasErrors) {
 
       L('segment updates', { count: updates.length });
 
-      await apiPatchJson(
-        `/api/tsfin/${encodeURIComponent(tsId || rowNow.timesheet_id)}/segments`,
-        { segments: updates }
-      );
+await apiPatchJson(
+  `/api/tsfin/${encodeURIComponent(tsId || rowNow.timesheet_id)}/segments`,
+  { expected_timesheet_id: (window.modalCtx?.timesheetMeta?.expected_timesheet_id || tsId), segments: updates }
+);
+
     });
   }
 
   // 5c) Apply reference update if changed
-  if (refChanged && tsId) {
-    tasks.push(async () => {
-      await updateTimesheetReference(tsId, stagedRef);
-    });
-  }
+if (refChanged && tsId) {
 
-  // 5e) Apply pay hold change (staged)
-  if (shouldChangeHold && tsId) {
-    tasks.push(async () => {
-      const onHold = !!payHoldDesired;
-      const reason = onHold ? payHoldReason : '';
-      await toggleTimesheetPayHold(tsId, onHold, reason);
-    });
-  }
+  tasks.push(async () => {
+    const expected = window.modalCtx?.timesheetMeta?.expected_timesheet_id || tsId;
+    await updateTimesheetReference(tsId, stagedRef, expected);
+  });
+}
 
-  // 5f) Apply mark paid (staged)
-  if (shouldMarkPaid && tsId) {
-    tasks.push(async () => {
-      await markTimesheetPaid(tsId);
-    });
-  }
+// 5e) Apply pay hold change (staged)
+if (shouldChangeHold && tsId) {
+  tasks.push(async () => {
+    const expected = window.modalCtx?.timesheetMeta?.expected_timesheet_id || tsId;
+    const onHold = !!payHoldDesired;
+    const reason = onHold ? payHoldReason : '';
+    await toggleTimesheetPayHold(tsId, onHold, reason, expected);
+  });
+}
+
+// 5f) Apply mark paid (staged)
+if (shouldMarkPaid && tsId) {
+  tasks.push(async () => {
+    const expected = window.modalCtx?.timesheetMeta?.expected_timesheet_id || tsId;
+    await markTimesheetPaid(tsId, expected);
+  });
+}
+
 
   if (!tasks.length) {
     L('no staged changes to apply; no-op');
@@ -42120,16 +42694,92 @@ if (st && st.scheduleHasErrors) {
     return { ok: true, saved: rowNow };
   }
 
-  for (let i = 0; i < tasks.length; i++) {
-    try {
-      await tasks[i]();
-    } catch (err) {
-      L('task failed', { index: i, error: err });
-      GE();
-      alert(err?.message || 'Failed to save timesheet changes. No changes were fully applied.');
-      return { ok: false };
-    }
+ for (let i = 0; i < tasks.length; i++) {
+  try {
+    await tasks[i]();
+  } catch (err) {
+    // ✅ NEW: handle guarded-write conflict (timesheet rotated)
+  let moved = (err && err.json && typeof err.json === 'object') ? err.json : null;
+if (!moved) {
+  try {
+    const msg = String(err?.message || '');
+    if (msg && msg.trim().startsWith('{')) moved = JSON.parse(msg);
+  } catch {}
+}
+
+if ((err?.status === 409) && moved && moved.error === 'TIMESHEET_MOVED' && moved.current_timesheet_id) {
+  const newId = moved.current_timesheet_id;
+
+  // adopt new id everywhere
+  tsId = newId;
+
+  if (window.modalCtx?.data) {
+    window.modalCtx.data.timesheet_id = newId;
+    window.modalCtx.data.id = newId;
   }
+
+  // reload details for the new current row
+  let freshDetails = null;
+  try {
+    freshDetails = await fetchTimesheetDetails(newId);
+    if (window.modalCtx) window.modalCtx.timesheetDetails = freshDetails;
+  } catch {}
+
+  // recompute meta so button gating/labels aren’t stale
+  try {
+    const tsNew   = freshDetails?.timesheet || {};
+    const finNew  = freshDetails?.tsfin || {};
+    const scopeU  = String(freshDetails?.sheet_scope || tsNew.sheet_scope || '').toUpperCase();
+    const subU    = String(tsNew.submission_mode || '').toUpperCase();
+    const basisU  = String(finNew.basis || '').toUpperCase();
+    const qrU     = String(freshDetails?.qr_status || tsNew.qr_status || '').toUpperCase();
+    const paid    = !!finNew.paid_at_utc;
+    const invo    = !!finNew.locked_by_invoice_id;
+
+    window.modalCtx.timesheetMeta = {
+      ...(window.modalCtx.timesheetMeta || {}),
+      hasTs: true,
+      isPlannedWeek: false,
+      sheetScope: scopeU,
+      subMode: subU,
+      basis: basisU,
+      qrStatus: qrU,
+      isPaid: paid,
+      isInvoiced: invo,
+      isLocked: (paid || invo),
+      contract_week_id: freshDetails?.contract_week_id || window.modalCtx?.data?.contract_week_id || null,
+      expected_timesheet_id: newId,
+      hasElectronicOriginal: !!(freshDetails?.action_flags && freshDetails.action_flags.can_revert_to_electronic)
+    };
+  } catch {}
+
+  // ✅ keep summary grid in sync
+  try { await refreshTimesheetsSummaryAfterRotation(newId); } catch {}
+
+  // repaint the modal so the user sees refreshed data
+  try {
+    const fr = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
+    if (fr && fr.entity === 'timesheets') {
+      fr._suppressDirty = true;
+      await fr.setTab(fr.currentTabKey || 'overview');
+      fr._suppressDirty = false;
+      fr._updateButtons && fr._updateButtons();
+    }
+  } catch {}
+
+  alert('This timesheet changed while you were editing. Reloaded to the latest version. Please review and save again.');
+  return { ok: false, reloaded: true };
+}
+
+
+
+    L('task failed', { index: i, error: err });
+    GE();
+    alert(err?.message || 'Failed to save timesheet changes. No changes were fully applied.');
+    return { ok: false };
+  }
+}
+
 
   // After helpers, details & timesheetState should already be updated
   const newDetails = window.modalCtx.timesheetDetails || det;
@@ -42163,20 +42813,29 @@ if (st && st.scheduleHasErrors) {
     // manualHours / additionalRates / schedule / dayReferences / evidence remain staged for the next edit session
   }
 
-  // Focus this TS in summary grid on next refresh
-  try {
-    if (finalTsId) {
-      window.__pendingFocus = {
-        section: 'timesheets',
-        ids: [String(finalTsId)],
-        primaryIds: [String(finalTsId)]
-      };
-    }
-  } catch {}
+ window.modalCtx.data = updatedRow;
 
-  L('SAVE OK, updatedRow', { id: updatedRow.id });
-  GE();
-  return { ok: true, saved: updatedRow };
+// ✅ refresh summary row behind modal even when there was NO rotation
+try {
+  const idToRefresh = finalTsId || tsId || null;
+  if (idToRefresh) await refreshTimesheetsSummaryAfterRotation(idToRefresh);
+} catch {}
+
+// Focus this TS in summary grid on next refresh
+try {
+  if (finalTsId) {
+    window.__pendingFocus = {
+      section: 'timesheets',
+      ids: [String(finalTsId)],
+      primaryIds: [String(finalTsId)]
+    };
+  }
+} catch {}
+
+L('SAVE OK, updatedRow', { id: updatedRow.id });
+GE();
+return { ok: true, saved: updatedRow };
+
 };
 
   
@@ -42204,6 +42863,18 @@ if (st && st.scheduleHasErrors) {
     GE();
   }
 }
+
+async function refreshTimesheetsSummaryAfterRotation(newId) {
+  try {
+    window.__pendingFocus = {
+      section: 'timesheets',
+      ids: [String(newId)],
+      primaryIds: [String(newId)]
+    };
+  } catch {}
+  try { await renderAll(); } catch {}
+}
+
 
 async function fetchTimesheetAudit(timesheetId) {
   const { LOGM, L, GC, GE } = getTsLoggers('[TS][AUDIT][FETCH]');
@@ -42859,7 +43530,6 @@ function renderTimesheetEvidenceTab(ctx) {
   `;
 }
 
-
 async function openTimesheetEvidenceUploadDialog(file) {
   const { LOGM, L, GC, GE } = getTsLoggers('[TS][EVIDENCE][UPLOAD_DIALOG]');
   GC('openTimesheetEvidenceUploadDialog');
@@ -42999,15 +43669,56 @@ async function openTimesheetEvidenceUploadDialog(file) {
         throw new Error('uploadTimesheetEvidence is not defined.');
       }
 
-      await uploadTimesheetEvidence(tsId, file, kind);
+      // ✅ Pull current expected snapshot at the moment of save
+      const mc2 = window.modalCtx || {};
+      const tsIdNow =
+        mc2.data?.timesheet_id ||
+        mc2.data?.id ||
+        (mc2.timesheetDetails && mc2.timesheetDetails.timesheet && mc2.timesheetDetails.timesheet.timesheet_id) ||
+        tsId;
+
+      const expected =
+        (mc2.timesheetMeta && mc2.timesheetMeta.expected_timesheet_id) ||
+        String(tsIdNow);
+
+      // ✅ Upload evidence (guarded by expected_timesheet_id)
+      const up = await uploadTimesheetEvidence(tsIdNow, file, kind, expected);
+
+      const resolvedId =
+        (up && (up.current_timesheet_id || up.timesheet_id))
+          ? String(up.current_timesheet_id || up.timesheet_id)
+          : String(tsIdNow);
+
+      // ✅ Keep modalCtx aligned (if TS is open)
+      try {
+        if (window.modalCtx?.data) {
+          const cur = window.modalCtx.data.timesheet_id || window.modalCtx.data.id || null;
+          if (String(cur || '') === String(tsIdNow || '')) {
+            window.modalCtx.data.timesheet_id = resolvedId;
+            window.modalCtx.data.id = resolvedId;
+          }
+        }
+        if (window.modalCtx?.timesheetMeta && typeof window.modalCtx.timesheetMeta === 'object') {
+          window.modalCtx.timesheetMeta.expected_timesheet_id = resolvedId;
+          window.modalCtx.timesheetMeta.hasTs = true;
+        }
+      } catch {}
+
+      // Refresh details best-effort
+      try {
+        const fresh = await fetchTimesheetDetails(resolvedId);
+        window.modalCtx.timesheetDetails = fresh;
+      } catch (e) {
+        L('refresh details after evidence upload failed (non-fatal)', e);
+      }
 
       // Refresh evidence list + repaint Evidence tab
       try {
         if (typeof refreshTimesheetEvidenceIntoModalState === 'function') {
-          await refreshTimesheetEvidenceIntoModalState(tsId);
+          await refreshTimesheetEvidenceIntoModalState(resolvedId);
         } else {
           const enc = encodeURIComponent;
-          const res = await authFetch(API(`/api/timesheets/${enc(tsId)}/evidence`));
+          const res = await authFetch(API(`/api/timesheets/${enc(resolvedId)}/evidence`));
           const json = await res.json().catch(() => []);
           const list = Array.isArray(json) ? json : [];
 
@@ -43041,13 +43752,37 @@ async function openTimesheetEvidenceUploadDialog(file) {
         L('repaint evidence tab failed (non-fatal)', e);
       }
 
+      // Keep summary row consistent if id rotated
+      try {
+        if (typeof refreshTimesheetsSummaryAfterRotation === 'function') {
+          await refreshTimesheetsSummaryAfterRotation(resolvedId);
+        }
+      } catch (e) {
+        L('summary refresh failed (non-fatal)', e);
+      }
+
       if (window.__toast) window.__toast('Evidence uploaded');
 
       cleanup();
       GE();
-      return { ok: true, saved: { timesheet_id: tsId } };
+      return { ok: true, saved: { timesheet_id: resolvedId } };
     } catch (err) {
       L('upload failed', err);
+
+      // ✅ Rotation safety: if TS moved, adopt + refetch + repaint, then let user retry
+      try {
+        if (typeof tsHandleMoved409Modal === 'function') {
+          const handled = await tsHandleMoved409Modal(err, {
+            tabKey: 'evidence',
+            toast: 'This timesheet changed while you were editing. Please review and try again.'
+          });
+          if (handled) {
+            GE();
+            return { ok: false };
+          }
+        }
+      } catch {}
+
       alert(err?.message || 'Failed to upload evidence.');
       GE();
       return { ok: false };
@@ -43098,6 +43833,7 @@ async function openTimesheetEvidenceUploadDialog(file) {
 
   GE();
 }
+
 
 
 async function refreshTimesheetEvidenceIntoModalState(timesheetId) {
@@ -43389,16 +44125,55 @@ async function openTimesheetEvidenceReplaceDialog(file) {
         return { ok: false };
       }
 
-      // Upload evidence using the new timesheet-level path
-      await uploadTimesheetEvidence(tsId, file, kind);
+      // ✅ Re-read the current modal context at save time
+      const mc2 = window.modalCtx || {};
+      const tsIdNow =
+        mc2.data?.timesheet_id ||
+        mc2.data?.id ||
+        (mc2.timesheetDetails && mc2.timesheetDetails.timesheet && mc2.timesheetDetails.timesheet.timesheet_id) ||
+        tsId;
 
-      // Refresh evidence list in modal state so parent Evidence tab updates immediately
+      const expected =
+        (mc2.timesheetMeta && mc2.timesheetMeta.expected_timesheet_id) ||
+        String(tsIdNow);
+
+      // ✅ Upload evidence (guarded; if stale, backend returns 409 -> we adopt+refresh below)
+      const up = await uploadTimesheetEvidence(tsIdNow, file, kind, expected);
+
+      const resolvedId =
+        (up && (up.current_timesheet_id || up.timesheet_id))
+          ? String(up.current_timesheet_id || up.timesheet_id)
+          : String(tsIdNow);
+
+      // ✅ If the timesheet moved, adopt it into modalCtx for correctness
       try {
-        const encTsId = encodeURIComponent(tsId);
+        if (window.modalCtx && window.modalCtx.data) {
+          const cur = window.modalCtx.data.timesheet_id || window.modalCtx.data.id || null;
+          if (String(cur || '') === String(tsIdNow || '')) {
+            window.modalCtx.data.timesheet_id = resolvedId;
+            window.modalCtx.data.id = resolvedId;
+          }
+        }
+        if (window.modalCtx?.timesheetMeta && typeof window.modalCtx.timesheetMeta === 'object') {
+          window.modalCtx.timesheetMeta.expected_timesheet_id = resolvedId;
+          window.modalCtx.timesheetMeta.hasTs = true;
+        }
+      } catch {}
 
-        // Prefer the canonical refresh helper if it exists
+      // Refresh details best-effort (keeps action flags, evidence mode etc aligned)
+      try {
+        const fresh = await fetchTimesheetDetails(resolvedId);
+        window.modalCtx.timesheetDetails = fresh;
+      } catch (e) {
+        L('refresh details after evidence upload failed (non-fatal)', e);
+      }
+
+      // ✅ Refresh evidence list in modal state using resolvedId
+      try {
+        const encTsId = encodeURIComponent(resolvedId);
+
         if (typeof refreshTimesheetEvidenceIntoModalState === 'function') {
-          await refreshTimesheetEvidenceIntoModalState(tsId);
+          await refreshTimesheetEvidenceIntoModalState(resolvedId);
         } else {
           const res = await authFetch(API(`/api/timesheets/${encTsId}/evidence`));
           const json = await res.json().catch(() => []);
@@ -43420,6 +44195,15 @@ async function openTimesheetEvidenceReplaceDialog(file) {
         L('refresh evidence after upload failed (non-fatal)', err);
       }
 
+      // ✅ Keep summary row consistent if id rotated
+      try {
+        if (typeof refreshTimesheetsSummaryAfterRotation === 'function') {
+          await refreshTimesheetsSummaryAfterRotation(resolvedId);
+        }
+      } catch (e) {
+        L('summary refresh failed (non-fatal)', e);
+      }
+
       if (window.__toast) {
         window.__toast('Evidence uploaded');
       }
@@ -43427,16 +44211,30 @@ async function openTimesheetEvidenceReplaceDialog(file) {
       try { URL.revokeObjectURL(newUrl); } catch {}
 
       GE();
-      return { ok: true, saved: { timesheet_id: tsId } };
+      return { ok: true, saved: { timesheet_id: resolvedId } };
     } catch (err) {
       L('uploadTimesheetEvidence failed', err);
+
+      // ✅ Rotation safety: adopt moved current id + refresh + repaint; user can retry
+      try {
+        if (typeof tsHandleMoved409Modal === 'function') {
+          const handled = await tsHandleMoved409Modal(err, {
+            tabKey: 'upload',
+            toast: 'This timesheet changed while you were editing. Please review and try again.'
+          });
+          if (handled) {
+            GE();
+            return { ok: false };
+          }
+        }
+      } catch {}
+
       alert(err?.message || 'Failed to upload evidence.');
       GE();
       return { ok: false };
     }
   };
 
-  // Wire show/hide of "Other" textbox after modal renders (best-effort, non-fatal)
   const onDismiss = () => {
     try { URL.revokeObjectURL(newUrl); } catch {}
   };
@@ -43446,7 +44244,7 @@ async function openTimesheetEvidenceReplaceDialog(file) {
     tabs,
     () => bodyHtml,
     onSave,
-    false, // treat as a create/edit-only child frame so Save is visible
+    false,
     undefined,
     {
       kind: 'timesheet-evidence-replace',
@@ -43480,7 +44278,8 @@ async function openTimesheetEvidenceReplaceDialog(file) {
   GE();
 }
 
-async function uploadTimesheetEvidence(timesheetId, file, evidenceTypeLabel) {
+
+async function uploadTimesheetEvidence(timesheetId, file, evidenceTypeLabel, expectedTimesheetId) {
   const { LOGM, L, GC, GE } = getTsLoggers('[TS][EVIDENCE][UPLOAD]');
   GC('uploadTimesheetEvidence');
 
@@ -43499,44 +44298,40 @@ async function uploadTimesheetEvidence(timesheetId, file, evidenceTypeLabel) {
     throw new Error('uploadTimesheetEvidence: evidenceTypeLabel is required');
   }
 
+  const mc = window.modalCtx || {};
+  const expected =
+    (expectedTimesheetId != null ? String(expectedTimesheetId) : '') ||
+    (mc.timesheetMeta && mc.timesheetMeta.expected_timesheet_id) ||
+    String(timesheetId);
+
   const enc = encodeURIComponent;
   const contentType = file.type || 'application/octet-stream';
   const filename    = file.name || 'timesheet-evidence';
 
-  L('ENTRY', { timesheetId, kind, contentType, filename, size: file.size });
+  L('ENTRY', { timesheetId, expected_timesheet_id: expected, kind, contentType, filename, size: file.size });
 
   // ─────────────────────────────────────────────────────────────
   // Timesheet-level path ONLY:
   // 1) /api/files/presign-upload
   // 2) PUT to upload_url
-  // 3) POST /api/timesheets/:id/evidence with { kind, display_name, storage_key }
+  // 3) POST /api/timesheets/:id/evidence with { kind, display_name, storage_key, expected_timesheet_id }
   // ─────────────────────────────────────────────────────────────
 
-  // 1) Presign upload
-  let presignJson;
+  // 1) Presign upload (use apiPostJson so errors preserve err.status + err.json)
+  let presignJson = null;
   try {
-    const res = await authFetch(API('/api/files/presign-upload'), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        content_type: contentType,
-        filename
-      })
+    presignJson = await apiPostJson('/api/files/presign-upload', {
+      content_type: contentType,
+      filename
     });
-    const text = await res.text();
-    if (!res.ok) {
-      L('files presign-upload failed', { status: res.status, bodyPreview: text.slice(0, 400) });
-      throw new Error(text || 'Failed to presign timesheet evidence upload');
-    }
-    presignJson = text ? JSON.parse(text) : {};
   } catch (err) {
     L('files presign-upload error', err);
     GE();
     throw err;
   }
 
-  const uploadUrl = presignJson.upload_url || null;
-  const fileKey   = presignJson.key || null;
+  const uploadUrl = presignJson && presignJson.upload_url ? String(presignJson.upload_url) : null;
+  const fileKey   = presignJson && presignJson.key ? String(presignJson.key) : null;
   if (!uploadUrl || !fileKey) {
     GE();
     throw new Error('Presign-upload response missing upload_url or key');
@@ -43544,7 +44339,7 @@ async function uploadTimesheetEvidence(timesheetId, file, evidenceTypeLabel) {
 
   L('presign OK', { uploadUrl, fileKey });
 
-  // 2) Upload file to R2 (via signed URL)
+  // 2) Upload file to R2 (via signed URL) — keep as raw fetch (not a CloudTMS API call)
   try {
     const res = await fetch(uploadUrl, {
       method: 'PUT',
@@ -43562,38 +44357,67 @@ async function uploadTimesheetEvidence(timesheetId, file, evidenceTypeLabel) {
     throw err;
   }
 
-  // 3) Record evidence row
+  // 3) Record evidence row (guarded: expected_timesheet_id)
+  let recordJson = {};
   try {
     const encTsId = enc(timesheetId);
-    const res = await authFetch(API(`/api/timesheets/${encTsId}/evidence`), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        kind,
-        display_name: file.name || filename,
-        storage_key: fileKey
-      })
+    recordJson = await apiPostJson(`/api/timesheets/${encTsId}/evidence`, {
+      kind,
+      display_name: file.name || filename,
+      storage_key: fileKey,
+      expected_timesheet_id: expected
     });
-    const text = await res.text();
-    if (!res.ok) {
-      L('timesheet evidence POST failed', { status: res.status, bodyPreview: text.slice(0, 400) });
-      throw new Error(text || 'Failed to record timesheet evidence');
-    }
   } catch (err) {
     L('timesheet evidence POST error', err);
     GE();
     throw err;
   }
 
-  L('UPLOAD OK (timesheet-level, evidence)', { timesheetId, kind, storage_key: fileKey });
-  GE();
-  return { ok: true, storage_key: fileKey };
-}
+  const resolvedId =
+    (recordJson && (recordJson.current_timesheet_id || recordJson.timesheet_id || recordJson.new_timesheet_id))
+      ? String(recordJson.current_timesheet_id || recordJson.timesheet_id || recordJson.new_timesheet_id)
+      : String(timesheetId);
 
+  L('UPLOAD OK (timesheet-level, evidence)', { timesheetId, resolvedId, kind, storage_key: fileKey, recordJson });
+  GE();
+  return { ok: true, storage_key: fileKey, timesheet_id: resolvedId, current_timesheet_id: resolvedId, record: recordJson };
+}
 
 async function handleTimesheetEvidenceRemoveClick(ev) {
   const { LOGM, L, GC, GE } = getTsLoggers('[TS][EVIDENCE][REMOVE]');
   GC('handleTimesheetEvidenceRemoveClick');
+
+  // Local helper to throw with err.status + err.json (so TIMESHEET_MOVED can be handled consistently)
+  const apiDeleteJson = async (urlPath, bodyObj) => {
+    const url = API(urlPath);
+    let res, text = '';
+    try {
+      res = await authFetch(url, {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(bodyObj || {})
+      });
+      text = await res.text().catch(() => '');
+    } catch (e) {
+      throw e;
+    }
+
+    let j = null;
+    try { j = text ? JSON.parse(text) : null; } catch { j = null; }
+
+    if (!res.ok) {
+      const err = new Error(
+        (j && typeof j === 'object' && (j.message || j.error))
+          ? String(j.message || j.error)
+          : (text || `HTTP ${res.status}`)
+      );
+      err.status = res.status;
+      err.json = j;
+      throw err;
+    }
+
+    return (j && typeof j === 'object') ? j : {};
+  };
 
   const btn = ev?.target?.closest?.('[data-evidence-remove]');
   if (!btn) {
@@ -43619,6 +44443,10 @@ async function handleTimesheetEvidenceRemoveClick(ev) {
     alert('Timesheet context missing; cannot remove evidence.');
     return;
   }
+
+  const expected =
+    (mc.timesheetMeta && mc.timesheetMeta.expected_timesheet_id) ||
+    String(tsId);
 
   // Defensive guard: block system evidence / non-deletable rows
   try {
@@ -43647,17 +44475,41 @@ async function handleTimesheetEvidenceRemoveClick(ev) {
   const encTsId = enc(tsId);
   const encEid  = enc(eid);
 
-  L('REMOVE ENTRY', { timesheetId: tsId, evidenceId: eid });
+  L('REMOVE ENTRY', { timesheetId: tsId, expected_timesheet_id: expected, evidenceId: eid });
 
   try {
-    // 1) DELETE the evidence row
-    const res = await authFetch(API(`/api/timesheets/${encTsId}/evidence/${encEid}`), {
-      method: 'DELETE'
-    });
-    const text = await res.text().catch(() => '');
-    if (!res.ok) {
-      L('DELETE evidence failed', { status: res.status, bodyPreview: text.slice(0, 400) });
-      throw new Error(text || 'Failed to delete evidence item');
+    // 1) DELETE the evidence row (guarded)
+    const delJson = await apiDeleteJson(
+      `/api/timesheets/${encTsId}/evidence/${encEid}`,
+      { expected_timesheet_id: expected }
+    );
+
+    // NOTE: a rotated/moved TS should return 409 (handled below), but keep this as a safety net
+    const resolvedId =
+      (delJson && (delJson.current_timesheet_id || delJson.timesheet_id || delJson.new_timesheet_id))
+        ? String(delJson.current_timesheet_id || delJson.timesheet_id || delJson.new_timesheet_id)
+        : String(tsId);
+
+    // Keep modalCtx identity aligned (best-effort)
+    try {
+      if (window.modalCtx?.data) {
+        const cur = window.modalCtx.data.timesheet_id || window.modalCtx.data.id || null;
+        if (String(cur || '') === String(tsId || '')) {
+          window.modalCtx.data.timesheet_id = resolvedId;
+          window.modalCtx.data.id = resolvedId;
+        }
+      }
+      if (window.modalCtx?.timesheetMeta && typeof window.modalCtx.timesheetMeta === 'object') {
+        window.modalCtx.timesheetMeta.expected_timesheet_id = resolvedId;
+      }
+    } catch {}
+
+    // Refresh details best-effort
+    try {
+      const fresh = await fetchTimesheetDetails(resolvedId);
+      window.modalCtx.timesheetDetails = fresh;
+    } catch (e) {
+      L('refresh details after evidence delete failed (non-fatal)', e);
     }
 
     // 2) Refresh evidence list into modal state (canonical helper if present)
@@ -43665,7 +44517,7 @@ async function handleTimesheetEvidenceRemoveClick(ev) {
 
     if (typeof refreshTimesheetEvidenceIntoModalState === 'function') {
       try {
-        newEvidence = await refreshTimesheetEvidenceIntoModalState(tsId);
+        newEvidence = await refreshTimesheetEvidenceIntoModalState(resolvedId);
       } catch (e) {
         L('refreshTimesheetEvidenceIntoModalState failed (non-fatal)', e);
         newEvidence = null;
@@ -43673,7 +44525,7 @@ async function handleTimesheetEvidenceRemoveClick(ev) {
     }
 
     if (!Array.isArray(newEvidence)) {
-      const res2 = await authFetch(API(`/api/timesheets/${encTsId}/evidence`));
+      const res2 = await authFetch(API(`/api/timesheets/${encodeURIComponent(resolvedId)}/evidence`));
       const json2 = await res2.json().catch(() => []);
       const list2 = Array.isArray(json2) ? json2 : [];
 
@@ -43705,11 +44557,35 @@ async function handleTimesheetEvidenceRemoveClick(ev) {
       L('repaint evidence tab failed (non-fatal)', e);
     }
 
+    // Keep summary row consistent if id rotated
+    try {
+      if (typeof refreshTimesheetsSummaryAfterRotation === 'function') {
+        await refreshTimesheetsSummaryAfterRotation(resolvedId);
+      }
+    } catch (e) {
+      L('summary refresh failed (non-fatal)', e);
+    }
+
     if (window.__toast) {
       window.__toast('Evidence removed');
     }
   } catch (err) {
     L('evidence remove error', err);
+
+    // ✅ Rotation safety: adopt moved current id + refresh + repaint (no delete occurs)
+    try {
+      if (typeof tsHandleMoved409Modal === 'function') {
+        const handled = await tsHandleMoved409Modal(err, {
+          tabKey: 'evidence',
+          toast: 'This timesheet changed while you were editing. Please review and try again.'
+        });
+        if (handled) {
+          GE();
+          return;
+        }
+      }
+    } catch {}
+
     alert(err?.message || 'Failed to remove evidence item.');
   }
 
@@ -43717,13 +44593,11 @@ async function handleTimesheetEvidenceRemoveClick(ev) {
 }
 
 
-
-async function authoriseTimesheet(ctxOrId) {
+async function authoriseTimesheet(ctxOrId, expectedTimesheetId) {
   const { LOGM, L, GC, GE } = getTsLoggers('[TS][AUTH]');
   GC('authoriseTimesheet');
 
-  // Normalise context
-  const mc = window.modalCtx || {};
+  const mc  = window.modalCtx || {};
   const row = (mc.data && mc.data.timesheet_id) ? mc.data : (ctxOrId && ctxOrId.row ? ctxOrId.row : {});
   const tsId = (typeof ctxOrId === 'string') ? ctxOrId : (row.timesheet_id || row.id || mc.data?.id || null);
 
@@ -43733,38 +44607,34 @@ async function authoriseTimesheet(ctxOrId) {
     throw new Error('authoriseTimesheet: timesheetId is required');
   }
 
-  const encId = encodeURIComponent(tsId);
-  const url   = API(`/api/timesheets/${encId}/authorise`);
+  const expected =
+    (expectedTimesheetId != null ? String(expectedTimesheetId) : '') ||
+    (mc.timesheetMeta && mc.timesheetMeta.expected_timesheet_id) ||
+    String(tsId);
 
-  L('REQUEST', { url, tsId });
+  const encId   = encodeURIComponent(tsId);
+  const urlPath = `/api/timesheets/${encId}/authorise`;
 
-  let res, text;
-  try {
-    res  = await authFetch(url, { method: 'POST' });
-    text = await res.text();
-  } catch (err) {
-    L('network error', err);
-    GE();
-    throw err;
-  }
+  const payload = { expected_timesheet_id: expected };
 
-  if (!res.ok) {
-    L('server error', { status: res.status, bodyPreview: text.slice(0, 400) });
-    GE();
-    throw new Error(text || `Failed to authorise timesheet ${tsId}`);
-  }
+  L('REQUEST', { url: API(urlPath), tsId, payload });
 
-  let json = {};
-  try { json = text ? JSON.parse(text) : {}; } catch (err) {
-    L('parse error', err);
-  }
+  // ✅ Use apiPostJson so 409 errors preserve err.status + err.json for TIMESHEET_MOVED handling
+  const json = await apiPostJson(urlPath, payload);
 
   L('authorise result', json);
+
+  const newId =
+    (json && (json.current_timesheet_id || json.new_timesheet_id || json.timesheet_id))
+      ? (json.current_timesheet_id || json.new_timesheet_id || json.timesheet_id)
+      : null;
+
+  const resolvedId = (newId && String(newId).trim()) ? String(newId) : String(tsId);
 
   // Refresh details so Overview, Lines, Finance reflect new status
   let newDetails = mc.timesheetDetails;
   try {
-    newDetails = await fetchTimesheetDetails(tsId);
+    newDetails = await fetchTimesheetDetails(resolvedId);
     window.modalCtx.timesheetDetails = newDetails;
   } catch (err) {
     L('refresh details failed (non-fatal)', err);
@@ -43779,26 +44649,40 @@ async function authoriseTimesheet(ctxOrId) {
     total_pay_ex_vat: tsfin.total_pay_ex_vat ?? mc.data?.total_pay_ex_vat,
     total_charge_ex_vat: tsfin.total_charge_ex_vat ?? mc.data?.total_charge_ex_vat,
     margin_ex_vat: tsfin.margin_ex_vat ?? mc.data?.margin_ex_vat,
-    id: tsId
+    timesheet_id: resolvedId,
+    id: resolvedId
   };
 
   window.modalCtx.data = updatedRow;
 
-  // Focus this TS in summary grid on next refresh
+  // ✅ keep guarded-write expected id aligned
+  if (window.modalCtx?.timesheetMeta && typeof window.modalCtx.timesheetMeta === 'object') {
+    window.modalCtx.timesheetMeta.expected_timesheet_id = resolvedId;
+  }
+
   try {
     window.__pendingFocus = {
       section: 'timesheets',
-      ids: [String(tsId)],
-      primaryIds: [String(tsId)]
+      ids: [String(resolvedId)],
+      primaryIds: [String(resolvedId)]
     };
   } catch {}
 
+  // ✅ Keep the summary grid consistent
+  try {
+    if (typeof refreshTimesheetsSummaryAfterRotation === 'function') {
+      await refreshTimesheetsSummaryAfterRotation(resolvedId);
+    }
+  } catch (e) {
+    L('summary refresh failed (non-fatal)', e);
+  }
+
   L('UPDATED ROW', updatedRow);
   GE();
-  return { ok: true, updatedRow, details: newDetails };
+  return { ok: true, updatedRow, details: newDetails, json };
 }
 
-async function toggleTimesheetPayHold(ctxOrId, onHold, reason = '') {
+async function toggleTimesheetPayHold(ctxOrId, onHold, reason = '', expectedTimesheetId) {
   const { LOGM, L, GC, GE } = getTsLoggers('[TS][PAY-HOLD]');
   GC('toggleTimesheetPayHold');
 
@@ -43812,45 +44696,33 @@ async function toggleTimesheetPayHold(ctxOrId, onHold, reason = '') {
     throw new Error('toggleTimesheetPayHold: timesheetId is required');
   }
 
-  const encId = encodeURIComponent(tsId);
-  const url   = API(`/api/timesheets/${encId}/pay-hold`);
+  const expected =
+    (expectedTimesheetId != null ? String(expectedTimesheetId) : '') ||
+    (mc.timesheetMeta && mc.timesheetMeta.expected_timesheet_id) ||
+    tsId;
 
-  const payload = { on_hold: !!onHold };
+  const encId   = encodeURIComponent(tsId);
+  const urlPath = `/api/timesheets/${encId}/pay-hold`;
+
+  const payload = { on_hold: !!onHold, expected_timesheet_id: expected };
   if (onHold && reason) payload.reason = reason;
 
-  L('REQUEST', { url, payload });
+  L('REQUEST', { url: API(urlPath), payload });
 
-  let res, text;
-  try {
-    res  = await authFetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload)
-    });
-    text = await res.text();
-  } catch (err) {
-    L('network error', err);
-    GE();
-    throw err;
-  }
-
-  if (!res.ok) {
-    L('server error', { status: res.status, bodyPreview: text.slice(0, 400) });
-    GE();
-    throw new Error(text || `Failed to ${onHold ? 'apply' : 'release'} pay hold`);
-  }
-
-  let json = {};
-  try { json = text ? JSON.parse(text) : {}; } catch (err) {
-    L('parse error', err);
-  }
+  // ✅ FIX: backend route is PATCH, not POST (preserves err.status + err.json for TIMESHEET_MOVED handling upstream)
+  const json = await apiPatchJson(urlPath, payload);
 
   L('pay-hold result', json);
 
-  // Refresh details
+  // Refresh details (use current id if backend returned one)
+  const resolvedId =
+    (json && (json.current_timesheet_id || json.timesheet_id))
+      ? (json.current_timesheet_id || json.timesheet_id)
+      : tsId;
+
   let newDetails = mc.timesheetDetails;
   try {
-    newDetails = await fetchTimesheetDetails(tsId);
+    newDetails = await fetchTimesheetDetails(resolvedId);
     window.modalCtx.timesheetDetails = newDetails;
   } catch (err) {
     L('refresh details failed (non-fatal)', err);
@@ -43860,25 +44732,41 @@ async function toggleTimesheetPayHold(ctxOrId, onHold, reason = '') {
   const updatedRow = {
     ...(mc.data || row),
     pay_on_hold: !!tsfin.pay_on_hold,
-    id: tsId
+    timesheet_id: resolvedId,
+    id: resolvedId
   };
 
   window.modalCtx.data = updatedRow;
 
+  // If we landed on a new id, keep expected aligned
+  if (window.modalCtx?.timesheetMeta) {
+    window.modalCtx.timesheetMeta.expected_timesheet_id = resolvedId;
+  }
+
   try {
     window.__pendingFocus = {
       section: 'timesheets',
-      ids: [String(tsId)],
-      primaryIds: [String(tsId)]
+      ids: [String(resolvedId)],
+      primaryIds: [String(resolvedId)]
     };
   } catch {}
+
+  // ✅ Keep the summary grid consistent
+  try {
+    if (typeof refreshTimesheetsSummaryAfterRotation === 'function') {
+      await refreshTimesheetsSummaryAfterRotation(resolvedId);
+    }
+  } catch (e) {
+    L('summary refresh failed (non-fatal)', e);
+  }
 
   L('UPDATED ROW', updatedRow);
   GE();
   return { ok: true, updatedRow, details: newDetails };
 }
 
-async function markTimesheetPaid(ctxOrId) {
+
+async function markTimesheetPaid(ctxOrId, expectedTimesheetId, paymentReference) {
   const { LOGM, L, GC, GE } = getTsLoggers('[TS][MARK-PAID]');
   GC('markTimesheetPaid');
 
@@ -43892,38 +44780,38 @@ async function markTimesheetPaid(ctxOrId) {
     throw new Error('markTimesheetPaid: timesheetId is required');
   }
 
-  const encId = encodeURIComponent(tsId);
-  const url   = API(`/api/timesheets/${encId}/mark-paid`);
+  const expected =
+    (expectedTimesheetId != null ? String(expectedTimesheetId) : '') ||
+    (mc.timesheetMeta && mc.timesheetMeta.expected_timesheet_id) ||
+    tsId;
 
-  L('REQUEST', { url, tsId });
+  const encId   = encodeURIComponent(tsId);
+  const urlPath = `/api/timesheets/${encId}/mark-paid`;
 
-  let res, text;
-  try {
-    res  = await authFetch(url, { method: 'POST' });
-    text = await res.text();
-  } catch (err) {
-    L('network error', err);
-    GE();
-    throw err;
+  const payload = {
+    paid: true,
+    expected_timesheet_id: expected
+  };
+  if (paymentReference != null && String(paymentReference).trim()) {
+    payload.payment_reference = String(paymentReference).trim();
   }
 
-  if (!res.ok) {
-    L('server error', { status: res.status, bodyPreview: text.slice(0, 400) });
-    GE();
-    throw new Error(text || `Failed to mark timesheet ${tsId} as paid`);
-  }
+  L('REQUEST', { url: API(urlPath), tsId, payload });
 
-  let json = {};
-  try { json = text ? JSON.parse(text) : {}; } catch (err) {
-    L('parse error', err);
-  }
+  // ✅ FIX: backend route is PATCH, not POST (preserves err.status + err.json for TIMESHEET_MOVED handling upstream)
+  const json = await apiPatchJson(urlPath, payload);
 
   L('mark-paid result', json);
 
   // Refresh details
+  const resolvedId =
+    (json && (json.current_timesheet_id || json.timesheet_id))
+      ? (json.current_timesheet_id || json.timesheet_id)
+      : tsId;
+
   let newDetails = mc.timesheetDetails;
   try {
-    newDetails = await fetchTimesheetDetails(tsId);
+    newDetails = await fetchTimesheetDetails(resolvedId);
     window.modalCtx.timesheetDetails = newDetails;
   } catch (err) {
     L('refresh details failed (non-fatal)', err);
@@ -43934,25 +44822,43 @@ async function markTimesheetPaid(ctxOrId) {
     ...(mc.data || row),
     paid_at_utc: tsfin.paid_at_utc || mc.data?.paid_at_utc,
     summary_stage: 'PAID',
-    id: tsId
+    timesheet_id: resolvedId,
+    id: resolvedId
   };
 
   window.modalCtx.data = updatedRow;
 
+  if (window.modalCtx?.timesheetMeta) {
+    window.modalCtx.timesheetMeta.expected_timesheet_id = resolvedId;
+  }
+
   try {
     window.__pendingFocus = {
       section: 'timesheets',
-      ids: [String(tsId)],
-      primaryIds: [String(tsId)]
+      ids: [String(resolvedId)],
+      primaryIds: [String(resolvedId)]
     };
   } catch {}
+
+  // ✅ Keep the summary grid consistent
+  try {
+    if (typeof refreshTimesheetsSummaryAfterRotation === 'function') {
+      await refreshTimesheetsSummaryAfterRotation(resolvedId);
+    }
+  } catch (e) {
+    L('summary refresh failed (non-fatal)', e);
+  }
 
   L('UPDATED ROW', updatedRow);
   GE();
   return { ok: true, updatedRow, details: newDetails };
 }
 
-async function updateTimesheetReference(ctxOrId, newReference) {
+
+
+
+
+async function updateTimesheetReference(ctxOrId, newReference, expectedTimesheetId) {
   const { LOGM, L, GC, GE } = getTsLoggers('[TS][REF]');
   GC('updateTimesheetReference');
 
@@ -43966,43 +44872,31 @@ async function updateTimesheetReference(ctxOrId, newReference) {
     throw new Error('updateTimesheetReference: timesheetId is required');
   }
 
-  const encId = encodeURIComponent(tsId);
-  const url   = API(`/api/timesheets/${encId}/reference`);
+  const expected =
+    (expectedTimesheetId != null ? String(expectedTimesheetId) : '') ||
+    (mc.timesheetMeta && mc.timesheetMeta.expected_timesheet_id) ||
+    tsId;
+
+  const encId   = encodeURIComponent(tsId);
+  const urlPath = `/api/timesheets/${encId}/reference`;
 
   const reference_number = newReference == null ? '' : String(newReference);
-  L('REQUEST', { url, reference_number });
+  L('REQUEST', { url: API(urlPath), reference_number, expected_timesheet_id: expected });
 
-  let res, text;
-  try {
-    res  = await authFetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ reference_number })
-    });
-    text = await res.text();
-  } catch (err) {
-    L('network error', err);
-    GE();
-    throw err;
-  }
-
-  if (!res.ok) {
-    L('server error', { status: res.status, bodyPreview: text.slice(0, 400) });
-    GE();
-    throw new Error(text || `Failed to update reference for timesheet ${tsId}`);
-  }
-
-  let json = {};
-  try { json = text ? JSON.parse(text) : {}; } catch (err) {
-    L('parse error', err);
-  }
+  // ✅ Use apiPostJson so 409 errors preserve err.status + err.json for TIMESHEET_MOVED handling upstream
+  const json = await apiPostJson(urlPath, { reference_number, expected_timesheet_id: expected });
 
   L('reference result', json);
 
   // Refresh details
+  const resolvedId =
+    (json && (json.current_timesheet_id || json.timesheet_id))
+      ? (json.current_timesheet_id || json.timesheet_id)
+      : tsId;
+
   let newDetails = mc.timesheetDetails;
   try {
-    newDetails = await fetchTimesheetDetails(tsId);
+    newDetails = await fetchTimesheetDetails(resolvedId);
     window.modalCtx.timesheetDetails = newDetails;
   } catch (err) {
     L('refresh details failed (non-fatal)', err);
@@ -44012,7 +44906,8 @@ async function updateTimesheetReference(ctxOrId, newReference) {
   const updatedRow = {
     ...(mc.data || row),
     reference_number: ts.reference_number || reference_number,
-    id: tsId
+    timesheet_id: resolvedId,
+    id: resolvedId
   };
 
   window.modalCtx.data = updatedRow;
@@ -44022,24 +44917,43 @@ async function updateTimesheetReference(ctxOrId, newReference) {
     mc.timesheetState.reference = updatedRow.reference_number;
   }
 
+  if (window.modalCtx?.timesheetMeta) {
+    window.modalCtx.timesheetMeta.expected_timesheet_id = resolvedId;
+  }
+
+  // ✅ Keep the summary grid consistent
+  try {
+    if (typeof refreshTimesheetsSummaryAfterRotation === 'function') {
+      await refreshTimesheetsSummaryAfterRotation(resolvedId);
+    }
+  } catch (e) {
+    L('summary refresh failed (non-fatal)', e);
+  }
+
   L('UPDATED ROW', updatedRow);
   GE();
   return { ok: true, updatedRow, details: newDetails };
 }
 
-async function updateTimesheetSegmentsPayFlags(ctxOrId, overrides) {
+
+async function updateTimesheetSegmentsPayFlags(ctxOrId, overrides, expectedTimesheetId) {
   const { LOGM, L, GC, GE } = getTsLoggers('[TS][SEGMENTS]');
   GC('updateTimesheetSegmentsPayFlags');
 
   const mc  = window.modalCtx || {};
   const row = (mc.data && mc.data.timesheet_id) ? mc.data : (ctxOrId && ctxOrId.row ? ctxOrId.row : {});
-  const tsId = (typeof ctxOrId === 'string') ? ctxOrId : (row.timesheet_id || row.id || mc.data?.id || null);
+  const tsId0 = (typeof ctxOrId === 'string') ? ctxOrId : (row.timesheet_id || row.id || mc.data?.id || null);
 
-  if (!tsId) {
+  if (!tsId0) {
     L('ERROR: missing timesheetId');
     GE();
     throw new Error('updateTimesheetSegmentsPayFlags: timesheetId is required');
   }
+
+  const expected =
+    (expectedTimesheetId != null ? String(expectedTimesheetId) : '') ||
+    (mc.timesheetMeta && mc.timesheetMeta.expected_timesheet_id) ||
+    tsId0;
 
   const det = mc.timesheetDetails || {};
   if (!det.isSegmentsMode || !Array.isArray(det.segments)) {
@@ -44048,7 +44962,6 @@ async function updateTimesheetSegmentsPayFlags(ctxOrId, overrides) {
     return { ok: true };
   }
 
-  const baseSegs = det.segments || [];
   const overridesMap = overrides || (mc.timesheetState && mc.timesheetState.segmentOverrides) || {};
   const segIds = Object.keys(overridesMap);
   if (!segIds.length) {
@@ -44062,46 +44975,38 @@ async function updateTimesheetSegmentsPayFlags(ctxOrId, overrides) {
     exclude_from_pay: !!overridesMap[segId].exclude_from_pay
   }));
 
-  const encId = encodeURIComponent(tsId);
-  const url   = API(`/api/timesheets/${encId}/segments`);
+  // Guarded TSFIN segments endpoint
+  const encId   = encodeURIComponent(tsId0);
+  const urlPath = `/api/tsfin/${encId}/segments`;
 
-  L('REQUEST', { url, count: segmentsPayload.length, segmentsPayload });
+  L('REQUEST', {
+    url: API(urlPath),
+    expected_timesheet_id: expected,
+    count: segmentsPayload.length,
+    segmentsPayload
+  });
 
-  let res, text;
-  try {
-    res  = await authFetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ segments: segmentsPayload })
-    });
-    text = await res.text();
-  } catch (err) {
-    L('network error', err);
-    GE();
-    throw err;
-  }
-
-  if (!res.ok) {
-    L('server error', { status: res.status, bodyPreview: text.slice(0, 400) });
-    GE();
-    throw new Error(text || 'Failed to apply segment overrides');
-  }
-
-  let json = {};
-  try { json = text ? JSON.parse(text) : {}; } catch (err) {
-    L('parse error', err);
-  }
+  // ✅ Use apiPatchJson so 409 errors preserve err.status + err.json for TIMESHEET_MOVED handling upstream
+  const json = await apiPatchJson(urlPath, { expected_timesheet_id: expected, segments: segmentsPayload });
 
   L('segment overrides applied', json);
 
-  // Refresh details
+  // ✅ Adopt current id if backend returned it
+  const resolvedId =
+    (json && (json.current_timesheet_id || json.timesheet_id))
+      ? (json.current_timesheet_id || json.timesheet_id)
+      : tsId0;
+
+  // Refresh details using resolved id
   let newDetails = det;
   try {
-    newDetails = await fetchTimesheetDetails(tsId);
+    newDetails = await fetchTimesheetDetails(resolvedId);
     window.modalCtx.timesheetDetails = newDetails;
+
     if (window.modalCtx.timesheetState) {
       window.modalCtx.timesheetState.segmentOverrides = {};
     }
+
     L('details refreshed after segments', {
       newTotalPay: newDetails.tsfin?.total_pay_ex_vat,
       newTotalCharge: newDetails.tsfin?.total_charge_ex_vat
@@ -44110,30 +45015,123 @@ async function updateTimesheetSegmentsPayFlags(ctxOrId, overrides) {
     L('refresh details failed (non-fatal)', err);
   }
 
-  // Update row totals
+  // Update row totals + id
   const tsfin = newDetails?.tsfin || {};
   const updatedRow = {
     ...(mc.data || row),
     total_pay_ex_vat: tsfin.total_pay_ex_vat ?? mc.data?.total_pay_ex_vat,
     total_charge_ex_vat: tsfin.total_charge_ex_vat ?? mc.data?.total_charge_ex_vat,
     margin_ex_vat: tsfin.margin_ex_vat ?? mc.data?.margin_ex_vat,
-    id: tsId
+    timesheet_id: resolvedId,
+    id: resolvedId
   };
 
   window.modalCtx.data = updatedRow;
 
+  // Keep expected aligned to the new current id
+  if (window.modalCtx?.timesheetMeta) {
+    window.modalCtx.timesheetMeta.expected_timesheet_id = resolvedId;
+  }
+
   try {
     window.__pendingFocus = {
       section: 'timesheets',
-      ids: [String(tsId)],
-      primaryIds: [String(tsId)]
+      ids: [String(resolvedId)],
+      primaryIds: [String(resolvedId)]
     };
   } catch {}
+
+  // ✅ Keep the summary grid consistent
+  try {
+    if (typeof refreshTimesheetsSummaryAfterRotation === 'function') {
+      await refreshTimesheetsSummaryAfterRotation(resolvedId);
+    }
+  } catch (e) {
+    L('summary refresh failed (non-fatal)', e);
+  }
 
   L('UPDATED ROW', updatedRow);
   GE();
   return { ok: true, updatedRow, details: newDetails };
 }
+
+
+async function manualUpsertContractWeek(weekId, payload) {
+  const { LOGM, L, GC, GE } = getTsLoggers('[TS][MANUAL-UPsert]');
+  GC('manualUpsertContractWeek');
+
+  if (!weekId) {
+    GE();
+    throw new Error('manualUpsertContractWeek: weekId is required');
+  }
+
+  const mc = window.modalCtx || {};
+
+  // ✅ Ensure expected_timesheet_id is always included when we can infer it
+  const inferredExpected =
+    (payload && payload.expected_timesheet_id != null ? String(payload.expected_timesheet_id) : '') ||
+    (mc.timesheetMeta && mc.timesheetMeta.expected_timesheet_id) ||
+    (mc.data && (mc.data.timesheet_id || mc.data.id)) ||
+    '';
+
+  const safePayload = {
+    ...(payload || {}),
+    ...(inferredExpected ? { expected_timesheet_id: inferredExpected } : {})
+  };
+
+  const encId   = encodeURIComponent(weekId);
+  const urlPath = `/api/contract-weeks/${encId}/manual-upsert`;
+
+  // We expect payload to contain at least:
+  //   - either hours or actual_schedule_json
+  //   - optionally additional_units_week / additional_units_per_day
+  L('REQUEST', { url: API(urlPath), weekId, payload: safePayload });
+
+  // ✅ Use apiPostJson so 409 errors preserve err.status + err.json for TIMESHEET_MOVED handling upstream
+  const json = await apiPostJson(urlPath, safePayload);
+
+  L('RESULT', json);
+
+  // ✅ If backend returns a (new) current timesheet id, align modal ctx + expected + summary
+  const resolvedId =
+    (json && (json.current_timesheet_id || json.timesheet_id))
+      ? (json.current_timesheet_id || json.timesheet_id)
+      : null;
+
+  if (resolvedId && window.modalCtx && window.modalCtx.data) {
+    window.modalCtx.data = {
+      ...(window.modalCtx.data || {}),
+      timesheet_id: resolvedId,
+      id: resolvedId
+    };
+    if (window.modalCtx.timesheetMeta) {
+      window.modalCtx.timesheetMeta.expected_timesheet_id = resolvedId;
+    }
+
+    try {
+      window.__pendingFocus = {
+        section: 'timesheets',
+        ids: [String(resolvedId)],
+        primaryIds: [String(resolvedId)]
+      };
+    } catch {}
+
+    try {
+      if (typeof refreshTimesheetsSummaryAfterRotation === 'function') {
+        await refreshTimesheetsSummaryAfterRotation(resolvedId);
+      }
+    } catch (e) {
+      L('summary refresh failed (non-fatal)', e);
+    }
+  }
+
+  GE();
+  return json;
+}
+
+
+
+
 
 async function deferNhspShift(shiftId, runAtIso = null) {
   const { LOGM, L, GC, GE } = getTsLoggers('[TS][NHSP-DEFER]');
@@ -44360,61 +45358,9 @@ async function listTimesheetsSummary(filters = {}) {
 
 
 
-// ======== Manual weekly upsert (contract weeks) ========
-
-async function manualUpsertContractWeek(weekId, payload) {
-  const { LOGM, L, GC, GE } = getTsLoggers('[TS][MANUAL-UPsert]');
-  GC('manualUpsertContractWeek');
-
-  if (!weekId) {
-    GE();
-    throw new Error('manualUpsertContractWeek: weekId is required');
-  }
-
-  const encId = encodeURIComponent(weekId);
-  const url   = API(`/api/contract-weeks/${encId}/manual-upsert`);
-
-  // We expect payload to contain at least:
-  //   - either hours or actual_schedule_json
-  //   - optionally additional_units_week / additional_units_per_day
-  L('REQUEST', { url, weekId, payload });
-
-  let res, text;
-  try {
-    res = await authFetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload || {})
-    });
-    text = await res.text();
-  } catch (err) {
-    L('network error', err);
-    GE();
-    throw err;
-  }
-
-  if (!res.ok) {
-    L('server error', { status: res.status, bodyPreview: text.slice(0, 400) });
-    GE();
-    throw new Error(text || `Manual upsert failed (${res.status})`);
-  }
-
-  let json = {};
-  try {
-    json = text ? JSON.parse(text) : {};
-  } catch (err) {
-    L('parse error', err);
-  }
-
-  L('RESULT', json);
-  GE();
-  return json;
-}
-
 
 // ======== Switch a timesheet to MANUAL (weekly) ========
-
-async function switchTimesheetToManual(timesheetId) {
+async function switchTimesheetToManual(timesheetId, expectedTimesheetId) {
   const { LOGM, L, GC, GE } = getTsLoggers('[TS][SWITCH-MANUAL]');
   GC('switchTimesheetToManual');
 
@@ -44423,40 +45369,79 @@ async function switchTimesheetToManual(timesheetId) {
     throw new Error('switchTimesheetToManual: timesheetId is required');
   }
 
-  const encId = encodeURIComponent(timesheetId);
-  const url   = API(`/api/timesheets/${encId}/switch-to-manual`);
+  const mc = window.modalCtx || {};
+  const expected =
+    (expectedTimesheetId != null ? String(expectedTimesheetId) : '') ||
+    (mc.timesheetMeta && mc.timesheetMeta.expected_timesheet_id) ||
+    String(timesheetId);
 
-  L('REQUEST', { url, timesheetId });
+  const encId   = encodeURIComponent(timesheetId);
+  const urlPath = `/api/timesheets/${encId}/switch-to-manual`;
 
-  let res, text;
+  const payload = { expected_timesheet_id: expected };
+
+  L('REQUEST', { url: API(urlPath), timesheetId, payload });
+
+  // ✅ Use apiPostJson so 409 errors preserve err.status + err.json for TIMESHEET_MOVED handling
+  const json = await apiPostJson(urlPath, payload);
+
+  const newId =
+    (json && (json.current_timesheet_id || json.new_timesheet_id || json.timesheet_id))
+      ? (json.current_timesheet_id || json.new_timesheet_id || json.timesheet_id)
+      : null;
+
+  const resolvedId = (newId && String(newId).trim()) ? String(newId) : String(timesheetId);
+
+  // Refresh details in modal if open on this TS
   try {
-    res  = await authFetch(url, { method: 'POST' });
-    text = await res.text();
-  } catch (err) {
-    L('network error', err);
-    GE();
-    throw err;
-  }
+    if (window.modalCtx && window.modalCtx.data) {
+      const cur = window.modalCtx.data.timesheet_id || window.modalCtx.data.id || null;
+      const isSame = String(cur || '') === String(timesheetId || '');
 
-  if (!res.ok) {
-    L('server error', { status: res.status, bodyPreview: text.slice(0, 400) });
-    GE();
-    throw new Error(text || `Failed to switch timesheet ${timesheetId} to manual`);
-  }
+      if (isSame) {
+        if (String(resolvedId) !== String(cur || '')) {
+          window.modalCtx.data.timesheet_id = resolvedId;
+          window.modalCtx.data.id = resolvedId;
+        }
 
-  let json = {};
+        const fresh = await fetchTimesheetDetails(resolvedId);
+        window.modalCtx.timesheetDetails = fresh;
+
+        try {
+          if (window.modalCtx.data) window.modalCtx.data.submission_mode = 'MANUAL';
+        } catch {}
+
+        if (window.modalCtx.timesheetMeta && typeof window.modalCtx.timesheetMeta === 'object') {
+          window.modalCtx.timesheetMeta.expected_timesheet_id = resolvedId;
+          window.modalCtx.timesheetMeta.hasTs = true;
+        }
+      }
+    }
+  } catch {}
+
   try {
-    json = text ? JSON.parse(text) : {};
-  } catch (err) {
-    L('parse error', err);
+    window.__pendingFocus = {
+      section: 'timesheets',
+      ids: [String(resolvedId)],
+      primaryIds: [String(resolvedId)]
+    };
+  } catch {}
+
+  // ✅ Keep the summary grid consistent
+  try {
+    if (typeof refreshTimesheetsSummaryAfterRotation === 'function') {
+      await refreshTimesheetsSummaryAfterRotation(resolvedId);
+    }
+  } catch (e) {
+    L('summary refresh failed (non-fatal)', e);
   }
 
-  L('RESULT', json);
+  L('RESULT', { json, resolvedId });
   GE();
   return json;
 }
 
-async function revertTimesheetToElectronic(timesheetId) {
+async function revertTimesheetToElectronic(timesheetId, expectedTimesheetId) {
   const { LOGM, L, GC, GE } = getTsLoggers('[TS][REVERT-ELEC]');
   GC('revertTimesheetToElectronic');
 
@@ -44465,61 +45450,74 @@ async function revertTimesheetToElectronic(timesheetId) {
     throw new Error('revertTimesheetToElectronic: timesheetId is required');
   }
 
-  const encId = encodeURIComponent(timesheetId);
-  const url   = API(`/api/timesheets/${encId}/revert-to-electronic`);
+  const mc = window.modalCtx || {};
+  const expected =
+    (expectedTimesheetId != null ? String(expectedTimesheetId) : '') ||
+    (mc.timesheetMeta && mc.timesheetMeta.expected_timesheet_id) ||
+    String(timesheetId);
 
-  L('REQUEST', { url, timesheetId });
+  const encId   = encodeURIComponent(timesheetId);
+  const urlPath = `/api/timesheets/${encId}/revert-to-electronic`;
 
-  let res;
-  let text = '';
-  try {
-    res  = await authFetch(url, { method: 'POST' });
-    text = await res.text().catch(() => '');
-  } catch (err) {
-    L('network error', err);
-    GE();
-    throw err;
-  }
+  const payload = { expected_timesheet_id: expected };
 
-  if (!res.ok) {
-    L('server error', { status: res.status, bodyPreview: (text || '').slice(0, 400) });
-    GE();
-    throw new Error(text || `Failed to revert timesheet ${timesheetId} to electronic`);
-  }
+  L('REQUEST', { url: API(urlPath), timesheetId, payload });
 
-  let json = {};
-  try { json = text ? JSON.parse(text) : {}; } catch {}
+  // ✅ Use apiPostJson so 409 errors preserve err.status + err.json for TIMESHEET_MOVED handling
+  const json = await apiPostJson(urlPath, payload);
 
   const newId =
-    json.current_timesheet_id ||
-    json.new_timesheet_id ||
-    json.timesheet_id ||
-    null;
+    (json && (json.current_timesheet_id || json.new_timesheet_id || json.timesheet_id))
+      ? (json.current_timesheet_id || json.new_timesheet_id || json.timesheet_id)
+      : null;
+
+  const resolvedId = (newId && String(newId).trim()) ? String(newId) : String(timesheetId);
 
   // If modal is open on this TS, refresh using returned current id
   try {
     if (window.modalCtx && window.modalCtx.data) {
-      const isSame =
-        String(window.modalCtx.data.timesheet_id || '') === String(timesheetId || '');
+      const cur = window.modalCtx.data.timesheet_id || window.modalCtx.data.id || null;
+      const isSame = String(cur || '') === String(timesheetId || '');
 
       if (isSame) {
-        if (newId && String(newId) !== String(timesheetId)) {
-          window.modalCtx.data.timesheet_id = newId;
-          window.modalCtx.data.id = newId;
+        if (String(resolvedId) !== String(cur || '')) {
+          window.modalCtx.data.timesheet_id = resolvedId;
+          window.modalCtx.data.id = resolvedId;
         }
 
-        const fetchId = (newId || timesheetId);
-        const fresh = await fetchTimesheetDetails(fetchId);
+        const fresh = await fetchTimesheetDetails(resolvedId);
         window.modalCtx.timesheetDetails = fresh;
 
         try {
           if (window.modalCtx.data) window.modalCtx.data.submission_mode = 'ELECTRONIC';
         } catch {}
+
+        if (window.modalCtx.timesheetMeta && typeof window.modalCtx.timesheetMeta === 'object') {
+          window.modalCtx.timesheetMeta.expected_timesheet_id = resolvedId;
+          window.modalCtx.timesheetMeta.hasTs = true;
+        }
       }
     }
   } catch {}
 
-  L('RESULT', { json, newId });
+  try {
+    window.__pendingFocus = {
+      section: 'timesheets',
+      ids: [String(resolvedId)],
+      primaryIds: [String(resolvedId)]
+    };
+  } catch {}
+
+  // ✅ Keep the summary grid consistent
+  try {
+    if (typeof refreshTimesheetsSummaryAfterRotation === 'function') {
+      await refreshTimesheetsSummaryAfterRotation(resolvedId);
+    }
+  } catch (e) {
+    L('summary refresh failed (non-fatal)', e);
+  }
+
+  L('RESULT', { json, resolvedId });
   GE();
   return json;
 }
@@ -44535,38 +45533,23 @@ async function deleteManualTimesheetAndReopenWeek(timesheetId, contractWeekId) {
   }
 
   const encWeekId = encodeURIComponent(contractWeekId);
-  const url       = API(`/api/contract-weeks/${encWeekId}/timesheet`);
+  const urlPath   = `/api/contract-weeks/${encWeekId}/timesheet`;
 
-  L('REQUEST', { url, timesheetId, contractWeekId });
+  const expected =
+    window.modalCtx?.timesheetMeta?.expected_timesheet_id ||
+    timesheetId ||
+    null;
 
-  let res;
-  let text = '';
-  try {
-    res  = await authFetch(url, { method: 'DELETE' });
-    text = await res.text();
-  } catch (err) {
-    L('network error', err);
-    GE();
-    throw err;
-  }
+  L('REQUEST', { urlPath, timesheetId, contractWeekId, expected });
 
-  if (!res.ok) {
-    L('server error', { status: res.status, bodyPreview: (text || '').slice(0, 400) });
-    GE();
-    throw new Error(text || `Failed to delete manual timesheet ${timesheetId || ''} and reopen week ${contractWeekId}`);
-  }
-
-  let json = {};
-  try {
-    json = text ? JSON.parse(text) : {};
-  } catch (err) {
-    L('parse error (non-fatal)', err);
-  }
+  // ✅ Delete with JSON body so backend can guard against rotation
+  const json = await apiDeleteJson(urlPath, { expected_timesheet_id: expected });
 
   L('RESULT', json);
   GE();
   return json;
 }
+
 
 async function deleteTimesheetPermanent(timesheetId, opts = {}) {
   const { LOGM, L, GC, GE } = getTsLoggers('[TS][DELETE-PERM]');
@@ -44584,73 +45567,34 @@ async function deleteTimesheetPermanent(timesheetId, opts = {}) {
     }
 
     const encCw = encodeURIComponent(contractWeekId);
-    const url   = API(`/api/contract-weeks/${encCw}/delete-planned`);
+    const urlPath = `/api/contract-weeks/${encCw}/delete-planned`;
 
-    L('REQUEST (planned delete)', { url, contractWeekId });
+    L('REQUEST (planned delete)', { urlPath, contractWeekId });
 
-    let res;
-    let text = '';
-    try {
-      res  = await authFetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) });
-      text = await res.text().catch(() => '');
-    } catch (err) {
-      L('network error (planned delete)', err);
-      GE();
-      throw err;
-    }
-
-    if (!res.ok) {
-      L('server error (planned delete)', { status: res.status, bodyPreview: (text || '').slice(0, 400) });
-      GE();
-      throw new Error(text || `Failed to delete planned week ${contractWeekId}`);
-    }
-
-    let json = {};
-    try {
-      json = text ? JSON.parse(text) : {};
-    } catch (err) {
-      L('parse error (non-fatal, planned delete)', err);
-    }
-
+    // Keep behaviour, but use apiPostJson for consistent error shape
+    const json = await apiPostJson(urlPath, {});
     L('RESULT (planned delete)', json);
     GE();
     return json;
   }
 
-  // Normal timesheet delete path
+  // Normal timesheet delete path (✅ guarded)
   const encId = encodeURIComponent(timesheetId);
-  const url   = API(`/api/timesheets/${encId}`);
+  const urlPath = `/api/timesheets/${encId}`;
 
-  L('REQUEST', { url, timesheetId });
+  const expected =
+    window.modalCtx?.timesheetMeta?.expected_timesheet_id ||
+    timesheetId;
 
-  let res;
-  let text = '';
-  try {
-    res  = await authFetch(url, { method: 'DELETE' });
-    text = await res.text().catch(() => '');
-  } catch (err) {
-    L('network error', err);
-    GE();
-    throw err;
-  }
+  L('REQUEST', { urlPath, timesheetId, expected });
 
-  if (!res.ok) {
-    L('server error', { status: res.status, bodyPreview: (text || '').slice(0, 400) });
-    GE();
-    throw new Error(text || `Failed to permanently delete timesheet ${timesheetId}`);
-  }
-
-  let json = {};
-  try {
-    json = text ? JSON.parse(text) : {};
-  } catch (err) {
-    L('parse error (non-fatal)', err);
-  }
+  const json = await apiDeleteJson(urlPath, { expected_timesheet_id: expected });
 
   L('RESULT', json);
   GE();
   return json;
 }
+
 
 async function resendQrTimesheetEmail(timesheetId) {
   const { LOGM, L, GC, GE } = getTsLoggers('[TS][QR][RESEND]');
@@ -44662,40 +45606,37 @@ async function resendQrTimesheetEmail(timesheetId) {
   }
 
   const encId = encodeURIComponent(timesheetId);
-  const url = API(`/api/timesheets/${encId}/qr-resend`);
+  const urlPath = `/api/timesheets/${encId}/qr-resend`;
 
-  L('REQUEST', { url, timesheetId });
+  const expected =
+    window.modalCtx?.timesheetMeta?.expected_timesheet_id ||
+    timesheetId;
 
-  let res;
-  let text = '';
+  L('REQUEST', { urlPath, timesheetId, expected });
+
+  // ✅ Use apiPostJson so 409 carries err.status + err.json
+  const json = await apiPostJson(urlPath, { expected_timesheet_id: expected });
+
+  // ✅ Defensive adoption on success (if backend returns current_timesheet_id)
   try {
-    res = await authFetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({})
-    });
-    text = await res.text().catch(() => '');
-  } catch (err) {
-    L('network error', err);
-    GE();
-    throw err;
-  }
-
-  if (!res.ok) {
-    L('server error', { status: res.status, bodyPreview: (text || '').slice(0, 400) });
-    GE();
-    throw new Error(text || 'Failed to resend QR email');
-  }
-
-  let json = {};
-  try { json = text ? JSON.parse(text) : {}; } catch {}
+    const movedTo = json?.current_timesheet_id || null;
+    if (movedTo && window.modalCtx) {
+      window.modalCtx.data ||= {};
+      window.modalCtx.timesheetMeta ||= {};
+      window.modalCtx.data.timesheet_id = movedTo;
+      window.modalCtx.data.id = movedTo;
+      window.modalCtx.timesheetMeta.expected_timesheet_id = movedTo;
+    }
+  } catch {}
 
   L('RESULT', json);
   GE();
   return json;
 }
 
-async function refuseQrHours(timesheetId) {
+
+
+async function refuseQrHours(timesheetId, expectedTimesheetId) {
   const { LOGM, L, GC, GE } = getTsLoggers('[TS][QR][REFUSE]');
   GC('refuseQrHours');
 
@@ -44716,50 +45657,76 @@ async function refuseQrHours(timesheetId) {
     throw new Error('Refusal reason is required');
   }
 
-  const encId = encodeURIComponent(timesheetId);
-  const url = API(`/api/timesheets/${encId}/qr-refuse`);
+  const mc = window.modalCtx || {};
+  const expected =
+    (expectedTimesheetId != null ? String(expectedTimesheetId) : '') ||
+    (mc.timesheetMeta && mc.timesheetMeta.expected_timesheet_id) ||
+    String(timesheetId);
 
-  L('REQUEST', { url, timesheetId, reasonPreview: reasonTrim.slice(0, 80) });
+  const encId   = encodeURIComponent(timesheetId);
+  const urlPath = `/api/timesheets/${encId}/qr-refuse`;
 
-  let res;
-  let text = '';
-  try {
-    res = await authFetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ reason: reasonTrim })
-    });
-    text = await res.text().catch(() => '');
-  } catch (err) {
-    L('network error', err);
-    GE();
-    throw err;
-  }
+  const payload = { reason: reasonTrim, expected_timesheet_id: expected };
 
-  if (!res.ok) {
-    L('server error', { status: res.status, bodyPreview: (text || '').slice(0, 400) });
-    GE();
-    throw new Error(text || 'Failed to refuse QR hours');
-  }
+  L('REQUEST', { url: API(urlPath), timesheetId, reasonPreview: reasonTrim.slice(0, 80), payload: { expected_timesheet_id: expected } });
 
-  let json = {};
-  try { json = text ? JSON.parse(text) : {}; } catch {}
+  // ✅ Use apiPostJson so 409 errors preserve err.status + err.json for TIMESHEET_MOVED handling
+  const json = await apiPostJson(urlPath, payload);
+
+  // ✅ If backend produced a new "current" id, adopt it in the open modal
+  const newId =
+    (json && (json.current_timesheet_id || json.new_timesheet_id || json.timesheet_id))
+      ? (json.current_timesheet_id || json.new_timesheet_id || json.timesheet_id)
+      : null;
+
+  const resolvedId = (newId && String(newId).trim()) ? String(newId) : String(timesheetId);
 
   // Refresh details in modal if open
   try {
-    if (window.modalCtx && window.modalCtx.data && window.modalCtx.data.timesheet_id === timesheetId) {
-      const fresh = await fetchTimesheetDetails(timesheetId);
-      window.modalCtx.timesheetDetails = fresh;
+    if (window.modalCtx && window.modalCtx.data) {
+      const cur = window.modalCtx.data.timesheet_id || window.modalCtx.data.id || null;
+      const isSame = String(cur || '') === String(timesheetId || '');
+
+      if (isSame) {
+        if (String(resolvedId) !== String(cur || '')) {
+          window.modalCtx.data.timesheet_id = resolvedId;
+          window.modalCtx.data.id = resolvedId;
+        }
+
+        // ✅ keep guarded-write expected id aligned
+        if (window.modalCtx.timesheetMeta && typeof window.modalCtx.timesheetMeta === 'object') {
+          window.modalCtx.timesheetMeta.expected_timesheet_id = resolvedId;
+        }
+
+        const fresh = await fetchTimesheetDetails(resolvedId);
+        window.modalCtx.timesheetDetails = fresh;
+      }
     }
   } catch {}
 
-  L('RESULT', json);
+  try {
+    window.__pendingFocus = {
+      section: 'timesheets',
+      ids: [String(resolvedId)],
+      primaryIds: [String(resolvedId)]
+    };
+  } catch {}
+
+  // ✅ Keep the summary grid consistent (these actions often rotate)
+  try {
+    if (typeof refreshTimesheetsSummaryAfterRotation === 'function') {
+      await refreshTimesheetsSummaryAfterRotation(resolvedId);
+    }
+  } catch (e) {
+    L('summary refresh failed (non-fatal)', e);
+  }
+
+  L('RESULT', { json, resolvedId });
   GE();
   return json;
 }
 
-
-async function restoreRevokedQr(timesheetId, kind) {
+async function restoreRevokedQr(timesheetId, kind, expectedTimesheetId) {
   const { LOGM, L, GC, GE } = getTsLoggers('[TS][QR][RESTORE]');
   GC('restoreRevokedQr');
 
@@ -44775,65 +45742,77 @@ async function restoreRevokedQr(timesheetId, kind) {
     throw new Error('restoreRevokedQr: kind must be PENDING or SIGNED');
   }
 
-  const encId = encodeURIComponent(timesheetId);
-  const url = API(`/api/timesheets/${encId}/qr-restore`);
+  const mc = window.modalCtx || {};
+  const expected =
+    (expectedTimesheetId != null ? String(expectedTimesheetId) : '') ||
+    (mc.timesheetMeta && mc.timesheetMeta.expected_timesheet_id) ||
+    String(timesheetId);
 
-  L('REQUEST', { url, timesheetId, kind: restoreKind });
+  const encId   = encodeURIComponent(timesheetId);
+  const urlPath = `/api/timesheets/${encId}/qr-restore`;
 
-  let res;
-  let text = '';
-  try {
-    res = await authFetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ kind: restoreKind })
-    });
-    text = await res.text().catch(() => '');
-  } catch (err) {
-    L('network error', err);
-    GE();
-    throw err;
-  }
+  const payload = { kind: restoreKind, expected_timesheet_id: expected };
 
-  if (!res.ok) {
-    L('server error', { status: res.status, bodyPreview: (text || '').slice(0, 400) });
-    GE();
-    throw new Error(text || 'Failed to restore revoked QR');
-  }
+  L('REQUEST', { url: API(urlPath), timesheetId, payload });
 
-  let json = {};
-  try { json = text ? JSON.parse(text) : {}; } catch {}
+  // ✅ Use apiPostJson so 409 errors preserve err.status + err.json for TIMESHEET_MOVED handling
+  const json = await apiPostJson(urlPath, payload);
 
   const newId =
-    json.current_timesheet_id ||
-    json.new_timesheet_id ||
-    json.timesheet_id ||
-    null;
+    (json && (json.current_timesheet_id || json.new_timesheet_id || json.timesheet_id))
+      ? (json.current_timesheet_id || json.new_timesheet_id || json.timesheet_id)
+      : null;
+
+  const resolvedId = (newId && String(newId).trim()) ? String(newId) : String(timesheetId);
 
   // Refresh details in modal if open (use NEW current id if provided)
   try {
     if (window.modalCtx && window.modalCtx.data) {
-      const isSame =
-        String(window.modalCtx.data.timesheet_id || '') === String(timesheetId || '');
+      const cur = window.modalCtx.data.timesheet_id || window.modalCtx.data.id || null;
+      const isSame = String(cur || '') === String(timesheetId || '');
 
       if (isSame) {
-        if (newId && String(newId) !== String(timesheetId)) {
-          window.modalCtx.data.timesheet_id = newId;
-          window.modalCtx.data.id = newId;
+        if (String(resolvedId) !== String(cur || '')) {
+          window.modalCtx.data.timesheet_id = resolvedId;
+          window.modalCtx.data.id = resolvedId;
         }
-        const fetchId = (newId || timesheetId);
-        const fresh = await fetchTimesheetDetails(fetchId);
+
+        // ✅ keep guarded-write expected id aligned
+        if (window.modalCtx.timesheetMeta && typeof window.modalCtx.timesheetMeta === 'object') {
+          window.modalCtx.timesheetMeta.expected_timesheet_id = resolvedId;
+          window.modalCtx.timesheetMeta.hasTs = true;
+        }
+
+        const fresh = await fetchTimesheetDetails(resolvedId);
         window.modalCtx.timesheetDetails = fresh;
       }
     }
   } catch {}
 
-  L('RESULT', { json, newId });
+  try {
+    window.__pendingFocus = {
+      section: 'timesheets',
+      ids: [String(resolvedId)],
+      primaryIds: [String(resolvedId)]
+    };
+  } catch {}
+
+  // ✅ Keep the summary grid consistent
+  try {
+    if (typeof refreshTimesheetsSummaryAfterRotation === 'function') {
+      await refreshTimesheetsSummaryAfterRotation(resolvedId);
+    }
+  } catch (e) {
+    L('summary refresh failed (non-fatal)', e);
+  }
+
+  L('RESULT', { json, resolvedId });
   GE();
   return json;
 }
 
-async function allowQrAgain(timesheetId) {
+
+async function allowQrAgain(timesheetId, expectedTimesheetId) {
   const { LOGM, L, GC, GE } = getTsLoggers('[TS][ALLOW][QR]');
   GC('allowQrAgain');
 
@@ -44851,69 +45830,77 @@ async function allowQrAgain(timesheetId) {
     return { cancelled: true };
   }
 
-  const encId = encodeURIComponent(timesheetId);
-  const url = API(`/api/timesheets/${encId}/allow-qr-again`);
+  const mc = window.modalCtx || {};
+  const expected =
+    (expectedTimesheetId != null ? String(expectedTimesheetId) : '') ||
+    (mc.timesheetMeta && mc.timesheetMeta.expected_timesheet_id) ||
+    String(timesheetId);
 
-  L('REQUEST', { url, timesheetId });
+  const encId   = encodeURIComponent(timesheetId);
+  const urlPath = `/api/timesheets/${encId}/allow-qr-again`;
 
-  let res;
-  let text = '';
-  try {
-    res = await authFetch(url, { method: 'POST' });
-    text = await res.text().catch(() => '');
-  } catch (err) {
-    L('network error', err);
-    GE();
-    throw err;
-  }
+  const payload = { expected_timesheet_id: expected };
 
-  if (!res.ok) {
-    L('server error', { status: res.status, bodyPreview: (text || '').slice(0, 400) });
-    GE();
-    throw new Error(text || 'Failed to allow QR again');
-  }
+  L('REQUEST', { url: API(urlPath), timesheetId, payload });
 
-  let json = {};
-  try { json = text ? JSON.parse(text) : {}; } catch {}
+  // ✅ Use apiPostJson so 409 errors preserve err.status + err.json for TIMESHEET_MOVED handling
+  const json = await apiPostJson(urlPath, payload);
 
   const newId =
-    json.current_timesheet_id ||
-    json.new_timesheet_id ||
-    json.timesheet_id ||
-    null;
+    (json && (json.current_timesheet_id || json.new_timesheet_id || json.timesheet_id))
+      ? (json.current_timesheet_id || json.new_timesheet_id || json.timesheet_id)
+      : null;
+
+  const resolvedId = (newId && String(newId).trim()) ? String(newId) : String(timesheetId);
 
   // Refresh details in modal if open (use NEW current id if provided)
   try {
     if (window.modalCtx && window.modalCtx.data) {
-      const isSame =
-        String(window.modalCtx.data.timesheet_id || '') === String(timesheetId || '');
+      const cur = window.modalCtx.data.timesheet_id || window.modalCtx.data.id || null;
+      const isSame = String(cur || '') === String(timesheetId || '');
 
       if (isSame) {
-        if (newId && String(newId) !== String(timesheetId)) {
-          window.modalCtx.data.timesheet_id = newId;
-          window.modalCtx.data.id = newId;
+        if (String(resolvedId) !== String(cur || '')) {
+          window.modalCtx.data.timesheet_id = resolvedId;
+          window.modalCtx.data.id = resolvedId;
         }
 
-        const fetchId = (newId || timesheetId);
-        const fresh = await fetchTimesheetDetails(fetchId);
+        const fresh = await fetchTimesheetDetails(resolvedId);
         window.modalCtx.timesheetDetails = fresh;
 
-        try {
-          if (window.modalCtx.timesheetMeta && typeof window.modalCtx.timesheetMeta === 'object') {
-            window.modalCtx.timesheetMeta.hasTs = true;
-          }
-        } catch {}
+        // ✅ keep guarded-write expected id aligned
+        if (window.modalCtx.timesheetMeta && typeof window.modalCtx.timesheetMeta === 'object') {
+          window.modalCtx.timesheetMeta.expected_timesheet_id = resolvedId;
+          window.modalCtx.timesheetMeta.hasTs = true;
+        }
       }
     }
   } catch {}
 
-  L('RESULT', { json, newId });
+  try {
+    window.__pendingFocus = {
+      section: 'timesheets',
+      ids: [String(resolvedId)],
+      primaryIds: [String(resolvedId)]
+    };
+  } catch {}
+
+  // ✅ Keep the summary grid consistent (id can change on rotation)
+  try {
+    if (typeof refreshTimesheetsSummaryAfterRotation === 'function') {
+      await refreshTimesheetsSummaryAfterRotation(resolvedId);
+    }
+  } catch (e) {
+    L('summary refresh failed (non-fatal)', e);
+  }
+
+  L('RESULT', { json, newId: resolvedId });
   GE();
   return json;
 }
 
 
-async function allowElectronicAgain(timesheetId) {
+async function allowElectronicAgain(timesheetId, expectedTimesheetId) {
   const { LOGM, L, GC, GE } = getTsLoggers('[TS][ALLOW][ELECTRONIC]');
   GC('allowElectronicAgain');
 
@@ -44931,66 +45918,75 @@ async function allowElectronicAgain(timesheetId) {
     return { cancelled: true };
   }
 
-  const encId = encodeURIComponent(timesheetId);
-  const url = API(`/api/timesheets/${encId}/allow-electronic-again`);
+  const mc = window.modalCtx || {};
+  const expected =
+    (expectedTimesheetId != null ? String(expectedTimesheetId) : '') ||
+    (mc.timesheetMeta && mc.timesheetMeta.expected_timesheet_id) ||
+    String(timesheetId);
 
-  L('REQUEST', { url, timesheetId });
+  const encId   = encodeURIComponent(timesheetId);
+  const urlPath = `/api/timesheets/${encId}/allow-electronic-again`;
 
-  let res;
-  let text = '';
-  try {
-    res = await authFetch(url, { method: 'POST' });
-    text = await res.text().catch(() => '');
-  } catch (err) {
-    L('network error', err);
-    GE();
-    throw err;
-  }
+  const payload = { expected_timesheet_id: expected };
 
-  if (!res.ok) {
-    L('server error', { status: res.status, bodyPreview: (text || '').slice(0, 400) });
-    GE();
-    throw new Error(text || 'Failed to allow electronic again');
-  }
+  L('REQUEST', { url: API(urlPath), timesheetId, payload });
 
-  let json = {};
-  try { json = text ? JSON.parse(text) : {}; } catch {}
+  // ✅ Use apiPostJson so 409 errors preserve err.status + err.json for TIMESHEET_MOVED handling
+  const json = await apiPostJson(urlPath, payload);
 
   const newId =
-    json.current_timesheet_id ||
-    json.new_timesheet_id ||
-    json.timesheet_id ||
-    null;
+    (json && (json.current_timesheet_id || json.new_timesheet_id || json.timesheet_id))
+      ? (json.current_timesheet_id || json.new_timesheet_id || json.timesheet_id)
+      : null;
+
+  const resolvedId = (newId && String(newId).trim()) ? String(newId) : String(timesheetId);
 
   // Refresh details in modal if open (use NEW current id if provided)
   try {
     if (window.modalCtx && window.modalCtx.data) {
-      const isSame =
-        String(window.modalCtx.data.timesheet_id || '') === String(timesheetId || '');
+      const cur = window.modalCtx.data.timesheet_id || window.modalCtx.data.id || null;
+      const isSame = String(cur || '') === String(timesheetId || '');
 
       if (isSame) {
-        if (newId && String(newId) !== String(timesheetId)) {
-          window.modalCtx.data.timesheet_id = newId;
-          window.modalCtx.data.id = newId;
+        if (String(resolvedId) !== String(cur || '')) {
+          window.modalCtx.data.timesheet_id = resolvedId;
+          window.modalCtx.data.id = resolvedId;
         }
 
-        const fetchId = (newId || timesheetId);
-        const fresh = await fetchTimesheetDetails(fetchId);
+        const fresh = await fetchTimesheetDetails(resolvedId);
         window.modalCtx.timesheetDetails = fresh;
 
-        try {
-          if (window.modalCtx.timesheetMeta && typeof window.modalCtx.timesheetMeta === 'object') {
-            window.modalCtx.timesheetMeta.hasTs = true;
-          }
-        } catch {}
+        // ✅ keep guarded-write expected id aligned
+        if (window.modalCtx.timesheetMeta && typeof window.modalCtx.timesheetMeta === 'object') {
+          window.modalCtx.timesheetMeta.expected_timesheet_id = resolvedId;
+          window.modalCtx.timesheetMeta.hasTs = true;
+        }
       }
     }
   } catch {}
 
-  L('RESULT', { json, newId });
+  try {
+    window.__pendingFocus = {
+      section: 'timesheets',
+      ids: [String(resolvedId)],
+      primaryIds: [String(resolvedId)]
+    };
+  } catch {}
+
+  // ✅ Keep the summary grid consistent (id can change on rotation)
+  try {
+    if (typeof refreshTimesheetsSummaryAfterRotation === 'function') {
+      await refreshTimesheetsSummaryAfterRotation(resolvedId);
+    }
+  } catch (e) {
+    L('summary refresh failed (non-fatal)', e);
+  }
+
+  L('RESULT', { json, newId: resolvedId });
   GE();
   return json;
 }
+
 
 
 async function deletePlannedContractWeek(contractWeekId) {
