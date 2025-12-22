@@ -18202,6 +18202,376 @@ function buildWeekIndex(weeks) {
   return m;
 }
 
+
+/**
+ * buildWeeklyScheduleFromLinesAndValidate
+ *
+ * Converts the WEEKLY manual grid model (weeklyLinesByDate) into the canonical schedule array
+ * and validates overlaps / break rules. Designed to be the single shared truth used by:
+ *  - Lines tab (pre-save live preview)
+ *  - Save handler (final guard)
+ *
+ * Input model (per line):
+ *  - Shift line: { ref, start, end, break_start, break_end, break_mins }
+ *  - Break-only line (attaches to most recent shift above): { start:'', end:'', break_* set }
+ *
+ * Break rules:
+ *  - For a given shift, you may use either break windows OR break minutes (not both).
+ *  - Multiple break-only lines are allowed and attach to the current shift.
+ *  - Break minutes can be entered on the shift line and/or break-only lines (they sum).
+ *
+ * Overnight:
+ *  - Supported: end <= start means shift crosses midnight into next day.
+ *  - Overlap detection accounts for overnight shifts (splits into two intervals).
+ *
+ * Returns:
+ *  {
+ *    schedule: [ {date,start,end,ref_num,breaks?:[{start,end}],break_minutes?:number} ... ],
+ *    hasErrors: boolean,
+ *    errorsByDate: { [ymd]: string[] }
+ *  }
+ */
+function buildWeeklyScheduleFromLinesAndValidate(weeklyLinesByDate, weekDays, opts = {}) {
+  const allowOvernight = (opts.allowOvernight !== false);
+  const allowBreakMins = (opts.allowBreakMins !== false);
+
+  const byDate = (weeklyLinesByDate && typeof weeklyLinesByDate === 'object') ? weeklyLinesByDate : {};
+  const dayList = Array.isArray(weekDays) && weekDays.length
+    ? weekDays.map(d => String(d?.ymd || '')).filter(Boolean)
+    : Object.keys(byDate);
+
+  const errorsByDate = {};
+  const schedule = [];
+
+  const err = (ymd, msg) => {
+    const d = String(ymd || '');
+    if (!d) return;
+    (errorsByDate[d] ||= []).push(String(msg || 'Invalid'));
+  };
+
+  const str = (x) => (x == null) ? '' : String(x).trim();
+
+  // Flexible time parser: accepts "8", "800", "08:00", "8:00", "0830", etc.
+  // Returns { mins, hhmm } or null if invalid.
+  const parseTime = (raw) => {
+    let s = str(raw);
+    if (!s) return null;
+
+    // Normal HH:MM / H:MM
+    let m = s.match(/^(\d{1,2}):(\d{2})$/);
+    if (m) {
+      const hh = Number(m[1]), mm = Number(m[2]);
+      if (!Number.isFinite(hh) || !Number.isFinite(mm)) return null;
+      if (hh < 0 || hh > 23 || mm < 0 || mm > 59) return null;
+      const hhmm = `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
+      return { mins: hh * 60 + mm, hhmm };
+    }
+
+    // Digits-only: "8" => 08:00, "800" => 08:00, "830" => 08:30, "0830" => 08:30
+    s = s.replace(/\s+/g, '').replace(':', '');
+    if (!/^\d{1,4}$/.test(s)) return null;
+
+    let hh = 0, mm = 0;
+    if (s.length <= 2) {
+      hh = Number(s);
+      mm = 0;
+    } else {
+      mm = Number(s.slice(-2));
+      hh = Number(s.slice(0, -2));
+    }
+    if (!Number.isFinite(hh) || !Number.isFinite(mm)) return null;
+    if (hh < 0 || hh > 23 || mm < 0 || mm > 59) return null;
+
+    const hhmm = `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
+    return { mins: hh * 60 + mm, hhmm };
+  };
+
+  // Break minutes parser: accepts "30", "30m", "".
+  // Returns:
+  //   - 0 for blank
+  //   - integer >=0 for valid
+  //   - NaN for invalid string
+  const parseBreakMins = (raw) => {
+    const s = str(raw);
+    if (!s) return 0;
+    if (!allowBreakMins) return NaN;
+    const m = s.match(/^(\d{1,4})(?:\s*m)?$/i);
+    if (!m) return NaN;
+    const n = Number(m[1]);
+    if (!Number.isFinite(n) || n < 0) return NaN;
+    return Math.floor(n);
+  };
+
+  // Normalize break window times into the shift's timeline (supports overnight):
+  // - shiftStartMins: [0..1439]
+  // - shiftEndAdj: can be >1440 if overnight
+  // Returns { sAdj, eAdj, startHHMM, endHHMM } or { err } or null if invalid parse.
+  const normalizeBreakWindowToShift = (shiftStartMins, shiftEndAdj, rawStart, rawEnd) => {
+    const ps = parseTime(rawStart);
+    const pe = parseTime(rawEnd);
+    if (!ps || !pe) return null;
+
+    let bs = ps.mins;
+    // If shift crosses midnight, break after midnight could be < shift start; bump by +1440 until inside timeline.
+    while (bs < shiftStartMins) bs += 1440;
+
+    let be = pe.mins;
+    while (be < bs) be += 1440;
+
+    if (be <= bs) return { err: 'Break end must be after break start' };
+    if (be > shiftEndAdj) return { err: 'Break is outside shift' };
+
+    return {
+      sAdj: bs,
+      eAdj: be,
+      startHHMM: ps.hhmm,
+      endHHMM: pe.hhmm
+    };
+  };
+
+  // Convert a shift into one or two intervals within a 0..1440 day (for overlap detection)
+  // Interval format is [start,end) with end in [0..1440]
+  const dayIntervalsForShift = (startMins, endMinsRaw, isOvernight) => {
+    if (!isOvernight) return [[startMins, endMinsRaw]];
+    // overnight covers [start..1440) and [0..end)
+    return [[startMins, 1440], [0, endMinsRaw]];
+  };
+
+  for (const ymd of dayList) {
+    const lines = Array.isArray(byDate[ymd]) ? byDate[ymd] : [];
+
+    // Build shift objects; breaks attach to the most recent shift above
+    const shifts = [];
+    let cur = null;
+
+    for (let i = 0; i < lines.length; i++) {
+      const ln = lines[i] || {};
+
+      const ref = str(ln.ref);
+      const startRaw = str(ln.start);
+      const endRaw   = str(ln.end);
+
+      const bStart = str(ln.break_start);
+      const bEnd   = str(ln.break_end);
+      const bMins  = parseBreakMins(ln.break_mins);
+
+      const hasShift = !!(startRaw || endRaw);
+      const hasBreakWindow = !!(bStart || bEnd);
+      const hasBreakMins = Number.isFinite(bMins) && bMins > 0;
+      const hasAnyBreak = hasBreakWindow || hasBreakMins || (Number.isNaN(bMins) && str(ln.break_mins));
+
+      if (Number.isNaN(bMins) && str(ln.break_mins)) {
+        err(ymd, `Line ${i + 1}: Break (mins) must be a number (e.g. 30)`);
+      }
+
+      if (hasShift) {
+        cur = {
+          lineIdx: i,
+          ref_num: ref,
+          startRaw,
+          endRaw,
+          // break collection for this shift
+          breakWindows: [],     // [{ lineIdx, startRaw, endRaw }]
+          breakMinsTotal: 0,
+          hasWindow: false,
+          hasMins: false
+        };
+        shifts.push(cur);
+
+        // Break specified on the shift line itself
+        if (hasBreakWindow) {
+          cur.hasWindow = true;
+          cur.breakWindows.push({ lineIdx: i, startRaw: bStart, endRaw: bEnd });
+        }
+        if (hasBreakMins) {
+          cur.hasMins = true;
+          cur.breakMinsTotal += bMins;
+        }
+        if (hasBreakWindow && (!bStart || !bEnd)) {
+          err(ymd, `Line ${i + 1}: break start/end must both be filled (or both blank)`);
+        }
+      } else if (hasAnyBreak) {
+        // Break-only line
+        if (!cur) {
+          err(ymd, `Line ${i + 1}: break provided without a shift above`);
+          continue;
+        }
+
+        if (hasBreakWindow) {
+          cur.hasWindow = true;
+          cur.breakWindows.push({ lineIdx: i, startRaw: bStart, endRaw: bEnd });
+          if (!bStart || !bEnd) {
+            err(ymd, `Line ${i + 1}: break start/end must both be filled (or both blank)`);
+          }
+        }
+        if (hasBreakMins) {
+          cur.hasMins = true;
+          cur.breakMinsTotal += bMins;
+        }
+      }
+    }
+
+    // Validate shifts + build schedule segments
+    const validShiftRecs = []; // for overlap detection: { lineIdx, startMins, endMinsRaw, overnight, parts }
+
+    for (const sh of shifts) {
+      const hasStart = !!sh.startRaw;
+      const hasEnd   = !!sh.endRaw;
+
+      if (hasStart !== hasEnd) {
+        err(ymd, `Line ${sh.lineIdx + 1}: Start and End must both be filled (or both blank)`);
+        continue;
+      }
+      if (!hasStart && !hasEnd) continue; // blank shift row
+
+      const ps = parseTime(sh.startRaw);
+      const pe = parseTime(sh.endRaw);
+      if (!ps || !pe) {
+        err(ymd, `Line ${sh.lineIdx + 1}: invalid Start/End time`);
+        continue;
+      }
+
+      const startMins = ps.mins;
+      const endMinsRaw = pe.mins;
+
+      const overnight = allowOvernight && (endMinsRaw <= startMins);
+      if (!allowOvernight && (endMinsRaw <= startMins)) {
+        err(ymd, `Line ${sh.lineIdx + 1}: End must be after Start`);
+        continue;
+      }
+
+      const endAdj = overnight ? (endMinsRaw + 1440) : endMinsRaw;
+      const shiftDur = endAdj - startMins;
+
+      if (!(shiftDur > 0)) {
+        err(ymd, `Line ${sh.lineIdx + 1}: shift duration must be > 0`);
+        continue;
+      }
+
+      // Disallow mixing window breaks with break minutes for the same shift
+      if (sh.hasWindow && sh.hasMins) {
+        err(ymd, `Line ${sh.lineIdx + 1}: use either Break (mins) OR Break start/end times (not both)`);
+      }
+
+      // Build breaks[] or break_minutes
+      let outBreaks = [];
+      let outBreakMinutes = null;
+
+      if (sh.hasWindow) {
+        const intervals = [];
+
+        for (const bw of sh.breakWindows) {
+          const bs = str(bw.startRaw);
+          const be = str(bw.endRaw);
+
+          // pair completeness already error'd; skip if incomplete
+          if (!!bs !== !!be) continue;
+          if (!bs && !be) continue;
+
+          const norm = normalizeBreakWindowToShift(startMins, endAdj, bs, be);
+          if (!norm) {
+            err(ymd, `Line ${bw.lineIdx + 1}: invalid break time`);
+            continue;
+          }
+          if (norm.err) {
+            err(ymd, `Line ${bw.lineIdx + 1}: ${norm.err}`);
+            continue;
+          }
+
+          intervals.push({
+            s: norm.sAdj,
+            e: norm.eAdj,
+            lineIdx: bw.lineIdx,
+            startHHMM: norm.startHHMM,
+            endHHMM: norm.endHHMM
+          });
+        }
+
+        intervals.sort((a, b) => a.s - b.s);
+        for (let i = 1; i < intervals.length; i++) {
+          if (intervals[i].s < intervals[i - 1].e) {
+            err(ymd, `Line ${intervals[i].lineIdx + 1}: break overlaps another break`);
+          }
+        }
+
+        outBreaks = intervals.map(b => ({ start: b.startHHMM, end: b.endHHMM }));
+      } else if (sh.hasMins) {
+        const bm = Number(sh.breakMinsTotal || 0);
+        if (bm > 0) {
+          if (bm >= shiftDur) {
+            err(ymd, `Line ${sh.lineIdx + 1}: Break (mins) must be less than shift duration`);
+          } else {
+            outBreakMinutes = Math.floor(bm);
+          }
+        }
+      }
+
+      // Record for overlap detection (using day-based split for overnight)
+      const parts = dayIntervalsForShift(startMins, endMinsRaw, overnight);
+      validShiftRecs.push({
+        lineIdx: sh.lineIdx,
+        startMins,
+        endMinsRaw,
+        overnight,
+        parts
+      });
+
+      // Emit schedule segment
+      const seg = {
+        date: ymd,
+        start: ps.hhmm,
+        end: pe.hhmm,
+        ref_num: str(sh.ref_num)
+      };
+
+      if (outBreakMinutes != null && outBreakMinutes > 0) {
+        seg.break_minutes = outBreakMinutes;
+      } else if (outBreaks.length) {
+        seg.breaks = outBreaks;
+      }
+
+      schedule.push(seg);
+    }
+
+    // Shift overlap detection (handles overnight by splitting into 0..1440 intervals)
+    for (let a = 0; a < validShiftRecs.length; a++) {
+      for (let b = a + 1; b < validShiftRecs.length; b++) {
+        const A = validShiftRecs[a];
+        const B = validShiftRecs[b];
+
+        let overlaps = false;
+        for (const pA of A.parts) {
+          for (const pB of B.parts) {
+            const s = Math.max(pA[0], pB[0]);
+            const e = Math.min(pA[1], pB[1]);
+            if (s < e) { overlaps = true; break; }
+          }
+          if (overlaps) break;
+        }
+
+        if (overlaps) {
+          err(ymd, `Line ${A.lineIdx + 1}: shift overlaps another shift`);
+          err(ymd, `Line ${B.lineIdx + 1}: shift overlaps another shift`);
+        }
+      }
+    }
+  }
+
+  // Sort schedule for stable output: date then start
+  const sortKeyMins = (hhmm) => (parseTime(hhmm)?.mins ?? 0);
+  schedule.sort((a, b) => {
+    const da = str(a.date);
+    const db = str(b.date);
+    if (da !== db) return da.localeCompare(db);
+    return sortKeyMins(a.start) - sortKeyMins(b.start);
+  });
+
+  const hasErrors = Object.keys(errorsByDate).length > 0;
+
+  return { schedule, hasErrors, errorsByDate };
+}
+
+
 // ---------- Staging state ----------
 
 function getContractCalendarStageState(contractId) {
@@ -22887,7 +23257,227 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
   let opts = options || {};
   if (onReturn && typeof onReturn === 'object' && options === undefined) { opts = onReturn; onReturn = undefined; }
 
-  const stripEmpty = (obj) => { const out={}; for (const [k,v] of Object.entries(obj||{})) { if (v===''||v==null) continue; out[k]=v; } return out; };
+const stripEmpty = (obj) => { const out={}; for (const [k,v] of Object.entries(obj||{})) { if (v===''||v==null) continue; out[k]=v; } return out; };
+
+// ✅ Canonical timesheet refresh helper (must exist BEFORE any footer clicks)
+function ensureTsRefreshAndRepaintOverview() {
+  if (typeof window.__tsRefreshAndRepaintOverview === 'function') {
+    return window.__tsRefreshAndRepaintOverview;
+  }
+
+  window.__tsRefreshAndRepaintOverview = async function(tsTabKey) {
+    const mc = window.modalCtx || {};
+    const idNow   = mc.data?.timesheet_id || null;
+    const weekId  = mc.data?.contract_week_id || null;
+
+    // 1) Refresh details (TS or planned CW)
+    try {
+      if (idNow && typeof fetchTimesheetDetails === 'function') {
+        const fresh = await fetchTimesheetDetails(idNow);
+
+        // ✅ adopt current_timesheet_id if backend returns it
+        const movedId = fresh?.current_timesheet_id ? String(fresh.current_timesheet_id) : null;
+        if (movedId && String(movedId) !== String(idNow)) {
+          mc.data = mc.data || {};
+          mc.data.timesheet_id = movedId;
+          mc.data.id = movedId;
+          mc.timesheetMeta = mc.timesheetMeta || {};
+          mc.timesheetMeta.expected_timesheet_id = movedId;
+        }
+
+ mc.timesheetDetails = fresh;
+
+// ✅ Option A: rebuild timesheetMeta from refreshed details (safe)
+// - Preserve expected_timesheet_id even if a builder returns a new object without it
+// - If a builder returns null/undefined/non-object, fall back to local rebuild
+try {
+  const prevExpected =
+    (mc.timesheetMeta && typeof mc.timesheetMeta === 'object' && mc.timesheetMeta.expected_timesheet_id)
+      ? mc.timesheetMeta.expected_timesheet_id
+      : null;
+
+  let built = null;
+
+  if (typeof window.buildTimesheetMetaFromDetails === 'function') {
+    built = window.buildTimesheetMetaFromDetails(mc, fresh);
+  } else if (typeof window.computeTimesheetMeta === 'function') {
+    built = window.computeTimesheetMeta(mc, fresh);
+  } else if (typeof window.seedTimesheetMetaFromDetails === 'function') {
+    built = window.seedTimesheetMetaFromDetails(mc, fresh);
+  }
+
+  // Accept builder output only if it's a real object
+  if (built && typeof built === 'object') {
+    mc.timesheetMeta = built;
+  } else {
+    // Fallback meta rebuild (sufficient for footer gating)
+    mc.timesheetMeta = (mc.timesheetMeta && typeof mc.timesheetMeta === 'object') ? mc.timesheetMeta : {};
+    const ts    = (fresh && fresh.timesheet) || {};
+    const cw    = (fresh && fresh.contract_week) || {};
+    const tsfin = (fresh && fresh.tsfin) || {};
+
+    const sheetScope =
+      String(fresh?.sheet_scope || ts.sheet_scope || mc.data?.sheet_scope || '').toUpperCase();
+
+    const cwModeSnapshot =
+      String(
+        cw.submission_mode_snapshot ||
+        fresh?.cw_submission_mode_snapshot ||
+        mc.data?.submission_mode_snapshot ||
+        ''
+      ).toUpperCase();
+
+    const subMode =
+      String(ts.submission_mode || mc.data?.submission_mode || cwModeSnapshot || '').toUpperCase();
+
+    const hasTs   = !!(ts.timesheet_id || mc.data?.timesheet_id);
+    const hasWeek = !!(mc.data?.contract_week_id || cw.id || fresh?.contract_week_id);
+
+    mc.timesheetMeta.sheetScope = sheetScope;
+    mc.timesheetMeta.subMode = subMode;
+    mc.timesheetMeta.cw_submission_mode_snapshot = cwModeSnapshot;
+
+    mc.timesheetMeta.hasTs = hasTs;
+    mc.timesheetMeta.isPlannedWeek = (!hasTs && hasWeek);
+
+    mc.timesheetMeta.isPaid = !!(tsfin.paid_at_utc || mc.data?.paid_at_utc);
+    mc.timesheetMeta.isInvoiced = !!(tsfin.locked_by_invoice_id || mc.data?.locked_by_invoice_id);
+  }
+
+  // ✅ Always enforce expected_timesheet_id after rebuild
+  // Priority: current modal id → previous expected → existing meta value
+  mc.timesheetMeta = (mc.timesheetMeta && typeof mc.timesheetMeta === 'object') ? mc.timesheetMeta : {};
+  mc.timesheetMeta.expected_timesheet_id =
+    (mc.data && mc.data.timesheet_id) ||
+    prevExpected ||
+    mc.timesheetMeta.expected_timesheet_id ||
+    null;
+
+} catch (e) {
+  console.warn('[TS][REFRESH] timesheetMeta rebuild failed', e);
+}
+
+
+      } else if (!idNow && weekId) {
+        // planned week: refetch contract_week so submission_mode_snapshot etc is current
+        try {
+          if (typeof authFetch === 'function' && typeof API === 'function') {
+            const qs = new URLSearchParams();
+            if (mc.data?.contract_id) qs.set('contract_id', mc.data.contract_id);
+
+            const we = mc.data?.contract_week_ending_date || mc.data?.week_ending_date || null;
+            if (we) {
+              qs.set('week_ending_from', we);
+              qs.set('week_ending_to', we);
+            }
+            qs.set('include_plan', 'true');
+
+            const res = await authFetch(API(`/api/contract-weeks?${qs.toString()}`));
+
+            let rows = [];
+            try {
+              if (typeof toList === 'function') rows = await toList(res);
+              else rows = await res.json();
+            } catch { rows = []; }
+
+            const cw =
+              (rows || []).find(w => String(w.id) === String(weekId)) ||
+              (rows || [])[0] ||
+              null;
+
+ mc.timesheetDetails = mc.timesheetDetails || {};
+mc.timesheetDetails.contract_week = cw;
+mc.timesheetDetails.contract_week_id = weekId;
+
+// ✅ Option A: rebuild timesheetMeta for planned weeks too (safe)
+// - Ensure timesheetMeta is an object
+// - Preserve expected_timesheet_id consistently
+try {
+  const prevExpected =
+    (mc.timesheetMeta && typeof mc.timesheetMeta === 'object' && mc.timesheetMeta.expected_timesheet_id)
+      ? mc.timesheetMeta.expected_timesheet_id
+      : null;
+
+  const det  = mc.timesheetDetails || {};
+  const ts   = det.timesheet || {}; // likely null/empty for planned
+  const cw2  = det.contract_week || {};
+  const tsfin= det.tsfin || {};
+
+  mc.timesheetMeta = (mc.timesheetMeta && typeof mc.timesheetMeta === 'object') ? mc.timesheetMeta : {};
+
+  const sheetScope =
+    String(det.sheet_scope || mc.data?.sheet_scope || ts.sheet_scope || '').toUpperCase();
+
+  const cwModeSnapshot =
+    String(
+      cw2.submission_mode_snapshot ||
+      det.cw_submission_mode_snapshot ||
+      mc.data?.submission_mode_snapshot ||
+      ''
+    ).toUpperCase();
+
+  const subMode =
+    String(ts.submission_mode || mc.data?.submission_mode || cwModeSnapshot || '').toUpperCase();
+
+  const hasTs   = !!(ts.timesheet_id || mc.data?.timesheet_id);
+  const hasWeek = !!(mc.data?.contract_week_id || cw2.id || det.contract_week_id);
+
+  mc.timesheetMeta.sheetScope = sheetScope;
+  mc.timesheetMeta.subMode = subMode;
+  mc.timesheetMeta.cw_submission_mode_snapshot = cwModeSnapshot;
+
+  mc.timesheetMeta.hasTs = hasTs;
+  mc.timesheetMeta.isPlannedWeek = (!hasTs && hasWeek);
+
+  mc.timesheetMeta.isPaid = !!(tsfin.paid_at_utc || mc.data?.paid_at_utc);
+  mc.timesheetMeta.isInvoiced = !!(tsfin.locked_by_invoice_id || mc.data?.locked_by_invoice_id);
+
+  // ✅ Always enforce expected_timesheet_id after rebuild
+  mc.timesheetMeta.expected_timesheet_id =
+    (mc.data && mc.data.timesheet_id) ||
+    prevExpected ||
+    mc.timesheetMeta.expected_timesheet_id ||
+    null;
+
+} catch (e) {
+  console.warn('[TS][REFRESH] timesheetMeta rebuild failed (planned week)', e);
+}
+
+
+          }
+        } catch {}
+      }
+    } catch (e) {
+      console.warn('[TS][REFRESH] details refresh failed', e);
+    }
+
+    // 2) Refresh summary (for TS id only)
+    try {
+      const id2 = mc.data?.timesheet_id || null;
+      if (id2 && typeof refreshTimesheetsSummaryAfterRotation === 'function') {
+        await refreshTimesheetsSummaryAfterRotation(id2);
+      }
+    } catch {}
+
+    // 3) Repaint modal + grid
+    try { await renderAll(); } catch {}
+
+    // 4) Repaint the current modal tab (or the requested tab)
+    try {
+      const fr = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
+      if (fr && fr.entity === 'timesheets') {
+        fr.mode = 'view';
+        fr._suppressDirty = true;
+        const k = tsTabKey || fr.currentTabKey || 'overview';
+        await fr.setTab(k);
+        fr._suppressDirty = false;
+        fr._updateButtons && fr._updateButtons();
+      }
+    } catch {}
+  };
+
+  return window.__tsRefreshAndRepaintOverview;
+}
 
 function setFormReadOnly(root, ro) {
   if (!root || !document.contains(root)) { L('setFormReadOnly(skip: invalid root)', { ro }); return; }
@@ -22906,22 +23496,26 @@ function setFormReadOnly(root, ro) {
 
     // Buttons: in ro mode, keep specific IDs + any timesheet action buttons enabled
     if (el.type === 'button' || el.tagName === 'BUTTON') {
-      const allow = new Set([
-        'btnCloseModal',
-        'btnDelete',
-        'btnEditModal',
-        'btnSave',
-        'btnRelated',
+  const allow = new Set([
+  'btnCloseModal',
+  'btnDelete',
+  'btnEditModal',
+  'btnSave',
+  'btnRelated',
 
-        // ✅ Timesheet footer buttons you want clickable even in VIEW mode
-        'btnTsDeleteTimesheet',
-        'btnTsConvertManual',
-        'btnTsRestoreElectronic',
-        'btnTsRequestNewElectronic',
+  // ✅ Keep ONLY non-conversion footer actions
+  'btnTsDeleteTimesheet',
+  'btnTsProcessTimesheet',
+  'btnTsUnprocessTimesheet',   // ✅ NEW
+  'btnTsAuthorise',
+  'btnTsUnauthorise'
+]);
 
-        // ✅ NEW: planned weekly manual → process into a real timesheet (VIEW mode)
-        'btnTsProcessTimesheet'
-      ]);
+
+
+// NOTE: conversions are now Overview actions (data-ts-action buttons),
+// and setFormReadOnly already auto-enables data-ts-action buttons in VIEW.
+
 
  // Keep Timesheet action buttons enabled in VIEW only if they are "safe view actions".
 // Do NOT keep weekly schedule edit buttons enabled (reset / add/remove shift lines).
@@ -23593,13 +24187,15 @@ const handleMoved = async (err, label) => {
   });
 };
 
+const refreshAndRepaintOverview = ensureTsRefreshAndRepaintOverview();
+
+
 
       if (!tsId && !weekId) {
         if (LOGM) LT('no tsId/contract_week_id on modalCtx.data, skip overview wiring');
       } else {
-        const authoriseBtn       = root.querySelector('button[data-ts-action="authorise"]');
-        const unauthoriseBtn     = root.querySelector('button[data-ts-action="unauthorise"]');
-        const switchManualBtn    = root.querySelector('button[data-ts-action="switch-manual"]');
+              const switchManualBtn    = root.querySelector('button[data-ts-action="switch-manual"]');
+
         const holdOnBtn          = root.querySelector('button[data-ts-action="pay-hold-on"]');
         const holdOffBtn         = root.querySelector('button[data-ts-action="pay-hold-off"]');
         const markPaidBtn        = root.querySelector('button[data-ts-action="mark-paid"]');
@@ -23609,9 +24205,20 @@ const handleMoved = async (err, label) => {
         const markPaidInput      = root.querySelector('input[name="ts_mark_paid"]');
 
         // Extra action buttons for timesheets
-        const revertElecBtn   = root.querySelector('button[data-ts-action="revert-electronic"]');
-        const deleteReopenBtn = root.querySelector('button[data-ts-action="delete-manual-reopen"]');
-        const deletePermBtn   = root.querySelector('button[data-ts-action="delete-permanent"]');
+     // Extra action buttons for timesheets
+const revertElecBtn   = root.querySelector('button[data-ts-action="revert-electronic"]');
+const deleteReopenBtn = root.querySelector('button[data-ts-action="delete-manual-reopen"]');
+const deletePermBtn   = root.querySelector('button[data-ts-action="delete-permanent"]');
+
+// ✅ Footer-only policy:
+// - Unprocess Timesheet lives in footer (btnTsUnprocessTimesheet)
+// - Delete permanently lives in footer (btnTsDeleteTimesheet)
+// So do NOT show/wire these Overview action buttons even if renderer outputs them.
+if (deleteReopenBtn) { deleteReopenBtn.style.display = 'none'; }
+if (deletePermBtn)   { deletePermBtn.style.display   = 'none'; }
+
+// ⛔ Do not attach any click listeners to deleteReopenBtn / deletePermBtn here.
+
 
         // QR / route action buttons
         const qrResendBtn        = root.querySelector('button[data-ts-action="qr-resend"]');
@@ -23694,8 +24301,7 @@ const weeklyManualPlanned =
             locked,
             weeklyElectronicWithTs,
             weeklyElectronicPlanned,
-            hasAuthorise: !!authoriseBtn,
-            hasUnauthorise: !!unauthoriseBtn,
+      
             hasSwitchManual: !!switchManualBtn,
         
             hasPayHoldInput: !!payHoldInput,
@@ -23724,55 +24330,21 @@ const weeklyManualPlanned =
         if (holdOffBtn)  holdOffBtn.style.display = 'none';
         if (markPaidBtn) markPaidBtn.style.display= 'none';
 
-       // ── Authorise / Unauthorise ──
-        if (authoriseBtn) {
-          authoriseBtn.style.display = (!isAuthorised && !locked && mode === 'view' && hasTs) ? '' : 'none';
-          if (!authoriseBtn.__tsWired) {
-            authoriseBtn.__tsWired = true;
-            authoriseBtn.addEventListener('click', async () => {
-              try {
-          await authoriseTimesheet(tsNow());
-window.__toast && window.__toast('Timesheet authorised');
-await refreshAndRepaintOverview();
+         // ── Authorise / Unauthorise ──
+        // These are footer actions: btnTsAuthorise / btnTsUnauthorise (wired in top._updateButtons).
 
-              } catch (err) {
-                if (await handleMoved(err, 'authorise')) return;
-                if (LOGM) console.warn('[TS][OVERVIEW] authoriseTimesheet failed', err);
-                alert(err?.message || 'Failed to authorise timesheet.');
-              }
-            });
-          }
-        }
 
-        if (unauthoriseBtn) {
-          unauthoriseBtn.style.display = (isAuthorised && !locked && mode === 'view' && hasTs) ? '' : 'none';
-          if (!unauthoriseBtn.__tsWired) {
-            unauthoriseBtn.__tsWired = true;
-            unauthoriseBtn.addEventListener('click', async () => {
-              const ok = window.confirm('Unauthorise this timesheet? It will return to a pending state.');
-              if (!ok) return;
-          try {
-  await unauthoriseTimesheet(tsNow());
-  window.__toast && window.__toast('Timesheet unauthorised');
-  await refreshAndRepaintOverview();
-} catch (err) {
-  if (await handleMoved(err, 'unauthorise')) return;
-  if (LOGM) console.warn('[TS][OVERVIEW] unauthoriseTimesheet failed', err);
-  alert(err?.message || 'Failed to unauthorise timesheet.');
-}
-
-            });
-          }
-        }
-
-        // ── Convert to manual (two paths) ──
+           // ── Convert to manual (weekly existing OR weekly planned electronic OR daily existing) ──
         if (switchManualBtn) {
           const showSwitch =
             mode === 'view' &&
             !locked &&
-            isWeekly &&
-            subMode === 'ELECTRONIC' &&
-            (!!tsId || !!weekId);
+            (
+              // WEEKLY electronic (existing OR planned week)
+              (isWeekly && subMode === 'ELECTRONIC' && (!!tsId || !!weekId)) ||
+              // DAILY electronic (existing)
+              (isDaily  && subMode === 'ELECTRONIC' && !!tsId)
+            );
 
           switchManualBtn.style.display = showSwitch ? '' : 'none';
 
@@ -23780,77 +24352,38 @@ await refreshAndRepaintOverview();
             switchManualBtn.__tsWired = true;
             switchManualBtn.addEventListener('click', async () => {
               const ok = window.confirm(
-                'Convert this weekly electronic timesheet to MANUAL?\n\n' +
-                'For existing timesheets, the signed electronic version is preserved as a separate version.\n' +
-                'For planned/open weeks, the week will be marked as MANUAL so you can enter manual hours.'
+                'Convert this timesheet to MANUAL?\n\n' +
+                'For existing electronic timesheets, the signed electronic version is preserved as history.\n' +
+                'For planned/open weekly slots, the week will be marked MANUAL so you can enter manual hours.'
               );
               if (!ok) return;
 
               try {
-                const mc2    = window.modalCtx || {};
-                const tsId2  = mc2.data?.timesheet_id || null;
-                const weekId2= mc2.data?.contract_week_id || null;
+                const mc2     = window.modalCtx || {};
+                const tsId2   = mc2.data?.timesheet_id || null;
+                const weekId2 = mc2.data?.contract_week_id || null;
+
                 const det2   = mc2.timesheetDetails || {};
                 const ts2    = det2.timesheet || {};
-                const sheetScope2 = (det2.sheet_scope || mc2.data?.sheet_scope || ts2.sheet_scope || '').toUpperCase();
-                const subMode2    = (ts2.submission_mode || mc2.data?.submission_mode || '').toUpperCase();
+                const sheetScope2 = String(det2.sheet_scope || mc2.data?.sheet_scope || ts2.sheet_scope || '').toUpperCase();
+                const subMode2    = String(ts2.submission_mode || mc2.data?.submission_mode || '').toUpperCase();
 
-                const hasTs2 = !!tsId2;
+                const isDaily2  = (sheetScope2 === 'DAILY');
+                const isWeekly2 = (sheetScope2 === 'WEEKLY');
+                const hasTs2    = !!tsId2;
 
-                const weeklyElectronicWithTs2 =
-                  sheetScope2 === 'WEEKLY' && subMode2 === 'ELECTRONIC' && hasTs2;
-
-                const weeklyElectronicPlanned2 =
-                  sheetScope2 === 'WEEKLY' && subMode2 === 'ELECTRONIC' && !hasTs2 && !!weekId2;
-
-                if (weeklyElectronicWithTs2 && tsId2) {
+                if (isDaily2 && hasTs2 && subMode2 === 'ELECTRONIC') {
+                  await switchDailyTimesheetToManual(tsId2);
+                } else if (isWeekly2 && hasTs2 && subMode2 === 'ELECTRONIC') {
                   await switchTimesheetToManual(tsId2);
-                  try {
-                    mc2.data.submission_mode = 'MANUAL';
-                    if (mc2.timesheetDetails && mc2.timesheetDetails.timesheet) {
-                      mc2.timesheetDetails.timesheet.submission_mode = 'MANUAL';
-                    }
-                  } catch {}
-                } else if (weeklyElectronicPlanned2 && weekId2) {
+                } else if (isWeekly2 && !hasTs2 && !!weekId2 && subMode2 === 'ELECTRONIC') {
                   await switchContractWeekToManual(weekId2);
-                  try {
-                    mc2.data.submission_mode_snapshot = 'MANUAL';
-                    if (mc2.timesheetDetails && mc2.timesheetDetails.contract_week) {
-                      mc2.timesheetDetails.contract_week.submission_mode_snapshot = 'MANUAL';
-                    }
-                    if (mc2.timesheetMeta && typeof mc2.timesheetMeta === 'object') {
-                      mc2.timesheetMeta.cw_submission_mode_snapshot = 'MANUAL';
-                      mc2.timesheetMeta.sheetScope  = 'WEEKLY';
-                      mc2.timesheetMeta.subMode     = 'MANUAL';
-                      mc2.timesheetMeta.isPlannedWeek = true;
-                      mc2.timesheetMeta.hasTs      = false;
-                    }
-                  } catch {}
                 } else {
-                  throw new Error('This week is not an electronic weekly slot; cannot convert to manual.');
+                  throw new Error('This item is not eligible for Convert to Manual.');
                 }
 
-                window.__toast && window.__toast('Weekly week is now in MANUAL mode. Click Edit to enter manual hours.');
-
-                try { await renderAll(); } catch (e) {
-                  if (LOGM) LT('switchManual: renderAll() after convert failed (non-fatal)', e);
-                }
-
-                try {
-                  if (typeof window.__getModalFrame === 'function') {
-                    const fr = window.__getModalFrame();
-                    if (fr && fr.entity === 'timesheets') {
-                      fr.mode = 'view';
-                      fr._suppressDirty = true;
-                      fr.setTab('overview');
-                      fr._suppressDirty = false;
-                      fr._updateButtons && fr._updateButtons();
-                    }
-                  }
-                } catch (e) {
-                  if (LOGM) LT('switchManual: repaint after convert failed (non-fatal)', e);
-                }
-
+                window.__toast && window.__toast('Converted to MANUAL.');
+                await refreshAndRepaintOverview();
               } catch (err) {
                 if (await handleMoved(err, 'switch-manual')) return;
                 if (LOGM) console.warn('[TS][OVERVIEW] switch to manual failed', err);
@@ -23859,6 +24392,7 @@ await refreshAndRepaintOverview();
             });
           }
         }
+
 
         // ── Revert to original electronic (versioned) — VIEW mode only ──
         if (revertElecBtn) {
@@ -23872,78 +24406,22 @@ await refreshAndRepaintOverview();
                 'Any manual overrides will be kept in history but no longer current.'
               );
               if (!ok) return;
-              try {
-                await revertTimesheetToElectronic(tsId);
-                window.__toast && window.__toast('Original electronic timesheet restored.');
-                try { byId('btnCloseModal').click(); } catch {}
-                try { await renderAll(); } catch {}
-              } catch (err) {
-                if (await handleMoved(err, 'revert-electronic')) return;
-                if (LOGM) console.warn('[TS][OVERVIEW] revertTimesheetToElectronic failed', err);
-                alert(err?.message || 'Failed to restore electronic timesheet.');
-              }
+            try {
+  await revertTimesheetToElectronic(tsId);
+  window.__toast && window.__toast('Original electronic timesheet restored.');
+  await refreshAndRepaintOverview();
+} catch (err) {
+  if (await handleMoved(err, 'revert-electronic')) return;
+  if (LOGM) console.warn('[TS][OVERVIEW] revertTimesheetToElectronic failed', err);
+  alert(err?.message || 'Failed to restore electronic timesheet.');
+}
+
             });
           }
         }
 
         // ── Delete manual TS & reopen week for e-submission — VIEW mode only ──
-        if (deleteReopenBtn) {
-          deleteReopenBtn.style.display = (mode === 'view' && canDeleteManualReopen) ? '' : 'none';
-
-          if (!deleteReopenBtn.__tsWired) {
-            deleteReopenBtn.__tsWired = true;
-            deleteReopenBtn.addEventListener('click', async () => {
-              const ok = window.confirm(
-                'Delete this manual weekly timesheet and reopen the week for electronic submission?\n\n' +
-                'The manual version and its financials will be removed. The week will appear as OPEN/PLANNED again.'
-              );
-              if (!ok) return;
-              try {
-                await deleteManualTimesheetAndReopenWeek(tsId, cwId);
-                window.__toast && window.__toast('Manual timesheet deleted and week reopened for electronic submission.');
-                try { byId('btnCloseModal').click(); } catch {}
-                try { await renderAll(); } catch {}
-              } catch (err) {
-                if (await handleMoved(err, 'delete-manual-reopen')) return;
-                if (LOGM) console.warn('[TS][OVERVIEW] deleteManualTimesheetAndReopenWeek failed', err);
-                alert(err?.message || 'Failed to delete manual timesheet and reopen week.');
-              }
-            });
-          }
-        }
-
-        // ── Delete permanently — any unlocked TS, allowed in VIEW or EDIT ──
-        if (deletePermBtn) {
-          const showDeletePerm =
-            !!tsId &&
-            !locked &&
-            (mode === 'view' || mode === 'edit') &&
-            canDeletePermanent;
-
-          deletePermBtn.style.display = showDeletePerm ? '' : 'none';
-
-          if (!deletePermBtn.__tsWired) {
-            deletePermBtn.__tsWired = true;
-            deletePermBtn.addEventListener('click', async () => {
-              const ok = window.confirm(
-                'Permanently delete this timesheet?\n\n' +
-                'This will remove all versions and financial snapshots for this timesheet_id.\n' +
-                'This action cannot be undone.'
-              );
-              if (!ok) return;
-              try {
-                await deleteTimesheetPermanent(tsId);
-                alert('Timesheet record deleted.');
-                try { byId('btnCloseModal').click(); } catch {}
-                try { await renderAll(); } catch {}
-              } catch (err) {
-                if (await handleMoved(err, 'delete-permanent')) return;
-                if (LOGM) console.warn('[TS][OVERVIEW] deleteTimesheetPermanent failed', err);
-                alert(err?.message || 'Failed to delete timesheet.');
-              }
-            });
-          }
-        }
+      
 
         // ─────────────────────────────────────────────────────────────
         // QR / route actions wiring (buttons rendered by renderTimesheetOverviewTab)
@@ -23969,38 +24447,10 @@ if (switchElecPlannedBtn) {
         const weekId2 = mc2.data?.contract_week_id || null;
         if (!weekId2) throw new Error('Contract week id missing.');
 
-        await switchContractWeekToElectronic(weekId2);
+     await switchContractWeekToElectronic(weekId2);
+window.__toast && window.__toast('Week is now ELECTRONIC.');
+await refreshAndRepaintOverview();
 
-        try {
-          mc2.data.submission_mode_snapshot = 'ELECTRONIC';
-          if (mc2.timesheetDetails && mc2.timesheetDetails.contract_week) {
-            mc2.timesheetDetails.contract_week.submission_mode_snapshot = 'ELECTRONIC';
-          }
-          if (mc2.timesheetMeta && typeof mc2.timesheetMeta === 'object') {
-            mc2.timesheetMeta.cw_submission_mode_snapshot = 'ELECTRONIC';
-            mc2.timesheetMeta.sheetScope = 'WEEKLY';
-            mc2.timesheetMeta.subMode = 'ELECTRONIC';
-            mc2.timesheetMeta.isPlannedWeek = true;
-            mc2.timesheetMeta.hasTs = false;
-          }
-        } catch {}
-
-        window.__toast && window.__toast('Week is now ELECTRONIC.');
-
-        try { await renderAll(); } catch {}
-
-        try {
-          if (typeof window.__getModalFrame === 'function') {
-            const fr = window.__getModalFrame();
-            if (fr && fr.entity === 'timesheets') {
-              fr.mode = 'view';
-              fr._suppressDirty = true;
-              fr.setTab('overview');
-              fr._suppressDirty = false;
-              fr._updateButtons && fr._updateButtons();
-            }
-          }
-        } catch {}
       } catch (err) {
         alert(err?.message || 'Failed to switch week back to electronic.');
       }
@@ -24011,38 +24461,6 @@ if (switchElecPlannedBtn) {
 
 
 
-   const refreshAndRepaintOverview = async () => {
-  const idNow = (window.modalCtx?.data?.timesheet_id || null);
-
-  try {
-    if (idNow) {
-      const fresh = await fetchTimesheetDetails(idNow);
-      window.modalCtx.timesheetDetails = fresh;
-    }
-  } catch {}
-
-  // Keep summary row in sync with the adopted/current id
-  try {
-    if (idNow && typeof refreshTimesheetsSummaryAfterRotation === 'function') {
-      refreshTimesheetsSummaryAfterRotation(idNow);
-    }
-  } catch {}
-
-  try { await renderAll(); } catch {}
-
-  try {
-    if (typeof window.__getModalFrame === 'function') {
-      const fr = window.__getModalFrame();
-      if (fr && fr.entity === 'timesheets') {
-        fr.mode = 'view';
-        fr._suppressDirty = true;
-        await fr.setTab('overview');
-        fr._suppressDirty = false;
-        fr._updateButtons && fr._updateButtons();
-      }
-    }
-  } catch {}
-};
 
 
       // Resend QR email (Scenario 2)
@@ -24493,8 +24911,46 @@ if (this.entity === 'timesheets' && k === 'lines') {
         });
       });
 
-      // ✅ IMPORTANT: do NOT wire weekly schedule grid fields here.
-      // Weekly shift-line grid persists edits via window.__tsWeeklyLinesHelper inside renderTimesheetLinesTab().
+   // ✅ IMPORTANT: do NOT wire weekly schedule grid fields here.
+      // ✅ NEW: best-effort schedule rebuild for weekly manual so Finance preview isn't stale
+      try {
+        const det = mc.timesheetDetails || {};
+        const ts  = det.timesheet || {};
+        const sheetScope = String(det.sheet_scope || mc.data?.sheet_scope || ts.sheet_scope || '').toUpperCase();
+        const subMode    = String(ts.submission_mode || mc.data?.submission_mode || '').toUpperCase();
+
+     const hasLines =
+  mc.timesheetState.weeklyLinesByDate &&
+  typeof mc.timesheetState.weeklyLinesByDate === 'object' &&
+  Object.keys(mc.timesheetState.weeklyLinesByDate).some(d => {
+    const arr = mc.timesheetState.weeklyLinesByDate[d];
+    return Array.isArray(arr) && arr.some(ln =>
+      String(ln?.start || '').trim() ||
+      String(ln?.end || '').trim() ||
+      String(ln?.break_start || '').trim() ||
+      String(ln?.break_end || '').trim() ||
+      String(ln?.break_mins || '').trim() ||
+      String(ln?.ref || '').trim()
+    );
+  });
+
+
+        if (sheetScope === 'WEEKLY' && subMode === 'MANUAL' && hasLines && typeof buildWeeklyScheduleFromLinesAndValidate === 'function') {
+          const wd = Array.isArray(mc.timesheetState.__weekDaysForSchedule) && mc.timesheetState.__weekDaysForSchedule.length
+            ? mc.timesheetState.__weekDaysForSchedule
+            : null;
+
+          const out = buildWeeklyScheduleFromLinesAndValidate(
+            mc.timesheetState.weeklyLinesByDate,
+            wd || undefined,
+            { allowOvernight: true, allowBreakMins: true }
+          );
+
+          mc.timesheetState.schedule = Array.isArray(out?.schedule) ? out.schedule : [];
+          mc.timesheetState.scheduleErrorsByDate = (out?.errorsByDate && typeof out.errorsByDate === 'object') ? out.errorsByDate : {};
+          mc.timesheetState.scheduleHasErrors = !!out?.hasErrors;
+        }
+      } catch {}
     } catch (err) {
       if ((typeof window.__LOG_MODAL === 'boolean') ? window.__LOG_MODAL : false) {
         console.warn('[TS][LINES][WIRE] failed', err);
@@ -25005,12 +25461,27 @@ const setHint = (txt, tone) => {
   if (tone === 'ok')   try { hintEl2.classList.add('ok'); } catch {}
 };
 
-// View-mode (replaces Edit when Edit is not available)
-const btnTsConvert = ensureFooterBtn(
-  'btnTsConvertManual',
-  'Convert to manual',
+// ✅ Legacy footer conversion buttons are removed.
+// If any old DOM button exists from previous sessions, hide/disable it.
+['btnTsConvertManual','btnTsRestoreElectronic','btnTsRequestNewElectronic'].forEach(id => {
+  const b = byId(id);
+  if (b) { b.style.display = 'none'; b.disabled = true; }
+});
+
+
+// ✅ NEW: VIEW-mode Authorise / Unauthorise (footer, next to Save/Edit)
+const btnTsAuthorise = ensureFooterBtn(
+  'btnTsAuthorise',
+  'Authorise',
   'btn btn-outline btn-sm',
-  btnEdit // sits where Edit lives
+  btnSave
+);
+
+const btnTsUnauthorise = ensureFooterBtn(
+  'btnTsUnauthorise',
+  'Unauthorise',
+  'btn btn-outline btn-sm',
+  btnSave
 );
 
 // ✅ NEW: VIEW-mode planned weekly manual → process into a real timesheet
@@ -25018,20 +25489,13 @@ const btnTsProcess = ensureFooterBtn(
   'btnTsProcessTimesheet',
   'Process Timesheet',
   'btn btn-outline btn-sm',
-  btnSave // sits near Edit in view mode (Edit is inserted before Save)
-);
-
-// Edit-mode (next to Save)
-const btnTsRestore = ensureFooterBtn(
-  'btnTsRestoreElectronic',
-  'Restore original electronic',
-  'btn btn-outline btn-sm',
   btnSave
 );
 
-const btnTsRequest = ensureFooterBtn(
-  'btnTsRequestNewElectronic',
-  'Request new electronic',
+// ✅ NEW: footer-only Unprocess
+const btnTsUnprocess = ensureFooterBtn(
+  'btnTsUnprocessTimesheet',
+  'Unprocess Timesheet',
   'btn btn-outline btn-sm',
   btnSave
 );
@@ -25044,31 +25508,20 @@ const btnTsDelete = ensureFooterBtn(
 );
 
 // Default hidden; _updateButtons decides
-btnTsConvert.style.display = 'none';
-btnTsProcess.style.display = 'none';
-btnTsRestore.style.display = 'none';
-btnTsRequest.style.display = 'none';
-btnTsDelete.style.display  = 'none';
+btnTsAuthorise.style.display   = 'none';
+btnTsUnauthorise.style.display = 'none';
+btnTsProcess.style.display     = 'none';
+btnTsUnprocess.style.display   = 'none'; // ✅ NEW
+btnTsDelete.style.display      = 'none';
 
 
-// Hover hints (requested)
-btnTsRestore.onmouseenter = () => setHint(
-  'If you restore the original timesheet we will discard all changes you have made and restore the electronic timesheet to the exact values that the candidate submited and the manager authorised.',
-  'warn'
-);
-btnTsRestore.onmouseleave = () => setHint('', null);
-
-btnTsRequest.onmouseenter = () => setHint(
-  'If you request a new electronic timesheet we will permanently delete the electronic timesheeet on file and allow the user to submit a band new electronic timesheet via the app, only do this is you definitely do not need the original signed electronic timesheet ever again',
-  'err'
-);
-btnTsRequest.onmouseleave = () => setHint('', null);
-
+// Hover hint: Process only
 btnTsProcess.onmouseenter = () => setHint(
   'Process this planned MANUAL week into a real timesheet using the stored schedule/hours.',
   'warn'
 );
 btnTsProcess.onmouseleave = () => setHint('', null);
+
 
   (function dragWire() {
     if (!header || !modalNode) return;
@@ -25360,9 +25813,8 @@ top._updateButtons = ()=> {
 
   } else {
 
-    // ── Edit / Convert (Timesheets) gating ──
+    // ── Edit gating (Timesheets + generic entities) ──
     let canEdit = false;
-    let canConvert = false;
 
     const mcTs = (window.modalCtx || {});
     const meta = (mcTs && mcTs.timesheetMeta) || {};
@@ -25380,9 +25832,11 @@ top._updateButtons = ()=> {
     const isWeekly   = (sheetScope === 'WEEKLY');
     const isDaily    = (sheetScope === 'DAILY');
 
-    const isPaid     = !!meta.isPaid;
-    const isInvoiced = !!meta.isInvoiced;
-    const locked     = isPaid || isInvoiced;
+    const locked =
+      !!meta.isPaid ||
+      !!meta.isInvoiced ||
+      !!tsfin.locked_by_invoice_id ||
+      !!tsfin.paid_at_utc;
 
     if (top.entity === 'timesheets') {
       const hasTsMeta  = !!meta.hasTs;
@@ -25391,36 +25845,26 @@ top._updateButtons = ()=> {
       const isWeeklyManualTs =
         hasTsMeta && isWeekly && subMode === 'MANUAL' && !locked;
 
-   // Allow Edit only for PLANNED weekly slots that are already MANUAL
-const isPlannedManualWeek =
-  !hasTsMeta && isPlanned && isWeekly && !!weekId && !locked && (cwMode === 'MANUAL');
+      // Allow Edit only for PLANNED weekly slots that are already MANUAL
+      const isPlannedManualWeek =
+        !hasTsMeta && isPlanned && isWeekly && !!weekId && !locked && (cwMode === 'MANUAL');
 
-const isDailyManualTs =
-  hasTsMeta && isDaily && subMode === 'MANUAL' && !locked;
+      const isDailyManualTs =
+        hasTsMeta && isDaily && subMode === 'MANUAL' && !locked;
 
-canEdit = (top.mode === 'view') && (isWeeklyManualTs || isPlannedManualWeek || isDailyManualTs);
-
-
-      // Convert-to-manual eligibility
-      if (!locked && top.mode === 'view') {
-        const weeklyExistingOk =
-          isWeekly && !!tsId && subMode === 'ELECTRONIC';
-
-        const weeklyPlannedOk =
-          isWeekly && !tsId && !!weekId && cwMode === 'ELECTRONIC';
-
-        const dailyExistingOk =
-          isDaily && !!tsId && subMode === 'ELECTRONIC';
-
-        canConvert = (weeklyExistingOk || weeklyPlannedOk || dailyExistingOk);
-      }
+      canEdit = (top.mode === 'view') && (isWeeklyManualTs || isPlannedManualWeek || isDailyManualTs);
     } else {
       canEdit = (top.mode === 'view' && top.hasId);
-      canConvert = false;
     }
 
-    // Footer placement: Convert replaces Edit when Edit isn't available
+    // Footer placement: ONLY show Edit when allowed (no convert replacement)
     btnEdit.style.display = (canEdit ? '' : 'none');
+
+    // ✅ Hard-hide any legacy footer conversion buttons (all converts live in Overview Actions now)
+    ['btnTsConvertManual','btnTsRestoreElectronic','btnTsRequestNewElectronic'].forEach(id => {
+      const b = byId(id);
+      if (b) { b.style.display = 'none'; b.disabled = true; }
+    });
 
     // Helper: kill old addEventListener closures by cloning once, then use onclick + ownerToken forever
     const staleSafeBtn = (btn) => {
@@ -25432,109 +25876,31 @@ canEdit = (top.mode === 'view') && (isWeeklyManualTs || isPlannedManualWeek || i
       return clone;
     };
 
-    // Convert (view-mode)
-    let btnTsConvert = byId('btnTsConvertManual');
-    btnTsConvert = staleSafeBtn(btnTsConvert);
+       // ── Footer buttons for timesheets: Authorise / Unauthorise / Process / Delete ──
+   let btnTsAuthorise   = byId('btnTsAuthorise');
+let btnTsUnauthorise = byId('btnTsUnauthorise');
+let btnTsProcess     = byId('btnTsProcessTimesheet');
+let btnTsUnprocess   = byId('btnTsUnprocessTimesheet'); // ✅ NEW
+let btnTsDelete      = byId('btnTsDeleteTimesheet');
 
-    if (btnTsConvert) {
-      const showConvert = (!isChild && top.entity === 'timesheets' && top.mode === 'view' && !canEdit && canConvert);
-      btnTsConvert.style.display = showConvert ? '' : 'none';
-      btnTsConvert.disabled = !!top._saving;
+btnTsAuthorise   = staleSafeBtn(btnTsAuthorise);
+btnTsUnauthorise = staleSafeBtn(btnTsUnauthorise);
+btnTsProcess     = staleSafeBtn(btnTsProcess);
+btnTsUnprocess   = staleSafeBtn(btnTsUnprocess);       // ✅ NEW
+btnTsDelete      = staleSafeBtn(btnTsDelete);
 
-      btnTsConvert.dataset.ownerToken = top._token;
-      btnTsConvert.onclick = async () => {
-        const fr = (typeof currentFrame === 'function') ? currentFrame() : null;
-        if (!fr || btnTsConvert.dataset.ownerToken !== fr._token) return;
-
-        const mc = window.modalCtx || {};
-        const meta2 = mc.timesheetMeta || {};
-        const det2  = mc.timesheetDetails || {};
-        const tsfin2= det2.tsfin || {};
-
-        const tsId2   = mc.data?.timesheet_id || null;
-        const weekId2 = mc.data?.contract_week_id || null;
-
-        const sheetScope2 = String(meta2.sheetScope || '').toUpperCase();
-        const subMode2    = String(meta2.subMode    || '').toUpperCase();
-        const cwMode2     = String(meta2.cw_submission_mode_snapshot || '').toUpperCase();
-
-        const locked2 = !!(meta2.isPaid || meta2.isInvoiced || tsfin2.locked_by_invoice_id || tsfin2.paid_at_utc);
-        if (locked2) { alert('This timesheet is locked (paid or invoiced).'); return; }
-
-        const ok = window.confirm('Convert to MANUAL timesheet?');
-        if (!ok) return;
-
-     // inside showModal → renderTop → top._updateButtons → btnTsConvert.onclick
-
-try {
-  if (sheetScope2 === 'DAILY' && tsId2 && subMode2 === 'ELECTRONIC') {
-    // ✅ NEW: helper handles expected_timesheet_id + 409 shape + adopt current id + refresh details + refresh summary
-    await switchDailyTimesheetToManual(tsId2);
-  } else if (sheetScope2 === 'WEEKLY' && tsId2 && subMode2 === 'ELECTRONIC') {
-    await switchTimesheetToManual(tsId2);
-  } else if (sheetScope2 === 'WEEKLY' && !tsId2 && weekId2 && cwMode2 === 'ELECTRONIC') {
-    await switchContractWeekToManual(weekId2);
-  } else {
-    throw new Error('This item is not eligible for Convert to Manual.');
-  }
-
-  // Keep existing repaint behaviour (non-fatal)
-  try { await renderAll(); } catch {}
-  try {
-    if (window.modalCtx?.timesheetMeta) {
-      window.modalCtx.timesheetMeta.subMode = 'MANUAL';
-      if (sheetScope2 === 'WEEKLY' && !tsId2) window.modalCtx.timesheetMeta.cw_submission_mode_snapshot = 'MANUAL';
-    }
-    if (window.modalCtx?.data) window.modalCtx.data.submission_mode = 'MANUAL';
-  } catch {}
-
-  try {
-    fr.mode = 'view';
-    fr._suppressDirty = true;
-    await fr.setTab('overview');
-    fr._suppressDirty = false;
-    fr._updateButtons && fr._updateButtons();
-  } catch {}
-
-  window.__toast && window.__toast('Converted to MANUAL.');
-} catch (e) {
-  try {
-    if (typeof tsHandleMoved409Modal === 'function') {
-      const handled = await tsHandleMoved409Modal(e, {
-        tabKey: (currentFrame?.() && currentFrame().currentTabKey) ? currentFrame().currentTabKey : 'overview',
-        label: 'footer-convert-manual',
-        toast: 'This timesheet changed while you were editing; review and try again.'
-      });
-      if (handled) return;
-    }
-  } catch {}
-  alert(e?.message || 'Convert failed');
-}
-
-
-      };
-    }
-
-    // ── Footer buttons next to Save: Restore / Request New / Delete Timesheet (stale-safe) ──
-let btnTsProcess = byId('btnTsProcessTimesheet'); // ✅ NEW
-let btnTsRestore = byId('btnTsRestoreElectronic');
-let btnTsRequest = byId('btnTsRequestNewElectronic');
-let btnTsDelete  = byId('btnTsDeleteTimesheet');
-
-btnTsProcess = staleSafeBtn(btnTsProcess);        // ✅ NEW
-btnTsRestore = staleSafeBtn(btnTsRestore);
-btnTsRequest = staleSafeBtn(btnTsRequest);
-btnTsDelete  = staleSafeBtn(btnTsDelete);
 
 if (!isChild && top.entity === 'timesheets') {
   const mcNow    = window.modalCtx || {};
   const metaNow  = (mcNow && mcNow.timesheetMeta) || {};
   const detNow   = (mcNow && mcNow.timesheetDetails) || {};
+  const tsNowObj = detNow.timesheet || {};
   const tsfinNow = detNow.tsfin || {};
-  const cwNow    = detNow.contract_week || {}; // ✅ NEW (for planned schedule/totals)
+  const cwNow    = detNow.contract_week || {};
+  const policyNow = detNow.policy || {};
 
-  const tsIdNow   = mcNow.data?.timesheet_id || null;
-  const weekIdNow = mcNow.data?.contract_week_id || null;
+  const tsIdNow   = mcNow.data?.timesheet_id || null;          // real TS id (if exists)
+  const weekIdNow = mcNow.data?.contract_week_id || null;      // planned CW id (if any)
 
   const lockedNow = !!(
     metaNow.isPaid ||
@@ -25543,17 +25909,43 @@ if (!isChild && top.entity === 'timesheets') {
     tsfinNow.paid_at_utc
   );
 
-  const hasElecFlagNow =
-    !!metaNow.hasElectronicOriginal ||
-    !!detNow.has_electronic_version ||
-    !!detNow.has_electronic_original;
+  const isAuthorisedNow = !!(
+    tsNowObj.authorised_at_server ||
+    mcNow.data?.authorised_at_server
+  );
 
-  const canRestoreNow = (top.mode === 'edit' && !!tsIdNow && !lockedNow && hasElecFlagNow);
-  const canRequestNow = (top.mode === 'edit' && !!tsIdNow && !!weekIdNow && !lockedNow && hasElecFlagNow);
-  const canDeleteNow =
-    ((top.mode === 'edit' || top.mode === 'view') && !lockedNow && (!!tsIdNow || !!weekIdNow));
+  // requiresAuth: prefer helper if available, else fallback
+  let requiresAuthNow = false;
+  try {
+    if (typeof computeRequiresTimesheetAuthorisation === 'function') {
+      const x = computeRequiresTimesheetAuthorisation(detNow, (mcNow.data || {}));
+      requiresAuthNow = !!(x && typeof x === 'object' ? x.requires : false);
+    } else {
+      const stageRawNow = String(tsfinNow.processing_status || mcNow.data?.processing_status || '').toUpperCase();
+      const requiresHrNow = !!policyNow.requires_hr;
+      const autoprocessHrNow = !!policyNow.autoprocess_hr;
+      requiresAuthNow =
+        (stageRawNow === 'PENDING_AUTH') ||
+        (requiresHrNow && !autoprocessHrNow && stageRawNow === 'READY_FOR_HR');
+    }
+  } catch {
+    requiresAuthNow = false;
+  }
 
-  // ✅ NEW: Process Timesheet (planned weekly MANUAL week → create real timesheet)
+  const canAuthoriseNow =
+    (top.mode === 'view') &&
+    !!tsIdNow &&
+    !lockedNow &&
+    requiresAuthNow &&
+    !isAuthorisedNow;
+
+  const canUnauthoriseNow =
+    (top.mode === 'view') &&
+    !!tsIdNow &&
+    !lockedNow &&
+    isAuthorisedNow;
+
+  // Process Timesheet (planned weekly MANUAL week → create real timesheet)
   const sheetScopeNow = String(metaNow.sheetScope || '').toUpperCase();
   const cwModeNow     = String(
     metaNow.cw_submission_mode_snapshot ||
@@ -25570,270 +25962,324 @@ if (!isChild && top.entity === 'timesheets') {
     !!weekIdNow &&
     (cwModeNow === 'MANUAL');
 
-  if (btnTsProcess) {
-    btnTsProcess.style.display = canProcessNow ? '' : 'none';
-    btnTsProcess.disabled      = !!top._saving;
-
-    btnTsProcess.dataset.ownerToken = top._token;
-    btnTsProcess.onclick = async () => {
-      const fr = (typeof currentFrame === 'function') ? currentFrame() : null;
-      if (!fr || btnTsProcess.dataset.ownerToken !== fr._token) return;
-
-      const mc = window.modalCtx || {};
-      const det = mc.timesheetDetails || {};
-      const tsfin = det.tsfin || {};
-      const cw = det.contract_week || {};
-      const st = mc.timesheetState || {};
-
-      const lockedX = !!(tsfin.locked_by_invoice_id || tsfin.paid_at_utc);
-      if (lockedX) { alert('This timesheet is locked (paid or invoiced).'); return; }
-
-      const weekIdX = mc.data?.contract_week_id || null;
-      if (!weekIdX) { alert('Contract week id missing.'); return; }
-
-      const ok = window.confirm(
-        'Process Timesheet?\n\n' +
-        'This will create a real timesheet from the saved MANUAL planned week.'
-      );
-      if (!ok) return;
-
-         const tryParseSchedule = (src) => {
-        if (!src) return null;
-        if (Array.isArray(src)) return JSON.parse(JSON.stringify(src));
-        if (typeof src === 'string') {
-          try {
-            const p = JSON.parse(src);
-            if (Array.isArray(p)) return p;
-          } catch {}
-        }
-        if (typeof src === 'object') return JSON.parse(JSON.stringify(src));
-        return null;
-      };
-
-        const scheduleX =
-        tryParseSchedule(cw && cw.planned_schedule_json) ||
-        null;
-
-      if (!Array.isArray(scheduleX) || !scheduleX.length) {
-        alert('No planned schedule is saved for this week. Click Edit, enter the schedule, then Save before processing.');
-        return;
-      }
-
-      // pull draft extras from contract_weeks.totals_json.additional_units_week (Option A storage)
-      let auWeek = null;
-      try {
-        auWeek = (cw && cw.totals_json && typeof cw.totals_json === 'object')
-          ? cw.totals_json.additional_units_week
-          : null;
-
-        if (typeof auWeek === 'string') {
-          try { auWeek = JSON.parse(auWeek); } catch { auWeek = null; }
-        }
-
-        if (!auWeek || typeof auWeek !== 'object') auWeek = {};
-      } catch {
-        auWeek = {};
-      }
-
-      const payload = {
-        actual_schedule_json: scheduleX,
-        additional_units_week: auWeek
-      };
-
-
-
-      try {
-        const result = await manualUpsertContractWeek(weekIdX, payload);
-        const newTsId = result?.timesheet_id || null;
-
-        if (newTsId) {
-          window.__toast && window.__toast('Timesheet processed.');
-        } else {
-          alert('Processed, but no timesheet_id was returned.');
-        }
-
-        try { byId('btnCloseModal').click(); } catch {}
-        try { await renderAll(); } catch {}
-      } catch (e) {
-        alert(e?.message || 'Process Timesheet failed');
-      }
-    };
-  }
-
-  // Restore
-  if (btnTsRestore) {
-    btnTsRestore.style.display = canRestoreNow ? '' : 'none';
-    btnTsRestore.disabled      = !!top._saving;
-
-    btnTsRestore.dataset.ownerToken = top._token;
-    btnTsRestore.onclick = async () => {
-      const fr = (typeof currentFrame === 'function') ? currentFrame() : null;
-      if (!fr || btnTsRestore.dataset.ownerToken !== fr._token) return;
-
-      const mc = window.modalCtx || {};
-      const det = mc.timesheetDetails || {};
-      const tsfin = det.tsfin || {};
-      const tsIdX = mc.data?.timesheet_id || null;
-
-      const lockedX = !!(tsfin.locked_by_invoice_id || tsfin.paid_at_utc);
-      if (lockedX) { alert('This timesheet is locked (paid or invoiced).'); return; }
-      if (!tsIdX)  { alert('Timesheet id missing.'); return; }
-
-      const ok = window.confirm(
-        'Restore the original signed electronic timesheet?\n\n' +
-        'This discards all current manual edits.'
-      );
-      if (!ok) return;
-
-      try {
-        await revertTimesheetToElectronic(tsIdX);
-
-        try {
-          const fresh = await fetchTimesheetDetails(tsIdX);
-          if (window.modalCtx) window.modalCtx.timesheetDetails = fresh;
-        } catch {}
-
-        fr.isDirty = false;
-        fr._snapshot = null;
-        setFrameMode(fr, 'view');
-        renderTop();
-
-        try { await renderAll(); } catch {}
-  } catch (e) {
-  try {
-    if (typeof tsHandleMoved409Modal === 'function') {
-      const handled = await tsHandleMoved409Modal(e, {
-        tabKey: (currentFrame?.() && currentFrame().currentTabKey) ? currentFrame().currentTabKey : 'overview',
-        label: 'footer-restore-electronic',
-        toast: 'This timesheet changed while you were editing; review and try again.'
-      });
-      if (handled) return;
-    }
-  } catch {}
-  alert(e?.message || 'Restore failed');
-}
-
-    };
-  }
-
-  // Request new electronic
-  if (btnTsRequest) {
-    btnTsRequest.style.display = canRequestNow ? '' : 'none';
-    btnTsRequest.disabled      = !!top._saving;
-
-    btnTsRequest.dataset.ownerToken = top._token;
-    btnTsRequest.onclick = async () => {
-      const fr = (typeof currentFrame === 'function') ? currentFrame() : null;
-      if (!fr || btnTsRequest.dataset.ownerToken !== fr._token) return;
-
-      const mc = window.modalCtx || {};
-      const det = mc.timesheetDetails || {};
-      const tsfin = det.tsfin || {};
-      const tsIdX = mc.data?.timesheet_id || null;
-      const weekIdX = mc.data?.contract_week_id || null;
-
-      const lockedX = !!(tsfin.locked_by_invoice_id || tsfin.paid_at_utc);
-      if (lockedX) { alert('This timesheet is locked (paid or invoiced).'); return; }
-      if (!tsIdX || !weekIdX) { alert('Timesheet/week id missing.'); return; }
-
-      const ok = window.confirm(
-        'REQUEST A NEW ELECTRONIC TIMESHEET?\n\n' +
-        'This will permanently delete the electronic timesheet on file and reopen the week for a brand new submission.\n' +
-        'Only do this if you definitely do not need the original signed electronic timesheet ever again.\n\n' +
-        'Continue?'
-      );
-      if (!ok) return;
-
-      try {
-        await deleteManualTimesheetAndReopenWeek(tsIdX, weekIdX);
-        try { byId('btnCloseModal').click(); } catch {}
-        try { await renderAll(); } catch {}
-    } catch (e) {
-  try {
-    if (typeof tsHandleMoved409Modal === 'function') {
-      const handled = await tsHandleMoved409Modal(e, {
-        tabKey: (currentFrame?.() && currentFrame().currentTabKey) ? currentFrame().currentTabKey : 'overview',
-        label: 'footer-request-new-electronic',
-        toast: 'This timesheet changed while you were editing; review and try again.'
-      });
-      if (handled) return;
-    }
-  } catch {}
-  alert(e?.message || 'Request new electronic failed');
-}
-
-    };
-  }
-
   // Delete (real OR planned)
-  if (btnTsDelete) {
-    btnTsDelete.style.display = canDeleteNow ? '' : 'none';
-    btnTsDelete.disabled      = !!top._saving;
+  const canDeleteNow =
+    ((top.mode === 'edit' || top.mode === 'view') && !lockedNow && (!!tsIdNow || !!weekIdNow));
 
-    btnTsDelete.dataset.ownerToken = top._token;
-    btnTsDelete.onclick = async () => {
+  // ✅ Unprocess eligibility:
+  // - real TS exists
+  // - WEEKLY + MANUAL
+  // - has contract week
+  // - not locked
+  // - NOT authorised (user must unauthorise first)
+  const subModeNow = String(metaNow.subMode || '').toUpperCase();
+  const isWeeklyNow2 = (String(metaNow.sheetScope || '').toUpperCase() === 'WEEKLY');
+  const hasCwNow = !!(detNow.contract_week_id || cwNow.id || weekIdNow);
+
+  const canUnprocessNow =
+    (top.mode === 'view') &&
+    !!tsIdNow &&
+    isWeeklyNow2 &&
+    (subModeNow === 'MANUAL') &&
+    hasCwNow &&
+    !lockedNow &&
+    !isAuthorisedNow;
+
+  const refreshFooter = async () => {
+    const fn = ensureTsRefreshAndRepaintOverview();
+    await fn();
+  };
+
+  if (btnTsUnprocess) {
+    btnTsUnprocess.style.display = canUnprocessNow ? '' : 'none';
+    btnTsUnprocess.disabled      = !!top._saving;
+
+    btnTsUnprocess.dataset.ownerToken = top._token;
+    btnTsUnprocess.onclick = async () => {
       const fr = (typeof currentFrame === 'function') ? currentFrame() : null;
-      if (!fr || btnTsDelete.dataset.ownerToken !== fr._token) return;
+      if (!fr || btnTsUnprocess.dataset.ownerToken !== fr._token) return;
 
       const mc = window.modalCtx || {};
       const det = mc.timesheetDetails || {};
-      const tsfin = det.tsfin || {};
+
       const tsIdX = mc.data?.timesheet_id || null;
-      const weekIdX = mc.data?.contract_week_id || null;
+      const cwIdX = det.contract_week_id || mc.data?.contract_week_id || null;
 
-      const lockedX = !!(tsfin.locked_by_invoice_id || tsfin.paid_at_utc);
-      if (lockedX) { alert('This timesheet is locked (paid or invoiced).'); return; }
-
-      const isPlannedOnly = (!tsIdX && !!weekIdX);
+      if (!tsIdX) { alert('Timesheet id missing.'); return; }
+      if (!cwIdX) { alert('Contract week id missing.'); return; }
 
       const ok = window.confirm(
-        isPlannedOnly
-          ? (
-              'Delete this timesheet?\n\n' +
-              'This is a planned week (no timesheet has been created yet).\n' +
-              'Deleting will remove the planned contract week.\n\n' +
-              'This action cannot be undone.'
-            )
-          : (
-              'Permanently delete this timesheet?\n\n' +
-              'This will remove all versions and financial snapshots for this timesheet_id.\n' +
-              'This action cannot be undone.'
-            )
+        'Unprocess Timesheet?\n\n' +
+        'This will delete the processed MANUAL timesheet and revert back to the planned week.'
       );
       if (!ok) return;
 
       try {
-        if (isPlannedOnly) {
-          if (!weekIdX) throw new Error('Contract week id missing.');
-          await deletePlannedContractWeek(weekIdX);
-        } else {
-          if (!tsIdX) throw new Error('Timesheet id missing.');
-          await deleteTimesheetPermanent(tsIdX);
-        }
+        // This is your existing “delete-manual-reopen” operation.
+        await deleteManualTimesheetAndReopenWeek(tsIdX, cwIdX);
 
-        // ✅ success acknowledgement first (user clicks OK)
-        alert('This timesheet has been deleted.');
+        // ✅ flip modal context into planned-week shape BEFORE refresh
+        try {
+          mc.data = mc.data || {};
+          mc.data.timesheet_id = null;
+          mc.data.contract_week_id = cwIdX; // keep planned-week identity for canonical refresh
+          mc.data.id = cwIdX; // stable-ish id for UI
+        } catch {}
+        try { fr.hasId = false; } catch {}
 
-        // ✅ then close + refresh
-        try { byId('btnCloseModal').click(); } catch {}
-        try { await renderAll(); } catch {}
-   } catch (e) {
-  try {
-    if (typeof tsHandleMoved409Modal === 'function') {
-      const handled = await tsHandleMoved409Modal(e, {
-        tabKey: (currentFrame?.() && currentFrame().currentTabKey) ? currentFrame().currentTabKey : 'overview',
-        label: 'footer-delete-timesheet',
-        toast: 'This timesheet changed while you were editing; review and try again.'
-      });
-      if (handled) return;
-    }
-  } catch {}
-  alert(e?.message || 'Delete failed');
-}
-
+        window.__toast && window.__toast('Timesheet unprocessed.');
+        await refreshFooter();
+      } catch (e) {
+        try {
+          if (typeof tsHandleMoved409Modal === 'function') {
+            const handled = await tsHandleMoved409Modal(e, {
+              tabKey: 'overview',
+              label: 'footer-unprocess-timesheet',
+              toast: 'This timesheet changed while you were editing; review and try again.'
+            });
+            if (handled) return;
+          }
+        } catch {}
+        alert(e?.message || 'Failed to unprocess timesheet.');
+      }
     };
   }
+
+
+      // ── Authorise ──
+      if (btnTsAuthorise) {
+        btnTsAuthorise.style.display = canAuthoriseNow ? '' : 'none';
+        btnTsAuthorise.disabled      = !!top._saving;
+
+        btnTsAuthorise.dataset.ownerToken = top._token;
+        btnTsAuthorise.onclick = async () => {
+          const fr = (typeof currentFrame === 'function') ? currentFrame() : null;
+          if (!fr || btnTsAuthorise.dataset.ownerToken !== fr._token) return;
+
+          const id = (window.modalCtx?.data?.timesheet_id || null);
+          if (!id) { alert('Timesheet id missing.'); return; }
+
+          try {
+            await authoriseTimesheet(id);
+            window.__toast && window.__toast('Timesheet authorised');
+            await refreshFooter();
+          } catch (e) {
+            try {
+              if (typeof tsHandleMoved409Modal === 'function') {
+                const handled = await tsHandleMoved409Modal(e, {
+                  tabKey: 'overview',
+                  label: 'footer-authorise',
+                  toast: 'This timesheet changed while you were editing; review and try again.'
+                });
+                if (handled) return;
+              }
+            } catch {}
+            alert(e?.message || 'Failed to authorise timesheet.');
+          }
+        };
+      }
+
+      // ── Unauthorise ──
+      if (btnTsUnauthorise) {
+        btnTsUnauthorise.style.display = canUnauthoriseNow ? '' : 'none';
+        btnTsUnauthorise.disabled      = !!top._saving;
+
+        btnTsUnauthorise.dataset.ownerToken = top._token;
+        btnTsUnauthorise.onclick = async () => {
+          const fr = (typeof currentFrame === 'function') ? currentFrame() : null;
+          if (!fr || btnTsUnauthorise.dataset.ownerToken !== fr._token) return;
+
+          const id = (window.modalCtx?.data?.timesheet_id || null);
+          if (!id) { alert('Timesheet id missing.'); return; }
+
+          const ok = window.confirm('Unauthorise this timesheet? It will return to a pending state.');
+          if (!ok) return;
+
+          try {
+            await unauthoriseTimesheet(id);
+            window.__toast && window.__toast('Timesheet unauthorised');
+            await refreshFooter();
+          } catch (e) {
+            try {
+              if (typeof tsHandleMoved409Modal === 'function') {
+                const handled = await tsHandleMoved409Modal(e, {
+                  tabKey: 'overview',
+                  label: 'footer-unauthorise',
+                  toast: 'This timesheet changed while you were editing; review and try again.'
+                });
+                if (handled) return;
+              }
+            } catch {}
+            alert(e?.message || 'Failed to unauthorise timesheet.');
+          }
+        };
+      }
+
+   // ── Process Timesheet ──
+if (btnTsProcess) {
+  btnTsProcess.style.display = canProcessNow ? '' : 'none';
+  btnTsProcess.disabled      = !!top._saving;
+
+  btnTsProcess.dataset.ownerToken = top._token;
+  btnTsProcess.onclick = async () => {
+    const fr = (typeof currentFrame === 'function') ? currentFrame() : null;
+    if (!fr || btnTsProcess.dataset.ownerToken !== fr._token) return;
+
+    const mc = window.modalCtx || {};
+    const det = mc.timesheetDetails || {};
+    const tsfin = det.tsfin || {};
+    const cw = det.contract_week || {};
+
+    const lockedX = !!(tsfin.locked_by_invoice_id || tsfin.paid_at_utc);
+    if (lockedX) { alert('This timesheet is locked (paid or invoiced).'); return; }
+
+    const weekIdX = mc.data?.contract_week_id || null;
+    if (!weekIdX) { alert('Contract week id missing.'); return; }
+
+    const ok = window.confirm(
+      'Process Timesheet?\n\n' +
+      'This will create a real timesheet from the saved MANUAL planned week.'
+    );
+    if (!ok) return;
+
+    const tryParseSchedule = (src) => {
+      if (!src) return null;
+      if (Array.isArray(src)) return JSON.parse(JSON.stringify(src));
+      if (typeof src === 'string') {
+        try { const p = JSON.parse(src); if (Array.isArray(p)) return p; } catch {}
+      }
+      if (typeof src === 'object') return JSON.parse(JSON.stringify(src));
+      return null;
+    };
+
+    const scheduleX = tryParseSchedule(cw && cw.planned_schedule_json) || null;
+
+    if (!Array.isArray(scheduleX) || !scheduleX.length) {
+      alert('No planned schedule is saved for this week. Click Edit, enter the schedule, then Save before processing.');
+      return;
+    }
+
+    // pull draft extras from contract_weeks.totals_json.additional_units_week
+    let auWeek = null;
+    try {
+      auWeek = (cw && cw.totals_json && typeof cw.totals_json === 'object')
+        ? cw.totals_json.additional_units_week
+        : null;
+
+      if (typeof auWeek === 'string') {
+        try { auWeek = JSON.parse(auWeek); } catch { auWeek = null; }
+      }
+
+      if (!auWeek || typeof auWeek !== 'object') auWeek = {};
+    } catch {
+      auWeek = {};
+    }
+
+    const payload = {
+      actual_schedule_json: scheduleX,
+      additional_units_week: auWeek
+    };
+
+    try {
+      const result = await manualUpsertContractWeek(weekIdX, payload);
+      const newTsId = result?.timesheet_id || null;
+
+    if (newTsId) {
+  try {
+    if (window.modalCtx && window.modalCtx.data) {
+      window.modalCtx.data.timesheet_id = newTsId;
+      window.modalCtx.data.id = newTsId;
+    }
+  } catch {}
+  window.__toast && window.__toast('Timesheet processed.');
+} else {
+  alert('Processed, but no timesheet_id was returned.');
 }
+
+// ✅ Keep modal open and ALWAYS do canonical refresh
+await refreshFooter();
+
+    } catch (e) {
+      alert(e?.message || 'Process Timesheet failed');
+    }
+  };
+}
+
+
+      // ── Delete Timesheet ──
+      if (btnTsDelete) {
+        btnTsDelete.style.display = canDeleteNow ? '' : 'none';
+        btnTsDelete.disabled      = !!top._saving;
+
+        btnTsDelete.dataset.ownerToken = top._token;
+        btnTsDelete.onclick = async () => {
+          const fr = (typeof currentFrame === 'function') ? currentFrame() : null;
+          if (!fr || btnTsDelete.dataset.ownerToken !== fr._token) return;
+
+          const mc = window.modalCtx || {};
+          const det = mc.timesheetDetails || {};
+          const tsfin = det.tsfin || {};
+          const tsIdX = mc.data?.timesheet_id || null;
+          const weekIdX = mc.data?.contract_week_id || null;
+
+          const lockedX = !!(tsfin.locked_by_invoice_id || tsfin.paid_at_utc);
+          if (lockedX) { alert('This timesheet is locked (paid or invoiced).'); return; }
+
+          const isPlannedOnly = (!tsIdX && !!weekIdX);
+
+          const ok = window.confirm(
+            isPlannedOnly
+              ? (
+                  'Delete this timesheet?\n\n' +
+                  'This is a planned week (no timesheet has been created yet).\n' +
+                  'Deleting will remove the planned contract week.\n\n' +
+                  'This action cannot be undone.'
+                )
+              : (
+                  'Permanently delete this timesheet?\n\n' +
+                  'This will remove all versions and financial snapshots for this timesheet_id.\n' +
+                  'This action cannot be undone.'
+                )
+          );
+          if (!ok) return;
+
+          try {
+            if (isPlannedOnly) {
+              if (!weekIdX) throw new Error('Contract week id missing.');
+              await deletePlannedContractWeek(weekIdX);
+            } else {
+              if (!tsIdX) throw new Error('Timesheet id missing.');
+              await deleteTimesheetPermanent(tsIdX);
+            }
+
+            alert('This timesheet has been deleted.');
+            try { byId('btnCloseModal').click(); } catch {}
+            try { await renderAll(); } catch {}
+          } catch (e) {
+            try {
+              if (typeof tsHandleMoved409Modal === 'function') {
+                const handled = await tsHandleMoved409Modal(e, {
+                  tabKey: (currentFrame?.() && currentFrame().currentTabKey) ? currentFrame().currentTabKey : 'overview',
+                  label: 'footer-delete-timesheet',
+                  toast: 'This timesheet changed while you were editing; review and try again.'
+                });
+                if (handled) return;
+              }
+            } catch {}
+            alert(e?.message || 'Delete failed');
+          }
+        };
+      }
+
+  } else {
+  // not a top-level timesheet → hide footer actions
+  if (btnTsAuthorise)   { btnTsAuthorise.style.display   = 'none'; btnTsAuthorise.disabled   = true; }
+  if (btnTsUnauthorise) { btnTsUnauthorise.style.display = 'none'; btnTsUnauthorise.disabled = true; }
+  if (btnTsProcess)     { btnTsProcess.style.display     = 'none'; btnTsProcess.disabled     = true; }
+  if (btnTsUnprocess)   { btnTsUnprocess.style.display   = 'none'; btnTsUnprocess.disabled   = true; } // ✅ NEW
+  if (btnTsDelete)      { btnTsDelete.style.display      = 'none'; btnTsDelete.disabled      = true; }
+}
+
 
 
     // Related button (unchanged)
@@ -25895,23 +26341,19 @@ if (!isChild && top.entity === 'timesheets') {
       btnSave.style.display = '';
 
       let gateOK = true;
-      let elig   = null;
 
       if (top.entity === 'contracts') {
         try {
           gateOK = (typeof computeContractSaveEligibility === 'function') ? !!computeContractSaveEligibility() : true;
-          elig   = (typeof window !== 'undefined') ? (window.__contractEligibility || null) : null;
         } catch { gateOK = true; }
       }
 
-    btnSave.disabled = (top.entity === 'contracts')
-  ? (top._saving || ((top.kind !== 'contract-clone-extend') && !top.isDirty) || !gateOK)
-  : (
-      top._saving ||
-      // ✅ Evidence viewer: Save only enabled once dirty (evidence type changed)
-      (top.kind === 'timesheet-evidence-viewer' && !top.isDirty)
-    );
-
+      btnSave.disabled = (top.entity === 'contracts')
+        ? (top._saving || ((top.kind !== 'contract-clone-extend') && !top.isDirty) || !gateOK)
+        : (
+            top._saving ||
+            (top.kind === 'timesheet-evidence-viewer' && !top.isDirty)
+          );
     }
 
     // 🔹 Top-level Edit Contract → wire global Delete button
@@ -37710,296 +38152,6 @@ function renderTimesheetLinesTab(ctx) {
     const isEditMode = (frameMode === 'edit' || frameMode === 'create');
     const canEditSchedule = isEditMode && !locked && subMode === 'MANUAL';
 
-    // Install helper (function-only change: persistence + buttons + paid refresh)
-    try {
-      if (!window.__tsWeeklyLinesHelper || window.__tsWeeklyLinesHelper.__v !== 1) {
-        window.__tsWeeklyLinesHelper = {
-          __v: 1,
-          _hhmm(raw) {
-            let s = String(raw || '').trim();
-            if (!s) return '';
-            if (/^\d{1,2}:\d{2}$/.test(s)) {
-              const [h, m] = s.split(':');
-              const hh = String(Number(h) || 0).padStart(2, '0');
-              const mm = String(Number(m) || 0).padStart(2, '0');
-              return `${hh}:${mm}`;
-            }
-            s = s.replace(':', '');
-            if (!/^\d{1,4}$/.test(s)) return '';
-            if (s.length <= 2) {
-              const h = Number(s);
-              if (!Number.isFinite(h)) return '';
-              return `${String(h).padStart(2, '0')}:00`;
-            }
-            const mm = s.slice(-2);
-            const h  = s.slice(0, -2);
-            const hh = String(Number(h) || 0).padStart(2, '0');
-            const mm2 = String(Number(mm) || 0).padStart(2, '0');
-            return `${hh}:${mm2}`;
-          },
-          _parse(s) {
-            const m = String(s || '').trim().match(/^(\d{1,2}):(\d{2})$/);
-            if (!m) return null;
-            const hh = Number(m[1]), mm = Number(m[2]);
-            if (!Number.isFinite(hh) || !Number.isFinite(mm) || hh < 0 || hh > 23 || mm < 0 || mm > 59) return null;
-            return hh * 60 + mm;
-          },
-          _diff(a, b) {
-            const am = this._parse(a);
-            const bm = this._parse(b);
-            if (am == null || bm == null) return null;
-            let d = bm - am;
-            if (d < 0) d += 1440;
-            return d;
-          },
-          _getState() {
-            const mc = window.modalCtx || {};
-            const st = mc.timesheetState || null;
-            const fr = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
-            if (!st) return { st: null, fr: null };
-
-            st.weeklyLinesByDate = (st.weeklyLinesByDate && typeof st.weeklyLinesByDate === 'object') ? st.weeklyLinesByDate : {};
-            st.scheduleErrorsByDate = (st.scheduleErrorsByDate && typeof st.scheduleErrorsByDate === 'object') ? st.scheduleErrorsByDate : {};
-            st.extraShiftCount = Number.isFinite(Number(st.extraShiftCount)) ? Math.max(0, Number(st.extraShiftCount)) : 0;
-            st.scheduleHasErrors = !!st.scheduleHasErrors;
-
-            return { st, fr };
-          },
-          _ensureLine(st, date, idx) {
-            const d = String(date || '');
-            const i = Number(idx || 0);
-            if (!d || !Number.isFinite(i) || i < 0) return null;
-            st.weeklyLinesByDate[d] = Array.isArray(st.weeklyLinesByDate[d]) ? st.weeklyLinesByDate[d] : [];
-            while (st.weeklyLinesByDate[d].length <= i) {
-              st.weeklyLinesByDate[d].push({ ref:'', start:'', end:'', break_start:'', break_end:'' });
-            }
-            st.weeklyLinesByDate[d][i] = st.weeklyLinesByDate[d][i] || { ref:'', start:'', end:'', break_start:'', break_end:'' };
-            return st.weeklyLinesByDate[d][i];
-          },
-          _recalcPaidForDate(st, date) {
-            const d = String(date || '');
-            if (!d) return;
-
-            const lines = Array.isArray(st.weeklyLinesByDate[d]) ? st.weeklyLinesByDate[d] : [];
-            let curShiftIdx = null;
-            let curShiftStart = null;
-            let curShiftEndAdj = null;
-            let curBreakMins = 0;
-
-            const setPaid = (idx, val) => {
-              try {
-                const el = document.querySelector(`span.sched-paid-hours[data-date="${CSS.escape(d)}"][data-line-idx="${idx}"]`);
-                if (el) el.textContent = (val == null ? '' : String(val));
-              } catch {}
-            };
-
-            const fin = () => {
-              if (curShiftIdx == null) return;
-              if (curShiftStart == null || curShiftEndAdj == null) {
-                setPaid(curShiftIdx, '');
-                return;
-              }
-              const shiftMins = Math.max(0, curShiftEndAdj - curShiftStart);
-              const paidMins  = Math.max(0, shiftMins - (Number(curBreakMins) || 0));
-              setPaid(curShiftIdx, (Math.round((paidMins / 60) * 100) / 100).toFixed(2));
-            };
-
-            for (let i = 0; i < lines.length; i++) {
-              const ln = lines[i] || {};
-              const hasShift = !!(String(ln.start||'').trim() || String(ln.end||'').trim());
-              const hasBreak = !!(String(ln.break_start||'').trim() || String(ln.break_end||'').trim());
-
-              if (hasShift) {
-                fin();
-
-                const s0 = this._parse(ln.start);
-                const e0 = this._parse(ln.end);
-
-                curShiftIdx = i;
-                curBreakMins = 0;
-
-                if (s0 != null && e0 != null && s0 !== e0) {
-                  curShiftStart = s0;
-                  curShiftEndAdj = (e0 > s0) ? e0 : (e0 + 1440);
-                } else {
-                  curShiftStart = null;
-                  curShiftEndAdj = null;
-                }
-
-                if (hasBreak) {
-                  const x = this._diff(ln.break_start, ln.break_end);
-                  if (Number.isFinite(x) && x > 0) curBreakMins += x;
-                }
-              } else if (hasBreak && curShiftIdx != null) {
-                const x = this._diff(ln.break_start, ln.break_end);
-                if (Number.isFinite(x) && x > 0) curBreakMins += x;
-              }
-            }
-
-            fin();
-
-            // clear paid text for non-shift lines
-            for (let i = 0; i < lines.length; i++) {
-              const ln = lines[i] || {};
-              const hasShift = !!(String(ln.start||'').trim() || String(ln.end||'').trim());
-              if (!hasShift) setPaid(i, '');
-            }
-          },
-          _markDirty() {
-            try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
-          },
-          _rerenderLines() {
-            try {
-              const fr = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
-              if (fr && fr.entity === 'timesheets') {
-                fr._suppressDirty = true;
-                fr.setTab('lines');
-                fr._suppressDirty = false;
-                fr._updateButtons && fr._updateButtons();
-              }
-            } catch {}
-          },
-          onInput(el) {
-            try {
-              const { st } = this._getState();
-              if (!st || !el) return;
-
-              const date  = String(el.dataset.date || '');
-              const idx   = Number(el.dataset.lineIdx || '0');
-              const field = String(el.dataset.weeklyField || '');
-
-              if (!date || !Number.isFinite(idx) || idx < 0 || !field) return;
-
-              const ln = this._ensureLine(st, date, idx);
-              if (!ln) return;
-
-              ln[field] = String(el.value || '');
-
-              // clear stored errors for this date (so old red disappears as user edits)
-              if (st.scheduleErrorsByDate && st.scheduleErrorsByDate[date]) {
-                delete st.scheduleErrorsByDate[date];
-                st.scheduleHasErrors = Object.keys(st.scheduleErrorsByDate).length > 0;
-                try {
-                  document.querySelectorAll(`input[data-date="${CSS.escape(date)}"]`).forEach(inp => inp.classList.remove('is-invalid'));
-                } catch {}
-                try {
-                  const b = document.getElementById('tsWeeklyErrorsBanner');
-                  if (b && !st.scheduleHasErrors) b.style.display = 'none';
-                } catch {}
-              }
-
-              this._recalcPaidForDate(st, date);
-              this._markDirty();
-            } catch {}
-          },
-          onBlur(el) {
-            try {
-              if (!el) return;
-              const field = String(el.dataset.weeklyField || '');
-              if (field === 'start' || field === 'end' || field === 'break_start' || field === 'break_end') {
-                const norm = this._hhmm(el.value);
-                el.value = norm;
-              }
-              this.onInput(el);
-            } catch {}
-          },
-          addLine() {
-            const { st } = this._getState();
-            if (!st) return;
-
-            const dates = Object.keys(st.weeklyLinesByDate || {});
-            if (!dates.length) return;
-
-            const cur = Number(st.extraShiftCount || 0);
-            st.extraShiftCount = (Number.isFinite(cur) ? cur : 0) + 1;
-
-            const wantLen = 1 + st.extraShiftCount;
-            for (const d of dates) {
-              st.weeklyLinesByDate[d] = Array.isArray(st.weeklyLinesByDate[d]) ? st.weeklyLinesByDate[d] : [];
-              while (st.weeklyLinesByDate[d].length < wantLen) {
-                st.weeklyLinesByDate[d].push({ ref:'', start:'', end:'', break_start:'', break_end:'' });
-              }
-              if (st.weeklyLinesByDate[d].length > wantLen) st.weeklyLinesByDate[d].length = wantLen;
-            }
-
-            this._markDirty();
-            this._rerenderLines();
-          },
-          removeLine() {
-            const { st } = this._getState();
-            if (!st) return;
-
-            const cur = Number(st.extraShiftCount || 0);
-            if (!Number.isFinite(cur) || cur <= 0) return;
-
-            const wantLen = 1 + (cur - 1);
-
-            // confirm if any last line contains data
-            let hasData = false;
-            for (const d of Object.keys(st.weeklyLinesByDate || {})) {
-              const arr = Array.isArray(st.weeklyLinesByDate[d]) ? st.weeklyLinesByDate[d] : [];
-              const last = arr[arr.length - 1] || null;
-              if (last) {
-                if (
-                  String(last.ref || '').trim() ||
-                  String(last.start || '').trim() ||
-                  String(last.end || '').trim() ||
-                  String(last.break_start || '').trim() ||
-                  String(last.break_end || '').trim()
-                ) {
-                  hasData = true;
-                  break;
-                }
-              }
-            }
-            if (hasData) {
-              const ok = window.confirm('The last shift line contains data on at least one day. Remove it anyway?');
-              if (!ok) return;
-            }
-
-            st.extraShiftCount = cur - 1;
-
-            for (const d of Object.keys(st.weeklyLinesByDate || {})) {
-              const arr = Array.isArray(st.weeklyLinesByDate[d]) ? st.weeklyLinesByDate[d] : [];
-              if (arr.length > wantLen) arr.length = wantLen;
-              while (arr.length < wantLen) arr.push({ ref:'', start:'', end:'', break_start:'', break_end:'' });
-              st.weeklyLinesByDate[d] = arr;
-            }
-
-            this._markDirty();
-            this._rerenderLines();
-          },
-          resetAll() {
-            const { st } = this._getState();
-            if (!st) return;
-
-            const ok = window.confirm('Reset the weekly schedule grid back to a blank week?');
-            if (!ok) return;
-
-            st.extraShiftCount = 0;
-            for (const d of Object.keys(st.weeklyLinesByDate || {})) {
-              st.weeklyLinesByDate[d] = [{ ref:'', start:'', end:'', break_start:'', break_end:'' }];
-            }
-
-            // clear errors
-            st.scheduleErrorsByDate = {};
-            st.scheduleHasErrors = false;
-
-            this._markDirty();
-            this._rerenderLines();
-          }
-        };
-      }
-    } catch {}
-
-    const badgeHtml = (!tsId)
-      ? (subMode === 'MANUAL'
-          ? '<span class="pill pill-bad">PLANNED (manual)</span>'
-          : '<span class="pill pill-info">PLANNED (electronic, read-only)</span>')
-      : (subMode === 'MANUAL'
-          ? '<span class="pill pill-ok">CONFIRMED HOURS (manual)</span>'
-          : '<span class="pill pill-elec">CONFIRMED HOURS (electronic, read-only)</span>');
-
     // Build full 7-day week list (always show all days)
     const dowShort = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
     let weekDays = [];
@@ -38019,10 +38171,13 @@ function renderTimesheetLinesTab(ctx) {
       }
     }
     if (!weekDays.length) {
+      // still render something rather than crash; schedule editor expects 7 days when week ending exists
       weekDays = [{ ymd: '', dow: '' }];
     }
 
-    // Seed source schedule (for view-mode display + initial state seeding)
+    // Persist weekDays on state so the window helper can always build/validate
+    state.__weekDaysForSchedule = weekDays;
+
     const tryParse = (src) => {
       if (!src) return null;
       if (Array.isArray(src) || typeof src === 'object') return JSON.parse(JSON.stringify(src));
@@ -38050,8 +38205,7 @@ function renderTimesheetLinesTab(ctx) {
     }
     if (!Array.isArray(seedSchedule)) seedSchedule = [];
 
-    const normDate = (seg) =>
-      String(seg?.date || seg?.date_ymd || seg?.work_date || '').trim();
+    const normDate = (seg) => String(seg?.date || seg?.date_ymd || seg?.work_date || '').trim();
 
     const asLondonHHMM = (iso) => {
       try {
@@ -38079,7 +38233,7 @@ function renderTimesheetLinesTab(ctx) {
       return String(v || '').trim();
     };
 
-    // ✅ de-dupe primary break if break_start/break_end also appears in breaks[]
+    // de-dupe primary break if break_start/break_end also appears in breaks[]
     const segBreaks = (seg) => {
       const out = [];
       const seen = new Set();
@@ -38095,15 +38249,8 @@ function renderTimesheetLinesTab(ctx) {
       };
 
       const bArr = Array.isArray(seg?.breaks) ? seg.breaks : [];
-
-      const pStart = String(seg?.break_start || '').trim();
-      const pEnd   = String(seg?.break_end   || '').trim();
-
-      add(pStart, pEnd);
-      bArr.forEach(b => {
-        add(b?.start, b?.end);
-      });
-
+      add(seg?.break_start, seg?.break_end);
+      bArr.forEach(b => add(b?.start, b?.end));
       return out;
     };
 
@@ -38116,7 +38263,18 @@ function renderTimesheetLinesTab(ctx) {
       return hh * 60 + mm;
     };
 
+    const parseBreakMins = (v) => {
+      const s = String(v == null ? '' : v).trim();
+      if (!s) return 0;
+      const m = s.match(/^(\d{1,4})(?:\s*m)?$/i);
+      if (!m) return NaN;
+      const n = Number(m[1]);
+      if (!Number.isFinite(n) || n < 0) return NaN;
+      return Math.floor(n);
+    };
+
     // Build default linesByDate from seedSchedule (shift lines + break-only lines)
+    // supports schedule seg.break_minutes -> seeds break_mins
     const buildLinesFromSchedule = () => {
       const byDate = {};
       for (const seg of seedSchedule) {
@@ -38146,12 +38304,20 @@ function renderTimesheetLinesTab(ctx) {
           const breaks = segBreaks(seg);
           const b0 = breaks[0] || { start: '', end: '' };
 
+          const segBreakMinutes =
+            (seg && (seg.break_minutes != null || seg.break_mins != null))
+              ? (Number(seg.break_minutes ?? seg.break_mins) || 0)
+              : 0;
+
+          const useBreakMins = (!breaks.length && segBreakMinutes > 0);
+
           lines.push({
             ref: segRef(seg),
             start: normHHMM(seg, 'start', 'start_utc'),
             end:   normHHMM(seg, 'end',   'end_utc'),
-            break_start: String(b0.start || '').trim(),
-            break_end:   String(b0.end   || '').trim()
+            break_start: useBreakMins ? '' : String(b0.start || '').trim(),
+            break_end:   useBreakMins ? '' : String(b0.end   || '').trim(),
+            break_mins:  useBreakMins ? String(Math.round(segBreakMinutes)) : ''
           });
 
           for (let i = 1; i < breaks.length; i++) {
@@ -38161,13 +38327,14 @@ function renderTimesheetLinesTab(ctx) {
               start: '',
               end: '',
               break_start: String(b.start || '').trim(),
-              break_end:   String(b.end   || '').trim()
+              break_end:   String(b.end   || '').trim(),
+              break_mins: ''
             });
           }
         }
 
         if (!lines.length) {
-          lines.push({ ref:'', start:'', end:'', break_start:'', break_end:'' });
+          lines.push({ ref:'', start:'', end:'', break_start:'', break_end:'', break_mins:'' });
         }
 
         linesByDate[ymd] = lines;
@@ -38176,7 +38343,6 @@ function renderTimesheetLinesTab(ctx) {
       return linesByDate;
     };
 
-    // Decide whether to seed/refresh weeklyLinesByDate
     const stable = (x) => { try { return JSON.stringify(x || null); } catch { return ''; } };
 
     state.weeklyLinesByDate = (state.weeklyLinesByDate && typeof state.weeklyLinesByDate === 'object') ? state.weeklyLinesByDate : null;
@@ -38209,11 +38375,10 @@ function renderTimesheetLinesTab(ctx) {
       return m;
     })());
 
-    // Pad/truncate per day to totalLinesPerDay
     for (const wd of weekDays) {
       const ymd = wd.ymd;
       const arr = Array.isArray(state.weeklyLinesByDate?.[ymd]) ? state.weeklyLinesByDate[ymd].slice() : [];
-      while (arr.length < totalLinesPerDay) arr.push({ ref:'', start:'', end:'', break_start:'', break_end:'' });
+      while (arr.length < totalLinesPerDay) arr.push({ ref:'', start:'', end:'', break_start:'', break_end:'', break_mins:'' });
       if (arr.length > totalLinesPerDay) arr.length = totalLinesPerDay;
       state.weeklyLinesByDate[ymd] = arr;
     }
@@ -38223,10 +38388,32 @@ function renderTimesheetLinesTab(ctx) {
     for (const wd of weekDays) {
       const ymd = wd.ymd;
       const lines = state.weeklyLinesByDate[ymd] || [];
+
       let curShiftIdx = null;
       let curShiftStart = null;
       let curShiftEndAdj = null;
       let curBreakMins = 0;
+
+      const diffMins = (a, b) => {
+        const am = parseHHMM(a);
+        const bm = parseHHMM(b);
+        if (am == null || bm == null) return null;
+        let d = bm - am;
+        if (d < 0) d += 1440;
+        return d;
+      };
+
+      const addBreakFromLine = (ln) => {
+        const bm = parseBreakMins(ln.break_mins);
+        const hasMins = Number.isFinite(bm) && bm > 0;
+        const hasWin = !!(String(ln.break_start || '').trim() || String(ln.break_end || '').trim());
+
+        if (hasMins) { curBreakMins += bm; return; }
+        if (hasWin) {
+          const d = diffMins(ln.break_start, ln.break_end);
+          if (Number.isFinite(d) && d > 0) curBreakMins += d;
+        }
+      };
 
       const finalize = () => {
         if (curShiftIdx == null) return;
@@ -38239,19 +38426,12 @@ function renderTimesheetLinesTab(ctx) {
         paidByKey[`${ymd}:${curShiftIdx}`] = (Math.round((paidMins / 60) * 100) / 100).toFixed(2);
       };
 
-      const diffMins = (a, b) => {
-        const am = parseHHMM(a);
-        const bm = parseHHMM(b);
-        if (am == null || bm == null) return null;
-        let d = bm - am;
-        if (d < 0) d += 1440;
-        return d;
-      };
-
       for (let i = 0; i < lines.length; i++) {
         const ln = lines[i] || {};
         const hasShift = !!(String(ln.start||'').trim() || String(ln.end||'').trim());
-        const hasBreak = !!(String(ln.break_start||'').trim() || String(ln.break_end||'').trim());
+        const hasBreakAny =
+          !!(String(ln.break_start||'').trim() || String(ln.break_end||'').trim()) ||
+          (Number.isFinite(parseBreakMins(ln.break_mins)) && parseBreakMins(ln.break_mins) > 0);
 
         if (hasShift) {
           finalize();
@@ -38270,19 +38450,465 @@ function renderTimesheetLinesTab(ctx) {
             curShiftEndAdj = null;
           }
 
-          if (hasBreak) {
-            const d = diffMins(ln.break_start, ln.break_end);
-            if (Number.isFinite(d) && d > 0) curBreakMins += d;
-          }
-        } else if (hasBreak && curShiftIdx != null) {
-          const d = diffMins(ln.break_start, ln.break_end);
-          if (Number.isFinite(d) && d > 0) curBreakMins += d;
+          if (hasBreakAny) addBreakFromLine(ln);
+        } else if (hasBreakAny && curShiftIdx != null) {
+          addBreakFromLine(ln);
         }
       }
       finalize();
     }
 
     const disabledAttrManual = (!canEditSchedule) ? 'disabled' : '';
+
+    // Ensure these exist
+    state.scheduleErrorsByDate = (state.scheduleErrorsByDate && typeof state.scheduleErrorsByDate === 'object') ? state.scheduleErrorsByDate : {};
+    state.scheduleHasErrors = !!state.scheduleHasErrors;
+
+    // ─────────────────────────────────────────────────────────────
+    // Uses your NEW global helper: buildWeeklyScheduleFromLinesAndValidate
+    // Updates state.schedule + state.scheduleHasErrors + state.scheduleErrorsByDate
+    // Also does UI highlighting + dispatch event for Finance tab.
+    // ─────────────────────────────────────────────────────────────
+    const applyScheduleFromLines = (st) => {
+      if (typeof buildWeeklyScheduleFromLinesAndValidate !== 'function') return null;
+
+      const wd = Array.isArray(st.__weekDaysForSchedule) && st.__weekDaysForSchedule.length
+        ? st.__weekDaysForSchedule
+        : weekDays;
+
+      const out = buildWeeklyScheduleFromLinesAndValidate(st.weeklyLinesByDate, wd, {
+        allowOvernight: true,
+        allowBreakMins: true
+      });
+
+      st.schedule = Array.isArray(out?.schedule) ? out.schedule : [];
+      st.scheduleErrorsByDate = (out?.errorsByDate && typeof out.errorsByDate === 'object') ? out.errorsByDate : {};
+      st.scheduleHasErrors = !!out?.hasErrors;
+      st.__scheduleUpdatedAt = Date.now();
+
+      // Live highlight: if a date has any errors, mark all inputs for that date
+      try {
+        const errs = st.scheduleErrorsByDate || {};
+        const allDates = new Set(Object.keys(st.weeklyLinesByDate || {}));
+        for (const d of allDates) {
+          const hasErr = !!errs[d];
+          const sel = `#tsWeeklySchedule input[data-date="${CSS.escape(d)}"]`;
+          document.querySelectorAll(sel).forEach(inp => {
+            if (hasErr) inp.classList.add('is-invalid');
+            else inp.classList.remove('is-invalid');
+          });
+        }
+        const banner = document.getElementById('tsWeeklyErrorsBanner');
+        if (banner) banner.style.display = st.scheduleHasErrors ? '' : 'none';
+      } catch {}
+
+      // Notify other tabs (Finance) that schedule/errors changed
+      try {
+        window.dispatchEvent(new CustomEvent('ts-weekly-schedule-updated', {
+          detail: {
+            hasErrors: !!st.scheduleHasErrors,
+            errorsByDate: st.scheduleErrorsByDate || {},
+            scheduleCount: Array.isArray(st.schedule) ? st.schedule.length : 0
+          }
+        }));
+      } catch {}
+
+      return out;
+    };
+
+    // Install helper in THIS TAB (not showModal)
+    try {
+      if (!window.__tsWeeklyLinesHelper || window.__tsWeeklyLinesHelper.__v !== 4) {
+        window.__tsWeeklyLinesHelper = {
+          __v: 4,
+
+          _hhmm(raw) {
+            let s = String(raw || '').trim();
+            if (!s) return '';
+            if (/^\d{1,2}:\d{2}$/.test(s)) {
+              const [h, m] = s.split(':');
+              const hh = String(Number(h) || 0).padStart(2, '0');
+              const mm = String(Number(m) || 0).padStart(2, '0');
+              return `${hh}:${mm}`;
+            }
+            s = s.replace(':', '');
+            if (!/^\d{1,4}$/.test(s)) return '';
+            if (s.length <= 2) {
+              const h = Number(s);
+              if (!Number.isFinite(h)) return '';
+              return `${String(h).padStart(2, '0')}:00`;
+            }
+            const mm = s.slice(-2);
+            const h  = s.slice(0, -2);
+            const hh = String(Number(h) || 0).padStart(2, '0');
+            const mm2 = String(Number(mm) || 0).padStart(2, '0');
+            return `${hh}:${mm2}`;
+          },
+
+          _normBreakMins(raw) {
+            const s = String(raw == null ? '' : raw).trim();
+            if (!s) return '';
+            const m = s.match(/^(\d{1,4})(?:\s*m)?$/i);
+            if (!m) return '';
+            const n = Number(m[1]);
+            if (!Number.isFinite(n) || n < 0) return '';
+            return String(Math.floor(n));
+          },
+
+          _parse(s) {
+            const m = String(s || '').trim().match(/^(\d{1,2}):(\d{2})$/);
+            if (!m) return null;
+            const hh = Number(m[1]), mm = Number(m[2]);
+            if (!Number.isFinite(hh) || !Number.isFinite(mm) || hh < 0 || hh > 23 || mm < 0 || mm > 59) return null;
+            return hh * 60 + mm;
+          },
+
+          _diff(a, b) {
+            const am = this._parse(a);
+            const bm = this._parse(b);
+            if (am == null || bm == null) return null;
+            let d = bm - am;
+            if (d < 0) d += 1440;
+            return d;
+          },
+
+          _parseBreakMins(raw) {
+            const s = String(raw == null ? '' : raw).trim();
+            if (!s) return 0;
+            const m = s.match(/^(\d{1,4})(?:\s*m)?$/i);
+            if (!m) return NaN;
+            const n = Number(m[1]);
+            if (!Number.isFinite(n) || n < 0) return NaN;
+            return Math.floor(n);
+          },
+
+          _getState() {
+            const mc = window.modalCtx || {};
+            const st = mc.timesheetState || null;
+            const fr = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
+            if (!st) return { st: null, fr: null };
+
+            st.weeklyLinesByDate = (st.weeklyLinesByDate && typeof st.weeklyLinesByDate === 'object') ? st.weeklyLinesByDate : {};
+            st.scheduleErrorsByDate = (st.scheduleErrorsByDate && typeof st.scheduleErrorsByDate === 'object') ? st.scheduleErrorsByDate : {};
+            st.extraShiftCount = Number.isFinite(Number(st.extraShiftCount)) ? Math.max(0, Number(st.extraShiftCount)) : 0;
+            st.scheduleHasErrors = !!st.scheduleHasErrors;
+
+            return { st, fr };
+          },
+
+      _ensureLine(st, date, idx) {
+  const d = String(date || '');
+  const i = Number(idx || 0);
+  if (!d || !Number.isFinite(i) || i < 0) return null;
+
+  st.weeklyLinesByDate[d] = Array.isArray(st.weeklyLinesByDate[d]) ? st.weeklyLinesByDate[d] : [];
+  while (st.weeklyLinesByDate[d].length <= i) {
+    st.weeklyLinesByDate[d].push({ ref:'', start:'', end:'', break_start:'', break_end:'', break_mins:'' });
+  }
+  st.weeklyLinesByDate[d][i] = st.weeklyLinesByDate[d][i] || { ref:'', start:'', end:'', break_start:'', break_end:'', break_mins:'' };
+  if (st.weeklyLinesByDate[d][i].break_mins == null) st.weeklyLinesByDate[d][i].break_mins = '';
+  return st.weeklyLinesByDate[d][i];
+},
+
+_syncBreakMinsLock(date, idx, ln) {
+  try {
+    const d = String(date || '');
+    const i = Number(idx);
+    if (!d || !Number.isFinite(i)) return;
+
+    const hasWindow = !!(String(ln?.break_start || '').trim() || String(ln?.break_end || '').trim());
+
+    const minsEl = document.querySelector(
+      `input[data-weekly-field="break_mins"][data-date="${CSS.escape(d)}"][data-line-idx="${i}"]`
+    );
+    if (!minsEl) return;
+
+    if (hasWindow) {
+      minsEl.dataset.breaklock = '1';
+      minsEl.disabled = true;
+      minsEl.readOnly = true;
+      return;
+    }
+
+    // Only re-enable if we were the reason it was disabled (avoid fighting global readonly)
+    if (minsEl.dataset.breaklock === '1') {
+      minsEl.disabled = false;
+      minsEl.readOnly = false;
+      delete minsEl.dataset.breaklock;
+    }
+  } catch {}
+},
+
+          _recalcPaidForDate(st, date) {
+            const d = String(date || '');
+            if (!d) return;
+
+            const lines = Array.isArray(st.weeklyLinesByDate[d]) ? st.weeklyLinesByDate[d] : [];
+            let curShiftIdx = null;
+            let curShiftStart = null;
+            let curShiftEndAdj = null;
+            let curBreakMins = 0;
+
+            const setPaid = (idx, val) => {
+              try {
+                const el = document.querySelector(`span.sched-paid-hours[data-date="${CSS.escape(d)}"][data-line-idx="${idx}"]`);
+                if (el) el.textContent = (val == null ? '' : String(val));
+              } catch {}
+            };
+
+            const fin = () => {
+              if (curShiftIdx == null) return;
+              if (curShiftStart == null || curShiftEndAdj == null) {
+                setPaid(curShiftIdx, '');
+                return;
+              }
+              const shiftMins = Math.max(0, curShiftEndAdj - curShiftStart);
+              const paidMins  = Math.max(0, shiftMins - (Number(curBreakMins) || 0));
+              setPaid(curShiftIdx, (Math.round((paidMins / 60) * 100) / 100).toFixed(2));
+            };
+
+            const addBreak = (ln) => {
+              const bm = this._parseBreakMins(ln.break_mins);
+              const hasMins = Number.isFinite(bm) && bm > 0;
+              const hasWin = !!(String(ln.break_start||'').trim() || String(ln.break_end||'').trim());
+
+              if (hasMins) { curBreakMins += bm; return; }
+              if (hasWin) {
+                const x = this._diff(ln.break_start, ln.break_end);
+                if (Number.isFinite(x) && x > 0) curBreakMins += x;
+              }
+            };
+
+            for (let i = 0; i < lines.length; i++) {
+              const ln = lines[i] || {};
+              const hasShift = !!(String(ln.start||'').trim() || String(ln.end||'').trim());
+              const bm = this._parseBreakMins(ln.break_mins);
+              const hasBreak =
+                !!(String(ln.break_start||'').trim() || String(ln.break_end||'').trim()) ||
+                (Number.isFinite(bm) && bm > 0);
+
+              if (hasShift) {
+                fin();
+
+                const s0 = this._parse(ln.start);
+                const e0 = this._parse(ln.end);
+
+                curShiftIdx = i;
+                curBreakMins = 0;
+
+                if (s0 != null && e0 != null && s0 !== e0) {
+                  curShiftStart = s0;
+                  curShiftEndAdj = (e0 > s0) ? e0 : (e0 + 1440);
+                } else {
+                  curShiftStart = null;
+                  curShiftEndAdj = null;
+                }
+
+                if (hasBreak) addBreak(ln);
+              } else if (hasBreak && curShiftIdx != null) {
+                addBreak(ln);
+              }
+            }
+
+            fin();
+
+            // clear paid text for non-shift lines
+            for (let i = 0; i < lines.length; i++) {
+              const ln = lines[i] || {};
+              const hasShift = !!(String(ln.start||'').trim() || String(ln.end||'').trim());
+              if (!hasShift) setPaid(i, '');
+            }
+          },
+
+          _markDirty() {
+            try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
+          },
+
+          onInput(el) {
+            try {
+              const { st } = this._getState();
+              if (!st || !el) return;
+
+              const date  = String(el.dataset.date || '');
+              const idx   = Number(el.dataset.lineIdx || '0');
+              const field = String(el.dataset.weeklyField || '');
+
+              if (!date || !Number.isFinite(idx) || idx < 0 || !field) return;
+
+              const ln = this._ensureLine(st, date, idx);
+              if (!ln) return;
+
+           ln[field] = String(el.value || '');
+
+// If user is using break start/end on this line, clear break mins (avoid "mix" validation errors)
+if (field === 'break_start' || field === 'break_end') {
+  const hasWindow = !!(String(ln.break_start || '').trim() || String(ln.break_end || '').trim());
+  if (hasWindow) {
+    ln.break_mins = '';
+    try {
+      const minsEl = document.querySelector(
+        `input[data-weekly-field="break_mins"][data-date="${CSS.escape(date)}"][data-line-idx="${idx}"]`
+      );
+      if (minsEl) minsEl.value = '';
+    } catch {}
+  }
+}
+
+// ✅ lock/unlock break mins for THIS line only
+this._syncBreakMinsLock(date, idx, ln);
+
+// ✅ paid hours updates live, including after tab-away (onBlur calls onInput)
+this._recalcPaidForDate(st, date);
+
+// ✅ rebuild + validate schedule on every edit (pre-save Finance preview fix)
+applyScheduleFromLines(st);
+
+this._markDirty();
+
+            } catch {}
+          },
+
+          onBlur(el) {
+            try {
+              if (!el) return;
+              const field = String(el.dataset.weeklyField || '');
+              if (field === 'start' || field === 'end' || field === 'break_start' || field === 'break_end') {
+                el.value = this._hhmm(el.value);
+              }
+              if (field === 'break_mins') {
+                el.value = this._normBreakMins(el.value);
+              }
+              this.onInput(el);
+            } catch {}
+          },
+
+          addLine() {
+            const { st, fr } = this._getState();
+            if (!st) return;
+
+            const dates = Object.keys(st.weeklyLinesByDate || {});
+            if (!dates.length) return;
+
+            const cur = Number(st.extraShiftCount || 0);
+            st.extraShiftCount = (Number.isFinite(cur) ? cur : 0) + 1;
+
+            const wantLen = 1 + st.extraShiftCount;
+            for (const d of dates) {
+              st.weeklyLinesByDate[d] = Array.isArray(st.weeklyLinesByDate[d]) ? st.weeklyLinesByDate[d] : [];
+              while (st.weeklyLinesByDate[d].length < wantLen) {
+                st.weeklyLinesByDate[d].push({ ref:'', start:'', end:'', break_start:'', break_end:'', break_mins:'' });
+              }
+              if (st.weeklyLinesByDate[d].length > wantLen) st.weeklyLinesByDate[d].length = wantLen;
+              this._recalcPaidForDate(st, d);
+            }
+
+            applyScheduleFromLines(st);
+            this._markDirty();
+
+            try {
+              if (fr && fr.entity === 'timesheets') {
+                fr._suppressDirty = true;
+                fr.setTab('lines');
+                fr._suppressDirty = false;
+                fr._updateButtons && fr._updateButtons();
+              }
+            } catch {}
+          },
+
+          removeLine() {
+            const { st, fr } = this._getState();
+            if (!st) return;
+
+            const cur = Number(st.extraShiftCount || 0);
+            if (!Number.isFinite(cur) || cur <= 0) return;
+
+            const wantLen = 1 + (cur - 1);
+
+            let hasData = false;
+            for (const d of Object.keys(st.weeklyLinesByDate || {})) {
+              const arr = Array.isArray(st.weeklyLinesByDate[d]) ? st.weeklyLinesByDate[d] : [];
+              const last = arr[arr.length - 1] || null;
+              if (last) {
+                if (
+                  String(last.ref || '').trim() ||
+                  String(last.start || '').trim() ||
+                  String(last.end || '').trim() ||
+                  String(last.break_start || '').trim() ||
+                  String(last.break_end || '').trim() ||
+                  String(last.break_mins || '').trim()
+                ) {
+                  hasData = true;
+                  break;
+                }
+              }
+            }
+            if (hasData) {
+              const ok = window.confirm('The last shift line contains data on at least one day. Remove it anyway?');
+              if (!ok) return;
+            }
+
+            st.extraShiftCount = cur - 1;
+
+            for (const d of Object.keys(st.weeklyLinesByDate || {})) {
+              const arr = Array.isArray(st.weeklyLinesByDate[d]) ? st.weeklyLinesByDate[d] : [];
+              if (arr.length > wantLen) arr.length = wantLen;
+              while (arr.length < wantLen) arr.push({ ref:'', start:'', end:'', break_start:'', break_end:'', break_mins:'' });
+              st.weeklyLinesByDate[d] = arr;
+              this._recalcPaidForDate(st, d);
+            }
+
+            applyScheduleFromLines(st);
+            this._markDirty();
+
+            try {
+              if (fr && fr.entity === 'timesheets') {
+                fr._suppressDirty = true;
+                fr.setTab('lines');
+                fr._suppressDirty = false;
+                fr._updateButtons && fr._updateButtons();
+              }
+            } catch {}
+          },
+
+          resetAll() {
+            const { st, fr } = this._getState();
+            if (!st) return;
+
+            const ok = window.confirm('Reset the weekly schedule grid back to a blank week?');
+            if (!ok) return;
+
+            st.extraShiftCount = 0;
+            for (const d of Object.keys(st.weeklyLinesByDate || {})) {
+              st.weeklyLinesByDate[d] = [{ ref:'', start:'', end:'', break_start:'', break_end:'', break_mins:'' }];
+              this._recalcPaidForDate(st, d);
+            }
+
+            applyScheduleFromLines(st);
+            this._markDirty();
+
+            try {
+              if (fr && fr.entity === 'timesheets') {
+                fr._suppressDirty = true;
+                fr.setTab('lines');
+                fr._suppressDirty = false;
+                fr._updateButtons && fr._updateButtons();
+              }
+            } catch {}
+          }
+        };
+      }
+    } catch {}
+
+    // Ensure schedule/errors are computed at least once for this render
+    try { applyScheduleFromLines(state); } catch {}
+
+    const badgeHtml = (!tsId)
+      ? (subMode === 'MANUAL'
+          ? '<span class="pill pill-bad">PLANNED (manual)</span>'
+          : '<span class="pill pill-info">PLANNED (electronic, read-only)</span>')
+      : (subMode === 'MANUAL'
+          ? '<span class="pill pill-ok">CONFIRMED HOURS (manual)</span>'
+          : '<span class="pill pill-elec">CONFIRMED HOURS (electronic, read-only)</span>');
 
     const errorsByDate = (state.scheduleErrorsByDate && typeof state.scheduleErrorsByDate === 'object')
       ? state.scheduleErrorsByDate
@@ -38302,8 +38928,13 @@ function renderTimesheetLinesTab(ctx) {
       return dayLines.map((ln, lineIdx) => {
         const keyPaid = paidByKey[`${ymd}:${lineIdx}`] || '';
         const lineNo = lineIdx + 1;
+       // ✅ compute these OUTSIDE the template string
+  const hasBreakWindow = !!(String(ln?.break_start || '').trim() || String(ln?.break_end || '').trim());
+  const breakMinsLockAttr = hasBreakWindow ? 'disabled' : '';
+  const breakMinsLockData = hasBreakWindow ? 'data-breaklock="1"' : ''; 
 
         return `
+        
           <tr data-weekly-line="1" data-date="${esc(ymd)}" data-line-idx="${lineIdx}">
             <td>${esc(wd.dow || '') || '<span class="mini">—</span>'}</td>
             <td>${dateCellHtml}</td>
@@ -38373,6 +39004,21 @@ function renderTimesheetLinesTab(ctx) {
                      ${disabledAttrManual} />
             </td>
 
+          <td>
+  <input type="text"
+         class="input${errClass}"
+         name="wl_break_mins_${esc(ymd)}_${lineIdx}"
+         data-weekly-field="break_mins"
+         data-date="${esc(ymd)}"
+         data-line-idx="${lineIdx}"
+         ${breakMinsLockData}
+         value="${esc(ln?.break_mins || '')}"
+         oninput="window.__tsWeeklyLinesHelper&&window.__tsWeeklyLinesHelper.onInput(this)"
+         onblur="window.__tsWeeklyLinesHelper&&window.__tsWeeklyLinesHelper.onBlur(this)"
+         ${disabledAttrManual} ${breakMinsLockAttr} />
+</td>
+
+
             <td>
               <span class="mini sched-paid-hours" data-date="${esc(ymd)}" data-line-idx="${lineIdx}">
                 ${esc(keyPaid || '')}
@@ -38412,7 +39058,7 @@ function renderTimesheetLinesTab(ctx) {
       `;
 
     const scheduleHelpText = canEditSchedule
-      ? 'Each line is either: (1) a shift (fill Ref + Start + End, optional Break Start/End), OR (2) an additional break for the most recent shift above (leave Start/End blank, fill Break Start/End). Ref # applies to the shift line only. Save applies changes.'
+      ? 'Each line is either: (1) a shift (fill Ref + Start + End), OR (2) an additional break for the most recent shift above (leave Start/End blank). For breaks you may use either Break start/end OR Break (mins) (do not mix). Save applies changes.'
       : 'Schedule is shown read-only. Multiple shifts on the same day appear as multiple lines.';
 
     return `
@@ -38460,6 +39106,7 @@ function renderTimesheetLinesTab(ctx) {
                       <th>End</th>
                       <th>Break start</th>
                       <th>Break end</th>
+                      <th>Break (mins)</th>
                       <th>Paid hours</th>
                     </tr>
                   </thead>
@@ -39489,124 +40136,175 @@ function renderTimesheetOverviewTab(ctx) {
   const badgeBtnStyle = 'cursor:pointer;border:1px solid var(--line);background:transparent;color:inherit;padding:6px 10px;border-radius:999px;';
 
   const actionsHtml = (() => {
-    const btns = [];
+  const btns = [];
 
-    const isScenario1 = (qrScenario === 'SCENARIO_1');
-    const isScenario2 = (qrScenario === 'SCENARIO_2');
-    const isScenario3 = (qrScenario === 'SCENARIO_3');
-    const isExpired   = (qrScenario === 'EXPIRED');
-    const isCancelled = (qrScenario === 'CANCELLED');
+  const isScenario1 = (qrScenario === 'SCENARIO_1');
+  const isScenario2 = (qrScenario === 'SCENARIO_2');
+  const isScenario3 = (qrScenario === 'SCENARIO_3');
+  const isExpired   = (qrScenario === 'EXPIRED');
+  const isCancelled = (qrScenario === 'CANCELLED');
 
-    const canRestorePending = !!actionFlags.can_restore_qr_pending;
-    const canRestoreSigned  = !!actionFlags.can_restore_qr_signed;
-    const canRevertToElec   = !!actionFlags.can_revert_to_electronic;
+  const canRestorePending = !!actionFlags.can_restore_qr_pending;
+  const canRestoreSigned  = !!actionFlags.can_restore_qr_signed;
+  const canRevertToElec   = !!actionFlags.can_revert_to_electronic;
 
-    const isManualOnly = !!actionFlags.is_manual_only;
-    const canAllowQrAgain   = !!actionFlags.can_allow_qr_again;
-    const canAllowElecAgain = !!actionFlags.can_allow_electronic_again;
+  const isManualOnly = !!actionFlags.is_manual_only;
+  const canAllowQrAgain   = !!actionFlags.can_allow_qr_again;
+  const canAllowElecAgain = !!actionFlags.can_allow_electronic_again;
 
-    const weekId =
-      details.contract_week_id ||
-      cw.id ||
-      row.contract_week_id ||
-      null;
+  const weekId =
+    details.contract_week_id ||
+    cw.id ||
+    row.contract_week_id ||
+    null;
 
-    const isPlannedWeeklyManual =
-      (sheetScope === 'WEEKLY') &&
-      !tsId &&
-      !!weekId &&
-      !locked &&
-      (cwModeSnapshot === 'MANUAL');
+  const isWeekly = (sheetScope === 'WEEKLY');
+  const isDaily  = (sheetScope === 'DAILY');
 
-    if (isPlannedWeeklyManual) {
-      btns.push(`
-        <button type="button" class="pill pill-info" style="${badgeBtnStyle}" data-ts-action="switch-electronic-planned">
-          Switch week back to electronic
-        </button>
-      `);
-    }
+  const isPlannedWeeklyManual =
+    isWeekly &&
+    !tsId &&
+    !!weekId &&
+    !locked &&
+    (cwModeSnapshot === 'MANUAL');
 
-    if (sheetScope === 'DAILY' && tsId && subMode === 'ELECTRONIC' && !locked) {
-      btns.push(`
-        <button type="button" class="pill pill-info" style="${badgeBtnStyle}" data-ts-action="send-daily-qr">
-          Send daily QR timesheet
-        </button>
-      `);
-    }
+  const isPlannedWeeklyElectronic =
+    isWeekly &&
+    !tsId &&
+    !!weekId &&
+    !locked &&
+    (cwModeSnapshot === 'ELECTRONIC');
 
-    if (tsId && !locked && isScenario2 && qrStatus === 'PENDING') {
-      btns.push(`
-        <button type="button" class="pill pill-info" style="${badgeBtnStyle}" data-ts-action="qr-resend">
-          Resend QR email
-        </button>
-      `);
-    }
+  const isWeeklyElectronicWithTs =
+    isWeekly &&
+    !!tsId &&
+    !locked &&
+    (subMode === 'ELECTRONIC');
 
-    if (tsId && !locked && isScenario2 && qrStatus === 'PENDING') {
-      btns.push(`
-        <button type="button" class="pill pill-warn" style="${badgeBtnStyle}" data-ts-action="qr-refuse">
-          Refuse hours & request resubmission
-        </button>
-      `);
-    }
+  const isDailyElectronicWithTs =
+    isDaily &&
+    !!tsId &&
+    !locked &&
+    (subMode === 'ELECTRONIC');
 
-    if (tsId && !locked && isScenario3 && qrStatus === 'USED') {
-      btns.push(`
-        <button type="button" class="pill pill-warn" style="${badgeBtnStyle}" data-ts-action="qr-reissue-request">
-          Revoke signed QR & request resubmission
-        </button>
-      `);
-    }
+  // ✅ Convert to manual (weekly existing OR weekly planned electronic OR daily existing)
+  if (isWeeklyElectronicWithTs || isPlannedWeeklyElectronic || isDailyElectronicWithTs) {
+    btns.push(`
+      <button type="button" class="pill pill-info" style="${badgeBtnStyle}" data-ts-action="switch-manual">
+        Convert to manual
+      </button>
+    `);
+  }
 
-    if (tsId && !locked && (isScenario1 || isScenario2 || isScenario3 || isExpired || isCancelled) && qrStatus) {
-      btns.push(`
-        <button type="button" class="pill pill-info" style="${badgeBtnStyle}" data-ts-action="qr-convert-manual-only">
-          Convert to manual-only
-        </button>
-      `);
-    }
+  // Planned weekly manual → switch back to electronic
+  if (isPlannedWeeklyManual) {
+    btns.push(`
+      <button type="button" class="pill pill-info" style="${badgeBtnStyle}" data-ts-action="switch-electronic-planned">
+        Switch week back to electronic
+      </button>
+    `);
+  }
 
-    if (tsId && !locked && canRestorePending) {
-      btns.push(`
-        <button type="button" class="pill pill-info" style="${badgeBtnStyle}" data-ts-action="qr-restore-pending">
-          Restore revoked QR (pending)
-        </button>
-      `);
-    }
-    if (tsId && !locked && canRestoreSigned) {
-      btns.push(`
-        <button type="button" class="pill pill-info" style="${badgeBtnStyle}" data-ts-action="qr-restore-signed">
-          Restore revoked QR (signed)
-        </button>
-      `);
-    }
+  // Daily: generate daily QR
+  if (isDaily && tsId && subMode === 'ELECTRONIC' && !locked) {
+    btns.push(`
+      <button type="button" class="pill pill-info" style="${badgeBtnStyle}" data-ts-action="send-daily-qr">
+        Send daily QR timesheet
+      </button>
+    `);
+  }
 
-    if (tsId && !locked && isManualOnly && canAllowQrAgain) {
-      btns.push(`
-        <button type="button" class="pill pill-info" style="${badgeBtnStyle}" data-ts-action="allow-qr-again">
-          Allow QR again
-        </button>
-      `);
-    }
-    if (tsId && !locked && isManualOnly && canAllowElecAgain) {
-      btns.push(`
-        <button type="button" class="pill pill-info" style="${badgeBtnStyle}" data-ts-action="allow-electronic-again">
-          Allow electronic again
-        </button>
-      `);
-    }
+  // QR issue/resend (same action; label depends on scenario)
+  if (tsId && !locked && (isScenario1 || isScenario2) && qrStatus === 'PENDING') {
+    btns.push(`
+      <button type="button" class="pill pill-info" style="${badgeBtnStyle}" data-ts-action="qr-resend">
+        ${isScenario1 ? 'Issue QR timesheet' : 'Resend QR email'}
+      </button>
+    `);
+  }
 
-    if (tsId && !locked && canRevertToElec) {
-      btns.push(`
-        <button type="button" class="pill pill-info" style="${badgeBtnStyle}" data-ts-action="revert-electronic">
-          Revert to electronic
-        </button>
-      `);
-    }
+  // QR refuse (scenario 2)
+  if (tsId && !locked && isScenario2 && qrStatus === 'PENDING') {
+    btns.push(`
+      <button type="button" class="pill pill-warn" style="${badgeBtnStyle}" data-ts-action="qr-refuse">
+        Refuse hours & request resubmission
+      </button>
+    `);
+  }
 
-    if (!btns.length) return `<span class="mini">No actions available.</span>`;
-    return `<div style="display:flex;flex-wrap:wrap;gap:8px;">${btns.join('')}</div>`;
-  })();
+  // QR reissue request (scenario 3)
+  if (tsId && !locked && isScenario3 && qrStatus === 'USED') {
+    btns.push(`
+      <button type="button" class="pill pill-warn" style="${badgeBtnStyle}" data-ts-action="qr-reissue-request">
+        Revoke signed QR & request resubmission
+      </button>
+    `);
+  }
+
+  // Convert QR route → manual-only (available whenever QR is active/known)
+  if (tsId && !locked && (isScenario1 || isScenario2 || isScenario3 || isExpired || isCancelled) && qrStatus) {
+    btns.push(`
+      <button type="button" class="pill pill-info" style="${badgeBtnStyle}" data-ts-action="qr-convert-manual-only">
+        Convert to manual-only
+      </button>
+    `);
+  }
+
+  if (tsId && !locked && canRestorePending) {
+    btns.push(`
+      <button type="button" class="pill pill-info" style="${badgeBtnStyle}" data-ts-action="qr-restore-pending">
+        Restore revoked QR (pending)
+      </button>
+    `);
+  }
+
+  if (tsId && !locked && canRestoreSigned) {
+    btns.push(`
+      <button type="button" class="pill pill-info" style="${badgeBtnStyle}" data-ts-action="qr-restore-signed">
+        Restore revoked QR (signed)
+      </button>
+    `);
+  }
+
+  if (tsId && !locked && isManualOnly && canAllowQrAgain) {
+    btns.push(`
+      <button type="button" class="pill pill-info" style="${badgeBtnStyle}" data-ts-action="allow-qr-again">
+        Allow QR again
+      </button>
+    `);
+  }
+
+  if (tsId && !locked && isManualOnly && canAllowElecAgain) {
+    btns.push(`
+      <button type="button" class="pill pill-info" style="${badgeBtnStyle}" data-ts-action="allow-electronic-again">
+        Allow electronic again
+      </button>
+    `);
+  }
+
+  // Revert to electronic (current manual → electronic original)
+  if (tsId && !locked && canRevertToElec) {
+    btns.push(`
+      <button type="button" class="pill pill-info" style="${badgeBtnStyle}" data-ts-action="revert-electronic">
+        Revert to electronic
+      </button>
+    `);
+  }
+
+  // ✅ Footer-only actions MUST NOT appear in Overview Actions
+  // (they live in the modal footer):
+  // - delete-permanent (Delete timesheet)
+  // - delete-manual-reopen (Unprocess Timesheet)
+  const FOOTER_ONLY_ACTION_RE =
+    /data-ts-action="(?:delete-permanent|delete-manual-reopen)"/i;
+
+  const safeBtns = btns.filter(html => !FOOTER_ONLY_ACTION_RE.test(String(html || '')));
+
+  if (!safeBtns.length) return `<span class="mini">No actions available.</span>`;
+  return `<div style="display:flex;flex-wrap:wrap;gap:8px;">${safeBtns.join('')}</div>`;
+})();
+
+
 
   const routeHtml = `
     <div class="card" style="margin-top:10px;">
@@ -40179,7 +40877,6 @@ function renderTimesheetIssuesTab(ctx) {
   `;
 }
 
-
 function renderTimesheetFinanceTab(ctx) {
   const { LOGM, L, GC, GE } = getTsLoggers('[TS][FINANCE]');
   const { row, details, related, state } = normaliseTimesheetCtx(ctx);
@@ -40301,17 +40998,60 @@ function renderTimesheetFinanceTab(ctx) {
 
   const mc = window.modalCtx || {};
   const st = mc.timesheetState || state || {};
-  const schedule = Array.isArray(st.schedule) ? st.schedule : null;
-  const hasSchedule = !!(schedule && schedule.length);
-  const isEditing = (frameMode === 'edit' || frameMode === 'create');
 
   // Look at timesheetMeta to know if this is a planned/open week
   const meta           = mc.timesheetMeta || {};
   const isPlannedWeek  = !!meta.isPlannedWeek;
 
+  const isEditing = (frameMode === 'edit' || frameMode === 'create');
+
+  // ───────────────────── Ensure schedule is fresh (weekly manual) ─────────────────────
+  // If user is editing weekly manual lines, the Lines tab should already keep st.schedule in sync.
+  // But for safety (and for cases where Finance tab is opened first), recompute here if possible.
+  const sheetScope = (details.sheet_scope || row.sheet_scope || ts.sheet_scope || '').toUpperCase();
+  const subMode    = (row.submission_mode || ts.submission_mode || '').toUpperCase();
+
+  const recomputeScheduleIfPossible = () => {
+    try {
+      if (typeof buildWeeklyScheduleFromLinesAndValidate !== 'function') return null;
+      if (!st || !st.weeklyLinesByDate || typeof st.weeklyLinesByDate !== 'object') return null;
+      const wd = Array.isArray(st.__weekDaysForSchedule) && st.__weekDaysForSchedule.length ? st.__weekDaysForSchedule : null;
+      const out = buildWeeklyScheduleFromLinesAndValidate(st.weeklyLinesByDate, wd || undefined, {
+        allowOvernight: true,
+        allowBreakMins: true
+      });
+      st.schedule = Array.isArray(out?.schedule) ? out.schedule : [];
+      st.scheduleErrorsByDate = (out?.errorsByDate && typeof out.errorsByDate === 'object') ? out.errorsByDate : {};
+      st.scheduleHasErrors = !!out?.hasErrors;
+      st.__scheduleUpdatedAt = Date.now();
+      return out;
+    } catch {
+      return null;
+    }
+  };
+
+  // Only do this auto-recompute for WEEKLY+MANUAL (schedule-driven editor)
+  if (sheetScope === 'WEEKLY' && subMode === 'MANUAL') {
+    // If schedule missing but lines exist, or errors flags missing, recompute
+    const hasLines = !!(st.weeklyLinesByDate && typeof st.weeklyLinesByDate === 'object' && Object.keys(st.weeklyLinesByDate).length);
+    const hasScheduleAlready = Array.isArray(st.schedule);
+    const hasErrFlags = (typeof st.scheduleHasErrors === 'boolean') && (st.scheduleErrorsByDate && typeof st.scheduleErrorsByDate === 'object');
+    if (hasLines && (!hasScheduleAlready || !hasErrFlags)) {
+      recomputeScheduleIfPossible();
+    }
+  }
+
+  const schedule = Array.isArray(st.schedule) ? st.schedule : null;
+  const hasSchedule = !!(schedule && schedule.length);
+
   // In EDIT/CREATE + schedule present → Proposed Buckets
   // Also: in VIEW + schedule present for planned weeks → Proposed Buckets
   const useProposedBuckets = hasSchedule && (isEditing || isPlannedWeek);
+
+  const scheduleHasErrors = !!st.scheduleHasErrors;
+  const scheduleErrorsByDate = (st.scheduleErrorsByDate && typeof st.scheduleErrorsByDate === 'object')
+    ? st.scheduleErrorsByDate
+    : {};
 
   // Helper for building proposed-buckets table from preview payload
   const buildProposedBucketTable = (preview) => {
@@ -40427,83 +41167,107 @@ function renderTimesheetFinanceTab(ctx) {
         const containerId = 'tsBucketPreview';
         const innerId = 'tsBucketPreviewInner';
 
-        bucketCardHtml = `
-          <div class="card">
-            <div class="row">
-              <label>Core hours & rates</label>
-              <div class="controls">
-                <span class="pill pill-bad">Proposed Buckets</span>
-                <div id="${containerId}">
-                  <div id="${innerId}">
-                    <span class="mini" id="tsBucketPreviewStatus">Loading bucket preview from Lines…</span>
+        // ✅ If schedule has errors (overlaps etc), do NOT call bucket-preview.
+        // Show actionable message instead.
+        if (scheduleHasErrors) {
+          const errDates = Object.keys(scheduleErrorsByDate || {});
+          const errHint = errDates.length
+            ? `Fix schedule errors on: ${errDates.map(d => enc(d)).join(', ')}`
+            : 'Fix schedule errors in Lines before previewing buckets.';
+
+          bucketCardHtml = `
+            <div class="card">
+              <div class="row">
+                <label>Core hours & rates</label>
+                <div class="controls">
+                  <span class="pill pill-bad">Proposed Buckets</span>
+                  <div class="hint mini" style="margin-top:6px;">
+                    <span class="warn-icon" title="Schedule errors">&#9888;</span>
+                    ${errHint}
                   </div>
                 </div>
               </div>
             </div>
-          </div>
-        `;
+          `;
+        } else {
+          bucketCardHtml = `
+            <div class="card">
+              <div class="row">
+                <label>Core hours & rates</label>
+                <div class="controls">
+                  <span class="pill pill-bad">Proposed Buckets</span>
+                  <div id="${containerId}">
+                    <div id="${innerId}">
+                      <span class="mini" id="tsBucketPreviewStatus">Loading bucket preview from Lines…</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          `;
 
-        try {
-          // Build additional_units_week from staged additionalRates
-          const additionalUnitsWeek = {};
-          if (st.additionalRates && typeof st.additionalRates === 'object') {
-            Object.entries(st.additionalRates).forEach(([code, r]) => {
-              if (!r) return;
-              const units = Number(r.units_week || 0);
-              if (!Number.isFinite(units) || units === 0) return;
-              additionalUnitsWeek[code] = units;
-            });
+          try {
+            // Build additional_units_week from staged additionalRates
+            const additionalUnitsWeek = {};
+            if (st.additionalRates && typeof st.additionalRates === 'object') {
+              Object.entries(st.additionalRates).forEach(([code, r]) => {
+                if (!r) return;
+                const units = Number(r.units_week || 0);
+                if (!Number.isFinite(units) || units === 0) return;
+                additionalUnitsWeek[code] = units;
+              });
+            }
+
+            const payload = {
+              timesheet_id:         tsId || null,
+              contract_week_id:     tsId ? null : (weekId || null),
+              actual_schedule_json: schedule,
+              additional_units_week: additionalUnitsWeek
+            };
+
+            const url = API('/api/timesheets/bucket-preview');
+            authFetch(url, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(payload)
+            })
+              .then(res => {
+                if (!res.ok) {
+                  return res.text().then(msg => {
+                    throw new Error(msg || 'Bucket preview failed');
+                  });
+                }
+                return res.json();
+              })
+              .then(data => {
+                try {
+                  const cacheKey = tsId || `cw:${weekId || 'unknown'}`;
+                  window.__tsBucketPreviewCache = window.__tsBucketPreviewCache || {};
+                  window.__tsBucketPreviewCache[String(cacheKey)] = { ok: true, data };
+                } catch {}
+                const container = document.getElementById(innerId);
+                if (container) {
+                  container.innerHTML = buildProposedBucketTable(data);
+                }
+              })
+              .catch(err => {
+                const msg = err?.message || 'Bucket preview failed';
+                try {
+                  const cacheKey = tsId || `cw:${weekId || 'unknown'}`;
+                  window.__tsBucketPreviewCache = window.__tsBucketPreviewCache || {};
+                  window.__tsBucketPreviewCache[String(cacheKey)] = { error: msg };
+                } catch {}
+                const statusEl = document.getElementById('tsBucketPreviewStatus');
+                if (statusEl) {
+                  const safeMsg = enc(msg);
+                  statusEl.innerHTML = `
+                    <span class="warn-icon" title="${safeMsg}">&#9888;</span>
+                  `;
+                }
+              });
+          } catch (e) {
+            if (LOGM) L('[FINANCE] bucket-preview wiring failed', e);
           }
-
-          const payload = {
-            timesheet_id:         tsId || null,
-            contract_week_id:     tsId ? null : (weekId || null),
-            actual_schedule_json: schedule,
-            additional_units_week: additionalUnitsWeek
-          };
-
-          const url = API('/api/timesheets/bucket-preview');
-          authFetch(url, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload)
-          })
-            .then(res => {
-              if (!res.ok) {
-                return res.text().then(msg => {
-                  throw new Error(msg || 'Bucket preview failed');
-                });
-              }
-              return res.json();
-            })
-            .then(data => {
-              try {
-                const cacheKey = tsId || `cw:${weekId || 'unknown'}`;
-                window.__tsBucketPreviewCache = window.__tsBucketPreviewCache || {};
-                window.__tsBucketPreviewCache[String(cacheKey)] = { ok: true, data };
-              } catch {}
-              const container = document.getElementById(innerId);
-              if (container) {
-                container.innerHTML = buildProposedBucketTable(data);
-              }
-            })
-            .catch(err => {
-              const msg = err?.message || 'Bucket preview failed';
-              try {
-                const cacheKey = tsId || `cw:${weekId || 'unknown'}`;
-                window.__tsBucketPreviewCache = window.__tsBucketPreviewCache || {};
-                window.__tsBucketPreviewCache[String(cacheKey)] = { error: msg };
-              } catch {}
-              const statusEl = document.getElementById('tsBucketPreviewStatus');
-              if (statusEl) {
-                const safeMsg = enc(msg);
-                statusEl.innerHTML = `
-                  <span class="warn-icon" title="${safeMsg}">&#9888;</span>
-                `;
-              }
-            });
-        } catch (e) {
-          if (LOGM) L('[FINANCE] bucket-preview wiring failed', e);
         }
       }
     }
@@ -41345,7 +42109,8 @@ const onSaveTimesheet = async () => {
         if (!date) return;
 
         out[date] ||= [];
-        out[date][idx] ||= { ref:'', start:'', end:'', break_start:'', break_end:'' };
+    out[date][idx] ||= { ref:'', start:'', end:'', break_start:'', break_end:'', break_mins:'' };
+
 
         tr.querySelectorAll('input[data-weekly-field]').forEach(inp => {
           const f = String(inp.getAttribute('data-weekly-field') || '');
@@ -41357,7 +42122,8 @@ const onSaveTimesheet = async () => {
       for (const d of Object.keys(out)) {
         const arr = Array.isArray(out[d]) ? out[d] : [];
         for (let i = 0; i < arr.length; i++) {
-          if (!arr[i]) arr[i] = { ref:'', start:'', end:'', break_start:'', break_end:'' };
+     if (!arr[i]) arr[i] = { ref:'', start:'', end:'', break_start:'', break_end:'', break_mins:'' };
+
         }
         out[d] = arr;
       }
@@ -41367,191 +42133,7 @@ const onSaveTimesheet = async () => {
     }
   };
 
-  // Build WEEKLY actual_schedule_json from weeklyLinesByDate (schedule-driven ONLY)
-  const buildWeeklyScheduleFromLines = (linesByDate, weekDays) => {
-    const errors = [];
-    const errorsByDate = {};
-
-    const hasAny = (v) => !!String(v || '').trim();
-    const hasBothOrNeither = (a, b) => (!hasAny(a) && !hasAny(b)) || (hasAny(a) && hasAny(b));
-
-    const pushErr = (ymd, msg) => {
-      const d = String(ymd || '').trim() || '_global';
-      const m = String(msg || '').trim() || 'Invalid schedule';
-      errors.push(`${d}: ${m}`);
-      (errorsByDate[d] ||= []).push(m);
-    };
-
-    const schedule = [];
-
-    for (const wd of weekDays) {
-      const ymd = wd.ymd;
-      const lines = Array.isArray(linesByDate?.[ymd]) ? linesByDate[ymd] : [];
-
-      let currentSeg = null;
-
-      for (let i = 0; i < lines.length; i++) {
-        const ln = lines[i] || {};
-        const ref   = String(ln.ref || '').trim();
-        const start = String(ln.start || '').trim();
-        const end   = String(ln.end || '').trim();
-        const bs    = String(ln.break_start || '').trim();
-        const be    = String(ln.break_end   || '').trim();
-
-        const hasShift = hasAny(start) || hasAny(end);
-        const hasBreak = hasAny(bs) || hasAny(be);
-
-        if (!hasShift && !hasBreak && !hasAny(ref)) continue;
-
-        if (hasShift && !hasBothOrNeither(start, end)) {
-          pushErr(ymd, `line ${i+1} has partial shift time (start/end).`);
-          continue;
-        }
-        if (hasBreak && !hasBothOrNeither(bs, be)) {
-          pushErr(ymd, `line ${i+1} has partial break time (break start/end).`);
-          continue;
-        }
-
-        if (hasShift) {
-          const s0 = parseHHMM(start);
-          const e0 = parseHHMM(end);
-          if (s0 == null || e0 == null || s0 === e0) {
-            pushErr(ymd, `line ${i+1} has invalid shift time.`);
-            continue;
-          }
-
-          const seg = {
-            date: ymd,
-            start,
-            end,
-            ref_num: ref || null,
-            breaks: []
-          };
-
-          if (hasBreak) seg.breaks.push({ start: bs, end: be });
-
-          schedule.push(seg);
-          currentSeg = seg;
-          continue;
-        }
-
-        if (hasBreak && !hasShift) {
-          if (!currentSeg) {
-            pushErr(ymd, `line ${i+1} has a break but no shift above it to attach to.`);
-            continue;
-          }
-          currentSeg.breaks ||= [];
-          currentSeg.breaks.push({ start: bs, end: be });
-          continue;
-        }
-      }
-    }
-
-    for (const seg of schedule) {
-      const bArr = Array.isArray(seg.breaks) ? seg.breaks : [];
-      let sum = 0;
-      const cleaned = [];
-
-      for (const b of bArr) {
-        const bs = String(b?.start || '').trim();
-        const be = String(b?.end   || '').trim();
-        if (!bs && !be) continue;
-
-        const d = diffMins(bs, be);
-        if (!Number.isFinite(d) || d <= 0) {
-          pushErr(seg.date, `invalid break window "${bs}"→"${be}".`);
-          continue;
-        }
-        sum += d;
-        cleaned.push({ start: bs, end: be });
-      }
-
-      seg.breaks = cleaned;
-
-      const primary = cleaned[0] || null;
-      seg.break_start = primary ? primary.start : '';
-      seg.break_end   = primary ? primary.end   : '';
-
-      seg.break_mins = Math.max(0, Math.round(sum));
-      seg.break_minutes = seg.break_mins;
-    }
-
-    const byDate = {};
-    for (const seg of schedule) {
-      const d = String(seg.date || '');
-      if (!d) continue;
-      (byDate[d] ||= []).push(seg);
-    }
-
-    for (const d of Object.keys(byDate)) {
-      const ranges = byDate[d]
-        .map((seg) => {
-          const s0 = parseHHMM(seg.start);
-          const e0 = parseHHMM(seg.end);
-          if (s0 == null || e0 == null || s0 === e0) return null;
-          const endAdj = (e0 > s0) ? e0 : (e0 + 1440);
-          return { s0, endAdj };
-        })
-        .filter(Boolean)
-        .sort((a, b) => a.s0 - b.s0);
-
-      for (let i = 1; i < ranges.length; i++) {
-        const prev = ranges[i - 1];
-        const cur  = ranges[i];
-        if (cur.s0 < prev.endAdj) {
-          pushErr(d, 'overlapping shifts detected.');
-          break;
-        }
-      }
-
-      for (const seg of byDate[d]) {
-        const s0 = parseHHMM(seg.start);
-        const e0 = parseHHMM(seg.end);
-        if (s0 == null || e0 == null || s0 === e0) continue;
-        const endAdj = (e0 > s0) ? e0 : (e0 + 1440);
-
-        const br = (Array.isArray(seg.breaks) ? seg.breaks : [])
-          .map((b) => {
-            const bs0 = parseHHMM(b.start);
-            const be0 = parseHHMM(b.end);
-            if (bs0 == null || be0 == null || bs0 === be0) return null;
-
-            let bsAdj = bs0;
-            if (bsAdj < s0) bsAdj += 1440;
-
-            let beAdj = be0;
-            if (beAdj < bsAdj) beAdj += 1440;
-
-            return { bsAdj, beAdj };
-          })
-          .filter(Boolean)
-          .sort((a, b) => a.bsAdj - b.bsAdj);
-
-        for (const b of br) {
-          if (b.bsAdj < s0 || b.beAdj > endAdj || b.beAdj <= b.bsAdj) {
-            pushErr(d, 'break outside shift window.');
-            break;
-          }
-        }
-
-        for (let i = 1; i < br.length; i++) {
-          const p = br[i - 1], c = br[i];
-          if (c.bsAdj < p.beAdj) {
-            pushErr(d, 'overlapping breaks detected.');
-            break;
-          }
-        }
-      }
-    }
-
-    return {
-      ok: errors.length === 0,
-      errors,
-      errorsByDate,
-      schedule: sortScheduleStable(schedule)
-    };
-  };
-
+  
   // ─────────────────────────────────────────────────────────────
   // Context flags
   // ─────────────────────────────────────────────────────────────
@@ -41629,37 +42211,57 @@ const onSaveTimesheet = async () => {
   // Build schedule from lines if we can; otherwise fall back to existing schedule/baseline (no-op safe).
   let scheduleToSave = null;
 
-  if (isWeeklyManualContext && weekDays.length && linesByDate) {
-    const rebuilt = buildWeeklyScheduleFromLines(linesByDate, weekDays);
+if (isWeeklyManualContext && weekDays.length && linesByDate) {
+  if (typeof buildWeeklyScheduleFromLinesAndValidate !== 'function') {
+    alert('Internal error: buildWeeklyScheduleFromLinesAndValidate is missing.');
+    GE();
+    return { ok: false };
+  }
 
-    if (!rebuilt.ok) {
-      st.scheduleHasErrors = true;
-      st.scheduleErrorsByDate = (rebuilt.errorsByDate && typeof rebuilt.errorsByDate === 'object') ? rebuilt.errorsByDate : {};
+  const out = buildWeeklyScheduleFromLinesAndValidate(
+    linesByDate,
+    weekDays,
+    { allowOvernight: true, allowBreakMins: true }
+  );
 
-      try {
-        const fr = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
-        if (fr && fr.entity === 'timesheets' && fr.currentTabKey === 'lines') {
-          fr._suppressDirty = true;
-          await fr.setTab('lines');
-          fr._suppressDirty = false;
-          fr._updateButtons && fr._updateButtons();
-        }
-      } catch {}
+  if (out && out.hasErrors) {
+    st.scheduleHasErrors = true;
+    st.scheduleErrorsByDate = (out.errorsByDate && typeof out.errorsByDate === 'object') ? out.errorsByDate : {};
 
-      alert(
-        'Fix these schedule issues first:\n\n' +
-        rebuilt.errors.slice(0, 12).map(x => `- ${x}`).join('\n') +
-        (rebuilt.errors.length > 12 ? `\n\n(and ${rebuilt.errors.length - 12} more)` : '')
-      );
-      GE();
-      return { ok: false };
-    }
+    try {
+      const fr = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
+      if (fr && fr.entity === 'timesheets') {
+        fr._suppressDirty = true;
+        await fr.setTab('lines');
+        fr._suppressDirty = false;
+        fr._updateButtons && fr._updateButtons();
+      }
+    } catch {}
 
-    st.scheduleHasErrors = false;
-    st.scheduleErrorsByDate = {};
+    // Build a friendly error list (cap at 12)
+    const flat = [];
+    try {
+      for (const [d, msgs] of Object.entries(st.scheduleErrorsByDate || {})) {
+        (Array.isArray(msgs) ? msgs : []).forEach(m => flat.push(`${d}: ${m}`));
+      }
+    } catch {}
 
-    scheduleToSave = rebuilt.schedule;
-  } else if (isWeeklyManualContext) {
+    alert(
+      'Fix these schedule issues first:\n\n' +
+      flat.slice(0, 12).map(x => `- ${x}`).join('\n') +
+      (flat.length > 12 ? `\n\n(and ${flat.length - 12} more)` : '')
+    );
+
+    GE();
+    return { ok: false };
+  }
+
+  st.scheduleHasErrors = false;
+  st.scheduleErrorsByDate = {};
+
+  scheduleToSave = Array.isArray(out?.schedule) ? out.schedule : [];
+}
+ else if (isWeeklyManualContext) {
     const fallback = normaliseScheduleJson(st.schedule) || baselineSorted;
     scheduleToSave = sortScheduleStable(Array.isArray(fallback) ? fallback : []);
   }
