@@ -23307,19 +23307,21 @@ try {
   }
 
   // Accept builder output only if it's a real object
-  if (built && typeof built === 'object') {
-    mc.timesheetMeta = built;
-  } else {
-    // Fallback meta rebuild (sufficient for footer gating)
-    mc.timesheetMeta = (mc.timesheetMeta && typeof mc.timesheetMeta === 'object') ? mc.timesheetMeta : {};
-    const ts    = (fresh && fresh.timesheet) || {};
-    const cw    = (fresh && fresh.contract_week) || {};
-    const tsfin = (fresh && fresh.tsfin) || {};
+ if (built && typeof built === 'object') {
+  mc.timesheetMeta = built;
+} else {
+  mc.timesheetMeta = (mc.timesheetMeta && typeof mc.timesheetMeta === 'object') ? mc.timesheetMeta : {};
+}
 
-    const sheetScope =
-      String(fresh?.sheet_scope || ts.sheet_scope || mc.data?.sheet_scope || '').toUpperCase();
+// ✅ Canonicalise mode fields ALWAYS (builder or fallback)
+const ts    = fresh?.timesheet || {};
+const cw    = fresh?.contract_week || {};
+const tsfin = fresh?.tsfin || {};
 
- const cwModeSnapshot =
+const sheetScope =
+  String(fresh?.sheet_scope || ts.sheet_scope || mc.data?.sheet_scope || '').toUpperCase();
+
+const cwModeSnapshot =
   String(
     cw.submission_mode_snapshot ||
     fresh?.cw_submission_mode_snapshot ||
@@ -23329,27 +23331,28 @@ try {
 
 const hasTsNow = !!(ts.timesheet_id || mc.data?.timesheet_id);
 
-// TS mode only meaningful when we have a real timesheet
 const subModeTs =
   String(ts.submission_mode || mc.data?.submission_mode || '').toUpperCase();
 
-// ✅ Planned-week uses snapshot; real TS uses ts.submission_mode
+// ✅ THIS is the missing definition
 const subModeEff =
-  hasTsNow ? subModeTs : (cwModeSnapshot || subModeTs || '');
+  hasTsNow ? subModeTs : (cwModeSnapshot || '');
 
-const hasTs   = hasTsNow;
-const hasWeek = !!(mc.data?.contract_week_id || cw.id || fresh?.contract_week_id);
+const hasWeek =
+  !!(mc.data?.contract_week_id || cw.id || fresh?.contract_week_id);
 
+mc.timesheetMeta = (mc.timesheetMeta && typeof mc.timesheetMeta === 'object') ? mc.timesheetMeta : {};
 mc.timesheetMeta.sheetScope = sheetScope;
-mc.timesheetMeta.subMode = subModeEff;                 // ✅ FIX
+mc.timesheetMeta.subMode = subModeEff;
 mc.timesheetMeta.cw_submission_mode_snapshot = cwModeSnapshot;
+mc.timesheetMeta.hasTs = hasTsNow;
+mc.timesheetMeta.isPlannedWeek = (!hasTsNow && hasWeek);
 
-    mc.timesheetMeta.hasTs = hasTs;
-    mc.timesheetMeta.isPlannedWeek = (!hasTs && hasWeek);
+// keep these aligned too (safe even if builder sets them)
+mc.timesheetMeta.isPaid     = !!(tsfin.paid_at_utc || mc.data?.paid_at_utc);
+mc.timesheetMeta.isInvoiced = !!(tsfin.locked_by_invoice_id || mc.data?.locked_by_invoice_id);
 
-    mc.timesheetMeta.isPaid = !!(tsfin.paid_at_utc || mc.data?.paid_at_utc);
-    mc.timesheetMeta.isInvoiced = !!(tsfin.locked_by_invoice_id || mc.data?.locked_by_invoice_id);
-  }
+  
 
   // ✅ Always enforce expected_timesheet_id after rebuild
   // Priority: current modal id → previous expected → existing meta value
@@ -23422,13 +23425,16 @@ try {
       ''
     ).toUpperCase();
 
-  if (snap) {
-    mc.data.submission_mode_snapshot = snap;
-    mc.data.submission_mode = snap; // legacy compat
-    // optional: keep details-level compat too (if anything reads it)
-    mc.timesheetDetails = mc.timesheetDetails || {};
-    mc.timesheetDetails.cw_submission_mode_snapshot = snap;
-  }
+ if (snap) {
+  mc.data.submission_mode_snapshot = snap;
+
+  // ✅ DO NOT overwrite mc.data.submission_mode for planned weeks
+  // (it belongs to real timesheets; snapshot is separate)
+
+  mc.timesheetDetails = mc.timesheetDetails || {};
+  mc.timesheetDetails.cw_submission_mode_snapshot = snap;
+}
+
 } catch {}
 
 
@@ -23447,38 +23453,50 @@ try {
   const cw2  = det.contract_week || {};
   const tsfin= det.tsfin || {};
 
-  mc.timesheetMeta = (mc.timesheetMeta && typeof mc.timesheetMeta === 'object') ? mc.timesheetMeta : {};
+ mc.timesheetMeta = (mc.timesheetMeta && typeof mc.timesheetMeta === 'object') ? mc.timesheetMeta : {};
 
- const sheetScope =
-  String(det.sheet_scope || mc.data?.sheet_scope || ts.sheet_scope || '').toUpperCase();
+// ✅ Canonicalise mode fields ALWAYS (planned week branch)
+const tsX    = det?.timesheet || {};
+const cwX    = det?.contract_week || {};
+const tsfinX = det?.tsfin || tsfin || {}; // keep compatibility if you already have tsfin
+
+const sheetScope =
+  String(det.sheet_scope || mc.data?.sheet_scope || tsX.sheet_scope || '').toUpperCase();
 
 const cwModeSnapshot =
   String(
-    cw2.submission_mode_snapshot ||
+    cwX.submission_mode_snapshot ||
     mc.data?.submission_mode_snapshot ||
     ''
   ).toUpperCase();
 
-const hasTs = !!(ts.timesheet_id || mc.data?.timesheet_id);
-const hasWeek = !!(mc.data?.contract_week_id || cw2.id || det.contract_week_id);
+const hasTsNow =
+  !!(tsX.timesheet_id || mc.data?.timesheet_id);
 
+const hasWeekNow =
+  !!(mc.data?.contract_week_id || cwX.id || det.contract_week_id);
+
+// TS mode only meaningful when we have a real timesheet
 const subModeTs =
-  String(ts.submission_mode || mc.data?.submission_mode || '').toUpperCase();
+  String(tsX.submission_mode || mc.data?.submission_mode || '').toUpperCase();
 
 // ✅ planned-week must use snapshot
 const subModeEff =
-  hasTs ? subModeTs : (cwModeSnapshot || '');
+  hasTsNow ? subModeTs : (cwModeSnapshot || '');
 
 mc.timesheetMeta.sheetScope = sheetScope;
 mc.timesheetMeta.subMode = subModeEff;
 mc.timesheetMeta.cw_submission_mode_snapshot = cwModeSnapshot;
 
-mc.timesheetMeta.hasTs = hasTs;
-mc.timesheetMeta.isPlannedWeek = (!hasTs && hasWeek);
+mc.timesheetMeta.hasTs = hasTsNow;
+mc.timesheetMeta.isPlannedWeek = (!hasTsNow && hasWeekNow);
 
+mc.timesheetMeta.isPaid =
+  !!(tsfinX.paid_at_utc || mc.data?.paid_at_utc);
 
-  mc.timesheetMeta.isPaid = !!(tsfin.paid_at_utc || mc.data?.paid_at_utc);
-  mc.timesheetMeta.isInvoiced = !!(tsfin.locked_by_invoice_id || mc.data?.locked_by_invoice_id);
+mc.timesheetMeta.isInvoiced =
+  !!(tsfinX.locked_by_invoice_id || mc.data?.locked_by_invoice_id);
+
 
   // ✅ Always enforce expected_timesheet_id after rebuild
   mc.timesheetMeta.expected_timesheet_id =
