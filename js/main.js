@@ -23273,6 +23273,20 @@ function ensureTsRefreshAndRepaintOverview() {
 
  mc.timesheetDetails = fresh;
 
+// ✅ keep mc.data aligned for any legacy renderers that read row.submission_mode
+try {
+  mc.data = mc.data || {};
+  const ts2 = fresh?.timesheet || {};
+  const cw2 = fresh?.contract_week || {};
+
+  const subMode = String(ts2.submission_mode || '').toUpperCase();
+  if (subMode) mc.data.submission_mode = subMode;
+
+  const snap = String(cw2.submission_mode_snapshot || fresh?.cw_submission_mode_snapshot || '').toUpperCase();
+  if (snap) mc.data.submission_mode_snapshot = snap;
+} catch {}
+
+
 // ✅ Option A: rebuild timesheetMeta from refreshed details (safe)
 // - Preserve expected_timesheet_id even if a builder returns a new object without it
 // - If a builder returns null/undefined/non-object, fall back to local rebuild
@@ -23305,23 +23319,30 @@ try {
     const sheetScope =
       String(fresh?.sheet_scope || ts.sheet_scope || mc.data?.sheet_scope || '').toUpperCase();
 
-    const cwModeSnapshot =
-      String(
-        cw.submission_mode_snapshot ||
-        fresh?.cw_submission_mode_snapshot ||
-        mc.data?.submission_mode_snapshot ||
-        ''
-      ).toUpperCase();
+ const cwModeSnapshot =
+  String(
+    cw.submission_mode_snapshot ||
+    fresh?.cw_submission_mode_snapshot ||
+    mc.data?.submission_mode_snapshot ||
+    ''
+  ).toUpperCase();
 
-    const subMode =
-      String(ts.submission_mode || mc.data?.submission_mode || cwModeSnapshot || '').toUpperCase();
+const hasTsNow = !!(ts.timesheet_id || mc.data?.timesheet_id);
 
-    const hasTs   = !!(ts.timesheet_id || mc.data?.timesheet_id);
-    const hasWeek = !!(mc.data?.contract_week_id || cw.id || fresh?.contract_week_id);
+// TS mode only meaningful when we have a real timesheet
+const subModeTs =
+  String(ts.submission_mode || mc.data?.submission_mode || '').toUpperCase();
 
-    mc.timesheetMeta.sheetScope = sheetScope;
-    mc.timesheetMeta.subMode = subMode;
-    mc.timesheetMeta.cw_submission_mode_snapshot = cwModeSnapshot;
+// ✅ Planned-week uses snapshot; real TS uses ts.submission_mode
+const subModeEff =
+  hasTsNow ? subModeTs : (cwModeSnapshot || subModeTs || '');
+
+const hasTs   = hasTsNow;
+const hasWeek = !!(mc.data?.contract_week_id || cw.id || fresh?.contract_week_id);
+
+mc.timesheetMeta.sheetScope = sheetScope;
+mc.timesheetMeta.subMode = subModeEff;                 // ✅ FIX
+mc.timesheetMeta.cw_submission_mode_snapshot = cwModeSnapshot;
 
     mc.timesheetMeta.hasTs = hasTs;
     mc.timesheetMeta.isPlannedWeek = (!hasTs && hasWeek);
@@ -23348,17 +23369,31 @@ try {
         // planned week: refetch contract_week so submission_mode_snapshot etc is current
         try {
           if (typeof authFetch === 'function' && typeof API === 'function') {
-            const qs = new URLSearchParams();
-            if (mc.data?.contract_id) qs.set('contract_id', mc.data.contract_id);
+     const qs = new URLSearchParams();
 
-            const we = mc.data?.contract_week_ending_date || mc.data?.week_ending_date || null;
-            if (we) {
-              qs.set('week_ending_from', we);
-              qs.set('week_ending_to', we);
-            }
-            qs.set('include_plan', 'true');
+// ✅ fall back to existing loaded CW if mc.data is missing
+const contractId =
+  mc.data?.contract_id ||
+  mc.timesheetDetails?.contract_week?.contract_id ||
+  null;
 
-            const res = await authFetch(API(`/api/contract-weeks?${qs.toString()}`));
+if (contractId) qs.set('contract_id', contractId);
+
+const we =
+  mc.data?.contract_week_ending_date ||
+  mc.data?.week_ending_date ||
+  mc.timesheetDetails?.contract_week?.week_ending_date ||
+  null;
+
+if (we) {
+  qs.set('week_ending_from', we);
+  qs.set('week_ending_to', we);
+}
+
+qs.set('include_plan', 'true');
+
+const res = await authFetch(API(`/api/contract-weeks?${qs.toString()}`));
+
 
             let rows = [];
             try {
@@ -23372,8 +23407,31 @@ try {
               null;
 
  mc.timesheetDetails = mc.timesheetDetails || {};
-mc.timesheetDetails.contract_week = cw;
+if (cw) mc.timesheetDetails.contract_week = cw;   // ✅ only overwrite if found
 mc.timesheetDetails.contract_week_id = weekId;
+
+
+// ✅ Keep modalCtx.data in sync so any legacy callers using mc.data.* aren't stale
+try {
+  mc.data = mc.data || {};
+  const snap =
+    String(
+      cw?.submission_mode_snapshot ||
+      mc.timesheetDetails?.contract_week?.submission_mode_snapshot ||
+      mc.data?.submission_mode_snapshot ||
+      ''
+    ).toUpperCase();
+
+  if (snap) {
+    mc.data.submission_mode_snapshot = snap;
+    mc.data.submission_mode = snap; // legacy compat
+    // optional: keep details-level compat too (if anything reads it)
+    mc.timesheetDetails = mc.timesheetDetails || {};
+    mc.timesheetDetails.cw_submission_mode_snapshot = snap;
+  }
+} catch {}
+
+
 
 // ✅ Option A: rebuild timesheetMeta for planned weeks too (safe)
 // - Ensure timesheetMeta is an object
@@ -23391,29 +23449,33 @@ try {
 
   mc.timesheetMeta = (mc.timesheetMeta && typeof mc.timesheetMeta === 'object') ? mc.timesheetMeta : {};
 
-  const sheetScope =
-    String(det.sheet_scope || mc.data?.sheet_scope || ts.sheet_scope || '').toUpperCase();
+ const sheetScope =
+  String(det.sheet_scope || mc.data?.sheet_scope || ts.sheet_scope || '').toUpperCase();
 
-  const cwModeSnapshot =
-    String(
-      cw2.submission_mode_snapshot ||
-      det.cw_submission_mode_snapshot ||
-      mc.data?.submission_mode_snapshot ||
-      ''
-    ).toUpperCase();
+const cwModeSnapshot =
+  String(
+    cw2.submission_mode_snapshot ||
+    mc.data?.submission_mode_snapshot ||
+    ''
+  ).toUpperCase();
 
-  const subMode =
-    String(ts.submission_mode || mc.data?.submission_mode || cwModeSnapshot || '').toUpperCase();
+const hasTs = !!(ts.timesheet_id || mc.data?.timesheet_id);
+const hasWeek = !!(mc.data?.contract_week_id || cw2.id || det.contract_week_id);
 
-  const hasTs   = !!(ts.timesheet_id || mc.data?.timesheet_id);
-  const hasWeek = !!(mc.data?.contract_week_id || cw2.id || det.contract_week_id);
+const subModeTs =
+  String(ts.submission_mode || mc.data?.submission_mode || '').toUpperCase();
 
-  mc.timesheetMeta.sheetScope = sheetScope;
-  mc.timesheetMeta.subMode = subMode;
-  mc.timesheetMeta.cw_submission_mode_snapshot = cwModeSnapshot;
+// ✅ planned-week must use snapshot
+const subModeEff =
+  hasTs ? subModeTs : (cwModeSnapshot || '');
 
-  mc.timesheetMeta.hasTs = hasTs;
-  mc.timesheetMeta.isPlannedWeek = (!hasTs && hasWeek);
+mc.timesheetMeta.sheetScope = sheetScope;
+mc.timesheetMeta.subMode = subModeEff;
+mc.timesheetMeta.cw_submission_mode_snapshot = cwModeSnapshot;
+
+mc.timesheetMeta.hasTs = hasTs;
+mc.timesheetMeta.isPlannedWeek = (!hasTs && hasWeek);
+
 
   mc.timesheetMeta.isPaid = !!(tsfin.paid_at_utc || mc.data?.paid_at_utc);
   mc.timesheetMeta.isInvoiced = !!(tsfin.locked_by_invoice_id || mc.data?.locked_by_invoice_id);
@@ -26160,11 +26222,55 @@ if (btnTsProcess) {
     } catch {
       auWeek = {};
     }
+const sanitizeSchedule = (arr) => {
+  const out = Array.isArray(arr) ? JSON.parse(JSON.stringify(arr)) : [];
+  for (const seg of out) {
+    if (!seg || typeof seg !== 'object') continue;
 
-    const payload = {
-      actual_schedule_json: scheduleX,
-      additional_units_week: auWeek
-    };
+    const breaksArr = Array.isArray(seg.breaks) ? seg.breaks.filter(b => b && (b.start || b.end)) : [];
+    const hasBreakWindows =
+      breaksArr.length > 0 ||
+      String(seg.break_start || '').trim() ||
+      String(seg.break_end || '').trim();
+
+    if (hasBreakWindows) {
+      // ✅ Break windows win → strip mins fields
+      delete seg.break_minutes;
+      delete seg.break_mins;
+
+      // also strip legacy mins aliases if you have any
+      delete seg.breakMin;
+      delete seg.breakMinutes;
+
+      // if legacy break_start/end exist, ensure they are represented in breaks[]
+      if (!breaksArr.length) {
+        const bs = String(seg.break_start || '').trim();
+        const be = String(seg.break_end || '').trim();
+        if (bs || be) seg.breaks = [{ start: bs, end: be }];
+      } else {
+        seg.breaks = breaksArr;
+      }
+    } else {
+      // ✅ No windows → keep minutes if present, strip breaks fields
+      if (seg.break_minutes != null) {
+        const n = Number(seg.break_minutes);
+        if (!Number.isFinite(n) || n <= 0) delete seg.break_minutes;
+        else seg.break_minutes = Math.floor(n);
+      }
+      delete seg.breaks;
+      delete seg.break_start;
+      delete seg.break_end;
+      delete seg.break_mins;
+    }
+  }
+  return out;
+};
+
+const payload = {
+  actual_schedule_json: sanitizeSchedule(scheduleX),
+  additional_units_week: auWeek
+};
+    
 
     try {
       const result = await manualUpsertContractWeek(weekIdX, payload);
@@ -40027,7 +40133,15 @@ function renderTimesheetOverviewTab(ctx) {
 
   if (!stageBadges.length) addStage('Unknown', 'pill-info');
 
-  const qrStatus = String(details.qr_status || ts.qr_status || '').toUpperCase();
+  // ✅ Only treat as QR if it's actually a QR timesheet (prevents "awaiting signature" on normal manual)
+const isQr =
+  !!(row?.is_qr) ||
+  !!(ts?.is_qr) ||
+  !!(actionFlags?.is_qr);
+
+const qrStatus = isQr
+  ? String(details.qr_status || ts.qr_status || '').toUpperCase()
+  : '';
 
   // ✅ FIX: scenario fallback if actionFlags missing
   const computeQrScenarioFallback = () => {
@@ -40088,8 +40202,9 @@ function renderTimesheetOverviewTab(ctx) {
       return 'QR';
     }
 
-    if (subMode === 'ELECTRONIC') return 'Electronic';
-    return 'Manual';
+ if (subModeEff === 'ELECTRONIC') return 'Electronic';
+return 'Manual';
+
   })();
 
   const routePillClass =
@@ -40175,17 +40290,18 @@ function renderTimesheetOverviewTab(ctx) {
     !locked &&
     (cwModeSnapshot === 'ELECTRONIC');
 
-  const isWeeklyElectronicWithTs =
-    isWeekly &&
-    !!tsId &&
-    !locked &&
-    (subMode === 'ELECTRONIC');
+const isWeeklyElectronicWithTs =
+  isWeekly &&
+  !!tsId &&
+  !locked &&
+  (subModeEff === 'ELECTRONIC');
 
-  const isDailyElectronicWithTs =
-    isDaily &&
-    !!tsId &&
-    !locked &&
-    (subMode === 'ELECTRONIC');
+const isDailyElectronicWithTs =
+  isDaily &&
+  !!tsId &&
+  !locked &&
+  (subModeEff === 'ELECTRONIC');
+
 
   // ✅ Convert to manual (weekly existing OR weekly planned electronic OR daily existing)
   if (isWeeklyElectronicWithTs || isPlannedWeeklyElectronic || isDailyElectronicWithTs) {
