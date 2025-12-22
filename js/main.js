@@ -18312,7 +18312,6 @@ function buildWeeklyScheduleFromLinesAndValidate(weeklyLinesByDate, weekDays, op
     if (!ps || !pe) return null;
 
     let bs = ps.mins;
-    // If shift crosses midnight, break after midnight could be < shift start; bump by +1440 until inside timeline.
     while (bs < shiftStartMins) bs += 1440;
 
     let be = pe.mins;
@@ -18330,10 +18329,8 @@ function buildWeeklyScheduleFromLinesAndValidate(weeklyLinesByDate, weekDays, op
   };
 
   // Convert a shift into one or two intervals within a 0..1440 day (for overlap detection)
-  // Interval format is [start,end) with end in [0..1440]
   const dayIntervalsForShift = (startMins, endMinsRaw, isOvernight) => {
     if (!isOvernight) return [[startMins, endMinsRaw]];
-    // overnight covers [start..1440) and [0..end)
     return [[startMins, 1440], [0, endMinsRaw]];
   };
 
@@ -18353,16 +18350,21 @@ function buildWeeklyScheduleFromLinesAndValidate(weeklyLinesByDate, weekDays, op
 
       const bStart = str(ln.break_start);
       const bEnd   = str(ln.break_end);
-      const bMins  = parseBreakMins(ln.break_mins);
+      const hasBreakWindow = !!(bStart || bEnd);
+
+      // ✅ SIMPLE RULE:
+      // If a break window exists, ignore break_mins entirely (it can be display-only).
+      let bMins = 0;
+      if (!hasBreakWindow) {
+        bMins = parseBreakMins(ln.break_mins);
+        if (Number.isNaN(bMins) && str(ln.break_mins)) {
+          err(ymd, `Line ${i + 1}: Break (mins) must be a number (e.g. 30)`);
+        }
+      }
 
       const hasShift = !!(startRaw || endRaw);
-      const hasBreakWindow = !!(bStart || bEnd);
       const hasBreakMins = Number.isFinite(bMins) && bMins > 0;
-      const hasAnyBreak = hasBreakWindow || hasBreakMins || (Number.isNaN(bMins) && str(ln.break_mins));
-
-      if (Number.isNaN(bMins) && str(ln.break_mins)) {
-        err(ymd, `Line ${i + 1}: Break (mins) must be a number (e.g. 30)`);
-      }
+      const hasAnyBreak = hasBreakWindow || hasBreakMins;
 
       if (hasShift) {
         cur = {
@@ -18370,25 +18372,22 @@ function buildWeeklyScheduleFromLinesAndValidate(weeklyLinesByDate, weekDays, op
           ref_num: ref,
           startRaw,
           endRaw,
-          // break collection for this shift
-          breakWindows: [],     // [{ lineIdx, startRaw, endRaw }]
+          breakWindows: [], // [{ lineIdx, startRaw, endRaw }]
           breakMinsTotal: 0,
           hasWindow: false,
           hasMins: false
         };
         shifts.push(cur);
 
-        // Break specified on the shift line itself
         if (hasBreakWindow) {
           cur.hasWindow = true;
           cur.breakWindows.push({ lineIdx: i, startRaw: bStart, endRaw: bEnd });
-        }
-        if (hasBreakMins) {
+          if (!bStart || !bEnd) {
+            err(ymd, `Line ${i + 1}: break start/end must both be filled (or both blank)`);
+          }
+        } else if (hasBreakMins) {
           cur.hasMins = true;
           cur.breakMinsTotal += bMins;
-        }
-        if (hasBreakWindow && (!bStart || !bEnd)) {
-          err(ymd, `Line ${i + 1}: break start/end must both be filled (or both blank)`);
         }
       } else if (hasAnyBreak) {
         // Break-only line
@@ -18403,8 +18402,7 @@ function buildWeeklyScheduleFromLinesAndValidate(weeklyLinesByDate, weekDays, op
           if (!bStart || !bEnd) {
             err(ymd, `Line ${i + 1}: break start/end must both be filled (or both blank)`);
           }
-        }
-        if (hasBreakMins) {
+        } else if (hasBreakMins) {
           cur.hasMins = true;
           cur.breakMinsTotal += bMins;
         }
@@ -18412,7 +18410,7 @@ function buildWeeklyScheduleFromLinesAndValidate(weeklyLinesByDate, weekDays, op
     }
 
     // Validate shifts + build schedule segments
-    const validShiftRecs = []; // for overlap detection: { lineIdx, startMins, endMinsRaw, overnight, parts }
+    const validShiftRecs = [];
 
     for (const sh of shifts) {
       const hasStart = !!sh.startRaw;
@@ -18422,7 +18420,7 @@ function buildWeeklyScheduleFromLinesAndValidate(weeklyLinesByDate, weekDays, op
         err(ymd, `Line ${sh.lineIdx + 1}: Start and End must both be filled (or both blank)`);
         continue;
       }
-      if (!hasStart && !hasEnd) continue; // blank shift row
+      if (!hasStart && !hasEnd) continue;
 
       const ps = parseTime(sh.startRaw);
       const pe = parseTime(sh.endRaw);
@@ -18448,12 +18446,11 @@ function buildWeeklyScheduleFromLinesAndValidate(weeklyLinesByDate, weekDays, op
         continue;
       }
 
-      // Disallow mixing window breaks with break minutes for the same shift
+      // Disallow mixing (defensive; should not happen now)
       if (sh.hasWindow && sh.hasMins) {
         err(ymd, `Line ${sh.lineIdx + 1}: use either Break (mins) OR Break start/end times (not both)`);
       }
 
-      // Build breaks[] or break_minutes
       let outBreaks = [];
       let outBreakMinutes = null;
 
@@ -18463,8 +18460,6 @@ function buildWeeklyScheduleFromLinesAndValidate(weeklyLinesByDate, weekDays, op
         for (const bw of sh.breakWindows) {
           const bs = str(bw.startRaw);
           const be = str(bw.endRaw);
-
-          // pair completeness already error'd; skip if incomplete
           if (!!bs !== !!be) continue;
           if (!bs && !be) continue;
 
@@ -18501,22 +18496,14 @@ function buildWeeklyScheduleFromLinesAndValidate(weeklyLinesByDate, weekDays, op
           if (bm >= shiftDur) {
             err(ymd, `Line ${sh.lineIdx + 1}: Break (mins) must be less than shift duration`);
           } else {
-            outBreakMinutes = Math.floor(bm);
+            outBreakMinutes = Math.floor(bm); // ✅ numeric integer
           }
         }
       }
 
-      // Record for overlap detection (using day-based split for overnight)
       const parts = dayIntervalsForShift(startMins, endMinsRaw, overnight);
-      validShiftRecs.push({
-        lineIdx: sh.lineIdx,
-        startMins,
-        endMinsRaw,
-        overnight,
-        parts
-      });
+      validShiftRecs.push({ lineIdx: sh.lineIdx, startMins, endMinsRaw, overnight, parts });
 
-      // Emit schedule segment
       const seg = {
         date: ymd,
         start: ps.hhmm,
@@ -18524,16 +18511,17 @@ function buildWeeklyScheduleFromLinesAndValidate(weeklyLinesByDate, weekDays, op
         ref_num: str(sh.ref_num)
       };
 
-      if (outBreakMinutes != null && outBreakMinutes > 0) {
-        seg.break_minutes = outBreakMinutes;
-      } else if (outBreaks.length) {
+      // ✅ never emit both
+      if (outBreaks.length) {
         seg.breaks = outBreaks;
+      } else if (outBreakMinutes != null && outBreakMinutes > 0) {
+        seg.break_minutes = outBreakMinutes;
       }
 
       schedule.push(seg);
     }
 
-    // Shift overlap detection (handles overnight by splitting into 0..1440 intervals)
+    // Shift overlap detection
     for (let a = 0; a < validShiftRecs.length; a++) {
       for (let b = a + 1; b < validShiftRecs.length; b++) {
         const A = validShiftRecs[a];
@@ -18557,7 +18545,6 @@ function buildWeeklyScheduleFromLinesAndValidate(weeklyLinesByDate, weekDays, op
     }
   }
 
-  // Sort schedule for stable output: date then start
   const sortKeyMins = (hhmm) => (parseTime(hhmm)?.mins ?? 0);
   schedule.sort((a, b) => {
     const da = str(a.date);
@@ -18567,7 +18554,6 @@ function buildWeeklyScheduleFromLinesAndValidate(weeklyLinesByDate, weekDays, op
   });
 
   const hasErrors = Object.keys(errorsByDate).length > 0;
-
   return { schedule, hasErrors, errorsByDate };
 }
 
@@ -38740,22 +38726,36 @@ _syncBreakMinsLock(date, idx, ln) {
 
            ln[field] = String(el.value || '');
 
-// If user is using break start/end on this line, clear break mins (avoid "mix" validation errors)
+// If user is using break start/end on this line:
+// - keep break_mins OUT of state (avoid mixing)
+// - but auto-populate the break_mins *display* so the user can see the duration
 if (field === 'break_start' || field === 'break_end') {
-  const hasWindow = !!(String(ln.break_start || '').trim() || String(ln.break_end || '').trim());
-  if (hasWindow) {
-    ln.break_mins = '';
-    try {
-      const minsEl = document.querySelector(
-        `input[data-weekly-field="break_mins"][data-date="${CSS.escape(date)}"][data-line-idx="${idx}"]`
-      );
-      if (minsEl) minsEl.value = '';
-    } catch {}
-  }
+  const bs = String(ln.break_start || '').trim();
+  const be = String(ln.break_end   || '').trim();
+  const hasWindow = !!(bs || be);
+
+  // Always keep mins empty in state when a window is used
+  if (hasWindow) ln.break_mins = '';
+
+  // Auto-fill the UI mins box (read-only/disabled is fine; value still shows)
+  try {
+    const minsEl = document.querySelector(
+      `input[data-weekly-field="break_mins"][data-date="${CSS.escape(date)}"][data-line-idx="${idx}"]`
+    );
+    if (minsEl) {
+      // Only show mins when BOTH start+end are present and valid
+      const d = (bs && be) ? this._diff(bs, be) : null; // minutes, supports overnight
+      minsEl.value = (Number.isFinite(d) && d >= 0) ? String(d) : '';
+    }
+  } catch {}
+
+  // ✅ lock/unlock break mins for THIS line only
+  this._syncBreakMinsLock(date, idx, ln);
+} else {
+  // keep existing behaviour for other fields
+  this._syncBreakMinsLock(date, idx, ln);
 }
 
-// ✅ lock/unlock break mins for THIS line only
-this._syncBreakMinsLock(date, idx, ln);
 
 // ✅ paid hours updates live, including after tab-away (onBlur calls onInput)
 this._recalcPaidForDate(st, date);
@@ -42112,11 +42112,21 @@ const onSaveTimesheet = async () => {
     out[date][idx] ||= { ref:'', start:'', end:'', break_start:'', break_end:'', break_mins:'' };
 
 
-        tr.querySelectorAll('input[data-weekly-field]').forEach(inp => {
-          const f = String(inp.getAttribute('data-weekly-field') || '');
-          if (!f) return;
-          out[date][idx][f] = String(inp.value || '').trim();
-        });
+      tr.querySelectorAll('input[data-weekly-field]').forEach(inp => {
+  const f = String(inp.getAttribute('data-weekly-field') || '');
+  if (!f) return;
+
+  // ✅ don’t let UI-only mins leak into state via DOM fallback
+  if (
+    f === 'break_mins' &&
+    (inp.dataset.autocalc === '1' || inp.dataset.breaklock === '1')
+  ) {
+    return;
+  }
+
+  out[date][idx][f] = String(inp.value || '').trim();
+});
+
       });
 
       for (const d of Object.keys(out)) {
@@ -42218,11 +42228,30 @@ if (isWeeklyManualContext && weekDays.length && linesByDate) {
     return { ok: false };
   }
 
-  const out = buildWeeklyScheduleFromLinesAndValidate(
-    linesByDate,
-    weekDays,
-    { allowOvernight: true, allowBreakMins: true }
-  );
+ const cleanLinesByDate = (() => {
+  const src = (linesByDate && typeof linesByDate === 'object') ? linesByDate : {};
+  const clone = JSON.parse(JSON.stringify(src || {}));
+
+  for (const d of Object.keys(clone)) {
+    const arr = Array.isArray(clone[d]) ? clone[d] : [];
+    for (const ln of arr) {
+      const hasWindow =
+        !!(String(ln?.break_start || '').trim() || String(ln?.break_end || '').trim());
+
+      // ✅ if window mode, mins must NOT be sent/validated as “chosen”
+      if (hasWindow) ln.break_mins = '';
+    }
+    clone[d] = arr;
+  }
+  return clone;
+})();
+
+const out = buildWeeklyScheduleFromLinesAndValidate(
+  cleanLinesByDate,
+  weekDays,
+  { allowOvernight: true, allowBreakMins: true }
+);
+
 
   if (out && out.hasErrors) {
     st.scheduleHasErrors = true;
@@ -42524,14 +42553,15 @@ if (isWeeklyManualContext && weekDays.length && linesByDate) {
           throw new Error('contractWeekManualDraftUpsert is not defined (required for weekly MANUAL draft save)');
         }
 
-        const payload = {
-          actual_schedule_json: schedulePayload
-        };
+  const payload = {
+  planned_schedule_json: schedulePayload
+};
 
-        if (extrasChangedWeekly) payload.additional_units_week = { ...(stagedExtrasWeek || {}) };
+if (extrasChangedWeekly) payload.additional_units_week = { ...(stagedExtrasWeek || {}) };
 
-        L('weekly DRAFT upsert payload', { weekIdSave, payload });
-        await contractWeekManualDraftUpsert(weekIdSave, payload);
+await contractWeekManualDraftUpsert(weekIdSave, payload);
+
+
 
         try {
           let contractWeek = null;
