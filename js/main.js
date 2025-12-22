@@ -40012,24 +40012,30 @@ function renderTimesheetOverviewTab(ctx) {
 
   const sheetScope = (details.sheet_scope || row.sheet_scope || ts.sheet_scope || '').toUpperCase();
 
-  // ✅ FIX: planned weeks use submission_mode_snapshot (not ts.submission_mode)
-  const cwModeSnapshot =
-    String(
-      cw.submission_mode_snapshot ||
-      details.cw_submission_mode_snapshot ||
-      row.submission_mode_snapshot ||
-      ''
-    ).toUpperCase();
+ // ✅ FIX: planned weeks use submission_mode_snapshot (not ts.submission_mode)
+const cwModeSnapshot =
+  String(
+    cw.submission_mode_snapshot ||
+    details.cw_submission_mode_snapshot ||
+    row.submission_mode_snapshot ||
+    ''
+  ).toUpperCase();
 
-  const subMode =
-    (ts.submission_mode || row.submission_mode || cwModeSnapshot || '').toUpperCase();
+// ✅ FIX: prefer backend-resolved current id
+const tsId =
+  ts.timesheet_id ||
+  details.current_timesheet_id ||
+  row.timesheet_id ||
+  null;
 
-  // ✅ FIX: prefer backend-resolved current id
-  const tsId =
-    ts.timesheet_id ||
-    details.current_timesheet_id ||
-    row.timesheet_id ||
-    null;
+// ✅ FIX: define effective mode (real TS mode if TS exists; otherwise planned-week snapshot)
+const hasTsNow  = !!tsId;
+const subModeTs = String(ts.submission_mode || row.submission_mode || '').toUpperCase();
+const subModeEff = hasTsNow ? subModeTs : cwModeSnapshot;
+
+// keep existing variable name used elsewhere in this function
+const subMode = subModeEff;
+
 
   const enc = escapeHtml;
 
