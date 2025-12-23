@@ -24305,10 +24305,86 @@ const switchElecPlannedBtn = root.querySelector('button[data-ts-action="switch-e
         //   - tsId present → deleteTimesheetPermanent(tsId)
         //   - tsId null + weekId present → deleteTimesheetPermanent(null, { contractWeekId: weekId })
 
-        const det         = mc.timesheetDetails || {};
-        const ts          = det.timesheet || {};
-        const tsfin        = det.tsfin || {};
-        const actionFlags  = (det.action_flags && typeof det.action_flags === 'object') ? det.action_flags : {};
+      const det         = mc.timesheetDetails || {};
+const ts          = det.timesheet || {};
+const tsfin        = det.tsfin || {};
+const actionFlags  = (det.action_flags && typeof det.action_flags === 'object') ? det.action_flags : {};
+
+// ✅ Import-authoritative detection (must work for PLANNED weeks with no evidence):
+// Import-authoritative =
+//   weekly_mode === 'NHSP'
+//   OR (weekly_mode === 'HEALTHROSTER' && hr_weekly_behaviour === 'CREATE')
+//
+// Evidence may still exist for real NHSP timesheets, but MUST NOT be required.
+const rel = mc.timesheetRelated || {};
+const relCtr = rel.contract || {};
+const relCli = rel.client || {};
+
+const weeklyMode =
+  String(
+    det.policy?.weekly_mode ??
+    relCtr.weekly_mode ??
+    relCli.weekly_mode ??
+    relCli?.client_settings?.weekly_mode ??
+    det.contract?.weekly_mode ??
+    det.client_settings?.weekly_mode ??
+    ''
+  ).toUpperCase();
+
+const hrWeeklyBehaviour =
+  String(
+    det.policy?.hr_weekly_behaviour ??
+    relCtr.hr_weekly_behaviour ??
+    relCli.hr_weekly_behaviour ??
+    relCli?.client_settings?.hr_weekly_behaviour ??
+    det.contract?.hr_weekly_behaviour ??
+    det.client_settings?.hr_weekly_behaviour ??
+    ''
+  ).toUpperCase();
+
+// ✅ Single gate you’ll use below (authoritative definition)
+const importAuthoritative =
+  (weeklyMode === 'NHSP') ||
+  (weeklyMode === 'HEALTHROSTER' && hrWeeklyBehaviour === 'CREATE');
+
+// ✅ Defence-in-depth: recompute at click time (modal may have refreshed since wiring)
+const importAuthoritativeNow = () => {
+  try {
+    const mcX  = window.modalCtx || {};
+    const detX = mcX.timesheetDetails || {};
+    const polX = detX.policy || {};
+    const relX = mcX.timesheetRelated || {};
+    const ctrX = relX.contract || {};
+    const cliX = relX.client || {};
+
+    const wm =
+      String(
+        polX.weekly_mode ??
+        ctrX.weekly_mode ??
+        cliX.weekly_mode ??
+        cliX?.client_settings?.weekly_mode ??
+        detX.contract?.weekly_mode ??
+        detX.client_settings?.weekly_mode ??
+        ''
+      ).toUpperCase();
+
+    const hb =
+      String(
+        polX.hr_weekly_behaviour ??
+        ctrX.hr_weekly_behaviour ??
+        cliX.hr_weekly_behaviour ??
+        cliX?.client_settings?.hr_weekly_behaviour ??
+        detX.contract?.hr_weekly_behaviour ??
+        detX.client_settings?.hr_weekly_behaviour ??
+        ''
+      ).toUpperCase();
+
+    return (wm === 'NHSP') || (wm === 'HEALTHROSTER' && hb === 'CREATE');
+  } catch {
+    return false;
+  }
+};
+
 
         const sheetScope = (det.sheet_scope || mc.data?.sheet_scope || ts.sheet_scope || '').toUpperCase();
         const subMode    = (ts.submission_mode || mc.data?.submission_mode || '').toUpperCase();
@@ -24400,69 +24476,76 @@ const weeklyManualPlanned =
         // These are footer actions: btnTsAuthorise / btnTsUnauthorise (wired in top._updateButtons).
 
 
-           // ── Convert to manual (weekly existing OR weekly planned electronic OR daily existing) ──
-        if (switchManualBtn) {
-          const showSwitch =
-            mode === 'view' &&
-            !locked &&
-            (
-              // WEEKLY electronic (existing OR planned week)
-              (isWeekly && subMode === 'ELECTRONIC' && (!!tsId || !!weekId)) ||
-              // DAILY electronic (existing)
-              (isDaily  && subMode === 'ELECTRONIC' && !!tsId)
-            );
+    // ── Convert to manual (weekly existing OR weekly planned electronic OR daily existing) ──
+if (switchManualBtn) {
+  const showSwitch =
+    mode === 'view' &&
+    !locked &&
+    !importAuthoritative && // ✅ block NHSP + HR CREATE
+    (
+      (isWeekly && subMode === 'ELECTRONIC' && (!!tsId || !!weekId)) ||
+      (isDaily  && subMode === 'ELECTRONIC' && !!tsId)
+    );
 
-          switchManualBtn.style.display = showSwitch ? '' : 'none';
+  switchManualBtn.style.display = showSwitch ? '' : 'none';
 
-          if (!switchManualBtn.__tsWired) {
-            switchManualBtn.__tsWired = true;
-            switchManualBtn.addEventListener('click', async () => {
-              const ok = window.confirm(
-                'Convert this timesheet to MANUAL?\n\n' +
-                'For existing electronic timesheets, the signed electronic version is preserved as history.\n' +
-                'For planned/open weekly slots, the week will be marked MANUAL so you can enter manual hours.'
-              );
-              if (!ok) return;
+  // ✅ Defence-in-depth: only wire when visible/eligible
+  if (showSwitch && !switchManualBtn.__tsWired) {
+    switchManualBtn.__tsWired = true;
+    switchManualBtn.addEventListener('click', async () => {
+      // ✅ Defence-in-depth: re-check at click time (state may have changed)
+      if (importAuthoritativeNow && importAuthoritativeNow()) {
+        alert('This timesheet is import-authoritative (NHSP / HR weekly CREATE). Conversion actions are disabled.');
+        return;
+      }
 
-              try {
-                const mc2     = window.modalCtx || {};
-                const tsId2   = mc2.data?.timesheet_id || null;
-                const weekId2 = mc2.data?.contract_week_id || null;
+      const ok = window.confirm(
+        'Convert this timesheet to MANUAL?\n\n' +
+        'For existing electronic timesheets, the signed electronic version is preserved as history.\n' +
+        'For planned/open weekly slots, the week will be marked MANUAL so you can enter manual hours.'
+      );
+      if (!ok) return;
 
-                const det2   = mc2.timesheetDetails || {};
-                const ts2    = det2.timesheet || {};
-                const sheetScope2 = String(det2.sheet_scope || mc2.data?.sheet_scope || ts2.sheet_scope || '').toUpperCase();
-                const subMode2    = String(ts2.submission_mode || mc2.data?.submission_mode || '').toUpperCase();
+      try {
+        const mc2     = window.modalCtx || {};
+        const tsId2   = mc2.data?.timesheet_id || null;
+        const weekId2 = mc2.data?.contract_week_id || null;
 
-                const isDaily2  = (sheetScope2 === 'DAILY');
-                const isWeekly2 = (sheetScope2 === 'WEEKLY');
-                const hasTs2    = !!tsId2;
+        const det2   = mc2.timesheetDetails || {};
+        const ts2    = det2.timesheet || {};
+        const sheetScope2 = String(det2.sheet_scope || mc2.data?.sheet_scope || ts2.sheet_scope || '').toUpperCase();
+        const subMode2    = String(ts2.submission_mode || mc2.data?.submission_mode || '').toUpperCase();
 
-                if (isDaily2 && hasTs2 && subMode2 === 'ELECTRONIC') {
-                  await switchDailyTimesheetToManual(tsId2);
-                } else if (isWeekly2 && hasTs2 && subMode2 === 'ELECTRONIC') {
-                  await switchTimesheetToManual(tsId2);
-                } else if (isWeekly2 && !hasTs2 && !!weekId2 && subMode2 === 'ELECTRONIC') {
-                  await switchContractWeekToManual(weekId2);
-                } else {
-                  throw new Error('This item is not eligible for Convert to Manual.');
-                }
+        const isDaily2  = (sheetScope2 === 'DAILY');
+        const isWeekly2 = (sheetScope2 === 'WEEKLY');
+        const hasTs2    = !!tsId2;
 
-                window.__toast && window.__toast('Converted to MANUAL.');
-                await refreshAndRepaintOverview();
-              } catch (err) {
-                if (await handleMoved(err, 'switch-manual')) return;
-                if (LOGM) console.warn('[TS][OVERVIEW] switch to manual failed', err);
-                alert(err?.message || 'Failed to switch to manual.');
-              }
-            });
-          }
+        if (isDaily2 && hasTs2 && subMode2 === 'ELECTRONIC') {
+          await switchDailyTimesheetToManual(tsId2);
+        } else if (isWeekly2 && hasTs2 && subMode2 === 'ELECTRONIC') {
+          await switchTimesheetToManual(tsId2);
+        } else if (isWeekly2 && !hasTs2 && !!weekId2 && subMode2 === 'ELECTRONIC') {
+          await switchContractWeekToManual(weekId2);
+        } else {
+          throw new Error('This item is not eligible for Convert to Manual.');
         }
+
+        window.__toast && window.__toast('Converted to MANUAL.');
+        await refreshAndRepaintOverview();
+      } catch (err) {
+        if (await handleMoved(err, 'switch-manual')) return;
+        if (LOGM) console.warn('[TS][OVERVIEW] switch to manual failed', err);
+        alert(err?.message || 'Failed to switch to manual.');
+      }
+    });
+  }
+}
+
 
 
         // ── Revert to original electronic (versioned) — VIEW mode only ──
         if (revertElecBtn) {
-          revertElecBtn.style.display = (mode === 'view' && canRevertElectronic) ? '' : 'none';
+         revertElecBtn.style.display = (mode === 'view' && canRevertElectronic && !importAuthoritative) ? '' : 'none';
 
           if (!revertElecBtn.__tsWired) {
             revertElecBtn.__tsWired = true;
@@ -24498,13 +24581,21 @@ if (switchElecPlannedBtn) {
   const showSwitchBack =
     mode === 'view' &&
     !locked &&
+    !importAuthoritative && // ✅ block NHSP + HR CREATE
     weeklyManualPlanned;
 
   switchElecPlannedBtn.style.display = showSwitchBack ? '' : 'none';
 
-  if (!switchElecPlannedBtn.__tsWired) {
+  // ✅ Defence-in-depth: only wire when visible/eligible
+  if (showSwitchBack && !switchElecPlannedBtn.__tsWired) {
     switchElecPlannedBtn.__tsWired = true;
     switchElecPlannedBtn.addEventListener('click', async () => {
+      // ✅ Defence-in-depth: re-check at click time (state may have changed)
+      if (importAuthoritativeNow && importAuthoritativeNow()) {
+        alert('This timesheet is import-authoritative (NHSP / HR weekly CREATE). Route changes are disabled.');
+        return;
+      }
+
       const ok = window.confirm('Switch this planned weekly week back to ELECTRONIC submission?');
       if (!ok) return;
 
@@ -24513,9 +24604,9 @@ if (switchElecPlannedBtn) {
         const weekId2 = mc2.data?.contract_week_id || null;
         if (!weekId2) throw new Error('Contract week id missing.');
 
-     await switchContractWeekToElectronic(weekId2);
-window.__toast && window.__toast('Week is now ELECTRONIC.');
-await refreshAndRepaintOverview();
+        await switchContractWeekToElectronic(weekId2);
+        window.__toast && window.__toast('Week is now ELECTRONIC.');
+        await refreshAndRepaintOverview();
 
       } catch (err) {
         alert(err?.message || 'Failed to switch week back to electronic.');
@@ -24529,9 +24620,10 @@ await refreshAndRepaintOverview();
 
 
 
+
       // Resend QR email (Scenario 2)
         if (qrResendBtn) {
-          qrResendBtn.style.display = (!!tsId && !locked) ? '' : 'none';
+        qrResendBtn.style.display = (!!tsId && !locked && !importAuthoritative) ? '' : 'none';
           if (!qrResendBtn.__tsWired) {
             qrResendBtn.__tsWired = true;
             qrResendBtn.addEventListener('click', async () => {
@@ -24686,7 +24778,7 @@ await refreshAndRepaintOverview();
 
         // Allow QR again
         if (allowQrAgainBtn) {
-          allowQrAgainBtn.style.display = (!!tsId && !locked && canAllowQrAgain) ? '' : 'none';
+       allowQrAgainBtn.style.display = (!!tsId && !locked && canAllowQrAgain && !importAuthoritative) ? '' : 'none';
           if (!allowQrAgainBtn.__tsWired) {
             allowQrAgainBtn.__tsWired = true;
             allowQrAgainBtn.addEventListener('click', async () => {
@@ -24706,7 +24798,7 @@ await refreshAndRepaintOverview();
 
        // Allow electronic again
         if (allowElecAgainBtn) {
-          allowElecAgainBtn.style.display = (!!tsId && !locked && canAllowElecAgain) ? '' : 'none';
+       allowElecAgainBtn.style.display = (!!tsId && !locked && canAllowElecAgain && !importAuthoritative) ? '' : 'none';
           if (!allowElecAgainBtn.__tsWired) {
             allowElecAgainBtn.__tsWired = true;
             allowElecAgainBtn.addEventListener('click', async () => {
@@ -26080,22 +26172,66 @@ if (!isChild && top.entity === 'timesheets') {
       );
       if (!ok) return;
 
-      try {
-        // This is your existing “delete-manual-reopen” operation.
-        await deleteManualTimesheetAndReopenWeek(tsIdX, cwIdX);
+   try {
+  // This is your existing “delete-manual-reopen” operation.
+  await deleteManualTimesheetAndReopenWeek(tsIdX, cwIdX);
 
-        // ✅ flip modal context into planned-week shape BEFORE refresh
-        try {
-          mc.data = mc.data || {};
-          mc.data.timesheet_id = null;
-          mc.data.contract_week_id = cwIdX; // keep planned-week identity for canonical refresh
-          mc.data.id = cwIdX; // stable-ish id for UI
-        } catch {}
-        try { fr.hasId = false; } catch {}
+  // ✅ flip modal context into planned-week shape BEFORE refresh
+  try {
+    mc.data = mc.data || {};
+    mc.data.timesheet_id = null;
+    mc.data.contract_week_id = cwIdX; // planned-week identity
+    mc.data.id = cwIdX;
 
-        window.__toast && window.__toast('Timesheet unprocessed.');
-        await refreshFooter();
-      } catch (e) {
+    // ✅ FIX: clear row-level TSFIN-derived fields so badges do NOT read stale row.* values
+    mc.data.processing_status     = null;
+    mc.data.ready_to_pay          = null;
+    mc.data.paid_at_utc           = null;
+    mc.data.locked_by_invoice_id  = null;
+    mc.data.locked_by_invoice_number = null;
+    mc.data.total_hours           = null;
+    mc.data.total_pay_ex_vat      = null;
+    mc.data.total_charge_ex_vat   = null;
+    mc.data.margin_ex_vat         = null;
+    mc.data.pay_on_hold           = null;
+    mc.data.authorised_at_server  = null;
+
+    // ✅ Prevent planned week being treated as QR via row flags
+    mc.data.is_qr     = false;
+    mc.data.qr_status = null;
+  } catch {}
+  try { fr.hasId = false; } catch {}
+
+  // ✅ FIX (Issue #1): clear stale TS/TSFIN so Overview badges repaint immediately
+  // ✅ ALSO: clear evidence list so planned-week gating never sees old TS evidence
+  try {
+    mc.timesheetDetails = mc.timesheetDetails || {};
+    mc.timesheetDetails.timesheet = null;
+    mc.timesheetDetails.tsfin = null;
+
+    // clear fields that make the UI think it’s still “processed/QR”
+    mc.timesheetDetails.qr_status = null;
+    mc.timesheetDetails.qr_generated_at = null;
+    mc.timesheetDetails.qr_scanned_at = null;
+    mc.timesheetDetails.qr_r2_key = null;
+    mc.timesheetDetails.manual_pdf_r2_key = null;
+
+    // keep the week pointer consistent
+    mc.timesheetDetails.contract_week_id = cwIdX;
+
+    // clear evidence cache (prevents old SYS:NHSP:* / NHSP kind leaking into planned-week gating)
+    mc.timesheetState = (mc.timesheetState && typeof mc.timesheetState === 'object') ? mc.timesheetState : {};
+    mc.timesheetState.evidence = [];
+
+    // optional: clear related caches (prevents old invoice badge/data)
+    mc.timesheetRelated = mc.timesheetRelated || {};
+    mc.timesheetRelated.invoice = null;
+  } catch {}
+
+  window.__toast && window.__toast('Timesheet unprocessed.');
+  await refreshFooter();
+} catch (e) {
+
         try {
           if (typeof tsHandleMoved409Modal === 'function') {
             const handled = await tsHandleMoved409Modal(e, {
@@ -40012,30 +40148,29 @@ function renderTimesheetOverviewTab(ctx) {
 
   const sheetScope = (details.sheet_scope || row.sheet_scope || ts.sheet_scope || '').toUpperCase();
 
- // ✅ FIX: planned weeks use submission_mode_snapshot (not ts.submission_mode)
-const cwModeSnapshot =
-  String(
-    cw.submission_mode_snapshot ||
-    details.cw_submission_mode_snapshot ||
-    row.submission_mode_snapshot ||
-    ''
-  ).toUpperCase();
+  // ✅ FIX: planned weeks use submission_mode_snapshot (not ts.submission_mode)
+  const cwModeSnapshot =
+    String(
+      cw.submission_mode_snapshot ||
+      details.cw_submission_mode_snapshot ||
+      row.submission_mode_snapshot ||
+      ''
+    ).toUpperCase();
 
-// ✅ FIX: prefer backend-resolved current id
-const tsId =
-  ts.timesheet_id ||
-  details.current_timesheet_id ||
-  row.timesheet_id ||
-  null;
+  // ✅ FIX: prefer backend-resolved current id
+  const tsId =
+    ts.timesheet_id ||
+    details.current_timesheet_id ||
+    row.timesheet_id ||
+    null;
 
-// ✅ FIX: define effective mode (real TS mode if TS exists; otherwise planned-week snapshot)
-const hasTsNow  = !!tsId;
-const subModeTs = String(ts.submission_mode || row.submission_mode || '').toUpperCase();
-const subModeEff = hasTsNow ? subModeTs : cwModeSnapshot;
+  // ✅ FIX: define effective mode (real TS mode if TS exists; otherwise planned-week snapshot)
+  const hasTsNow  = !!tsId;
+  const subModeTs = String(ts.submission_mode || row.submission_mode || '').toUpperCase();
+  const subModeEff = hasTsNow ? subModeTs : cwModeSnapshot;
 
-// keep existing variable name used elsewhere in this function
-const subMode = subModeEff;
-
+  // keep existing variable name used elsewhere in this function
+  const subMode = subModeEff;
 
   const enc = escapeHtml;
 
@@ -40086,7 +40221,10 @@ const subMode = subModeEff;
   const hasContractWeek = !!(details.contract_week_id || cw.id || row.contract_week_id);
   const isPlannedOnly   = !hasTsfin && hasContractWeek && !tsId;
 
-  const stageRaw = String(tsfin.processing_status || row.processing_status || '').toUpperCase() || null;
+  // ✅ FIX: planned weeks must NOT read row.processing_status (can be stale after unprocess)
+  const stageRaw = hasTsfin
+    ? (String(tsfin.processing_status || row.processing_status || '').toUpperCase() || null)
+    : null;
 
   const isPaid     = !!(tsfin.paid_at_utc || row.paid_at_utc);
   const isInvoiced = !!(tsfin.locked_by_invoice_id || row.locked_by_invoice_id);
@@ -40102,6 +40240,30 @@ const subMode = subModeEff;
   const policy        = details.policy || {};
   const requiresHr    = !!policy.requires_hr;
   const autoprocessHr = !!policy.autoprocess_hr;
+
+  // ✅ Import-authoritative gating (NHSP weekly OR HR weekly CREATE)
+  // Planned weeks have no evidence, so we MUST rely on policy/contract settings.
+  const weeklyMode =
+    String(
+      (policy && policy.weekly_mode) ??
+      (rCtr && rCtr.weekly_mode) ??
+      (rCli && rCli.weekly_mode) ??
+      (rCli && rCli.client_settings && rCli.client_settings.weekly_mode) ??
+      ''
+    ).toUpperCase();
+
+  const hrWeeklyBehaviour =
+    String(
+      (policy && policy.hr_weekly_behaviour) ??
+      (rCtr && rCtr.hr_weekly_behaviour) ??
+      (rCli && rCli.hr_weekly_behaviour) ??
+      (rCli && rCli.client_settings && rCli.client_settings.hr_weekly_behaviour) ??
+      ''
+    ).toUpperCase();
+
+  const importAuthoritative =
+    (weeklyMode === 'NHSP') ||
+    (weeklyMode === 'HEALTHROSTER' && hrWeeklyBehaviour === 'CREATE');
 
   let authInfo = { requires: false, authorised: false, showAwaitingBadge: false };
   if (typeof computeRequiresTimesheetAuthorisation === 'function') {
@@ -40134,16 +40296,17 @@ const subMode = subModeEff;
     );
   };
 
-  // ✅ CHANGE: planned weeks must still show "Unprocessed"
+  // ✅ planned weeks must still show "Unprocessed"
   if (!hasTsfin) addStage('Unprocessed', 'pill-info');
 
   if (isPaid)     addStage('Paid', 'pill-ok');
   if (isInvoiced) addStage('Invoiced', 'pill-warn');
 
-  if (stageRaw === 'READY_FOR_INVOICE')     addStage('Ready for Invoicing', 'pill-ok');
-  if (stageRaw === 'READY_FOR_HR')          addStage('Ready for HR', 'pill-info');
-  if (stageRaw === 'RATE_MISSING')          addStage('Rate Missing', 'pill-bad');
-  if (stageRaw === 'PAY_CHANNEL_MISSING')   addStage('Pay Channel Missing', 'pill-bad');
+  // ✅ Only show TSFIN-derived stages when TSFIN exists
+  if (hasTsfin && stageRaw === 'READY_FOR_INVOICE')     addStage('Ready for Invoicing', 'pill-ok');
+  if (hasTsfin && stageRaw === 'READY_FOR_HR')          addStage('Ready for HR', 'pill-info');
+  if (hasTsfin && stageRaw === 'RATE_MISSING')          addStage('Rate Missing', 'pill-bad');
+  if (hasTsfin && stageRaw === 'PAY_CHANNEL_MISSING')   addStage('Pay Channel Missing', 'pill-bad');
 
   if (authInfo.showAwaitingBadge) addStage('Awaiting Authorisation', 'pill-warn');
 
@@ -40158,14 +40321,14 @@ const subMode = subModeEff;
   if (!stageBadges.length) addStage('Unknown', 'pill-info');
 
   // ✅ Only treat as QR if it's actually a QR timesheet (prevents "awaiting signature" on normal manual)
-const isQr =
-  !!(row?.is_qr) ||
-  !!(ts?.is_qr) ||
-  !!(actionFlags?.is_qr);
+  const isQr =
+    !!(row?.is_qr) ||
+    !!(ts?.is_qr) ||
+    !!(actionFlags?.is_qr);
 
-const qrStatus = isQr
-  ? String(details.qr_status || ts.qr_status || '').toUpperCase()
-  : '';
+  const qrStatus = isQr
+    ? String(details.qr_status || ts.qr_status || '').toUpperCase()
+    : '';
 
   // ✅ FIX: scenario fallback if actionFlags missing
   const computeQrScenarioFallback = () => {
@@ -40226,8 +40389,8 @@ const qrStatus = isQr
       return 'QR';
     }
 
- if (subModeEff === 'ELECTRONIC') return 'Electronic';
-return 'Manual';
+    if (subModeEff === 'ELECTRONIC') return 'Electronic';
+    return 'Manual';
 
   })();
 
@@ -40275,176 +40438,176 @@ return 'Manual';
   const badgeBtnStyle = 'cursor:pointer;border:1px solid var(--line);background:transparent;color:inherit;padding:6px 10px;border-radius:999px;';
 
   const actionsHtml = (() => {
-  const btns = [];
+    const btns = [];
 
-  const isScenario1 = (qrScenario === 'SCENARIO_1');
-  const isScenario2 = (qrScenario === 'SCENARIO_2');
-  const isScenario3 = (qrScenario === 'SCENARIO_3');
-  const isExpired   = (qrScenario === 'EXPIRED');
-  const isCancelled = (qrScenario === 'CANCELLED');
+    const isScenario1 = (qrScenario === 'SCENARIO_1');
+    const isScenario2 = (qrScenario === 'SCENARIO_2');
+    const isScenario3 = (qrScenario === 'SCENARIO_3');
+    const isExpired   = (qrScenario === 'EXPIRED');
+    const isCancelled = (qrScenario === 'CANCELLED');
 
-  const canRestorePending = !!actionFlags.can_restore_qr_pending;
-  const canRestoreSigned  = !!actionFlags.can_restore_qr_signed;
-  const canRevertToElec   = !!actionFlags.can_revert_to_electronic;
+    const canRestorePending = !!actionFlags.can_restore_qr_pending;
+    const canRestoreSigned  = !!actionFlags.can_restore_qr_signed;
+    const canRevertToElec   = !!actionFlags.can_revert_to_electronic;
 
-  const isManualOnly = !!actionFlags.is_manual_only;
-  const canAllowQrAgain   = !!actionFlags.can_allow_qr_again;
-  const canAllowElecAgain = !!actionFlags.can_allow_electronic_again;
+    const isManualOnly = !!actionFlags.is_manual_only;
+    const canAllowQrAgain   = !!actionFlags.can_allow_qr_again;
+    const canAllowElecAgain = !!actionFlags.can_allow_electronic_again;
 
-  const weekId =
-    details.contract_week_id ||
-    cw.id ||
-    row.contract_week_id ||
-    null;
+    const weekId =
+      details.contract_week_id ||
+      cw.id ||
+      row.contract_week_id ||
+      null;
 
-  const isWeekly = (sheetScope === 'WEEKLY');
-  const isDaily  = (sheetScope === 'DAILY');
+    const isWeekly = (sheetScope === 'WEEKLY');
+    const isDaily  = (sheetScope === 'DAILY');
 
-  const isPlannedWeeklyManual =
-    isWeekly &&
-    !tsId &&
-    !!weekId &&
-    !locked &&
-    (cwModeSnapshot === 'MANUAL');
+    const isPlannedWeeklyManual =
+      isWeekly &&
+      !tsId &&
+      !!weekId &&
+      !locked &&
+      (cwModeSnapshot === 'MANUAL');
 
-  const isPlannedWeeklyElectronic =
-    isWeekly &&
-    !tsId &&
-    !!weekId &&
-    !locked &&
-    (cwModeSnapshot === 'ELECTRONIC');
+    const isPlannedWeeklyElectronic =
+      isWeekly &&
+      !tsId &&
+      !!weekId &&
+      !locked &&
+      (cwModeSnapshot === 'ELECTRONIC');
 
-const isWeeklyElectronicWithTs =
-  isWeekly &&
-  !!tsId &&
-  !locked &&
-  (subModeEff === 'ELECTRONIC');
+    const isWeeklyElectronicWithTs =
+      isWeekly &&
+      !!tsId &&
+      !locked &&
+      (subModeEff === 'ELECTRONIC');
 
-const isDailyElectronicWithTs =
-  isDaily &&
-  !!tsId &&
-  !locked &&
-  (subModeEff === 'ELECTRONIC');
+    const isDailyElectronicWithTs =
+      isDaily &&
+      !!tsId &&
+      !locked &&
+      (subModeEff === 'ELECTRONIC');
 
+    // ✅ Convert to manual (weekly existing OR weekly planned electronic OR daily existing)
+    // IMPORTANT: never render conversion actions for import-authoritative contexts (NHSP / HR CREATE)
+    if (!importAuthoritative && (isWeeklyElectronicWithTs || isPlannedWeeklyElectronic || isDailyElectronicWithTs)) {
+      btns.push(`
+        <button type="button" class="pill pill-info" style="${badgeBtnStyle}" data-ts-action="switch-manual">
+          Convert to manual
+        </button>
+      `);
+    }
 
-  // ✅ Convert to manual (weekly existing OR weekly planned electronic OR daily existing)
-  if (isWeeklyElectronicWithTs || isPlannedWeeklyElectronic || isDailyElectronicWithTs) {
-    btns.push(`
-      <button type="button" class="pill pill-info" style="${badgeBtnStyle}" data-ts-action="switch-manual">
-        Convert to manual
-      </button>
-    `);
-  }
+    // Planned weekly manual → switch back to electronic
+    // IMPORTANT: never render this for import-authoritative contexts (NHSP / HR CREATE)
+    if (!importAuthoritative && isPlannedWeeklyManual) {
+      btns.push(`
+        <button type="button" class="pill pill-info" style="${badgeBtnStyle}" data-ts-action="switch-electronic-planned">
+          Switch week back to electronic
+        </button>
+      `);
+    }
 
-  // Planned weekly manual → switch back to electronic
-  if (isPlannedWeeklyManual) {
-    btns.push(`
-      <button type="button" class="pill pill-info" style="${badgeBtnStyle}" data-ts-action="switch-electronic-planned">
-        Switch week back to electronic
-      </button>
-    `);
-  }
+    // Daily: generate daily QR
+    if (isDaily && tsId && subMode === 'ELECTRONIC' && !locked) {
+      btns.push(`
+        <button type="button" class="pill pill-info" style="${badgeBtnStyle}" data-ts-action="send-daily-qr">
+          Send daily QR timesheet
+        </button>
+      `);
+    }
 
-  // Daily: generate daily QR
-  if (isDaily && tsId && subMode === 'ELECTRONIC' && !locked) {
-    btns.push(`
-      <button type="button" class="pill pill-info" style="${badgeBtnStyle}" data-ts-action="send-daily-qr">
-        Send daily QR timesheet
-      </button>
-    `);
-  }
+    // QR issue/resend (same action; label depends on scenario)
+    if (tsId && !locked && (isScenario1 || isScenario2) && qrStatus === 'PENDING') {
+      btns.push(`
+        <button type="button" class="pill pill-info" style="${badgeBtnStyle}" data-ts-action="qr-resend">
+          ${isScenario1 ? 'Issue QR timesheet' : 'Resend QR email'}
+        </button>
+      `);
+    }
 
-  // QR issue/resend (same action; label depends on scenario)
-  if (tsId && !locked && (isScenario1 || isScenario2) && qrStatus === 'PENDING') {
-    btns.push(`
-      <button type="button" class="pill pill-info" style="${badgeBtnStyle}" data-ts-action="qr-resend">
-        ${isScenario1 ? 'Issue QR timesheet' : 'Resend QR email'}
-      </button>
-    `);
-  }
+    // QR refuse (scenario 2)
+    if (tsId && !locked && isScenario2 && qrStatus === 'PENDING') {
+      btns.push(`
+        <button type="button" class="pill pill-warn" style="${badgeBtnStyle}" data-ts-action="qr-refuse">
+          Refuse hours & request resubmission
+        </button>
+      `);
+    }
 
-  // QR refuse (scenario 2)
-  if (tsId && !locked && isScenario2 && qrStatus === 'PENDING') {
-    btns.push(`
-      <button type="button" class="pill pill-warn" style="${badgeBtnStyle}" data-ts-action="qr-refuse">
-        Refuse hours & request resubmission
-      </button>
-    `);
-  }
+    // QR reissue request (scenario 3)
+    if (tsId && !locked && isScenario3 && qrStatus === 'USED') {
+      btns.push(`
+        <button type="button" class="pill pill-warn" style="${badgeBtnStyle}" data-ts-action="qr-reissue-request">
+          Revoke signed QR & request resubmission
+        </button>
+      `);
+    }
 
-  // QR reissue request (scenario 3)
-  if (tsId && !locked && isScenario3 && qrStatus === 'USED') {
-    btns.push(`
-      <button type="button" class="pill pill-warn" style="${badgeBtnStyle}" data-ts-action="qr-reissue-request">
-        Revoke signed QR & request resubmission
-      </button>
-    `);
-  }
+    // Convert QR route → manual-only (available whenever QR is active/known)
+    if (tsId && !locked && (isScenario1 || isScenario2 || isScenario3 || isExpired || isCancelled) && qrStatus) {
+      btns.push(`
+        <button type="button" class="pill pill-info" style="${badgeBtnStyle}" data-ts-action="qr-convert-manual-only">
+          Convert to manual-only
+        </button>
+      `);
+    }
 
-  // Convert QR route → manual-only (available whenever QR is active/known)
-  if (tsId && !locked && (isScenario1 || isScenario2 || isScenario3 || isExpired || isCancelled) && qrStatus) {
-    btns.push(`
-      <button type="button" class="pill pill-info" style="${badgeBtnStyle}" data-ts-action="qr-convert-manual-only">
-        Convert to manual-only
-      </button>
-    `);
-  }
+    if (tsId && !locked && canRestorePending) {
+      btns.push(`
+        <button type="button" class="pill pill-info" style="${badgeBtnStyle}" data-ts-action="qr-restore-pending">
+          Restore revoked QR (pending)
+        </button>
+      `);
+    }
 
-  if (tsId && !locked && canRestorePending) {
-    btns.push(`
-      <button type="button" class="pill pill-info" style="${badgeBtnStyle}" data-ts-action="qr-restore-pending">
-        Restore revoked QR (pending)
-      </button>
-    `);
-  }
+    if (tsId && !locked && canRestoreSigned) {
+      btns.push(`
+        <button type="button" class="pill pill-info" style="${badgeBtnStyle}" data-ts-action="qr-restore-signed">
+          Restore revoked QR (signed)
+        </button>
+      `);
+    }
 
-  if (tsId && !locked && canRestoreSigned) {
-    btns.push(`
-      <button type="button" class="pill pill-info" style="${badgeBtnStyle}" data-ts-action="qr-restore-signed">
-        Restore revoked QR (signed)
-      </button>
-    `);
-  }
+    if (!importAuthoritative && tsId && !locked && isManualOnly && canAllowQrAgain) {
+      btns.push(`
+        <button type="button" class="pill pill-info" style="${badgeBtnStyle}" data-ts-action="allow-qr-again">
+          Allow QR again
+        </button>
+      `);
+    }
 
-  if (tsId && !locked && isManualOnly && canAllowQrAgain) {
-    btns.push(`
-      <button type="button" class="pill pill-info" style="${badgeBtnStyle}" data-ts-action="allow-qr-again">
-        Allow QR again
-      </button>
-    `);
-  }
+    if (!importAuthoritative && tsId && !locked && isManualOnly && canAllowElecAgain) {
+      btns.push(`
+        <button type="button" class="pill pill-info" style="${badgeBtnStyle}" data-ts-action="allow-electronic-again">
+          Allow electronic again
+        </button>
+      `);
+    }
 
-  if (tsId && !locked && isManualOnly && canAllowElecAgain) {
-    btns.push(`
-      <button type="button" class="pill pill-info" style="${badgeBtnStyle}" data-ts-action="allow-electronic-again">
-        Allow electronic again
-      </button>
-    `);
-  }
+    // Revert to electronic (current manual → electronic original)
+    // IMPORTANT: never render conversion actions for import-authoritative contexts (NHSP / HR CREATE)
+    if (!importAuthoritative && tsId && !locked && canRevertToElec) {
+      btns.push(`
+        <button type="button" class="pill pill-info" style="${badgeBtnStyle}" data-ts-action="revert-electronic">
+          Revert to electronic
+        </button>
+      `);
+    }
 
-  // Revert to electronic (current manual → electronic original)
-  if (tsId && !locked && canRevertToElec) {
-    btns.push(`
-      <button type="button" class="pill pill-info" style="${badgeBtnStyle}" data-ts-action="revert-electronic">
-        Revert to electronic
-      </button>
-    `);
-  }
+    // ✅ Footer-only actions MUST NOT appear in Overview Actions
+    // (they live in the modal footer):
+    // - delete-permanent (Delete timesheet)
+    // - delete-manual-reopen (Unprocess Timesheet)
+    const FOOTER_ONLY_ACTION_RE =
+      /data-ts-action="(?:delete-permanent|delete-manual-reopen)"/i;
 
-  // ✅ Footer-only actions MUST NOT appear in Overview Actions
-  // (they live in the modal footer):
-  // - delete-permanent (Delete timesheet)
-  // - delete-manual-reopen (Unprocess Timesheet)
-  const FOOTER_ONLY_ACTION_RE =
-    /data-ts-action="(?:delete-permanent|delete-manual-reopen)"/i;
+    const safeBtns = btns.filter(html => !FOOTER_ONLY_ACTION_RE.test(String(html || '')));
 
-  const safeBtns = btns.filter(html => !FOOTER_ONLY_ACTION_RE.test(String(html || '')));
-
-  if (!safeBtns.length) return `<span class="mini">No actions available.</span>`;
-  return `<div style="display:flex;flex-wrap:wrap;gap:8px;">${safeBtns.join('')}</div>`;
-})();
-
-
+    if (!safeBtns.length) return `<span class="mini">No actions available.</span>`;
+    return `<div style="display:flex;flex-wrap:wrap;gap:8px;">${safeBtns.join('')}</div>`;
+  })();
 
   const routeHtml = `
     <div class="card" style="margin-top:10px;">
@@ -41636,154 +41799,208 @@ baseRow.id = hasTs ? realTsId : (weekId || baseRow.id);
 
     L('ENTRY', { tsId, weekId, isPlannedWeek, sheetScopeRaw, subModeRaw, basisRaw, routeTypeRaw, rowKeys: Object.keys(baseRow || {}) });
 
-    let details;
-    let evidence = [];
+  let details;
+let evidence = [];
+let plannedContract = null;
 
-    if (hasTs) {
-        try {
-       details = await fetchTimesheetDetails(tsId);
+if (hasTs) {
+  try {
+    details = await fetchTimesheetDetails(tsId);
 
-// ✅ adopt resolved current id (stale-safe)
-if (details && details.current_timesheet_id && String(details.current_timesheet_id) !== String(tsId)) {
-  const newId = String(details.current_timesheet_id);
-  tsId = newId;
-  baseRow.timesheet_id = newId;
-  baseRow.id = newId;
+    // ✅ adopt resolved current id (stale-safe)
+    if (details && details.current_timesheet_id && String(details.current_timesheet_id) !== String(tsId)) {
+      const newId = String(details.current_timesheet_id);
+      tsId = newId;
+      baseRow.timesheet_id = newId;
+      baseRow.id = newId;
 
-  if (details.timesheet && typeof details.timesheet === 'object') {
-    details.timesheet.timesheet_id = newId;
-  }
+      if (details.timesheet && typeof details.timesheet === 'object') {
+        details.timesheet.timesheet_id = newId;
+      }
 
-  details.current_timesheet_id = newId;
+      details.current_timesheet_id = newId;
 
-  try { await refreshTimesheetsSummaryAfterRotation(newId); } catch {}
-}
+      try { await refreshTimesheetsSummaryAfterRotation(newId); } catch {}
+    }
 
+    // ✅ NEW: fetch contract for gating (NHSP / HR CREATE) even when hasTs
+    try {
+      const contractId =
+        (details && details.timesheet && details.timesheet.contract_id) ||
+        baseRow.contract_id ||
+        null;
 
+      if (contractId && typeof getContract === 'function') {
+        const cRes = await getContract(contractId);
+        plannedContract = (cRes && cRes.contract) ? cRes.contract : (cRes || null);
+      }
+    } catch {
+      plannedContract = null;
+    }
 
-
-
-      // fetchTimesheetDetails() now returns policy / contract_week / action_flags and rotation metadata.
-// No additional enrichment fetch needed here.
-
-       
+    // ✅ Optional: mirror into details.policy so gating can read it from details as well
+    try {
+      details.policy = (details.policy && typeof details.policy === 'object') ? details.policy : {};
+      if (plannedContract) {
+        if (details.policy.weekly_mode == null && plannedContract.weekly_mode != null) {
+          details.policy.weekly_mode = plannedContract.weekly_mode;
+        }
+        if (details.policy.hr_weekly_behaviour == null && plannedContract.hr_weekly_behaviour != null) {
+          details.policy.hr_weekly_behaviour = plannedContract.hr_weekly_behaviour;
+        }
+      }
+    } catch {}
 
     L('details fetched', {
-  hasTimesheet: !!details.timesheet,
-  hasTsfin: !!details.tsfin,
-  segments: (details.segments || []).length,
-  shifts: (details.shifts || []).length,
-  isSegmentsMode: !!details.isSegmentsMode,
-  contract_week_id: details.contract_week_id || null,
-  hasPolicy: !!details.policy,
-  hasActionFlags: !!details.action_flags,
-  hasContractWeek: !!details.contract_week,
+      hasTimesheet: !!details.timesheet,
+      hasTsfin: !!details.tsfin,
+      segments: (details.segments || []).length,
+      shifts: (details.shifts || []).length,
+      isSegmentsMode: !!details.isSegmentsMode,
+      contract_week_id: details.contract_week_id || null,
+      hasPolicy: !!details.policy,
+      hasActionFlags: !!details.action_flags,
+      hasContractWeek: !!details.contract_week,
+      ready_to_pay: (details && typeof details.ready_to_pay === 'boolean') ? details.ready_to_pay : null
+    });
 
-  // ✅ NEW
-  ready_to_pay: (details && typeof details.ready_to_pay === 'boolean') ? details.ready_to_pay : null
-});
+  } catch (err) {
+    L('fetchTimesheetDetails FAILED', err);
+    GE();
+    alert(err?.message || 'Failed to load timesheet details.');
+    return;
+  }
 
-      } catch (err) {
-        L('fetchTimesheetDetails FAILED', err);
-        GE();
-        alert(err?.message || 'Failed to load timesheet details.');
-        return;
-      }
-
-
-          try {
+  try {
     const encTsId = encodeURIComponent(tsId);
-const res  = await authFetch(API(`/api/timesheets/${encTsId}/evidence`));
-const txt  = await res.text().catch(() => '');
-if (!res.ok) {
-  L('fetch evidence FAILED', { status: res.status, bodyPreview: (txt || '').slice(0, 400) });
-  throw new Error(txt || 'Failed to fetch evidence');
-}
-
-let parsed = null;
-try { parsed = txt ? JSON.parse(txt) : null; } catch { parsed = null; }
-
-// ✅ Support both legacy list response and future object response
-const movedId =
-  parsed && typeof parsed === 'object' && !Array.isArray(parsed) && parsed.current_timesheet_id
-    ? String(parsed.current_timesheet_id)
-    : null;
-
-if (movedId && String(movedId) !== String(tsId)) {
-  tsId = movedId;
-  baseRow.timesheet_id = movedId;
-  baseRow.id = movedId;
-  try { await refreshTimesheetsSummaryAfterRotation(movedId); } catch {}
-}
-
-const list =
-  Array.isArray(parsed)
-    ? parsed
-    : (parsed && typeof parsed === 'object' && Array.isArray(parsed.evidence))
-      ? parsed.evidence
-      : [];
-
-evidence = list.map(ev => {
-  const out = { ...(ev || {}) };
-
-  if (typeof out.system !== 'boolean') out.system = false;
-  if (typeof out.can_delete !== 'boolean') out.can_delete = !out.system;
-
-  if (!out.uploaded_at_utc && out.created_at) out.uploaded_at_utc = out.created_at;
-
-  return out;
-});
-
-L('evidence fetched', { timesheet_id: tsId, count: evidence.length });
-
-      } catch (err) {
-        L('fetch evidence FAILED (non-fatal)', err);
-        evidence = [];
-      }
-
-    } else {
-      let contractWeek = null;
-      try {
-        const qs = new URLSearchParams();
-        if (baseRow.contract_id) qs.set('contract_id', baseRow.contract_id);
-
-        const we = baseRow.contract_week_ending_date || baseRow.week_ending_date || null;
-        if (we) { qs.set('week_ending_from', we); qs.set('week_ending_to', we); }
-
-        qs.set('include_plan', 'true');
-
-        const url = API(`/api/contract-weeks?${qs.toString()}`);
-        const res = await authFetch(url);
-        const rows = await toList(res);
-
-        contractWeek =
-          (rows || []).find(w => String(w.id) === String(weekId)) ||
-          (rows || [])[0] ||
-          null;
-      } catch (e) {
-        if (LOGM) L('failed to load contract_week for planned week (non-fatal)', e);
-      }
-
-      details = {
-        timesheet: null,
-        tsfin: null,
-        validations: [],
-        shifts: [],
-        segments: [],
-        isSegmentsMode: false,
-        invoiceBreakdown: null,
-        sheet_scope: sheetScopeRaw || 'WEEKLY',
-        qr_status: null,
-        qr_generated_at: null,
-        qr_scanned_at: null,
-        manual_pdf_r2_key: null,
-        contract_week_id: weekId,
-        contract_week: contractWeek
-      };
-
-      evidence = [];
-      L('details stubbed for planned week', { weekId, details_scope: details.sheet_scope, hasContractWeek: !!contractWeek });
+    const res  = await authFetch(API(`/api/timesheets/${encTsId}/evidence`));
+    const txt  = await res.text().catch(() => '');
+    if (!res.ok) {
+      L('fetch evidence FAILED', { status: res.status, bodyPreview: (txt || '').slice(0, 400) });
+      throw new Error(txt || 'Failed to fetch evidence');
     }
+
+    let parsed = null;
+    try { parsed = txt ? JSON.parse(txt) : null; } catch { parsed = null; }
+
+    // ✅ Support both legacy list response and future object response
+    const movedId =
+      parsed && typeof parsed === 'object' && !Array.isArray(parsed) && parsed.current_timesheet_id
+        ? String(parsed.current_timesheet_id)
+        : null;
+
+    if (movedId && String(movedId) !== String(tsId)) {
+      tsId = movedId;
+      baseRow.timesheet_id = movedId;
+      baseRow.id = movedId;
+      try { await refreshTimesheetsSummaryAfterRotation(movedId); } catch {}
+    }
+
+    const list =
+      Array.isArray(parsed)
+        ? parsed
+        : (parsed && typeof parsed === 'object' && Array.isArray(parsed.evidence))
+          ? parsed.evidence
+          : [];
+
+    evidence = list.map(ev => {
+      const out = { ...(ev || {}) };
+
+      if (typeof out.system !== 'boolean') out.system = false;
+      if (typeof out.can_delete !== 'boolean') out.can_delete = !out.system;
+
+      if (!out.uploaded_at_utc && out.created_at) out.uploaded_at_utc = out.created_at;
+
+      return out;
+    });
+
+    L('evidence fetched', { timesheet_id: tsId, count: evidence.length });
+
+  } catch (err) {
+    L('fetch evidence FAILED (non-fatal)', err);
+    evidence = [];
+  }
+
+ } else {
+  let contractWeek = null;
+  try {
+    const qs = new URLSearchParams();
+    if (baseRow.contract_id) qs.set('contract_id', baseRow.contract_id);
+
+    const we = baseRow.contract_week_ending_date || baseRow.week_ending_date || null;
+    if (we) { qs.set('week_ending_from', we); qs.set('week_ending_to', we); }
+
+    qs.set('include_plan', 'true');
+
+    const url = API(`/api/contract-weeks?${qs.toString()}`);
+    const res = await authFetch(url);
+    const rows = await toList(res);
+
+    contractWeek =
+      (rows || []).find(w => String(w.id) === String(weekId)) ||
+      (rows || [])[0] ||
+      null;
+  } catch (e) {
+    if (LOGM) L('failed to load contract_week for planned week (non-fatal)', e);
+  }
+
+  // ✅ NEW: fetch contract so planned-week can be gated (NHSP / HR CREATE)
+  // IMPORTANT: do NOT redeclare plannedContract here (no shadowing).
+  try {
+    const contractId =
+      baseRow.contract_id ||
+      (contractWeek && contractWeek.contract_id) ||
+      null;
+
+    if (contractId && typeof getContract === 'function') {
+      const cRes = await getContract(contractId);
+      plannedContract = (cRes && cRes.contract) ? cRes.contract : (cRes || null);
+    }
+  } catch {
+    plannedContract = null;
+  }
+
+  details = {
+    timesheet: null,
+    tsfin: null,
+    validations: [],
+    shifts: [],
+    segments: [],
+    isSegmentsMode: false,
+    invoiceBreakdown: null,
+    sheet_scope: sheetScopeRaw || 'WEEKLY',
+    qr_status: null,
+    qr_generated_at: null,
+    qr_scanned_at: null,
+    manual_pdf_r2_key: null,
+    contract_week_id: weekId,
+    contract_week: contractWeek,
+
+    // ✅ NEW: carry policy hints for gating in Overview
+      policy: {
+      weekly_mode:
+        (plannedContract && plannedContract.weekly_mode != null)
+          ? plannedContract.weekly_mode
+          : null,
+      hr_weekly_behaviour:
+        (plannedContract && plannedContract.hr_weekly_behaviour != null)
+          ? plannedContract.hr_weekly_behaviour
+          : null
+    }
+
+  };
+
+  evidence = [];
+  L('details stubbed for planned week', {
+    weekId,
+    details_scope: details.sheet_scope,
+    hasContractWeek: !!contractWeek,
+    weekly_mode: details.policy?.weekly_mode || null,
+    hr_weekly_behaviour: details.policy?.hr_weekly_behaviour || null
+  });
+}
+
+
 
     let related;
     if (hasTs) {
@@ -41801,21 +42018,22 @@ L('evidence fetched', { timesheet_id: tsId, count: evidence.length });
         L('fetchTimesheetRelated FAILED (non-fatal)', err);
         related = { counts: {}, candidate: null, client: null, invoice: null, umbrella: null, contract: null, series: [] };
       }
-    } else {
-      related = {
-        counts: {},
-        candidate: (baseRow.candidate_id || baseRow.candidate_name || baseRow.occupant_key_norm)
-          ? { id: baseRow.candidate_id || null, display_name: baseRow.candidate_name || baseRow.occupant_key_norm || null, first_name: null, last_name: null }
-          : null,
-        client: (baseRow.client_id || baseRow.client_name)
-          ? { id: baseRow.client_id || null, name: baseRow.client_name || null }
-          : null,
-        invoice: null,
-        umbrella: null,
-        contract: null,
-        series: []
-      };
-    }
+   } else {
+  related = {
+    counts: {},
+    candidate: (baseRow.candidate_id || baseRow.candidate_name || baseRow.occupant_key_norm)
+      ? { id: baseRow.candidate_id || null, display_name: baseRow.candidate_name || baseRow.occupant_key_norm || null, first_name: null, last_name: null }
+      : null,
+    client: (baseRow.client_id || baseRow.client_name)
+      ? { id: baseRow.client_id || null, name: baseRow.client_name || null }
+      : null,
+    invoice: null,
+    umbrella: null,
+    contract: plannedContract || null,
+    series: []
+  };
+}
+
 
     const tsLocal    = details.timesheet || {};
     const tsfinLocal = details.tsfin     || {};
