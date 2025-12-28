@@ -5467,8 +5467,18 @@ function openContract(row) {
       if (base.display_site != null) m.display_site = base.display_site;
       if (base.start_date)           m.start_date   = base.start_date;
       if (base.end_date)             m.end_date     = base.end_date;
-      if (base.pay_method_snapshot)  m.pay_method_snapshot = base.pay_method_snapshot;
+         if (base.pay_method_snapshot)  m.pay_method_snapshot = base.pay_method_snapshot;
       if (base.default_submission_mode) m.default_submission_mode = base.default_submission_mode;
+
+      // NEW: seed contract route/settings overrides (only if present on row)
+      if (base.is_nhsp != null)              m.is_nhsp = base.is_nhsp;
+      if (base.autoprocess_hr != null)       m.autoprocess_hr = base.autoprocess_hr;
+      if (base.requires_hr != null)          m.requires_hr = base.requires_hr;
+      if (base.no_timesheet_required != null) m.no_timesheet_required = base.no_timesheet_required;
+      if (base.daily_calc_of_invoices != null) m.daily_calc_of_invoices = base.daily_calc_of_invoices;
+      if (base.group_nightsat_sunbh != null) m.group_nightsat_sunbh = base.group_nightsat_sunbh;
+      if (base.self_bill != null)            m.self_bill = base.self_bill;
+
       if (base.week_ending_weekday_snapshot != null) m.week_ending_weekday_snapshot = String(base.week_ending_weekday_snapshot);
       if (base.bucket_labels_json)   m.__bucket_labels = base.bucket_labels_json;
       if (base.std_schedule_json)    m.__template      = base.std_schedule_json;
@@ -5477,6 +5487,7 @@ function openContract(row) {
       if (base.mileage_charge_rate != null) m.mileage_charge_rate = base.mileage_charge_rate;
       if (base.mileage_pay_rate != null)    m.mileage_pay_rate    = base.mileage_pay_rate;
       m.__seeded = true;
+
       if (LOGC) console.log('[CONTRACTS] seed formState (main/pay) from base row', {
         forId: (window.modalCtx.formState && window.modalCtx.formState.__forId),
         mainKeys: Object.keys(window.modalCtx.formState?.main || {}),
@@ -5804,16 +5815,65 @@ const band         = choose('band', base.band ?? null);
 const display_site = choose('display_site', base.display_site ?? '');
 
 
-        const boolFromFS = (name, baseVal=false) => {
+         const boolFromFS = (name, baseVal=false) => {
           if (fs && fs.main && Object.prototype.hasOwnProperty.call(fs.main, name)) {
             const v = fs.main[name];
             return v === 'on' || v === true || v === 'true' || v === 1 || v === '1';
           }
           return !!base[name];
         };
+
+        // NEW: tri-state boolean (preserve NULL contract overrides unless explicitly set)
+           const boolTriFromFS = (name) => {
+          // Tri-state rule:
+          // - if field is NOT present in fs.main: preserve base boolean or null
+          // - if field IS present in fs.main: interpret truthy vs falsey ('' counts as false, not null)
+          if (fs && fs.main && Object.prototype.hasOwnProperty.call(fs.main, name)) {
+            const v = fs.main[name];
+            if (v === null || v === undefined) return null;
+            return v === 'on' || v === true || v === 'true' || v === 1 || v === '1';
+          }
+          const b = base ? base[name] : undefined;
+          return (b === true || b === false) ? b : null;
+        };
+
+
+        // NEW: contract route/settings fields (tri-state)
+        let is_nhsp              = boolTriFromFS('is_nhsp');
+        let autoprocess_hr       = boolTriFromFS('autoprocess_hr');
+        let requires_hr          = boolTriFromFS('requires_hr');
+        let no_timesheet_required = boolTriFromFS('no_timesheet_required');
+        let daily_calc_of_invoices = boolTriFromFS('daily_calc_of_invoices');
+        let group_nightsat_sunbh  = boolTriFromFS('group_nightsat_sunbh');
+        let self_bill            = boolTriFromFS('self_bill');
+
+        // NEW: canonicalise route flags only if any route override is present (avoids clobbering NULL legacy overrides)
+        const anyRouteSet = [is_nhsp, autoprocess_hr, no_timesheet_required].some(v => v === true || v === false);
+        if (anyRouteSet) {
+          // Manual: is_nhsp=false, autoprocess_hr=false, no_timesheet_required=false
+          // NHSP: is_nhsp=true, autoprocess_hr=false, no_timesheet_required=false
+          // HR required: autoprocess_hr=true, is_nhsp=false, no_timesheet_required=false
+          // HR no-timesheets: autoprocess_hr=true, is_nhsp=false, no_timesheet_required=true
+          if (is_nhsp === true) {
+            autoprocess_hr = false;
+            no_timesheet_required = false;
+          }
+          if (no_timesheet_required === true) {
+            autoprocess_hr = true;
+            is_nhsp = false;
+          }
+          if (autoprocess_hr === true) {
+            is_nhsp = false;
+          }
+          if (autoprocess_hr !== true) {
+            no_timesheet_required = false;
+          }
+        }
+
         const auto_invoice                 = boolFromFS('auto_invoice',                 !!base.auto_invoice);
         const require_reference_to_pay     = boolFromFS('require_reference_to_pay',     !!base.require_reference_to_pay);
         const require_reference_to_invoice = boolFromFS('require_reference_to_invoice', !!base.require_reference_to_invoice);
+
 
         const BUCKETS = ['paye_day','paye_night','paye_sat','paye_sun','paye_bh','umb_day','umb_night','umb_sat','umb_sun','umb_bh','charge_day','charge_night','charge_sat','charge_sun','charge_bh'];
         const baseRates = { ...(base.rates_json || {}) };
@@ -5916,6 +5976,16 @@ const data = {
   pay_method_snapshot: payMethodSnap,
   default_submission_mode,
   week_ending_weekday_snapshot,
+
+  // NEW: contract route/settings overrides
+  is_nhsp,
+  autoprocess_hr,
+  requires_hr,
+  no_timesheet_required,
+  daily_calc_of_invoices,
+  group_nightsat_sunbh,
+  self_bill,
+
   auto_invoice,
   require_reference_to_pay,
   require_reference_to_invoice,
@@ -5927,6 +5997,7 @@ const data = {
   mileage_charge_rate: mileage_charge_rate,
   mileage_pay_rate:    mileage_pay_rate
 };
+
 
 if (LOGC) {
   const preview = {
@@ -6717,12 +6788,111 @@ if (hiddenName === 'candidate_id') {
                     const lbl = document.getElementById('weLabel'); if (lbl) lbl.textContent = weekNames[Number(we)] || 'Sunday';
                     const hidden = form?.querySelector('input[name="week_ending_weekday_snapshot"]'); if (hidden) hidden.value = String(we);
 
-                    // NEW: 2.5 defaults (only on brand new contract and if not manually set yet)
+                      // NEW: 2.5 defaults (only on brand new contract and if not manually set yet)
 try {
   const isNewContract = !window.modalCtx?.data?.id;
   const cs = client?.client_settings || {};
   if (isNewContract) {
     const main = (window.modalCtx.formState ||= {main:{},pay:{}}).main ||= {};
+
+    // NEW: contract route defaults from client settings (only if unset)
+    if (!Object.prototype.hasOwnProperty.call(main, 'is_nhsp')) {
+      const v = !!cs.is_nhsp;
+      setContractFormValue('is_nhsp', v ? 'on' : '');
+      main.is_nhsp = v;
+    }
+    if (!Object.prototype.hasOwnProperty.call(main, 'autoprocess_hr')) {
+      const v = !!cs.autoprocess_hr;
+      setContractFormValue('autoprocess_hr', v ? 'on' : '');
+      main.autoprocess_hr = v;
+    }
+    if (!Object.prototype.hasOwnProperty.call(main, 'requires_hr')) {
+      const v = !!cs.requires_hr;
+      setContractFormValue('requires_hr', v ? 'on' : '');
+      main.requires_hr = v;
+    }
+    if (!Object.prototype.hasOwnProperty.call(main, 'no_timesheet_required')) {
+      const v = !!cs.no_timesheet_required;
+      setContractFormValue('no_timesheet_required', v ? 'on' : '');
+      main.no_timesheet_required = v;
+    }
+       if (!Object.prototype.hasOwnProperty.call(main, 'daily_calc_of_invoices')) {
+      const v = !!cs.daily_calc_of_invoices;
+      setContractFormValue('daily_calc_of_invoices', v ? 'on' : '');
+      main.daily_calc_of_invoices = v;
+    }
+       if (!Object.prototype.hasOwnProperty.call(main, 'group_nightsat_sunbh')) {
+      const v = !!cs.group_nightsat_sunbh;
+      setContractFormValue('group_nightsat_sunbh', v ? 'on' : '');
+      main.group_nightsat_sunbh = v;
+    }
+
+    // NEW: self-bill default (client_settings column is self_bill_no_invoices_sent)
+    if (!Object.prototype.hasOwnProperty.call(main, 'self_bill')) {
+      const v = !!cs.self_bill_no_invoices_sent;
+      setContractFormValue('self_bill', v ? 'on' : '');
+      main.self_bill = v;
+    }
+
+    // NEW: canonicalise route flags (matches brief)
+    // Manual: is_nhsp=false, autoprocess_hr=false, no_timesheet_required=false
+    // NHSP: is_nhsp=true, autoprocess_hr=false, no_timesheet_required=false
+    // HR required: autoprocess_hr=true, is_nhsp=false, no_timesheet_required=false
+    // HR no-timesheets: autoprocess_hr=true, is_nhsp=false, no_timesheet_required=true
+    const r_isNhsp = !!main.is_nhsp;
+    const r_isHr   = !!main.autoprocess_hr;
+    const r_noTs   = !!main.no_timesheet_required;
+
+
+
+    if (r_isNhsp) {
+      if (main.autoprocess_hr) {
+        setContractFormValue('autoprocess_hr', '');
+        main.autoprocess_hr = false;
+      }
+      if (main.no_timesheet_required) {
+        setContractFormValue('no_timesheet_required', '');
+        main.no_timesheet_required = false;
+      }
+    }
+    if (r_noTs) {
+      if (!main.autoprocess_hr) {
+        setContractFormValue('autoprocess_hr', 'on');
+        main.autoprocess_hr = true;
+      }
+      if (main.is_nhsp) {
+        setContractFormValue('is_nhsp', '');
+        main.is_nhsp = false;
+      }
+    }
+    if (main.autoprocess_hr) {
+      if (main.is_nhsp) {
+        setContractFormValue('is_nhsp', '');
+        main.is_nhsp = false;
+      }
+    }
+    if (!main.autoprocess_hr) {
+      if (main.no_timesheet_required) {
+        setContractFormValue('no_timesheet_required', '');
+        main.no_timesheet_required = false;
+      }
+    }
+
+    // Optional: update visible route label immediately if present (non-blocking)
+    try {
+      const lbl = document.getElementById('contractRouteLabel');
+      if (lbl) {
+        const isNhsp = !!main.is_nhsp;
+        const isHr   = !!main.autoprocess_hr;
+        const noTs   = !!main.no_timesheet_required;
+        const routeLabel =
+          isNhsp ? 'NHSP' :
+          (isHr && noTs) ? 'HealthRoster (no timesheets)' :
+          (isHr) ? 'HealthRoster (timesheets required)' :
+          'Manual';
+        lbl.innerHTML = `<strong>${routeLabel}</strong>`;
+      }
+    } catch {}
 
     if (!Object.prototype.hasOwnProperty.call(main, 'require_reference_to_pay')) {
       const v = !!cs.pay_reference_required;
@@ -6741,14 +6911,16 @@ try {
       main.default_submission_mode = mode;
     }
 
-    // NEW: auto_invoice default from client settings
+       // NEW: auto_invoice default from client_settings (client-level default feeds contract)
     if (!Object.prototype.hasOwnProperty.call(main, 'auto_invoice')) {
-      const v = !!cs.auto_invoice_default;              // tweak property name if needed
+      const v = !!cs.auto_invoice_default;
       setContractFormValue('auto_invoice', v ? 'on' : '');
       main.auto_invoice = v;
       const cb = form?.querySelector('input[name="auto_invoice"]');
       if (cb) cb.checked = v;
     }
+
+
 
     // NEW: mileage default from client when empty
     const mcrEl = document.querySelector('#contractRatesTab input[name="mileage_charge_rate"]');
@@ -6770,6 +6942,7 @@ try {
     }
   }
 } catch (e) { if (LOGC) console.warn('[CONTRACTS] client defaults (gates/submission/mileage) failed', e); }
+
 
                     try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
                   } catch (e) { if (LOGC) console.warn('[CONTRACTS] client hint/week-ending check failed', e); }
@@ -8840,17 +9013,41 @@ function applyRatePresetToContractForm(preset, payMethod /* 'PAYE'|'UMBRELLA' */
   }
 }
 
-
-function mergeContractStateIntoRow(row) {
+function mergeContractStateIntoRow(row, formState) {
   const base = { ...(row || {}) };
-  const fs = (window.modalCtx && window.modalCtx.formState) || null;
+
+  // Allow explicit formState injection (for testability), but keep backward compatibility.
+  const fs =
+    formState ||
+    ((window.modalCtx && window.modalCtx.formState) ? window.modalCtx.formState : null);
+
+  const toBool = (v) => {
+    return v === 'on' || v === true || v === 'true' || v === 1 || v === '1';
+  };
+
+  const boolKeys = new Set([
+    // existing
+    'auto_invoice',
+    'require_reference_to_pay',
+    'require_reference_to_invoice',
+    // existing but previously not normalised here
+    'self_bill',
+
+    // NEW: contract route + invoice calc flags
+    'is_nhsp',
+    'autoprocess_hr',
+    'requires_hr',
+    'no_timesheet_required',
+    'daily_calc_of_invoices',
+    'group_nightsat_sunbh'
+  ]);
 
   // Merge MAIN staged fields (text/selects/checkbox snapshots)
   if (fs && fs.main) {
     for (const [k, v] of Object.entries(fs.main)) {
-      // For checkboxes we store 'on' or '', hydrate to boolean-like fields where appropriate
-      if (k === 'auto_invoice' || k === 'require_reference_to_pay' || k === 'require_reference_to_invoice') {
-        base[k] = v === 'on' || v === true;
+      // For checkbox-style fields we store 'on' / '' (or boolean in some flows) → normalise to boolean
+      if (boolKeys.has(k)) {
+        base[k] = toBool(v);
       } else if (k === 'start_date' || k === 'end_date') {
         base[k] = v; // Keep as DD/MM/YYYY in the UI; conversion happens on save
       } else if (k === 'week_ending_weekday_snapshot') {
@@ -8871,6 +9068,296 @@ function mergeContractStateIntoRow(row) {
 
   return base;
 }
+
+function openContractSettingsModal() {
+  const LOGC = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : true;
+
+  if (!window.modalCtx || window.modalCtx.entity !== 'contracts') {
+    alert('Contract settings can only be opened from an active Contract modal.');
+    return;
+  }
+
+  const applyFromDOM = (root) => {
+    if (!root) return;
+
+    const weekly = String(root.querySelector('input[type="radio"][name="weekly_mode"]:checked')?.value || 'NONE').toUpperCase();
+    const hrMode = String(root.querySelector('input[type="radio"][name="hr_timesheet_mode"]:checked')?.value || 'REQUIRE_TS').toUpperCase();
+
+    const setBool = (name, val) => {
+      try {
+        if (typeof setContractFormValue === 'function') setContractFormValue(name, val ? 'on' : '');
+      } catch {}
+      try {
+        const fs = (window.modalCtx.formState ||= { __forId:(window.modalCtx.data?.id ?? window.modalCtx.openToken ?? null), main:{}, pay:{} });
+        (fs.main ||= {})[name] = !!val;
+      } catch {}
+    };
+
+    // --- Canonicalise route flags (contract-level) ---
+    // Manual:
+    //  is_nhsp=false, autoprocess_hr=false, no_timesheet_required=false, requires_hr=false
+    // NHSP:
+    //  is_nhsp=true, autoprocess_hr=false, no_timesheet_required=false, requires_hr=false
+    // HR (timesheets required):
+    //  is_nhsp=false, autoprocess_hr=true, no_timesheet_required=false, requires_hr=true
+    // HR (no timesheets):
+    //  is_nhsp=false, autoprocess_hr=true, no_timesheet_required=true, requires_hr=false
+    if (weekly === 'NHSP') {
+      setBool('is_nhsp', true);
+      setBool('autoprocess_hr', false);
+      setBool('no_timesheet_required', false);
+      setBool('requires_hr', false);
+    } else if (weekly === 'HEALTHROSTER') {
+      setBool('is_nhsp', false);
+      setBool('autoprocess_hr', true);
+      if (hrMode === 'NO_TS') {
+        setBool('no_timesheet_required', true);
+        setBool('requires_hr', false);
+      } else {
+        setBool('no_timesheet_required', false);
+        setBool('requires_hr', true);
+      }
+    } else {
+      setBool('is_nhsp', false);
+      setBool('autoprocess_hr', false);
+      setBool('no_timesheet_required', false);
+      setBool('requires_hr', false);
+    }
+
+    // --- Contract-scoped flags ---
+    setBool('require_reference_to_pay',    !!root.querySelector('input[type="checkbox"][name="require_reference_to_pay"]')?.checked);
+    setBool('require_reference_to_invoice',!!root.querySelector('input[type="checkbox"][name="require_reference_to_invoice"]')?.checked);
+    setBool('self_bill',                  !!root.querySelector('input[type="checkbox"][name="self_bill"]')?.checked);
+    setBool('daily_calc_of_invoices',     !!root.querySelector('input[type="checkbox"][name="daily_calc_of_invoices"]')?.checked);
+    setBool('group_nightsat_sunbh',       !!root.querySelector('input[type="checkbox"][name="group_nightsat_sunbh"]')?.checked);
+
+    // NEW: contract-level override
+    setBool('auto_invoice',               !!root.querySelector('input[type="checkbox"][name="auto_invoice"]')?.checked);
+
+    // Update route pill in the parent contract main tab if it exists
+    try {
+      const lbl = document.getElementById('contractRouteLabel');
+      if (lbl) {
+        const isNhsp = weekly === 'NHSP';
+        const isHr   = weekly === 'HEALTHROSTER';
+        const noTs   = isHr && hrMode === 'NO_TS';
+        const routeLabel =
+          isNhsp ? 'NHSP' :
+          (isHr && noTs) ? 'HealthRoster (no timesheets)' :
+          (isHr) ? 'HealthRoster (timesheets required)' :
+          'Manual';
+        lbl.innerHTML = `<strong>${routeLabel}</strong>`;
+      }
+    } catch {}
+
+    // Best-effort: hide default submission mode select row if it exists (main tab may re-render later anyway)
+    try {
+      const form = document.querySelector('#contractForm');
+      if (form) {
+        const sel = form.querySelector('select[name="default_submission_mode"]');
+        if (sel) {
+          const hideDSM = (weekly === 'NHSP') || (weekly === 'HEALTHROSTER' && hrMode === 'NO_TS');
+          const row = sel.closest('.row');
+          if (row) row.style.display = hideDSM ? 'none' : '';
+        }
+      }
+    } catch {}
+
+    try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
+  };
+
+  const wire = () => {
+    const root = document.getElementById('contractSettingsForm');
+    if (!root || root.__wired) return;
+    root.__wired = true;
+
+    const onAnyChange = () => {
+      try { applyFromDOM(root); } catch {}
+      try {
+        // Toggle HR options visibility
+        const weekly = String(root.querySelector('input[type="radio"][name="weekly_mode"]:checked')?.value || 'NONE').toUpperCase();
+        const hrWrap = document.getElementById('contractHrModeWrap');
+        if (hrWrap) hrWrap.style.display = (weekly === 'HEALTHROSTER') ? '' : 'none';
+      } catch {}
+    };
+
+    root.addEventListener('change', onAnyChange, true);
+    root.addEventListener('input',  onAnyChange, true);
+
+    // Initial paint
+    onAnyChange();
+  };
+
+  showModal(
+    'Contract settings',
+    [{ key: 'settings', title: 'Settings' }],
+    (key) => {
+      if (key !== 'settings') return `<div class="tabc">Unknown tab.</div>`;
+      return renderContractSettingsModal({ data: (window.modalCtx && window.modalCtx.data) ? window.modalCtx.data : {} });
+    },
+    async () => {
+      // Apply once more on Save/Apply, then close
+      try {
+        const root = document.getElementById('contractSettingsForm');
+        applyFromDOM(root);
+      } catch {}
+      return { ok: true, saved: null };
+    },
+    false, // treat as "create-like" so Save/Apply is available
+    () => {
+      setTimeout(() => {
+        try { wire(); } catch (e) { if (LOGC) console.warn('[CONTRACT_SETTINGS] wire failed', e); }
+      }, 0);
+    },
+    {
+      kind: 'contract_settings',
+      noParentGate: true,
+      _trace: (LOGC && { tag: 'contract-settings', contract_id: window.modalCtx?.data?.id || null })
+    }
+  );
+}
+
+function renderContractSettingsModal(ctx) {
+  const LOGC = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : true;
+
+  const d = (typeof mergeContractStateIntoRow === 'function')
+    ? mergeContractStateIntoRow(ctx?.data || {})
+    : (ctx?.data || {});
+
+  const isNhsp = !!d.is_nhsp;
+  const isHr   = !!d.autoprocess_hr;
+  const noTs   = !!d.no_timesheet_required;
+
+  const weeklyMode = isNhsp ? 'NHSP' : (isHr ? 'HEALTHROSTER' : 'NONE');
+  const hrMode     = (isHr && noTs) ? 'NO_TS' : 'REQUIRE_TS';
+
+  const radioPill = (name, value, text, checked) => `
+    <label class="inline chk-tight"
+      style="display:inline-flex;align-items:center;gap:6px;margin-right:10px;white-space:nowrap;">
+      <input type="radio" name="${name}" value="${value}" ${checked ? 'checked' : ''}/>
+      <span style="white-space:nowrap;">${text}</span>
+    </label>
+  `;
+
+  const radioChoice = (name, value, title, desc, checked) => `
+    <label style="
+      display:grid;
+      grid-template-columns: 18px 1fr;
+      column-gap:8px;
+      row-gap:4px;
+      align-items:start;
+      cursor:pointer;
+      margin:0;
+    ">
+      <input type="radio" name="${name}" value="${value}" ${checked ? 'checked' : ''} style="margin-top:2px;" />
+      <div style="min-width:0;">
+        <div style="line-height:1.2;white-space:normal;word-break:normal;overflow-wrap:break-word;">${title}</div>
+        ${desc ? `<div class="mini" style="opacity:0.9;line-height:1.25;white-space:normal;word-break:normal;overflow-wrap:break-word;">${desc}</div>` : ``}
+      </div>
+    </label>
+  `;
+
+  const checkChoice = (name, title, checked) => `
+    <label style="
+      display:grid;
+      grid-template-columns: 18px 1fr;
+      column-gap:8px;
+      align-items:start;
+      cursor:pointer;
+      margin:0;
+    ">
+      <input type="checkbox" name="${name}" ${checked ? 'checked' : ''} style="margin-top:2px;" />
+      <div style="line-height:1.2;white-space:normal;word-break:normal;overflow-wrap:break-word;min-width:0;">${title}</div>
+    </label>
+  `;
+
+  const msg =
+    (weeklyMode === 'NONE')
+      ? 'Weekly timesheets are managed manually (no external weekly import source). Candidates will submit timesheets electronically or using a QR Timesheet.'
+    : (weeklyMode === 'NHSP')
+      ? 'NHSP weekly imports will be used for this contract. Candidates will not submit any timesheets.'
+      : 'HealthRoster weekly imports will be used for this contract.';
+
+  if (LOGC) console.log('[CONTRACT_SETTINGS] render snapshot', {
+    weeklyMode, hrMode,
+    flags: {
+      require_reference_to_pay: !!d.require_reference_to_pay,
+      require_reference_to_invoice: !!d.require_reference_to_invoice,
+      self_bill: !!d.self_bill,
+      daily_calc_of_invoices: !!d.daily_calc_of_invoices,
+      group_nightsat_sunbh: !!d.group_nightsat_sunbh,
+      auto_invoice: !!d.auto_invoice
+    }
+  });
+
+  return `
+    <form id="contractSettingsForm" class="tabc form">
+
+      <div class="row" style="margin:0;">
+        <label style="white-space:normal">Weekly timesheet source</label>
+        <div class="controls" style="display:flex;flex-direction:column;gap:8px;min-width:0;">
+          <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;">
+            ${radioPill('weekly_mode', 'NONE', 'None (manual)', weeklyMode === 'NONE')}
+            ${radioPill('weekly_mode', 'NHSP', 'NHSP', weeklyMode === 'NHSP')}
+            ${radioPill('weekly_mode', 'HEALTHROSTER', 'HealthRoster', weeklyMode === 'HEALTHROSTER')}
+          </div>
+          <div class="mini" style="opacity:0.9;line-height:1.25;white-space:normal;overflow-wrap:break-word;">${msg}</div>
+        </div>
+      </div>
+
+      <div id="contractHrModeWrap" style="display:${weeklyMode === 'HEALTHROSTER' ? '' : 'none'};">
+        <div class="row" style="margin-top:12px;">
+          <label style="white-space:normal">HealthRoster weekly behaviour</label>
+          <div class="controls" style="display:flex;flex-direction:column;gap:12px;min-width:0;">
+            ${radioChoice(
+              'hr_timesheet_mode',
+              'REQUIRE_TS',
+              'Timesheets required',
+              'Worker will provide timesheets; HealthRoster imports are used to verify/validate.',
+              hrMode === 'REQUIRE_TS'
+            )}
+            ${radioChoice(
+              'hr_timesheet_mode',
+              'NO_TS',
+              'No timesheets',
+              'Worker will not provide timesheets; HealthRoster imports create/update weekly timesheets when a contract exists.',
+              hrMode === 'NO_TS'
+            )}
+          </div>
+        </div>
+      </div>
+
+      <div class="row" style="margin-top:12px;">
+        <label style="white-space:normal">References & flags</label>
+        <div class="controls" style="display:flex;flex-direction:column;gap:12px;min-width:0;">
+          <div style="display:grid;grid-template-columns:1fr;gap:8px;">
+            ${checkChoice('require_reference_to_pay', 'Ref No. required to PAY', !!d.require_reference_to_pay)}
+            ${checkChoice('require_reference_to_invoice', 'Ref No. required to INVOICE', !!d.require_reference_to_invoice)}
+          </div>
+
+          <div style="display:grid;grid-template-columns:1fr;gap:8px;">
+            ${checkChoice('self_bill', 'Self-bill (no invoices sent)', !!d.self_bill)}
+            ${checkChoice('daily_calc_of_invoices', 'Daily invoice calculation', !!d.daily_calc_of_invoices)}
+            ${checkChoice('group_nightsat_sunbh', 'Group Night/Sat/Sun/BH', !!d.group_nightsat_sunbh)}
+            ${checkChoice('auto_invoice', 'Auto-invoice (this contract)', !!d.auto_invoice)}
+          </div>
+
+          <div class="mini" style="opacity:0.9;line-height:1.25;white-space:normal;overflow-wrap:break-word;">
+            Timesheets will always be attached to invoices for manual clients.
+          </div>
+
+          <div class="mini" style="opacity:0.8;line-height:1.25;white-space:normal;overflow-wrap:break-word;">
+            Day/night boundary time settings remain client-level and are not shown here.
+          </div>
+        </div>
+      </div>
+
+    </form>
+  `;
+}
+
+
+
 function snapshotContractForm() {
   const fs = (window.modalCtx.formState ||= { __forId: (window.modalCtx.data?.id ?? window.modalCtx.openToken ?? null), main:{}, pay:{} });
 
@@ -8960,6 +9447,23 @@ function renderContractMainTab(ctx) {
 
   const candLabel   = (d.candidate_display || '').trim();
   const clientLabel = (d.client_name || '').trim();
+
+  // ---- Route / visibility derived from CONTRACT OVERRIDES first (formState), fallback to loaded row ----
+  const fsMain = window.modalCtx?.formState?.main || {};
+  const hasOwn = (o, k) => Object.prototype.hasOwnProperty.call(o || {}, k);
+  const triVal = (k) => (hasOwn(fsMain, k) && fsMain[k] !== null && fsMain[k] !== undefined) ? fsMain[k] : d[k];
+
+  const isNhsp = !!triVal('is_nhsp');
+  const isHr   = !!triVal('autoprocess_hr');
+  const noTs   = !!triVal('no_timesheet_required');
+
+  const hideDSM = isNhsp || (isHr && noTs);
+
+  const routeLabel =
+    isNhsp ? 'NHSP' :
+    (isHr && noTs) ? 'HealthRoster (no timesheets)' :
+    (isHr) ? 'HealthRoster (timesheets required)' :
+    'Manual';
 
   // Derive labels from picker cache if missing but ids exist (and store into formState for persistence)
   let derivedCand = '';
@@ -9127,6 +9631,7 @@ function renderContractMainTab(ctx) {
     candidate_id: candVal, client_id: clientVal,
     candidate_label: _candLabel, client_label: _clientLabel,
     week_ending_weekday_snapshot: d.week_ending_weekday_snapshot,
+    route: { is_nhsp: isNhsp, autoprocess_hr: isHr, no_timesheet_required: noTs, routeLabel, hideDSM },
     mode: window.__getModalFrame?.()?.mode
   });
 
@@ -9221,6 +9726,21 @@ function renderContractMainTab(ctx) {
         </div>
       </div>
 
+      <div class="row">
+        <label>Route</label>
+        <div class="controls" style="display:flex;flex-wrap:wrap;gap:10px;align-items:center">
+          <div class="mini" id="contractRouteLabel"><strong>${routeLabel}</strong></div>
+          <button type="button" class="btn mini" id="btnContractSettings"
+            onclick="(function(){
+              try{
+                if (typeof openContractSettingsModal === 'function') { openContractSettingsModal(); return; }
+                if (window.__toast) __toast('Contract settings modal is not wired yet.');
+              }catch(e){}
+            })()"
+          >Contract settings</button>
+        </div>
+      </div>
+
       <div class="grid-2">
         <div class="row"><label>Display site</label><div class="controls"><input class="input" name="display_site" value="${d.display_site || ''}" /></div></div>
         <div class="row"><label>Week-ending day</label><div class="controls"><div class="mini" id="weLabel">${weLabel}</div></div></div>
@@ -9236,7 +9756,7 @@ function renderContractMainTab(ctx) {
         <div class="row"><label>End date</label><div class="controls"><input class="input" name="end_date" value="${endUk}" placeholder="DD/MM/YYYY" required ${overlapChangeAttr} /></div></div>
       </div>
 
-        <div class="grid-2">
+      <div class="grid-2">
         <div class="row"><label>Pay method snapshot</label>
           <div class="controls">
             <select name="pay_method_snapshot" ${payLocked ? 'disabled' : ''}>
@@ -9245,40 +9765,27 @@ function renderContractMainTab(ctx) {
             </select>
           </div>
         </div>
-        <div class="row"><label>Default submission mode</label>
-          <div class="controls">
-            <select name="default_submission_mode">
-              <option value="ELECTRONIC" ${String(d.default_submission_mode||'ELECTRONIC').toUpperCase()==='ELECTRONIC'?'selected':''}>Electronic</option>
-              <option value="MANUAL" ${String(d.default_submission_mode||'ELECTRONIC').toUpperCase()==='MANUAL'?'selected':''}>Manual</option>
-            </select>
-          </div>
-        </div>
-      </div>
 
-      <div class="row">
-        <label>Billing & references</label>
-        <div class="controls" style="display:flex;flex-wrap:wrap;gap:12px;align-items:center">
-          <label class="inline">
-            <input type="checkbox" name="auto_invoice" ${d.auto_invoice ? 'checked' : ''} />
-            <span>Auto-invoice</span>
-          </label>
-          <label class="inline">
-            <input type="checkbox" name="require_reference_to_pay" ${d.require_reference_to_pay ? 'checked' : ''} />
-            <span>Require reference to PAY</span>
-          </label>
-          <label class="inline">
-            <input type="checkbox" name="require_reference_to_invoice" ${d.require_reference_to_invoice ? 'checked' : ''} />
-            <span>Require reference to INVOICE</span>
-          </label>
-        </div>
+        ${
+          hideDSM
+            ? `<div class="row"><label>Default submission mode</label><div class="controls"><div class="mini">Hidden for <strong>${routeLabel}</strong> route.</div></div></div>`
+            : `<div class="row"><label>Default submission mode</label>
+                <div class="controls">
+                  <select name="default_submission_mode">
+                    <option value="ELECTRONIC" ${String(d.default_submission_mode||'ELECTRONIC').toUpperCase()==='ELECTRONIC'?'selected':''}>Electronic</option>
+                    <option value="MANUAL" ${String(d.default_submission_mode||'ELECTRONIC').toUpperCase()==='MANUAL'?'selected':''}>Manual</option>
+                  </select>
+                </div>
+              </div>`
+        }
       </div>
 
       ${schedGrid}
 
-
       ${labelsBlock}
     </form>`;
 }
+
 
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -9901,6 +10408,8 @@ function openContractCloneAndExtend(contract_id) {
     onStartChange();
   }, 0);
 }
+
+
 
 
 function openContractSkipWeeks(contract_id) {
@@ -24310,80 +24819,56 @@ const ts          = det.timesheet || {};
 const tsfin        = det.tsfin || {};
 const actionFlags  = (det.action_flags && typeof det.action_flags === 'object') ? det.action_flags : {};
 
-// ✅ Import-authoritative detection (must work for PLANNED weeks with no evidence):
-// Import-authoritative =
-//   weekly_mode === 'NHSP'
-//   OR (weekly_mode === 'HEALTHROSTER' && hr_weekly_behaviour === 'CREATE')
+// ✅ Import-authoritative detection MUST come from SUMMARY ROW fields (per spec):
+//   - route_type (e.g. WEEKLY_NHSP, WEEKLY_NHSP_ADJUSTMENT, WEEKLY_HEALTHROSTER)
+//   - client_no_timesheet_required (boolean)
 //
-// Evidence may still exist for real NHSP timesheets, but MUST NOT be required.
-const rel = mc.timesheetRelated || {};
-const relCtr = rel.contract || {};
-const relCli = rel.client || {};
+// Import-authoritative =
+//   WEEKLY_NHSP
+//   OR WEEKLY_NHSP_ADJUSTMENT
+//   OR (WEEKLY_HEALTHROSTER AND client_no_timesheet_required === true)
+const boolish = (v) => {
+  if (v === true) return true;
+  if (v === false) return false;
+  if (v == null) return false;
+  const s = String(v).trim().toLowerCase();
+  return (s === 'true' || s === '1' || s === 'yes' || s === 'y' || s === 'on');
+};
 
-const weeklyMode =
-  String(
-    det.policy?.weekly_mode ??
-    relCtr.weekly_mode ??
-    relCli.weekly_mode ??
-    relCli?.client_settings?.weekly_mode ??
-    det.contract?.weekly_mode ??
-    det.client_settings?.weekly_mode ??
-    ''
-  ).toUpperCase();
+const isImportAuthoritativeFromSummary = (routeType, noTimesheetRequired) => {
+  const rt = String(routeType || '').toUpperCase();
+  const noTs = boolish(noTimesheetRequired);
+  return (
+    rt === 'WEEKLY_NHSP' ||
+    rt === 'WEEKLY_NHSP_ADJUSTMENT' ||
+    (rt === 'WEEKLY_HEALTHROSTER' && noTs === true)
+  );
+};
 
-const hrWeeklyBehaviour =
-  String(
-    det.policy?.hr_weekly_behaviour ??
-    relCtr.hr_weekly_behaviour ??
-    relCli.hr_weekly_behaviour ??
-    relCli?.client_settings?.hr_weekly_behaviour ??
-    det.contract?.hr_weekly_behaviour ??
-    det.client_settings?.hr_weekly_behaviour ??
-    ''
-  ).toUpperCase();
+// IMPORTANT: must use the SUMMARY row fields (modalCtx.data)
+const baseSummary = (window.modalCtx && window.modalCtx.data) ? window.modalCtx.data : (mc.data || {});
+const rt   = String(baseSummary.route_type || '').toUpperCase();
+const noTs = boolish(
+  (Object.prototype.hasOwnProperty.call(baseSummary, 'client_no_timesheet_required'))
+    ? baseSummary.client_no_timesheet_required
+    : baseSummary.client_no_timesheet_required
+);
 
 // ✅ Single gate you’ll use below (authoritative definition)
-const importAuthoritative =
-  (weeklyMode === 'NHSP') ||
-  (weeklyMode === 'HEALTHROSTER' && hrWeeklyBehaviour === 'CREATE');
+const importAuthoritative = isImportAuthoritativeFromSummary(rt, noTs);
 
 // ✅ Defence-in-depth: recompute at click time (modal may have refreshed since wiring)
 const importAuthoritativeNow = () => {
   try {
-    const mcX  = window.modalCtx || {};
-    const detX = mcX.timesheetDetails || {};
-    const polX = detX.policy || {};
-    const relX = mcX.timesheetRelated || {};
-    const ctrX = relX.contract || {};
-    const cliX = relX.client || {};
-
-    const wm =
-      String(
-        polX.weekly_mode ??
-        ctrX.weekly_mode ??
-        cliX.weekly_mode ??
-        cliX?.client_settings?.weekly_mode ??
-        detX.contract?.weekly_mode ??
-        detX.client_settings?.weekly_mode ??
-        ''
-      ).toUpperCase();
-
-    const hb =
-      String(
-        polX.hr_weekly_behaviour ??
-        ctrX.hr_weekly_behaviour ??
-        cliX.hr_weekly_behaviour ??
-        cliX?.client_settings?.hr_weekly_behaviour ??
-        detX.contract?.hr_weekly_behaviour ??
-        detX.client_settings?.hr_weekly_behaviour ??
-        ''
-      ).toUpperCase();
-
-    return (wm === 'NHSP') || (wm === 'HEALTHROSTER' && hb === 'CREATE');
+    const d = (window.modalCtx && window.modalCtx.data) ? window.modalCtx.data : {};
+    const rtNow = String(d.route_type || '').toUpperCase();
+    const noTsNow = boolish(d.client_no_timesheet_required);
+    return isImportAuthoritativeFromSummary(rtNow, noTsNow);
   } catch {
     return false;
   }
 };
+
 
 
         const sheetScope = (det.sheet_scope || mc.data?.sheet_scope || ts.sheet_scope || '').toUpperCase();
@@ -24494,10 +24979,10 @@ if (switchManualBtn) {
     switchManualBtn.__tsWired = true;
     switchManualBtn.addEventListener('click', async () => {
       // ✅ Defence-in-depth: re-check at click time (state may have changed)
-      if (importAuthoritativeNow && importAuthoritativeNow()) {
-        alert('This timesheet is import-authoritative (NHSP / HR weekly CREATE). Conversion actions are disabled.');
-        return;
-      }
+  if (importAuthoritativeNow()) {
+  alert('This timesheet is import-authoritative (NHSP / HealthRoster weekly no-timesheets). Conversion actions are disabled.');
+  return;
+}
 
       const ok = window.confirm(
         'Convert this timesheet to MANUAL?\n\n' +
@@ -24591,10 +25076,11 @@ if (switchElecPlannedBtn) {
     switchElecPlannedBtn.__tsWired = true;
     switchElecPlannedBtn.addEventListener('click', async () => {
       // ✅ Defence-in-depth: re-check at click time (state may have changed)
-      if (importAuthoritativeNow && importAuthoritativeNow()) {
-        alert('This timesheet is import-authoritative (NHSP / HR weekly CREATE). Route changes are disabled.');
+          if (importAuthoritativeNow()) {
+        alert('This timesheet is import-authoritative (NHSP / HealthRoster weekly no-timesheets). Route changes are disabled.');
         return;
       }
+
 
       const ok = window.confirm('Switch this planned weekly week back to ELECTRONIC submission?');
       if (!ok) return;
@@ -24621,259 +25107,259 @@ if (switchElecPlannedBtn) {
 
 
 
-      // Resend QR email (Scenario 2)
-        if (qrResendBtn) {
-        qrResendBtn.style.display = (!!tsId && !locked && !importAuthoritative) ? '' : 'none';
-          if (!qrResendBtn.__tsWired) {
-            qrResendBtn.__tsWired = true;
-            qrResendBtn.addEventListener('click', async () => {
-              try {
-                await resendQrTimesheetEmail(tsId);
-                window.__toast && window.__toast('QR email queued for resend.');
-                await refreshAndRepaintOverview();
-              } catch (err) {
-                if (await handleMoved(err, 'qr-resend')) return;
-                if (LOGM) console.warn('[TS][OVERVIEW] qr-resend failed', err);
-                alert(err?.message || 'Failed to resend QR email.');
-              }
-            });
-          }
-        }
-      // Refuse QR hours (Scenario 2)
-        if (qrRefuseBtn) {
-          qrRefuseBtn.style.display = (!!tsId && !locked) ? '' : 'none';
-          if (!qrRefuseBtn.__tsWired) {
-            qrRefuseBtn.__tsWired = true;
-            qrRefuseBtn.addEventListener('click', async () => {
-              try {
-                const r = await refuseQrHours(tsId);
-                if (r && r.cancelled) return;
-                window.__toast && window.__toast('Timesheet refused and candidate notified.');
-                await refreshAndRepaintOverview();
-              } catch (err) {
-                if (await handleMoved(err, 'qr-refuse')) return;
-                if (LOGM) console.warn('[TS][OVERVIEW] qr-refuse failed', err);
-                alert(err?.message || 'Failed to refuse QR hours.');
-              }
-            });
-          }
-        }
-
-        // Revoke signed QR & request resubmission (Scenario 3) → reissue via Save
-        if (qrReissueReqBtn) {
-          qrReissueReqBtn.style.display = (!!tsId && !locked) ? '' : 'none';
-          if (!qrReissueReqBtn.__tsWired) {
-            qrReissueReqBtn.__tsWired = true;
-            qrReissueReqBtn.addEventListener('click', async () => {
-              const ok = window.confirm(
-                'Revoke the signed QR submission and request resubmission?\n\n' +
-                'This will require a new signature and upload. You will be taken to Edit mode to confirm hours then Save.'
-              );
-              if (!ok) return;
-
-              try {
-                window.modalCtx = window.modalCtx || {};
-                window.modalCtx.timesheetState = window.modalCtx.timesheetState || {};
-                window.modalCtx.timesheetState.__forceQrActionEnum = 'REISSUE_QR';
-
-                if (typeof window.__getModalFrame === 'function') {
-                  const fr = window.__getModalFrame();
-                  if (fr && fr.entity === 'timesheets') {
-                    fr.mode = 'edit';
-                    fr._suppressDirty = true;
-                    fr.setTab('overview');
-                    fr._suppressDirty = false;
-                    fr._updateButtons && fr._updateButtons();
-                  }
-                }
-
-                window.__toast && window.__toast('Edit mode enabled. Click Save to reissue a new QR.');
-              } catch (err) {
-                if (LOGM) console.warn('[TS][OVERVIEW] qr-reissue-request failed', err);
-                alert(err?.message || 'Failed to enter reissue flow.');
-              }
-            });
-          }
-        }
-
-        // Convert QR → manual-only
-        if (qrConvertManualBtn) {
-          qrConvertManualBtn.style.display = (!!tsId && !locked) ? '' : 'none';
-          if (!qrConvertManualBtn.__tsWired) {
-            qrConvertManualBtn.__tsWired = true;
-            qrConvertManualBtn.addEventListener('click', async () => {
-              const ok = window.confirm(
-                'Convert this QR timesheet to manual-only?\n\n' +
-                'This disables candidate QR/electronic submission. Admin will manage evidence manually.'
-              );
-              if (!ok) return;
-
-              try {
-           const idNow = tsNow();
-if (!idNow) throw new Error('Timesheet id missing.');
-
-await apiPostJson(
-  `/api/timesheets/${encodeURIComponent(idNow)}/convert-qr-to-manual`,
-  { expected_timesheet_id: expectedNow() }
-);
-
-window.__toast && window.__toast('Converted to manual-only.');
-await refreshAndRepaintOverview();
-
-            } catch (err) {
-  if (await handleMoved(err, 'convert-qr-to-manual')) return;
-  if (LOGM) console.warn('[TS][OVERVIEW] convert-qr-to-manual failed', err);
-  alert(err?.message || 'Failed to convert to manual-only.');
+   // Resend QR email (Scenario 2)
+if (qrResendBtn) {
+  qrResendBtn.style.display = (!!tsId && !locked && !importAuthoritative) ? '' : 'none';
+  if (!qrResendBtn.__tsWired) {
+    qrResendBtn.__tsWired = true;
+    qrResendBtn.addEventListener('click', async () => {
+      try {
+        await resendQrTimesheetEmail(tsId);
+        window.__toast && window.__toast('QR email queued for resend.');
+        await refreshAndRepaintOverview();
+      } catch (err) {
+        if (await handleMoved(err, 'qr-resend')) return;
+        if (LOGM) console.warn('[TS][OVERVIEW] qr-resend failed', err);
+        alert(err?.message || 'Failed to resend QR email.');
+      }
+    });
+  }
 }
 
-            });
+// Refuse QR hours (Scenario 2)
+if (qrRefuseBtn) {
+  qrRefuseBtn.style.display = (!!tsId && !locked && !importAuthoritative) ? '' : 'none';
+  if (!qrRefuseBtn.__tsWired) {
+    qrRefuseBtn.__tsWired = true;
+    qrRefuseBtn.addEventListener('click', async () => {
+      try {
+        const r = await refuseQrHours(tsId);
+        if (r && r.cancelled) return;
+        window.__toast && window.__toast('Timesheet refused and candidate notified.');
+        await refreshAndRepaintOverview();
+      } catch (err) {
+        if (await handleMoved(err, 'qr-refuse')) return;
+        if (LOGM) console.warn('[TS][OVERVIEW] qr-refuse failed', err);
+        alert(err?.message || 'Failed to refuse QR hours.');
+      }
+    });
+  }
+}
+
+// Revoke signed QR & request resubmission (Scenario 3) → reissue via Save
+if (qrReissueReqBtn) {
+  qrReissueReqBtn.style.display = (!!tsId && !locked && !importAuthoritative) ? '' : 'none';
+  if (!qrReissueReqBtn.__tsWired) {
+    qrReissueReqBtn.__tsWired = true;
+    qrReissueReqBtn.addEventListener('click', async () => {
+      const ok = window.confirm(
+        'Revoke the signed QR submission and request resubmission?\n\n' +
+        'This will require a new signature and upload. You will be taken to Edit mode to confirm hours then Save.'
+      );
+      if (!ok) return;
+
+      try {
+        window.modalCtx = window.modalCtx || {};
+        window.modalCtx.timesheetState = window.modalCtx.timesheetState || {};
+        window.modalCtx.timesheetState.__forceQrActionEnum = 'REISSUE_QR';
+
+        if (typeof window.__getModalFrame === 'function') {
+          const fr = window.__getModalFrame();
+          if (fr && fr.entity === 'timesheets') {
+            fr.mode = 'edit';
+            fr._suppressDirty = true;
+            fr.setTab('overview');
+            fr._suppressDirty = false;
+            fr._updateButtons && fr._updateButtons();
           }
         }
 
+        window.__toast && window.__toast('Edit mode enabled. Click Save to reissue a new QR.');
+      } catch (err) {
+        if (LOGM) console.warn('[TS][OVERVIEW] qr-reissue-request failed', err);
+        alert(err?.message || 'Failed to enter reissue flow.');
+      }
+    });
+  }
+}
 
-        // Restore revoked QR (pending)
-        if (qrRestorePendBtn) {
-          qrRestorePendBtn.style.display = (!!tsId && !locked && canRestorePending) ? '' : 'none';
-          if (!qrRestorePendBtn.__tsWired) {
-            qrRestorePendBtn.__tsWired = true;
-            qrRestorePendBtn.addEventListener('click', async () => {
-              const ok = window.confirm('Restore the most recently revoked pending QR version?');
-              if (!ok) return;
-              try {
-                await restoreRevokedQr(tsId, 'PENDING');
-                window.__toast && window.__toast('Pending QR restored.');
-                await refreshAndRepaintOverview();
-              } catch (err) {
-                if (await handleMoved(err, 'qr-restore-pending')) return;
-                if (LOGM) console.warn('[TS][OVERVIEW] restore pending failed', err);
-                alert(err?.message || 'Failed to restore pending QR.');
-              }
-            });
-          }
+// Convert QR → manual-only
+if (qrConvertManualBtn) {
+  qrConvertManualBtn.style.display = (!!tsId && !locked && !importAuthoritative) ? '' : 'none';
+  if (!qrConvertManualBtn.__tsWired) {
+    qrConvertManualBtn.__tsWired = true;
+    qrConvertManualBtn.addEventListener('click', async () => {
+      const ok = window.confirm(
+        'Convert this QR timesheet to manual-only?\n\n' +
+        'This disables candidate QR/electronic submission. Admin will manage evidence manually.'
+      );
+      if (!ok) return;
+
+      try {
+        const idNow = tsNow();
+        if (!idNow) throw new Error('Timesheet id missing.');
+
+        await apiPostJson(
+          `/api/timesheets/${encodeURIComponent(idNow)}/convert-qr-to-manual`,
+          { expected_timesheet_id: expectedNow() }
+        );
+
+        window.__toast && window.__toast('Converted to manual-only.');
+        await refreshAndRepaintOverview();
+
+      } catch (err) {
+        if (await handleMoved(err, 'convert-qr-to-manual')) return;
+        if (LOGM) console.warn('[TS][OVERVIEW] convert-qr-to-manual failed', err);
+        alert(err?.message || 'Failed to convert to manual-only.');
+      }
+    });
+  }
+}
+
+// Restore revoked QR (pending)
+if (qrRestorePendBtn) {
+  qrRestorePendBtn.style.display = (!!tsId && !locked && canRestorePending && !importAuthoritative) ? '' : 'none';
+  if (!qrRestorePendBtn.__tsWired) {
+    qrRestorePendBtn.__tsWired = true;
+    qrRestorePendBtn.addEventListener('click', async () => {
+      const ok = window.confirm('Restore the most recently revoked pending QR version?');
+      if (!ok) return;
+      try {
+        await restoreRevokedQr(tsId, 'PENDING');
+        window.__toast && window.__toast('Pending QR restored.');
+        await refreshAndRepaintOverview();
+      } catch (err) {
+        if (await handleMoved(err, 'qr-restore-pending')) return;
+        if (LOGM) console.warn('[TS][OVERVIEW] restore pending failed', err);
+        alert(err?.message || 'Failed to restore pending QR.');
+      }
+    });
+  }
+}
+
+// Restore revoked QR (signed)
+if (qrRestoreSignedBtn) {
+  qrRestoreSignedBtn.style.display = (!!tsId && !locked && canRestoreSigned && !importAuthoritative) ? '' : 'none';
+  if (!qrRestoreSignedBtn.__tsWired) {
+    qrRestoreSignedBtn.__tsWired = true;
+    qrRestoreSignedBtn.addEventListener('click', async () => {
+      const ok = window.confirm(
+        'Restore the most recently revoked signed QR version?\n\n' +
+        'This will restore the signed evidence as current.'
+      );
+      if (!ok) return;
+      try {
+        await restoreRevokedQr(tsId, 'SIGNED');
+        window.__toast && window.__toast('Signed QR restored.');
+        await refreshAndRepaintOverview();
+      } catch (err) {
+        if (await handleMoved(err, 'qr-restore-signed')) return;
+        if (LOGM) console.warn('[TS][OVERVIEW] restore signed failed', err);
+        alert(err?.message || 'Failed to restore signed QR.');
+      }
+    });
+  }
+}
+
+// Allow QR again
+if (allowQrAgainBtn) {
+  allowQrAgainBtn.style.display = (!!tsId && !locked && canAllowQrAgain && !importAuthoritative) ? '' : 'none';
+  if (!allowQrAgainBtn.__tsWired) {
+    allowQrAgainBtn.__tsWired = true;
+    allowQrAgainBtn.addEventListener('click', async () => {
+      try {
+        const r = await allowQrAgain(tsId);
+        if (r && r.cancelled) return;
+        window.__toast && window.__toast('QR enabled again.');
+        await refreshAndRepaintOverview();
+      } catch (err) {
+        if (await handleMoved(err, 'allow-qr-again')) return;
+        if (LOGM) console.warn('[TS][OVERVIEW] allow-qr-again failed', err);
+        alert(err?.message || 'Failed to allow QR again.');
+      }
+    });
+  }
+}
+
+// Allow electronic again
+if (allowElecAgainBtn) {
+  allowElecAgainBtn.style.display = (!!tsId && !locked && canAllowElecAgain && !importAuthoritative) ? '' : 'none';
+  if (!allowElecAgainBtn.__tsWired) {
+    allowElecAgainBtn.__tsWired = true;
+    allowElecAgainBtn.addEventListener('click', async () => {
+      try {
+        const r = await allowElectronicAgain(tsId);
+        if (r && r.cancelled) return;
+        window.__toast && window.__toast('Electronic enabled again.');
+        await refreshAndRepaintOverview();
+      } catch (err) {
+        if (await handleMoved(err, 'allow-electronic-again')) return;
+        if (LOGM) console.warn('[TS][OVERVIEW] allow-electronic-again failed', err);
+        alert(err?.message || 'Failed to allow electronic again.');
+      }
+    });
+  }
+}
+
+// ── Daily QR send button (DAILY, ELECTRONIC, unlocked, VIEW mode) ──
+try {
+  const dailyQrBtn = root.querySelector('button[data-ts-action="send-daily-qr"]');
+
+  const canSendDailyQr =
+    !!tsId &&
+    mode === 'view' &&
+    isDaily &&
+    subMode === 'ELECTRONIC' &&
+    !locked &&
+    !importAuthoritative;
+
+  if (dailyQrBtn) {
+    dailyQrBtn.style.display = canSendDailyQr ? '' : 'none';
+
+    if (!dailyQrBtn.__tsWired) {
+      dailyQrBtn.__tsWired = true;
+      dailyQrBtn.addEventListener('click', async () => {
+        if (!tsId) {
+          alert('Timesheet id missing; cannot generate daily QR timesheet.');
+          return;
         }
 
-       // Restore revoked QR (signed)
-        if (qrRestoreSignedBtn) {
-          qrRestoreSignedBtn.style.display = (!!tsId && !locked && canRestoreSigned) ? '' : 'none';
-          if (!qrRestoreSignedBtn.__tsWired) {
-            qrRestoreSignedBtn.__tsWired = true;
-            qrRestoreSignedBtn.addEventListener('click', async () => {
-              const ok = window.confirm(
-                'Restore the most recently revoked signed QR version?\n\n' +
-                'This will restore the signed evidence as current.'
-              );
-              if (!ok) return;
-              try {
-                await restoreRevokedQr(tsId, 'SIGNED');
-                window.__toast && window.__toast('Signed QR restored.');
-                await refreshAndRepaintOverview();
-              } catch (err) {
-                if (await handleMoved(err, 'qr-restore-signed')) return;
-                if (LOGM) console.warn('[TS][OVERVIEW] restore signed failed', err);
-                alert(err?.message || 'Failed to restore signed QR.');
-              }
-            });
-          }
-        }
+        const ok = window.confirm(
+          'Generate a DAILY QR timesheet for this shift?\n\n' +
+          'This will generate a QR-coded PDF and email it to the candidate. ' +
+          'Any previous QR for this timesheet will be invalidated.'
+        );
+        if (!ok) return;
 
-        // Allow QR again
-        if (allowQrAgainBtn) {
-       allowQrAgainBtn.style.display = (!!tsId && !locked && canAllowQrAgain && !importAuthoritative) ? '' : 'none';
-          if (!allowQrAgainBtn.__tsWired) {
-            allowQrAgainBtn.__tsWired = true;
-            allowQrAgainBtn.addEventListener('click', async () => {
-              try {
-                const r = await allowQrAgain(tsId);
-                if (r && r.cancelled) return;
-                window.__toast && window.__toast('QR enabled again.');
-                await refreshAndRepaintOverview();
-              } catch (err) {
-                if (await handleMoved(err, 'allow-qr-again')) return;
-                if (LOGM) console.warn('[TS][OVERVIEW] allow-qr-again failed', err);
-                alert(err?.message || 'Failed to allow QR again.');
-              }
-            });
-          }
-        }
+        const encId = encodeURIComponent(tsId);
 
-       // Allow electronic again
-        if (allowElecAgainBtn) {
-       allowElecAgainBtn.style.display = (!!tsId && !locked && canAllowElecAgain && !importAuthoritative) ? '' : 'none';
-          if (!allowElecAgainBtn.__tsWired) {
-            allowElecAgainBtn.__tsWired = true;
-            allowElecAgainBtn.addEventListener('click', async () => {
-              try {
-                const r = await allowElectronicAgain(tsId);
-                if (r && r.cancelled) return;
-                window.__toast && window.__toast('Electronic enabled again.');
-                await refreshAndRepaintOverview();
-              } catch (err) {
-                if (await handleMoved(err, 'allow-electronic-again')) return;
-                if (LOGM) console.warn('[TS][OVERVIEW] allow-electronic-again failed', err);
-                alert(err?.message || 'Failed to allow electronic again.');
-              }
-            });
-          }
-        }
-
-        // ── Daily QR send button (DAILY, ELECTRONIC, unlocked, VIEW mode) ──
         try {
-          const dailyQrBtn = root.querySelector('button[data-ts-action="send-daily-qr"]');
+          const idNow = tsNow();
+          if (!idNow) throw new Error('Timesheet id missing; cannot generate daily QR timesheet.');
 
-          const canSendDailyQr =
-            !!tsId &&
-            mode === 'view' &&
-            isDaily &&
-            subMode === 'ELECTRONIC' &&
-            !locked;
+          await apiPostJson(
+            `/api/timesheets/${encodeURIComponent(idNow)}/daily-qr-printable`,
+            { expected_timesheet_id: expectedNow() }
+          );
 
-          if (dailyQrBtn) {
-            dailyQrBtn.style.display = canSendDailyQr ? '' : 'none';
+          window.__toast && window.__toast(
+            'Daily QR timesheet generated and emailed. Evidence is now required via QR scan.'
+          );
 
-            if (!dailyQrBtn.__tsWired) {
-              dailyQrBtn.__tsWired = true;
-              dailyQrBtn.addEventListener('click', async () => {
-                if (!tsId) {
-                  alert('Timesheet id missing; cannot generate daily QR timesheet.');
-                  return;
-                }
+          await refreshAndRepaintOverview();
 
-                const ok = window.confirm(
-                  'Generate a DAILY QR timesheet for this shift?\n\n' +
-                  'This will generate a QR-coded PDF and email it to the candidate. ' +
-                  'Any previous QR for this timesheet will be invalidated.'
-                );
-                if (!ok) return;
-
-                const encId = encodeURIComponent(tsId);
-
-                try {
-             const idNow = tsNow();
-if (!idNow) throw new Error('Timesheet id missing; cannot generate daily QR timesheet.');
-
-await apiPostJson(
-  `/api/timesheets/${encodeURIComponent(idNow)}/daily-qr-printable`,
-  { expected_timesheet_id: expectedNow() }
-);
-
-window.__toast && window.__toast(
-  'Daily QR timesheet generated and emailed. Evidence is now required via QR scan.'
-);
-
-await refreshAndRepaintOverview();
-
-         } catch (err) {
-  if (await handleMoved(err, 'send-daily-qr')) return;
-  if (LOGM) console.warn('[TS][OVERVIEW] send-daily-qr failed', err);
-  alert(err?.message || 'Failed to generate daily QR timesheet.');
+        } catch (err) {
+          if (await handleMoved(err, 'send-daily-qr')) return;
+          if (LOGM) console.warn('[TS][OVERVIEW] send-daily-qr failed', err);
+          alert(err?.message || 'Failed to generate daily QR timesheet.');
+        }
+      });
+    }
+  }
+} catch (e) {
+  if (LOGM) LT('[TS][OVERVIEW] QR wiring failed (non-fatal)', e);
 }
 
-              });
-            }
-          }
-        } catch (e) {
-          if (LOGM) LT('[TS][OVERVIEW] QR wiring failed (non-fatal)', e);
-        }
 
         // ── Pay-hold + mark-paid staging in edit/create (unchanged) ──
         if (mode === 'edit' || mode === 'create') {
@@ -25305,46 +25791,123 @@ if (this.entity === 'timesheets' && k === 'evidence') {
     this.kind === 'resolve-client'     ||
     (typeof this.kind === 'string' && this.kind.startsWith('import-summary-'));
 
-  if (this.noParentGate) {
-    const ro = isUtilityKindForThis
-      ? false
-      : (this.mode === 'view' || this.mode === 'saving');
-    setFormReadOnly(byId('modalBody'), ro);
-  } else if (isChild) {
-    const p = parentFrame();
-    setFormReadOnly(byId('modalBody'), !(p && (p.mode === 'edit' || p.mode === 'create')));
-  } else {
-    setFormReadOnly(byId('modalBody'), (this.mode === 'view' || this.mode === 'saving'));
-  }
-
-
-  try {
-    const pc = document.getElementById('btnPickCandidate');
-    const pl = document.getElementById('btnPickClient');
-    L('setTab EXIT snapshot', {
-      currentTabKey: this.currentTabKey,
-      pickButtons: {
-        btnPickCandidate: { exists: !!pc, disabled: !!(pc && pc.disabled) },
-        btnPickClient:    { exists: !!pl, disabled: !!(pl && pl.disabled) }
-      }
-    });
-  } catch {}
-
-  try {
-    if (this.entity === 'contracts' && k === 'main') {
-      window.dispatchEvent(new Event('contracts-main-rendered'));
-    }
-  } catch {}
-
-  this._hasMountedOnce = true;
-  this._suppressDirty  = false;
-  this.isDirty         = prevDirty;
-
-  if (typeof this._updateButtons === 'function') this._updateButtons();
-
-  GE();
+if (this.noParentGate) {
+  const ro = isUtilityKindForThis
+    ? false
+    : (this.mode === 'view' || this.mode === 'saving');
+  setFormReadOnly(byId('modalBody'), ro);
+} else if (isChild) {
+  const p = parentFrame();
+  setFormReadOnly(byId('modalBody'), !(p && (p.mode === 'edit' || p.mode === 'create')));
+} else {
+  setFormReadOnly(byId('modalBody'), (this.mode === 'view' || this.mode === 'saving'));
 }
 
+// ✅ TIMESHEETS → LINES: import-authoritative + PROCESSED → allow deferrals, lock hours/schedule/extras
+if (this.entity === 'timesheets' && k === 'lines') {
+  try {
+    const d    = (window.modalCtx && window.modalCtx.data) ? window.modalCtx.data : {};
+    const meta = (window.modalCtx && window.modalCtx.timesheetMeta) ? window.modalCtx.timesheetMeta : {};
+
+    const boolish = (v) => {
+      if (v === true) return true;
+      if (v === false) return false;
+      if (v == null) return false;
+      const s = String(v).trim().toLowerCase();
+      return (s === 'true' || s === '1' || s === 'yes' || s === 'y' || s === 'on');
+    };
+
+    const isImportAuthoritativeFromSummary = (routeType, noTimesheetRequired) => {
+      const rt = String(routeType || '').toUpperCase();
+      const noTs = boolish(noTimesheetRequired);
+      return (
+        rt === 'WEEKLY_NHSP' ||
+        rt === 'WEEKLY_NHSP_ADJUSTMENT' ||
+        (rt === 'WEEKLY_HEALTHROSTER' && noTs === true)
+      );
+    };
+
+    const importAuth = isImportAuthoritativeFromSummary(d.route_type, d.client_no_timesheet_required);
+
+    // "Processed" = has a real timesheet id (NOT a planned week stub)
+    const hasRealTs = !!(d.timesheet_id || meta.hasTs);
+
+  // Only apply locks in EDIT/CREATE
+const isEditing = (this.mode === 'edit' || this.mode === 'create');
+
+if (isEditing && importAuth && hasRealTs) {
+  const root2 = byId('modalBody');
+  if (root2) {
+
+    // Allowlist: deferral controls remain editable
+    const isDeferralControl = (el) => {
+      const nm = String(el?.name || '');
+      if (nm === 'seg_exclude_from_pay' && el.hasAttribute('data-segment-id')) return true;
+      if (nm === 'seg_invoice_week'    && el.hasAttribute('data-segment-id')) return true;
+      return false;
+    };
+
+    // Lock ALL inputs/selects/textareas in Lines tab except deferral controls
+    root2.querySelectorAll('input, select, textarea').forEach(el => {
+      if (isDeferralControl(el)) {
+        el.disabled = false;
+        try { el.removeAttribute('readonly'); } catch {}
+        return;
+      }
+      el.disabled = true;
+      try { el.setAttribute('readonly', 'true'); } catch {}
+    });
+
+    // Lock schedule edit buttons
+    const scheduleEditActions = new Set([
+      'reset-schedule',
+      'extra-shift-add',
+      'extra-shift-remove',
+      'extra-break-add',
+      'extra-break-remove'
+    ]);
+    root2.querySelectorAll('button[data-ts-action]').forEach(btn => {
+      const act = String(btn.getAttribute('data-ts-action') || '').toLowerCase();
+      if (scheduleEditActions.has(act)) btn.disabled = true;
+    });
+
+    // Lock weekly extras inputs
+    root2.querySelectorAll('input[name^="extra_units_"]').forEach(inp => {
+      inp.disabled = true;
+      try { inp.setAttribute('readonly', 'true'); } catch {}
+    });
+
+  }
+}
+} catch {}
+}
+
+try {
+  const pc = document.getElementById('btnPickCandidate');
+  const pl = document.getElementById('btnPickClient');
+  L('setTab EXIT snapshot', {
+    currentTabKey: this.currentTabKey,
+    pickButtons: {
+      btnPickCandidate: { exists: !!pc, disabled: !!(pc && pc.disabled) },
+      btnPickClient:    { exists: !!pl, disabled: !!(pl && pl.disabled) }
+    }
+  });
+} catch {}
+
+try {
+  if (this.entity === 'contracts' && k === 'main') {
+    window.dispatchEvent(new Event('contracts-main-rendered'));
+  }
+} catch {}
+
+this._hasMountedOnce = true;
+this._suppressDirty  = false;
+this.isDirty         = prevDirty;
+
+if (typeof this._updateButtons === 'function') this._updateButtons();
+
+GE();
+}
 
 
 
@@ -25996,24 +26559,59 @@ top._updateButtons = ()=> {
       !!tsfin.locked_by_invoice_id ||
       !!tsfin.paid_at_utc;
 
-    if (top.entity === 'timesheets') {
-      const hasTsMeta  = !!meta.hasTs;
-      const isPlanned  = !!meta.isPlannedWeek;
+ if (top.entity === 'timesheets') {
+  const hasTsMeta  = !!meta.hasTs;
+  const isPlanned  = !!meta.isPlannedWeek;
 
-      const isWeeklyManualTs =
-        hasTsMeta && isWeekly && subMode === 'MANUAL' && !locked;
+  const isWeeklyManualTs =
+    hasTsMeta && isWeekly && subMode === 'MANUAL' && !locked;
 
-      // Allow Edit only for PLANNED weekly slots that are already MANUAL
-      const isPlannedManualWeek =
-        !hasTsMeta && isPlanned && isWeekly && !!weekId && !locked && (cwMode === 'MANUAL');
+  const isPlannedManualWeek =
+    !hasTsMeta && isPlanned && isWeekly && !!weekId && !locked && (cwMode === 'MANUAL');
 
-      const isDailyManualTs =
-        hasTsMeta && isDaily && subMode === 'MANUAL' && !locked;
+  const isDailyManualTs =
+    hasTsMeta && isDaily && subMode === 'MANUAL' && !locked;
 
-      canEdit = (top.mode === 'view') && (isWeeklyManualTs || isPlannedManualWeek || isDailyManualTs);
-    } else {
-      canEdit = (top.mode === 'view' && top.hasId);
-    }
+  // ✅ NEW: import-authoritative (from SUMMARY row)
+  const boolish = (v) => {
+    if (v === true) return true;
+    if (v === false) return false;
+    if (v == null) return false;
+    const s = String(v).trim().toLowerCase();
+    return (s === 'true' || s === '1' || s === 'yes' || s === 'y' || s === 'on');
+  };
+
+  const isImportAuthoritativeFromSummary = (routeType, noTimesheetRequired) => {
+    const rt = String(routeType || '').toUpperCase();
+    const noTs = boolish(noTimesheetRequired);
+    return (
+      rt === 'WEEKLY_NHSP' ||
+      rt === 'WEEKLY_NHSP_ADJUSTMENT' ||
+      (rt === 'WEEKLY_HEALTHROSTER' && noTs === true)
+    );
+  };
+
+  const dSum = (mcTs && mcTs.data) ? mcTs.data : {};
+const importAuthoritative =
+  isImportAuthoritativeFromSummary(dSum.route_type, dSum.client_no_timesheet_required);
+
+// ✅ Allow Edit for import-authoritative *real timesheets* (for deferrals)
+const isImportAuthEditable =
+  hasTsMeta && !locked && importAuthoritative;
+
+// ✅ NEW: import-authoritative planned stub → cannot Edit
+const isImportAuthPlannedStub =
+  (!hasTsMeta && isPlanned && importAuthoritative);
+
+canEdit =
+  (top.mode === 'view') &&
+  !isImportAuthPlannedStub &&
+  (isWeeklyManualTs || isPlannedManualWeek || isDailyManualTs || isImportAuthEditable);
+
+} else {
+  canEdit = (top.mode === 'view' && top.hasId);
+}
+
 
     // Footer placement: ONLY show Edit when allowed (no convert replacement)
     btnEdit.style.display = (canEdit ? '' : 'none');
@@ -26073,22 +26671,42 @@ if (!isChild && top.entity === 'timesheets') {
   );
 
   // requiresAuth: prefer helper if available, else fallback
-  let requiresAuthNow = false;
-  try {
-    if (typeof computeRequiresTimesheetAuthorisation === 'function') {
-      const x = computeRequiresTimesheetAuthorisation(detNow, (mcNow.data || {}));
-      requiresAuthNow = !!(x && typeof x === 'object' ? x.requires : false);
-    } else {
-      const stageRawNow = String(tsfinNow.processing_status || mcNow.data?.processing_status || '').toUpperCase();
-      const requiresHrNow = !!policyNow.requires_hr;
-      const autoprocessHrNow = !!policyNow.autoprocess_hr;
-      requiresAuthNow =
-        (stageRawNow === 'PENDING_AUTH') ||
-        (requiresHrNow && !autoprocessHrNow && stageRawNow === 'READY_FOR_HR');
-    }
-  } catch {
-    requiresAuthNow = false;
+let requiresAuthNow = false;
+try {
+  if (typeof computeRequiresTimesheetAuthorisation === 'function') {
+    const x = computeRequiresTimesheetAuthorisation(detNow, (mcNow.data || {}));
+    requiresAuthNow = !!(x && x.requires); // ✅ apply helper output
+  } else {
+    const stageRawNow = String(tsfinNow.processing_status || mcNow.data?.processing_status || '').toUpperCase();
+
+    const asBool = (v) => {
+      if (v === true) return true;
+      if (v === false) return false;
+      if (v == null) return false;
+      const s = String(v).trim().toLowerCase();
+      return (s === 'true' || s === '1' || s === 'yes' || s === 'y' || s === 'on');
+    };
+
+    // Prefer summary-row fields (contract-resolved) when present; otherwise fallback to policy
+    const d = mcNow.data || {};
+    const requiresHrNow =
+      (Object.prototype.hasOwnProperty.call(d, 'client_requires_hr'))
+        ? asBool(d.client_requires_hr)
+        : !!policyNow.requires_hr;
+
+    const autoprocessHrNow =
+      (Object.prototype.hasOwnProperty.call(d, 'client_autoprocess_hr'))
+        ? asBool(d.client_autoprocess_hr)
+        : !!policyNow.autoprocess_hr;
+
+    requiresAuthNow =
+      (stageRawNow === 'PENDING_AUTH') ||
+      (requiresHrNow && !autoprocessHrNow && stageRawNow === 'READY_FOR_HR');
   }
+} catch {
+  requiresAuthNow = false;
+}
+
 
   const canAuthoriseNow =
     (top.mode === 'view') &&
@@ -26112,13 +26730,37 @@ if (!isChild && top.entity === 'timesheets') {
   ).toUpperCase();
   const isWeeklyNow   = (sheetScopeNow === 'WEEKLY');
 
-  const canProcessNow =
-    (top.mode === 'view') &&
-    isWeeklyNow &&
-    !lockedNow &&
-    !tsIdNow &&
-    !!weekIdNow &&
-    (cwModeNow === 'MANUAL');
+const boolish = (v) => {
+  if (v === true) return true;
+  if (v === false) return false;
+  if (v == null) return false;
+  const s = String(v).trim().toLowerCase();
+  return (s === 'true' || s === '1' || s === 'yes' || s === 'y' || s === 'on');
+};
+
+const isImportAuthoritativeFromSummary = (routeType, noTimesheetRequired) => {
+  const rt = String(routeType || '').toUpperCase();
+  const noTs = boolish(noTimesheetRequired);
+  return (
+    rt === 'WEEKLY_NHSP' ||
+    rt === 'WEEKLY_NHSP_ADJUSTMENT' ||
+    (rt === 'WEEKLY_HEALTHROSTER' && noTs === true)
+  );
+};
+
+const dSum = (mcNow && mcNow.data) ? mcNow.data : {};
+const importAuthoritativeNow =
+  isImportAuthoritativeFromSummary(dSum.route_type, dSum.client_no_timesheet_required);
+
+const canProcessNow =
+  (top.mode === 'view') &&
+  isWeeklyNow &&
+  !lockedNow &&
+  !importAuthoritativeNow &&   // ✅ NEW
+  !tsIdNow &&
+  !!weekIdNow &&
+  (cwModeNow === 'MANUAL');
+
 
   // Delete (real OR planned)
   const canDeleteNow =
@@ -33016,7 +33658,6 @@ function renderClientHospitalsTable() {
 
 // =================== HOSPITALS TABLE (UPDATED: staged delete & edit) ===================
 
-
 async function renderClientSettingsUI(settingsObj){
   const div = byId('clientSettings'); if (!div) return;
 
@@ -33055,11 +33696,18 @@ async function renderClientSettingsUI(settingsObj){
 
     default_submission_mode: String(initial.default_submission_mode || 'ELECTRONIC').toUpperCase(),
 
+    // NEW: Auto-invoice by default (client-level). Default FALSE for new clients.
+    auto_invoice_default: (typeof initial.auto_invoice_default === 'boolean') ? initial.auto_invoice_default : false,
+
     weekly_mode: initial.weekly_mode || '',
     hr_weekly_behaviour: initial.hr_weekly_behaviour || ''
   };
 
   let s = canonicalizeClientSettings(seed);
+
+  // Ensure the new key is always preserved and never dropped/overwritten by canonicalizeClientSettings()
+  s.auto_invoice_default = !!seed.auto_invoice_default;
+
   ctx.clientSettingsState = { ...initial, ...s };
 
   const pairTimeRow = (label, aName, aVal, bName, bVal) => `
@@ -33079,8 +33727,17 @@ async function renderClientSettingsUI(settingsObj){
   `;
 
   const weekEndingAndDefaultRow = () => {
+    const mode = String(s.weekly_mode || 'NONE').toUpperCase();
+    const beh  = String(s.hr_weekly_behaviour || 'VERIFY').toUpperCase();
+
+    // Requirement: hide Default submission mode when:
+    // - weekly_mode === NHSP
+    // - OR weekly_mode === HEALTHROSTER AND hr_weekly_behaviour === CREATE (no timesheets)
+    const hideDSM = (mode === 'NHSP') || (mode === 'HEALTHROSTER' && beh === 'CREATE');
+
     const opts = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday']
       .map((lab,idx)=>`<option value="${idx}" ${String(idx)===String(s.week_ending_weekday)?'selected':''}>${lab}</option>`).join('');
+
     return `
       <div class="row">
         <label style="white-space:normal">Week ending / Default submission</label>
@@ -33089,13 +33746,20 @@ async function renderClientSettingsUI(settingsObj){
             <span class="mini" style="opacity:0.9">Week ending day</span>
             <select name="week_ending_weekday">${opts}</select>
           </div>
-          <div style="display:flex;flex-direction:column;gap:4px;width:220px;min-width:220px;">
-            <span class="mini" style="opacity:0.9">Default submission</span>
-            <select name="default_submission_mode">
-              <option value="ELECTRONIC" ${String(s.default_submission_mode||'').toUpperCase()==='ELECTRONIC'?'selected':''}>ELECTRONIC</option>
-              <option value="MANUAL"     ${String(s.default_submission_mode||'').toUpperCase()==='MANUAL'?'selected':''}>MANUAL</option>
-            </select>
-          </div>
+
+          ${
+            hideDSM
+              ? ``
+              : `
+                <div style="display:flex;flex-direction:column;gap:4px;width:220px;min-width:220px;">
+                  <span class="mini" style="opacity:0.9">Default submission</span>
+                  <select name="default_submission_mode">
+                    <option value="ELECTRONIC" ${String(s.default_submission_mode||'').toUpperCase()==='ELECTRONIC'?'selected':''}>ELECTRONIC</option>
+                    <option value="MANUAL"     ${String(s.default_submission_mode||'').toUpperCase()==='MANUAL'?'selected':''}>MANUAL</option>
+                  </select>
+                </div>
+              `
+          }
         </div>
       </div>
     `;
@@ -33205,9 +33869,12 @@ async function renderClientSettingsUI(settingsObj){
       return `
         <div class="row" style="margin:0;">
           <label style="white-space:normal">References & flags</label>
-          <div class="controls" style="min-width:0;">
+          <div class="controls" style="display:flex;flex-direction:column;gap:12px;min-width:0;">
             <div class="mini" style="opacity:0.9;line-height:1.25;white-space:normal;overflow-wrap:break-word;">
               NHSP mode controls references, invoicing behaviour and attachments automatically.
+            </div>
+            <div style="display:grid;grid-template-columns:1fr;gap:8px;">
+              ${checkChoice('auto_invoice_default', 'Auto-invoice by default', !!st.auto_invoice_default)}
             </div>
           </div>
         </div>
@@ -33228,6 +33895,7 @@ async function renderClientSettingsUI(settingsObj){
               ${checkChoice('self_bill_no_invoices_sent', 'Self-bill (no invoices sent)', !!st.self_bill_no_invoices_sent)}
               ${checkChoice('daily_calc_of_invoices', 'Daily invoice calculation', !!st.daily_calc_of_invoices)}
               ${checkChoice('group_nightsat_sunbh', 'Group Night/Sat/Sun/BH', !!st.group_nightsat_sunbh)}
+              ${checkChoice('auto_invoice_default', 'Auto-invoice by default', !!st.auto_invoice_default)}
             </div>
 
             <div class="mini" style="opacity:0.9;line-height:1.25;white-space:normal;overflow-wrap:break-word;">
@@ -33246,6 +33914,7 @@ async function renderClientSettingsUI(settingsObj){
             ${checkChoice('self_bill_no_invoices_sent', 'Self-bill (no invoices sent)', !!st.self_bill_no_invoices_sent)}
             ${checkChoice('daily_calc_of_invoices', 'Daily invoice calculation', !!st.daily_calc_of_invoices)}
             ${checkChoice('group_nightsat_sunbh', 'Group Night/Sat/Sun/BH', !!st.group_nightsat_sunbh)}
+            ${checkChoice('auto_invoice_default', 'Auto-invoice by default', !!st.auto_invoice_default)}
           </div>
 
           <div style="display:grid;grid-template-columns:1fr;gap:8px;">
@@ -33345,8 +34014,12 @@ async function renderClientSettingsUI(settingsObj){
     const w = Number(vals.week_ending_weekday);
     next.week_ending_weekday = Number.isInteger(w) ? String(Math.min(6, Math.max(0, w))) : lastValid.week_ending_weekday;
 
-    const dsm = String(vals.default_submission_mode || next.default_submission_mode || 'ELECTRONIC').toUpperCase();
-    next.default_submission_mode = (dsm === 'ELECTRONIC' || dsm === 'MANUAL') ? dsm : 'ELECTRONIC';
+    // Only read default_submission_mode if it exists in the DOM (it will be hidden for NHSP / HR CREATE)
+    const dsmDom = root.querySelector('select[name="default_submission_mode"]');
+    if (dsmDom) {
+      const dsm = String(vals.default_submission_mode || next.default_submission_mode || 'ELECTRONIC').toUpperCase();
+      next.default_submission_mode = (dsm === 'ELECTRONIC' || dsm === 'MANUAL') ? dsm : 'ELECTRONIC';
+    }
 
     const wm = getRadio('weekly_mode');
     if (wm) next.weekly_mode = wm;
@@ -33360,6 +34033,7 @@ async function renderClientSettingsUI(settingsObj){
       'self_bill_no_invoices_sent',
       'daily_calc_of_invoices',
       'group_nightsat_sunbh',
+      'auto_invoice_default',
       'hr_attach_to_invoice',
       'ts_attach_to_invoice'
     ];
@@ -33368,7 +34042,12 @@ async function renderClientSettingsUI(settingsObj){
       if (v !== null) next[k] = v;
     });
 
+    const keepAutoInv = (typeof next.auto_invoice_default === 'boolean') ? next.auto_invoice_default : !!prev.auto_invoice_default;
+
     next = canonicalizeClientSettings(next);
+
+    // Ensure new key always survives canonicalisation
+    next.auto_invoice_default = keepAutoInv;
 
     const gatePrev = `${String(prev.weekly_mode||'').toUpperCase()}|${String(prev.hr_weekly_behaviour||'').toUpperCase()}`;
     const gateNext = `${String(next.weekly_mode||'').toUpperCase()}|${String(next.hr_weekly_behaviour||'').toUpperCase()}`;
@@ -33425,6 +34104,7 @@ async function renderClientSettingsUI(settingsObj){
   });
   root.__wired = true;
 }
+
 
 // ---- Umbrella modal
 // ========================= openUmbrella (FIXED) =========================
@@ -39613,8 +40293,25 @@ function computeRequiresTimesheetAuthorisation(details, row) {
     (details && details.tsfin_policy) ||
     {};
 
-  const requiresHr = !!(policy && policy.requires_hr);
-  const autoprocessHr = !!(policy && policy.autoprocess_hr);
+  const boolish = (v) => {
+    if (v === true) return true;
+    if (v === false) return false;
+    if (v == null) return false;
+    const s = String(v).trim().toLowerCase();
+    return (s === 'true' || s === '1' || s === 'yes' || s === 'y' || s === 'on');
+  };
+
+  // ✅ Prefer contract-resolved effective flags from the SUMMARY ROW
+  // ✅ Fallback to policy using boolish (not !!) to avoid "false" -> true
+  const requiresHr =
+    (row && Object.prototype.hasOwnProperty.call(row, 'client_requires_hr'))
+      ? boolish(row.client_requires_hr)
+      : boolish(policy && policy.requires_hr);
+
+  const autoprocessHr =
+    (row && Object.prototype.hasOwnProperty.call(row, 'client_autoprocess_hr'))
+      ? boolish(row.client_autoprocess_hr)
+      : boolish(policy && policy.autoprocess_hr);
 
   const requires =
     (procStatus === 'PENDING_AUTH') ||
@@ -40237,33 +40934,65 @@ function renderTimesheetOverviewTab(ctx) {
     (typeof row.ready_to_pay === 'boolean')     ? row.ready_to_pay :
     false;
 
-  const policy        = details.policy || {};
-  const requiresHr    = !!policy.requires_hr;
-  const autoprocessHr = !!policy.autoprocess_hr;
-
-  // ✅ Import-authoritative gating (NHSP weekly OR HR weekly CREATE)
-  // Planned weeks have no evidence, so we MUST rely on policy/contract settings.
-  const weeklyMode =
-    String(
-      (policy && policy.weekly_mode) ??
-      (rCtr && rCtr.weekly_mode) ??
-      (rCli && rCli.weekly_mode) ??
-      (rCli && rCli.client_settings && rCli.client_settings.weekly_mode) ??
-      ''
-    ).toUpperCase();
-
-  const hrWeeklyBehaviour =
-    String(
-      (policy && policy.hr_weekly_behaviour) ??
-      (rCtr && rCtr.hr_weekly_behaviour) ??
-      (rCli && rCli.hr_weekly_behaviour) ??
-      (rCli && rCli.client_settings && rCli.client_settings.hr_weekly_behaviour) ??
-      ''
-    ).toUpperCase();
+  // ─────────────────────────────────────────────────────────────
+  // ✅ Import-authoritative detection MUST come from SUMMARY ROW fields:
+  //    window.modalCtx.data.route_type + window.modalCtx.data.client_no_timesheet_required
+  //
+  // Rules:
+  //  - import-authoritative = WEEKLY_NHSP
+  //  - OR WEEKLY_NHSP_ADJUSTMENT
+  //  - OR (WEEKLY_HEALTHROSTER AND client_no_timesheet_required === true)
+  // ─────────────────────────────────────────────────────────────
+  const baseSummary = (window.modalCtx && window.modalCtx.data) ? window.modalCtx.data : (row || {});
+  const rt   = String(baseSummary.route_type || '').toUpperCase();
+  const noTs = !!baseSummary.client_no_timesheet_required;
 
   const importAuthoritative =
-    (weeklyMode === 'NHSP') ||
-    (weeklyMode === 'HEALTHROSTER' && hrWeeklyBehaviour === 'CREATE');
+    (rt === 'WEEKLY_NHSP') ||
+    (rt === 'WEEKLY_NHSP_ADJUSTMENT') ||
+    (rt === 'WEEKLY_HEALTHROSTER' && noTs === true);
+
+  // ─────────────────────────────────────────────────────────────
+  // Other policy flags (still used for authorisation fallback only)
+  // ─────────────────────────────────────────────────────────────
+  const policy = (details && details.policy && typeof details.policy === 'object') ? details.policy : {};
+
+  const boolish = (v) => {
+    if (v === true) return true;
+    if (v === false) return false;
+    if (v == null) return false;
+    const s = String(v).trim().toLowerCase();
+    return (s === 'true' || s === '1' || s === 'yes' || s === 'y' || s === 'on');
+  };
+
+  const routeType =
+    String(
+      row.route_type ??
+      row.routeType ??
+      policy.route_type ??
+      ''
+    ).toUpperCase();
+
+  const noTimesheetRequired =
+    (row && Object.prototype.hasOwnProperty.call(row, 'client_no_timesheet_required'))
+      ? boolish(row.client_no_timesheet_required)
+      : (policy && Object.prototype.hasOwnProperty.call(policy, 'no_timesheet_required'))
+        ? boolish(policy.no_timesheet_required)
+        : false;
+
+  const requiresHr =
+    (row && Object.prototype.hasOwnProperty.call(row, 'client_requires_hr'))
+      ? boolish(row.client_requires_hr)
+      : (policy && Object.prototype.hasOwnProperty.call(policy, 'requires_hr'))
+        ? boolish(policy.requires_hr)
+        : false;
+
+  const autoprocessHr =
+    (row && Object.prototype.hasOwnProperty.call(row, 'client_autoprocess_hr'))
+      ? boolish(row.client_autoprocess_hr)
+      : (policy && Object.prototype.hasOwnProperty.call(policy, 'autoprocess_hr'))
+        ? boolish(policy.autoprocess_hr)
+        : false;
 
   let authInfo = { requires: false, authorised: false, showAwaitingBadge: false };
   if (typeof computeRequiresTimesheetAuthorisation === 'function') {
@@ -40368,8 +41097,17 @@ function renderTimesheetOverviewTab(ctx) {
   const hasScan      = !!(details.qr_scanned_at || ts.qr_scanned_at);
 
   const routeLabel = (() => {
-    const isManualOnly = !!actionFlags.is_manual_only;
+    // ✅ Route display should respect weekly route_type first
+    if (sheetScope === 'WEEKLY') {
+      if (routeType === 'WEEKLY_NHSP' || routeType === 'WEEKLY_NHSP_ADJUSTMENT') return 'NHSP';
+      if (routeType === 'WEEKLY_HEALTHROSTER') {
+        return noTimesheetRequired ? 'HealthRoster (no timesheets)' : 'HealthRoster (timesheets required)';
+      }
+      if (routeType === 'WEEKLY_MANUAL') return 'Manual';
+      if (routeType === 'WEEKLY_ELECTRONIC') return 'Electronic';
+    }
 
+    const isManualOnly = !!actionFlags.is_manual_only;
     if (isManualOnly) return 'Manual-only';
 
     if (qrStatus) {
@@ -40391,7 +41129,6 @@ function renderTimesheetOverviewTab(ctx) {
 
     if (subModeEff === 'ELECTRONIC') return 'Electronic';
     return 'Manual';
-
   })();
 
   const routePillClass =
@@ -40490,7 +41227,7 @@ function renderTimesheetOverviewTab(ctx) {
       (subModeEff === 'ELECTRONIC');
 
     // ✅ Convert to manual (weekly existing OR weekly planned electronic OR daily existing)
-    // IMPORTANT: never render conversion actions for import-authoritative contexts (NHSP / HR CREATE)
+    // IMPORTANT: never render conversion actions for import-authoritative contexts
     if (!importAuthoritative && (isWeeklyElectronicWithTs || isPlannedWeeklyElectronic || isDailyElectronicWithTs)) {
       btns.push(`
         <button type="button" class="pill pill-info" style="${badgeBtnStyle}" data-ts-action="switch-manual">
@@ -40500,7 +41237,7 @@ function renderTimesheetOverviewTab(ctx) {
     }
 
     // Planned weekly manual → switch back to electronic
-    // IMPORTANT: never render this for import-authoritative contexts (NHSP / HR CREATE)
+    // IMPORTANT: never render this for import-authoritative contexts
     if (!importAuthoritative && isPlannedWeeklyManual) {
       btns.push(`
         <button type="button" class="pill pill-info" style="${badgeBtnStyle}" data-ts-action="switch-electronic-planned">
@@ -40587,7 +41324,7 @@ function renderTimesheetOverviewTab(ctx) {
     }
 
     // Revert to electronic (current manual → electronic original)
-    // IMPORTANT: never render conversion actions for import-authoritative contexts (NHSP / HR CREATE)
+    // IMPORTANT: never render conversion actions for import-authoritative contexts
     if (!importAuthoritative && tsId && !locked && canRevertToElec) {
       btns.push(`
         <button type="button" class="pill pill-info" style="${badgeBtnStyle}" data-ts-action="revert-electronic">
@@ -40642,6 +41379,8 @@ function renderTimesheetOverviewTab(ctx) {
     </div>
   `;
 }
+
+
 
 
 function renderHrRotaDailySummary(type, importId, rows, ss) {
@@ -41084,6 +41823,12 @@ function renderTimesheetIssuesTab(ctx) {
     ps = { key: 'UNPROCESSED', label: 'Unprocessed' };
   }
 
+  const esc = (typeof escapeHtml === 'function')
+    ? escapeHtml
+    : (s) => String(s == null ? '' : s)
+        .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+        .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+
   // Facts used only for issues list (not for Processing State label)
   const procStatusRaw =
     tsfin.processing_status ||
@@ -41093,12 +41838,14 @@ function renderTimesheetIssuesTab(ctx) {
 
   const procStatus = String(procStatusRaw || '').toUpperCase();
 
-  L('snapshot', {
-    procStatus,
-    requiresAuth: !!authInfo.requires,
-    authorised: !!authInfo.authorised,
-    processingState: ps
-  });
+  if (LOGM) {
+    L('snapshot', {
+      procStatus,
+      requiresAuth: !!authInfo.requires,
+      authorised: !!authInfo.authorised,
+      processingState: ps
+    });
+  }
 
   const issues = [];
 
@@ -41151,11 +41898,11 @@ function renderTimesheetIssuesTab(ctx) {
 
   // NOTE: No Validation Log UI and no schedule advisory messages here (per spec).
 
-  GE();
-
   const issuesHtml = issues.length
-    ? `<ul class="mini">${issues.map(i => `<li>${escapeHtml(i)}</li>`).join('')}</ul>`
+    ? `<ul class="mini">${issues.map(i => `<li>${esc(i)}</li>`).join('')}</ul>`
     : `<span class="mini">No issues detected.</span>`;
+
+  GE();
 
   return `
     <div class="tabc">
@@ -41163,7 +41910,7 @@ function renderTimesheetIssuesTab(ctx) {
         <div class="row">
           <label>Processing State</label>
           <div class="controls">
-            <span class="mini">${escapeHtml(ps.label || 'Unprocessed')}</span>
+            <span class="mini">${esc(ps.label || 'Unprocessed')}</span>
           </div>
         </div>
       </div>
@@ -43261,15 +44008,18 @@ await contractWeekManualDraftUpsert(weekIdSave, payload);
       ? `Timesheet ${String(tsId).slice(0, 8)}…`
       : `Weekly timesheet (planned) ${String(weekId).slice(0, 8)}…`;
 
- showModal(
+ const hasRelatedId = !!(tsId || weekId);
+
+showModal(
   title,
   tabDefs,
   renderTab,
   onSaveTimesheet,
-  hasTs,
+  hasRelatedId,
   undefined,
   { kind: 'timesheets' }
 );
+
 
 
     GE();
