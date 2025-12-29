@@ -25527,33 +25527,111 @@ if (this.entity === 'timesheets' && k === 'lines') {
         });
       });
 
-      // ✅ KEEP: Additional Rates weekly extras inputs
+         // ✅ KEEP: Additional Rates weekly extras inputs
+      // ✅ EXTEND: support per-day units via data-extra-ymd="YYYY-MM-DD"
+      // ✅ UX: Tab cycles left→right then next row inside the Additional Rates table
       const extraInputs = root.querySelectorAll('input[name^="extra_units_"]');
+
+      const sumPerDay = (m) => {
+        if (!m || typeof m !== 'object') return 0;
+        let s = 0;
+        for (const v of Object.values(m)) {
+          const n = Number(v);
+          if (Number.isFinite(n) && n > 0) s += n;
+        }
+        return s;
+      };
+
+      const getExtrasInputsInOrder = () => {
+        const table = root.querySelector('#tsWeeklyExtras');
+        if (!table) return Array.from(extraInputs);
+        return Array.from(table.querySelectorAll('input[name^="extra_units_"]'));
+      };
+
+      const moveExtrasFocus = (currentEl, dir /* +1 or -1 */) => {
+        const list = getExtrasInputsInOrder().filter(el => el && !el.disabled);
+        const idx = list.indexOf(currentEl);
+        if (idx < 0) return false;
+
+        const nextIdx = idx + dir;
+
+        // If we're at the ends, allow default Tab to leave the table
+        if (nextIdx < 0 || nextIdx >= list.length) return false;
+
+        try {
+          list[nextIdx].focus();
+          list[nextIdx].select && list[nextIdx].select();
+        } catch {}
+        return true;
+      };
+
       extraInputs.forEach(input => {
         if (input.__tsExtraWired) return;
         input.__tsExtraWired = true;
 
-        const name     = String(input.name || '');
-        const codeName = name.replace(/^extra_units_/i, '').toUpperCase();
-        const codeAttr = (input.getAttribute('data-extra-code') || '').toUpperCase();
-        const code     = codeAttr || codeName;
+        const name = String(input.name || '');
+
+        // Prefer explicit code attribute; fallback parses "extra_units_CODE" or "extra_units_CODE_YYYY-MM-DD"
+        const codeAttr = String(input.getAttribute('data-extra-code') || '').toUpperCase().trim();
+        const tail = name.replace(/^extra_units_/i, '');
+        const codeName = String((tail.split('_')[0] || '')).toUpperCase().trim();
+        const code = codeAttr || codeName;
         if (!code) return;
+
+        // Optional per-day marker
+        const ymdAttr = String(input.getAttribute('data-extra-ymd') || '').slice(0, 10);
+        const isPerDay = !!(ymdAttr && /^\d{4}-\d{2}-\d{2}$/.test(ymdAttr));
 
         mc.timesheetState.additionalRates = (mc.timesheetState.additionalRates && typeof mc.timesheetState.additionalRates === 'object')
           ? mc.timesheetState.additionalRates
           : {};
 
+        // Keydown handler: Tab navigation inside extras table
+        if (!input.__tsExtraNavWired) {
+          input.__tsExtraNavWired = true;
+          input.addEventListener('keydown', (ev) => {
+            if (!ev || ev.key !== 'Tab') return;
+            const moved = moveExtrasFocus(input, ev.shiftKey ? -1 : +1);
+            if (moved) {
+              ev.preventDefault();
+              ev.stopPropagation();
+            }
+          });
+        }
+
         input.addEventListener('input', () => {
-          const raw = input.value;
+          const raw = String(input.value || '').trim();
           const units = raw === '' ? 0 : Number(raw);
-          const unitsNum = Number.isFinite(units) ? units : 0;
+          const unitsNum = (Number.isFinite(units) && units >= 0) ? units : 0;
 
           const prev = mc.timesheetState.additionalRates[code] || { code };
-          mc.timesheetState.additionalRates[code] = { ...prev, code, units_week: unitsNum };
+
+          if (isPerDay) {
+            const per = (prev.units_per_day && typeof prev.units_per_day === 'object') ? { ...prev.units_per_day } : {};
+
+            if (unitsNum > 0) per[ymdAttr] = unitsNum;
+            else delete per[ymdAttr];
+
+            const weekSum = sumPerDay(per);
+
+            mc.timesheetState.additionalRates[code] = {
+              ...prev,
+              code,
+              units_per_day: per,
+              units_week: weekSum
+            };
+          } else {
+            mc.timesheetState.additionalRates[code] = {
+              ...prev,
+              code,
+              units_week: unitsNum
+            };
+          }
 
           try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
         });
       });
+
 
    // ✅ IMPORTANT: do NOT wire weekly schedule grid fields here.
       // ✅ NEW: best-effort schedule rebuild for weekly manual so Finance preview isn't stale
@@ -38788,8 +38866,9 @@ function normaliseTimesheetCtx(ctx) {
   return { row, details, related, state };
 }
 function renderTimesheetLinesTab(ctx) {
-  const { LOGM, L, GC, GE } = getTsLoggers('[TS][LINES]');
-  const { row, details, state } = normaliseTimesheetCtx(ctx);
+    const { LOGM, L, GC, GE } = getTsLoggers('[TS][LINES]');
+  const { row, details, related, state } = normaliseTimesheetCtx(ctx);
+
 
   GC('render');
 
@@ -39997,12 +40076,210 @@ this._markDirty();
         </button>
       `;
 
-    const scheduleHelpText = canEditSchedule
+      const scheduleHelpText = canEditSchedule
       ? 'Each line is either: (1) a shift (fill Ref + Start + End), OR (2) an additional break for the most recent shift above (leave Start/End blank). For breaks you may use either Break start/end OR Break (mins) (do not mix). Save applies changes.'
       : 'Schedule is shown read-only. Multiple shifts on the same day appear as multiple lines.';
 
+    // ✅ NEW: Additional Rates units entry table (weekly manual only, same edit gate as schedule)
+    let extrasCardHtml = '';
+    try {
+      const isWeeklyManualContext = (sheetScope === 'WEEKLY' && subMode === 'MANUAL');
+      const canEditExtras = !!canEditSchedule;
+      const disabledAttrExtras = canEditExtras ? '' : 'disabled';
+
+      const contract = (related && related.contract) ? related.contract : null;
+
+      let cfgArr = (contract && contract.additional_rates_json != null) ? contract.additional_rates_json : [];
+      if (typeof cfgArr === 'string') {
+        try { cfgArr = JSON.parse(cfgArr); } catch { cfgArr = []; }
+      }
+      if (!Array.isArray(cfgArr)) cfgArr = [];
+
+      if (isWeeklyManualContext && cfgArr.length) {
+        // BH list is global and supplied on details.policy (openTimesheet planned-week stub now includes it)
+        let bhArr = [];
+        try {
+          const raw = details && details.policy ? details.policy.bh_list : null;
+          if (Array.isArray(raw)) bhArr = raw;
+          else if (typeof raw === 'string') {
+            try {
+              const p = JSON.parse(raw || '[]');
+              if (Array.isArray(p)) bhArr = p;
+            } catch {}
+          }
+        } catch { bhArr = []; }
+
+        const bhSet = new Set((bhArr || []).map(x => String(x).slice(0, 10)));
+
+        const freqNorm = (raw) => {
+          const s = String(raw || '').toUpperCase();
+          if (s === 'ONE_PER_WEEK') return 'ONE_PER_WEEK';
+          if (s === 'ONE_PER_DAY') return 'ONE_PER_DAY';
+          if (s === 'WEEKENDS_AND_BH_ONLY') return 'WEEKENDS_AND_BH_ONLY';
+          if (s === 'WEEKDAYS_EXCL_BH_ONLY') return 'WEEKDAYS_EXCL_BH_ONLY';
+          return 'ONE_PER_WEEK';
+        };
+
+        const weekRangeLabel = (() => {
+          if (Array.isArray(weekDays) && weekDays.length === 7 && weekDays[0]?.ymd && weekDays[6]?.ymd) {
+            return `${fmtYmdDmy(String(weekDays[0].ymd).slice(0, 10))} – ${fmtYmdDmy(String(weekDays[6].ymd).slice(0, 10))}`;
+          }
+          if (tsWeekEnding) return fmtYmdDmy(String(tsWeekEnding).slice(0, 10));
+          return '';
+        })();
+
+        // Current staged values live in state.additionalRates (seeded by openTimesheet)
+        const stExtras = (state && state.additionalRates && typeof state.additionalRates === 'object')
+          ? state.additionalRates
+          : {};
+
+        const getStagedWeekUnits = (code) => {
+          const r = stExtras[code];
+          if (!r || typeof r !== 'object') return '';
+          const v = r.units_week;
+          if (v == null) return '';
+          return String(v);
+        };
+
+        const getStagedDayUnits = (code, ymd) => {
+          const r = stExtras[code];
+          if (!r || typeof r !== 'object') return '';
+          const per = (r.units_per_day && typeof r.units_per_day === 'object') ? r.units_per_day : {};
+          const v = per[ymd];
+          if (v == null) return '';
+          return String(v);
+        };
+
+        const rows = [];
+
+        for (let i = 0; i < cfgArr.length; i++) {
+          const cfg = cfgArr[i] && typeof cfgArr[i] === 'object' ? cfgArr[i] : {};
+          const code = String(cfg.code || '').toUpperCase().trim();
+          if (!code) continue;
+
+          const bucketName = String(cfg.bucket_name || code);
+          const unitName   = String(cfg.unit_name || '');
+          const freq       = freqNorm(cfg.frequency);
+
+          if (freq === 'ONE_PER_WEEK') {
+            rows.push({
+              dayLabel: 'Week',
+              dateLabel: weekRangeLabel,
+              code,
+              bucketName,
+              unitName,
+              ymd: '',
+              value: getStagedWeekUnits(code)
+            });
+            continue;
+          }
+
+          // Per-day modes always iterate the same 7 day list used by the schedule grid.
+          for (const wd of (Array.isArray(weekDays) ? weekDays : [])) {
+            const ymd = String(wd?.ymd || '').slice(0, 10);
+            const dow = String(wd?.dow || '').trim();
+            if (!/^\d{4}-\d{2}-\d{2}$/.test(ymd)) continue;
+
+            const isBh = bhSet.has(ymd);
+            const isWeekend = (dow === 'Sat' || dow === 'Sun');
+            const isWeekday = (dow === 'Mon' || dow === 'Tue' || dow === 'Wed' || dow === 'Thu' || dow === 'Fri');
+
+            let include = false;
+            let dayLabel = dow;
+
+            if (freq === 'ONE_PER_DAY') {
+              include = true;
+            } else if (freq === 'WEEKENDS_AND_BH_ONLY') {
+              include = isWeekend || isBh;
+              // ✅ overlap rule: if BH on Sat/Sun, render ONCE but label as BH
+              if (include && isBh) dayLabel = 'BH';
+            } else if (freq === 'WEEKDAYS_EXCL_BH_ONLY') {
+              // ✅ Mon–Fri excluding BH weekdays
+              include = isWeekday && !isBh;
+            }
+
+            if (!include) continue;
+
+            rows.push({
+              dayLabel,
+              dateLabel: fmtYmdDmy(ymd),
+              code,
+              bucketName,
+              unitName,
+              ymd,
+              value: getStagedDayUnits(code, ymd)
+            });
+          }
+        }
+
+        const rowsHtml = rows.map(r => {
+          const nameAttr = r.ymd
+            ? `extra_units_${esc(r.code)}_${esc(r.ymd)}`
+            : `extra_units_${esc(r.code)}`;
+
+          const ymdAttr = r.ymd ? `data-extra-ymd="${esc(r.ymd)}"` : '';
+
+          return `
+            <tr>
+              <td>${esc(r.dayLabel)}</td>
+              <td>${esc(r.dateLabel)}</td>
+              <td>${esc(r.bucketName)}</td>
+              <td>
+                <input
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  class="input"
+                  name="${nameAttr}"
+                  data-extra-code="${esc(r.code)}"
+                  ${ymdAttr}
+                  value="${esc(r.value || '')}"
+                  ${disabledAttrExtras}
+                />
+              </td>
+              <td>${esc(r.unitName)}</td>
+            </tr>
+          `;
+        }).join('');
+
+        extrasCardHtml = `
+          <div class="card" style="margin-top:10px;">
+            <div class="row">
+              <label>Additional Rates</label>
+              <div class="controls">
+                <div style="max-height:260px;overflow:auto;">
+                  <table class="grid mini" id="tsWeeklyExtras">
+                    <thead>
+                      <tr>
+                        <th>Day</th>
+                        <th>Date</th>
+                        <th>Bucket name</th>
+                        <th>No. of units</th>
+                        <th>Unit name</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      ${rowsHtml || `<tr><td colspan="5"><span class="mini">No additional rates configured for this contract.</span></td></tr>`}
+                    </tbody>
+                  </table>
+                </div>
+
+                <span class="mini" style="display:block;margin-top:4px;">
+                  Editable only when the weekly schedule is editable. Values are saved with the week.
+                </span>
+              </div>
+            </div>
+          </div>
+        `;
+      }
+    } catch (e) {
+      try { L('weekly extras render failed (non-fatal)', e); } catch {}
+      extrasCardHtml = '';
+    }
+
     return `
       <div class="tabc">
+
         <div class="card">
           <div class="row">
             <label>Status</label>
@@ -40069,8 +40346,11 @@ this._markDirty();
             </div>
           </div>
         </div>
+
+        ${extrasCardHtml}
       </div>
     `;
+
   }
 
   // ─────────────────────────────────────────────────────
@@ -42707,6 +42987,23 @@ if (hasTs) {
     plannedContract = null;
   }
 
+   // ✅ NEW: global BH list for planned weeks (BH are not per-client)
+  let globalBhList = [];
+  try {
+    if (typeof getSettingsCached === 'function') {
+      const s = await getSettingsCached();
+      if (Array.isArray(s?.bh_list)) globalBhList = s.bh_list;
+      else if (typeof s?.bh_list === 'string') {
+        try {
+          const p = JSON.parse(s.bh_list || '[]');
+          if (Array.isArray(p)) globalBhList = p;
+        } catch {}
+      }
+    }
+  } catch {
+    globalBhList = [];
+  }
+
   details = {
     timesheet: null,
     tsfin: null,
@@ -42724,7 +43021,7 @@ if (hasTs) {
     contract_week: contractWeek,
 
     // ✅ NEW: carry policy hints for gating in Overview
-      policy: {
+    policy: {
       weekly_mode:
         (plannedContract && plannedContract.weekly_mode != null)
           ? plannedContract.weekly_mode
@@ -42732,9 +43029,11 @@ if (hasTs) {
       hr_weekly_behaviour:
         (plannedContract && plannedContract.hr_weekly_behaviour != null)
           ? plannedContract.hr_weekly_behaviour
-          : null
-    }
+          : null,
 
+      // ✅ NEW: required for BH row filtering + BH bucket logic in UI
+      bh_list: globalBhList
+    }
   };
 
   evidence = [];
@@ -42799,18 +43098,78 @@ if (hasTs) {
   let manualHours = {};
 
   let contractTemplateSchedule = null;
-
 let additionalRates = {};
 try {
   let units = null;
 
+  // ✅ NEW: staged/per-day units source (map: CODE -> { 'YYYY-MM-DD': number })
+  let unitsPerDay = {};
+
+  const normaliseUnitsPerDay = (src) => {
+    const out = {};
+    if (!src || typeof src !== 'object') return out;
+
+    for (const [codeRaw, dayMap] of Object.entries(src)) {
+      const code = String(codeRaw || '').toUpperCase().trim();
+      if (!code) continue;
+
+      if (!dayMap || typeof dayMap !== 'object') continue;
+
+      const outDays = {};
+      for (const [dRaw, vRaw] of Object.entries(dayMap)) {
+        const ymd = String(dRaw || '').slice(0, 10);
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(ymd)) continue;
+
+        const n = Number(vRaw || 0);
+        if (!Number.isFinite(n) || n <= 0) continue;
+
+        outDays[ymd] = n;
+      }
+
+      if (Object.keys(outDays).length) out[code] = outDays;
+    }
+
+    return out;
+  };
+
+  const sumPerDay = (m) => {
+    if (!m || typeof m !== 'object') return 0;
+    return Object.values(m).reduce((acc, v) => acc + (Number(v) || 0), 0);
+  };
+
+    // ✅ NEW: weekly totals stored on the timesheet row (preferred over TSFIN snapshot)
+  let unitsWeekStored = {};
+  const normaliseUnitsWeekMap = (src) => {
+    const out = {};
+    if (!src || typeof src !== 'object') return out;
+    for (const [k, v] of Object.entries(src)) {
+      const code = String(k || '').toUpperCase().trim();
+      if (!code) continue;
+      const n = Number(v || 0);
+      if (!Number.isFinite(n) || n <= 0) continue;
+      out[code] = n;
+    }
+    return out;
+  };
+
   // ── Existing timesheet: seed from TSFIN additional_units_json (unchanged) ──
+  // ✅ PLUS: seed per-day from timesheet.additional_units_per_day
   if (hasTs) {
+    // Weekly totals: read from TS storage first
+    let aw = (tsLocal && tsLocal.additional_units_week != null) ? tsLocal.additional_units_week : null;
+    if (typeof aw === 'string') { try { aw = JSON.parse(aw); } catch { aw = null; } }
+    unitsWeekStored = normaliseUnitsWeekMap(aw && typeof aw === 'object' ? aw : {});
+
     units = tsfinLocal.additional_units_json;
     if (!units && tsfinLocal.invoice_breakdown_json && typeof tsfinLocal.invoice_breakdown_json === 'object') {
       units = tsfinLocal.invoice_breakdown_json.additional && tsfinLocal.invoice_breakdown_json.additional.units;
     }
+
+    let apd = (tsLocal && tsLocal.additional_units_per_day != null) ? tsLocal.additional_units_per_day : null;
+    if (typeof apd === 'string') { try { apd = JSON.parse(apd); } catch { apd = null; } }
+    unitsPerDay = normaliseUnitsPerDay(apd);
   } else {
+
     // ── Planned week (no TS yet): seed from contract_week.totals_json.additional_units_week ──
     let au =
       (details && details.contract_week && details.contract_week.totals_json && typeof details.contract_week.totals_json === 'object')
@@ -42834,6 +43193,17 @@ try {
       }
     }
     units = norm;
+
+    // ✅ NEW: planned per-day from contract_weeks.totals_json.additional_units_per_day
+    let apd =
+      (details && details.contract_week && details.contract_week.totals_json && typeof details.contract_week.totals_json === 'object')
+        ? details.contract_week.totals_json.additional_units_per_day
+        : null;
+
+    if (typeof apd === 'string') {
+      try { apd = JSON.parse(apd); } catch { apd = null; }
+    }
+    unitsPerDay = normaliseUnitsPerDay(apd);
   }
 
   if (typeof units === 'string') { try { units = JSON.parse(units); } catch { units = {}; } }
@@ -42842,6 +43212,7 @@ try {
   // ── Config (contract.additional_rates_json): prefer related.contract when present,
   //    otherwise (planned week) fetch contract by id and read additional_rates_json ──
   let cfgArr = related && related.contract && related.contract.additional_rates_json;
+
 
   if ((!cfgArr || (typeof cfgArr !== 'string' && !Array.isArray(cfgArr))) && !hasTs) {
     try {
@@ -42868,27 +43239,58 @@ try {
       if (typeof cfgArr === 'string') { try { cfgArr = JSON.parse(cfgArr); } catch { cfgArr = []; } }
       if (!Array.isArray(cfgArr)) cfgArr = [];
 
-      const codes = new Set();
+         const codes = new Set();
       Object.keys(units || {}).forEach(k => { if (k) codes.add(String(k).toUpperCase()); });
+
+      // ✅ NEW: also include codes that only exist in per-day storage
+      Object.keys(unitsPerDay || {}).forEach(k => { if (k) codes.add(String(k).toUpperCase()); });
+
       cfgArr.forEach(cfg => { if (cfg && cfg.code) codes.add(String(cfg.code).toUpperCase()); });
 
       codes.forEach(code => {
+
         const cfg = cfgArr.find(c => c && String(c.code).toUpperCase() === code) || {};
         let existing = units[code];
         if (!existing) {
           const matchKey = Object.keys(units || {}).find(k => String(k).toUpperCase() === code);
           if (matchKey) existing = units[matchKey];
         }
-        existing = existing || {};
+          existing = existing || {};
+
+        // ✅ NEW: case-insensitive per-day lookup
+        let perDay = unitsPerDay[code] || null;
+        if (!perDay) {
+          const hit = Object.keys(unitsPerDay || {}).find(k => String(k).toUpperCase() === code);
+          if (hit) perDay = unitsPerDay[hit];
+        }
+        if (!perDay || typeof perDay !== 'object') perDay = {};
+
+            // If we have per-day units but no unit_count, derive units_week from the sum.
+        const derivedWeek = sumPerDay(perDay);
+
+        // ✅ Prefer stored weekly totals from timesheet.additional_units_week when present
+        const storedWeekUnits =
+          (unitsWeekStored && Object.prototype.hasOwnProperty.call(unitsWeekStored, code))
+            ? Number(unitsWeekStored[code] || 0)
+            : 0;
+
+        const weekUnits =
+          (Number.isFinite(storedWeekUnits) && storedWeekUnits > 0)
+            ? storedWeekUnits
+            : (Number(existing.unit_count ?? 0) || derivedWeek || 0);
+
         additionalRates[code] = {
           code,
           bucket_name: existing.bucket_name ?? cfg.bucket_name ?? null,
           unit_name:   existing.unit_name   ?? cfg.unit_name   ?? null,
           frequency:   existing.frequency   ?? cfg.frequency   ?? null,
-          units_week:  existing.unit_count  ?? 0,
+          units_week:  weekUnits,
+          units_per_day: perDay,
           pay_rate:    existing.pay_rate    ?? cfg.pay_rate    ?? null,
           charge_rate: existing.charge_rate ?? cfg.charge_rate ?? null
         };
+
+
       });
     } catch {
       additionalRates = {};
@@ -43408,7 +43810,7 @@ const out = buildWeeklyScheduleFromLinesAndValidate(
     isWeeklyManualContext &&
     !deepEqualJson(sortScheduleStable(st.schedule || []), baselineSorted);
 
-  // Extras diff (unchanged)
+   // Extras diff (weekly + per-day)
   const normExtrasWeek = (extrasMapOrUnitsWeek) => {
     const out = {};
     const src = extrasMapOrUnitsWeek || {};
@@ -43433,7 +43835,51 @@ const out = buildWeeklyScheduleFromLinesAndValidate(
     return sorted;
   };
 
+  const normExtrasPerDay = (extrasMap) => {
+    const out = {};
+    const src = (extrasMap && typeof extrasMap === 'object') ? extrasMap : {};
+
+    const codes = Object.keys(src).map(k => String(k || '').toUpperCase().trim()).filter(Boolean).sort();
+    for (const code of codes) {
+      const r = src[code] || src[Object.keys(src).find(k => String(k).toUpperCase() === code)] || null;
+      if (!r || typeof r !== 'object') continue;
+
+      const per = (r.units_per_day && typeof r.units_per_day === 'object') ? r.units_per_day : {};
+      const days = {};
+      Object.keys(per).sort().forEach(dRaw => {
+        const ymd = String(dRaw || '').slice(0, 10);
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(ymd)) return;
+
+        const n = Number(per[dRaw] || 0);
+        if (!Number.isFinite(n) || n <= 0) return;
+
+        days[ymd] = n;
+      });
+
+      if (Object.keys(days).length) out[code] = days;
+    }
+
+    return out;
+  };
+
   const getCurrentExtrasWeek = () => {
+    // ✅ Prefer stored TS values when a real timesheet exists
+    let awTs = tsLocal?.additional_units_week ?? null;
+    if (typeof awTs === 'string') { try { awTs = JSON.parse(awTs); } catch { awTs = null; } }
+    if (awTs && typeof awTs === 'object') {
+      const out = {};
+      for (const [codeRaw, v] of Object.entries(awTs)) {
+        const code = String(codeRaw || '').toUpperCase().trim();
+        if (!code) continue;
+        const n = Number(v || 0);
+        if (Number.isFinite(n) && n) out[code] = n;
+      }
+      const sorted = {};
+      Object.keys(out).sort().forEach(k => { sorted[k] = out[k]; });
+      return sorted;
+    }
+
+    // Fallback: TSFIN snapshot (older / missing TS fields)
     const au = tsfinLocal?.additional_units_json;
     if (au && typeof au === 'object') {
       const out = {};
@@ -43448,6 +43894,7 @@ const out = buildWeeklyScheduleFromLinesAndValidate(
       return sorted;
     }
 
+    // Planned week baseline
     let au2 = det?.contract_week?.totals_json?.additional_units_week ?? null;
     if (typeof au2 === 'string') { try { au2 = JSON.parse(au2); } catch { au2 = null; } }
     if (au2 && typeof au2 === 'object') {
@@ -43466,12 +43913,51 @@ const out = buildWeeklyScheduleFromLinesAndValidate(
     return {};
   };
 
+  const getCurrentExtrasPerDay = () => {
+    // Existing TS baseline
+    let apdTs = tsLocal?.additional_units_per_day ?? null;
+    if (typeof apdTs === 'string') { try { apdTs = JSON.parse(apdTs); } catch { apdTs = null; } }
+    if (apdTs && typeof apdTs === 'object') {
+      const tmp = {};
+      for (const [codeRaw, dayMap] of Object.entries(apdTs)) {
+        const code = String(codeRaw || '').toUpperCase().trim();
+        if (!code) continue;
+        if (!dayMap || typeof dayMap !== 'object') continue;
+        tmp[code] = dayMap;
+      }
+      return normExtrasPerDay(tmp);
+    }
+
+    // Planned week baseline
+    let apdCw = det?.contract_week?.totals_json?.additional_units_per_day ?? null;
+    if (typeof apdCw === 'string') { try { apdCw = JSON.parse(apdCw); } catch { apdCw = null; } }
+    if (apdCw && typeof apdCw === 'object') {
+      const tmp = {};
+      for (const [codeRaw, dayMap] of Object.entries(apdCw)) {
+        const code = String(codeRaw || '').toUpperCase().trim();
+        if (!code) continue;
+        if (!dayMap || typeof dayMap !== 'object') continue;
+        tmp[code] = dayMap;
+      }
+      return normExtrasPerDay(tmp);
+    }
+
+    return {};
+  };
+
   const extrasMap = st.additionalRates || {};
-  const stagedExtrasWeek  = normExtrasWeek(extrasMap);
-  const currentExtrasWeek = getCurrentExtrasWeek();
+  const stagedExtrasWeek   = normExtrasWeek(extrasMap);
+  const stagedExtrasPerDay = normExtrasPerDay(extrasMap);
+  const currentExtrasWeek  = getCurrentExtrasWeek();
+  const currentExtrasPerDay= getCurrentExtrasPerDay();
+
   const extrasChangedWeekly =
     isWeeklyManualContext &&
-    stableStringify(currentExtrasWeek) !== stableStringify(stagedExtrasWeek);
+    (
+      stableStringify(currentExtrasWeek)   !== stableStringify(stagedExtrasWeek) ||
+      stableStringify(currentExtrasPerDay) !== stableStringify(stagedExtrasPerDay)
+    );
+
 
   // Daily schedule change detection (unchanged)
   const stagedSchedule   = (st.schedule != null) ? st.schedule : null;
@@ -43663,8 +44149,10 @@ const out = buildWeeklyScheduleFromLinesAndValidate(
 };
 
 if (extrasChangedWeekly) payload.additional_units_week = { ...(stagedExtrasWeek || {}) };
+if (extrasChangedWeekly) payload.additional_units_per_day = { ...(stagedExtrasPerDay || {}) };
 
 await contractWeekManualDraftUpsert(weekIdSave, payload);
+
 
 
 
@@ -43697,7 +44185,7 @@ await contractWeekManualDraftUpsert(weekIdSave, payload);
 
       const expected = window.modalCtx?.timesheetMeta?.expected_timesheet_id || tsIdSave || null;
 
-      const payload = {
+         const payload = {
         expected_timesheet_id: expected,
         actual_schedule_json: schedulePayload,
         qr_action: qrActionBackend || null,
@@ -43709,6 +44197,8 @@ await contractWeekManualDraftUpsert(weekIdSave, payload);
       };
 
       if (extrasChangedWeekly) payload.additional_units_week = { ...(stagedExtrasWeek || {}) };
+      if (extrasChangedWeekly) payload.additional_units_per_day = { ...(stagedExtrasPerDay || {}) };
+
 
       L('weekly manual upsert payload', { weekIdSave, payload });
       const result = await manualUpsertContractWeek(weekIdSave, payload);
