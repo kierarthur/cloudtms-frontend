@@ -22424,41 +22424,45 @@ const display_site = choose('display_site', base.display_site ?? '');
         };
 
 
-        // NEW: contract route/settings fields (tri-state)
-        let is_nhsp              = boolTriFromFS('is_nhsp');
-        let autoprocess_hr       = boolTriFromFS('autoprocess_hr');
-        let requires_hr          = boolTriFromFS('requires_hr');
-        let no_timesheet_required = boolTriFromFS('no_timesheet_required');
-        let daily_calc_of_invoices = boolTriFromFS('daily_calc_of_invoices');
-        let group_nightsat_sunbh  = boolTriFromFS('group_nightsat_sunbh');
-        let self_bill            = boolTriFromFS('self_bill');
+      // NEW: contract route/settings fields (tri-state)
+let is_nhsp               = boolTriFromFS('is_nhsp');
+let autoprocess_hr        = boolTriFromFS('autoprocess_hr');
+let requires_hr           = boolTriFromFS('requires_hr');
+let no_timesheet_required = boolTriFromFS('no_timesheet_required');
+let daily_calc_of_invoices= boolTriFromFS('daily_calc_of_invoices');
+let group_nightsat_sunbh  = boolTriFromFS('group_nightsat_sunbh');
+let self_bill             = boolTriFromFS('self_bill');
 
-        // NEW: canonicalise route flags only if any route override is present (avoids clobbering NULL legacy overrides)
-        const anyRouteSet = [is_nhsp, autoprocess_hr, no_timesheet_required].some(v => v === true || v === false);
-        if (anyRouteSet) {
-          // Manual: is_nhsp=false, autoprocess_hr=false, no_timesheet_required=false
-          // NHSP: is_nhsp=true, autoprocess_hr=false, no_timesheet_required=false
-          // HR required: autoprocess_hr=true, is_nhsp=false, no_timesheet_required=false
-          // HR no-timesheets: autoprocess_hr=true, is_nhsp=false, no_timesheet_required=true
-          if (is_nhsp === true) {
-            autoprocess_hr = false;
-            no_timesheet_required = false;
-          }
-          if (no_timesheet_required === true) {
-            autoprocess_hr = true;
-            is_nhsp = false;
-          }
-          if (autoprocess_hr === true) {
-            is_nhsp = false;
-          }
-          if (autoprocess_hr !== true) {
-            no_timesheet_required = false;
-          }
-        }
+// ✅ FIX: define attachment flags BEFORE they’re referenced in settingsChanged
+let hr_attach_to_invoice  = boolTriFromFS('hr_attach_to_invoice');
+let ts_attach_to_invoice  = boolTriFromFS('ts_attach_to_invoice');
 
-        const auto_invoice                 = boolFromFS('auto_invoice',                 !!base.auto_invoice);
-        const require_reference_to_pay     = boolFromFS('require_reference_to_pay',     !!base.require_reference_to_pay);
-        const require_reference_to_invoice = boolFromFS('require_reference_to_invoice', !!base.require_reference_to_invoice);
+// NEW: canonicalise route flags only if any route override is present (avoids clobbering NULL legacy overrides)
+const anyRouteSet = [is_nhsp, autoprocess_hr, no_timesheet_required].some(v => v === true || v === false);
+if (anyRouteSet) {
+  // Manual: is_nhsp=false, autoprocess_hr=false, no_timesheet_required=false
+  // NHSP: is_nhsp=true, autoprocess_hr=false, no_timesheet_required=false
+  // HR required: autoprocess_hr=true, is_nhsp=false, no_timesheet_required=false
+  // HR no-timesheets: autoprocess_hr=true, is_nhsp=false, no_timesheet_required=true
+  if (is_nhsp === true) {
+    autoprocess_hr = false;
+    no_timesheet_required = false;
+  }
+  if (no_timesheet_required === true) {
+    autoprocess_hr = true;
+    is_nhsp = false;
+  }
+  if (autoprocess_hr === true) {
+    is_nhsp = false;
+  }
+  if (autoprocess_hr !== true) {
+    no_timesheet_required = false;
+  }
+}
+
+const auto_invoice                 = boolFromFS('auto_invoice',                 !!base.auto_invoice);
+const require_reference_to_pay     = boolFromFS('require_reference_to_pay',     !!base.require_reference_to_pay);
+const require_reference_to_invoice = boolFromFS('require_reference_to_invoice', !!base.require_reference_to_invoice);
 
 // ✅ FE guard: if real timesheets exist, block changes to route/settings.
 // Backend should enforce authoritatively; this is a UX guard only.
@@ -22487,6 +22491,7 @@ if (hasRealTimesheets && settingsChanged) {
   console.groupEnd?.();
   return false;
 }
+
 
 
 
