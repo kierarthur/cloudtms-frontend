@@ -28251,12 +28251,58 @@ if (!frameObj.hasId && mode === 'view' && !isPlannedTimesheetStub && !isUtilityK
 
   updateCalendarInteractivity(mode === 'edit' || mode === 'create');
 
-  if (repaint) {
-    // Just repaint the current tab; do NOT call onReturn here
+   if (repaint) {
+    // ✅ Preserve calendar viewport across mode flips (View↔Edit) so we don't snap to top/year.
+    let vp = null;
+    try {
+      const isContracts = (frameObj.entity === 'contracts' || frameObj.kind === 'contracts');
+      const isCalTab = (frameObj.currentTabKey === 'calendar');
+      const cid = window.modalCtx?.data?.id || null;
+
+      if (isContracts && isCalTab && cid) {
+        const cal = window.__calState?.[cid] || {};
+        const sb  = document.getElementById('__calScroll');
+
+        vp = {
+          contract_id: cid,
+          view: cal.view || 'year',
+          win: (cal.win && cal.win.from && cal.win.to) ? { from: cal.win.from, to: cal.win.to } : null,
+          scrollTop: sb ? sb.scrollTop : 0,
+          scrollLeft: sb ? sb.scrollLeft : 0
+        };
+
+        // keep latest copy on modalCtx as well (handy for other restore points)
+        if (window.modalCtx) window.modalCtx.__calViewport = { ...vp };
+      }
+    } catch {}
+
     Promise
       .resolve(frameObj.setTab(frameObj.currentTabKey))
+      .then(() => {
+        if (!vp) return;
+
+        // Restore view/win if they were present
+        try {
+          const cid = vp.contract_id;
+          const st = window.__calState?.[cid];
+          if (st) {
+            if (vp.view) st.view = vp.view;
+            if (vp.win && vp.win.from && vp.win.to) st.win = { from: vp.win.from, to: vp.win.to };
+          }
+        } catch {}
+
+        // Restore scroll AFTER layout settles
+        const applyScroll = () => {
+          const sb = document.getElementById('__calScroll');
+          if (!sb) return;
+          sb.scrollTop  = vp.scrollTop || 0;
+          sb.scrollLeft = vp.scrollLeft || 0;
+        };
+        try { requestAnimationFrame(() => requestAnimationFrame(applyScroll)); } catch { applyScroll(); }
+      })
       .catch(() => {});
   }
+
 }
 
 const parentOnOpen = currentFrame();
@@ -29821,7 +29867,118 @@ if (shouldNoop) {
 }
 
 
- 
+ function setFrameMode(frameObj, mode) {
+  L('setFrameMode ENTER', {
+    prevMode: frameObj.mode,
+    nextMode: mode,
+    isChild: (stack().length > 1),
+    noParentGate: frameObj.noParentGate
+  });
+
+  const prev    = frameObj.mode;
+  frameObj.mode = mode;
+
+  const isChild = (stack().length > 1);
+  const isTop   = (currentFrame && currentFrame() === frameObj);
+
+  // ▶ Special case: planned timesheet week (no timesheet_id yet, but has a contract_week)
+  // We want to allow "view without id" here, so do NOT auto-convert to create/edit.
+  let isPlannedTimesheetStub = false;
+  try {
+    if (frameObj.entity === 'timesheets' && !frameObj.hasId) {
+      // Prefer the frame's own ctxRef, then fall back to global modalCtx
+      const ctx = frameObj._ctxRef || window.modalCtx || {};
+      const d   = ctx.data || {};
+      const hasWeek = !!(d.contract_week_id || d.week_id || d.week_ending_date);
+      const hasTsId = !!d.timesheet_id;
+      if (hasWeek && !hasTsId) {
+        isPlannedTimesheetStub = true;
+      }
+    }
+  } catch (e) {
+    // Non-fatal; treat as normal frame if detection fails
+    isPlannedTimesheetStub = false;
+  }
+
+ // ▶ correct accidental 'view' on brand-new frames (e.g., successor create)
+//    but DO NOT do this for planned timesheet weeks or utility modals where we *want* view+no id.
+const isUtilityKind =
+  frameObj.kind === 'timesheets-resolve' ||
+  frameObj.kind === 'resolve-candidate'  ||
+  frameObj.kind === 'resolve-client'     ||
+  (typeof frameObj.kind === 'string' && frameObj.kind.startsWith('import-summary-'));
+
+if (!frameObj.hasId && mode === 'view' && !isPlannedTimesheetStub && !isUtilityKind) {
+  mode = frameObj.forceEdit ? 'edit' : 'create';
+  frameObj.mode = mode;
+}
+
+
+   // ▶ Only toggle read-only on the DOM that actually belongs to the top frame.
+  //    When updating a non-top frame (e.g., the parent while a picker is open),
+  //    do not flip the global #modalBody to avoid UI flicker/regressions.
+  if (isTop) {
+    const isUtilityKindForFrame =
+      frameObj.kind === 'timesheets-resolve' ||
+      frameObj.kind === 'resolve-candidate'  ||
+      frameObj.kind === 'resolve-client'     ||
+      (typeof frameObj.kind === 'string' && frameObj.kind.startsWith('import-summary-'));
+
+    if (!isChild && (mode === 'create' || mode === 'edit')) {
+      setFormReadOnly(byId('modalBody'), false);
+    } else if (frameObj.noParentGate) {
+      const ro = isUtilityKindForFrame
+        ? false
+        : (mode === 'view' || mode === 'saving');
+      setFormReadOnly(byId('modalBody'), ro);
+    } else if (isChild) {
+      const p = parentFrame();
+      setFormReadOnly(byId('modalBody'), !(p && (p.mode === 'edit' || p.mode === 'create')));
+    } else {
+      setFormReadOnly(byId('modalBody'), (mode === 'view' || mode === 'saving'));
+    }
+  } else {
+    L('setFrameMode (non-top): skipped read-only toggle to avoid affecting current child');
+  }
+
+
+  if (typeof frameObj._updateButtons === 'function') frameObj._updateButtons();
+
+  try {
+    const idx = stack().indexOf(frameObj);
+    window.dispatchEvent(new CustomEvent('modal-frame-mode-changed', {
+      detail: { frameIndex: idx, mode }
+    }));
+  } catch {}
+
+  const repaint = !!(frameObj._hasMountedOnce && frameObj.currentTabKey);
+  L('setFrameMode', {
+    prevMode: prev,
+    nextMode: mode,
+    _hasMountedOnce: frameObj._hasMountedOnce,
+    willRepaint: repaint,
+    isPlannedTimesheetStub
+  });
+
+  try {
+    const pc = document.getElementById('btnPickCandidate');
+    const pl = document.getElementById('btnPickClient');
+    L('setFrameMode picker snapshot', {
+      pickCandidate: { exists: !!pc, disabled: !!(pc && pc.disabled) },
+      pickClient:    { exists: !!pl, disabled: !!(pl && pl.disabled) }
+    });
+  } catch {}
+
+  updateCalendarInteractivity(mode === 'edit' || mode === 'create');
+
+  if (repaint) {
+    // Just repaint the current tab; do NOT call onReturn here
+    Promise
+      .resolve(frameObj.setTab(frameObj.currentTabKey))
+      .catch(() => {});
+  }
+}
+
 
   fr.persistCurrentTabState();
 
