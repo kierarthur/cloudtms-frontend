@@ -41969,25 +41969,21 @@ const buildInvoiceWeekSelectHtml = (seg) => {
       const ref   = seg.ref_num || '';
       const reqId = seg.request_id || '';
 
-      const invoiceWeekCellHtml = buildInvoiceWeekSelectHtml(seg);
-const segId = String(seg.segment_id || '');
+ const segId = String(seg.segment_id || '');
 
-// ✅ Capture “explicitness” BEFORE buildInvoiceWeekSelectHtml() writes segTargets[segId]
+// ✅ MUST capture these BEFORE buildInvoiceWeekSelectHtml() mutates segTargets[segId]
 const hadStagedBefore = Object.prototype.hasOwnProperty.call(segTargets, segId);
 const storedTargetRaw = String(seg.invoice_target_week_start || '').trim();
 const lockedInvoiceId = String(seg.invoice_locked_invoice_id || '').trim();
 
-// (already computed above)
-// const invoiceWeekCellHtml = buildInvoiceWeekSelectHtml(seg);
+// build HTML (this may write segTargets[segId])
+const invoiceWeekCellHtml = buildInvoiceWeekSelectHtml(seg);
 
-// ✅ Determine delay using SQL semantics:
-// only if target is explicitly present (stored OR staged-before) and not invoice-locked
+// ✅ Determine delay using SQL semantics (explicit stored OR staged-before)
 const hasExplicitTarget = hadStagedBefore || !!storedTargetRaw;
 const targetForDelay = hadStagedBefore ? String(segTargets[segId] || '').trim() : storedTargetRaw;
 
-// baseline = naturalWeekStart (week_ending_date - 6) — matches your SQL baseline for WEEKLY
 const baseline = String(naturalWeekStart || '').trim();
-
 const isPermanentDelay = (targetForDelay === pauseWeekStart);
 
 const isInvoiceDelayed =
@@ -41998,12 +41994,10 @@ const isInvoiceDelayed =
     (baseline && targetForDelay && targetForDelay !== baseline)
   );
 
-// Pay-held at line level = exclude_from_pay (effective)
 const rowIsFlagged = !!effExclude || isInvoiceDelayed;
-
-
-// Discreet red background (inline so no CSS dependency)
 const rowStyle = rowIsFlagged ? ` style="background: rgba(192, 57, 43, 0.08);"` : '';
+
+
 
       return `
         <tr data-segment-id="${seg.segment_id}"${rowStyle}>
