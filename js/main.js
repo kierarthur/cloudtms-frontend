@@ -21173,6 +21173,29 @@ function openCalendarContextMenu({ anchorEl, bucketKey, selection, capabilities,
 // CALENDAR – GENERIC DAY GRID
 // ============================================================================
 
+
+function renderCalendarLegend(container) {
+  if (!container) return;
+
+  container.innerHTML = `
+    <div class="legend">
+      <span class="chip cal-planned">Planned</span>
+      <span class="chip cal-processed">Processed (not ready)</span>
+      <span class="chip cal-ready">Ready</span>
+      <span class="chip cal-invoiced">Invoiced</span>
+      <span class="chip cal-invoice-hold">Invoice on hold</span>
+      <span class="chip cal-pay-hold">Pay on hold</span>
+      <span class="chip cal-pay-invoice-hold">Pay + invoice on hold</span>
+      <span class="chip cal-paid">Paid</span>
+
+      <span class="chip">Not booked</span>
+
+      <span class="chip cal-flag-payline">Pay line held</span>
+      <span class="chip cal-flag-invoiceline">Invoice line delayed</span>
+      <span class="chip occupied-other">Other contract (occupied)</span>
+    </div>`;
+}
+
 function renderDayGrid(hostEl, opts) {
   if (!hostEl) return;
   const { from, to, itemsByDate, view, bucketKey } = opts;
@@ -21215,6 +21238,19 @@ function renderDayGrid(hostEl, opts) {
   // Monday-first weekday labels (Mon..Sun)
   const DOW_LONG  = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
   const DOW_SHORT = ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
+
+  // NEW: human-readable state labels for hover tooltips
+  const prettyStateLabel = (st) => {
+    const s = String(st || '').toUpperCase();
+    if (!s || s === 'EMPTY') return 'Not booked';
+    if (s === 'PLANNED') return 'Booked';
+    if (s === 'PROCESSED') return 'Processed';
+    if (s === 'READY') return 'Ready';
+    if (s === 'AUTHORISED' || s === 'AUTHORIZED') return 'Authorised';
+    if (s === 'INVOICED') return 'Invoiced';
+    if (s === 'PAID') return 'Paid';
+    return s; // fallback
+  };
 
   for (const { y, m } of months) {
     const box = document.createElement('div');
@@ -21282,9 +21318,10 @@ function renderDayGrid(hostEl, opts) {
       if (hasInvoiceLineHold) cell.classList.add('flag-invoiceline-hold');
 
       // Grey “occupied by other contract” days in contract-centric views
+      let occupiedByOtherOnly = false;
       if (isContractBucket) {
         const keyStr = String(currentKey || '');
-        const occupiedByOtherOnly =
+        occupiedByOtherOnly =
           !ownedByCurrent &&
           items.some(it => {
             const cid = String(it?.contract_id || '');
@@ -21301,11 +21338,40 @@ function renderDayGrid(hostEl, opts) {
       cell.innerHTML = `<div class="ico"><div class="num">${d}</div></div>`;
       cell.setAttribute('data-date', dYmd);
 
-      // Optional: keep a tooltip with the weekday (Mon..Sun) for quick hover
+      // NEW: Hover tooltip shows STATUS in words (and includes the date)
       try {
         const jsDay = new Date(Date.UTC(y, m, d)).getUTCDay();
         const monDay = (jsDay + 6) % 7;
-        cell.title = `${DOW_LONG[monDay]} ${dYmd}`;
+
+        // Base label: other-contract overrides everything in contract-centric view
+        let statusLabel = occupiedByOtherOnly
+          ? 'Other contract'
+          : prettyStateLabel(finalState);
+
+        // Add holds/details (only when the date has something meaningful)
+        const extras = [];
+
+        // Contract-level holds (these appear on day items in your payloads)
+        const hasPayHold = relevant.some(it => it && it.pay_on_hold === true);
+        const hasInvoiceHold = relevant.some(it => it && it.invoice_on_hold === true);
+
+        if (hasPayHold) extras.push('Pay on hold');
+        if (hasInvoiceHold) extras.push('Invoice on hold');
+        if (hasPayLineHold) extras.push('Pay line held');
+        if (hasInvoiceLineHold) extras.push('Invoice line delayed');
+
+        // Candidate view: if multiple different contracts exist on this date, mention it
+        if (!isContractBucket) {
+          const uniq = new Set(
+            (items || [])
+              .map(it => String(it?.contract_id || '').trim())
+              .filter(Boolean)
+          );
+          if (uniq.size > 1) extras.push(`Multiple contracts (${uniq.size})`);
+        }
+
+        const extraStr = extras.length ? ` • ${extras.join(' • ')}` : '';
+        cell.title = `${statusLabel}${extraStr}\n${DOW_LONG[monDay]} ${dYmd}`;
       } catch {}
 
       if (interactive) {
@@ -21362,30 +21428,8 @@ function renderDayGrid(hostEl, opts) {
   }, { signal: controller.signal });
 }
 
-// ============================================================================
-// CALENDAR – LEGEND
-// ============================================================================
-function renderCalendarLegend(container) {
-  if (!container) return;
 
-  container.innerHTML = `
-    <div class="legend">
-      <span class="chip cal-planned">Planned</span>
-      <span class="chip cal-processed">Processed (not ready)</span>
-      <span class="chip cal-ready">Ready</span>
-      <span class="chip cal-invoiced">Invoiced</span>
-      <span class="chip cal-invoice-hold">Invoice on hold</span>
-      <span class="chip cal-pay-hold">Pay on hold</span>
-      <span class="chip cal-pay-invoice-hold">Pay + invoice on hold</span>
-      <span class="chip cal-paid">Paid</span>
 
-      <span class="chip">Not booked</span>
-
-      <span class="chip cal-flag-payline">Pay line held</span>
-      <span class="chip cal-flag-invoiceline">Invoice line delayed</span>
-      <span class="chip occupied-other">Other contract (occupied)</span>
-    </div>`;
-}
 
 // ============================================================================
 // CONTRACTS – FETCH & RENDER (DAY CALENDAR) with STAGING
@@ -21446,9 +21490,47 @@ function renderContractCalendarTab(ctx) {
 
   setTimeout(async () => {
     try {
-      const y = (new Date()).getUTCFullYear();
-      const win = computeYearWindow(y);
       const el = byId(holderId); if (!el) return;
+
+      // ─────────────────────────────────────────────────────────────
+      // ✅ FULL FIX: preserve view/window + restore scroll on every repaint
+      // Priority:
+      //  1) modalCtx.__calViewport (captured before save/edit)
+      //  2) window.__calState[contractId] (persisted by fetchAndRenderContractCalendar)
+      //  3) fallback current year
+      // Also: capture scroll BEFORE we replace DOM
+      // ─────────────────────────────────────────────────────────────
+
+      const contractId = c.id || null;
+
+      // capture existing scroll BEFORE we rebuild DOM (otherwise it becomes 0)
+      const prevScrollTop  = byId('__calScroll')?.scrollTop  ?? 0;
+      const prevScrollLeft = byId('__calScroll')?.scrollLeft ?? 0;
+
+      const vp = (contractId && window.modalCtx?.__calViewport && window.modalCtx.__calViewport.contract_id === contractId)
+        ? window.modalCtx.__calViewport
+        : null;
+
+      const st = (contractId && window.__calState && window.__calState[contractId])
+        ? window.__calState[contractId]
+        : null;
+
+      const view =
+        vp?.view ||
+        st?.view ||
+        'year';
+
+      const win =
+        (vp?.win && vp.win.from && vp.win.to)
+          ? vp.win
+          : (st?.win && st.win.from && st.win.to)
+            ? st.win
+            : computeYearWindow((new Date()).getUTCFullYear());
+
+      const restoreScroll = {
+        top:  (vp?.scrollTop  ?? st?.scrollTop  ?? prevScrollTop  ?? 0),
+        left: (vp?.scrollLeft ?? st?.scrollLeft ?? prevScrollLeft ?? 0)
+      };
 
       el.innerHTML = `
         <div class="tabc" style="display:flex;flex-direction:column;gap:8px;height:calc(72vh);max-height:calc(72vh)">
@@ -21479,17 +21561,47 @@ function renderContractCalendarTab(ctx) {
       } catch {}
 
       if (c.id) {
-        // EXISTING contract → always render calendar, even if candidate_id is null
-        if (LOGM) console.log('[CAL][contract] render with real contract id', { id: c.id, win });
-        await fetchAndRenderContractCalendar(c.id, { from: win.from, to: win.to, view: 'year' });
+        // EXISTING contract → use preserved view/window + restore scroll
+        if (LOGM) console.log('[CAL][contract] render with real contract id (preserve viewport)', {
+          id: c.id, view, win, restoreScroll
+        });
+
+        await fetchAndRenderContractCalendar(c.id, {
+          from: win.from,
+          to: win.to,
+          view,
+          weekEnding: Number(weekEnding),
+          __restoreScroll: restoreScroll
+        });
+
       } else {
-        // CREATE mode with candidate → candidate-wide planner
-        if (LOGM) console.log('[CAL][contract] render in CREATE mode (candidate-wide) with token bucket', { token: currentKey, candId, weekEnding });
+        // CREATE mode with candidate → preserve window/view only (scroll restore still helps)
+        if (LOGM) console.log('[CAL][contract] render in CREATE mode (candidate-wide) with token bucket', {
+          token: currentKey, candId, weekEnding, view, win, restoreScroll
+        });
+
         await fetchAndRenderCandidateCalendarForContract(
           currentKey,
           candId,
-          { from: win.from, to: win.to, view: 'year', weekEnding: Number(weekEnding) }
+          {
+            from: win.from,
+            to: win.to,
+            view,
+            weekEnding: Number(weekEnding),
+            __restoreScroll: restoreScroll
+          }
         );
+
+        // best-effort restore if candidate-wide renderer doesn’t support __restoreScroll
+        try {
+          const sb = byId('__calScroll');
+          if (sb) {
+            requestAnimationFrame(() => requestAnimationFrame(() => {
+              sb.scrollTop  = restoreScroll.top  || 0;
+              sb.scrollLeft = restoreScroll.left || 0;
+            }));
+          }
+        } catch {}
       }
 
       if (c.id) {
@@ -21502,16 +21614,21 @@ function renderContractCalendarTab(ctx) {
               await stageAddMissingWeeks(c.id, { from: c.start_date || win.from, to: c.end_date || win.to });
               try { showModalHint?.('Missing weeks staged (preview only). Save to persist.', 'warn'); } catch {}
             }
-            const prev = byId('__calScroll')?.scrollTop || 0;
+
+            const sb0 = byId('__calScroll');
+            const prev = sb0 ? sb0.scrollTop : 0;
+            const prevL = sb0 ? sb0.scrollLeft : 0;
+
             await fetchAndRenderContractCalendar(
               c.id,
               {
                 from: window.__calState[c.id]?.win?.from,
                 to:   window.__calState[c.id]?.win?.to,
-                view: window.__calState[c.id]?.view
+                view: window.__calState[c.id]?.view,
+                weekEnding: Number(weekEnding),
+                __restoreScroll: { top: prev, left: prevL }
               }
             );
-            const sb = byId('__calScroll'); if (sb) sb.scrollTop = prev;
           });
         }
 
@@ -21525,16 +21642,21 @@ function renderContractCalendarTab(ctx) {
               await removeAllUnsubmittedWeeks(c.id, { from: c.start_date || null, to: c.end_date || null });
               try { showModalHint?.('All unsubmitted weeks staged for removal (preview only). Save to persist.', 'warn'); } catch {}
             }
-            const prev = byId('__calScroll')?.scrollTop || 0;
+
+            const sb0 = byId('__calScroll');
+            const prev = sb0 ? sb0.scrollTop : 0;
+            const prevL = sb0 ? sb0.scrollLeft : 0;
+
             await fetchAndRenderContractCalendar(
               c.id,
               {
                 from: window.__calState[c.id]?.win?.from,
                 to:   window.__calState[c.id]?.win?.to,
-                view: window.__calState[c.id]?.view
+                view: window.__calState[c.id]?.view,
+                weekEnding: Number(weekEnding),
+                __restoreScroll: { top: prev, left: prevL }
               }
             );
-            const sb = byId('__calScroll'); if (sb) sb.scrollTop = prev;
           });
         }
 
