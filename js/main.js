@@ -4820,7 +4820,7 @@ async function upsertContract(payload, id /* optional */) {
     if (!patch.start_date && snap.start_date) patch.start_date = snap.start_date;
     if (!patch.end_date   && snap.end_date)   patch.end_date   = snap.end_date;
 
-    // NEW: if caller didn't include additional_rates_json on an edit,
+    // If caller didn't include additional_rates_json on an edit,
     // keep whatever is already stored on the contract instead of wiping it.
     if (!Object.prototype.hasOwnProperty.call(patch, 'additional_rates_json') &&
         Object.prototype.hasOwnProperty.call(snap, 'additional_rates_json')) {
@@ -4846,33 +4846,61 @@ async function upsertContract(payload, id /* optional */) {
 
   try {
     const currentTab = (window.modalCtx && window.modalCtx.currentTabKey) || null;
-    const baseRates = (window.modalCtx && window.modalCtx.data && window.modalCtx.data.rates_json) || {};
+    const snapRow   = (window.modalCtx && window.modalCtx.data) || {};
+    const baseRates = (snapRow && snapRow.rates_json) || {};
     const incoming  = (patch.rates_json && typeof patch.rates_json === 'object') ? patch.rates_json : {};
 
+    const pmOld = String(snapRow.pay_method_snapshot || '').toUpperCase();
+    const pmNew = String(patch.pay_method_snapshot || '').toUpperCase();
+
+    // ────────────────────────────────────────────────────────────
+    // ✅ FIX: avoid “rates changed” drift when user didn’t edit rates
+    //
+    // - On PUT (edit), we DO NOT prune keys by pay_method_snapshot.
+    //   Pruning changes the object shape and can trip backend “rates changed”
+    //   protection even when amounts are identical.
+    //
+    // - We only apply pruning on POST (create) OR if pay_method_snapshot changed.
+    // ────────────────────────────────────────────────────────────
     if (id) {
-      const merged = { ...baseRates };
+      const merged = { ...(baseRates && typeof baseRates === 'object' ? baseRates : {}) };
+
       for (const k of BUCKETS) {
-        const n = Number(incoming[k]);
-        if (Number.isFinite(n)) {
-          merged[k] = n;
-        } else if (merged[k] !== undefined) {
-          merged[k] = Number(merged[k]);
-        }
+        if (!Object.prototype.hasOwnProperty.call(incoming, k)) continue;
+
+        const raw = incoming[k];
+        if (raw === '' || raw === null || raw === undefined) continue;
+
+        const n = Number(raw);
+        if (!Number.isFinite(n)) continue;
+
+        merged[k] = n;
       }
+
       patch.rates_json = merged;
+    } else {
+      // Create: ensure rates_json is at least an object
+      if (!patch.rates_json || typeof patch.rates_json !== 'object') patch.rates_json = {};
     }
 
-    // Prune PAYE vs Umbrella buckets according to pay_method_snapshot
+    // Prune PAYE vs Umbrella buckets:
+    // - Create (POST): yes
+    // - Edit (PUT): only if pay_method_snapshot changed (rare / intentional)
     try {
-      const pm = String(patch.pay_method_snapshot || '').toUpperCase();
-      if (patch.rates_json && typeof patch.rates_json === 'object') {
-        const keepPrefixes =
-          pm === 'PAYE'     ? ['paye_','charge_'] :
-          pm === 'UMBRELLA' ? ['umb_','charge_'] :
-                              ['charge_'];
-        for (const key of Object.keys(patch.rates_json)) {
-          if (!keepPrefixes.some(pre => key.startsWith(pre))) {
-            delete patch.rates_json[key];
+      const shouldPrune =
+        (!id) || (pmOld && pmNew && pmOld !== pmNew);
+
+      if (shouldPrune) {
+        const pm = String(patch.pay_method_snapshot || '').toUpperCase();
+        if (patch.rates_json && typeof patch.rates_json === 'object') {
+          const keepPrefixes =
+            pm === 'PAYE'     ? ['paye_','charge_'] :
+            pm === 'UMBRELLA' ? ['umb_','charge_'] :
+                                ['charge_'];
+          for (const key of Object.keys(patch.rates_json)) {
+            if (!keepPrefixes.some(pre => key.startsWith(pre))) {
+              delete patch.rates_json[key];
+            }
           }
         }
       }
@@ -4929,11 +4957,7 @@ async function upsertContract(payload, id /* optional */) {
     if (LOGC) console.warn('[CONTRACTS][UPSERT] list cache merge failed', e);
   }
 
-  // ────────────────────────────────────────────────────────────
   // Auto-refresh any open weekly import resolve panels (NHSP / HR_WEEKLY)
-  // so that newly created/extended contracts are immediately reflected
-  // in the weekly import summary without re-uploading files.
-  // ────────────────────────────────────────────────────────────
   try {
     if (typeof refreshOpenWeeklyImportSummariesAfterContractSave === 'function') {
       await refreshOpenWeeklyImportSummariesAfterContractSave();
@@ -4944,6 +4968,7 @@ async function upsertContract(payload, id /* optional */) {
 
   return data;
 }
+
 
 
 // ✅ CHANGED: after successful upsert, also merge into currentRows and stamp recency
@@ -5400,12 +5425,17 @@ function openContract(row) {
   const isCreate = !row || !row.id;
   if (LOGC) console.log('[CONTRACTS] openContract ENTRY', { isCreate, rowPreview: !!row });
 
-   window.modalCtx = {
-    entity: 'contracts',
-    mode: isCreate ? 'create' : 'view',
-    data: { ...(row || {}) },
-    _saveInFlight: false
-  };
+  window.modalCtx = {
+  entity: 'contracts',
+  mode: isCreate ? 'create' : 'view',
+  data: { ...(row || {}) },
+  _saveInFlight: false,
+
+  // ✅ NEW: track whether this save is calendar-only
+  __calendarDirty: false,
+  __nonCalendarDirty: false
+};
+
 
   const preToken = window.__preOpenToken || null;
   if (LOGC) console.log('[CONTRACTS] preOpenToken snapshot', preToken);
@@ -6158,8 +6188,30 @@ if (LOGC) {
 }
 
 
+// ✅ NEW: calendar-only saves should NOT PUT the contract (avoids “rates” validation etc)
+const calendarOnlySave =
+  !isCreate &&
+  !!data.id &&
+  !!stageShape?.hasAny &&
+  window.modalCtx?.__calendarDirty === true &&
+  window.modalCtx?.__nonCalendarDirty !== true;
+
+if (calendarOnlySave) {
+  if (LOGC) console.log('[CONTRACTS] calendar-only save: skipping upsertContract (no contract fields changed)');
+
+  // Clear markers so future edits behave normally
+  try {
+    window.modalCtx.__calendarDirty = false;
+    window.modalCtx.__calendarOnly = false;
+  } catch {}
+
+  if (LOGC) console.groupEnd?.();
+  return { ok: true, saved: (window.modalCtx.data || base) };
+}
+
 if (LOGC) console.log('[CONTRACTS] upsert → upsertContract');
 const saved = await upsertContract(data, data.id || undefined);
+
 
 const persistedId = saved?.id || saved?.contract?.id || null;
 if (LOGC) console.log('[CONTRACTS] upsertContract result', {
@@ -6352,17 +6404,20 @@ const stage = (e) => {
 
   const name = t.name;
 
-  // Base value: just read what’s in the field
   const v = t.type === 'checkbox'
     ? (t.checked ? 'on' : '')
     : t.value;
 
   const isScheduleTime = /^(mon|tue|wed|thu|fri|sat|sun)_(start|end)$/.test(name);
 
+  // ✅ NEW: any form input here is NON-calendar (calendar staging uses separate functions)
+  try {
+    window.modalCtx = window.modalCtx || {};
+    window.modalCtx.__nonCalendarDirty = true;
+    window.modalCtx.__calendarOnly = false;
+  } catch {}
+
   if (isScheduleTime) {
-    // For schedule times, just stage raw text into formState; blur/Tab
-    // normalisers + explicit calls to setContractFormValue will handle
-    // validation and normalisation later.
     window.modalCtx = window.modalCtx || {};
     const fs = (window.modalCtx.formState ||= {
       __forId: (window.modalCtx.data?.id ?? window.modalCtx.openToken ?? null),
@@ -6372,10 +6427,8 @@ const stage = (e) => {
     fs.main ||= {};
     fs.main[name] = v;
   } else {
-    // Everything else keeps current behaviour
     setContractFormValue(name, v);
 
-    // Recompute margins when rate / pay_method changes
     if (name === 'pay_method_snapshot' || /^(paye_|umb_|charge_)/.test(name)) {
       computeContractMargins();
     }
@@ -6383,6 +6436,7 @@ const stage = (e) => {
 
   try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
 };
+
 
 
 
@@ -16235,12 +16289,63 @@ function confirmDiscardChangesIfDirty(){
   return true;
 }
 
-
 async function commitContractCalendarStageIfPending(contractId) {
   const LOG_CAL = (typeof window.__LOG_CAL === 'boolean') ? window.__LOG_CAL : true;
   const L = (...a)=> { if (LOG_CAL) console.log('[CAL][commitIfPending]', ...a); };
   const W = (...a)=> { if ( LOG_CAL) console.warn('[CAL][commitIfPending]', ...a); };
   const E = (...a)=> { if ( LOG_CAL) console.error('[CAL][commitIfPending]', ...a); };
+
+  // ✅ NEW: UI helper
+  const showUnplanSummary = (resp, opts = {}) => {
+    try {
+      const blocked = Array.isArray(resp?.blocked_weeks) ? resp.blocked_weeks : [];
+      const removedCount =
+        Number(resp?.totals?.emptied_weeks ?? resp?.totals?.patched_weeks ?? 0) ||
+        Number(resp?.ranges?.[0]?.emptied_weeks ?? resp?.ranges?.[0]?.patched_weeks ?? 0) ||
+        0;
+
+      const fmt = (we) => String(we || '');
+      const statusLabel = (b) => {
+        if (b?.paid) return 'PAID';
+        if (b?.invoiced) return 'INVOICED';
+        if (b?.authorised) return 'AUTHORISED';
+        if (b?.tsfin_processing_status) return String(b.tsfin_processing_status).toUpperCase();
+        if (b?.contract_week_status) return String(b.contract_week_status).toUpperCase();
+        return 'HAS_TIMESHEET';
+      };
+
+      let msg = '';
+      if (!blocked.length) {
+        msg = (opts.removeAll)
+          ? `All unsubmitted weeks were removed successfully.`
+          : `Calendar updated successfully.`;
+      } else {
+        const lines = blocked
+          .slice(0, 12)
+          .map(b => `• W/E ${fmt(b.week_ending_date)} (${statusLabel(b)})`)
+          .join('\n');
+
+        msg =
+          (opts.removeAll)
+            ? `Unsubmitted weeks were removed, but ${blocked.length} week(s) were kept because they already have a timesheet:\n\n${lines}`
+            : `Some dates could not be removed because a timesheet already exists (${blocked.length} week(s)):\n\n${lines}`;
+
+        if (blocked.length > 12) {
+          msg += `\n\n…and ${blocked.length - 12} more.`;
+        }
+      }
+
+      if (typeof showModalHint === 'function') {
+        showModalHint(msg, blocked.length ? 'warn' : 'ok');
+      } else if (typeof window.__toast === 'function') {
+        window.__toast(blocked.length ? 'Removed (some weeks kept)' : 'Removed');
+      } else {
+        alert(msg);
+      }
+    } catch (e) {
+      // non-fatal
+    }
+  };
 
   try {
     const st = getContractCalendarStageState(contractId);
@@ -16273,6 +16378,8 @@ async function commitContractCalendarStageIfPending(contractId) {
 
     // Special case: "remove all unsubmitted weeks" → single bulk unplan then exit.
     if (removeAll) {
+      let resp = null;
+
       if (removeRanges.length) {
         const payload = {
           when_timesheet_exists: 'skip',
@@ -16281,7 +16388,7 @@ async function commitContractCalendarStageIfPending(contractId) {
         };
         L('DELETE /plan-ranges (removeAll, IfPending)', payload);
         try {
-          const resp = await contractsUnplanRanges(contractId, payload);
+          resp = await contractsUnplanRanges(contractId, payload);
           L('DELETE /plan-ranges (removeAll, IfPending) ←', resp);
         } catch (err) {
           E('unplan-ranges (removeAll, IfPending) failed', err);
@@ -16291,11 +16398,12 @@ async function commitContractCalendarStageIfPending(contractId) {
         L('removeAll=true but no removeRanges built (IfPending)');
       }
 
-      // Stage will be completely rebuilt by next view; normalizeContractWindowToShifts
-      // will run after this from the caller.
+      // ✅ NEW: show user summary
+      if (resp) showUnplanSummary(resp, { removeAll: true });
+
       try { clearContractCalendarStageState(contractId); } catch {}
       L('calendar commit ok (removeAll, IfPending)');
-      return { ok: true, detail: 'calendar saved', removedAll: true };
+      return { ok: true, detail: 'calendar saved', removedAll: true, unplan_result: resp || null };
     }
 
     // Optional preflight overlap check when extending left
@@ -16359,6 +16467,7 @@ async function commitContractCalendarStageIfPending(contractId) {
     }
 
     // === UNPLAN (removals) ===
+    let lastUnplanResp = null;
     if (Array.isArray(removeRanges) && removeRanges.length) {
       const payload = {
         when_timesheet_exists: 'skip',
@@ -16367,8 +16476,12 @@ async function commitContractCalendarStageIfPending(contractId) {
       };
       L('DELETE /plan-ranges (IfPending)', { ranges: payload.ranges.length });
       try {
-        const resp = await contractsUnplanRanges(contractId, payload);
-        L('DELETE /plan-ranges (IfPending) ←', resp);
+        lastUnplanResp = await contractsUnplanRanges(contractId, payload);
+        L('DELETE /plan-ranges (IfPending) ←', lastUnplanResp);
+
+        // ✅ NEW: show summary if backend reports blocked weeks
+        if (lastUnplanResp) showUnplanSummary(lastUnplanResp, { removeAll: false });
+
       } catch (err) {
         E('unplan-ranges (IfPending) failed', err);
         return { ok: false, message: err?.message || 'Calendar commit failed', removedAll: false };
@@ -16410,9 +16523,7 @@ async function commitContractCalendarStageIfPending(contractId) {
       }
     } catch {}
 
-    // Clear staged state after a successful commit
     try { clearContractCalendarStageState(contractId); } catch {}
-
     L('calendar commit ok (IfPending)');
     return { ok: true, detail: 'calendar saved', removedAll: false };
 
@@ -16442,14 +16553,24 @@ async function removeAllUnsubmittedWeeks(contractId, bounds) {
   const startFrom = addDays(endFrom, -6);
   const endTo = computeWeekEnding(toIso || window.modalCtx?.data?.end_date, wew);
 
-  st.removeAll = { from: startFrom, to: endTo };
-  st.remove.clear?.();
-  st.add.clear?.();
-  st.additional = {};
+st.removeAll = { from: startFrom, to: endTo };
+st.remove.clear?.();
+st.add.clear?.();
+st.additional = {};
 
-  L('staged removeAll', st.removeAll);
-  try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
-  return { ok: true, staged: true, bounds: st.removeAll };
+L('staged removeAll', st.removeAll);
+
+// ✅ NEW: calendar-only dirty marker
+try {
+  window.modalCtx = window.modalCtx || {};
+  window.modalCtx.__calendarDirty = true;
+  // only mark calendar-only if we haven't seen non-calendar edits
+  if (!window.modalCtx.__nonCalendarDirty) window.modalCtx.__calendarOnly = true;
+} catch {}
+
+try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
+return { ok: true, staged: true, bounds: st.removeAll };
+
 }
 
 // After a "remove-all" commit, rebound the contract dates to actuals
@@ -38224,11 +38345,56 @@ async function commitContractCalendarStage(contractId) {
   const W = (...a)=> { if (LOG_CAL) console.warn('[CAL][commit]', ...a); };
   const E = (...a)=> { if (LOG_CAL) console.error('[CAL][commit]', ...a); };
 
+  // ✅ NEW: UI helper
+  const showUnplanSummary = (resp, opts = {}) => {
+    try {
+      const blocked = Array.isArray(resp?.blocked_weeks) ? resp.blocked_weeks : [];
+
+      let msg = '';
+      if (!blocked.length) {
+        msg = (opts.removeAll)
+          ? `All unsubmitted weeks were removed successfully.`
+          : `Calendar updated successfully.`;
+      } else {
+        const statusLabel = (b) => {
+          if (b?.paid) return 'PAID';
+          if (b?.invoiced) return 'INVOICED';
+          if (b?.authorised) return 'AUTHORISED';
+          if (b?.tsfin_processing_status) return String(b.tsfin_processing_status).toUpperCase();
+          if (b?.contract_week_status) return String(b.contract_week_status).toUpperCase();
+          return 'HAS_TIMESHEET';
+        };
+
+        const lines = blocked
+          .slice(0, 12)
+          .map(b => `• W/E ${String(b.week_ending_date || '')} (${statusLabel(b)})`)
+          .join('\n');
+
+        msg =
+          (opts.removeAll)
+            ? `Unsubmitted weeks were removed, but ${blocked.length} week(s) were kept because they already have a timesheet:\n\n${lines}`
+            : `Some dates could not be removed because a timesheet already exists (${blocked.length} week(s)):\n\n${lines}`;
+
+        if (blocked.length > 12) msg += `\n\n…and ${blocked.length - 12} more.`;
+      }
+
+      if (typeof showModalHint === 'function') {
+        showModalHint(msg, blocked.length ? 'warn' : 'ok');
+      } else if (typeof window.__toast === 'function') {
+        window.__toast(blocked.length ? 'Removed (some weeks kept)' : 'Removed');
+      } else {
+        alert(msg);
+      }
+    } catch {}
+  };
+
   const { addRanges, removeRanges, additionals, removeAll } = buildPlanRangesFromStage(contractId);
   L('BEGIN', { contractId, addRanges, removeRanges, additionals, removeAll });
 
   // If "remove all" is staged, we only perform the single bulk unplan and exit.
   if (removeAll) {
+    let resp = null;
+
     if (removeRanges.length) {
       const payload = {
         when_timesheet_exists: 'skip',
@@ -38237,7 +38403,7 @@ async function commitContractCalendarStage(contractId) {
       };
       L('DELETE /plan-ranges (removeAll)', payload);
       try {
-        const resp = await contractsUnplanRanges(contractId, payload);
+        resp = await contractsUnplanRanges(contractId, payload);
         L('DELETE /plan-ranges ←', resp);
       } catch (err) {
         E('unplan-ranges (removeAll) failed', err);
@@ -38246,9 +38412,13 @@ async function commitContractCalendarStage(contractId) {
     } else {
       L('removeAll=true but no removeRanges built');
     }
+
+    // ✅ NEW: show message
+    if (resp) showUnplanSummary(resp, { removeAll: true });
+
     clearContractCalendarStageState(contractId);
     L('DONE: stage cleared for', contractId);
-    return { ok: true, detail: 'calendar saved', removedAll: true };
+    return { ok: true, detail: 'calendar saved', removedAll: true, unplan_result: resp || null };
   }
 
   // Otherwise, proceed with normal sequence: adds → removes → additionals.
@@ -38280,6 +38450,10 @@ async function commitContractCalendarStage(contractId) {
     try {
       const resp = await contractsUnplanRanges(contractId, payload);
       L('DELETE /plan-ranges ←', resp);
+
+      // ✅ NEW: show message if blocked weeks exist
+      if (resp) showUnplanSummary(resp, { removeAll: false });
+
     } catch (err) {
       E('unplan-ranges failed', err);
       throw err;
@@ -38312,6 +38486,7 @@ async function commitContractCalendarStage(contractId) {
   L('DONE: stage cleared for', contractId);
   return { ok: true, detail: 'calendar saved', removedAll: false };
 }
+
 
 
 async function duplicateContract(contractId, { count } = {}) {
