@@ -41827,71 +41827,112 @@ function renderTimesheetLinesTab(ctx) {
 
   const disabledAttr = locked ? 'disabled' : '';
 
-  const buildInvoiceWeekSelectHtml = (seg) => {
-    if (!isNhspOrHrSelfBillBasis) return '<span class="mini">—</span>';
-    const segId = String(seg.segment_id || '');
-    if (!segId) return '<span class="mini">—</span>';
+const buildInvoiceWeekSelectHtml = (seg) => {
+  if (!isNhspOrHrSelfBillBasis) return '<span class="mini">—</span>';
+  const segId = String(seg.segment_id || '');
+  if (!segId) return '<span class="mini">—</span>';
 
-    const currentTarget =
-      segTargets[segId] ||
-      seg.invoice_target_week_start ||
-      currentWeekStart ||
-      '';
+  // ✅ Capture these BEFORE we potentially write segTargets[segId] below
+  // (prevents "default This week" being treated as an explicit delay)
+  const hadStagedBefore = Object.prototype.hasOwnProperty.call(segTargets, segId);
+  const storedTargetRaw = String(seg.invoice_target_week_start || '').trim();
+  const lockedInvoiceId = String(seg.invoice_locked_invoice_id || '').trim();
 
-    const opts = [];
-    const seen = new Set();
+  const currentTarget =
+    segTargets[segId] ||
+    storedTargetRaw ||
+    currentWeekStart ||
+    '';
 
-    if (currentWeekStart) {
-      opts.push({ value: currentWeekStart, label: 'This week' });
-      seen.add(currentWeekStart);
+  const opts = [];
+  const seen = new Set();
 
-      const nextDate = new Date(`${currentWeekStart}T00:00:00Z`);
-      nextDate.setUTCDate(nextDate.getUTCDate() + 7);
-      const nextWeekStart = toYmd(nextDate);
-      opts.push({ value: nextWeekStart, label: `Week starting ${fmtYmdDmy(nextWeekStart)}` });
-      seen.add(nextWeekStart);
+  if (currentWeekStart) {
+    opts.push({ value: currentWeekStart, label: 'This week' });
+    seen.add(currentWeekStart);
 
-      for (let i = 2; i <= 8; i++) {
-        const d = new Date(`${currentWeekStart}T00:00:00Z`);
-        d.setUTCDate(d.getUTCDate() + i * 7);
-        const ws = toYmd(d);
-        if (!seen.has(ws)) {
-          opts.push({ value: ws, label: `Week starting ${fmtYmdDmy(ws)}` });
-          seen.add(ws);
-        }
+    const nextDate = new Date(`${currentWeekStart}T00:00:00Z`);
+    nextDate.setUTCDate(nextDate.getUTCDate() + 7);
+    const nextWeekStart = toYmd(nextDate);
+    opts.push({ value: nextWeekStart, label: `Week starting ${fmtYmdDmy(nextWeekStart)}` });
+    seen.add(nextWeekStart);
+
+    for (let i = 2; i <= 8; i++) {
+      const d = new Date(`${currentWeekStart}T00:00:00Z`);
+      d.setUTCDate(d.getUTCDate() + i * 7);
+      const ws = toYmd(d);
+      if (!seen.has(ws)) {
+        opts.push({ value: ws, label: `Week starting ${fmtYmdDmy(ws)}` });
+        seen.add(ws);
       }
     }
+  }
 
-    if (naturalWeekStart && !seen.has(naturalWeekStart)) {
-      opts.push({ value: naturalWeekStart, label: `Natural week (${fmtYmdDmy(naturalWeekStart)})` });
-      seen.add(naturalWeekStart);
-    }
+  if (naturalWeekStart && !seen.has(naturalWeekStart)) {
+    opts.push({ value: naturalWeekStart, label: `Natural week (${fmtYmdDmy(naturalWeekStart)})` });
+    seen.add(naturalWeekStart);
+  }
 
-    if (!seen.has(pauseWeekStart)) {
-      opts.push({ value: pauseWeekStart, label: 'Pause (defer)' });
-      seen.add(pauseWeekStart);
-    }
+  if (!seen.has(pauseWeekStart)) {
+    opts.push({ value: pauseWeekStart, label: 'Pause (defer)' });
+    seen.add(pauseWeekStart);
+  }
 
-    let selectedVal = currentTarget || currentWeekStart || '';
-    const optionValues = opts.map(o => o.value);
-    if (!optionValues.includes(selectedVal)) {
-      selectedVal = optionValues.includes(currentWeekStart) ? currentWeekStart : pauseWeekStart;
-    }
+  let selectedVal = currentTarget || currentWeekStart || '';
+  const optionValues = opts.map(o => o.value);
+  if (!optionValues.includes(selectedVal)) {
+    selectedVal = optionValues.includes(currentWeekStart) ? currentWeekStart : pauseWeekStart;
+  }
 
-    segTargets[segId] = selectedVal;
+  // Keep existing behavior: always stage the selected value
+  segTargets[segId] = selectedVal;
 
-    const optionsHtml = opts.map(o => {
-      const sel = (o.value === selectedVal) ? 'selected' : '';
-      return `<option value="${o.value}" ${sel}>${o.label}</option>`;
-    }).join('');
+  const optionsHtml = opts.map(o => {
+    const sel = (o.value === selectedVal) ? 'selected' : '';
+    return `<option value="${o.value}" ${sel}>${o.label}</option>`;
+  }).join('');
 
-    return `
-      <select name="seg_invoice_week" data-segment-id="${segId}" ${disabledAttr}>
-        ${optionsHtml}
-      </select>
-      <span class="mini">Staged invoice week</span>
-    `;
+  // helper just for the hint text (DD/MM/YYYY)
+  const fmtYmdDmySlash = (ymd) => {
+    const s = String(ymd || '').slice(0, 10);
+    const m = s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (!m) return s;
+    const [, y, mo, d] = m;
+    return `${d}/${mo}/${y}`;
   };
+
+  // ✅ Match SQL semantics:
+  // delayed if:
+  //   invoice_locked_invoice_id is null/empty AND
+  //   invoice_target_week_start is explicitly present (stored OR previously staged) AND
+  //   invoice_target_week_start !== baseline week start
+  //
+  // where baseline is naturalWeekStart (week_ending_date - 6)
+  const hasExplicitTarget = hadStagedBefore || !!storedTargetRaw;
+  const targetForDelay = hadStagedBefore ? String(selectedVal || '').trim() : storedTargetRaw;
+
+  const isPermanentDelay = (targetForDelay === pauseWeekStart);
+
+  const isInvoiceDelayed =
+    hasExplicitTarget &&
+    !lockedInvoiceId &&
+    (
+      isPermanentDelay ||
+      (!!naturalWeekStart && !!targetForDelay && targetForDelay !== naturalWeekStart)
+    );
+
+  const delayHint = isInvoiceDelayed
+    ? (isPermanentDelay ? 'Permanently delayed' : `Delayed until ${fmtYmdDmySlash(targetForDelay)}`)
+    : '';
+
+  return `
+    <select name="seg_invoice_week" data-segment-id="${segId}" ${disabledAttr}>
+      ${optionsHtml}
+    </select>
+    ${delayHint ? `<span class="mini">${delayHint}</span>` : ``}
+  `;
+};
+
 
   if (isSegments && segs.length && isNhspOrHrSelfBillBasis) {
     const headHtml = `
@@ -41929,9 +41970,43 @@ function renderTimesheetLinesTab(ctx) {
       const reqId = seg.request_id || '';
 
       const invoiceWeekCellHtml = buildInvoiceWeekSelectHtml(seg);
+const segId = String(seg.segment_id || '');
+
+// ✅ Capture “explicitness” BEFORE buildInvoiceWeekSelectHtml() writes segTargets[segId]
+const hadStagedBefore = Object.prototype.hasOwnProperty.call(segTargets, segId);
+const storedTargetRaw = String(seg.invoice_target_week_start || '').trim();
+const lockedInvoiceId = String(seg.invoice_locked_invoice_id || '').trim();
+
+// (already computed above)
+// const invoiceWeekCellHtml = buildInvoiceWeekSelectHtml(seg);
+
+// ✅ Determine delay using SQL semantics:
+// only if target is explicitly present (stored OR staged-before) and not invoice-locked
+const hasExplicitTarget = hadStagedBefore || !!storedTargetRaw;
+const targetForDelay = hadStagedBefore ? String(segTargets[segId] || '').trim() : storedTargetRaw;
+
+// baseline = naturalWeekStart (week_ending_date - 6) — matches your SQL baseline for WEEKLY
+const baseline = String(naturalWeekStart || '').trim();
+
+const isPermanentDelay = (targetForDelay === pauseWeekStart);
+
+const isInvoiceDelayed =
+  hasExplicitTarget &&
+  !lockedInvoiceId &&
+  (
+    isPermanentDelay ||
+    (baseline && targetForDelay && targetForDelay !== baseline)
+  );
+
+// Pay-held at line level = exclude_from_pay (effective)
+const rowIsFlagged = !!effExclude || isInvoiceDelayed;
+
+
+// Discreet red background (inline so no CSS dependency)
+const rowStyle = rowIsFlagged ? ` style="background: rgba(192, 57, 43, 0.08);"` : '';
 
       return `
-        <tr data-segment-id="${seg.segment_id}">
+        <tr data-segment-id="${seg.segment_id}"${rowStyle}>
           <td>${dateCellHtml}</td>
           <td>
             ${ref ? `<span class="mini">Ref: ${esc(ref)}</span>` : ''}
@@ -43954,7 +44029,6 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
   GE();
 }
 
-
 function renderTimesheetOverviewTab(ctx) {
   const { LOGM, L, GC, GE } = getTsLoggers('[TS][OVERVIEW]');
   const { row, details, related, state } = normaliseTimesheetCtx(ctx);
@@ -44056,6 +44130,7 @@ function renderTimesheetOverviewTab(ctx) {
   const isInvoiced = !!(tsfin.locked_by_invoice_id || row.locked_by_invoice_id);
   const locked     = isPaid || isInvoiced;
 
+  // Sheet-level pay hold (NOT line-level)
   const payOnHold  = !!(tsfin.pay_on_hold ?? row.pay_on_hold);
 
   const readyToPay =
@@ -44065,12 +44140,6 @@ function renderTimesheetOverviewTab(ctx) {
 
   // ─────────────────────────────────────────────────────────────
   // ✅ Import-authoritative detection MUST come from SUMMARY ROW fields:
-  //    window.modalCtx.data.route_type + window.modalCtx.data.client_no_timesheet_required
-  //
-  // Rules:
-  //  - import-authoritative = WEEKLY_NHSP
-  //  - OR WEEKLY_NHSP_ADJUSTMENT
-  //  - OR (WEEKLY_HEALTHROSTER AND client_no_timesheet_required === true)
   // ─────────────────────────────────────────────────────────────
   const baseSummary = (window.modalCtx && window.modalCtx.data) ? window.modalCtx.data : (row || {});
   const rt   = String(baseSummary.route_type || '').toUpperCase();
@@ -44138,6 +44207,99 @@ function renderTimesheetOverviewTab(ctx) {
     authInfo = { requires: requiresAuth, authorised, showAwaitingBadge: (requiresAuth && !authorised) };
   }
 
+  // ─────────────────────────────────────────────────────────────
+  // ✅ Invoice issuing delay badge (SEGMENTS mode, matches SQL rule)
+  // + ✅ Line-level pay hold badge (SEGMENTS mode, matches SQL: seg.exclude_from_pay)
+  // ─────────────────────────────────────────────────────────────
+  let invoiceDelayBadge = null; // { label, cls, title } | null
+  let payLineHoldBadge  = null; // { label, cls, title } | null
+
+  try {
+    let inv = tsfin.invoice_breakdown_json ?? null;
+    if (typeof inv === 'string') {
+      try { inv = JSON.parse(inv); } catch { inv = null; }
+    }
+
+    const mode = String(inv?.mode || '').toUpperCase();
+    const segs = Array.isArray(inv?.segments) ? inv.segments : [];
+
+    const addDaysYmd = (ymd, deltaDays) => {
+      if (!ymd || typeof ymd !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(ymd)) return null;
+      const [yy, mm, dd] = ymd.split('-').map(Number);
+      const dt = new Date(Date.UTC(yy, mm - 1, dd));
+      dt.setUTCDate(dt.getUTCDate() + Number(deltaDays || 0));
+      return dt.toISOString().slice(0, 10);
+    };
+
+    const weekStartMondayYmd = (ymd) => {
+      if (!ymd || typeof ymd !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(ymd)) return null;
+      const [yy, mm, dd] = ymd.split('-').map(Number);
+      const dt = new Date(Date.UTC(yy, mm - 1, dd));
+      const jsDow = dt.getUTCDay();        // Sun=0..Sat=6
+      const monIndex = (jsDow + 6) % 7;   // Mon=0..Sun=6
+      dt.setUTCDate(dt.getUTCDate() - monIndex);
+      return dt.toISOString().slice(0, 10);
+    };
+
+    const baselineWeekStart =
+      (weYmd && /^\d{4}-\d{2}-\d{2}$/.test(String(weYmd))) ? addDaysYmd(String(weYmd), -6) : null;
+
+    if (hasTsfin && mode === 'SEGMENTS' && segs.length) {
+      // --- invoice delay (same rule as your SQL) ---
+      const delayedSegs = segs.filter(seg => {
+        if (!seg || typeof seg !== 'object') return false;
+
+        const lockedIdRaw = seg.invoice_locked_invoice_id;
+        const lockedId = (lockedIdRaw == null) ? '' : String(lockedIdRaw).trim();
+
+        const targetRaw = seg.invoice_target_week_start;
+        const target = (targetRaw == null) ? '' : String(targetRaw).trim();
+
+        const segDateRaw = seg.date;
+        const segDate = (segDateRaw == null) ? '' : String(segDateRaw).trim();
+
+        const baseStart = baselineWeekStart || weekStartMondayYmd(segDate);
+
+        const hasLocked = !!lockedId;
+        const hasTarget = !!target;
+
+        if (hasLocked) return false;
+        if (!hasTarget) return false;
+        if (!baseStart) return false;
+
+        return target !== baseStart;
+      });
+
+      if (delayedSegs.length) {
+        const allDelayed = (delayedSegs.length === segs.length);
+        invoiceDelayBadge = {
+          label: allDelayed ? 'Whole Invoice is Delayed' : 'Some Invoice Issuing Delays',
+          cls:   allDelayed ? 'pill-bad' : 'pill-warn',
+          title: allDelayed
+            ? `All ${segs.length} segment(s) are delayed from their baseline invoice week.`
+            : `${delayedSegs.length} of ${segs.length} segment(s) are delayed from their baseline invoice week.`
+        };
+      }
+
+      // --- pay line hold (exclude_from_pay), same as your SQL pay_line_on_hold ---
+      const heldSegs = segs.filter(seg => {
+        if (!seg || typeof seg !== 'object') return false;
+        return boolish(seg.exclude_from_pay);
+      });
+
+      if (heldSegs.length) {
+        const allHeld = (heldSegs.length === segs.length);
+        payLineHoldBadge = {
+          label: allHeld ? 'All Pay on hold' : 'Some Pay on hold',
+          cls:   allHeld ? 'pill-bad' : 'pill-warn',
+          title: allHeld
+            ? `All ${segs.length} segment(s) are excluded from pay.`
+            : `${heldSegs.length} of ${segs.length} segment(s) are excluded from pay.`
+        };
+      }
+    }
+  } catch {}
+
   const stageBadges = [];
   const seenStage   = new Set();
 
@@ -44168,11 +44330,30 @@ function renderTimesheetOverviewTab(ctx) {
 
   if (authInfo.showAwaitingBadge) addStage('Awaiting Authorisation', 'pill-warn');
 
+  // Sheet-level hold (kept; distinct from line-level)
   if (payOnHold) addStage('Pay on hold', 'pill-bad');
 
   if (readyToPay && !payOnHold && !isPaid) addStage('Ready to Pay', 'pill-ok');
 
-  if (hasTsfin && stageRaw && !seenStage.has(stageRaw)) {
+  // ✅ Invoice delay badge (SEGMENTS)
+  if (invoiceDelayBadge && invoiceDelayBadge.label) {
+    addStage(invoiceDelayBadge.label, invoiceDelayBadge.cls, invoiceDelayBadge.title);
+  }
+
+  // ✅ NEW: Line-level pay hold badge (SEGMENTS exclude_from_pay)
+  if (payLineHoldBadge && payLineHoldBadge.label) {
+    addStage(payLineHoldBadge.label, payLineHoldBadge.cls, payLineHoldBadge.title);
+  }
+
+  // ✅ Avoid duplicate “READY_FOR_INVOICE” alongside “Ready for Invoicing”
+  const STAGES_WITH_FRIENDLY_BADGE = new Set([
+    'READY_FOR_INVOICE',
+    'READY_FOR_HR',
+    'RATE_MISSING',
+    'PAY_CHANNEL_MISSING'
+  ]);
+
+  if (hasTsfin && stageRaw && !STAGES_WITH_FRIENDLY_BADGE.has(stageRaw)) {
     if (stageRaw !== 'PENDING_AUTH') addStage(stageRaw, 'pill-info');
   }
 
@@ -44463,9 +44644,6 @@ function renderTimesheetOverviewTab(ctx) {
     }
 
     // ✅ Footer-only actions MUST NOT appear in Overview Actions
-    // (they live in the modal footer):
-    // - delete-permanent (Delete timesheet)
-    // - delete-manual-reopen (Unprocess Timesheet)
     const FOOTER_ONLY_ACTION_RE =
       /data-ts-action="(?:delete-permanent|delete-manual-reopen)"/i;
 
@@ -44508,7 +44686,6 @@ function renderTimesheetOverviewTab(ctx) {
     </div>
   `;
 }
-
 
 
 
@@ -44919,6 +45096,7 @@ async function switchContractWeekToManual(weekId) {
   return json;
 }
 
+
 function renderTimesheetIssuesTab(ctx) {
   const { LOGM, L, GC, GE } = getTsLoggers('[TS][ISSUES]');
   const { row, details } = normaliseTimesheetCtx(ctx);
@@ -44958,6 +45136,50 @@ function renderTimesheetIssuesTab(ctx) {
         .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
         .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 
+  const fmtYmdToDmy = (ymd) => {
+    const s = String(ymd || '').slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+    const [y, m, d] = s.split('-');
+    return `${d}/${m}/${y}`;
+  };
+
+  const fmtDow = (ymd) => {
+    const s = String(ymd || '').slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return '';
+    const d = new Date(`${s}T00:00:00Z`);
+    if (Number.isNaN(d.getTime())) return '';
+    return d.toLocaleDateString('en-GB', { weekday: 'short', timeZone: 'Europe/London' });
+  };
+
+  const addDaysYmd = (ymd, deltaDays) => {
+    const s = String(ymd || '').slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return null;
+    const [yy, mm, dd] = s.split('-').map(Number);
+    const dt = new Date(Date.UTC(yy, mm - 1, dd));
+    dt.setUTCDate(dt.getUTCDate() + Number(deltaDays || 0));
+    return dt.toISOString().slice(0, 10);
+  };
+
+  // Monday start (matches Postgres date_trunc('week', ...) behaviour)
+  const weekStartMondayYmd = (ymd) => {
+    const s = String(ymd || '').slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return null;
+    const [yy, mm, dd] = s.split('-').map(Number);
+    const dt = new Date(Date.UTC(yy, mm - 1, dd));
+    const jsDow = dt.getUTCDay();        // Sun=0..Sat=6
+    const monIndex = (jsDow + 6) % 7;   // Mon=0..Sun=6
+    dt.setUTCDate(dt.getUTCDate() - monIndex);
+    return dt.toISOString().slice(0, 10);
+  };
+
+  const boolish = (v) => {
+    if (v === true) return true;
+    if (v === false) return false;
+    if (v == null) return false;
+    const s = String(v).trim().toLowerCase();
+    return (s === 'true' || s === '1' || s === 'yes' || s === 'y' || s === 'on');
+  };
+
   // Facts used only for issues list (not for Processing State label)
   const procStatusRaw =
     tsfin.processing_status ||
@@ -44992,10 +45214,114 @@ function renderTimesheetIssuesTab(ctx) {
     issues.push('Unassigned: this timesheet has not been fully matched or processed yet.');
   }
 
-  // Pay hold (from row or tsfin)
+  // Pay hold (sheet-level, from row or tsfin)
   const payOnHold = !!(tsfin.pay_on_hold ?? row.pay_on_hold);
   if (payOnHold) {
     issues.push('Pay is currently on hold for this timesheet. It will be excluded from pay runs until released.');
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // ✅ NEW: SEGMENTS-mode per-day delays (matches your SQL rules)
+  //   - invoice delayed per day: invoice_locked_invoice_id empty AND invoice_target_week_start present AND target != baseline
+  //   - pay delayed per day: exclude_from_pay === true
+  // Only list dates that are actually delayed.
+  // ─────────────────────────────────────────────────────────────
+  try {
+    const weYmd = (ts.week_ending_date || row.week_ending_date || null);
+    const baselineWeekStart =
+      (weYmd && /^\d{4}-\d{2}-\d{2}$/.test(String(weYmd).slice(0,10)))
+        ? addDaysYmd(String(weYmd).slice(0,10), -6)
+        : null;
+
+    let inv = tsfin.invoice_breakdown_json ?? null;
+    if (typeof inv === 'string') {
+      try { inv = JSON.parse(inv); } catch { inv = null; }
+    }
+
+    const mode = String(inv?.mode || '').toUpperCase();
+    const segs = Array.isArray(inv?.segments) ? inv.segments : [];
+
+    if (mode === 'SEGMENTS' && segs.length) {
+      const invoiceDelayed = [];
+      const payDelayed     = [];
+
+      for (const seg of segs) {
+        if (!seg || typeof seg !== 'object') continue;
+
+        const segDate = String(seg.date || '').slice(0, 10);
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(segDate)) continue;
+
+        // --- pay delay (exclude_from_pay) ---
+        if (boolish(seg.exclude_from_pay)) {
+          // optional reason (only if present; doesn't invent anything)
+          const reason = (seg.held_back_reason != null && String(seg.held_back_reason).trim())
+            ? String(seg.held_back_reason).trim()
+            : '';
+          payDelayed.push({ date: segDate, reason });
+        }
+
+        // --- invoice delay (exactly your SQL rule) ---
+        const lockedRaw = seg.invoice_locked_invoice_id;
+        const lockedId  = (lockedRaw == null) ? '' : String(lockedRaw).trim(); // SQL nullif(...,'') behaviour
+
+        const targetRaw = seg.invoice_target_week_start;
+        const target    = (targetRaw == null) ? '' : String(targetRaw).slice(0, 10).trim(); // keep YYYY-MM-DD
+
+        const baseStart = baselineWeekStart || weekStartMondayYmd(segDate);
+
+        const hasLocked = !!lockedId;
+        const hasTarget = !!target;
+
+        const isDelayed = (!hasLocked) && hasTarget && baseStart && (target !== baseStart);
+
+        if (isDelayed) {
+          const isPermanent = (target === '2099-01-05') || (/^2099-/.test(target));
+          invoiceDelayed.push({
+            date: segDate,
+            targetWeekStart: target,
+            permanent: isPermanent
+          });
+        }
+      }
+
+      // Only add when we actually have delays
+      if (invoiceDelayed.length) {
+        // summary + per-date lines
+        const allInvDelayed = (invoiceDelayed.length === segs.length);
+        issues.push(allInvDelayed
+          ? 'Whole invoice is delayed: all dated lines are being held back for invoicing.'
+          : `Some invoice issuing delays: ${invoiceDelayed.length} dated line(s) are being held back for invoicing.`
+        );
+
+        // per-date detail
+        for (const it of invoiceDelayed.sort((a,b)=>String(a.date).localeCompare(String(b.date)))) {
+          const dmy = fmtYmdToDmy(it.date);
+          const dow = fmtDow(it.date);
+          if (it.permanent) {
+            issues.push(`Invoice delayed: ${dow ? dow + ' ' : ''}${dmy} — permanently delayed.`);
+          } else {
+            issues.push(`Invoice delayed: ${dow ? dow + ' ' : ''}${dmy} — delayed until week starting ${fmtYmdToDmy(it.targetWeekStart)}.`);
+          }
+        }
+      }
+
+      if (payDelayed.length) {
+        const allPayDelayed = (payDelayed.length === segs.length);
+        issues.push(allPayDelayed
+          ? 'All pay is on hold (line-level): all dated lines are excluded from pay.'
+          : `Some pay is on hold (line-level): ${payDelayed.length} dated line(s) are excluded from pay.`
+        );
+
+        for (const it of payDelayed.sort((a,b)=>String(a.date).localeCompare(String(b.date)))) {
+          const dmy = fmtYmdToDmy(it.date);
+          const dow = fmtDow(it.date);
+          const extra = it.reason ? ` (Reason: ${it.reason})` : '';
+          issues.push(`Pay excluded: ${dow ? dow + ' ' : ''}${dmy}${extra}.`);
+        }
+      }
+    }
+  } catch (e) {
+    if (LOGM) L('[ISSUES] SEGMENTS delay scan failed (non-fatal)', e);
   }
 
   // HR cross-check issues (from TSFIN) — keep as “issues flagged”, but no Validation Log UI
@@ -45025,8 +45351,6 @@ function renderTimesheetIssuesTab(ctx) {
     issues.push('Awaiting authorisation by team.');
   }
 
-  // NOTE: No Validation Log UI and no schedule advisory messages here (per spec).
-
   const issuesHtml = issues.length
     ? `<ul class="mini">${issues.map(i => `<li>${esc(i)}</li>`).join('')}</ul>`
     : `<span class="mini">No issues detected.</span>`;
@@ -45055,6 +45379,7 @@ function renderTimesheetIssuesTab(ctx) {
     </div>
   `;
 }
+
 
 function renderTimesheetFinanceTab(ctx) {
   const { LOGM, L, GC, GE } = getTsLoggers('[TS][FINANCE]');
