@@ -1680,12 +1680,57 @@ function normalizeClientSettingsForSave(raw) {
     return s === 'true' || s === 'yes' || s === 'y' || s === '1' || s === 'on';
   };
 
-  // NOTE: keep your existing time + week_ending_weekday + validation logic here (unchanged)
-  // ... time + week_ending_weekday logic unchanged ...
-
-  // When settings are coming from the mounted UI, we can safely default missing boolean keys to false.
+  // When settings are coming from the mounted UI, we can safely default missing keys.
   // This prevents “unchecked” boxes becoming “missing key”.
   const fromUi = (src && src.__from_ui === true);
+
+  const isHHMM = (s) => {
+    if (typeof s !== 'string') return false;
+    const m = /^(\d{2}):(\d{2})$/.exec(s.trim());
+    if (!m) return false;
+    const hh = Number(m[1]), mm = Number(m[2]);
+    return Number.isInteger(hh) && Number.isInteger(mm) && hh >= 0 && hh <= 23 && mm >= 0 && mm <= 59;
+  };
+
+  // ✅ Time windows (include even when blank; validate HH:MM when present)
+  // ✅ Includes bh_start + bh_end
+  const TIME_KEYS = [
+    'day_start','day_end','night_start','night_end',
+    'sat_start','sat_end','sun_start','sun_end',
+    'bh_start','bh_end'
+  ];
+
+  for (const k of TIME_KEYS) {
+    if (fromUi || (k in src)) {
+      const v = (src[k] == null) ? '' : String(src[k]).trim();
+      if (v === '') out[k] = null;            // allow clearing
+      else if (isHHMM(v)) out[k] = v;
+      else invalid = true;
+    }
+  }
+
+  // ✅ timezone_id (allow null)
+  if (fromUi || ('timezone_id' in src)) {
+    const tz = (src.timezone_id == null) ? '' : String(src.timezone_id).trim();
+    out.timezone_id = (tz === '') ? null : tz;
+  }
+
+  // ✅ week_ending_weekday (0..6; 0 is valid) — keep NULL if empty
+  if (fromUi || ('week_ending_weekday' in src)) {
+    const rawW = src.week_ending_weekday;
+    if (rawW === '' || rawW === null || rawW === undefined) {
+      out.week_ending_weekday = null;
+    } else {
+      const n = Number(rawW);
+      if (!Number.isInteger(n) || n < 0 || n > 6) invalid = true;
+      else out.week_ending_weekday = n;
+    }
+  }
+
+  // ✅ Auto-invoice by default (client-level) — was missing
+  if (fromUi || ('auto_invoice_default' in src)) {
+    out.auto_invoice_default = asBool(src.auto_invoice_default);
+  }
 
   const BOOL_KEYS = [
     'pay_reference_required',
@@ -1716,6 +1761,7 @@ function normalizeClientSettingsForSave(raw) {
 
   return { cleaned: out, invalid };
 }
+
 
 
 // ===== Auth fetch with refresh retry =====
@@ -5501,10 +5547,15 @@ function openContract(row) {
       if (base.default_submission_mode) m.default_submission_mode = base.default_submission_mode;
 
       // NEW: seed contract route/settings overrides (only if present on row)
-      if (base.is_nhsp != null)              m.is_nhsp = base.is_nhsp;
-      if (base.autoprocess_hr != null)       m.autoprocess_hr = base.autoprocess_hr;
-      if (base.requires_hr != null)          m.requires_hr = base.requires_hr;
-      if (base.no_timesheet_required != null) m.no_timesheet_required = base.no_timesheet_required;
+    if (base.is_nhsp != null)               m.is_nhsp = base.is_nhsp;
+if (base.autoprocess_hr != null)        m.autoprocess_hr = base.autoprocess_hr;
+if (base.requires_hr != null)           m.requires_hr = base.requires_hr;
+if (base.no_timesheet_required != null) m.no_timesheet_required = base.no_timesheet_required;
+
+// ✅ NEW: attachments
+if (base.hr_attach_to_invoice != null)  m.hr_attach_to_invoice = base.hr_attach_to_invoice;
+if (base.ts_attach_to_invoice != null)  m.ts_attach_to_invoice = base.ts_attach_to_invoice;
+
       if (base.daily_calc_of_invoices != null) m.daily_calc_of_invoices = base.daily_calc_of_invoices;
       if (base.group_nightsat_sunbh != null) m.group_nightsat_sunbh = base.group_nightsat_sunbh;
       if (base.self_bill != null)            m.self_bill = base.self_bill;
@@ -5899,13 +5950,18 @@ const display_site = choose('display_site', base.display_site ?? '');
 
 
         // NEW: contract route/settings fields (tri-state)
-        let is_nhsp              = boolTriFromFS('is_nhsp');
-        let autoprocess_hr       = boolTriFromFS('autoprocess_hr');
-        let requires_hr          = boolTriFromFS('requires_hr');
-        let no_timesheet_required = boolTriFromFS('no_timesheet_required');
-        let daily_calc_of_invoices = boolTriFromFS('daily_calc_of_invoices');
-        let group_nightsat_sunbh  = boolTriFromFS('group_nightsat_sunbh');
-        let self_bill            = boolTriFromFS('self_bill');
+      let is_nhsp               = boolTriFromFS('is_nhsp');
+let autoprocess_hr        = boolTriFromFS('autoprocess_hr');
+let requires_hr           = boolTriFromFS('requires_hr');
+let no_timesheet_required = boolTriFromFS('no_timesheet_required');
+let daily_calc_of_invoices= boolTriFromFS('daily_calc_of_invoices');
+let group_nightsat_sunbh  = boolTriFromFS('group_nightsat_sunbh');
+let self_bill             = boolTriFromFS('self_bill');
+
+// ✅ NEW: attachments
+let hr_attach_to_invoice  = boolTriFromFS('hr_attach_to_invoice');
+let ts_attach_to_invoice  = boolTriFromFS('ts_attach_to_invoice');
+
 
         // NEW: canonicalise route flags only if any route override is present (avoids clobbering NULL legacy overrides)
         const anyRouteSet = [is_nhsp, autoprocess_hr, no_timesheet_required].some(v => v === true || v === false);
@@ -6044,11 +6100,16 @@ const data = {
   no_timesheet_required,
   daily_calc_of_invoices,
   group_nightsat_sunbh,
-  self_bill,
+   self_bill,
+
+  // ✅ NEW: attachments
+  hr_attach_to_invoice,
+  ts_attach_to_invoice,
 
   auto_invoice,
   require_reference_to_pay,
   require_reference_to_invoice,
+
   rates_json: mergedRates,
   std_hours_json,
   std_schedule_json,
@@ -9132,26 +9193,28 @@ function mergeContractStateIntoRow(row, formState) {
   };
 
   const boolKeys = new Set([
-    // existing
+    // contract flags
     'auto_invoice',
     'require_reference_to_pay',
     'require_reference_to_invoice',
-    // existing but previously not normalised here
     'self_bill',
 
-    // NEW: contract route + invoice calc flags
+    // contract route + invoice calc flags
     'is_nhsp',
     'autoprocess_hr',
     'requires_hr',
     'no_timesheet_required',
     'daily_calc_of_invoices',
-    'group_nightsat_sunbh'
+    'group_nightsat_sunbh',
+
+    // ✅ NEW: attachments at contract level
+    'hr_attach_to_invoice',
+    'ts_attach_to_invoice'
   ]);
 
-  // Merge MAIN staged fields (text/selects/checkbox snapshots)
+  // Merge MAIN staged fields
   if (fs && fs.main) {
     for (const [k, v] of Object.entries(fs.main)) {
-      // For checkbox-style fields we store 'on' / '' (or boolean in some flows) → normalise to boolean
       if (boolKeys.has(k)) {
         base[k] = toBool(v);
       } else if (k === 'start_date' || k === 'end_date') {
@@ -9175,6 +9238,8 @@ function mergeContractStateIntoRow(row, formState) {
   return base;
 }
 
+
+
 function openContractSettingsModal() {
   const LOGC = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : true;
 
@@ -9183,74 +9248,209 @@ function openContractSettingsModal() {
     return;
   }
 
-  const applyFromDOM = (root) => {
-    if (!root) return;
+  const base = window.modalCtx?.data || {};
+  const contractId = base?.id || null;
 
+  // ✅ Gate: only allow changes if NO real timesheets exist.
+  // We only have a best-effort FE check here (backend should enforce authoritatively).
+  const hasRealTimesheets = (() => {
+    const d = base || {};
+    const n =
+      Number(d.real_timesheets_count ?? d.real_timesheet_count ?? d.timesheets_count ?? d.timesheet_count ?? NaN);
+    if (Number.isFinite(n) && n > 0) return true;
+
+    if (d.has_real_timesheets === true) return true;
+    if (d.has_timesheets === true) return true;
+
+    return false;
+  })();
+
+  // Allow on CREATE (no id yet) but block on EDIT if we know there are real timesheets.
+  if (contractId && hasRealTimesheets) {
+    alert('Contract settings cannot be changed because real timesheets already exist for this contract.');
+    return;
+  }
+
+  const fs = (window.modalCtx.formState ||= {
+    __forId: (window.modalCtx.data?.id ?? window.modalCtx.openToken ?? null),
+    main: {},
+    pay: {}
+  });
+  fs.main ||= {};
+
+  const boolish = (v) => (v === 'on' || v === true || v === 'true' || v === 1 || v === '1');
+
+  const getMainBool = (k, fallback = false) => {
+    if (Object.prototype.hasOwnProperty.call(fs.main, k)) return !!boolish(fs.main[k]);
+    if (Object.prototype.hasOwnProperty.call(base, k)) return !!base[k];
+    return !!fallback;
+  };
+
+  const setMainBool = (k, b) => {
+    const next = b ? 'on' : '';
+    const prev = Object.prototype.hasOwnProperty.call(fs.main, k) ? fs.main[k] : undefined;
+    if (prev === next) return false;
+    fs.main[k] = next;
+    return true;
+  };
+
+  const setContractDirtyIfChanged = (changed) => {
+    if (!changed) return;
+
+    // Mark non-calendar dirty so calendar-only saves never skip the upsert.
+    try {
+      window.modalCtx.__nonCalendarDirty = true;
+      window.modalCtx.__calendarOnly = false;
+    } catch {}
+
+    // Mark parent contract frame dirty (so Save becomes available after Apply closes)
+    try {
+      const fr = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
+      // If this is the child frame, parent should be one below; if not available, rely on modal-dirty propagation.
+      if (fr && fr.kind === 'contracts') {
+        fr.isDirty = true;
+        fr._updateButtons && fr._updateButtons();
+      }
+    } catch {}
+
+    try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
+  };
+
+  const applyFromDOM = (root, opts = {}) => {
+    if (!root) return false;
+
+    const initial = !!opts.initial;
+
+    // Read the UI selection
     const weekly = String(root.querySelector('input[type="radio"][name="weekly_mode"]:checked')?.value || 'NONE').toUpperCase();
     const hrMode = String(root.querySelector('input[type="radio"][name="hr_timesheet_mode"]:checked')?.value || 'REQUIRE_TS').toUpperCase();
+    const isHrCreate = (weekly === 'HEALTHROSTER' && hrMode === 'NO_TS');
 
-    const setBool = (name, val) => {
-      try {
-        if (typeof setContractFormValue === 'function') setContractFormValue(name, val ? 'on' : '');
-      } catch {}
-      try {
-        const fs = (window.modalCtx.formState ||= { __forId:(window.modalCtx.data?.id ?? window.modalCtx.openToken ?? null), main:{}, pay:{} });
-        (fs.main ||= {})[name] = !!val;
-      } catch {}
+    // Snapshot current (effective-from-stage) before we mutate
+    const before = {
+      is_nhsp:                getMainBool('is_nhsp'),
+      autoprocess_hr:         getMainBool('autoprocess_hr'),
+      no_timesheet_required:  getMainBool('no_timesheet_required'),
+      requires_hr:            getMainBool('requires_hr'),
+
+      require_reference_to_pay:     getMainBool('require_reference_to_pay'),
+      require_reference_to_invoice: getMainBool('require_reference_to_invoice'),
+
+      self_bill:              getMainBool('self_bill'),
+      daily_calc_of_invoices: getMainBool('daily_calc_of_invoices'),
+      group_nightsat_sunbh:   getMainBool('group_nightsat_sunbh'),
+
+      auto_invoice:           getMainBool('auto_invoice'),
+
+      hr_attach_to_invoice:   getMainBool('hr_attach_to_invoice'),
+      ts_attach_to_invoice:   getMainBool('ts_attach_to_invoice')
     };
 
-    // --- Canonicalise route flags (contract-level) ---
+    let changed = false;
+
+    // --- Route canonicalisation (contract-level) ---
     // Manual:
     //  is_nhsp=false, autoprocess_hr=false, no_timesheet_required=false, requires_hr=false
     // NHSP:
-    //  is_nhsp=true, autoprocess_hr=false, no_timesheet_required=false, requires_hr=false
-    // HR (timesheets required):
-    //  is_nhsp=false, autoprocess_hr=true, no_timesheet_required=false, requires_hr=true
-    // HR (no timesheets):
-    //  is_nhsp=false, autoprocess_hr=true, no_timesheet_required=true, requires_hr=false
+    //  is_nhsp=true,  autoprocess_hr=false, no_timesheet_required=false, requires_hr=false
+    // HR VERIFY (timesheets required):
+    //  is_nhsp=false, autoprocess_hr=true,  no_timesheet_required=false, requires_hr=true
+    // HR CREATE (no timesheets):
+    //  is_nhsp=false, autoprocess_hr=true,  no_timesheet_required=true,  requires_hr=false
     if (weekly === 'NHSP') {
-      setBool('is_nhsp', true);
-      setBool('autoprocess_hr', false);
-      setBool('no_timesheet_required', false);
-      setBool('requires_hr', false);
+      changed = setMainBool('is_nhsp', true) || changed;
+      changed = setMainBool('autoprocess_hr', false) || changed;
+      changed = setMainBool('no_timesheet_required', false) || changed;
+      changed = setMainBool('requires_hr', false) || changed;
     } else if (weekly === 'HEALTHROSTER') {
-      setBool('is_nhsp', false);
-      setBool('autoprocess_hr', true);
-      if (hrMode === 'NO_TS') {
-        setBool('no_timesheet_required', true);
-        setBool('requires_hr', false);
+      changed = setMainBool('is_nhsp', false) || changed;
+      changed = setMainBool('autoprocess_hr', true) || changed;
+      if (isHrCreate) {
+        changed = setMainBool('no_timesheet_required', true) || changed;
+        changed = setMainBool('requires_hr', false) || changed;
       } else {
-        setBool('no_timesheet_required', false);
-        setBool('requires_hr', true);
+        changed = setMainBool('no_timesheet_required', false) || changed;
+        changed = setMainBool('requires_hr', true) || changed;
       }
     } else {
-      setBool('is_nhsp', false);
-      setBool('autoprocess_hr', false);
-      setBool('no_timesheet_required', false);
-      setBool('requires_hr', false);
+      changed = setMainBool('is_nhsp', false) || changed;
+      changed = setMainBool('autoprocess_hr', false) || changed;
+      changed = setMainBool('no_timesheet_required', false) || changed;
+      changed = setMainBool('requires_hr', false) || changed;
     }
 
-    // --- Contract-scoped flags ---
-    setBool('require_reference_to_pay',    !!root.querySelector('input[type="checkbox"][name="require_reference_to_pay"]')?.checked);
-    setBool('require_reference_to_invoice',!!root.querySelector('input[type="checkbox"][name="require_reference_to_invoice"]')?.checked);
-    setBool('self_bill',                  !!root.querySelector('input[type="checkbox"][name="self_bill"]')?.checked);
-    setBool('daily_calc_of_invoices',     !!root.querySelector('input[type="checkbox"][name="daily_calc_of_invoices"]')?.checked);
-    setBool('group_nightsat_sunbh',       !!root.querySelector('input[type="checkbox"][name="group_nightsat_sunbh"]')?.checked);
+    // --- Contract-scoped flags (some are forced by route) ---
 
-    // NEW: contract-level override
-    setBool('auto_invoice',               !!root.querySelector('input[type="checkbox"][name="auto_invoice"]')?.checked);
+    // Auto-invoice is always user-controlled (all modes)
+    const ai = !!root.querySelector('input[type="checkbox"][name="auto_invoice"]')?.checked;
+    changed = setMainBool('auto_invoice', ai) || changed;
+
+    // NHSP: references + invoicing flags controlled automatically
+    if (weekly === 'NHSP') {
+      changed = setMainBool('require_reference_to_pay', false) || changed;
+      changed = setMainBool('require_reference_to_invoice', false) || changed;
+
+      changed = setMainBool('self_bill', true) || changed;
+      changed = setMainBool('daily_calc_of_invoices', true) || changed;
+      changed = setMainBool('group_nightsat_sunbh', false) || changed;
+
+      changed = setMainBool('hr_attach_to_invoice', false) || changed;
+      changed = setMainBool('ts_attach_to_invoice', false) || changed;
+    }
+
+    // Manual: allow ref flags + invoice flags; attachments forced
+    if (weekly === 'NONE') {
+      const rPay = !!root.querySelector('input[type="checkbox"][name="require_reference_to_pay"]')?.checked;
+      const rInv = !!root.querySelector('input[type="checkbox"][name="require_reference_to_invoice"]')?.checked;
+
+      const sb   = !!root.querySelector('input[type="checkbox"][name="self_bill"]')?.checked;
+      const di   = !!root.querySelector('input[type="checkbox"][name="daily_calc_of_invoices"]')?.checked;
+      const gn   = !!root.querySelector('input[type="checkbox"][name="group_nightsat_sunbh"]')?.checked;
+
+      changed = setMainBool('require_reference_to_pay', rPay) || changed;
+      changed = setMainBool('require_reference_to_invoice', rInv) || changed;
+      changed = setMainBool('self_bill', sb) || changed;
+      changed = setMainBool('daily_calc_of_invoices', di) || changed;
+      changed = setMainBool('group_nightsat_sunbh', gn) || changed;
+
+      // forced
+      changed = setMainBool('hr_attach_to_invoice', false) || changed;
+      changed = setMainBool('ts_attach_to_invoice', true) || changed;
+    }
+
+    // HealthRoster: references forced off; invoicing flags user-controlled; attachments depend on CREATE vs VERIFY
+    if (weekly === 'HEALTHROSTER') {
+      changed = setMainBool('require_reference_to_pay', false) || changed;
+      changed = setMainBool('require_reference_to_invoice', false) || changed;
+
+      const sb   = !!root.querySelector('input[type="checkbox"][name="self_bill"]')?.checked;
+      const di   = !!root.querySelector('input[type="checkbox"][name="daily_calc_of_invoices"]')?.checked;
+      const gn   = !!root.querySelector('input[type="checkbox"][name="group_nightsat_sunbh"]')?.checked;
+
+      changed = setMainBool('self_bill', sb) || changed;
+      changed = setMainBool('daily_calc_of_invoices', di) || changed;
+      changed = setMainBool('group_nightsat_sunbh', gn) || changed;
+
+      const ha = !!root.querySelector('input[type="checkbox"][name="hr_attach_to_invoice"]')?.checked;
+      changed = setMainBool('hr_attach_to_invoice', ha) || changed;
+
+      if (isHrCreate) {
+        // forced
+        changed = setMainBool('ts_attach_to_invoice', false) || changed;
+      } else {
+        const ta = !!root.querySelector('input[type="checkbox"][name="ts_attach_to_invoice"]')?.checked;
+        changed = setMainBool('ts_attach_to_invoice', ta) || changed;
+      }
+    }
 
     // Update route pill in the parent contract main tab if it exists
     try {
       const lbl = document.getElementById('contractRouteLabel');
       if (lbl) {
-        const isNhsp = weekly === 'NHSP';
-        const isHr   = weekly === 'HEALTHROSTER';
-        const noTs   = isHr && hrMode === 'NO_TS';
         const routeLabel =
-          isNhsp ? 'NHSP' :
-          (isHr && noTs) ? 'HealthRoster (no timesheets)' :
-          (isHr) ? 'HealthRoster (timesheets required)' :
+          (weekly === 'NHSP') ? 'NHSP' :
+          (weekly === 'HEALTHROSTER' && isHrCreate) ? 'HealthRoster (no timesheets)' :
+          (weekly === 'HEALTHROSTER') ? 'HealthRoster (timesheets required)' :
           'Manual';
         lbl.innerHTML = `<strong>${routeLabel}</strong>`;
       }
@@ -9262,14 +9462,39 @@ function openContractSettingsModal() {
       if (form) {
         const sel = form.querySelector('select[name="default_submission_mode"]');
         if (sel) {
-          const hideDSM = (weekly === 'NHSP') || (weekly === 'HEALTHROSTER' && hrMode === 'NO_TS');
+          const hideDSM = (weekly === 'NHSP') || (weekly === 'HEALTHROSTER' && isHrCreate);
           const row = sel.closest('.row');
           if (row) row.style.display = hideDSM ? 'none' : '';
         }
       }
     } catch {}
 
-    try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
+    // Only mark parent dirty if something actually changed (avoid dirty-on-open)
+    const after = {
+      is_nhsp:                getMainBool('is_nhsp'),
+      autoprocess_hr:         getMainBool('autoprocess_hr'),
+      no_timesheet_required:  getMainBool('no_timesheet_required'),
+      requires_hr:            getMainBool('requires_hr'),
+
+      require_reference_to_pay:     getMainBool('require_reference_to_pay'),
+      require_reference_to_invoice: getMainBool('require_reference_to_invoice'),
+
+      self_bill:              getMainBool('self_bill'),
+      daily_calc_of_invoices: getMainBool('daily_calc_of_invoices'),
+      group_nightsat_sunbh:   getMainBool('group_nightsat_sunbh'),
+
+      auto_invoice:           getMainBool('auto_invoice'),
+
+      hr_attach_to_invoice:   getMainBool('hr_attach_to_invoice'),
+      ts_attach_to_invoice:   getMainBool('ts_attach_to_invoice')
+    };
+
+    const changedNet =
+      Object.keys(after).some(k => after[k] !== before[k]);
+
+    if (!initial && changedNet) setContractDirtyIfChanged(true);
+
+    return changedNet;
   };
 
   const wire = () => {
@@ -9277,21 +9502,52 @@ function openContractSettingsModal() {
     if (!root || root.__wired) return;
     root.__wired = true;
 
-    const onAnyChange = () => {
-      try { applyFromDOM(root); } catch {}
-      try {
-        // Toggle HR options visibility
-        const weekly = String(root.querySelector('input[type="radio"][name="weekly_mode"]:checked')?.value || 'NONE').toUpperCase();
-        const hrWrap = document.getElementById('contractHrModeWrap');
-        if (hrWrap) hrWrap.style.display = (weekly === 'HEALTHROSTER') ? '' : 'none';
-      } catch {}
+    const updatePanels = () => {
+      const weekly = String(root.querySelector('input[type="radio"][name="weekly_mode"]:checked')?.value || 'NONE').toUpperCase();
+      const hrMode = String(root.querySelector('input[type="radio"][name="hr_timesheet_mode"]:checked')?.value || 'REQUIRE_TS').toUpperCase();
+      const isHr = (weekly === 'HEALTHROSTER');
+      const isNhsp = (weekly === 'NHSP');
+      const isManual = (weekly === 'NONE');
+      const isHrCreate = isHr && hrMode === 'NO_TS';
+
+      const hrWrap = document.getElementById('contractHrModeWrap');
+      if (hrWrap) hrWrap.style.display = isHr ? '' : 'none';
+
+      const nhspPanel   = document.getElementById('contractFlagsNHSP');
+      const manualPanel = document.getElementById('contractFlagsManual');
+      const hrPanel     = document.getElementById('contractFlagsHR');
+      if (nhspPanel)   nhspPanel.style.display   = isNhsp ? '' : 'none';
+      if (manualPanel) manualPanel.style.display = isManual ? '' : 'none';
+      if (hrPanel)     hrPanel.style.display     = isHr ? '' : 'none';
+
+      // HR CREATE: hide TS attach option (forced off)
+      const tsAttachRow = document.getElementById('contractTsAttachRow');
+      if (tsAttachRow) tsAttachRow.style.display = (isHr && !isHrCreate) ? '' : 'none';
+
+      // weekly message
+      const msgEl = document.getElementById('contractWeeklyMsg');
+      if (msgEl) {
+        msgEl.textContent =
+          isManual
+            ? 'Weekly timesheets are managed manually (no external weekly import source). Candidates will submit timesheets electronically or using a QR Timesheet.'
+            : isNhsp
+            ? 'NHSP weekly imports will be used for this contract. Candidates will not submit any timesheets.'
+            : 'HealthRoster weekly imports will be used for this contract.';
+      }
+    };
+
+    const onAnyChange = (ev) => {
+      // Apply canonical changes + stage fields (dirty only if net change)
+      try { applyFromDOM(root, { initial: false }); } catch {}
+      try { updatePanels(); } catch {}
     };
 
     root.addEventListener('change', onAnyChange, true);
     root.addEventListener('input',  onAnyChange, true);
 
-    // Initial paint
-    onAnyChange();
+    // Initial paint: update UI + canonicalise WITHOUT dirty
+    try { updatePanels(); } catch {}
+    try { applyFromDOM(root, { initial: true }); } catch {}
   };
 
   showModal(
@@ -9302,26 +9558,28 @@ function openContractSettingsModal() {
       return renderContractSettingsModal({ data: (window.modalCtx && window.modalCtx.data) ? window.modalCtx.data : {} });
     },
     async () => {
-      // Apply once more on Save/Apply, then close
+      // Apply once more on Apply, then close (staging only; parent Save persists)
       try {
         const root = document.getElementById('contractSettingsForm');
-        applyFromDOM(root);
+        applyFromDOM(root, { initial: false });
       } catch {}
       return { ok: true, saved: null };
     },
-    false, // treat as "create-like" so Save/Apply is available
-    () => {
-      setTimeout(() => {
-        try { wire(); } catch (e) { if (LOGC) console.warn('[CONTRACT_SETTINGS] wire failed', e); }
-      }, 0);
-    },
+    true, // ✅ treat as "hasId" so modal opens in VIEW (Apply still works because it's a child)
+    null,
     {
       kind: 'contract_settings',
-      noParentGate: true,
+      noParentGate: false, // ✅ IMPORTANT: child Apply must mark parent dirty & require parent editable
       _trace: (LOGC && { tag: 'contract-settings', contract_id: window.modalCtx?.data?.id || null })
     }
   );
+
+  // ✅ Wire immediately after open (showModal does NOT call onReturn on initial open)
+  setTimeout(() => {
+    try { wire(); } catch (e) { if (LOGC) console.warn('[CONTRACT_SETTINGS] wire failed', e); }
+  }, 0);
 }
+
 
 function renderContractSettingsModal(ctx) {
   const LOGC = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : true;
@@ -9377,13 +9635,6 @@ function renderContractSettingsModal(ctx) {
     </label>
   `;
 
-  const msg =
-    (weeklyMode === 'NONE')
-      ? 'Weekly timesheets are managed manually (no external weekly import source). Candidates will submit timesheets electronically or using a QR Timesheet.'
-    : (weeklyMode === 'NHSP')
-      ? 'NHSP weekly imports will be used for this contract. Candidates will not submit any timesheets.'
-      : 'HealthRoster weekly imports will be used for this contract.';
-
   if (LOGC) console.log('[CONTRACT_SETTINGS] render snapshot', {
     weeklyMode, hrMode,
     flags: {
@@ -9392,9 +9643,16 @@ function renderContractSettingsModal(ctx) {
       self_bill: !!d.self_bill,
       daily_calc_of_invoices: !!d.daily_calc_of_invoices,
       group_nightsat_sunbh: !!d.group_nightsat_sunbh,
-      auto_invoice: !!d.auto_invoice
+      auto_invoice: !!d.auto_invoice,
+      hr_attach_to_invoice: !!d.hr_attach_to_invoice,
+      ts_attach_to_invoice: !!d.ts_attach_to_invoice
     }
   });
+
+  const showNhsp   = (weeklyMode === 'NHSP');
+  const showManual = (weeklyMode === 'NONE');
+  const showHr     = (weeklyMode === 'HEALTHROSTER');
+  const showHrTsAttach = showHr && (hrMode !== 'NO_TS');
 
   return `
     <form id="contractSettingsForm" class="tabc form">
@@ -9407,26 +9665,34 @@ function renderContractSettingsModal(ctx) {
             ${radioPill('weekly_mode', 'NHSP', 'NHSP', weeklyMode === 'NHSP')}
             ${radioPill('weekly_mode', 'HEALTHROSTER', 'HealthRoster', weeklyMode === 'HEALTHROSTER')}
           </div>
-          <div class="mini" style="opacity:0.9;line-height:1.25;white-space:normal;overflow-wrap:break-word;">${msg}</div>
+          <div id="contractWeeklyMsg" class="mini" style="opacity:0.9;line-height:1.25;white-space:normal;overflow-wrap:break-word;">
+            ${
+              weeklyMode === 'NONE'
+                ? 'Weekly timesheets are managed manually (no external weekly import source). Candidates will submit timesheets electronically or using a QR Timesheet.'
+                : weeklyMode === 'NHSP'
+                ? 'NHSP weekly imports will be used for this contract. Candidates will not submit any timesheets.'
+                : 'HealthRoster weekly imports will be used for this contract.'
+            }
+          </div>
         </div>
       </div>
 
-      <div id="contractHrModeWrap" style="display:${weeklyMode === 'HEALTHROSTER' ? '' : 'none'};">
+      <div id="contractHrModeWrap" style="display:${showHr ? '' : 'none'};">
         <div class="row" style="margin-top:12px;">
-          <label style="white-space:normal">HealthRoster weekly behaviour</label>
+          <label style="white-space:normal">Weekly HealthRoster behaviour</label>
           <div class="controls" style="display:flex;flex-direction:column;gap:12px;min-width:0;">
             ${radioChoice(
               'hr_timesheet_mode',
               'REQUIRE_TS',
-              'Timesheets required',
-              'Worker will provide timesheets; HealthRoster imports are used to verify/validate.',
+              'Worker will provide timesheets; the agency will also import healthroster data to verify workers hours',
+              'Import will validate that HealthRoster hours match the worker’s weekly timesheet. Mismatches fail validation and healthroster or timesheet will need amending before it can be paid.',
               hrMode === 'REQUIRE_TS'
             )}
             ${radioChoice(
               'hr_timesheet_mode',
               'NO_TS',
-              'No timesheets',
-              'Worker will not provide timesheets; HealthRoster imports create/update weekly timesheets when a contract exists.',
+              'Worker will not provide timesheets; imports create them if a contract exists',
+              'Import will create/update weekly timesheets from HealthRoster hours when a contract exists. Healthroster hours will not require any seperate checks.',
               hrMode === 'NO_TS'
             )}
           </div>
@@ -9436,20 +9702,51 @@ function renderContractSettingsModal(ctx) {
       <div class="row" style="margin-top:12px;">
         <label style="white-space:normal">References & flags</label>
         <div class="controls" style="display:flex;flex-direction:column;gap:12px;min-width:0;">
-          <div style="display:grid;grid-template-columns:1fr;gap:8px;">
-            ${checkChoice('require_reference_to_pay', 'Ref No. required to PAY', !!d.require_reference_to_pay)}
-            ${checkChoice('require_reference_to_invoice', 'Ref No. required to INVOICE', !!d.require_reference_to_invoice)}
+
+          <!-- NHSP -->
+          <div id="contractFlagsNHSP" style="display:${showNhsp ? '' : 'none'};">
+            <div class="mini" style="opacity:0.9;line-height:1.25;white-space:normal;overflow-wrap:break-word;">
+              NHSP mode controls references, invoicing behaviour and attachments automatically.
+            </div>
+            <div style="display:grid;grid-template-columns:1fr;gap:8px;margin-top:10px;">
+              ${checkChoice('auto_invoice', 'Auto-invoice (this contract)', !!d.auto_invoice)}
+            </div>
           </div>
 
-          <div style="display:grid;grid-template-columns:1fr;gap:8px;">
-            ${checkChoice('self_bill', 'Self-bill (no invoices sent)', !!d.self_bill)}
-            ${checkChoice('daily_calc_of_invoices', 'Daily invoice calculation', !!d.daily_calc_of_invoices)}
-            ${checkChoice('group_nightsat_sunbh', 'Group Night/Sat/Sun/BH', !!d.group_nightsat_sunbh)}
-            ${checkChoice('auto_invoice', 'Auto-invoice (this contract)', !!d.auto_invoice)}
+          <!-- MANUAL -->
+          <div id="contractFlagsManual" style="display:${showManual ? '' : 'none'};">
+            <div style="display:grid;grid-template-columns:1fr;gap:8px;">
+              ${checkChoice('require_reference_to_pay', 'Ref No. required to PAY', !!d.require_reference_to_pay)}
+              ${checkChoice('require_reference_to_invoice', 'Ref No. required to INVOICE', !!d.require_reference_to_invoice)}
+            </div>
+
+            <div style="display:grid;grid-template-columns:1fr;gap:8px;margin-top:10px;">
+              ${checkChoice('self_bill', 'Self-bill (no invoices sent)', !!d.self_bill)}
+              ${checkChoice('daily_calc_of_invoices', 'Daily invoice calculation', !!d.daily_calc_of_invoices)}
+              ${checkChoice('group_nightsat_sunbh', 'Group Night/Sat/Sun/BH', !!d.group_nightsat_sunbh)}
+              ${checkChoice('auto_invoice', 'Auto-invoice (this contract)', !!d.auto_invoice)}
+            </div>
+
+            <div class="mini" style="opacity:0.9;line-height:1.25;white-space:normal;overflow-wrap:break-word;margin-top:10px;">
+              Timesheets will always be attached to invoices for manual clients.
+            </div>
           </div>
 
-          <div class="mini" style="opacity:0.9;line-height:1.25;white-space:normal;overflow-wrap:break-word;">
-            Timesheets will always be attached to invoices for manual clients.
+          <!-- HEALTHROSTER -->
+          <div id="contractFlagsHR" style="display:${showHr ? '' : 'none'};">
+            <div style="display:grid;grid-template-columns:1fr;gap:8px;">
+              ${checkChoice('self_bill', 'Self-bill (no invoices sent)', !!d.self_bill)}
+              ${checkChoice('daily_calc_of_invoices', 'Daily invoice calculation', !!d.daily_calc_of_invoices)}
+              ${checkChoice('group_nightsat_sunbh', 'Group Night/Sat/Sun/BH', !!d.group_nightsat_sunbh)}
+              ${checkChoice('auto_invoice', 'Auto-invoice (this contract)', !!d.auto_invoice)}
+            </div>
+
+            <div style="display:grid;grid-template-columns:1fr;gap:8px;margin-top:10px;">
+              ${checkChoice('hr_attach_to_invoice', 'Attach HealthRoster to invoice', !!d.hr_attach_to_invoice)}
+              <div id="contractTsAttachRow" style="display:${showHrTsAttach ? '' : 'none'};">
+                ${checkChoice('ts_attach_to_invoice', 'Attach timesheets to invoice', !!d.ts_attach_to_invoice)}
+              </div>
+            </div>
           </div>
 
           <div class="mini" style="opacity:0.8;line-height:1.25;white-space:normal;overflow-wrap:break-word;">
@@ -9461,7 +9758,6 @@ function renderContractSettingsModal(ctx) {
     </form>
   `;
 }
-
 
 
 function snapshotContractForm() {
@@ -17814,25 +18110,31 @@ async function openClient(row) {
           const formEl = byId('clientSettingsForm');
           const liveSettings = collectForm('#clientSettingsForm', false);
 
-          const normKeys = ['day_start','day_end','night_start','night_end','sat_start','sat_end','sun_start','sun_end','bh_start','bh_end'];
+   const normKeys = ['day_start','day_end','night_start','night_end','sat_start','sat_end','sun_start','sun_end','bh_start','bh_end'];
 
-          // merge HH:MM fields (existing behaviour)
-          normKeys.forEach(k=>{
-            const v = liveSettings[k];
-            if (typeof v === 'string' && v.trim() !== '') {
-              csMerged[k] = v.trim();
-            }
-          });
+// ✅ merge time fields INCLUDING blanks so clears propagate ('' → null in normalizeClientSettingsForSave)
+normKeys.forEach(k => {
+  if (!Object.prototype.hasOwnProperty.call(liveSettings, k)) return;
+  const v = liveSettings[k];
+  csMerged[k] = (v == null) ? '' : String(v).trim(); // keep '' to mean “clear”
+});
 
-          // timezone (existing behaviour)
-          if (typeof liveSettings.timezone_id === 'string' && liveSettings.timezone_id.trim() !== '') {
-            csMerged.timezone_id = liveSettings.timezone_id.trim();
-          }
 
-          // week ending day
-          if (typeof liveSettings.week_ending_weekday !== 'undefined') {
-            csMerged.week_ending_weekday = String(liveSettings.week_ending_weekday || '').trim();
-          }
+     // ✅ timezone_id (allow clearing)
+if (Object.prototype.hasOwnProperty.call(liveSettings, 'timezone_id')) {
+  const tz = liveSettings.timezone_id;
+  csMerged.timezone_id = (tz == null) ? '' : String(tz).trim(); // '' → null in normalizeClientSettingsForSave
+}
+
+
+ // ✅ week ending day (0 is valid; do NOT use || '')
+if (Object.prototype.hasOwnProperty.call(liveSettings, 'week_ending_weekday')) {
+  const raw = liveSettings.week_ending_weekday;
+  csMerged.week_ending_weekday =
+    (raw === '' || raw === null || raw === undefined) ? null : String(raw).trim();
+}
+
+
 
           // default submission mode
           if (typeof liveSettings.default_submission_mode !== 'undefined') {
@@ -17847,20 +18149,22 @@ async function openClient(row) {
             if (hp) csMerged.hr_weekly_behaviour = String(hp.value || '').trim();
 
             // Checkboxes that may be present depending on gate
-            const BOOL_KEYS = [
-              'pay_reference_required',
-              'invoice_reference_required',
-              'self_bill_no_invoices_sent',
-              'daily_calc_of_invoices',
-              'group_nightsat_sunbh',
-              'hr_attach_to_invoice',
-              'ts_attach_to_invoice'
-            ];
-            csMerged.__from_ui = true;
-            for (const key of BOOL_KEYS) {
-              const el = formEl.querySelector(`input[type="checkbox"][name="${key}"]`);
-              if (el) csMerged[key] = !!el.checked;
-            }
+      const BOOL_KEYS = [
+  'pay_reference_required',
+  'invoice_reference_required',
+  'self_bill_no_invoices_sent',
+  'daily_calc_of_invoices',
+  'group_nightsat_sunbh',
+  'auto_invoice_default',     // ✅ NEW (was not being captured)
+  'hr_attach_to_invoice',
+  'ts_attach_to_invoice'
+];
+csMerged.__from_ui = true;
+for (const key of BOOL_KEYS) {
+  const el = formEl.querySelector(`input[type="checkbox"][name="${key}"]`);
+  if (el) csMerged[key] = !!el.checked;
+}
+
           }
         }
 
@@ -22156,6 +22460,37 @@ const display_site = choose('display_site', base.display_site ?? '');
         const require_reference_to_pay     = boolFromFS('require_reference_to_pay',     !!base.require_reference_to_pay);
         const require_reference_to_invoice = boolFromFS('require_reference_to_invoice', !!base.require_reference_to_invoice);
 
+// ✅ FE guard: if real timesheets exist, block changes to route/settings.
+// Backend should enforce authoritatively; this is a UX guard only.
+const hasRealTimesheets =
+  (Number(base.real_timesheets_count ?? base.timesheets_count ?? 0) > 0) ||
+  (base.has_real_timesheets === true) ||
+  (base.has_timesheets === true);
+
+const settingsChanged =
+  (!!base.is_nhsp !== !!is_nhsp) ||
+  (!!base.autoprocess_hr !== !!autoprocess_hr) ||
+  (!!base.no_timesheet_required !== !!no_timesheet_required) ||
+  (!!base.requires_hr !== !!requires_hr) ||
+  (!!base.self_bill !== !!self_bill) ||
+  (!!base.daily_calc_of_invoices !== !!daily_calc_of_invoices) ||
+  (!!base.group_nightsat_sunbh !== !!group_nightsat_sunbh) ||
+  (!!base.auto_invoice !== !!auto_invoice) ||
+  (!!base.hr_attach_to_invoice !== !!hr_attach_to_invoice) ||
+  (!!base.ts_attach_to_invoice !== !!ts_attach_to_invoice) ||
+  (!!base.require_reference_to_pay !== !!require_reference_to_pay) ||
+  (!!base.require_reference_to_invoice !== !!require_reference_to_invoice);
+
+if (hasRealTimesheets && settingsChanged) {
+  alert('Cannot change contract settings because real timesheets already exist for this contract.');
+  window.modalCtx._saveInFlight = false;
+  console.groupEnd?.();
+  return false;
+}
+
+
+
+
 
         const BUCKETS = ['paye_day','paye_night','paye_sat','paye_sun','paye_bh','umb_day','umb_night','umb_sat','umb_sun','umb_bh','charge_day','charge_night','charge_sat','charge_sun','charge_bh'];
         const baseRates = { ...(base.rates_json || {}) };
@@ -25759,6 +26094,7 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
   return markup;
 }
 
+
 function canonicalizeClientSettings(input) {
   const cs = { ...(input || {}) };
 
@@ -25770,6 +26106,9 @@ function canonicalizeClientSettings(input) {
   };
 
   const up = (v) => String(v || '').trim().toUpperCase();
+
+  // ✅ Preserve + canonicalise "Auto-invoice by default" across all mode branches
+  const autoInvDefault = toBool(cs.auto_invoice_default, false);
 
   // Determine weekly mode (UI helper first; else derive from legacy flags)
   let weeklyMode = up(cs.weekly_mode);
@@ -25819,6 +26158,9 @@ function canonicalizeClientSettings(input) {
     cs.weekly_mode = 'NHSP';
     cs.hr_weekly_behaviour = ''; // irrelevant in NHSP
 
+    // ✅ keep
+    cs.auto_invoice_default = autoInvDefault;
+
     return cs;
   }
 
@@ -25843,6 +26185,9 @@ function canonicalizeClientSettings(input) {
     cs.weekly_mode = 'NONE';
     cs.hr_weekly_behaviour = ''; // irrelevant
 
+    // ✅ keep
+    cs.auto_invoice_default = autoInvDefault;
+
     return cs;
   }
 
@@ -25864,6 +26209,9 @@ function canonicalizeClientSettings(input) {
 
     cs.weekly_mode = 'HEALTHROSTER';
     cs.hr_weekly_behaviour = 'CREATE';
+
+    // ✅ keep
+    cs.auto_invoice_default = autoInvDefault;
 
     return cs;
   }
@@ -25888,8 +26236,12 @@ function canonicalizeClientSettings(input) {
   cs.weekly_mode = 'HEALTHROSTER';
   cs.hr_weekly_behaviour = 'VERIFY';
 
+  // ✅ keep
+  cs.auto_invoice_default = autoInvDefault;
+
   return cs;
 }
+
 
 // ─────────────────────────────────────────────────────────────────────────────
 // UPDATED: showModal (adds contract-modal class toggling for Contracts dialogs)
@@ -28616,8 +28968,10 @@ btnTsProcess.onmouseleave = () => setHint('', null);
     top.kind === 'rate-presets-picker' ||
     top.kind === 'candidate-picker'  ||
     top.kind === 'client-picker'     ||
-    top.kind === 'qr-decision'       // NEW
+    top.kind === 'qr-decision'       ||
+    top.kind === 'contract_settings' // ✅ NEW: always an Apply-style staging child
   );
+
 
 
   const defaultPrimary =
