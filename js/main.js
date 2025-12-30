@@ -41995,7 +41995,8 @@ const isInvoiceDelayed =
   );
 
 const rowIsFlagged = !!effExclude || isInvoiceDelayed;
-const rowStyle = rowIsFlagged ? ` style="background: rgba(192, 57, 43, 0.08);"` : '';
+const rowStyle = rowIsFlagged ? ` style="background: rgba(192, 57, 43, 0.18);"` : '';
+
 
 
 
