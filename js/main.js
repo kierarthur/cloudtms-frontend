@@ -44014,7 +44014,6 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
 
   GE();
 }
-
 function renderTimesheetOverviewTab(ctx) {
   const { LOGM, L, GC, GE } = getTsLoggers('[TS][OVERVIEW]');
   const { row, details, related, state } = normaliseTimesheetCtx(ctx);
@@ -44197,6 +44196,8 @@ function renderTimesheetOverviewTab(ctx) {
     authInfo = { requires: requiresAuth, authorised, showAwaitingBadge: (requiresAuth && !authorised) };
   }
 
+  const isManualOnly = !!actionFlags.is_manual_only;
+
   // ─────────────────────────────────────────────────────────────
   // ✅ Invoice issuing delay badge (SEGMENTS mode, matches SQL rule)
   // + ✅ Line-level pay hold badge (SEGMENTS mode, matches SQL: seg.exclude_from_pay)
@@ -44235,7 +44236,6 @@ function renderTimesheetOverviewTab(ctx) {
       (weYmd && /^\d{4}-\d{2}-\d{2}$/.test(String(weYmd))) ? addDaysYmd(String(weYmd), -6) : null;
 
     if (hasTsfin && mode === 'SEGMENTS' && segs.length) {
-      // --- invoice delay (same rule as your SQL) ---
       const delayedSegs = segs.filter(seg => {
         if (!seg || typeof seg !== 'object') return false;
 
@@ -44271,7 +44271,6 @@ function renderTimesheetOverviewTab(ctx) {
         };
       }
 
-      // --- pay line hold (exclude_from_pay), same as your SQL pay_line_on_hold ---
       const heldSegs = segs.filter(seg => {
         if (!seg || typeof seg !== 'object') return false;
         return boolish(seg.exclude_from_pay);
@@ -44309,7 +44308,6 @@ function renderTimesheetOverviewTab(ctx) {
     );
   };
 
-  // ✅ planned weeks must still show "Unprocessed"
   if (!hasTsfin) {
     addStage(
       'Unprocessed',
@@ -44358,33 +44356,48 @@ function renderTimesheetOverviewTab(ctx) {
   }
 
   // ─────────────────────────────────────────────────────────────
-  // QR detection + QR “truth” flags (hash checks)
+  // QR detection + hash-aware truth model
   // ─────────────────────────────────────────────────────────────
+  const qrStatusAny = String(details.qr_status || ts.qr_status || row.qr_status || '').toUpperCase();
+  const qrTokenAny  = (details.qr_token ?? ts.qr_token ?? null);
+  const qrGenAny    = (details.qr_generated_at ?? ts.qr_generated_at ?? null);
+  const qrScanAny   = (details.qr_scanned_at ?? ts.qr_scanned_at ?? null);
+  const qrLastSentHashAny = (ts.qr_last_sent_hash ?? details?.timesheet?.qr_last_sent_hash ?? null);
+
+  const hasAnyQrToken = !!(qrTokenAny && String(qrTokenAny).trim());
+  const hasAnyQrGen   = !!qrGenAny;
+  const hasAnyQrScan  = !!qrScanAny;
+  const hasAnyLastSentHash = !!(qrLastSentHashAny && String(qrLastSentHashAny).trim());
+
+  // ✅ FIX #1: do NOT rely on ts.is_qr (not a real DB column). Prefer row.is_qr (view),
+  // then backend-derived hints, then fall back to QR fields / hashes.
   const isQr =
-    !!(row?.is_qr) ||
-    !!(ts?.is_qr) ||
-    !!(actionFlags?.is_qr);
+    !!row?.is_qr ||
+    !!details?.is_qr ||
+    !!actionFlags?.is_qr ||
+    !!qrStatusAny ||
+    hasAnyQrToken ||
+    hasAnyQrGen ||
+    hasAnyQrScan ||
+    hasAnyLastSentHash;
 
-  const qrStatus = isQr
-    ? String(details.qr_status || ts.qr_status || '').toUpperCase()
-    : '';
-
-  const qrTokenRaw = isQr ? (details.qr_token ?? ts.qr_token ?? null) : null;
-  const qrGenRaw   = isQr ? (details.qr_generated_at ?? ts.qr_generated_at ?? null) : null;
-  const qrScanRaw  = isQr ? (details.qr_scanned_at ?? ts.qr_scanned_at ?? null) : null;
-
-  const hasQrToken = !!(qrTokenRaw && String(qrTokenRaw).trim());
-  const hasQrGen   = !!qrGenRaw;
-  const hasQrScan  = !!qrScanRaw;
+  const qrStatus = isQr ? qrStatusAny : '';
+  const hasQrToken = isQr ? hasAnyQrToken : false;
+  const hasQrGen   = isQr ? hasAnyQrGen   : false;
+  const hasQrScan  = isQr ? hasAnyQrScan  : false;
+  const hasQrLastSentHash = isQr ? hasAnyLastSentHash : false;
 
   const qrIsCancelled = (qrStatus === 'CANCELLED');
   const qrIsExpired   = (qrStatus === 'EXPIRED');
 
+  // ✅ FIX #2: “issued/awaiting signature” is true if (token+gen) OR qr_last_sent_hash exists.
+  const hasIssuedProof = (hasQrToken && hasQrGen) || hasQrLastSentHash;
+
   const qrNotYetSentToCandidate =
-    (qrStatus === 'PENDING') && !hasQrToken && !hasQrGen;
+    (qrStatus === 'PENDING') && !hasIssuedProof && !hasQrScan;
 
   const qrWaitingForSignatureUpload =
-    (qrStatus === 'PENDING') && hasQrToken && hasQrGen && !hasQrScan;
+    (qrStatus === 'PENDING') && hasIssuedProof && !hasQrScan;
 
   const qrSignedReceived =
     (qrStatus === 'USED') || hasQrScan;
@@ -44397,22 +44410,24 @@ function renderTimesheetOverviewTab(ctx) {
   const hasSignedPdf = !!(signedPdfKey && String(signedPdfKey).trim());
   const hasScan      = !!hasQrScan;
 
+  // Prefer backend boolean; if missing, use conservative-but-helpful fallback:
+  // if we have a last-sent hash and we’re awaiting signature, a resend is usually safe.
   const qrCanResendSameHours =
     (typeof actionFlags.qr_can_resend_same_hours === 'boolean')
       ? actionFlags.qr_can_resend_same_hours
-      : false;
+      : (qrWaitingForSignatureUpload && hasQrLastSentHash);
 
   const qrSignedMatchesHours =
     (typeof actionFlags.qr_completed_matches_hours === 'boolean')
       ? actionFlags.qr_completed_matches_hours
       : false;
 
-  // ✅ QR-friendly stage badges (no action text; tooltips explain what to do)
+  // QR-friendly stage badges (no action text; tooltips explain what to do)
   if (isQr && qrStatus) {
     if (qrIsCancelled) {
-      // keep QR cancelled/expired primarily as Route state; stage stays TSFIN-driven + QR helper stage below
+      addStage('QR Cancelled', 'pill-warn', 'The QR route is cancelled. Issue a new QR timesheet if you want to continue via QR.');
     } else if (qrIsExpired) {
-      // same
+      addStage('QR Expired', 'pill-warn', 'The QR route is expired. You must issue a new QR timesheet.');
     } else if (qrNotYetSentToCandidate && qrStatus === 'PENDING') {
       if (!hasHours) {
         addStage(
@@ -44458,9 +44473,8 @@ function renderTimesheetOverviewTab(ctx) {
     }
   }
 
-  // Manual-only indicator (shown as a stage badge, while Route label stays simply "Manual")
-  const isManualOnly = !!actionFlags.is_manual_only;
-  if (isManualOnly && !(isQr && qrStatus)) {
+  // Manual-only indicator (still shown as a stage badge; Route stays simply “Manual”)
+  if (isManualOnly) {
     addStage(
       'Candidate submission disabled',
       'pill-warn',
@@ -44487,10 +44501,8 @@ function renderTimesheetOverviewTab(ctx) {
   // Route label (stable; never show action text here)
   // ─────────────────────────────────────────────────────────────
   const routeLabel = (() => {
-    // QR always wins while QR is active/known
     if (isQr && qrStatus) return 'QR';
 
-    // Import routes
     if (sheetScope === 'WEEKLY') {
       if (routeType === 'WEEKLY_NHSP' || routeType === 'WEEKLY_NHSP_ADJUSTMENT') return 'NHSP';
       if (routeType === 'WEEKLY_HEALTHROSTER') {
@@ -44520,10 +44532,9 @@ function renderTimesheetOverviewTab(ctx) {
     }
 
     if (routeLabel === 'Manual') {
-      if (isManualOnly) {
-        return 'Manual (candidate submission disabled). Admin will manage hours and evidence manually. To involve the candidate again you must explicitly re-enable submission.';
-      }
-      return 'Manual (admin-managed). Admin can adjust hours/schedule internally; to return to candidate evidence use “Revert to electronic” or re-enable submission where appropriate.';
+      return isManualOnly
+        ? 'Manual (candidate submission disabled). Admin will manage hours and evidence manually. To involve the candidate again you must explicitly re-enable submission.'
+        : 'Manual (admin-managed). Admin can adjust hours/schedule internally; to return to candidate evidence use “Revert to electronic” or re-enable submission where appropriate.';
     }
 
     if (routeLabel.startsWith('HealthRoster')) {
@@ -44702,7 +44713,7 @@ function renderTimesheetOverviewTab(ctx) {
     }
 
     if (tsId && !locked && isQr && qrStatus) {
-      const title = 'Convert to Manual-only (candidate submission disabled). Admin will manage hours and evidence manually from this point.';
+      const title = 'Convert to Manual (candidate submission disabled). Admin will manage hours and evidence manually from this point.';
       btns.push(`
         <button type="button" class="pill pill-info" style="${badgeBtnStyle}" data-ts-action="qr-convert-manual-only" title="${enc(title)}">
           Convert to Manual so you can enter hours on behalf of candidate
@@ -50502,7 +50513,6 @@ async function deleteTimesheetPermanent(timesheetId, opts = {}) {
   GE();
   return json;
 }
-
 async function resendQrTimesheetEmail(timesheetId) {
   const { LOGM, L, GC, GE } = getTsLoggers('[TS][QR][RESEND]');
   GC('resendQrTimesheetEmail');
@@ -50595,7 +50605,6 @@ async function resendQrTimesheetEmail(timesheetId) {
         throw err2;
       }
     } else {
-      // Any other error: rethrow
       GE();
       throw err;
     }
@@ -50609,55 +50618,77 @@ async function resendQrTimesheetEmail(timesheetId) {
 
   L('RESULT', json);
 
+  // ✅ Merge backend “action hints” into modal state immediately (so Overview updates even if details fields lag)
+  try {
+    const mc = window.modalCtx;
+    if (mc) {
+      mc.timesheetDetails ||= {};
+      const det = mc.timesheetDetails;
+
+      // Ensure nested structures exist
+      det.action_flags = (det.action_flags && typeof det.action_flags === 'object') ? det.action_flags : {};
+      det.timesheet    = (det.timesheet && typeof det.timesheet === 'object') ? det.timesheet : {};
+
+      // Persist “truth” signals the Overview uses
+      if (typeof json?.qr_can_resend_same_hours === 'boolean') {
+        det.action_flags.qr_can_resend_same_hours = json.qr_can_resend_same_hours;
+      }
+
+      if (json?.qr_last_sent_hash) {
+        det.timesheet.qr_last_sent_hash = String(json.qr_last_sent_hash);
+      }
+
+      // If backend returned a current_hash, it can be useful for debugging (optional)
+      if (json?.current_hash) det.action_flags.qr_current_hash = String(json.current_hash);
+
+      // Keep details' top-level id fields aligned if present
+      if (json?.current_timesheet_id) det.current_timesheet_id = String(json.current_timesheet_id);
+      if (json?.timesheet_id) det.timesheet_id = String(json.timesheet_id);
+    }
+  } catch {}
+
   // -----------------------------
-  // ✅ New backend response handling
+  // ✅ New backend response handling (result: NEW_ISSUED / RESENT / REISSUED)
   // -----------------------------
   try {
-    const raw =
-      json?.result ??
-      json?.action ??
-      json?.status ??
-      json?.kind ??
-      json?.outcome ??
-      '';
-
-    const s = String(raw || '').toLowerCase();
+    const resultU = String(json?.result || '').toUpperCase();
 
     const isReissueRequired =
-      s.includes('reissue') ||
-      s.includes('changed') ||
       String(json?.error || '').toUpperCase() === 'QR_CONTENT_CHANGED_REISSUE_REQUIRED' ||
       String(json?.code  || '').toUpperCase() === 'QR_CONTENT_CHANGED_REISSUE_REQUIRED';
 
-    const isResent =
-      s.includes('resent') ||
-      s.includes('resend') ||
-      s.includes('re-sent');
-
-    const isNewIssued =
-      s.includes('issued') ||
-      s.includes('new_issued') ||
-      s.includes('new') ||
-      s.includes('created');
-
     if (isReissueRequired) {
       toast('Hours have changed since the last QR was sent. Please send a new QR timesheet with current hours.');
-    } else if (isResent) {
+    } else if (resultU === 'RESENT') {
       toast('QR timesheet resent with current hours.');
-    } else if (isNewIssued) {
+    } else if (resultU === 'NEW_ISSUED') {
       toast('New QR timesheet sent with current hours.');
+    } else if (resultU === 'REISSUED') {
+      toast('New QR timesheet sent with updated hours.');
     } else {
-      // Safe fallback
       toast('QR timesheet email queued.');
     }
   } catch {}
 
-  // ✅ Always trigger a refresh/repaint after issuing/resending (so buttons/stage update immediately)
+  // ✅ Always trigger a refresh/repaint after issuing/resending
+  // Prefer to use the id that is now current.
   try {
+    const idNow =
+      window.modalCtx?.data?.timesheet_id ||
+      json?.current_timesheet_id ||
+      adoptedId ||
+      timesheetId;
+
     const refresh = ensureTsRefreshAndRepaintOverview();
     if (typeof refresh === 'function') {
-      // Prefer to repaint Overview after QR action
-      await refresh('overview');
+      await refresh('overview', idNow);
+    } else {
+      // Fallback: repaint current tab if helper isn't available
+      const fr = window.__getModalFrame?.();
+      if (fr?.setTab) {
+        if ((fr.currentTabKey || '') === 'overview') await fr.setTab('lines');
+        await fr.setTab('overview');
+      }
     }
   } catch {}
 
