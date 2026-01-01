@@ -44050,8 +44050,8 @@ function renderTimesheetOverviewTab(ctx) {
     null;
 
   // ✅ define effective mode (real TS mode if TS exists; otherwise planned-week snapshot)
-  const hasTsNow  = !!tsId;
-  const subModeTs = String(ts.submission_mode || row.submission_mode || '').toUpperCase();
+  const hasTsNow   = !!tsId;
+  const subModeTs  = String(ts.submission_mode || row.submission_mode || '').toUpperCase();
   const subModeEff = hasTsNow ? subModeTs : cwModeSnapshot;
 
   // keep existing variable name used elsewhere in this function
@@ -44226,8 +44226,8 @@ function renderTimesheetOverviewTab(ctx) {
       if (!ymd || typeof ymd !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(ymd)) return null;
       const [yy, mm, dd] = ymd.split('-').map(Number);
       const dt = new Date(Date.UTC(yy, mm - 1, dd));
-      const jsDow = dt.getUTCDay();        // Sun=0..Sat=6
-      const monIndex = (jsDow + 6) % 7;   // Mon=0..Sun=6
+      const jsDow = dt.getUTCDay();
+      const monIndex = (jsDow + 6) % 7;
       dt.setUTCDate(dt.getUTCDate() - monIndex);
       return dt.toISOString().slice(0, 10);
     };
@@ -44308,7 +44308,14 @@ function renderTimesheetOverviewTab(ctx) {
     );
   };
 
-  if (!hasTsfin) {
+  // ✅ map TSFIN.UNASSIGNED to "Unprocessed" (never show UNASSIGNED to admins)
+  if (hasTsfin && stageRaw === 'UNASSIGNED') {
+    addStage(
+      'Unprocessed',
+      'pill-info',
+      'This timesheet has been reset or currently has no valid hours recorded yet. Enter/submit hours to continue.'
+    );
+  } else if (!hasTsfin) {
     addStage(
       'Unprocessed',
       'pill-info',
@@ -44358,7 +44365,8 @@ function renderTimesheetOverviewTab(ctx) {
   // ─────────────────────────────────────────────────────────────
   // QR detection + hash-aware truth model
   // ─────────────────────────────────────────────────────────────
-  const qrStatusAny = String(details.qr_status || ts.qr_status || row.qr_status || '').toUpperCase();
+  // IMPORTANT: do not let SUMMARY-row qr_status drive modal actions (can be stale after rotation).
+  const qrStatusAny = String(details.qr_status || ts.qr_status || '').toUpperCase();
   const qrTokenAny  = (details.qr_token ?? ts.qr_token ?? null);
   const qrGenAny    = (details.qr_generated_at ?? ts.qr_generated_at ?? null);
   const qrScanAny   = (details.qr_scanned_at ?? ts.qr_scanned_at ?? null);
@@ -44369,8 +44377,7 @@ function renderTimesheetOverviewTab(ctx) {
   const hasAnyQrScan  = !!qrScanAny;
   const hasAnyLastSentHash = !!(qrLastSentHashAny && String(qrLastSentHashAny).trim());
 
-  // ✅ FIX #1: do NOT rely on ts.is_qr (not a real DB column). Prefer row.is_qr (view),
-  // then backend-derived hints, then fall back to QR fields / hashes.
+  // ✅ FIX: do NOT rely on ts.is_qr (not a real DB column). Prefer view row.is_qr, then backend hints, then QR fields/hashes.
   const isQr =
     !!row?.is_qr ||
     !!details?.is_qr ||
@@ -44390,7 +44397,7 @@ function renderTimesheetOverviewTab(ctx) {
   const qrIsCancelled = (qrStatus === 'CANCELLED');
   const qrIsExpired   = (qrStatus === 'EXPIRED');
 
-  // ✅ FIX #2: “issued/awaiting signature” is true if (token+gen) OR qr_last_sent_hash exists.
+  // ✅ “issued/awaiting signature” is true if (token+gen) OR last_sent_hash exists.
   const hasIssuedProof = (hasQrToken && hasQrGen) || hasQrLastSentHash;
 
   const qrNotYetSentToCandidate =
@@ -44410,8 +44417,7 @@ function renderTimesheetOverviewTab(ctx) {
   const hasSignedPdf = !!(signedPdfKey && String(signedPdfKey).trim());
   const hasScan      = !!hasQrScan;
 
-  // Prefer backend boolean; if missing, use conservative-but-helpful fallback:
-  // if we have a last-sent hash and we’re awaiting signature, a resend is usually safe.
+  // Prefer backend boolean; if missing, fallback so UI updates immediately after /qr-resend.
   const qrCanResendSameHours =
     (typeof actionFlags.qr_can_resend_same_hours === 'boolean')
       ? actionFlags.qr_can_resend_same_hours
@@ -44422,7 +44428,7 @@ function renderTimesheetOverviewTab(ctx) {
       ? actionFlags.qr_completed_matches_hours
       : false;
 
-  // QR-friendly stage badges (no action text; tooltips explain what to do)
+  // QR-friendly stage badges
   if (isQr && qrStatus) {
     if (qrIsCancelled) {
       addStage('QR Cancelled', 'pill-warn', 'The QR route is cancelled. Issue a new QR timesheet if you want to continue via QR.');
@@ -44473,7 +44479,6 @@ function renderTimesheetOverviewTab(ctx) {
     }
   }
 
-  // Manual-only indicator (still shown as a stage badge; Route stays simply “Manual”)
   if (isManualOnly) {
     addStage(
       'Candidate submission disabled',
@@ -44488,7 +44493,8 @@ function renderTimesheetOverviewTab(ctx) {
     'READY_FOR_HR',
     'RATE_MISSING',
     'PAY_CHANNEL_MISSING',
-    'AWAITING_MANUAL_SIGNATURE'
+    'AWAITING_MANUAL_SIGNATURE',
+    'UNASSIGNED' // ✅ NEVER show as raw
   ]);
 
   if (hasTsfin && stageRaw && !STAGES_WITH_FRIENDLY_BADGE.has(stageRaw)) {
@@ -44662,8 +44668,9 @@ function renderTimesheetOverviewTab(ctx) {
       `);
     }
 
-    // QR send / resend
-    if (tsId && !locked && qrStatus === 'PENDING' && isQr) {
+    // QR send / resend (only when QR is actually enabled: qr_status=PENDING on CURRENT row)
+    // ✅ This prevents calling /qr-resend when backend has qr_status=NULL (manual-only).
+    if (tsId && !locked && !isManualOnly && isQr && qrStatus === 'PENDING') {
       if (qrNotYetSentToCandidate) {
         if (hasHours) {
           const title = 'Issue a new printable QR PDF for the current hours and email it to the candidate.';
@@ -44694,7 +44701,7 @@ function renderTimesheetOverviewTab(ctx) {
       }
     }
 
-    if (tsId && !locked && qrWaitingForSignatureUpload && qrStatus === 'PENDING') {
+    if (tsId && !locked && !isManualOnly && isQr && qrStatus === 'PENDING' && qrWaitingForSignatureUpload) {
       const title = 'Reject the submitted QR hours and reset the QR route so the candidate must re-submit their hours again (email will be queued to the candidate if configured).';
       btns.push(`
         <button type="button" class="pill pill-warn" style="${badgeBtnStyle}" data-ts-action="qr-refuse" title="${enc(title)}">
@@ -44703,7 +44710,7 @@ function renderTimesheetOverviewTab(ctx) {
       `);
     }
 
-    if (tsId && !locked && qrSignedReceived && qrStatus === 'USED') {
+    if (tsId && !locked && !isManualOnly && isQr && qrStatus === 'USED' && qrSignedReceived) {
       const title = 'Revoke the signed QR evidence and request the candidate resubmit hours/signatures again (use when signed evidence is incorrect or hours changed).';
       btns.push(`
         <button type="button" class="pill pill-warn" style="${badgeBtnStyle}" data-ts-action="qr-reissue-request" title="${enc(title)}">
@@ -44712,6 +44719,7 @@ function renderTimesheetOverviewTab(ctx) {
       `);
     }
 
+    // Convert QR route → manual-only
     if (tsId && !locked && isQr && qrStatus) {
       const title = 'Convert to Manual (candidate submission disabled). Admin will manage hours and evidence manually from this point.';
       btns.push(`
@@ -44808,7 +44816,6 @@ function renderTimesheetOverviewTab(ctx) {
     </div>
   `;
 }
-
 
 function renderHrRotaDailySummary(type, importId, rows, ss) {
   const summary = ss.summary || {};
