@@ -44290,6 +44290,9 @@ function renderTimesheetOverviewTab(ctx) {
     }
   } catch {}
 
+  // ─────────────────────────────────────────────────────────────
+  // Stage badges + tooltips
+  // ─────────────────────────────────────────────────────────────
   const stageBadges = [];
   const seenStage   = new Set();
 
@@ -44307,35 +44310,56 @@ function renderTimesheetOverviewTab(ctx) {
   };
 
   // ✅ planned weeks must still show "Unprocessed"
-  if (!hasTsfin) addStage('Unprocessed', 'pill-info');
+  if (!hasTsfin) {
+    addStage(
+      'Unprocessed',
+      'pill-info',
+      'This timesheet is unprocessed. No real hours have been entered yet (the Lines tab shows the default contract schedule until you enter actual hours).'
+    );
+  }
 
-  if (isPaid)     addStage('Paid', 'pill-ok');
-  if (isInvoiced) addStage('Invoiced', 'pill-warn');
+  if (isPaid)     addStage('Paid', 'pill-ok', 'This timesheet has been marked as paid.');
+  if (isInvoiced) addStage('Invoiced', 'pill-warn', 'This timesheet has been invoiced and is locked for changes.');
 
-  // ✅ Only show TSFIN-derived stages when TSFIN exists
-  if (hasTsfin && stageRaw === 'READY_FOR_INVOICE')     addStage('Ready for Invoicing', 'pill-ok');
-  if (hasTsfin && stageRaw === 'READY_FOR_HR')          addStage('Ready for HR', 'pill-info');
-  if (hasTsfin && stageRaw === 'RATE_MISSING')          addStage('Rate Missing', 'pill-bad');
-  if (hasTsfin && stageRaw === 'PAY_CHANNEL_MISSING')   addStage('Pay Channel Missing', 'pill-bad');
+  if (hasTsfin && stageRaw === 'READY_FOR_INVOICE') {
+    addStage('Ready for Invoicing', 'pill-ok', 'This timesheet is authorised and ready to be added to an invoice.');
+  }
+  if (hasTsfin && stageRaw === 'READY_FOR_HR') {
+    addStage('Ready for HR', 'pill-info', 'This timesheet is authorised and requires HealthRoster validation before it can be invoiced.');
+  }
+  if (hasTsfin && stageRaw === 'RATE_MISSING') {
+    addStage(
+      'Rate Missing',
+      'pill-bad',
+      'Rates are missing for one or more hour buckets used by this timesheet. Add the missing rates before continuing (in some cases you may need to correct the contract and reprocess/recreate unprocessed weeks).'
+    );
+  }
+  if (hasTsfin && stageRaw === 'PAY_CHANNEL_MISSING') {
+    addStage('Pay Channel Missing', 'pill-bad', 'The pay channel for this candidate is missing. Set the candidate pay method/channel before continuing.');
+  }
 
-  if (authInfo.showAwaitingBadge) addStage('Awaiting Authorisation', 'pill-warn');
+  if (authInfo.showAwaitingBadge) {
+    addStage('Awaiting Authorisation', 'pill-warn', 'This timesheet requires authorisation before it can proceed.');
+  }
 
-  // Sheet-level hold (kept; distinct from line-level)
-  if (payOnHold) addStage('Pay on hold', 'pill-bad');
+  if (payOnHold) {
+    addStage('Pay on hold', 'pill-bad', 'Pay is on hold for this timesheet. Remove the hold to allow payment.');
+  }
 
-  if (readyToPay && !payOnHold && !isPaid) addStage('Ready to Pay', 'pill-ok');
+  if (readyToPay && !payOnHold && !isPaid) {
+    addStage('Ready to Pay', 'pill-ok', 'This timesheet is ready to be included in the next pay run.');
+  }
 
-  // ✅ Invoice delay badge (SEGMENTS)
   if (invoiceDelayBadge && invoiceDelayBadge.label) {
     addStage(invoiceDelayBadge.label, invoiceDelayBadge.cls, invoiceDelayBadge.title);
   }
-
-  // ✅ Line-level pay hold badge (SEGMENTS exclude_from_pay)
   if (payLineHoldBadge && payLineHoldBadge.label) {
     addStage(payLineHoldBadge.label, payLineHoldBadge.cls, payLineHoldBadge.title);
   }
 
-  // ✅ Only treat as QR if it's actually a QR timesheet
+  // ─────────────────────────────────────────────────────────────
+  // QR detection + QR “truth” flags (hash checks)
+  // ─────────────────────────────────────────────────────────────
   const isQr =
     !!(row?.is_qr) ||
     !!(ts?.is_qr) ||
@@ -44345,14 +44369,9 @@ function renderTimesheetOverviewTab(ctx) {
     ? String(details.qr_status || ts.qr_status || '').toUpperCase()
     : '';
 
-  const qrTokenRaw =
-    isQr ? (details.qr_token ?? ts.qr_token ?? null) : null;
-
-  const qrGenRaw =
-    isQr ? (details.qr_generated_at ?? ts.qr_generated_at ?? null) : null;
-
-  const qrScanRaw =
-    isQr ? (details.qr_scanned_at ?? ts.qr_scanned_at ?? null) : null;
+  const qrTokenRaw = isQr ? (details.qr_token ?? ts.qr_token ?? null) : null;
+  const qrGenRaw   = isQr ? (details.qr_generated_at ?? ts.qr_generated_at ?? null) : null;
+  const qrScanRaw  = isQr ? (details.qr_scanned_at ?? ts.qr_scanned_at ?? null) : null;
 
   const hasQrToken = !!(qrTokenRaw && String(qrTokenRaw).trim());
   const hasQrGen   = !!qrGenRaw;
@@ -44370,7 +44389,6 @@ function renderTimesheetOverviewTab(ctx) {
   const qrSignedReceived =
     (qrStatus === 'USED') || hasQrScan;
 
-  // Signed PDF key (current signed evidence pointer)
   const signedPdfKey =
     details.manual_pdf_r2_key ||
     ts.manual_pdf_r2_key ||
@@ -44379,107 +44397,147 @@ function renderTimesheetOverviewTab(ctx) {
   const hasSignedPdf = !!(signedPdfKey && String(signedPdfKey).trim());
   const hasScan      = !!hasQrScan;
 
-  // Backend-provided truth flags (hash checks)
   const qrCanResendSameHours =
     (typeof actionFlags.qr_can_resend_same_hours === 'boolean')
       ? actionFlags.qr_can_resend_same_hours
-      : false; // conservative: if not provided, do not show "Resend"
+      : false;
 
   const qrSignedMatchesHours =
     (typeof actionFlags.qr_completed_matches_hours === 'boolean')
       ? actionFlags.qr_completed_matches_hours
       : false;
 
-  // ✅ QR-friendly stage badges (never show raw internal QR statuses)
+  // ✅ QR-friendly stage badges (no action text; tooltips explain what to do)
   if (isQr && qrStatus) {
     if (qrIsCancelled) {
-      // keep existing "QR Cancelled" as a route label only; stage stays TSFIN-driven
+      // keep QR cancelled/expired primarily as Route state; stage stays TSFIN-driven + QR helper stage below
     } else if (qrIsExpired) {
-      // keep existing "QR Expired" as a route label only
+      // same
     } else if (qrNotYetSentToCandidate && qrStatus === 'PENDING') {
       if (!hasHours) {
-        addStage('QR Timesheet not yet issued – Awaiting Hours from Candidate', 'pill-info');
+        addStage(
+          'QR Timesheet not yet issued – Awaiting Hours from Candidate',
+          'pill-info',
+          'No hours are recorded for this QR timesheet yet. The candidate must enter hours in the app before a QR timesheet can be issued.'
+        );
       } else {
-        addStage('Send New QR Timesheet to Candidate with current Hours', 'pill-info');
+        addStage(
+          'QR Timesheet ready to send',
+          'pill-info',
+          'Hours are recorded, but no valid QR timesheet has been sent for the current hours. Use “Send New QR Timesheet…” to issue the printable QR PDF and email it to the candidate.'
+        );
       }
     } else if (qrWaitingForSignatureUpload && qrStatus === 'PENDING') {
       if (qrCanResendSameHours) {
-        addStage('QR Timesheet Hours received – Awaiting signature', 'pill-warn');
-      } else {
-        addStage('Send New QR Timesheet to Candidate with current Hours', 'pill-info');
+        addStage(
+          'QR Timesheet Hours received – Awaiting signature',
+          'pill-warn',
+          'Hours are recorded and a QR timesheet has been issued. The candidate/manager must sign and upload the signed copy.'
+        );
+      } else if (hasHours) {
+        addStage(
+          'QR Timesheet ready to send',
+          'pill-info',
+          'Hours have changed since the last QR was sent, so the previous QR is no longer valid for the current hours. Use “Send New QR Timesheet…” to issue a new QR PDF.'
+        );
       }
-    } else if (qrSignedReceived && hasScan && hasSignedPdf && qrSignedMatchesHours) {
-      // Optional: you may choose to also show a stage badge when fully matched
-      // addStage('QR Completed', 'pill-ok');
+    } else if (qrSignedReceived && hasScan && hasSignedPdf) {
+      if (qrSignedMatchesHours) {
+        addStage(
+          'QR Completed – Signed timesheet matches current hours',
+          'pill-ok',
+          'A signed QR timesheet has been received and it matches the hours currently recorded in the system.'
+        );
+      } else {
+        addStage(
+          'QR Signed upload received – Does not match current hours',
+          'pill-warn',
+          'A signed QR timesheet exists, but it does not match the current hours. If hours were changed after signing, send a new QR timesheet and have it re-signed.'
+        );
+      }
     }
   }
 
-  // ✅ Avoid duplicate “READY_FOR_INVOICE” alongside “Ready for Invoicing”
+  // Manual-only indicator (shown as a stage badge, while Route label stays simply "Manual")
+  const isManualOnly = !!actionFlags.is_manual_only;
+  if (isManualOnly && !(isQr && qrStatus)) {
+    addStage(
+      'Candidate submission disabled',
+      'pill-warn',
+      'Candidate submission is disabled for this timesheet. To involve the candidate again, use “Allow electronic again” / “Allow Candidate to submit QR Timesheet hours again” (if available), or “Revert to electronic” where applicable.'
+    );
+  }
+
+  // Avoid raw stage echo for keys we already show in friendly form
   const STAGES_WITH_FRIENDLY_BADGE = new Set([
     'READY_FOR_INVOICE',
     'READY_FOR_HR',
     'RATE_MISSING',
     'PAY_CHANNEL_MISSING',
-    'AWAITING_MANUAL_SIGNATURE' // QR waiting state (do not show raw)
+    'AWAITING_MANUAL_SIGNATURE'
   ]);
 
   if (hasTsfin && stageRaw && !STAGES_WITH_FRIENDLY_BADGE.has(stageRaw)) {
     if (stageRaw !== 'PENDING_AUTH') addStage(stageRaw, 'pill-info');
   }
 
-  if (!stageBadges.length) addStage('Unknown', 'pill-info');
+  if (!stageBadges.length) addStage('Unknown', 'pill-info', 'No stage could be determined for this timesheet.');
 
+  // ─────────────────────────────────────────────────────────────
+  // Route label (stable; never show action text here)
+  // ─────────────────────────────────────────────────────────────
   const routeLabel = (() => {
-    const isManualOnly = !!actionFlags.is_manual_only;
-    if (isManualOnly) return 'Manual-only';
+    // QR always wins while QR is active/known
+    if (isQr && qrStatus) return 'QR';
 
-    // ✅ If QR is active/known, QR wording overrides weekly route_type (prevents "Manual" showing when QR is in use)
-    if (qrStatus) {
-      if (qrIsCancelled) return 'QR Cancelled';
-      if (qrIsExpired)   return 'QR Expired';
-
-      if (qrNotYetSentToCandidate && qrStatus === 'PENDING') {
-        return hasHours
-          ? 'Send New QR Timesheet to Candidate with current Hours'
-          : 'QR Timesheet not yet issued – Awaiting Hours from Candidate';
-      }
-
-      if (qrWaitingForSignatureUpload && qrStatus === 'PENDING') {
-        return qrCanResendSameHours
-          ? 'QR Timesheet Hours received – Awaiting signature'
-          : 'Send New QR Timesheet to Candidate with current Hours';
-      }
-
-      if (qrSignedReceived || qrStatus === 'USED') {
-        if (hasScan && hasSignedPdf) {
-          if (qrSignedMatchesHours) {
-            return 'QR Completed – We have a signed timesheet that matches the hours entered on the system.';
-          }
-          return 'QR Completed';
-        }
-        if (hasScan && !hasSignedPdf) return 'QR Scanned - awaiting signed evidence';
-        return 'QR Hours Submitted';
-      }
-
-      return 'QR';
-    }
-
-    // Weekly route display (non-QR)
+    // Import routes
     if (sheetScope === 'WEEKLY') {
       if (routeType === 'WEEKLY_NHSP' || routeType === 'WEEKLY_NHSP_ADJUSTMENT') return 'NHSP';
       if (routeType === 'WEEKLY_HEALTHROSTER') {
         return noTimesheetRequired ? 'HealthRoster (no timesheets)' : 'HealthRoster (timesheets required)';
       }
-      if (routeType === 'WEEKLY_MANUAL') return 'Manual';
       if (routeType === 'WEEKLY_ELECTRONIC') return 'Electronic';
+      if (routeType === 'WEEKLY_MANUAL') return 'Manual';
     }
 
     if (subModeEff === 'ELECTRONIC') return 'Electronic';
     return 'Manual';
   })();
 
+  const routeTitle = (() => {
+    if (isQr && qrStatus) {
+      if (qrIsCancelled) return 'QR route is cancelled. You will need to issue a new QR if you want to continue the QR process.';
+      if (qrIsExpired)   return 'QR route is expired. You must issue a new QR timesheet.';
+      if (qrNotYetSentToCandidate && !hasHours) return 'QR route is enabled but no hours have been entered yet.';
+      if (qrNotYetSentToCandidate && hasHours)  return 'QR route is ready to send for the current hours.';
+      if (qrWaitingForSignatureUpload) return 'QR timesheet issued. Awaiting signed upload.';
+      if (qrSignedReceived) return 'QR signed upload has been received.';
+      return 'QR timesheet route.';
+    }
+
+    if (routeLabel === 'Electronic') {
+      return 'Hours and signatures are submitted electronically by the candidate via the app. The candidate can also choose to complete a QR Timesheet if they prefer.';
+    }
+
+    if (routeLabel === 'Manual') {
+      if (isManualOnly) {
+        return 'Manual (candidate submission disabled). Admin will manage hours and evidence manually. To involve the candidate again you must explicitly re-enable submission.';
+      }
+      return 'Manual (admin-managed). Admin can adjust hours/schedule internally; to return to candidate evidence use “Revert to electronic” or re-enable submission where appropriate.';
+    }
+
+    if (routeLabel.startsWith('HealthRoster')) {
+      return noTimesheetRequired
+        ? 'HealthRoster is authoritative and no weekly timesheet evidence is required.'
+        : 'HealthRoster is used and a weekly timesheet is required for evidence/processing.';
+    }
+
+    if (routeLabel === 'NHSP') return 'NHSP is the authoritative source for this week.';
+    return '';
+  })();
+
   const routePillClass =
-    (routeLabel === 'Manual' || routeLabel === 'Manual-only') ? 'pill-manual' :
+    (routeLabel === 'Manual') ? 'pill-manual' :
     (routeLabel === 'Electronic') ? 'pill-elec' :
     'pill-info';
 
@@ -44528,7 +44586,6 @@ function renderTimesheetOverviewTab(ctx) {
     const canRestoreSigned  = !!actionFlags.can_restore_qr_signed;
     const canRevertToElec   = !!actionFlags.can_revert_to_electronic;
 
-    const isManualOnly = !!actionFlags.is_manual_only;
     const canAllowQrAgain   = !!actionFlags.can_allow_qr_again;
     const canAllowElecAgain = !!actionFlags.can_allow_electronic_again;
 
@@ -44567,30 +44624,28 @@ function renderTimesheetOverviewTab(ctx) {
       !locked &&
       (subModeEff === 'ELECTRONIC');
 
-    // Convert to Manual so you can enter hours on behalf of candidate
-    // IMPORTANT: never render conversion actions for import-authoritative contexts
     if (!importAuthoritative && (isWeeklyElectronicWithTs || isPlannedWeeklyElectronic || isDailyElectronicWithTs)) {
+      const title = 'Switch this timesheet into admin-managed Manual mode so you can adjust hours/schedule internally.';
       btns.push(`
-        <button type="button" class="pill pill-info" style="${badgeBtnStyle}" data-ts-action="switch-manual">
+        <button type="button" class="pill pill-info" style="${badgeBtnStyle}" data-ts-action="switch-manual" title="${enc(title)}">
           Convert to Manual so you can enter hours on behalf of candidate
         </button>
       `);
     }
 
-    // Planned weekly manual → switch back to electronic
-    // IMPORTANT: never render this for import-authoritative contexts
     if (!importAuthoritative && isPlannedWeeklyManual) {
+      const title = 'Switch this planned manual week back to Electronic (read-only) behaviour.';
       btns.push(`
-        <button type="button" class="pill pill-info" style="${badgeBtnStyle}" data-ts-action="switch-electronic-planned">
+        <button type="button" class="pill pill-info" style="${badgeBtnStyle}" data-ts-action="switch-electronic-planned" title="${enc(title)}">
           Switch week back to electronic
         </button>
       `);
     }
 
-    // Daily: generate daily QR
     if (isDaily && tsId && subMode === 'ELECTRONIC' && !locked) {
+      const title = 'Generate and email a daily QR timesheet for printing/signature, then upload the signed copy.';
       btns.push(`
-        <button type="button" class="pill pill-info" style="${badgeBtnStyle}" data-ts-action="send-daily-qr">
+        <button type="button" class="pill pill-info" style="${badgeBtnStyle}" data-ts-action="send-daily-qr" title="${enc(title)}">
           Send daily QR timesheet
         </button>
       `);
@@ -44598,65 +44653,65 @@ function renderTimesheetOverviewTab(ctx) {
 
     // QR send / resend
     if (tsId && !locked && qrStatus === 'PENDING' && isQr) {
-      // Not yet sent to candidate: only show send if hours exist
       if (qrNotYetSentToCandidate) {
         if (hasHours) {
+          const title = 'Issue a new printable QR PDF for the current hours and email it to the candidate.';
           btns.push(`
-            <button type="button" class="pill pill-info" style="${badgeBtnStyle}" data-ts-action="qr-resend">
-              Send New QR Timesheet to Candidate with current Hours (they don't have one yet)
+            <button type="button" class="pill pill-info" style="${badgeBtnStyle}" data-ts-action="qr-resend" title="${enc(title)}">
+              Send New QR Timesheet…
             </button>
           `);
         }
       }
 
-      // Waiting for signature upload: show Resend only if backend says "same hours"; else force Send New
       if (qrWaitingForSignatureUpload) {
         if (qrCanResendSameHours) {
+          const title = 'Resend the previously-issued QR PDF for the same hours (no changes). This does not issue a new token.';
           btns.push(`
-            <button type="button" class="pill pill-info" style="${badgeBtnStyle}" data-ts-action="qr-resend">
-              Resend QR Timesheet to Candidate with current Hours
+            <button type="button" class="pill pill-info" style="${badgeBtnStyle}" data-ts-action="qr-resend" title="${enc(title)}">
+              Resend QR Timesheet…
             </button>
           `);
         } else if (hasHours) {
+          const title = 'Hours have changed since the last QR was sent. Issue a new QR PDF for the current hours and email it to the candidate.';
           btns.push(`
-            <button type="button" class="pill pill-info" style="${badgeBtnStyle}" data-ts-action="qr-resend">
-              Send New QR Timesheet to Candidate with current Hours (they don't have one yet)
+            <button type="button" class="pill pill-info" style="${badgeBtnStyle}" data-ts-action="qr-resend" title="${enc(title)}">
+              Send New QR Timesheet…
             </button>
           `);
         }
       }
     }
 
-    // QR refuse (awaiting signature upload)
     if (tsId && !locked && qrWaitingForSignatureUpload && qrStatus === 'PENDING') {
+      const title = 'Reject the submitted QR hours and reset the QR route so the candidate must re-submit their hours again (email will be queued to the candidate if configured).';
       btns.push(`
-        <button type="button" class="pill pill-warn" style="${badgeBtnStyle}" data-ts-action="qr-refuse">
+        <button type="button" class="pill pill-warn" style="${badgeBtnStyle}" data-ts-action="qr-refuse" title="${enc(title)}">
           Refuse hours & request resubmission
         </button>
       `);
     }
 
-    // QR revoke signed + request resubmission (signed received)
     if (tsId && !locked && qrSignedReceived && qrStatus === 'USED') {
+      const title = 'Revoke the signed QR evidence and request the candidate resubmit hours/signatures again (use when signed evidence is incorrect or hours changed).';
       btns.push(`
-        <button type="button" class="pill pill-warn" style="${badgeBtnStyle}" data-ts-action="qr-reissue-request">
+        <button type="button" class="pill pill-warn" style="${badgeBtnStyle}" data-ts-action="qr-reissue-request" title="${enc(title)}">
           Revoke signed QR & request resubmission
         </button>
       `);
     }
 
-    // Convert QR route → manual-only (available whenever QR is active/known)
     if (tsId && !locked && isQr && qrStatus) {
-      const title = `Convert to Manual-only so you can enter hours on behalf of candidate (this will disable candidate submission — they won’t be able to submit hours themselves unless you switch back later).`;
+      const title = 'Convert to Manual-only (candidate submission disabled). Admin will manage hours and evidence manually from this point.';
       btns.push(`
         <button type="button" class="pill pill-info" style="${badgeBtnStyle}" data-ts-action="qr-convert-manual-only" title="${enc(title)}">
-          Convert to Manual-only so you can enter hours on behalf of candidate
+          Convert to Manual so you can enter hours on behalf of candidate
         </button>
       `);
     }
 
     if (tsId && !locked && canRestorePending) {
-      const title = `Restore the most recently revoked pending QR version as current. This re-enables that QR timesheet so the candidate can sign it. You may need to resend the QR PDF.`;
+      const title = 'Restore the most recently revoked pending QR version as current (you may need to resend the QR PDF afterwards).';
       btns.push(`
         <button type="button" class="pill pill-info" style="${badgeBtnStyle}" data-ts-action="qr-restore-pending" title="${enc(title)}">
           Restore revoked QR (pending)
@@ -44665,23 +44720,25 @@ function renderTimesheetOverviewTab(ctx) {
     }
 
     if (tsId && !locked && canRestoreSigned) {
+      const title = 'Restore the most recently revoked signed QR version as current (only valid if it matches current hours).';
       btns.push(`
-        <button type="button" class="pill pill-info" style="${badgeBtnStyle}" data-ts-action="qr-restore-signed">
+        <button type="button" class="pill pill-info" style="${badgeBtnStyle}" data-ts-action="qr-restore-signed" title="${enc(title)}">
           Restore revoked QR (signed)
         </button>
       `);
     }
 
     if (!importAuthoritative && tsId && !locked && isManualOnly && canAllowQrAgain) {
+      const title = 'Create a new current QR-enabled state so the candidate can submit QR hours again.';
       btns.push(`
-        <button type="button" class="pill pill-info" style="${badgeBtnStyle}" data-ts-action="allow-qr-again">
+        <button type="button" class="pill pill-info" style="${badgeBtnStyle}" data-ts-action="allow-qr-again" title="${enc(title)}">
           Allow Candidate to submit QR Timesheet hours again
         </button>
       `);
     }
 
     if (!importAuthoritative && tsId && !locked && isManualOnly && canAllowElecAgain) {
-      const title = `Create a new current ELECTRONIC version. The candidate must re-submit hours and signatures in the app — they can also choose to submit a QR Timesheet if they prefer.`;
+      const title = 'Create a new current ELECTRONIC version. The candidate must re-submit hours and signatures in the app.';
       btns.push(`
         <button type="button" class="pill pill-info" style="${badgeBtnStyle}" data-ts-action="allow-electronic-again" title="${enc(title)}">
           Allow electronic again
@@ -44689,10 +44746,8 @@ function renderTimesheetOverviewTab(ctx) {
       `);
     }
 
-    // Revert to electronic (current manual → electronic original)
-    // IMPORTANT: never render conversion actions for import-authoritative contexts
     if (!importAuthoritative && tsId && !locked && canRevertToElec) {
-      const title = `Use this when you want to undo manual overrides and return to the original electronic evidence without asking the candidate to do anything again.`;
+      const title = 'Return to the previously submitted ELECTRONIC version without asking the candidate to resubmit. Recheck the hours afterwards.';
       btns.push(`
         <button type="button" class="pill pill-info" style="${badgeBtnStyle}" data-ts-action="revert-electronic" title="${enc(title)}">
           Revert to electronic
@@ -44700,7 +44755,6 @@ function renderTimesheetOverviewTab(ctx) {
       `);
     }
 
-    // Footer-only actions MUST NOT appear in Overview Actions
     const FOOTER_ONLY_ACTION_RE =
       /data-ts-action="(?:delete-permanent|delete-manual-reopen)"/i;
 
@@ -44722,7 +44776,7 @@ function renderTimesheetOverviewTab(ctx) {
       <div class="row">
         <label>Route</label>
         <div class="controls" style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;">
-          <span class="pill ${routePillClass}" style="font-weight:600;">${enc(routeLabel)}</span>
+          <span class="pill ${routePillClass}" style="font-weight:600;" ${routeTitle ? `title="${enc(routeTitle)}"` : ''}>${enc(routeLabel)}</span>
           <span class="pill ${scopePillClass}" style="font-weight:600;">${enc(scopeLabel)}</span>
         </div>
       </div>
@@ -44743,7 +44797,6 @@ function renderTimesheetOverviewTab(ctx) {
     </div>
   `;
 }
-
 
 
 function renderHrRotaDailySummary(type, importId, rows, ss) {
