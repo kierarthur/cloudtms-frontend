@@ -43823,8 +43823,6 @@ function computeTimesheetProcessingState(details, row) {
 
   return { key: 'UNPROCESSED', label: 'Unprocessed' };
 }
-
-
 async function openTimesheetEvidenceViewerExisting(evidenceItem) {
   const { LOGM, L, GC, GE } = getTsLoggers('[TS][EVIDENCE][VIEWER]');
   GC('openTimesheetEvidenceViewerExisting');
@@ -43955,7 +43953,7 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
   };
 
   // ─────────────────────────────────────────────────────────────
-  // IMPORT TABLE preview (supports NHSP “pretty” + generic fallback)
+  // IMPORT TABLE preview (NHSP “pretty” + generic fallback)
   // ─────────────────────────────────────────────────────────────
   if (previewMode === 'IMPORT_TABLE') {
     const importId =
@@ -43991,21 +43989,24 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
     const headerColsRaw = Array.isArray(imp?.header_columns) ? imp.header_columns : [];
     const rows = Array.isArray(imp?.rows) ? imp.rows : [];
 
-    // If headers are missing, derive generic column names from first row
+    // ✅ CRITICAL: preserve header alignment (DO NOT drop blanks).
+    // header columns may include blanks because the source has merged / multi-row headers.
     const headerCols = (() => {
-      const hc = headerColsRaw
-        .map(x => String(x ?? '').trim())
-        .filter(Boolean);
+      const mapped = (headerColsRaw || []).map(x => {
+        const s = (x == null) ? '' : String(x);
+        return s.replace(/\s+/g, ' ').trim();
+      });
 
-      if (hc.length) return hc;
+      if (mapped.length) return mapped;
 
       const raw0 = Array.isArray(rows?.[0]?.raw_columns) ? rows[0].raw_columns : [];
       const n = Array.isArray(raw0) ? raw0.length : 0;
-      if (n > 0) {
-        return Array.from({ length: n }, (_, i) => `Column ${i + 1}`);
-      }
+      if (n > 0) return Array.from({ length: n }, (_, i) => `Column ${i + 1}`);
       return [];
     })();
+
+    // For display only (keep indexing headerCols intact)
+    const headerDisp = headerCols.map((h, i) => (h ? h : `C${i + 1}`));
 
     const downloadKeyRaw =
       (evidenceItem.download_storage_key != null && String(evidenceItem.download_storage_key).trim())
@@ -44018,7 +44019,7 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
 
     // ── shared formatting helpers ───────────────────────────────
     const normH = (s) => String(s || '').trim().toLowerCase().replace(/\s+/g, ' ');
-    const headersNorm = headerCols.map(normH);
+    const headersNorm = headerCols.map(normH); // keep blanks as ''
 
     const fmtYmdToDmy = (ymd) => {
       const s = String(ymd || '').trim();
@@ -44130,8 +44131,9 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
       return { display: rawS || '—', ms: null };
     };
 
-    // ── layout detection (NHSP “pretty” vs generic) ──────────────
+    // ── NHSP detection + indices ────────────────────────────────
     const hasAll = (need) => need.every(t => headersNorm.some(h => h === t || h.includes(t)));
+
     const nhspNeed = [
       'ref num',
       'agency worker name',
@@ -44142,13 +44144,31 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
       'commission',
       'total cost'
     ];
-    const looksLikeNhsp = hasAll(nhspNeed) && headersNorm.some(h => h === 'contract') && headersNorm.some(h => h === 'actual');
 
-    // Find "assignment" index, then find 1st/2nd Start/End/Break/Total after that (handles extra columns)
+    const countEq = (x) => headersNorm.filter(h => h === x).length;
+    const hasSubStarts  = countEq('start') >= 2;
+    const hasSubEnds    = countEq('end') >= 2;
+    const hasSubTotals  = countEq('total') >= 2;
+    const hasSubBreak   = headersNorm.some(h => h.includes('break') && h.includes('minute'));
+
+    const hasGroupContract = headersNorm.some(h => h === 'contract' || h.includes('contract'));
+    const hasGroupActual   = headersNorm.some(h => h === 'actual'   || h.includes('actual'));
+
+    // Works for:
+    // - NEW flattened headers: start/end/break/total appear twice
+    // - OLD “group-only” headers: Contract/Actual present but subheaders missing
+    const looksLikeNhsp =
+      hasAll(nhspNeed) &&
+      (
+        (hasSubStarts && hasSubEnds && hasSubTotals && hasSubBreak) ||
+        (hasGroupContract && hasGroupActual)
+      );
+
     const findFirstIdx = (pred) => {
       for (let i = 0; i < headersNorm.length; i++) if (pred(headersNorm[i], headerCols[i], i)) return i;
       return -1;
     };
+
     const findAllIdx = (pred, startAt = 0) => {
       const out = [];
       for (let i = Math.max(0, startAt); i < headersNorm.length; i++) {
@@ -44159,12 +44179,31 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
 
     const idxDate = findFirstIdx((hn) => hn === 'date' || hn.startsWith('date'));
     const idxAssign = findFirstIdx((hn) => hn === 'assignment');
+
     const scanFrom = (idxAssign >= 0 ? idxAssign + 1 : 0);
 
-    const idxStartAll = findAllIdx((hn) => hn === 'start', scanFrom);
-    const idxEndAll   = findAllIdx((hn) => hn === 'end',   scanFrom);
-    const idxBreakAll = findAllIdx((hn) => hn === 'break in minutes' || (hn.includes('break') && hn.includes('minute')), scanFrom);
-    const idxTotalAll = findAllIdx((hn) => hn === 'total', scanFrom);
+    // If we only have Contract/Actual group labels (older stored headers),
+    // fall back to the canonical NHSP column positions relative to Assignment.
+    const usePositionalNhsp =
+      looksLikeNhsp &&
+      idxAssign >= 0 &&
+      !(hasSubStarts && hasSubEnds && hasSubTotals && hasSubBreak);
+
+    const idxStartAll = usePositionalNhsp
+      ? [idxAssign + 1, idxAssign + 5]
+      : findAllIdx((hn) => hn === 'start', scanFrom);
+
+    const idxEndAll = usePositionalNhsp
+      ? [idxAssign + 2, idxAssign + 6]
+      : findAllIdx((hn) => hn === 'end', scanFrom);
+
+    const idxBreakAll = usePositionalNhsp
+      ? [idxAssign + 3, idxAssign + 7]
+      : findAllIdx((hn) => hn === 'break in minutes' || (hn.includes('break') && hn.includes('minute')), scanFrom);
+
+    const idxTotalAll = usePositionalNhsp
+      ? [idxAssign + 4, idxAssign + 8]
+      : findAllIdx((hn) => hn === 'total', scanFrom);
 
     const idxCommission = findFirstIdx((hn) => hn === 'commission' || hn.includes('commission'));
     const idxTotalCost  = findFirstIdx((hn) => hn === 'total cost' || hn.includes('total cost'));
@@ -44179,7 +44218,6 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
       idxCommission >= 0 &&
       idxTotalCost >= 0;
 
-    // Decide indices for NHSP pretty (by occurrence)
     const nhspIdx = canPrettyNhsp ? {
       date: (idxDate >= 0 ? idxDate : 0),
       ref: findFirstIdx((hn) => hn === 'ref num' || hn.includes('ref num')),
@@ -44189,11 +44227,13 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
       ward: findFirstIdx((hn) => hn === 'ward' || hn.includes('ward')),
       assignment: idxAssign,
 
+      // Contract block (first occurrence)
       cStart: idxStartAll[0],
       cEnd:   idxEndAll[0],
       cBreak: idxBreakAll[0],
       cTotal: idxTotalAll[0],
 
+      // Actual block (second occurrence)
       aStart: idxStartAll[1],
       aEnd:   idxEndAll[1],
       aBreak: idxBreakAll[1],
@@ -44203,10 +44243,8 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
       totalCost:  idxTotalCost
     } : null;
 
-    // For generic layout, attempt to locate date + actual start for sorting if possible
     const genericIdx = (() => {
       const d = idxDate >= 0 ? idxDate : findFirstIdx((hn) => hn.includes('date'));
-      // actual start: prefer "actual start", else if "start" appears >=2, pick second, else first "start"
       const aStart =
         findFirstIdx((hn) => hn.includes('actual start')) >= 0
           ? findFirstIdx((hn) => hn.includes('actual start'))
@@ -44214,7 +44252,7 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
       return { date: d, aStart };
     })();
 
-    // Sort rows oldest->newest, tie by actual start time
+    // Sort rows oldest->newest, tie by ACTUAL start time
     const rowsSorted = rows
       .map((r, idx) => {
         const payload = (r && typeof r.payload === 'object' && r.payload) ? r.payload : {};
@@ -44246,44 +44284,63 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
     // ── table renderers ─────────────────────────────────────────
     const commonWrapStyle = `
       <style>
-        .ts-import-wrap { max-height:520px; overflow:auto; border:1px solid var(--line); border-radius:8px; }
-        table.ts-import-table { width:100%; border-collapse:collapse; }
-        table.ts-import-table th, table.ts-import-table td { padding:6px 8px; border-bottom:1px solid rgba(255,255,255,.08); vertical-align:top; }
-        table.ts-import-table td { white-space:normal; }
-        table.ts-import-table thead th { background:#0f0f0f; position:sticky; z-index:5; border-bottom:1px solid var(--line); }
+        .ts-import-wrap {
+          max-height:520px;
+          overflow:auto;
+          border:1px solid var(--line);
+          border-radius:8px;
+          background:#000;
+        }
+        table.ts-import-table {
+          width:100%;
+          border-collapse:collapse;
+        }
+        table.ts-import-table th,
+        table.ts-import-table td {
+          padding:6px 8px;
+          vertical-align:top;
+          border:1px solid rgba(255,255,255,.16); /* ✅ borders around every cell */
+        }
+        table.ts-import-table thead th {
+          background:#0f0f0f;
+          position:sticky;
+          z-index:5;
+          border:1px solid rgba(255,255,255,.22);
+        }
+        table.ts-import-table td {
+          white-space:normal;
+        }
       </style>
     `;
 
     const mkTableGeneric = () => {
-      const hdr = headerCols.length ? headerCols : Array.from({ length: (rowsSorted[0]?._raw?.length || 0) }, (_, i) => `Column ${i + 1}`);
+      const hdr = headerCols.length
+        ? headerCols
+        : Array.from({ length: (rowsSorted[0]?._raw?.length || 0) }, (_, i) => `Column ${i + 1}`);
+
+      const hdrDisp = hdr.map((h, i) => (String(h || '').trim() ? String(h).trim() : `Column ${i + 1}`));
       const hdrNorm = hdr.map(normH);
 
-      // Sticky single header row
       const head = `
         <thead>
           <tr>
-            ${hdr.map((h) => `<th style="top:0; z-index:6; text-align:left;">${escapeHtml(String(h))}</th>`).join('')}
+            ${hdrDisp.map((h) => `<th style="top:0; z-index:6; text-align:left;">${escapeHtml(String(h))}</th>`).join('')}
           </tr>
         </thead>
       `;
 
       const fmtCell = (i, v, hn) => {
         const h = hn || '';
-        // date-like
         if (h.includes('date')) {
-          const payload = null;
-          const d = normalizeDateDisplayAndSort(payload, v);
+          const d = normalizeDateDisplayAndSort(null, v);
           return d.display;
         }
-        // money-like
         if (h.includes('commission') || h.includes('total cost') || (h.includes('cost') && !h.includes('cost centre'))) {
           return fmtMoney2(v);
         }
-        // break minutes
         if (h.includes('break') && h.includes('minute')) {
           return fmtInt(v);
         }
-        // time-like columns (start/end/total in Contract/Actual)
         if (h === 'start' || h === 'end' || h === 'total' || h.includes(' start') || h.includes(' end') || h.includes(' total')) {
           const n = Number(v);
           if (Number.isFinite(n) && n >= 0 && n <= 2) return fmtDayFractionToHHMM(v);
@@ -44296,8 +44353,8 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
       const body = rowsSorted.length
         ? rowsSorted.map((x) => {
             const raw = Array.isArray(x._raw) ? x._raw : [];
-            // render exactly as many columns as headers (or raw length if headers missing)
             const nCols = hdr.length ? hdr.length : raw.length;
+
             const cells = [];
             for (let i = 0; i < nCols; i++) {
               const v = raw[i];
@@ -44306,7 +44363,7 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
             }
             return `<tr>${cells.join('')}</tr>`;
           }).join('')
-        : `<tr><td colspan="${escapeHtml(String(headerCols.length || 1))}" style="padding:10px; opacity:.85;">No rows found for this import.</td></tr>`;
+        : `<tr><td colspan="${escapeHtml(String(hdr.length || 1))}" style="padding:10px; opacity:.85;">No rows found for this import.</td></tr>`;
 
       return `
         ${commonWrapStyle}
@@ -44320,76 +44377,35 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
     };
 
     const mkTableNhspPretty = () => {
-      // Determine which indices are used in the “pretty” view
-      const used = new Set([
-        nhspIdx.date, nhspIdx.ref, nhspIdx.workerName, nhspIdx.workerId, nhspIdx.trust, nhspIdx.ward, nhspIdx.assignment,
-        nhspIdx.cStart, nhspIdx.cEnd, nhspIdx.cBreak, nhspIdx.cTotal,
-        nhspIdx.aStart, nhspIdx.aEnd, nhspIdx.aBreak, nhspIdx.aTotal,
-        nhspIdx.commission, nhspIdx.totalCost
-      ].filter(i => Number.isFinite(i) && i >= 0));
-
-      // Any extra columns (added by client/import variation) are appended to the right
-      const extras = [];
-      for (let i = 0; i < headerCols.length; i++) {
-        if (!used.has(i)) {
-          const name = String(headerCols[i] || '').trim() || `Extra ${i + 1}`;
-          extras.push({ idx: i, name, nameNorm: normH(name) });
-        }
-      }
-
       const style = `
         <style>
-          .ts-import-wrap { max-height:520px; overflow:auto; border:1px solid var(--line); border-radius:8px; }
+          .ts-import-wrap {
+            max-height:520px;
+            overflow:auto;
+            border:1px solid var(--line);
+            border-radius:8px;
+            background:#000;
+          }
           table.ts-import-table { width:100%; border-collapse:collapse; }
-          table.ts-import-table th, table.ts-import-table td { padding:6px 8px; border-bottom:1px solid rgba(255,255,255,.08); vertical-align:top; }
-          table.ts-import-table thead th { background:#0f0f0f; position:sticky; z-index:5; border-bottom:1px solid var(--line); }
-          table.ts-import-table thead tr:nth-child(1) th { top:0; z-index:6; }
+          table.ts-import-table th, table.ts-import-table td {
+            padding:6px 8px;
+            vertical-align:top;
+            border:1px solid rgba(255,255,255,.16); /* ✅ borders around every cell */
+          }
+          table.ts-import-table thead th {
+            background:#0f0f0f;
+            position:sticky;
+            z-index:5;
+            border:1px solid rgba(255,255,255,.22);
+          }
+          table.ts-import-table thead tr:nth-child(1) th { top:0;   z-index:6; }
           table.ts-import-table thead tr:nth-child(2) th { top:32px; z-index:5; }
           table.ts-import-table td { white-space:normal; }
+          .ts-import-center { text-align:center; }
         </style>
       `;
 
-      const extraHeaderTh = extras.map(ex => `<th rowspan="2">${escapeHtml(ex.name)}</th>`).join('');
-
-      const head = `
-        <thead>
-          <tr>
-            <th rowspan="2">Date</th>
-            <th rowspan="2">Ref Num</th>
-            <th rowspan="2">Agency Worker Name</th>
-            <th rowspan="2">Agency Worker Unique Id</th>
-            <th rowspan="2">Trust</th>
-            <th rowspan="2">Ward</th>
-            <th rowspan="2">Assignment</th>
-            <th colspan="4" style="text-align:center;">Contract</th>
-            <th colspan="4" style="text-align:center;">Actual</th>
-            <th rowspan="2">Commission</th>
-            <th rowspan="2">Total Cost</th>
-            ${extraHeaderTh}
-          </tr>
-          <tr>
-            <th>Start</th><th>End</th><th>Break In Minutes</th><th>Total</th>
-            <th>Start</th><th>End</th><th>Break In Minutes</th><th>Total</th>
-          </tr>
-        </thead>
-      `;
-
-      const fmtExtra = (ex, v) => {
-        const hn = ex.nameNorm || '';
-        if (hn.includes('commission') || hn.includes('total cost') || (hn.includes('cost') && !hn.includes('cost centre'))) return fmtMoney2(v);
-        if (hn.includes('break') && hn.includes('minute')) return fmtInt(v);
-        if (hn.includes('date')) {
-          const d = normalizeDateDisplayAndSort(null, v);
-          return d.display;
-        }
-        if (hn === 'start' || hn === 'end' || hn === 'total' || hn.includes(' start') || hn.includes(' end') || hn.includes(' total')) {
-          const n = Number(v);
-          if (Number.isFinite(n) && n >= 0 && n <= 2) return fmtDayFractionToHHMM(v);
-          const s = String(v ?? '').trim();
-          if (/^\d{1,2}:\d{2}$/.test(s)) return fmtDayFractionToHHMM(s);
-        }
-        return String(v ?? '');
-      };
+      const get = (raw, i) => (i != null && i >= 0) ? raw[i] : null;
 
       const body = rowsSorted.length
         ? rowsSorted.map((x) => {
@@ -44402,39 +44418,69 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
               return d.display;
             })();
 
-            const get = (i) => (i != null && i >= 0) ? raw[i] : null;
+            const refNum     = String(get(raw, nhspIdx.ref) ?? '');
+            const workerName = String(get(raw, nhspIdx.workerName) ?? '');
+            const workerId   = String(get(raw, nhspIdx.workerId) ?? '');
+            const trust      = String(get(raw, nhspIdx.trust) ?? '');
+            const ward       = String(get(raw, nhspIdx.ward) ?? '');
+            const assignment = String(get(raw, nhspIdx.assignment) ?? '');
+
+            const cStart = fmtDayFractionToHHMM(get(raw, nhspIdx.cStart));
+            const cEnd   = fmtDayFractionToHHMM(get(raw, nhspIdx.cEnd));
+            const cBr    = fmtInt(get(raw, nhspIdx.cBreak));
+            const cTot   = fmtDayFractionToHHMM(get(raw, nhspIdx.cTotal));
+
+            const aStart = fmtDayFractionToHHMM(get(raw, nhspIdx.aStart));
+            const aEnd   = fmtDayFractionToHHMM(get(raw, nhspIdx.aEnd));
+            const aBr    = fmtInt(get(raw, nhspIdx.aBreak));
+            const aTot   = fmtDayFractionToHHMM(get(raw, nhspIdx.aTotal));
+
+            const commission = fmtMoney2(get(raw, nhspIdx.commission));
+            const totalCost  = fmtMoney2(get(raw, nhspIdx.totalCost));
 
             const cells = [
               dateDisp,
-              String(get(nhspIdx.ref) ?? ''),
-              String(get(nhspIdx.workerName) ?? ''),
-              String(get(nhspIdx.workerId) ?? ''),
-              String(get(nhspIdx.trust) ?? ''),
-              String(get(nhspIdx.ward) ?? ''),
-              String(get(nhspIdx.assignment) ?? ''),
-
-              fmtDayFractionToHHMM(get(nhspIdx.cStart)),
-              fmtDayFractionToHHMM(get(nhspIdx.cEnd)),
-              fmtInt(get(nhspIdx.cBreak)),
-              fmtDayFractionToHHMM(get(nhspIdx.cTotal)),
-
-              fmtDayFractionToHHMM(get(nhspIdx.aStart)),
-              fmtDayFractionToHHMM(get(nhspIdx.aEnd)),
-              fmtInt(get(nhspIdx.aBreak)),
-              fmtDayFractionToHHMM(get(nhspIdx.aTotal)),
-
-              fmtMoney2(get(nhspIdx.commission)),
-              fmtMoney2(get(nhspIdx.totalCost))
+              refNum,
+              workerName,
+              workerId,
+              trust,
+              ward,
+              assignment,
+              cStart, cEnd, cBr, cTot,
+              aStart, aEnd, aBr, aTot,
+              commission,
+              totalCost
             ];
-
-            // Append extras
-            for (const ex of extras) {
-              cells.push(fmtExtra(ex, get(ex.idx)));
-            }
 
             return `<tr>${cells.map(v => `<td>${escapeHtml(String(v ?? ''))}</td>`).join('')}</tr>`;
           }).join('')
-        : `<tr><td colspan="${String(17 + (headerCols.length ? Math.max(0, headerCols.length - used.size) : 0))}" style="padding:10px; opacity:.85;">No rows found for this import.</td></tr>`;
+        : `<tr><td colspan="17" style="padding:10px; opacity:.85;">No rows found for this import.</td></tr>`;
+
+      // ✅ EXACT layout requested:
+      // Contract / Actual grouped headings, and subcolumns Start/End/Break/Total beneath each.
+      const head = `
+        <thead>
+          <tr>
+            <th rowspan="2">Date</th>
+            <th rowspan="2">Ref Num</th>
+            <th rowspan="2">Agency Worker Name</th>
+            <th rowspan="2">Agency Worker Unique Id</th>
+            <th rowspan="2">Trust</th>
+            <th rowspan="2">Ward</th>
+            <th rowspan="2">Assignment</th>
+
+            <th colspan="4" class="ts-import-center">Contract</th>
+            <th colspan="4" class="ts-import-center">Actual</th>
+
+            <th rowspan="2">Commission</th>
+            <th rowspan="2">Total Cost</th>
+          </tr>
+          <tr>
+            <th>Start</th><th>End</th><th>Break In Minutes</th><th>Total</th>
+            <th>Start</th><th>End</th><th>Break In Minutes</th><th>Total</th>
+          </tr>
+        </thead>
+      `;
 
       return `
         ${style}
@@ -44448,13 +44494,11 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
     };
 
     const mkTable = () => {
-      // If the NHSP “pretty” layout can’t be safely derived, fall back to generic.
       if (nhspIdx) return mkTableNhspPretty();
       return mkTableGeneric();
     };
 
     const title = `Import evidence ${String(tsIdForPrint).slice(0, 8)}…`;
-
     const dlBtnId = `tsImportDl_${Date.now()}_${Math.random().toString(36).slice(2)}`;
 
     const downloadBtn = downloadKey
