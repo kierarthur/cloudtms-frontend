@@ -44207,7 +44207,7 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
   };
 
   // ─────────────────────────────────────────────────────────────
-  // IMPORT TABLE preview
+  // IMPORT TABLE preview (supports NHSP “pretty” + generic fallback)
   // ─────────────────────────────────────────────────────────────
   if (previewMode === 'IMPORT_TABLE') {
     const importId =
@@ -44240,8 +44240,24 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
     const imports = Array.isArray(json.imports) ? json.imports : [];
     const imp = imports.find(x => String(x?.import_id) === String(importId)) || imports[0] || null;
 
-    const headerCols = Array.isArray(imp?.header_columns) ? imp.header_columns : [];
+    const headerColsRaw = Array.isArray(imp?.header_columns) ? imp.header_columns : [];
     const rows = Array.isArray(imp?.rows) ? imp.rows : [];
+
+    // If headers are missing, derive generic column names from first row
+    const headerCols = (() => {
+      const hc = headerColsRaw
+        .map(x => String(x ?? '').trim())
+        .filter(Boolean);
+
+      if (hc.length) return hc;
+
+      const raw0 = Array.isArray(rows?.[0]?.raw_columns) ? rows[0].raw_columns : [];
+      const n = Array.isArray(raw0) ? raw0.length : 0;
+      if (n > 0) {
+        return Array.from({ length: n }, (_, i) => `Column ${i + 1}`);
+      }
+      return [];
+    })();
 
     const downloadKeyRaw =
       (evidenceItem.download_storage_key != null && String(evidenceItem.download_storage_key).trim())
@@ -44252,57 +44268,475 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
 
     const downloadKey = downloadKeyRaw.replace(/^\/+/, '').trim();
 
-    const mkTable = () => {
-      const headHtml = headerCols.length
-        ? headerCols.map(c => `<th style="text-align:left; padding:6px 8px; border-bottom:1px solid var(--line);">${escapeHtml(String(c))}</th>`).join('')
-        : `<th style="text-align:left; padding:6px 8px; border-bottom:1px solid var(--line);">Row</th>`;
+    // ── shared formatting helpers ───────────────────────────────
+    const normH = (s) => String(s || '').trim().toLowerCase().replace(/\s+/g, ' ');
+    const headersNorm = headerCols.map(normH);
 
-      const bodyHtml = rows.length
-        ? rows.map((r, idx) => {
-            const raw = Array.isArray(r?.raw_columns) ? r.raw_columns : null;
-            const cells = raw
-              ? raw.map(v => `<td style="padding:6px 8px; border-bottom:1px solid rgba(255,255,255,.08);">${escapeHtml(String(v ?? ''))}</td>`).join('')
-              : `<td style="padding:6px 8px; border-bottom:1px solid rgba(255,255,255,.08);">${escapeHtml(JSON.stringify(r?.payload || r || {}))}</td>`;
+    const fmtYmdToDmy = (ymd) => {
+      const s = String(ymd || '').trim();
+      const m = s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+      if (!m) return s || '—';
+      return `${m[3]}/${m[2]}/${m[1]}`;
+    };
 
-            return `<tr>${cells}</tr>`;
+    const parseDmyToMs = (dmy) => {
+      const s = String(dmy || '').trim();
+      const m = s.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+      if (!m) return null;
+      const dd = Number(m[1]), mm = Number(m[2]), yy = Number(m[3]);
+      if (!Number.isFinite(dd) || !Number.isFinite(mm) || !Number.isFinite(yy)) return null;
+      const ms = Date.UTC(yy, mm - 1, dd, 0, 0, 0, 0);
+      return Number.isFinite(ms) ? ms : null;
+    };
+
+    const parseYmdToMs = (ymd) => {
+      const s = String(ymd || '').trim();
+      const m = s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+      if (!m) return null;
+      const yy = Number(m[1]), mm = Number(m[2]), dd = Number(m[3]);
+      if (!Number.isFinite(dd) || !Number.isFinite(mm) || !Number.isFinite(yy)) return null;
+      const ms = Date.UTC(yy, mm - 1, dd, 0, 0, 0, 0);
+      return Number.isFinite(ms) ? ms : null;
+    };
+
+    // Excel time/duration fractions (0.375 = 09:00, 0.3125 = 07:30)
+    const fmtDayFractionToHHMM = (v) => {
+      const n = Number(v);
+      if (!Number.isFinite(n)) {
+        const s = String(v ?? '').trim();
+        if (/^\d{1,2}:\d{2}$/.test(s)) {
+          const [h, m] = s.split(':');
+          return `${String(Number(h) || 0).padStart(2, '0')}:${String(Number(m) || 0).padStart(2, '0')}`;
+        }
+        return String(v ?? '');
+      }
+      // treat 0..2 as day fractions (covers durations up to 48h)
+      if (n < 0 || n > 2) return String(v ?? '');
+      const mins = Math.round(n * 1440);
+      const hh = Math.floor((mins % 1440) / 60);
+      const mm = mins % 60;
+      return `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
+    };
+
+    const parseTimeToSortMinutes = (v) => {
+      const n = Number(v);
+      if (Number.isFinite(n) && n >= 0 && n <= 2) return Math.round(n * 1440);
+
+      const s = String(v ?? '').trim();
+      const m = s.match(/^(\d{1,2}):(\d{2})$/);
+      if (!m) return null;
+      const hh = Number(m[1]);
+      const mm = Number(m[2]);
+      if (!Number.isFinite(hh) || !Number.isFinite(mm)) return null;
+      if (hh < 0 || hh > 47 || mm < 0 || mm > 59) return null;
+      return hh * 60 + mm;
+    };
+
+    const fmtMoney2 = (v) => {
+      const n = Number(v);
+      if (!Number.isFinite(n)) return String(v ?? '');
+      return n.toFixed(2);
+    };
+
+    const fmtInt = (v) => {
+      const n = Number(v);
+      if (!Number.isFinite(n)) return String(v ?? '');
+      return String(Math.round(n));
+    };
+
+    const normalizeDateDisplayAndSort = (payload, raw0) => {
+      // Prefer parsed fields
+      const ymd =
+        payload?.work_date ? String(payload.work_date).trim() :
+        payload?.date_local ? String(payload.date_local).trim() :
+        payload?.date ? String(payload.date).trim() :
+        '';
+
+      let ms = parseYmdToMs(ymd);
+      if (ms != null) return { display: fmtYmdToDmy(ymd), ms };
+
+      // If raw0 is dd/mm/yyyy
+      const rawS = String(raw0 ?? '').trim();
+      ms = parseDmyToMs(rawS);
+      if (ms != null) return { display: rawS, ms };
+
+      // If raw0 is yyyy-mm-dd
+      ms = parseYmdToMs(rawS);
+      if (ms != null) return { display: fmtYmdToDmy(rawS), ms };
+
+      // Excel serial date (rough)
+      const n = Number(raw0);
+      if (Number.isFinite(n) && n >= 20000) {
+        // Excel epoch: 1899-12-30
+        const base = Date.UTC(1899, 11, 30, 0, 0, 0, 0);
+        const ms2 = base + Math.round(n) * 86400000;
+        if (Number.isFinite(ms2)) {
+          const d = new Date(ms2);
+          const dd = String(d.getUTCDate()).padStart(2, '0');
+          const mm = String(d.getUTCMonth() + 1).padStart(2, '0');
+          const yy = String(d.getUTCFullYear());
+          return { display: `${dd}/${mm}/${yy}`, ms: ms2 };
+        }
+      }
+
+      return { display: rawS || '—', ms: null };
+    };
+
+    // ── layout detection (NHSP “pretty” vs generic) ──────────────
+    const hasAll = (need) => need.every(t => headersNorm.some(h => h === t || h.includes(t)));
+    const nhspNeed = [
+      'ref num',
+      'agency worker name',
+      'agency worker unique id',
+      'trust',
+      'ward',
+      'assignment',
+      'commission',
+      'total cost'
+    ];
+    const looksLikeNhsp = hasAll(nhspNeed) && headersNorm.some(h => h === 'contract') && headersNorm.some(h => h === 'actual');
+
+    // Find "assignment" index, then find 1st/2nd Start/End/Break/Total after that (handles extra columns)
+    const findFirstIdx = (pred) => {
+      for (let i = 0; i < headersNorm.length; i++) if (pred(headersNorm[i], headerCols[i], i)) return i;
+      return -1;
+    };
+    const findAllIdx = (pred, startAt = 0) => {
+      const out = [];
+      for (let i = Math.max(0, startAt); i < headersNorm.length; i++) {
+        if (pred(headersNorm[i], headerCols[i], i)) out.push(i);
+      }
+      return out;
+    };
+
+    const idxDate = findFirstIdx((hn) => hn === 'date' || hn.startsWith('date'));
+    const idxAssign = findFirstIdx((hn) => hn === 'assignment');
+    const scanFrom = (idxAssign >= 0 ? idxAssign + 1 : 0);
+
+    const idxStartAll = findAllIdx((hn) => hn === 'start', scanFrom);
+    const idxEndAll   = findAllIdx((hn) => hn === 'end',   scanFrom);
+    const idxBreakAll = findAllIdx((hn) => hn === 'break in minutes' || (hn.includes('break') && hn.includes('minute')), scanFrom);
+    const idxTotalAll = findAllIdx((hn) => hn === 'total', scanFrom);
+
+    const idxCommission = findFirstIdx((hn) => hn === 'commission' || hn.includes('commission'));
+    const idxTotalCost  = findFirstIdx((hn) => hn === 'total cost' || hn.includes('total cost'));
+
+    const canPrettyNhsp =
+      looksLikeNhsp &&
+      idxAssign >= 0 &&
+      idxStartAll.length >= 2 &&
+      idxEndAll.length >= 2 &&
+      idxBreakAll.length >= 2 &&
+      idxTotalAll.length >= 2 &&
+      idxCommission >= 0 &&
+      idxTotalCost >= 0;
+
+    // Decide indices for NHSP pretty (by occurrence)
+    const nhspIdx = canPrettyNhsp ? {
+      date: (idxDate >= 0 ? idxDate : 0),
+      ref: findFirstIdx((hn) => hn === 'ref num' || hn.includes('ref num')),
+      workerName: findFirstIdx((hn) => hn === 'agency worker name' || hn.includes('agency worker name')),
+      workerId: findFirstIdx((hn) => hn === 'agency worker unique id' || hn.includes('agency worker unique id')),
+      trust: findFirstIdx((hn) => hn === 'trust' || hn.includes('trust')),
+      ward: findFirstIdx((hn) => hn === 'ward' || hn.includes('ward')),
+      assignment: idxAssign,
+
+      cStart: idxStartAll[0],
+      cEnd:   idxEndAll[0],
+      cBreak: idxBreakAll[0],
+      cTotal: idxTotalAll[0],
+
+      aStart: idxStartAll[1],
+      aEnd:   idxEndAll[1],
+      aBreak: idxBreakAll[1],
+      aTotal: idxTotalAll[1],
+
+      commission: idxCommission,
+      totalCost:  idxTotalCost
+    } : null;
+
+    // For generic layout, attempt to locate date + actual start for sorting if possible
+    const genericIdx = (() => {
+      const d = idxDate >= 0 ? idxDate : findFirstIdx((hn) => hn.includes('date'));
+      // actual start: prefer "actual start", else if "start" appears >=2, pick second, else first "start"
+      const aStart =
+        findFirstIdx((hn) => hn.includes('actual start')) >= 0
+          ? findFirstIdx((hn) => hn.includes('actual start'))
+          : (idxStartAll.length >= 2 ? idxStartAll[1] : (idxStartAll.length ? idxStartAll[0] : -1));
+      return { date: d, aStart };
+    })();
+
+    // Sort rows oldest->newest, tie by actual start time
+    const rowsSorted = rows
+      .map((r, idx) => {
+        const payload = (r && typeof r.payload === 'object' && r.payload) ? r.payload : {};
+        const raw = Array.isArray(r?.raw_columns) ? r.raw_columns : [];
+
+        const dateColIdx = (nhspIdx ? nhspIdx.date : (genericIdx.date >= 0 ? genericIdx.date : 0));
+        const d = normalizeDateDisplayAndSort(payload, raw[dateColIdx]);
+
+        const aStartIdx = (nhspIdx ? nhspIdx.aStart : genericIdx.aStart);
+        const actualStartSort = (aStartIdx != null && aStartIdx >= 0) ? parseTimeToSortMinutes(raw[aStartIdx]) : null;
+
+        return {
+          _idx: idx,
+          _dateMs: d.ms,
+          _dateDisp: d.display,
+          _actualStartSort: (actualStartSort == null ? 999999 : actualStartSort),
+          _raw: raw,
+          _payload: payload
+        };
+      })
+      .sort((a, b) => {
+        const am = (a._dateMs == null) ? Number.POSITIVE_INFINITY : a._dateMs;
+        const bm = (b._dateMs == null) ? Number.POSITIVE_INFINITY : b._dateMs;
+        if (am !== bm) return am - bm;
+        if (a._actualStartSort !== b._actualStartSort) return a._actualStartSort - b._actualStartSort;
+        return a._idx - b._idx;
+      });
+
+    // ── table renderers ─────────────────────────────────────────
+    const commonWrapStyle = `
+      <style>
+        .ts-import-wrap { max-height:520px; overflow:auto; border:1px solid var(--line); border-radius:8px; }
+        table.ts-import-table { width:100%; border-collapse:collapse; }
+        table.ts-import-table th, table.ts-import-table td { padding:6px 8px; border-bottom:1px solid rgba(255,255,255,.08); vertical-align:top; }
+        table.ts-import-table td { white-space:normal; }
+        table.ts-import-table thead th { background:#0f0f0f; position:sticky; z-index:5; border-bottom:1px solid var(--line); }
+      </style>
+    `;
+
+    const mkTableGeneric = () => {
+      const hdr = headerCols.length ? headerCols : Array.from({ length: (rowsSorted[0]?._raw?.length || 0) }, (_, i) => `Column ${i + 1}`);
+      const hdrNorm = hdr.map(normH);
+
+      // Sticky single header row
+      const head = `
+        <thead>
+          <tr>
+            ${hdr.map((h) => `<th style="top:0; z-index:6; text-align:left;">${escapeHtml(String(h))}</th>`).join('')}
+          </tr>
+        </thead>
+      `;
+
+      const fmtCell = (i, v, hn) => {
+        const h = hn || '';
+        // date-like
+        if (h.includes('date')) {
+          const payload = null;
+          const d = normalizeDateDisplayAndSort(payload, v);
+          return d.display;
+        }
+        // money-like
+        if (h.includes('commission') || h.includes('total cost') || (h.includes('cost') && !h.includes('cost centre'))) {
+          return fmtMoney2(v);
+        }
+        // break minutes
+        if (h.includes('break') && h.includes('minute')) {
+          return fmtInt(v);
+        }
+        // time-like columns (start/end/total in Contract/Actual)
+        if (h === 'start' || h === 'end' || h === 'total' || h.includes(' start') || h.includes(' end') || h.includes(' total')) {
+          const n = Number(v);
+          if (Number.isFinite(n) && n >= 0 && n <= 2) return fmtDayFractionToHHMM(v);
+          const s = String(v ?? '').trim();
+          if (/^\d{1,2}:\d{2}$/.test(s)) return fmtDayFractionToHHMM(s);
+        }
+        return String(v ?? '');
+      };
+
+      const body = rowsSorted.length
+        ? rowsSorted.map((x) => {
+            const raw = Array.isArray(x._raw) ? x._raw : [];
+            // render exactly as many columns as headers (or raw length if headers missing)
+            const nCols = hdr.length ? hdr.length : raw.length;
+            const cells = [];
+            for (let i = 0; i < nCols; i++) {
+              const v = raw[i];
+              const hn = hdrNorm[i] || '';
+              cells.push(`<td>${escapeHtml(fmtCell(i, v, hn))}</td>`);
+            }
+            return `<tr>${cells.join('')}</tr>`;
           }).join('')
-        : `<tr><td style="padding:10px; opacity:.85;">No rows found for this import.</td></tr>`;
+        : `<tr><td colspan="${escapeHtml(String(headerCols.length || 1))}" style="padding:10px; opacity:.85;">No rows found for this import.</td></tr>`;
 
       return `
-        <div class="scrollable-evidence" style="max-height:520px; overflow:auto; border:1px solid var(--line); border-radius:8px;">
-          <table style="width:100%; border-collapse:collapse;">
-            <thead><tr>${headHtml}</tr></thead>
-            <tbody>${bodyHtml}</tbody>
+        ${commonWrapStyle}
+        <div class="ts-import-wrap">
+          <table class="ts-import-table">
+            ${head}
+            <tbody>${body}</tbody>
           </table>
         </div>
       `;
     };
 
+    const mkTableNhspPretty = () => {
+      // Determine which indices are used in the “pretty” view
+      const used = new Set([
+        nhspIdx.date, nhspIdx.ref, nhspIdx.workerName, nhspIdx.workerId, nhspIdx.trust, nhspIdx.ward, nhspIdx.assignment,
+        nhspIdx.cStart, nhspIdx.cEnd, nhspIdx.cBreak, nhspIdx.cTotal,
+        nhspIdx.aStart, nhspIdx.aEnd, nhspIdx.aBreak, nhspIdx.aTotal,
+        nhspIdx.commission, nhspIdx.totalCost
+      ].filter(i => Number.isFinite(i) && i >= 0));
+
+      // Any extra columns (added by client/import variation) are appended to the right
+      const extras = [];
+      for (let i = 0; i < headerCols.length; i++) {
+        if (!used.has(i)) {
+          const name = String(headerCols[i] || '').trim() || `Extra ${i + 1}`;
+          extras.push({ idx: i, name, nameNorm: normH(name) });
+        }
+      }
+
+      const style = `
+        <style>
+          .ts-import-wrap { max-height:520px; overflow:auto; border:1px solid var(--line); border-radius:8px; }
+          table.ts-import-table { width:100%; border-collapse:collapse; }
+          table.ts-import-table th, table.ts-import-table td { padding:6px 8px; border-bottom:1px solid rgba(255,255,255,.08); vertical-align:top; }
+          table.ts-import-table thead th { background:#0f0f0f; position:sticky; z-index:5; border-bottom:1px solid var(--line); }
+          table.ts-import-table thead tr:nth-child(1) th { top:0; z-index:6; }
+          table.ts-import-table thead tr:nth-child(2) th { top:32px; z-index:5; }
+          table.ts-import-table td { white-space:normal; }
+        </style>
+      `;
+
+      const extraHeaderTh = extras.map(ex => `<th rowspan="2">${escapeHtml(ex.name)}</th>`).join('');
+
+      const head = `
+        <thead>
+          <tr>
+            <th rowspan="2">Date</th>
+            <th rowspan="2">Ref Num</th>
+            <th rowspan="2">Agency Worker Name</th>
+            <th rowspan="2">Agency Worker Unique Id</th>
+            <th rowspan="2">Trust</th>
+            <th rowspan="2">Ward</th>
+            <th rowspan="2">Assignment</th>
+            <th colspan="4" style="text-align:center;">Contract</th>
+            <th colspan="4" style="text-align:center;">Actual</th>
+            <th rowspan="2">Commission</th>
+            <th rowspan="2">Total Cost</th>
+            ${extraHeaderTh}
+          </tr>
+          <tr>
+            <th>Start</th><th>End</th><th>Break In Minutes</th><th>Total</th>
+            <th>Start</th><th>End</th><th>Break In Minutes</th><th>Total</th>
+          </tr>
+        </thead>
+      `;
+
+      const fmtExtra = (ex, v) => {
+        const hn = ex.nameNorm || '';
+        if (hn.includes('commission') || hn.includes('total cost') || (hn.includes('cost') && !hn.includes('cost centre'))) return fmtMoney2(v);
+        if (hn.includes('break') && hn.includes('minute')) return fmtInt(v);
+        if (hn.includes('date')) {
+          const d = normalizeDateDisplayAndSort(null, v);
+          return d.display;
+        }
+        if (hn === 'start' || hn === 'end' || hn === 'total' || hn.includes(' start') || hn.includes(' end') || hn.includes(' total')) {
+          const n = Number(v);
+          if (Number.isFinite(n) && n >= 0 && n <= 2) return fmtDayFractionToHHMM(v);
+          const s = String(v ?? '').trim();
+          if (/^\d{1,2}:\d{2}$/.test(s)) return fmtDayFractionToHHMM(s);
+        }
+        return String(v ?? '');
+      };
+
+      const body = rowsSorted.length
+        ? rowsSorted.map((x) => {
+            const raw = Array.isArray(x._raw) ? x._raw : [];
+            const payload = (x._payload && typeof x._payload === 'object') ? x._payload : {};
+
+            const dateDisp = (() => {
+              const raw0 = raw[nhspIdx.date];
+              const d = normalizeDateDisplayAndSort(payload, raw0);
+              return d.display;
+            })();
+
+            const get = (i) => (i != null && i >= 0) ? raw[i] : null;
+
+            const cells = [
+              dateDisp,
+              String(get(nhspIdx.ref) ?? ''),
+              String(get(nhspIdx.workerName) ?? ''),
+              String(get(nhspIdx.workerId) ?? ''),
+              String(get(nhspIdx.trust) ?? ''),
+              String(get(nhspIdx.ward) ?? ''),
+              String(get(nhspIdx.assignment) ?? ''),
+
+              fmtDayFractionToHHMM(get(nhspIdx.cStart)),
+              fmtDayFractionToHHMM(get(nhspIdx.cEnd)),
+              fmtInt(get(nhspIdx.cBreak)),
+              fmtDayFractionToHHMM(get(nhspIdx.cTotal)),
+
+              fmtDayFractionToHHMM(get(nhspIdx.aStart)),
+              fmtDayFractionToHHMM(get(nhspIdx.aEnd)),
+              fmtInt(get(nhspIdx.aBreak)),
+              fmtDayFractionToHHMM(get(nhspIdx.aTotal)),
+
+              fmtMoney2(get(nhspIdx.commission)),
+              fmtMoney2(get(nhspIdx.totalCost))
+            ];
+
+            // Append extras
+            for (const ex of extras) {
+              cells.push(fmtExtra(ex, get(ex.idx)));
+            }
+
+            return `<tr>${cells.map(v => `<td>${escapeHtml(String(v ?? ''))}</td>`).join('')}</tr>`;
+          }).join('')
+        : `<tr><td colspan="${String(17 + (headerCols.length ? Math.max(0, headerCols.length - used.size) : 0))}" style="padding:10px; opacity:.85;">No rows found for this import.</td></tr>`;
+
+      return `
+        ${style}
+        <div class="ts-import-wrap">
+          <table class="ts-import-table">
+            ${head}
+            <tbody>${body}</tbody>
+          </table>
+        </div>
+      `;
+    };
+
+    const mkTable = () => {
+      // If the NHSP “pretty” layout can’t be safely derived, fall back to generic.
+      if (nhspIdx) return mkTableNhspPretty();
+      return mkTableGeneric();
+    };
+
     const title = `Import evidence ${String(tsIdForPrint).slice(0, 8)}…`;
+
+    const dlBtnId = `tsImportDl_${Date.now()}_${Math.random().toString(36).slice(2)}`;
 
     const downloadBtn = downloadKey
       ? `<button type="button"
+                 id="${dlBtnId}"
                  class="pill"
-                 style="cursor:pointer;border:1px solid var(--line);background:transparent;color:inherit;padding:6px 10px;border-radius:999px;"
-                 onclick="window.__tsEvidenceDownload && window.__tsEvidenceDownload('${escapeHtml(evidenceId)}')">
+                 style="cursor:pointer;border:1px solid var(--line);background:transparent;color:inherit;padding:6px 10px;border-radius:999px;">
            Download full file
          </button>`
       : `<span class="mini" style="opacity:.85;">No downloadable import file key</span>`;
 
-    // ✅ UI: remove Import ID (internal), show row count instead
+    const rowsMatched = Array.isArray(rowsSorted) ? rowsSorted.length : 0;
+    const sourceLabel = String(imp?.source_system || evidenceItem.kind || 'IMPORT');
+
     const bodyHtml = `
       <div class="tabc">
         <div class="card">
           <div class="row">
             <label>Source</label>
             <div class="controls">
-              <span class="mini">${escapeHtml(String(imp?.source_system || evidenceItem.kind || 'IMPORT'))}</span>
+              <span class="mini">${escapeHtml(sourceLabel)}</span>
+              <div class="mini" style="opacity:.75; margin-top:2px;">
+                ${nhspIdx ? 'NHSP view' : 'Generic view'}
+              </div>
             </div>
           </div>
           <div class="row">
             <label>Rows matched</label>
             <div class="controls">
-              <span class="mini">${escapeHtml(String(Array.isArray(rows) ? rows.length : 0))}</span>
+              <span class="mini">${escapeHtml(String(rowsMatched))}</span>
             </div>
           </div>
           <div class="row">
@@ -44339,6 +44773,26 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
       undefined,
       { kind: 'timesheet-evidence-viewer', noParentGate: true, forceEdit: true }
     );
+
+    // Wire download (best-effort)
+    try {
+      if (downloadKey) {
+        const wire = async () => {
+          const btn = document.getElementById(dlBtnId);
+          if (!btn || btn.__wired) return;
+          btn.__wired = true;
+          btn.addEventListener('click', async () => {
+            try {
+              const u = await presignDownload(downloadKey);
+              window.open(u, '_blank', 'noopener,noreferrer');
+            } catch (e) {
+              try { window.__toast && window.__toast(e?.message || 'Download failed'); } catch {}
+            }
+          });
+        };
+        try { requestAnimationFrame(() => requestAnimationFrame(wire)); } catch { wire(); }
+      }
+    } catch {}
 
     GE();
     return;
