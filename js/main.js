@@ -28405,75 +28405,147 @@ if (this.entity === 'timesheets' && k === 'evidence') {
         if (LOGM) LT('drop-anywhere wired on evidence tab root');
       }
 
-      // 3) Wire View buttons
-      const viewBtns = root.querySelectorAll('button[data-evidence-view]');
-      if (LOGM) LT('wiring evidence view buttons', { count: viewBtns.length });
+     // 3) Wire View buttons
+const viewBtns = root.querySelectorAll('button[data-evidence-view]');
+if (LOGM) LT('wiring evidence view buttons', { count: viewBtns.length });
 
-      viewBtns.forEach(btn => {
-        if (btn.__tsEvViewWired) return;
-        btn.__tsEvViewWired = true;
+viewBtns.forEach(btn => {
+  if (btn.__tsEvViewWired) return;
+  btn.__tsEvViewWired = true;
 
-        btn.addEventListener('click', async (ev) => {
-          ev.preventDefault();
+  btn.addEventListener('click', async (ev) => {
+    ev.preventDefault();
 
-          const id = btn.getAttribute('data-evidence-view') || '';
-          if (!id) return;
+    const id = btn.getAttribute('data-evidence-view') || '';
+    if (!id) return;
 
-          if (typeof openTimesheetEvidenceViewerExisting !== 'function') {
-            alert('Evidence viewer is not available yet (openTimesheetEvidenceViewerExisting missing).');
-            return;
-          }
+    // Find evidence item from modal state
+    const list = Array.isArray(window.modalCtx?.timesheetState?.evidence)
+      ? window.modalCtx.timesheetState.evidence
+      : [];
 
-          // Find evidence item from modal state
-          const list = Array.isArray(window.modalCtx?.timesheetState?.evidence)
-            ? window.modalCtx.timesheetState.evidence
-            : [];
+    let item = list.find(x => x && String(x.id) === String(id)) || null;
 
-          let item = list.find(x => x && String(x.id) === String(id)) || null;
+    // If not found, attempt a refresh once (best-effort)
+    const idNowForRefresh =
+      window.modalCtx?.data?.timesheet_id ||
+      window.modalCtx?.data?.id ||
+      tsId ||
+      null;
 
-          // If not found, attempt a refresh once (best-effort)
-          if (!item && tsId && typeof refreshTimesheetEvidenceIntoModalState === 'function') {
-            try {
-              await refreshTimesheetEvidenceIntoModalState(tsId);
-              const list2 = Array.isArray(window.modalCtx?.timesheetState?.evidence)
-                ? window.modalCtx.timesheetState.evidence
-                : [];
-              item = list2.find(x => x && String(x.id) === String(id)) || null;
-            } catch {}
-          }
+    if (!item && idNowForRefresh && typeof refreshTimesheetEvidenceIntoModalState === 'function') {
+      try {
+        await refreshTimesheetEvidenceIntoModalState(idNowForRefresh);
+        const list2 = Array.isArray(window.modalCtx?.timesheetState?.evidence)
+          ? window.modalCtx.timesheetState.evidence
+          : [];
+        item = list2.find(x => x && String(x.id) === String(id)) || null;
+      } catch {}
+    }
 
-          if (!item) {
-            alert('Evidence item not found.');
-            return;
-          }
+    if (!item) {
+      alert('Evidence item not found.');
+      return;
+    }
 
-          try {
-            await openTimesheetEvidenceViewerExisting(item);
-          } catch (err) {
-            if (LOGM) console.warn('[TS][EVIDENCE] view failed', err);
-            alert(err?.message || 'Failed to open evidence viewer.');
-          }
-        });
-      });
+    // ✅ NEW: branch by preview_mode
+    const pm = String(item.preview_mode || item.preview_kind || '').trim().toUpperCase();
+
+    try {
+      if (pm === 'IMPORT_TABLE') {
+        if (typeof openTimesheetEvidenceViewerImportTable !== 'function') {
+          alert('Import viewer missing (openTimesheetEvidenceViewerImportTable).');
+          return;
+        }
+        await openTimesheetEvidenceViewerImportTable(item);
+        return;
+      }
+
+      if (pm === 'SIGNATURES') {
+        if (typeof openTimesheetEvidenceViewerSignatures !== 'function') {
+          alert('Signatures viewer missing (openTimesheetEvidenceViewerSignatures).');
+          return;
+        }
+        await openTimesheetEvidenceViewerSignatures(item);
+        return;
+      }
+
+      // Default: PDF/manual/system evidence
+      if (typeof openTimesheetEvidenceViewerExisting !== 'function') {
+        alert('Evidence viewer missing (openTimesheetEvidenceViewerExisting).');
+        return;
+      }
+      await openTimesheetEvidenceViewerExisting(item);
+    } catch (err) {
+      if (LOGM) console.warn('[TS][EVIDENCE] view failed', err);
+      alert(err?.message || 'Failed to open evidence viewer.');
+    }
+  });
+});
+
 
       // 4) Wire Delete buttons (user evidence only; system rows should not render delete)
       const removeBtns = root.querySelectorAll('button[data-evidence-remove]');
       if (LOGM) LT('wiring evidence delete buttons', { count: removeBtns.length });
 
-      removeBtns.forEach(btn => {
-        if (btn.__tsEvRemoveWired) return;
-        btn.__tsEvRemoveWired = true;
+    removeBtns.forEach(btn => {
+  if (btn.__tsEvRemoveWired) return;
+  btn.__tsEvRemoveWired = true;
 
-        btn.addEventListener('click', async (ev) => {
-          ev.preventDefault();
-          try {
-            await handleTimesheetEvidenceRemoveClick(ev);
-          } catch (err) {
-            if (LOGM) console.warn('[TS][EVIDENCE] delete failed', err);
-            alert(err?.message || 'Failed to delete evidence item.');
-          }
-        });
-      });
+  btn.addEventListener('click', async (ev) => {
+    ev.preventDefault();
+
+    const tryHandleMoved = async (err) => {
+      const st = err?.status ?? null;
+      const j  = err?.json || null;
+
+      if (!(st === 409 && j && j.error === 'TIMESHEET_MOVED' && j.current_timesheet_id)) {
+        return false;
+      }
+
+      const newId = String(j.current_timesheet_id);
+
+      try {
+        window.modalCtx ||= {};
+        window.modalCtx.data ||= {};
+        window.modalCtx.timesheetMeta ||= {};
+
+        window.modalCtx.data.timesheet_id = newId;
+        window.modalCtx.data.id = newId;
+        window.modalCtx.timesheetMeta.expected_timesheet_id = newId;
+      } catch {}
+
+      // refresh details/evidence so UI is coherent
+      try { window.modalCtx.timesheetDetails = await fetchTimesheetDetails(newId); } catch {}
+      try { await refreshTimesheetEvidenceIntoModalState(newId); } catch {}
+      try { refreshTimesheetsSummaryAfterRotation?.(newId); } catch {}
+
+      try { window.__toast && window.__toast('This timesheet changed while you were editing; try again.'); } catch {}
+      return true;
+    };
+
+    try {
+      await handleTimesheetEvidenceRemoveClick(ev);
+    } catch (err) {
+      // ✅ adopt + retry once if moved
+      const moved = await tryHandleMoved(err);
+      if (moved) {
+        try {
+          await handleTimesheetEvidenceRemoveClick(ev);
+          return;
+        } catch (err2) {
+          if (LOGM) console.warn('[TS][EVIDENCE] delete failed after moved retry', err2);
+          alert(err2?.message || 'Failed to delete evidence item.');
+          return;
+        }
+      }
+
+      if (LOGM) console.warn('[TS][EVIDENCE] delete failed', err);
+      alert(err?.message || 'Failed to delete evidence item.');
+    }
+  });
+});
+
 
     } catch (err) {
       if ((typeof window.__LOG_MODAL === 'boolean') ? window.__LOG_MODAL : false) {
@@ -41516,6 +41588,432 @@ async function fetchTimesheetRelated(timesheetId) {
   GE();
   return out;
 }
+// NEW: Import-table evidence viewer (NHSP / HealthRoster)
+// Expects backend evidence items tagged with preview_mode: 'IMPORT_TABLE' and storage_key for full file download.
+// Uses existing helper fetchTimesheetSourceRows(timesheetId, { scope:'all', include_excluded:true }) if available.
+// Falls back to direct /api/timesheets/:id/source-print call if helper is missing.
+async function openTimesheetEvidenceViewerImportTable(ev) {
+  const { LOGM, L, GC, GE } = getTsLoggers('[TS][EVIDENCE][IMPORT_VIEW]');
+  GC('openTimesheetEvidenceViewerImportTable');
+
+  if (!ev || typeof ev !== 'object') {
+    GE();
+    throw new Error('Evidence item is required.');
+  }
+
+  const mc = window.modalCtx || {};
+  const tsId =
+    mc.data?.timesheet_id ||
+    mc.data?.id ||
+    (mc.timesheetDetails && mc.timesheetDetails.timesheet && mc.timesheetDetails.timesheet.timesheet_id) ||
+    null;
+
+  if (!tsId) {
+    GE();
+    throw new Error('Timesheet context missing; cannot view import evidence.');
+  }
+
+  const tsIdNow = () =>
+    window.modalCtx?.data?.timesheet_id ||
+    window.modalCtx?.data?.id ||
+    tsId;
+
+  const fmtUkDateTime = (iso) => {
+    if (!iso) return '—';
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return String(iso);
+    try {
+      return d.toLocaleString('en-GB', {
+        timeZone: 'Europe/London',
+        weekday: 'short',
+        day: '2-digit',
+        month: 'short',
+        year: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: false
+      });
+    } catch {
+      return d.toISOString();
+    }
+  };
+
+  // Import id may be in meta/meta_json OR embedded in system id SYS:<kind>:<import_id>
+  const getImportIdFromEvidence = (e) => {
+    const meta =
+      (e && typeof e.meta === 'object' && e.meta) ? e.meta :
+      (e && typeof e.meta_json === 'object' && e.meta_json) ? e.meta_json :
+      null;
+
+    const direct =
+      (meta && meta.import_id != null && String(meta.import_id).trim())
+        ? String(meta.import_id).trim()
+        : (e && e.import_batch_id != null && String(e.import_batch_id).trim())
+          ? String(e.import_batch_id).trim()
+          : null;
+
+    if (direct) return direct;
+
+    const id = (e && e.id != null) ? String(e.id) : '';
+    if (id.startsWith('SYS:')) {
+      const parts = id.split(':');
+      if (parts.length >= 3) {
+        const last = String(parts[parts.length - 1] || '').trim();
+        if (last) return last;
+      }
+    }
+
+    return null;
+  };
+
+  const importId = getImportIdFromEvidence(ev);
+  if (!importId) {
+    GE();
+    throw new Error('Import evidence is missing import_id.');
+  }
+
+  const downloadKeyRaw =
+    (ev.download_storage_key != null && String(ev.download_storage_key).trim())
+      ? String(ev.download_storage_key).trim()
+      : (ev.storage_key != null && String(ev.storage_key).trim())
+        ? String(ev.storage_key).trim()
+        : '';
+
+  const downloadKey = downloadKeyRaw.replace(/^\/+/, '').trim();
+
+  const presignDownload = async (key) => {
+    const cleanKey = String(key || '').trim().replace(/^\/+/, '');
+    const res = await authFetch(API('/api/files/presign-download'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key: cleanKey })
+    });
+    const text = await res.text().catch(() => '');
+    if (!res.ok) throw new Error(text || 'Failed to presign download URL');
+    const json = text ? JSON.parse(text) : {};
+    const url = json.url || json.signed_url || null;
+    if (!url) throw new Error('No URL returned from presign-download');
+    return url;
+  };
+
+  // Fetch rows for this timesheet (all imports), then select by import_id
+  let imports = [];
+  try {
+    const idNow = tsIdNow();
+    if (typeof fetchTimesheetSourceRows === 'function') {
+      const data = await fetchTimesheetSourceRows(idNow, { scope: 'all', include_excluded: true });
+      imports = Array.isArray(data?.imports) ? data.imports : [];
+    } else {
+      const res = await authFetch(API(`/api/timesheets/${encodeURIComponent(String(idNow))}/source-print?include_excluded=true`));
+      const txt = await res.text().catch(() => '');
+      if (!res.ok) throw new Error(txt || 'Failed to load import rows');
+      const json = txt ? JSON.parse(txt) : {};
+      imports = Array.isArray(json?.imports) ? json.imports : [];
+    }
+  } catch (e) {
+    GE();
+    throw new Error(e?.message || String(e) || 'Failed to load import rows');
+  }
+
+  const imp =
+    imports.find(x => String(x?.import_id) === String(importId)) ||
+    null;
+
+  if (!imp) {
+    GE();
+    throw new Error(`No rows found for import_id=${importId} on this timesheet.`);
+  }
+
+  const sourceSystem = String(imp.source_system || ev.kind || 'IMPORT').toUpperCase();
+  const headerCols = Array.isArray(imp.header_columns) ? imp.header_columns : [];
+  const rows = Array.isArray(imp.rows) ? imp.rows : [];
+
+  // Build table headers
+  const maxRawLen = rows.reduce((mx, r) => {
+    const raw = Array.isArray(r?.raw_columns) ? r.raw_columns : null;
+    return raw ? Math.max(mx, raw.length) : mx;
+  }, 0);
+
+  const effectiveHeaders = headerCols.length
+    ? headerCols.map(String)
+    : (maxRawLen > 0)
+      ? Array.from({ length: maxRawLen }, (_, i) => `C${i + 1}`)
+      : ['Row'];
+
+  const headHtml = effectiveHeaders
+    .map(c => `<th style="text-align:left; padding:6px 8px; border-bottom:1px solid var(--line);">${escapeHtml(String(c))}</th>`)
+    .join('');
+
+  const bodyHtml = rows.length
+    ? rows.map((r) => {
+        const raw = Array.isArray(r?.raw_columns) ? r.raw_columns : null;
+        const payload = r?.payload || r || {};
+        const cells = raw
+          ? raw.map(v => `<td style="padding:6px 8px; border-bottom:1px solid rgba(255,255,255,.08);">${escapeHtml(String(v ?? ''))}</td>`).join('')
+          : `<td style="padding:6px 8px; border-bottom:1px solid rgba(255,255,255,.08);">${escapeHtml(JSON.stringify(payload))}</td>`;
+        return `<tr>${cells}</tr>`;
+      }).join('')
+    : `<tr><td style="padding:10px; opacity:.85;">No rows found.</td></tr>`;
+
+  const dtRaw = ev.uploaded_at_utc || ev.uploaded_at || ev.created_at || null;
+
+  const title = `Import evidence ${String(tsId).slice(0, 8)}…`;
+
+  const downloadBtnHtml = downloadKey
+    ? `<button type="button"
+               class="pill"
+               style="cursor:pointer;border:1px solid var(--line);background:transparent;color:inherit;padding:6px 10px;border-radius:999px;"
+               id="btnImportDl">
+         Download full file
+       </button>`
+    : `<span class="mini" style="opacity:.85;">No downloadable file key</span>`;
+
+  const contentHtml = `
+    <div class="tabc">
+      <div class="card">
+        <div class="row">
+          <label>Source system</label>
+          <div class="controls"><span class="mini">${escapeHtml(sourceSystem)}</span></div>
+        </div>
+        <div class="row">
+          <label>Import ID</label>
+          <div class="controls"><span class="mini">${escapeHtml(String(importId))}</span></div>
+        </div>
+        <div class="row">
+          <label>Rows</label>
+          <div class="controls"><span class="mini">${escapeHtml(String(rows.length))}</span></div>
+        </div>
+        <div class="row">
+          <label>Columns</label>
+          <div class="controls"><span class="mini">${escapeHtml(String(effectiveHeaders.length))}</span></div>
+        </div>
+        <div class="row">
+          <label>Date</label>
+          <div class="controls"><span class="mini">${escapeHtml(fmtUkDateTime(dtRaw))}</span></div>
+        </div>
+        <div class="row">
+          <label>Download</label>
+          <div class="controls">${downloadBtnHtml}</div>
+        </div>
+      </div>
+
+      <div class="card" style="margin-top:10px;">
+        <div class="row">
+          <label>Preview</label>
+          <div class="controls">
+            <div class="scrollable-evidence" style="max-height:520px; overflow:auto; border:1px solid var(--line); border-radius:8px;">
+              <table style="width:100%; border-collapse:collapse;">
+                <thead><tr>${headHtml}</tr></thead>
+                <tbody>${bodyHtml}</tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+
+  showModal(
+    title,
+    [{ key: 'view', title: 'Evidence' }],
+    () => contentHtml,
+    async () => ({ ok: true }),
+    false,
+    undefined,
+    { kind: 'timesheet-evidence-import', noParentGate: true, forceEdit: true }
+  );
+
+  // Wire download (after modal render)
+  try {
+    if (downloadKey) {
+      const btn = document.getElementById('btnImportDl');
+      if (btn && !btn.__wired) {
+        btn.__wired = true;
+        btn.addEventListener('click', async () => {
+          try {
+            const url = await presignDownload(downloadKey);
+            window.open(url, '_blank', 'noopener,noreferrer');
+          } catch (e) {
+            try { window.__toast && window.__toast(e?.message || 'Download failed'); } catch {}
+          }
+        });
+      }
+    }
+  } catch {}
+
+  GE();
+}
+
+// NEW: Electronic signatures evidence viewer
+// Expects backend evidence item with preview_mode: 'SIGNATURES' and meta/meta_json containing booking_id,
+// authorised_at_server, auth_name, auth_job_title, and (optionally) worked/weekly details.
+async function openTimesheetEvidenceViewerSignatures(ev) {
+  const { LOGM, L, GC, GE } = getTsLoggers('[TS][EVIDENCE][SIG_VIEW]');
+  GC('openTimesheetEvidenceViewerSignatures');
+
+  if (!ev || typeof ev !== 'object') {
+    GE();
+    throw new Error('Evidence item is required.');
+  }
+
+  const mc = window.modalCtx || {};
+  const ts = mc?.timesheetDetails?.timesheet || null;
+
+  const meta =
+    (ev && typeof ev.meta === 'object' && ev.meta) ? ev.meta :
+    (ev && typeof ev.meta_json === 'object' && ev.meta_json) ? ev.meta_json :
+    {};
+
+  const bookingId = meta.booking_id ? String(meta.booking_id).trim() : '';
+  if (!bookingId) {
+    GE();
+    throw new Error('Electronic evidence missing booking_id.');
+  }
+
+  const version = (meta.version != null && Number.isFinite(Number(meta.version))) ? Number(meta.version) : null;
+
+  const authName = meta.auth_name ? String(meta.auth_name) : '';
+  const authJob  = meta.auth_job_title ? String(meta.auth_job_title) : '';
+  const authAt   = meta.authorised_at_server ? String(meta.authorised_at_server) : (ev.created_at ? String(ev.created_at) : '');
+
+  const fmtUkDateTime = (iso) => {
+    if (!iso) return '—';
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return String(iso);
+    try {
+      return d.toLocaleString('en-GB', {
+        timeZone: 'Europe/London',
+        weekday: 'short',
+        day: '2-digit',
+        month: 'short',
+        year: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: false
+      });
+    } catch {
+      return d.toISOString();
+    }
+  };
+
+  // Shift summary: prefer loaded timesheetDetails, fallback to meta fields.
+  const scope = String((ts?.sheet_scope || meta.sheet_scope || '')).toUpperCase();
+  const summaryLines = [];
+
+  if (scope === 'DAILY') {
+    const s = (ts?.worked_start_iso || meta.worked_start_iso) ? String(ts?.worked_start_iso || meta.worked_start_iso) : '';
+    const e = (ts?.worked_end_iso || meta.worked_end_iso) ? String(ts?.worked_end_iso || meta.worked_end_iso) : '';
+    const bs = (ts?.break_start_iso || meta.break_start_iso) ? String(ts?.break_start_iso || meta.break_start_iso) : '';
+    const be = (ts?.break_end_iso || meta.break_end_iso) ? String(ts?.break_end_iso || meta.break_end_iso) : '';
+    const bm = (ts?.break_minutes != null ? ts.break_minutes : meta.break_minutes) != null
+      ? String(ts?.break_minutes != null ? ts.break_minutes : meta.break_minutes)
+      : '';
+
+    if (s && e) summaryLines.push(`Worked: ${s} → ${e}`);
+    if (bs && be) summaryLines.push(`Break: ${bs} → ${be}`);
+    else if (bm) summaryLines.push(`Break minutes: ${bm}`);
+  } else if (scope === 'WEEKLY') {
+    const we = (ts?.week_ending_date || meta.week_ending_date) ? String(ts?.week_ending_date || meta.week_ending_date) : '';
+    if (we) summaryLines.push(`Week ending: ${we}`);
+
+    const sched = Array.isArray(ts?.actual_schedule_json) ? ts.actual_schedule_json :
+                  Array.isArray(meta.actual_schedule_json) ? meta.actual_schedule_json :
+                  null;
+    if (sched) summaryLines.push(`Shifts: ${sched.length}`);
+  }
+
+  // Presign signature URLs (batch)
+  let nurseUrl = null;
+  let authUrl = null;
+
+  try {
+    const presRes = await authFetch(API('/signatures/presign-get/batch'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        items: [
+          { booking_id: bookingId, which: 'nurse', ...(version != null ? { version } : {}) },
+          { booking_id: bookingId, which: 'authoriser', ...(version != null ? { version } : {}) }
+        ],
+        expires_seconds: 600
+      })
+    });
+
+    const presTxt = await presRes.text().catch(() => '');
+    if (!presRes.ok) throw new Error(presTxt || 'Failed to presign signature URLs');
+
+    const presJson = presTxt ? JSON.parse(presTxt) : {};
+    const links = Array.isArray(presJson.links) ? presJson.links : [];
+
+    nurseUrl = (links.find(x => String(x?.which || '') === 'nurse') || {}).get_url || null;
+    authUrl  = (links.find(x => String(x?.which || '') === 'authoriser') || {}).get_url || null;
+  } catch (e) {
+    // We still render modal with metadata; panels will show Not available.
+    try { window.__toast && window.__toast(e?.message || 'Failed to load signatures'); } catch {}
+  }
+
+  const title = `Electronic evidence ${String((ts?.timesheet_id || mc?.data?.timesheet_id || '')).slice(0, 8)}…`;
+
+  const bodyHtml = `
+    <div class="tabc">
+      <div class="card">
+        <div class="row">
+          <label>Authorised at server</label>
+          <div class="controls">
+            <span class="mini">${escapeHtml(fmtUkDateTime(authAt))}</span>
+          </div>
+        </div>
+        <div class="row">
+          <label>Authoriser</label>
+          <div class="controls">
+            <span class="mini">${escapeHtml([authName, authJob].filter(Boolean).join(' — ') || '—')}</span>
+          </div>
+        </div>
+        <div class="row">
+          <label>Shift details</label>
+          <div class="controls">
+            <div class="mini" style="opacity:.9;">
+              ${summaryLines.length ? summaryLines.map(x => `<div>${escapeHtml(x)}</div>`).join('') : '—'}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card" style="margin-top:10px;">
+        <div class="row">
+          <label>Signatures</label>
+          <div class="controls" style="display:flex; gap:12px; flex-wrap:wrap;">
+            <div style="flex:1; min-width:240px;">
+              <div class="mini" style="opacity:.85; margin-bottom:6px;">Nurse signature</div>
+              ${nurseUrl
+                ? `<img src="${nurseUrl}" style="max-width:100%; max-height:260px; border:1px solid var(--line); border-radius:8px; background:#000;" />`
+                : `<div class="mini" style="opacity:.85;">Not available</div>`}
+            </div>
+
+            <div style="flex:1; min-width:240px;">
+              <div class="mini" style="opacity:.85; margin-bottom:6px;">Authoriser signature</div>
+              ${authUrl
+                ? `<img src="${authUrl}" style="max-width:100%; max-height:260px; border:1px solid var(--line); border-radius:8px; background:#000;" />`
+                : `<div class="mini" style="opacity:.85;">Not available</div>`}
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+
+  showModal(
+    title,
+    [{ key: 'view', title: 'Evidence' }],
+    () => bodyHtml,
+    async () => ({ ok: true }),
+    false,
+    undefined,
+    { kind: 'timesheet-evidence-signatures', noParentGate: true, forceEdit: true }
+  );
+
+  GE();
+}
 
 async function fetchTimesheetSourceRows(timesheetId, opts = {}) {
   const LOGM = (typeof window.__LOG_MODAL === 'boolean') ? window.__LOG_MODAL : false;
@@ -41532,16 +42030,20 @@ async function fetchTimesheetSourceRows(timesheetId, opts = {}) {
   const shiftId  = scope === 'shift' ? (opts.shiftId || opts.shift_id || '') : '';
   const includeExcluded = !!opts.includeExcluded || !!opts.include_excluded;
 
+  // ✅ NEW: optional filter to fetch only a specific import batch
+  const importId = String(opts.importId || opts.import_id || '').trim();
+
   const qp = new URLSearchParams();
   qp.set('scope', scope);
   if (scope === 'shift' && shiftId) qp.set('shift_id', String(shiftId));
   if (includeExcluded) qp.set('include_excluded', 'true');
+  if (importId) qp.set('import_id', importId);
 
   const encId = encodeURIComponent(timesheetId);
   const url   = API(`/api/timesheets/${encId}/source-print?${qp.toString()}`);
 
   GC('request');
-  L('→ GET', { url, timesheetId, scope, shiftId: shiftId || null, includeExcluded });
+  L('→ GET', { url, timesheetId, scope, shiftId: shiftId || null, includeExcluded, importId: importId || null });
 
   let res;
   try {
@@ -41585,6 +42087,11 @@ async function fetchTimesheetSourceRows(timesheetId, opts = {}) {
   GE();
   return json;
 }
+
+
+
+
+
 // ======== Timesheet tab helpers ========
 
 function getTsLoggers(ns) {
@@ -43647,14 +44154,7 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
   };
 
   const evidenceId = evidenceItem.id != null ? String(evidenceItem.id) : '';
-
-  // ✅ FIX: normalise evidence storage keys (DB may store "/files/..." but R2 key is "files/...")
-  const storageKeyRaw = evidenceItem.storage_key ? String(evidenceItem.storage_key).trim() : '';
-  if (!storageKeyRaw) {
-    GE();
-    throw new Error('Evidence item missing storage_key.');
-  }
-  const storageKey = storageKeyRaw.replace(/^\/+/, '');
+  const previewMode = String(evidenceItem.preview_mode || evidenceItem.preview_kind || '').trim().toUpperCase();
 
   const isSystem =
     (typeof evidenceItem.system === 'boolean') ? evidenceItem.system : String(evidenceId).startsWith('SYS:');
@@ -43691,19 +44191,7 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
     }
   };
 
-  L('ENTRY', {
-    tsId,
-    evidenceId,
-    storageKeyRaw,
-    storageKey,
-    kind,
-    canDelete,
-    canEditType,
-    dt: dtRaw
-  });
-
   const presignDownload = async (key) => {
-    // ✅ always normalise before presign-download
     const cleanKey = String(key || '').trim().replace(/^\/+/, '');
     const res = await authFetch(API('/api/files/presign-download'), {
       method: 'POST',
@@ -43717,6 +44205,294 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
     if (!url) throw new Error('No URL returned from presign-download');
     return url;
   };
+
+  // ─────────────────────────────────────────────────────────────
+  // IMPORT TABLE preview
+  // ─────────────────────────────────────────────────────────────
+  if (previewMode === 'IMPORT_TABLE') {
+    const importId =
+      (evidenceItem?.meta_json && evidenceItem.meta_json.import_id != null && String(evidenceItem.meta_json.import_id).trim())
+        ? String(evidenceItem.meta_json.import_id).trim()
+        : (() => {
+            // Fallback: parse import id from SYS:*:* id (backend uses SYS:<kind>:<importId>)
+            const s = String(evidenceId || '');
+            const parts = s.split(':');
+            return (parts.length >= 3) ? String(parts[parts.length - 1]) : null;
+          })();
+
+    if (!importId) {
+      GE();
+      throw new Error('Import evidence is missing import_id.');
+    }
+
+    const tsIdForPrint = tsIdNow() || tsId;
+
+    // fetch rows (scoped to this import_id)
+    const res = await authFetch(
+      API(`/api/timesheets/${encodeURIComponent(String(tsIdForPrint))}/source-print?import_id=${encodeURIComponent(String(importId))}&include_excluded=true`)
+    );
+    const txt = await res.text().catch(() => '');
+    if (!res.ok) {
+      GE();
+      throw new Error(txt || 'Failed to load import rows');
+    }
+    const json = txt ? JSON.parse(txt) : {};
+    const imports = Array.isArray(json.imports) ? json.imports : [];
+    const imp = imports.find(x => String(x?.import_id) === String(importId)) || imports[0] || null;
+
+    const headerCols = Array.isArray(imp?.header_columns) ? imp.header_columns : [];
+    const rows = Array.isArray(imp?.rows) ? imp.rows : [];
+
+    const downloadKeyRaw =
+      (evidenceItem.download_storage_key != null && String(evidenceItem.download_storage_key).trim())
+        ? String(evidenceItem.download_storage_key).trim()
+        : (evidenceItem.storage_key != null && String(evidenceItem.storage_key).trim())
+          ? String(evidenceItem.storage_key).trim()
+          : '';
+
+    const downloadKey = downloadKeyRaw.replace(/^\/+/, '').trim();
+
+    const mkTable = () => {
+      const headHtml = headerCols.length
+        ? headerCols.map(c => `<th style="text-align:left; padding:6px 8px; border-bottom:1px solid var(--line);">${escapeHtml(String(c))}</th>`).join('')
+        : `<th style="text-align:left; padding:6px 8px; border-bottom:1px solid var(--line);">Row</th>`;
+
+      const bodyHtml = rows.length
+        ? rows.map((r, idx) => {
+            const raw = Array.isArray(r?.raw_columns) ? r.raw_columns : null;
+            const cells = raw
+              ? raw.map(v => `<td style="padding:6px 8px; border-bottom:1px solid rgba(255,255,255,.08);">${escapeHtml(String(v ?? ''))}</td>`).join('')
+              : `<td style="padding:6px 8px; border-bottom:1px solid rgba(255,255,255,.08);">${escapeHtml(JSON.stringify(r?.payload || r || {}))}</td>`;
+
+            return `<tr>${cells}</tr>`;
+          }).join('')
+        : `<tr><td style="padding:10px; opacity:.85;">No rows found for this import.</td></tr>`;
+
+      return `
+        <div class="scrollable-evidence" style="max-height:520px; overflow:auto; border:1px solid var(--line); border-radius:8px;">
+          <table style="width:100%; border-collapse:collapse;">
+            <thead><tr>${headHtml}</tr></thead>
+            <tbody>${bodyHtml}</tbody>
+          </table>
+        </div>
+      `;
+    };
+
+    const title = `Import evidence ${String(tsIdForPrint).slice(0, 8)}…`;
+
+    const downloadBtn = downloadKey
+      ? `<button type="button"
+                 class="pill"
+                 style="cursor:pointer;border:1px solid var(--line);background:transparent;color:inherit;padding:6px 10px;border-radius:999px;"
+                 onclick="window.__tsEvidenceDownload && window.__tsEvidenceDownload('${escapeHtml(evidenceId)}')">
+           Download full file
+         </button>`
+      : `<span class="mini" style="opacity:.85;">No downloadable import file key</span>`;
+
+    // ✅ UI: remove Import ID (internal), show row count instead
+    const bodyHtml = `
+      <div class="tabc">
+        <div class="card">
+          <div class="row">
+            <label>Source</label>
+            <div class="controls">
+              <span class="mini">${escapeHtml(String(imp?.source_system || evidenceItem.kind || 'IMPORT'))}</span>
+            </div>
+          </div>
+          <div class="row">
+            <label>Rows matched</label>
+            <div class="controls">
+              <span class="mini">${escapeHtml(String(Array.isArray(rows) ? rows.length : 0))}</span>
+            </div>
+          </div>
+          <div class="row">
+            <label>Date</label>
+            <div class="controls">
+              <span class="mini">${escapeHtml(fmtUkDateTime(dtRaw))}</span>
+            </div>
+          </div>
+          <div class="row">
+            <label>Download</label>
+            <div class="controls">
+              ${downloadBtn}
+            </div>
+          </div>
+        </div>
+
+        <div class="card" style="margin-top:10px;">
+          <div class="row">
+            <label>Rows (this timesheet only)</label>
+            <div class="controls">
+              ${mkTable()}
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
+
+    showModal(
+      title,
+      [{ key: 'view', title: 'Evidence' }],
+      () => bodyHtml,
+      async () => ({ ok: true }),
+      false,
+      undefined,
+      { kind: 'timesheet-evidence-viewer', noParentGate: true, forceEdit: true }
+    );
+
+    GE();
+    return;
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // SIGNATURES preview (Electronic submission evidence)
+  // ─────────────────────────────────────────────────────────────
+  if (previewMode === 'SIGNATURES') {
+    const meta = (evidenceItem && evidenceItem.meta_json && typeof evidenceItem.meta_json === 'object')
+      ? evidenceItem.meta_json
+      : {};
+
+    const bookingId = meta.booking_id ? String(meta.booking_id) : '';
+    if (!bookingId) {
+      GE();
+      throw new Error('Electronic evidence missing booking_id.');
+    }
+
+    const version = (meta.version != null && Number.isFinite(Number(meta.version))) ? Number(meta.version) : null;
+
+    // Presign signature GETs
+    const presRes = await authFetch(API('/signatures/presign-get/batch'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        items: [
+          { booking_id: bookingId, which: 'nurse', ...(version != null ? { version } : {}) },
+          { booking_id: bookingId, which: 'authoriser', ...(version != null ? { version } : {}) }
+        ],
+        expires_seconds: 600
+      })
+    });
+
+    const presTxt = await presRes.text().catch(() => '');
+    if (!presRes.ok) {
+      GE();
+      throw new Error(presTxt || 'Failed to presign signature URLs');
+    }
+
+    const presJson = presTxt ? JSON.parse(presTxt) : {};
+    const links = Array.isArray(presJson.links) ? presJson.links : [];
+
+    const nurseUrl = (links.find(x => String(x?.which || '') === 'nurse') || {}).get_url || null;
+    const authUrl  = (links.find(x => String(x?.which || '') === 'authoriser') || {}).get_url || null;
+
+    const authName = meta.auth_name ? String(meta.auth_name) : '';
+    const authJob  = meta.auth_job_title ? String(meta.auth_job_title) : '';
+    const authAt   = meta.authorised_at_server ? String(meta.authorised_at_server) : (dtRaw ? String(dtRaw) : '');
+
+    const scope = String(meta.sheet_scope || '').toUpperCase();
+    const summaryLines = [];
+
+    if (scope === 'DAILY') {
+      const s = meta.worked_start_iso ? String(meta.worked_start_iso) : '';
+      const e = meta.worked_end_iso ? String(meta.worked_end_iso) : '';
+      const bs = meta.break_start_iso ? String(meta.break_start_iso) : '';
+      const be = meta.break_end_iso ? String(meta.break_end_iso) : '';
+      const bm = (meta.break_minutes != null) ? String(meta.break_minutes) : '';
+      if (s && e) summaryLines.push(`Worked: ${s} → ${e}`);
+      if (bs && be) summaryLines.push(`Break: ${bs} → ${be}`);
+      else if (bm) summaryLines.push(`Break minutes: ${bm}`);
+    } else if (scope === 'WEEKLY') {
+      const we = meta.week_ending_date ? String(meta.week_ending_date) : '';
+      if (we) summaryLines.push(`Week ending: ${we}`);
+      const sched = meta.actual_schedule_json;
+      if (Array.isArray(sched)) summaryLines.push(`Shifts: ${sched.length}`);
+    }
+
+    const title = `Electronic evidence ${String(tsId).slice(0, 8)}…`;
+
+    const bodyHtml = `
+      <div class="tabc">
+        <div class="card">
+          <div class="row">
+            <label>Authorised at server</label>
+            <div class="controls">
+              <span class="mini">${escapeHtml(fmtUkDateTime(authAt))}</span>
+            </div>
+          </div>
+          <div class="row">
+            <label>Authoriser</label>
+            <div class="controls">
+              <span class="mini">${escapeHtml([authName, authJob].filter(Boolean).join(' — ') || '—')}</span>
+            </div>
+          </div>
+          <div class="row">
+            <label>Shift summary</label>
+            <div class="controls">
+              <div class="mini" style="opacity:.9;">
+                ${summaryLines.length ? summaryLines.map(x => `<div>${escapeHtml(x)}</div>`).join('') : '—'}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card" style="margin-top:10px;">
+          <div class="row">
+            <label>Signatures</label>
+            <div class="controls" style="display:flex; gap:12px; flex-wrap:wrap;">
+              <div style="flex:1; min-width:240px;">
+                <div class="mini" style="opacity:.85; margin-bottom:6px;">Nurse</div>
+                ${nurseUrl
+                  ? `<img src="${nurseUrl}" style="max-width:100%; max-height:260px; border:1px solid var(--line); border-radius:8px; background:#000;" />`
+                  : `<div class="mini" style="opacity:.85;">Not available</div>`}
+              </div>
+
+              <div style="flex:1; min-width:240px;">
+                <div class="mini" style="opacity:.85; margin-bottom:6px;">Authoriser</div>
+                ${authUrl
+                  ? `<img src="${authUrl}" style="max-width:100%; max-height:260px; border:1px solid var(--line); border-radius:8px; background:#000;" />`
+                  : `<div class="mini" style="opacity:.85;">Not available</div>`}
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
+
+    showModal(
+      title,
+      [{ key: 'view', title: 'Evidence' }],
+      () => bodyHtml,
+      async () => ({ ok: true }),
+      false,
+      undefined,
+      { kind: 'timesheet-evidence-viewer', noParentGate: true, forceEdit: true }
+    );
+
+    GE();
+    return;
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // Default: PDF/file preview
+  // ─────────────────────────────────────────────────────────────
+  const storageKeyRaw = evidenceItem.storage_key ? String(evidenceItem.storage_key).trim() : '';
+  if (!storageKeyRaw) {
+    GE();
+    throw new Error('Evidence item missing storage_key.');
+  }
+  const storageKey = storageKeyRaw.replace(/^\/+/, '');
+
+  L('ENTRY', {
+    tsId,
+    evidenceId,
+    storageKeyRaw,
+    storageKey,
+    kind,
+    canDelete,
+    canEditType,
+    dt: dtRaw,
+    previewMode: previewMode || 'PDF'
+  });
 
   const signedUrl = await presignDownload(storageKey);
 
@@ -43769,7 +44545,7 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
       <div class="controls">
         <span class="mini">${escapeHtml(kindTrim || 'Evidence')}</span>
         <div class="mini" style="margin-top:4px;opacity:.85;">
-          ${isSystem ? 'System evidence (NHSP/HealthRoster) cannot be re-typed.' : 'This evidence item cannot be edited.'}
+          ${isSystem ? 'System evidence cannot be re-typed.' : 'This evidence item cannot be edited.'}
         </div>
       </div>
     </div>
@@ -43783,6 +44559,18 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
           <label>Date Uploaded</label>
           <div class="controls">
             <span class="mini">${escapeHtml(fmtUkDateTime(dtRaw))}</span>
+          </div>
+        </div>
+        <div class="row">
+          <label>Download</label>
+          <div class="controls">
+            <a class="pill"
+               href="${signedUrl}"
+               target="_blank"
+               rel="noopener noreferrer"
+               style="display:inline-block;border:1px solid var(--line);background:transparent;color:inherit;padding:6px 10px;border-radius:999px;text-decoration:none;">
+              Open / Download
+            </a>
           </div>
         </div>
       </div>
@@ -43817,8 +44605,6 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
       </div>
     </div>
   `;
-
-  const tabs = [{ key: 'view', title: 'Evidence' }];
 
   // Hide Delete Timesheet button while viewer open
   let __tsDelPrev = null;
@@ -43899,13 +44685,6 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
         }
       } catch {}
 
-      // Repaint parent Evidence tab
-      try {
-        const st = (window.__modalStack && Array.isArray(window.__modalStack)) ? window.__modalStack : null;
-        const parentFr = (st && st.length > 1) ? st[st.length - 2] : null;
-        if (parentFr && parentFr.entity === 'timesheets') parentFr.currentTabKey = 'evidence';
-      } catch {}
-
       if (window.__toast) window.__toast('Evidence type updated');
 
       GE();
@@ -43915,8 +44694,16 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
         GE();
         return { ok: false };
       }
+
+      // ✅ Friendly lock/paid messaging
+      const msg = String(err?.message || 'Failed to update evidence type.');
+      if (/invoiced|paid|locked/i.test(msg)) {
+        try { window.__toast && window.__toast(msg); } catch {}
+      } else {
+        alert(msg);
+      }
+
       L('update kind failed', err);
-      alert(err?.message || 'Failed to update evidence type.');
       GE();
       return { ok: false };
     }
@@ -43924,7 +44711,7 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
 
   showModal(
     title,
-    tabs,
+    [{ key: 'view', title: 'Evidence' }],
     () => bodyHtml,
     onSave,
     false,
@@ -43989,21 +44776,21 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
               }
             } catch {}
 
-            // Refresh summary behind modal (defensive)
-            try {
-              if (typeof refreshTimesheetsSummaryAfterRotation === 'function') {
-                refreshTimesheetsSummaryAfterRotation(idNow);
-              }
-            } catch {}
-
             if (window.__toast) window.__toast('Evidence removed');
 
             // Close viewer
             try { document.getElementById('btnCloseModal')?.click(); } catch {}
           } catch (err) {
             if (await handleMovedInViewer(err, 'evidence-viewer-delete')) return;
+
+            const msg = String(err?.message || 'Failed to delete evidence item.');
+            if (/invoiced|paid|locked/i.test(msg)) {
+              try { window.__toast && window.__toast(msg); } catch {}
+              return;
+            }
+
             L('delete from viewer failed', err);
-            alert(err?.message || 'Failed to delete evidence item.');
+            alert(msg);
           }
         });
       }
@@ -44014,6 +44801,8 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
 
   GE();
 }
+
+
 function renderTimesheetOverviewTab(ctx) {
   const { LOGM, L, GC, GE } = getTsLoggers('[TS][OVERVIEW]');
   const { row, details, related, state } = normaliseTimesheetCtx(ctx);
@@ -48234,7 +49023,6 @@ function renderTimesheetRelatedTab(ctx) {
 }
 
 
-
 function renderTimesheetEvidenceTab(ctx) {
   const { LOGM, L, GC, GE } = getTsLoggers('[TS][EVIDENCE]');
   const { row, details, state } = normaliseTimesheetCtx(ctx);
@@ -48299,14 +49087,12 @@ function renderTimesheetEvidenceTab(ctx) {
     return false;
   };
 
+  // ✅ Prefer display_name so "QR Timesheet (Unsigned/Signed)" and "Electronic submission evidence" show clearly
   const typeLabel = (ev) => {
+    const dn = String(ev?.display_name || '').trim();
+    if (dn) return dn;
     const k = String(ev?.kind || '').trim();
     return k ? k : 'Unknown';
-  };
-
-  const nameLabel = (ev) => {
-    const n = String(ev?.display_name || '').trim();
-    return n ? n : '';
   };
 
   // "Uploaded by" comes from backend enrichment (preferred), otherwise falls back
@@ -48324,6 +49110,12 @@ function renderTimesheetEvidenceTab(ctx) {
     return by || '—';
   };
 
+  const hasDownloadableKey = (ev) => {
+    const k1 = (ev?.download_storage_key != null) ? String(ev.download_storage_key).trim() : '';
+    const k2 = (ev?.storage_key != null) ? String(ev.storage_key).trim() : '';
+    return !!((k1 || k2) && (k1 || k2).replace(/^\/+/, '').trim());
+  };
+
   const rowsHtml = evList.length
     ? evList.map(ev => {
         const id = (ev && ev.id != null) ? String(ev.id) : '';
@@ -48335,8 +49127,6 @@ function renderTimesheetEvidenceTab(ctx) {
         const uploadedTime = escapeHtml(formatEvidenceTime(dt));
 
         const type = escapeHtml(typeLabel(ev));
-        const tooltip = nameLabel(ev) ? ` title="${escapeHtml(nameLabel(ev))}"` : '';
-
         const uploadedBy = escapeHtml(uploadedByLabel(ev));
 
         const viewBtn = `
@@ -48347,6 +49137,18 @@ function renderTimesheetEvidenceTab(ctx) {
             View
           </button>
         `;
+
+        // ✅ Download button (imports + PDFs) — calls the global helper installed by refreshTimesheetEvidenceIntoModalState
+        const dlBtn = hasDownloadableKey(ev)
+          ? `
+            <button type="button"
+                    class="btn mini subtle"
+                    style="background:transparent;border:1px solid rgba(255,255,255,.18);"
+                    onclick="window.__tsEvidenceDownload && window.__tsEvidenceDownload('${escapeHtml(id)}')">
+              Download
+            </button>
+          `
+          : '';
 
         const delBtn = canDelete
           ? `
@@ -48361,14 +49163,14 @@ function renderTimesheetEvidenceTab(ctx) {
 
         return `
           <tr data-evidence-id="${escapeHtml(id)}"
-              class="${system ? 'system-evidence' : ''}"
-              ${tooltip}>
+              class="${system ? 'system-evidence' : ''}">
             <td>${type}</td>
             <td>${uploadedDate}</td>
             <td>${uploadedTime}</td>
             <td>${uploadedBy}</td>
             <td style="text-align:right; white-space:nowrap;">
               ${viewBtn}
+              ${dlBtn}
               ${delBtn}
             </td>
           </tr>
@@ -48726,7 +49528,6 @@ async function openTimesheetEvidenceUploadDialog(file) {
 }
 
 
-
 async function refreshTimesheetEvidenceIntoModalState(timesheetId) {
   const { LOGM, L, GC, GE } = getTsLoggers('[TS][EVIDENCE][REFRESH]');
   GC('refreshTimesheetEvidenceIntoModalState');
@@ -48741,7 +49542,8 @@ async function refreshTimesheetEvidenceIntoModalState(timesheetId) {
   L('ENTRY', { timesheetId });
 
   try {
-    const res = await authFetch(API(`/api/timesheets/${encTsId}/evidence`));
+    // ✅ Use meta=1 so backend can tell us if the id rotated
+    const res = await authFetch(API(`/api/timesheets/${encTsId}/evidence?meta=1`));
     const text = await res.text().catch(() => '');
 
     if (!res.ok) {
@@ -48749,8 +49551,37 @@ async function refreshTimesheetEvidenceIntoModalState(timesheetId) {
       throw new Error(text || 'Failed to load timesheet evidence');
     }
 
-    const json = text ? JSON.parse(text) : [];
-    const list = Array.isArray(json) ? json : [];
+    const json = text ? JSON.parse(text) : null;
+
+    // Backward compatible:
+    // - legacy: array
+    // - meta: { current_timesheet_id, evidence:[...] }
+    const currentIdFromApi =
+      (json && typeof json === 'object' && !Array.isArray(json) && json.current_timesheet_id)
+        ? String(json.current_timesheet_id)
+        : null;
+
+    const list =
+      Array.isArray(json)
+        ? json
+        : (json && typeof json === 'object' && Array.isArray(json.evidence))
+          ? json.evidence
+          : [];
+
+    // If API says the current id differs, adopt it into modal state so future ops hit the right record
+    if (currentIdFromApi && String(currentIdFromApi) !== String(timesheetId)) {
+      try {
+        window.modalCtx ||= {};
+        window.modalCtx.data ||= {};
+        window.modalCtx.timesheetMeta ||= {};
+
+        window.modalCtx.data.timesheet_id = currentIdFromApi;
+        window.modalCtx.data.id = currentIdFromApi;
+        window.modalCtx.timesheetMeta.expected_timesheet_id = currentIdFromApi;
+      } catch {}
+
+      L('ADOPTED_CURRENT_ID', { from: timesheetId, to: currentIdFromApi });
+    }
 
     // Normalise evidence rows so UI can rely on flags
     const normalised = list.map(ev => {
@@ -48764,6 +49595,52 @@ async function refreshTimesheetEvidenceIntoModalState(timesheetId) {
     window.modalCtx = window.modalCtx || {};
     window.modalCtx.timesheetState = window.modalCtx.timesheetState || {};
     window.modalCtx.timesheetState.evidence = normalised;
+
+    // ✅ Provide a lightweight global download helper used by the Evidence tab buttons
+    // (kept here so renderTimesheetEvidenceTab can be purely HTML)
+    try {
+      window.__tsEvidenceDownload = async (evidenceId) => {
+        const mc = window.modalCtx || {};
+        const evs = mc?.timesheetState?.evidence || [];
+        const ev = (Array.isArray(evs) ? evs : []).find(x => String(x?.id || '') === String(evidenceId || ''));
+        if (!ev) {
+          window.__toast && window.__toast('Evidence item not found');
+          return;
+        }
+
+        const keyRaw =
+          (ev.download_storage_key != null && String(ev.download_storage_key).trim())
+            ? String(ev.download_storage_key).trim()
+            : (ev.storage_key != null && String(ev.storage_key).trim())
+              ? String(ev.storage_key).trim()
+              : '';
+
+        const key = keyRaw.replace(/^\/+/, '');
+        if (!key) {
+          window.__toast && window.__toast('No downloadable file for this evidence item');
+          return;
+        }
+
+        // presign-download
+        const presRes = await authFetch(API('/api/files/presign-download'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ key })
+        });
+
+        const presTxt = await presRes.text().catch(() => '');
+        if (!presRes.ok) {
+          throw new Error(presTxt || 'Failed to presign download URL');
+        }
+
+        const presJson = presTxt ? JSON.parse(presTxt) : {};
+        const url = presJson.url || presJson.signed_url || null;
+        if (!url) throw new Error('No URL returned from presign-download');
+
+        // Open in new tab
+        window.open(url, '_blank', 'noopener,noreferrer');
+      };
+    } catch {}
 
     L('OK', { count: normalised.length });
     GE();
