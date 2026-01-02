@@ -28448,38 +28448,40 @@ viewBtns.forEach(btn => {
       return;
     }
 
-    // ✅ NEW: branch by preview_mode
-    const pm = String(item.preview_mode || item.preview_kind || '').trim().toUpperCase();
+  // ✅ NEW: branch by preview_mode
+const pm = String(item.preview_mode || item.preview_kind || '').trim().toUpperCase();
 
-    try {
-      if (pm === 'IMPORT_TABLE') {
-        if (typeof openTimesheetEvidenceViewerImportTable !== 'function') {
-          alert('Import viewer missing (openTimesheetEvidenceViewerImportTable).');
-          return;
-        }
-        await openTimesheetEvidenceViewerImportTable(item);
-        return;
-      }
-
-      if (pm === 'SIGNATURES') {
-        if (typeof openTimesheetEvidenceViewerSignatures !== 'function') {
-          alert('Signatures viewer missing (openTimesheetEvidenceViewerSignatures).');
-          return;
-        }
-        await openTimesheetEvidenceViewerSignatures(item);
-        return;
-      }
-
-      // Default: PDF/manual/system evidence
-      if (typeof openTimesheetEvidenceViewerExisting !== 'function') {
-        alert('Evidence viewer missing (openTimesheetEvidenceViewerExisting).');
-        return;
-      }
-      await openTimesheetEvidenceViewerExisting(item);
-    } catch (err) {
-      if (LOGM) console.warn('[TS][EVIDENCE] view failed', err);
-      alert(err?.message || 'Failed to open evidence viewer.');
+try {
+  if (pm === 'IMPORT_TABLE') {
+    // ✅ Route IMPORT_TABLE to the unified viewer (it now handles NHSP pretty + generic fallback)
+    if (typeof openTimesheetEvidenceViewerExisting !== 'function') {
+      alert('Evidence viewer missing (openTimesheetEvidenceViewerExisting).');
+      return;
     }
+    await openTimesheetEvidenceViewerExisting(item);
+    return;
+  }
+
+  if (pm === 'SIGNATURES') {
+    if (typeof openTimesheetEvidenceViewerSignatures !== 'function') {
+      alert('Signatures viewer missing (openTimesheetEvidenceViewerSignatures).');
+      return;
+    }
+    await openTimesheetEvidenceViewerSignatures(item);
+    return;
+  }
+
+  // Default: PDF/manual/system evidence
+  if (typeof openTimesheetEvidenceViewerExisting !== 'function') {
+    alert('Evidence viewer missing (openTimesheetEvidenceViewerExisting).');
+    return;
+  }
+  await openTimesheetEvidenceViewerExisting(item);
+} catch (err) {
+  if (LOGM) console.warn('[TS][EVIDENCE] view failed', err);
+  alert(err?.message || 'Failed to open evidence viewer.');
+}
+
   });
 });
 
@@ -41587,261 +41589,6 @@ async function fetchTimesheetRelated(timesheetId) {
   });
   GE();
   return out;
-}
-// NEW: Import-table evidence viewer (NHSP / HealthRoster)
-// Expects backend evidence items tagged with preview_mode: 'IMPORT_TABLE' and storage_key for full file download.
-// Uses existing helper fetchTimesheetSourceRows(timesheetId, { scope:'all', include_excluded:true }) if available.
-// Falls back to direct /api/timesheets/:id/source-print call if helper is missing.
-async function openTimesheetEvidenceViewerImportTable(ev) {
-  const { LOGM, L, GC, GE } = getTsLoggers('[TS][EVIDENCE][IMPORT_VIEW]');
-  GC('openTimesheetEvidenceViewerImportTable');
-
-  if (!ev || typeof ev !== 'object') {
-    GE();
-    throw new Error('Evidence item is required.');
-  }
-
-  const mc = window.modalCtx || {};
-  const tsId =
-    mc.data?.timesheet_id ||
-    mc.data?.id ||
-    (mc.timesheetDetails && mc.timesheetDetails.timesheet && mc.timesheetDetails.timesheet.timesheet_id) ||
-    null;
-
-  if (!tsId) {
-    GE();
-    throw new Error('Timesheet context missing; cannot view import evidence.');
-  }
-
-  const tsIdNow = () =>
-    window.modalCtx?.data?.timesheet_id ||
-    window.modalCtx?.data?.id ||
-    tsId;
-
-  const fmtUkDateTime = (iso) => {
-    if (!iso) return '—';
-    const d = new Date(iso);
-    if (Number.isNaN(d.getTime())) return String(iso);
-    try {
-      return d.toLocaleString('en-GB', {
-        timeZone: 'Europe/London',
-        weekday: 'short',
-        day: '2-digit',
-        month: 'short',
-        year: 'numeric',
-        hour: '2-digit',
-        minute: '2-digit',
-        hour12: false
-      });
-    } catch {
-      return d.toISOString();
-    }
-  };
-
-  // Import id may be in meta/meta_json OR embedded in system id SYS:<kind>:<import_id>
-  const getImportIdFromEvidence = (e) => {
-    const meta =
-      (e && typeof e.meta === 'object' && e.meta) ? e.meta :
-      (e && typeof e.meta_json === 'object' && e.meta_json) ? e.meta_json :
-      null;
-
-    const direct =
-      (meta && meta.import_id != null && String(meta.import_id).trim())
-        ? String(meta.import_id).trim()
-        : (e && e.import_batch_id != null && String(e.import_batch_id).trim())
-          ? String(e.import_batch_id).trim()
-          : null;
-
-    if (direct) return direct;
-
-    const id = (e && e.id != null) ? String(e.id) : '';
-    if (id.startsWith('SYS:')) {
-      const parts = id.split(':');
-      if (parts.length >= 3) {
-        const last = String(parts[parts.length - 1] || '').trim();
-        if (last) return last;
-      }
-    }
-
-    return null;
-  };
-
-  const importId = getImportIdFromEvidence(ev);
-  if (!importId) {
-    GE();
-    throw new Error('Import evidence is missing import_id.');
-  }
-
-  const downloadKeyRaw =
-    (ev.download_storage_key != null && String(ev.download_storage_key).trim())
-      ? String(ev.download_storage_key).trim()
-      : (ev.storage_key != null && String(ev.storage_key).trim())
-        ? String(ev.storage_key).trim()
-        : '';
-
-  const downloadKey = downloadKeyRaw.replace(/^\/+/, '').trim();
-
-  const presignDownload = async (key) => {
-    const cleanKey = String(key || '').trim().replace(/^\/+/, '');
-    const res = await authFetch(API('/api/files/presign-download'), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ key: cleanKey })
-    });
-    const text = await res.text().catch(() => '');
-    if (!res.ok) throw new Error(text || 'Failed to presign download URL');
-    const json = text ? JSON.parse(text) : {};
-    const url = json.url || json.signed_url || null;
-    if (!url) throw new Error('No URL returned from presign-download');
-    return url;
-  };
-
-  // Fetch rows for this timesheet (all imports), then select by import_id
-  let imports = [];
-  try {
-    const idNow = tsIdNow();
-    if (typeof fetchTimesheetSourceRows === 'function') {
-      const data = await fetchTimesheetSourceRows(idNow, { scope: 'all', include_excluded: true });
-      imports = Array.isArray(data?.imports) ? data.imports : [];
-    } else {
-      const res = await authFetch(API(`/api/timesheets/${encodeURIComponent(String(idNow))}/source-print?include_excluded=true`));
-      const txt = await res.text().catch(() => '');
-      if (!res.ok) throw new Error(txt || 'Failed to load import rows');
-      const json = txt ? JSON.parse(txt) : {};
-      imports = Array.isArray(json?.imports) ? json.imports : [];
-    }
-  } catch (e) {
-    GE();
-    throw new Error(e?.message || String(e) || 'Failed to load import rows');
-  }
-
-  const imp =
-    imports.find(x => String(x?.import_id) === String(importId)) ||
-    null;
-
-  if (!imp) {
-    GE();
-    throw new Error(`No rows found for import_id=${importId} on this timesheet.`);
-  }
-
-  const sourceSystem = String(imp.source_system || ev.kind || 'IMPORT').toUpperCase();
-  const headerCols = Array.isArray(imp.header_columns) ? imp.header_columns : [];
-  const rows = Array.isArray(imp.rows) ? imp.rows : [];
-
-  // Build table headers
-  const maxRawLen = rows.reduce((mx, r) => {
-    const raw = Array.isArray(r?.raw_columns) ? r.raw_columns : null;
-    return raw ? Math.max(mx, raw.length) : mx;
-  }, 0);
-
-  const effectiveHeaders = headerCols.length
-    ? headerCols.map(String)
-    : (maxRawLen > 0)
-      ? Array.from({ length: maxRawLen }, (_, i) => `C${i + 1}`)
-      : ['Row'];
-
-  const headHtml = effectiveHeaders
-    .map(c => `<th style="text-align:left; padding:6px 8px; border-bottom:1px solid var(--line);">${escapeHtml(String(c))}</th>`)
-    .join('');
-
-  const bodyHtml = rows.length
-    ? rows.map((r) => {
-        const raw = Array.isArray(r?.raw_columns) ? r.raw_columns : null;
-        const payload = r?.payload || r || {};
-        const cells = raw
-          ? raw.map(v => `<td style="padding:6px 8px; border-bottom:1px solid rgba(255,255,255,.08);">${escapeHtml(String(v ?? ''))}</td>`).join('')
-          : `<td style="padding:6px 8px; border-bottom:1px solid rgba(255,255,255,.08);">${escapeHtml(JSON.stringify(payload))}</td>`;
-        return `<tr>${cells}</tr>`;
-      }).join('')
-    : `<tr><td style="padding:10px; opacity:.85;">No rows found.</td></tr>`;
-
-  const dtRaw = ev.uploaded_at_utc || ev.uploaded_at || ev.created_at || null;
-
-  const title = `Import evidence ${String(tsId).slice(0, 8)}…`;
-
-  const downloadBtnHtml = downloadKey
-    ? `<button type="button"
-               class="pill"
-               style="cursor:pointer;border:1px solid var(--line);background:transparent;color:inherit;padding:6px 10px;border-radius:999px;"
-               id="btnImportDl">
-         Download full file
-       </button>`
-    : `<span class="mini" style="opacity:.85;">No downloadable file key</span>`;
-
-  const contentHtml = `
-    <div class="tabc">
-      <div class="card">
-        <div class="row">
-          <label>Source system</label>
-          <div class="controls"><span class="mini">${escapeHtml(sourceSystem)}</span></div>
-        </div>
-        <div class="row">
-          <label>Import ID</label>
-          <div class="controls"><span class="mini">${escapeHtml(String(importId))}</span></div>
-        </div>
-        <div class="row">
-          <label>Rows</label>
-          <div class="controls"><span class="mini">${escapeHtml(String(rows.length))}</span></div>
-        </div>
-        <div class="row">
-          <label>Columns</label>
-          <div class="controls"><span class="mini">${escapeHtml(String(effectiveHeaders.length))}</span></div>
-        </div>
-        <div class="row">
-          <label>Date</label>
-          <div class="controls"><span class="mini">${escapeHtml(fmtUkDateTime(dtRaw))}</span></div>
-        </div>
-        <div class="row">
-          <label>Download</label>
-          <div class="controls">${downloadBtnHtml}</div>
-        </div>
-      </div>
-
-      <div class="card" style="margin-top:10px;">
-        <div class="row">
-          <label>Preview</label>
-          <div class="controls">
-            <div class="scrollable-evidence" style="max-height:520px; overflow:auto; border:1px solid var(--line); border-radius:8px;">
-              <table style="width:100%; border-collapse:collapse;">
-                <thead><tr>${headHtml}</tr></thead>
-                <tbody>${bodyHtml}</tbody>
-              </table>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-  `;
-
-  showModal(
-    title,
-    [{ key: 'view', title: 'Evidence' }],
-    () => contentHtml,
-    async () => ({ ok: true }),
-    false,
-    undefined,
-    { kind: 'timesheet-evidence-import', noParentGate: true, forceEdit: true }
-  );
-
-  // Wire download (after modal render)
-  try {
-    if (downloadKey) {
-      const btn = document.getElementById('btnImportDl');
-      if (btn && !btn.__wired) {
-        btn.__wired = true;
-        btn.addEventListener('click', async () => {
-          try {
-            const url = await presignDownload(downloadKey);
-            window.open(url, '_blank', 'noopener,noreferrer');
-          } catch (e) {
-            try { window.__toast && window.__toast(e?.message || 'Download failed'); } catch {}
-          }
-        });
-      }
-    }
-  } catch {}
-
-  GE();
 }
 
 // NEW: Electronic signatures evidence viewer
