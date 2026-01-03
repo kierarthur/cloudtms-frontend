@@ -44687,16 +44687,18 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
             <div class="controls" style="display:flex; gap:12px; flex-wrap:wrap;">
               <div style="flex:1; min-width:240px;">
                 <div class="mini" style="opacity:.85; margin-bottom:6px;">Nurse</div>
-                ${nurseUrl
-                  ? `<img src="${nurseUrl}" style="max-width:100%; max-height:260px; border:1px solid var(--line); border-radius:8px; background:#000;" />`
-                  : `<div class="mini" style="opacity:.85;">Not available</div>`}
+               ${nurseUrl
+  ? `<img src="${nurseUrl}" style="max-width:100%; max-height:260px; border:1px solid var(--line); border-radius:8px; background:#fff;" />`
+  : `<div class="mini" style="opacity:.85;">Not available</div>`}
               </div>
 
               <div style="flex:1; min-width:240px;">
                 <div class="mini" style="opacity:.85; margin-bottom:6px;">Authoriser</div>
                 ${authUrl
-                  ? `<img src="${authUrl}" style="max-width:100%; max-height:260px; border:1px solid var(--line); border-radius:8px; background:#000;" />`
+                  ? `<img src="${authUrl}" style="max-width:100%; max-height:260px; border:1px solid var(--line); border-radius:8px; background:#fff;" />`
                   : `<div class="mini" style="opacity:.85;">Not available</div>`}
+
+
               </div>
             </div>
           </div>
