@@ -41732,16 +41732,32 @@ async function openTimesheetEvidenceViewerSignatures(ev) {
           <div class="controls" style="display:flex; gap:12px; flex-wrap:wrap;">
             <div style="flex:1; min-width:240px;">
               <div class="mini" style="opacity:.85; margin-bottom:6px;">Nurse signature</div>
-              ${nurseUrl
-                ? `<img src="${nurseUrl}" style="max-width:100%; max-height:260px; border:1px solid var(--line); border-radius:8px; background:#000;" />`
-                : `<div class="mini" style="opacity:.85;">Not available</div>`}
+          ${nurseUrl
+  ? `
+    <div style="background:#fff; padding:10px; border:1px solid var(--line); border-radius:8px; display:inline-block;">
+      <img
+        src="${nurseUrl}"
+        style="display:block; max-width:100%; max-height:260px; background:transparent; filter:brightness(0) contrast(1.35);"
+      />
+    </div>
+  `
+  : `<div class="mini" style="opacity:.85;">Not available</div>`}
+
             </div>
 
             <div style="flex:1; min-width:240px;">
               <div class="mini" style="opacity:.85; margin-bottom:6px;">Authoriser signature</div>
-              ${authUrl
-                ? `<img src="${authUrl}" style="max-width:100%; max-height:260px; border:1px solid var(--line); border-radius:8px; background:#000;" />`
-                : `<div class="mini" style="opacity:.85;">Not available</div>`}
+            ${authUrl
+  ? `
+    <div style="background:#fff; padding:10px; border:1px solid var(--line); border-radius:8px; display:inline-block;">
+      <img
+        src="${authUrl}"
+        style="display:block; max-width:100%; max-height:260px; background:transparent; filter:brightness(0) contrast(1.35);"
+      />
+    </div>
+  `
+  : `<div class="mini" style="opacity:.85;">Not available</div>`}
+
             </div>
           </div>
         </div>
