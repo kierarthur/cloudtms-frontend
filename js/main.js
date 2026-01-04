@@ -14350,22 +14350,22 @@ function renderCandidateTab(key, row = {}) {
           { id:'pay-method' }
         )}
 
-        <!-- Rota key name: read-only, not posted -->
-        <div class="row">
-          <label>Rota key name</label>
-          <div class="controls">
-            <input
-              class="input"
-              value="${enc(row.key_norm || '')}"
-              disabled
-              readonly
-              style="opacity:.7"
-            />
-            <div class="hint">
-              This is the candidate's normalised rota key and is managed by the system / mappings.
-            </div>
-          </div>
-        </div>
+     <!-- Global Candidate Key (GCK): editable (so we can correct/clear mappings) -->
+<div class="row">
+  <label>Global Candidate Key (GCK)</label>
+  <div class="controls">
+    <input
+      class="input"
+      name="key_norm"
+      value="${enc(row.key_norm || '')}"
+      placeholder=""
+    />
+    <div class="hint">
+      Links this candidate to the rota identity (GCK). You can correct or clear this if it was mapped incorrectly.
+    </div>
+  </div>
+</div>
+
 
         <!-- NHSP / HealthRoster aliases (from hr_name_mappings) -->
         <div class="row">
@@ -14491,39 +14491,30 @@ function renderCandidateTab(key, row = {}) {
   }
 
   // Care Packages tab (was "Rates")
-  if (key === 'rates') return html(`
-    <div class="form" id="tab-rates">
-      <!-- Global Candidate Key (GCK) -->
-      <div class="row">
-        <label>Global Candidate Key (GCK)</label>
-        <div class="controls">
-          <input class="input"
-                 name="key_norm"
-                 value="${escapeHtml(row.key_norm || '')}"
-                 placeholder="" />
-          <div class="hint">
-            This links the candidate record to the Google Sheets Rota.
-          </div>
-        </div>
-      </div>
-
-      <!-- Rota Roles editor -->
-      <div class="row">
-        <label>Rota Roles</label>
+ if (key === 'rates') return html(`
+  <div class="form" id="tab-rates" style="grid-template-columns:minmax(0,1fr);">
+    <!-- Rota Roles editor -->
+    <div class="row" style="grid-column:1/-1;">
+      <label>Rota Roles</label>
+      <div class="controls">
         <div id="rolesEditor" data-init="1"></div>
         <div class="hint">
           This links the candidate job role to a Care Package rota only.
           If this candidate is not working on Care Packages, you can ignore this.
         </div>
       </div>
+    </div>
 
-      <!-- Candidate rate overrides table (unchanged wiring) -->
-      <div class="row">
-        <label>Care Package Rates</label>
-        <div id="ratesTable"></div>
+    <!-- Candidate rate overrides table -->
+    <div class="row" style="grid-column:1/-1;">
+      <label>Care Package Rates</label>
+      <div class="controls">
+        <div id="ratesTable" class="rates-table-wrap"></div>
       </div>
     </div>
-  `);
+  </div>
+`);
+
 
   if (key === 'pay') return html(`
     <div class="form" id="tab-pay" data-candidate-id="${row.id || ''}">
@@ -16075,10 +16066,30 @@ async function openCandidate(row) {
         clearBankOnPayload(payload);
       }
 
-      // Remove empty strings before sending
-      for (const k of Object.keys(payload)) {
-        if (payload[k] === '') delete payload[k];
-      }
+   // ✅ Allow clearing key_norm + normalise it
+if (Object.prototype.hasOwnProperty.call(payload, 'key_norm')) {
+  const v = String(payload.key_norm ?? '').trim();
+  payload.key_norm = v ? v.toLowerCase() : null; // null clears it in DB
+}
+
+// ✅ Remove empty strings before sending
+// - keep key_norm as-is (including null when user cleared it)
+// - do NOT allow first/last/display_name to be cleared (convert "" → keep existing / drop from payload)
+for (const k of Object.keys(payload)) {
+  if (k === 'key_norm') continue;
+
+  // Prevent clearing required identity fields
+  if (k === 'first_name' || k === 'last_name' || k === 'display_name') {
+    if (payload[k] === '' || payload[k] == null) {
+      delete payload[k]; // keep existing DB value
+    }
+    continue;
+  }
+
+  if (payload[k] === '') delete payload[k];
+}
+
+
 
       // Sync Job Titles + Registration + DOB from candidateMainModel (unchanged)
       try {
@@ -25042,8 +25053,22 @@ async function openClientRateModal(client_id, existing) {
       const umb  = numOrNull(getIn(`#clientRateForm input[name="umb_${bucket}"]`)?.value);
       const chg  = numOrNull(getIn(`#clientRateForm input[name="charge_${bucket}"]`)?.value);
 
-      const payeMargin = (paye!=null && chg!=null) ? (chg - (paye * mult)) : null;
-      const umbMargin  = (umb!=null  && chg!=null) ? (chg - umb)          : null;
+  const nOrNull = (x) => {
+  const n = Number(x);
+  return Number.isFinite(n) ? n : null;
+};
+
+const payeN = nOrNull(paye);
+const umbN  = nOrNull(umb);
+const chgN  = nOrNull(chg);
+
+// ✅ Hourly margins
+// PAYE margin includes employer NI multiplier
+const payeMargin = (payeN != null && chgN != null) ? (chgN - (payeN * mult)) : null;
+// Umbrella margin is straight charge - pay
+const umbMargin  = (umbN  != null && chgN != null) ? (chgN - umbN)          : null;
+
+
 
       const spP = byId(`m_paye_${bucket}`), spU = byId(`m_umb_${bucket}`);
       if (spP) spP.textContent = fmt2(payeMargin);
@@ -25370,22 +25395,32 @@ async function renderClientRatesTable() {
   const LOG_RATES = !!window.__LOG_RATES;
   const DBG = (...a)=> { if (LOG_RATES) console.log('[RATES][renderClientRatesTable]', ...a); };
 
-  const div = byId('clientRates'); if (!div) { DBG('no #clientRates host, bail'); return; }
+  const div = byId('clientRates');
+  if (!div) { DBG('no #clientRates host, bail'); return; }
 
-  const ctx = window.modalCtx;
+  // ✅ force full-width even if the parent tab is a 2-col grid
+  try {
+    div.style.gridColumn = '1 / -1';
+    div.style.width = '100%';
+    div.style.minWidth = '0';
+  } catch {}
+
+  const ctx = window.modalCtx || {};
   const staged = Array.isArray(ctx.ratesState) ? ctx.ratesState : [];
   const frame = _currentFrame();
   const parentEditable = frame && (frame.mode === 'edit' || frame.mode === 'create');
 
   DBG('ENTRY', { stagedLen: staged.length, parentEditable, ctxEntity: ctx?.entity });
 
+  // ERNI multiplier for PAYE margins (same logic as elsewhere)
   async function _erniMultiplier(){
     if (typeof window.__ERNI_MULT__ === 'number') return window.__ERNI_MULT__;
     try {
       if (typeof getSettingsCached === 'function') {
         const s = await getSettingsCached();
         let p = s?.erni_pct ?? s?.employers_ni_percent ?? 0;
-        p = Number(p) || 0; if (p > 1) p = p/100;
+        p = Number(p) || 0;
+        if (p > 1) p = p / 100;
         window.__ERNI_MULT__ = 1 + p;
         return window.__ERNI_MULT__;
       }
@@ -25394,10 +25429,26 @@ async function renderClientRatesTable() {
     return 1;
   }
   const mult = await _erniMultiplier();
-  const fmt = v => (v==null || Number.isNaN(v)) ? '—' : (Math.round(v*100)/100).toFixed(2);
+
+  // Formatters
+  const fmt2 = (v) => (v==null || Number.isNaN(v)) ? '—' : (Math.round(Number(v)*100)/100).toFixed(2);
+
+  // ✅ FIX: Client rates are HOURLY — margin must be HOURLY (not "daily")
+  // PAYE margin includes ERNI multiplier: charge - (pay * mult)
+  // UMB margin: charge - pay
+  const calcMargin = ({ charge, pay, method }) => {
+    const ch = (charge == null ? null : Number(charge));
+    const py = (pay    == null ? null : Number(pay));
+    if (!Number.isFinite(ch) || !Number.isFinite(py)) return null;
+
+    const m = String(method || '').toUpperCase();
+    if (m === 'PAYE') return ch - (py * (Number(mult) || 1));
+    return ch - py; // UMBRELLA
+  };
 
   div.innerHTML = '';
 
+  // Empty state
   if (!staged.length) {
     DBG('no staged rows → show empty state');
     div.innerHTML = `
@@ -25421,150 +25472,167 @@ async function renderClientRatesTable() {
     return;
   }
 
-  // Build a quick baseline lookup (used only for the new last-column status)
-  const baseline = Array.isArray(ctx.ratesBaseline) ? ctx.ratesBaseline : [];
-  const baselineById = new Map(baseline.filter(b => b && b.id).map(b => [String(b.id), b]));
-  const stagedDelSet = (ctx.ratesStagedDeletes instanceof Set) ? ctx.ratesStagedDeletes : new Set();
-
-  const cols = [
-    'status',
-    'role','band',
-    'paye_day','paye_night','paye_sat','paye_sun','paye_bh',
-    'umb_day','umb_night','umb_sat','umb_sun','umb_bh',
-    'charge_day','charge_night','charge_sat','charge_sun','charge_bh',
-    'paye_margin_day','paye_margin_night','paye_margin_sat','paye_margin_sun','paye_margin_bh',
-    'umb_margin_day','umb_margin_night','umb_margin_sat','umb_margin_sun','umb_margin_bh',
-    'date_from','date_to',
-    // NEW: final column to reflect staged change status
-    'change_status'
-  ];
-  const headers = [
-    'Status',
-    'Role','Band',
-    'PAYE Day','PAYE Night','PAYE Sat','PAYE Sun','PAYE BH',
-    'UMB Day','UMB Night','UMB Sat','UMB Sun','UMB BH',
-    'Charge Day','Charge Night','Charge Sat','Charge Sun','Charge BH',
-    'PAYE M Day','PAYE M Night','PAYE M Sat','PAYE M Sun','PAYE M BH',
-    'UMB M Day','UMB M Night','UMB M Sat','UMB M Sun','UMB M BH',
-    'From','To',
-    // NEW header aligned with the final column
-    'Change'
+  // ✅ SECTION-PER-WINDOW LAYOUT (Role/Band/From/To header + 5-row table)
+  const SHIFT_LABELS = [
+    ['day',   'Day'],
+    ['night', 'Night'],
+    ['sat',   'Sat'],
+    ['sun',   'Sun'],
+    ['bh',    'BH']
   ];
 
-  const tbl   = document.createElement('table'); tbl.className='grid';
-  const thead = document.createElement('thead');
-  const trh   = document.createElement('tr');
-  headers.forEach(h => { const th=document.createElement('th'); th.textContent = h; trh.appendChild(th); });
-  thead.appendChild(trh);
-  tbl.appendChild(thead);
+  // Group by window keys (role+band+date_from+date_to)
+  const keyFor = (r) => [
+    String(r.role || ''),
+    String(r.band ?? ''),
+    String(r.date_from || ''),
+    String(r.date_to || '')
+  ].join('|');
 
-  const tb = document.createElement('tbody');
+  const groups = new Map();
+  for (const r of staged) {
+    if (!r) continue;
+    if (r.__delete) continue; // hide pending deletes from main view (your prior preference)
+    const k = keyFor(r);
+    if (!groups.has(k)) groups.set(k, r);
+  }
 
-  // Helper to detect field differences against baseline
-  const DIFF_FIELDS = [
-    'role','band','date_from','date_to',
-    'charge_day','charge_night','charge_sat','charge_sun','charge_bh',
-    'paye_day','paye_night','paye_sat','paye_sun','paye_bh',
-    'umb_day','umb_night','umb_sat','umb_sun','umb_bh'
-  ];
-  const differsFromBaseline = (row) => {
-    if (!row || !row.id) return false; // creations are handled separately
-    const base = baselineById.get(String(row.id));
-    if (!base) return true; // no baseline match means it's effectively different
-    for (const f of DIFF_FIELDS) {
-      const a = row[f]; const b = base[f];
-      const na = (a === '' || a == null) ? null : a;
-      const nb = (b === '' || b == null) ? null : b;
-      if (String(na) !== String(nb)) return true;
-    }
-    return false;
-  };
-
-  // 2dp formatter for numeric cells that aren’t margins
-  const to2 = v => (v==null || v==='') ? '—' : fmt(Number(v));
-
-  staged.forEach((r, idx) => {
-    const tr = document.createElement('tr');
-    if (r.disabled_at_utc) tr.classList.add('row-disabled');
-    if (r.__delete) tr.classList.add('row-delete-pending');
-
-    if (parentEditable) tr.ondblclick = () => {
-      const cid = (ctx && ctx.data && (ctx.data.id || ctx.data.client_id)) || r.client_id || null;
-      return openClientRateModal(cid, r);
-    };
-
-    cols.forEach(c => {
-      const td = document.createElement('td');
-
-      if (c === 'status') {
-        if (r.__delete) {
-          td.innerHTML = `<span class="pill tag-fail" aria-label="Pending delete">🗑 Pending delete (save to confirm)</span>`;
-        } else if (r.disabled_at_utc) {
-          const pending = r.__toggle ? ' (pending save)' : '';
-          td.innerHTML = `<span class="pill tag-fail" aria-label="Disabled">❌ Disabled${pending}</span>`;
-        } else {
-          const pending = r.__toggle ? ' (pending save)' : '';
-          td.innerHTML = `<span class="pill tag-ok" aria-label="Active">✓ Active${pending}</span>`;
-        }
-
-      } else if (c.startsWith('paye_margin_') || c.startsWith('umb_margin_')) {
-        const bucket = c.split('_').pop();
-        const charge = r[`charge_${bucket}`];
-        const paye   = r[`paye_${bucket}`];
-        const umb    = r[`umb_${bucket}`];
-
-        // ✅ Use global helper when present; fallback preserves existing behaviour
-        let val = null;
-        if (typeof calcDailyMargin === 'function') {
-          if (c.startsWith('paye_margin_')) {
-            val = calcDailyMargin({ bucket, charge, pay: paye, method: 'PAYE', erniMultiplier: mult });
-          } else {
-            val = calcDailyMargin({ bucket, charge, pay: umb,  method: 'UMBRELLA' });
-          }
-        } else {
-          if (c.startsWith('paye_margin_')) val = (charge!=null && paye!=null) ? (charge - (paye * mult)) : null;
-          else                               val = (charge!=null && umb!=null)  ? (charge - umb)          : null;
-        }
-        td.textContent = fmt(val);
-
-      } else if (
-        c.startsWith('charge_') ||
-        c.startsWith('paye_')   ||
-        c.startsWith('umb_')
-      ) {
-        // 2dp formatting for charge_* and paye_*/umb_* columns
-        td.textContent = to2(r[c]);
-
-      } else if (c === 'change_status') {
-        let label = '';
-        if (r.__delete || (r.id && stagedDelSet.has(String(r.id)))) {
-          label = 'Pending delete (save to confirm)';
-        } else if (r && r.__toggle === 'enable') {
-          label = 'Pending enable';
-        } else if (r && r.__toggle === 'disable') {
-          label = 'Pending disable';
-        } else if (!r.id) {
-          label = 'Pending create';
-        } else if (differsFromBaseline(r)) {
-          label = 'Pending update';
-        } else {
-          label = '';
-        }
-        td.textContent = label;
-
-      } else {
-        td.textContent = formatDisplayValue(c, r[c]);
-      }
-
-      tr.appendChild(td);
-    });
-
-    tb.appendChild(tr);
-    if (idx === 0) DBG('first row preview', r);
+  const groupRows = Array.from(groups.values()).sort((a, b) => {
+    const ar = String(a.role || ''), br = String(b.role || '');
+    if (ar !== br) return ar.localeCompare(br);
+    const ad = String(a.date_from || ''), bd = String(b.date_from || '');
+    return ad.localeCompare(bd);
   });
 
-  tbl.appendChild(tb);
+  const wrap = document.createElement('div');
+  wrap.style.display = 'flex';
+  wrap.style.flexDirection = 'column';
+  wrap.style.gap = '12px';
+  wrap.style.width = '100%';
+  wrap.style.minWidth = '0';
 
+  groupRows.forEach((r) => {
+    const roleText = String(r.role || '').trim();
+    const bandText = (r.band ?? null) ? String(r.band) : '';
+    const fromText = r.date_from ? formatIsoToUk(String(r.date_from)) : '';
+    const toText   = r.date_to   ? formatIsoToUk(String(r.date_to))   : 'Open-ended';
+
+    const card = document.createElement('div');
+    // Use your existing “card” style if present; otherwise inline still looks fine
+    card.className = 'card';
+    card.style.padding = '12px';
+    card.style.border = '1px solid var(--line)';
+    card.style.borderRadius = '12px';
+    card.style.background = '#0c172d';
+    card.style.width = '100%';
+    card.style.minWidth = '0';
+
+    // Header (Role/Band/From/To + Edit)
+    const header = document.createElement('div');
+    header.style.display = 'flex';
+    header.style.alignItems = 'flex-start';
+    header.style.justifyContent = 'space-between';
+    header.style.gap = '12px';
+    header.style.marginBottom = '10px';
+
+    const left = document.createElement('div');
+    left.style.minWidth = '0';
+    left.innerHTML = `
+      <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;">
+        <div style="font-weight:800;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">
+          ${escapeHtml(roleText || '—')}
+        </div>
+        ${bandText ? `<span class="pill">${escapeHtml(bandText)}</span>` : ``}
+        ${r.disabled_at_utc ? `<span class="pill tag-fail">Disabled</span>` : `<span class="pill tag-ok">Active</span>`}
+      </div>
+      <div class="hint" style="margin-top:4px;">
+        <span style="opacity:.9">From:</span> ${escapeHtml(fromText || '—')}
+        <span style="opacity:.6"> · </span>
+        <span style="opacity:.9">To:</span> ${escapeHtml(toText)}
+      </div>
+    `;
+
+    const right = document.createElement('div');
+    right.style.flex = '0 0 auto';
+
+    if (parentEditable) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'btn mini';
+      btn.textContent = 'Edit';
+      btn.setAttribute('data-edit-client-rate', String(r.id || r.__localKey || ''));
+      right.appendChild(btn);
+    }
+
+    header.appendChild(left);
+    header.appendChild(right);
+
+    // Table for this window: Shift + PAYE + Umb + Charge + PAYE Margin + Umb Margin
+    const tbl = document.createElement('table');
+    tbl.className = 'grid';
+    tbl.style.width = '100%';
+    tbl.style.tableLayout = 'auto';
+
+    const thead = document.createElement('thead');
+    thead.innerHTML = `
+      <tr>
+        <th style="min-width:110px">Shift type</th>
+        <th style="min-width:130px">PAYE pay</th>
+        <th style="min-width:150px">Umbrella pay</th>
+        <th style="min-width:170px">Total charge (ex VAT)</th>
+        <th style="min-width:140px">Margin (PAYE)</th>
+        <th style="min-width:160px">Margin (Umbrella)</th>
+      </tr>
+    `;
+    tbl.appendChild(thead);
+
+    const tb = document.createElement('tbody');
+    SHIFT_LABELS.forEach(([bucket, label]) => {
+      const tr = document.createElement('tr');
+
+      const paye   = r[`paye_${bucket}`];
+      const umb    = r[`umb_${bucket}`];
+      const charge = r[`charge_${bucket}`];
+
+      const mPaye = calcMargin({ charge, pay: paye, method: 'PAYE' });
+      const mUmb  = calcMargin({ charge, pay: umb,  method: 'UMBRELLA' });
+
+      const tdShift = document.createElement('td');
+      tdShift.textContent = label;
+      tr.appendChild(tdShift);
+
+      const tdPaye = document.createElement('td');
+      tdPaye.textContent = fmt2(paye);
+      tr.appendChild(tdPaye);
+
+      const tdUmb = document.createElement('td');
+      tdUmb.textContent = fmt2(umb);
+      tr.appendChild(tdUmb);
+
+      const tdCharge = document.createElement('td');
+      tdCharge.textContent = fmt2(charge);
+      tr.appendChild(tdCharge);
+
+      const tdMPaye = document.createElement('td');
+      tdMPaye.textContent = fmt2(mPaye);
+      tr.appendChild(tdMPaye);
+
+      const tdMUmb = document.createElement('td');
+      tdMUmb.textContent = fmt2(mUmb);
+      tr.appendChild(tdMUmb);
+
+      tb.appendChild(tr);
+    });
+    tbl.appendChild(tb);
+
+    card.appendChild(header);
+    card.appendChild(tbl);
+    wrap.appendChild(card);
+  });
+
+  div.appendChild(wrap);
+
+  // Actions footer
   const actions = document.createElement('div');
   actions.className = 'actions';
   actions.innerHTML = `
@@ -25573,10 +25641,35 @@ async function renderClientRatesTable() {
     </button>
     ${parentEditable ? '' : '<span class="hint">Read-only. Click “Edit” in the main dialog to add/modify windows.</span>'}
   `;
-
-  div.appendChild(tbl);
   div.appendChild(actions);
-  DBG('EXIT render', { stagedLen: staged.length });
+
+  // Wire Add
+  const addBtn = byId('btnAddClientRate');
+  if (addBtn && parentEditable) {
+    addBtn.onclick = () => {
+      const cid = (ctx && ctx.data && (ctx.data.id || ctx.data.client_id)) || null;
+      return openClientRateModal(cid);
+    };
+  }
+
+  // Wire Edit (one per window)
+  if (parentEditable) {
+    div.querySelectorAll('button[data-edit-client-rate]').forEach(btn => {
+      if (btn.__wired) return;
+      btn.__wired = true;
+      btn.onclick = () => {
+        const cid = (ctx && ctx.data && (ctx.data.id || ctx.data.client_id)) || null;
+        const idOrKey = btn.getAttribute('data-edit-client-rate');
+        const row =
+          staged.find(x => x && x.id && String(x.id) === String(idOrKey)) ||
+          staged.find(x => x && x.__localKey && String(x.__localKey) === String(idOrKey)) ||
+          null;
+        if (cid && row) openClientRateModal(cid, row);
+      };
+    });
+  }
+
+  DBG('EXIT render', { groups: groupRows.length, stagedLen: staged.length });
 }
 
 
@@ -27078,16 +27171,23 @@ persistCurrentTabState() {
     return out;
   };
 
-   if (this.currentTabKey === 'main') {
-    const sel = byId('tab-main') ? '#tab-main' : (byId('contractForm') ? '#contractForm' : null);
-    if (sel) {
-      const c = collectForm(sel);
-      // keep existing behavior for most fields, then re-add schedule blanks explicitly
-      const merged = { ...stripEmpty(c) };
-      const sched  = keepScheduleBlanks(c);
-      fs.main = { ...(fs.main||{}), ...merged, ...sched };
+  if (this.currentTabKey === 'main') {
+  const sel = byId('tab-main') ? '#tab-main' : (byId('contractForm') ? '#contractForm' : null);
+  if (sel) {
+    const c = collectForm(sel);
+
+    const merged = { ...stripEmpty(c) };
+
+    // ✅ Preserve GCK (key_norm) even when user clears it ('')
+    if (Object.prototype.hasOwnProperty.call(c, 'key_norm')) {
+      merged.key_norm = (c.key_norm == null) ? '' : String(c.key_norm);
     }
+
+    const sched  = keepScheduleBlanks(c);
+    fs.main = { ...(fs.main||{}), ...merged, ...sched };
   }
+}
+
 
  if (this.currentTabKey === 'pay' && byId('tab-pay')) {
   const c = collectForm('#tab-pay');
@@ -29072,17 +29172,22 @@ function renderTop() {
       console.log('[CONTRACTS][MODAL] contract-modal class applied to #modal (inherited:', parentIsContracts, ')');
     }
 
-    // Job Titles: apply narrower modal sizing
-    const isJobTitles = (top.kind === 'job-titles');
-    modalNode.classList.toggle('jobtitles-modal', !!isJobTitles);
+   // Job Titles: apply narrower modal sizing
+const isJobTitles = (top.kind === 'job-titles');
+modalNode.classList.toggle('jobtitles-modal', !!isJobTitles);
 
-    // Evidence replace: temporarily use a larger modal footprint
-    const isEvidenceReplace = (top.kind === 'timesheet-evidence-replace');
-    modalNode.classList.toggle('evidence-modal', !!isEvidenceReplace);
+// Evidence replace: temporarily use a larger modal footprint
+const isEvidenceReplace = (top.kind === 'timesheet-evidence-replace');
+modalNode.classList.toggle('evidence-modal', !!isEvidenceReplace);
 
-    // Candidate Advances: use a slightly wider modal footprint
-    const isAdvances = (top.kind === 'candidate-advances');
-    modalNode.classList.toggle('advances-modal', !!isAdvances);
+// Candidate Advances: use a slightly wider modal footprint
+const isAdvances = (top.kind === 'candidate-advances');
+modalNode.classList.toggle('advances-modal', !!isAdvances);
+
+// ✅ Resolve Timesheets: larger/taller footprint (kills the unnecessary scrollbar)
+const isResolve = (top.kind === 'timesheets-resolve');
+modalNode.classList.toggle('resolve-modal', !!isResolve);
+
   }
 
 
@@ -36371,10 +36476,6 @@ function renderClientHospitalsTable() {
   }
 }
 
-
-
-// =================== HOSPITALS TABLE (UPDATED: staged delete & edit) ===================
-
 async function renderClientSettingsUI(settingsObj){
   const div = byId('clientSettings'); if (!div) return;
 
@@ -36384,27 +36485,39 @@ async function renderClientSettingsUI(settingsObj){
     ? ctx.clientSettingsState
     : (settingsObj && typeof settingsObj === 'object' ? settingsObj : {});
 
+  // ✅ Robust: accepts "06:00", "06:00:00", "06:00:00+00", etc
   const _toHHMM = (v) => {
-    if (!v) return '';
+    if (v == null) return '';
     const s = String(v).trim();
-    if (/^\d{2}:\d{2}(:\d{2})?$/.test(s)) return s.slice(0,5);
-    return s;
+    const m = s.match(/^(\d{2}:\d{2})/);
+    return m ? m[1] : s;
   };
 
+  // ✅ Time keys (used for all-or-nothing rule + clear-to-global behaviour)
+  const TIME_KEYS = [
+    'day_start','day_end',
+    'night_start','night_end',
+    'sat_start','sat_end',
+    'sun_start','sun_end',
+    'bh_start','bh_end'
+  ];
+
+  // ✅ Seed WITHOUT forcing defaults. Blank means “inherit global”.
   const seed = {
     ...initial,
 
     timezone_id : initial.timezone_id ?? 'Europe/London',
-    day_start   : _toHHMM(initial.day_start)   || '06:00',
-    day_end     : _toHHMM(initial.day_end)     || '20:00',
-    night_start : _toHHMM(initial.night_start) || '20:00',
-    night_end   : _toHHMM(initial.night_end)   || '06:00',
-    sat_start   : _toHHMM(initial.sat_start)   || '00:00',
-    sat_end     : _toHHMM(initial.sat_end)     || '00:00',
-    sun_start   : _toHHMM(initial.sun_start)   || '00:00',
-    sun_end     : _toHHMM(initial.sun_end)     || '00:00',
-    bh_start    : _toHHMM(initial.bh_start)    || '',
-    bh_end      : _toHHMM(initial.bh_end)      || '',
+
+    day_start   : _toHHMM(initial.day_start),
+    day_end     : _toHHMM(initial.day_end),
+    night_start : _toHHMM(initial.night_start),
+    night_end   : _toHHMM(initial.night_end),
+    sat_start   : _toHHMM(initial.sat_start),
+    sat_end     : _toHHMM(initial.sat_end),
+    sun_start   : _toHHMM(initial.sun_start),
+    sun_end     : _toHHMM(initial.sun_end),
+    bh_start    : _toHHMM(initial.bh_start),
+    bh_end      : _toHHMM(initial.bh_end),
 
     week_ending_weekday:
       Number.isInteger(Number(initial.week_ending_weekday))
@@ -36420,10 +36533,16 @@ async function renderClientSettingsUI(settingsObj){
     hr_weekly_behaviour: initial.hr_weekly_behaviour || ''
   };
 
+  // ✅ Preserve blanks through canonicalise (so UI can represent “inherit global”)
+  const seedBlankTimeKeys = TIME_KEYS.filter(k => String(seed[k] ?? '').trim() === '');
+
   let s = canonicalizeClientSettings(seed);
 
   // Ensure the new key is always preserved and never dropped/overwritten by canonicalizeClientSettings()
   s.auto_invoice_default = !!seed.auto_invoice_default;
+
+  // ✅ restore blanks (so they inherit global)
+  seedBlankTimeKeys.forEach(k => { s[k] = ''; });
 
   ctx.clientSettingsState = { ...initial, ...s };
 
@@ -36658,6 +36777,22 @@ async function renderClientSettingsUI(settingsObj){
             <div class="controls"><input class="input" name="timezone_id" value="${String(s.timezone_id||'')}" /></div>
           </div>
 
+          <!-- ✅ NEW: clear-to-global button -->
+          <div class="row">
+            <label>Shift times</label>
+            <div class="controls">
+              <button type="button" class="btn mini" id="btnClearClientShiftTimes">
+                Clear shift times and default to global shift times
+              </button>
+              <div class="hint mini" style="opacity:0.9;margin-top:6px;">
+                Clearing all times means this client will inherit the global shift pattern.
+              </div>
+              <div class="hint mini" style="opacity:0.85;margin-top:4px;">
+                Rule: you can either set <b>all</b> shift times, or leave <b>all</b> blank.
+              </div>
+            </div>
+          </div>
+
           ${pairTimeRow('Day shift',   'day_start',   s.day_start,   'day_end',   s.day_end)}
           ${pairTimeRow('Night shift', 'night_start', s.night_start, 'night_end', s.night_end)}
           ${pairTimeRow('Saturday',    'sat_start',   s.sat_start,   'sat_end',   s.sat_end)}
@@ -36676,14 +36811,13 @@ async function renderClientSettingsUI(settingsObj){
 
   const root = document.getElementById('clientSettingsForm');
   const hhmm = /^([01]\d|2[0-3]):[0-5]\d$/;
-  const timeKeys = ['day_start','day_end','night_start','night_end','sat_start','sat_end','sun_start','sun_end','bh_start','bh_end'];
 
   let lastValid = { ...s };
 
   if (root.__wired) {
     root.removeEventListener('input',  root.__syncSoft, true);
     root.removeEventListener('change', root.__syncValidate, true);
-    timeKeys.forEach(k=>{
+    TIME_KEYS.forEach(k=>{
       const el = root.querySelector(`input[name="${k}"]`);
       if (el && el.__syncValidate) el.removeEventListener('blur', el.__syncValidate, true);
     });
@@ -36717,7 +36851,8 @@ async function renderClientSettingsUI(settingsObj){
     const vals = collectForm('#clientSettingsForm', false);
     let next = { ...prev, ...vals };
 
-    timeKeys.forEach(k=>{
+    // Validate time formats for non-blank values only
+    TIME_KEYS.forEach(k=>{
       const v = String(vals[k] ?? '').trim();
       if (v && !hhmm.test(v)) {
         if (soft) next[k] = lastValid[k];
@@ -36728,8 +36863,34 @@ async function renderClientSettingsUI(settingsObj){
       }
     });
 
+    // ✅ All-or-nothing rule (enforced on validate, not while typing)
+    const blankTimeKeys = TIME_KEYS.filter(k => String(next[k] ?? '').trim() === '');
+    const hasSomeBlank = (blankTimeKeys.length > 0 && blankTimeKeys.length < TIME_KEYS.length);
+
+    if (!soft && hasSomeBlank) {
+      // Revert to last valid (either all filled or all blank)
+      TIME_KEYS.forEach(k => {
+        next[k] = String(lastValid[k] ?? '');
+        const el = root.querySelector(`input[name="${k}"]`);
+        if (el) el.value = String(lastValid[k] ?? '');
+      });
+
+      alert(
+        'Shift times must be either:\n' +
+        '• all filled, or\n' +
+        '• all blank (to inherit global).\n\n' +
+        'Use “Clear shift times and default to global shift times” to blank them all.'
+      );
+
+      // keep state unchanged (lastValid already represents it)
+      ctx.clientSettingsState = { ...lastValid };
+      return;
+    }
+
     const w = Number(vals.week_ending_weekday);
-    next.week_ending_weekday = Number.isInteger(w) ? String(Math.min(6, Math.max(0, w))) : lastValid.week_ending_weekday;
+    next.week_ending_weekday = Number.isInteger(w)
+      ? String(Math.min(6, Math.max(0, w)))
+      : lastValid.week_ending_weekday;
 
     // Only read default_submission_mode if it exists in the DOM (it will be hidden for NHSP / HR CREATE)
     const dsmDom = root.querySelector('select[name="default_submission_mode"]');
@@ -36759,12 +36920,21 @@ async function renderClientSettingsUI(settingsObj){
       if (v !== null) next[k] = v;
     });
 
-    const keepAutoInv = (typeof next.auto_invoice_default === 'boolean') ? next.auto_invoice_default : !!prev.auto_invoice_default;
+    const keepAutoInv =
+      (typeof next.auto_invoice_default === 'boolean')
+        ? next.auto_invoice_default
+        : !!prev.auto_invoice_default;
+
+    // ✅ Preserve blanks through canonicalise
+    const blankKeysNow = TIME_KEYS.filter(k => String(next[k] ?? '').trim() === '');
 
     next = canonicalizeClientSettings(next);
 
     // Ensure new key always survives canonicalisation
     next.auto_invoice_default = keepAutoInv;
+
+    // ✅ restore blanks (so they inherit global)
+    blankKeysNow.forEach(k => { next[k] = ''; });
 
     const gatePrev = `${String(prev.weekly_mode||'').toUpperCase()}|${String(prev.hr_weekly_behaviour||'').toUpperCase()}`;
     const gateNext = `${String(next.weekly_mode||'').toUpperCase()}|${String(next.hr_weekly_behaviour||'').toUpperCase()}`;
@@ -36788,7 +36958,7 @@ async function renderClientSettingsUI(settingsObj){
     const vals = collectForm('#clientSettingsForm', false);
     let hadError = false;
 
-    timeKeys.forEach(k=>{
+    TIME_KEYS.forEach(k=>{
       const v = String(vals[k] ?? '').trim();
       if (v && !hhmm.test(v)) hadError = true;
     });
@@ -36807,11 +36977,31 @@ async function renderClientSettingsUI(settingsObj){
     }
   };
 
+  // ✅ Wire clear-to-global button
+  const btnClear = root.querySelector('#btnClearClientShiftTimes');
+  if (btnClear && !btnClear.__wired) {
+    btnClear.__wired = true;
+    btnClear.addEventListener('click', () => {
+      const frame = _currentFrame();
+      if (!frame || frame.mode !== 'edit') return;
+
+      TIME_KEYS.forEach(k => {
+        const el = root.querySelector(`input[name="${k}"]`);
+        if (el) el.value = '';
+      });
+
+      // Update staged state (blank means inherit global)
+      applyFromDOM(false);
+      try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
+    });
+  }
+
   root.__syncSoft = syncSoft;
   root.__syncValidate = syncValidate;
   root.addEventListener('input',  syncSoft, true);
   root.addEventListener('change', syncValidate, true);
-  timeKeys.forEach(k=>{
+
+  TIME_KEYS.forEach(k=>{
     const el = root.querySelector(`input[name="${k}"]`);
     if (el) {
       el.__syncValidate = syncValidate;
@@ -36819,8 +37009,12 @@ async function renderClientSettingsUI(settingsObj){
       el.setAttribute('step', '60');
     }
   });
+
   root.__wired = true;
 }
+
+
+// =================== HOSPITALS TABLE (UPDATED: staged delete & edit) ===================
 
 
 // ---- Umbrella modal
