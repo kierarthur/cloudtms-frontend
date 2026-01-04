@@ -18329,13 +18329,29 @@ for (const key of BOOL_KEYS) {
           }
         }
 
-        // ✅ Canonicalise gated settings so they are consistent even if saved from another tab
-        try {
-          csMerged = canonicalizeClientSettings(csMerged);
-        } catch {}
+       // ✅ Canonicalise gated settings so they are consistent even if saved from another tab
+try {
+  csMerged = canonicalizeClientSettings(csMerged);
+} catch {}
 
-        // Clean + validate HH:MM etc (existing)
-        const { cleaned: csCleanRaw, invalid: csInvalid } = normalizeClientSettingsForSave(csMerged);
+// ✅ NORMALISE server times like "06:00:00" → "06:00" so validation won't fail
+const toHHMM = (v) => {
+  if (v == null) return '';
+  const s = String(v).trim();
+  const m = s.match(/^(\d{2}:\d{2})/);   // accepts "06:00:00", "06:00:00+00", etc
+  return m ? m[1] : s;
+};
+const TIME_KEYS = ['day_start','day_end','night_start','night_end','sat_start','sat_end','sun_start','sun_end','bh_start','bh_end'];
+TIME_KEYS.forEach(k => {
+  if (!Object.prototype.hasOwnProperty.call(csMerged, k)) return;
+  const raw = csMerged[k];
+  if (raw === '' || raw == null) return;     // preserve blanks
+  csMerged[k] = toHHMM(raw);
+});
+
+// Clean + validate HH:MM etc (existing)
+const { cleaned: csCleanRaw, invalid: csInvalid } = normalizeClientSettingsForSave(csMerged);
+
 
         // Ensure we never send UI helper fields to DB
         const csClean = { ...(csCleanRaw || {}) };
@@ -27297,18 +27313,34 @@ if (this.entity === 'contracts' && (this.currentTabKey === 'rates' || this.curre
 // inside showModal(...), in the `const frame = { ... }` object:
 mergedRowForTab(k) {
   L('mergedRowForTab ENTER', { k });
+
   const base = { ...(window.modalCtx?.data || {}) };
   const fs   = (window.modalCtx?.formState || {});
   const rid  = window.modalCtx?.data?.id ?? null;
   const fid  = fs.__forId ?? null;
   const sentinel = window.modalCtx?.openToken ?? null;
-  const same = (fid===rid) || (rid==null && (fid===sentinel || fid==null));
+  const same = (fid === rid) || (rid == null && (fid === sentinel || fid == null));
 
   const mainStaged = same ? (fs.main || {}) : {};
   const payStaged  = same ? (fs.pay  || {}) : {};
 
   // Default merge (drops empty strings via stripEmpty)
   const out = { ...base, ...stripEmpty(mainStaged) };
+
+  // ✅ Preserve intentional clears for specific fields (blank string should win over base)
+  // Global Candidate Key is stored as candidates.key_norm in your data model.
+  try {
+    if (this.entity === 'candidates') {
+      const PRESERVE_EMPTY_KEYS = new Set(['key_norm']); // add more here only if needed
+
+      for (const key of PRESERVE_EMPTY_KEYS) {
+        if (Object.prototype.hasOwnProperty.call(mainStaged, key)) {
+          const v = mainStaged[key];
+          if (v === '') out[key] = ''; // keep explicit blank
+        }
+      }
+    }
+  } catch {}
 
   // ✅ FIX: when rendering the Pay tab, rehydrate staged pay fields verbatim
   // (do NOT strip empties, otherwise clearing a bank field will snap back)
@@ -27320,22 +27352,18 @@ mergedRowForTab(k) {
 
   // Keep non-DOM baselines visible, but let staged template override base schedule
   try {
-    // 🔹 CHANGE: always prefer the staged __template if present
     if (mainStaged.__template) {
       out.std_schedule_json = mainStaged.__template;
     }
-
     if (!out.std_hours_json && mainStaged.__hours) {
       out.std_hours_json = mainStaged.__hours;
     }
-
     if (Object.prototype.hasOwnProperty.call(mainStaged, '__bucket_labels')) {
       out.bucket_labels_json = mainStaged.__bucket_labels;
     }
   } catch {}
 
   // ✨ Preserve schedule fields even when blank
-  // (so an applied preset with missing days truly overwrites prior values to empty)
   try {
     const days = ['mon','tue','wed','thu','fri','sat','sun'];
     const parts = ['start','end','break'];
@@ -27343,8 +27371,7 @@ mergedRowForTab(k) {
       parts.forEach(p => {
         const key = `${d}_${p}`;
         if (Object.prototype.hasOwnProperty.call(mainStaged, key)) {
-          // Use the staged value verbatim, including ''
-          out[key] = mainStaged[key];
+          out[key] = mainStaged[key]; // includes ''
         }
       });
     });
@@ -27363,13 +27390,13 @@ mergedRowForTab(k) {
 
   L('mergedRowForTab STATE', {
     rid, fid, sentinel, same,
-    stagedMainKeys: Object.keys(mainStaged||{}),
-    stagedPayKeys: Object.keys(payStaged||{}),
+    stagedMainKeys: Object.keys(mainStaged || {}),
+    stagedPayKeys: Object.keys(payStaged || {}),
     ratesKeys: Object.keys(out.rates_json || {})
   });
+
   return out;
 },
-
 
 
    _attachDirtyTracker() {
