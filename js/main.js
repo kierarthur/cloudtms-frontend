@@ -8035,14 +8035,15 @@ async function contractWeekCreateAdditional(week_id) {
 
 
 
-
-
-
-
-
 async function openCandidatePicker(onPick, options) {
   const LOGC = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : true; // default ON
   const ctx  = options && options.context ? options.context : null;
+
+  // ✅ NEW options
+  const ignoreMembership = !!(options && options.ignoreMembership);
+  const seedHintRaw      = (options && options.seed_hint && typeof options.seed_hint === 'object' && !Array.isArray(options.seed_hint))
+    ? options.seed_hint
+    : null;
 
   if (LOGC) console.log('[PICKER][candidates] ensure dataset primed → start');
   await ensurePickerDatasetPrimed('candidates').catch(e => {
@@ -8051,18 +8052,96 @@ async function openCandidatePicker(onPick, options) {
 
   let fp  = getSummaryFingerprint('candidates');
   let mem = getSummaryMembership('candidates', fp);
-  if (!mem?.ids?.length || mem?.stale) {
-    if (LOGC) console.log('[PICKER][candidates] membership empty/stale → priming', { fp, mem });
-    await primeSummaryMembership('candidates', fp);
-    fp  = getSummaryFingerprint('candidates');
-    mem = getSummaryMembership('candidates', fp);
+
+  // Keep existing behaviour by default; allow caller to ignore membership (timesheet resolve)
+  if (!ignoreMembership) {
+    if (!mem?.ids?.length || mem?.stale) {
+      if (LOGC) console.log('[PICKER][candidates] membership empty/stale → priming', { fp, mem });
+      await primeSummaryMembership('candidates', fp);
+      fp  = getSummaryFingerprint('candidates');
+      mem = getSummaryMembership('candidates', fp);
+    }
   }
 
   const ds    = (window.__pickerData ||= {}).candidates || { since: null, itemsById: {} };
   const items = ds.itemsById || {};
 
-  const baseIds  = (mem?.ids && mem.ids.length) ? mem.ids : Object.keys(items);
+  // ✅ NEW: ignore membership if requested
+  const baseIds  = (!ignoreMembership && (mem?.ids && mem.ids.length)) ? mem.ids : Object.keys(items);
   const baseRows = baseIds.map(id => items[id]).filter(Boolean);
+
+  // ✅ NEW: suggested rows based on hint (best matches shown immediately)
+  const norm = (s) => String(s || '').trim().toLowerCase();
+  const alnum = (s) => norm(s).replace(/[^a-z0-9]+/g, '');
+
+  const hint = (() => {
+    if (!seedHintRaw) return null;
+    return {
+      email: norm(seedHintRaw.email || ''),
+      first: norm(seedHintRaw.first_name || seedHintRaw.firstname || ''),
+      sur:   norm(seedHintRaw.surname || seedHintRaw.last_name || seedHintRaw.lastname || ''),
+      disp:  norm(seedHintRaw.display_name || ''),
+      disp2: alnum(seedHintRaw.display_name || '')
+    };
+  })();
+
+  const scoreCandidate = (r) => {
+    if (!hint) return 0;
+
+    const cEmail = norm(r.email || '');
+    const cFirst = norm(r.first_name || '');
+    const cLast  = norm(r.last_name || '');
+    const cDisp  = norm(r.display_name || `${r.first_name || ''} ${r.last_name || ''}`);
+    const cDisp2 = alnum(r.display_name || `${r.first_name || ''} ${r.last_name || ''}`);
+
+    let score = 0;
+
+    // Email is the strongest signal
+    if (hint.email && cEmail) {
+      if (cEmail === hint.email) score += 120;
+      else if (cEmail.includes(hint.email)) score += 60;
+    }
+
+    // Surname
+    if (hint.sur && cLast) {
+      if (cLast === hint.sur) score += 50;
+      else if (cLast.startsWith(hint.sur)) score += 30;
+      else if (cLast.includes(hint.sur)) score += 15;
+    }
+
+    // First name
+    if (hint.first && cFirst) {
+      if (cFirst === hint.first) score += 25;
+      else if (cFirst.startsWith(hint.first)) score += 15;
+      else if (cFirst.includes(hint.first)) score += 8;
+    }
+
+    // Display name / combined
+    if (hint.disp && cDisp.includes(hint.disp)) score += 12;
+    if (hint.disp2 && cDisp2 && cDisp2 === hint.disp2) score += 25;
+
+    // Bonus if both first+surname appear in display
+    if (hint.first && hint.sur && cDisp) {
+      if (cDisp.includes(hint.first) && cDisp.includes(hint.sur)) score += 18;
+    }
+
+    return score;
+  };
+
+  const suggestedRows = (() => {
+    if (!hint) return [];
+    const scored = baseRows
+      .map(r => ({ r, s: scoreCandidate(r) }))
+      .filter(x => x.s > 0)
+      .sort((a, b) =>
+        (b.s - a.s) ||
+        String(a.r.last_name||'').localeCompare(String(b.r.last_name||'')) ||
+        String(a.r.first_name||'').localeCompare(String(b.r.first_name||''))
+      );
+    return scored.slice(0, 20).map(x => x.r);
+  })();
+
+  const initialRows = (suggestedRows && suggestedRows.length) ? suggestedRows : baseRows;
 
   if (LOGC) console.log('[PICKER][candidates] dataset snapshot', {
     fingerprint: fp,
@@ -8071,7 +8150,9 @@ async function openCandidatePicker(onPick, options) {
     stale: !!mem?.stale,
     since: ds?.since,
     rowsBase: baseRows.length,
-    missingItems: baseIds.length - baseRows.length
+    missingItems: baseIds.length - baseRows.length,
+    ignoreMembership,
+    suggestedCount: suggestedRows.length
   });
 
   const renderRows = (rows) => rows.map(r => {
@@ -8110,6 +8191,15 @@ async function openCandidatePicker(onPick, options) {
       </div>`;
   }
 
+  const hintLine = (() => {
+    if (ignoreMembership) return `Showing candidates from the full dataset${baseRows.length ? ` (${baseRows.length})` : ''}.`;
+    return `Showing candidates from the current summary list${mem?.total ? ` (${mem.total} total)` : ''}.`;
+  })();
+
+  const hintLine2 = (suggestedRows && suggestedRows.length)
+    ? `<div class="hint mini" style="margin-top:6px;">Suggested matches shown (top ${suggestedRows.length}). Type to search all candidates.</div>`
+    : '';
+
   const html = `
     <div class="tabc">
       ${ctxHtml}
@@ -8121,8 +8211,9 @@ async function openCandidatePicker(onPick, options) {
         </div>
       </div>
       <div class="hint">
-        Showing candidates from the current summary list${mem?.total ? ` (${mem.total} total)` : ''}.
+        ${hintLine}
       </div>
+      ${hintLine2}
       <div class="picker-table-wrap">
         <table class="grid" id="pickerTable">
           <thead>
@@ -8133,7 +8224,7 @@ async function openCandidatePicker(onPick, options) {
               <th data-sort="email">Email</th>
             </tr>
           </thead>
-          <tbody id="pickerTBody">${renderRows(baseRows)}</tbody>
+          <tbody id="pickerTBody">${renderRows(initialRows)}</tbody>
         </table>
       </div>
     </div>`;
@@ -8166,9 +8257,9 @@ async function openCandidatePicker(onPick, options) {
       if (LOGC) console.log('[PICKER][candidates] onReturn', { hasTBody: !!tbody, hasSearch: !!search, hasTable: !!table });
       if (!tbody || !search || !table) return;
 
-      let sortKey    = 'last_name';
-      let sortDir    = 'asc';
-      let currentRows = baseRows.slice();
+      let sortKey     = 'last_name';
+      let sortDir     = 'asc';
+      let currentRows = initialRows.slice();
 
       const frame = window.__getModalFrame?.();
       if (frame && frame.kind === 'candidate-picker') {
@@ -8188,7 +8279,7 @@ async function openCandidatePicker(onPick, options) {
         });
       };
 
-      // Always filter from the full baseRows
+      // Always filter from the full baseRows (NOT initialRows)
       const doFilter = (q) => {
         const fn  = (window.pickersLocalFilterAndSort || pickersLocalFilterAndSort);
         const out = fn('candidates', baseRows, q, sortKey, sortDir);
@@ -8236,9 +8327,6 @@ async function openCandidatePicker(onPick, options) {
           alert(err?.message || 'Selection could not be validated.');
           return false;
         }
-
-        // IMPORTANT: do NOT manually click Close here.
-        // saveForFrame (child branch) will pop this frame and repaint the parent.
         return true;
       };
 
@@ -8259,17 +8347,39 @@ async function openCandidatePicker(onPick, options) {
         if (LOGC) console.log('[PICKER][candidates] wired click + dblclick handler');
       }
 
+      // ✅ FIX #1: sort should work even when search box is empty (sort currentRows = suggestions)
       if (!table.__wiredSort) {
         table.__wiredSort = true;
         table.querySelector('thead').addEventListener('click', (e) => {
           const th = e.target && e.target.closest('th[data-sort]');
           if (!th) return;
+
           const key = th.getAttribute('data-sort');
           sortDir = (sortKey === key && sortDir === 'asc') ? 'desc' : 'asc';
           sortKey = key;
-          currentRows = doFilter(search.value.trim());
+
+          const q = search.value.trim();
+
+          if (q) {
+            // Normal: filter+sort full set
+            currentRows = doFilter(q);
+            applyRows(currentRows);
+            if (LOGC) console.log('[PICKER][candidates] sort (filtered)', { sortKey, sortDir, count: currentRows.length });
+            return;
+          }
+
+          // Search empty: re-sort current visible set (suggestions / initial list)
+          const dir = (sortDir === 'desc') ? -1 : 1;
+          currentRows = (currentRows || []).slice().sort((a, b) => {
+            const av = String((a && a[sortKey]) ?? '').toLowerCase();
+            const bv = String((b && b[sortKey]) ?? '').toLowerCase();
+            if (av < bv) return -1 * dir;
+            if (av > bv) return  1 * dir;
+            return 0;
+          });
           applyRows(currentRows);
-          if (LOGC) console.log('[PICKER][candidates] sort', { sortKey, sortDir, count: currentRows.length });
+
+          if (LOGC) console.log('[PICKER][candidates] sort (currentRows)', { sortKey, sortDir, count: currentRows.length });
         });
         if (LOGC) console.log('[PICKER][candidates] wired sort header');
       }
@@ -8282,7 +8392,8 @@ async function openCandidatePicker(onPick, options) {
           if (LOGC) console.log('[PICKER][candidates] search input', { q });
           if (t) clearTimeout(t);
           t = setTimeout(() => {
-            currentRows = doFilter(q);
+            // If cleared, show suggested rows again (if any)
+            currentRows = q ? doFilter(q) : initialRows.slice();
             applyRows(currentRows);
             setActiveRow(null);
           }, 150);
@@ -8334,6 +8445,13 @@ async function openCandidatePicker(onPick, options) {
         if (LOGC) console.log('[PICKER][candidates] wired search keydown');
       }
 
+      // If we’re in seed mode, ensure the suggested rows are applied once after wiring
+      try {
+        if (suggestedRows && suggestedRows.length) {
+          applyRows(currentRows);
+        }
+      } catch {}
+
       setTimeout(() => {
         try {
           search.focus();
@@ -8367,14 +8485,16 @@ async function openCandidatePicker(onPick, options) {
   }, 0);
 }
 
-
-
-
 async function openClientPicker(onPick, opts) {
-  const LOGC      = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : true; // default ON
-  const nhspOnly  = !!(opts && opts.nhspOnly);
-  const hrAutoOnly= !!(opts && opts.hrAutoOnly);
-  const ctx       = opts && opts.context ? opts.context : null;
+  const LOGC       = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : true; // default ON
+  const nhspOnly   = !!(opts && opts.nhspOnly);
+  const hrAutoOnly = !!(opts && opts.hrAutoOnly);
+  const ctx        = opts && opts.context ? opts.context : null;
+
+  // ✅ NEW options
+  const ignoreMembership = !!(opts && opts.ignoreMembership);
+  const seedQueryRaw     = (opts && typeof opts.seed_query === 'string') ? String(opts.seed_query).trim() : '';
+  const seedQuery        = seedQueryRaw;
 
   if (LOGC) console.log('[PICKER][clients] ensure dataset primed → start');
   await ensurePickerDatasetPrimed('clients').catch(e => {
@@ -8383,17 +8503,21 @@ async function openClientPicker(onPick, opts) {
 
   let fp  = getSummaryFingerprint('clients');
   let mem = getSummaryMembership('clients', fp);
-  if (!mem?.ids?.length || mem?.stale) {
-    if (LOGC) console.log('[PICKER][clients] membership empty/stale → priming', { fp, mem });
-    await primeSummaryMembership('clients', fp);
-    fp  = getSummaryFingerprint('clients');
-    mem = getSummaryMembership('clients', fp);
+
+  if (!ignoreMembership) {
+    if (!mem?.ids?.length || mem?.stale) {
+      if (LOGC) console.log('[PICKER][clients] membership empty/stale → priming', { fp, mem });
+      await primeSummaryMembership('clients', fp);
+      fp  = getSummaryFingerprint('clients');
+      mem = getSummaryMembership('clients', fp);
+    }
   }
 
   const ds    = (window.__pickerData ||= {}).clients || { since: null, itemsById: {} };
   const items = ds.itemsById || {};
 
-  const baseIds     = (mem?.ids && mem.ids.length) ? mem.ids : Object.keys(items);
+  // ✅ NEW: ignore membership if requested
+  const baseIds     = (!ignoreMembership && (mem?.ids && mem.ids.length)) ? mem.ids : Object.keys(items);
   const baseRowsAll = baseIds.map(id => items[id]).filter(Boolean);
 
   let baseRows = baseRowsAll;
@@ -8413,7 +8537,9 @@ async function openClientPicker(onPick, opts) {
     rowsBase: baseRows.length,
     missingItems: baseIds.length - baseRows.length,
     nhspOnly,
-    hrAutoOnly
+    hrAutoOnly,
+    ignoreMembership,
+    seedQuery
   });
 
   const renderRows = (rows) => rows.map(r => {
@@ -8448,6 +8574,22 @@ async function openClientPicker(onPick, opts) {
       </div>`;
   }
 
+  const hintLine = (() => {
+    if (ignoreMembership) return `Showing clients from the full dataset${baseRows.length ? ` (${baseRows.length})` : ''}.`;
+    return `Showing clients from the current summary list${mem?.total ? ` (${mem.total} total)` : ''}.`;
+  })();
+
+  // ✅ FIX #2: seed_query must be HTML-escaped (attribute-safe)
+  const seedEsc = seedQuery
+    ? ((typeof escapeHtml === 'function')
+        ? String(escapeHtml(seedQuery)).replace(/"/g, '&quot;')
+        : String(seedQuery)
+            .replace(/&/g,'&amp;')
+            .replace(/</g,'&lt;')
+            .replace(/>/g,'&gt;')
+            .replace(/"/g,'&quot;'))
+    : '';
+
   const html = `
     <div class="tabc">
       ${ctxHtml}
@@ -8455,12 +8597,14 @@ async function openClientPicker(onPick, opts) {
         <label>Search</label>
         <div class="controls">
           <input class="input" type="text" id="pickerSearch"
+                 value="${seedEsc}"
                  placeholder="${mem?.stale ? 'Priming list… type to narrow' : 'Type a client name or email…'}"/>
         </div>
       </div>
       <div class="hint">
-        Showing clients from the current summary list${mem?.total ? ` (${mem.total} total)` : ''}.
+        ${hintLine}
         ${nhspOnly ? ' (NHSP-only filter)' : ''}${hrAutoOnly ? ' (Auto-process HR only)' : ''}
+        ${seedQuery ? `<span class="mini" style="margin-left:8px;">(prefilled)</span>` : ''}
       </div>
       <div class="picker-table-wrap">
         <table class="grid" id="pickerTable">
@@ -8538,6 +8682,16 @@ async function openClientPicker(onPick, opts) {
         return out;
       };
 
+      // ✅ apply seed query immediately (prefill + filtered list on open)
+      if (seedQuery && !search.__seedApplied) {
+        search.__seedApplied = true;
+        try {
+          search.value = seedQuery;
+          currentRows = doFilter(seedQuery);
+          applyRows(currentRows);
+        } catch {}
+      }
+
       const setActiveRow = (tr) => {
         const all = tbody.querySelectorAll('tr[data-id]');
         all.forEach(r => r.classList.remove('active'));
@@ -8573,8 +8727,6 @@ async function openClientPicker(onPick, opts) {
           alert(err?.message || 'Selection could not be validated.');
           return false;
         }
-
-        // Do NOT manually close; let saveForFrame handle popping this child frame.
         return true;
       };
 
@@ -8703,8 +8855,6 @@ async function openClientPicker(onPick, opts) {
     }
   }, 0);
 }
-
-
 
 
 
@@ -32023,13 +32173,36 @@ async function openTimesheetsResolveModal(selectedRows) {
     }
   );
 }
-
 function renderTimesheetsResolveModal(state) {
   const enc = (typeof escapeHtml === 'function')
     ? escapeHtml
     : (s) => String(s == null ? '' : s);
 
   const rows = state && Array.isArray(state.rows) ? state.rows : [];
+
+  // Build a human label from candidate_hint_text (if present + object)
+  const hintLabelFor = (r) => {
+    const h = r && r.candidate_hint_text;
+    if (!h || typeof h !== 'object' || Array.isArray(h)) return null;
+
+    const first = String(h.first_name || h.firstname || '').trim();
+    const sur   = String(h.surname || h.last_name || h.lastname || '').trim();
+    const disp  = String(h.display_name || '').trim();
+    const email = String(h.email || '').trim();
+
+    const name =
+      (first || sur) ? `${first} ${sur}`.trim()
+      : (disp ? disp : '');
+
+    const bits = [];
+    if (name) bits.push(name);
+    if (email) bits.push(email);
+
+    const primary = bits.join(' • ').trim();
+    if (!primary) return null;
+
+    return primary;
+  };
 
   const rowsHtml = rows.length
     ? rows.map((r, idx) => {
@@ -32049,12 +32222,21 @@ function renderTimesheetsResolveModal(state) {
         const canAssignCand   = (p === 'UNASSIGNED');
         const canAssignClient = (p === 'CLIENT_UNRESOLVED');
 
+        // ✅ Display: show hint when UNASSIGNED and hint available; else show raw key
+        const hintLabel = canAssignCand ? hintLabelFor(r) : null;
+        const rotaNameHtml = hintLabel
+          ? `
+            <div class="mini">${enc(hintLabel)}</div>
+            ${occ ? `<div class="mini mono" style="opacity:.7;margin-top:2px;">${enc(occ)}</div>` : ''}
+          `
+          : `<span class="mini">${occ ? enc(occ) : '—'}</span>`;
+
         return `
           <tr>
             <td><span class="mini">${enc(tsId || '—')}</span></td>
             <td><span class="mini">${enc(scope || '—')}</span></td>
             <td><span class="mini">${weYmd ? enc(weYmd) : '—'}</span></td>
-            <td><span class="mini">${occ ? enc(occ) : '—'}</span></td>
+            <td>${rotaNameHtml}</td>
             <td><span class="mini">${hosp ? enc(hosp) : '—'}</span></td>
             <td>
               <span class="pill ${pillCls}">${p ? enc(p) : 'UNKNOWN'}</span>
@@ -32064,7 +32246,7 @@ function renderTimesheetsResolveModal(state) {
                 canAssignCand
                   ? `<button type="button"
                              class="btn mini"
-                             onclick="openResolveCandidateModal((window.__resolveTimesheetsState||{}).rows[${idx}])">
+                             onclick="openResolveCandidatePicker && openResolveCandidatePicker((window.__resolveTimesheetsState||{}).rows[${idx}])">
                        Assign candidate…
                      </button>`
                   : ''
@@ -32074,7 +32256,7 @@ function renderTimesheetsResolveModal(state) {
                   ? `<button type="button"
                              class="btn mini"
                              style="margin-left:4px;"
-                             onclick="openResolveClientModal && openResolveClientModal((window.__resolveTimesheetsState||{}).rows[${idx}])">
+                             onclick="openResolveClientPicker && openResolveClientPicker((window.__resolveTimesheetsState||{}).rows[${idx}])">
                        Assign client…
                      </button>`
                   : ''
@@ -32163,298 +32345,187 @@ function renderTimesheetsResolveModal(state) {
   }, 0);
 })();
 
-async function openResolveCandidateModal(resolveRow) {
+
+
+// Wrapper: use contract-style candidate picker with hint-seeded suggestions
+async function openResolveCandidatePicker(resolveRow) {
   if (!resolveRow || !resolveRow.timesheet_id) {
     alert('Timesheet context missing for resolve.');
     return;
   }
+  if (typeof openCandidatePicker !== 'function') {
+    alert('Candidate picker is not available.');
+    return;
+  }
 
-  // Seed a small local state for this child modal
-  window.__resolveCandidateState = {
-    row: { ...(resolveRow || {}) },
-    results: [],
-    term: '',
-    // Track the "expected" id for rotation safety (updated if we detect a move)
-    expected_timesheet_id: String(resolveRow.timesheet_id || '')
+  const tsId = String(resolveRow.timesheet_id || '').trim();
+  const hint = (resolveRow && resolveRow.candidate_hint_text && typeof resolveRow.candidate_hint_text === 'object' && !Array.isArray(resolveRow.candidate_hint_text))
+    ? resolveRow.candidate_hint_text
+    : null;
+
+  // Context block for the picker (optional)
+  const ctx = {
+    staffName: (() => {
+      if (!hint) return (resolveRow.occupant_key_norm || resolveRow.candidate_name || '(unknown)');
+      const first = String(hint.first_name || hint.firstname || '').trim();
+      const sur   = String(hint.surname || hint.last_name || hint.lastname || '').trim();
+      const disp  = String(hint.display_name || '').trim();
+      const email = String(hint.email || '').trim();
+      const name  = (first || sur) ? `${first} ${sur}`.trim() : (disp || '');
+      return [name, email].filter(Boolean).join(' • ') || (resolveRow.occupant_key_norm || '(unknown)');
+    })(),
+    hospital: resolveRow.hospital_norm || '',
+    unit: resolveRow.hospital_norm || '',
+    dateYmd: resolveRow.week_ending_date || resolveRow.worked_date || resolveRow.date_ymd || '',
   };
 
-  const occName = resolveRow.occupant_key_norm || resolveRow.candidate_name || '(unknown)';
+  // Expected id guard for rotate safety
+  const expected = String(resolveRow.timesheet_id || '');
 
-  const enc = (typeof escapeHtml === 'function')
-    ? escapeHtml
-    : (s) => String(s == null ? '' : s);
-
-  const renderResolveCandidateTab = (key) => {
-    if (key !== 'main') return '';
-    const state = window.__resolveCandidateState || {};
-    const results = Array.isArray(state.results) ? state.results : [];
-    const tsIdNow = String(state?.row?.timesheet_id || '');
-
-    const resultsHtml = results.length
-      ? `
-        <ul class="mini">
-          ${results.map(c => `
-            <li>
-              <strong>${enc(c.display_name || c.name || (c.first_name || '') + ' ' + (c.last_name || ''))}</strong>
-              ${c.tms_ref ? ` &nbsp; <span class="mono">(${enc(c.tms_ref)})</span>` : ''}
-              <button type="button"
-                      class="btn mini"
-                      data-act="resolve-cand-select"
-                      data-candidate-id="${enc(c.id)}">
-                Select
-              </button>
-            </li>
-          `).join('')}
-        </ul>
-      `
-      : '<span class="mini">No candidates loaded yet. Try a search.</span>';
-
-    return html(`
-      <div class="form" id="ts-resolve-cand">
-        <div class="card">
-          <div class="row">
-            <label>Assign candidate</label>
-            <div class="controls">
-              <div class="mini">
-                Assign candidate for <strong>${enc(occName)}</strong><br/>
-                Timesheet: <span class="mono">${enc(tsIdNow)}</span>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div class="card" style="margin-top:10px;">
-          <div class="row">
-            <label>Search</label>
-            <div class="controls">
-              <input id="candResolveSearch"
-                     class="input"
-                     type="text"
-                     placeholder="Search by name, CCR, NI, etc."
-                     value="${enc(state.term || '')}" />
-              <button type="button"
-                      class="btn mini"
-                      data-act="resolve-cand-search">
-                Search
-              </button>
-              <div class="hint mini" style="margin-top:4px;">
-                This uses the same search as the Candidates summary (name, CCR, NI, etc.).
-              </div>
-            </div>
-          </div>
-          <div class="row">
-            <label>Matches</label>
-            <div class="controls" id="candResolveResults">
-              ${resultsHtml}
-            </div>
-          </div>
-        </div>
-      </div>
-    `);
-  };
-
-  // Open as child modal
-  showModal(
-    'Assign candidate',
-    [{ key: 'main', label: 'Assign candidate' }],
-    renderResolveCandidateTab,
-    null,
-    false,
-    null,
-    {
-      kind: 'timesheet-resolve-candidate',
-      noParentGate: true,
-      stayOpenOnSave: false
-    }
-  );
-
-  // Wire search + select after the modal is rendered
-  setTimeout(() => {
+  const refreshResolvePreview = async () => {
     try {
-      const root = document.getElementById('modalBody');
-      if (!root) return;
+      const rs = window.__resolveTimesheetsState || {};
+      const ids = Array.isArray(rs.selectionIds)
+        ? rs.selectionIds
+        : (rs.rows || []).map(r => String(r.timesheet_id || r.id || '')).filter(Boolean);
 
-      const searchBtn = root.querySelector('button[data-act="resolve-cand-search"]');
-      const searchInput = root.querySelector('#candResolveSearch');
+      if (!ids.length) return;
 
-      if (searchBtn && !searchBtn.__tsCandResolveWired) {
-        searchBtn.__tsCandResolveWired = true;
-        searchBtn.addEventListener('click', async () => {
-          const term = (searchInput && searchInput.value || '').trim();
-          if (!term) {
-            alert('Please enter something to search for.');
-            return;
-          }
-          try {
-            const results = await searchCandidatesForResolve(term);
-            window.__resolveCandidateState = window.__resolveCandidateState || {};
-            window.__resolveCandidateState.term = term;
-            window.__resolveCandidateState.results = Array.isArray(results) ? results : [];
-            const frame = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
-            if (frame && frame.kind === 'timesheet-resolve-candidate') {
-              frame.setTab('main');
-            }
-          } catch (err) {
-            console.error('[TS][RESOLVE] candidate search failed', err);
-            alert(err?.message || 'Candidate search failed.');
-          }
-        });
-      }
+      const res = await authFetch(API('/api/timesheets/resolve-preview'), {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ timesheet_ids: ids })
+      });
+      const text = await res.text();
+      if (!res.ok) return;
 
-      const adoptMovedInResolveUI = async (oldId, movedTo) => {
-        const state = window.__resolveCandidateState || {};
-        if (!state.row || typeof state.row !== 'object') state.row = {};
-        state.row.timesheet_id = movedTo;
-        state.row.id = movedTo;
-        state.expected_timesheet_id = movedTo;
+      const newRows = text ? JSON.parse(text) : [];
+      window.__resolveTimesheetsState ||= {};
+      window.__resolveTimesheetsState.rows = Array.isArray(newRows) ? newRows : [];
 
-        // Keep the shared modalCtx expected aligned (apiResolveTimesheetCandidate reads this)
-        try {
-          window.modalCtx ||= {};
-          window.modalCtx.timesheetMeta ||= {};
-          window.modalCtx.timesheetMeta.expected_timesheet_id = movedTo;
-        } catch {}
-
-        // Update parent resolve selections so preview doesn’t keep referencing stale ids
-        try {
-          const rs = window.__resolveTimesheetsState || {};
-          if (Array.isArray(rs.selectionIds) && rs.selectionIds.length) {
-            rs.selectionIds = rs.selectionIds.map(x => (String(x) === String(oldId) ? String(movedTo) : x));
-          }
-          if (Array.isArray(rs.rows) && rs.rows.length) {
-            rs.rows = rs.rows.map(r => {
-              const rid = String(r?.timesheet_id || r?.id || '');
-              if (rid === String(oldId)) {
-                return { ...(r || {}), timesheet_id: movedTo, id: movedTo };
-              }
-              return r;
-            });
-          }
-        } catch {}
-
-        // Repaint this child modal so the displayed TS id updates
-        try {
-          const fr = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
-          if (fr && fr.kind === 'timesheet-resolve-candidate') {
-            fr.setTab('main');
-          }
-        } catch {}
-
-        // Best-effort refresh of parent Resolve modal rows (preview)
-        try {
-          const rs = window.__resolveTimesheetsState || {};
-          const ids = Array.isArray(rs.selectionIds)
-            ? rs.selectionIds
-            : (rs.rows || []).map(r => String(r.timesheet_id || r.id || '')).filter(Boolean);
-
-          if (ids.length) {
-            const res = await authFetch(API('/api/timesheets/resolve-preview'), {
-              method: 'POST',
-              headers: { 'content-type': 'application/json' },
-              body: JSON.stringify({ timesheet_ids: ids })
-            });
-            const text = await res.text();
-            if (res.ok) {
-              const newRows = text ? JSON.parse(text) : [];
-              window.__resolveTimesheetsState ||= {};
-              window.__resolveTimesheetsState.rows = Array.isArray(newRows) ? newRows : [];
-              const fr2 = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
-              if (fr2 && fr2.kind === 'timesheets-resolve') {
-                fr2.setTab('main');
-              }
-            }
-          }
-        } catch (e2) {
-          console.warn('[TS][RESOLVE] failed to refresh resolve-preview after moved adoption', e2);
-        }
-
-        try {
-          if (typeof refreshTimesheetsSummaryAfterRotation === 'function') {
-            await refreshTimesheetsSummaryAfterRotation(movedTo);
-          }
-        } catch {}
-
-        window.__toast && window.__toast('This timesheet changed while you were editing. Please review and try again.');
-      };
-
-      // Delegate click handler for "Select" buttons
-      const resultsHost = root.querySelector('#candResolveResults');
-      if (resultsHost && !resultsHost.__tsCandResolveSelectWired) {
-        resultsHost.__tsCandResolveSelectWired = true;
-        resultsHost.addEventListener('click', async (ev) => {
-          const btn = ev.target.closest('button[data-act="resolve-cand-select"]');
-          if (!btn) return;
-          const candId = btn.getAttribute('data-candidate-id') || '';
-          if (!candId) return;
-
-          const state = window.__resolveCandidateState || {};
-          const tsIdNow = String(state?.row?.timesheet_id || '');
-          if (!tsIdNow) {
-            alert('Timesheet id missing; cannot assign candidate.');
-            return;
-          }
-
-          // Ensure apiResolveTimesheetCandidate uses the right expected id (it reads modalCtx.timesheetMeta)
-          try {
-            window.modalCtx ||= {};
-            window.modalCtx.timesheetMeta ||= {};
-            window.modalCtx.timesheetMeta.expected_timesheet_id =
-              String(state.expected_timesheet_id || tsIdNow);
-          } catch {}
-
-          try {
-            await apiResolveTimesheetCandidate(tsIdNow, candId);
-            window.__toast && window.__toast('Candidate mapping updated for timesheet.');
-
-            // Close this child modal
-            const closeBtn = document.getElementById('btnCloseModal');
-            if (closeBtn) closeBtn.click();
-
-            // Refresh the parent "Resolve timesheets" modal using stored selectionIds
-            const rs = window.__resolveTimesheetsState || {};
-            const ids = Array.isArray(rs.selectionIds)
-              ? rs.selectionIds
-              : (rs.rows || []).map(r => String(r.timesheet_id || r.id || '')).filter(Boolean);
-
-            if (ids.length) {
-              try {
-                const res = await authFetch(API('/api/timesheets/resolve-preview'), {
-                  method: 'POST',
-                  headers: { 'content-type': 'application/json' },
-                  body: JSON.stringify({ timesheet_ids: ids })
-                });
-                const text = await res.text();
-                if (res.ok) {
-                  const newRows = text ? JSON.parse(text) : [];
-                  window.__resolveTimesheetsState ||= {};
-                  window.__resolveTimesheetsState.rows = Array.isArray(newRows) ? newRows : [];
-                  const frame = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
-                  if (frame && frame.kind === 'timesheets-resolve') {
-                    frame.setTab('main');
-                  }
-                }
-              } catch (e2) {
-                console.warn('[TS][RESOLVE] failed to refresh resolve-preview after candidate assignment', e2);
-              }
-            }
-          } catch (err) {
-            // ✅ Rotation safety: adopt moved id + refresh + let user retry
-            const movedTo = err?.json?.current_timesheet_id || null;
-            if (err?.status === 409 && err?.json?.error === 'TIMESHEET_MOVED' && movedTo) {
-              await adoptMovedInResolveUI(tsIdNow, String(movedTo));
-              return;
-            }
-
-            console.error('[TS][RESOLVE] apiResolveTimesheetCandidate failed', err);
-            alert(err?.message || 'Failed to assign candidate.');
-          }
-        });
-      }
+      const fr = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
+      if (fr && fr.kind === 'timesheets-resolve') fr.setTab('main');
     } catch (e) {
-      console.warn('[TS][RESOLVE] wiring resolve-candidate modal failed', e);
+      console.warn('[TS][RESOLVE] refresh resolve-preview failed', e);
     }
-  }, 0);
+  };
+
+  // Open the existing picker, but seed with hint data (openCandidatePicker will need to support these opts)
+  openCandidatePicker(async ({ id, label }) => {
+    try {
+      // ensure apiResolveTimesheetCandidate uses expected id
+      window.modalCtx ||= {};
+      window.modalCtx.timesheetMeta ||= {};
+      window.modalCtx.timesheetMeta.expected_timesheet_id = expected;
+
+      await apiResolveTimesheetCandidate(tsId, id);
+      window.__toast && window.__toast('Candidate mapping updated for timesheet.');
+
+      // Refresh resolve modal list + main summary behind
+      await refreshResolvePreview();
+      try {
+        if (typeof renderAll === 'function') await renderAll();
+      } catch {}
+    } catch (err) {
+      const movedTo = err?.json?.current_timesheet_id || null;
+      if (err?.status === 409 && err?.json?.error === 'TIMESHEET_MOVED' && movedTo) {
+        window.__toast && window.__toast('This timesheet changed while you were editing. Please retry.');
+        // best-effort: refresh preview and let user try again
+        await refreshResolvePreview();
+        return;
+      }
+      console.error('[TS][RESOLVE] apiResolveTimesheetCandidate failed', err);
+      alert(err?.message || 'Failed to assign candidate.');
+    }
+  }, {
+    context: ctx,
+    // These are the new options you’ll implement inside openCandidatePicker
+    seed_hint: hint,
+    ignoreMembership: true,
+  });
 }
+
+
+// Wrapper: use contract-style client picker; prefill from hospital_norm where possible
+async function openResolveClientPicker(resolveRow) {
+  if (!resolveRow || !resolveRow.timesheet_id) {
+    alert('Timesheet context missing for resolve.');
+    return;
+  }
+  if (typeof openClientPicker !== 'function') {
+    alert('Client picker is not available.');
+    return;
+  }
+
+  const tsId = String(resolveRow.timesheet_id || '').trim();
+  const expected = String(resolveRow.timesheet_id || '');
+  const hosp = String(resolveRow.hospital_norm || '').trim();
+
+  const refreshResolvePreview = async () => {
+    try {
+      const rs = window.__resolveTimesheetsState || {};
+      const ids = Array.isArray(rs.selectionIds)
+        ? rs.selectionIds
+        : (rs.rows || []).map(r => String(r.timesheet_id || r.id || '')).filter(Boolean);
+
+      if (!ids.length) return;
+
+      const res = await authFetch(API('/api/timesheets/resolve-preview'), {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ timesheet_ids: ids })
+      });
+      const text = await res.text();
+      if (!res.ok) return;
+
+      const newRows = text ? JSON.parse(text) : [];
+      window.__resolveTimesheetsState ||= {};
+      window.__resolveTimesheetsState.rows = Array.isArray(newRows) ? newRows : [];
+
+      const fr = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
+      if (fr && fr.kind === 'timesheets-resolve') fr.setTab('main');
+    } catch (e) {
+      console.warn('[TS][RESOLVE] refresh resolve-preview failed', e);
+    }
+  };
+
+  openClientPicker(async ({ id, label }) => {
+    try {
+      window.modalCtx ||= {};
+      window.modalCtx.timesheetMeta ||= {};
+      window.modalCtx.timesheetMeta.expected_timesheet_id = expected;
+
+      await apiResolveTimesheetClient(tsId, id);
+      window.__toast && window.__toast('Client mapping updated for timesheet.');
+
+      await refreshResolvePreview();
+      try {
+        if (typeof renderAll === 'function') await renderAll();
+      } catch {}
+    } catch (err) {
+      const movedTo = err?.json?.current_timesheet_id || null;
+      if (err?.status === 409 && err?.json?.error === 'TIMESHEET_MOVED' && movedTo) {
+        window.__toast && window.__toast('This timesheet changed while you were editing. Please retry.');
+        await refreshResolvePreview();
+        return;
+      }
+      console.error('[TS][RESOLVE] apiResolveTimesheetClient failed', err);
+      alert(err?.message || 'Failed to assign client.');
+    }
+  }, {
+    context: {
+      staffName: resolveRow.occupant_key_norm || '',
+      hospital: hosp,
+      unit: hosp,
+      dateYmd: resolveRow.week_ending_date || resolveRow.worked_date || resolveRow.date_ymd || '',
+    },
+    // New option you’ll implement inside openClientPicker:
+    seed_query: hosp,
+    ignoreMembership: true,
+  });
+}
+
+
 
 
 async function searchCandidatesForResolve(term) {
@@ -32512,296 +32583,6 @@ async function apiResolveTimesheetCandidate(timesheetId, candidateId) {
   } catch {}
 
   return json;
-}
-
-async function openResolveClientModal(resolveRow) {
-  if (!resolveRow || !resolveRow.timesheet_id) {
-    alert('Timesheet context missing for client resolve.');
-    return;
-  }
-
-  const hosp   = resolveRow.hospital_norm || '(unknown hospital/site)';
-  const enc    = (typeof escapeHtml === 'function')
-    ? escapeHtml
-    : (s) => String(s == null ? '' : s);
-
-  // Seed local state for this child modal
-  window.__resolveClientState = {
-    row: { ...(resolveRow || {}) },
-    results: [],
-    term: '',
-    expected_timesheet_id: String(resolveRow.timesheet_id || '')
-  };
-
-  const renderResolveClientTab = (key) => {
-    if (key !== 'main') return '';
-    const state   = window.__resolveClientState || {};
-    const results = Array.isArray(state.results) ? state.results : [];
-    const tsIdNow = String(state?.row?.timesheet_id || '');
-
-    const resultsHtml = results.length
-      ? `
-        <ul class="mini">
-          ${results.map(c => `
-            <li>
-              <strong>${enc(c.name || c.client_name || '')}</strong>
-              ${c.cli_ref ? ` &nbsp; <span class="mono">(${enc(c.cli_ref)})</span>` : ''}
-              <button type="button"
-                      class="btn mini"
-                      data-act="resolve-client-select"
-                      data-client-id="${enc(c.id)}">
-                Select
-              </button>
-            </li>
-          `).join('')}
-        </ul>
-      `
-      : '<span class="mini">No clients loaded yet. Try a search.</span>';
-
-    return html(`
-      <div class="form" id="ts-resolve-client">
-        <div class="card">
-          <div class="row">
-            <label>Assign client</label>
-            <div class="controls">
-              <div class="mini">
-                Assign client / site for <strong>${enc(hosp)}</strong><br/>
-                Timesheet: <span class="mono">${enc(tsIdNow)}</span>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div class="card" style="margin-top:10px;">
-          <div class="row">
-            <label>Search</label>
-            <div class="controls">
-              <input id="clientResolveSearch"
-                     class="input"
-                     type="text"
-                     placeholder="Search by client name or reference"
-                     value="${enc(state.term || '')}" />
-              <button type="button"
-                      class="btn mini"
-                      data-act="resolve-client-search">
-                Search
-              </button>
-              <div class="hint mini" style="margin-top:4px;">
-                This uses the same search as the Clients summary (name, CLI ref, etc.).
-              </div>
-            </div>
-          </div>
-          <div class="row">
-            <label>Matches</label>
-            <div class="controls" id="clientResolveResults">
-              ${resultsHtml}
-            </div>
-          </div>
-        </div>
-      </div>
-    `);
-  };
-
-  // Open as child modal
-  showModal(
-    'Assign client / site',
-    [{ key: 'main', label: 'Assign client' }],
-    renderResolveClientTab,
-    null,
-    false,
-    null,
-    {
-      kind: 'timesheet-resolve-client',
-      noParentGate: true,
-      stayOpenOnSave: false
-    }
-  );
-
-  // Wire search + select after render
-  setTimeout(() => {
-    try {
-      const root = document.getElementById('modalBody');
-      if (!root) return;
-
-      const searchBtn   = root.querySelector('button[data-act="resolve-client-search"]');
-      const searchInput = root.querySelector('#clientResolveSearch');
-
-      if (searchBtn && !searchBtn.__tsClientResolveWired) {
-        searchBtn.__tsClientResolveWired = true;
-        searchBtn.addEventListener('click', async () => {
-          const term = (searchInput && searchInput.value || '').trim();
-          if (!term) {
-            alert('Please enter something to search for.');
-            return;
-          }
-          try {
-            const results = await searchClientsForResolve(term);
-            window.__resolveClientState = window.__resolveClientState || {};
-            window.__resolveClientState.term = term;
-            window.__resolveClientState.results = Array.isArray(results) ? results : [];
-            const frame = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
-            if (frame && frame.kind === 'timesheet-resolve-client') {
-              frame.setTab('main');
-            }
-          } catch (err) {
-            console.error('[TS][RESOLVE] client search failed', err);
-            alert(err?.message || 'Client search failed.');
-          }
-        });
-      }
-
-      const adoptMovedInResolveUI = async (oldId, movedTo) => {
-        const state = window.__resolveClientState || {};
-        if (!state.row || typeof state.row !== 'object') state.row = {};
-        state.row.timesheet_id = movedTo;
-        state.row.id = movedTo;
-        state.expected_timesheet_id = movedTo;
-
-        // Keep the shared modalCtx expected aligned (apiResolveTimesheetClient reads this)
-        try {
-          window.modalCtx ||= {};
-          window.modalCtx.timesheetMeta ||= {};
-          window.modalCtx.timesheetMeta.expected_timesheet_id = movedTo;
-        } catch {}
-
-        // Update parent resolve selections
-        try {
-          const rs = window.__resolveTimesheetsState || {};
-          if (Array.isArray(rs.selectionIds) && rs.selectionIds.length) {
-            rs.selectionIds = rs.selectionIds.map(x => (String(x) === String(oldId) ? String(movedTo) : x));
-          }
-          if (Array.isArray(rs.rows) && rs.rows.length) {
-            rs.rows = rs.rows.map(r => {
-              const rid = String(r?.timesheet_id || r?.id || '');
-              if (rid === String(oldId)) {
-                return { ...(r || {}), timesheet_id: movedTo, id: movedTo };
-              }
-              return r;
-            });
-          }
-        } catch {}
-
-        // Repaint this child modal
-        try {
-          const fr = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
-          if (fr && fr.kind === 'timesheet-resolve-client') {
-            fr.setTab('main');
-          }
-        } catch {}
-
-        // Best-effort refresh parent Resolve modal rows
-        try {
-          const rs = window.__resolveTimesheetsState || {};
-          const ids = Array.isArray(rs.selectionIds)
-            ? rs.selectionIds
-            : (rs.rows || []).map(r => String(r.timesheet_id || r.id || '')).filter(Boolean);
-
-          if (ids.length) {
-            const res = await authFetch(API('/api/timesheets/resolve-preview'), {
-              method: 'POST',
-              headers: { 'content-type': 'application/json' },
-              body: JSON.stringify({ timesheet_ids: ids })
-            });
-            const text = await res.text();
-            if (res.ok) {
-              const newRows = text ? JSON.parse(text) : [];
-              window.__resolveTimesheetsState ||= {};
-              window.__resolveTimesheetsState.rows = Array.isArray(newRows) ? newRows : [];
-              const fr2 = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
-              if (fr2 && fr2.kind === 'timesheets-resolve') {
-                fr2.setTab('main');
-              }
-            }
-          }
-        } catch (e2) {
-          console.warn('[TS][RESOLVE] failed to refresh resolve-preview after moved adoption', e2);
-        }
-
-        try {
-          if (typeof refreshTimesheetsSummaryAfterRotation === 'function') {
-            await refreshTimesheetsSummaryAfterRotation(movedTo);
-          }
-        } catch {}
-
-        window.__toast && window.__toast('This timesheet changed while you were editing. Please review and try again.');
-      };
-
-      const resultsHost = root.querySelector('#clientResolveResults');
-      if (resultsHost && !resultsHost.__tsClientResolveSelectWired) {
-        resultsHost.__tsClientResolveSelectWired = true;
-        resultsHost.addEventListener('click', async (ev) => {
-          const btn = ev.target.closest('button[data-act="resolve-client-select"]');
-          if (!btn) return;
-          const clientId = btn.getAttribute('data-client-id') || '';
-          if (!clientId) return;
-
-          const state = window.__resolveClientState || {};
-          const tsIdNow = String(state?.row?.timesheet_id || '');
-          if (!tsIdNow) {
-            alert('Timesheet id missing; cannot assign client.');
-            return;
-          }
-
-          // Ensure apiResolveTimesheetClient uses the right expected id (it reads modalCtx.timesheetMeta)
-          try {
-            window.modalCtx ||= {};
-            window.modalCtx.timesheetMeta ||= {};
-            window.modalCtx.timesheetMeta.expected_timesheet_id =
-              String(state.expected_timesheet_id || tsIdNow);
-          } catch {}
-
-          try {
-            await apiResolveTimesheetClient(tsIdNow, clientId);
-            window.__toast && window.__toast('Client mapping updated for timesheet.');
-
-            // Close the child modal
-            const closeBtn = document.getElementById('btnCloseModal');
-            if (closeBtn) closeBtn.click();
-
-            // Refresh parent Resolve modal
-            const rs = window.__resolveTimesheetsState || {};
-            const ids = Array.isArray(rs.selectionIds)
-              ? rs.selectionIds
-              : (rs.rows || []).map(r => String(r.timesheet_id || r.id || '')).filter(Boolean);
-
-            if (ids.length) {
-              try {
-                const res = await authFetch(API('/api/timesheets/resolve-preview'), {
-                  method: 'POST',
-                  headers: { 'content-type': 'application/json' },
-                  body: JSON.stringify({ timesheet_ids: ids })
-                });
-                const text = await res.text();
-                if (res.ok) {
-                  const newRows = text ? JSON.parse(text) : [];
-                  window.__resolveTimesheetsState ||= {};
-                  window.__resolveTimesheetsState.rows = Array.isArray(newRows) ? newRows : [];
-                  const frame = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
-                  if (frame && frame.kind === 'timesheets-resolve') {
-                    frame.setTab('main');
-                  }
-                }
-              } catch (e2) {
-                console.warn('[TS][RESOLVE] failed to refresh resolve-preview after client assignment', e2);
-              }
-            }
-          } catch (err) {
-            // ✅ Rotation safety: adopt moved id + refresh + let user retry
-            const movedTo = err?.json?.current_timesheet_id || null;
-            if (err?.status === 409 && err?.json?.error === 'TIMESHEET_MOVED' && movedTo) {
-              await adoptMovedInResolveUI(tsIdNow, String(movedTo));
-              return;
-            }
-
-            console.error('[TS][RESOLVE] apiResolveTimesheetClient failed', err);
-            alert(err?.message || 'Failed to assign client.');
-          }
-        });
-      }
-    } catch (e) {
-      console.warn('[TS][RESOLVE] wiring resolve-client modal failed', e);
-    }
-  }, 0);
 }
 
 async function searchClientsForResolve(term) {
@@ -45869,7 +45650,6 @@ function renderTimesheetOverviewTab(ctx) {
     </div>
   `;
 }
-
 function renderHrRotaDailySummary(type, importId, rows, ss) {
   const summary = ss.summary || {};
   const total   = summary.total_rows || rows.length || 0;
@@ -46083,6 +45863,31 @@ function renderHrRotaDailySummary(type, importId, rows, ss) {
       const root = document.getElementById('hrRotaSummary');
       if (!root || type !== 'HR_ROTA_DAILY') return;
 
+      // Helper: build a minimal hint object from HR row staff fields (for seeding candidate picker)
+      const buildHintFromHrRow = (row) => {
+        const staff = String(row.staff_name || row.staff_raw || '').trim();
+        if (!staff) return null;
+
+        // naive split into first/surname (good enough for seeding suggestions)
+        const parts = staff.split(/\s+/).filter(Boolean);
+        const first = parts.length ? parts[0] : '';
+        const sur   = parts.length > 1 ? parts[parts.length - 1] : '';
+
+        const email = String(row.staff_email || row.email || row.worker_email || '').trim();
+
+        const hint = {
+          source: 'hr_rota_daily',
+          display_name: staff,
+          first_name: first,
+          surname: sur
+        };
+        if (email) hint.email = email;
+
+        // drop empties
+        Object.keys(hint).forEach(k => { if (!hint[k]) delete hint[k]; });
+        return Object.keys(hint).length ? hint : null;
+      };
+
       root.addEventListener('click', (ev) => {
         const btn = ev.target.closest('button[data-act]');
         if (!btn) return;
@@ -46099,34 +45904,73 @@ function renderHrRotaDailySummary(type, importId, rows, ss) {
         const reasonCode   = String(row.reason_code || row.failure_reason || row.reason || '').toLowerCase();
         const hasTimesheet = !!row.timesheet_id;
 
+        const unit = row.unit || row.hospital_or_trust || row.hospital_norm || '';
+        const staff = row.staff_name || row.staff_raw || '';
+
         if (act === 'resolve-candidate') {
+          // HR-row resolution path (no TS / still candidate_unresolved)
           if (reasonCode === 'candidate_unresolved' || !hasTimesheet) {
             openHrRotaAssignCandidateModal(importId, idx);
             return;
           }
 
+          // Timesheet-backed resolution path: ✅ use contract picker wrapper with seeded hint
           if (hasTimesheet) {
-            openResolveCandidateModal({
-              timesheet_id:      row.timesheet_id,
-              occupant_key_norm: row.staff_name || row.staff_raw || '',
-              hospital_norm:     row.unit || row.hospital_or_trust || row.hospital_norm || ''
-            });
+            const hint = buildHintFromHrRow(row);
+
+            if (typeof openResolveCandidatePicker === 'function') {
+              openResolveCandidatePicker({
+                timesheet_id: row.timesheet_id,
+                hospital_norm: unit,
+                occupant_key_norm: staff,
+                candidate_hint_text: hint
+              });
+              return;
+            }
+
+            // Fallback (should be rare once wrappers are in place)
+            if (typeof openResolveCandidateModal === 'function') {
+              openResolveCandidateModal({
+                timesheet_id:      row.timesheet_id,
+                occupant_key_norm: staff,
+                hospital_norm:     unit
+              });
+              return;
+            }
+
+            alert('Candidate resolve picker is not available.');
           } else {
             alert('No timesheet matched for this row; resolve candidate via imports/aliases instead.');
           }
         }
 
         if (act === 'resolve-client') {
+          // HR-row resolution path (no TS / still client_unresolved)
           if (reasonCode === 'client_unresolved' || !hasTimesheet) {
             openHrRotaAssignClientModal(importId, idx);
             return;
           }
 
+          // Timesheet-backed resolution path: ✅ use contract picker wrapper with seeded query
           if (hasTimesheet) {
-            openResolveClientModal({
-              timesheet_id:  row.timesheet_id,
-              hospital_norm: row.unit || row.hospital_or_trust || row.hospital_norm || ''
-            });
+            if (typeof openResolveClientPicker === 'function') {
+              openResolveClientPicker({
+                timesheet_id:  row.timesheet_id,
+                hospital_norm: unit
+              });
+              return;
+            }
+
+            // Fallback (should be rare once wrappers are in place)
+            if (typeof openResolveClientModal === 'function') {
+              openResolveClientModal({
+                timesheet_id:  row.timesheet_id,
+                hospital_norm: unit
+              });
+              return;
+            }
+
+            alert('Client resolve picker is not available.');
           } else {
             alert('No timesheet matched for this row; resolve client/site via imports/aliases instead.');
           }
