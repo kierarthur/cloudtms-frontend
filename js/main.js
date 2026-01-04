@@ -32195,7 +32195,7 @@ function renderTimesheetsResolveModal(state) {
       : (disp ? disp : '');
 
     const bits = [];
-    if (name) bits.push(name);
+    if (name)  bits.push(name);
     if (email) bits.push(email);
 
     const primary = bits.join(' • ').trim();
@@ -32231,6 +32231,30 @@ function renderTimesheetsResolveModal(state) {
           `
           : `<span class="mini">${occ ? enc(occ) : '—'}</span>`;
 
+        // ✅ Wrap buttons so they never collide with other text in narrow columns
+        const resolveBtnsHtml = `
+          <div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;">
+            ${
+              canAssignCand
+                ? `<button type="button"
+                           class="btn mini"
+                           onclick="openResolveCandidatePicker && openResolveCandidatePicker((window.__resolveTimesheetsState||{}).rows[${idx}])">
+                     Assign candidate…
+                   </button>`
+                : ''
+            }
+            ${
+              canAssignClient
+                ? `<button type="button"
+                           class="btn mini"
+                           onclick="openResolveClientPicker && openResolveClientPicker((window.__resolveTimesheetsState||{}).rows[${idx}])">
+                     Assign client…
+                   </button>`
+                : ''
+            }
+          </div>
+        `;
+
         return `
           <tr>
             <td><span class="mini">${enc(tsId || '—')}</span></td>
@@ -32242,25 +32266,7 @@ function renderTimesheetsResolveModal(state) {
               <span class="pill ${pillCls}">${p ? enc(p) : 'UNKNOWN'}</span>
             </td>
             <td>
-              ${
-                canAssignCand
-                  ? `<button type="button"
-                             class="btn mini"
-                             onclick="openResolveCandidatePicker && openResolveCandidatePicker((window.__resolveTimesheetsState||{}).rows[${idx}])">
-                       Assign candidate…
-                     </button>`
-                  : ''
-              }
-              ${
-                canAssignClient
-                  ? `<button type="button"
-                             class="btn mini"
-                             style="margin-left:4px;"
-                             onclick="openResolveClientPicker && openResolveClientPicker((window.__resolveTimesheetsState||{}).rows[${idx}])">
-                       Assign client…
-                     </button>`
-                  : ''
-              }
+              ${resolveBtnsHtml}
             </td>
           </tr>
         `;
@@ -32312,7 +32318,10 @@ function renderTimesheetsResolveModal(state) {
         <div class="row">
           <label></label>
           <div class="controls">
-            <button type="button" class="btn" id="btnTsResolveClose">
+            <button type="button"
+                    class="btn"
+                    id="btnTsResolveClose"
+                    onclick="document.getElementById('btnCloseModal') && document.getElementById('btnCloseModal').click()">
               Close
             </button>
             <span class="mini" style="margin-left:8px;">
