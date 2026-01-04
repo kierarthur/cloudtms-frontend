@@ -32206,7 +32206,6 @@ function renderTimesheetsResolveModal(state) {
 
   const rowsHtml = rows.length
     ? rows.map((r, idx) => {
-        const tsId   = r.timesheet_id || r.id || '';
         const scope  = (r.sheet_scope || '').toUpperCase();
         const weYmd  = r.week_ending_date || r.worked_date || r.date_ymd || '';
         const occ    = r.occupant_key_norm || '';
@@ -32222,22 +32221,21 @@ function renderTimesheetsResolveModal(state) {
         const canAssignCand   = (p === 'UNASSIGNED');
         const canAssignClient = (p === 'CLIENT_UNRESOLVED');
 
-        // ✅ Display: show hint when UNASSIGNED and hint available; else show raw key
+        // ✅ Display: show hint when UNASSIGNED and hint available; otherwise show occupant_key_norm
+        // ✅ DO NOT show the long Global Key as a secondary line
         const hintLabel = canAssignCand ? hintLabelFor(r) : null;
         const rotaNameHtml = hintLabel
-          ? `
-            <div class="mini">${enc(hintLabel)}</div>
-            ${occ ? `<div class="mini mono" style="opacity:.7;margin-top:2px;">${enc(occ)}</div>` : ''}
-          `
-          : `<span class="mini">${occ ? enc(occ) : '—'}</span>`;
+          ? `<div class="mini" style="white-space:normal;word-break:break-word;">${enc(hintLabel)}</div>`
+          : `<span class="mini" style="white-space:normal;word-break:break-word;">${occ ? enc(occ) : '—'}</span>`;
 
-        // ✅ Wrap buttons so they never collide with other text in narrow columns
+        // ✅ Buttons: stack vertically and constrain width so they never overflow the table cell
         const resolveBtnsHtml = `
-          <div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;">
+          <div style="display:flex;flex-direction:column;gap:6px;align-items:stretch;min-width:170px;max-width:220px;">
             ${
               canAssignCand
                 ? `<button type="button"
                            class="btn mini"
+                           style="width:100%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;"
                            onclick="openResolveCandidatePicker && openResolveCandidatePicker((window.__resolveTimesheetsState||{}).rows[${idx}])">
                      Assign candidate…
                    </button>`
@@ -32247,6 +32245,7 @@ function renderTimesheetsResolveModal(state) {
               canAssignClient
                 ? `<button type="button"
                            class="btn mini"
+                           style="width:100%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;"
                            onclick="openResolveClientPicker && openResolveClientPicker((window.__resolveTimesheetsState||{}).rows[${idx}])">
                      Assign client…
                    </button>`
@@ -32257,13 +32256,12 @@ function renderTimesheetsResolveModal(state) {
 
         return `
           <tr>
-            <td><span class="mini">${enc(tsId || '—')}</span></td>
             <td><span class="mini">${enc(scope || '—')}</span></td>
             <td><span class="mini">${weYmd ? enc(weYmd) : '—'}</span></td>
             <td>${rotaNameHtml}</td>
-            <td><span class="mini">${hosp ? enc(hosp) : '—'}</span></td>
+            <td><span class="mini" style="white-space:normal;word-break:break-word;">${hosp ? enc(hosp) : '—'}</span></td>
             <td>
-              <span class="pill ${pillCls}">${p ? enc(p) : 'UNKNOWN'}</span>
+              <span class="pill ${pillCls}" style="white-space:nowrap;">${p ? enc(p) : 'UNKNOWN'}</span>
             </td>
             <td>
               ${resolveBtnsHtml}
@@ -32273,63 +32271,54 @@ function renderTimesheetsResolveModal(state) {
       }).join('')
     : `
       <tr>
-        <td colspan="7">
+        <td colspan="6">
           <span class="mini">No timesheets in this selection require candidate/client resolution.</span>
         </td>
       </tr>
     `;
 
+  // ✅ Make the modal body wider by using an inner wrapper with a min-width.
+  // This avoids relying on global modal sizing/CSS.
   return html(`
     <div class="form" id="ts-resolve-wrapper">
-      <div class="card">
-        <div class="row">
-          <label>Resolve timesheets</label>
-          <div class="controls">
-            <span class="mini">
-              Use this screen to fix unassigned candidates and unresolved clients
-              by teaching the system how rota/HR names map to database records.
-            </span>
+      <div style="min-width: 980px; max-width: 1200px;">
+        <div class="card">
+          <div class="row">
+            <label>Resolve timesheets</label>
+            <div class="controls">
+              <span class="mini">
+                Use this screen to fix unassigned candidates and unresolved clients
+                by teaching the system how rota/HR names map to database records.
+              </span>
+            </div>
           </div>
         </div>
-      </div>
 
-      <div class="card" style="margin-top:10px;">
-        <div class="row">
-          <label>Timesheets</label>
-          <div class="controls">
-            <table class="grid">
-              <thead>
-                <tr>
-                  <th>Timesheet ID</th>
-                  <th>Scope</th>
-                  <th>Week ending / Date</th>
-                  <th>Rota name</th>
-                  <th>Rota hospital</th>
-                  <th>Status</th>
-                  <th>Resolve</th>
-                </tr>
-              </thead>
-              <tbody>
-                ${rowsHtml}
-              </tbody>
-            </table>
+        <div class="card" style="margin-top:10px;">
+          <div class="row">
+            <label>Timesheets</label>
+            <div class="controls">
+              <div style="overflow-x:auto;">
+                <table class="grid" style="min-width: 980px;">
+                  <thead>
+                    <tr>
+                      <th style="width:90px;">Scope</th>
+                      <th style="width:130px;">Week ending / Date</th>
+                      <th>Rota name</th>
+                      <th style="width:160px;">Rota hospital</th>
+                      <th style="width:140px;">Status</th>
+                      <th style="width:220px;">Resolve</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    ${rowsHtml}
+                  </tbody>
+                </table>
+              </div>
+            </div>
           </div>
         </div>
-        <div class="row">
-          <label></label>
-          <div class="controls">
-            <button type="button"
-                    class="btn"
-                    id="btnTsResolveClose"
-                    onclick="document.getElementById('btnCloseModal') && document.getElementById('btnCloseModal').click()">
-              Close
-            </button>
-            <span class="mini" style="margin-left:8px;">
-              Closing this dialog does not change any data; only the "Assign…" actions
-              update aliases and trigger financial recompute.
-            </span>
-          </div>
-        </div>
+
       </div>
     </div>
   `);
