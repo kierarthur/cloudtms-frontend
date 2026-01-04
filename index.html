@@ -532,6 +532,28 @@ body{
       box-shadow:0 24px 60px rgba(15,23,42,.85);
       overflow:hidden;
     }
+    .modal{
+  width:min(1100px,95vw);
+  max-height:90vh;
+  display:flex;
+  flex-direction:column;
+  background:radial-gradient(circle at top,#020617 0,#020617 55%,#020617 100%);
+  border:1px solid rgba(148,163,184,.4);
+  border-radius:16px;
+  box-shadow:0 24px 60px rgba(15,23,42,.85);
+  overflow:hidden;
+}
+
+/* ===== Resolve Timesheets modal: taller/wider so the table fits without a silly scrollbar ===== */
+#modal.resolve-modal{
+  width: min(1300px, 98vw);
+  max-height: 96vh;
+}
+
+#modal.resolve-modal .tabc{
+  padding: 10px;
+}
+
     /* Narrower modal just for Job Titles */
     .modal.jobtitles-modal{
       width:min(800px,95vw);
@@ -612,6 +634,32 @@ body{
       column-gap:18px;
       row-gap:8px;
     }
+    /* Forms in modal */
+.form{
+  display:grid;
+  grid-template-columns:repeat(2,minmax(240px,1fr));
+  column-gap:18px;
+  row-gap:8px;
+}
+
+/* ===== Candidates: Care Packages tab (make rates table use full width) ===== */
+/* #tab-rates is rendered as <div class="form" id="tab-rates"> */
+#modal #tab-rates{
+  grid-template-columns: minmax(0, 1fr); /* force single column */
+}
+
+/* ratesTable is your container: <div id="ratesTable"></div> */
+#modal #tab-rates #ratesTable{
+  width:100%;
+  overflow:auto;          /* allow horizontal scroll if needed */
+}
+
+/* Override global .grid { table-layout: fixed } just inside the rates table */
+#modal #tab-rates #ratesTable .grid{
+  table-layout:auto;
+  min-width: 980px;       /* adjust if you want; gives columns breathing space */
+}
+
     .form .row{
       display:flex;
       flex-direction:column;
