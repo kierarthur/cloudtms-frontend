@@ -13649,17 +13649,8 @@ async function upsertClientRate(payload) {
 
 // Small helper: cached settings (for ERNI%)
 // Falls back to 0 if missing; returns { erni_pct: number (e.g. 0.15), ... }
-let __SETTINGS_CACHE__ = null;
-async function getSettingsCached() {
-  if (__SETTINGS_CACHE__) return __SETTINGS_CACHE__;
-  try {
-    const s = await getSettings();
-    __SETTINGS_CACHE__ = s || {};
-  } catch {
-    __SETTINGS_CACHE__ = {};
-  }
-  return __SETTINGS_CACHE__;
-}
+
+
 
 // Small helper: pick best shared charge row for {client_id, role, band, active_on}
 // Uses backend’s selection logic via filters; no rate_type filter here (shared).
@@ -13744,15 +13735,11 @@ async function fetchRelated(entity, id, type){
 }
 
 
+
 // Settings (singleton)
-async function getSettings(){
-  const r = await authFetch(API('/api/settings/defaults'));
-  if (!r.ok) throw new Error('Fetch settings failed');
-  const j = await r.json();
-  return j?.settings || j || {};   // <-- unwrap {settings: {...}}
-}
 
 async function saveSettings(payload){
+  // Save non-finance settings_defaults only (finance windows are saved separately)
   const r = await authFetch(API('/api/settings/defaults'), {
     method:'PUT',
     headers:{'content-type':'application/json'},
@@ -13761,6 +13748,40 @@ async function saveSettings(payload){
   if (!r.ok) throw new Error('Save failed');
   return true;
 }
+
+async function getSettings(){
+  const r = await authFetch(API('/api/settings/defaults'));
+  if (!r.ok) throw new Error('Fetch settings failed');
+  const j = await r.json();
+
+  // Updated shape: { settings: {...}, finance_windows: [...] }
+  if (j && typeof j === 'object' && j.settings && typeof j.settings === 'object') {
+    return {
+      settings: j.settings || {},
+      finance_windows: Array.isArray(j.finance_windows) ? j.finance_windows : []
+    };
+  }
+
+  // Fallback for legacy responses
+  return {
+    settings: (j?.settings || j || {}),
+    finance_windows: Array.isArray(j?.finance_windows) ? j.finance_windows : []
+  };
+}
+let __SETTINGS_CACHE__ = null;
+async function getSettingsCached() {
+  if (__SETTINGS_CACHE__) return __SETTINGS_CACHE__;
+  try {
+    const s = await getSettings();
+    __SETTINGS_CACHE__ = s || { settings:{}, finance_windows:[] };
+  } catch {
+    __SETTINGS_CACHE__ = { settings:{}, finance_windows:[] };
+  }
+  return __SETTINGS_CACHE__;
+}
+
+
+
 
 // Related counts (object map: {type: count, ...})
 async function fetchRelatedCounts(entity, id){
@@ -16175,13 +16196,45 @@ for (const k of Object.keys(payload)) {
           return win || null;
         } catch { return null; }
       }
-      const bucketLabel = { day:'Day', night:'Night', sat:'Sat', sun:'Sun', bh:'BH' };
+         const bucketLabel = { day:'Day', night:'Night', sat:'Sat', sun:'Sun', bh:'BH' };
       const erniMult = await (async ()=>{
         if (typeof window.__ERNI_MULT__ === 'number') return window.__ERNI_MULT__;
         try {
           if (typeof getSettingsCached === 'function') {
             const s = await getSettingsCached();
-            let p = s?.erni_pct ?? s?.employers_ni_percent ?? 0;
+
+            // New shape: { settings: {...}, finance_windows: [...] }
+            const fws = Array.isArray(s?.finance_windows) ? s.finance_windows : [];
+
+            // Pick "current" finance window in scope for today (YYYY-MM-DD).
+            let todayYmd = null;
+            try { todayYmd = (typeof toLocalParts === 'function') ? (toLocalParts(new Date().toISOString(), null)?.ymd || null) : null; } catch {}
+            if (!todayYmd) todayYmd = new Date().toISOString().slice(0, 10);
+
+            const asYmd = (v) => {
+              if (!v) return null;
+              const ss = String(v).slice(0, 10);
+              return /^\d{4}-\d{2}-\d{2}$/.test(ss) ? ss : null;
+            };
+
+            let chosen = null;
+            for (const w of fws) {
+              const df = asYmd(w?.date_from);
+              const dt = asYmd(w?.date_to);
+              if (!df) continue;
+              if (df > todayYmd) continue;
+              if (dt && dt < todayYmd) continue;
+              if (!chosen) {
+                chosen = w;
+              } else {
+                const cdf = asYmd(chosen?.date_from);
+                if (cdf && df > cdf) chosen = w;
+              }
+            }
+
+            // ERNI from chosen window; fall back to 0 if missing
+            let p = chosen?.erni_pct ?? 0;
+
             p = Number(p)||0;
             if (p>1) p=p/100;
             window.__ERNI_MULT__ = 1 + p;
@@ -16191,6 +16244,7 @@ for (const k of Object.keys(payload)) {
         window.__ERNI_MULT__ = 1;
         return 1;
       })();
+
 
       // Validate EDITS
       for (const [editId, patchRaw] of Object.entries(O.stagedEdits || {})) {
@@ -16533,7 +16587,76 @@ async function renderCandidateRatesTable() {
   }
 
   const fmt = v => (v==null || Number.isNaN(v)) ? '—' : (Math.round(v*100)/100).toFixed(2);
-  const mult = await (async ()=>{ if (typeof window.__ERNI_MULT__ === 'number') return window.__ERNI_MULT__; try { if (typeof getSettingsCached === 'function') { const s = await getSettingsCached(); let p = s?.erni_pct ?? s?.employers_ni_percent ?? 0; p = Number(p)||0; if (p>1) p=p/100; window.__ERNI_MULT__ = 1 + p; return window.__ERNI_MULT__; } } catch{} window.__ERNI_MULT__ = 1; return 1; })();
+
+  // === Today (Europe/London) used for "ongoing" overrides
+  const todayIso = (() => {
+    try {
+      const s = new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/London', year:'numeric', month:'2-digit', day:'2-digit' }).format(new Date());
+      const [dd, mm, yyyy] = s.split('/');
+      return `${yyyy}-${mm}-${dd}`;
+    } catch { // fallback
+      const d = new Date(); const y = d.getFullYear(), m = String(d.getMonth()+1).padStart(2,'0'), day = String(d.getDate()).padStart(2,'0');
+      return `${y}-${m}-${day}`;
+    }
+  })();
+
+  // === ERNI multiplier selection:
+  // - If candidate override is ongoing (date_to null or date_to >= today): use today's date
+  // - If candidate override finished (date_to < today): use override start date (date_from)
+  //
+  // Uses finance_windows from getSettingsCached() (no extra network calls).
+  const s = await (typeof getSettingsCached === 'function' ? getSettingsCached() : null);
+  const fws = Array.isArray(s?.finance_windows) ? s.finance_windows : [];
+
+  const asYmd = (v) => {
+    if (!v) return null;
+    const ss = String(v).slice(0, 10);
+    return /^\d{4}-\d{2}-\d{2}$/.test(ss) ? ss : null;
+  };
+
+  const erniMultByDate = Object.create(null);
+
+  const erniMultForYmd = (ymd) => {
+    const key = asYmd(ymd) || todayIso;
+    if (erniMultByDate[key] != null) return erniMultByDate[key];
+
+    // Pick window with date_from <= key <= date_to (or open), prefer latest date_from
+    let chosen = null;
+    for (const w of fws) {
+      const df = asYmd(w?.date_from);
+      const dt = asYmd(w?.date_to);
+      if (!df) continue;
+      if (df > key) continue;
+      if (dt && dt < key) continue;
+
+      if (!chosen) {
+        chosen = w;
+      } else {
+        const cdf = asYmd(chosen?.date_from);
+        if (cdf && df > cdf) chosen = w;
+      }
+    }
+
+    let p = chosen?.erni_pct ?? 0;
+    p = Number(p) || 0;
+    if (p > 1) p = p / 100; // support 15 vs 0.15
+
+    const mult = (Number.isFinite(1 + p) && (1 + p) > 0) ? (1 + p) : 1;
+    erniMultByDate[key] = mult;
+    return mult;
+  };
+
+  const multForRow = (r) => {
+    const startIso = asYmd(r?.date_from) || null;
+    const endIso   = asYmd(r?.date_to) || null;
+    const finished = !!(endIso && endIso < todayIso);
+
+    // Rule requested:
+    // - ongoing -> today
+    // - finished -> start_date
+    const anchor = (finished && startIso) ? startIso : todayIso;
+    return erniMultForYmd(anchor);
+  };
 
   const keyOf = r => [r.client_id, r.role || '', (r.band==null?'':String(r.band)), r.date_from || ''].join('|');
   const uniqueKeys = Array.from(new Set(rows.map(keyOf)));
@@ -16560,16 +16683,6 @@ async function renderCandidateRatesTable() {
   await Promise.all(uniqueKeys.map(async k => { chargeMap[k] = await loadChargesForKey(k); }));
 
   // === NEW: check whether a covering client default exists TODAY (Europe/London), per (client,role,band)
-  const todayIso = (() => {
-    try {
-      const s = new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/London', year:'numeric', month:'2-digit', day:'2-digit' }).format(new Date());
-      const [dd, mm, yyyy] = s.split('/');
-      return `${yyyy}-${mm}-${dd}`;
-    } catch { // fallback
-      const d = new Date(); const y = d.getFullYear(), m = String(d.getMonth()+1).padStart(2,'0'), day = String(d.getDate()).padStart(2,'0');
-      return `${y}-${m}-${day}`;
-    }
-  })();
   const todayKeyOf = r => [r.client_id, r.role || '', (r.band==null?'':String(r.band))].join('|');
   const todayKeys = Array.from(new Set(rows.map(todayKeyOf)));
   const coverTodayMap = Object.create(null);
@@ -16603,10 +16716,13 @@ async function renderCandidateRatesTable() {
     const charges = chargeMap[keyOf(r)] || null;
     const isPAYE = String(r.rate_type || '').toUpperCase() === 'PAYE';
 
+    // ERNI multiplier per row (ongoing -> today, finished -> start date)
+    const rowMult = isPAYE ? multForRow(r) : 1;
+
     const margin = {};
     ['day','night','sat','sun','bh'].forEach(b=>{
       const pay = r[`pay_${b}`]; const chg = charges ? charges[b] : null;
-      margin[b] = (chg!=null && pay!=null) ? (isPAYE ? (chg - (pay * mult)) : (chg - pay)) : null;
+      margin[b] = (chg!=null && pay!=null) ? (isPAYE ? (chg - (pay * rowMult)) : (chg - pay)) : null;
     });
 
     let status =
@@ -17430,7 +17546,6 @@ async function fetchCandidateRateOverrides({ candidate_id, client_id, role, band
 
 
 
-
 async function computeContractMargins() {
   const fs = (window.modalCtx && window.modalCtx.formState) || { main:{}, pay:{} };
   const form = document.querySelector('#contractRatesTab')?.closest('form') || document.querySelector('#contractForm');
@@ -17440,24 +17555,117 @@ async function computeContractMargins() {
   const payMethod = ((payMethodSel && payMethodSel.value) || pmStaged || 'PAYE').toUpperCase();
 
   // ─────────────────────────────────────────────────────────────
+  // Determine which date to use for finance-window selection:
+  // - If contract is ongoing: use today's date (Europe/London)
+  // - If contract has finished (end_date < today): use contract start_date
+  // ─────────────────────────────────────────────────────────────
+  const todayIso = (() => {
+    try {
+      const d = new Intl.DateTimeFormat('en-GB', {
+        timeZone: 'Europe/London',
+        year:'numeric', month:'2-digit', day:'2-digit'
+      }).format(new Date());
+      const [dd, mm, yyyy] = d.split('/');
+      return `${yyyy}-${mm}-${dd}`;
+    } catch {
+      const d = new Date();
+      const y = d.getFullYear();
+      const m = String(d.getMonth()+1).padStart(2,'0');
+      const day = String(d.getDate()).padStart(2,'0');
+      return `${y}-${m}-${day}`;
+    }
+  })();
+
+  const toIsoYmd = (v) => {
+    if (!v) return null;
+    const s = String(v).trim();
+    if (!s) return null;
+
+    // Accept ISO 'YYYY-MM-DD' (or ISO datetime)
+    if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);
+
+    // Accept UK 'DD/MM/YYYY'
+    if (/^\d{2}\/\d{2}\/\d{4}$/.test(s) && typeof parseUkDateToIso === 'function') {
+      try { return parseUkDateToIso(s) || null; } catch { return null; }
+    }
+    return null;
+  };
+
+  // Best-effort: read dates from staged state, modalCtx.data, or DOM inputs
+  const getDateField = (name) => {
+    const staged = fs.main ? fs.main[name] : null;
+    const dataV  = (window.modalCtx && window.modalCtx.data) ? window.modalCtx.data[name] : null;
+    const domV   = form ? form.querySelector(`[name="${name}"]`)?.value : null;
+    return (staged != null && staged !== '') ? staged : (domV != null && domV !== '' ? domV : dataV);
+  };
+
+  const startIso = toIsoYmd(getDateField('start_date')) || null;
+  const endIso   = toIsoYmd(getDateField('end_date'))   || null;
+
+  const isFinished = !!(endIso && endIso < todayIso);
+  const asOfIso = (isFinished && startIso) ? startIso : todayIso;
+
+  // ─────────────────────────────────────────────────────────────
   // Ensure we have a sensible ERNI multiplier (1 + erni_pct)
+  // UPDATED: getSettingsCached() now returns { settings, finance_windows }
+  // and ERNI must be selected using the asOfIso computed above.
+  // Cached by date to avoid repeated work/subcalls.
   // ─────────────────────────────────────────────────────────────
   let erniMult = 1;
   try {
-    if (typeof window.__ERNI_MULT__ === 'number' && window.__ERNI_MULT__ > 0) {
-      erniMult = window.__ERNI_MULT__;
+    window.__ERNI_MULT_BY_DATE__ = window.__ERNI_MULT_BY_DATE__ || Object.create(null);
+    if (window.__ERNI_MULT_BY_DATE__[asOfIso] && window.__ERNI_MULT_BY_DATE__[asOfIso] > 0) {
+      erniMult = window.__ERNI_MULT_BY_DATE__[asOfIso];
     } else if (typeof window.getSettingsCached === 'function') {
       const s = await window.getSettingsCached();
-      let p = s?.erni_pct ?? s?.employers_ni_percent ?? 0;
+
+      // New shape: { settings: {...}, finance_windows: [...] }
+      const fws = Array.isArray(s?.finance_windows) ? s.finance_windows : [];
+
+      const asYmd = (v) => {
+        if (!v) return null;
+        const ss = String(v).slice(0, 10);
+        return /^\d{4}-\d{2}-\d{2}$/.test(ss) ? ss : null;
+      };
+
+      // Pick the finance window in-scope for asOfIso
+      let chosen = null;
+      for (const w of fws) {
+        const df = asYmd(w?.date_from);
+        const dt = asYmd(w?.date_to);
+        if (!df) continue;
+        if (df > asOfIso) continue;
+        if (dt && dt < asOfIso) continue;
+
+        if (!chosen) {
+          chosen = w;
+        } else {
+          const cdf = asYmd(chosen?.date_from);
+          if (cdf && df > cdf) chosen = w;
+        }
+      }
+
+      // ERNI pct from finance window (preferred), else legacy fallbacks
+      let p = (chosen?.erni_pct ?? null);
+      if (p == null) p = s?.settings?.erni_pct ?? null;
+      if (p == null) p = s?.erni_pct ?? null;
+      if (p == null) p = s?.employers_ni_percent ?? null;
+      if (p == null) p = 0;
+
       p = Number(p) || 0;
       if (p > 1) p = p / 100; // support 15 vs 0.15
+
       erniMult = 1 + p;
       if (!Number.isFinite(erniMult) || erniMult <= 0) erniMult = 1;
-      window.__ERNI_MULT__ = erniMult;
+
+      window.__ERNI_MULT_BY_DATE__[asOfIso] = erniMult;
+      window.__ERNI_MULT__ = erniMult; // keep legacy single-value cache in sync
     }
   } catch {
     erniMult = 1;
     window.__ERNI_MULT__ = 1;
+    window.__ERNI_MULT_BY_DATE__ = window.__ERNI_MULT_BY_DATE__ || Object.create(null);
+    window.__ERNI_MULT_BY_DATE__[asOfIso] = 1;
   }
 
   const get = (n) => {
@@ -17539,7 +17747,17 @@ async function computeContractMargins() {
   });
 
   const hasNegativeMargins = Object.values(negFlags).some(Boolean);
-  window.__contractMarginState = { hasNegativeMargins, negFlags, method: payMethod };
+  window.__contractMarginState = {
+    hasNegativeMargins,
+    negFlags,
+    method: payMethod,
+
+    // useful metadata for debugging/UI if needed
+    finance_asof_ymd: asOfIso,
+    contract_start_ymd: startIso,
+    contract_end_ymd: endIso,
+    contract_finished: isFinished
+  };
 
   try { window.dispatchEvent(new CustomEvent('contract-margins-updated', { detail: window.__contractMarginState })); } catch {}
   try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
@@ -17555,7 +17773,6 @@ async function computeContractMargins() {
 
 
 // ========== PARENT TABLE RENDER (WITH LOUD LOGS + SAFETY NET) ==========
-
 async function openCandidateRateModal(candidate_id, existing) {
   const LOG = !!window.__LOG_RATES;
   const LOG_APPLY = (typeof window.__LOG_APPLY === 'boolean') ? window.__LOG_APPLY : LOG;
@@ -17652,21 +17869,29 @@ async function openCandidateRateModal(candidate_id, existing) {
   `);
 
   // ===== helpers =====
-  async function _erniMultiplier(){
-    if (typeof window.__ERNI_MULT__ === 'number') return window.__ERNI_MULT__;
+  const todayIso = (() => {
     try {
-      if (typeof getSettingsCached === 'function') {
-        const s = await getSettingsCached();
-        let p = s?.erni_pct ?? s?.employers_ni_percent ?? 0;
-        p = Number(p) || 0;
-        if (p > 1) p = p / 100;
-        window.__ERNI_MULT__ = 1 + p;
-        return window.__ERNI_MULT__;
-      }
-    } catch {}
-    window.__ERNI_MULT__ = 1;
-    return 1;
-  }
+      const d = new Intl.DateTimeFormat('en-GB', {
+        timeZone: 'Europe/London',
+        year:'numeric', month:'2-digit', day:'2-digit'
+      }).format(new Date());
+      const [dd, mm, yyyy] = d.split('/');
+      return `${yyyy}-${mm}-${dd}`;
+    } catch {
+      const d = new Date();
+      const y = d.getFullYear();
+      const m = String(d.getMonth()+1).padStart(2,'0');
+      const day = String(d.getDate()).padStart(2,'0');
+      return `${y}-${m}-${day}`;
+    }
+  })();
+
+  const asYmd = (v) => {
+    if (!v) return null;
+    const ss = String(v).slice(0, 10);
+    return /^\d{4}-\d{2}-\d{2}$/.test(ss) ? ss : null;
+  };
+
   function numOrNull(v){ if (v===undefined||v===null) return null; if (typeof v === 'string' && v.trim()==='') return null; const n=Number(v); return Number.isFinite(n) ? n : null; }
   const fmt = v => (v==null || Number.isNaN(v)) ? '—' : (Math.round(v*100)/100).toFixed(2);
   function showInlineError(html){ const p = byId('cr_err_panel'); if (!p) return; if (html && String(html).trim() !== '') { p.innerHTML = html; p.style.display = ''; } else { p.innerHTML = ''; p.style.display = 'none'; } }
@@ -17686,6 +17911,73 @@ async function openCandidateRateModal(candidate_id, existing) {
   }
   function setDateToError(msg){ const el = byId('cr_date_to_err'); if (!el) return; if (msg) { el.textContent = msg; el.style.display = ''; } else { el.textContent = ''; el.style.display = 'none'; } }
   function clearAllFieldErrors(){ document.querySelectorAll('#candRateForm .field-hint.err').forEach(el=>el.remove()); setDateToError(''); }
+
+  // ✅ ERNI multiplier selection per override:
+  // - If override is ongoing (date_to empty or date_to >= today) → use today
+  // - If override is finished (date_to < today) → use date_from
+  //
+  // Uses getSettingsCached() -> finance_windows (no extra network calls).
+  async function _erniMultiplier(isoFrom, isoTo){
+    try {
+      const fromIso = asYmd(isoFrom) || null;
+      const toIso   = asYmd(isoTo)   || null;
+
+      const finished = !!(toIso && toIso < todayIso);
+      const anchorYmd = (finished && fromIso) ? fromIso : todayIso;
+
+      // cache by anchor date (prevents repeated lookups while typing)
+      window.__ERNI_MULT_BY_DATE__ = window.__ERNI_MULT_BY_DATE__ || Object.create(null);
+      if (typeof window.__ERNI_MULT_BY_DATE__[anchorYmd] === 'number' && window.__ERNI_MULT_BY_DATE__[anchorYmd] > 0) {
+        return window.__ERNI_MULT_BY_DATE__[anchorYmd];
+      }
+
+      let fws = [];
+      try {
+        if (typeof getSettingsCached === 'function') {
+          const s = await getSettingsCached();
+          fws = Array.isArray(s?.finance_windows) ? s.finance_windows : [];
+        }
+      } catch {
+        fws = [];
+      }
+
+      // pick finance window in-scope for anchorYmd
+      let chosen = null;
+      for (const w of fws) {
+        const df = asYmd(w?.date_from);
+        const dt = asYmd(w?.date_to);
+        if (!df) continue;
+        if (df > anchorYmd) continue;
+        if (dt && dt < anchorYmd) continue;
+
+        if (!chosen) {
+          chosen = w;
+        } else {
+          const cdf = asYmd(chosen?.date_from);
+          if (cdf && df > cdf) chosen = w;
+        }
+      }
+
+      let pct = chosen?.erni_pct ?? 0;
+      pct = Number(pct) || 0;
+      if (pct > 1) pct = pct / 100; // support 15 vs 0.15
+
+      let mult = 1 + pct;
+      if (!Number.isFinite(mult) || mult <= 0) mult = 1;
+
+      window.__ERNI_MULT_BY_DATE__[anchorYmd] = mult;
+
+      // keep legacy cache in sync (best-effort)
+      window.__ERNI_MULT__ = mult;
+
+      return mult;
+    } catch {
+      window.__ERNI_MULT__ = 1;
+      window.__ERNI_MULT_BY_DATE__ = window.__ERNI_MULT_BY_DATE__ || Object.create(null);
+      window.__ERNI_MULT_BY_DATE__[todayIso] = 1;
+      return 1;
+    }
+  }
 
   async function resolveCoveringWindow(client_id, role, band, active_on){
     try {
@@ -17777,7 +18069,7 @@ async function openCandidateRateModal(candidate_id, existing) {
       }
     });
 
-    const mult = await _erniMultiplier();
+    const mult = await _erniMultiplier(isoFrom, isoTo);
 
     const invalid = [];
     buckets.forEach(b => {
@@ -18106,7 +18398,6 @@ async function openCandidateRateModal(candidate_id, existing) {
     };
   })();
 }
-
 
 
 // ---- Client modal
@@ -18526,28 +18817,101 @@ const { cleaned: csCleanRaw, invalid: csInvalid } = normalizeClientSettingsForSa
         }
       }
 
-      // 8) Negative-margin guard
-      const erniMult = (async ()=> {
-        if (typeof window.__ERNI_MULT__ === 'number') return window.__ERNI_MULT__;
+          // 8) Negative-margin guard
+      const erniMultForWindow = await (async ()=> {
+        // Pick today's date (Europe/London)
+        const todayIso = (() => {
+          try {
+            const s = new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/London', year:'numeric', month:'2-digit', day:'2-digit' }).format(new Date());
+            const [dd, mm, yyyy] = s.split('/');
+            return `${yyyy}-${mm}-${dd}`;
+          } catch {
+            const d = new Date(); const y = d.getFullYear(), m = String(d.getMonth()+1).padStart(2,'0'), day = String(d.getDate()).padStart(2,'0');
+            return `${y}-${m}-${day}`;
+          }
+        })();
+
+        const asYmd = (v) => {
+          if (!v) return null;
+          const ss = String(v).slice(0, 10);
+          return /^\d{4}-\d{2}-\d{2}$/.test(ss) ? ss : null;
+        };
+
+        // Load finance windows once (no extra network calls beyond existing cache)
+        let fws = [];
         try {
           if (typeof getSettingsCached === 'function') {
             const s = await getSettingsCached();
-            let p = s?.erni_pct ?? s?.employers_ni_percent ?? 0;
-            p = Number(p) || 0; if (p > 1) p = p/100;
-            window.__ERNI_MULT__ = 1 + p; return window.__ERNI_MULT__;
+            fws = Array.isArray(s?.finance_windows) ? s.finance_windows : [];
           }
-        } catch {}
-        return 1;
+        } catch {
+          fws = [];
+        }
+
+        // Cache ERNI multipliers by date
+        const multByYmd = Object.create(null);
+
+        const multForYmd = (ymd) => {
+          const key = asYmd(ymd) || todayIso;
+          if (multByYmd[key] != null) return multByYmd[key];
+
+          // Pick finance window in-scope for key, prefer latest date_from
+          let chosen = null;
+          for (const w of fws) {
+            const df = asYmd(w?.date_from);
+            const dt = asYmd(w?.date_to);
+            if (!df) continue;
+            if (df > key) continue;
+            if (dt && dt < key) continue;
+
+            if (!chosen) {
+              chosen = w;
+            } else {
+              const cdf = asYmd(chosen?.date_from);
+              if (cdf && df > cdf) chosen = w;
+            }
+          }
+
+          let p = chosen?.erni_pct ?? 0;
+          p = Number(p) || 0;
+          if (p > 1) p = p / 100; // support 15 vs 0.15
+
+          let mult = 1 + p;
+          if (!Number.isFinite(mult) || mult <= 0) mult = 1;
+
+          multByYmd[key] = mult;
+          return mult;
+        };
+
+        // Keep legacy cache aligned (best-effort) for other parts of UI
+        try { window.__ERNI_MULT__ = multForYmd(todayIso); } catch {}
+
+        // Return a function: (client default rate window) -> ERNI_MULT
+        return (rateWindow) => {
+          const endIso   = asYmd(rateWindow?.date_to) || null;
+          const startIso = asYmd(rateWindow?.date_from) || null;
+
+          const finished = !!(endIso && endIso < todayIso);
+          const anchorIso = (finished && startIso) ? startIso : todayIso;
+
+          return multForYmd(anchorIso);
+        };
       })();
-      const mult = await erniMult;
+
       for (const w of windows) {
         if (w.disabled_at_utc) continue;
+
+        // ✅ Per-window ERNI multiplier:
+        // ongoing -> today, finished -> date_from
+        const mult = erniMultForWindow(w);
+
         for (const b of ['day','night','sat','sun','bh']) {
           const chg  = w[`charge_${b}`], paye = w[`paye_${b}`], umb = w[`umb_${b}`];
           if (chg != null && paye != null && (chg - (paye * mult)) < 0) { alert(`PAYE margin would be negative for ${w.role}${w.band?` / ${w.band}`:''} (${b.toUpperCase()}). Fix before saving.`); return { ok:false }; }
           if (chg != null && umb  != null && (chg - umb) < 0)            { alert(`Umbrella margin would be negative for ${w.role}${w.band?` / ${w.band}`:''} (${b.toUpperCase()}). Fix before saving.`); return { ok:false }; }
         }
       }
+
 
       // 9) UPDATE existing, POST new (skip disabled)
       const toUpdate = windows.filter(w => w.id && !w.disabled_at_utc);
@@ -20312,26 +20676,102 @@ async function openChangeContractRatesModal(contractId) {
     };
   };
 
-  // Helper to ensure we have ERNI multiplier from settings (used for margin check)
+    // Helper to ensure we have ERNI multiplier from settings (used for margin check)
+  // UPDATED:
+  // - getSettingsCached() returns { settings, finance_windows }
+  // - ERNI comes from finance_windows window in-scope for an anchor date
+  // - Anchor date rule:
+  //    - if contract ongoing -> today (Europe/London)
+  //    - if contract finished (end_date < today) -> contract start_date
   const ensureErniMult = async () => {
-    if (typeof window.__ERNI_MULT__ === 'number' && window.__ERNI_MULT__ > 0) {
-      return window.__ERNI_MULT__;
+    // Today (Europe/London)
+    const todayIso = (() => {
+      try {
+        const s = new Intl.DateTimeFormat('en-GB', {
+          timeZone: 'Europe/London',
+          year:'numeric', month:'2-digit', day:'2-digit'
+        }).format(new Date());
+        const [dd, mm, yyyy] = s.split('/');
+        return `${yyyy}-${mm}-${dd}`;
+      } catch {
+        const d = new Date();
+        const y = d.getFullYear();
+        const m = String(d.getMonth()+1).padStart(2,'0');
+        const day = String(d.getDate()).padStart(2,'0');
+        return `${y}-${m}-${day}`;
+      }
+    })();
+
+    const asYmd = (v) => {
+      if (!v) return null;
+      const ss = String(v).slice(0, 10);
+      return /^\d{4}-\d{2}-\d{2}$/.test(ss) ? ss : null;
+    };
+
+    // Determine anchor date from baseContract start/end
+    const startIso = asYmd(baseContract?.start_date) || null;
+    const endIso   = asYmd(baseContract?.end_date)   || null;
+    const isFinished = !!(endIso && endIso < todayIso);
+    const anchorIso = (isFinished && startIso) ? startIso : todayIso;
+
+    // Cache ERNI_MULT per anchor date (so we don't recompute repeatedly)
+    window.__ERNI_MULT_BY_DATE__ = window.__ERNI_MULT_BY_DATE__ || Object.create(null);
+    if (typeof window.__ERNI_MULT_BY_DATE__[anchorIso] === 'number' && window.__ERNI_MULT_BY_DATE__[anchorIso] > 0) {
+      window.__ERNI_MULT__ = window.__ERNI_MULT_BY_DATE__[anchorIso]; // keep legacy cache aligned
+      return window.__ERNI_MULT_BY_DATE__[anchorIso];
     }
+
     try {
       if (typeof getSettingsCached === 'function') {
         const s = await getSettingsCached();
-        let p = s?.erni_pct ?? s?.employers_ni_percent ?? 0;
+
+        // New shape: { settings: {...}, finance_windows: [...] }
+        const fws = Array.isArray(s?.finance_windows) ? s.finance_windows : [];
+
+        // Pick finance window in-scope for anchorIso (prefer latest date_from)
+        let chosen = null;
+        for (const w of fws) {
+          const df = asYmd(w?.date_from);
+          const dt = asYmd(w?.date_to);
+          if (!df) continue;
+          if (df > anchorIso) continue;
+          if (dt && dt < anchorIso) continue;
+
+          if (!chosen) {
+            chosen = w;
+          } else {
+            const cdf = asYmd(chosen?.date_from);
+            if (cdf && df > cdf) chosen = w;
+          }
+        }
+
+        // ERNI pct from finance window; fallback to legacy fields if needed
+        let p = chosen?.erni_pct ?? null;
+        if (p == null) p = s?.settings?.erni_pct ?? null;
+        if (p == null) p = s?.erni_pct ?? null;
+        if (p == null) p = s?.employers_ni_percent ?? null;
+        if (p == null) p = 0;
+
         p = Number(p) || 0;
         if (p > 1) p = p / 100;
-        window.__ERNI_MULT__ = 1 + p;
-        return window.__ERNI_MULT__;
+
+        let mult = 1 + p;
+        if (!Number.isFinite(mult) || mult <= 0) mult = 1;
+
+        window.__ERNI_MULT_BY_DATE__[anchorIso] = mult;
+        window.__ERNI_MULT__ = mult;
+
+        return mult;
       }
     } catch (e) {
       W('ensureErniMult failed, defaulting to 1', e);
     }
+
+    window.__ERNI_MULT_BY_DATE__[anchorIso] = 1;
     window.__ERNI_MULT__ = 1;
     return 1;
   };
+
 
   // Margin validation before submit (per bucket)
   const validateMargins = async (ratesOverride) => {
@@ -24972,21 +25412,97 @@ async function openClientRateModal(client_id, existing) {
     </div>
   `);
 
-  // ERNI
-  async function _erniMultiplier(){
-    if (typeof window.__ERNI_MULT__ === 'number') return window.__ERNI_MULT__;
+    // ERNI
+  // UPDATED:
+  // - getSettingsCached() returns { settings, finance_windows }
+  // - ERNI is selected by date:
+  //     ongoing (date_to empty or date_to >= today) -> today
+  //     finished (date_to < today) -> date_from
+  async function _erniMultiplier(fromIso, toIso){
+    // Today (Europe/London)
+    const todayIso = (() => {
+      try {
+        const s = new Intl.DateTimeFormat('en-GB', {
+          timeZone: 'Europe/London',
+          year:'numeric', month:'2-digit', day:'2-digit'
+        }).format(new Date());
+        const [dd, mm, yyyy] = s.split('/');
+        return `${yyyy}-${mm}-${dd}`;
+      } catch {
+        const d = new Date(); const y = d.getFullYear(), m = String(d.getMonth()+1).padStart(2,'0'), day = String(d.getDate()).padStart(2,'0');
+        return `${y}-${m}-${day}`;
+      }
+    })();
+
+    const asYmd = (v) => {
+      if (!v) return null;
+      const ss = String(v).slice(0, 10);
+      return /^\d{4}-\d{2}-\d{2}$/.test(ss) ? ss : null;
+    };
+
+    const fIso = asYmd(fromIso) || null;
+    const tIso = asYmd(toIso)   || null;
+
+    // Rule: finished -> start date, else today
+    const finished = !!(tIso && tIso < todayIso);
+    const anchorYmd = (finished && fIso) ? fIso : todayIso;
+
+    // Cache by anchor date (prevents repeated lookups while typing)
+    window.__ERNI_MULT_BY_DATE__ = window.__ERNI_MULT_BY_DATE__ || Object.create(null);
+    if (typeof window.__ERNI_MULT_BY_DATE__[anchorYmd] === 'number' && window.__ERNI_MULT_BY_DATE__[anchorYmd] > 0) {
+      window.__ERNI_MULT__ = window.__ERNI_MULT_BY_DATE__[anchorYmd]; // keep legacy cache aligned
+      return window.__ERNI_MULT_BY_DATE__[anchorYmd];
+    }
+
     try {
       if (typeof getSettingsCached === 'function') {
         const s = await getSettingsCached();
-        let p = s?.erni_pct ?? s?.employers_ni_percent ?? 0;
-        p = Number(p) || 0; if (p > 1) p = p/100;
-        window.__ERNI_MULT__ = 1 + p;
-        return window.__ERNI_MULT__;
+
+        // New shape: { settings: {...}, finance_windows: [...] }
+        const fws = Array.isArray(s?.finance_windows) ? s.finance_windows : [];
+
+        // Pick finance window in-scope for anchorYmd (prefer latest date_from)
+        let chosen = null;
+        for (const w of fws) {
+          const df = asYmd(w?.date_from);
+          const dt = asYmd(w?.date_to);
+          if (!df) continue;
+          if (df > anchorYmd) continue;
+          if (dt && dt < anchorYmd) continue;
+
+          if (!chosen) {
+            chosen = w;
+          } else {
+            const cdf = asYmd(chosen?.date_from);
+            if (cdf && df > cdf) chosen = w;
+          }
+        }
+
+        // ERNI pct from finance window (preferred), else legacy fallbacks
+        let p = chosen?.erni_pct ?? null;
+        if (p == null) p = s?.settings?.erni_pct ?? null;
+        if (p == null) p = s?.erni_pct ?? null;
+        if (p == null) p = s?.employers_ni_percent ?? null;
+        if (p == null) p = 0;
+
+        p = Number(p) || 0;
+        if (p > 1) p = p/100;
+
+        let mult = 1 + p;
+        if (!Number.isFinite(mult) || mult <= 0) mult = 1;
+
+        window.__ERNI_MULT_BY_DATE__[anchorYmd] = mult;
+        window.__ERNI_MULT__ = mult;
+
+        return mult;
       }
     } catch {}
+
+    window.__ERNI_MULT_BY_DATE__[anchorYmd] = 1;
     window.__ERNI_MULT__ = 1;
     return 1;
   }
+
 
   function setApplyEnabled(enabled){
     if (LOG_RATES) console.log('[RATES][setApplyEnabled]', { enabled });
@@ -25027,11 +25543,14 @@ async function openClientRateModal(client_id, existing) {
   }
 
   // Gate inputs + margins + Apply + overlap inline fixes
+   // Gate inputs + margins + Apply + overlap inline fixes
   async function recomputeClientState(){
-    const mult = await _erniMultiplier();
     const roleVal = (byId('cl_role')?.value || '').trim();
     const fromIso = parseUkDateToIso(byId('cl_date_from')?.value || '');
     const toIso   = parseUkDateToIso(byId('cl_date_to')?.value || '');
+
+    const mult = await _erniMultiplier(fromIso, toIso);
+
 
     DBG('recomputeClientState: ENTRY', { roleVal, fromIso, toIso, exId: ex?.id });
 
@@ -25428,37 +25947,106 @@ async function renderClientRatesTable() {
 
   DBG('ENTRY', { stagedLen: staged.length, parentEditable, ctxEntity: ctx?.entity });
 
-  // ERNI multiplier for PAYE margins (same logic as elsewhere)
-  async function _erniMultiplier(){
-    if (typeof window.__ERNI_MULT__ === 'number') return window.__ERNI_MULT__;
+  // ERNI multiplier for PAYE margins
+  // UPDATED:
+  // - getSettingsCached() returns { settings, finance_windows }
+  // - choose ERNI by date:
+  //     ongoing (date_to empty or date_to >= today) -> today
+  //     finished (date_to < today) -> date_from
+  async function _erniMultiplier(fromIso, toIso){
+    // Today (Europe/London)
+    const todayIso = (() => {
+      try {
+        const s = new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/London', year:'numeric', month:'2-digit', day:'2-digit' }).format(new Date());
+        const [dd, mm, yyyy] = s.split('/');
+        return `${yyyy}-${mm}-${dd}`;
+      } catch {
+        const d = new Date(); const y = d.getFullYear(), m = String(d.getMonth()+1).padStart(2,'0'), day = String(d.getDate()).padStart(2,'0');
+        return `${y}-${m}-${day}`;
+      }
+    })();
+
+    const asYmd = (v) => {
+      if (!v) return null;
+      const ss = String(v).slice(0, 10);
+      return /^\d{4}-\d{2}-\d{2}$/.test(ss) ? ss : null;
+    };
+
+    const fIso = asYmd(fromIso) || null;
+    const tIso = asYmd(toIso)   || null;
+
+    // Rule: finished -> start date, else today
+    const finished = !!(tIso && tIso < todayIso);
+    const anchorYmd = (finished && fIso) ? fIso : todayIso;
+
+    // Cache by anchor date
+    window.__ERNI_MULT_BY_DATE__ = window.__ERNI_MULT_BY_DATE__ || Object.create(null);
+    if (typeof window.__ERNI_MULT_BY_DATE__[anchorYmd] === 'number' && window.__ERNI_MULT_BY_DATE__[anchorYmd] > 0) {
+      window.__ERNI_MULT__ = window.__ERNI_MULT_BY_DATE__[anchorYmd]; // keep legacy cache aligned
+      return window.__ERNI_MULT_BY_DATE__[anchorYmd];
+    }
+
     try {
       if (typeof getSettingsCached === 'function') {
         const s = await getSettingsCached();
-        let p = s?.erni_pct ?? s?.employers_ni_percent ?? 0;
+
+        // New shape: { settings: {...}, finance_windows: [...] }
+        const fws = Array.isArray(s?.finance_windows) ? s.finance_windows : [];
+
+        // Pick finance window in-scope for anchorYmd (prefer latest date_from)
+        let chosen = null;
+        for (const w of fws) {
+          const df = asYmd(w?.date_from);
+          const dt = asYmd(w?.date_to);
+          if (!df) continue;
+          if (df > anchorYmd) continue;
+          if (dt && dt < anchorYmd) continue;
+
+          if (!chosen) {
+            chosen = w;
+          } else {
+            const cdf = asYmd(chosen?.date_from);
+            if (cdf && df > cdf) chosen = w;
+          }
+        }
+
+        let p = chosen?.erni_pct ?? null;
+        if (p == null) p = s?.settings?.erni_pct ?? null;
+        if (p == null) p = s?.erni_pct ?? null;
+        if (p == null) p = s?.employers_ni_percent ?? null;
+        if (p == null) p = 0;
+
         p = Number(p) || 0;
         if (p > 1) p = p / 100;
-        window.__ERNI_MULT__ = 1 + p;
-        return window.__ERNI_MULT__;
+
+        let mult = 1 + p;
+        if (!Number.isFinite(mult) || mult <= 0) mult = 1;
+
+        window.__ERNI_MULT_BY_DATE__[anchorYmd] = mult;
+        window.__ERNI_MULT__ = mult;
+
+        return mult;
       }
     } catch {}
+
+    window.__ERNI_MULT_BY_DATE__[anchorYmd] = 1;
     window.__ERNI_MULT__ = 1;
     return 1;
   }
-  const mult = await _erniMultiplier();
 
   // Formatters
   const fmt2 = (v) => (v==null || Number.isNaN(v)) ? '—' : (Math.round(Number(v)*100)/100).toFixed(2);
 
-  // ✅ FIX: Client rates are HOURLY — margin must be HOURLY (not "daily")
-  // PAYE margin includes ERNI multiplier: charge - (pay * mult)
+  // ✅ FIX: Client rates are HOURLY — margin must be HOURLY
+  // PAYE margin includes ERNI multiplier: charge - (pay * erniMult)
   // UMB margin: charge - pay
-  const calcMargin = ({ charge, pay, method }) => {
+  const calcMargin = ({ charge, pay, method, erniMult }) => {
     const ch = (charge == null ? null : Number(charge));
     const py = (pay    == null ? null : Number(pay));
     if (!Number.isFinite(ch) || !Number.isFinite(py)) return null;
 
     const m = String(method || '').toUpperCase();
-    if (m === 'PAYE') return ch - (py * (Number(mult) || 1));
+    if (m === 'PAYE') return ch - (py * (Number(erniMult) || 1));
     return ch - py; // UMBRELLA
   };
 
@@ -25527,14 +26115,14 @@ async function renderClientRatesTable() {
   wrap.style.width = '100%';
   wrap.style.minWidth = '0';
 
-  groupRows.forEach((r) => {
+  // ✅ IMPORTANT: use for..of so we can await per-window ERNI multiplier
+  for (const r of groupRows) {
     const roleText = String(r.role || '').trim();
     const bandText = (r.band ?? null) ? String(r.band) : '';
     const fromText = r.date_from ? formatIsoToUk(String(r.date_from)) : '';
     const toText   = r.date_to   ? formatIsoToUk(String(r.date_to))   : 'Open-ended';
 
     const card = document.createElement('div');
-    // Use your existing “card” style if present; otherwise inline still looks fine
     card.className = 'card';
     card.style.padding = '12px';
     card.style.border = '1px solid var(--line)';
@@ -25603,6 +26191,10 @@ async function renderClientRatesTable() {
     tbl.appendChild(thead);
 
     const tb = document.createElement('tbody');
+
+    // ✅ compute ERNI multiplier ONCE per window (ongoing->today, finished->date_from)
+    const erniMultForThisWindow = await _erniMultiplier(r.date_from || null, r.date_to || null);
+
     SHIFT_LABELS.forEach(([bucket, label]) => {
       const tr = document.createElement('tr');
 
@@ -25610,8 +26202,8 @@ async function renderClientRatesTable() {
       const umb    = r[`umb_${bucket}`];
       const charge = r[`charge_${bucket}`];
 
-      const mPaye = calcMargin({ charge, pay: paye, method: 'PAYE' });
-      const mUmb  = calcMargin({ charge, pay: umb,  method: 'UMBRELLA' });
+      const mPaye = calcMargin({ charge, pay: paye, method: 'PAYE',     erniMult: erniMultForThisWindow });
+      const mUmb  = calcMargin({ charge, pay: umb,  method: 'UMBRELLA', erniMult: erniMultForThisWindow });
 
       const tdShift = document.createElement('td');
       tdShift.textContent = label;
@@ -25639,12 +26231,13 @@ async function renderClientRatesTable() {
 
       tb.appendChild(tr);
     });
+
     tbl.appendChild(tb);
 
     card.appendChild(header);
     card.appendChild(tbl);
     wrap.appendChild(card);
-  });
+  }
 
   div.appendChild(wrap);
 
@@ -25701,6 +26294,23 @@ async function renderClientRatesTable() {
 //   • Respects existing memo: window.__ERNI_MULT__ (fallback 1.0). Does not force async lookups.
 //   • Non-breaking: only defines helpers if not already present.
 // ──────────────────────────────────────────────────────────────────────────────
+// ──────────────────────────────────────────────────────────────────────────────
+// Global margin helpers (safe, consumers can use immediately)
+// - calcDailyMargin({ bucket, charge, pay, method, erniMultiplier? }) -> number|null
+// - calcDailyMarginsForBuckets({ method, charge:{...}, pay:{...}, erniMultiplier? }) -> {day,night,sat,sun,bh}
+// - ensureErniMultiplier(fromIso?, toIso?) -> Promise<number>  (optional bootstrap to memoise ERNI)
+// Notes:
+//   • Pure calc (ex-VAT). No rounding, no styling. Callers format to 2dp.
+//   • For PAYE, margin = charge − (pay × ERNI_MULTIPLIER). For Umbrella, margin = charge − pay.
+//   • If any operand is missing/NaN returns null.
+//   • Respects memo: window.__ERNI_MULT__ / window.__ERNI_MULT_BY_DATE__ (fallback 1.0).
+//   • Non-breaking: only defines helpers if not already present.
+//   • Updated settings logic: getSettingsCached() now returns { settings, finance_windows } and ERNI is chosen from
+//     finance_windows in-scope for an anchor date.
+//     Anchor rule (when dates provided):
+//       - ongoing (toIso empty or toIso >= today UK) -> today UK
+//       - finished (toIso < today UK) -> fromIso
+// ──────────────────────────────────────────────────────────────────────────────
 (() => {
   const W = (typeof window !== 'undefined') ? window : globalThis;
 
@@ -25711,21 +26321,103 @@ async function renderClientRatesTable() {
     return Number.isFinite(n) ? n : null;
   };
 
+  // Today (Europe/London) as YYYY-MM-DD
+  const todayUkYmd = () => {
+    try {
+      const s = new Intl.DateTimeFormat('en-GB', {
+        timeZone: 'Europe/London',
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit'
+      }).format(new Date());
+      const [dd, mm, yyyy] = s.split('/');
+      return `${yyyy}-${mm}-${dd}`;
+    } catch {
+      const d = new Date();
+      const y = d.getFullYear();
+      const m = String(d.getMonth() + 1).padStart(2, '0');
+      const day = String(d.getDate()).padStart(2, '0');
+      return `${y}-${m}-${day}`;
+    }
+  };
+
+  const asYmd = (v) => {
+    if (!v) return null;
+    const s = String(v).trim();
+    if (!s) return null;
+    // Accept YYYY-MM-DD or ISO datetime; keep YYYY-MM-DD
+    const ymd = s.slice(0, 10);
+    return /^\d{4}-\d{2}-\d{2}$/.test(ymd) ? ymd : null;
+  };
+
   // Optional async bootstrap to memoise ERNI multiplier once (1 + percent)
   // Uses your existing getSettingsCached if available. Safe to call multiple times.
+  // Updated: pulls from finance_windows (in-scope for anchor date) rather than settings_defaults fields.
   if (typeof W.ensureErniMultiplier !== 'function') {
-    W.ensureErniMultiplier = async function ensureErniMultiplier() {
-      if (typeof W.__ERNI_MULT__ === 'number') return W.__ERNI_MULT__;
+    W.ensureErniMultiplier = async function ensureErniMultiplier(fromIso = null, toIso = null) {
+      const todayIso = todayUkYmd();
+
+      // Determine anchor date:
+      // - ongoing -> today
+      // - finished -> fromIso
+      const fIso = asYmd(fromIso);
+      const tIso = asYmd(toIso);
+      const finished = !!(tIso && tIso < todayIso);
+      const anchorYmd = (finished && fIso) ? fIso : todayIso;
+
+      // Cache by date (prevents repeat lookups)
+      W.__ERNI_MULT_BY_DATE__ = W.__ERNI_MULT_BY_DATE__ || Object.create(null);
+      if (typeof W.__ERNI_MULT_BY_DATE__[anchorYmd] === 'number' && W.__ERNI_MULT_BY_DATE__[anchorYmd] > 0) {
+        W.__ERNI_MULT__ = W.__ERNI_MULT_BY_DATE__[anchorYmd]; // keep legacy cache aligned
+        return W.__ERNI_MULT_BY_DATE__[anchorYmd];
+      }
+
       try {
         if (typeof W.getSettingsCached === 'function') {
           const s = await W.getSettingsCached();
-          let p = s?.erni_pct ?? s?.employers_ni_percent ?? 0;
+
+          // New shape: { settings: {...}, finance_windows: [...] }
+          const fws = Array.isArray(s?.finance_windows) ? s.finance_windows : [];
+
+          // Pick finance window in-scope for anchorYmd (prefer latest date_from)
+          let chosen = null;
+          for (const w of fws) {
+            const df = asYmd(w?.date_from);
+            const dt = asYmd(w?.date_to);
+            if (!df) continue;
+            if (df > anchorYmd) continue;
+            if (dt && dt < anchorYmd) continue;
+
+            if (!chosen) {
+              chosen = w;
+            } else {
+              const cdf = asYmd(chosen?.date_from);
+              if (cdf && df > cdf) chosen = w;
+            }
+          }
+
+          // Prefer finance window erni_pct; fallback to legacy fields if present
+          let p = chosen?.erni_pct ?? null;
+          if (p == null) p = s?.settings?.erni_pct ?? null;
+          if (p == null) p = s?.erni_pct ?? null;
+          if (p == null) p = s?.employers_ni_percent ?? null;
+          if (p == null) p = 0;
+
           p = Number(p) || 0;
-          if (p > 1) p = p / 100;           // support 13.8 vs 0.138
-          W.__ERNI_MULT__ = 1 + p;
-          return W.__ERNI_MULT__;
+          if (p > 1) p = p / 100; // support 15 vs 0.15
+
+          let mult = 1 + p;
+          if (!Number.isFinite(mult) || mult <= 0) mult = 1;
+
+          W.__ERNI_MULT_BY_DATE__[anchorYmd] = mult;
+          W.__ERNI_MULT__ = mult;
+
+          return mult;
         }
       } catch {}
+
+      // Fallback
+      W.__ERNI_MULT_BY_DATE__[anchorYmd] = 1;
       W.__ERNI_MULT__ = 1;
       return 1;
     };
@@ -25793,6 +26485,7 @@ async function renderClientRatesTable() {
     };
   }
 })();
+
 
 
 // NEW
@@ -40063,10 +40756,19 @@ document.addEventListener('keydown', (e) => {
 async function openSettings() {
   const deep = (o)=> JSON.parse(JSON.stringify(o || {}));
 
-  // Hydrate settings first
-  let settings;
+  // Hydrate settings + finance windows
+  let settings = null;
+  let finance_windows = [];
+
   try {
-    settings = await getSettings(); // unwraps {settings:{...}} → {...}
+    const res = await getSettings(); // may return {settings, finance_windows} or just settings (legacy)
+    if (res && typeof res === 'object' && res.settings && typeof res.settings === 'object') {
+      settings = res.settings;
+      finance_windows = Array.isArray(res.finance_windows) ? res.finance_windows : [];
+    } else {
+      settings = res; // legacy behaviour
+      finance_windows = Array.isArray(res?.finance_windows) ? res.finance_windows : [];
+    }
   } catch (e) {
     alert('Could not load settings.');
     return;
@@ -40075,7 +40777,9 @@ async function openSettings() {
   // Seed modal context
   modalCtx = {
     entity: 'settings',
-    data: deep(settings),                    // single source of truth for showModal
+    data: deep(settings || {}),             // settings_defaults (non-finance) remain the modal's main data
+    finance_windows: deep(finance_windows), // finance windows live alongside data (so we don’t accidentally POST them to /defaults)
+    finance_new_draft: (modalCtx && modalCtx.finance_new_draft) ? modalCtx.finance_new_draft : { date_from:'', date_to:'', vat:'', hol:'', erni:'' },
     formState: { __forId: 'global', main:{} },
     openToken: 'settings:' + Date.now()
   };
@@ -40088,7 +40792,142 @@ async function openSettings() {
     handleSaveSettings,
     true // hasId → opens in View mode
   );
+
+  // Wire finance window behaviours (delegated, survives re-renders)
+  try { __ensureSettingsFinanceWindowsWiring(); } catch {}
+  // Best-effort: initial sync/bounds after render
+  setTimeout(() => { try { __settingsFinanceSync(); } catch {} }, 0);
 }
+function __ensureSettingsFinanceWindowsWiring() {
+  if (window.__settingsFinanceWindowsWired) return;
+  window.__settingsFinanceWindowsWired = true;
+
+  // Attach UK datepicker lazily on focus
+  document.addEventListener('focusin', (e) => {
+    const el = e.target;
+    if (!el) return;
+    if (!el.classList || !el.classList.contains('js-ukdp')) return;
+    try { attachUkDatePicker(el, {}); } catch {}
+  });
+
+  // Keep draft fields in modalCtx and enforce no-overlap auto-adjust rules
+  document.addEventListener('input', (e) => {
+    const el = e.target;
+    if (!modalCtx || modalCtx.entity !== 'settings') return;
+    if (!el || !el.id) return;
+
+    // Persist Add-new draft values live
+    if (el.id.startsWith('fw_new_')) {
+      modalCtx.finance_new_draft = modalCtx.finance_new_draft || { date_from:'', date_to:'', vat:'', hol:'', erni:'' };
+      if (el.id === 'fw_new_from') modalCtx.finance_new_draft.date_from = el.value || '';
+      if (el.id === 'fw_new_to')   modalCtx.finance_new_draft.date_to   = el.value || '';
+      if (el.id === 'fw_new_vat')  modalCtx.finance_new_draft.vat       = el.value;
+      if (el.id === 'fw_new_hol')  modalCtx.finance_new_draft.hol       = el.value;
+      if (el.id === 'fw_new_erni') modalCtx.finance_new_draft.erni      = el.value;
+    }
+  });
+
+  document.addEventListener('change', (e) => {
+    if (!modalCtx || modalCtx.entity !== 'settings') return;
+    const el = e.target;
+    if (!el || !el.id) return;
+    if (!/^fw_(cur|fut|new)_/.test(el.id)) return;
+    __settingsFinanceSync();
+  });
+}
+
+function __settingsFinanceSync() {
+  const byId = (id) => document.getElementById(id);
+
+  const curTo   = byId('fw_cur_to');
+  const futFrom = byId('fw_fut_from');
+  const newFrom = byId('fw_new_from');
+  const hint    = byId('fw_hint');
+
+  if (!curTo || (!futFrom && !newFrom)) return;
+
+  const toIso = (ukVal) => {
+    if (!ukVal) return null;
+    try { return parseUkDateToIso(String(ukVal).trim()) || null; } catch { return null; }
+  };
+
+  const toUk = (iso) => {
+    if (!iso) return '';
+    try { return formatIsoToUk(iso); } catch { return iso; }
+  };
+
+  const addDays = (iso, delta) => {
+    const d = new Date(`${iso}T00:00:00Z`);
+    if (Number.isNaN(d.getTime())) return iso;
+    d.setUTCDate(d.getUTCDate() + delta);
+    const yyyy = d.getUTCFullYear();
+    const mm = String(d.getUTCMonth() + 1).padStart(2, '0');
+    const dd = String(d.getUTCDate()).padStart(2, '0');
+    return `${yyyy}-${mm}-${dd}`;
+  };
+
+  const curToIso   = toIso(curTo.value);
+  const futFromIso = futFrom ? toIso(futFrom.value) : null;
+  const newFromIso = newFrom ? toIso(newFrom.value) : null;
+
+  let msg = '';
+
+  // Rule A: If new start is set and would overlap current (open-ended or current end >= new start),
+  // auto-set current end = day before new start.
+  if (newFromIso) {
+    if (!curToIso || (curToIso >= newFromIso)) {
+      const nextCurTo = addDays(newFromIso, -1);
+      curTo.value = toUk(nextCurTo);
+      msg = `Adjusted Current end to ${curTo.value} (day before new start) to prevent overlap.`;
+    }
+  }
+
+  // Refresh after possible change
+  const curToIso2 = toIso(curTo.value);
+
+  // Rule B: If future start exists and overlaps current end (or current end open), auto-adjust:
+  // - if current end is empty -> set current end to day before future start
+  // - else if current end >= future start -> move future start to day after current end
+  if (futFromIso) {
+    if (!curToIso2) {
+      curTo.value = toUk(addDays(futFromIso, -1));
+      msg = msg || `Adjusted Current end to ${curTo.value} to avoid overlap with Future start.`;
+    } else if (curToIso2 >= futFromIso) {
+      const nextFutFrom = addDays(curToIso2, +1);
+      futFrom.value = toUk(nextFutFrom);
+      msg = msg || `Adjusted Future start to ${futFrom.value} (day after Current end) to prevent overlap.`;
+    }
+  }
+
+  // Update datepicker constraints (best-effort)
+  try {
+    // Current end max date = min(futureStart-1, newStart-1) if either exists
+    let maxIso = null;
+    const fIso = futFrom ? toIso(futFrom.value) : null;
+    const nIso = newFrom ? toIso(newFrom.value) : null;
+    if (fIso) maxIso = addDays(fIso, -1);
+    if (nIso) maxIso = maxIso ? (nIso < fIso ? addDays(nIso, -1) : maxIso) : addDays(nIso, -1);
+
+    if (typeof curTo.setMaxDate === 'function') curTo.setMaxDate(maxIso);
+
+    // Future start min date = current end + 1 (if current end exists)
+    if (futFrom && typeof futFrom.setMinDate === 'function') {
+      const cIso = toIso(curTo.value);
+      futFrom.setMinDate(cIso ? addDays(cIso, +1) : null);
+    }
+
+    // New start min date = current end + 1 (if current end exists)
+    if (newFrom && typeof newFrom.setMinDate === 'function') {
+      const cIso = toIso(curTo.value);
+      newFrom.setMinDate(cIso ? addDays(cIso, +1) : null);
+    }
+  } catch {}
+
+  if (hint) {
+    hint.textContent = msg || 'Tip: selecting a new Start date will automatically adjust the Current End date to avoid overlaps.';
+  }
+}
+
 function renderSummary(rows){
   currentRows = rows;
   currentSelection = null;
@@ -41009,7 +41848,138 @@ function renderSummary(rows){
 function renderSettingsTab(key, s = {}) {
   if (key !== 'main') return '';
 
-  const erniValue = (s.employers_ni_pct ?? s.erni_pct ?? 0);
+  // Finance windows are now loaded separately (handleGetSettings returns { settings, finance_windows }).
+  // We keep settings_defaults fields here for non-finance settings only.
+  const fws = (modalCtx && Array.isArray(modalCtx.finance_windows)) ? modalCtx.finance_windows : [];
+
+  // Determine "today" (YYYY-MM-DD). Prefer existing helper if present.
+  let todayYmd = null;
+  try { todayYmd = (typeof toLocalParts === 'function') ? (toLocalParts(new Date().toISOString(), null)?.ymd || null) : null; } catch {}
+  if (!todayYmd) todayYmd = new Date().toISOString().slice(0, 10);
+
+  const asYmd = (v) => {
+    if (!v) return null;
+    const s = String(v).slice(0, 10);
+    return /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : null;
+  };
+
+  const sortDesc = (a, b) => (asYmd(b?.date_from) || '').localeCompare(asYmd(a?.date_from) || '');
+  const sortAsc  = (a, b) => (asYmd(a?.date_from) || '').localeCompare(asYmd(b?.date_from) || '');
+
+  const current = (fws || [])
+    .filter(w => {
+      const df = asYmd(w?.date_from);
+      const dt = asYmd(w?.date_to);
+      return df && df <= todayYmd && (!dt || dt >= todayYmd);
+    })
+    .sort(sortDesc)[0] || null;
+
+  const futureList = (fws || [])
+    .filter(w => {
+      const df = asYmd(w?.date_from);
+      return df && df > todayYmd;
+    })
+    .sort(sortAsc);
+
+  const future = futureList[0] || null;
+  const futureExtraCount = Math.max(0, futureList.length - 1);
+
+  const uk = (iso) => {
+    try { return iso ? formatIsoToUk(String(iso).slice(0, 10)) : ''; } catch { return iso ? String(iso).slice(0, 10) : ''; }
+  };
+
+  const cur = {
+    id: current?.id || null,
+    date_from: uk(current?.date_from || ''),
+    date_to: uk(current?.date_to || ''),
+    vat: (current?.vat_rate_pct ?? ''),
+    hol: (current?.holiday_pay_pct ?? ''),
+    erni: (current?.erni_pct ?? ''),
+  };
+
+  const fut = {
+    id: future?.id || null,
+    date_from: uk(future?.date_from || ''),
+    date_to: uk(future?.date_to || ''),
+    vat: (future?.vat_rate_pct ?? ''),
+    hol: (future?.holiday_pay_pct ?? ''),
+    erni: (future?.erni_pct ?? ''),
+  };
+
+  // Draft "Add new" values live on modalCtx so they survive re-renders
+  const draft = (modalCtx && modalCtx.finance_new_draft && typeof modalCtx.finance_new_draft === 'object')
+    ? modalCtx.finance_new_draft
+    : (modalCtx.finance_new_draft = { date_from: '', date_to: '', vat: '', hol: '', erni: '' });
+
+  const financeCard = `
+    <div class="row" style="grid-column:1/-1">
+      <div id="settingsFinanceWindows" style="padding:12px;border:1px solid rgba(255,255,255,0.12);border-radius:12px;background:rgba(255,255,255,0.04)">
+        <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:10px">
+          <div>
+            <div style="font-weight:700;font-size:14px">Finance windows</div>
+            <div style="font-size:12px;color:rgba(255,255,255,0.7)">
+              VAT / Holiday pay / ERNI are controlled by date windows. Windows cannot overlap.
+              ${futureExtraCount ? `<span style="margin-left:6px;color:rgba(255,200,120,0.95)">(+${futureExtraCount} more future window${futureExtraCount>1?'s':''} not shown)</span>` : ``}
+            </div>
+          </div>
+          <div style="font-size:12px;color:rgba(255,255,255,0.6);text-align:right">
+            Today: <strong>${todayYmd}</strong><br/>
+            UK dates (DD/MM/YYYY)
+          </div>
+        </div>
+
+        <div style="display:grid;grid-template-columns: 140px 160px 160px 120px 140px 120px;gap:8px;align-items:end">
+          <div style="font-size:12px;color:rgba(255,255,255,0.7)">Type</div>
+          <div style="font-size:12px;color:rgba(255,255,255,0.7)">Start</div>
+          <div style="font-size:12px;color:rgba(255,255,255,0.7)">End</div>
+          <div style="font-size:12px;color:rgba(255,255,255,0.7)">VAT %</div>
+          <div style="font-size:12px;color:rgba(255,255,255,0.7)">Holiday %</div>
+          <div style="font-size:12px;color:rgba(255,255,255,0.7)">ERNI %</div>
+
+          <!-- CURRENT -->
+          <div style="font-weight:600">Current</div>
+          <input id="fw_cur_from" class="js-ukdp" type="text" value="${cur.date_from}" placeholder="DD/MM/YYYY" disabled
+                 style="opacity:0.7" />
+          <input id="fw_cur_to" class="js-ukdp" type="text" value="${cur.date_to}" placeholder="(open)"
+                 data-row="current" />
+          <input id="fw_cur_vat" type="number" step="0.01" value="${cur.vat}" placeholder="e.g. 20" data-row="current" />
+          <input id="fw_cur_hol" type="number" step="0.01" value="${cur.hol}" placeholder="e.g. 12.07" data-row="current" />
+          <input id="fw_cur_erni" type="number" step="0.01" value="${cur.erni}" placeholder="e.g. 15" data-row="current" />
+
+          <!-- FUTURE (next upcoming only) -->
+          <div style="font-weight:600">Future</div>
+          <input id="fw_fut_from" class="js-ukdp" type="text" value="${fut.date_from}" placeholder="DD/MM/YYYY"
+                 data-row="future" ${fut.id ? '' : 'disabled style="opacity:0.6"'} />
+          <input id="fw_fut_to" class="js-ukdp" type="text" value="${fut.date_to}" placeholder="(open)"
+                 data-row="future" ${fut.id ? '' : 'disabled style="opacity:0.6"'} />
+          <input id="fw_fut_vat" type="number" step="0.01" value="${fut.vat}" placeholder="e.g. 20"
+                 data-row="future" ${fut.id ? '' : 'disabled style="opacity:0.6"'} />
+          <input id="fw_fut_hol" type="number" step="0.01" value="${fut.hol}" placeholder="e.g. 12.07"
+                 data-row="future" ${fut.id ? '' : 'disabled style="opacity:0.6"'} />
+          <input id="fw_fut_erni" type="number" step="0.01" value="${fut.erni}" placeholder="e.g. 15"
+                 data-row="future" ${fut.id ? '' : 'disabled style="opacity:0.6"'} />
+
+          <!-- ADD NEW (draft) -->
+          <div style="font-weight:600">Add new</div>
+          <input id="fw_new_from" class="js-ukdp" type="text" value="${draft.date_from || ''}" placeholder="DD/MM/YYYY"
+                 data-row="new" />
+          <input id="fw_new_to" class="js-ukdp" type="text" value="${draft.date_to || ''}" placeholder="(open)"
+                 data-row="new" />
+          <input id="fw_new_vat" type="number" step="0.01" value="${draft.vat ?? ''}" placeholder="e.g. 20" data-row="new" />
+          <input id="fw_new_hol" type="number" step="0.01" value="${draft.hol ?? ''}" placeholder="e.g. 12.07" data-row="new" />
+          <input id="fw_new_erni" type="number" step="0.01" value="${draft.erni ?? ''}" placeholder="e.g. 15" data-row="new" />
+        </div>
+
+        <div id="fw_hint" style="margin-top:10px;font-size:12px;color:rgba(255,255,255,0.65)">
+          Tip: selecting a new Start date will automatically adjust the Current End date to avoid overlaps.
+        </div>
+
+        <!-- hidden ids for save logic (handled in handleSaveSettings later) -->
+        <input type="hidden" id="fw_cur_id" value="${cur.id || ''}" />
+        <input type="hidden" id="fw_fut_id" value="${fut.id || ''}" />
+      </div>
+    </div>
+  `;
 
   return html(`
     <div class="form" id="settingsForm">
@@ -41031,52 +42001,211 @@ function renderSettingsTab(key, s = {}) {
         <textarea name="bh_list">${JSON.stringify(s.bh_list || [], null, 2)}</textarea>
       </div>
       ${input('bh_feed_url','BH feed URL', s.bh_feed_url || '')}
-      ${input('vat_rate_pct','VAT %', s.vat_rate_pct ?? 20, 'number')}
-      ${input('holiday_pay_pct','Holiday pay %', s.holiday_pay_pct ?? 0, 'number')}
-      ${input('erni_pct','ERNI %', erniValue, 'number')}
-      ${select('apply_holiday_to','Apply holiday to', s.apply_holiday_to || 'PAYE_ONLY', ['PAYE_ONLY','ALL','NONE'])}
-      ${select('apply_erni_to','Apply ERNI to', s.apply_erni_to || 'PAYE_ONLY', ['PAYE_ONLY','ALL','NONE'])}
-      <div class="row" style="grid-column:1/-1">
-        <label>Margin includes (JSON)</label>
-        <textarea name="margin_includes">${JSON.stringify(s.margin_includes || {}, null, 2)}</textarea>
-      </div>
 
-      <div class="row">
-        <label>Effective from (DD/MM/YYYY)</label>
-        <input type="text" name="effective_from" id="settings_effective_from" placeholder="DD/MM/YYYY"
-               value="${s.effective_from ? formatIsoToUk(s.effective_from) : ''}" />
-      </div>
+      ${financeCard}
     </div>
   `);
 }
 
+// ─────────────────────────────────────────────────────────────
+// Finance windows API helpers (minimise calls; direct to broker)
+// ─────────────────────────────────────────────────────────────
+async function createFinanceWindow(payload){
+  const r = await authFetch(API('/api/settings/finance-windows'), {
+    method:'POST',
+    headers:{'content-type':'application/json'},
+    body: JSON.stringify(payload)
+  });
+  if (!r.ok) {
+    const t = await r.text().catch(()=> '');
+    throw new Error(t || 'Create finance window failed');
+  }
+  return true;
+}
 
-// ================== NEW: handleSaveSettings (parent onSave; persist then stay open in View) ==================
+async function patchFinanceWindow(id, patch){
+  const r = await authFetch(API(`/api/settings/finance-windows/${encodeURIComponent(id)}`), {
+    method:'PATCH',
+    headers:{'content-type':'application/json'},
+    body: JSON.stringify(patch)
+  });
+  if (!r.ok) {
+    const t = await r.text().catch(()=> '');
+    throw new Error(t || 'Update finance window failed');
+  }
+  return true;
+}
+
+// ─────────────────────────────────────────────────────────────
+// UPDATED: Save Settings modal (non-finance via /defaults, finance via /finance-windows)
+// - Finance windows are saved in this order (to avoid overlap constraint failures):
+//   1) PATCH Current (end/value changes)   2) POST New   3) PATCH Future
+// - Clears __SETTINGS_CACHE__ and refreshes modalCtx with latest settings + windows
+// ─────────────────────────────────────────────────────────────
 async function handleSaveSettings() {
-  // Collect with JSON parsing for bh_list / margin_includes
+  const byId = (id) => document.getElementById(id);
+
+  // Collect non-finance settings_defaults fields only (bh_list parsed etc.)
   const payload = collectForm('#settingsForm', true) || {};
 
-  // Normalise date
-  if (payload.effective_from) {
-    const iso = parseUkDateToIso(payload.effective_from);
-    if (!iso) {
-      alert('Invalid “Effective from” date');
-      return { ok:false };
-    }
-    payload.effective_from = iso;
-  }
+  // ─────────────────────────────────────────────
+  // Read finance window inputs (Current / Future / Add new)
+  // ─────────────────────────────────────────────
+  const ukToIsoOrNull = (uk) => {
+    const v = String(uk || '').trim();
+    if (!v) return null;
+    const iso = parseUkDateToIso(v);
+    return iso || null;
+  };
+
+  const mustIso = (uk, label) => {
+    const iso = ukToIsoOrNull(uk);
+    if (!iso) throw new Error(`Invalid ${label} date`);
+    return iso;
+  };
+
+  const numOrNull = (v) => {
+    if (v == null) return null;
+    const s = String(v).trim();
+    if (s === '') return null;
+    const n = Number(s);
+    return Number.isFinite(n) ? n : null;
+  };
+
+  const mustNum = (v, label) => {
+    const n = numOrNull(v);
+    if (n == null) throw new Error(`Invalid ${label} value`);
+    return n;
+  };
+
+  // IDs
+  const curId = String(byId('fw_cur_id')?.value || '').trim() || null;
+  const futId = String(byId('fw_fut_id')?.value || '').trim() || null;
+
+  // Current (start disabled; but values + end editable)
+  const cur_to_uk   = byId('fw_cur_to')?.value || '';
+  const cur_vat_raw = byId('fw_cur_vat')?.value;
+  const cur_hol_raw = byId('fw_cur_hol')?.value;
+  const cur_erni_raw= byId('fw_cur_erni')?.value;
+
+  // Future (optional)
+  const fut_from_uk = byId('fw_fut_from')?.value || '';
+  const fut_to_uk   = byId('fw_fut_to')?.value || '';
+  const fut_vat_raw = byId('fw_fut_vat')?.value;
+  const fut_hol_raw = byId('fw_fut_hol')?.value;
+  const fut_erni_raw= byId('fw_fut_erni')?.value;
+
+  // New (draft)
+  const new_from_uk = byId('fw_new_from')?.value || '';
+  const new_to_uk   = byId('fw_new_to')?.value || '';
+  const new_vat_raw = byId('fw_new_vat')?.value;
+  const new_hol_raw = byId('fw_new_hol')?.value;
+  const new_erni_raw= byId('fw_new_erni')?.value;
+
+  // Build finance operations
+  let patchCurrent = null;
+  let patchFuture  = null;
+  let createNew    = null;
 
   try {
+    // Current must exist if UI is showing it
+    if (curId) {
+      patchCurrent = {
+        // date_from is not editable; date_to is optional (null = open ended)
+        date_to: (cur_to_uk && String(cur_to_uk).trim()) ? mustIso(cur_to_uk, 'Current end') : null,
+
+        vat_rate_pct: mustNum(cur_vat_raw, 'Current VAT %'),
+        holiday_pay_pct: mustNum(cur_hol_raw, 'Current Holiday %'),
+        erni_pct: mustNum(cur_erni_raw, 'Current ERNI %')
+      };
+    }
+
+    // Future: only patch if there is an actual future row (id present)
+    if (futId) {
+      patchFuture = {
+        date_from: mustIso(fut_from_uk, 'Future start'),
+        date_to: (fut_to_uk && String(fut_to_uk).trim()) ? mustIso(fut_to_uk, 'Future end') : null,
+
+        vat_rate_pct: mustNum(fut_vat_raw, 'Future VAT %'),
+        holiday_pay_pct: mustNum(fut_hol_raw, 'Future Holiday %'),
+        erni_pct: mustNum(fut_erni_raw, 'Future ERNI %')
+      };
+    }
+
+    // New: only create if start date is provided
+    const newFromIso = ukToIsoOrNull(new_from_uk);
+    if (newFromIso) {
+      createNew = {
+        date_from: newFromIso,
+        date_to: (new_to_uk && String(new_to_uk).trim()) ? mustIso(new_to_uk, 'New end') : null,
+
+        vat_rate_pct: mustNum(new_vat_raw, 'New VAT %'),
+        holiday_pay_pct: mustNum(new_hol_raw, 'New Holiday %'),
+        erni_pct: mustNum(new_erni_raw, 'New ERNI %'),
+
+        // Optional (not exposed in UI yet; keep null)
+        apply_holiday_to: null,
+        apply_erni_to: null,
+        margin_includes: null
+      };
+    }
+  } catch (e) {
+    alert(e?.message || 'Invalid finance window values');
+    return { ok:false };
+  }
+
+  // ─────────────────────────────────────────────
+  // Save (minimise calls; enforce safe order)
+  // ─────────────────────────────────────────────
+  try {
+    // 1) Save non-finance settings_defaults
     await saveSettings(payload);
+
+    // 2) Finance windows updates (order matters)
+    if (curId && patchCurrent) {
+      await patchFinanceWindow(curId, patchCurrent);
+    }
+
+    if (createNew) {
+      await createFinanceWindow(createNew);
+    }
+
+    if (futId && patchFuture) {
+      await patchFinanceWindow(futId, patchFuture);
+    }
+
   } catch (e) {
     alert('Save failed: ' + (e?.message || 'Unknown error'));
     return { ok:false };
   }
 
-  // Return the merged saved state so showModal flips to View and repaints with new values
-  const saved = { ...(modalCtx.data || {}), ...payload };
-  return { ok:true, saved };
+  // Bust FE cache so next loads are fresh
+  try { __SETTINGS_CACHE__ = null; } catch {}
+
+  // Refresh modalCtx from server so the modal flips to View and repaints correctly
+  try {
+    const res = await getSettings(); // returns { settings, finance_windows }
+    const freshSettings = res?.settings || {};
+    const freshWindows  = Array.isArray(res?.finance_windows) ? res.finance_windows : [];
+
+    modalCtx.data = JSON.parse(JSON.stringify(freshSettings));
+    modalCtx.finance_windows = JSON.parse(JSON.stringify(freshWindows));
+
+    // Clear draft "Add new" row after successful save
+    modalCtx.finance_new_draft = { date_from:'', date_to:'', vat:'', hol:'', erni:'' };
+
+    return { ok:true, saved: modalCtx.data };
+  } catch {
+    // Fallback: keep current modalCtx.data and return merged payload (non-finance only)
+    const saved = { ...(modalCtx.data || {}), ...payload };
+    modalCtx.data = saved;
+    return { ok:true, saved };
+  }
 }
+
+// ================== NEW: handleSaveSettings (parent onSave; persist then stay open in View) ==================
+
+
 
 async function commitContractCalendarStage(contractId) {
   const LOG_CAL = (typeof window.__LOG_CAL === 'boolean') ? window.__LOG_CAL : true;
@@ -46637,6 +47766,42 @@ function renderTimesheetFinanceTab(ctx) {
   const fmtMoney = (v) =>
     isNaN(Number(v)) ? '—' : `£${(Math.round(Number(v) * 100) / 100).toFixed(2)}`;
 
+  // ─────────────────────────────────────────────────────────────
+  // ERNI-aware margin helpers (UI must not "recompute margin wrong")
+  // - Prefer server-provided tsfin.margin_ex_vat where available
+  // - For per-bucket display, compute pay-cost inc ERNI when policy says so
+  // ─────────────────────────────────────────────────────────────
+  const pctToMultiplier = (pctMaybe) => {
+    let p = Number(pctMaybe);
+    if (!Number.isFinite(p) || p <= 0) return 1;
+    if (p > 1) p = p / 100; // treat as percent if stored like 15.00
+    const m = 1 + p;
+    return (Number.isFinite(m) && m > 0) ? m : 1;
+  };
+
+  const getErniCtxFromPolicy = (policyObj, payMethodUpper) => {
+    const pol = (policyObj && typeof policyObj === 'object') ? policyObj : {};
+    const applyTo = String(pol.apply_erni_to || 'PAYE_ONLY').toUpperCase();
+    const erniPct = (pol.erni_pct != null) ? Number(pol.erni_pct) : NaN;
+
+    const erniMult = pctToMultiplier(erniPct);
+    const applies =
+      (applyTo === 'ALL') ||
+      (applyTo === 'PAYE_ONLY' && payMethodUpper === 'PAYE');
+
+    return { applies: !!applies, erni_pct: Number.isFinite(erniPct) ? erniPct : null, erni_mult: erniMult };
+  };
+
+  const payMethodUpper = String(tsfin.pay_method || ts.pay_method || '').toUpperCase();
+  const policySnap = tsfin.policy_snapshot_json || null;
+  const erniCtx = getErniCtxFromPolicy(policySnap, payMethodUpper);
+
+  const applyErniToPayEx = (payEx) => {
+    const p = Number(payEx || 0);
+    if (!Number.isFinite(p)) return 0;
+    return erniCtx.applies ? (p * erniCtx.erni_mult) : p;
+  };
+
   // Core TSFIN-derived buckets
   const hours = {
     day:   Number(tsfin.hours_day   || 0),
@@ -46671,13 +47836,17 @@ function renderTimesheetFinanceTab(ctx) {
     bh:   'Bank Holiday'
   };
 
+  // ✅ IMPORTANT: margin column must reflect TSFIN logic (PAYE may include ERNI).
   const tsfinBucketRows = buckets.map(b => {
     const hrs   = hours[b] || 0;
     const payR  = pay[b] != null ? Number(pay[b]) : null;
     const chgR  = chg[b] != null ? Number(chg[b]) : null;
-    const payEx = payR != null ? hrs * payR : null;
-    const chgEx = chgR != null ? hrs * chgR : null;
-    const marEx = (payEx != null && chgEx != null) ? (chgEx - payEx) : null;
+
+    const payEx = (payR != null) ? (hrs * payR) : null;
+    const chgEx = (chgR != null) ? (hrs * chgR) : null;
+
+    const payCostEx = (payEx != null) ? applyErniToPayEx(payEx) : null;
+    const marEx = (payCostEx != null && chgEx != null) ? (chgEx - payCostEx) : null;
 
     return `
       <tr>
@@ -46699,14 +47868,21 @@ function renderTimesheetFinanceTab(ctx) {
   }
   if (!addUnits || typeof addUnits !== 'object') addUnits = {};
 
+  // ✅ IMPORTANT: prefer server-provided ex.margin_ex_vat if present;
+  // otherwise compute ERNI-aware margin for PAYE.
   const additionalRows = Object.entries(addUnits).map(([code, ex]) => {
     if (!ex || typeof ex !== 'object') return '';
     const bucketName = (ex.bucket_name || code || '').trim();
     const unitName   = (ex.unit_name || 'units').trim();
     const unitCount  = Number(ex.unit_count || 0) || 0;
+
     const payEx      = Number(ex.pay_ex_vat    || 0);
     const chgEx      = Number(ex.charge_ex_vat || 0);
-    const marEx      = chgEx - payEx;
+
+    const hasServerMargin = (ex.margin_ex_vat != null && Number.isFinite(Number(ex.margin_ex_vat)));
+    const marEx = hasServerMargin
+      ? Number(ex.margin_ex_vat)
+      : (chgEx - applyErniToPayEx(payEx));
 
     if (!unitCount && !payEx && !chgEx) return '';
 
@@ -46733,7 +47909,11 @@ function renderTimesheetFinanceTab(ctx) {
 
   const totalPayEx    = Number(tsfin.total_pay_ex_vat    || 0) || 0;
   const totalChgEx    = Number(tsfin.total_charge_ex_vat || 0) || 0;
-  const totalMarginEx = totalChgEx - totalPayEx;
+
+  // ✅ IMPORTANT: use server margin if present (do not recompute and get PAYE wrong)
+  const totalMarginEx = (tsfin.margin_ex_vat != null && Number.isFinite(Number(tsfin.margin_ex_vat)))
+    ? Number(tsfin.margin_ex_vat)
+    : (totalChgEx - applyErniToPayEx(totalPayEx));
 
   // ───────────────────── Determine mode & schedule state ─────────────────────
   let frameMode = 'view';
@@ -46806,17 +47986,32 @@ function renderTimesheetFinanceTab(ctx) {
     if (!preview || typeof preview !== 'object') {
       return `<span class="mini">Bucket preview unavailable.</span>`;
     }
+
     const h = preview.hours  || {};
     const p = preview.pay    || {};
     const c = preview.charge || {};
+
+    // ERNI context from preview payload (server)
+    const f = (preview.finance && typeof preview.finance === 'object') ? preview.finance : {};
+    const erniApplies = f.erni_applies === true;
+    const erniMult = Number.isFinite(Number(f.erni_multiplier)) ? Number(f.erni_multiplier) : 1;
+
+    const applyErniPreview = (payEx) => {
+      const x = Number(payEx || 0);
+      if (!Number.isFinite(x)) return 0;
+      return erniApplies ? (x * erniMult) : x;
+    };
 
     const rows = buckets.map(b => {
       const hrs   = Number(h[b] || 0);
       const payR  = p[b] != null ? Number(p[b]) : null;
       const chgR  = c[b] != null ? Number(c[b]) : null;
+
       const payEx = payR != null ? hrs * payR : null;
       const chgEx = chgR != null ? hrs * chgR : null;
-      const marEx = (payEx != null && chgEx != null) ? (chgEx - payEx) : null;
+
+      const payCostEx = (payEx != null) ? applyErniPreview(payEx) : null;
+      const marEx = (payCostEx != null && chgEx != null) ? (chgEx - payCostEx) : null;
 
       return `
         <tr>
@@ -47104,6 +48299,13 @@ function renderTimesheetFinanceTab(ctx) {
               Additional charge (ex VAT): <strong>${fmtMoney(addCharge)}</strong><br/>
               Expenses pay (ex VAT): <strong>${fmtMoney(expensesPay)}</strong><br/>
               Mileage pay (ex VAT): <strong>${fmtMoney(mileagePay)}</strong>
+              ${
+                erniCtx.applies
+                  ? `<br/><span class="mini" style="display:block;margin-top:6px;color:#888">
+                      PAYE margin includes ERNI (${Number.isFinite(Number(erniCtx.erni_pct)) ? `${Number(erniCtx.erni_pct).toFixed(2)}%` : 'configured'}).
+                    </span>`
+                  : ''
+              }
             </div>
           </div>
         </div>
@@ -47405,15 +48607,19 @@ if (hasTs) {
     plannedContract = null;
   }
 
-   // ✅ NEW: global BH list for planned weeks (BH are not per-client)
+     // ✅ NEW: global BH list for planned weeks (BH are not per-client)
   let globalBhList = [];
   try {
     if (typeof getSettingsCached === 'function') {
       const s = await getSettingsCached();
-      if (Array.isArray(s?.bh_list)) globalBhList = s.bh_list;
-      else if (typeof s?.bh_list === 'string') {
+
+      // getSettingsCached now returns { settings: {...}, finance_windows: [...] }
+      const bhRaw = (s && s.settings) ? s.settings.bh_list : (s ? s.bh_list : null);
+
+      if (Array.isArray(bhRaw)) globalBhList = bhRaw;
+      else if (typeof bhRaw === 'string') {
         try {
-          const p = JSON.parse(s.bh_list || '[]');
+          const p = JSON.parse(bhRaw || '[]');
           if (Array.isArray(p)) globalBhList = p;
         } catch {}
       }
@@ -47421,6 +48627,7 @@ if (hasTs) {
   } catch {
     globalBhList = [];
   }
+
 
   details = {
     timesheet: null,
