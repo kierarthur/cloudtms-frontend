@@ -37974,207 +37974,24 @@ function openAuditItem(row){
 
 // ---- Settings (global defaults)
 
-async function renderSettingsPanel(content){
-  // Load settings with a visible error if the call fails
-  let s;
-  try {
-    s = await getSettings(); // unwraps {settings:{...}} → {...}
-  } catch (e) {
-    content.innerHTML = `
-      <div class="tabc">
-        <div class="error">Couldn’t load settings: ${e?.message || 'Unknown error'}</div>
-      </div>`;
-    return;
-  }
-
-  // Establish mode + snapshot for Cancel/Discard semantics
-  let mode = 'view';            // 'view' | 'edit' | 'saving'
-  let dirty = false;            // enable Save only when true
-  let snapshot = JSON.parse(JSON.stringify(s)); // original values to restore on Discard
-
-  // Prefer the new key; fall back to legacy if needed (still GLOBAL-only)
-  const erniValue = (s.employers_ni_pct ?? s.erni_pct ?? 0);
-
-  const input = (name,label,val,type='text') =>
-    `<div class="row"><label>${label}</label><div class="controls"><input class="input" name="${name}" value="${String(val||'')}" ${type==='time'?'type="time" step="60"':''}/></div></div>`;
-
-  const select = (name,label,val,opts)=>{
-    const o = opts.map(v=>`<option value="${v}" ${String(v)===String(val)?'selected':''}>${v}</option>`).join('');
-    return `<div class="row"><label>${label}</label><div class="controls"><select name="${name}">${o}</select></div></div>`;
-  };
-
-  // Render panel shell with explicit Edit / Save / Cancel buttons
+async function renderSettingsPanel(content) {
+  // Settings are now managed in the Settings modal (supports finance_windows).
   content.innerHTML = `
     <div class="tabc">
-      <div class="form" id="settingsForm">
-        ${input('timezone_id','Timezone', s.timezone_id || 'Europe/London')}
-        ${input('day_start','Day start', s.day_start || '06:00')}
-        ${input('day_end','Day end', s.day_end || '20:00')}
-        ${input('night_start','Night start', s.night_start || '20:00')}
-        ${input('night_end','Night end', s.night_end || '06:00')}
-
-        ${input('sat_start','Saturday starts (HH:MM)', s.sat_start || '00:00')}
-        ${input('sat_end','Saturday ends (HH:MM)', s.sat_end || '00:00')}
-        ${input('sun_start','Sunday starts (HH:MM)', s.sun_start || '00:00')}
-        ${input('sun_end','Sunday ends (HH:MM)', s.sun_end || '00:00')}
-
-        ${input('bh_start','Bank Holiday starts (HH:MM)', s.bh_start || '00:00')}
-        ${input('bh_end','Bank Holiday ends (HH:MM)',   s.bh_end   || '00:00')}
-
-        ${select('bh_source','Bank Holidays source', s.bh_source || 'MANUAL', ['MANUAL','FEED'])}
-        <div class="row" style="grid-column:1/-1">
-          <label>Bank Holidays list (JSON dates)</label>
-          <textarea name="bh_list">${JSON.stringify(s.bh_list || [], null, 2)}</textarea>
-        </div>
-        ${input('bh_feed_url','BH feed URL', s.bh_feed_url || '')}
-        ${input('vat_rate_pct','VAT %', s.vat_rate_pct ?? 20, 'number')}
-        ${input('holiday_pay_pct','Holiday pay %', s.holiday_pay_pct ?? 0, 'number')}
-        ${input('erni_pct','ERNI %', erniValue, 'number')}
-        ${select('apply_holiday_to','Apply holiday to', s.apply_holiday_to || 'PAYE_ONLY', ['PAYE_ONLY','ALL','NONE'])}
-        ${select('apply_erni_to','Apply ERNI to', s.apply_erni_to || 'PAYE_ONLY', ['PAYE_ONLY','ALL','NONE'])}
-        <div class="row" style="grid-column:1/-1">
-          <label>Margin includes (JSON)</label>
-          <textarea name="margin_includes">${JSON.stringify(s.margin_includes || {}, null, 2)}</textarea>
-        </div>
-
-        <div class="row">
-          <label>Effective from (DD/MM/YYYY)</label>
-          <input type="text" name="effective_from" id="settings_effective_from" placeholder="DD/MM/YYYY"
-                 value="${s.effective_from ? formatIsoToUk(s.effective_from) : ''}" />
-        </div>
+      <div class="mini" style="opacity:0.8">
+        Settings are managed in the Settings modal (includes finance windows).
       </div>
-
-      <div class="actions">
-        <span class="hint" id="settingsHint"></span>
-        <div class="spacer"></div>
-        <button id="btnEditSettings">Edit</button>
-        <button id="btnCancelSettings">Close</button>
-        <button id="btnSaveSettings" class="primary" disabled>Save</button>
+      <div style="margin-top:10px">
+        <button id="btnOpenSettingsModal" class="primary">Open Settings</button>
       </div>
     </div>
   `;
 
-  // Elements
-  const formEl   = byId('settingsForm');
-  const effInput = byId('settings_effective_from');
-  const btnEdit  = byId('btnEditSettings');
-  const btnSave  = byId('btnSaveSettings');
-  const btnCancel= byId('btnCancelSettings');
-  const hintEl   = byId('settingsHint');
+  const btn = document.getElementById('btnOpenSettingsModal');
+  if (btn) btn.onclick = () => { try { openSettings(); } catch (e) { alert('Could not open settings'); } };
 
-  // Attach date picker
-  if (effInput) attachUkDatePicker(effInput);
-
-  // Helpers for view/edit toggling
-  function setReadOnly(ro) {
-    formEl.querySelectorAll('input, select, textarea').forEach(el => {
-      el.disabled = !!ro;
-      el.readOnly = !!ro && el.tagName === 'INPUT';
-    });
-  }
-  function repaintButtons() {
-    if (mode === 'view') {
-      btnCancel.textContent = 'Close';
-      hintEl.textContent = '';
-      btnEdit.style.display = '';
-      btnSave.style.display = 'none';
-    } else if (mode === 'edit') {
-      btnCancel.textContent = dirty ? 'Discard' : 'Cancel';
-      hintEl.textContent = dirty ? 'You have unsaved changes' : '';
-      btnEdit.style.display = 'none';
-      btnSave.style.display = '';
-      btnSave.disabled = !dirty;
-    } else if (mode === 'saving') {
-      btnCancel.textContent = 'Saving…';
-      btnEdit.style.display = 'none';
-      btnSave.style.display = '';
-      btnSave.disabled = true;
-    }
-  }
-  function toView() { mode = 'view'; dirty = false; setReadOnly(true);  repaintButtons(); }
-  function toEdit() { mode = 'edit'; dirty = false; setReadOnly(false); repaintButtons(); }
-
-  function refillFrom(obj) {
-    const map = new Map([...formEl.querySelectorAll('input,select,textarea')].map(el => [el.name, el]));
-    if (map.has('timezone_id')) map.get('timezone_id').value = obj.timezone_id || 'Europe/London';
-    if (map.has('day_start'))   map.get('day_start').value   = obj.day_start || '06:00';
-    if (map.has('day_end'))     map.get('day_end').value     = obj.day_end || '20:00';
-    if (map.has('night_start')) map.get('night_start').value = obj.night_start || '20:00';
-    if (map.has('night_end'))   map.get('night_end').value   = obj.night_end || '06:00';
-    if (map.has('sat_start'))   map.get('sat_start').value   = obj.sat_start || '00:00';
-    if (map.has('sat_end'))     map.get('sat_end').value     = obj.sat_end   || '00:00';
-    if (map.has('sun_start'))   map.get('sun_start').value   = obj.sun_start || '00:00';
-    if (map.has('sun_end'))     map.get('sun_end').value     = obj.sun_end   || '00:00';
-    if (map.has('bh_start'))    map.get('bh_start').value    = obj.bh_start  || '00:00';
-    if (map.has('bh_end'))      map.get('bh_end').value      = obj.bh_end    || '00:00';
-    if (map.has('bh_source'))   map.get('bh_source').value   = obj.bh_source || 'MANUAL';
-    if (map.has('bh_list'))     map.get('bh_list').value     = JSON.stringify(obj.bh_list || [], null, 2);
-    if (map.has('bh_feed_url')) map.get('bh_feed_url').value = obj.bh_feed_url || '';
-    if (map.has('vat_rate_pct'))map.get('vat_rate_pct').value= obj.vat_rate_pct ?? 20;
-    if (map.has('holiday_pay_pct')) map.get('holiday_pay_pct').value = obj.holiday_pay_pct ?? 0;
-    if (map.has('erni_pct'))    map.get('erni_pct').value    = (obj.employers_ni_pct ?? obj.erni_pct ?? 0);
-    if (map.has('apply_holiday_to')) map.get('apply_holiday_to').value = obj.apply_holiday_to || 'PAYE_ONLY';
-    if (map.has('apply_erni_to'))    map.get('apply_erni_to').value    = obj.apply_erni_to || 'PAYE_ONLY';
-    if (map.has('margin_includes'))  map.get('margin_includes').value  = JSON.stringify(obj.margin_includes || {}, null, 2);
-    if (map.has('effective_from'))   map.get('effective_from').value   = obj.effective_from ? formatIsoToUk(obj.effective_from) : '';
-  }
-
-  // Initial view-only mode
-  setReadOnly(true);
-  repaintButtons();
-
-  // Dirty tracking (only in edit mode)
-  const onDirty = () => { if (mode !== 'edit') return; dirty = true; repaintButtons(); };
-  formEl.addEventListener('input', onDirty, true);
-  formEl.addEventListener('change', onDirty, true);
-
-  // Edit
-  btnEdit.onclick = () => {
-    if (mode !== 'view') return;
-    snapshot = JSON.parse(JSON.stringify(s)); // capture original
-    toEdit();
-  };
-
-  // Cancel / Discard / Close
-  btnCancel.onclick = () => {
-    if (mode === 'edit') {
-      if (!dirty) { toView(); return; }
-      const ok = window.confirm('Discard changes and return to view?');
-      if (!ok) return;
-      s = JSON.parse(JSON.stringify(snapshot));
-      refillFrom(s);
-      toView();
-      return;
-    }
-    // mode === 'view' → Close the settings panel view
-    currentSection = 'candidates';
-    renderAll();
-  };
-
-  // Save
-  btnSave.onclick = async () => {
-    if (mode !== 'edit' || !dirty) return;
-    mode = 'saving'; repaintButtons();
-
-    const payload = collectForm('#settingsForm', true);
-    if (payload.effective_from) {
-      const iso = parseUkDateToIso(payload.effective_from);
-      if (!iso) { alert('Invalid Effective from date'); mode='edit'; repaintButtons(); return; }
-      payload.effective_from = iso;
-    }
-
-    try {
-      await saveSettings(payload);
-      s = { ...s, ...payload };
-      snapshot = JSON.parse(JSON.stringify(s));
-      toView();
-      hintEl.textContent = 'Saved.';
-      setTimeout(()=> { if (hintEl.textContent === 'Saved.') hintEl.textContent=''; }, 1500);
-    } catch (e) {
-      mode = 'edit'; repaintButtons();
-      alert('Save failed: ' + (e?.message || 'Unknown error'));
-    }
-  };
+  // Optional: auto-open immediately
+  try { openSettings(); } catch {}
 }
 
 
