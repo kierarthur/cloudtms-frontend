@@ -27337,8 +27337,24 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
   const parentFrame  = () => (stack().length > 1 ? stack()[stack().length - 2] : null);
   const deep = (o) => JSON.parse(JSON.stringify(o));
 
-  let opts = options || {};
+   let opts = options || {};
   if (onReturn && typeof onReturn === 'object' && options === undefined) { opts = onReturn; onReturn = undefined; }
+
+// ✅ Back-compat: if caller seeded global `modalCtx` (legacy) but not `window.modalCtx`,
+// adopt it before we snapshot the frame. Uses openToken to avoid clobbering the active ctx.
+try {
+  if (typeof modalCtx !== 'undefined' && modalCtx && typeof modalCtx === 'object') {
+    const w = (window.modalCtx && typeof window.modalCtx === 'object') ? window.modalCtx : null;
+    const m = modalCtx;
+
+    const wTok = w ? (w.openToken || null) : null;
+    const mTok = m.openToken || null;
+
+    if (mTok && (!wTok || String(wTok) !== String(mTok))) {
+      window.modalCtx = m;
+    }
+  }
+} catch {}
 
 const stripEmpty = (obj) => { const out={}; for (const [k,v] of Object.entries(obj||{})) { if (v===''||v==null) continue; out[k]=v; } return out; };
 
@@ -27798,18 +27814,19 @@ try {
   }
 
 
-
+const ctxForFrame = window.modalCtx;
 
 const frame = {
   _token: `f:${Date.now()}:${Math.random().toString(36).slice(2)}`,
-  _ctxRef: window.modalCtx,
+  _ctxRef: ctxForFrame,
   title,
   tabs: Array.isArray(tabs) ? tabs.slice() : [],
   renderTab,
   onSave,
   onReturn,
   hasId: !!hasId,
-  entity: (window.modalCtx && window.modalCtx.entity) || null,
+  entity: (ctxForFrame && ctxForFrame.entity) || null,
+
 
   // NEW: optional dismiss hook (called when user closes the modal via Close/ESC)
   _onDismiss: (opts && typeof opts.onDismiss === 'function') ? opts.onDismiss : null,
@@ -40591,12 +40608,23 @@ async function openSettings() {
     return;
   }
 
-  // Seed modal context
-  modalCtx = {
+  // Preserve draft across re-opens (prefer window.modalCtx because showModal uses it)
+  const prevCtx =
+    (window.modalCtx && typeof window.modalCtx === 'object')
+      ? window.modalCtx
+      : ((typeof modalCtx !== 'undefined' && modalCtx && typeof modalCtx === 'object') ? modalCtx : null);
+
+  const prevDraft =
+    (prevCtx && prevCtx.entity === 'settings' && prevCtx.finance_new_draft)
+      ? deep(prevCtx.finance_new_draft)
+      : { date_from:'', date_to:'', vat:'', hol:'', erni:'' };
+
+  // Seed modal context (IMPORTANT: showModal reads window.modalCtx)
+  window.modalCtx = modalCtx = {
     entity: 'settings',
-    data: deep(settings || {}),             // settings_defaults (non-finance) remain the modal's main data
-    finance_windows: deep(finance_windows), // finance windows live alongside data (so we don’t accidentally POST them to /defaults)
-    finance_new_draft: (modalCtx && modalCtx.finance_new_draft) ? modalCtx.finance_new_draft : { date_from:'', date_to:'', vat:'', hol:'', erni:'' },
+    data: deep(settings || {}),              // settings_defaults (non-finance) remain the modal's main data
+    finance_windows: deep(finance_windows),  // finance windows live alongside data (so we don’t accidentally POST them to /defaults)
+    finance_new_draft: prevDraft,
     formState: { __forId: 'global', main:{} },
     openToken: 'settings:' + Date.now()
   };
@@ -40615,6 +40643,7 @@ async function openSettings() {
   // Best-effort: initial sync/bounds after render
   setTimeout(() => { try { __settingsFinanceSync(); } catch {} }, 0);
 }
+
 function __ensureSettingsFinanceWindowsWiring() {
   if (window.__settingsFinanceWindowsWired) return;
   window.__settingsFinanceWindowsWired = true;
