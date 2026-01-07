@@ -4866,8 +4866,17 @@ async function getContract(contract_id) {
   const r = await authFetch(url);
   if (!r?.ok) return null;
   const j = await r.json();
-  return j && j.contract ? j.contract : j;
-}
+
+  // ✅ Keep full wrapper so callers can access:
+  //   j.contract, j.finance, j.margins, j.counts, j.weeks, j.warnings, etc.
+  if (j && typeof j === 'object' && j.contract && typeof j.contract === 'object') {
+    return j;
+  }
+
+  // Legacy fallback (older endpoints might return contract row directly)
+  return j;
+} 
+
 
 async function upsertContract(payload, id /* optional */) {
   const LOGC = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : true;
@@ -5479,7 +5488,7 @@ function renderContractsTable(rows) {
 
 // ✅ CHANGED: honour fresh row; give the modal an openToken for stable formState binding
 
-function openContract(row) {
+async function openContract(row) {
   const LOGC = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : true;
   const isCreate = !row || !row.id;
   if (LOGC) console.log('[CONTRACTS] openContract ENTRY', { isCreate, rowPreview: !!row });
@@ -5495,9 +5504,55 @@ function openContract(row) {
   __nonCalendarDirty: false
 };
 
+  // ✅ NEW: always hydrate prevailing finance (ERNI/VAT) from server.
+  // - CREATE: GET /api/contracts/finance-globals (today’s window)
+  // - EDIT:   GET /api/contracts/:id (contract + finance + margins)
+  try {
+    // Prefer backend as source-of-truth for live finance multipliers
+    if (isCreate) {
+      const r = await authFetch(API('/api/contracts/finance-globals'));
+      if (r.ok) {
+        const j = await r.json().catch(() => null);
+        const fin = (j && j.finance && typeof j.finance === 'object') ? j.finance : null;
+        if (fin) {
+          window.modalCtx.finance = fin;
+          try {
+            if (typeof fin.erni_multiplier === 'number' && fin.erni_multiplier > 0) window.__ERNI_MULT__ = fin.erni_multiplier;
+            if (typeof fin.vat_multiplier  === 'number' && fin.vat_multiplier  > 0) window.__VAT_MULT__  = fin.vat_multiplier;
+          } catch {}
+        }
+      }
+    } else {
+      const cid = window.modalCtx?.data?.id || null;
+      if (cid && typeof getContract === 'function') {
+        const raw = await getContract(cid);
+        const c   = (raw && raw.contract && typeof raw.contract === 'object') ? raw.contract : raw;
+        const fin = (raw && raw.finance  && typeof raw.finance  === 'object') ? raw.finance  : null;
+        const mg  = (raw && raw.margins  && typeof raw.margins  === 'object') ? raw.margins  : null;
+
+        if (c && typeof c === 'object') {
+          window.modalCtx.data = { ...(window.modalCtx.data || {}), ...c };
+        }
+        if (fin) {
+          window.modalCtx.finance = fin;
+          try {
+            if (typeof fin.erni_multiplier === 'number' && fin.erni_multiplier > 0) window.__ERNI_MULT__ = fin.erni_multiplier;
+            if (typeof fin.vat_multiplier  === 'number' && fin.vat_multiplier  > 0) window.__VAT_MULT__  = fin.vat_multiplier;
+          } catch {}
+        }
+        if (mg) {
+          window.modalCtx.margins = mg;
+        }
+      }
+    }
+  } catch (e) {
+    if (LOGC) console.warn('[CONTRACTS] finance/margins hydrate failed (non-fatal)', e);
+  }
+
 
   const preToken = window.__preOpenToken || null;
   if (LOGC) console.log('[CONTRACTS] preOpenToken snapshot', preToken);
+
 
   if (isCreate) {
     if (preToken) {
@@ -10375,6 +10430,53 @@ function renderContractRatesTab(ctx) {
     return k;
   };
 
+  // ✅ Prefer finance payload from backend (fresh) over any cached globals
+  const fin = (window.modalCtx && window.modalCtx.finance && typeof window.modalCtx.finance === 'object')
+    ? window.modalCtx.finance
+    : null;
+
+  const erniMult = (fin && typeof fin.erni_multiplier === 'number' && fin.erni_multiplier > 0)
+    ? fin.erni_multiplier
+    : (typeof window.__ERNI_MULT__ === 'number' && window.__ERNI_MULT__ > 0)
+      ? window.__ERNI_MULT__
+      : 1;
+
+  const erniApplies = (fin && typeof fin.erni_applies === 'boolean')
+    ? fin.erni_applies
+    : (payMethod === 'PAYE');
+
+  const toNum = (v) => {
+    if (v === '' || v === null || v === undefined) return null;
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  };
+
+  const fmt = (n) => (Number.isFinite(Number(n)) ? `£${Number(n).toFixed(2)}` : '');
+
+  const payRate = {
+    day:   toNum(showPAYE ? R.paye_day   : R.umb_day),
+    night: toNum(showPAYE ? R.paye_night : R.umb_night),
+    sat:   toNum(showPAYE ? R.paye_sat   : R.umb_sat),
+    sun:   toNum(showPAYE ? R.paye_sun   : R.umb_sun),
+    bh:    toNum(showPAYE ? R.paye_bh    : R.umb_bh)
+  };
+
+  const chgRate = {
+    day:   toNum(R.charge_day),
+    night: toNum(R.charge_night),
+    sat:   toNum(R.charge_sat),
+    sun:   toNum(R.charge_sun),
+    bh:    toNum(R.charge_bh)
+  };
+
+  const marginRate = {
+    day:   (payRate.day   != null && chgRate.day   != null) ? (chgRate.day   - (payMethod === 'PAYE' && erniApplies ? payRate.day   * erniMult : payRate.day))   : null,
+    night: (payRate.night != null && chgRate.night != null) ? (chgRate.night - (payMethod === 'PAYE' && erniApplies ? payRate.night * erniMult : payRate.night)) : null,
+    sat:   (payRate.sat   != null && chgRate.sat   != null) ? (chgRate.sat   - (payMethod === 'PAYE' && erniApplies ? payRate.sat   * erniMult : payRate.sat))   : null,
+    sun:   (payRate.sun   != null && chgRate.sun   != null) ? (chgRate.sun   - (payMethod === 'PAYE' && erniApplies ? payRate.sun   * erniMult : payRate.sun))   : null,
+    bh:    (payRate.bh    != null && chgRate.bh    != null) ? (chgRate.bh    - (payMethod === 'PAYE' && erniApplies ? payRate.bh    * erniMult : payRate.bh))    : null
+  };
+
   if (LOGC) console.log('[CONTRACTS] renderContractRatesTab', { payMethod, hasRates: !!merged?.rates_json });
 
   const html = `
@@ -10433,11 +10535,11 @@ function renderContractRatesTab(ctx) {
       <table class="grid" id="marginsTable">
         <thead><tr><th>Bucket</th><th>Pay</th><th>Charge</th><th>Margin</th></tr></thead>
         <tbody>
-          <tr data-b="day"><td>${labelOf('day')}</td><td class="py"></td><td class="ch"></td><td class="mg"></td></tr>
-          <tr data-b="night"><td>${labelOf('night')}</td><td class="py"></td><td class="ch"></td><td class="mg"></td></tr>
-          <tr data-b="sat"><td>${labelOf('sat')}</td><td class="py"></td><td class="ch"></td><td class="mg"></td></tr>
-          <tr data-b="sun"><td>${labelOf('sun')}</td><td class="py"></td><td class="ch"></td><td class="mg"></td></tr>
-          <tr data-b="bh"><td>${labelOf('bh')}</td><td class="py"></td><td class="ch"></td><td class="mg"></td></tr>
+          <tr data-b="day"><td>${labelOf('day')}</td><td class="py">${payRate.day != null ? fmt(payRate.day) : ''}</td><td class="ch">${chgRate.day != null ? fmt(chgRate.day) : ''}</td><td class="mg">${marginRate.day != null ? fmt(marginRate.day) : ''}</td></tr>
+          <tr data-b="night"><td>${labelOf('night')}</td><td class="py">${payRate.night != null ? fmt(payRate.night) : ''}</td><td class="ch">${chgRate.night != null ? fmt(chgRate.night) : ''}</td><td class="mg">${marginRate.night != null ? fmt(marginRate.night) : ''}</td></tr>
+          <tr data-b="sat"><td>${labelOf('sat')}</td><td class="py">${payRate.sat != null ? fmt(payRate.sat) : ''}</td><td class="ch">${chgRate.sat != null ? fmt(chgRate.sat) : ''}</td><td class="mg">${marginRate.sat != null ? fmt(marginRate.sat) : ''}</td></tr>
+          <tr data-b="sun"><td>${labelOf('sun')}</td><td class="py">${payRate.sun != null ? fmt(payRate.sun) : ''}</td><td class="ch">${chgRate.sun != null ? fmt(chgRate.sun) : ''}</td><td class="mg">${marginRate.sun != null ? fmt(marginRate.sun) : ''}</td></tr>
+          <tr data-b="bh"><td>${labelOf('bh')}</td><td class="py">${payRate.bh != null ? fmt(payRate.bh) : ''}</td><td class="ch">${chgRate.bh != null ? fmt(chgRate.bh) : ''}</td><td class="mg">${marginRate.bh != null ? fmt(marginRate.bh) : ''}</td></tr>
         </tbody>
       </table>
     </div>`;
@@ -10458,6 +10560,7 @@ function renderContractRatesTab(ctx) {
 
   return html;
 }
+
 
 
 
@@ -26324,7 +26427,7 @@ async function renderClientRatesTable() {
 //       - ongoing (toIso empty or toIso >= today UK) -> today UK
 //       - finished (toIso < today UK) -> fromIso
 // ──────────────────────────────────────────────────────────────────────────────
-(() => {
+(() => { 
   const W = (typeof window !== 'undefined') ? window : globalThis;
 
   // Normalise to number or null (treat '', undefined, NaN as null)
@@ -26363,11 +26466,39 @@ async function renderClientRatesTable() {
     return /^\d{4}-\d{2}-\d{2}$/.test(ymd) ? ymd : null;
   };
 
-  // Optional async bootstrap to memoise ERNI multiplier once (1 + percent)
-  // Uses your existing getSettingsCached if available. Safe to call multiple times.
-  // Updated: pulls from finance_windows (in-scope for anchor date) rather than settings_defaults fields.
+  const pctToMultiplier = (pctMaybe) => {
+    let p = Number(pctMaybe);
+    if (!Number.isFinite(p) || p <= 0) return 1;
+    if (p > 1) p = p / 100; // support 15 vs 0.15
+    const m = 1 + p;
+    return (Number.isFinite(m) && m > 0) ? m : 1;
+  };
+
+  const pickFinanceWindowForDate = (finance_windows, anchorYmd) => {
+    const fws = Array.isArray(finance_windows) ? finance_windows : [];
+    let chosen = null;
+
+    for (const w of fws) {
+      const df = asYmd(w?.date_from);
+      const dt = asYmd(w?.date_to);
+      if (!df) continue;
+      if (df > anchorYmd) continue;
+      if (dt && dt < anchorYmd) continue;
+
+      if (!chosen) {
+        chosen = w;
+      } else {
+        const cdf = asYmd(chosen?.date_from);
+        if (cdf && df > cdf) chosen = w;
+      }
+    }
+    return chosen;
+  };
+
+  // Optional async bootstrap to memoise finance globals once (erni+vat) for a chosen anchor date.
+  // Updated: supports force-refresh so opening a contract can always pull current values (in case another admin changed them).
   if (typeof W.ensureErniMultiplier !== 'function') {
-    W.ensureErniMultiplier = async function ensureErniMultiplier(fromIso = null, toIso = null) {
+    W.ensureErniMultiplier = async function ensureErniMultiplier(fromIso = null, toIso = null, forceRefresh = false) {
       const todayIso = todayUkYmd();
 
       // Determine anchor date:
@@ -26378,61 +26509,114 @@ async function renderClientRatesTable() {
       const finished = !!(tIso && tIso < todayIso);
       const anchorYmd = (finished && fIso) ? fIso : todayIso;
 
-      // Cache by date (prevents repeat lookups)
-      W.__ERNI_MULT_BY_DATE__ = W.__ERNI_MULT_BY_DATE__ || Object.create(null);
-      if (typeof W.__ERNI_MULT_BY_DATE__[anchorYmd] === 'number' && W.__ERNI_MULT_BY_DATE__[anchorYmd] > 0) {
-        W.__ERNI_MULT__ = W.__ERNI_MULT_BY_DATE__[anchorYmd]; // keep legacy cache aligned
-        return W.__ERNI_MULT_BY_DATE__[anchorYmd];
+      // Cache by date (prevents repeat lookups) unless forceRefresh=true
+      W.__FINANCE_BY_DATE__ = W.__FINANCE_BY_DATE__ || Object.create(null);
+      if (!forceRefresh) {
+        const cached = W.__FINANCE_BY_DATE__[anchorYmd];
+        if (cached && typeof cached === 'object') {
+          const mult = Number(cached.erni_mult);
+          if (Number.isFinite(mult) && mult > 0) {
+            W.__ERNI_MULT__ = mult;
+            W.__ERNI_MULT_BY_DATE__ = W.__ERNI_MULT_BY_DATE__ || Object.create(null);
+            W.__ERNI_MULT_BY_DATE__[anchorYmd] = mult;
+            return mult;
+          }
+        }
       }
 
+      let financeWindow = null;
+
+      // 0) If backend already injected finance into the current modal, prefer it (fresh per open)
       try {
-        if (typeof W.getSettingsCached === 'function') {
-          const s = await W.getSettingsCached();
-
-          // New shape: { settings: {...}, finance_windows: [...] }
-          const fws = Array.isArray(s?.finance_windows) ? s.finance_windows : [];
-
-          // Pick finance window in-scope for anchorYmd (prefer latest date_from)
-          let chosen = null;
-          for (const w of fws) {
-            const df = asYmd(w?.date_from);
-            const dt = asYmd(w?.date_to);
-            if (!df) continue;
-            if (df > anchorYmd) continue;
-            if (dt && dt < anchorYmd) continue;
-
-            if (!chosen) {
-              chosen = w;
-            } else {
-              const cdf = asYmd(chosen?.date_from);
-              if (cdf && df > cdf) chosen = w;
-            }
+        const mc = W.modalCtx || null;
+        const direct = mc?.finance_window || mc?.finance?.window || mc?.finance?.finance_window || null;
+        if (direct && typeof direct === 'object') {
+          // If it looks like a window row, accept it
+          if (direct.vat_rate_pct != null || direct.erni_pct != null || direct.date_from != null) {
+            financeWindow = direct;
           }
-
-          // Prefer finance window erni_pct; fallback to legacy fields if present
-          let p = chosen?.erni_pct ?? null;
-          if (p == null) p = s?.settings?.erni_pct ?? null;
-          if (p == null) p = s?.erni_pct ?? null;
-          if (p == null) p = s?.employers_ni_percent ?? null;
-          if (p == null) p = 0;
-
-          p = Number(p) || 0;
-          if (p > 1) p = p / 100; // support 15 vs 0.15
-
-          let mult = 1 + p;
-          if (!Number.isFinite(mult) || mult <= 0) mult = 1;
-
-          W.__ERNI_MULT_BY_DATE__[anchorYmd] = mult;
-          W.__ERNI_MULT__ = mult;
-
-          return mult;
         }
       } catch {}
 
-      // Fallback
-      W.__ERNI_MULT_BY_DATE__[anchorYmd] = 1;
-      W.__ERNI_MULT__ = 1;
-      return 1;
+      // 1) Try a dedicated backend picker endpoint (recommended):
+      //    GET /api/settings/finance-pick?date=YYYY-MM-DD  -> { finance_window: {...} }
+      //    (If you named it differently, adjust the URL here.)
+      if (!financeWindow) {
+        try {
+          if (typeof W.authFetch === 'function' && typeof W.API === 'function') {
+            const url = W.API(`/api/settings/finance-pick?date=${encodeURIComponent(anchorYmd)}`);
+            const r = await W.authFetch(url);
+            if (r && r.ok) {
+              const j = await r.json().catch(() => null);
+              if (j && typeof j === 'object') {
+                financeWindow = j.finance_window || j.financeWindow || j.window || null;
+              }
+            }
+          }
+        } catch {}
+      }
+
+      // 2) Fall back to getSettingsCached (support both old & new shapes)
+      if (!financeWindow) {
+        try {
+          if (typeof W.getSettingsCached === 'function') {
+            const sRaw = await W.getSettingsCached();
+
+            // Support both shapes:
+            // - { settings, finance_windows }
+            // - legacy where getSettingsCached returned just settings object
+            const settingsObj = (sRaw && typeof sRaw === 'object' && sRaw.settings && typeof sRaw.settings === 'object')
+              ? sRaw.settings
+              : (sRaw && typeof sRaw === 'object' ? sRaw : {});
+
+            const finance_windows =
+              Array.isArray(sRaw?.finance_windows) ? sRaw.finance_windows
+              : Array.isArray(settingsObj?.finance_windows) ? settingsObj.finance_windows
+              : [];
+
+            financeWindow = pickFinanceWindowForDate(finance_windows, anchorYmd);
+
+            // If still missing, try a single finance_window field (some handlers return this)
+            if (!financeWindow) {
+              const single = sRaw?.finance_window || settingsObj?.finance_window || null;
+              if (single && typeof single === 'object') financeWindow = single;
+            }
+
+            // If STILL missing, synthesize from legacy fields if present (last resort)
+            if (!financeWindow) {
+              financeWindow = {
+                vat_rate_pct: settingsObj?.vat_rate_pct ?? sRaw?.vat_rate_pct ?? null,
+                erni_pct: settingsObj?.erni_pct ?? sRaw?.erni_pct ?? settingsObj?.employers_ni_percent ?? null,
+                apply_erni_to: settingsObj?.apply_erni_to ?? sRaw?.apply_erni_to ?? 'PAYE_ONLY'
+              };
+            }
+          }
+        } catch {}
+      }
+
+      // Parse ERNI % and VAT % (store both for future use)
+      let erniPct = financeWindow?.erni_pct ?? 0;
+      let vatPct  = financeWindow?.vat_rate_pct ?? 0;
+
+      const erniMult = pctToMultiplier(erniPct);
+      const vatMult  = pctToMultiplier(vatPct);
+
+      // Persist caches (and keep your legacy global aligned)
+      W.__FINANCE_BY_DATE__[anchorYmd] = {
+        anchor_ymd: anchorYmd,
+        erni_pct: Number(erniPct) || 0,
+        erni_mult: erniMult,
+        apply_erni_to: String(financeWindow?.apply_erni_to || 'PAYE_ONLY').toUpperCase(),
+        vat_rate_pct: Number(vatPct) || 0,
+        vat_mult: vatMult,
+        window: financeWindow || null
+      };
+
+      W.__ERNI_MULT_BY_DATE__ = W.__ERNI_MULT_BY_DATE__ || Object.create(null);
+      W.__ERNI_MULT_BY_DATE__[anchorYmd] = erniMult;
+      W.__ERNI_MULT__ = erniMult;
+
+      return erniMult;
     };
   }
 
@@ -26497,8 +26681,7 @@ async function renderClientRatesTable() {
       return out;
     };
   }
-})();
-
+})();   
 
 
 // NEW
@@ -38060,17 +38243,41 @@ function renderContractAdditionalRatesTab(ctx) {
     const payRate    = (cfg.pay_rate != null && Number.isFinite(Number(cfg.pay_rate))) ? Number(cfg.pay_rate) : null;
     const chargeRate = (cfg.charge_rate != null && Number.isFinite(Number(cfg.charge_rate))) ? Number(cfg.charge_rate) : null;
 
-    let marginStr = '';
+      let marginStr = '';
     if (payRate != null && chargeRate != null) {
-      let erniMult = 1;
+      const fin = (window.modalCtx && window.modalCtx.finance && typeof window.modalCtx.finance === 'object')
+        ? window.modalCtx.finance
+        : null;
+
+      const erniMult = (fin && typeof fin.erni_multiplier === 'number' && fin.erni_multiplier > 0)
+        ? fin.erni_multiplier
+        : (typeof window.__ERNI_MULT__ === 'number' && window.__ERNI_MULT__ > 0)
+          ? window.__ERNI_MULT__
+          : 1;
+
+      const erniApplies = (fin && typeof fin.erni_applies === 'boolean')
+        ? fin.erni_applies
+        : (payMethod === 'PAYE');
+
+      // Prefer server-provided per-unit margins (existing contract GET includes them)
+      let serverMargin = null;
       try {
-        if (typeof window.__ERNI_MULT__ === 'number' && window.__ERNI_MULT__ > 0) {
-          erniMult = window.__ERNI_MULT__;
-        }
+        const arr = (window.modalCtx && window.modalCtx.margins && Array.isArray(window.modalCtx.margins.additional_rates_margin_preview))
+          ? window.modalCtx.margins.additional_rates_margin_preview
+          : [];
+        const found = arr.find(x => String(x?.code || '').toUpperCase() === String(code || '').toUpperCase()) || null;
+        if (found && found.margin_per_unit != null) serverMargin = Number(found.margin_per_unit);
       } catch {}
-      let mg = chargeRate - (payMethod === 'PAYE' ? payRate * erniMult : payRate);
+
+      let mg;
+      if (serverMargin != null && Number.isFinite(serverMargin)) {
+        mg = serverMargin;
+      } else {
+        mg = chargeRate - (payMethod === 'PAYE' && erniApplies ? payRate * erniMult : payRate);
+      }
       marginStr = mg.toFixed(2);
     }
+
 
     rowsHtml.push(`
       <div class="row extra-rate-row" data-slot="${esc(code)}">
@@ -38142,14 +38349,21 @@ function renderContractAdditionalRatesTab(ctx) {
       const root = document.getElementById('contractAdditionalRatesTab');
       if (!root) return;
 
-      const getErniMult = () => {
+        const getErniMult = () => {
         try {
+          const fin = (window.modalCtx && window.modalCtx.finance && typeof window.modalCtx.finance === 'object')
+            ? window.modalCtx.finance
+            : null;
+          if (fin && typeof fin.erni_multiplier === 'number' && fin.erni_multiplier > 0) {
+            return fin.erni_multiplier;
+          }
           if (typeof window.__ERNI_MULT__ === 'number' && window.__ERNI_MULT__ > 0) {
             return window.__ERNI_MULT__;
           }
         } catch {}
         return 1;
       };
+
 
       const getPayMethod = () => {
         try {
