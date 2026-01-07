@@ -2514,26 +2514,36 @@ function renderTopNav(){
   window.__selection = window.__selection || {};
 
   // helper: common section switch (mirrors original behaviour)
-  const switchToSection = (sectionKey) => {
-    if (!confirmDiscardChangesIfDirty()) return;
+ const switchToSection = (sectionKey) => {
+  if (!confirmDiscardChangesIfDirty()) return;
 
+  // ✅ Settings is modal-only: do NOT change the summary section
+  if (sectionKey === 'settings') {
     if ((window.__modalStack?.length || 0) > 0 || modalCtx?.entity) {
       discardAllModalsAndState();
     }
+    try { openSettings(); } catch (e) { alert('Could not open settings'); }
+    return;
+  }
 
-    if (!window.__listState[sectionKey]) {
-      window.__listState[sectionKey] = { page: 1, pageSize: 50, total: null, hasMore: false, filters: null };
-    }
+  if ((window.__modalStack?.length || 0) > 0 || modalCtx?.entity) {
+    discardAllModalsAndState();
+  }
 
-    // IDs-only selection seed for the new section
-    window.__selection[sectionKey] = window.__selection[sectionKey] || { fingerprint:'', ids:new Set() };
+  if (!window.__listState[sectionKey]) {
+    window.__listState[sectionKey] = { page: 1, pageSize: 50, total: null, hasMore: false, filters: null };
+  }
 
-    currentSection   = sectionKey;
-    currentRows      = [];
-    currentSelection = null;
+  // IDs-only selection seed for the new section
+  window.__selection[sectionKey] = window.__selection[sectionKey] || { fingerprint:'', ids:new Set() };
 
-    renderAll();
-  };
+  currentSection   = sectionKey;
+  currentRows      = [];
+  currentSelection = null;
+
+  renderAll();
+};
+
 
   // Helper: close any open settings dropdown
   const closeSettingsMenu = () => {
@@ -2638,45 +2648,48 @@ function renderTopNav(){
         m.style.top  = `${Math.round(window.scrollY + r.bottom + 6)}px`;
 
         // Wire actions
-        m.addEventListener('click', (e) => {
-          const it = e.target.closest('.menu-item');
-          if (!it) return;
-          const k = it.getAttribute('data-k');
-          closeSettingsMenu();
+      m.addEventListener('click', (e) => {
+  const it = e.target.closest('.menu-item');
+  if (!it) return;
+  const k = it.getAttribute('data-k');
+  closeSettingsMenu();
 
-          if (k === 'global') {
-            // keep current behaviour
-            switchToSection('settings');
+  if (k === 'global') {
+    // ✅ Open global settings modal WITHOUT switching the summary section
+    if (!confirmDiscardChangesIfDirty()) return;
+    try { openSettings(); } catch (err) { alert('Could not open settings'); }
+    return;
 
-          } else if (k === 'rates') {
-            // Preset Rates manager (parent modal)
-            if (!confirmDiscardChangesIfDirty()) return;
-            openPresetRatesManager();
+  } else if (k === 'rates') {
+    // Preset Rates manager (parent modal)
+    if (!confirmDiscardChangesIfDirty()) return;
+    openPresetRatesManager();
 
-          } else if (k === 'job-titles') {
-            // New Job Titles manager (side-panel modal)
-            if (!confirmDiscardChangesIfDirty()) return;
-            openJobTitleSettingsModal();
+  } else if (k === 'job-titles') {
+    // New Job Titles manager (side-panel modal)
+    if (!confirmDiscardChangesIfDirty()) return;
+    openJobTitleSettingsModal();
 
-          } else if (k === 'band-mappings') {
-            // NEW: Weekly band mappings (assignment/grade ↔ contract band)
-            if (!confirmDiscardChangesIfDirty()) return;
-            if (typeof openAssignmentBandMappingsModal !== 'function') {
-              alert('Band mappings modal not yet implemented.');
-              return;
-            }
-            openAssignmentBandMappingsModal();
+  } else if (k === 'band-mappings') {
+    // NEW: Weekly band mappings (assignment/grade ↔ contract band)
+    if (!confirmDiscardChangesIfDirty()) return;
+    if (typeof openAssignmentBandMappingsModal !== 'function') {
+      alert('Band mappings modal not yet implemented.');
+      return;
+    }
+    openAssignmentBandMappingsModal();
 
-          } else if (k === 'import-col-aliases') {
-            // NEW: Import column aliases (header name mapping)
-            if (!confirmDiscardChangesIfDirty()) return;
-            if (typeof openImportColumnAliasesModal !== 'function') {
-              alert('Import column aliases modal not yet implemented.');
-              return;
-            }
-            openImportColumnAliasesModal();
-          }
-        });
+  } else if (k === 'import-col-aliases') {
+    // NEW: Import column aliases (header name mapping)
+    if (!confirmDiscardChangesIfDirty()) return;
+    if (typeof openImportColumnAliasesModal !== 'function') {
+      alert('Import column aliases modal not yet implemented.');
+      return;
+    }
+    openImportColumnAliasesModal();
+  }
+});
+
 
         // Close on outside click / Esc
         setTimeout(() => {
