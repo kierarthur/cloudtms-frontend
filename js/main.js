@@ -22803,13 +22803,26 @@ async function callCheckContractWindowOverlap(candidate_id, start_date_iso, end_
 
 function openContract(row) {
   const LOGC = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : true;
-  const isCreate = !row || !row.id;
-  if (LOGC) console.log('[CONTRACTS] openContract ENTRY', { isCreate, rowPreview: !!row });
+
+  // ✅ Robust: support either shape:
+  //   - contract row (has id)
+  //   - wrapper payload { contract, counts, weeks, warnings, ... }
+  const __wrapper = (row && typeof row === 'object' && row.contract && typeof row.contract === 'object') ? row : null;
+  const __baseRow = __wrapper ? __wrapper.contract : row;
+
+  const isCreate = !__baseRow || !__baseRow.id;
+  if (LOGC) console.log('[CONTRACTS] openContract ENTRY', {
+    isCreate,
+    rowPreview: !!row,
+    id: __baseRow?.id,
+    wrapper: !!__wrapper,
+    wrapper_id: __wrapper?.contract?.id
+  });
 
   window.modalCtx = {
   entity: 'contracts',
   mode: isCreate ? 'create' : 'view',
-  data: { ...(row || {}) },
+  data: { ...(__baseRow || {}) },
   _saveInFlight: false,
 
   // ✅ NEW: track whether this save is calendar-only
@@ -22817,9 +22830,62 @@ function openContract(row) {
   __nonCalendarDirty: false
 };
 
+   // ✅ If backend returned warnings separately (wrapper shape), attach them so your existing UI works
+  try {
+    if (__wrapper && Array.isArray(__wrapper.warnings)) {
+      window.modalCtx.data.warnings = __wrapper.warnings;
+    }
+  } catch {}
+
+  // ✅ Pull prevailing finance globals (TODAY, London) so ERNI/VAT are always current
+  //    This fixes stale ERNI when another user changes it.
+  (async () => {
+    try {
+      const r = await authFetch(API('/api/contracts/finance-globals'));
+      if (!r || !r.ok) {
+        const t = r ? await r.text().catch(() => '') : '';
+        throw new Error(t || 'finance-globals fetch failed');
+      }
+      const j = await r.json().catch(() => ({}));
+      const fin = (j && typeof j === 'object' && j.finance && typeof j.finance === 'object') ? j.finance : null;
+
+      if (fin) {
+        // stash on modalCtx for later use (debug/inspection)
+        window.modalCtx.finance = fin;
+
+        // keep legacy globals aligned (your existing margin calculators read these)
+        try {
+          const em = Number(fin.erni_multiplier);
+          if (Number.isFinite(em) && em > 0) window.__ERNI_MULT__ = em;
+        } catch {}
+
+        try {
+          const vm = Number(fin.vat_multiplier);
+          if (Number.isFinite(vm) && vm > 0) window.__VAT_MULT__ = vm;
+        } catch {}
+
+        if (LOGC) console.log('[CONTRACTS] finance-globals loaded', {
+          anchor_ymd: fin.anchor_ymd,
+          erni_pct: fin.erni_pct,
+          erni_multiplier: fin.erni_multiplier,
+          vat_rate_pct: fin.vat_rate_pct,
+          vat_multiplier: fin.vat_multiplier
+        });
+
+        // If the modal is already open, recompute margins (non-fatal)
+        try { if (typeof computeContractMargins === 'function') computeContractMargins(); } catch {}
+        try { window.dispatchEvent(new Event('contracts-finance-globals-loaded')); } catch {}
+      }
+    } catch (e) {
+      if (LOGC) console.warn('[CONTRACTS] finance-globals fetch failed (non-fatal)', e?.message || e);
+    }
+  })();
+
+
 
   const preToken = window.__preOpenToken || null;
   if (LOGC) console.log('[CONTRACTS] preOpenToken snapshot', preToken);
+
 
   if (isCreate) {
     if (preToken) {
