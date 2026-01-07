@@ -4870,12 +4870,17 @@ async function getContract(contract_id) {
   // ✅ Keep full wrapper so callers can access:
   //   j.contract, j.finance, j.margins, j.counts, j.weeks, j.warnings, etc.
   if (j && typeof j === 'object' && j.contract && typeof j.contract === 'object') {
+    // ✅ Back-compat: some call sites (or logs) may still expect row.id
+    // If wrapper doesn't have id, mirror contract.id onto wrapper.id
+    if (j.id == null && j.contract.id != null) j.id = j.contract.id;
+
     return j;
   }
 
   // Legacy fallback (older endpoints might return contract row directly)
-  return j;
-} 
+  return j || null;
+}
+
 
 
 async function upsertContract(payload, id /* optional */) {
@@ -10445,6 +10450,12 @@ function renderContractRatesTab(ctx) {
     ? fin.erni_applies
     : (payMethod === 'PAYE');
 
+  // ✅ NEW: server-computed margins (from GET /api/contracts/:id)
+  // merged.margins.bucket_margins is the preferred source when present.
+  const serverBucketMargins = (merged && merged.margins && merged.margins.bucket_margins && typeof merged.margins.bucket_margins === 'object')
+    ? merged.margins.bucket_margins
+    : null;
+
   const toNum = (v) => {
     if (v === '' || v === null || v === undefined) return null;
     const n = Number(v);
@@ -10469,12 +10480,23 @@ function renderContractRatesTab(ctx) {
     bh:    toNum(R.charge_bh)
   };
 
-  const marginRate = {
+  // ✅ Local compute fallback (used only when server margin not present)
+  const marginRateLocal = {
     day:   (payRate.day   != null && chgRate.day   != null) ? (chgRate.day   - (payMethod === 'PAYE' && erniApplies ? payRate.day   * erniMult : payRate.day))   : null,
     night: (payRate.night != null && chgRate.night != null) ? (chgRate.night - (payMethod === 'PAYE' && erniApplies ? payRate.night * erniMult : payRate.night)) : null,
     sat:   (payRate.sat   != null && chgRate.sat   != null) ? (chgRate.sat   - (payMethod === 'PAYE' && erniApplies ? payRate.sat   * erniMult : payRate.sat))   : null,
     sun:   (payRate.sun   != null && chgRate.sun   != null) ? (chgRate.sun   - (payMethod === 'PAYE' && erniApplies ? payRate.sun   * erniMult : payRate.sun))   : null,
     bh:    (payRate.bh    != null && chgRate.bh    != null) ? (chgRate.bh    - (payMethod === 'PAYE' && erniApplies ? payRate.bh    * erniMult : payRate.bh))    : null
+  };
+
+  // ✅ Prefer server margins when present; fallback to local compute.
+  // FE recompute on edits still works because your input handlers call computeContractMargins().
+  const marginRate = {
+    day:   (serverBucketMargins && toNum(serverBucketMargins.day)   != null) ? toNum(serverBucketMargins.day)   : marginRateLocal.day,
+    night: (serverBucketMargins && toNum(serverBucketMargins.night) != null) ? toNum(serverBucketMargins.night) : marginRateLocal.night,
+    sat:   (serverBucketMargins && toNum(serverBucketMargins.sat)   != null) ? toNum(serverBucketMargins.sat)   : marginRateLocal.sat,
+    sun:   (serverBucketMargins && toNum(serverBucketMargins.sun)   != null) ? toNum(serverBucketMargins.sun)   : marginRateLocal.sun,
+    bh:    (serverBucketMargins && toNum(serverBucketMargins.bh)    != null) ? toNum(serverBucketMargins.bh)    : marginRateLocal.bh
   };
 
   if (LOGC) console.log('[CONTRACTS] renderContractRatesTab', { payMethod, hasRates: !!merged?.rates_json });
@@ -10560,8 +10582,6 @@ function renderContractRatesTab(ctx) {
 
   return html;
 }
-
-
 
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -22837,9 +22857,72 @@ function openContract(row) {
     }
   } catch {}
 
-  // ✅ Pull prevailing finance globals (TODAY, London) so ERNI/VAT are always current
-  //    This fixes stale ERNI when another user changes it.
+   // ✅ Prefer server-provided finance/margins from wrapper (when opening an existing contract)
+  try {
+    if (__wrapper && __wrapper.finance && typeof __wrapper.finance === 'object') {
+      window.modalCtx.finance = __wrapper.finance;
+      window.modalCtx.data.finance = __wrapper.finance;
+    }
+  } catch {}
+
+  try {
+    if (__wrapper && __wrapper.margins && typeof __wrapper.margins === 'object') {
+      window.modalCtx.margins = __wrapper.margins;
+      window.modalCtx.data.margins = __wrapper.margins;
+    }
+  } catch {}
+
+  // ✅ Apply finance into legacy globals + date-keyed caches (prevents stale overrides later)
+  const applyFinanceGlobals = (fin) => {
+    if (!fin || typeof fin !== 'object') return;
+
+    window.modalCtx.finance = fin;
+    window.modalCtx.data.finance = fin;
+
+    const anchor = (fin.anchor_ymd != null) ? String(fin.anchor_ymd) : null;
+
+    try {
+      const em = Number(fin.erni_multiplier);
+      if (Number.isFinite(em) && em > 0) {
+        window.__ERNI_MULT__ = em;
+
+        // ✅ CRITICAL: also prime the by-date cache so ensureErniMultiplier() won't reintroduce stale values
+        window.__ERNI_MULT_BY_DATE__ = window.__ERNI_MULT_BY_DATE__ || Object.create(null);
+        if (anchor) window.__ERNI_MULT_BY_DATE__[anchor] = em;
+      }
+    } catch {}
+
+    try {
+      const vm = Number(fin.vat_multiplier);
+      if (Number.isFinite(vm) && vm > 0) {
+        window.__VAT_MULT__ = vm;
+
+        // Optional symmetry (only if you later add VAT-by-date usage)
+        window.__VAT_MULT_BY_DATE__ = window.__VAT_MULT_BY_DATE__ || Object.create(null);
+        if (anchor) window.__VAT_MULT_BY_DATE__[anchor] = vm;
+      }
+    } catch {}
+
+    if (LOGC) console.log('[CONTRACTS] finance applied', {
+      anchor_ymd: fin.anchor_ymd,
+      erni_pct: fin.erni_pct,
+      erni_multiplier: fin.erni_multiplier,
+      vat_rate_pct: fin.vat_rate_pct,
+      vat_multiplier: fin.vat_multiplier
+    });
+  };
+
+  // If wrapper provided finance, apply immediately
+  try {
+    if (window.modalCtx.finance) applyFinanceGlobals(window.modalCtx.finance);
+  } catch {}
+
+  // ✅ Pull prevailing finance globals (TODAY) ONLY when needed:
+  // - create mode
+  // - or wrapper did not include finance
   (async () => {
+    if (!isCreate && window.modalCtx.finance) return;
+
     try {
       const r = await authFetch(API('/api/contracts/finance-globals'));
       if (!r || !r.ok) {
@@ -22850,27 +22933,7 @@ function openContract(row) {
       const fin = (j && typeof j === 'object' && j.finance && typeof j.finance === 'object') ? j.finance : null;
 
       if (fin) {
-        // stash on modalCtx for later use (debug/inspection)
-        window.modalCtx.finance = fin;
-
-        // keep legacy globals aligned (your existing margin calculators read these)
-        try {
-          const em = Number(fin.erni_multiplier);
-          if (Number.isFinite(em) && em > 0) window.__ERNI_MULT__ = em;
-        } catch {}
-
-        try {
-          const vm = Number(fin.vat_multiplier);
-          if (Number.isFinite(vm) && vm > 0) window.__VAT_MULT__ = vm;
-        } catch {}
-
-        if (LOGC) console.log('[CONTRACTS] finance-globals loaded', {
-          anchor_ymd: fin.anchor_ymd,
-          erni_pct: fin.erni_pct,
-          erni_multiplier: fin.erni_multiplier,
-          vat_rate_pct: fin.vat_rate_pct,
-          vat_multiplier: fin.vat_multiplier
-        });
+        applyFinanceGlobals(fin);
 
         // If the modal is already open, recompute margins (non-fatal)
         try { if (typeof computeContractMargins === 'function') computeContractMargins(); } catch {}
@@ -22880,6 +22943,7 @@ function openContract(row) {
       if (LOGC) console.warn('[CONTRACTS] finance-globals fetch failed (non-fatal)', e?.message || e);
     }
   })();
+
 
 
 
