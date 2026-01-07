@@ -41900,8 +41900,18 @@ async function patchFinanceWindow(id, patch){
 async function handleSaveSettings() {
   const byId = (id) => document.getElementById(id);
 
+  // ✅ Preserve the singleton modal id across save/refresh
+  const keepId = String(
+    (window.modalCtx && window.modalCtx.data && window.modalCtx.data.id) ||
+    (modalCtx && modalCtx.data && modalCtx.data.id) ||
+    'global'
+  );
+
   // Collect non-finance settings_defaults fields only (bh_list parsed etc.)
   const payload = collectForm('#settingsForm', true) || {};
+
+  // ✅ Never send modal-only id to backend
+  try { delete payload.id; } catch {}
 
   // ─────────────────────────────────────────────
   // Read finance window inputs (Current / Future / Add new)
@@ -42044,6 +42054,9 @@ async function handleSaveSettings() {
     const freshWindows  = Array.isArray(res?.finance_windows) ? res.finance_windows : [];
 
     modalCtx.data = JSON.parse(JSON.stringify(freshSettings));
+    modalCtx.data = modalCtx.data || {};
+    modalCtx.data.id = keepId; // ✅ critical: keep singleton id
+
     modalCtx.finance_windows = JSON.parse(JSON.stringify(freshWindows));
 
     // Clear draft "Add new" row after successful save
@@ -42052,11 +42065,12 @@ async function handleSaveSettings() {
     return { ok:true, saved: modalCtx.data };
   } catch {
     // Fallback: keep current modalCtx.data and return merged payload (non-finance only)
-    const saved = { ...(modalCtx.data || {}), ...payload };
+    const saved = { ...(modalCtx.data || {}), ...payload, id: keepId };
     modalCtx.data = saved;
     return { ok:true, saved };
   }
 }
+
 
 // ================== NEW: handleSaveSettings (parent onSave; persist then stay open in View) ==================
 
