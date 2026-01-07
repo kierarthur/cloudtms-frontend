@@ -37992,23 +37992,19 @@ function openAuditItem(row){
 // ---- Settings (global defaults)
 
 async function renderSettingsPanel(content) {
-  // Settings are now managed in the Settings modal (supports finance_windows).
-  content.innerHTML = `
-    <div class="tabc">
-      <div class="mini" style="opacity:0.8">
-        Settings are managed in the Settings modal (includes finance windows).
-      </div>
-      <div style="margin-top:10px">
-        <button id="btnOpenSettingsModal" class="primary">Open Settings</button>
-      </div>
-    </div>
-  `;
+  // Settings are now managed in the Settings modal.
+  // IMPORTANT: do NOT change the caller's container (prevents "Summary" being overwritten).
 
-  const btn = document.getElementById('btnOpenSettingsModal');
-  if (btn) btn.onclick = () => { try { openSettings(); } catch (e) { alert('Could not open settings'); } };
+  try {
+    // Avoid stacking multiple Settings modals if renderSettingsPanel is called repeatedly
+    const fr = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
+    const alreadyOpen = !!(fr && fr.entity === 'settings');
+    if (!alreadyOpen) openSettings();
+  } catch (e) {
+    alert('Could not open settings');
+  }
 
-  // Optional: auto-open immediately
-  try { openSettings(); } catch {}
+  return;
 }
 
 
