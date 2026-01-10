@@ -617,6 +617,25 @@ body{
       border-color:rgba(79,70,229,.7);
       box-shadow:0 -1px 0 #0b1221;
     }
+/* ✅ Disabled tabs (hover/tooltips must work reliably)
+   IMPORTANT: do NOT use the native disabled attribute for tabs.
+   Use .disabled and/or data-disabled="1" instead.
+*/
+.tabs button.disabled,
+.tabs button[data-disabled="1"]{
+  opacity:0.45;
+  cursor:not-allowed !important;
+  filter:saturate(0.6) brightness(0.95);
+}
+
+/* Optional: keep hover from looking “active” on disabled tabs */
+.tabs button.disabled:hover,
+.tabs button[data-disabled="1"]:hover{
+  background:#020617;
+  border-color:transparent;
+  box-shadow:none;
+}
+
 
     .tabc{ padding:14px }
 
