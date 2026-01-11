@@ -28863,7 +28863,6 @@ const importAuthoritativeNow = () => {
     return false;
   }
 };
-
 const sheetScope = (det.sheet_scope || mc.data?.sheet_scope || ts.sheet_scope || '').toUpperCase();
 const subMode    = (ts.submission_mode || mc.data?.submission_mode || '').toUpperCase();
 
@@ -28882,15 +28881,16 @@ const isDaily  = (sheetScope === 'DAILY');
 // ─────────────────────────────────────────────────────────────
 // ✅ UPDATED: wire “Add additional manual timesheet” pill
 // Now calls consolidated createAdditionalManualAdjustmentAndOpen()
-// ✅ ALSO: only show for REAL timesheets (requires timesheet_id; hides planned contract_week stubs)
+// ✅ ALSO: allow WEEKLY planned contract_week stubs (no timesheet_id yet)
+// - Weekly: needs contract_week_id
+// - Daily:  needs timesheet_id
 // ─────────────────────────────────────────────────────────────
 if (addAdditionalManualBtn) {
   const showAdd =
     (mode === 'view') &&
-    !!tsId &&                 // ✅ must be a real timesheet id (planned contract_week has no tsId)
     (
-      isWeekly ||
-      isDaily
+      (isWeekly && !!weekId) ||  // ✅ allow planned weekly stubs
+      (isDaily  && !!tsId)       // ✅ daily still requires a real timesheet id
     );
 
   addAdditionalManualBtn.style.display = showAdd ? '' : 'none';
@@ -28912,6 +28912,7 @@ if (addAdditionalManualBtn) {
     });
   }
 }
+
 
 
 const weeklyElectronicWithTs =
