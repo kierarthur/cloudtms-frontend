@@ -52834,7 +52834,7 @@ async function openTimesheetEvidenceUploadDialog(file) {
               <option value="Timesheet">Timesheet</option>
               <option value="Mileage">Mileage</option>
               <option value="Accommodation">Accommodation</option>
-              <option value="Expenses">Expenses</option>
+              <option value="Travel">Travel</option>
               <option value="Other">Other</option>
             </select>
 
@@ -52953,9 +52953,12 @@ async function openTimesheetEvidenceUploadDialog(file) {
 
           const normalised = list.map(ev2 => {
             const out = { ...(ev2 || {}) };
+
             if (typeof out.system !== 'boolean') out.system = false;
             if (typeof out.can_delete !== 'boolean') out.can_delete = !out.system;
+
             if (!out.uploaded_at_utc && out.created_at) out.uploaded_at_utc = out.created_at;
+
             return out;
           });
 
@@ -53062,6 +53065,286 @@ async function openTimesheetEvidenceUploadDialog(file) {
 
   GE();
 }
+
+async function openTimesheetEvidenceReplaceDialog(file) {
+  const { LOGM, L, GC, GE } = getTsLoggers('[TS][EVIDENCE][DIALOG]');
+  GC('openTimesheetEvidenceReplaceDialog');
+
+  const mc = window.modalCtx || {};
+  const tsId = mc.data?.timesheet_id || mc.data?.id || null;
+
+  if (!tsId) {
+    GE();
+    throw new Error('Timesheet context missing; cannot upload evidence.');
+  }
+  if (!file) {
+    GE();
+    throw new Error('File is required for evidence upload dialog.');
+  }
+
+  const type = String(file.type || '').toLowerCase();
+  const name = String(file.name || '').toLowerCase();
+  const isPdf = (type === 'application/pdf') || name.endsWith('.pdf');
+  const isImg = type.startsWith('image/') || /\.(jpe?g|png|gif|webp|heic|heif)$/i.test(name);
+
+  if (!isPdf && !isImg) {
+    GE();
+    throw new Error('Please upload a PDF or image file.');
+  }
+
+  L('ENTRY', {
+    tsId,
+    name: file.name,
+    type: file.type,
+    size: file.size
+  });
+
+  const instanceId = `ts-ev-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const selId = `${instanceId}-type`;
+  const otherId = `${instanceId}-other`;
+  const previewId = `${instanceId}-preview`;
+
+  const newUrl = URL.createObjectURL(file);
+
+  const title = `Upload evidence ${String(tsId).slice(0, 8)}…`;
+
+  const bodyHtml = `
+    <div class="tabc">
+      <div class="card">
+        <div class="row">
+          <label>Preview</label>
+          <div class="controls">
+            <iframe
+              id="${previewId}"
+              src="${newUrl}"
+              style="width:100%;height:420px;border:1px solid var(--line);border-radius:8px;background:#000;"
+            ></iframe>
+            <div class="mini" style="margin-top:8px;opacity:.85;">
+              ${escapeHtml(file.name || 'Evidence file')} (${Math.round((file.size || 0) / 1024)} KB)
+            </div>
+          </div>
+        </div>
+
+        <div class="row" style="margin-top:10px;">
+          <label>Evidence Type</label>
+          <div class="controls" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+            <select
+              id="${selId}"
+              class="input"
+              style="min-width:220px;background:transparent;border:1px solid rgba(255,255,255,.18);"
+            >
+              <option value="Timesheet">Timesheet</option>
+              <option value="Mileage">Mileage</option>
+              <option value="Accommodation">Accommodation</option>
+              <option value="Travel">Travel</option>
+              <option value="Other">Other</option>
+            </select>
+
+            <input
+              id="${otherId}"
+              type="text"
+              class="input"
+              placeholder="Enter evidence type"
+              style="display:none;min-width:260px;background:transparent;border:1px solid rgba(255,255,255,.18);"
+              value=""
+            />
+          </div>
+        </div>
+
+        <div class="row" style="margin-top:10px;">
+          <label></label>
+          <div class="controls">
+            <span class="mini" style="opacity:.85;">
+              This will add a new evidence item to the timesheet. Use the Evidence tab table to view or delete items later.
+            </span>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+
+  const tabs = [{ key: 'upload', title: 'Evidence' }];
+
+  const onSave = async () => {
+    const { LOGM, L, GC, GE } = getTsLoggers('[TS][EVIDENCE][DIALOG][SAVE]');
+    GC('onSave (evidence upload)');
+
+    try {
+      const sel = document.getElementById(selId);
+      const other = document.getElementById(otherId);
+
+      const selVal = sel ? String(sel.value || '').trim() : '';
+      let kind = selVal;
+
+      if (selVal.toLowerCase() === 'other') {
+        const txt = other ? String(other.value || '').trim() : '';
+        if (!txt) {
+          alert('Please enter an evidence type.');
+          GE();
+          return { ok: false };
+        }
+        kind = txt;
+      }
+
+      if (!kind) {
+        alert('Please select an evidence type.');
+        GE();
+        return { ok: false };
+      }
+
+      // ✅ Re-read the current modal context at save time
+      const mc2 = window.modalCtx || {};
+      const tsIdNow =
+        mc2.data?.timesheet_id ||
+        mc2.data?.id ||
+        (mc2.timesheetDetails && mc2.timesheetDetails.timesheet && mc2.timesheetDetails.timesheet.timesheet_id) ||
+        tsId;
+
+      const expected =
+        (mc2.timesheetMeta && mc2.timesheetMeta.expected_timesheet_id) ||
+        String(tsIdNow);
+
+      // ✅ Upload evidence (guarded; if stale, backend returns 409 -> we adopt+refresh below)
+      const up = await uploadTimesheetEvidence(tsIdNow, file, kind, expected);
+
+      const resolvedId =
+        (up && (up.current_timesheet_id || up.timesheet_id))
+          ? String(up.current_timesheet_id || up.timesheet_id)
+          : String(tsIdNow);
+
+      // ✅ If the timesheet moved, adopt it into modalCtx for correctness
+      try {
+        if (window.modalCtx && window.modalCtx.data) {
+          const cur = window.modalCtx.data.timesheet_id || window.modalCtx.data.id || null;
+          if (String(cur || '') === String(tsIdNow || '')) {
+            window.modalCtx.data.timesheet_id = resolvedId;
+            window.modalCtx.data.id = resolvedId;
+          }
+        }
+        if (window.modalCtx?.timesheetMeta && typeof window.modalCtx.timesheetMeta === 'object') {
+          window.modalCtx.timesheetMeta.expected_timesheet_id = resolvedId;
+          window.modalCtx.timesheetMeta.hasTs = true;
+        }
+      } catch {}
+
+      // Refresh details best-effort (keeps action flags, evidence mode etc aligned)
+      try {
+        const fresh = await fetchTimesheetDetails(resolvedId);
+        window.modalCtx.timesheetDetails = fresh;
+      } catch (e) {
+        L('refresh details after evidence upload failed (non-fatal)', e);
+      }
+
+      // ✅ Refresh evidence list in modal state using resolvedId
+      try {
+        const encTsId = encodeURIComponent(resolvedId);
+
+        if (typeof refreshTimesheetEvidenceIntoModalState === 'function') {
+          await refreshTimesheetEvidenceIntoModalState(resolvedId);
+        } else {
+          const res = await authFetch(API(`/api/timesheets/${encTsId}/evidence`));
+          const json = await res.json().catch(() => []);
+          const list = Array.isArray(json) ? json : [];
+
+          const normalised = list.map(ev => {
+            const out = { ...(ev || {}) };
+            if (typeof out.system !== 'boolean') out.system = false;
+            if (typeof out.can_delete !== 'boolean') out.can_delete = !out.system;
+            if (!out.uploaded_at_utc && out.created_at) out.uploaded_at_utc = out.created_at;
+            return out;
+          });
+
+          window.modalCtx = window.modalCtx || {};
+          window.modalCtx.timesheetState = window.modalCtx.timesheetState || {};
+          window.modalCtx.timesheetState.evidence = normalised;
+        }
+      } catch (err) {
+        L('refresh evidence after upload failed (non-fatal)', err);
+      }
+
+      // ✅ Keep summary row consistent if id rotated
+      try {
+        if (typeof refreshTimesheetsSummaryAfterRotation === 'function') {
+          await refreshTimesheetsSummaryAfterRotation(resolvedId);
+        }
+      } catch (e) {
+        L('summary refresh failed (non-fatal)', e);
+      }
+
+      if (window.__toast) {
+        window.__toast('Evidence uploaded');
+      }
+
+      try { URL.revokeObjectURL(newUrl); } catch {}
+
+      GE();
+      return { ok: true, saved: { timesheet_id: resolvedId } };
+    } catch (err) {
+      L('uploadTimesheetEvidence failed', err);
+
+      // ✅ Rotation safety: adopt moved current id + refresh + repaint; user can retry
+      try {
+        if (typeof tsHandleMoved409Modal === 'function') {
+          const handled = await tsHandleMoved409Modal(err, {
+            tabKey: 'upload',
+            toast: 'This timesheet changed while you were editing. Please review and try again.'
+          });
+          if (handled) {
+            GE();
+            return { ok: false };
+          }
+        }
+      } catch {}
+
+      alert(err?.message || 'Failed to upload evidence.');
+      GE();
+      return { ok: false };
+    }
+  };
+
+  const onDismiss = () => {
+    try { URL.revokeObjectURL(newUrl); } catch {}
+  };
+
+  showModal(
+    title,
+    tabs,
+    () => bodyHtml,
+    onSave,
+    false,
+    undefined,
+    {
+      kind: 'timesheet-evidence-replace',
+      noParentGate: true,
+      forceEdit: true,
+      onDismiss
+    }
+  );
+
+  // Best-effort UI wiring after render
+  try {
+    const sel = document.getElementById(selId);
+    const other = document.getElementById(otherId);
+    if (sel && !sel.__tsEvTypeWired) {
+      sel.__tsEvTypeWired = true;
+
+      const sync = () => {
+        const v = String(sel.value || '').trim().toLowerCase();
+        const isOther = (v === 'other');
+        if (other) {
+          other.style.display = isOther ? '' : 'none';
+          if (!isOther) other.value = '';
+        }
+      };
+
+      sel.addEventListener('change', sync);
+      sync();
+    }
+  } catch {}
+
+  GE();
+}
+
 
 
 async function refreshTimesheetEvidenceIntoModalState(timesheetId) {
@@ -53301,285 +53584,6 @@ async function openTimesheetPdf(timesheetId) {
     if (LOGM) console.warn('[TS][PDF] window.open failed', err);
     alert('Unable to open PDF window. Please check your popup blocker.');
   }
-}
-
-async function openTimesheetEvidenceReplaceDialog(file) {
-  const { LOGM, L, GC, GE } = getTsLoggers('[TS][EVIDENCE][DIALOG]');
-  GC('openTimesheetEvidenceReplaceDialog');
-
-  const mc = window.modalCtx || {};
-  const tsId = mc.data?.timesheet_id || mc.data?.id || null;
-
-  if (!tsId) {
-    GE();
-    throw new Error('Timesheet context missing; cannot upload evidence.');
-  }
-  if (!file) {
-    GE();
-    throw new Error('File is required for evidence upload dialog.');
-  }
-
-  const type = String(file.type || '').toLowerCase();
-  const name = String(file.name || '').toLowerCase();
-  const isPdf = (type === 'application/pdf') || name.endsWith('.pdf');
-  const isImg = type.startsWith('image/') || /\.(jpe?g|png|gif|webp|heic|heif)$/i.test(name);
-
-  if (!isPdf && !isImg) {
-    GE();
-    throw new Error('Please upload a PDF or image file.');
-  }
-
-  L('ENTRY', {
-    tsId,
-    name: file.name,
-    type: file.type,
-    size: file.size
-  });
-
-  const instanceId = `ts-ev-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-  const selId = `${instanceId}-type`;
-  const otherId = `${instanceId}-other`;
-  const previewId = `${instanceId}-preview`;
-
-  const newUrl = URL.createObjectURL(file);
-
-  const title = `Upload evidence ${String(tsId).slice(0, 8)}…`;
-
-  const bodyHtml = `
-    <div class="tabc">
-      <div class="card">
-        <div class="row">
-          <label>Preview</label>
-          <div class="controls">
-            <iframe
-              id="${previewId}"
-              src="${newUrl}"
-              style="width:100%;height:420px;border:1px solid var(--line);border-radius:8px;background:#000;"
-            ></iframe>
-            <div class="mini" style="margin-top:8px;opacity:.85;">
-              ${escapeHtml(file.name || 'Evidence file')} (${Math.round((file.size || 0) / 1024)} KB)
-            </div>
-          </div>
-        </div>
-
-        <div class="row" style="margin-top:10px;">
-          <label>Evidence Type</label>
-          <div class="controls" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
-            <select
-              id="${selId}"
-              class="input"
-              style="min-width:220px;background:transparent;border:1px solid rgba(255,255,255,.18);"
-            >
-              <option value="Timesheet">Timesheet</option>
-              <option value="Mileage">Mileage</option>
-              <option value="Accommodation">Accommodation</option>
-              <option value="Expenses">Expenses</option>
-              <option value="Other">Other</option>
-            </select>
-
-            <input
-              id="${otherId}"
-              type="text"
-              class="input"
-              placeholder="Enter evidence type"
-              style="display:none;min-width:260px;background:transparent;border:1px solid rgba(255,255,255,.18);"
-              value=""
-            />
-          </div>
-        </div>
-
-        <div class="row" style="margin-top:10px;">
-          <label></label>
-          <div class="controls">
-            <span class="mini" style="opacity:.85;">
-              This will add a new evidence item to the timesheet. Use the Evidence tab table to view or delete items later.
-            </span>
-          </div>
-        </div>
-      </div>
-    </div>
-  `;
-
-  const tabs = [{ key: 'upload', title: 'Evidence' }];
-
-  const onSave = async () => {
-    const { LOGM, L, GC, GE } = getTsLoggers('[TS][EVIDENCE][DIALOG][SAVE]');
-    GC('onSave (evidence upload)');
-
-    try {
-      const sel = document.getElementById(selId);
-      const other = document.getElementById(otherId);
-
-      const selVal = sel ? String(sel.value || '').trim() : '';
-      let kind = selVal;
-
-      if (selVal.toLowerCase() === 'other') {
-        const txt = other ? String(other.value || '').trim() : '';
-        if (!txt) {
-          alert('Please enter an evidence type.');
-          GE();
-          return { ok: false };
-        }
-        kind = txt;
-      }
-
-      if (!kind) {
-        alert('Please select an evidence type.');
-        GE();
-        return { ok: false };
-      }
-
-      // ✅ Re-read the current modal context at save time
-      const mc2 = window.modalCtx || {};
-      const tsIdNow =
-        mc2.data?.timesheet_id ||
-        mc2.data?.id ||
-        (mc2.timesheetDetails && mc2.timesheetDetails.timesheet && mc2.timesheetDetails.timesheet.timesheet_id) ||
-        tsId;
-
-      const expected =
-        (mc2.timesheetMeta && mc2.timesheetMeta.expected_timesheet_id) ||
-        String(tsIdNow);
-
-      // ✅ Upload evidence (guarded; if stale, backend returns 409 -> we adopt+refresh below)
-      const up = await uploadTimesheetEvidence(tsIdNow, file, kind, expected);
-
-      const resolvedId =
-        (up && (up.current_timesheet_id || up.timesheet_id))
-          ? String(up.current_timesheet_id || up.timesheet_id)
-          : String(tsIdNow);
-
-      // ✅ If the timesheet moved, adopt it into modalCtx for correctness
-      try {
-        if (window.modalCtx && window.modalCtx.data) {
-          const cur = window.modalCtx.data.timesheet_id || window.modalCtx.data.id || null;
-          if (String(cur || '') === String(tsIdNow || '')) {
-            window.modalCtx.data.timesheet_id = resolvedId;
-            window.modalCtx.data.id = resolvedId;
-          }
-        }
-        if (window.modalCtx?.timesheetMeta && typeof window.modalCtx.timesheetMeta === 'object') {
-          window.modalCtx.timesheetMeta.expected_timesheet_id = resolvedId;
-          window.modalCtx.timesheetMeta.hasTs = true;
-        }
-      } catch {}
-
-      // Refresh details best-effort (keeps action flags, evidence mode etc aligned)
-      try {
-        const fresh = await fetchTimesheetDetails(resolvedId);
-        window.modalCtx.timesheetDetails = fresh;
-      } catch (e) {
-        L('refresh details after evidence upload failed (non-fatal)', e);
-      }
-
-      // ✅ Refresh evidence list in modal state using resolvedId
-      try {
-        const encTsId = encodeURIComponent(resolvedId);
-
-        if (typeof refreshTimesheetEvidenceIntoModalState === 'function') {
-          await refreshTimesheetEvidenceIntoModalState(resolvedId);
-        } else {
-          const res = await authFetch(API(`/api/timesheets/${encTsId}/evidence`));
-          const json = await res.json().catch(() => []);
-          const list = Array.isArray(json) ? json : [];
-
-          const normalised = list.map(ev => {
-            const out = { ...(ev || {}) };
-            if (typeof out.system !== 'boolean') out.system = false;
-            if (typeof out.can_delete !== 'boolean') out.can_delete = !out.system;
-            if (!out.uploaded_at_utc && out.created_at) out.uploaded_at_utc = out.created_at;
-            return out;
-          });
-
-          window.modalCtx = window.modalCtx || {};
-          window.modalCtx.timesheetState = window.modalCtx.timesheetState || {};
-          window.modalCtx.timesheetState.evidence = normalised;
-        }
-      } catch (err) {
-        L('refresh evidence after upload failed (non-fatal)', err);
-      }
-
-      // ✅ Keep summary row consistent if id rotated
-      try {
-        if (typeof refreshTimesheetsSummaryAfterRotation === 'function') {
-          await refreshTimesheetsSummaryAfterRotation(resolvedId);
-        }
-      } catch (e) {
-        L('summary refresh failed (non-fatal)', e);
-      }
-
-      if (window.__toast) {
-        window.__toast('Evidence uploaded');
-      }
-
-      try { URL.revokeObjectURL(newUrl); } catch {}
-
-      GE();
-      return { ok: true, saved: { timesheet_id: resolvedId } };
-    } catch (err) {
-      L('uploadTimesheetEvidence failed', err);
-
-      // ✅ Rotation safety: adopt moved current id + refresh + repaint; user can retry
-      try {
-        if (typeof tsHandleMoved409Modal === 'function') {
-          const handled = await tsHandleMoved409Modal(err, {
-            tabKey: 'upload',
-            toast: 'This timesheet changed while you were editing. Please review and try again.'
-          });
-          if (handled) {
-            GE();
-            return { ok: false };
-          }
-        }
-      } catch {}
-
-      alert(err?.message || 'Failed to upload evidence.');
-      GE();
-      return { ok: false };
-    }
-  };
-
-  const onDismiss = () => {
-    try { URL.revokeObjectURL(newUrl); } catch {}
-  };
-
-  showModal(
-    title,
-    tabs,
-    () => bodyHtml,
-    onSave,
-    false,
-    undefined,
-    {
-      kind: 'timesheet-evidence-replace',
-      noParentGate: true,
-      forceEdit: true,
-      onDismiss
-    }
-  );
-
-  // Best-effort UI wiring after render
-  try {
-    const sel = document.getElementById(selId);
-    const other = document.getElementById(otherId);
-    if (sel && !sel.__tsEvTypeWired) {
-      sel.__tsEvTypeWired = true;
-
-      const sync = () => {
-        const v = String(sel.value || '').trim().toLowerCase();
-        const isOther = (v === 'other');
-        if (other) {
-          other.style.display = isOther ? '' : 'none';
-          if (!isOther) other.value = '';
-        }
-      };
-
-      sel.addEventListener('change', sync);
-      sync();
-    }
-  } catch {}
-
-  GE();
 }
 
 
