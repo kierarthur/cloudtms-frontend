@@ -18635,7 +18635,7 @@ async function openClient(row) {
   };
 
   // Canonicalise immediately so UI always starts in a consistent state
-   // Canonicalise immediately so UI always starts in a consistent state
+  // Canonicalise immediately so UI always starts in a consistent state
   // ✅ Preserve manual-invoice routing + auto-invoice even if canonicalize strips unknown keys
   try {
     const cs0 = window.modalCtx.clientSettingsState || {};
@@ -18649,7 +18649,6 @@ async function openClient(row) {
     window.modalCtx.clientSettingsState.send_manual_invoices_to_different_email = keepManualFlag;
     window.modalCtx.clientSettingsState.manual_invoices_alt_email_address = keepManualFlag ? keepManualEmail : '';
   } catch {}
-
 
   L('window.modalCtx seeded', {
     entity: window.modalCtx.entity,
@@ -18697,7 +18696,7 @@ async function openClient(row) {
       }
 
       // Settings normalization (including BH hours)
-         const baseline = window.modalCtx.clientSettingsState || {};
+      const baseline = window.modalCtx.clientSettingsState || {};
       const hasFormMounted = !!byId('clientSettingsForm');
       const hasFullBaseline = ['day_start','day_end','night_start','night_end'].every(k => typeof baseline[k] === 'string' && baseline[k] !== '');
 
@@ -18708,7 +18707,6 @@ async function openClient(row) {
 
       const shouldValidateSettings = hasFormMounted || hasFullBaseline || hasManualInvoiceRoutingKeys;
 
-
       let pendingSettings = null;
       if (shouldValidateSettings) {
         let csMerged = { ...(baseline || {}) };
@@ -18717,31 +18715,27 @@ async function openClient(row) {
           const formEl = byId('clientSettingsForm');
           const liveSettings = collectForm('#clientSettingsForm', false);
 
-   const normKeys = ['day_start','day_end','night_start','night_end','sat_start','sat_end','sun_start','sun_end','bh_start','bh_end'];
+          const normKeys = ['day_start','day_end','night_start','night_end','sat_start','sat_end','sun_start','sun_end','bh_start','bh_end'];
 
-// ✅ merge time fields INCLUDING blanks so clears propagate ('' → null in normalizeClientSettingsForSave)
-normKeys.forEach(k => {
-  if (!Object.prototype.hasOwnProperty.call(liveSettings, k)) return;
-  const v = liveSettings[k];
-  csMerged[k] = (v == null) ? '' : String(v).trim(); // keep '' to mean “clear”
-});
+          // ✅ merge time fields INCLUDING blanks so clears propagate ('' → null in normalizeClientSettingsForSave)
+          normKeys.forEach(k => {
+            if (!Object.prototype.hasOwnProperty.call(liveSettings, k)) return;
+            const v = liveSettings[k];
+            csMerged[k] = (v == null) ? '' : String(v).trim(); // keep '' to mean “clear”
+          });
 
+          // ✅ timezone_id (allow clearing)
+          if (Object.prototype.hasOwnProperty.call(liveSettings, 'timezone_id')) {
+            const tz = liveSettings.timezone_id;
+            csMerged.timezone_id = (tz == null) ? '' : String(tz).trim(); // '' → null in normalizeClientSettingsForSave
+          }
 
-     // ✅ timezone_id (allow clearing)
-if (Object.prototype.hasOwnProperty.call(liveSettings, 'timezone_id')) {
-  const tz = liveSettings.timezone_id;
-  csMerged.timezone_id = (tz == null) ? '' : String(tz).trim(); // '' → null in normalizeClientSettingsForSave
-}
-
-
- // ✅ week ending day (0 is valid; do NOT use || '')
-if (Object.prototype.hasOwnProperty.call(liveSettings, 'week_ending_weekday')) {
-  const raw = liveSettings.week_ending_weekday;
-  csMerged.week_ending_weekday =
-    (raw === '' || raw === null || raw === undefined) ? null : String(raw).trim();
-}
-
-
+          // ✅ week ending day (0 is valid; do NOT use || '')
+          if (Object.prototype.hasOwnProperty.call(liveSettings, 'week_ending_weekday')) {
+            const raw = liveSettings.week_ending_weekday;
+            csMerged.week_ending_weekday =
+              (raw === '' || raw === null || raw === undefined) ? null : String(raw).trim();
+          }
 
           // default submission mode
           if (typeof liveSettings.default_submission_mode !== 'undefined') {
@@ -18755,75 +18749,94 @@ if (Object.prototype.hasOwnProperty.call(liveSettings, 'week_ending_weekday')) {
             if (wm) csMerged.weekly_mode = String(wm.value || '').trim();
             if (hp) csMerged.hr_weekly_behaviour = String(hp.value || '').trim();
 
-                  // Checkboxes that may be present depending on gate
-      const BOOL_KEYS = [
-  'pay_reference_required',
-  'invoice_reference_required',
-  'self_bill_no_invoices_sent',
-  'daily_calc_of_invoices',
-  'group_nightsat_sunbh',
-  'auto_invoice_default',     // ✅ NEW (was not being captured)
-  'hr_attach_to_invoice',
-  'ts_attach_to_invoice',
-  'send_manual_invoices_to_different_email'
-];
-csMerged.__from_ui = true;
-for (const key of BOOL_KEYS) {
-  const el = formEl.querySelector(`input[type="checkbox"][name="${key}"]`);
-  if (el) csMerged[key] = !!el.checked;
-}
+            // Checkboxes that may be present depending on gate
+            const BOOL_KEYS = [
+              'pay_reference_required',
+              'invoice_reference_required',
+              'self_bill_no_invoices_sent',
+              'daily_calc_of_invoices',
+              'group_nightsat_sunbh',
+              'auto_invoice_default',     // ✅ NEW (was not being captured)
+              'hr_attach_to_invoice',
+              'ts_attach_to_invoice',
+              'send_manual_invoices_to_different_email'
+            ];
+            csMerged.__from_ui = true;
+            for (const key of BOOL_KEYS) {
+              const el = formEl.querySelector(`input[type="checkbox"][name="${key}"]`);
+              if (el) csMerged[key] = !!el.checked;
+            }
 
-// ✅ NEW: manual invoices alt email input (only meaningful if the checkbox is enabled)
-if (Object.prototype.hasOwnProperty.call(liveSettings, 'manual_invoices_alt_email_address')) {
-  csMerged.manual_invoices_alt_email_address = String(liveSettings.manual_invoices_alt_email_address || '').trim();
-}
-if (!csMerged.send_manual_invoices_to_different_email) {
-  csMerged.manual_invoices_alt_email_address = '';
-}
-
-
+            // ✅ NEW: manual invoices alt email input (only meaningful if the checkbox is enabled)
+            if (Object.prototype.hasOwnProperty.call(liveSettings, 'manual_invoices_alt_email_address')) {
+              csMerged.manual_invoices_alt_email_address = String(liveSettings.manual_invoices_alt_email_address || '').trim();
+            }
+            if (!csMerged.send_manual_invoices_to_different_email) {
+              csMerged.manual_invoices_alt_email_address = '';
+            }
           }
         }
 
-       // ✅ Canonicalise gated settings so they are consistent even if saved from another tab
-const keepManualFlag  = !!csMerged.send_manual_invoices_to_different_email;
-const keepManualEmail = String(csMerged.manual_invoices_alt_email_address || '').trim();
-const keepAutoInv     = !!csMerged.auto_invoice_default;
+        // ✅ Canonicalise gated settings so they are consistent even if saved from another tab
+        const keepManualFlag  = !!csMerged.send_manual_invoices_to_different_email;
+        const keepManualEmail = String(csMerged.manual_invoices_alt_email_address || '').trim();
+        const keepAutoInv     = !!csMerged.auto_invoice_default;
 
-try {
-  csMerged = canonicalizeClientSettings(csMerged);
-} catch {}
+        try {
+          csMerged = canonicalizeClientSettings(csMerged);
+        } catch {}
 
-// ✅ restore preserved keys
-csMerged.auto_invoice_default = keepAutoInv;
-csMerged.send_manual_invoices_to_different_email = keepManualFlag;
-csMerged.manual_invoices_alt_email_address = keepManualFlag ? keepManualEmail : '';
+        // ✅ restore preserved keys
+        csMerged.auto_invoice_default = keepAutoInv;
+        csMerged.send_manual_invoices_to_different_email = keepManualFlag;
+        csMerged.manual_invoices_alt_email_address = keepManualFlag ? keepManualEmail : '';
 
+        // ✅ NEW: Save-time validation (prevent roundtrip)
+        if (csMerged.send_manual_invoices_to_different_email) {
+          const em = String(csMerged.manual_invoices_alt_email_address || '').trim();
+          if (!em) {
+            alert('Manual invoices alternate email address is required when "Send manual invoices to different email" is enabled.');
+            return { ok:false };
+          }
+          csMerged.manual_invoices_alt_email_address = em;
+        } else {
+          csMerged.manual_invoices_alt_email_address = '';
+        }
 
-// ✅ NORMALISE server times like "06:00:00" → "06:00" so validation won't fail
-const toHHMM = (v) => {
-  if (v == null) return '';
-  const s = String(v).trim();
-  const m = s.match(/^(\d{2}:\d{2})/);   // accepts "06:00:00", "06:00:00+00", etc
-  return m ? m[1] : s;
-};
-const TIME_KEYS = ['day_start','day_end','night_start','night_end','sat_start','sat_end','sun_start','sun_end','bh_start','bh_end'];
-TIME_KEYS.forEach(k => {
-  if (!Object.prototype.hasOwnProperty.call(csMerged, k)) return;
-  const raw = csMerged[k];
-  if (raw === '' || raw == null) return;     // preserve blanks
-  csMerged[k] = toHHMM(raw);
-});
+        // ✅ NORMALISE server times like "06:00:00" → "06:00" so validation won't fail
+        const toHHMM = (v) => {
+          if (v == null) return '';
+          const s = String(v).trim();
+          const m = s.match(/^(\d{2}:\d{2})/);   // accepts "06:00:00", "06:00:00+00", etc
+          return m ? m[1] : s;
+        };
+        const TIME_KEYS = ['day_start','day_end','night_start','night_end','sat_start','sat_end','sun_start','sun_end','bh_start','bh_end'];
+        TIME_KEYS.forEach(k => {
+          if (!Object.prototype.hasOwnProperty.call(csMerged, k)) return;
+          const raw = csMerged[k];
+          if (raw === '' || raw == null) return;     // preserve blanks
+          csMerged[k] = toHHMM(raw);
+        });
 
-// Clean + validate HH:MM etc (existing)
-const { cleaned: csCleanRaw, invalid: csInvalid } = normalizeClientSettingsForSave(csMerged);
-
+        // Clean + validate HH:MM etc (existing)
+        const { cleaned: csCleanRaw, invalid: csInvalid } = normalizeClientSettingsForSave(csMerged);
 
         // Ensure we never send UI helper fields to DB
         const csClean = { ...(csCleanRaw || {}) };
         delete csClean.weekly_mode;
         delete csClean.hr_weekly_behaviour;
         delete csClean.__from_ui;
+
+        // ✅ NEW: Ensure manual invoice routing keys are ALWAYS sent (including false),
+        // so backend does not keep stale values when user toggles off.
+        csClean.send_manual_invoices_to_different_email = !!csMerged.send_manual_invoices_to_different_email;
+        csClean.manual_invoices_alt_email_address =
+          csClean.send_manual_invoices_to_different_email
+            ? (String(csMerged.manual_invoices_alt_email_address || '').trim() || null)
+            : null;
+
+        // (keep auto-invoice stable too)
+        csClean.auto_invoice_default = !!csMerged.auto_invoice_default;
 
         if (APILOG) console.log('[OPEN_CLIENT] client_settings (merged→canon→clean)', { csMerged, csClean, csInvalid, hasFormMounted, hasFullBaseline });
         if (csInvalid) { alert('Times must be HH:MM (24-hour).'); return { ok:false }; }
@@ -18992,7 +19005,7 @@ const { cleaned: csCleanRaw, invalid: csInvalid } = normalizeClientSettingsForSa
         }
       }
 
-          // 8) Negative-margin guard
+      // 8) Negative-margin guard
       const erniMultForWindow = await (async ()=> {
         // Pick today's date (Europe/London)
         const todayIso = (() => {
@@ -19086,7 +19099,6 @@ const { cleaned: csCleanRaw, invalid: csInvalid } = normalizeClientSettingsForSa
           if (chg != null && umb  != null && (chg - umb) < 0)            { alert(`Umbrella margin would be negative for ${w.role}${w.band?` / ${w.band}`:''} (${b.toUpperCase()}). Fix before saving.`); return { ok:false }; }
         }
       }
-
 
       // 9) UPDATE existing, POST new (skip disabled)
       const toUpdate = windows.filter(w => w.id && !w.disabled_at_utc);
@@ -19224,6 +19236,7 @@ const { cleaned: csCleanRaw, invalid: csInvalid } = normalizeClientSettingsForSa
     L('skip companion loads (no full.id)');
   }
 }
+
 
 
 
@@ -32535,6 +32548,20 @@ async function createAdditionalManualAdjustmentAndOpen() {
   window.__toast && window.__toast('Additional manual timesheet created.');
 
   // ─────────────────────────────────────────────────────────────
+  // ✅ Update expected_timesheet_id to the new timesheet (so any subsequent guarded writes target the new sheet)
+  // (Even though we close + reopen, set it defensively for consistency.)
+  // ─────────────────────────────────────────────────────────────
+  try {
+    window.modalCtx ||= {};
+    window.modalCtx.data ||= {};
+    window.modalCtx.timesheetMeta ||= {};
+
+    window.modalCtx.data.timesheet_id = newId;
+    window.modalCtx.data.id = newId;
+    window.modalCtx.timesheetMeta.expected_timesheet_id = newId;
+  } catch {}
+
+  // ─────────────────────────────────────────────────────────────
   // Close current modal, then open the new timesheet modal
   // ─────────────────────────────────────────────────────────────
   try { byId('btnCloseModal')?.click(); } catch {}
@@ -38501,31 +38528,126 @@ async function renderClientSettingsUI(settingsObj){
   const syncSoft = ()=> applyFromDOM(true);
 
   let lastAlertAt = 0;
-  const syncValidate = ()=> {
-    const frame = _currentFrame();
-    if (!frame || frame.mode !== 'edit') return;
+ // ✅ NEW helper: validate shift-time rules only on Save (no alert spam)
+const validateShiftTimesOnSave = (settings) => {
+  const s = (settings && typeof settings === 'object') ? settings : {};
+  const errs = [];
 
-    const vals = collectForm('#clientSettingsForm', false);
-    let hadError = false;
+  const hhmm = /^([01]\d|2[0-3]):([0-5]\d)$/;
 
-    TIME_KEYS.forEach(k=>{
-      const v = String(vals[k] ?? '').trim();
-      if (v && !hhmm.test(v)) hadError = true;
-    });
+  // NOTE: “either all blank or all filled” for each *pair*
+  // (day/night) are required; sat/sun/bh are optional but must be complete if any part is provided.
+  const PAIRS = [
+    { a:'day_start',   b:'day_end',   label:'Day' },
+    { a:'night_start', b:'night_end', label:'Night' },
 
-    const w = Number(vals.week_ending_weekday);
-    if (!Number.isInteger(w) || w < 0 || w > 6) hadError = true;
+    { a:'sat_start',   b:'sat_end',   label:'Saturday' },
+    { a:'sun_start',   b:'sun_end',   label:'Sunday' },
+    { a:'bh_start',    b:'bh_end',    label:'Bank Holiday' }
+  ];
 
-    applyFromDOM(false);
+  const norm = (v) => {
+    if (v == null) return '';
+    const str = String(v).trim();
+    if (!str) return '';
+    // accept "HH:MM:SS" and normalise to HH:MM for validation
+    const m = str.match(/^(\d{2}:\d{2})/);
+    return m ? m[1] : str;
+  };
 
-    if (hadError) {
-      const now = Date.now();
-      if (now - lastAlertAt > 400) {
-        alert('Please fix invalid values (times must be HH:MM, week ending must be 0–6).');
-        lastAlertAt = now;
+  const isFilled = (v) => !!norm(v);
+  const isValidTime = (v) => {
+    const t = norm(v);
+    if (!t) return true; // blank is allowed at this stage
+    return hhmm.test(t);
+  };
+
+  for (const p of PAIRS) {
+    const a = norm(s[p.a]);
+    const b = norm(s[p.b]);
+
+    const aFilled = !!a;
+    const bFilled = !!b;
+
+    // If one is filled, both must be filled
+    if ((aFilled && !bFilled) || (!aFilled && bFilled)) {
+      errs.push(`${p.label} times must be either both blank or both filled.`);
+      continue;
+    }
+
+    // If provided, must be valid HH:MM
+    if (aFilled && !hhmm.test(a)) errs.push(`${p.label} start time must be HH:MM.`);
+    if (bFilled && !hhmm.test(b)) errs.push(`${p.label} end time must be HH:MM.`);
+  }
+
+  // Week ending weekday (0..6)
+  // NOTE: allow blank/null only if your system supports “unset”; otherwise enforce required.
+  if (Object.prototype.hasOwnProperty.call(s, 'week_ending_weekday')) {
+    const raw = s.week_ending_weekday;
+    if (!(raw === '' || raw === null || raw === undefined)) {
+      const w = Number(raw);
+      if (!Number.isInteger(w) || w < 0 || w > 6) errs.push('Week ending weekday must be 0–6.');
+    }
+  }
+
+  return errs;
+};
+
+
+// ✅ UPDATED: syncValidate no longer alerts; it only applies/stages state and optionally highlights fields
+const syncValidate = ()=> {
+  const frame = _currentFrame();
+  if (!frame || frame.mode !== 'edit') return;
+
+  const vals = collectForm('#clientSettingsForm', false);
+
+  // Keep existing behaviour: stage into modal state
+  applyFromDOM(false);
+
+  // ✅ No alerts here. Optional: live UI hinting/highlight only.
+  // If you don’t want any live UI effects, you can remove this block entirely.
+  try {
+    const errs = validateShiftTimesOnSave(vals);
+
+    // Simple highlight: mark inputs with data-time-field="1" red when invalid
+    // (This is optional UX; no modal spam.)
+    const form = document.querySelector('#clientSettingsForm');
+    if (form) {
+      // Clear old markers
+      form.querySelectorAll('[data-time-field="1"]').forEach(el => {
+        el.classList.remove('input-invalid');
+        el.removeAttribute('title');
+      });
+
+      // Mark invalid times specifically
+      const hhmm = /^([01]\d|2[0-3]):([0-5]\d)$/;
+      const TIME_KEYS = ['day_start','day_end','night_start','night_end','sat_start','sat_end','sun_start','sun_end','bh_start','bh_end'];
+
+      TIME_KEYS.forEach(k => {
+        const el = form.querySelector(`[name="${k}"]`);
+        if (!el) return;
+
+        const raw = String(vals[k] ?? '').trim();
+        if (!raw) return;
+
+        const m = raw.match(/^(\d{2}:\d{2})/);
+        const hh = m ? m[1] : raw;
+
+        if (!hhmm.test(hh)) {
+          el.classList.add('input-invalid');
+          el.setAttribute('title', 'Invalid time (HH:MM)');
+        }
+      });
+
+      // Show a small inline hint if errors exist
+      const hint = form.querySelector('[data-settings-validate-hint="1"]');
+      if (hint) {
+        hint.style.display = errs.length ? '' : 'none';
+        hint.textContent = errs.length ? 'Some fields are invalid. Fix before Save.' : '';
       }
     }
-  };
+  } catch {}
+};
 
   // ✅ Wire clear-to-global button
   const btnClear = root.querySelector('#btnClearClientShiftTimes');
@@ -43907,6 +44029,7 @@ function getTsLoggers(ns) {
   };
 }
 
+
 function normaliseTimesheetCtx(ctx) {
   const baseCtx = ctx || {};
   const mc = window.modalCtx || {};
@@ -43981,7 +44104,10 @@ function normaliseTimesheetCtx(ctx) {
 
       // ✅ Expenses always present (stable shape)
       expensesDraft: null,
-      expensesBaseline: null
+      expensesBaseline: null,
+
+      // ✅ internal marker to avoid re-seeding on every render
+      __expensesSeededFromTsfinCols: false
     };
   } else {
     if (!mc.timesheetState.additionalRates || typeof mc.timesheetState.additionalRates !== 'object') {
@@ -44011,6 +44137,9 @@ function normaliseTimesheetCtx(ctx) {
     if (!mc.timesheetState.expensesBaseline || typeof mc.timesheetState.expensesBaseline !== 'object') {
       mc.timesheetState.expensesBaseline = null;
     }
+    if (typeof mc.timesheetState.__expensesSeededFromTsfinCols !== 'boolean') {
+      mc.timesheetState.__expensesSeededFromTsfinCols = false;
+    }
   }
 
   const state = mc.timesheetState;
@@ -44021,19 +44150,14 @@ function normaliseTimesheetCtx(ctx) {
   if (!mc.timesheetRelated) mc.timesheetRelated = related;
 
   // ─────────────────────────────────────────────────────────────
-  // ✅ Expenses draft/baseline (always present; TSFIN-only population)
+  // ✅ Expenses draft/baseline
+  // - Amounts are seeded ONLY from TSFIN numeric columns
+  // - expenses_description is treated as notes/meta only (optional)
+  // - Backward-compat amounts-from-JSON is NOT used (per your instruction)
   // ─────────────────────────────────────────────────────────────
   const tsfinLocal = (details && details.tsfin && typeof details.tsfin === 'object') ? details.tsfin : null;
 
-  const _parseExpenseDesc = (desc) => {
-    try {
-      if (!desc) return null;
-      if (typeof desc === 'object') return desc;
-      if (typeof desc === 'string') return JSON.parse(desc);
-    } catch {}
-    return null;
-  };
-
+  // Stable draft shape used by UI
   const defaultDraft = {
     mileage_units: 0,
     travel_pay: 0,
@@ -44041,47 +44165,116 @@ function normaliseTimesheetCtx(ctx) {
     accommodation_pay: 0,
     accommodation_charge: 0,
     other_pay: 0,
-    other_charge: 0
+    other_charge: 0,
+
+    // optional notes/meta (safe even if UI doesn't render it yet)
+    note: ''
   };
 
-  let draft = { ...defaultDraft };
+  const num0 = (v) => {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : 0;
+  };
 
-  if (tsfinLocal) {
-    const expObj = _parseExpenseDesc(tsfinLocal.expenses_description);
+  const extractNote = (desc) => {
+    // notes/meta only; do NOT interpret legacy JSON as amounts
+    if (desc == null) return '';
+    if (typeof desc === 'string') {
+      const s = desc.trim();
+      if (!s) return '';
+      // if it's JSON, only accept {note} / {notes}; otherwise treat as plain text
+      try {
+        const j = JSON.parse(s);
+        if (j && typeof j === 'object') {
+          const n1 = (typeof j.note === 'string') ? j.note.trim() : '';
+          const n2 = (!n1 && typeof j.notes === 'string') ? j.notes.trim() : '';
+          return n1 || n2 || '';
+        }
+      } catch {}
+      return s;
+    }
+    if (typeof desc === 'object') {
+      const n1 = (typeof desc.note === 'string') ? desc.note.trim() : '';
+      const n2 = (!n1 && typeof desc.notes === 'string') ? desc.notes.trim() : '';
+      return n1 || n2 || '';
+    }
+    return '';
+  };
 
-    const expTravel = (expObj && typeof expObj.travel === 'object' && expObj.travel) ? expObj.travel : {};
-    const expAccom  = (expObj && typeof expObj.accommodation === 'object' && expObj.accommodation) ? expObj.accommodation : {};
-    const expOther  = (expObj && typeof expObj.other === 'object' && expObj.other) ? expObj.other : {};
+  // Draft derived from TSFIN numeric columns (canonical source)
+  const draftFromTsfinCols = (() => {
+    if (!tsfinLocal) return { ...defaultDraft };
 
-    draft = {
-      mileage_units: Number(tsfinLocal.mileage_units ?? 0) || 0,
+    return {
+      mileage_units: num0(tsfinLocal.mileage_units ?? 0),
 
-      travel_pay: Number(expTravel.pay ?? 0) || 0,
-      travel_charge: Number(expTravel.charge ?? 0) || 0,
+      // ✅ NEW canonical TSFIN columns
+      travel_pay: num0(tsfinLocal.travel_pay_ex_vat ?? 0),
+      travel_charge: num0(tsfinLocal.travel_charge_ex_vat ?? 0),
 
-      accommodation_pay: Number(expAccom.pay ?? 0) || 0,
-      accommodation_charge: Number(expAccom.charge ?? 0) || 0,
+      accommodation_pay: num0(tsfinLocal.accommodation_pay_ex_vat ?? 0),
+      accommodation_charge: num0(tsfinLocal.accommodation_charge_ex_vat ?? 0),
 
-      other_pay: Number(expOther.pay ?? 0) || 0,
-      other_charge: Number(expOther.charge ?? 0) || 0
+      other_pay: num0(tsfinLocal.other_pay_ex_vat ?? 0),
+      other_charge: num0(tsfinLocal.other_charge_ex_vat ?? 0),
+
+      // notes/meta only
+      note: extractNote(tsfinLocal.expenses_description)
     };
-  }
+  })();
 
-  // Always ensure draft exists
+  // Helper: compare only the canonical numeric fields (ignore note)
+  const sameCoreNumbers = (a, b) => {
+    const keys = [
+      'mileage_units',
+      'travel_pay','travel_charge',
+      'accommodation_pay','accommodation_charge',
+      'other_pay','other_charge'
+    ];
+    for (const k of keys) {
+      if (num0(a?.[k]) !== num0(b?.[k])) return false;
+    }
+    return true;
+  };
+
+  // Seed/migrate state.expensesDraft + baseline:
+  // - If missing => seed from TSFIN columns
+  // - If present but untouched (draft == baseline) AND not yet seeded-from-cols => migrate to TSFIN cols
   if (!state.expensesDraft || typeof state.expensesDraft !== 'object') {
-    state.expensesDraft = JSON.parse(JSON.stringify(draft));
+    state.expensesDraft = JSON.parse(JSON.stringify(draftFromTsfinCols));
+    state.__expensesSeededFromTsfinCols = true;
   } else {
-    // Preserve user edits; ensure keys exist
+    // Ensure required keys exist (and keep any user-added keys)
     for (const k of Object.keys(defaultDraft)) {
       if (!Object.prototype.hasOwnProperty.call(state.expensesDraft, k)) {
         state.expensesDraft[k] = defaultDraft[k];
       }
     }
+
+    // One-time migration if the existing draft looks like an initial seed (not edited)
+    if (
+      tsfinLocal &&
+      state.expensesBaseline &&
+      typeof state.expensesBaseline === 'object' &&
+      !state.__expensesSeededFromTsfinCols &&
+      sameCoreNumbers(state.expensesDraft, state.expensesBaseline)
+    ) {
+      state.expensesDraft = JSON.parse(JSON.stringify(draftFromTsfinCols));
+      state.expensesBaseline = JSON.parse(JSON.stringify(draftFromTsfinCols));
+      state.__expensesSeededFromTsfinCols = true;
+    }
   }
 
-  // Baseline (for save diff) — only seed if missing
+  // Baseline (for save diff) — seed if missing
   if (!state.expensesBaseline || typeof state.expensesBaseline !== 'object') {
     state.expensesBaseline = JSON.parse(JSON.stringify(state.expensesDraft));
+  } else {
+    // Ensure required keys exist in baseline too
+    for (const k of Object.keys(defaultDraft)) {
+      if (!Object.prototype.hasOwnProperty.call(state.expensesBaseline, k)) {
+        state.expensesBaseline[k] = defaultDraft[k];
+      }
+    }
   }
 
   return { row, details, related, state };
@@ -44113,7 +44306,8 @@ function renderTimesheetExpensesTab(ctx) {
         mileage_units: 0,
         travel_pay: 0, travel_charge: 0,
         accommodation_pay: 0, accommodation_charge: 0,
-        other_pay: 0, other_charge: 0
+        other_pay: 0, other_charge: 0,
+        note: ''
       };
 
   const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
@@ -44146,6 +44340,23 @@ function renderTimesheetExpensesTab(ctx) {
 
   const totalPay = round2(mileagePay + travelPay + accomPay + otherPay);
   const totalChg = round2(mileageChg + travelChg + accomChg + otherChg);
+
+  // Evidence requirements (UX guidance only; hard enforcement happens on Save)
+  const needsMileageEvidence = mileageUnits > 0;
+  const needsTravelEvidence  = travelChg > 0;
+  const needsAccomEvidence   = accomChg > 0;
+  const needsOtherEvidence   = otherChg > 0;
+
+  const evidenceLines = [];
+  if (needsMileageEvidence) evidenceLines.push('• Mileage requires evidence kind MILEAGE (when units > 0).');
+  if (needsTravelEvidence)  evidenceLines.push('• Travel requires evidence kind TRAVEL (when charge > £0.00).');
+  if (needsAccomEvidence)   evidenceLines.push('• Accommodation requires evidence kind ACCOMMODATION (when charge > £0.00).');
+  if (needsOtherEvidence)   evidenceLines.push('• Other requires evidence kind OTHER (when charge > £0.00).');
+
+  const evidenceHint =
+    evidenceLines.length
+      ? `<div class="mini" style="margin-top:8px;color:rgba(255,200,120,0.95)">${evidenceLines.join('<br/>')}</div>`
+      : `<div class="mini" style="margin-top:8px;color:rgba(255,255,255,0.7)">Tip: upload receipts in the Evidence tab. Evidence is required only when you claim mileage/charges.</div>`;
 
   if (!enabled) {
     const reason =
@@ -44182,6 +44393,8 @@ function renderTimesheetExpensesTab(ctx) {
   const lockHint = locked
     ? `<div class="mini" style="margin-top:8px;color:rgba(255,200,120,0.95)">This timesheet is locked (paid or invoiced). Expenses are read-only.</div>`
     : ``;
+
+  const noteVal = String(draft.note ?? '').trim();
 
   return `
     <div class="tabc">
@@ -44290,14 +44503,32 @@ function renderTimesheetExpensesTab(ctx) {
 
         <div class="row" style="grid-column:1/-1;margin-top:10px">
           <div class="mini" style="color:rgba(255,255,255,0.7)">
-            Note: Expense evidence is required when Charge &gt; £0.00 (per TSFIN constraints).
+            Notes (optional). Notes do not affect totals or invoice maths.
           </div>
+        </div>
+
+        <div class="row" style="grid-column:1/-1;margin-top:6px">
+          <textarea
+            class="input"
+            style="width:100%;min-height:90px;resize:vertical"
+            name="exp_note"
+            placeholder="Add any notes about these expenses (optional)…"
+            data-exp-field="note"
+            ${ro}
+            ${roStyle}
+          >${noteVal}</textarea>
+        </div>
+
+        <div class="row" style="grid-column:1/-1;margin-top:10px">
+          <div class="mini" style="color:rgba(255,255,255,0.7)">
+            Note: Evidence enforcement happens on Save. If required evidence is missing, Save will fail with an “Evidence required” message and you should upload receipts in the Evidence tab.
+          </div>
+          ${evidenceHint}
         </div>
       </div>
     </div>
   `;
 }
-
 
 
 function renderTimesheetLinesTab(ctx) {
@@ -46164,6 +46395,7 @@ function computeTimesheetProcessingState(details, row) {
 
   return { key: 'UNPROCESSED', label: 'Unprocessed' };
 }
+
 async function openTimesheetEvidenceViewerExisting(evidenceItem) {
   const { LOGM, L, GC, GE } = getTsLoggers('[TS][EVIDENCE][VIEWER]');
   GC('openTimesheetEvidenceViewerExisting');
@@ -47093,11 +47325,40 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
 
   const title = `Evidence ${String(tsId).slice(0, 8)}…`;
 
-  const OPTIONS = ['Timesheet', 'Mileage', 'Accommodation', 'Expenses'];
-  const kindTrim = String(kind || '').trim();
-  const kindLower = kindTrim.toLowerCase();
+  // ✅ Canonical evidence type options (UI labels)
+  // NOTE: "Other" is allowed, but does NOT satisfy invoice readiness unless it maps to a canonical kind.
+  const OPTIONS = ['Timesheet', 'Mileage', 'Travel', 'Accommodation', 'Other'];
 
-  const matchOpt = OPTIONS.find(o => o.toLowerCase() === kindLower) || null;
+  // ✅ Map canonical stored kinds to UI labels
+  const kindTrim = String(kind || '').trim();
+  const kindUpper = kindTrim.toUpperCase();
+
+  const kindToUi = (k) => {
+    const u = String(k || '').trim().toUpperCase();
+    if (u === 'TIMESHEET') return 'Timesheet';
+    if (u === 'MILEAGE') return 'Mileage';
+    if (u === 'TRAVEL') return 'Travel';
+    if (u === 'ACCOMMODATION') return 'Accommodation';
+    if (u === 'OTHER') return 'Other';
+    return null; // unknown => Other + free text
+  };
+
+  const uiToKind = (label, otherText) => {
+    const v = String(label || '').trim().toUpperCase();
+
+    if (v === 'TIMESHEET') return 'TIMESHEET';
+    if (v === 'MILEAGE') return 'MILEAGE';
+    if (v === 'TRAVEL') return 'TRAVEL';
+    if (v === 'ACCOMMODATION') return 'ACCOMMODATION';
+    if (v === 'OTHER') return 'OTHER';
+
+    // If "Other" in the select, allow free-text value but it will not satisfy gating.
+    // Keep it stable; backend will uppercase it.
+    const txt = String(otherText || '').trim();
+    return txt || 'OTHER';
+  };
+
+  const matchOpt = kindToUi(kindUpper);
   const initialSelect = matchOpt ? matchOpt : 'Other';
   const initialOther  = matchOpt ? '' : kindTrim;
 
@@ -47112,8 +47373,8 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
         >
           <option value="Timesheet" ${initialSelect === 'Timesheet' ? 'selected' : ''}>Timesheet</option>
           <option value="Mileage" ${initialSelect === 'Mileage' ? 'selected' : ''}>Mileage</option>
+          <option value="Travel" ${initialSelect === 'Travel' ? 'selected' : ''}>Travel</option>
           <option value="Accommodation" ${initialSelect === 'Accommodation' ? 'selected' : ''}>Accommodation</option>
-          <option value="Expenses" ${initialSelect === 'Expenses' ? 'selected' : ''}>Expenses</option>
           <option value="Other" ${initialSelect === 'Other' ? 'selected' : ''}>Other</option>
         </select>
 
@@ -47126,6 +47387,10 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
           value="${escapeHtml(initialOther)}"
         />
         <span class="mini" style="opacity:.85;">Change type then click Save.</span>
+        <div class="mini" style="margin-top:4px;opacity:.75;">
+          Only <strong>Timesheet / Mileage / Travel / Accommodation / Other</strong> satisfy invoice readiness checks.
+          Free-text types are allowed for labelling but won’t satisfy evidence requirements unless mapped to one of those kinds.
+        </div>
       </div>
     </div>
   ` : `
@@ -47234,17 +47499,9 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
       const other = document.getElementById(otherId);
 
       const selVal = sel ? String(sel.value || '').trim() : '';
-      let newKind = selVal;
+      const otherVal = other ? String(other.value || '').trim() : '';
 
-      if (selVal.toLowerCase() === 'other') {
-        const txt = other ? String(other.value || '').trim() : '';
-        if (!txt) {
-          alert('Please enter an evidence type.');
-          GE();
-          return { ok: false };
-        }
-        newKind = txt;
-      }
+      let newKind = uiToKind(selVal, otherVal);
 
       if (!newKind) {
         alert('Please select an evidence type.');
@@ -47252,7 +47509,27 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
         return { ok: false };
       }
 
-      if (String(newKind) === String(kindTrim)) {
+      // Canonicalise (backend also normalises; do it here for correctness / clarity)
+      newKind = String(newKind || '').trim().toUpperCase();
+
+      if (!newKind) {
+        alert('Please select an evidence type.');
+        GE();
+        return { ok: false };
+      }
+
+      // If user chose Other, require a value (either "OTHER" or free text)
+      if (String(selVal || '').trim().toLowerCase() === 'other') {
+        if (!otherVal) {
+          // Allow "OTHER" explicitly if user wants canonical OTHER
+          // (But UI requires clarity to prevent accidental blank)
+          alert('Please enter an evidence type (or enter "Other").');
+          GE();
+          return { ok: false };
+        }
+      }
+
+      if (String(newKind) === String(kindTrim).trim().toUpperCase()) {
         GE();
         return { ok: true };
       }
@@ -50177,39 +50454,58 @@ const expensesTabReason = !hasTsForExpenses
           ? 'Expenses are available for Manual or QR timesheets.'
           : ''));
 
-
 // ─────────────────────────────────────────────
 // ✅ Expenses draft seed (derived from TSFIN)
 // (Safe even if tab disabled; keeps state shape stable.)
 // ─────────────────────────────────────────────
-const _parseExpenseDesc = (desc) => {
-  try {
-    if (!desc) return null;
-    if (typeof desc === 'object') return desc;
-    if (typeof desc === 'string') return JSON.parse(desc);
-  } catch {}
-  return null;
-};
 
-const expObj = _parseExpenseDesc(tsfinLocal?.expenses_description);
-const expTravel = (expObj && typeof expObj === 'object' && expObj.travel) ? expObj.travel : {};
-const expAccom  = (expObj && typeof expObj === 'object' && expObj.accommodation) ? expObj.accommodation : {};
-const expOther  = (expObj && typeof expObj === 'object' && expObj.other) ? expObj.other : {};
+// Notes/meta only (do NOT use expenses_description for amounts)
+const _extractExpenseNote = (desc) => {
+  try {
+    if (desc == null) return '';
+    if (typeof desc === 'string') {
+      const s = String(desc || '').trim();
+      if (!s) return '';
+      // If it's JSON, only accept {note}/{notes} as meta
+      try {
+        const j = JSON.parse(s);
+        if (j && typeof j === 'object') {
+          const n1 = (typeof j.note === 'string') ? j.note.trim() : '';
+          const n2 = (!n1 && typeof j.notes === 'string') ? j.notes.trim() : '';
+          return n1 || n2 || '';
+        }
+      } catch {}
+      // Otherwise treat as plain text note
+      return s;
+    }
+    if (typeof desc === 'object') {
+      const n1 = (typeof desc.note === 'string') ? desc.note.trim() : '';
+      const n2 = (!n1 && typeof desc.notes === 'string') ? desc.notes.trim() : '';
+      return n1 || n2 || '';
+    }
+  } catch {}
+  return '';
+};
 
 const expensesDraft = {
   mileage_units: Number(tsfinLocal?.mileage_units ?? 0) || 0,
 
-  travel_pay: Number(expTravel?.pay ?? 0) || 0,
-  travel_charge: Number(expTravel?.charge ?? 0) || 0,
+  // ✅ NEW canonical TSFIN numeric columns (amount carriers)
+  travel_pay: Number(tsfinLocal?.travel_pay_ex_vat ?? 0) || 0,
+  travel_charge: Number(tsfinLocal?.travel_charge_ex_vat ?? 0) || 0,
 
-  accommodation_pay: Number(expAccom?.pay ?? 0) || 0,
-  accommodation_charge: Number(expAccom?.charge ?? 0) || 0,
+  accommodation_pay: Number(tsfinLocal?.accommodation_pay_ex_vat ?? 0) || 0,
+  accommodation_charge: Number(tsfinLocal?.accommodation_charge_ex_vat ?? 0) || 0,
 
-  other_pay: Number(expOther?.pay ?? 0) || 0,
-  other_charge: Number(expOther?.charge ?? 0) || 0
+  other_pay: Number(tsfinLocal?.other_pay_ex_vat ?? 0) || 0,
+  other_charge: Number(tsfinLocal?.other_charge_ex_vat ?? 0) || 0,
+
+  // notes/meta only
+  note: _extractExpenseNote(tsfinLocal?.expenses_description)
 };
 
 const expensesBaseline = JSON.parse(JSON.stringify(expensesDraft));
+
 
 
 
@@ -50769,31 +51065,29 @@ const onSaveTimesheet = async () => {
         if (!date) return;
 
         out[date] ||= [];
-    out[date][idx] ||= { ref:'', start:'', end:'', break_start:'', break_end:'', break_mins:'' };
+        out[date][idx] ||= { ref:'', start:'', end:'', break_start:'', break_end:'', break_mins:'' };
 
+        tr.querySelectorAll('input[data-weekly-field]').forEach(inp => {
+          const f = String(inp.getAttribute('data-weekly-field') || '');
+          if (!f) return;
 
-      tr.querySelectorAll('input[data-weekly-field]').forEach(inp => {
-  const f = String(inp.getAttribute('data-weekly-field') || '');
-  if (!f) return;
+          // ✅ don’t let UI-only mins leak into state via DOM fallback
+          if (
+            f === 'break_mins' &&
+            (inp.dataset.autocalc === '1' || inp.dataset.breaklock === '1')
+          ) {
+            return;
+          }
 
-  // ✅ don’t let UI-only mins leak into state via DOM fallback
-  if (
-    f === 'break_mins' &&
-    (inp.dataset.autocalc === '1' || inp.dataset.breaklock === '1')
-  ) {
-    return;
-  }
-
-  out[date][idx][f] = String(inp.value || '').trim();
-});
+          out[date][idx][f] = String(inp.value || '').trim();
+        });
 
       });
 
       for (const d of Object.keys(out)) {
         const arr = Array.isArray(out[d]) ? out[d] : [];
         for (let i = 0; i < arr.length; i++) {
-     if (!arr[i]) arr[i] = { ref:'', start:'', end:'', break_start:'', break_end:'', break_mins:'' };
-
+          if (!arr[i]) arr[i] = { ref:'', start:'', end:'', break_start:'', break_end:'', break_mins:'' };
         }
         out[d] = arr;
       }
@@ -50803,7 +51097,6 @@ const onSaveTimesheet = async () => {
     }
   };
 
-  
   // ─────────────────────────────────────────────────────────────
   // Context flags
   // ─────────────────────────────────────────────────────────────
@@ -50881,76 +51174,75 @@ const onSaveTimesheet = async () => {
   // Build schedule from lines if we can; otherwise fall back to existing schedule/baseline (no-op safe).
   let scheduleToSave = null;
 
-if (isWeeklyManualContext && weekDays.length && linesByDate) {
-  if (typeof buildWeeklyScheduleFromLinesAndValidate !== 'function') {
-    alert('Internal error: buildWeeklyScheduleFromLinesAndValidate is missing.');
-    GE();
-    return { ok: false };
-  }
-
- const cleanLinesByDate = (() => {
-  const src = (linesByDate && typeof linesByDate === 'object') ? linesByDate : {};
-  const clone = JSON.parse(JSON.stringify(src || {}));
-
-  for (const d of Object.keys(clone)) {
-    const arr = Array.isArray(clone[d]) ? clone[d] : [];
-    for (const ln of arr) {
-      const hasWindow =
-        !!(String(ln?.break_start || '').trim() || String(ln?.break_end || '').trim());
-
-      // ✅ if window mode, mins must NOT be sent/validated as “chosen”
-      if (hasWindow) ln.break_mins = '';
+  if (isWeeklyManualContext && weekDays.length && linesByDate) {
+    if (typeof buildWeeklyScheduleFromLinesAndValidate !== 'function') {
+      alert('Internal error: buildWeeklyScheduleFromLinesAndValidate is missing.');
+      GE();
+      return { ok: false };
     }
-    clone[d] = arr;
-  }
-  return clone;
-})();
 
-const out = buildWeeklyScheduleFromLinesAndValidate(
-  cleanLinesByDate,
-  weekDays,
-  { allowOvernight: true, allowBreakMins: true }
-);
+    const cleanLinesByDate = (() => {
+      const src = (linesByDate && typeof linesByDate === 'object') ? linesByDate : {};
+      const clone = JSON.parse(JSON.stringify(src || {}));
 
+      for (const d of Object.keys(clone)) {
+        const arr = Array.isArray(clone[d]) ? clone[d] : [];
+        for (const ln of arr) {
+          const hasWindow =
+            !!(String(ln?.break_start || '').trim() || String(ln?.break_end || '').trim());
 
-  if (out && out.hasErrors) {
-    st.scheduleHasErrors = true;
-    st.scheduleErrorsByDate = (out.errorsByDate && typeof out.errorsByDate === 'object') ? out.errorsByDate : {};
-
-    try {
-      const fr = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
-      if (fr && fr.entity === 'timesheets') {
-        fr._suppressDirty = true;
-        await fr.setTab('lines');
-        fr._suppressDirty = false;
-        fr._updateButtons && fr._updateButtons();
+          // ✅ if window mode, mins must NOT be sent/validated as “chosen”
+          if (hasWindow) ln.break_mins = '';
+        }
+        clone[d] = arr;
       }
-    } catch {}
+      return clone;
+    })();
 
-    // Build a friendly error list (cap at 12)
-    const flat = [];
-    try {
-      for (const [d, msgs] of Object.entries(st.scheduleErrorsByDate || {})) {
-        (Array.isArray(msgs) ? msgs : []).forEach(m => flat.push(`${d}: ${m}`));
-      }
-    } catch {}
-
-    alert(
-      'Fix these schedule issues first:\n\n' +
-      flat.slice(0, 12).map(x => `- ${x}`).join('\n') +
-      (flat.length > 12 ? `\n\n(and ${flat.length - 12} more)` : '')
+    const out = buildWeeklyScheduleFromLinesAndValidate(
+      cleanLinesByDate,
+      weekDays,
+      { allowOvernight: true, allowBreakMins: true }
     );
 
-    GE();
-    return { ok: false };
+    if (out && out.hasErrors) {
+      st.scheduleHasErrors = true;
+      st.scheduleErrorsByDate = (out.errorsByDate && typeof out.errorsByDate === 'object') ? out.errorsByDate : {};
+
+      try {
+        const fr = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
+        if (fr && fr.entity === 'timesheets') {
+          fr._suppressDirty = true;
+          await fr.setTab('lines');
+          fr._suppressDirty = false;
+          fr._updateButtons && fr._updateButtons();
+        }
+      } catch {}
+
+      // Build a friendly error list (cap at 12)
+      const flat = [];
+      try {
+        for (const [d, msgs] of Object.entries(st.scheduleErrorsByDate || {})) {
+          (Array.isArray(msgs) ? msgs : []).forEach(m => flat.push(`${d}: ${m}`));
+        }
+      } catch {}
+
+      alert(
+        'Fix these schedule issues first:\n\n' +
+        flat.slice(0, 12).map(x => `- ${x}`).join('\n') +
+        (flat.length > 12 ? `\n\n(and ${flat.length - 12} more)` : '')
+      );
+
+      GE();
+      return { ok: false };
+    }
+
+    st.scheduleHasErrors = false;
+    st.scheduleErrorsByDate = {};
+
+    scheduleToSave = Array.isArray(out?.schedule) ? out.schedule : [];
   }
-
-  st.scheduleHasErrors = false;
-  st.scheduleErrorsByDate = {};
-
-  scheduleToSave = Array.isArray(out?.schedule) ? out.schedule : [];
-}
- else if (isWeeklyManualContext) {
+  else if (isWeeklyManualContext) {
     const fallback = normaliseScheduleJson(st.schedule) || baselineSorted;
     scheduleToSave = sortScheduleStable(Array.isArray(fallback) ? fallback : []);
   }
@@ -50963,7 +51255,7 @@ const out = buildWeeklyScheduleFromLinesAndValidate(
     isWeeklyManualContext &&
     !deepEqualJson(sortScheduleStable(st.schedule || []), baselineSorted);
 
-   // Extras diff (weekly + per-day)
+  // Extras diff (weekly + per-day)
   const normExtrasWeek = (extrasMapOrUnitsWeek) => {
     const out = {};
     const src = extrasMapOrUnitsWeek || {};
@@ -51111,6 +51403,33 @@ const out = buildWeeklyScheduleFromLinesAndValidate(
       stableStringify(currentExtrasPerDay) !== stableStringify(stagedExtrasPerDay)
     );
 
+  // ─────────────────────────────────────────────────────────────
+  // ✅ Expenses diff (NEW): compare draft vs baseline (tsfin-seeded)
+  // ─────────────────────────────────────────────────────────────
+  const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+
+  const normExpenses = (x) => {
+    const d = (x && typeof x === 'object') ? x : {};
+    return {
+      mileage_units: Number(d.mileage_units ?? 0) || 0,
+
+      travel_pay: round2(d.travel_pay ?? 0),
+      travel_charge: round2(d.travel_charge ?? 0),
+
+      accommodation_pay: round2(d.accommodation_pay ?? 0),
+      accommodation_charge: round2(d.accommodation_charge ?? 0),
+
+      other_pay: round2(d.other_pay ?? 0),
+      other_charge: round2(d.other_charge ?? 0),
+
+      // ✅ include notes/meta in diff so “note-only” edits are saved
+      note: String(d.note ?? '').trim()
+    };
+  };
+
+  const stagedExpenses   = normExpenses(st.expensesDraft);
+  const baselineExpenses = normExpenses(st.expensesBaseline);
+  const expensesChanged  = stableStringify(stagedExpenses) !== stableStringify(baselineExpenses);
 
   // Daily schedule change detection (unchanged)
   const stagedSchedule   = (st.schedule != null) ? st.schedule : null;
@@ -51133,81 +51452,81 @@ const out = buildWeeklyScheduleFromLinesAndValidate(
 
   const isContentChangeAttempt =
     qrSensitiveChange ||
+    expensesChanged ||
     (det.isSegmentsMode && (hasSegOverrides || hasSegTargets)) ||
     refChanged;
 
   if (lockedNow && isContentChangeAttempt) {
-    alert('This timesheet is locked (invoiced or paid). You cannot change schedule, references, or segments.');
+    alert('This timesheet is locked (invoiced or paid). You cannot change schedule, references, segments, or expenses.');
     GE();
     return { ok: false };
   }
 
-    // ─────────────────────────────────────────────────────────────
+  // ─────────────────────────────────────────────────────────────
   // QR after-save decision (invalidate / manual-only / optionally send new)
   // Only applies when: real TS exists + QR-sensitive content changed + not locked.
   // ─────────────────────────────────────────────────────────────
 
- // ─────────────────────────────────────────────────────────────
-// QR after-save decision (NEW):
-// If QR-sensitive content changed on a real QR-enabled timesheet, we must:
-//  - invalidate any old QR state (backend qr_action='INVALIDATE'), OR
-//  - convert to manual-only (backend qr_action='REVOKE_TO_MANUAL')
-// and optionally send a new QR immediately after save.
-// ─────────────────────────────────────────────────────────────
+  // ─────────────────────────────────────────────────────────────
+  // QR after-save decision (NEW):
+  // If QR-sensitive content changed on a real QR-enabled timesheet, we must:
+  //  - invalidate any old QR state (backend qr_action='INVALIDATE'), OR
+  //  - convert to manual-only (backend qr_action='REVOKE_TO_MANUAL')
+  // and optionally send a new QR immediately after save.
+  // ─────────────────────────────────────────────────────────────
 
-const qrStatusRaw = String(det?.qr_status || tsLocal?.qr_status || '').toUpperCase();
+  const qrStatusRaw = String(det?.qr_status || tsLocal?.qr_status || '').toUpperCase();
 
-let qrAfterSaveAction = null;     // 'SEND_NEW_NOW' | 'SAVE_ONLY_INVALIDATE' | 'CONVERT_TO_MANUAL_ONLY' | null
-let qrActionBackend   = null;     // 'INVALIDATE' | 'REVOKE_TO_MANUAL' | null
-let qrSendNewNow      = false;    // boolean
+  let qrAfterSaveAction = null;     // 'SEND_NEW_NOW' | 'SAVE_ONLY_INVALIDATE' | 'CONVERT_TO_MANUAL_ONLY' | null
+  let qrActionBackend   = null;     // 'INVALIDATE' | 'REVOKE_TO_MANUAL' | null
+  let qrSendNewNow      = false;    // boolean
 
-// Only prompt when:
-// - we have a real timesheet id (not planned week),
-// - QR is active/known on this timesheet,
-// - not locked,
-// - and QR-sensitive content actually changed.
-if (!!tsIdSave && qrStatusRaw && !lockedNow && qrSensitiveChange) {
-  const decision = await openQrAfterSaveModal({
-    context: {
-      timesheet_id: tsIdSave || null,
-      sheet_scope: sheetScopeSave,
-      submission_mode: subModeSave,
-      qr_status: qrStatusRaw
+  // Only prompt when:
+  // - we have a real timesheet id (not planned week),
+  // - QR is active/known on this timesheet,
+  // - not locked,
+  // - and QR-sensitive content actually changed.
+  if (!!tsIdSave && qrStatusRaw && !lockedNow && qrSensitiveChange) {
+    const decision = await openQrAfterSaveModal({
+      context: {
+        timesheet_id: tsIdSave || null,
+        sheet_scope: sheetScopeSave,
+        submission_mode: subModeSave,
+        qr_status: qrStatusRaw
+      }
+    });
+
+    if (!decision || decision.cancelled) {
+      GE();
+      return { ok: false };
     }
-  });
 
-  if (!decision || decision.cancelled) {
-    GE();
-    return { ok: false };
+    qrAfterSaveAction = String(decision.action || '').toUpperCase();
+
+    if (qrAfterSaveAction === 'CONVERT_TO_MANUAL_ONLY') {
+      qrActionBackend = 'REVOKE_TO_MANUAL';
+      qrSendNewNow = false;
+    } else if (qrAfterSaveAction === 'SEND_NEW_NOW') {
+      qrActionBackend = 'INVALIDATE';
+      qrSendNewNow = true;
+    } else if (qrAfterSaveAction === 'SAVE_ONLY_INVALIDATE') {
+      qrActionBackend = 'INVALIDATE';
+      qrSendNewNow = false;
+    } else {
+      alert('Please select an option.');
+      GE();
+      return { ok: false };
+    }
   }
 
-  qrAfterSaveAction = String(decision.action || '').toUpperCase();
-
-  if (qrAfterSaveAction === 'CONVERT_TO_MANUAL_ONLY') {
-    qrActionBackend = 'REVOKE_TO_MANUAL';
-    qrSendNewNow = false;
-  } else if (qrAfterSaveAction === 'SEND_NEW_NOW') {
+  // Forced QR action (legacy trigger from “revoke signed QR & request resubmission” flow)
+  // Treat it as: invalidate + send new now on save.
+  const forced = String(st.__forceQrActionEnum || '').toUpperCase();
+  if (!qrActionBackend && !lockedNow && tsIdSave && forced === 'REISSUE_QR') {
     qrActionBackend = 'INVALIDATE';
     qrSendNewNow = true;
-  } else if (qrAfterSaveAction === 'SAVE_ONLY_INVALIDATE') {
-    qrActionBackend = 'INVALIDATE';
-    qrSendNewNow = false;
-  } else {
-    alert('Please select an option.');
-    GE();
-    return { ok: false };
+    try { st.__forceQrActionEnum = null; } catch {}
   }
-}
-
-// Forced QR action (legacy trigger from “revoke signed QR & request resubmission” flow)
-// Treat it as: invalidate + send new now on save.
-const forced = String(st.__forceQrActionEnum || '').toUpperCase();
-if (!qrActionBackend && !lockedNow && tsIdSave && forced === 'REISSUE_QR') {
-  qrActionBackend = 'INVALIDATE';
-  qrSendNewNow = true;
-  try { st.__forceQrActionEnum = null; } catch {}
-}
-
 
   // Pay-hold / mark-paid staging (unchanged)
   const currentOnHold    = !!tsfinLocal.pay_on_hold;
@@ -51234,6 +51553,9 @@ if (!qrActionBackend && !lockedNow && tsIdSave && forced === 'REISSUE_QR') {
     qrSensitiveChange,
     qrStatusRaw,
 
+    // ✅ NEW: expenses change detection
+    expensesChanged,
+
     // ✅ NEW after-save QR decision fields
     qrAfterSaveAction,
     qrActionBackend,
@@ -51244,7 +51566,6 @@ if (!qrActionBackend && !lockedNow && tsIdSave && forced === 'REISSUE_QR') {
     shouldChangeHold,
     shouldMarkPaid
   });
-
 
   const tasks = [];
 
@@ -51259,17 +51580,14 @@ if (!qrActionBackend && !lockedNow && tsIdSave && forced === 'REISSUE_QR') {
           throw new Error('contractWeekManualDraftUpsert is not defined (required for weekly MANUAL draft save)');
         }
 
-  const payload = {
-  planned_schedule_json: schedulePayload
-};
+        const payload = {
+          planned_schedule_json: schedulePayload
+        };
 
-if (extrasChangedWeekly) payload.additional_units_week = { ...(stagedExtrasWeek || {}) };
-if (extrasChangedWeekly) payload.additional_units_per_day = { ...(stagedExtrasPerDay || {}) };
+        if (extrasChangedWeekly) payload.additional_units_week = { ...(stagedExtrasWeek || {}) };
+        if (extrasChangedWeekly) payload.additional_units_per_day = { ...(stagedExtrasPerDay || {}) };
 
-await contractWeekManualDraftUpsert(weekIdSave, payload);
-
-
-
+        await contractWeekManualDraftUpsert(weekIdSave, payload);
 
         try {
           let contractWeek = null;
@@ -51300,27 +51618,26 @@ await contractWeekManualDraftUpsert(weekIdSave, payload);
 
       const expected = window.modalCtx?.timesheetMeta?.expected_timesheet_id || tsIdSave || null;
 
-   const payload = {
-  expected_timesheet_id: expected,
-  actual_schedule_json: schedulePayload,
+      const payload = {
+        expected_timesheet_id: expected,
+        actual_schedule_json: schedulePayload,
 
-  // ✅ NEW backend operations:
-  //   - 'INVALIDATE'        (clear token/payload/scanned + clear hashes, stay QR-enabled)
-  //   - 'REVOKE_TO_MANUAL'  (convert to manual-only)
-  qr_action: qrActionBackend || null,
+        // ✅ NEW backend operations:
+        //   - 'INVALIDATE'        (clear token/payload/scanned + clear hashes, stay QR-enabled)
+        //   - 'REVOKE_TO_MANUAL'  (convert to manual-only)
+        qr_action: qrActionBackend || null,
 
-  // Keep legacy boolean fields present but only set for manual-only.
-  // (INVALIDATE is controlled solely by qr_action.)
-  issue_qr:         false,
-  reissue_qr:       false,
-  revoke_to_manual: (qrActionBackend === 'REVOKE_TO_MANUAL'),
-  revoke_qr:        (qrActionBackend === 'REVOKE_TO_MANUAL'),
-  disable_qr:       false
-};
+        // Keep legacy boolean fields present but only set for manual-only.
+        // (INVALIDATE is controlled solely by qr_action.)
+        issue_qr:         false,
+        reissue_qr:       false,
+        revoke_to_manual: (qrActionBackend === 'REVOKE_TO_MANUAL'),
+        revoke_qr:        (qrActionBackend === 'REVOKE_TO_MANUAL'),
+        disable_qr:       false
+      };
 
-if (extrasChangedWeekly) payload.additional_units_week = { ...(stagedExtrasWeek || {}) };
-if (extrasChangedWeekly) payload.additional_units_per_day = { ...(stagedExtrasPerDay || {}) };
-
+      if (extrasChangedWeekly) payload.additional_units_week = { ...(stagedExtrasWeek || {}) };
+      if (extrasChangedWeekly) payload.additional_units_per_day = { ...(stagedExtrasPerDay || {}) };
 
       L('weekly manual upsert payload', { weekIdSave, payload });
       const result = await manualUpsertContractWeek(weekIdSave, payload);
@@ -51353,23 +51670,22 @@ if (extrasChangedWeekly) payload.additional_units_per_day = { ...(stagedExtrasPe
   // DAILY manual schedule path (unchanged)
   if (isDailyManualContext && tsIdSave && scheduleChangedDaily) {
     tasks.push(async () => {
- const payload = {
-  schedule_json: st.schedule || null,
+      const payload = {
+        schedule_json: st.schedule || null,
 
-  // ✅ NEW backend operations:
-  //   - 'INVALIDATE'
-  //   - 'REVOKE_TO_MANUAL'
-  qr_action: qrActionBackend || null,
+        // ✅ NEW backend operations:
+        //   - 'INVALIDATE'
+        //   - 'REVOKE_TO_MANUAL'
+        qr_action: qrActionBackend || null,
 
-  // Keep legacy boolean fields but only set for manual-only.
-  // (INVALIDATE is controlled solely by qr_action.)
-  reissue_qr:       false,
-  revoke_to_manual: (qrActionBackend === 'REVOKE_TO_MANUAL'),
-  revoke_qr:        (qrActionBackend === 'REVOKE_TO_MANUAL')
-};
+        // Keep legacy boolean fields but only set for manual-only.
+        // (INVALIDATE is controlled solely by qr_action.)
+        reissue_qr:       false,
+        revoke_to_manual: (qrActionBackend === 'REVOKE_TO_MANUAL'),
+        revoke_qr:        (qrActionBackend === 'REVOKE_TO_MANUAL')
+      };
 
-payload.expected_timesheet_id = window.modalCtx?.timesheetMeta?.expected_timesheet_id || tsIdSave;
-
+      payload.expected_timesheet_id = window.modalCtx?.timesheetMeta?.expected_timesheet_id || tsIdSave;
 
       const upsertRes = await apiPostJson(
         `/api/timesheets/${encodeURIComponent(tsIdSave)}/daily-manual-upsert`,
@@ -51473,30 +51789,180 @@ payload.expected_timesheet_id = window.modalCtx?.timesheetMeta?.expected_timeshe
     });
   }
 
-// ✅ If user chose "Save changes and send a new QR timesheet now":
-// - we already sent qr_action='INVALIDATE' in the save payload
-// - once the save completes (and any rotation/adoption is done), send the QR now.
-if (qrSendNewNow && tsIdSave && !lockedNow) {
-  tasks.push(async () => {
-    const idNow = (window.modalCtx?.data?.timesheet_id || tsIdSave || null);
-    if (!idNow) throw new Error('Timesheet id missing; cannot send QR.');
+  // ─────────────────────────────────────────────────────────────
+  // ✅ Expenses save (NEW)
+  // - ensures expenses-only edits are not a no-op
+  // - triggers backend enforcement (incl. “no evidence” rule) because a real request is made
+  // ─────────────────────────────────────────────────────────────
+  if (expensesChanged && tsIdSave) {
+    tasks.push(async () => {
+      const expected = window.modalCtx?.timesheetMeta?.expected_timesheet_id || tsIdSave;
 
-    // This endpoint will issue a new token, generate the PDF, queue the email,
-    // and set qr_last_sent_* fields (backend enforces resend rules).
-    await resendQrTimesheetEmail(idNow);
+      const d = (window.modalCtx?.timesheetState?.expensesDraft && typeof window.modalCtx.timesheetState.expensesDraft === 'object')
+        ? window.modalCtx.timesheetState.expensesDraft
+        : {};
 
-    // Refresh details so Overview buttons/stage update immediately after the send
-    try {
-      const id2 = (window.modalCtx?.data?.timesheet_id || idNow);
-      if (id2) {
-        const fresh = await fetchTimesheetDetails(id2);
-        window.modalCtx.timesheetDetails = fresh;
+      // Pull current TSFIN rates for mileage so backend gets consistent values (units * rate)
+      const detNow = window.modalCtx?.timesheetDetails || det || {};
+      const finNow = detNow?.tsfin || tsfinLocal || {};
+
+      const mileageUnits = Number(d.mileage_units ?? 0) || 0;
+      const mileagePayRate = Number(finNow?.mileage_pay_rate ?? 0) || 0;
+      const mileageChargeRate = Number(finNow?.mileage_charge_rate ?? 0) || 0;
+
+      const mileagePayEx = round2(mileageUnits * mileagePayRate);
+      const mileageChargeEx = round2(mileageUnits * mileageChargeRate);
+
+      // 1) Patch expense category amounts (TSFIN canonical columns)
+      const payloadExpenses = {
+        expected_timesheet_id: expected,
+        expenses: {
+          travel_pay_ex_vat: round2(d.travel_pay ?? 0),
+          travel_charge_ex_vat: round2(d.travel_charge ?? 0),
+
+          accommodation_pay_ex_vat: round2(d.accommodation_pay ?? 0),
+          accommodation_charge_ex_vat: round2(d.accommodation_charge ?? 0),
+
+          other_pay_ex_vat: round2(d.other_pay ?? 0),
+          other_charge_ex_vat: round2(d.other_charge ?? 0),
+
+          // notes/meta only
+          description: String(d.note ?? '').trim()
+        }
+      };
+
+      // 2) Patch mileage (units + derived amounts + rates)
+      const payloadMileage = {
+        expected_timesheet_id: expected,
+        mileage: {
+          mileage_units: mileageUnits,
+          pay_rate: mileagePayRate,
+          charge_rate: mileageChargeRate,
+          pay_ex_vat: mileagePayEx,
+          charge_ex_vat: mileageChargeEx
+        }
+      };
+
+      // Helper: handle evidence-required errors in a user-friendly way
+      const handleEvidenceRequired = (err) => {
+        const j = (err && err.json && typeof err.json === 'object') ? err.json : null;
+        if (!(err?.status === 400 && j && j.error === 'EVIDENCE_REQUIRED')) return false;
+
+        const missing = Array.isArray(j.missing) ? j.missing : [];
+        const lines = missing.map(m => {
+          const cat = String(m?.category || '').trim();
+          const kind = String(m?.required_kind || '').trim();
+          return `- ${cat || 'Expense'}: upload evidence kind ${kind || 'REQUIRED'}`;
+        });
+
+        alert(
+          'Evidence is required before you can save these expenses:\n\n' +
+          (lines.length ? lines.join('\n') : '- Upload the required evidence in the Evidence tab.') +
+          '\n\nGo to the Evidence tab and upload the correct kind(s), then try Save again.'
+        );
+
+        try {
+          const fr = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
+          if (fr && fr.entity === 'timesheets' && typeof fr.setTab === 'function') {
+            Promise.resolve().then(() => { try { fr.setTab('evidence'); } catch {} });
+          }
+        } catch {}
+
+        return true;
+      };
+
+      // ✅ Use the TSFIN patch endpoints (canonical)
+      //    - /api/tsfin/:timesheet_id/expenses
+      //    - /api/tsfin/:timesheet_id/mileage
+      try {
+        const res1 = await apiPatchJson(
+          `/api/tsfin/${encodeURIComponent(tsIdSave)}/expenses`,
+          payloadExpenses
+        );
+
+        const moved1 =
+          (res1 && (res1.current_timesheet_id || res1.timesheet_id))
+            ? String(res1.current_timesheet_id || res1.timesheet_id)
+            : null;
+
+        if (moved1 && String(moved1) !== String(tsIdSave)) {
+          tsIdSave = moved1;
+          if (window.modalCtx?.data) {
+            window.modalCtx.data.timesheet_id = moved1;
+            window.modalCtx.data.id = moved1;
+          }
+          if (window.modalCtx?.timesheetMeta) window.modalCtx.timesheetMeta.expected_timesheet_id = moved1;
+          try { await refreshTimesheetsSummaryAfterRotation(moved1); } catch {}
+        }
+      } catch (err) {
+        if (handleEvidenceRequired(err)) { try { err.__handled = true; } catch {} }
+        throw err;
       }
-    } catch {}
-  });
-}
 
+      try {
+        const res2 = await apiPatchJson(
+          `/api/tsfin/${encodeURIComponent(tsIdSave)}/mileage`,
+          payloadMileage
+        );
 
+        const moved2 =
+          (res2 && (res2.current_timesheet_id || res2.timesheet_id))
+            ? String(res2.current_timesheet_id || res2.timesheet_id)
+            : null;
+
+        if (moved2 && String(moved2) !== String(tsIdSave)) {
+          tsIdSave = moved2;
+          if (window.modalCtx?.data) {
+            window.modalCtx.data.timesheet_id = moved2;
+            window.modalCtx.data.id = moved2;
+          }
+          if (window.modalCtx?.timesheetMeta) window.modalCtx.timesheetMeta.expected_timesheet_id = moved2;
+          try { await refreshTimesheetsSummaryAfterRotation(moved2); } catch {}
+        }
+      } catch (err) {
+        if (handleEvidenceRequired(err)) { try { err.__handled = true; } catch {} }
+        throw err;
+      }
+
+      // Refresh details so totals + tsfin reflect saved expenses immediately
+      try {
+        const idNow = (window.modalCtx?.data?.timesheet_id || tsIdSave || null);
+        if (idNow) {
+          const fresh = await fetchTimesheetDetails(idNow);
+          window.modalCtx.timesheetDetails = fresh;
+        }
+      } catch {}
+
+      // Advance baseline so subsequent saves don’t re-send unchanged expenses
+      try {
+        window.modalCtx.timesheetState.expensesBaseline =
+          JSON.parse(JSON.stringify(normExpenses(window.modalCtx.timesheetState.expensesDraft)));
+      } catch {}
+    });
+  }
+
+  // ✅ If user chose "Save changes and send a new QR timesheet now":
+  // - we already sent qr_action='INVALIDATE' in the save payload
+  // - once the save completes (and any rotation/adoption is done), send the QR now.
+  if (qrSendNewNow && tsIdSave && !lockedNow) {
+    tasks.push(async () => {
+      const idNow = (window.modalCtx?.data?.timesheet_id || tsIdSave || null);
+      if (!idNow) throw new Error('Timesheet id missing; cannot send QR.');
+
+      // This endpoint will issue a new token, generate the PDF, queue the email,
+      // and set qr_last_sent_* fields (backend enforces resend rules).
+      await resendQrTimesheetEmail(idNow);
+
+      // Refresh details so Overview buttons/stage update immediately after the send
+      try {
+        const id2 = (window.modalCtx?.data?.timesheet_id || idNow);
+        if (id2) {
+          const fresh = await fetchTimesheetDetails(id2);
+          window.modalCtx.timesheetDetails = fresh;
+        }
+      } catch {}
+    });
+  }
 
   if (!tasks.length) {
     L('no staged changes to apply; no-op');
@@ -51509,6 +51975,13 @@ if (qrSendNewNow && tsIdSave && !lockedNow) {
     try {
       await tasks[i]();
     } catch (err) {
+
+      // ✅ Evidence-required errors are already shown to the user; do not show generic failure
+      if (err && err.__handled === true) {
+        GE();
+        return { ok: false };
+      }
+
       try {
         if (typeof tsHandleMoved409Modal === 'function') {
           const handled = await tsHandleMoved409Modal(err, {
@@ -51646,6 +52119,7 @@ if (qrSendNewNow && tsIdSave && !lockedNow) {
   GE();
   return { ok: true, saved: updatedRow };
 };
+
 
 
   
