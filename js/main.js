@@ -27850,6 +27850,45 @@ function canonicalizeClientSettings(input) {
   return cs;
 }
 
+function deriveTimesheetInvoicingDisplay(row) {
+  const r = (row && typeof row === 'object') ? row : {};
+
+  // “Invoiced” indicator (summary rows already carry this today)
+  const lockedInvoiceId =
+    r.locked_by_invoice_id ??
+    r.locked_invoice_id ??
+    null;
+
+  const lockedInvoiceNo =
+    r.locked_by_invoice_number ??
+    r.locked_invoice_number ??
+    null;
+
+  const isInvoiced =
+    !!lockedInvoiceId ||
+    !!lockedInvoiceNo;
+
+  if (!isInvoiced) return null;
+
+  // Requires SQL 2B.1: invoice status joined into the timesheet summary row
+  const lockedStatusRaw =
+    r.locked_invoice_status ??
+    r.locked_invoice_status_text ??
+    r.locked_invoice_status_enum ??
+    null;
+
+  const lockedStatus = String(lockedStatusRaw || '').trim().toUpperCase();
+
+  // Spec: only map when locked_invoice_status exists (no frontend inference)
+  if (!lockedStatus) return null;
+
+  if (lockedStatus === 'ISSUED' || lockedStatus === 'PAID') {
+    return 'INVOICED_ISSUED';
+  }
+
+  return 'INVOICED_NOT_ISSUED';
+}
+
 
 async function openInvoiceModal(row) {
   // ─────────────────────────────────────────────────────────────
@@ -30565,6 +30604,1103 @@ async function openInvoiceBatchGenerateModal() {
     paint();
   }
 }
+
+async function openUserManagementModal() {
+  // ─────────────────────────────────────────────────────────────
+  // User Management (Admin) — Utility modal
+  // Tabs:
+  //  - Users
+  //  - Email Settings (Finance)
+  //
+  // Uses showModal kind "import-summary-*" so:
+  //  - footer Save/Edit hidden
+  //  - inputs/buttons remain enabled even in view mode
+  //
+  // Backend endpoints used:
+  //  - GET    /api/users?q=&role=&is_active=
+  //  - POST   /api/users
+  //  - PATCH  /api/users/:id
+  //  - POST   /api/users/:id/reset-password
+  //  - GET    /api/settings/defaults
+  //  - PUT    /api/settings/defaults
+  // ─────────────────────────────────────────────────────────────
+
+  if (typeof confirmDiscardChangesIfDirty === 'function') {
+    if (!confirmDiscardChangesIfDirty()) return;
+  }
+
+  const byIdLocal = (id) => (typeof byId === 'function' ? byId(id) : document.getElementById(id));
+  const esc = encodeURIComponent;
+
+  const safeJson = async (res) => { try { return await res.json(); } catch { return null; } };
+
+  const escapeHtml = (s) => String(s ?? '')
+    .replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;')
+    .replaceAll('"','&quot;').replaceAll("'","&#39;");
+
+  const strongPasswordOk = (pw) => {
+    const s = String(pw || '');
+    return s.length >= 8 && /[a-z]/.test(s) && /[A-Z]/.test(s) && /[0-9]/.test(s);
+  };
+
+  const parseJsonStrict = (txt, label) => {
+    const raw = String(txt ?? '').trim();
+    if (!raw) return {}; // treat empty as {}
+    let parsed = null;
+    try { parsed = JSON.parse(raw); } catch {
+      throw new Error(`${label} must be valid JSON.`);
+    }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new Error(`${label} must be a JSON object.`);
+    }
+    return parsed;
+  };
+
+  const fmtBoolPill = (on, txtOn='Yes', txtOff='No') => {
+    const cls = on ? 'pill pill-ok' : 'pill pill-warn';
+    const txt = on ? txtOn : txtOff;
+    return `<span class="${cls}">${escapeHtml(txt)}</span>`;
+  };
+
+  const fmtIso = (isoLike) => {
+    if (!isoLike) return '—';
+    // use your existing helpers if available
+    try {
+      if (typeof formatUkTimestampFromUtc === 'function') return formatUkTimestampFromUtc(String(isoLike));
+    } catch {}
+    return String(isoLike);
+  };
+
+  const state = {
+    tab: 'users',
+
+    busy: false,
+    error: '',
+    notice: '',
+
+    users: [],
+    usersLoaded: false,
+    usersLoading: false,
+
+    // client-side filters
+    q: '',
+    role: '',
+    is_active: '',
+
+    // create panel
+    createOpen: false,
+    creating: false,
+    createModel: {
+      email: '',
+      display_name: '',
+      role: 'admin',
+      password: '',
+      email_settings_text: '{}'
+    },
+
+    // edit panel
+    editingUserId: null,
+    savingEdit: false,
+    editModel: {
+      id: '',
+      email: '',
+      display_name: '',
+      role: 'admin',
+      is_active: true,
+      email_settings_text: '{}',
+      new_password: '' // optional
+    },
+
+    // finance settings
+    settingsLoaded: false,
+    settingsLoading: false,
+    savingSettings: false,
+    settings: null, // { finance_email, finance_email_settings, max_attachments_per_email, ... }
+    financeModel: {
+      finance_email: '',
+      finance_email_settings_text: '{}',
+      max_attachments_per_email: '30'
+    }
+  };
+
+  const setError = (msg) => { state.error = String(msg || ''); state.notice = ''; };
+  const setNotice = (msg) => { state.notice = String(msg || ''); state.error = ''; };
+
+  const apiGetUsers = async (paramsObj = {}) => {
+    const qs = new URLSearchParams();
+    if (paramsObj.q) qs.set('q', String(paramsObj.q));
+    if (paramsObj.role) qs.set('role', String(paramsObj.role));
+    if (paramsObj.is_active) qs.set('is_active', String(paramsObj.is_active));
+    const url = API(`/api/users${qs.toString() ? `?${qs.toString()}` : ''}`);
+
+    const res = await authFetch(url);
+    const j = await safeJson(res);
+    if (!res.ok) {
+      const t = await res.text().catch(() => '');
+      const msg = (j && (j.error || j.message)) ? (j.error || j.message) : (t || `Request failed (${res.status})`);
+      throw new Error(String(msg || 'Failed to load users'));
+    }
+    const users = Array.isArray(j?.users) ? j.users : (Array.isArray(j) ? j : []);
+    return users;
+  };
+
+  const apiCreateUser = async (payload) => {
+    const res = await authFetch(API('/api/users'), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(payload || {})
+    });
+    const j = await safeJson(res);
+    if (!res.ok) {
+      const t = await res.text().catch(() => '');
+      const msg = (j && (j.error || j.message)) ? (j.error || j.message) : (t || `Request failed (${res.status})`);
+      throw new Error(String(msg || 'Failed to create user'));
+    }
+    return j;
+  };
+
+  const apiPatchUser = async (userId, patch) => {
+    const res = await authFetch(API(`/api/users/${esc(userId)}`), {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(patch || {})
+    });
+    const j = await safeJson(res);
+    if (!res.ok) {
+      const t = await res.text().catch(() => '');
+      const msg = (j && (j.error || j.message)) ? (j.error || j.message) : (t || `Request failed (${res.status})`);
+      throw new Error(String(msg || 'Failed to update user'));
+    }
+    return j;
+  };
+
+  const apiResetUserPassword = async (userId, newPw) => {
+    const res = await authFetch(API(`/api/users/${esc(userId)}/reset-password`), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ new_password: String(newPw || '') })
+    });
+    const j = await safeJson(res);
+    if (!res.ok) {
+      const t = await res.text().catch(() => '');
+      const msg = (j && (j.error || j.message)) ? (j.error || j.message) : (t || `Request failed (${res.status})`);
+      throw new Error(String(msg || 'Failed to reset password'));
+    }
+    return j;
+  };
+
+  const apiGetSettingsDefaults = async () => {
+    const res = await authFetch(API('/api/settings/defaults'));
+    const j = await safeJson(res);
+    if (!res.ok) {
+      const t = await res.text().catch(() => '');
+      const msg = (j && (j.error || j.message)) ? (j.error || j.message) : (t || `Request failed (${res.status})`);
+      throw new Error(String(msg || 'Failed to load settings'));
+    }
+    // backend returns { settings, finance_windows }
+    return j?.settings || j?.data?.settings || j?.settings_defaults || j || null;
+  };
+
+  const apiPutSettingsDefaults = async (payload) => {
+    const res = await authFetch(API('/api/settings/defaults'), {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(payload || {})
+    });
+    const j = await safeJson(res);
+    if (!res.ok) {
+      const t = await res.text().catch(() => '');
+      const msg = (j && (j.error || j.message)) ? (j.error || j.message) : (t || `Request failed (${res.status})`);
+      throw new Error(String(msg || 'Failed to save settings'));
+    }
+    return j?.settings || j?.data?.settings || j || null;
+  };
+
+  const loadUsers = async () => {
+    state.usersLoading = true;
+    setError('');
+    paint();
+    try {
+      // fetch full list once; filter client-side for fast UX
+      const users = await apiGetUsers({});
+      state.users = Array.isArray(users) ? users : [];
+      state.usersLoaded = true;
+    } finally {
+      state.usersLoading = false;
+      paint();
+    }
+  };
+
+  const loadSettings = async () => {
+    state.settingsLoading = true;
+    setError('');
+    paint();
+    try {
+      const s = await apiGetSettingsDefaults();
+      state.settings = (s && typeof s === 'object') ? s : {};
+
+      const finEmail = (state.settings.finance_email == null) ? '' : String(state.settings.finance_email || '').trim();
+      const finSet   = (state.settings.finance_email_settings && typeof state.settings.finance_email_settings === 'object')
+        ? state.settings.finance_email_settings
+        : {};
+      const maxA = (state.settings.max_attachments_per_email == null) ? 30 : Number(state.settings.max_attachments_per_email);
+
+      state.financeModel.finance_email = finEmail;
+      state.financeModel.finance_email_settings_text = JSON.stringify(finSet || {}, null, 2);
+      state.financeModel.max_attachments_per_email = String(Number.isFinite(maxA) ? Math.trunc(maxA) : 30);
+
+      state.settingsLoaded = true;
+    } finally {
+      state.settingsLoading = false;
+      paint();
+    }
+  };
+
+  const filteredUsers = () => {
+    const q = String(state.q || '').trim().toLowerCase();
+    const role = String(state.role || '').trim().toLowerCase();
+    const isActive = String(state.is_active || '').trim().toLowerCase();
+
+    return (state.users || []).filter(u => {
+      if (!u || typeof u !== 'object') return false;
+
+      if (role) {
+        const r = String(u.role || '').toLowerCase();
+        if (r !== role) return false;
+      }
+
+      if (isActive === 'true' || isActive === 'false') {
+        const want = (isActive === 'true');
+        if (!!u.is_active !== want) return false;
+      }
+
+      if (q) {
+        const email = String(u.email || '').toLowerCase();
+        const dn = String(u.display_name || '').toLowerCase();
+        if (!email.includes(q) && !dn.includes(q)) return false;
+      }
+      return true;
+    });
+  };
+
+  const seedEditModel = (user) => {
+    const u = user || {};
+    state.editModel = {
+      id: String(u.id || ''),
+      email: String(u.email || ''),
+      display_name: String(u.display_name || ''),
+      role: String(u.role || 'admin'),
+      is_active: !!u.is_active,
+      email_settings_text: JSON.stringify((u.email_settings && typeof u.email_settings === 'object') ? u.email_settings : {}, null, 2),
+      new_password: ''
+    };
+  };
+
+  const renderSkeleton = (k) => {
+    state.tab = (k === 'finance') ? 'finance' : 'users';
+
+    return `
+      <div id="userMgmtRoot" style="display:flex;flex-direction:column;gap:10px;min-height:0;" data-tab="${escapeHtml(state.tab)}">
+        <div class="mini" style="opacity:.95">
+          ${
+            state.tab === 'users'
+              ? 'Admin: manage users (create/edit/disable/reset password) and per-user email settings JSON.'
+              : 'Admin: edit global finance email settings (used for finance workflows and attachment bundling).'
+          }
+        </div>
+
+        <div id="userMgmtError" class="mini" style="display:none;color:#ffb4b4;"></div>
+        <div id="userMgmtNotice" class="mini" style="display:none;color:#bbf7d0;"></div>
+
+        <div id="userMgmtBody" style="display:flex;flex-direction:column;gap:10px;min-height:0;"></div>
+      </div>
+    `;
+  };
+
+  const paint = () => {
+    const root = document.getElementById('userMgmtRoot');
+    if (!root) return;
+
+    const tab = String(root.getAttribute('data-tab') || 'users');
+
+    const errEl = document.getElementById('userMgmtError');
+    const okEl  = document.getElementById('userMgmtNotice');
+    const body  = document.getElementById('userMgmtBody');
+
+    if (errEl) {
+      if (state.error) { errEl.style.display = ''; errEl.textContent = state.error; }
+      else { errEl.style.display = 'none'; errEl.textContent = ''; }
+    }
+    if (okEl) {
+      if (state.notice) { okEl.style.display = ''; okEl.textContent = state.notice; }
+      else { okEl.style.display = 'none'; okEl.textContent = ''; }
+    }
+    if (!body) return;
+
+    body.innerHTML = '';
+
+    const mkBtn = (label, onClick, opts = {}) => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'btn mini';
+      b.textContent = label;
+      if (opts.danger) b.style.background = '#5a1d22';
+      if (opts.primary) b.style.background = '#123a66';
+      if (opts.disabled) {
+        b.disabled = true;
+        b.style.opacity = '0.55';
+        b.style.cursor = 'not-allowed';
+      } else {
+        b.addEventListener('click', onClick);
+      }
+      return b;
+    };
+
+    if (tab === 'users') {
+      // ── Controls ───────────────────────────────────────────────
+      const controls = document.createElement('div');
+      controls.className = 'card';
+      controls.style.display = 'flex';
+      controls.style.flexWrap = 'wrap';
+      controls.style.gap = '10px';
+      controls.style.alignItems = 'center';
+
+      const q = document.createElement('input');
+      q.className = 'input';
+      q.placeholder = 'Search users…';
+      q.style.maxWidth = '280px';
+      q.value = String(state.q || '');
+      q.addEventListener('input', () => { state.q = q.value; paint(); });
+
+      const roleSel = document.createElement('select');
+      roleSel.className = 'input';
+      roleSel.style.maxWidth = '170px';
+      roleSel.innerHTML = `
+        <option value="">All roles</option>
+        <option value="admin">admin</option>
+        <option value="user">user</option>
+      `;
+      roleSel.value = String(state.role || '');
+      roleSel.addEventListener('change', () => { state.role = roleSel.value; paint(); });
+
+      const actSel = document.createElement('select');
+      actSel.className = 'input';
+      actSel.style.maxWidth = '190px';
+      actSel.innerHTML = `
+        <option value="">All statuses</option>
+        <option value="true">Active only</option>
+        <option value="false">Inactive only</option>
+      `;
+      actSel.value = String(state.is_active || '');
+      actSel.addEventListener('change', () => { state.is_active = actSel.value; paint(); });
+
+      controls.appendChild(mkBtn('Refresh', async () => {
+        setError('');
+        setNotice('');
+        try { await loadUsers(); setNotice('Users refreshed.'); } catch (e) { setError(e?.message || e); }
+      }, { disabled: state.usersLoading || state.creating || state.savingEdit }));
+
+      controls.appendChild(mkBtn(state.createOpen ? 'Close create' : 'Create user', () => {
+        state.createOpen = !state.createOpen;
+        if (state.createOpen) {
+          state.editingUserId = null;
+        }
+        setError('');
+        setNotice('');
+        paint();
+      }, { primary: true, disabled: state.usersLoading || state.creating || state.savingEdit }));
+
+      controls.appendChild(q);
+      controls.appendChild(roleSel);
+      controls.appendChild(actSel);
+
+      const meta = document.createElement('div');
+      meta.className = 'mini';
+      meta.style.opacity = '0.85';
+      meta.textContent = state.usersLoading
+        ? 'Loading…'
+        : `${filteredUsers().length} shown / ${Array.isArray(state.users) ? state.users.length : 0} total`;
+      controls.appendChild(meta);
+
+      body.appendChild(controls);
+
+      // ── Create panel ───────────────────────────────────────────
+      if (state.createOpen) {
+        const card = document.createElement('div');
+        card.className = 'card';
+
+        const title = document.createElement('div');
+        title.style.fontWeight = '700';
+        title.textContent = 'Create user';
+        card.appendChild(title);
+
+        const grid = document.createElement('div');
+        grid.className = 'form';
+        grid.style.marginTop = '10px';
+
+        const mkRow = (label, inputEl) => {
+          const r = document.createElement('div');
+          r.className = 'row';
+          const lab = document.createElement('label');
+          lab.textContent = label;
+          r.appendChild(lab);
+          r.appendChild(inputEl);
+          return r;
+        };
+
+        const inEmail = document.createElement('input');
+        inEmail.className = 'input';
+        inEmail.placeholder = 'email@domain.com';
+        inEmail.value = state.createModel.email;
+        inEmail.addEventListener('input', () => { state.createModel.email = inEmail.value; });
+
+        const inDN = document.createElement('input');
+        inDN.className = 'input';
+        inDN.placeholder = 'Display name (optional)';
+        inDN.value = state.createModel.display_name;
+        inDN.addEventListener('input', () => { state.createModel.display_name = inDN.value; });
+
+        const inRole = document.createElement('select');
+        inRole.className = 'input';
+        inRole.innerHTML = `
+          <option value="admin">admin</option>
+          <option value="user">user</option>
+        `;
+        inRole.value = String(state.createModel.role || 'admin');
+        inRole.addEventListener('change', () => { state.createModel.role = inRole.value; });
+
+        const inPw = document.createElement('input');
+        inPw.className = 'input';
+        inPw.type = 'password';
+        inPw.placeholder = 'Default password (min 8, upper/lower/digit)';
+        inPw.value = state.createModel.password;
+        inPw.addEventListener('input', () => { state.createModel.password = inPw.value; });
+
+        const inEmailSettings = document.createElement('textarea');
+        inEmailSettings.className = 'input';
+        inEmailSettings.style.minHeight = '120px';
+        inEmailSettings.value = state.createModel.email_settings_text;
+        inEmailSettings.addEventListener('input', () => { state.createModel.email_settings_text = inEmailSettings.value; });
+
+        grid.appendChild(mkRow('Email', inEmail));
+        grid.appendChild(mkRow('Display name', inDN));
+        grid.appendChild(mkRow('Role', inRole));
+        grid.appendChild(mkRow('Default password', inPw));
+
+        const rowJson = document.createElement('div');
+        rowJson.className = 'row';
+        rowJson.style.gridColumn = '1 / -1';
+        const labJson = document.createElement('label');
+        labJson.textContent = 'email_settings (JSON object)';
+        rowJson.appendChild(labJson);
+        rowJson.appendChild(inEmailSettings);
+        grid.appendChild(rowJson);
+
+        card.appendChild(grid);
+
+        const actions = document.createElement('div');
+        actions.style.display = 'flex';
+        actions.style.gap = '8px';
+        actions.style.marginTop = '10px';
+        actions.style.justifyContent = 'flex-end';
+
+        actions.appendChild(mkBtn('Create', async () => {
+          if (state.creating) return;
+
+          setError('');
+          setNotice('');
+
+          const email = String(state.createModel.email || '').trim().toLowerCase();
+          const dn = String(state.createModel.display_name || '').trim();
+          const role = String(state.createModel.role || '').trim().toLowerCase();
+          const pw = String(state.createModel.password || '');
+
+          if (!email) { setError('Email is required.'); paint(); return; }
+          if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { setError('Invalid email address.'); paint(); return; }
+          if (!(role === 'admin' || role === 'user')) { setError('Role must be admin or user.'); paint(); return; }
+
+          if (!pw) { setError('Password is required.'); paint(); return; }
+          if (!strongPasswordOk(pw)) {
+            setError('Password must be at least 8 chars and include upper/lower case and a digit.');
+            paint();
+            return;
+          }
+
+          let emailSettingsObj = {};
+          try {
+            emailSettingsObj = parseJsonStrict(state.createModel.email_settings_text, 'email_settings');
+          } catch (e) {
+            setError(e?.message || e);
+            paint();
+            return;
+          }
+
+          state.creating = true;
+          paint();
+
+          try {
+            const out = await apiCreateUser({
+              email,
+              display_name: dn || null,
+              role,
+              password: pw,
+              email_settings: emailSettingsObj
+            });
+
+            setNotice('User created.');
+            // reset create form (keep open)
+            state.createModel.email = '';
+            state.createModel.display_name = '';
+            state.createModel.role = 'admin';
+            state.createModel.password = '';
+            state.createModel.email_settings_text = '{}';
+
+            await loadUsers();
+          } catch (e) {
+            setError(e?.message || e);
+          } finally {
+            state.creating = false;
+            paint();
+          }
+        }, { primary: true, disabled: state.creating || state.usersLoading || state.savingEdit }));
+
+        card.appendChild(actions);
+        body.appendChild(card);
+      }
+
+      // ── Edit panel ────────────────────────────────────────────
+      if (state.editingUserId) {
+        const u = (state.users || []).find(x => String(x?.id || '') === String(state.editingUserId)) || null;
+
+        const card = document.createElement('div');
+        card.className = 'card';
+
+        const title = document.createElement('div');
+        title.style.fontWeight = '700';
+        title.textContent = `Edit user`;
+        card.appendChild(title);
+
+        const sub = document.createElement('div');
+        sub.className = 'mini';
+        sub.style.opacity = '0.9';
+        sub.textContent = u ? (String(u.email || '') || String(u.id || '')) : String(state.editingUserId);
+        card.appendChild(sub);
+
+        const grid = document.createElement('div');
+        grid.className = 'form';
+        grid.style.marginTop = '10px';
+
+        const mkRow = (label, inputEl) => {
+          const r = document.createElement('div');
+          r.className = 'row';
+          const lab = document.createElement('label');
+          lab.textContent = label;
+          r.appendChild(lab);
+          r.appendChild(inputEl);
+          return r;
+        };
+
+        const inEmail = document.createElement('input');
+        inEmail.className = 'input';
+        inEmail.value = String(state.editModel.email || '');
+        inEmail.addEventListener('input', () => { state.editModel.email = inEmail.value; });
+
+        const inDN = document.createElement('input');
+        inDN.className = 'input';
+        inDN.value = String(state.editModel.display_name || '');
+        inDN.addEventListener('input', () => { state.editModel.display_name = inDN.value; });
+
+        const inRole = document.createElement('select');
+        inRole.className = 'input';
+        inRole.innerHTML = `
+          <option value="admin">admin</option>
+          <option value="user">user</option>
+        `;
+        inRole.value = String(state.editModel.role || 'admin');
+        inRole.addEventListener('change', () => { state.editModel.role = inRole.value; });
+
+        const inActive = document.createElement('select');
+        inActive.className = 'input';
+        inActive.innerHTML = `
+          <option value="true">Active</option>
+          <option value="false">Inactive</option>
+        `;
+        inActive.value = state.editModel.is_active ? 'true' : 'false';
+        inActive.addEventListener('change', () => { state.editModel.is_active = (inActive.value === 'true'); });
+
+        const inEmailSettings = document.createElement('textarea');
+        inEmailSettings.className = 'input';
+        inEmailSettings.style.minHeight = '140px';
+        inEmailSettings.value = String(state.editModel.email_settings_text || '{}');
+        inEmailSettings.addEventListener('input', () => { state.editModel.email_settings_text = inEmailSettings.value; });
+
+        const inNewPw = document.createElement('input');
+        inNewPw.className = 'input';
+        inNewPw.type = 'password';
+        inNewPw.placeholder = 'Set new password (optional)';
+        inNewPw.value = String(state.editModel.new_password || '');
+        inNewPw.addEventListener('input', () => { state.editModel.new_password = inNewPw.value; });
+
+        grid.appendChild(mkRow('Email', inEmail));
+        grid.appendChild(mkRow('Display name', inDN));
+        grid.appendChild(mkRow('Role', inRole));
+        grid.appendChild(mkRow('Status', inActive));
+
+        const rowPw = document.createElement('div');
+        rowPw.className = 'row';
+        rowPw.style.gridColumn = '1 / -1';
+        const labPw = document.createElement('label');
+        labPw.textContent = 'New password (optional)';
+        rowPw.appendChild(labPw);
+        rowPw.appendChild(inNewPw);
+        const hintPw = document.createElement('div');
+        hintPw.className = 'mini';
+        hintPw.style.opacity = '0.85';
+        hintPw.textContent = 'If provided, must be 8+ chars and include upper/lower case and a digit.';
+        rowPw.appendChild(hintPw);
+        grid.appendChild(rowPw);
+
+        const rowJson = document.createElement('div');
+        rowJson.className = 'row';
+        rowJson.style.gridColumn = '1 / -1';
+        const labJson = document.createElement('label');
+        labJson.textContent = 'email_settings (JSON object)';
+        rowJson.appendChild(labJson);
+        rowJson.appendChild(inEmailSettings);
+        grid.appendChild(rowJson);
+
+        card.appendChild(grid);
+
+        const actions = document.createElement('div');
+        actions.style.display = 'flex';
+        actions.style.gap = '8px';
+        actions.style.marginTop = '10px';
+        actions.style.justifyContent = 'space-between';
+        actions.style.flexWrap = 'wrap';
+
+        actions.appendChild(mkBtn('Cancel', () => {
+          state.editingUserId = null;
+          setError('');
+          setNotice('');
+          paint();
+        }, { disabled: state.savingEdit || state.usersLoading || state.creating }));
+
+        const rightActions = document.createElement('div');
+        rightActions.style.display = 'flex';
+        rightActions.style.gap = '8px';
+        rightActions.style.flexWrap = 'wrap';
+
+        rightActions.appendChild(mkBtn('Save changes', async () => {
+          if (state.savingEdit) return;
+
+          setError('');
+          setNotice('');
+
+          const id = String(state.editModel.id || '').trim();
+          if (!id) { setError('User id missing.'); paint(); return; }
+
+          const email = String(state.editModel.email || '').trim().toLowerCase();
+          const dn = String(state.editModel.display_name || '').trim();
+          const role = String(state.editModel.role || '').trim().toLowerCase();
+          const isActive = !!state.editModel.is_active;
+
+          if (!email) { setError('Email is required.'); paint(); return; }
+          if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { setError('Invalid email address.'); paint(); return; }
+          if (!(role === 'admin' || role === 'user')) { setError('Role must be admin or user.'); paint(); return; }
+
+          let emailSettingsObj = {};
+          try {
+            emailSettingsObj = parseJsonStrict(state.editModel.email_settings_text, 'email_settings');
+          } catch (e) {
+            setError(e?.message || e);
+            paint();
+            return;
+          }
+
+          const newPw = String(state.editModel.new_password || '');
+
+          // If password provided, validate client-side too (backend will enforce anyway)
+          if (newPw && !strongPasswordOk(newPw)) {
+            setError('New password must be 8+ chars and include upper/lower case and a digit.');
+            paint();
+            return;
+          }
+
+          state.savingEdit = true;
+          paint();
+
+          try {
+            // 1) Patch user fields
+            await apiPatchUser(id, {
+              email,
+              display_name: dn || null,
+              role,
+              is_active: isActive,
+              email_settings: emailSettingsObj
+            });
+
+            // 2) Optional password reset
+            if (newPw) {
+              await apiResetUserPassword(id, newPw);
+            }
+
+            setNotice(newPw ? 'User updated and password reset.' : 'User updated.');
+            state.editingUserId = null;
+            await loadUsers();
+          } catch (e) {
+            setError(e?.message || e);
+          } finally {
+            state.savingEdit = false;
+            paint();
+          }
+        }, { primary: true, disabled: state.savingEdit || state.usersLoading || state.creating }));
+
+        actions.appendChild(rightActions);
+
+        card.appendChild(actions);
+        body.appendChild(card);
+      }
+
+      // ── Users table ───────────────────────────────────────────
+      const tblCard = document.createElement('div');
+      tblCard.className = 'card';
+
+      const hdr = document.createElement('div');
+      hdr.style.display = 'flex';
+      hdr.style.alignItems = 'center';
+      hdr.style.justifyContent = 'space-between';
+      hdr.style.gap = '10px';
+      hdr.style.flexWrap = 'wrap';
+
+      const t = document.createElement('div');
+      t.style.fontWeight = '700';
+      t.textContent = 'Users';
+      hdr.appendChild(t);
+
+      const hint = document.createElement('div');
+      hint.className = 'mini';
+      hint.style.opacity = '0.85';
+      hint.textContent = 'Edit opens a panel above. Reset password can be done per row.';
+      hdr.appendChild(hint);
+
+      tblCard.appendChild(hdr);
+
+      const wrap = document.createElement('div');
+      wrap.style.marginTop = '10px';
+      wrap.style.maxHeight = '55vh';
+      wrap.style.overflow = 'auto';
+      wrap.style.border = '1px solid var(--line)';
+      wrap.style.borderRadius = '10px';
+
+      const table = document.createElement('table');
+      table.className = 'grid';
+      table.style.margin = '0';
+
+      const users = filteredUsers();
+
+      table.innerHTML = `
+        <thead>
+          <tr>
+            <th>Email</th>
+            <th>Display name</th>
+            <th>Role</th>
+            <th>Active</th>
+            <th>Last login</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${
+            users.length
+              ? users.map(u => {
+                  const id = String(u.id || '');
+                  const email = escapeHtml(u.email || '');
+                  const dn = escapeHtml(u.display_name || '');
+                  const role = escapeHtml(u.role || '');
+                  const active = !!u.is_active;
+                  const last = fmtIso(u.last_login_at_utc);
+
+                  return `
+                    <tr data-uid="${escapeHtml(id)}">
+                      <td>${email}</td>
+                      <td>${dn || '—'}</td>
+                      <td>${role || '—'}</td>
+                      <td>${fmtBoolPill(active, 'Active', 'Inactive')}</td>
+                      <td>${escapeHtml(last)}</td>
+                      <td>
+                        <button type="button" class="btn mini" data-um-act="edit" data-uid="${escapeHtml(id)}">Edit</button>
+                        <button type="button" class="btn mini" data-um-act="reset" data-uid="${escapeHtml(id)}">Reset password</button>
+                      </td>
+                    </tr>
+                  `;
+                }).join('')
+              : `<tr><td colspan="6" class="mini" style="opacity:.85;">${state.usersLoading ? 'Loading…' : 'No users found.'}</td></tr>`
+          }
+        </tbody>
+      `;
+
+      wrap.appendChild(table);
+      tblCard.appendChild(wrap);
+      body.appendChild(tblCard);
+
+      // Wire table action buttons
+      const btns = table.querySelectorAll('button[data-um-act][data-uid]');
+      btns.forEach(b => {
+        if (b.dataset.wired === '1') return;
+        b.dataset.wired = '1';
+
+        b.addEventListener('click', async (ev) => {
+          ev.preventDefault();
+          ev.stopPropagation();
+
+          const act = String(b.getAttribute('data-um-act') || '');
+          const uid = String(b.getAttribute('data-uid') || '').trim();
+          if (!uid) return;
+
+          const user = (state.users || []).find(x => String(x?.id || '') === uid) || null;
+
+          if (act === 'edit') {
+            if (!user) { setError('User not found.'); paint(); return; }
+            state.editingUserId = uid;
+            state.createOpen = false;
+            seedEditModel(user);
+            setError('');
+            setNotice('');
+            paint();
+            return;
+          }
+
+          if (act === 'reset') {
+            if (!user) { setError('User not found.'); paint(); return; }
+            const email = String(user.email || '').trim();
+
+            const pw1 = window.prompt(`Set a new password for ${email}.\n\nMust be 8+ chars and include upper/lower case and a digit.\n\nEnter new password:`, '');
+            if (pw1 == null) return; // cancelled
+            const pw = String(pw1 || '');
+
+            if (!strongPasswordOk(pw)) {
+              alert('Password must be 8+ chars and include upper/lower case and a digit.');
+              return;
+            }
+
+            const ok = window.confirm(`Reset password for ${email}?`);
+            if (!ok) return;
+
+            try {
+              await apiResetUserPassword(uid, pw);
+              setNotice('Password reset.');
+              paint();
+            } catch (e) {
+              setError(e?.message || e);
+              paint();
+            }
+            return;
+          }
+        });
+      });
+
+      return;
+    }
+
+    // ── Finance settings tab ─────────────────────────────────────
+    if (tab === 'finance') {
+      const card = document.createElement('div');
+      card.className = 'card';
+
+      const title = document.createElement('div');
+      title.style.fontWeight = '700';
+      title.textContent = 'Email Settings (Finance)';
+      card.appendChild(title);
+
+      const desc = document.createElement('div');
+      desc.className = 'mini';
+      desc.style.opacity = '0.9';
+      desc.textContent = 'These values are stored on settings_defaults and are used for finance emailing/bundling.';
+      card.appendChild(desc);
+
+      if (state.settingsLoading) {
+        const loading = document.createElement('div');
+        loading.className = 'mini';
+        loading.style.opacity = '0.85';
+        loading.style.marginTop = '10px';
+        loading.textContent = 'Loading…';
+        card.appendChild(loading);
+        body.appendChild(card);
+        return;
+      }
+
+      const form = document.createElement('div');
+      form.className = 'form';
+      form.style.marginTop = '10px';
+
+      const mkRow = (label, inputEl) => {
+        const r = document.createElement('div');
+        r.className = 'row';
+        const lab = document.createElement('label');
+        lab.textContent = label;
+        r.appendChild(lab);
+        r.appendChild(inputEl);
+        return r;
+      };
+
+      const inEmail = document.createElement('input');
+      inEmail.className = 'input';
+      inEmail.placeholder = 'finance@domain.com';
+      inEmail.value = String(state.financeModel.finance_email || '');
+      inEmail.addEventListener('input', () => { state.financeModel.finance_email = inEmail.value; });
+
+      const inMax = document.createElement('input');
+      inMax.className = 'input';
+      inMax.type = 'number';
+      inMax.min = '1';
+      inMax.max = '100';
+      inMax.value = String(state.financeModel.max_attachments_per_email || '30');
+      inMax.addEventListener('input', () => { state.financeModel.max_attachments_per_email = inMax.value; });
+
+      const inJson = document.createElement('textarea');
+      inJson.className = 'input';
+      inJson.style.minHeight = '160px';
+      inJson.value = String(state.financeModel.finance_email_settings_text || '{}');
+      inJson.addEventListener('input', () => { state.financeModel.finance_email_settings_text = inJson.value; });
+
+      form.appendChild(mkRow('finance_email', inEmail));
+      form.appendChild(mkRow('max_attachments_per_email', inMax));
+
+      const rowJson = document.createElement('div');
+      rowJson.className = 'row';
+      rowJson.style.gridColumn = '1 / -1';
+      const labJson = document.createElement('label');
+      labJson.textContent = 'finance_email_settings (JSON object)';
+      rowJson.appendChild(labJson);
+      rowJson.appendChild(inJson);
+      form.appendChild(rowJson);
+
+      card.appendChild(form);
+
+      const actions = document.createElement('div');
+      actions.style.display = 'flex';
+      actions.style.justifyContent = 'flex-end';
+      actions.style.gap = '8px';
+      actions.style.marginTop = '10px';
+
+      actions.appendChild(mkBtn('Save finance settings', async () => {
+        if (state.savingSettings) return;
+
+        setError('');
+        setNotice('');
+
+        const financeEmail = String(state.financeModel.finance_email || '').trim();
+        const maxN = Number(state.financeModel.max_attachments_per_email);
+        const maxV = Number.isFinite(maxN) ? Math.trunc(maxN) : NaN;
+
+        if (!(maxV >= 1 && maxV <= 100)) {
+          setError('max_attachments_per_email must be an integer between 1 and 100.');
+          paint();
+          return;
+        }
+
+        let finSettingsObj = {};
+        try {
+          finSettingsObj = parseJsonStrict(state.financeModel.finance_email_settings_text, 'finance_email_settings');
+        } catch (e) {
+          setError(e?.message || e);
+          paint();
+          return;
+        }
+
+        state.savingSettings = true;
+        paint();
+
+        try {
+          const saved = await apiPutSettingsDefaults({
+            finance_email: financeEmail || null,
+            finance_email_settings: finSettingsObj,
+            max_attachments_per_email: maxV
+          });
+
+          // refresh local state from response (source of truth)
+          state.settings = (saved && typeof saved === 'object') ? saved : state.settings;
+
+          const finEmail2 = (state.settings.finance_email == null) ? '' : String(state.settings.finance_email || '').trim();
+          const finSet2   = (state.settings.finance_email_settings && typeof state.settings.finance_email_settings === 'object')
+            ? state.settings.finance_email_settings
+            : finSettingsObj;
+
+          const max2 = (state.settings.max_attachments_per_email == null) ? maxV : Number(state.settings.max_attachments_per_email);
+
+          state.financeModel.finance_email = finEmail2;
+          state.financeModel.finance_email_settings_text = JSON.stringify(finSet2 || {}, null, 2);
+          state.financeModel.max_attachments_per_email = String(Number.isFinite(max2) ? Math.trunc(max2) : maxV);
+
+          setNotice('Finance settings saved.');
+        } catch (e) {
+          setError(e?.message || e);
+        } finally {
+          state.savingSettings = false;
+          paint();
+        }
+      }, { primary: true, disabled: state.savingSettings || state.settingsLoading }));
+
+      card.appendChild(actions);
+      body.appendChild(card);
+      return;
+    }
+  };
+
+  // Seed modalCtx
+  window.modalCtx = {
+    entity: 'settings',
+    openToken: `user-management:${Date.now()}:${Math.random().toString(36).slice(2)}`,
+    data: {}
+  };
+
+  // Open modal
+  showModal(
+    'User Management',
+    [
+      { key: 'users',   label: 'Users' },
+      { key: 'finance', label: 'Email Settings (Finance)' }
+    ],
+    (k) => renderSkeleton(k),
+    null,
+    true,
+    null,
+    {
+      kind: 'import-summary-user-management',
+      noParentGate: true,
+      onDismiss: () => {
+        try {
+          const ob = window.modalCtx && window.modalCtx.__umObserver;
+          if (ob && typeof ob.disconnect === 'function') ob.disconnect();
+        } catch {}
+      }
+    }
+  );
+
+  // Repaint on tab swaps / rerenders
+  try {
+    const target = byIdLocal('modalBody');
+    if (target) {
+      const ob = new MutationObserver(() => { try { paint(); } catch {} });
+      ob.observe(target, { childList: true, subtree: true });
+      window.modalCtx.__umObserver = ob;
+    }
+  } catch {}
+
+  // Load initial data (users + settings)
+  try {
+    await Promise.all([
+      loadUsers().catch(e => setError(e?.message || e)),
+      loadSettings().catch(e => setError(e?.message || e))
+    ]);
+  } catch {}
+
+  // Initial paint
+  try { paint(); } catch {}
+}
+
+
+
 
 
 // ─────────────────────────────────────────────────────────────────────────────
