@@ -1345,23 +1345,27 @@ async function loadSection() {
     }
   }
 
+  // ✅ Default Invoices filter (only if not already specified)
+  if (currentSection === 'invoices') {
+    if (!st.filters || typeof st.filters !== 'object') st.filters = {};
+    const cur = st.filters.status;
+    const hasStatus =
+      (Array.isArray(cur) && cur.length > 0) ||
+      (typeof cur === 'string' && cur.trim().length > 0);
+    if (!hasStatus) {
+      st.filters.status = ['DRAFT','ON_HOLD','ISSUED','PAID'];
+    }
+  }
+
   // Ensure user grid prefs are loaded once per session (per section).
-  // These prefs come from tms_users.grid_prefs_json if present, else
-  // fall back to DEFAULT_GRID_PREFS on the backend.
   await loadUserGridPrefs(currentSection);
 
-  // Decide whether to use the search endpoints:
-  // - ALWAYS for 'candidates' and 'contracts' (so we hit candidates_summary /
-  //   contracts search and get all derived fields, including job_titles_display)
-  // - For other sections, only if there are filters or an active sort key.
-  //
-  // NOTE: Timesheets is special: it uses listTimesheetsSummary() against
-  // /api/timesheets/summary and does NOT go through the generic /api/search/*
   const hasFilters = !!st.filters && Object.keys(st.filters).length > 0;
   const hasSort    = !!(st.sort && st.sort.key);
 
+  // ✅ ALWAYS use search for candidates + contracts + invoices
   const useSearch =
-    (currentSection === 'candidates' || currentSection === 'contracts')
+    (currentSection === 'candidates' || currentSection === 'contracts' || currentSection === 'invoices')
       ? true
       : (hasFilters || hasSort);
 
@@ -1370,20 +1374,16 @@ async function loadSection() {
     window.__listState[section].pageSize = pageSize;
 
     // Timesheets always go via the summary endpoint (v_timesheets_summary)
-    // using listTimesheetsSummary, not the generic search().
     if (section === 'timesheets') {
       const filters = window.__listState[section].filters || {};
       return await listTimesheetsSummary(filters);
     }
 
     if (useSearch) {
-      // For candidates + contracts this always runs, so candidates come from
-      // /api/search/candidates (candidates_summary) and include job_titles_display.
       return await search(section, window.__listState[section].filters || {});
     } else {
-      // Legacy/simple list endpoints for non-search sections
       switch (section) {
-        case 'candidates': return await listCandidates();   // used only when some other caller asks loadSection with useSearch=false for candidates (not the normal grid path now)
+        case 'candidates': return await listCandidates();
         case 'clients':    return await listClients();
         case 'umbrellas':  return await listUmbrellas();
         case 'settings':   return await getSettings();
@@ -2514,36 +2514,35 @@ function renderTopNav(){
   window.__selection = window.__selection || {};
 
   // helper: common section switch (mirrors original behaviour)
- const switchToSection = (sectionKey) => {
-  if (!confirmDiscardChangesIfDirty()) return;
+  const switchToSection = (sectionKey) => {
+    if (!confirmDiscardChangesIfDirty()) return;
 
-  // ✅ Settings is modal-only: do NOT change the summary section
-  if (sectionKey === 'settings') {
+    // ✅ Settings is modal-only: do NOT change the summary section
+    if (sectionKey === 'settings') {
+      if ((window.__modalStack?.length || 0) > 0 || modalCtx?.entity) {
+        discardAllModalsAndState();
+      }
+      try { openSettings(); } catch (e) { alert('Could not open settings'); }
+      return;
+    }
+
     if ((window.__modalStack?.length || 0) > 0 || modalCtx?.entity) {
       discardAllModalsAndState();
     }
-    try { openSettings(); } catch (e) { alert('Could not open settings'); }
-    return;
-  }
 
-  if ((window.__modalStack?.length || 0) > 0 || modalCtx?.entity) {
-    discardAllModalsAndState();
-  }
+    if (!window.__listState[sectionKey]) {
+      window.__listState[sectionKey] = { page: 1, pageSize: 50, total: null, hasMore: false, filters: null };
+    }
 
-  if (!window.__listState[sectionKey]) {
-    window.__listState[sectionKey] = { page: 1, pageSize: 50, total: null, hasMore: false, filters: null };
-  }
+    // IDs-only selection seed for the new section
+    window.__selection[sectionKey] = window.__selection[sectionKey] || { fingerprint:'', ids:new Set() };
 
-  // IDs-only selection seed for the new section
-  window.__selection[sectionKey] = window.__selection[sectionKey] || { fingerprint:'', ids:new Set() };
+    currentSection   = sectionKey;
+    currentRows      = [];
+    currentSelection = null;
 
-  currentSection   = sectionKey;
-  currentRows      = [];
-  currentSelection = null;
-
-  renderAll();
-};
-
+    renderAll();
+  };
 
   // Helper: close any open settings dropdown
   const closeSettingsMenu = () => {
@@ -2563,8 +2562,129 @@ function renderTopNav(){
   };
   const onEsc = (e) => { if (e.key === 'Escape') closeSettingsMenu(); };
 
+  // Helper: close any open invoices dropdown
+  const closeInvoicesMenu = () => {
+    const m = document.getElementById('__invoicesMenu');
+    if (m) m.remove();
+    const btn = document.querySelector('button.__invoicesCaret');
+    if (btn) btn.classList.remove('active');
+    document.removeEventListener('click', onAnyDocClickInv, true);
+    document.removeEventListener('keydown', onEscInv, true);
+  };
+  const onAnyDocClickInv = (e) => {
+    const menu = document.getElementById('__invoicesMenu');
+    const anchor = document.querySelector('button.__invoicesCaret');
+    if (!menu) return;
+    if (menu.contains(e.target) || anchor?.contains(e.target)) return;
+    closeInvoicesMenu();
+  };
+  const onEscInv = (e) => { if (e.key === 'Escape') closeInvoicesMenu(); };
+
   // Build buttons
   sections.forEach(s => {
+    // ─────────────────────────────────────────────────────────────
+    // INVOICES: split button (main click opens invoices; caret opens batch menu)
+    // ─────────────────────────────────────────────────────────────
+    if (s.key === 'invoices') {
+      const wrap = document.createElement('div');
+      wrap.style.display = 'flex';
+      wrap.style.gap = '6px';
+      wrap.style.alignItems = 'center';
+
+      const main = document.createElement('button');
+      main.innerHTML = `<span class="ico">${s.icon}</span> ${s.label}`;
+      if (s.key === currentSection) main.classList.add('active');
+      main.onclick = () => switchToSection('invoices');
+
+      const caret = document.createElement('button');
+      caret.classList.add('__invoicesCaret');
+      caret.innerHTML = `▾`;
+      caret.title = 'Invoice actions';
+      caret.onclick = (ev) => {
+        ev.preventDefault();
+
+        // toggle
+        const existing = document.getElementById('__invoicesMenu');
+        if (existing) { closeInvoicesMenu(); return; }
+
+        // avoid dual menus
+        try { closeSettingsMenu(); } catch {}
+
+        const m = document.createElement('div');
+        m.id = '__invoicesMenu';
+        m.style.position      = 'absolute';
+        m.style.zIndex        = '1000';
+        m.style.background    = 'var(--panel, #0b1221)';
+        m.style.border        = '1px solid var(--line, #334155)';
+        m.style.borderRadius  = '10px';
+        m.style.boxShadow     = 'var(--shadow, 0 6px 20px rgba(0,0,0,.25))';
+        m.style.padding       = '6px';
+        m.style.minWidth      = '220px';
+        m.style.userSelect    = 'none';
+
+        m.innerHTML = `
+          <button type="button" class="inv-menu-item" data-k="batch-generate"
+                  style="display:flex;gap:8px;align-items:center;width:100%;
+                         background:#0b1427;border:1px solid var(--line);color:#fff;
+                         padding:8px 10px;border-radius:8px;cursor:pointer;margin:4px 0;">
+            🧾 Batch Generate
+          </button>
+          <button type="button" class="inv-menu-item" data-k="batch-issue"
+                  style="display:flex;gap:8px;align-items:center;width:100%;
+                         background:#0b1427;border:1px solid var(--line);color:#fff;
+                         padding:8px 10px;border-radius:8px;cursor:pointer;margin:4px 0;">
+            📤 Batch Issue
+          </button>
+        `;
+
+        document.body.appendChild(m);
+        const r = caret.getBoundingClientRect();
+        m.style.left = `${Math.round(window.scrollX + r.left)}px`;
+        m.style.top  = `${Math.round(window.scrollY + r.bottom + 6)}px`;
+
+        m.addEventListener('click', (e) => {
+          const it = e.target.closest('.inv-menu-item');
+          if (!it) return;
+          const k = it.getAttribute('data-k');
+          closeInvoicesMenu();
+
+          if (!confirmDiscardChangesIfDirty()) return;
+
+          if (k === 'batch-generate') {
+            if (typeof openInvoiceBatchGenerateModal !== 'function') {
+              alert('Batch Generate modal not yet implemented.');
+              return;
+            }
+            openInvoiceBatchGenerateModal();
+            return;
+          }
+
+          if (k === 'batch-issue') {
+            if (typeof openInvoiceBatchIssueModal !== 'function') {
+              alert('Batch Issue modal not yet implemented.');
+              return;
+            }
+            openInvoiceBatchIssueModal();
+            return;
+          }
+        });
+
+        // Close on outside click / Esc
+        setTimeout(() => {
+          document.addEventListener('click', onAnyDocClickInv, true);
+          document.addEventListener('keydown', onEscInv, true);
+        }, 0);
+
+        caret.classList.add('active');
+      };
+
+      wrap.appendChild(main);
+      wrap.appendChild(caret);
+      nav.appendChild(wrap);
+      return;
+    }
+
+    // Normal button for all other sections
     const b = document.createElement('button');
     b.innerHTML = `<span class="ico">${s.icon}</span> ${s.label}`;
     if (s.key === currentSection) b.classList.add('active');
@@ -2591,6 +2711,9 @@ function renderTopNav(){
         // toggle
         const existing = document.getElementById('__settingsMenu');
         if (existing) { closeSettingsMenu(); return; }
+
+        // avoid dual menus
+        try { closeInvoicesMenu(); } catch {}
 
         // Build a light menu styled with your palette
         const m = document.createElement('div');
@@ -2624,6 +2747,12 @@ function renderTopNav(){
                          padding:8px 10px;border-radius:8px;cursor:pointer;margin:4px 0;">
             🏷 Job Titles
           </button>
+          <button type="button" class="menu-item" data-k="user-management"
+                  style="display:flex;gap:8px;align-items:center;width:100%;
+                         background:#0b1427;border:1px solid var(--line);color:#fff;
+                         padding:8px 10px;border-radius:8px;cursor:pointer;margin:4px 0;">
+            👤 User Management
+          </button>
 
           <div style="height:1px;background:var(--line,#334155);margin:8px 4px;"></div>
 
@@ -2648,48 +2777,51 @@ function renderTopNav(){
         m.style.top  = `${Math.round(window.scrollY + r.bottom + 6)}px`;
 
         // Wire actions
-      m.addEventListener('click', (e) => {
-  const it = e.target.closest('.menu-item');
-  if (!it) return;
-  const k = it.getAttribute('data-k');
-  closeSettingsMenu();
+        m.addEventListener('click', (e) => {
+          const it = e.target.closest('.menu-item');
+          if (!it) return;
+          const k = it.getAttribute('data-k');
+          closeSettingsMenu();
 
-  if (k === 'global') {
-    // ✅ Open global settings modal WITHOUT switching the summary section
-    if (!confirmDiscardChangesIfDirty()) return;
-    try { openSettings(); } catch (err) { alert('Could not open settings'); }
-    return;
+          if (k === 'global') {
+            // ✅ Open global settings modal WITHOUT switching the summary section
+            if (!confirmDiscardChangesIfDirty()) return;
+            try { openSettings(); } catch (err) { alert('Could not open settings'); }
+            return;
 
-  } else if (k === 'rates') {
-    // Preset Rates manager (parent modal)
-    if (!confirmDiscardChangesIfDirty()) return;
-    openPresetRatesManager();
+          } else if (k === 'rates') {
+            if (!confirmDiscardChangesIfDirty()) return;
+            openPresetRatesManager();
 
-  } else if (k === 'job-titles') {
-    // New Job Titles manager (side-panel modal)
-    if (!confirmDiscardChangesIfDirty()) return;
-    openJobTitleSettingsModal();
+          } else if (k === 'job-titles') {
+            if (!confirmDiscardChangesIfDirty()) return;
+            openJobTitleSettingsModal();
 
-  } else if (k === 'band-mappings') {
-    // NEW: Weekly band mappings (assignment/grade ↔ contract band)
-    if (!confirmDiscardChangesIfDirty()) return;
-    if (typeof openAssignmentBandMappingsModal !== 'function') {
-      alert('Band mappings modal not yet implemented.');
-      return;
-    }
-    openAssignmentBandMappingsModal();
+          } else if (k === 'user-management') {
+            if (!confirmDiscardChangesIfDirty()) return;
+            if (typeof openUserManagementModal !== 'function') {
+              alert('User Management modal not yet implemented.');
+              return;
+            }
+            openUserManagementModal();
 
-  } else if (k === 'import-col-aliases') {
-    // NEW: Import column aliases (header name mapping)
-    if (!confirmDiscardChangesIfDirty()) return;
-    if (typeof openImportColumnAliasesModal !== 'function') {
-      alert('Import column aliases modal not yet implemented.');
-      return;
-    }
-    openImportColumnAliasesModal();
-  }
-});
+          } else if (k === 'band-mappings') {
+            if (!confirmDiscardChangesIfDirty()) return;
+            if (typeof openAssignmentBandMappingsModal !== 'function') {
+              alert('Band mappings modal not yet implemented.');
+              return;
+            }
+            openAssignmentBandMappingsModal();
 
+          } else if (k === 'import-col-aliases') {
+            if (!confirmDiscardChangesIfDirty()) return;
+            if (typeof openImportColumnAliasesModal !== 'function') {
+              alert('Import column aliases modal not yet implemented.');
+              return;
+            }
+            openImportColumnAliasesModal();
+          }
+        });
 
         // Close on outside click / Esc
         setTimeout(() => {
@@ -4788,7 +4920,7 @@ async function search(section, filters = {}) {
     clients:'/api/search/clients',
     umbrellas:'/api/search/umbrellas',
     timesheets:'/api/search/timesheets',
-    invoices:'/api/search/invoices'
+    invoices:'/api/invoices' // ✅ switched from /api/search/invoices
   };
 
   // Contracts use /api/contracts (admin list)
@@ -4799,7 +4931,7 @@ async function search(section, filters = {}) {
   const url = qs ? `${p}?${qs}` : p;
 
   const r = await authFetch(API(url));
-  const rows = toList(r);
+  const rows = await toList(r);
 
   // update state
   st.filters = { ...(filters || {}) };
@@ -11647,7 +11779,10 @@ function buildSearchQS(section, filters = {}) {
     add('page_size', st.pageSize || 50);
     add('include_count', 'true');
   } else {
+    // ✅ ALL is normally handled by loadSection() paging. If someone calls search() directly while ALL,
+    // request a safe high cap; backends can clamp.
     add('page', 1);
+    add('page_size', 10000);
     add('include_count', 'true');
   }
 
@@ -11692,7 +11827,6 @@ function buildSearchQS(section, filters = {}) {
       add('phone', phone);
       add('pay_method', pay_method); // PAYE / UMBRELLA / BLANK
 
-      // Care Package Roles (rota roles)
       addArr('roles_any', roles_any);
 
       if (typeof active === 'boolean') add('active', active);
@@ -11700,27 +11834,21 @@ function buildSearchQS(section, filters = {}) {
       add('created_from', created_from);
       add('created_to', created_to);
 
-      // Primary vs all job titles
       add('primary_job_title_contains', primary_job_title_contains);
       add('job_title_contains', job_title_contains);
 
-      // Professional registration
       add('prof_reg_number', prof_reg_number);
       add('prof_reg_type', prof_reg_type);
 
-      // DOB exact
       add('dob', dob);
 
-      // Demographics
       add('gender', gender);
       add('town_city', town_city);
       add('postcode', postcode);
 
-      // Updated_at range
       add('updated_from', updated_from);
       add('updated_to', updated_to);
 
-      // Banking / umbrella / ref
       add('sort_code', sort_code);
       add('account_number', account_number);
       add('umbrella_name', umbrella_name);
@@ -11814,23 +11942,50 @@ function buildSearchQS(section, filters = {}) {
 
     case 'invoices': {
       const {
+        // Support both: invoice_no (legacy) and q (preferred for /api/invoices)
+        q,
         invoice_no,
+
         client_id,
         status,
+
         issued_from,
         issued_to,
         due_from,
         due_to,
+
+        // ✅ requested (FE-ready)
+        week_ending_from,
+        week_ending_to,
+
         created_from,
         created_to
       } = filters || {};
-      add('invoice_no', invoice_no);
+
+      const qText =
+        (q != null && String(q).trim() !== '')
+          ? String(q).trim()
+          : (invoice_no != null ? String(invoice_no).trim() : '');
+
+      if (qText) add('q', qText);
+
       add('client_id', client_id);
-      addArr('status', status);
+
+      // status can be array or comma list string
+      let statusArr = status;
+      if (typeof statusArr === 'string' && statusArr.trim()) {
+        statusArr = statusArr.split(',').map(s => s.trim()).filter(Boolean);
+      }
+      addArr('status', statusArr);
+
       add('issued_from', issued_from);
       add('issued_to', issued_to);
       add('due_from', due_from);
       add('due_to', due_to);
+
+      add('week_ending_from', week_ending_from);
+      add('week_ending_to', week_ending_to);
+
       add('created_from', created_from);
       add('created_to', created_to);
       break;
@@ -11891,16 +12046,11 @@ function buildSearchQS(section, filters = {}) {
       }
 
       if (typeof auto_invoice === 'boolean') add('auto_invoice', auto_invoice);
-      if (typeof require_reference_to_pay === 'boolean') {
-        add('require_reference_to_pay', require_reference_to_pay);
-      }
-      if (typeof require_reference_to_invoice === 'boolean') {
-        add('require_reference_to_invoice', require_reference_to_invoice);
-      }
+      if (typeof require_reference_to_pay === 'boolean') add('require_reference_to_pay', require_reference_to_pay);
+      if (typeof require_reference_to_invoice === 'boolean') add('require_reference_to_invoice', require_reference_to_invoice);
       if (typeof has_custom_labels === 'boolean') add('has_custom_labels', has_custom_labels);
       add('active_on', active_on);
 
-      // Date ranges
       add('start_date_from', start_date_from);
       add('start_date_to',   start_date_to);
       add('end_date_from',   end_date_from);
@@ -11910,7 +12060,6 @@ function buildSearchQS(section, filters = {}) {
       add('updated_from',    updated_from);
       add('updated_to',      updated_to);
 
-      // Mileage
       add('mileage_pay_rate',    mileage_pay_rate);
       add('mileage_charge_rate', mileage_charge_rate);
 
@@ -11929,7 +12078,6 @@ function buildSearchQS(section, filters = {}) {
 
   return qs.toString();
 }
-
 
 
 // -----------------------------
@@ -27698,6 +27846,821 @@ function canonicalizeClientSettings(input) {
 
   return cs;
 }
+async function openInvoiceBatchGenerateModal() {
+  // ─────────────────────────────────────────────────────────────
+  // Batch Generate (Invoices)
+  //
+  // ✅ Server is source-of-truth for “not due yet” / week-ended gating:
+  //    - When allow_early=false, the RPC MUST NOT return future weeks (it doesn’t).
+  //    - UI does NOT compute “future” or hide/show based on local date.
+  //
+  // ✅ Styling: uses existing modal shell + existing .btn/.mini styles.
+  //    We add modal classes so index.html CSS can:
+  //      - widen/tall the modal for batch lists
+  //      - disable outer .modal-b scrolling (avoid double scrollbars)
+  //      - make only the inner list scroll
+  //
+  // 📌 CSS to add in index.html next (NOT done here):
+  //   .invbatch-modal { /* optional: width/max-width overrides */ }
+  //   .invbatch-modal .modal-b { overflow:hidden; }               // kill outer scrollbar
+  //   .invbatch-root { display:flex; flex-direction:column; gap:10px; height:100%; }
+  //   .invbatch-controls { display:flex; align-items:center; gap:10px; flex-wrap:wrap;
+  //                        padding:10px; border:1px solid var(--line); border-radius:12px;
+  //                        background:#0b1427; }
+  //   .invbatch-scroll { overflow:auto; max-height:60vh; padding:6px 2px; }
+  //   .invbatch-card { border:1px solid var(--line); border-radius:12px; background:#0b1427; }
+  //   .invbatch-card-head { display:flex; align-items:center; justify-content:space-between; gap:10px;
+  //                         padding:10px; cursor:pointer; }
+  //   .invbatch-week-head { background:#081024; }
+  //   .invbatch-row { display:flex; align-items:center; gap:10px; padding:10px; }
+  //   .invbatch-right { display:flex; flex-direction:column; align-items:flex-end; gap:2px; min-width:140px; }
+  //   .invbatch-badge { padding:3px 8px; border:1px solid var(--line); border-radius:999px; background:#0b152a; }
+  //   .invbatch-badge-warn { border-color:#a33; background:#3a1214; color:#ffb4b4; }
+  //   .invbatch-results { margin-top:10px; padding:10px; border:1px solid var(--line); border-radius:12px;
+  //                       background:#0b1427; }
+  // ─────────────────────────────────────────────────────────────
+
+  const API_CANDIDATES = '/api/invoices/batch-generate/candidates';
+  const API_CONFIRM    = '/api/invoices/batch-generate/confirm';
+
+  const state = {
+    allowEarly: false,
+    limit: 5000,
+
+    groups: [],              // RPC JSON: [{ client_id, client_name, weeks:[...] }]
+    selected: new Set(),     // timesheet_id strings
+
+    busy: false,
+    error: '',
+    results: null,           // confirm response
+
+    openClients: new Set(),  // client_id strings
+    openWeeks: new Set()     // `${client_id}|${invoice_week_start}`
+  };
+
+  const fmtMoney = (n) => {
+    const x = Number(n || 0);
+    const v = Number.isFinite(x) ? x : 0;
+    return `£${v.toFixed(2)}`;
+  };
+
+  const ymdToDMY = (ymd) => {
+    const s = String(ymd || '').slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return String(ymd || '');
+    const [Y, M, D] = s.split('-');
+    return `${D}/${M}/${Y}`;
+  };
+
+  const safeJson = async (res) => {
+    try { return await res.json(); } catch { return null; }
+  };
+
+  const apiGetJson = async (path) => {
+    const res = await authFetch(API(path));
+    const j = await safeJson(res);
+    if (!res.ok) {
+      const msg = (j && (j.error || j.message)) ? (j.error || j.message) : `Request failed (${res.status})`;
+      throw new Error(msg);
+    }
+    return j;
+  };
+
+  const apiPostJsonLocal = async (path, body) => {
+    const res = await authFetch(API(path), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body || {})
+    });
+    const j = await safeJson(res);
+    if (!res.ok) {
+      const msg = (j && (j.error || j.message)) ? (j.error || j.message) : `Request failed (${res.status})`;
+      throw new Error(msg);
+    }
+    return j;
+  };
+
+  const clearSelection = () => state.selected.clear();
+
+  const buildRowsPayload = () => {
+    // Server expects:
+    // [
+    //   { client_id, invoice_week_start: "YYYY-MM-DD", timesheet_ids:[uuid...] },
+    //   ...
+    // ]
+    //
+    // Source: public.invoice_outbox_enqueue_by_week_selected docs.
+    const map = new Map(); // key -> {client_id, invoice_week_start, timesheet_ids:[]}
+
+    (state.groups || []).forEach(c => {
+      const clientId = String(c?.client_id || '').trim();
+      if (!clientId) return;
+
+      const weeks = Array.isArray(c?.weeks) ? c.weeks : [];
+      weeks.forEach(w => {
+        const wkStart = String(w?.invoice_week_start || '').slice(0, 10);
+        if (!wkStart) return;
+
+        const key = `${clientId}|${wkStart}`;
+        const tss = Array.isArray(w?.timesheets) ? w.timesheets : [];
+
+        const picked = [];
+        tss.forEach(t => {
+          const id = String(t?.timesheet_id || '').trim();
+          if (!id) return;
+          if (!state.selected.has(id)) return;
+
+          // Never send blocked rows (server will also validate)
+          if (t?.blocked_by_hr_validation === true) return;
+
+          picked.push(id);
+        });
+
+        if (!picked.length) return;
+
+        const row = map.get(key) || { client_id: clientId, invoice_week_start: wkStart, timesheet_ids: [] };
+        row.timesheet_ids.push(...picked);
+        map.set(key, row);
+      });
+    });
+
+    const out = [];
+    for (const r of map.values()) {
+      r.timesheet_ids = Array.from(new Set((r.timesheet_ids || []).map(String).filter(Boolean)));
+      if (r.timesheet_ids.length) out.push(r);
+    }
+    return out;
+  };
+
+  const fetchCandidates = async () => {
+    state.error = '';
+    state.results = null;
+    clearSelection();
+
+    const qs = new URLSearchParams();
+    qs.set('allow_early', state.allowEarly ? '1' : '0');
+    qs.set('limit', String(state.limit || 5000));
+
+    const j = await apiGetJson(`${API_CANDIDATES}?${qs.toString()}`);
+    state.groups = Array.isArray(j?.groups) ? j.groups : [];
+
+    // Default expand: first client + first week
+    state.openClients.clear();
+    state.openWeeks.clear();
+    const g0 = state.groups[0];
+    if (g0 && g0.client_id) {
+      const cid = String(g0.client_id);
+      state.openClients.add(cid);
+      const w0 = Array.isArray(g0.weeks) ? g0.weeks[0] : null;
+      if (w0 && w0.invoice_week_start) {
+        state.openWeeks.add(`${cid}|${String(w0.invoice_week_start)}`);
+      }
+    }
+  };
+
+  const refreshSummariesAfterSuccess = async () => {
+    // Make the next summary view fetch fresh pages
+    try {
+      window.__listState = window.__listState || {};
+
+      window.__listState.invoices   = window.__listState.invoices   || { page:1, pageSize:50, total:null, hasMore:false, filters:null, sort:{ key:null, dir:'asc' } };
+      window.__listState.timesheets = window.__listState.timesheets || { page:1, pageSize:50, total:null, hasMore:false, filters:null, sort:{ key:null, dir:'asc' } };
+
+      window.__listState.invoices.page = 1;
+      window.__listState.invoices.total = null;
+      window.__listState.invoices.hasMore = false;
+
+      window.__listState.timesheets.page = 1;
+      window.__listState.timesheets.total = null;
+      window.__listState.timesheets.hasMore = false;
+
+      // If they are currently viewing either sheet behind the modal, refresh immediately
+      if (currentSection === 'invoices' || currentSection === 'timesheets') {
+        const data = await loadSection();
+        renderSummary(data);
+      }
+    } catch {}
+  };
+
+  const renderSkeleton = () => {
+    // NOTE: no inline styling beyond minimal structure; CSS will be added in index.html.
+    return `
+      <div id="invBatchGenRoot" class="invbatch-root">
+        <div class="mini" style="opacity:.95">
+          Create draft invoices for <b>READY_FOR_INVOICE</b> timesheets, grouped by client and week.
+        </div>
+
+        <div id="invBatchGenControls" class="invbatch-controls"></div>
+
+        <div id="invBatchGenError" class="mini" style="display:none;color:#ffb4b4;"></div>
+
+        <div id="invBatchGenScroll" class="invbatch-scroll">
+          <div id="invBatchGenBody" class="invbatch-groups"></div>
+          <div id="invBatchGenResults" class="invbatch-results" style="display:none"></div>
+        </div>
+      </div>
+    `;
+  };
+
+  const paint = () => {
+    const root = document.getElementById('invBatchGenRoot');
+    if (!root) return;
+
+    const controls = document.getElementById('invBatchGenControls');
+    const bodyEl   = document.getElementById('invBatchGenBody');
+    const errEl    = document.getElementById('invBatchGenError');
+    const resEl    = document.getElementById('invBatchGenResults');
+    const scrollEl = document.getElementById('invBatchGenScroll');
+
+    if (!controls || !bodyEl || !errEl || !resEl || !scrollEl) return;
+
+    const prevScroll = scrollEl.scrollTop || 0;
+
+    const selectedCount = state.selected.size;
+
+    const mkBtn = (label, onClick, opts={}) => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.textContent = label;
+
+      // Match existing modal button conventions
+      const cls = ['btn', 'btn-sm'];
+      if (opts.primary) cls.push('btn-primary');
+      else cls.push('btn-outline');
+      if (opts.warn) cls.push('btn-warn');
+      b.className = cls.join(' ');
+
+      b.disabled = !!opts.disabled;
+      if (!opts.disabled) b.addEventListener('click', onClick);
+      return b;
+    };
+
+    // ── controls ──────────────────────────────────────────────
+    controls.innerHTML = '';
+
+    const allowWrap = document.createElement('label');
+    allowWrap.className = 'mini';
+    allowWrap.style.display = 'flex';
+    allowWrap.style.alignItems = 'center';
+    allowWrap.style.gap = '8px';
+
+    const allowCb = document.createElement('input');
+    allowCb.type = 'checkbox';
+    allowCb.checked = !!state.allowEarly;
+    allowCb.disabled = state.busy;
+
+    const allowTxt = document.createElement('span');
+    allowTxt.textContent = 'Batch early';
+
+    allowWrap.appendChild(allowCb);
+    allowWrap.appendChild(allowTxt);
+
+    allowCb.addEventListener('change', async () => {
+      state.allowEarly = !!allowCb.checked;
+      state.busy = true;
+      paint();
+      try {
+        await fetchCandidates();
+      } catch (e) {
+        state.error = String(e?.message || e);
+      } finally {
+        state.busy = false;
+        paint();
+      }
+    });
+
+    controls.appendChild(allowWrap);
+
+    controls.appendChild(mkBtn('Refresh', async () => {
+      state.busy = true;
+      paint();
+      try {
+        await fetchCandidates();
+      } catch (e) {
+        state.error = String(e?.message || e);
+      } finally {
+        state.busy = false;
+        paint();
+      }
+    }, { disabled: state.busy }));
+
+    controls.appendChild(mkBtn('Clear selection', () => {
+      clearSelection();
+      paint();
+    }, { disabled: state.busy || selectedCount === 0 }));
+
+    controls.appendChild(mkBtn(`Confirm (${selectedCount})`, async () => {
+      if (state.busy) return;
+
+      const rowsPayload = buildRowsPayload();
+      if (!rowsPayload.length) {
+        alert('Select at least one eligible timesheet.');
+        return;
+      }
+
+      const ok = window.confirm(
+        `Generate draft invoices for ${selectedCount} timesheet(s)?\n\n` +
+        `This will enqueue BY_WEEK jobs and generate invoices immediately.`
+      );
+      if (!ok) return;
+
+      state.busy = true;
+      state.error = '';
+      state.results = null;
+      paint();
+
+      try {
+        const out = await apiPostJsonLocal(API_CONFIRM, {
+          allow_early: !!state.allowEarly,
+          rows: rowsPayload
+        });
+
+        state.results = out || {};
+        window.__toast && window.__toast(`Batch generate complete (generated: ${Number(out?.generated || 0)}).`);
+        await refreshSummariesAfterSuccess();
+      } catch (e) {
+        state.error = String(e?.message || e);
+      } finally {
+        state.busy = false;
+        paint();
+      }
+    }, { primary: true, disabled: state.busy || selectedCount === 0 }));
+
+    const selInfo = document.createElement('div');
+    selInfo.className = 'mini';
+    selInfo.style.opacity = '0.9';
+    selInfo.textContent = state.busy ? 'Working…' : (selectedCount ? `${selectedCount} selected` : '');
+    controls.appendChild(selInfo);
+
+    // ── error ─────────────────────────────────────────────────
+    if (state.error) {
+      errEl.style.display = '';
+      errEl.textContent = state.error;
+    } else {
+      errEl.style.display = 'none';
+      errEl.textContent = '';
+    }
+
+    // ── groups ────────────────────────────────────────────────
+    bodyEl.innerHTML = '';
+    const groups = Array.isArray(state.groups) ? state.groups : [];
+
+    if (!groups.length && !state.busy) {
+      const empty = document.createElement('div');
+      empty.className = 'mini';
+      empty.style.opacity = '0.85';
+      empty.textContent = 'No candidates found (nothing ready to invoice).';
+      bodyEl.appendChild(empty);
+    }
+
+    groups.forEach((c) => {
+      const clientId = String(c?.client_id || '');
+      const clientName = String(c?.client_name || clientId || 'Client');
+      const weeks = Array.isArray(c?.weeks) ? c.weeks : [];
+
+      // Collect selectable timesheets for this client (skip blocked_by_hr_validation)
+      const selectableClientIds = [];
+      weeks.forEach(w => {
+        const tss = Array.isArray(w?.timesheets) ? w.timesheets : [];
+        tss.forEach(t => {
+          const id = String(t?.timesheet_id || '');
+          if (!id) return;
+          if (t?.blocked_by_hr_validation === true) return;
+          selectableClientIds.push(id);
+        });
+      });
+
+      const clientSelectedCount = selectableClientIds.filter(id => state.selected.has(id)).length;
+
+      const clientDetails = document.createElement('details');
+      clientDetails.className = 'invbatch-card';
+      clientDetails.open = state.openClients.has(clientId) || false;
+
+      clientDetails.addEventListener('toggle', () => {
+        if (clientDetails.open) state.openClients.add(clientId);
+        else state.openClients.delete(clientId);
+      });
+
+      const sum = document.createElement('summary');
+      sum.className = 'invbatch-card-head';
+      sum.style.listStyle = 'none';
+
+      const left = document.createElement('div');
+      left.style.display = 'flex';
+      left.style.flexDirection = 'column';
+      left.style.gap = '2px';
+
+      const title = document.createElement('div');
+      title.style.fontWeight = '700';
+      title.textContent = clientName;
+
+      const sub = document.createElement('div');
+      sub.className = 'mini';
+      sub.style.opacity = '0.85';
+      sub.textContent = `${weeks.length} week group(s)`;
+
+      left.appendChild(title);
+      left.appendChild(sub);
+
+      const right = document.createElement('div');
+      right.style.display = 'flex';
+      right.style.alignItems = 'center';
+      right.style.gap = '8px';
+
+      const badge = document.createElement('span');
+      badge.className = 'mini invbatch-badge';
+      badge.textContent = clientSelectedCount ? `${clientSelectedCount} selected` : '';
+      if (!clientSelectedCount) badge.style.opacity = '0.5';
+
+      const btnSelClient = mkBtn('Select all in client', (ev) => {
+        ev.preventDefault(); ev.stopPropagation();
+        selectableClientIds.forEach(id => state.selected.add(id));
+        paint();
+      }, { disabled: state.busy || selectableClientIds.length === 0 });
+
+      const btnDeselClient = mkBtn('Deselect client', (ev) => {
+        ev.preventDefault(); ev.stopPropagation();
+        selectableClientIds.forEach(id => state.selected.delete(id));
+        paint();
+      }, { disabled: state.busy || clientSelectedCount === 0 });
+
+      right.appendChild(badge);
+      right.appendChild(btnSelClient);
+      right.appendChild(btnDeselClient);
+
+      sum.appendChild(left);
+      sum.appendChild(right);
+      clientDetails.appendChild(sum);
+
+      const clientInner = document.createElement('div');
+      clientInner.style.display = 'flex';
+      clientInner.style.flexDirection = 'column';
+      clientInner.style.gap = '8px';
+      clientInner.style.padding = '10px 6px 6px 6px';
+
+      weeks.forEach((w) => {
+        const wkStart = String(w?.invoice_week_start || '');
+        const wkEnd   = String(w?.week_ending_date || '');
+        const wkKey   = `${clientId}|${wkStart}`;
+
+        const subtotal = fmtMoney(w?.subtotal_ex_vat);
+        const hours    = Number(w?.total_hours || 0);
+
+        const tss = Array.isArray(w?.timesheets) ? w.timesheets : [];
+
+        const selectableWeekIds = [];
+        tss.forEach(t => {
+          const id = String(t?.timesheet_id || '');
+          if (!id) return;
+          if (t?.blocked_by_hr_validation === true) return;
+          selectableWeekIds.push(id);
+        });
+
+        const weekSelectedCount = selectableWeekIds.filter(id => state.selected.has(id)).length;
+
+        const weekDetails = document.createElement('details');
+        weekDetails.className = 'invbatch-card';
+        weekDetails.open = state.openWeeks.has(wkKey) || false;
+
+        weekDetails.addEventListener('toggle', () => {
+          if (weekDetails.open) state.openWeeks.add(wkKey);
+          else state.openWeeks.delete(wkKey);
+        });
+
+        const wkSum = document.createElement('summary');
+        wkSum.className = 'invbatch-card-head invbatch-week-head';
+        wkSum.style.listStyle = 'none';
+
+        const wkLeft = document.createElement('div');
+        wkLeft.style.display = 'flex';
+        wkLeft.style.flexDirection = 'column';
+        wkLeft.style.gap = '2px';
+
+        const wkTitle = document.createElement('div');
+        wkTitle.style.fontWeight = '700';
+        wkTitle.textContent = `Week ending ${ymdToDMY(wkEnd)}`;
+
+        const wkMeta = document.createElement('div');
+        wkMeta.className = 'mini';
+        wkMeta.style.opacity = '0.85';
+        wkMeta.textContent = `Week start ${ymdToDMY(wkStart)} • Subtotal ${subtotal} • Hours ${Number.isFinite(hours) ? hours.toFixed(2) : '0.00'}`;
+
+        wkLeft.appendChild(wkTitle);
+        wkLeft.appendChild(wkMeta);
+
+        const wkRight = document.createElement('div');
+        wkRight.style.display = 'flex';
+        wkRight.style.alignItems = 'center';
+        wkRight.style.gap = '8px';
+
+        const wkBadge = document.createElement('span');
+        wkBadge.className = 'mini invbatch-badge';
+        wkBadge.textContent = weekSelectedCount ? `${weekSelectedCount} selected` : '';
+        if (!weekSelectedCount) wkBadge.style.opacity = '0.5';
+
+        const btnSelWeek = mkBtn('Select all in week', (ev) => {
+          ev.preventDefault(); ev.stopPropagation();
+          selectableWeekIds.forEach(id => state.selected.add(id));
+          paint();
+        }, { disabled: state.busy || selectableWeekIds.length === 0 });
+
+        const btnDeselWeek = mkBtn('Deselect week', (ev) => {
+          ev.preventDefault(); ev.stopPropagation();
+          selectableWeekIds.forEach(id => state.selected.delete(id));
+          paint();
+        }, { disabled: state.busy || weekSelectedCount === 0 });
+
+        wkRight.appendChild(wkBadge);
+        wkRight.appendChild(btnSelWeek);
+        wkRight.appendChild(btnDeselWeek);
+
+        wkSum.appendChild(wkLeft);
+        wkSum.appendChild(wkRight);
+        weekDetails.appendChild(wkSum);
+
+        const list = document.createElement('div');
+        list.style.display = 'flex';
+        list.style.flexDirection = 'column';
+        list.style.gap = '6px';
+        list.style.padding = '10px 6px 6px 6px';
+
+        tss.forEach(t => {
+          const tsId = String(t?.timesheet_id || '');
+          const cand = String(t?.candidate_name || 'Worker');
+          const basis = String(t?.basis || '');
+          const sm = String(t?.submission_mode || '');
+          const vs = String(t?.validation_status || '');
+
+          const charge = fmtMoney(t?.total_charge_ex_vat);
+          const hrs = Number(t?.total_hours || 0);
+
+          const hrReq = (t?.hr_validation_required_for_invoice === true);
+          const hrBlocked = (t?.blocked_by_hr_validation === true);
+
+          const row = document.createElement('div');
+          row.className = 'invbatch-row';
+          row.style.border = '1px solid var(--line)';
+          row.style.borderRadius = '12px';
+          row.style.background = '#0b1427';
+
+          const cb = document.createElement('input');
+          cb.type = 'checkbox';
+          cb.checked = !!(tsId && state.selected.has(tsId));
+          cb.disabled = state.busy || !tsId || hrBlocked;
+          cb.addEventListener('change', () => {
+            if (!tsId) return;
+            if (cb.checked) state.selected.add(tsId);
+            else state.selected.delete(tsId);
+            paint();
+          });
+
+          const main = document.createElement('div');
+          main.style.display = 'flex';
+          main.style.flexDirection = 'column';
+          main.style.gap = '2px';
+          main.style.flex = '1';
+          main.style.minWidth = '0';
+
+          const line1 = document.createElement('div');
+          line1.style.display = 'flex';
+          line1.style.alignItems = 'center';
+          line1.style.gap = '8px';
+          line1.style.flexWrap = 'wrap';
+
+          const name = document.createElement('div');
+          name.style.fontWeight = '700';
+          name.textContent = cand;
+          line1.appendChild(name);
+
+          if (hrReq) {
+            const b = document.createElement('span');
+            b.className = 'mini invbatch-badge';
+            b.textContent = 'HR validation required';
+            line1.appendChild(b);
+          }
+
+          if (hrBlocked) {
+            const b = document.createElement('span');
+            b.className = 'mini invbatch-badge invbatch-badge-warn';
+            b.textContent = 'Blocked by HR validation';
+            line1.appendChild(b);
+          }
+
+          const line2 = document.createElement('div');
+          line2.className = 'mini';
+          line2.style.opacity = '0.9';
+          line2.textContent = `${basis}${basis && sm ? ' • ' : ''}${sm}${(vs ? ` • Validation: ${vs}` : '')}`;
+
+          main.appendChild(line1);
+          main.appendChild(line2);
+
+          const right = document.createElement('div');
+          right.className = 'mini invbatch-right';
+
+          const a = document.createElement('div');
+          a.textContent = `${charge}`;
+
+          const b2 = document.createElement('div');
+          b2.style.opacity = '0.9';
+          b2.textContent = `Hours ${Number.isFinite(hrs) ? hrs.toFixed(2) : '0.00'}`;
+
+          right.appendChild(a);
+          right.appendChild(b2);
+
+          row.appendChild(cb);
+          row.appendChild(main);
+          row.appendChild(right);
+
+          list.appendChild(row);
+        });
+
+        weekDetails.appendChild(list);
+        clientInner.appendChild(weekDetails);
+      });
+
+      clientDetails.appendChild(clientInner);
+      bodyEl.appendChild(clientDetails);
+    });
+
+    // ── results (inside the SAME scroll area to avoid outer scrolling) ──
+    if (state.results) {
+      resEl.style.display = '';
+      const out = state.results || {};
+      const jobs = Array.isArray(out?.jobs) ? out.jobs : [];
+
+      const grouped = new Map(); // client_id -> array of jobs
+      jobs.forEach(j => {
+        const cid = String(j?.client_id || '');
+        if (!grouped.has(cid)) grouped.set(cid, []);
+        grouped.get(cid).push(j);
+      });
+
+      const findClientName = (cid) => {
+        const g = (state.groups || []).find(x => String(x?.client_id || '') === cid);
+        return String(g?.client_name || cid || 'Client');
+      };
+
+      const wrap = document.createElement('div');
+
+      const h = document.createElement('div');
+      h.style.fontWeight = '700';
+      h.style.marginBottom = '6px';
+      h.textContent = `Results — Enqueued ${Number(out?.enqueued || 0)} • Generated ${Number(out?.generated || 0)}`;
+      wrap.appendChild(h);
+
+      const note = document.createElement('div');
+      note.className = 'mini';
+      note.style.opacity = '0.9';
+      note.textContent = 'Invoices are created as DRAFT/ON_HOLD according to policy. You can now Batch Issue from the Invoices menu.';
+      wrap.appendChild(note);
+
+      const hr = document.createElement('div');
+      hr.style.height = '1px';
+      hr.style.background = 'var(--line)';
+      hr.style.margin = '10px 0';
+      wrap.appendChild(hr);
+
+      if (!jobs.length) {
+        const empty = document.createElement('div');
+        empty.className = 'mini';
+        empty.textContent = 'No jobs returned.';
+        wrap.appendChild(empty);
+      }
+
+      for (const [cid, arr] of grouped.entries()) {
+        const box = document.createElement('div');
+        box.className = 'invbatch-card';
+        box.style.background = '#081024';
+        box.style.padding = '10px';
+        box.style.marginBottom = '10px';
+
+        const t = document.createElement('div');
+        t.style.fontWeight = '700';
+        t.style.marginBottom = '6px';
+        t.textContent = findClientName(cid);
+        box.appendChild(t);
+
+        arr.forEach(j => {
+          const wk = String(j?.invoice_week_start || '');
+          const ok = !!j?.ok;
+          const invIds = Array.isArray(j?.invoice_ids) ? j.invoice_ids : [];
+
+          const line = document.createElement('div');
+          line.className = 'mini';
+          line.style.display = 'flex';
+          line.style.flexWrap = 'wrap';
+          line.style.gap = '8px';
+          line.style.alignItems = 'center';
+          line.style.padding = '6px 0';
+          line.style.borderTop = '1px solid rgba(255,255,255,0.06)';
+
+          const pill = document.createElement('span');
+          pill.className = 'mini invbatch-badge';
+          pill.style.borderColor = ok ? '#2d6' : '#a33';
+          pill.style.background  = ok ? '#0f2a1b' : '#3a1214';
+          pill.style.color       = ok ? '#bfffe0' : '#ffb4b4';
+          pill.textContent = ok ? 'OK' : 'FAILED';
+
+          const wkTxt = document.createElement('span');
+          wkTxt.textContent = `Week start ${ymdToDMY(wk)}`;
+
+          const invTxt = document.createElement('span');
+          invTxt.textContent = invIds.length ? `Invoices: ${invIds.length}` : 'Invoices: 0';
+
+          line.appendChild(pill);
+          line.appendChild(wkTxt);
+          line.appendChild(invTxt);
+
+          if (j?.enqueue_action) {
+            const a = document.createElement('span');
+            a.style.opacity = '0.9';
+            a.textContent = `Outbox: ${String(j.enqueue_action)}`;
+            line.appendChild(a);
+          }
+
+          if (j?.warnings) {
+            const wj = document.createElement('span');
+            wj.style.opacity = '0.9';
+            try {
+              wj.textContent = `Notes: ${JSON.stringify(j.warnings)}`;
+            } catch {
+              wj.textContent = 'Notes: (unavailable)';
+            }
+            line.appendChild(wj);
+          }
+
+          box.appendChild(line);
+        });
+
+        wrap.appendChild(box);
+      }
+
+      resEl.innerHTML = '';
+      resEl.appendChild(wrap);
+    } else {
+      resEl.style.display = 'none';
+      resEl.innerHTML = '';
+    }
+
+    // Restore scroll
+    scrollEl.scrollTop = prevScroll;
+  };
+
+  // ─────────────────────────────────────────────────────────────
+  // Open modal (no showModal changes required yet)
+  // ─────────────────────────────────────────────────────────────
+  window.modalCtx = {
+    entity: 'invoices',
+    openToken: `invoice-batch-generate:${Date.now()}:${Math.random().toString(36).slice(2)}`,
+    data: {}
+  };
+
+  showModal(
+    'Batch Generate — Invoices',
+    [{ key: 'main', label: 'Batch Generate' }],
+    () => renderSkeleton(),
+    null,
+    true,
+    null,
+    {
+      // Use existing "utility kind" pattern so showModal:
+      // - hides Save/Edit
+      // - keeps inputs enabled even in view mode
+      kind: 'import-summary-invoice-batch-generate',
+      noParentGate: true,
+      onDismiss: () => {
+        try {
+          const modalNode = document.getElementById('modal');
+          if (modalNode) {
+            modalNode.classList.remove('invbatch-modal');
+            modalNode.classList.remove('invbatch-generate-modal');
+          }
+        } catch {}
+      }
+    }
+  );
+
+  // Add modal sizing/overflow class hooks (CSS added in index.html next)
+  try {
+    const modalNode = document.getElementById('modal');
+    if (modalNode) {
+      modalNode.classList.add('invbatch-modal');
+      modalNode.classList.add('invbatch-generate-modal');
+    }
+  } catch {}
+
+  // Initial load + paint
+  state.busy = true;
+  paint();
+
+  try {
+    await fetchCandidates();
+  } catch (e) {
+    state.error = String(e?.message || e);
+  } finally {
+    state.busy = false;
+    paint();
+  }
+}
 
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -28219,16 +29182,19 @@ const frame = {
   if (opts.forceEdit) return 'edit';
   if (!hasId && opts.kind === 'rate-preset') return 'edit';
 
-  // NEW: utility modals – always view-only, no Save/Edit
+   // NEW: utility modals – always view-only, no Save/Edit
   const isUtilityKind =
     opts.kind === 'timesheets-resolve' ||
     opts.kind === 'resolve-candidate'  ||
     opts.kind === 'resolve-client'     ||
-    (typeof opts.kind === 'string' && opts.kind.startsWith('import-summary-'));
+    (typeof opts.kind === 'string' && opts.kind.startsWith('import-summary-')) ||
+    (typeof opts.kind === 'string' && opts.kind.startsWith('invoice-batch-')) ||
+    (typeof opts.kind === 'string' && opts.kind.startsWith('import-summary-invoice-batch-'));
 
   if (isUtilityKind) {
     return 'view';
   }
+
 
 
   // Special case: planned timesheet week (no timesheet_id yet)
@@ -30073,12 +31039,14 @@ try {
 
   const isChild = (stack().length > 1);
 
-  // Utility modals (resolve/import summaries) should keep inner buttons active
+    // Utility modals (resolve/import summaries) should keep inner buttons active
   const isUtilityKindForThis =
     this.kind === 'timesheets-resolve' ||
     this.kind === 'resolve-candidate'  ||
     this.kind === 'resolve-client'     ||
-    (typeof this.kind === 'string' && this.kind.startsWith('import-summary-'));
+    (typeof this.kind === 'string' && this.kind.startsWith('import-summary-')) ||
+    (typeof this.kind === 'string' && this.kind.startsWith('invoice-batch-')) ||
+    (typeof this.kind === 'string' && this.kind.startsWith('import-summary-invoice-batch-'));
 
 if (this.noParentGate) {
   const ro = isUtilityKindForThis
@@ -30091,6 +31059,7 @@ if (this.noParentGate) {
 } else {
   setFormReadOnly(byId('modalBody'), (this.mode === 'view' || this.mode === 'saving'));
 }
+
 
 // ✅ TIMESHEETS → LINES: import-authoritative + PROCESSED → allow deferrals, lock hours/schedule/extras
 if (this.entity === 'timesheets' && k === 'lines') {
@@ -30240,7 +31209,9 @@ const isUtilityKind =
   frameObj.kind === 'timesheets-resolve' ||
   frameObj.kind === 'resolve-candidate'  ||
   frameObj.kind === 'resolve-client'     ||
-  (typeof frameObj.kind === 'string' && frameObj.kind.startsWith('import-summary-'));
+  (typeof frameObj.kind === 'string' && frameObj.kind.startsWith('import-summary-')) ||
+  (typeof frameObj.kind === 'string' && frameObj.kind.startsWith('invoice-batch-')) ||
+  (typeof frameObj.kind === 'string' && frameObj.kind.startsWith('import-summary-invoice-batch-'));
 
 if (!frameObj.hasId && mode === 'view' && !isPlannedTimesheetStub && !isUtilityKind) {
   mode = frameObj.forceEdit ? 'edit' : 'create';
@@ -30248,15 +31219,19 @@ if (!frameObj.hasId && mode === 'view' && !isPlannedTimesheetStub && !isUtilityK
 }
 
 
+
    // ▶ Only toggle read-only on the DOM that actually belongs to the top frame.
   //    When updating a non-top frame (e.g., the parent while a picker is open),
   //    do not flip the global #modalBody to avoid UI flicker/regressions.
   if (isTop) {
-    const isUtilityKindForFrame =
+      const isUtilityKindForFrame =
       frameObj.kind === 'timesheets-resolve' ||
       frameObj.kind === 'resolve-candidate'  ||
       frameObj.kind === 'resolve-client'     ||
-      (typeof frameObj.kind === 'string' && frameObj.kind.startsWith('import-summary-'));
+      (typeof frameObj.kind === 'string' && frameObj.kind.startsWith('import-summary-')) ||
+      (typeof frameObj.kind === 'string' && frameObj.kind.startsWith('invoice-batch-')) ||
+      (typeof frameObj.kind === 'string' && frameObj.kind.startsWith('import-summary-invoice-batch-'));
+
 
     if (!isChild && (mode === 'create' || mode === 'edit')) {
       setFormReadOnly(byId('modalBody'), false);
@@ -30475,7 +31450,6 @@ L('renderTop tabs (global)', { count: (top.tabs||[]).length, active: top.current
     if (LOGC && isContracts && !isImportSummary) {
       console.log('[CONTRACTS][MODAL] contract-modal class applied to #modal (inherited:', parentIsContracts, ')');
     }
-
    // Job Titles: apply narrower modal sizing
 const isJobTitles = (top.kind === 'job-titles');
 modalNode.classList.toggle('jobtitles-modal', !!isJobTitles);
@@ -30492,7 +31466,17 @@ modalNode.classList.toggle('advances-modal', !!isAdvances);
 const isResolve = (top.kind === 'timesheets-resolve');
 modalNode.classList.toggle('resolve-modal', !!isResolve);
 
+// ✅ Invoice batch modals (Generate/Issue): larger + no outer modal scrollbar (CSS handles overflow)
+const isInvBatch =
+  (typeof top.kind === 'string' && top.kind.startsWith('invoice-batch-')) ||
+  (typeof top.kind === 'string' && top.kind.startsWith('import-summary-invoice-batch-'));
+
+modalNode.classList.toggle('invbatch-modal', !!isInvBatch);
+modalNode.classList.toggle('invbatch-generate-modal', !!(typeof top.kind === 'string' && top.kind.includes('generate')));
+modalNode.classList.toggle('invbatch-issue-modal',    !!(typeof top.kind === 'string' && top.kind.includes('issue')));
+
   }
+
 
 
 
@@ -30741,7 +31725,10 @@ const isUtilityKind =
   top.kind === 'timesheets-resolve' ||
   top.kind === 'resolve-candidate'  ||
   top.kind === 'resolve-client'     ||
-  (typeof top.kind === 'string' && top.kind.startsWith('import-summary-'));
+  (typeof top.kind === 'string' && top.kind.startsWith('import-summary-')) ||
+  (typeof top.kind === 'string' && top.kind.startsWith('invoice-batch-')) ||
+  (typeof top.kind === 'string' && top.kind.startsWith('import-summary-invoice-batch-'));
+
 
 
  const label =
@@ -30849,13 +31836,15 @@ top._updateButtons = ()=> {
     btnClose.setAttribute('title', 'Cancel');
     return;
 
-  } else if (
+   } else if (
     top.kind === 'timesheets-resolve' ||
     top.kind === 'resolve-candidate'  ||
     top.kind === 'resolve-client'     ||
-    (typeof top.kind === 'string' && top.kind.startsWith('import-summary-'))
+    (typeof top.kind === 'string' && top.kind.startsWith('import-summary-')) ||
+    (typeof top.kind === 'string' && top.kind.startsWith('invoice-batch-')) ||
+    (typeof top.kind === 'string' && top.kind.startsWith('import-summary-invoice-batch-'))
   ) {
-    // NEW: utility modals (resolve/import) — hide Save/Edit, Close-only
+    // NEW: utility modals (resolve/import/invoice-batch) — hide Save/Edit, Close-only
 
     // No Save/Edit on these; everything happens via inline buttons in the modal body
     btnSave.style.display = 'none';
@@ -30880,6 +31869,7 @@ top._updateButtons = ()=> {
       btnEdit: { display: btnEdit.style.display }
     });
     return;
+
 
   } else if (isChild && !top.noParentGate) {
 
@@ -41820,7 +42810,7 @@ function renderSummary(rows){
   const ensureSel = (section)=>{ const init = { fingerprint:'', ids:new Set() }; return (window.__selection[section] ||= init); };
   const sel = ensureSel(currentSection);
 
-  const isRowSelected = (id)=> sel.ids.has(String(id||''));    
+  const isRowSelected = (id)=> sel.ids.has(String(id||''));
   const setRowSelected = (id, selected)=>{
     id = String(id||''); if (!id) return;
     if (selected) sel.ids.add(id); else sel.ids.delete(id);
@@ -41869,7 +42859,9 @@ function renderSummary(rows){
   const fp = computeFp();
   if (sel.fingerprint !== fp) { sel.fingerprint = fp; clearSelection(); }
 
+  // ─────────────────────────────────────────────────────────────
   // Section-specific pre-formatting / normalisation
+  // ─────────────────────────────────────────────────────────────
   if (currentSection === 'candidates') {
     rows.forEach(r => {
       // Rota roles only – do NOT use this for Job Titles
@@ -41911,6 +42903,38 @@ function renderSummary(rows){
         r.id = stableId;
       }
     });
+  } else if (currentSection === 'invoices') {
+    // Flatten joined client name (backend returns client: { name, ... })
+    rows.forEach(r => {
+      if (!r || typeof r !== 'object') return;
+      if (r.client_name == null || r.client_name === '') {
+        const cn = r.client && typeof r.client === 'object' ? (r.client.name || '') : '';
+        if (cn) r.client_name = cn;
+      }
+    });
+
+    // Keep UI sort state aligned with backend allowed sorts for /api/invoices
+    const INVOICE_SORT_ALLOWED = new Set([
+      'issued_at_utc',
+      'due_at_utc',
+      'created_at',
+      'status_date_utc',
+      'invoice_no',
+      'subtotal_ex_vat',
+      'vat_amount',
+      'total_inc_vat',
+      'status'
+    ]);
+
+    if (sortState && sortState.key) {
+      const k = String(sortState.key || '');
+      if (k && !INVOICE_SORT_ALLOWED.has(k)) {
+        // Reset to backend default to avoid "arrow says sorted by X" when backend ignores it
+        sortState.key = 'issued_at_utc';
+        sortState.dir = 'desc';
+        window.__listState[currentSection].sort = sortState;
+      }
+    }
   }
 
   const content = byId('content');
@@ -41927,7 +42951,7 @@ function renderSummary(rows){
 
   // ── top controls ────────────────────────────────────────────────────────────
   const topControls = document.createElement('div');
-  topControls.style.cssText = 'display:flex;align-items:center;gap:10px;padding:8px 10px;border-bottom:1px solid var(--line)';
+  topControls.style.cssText = 'display:flex;align-items:center;gap:10px;padding:8px 10px;border-bottom:1px solid var(--line);flex-wrap:wrap';
 
   // Page size
   const sizeLabel = document.createElement('span'); sizeLabel.className = 'mini'; sizeLabel.textContent = 'Page size:';
@@ -41949,7 +42973,282 @@ function renderSummary(rows){
   topControls.appendChild(sizeLabel);
   topControls.appendChild(sizeSel);
 
-  // ── NEW: Contracts quick Status menu ────────────────────────────────────────
+  // ─────────────────────────────────────────────────────────────
+  // NEW: Invoices quick filters row (Status multi + Week ending + Issued + q)
+  // ─────────────────────────────────────────────────────────────
+  if (currentSection === 'invoices') {
+    const stFilters = window.__listState[currentSection].filters || {};
+    window.__listState[currentSection].filters = stFilters;
+
+    // Default statuses (first entry)
+    const curStatus = stFilters.status;
+    const hasStatus =
+      (Array.isArray(curStatus) && curStatus.length > 0) ||
+      (typeof curStatus === 'string' && curStatus.trim().length > 0);
+    if (!hasStatus) {
+      stFilters.status = ['DRAFT','ON_HOLD','ISSUED','PAID'];
+      window.__listState[currentSection].filters = stFilters;
+    }
+
+    const applyFilters = async (patch) => {
+      const cur = { ...(window.__listState[currentSection].filters || {}) };
+
+      Object.keys(patch || {}).forEach(k => {
+        const v = patch[k];
+        // normalise empties: delete
+        if (v == null) { delete cur[k]; return; }
+        if (typeof v === 'string' && v.trim() === '') { delete cur[k]; return; }
+        if (Array.isArray(v) && v.length === 0) { delete cur[k]; return; }
+        cur[k] = v;
+      });
+
+      window.__listState[currentSection].filters = cur;
+      window.__listState[currentSection].page = 1;
+
+      const data = await loadSection();
+      renderSummary(data);
+    };
+
+    // Status multi-select dropdown (checkbox menu)
+    const statusLabel = document.createElement('span');
+    statusLabel.className = 'mini';
+    statusLabel.textContent = 'Status:';
+
+    const statusBtn = document.createElement('button');
+    statusBtn.type = 'button';
+    statusBtn.style.cssText = 'border:1px solid var(--line);background:#0b152a;color:var(--text);padding:4px 8px;border-radius:8px;cursor:pointer';
+    statusBtn.title = 'Filter invoice statuses';
+
+    const getStatusArr = () => {
+      let s = (window.__listState[currentSection].filters || {}).status;
+      if (typeof s === 'string' && s.trim()) {
+        s = s.split(',').map(x => x.trim()).filter(Boolean);
+      }
+      if (!Array.isArray(s)) s = [];
+      return s.map(x => String(x).toUpperCase());
+    };
+
+    const setStatusBtnText = () => {
+      const arr = getStatusArr();
+      statusBtn.textContent = arr.length ? arr.join(', ') : 'Any';
+    };
+    setStatusBtnText();
+
+    const closeInvStatusMenu = () => {
+      const m = document.getElementById('__invStatusMenu');
+      if (m) m.remove();
+      document.removeEventListener('click', onDocClose, true);
+      document.removeEventListener('keydown', onEscClose, true);
+    };
+    const onDocClose = (e) => {
+      const m = document.getElementById('__invStatusMenu');
+      if (!m) return;
+      if (m.contains(e.target) || statusBtn.contains(e.target)) return;
+      closeInvStatusMenu();
+    };
+    const onEscClose = (e) => { if (e.key === 'Escape') closeInvStatusMenu(); };
+
+    statusBtn.addEventListener('click', (ev) => {
+      ev.preventDefault();
+      const existing = document.getElementById('__invStatusMenu');
+      if (existing) { closeInvStatusMenu(); return; }
+
+      const menu = document.createElement('div');
+      menu.id = '__invStatusMenu';
+      menu.style.position = 'absolute';
+      menu.style.zIndex = '1000';
+      menu.style.background = 'var(--panel, #0b1221)';
+      menu.style.border = '1px solid var(--line, #334155)';
+      menu.style.borderRadius = '10px';
+      menu.style.boxShadow = 'var(--shadow, 0 6px 20px rgba(0,0,0,.25))';
+      menu.style.padding = '8px';
+      menu.style.minWidth = '220px';
+      menu.style.userSelect = 'none';
+
+      const opts = ['DRAFT','ON_HOLD','ISSUED','PAID'];
+      const selected = new Set(getStatusArr());
+
+      const mkRow = (code) => {
+        const lab = document.createElement('label');
+        lab.className = 'mini';
+        lab.style.display = 'flex';
+        lab.style.alignItems = 'center';
+        lab.style.gap = '8px';
+        lab.style.padding = '6px 6px';
+        lab.style.cursor = 'pointer';
+
+        const cb = document.createElement('input');
+        cb.type = 'checkbox';
+        cb.checked = selected.has(code);
+
+        cb.addEventListener('change', () => {
+          if (cb.checked) selected.add(code);
+          else selected.delete(code);
+        });
+
+        const txt = document.createElement('span');
+        txt.textContent = code;
+
+        lab.appendChild(cb);
+        lab.appendChild(txt);
+        return lab;
+      };
+
+      // header actions
+      const actions = document.createElement('div');
+      actions.style.cssText = 'display:flex;gap:8px;justify-content:flex-end;margin-bottom:6px;';
+      const btnAll = document.createElement('button');
+      btnAll.type = 'button';
+      btnAll.className = 'btn mini';
+      btnAll.textContent = 'All';
+      btnAll.addEventListener('click', () => { opts.forEach(o => selected.add(o)); refreshChecks(); });
+
+      const btnNone = document.createElement('button');
+      btnNone.type = 'button';
+      btnNone.className = 'btn mini';
+      btnNone.textContent = 'None';
+      btnNone.addEventListener('click', () => { selected.clear(); refreshChecks(); });
+
+      actions.appendChild(btnAll);
+      actions.appendChild(btnNone);
+
+      const list = document.createElement('div');
+      list.style.cssText = 'display:flex;flex-direction:column;gap:2px;';
+
+      const rowsEls = opts.map(o => mkRow(o));
+      rowsEls.forEach(el => list.appendChild(el));
+
+      const refreshChecks = () => {
+        rowsEls.forEach((el, idx) => {
+          const code = opts[idx];
+          const cb = el.querySelector('input[type="checkbox"]');
+          if (cb) cb.checked = selected.has(code);
+        });
+      };
+
+      const footer = document.createElement('div');
+      footer.style.cssText = 'display:flex;gap:8px;justify-content:flex-end;margin-top:8px;';
+      const applyBtn = document.createElement('button');
+      applyBtn.type = 'button';
+      applyBtn.className = 'btn btn-primary mini';
+      applyBtn.textContent = 'Apply';
+      applyBtn.addEventListener('click', async () => {
+        closeInvStatusMenu();
+        const arr = Array.from(selected);
+        await applyFilters({ status: arr });
+      });
+
+      footer.appendChild(applyBtn);
+
+      menu.appendChild(actions);
+      menu.appendChild(list);
+      menu.appendChild(footer);
+
+      document.body.appendChild(menu);
+      const r = statusBtn.getBoundingClientRect();
+      menu.style.left = `${Math.round(window.scrollX + r.left)}px`;
+      menu.style.top  = `${Math.round(window.scrollY + r.bottom + 6)}px`;
+
+      setTimeout(() => {
+        document.addEventListener('click', onDocClose, true);
+        document.addEventListener('keydown', onEscClose, true);
+      }, 0);
+    });
+
+    topControls.appendChild(statusLabel);
+    topControls.appendChild(statusBtn);
+
+    // Week ending date range (FE sends week_ending_from/to)
+    const weLabel = document.createElement('span');
+    weLabel.className = 'mini';
+    weLabel.textContent = 'Week ending:';
+
+    const weFrom = document.createElement('input');
+    weFrom.type = 'date';
+    weFrom.className = 'input';
+    weFrom.style.cssText = 'width:160px;min-width:160px;';
+    weFrom.value = String(stFilters.week_ending_from || '');
+
+    const weTo = document.createElement('input');
+    weTo.type = 'date';
+    weTo.className = 'input';
+    weTo.style.cssText = 'width:160px;min-width:160px;';
+    weTo.value = String(stFilters.week_ending_to || '');
+
+    weFrom.addEventListener('change', async () => {
+      await applyFilters({ week_ending_from: weFrom.value || null });
+    });
+    weTo.addEventListener('change', async () => {
+      await applyFilters({ week_ending_to: weTo.value || null });
+    });
+
+    topControls.appendChild(weLabel);
+    topControls.appendChild(weFrom);
+    topControls.appendChild(weTo);
+
+    // Issued date range
+    const issLabel = document.createElement('span');
+    issLabel.className = 'mini';
+    issLabel.textContent = 'Issued:';
+
+    const issFrom = document.createElement('input');
+    issFrom.type = 'date';
+    issFrom.className = 'input';
+    issFrom.style.cssText = 'width:160px;min-width:160px;';
+    issFrom.value = String(stFilters.issued_from || '');
+
+    const issTo = document.createElement('input');
+    issTo.type = 'date';
+    issTo.className = 'input';
+    issTo.style.cssText = 'width:160px;min-width:160px;';
+    issTo.value = String(stFilters.issued_to || '');
+
+    issFrom.addEventListener('change', async () => {
+      await applyFilters({ issued_from: issFrom.value || null });
+    });
+    issTo.addEventListener('change', async () => {
+      await applyFilters({ issued_to: issTo.value || null });
+    });
+
+    topControls.appendChild(issLabel);
+    topControls.appendChild(issFrom);
+    topControls.appendChild(issTo);
+
+    // Search box bound to filters.q
+    const qLabel = document.createElement('span');
+    qLabel.className = 'mini';
+    qLabel.textContent = 'Search:';
+
+    const qInp = document.createElement('input');
+    qInp.type = 'text';
+    qInp.className = 'input';
+    qInp.placeholder = 'Invoice no…';
+    qInp.style.cssText = 'width:220px;min-width:220px;';
+    qInp.value = String(stFilters.q || '');
+
+    const applyQ = async () => {
+      const v = (qInp.value || '').trim();
+      await applyFilters({ q: v || null });
+    };
+    qInp.addEventListener('keydown', async (e) => {
+      if (e.key !== 'Enter') return;
+      await applyQ();
+    });
+    qInp.addEventListener('blur', async () => {
+      // keep UX light: only apply if value differs from stored filter
+      const cur = String((window.__listState[currentSection].filters || {}).q || '').trim();
+      const next = String((qInp.value || '')).trim();
+      if (cur !== next) await applyQ();
+    });
+
+    topControls.appendChild(qLabel);
+    topControls.appendChild(qInp);
+
+    // Refresh status button text if filters changed by defaults
+    setStatusBtnText();
+  }
+
+  // ── Contracts quick Status menu ─────────────────────────────────────────────
   let statusSel = null;
   if (currentSection === 'contracts') {
     const stFilters = window.__listState[currentSection].filters || {};
@@ -42144,7 +43443,7 @@ function renderSummary(rows){
     topControls.appendChild(mkFlag('is_adjusted', 'Adjusted only'));
   }
 
-  // Columns button
+  // Columns button (already supports per-column display name overrides via openColumnsDialog)
   const btnCols = document.createElement('button');
   btnCols.textContent = 'Columns';
   btnCols.style.cssText = 'border:1px solid var(--line);background:#0b152a;color:var(--text);padding:4px 8px;border-radius:8px;cursor:pointer';
@@ -42267,6 +43566,19 @@ function renderSummary(rows){
   thSel.appendChild(hdrCb);
   trh.appendChild(thSel);
 
+  // Invoice sortable keys (backend /api/invoices allows only these)
+  const INVOICE_SORT_ALLOWED = new Set([
+    'issued_at_utc',
+    'due_at_utc',
+    'created_at',
+    'status_date_utc',
+    'invoice_no',
+    'subtotal_ex_vat',
+    'vat_amount',
+    'total_inc_vat',
+    'status'
+  ]);
+
   // Build header cells with friendly labels, resizer handles, and click-to-sort
   cols.forEach(c=>{
     const th = document.createElement('th');
@@ -42278,7 +43590,11 @@ function renderSummary(rows){
       label = 'Issues';
     }
 
-    const isActive = sortState && sortState.key === c;
+    // Only show sort arrow for invoice-supported keys when in invoices section
+    const isSortable =
+      (currentSection !== 'invoices') ? true : INVOICE_SORT_ALLOWED.has(String(c));
+
+    const isActive = isSortable && sortState && sortState.key === c;
     const arrow = isActive ? (sortState.dir === 'asc' ? ' ▲' : ' ▼') : '';
     th.textContent = label + arrow;
 
@@ -42295,6 +43611,9 @@ function renderSummary(rows){
 
       const colKey = th.dataset.colKey;
       if (!colKey) return;
+
+      // invoices: only allow backend-supported sort keys (avoid misleading arrows)
+      if (currentSection === 'invoices' && !INVOICE_SORT_ALLOWED.has(colKey)) return;
 
       window.__listState = window.__listState || {};
       const st2 = (window.__listState[currentSection] ||= {
@@ -42380,6 +43699,9 @@ function renderSummary(rows){
           // Timesheet exists – use shared helper (green OK or red/amber badges)
           td.appendChild(renderIssueBadges(codes));
         }
+      } else if (currentSection === 'invoices' && c === 'client_name') {
+        // Flattened client name (already set in pre-normalisation)
+        td.textContent = String(r.client_name || '');
       } else {
         td.textContent = formatDisplayValue(c, v);
       }
@@ -42563,39 +43885,42 @@ function renderSummary(rows){
   else if (pageSize === 'ALL') maxPageToShow = 1;
   else maxPageToShow = hasMore ? (current + 1) : current;
 
-  const prevBtn = mkBtn('Prev', current <= 1, async () => {
-    window.__listState[currentSection].page = Math.max(1, current - 1);
-    const data = await loadSection();
-    renderSummary(data);
-  });
-  pager.appendChild(prevBtn);
+  // If pageSize is ALL, hide navigation controls (single-page UX)
+  if (pageSize !== 'ALL') {
+    const prevBtn = mkBtn('Prev', current <= 1, async () => {
+      window.__listState[currentSection].page = Math.max(1, current - 1);
+      const data = await loadSection();
+      renderSummary(data);
+    });
+    pager.appendChild(prevBtn);
 
-  const makePageLink = (n) => mkBtn(String(n), n === current, async () => {
-    window.__listState[currentSection].page = n;
-    const data = await loadSection();
-    renderSummary(data);
-  });
+    const makePageLink = (n) => mkBtn(String(n), n === current, async () => {
+      window.__listState[currentSection].page = n;
+      const data = await loadSection();
+      renderSummary(data);
+    });
 
-  const pages = [];
-  if (maxPageToShow <= 7) { for (let n=1; n<=maxPageToShow; n++) pages.push(n); }
-  else {
-    pages.push(1);
-    if (current > 3) pages.push('…');
-    for (let n=Math.max(2, current-1); n<=Math.min(maxPageToShow-1, current+1); n++) pages.push(n);
-    if (hasMore || current+1 < maxPageToShow) pages.push('…');
-    pages.push(maxPageToShow);
+    const pages = [];
+    if (maxPageToShow <= 7) { for (let n=1; n<=maxPageToShow; n++) pages.push(n); }
+    else {
+      pages.push(1);
+      if (current > 3) pages.push('…');
+      for (let n=Math.max(2, current-1); n<=Math.min(maxPageToShow-1, current+1); n++) pages.push(n);
+      if (hasMore || current+1 < maxPageToShow) pages.push('…');
+      pages.push(maxPageToShow);
+    }
+    pages.forEach(pn => {
+      if (pn === '…') { const span = document.createElement('span'); span.textContent = '…'; span.className = 'mini'; pager.appendChild(span); }
+      else pager.appendChild(makePageLink(pn));
+    });
+
+    const nextBtn = mkBtn('Next', (!hasMore && (!totalKnown || current >= maxPageToShow)), async () => {
+      window.__listState[currentSection].page = current + 1;
+      const data = await loadSection();
+      renderSummary(data);
+    });
+    pager.appendChild(nextBtn);
   }
-  pages.forEach(pn => {
-    if (pn === '…') { const span = document.createElement('span'); span.textContent = '…'; span.className = 'mini'; pager.appendChild(span); }
-    else pager.appendChild(makePageLink(pn));
-  });
-
-  const nextBtn = mkBtn('Next', (pageSize === 'ALL') || (!hasMore && (!totalKnown || current >= maxPageToShow)), async () => {
-    window.__listState[currentSection].page = current + 1;
-    const data = await loadSection();
-    renderSummary(data);
-  });
-  pager.appendChild(nextBtn);
 
   if (pageSize === 'ALL') info.textContent = `Showing all ${effectiveRows.length} ${currentSection}.`;
   else if (totalKnown) {
@@ -42704,7 +44029,6 @@ function renderSummary(rows){
 
   try { primeSummaryMembership(currentSection, fp); } catch (e) { /* non-blocking */ }
 }
-
 
 
 // ================== NEW: renderSettingsTab (tab renderer; showModal controls read-only) ==================
