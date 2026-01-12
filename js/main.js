@@ -14221,7 +14221,6 @@ let modalCtx = { entity:null, data:null };
 
 
 // ✅ CHANGED: make this async, always hydrate fresh from server before opening
-
 function openDetails(rowOrId) {
   if (!confirmDiscardChangesIfDirty()) return;
 
@@ -14265,7 +14264,11 @@ function openDetails(rowOrId) {
   else if (currentSection === 'audit')      openAuditItem(row);
   else if (currentSection === 'contracts')  openContract(row);
   else if (currentSection === 'timesheets') openTimesheet(row);
+  else if (currentSection === 'invoices')   openInvoiceModal(row); // ✅ NEW
 }
+
+
+
 
 async function unauthoriseTimesheet(ctxOrId, expectedTimesheetId) {
   const { LOGM, L, GC, GE } = getTsLoggers('[TS][UNAUTH]');
@@ -27846,6 +27849,1907 @@ function canonicalizeClientSettings(input) {
 
   return cs;
 }
+
+
+async function openInvoiceModal(row) {
+  // ─────────────────────────────────────────────────────────────
+  // Invoice modal UX:
+  // - View mode: pills + timestamps (no inputs)
+  // - Edit mode: checkbox rows + staged timestamps (London)
+  // - Save calls backend endpoints in safe order and refetches detail
+  // - Remove timesheets: div-based selection + POST remove-timesheets
+  // - Delete: DELETE /api/invoices/:id (only when empty + unissued + unpaid)
+  // - Render PDF: POST render + show iframe preview modal
+  // - Email: POST email (queues outbox) + show mail_id hint
+  // ─────────────────────────────────────────────────────────────
+
+  if (!row || typeof row !== 'object') {
+    alert('Invoice row not provided');
+    return;
+  }
+
+  const invoiceId = String(row.id || row.invoice_id || '').trim();
+  if (!invoiceId) {
+    alert('Invoice id missing');
+    return;
+  }
+
+  const esc = encodeURIComponent;
+
+  const safeJson = async (res) => { try { return await res.json(); } catch { return null; } };
+
+  const apiGetInvoiceDetail = async (id) => {
+    const res = await authFetch(API(`/api/invoices/${esc(id)}`));
+    const j = await safeJson(res);
+    if (!res.ok) {
+      const t = await res.text().catch(()=> '');
+      const msg = (j && (j.error || j.message)) ? (j.error || j.message) : (t || `Request failed (${res.status})`);
+      throw new Error(String(msg || 'Failed to fetch invoice'));
+    }
+    return j;
+  };
+
+  // Minimal invoice state seed
+  window.modalCtx = {
+    entity: 'invoices',
+    openToken: `invoice:${invoiceId}:${Date.now()}:${Math.random().toString(36).slice(2)}`,
+    data: { ...(row || {}), id: invoiceId },
+    invoiceDetail: null,
+    invoiceState: null,
+    invoiceRemove: { selectedTimesheetIds: new Set() },
+    invoiceUi: { lastEmail: null, lastRenderUrl: null }
+  };
+
+  const initInvoiceStateFromDetail = (detail) => {
+    const inv = detail?.invoice || null;
+    if (!inv) return null;
+
+    const status = String(inv.status || '').toUpperCase();
+    const isHold = (status === 'ON_HOLD');
+    const isPaid = (status === 'PAID');
+    const isIssued = (status === 'ISSUED' || isPaid);
+
+    const original = {
+      status,
+      is_hold: isHold,
+      is_issued: isIssued,
+      is_paid: isPaid,
+      on_hold_reason: String(inv.on_hold_reason || '').trim(),
+      status_date_utc: inv.status_date_utc || null,
+      issued_at_utc: inv.issued_at_utc || null,
+      paid_at_utc: inv.paid_at_utc || null
+    };
+
+    // staged starts as original
+    const staged = {
+      is_hold: original.is_hold,
+      is_issued: original.is_issued,
+      is_paid: original.is_paid,
+      on_hold_reason: original.on_hold_reason,
+
+      hold_ts_local: '',
+      issued_ts_local: '',
+      paid_ts_local: ''
+    };
+
+    window.modalCtx.invoiceState = { original, staged };
+    return window.modalCtx.invoiceState;
+  };
+
+  const reloadInvoiceIntoCtx = async () => {
+    const detail = await apiGetInvoiceDetail(invoiceId);
+    window.modalCtx.invoiceDetail = detail;
+    window.modalCtx.data = { ...(detail.invoice || {}), id: invoiceId };
+    initInvoiceStateFromDetail(detail);
+    return detail;
+  };
+
+  const renderTab = () => renderInvoiceModalContent(window.modalCtx);
+
+  const onSave = async () => {
+    const mc = window.modalCtx || {};
+    const detail = mc.invoiceDetail || null;
+    const inv = detail?.invoice || null;
+
+    if (!inv) {
+      alert('Invoice not loaded');
+      return { ok: false };
+    }
+
+    const st = mc.invoiceState;
+    if (!st || !st.original || !st.staged) {
+      alert('Invoice state missing');
+      return { ok: false };
+    }
+
+    const original = st.original;
+    const staged = st.staged;
+
+    // Enforce consistency rules in staged state
+    if (staged.is_paid) staged.is_issued = true;
+    if (staged.is_hold) {
+      staged.is_issued = false;
+      staged.is_paid = false;
+    }
+    if (!staged.is_issued) staged.is_paid = false;
+
+    staged.on_hold_reason = String(staged.on_hold_reason || '').trim();
+
+    // Hold reason required if holding
+    if (staged.is_hold && !staged.on_hold_reason) {
+      alert('Hold reason is required when placing an invoice on hold.');
+      return { ok: false };
+    }
+
+    const encId = esc(invoiceId);
+
+    const postJson = async (path, body) => {
+      const res = await authFetch(API(path), {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body || {})
+      });
+      const j = await safeJson(res);
+      if (!res.ok) {
+        const t = await res.text().catch(()=> '');
+        const msg = (j && (j.error || j.message)) ? (j.error || j.message) : (t || `Request failed (${res.status})`);
+        throw new Error(String(msg || 'Request failed'));
+      }
+      return j;
+    };
+
+    // Determine transitions (safe order)
+    const tasks = [];
+
+    // If moving off hold → unhold first
+    if (original.is_hold && !staged.is_hold) {
+      tasks.push(async () => await postJson(`/api/invoices/${encId}/unhold`, {}));
+    }
+
+    // If unpaying → mark unpaid first (must be before unissue)
+    if (original.is_paid && !staged.is_paid) {
+      tasks.push(async () => await postJson(`/api/invoices/${encId}/mark-unpaid`, {}));
+    }
+
+    // If unissuing → unissue after unpaid
+    if (original.is_issued && !staged.is_issued) {
+      tasks.push(async () => await postJson(`/api/invoices/${encId}/unissue`, { clear_pdf: false }));
+    }
+
+    // If holding from draft → hold (only if not issued/paid)
+    // (If they toggled hold on, UI rules already cleared issued/paid)
+    if (!original.is_hold && staged.is_hold) {
+      tasks.push(async () => await postJson(`/api/invoices/${encId}/hold`, { reason: staged.on_hold_reason || null }));
+    }
+
+    // If issuing → issue (if not hold)
+    if (!staged.is_hold && !original.is_issued && staged.is_issued) {
+      tasks.push(async () => {
+        const j = await postJson(`/api/invoices/${encId}/issue`, {});
+        // issue can return ON_HOLD (server reasons)
+        const st = String(j?.status || '').toUpperCase();
+        if (st === 'ON_HOLD') {
+          // refresh and stop further actions by throwing a controlled error
+          const reason = j?.on_hold_reason ? String(j.on_hold_reason) : 'Invoice moved to ON_HOLD';
+          throw new Error(`Invoice placed ON_HOLD: ${reason}`);
+        }
+        return j;
+      });
+    }
+
+    // If marking paid → mark paid (must be after issue)
+    if (!original.is_paid && staged.is_paid) {
+      tasks.push(async () => await postJson(`/api/invoices/${encId}/mark-paid`, {}));
+    }
+
+    // If we need to update hold reason while already on hold
+    if (staged.is_hold && staged.on_hold_reason !== String(original.on_hold_reason || '')) {
+      // invoice_hold_one sets reason; calling hold again is fine to update reason
+      tasks.push(async () => await postJson(`/api/invoices/${encId}/hold`, { reason: staged.on_hold_reason || null }));
+    }
+
+    if (!tasks.length) {
+      window.__toast && window.__toast('No changes');
+      return { ok: true };
+    }
+
+    try {
+      for (const fn of tasks) await fn();
+    } catch (e) {
+      // Always refetch so UI reflects server truth if something changed mid-way
+      try { await reloadInvoiceIntoCtx(); } catch {}
+      alert(String(e?.message || e || 'Failed to update invoice'));
+      return { ok: false };
+    }
+
+    // Refetch and repaint with server timestamps
+    try { await reloadInvoiceIntoCtx(); } catch {}
+
+    // refresh invoice summary behind the modal
+    try {
+      if (currentSection === 'invoices') {
+        const data = await loadSection();
+        renderSummary(data);
+      }
+    } catch {}
+
+    // repaint current modal tab
+    try {
+      const fr = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
+      if (fr) {
+        fr._suppressDirty = true;
+        await fr.setTab(fr.currentTabKey || 'main');
+        fr._suppressDirty = false;
+        fr._updateButtons && fr._updateButtons();
+      }
+    } catch {}
+
+    return { ok: true };
+  };
+
+  showModal(
+    `Invoice ${String(row.invoice_no || '').trim() || String(invoiceId).slice(0, 8) + '…'}`,
+    [{ key: 'main', label: 'Invoice' }],
+    renderTab,
+    onSave,
+    true,
+    null,
+    { kind: 'invoice' }
+  );
+
+  // Fetch detail and paint
+  try {
+    await reloadInvoiceIntoCtx();
+  } catch (e) {
+    alert(String(e?.message || e || 'Failed to load invoice'));
+  }
+
+  // Wire DOM behaviour (re-wire after re-renders)
+  const wire = () => {
+    try {
+      const root = document.getElementById('invModalRoot');
+      if (!root) return;
+
+      // Render / Email / Remove / Delete
+      const btnRender = root.querySelector('[data-inv-action="render-pdf"]');
+      const btnEmail  = root.querySelector('[data-inv-action="email"]');
+      const btnRemove = root.querySelector('[data-inv-action="remove-timesheets"]');
+      const btnDelete = root.querySelector('[data-inv-action="delete"]');
+
+      if (btnRender && !btnRender.dataset.wired) {
+        btnRender.dataset.wired = '1';
+        btnRender.addEventListener('click', async (ev) => {
+          ev.preventDefault(); ev.stopPropagation();
+          await handleInvoiceRenderPdf(window.modalCtx);
+        });
+      }
+
+      if (btnEmail && !btnEmail.dataset.wired) {
+        btnEmail.dataset.wired = '1';
+        btnEmail.addEventListener('click', async (ev) => {
+          ev.preventDefault(); ev.stopPropagation();
+          await handleInvoiceEmail(window.modalCtx);
+        });
+      }
+
+      if (btnRemove && !btnRemove.dataset.wired) {
+        btnRemove.dataset.wired = '1';
+        btnRemove.addEventListener('click', async (ev) => {
+          ev.preventDefault(); ev.stopPropagation();
+
+          const mc = window.modalCtx || {};
+          const inv = mc.invoiceDetail?.invoice || null;
+          const status = String(inv?.status || '').toUpperCase();
+
+          const can =
+            inv &&
+            (inv.paid_at_utc == null) &&
+            (status === 'DRAFT' || status === 'ON_HOLD');
+
+          if (!can) {
+            alert('You can only remove timesheets from an unissued/unpaid invoice (DRAFT/ON_HOLD).');
+            return;
+          }
+
+          const tsIds = Array.from(mc.invoiceRemove?.selectedTimesheetIds || []).map(String).filter(Boolean);
+          if (!tsIds.length) {
+            alert('Select at least one timesheet group to remove.');
+            return;
+          }
+
+          const ok = window.confirm(
+            `Remove ${tsIds.length} timesheet(s) from this invoice?\n\n` +
+            `Removed timesheets return to a pre-authorised state (PENDING_AUTH) and must be re-authorised before invoicing.`
+          );
+          if (!ok) return;
+
+          try {
+            const res = await authFetch(API(`/api/invoices/${esc(invoiceId)}/remove-timesheets`), {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ timesheet_ids: tsIds })
+            });
+            const j = await safeJson(res);
+            if (!res.ok) {
+              const t = await res.text().catch(()=> '');
+              const msg = (j && (j.error || j.message)) ? (j.error || j.message) : (t || `Request failed (${res.status})`);
+              throw new Error(String(msg || 'Failed to remove timesheets'));
+            }
+
+            mc.invoiceRemove.selectedTimesheetIds.clear();
+            window.__toast && window.__toast('Timesheets removed.');
+
+            // refresh invoice detail + repaint
+            await reloadInvoiceIntoCtx();
+
+            // refresh invoices summary if open
+            try {
+              if (currentSection === 'invoices') {
+                const data = await loadSection();
+                renderSummary(data);
+              }
+              if (currentSection === 'timesheets') {
+                const data = await loadSection();
+                renderSummary(data);
+              }
+            } catch {}
+
+            try {
+              const fr = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
+              if (fr) {
+                fr._suppressDirty = true;
+                await fr.setTab(fr.currentTabKey || 'main');
+                fr._suppressDirty = false;
+                fr._updateButtons && fr._updateButtons();
+              }
+            } catch {}
+
+          } catch (e) {
+            alert(String(e?.message || e || 'Failed to remove timesheets'));
+          }
+        });
+      }
+
+      if (btnDelete && !btnDelete.dataset.wired) {
+        btnDelete.dataset.wired = '1';
+        btnDelete.addEventListener('click', async (ev) => {
+          ev.preventDefault(); ev.stopPropagation();
+          await handleInvoiceDelete(window.modalCtx);
+        });
+      }
+
+      // Timesheet group selection toggles (divs)
+      const picks = root.querySelectorAll('[data-inv-ts-pick="1"][data-tsid]');
+      picks.forEach(el => {
+        if (el.dataset.wired === '1') return;
+        el.dataset.wired = '1';
+
+        const tsid = String(el.getAttribute('data-tsid') || '').trim();
+        if (!tsid) return;
+
+        const refreshPick = () => {
+          const on = window.modalCtx?.invoiceRemove?.selectedTimesheetIds?.has(tsid) || false;
+          el.setAttribute('aria-checked', on ? 'true' : 'false');
+          el.style.borderColor = on ? 'rgba(129,140,248,.7)' : 'var(--line)';
+          el.style.background = on ? 'rgba(79,70,229,.18)' : '#0b152a';
+          const mark = el.querySelector('[data-inv-ts-mark]');
+          if (mark) mark.textContent = on ? 'Selected' : 'Select';
+        };
+
+        el.addEventListener('click', (ev) => {
+          ev.preventDefault(); ev.stopPropagation();
+          const set = window.modalCtx.invoiceRemove.selectedTimesheetIds;
+          if (set.has(tsid)) set.delete(tsid);
+          else set.add(tsid);
+          refreshPick();
+        });
+
+        refreshPick();
+      });
+
+      // Edit-mode checkbox rules: enforce UI consistency + stage timestamps
+      const fr = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
+      const mode = fr?.mode || 'view';
+      if (mode !== 'edit' && mode !== 'create') return;
+
+      const mc = window.modalCtx || {};
+      const st = mc.invoiceState;
+      if (!st || !st.staged) return;
+
+      const cbHold   = root.querySelector('input[name="inv_is_hold"]');
+      const cbIssued = root.querySelector('input[name="inv_is_issued"]');
+      const cbPaid   = root.querySelector('input[name="inv_is_paid"]');
+      const inReason = root.querySelector('input[name="inv_hold_reason"]');
+
+      const stampHold  = root.querySelector('[data-inv-stamp="hold"]');
+      const stampIssue = root.querySelector('[data-inv-stamp="issued"]');
+      const stampPaid  = root.querySelector('[data-inv-stamp="paid"]');
+
+      const nowLondon = () => {
+        const dt = new Date();
+        try {
+          const parts = new Intl.DateTimeFormat('en-GB', {
+            timeZone: 'Europe/London',
+            year: 'numeric', month: '2-digit', day: '2-digit',
+            hour: '2-digit', minute: '2-digit', second: '2-digit',
+            hour12: false
+          }).formatToParts(dt);
+          const g = (t) => (parts.find(p => p.type === t)?.value || '');
+          return `${g('day')}/${g('month')}/${g('year')} ${g('hour')}:${g('minute')}:${g('second')}`;
+        } catch {
+          const pad = (n) => String(n).padStart(2, '0');
+          return `${pad(dt.getDate())}/${pad(dt.getMonth()+1)}/${dt.getFullYear()} ${pad(dt.getHours())}:${pad(dt.getMinutes())}:${pad(dt.getSeconds())}`;
+        }
+      };
+
+      const repaintStamps = () => {
+        if (stampHold)  stampHold.textContent  = st.staged.is_hold  ? (st.staged.hold_ts_local ? `On hold: ${st.staged.hold_ts_local}` : '') : '';
+        if (stampIssue) stampIssue.textContent = st.staged.is_issued ? (st.staged.issued_ts_local ? `Issued: ${st.staged.issued_ts_local}` : '') : '';
+        if (stampPaid)  stampPaid.textContent  = st.staged.is_paid  ? (st.staged.paid_ts_local ? `Paid: ${st.staged.paid_ts_local}` : '') : '';
+      };
+
+      const enforceRules = (changed) => {
+        // Checking “Paid” auto-checks “Issued” and unchecks “On hold”
+        if (changed === 'paid' && st.staged.is_paid) {
+          st.staged.is_issued = true;
+          st.staged.is_hold = false;
+        }
+
+        // Checking “On hold” unchecks “Issued” and “Paid”
+        if (changed === 'hold' && st.staged.is_hold) {
+          st.staged.is_issued = false;
+          st.staged.is_paid = false;
+        }
+
+        // Unchecking “Issued” unchecks “Paid”
+        if (changed === 'issued' && !st.staged.is_issued) {
+          st.staged.is_paid = false;
+        }
+
+        // Apply to inputs
+        if (cbHold) cbHold.checked = !!st.staged.is_hold;
+        if (cbIssued) cbIssued.checked = !!st.staged.is_issued;
+        if (cbPaid) cbPaid.checked = !!st.staged.is_paid;
+
+        // Staged timestamps (UI only)
+        if (st.staged.is_hold) {
+          if (!st.staged.hold_ts_local) st.staged.hold_ts_local = nowLondon();
+        } else {
+          st.staged.hold_ts_local = '';
+        }
+
+        if (st.staged.is_issued) {
+          if (!st.staged.issued_ts_local) st.staged.issued_ts_local = nowLondon();
+        } else {
+          st.staged.issued_ts_local = '';
+        }
+
+        if (st.staged.is_paid) {
+          if (!st.staged.paid_ts_local) st.staged.paid_ts_local = nowLondon();
+        } else {
+          st.staged.paid_ts_local = '';
+        }
+
+        if (inReason) {
+          inReason.disabled = !st.staged.is_hold;
+          inReason.style.opacity = st.staged.is_hold ? '' : '0.6';
+        }
+
+        repaintStamps();
+      };
+
+      if (cbHold && !cbHold.dataset.wired) {
+        cbHold.dataset.wired = '1';
+        cbHold.addEventListener('change', () => {
+          st.staged.is_hold = !!cbHold.checked;
+          enforceRules('hold');
+        });
+      }
+
+      if (cbIssued && !cbIssued.dataset.wired) {
+        cbIssued.dataset.wired = '1';
+        cbIssued.addEventListener('change', () => {
+          st.staged.is_issued = !!cbIssued.checked;
+          enforceRules('issued');
+        });
+      }
+
+      if (cbPaid && !cbPaid.dataset.wired) {
+        cbPaid.dataset.wired = '1';
+        cbPaid.addEventListener('change', () => {
+          st.staged.is_paid = !!cbPaid.checked;
+          enforceRules('paid');
+        });
+      }
+
+      if (inReason && !inReason.dataset.wired) {
+        inReason.dataset.wired = '1';
+        inReason.addEventListener('input', () => {
+          st.staged.on_hold_reason = String(inReason.value || '').trim();
+        });
+      }
+
+      enforceRules(null);
+    } catch {}
+  };
+
+  // Observe re-renders
+  try {
+    const target = document.getElementById('modalBody');
+    if (target) {
+      const ob = new MutationObserver(() => { wire(); });
+      ob.observe(target, { childList: true, subtree: true });
+      window.modalCtx._invoiceObserver = ob;
+    }
+  } catch {}
+
+  // Initial wire
+  try { wire(); } catch {}
+}
+
+function renderInvoiceModalContent(modalCtx) {
+  const mc = modalCtx || {};
+  const detail = mc.invoiceDetail || null;
+  const inv = detail?.invoice || null;
+
+  const fr = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
+  const mode = fr?.mode || 'view';
+  const isEdit = (mode === 'edit' || mode === 'create');
+
+  const escapeHtml = (s) => String(s ?? '')
+    .replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;')
+    .replaceAll('"','&quot;').replaceAll("'","&#39;");
+
+  const fmtMoney = (n) => {
+    const x = Number(n || 0);
+    const v = Number.isFinite(x) ? x : 0;
+    return `£${v.toFixed(2)}`;
+  };
+
+  const fmtLondonTs = (isoLike) => {
+    if (!isoLike) return '';
+    const dt = new Date(isoLike);
+    if (Number.isNaN(dt.getTime())) return String(isoLike);
+    try {
+      const parts = new Intl.DateTimeFormat('en-GB', {
+        timeZone: 'Europe/London',
+        year: 'numeric', month: '2-digit', day: '2-digit',
+        hour: '2-digit', minute: '2-digit', second: '2-digit',
+        hour12: false
+      }).formatToParts(dt);
+      const g = (t) => (parts.find(p => p.type === t)?.value || '');
+      return `${g('day')}/${g('month')}/${g('year')} ${g('hour')}:${g('minute')}:${g('second')}`;
+    } catch {
+      const pad = (n) => String(n).padStart(2, '0');
+      return `${pad(dt.getDate())}/${pad(dt.getMonth()+1)}/${dt.getFullYear()} ${pad(dt.getHours())}:${pad(dt.getMinutes())}:${pad(dt.getSeconds())}`;
+    }
+  };
+
+  const fmtYmd = (ymd) => {
+    const s = String(ymd || '').slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return String(ymd || '');
+    const [Y,M,D] = s.split('-');
+    return `${D}/${M}/${Y}`;
+  };
+
+  // loading state
+  if (!inv) {
+    return `
+      <div id="invModalRoot" class="tabc" style="display:flex;flex-direction:column;gap:10px;">
+        <div class="card">
+          <div style="font-weight:700;">Loading invoice…</div>
+          <div class="mini" style="opacity:.85;">If this takes too long, close and reopen.</div>
+        </div>
+      </div>
+    `;
+  }
+
+  const status = String(inv.status || '').toUpperCase();
+  const isHold = (status === 'ON_HOLD');
+  const isIssued = (status === 'ISSUED' || status === 'PAID');
+  const isPaid = (status === 'PAID');
+
+  const st = mc.invoiceState || { original: {}, staged: {} };
+  const staged = st.staged || {};
+  const effectiveHold   = isEdit ? !!staged.is_hold   : isHold;
+  const effectiveIssued = isEdit ? !!staged.is_issued : isIssued;
+  const effectivePaid   = isEdit ? !!staged.is_paid   : isPaid;
+
+  // Invoice date preference: invoice_date else issued_at/created_at
+  const invDate =
+    inv.invoice_date ||
+    inv.issued_at_utc ||
+    inv.created_at ||
+    null;
+
+  // Week ending derivation:
+  // 1) from header_snapshot_json.meta.invoice_week_start + 6
+  // 2) else from items meta_json.week_ending_date (first)
+  let weekEndingTxt = '';
+  try {
+    const hdr = detail?.header_snapshot_json || {};
+    const ws = String(hdr?.meta?.invoice_week_start || hdr?.meta?.invoice_week_start_txt || '').slice(0, 10);
+    if (/^\d{4}-\d{2}-\d{2}$/.test(ws)) {
+      const dt = new Date(`${ws}T00:00:00Z`);
+      dt.setUTCDate(dt.getUTCDate() + 6);
+      weekEndingTxt = dt.toISOString().slice(0, 10);
+    }
+  } catch {}
+
+  if (!weekEndingTxt) {
+    try {
+      const items = Array.isArray(detail?.items) ? detail.items : [];
+      for (const it of items) {
+        const meta = (it?.meta_json && typeof it.meta_json === 'object') ? it.meta_json : {};
+        const we = String(meta?.week_ending_date || meta?.week_ending || '').slice(0, 10);
+        if (/^\d{4}-\d{2}-\d{2}$/.test(we)) { weekEndingTxt = we; break; }
+      }
+    } catch {}
+  }
+
+  const clientName =
+    String(detail?.header_snapshot_json?.client_name || inv?.client?.name || inv?.client_name || '').trim() ||
+    'Client';
+
+  const invoiceNo = String(inv.invoice_no || '').trim() || `${String(inv.id).slice(0,8)}…`;
+
+  const totals = {
+    ex:  fmtMoney(inv.subtotal_ex_vat),
+    vat: fmtMoney(inv.vat_amount),
+    inc: fmtMoney(inv.total_inc_vat)
+  };
+
+  // Stamps shown: hold uses status_date_utc when status ON_HOLD
+  const holdStampServer  = (isHold && inv.status_date_utc) ? fmtLondonTs(inv.status_date_utc) : '';
+  const issueStampServer = (inv.issued_at_utc) ? fmtLondonTs(inv.issued_at_utc) : '';
+  const paidStampServer  = (inv.paid_at_utc) ? fmtLondonTs(inv.paid_at_utc) : '';
+
+  const holdStamp = isEdit ? (staged.hold_ts_local || (effectiveHold ? holdStampServer : '')) : (effectiveHold ? holdStampServer : '');
+  const issueStamp = isEdit ? (staged.issued_ts_local || (effectiveIssued ? issueStampServer : '')) : (effectiveIssued ? issueStampServer : '');
+  const paidStamp = isEdit ? (staged.paid_ts_local || (effectivePaid ? paidStampServer : '')) : (effectivePaid ? paidStampServer : '');
+
+  const holdReasonVal = isEdit ? String(staged.on_hold_reason || '').trim() : String(inv.on_hold_reason || '').trim();
+
+  const pills = `
+    <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;">
+      <span class="pill ${effectiveHold ? 'pill-bad' : ''}">${effectiveHold ? 'ON HOLD' : 'HOLD: off'}</span>
+      <span class="pill ${effectiveIssued ? 'pill-info' : ''}">${effectiveIssued ? 'ISSUED' : 'ISSUED: off'}</span>
+      <span class="pill ${effectivePaid ? 'pill-ok' : ''}">${effectivePaid ? 'PAID' : 'PAID: off'}</span>
+    </div>
+  `;
+
+  const stateControls = isEdit ? `
+    <div class="card">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;">
+        <div style="font-weight:700;">State</div>
+        ${pills}
+      </div>
+
+      <div style="margin-top:10px;display:flex;flex-direction:column;gap:10px;">
+        <label class="mini" style="display:flex;align-items:center;gap:10px;">
+          <input type="checkbox" name="inv_is_hold" ${effectiveHold ? 'checked' : ''}/>
+          <span style="min-width:90px;">On Hold</span>
+          <span class="mini" data-inv-stamp="hold" style="opacity:.9;">${escapeHtml(holdStamp ? `On hold: ${holdStamp}` : '')}</span>
+        </label>
+
+        <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-left:24px;">
+          <input class="input" name="inv_hold_reason" placeholder="On hold reason…" value="${escapeHtml(holdReasonVal)}"
+                 ${effectiveHold ? '' : 'disabled'}
+                 style="max-width:600px;flex:1;${effectiveHold ? '' : 'opacity:.6;'}"/>
+          <span class="mini" style="opacity:.8;">Required if holding.</span>
+        </div>
+
+        <label class="mini" style="display:flex;align-items:center;gap:10px;">
+          <input type="checkbox" name="inv_is_issued" ${effectiveIssued ? 'checked' : ''}/>
+          <span style="min-width:90px;">Issued</span>
+          <span class="mini" data-inv-stamp="issued" style="opacity:.9;">${escapeHtml(issueStamp ? `Issued: ${issueStamp}` : '')}</span>
+        </label>
+
+        <label class="mini" style="display:flex;align-items:center;gap:10px;">
+          <input type="checkbox" name="inv_is_paid" ${effectivePaid ? 'checked' : ''}/>
+          <span style="min-width:90px;">Paid</span>
+          <span class="mini" data-inv-stamp="paid" style="opacity:.9;">${escapeHtml(paidStamp ? `Paid: ${paidStamp}` : '')}</span>
+        </label>
+
+        <div class="mini" style="opacity:.85;">
+          Stamps are staged locally until you click <b>Save</b>.
+        </div>
+      </div>
+    </div>
+  ` : `
+    <div class="card">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;">
+        <div style="font-weight:700;">State</div>
+        ${pills}
+      </div>
+
+      <div style="margin-top:10px;display:flex;flex-direction:column;gap:6px;">
+        <div class="mini" style="opacity:.9;">
+          ${effectiveHold ? `<span class="pill pill-bad">ON HOLD</span> ${escapeHtml(holdReasonVal ? `— ${holdReasonVal}` : '')}` : ''}
+        </div>
+        <div class="mini" style="opacity:.9;">
+          ${effectiveHold && holdStamp ? `On hold: <b>${escapeHtml(holdStamp)}</b>` : ''}
+        </div>
+        <div class="mini" style="opacity:.9;">
+          ${effectiveIssued && issueStamp ? `Issued: <b>${escapeHtml(issueStamp)}</b>` : ''}
+        </div>
+        <div class="mini" style="opacity:.9;">
+          ${effectivePaid && paidStamp ? `Paid: <b>${escapeHtml(paidStamp)}</b>` : ''}
+        </div>
+      </div>
+    </div>
+  `;
+
+  // Actions (anchors are clickable even in view mode because setFormReadOnly disables buttons/inputs)
+  const actions = `
+    <div class="card">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;">
+        <div style="font-weight:700;">Actions</div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;">
+          <a href="#" class="btn mini" data-inv-action="render-pdf">Render PDF</a>
+          <a href="#" class="btn mini" data-inv-action="email">Email invoice</a>
+        </div>
+      </div>
+      <div class="mini" style="opacity:.85;margin-top:6px;">
+        Render PDF opens a preview viewer. Email queues mail_outbox (non-blocking).
+      </div>
+    </div>
+  `;
+
+  // Header summary card
+  const header = `
+    <div class="card">
+      <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:10px;flex-wrap:wrap;">
+        <div style="display:flex;flex-direction:column;gap:4px;">
+          <div style="font-weight:800;font-size:14px;">Invoice ${escapeHtml(invoiceNo)}</div>
+          <div class="mini" style="opacity:.9;">Client: <strong>${escapeHtml(clientName)}</strong></div>
+          <div class="mini" style="opacity:.9;">Invoice date: <strong>${escapeHtml(invDate ? fmtLondonTs(invDate) : '—')}</strong></div>
+          <div class="mini" style="opacity:.9;">Week ending: <strong>${escapeHtml(weekEndingTxt ? fmtYmd(weekEndingTxt) : '—')}</strong></div>
+          <div class="mini" style="opacity:.9;">Status: <strong>${escapeHtml(status || '—')}</strong></div>
+        </div>
+
+        <div style="display:flex;flex-direction:column;gap:4px;min-width:220px;">
+          <div class="mini" style="display:flex;justify-content:space-between;gap:10px;">
+            <span>Subtotal ex VAT</span><strong>${escapeHtml(totals.ex)}</strong>
+          </div>
+          <div class="mini" style="display:flex;justify-content:space-between;gap:10px;">
+            <span>VAT</span><strong>${escapeHtml(totals.vat)}</strong>
+          </div>
+          <div class="mini" style="display:flex;justify-content:space-between;gap:10px;">
+            <span>Total inc VAT</span><strong>${escapeHtml(totals.inc)}</strong>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+
+  // Lines + remove + delete
+  const lines = renderInvoiceLinesTable(mc);
+
+  return `
+    <div id="invModalRoot" class="tabc" style="display:flex;flex-direction:column;gap:10px;min-height:0;">
+      ${header}
+      ${stateControls}
+      ${actions}
+      ${lines}
+    </div>
+  `;
+}
+
+function renderInvoiceLinesTable(modalCtx) {
+  const mc = modalCtx || {};
+  const detail = mc.invoiceDetail || null;
+  const inv = detail?.invoice || null;
+
+  const escapeHtml = (s) => String(s ?? '')
+    .replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;')
+    .replaceAll('"','&quot;').replaceAll("'","&#39;");
+
+  const fmtMoney = (n) => {
+    const x = Number(n || 0);
+    const v = Number.isFinite(x) ? x : 0;
+    return `£${v.toFixed(2)}`;
+  };
+
+  const fmtYmd = (ymd) => {
+    const s = String(ymd || '').slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return String(ymd || '');
+    const [Y,M,D] = s.split('-');
+    return `${D}/${M}/${Y}`;
+  };
+
+  if (!inv) {
+    return `
+      <div class="card">
+        <div style="font-weight:700;margin-bottom:8px;">Lines</div>
+        <div class="mini" style="opacity:.85;">Loading…</div>
+      </div>
+    `;
+  }
+
+  const items = Array.isArray(detail?.items) ? detail.items : [];
+  const status = String(inv.status || '').toUpperCase();
+
+  const canRemove =
+    (inv.paid_at_utc == null) &&
+    (status === 'DRAFT' || status === 'ON_HOLD');
+
+  // Group by timesheet_id for removal selection
+  const byTs = new Map(); // tsid -> {tsid, worker, week, count, ex, vat, inc}
+  for (const it of items) {
+    const tsid = String(it?.timesheet_id || '').trim();
+    if (!tsid) continue;
+
+    const meta = (it?.meta_json && typeof it.meta_json === 'object') ? it.meta_json : {};
+    const worker = String(meta?.candidate_name || meta?.candidate_display || meta?.candidate || '').trim() || 'Worker';
+
+    const week = String(meta?.week_ending_date || meta?.week_ending || '').slice(0, 10);
+
+    if (!byTs.has(tsid)) {
+      byTs.set(tsid, { tsid, worker, week, count: 0, ex: 0, vat: 0, inc: 0 });
+    }
+
+    const g = byTs.get(tsid);
+    g.count += 1;
+
+    g.ex += Number(it?.total_charge_ex_vat || 0) || 0;
+    g.vat += Number(it?.vat_amount || 0) || 0;
+    g.inc += Number(it?.total_inc_vat || 0) || 0;
+  }
+
+  const tsGroups = Array.from(byTs.values()).sort((a,b) => {
+    const aw = a.week || '';
+    const bw = b.week || '';
+    if (aw && bw && aw !== bw) return bw.localeCompare(aw);
+    return String(a.worker || '').localeCompare(String(b.worker || ''));
+  });
+
+  const tsPickHtml = tsGroups.length ? tsGroups.map(g => {
+    const we = g.week ? `W/E ${fmtYmd(g.week)}` : '';
+    const sub = `${we}${we ? ' • ' : ''}${g.count} line(s) • ${fmtMoney(g.ex)} ex VAT`;
+    return `
+      <div
+        data-inv-ts-pick="1"
+        data-tsid="${escapeHtml(g.tsid)}"
+        role="checkbox"
+        aria-checked="false"
+        style="display:flex;align-items:center;justify-content:space-between;gap:10px;
+               padding:8px 10px;border:1px solid var(--line);border-radius:10px;background:#0b152a;
+               cursor:pointer;user-select:none;"
+      >
+        <div style="display:flex;flex-direction:column;gap:2px;min-width:0;">
+          <div style="font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(g.worker)}</div>
+          <div class="mini" style="opacity:.9;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(sub)}</div>
+        </div>
+        <div class="mini" data-inv-ts-mark style="padding:3px 8px;border:1px solid var(--line);border-radius:999px;background:#081024;opacity:.8;">
+          Select
+        </div>
+      </div>
+    `;
+  }).join('') : `<div class="mini" style="opacity:.85;">No timesheet-linked lines found.</div>`;
+
+  const lineRowsHtml = items.map(it => {
+    const meta = (it?.meta_json && typeof it.meta_json === 'object') ? it.meta_json : {};
+
+    const worker = String(meta?.candidate_name || meta?.candidate_display || meta?.candidate || '').trim() || 'Worker';
+
+    const shiftOrWe =
+      String(meta?.shift_date || meta?.worked_date || meta?.date || meta?.week_ending_date || '').slice(0, 10);
+
+    const dateTxt = shiftOrWe ? fmtYmd(shiftOrWe) : '—';
+
+    const desc = String(it?.description || '').trim() || '';
+
+    const q = it?.qty || {};
+    const d  = Number(q.day || 0) || 0;
+    const n  = Number(q.night || 0) || 0;
+    const sa = Number(q.sat || 0) || 0;
+    const su = Number(q.sun || 0) || 0;
+    const bh = Number(q.bh || 0) || 0;
+
+    const totalH = d+n+sa+su+bh;
+    const qtyTxt =
+      totalH > 0
+        ? `D ${d.toFixed(2)} • N ${n.toFixed(2)} • Sat ${sa.toFixed(2)} • Sun ${su.toFixed(2)} • BH ${bh.toFixed(2)}`
+        : '—';
+
+    const ex  = fmtMoney(it?.total_charge_ex_vat);
+    const vat = fmtMoney(it?.vat_amount);
+    const inc = fmtMoney(it?.total_inc_vat);
+
+    return `
+      <tr>
+        <td>${escapeHtml(worker)}</td>
+        <td>${escapeHtml(dateTxt)}</td>
+        <td>${escapeHtml(desc)}</td>
+        <td>${escapeHtml(qtyTxt)}</td>
+        <td style="text-align:right">${escapeHtml(ex)}</td>
+        <td style="text-align:right">${escapeHtml(vat)}</td>
+        <td style="text-align:right">${escapeHtml(inc)}</td>
+      </tr>
+    `;
+  }).join('');
+
+  // Delete invoice is only enabled if invoice has zero lines, unissued, unpaid
+  const canDelete = canRemove && items.length === 0;
+
+  return `
+    <div class="card">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;">
+        <div style="font-weight:700;">Lines</div>
+        <div class="mini" style="opacity:.85;">Never shows raw timesheet_id.</div>
+      </div>
+
+      <div style="margin-top:10px;display:flex;flex-direction:column;gap:10px;">
+        <div class="mini" style="opacity:.9;">Remove timesheets from invoice (unissued/unpaid only):</div>
+
+        <div style="max-height:220px;overflow:auto;min-height:0;display:flex;flex-direction:column;gap:6px;border:1px solid var(--line);border-radius:10px;padding:8px;">
+          ${tsPickHtml}
+        </div>
+
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+          <a href="#" class="btn mini" data-inv-action="remove-timesheets"
+             style="display:inline-flex;align-items:center;justify-content:center;${canRemove ? '' : 'opacity:.45;pointer-events:none;'}">
+            Remove selected timesheets
+          </a>
+          <span class="mini" style="opacity:.85;">
+            ${canRemove ? '' : 'Not available (invoice must be DRAFT/ON_HOLD and unpaid).'}
+          </span>
+        </div>
+
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+          <a href="#" class="btn mini" data-inv-action="delete"
+             style="display:inline-flex;align-items:center;justify-content:center;background:#5a1d22;${canDelete ? '' : 'opacity:.45;pointer-events:none;'}">
+            Delete invoice
+          </a>
+          <span class="mini" style="opacity:.85;">
+            ${canDelete ? '' : 'Only available for empty, unissued, unpaid invoices.'}
+          </span>
+        </div>
+
+        <div style="max-height:50vh;overflow:auto;min-height:0;border:1px solid var(--line);border-radius:10px;">
+          <table class="grid mini" style="margin:0;">
+            <thead>
+              <tr>
+                <th>Worker</th>
+                <th>Shift / W/E</th>
+                <th>Description</th>
+                <th>Qty</th>
+                <th style="text-align:right">Ex VAT</th>
+                <th style="text-align:right">VAT</th>
+                <th style="text-align:right">Inc VAT</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${lineRowsHtml || `<tr><td colspan="7" class="mini" style="opacity:.85;">No lines.</td></tr>`}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+async function handleInvoiceDelete(modalCtx) {
+  const mc = modalCtx || {};
+  const inv = mc.invoiceDetail?.invoice || mc.data || null;
+  const invoiceId = String(inv?.id || '').trim();
+  if (!invoiceId) { alert('Invoice id missing'); return; }
+
+  const status = String(inv?.status || '').toUpperCase();
+  const items = Array.isArray(mc.invoiceDetail?.items) ? mc.invoiceDetail.items : [];
+
+  const can =
+    (inv?.paid_at_utc == null) &&
+    (status === 'DRAFT' || status === 'ON_HOLD') &&
+    items.length === 0;
+
+  if (!can) {
+    alert('Delete is only available for empty, unissued (DRAFT/ON_HOLD), unpaid invoices.');
+    return;
+  }
+
+  const ok = window.confirm('Delete this invoice? This cannot be undone.');
+  if (!ok) return;
+
+  const res = await authFetch(API(`/api/invoices/${encodeURIComponent(invoiceId)}`), { method: 'DELETE' });
+  if (!res.ok) {
+    const t = await res.text().catch(()=> '');
+    alert(t || `Delete failed (${res.status})`);
+    return;
+  }
+
+  window.__toast && window.__toast('Invoice deleted.');
+
+  // close modal
+  try { byId('btnCloseModal').click(); } catch {}
+
+  // refresh invoice summary if currently open
+  try {
+    if (currentSection === 'invoices') {
+      const data = await loadSection();
+      renderSummary(data);
+    }
+  } catch {}
+}
+
+async function handleInvoiceRenderPdf(modalCtx) {
+  const mc = modalCtx || {};
+  const inv = mc.invoiceDetail?.invoice || mc.data || null;
+  const invoiceId = String(inv?.id || '').trim();
+  if (!invoiceId) { alert('Invoice id missing'); return; }
+
+  const safeJson = async (res) => { try { return await res.json(); } catch { return null; } };
+
+  let pdfUrl = null;
+
+  try {
+    const res = await authFetch(API(`/api/invoices/${encodeURIComponent(invoiceId)}/render`), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({})
+    });
+    const j = await safeJson(res);
+    if (!res.ok) {
+      const t = await res.text().catch(()=> '');
+      const msg = (j && (j.error || j.message)) ? (j.error || j.message) : (t || `Render failed (${res.status})`);
+      throw new Error(String(msg || 'Render failed'));
+    }
+    pdfUrl = String(j?.pdf_url || '').trim();
+    if (!pdfUrl) throw new Error('Render returned no pdf_url');
+  } catch (e) {
+    alert(String(e?.message || e || 'Failed to render invoice PDF'));
+    return;
+  }
+
+  // Preview viewer modal (like evidence viewer design: iframe inside card)
+  const invNo = String(inv?.invoice_no || '').trim() || String(invoiceId).slice(0, 8);
+
+  window.modalCtx = {
+    entity: 'invoices',
+    openToken: `invoice-pdf:${invoiceId}:${Date.now()}:${Math.random().toString(36).slice(2)}`,
+    data: { id: invoiceId, invoice_no: invNo, pdf_url: pdfUrl }
+  };
+
+  showModal(
+    `Invoice ${invNo} — PDF Preview`,
+    [{ key: 'main', label: 'PDF' }],
+    () => {
+      const u = String(window.modalCtx?.data?.pdf_url || '');
+      return `
+        <div class="card" style="display:flex;flex-direction:column;gap:10px;min-height:0;">
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;">
+            <div class="mini" style="opacity:.9;">Preview (rendered PDF bundle)</div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;">
+              <a class="btn mini" href="${u}" target="_blank" rel="noopener">Open in new tab</a>
+            </div>
+          </div>
+
+          <div style="border:1px solid var(--line);border-radius:12px;overflow:hidden;min-height:0;">
+            <iframe src="${u}"
+              style="width:100%;height:75vh;border:0;background:#000;"
+              title="Invoice PDF Preview"></iframe>
+          </div>
+        </div>
+      `;
+    },
+    null,
+    true,
+    null,
+    { kind: 'import-summary-invoice-pdf', noParentGate: true }
+  );
+}
+
+async function handleInvoiceEmail(modalCtx) {
+  const mc = modalCtx || {};
+  const inv = mc.invoiceDetail?.invoice || mc.data || null;
+  const invoiceId = String(inv?.id || '').trim();
+  if (!invoiceId) { alert('Invoice id missing'); return; }
+
+  const safeJson = async (res) => { try { return await res.json(); } catch { return null; } };
+
+  try {
+    const res = await authFetch(API(`/api/invoices/${encodeURIComponent(invoiceId)}/email`), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({})
+    });
+    const j = await safeJson(res);
+
+    if (!res.ok) {
+      const t = await res.text().catch(()=> '');
+      const msg = (j && (j.error || j.message)) ? (j.error || j.message) : (t || `Email failed (${res.status})`);
+      throw new Error(String(msg || 'Email failed'));
+    }
+
+    const st = String(j?.status || '').toUpperCase();
+
+    if (st === 'ON_HOLD') {
+      const reason = j?.on_hold_reason ? String(j.on_hold_reason) : 'Invoice placed ON_HOLD';
+      alert(`Invoice moved to ON_HOLD and was not emailed.\n\nReason: ${reason}`);
+      // refresh invoice detail so UI reflects server state
+      try {
+        const r2 = await authFetch(API(`/api/invoices/${encodeURIComponent(invoiceId)}`));
+        const d2 = await safeJson(r2);
+        if (r2.ok && d2) {
+          mc.invoiceDetail = d2;
+          mc.data = { ...(d2.invoice || {}), id: invoiceId };
+        }
+      } catch {}
+      try {
+        const fr = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
+        if (fr) {
+          fr._suppressDirty = true;
+          await fr.setTab(fr.currentTabKey || 'main');
+          fr._suppressDirty = false;
+          fr._updateButtons && fr._updateButtons();
+        }
+      } catch {}
+      return;
+    }
+
+    if (j?.queued === true) {
+      const mailId = j?.mail_id ? String(j.mail_id) : '';
+      const to = j?.to ? String(j.to) : '';
+      window.__toast && window.__toast('Queued email.');
+      alert(
+        `Queued invoice email.\n\n` +
+        (to ? `To: ${to}\n` : '') +
+        (mailId ? `Outbox ID: ${mailId}\n\n` : '\n') +
+        `You can review outbox status in Audit → mail_outbox.`
+      );
+
+      // optional: if audit is open, refresh it
+      try {
+        if (currentSection === 'audit') {
+          const data = await loadSection();
+          renderSummary(data);
+        }
+      } catch {}
+
+      return;
+    }
+
+    // Fallback (should not happen, but safe)
+    window.__toast && window.__toast('Email request complete.');
+  } catch (e) {
+    alert(String(e?.message || e || 'Failed to queue invoice email'));
+  }
+}
+
+
+async function openInvoiceBatchIssueModal() {
+  // ─────────────────────────────────────────────────────────────
+  // Batch Issue — server authoritative gating
+  // - candidates endpoint uses invoice_batch_issue_candidates(p_allow_early, p_limit)
+  // - if allow_early=false, future weeks are not returned by server
+  // - selection defaults: DRAFT checked; ON_HOLD unchecked & visually red (disabled)
+  // ─────────────────────────────────────────────────────────────
+
+  const API_CANDIDATES = '/api/invoices/batch-issue/candidates';
+  const API_CONFIRM    = '/api/invoices/batch-issue/confirm';
+
+  const esc = encodeURIComponent;
+
+  const escapeHtml = (s) => String(s ?? '')
+    .replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;')
+    .replaceAll('"','&quot;').replaceAll("'","&#39;");
+
+  const fmtMoney = (n) => {
+    const x = Number(n || 0);
+    const v = Number.isFinite(x) ? x : 0;
+    return `£${v.toFixed(2)}`;
+  };
+
+  const fmtYmd = (ymd) => {
+    const s = String(ymd || '').slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return String(ymd || '');
+    const [Y,M,D] = s.split('-');
+    return `${D}/${M}/${Y}`;
+  };
+
+  const safeJson = async (res) => { try { return await res.json(); } catch { return null; } };
+
+  const apiGetJson = async (path) => {
+    const res = await authFetch(API(path));
+    const j = await safeJson(res);
+    if (!res.ok) {
+      const msg = (j && (j.error || j.message)) ? (j.error || j.message) : (await res.text().catch(()=>'')) || `Request failed (${res.status})`;
+      throw new Error(String(msg || 'Request failed'));
+    }
+    return j;
+  };
+
+  const apiPostJsonLocal = async (path, body) => {
+    const res = await authFetch(API(path), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body || {})
+    });
+    const j = await safeJson(res);
+    if (!res.ok) {
+      const msg = (j && (j.error || j.message)) ? (j.error || j.message) : (await res.text().catch(()=>'')) || `Request failed (${res.status})`;
+      throw new Error(String(msg || 'Request failed'));
+    }
+    return j;
+  };
+
+  const state = {
+    allowEarly: false,
+    limit: 2000,
+    groups: [],
+    selectedInvoiceIds: new Set(),
+    busy: false,
+    error: '',
+    results: null,
+    openClients: new Set(),
+    openWeeks: new Set()
+  };
+
+  const seedDefaultSelection = () => {
+    state.selectedInvoiceIds.clear();
+    const groups = Array.isArray(state.groups) ? state.groups : [];
+    for (const c of groups) {
+      const weeks = Array.isArray(c?.weeks) ? c.weeks : [];
+      for (const w of weeks) {
+        const invs = Array.isArray(w?.invoices) ? w.invoices : [];
+        for (const inv of invs) {
+          const id = String(inv?.invoice_id || '').trim();
+          const st = String(inv?.status || '').trim().toUpperCase();
+          if (!id) continue;
+          if (st === 'DRAFT') state.selectedInvoiceIds.add(id);
+        }
+      }
+    }
+  };
+
+  const fetchCandidates = async () => {
+    state.error = '';
+    state.results = null;
+
+    const qs = new URLSearchParams();
+    qs.set('allow_early', state.allowEarly ? '1' : '0');
+    qs.set('limit', String(state.limit || 2000));
+
+    const j = await apiGetJson(`${API_CANDIDATES}?${qs.toString()}`);
+    const groups = Array.isArray(j?.groups) ? j.groups : [];
+    state.groups = groups;
+
+    state.openClients.clear();
+    state.openWeeks.clear();
+
+    if (groups[0] && groups[0].client_id) {
+      const cid = String(groups[0].client_id);
+      state.openClients.add(cid);
+      const w0 = Array.isArray(groups[0].weeks) ? groups[0].weeks[0] : null;
+      if (w0 && (w0.invoice_week_start != null)) {
+        state.openWeeks.add(`${cid}|${String(w0.invoice_week_start)}`);
+      }
+    }
+
+    // Default selection rule
+    seedDefaultSelection();
+  };
+
+  const refreshInvoiceSummary = async () => {
+    try {
+      window.__listState = window.__listState || {};
+      window.__listState.invoices = window.__listState.invoices || { page: 1, pageSize: 50, total: null, hasMore: false, filters: null, sort: { key: null, dir: 'asc' } };
+      window.__listState.invoices.page = 1;
+      window.__listState.invoices.total = null;
+      window.__listState.invoices.hasMore = false;
+
+      if (currentSection === 'invoices') {
+        const data = await loadSection();
+        renderSummary(data);
+      }
+    } catch {}
+  };
+
+  const renderSkeleton = () => `
+    <div id="invBatchIssueRoot" class="invbatch-root">
+      <div class="mini" style="opacity:.95">
+        Issue <b>DRAFT</b> invoices and queue emails, grouped by client and week ending.
+        <span style="opacity:.85">ON_HOLD invoices remain excluded by default.</span>
+      </div>
+
+      <div id="invBatchIssueControls" class="invbatch-controls"></div>
+      <div id="invBatchIssueError" class="mini" style="display:none;color:#ffb4b4;"></div>
+
+      <div id="invBatchIssueScroll" class="invbatch-scroll">
+        <div id="invBatchIssueBody" class="invbatch-groups"></div>
+        <div id="invBatchIssueResults" class="invbatch-results" style="display:none"></div>
+      </div>
+    </div>
+  `;
+
+  const paint = () => {
+    const root = document.getElementById('invBatchIssueRoot');
+    if (!root) return;
+
+    const controls = document.getElementById('invBatchIssueControls');
+    const bodyEl   = document.getElementById('invBatchIssueBody');
+    const errEl    = document.getElementById('invBatchIssueError');
+    const resEl    = document.getElementById('invBatchIssueResults');
+    const scrollEl = document.getElementById('invBatchIssueScroll');
+
+    if (!controls || !bodyEl || !errEl || !resEl || !scrollEl) return;
+
+    const prevScroll = scrollEl.scrollTop || 0;
+    const selectedCount = state.selectedInvoiceIds.size;
+
+    const mkBtn = (label, onClick, opts={}) => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = ['btn','btn-sm', (opts.primary ? 'btn-primary' : 'btn-outline')].join(' ');
+      b.textContent = label;
+      if (opts.disabled) {
+        b.disabled = true;
+        b.style.opacity = '0.6';
+        b.style.cursor = 'not-allowed';
+      } else {
+        b.addEventListener('click', onClick);
+      }
+      return b;
+    };
+
+    // Controls
+    controls.innerHTML = '';
+
+    const allowWrap = document.createElement('label');
+    allowWrap.className = 'mini';
+    allowWrap.style.cssText = 'display:flex;align-items:center;gap:8px;padding:6px 10px;border:1px solid var(--line);border-radius:10px;background:#0b152a;';
+    const allowCb = document.createElement('input');
+    allowCb.type = 'checkbox';
+    allowCb.checked = !!state.allowEarly;
+    allowCb.disabled = state.busy;
+    const allowTxt = document.createElement('span');
+    allowTxt.textContent = 'Batch early';
+    allowWrap.appendChild(allowCb);
+    allowWrap.appendChild(allowTxt);
+
+    allowCb.addEventListener('change', async () => {
+      state.allowEarly = !!allowCb.checked;
+      state.busy = true;
+      paint();
+      try {
+        await fetchCandidates();
+      } catch (e) {
+        state.error = String(e?.message || e);
+      } finally {
+        state.busy = false;
+        paint();
+      }
+    });
+
+    controls.appendChild(allowWrap);
+
+    controls.appendChild(mkBtn('Refresh', async () => {
+      state.busy = true;
+      paint();
+      try {
+        await fetchCandidates();
+      } catch (e) {
+        state.error = String(e?.message || e);
+      } finally {
+        state.busy = false;
+        paint();
+      }
+    }, { disabled: state.busy }));
+
+    controls.appendChild(mkBtn('Clear selection', () => {
+      state.selectedInvoiceIds.clear();
+      paint();
+    }, { disabled: state.busy || selectedCount === 0 }));
+
+    controls.appendChild(mkBtn(`Confirm (${selectedCount})`, async () => {
+      if (state.busy) return;
+
+      const ids = Array.from(state.selectedInvoiceIds).map(String).filter(Boolean);
+      if (!ids.length) {
+        alert('Select at least one invoice.');
+        return;
+      }
+
+      const ok = window.confirm(
+        `Issue ${ids.length} invoice(s) now?\n\n` +
+        `This will attempt to issue invoices and queue client emails (mail_outbox).`
+      );
+      if (!ok) return;
+
+      state.busy = true;
+      state.error = '';
+      state.results = null;
+      paint();
+
+      try {
+        const out = await apiPostJsonLocal(API_CONFIRM, {
+          allow_early: !!state.allowEarly,
+          invoice_ids: ids
+        });
+
+        state.results = out || {};
+        window.__toast && window.__toast('Batch issue complete.');
+        await refreshInvoiceSummary();
+
+      } catch (e) {
+        state.error = String(e?.message || e);
+      } finally {
+        state.busy = false;
+        paint();
+      }
+    }, { primary: true, disabled: state.busy || selectedCount === 0 }));
+
+    const selInfo = document.createElement('div');
+    selInfo.className = 'mini';
+    selInfo.style.opacity = '0.9';
+    selInfo.textContent = state.busy ? 'Working…' : (selectedCount ? `${selectedCount} selected` : '');
+    controls.appendChild(selInfo);
+
+    // Error
+    if (state.error) {
+      errEl.style.display = '';
+      errEl.textContent = state.error;
+    } else {
+      errEl.style.display = 'none';
+      errEl.textContent = '';
+    }
+
+    // Body
+    bodyEl.innerHTML = '';
+
+    const groups = Array.isArray(state.groups) ? state.groups : [];
+    if (!groups.length && !state.busy) {
+      const empty = document.createElement('div');
+      empty.className = 'mini';
+      empty.style.opacity = '0.85';
+      empty.textContent = 'No draft/held invoices found for issuing.';
+      bodyEl.appendChild(empty);
+    }
+
+    const selectIdsFrom = (invoices, wantDraftOnly) => {
+      const ids = [];
+      for (const inv of (invoices || [])) {
+        const id = String(inv?.invoice_id || '').trim();
+        if (!id) continue;
+        const st = String(inv?.status || '').trim().toUpperCase();
+        if (wantDraftOnly && st !== 'DRAFT') continue;
+        // Disabled: ON_HOLD is intentionally not selectable
+        if (st === 'ON_HOLD') continue;
+        // Optional future flags (not provided by RPC, but safe if added later)
+        if (inv?.blocked_by_hr_validation === true) continue;
+        if (state.allowEarly === false && inv?.not_due_yet === true) continue;
+        ids.push(id);
+      }
+      return ids;
+    };
+
+    groups.forEach((c) => {
+      const clientId = String(c?.client_id || '');
+      const clientName = String(c?.client_name || clientId || 'Client');
+      const weeks = Array.isArray(c?.weeks) ? c.weeks : [];
+
+      const allClientSelectable = [];
+      for (const w of weeks) {
+        const invs = Array.isArray(w?.invoices) ? w.invoices : [];
+        allClientSelectable.push(...selectIdsFrom(invs, true)); // draft only
+      }
+      const clientSelectedCount = allClientSelectable.filter(id => state.selectedInvoiceIds.has(id)).length;
+
+      const clientDetails = document.createElement('details');
+      clientDetails.className = 'invbatch-card';
+      clientDetails.open = state.openClients.has(clientId) || false;
+      clientDetails.addEventListener('toggle', () => {
+        if (clientDetails.open) state.openClients.add(clientId);
+        else state.openClients.delete(clientId);
+      });
+
+      const sum = document.createElement('summary');
+      sum.className = 'invbatch-card-head';
+      sum.style.listStyle = 'none';
+
+      const left = document.createElement('div');
+      left.style.display = 'flex';
+      left.style.flexDirection = 'column';
+      left.style.gap = '2px';
+      left.innerHTML = `
+        <div style="font-weight:700;">${escapeHtml(clientName)}</div>
+        <div class="mini" style="opacity:.85;">${weeks.length} week group(s)</div>
+      `;
+
+      const right = document.createElement('div');
+      right.style.display = 'flex';
+      right.style.alignItems = 'center';
+      right.style.gap = '8px';
+
+      const badge = document.createElement('span');
+      badge.className = 'mini invbatch-badge';
+      badge.textContent = clientSelectedCount ? `${clientSelectedCount} selected` : '';
+      if (!clientSelectedCount) badge.style.opacity = '0.5';
+
+      const btnSelClient = mkBtn('Select all DRAFT in client', (ev) => {
+        ev.preventDefault(); ev.stopPropagation();
+        for (const id of allClientSelectable) state.selectedInvoiceIds.add(id);
+        paint();
+      }, { disabled: state.busy || allClientSelectable.length === 0 });
+
+      const btnDeselClient = mkBtn('Deselect client', (ev) => {
+        ev.preventDefault(); ev.stopPropagation();
+        for (const id of allClientSelectable) state.selectedInvoiceIds.delete(id);
+        paint();
+      }, { disabled: state.busy || clientSelectedCount === 0 });
+
+      right.appendChild(badge);
+      right.appendChild(btnSelClient);
+      right.appendChild(btnDeselClient);
+
+      sum.appendChild(left);
+      sum.appendChild(right);
+      clientDetails.appendChild(sum);
+
+      const clientInner = document.createElement('div');
+      clientInner.style.display = 'flex';
+      clientInner.style.flexDirection = 'column';
+      clientInner.style.gap = '8px';
+      clientInner.style.padding = '10px 6px 6px 6px';
+
+      weeks.forEach((w) => {
+        const wkStart = (w?.invoice_week_start == null) ? '' : String(w.invoice_week_start);
+        const wkEnd   = (w?.week_ending_date == null) ? '' : String(w.week_ending_date);
+        const wkKey   = `${clientId}|${wkStart}`;
+
+        const invs = Array.isArray(w?.invoices) ? w.invoices : [];
+
+        const weekSelectable = selectIdsFrom(invs, true); // draft only
+        const weekSelectedCount = weekSelectable.filter(id => state.selectedInvoiceIds.has(id)).length;
+
+        const weekDetails = document.createElement('details');
+        weekDetails.className = 'invbatch-card';
+        weekDetails.open = state.openWeeks.has(wkKey) || false;
+        weekDetails.addEventListener('toggle', () => {
+          if (weekDetails.open) state.openWeeks.add(wkKey);
+          else state.openWeeks.delete(wkKey);
+        });
+
+        const wkSum = document.createElement('summary');
+        wkSum.className = 'invbatch-card-head invbatch-week-head';
+        wkSum.style.listStyle = 'none';
+
+        const wkLeft = document.createElement('div');
+        wkLeft.style.display = 'flex';
+        wkLeft.style.flexDirection = 'column';
+        wkLeft.style.gap = '2px';
+
+        const subtotalSum = fmtMoney(w?.subtotal_ex_vat_sum);
+        const incSum = fmtMoney(w?.total_inc_vat_sum);
+
+        wkLeft.innerHTML = `
+          <div style="font-weight:700;">Week ending ${escapeHtml(wkEnd ? fmtYmd(wkEnd) : '—')}</div>
+          <div class="mini" style="opacity:.85;">Week start ${escapeHtml(wkStart ? fmtYmd(wkStart) : '—')} • Subtotal ${escapeHtml(subtotalSum)} • Total ${escapeHtml(incSum)}</div>
+        `;
+
+        const wkRight = document.createElement('div');
+        wkRight.style.display = 'flex';
+        wkRight.style.alignItems = 'center';
+        wkRight.style.gap = '8px';
+
+        const wkBadge = document.createElement('span');
+        wkBadge.className = 'mini invbatch-badge';
+        wkBadge.textContent = weekSelectedCount ? `${weekSelectedCount} selected` : '';
+        if (!weekSelectedCount) wkBadge.style.opacity = '0.5';
+
+        const btnSelWeek = mkBtn('Select all DRAFT in week', (ev) => {
+          ev.preventDefault(); ev.stopPropagation();
+          for (const id of weekSelectable) state.selectedInvoiceIds.add(id);
+          paint();
+        }, { disabled: state.busy || weekSelectable.length === 0 });
+
+        const btnDeselWeek = mkBtn('Deselect week', (ev) => {
+          ev.preventDefault(); ev.stopPropagation();
+          for (const id of weekSelectable) state.selectedInvoiceIds.delete(id);
+          paint();
+        }, { disabled: state.busy || weekSelectedCount === 0 });
+
+        wkRight.appendChild(wkBadge);
+        wkRight.appendChild(btnSelWeek);
+        wkRight.appendChild(btnDeselWeek);
+
+        wkSum.appendChild(wkLeft);
+        wkSum.appendChild(wkRight);
+        weekDetails.appendChild(wkSum);
+
+        const list = document.createElement('div');
+        list.style.display = 'flex';
+        list.style.flexDirection = 'column';
+        list.style.gap = '6px';
+        list.style.padding = '10px 6px 6px 6px';
+
+        invs.forEach(inv => {
+          const invId = String(inv?.invoice_id || '').trim();
+          const invNo = (inv?.invoice_no != null) ? String(inv.invoice_no).trim() : '';
+          const st = String(inv?.status || '').trim().toUpperCase();
+          const holdReason = String(inv?.on_hold_reason || '').trim();
+          const isSelfBill = inv?.is_self_bill === true;
+
+          const row = document.createElement('div');
+          row.className = 'invbatch-row';
+          row.style.border = '1px solid var(--line)';
+          row.style.borderRadius = '12px';
+          row.style.background = '#0b1427';
+
+          const cb = document.createElement('input');
+          cb.type = 'checkbox';
+          cb.checked = !!(invId && state.selectedInvoiceIds.has(invId));
+
+          // Default selection rules:
+          // - ON_HOLD is unchecked + visually red + NOT selectable
+          const disabled = state.busy || !invId || (st === 'ON_HOLD');
+
+          cb.disabled = !!disabled;
+
+          cb.addEventListener('change', () => {
+            if (!invId) return;
+            if (cb.checked) state.selectedInvoiceIds.add(invId);
+            else state.selectedInvoiceIds.delete(invId);
+            paint();
+          });
+
+          const main = document.createElement('div');
+          main.style.display = 'flex';
+          main.style.flexDirection = 'column';
+          main.style.gap = '3px';
+          main.style.flex = '1';
+          main.style.minWidth = '0';
+
+          const line1 = document.createElement('div');
+          line1.style.display = 'flex';
+          line1.style.alignItems = 'center';
+          line1.style.gap = '8px';
+          line1.style.flexWrap = 'wrap';
+
+          const name = document.createElement('div');
+          name.style.fontWeight = '700';
+          name.textContent = invNo ? `Invoice ${invNo}` : (invId ? `Invoice ${invId.slice(0, 8)}…` : 'Invoice');
+          line1.appendChild(name);
+
+          const pill = document.createElement('span');
+          pill.className = 'pill';
+
+          if (st === 'ON_HOLD') {
+            pill.classList.add('pill-bad');
+            pill.textContent = 'ON HOLD';
+          } else {
+            pill.classList.add('pill-info');
+            pill.textContent = 'DRAFT';
+          }
+          line1.appendChild(pill);
+
+          if (isSelfBill) {
+            const sb = document.createElement('span');
+            sb.className = 'pill pill-warn';
+            sb.textContent = 'SELF-BILL';
+            line1.appendChild(sb);
+          }
+
+          main.appendChild(line1);
+
+          if (holdReason) {
+            const line2 = document.createElement('div');
+            line2.className = 'mini';
+            line2.style.opacity = '0.9';
+            line2.textContent = `Reason: ${holdReason}`;
+            main.appendChild(line2);
+          }
+
+          const right = document.createElement('div');
+          right.className = 'mini invbatch-right';
+
+          const a = document.createElement('div');
+          a.textContent = fmtMoney(inv?.subtotal_ex_vat);
+
+          const b = document.createElement('div');
+          b.style.opacity = '0.9';
+          b.textContent = `VAT ${fmtMoney(inv?.vat_amount)} • Total ${fmtMoney(inv?.total_inc_vat)}`;
+
+          right.appendChild(a);
+          right.appendChild(b);
+
+          row.appendChild(cb);
+          row.appendChild(main);
+          row.appendChild(right);
+
+          if (st === 'ON_HOLD') {
+            row.style.borderColor = 'rgba(248,113,113,.55)';
+            row.style.background = 'rgba(58,18,20,.35)';
+          }
+
+          list.appendChild(row);
+        });
+
+        weekDetails.appendChild(list);
+        clientInner.appendChild(weekDetails);
+      });
+
+      clientDetails.appendChild(clientInner);
+      bodyEl.appendChild(clientDetails);
+    });
+
+    // Results
+    if (state.results) {
+      resEl.style.display = '';
+      resEl.innerHTML = '';
+
+      const out = state.results || {};
+      const invRes = Array.isArray(out?.invoice_results) ? out.invoice_results : [];
+      const mails  = Array.isArray(out?.email_outbox) ? out.email_outbox : [];
+      const maxA   = Number(out?.max_attachments_per_email || 0) || null;
+
+      const norm = (x) => String(x || '').trim().toUpperCase();
+      const issuedCount = invRes.filter(r => norm(r?.status) === 'ISSUED' && r?.ok === true).length;
+      const heldCount   = invRes.filter(r => norm(r?.status) === 'ON_HOLD').length;
+      const notDueCount = invRes.filter(r => norm(r?.error) === 'NOT_DUE_YET').length;
+
+      const head = document.createElement('div');
+      head.style.fontWeight = '700';
+      head.style.marginBottom = '6px';
+      head.textContent = `Results — Issued ${issuedCount} • Held ${heldCount} • Not due yet ${notDueCount} • Emails queued ${mails.length}${maxA ? ` (max attachments/email ${maxA})` : ''}`;
+      resEl.appendChild(head);
+
+      if (mails.length) {
+        const t = document.createElement('div');
+        t.className = 'mini';
+        t.style.opacity = '0.9';
+        t.textContent = 'Queued emails (bundled by client/week and split by attachment cap):';
+        resEl.appendChild(t);
+
+        const box = document.createElement('div');
+        box.style.marginTop = '8px';
+
+        mails.forEach(m => {
+          const line = document.createElement('div');
+          line.className = 'mini';
+          line.style.cssText = 'display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:6px 0;border-top:1px solid rgba(255,255,255,0.06);';
+
+          const pill = document.createElement('span');
+          pill.className = 'pill pill-info';
+          pill.textContent = 'QUEUED';
+
+          const to = document.createElement('span');
+          to.textContent = `To: ${String(m?.to || '').trim() || '—'}`;
+
+          const subj = document.createElement('span');
+          subj.style.opacity = '0.9';
+          subj.textContent = `Subject: ${String(m?.subject || '').trim() || '—'}`;
+
+          const ref = document.createElement('span');
+          ref.style.opacity = '0.9';
+          ref.textContent = `Ref: ${String(m?.reference || '').trim() || '—'}`;
+
+          const id = document.createElement('span');
+          id.style.opacity = '0.9';
+          id.textContent = `Outbox: ${String(m?.mail_outbox_id || '').trim() || '—'}`;
+
+          line.appendChild(pill);
+          line.appendChild(to);
+          line.appendChild(subj);
+          line.appendChild(ref);
+          line.appendChild(id);
+
+          box.appendChild(line);
+        });
+
+        resEl.appendChild(box);
+      }
+
+      if (invRes.length) {
+        const hr = document.createElement('div');
+        hr.style.cssText = 'height:1px;background:var(--line);margin:10px 0;';
+        resEl.appendChild(hr);
+
+        const t = document.createElement('div');
+        t.style.fontWeight = '700';
+        t.style.marginBottom = '6px';
+        t.textContent = 'Invoice outcomes';
+        resEl.appendChild(t);
+
+        invRes.forEach(r => {
+          const st = norm(r?.status);
+          const ok = (r?.ok === true);
+
+          const line = document.createElement('div');
+          line.className = 'mini';
+          line.style.cssText = 'display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:6px 0;border-top:1px solid rgba(255,255,255,0.06);';
+
+          const pill = document.createElement('span');
+          pill.className = 'pill';
+          if (norm(r?.error) === 'NOT_DUE_YET') pill.classList.add('pill-warn');
+          else if (st === 'ON_HOLD') pill.classList.add('pill-bad');
+          else if (ok && st === 'ISSUED') pill.classList.add('pill-ok');
+          else pill.classList.add('pill-info');
+
+          pill.textContent =
+            norm(r?.error) === 'NOT_DUE_YET' ? 'NOT DUE YET' :
+            st ? st :
+            ok ? 'OK' : 'FAILED';
+
+          const invTxt = document.createElement('span');
+          invTxt.textContent = r?.invoice_id ? `Invoice ${String(r.invoice_id).slice(0, 8)}…` : 'Invoice';
+
+          const msg = document.createElement('span');
+          msg.style.opacity = '0.9';
+          msg.textContent =
+            r?.on_hold_reason ? `Reason: ${r.on_hold_reason}` :
+            r?.error ? `Error: ${r.error}` :
+            '';
+
+          line.appendChild(pill);
+          line.appendChild(invTxt);
+          if (msg.textContent) line.appendChild(msg);
+
+          resEl.appendChild(line);
+        });
+      }
+
+    } else {
+      resEl.style.display = 'none';
+      resEl.innerHTML = '';
+    }
+
+    scrollEl.scrollTop = prevScroll;
+  };
+
+  // Seed modalCtx and open modal
+  window.modalCtx = {
+    entity: 'invoices',
+    openToken: `invoice-batch-issue:${Date.now()}:${Math.random().toString(36).slice(2)}`,
+    data: {}
+  };
+
+  showModal(
+    'Batch Issue — Invoices',
+    [{ key: 'main', label: 'Batch Issue' }],
+    () => renderSkeleton(),
+    null,
+    true,
+    null,
+    {
+      kind: 'import-summary-invoice-batch-issue',
+      noParentGate: true,
+      onDismiss: () => {
+        try {
+          const modalNode = document.getElementById('modal');
+          if (modalNode) {
+            modalNode.classList.remove('invbatch-modal');
+            modalNode.classList.remove('invbatch-issue-modal');
+          }
+        } catch {}
+      }
+    }
+  );
+
+  // Apply styling hooks even before showModal wiring is added
+  try {
+    const modalNode = document.getElementById('modal');
+    if (modalNode) {
+      modalNode.classList.add('invbatch-modal');
+      modalNode.classList.add('invbatch-issue-modal');
+    }
+  } catch {}
+
+  state.busy = true;
+  paint();
+
+  try {
+    await fetchCandidates();
+  } catch (e) {
+    state.error = String(e?.message || e);
+  } finally {
+    state.busy = false;
+    paint();
+  }
+}
+
+
 async function openInvoiceBatchGenerateModal() {
   // ─────────────────────────────────────────────────────────────
   // Batch Generate (Invoices)
@@ -32671,7 +34575,7 @@ await refreshFooter();
 
 
 
-  top._updateButtons();
+   top._updateButtons();
   btnEdit.onclick = ()=> {
     const isChildNow    = (stack().length > 1);
     const isRatePreset  = (top.kind === 'rate-preset');
@@ -32692,7 +34596,19 @@ await refreshFooter();
     candidateMainModel : deep(window.modalCtx?.candidateMainModel || null),
 
     // NEW: snapshot any timesheet-specific staging (lines, issues, etc.)
-    timesheetState     : deep(window.modalCtx?.timesheetState || null)
+    timesheetState     : deep(window.modalCtx?.timesheetState || null),
+
+    // ✅ NEW: snapshot invoice modal state so discard/no-change doesn't leave stale staged state
+    invoiceDetail      : deep(window.modalCtx?.invoiceDetail || null),
+    invoiceState       : deep(window.modalCtx?.invoiceState || null),
+    invoiceUi          : deep(window.modalCtx?.invoiceUi || null),
+
+    // invoiceRemove contains a Set → store as array and rebuild on restore
+    invoiceRemoveSelectedTimesheetIds: Array.from(
+      (window.modalCtx?.invoiceRemove?.selectedTimesheetIds instanceof Set)
+        ? window.modalCtx.invoiceRemove.selectedTimesheetIds
+        : []
+    )
   };
   top.isDirty = false;
   setFrameMode(top, 'edit');
@@ -32704,6 +34620,7 @@ await refreshFooter();
 
 
   };
+
 
 
   const handleSecondary = (ev)=>{
@@ -32768,7 +34685,7 @@ try { if (closing && typeof closing._onDismiss === 'function') closing._onDismis
 
 
 
-    if (!isChildNow && !top.noParentGate && top.mode==='edit' && top.kind!=='rates-presets') {
+       if (!isChildNow && !top.noParentGate && top.mode==='edit' && top.kind!=='rates-presets') {
     if (!top.isDirty) {
   if (top._snapshot && window.modalCtx) {
     window.modalCtx.data                = deep(top._snapshot.data);
@@ -32782,6 +34699,16 @@ try { if (closing && typeof closing._onDismiss === 'function') closing._onDismis
 
     // NEW: restore timesheetState so staged Lines/Issues state is rolled back
     window.modalCtx.timesheetState      = deep(top._snapshot.timesheetState || null);
+
+    // ✅ NEW: restore invoice modal state
+    window.modalCtx.invoiceDetail       = deep(top._snapshot.invoiceDetail || null);
+    window.modalCtx.invoiceState        = deep(top._snapshot.invoiceState || null);
+    window.modalCtx.invoiceUi           = deep(top._snapshot.invoiceUi || null);
+
+    // rebuild Set for invoiceRemove selection (safe default)
+    window.modalCtx.invoiceRemove       = window.modalCtx.invoiceRemove || {};
+    window.modalCtx.invoiceRemove.selectedTimesheetIds =
+      new Set(Array.isArray(top._snapshot.invoiceRemoveSelectedTimesheetIds) ? top._snapshot.invoiceRemoveSelectedTimesheetIds : []);
 
     if (LOG) {
       console.log('[MODAL][RESTORE][no-change]', {
@@ -32801,7 +34728,8 @@ try { if (closing && typeof closing._onDismiss === 'function') closing._onDismis
   top.isDirty=false; setFrameMode(top,'view'); top._snapshot=null;
   try{ window.__toast?.('No changes'); }catch{}; return;
 }
- else {
+
+  else {
         let ok=false; try{ top._confirmingDiscard=true; btnClose.disabled=true; ok=window.confirm('Discard changes and return to view?'); } finally { top._confirmingDiscard=false; btnClose.disabled=false; }
         if (!ok) return;
      if (top._snapshot && window.modalCtx) {
@@ -32817,6 +34745,16 @@ try { if (closing && typeof closing._onDismiss === 'function') closing._onDismis
 
   // NEW: restore timesheetState so staged per-line changes are discarded
   window.modalCtx.timesheetState      = deep(top._snapshot.timesheetState || null);
+
+  // ✅ NEW: restore invoice modal state
+  window.modalCtx.invoiceDetail       = deep(top._snapshot.invoiceDetail || null);
+  window.modalCtx.invoiceState        = deep(top._snapshot.invoiceState || null);
+  window.modalCtx.invoiceUi           = deep(top._snapshot.invoiceUi || null);
+
+  // rebuild Set for invoiceRemove selection (safe default)
+  window.modalCtx.invoiceRemove       = window.modalCtx.invoiceRemove || {};
+  window.modalCtx.invoiceRemove.selectedTimesheetIds =
+    new Set(Array.isArray(top._snapshot.invoiceRemoveSelectedTimesheetIds) ? top._snapshot.invoiceRemoveSelectedTimesheetIds : []);
 
   if (LOG) {
     console.log('[MODAL][RESTORE][discard]', {
@@ -32837,6 +34775,7 @@ try { if (closing && typeof closing._onDismiss === 'function') closing._onDismis
         top.isDirty=false; top._snapshot=null; setFrameMode(top,'view'); return;
       }
     }
+
 
 
     if (top._closing) return;
@@ -32861,6 +34800,15 @@ const closing = stack().pop();
 // ✅ NEW: call onDismiss for ALL modal kinds (not just advanced-search)
 try { if (closing && typeof closing._onDismiss === 'function') closing._onDismiss(); } catch {}
 
+// ✅ NEW: prevent MutationObserver leaks from invoice modal wiring
+try {
+  const ctx = closing && closing._ctxRef ? closing._ctxRef : null;
+  if (ctx && ctx._invoiceObserver) {
+    try { ctx._invoiceObserver.disconnect(); } catch {}
+    ctx._invoiceObserver = null;
+  }
+} catch {}
+
 if (closing?._detachDirty){ try{closing._detachDirty();}catch{} closing._detachDirty=null; }
 
     if (closing?._detachGlobal){ try{closing._detachGlobal();}catch{} closing._detachGlobal=null; } top._wired=false;
@@ -32877,6 +34825,7 @@ if (closing?._detachDirty){ try{closing._detachDirty();}catch{} closing._detachD
          closing.kind !== 'rate-presets-picker')
           ? closing._parentModeOnOpen
           : p.mode;
+
 
       try { setFrameMode(p, resumeMode); } catch {}
       p._updateButtons && p._updateButtons();
@@ -33342,6 +35291,10 @@ if (!frameObj.hasId && mode === 'view' && !isPlannedTimesheetStub && !isUtilityK
   L('showModal ENTER', { title, tabs: (tabs||[]).map(t=>t.key||t.title), hasId, entity: window.modalCtx?.entity, kind: opts.kind, forceEdit: !!opts.forceEdit });
   renderTop();
 }
+
+
+
+
 
 function tsExtractMoved409(err) {
   const status = err?.status ?? err?.statusCode ?? null;
