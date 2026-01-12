@@ -510,7 +510,7 @@ body{
     .tag-fail{ background:rgba(239,68,68,.15);  color:#fecaca;  border-color:rgba(248,113,113,.35) }
 
 
-    /* ===== Modal ===== */
+       /* ===== Modal ===== */
       /* ===== Modal ===== */
     .modal-back{
       position:fixed;
@@ -552,6 +552,20 @@ body{
 
 #modal.resolve-modal .tabc{
   padding: 10px;
+}
+
+/* ===== Invoice Batch modals (Generate/Issue): bigger + single inner scroll (no double scrollbars) ===== */
+#modal.invbatch-modal{
+  width: min(1300px, 98vw);
+  max-height: 96vh;
+}
+#modal.invbatch-modal .tabc{
+  padding: 10px;
+  min-height: 0;
+}
+#modal.invbatch-modal .modal-b{
+  padding: 0;
+  overflow: hidden; /* ✅ IMPORTANT: avoid outer modal scrollbar */
 }
 
     /* Narrower modal just for Job Titles */
@@ -599,6 +613,8 @@ body{
       top:auto;
       z-index:auto;
       background:transparent;
+    }
+
     }
     .tabs button{
       background:#020617;
@@ -783,7 +799,7 @@ body{
       margin-top:4px;
     }
 
-    /* Generic modal buttons (all small icon/utility buttons) */
+       /* Generic modal buttons (all small icon/utility buttons) */
     #modal .btn{
       border:1px solid var(--line);
       background:#0b152a;
@@ -801,6 +817,119 @@ body{
       background:var(--hover);
       color:#f9fafb;
     }
+
+    /* Button variants used by Invoice Batch modals */
+    #modal .btn.btn-sm{
+      padding:6px 10px;
+      font-size:12px;
+      border-radius:10px;
+    }
+    #modal .btn.btn-outline{
+      border:1px solid var(--line);
+      background:#0b152a;
+      color:#f9fafb;
+    }
+    #modal .btn.btn-primary{
+      background:linear-gradient(180deg,#5146e5,#4038cc);
+      border-color:#3730a3;
+      color:#fff;
+    }
+    #modal .btn.btn-warn{
+      background:#5a1d22;
+      border-color:#7f1d1d;
+      color:#fff;
+    }
+
+    /* ===== Invoice Batch (Generate/Issue) modal body styling ===== */
+    #modal.invbatch-modal .invbatch-root{
+      display:flex;
+      flex-direction:column;
+      gap:10px;
+      min-height:0;
+    }
+    #modal.invbatch-modal .invbatch-controls{
+      display:flex;
+      align-items:center;
+      gap:10px;
+      flex-wrap:wrap;
+      padding:10px;
+      border:1px solid var(--line);
+      border-radius:12px;
+      background:#0b1427;
+    }
+    #modal.invbatch-modal .invbatch-scroll{
+      overflow:auto;
+      max-height:60vh;
+      padding:6px 2px;
+      scrollbar-width:thin;
+      scrollbar-color:#1e293b #020617;
+    }
+    #modal.invbatch-modal .invbatch-scroll::-webkit-scrollbar{
+      width:8px;
+      height:8px;
+    }
+    #modal.invbatch-modal .invbatch-scroll::-webkit-scrollbar-track{
+      background:#020617;
+    }
+    #modal.invbatch-modal .invbatch-scroll::-webkit-scrollbar-thumb{
+      background:#1e293b;
+      border-radius:999px;
+      border:1px solid #020617;
+    }
+    #modal.invbatch-modal .invbatch-scroll::-webkit-scrollbar-thumb:hover{
+      background:#334155;
+    }
+
+    #modal.invbatch-modal .invbatch-card{
+      border:1px solid var(--line);
+      border-radius:12px;
+      background:#0b1427;
+      overflow:hidden;
+    }
+    #modal.invbatch-modal .invbatch-card-head{
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:10px;
+      padding:10px;
+      cursor:pointer;
+      user-select:none;
+    }
+    #modal.invbatch-modal .invbatch-week-head{
+      background:#081024;
+    }
+    #modal.invbatch-modal .invbatch-row{
+      display:flex;
+      align-items:center;
+      gap:10px;
+      padding:10px;
+    }
+    #modal.invbatch-modal .invbatch-right{
+      display:flex;
+      flex-direction:column;
+      align-items:flex-end;
+      gap:2px;
+      min-width:140px;
+    }
+    #modal.invbatch-modal .invbatch-badge{
+      padding:3px 8px;
+      border:1px solid var(--line);
+      border-radius:999px;
+      background:#0b152a;
+    }
+    #modal.invbatch-modal .invbatch-badge-warn{
+      border-color:#a33;
+      background:#3a1214;
+      color:#ffb4b4;
+    }
+    #modal.invbatch-modal .invbatch-results{
+      margin-top:10px;
+      padding:10px;
+      border:1px solid var(--line);
+      border-radius:12px;
+      background:#0b1427;
+    }
+
 
     /* Timesheet tab action buttons (Overview / Lines / Evidence) */
     #modal .tabc .controls button[type="button"]{
