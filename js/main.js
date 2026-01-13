@@ -27928,8 +27928,8 @@ async function openInvoiceModal(row) {
     return j;
   };
 
-  // Minimal invoice state seed
-  window.modalCtx = {
+    // Minimal invoice state seed
+  const ctxSeed = {
     entity: 'invoices',
     openToken: `invoice:${invoiceId}:${Date.now()}:${Math.random().toString(36).slice(2)}`,
     data: { ...(row || {}), id: invoiceId },
@@ -27938,6 +27938,9 @@ async function openInvoiceModal(row) {
     invoiceRemove: { selectedTimesheetIds: new Set() },
     invoiceUi: { lastEmail: null, lastRenderUrl: null }
   };
+  window.modalCtx = ctxSeed;
+  try { if (typeof modalCtx !== 'undefined') modalCtx = ctxSeed; } catch {}
+
 
   const initInvoiceStateFromDetail = (detail) => {
     const inv = detail?.invoice || null;
@@ -28136,12 +28139,24 @@ async function openInvoiceModal(row) {
     { kind: 'invoice' }
   );
 
-  // Fetch detail and paint
+    // Fetch detail and paint
   try {
     await reloadInvoiceIntoCtx();
+
+    // ✅ FORCE a repaint in VIEW mode so we don't stay stuck on "Loading invoice…"
+    try {
+      const fr = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
+      if (fr) {
+        fr._suppressDirty = true;
+        await fr.setTab(fr.currentTabKey || 'main');
+        fr._suppressDirty = false;
+        fr._updateButtons && fr._updateButtons();
+      }
+    } catch {}
   } catch (e) {
     alert(String(e?.message || e || 'Failed to load invoice'));
   }
+
 
   // Wire DOM behaviour (re-wire after re-renders)
   const wire = () => {
@@ -30899,6 +30914,10 @@ async function openUserManagementModal() {
   const renderSkeleton = (k) => {
     state.tab = (k === 'finance') ? 'finance' : 'users';
 
+    // ✅ IMPORTANT: trigger a single paint after showModal swaps the tab DOM.
+    // This replaces the old MutationObserver (which caused an infinite loop).
+    setTimeout(() => { try { paint(); } catch {} }, 0);
+
     return `
       <div id="userMgmtRoot" style="display:flex;flex-direction:column;gap:10px;min-height:0;" data-tab="${escapeHtml(state.tab)}">
         <div class="mini" style="opacity:.95">
@@ -31139,7 +31158,7 @@ async function openUserManagementModal() {
           paint();
 
           try {
-            const out = await apiCreateUser({
+            await apiCreateUser({
               email,
               display_name: dn || null,
               role,
@@ -31647,12 +31666,14 @@ async function openUserManagementModal() {
     }
   };
 
-  // Seed modalCtx
-  window.modalCtx = {
+  // ✅ Seed BOTH window.modalCtx and global modalCtx to prevent showModal back-compat clobbering.
+  const ctxSeed = {
     entity: 'settings',
     openToken: `user-management:${Date.now()}:${Math.random().toString(36).slice(2)}`,
     data: {}
   };
+  window.modalCtx = ctxSeed;
+  try { if (typeof modalCtx !== 'undefined') modalCtx = ctxSeed; } catch {}
 
   // Open modal
   showModal(
@@ -31668,24 +31689,9 @@ async function openUserManagementModal() {
     {
       kind: 'import-summary-user-management',
       noParentGate: true,
-      onDismiss: () => {
-        try {
-          const ob = window.modalCtx && window.modalCtx.__umObserver;
-          if (ob && typeof ob.disconnect === 'function') ob.disconnect();
-        } catch {}
-      }
+      onDismiss: () => {}
     }
   );
-
-  // Repaint on tab swaps / rerenders
-  try {
-    const target = byIdLocal('modalBody');
-    if (target) {
-      const ob = new MutationObserver(() => { try { paint(); } catch {} });
-      ob.observe(target, { childList: true, subtree: true });
-      window.modalCtx.__umObserver = ob;
-    }
-  } catch {}
 
   // Load initial data (users + settings)
   try {
@@ -46788,6 +46794,25 @@ function renderSummary(rows){
           // Timesheet exists – use shared helper (green OK or red/amber badges)
           td.appendChild(renderIssueBadges(codes));
         }
+      } else if (currentSection === 'timesheets' && c === 'processing_status') {
+        // ─────────────────────────────────────────────────────────────
+        // ✅ UI overlay ONLY (do NOT change row.processing_status):
+        // If timesheet is invoiced AND locked_invoice_status exists:
+        //   - PAID   → "Invoice Paid" (precedence)
+        //   - ISSUED → "Invoiced (Issued)"
+        //   - else   → "Invoiced (Not issued)"
+        // Otherwise show raw processing_status value.
+        // ─────────────────────────────────────────────────────────────
+        const hasLockedInvoiceId = !!(r && r.locked_by_invoice_id);
+        const lis = String((r && Object.prototype.hasOwnProperty.call(r, 'locked_invoice_status')) ? (r.locked_invoice_status ?? '') : '').trim().toUpperCase();
+
+        if (hasLockedInvoiceId && lis) {
+          if (lis === 'PAID') td.textContent = 'Invoice Paid';
+          else if (lis === 'ISSUED') td.textContent = 'Invoiced (Issued)';
+          else td.textContent = 'Invoiced (Not issued)';
+        } else {
+          td.textContent = formatDisplayValue(c, v);
+        }
       } else if (currentSection === 'invoices' && c === 'client_name') {
         // Flattened client name (already set in pre-normalisation)
         td.textContent = String(r.client_name || '');
@@ -52384,7 +52409,7 @@ function renderTimesheetOverviewTab(ctx) {
     );
   };
 
-  // ✅ map TSFIN.UNASSIGNED to "Unprocessed" (never show UNASSIGNED to admins)
+    // ✅ map TSFIN.UNASSIGNED to "Unprocessed" (never show UNASSIGNED to admins)
   if (hasTsfin && stageRaw === 'UNASSIGNED') {
     addStage(
       'Unprocessed',
@@ -52399,8 +52424,41 @@ function renderTimesheetOverviewTab(ctx) {
     );
   }
 
-  if (isPaid)     addStage('Paid', 'pill-ok', 'This timesheet has been marked as paid.');
-  if (isInvoiced) addStage('Invoiced', 'pill-warn', 'This timesheet has been invoiced and is locked for changes.');
+  // ─────────────────────────────────────────────────────────────
+  // ✅ Invoice issuance overlay (server-authoritative from SUMMARY row)
+  // Rules:
+  //  - Only apply if timesheet is invoiced AND locked_invoice_status exists
+  //  - Invoice Paid takes precedence and suppresses the separate "Paid" stage
+  //  - Otherwise show Invoiced (Issued) / Invoiced (Not issued); else fall back to "Invoiced"
+  // ─────────────────────────────────────────────────────────────
+  const lockedInvoiceStatus =
+    String(
+      (row && Object.prototype.hasOwnProperty.call(row, 'locked_invoice_status'))
+        ? (row.locked_invoice_status ?? '')
+        : ''
+    ).trim().toUpperCase();
+
+  const hasLockedInvoiceStatus = !!lockedInvoiceStatus;
+  const invoicePaid = hasLockedInvoiceStatus && (lockedInvoiceStatus === 'PAID');
+  const invoiceIssued = hasLockedInvoiceStatus && (lockedInvoiceStatus === 'ISSUED' || lockedInvoiceStatus === 'PAID');
+
+  if (invoicePaid) {
+    addStage('Invoice Paid', 'pill-ok', 'This timesheet is on an invoice that has been marked as paid.');
+  } else {
+    if (isPaid) addStage('Paid', 'pill-ok', 'This timesheet has been marked as paid.');
+
+    if (isInvoiced) {
+      if (hasLockedInvoiceStatus) {
+        if (invoiceIssued) {
+          addStage('Invoiced (Issued)', 'pill-warn', 'This timesheet is invoiced and the invoice has been issued.');
+        } else {
+          addStage('Invoiced (Not issued)', 'pill-warn', 'This timesheet is invoiced but the invoice has not been issued yet.');
+        }
+      } else {
+        addStage('Invoiced', 'pill-warn', 'This timesheet has been invoiced and is locked for changes.');
+      }
+    }
+  }
 
   if (hasTsfin && stageRaw === 'READY_FOR_INVOICE') {
     addStage('Ready for Invoicing', 'pill-ok', 'This timesheet is authorised and ready to be added to an invoice.');
@@ -52408,6 +52466,7 @@ function renderTimesheetOverviewTab(ctx) {
   if (hasTsfin && stageRaw === 'READY_FOR_HR') {
     addStage('Ready for HR', 'pill-info', 'This timesheet is authorised and requires HealthRoster validation before it can be invoiced.');
   }
+
   if (hasTsfin && stageRaw === 'RATE_MISSING') {
     addStage(
       'Rate Missing',
