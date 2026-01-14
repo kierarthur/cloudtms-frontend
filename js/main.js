@@ -28038,29 +28038,25 @@ async function handleInvoiceEmail(modalCtx) {
   }
 }
 
-
-
 async function openInvoiceModal(row) {
   // Invoice modal (staged edits, no MutationObserver loops)
   const invoiceId = row?.invoice_id || row?.id;
   if (!invoiceId) return;
 
-  showModal(
-    `<div id="invModalRoot">
-      <div class="p-3 text-muted">Loading invoice…</div>
-    </div>`,
-    { id: 'invModal' }
-  );
-
-  const root = document.getElementById('invModalRoot');
-  if (!root) return;
-
+  // Seed modal context BEFORE calling showModal so the frame snapshots it.
   const modalCtx = {
+    entity: 'invoices',
+    kind: 'invoice-modal',
+
+    // Give showModal something stable for related menus etc (safe default)
+    data: { id: invoiceId },
+
     invoiceId,
     activeTab: 'invoice',
 
     // Loaded from backend
-    data: null,
+    dataLoaded: null, // we keep the API payload here to avoid clobbering modalCtx.data (used by showModal)
+    // (renderers read modalCtx.dataLoaded via the helpers below)
 
     // Invoice line edit mode + staging buckets
     isEditing: false,
@@ -28074,15 +28070,118 @@ async function openInvoiceModal(row) {
     eligibleTimesheetsCache: null,
 
     // UI state
-    isBusy: false,
+    isBusy: true,   // start in loading so the shell renders "Loading…"
     error: null
   };
+
+  // Mirror into fields showModal already snapshots/restores (optional, but makes discard reliable)
+  modalCtx.invoiceState = {
+    isEditing: false,
+    invoiceEdits: modalCtx.invoiceEdits
+  };
+  modalCtx.invoiceUi = { activeTab: modalCtx.activeTab };
 
   // Debug convenience (matches existing pattern)
   window.modalCtx = modalCtx;
 
+  let root = null;
+
+  const safeHasPendingEdits = () => {
+    const e = modalCtx?.invoiceEdits;
+    if (!e) return false;
+    return (
+      (e.remove_invoice_line_ids && e.remove_invoice_line_ids.size > 0) ||
+      (e.add_timesheet_ids && e.add_timesheet_ids.size > 0) ||
+      (Array.isArray(e.add_adjustments) && e.add_adjustments.length > 0)
+    );
+  };
+
+  const syncEditingFromFrame = () => {
+    try {
+      const fr = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
+      const inEdit = !!(fr && fr.entity === 'invoices' && fr.kind === 'invoice-modal' && (fr.mode === 'edit' || fr.mode === 'create'));
+      modalCtx.isEditing = inEdit;
+      if (modalCtx.invoiceState && typeof modalCtx.invoiceState === 'object') {
+        modalCtx.invoiceState.isEditing = inEdit;
+      }
+    } catch {}
+  };
+
+  const ensureRootAndHandlers = () => {
+    const el = document.getElementById('invModalRoot');
+    if (!el) return null;
+
+    // If showModal repainted, root is a fresh node → reattach delegated handlers.
+    if (el !== root) {
+      root = el;
+      try {
+        attachInvoiceModalDelegatedHandlers(modalCtx, root, { rerender, reload });
+      } catch {}
+    } else {
+      // root same: ensure handler exists if caller never attached
+      try {
+        attachInvoiceModalDelegatedHandlers(modalCtx, root, { rerender, reload });
+      } catch {}
+    }
+    return root;
+  };
+
+  const invoiceModalFetchJson = async (path, options = {}) => {
+    const headers = { ...(options.headers || {}), 'Accept': 'application/json' };
+    // Only set Content-Type automatically when we send a body
+    if (options.body !== undefined && options.body !== null && !headers['Content-Type']) {
+      headers['Content-Type'] = 'application/json';
+    }
+
+    const res = await authFetch(API(path), { ...options, headers });
+
+    let data = null;
+    try {
+      data = await res.json();
+    } catch {
+      data = null;
+    }
+
+    if (!res.ok) {
+      const msg =
+        (data && (data.error || data.message)) ? (data.error || data.message)
+        : `Request failed (${res.status})`;
+      throw new Error(msg);
+    }
+
+    return data;
+  };
+
   const rerender = () => {
-    root.innerHTML = renderInvoiceModalShell(modalCtx);
+    // keep snapshot-friendly mirrors in sync
+    try {
+      if (modalCtx.invoiceUi && typeof modalCtx.invoiceUi === 'object') {
+        modalCtx.invoiceUi.activeTab = modalCtx.activeTab;
+      }
+      if (modalCtx.invoiceState && typeof modalCtx.invoiceState === 'object') {
+        modalCtx.invoiceState.invoiceEdits = modalCtx.invoiceEdits;
+      }
+    } catch {}
+
+    syncEditingFromFrame();
+
+    const r = ensureRootAndHandlers();
+    if (!r) return;
+
+    // Render using the payload we store in dataLoaded (invoiceModalGetInvoiceData already tolerates shape)
+    r.innerHTML = renderInvoiceModalShell({
+      ...modalCtx,
+      data: modalCtx.dataLoaded // 👈 keep existing invoice modal helpers working
+    });
+
+    // Keep showModal footer state aligned with pending invoice edits while in EDIT
+    try {
+      const fr = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
+      if (fr && fr.entity === 'invoices' && fr.kind === 'invoice-modal' && (fr.mode === 'edit' || fr.mode === 'create')) {
+        fr.isDirty = safeHasPendingEdits();
+        fr._updateButtons && fr._updateButtons();
+      }
+    } catch {}
   };
 
   const reload = async ({ includeCorrespondence = false } = {}) => {
@@ -28092,17 +28191,20 @@ async function openInvoiceModal(row) {
 
     try {
       const qs = includeCorrespondence ? '?include_correspondence=1' : '';
-      modalCtx.data = await invoiceModalFetchJson(`/api/invoices/${encodeURIComponent(invoiceId)}${qs}`);
+      modalCtx.dataLoaded = await invoiceModalFetchJson(`/api/invoices/${encodeURIComponent(invoiceId)}${qs}`);
     } catch (e) {
       modalCtx.error = String(e?.message || e || 'Failed to load invoice');
-      modalCtx.data = null;
+      modalCtx.dataLoaded = null;
     } finally {
       modalCtx.isBusy = false;
 
       // If invoice is not editable, force-exit edit mode and clear staged line edits
-      const inv = modalCtx.data?.invoice || null;
+      const inv = modalCtx.dataLoaded?.invoice || null;
       if (!invoiceModalIsEditable(inv)) {
         modalCtx.isEditing = false;
+        if (modalCtx.invoiceState && typeof modalCtx.invoiceState === 'object') {
+          modalCtx.invoiceState.isEditing = false;
+        }
         invoiceModalResetEdits(modalCtx);
       }
 
@@ -28110,39 +28212,62 @@ async function openInvoiceModal(row) {
     }
   };
 
-  // Attach once; rerenders only replace root.innerHTML (handler stays)
-  attachInvoiceModalDelegatedHandlers(modalCtx, root, { rerender, reload });
+  // showModal tab list is intentionally minimal; invoice modal renders its own internal tabs.
+  // IMPORTANT: hasId=true so the modal opens in VIEW mode with Save hidden.
+  showModal(
+    'Invoice',
+    [{ key: 'invoice', label: 'Invoice' }],
+    () => `
+      <div id="invModalRoot">
+        ${renderInvoiceModalShell({ ...modalCtx, data: modalCtx.dataLoaded })}
+      </div>
+    `,
+    // onSave: commit staged invoice edits (called by showModal’s footer Save button)
+    async () => {
+      // Only allow Save in edit mode; if nothing pending, treat as ok/no-op.
+      if (!safeHasPendingEdits()) return true;
+
+      // invoiceModalSaveEdits already commits via /save-edits and refreshes
+      await invoiceModalSaveEdits(modalCtx, { rerender, reload });
+      return { ok: true };
+    },
+    true,
+    null,
+    {
+      kind: 'invoice-modal'
+    }
+  );
+
+  // Attach handlers + initial paint
+  ensureRootAndHandlers();
+  rerender();
+
+  // Keep invoice UI synced when showModal flips VIEW<->EDIT (it repaints modalBody)
+  const onModeChanged = (ev) => {
+    try {
+      const fr = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
+      if (!fr || fr.entity !== 'invoices' || fr.kind !== 'invoice-modal') return;
+
+      // After showModal repaints, invModalRoot is recreated → re-find + reattach.
+      ensureRootAndHandlers();
+      rerender();
+    } catch {}
+  };
+  window.addEventListener('modal-frame-mode-changed', onModeChanged);
+
+  // Ensure we detach listener when modal closes
+  try {
+    // showModal supports onDismiss via options; we can piggyback by storing on modalCtx for cleanup
+    modalCtx._onDismiss = () => {
+      try { window.removeEventListener('modal-frame-mode-changed', onModeChanged); } catch {}
+    };
+  } catch {}
 
   // Initial load
   await reload();
-
-async function invoiceModalFetchJson(path, options = {}) {
-  const headers = { ...(options.headers || {}), 'Accept': 'application/json' };
-  // Only set Content-Type automatically when we send a body
-  if (options.body !== undefined && options.body !== null && !headers['Content-Type']) {
-    headers['Content-Type'] = 'application/json';
-  }
-
-  const res = await authFetch(API(path), { ...options, headers });
-
-  let data = null;
-  try {
-    data = await res.json();
-  } catch {
-    data = null;
-  }
-
-  if (!res.ok) {
-    const msg =
-      (data && (data.error || data.message)) ? (data.error || data.message)
-      : `Request failed (${res.status})`;
-    throw new Error(msg);
-  }
-
-  return data;
 }
 
-}
+
 
 function invoiceModalIsEditable(invoice) {
   if (!invoice || typeof invoice !== 'object') return false;
@@ -29443,7 +29568,9 @@ const buildInvoiceWeekSelectHtml = (seg) => {
     ? (isPermanentDelay ? 'Permanently delayed' : `Delayed until ${fmtYmdDmySlash(targetForDelay)}`)
     : '';
 
-  const invoiceStateHint = isLocked
+  const isSegLocked = !!lockedInvoiceId;
+
+  const invoiceStateHint = isSegLocked
     ? '✅ Invoiced'
     : (delayHint ? `⏳ ${delayHint}` : '○ Invoiceable now');
 
@@ -29453,6 +29580,7 @@ const buildInvoiceWeekSelectHtml = (seg) => {
     </select>
     <span class="mini">${invoiceStateHint}</span>
   `;
+
 };
 
 
@@ -35463,25 +35591,28 @@ function setFormReadOnly(root, ro) {
         }
       } catch {}
 
-      // ✅ NEW: Invoice modal internal buttons must remain clickable in VIEW.
-      // We only enable a SAFE allow-list of invoice actions.
+         // ✅ Invoice modal internal buttons must remain clickable in VIEW.
+      // This invoice modal uses data-action="inv-*", so we allow only SAFE view actions.
       try {
         const top = (typeof currentFrame === 'function') ? currentFrame() : null;
         const isInvoiceFrame = !!(top && top.entity === 'invoices');
-        const invAction = (el.getAttribute('data-inv-action') || '').toLowerCase();
 
-        const safeInvActions = new Set([
-          'render-pdf',     // Open invoice PDF
-          'email',          // Email / Re-email
-          'toggle-group',   // Accordion open/close
-          'open-timesheet'  // Jump to timesheet modal
+        const act = String(el.getAttribute('data-action') || '').toLowerCase();
+
+        const safeDataActions = new Set([
+          'inv-open-pdf',
+          'inv-email',
+          'inv-set-tab',
+          'inv-close',
+          'inv-delete-invoice'
         ]);
 
-        if (isInvoiceFrame && ro && invAction && safeInvActions.has(invAction)) {
+        if (isInvoiceFrame && ro && act && safeDataActions.has(act)) {
           el.disabled = false;
           return;
         }
       } catch {}
+
 
       // In read-only mode, disable everything except allow-listed buttons
       if (ro) {
@@ -39019,7 +39150,7 @@ await refreshFooter();
       }
     }
 
-    // Default Save/Edit display logic (unchanged)
+      // Default Save/Edit display logic
     if (top.mode === 'create') {
       btnSave.style.display = '';
       btnSave.disabled = top._saving;
@@ -39037,13 +39168,19 @@ await refreshFooter();
         } catch { gateOK = true; }
       }
 
-      btnSave.disabled = (top.entity === 'contracts')
-        ? (top._saving || ((top.kind !== 'contract-clone-extend') && !top.isDirty) || !gateOK)
-        : (
-            top._saving ||
-            (top.kind === 'timesheet-evidence-viewer' && !top.isDirty)
-          );
+      // ✅ Invoice modal: enable Save ONLY when there are staged edits (top.isDirty is driven externally)
+      if (top.entity === 'invoices' && top.kind === 'invoice-modal') {
+        btnSave.disabled = !!top._saving || !top.isDirty;
+      } else {
+        btnSave.disabled = (top.entity === 'contracts')
+          ? (top._saving || ((top.kind !== 'contract-clone-extend') && !top.isDirty) || !gateOK)
+          : (
+              top._saving ||
+              (top.kind === 'timesheet-evidence-viewer' && !top.isDirty)
+            );
+      }
     }
+
 
     // 🔹 Top-level Edit Contract → wire global Delete button
     if (!isChild && top.entity === 'contracts') {
@@ -39805,13 +39942,22 @@ if (!frameObj.hasId && mode === 'view' && !isPlannedTimesheetStub && !isUtilityK
   GE();
 }
 
-
-
   byId('modalBack').style.display='flex';
   window.__getModalFrame = currentFrame;
-  L('showModal ENTER', { title, tabs: (tabs||[]).map(t=>t.key||t.title), hasId, entity: window.modalCtx?.entity, kind: opts.kind, forceEdit: !!opts.forceEdit });
+
+  const _tabsForLog = Array.isArray(tabs) ? tabs : [];
+  L('showModal ENTER', {
+    title,
+    tabs: _tabsForLog.map(t => (t && (t.key || t.title)) || ''),
+    hasId,
+    entity: window.modalCtx?.entity,
+    kind: opts.kind,
+    forceEdit: !!opts.forceEdit
+  });
+
   renderTop();
 }
+
 
 
 
