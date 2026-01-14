@@ -27850,1039 +27850,6 @@ function canonicalizeClientSettings(input) {
   return cs;
 }
 
-function deriveTimesheetInvoicingDisplay(row) {
-  const r = (row && typeof row === 'object') ? row : {};
-
-  // “Invoiced” indicator (summary rows already carry this today)
-  const lockedInvoiceId =
-    r.locked_by_invoice_id ??
-    r.locked_invoice_id ??
-    null;
-
-  const lockedInvoiceNo =
-    r.locked_by_invoice_number ??
-    r.locked_invoice_number ??
-    null;
-
-  const isInvoiced =
-    !!lockedInvoiceId ||
-    !!lockedInvoiceNo;
-
-  if (!isInvoiced) return null;
-
-  // Requires SQL 2B.1: invoice status joined into the timesheet summary row
-  const lockedStatusRaw =
-    r.locked_invoice_status ??
-    r.locked_invoice_status_text ??
-    r.locked_invoice_status_enum ??
-    null;
-
-  const lockedStatus = String(lockedStatusRaw || '').trim().toUpperCase();
-
-  // Spec: only map when locked_invoice_status exists (no frontend inference)
-  if (!lockedStatus) return null;
-
-  if (lockedStatus === 'ISSUED' || lockedStatus === 'PAID') {
-    return 'INVOICED_ISSUED';
-  }
-
-  return 'INVOICED_NOT_ISSUED';
-}
-
-
-async function openInvoiceModal(row) {
-  // ─────────────────────────────────────────────────────────────
-  // Invoice modal UX:
-  // - View mode: pills + timestamps (no inputs)
-  // - Edit mode: checkbox rows + staged timestamps (London)
-  // - Save calls backend endpoints in safe order and refetches detail
-  // - Remove timesheets: div-based selection + POST remove-timesheets
-  // - Delete: DELETE /api/invoices/:id (only when empty + unissued + unpaid)
-  // - Render PDF: POST render + show iframe preview modal
-  // - Email: POST email (queues outbox) + show mail_id hint
-  // ─────────────────────────────────────────────────────────────
-
-  if (!row || typeof row !== 'object') {
-    alert('Invoice row not provided');
-    return;
-  }
-
-  const invoiceId = String(row.id || row.invoice_id || '').trim();
-  if (!invoiceId) {
-    alert('Invoice id missing');
-    return;
-  }
-
-  const esc = encodeURIComponent;
-
-  const safeJson = async (res) => { try { return await res.json(); } catch { return null; } };
-
-  const apiGetInvoiceDetail = async (id) => {
-    const res = await authFetch(API(`/api/invoices/${esc(id)}`));
-    const j = await safeJson(res);
-    if (!res.ok) {
-      const t = await res.text().catch(()=> '');
-      const msg = (j && (j.error || j.message)) ? (j.error || j.message) : (t || `Request failed (${res.status})`);
-      throw new Error(String(msg || 'Failed to fetch invoice'));
-    }
-    return j;
-  };
-
-    // Minimal invoice state seed
-  const ctxSeed = {
-    entity: 'invoices',
-    openToken: `invoice:${invoiceId}:${Date.now()}:${Math.random().toString(36).slice(2)}`,
-    data: { ...(row || {}), id: invoiceId },
-    invoiceDetail: null,
-    invoiceState: null,
-    invoiceRemove: { selectedTimesheetIds: new Set() },
-    invoiceUi: { lastEmail: null, lastRenderUrl: null }
-  };
-  window.modalCtx = ctxSeed;
-  try { if (typeof modalCtx !== 'undefined') modalCtx = ctxSeed; } catch {}
-
-
-  const initInvoiceStateFromDetail = (detail) => {
-    const inv = detail?.invoice || null;
-    if (!inv) return null;
-
-    const status = String(inv.status || '').toUpperCase();
-    const isHold = (status === 'ON_HOLD');
-    const isPaid = (status === 'PAID');
-    const isIssued = (status === 'ISSUED' || isPaid);
-
-    const original = {
-      status,
-      is_hold: isHold,
-      is_issued: isIssued,
-      is_paid: isPaid,
-      on_hold_reason: String(inv.on_hold_reason || '').trim(),
-      status_date_utc: inv.status_date_utc || null,
-      issued_at_utc: inv.issued_at_utc || null,
-      paid_at_utc: inv.paid_at_utc || null
-    };
-
-    // staged starts as original
-    const staged = {
-      is_hold: original.is_hold,
-      is_issued: original.is_issued,
-      is_paid: original.is_paid,
-      on_hold_reason: original.on_hold_reason,
-
-      hold_ts_local: '',
-      issued_ts_local: '',
-      paid_ts_local: ''
-    };
-
-    window.modalCtx.invoiceState = { original, staged };
-    return window.modalCtx.invoiceState;
-  };
-
-  const reloadInvoiceIntoCtx = async () => {
-    const detail = await apiGetInvoiceDetail(invoiceId);
-    window.modalCtx.invoiceDetail = detail;
-    window.modalCtx.data = { ...(detail.invoice || {}), id: invoiceId };
-    initInvoiceStateFromDetail(detail);
-    return detail;
-  };
-
-  const renderTab = () => renderInvoiceModalContent(window.modalCtx);
-
-  const onSave = async () => {
-    const mc = window.modalCtx || {};
-    const detail = mc.invoiceDetail || null;
-    const inv = detail?.invoice || null;
-
-    if (!inv) {
-      alert('Invoice not loaded');
-      return { ok: false };
-    }
-
-    const st = mc.invoiceState;
-    if (!st || !st.original || !st.staged) {
-      alert('Invoice state missing');
-      return { ok: false };
-    }
-
-    const original = st.original;
-    const staged = st.staged;
-
-    // Enforce consistency rules in staged state
-    if (staged.is_paid) staged.is_issued = true;
-    if (staged.is_hold) {
-      staged.is_issued = false;
-      staged.is_paid = false;
-    }
-    if (!staged.is_issued) staged.is_paid = false;
-
-    staged.on_hold_reason = String(staged.on_hold_reason || '').trim();
-
-    // Hold reason required if holding
-    if (staged.is_hold && !staged.on_hold_reason) {
-      alert('Hold reason is required when placing an invoice on hold.');
-      return { ok: false };
-    }
-
-    const encId = esc(invoiceId);
-
-    const postJson = async (path, body) => {
-      const res = await authFetch(API(path), {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(body || {})
-      });
-      const j = await safeJson(res);
-      if (!res.ok) {
-        const t = await res.text().catch(()=> '');
-        const msg = (j && (j.error || j.message)) ? (j.error || j.message) : (t || `Request failed (${res.status})`);
-        throw new Error(String(msg || 'Request failed'));
-      }
-      return j;
-    };
-
-    // Determine transitions (safe order)
-    const tasks = [];
-
-    // If moving off hold → unhold first
-    if (original.is_hold && !staged.is_hold) {
-      tasks.push(async () => await postJson(`/api/invoices/${encId}/unhold`, {}));
-    }
-
-    // If unpaying → mark unpaid first (must be before unissue)
-    if (original.is_paid && !staged.is_paid) {
-      tasks.push(async () => await postJson(`/api/invoices/${encId}/mark-unpaid`, {}));
-    }
-
-    // If unissuing → unissue after unpaid
-    if (original.is_issued && !staged.is_issued) {
-      tasks.push(async () => await postJson(`/api/invoices/${encId}/unissue`, { clear_pdf: false }));
-    }
-
-    // If holding from draft → hold (only if not issued/paid)
-    // (If they toggled hold on, UI rules already cleared issued/paid)
-    if (!original.is_hold && staged.is_hold) {
-      tasks.push(async () => await postJson(`/api/invoices/${encId}/hold`, { reason: staged.on_hold_reason || null }));
-    }
-
-    // If issuing → issue (if not hold)
-    if (!staged.is_hold && !original.is_issued && staged.is_issued) {
-      tasks.push(async () => {
-        const j = await postJson(`/api/invoices/${encId}/issue`, {});
-        // issue can return ON_HOLD (server reasons)
-        const st = String(j?.status || '').toUpperCase();
-        if (st === 'ON_HOLD') {
-          // refresh and stop further actions by throwing a controlled error
-          const reason = j?.on_hold_reason ? String(j.on_hold_reason) : 'Invoice moved to ON_HOLD';
-          throw new Error(`Invoice placed ON_HOLD: ${reason}`);
-        }
-        return j;
-      });
-    }
-
-    // If marking paid → mark paid (must be after issue)
-    if (!original.is_paid && staged.is_paid) {
-      tasks.push(async () => await postJson(`/api/invoices/${encId}/mark-paid`, {}));
-    }
-
-    // If we need to update hold reason while already on hold
-    if (staged.is_hold && staged.on_hold_reason !== String(original.on_hold_reason || '')) {
-      // invoice_hold_one sets reason; calling hold again is fine to update reason
-      tasks.push(async () => await postJson(`/api/invoices/${encId}/hold`, { reason: staged.on_hold_reason || null }));
-    }
-
-    if (!tasks.length) {
-      window.__toast && window.__toast('No changes');
-      return { ok: true };
-    }
-
-    try {
-      for (const fn of tasks) await fn();
-    } catch (e) {
-      // Always refetch so UI reflects server truth if something changed mid-way
-      try { await reloadInvoiceIntoCtx(); } catch {}
-      alert(String(e?.message || e || 'Failed to update invoice'));
-      return { ok: false };
-    }
-
-    // Refetch and repaint with server timestamps
-    try { await reloadInvoiceIntoCtx(); } catch {}
-
-    // refresh invoice summary behind the modal
-    try {
-      if (currentSection === 'invoices') {
-        const data = await loadSection();
-        renderSummary(data);
-      }
-    } catch {}
-
-    // repaint current modal tab
-    try {
-      const fr = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
-      if (fr) {
-        fr._suppressDirty = true;
-        await fr.setTab(fr.currentTabKey || 'main');
-        fr._suppressDirty = false;
-        fr._updateButtons && fr._updateButtons();
-      }
-    } catch {}
-
-    return { ok: true };
-  };
-
-  showModal(
-    `Invoice ${String(row.invoice_no || '').trim() || String(invoiceId).slice(0, 8) + '…'}`,
-    [{ key: 'main', label: 'Invoice' }],
-    renderTab,
-    onSave,
-    true,
-    null,
-    { kind: 'invoice' }
-  );
-
-    // Fetch detail and paint
-  try {
-    await reloadInvoiceIntoCtx();
-
-    // ✅ FORCE a repaint in VIEW mode so we don't stay stuck on "Loading invoice…"
-    try {
-      const fr = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
-      if (fr) {
-        fr._suppressDirty = true;
-        await fr.setTab(fr.currentTabKey || 'main');
-        fr._suppressDirty = false;
-        fr._updateButtons && fr._updateButtons();
-      }
-    } catch {}
-  } catch (e) {
-    alert(String(e?.message || e || 'Failed to load invoice'));
-  }
-
-
-  // Wire DOM behaviour (re-wire after re-renders)
-  const wire = () => {
-    try {
-      const root = document.getElementById('invModalRoot');
-      if (!root) return;
-
-      // Render / Email / Remove / Delete
-      const btnRender = root.querySelector('[data-inv-action="render-pdf"]');
-      const btnEmail  = root.querySelector('[data-inv-action="email"]');
-      const btnRemove = root.querySelector('[data-inv-action="remove-timesheets"]');
-      const btnDelete = root.querySelector('[data-inv-action="delete"]');
-
-      if (btnRender && !btnRender.dataset.wired) {
-        btnRender.dataset.wired = '1';
-        btnRender.addEventListener('click', async (ev) => {
-          ev.preventDefault(); ev.stopPropagation();
-          await handleInvoiceRenderPdf(window.modalCtx);
-        });
-      }
-
-      if (btnEmail && !btnEmail.dataset.wired) {
-        btnEmail.dataset.wired = '1';
-        btnEmail.addEventListener('click', async (ev) => {
-          ev.preventDefault(); ev.stopPropagation();
-          await handleInvoiceEmail(window.modalCtx);
-        });
-      }
-
-      if (btnRemove && !btnRemove.dataset.wired) {
-        btnRemove.dataset.wired = '1';
-        btnRemove.addEventListener('click', async (ev) => {
-          ev.preventDefault(); ev.stopPropagation();
-
-          const mc = window.modalCtx || {};
-          const inv = mc.invoiceDetail?.invoice || null;
-          const status = String(inv?.status || '').toUpperCase();
-
-          const can =
-            inv &&
-            (inv.paid_at_utc == null) &&
-            (status === 'DRAFT' || status === 'ON_HOLD');
-
-          if (!can) {
-            alert('You can only remove timesheets from an unissued/unpaid invoice (DRAFT/ON_HOLD).');
-            return;
-          }
-
-          const tsIds = Array.from(mc.invoiceRemove?.selectedTimesheetIds || []).map(String).filter(Boolean);
-          if (!tsIds.length) {
-            alert('Select at least one timesheet group to remove.');
-            return;
-          }
-
-          const ok = window.confirm(
-            `Remove ${tsIds.length} timesheet(s) from this invoice?\n\n` +
-            `Removed timesheets return to a pre-authorised state (PENDING_AUTH) and must be re-authorised before invoicing.`
-          );
-          if (!ok) return;
-
-          try {
-            const res = await authFetch(API(`/api/invoices/${esc(invoiceId)}/remove-timesheets`), {
-              method: 'POST',
-              headers: { 'content-type': 'application/json' },
-              body: JSON.stringify({ timesheet_ids: tsIds })
-            });
-            const j = await safeJson(res);
-            if (!res.ok) {
-              const t = await res.text().catch(()=> '');
-              const msg = (j && (j.error || j.message)) ? (j.error || j.message) : (t || `Request failed (${res.status})`);
-              throw new Error(String(msg || 'Failed to remove timesheets'));
-            }
-
-            mc.invoiceRemove.selectedTimesheetIds.clear();
-            window.__toast && window.__toast('Timesheets removed.');
-
-            // refresh invoice detail + repaint
-            await reloadInvoiceIntoCtx();
-
-            // refresh invoices summary if open
-            try {
-              if (currentSection === 'invoices') {
-                const data = await loadSection();
-                renderSummary(data);
-              }
-              if (currentSection === 'timesheets') {
-                const data = await loadSection();
-                renderSummary(data);
-              }
-            } catch {}
-
-            try {
-              const fr = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
-              if (fr) {
-                fr._suppressDirty = true;
-                await fr.setTab(fr.currentTabKey || 'main');
-                fr._suppressDirty = false;
-                fr._updateButtons && fr._updateButtons();
-              }
-            } catch {}
-
-          } catch (e) {
-            alert(String(e?.message || e || 'Failed to remove timesheets'));
-          }
-        });
-      }
-
-      if (btnDelete && !btnDelete.dataset.wired) {
-        btnDelete.dataset.wired = '1';
-        btnDelete.addEventListener('click', async (ev) => {
-          ev.preventDefault(); ev.stopPropagation();
-          await handleInvoiceDelete(window.modalCtx);
-        });
-      }
-
-      // Timesheet group selection toggles (divs)
-      const picks = root.querySelectorAll('[data-inv-ts-pick="1"][data-tsid]');
-      picks.forEach(el => {
-        if (el.dataset.wired === '1') return;
-        el.dataset.wired = '1';
-
-        const tsid = String(el.getAttribute('data-tsid') || '').trim();
-        if (!tsid) return;
-
-        const refreshPick = () => {
-          const on = window.modalCtx?.invoiceRemove?.selectedTimesheetIds?.has(tsid) || false;
-          el.setAttribute('aria-checked', on ? 'true' : 'false');
-          el.style.borderColor = on ? 'rgba(129,140,248,.7)' : 'var(--line)';
-          el.style.background = on ? 'rgba(79,70,229,.18)' : '#0b152a';
-          const mark = el.querySelector('[data-inv-ts-mark]');
-          if (mark) mark.textContent = on ? 'Selected' : 'Select';
-        };
-
-        el.addEventListener('click', (ev) => {
-          ev.preventDefault(); ev.stopPropagation();
-          const set = window.modalCtx.invoiceRemove.selectedTimesheetIds;
-          if (set.has(tsid)) set.delete(tsid);
-          else set.add(tsid);
-          refreshPick();
-        });
-
-        refreshPick();
-      });
-
-      // Edit-mode checkbox rules: enforce UI consistency + stage timestamps
-      const fr = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
-      const mode = fr?.mode || 'view';
-      if (mode !== 'edit' && mode !== 'create') return;
-
-      const mc = window.modalCtx || {};
-      const st = mc.invoiceState;
-      if (!st || !st.staged) return;
-
-      const cbHold   = root.querySelector('input[name="inv_is_hold"]');
-      const cbIssued = root.querySelector('input[name="inv_is_issued"]');
-      const cbPaid   = root.querySelector('input[name="inv_is_paid"]');
-      const inReason = root.querySelector('input[name="inv_hold_reason"]');
-
-      const stampHold  = root.querySelector('[data-inv-stamp="hold"]');
-      const stampIssue = root.querySelector('[data-inv-stamp="issued"]');
-      const stampPaid  = root.querySelector('[data-inv-stamp="paid"]');
-
-      const nowLondon = () => {
-        const dt = new Date();
-        try {
-          const parts = new Intl.DateTimeFormat('en-GB', {
-            timeZone: 'Europe/London',
-            year: 'numeric', month: '2-digit', day: '2-digit',
-            hour: '2-digit', minute: '2-digit', second: '2-digit',
-            hour12: false
-          }).formatToParts(dt);
-          const g = (t) => (parts.find(p => p.type === t)?.value || '');
-          return `${g('day')}/${g('month')}/${g('year')} ${g('hour')}:${g('minute')}:${g('second')}`;
-        } catch {
-          const pad = (n) => String(n).padStart(2, '0');
-          return `${pad(dt.getDate())}/${pad(dt.getMonth()+1)}/${dt.getFullYear()} ${pad(dt.getHours())}:${pad(dt.getMinutes())}:${pad(dt.getSeconds())}`;
-        }
-      };
-
-      const repaintStamps = () => {
-        if (stampHold)  stampHold.textContent  = st.staged.is_hold  ? (st.staged.hold_ts_local ? `On hold: ${st.staged.hold_ts_local}` : '') : '';
-        if (stampIssue) stampIssue.textContent = st.staged.is_issued ? (st.staged.issued_ts_local ? `Issued: ${st.staged.issued_ts_local}` : '') : '';
-        if (stampPaid)  stampPaid.textContent  = st.staged.is_paid  ? (st.staged.paid_ts_local ? `Paid: ${st.staged.paid_ts_local}` : '') : '';
-      };
-
-      const enforceRules = (changed) => {
-        // Checking “Paid” auto-checks “Issued” and unchecks “On hold”
-        if (changed === 'paid' && st.staged.is_paid) {
-          st.staged.is_issued = true;
-          st.staged.is_hold = false;
-        }
-
-        // Checking “On hold” unchecks “Issued” and “Paid”
-        if (changed === 'hold' && st.staged.is_hold) {
-          st.staged.is_issued = false;
-          st.staged.is_paid = false;
-        }
-
-        // Unchecking “Issued” unchecks “Paid”
-        if (changed === 'issued' && !st.staged.is_issued) {
-          st.staged.is_paid = false;
-        }
-
-        // Apply to inputs
-        if (cbHold) cbHold.checked = !!st.staged.is_hold;
-        if (cbIssued) cbIssued.checked = !!st.staged.is_issued;
-        if (cbPaid) cbPaid.checked = !!st.staged.is_paid;
-
-        // Staged timestamps (UI only)
-        if (st.staged.is_hold) {
-          if (!st.staged.hold_ts_local) st.staged.hold_ts_local = nowLondon();
-        } else {
-          st.staged.hold_ts_local = '';
-        }
-
-        if (st.staged.is_issued) {
-          if (!st.staged.issued_ts_local) st.staged.issued_ts_local = nowLondon();
-        } else {
-          st.staged.issued_ts_local = '';
-        }
-
-        if (st.staged.is_paid) {
-          if (!st.staged.paid_ts_local) st.staged.paid_ts_local = nowLondon();
-        } else {
-          st.staged.paid_ts_local = '';
-        }
-
-        if (inReason) {
-          inReason.disabled = !st.staged.is_hold;
-          inReason.style.opacity = st.staged.is_hold ? '' : '0.6';
-        }
-
-        repaintStamps();
-      };
-
-      if (cbHold && !cbHold.dataset.wired) {
-        cbHold.dataset.wired = '1';
-        cbHold.addEventListener('change', () => {
-          st.staged.is_hold = !!cbHold.checked;
-          enforceRules('hold');
-        });
-      }
-
-      if (cbIssued && !cbIssued.dataset.wired) {
-        cbIssued.dataset.wired = '1';
-        cbIssued.addEventListener('change', () => {
-          st.staged.is_issued = !!cbIssued.checked;
-          enforceRules('issued');
-        });
-      }
-
-      if (cbPaid && !cbPaid.dataset.wired) {
-        cbPaid.dataset.wired = '1';
-        cbPaid.addEventListener('change', () => {
-          st.staged.is_paid = !!cbPaid.checked;
-          enforceRules('paid');
-        });
-      }
-
-      if (inReason && !inReason.dataset.wired) {
-        inReason.dataset.wired = '1';
-        inReason.addEventListener('input', () => {
-          st.staged.on_hold_reason = String(inReason.value || '').trim();
-        });
-      }
-
-      enforceRules(null);
-    } catch {}
-  };
-
-  // Observe re-renders
-  try {
-    const target = document.getElementById('modalBody');
-    if (target) {
-      const ob = new MutationObserver(() => { wire(); });
-      ob.observe(target, { childList: true, subtree: true });
-      window.modalCtx._invoiceObserver = ob;
-    }
-  } catch {}
-
-  // Initial wire
-  try { wire(); } catch {}
-}
-
-function renderInvoiceModalContent(modalCtx) {
-  const mc = modalCtx || {};
-  const detail = mc.invoiceDetail || null;
-  const inv = detail?.invoice || null;
-
-  const fr = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
-  const mode = fr?.mode || 'view';
-  const isEdit = (mode === 'edit' || mode === 'create');
-
-  const escapeHtml = (s) => String(s ?? '')
-    .replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;')
-    .replaceAll('"','&quot;').replaceAll("'","&#39;");
-
-  const fmtMoney = (n) => {
-    const x = Number(n || 0);
-    const v = Number.isFinite(x) ? x : 0;
-    return `£${v.toFixed(2)}`;
-  };
-
-  const fmtLondonTs = (isoLike) => {
-    if (!isoLike) return '';
-    const dt = new Date(isoLike);
-    if (Number.isNaN(dt.getTime())) return String(isoLike);
-    try {
-      const parts = new Intl.DateTimeFormat('en-GB', {
-        timeZone: 'Europe/London',
-        year: 'numeric', month: '2-digit', day: '2-digit',
-        hour: '2-digit', minute: '2-digit', second: '2-digit',
-        hour12: false
-      }).formatToParts(dt);
-      const g = (t) => (parts.find(p => p.type === t)?.value || '');
-      return `${g('day')}/${g('month')}/${g('year')} ${g('hour')}:${g('minute')}:${g('second')}`;
-    } catch {
-      const pad = (n) => String(n).padStart(2, '0');
-      return `${pad(dt.getDate())}/${pad(dt.getMonth()+1)}/${dt.getFullYear()} ${pad(dt.getHours())}:${pad(dt.getMinutes())}:${pad(dt.getSeconds())}`;
-    }
-  };
-
-  const fmtYmd = (ymd) => {
-    const s = String(ymd || '').slice(0, 10);
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return String(ymd || '');
-    const [Y,M,D] = s.split('-');
-    return `${D}/${M}/${Y}`;
-  };
-
-  // loading state
-  if (!inv) {
-    return `
-      <div id="invModalRoot" class="tabc" style="display:flex;flex-direction:column;gap:10px;">
-        <div class="card">
-          <div style="font-weight:700;">Loading invoice…</div>
-          <div class="mini" style="opacity:.85;">If this takes too long, close and reopen.</div>
-        </div>
-      </div>
-    `;
-  }
-
-  const status = String(inv.status || '').toUpperCase();
-  const isHold = (status === 'ON_HOLD');
-  const isIssued = (status === 'ISSUED' || status === 'PAID');
-  const isPaid = (status === 'PAID');
-
-  const st = mc.invoiceState || { original: {}, staged: {} };
-  const staged = st.staged || {};
-  const effectiveHold   = isEdit ? !!staged.is_hold   : isHold;
-  const effectiveIssued = isEdit ? !!staged.is_issued : isIssued;
-  const effectivePaid   = isEdit ? !!staged.is_paid   : isPaid;
-
-  // Invoice date preference: invoice_date else issued_at/created_at
-  const invDate =
-    inv.invoice_date ||
-    inv.issued_at_utc ||
-    inv.created_at ||
-    null;
-
-  // Week ending derivation:
-  // 1) from header_snapshot_json.meta.invoice_week_start + 6
-  // 2) else from items meta_json.week_ending_date (first)
-  let weekEndingTxt = '';
-  try {
-    const hdr = detail?.header_snapshot_json || {};
-    const ws = String(hdr?.meta?.invoice_week_start || hdr?.meta?.invoice_week_start_txt || '').slice(0, 10);
-    if (/^\d{4}-\d{2}-\d{2}$/.test(ws)) {
-      const dt = new Date(`${ws}T00:00:00Z`);
-      dt.setUTCDate(dt.getUTCDate() + 6);
-      weekEndingTxt = dt.toISOString().slice(0, 10);
-    }
-  } catch {}
-
-  if (!weekEndingTxt) {
-    try {
-      const items = Array.isArray(detail?.items) ? detail.items : [];
-      for (const it of items) {
-        const meta = (it?.meta_json && typeof it.meta_json === 'object') ? it.meta_json : {};
-        const we = String(meta?.week_ending_date || meta?.week_ending || '').slice(0, 10);
-        if (/^\d{4}-\d{2}-\d{2}$/.test(we)) { weekEndingTxt = we; break; }
-      }
-    } catch {}
-  }
-
-  const clientName =
-    String(detail?.header_snapshot_json?.client_name || inv?.client?.name || inv?.client_name || '').trim() ||
-    'Client';
-
-  const invoiceNo = String(inv.invoice_no || '').trim() || `${String(inv.id).slice(0,8)}…`;
-
-  const totals = {
-    ex:  fmtMoney(inv.subtotal_ex_vat),
-    vat: fmtMoney(inv.vat_amount),
-    inc: fmtMoney(inv.total_inc_vat)
-  };
-
-  // Stamps shown: hold uses status_date_utc when status ON_HOLD
-  const holdStampServer  = (isHold && inv.status_date_utc) ? fmtLondonTs(inv.status_date_utc) : '';
-  const issueStampServer = (inv.issued_at_utc) ? fmtLondonTs(inv.issued_at_utc) : '';
-  const paidStampServer  = (inv.paid_at_utc) ? fmtLondonTs(inv.paid_at_utc) : '';
-
-  const holdStamp = isEdit ? (staged.hold_ts_local || (effectiveHold ? holdStampServer : '')) : (effectiveHold ? holdStampServer : '');
-  const issueStamp = isEdit ? (staged.issued_ts_local || (effectiveIssued ? issueStampServer : '')) : (effectiveIssued ? issueStampServer : '');
-  const paidStamp = isEdit ? (staged.paid_ts_local || (effectivePaid ? paidStampServer : '')) : (effectivePaid ? paidStampServer : '');
-
-  const holdReasonVal = isEdit ? String(staged.on_hold_reason || '').trim() : String(inv.on_hold_reason || '').trim();
-
-  const pills = `
-    <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;">
-      <span class="pill ${effectiveHold ? 'pill-bad' : ''}">${effectiveHold ? 'ON HOLD' : 'HOLD: off'}</span>
-      <span class="pill ${effectiveIssued ? 'pill-info' : ''}">${effectiveIssued ? 'ISSUED' : 'ISSUED: off'}</span>
-      <span class="pill ${effectivePaid ? 'pill-ok' : ''}">${effectivePaid ? 'PAID' : 'PAID: off'}</span>
-    </div>
-  `;
-
-  const stateControls = isEdit ? `
-    <div class="card">
-      <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;">
-        <div style="font-weight:700;">State</div>
-        ${pills}
-      </div>
-
-      <div style="margin-top:10px;display:flex;flex-direction:column;gap:10px;">
-        <label class="mini" style="display:flex;align-items:center;gap:10px;">
-          <input type="checkbox" name="inv_is_hold" ${effectiveHold ? 'checked' : ''}/>
-          <span style="min-width:90px;">On Hold</span>
-          <span class="mini" data-inv-stamp="hold" style="opacity:.9;">${escapeHtml(holdStamp ? `On hold: ${holdStamp}` : '')}</span>
-        </label>
-
-        <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-left:24px;">
-          <input class="input" name="inv_hold_reason" placeholder="On hold reason…" value="${escapeHtml(holdReasonVal)}"
-                 ${effectiveHold ? '' : 'disabled'}
-                 style="max-width:600px;flex:1;${effectiveHold ? '' : 'opacity:.6;'}"/>
-          <span class="mini" style="opacity:.8;">Required if holding.</span>
-        </div>
-
-        <label class="mini" style="display:flex;align-items:center;gap:10px;">
-          <input type="checkbox" name="inv_is_issued" ${effectiveIssued ? 'checked' : ''}/>
-          <span style="min-width:90px;">Issued</span>
-          <span class="mini" data-inv-stamp="issued" style="opacity:.9;">${escapeHtml(issueStamp ? `Issued: ${issueStamp}` : '')}</span>
-        </label>
-
-        <label class="mini" style="display:flex;align-items:center;gap:10px;">
-          <input type="checkbox" name="inv_is_paid" ${effectivePaid ? 'checked' : ''}/>
-          <span style="min-width:90px;">Paid</span>
-          <span class="mini" data-inv-stamp="paid" style="opacity:.9;">${escapeHtml(paidStamp ? `Paid: ${paidStamp}` : '')}</span>
-        </label>
-
-        <div class="mini" style="opacity:.85;">
-          Stamps are staged locally until you click <b>Save</b>.
-        </div>
-      </div>
-    </div>
-  ` : `
-    <div class="card">
-      <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;">
-        <div style="font-weight:700;">State</div>
-        ${pills}
-      </div>
-
-      <div style="margin-top:10px;display:flex;flex-direction:column;gap:6px;">
-        <div class="mini" style="opacity:.9;">
-          ${effectiveHold ? `<span class="pill pill-bad">ON HOLD</span> ${escapeHtml(holdReasonVal ? `— ${holdReasonVal}` : '')}` : ''}
-        </div>
-        <div class="mini" style="opacity:.9;">
-          ${effectiveHold && holdStamp ? `On hold: <b>${escapeHtml(holdStamp)}</b>` : ''}
-        </div>
-        <div class="mini" style="opacity:.9;">
-          ${effectiveIssued && issueStamp ? `Issued: <b>${escapeHtml(issueStamp)}</b>` : ''}
-        </div>
-        <div class="mini" style="opacity:.9;">
-          ${effectivePaid && paidStamp ? `Paid: <b>${escapeHtml(paidStamp)}</b>` : ''}
-        </div>
-      </div>
-    </div>
-  `;
-
-  // Actions (anchors are clickable even in view mode because setFormReadOnly disables buttons/inputs)
-  const actions = `
-    <div class="card">
-      <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;">
-        <div style="font-weight:700;">Actions</div>
-        <div style="display:flex;gap:8px;flex-wrap:wrap;">
-          <a href="#" class="btn mini" data-inv-action="render-pdf">Render PDF</a>
-          <a href="#" class="btn mini" data-inv-action="email">Email invoice</a>
-        </div>
-      </div>
-      <div class="mini" style="opacity:.85;margin-top:6px;">
-        Render PDF opens a preview viewer. Email queues mail_outbox (non-blocking).
-      </div>
-    </div>
-  `;
-
-  // Header summary card
-  const header = `
-    <div class="card">
-      <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:10px;flex-wrap:wrap;">
-        <div style="display:flex;flex-direction:column;gap:4px;">
-          <div style="font-weight:800;font-size:14px;">Invoice ${escapeHtml(invoiceNo)}</div>
-          <div class="mini" style="opacity:.9;">Client: <strong>${escapeHtml(clientName)}</strong></div>
-          <div class="mini" style="opacity:.9;">Invoice date: <strong>${escapeHtml(invDate ? fmtLondonTs(invDate) : '—')}</strong></div>
-          <div class="mini" style="opacity:.9;">Week ending: <strong>${escapeHtml(weekEndingTxt ? fmtYmd(weekEndingTxt) : '—')}</strong></div>
-          <div class="mini" style="opacity:.9;">Status: <strong>${escapeHtml(status || '—')}</strong></div>
-        </div>
-
-        <div style="display:flex;flex-direction:column;gap:4px;min-width:220px;">
-          <div class="mini" style="display:flex;justify-content:space-between;gap:10px;">
-            <span>Subtotal ex VAT</span><strong>${escapeHtml(totals.ex)}</strong>
-          </div>
-          <div class="mini" style="display:flex;justify-content:space-between;gap:10px;">
-            <span>VAT</span><strong>${escapeHtml(totals.vat)}</strong>
-          </div>
-          <div class="mini" style="display:flex;justify-content:space-between;gap:10px;">
-            <span>Total inc VAT</span><strong>${escapeHtml(totals.inc)}</strong>
-          </div>
-        </div>
-      </div>
-    </div>
-  `;
-
-  // Lines + remove + delete
-  const lines = renderInvoiceLinesTable(mc);
-
-  return `
-    <div id="invModalRoot" class="tabc" style="display:flex;flex-direction:column;gap:10px;min-height:0;">
-      ${header}
-      ${stateControls}
-      ${actions}
-      ${lines}
-    </div>
-  `;
-}
-
-function renderInvoiceLinesTable(modalCtx) {
-  const mc = modalCtx || {};
-  const detail = mc.invoiceDetail || null;
-  const inv = detail?.invoice || null;
-
-  const escapeHtml = (s) => String(s ?? '')
-    .replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;')
-    .replaceAll('"','&quot;').replaceAll("'","&#39;");
-
-  const fmtMoney = (n) => {
-    const x = Number(n || 0);
-    const v = Number.isFinite(x) ? x : 0;
-    return `£${v.toFixed(2)}`;
-  };
-
-  const fmtYmd = (ymd) => {
-    const s = String(ymd || '').slice(0, 10);
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return String(ymd || '');
-    const [Y,M,D] = s.split('-');
-    return `${D}/${M}/${Y}`;
-  };
-
-  if (!inv) {
-    return `
-      <div class="card">
-        <div style="font-weight:700;margin-bottom:8px;">Lines</div>
-        <div class="mini" style="opacity:.85;">Loading…</div>
-      </div>
-    `;
-  }
-
-  const items = Array.isArray(detail?.items) ? detail.items : [];
-  const status = String(inv.status || '').toUpperCase();
-
-  const canRemove =
-    (inv.paid_at_utc == null) &&
-    (status === 'DRAFT' || status === 'ON_HOLD');
-
-  // Group by timesheet_id for removal selection
-  const byTs = new Map(); // tsid -> {tsid, worker, week, count, ex, vat, inc}
-  for (const it of items) {
-    const tsid = String(it?.timesheet_id || '').trim();
-    if (!tsid) continue;
-
-    const meta = (it?.meta_json && typeof it.meta_json === 'object') ? it.meta_json : {};
-    const worker = String(meta?.candidate_name || meta?.candidate_display || meta?.candidate || '').trim() || 'Worker';
-
-    const week = String(meta?.week_ending_date || meta?.week_ending || '').slice(0, 10);
-
-    if (!byTs.has(tsid)) {
-      byTs.set(tsid, { tsid, worker, week, count: 0, ex: 0, vat: 0, inc: 0 });
-    }
-
-    const g = byTs.get(tsid);
-    g.count += 1;
-
-    g.ex += Number(it?.total_charge_ex_vat || 0) || 0;
-    g.vat += Number(it?.vat_amount || 0) || 0;
-    g.inc += Number(it?.total_inc_vat || 0) || 0;
-  }
-
-  const tsGroups = Array.from(byTs.values()).sort((a,b) => {
-    const aw = a.week || '';
-    const bw = b.week || '';
-    if (aw && bw && aw !== bw) return bw.localeCompare(aw);
-    return String(a.worker || '').localeCompare(String(b.worker || ''));
-  });
-
-  const tsPickHtml = tsGroups.length ? tsGroups.map(g => {
-    const we = g.week ? `W/E ${fmtYmd(g.week)}` : '';
-    const sub = `${we}${we ? ' • ' : ''}${g.count} line(s) • ${fmtMoney(g.ex)} ex VAT`;
-    return `
-      <div
-        data-inv-ts-pick="1"
-        data-tsid="${escapeHtml(g.tsid)}"
-        role="checkbox"
-        aria-checked="false"
-        style="display:flex;align-items:center;justify-content:space-between;gap:10px;
-               padding:8px 10px;border:1px solid var(--line);border-radius:10px;background:#0b152a;
-               cursor:pointer;user-select:none;"
-      >
-        <div style="display:flex;flex-direction:column;gap:2px;min-width:0;">
-          <div style="font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(g.worker)}</div>
-          <div class="mini" style="opacity:.9;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(sub)}</div>
-        </div>
-        <div class="mini" data-inv-ts-mark style="padding:3px 8px;border:1px solid var(--line);border-radius:999px;background:#081024;opacity:.8;">
-          Select
-        </div>
-      </div>
-    `;
-  }).join('') : `<div class="mini" style="opacity:.85;">No timesheet-linked lines found.</div>`;
-
-  const lineRowsHtml = items.map(it => {
-    const meta = (it?.meta_json && typeof it.meta_json === 'object') ? it.meta_json : {};
-
-    const worker = String(meta?.candidate_name || meta?.candidate_display || meta?.candidate || '').trim() || 'Worker';
-
-    const shiftOrWe =
-      String(meta?.shift_date || meta?.worked_date || meta?.date || meta?.week_ending_date || '').slice(0, 10);
-
-    const dateTxt = shiftOrWe ? fmtYmd(shiftOrWe) : '—';
-
-    const desc = String(it?.description || '').trim() || '';
-
-    const q = it?.qty || {};
-    const d  = Number(q.day || 0) || 0;
-    const n  = Number(q.night || 0) || 0;
-    const sa = Number(q.sat || 0) || 0;
-    const su = Number(q.sun || 0) || 0;
-    const bh = Number(q.bh || 0) || 0;
-
-    const totalH = d+n+sa+su+bh;
-    const qtyTxt =
-      totalH > 0
-        ? `D ${d.toFixed(2)} • N ${n.toFixed(2)} • Sat ${sa.toFixed(2)} • Sun ${su.toFixed(2)} • BH ${bh.toFixed(2)}`
-        : '—';
-
-    const ex  = fmtMoney(it?.total_charge_ex_vat);
-    const vat = fmtMoney(it?.vat_amount);
-    const inc = fmtMoney(it?.total_inc_vat);
-
-    return `
-      <tr>
-        <td>${escapeHtml(worker)}</td>
-        <td>${escapeHtml(dateTxt)}</td>
-        <td>${escapeHtml(desc)}</td>
-        <td>${escapeHtml(qtyTxt)}</td>
-        <td style="text-align:right">${escapeHtml(ex)}</td>
-        <td style="text-align:right">${escapeHtml(vat)}</td>
-        <td style="text-align:right">${escapeHtml(inc)}</td>
-      </tr>
-    `;
-  }).join('');
-
-  // Delete invoice is only enabled if invoice has zero lines, unissued, unpaid
-  const canDelete = canRemove && items.length === 0;
-
-  return `
-    <div class="card">
-      <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;">
-        <div style="font-weight:700;">Lines</div>
-        <div class="mini" style="opacity:.85;">Never shows raw timesheet_id.</div>
-      </div>
-
-      <div style="margin-top:10px;display:flex;flex-direction:column;gap:10px;">
-        <div class="mini" style="opacity:.9;">Remove timesheets from invoice (unissued/unpaid only):</div>
-
-        <div style="max-height:220px;overflow:auto;min-height:0;display:flex;flex-direction:column;gap:6px;border:1px solid var(--line);border-radius:10px;padding:8px;">
-          ${tsPickHtml}
-        </div>
-
-        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
-          <a href="#" class="btn mini" data-inv-action="remove-timesheets"
-             style="display:inline-flex;align-items:center;justify-content:center;${canRemove ? '' : 'opacity:.45;pointer-events:none;'}">
-            Remove selected timesheets
-          </a>
-          <span class="mini" style="opacity:.85;">
-            ${canRemove ? '' : 'Not available (invoice must be DRAFT/ON_HOLD and unpaid).'}
-          </span>
-        </div>
-
-        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
-          <a href="#" class="btn mini" data-inv-action="delete"
-             style="display:inline-flex;align-items:center;justify-content:center;background:#5a1d22;${canDelete ? '' : 'opacity:.45;pointer-events:none;'}">
-            Delete invoice
-          </a>
-          <span class="mini" style="opacity:.85;">
-            ${canDelete ? '' : 'Only available for empty, unissued, unpaid invoices.'}
-          </span>
-        </div>
-
-        <div style="max-height:50vh;overflow:auto;min-height:0;border:1px solid var(--line);border-radius:10px;">
-          <table class="grid mini" style="margin:0;">
-            <thead>
-              <tr>
-                <th>Worker</th>
-                <th>Shift / W/E</th>
-                <th>Description</th>
-                <th>Qty</th>
-                <th style="text-align:right">Ex VAT</th>
-                <th style="text-align:right">VAT</th>
-                <th style="text-align:right">Inc VAT</th>
-              </tr>
-            </thead>
-            <tbody>
-              ${lineRowsHtml || `<tr><td colspan="7" class="mini" style="opacity:.85;">No lines.</td></tr>`}
-            </tbody>
-          </table>
-        </div>
-      </div>
-    </div>
-  `;
-}
 
 async function handleInvoiceDelete(modalCtx) {
   const mc = modalCtx || {};
@@ -29070,6 +28037,4194 @@ async function handleInvoiceEmail(modalCtx) {
     alert(String(e?.message || e || 'Failed to queue invoice email'));
   }
 }
+
+
+
+async function openInvoiceModal(row) {
+  // Invoice modal (staged edits, no MutationObserver loops)
+  const invoiceId = row?.invoice_id || row?.id;
+  if (!invoiceId) return;
+
+  showModal(
+    `<div id="invModalRoot">
+      <div class="p-3 text-muted">Loading invoice…</div>
+    </div>`,
+    { id: 'invModal' }
+  );
+
+  const root = document.getElementById('invModalRoot');
+  if (!root) return;
+
+  const modalCtx = {
+    invoiceId,
+    activeTab: 'invoice',
+
+    // Loaded from backend
+    data: null,
+
+    // Invoice line edit mode + staging buckets
+    isEditing: false,
+    invoiceEdits: {
+      remove_invoice_line_ids: new Set(),
+      add_timesheet_ids: new Set(),
+      add_adjustments: [] // { client_token, description, amount_ex_vat }
+    },
+
+    // Cached eligible timesheets for Add Timesheet modal + preview totals
+    eligibleTimesheetsCache: null,
+
+    // UI state
+    isBusy: false,
+    error: null
+  };
+
+  // Debug convenience (matches existing pattern)
+  window.modalCtx = modalCtx;
+
+  const rerender = () => {
+    root.innerHTML = renderInvoiceModalShell(modalCtx);
+  };
+
+  const reload = async ({ includeCorrespondence = false } = {}) => {
+    modalCtx.isBusy = true;
+    modalCtx.error = null;
+    rerender();
+
+    try {
+      const qs = includeCorrespondence ? '?include_correspondence=1' : '';
+      modalCtx.data = await invoiceModalFetchJson(`/api/invoices/${encodeURIComponent(invoiceId)}${qs}`);
+    } catch (e) {
+      modalCtx.error = String(e?.message || e || 'Failed to load invoice');
+      modalCtx.data = null;
+    } finally {
+      modalCtx.isBusy = false;
+
+      // If invoice is not editable, force-exit edit mode and clear staged line edits
+      const inv = modalCtx.data?.invoice || null;
+      if (!invoiceModalIsEditable(inv)) {
+        modalCtx.isEditing = false;
+        invoiceModalResetEdits(modalCtx);
+      }
+
+      rerender();
+    }
+  };
+
+  // Attach once; rerenders only replace root.innerHTML (handler stays)
+  attachInvoiceModalDelegatedHandlers(modalCtx, root, { rerender, reload });
+
+  // Initial load
+  await reload();
+
+async function invoiceModalFetchJson(path, options = {}) {
+  const headers = { ...(options.headers || {}), 'Accept': 'application/json' };
+  // Only set Content-Type automatically when we send a body
+  if (options.body !== undefined && options.body !== null && !headers['Content-Type']) {
+    headers['Content-Type'] = 'application/json';
+  }
+
+  const res = await authFetch(API(path), { ...options, headers });
+
+  let data = null;
+  try {
+    data = await res.json();
+  } catch {
+    data = null;
+  }
+
+  if (!res.ok) {
+    const msg =
+      (data && (data.error || data.message)) ? (data.error || data.message)
+      : `Request failed (${res.status})`;
+    throw new Error(msg);
+  }
+
+  return data;
+}
+
+}
+
+function invoiceModalIsEditable(invoice) {
+  if (!invoice || typeof invoice !== 'object') return false;
+  const status = String(invoice.status || '').toUpperCase();
+  const type = String(invoice.type || '').toUpperCase();
+  if (type === 'CREDIT_NOTE') return false;
+  if (!(status === 'DRAFT' || status === 'ON_HOLD')) return false;
+  if (invoice.paid_at_utc) return false;
+  return true;
+}
+
+function invoiceModalHasPendingEdits(modalCtx) {
+  const e = modalCtx?.invoiceEdits;
+  if (!e) return false;
+  return (
+    (e.remove_invoice_line_ids && e.remove_invoice_line_ids.size > 0) ||
+    (e.add_timesheet_ids && e.add_timesheet_ids.size > 0) ||
+    (Array.isArray(e.add_adjustments) && e.add_adjustments.length > 0)
+  );
+}
+
+function invoiceModalResetEdits(modalCtx) {
+  if (!modalCtx) return;
+  modalCtx.invoiceEdits = {
+    remove_invoice_line_ids: new Set(),
+    add_timesheet_ids: new Set(),
+    add_adjustments: []
+  };
+  // Keep eligibleTimesheetsCache; it’s still valid across edits.
+}
+
+function invoiceModalGetInvoiceData(modalCtx) {
+  const d = modalCtx?.data || {};
+  const invoice = d.invoice || null;
+  const header_snapshot_json = (d.header_snapshot_json && typeof d.header_snapshot_json === 'object')
+    ? d.header_snapshot_json
+    : (invoice?.header_snapshot_json && typeof invoice.header_snapshot_json === 'object' ? invoice.header_snapshot_json : {});
+  const items = Array.isArray(d.items) ? d.items : [];
+  let email_summary = null;
+  if (d.email_summary && typeof d.email_summary === 'object') {
+    email_summary = d.email_summary;
+  } else if (invoice?.invoice_render_manifest && typeof invoice.invoice_render_manifest === 'object') {
+    const es = invoice.invoice_render_manifest.email_summary;
+    if (es && typeof es === 'object') email_summary = es;
+  }
+  return { invoice, header_snapshot_json, items, email_summary, raw: d };
+}
+
+function invoiceModalRound2(n) {
+  const v = Number(n);
+  if (!Number.isFinite(v)) return 0;
+  return Math.round(v * 100) / 100;
+}
+
+function invoiceModalFmtHours(n) {
+  const v = Number(n);
+  if (!Number.isFinite(v)) return '0';
+  const r = invoiceModalRound2(v);
+  // Show up to 2dp, trim trailing .00
+  return String(r.toFixed(2)).replace(/\.00$/, '');
+}
+
+
+function invoiceModalGetVatRatePct(invoice, header_snapshot_json) {
+  // Prefer explicit invoice.vat_rate_pct if present; fall back to header snapshot VAT if present; else 0.
+  const v1 = Number(invoice?.vat_rate_pct);
+  if (Number.isFinite(v1)) return v1;
+
+  const v2 = Number(header_snapshot_json?.vat_rate_pct ?? header_snapshot_json?.vat?.rate_pct);
+  if (Number.isFinite(v2)) return v2;
+
+  return 0;
+}
+
+async function invoiceModalEnsureEligibleTimesheets(modalCtx) {
+  if (modalCtx.eligibleTimesheetsCache) return modalCtx.eligibleTimesheetsCache;
+
+  const invoiceId = modalCtx?.invoiceId;
+  if (!invoiceId) throw new Error('Missing invoiceId');
+
+  const res = await invoiceModalFetchJson(`/api/invoices/${encodeURIComponent(invoiceId)}/eligible-timesheets`);
+  // Handler returns a JSON object; tolerate array wrapper just in case
+  const obj = Array.isArray(res) ? (res[0] ?? {}) : (res ?? {});
+  modalCtx.eligibleTimesheetsCache = obj;
+  return obj;
+}
+
+function invoiceModalLookupEligibleTimesheet(modalCtx, timesheetId) {
+  const cache = modalCtx?.eligibleTimesheetsCache;
+  const arr = Array.isArray(cache?.timesheets) ? cache.timesheets : [];
+  return arr.find(t => String(t?.timesheet_id || '') === String(timesheetId)) || null;
+}
+
+function invoiceModalComputePreviewTotals(modalCtx) {
+  const { invoice, header_snapshot_json, items } = invoiceModalGetInvoiceData(modalCtx);
+  const vatRatePct = invoiceModalGetVatRatePct(invoice, header_snapshot_json);
+
+  const removed = modalCtx?.invoiceEdits?.remove_invoice_line_ids || new Set();
+  const stagedAddTs = modalCtx?.invoiceEdits?.add_timesheet_ids || new Set();
+  const stagedAdjs = Array.isArray(modalCtx?.invoiceEdits?.add_adjustments) ? modalCtx.invoiceEdits.add_adjustments : [];
+
+  let subtotal_ex_vat = 0;
+  let vat_amount = 0;
+  let total_inc_vat = 0;
+
+  // Base: sum all existing invoice lines that are not staged for removal
+  for (const it of (items || [])) {
+    const lineId = it?.invoice_line_id;
+    if (lineId && removed.has(String(lineId))) continue;
+
+    subtotal_ex_vat += Number(it?.total_charge_ex_vat || 0);
+    vat_amount += Number(it?.vat_amount || 0);
+    total_inc_vat += Number(it?.total_inc_vat || 0);
+  }
+
+  // Add staged adjustments (preview VAT at invoice rate)
+  for (const a of stagedAdjs) {
+    const ex = Number(a?.amount_ex_vat || 0);
+    const vat = ex * (vatRatePct / 100);
+    subtotal_ex_vat += ex;
+    vat_amount += vat;
+    total_inc_vat += (ex + vat);
+  }
+
+  // Add staged timesheets using eligible-timesheets cache (segment-aware totals)
+  if (stagedAddTs.size > 0) {
+    const cache = modalCtx?.eligibleTimesheetsCache;
+    const arr = Array.isArray(cache?.timesheets) ? cache.timesheets : [];
+    const byId = new Map(arr.map(t => [String(t?.timesheet_id || ''), t]));
+
+    for (const tsId of stagedAddTs) {
+      const t = byId.get(String(tsId));
+      if (!t) continue;
+
+      const ex = Number(t?.invoiceable_charge_ex_vat || 0);
+      const vat = ex * (vatRatePct / 100);
+
+      subtotal_ex_vat += ex;
+      vat_amount += vat;
+      total_inc_vat += (ex + vat);
+    }
+  }
+
+  return {
+    subtotal_ex_vat: invoiceModalRound2(subtotal_ex_vat),
+    vat_amount: invoiceModalRound2(vat_amount),
+    total_inc_vat: invoiceModalRound2(total_inc_vat)
+  };
+}
+
+function invoiceModalToggleRemoveTimesheet(modalCtx, timesheetId) {
+  const { items } = invoiceModalGetInvoiceData(modalCtx);
+  const set = modalCtx.invoiceEdits.remove_invoice_line_ids;
+
+  const ts = String(timesheetId || '').trim();
+  if (!ts) return;
+
+  const lineIds = (items || [])
+    .filter(it => String(it?.timesheet_id || '') === ts)
+    .map(it => String(it?.invoice_line_id || ''))
+    .filter(Boolean);
+
+  if (!lineIds.length) return;
+
+  const allAlready = lineIds.every(id => set.has(id));
+  if (allAlready) {
+    for (const id of lineIds) set.delete(id);
+  } else {
+    for (const id of lineIds) set.add(id);
+  }
+}
+
+function invoiceModalToggleRemoveLine(modalCtx, invoiceLineId) {
+  const id = String(invoiceLineId || '').trim();
+  if (!id) return;
+
+  const set = modalCtx.invoiceEdits.remove_invoice_line_ids;
+  if (set.has(id)) set.delete(id);
+  else set.add(id);
+}
+
+function invoiceModalToggleAddTimesheet(modalCtx, timesheetId) {
+  const id = String(timesheetId || '').trim();
+  if (!id) return;
+
+  const set = modalCtx.invoiceEdits.add_timesheet_ids;
+  if (set.has(id)) set.delete(id);
+  else set.add(id);
+}
+
+function invoiceModalRemoveStagedAdjustment(modalCtx, clientToken) {
+  const tok = String(clientToken || '').trim();
+  if (!tok) return;
+
+  modalCtx.invoiceEdits.add_adjustments =
+    (modalCtx.invoiceEdits.add_adjustments || []).filter(a => String(a?.client_token || '') !== tok);
+}
+
+async function invoiceModalSaveEdits(modalCtx, { rerender, reload }) {
+  const { invoice } = invoiceModalGetInvoiceData(modalCtx);
+  if (!invoiceModalIsEditable(invoice)) {
+    throw new Error('Invoice is not editable (must be DRAFT/ON_HOLD and UNPAID).');
+  }
+
+  const invoiceId = modalCtx.invoiceId;
+
+  const payload = {
+    remove_invoice_line_ids: Array.from(modalCtx.invoiceEdits.remove_invoice_line_ids || []),
+    add_timesheet_ids: Array.from(modalCtx.invoiceEdits.add_timesheet_ids || []),
+    add_adjustments: (modalCtx.invoiceEdits.add_adjustments || []).map(a => ({
+      client_token: a.client_token,
+      description: a.description,
+      amount_ex_vat: a.amount_ex_vat
+    }))
+  };
+
+  modalCtx.isBusy = true;
+  modalCtx.error = null;
+  rerender();
+
+  try {
+    const res = await invoiceModalFetchJson(`/api/invoices/${encodeURIComponent(invoiceId)}/save-edits`, {
+      method: 'POST',
+      body: JSON.stringify(payload)
+    });
+
+    const out = (res && typeof res === 'object') ? res : {};
+    if (!out.ok) {
+      throw new Error(out.error || 'Failed to save edits');
+    }
+
+    // Update modal data from response (already includes updated invoice/items/email_summary)
+    modalCtx.data = {
+      invoice: out.invoice || out.invoice_row || null,
+      items: Array.isArray(out.items) ? out.items : [],
+      header_snapshot_json: (out.header_snapshot_json && typeof out.header_snapshot_json === 'object') ? out.header_snapshot_json : {},
+      email_summary: (out.email_summary && typeof out.email_summary === 'object') ? out.email_summary : null,
+
+      // pass-through extras if present
+      attach_policy: out.attach_policy ?? null,
+      evidence: Array.isArray(out.evidence) ? out.evidence : [],
+      hr_source_rows_cache: Array.isArray(out.hr_source_rows_cache) ? out.hr_source_rows_cache : [],
+      tsfin_external_source_rows: Array.isArray(out.tsfin_external_source_rows) ? out.tsfin_external_source_rows : []
+    };
+
+    // Clear staged edits + exit edit mode
+    invoiceModalResetEdits(modalCtx);
+    modalCtx.isEditing = false;
+
+    // Force a reload to ensure we re-pull any server side computed fields (optional but safe)
+    await reload();
+  } finally {
+    modalCtx.isBusy = false;
+    rerender();
+  }
+}
+
+function renderInvoiceModalShell(modalCtx) {
+  // Top-level shell with tabs; content is delegated to per-tab renderers
+  const active = modalCtx.activeTab || 'invoice';
+
+  const tabBtn = (key, label) => {
+    const isActive = key === active;
+    return `
+      <button type="button"
+        class="btn btn-sm ${isActive ? 'btn-primary' : 'btn-outline-secondary'}"
+        data-action="inv-set-tab"
+        data-tab="${key}">
+        ${label}
+      </button>`;
+  };
+
+  if (modalCtx.error) {
+    return `
+      <div class="p-3">
+        <div class="alert alert-danger mb-3">${escapeHtml(modalCtx.error)}</div>
+        <button type="button" class="btn btn-sm btn-secondary" data-action="inv-close">Close</button>
+      </div>`;
+  }
+
+  if (modalCtx.isBusy && !modalCtx.data) {
+    return `<div class="p-3 text-muted">Loading invoice…</div>`;
+  }
+
+  const { raw } = invoiceModalGetInvoiceData(modalCtx);
+
+  const tabs = `
+    <div class="d-flex gap-2 mb-3">
+      ${tabBtn('invoice', 'Invoice')}
+      ${tabBtn('correspondence', 'Correspondence')}
+    </div>`;
+
+  let body = '';
+  if (active === 'correspondence') {
+    const corr = Array.isArray(raw?.correspondence) ? raw.correspondence : null;
+    body = renderInvoiceModalCorrespondenceTab(modalCtx, corr);
+  } else {
+    body = renderInvoiceModalContent(modalCtx, raw);
+  }
+
+  return `${tabs}${body}`;
+}
+
+function attachInvoiceModalDelegatedHandlers(modalCtx, rootEl, { rerender, reload }) {
+  if (!rootEl || rootEl.__invDelegatedAttached) return;
+
+  const handler = async (e) => {
+    const el = e.target?.closest?.('[data-action]');
+    if (!el) return;
+
+    const action = el.getAttribute('data-action');
+    if (!action) return;
+
+    e.preventDefault();
+
+    const { invoice, header_snapshot_json, items } = invoiceModalGetInvoiceData(modalCtx);
+
+    try {
+      switch (action) {
+        case 'inv-close': {
+          // Best-effort cleanup
+          try { rootEl.removeEventListener('click', handler); } catch {}
+          try { rootEl.__invDelegatedAttached = false; } catch {}
+          closeModal('invModal');
+          return;
+        }
+
+        case 'inv-set-tab': {
+          const tab = String(el.getAttribute('data-tab') || 'invoice');
+          modalCtx.activeTab = tab;
+
+          if (tab === 'correspondence') {
+            // Lazy load correspondence (manifest already includes email_summary for button label)
+            const hasCorr = Array.isArray(modalCtx.data?.correspondence);
+            if (!hasCorr) {
+              await reload({ includeCorrespondence: true });
+              return;
+            }
+          }
+
+          rerender();
+          return;
+        }
+
+        case 'inv-open-pdf': {
+          if (typeof handleInvoiceRenderPdf === 'function') {
+            await handleInvoiceRenderPdf(modalCtx, { invoice, header_snapshot_json, items });
+          }
+          await reload();
+          return;
+        }
+
+        case 'inv-email': {
+          if (typeof handleInvoiceEmail === 'function') {
+            await handleInvoiceEmail(modalCtx, { invoice, header_snapshot_json, items });
+          }
+          await reload({ includeCorrespondence: true });
+          return;
+        }
+
+        case 'inv-delete-invoice': {
+          if (typeof handleInvoiceDelete === 'function') {
+            await handleInvoiceDelete(modalCtx);
+          }
+          closeModal('invModal');
+          return;
+        }
+
+        case 'inv-toggle-edit': {
+          if (!invoiceModalIsEditable(invoice)) return;
+          modalCtx.isEditing = true;
+          rerender();
+          return;
+        }
+
+        case 'inv-cancel-edit': {
+          modalCtx.isEditing = false;
+          invoiceModalResetEdits(modalCtx);
+          rerender();
+          return;
+        }
+
+        case 'inv-add-timesheets': {
+          if (!invoiceModalIsEditable(invoice)) return;
+          await openInvoiceAddTimesheetsModal(modalCtx, { rerender });
+          return;
+        }
+
+        case 'inv-add-adjustment': {
+          if (!invoiceModalIsEditable(invoice)) return;
+          await openInvoiceAddAdjustmentModal(modalCtx, { rerender });
+          return;
+        }
+
+        case 'inv-save-edits': {
+          if (!invoiceModalHasPendingEdits(modalCtx)) return;
+          await invoiceModalSaveEdits(modalCtx, { rerender, reload });
+          return;
+        }
+
+        case 'inv-toggle-remove-timesheet': {
+          if (!modalCtx.isEditing) return;
+          const tsId = el.getAttribute('data-timesheet-id');
+          invoiceModalToggleRemoveTimesheet(modalCtx, tsId);
+          rerender();
+          return;
+        }
+
+        case 'inv-toggle-remove-line': {
+          if (!modalCtx.isEditing) return;
+          const lineId = el.getAttribute('data-invoice-line-id');
+          invoiceModalToggleRemoveLine(modalCtx, lineId);
+          rerender();
+          return;
+        }
+
+        case 'inv-unstage-add-timesheet': {
+          if (!modalCtx.isEditing) return;
+          const tsId = el.getAttribute('data-timesheet-id');
+          invoiceModalToggleAddTimesheet(modalCtx, tsId);
+          rerender();
+          return;
+        }
+
+        case 'inv-remove-staged-adjustment': {
+          if (!modalCtx.isEditing) return;
+          const tok = el.getAttribute('data-client-token');
+          invoiceModalRemoveStagedAdjustment(modalCtx, tok);
+          rerender();
+          return;
+        }
+
+        default:
+          return;
+      }
+    } catch (err) {
+      modalCtx.error = String(err?.message || err || 'Action failed');
+      rerender();
+    }
+  };
+
+  rootEl.addEventListener('click', handler);
+  rootEl.__invDelegatedAttached = true;
+}
+
+async function openInvoiceAddTimesheetsModal(modalCtx, { rerender }) {
+  const { invoice, items } = invoiceModalGetInvoiceData(modalCtx);
+  if (!invoiceModalIsEditable(invoice)) return;
+
+  // Ensure cache
+  const eligible = await invoiceModalEnsureEligibleTimesheets(modalCtx);
+  const all = Array.isArray(eligible?.timesheets) ? eligible.timesheets : [];
+
+  const existingTs = new Set((items || []).map(it => String(it?.timesheet_id || '')).filter(Boolean));
+  const stagedTs = modalCtx.invoiceEdits.add_timesheet_ids;
+
+  const rows = all
+    .filter(t => {
+      const id = String(t?.timesheet_id || '');
+      if (!id) return false;
+      // Already on invoice => don't show as eligible-add
+      if (existingTs.has(id)) return false;
+      return true;
+    });
+
+  const fmtRow = (t) => {
+    const tsId = String(t?.timesheet_id || '');
+    const name = escapeHtml(String(t?.candidate_name || t?.candidate_id || tsId));
+    const we = escapeHtml(String(t?.source_week_ending_date || ''));
+    const hrs = invoiceModalFmtHours(Number(t?.invoiceable_hours || 0));
+    const ex = fmtMoney(Number(t?.invoiceable_charge_ex_vat || 0));
+
+    const blocked = !!t?.blocked_by_hr_validation;
+    const checked = stagedTs.has(tsId) ? 'checked' : '';
+    const disabled = blocked ? 'disabled' : '';
+
+    const badge = blocked ? `<span class="badge bg-warning text-dark ms-2">HR blocked</span>` : '';
+    return `
+      <label class="d-flex align-items-center justify-content-between border rounded p-2 mb-2 ${blocked ? 'opacity-50' : ''}">
+        <div class="d-flex align-items-center gap-2">
+          <input type="checkbox" class="form-check-input" value="${escapeHtml(tsId)}" ${checked} ${disabled}/>
+          <div>
+            <div class="fw-semibold">${name}${badge}</div>
+            <div class="text-muted small">Week ending: ${we}</div>
+          </div>
+        </div>
+        <div class="text-end">
+          <div class="fw-semibold">${ex}</div>
+          <div class="text-muted small">${hrs}</div>
+        </div>
+      </label>`;
+  };
+
+  const html = `
+    <div class="p-3">
+      <div class="h6 mb-3">Add Timesheets to Invoice</div>
+
+      <div class="text-muted small mb-2">
+        Only timesheets eligible for this invoice’s client/week are shown. Amounts are segment-aware for the invoice week.
+      </div>
+
+      <div id="invAddTsList" class="mt-2">
+        ${rows.length ? rows.map(fmtRow).join('') : '<div class="text-muted">No eligible timesheets.</div>'}
+      </div>
+
+      <div class="d-flex justify-content-end gap-2 mt-3">
+        <button type="button" class="btn btn-sm btn-secondary" id="invAddTsCancel">Cancel</button>
+        <button type="button" class="btn btn-sm btn-primary" id="invAddTsConfirm" ${rows.length ? '' : 'disabled'}>Add selected</button>
+      </div>
+    </div>
+  `;
+
+  showModal(html, { id: 'invAddTsModal' });
+
+  const btnCancel = document.getElementById('invAddTsCancel');
+  const btnConfirm = document.getElementById('invAddTsConfirm');
+
+  if (btnCancel) {
+    btnCancel.onclick = (e) => {
+      e.preventDefault();
+      closeModal('invAddTsModal');
+    };
+  }
+
+  if (btnConfirm) {
+    btnConfirm.onclick = (e) => {
+      e.preventDefault();
+      const list = document.getElementById('invAddTsList');
+      const checks = list ? Array.from(list.querySelectorAll('input[type="checkbox"]')) : [];
+      for (const c of checks) {
+        const id = String(c.value || '').trim();
+        if (!id) continue;
+        if (c.checked) stagedTs.add(id);
+        else stagedTs.delete(id);
+      }
+      closeModal('invAddTsModal');
+      rerender();
+    };
+  }
+}
+
+function invoiceModalNewClientToken() {
+  try {
+    if (typeof crypto !== 'undefined' && crypto?.randomUUID) return crypto.randomUUID();
+  } catch {}
+  return `tok_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+}
+
+async function openInvoiceAddAdjustmentModal(modalCtx, { rerender }) {
+  const { invoice } = invoiceModalGetInvoiceData(modalCtx);
+  if (!invoiceModalIsEditable(invoice)) return;
+
+  const html = `
+    <div class="p-3">
+      <div class="h6 mb-3">Invoice Adjustment</div>
+
+      <div class="mb-2">
+        <label class="form-label small text-muted">Description</label>
+        <input id="invAdjDesc" class="form-control" type="text" placeholder="e.g. Manual correction" />
+      </div>
+
+      <div class="mb-2">
+        <label class="form-label small text-muted">Amount (ex VAT)</label>
+        <input id="invAdjAmt" class="form-control" type="number" step="0.01" placeholder="0.00" />
+        <div class="text-muted small mt-1">Use a negative number for a credit/discount.</div>
+      </div>
+
+      <div class="d-flex justify-content-end gap-2 mt-3">
+        <button type="button" class="btn btn-sm btn-secondary" id="invAdjCancel">Cancel</button>
+        <button type="button" class="btn btn-sm btn-primary" id="invAdjAdd">Add adjustment</button>
+      </div>
+    </div>
+  `;
+
+  showModal(html, { id: 'invAdjModal' });
+
+  const btnCancel = document.getElementById('invAdjCancel');
+  const btnAdd = document.getElementById('invAdjAdd');
+
+  if (btnCancel) {
+    btnCancel.onclick = (e) => {
+      e.preventDefault();
+      closeModal('invAdjModal');
+    };
+  }
+
+  if (btnAdd) {
+    btnAdd.onclick = (e) => {
+      e.preventDefault();
+
+      const desc = String(document.getElementById('invAdjDesc')?.value || '').trim();
+      const amtRaw = document.getElementById('invAdjAmt')?.value;
+      const amt = Number(amtRaw);
+
+      if (!desc) {
+        alert('Adjustment description is required.');
+        return;
+      }
+      if (!Number.isFinite(amt)) {
+        alert('Adjustment amount must be a valid number.');
+        return;
+      }
+
+      modalCtx.invoiceEdits.add_adjustments.push({
+        client_token: invoiceModalNewClientToken(),
+        description: desc,
+        amount_ex_vat: invoiceModalRound2(amt)
+      });
+
+      closeModal('invAdjModal');
+      rerender();
+    };
+  }
+}
+
+function renderInvoiceModalContent(modalCtx, invoiceData) {
+  const { invoice, header_snapshot_json, items, email_summary } = invoiceModalGetInvoiceData(modalCtx);
+
+  if (!invoice) {
+    return `<div class="p-3 text-muted">Invoice not found.</div>`;
+  }
+
+  const status = String(invoice.status || '').toUpperCase();
+  const isPaid = !!invoice.paid_at_utc;
+  const isIssued = (status === 'ISSUED');
+  const isOnHold = (status === 'ON_HOLD');
+
+  const isEditable = invoiceModalIsEditable(invoice);
+  const isEditing = !!modalCtx.isEditing && isEditable;
+
+  const emailedOnce = !!email_summary?.emailed_once;
+  const emailLabel = emailedOnce ? 'Re-email' : 'Email';
+
+  const hasPendingEdits = invoiceModalHasPendingEdits(modalCtx);
+
+  const previewTotals = invoiceModalComputePreviewTotals(modalCtx);
+
+  const currentTotals = {
+    subtotal_ex_vat: invoiceModalRound2(invoice.subtotal_ex_vat || 0),
+    vat_amount: invoiceModalRound2(invoice.vat_amount || 0),
+    total_inc_vat: invoiceModalRound2(invoice.total_inc_vat || 0)
+  };
+
+  const totalsToShow = hasPendingEdits ? previewTotals : currentTotals;
+
+  const pill = (text, cls) => `<span class="badge ${cls} me-2">${escapeHtml(text)}</span>`;
+
+  const invoiceTitle = invoice.invoice_no ? `Invoice #${escapeHtml(String(invoice.invoice_no))}` : `Invoice ${escapeHtml(String(invoice.id || ''))}`;
+
+  const weekStart = header_snapshot_json?.meta?.invoice_week_start || null;
+
+  return `
+    <div class="p-2">
+
+      ${modalCtx.error ? `<div class="alert alert-danger mb-3">${escapeHtml(modalCtx.error)}</div>` : ''}
+
+      <div class="d-flex justify-content-between align-items-start">
+        <div>
+          <div class="h6 mb-1">${invoiceTitle}</div>
+          <div class="mb-2">
+            ${isOnHold ? pill('ON HOLD', 'bg-warning text-dark') : ''}
+            ${isIssued ? pill('ISSUED', 'bg-success') : pill('UNISSUED', 'bg-secondary')}
+            ${isPaid ? pill('PAID', 'bg-success') : pill('UNPAID', 'bg-secondary')}
+          </div>
+          <div class="text-muted small">
+            ${weekStart ? `Invoice week start: <span class="fw-semibold">${escapeHtml(String(weekStart))}</span><br/>` : ''}
+            Created: ${fmtLondonTs(invoice.created_at)}
+          </div>
+        </div>
+
+        <div class="text-end">
+          <button type="button" class="btn btn-sm btn-secondary" data-action="inv-close">Close</button>
+        </div>
+      </div>
+
+      <hr class="my-3"/>
+
+      <div class="d-flex flex-wrap gap-2 align-items-center mb-3">
+        <button type="button" class="btn btn-sm btn-primary" data-action="inv-open-pdf">
+          Open Invoice
+        </button>
+
+        <button type="button" class="btn btn-sm btn-secondary" data-action="inv-email">
+          ${emailLabel}
+        </button>
+
+        ${isEditable && !isEditing ? `
+          <button type="button" class="btn btn-sm btn-outline-primary" data-action="inv-toggle-edit">
+            Edit
+          </button>
+        ` : ''}
+
+        ${isEditing ? `
+          <button type="button" class="btn btn-sm btn-outline-secondary" data-action="inv-add-timesheets">
+            + Timesheet
+          </button>
+          <button type="button" class="btn btn-sm btn-outline-secondary" data-action="inv-add-adjustment">
+            + Adjustment
+          </button>
+
+          <button type="button" class="btn btn-sm btn-success" data-action="inv-save-edits" ${hasPendingEdits ? '' : 'disabled'}>
+            Save
+          </button>
+          <button type="button" class="btn btn-sm btn-secondary" data-action="inv-cancel-edit">
+            Cancel
+          </button>
+        ` : ''}
+
+        <span class="ms-auto"></span>
+
+        <button type="button" class="btn btn-sm btn-outline-danger" data-action="inv-delete-invoice">
+          Delete
+        </button>
+      </div>
+
+      ${isEditing && hasPendingEdits ? `
+        <div class="alert alert-warning py-1 px-2 small mb-3">
+          You have <b>unsaved changes</b>. Nothing is committed until you press <b>Save</b>.
+        </div>
+      ` : ''}
+
+      <div class="border rounded p-2 mb-3">
+        <div class="d-flex justify-content-between align-items-center">
+          <div class="fw-semibold">Totals ${hasPendingEdits ? '<span class="badge bg-info text-dark ms-2">Preview</span>' : ''}</div>
+          <div class="text-end">
+            <div><span class="text-muted me-2">Ex VAT:</span> <span class="fw-semibold">${fmtMoney(totalsToShow.subtotal_ex_vat)}</span></div>
+            <div><span class="text-muted me-2">VAT:</span> <span class="fw-semibold">${fmtMoney(totalsToShow.vat_amount)}</span></div>
+            <div><span class="text-muted me-2">Inc VAT:</span> <span class="fw-semibold">${fmtMoney(totalsToShow.total_inc_vat)}</span></div>
+          </div>
+        </div>
+      </div>
+
+      ${renderInvoiceLinesTable(modalCtx, invoiceData, items)}
+    </div>
+  `;
+}
+
+function renderInvoiceModalCorrespondenceTab(modalCtx, corrRows) {
+  // corrRows is only present if invoice was loaded with ?include_correspondence=1
+  if (modalCtx.isBusy && !corrRows) {
+    return `<div class="p-3 text-muted">Loading correspondence…</div>`;
+  }
+
+  if (!Array.isArray(corrRows)) {
+    return `
+      <div class="p-3">
+        <div class="text-muted mb-3">Correspondence not loaded.</div>
+        <button type="button" class="btn btn-sm btn-primary" data-action="inv-set-tab" data-tab="correspondence">
+          Load
+        </button>
+      </div>
+    `;
+  }
+
+  if (corrRows.length === 0) {
+    return `<div class="p-3 text-muted">No correspondence events found.</div>`;
+  }
+
+  const rowsHtml = corrRows.map(ev => {
+    const ts = escapeHtml(String(ev?.ts_utc || ''));
+    const action = escapeHtml(String(ev?.action || ''));
+    const mail = ev?.email || null;
+
+    const subj = mail?.subject ? escapeHtml(String(mail.subject)) : '';
+    const to = mail?.to ? escapeHtml(String(mail.to)) : '';
+    const status = mail?.status ? escapeHtml(String(mail.status)) : '';
+
+    return `
+      <div class="border rounded p-2 mb-2">
+        <div class="d-flex justify-content-between">
+          <div class="fw-semibold">${action}</div>
+          <div class="text-muted small">${ts}</div>
+        </div>
+        ${mail ? `
+          <div class="text-muted small mt-1">
+            <div><span class="me-2">To:</span>${to}</div>
+            <div><span class="me-2">Subject:</span>${subj}</div>
+            <div><span class="me-2">Status:</span>${status}</div>
+          </div>
+        ` : `
+          <div class="text-muted small mt-1">No mail_outbox details for this event.</div>
+        `}
+      </div>
+    `;
+  }).join('');
+
+  return `<div class="p-2">${rowsHtml}</div>`;
+}
+
+function renderInvoiceLinesTable(modalCtx, invoiceData, items) {
+  const { invoice } = invoiceModalGetInvoiceData(modalCtx);
+
+  const isEditable = invoiceModalIsEditable(invoice);
+  const isEditing = !!modalCtx.isEditing && isEditable;
+
+  const removedSet = modalCtx?.invoiceEdits?.remove_invoice_line_ids || new Set();
+
+  // Group invoice lines:
+  // - timesheet groups: by timesheet_id (multiple lines per timesheet)
+  // - adjustments: each line is its own group (timesheet_id null)
+  const tsGroups = new Map();
+  const adjGroups = [];
+
+  for (const it of (items || [])) {
+    const tsId = it?.timesheet_id ? String(it.timesheet_id) : null;
+
+    if (tsId) {
+      if (!tsGroups.has(tsId)) tsGroups.set(tsId, { key: tsId, timesheet_id: tsId, lines: [] });
+      tsGroups.get(tsId).lines.push(it);
+    } else {
+      const lid = String(it?.invoice_line_id || '');
+      adjGroups.push({ key: `adj:${lid}`, timesheet_id: null, lines: [it] });
+    }
+  }
+
+  const groups = [
+    ...Array.from(tsGroups.values()),
+    ...adjGroups
+  ];
+
+  const sumQty = (it) => {
+    const q = it?.qty || {};
+    const parts = ['day', 'night', 'sat', 'sun', 'bh'];
+    let total = 0;
+    for (const k of parts) total += Number(q?.[k] || 0);
+    return total;
+  };
+
+  const groupTotals = (g) => {
+    let hrs = 0, ex = 0, vat = 0, inc = 0, margin = 0;
+    for (const l of g.lines) {
+      hrs += sumQty(l);
+      ex += Number(l?.total_charge_ex_vat || 0);
+      vat += Number(l?.vat_amount || 0);
+      inc += Number(l?.total_inc_vat || 0);
+      margin += Number(l?.margin_ex_vat || 0);
+    }
+    return {
+      hours: invoiceModalRound2(hrs),
+      ex: invoiceModalRound2(ex),
+      vat: invoiceModalRound2(vat),
+      inc: invoiceModalRound2(inc),
+      margin: invoiceModalRound2(margin)
+    };
+  };
+
+  const groupLabel = (g) => {
+    const first = g.lines[0] || {};
+    const mj = first?.meta_json || {};
+    // Prefer explicit grouping hints if present; fall back to description.
+    const cand = mj?.candidate_display || mj?.candidate_name || mj?.worker_name || '';
+    const week = mj?.week_ending_date || mj?.week_end_date || mj?.week_ending || '';
+    const basis = mj?.basis || mj?.submission_mode || '';
+
+    const desc = first?.description || '';
+
+    let label = '';
+    if (cand) label += String(cand);
+    if (week) label += (label ? ' — ' : '') + `WE ${week}`;
+    if (basis) label += (label ? ' — ' : '') + String(basis);
+    if (!label) label = desc ? String(desc) : (g.timesheet_id ? `Timesheet ${g.timesheet_id}` : 'Adjustment');
+    return escapeHtml(label);
+  };
+
+  const isGroupRemoved = (g) => {
+    const ids = g.lines.map(l => String(l?.invoice_line_id || '')).filter(Boolean);
+    if (!ids.length) return false;
+    return ids.every(id => removedSet.has(id));
+  };
+
+  const renderLineBreakdown = (l) => {
+    const q = l?.qty || {};
+    const pr = l?.pay_rate || {};
+    const cr = l?.charge_rate || {};
+    const parts = ['day', 'night', 'sat', 'sun', 'bh'];
+
+    const hasHours = parts.some(k => Number(q?.[k] || 0) > 0);
+    if (!hasHours) return '';
+
+    const row = (k, label) => {
+      const qty = Number(q?.[k] || 0);
+      if (!qty) return '';
+      const pay = Number(pr?.[k] || 0);
+      const chg = Number(cr?.[k] || 0);
+      return `<div class="small text-muted">${label}: ${invoiceModalFmtHours(qty)} @ pay ${fmtMoney(pay)} / charge ${fmtMoney(chg)}</div>`;
+    };
+
+    return `
+      <div class="mt-1">
+        ${row('day', 'Day')}
+        ${row('night', 'Night')}
+        ${row('sat', 'Sat')}
+        ${row('sun', 'Sun')}
+        ${row('bh', 'BH')}
+      </div>
+    `;
+  };
+
+  const renderGroup = (g) => {
+    const removed = isGroupRemoved(g);
+    const totals = groupTotals(g);
+
+    const removeBtn = (() => {
+      if (!isEditing) return '';
+      if (g.timesheet_id) {
+        return `
+          <button type="button"
+            class="btn btn-sm ${removed ? 'btn-outline-secondary' : 'btn-outline-danger'}"
+            data-action="inv-toggle-remove-timesheet"
+            data-timesheet-id="${escapeHtml(g.timesheet_id)}">
+            ${removed ? 'Undo' : 'Remove'}
+          </button>
+        `;
+      }
+      const lid = String(g.lines?.[0]?.invoice_line_id || '');
+      return `
+        <button type="button"
+          class="btn btn-sm ${removed ? 'btn-outline-secondary' : 'btn-outline-danger'}"
+          data-action="inv-toggle-remove-line"
+          data-invoice-line-id="${escapeHtml(lid)}">
+          ${removed ? 'Undo' : 'Remove'}
+        </button>
+      `;
+    })();
+
+    const summaryRight = `
+      <div class="text-end">
+        <div class="fw-semibold">${fmtMoney(totals.ex)}</div>
+        <div class="text-muted small">${invoiceModalFmtHours(totals.hours)}</div>
+      </div>`;
+
+    const lineRows = g.lines.map(l => {
+      const lid = escapeHtml(String(l?.invoice_line_id || ''));
+      const desc = escapeHtml(String(l?.description || ''));
+      const ex = fmtMoney(Number(l?.total_charge_ex_vat || 0));
+      const vat = fmtMoney(Number(l?.vat_amount || 0));
+      const inc = fmtMoney(Number(l?.total_inc_vat || 0));
+      const margin = fmtMoney(Number(l?.margin_ex_vat || 0));
+
+      const cls = removedSet.has(String(l?.invoice_line_id || '')) ? 'opacity-50' : '';
+      return `
+        <div class="border rounded p-2 mb-2 ${cls}">
+          <div class="d-flex justify-content-between align-items-start">
+            <div class="fw-semibold">${desc}</div>
+            <div class="text-end small">
+              <div><span class="text-muted me-2">Ex:</span>${ex}</div>
+              <div><span class="text-muted me-2">VAT:</span>${vat}</div>
+              <div><span class="text-muted me-2">Inc:</span>${inc}</div>
+              <div><span class="text-muted me-2">Margin:</span>${margin}</div>
+            </div>
+          </div>
+          ${renderLineBreakdown(l)}
+        </div>
+      `;
+    }).join('');
+
+    return `
+      <details class="border rounded mb-2" ${removed ? '' : ''}>
+        <summary class="p-2 d-flex justify-content-between align-items-center" style="cursor:pointer;">
+          <div>
+            <div class="fw-semibold">${groupLabel(g)} ${removed ? '<span class="badge bg-warning text-dark ms-2">Removed</span>' : ''}</div>
+            ${g.timesheet_id ? `<div class="text-muted small">Timesheet: ${escapeHtml(g.timesheet_id)}</div>` : `<div class="text-muted small">Adjustment</div>`}
+          </div>
+          <div class="d-flex align-items-center gap-2">
+            ${summaryRight}
+            ${removeBtn}
+          </div>
+        </summary>
+        <div class="p-2">
+          ${lineRows}
+        </div>
+      </details>
+    `;
+  };
+
+  // Staged additions (not yet saved)
+  const staged = modalCtx.invoiceEdits || {};
+  const stagedTs = staged.add_timesheet_ids || new Set();
+  const stagedAdjs = Array.isArray(staged.add_adjustments) ? staged.add_adjustments : [];
+
+  const stagedBlocks = [];
+
+  if (isEditing && (stagedTs.size || stagedAdjs.length)) {
+    const blocks = [];
+
+    // Staged timesheets
+    if (stagedTs.size) {
+      const tsHtml = Array.from(stagedTs).map(tsId => {
+        const t = invoiceModalLookupEligibleTimesheet(modalCtx, tsId);
+        const name = escapeHtml(String(t?.candidate_name || t?.candidate_id || tsId));
+        const we = escapeHtml(String(t?.source_week_ending_date || ''));
+        const ex = fmtMoney(Number(t?.invoiceable_charge_ex_vat || 0));
+        const hrs = invoiceModalFmtHours(Number(t?.invoiceable_hours || 0));
+        return `
+          <div class="border rounded p-2 mb-2">
+            <div class="d-flex justify-content-between">
+              <div>
+                <div class="fw-semibold">ADD: ${name}</div>
+                <div class="text-muted small">Week ending: ${we}</div>
+              </div>
+              <div class="text-end">
+                <div class="fw-semibold">${ex}</div>
+                <div class="text-muted small">${hrs}</div>
+              </div>
+            </div>
+            <div class="d-flex justify-content-end mt-2">
+              <button type="button" class="btn btn-sm btn-outline-danger"
+                data-action="inv-unstage-add-timesheet"
+                data-timesheet-id="${escapeHtml(tsId)}">
+                Remove
+              </button>
+            </div>
+          </div>
+        `;
+      }).join('');
+      blocks.push(`<div class="mb-3"><div class="fw-semibold mb-2">Pending Timesheets</div>${tsHtml}</div>`);
+    }
+
+    // Staged adjustments
+    if (stagedAdjs.length) {
+      const adjHtml = stagedAdjs.map(a => {
+        const tok = escapeHtml(String(a?.client_token || ''));
+        const desc = escapeHtml(String(a?.description || ''));
+        const ex = fmtMoney(Number(a?.amount_ex_vat || 0));
+        return `
+          <div class="border rounded p-2 mb-2">
+            <div class="d-flex justify-content-between">
+              <div class="fw-semibold">ADJ: ${desc}</div>
+              <div class="fw-semibold">${ex}</div>
+            </div>
+            <div class="d-flex justify-content-end mt-2">
+              <button type="button" class="btn btn-sm btn-outline-danger"
+                data-action="inv-remove-staged-adjustment"
+                data-client-token="${tok}">
+                Remove
+              </button>
+            </div>
+          </div>
+        `;
+      }).join('');
+      blocks.push(`<div class="mb-3"><div class="fw-semibold mb-2">Pending Adjustments</div>${adjHtml}</div>`);
+    }
+
+    stagedBlocks.push(`
+      <div class="border rounded p-2 mb-3 bg-light">
+        <div class="fw-semibold mb-2">Pending additions (not saved)</div>
+        ${blocks.join('')}
+      </div>
+    `);
+  }
+
+  if (!groups.length && stagedBlocks.length === 0) {
+    return `<div class="text-muted">No invoice lines.</div>`;
+  }
+
+  return `
+    <div>
+      ${stagedBlocks.join('')}
+      <div class="fw-semibold mb-2">Invoice lines</div>
+      ${groups.map(renderGroup).join('')}
+    </div>
+  `;
+}
+
+function deriveTimesheetInvoicingDisplay(row) {
+  // Prefer new segment-aware fields where present (v_timesheets_summary_base additions),
+  // and fall back to legacy locked_by_invoice_id signals for non-segment timesheets.
+  const segStage = String(row?.invoice_segment_stage || '').toUpperCase();
+  const issueStage = String(row?.invoice_issue_stage || row?.locked_invoice_status || '').toUpperCase();
+
+  const segTotal = Number(row?.invoice_segments_total);
+  const hasSegments = Number.isFinite(segTotal) && segTotal > 0;
+
+  if (hasSegments) {
+    if (segStage === 'NOT_INVOICED') return 'NOT_INVOICED';
+    if (segStage === 'PARTIALLY_INVOICED') return 'PARTIALLY_INVOICED';
+    if (segStage === 'FULLY_INVOICED') {
+      // If fully invoiced, surface whether the invoice has been issued
+      if (issueStage === 'INVOICED_ISSUED') return 'INVOICED_ISSUED';
+      if (issueStage === 'INVOICED_NOT_ISSUED') return 'INVOICED_NOT_ISSUED';
+      return 'FULLY_INVOICED';
+    }
+  }
+
+  // Non-segment fallback
+  if (!row?.locked_by_invoice_id) return 'NOT_INVOICED';
+  if (issueStage === 'INVOICED_ISSUED') return 'INVOICED_ISSUED';
+  return 'INVOICED_NOT_ISSUED';
+}
+function renderTimesheetLinesTab(ctx) {
+    const { LOGM, L, GC, GE } = getTsLoggers('[TS][LINES]');
+  const { row, details, related, state } = normaliseTimesheetCtx(ctx);
+
+
+  GC('render');
+
+  const ts      = details.timesheet || {};
+  const tsId    = row.timesheet_id || ts.timesheet_id || null;
+  const segs    = Array.isArray(details.segments) ? details.segments : [];
+  const ib      = details.invoiceBreakdown || null;
+  const mode    = ib && typeof ib.mode === 'string' ? ib.mode : null;
+  const shifts  = Array.isArray(details.shifts) ? details.shifts : [];
+  const isSegments = !!details.isSegmentsMode;
+
+  const sheetScope = (details.sheet_scope || row.sheet_scope || ts.sheet_scope || '').toUpperCase();
+  const subMode    = (row.submission_mode || ts.submission_mode || '').toUpperCase();
+
+  const tsfin  = details.tsfin || {};
+  const locked = !!(tsfin.locked_by_invoice_id || tsfin.paid_at_utc);
+  const basis  = String(tsfin.basis || row.basis || '').toUpperCase();
+
+  const isNhspOrHrSelfBillBasis = [
+    'NHSP',
+    'NHSP_ADJUSTMENT',
+    'HEALTHROSTER_SELF_BILL',
+    'HEALTHROSTER_ADJUSTMENT'
+  ].includes(basis);
+
+  const segTargets = state.segmentInvoiceTargets || {};
+  state.segmentInvoiceTargets = segTargets;
+
+  const hasTsfin = !!(
+    tsfin && (
+      tsfin.timesheet_id ||
+      tsfin.total_hours != null ||
+      tsfin.total_pay_ex_vat != null ||
+      tsfin.processing_status
+    )
+  );
+  const hasContractWeek = !!(details.contract_week_id || row.contract_week_id);
+  const isPlannedOnly   = !hasTsfin && hasContractWeek && !tsId;
+
+  L('snapshot', {
+    tsId,
+    mode,
+    segmentsCount: segs.length,
+    shiftsCount: shifts.length,
+    sheetScope,
+    subMode,
+    basis,
+    hasTsfin,
+    hasContractWeek,
+    isPlannedOnly,
+    locked
+  });
+  GE();
+
+  const esc = (typeof escapeHtml === 'function')
+    ? escapeHtml
+    : (s) => String(s == null ? '' : s)
+        .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+        .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+
+  // UI helper: YYYY-MM-DD → DD-MM-YYYY
+  const fmtYmdDmy = (ymd) => {
+    if (!ymd || typeof ymd !== 'string') return ymd || '';
+    const m = ymd.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (!m) return ymd;
+    const [, y, mo, d] = m;
+    return `${d}-${mo}-${y}`;
+  };
+
+  const toYmd = (d) => {
+    const yyyy = d.getUTCFullYear();
+    const mm   = String(d.getUTCMonth() + 1).padStart(2, '0');
+    const dd   = String(d.getUTCDate()).toString().padStart(2, '0');
+    return `${yyyy}-${mm}-${dd}`;
+  };
+
+  // ─────────────────────────────────────────────────────
+  // SEGMENTS mode (NHSP / HR self-bill) unchanged
+  // ─────────────────────────────────────────────────────
+  const computeWeekStartFromWeekEnding = (weYmd) => {
+    if (!weYmd) return null;
+    const d = new Date(`${weYmd}T00:00:00Z`);
+    if (Number.isNaN(d.getTime())) return weYmd;
+    d.setUTCDate(d.getUTCDate() - 6);
+    return toYmd(d);
+  };
+
+  // Current invoice week = Monday of "today"
+  const computeCurrentWeekStart = () => {
+    const now = new Date();
+    const base = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+    const day = base.getUTCDay();      // 0=Sun..6=Sat
+    const offset = (day + 6) % 7;      // since Monday
+    base.setUTCDate(base.getUTCDate() - offset);
+    return toYmd(base);
+  };
+
+  const tsWeekEnding     =
+    ts.week_ending_date ||
+    row.week_ending_date ||
+    (details.contract_week && details.contract_week.week_ending_date) ||
+    null;
+
+  const naturalWeekStart = tsWeekEnding ? computeWeekStartFromWeekEnding(tsWeekEnding) : null;
+  const currentWeekStart = computeCurrentWeekStart();
+  const pauseWeekStart   = '2099-01-05'; // "Pause"
+
+  const disabledAttr = locked ? 'disabled' : '';
+
+const buildInvoiceWeekSelectHtml = (seg) => {
+  if (!isNhspOrHrSelfBillBasis) return '<span class="mini">—</span>';
+  const segId = String(seg.segment_id || '');
+  if (!segId) return '<span class="mini">—</span>';
+
+  // ✅ Capture these BEFORE we potentially write segTargets[segId] below
+  // (prevents "default This week" being treated as an explicit delay)
+  const hadStagedBefore = Object.prototype.hasOwnProperty.call(segTargets, segId);
+  const storedTargetRaw = String(seg.invoice_target_week_start || '').trim();
+  const lockedInvoiceId = String(seg.invoice_locked_invoice_id || '').trim();
+
+  const currentTarget =
+    segTargets[segId] ||
+    storedTargetRaw ||
+    currentWeekStart ||
+    '';
+
+  const opts = [];
+  const seen = new Set();
+
+  if (currentWeekStart) {
+    opts.push({ value: currentWeekStart, label: 'This week' });
+    seen.add(currentWeekStart);
+
+    const nextDate = new Date(`${currentWeekStart}T00:00:00Z`);
+    nextDate.setUTCDate(nextDate.getUTCDate() + 7);
+    const nextWeekStart = toYmd(nextDate);
+    opts.push({ value: nextWeekStart, label: `Week starting ${fmtYmdDmy(nextWeekStart)}` });
+    seen.add(nextWeekStart);
+
+    for (let i = 2; i <= 8; i++) {
+      const d = new Date(`${currentWeekStart}T00:00:00Z`);
+      d.setUTCDate(d.getUTCDate() + i * 7);
+      const ws = toYmd(d);
+      if (!seen.has(ws)) {
+        opts.push({ value: ws, label: `Week starting ${fmtYmdDmy(ws)}` });
+        seen.add(ws);
+      }
+    }
+  }
+
+  if (naturalWeekStart && !seen.has(naturalWeekStart)) {
+    opts.push({ value: naturalWeekStart, label: `Natural week (${fmtYmdDmy(naturalWeekStart)})` });
+    seen.add(naturalWeekStart);
+  }
+
+  if (!seen.has(pauseWeekStart)) {
+    opts.push({ value: pauseWeekStart, label: 'Pause (defer)' });
+    seen.add(pauseWeekStart);
+  }
+
+  let selectedVal = currentTarget || currentWeekStart || '';
+  const optionValues = opts.map(o => o.value);
+  if (!optionValues.includes(selectedVal)) {
+    selectedVal = optionValues.includes(currentWeekStart) ? currentWeekStart : pauseWeekStart;
+  }
+
+  // Keep existing behavior: always stage the selected value
+  segTargets[segId] = selectedVal;
+
+  const optionsHtml = opts.map(o => {
+    const sel = (o.value === selectedVal) ? 'selected' : '';
+    return `<option value="${o.value}" ${sel}>${o.label}</option>`;
+  }).join('');
+
+  // helper just for the hint text (DD/MM/YYYY)
+  const fmtYmdDmySlash = (ymd) => {
+    const s = String(ymd || '').slice(0, 10);
+    const m = s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (!m) return s;
+    const [, y, mo, d] = m;
+    return `${d}/${mo}/${y}`;
+  };
+
+  // ✅ Match SQL semantics:
+  // delayed if:
+  //   invoice_locked_invoice_id is null/empty AND
+  //   invoice_target_week_start is explicitly present (stored OR previously staged) AND
+  //   invoice_target_week_start !== baseline week start
+  //
+  // where baseline is naturalWeekStart (week_ending_date - 6)
+  const hasExplicitTarget = hadStagedBefore || !!storedTargetRaw;
+  const targetForDelay = hadStagedBefore ? String(selectedVal || '').trim() : storedTargetRaw;
+
+  const isPermanentDelay = (targetForDelay === pauseWeekStart);
+
+  const isInvoiceDelayed =
+    hasExplicitTarget &&
+    !lockedInvoiceId &&
+    (
+      isPermanentDelay ||
+      (!!naturalWeekStart && !!targetForDelay && targetForDelay !== naturalWeekStart)
+    );
+
+  const delayHint = isInvoiceDelayed
+    ? (isPermanentDelay ? 'Permanently delayed' : `Delayed until ${fmtYmdDmySlash(targetForDelay)}`)
+    : '';
+
+  const invoiceStateHint = isLocked
+    ? '✅ Invoiced'
+    : (delayHint ? `⏳ ${delayHint}` : '○ Invoiceable now');
+
+  return `
+    <select name="seg_invoice_week" data-segment-id="${segId}" ${disabledAttr}>
+      ${optionsHtml}
+    </select>
+    <span class="mini">${invoiceStateHint}</span>
+  `;
+};
+
+
+  if (isSegments && segs.length && isNhspOrHrSelfBillBasis) {
+    const headHtml = `
+      <thead>
+        <tr>
+          <th>Date</th>
+          <th>Ref / Request</th>
+          <th>Source</th>
+          <th>Hours</th>
+          <th>Pay</th>
+          <th>Charge</th>
+          <th>Exclude from pay</th>
+          <th>Invoice week / Pause</th>
+        </tr>
+      </thead>
+    `;
+
+    const bodyRows = segs.map((seg) => {
+      const effOverride = state.segmentOverrides && state.segmentOverrides[seg.segment_id];
+      const effExclude  = effOverride && Object.prototype.hasOwnProperty.call(effOverride, 'exclude_from_pay')
+        ? !!effOverride.exclude_from_pay
+        : !!seg.exclude_from_pay;
+
+      const srcRaw = seg.source_system || (seg.segment_id || '').split(':')[0] || '';
+      const src  = srcRaw || '';
+      const rawDate = seg.date || seg.work_date || '';
+      const displayDate = rawDate ? fmtYmdDmy(rawDate) : '';
+      const dateCellHtml = displayDate || '<span class="mini">—</span>';
+
+      const hours = seg.total_hours ?? seg.hours_day ?? seg.hours_night ?? seg.hours ?? '';
+      const pay   = seg.pay_amount   ?? seg.pay_ex_vat ?? '';
+      const charge= seg.charge_amount?? seg.charge_ex_vat ?? '';
+
+      const ref   = seg.ref_num || '';
+      const reqId = seg.request_id || '';
+
+ const segId = String(seg.segment_id || '');
+
+// ✅ MUST capture these BEFORE buildInvoiceWeekSelectHtml() mutates segTargets[segId]
+const hadStagedBefore = Object.prototype.hasOwnProperty.call(segTargets, segId);
+const storedTargetRaw = String(seg.invoice_target_week_start || '').trim();
+const lockedInvoiceId = String(seg.invoice_locked_invoice_id || '').trim();
+
+// build HTML (this may write segTargets[segId])
+const invoiceWeekCellHtml = buildInvoiceWeekSelectHtml(seg);
+
+// ✅ Determine delay using SQL semantics (explicit stored OR staged-before)
+const hasExplicitTarget = hadStagedBefore || !!storedTargetRaw;
+const targetForDelay = hadStagedBefore ? String(segTargets[segId] || '').trim() : storedTargetRaw;
+
+const baseline = String(naturalWeekStart || '').trim();
+const isPermanentDelay = (targetForDelay === pauseWeekStart);
+
+const isInvoiceDelayed =
+  hasExplicitTarget &&
+  !lockedInvoiceId &&
+  (
+    isPermanentDelay ||
+    (baseline && targetForDelay && targetForDelay !== baseline)
+  );
+
+const rowIsFlagged = !!effExclude || isInvoiceDelayed;
+const rowStyle = rowIsFlagged ? ` style="background: rgba(192, 57, 43, 0.18);"` : '';
+
+
+
+
+      return `
+        <tr data-segment-id="${seg.segment_id}"${rowStyle}>
+          <td>${dateCellHtml}</td>
+          <td>
+            ${ref ? `<span class="mini">Ref: ${esc(ref)}</span>` : ''}
+            ${reqId ? `<br><span class="mini">Req: ${esc(reqId)}</span>` : ''}
+            ${(!ref && !reqId) ? '<span class="mini">—</span>' : ''}
+          </td>
+          <td>${src ? esc(src) : '<span class="mini">—</span>'}</td>
+          <td>${hours !== '' ? esc(hours) : '<span class="mini">—</span>'}</td>
+          <td>${pay   !== '' ? esc(pay)   : '<span class="mini">—</span>'}</td>
+          <td>${charge!== '' ? esc(charge): '<span class="mini">—</span>'}</td>
+          <td>
+            <input
+              type="checkbox"
+              name="seg_exclude_from_pay"
+              data-segment-id="${seg.segment_id}"
+              ${effExclude ? 'checked' : ''}
+              ${disabledAttr}
+            />
+            <span class="mini">Tick = exclude from pay (staged)</span>
+          </td>
+          <td>${invoiceWeekCellHtml}</td>
+        </tr>
+      `;
+    }).join('');
+
+    return `
+      <div class="tabc">
+        <div class="card">
+          <div class="row">
+            <label>Timesheet ID</label>
+            <div class="controls">${tsId || '<span class="mini">Unknown</span>'}</div>
+          </div>
+          <div class="row">
+            <label>Mode</label>
+            <div class="controls">
+              <span class="mini">Invoice breakdown mode: ${esc(mode || 'UNKNOWN')} (basis: ${esc(basis || 'UNKNOWN')})</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="card" style="margin-top:10px;">
+          <div class="row">
+            <label>Lines</label>
+            <div class="controls">
+              <div style="max-height:320px;overflow:auto;">
+                <table class="grid mini">
+                  ${headHtml}
+                  <tbody>${bodyRows}</tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+          <div class="row">
+            <label></label>
+            <div class="controls">
+              <span class="mini">Changes to "Exclude from pay" and "Invoice week / Pause" are staged only. They are applied when you click Save on the Timesheet modal.</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  // ─────────────────────────────────────────────────────
+  // WEEKLY: shift-line grid (schedule-driven ONLY)
+  // ─────────────────────────────────────────────────────
+  if (sheetScope === 'WEEKLY') {
+    const frameMode =
+      (typeof window.__getModalFrame === 'function' ? window.__getModalFrame()?.mode : null) ||
+      'view';
+
+    const isEditMode = (frameMode === 'edit' || frameMode === 'create');
+    const canEditSchedule = isEditMode && !locked && subMode === 'MANUAL';
+
+    // Build full 7-day week list (always show all days)
+    const dowShort = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+    let weekDays = [];
+    if (tsWeekEnding) {
+      try {
+        const base = new Date(`${tsWeekEnding}T00:00:00Z`);
+        for (let offset = 6; offset >= 0; offset--) {
+          const d = new Date(base);
+          d.setUTCDate(base.getUTCDate() - offset);
+          weekDays.push({
+            ymd: toYmd(d),
+            dow: dowShort[d.getUTCDay()]
+          });
+        }
+      } catch {
+        weekDays = [];
+      }
+    }
+    if (!weekDays.length) {
+      // still render something rather than crash; schedule editor expects 7 days when week ending exists
+      weekDays = [{ ymd: '', dow: '' }];
+    }
+
+    // Persist weekDays on state so the window helper can always build/validate
+    state.__weekDaysForSchedule = weekDays;
+
+    const tryParse = (src) => {
+      if (!src) return null;
+      if (Array.isArray(src) || typeof src === 'object') return JSON.parse(JSON.stringify(src));
+      if (typeof src === 'string') {
+        try {
+          const p = JSON.parse(src);
+          if (Array.isArray(p) || typeof p === 'object') return p;
+        } catch {}
+      }
+      return null;
+    };
+
+    let seedSchedule = null;
+    if (Array.isArray(state.schedule) && state.schedule.length) {
+      seedSchedule = tryParse(state.schedule);
+    } else {
+      seedSchedule = tryParse(ts.actual_schedule_json);
+      if ((!seedSchedule || !seedSchedule.length) && details && details.contract_week) {
+        const cw2 = details.contract_week;
+        const src = (cw2.planned_schedule_json != null) ? cw2.planned_schedule_json
+                 : (cw2.std_schedule_json != null)     ? cw2.std_schedule_json
+                 : null;
+        seedSchedule = tryParse(src);
+      }
+    }
+    if (!Array.isArray(seedSchedule)) seedSchedule = [];
+
+    const normDate = (seg) => String(seg?.date || seg?.date_ymd || seg?.work_date || '').trim();
+
+    const asLondonHHMM = (iso) => {
+      try {
+        const d = new Date(String(iso || ''));
+        if (Number.isNaN(d.getTime())) return '';
+        return d.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'Europe/London' });
+      } catch { return ''; }
+    };
+
+    const normHHMM = (seg, keyHH, keyIso) => {
+      const s = String(seg?.[keyHH] || '').trim();
+      if (s) return s;
+      const iso = seg?.[keyIso] || null;
+      return iso ? asLondonHHMM(iso) : '';
+    };
+
+    const segRef = (seg) => {
+      const v =
+        seg?.ref_num ??
+        seg?.reference ??
+        seg?.ref ??
+        seg?.ref_number ??
+        seg?.request_id ??
+        '';
+      return String(v || '').trim();
+    };
+
+    // de-dupe primary break if break_start/break_end also appears in breaks[]
+    const segBreaks = (seg) => {
+      const out = [];
+      const seen = new Set();
+
+      const add = (startRaw, endRaw) => {
+        const s = String(startRaw || '').trim();
+        const e = String(endRaw   || '').trim();
+        if (!s && !e) return;
+        const key = `${s}→${e}`;
+        if (seen.has(key)) return;
+        seen.add(key);
+        out.push({ start: s, end: e });
+      };
+
+      const bArr = Array.isArray(seg?.breaks) ? seg.breaks : [];
+      add(seg?.break_start, seg?.break_end);
+      bArr.forEach(b => add(b?.start, b?.end));
+      return out;
+    };
+
+    const parseHHMM = (s) => {
+      const m = String(s || '').trim().match(/^(\d{1,2}):(\d{2})$/);
+      if (!m) return null;
+      const hh = Number(m[1]), mm = Number(m[2]);
+      if (!Number.isFinite(hh) || !Number.isFinite(mm)) return null;
+      if (hh < 0 || hh > 23 || mm < 0 || mm > 59) return null;
+      return hh * 60 + mm;
+    };
+
+    const parseBreakMins = (v) => {
+      const s = String(v == null ? '' : v).trim();
+      if (!s) return 0;
+      const m = s.match(/^(\d{1,4})(?:\s*m)?$/i);
+      if (!m) return NaN;
+      const n = Number(m[1]);
+      if (!Number.isFinite(n) || n < 0) return NaN;
+      return Math.floor(n);
+    };
+
+    // Build default linesByDate from seedSchedule (shift lines + break-only lines)
+    // supports schedule seg.break_minutes -> seeds break_mins
+    const buildLinesFromSchedule = () => {
+      const byDate = {};
+      for (const seg of seedSchedule) {
+        const ymd = normDate(seg);
+        if (!ymd) continue;
+        (byDate[ymd] ||= []).push(seg);
+      }
+
+      for (const ymd of Object.keys(byDate)) {
+        byDate[ymd].sort((a, b) => {
+          const sa = parseHHMM(normHHMM(a, 'start', 'start_utc')) ?? -1;
+          const sb = parseHHMM(normHHMM(b, 'start', 'start_utc')) ?? -1;
+          if (sa !== sb) return sa - sb;
+          const ea = parseHHMM(normHHMM(a, 'end', 'end_utc')) ?? -1;
+          const eb = parseHHMM(normHHMM(b, 'end', 'end_utc')) ?? -1;
+          return ea - eb;
+        });
+      }
+
+      const linesByDate = {};
+      for (const wd of weekDays) {
+        const ymd = wd.ymd;
+        const segsDay = (ymd && byDate[ymd]) ? byDate[ymd] : [];
+        const lines = [];
+
+        for (const seg of segsDay) {
+          const breaks = segBreaks(seg);
+          const b0 = breaks[0] || { start: '', end: '' };
+
+          const segBreakMinutes =
+            (seg && (seg.break_minutes != null || seg.break_mins != null))
+              ? (Number(seg.break_minutes ?? seg.break_mins) || 0)
+              : 0;
+
+          const useBreakMins = (!breaks.length && segBreakMinutes > 0);
+
+          lines.push({
+            ref: segRef(seg),
+            start: normHHMM(seg, 'start', 'start_utc'),
+            end:   normHHMM(seg, 'end',   'end_utc'),
+            break_start: useBreakMins ? '' : String(b0.start || '').trim(),
+            break_end:   useBreakMins ? '' : String(b0.end   || '').trim(),
+            break_mins:  useBreakMins ? String(Math.round(segBreakMinutes)) : ''
+          });
+
+          for (let i = 1; i < breaks.length; i++) {
+            const b = breaks[i] || {};
+            lines.push({
+              ref: '',
+              start: '',
+              end: '',
+              break_start: String(b.start || '').trim(),
+              break_end:   String(b.end   || '').trim(),
+              break_mins: ''
+            });
+          }
+        }
+
+        if (!lines.length) {
+          lines.push({ ref:'', start:'', end:'', break_start:'', break_end:'', break_mins:'' });
+        }
+
+        linesByDate[ymd] = lines;
+      }
+
+      return linesByDate;
+    };
+
+    const stable = (x) => { try { return JSON.stringify(x || null); } catch { return ''; } };
+
+    state.weeklyLinesByDate = (state.weeklyLinesByDate && typeof state.weeklyLinesByDate === 'object') ? state.weeklyLinesByDate : null;
+    state.extraShiftCount   = Number.isFinite(Number(state.extraShiftCount)) ? Math.max(0, Number(state.extraShiftCount)) : 0;
+
+    const seedHash  = stable(seedSchedule);
+    const priorHash = state.__weeklyLinesSeedHash || '';
+
+    // Only auto-reseed in VIEW mode (never clobber edits)
+    if (!state.weeklyLinesByDate || (frameMode === 'view' && priorHash !== seedHash)) {
+      state.weeklyLinesByDate = buildLinesFromSchedule();
+      state.__weeklyLinesSeedHash = seedHash;
+
+      // derive extraShiftCount so the UI shows all stored lines (including break-only lines)
+      let maxLines = 1;
+      for (const wd of weekDays) {
+        const arr = state.weeklyLinesByDate[wd.ymd] || [];
+        if (arr.length > maxLines) maxLines = arr.length;
+      }
+      state.extraShiftCount = Math.max(0, maxLines - 1);
+    }
+
+    // Ensure every day has the same number of visible line slots
+    const totalLinesPerDay = Math.max(1, 1 + Number(state.extraShiftCount || 0), (() => {
+      let m = 1;
+      for (const wd of weekDays) {
+        const arr = state.weeklyLinesByDate?.[wd.ymd] || [];
+        if (arr.length > m) m = arr.length;
+      }
+      return m;
+    })());
+
+    for (const wd of weekDays) {
+      const ymd = wd.ymd;
+      const arr = Array.isArray(state.weeklyLinesByDate?.[ymd]) ? state.weeklyLinesByDate[ymd].slice() : [];
+      while (arr.length < totalLinesPerDay) arr.push({ ref:'', start:'', end:'', break_start:'', break_end:'', break_mins:'' });
+      if (arr.length > totalLinesPerDay) arr.length = totalLinesPerDay;
+      state.weeklyLinesByDate[ymd] = arr;
+    }
+
+    // Paid hours per shift line (includes break-only lines below it)
+    const paidByKey = {};
+    for (const wd of weekDays) {
+      const ymd = wd.ymd;
+      const lines = state.weeklyLinesByDate[ymd] || [];
+
+      let curShiftIdx = null;
+      let curShiftStart = null;
+      let curShiftEndAdj = null;
+      let curBreakMins = 0;
+
+      const diffMins = (a, b) => {
+        const am = parseHHMM(a);
+        const bm = parseHHMM(b);
+        if (am == null || bm == null) return null;
+        let d = bm - am;
+        if (d < 0) d += 1440;
+        return d;
+      };
+
+      const addBreakFromLine = (ln) => {
+        const bm = parseBreakMins(ln.break_mins);
+        const hasMins = Number.isFinite(bm) && bm > 0;
+        const hasWin = !!(String(ln.break_start || '').trim() || String(ln.break_end || '').trim());
+
+        if (hasMins) { curBreakMins += bm; return; }
+        if (hasWin) {
+          const d = diffMins(ln.break_start, ln.break_end);
+          if (Number.isFinite(d) && d > 0) curBreakMins += d;
+        }
+      };
+
+      const finalize = () => {
+        if (curShiftIdx == null) return;
+        if (curShiftStart == null || curShiftEndAdj == null) {
+          paidByKey[`${ymd}:${curShiftIdx}`] = '';
+          return;
+        }
+        const shiftMins = Math.max(0, curShiftEndAdj - curShiftStart);
+        const paidMins = Math.max(0, shiftMins - (Number(curBreakMins) || 0));
+        paidByKey[`${ymd}:${curShiftIdx}`] = (Math.round((paidMins / 60) * 100) / 100).toFixed(2);
+      };
+
+      for (let i = 0; i < lines.length; i++) {
+        const ln = lines[i] || {};
+        const hasShift = !!(String(ln.start||'').trim() || String(ln.end||'').trim());
+        const hasBreakAny =
+          !!(String(ln.break_start||'').trim() || String(ln.break_end||'').trim()) ||
+          (Number.isFinite(parseBreakMins(ln.break_mins)) && parseBreakMins(ln.break_mins) > 0);
+
+        if (hasShift) {
+          finalize();
+
+          const s0 = parseHHMM(ln.start);
+          const e0 = parseHHMM(ln.end);
+
+          curShiftIdx = i;
+          curBreakMins = 0;
+
+          if (s0 != null && e0 != null && s0 !== e0) {
+            curShiftStart = s0;
+            curShiftEndAdj = (e0 > s0) ? e0 : (e0 + 1440);
+          } else {
+            curShiftStart = null;
+            curShiftEndAdj = null;
+          }
+
+          if (hasBreakAny) addBreakFromLine(ln);
+        } else if (hasBreakAny && curShiftIdx != null) {
+          addBreakFromLine(ln);
+        }
+      }
+      finalize();
+    }
+
+    const disabledAttrManual = (!canEditSchedule) ? 'disabled' : '';
+
+    // Ensure these exist
+    state.scheduleErrorsByDate = (state.scheduleErrorsByDate && typeof state.scheduleErrorsByDate === 'object') ? state.scheduleErrorsByDate : {};
+    state.scheduleHasErrors = !!state.scheduleHasErrors;
+
+    // ─────────────────────────────────────────────────────────────
+    // Uses your NEW global helper: buildWeeklyScheduleFromLinesAndValidate
+    // Updates state.schedule + state.scheduleHasErrors + state.scheduleErrorsByDate
+    // Also does UI highlighting + dispatch event for Finance tab.
+    // ─────────────────────────────────────────────────────────────
+    const applyScheduleFromLines = (st) => {
+      if (typeof buildWeeklyScheduleFromLinesAndValidate !== 'function') return null;
+
+      const wd = Array.isArray(st.__weekDaysForSchedule) && st.__weekDaysForSchedule.length
+        ? st.__weekDaysForSchedule
+        : weekDays;
+
+      const out = buildWeeklyScheduleFromLinesAndValidate(st.weeklyLinesByDate, wd, {
+        allowOvernight: true,
+        allowBreakMins: true
+      });
+
+      st.schedule = Array.isArray(out?.schedule) ? out.schedule : [];
+      st.scheduleErrorsByDate = (out?.errorsByDate && typeof out.errorsByDate === 'object') ? out.errorsByDate : {};
+      st.scheduleHasErrors = !!out?.hasErrors;
+      st.__scheduleUpdatedAt = Date.now();
+
+      // Live highlight: if a date has any errors, mark all inputs for that date
+      try {
+        const errs = st.scheduleErrorsByDate || {};
+        const allDates = new Set(Object.keys(st.weeklyLinesByDate || {}));
+        for (const d of allDates) {
+          const hasErr = !!errs[d];
+          const sel = `#tsWeeklySchedule input[data-date="${CSS.escape(d)}"]`;
+          document.querySelectorAll(sel).forEach(inp => {
+            if (hasErr) inp.classList.add('is-invalid');
+            else inp.classList.remove('is-invalid');
+          });
+        }
+        const banner = document.getElementById('tsWeeklyErrorsBanner');
+        if (banner) banner.style.display = st.scheduleHasErrors ? '' : 'none';
+      } catch {}
+
+      // Notify other tabs (Finance) that schedule/errors changed
+      try {
+        window.dispatchEvent(new CustomEvent('ts-weekly-schedule-updated', {
+          detail: {
+            hasErrors: !!st.scheduleHasErrors,
+            errorsByDate: st.scheduleErrorsByDate || {},
+            scheduleCount: Array.isArray(st.schedule) ? st.schedule.length : 0
+          }
+        }));
+      } catch {}
+
+      return out;
+    };
+
+    // Install helper in THIS TAB (not showModal)
+    try {
+      if (!window.__tsWeeklyLinesHelper || window.__tsWeeklyLinesHelper.__v !== 4) {
+        window.__tsWeeklyLinesHelper = {
+          __v: 4,
+
+          _hhmm(raw) {
+            let s = String(raw || '').trim();
+            if (!s) return '';
+            if (/^\d{1,2}:\d{2}$/.test(s)) {
+              const [h, m] = s.split(':');
+              const hh = String(Number(h) || 0).padStart(2, '0');
+              const mm = String(Number(m) || 0).padStart(2, '0');
+              return `${hh}:${mm}`;
+            }
+            s = s.replace(':', '');
+            if (!/^\d{1,4}$/.test(s)) return '';
+            if (s.length <= 2) {
+              const h = Number(s);
+              if (!Number.isFinite(h)) return '';
+              return `${String(h).padStart(2, '0')}:00`;
+            }
+            const mm = s.slice(-2);
+            const h  = s.slice(0, -2);
+            const hh = String(Number(h) || 0).padStart(2, '0');
+            const mm2 = String(Number(mm) || 0).padStart(2, '0');
+            return `${hh}:${mm2}`;
+          },
+
+          _normBreakMins(raw) {
+            const s = String(raw == null ? '' : raw).trim();
+            if (!s) return '';
+            const m = s.match(/^(\d{1,4})(?:\s*m)?$/i);
+            if (!m) return '';
+            const n = Number(m[1]);
+            if (!Number.isFinite(n) || n < 0) return '';
+            return String(Math.floor(n));
+          },
+
+          _parse(s) {
+            const m = String(s || '').trim().match(/^(\d{1,2}):(\d{2})$/);
+            if (!m) return null;
+            const hh = Number(m[1]), mm = Number(m[2]);
+            if (!Number.isFinite(hh) || !Number.isFinite(mm) || hh < 0 || hh > 23 || mm < 0 || mm > 59) return null;
+            return hh * 60 + mm;
+          },
+
+          _diff(a, b) {
+            const am = this._parse(a);
+            const bm = this._parse(b);
+            if (am == null || bm == null) return null;
+            let d = bm - am;
+            if (d < 0) d += 1440;
+            return d;
+          },
+
+          _parseBreakMins(raw) {
+            const s = String(raw == null ? '' : raw).trim();
+            if (!s) return 0;
+            const m = s.match(/^(\d{1,4})(?:\s*m)?$/i);
+            if (!m) return NaN;
+            const n = Number(m[1]);
+            if (!Number.isFinite(n) || n < 0) return NaN;
+            return Math.floor(n);
+          },
+
+          _getState() {
+            const mc = window.modalCtx || {};
+            const st = mc.timesheetState || null;
+            const fr = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
+            if (!st) return { st: null, fr: null };
+
+            st.weeklyLinesByDate = (st.weeklyLinesByDate && typeof st.weeklyLinesByDate === 'object') ? st.weeklyLinesByDate : {};
+            st.scheduleErrorsByDate = (st.scheduleErrorsByDate && typeof st.scheduleErrorsByDate === 'object') ? st.scheduleErrorsByDate : {};
+            st.extraShiftCount = Number.isFinite(Number(st.extraShiftCount)) ? Math.max(0, Number(st.extraShiftCount)) : 0;
+            st.scheduleHasErrors = !!st.scheduleHasErrors;
+
+            return { st, fr };
+          },
+
+      _ensureLine(st, date, idx) {
+  const d = String(date || '');
+  const i = Number(idx || 0);
+  if (!d || !Number.isFinite(i) || i < 0) return null;
+
+  st.weeklyLinesByDate[d] = Array.isArray(st.weeklyLinesByDate[d]) ? st.weeklyLinesByDate[d] : [];
+  while (st.weeklyLinesByDate[d].length <= i) {
+    st.weeklyLinesByDate[d].push({ ref:'', start:'', end:'', break_start:'', break_end:'', break_mins:'' });
+  }
+  st.weeklyLinesByDate[d][i] = st.weeklyLinesByDate[d][i] || { ref:'', start:'', end:'', break_start:'', break_end:'', break_mins:'' };
+  if (st.weeklyLinesByDate[d][i].break_mins == null) st.weeklyLinesByDate[d][i].break_mins = '';
+  return st.weeklyLinesByDate[d][i];
+},
+
+_syncBreakMinsLock(date, idx, ln) {
+  try {
+    const d = String(date || '');
+    const i = Number(idx);
+    if (!d || !Number.isFinite(i)) return;
+
+    const hasWindow = !!(String(ln?.break_start || '').trim() || String(ln?.break_end || '').trim());
+
+    const minsEl = document.querySelector(
+      `input[data-weekly-field="break_mins"][data-date="${CSS.escape(d)}"][data-line-idx="${i}"]`
+    );
+    if (!minsEl) return;
+
+    if (hasWindow) {
+      minsEl.dataset.breaklock = '1';
+      minsEl.disabled = true;
+      minsEl.readOnly = true;
+      return;
+    }
+
+    // Only re-enable if we were the reason it was disabled (avoid fighting global readonly)
+    if (minsEl.dataset.breaklock === '1') {
+      minsEl.disabled = false;
+      minsEl.readOnly = false;
+      delete minsEl.dataset.breaklock;
+    }
+  } catch {}
+},
+
+          _recalcPaidForDate(st, date) {
+            const d = String(date || '');
+            if (!d) return;
+
+            const lines = Array.isArray(st.weeklyLinesByDate[d]) ? st.weeklyLinesByDate[d] : [];
+            let curShiftIdx = null;
+            let curShiftStart = null;
+            let curShiftEndAdj = null;
+            let curBreakMins = 0;
+
+            const setPaid = (idx, val) => {
+              try {
+                const el = document.querySelector(`span.sched-paid-hours[data-date="${CSS.escape(d)}"][data-line-idx="${idx}"]`);
+                if (el) el.textContent = (val == null ? '' : String(val));
+              } catch {}
+            };
+
+            const fin = () => {
+              if (curShiftIdx == null) return;
+              if (curShiftStart == null || curShiftEndAdj == null) {
+                setPaid(curShiftIdx, '');
+                return;
+              }
+              const shiftMins = Math.max(0, curShiftEndAdj - curShiftStart);
+              const paidMins  = Math.max(0, shiftMins - (Number(curBreakMins) || 0));
+              setPaid(curShiftIdx, (Math.round((paidMins / 60) * 100) / 100).toFixed(2));
+            };
+
+            const addBreak = (ln) => {
+              const bm = this._parseBreakMins(ln.break_mins);
+              const hasMins = Number.isFinite(bm) && bm > 0;
+              const hasWin = !!(String(ln.break_start||'').trim() || String(ln.break_end||'').trim());
+
+              if (hasMins) { curBreakMins += bm; return; }
+              if (hasWin) {
+                const x = this._diff(ln.break_start, ln.break_end);
+                if (Number.isFinite(x) && x > 0) curBreakMins += x;
+              }
+            };
+
+            for (let i = 0; i < lines.length; i++) {
+              const ln = lines[i] || {};
+              const hasShift = !!(String(ln.start||'').trim() || String(ln.end||'').trim());
+              const bm = this._parseBreakMins(ln.break_mins);
+              const hasBreak =
+                !!(String(ln.break_start||'').trim() || String(ln.break_end||'').trim()) ||
+                (Number.isFinite(bm) && bm > 0);
+
+              if (hasShift) {
+                fin();
+
+                const s0 = this._parse(ln.start);
+                const e0 = this._parse(ln.end);
+
+                curShiftIdx = i;
+                curBreakMins = 0;
+
+                if (s0 != null && e0 != null && s0 !== e0) {
+                  curShiftStart = s0;
+                  curShiftEndAdj = (e0 > s0) ? e0 : (e0 + 1440);
+                } else {
+                  curShiftStart = null;
+                  curShiftEndAdj = null;
+                }
+
+                if (hasBreak) addBreak(ln);
+              } else if (hasBreak && curShiftIdx != null) {
+                addBreak(ln);
+              }
+            }
+
+            fin();
+
+            // clear paid text for non-shift lines
+            for (let i = 0; i < lines.length; i++) {
+              const ln = lines[i] || {};
+              const hasShift = !!(String(ln.start||'').trim() || String(ln.end||'').trim());
+              if (!hasShift) setPaid(i, '');
+            }
+          },
+
+          _markDirty() {
+            try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
+          },
+
+          onInput(el) {
+            try {
+              const { st } = this._getState();
+              if (!st || !el) return;
+
+              const date  = String(el.dataset.date || '');
+              const idx   = Number(el.dataset.lineIdx || '0');
+              const field = String(el.dataset.weeklyField || '');
+
+              if (!date || !Number.isFinite(idx) || idx < 0 || !field) return;
+
+              const ln = this._ensureLine(st, date, idx);
+              if (!ln) return;
+
+           ln[field] = String(el.value || '');
+
+// If user is using break start/end on this line:
+// - keep break_mins OUT of state (avoid mixing)
+// - but auto-populate the break_mins *display* so the user can see the duration
+if (field === 'break_start' || field === 'break_end') {
+  const bs = String(ln.break_start || '').trim();
+  const be = String(ln.break_end   || '').trim();
+  const hasWindow = !!(bs || be);
+
+  // Always keep mins empty in state when a window is used
+  if (hasWindow) ln.break_mins = '';
+
+  // Auto-fill the UI mins box (read-only/disabled is fine; value still shows)
+  try {
+    const minsEl = document.querySelector(
+      `input[data-weekly-field="break_mins"][data-date="${CSS.escape(date)}"][data-line-idx="${idx}"]`
+    );
+    if (minsEl) {
+      // Only show mins when BOTH start+end are present and valid
+      const d = (bs && be) ? this._diff(bs, be) : null; // minutes, supports overnight
+      minsEl.value = (Number.isFinite(d) && d >= 0) ? String(d) : '';
+    }
+  } catch {}
+
+  // ✅ lock/unlock break mins for THIS line only
+  this._syncBreakMinsLock(date, idx, ln);
+} else {
+  // keep existing behaviour for other fields
+  this._syncBreakMinsLock(date, idx, ln);
+}
+
+
+// ✅ paid hours updates live, including after tab-away (onBlur calls onInput)
+this._recalcPaidForDate(st, date);
+
+// ✅ rebuild + validate schedule on every edit (pre-save Finance preview fix)
+applyScheduleFromLines(st);
+
+this._markDirty();
+
+            } catch {}
+          },
+
+          onBlur(el) {
+            try {
+              if (!el) return;
+              const field = String(el.dataset.weeklyField || '');
+              if (field === 'start' || field === 'end' || field === 'break_start' || field === 'break_end') {
+                el.value = this._hhmm(el.value);
+              }
+              if (field === 'break_mins') {
+                el.value = this._normBreakMins(el.value);
+              }
+              this.onInput(el);
+            } catch {}
+          },
+
+          addLine() {
+            const { st, fr } = this._getState();
+            if (!st) return;
+
+            const dates = Object.keys(st.weeklyLinesByDate || {});
+            if (!dates.length) return;
+
+            const cur = Number(st.extraShiftCount || 0);
+            st.extraShiftCount = (Number.isFinite(cur) ? cur : 0) + 1;
+
+            const wantLen = 1 + st.extraShiftCount;
+            for (const d of dates) {
+              st.weeklyLinesByDate[d] = Array.isArray(st.weeklyLinesByDate[d]) ? st.weeklyLinesByDate[d] : [];
+              while (st.weeklyLinesByDate[d].length < wantLen) {
+                st.weeklyLinesByDate[d].push({ ref:'', start:'', end:'', break_start:'', break_end:'', break_mins:'' });
+              }
+              if (st.weeklyLinesByDate[d].length > wantLen) st.weeklyLinesByDate[d].length = wantLen;
+              this._recalcPaidForDate(st, d);
+            }
+
+            applyScheduleFromLines(st);
+            this._markDirty();
+
+            try {
+              if (fr && fr.entity === 'timesheets') {
+                fr._suppressDirty = true;
+                fr.setTab('lines');
+                fr._suppressDirty = false;
+                fr._updateButtons && fr._updateButtons();
+              }
+            } catch {}
+          },
+
+          removeLine() {
+            const { st, fr } = this._getState();
+            if (!st) return;
+
+            const cur = Number(st.extraShiftCount || 0);
+            if (!Number.isFinite(cur) || cur <= 0) return;
+
+            const wantLen = 1 + (cur - 1);
+
+            let hasData = false;
+            for (const d of Object.keys(st.weeklyLinesByDate || {})) {
+              const arr = Array.isArray(st.weeklyLinesByDate[d]) ? st.weeklyLinesByDate[d] : [];
+              const last = arr[arr.length - 1] || null;
+              if (last) {
+                if (
+                  String(last.ref || '').trim() ||
+                  String(last.start || '').trim() ||
+                  String(last.end || '').trim() ||
+                  String(last.break_start || '').trim() ||
+                  String(last.break_end || '').trim() ||
+                  String(last.break_mins || '').trim()
+                ) {
+                  hasData = true;
+                  break;
+                }
+              }
+            }
+            if (hasData) {
+              const ok = window.confirm('The last shift line contains data on at least one day. Remove it anyway?');
+              if (!ok) return;
+            }
+
+            st.extraShiftCount = cur - 1;
+
+            for (const d of Object.keys(st.weeklyLinesByDate || {})) {
+              const arr = Array.isArray(st.weeklyLinesByDate[d]) ? st.weeklyLinesByDate[d] : [];
+              if (arr.length > wantLen) arr.length = wantLen;
+              while (arr.length < wantLen) arr.push({ ref:'', start:'', end:'', break_start:'', break_end:'', break_mins:'' });
+              st.weeklyLinesByDate[d] = arr;
+              this._recalcPaidForDate(st, d);
+            }
+
+            applyScheduleFromLines(st);
+            this._markDirty();
+
+            try {
+              if (fr && fr.entity === 'timesheets') {
+                fr._suppressDirty = true;
+                fr.setTab('lines');
+                fr._suppressDirty = false;
+                fr._updateButtons && fr._updateButtons();
+              }
+            } catch {}
+          },
+
+          resetAll() {
+            const { st, fr } = this._getState();
+            if (!st) return;
+
+            const ok = window.confirm('Reset the weekly schedule grid back to a blank week?');
+            if (!ok) return;
+
+            st.extraShiftCount = 0;
+            for (const d of Object.keys(st.weeklyLinesByDate || {})) {
+              st.weeklyLinesByDate[d] = [{ ref:'', start:'', end:'', break_start:'', break_end:'', break_mins:'' }];
+              this._recalcPaidForDate(st, d);
+            }
+
+            applyScheduleFromLines(st);
+            this._markDirty();
+
+            try {
+              if (fr && fr.entity === 'timesheets') {
+                fr._suppressDirty = true;
+                fr.setTab('lines');
+                fr._suppressDirty = false;
+                fr._updateButtons && fr._updateButtons();
+              }
+            } catch {}
+          }
+        };
+      }
+    } catch {}
+
+    // Ensure schedule/errors are computed at least once for this render
+    try { applyScheduleFromLines(state); } catch {}
+
+   const badgeHtml = (!tsId)
+  ? (subMode === 'MANUAL'
+      ? '<span class="pill pill-bad">UNPROCESSED (manual)</span>'
+      : '<span class="pill pill-info">UNPROCESSED (electronic, read-only)</span>')
+  : (subMode === 'MANUAL'
+      ? '<span class="pill pill-ok">CONFIRMED HOURS (manual)</span>'
+      : '<span class="pill pill-elec">CONFIRMED HOURS (electronic, read-only)</span>');
+
+    const errorsByDate = (state.scheduleErrorsByDate && typeof state.scheduleErrorsByDate === 'object')
+      ? state.scheduleErrorsByDate
+      : {};
+
+    const hasAnyErrors = !!(state.scheduleHasErrors || Object.keys(errorsByDate).length);
+
+    const rowsHtml = weekDays.map((wd) => {
+      const ymd = wd.ymd;
+      const dayLines = state.weeklyLinesByDate?.[ymd] || [];
+      const displayDate = ymd ? fmtYmdDmy(ymd) : '';
+      const dateCellHtml = displayDate || '<span class="mini">—</span>';
+
+      const dateHasErr = !!errorsByDate[ymd];
+      const errClass = dateHasErr ? ' is-invalid' : '';
+
+      return dayLines.map((ln, lineIdx) => {
+        const keyPaid = paidByKey[`${ymd}:${lineIdx}`] || '';
+        const lineNo = lineIdx + 1;
+       // ✅ compute these OUTSIDE the template string
+  const hasBreakWindow = !!(String(ln?.break_start || '').trim() || String(ln?.break_end || '').trim());
+  const breakMinsLockAttr = hasBreakWindow ? 'disabled' : '';
+  const breakMinsLockData = hasBreakWindow ? 'data-breaklock="1"' : ''; 
+
+        return `
+        
+          <tr data-weekly-line="1" data-date="${esc(ymd)}" data-line-idx="${lineIdx}">
+            <td>${esc(wd.dow || '') || '<span class="mini">—</span>'}</td>
+            <td>${dateCellHtml}</td>
+            <td><span class="mini">#${lineNo}</span></td>
+
+            <td>
+              <input type="text"
+                     class="input mini${errClass}"
+                     name="wl_ref_${esc(ymd)}_${lineIdx}"
+                     data-weekly-field="ref"
+                     data-date="${esc(ymd)}"
+                     data-line-idx="${lineIdx}"
+                     value="${esc(ln?.ref || '')}"
+                     oninput="window.__tsWeeklyLinesHelper&&window.__tsWeeklyLinesHelper.onInput(this)"
+                     ${disabledAttrManual} />
+            </td>
+
+            <td>
+              <input type="text"
+                     class="input${errClass}"
+                     name="wl_start_${esc(ymd)}_${lineIdx}"
+                     data-weekly-field="start"
+                     data-date="${esc(ymd)}"
+                     data-line-idx="${lineIdx}"
+                     value="${esc(ln?.start || '')}"
+                     oninput="window.__tsWeeklyLinesHelper&&window.__tsWeeklyLinesHelper.onInput(this)"
+                     onblur="window.__tsWeeklyLinesHelper&&window.__tsWeeklyLinesHelper.onBlur(this)"
+                     ${disabledAttrManual} />
+            </td>
+
+            <td>
+              <input type="text"
+                     class="input${errClass}"
+                     name="wl_end_${esc(ymd)}_${lineIdx}"
+                     data-weekly-field="end"
+                     data-date="${esc(ymd)}"
+                     data-line-idx="${lineIdx}"
+                     value="${esc(ln?.end || '')}"
+                     oninput="window.__tsWeeklyLinesHelper&&window.__tsWeeklyLinesHelper.onInput(this)"
+                     onblur="window.__tsWeeklyLinesHelper&&window.__tsWeeklyLinesHelper.onBlur(this)"
+                     ${disabledAttrManual} />
+            </td>
+
+            <td>
+              <input type="text"
+                     class="input${errClass}"
+                     name="wl_break_start_${esc(ymd)}_${lineIdx}"
+                     data-weekly-field="break_start"
+                     data-date="${esc(ymd)}"
+                     data-line-idx="${lineIdx}"
+                     value="${esc(ln?.break_start || '')}"
+                     oninput="window.__tsWeeklyLinesHelper&&window.__tsWeeklyLinesHelper.onInput(this)"
+                     onblur="window.__tsWeeklyLinesHelper&&window.__tsWeeklyLinesHelper.onBlur(this)"
+                     ${disabledAttrManual} />
+            </td>
+
+            <td>
+              <input type="text"
+                     class="input${errClass}"
+                     name="wl_break_end_${esc(ymd)}_${lineIdx}"
+                     data-weekly-field="break_end"
+                     data-date="${esc(ymd)}"
+                     data-line-idx="${lineIdx}"
+                     value="${esc(ln?.break_end || '')}"
+                     oninput="window.__tsWeeklyLinesHelper&&window.__tsWeeklyLinesHelper.onInput(this)"
+                     onblur="window.__tsWeeklyLinesHelper&&window.__tsWeeklyLinesHelper.onBlur(this)"
+                     ${disabledAttrManual} />
+            </td>
+
+          <td>
+  <input type="text"
+         class="input${errClass}"
+         name="wl_break_mins_${esc(ymd)}_${lineIdx}"
+         data-weekly-field="break_mins"
+         data-date="${esc(ymd)}"
+         data-line-idx="${lineIdx}"
+         ${breakMinsLockData}
+         value="${esc(ln?.break_mins || '')}"
+         oninput="window.__tsWeeklyLinesHelper&&window.__tsWeeklyLinesHelper.onInput(this)"
+         onblur="window.__tsWeeklyLinesHelper&&window.__tsWeeklyLinesHelper.onBlur(this)"
+         ${disabledAttrManual} ${breakMinsLockAttr} />
+</td>
+
+
+            <td>
+              <span class="mini sched-paid-hours" data-date="${esc(ymd)}" data-line-idx="${lineIdx}">
+                ${esc(keyPaid || '')}
+              </span>
+            </td>
+          </tr>
+        `;
+      }).join('');
+    }).join('');
+
+    const resetButtonHtml = (!canEditSchedule)
+      ? ''
+      : `
+        <button type="button"
+                class="btn mini"
+                data-ts-action="reset-schedule"
+                onclick="window.__tsWeeklyLinesHelper&&window.__tsWeeklyLinesHelper.resetAll();return false;">
+          Reset timesheet schedule
+        </button>
+      `;
+
+    const extraLineButtonsHtml = (!canEditSchedule)
+      ? ''
+      : `
+        <button type="button"
+                class="btn mini"
+                data-ts-action="extra-shift-add"
+                onclick="window.__tsWeeklyLinesHelper&&window.__tsWeeklyLinesHelper.addLine();return false;">
+          Extra shift lines +
+        </button>
+        <button type="button"
+                class="btn mini"
+                data-ts-action="extra-shift-remove"
+                onclick="window.__tsWeeklyLinesHelper&&window.__tsWeeklyLinesHelper.removeLine();return false;">
+          Extra shift lines -
+        </button>
+      `;
+
+      const scheduleHelpText = canEditSchedule
+      ? 'Each line is either: (1) a shift (fill Ref + Start + End), OR (2) an additional break for the most recent shift above (leave Start/End blank). For breaks you may use either Break start/end OR Break (mins) (do not mix). Save applies changes.'
+      : 'Schedule is shown read-only. Multiple shifts on the same day appear as multiple lines.';
+
+    // ✅ NEW: Additional Rates units entry table (weekly manual only, same edit gate as schedule)
+    let extrasCardHtml = '';
+    try {
+      const isWeeklyManualContext = (sheetScope === 'WEEKLY' && subMode === 'MANUAL');
+      const canEditExtras = !!canEditSchedule;
+      const disabledAttrExtras = canEditExtras ? '' : 'disabled';
+
+      const contract = (related && related.contract) ? related.contract : null;
+
+      let cfgArr = (contract && contract.additional_rates_json != null) ? contract.additional_rates_json : [];
+      if (typeof cfgArr === 'string') {
+        try { cfgArr = JSON.parse(cfgArr); } catch { cfgArr = []; }
+      }
+      if (!Array.isArray(cfgArr)) cfgArr = [];
+
+      if (isWeeklyManualContext && cfgArr.length) {
+        // BH list is global and supplied on details.policy (openTimesheet planned-week stub now includes it)
+        let bhArr = [];
+        try {
+          const raw = details && details.policy ? details.policy.bh_list : null;
+          if (Array.isArray(raw)) bhArr = raw;
+          else if (typeof raw === 'string') {
+            try {
+              const p = JSON.parse(raw || '[]');
+              if (Array.isArray(p)) bhArr = p;
+            } catch {}
+          }
+        } catch { bhArr = []; }
+
+        const bhSet = new Set((bhArr || []).map(x => String(x).slice(0, 10)));
+
+        const freqNorm = (raw) => {
+          const s = String(raw || '').toUpperCase();
+          if (s === 'ONE_PER_WEEK') return 'ONE_PER_WEEK';
+          if (s === 'ONE_PER_DAY') return 'ONE_PER_DAY';
+          if (s === 'WEEKENDS_AND_BH_ONLY') return 'WEEKENDS_AND_BH_ONLY';
+          if (s === 'WEEKDAYS_EXCL_BH_ONLY') return 'WEEKDAYS_EXCL_BH_ONLY';
+          return 'ONE_PER_WEEK';
+        };
+
+        const weekRangeLabel = (() => {
+          if (Array.isArray(weekDays) && weekDays.length === 7 && weekDays[0]?.ymd && weekDays[6]?.ymd) {
+            return `${fmtYmdDmy(String(weekDays[0].ymd).slice(0, 10))} – ${fmtYmdDmy(String(weekDays[6].ymd).slice(0, 10))}`;
+          }
+          if (tsWeekEnding) return fmtYmdDmy(String(tsWeekEnding).slice(0, 10));
+          return '';
+        })();
+
+        // Current staged values live in state.additionalRates (seeded by openTimesheet)
+        const stExtras = (state && state.additionalRates && typeof state.additionalRates === 'object')
+          ? state.additionalRates
+          : {};
+
+        const getStagedWeekUnits = (code) => {
+          const r = stExtras[code];
+          if (!r || typeof r !== 'object') return '';
+          const v = r.units_week;
+          if (v == null) return '';
+          return String(v);
+        };
+
+        const getStagedDayUnits = (code, ymd) => {
+          const r = stExtras[code];
+          if (!r || typeof r !== 'object') return '';
+          const per = (r.units_per_day && typeof r.units_per_day === 'object') ? r.units_per_day : {};
+          const v = per[ymd];
+          if (v == null) return '';
+          return String(v);
+        };
+
+        const rows = [];
+
+        for (let i = 0; i < cfgArr.length; i++) {
+          const cfg = cfgArr[i] && typeof cfgArr[i] === 'object' ? cfgArr[i] : {};
+          const code = String(cfg.code || '').toUpperCase().trim();
+          if (!code) continue;
+
+          const bucketName = String(cfg.bucket_name || code);
+          const unitName   = String(cfg.unit_name || '');
+          const freq       = freqNorm(cfg.frequency);
+
+          if (freq === 'ONE_PER_WEEK') {
+            rows.push({
+              dayLabel: 'Week',
+              dateLabel: weekRangeLabel,
+              code,
+              bucketName,
+              unitName,
+              ymd: '',
+              value: getStagedWeekUnits(code)
+            });
+            continue;
+          }
+
+          // Per-day modes always iterate the same 7 day list used by the schedule grid.
+          for (const wd of (Array.isArray(weekDays) ? weekDays : [])) {
+            const ymd = String(wd?.ymd || '').slice(0, 10);
+            const dow = String(wd?.dow || '').trim();
+            if (!/^\d{4}-\d{2}-\d{2}$/.test(ymd)) continue;
+
+            const isBh = bhSet.has(ymd);
+            const isWeekend = (dow === 'Sat' || dow === 'Sun');
+            const isWeekday = (dow === 'Mon' || dow === 'Tue' || dow === 'Wed' || dow === 'Thu' || dow === 'Fri');
+
+            let include = false;
+            let dayLabel = dow;
+
+            if (freq === 'ONE_PER_DAY') {
+              include = true;
+            } else if (freq === 'WEEKENDS_AND_BH_ONLY') {
+              include = isWeekend || isBh;
+              // ✅ overlap rule: if BH on Sat/Sun, render ONCE but label as BH
+              if (include && isBh) dayLabel = 'BH';
+            } else if (freq === 'WEEKDAYS_EXCL_BH_ONLY') {
+              // ✅ Mon–Fri excluding BH weekdays
+              include = isWeekday && !isBh;
+            }
+
+            if (!include) continue;
+
+            rows.push({
+              dayLabel,
+              dateLabel: fmtYmdDmy(ymd),
+              code,
+              bucketName,
+              unitName,
+              ymd,
+              value: getStagedDayUnits(code, ymd)
+            });
+          }
+        }
+
+        const rowsHtml = rows.map(r => {
+          const nameAttr = r.ymd
+            ? `extra_units_${esc(r.code)}_${esc(r.ymd)}`
+            : `extra_units_${esc(r.code)}`;
+
+          const ymdAttr = r.ymd ? `data-extra-ymd="${esc(r.ymd)}"` : '';
+
+          return `
+            <tr>
+              <td>${esc(r.dayLabel)}</td>
+              <td>${esc(r.dateLabel)}</td>
+              <td>${esc(r.bucketName)}</td>
+              <td>
+                <input
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  class="input"
+                  name="${nameAttr}"
+                  data-extra-code="${esc(r.code)}"
+                  ${ymdAttr}
+                  value="${esc(r.value || '')}"
+                  ${disabledAttrExtras}
+                />
+              </td>
+              <td>${esc(r.unitName)}</td>
+            </tr>
+          `;
+        }).join('');
+
+        extrasCardHtml = `
+          <div class="card" style="margin-top:10px;">
+            <div class="row">
+              <label>Additional Rates</label>
+              <div class="controls">
+                <div style="max-height:260px;overflow:auto;">
+                  <table class="grid mini" id="tsWeeklyExtras">
+                    <thead>
+                      <tr>
+                        <th>Day</th>
+                        <th>Date</th>
+                        <th>Bucket name</th>
+                        <th>No. of units</th>
+                        <th>Unit name</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      ${rowsHtml || `<tr><td colspan="5"><span class="mini">No additional rates configured for this contract.</span></td></tr>`}
+                    </tbody>
+                  </table>
+                </div>
+
+                <span class="mini" style="display:block;margin-top:4px;">
+                  Editable only when the weekly schedule is editable. Values are saved with the week.
+                </span>
+              </div>
+            </div>
+          </div>
+        `;
+      }
+    } catch (e) {
+      try { L('weekly extras render failed (non-fatal)', e); } catch {}
+      extrasCardHtml = '';
+    }
+
+    return `
+      <div class="tabc">
+
+        <div class="card">
+          <div class="row">
+            <label>Status</label>
+            <div class="controls">
+              ${badgeHtml}
+              <span class="mini" style="margin-left:8px;">
+                ${(!tsId)
+                  ? 'This is a planned week. The grid shows the full week so you can add shifts.'
+                  : 'This shows the stored schedule. Multiple shifts per day are supported.'}
+              </span>
+            </div>
+          </div>
+          <div class="row">
+            <label>Timesheet ID</label>
+            <div class="controls">
+              ${tsId || '<span class="mini">Not yet created (planned week)</span>'}
+            </div>
+          </div>
+        </div>
+
+        <div class="card" style="margin-top:10px;">
+          <div class="row">
+            <label>Weekly schedule</label>
+            <div class="controls">
+
+              <div id="tsWeeklyErrorsBanner"
+                   class="hint mini"
+                   style="${hasAnyErrors ? '' : 'display:none;'}margin-bottom:6px;">
+                Fix the highlighted shift/break times before saving.
+              </div>
+
+              <div style="max-height:340px;overflow:auto;">
+                <table class="grid mini" id="tsWeeklySchedule">
+                  <thead>
+                    <tr>
+                      <th>Day</th>
+                      <th>Date</th>
+                      <th>Line</th>
+                      <th>Ref #</th>
+                      <th>Start</th>
+                      <th>End</th>
+                      <th>Break start</th>
+                      <th>Break end</th>
+                      <th>Break (mins)</th>
+                      <th>Paid hours</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    ${rowsHtml}
+                  </tbody>
+                </table>
+              </div>
+
+              <span class="mini" style="display:block;margin-top:4px;">
+                ${scheduleHelpText}
+              </span>
+
+              ${locked ? '<span class="mini">This timesheet is locked (paid/invoiced); schedule is read-only.</span>' : ''}
+
+              <div style="margin-top:8px;">
+                ${resetButtonHtml}
+                ${extraLineButtonsHtml}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        ${extrasCardHtml}
+      </div>
+    `;
+
+  }
+
+  // ─────────────────────────────────────────────────────
+  // DAILY (unchanged)
+  // ─────────────────────────────────────────────────────
+  if (sheetScope === 'DAILY') {
+    const startIso = ts.worked_start_iso || null;
+    const endIso   = ts.worked_end_iso   || null;
+    const brStartIso = ts.break_start_iso || null;
+    const brEndIso   = ts.break_end_iso   || null;
+    const brMinsRaw  = ts.break_minutes   != null ? Number(ts.break_minutes) : null;
+
+    const toLocalHHMM = (iso) => {
+      if (!iso) return '';
+      const d = new Date(iso);
+      if (Number.isNaN(d.getTime())) return '';
+      try {
+        return d.toLocaleTimeString('en-GB', {
+          hour: '2-digit',
+          minute: '2-digit',
+          hour12: false,
+          timeZone: 'Europe/London'
+        });
+      } catch {
+        const hh = String(d.getHours()).padStart(2, '0');
+        const mm = String(d.getMinutes()).padStart(2, '0');
+        return `${hh}:${mm}`;
+      }
+    };
+
+    const toLocalDateYmd = (iso) => {
+      if (!iso) return tsWeekEnding || row.week_ending_date || '';
+      const d = new Date(iso);
+      if (Number.isNaN(d.getTime())) return tsWeekEnding || row.week_ending_date || '';
+      const yyyy = d.getFullYear();
+      const mm   = String(d.getMonth() + 1).padStart(2, '0');
+      const dd   = String(d.getDate()).toString().padStart(2, '0');
+      return `${yyyy}-${mm}-${dd}`;
+    };
+
+    const toLocalDowShort = (isoOrYmd) => {
+      if (!isoOrYmd) return '';
+      let d;
+      if (/^\d{4}-\d{2}-\d{2}$/.test(isoOrYmd)) d = new Date(`${isoOrYmd}T00:00:00Z`);
+      else d = new Date(isoOrYmd);
+      if (Number.isNaN(d.getTime())) return '';
+      return d.toLocaleDateString('en-GB', { weekday: 'short', timeZone: 'Europe/London' });
+    };
+
+    const dateYmd  = toLocalDateYmd(startIso);
+    const dateDmy  = dateYmd ? fmtYmdDmy(dateYmd) : '';
+    const dowShort = toLocalDowShort(dateYmd);
+
+    const startHHMM   = toLocalHHMM(startIso);
+    const endHHMM     = toLocalHHMM(endIso);
+    const brStartHHMM = toLocalHHMM(brStartIso);
+    const brEndHHMM   = toLocalHHMM(brEndIso);
+
+    let paidHoursText = '';
+    try {
+      if (startIso && endIso) {
+        const dStart = new Date(startIso);
+        const dEnd   = new Date(endIso);
+        if (!Number.isNaN(dStart.getTime()) && !Number.isNaN(dEnd.getTime())) {
+          let diffMin = (dEnd.getTime() - dStart.getTime()) / 60000;
+          if (diffMin < 0) diffMin = 0;
+          const brMin = Number.isFinite(brMinsRaw) && brMinsRaw > 0 ? brMinsRaw : 0;
+          const paidMin = Math.max(0, diffMin - brMin);
+          paidHoursText = paidMin > 0 ? (Math.round((paidMin / 60) * 100) / 100).toFixed(2) : '0.00';
+        }
+      }
+    } catch { paidHoursText = ''; }
+
+    const badgeHtml = `
+      <span class="pill pill-elec">Electronic daily shift</span>
+      <span class="mini" style="margin-left:8px;">Start/End and break times are shown read-only.</span>
+    `;
+
+    return `
+      <div class="tabc">
+        <div class="card">
+          <div class="row">
+            <label>Status</label>
+            <div class="controls">${badgeHtml}</div>
+          </div>
+          <div class="row">
+            <label>Timesheet ID</label>
+            <div class="controls">${tsId || '<span class="mini">Unknown</span>'}</div>
+          </div>
+        </div>
+
+        <div class="card" style="margin-top:10px;">
+          <div class="row">
+            <label>Shift details</label>
+            <div class="controls">
+              <div style="max-height:240px;overflow:auto;">
+                <table class="grid mini">
+                  <thead>
+                    <tr>
+                      <th>Day</th>
+                      <th>Date</th>
+                      <th>Start</th>
+                      <th>End</th>
+                      <th>Break start</th>
+                      <th>Break end</th>
+                      <th>Break (mins)</th>
+                      <th>Paid hours</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr>
+                      <td>${dowShort || '<span class="mini">—</span>'}</td>
+                      <td>${dateDmy || '<span class="mini">—</span>'}</td>
+                      <td>${startHHMM || '<span class="mini">—</span>'}</td>
+                      <td>${endHHMM   || '<span class="mini">—</span>'}</td>
+                      <td>${brStartHHMM || '<span class="mini">—</span>'}</td>
+                      <td>${brEndHHMM   || '<span class="mini">—</span>'}</td>
+                      <td>${Number.isFinite(brMinsRaw) && brMinsRaw > 0 ? brMinsRaw : 0}</td>
+                      <td>${paidHoursText || '<span class="mini">—</span>'}</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+              <span class="mini" style="display:block;margin-top:4px;">
+                Bucketed hours and pay/charge for this shift are shown in the Finance tab.
+              </span>
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  // ─────────────────────────────────────────────────────
+  // Fallback
+  // ─────────────────────────────────────────────────────
+  const fallbackMsg = isPlannedOnly
+    ? `
+      <span class="mini">
+        This is a planned/open week without a financial snapshot yet.
+        Once the week is processed, a detailed line breakdown will appear here.
+      </span>
+    `
+    : `
+      <span class="mini">
+        This timesheet does not have a detailed line breakdown for editing in this view.
+      </span>
+    `;
+
+  return `
+    <div class="tabc">
+      <div class="card">
+        <div class="row">
+          <label>Lines</label>
+          <div class="controls">${fallbackMsg}</div>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+
+
+function renderSummary(rows){
+  currentRows = rows;
+  currentSelection = null;
+
+  // ── paging state (per section)
+  window.__listState = window.__listState || {};
+  const st = (window.__listState[currentSection] ||= {
+    page: 1,
+    pageSize: 50,
+    total: null,
+    hasMore: false,
+    filters: null,
+    sort: { key: null, dir: 'asc' }
+  });
+
+  // Ensure we always have a sort object
+  if (!st.sort || typeof st.sort !== 'object') {
+    st.sort = { key: null, dir: 'asc' };
+  }
+  const sortState = st.sort;
+
+  const page     = Number(st.page || 1);
+  const pageSize = st.pageSize; // 50 | 100 | 200 | 'ALL'
+
+  // ── selection state (per section) — explicit IDs only
+  window.__selection = window.__selection || {};
+  const ensureSel = (section)=>{ const init = { fingerprint:'', ids:new Set() }; return (window.__selection[section] ||= init); };
+  const sel = ensureSel(currentSection);
+
+  const isRowSelected = (id)=> sel.ids.has(String(id||''));
+  const setRowSelected = (id, selected)=>{
+    id = String(id||''); if (!id) return;
+    if (selected) sel.ids.add(id); else sel.ids.delete(id);
+  };
+  const clearSelection = ()=>{ sel.ids.clear(); };
+
+  // Small helper: render red issue badges or green OK for the Issues column
+  const renderIssueBadges = (codes) => {
+    const wrap = document.createElement('div');
+    wrap.className = 'issue-badges';
+
+    const arr = Array.isArray(codes) ? codes.filter(Boolean) : [];
+
+    if (!arr.length) {
+      // No issues → green OK badge
+      const ok = document.createElement('span');
+      ok.className = 'pill pill-ok';
+      ok.textContent = 'OK';
+      wrap.appendChild(ok);
+      return wrap;
+    }
+
+    arr.forEach(code => {
+      const span = document.createElement('span');
+      const label = String(code || '').trim() || 'Issue';
+
+      // Default: red (issue)
+      let cls = 'pill pill-bad';
+
+      // Slightly softer amber for "On hold" / "Validation" / "Authorisation"
+      const up = label.toUpperCase();
+      if (up === 'ON HOLD' || up === 'VALIDATION' || up === 'AUTHORISATION') {
+        cls = 'pill pill-warn';
+      }
+
+      span.className = cls;
+      span.textContent = label;
+      wrap.appendChild(span);
+    });
+
+    return wrap;
+  };
+
+  // Tie selection to dataset via fingerprint (filters + section)
+  const computeFp = ()=> getSummaryFingerprint(currentSection);
+  const fp = computeFp();
+  if (sel.fingerprint !== fp) { sel.fingerprint = fp; clearSelection(); }
+
+  // ─────────────────────────────────────────────────────────────
+  // Section-specific pre-formatting / normalisation
+  // ─────────────────────────────────────────────────────────────
+  if (currentSection === 'candidates') {
+    rows.forEach(r => {
+      // Rota roles only – do NOT use this for Job Titles
+      r.role = (r && Array.isArray(r.roles)) ? formatRolesSummary(r.roles) : '';
+
+      // Ensure job_titles_display exists as a string so the grid
+      // can show it via prefs as its own column
+      if (r.job_titles_display == null) {
+        r.job_titles_display = '';
+      } else {
+        r.job_titles_display = String(r.job_titles_display);
+      }
+    });
+  } else if (currentSection === 'contracts') {
+    rows.forEach(r => {
+      const j = r && r.bucket_labels_json;
+      if (j && typeof j === 'object') {
+        const day   = (j.day   || '').trim();
+        const night = (j.night || '').trim();
+        const sat   = (j.sat   || '').trim();
+        const sun   = (j.sun   || '').trim();
+        const bh    = (j.bh    || '').trim();
+        const parts = [day,night,sat,sun,bh].filter(Boolean);
+        r.bucket_labels_preview = parts.length === 5 ? parts.join('/') : '';
+      } else {
+        r.bucket_labels_preview = '';
+      }
+    });
+  } else if (currentSection === 'timesheets') {
+    // Normalise timesheet rows so they always have a stable id:
+    // - real TS → id = timesheet_id
+    // - planned/contract_week only → id = contract_week_id
+    rows.forEach(r => {
+      if (!r || typeof r !== 'object') return;
+      const tsId = r.timesheet_id || null;
+      const cwId = r.contract_week_id || null;
+      const stableId = tsId || cwId || r.id || null;
+      if (stableId) {
+        r.id = stableId;
+      }
+    });
+  } else if (currentSection === 'invoices') {
+    // Flatten joined client name (backend returns client: { name, ... })
+    rows.forEach(r => {
+      if (!r || typeof r !== 'object') return;
+      if (r.client_name == null || r.client_name === '') {
+        const cn = r.client && typeof r.client === 'object' ? (r.client.name || '') : '';
+        if (cn) r.client_name = cn;
+      }
+    });
+
+    // Keep UI sort state aligned with backend allowed sorts for /api/invoices
+    const INVOICE_SORT_ALLOWED = new Set([
+      'issued_at_utc',
+      'due_at_utc',
+      'created_at',
+      'status_date_utc',
+      'invoice_no',
+      'subtotal_ex_vat',
+      'vat_amount',
+      'total_inc_vat',
+      'status'
+    ]);
+
+    if (sortState && sortState.key) {
+      const k = String(sortState.key || '');
+      if (k && !INVOICE_SORT_ALLOWED.has(k)) {
+        // Reset to backend default to avoid "arrow says sorted by X" when backend ignores it
+        sortState.key = 'issued_at_utc';
+        sortState.dir = 'desc';
+        window.__listState[currentSection].sort = sortState;
+      }
+    }
+  }
+
+  const content = byId('content');
+  byId('title').textContent = sections.find(s=>s.key===currentSection)?.label || '';
+
+  // Preserve scroll position per section — for .summary-body, not #content
+  window.__scrollMemory = window.__scrollMemory || {};
+  const memKey = `summary:${currentSection}`;
+  const prevScrollY = window.__scrollMemory[memKey] ?? 0;
+
+  content.innerHTML = '';
+  if (currentSection === 'settings') return renderSettingsPanel(content);
+  if (currentSection === 'audit')    return renderAuditTable(content, rows);
+
+  // ── top controls ────────────────────────────────────────────────────────────
+  const topControls = document.createElement('div');
+  topControls.style.cssText = 'display:flex;align-items:center;gap:10px;padding:8px 10px;border-bottom:1px solid var(--line);flex-wrap:wrap';
+
+  // Page size
+  const sizeLabel = document.createElement('span'); sizeLabel.className = 'mini'; sizeLabel.textContent = 'Page size:';
+  const sizeSel = document.createElement('select'); sizeSel.id = 'summaryPageSize';
+  ['50','100','200','ALL'].forEach(optVal => {
+    const opt = document.createElement('option');
+    opt.value = optVal; opt.textContent = (optVal === 'ALL') ? 'All' : `First ${optVal}`;
+    if (String(pageSize) === optVal) opt.selected = true;
+    sizeSel.appendChild(opt);
+  });
+  sizeSel.addEventListener('change', async () => {
+    const val = sizeSel.value;
+    window.__listState[currentSection].pageSize = (val === 'ALL') ? 'ALL' : Number(val);
+    window.__listState[currentSection].page = 1;
+    const data = await loadSection();
+    renderSummary(data);
+  });
+
+  topControls.appendChild(sizeLabel);
+  topControls.appendChild(sizeSel);
+
+  // ─────────────────────────────────────────────────────────────
+  // NEW: Invoices quick filters row (Status multi + Week ending + Issued + q)
+  // ─────────────────────────────────────────────────────────────
+  if (currentSection === 'invoices') {
+    const stFilters = window.__listState[currentSection].filters || {};
+    window.__listState[currentSection].filters = stFilters;
+
+    // Default statuses (first entry)
+    const curStatus = stFilters.status;
+    const hasStatus =
+      (Array.isArray(curStatus) && curStatus.length > 0) ||
+      (typeof curStatus === 'string' && curStatus.trim().length > 0);
+    if (!hasStatus) {
+      stFilters.status = ['DRAFT','ON_HOLD','ISSUED','PAID'];
+      window.__listState[currentSection].filters = stFilters;
+    }
+
+    const applyFilters = async (patch) => {
+      const cur = { ...(window.__listState[currentSection].filters || {}) };
+
+      Object.keys(patch || {}).forEach(k => {
+        const v = patch[k];
+        // normalise empties: delete
+        if (v == null) { delete cur[k]; return; }
+        if (typeof v === 'string' && v.trim() === '') { delete cur[k]; return; }
+        if (Array.isArray(v) && v.length === 0) { delete cur[k]; return; }
+        cur[k] = v;
+      });
+
+      window.__listState[currentSection].filters = cur;
+      window.__listState[currentSection].page = 1;
+
+      const data = await loadSection();
+      renderSummary(data);
+    };
+
+    // Status multi-select dropdown (checkbox menu)
+    const statusLabel = document.createElement('span');
+    statusLabel.className = 'mini';
+    statusLabel.textContent = 'Status:';
+
+    const statusBtn = document.createElement('button');
+    statusBtn.type = 'button';
+    statusBtn.style.cssText = 'border:1px solid var(--line);background:#0b152a;color:var(--text);padding:4px 8px;border-radius:8px;cursor:pointer';
+    statusBtn.title = 'Filter invoice statuses';
+
+    const getStatusArr = () => {
+      let s = (window.__listState[currentSection].filters || {}).status;
+      if (typeof s === 'string' && s.trim()) {
+        s = s.split(',').map(x => x.trim()).filter(Boolean);
+      }
+      if (!Array.isArray(s)) s = [];
+      return s.map(x => String(x).toUpperCase());
+    };
+
+    const setStatusBtnText = () => {
+      const arr = getStatusArr();
+      statusBtn.textContent = arr.length ? arr.join(', ') : 'Any';
+    };
+    setStatusBtnText();
+
+    const closeInvStatusMenu = () => {
+      const m = document.getElementById('__invStatusMenu');
+      if (m) m.remove();
+      document.removeEventListener('click', onDocClose, true);
+      document.removeEventListener('keydown', onEscClose, true);
+    };
+    const onDocClose = (e) => {
+      const m = document.getElementById('__invStatusMenu');
+      if (!m) return;
+      if (m.contains(e.target) || statusBtn.contains(e.target)) return;
+      closeInvStatusMenu();
+    };
+    const onEscClose = (e) => { if (e.key === 'Escape') closeInvStatusMenu(); };
+
+    statusBtn.addEventListener('click', (ev) => {
+      ev.preventDefault();
+      const existing = document.getElementById('__invStatusMenu');
+      if (existing) { closeInvStatusMenu(); return; }
+
+      const menu = document.createElement('div');
+      menu.id = '__invStatusMenu';
+      menu.style.position = 'absolute';
+      menu.style.zIndex = '1000';
+      menu.style.background = 'var(--panel, #0b1221)';
+      menu.style.border = '1px solid var(--line, #334155)';
+      menu.style.borderRadius = '10px';
+      menu.style.boxShadow = 'var(--shadow, 0 6px 20px rgba(0,0,0,.25))';
+      menu.style.padding = '8px';
+      menu.style.minWidth = '220px';
+      menu.style.userSelect = 'none';
+
+      const opts = ['DRAFT','ON_HOLD','ISSUED','PAID'];
+      const selected = new Set(getStatusArr());
+
+      const mkRow = (code) => {
+        const lab = document.createElement('label');
+        lab.className = 'mini';
+        lab.style.display = 'flex';
+        lab.style.alignItems = 'center';
+        lab.style.gap = '8px';
+        lab.style.padding = '6px 6px';
+        lab.style.cursor = 'pointer';
+
+        const cb = document.createElement('input');
+        cb.type = 'checkbox';
+        cb.checked = selected.has(code);
+
+        cb.addEventListener('change', () => {
+          if (cb.checked) selected.add(code);
+          else selected.delete(code);
+        });
+
+        const txt = document.createElement('span');
+        txt.textContent = code;
+
+        lab.appendChild(cb);
+        lab.appendChild(txt);
+        return lab;
+      };
+
+      // header actions
+      const actions = document.createElement('div');
+      actions.style.cssText = 'display:flex;gap:8px;justify-content:flex-end;margin-bottom:6px;';
+      const btnAll = document.createElement('button');
+      btnAll.type = 'button';
+      btnAll.className = 'btn mini';
+      btnAll.textContent = 'All';
+      btnAll.addEventListener('click', () => { opts.forEach(o => selected.add(o)); refreshChecks(); });
+
+      const btnNone = document.createElement('button');
+      btnNone.type = 'button';
+      btnNone.className = 'btn mini';
+      btnNone.textContent = 'None';
+      btnNone.addEventListener('click', () => { selected.clear(); refreshChecks(); });
+
+      actions.appendChild(btnAll);
+      actions.appendChild(btnNone);
+
+      const list = document.createElement('div');
+      list.style.cssText = 'display:flex;flex-direction:column;gap:2px;';
+
+      const rowsEls = opts.map(o => mkRow(o));
+      rowsEls.forEach(el => list.appendChild(el));
+
+      const refreshChecks = () => {
+        rowsEls.forEach((el, idx) => {
+          const code = opts[idx];
+          const cb = el.querySelector('input[type="checkbox"]');
+          if (cb) cb.checked = selected.has(code);
+        });
+      };
+
+      const footer = document.createElement('div');
+      footer.style.cssText = 'display:flex;gap:8px;justify-content:flex-end;margin-top:8px;';
+      const applyBtn = document.createElement('button');
+      applyBtn.type = 'button';
+      applyBtn.className = 'btn btn-primary mini';
+      applyBtn.textContent = 'Apply';
+      applyBtn.addEventListener('click', async () => {
+        closeInvStatusMenu();
+        const arr = Array.from(selected);
+        await applyFilters({ status: arr });
+      });
+
+      footer.appendChild(applyBtn);
+
+      menu.appendChild(actions);
+      menu.appendChild(list);
+      menu.appendChild(footer);
+
+      document.body.appendChild(menu);
+      const r = statusBtn.getBoundingClientRect();
+      menu.style.left = `${Math.round(window.scrollX + r.left)}px`;
+      menu.style.top  = `${Math.round(window.scrollY + r.bottom + 6)}px`;
+
+      setTimeout(() => {
+        document.addEventListener('click', onDocClose, true);
+        document.addEventListener('keydown', onEscClose, true);
+      }, 0);
+    });
+
+    topControls.appendChild(statusLabel);
+    topControls.appendChild(statusBtn);
+
+    // Week ending date range (FE sends week_ending_from/to)
+    const weLabel = document.createElement('span');
+    weLabel.className = 'mini';
+    weLabel.textContent = 'Week ending:';
+
+    const weFrom = document.createElement('input');
+    weFrom.type = 'date';
+    weFrom.className = 'input';
+    weFrom.style.cssText = 'width:160px;min-width:160px;';
+    weFrom.value = String(stFilters.week_ending_from || '');
+
+    const weTo = document.createElement('input');
+    weTo.type = 'date';
+    weTo.className = 'input';
+    weTo.style.cssText = 'width:160px;min-width:160px;';
+    weTo.value = String(stFilters.week_ending_to || '');
+
+    weFrom.addEventListener('change', async () => {
+      await applyFilters({ week_ending_from: weFrom.value || null });
+    });
+    weTo.addEventListener('change', async () => {
+      await applyFilters({ week_ending_to: weTo.value || null });
+    });
+
+    topControls.appendChild(weLabel);
+    topControls.appendChild(weFrom);
+    topControls.appendChild(weTo);
+
+    // Issued date range
+    const issLabel = document.createElement('span');
+    issLabel.className = 'mini';
+    issLabel.textContent = 'Issued:';
+
+    const issFrom = document.createElement('input');
+    issFrom.type = 'date';
+    issFrom.className = 'input';
+    issFrom.style.cssText = 'width:160px;min-width:160px;';
+    issFrom.value = String(stFilters.issued_from || '');
+
+    const issTo = document.createElement('input');
+    issTo.type = 'date';
+    issTo.className = 'input';
+    issTo.style.cssText = 'width:160px;min-width:160px;';
+    issTo.value = String(stFilters.issued_to || '');
+
+    issFrom.addEventListener('change', async () => {
+      await applyFilters({ issued_from: issFrom.value || null });
+    });
+    issTo.addEventListener('change', async () => {
+      await applyFilters({ issued_to: issTo.value || null });
+    });
+
+    topControls.appendChild(issLabel);
+    topControls.appendChild(issFrom);
+    topControls.appendChild(issTo);
+
+    // Search box bound to filters.q
+    const qLabel = document.createElement('span');
+    qLabel.className = 'mini';
+    qLabel.textContent = 'Search:';
+
+    const qInp = document.createElement('input');
+    qInp.type = 'text';
+    qInp.className = 'input';
+    qInp.placeholder = 'Invoice no…';
+    qInp.style.cssText = 'width:220px;min-width:220px;';
+    qInp.value = String(stFilters.q || '');
+
+    const applyQ = async () => {
+      const v = (qInp.value || '').trim();
+      await applyFilters({ q: v || null });
+    };
+    qInp.addEventListener('keydown', async (e) => {
+      if (e.key !== 'Enter') return;
+      await applyQ();
+    });
+    qInp.addEventListener('blur', async () => {
+      // keep UX light: only apply if value differs from stored filter
+      const cur = String((window.__listState[currentSection].filters || {}).q || '').trim();
+      const next = String((qInp.value || '')).trim();
+      if (cur !== next) await applyQ();
+    });
+
+    topControls.appendChild(qLabel);
+    topControls.appendChild(qInp);
+
+    // Refresh status button text if filters changed by defaults
+    setStatusBtnText();
+  }
+
+  // ── Contracts quick Status menu ─────────────────────────────────────────────
+  let statusSel = null;
+  if (currentSection === 'contracts') {
+    const stFilters = window.__listState[currentSection].filters || {};
+
+    // Default to "active" if no status has been chosen yet
+    if (!('status' in stFilters)) stFilters.status = 'active';
+    window.__listState[currentSection].filters = stFilters;
+
+    const statusLabel = document.createElement('span');
+    statusLabel.className = 'mini';
+    statusLabel.textContent = 'Status:';
+
+    statusSel = document.createElement('select');
+
+    [['all','All'], ['active','Active'], ['unassigned','Unassigned'], ['completed','Completed']]
+      .forEach(([v, l]) => {
+        const o = document.createElement('option');
+        o.value = v;
+        o.textContent = l;
+        if ((stFilters.status || '').toLowerCase() === v) o.selected = true;
+        statusSel.appendChild(o);
+      });
+
+    statusSel.addEventListener('change', async () => {
+      const val = statusSel.value;
+      const curFilters = { ...(window.__listState[currentSection].filters || {}) };
+      curFilters.status = val;
+      window.__listState[currentSection].filters = curFilters;
+      window.__listState[currentSection].page = 1;
+      const data = await loadSection();
+      renderSummary(data);
+    });
+
+    topControls.appendChild(statusLabel);
+    topControls.appendChild(statusSel);
+  }
+
+  // ── Timesheets quick filters: Status / Route / Scope / Flags ───────────────
+  if (currentSection === 'timesheets') {
+    const stFilters = window.__listState[currentSection].filters || {};
+    window.__listState[currentSection].filters = stFilters;
+
+    // Status dropdown
+    const statusLabel2 = document.createElement('span');
+    statusLabel2.className = 'mini';
+    statusLabel2.textContent = 'Status:';
+    const statusSel2 = document.createElement('select');
+
+    const statusOpts = [
+      ['ALL',               'All'],
+      ['NO_MATCH_ID',       'No match to Candidate/Client'],
+      ['RATE_MISSING',      'Rate missing'],
+      ['PAY_CHAN_MISS',     'Pay channel missing'],
+      ['READY_FOR_HR',      'Ready for Healthroster validation'],
+      ['READY_FOR_INV',     'Ready for invoice'],
+      ['HR_HOURS_MISMATCH', 'Timesheet hours mismatch with Healthroster']
+    ];
+    const statusCur2 = (stFilters.status_code || 'ALL').toUpperCase();
+    statusOpts.forEach(([v, label]) => {
+      const o = document.createElement('option');
+      o.value = v;
+      o.textContent = label;
+      if (statusCur2 === v) o.selected = true;
+      statusSel2.appendChild(o);
+    });
+    statusSel2.addEventListener('change', async () => {
+      const val = statusSel2.value;
+      const curFilters = { ...(window.__listState[currentSection].filters || {}) };
+
+      // Remember UI choice
+      curFilters.status_code = val;
+
+      // Reset hr_issue by default
+      if ('hr_issue' in curFilters) {
+        delete curFilters.hr_issue;
+      }
+
+      // Map to backend processing_status / hr_issue only when it helps
+      switch (val) {
+        case 'NO_MATCH_ID':
+          curFilters.processing_status = 'UNASSIGNED,CLIENT_UNRESOLVED';
+          break;
+        case 'READY_FOR_HR':
+          curFilters.processing_status = 'READY_FOR_HR';
+          break;
+        case 'READY_FOR_INV':
+          curFilters.processing_status = 'READY_FOR_INVOICE';
+          break;
+        case 'HR_HOURS_MISMATCH':
+          curFilters.processing_status = 'ALL';
+          curFilters.hr_issue = 'HOURS_MISMATCH_HR';
+          break;
+        default:
+          curFilters.processing_status = 'ALL';
+          break;
+      }
+
+      window.__listState[currentSection].filters = curFilters;
+      window.__listState[currentSection].page = 1;
+      const data = await loadSection();
+      renderSummary(data);
+    });
+    topControls.appendChild(statusLabel2);
+    topControls.appendChild(statusSel2);
+
+    // Route dropdown
+    const routeLabel = document.createElement('span');
+    routeLabel.className = 'mini';
+    routeLabel.textContent = 'Route:';
+    const routeSel = document.createElement('select');
+    const routeOpts = [
+      ['ALL',         'All'],
+      ['ELECTRONIC',  'Electronic'],
+      ['MANUAL',      'Manual'],
+      ['NHSP',        'NHSP'],
+      ['HEALTHROSTER','Healthroster'],
+      ['QR',          'QR timesheets']
+    ];
+    const routeCur = (stFilters.route_type || 'ALL').toUpperCase();
+    routeOpts.forEach(([v, label]) => {
+      const o = document.createElement('option');
+      o.value = v;
+      o.textContent = label;
+      if (routeCur === v) o.selected = true;
+      routeSel.appendChild(o);
+    });
+    routeSel.addEventListener('change', async () => {
+      const val = routeSel.value;
+      const curFilters = { ...(window.__listState[currentSection].filters || {}) };
+      curFilters.route_type = val;
+      window.__listState[currentSection].filters = curFilters;
+      window.__listState[currentSection].page = 1;
+      const data = await loadSection();
+      renderSummary(data);
+    });
+    topControls.appendChild(routeLabel);
+    topControls.appendChild(routeSel);
+
+    // Scope dropdown
+    const scopeLabel = document.createElement('span');
+    scopeLabel.className = 'mini';
+    scopeLabel.textContent = 'Type:';
+    const scopeSel = document.createElement('select');
+    const scopeOpts = [
+      ['ALL',    'Both'],
+      ['WEEKLY', 'Weekly only'],
+      ['DAILY',  'Daily only']
+    ];
+    const scopeCur = (stFilters.sheet_scope || 'ALL').toUpperCase();
+    scopeOpts.forEach(([v, label]) => {
+      const o = document.createElement('option');
+      o.value = v;
+      o.textContent = label;
+      if (scopeCur === v) o.selected = true;
+      scopeSel.appendChild(o);
+    });
+    scopeSel.addEventListener('change', async () => {
+      const val = scopeSel.value;
+      const curFilters = { ...(window.__listState[currentSection].filters || {}) };
+      curFilters.sheet_scope = val;
+      window.__listState[currentSection].filters = curFilters;
+      window.__listState[currentSection].page = 1;
+      const data = await loadSection();
+      renderSummary(data);
+    });
+    topControls.appendChild(scopeLabel);
+    topControls.appendChild(scopeSel);
+
+    // Flags: Adjusted only (Needs attention lives in Tools)
+    const mkFlag = (name, label) => {
+      const wrap = document.createElement('label');
+      wrap.className = 'mini';
+      wrap.style.display = 'flex';
+      wrap.style.alignItems = 'center';
+      wrap.style.gap = '4px';
+      const cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.checked = !!stFilters[name];
+      cb.addEventListener('change', async () => {
+        const curFilters = { ...(window.__listState[currentSection].filters || {}) };
+        curFilters[name] = cb.checked ? true : false;
+        window.__listState[currentSection].filters = curFilters;
+        window.__listState[currentSection].page = 1;
+        const data = await loadSection();
+        renderSummary(data);
+      });
+      wrap.appendChild(cb);
+      wrap.appendChild(document.createTextNode(label));
+      return wrap;
+    };
+
+    topControls.appendChild(mkFlag('is_adjusted', 'Adjusted only'));
+  }
+
+  // Columns button (already supports per-column display name overrides via openColumnsDialog)
+  const btnCols = document.createElement('button');
+  btnCols.textContent = 'Columns';
+  btnCols.style.cssText = 'border:1px solid var(--line);background:#0b152a;color:var(--text);padding:4px 8px;border-radius:8px;cursor:pointer';
+  btnCols.addEventListener('click', () => openColumnsDialog(currentSection));
+  topControls.appendChild(btnCols);
+
+  const spacerTop = document.createElement('div'); spacerTop.style.flex = '1';
+  topControls.appendChild(spacerTop);
+
+  // Selected info / clear
+  const selInfo = document.createElement('div'); selInfo.className = 'mini';
+  const renderSelInfo = ()=>{ selInfo.textContent = (sel.ids.size > 0) ? `${sel.ids.size} selected.` : ''; };
+  renderSelInfo();
+
+  const clearBtn = document.createElement('button');
+  clearBtn.textContent = 'Clear selection';
+  clearBtn.style.cssText = 'border:1px solid var(--line);background:#0b152a;color:var(--text);padding:4px 8px;border-radius:8px;cursor:pointer;display:none';
+  clearBtn.onclick = ()=>{
+    clearSelection(); renderSelInfo();
+    Array.from(document.querySelectorAll('input.row-select')).forEach(cb=>{ cb.checked = false; });
+    const hdr = byId('summarySelectAll'); if (hdr) { hdr.checked=false; hdr.indeterminate=false; }
+    updateButtons();
+  };
+
+  topControls.appendChild(selInfo);
+  topControls.appendChild(clearBtn);
+  content.appendChild(topControls);
+
+  // ── apply extra Status filtering client-side for timesheets ────────────────
+  let effectiveRows = rows;
+  if (currentSection === 'timesheets') {
+    const stFilters = window.__listState[currentSection].filters || {};
+    const statusCode = (stFilters.status_code || 'ALL').toUpperCase();
+
+    if (statusCode === 'NO_MATCH_ID') {
+      effectiveRows = effectiveRows.filter(r => !r.candidate_id || !r.client_id);
+    } else if (statusCode === 'RATE_MISSING') {
+      effectiveRows = effectiveRows.filter(r => r.has_rate_issue === true);
+    } else if (statusCode === 'PAY_CHAN_MISS') {
+      effectiveRows = effectiveRows.filter(r => r.has_pay_channel_issue === true);
+    } else if (statusCode === 'READY_FOR_HR') {
+      effectiveRows = effectiveRows.filter(r =>
+        String(r.processing_status || '').toUpperCase() === 'READY_FOR_HR'
+      );
+    } else if (statusCode === 'READY_FOR_INV') {
+      effectiveRows = effectiveRows.filter(r =>
+        String(r.processing_status || '').toUpperCase() === 'READY_FOR_INVOICE'
+      );
+    }
+    // HR_HOURS_MISMATCH relies on backend hr_issue filter only
+  }
+  currentRows = effectiveRows;
+
+  // ── single table (header + body) inside scroll host ────────────────────────
+  const bodyWrap = document.createElement('div');
+  bodyWrap.className = 'summary-body';
+  content.appendChild(bodyWrap);
+
+  const tbl = document.createElement('table');
+  tbl.className = 'grid';
+
+  const thead = document.createElement('thead');
+  thead.style.borderBottom = '1px solid var(--line)';
+  const trh = document.createElement('tr');
+  thead.appendChild(trh);
+  tbl.appendChild(thead);
+
+  const tb = document.createElement('tbody');
+  tbl.appendChild(tb);
+  bodyWrap.appendChild(tbl);
+
+  let btnFocus, btnSave, btnResolve;
+
+  const computeHeaderState = ()=>{
+    const idsVisible = effectiveRows.map(r => String(r.id || ''));
+    const selectedOfVisible = idsVisible.filter(id => sel.ids.has(id)).length;
+    const hdrCbEl = byId('summarySelectAll');
+    if (hdrCbEl) {
+      hdrCbEl.checked = (idsVisible.length > 0 && selectedOfVisible === idsVisible.length);
+      hdrCbEl.indeterminate = (selectedOfVisible > 0 && selectedOfVisible < idsVisible.length);
+    }
+  };
+
+  const updateButtons = ()=>{
+    const any = sel.ids.size > 0;
+    if (btnFocus)   btnFocus.disabled   = !any;
+    if (btnSave)    btnSave.disabled    = !any;
+    if (btnResolve) btnResolve.disabled = !any;
+    clearBtn.style.display = any ? '' : 'none';
+    renderSelInfo();
+  };
+
+  // Determine columns (using server prefs)
+  const cols = getVisibleColumnsForSection(currentSection, effectiveRows);
+
+  // ── Force Issues column into timesheets view ───────────────────────────────
+  if (currentSection === 'timesheets') {
+    if (!cols.includes('issue_codes')) {
+      // Put Issues near the left so it’s visible by default
+      cols.unshift('issue_codes');
+    }
+  }
+
+  // Header checkbox (first column)
+  const thSel = document.createElement('th');
+  thSel.style.width = '40px';
+  thSel.style.minWidth = '40px';
+  thSel.style.maxWidth = '40px';
+
+  const hdrCb = document.createElement('input'); hdrCb.type='checkbox'; hdrCb.id='summarySelectAll';
+  hdrCb.addEventListener('click', (e)=>{
+    e.stopPropagation();
+    const idsVisible = effectiveRows.map(r => String(r.id || ''));
+    const wantOn = !!hdrCb.checked;
+    idsVisible.forEach(id => { if (wantOn) sel.ids.add(id); else sel.ids.delete(id); });
+    Array.from(document.querySelectorAll('input.row-select')).forEach(cb=>{ cb.checked = wantOn; });
+    computeHeaderState();
+    updateButtons();
+  });
+  thSel.appendChild(hdrCb);
+  trh.appendChild(thSel);
+
+  // Invoice sortable keys (backend /api/invoices allows only these)
+  const INVOICE_SORT_ALLOWED = new Set([
+    'issued_at_utc',
+    'due_at_utc',
+    'created_at',
+    'status_date_utc',
+    'invoice_no',
+    'subtotal_ex_vat',
+    'vat_amount',
+    'total_inc_vat',
+    'status'
+  ]);
+
+  // Build header cells with friendly labels, resizer handles, and click-to-sort
+  cols.forEach(c=>{
+    const th = document.createElement('th');
+    th.dataset.colKey = String(c);
+    th.style.cursor = 'pointer';
+
+    let label = getFriendlyHeaderLabel(currentSection, c);
+    if (currentSection === 'timesheets' && c === 'issue_codes') {
+      label = 'Issues';
+    }
+
+    // Only show sort arrow for invoice-supported keys when in invoices section
+    const isSortable =
+      (currentSection !== 'invoices') ? true : INVOICE_SORT_ALLOWED.has(String(c));
+
+    const isActive = isSortable && sortState && sortState.key === c;
+    const arrow = isActive ? (sortState.dir === 'asc' ? ' ▲' : ' ▼') : '';
+    th.textContent = label + arrow;
+
+    const res = document.createElement('div');
+    res.className = 'col-resizer';
+    res.title = 'Drag to resize. Double-click to reset.';
+    res.style.cssText = 'position:absolute;right:0;top:0;width:6px;height:100%;cursor:col-resize;user-select:none;';
+    th.appendChild(res);
+
+    th.draggable = true;
+
+    th.addEventListener('click', async (ev) => {
+      if (ev.target && ev.target.closest && ev.target.closest('.col-resizer')) return;
+
+      const colKey = th.dataset.colKey;
+      if (!colKey) return;
+
+      // invoices: only allow backend-supported sort keys (avoid misleading arrows)
+      if (currentSection === 'invoices' && !INVOICE_SORT_ALLOWED.has(colKey)) return;
+
+      window.__listState = window.__listState || {};
+      const st2 = (window.__listState[currentSection] ||= {
+        page: 1,
+        pageSize: 50,
+        total: null,
+        hasMore: false,
+        filters: null,
+        sort: { key: null, dir: 'asc' }
+      });
+
+      if (!st2.sort || typeof st2.sort !== 'object') {
+        st2.sort = { key: null, dir: 'asc' };
+      }
+
+      const prevDir = (st2.sort && st2.sort.key === colKey) ? st2.sort.dir : null;
+      const nextDir = (prevDir === 'asc') ? 'desc' : 'asc';
+
+      st2.sort = { key: colKey, dir: nextDir };
+      st2.page = 1;
+
+      try {
+        const data = await loadSection();
+        renderSummary(data);
+      } catch (e) {
+        console.error('Failed to apply sort', e);
+      }
+    });
+
+    trh.appendChild(th);
+  });
+
+  // Body rows
+  if (currentSection === 'candidates') {
+    tbl.style.width = 'auto';
+  }
+
+  effectiveRows.forEach(r=>{
+    const tr = document.createElement('tr');
+    tr.dataset.id = (r && r.id) ? String(r.id) : '';
+    tr.dataset.section = currentSection;
+
+    const tdSel = document.createElement('td');
+    tdSel.style.width = '40px';
+    tdSel.style.minWidth = '40px';
+    tdSel.style.maxWidth = '40px';
+
+    const cb = document.createElement('input'); cb.type='checkbox'; cb.className='row-select';
+    cb.checked = isRowSelected(tr.dataset.id);
+    cb.addEventListener('click', (e)=>{
+      e.stopPropagation();
+      const id = tr.dataset.id; setRowSelected(id, cb.checked);
+      computeHeaderState();
+      updateButtons();
+    });
+    tdSel.appendChild(cb); tr.appendChild(tdSel);
+
+    cols.forEach(c=>{
+      const td = document.createElement('td');
+      td.dataset.colKey = String(c);
+      const v = r[c];
+
+      if (currentSection === 'candidates' && c === 'job_titles_display') {
+        const raw = typeof r.job_titles_display === 'string' ? r.job_titles_display : (v || '');
+        if (!raw.trim()) {
+          td.textContent = '';
+        } else {
+          const parts = raw.split(';').map(s => s.trim()).filter(Boolean);
+          const rest  = parts.slice(1); // drop primary
+          td.textContent = rest.join('; ');
+        }
+      } else if (currentSection === 'timesheets' && c === 'issue_codes') {
+        // ── Issues column: badges ─────────────────────────────────────────────
+        td.classList.add('mini');
+
+        const hasTs = !!r.timesheet_id;
+        const codes = Array.isArray(v) ? v.filter(Boolean) : [];
+
+        if (!hasTs) {
+          // No timesheet yet (planned week only) – show nothing
+          td.textContent = '';
+        } else {
+          // Timesheet exists – use shared helper (green OK or red/amber badges)
+          td.appendChild(renderIssueBadges(codes));
+        }
+      } else if (currentSection === 'timesheets' && c === 'processing_status') {
+        // ─────────────────────────────────────────────────────────────
+        // ✅ UI overlay ONLY (do NOT change row.processing_status):
+        // If timesheet is invoiced AND locked_invoice_status exists:
+        //   - PAID   → "Invoice Paid" (precedence)
+        //   - ISSUED → "Invoiced (Issued)"
+        //   - else   → "Invoiced (Not issued)"
+        // Otherwise show raw processing_status value.
+        // ─────────────────────────────────────────────────────────────
+        const hasLockedInvoiceId = !!(r && r.locked_by_invoice_id);
+        const lis = String((r && Object.prototype.hasOwnProperty.call(r, 'locked_invoice_status')) ? (r.locked_invoice_status ?? '') : '').trim().toUpperCase();
+
+        if (hasLockedInvoiceId && lis) {
+          if (lis === 'PAID') td.textContent = 'Invoice Paid';
+          else if (lis === 'ISSUED') td.textContent = 'Invoiced (Issued)';
+          else td.textContent = 'Invoiced (Not issued)';
+        } else {
+          td.textContent = formatDisplayValue(c, v);
+        }
+      } else if (currentSection === 'invoices' && c === 'client_name') {
+        // Flattened client name (already set in pre-normalisation)
+        td.textContent = String(r.client_name || '');
+      } else {
+        td.textContent = formatDisplayValue(c, v);
+      }
+
+      tr.appendChild(td);
+    });
+
+    tb.appendChild(tr);
+  });
+
+  // ── Apply pending focus (from operations like pay-method change, change rates) ──
+  try {
+    if (window.__pendingFocus && window.__pendingFocus.section === currentSection) {
+      const pf   = window.__pendingFocus;
+      const ids  = Array.isArray(pf.ids) ? pf.ids.map(String) : [];
+      const pids = Array.isArray(pf.primaryIds) ? pf.primaryIds.map(String) : [];
+      const idSet   = new Set(ids);
+      const priSet  = new Set(pids);
+      let firstPrimaryRow = null;
+
+      tb.querySelectorAll('tr').forEach(tr => {
+        const id = String(tr.dataset.id || '');
+        if (idSet.has(id)) {
+          tr.classList.add('pending-focus');
+          if (priSet.has(id)) tr.classList.add('pending-focus-primary');
+          if (!firstPrimaryRow && priSet.has(id)) {
+            firstPrimaryRow = tr;
+          }
+        }
+      });
+
+      if (firstPrimaryRow) {
+        try {
+          firstPrimaryRow.scrollIntoView({ block: 'center', behavior: 'smooth' });
+        } catch {}
+      }
+
+      window.__pendingFocus = null;
+    }
+  } catch (e) {
+    console.warn('pendingFocus application failed (non-fatal)', e);
+  }
+
+  // ── NEW: Candidates row context menu (Open / Advances & loans) ─────────────
+  if (currentSection === 'candidates') {
+    if (!window.__ensureCandidateRowMenu) {
+      window.__candRowMenuEl = null;
+      window.__candRowMenuRow = null;
+
+      window.__hideCandidateRowMenu = function() {
+        const el = window.__candRowMenuEl;
+        if (el) el.style.display = 'none';
+        window.__candRowMenuRow = null;
+      };
+
+      window.__ensureCandidateRowMenu = function() {
+        if (!window.__candRowMenuEl) {
+          const menu = document.createElement('div');
+          menu.id = 'candidateRowContextMenu';
+          menu.style.position = 'fixed';
+          menu.style.zIndex = '9999';
+          menu.style.background = '#0b152a';
+          menu.style.border = '1px solid var(--line)';
+          menu.style.borderRadius = '6px';
+          menu.style.minWidth = '180px';
+          menu.style.boxShadow = '0 4px 12px rgba(0,0,0,0.5)';
+          menu.style.display = 'none';
+          menu.innerHTML = `
+            <div class="ctx-item" data-action="open" style="padding:6px 10px;cursor:pointer;">Open candidate…</div>
+            <div class="ctx-item" data-action="advances" style="padding:6px 10px;cursor:pointer;border-top:1px solid var(--line);">
+              Advances / loans…
+            </div>
+          `;
+          menu.addEventListener('click', (e) => {
+            const item = e.target.closest('.ctx-item');
+            if (!item) return;
+            const action = item.getAttribute('data-action') || '';
+            const row = window.__candRowMenuRow;
+            window.__hideCandidateRowMenu();
+            if (!row) return;
+            if (action === 'open') {
+              if (typeof openCandidate === 'function') openCandidate(row);
+            } else if (action === 'advances') {
+              if (typeof openCandidateAdvancesModal === 'function') openCandidateAdvancesModal(row);
+            }
+          });
+          document.body.appendChild(menu);
+          window.__candRowMenuEl = menu;
+
+          document.addEventListener('click', (ev) => {
+            const el = window.__candRowMenuEl;
+            if (!el || el.style.display === 'none') return;
+            if (ev.target && el.contains(ev.target)) return;
+            window.__hideCandidateRowMenu();
+          }, true);
+
+          document.addEventListener('contextmenu', (ev) => {
+            const el = window.__candRowMenuEl;
+            if (!el || el.style.display === 'none') return;
+            if (ev.target && el.contains(ev.target)) return;
+            window.__hideCandidateRowMenu();
+          }, true);
+
+          window.addEventListener('scroll', () => window.__hideCandidateRowMenu(), true);
+        }
+        return window.__candRowMenuEl;
+      };
+    }
+
+    tb.addEventListener('contextmenu', (ev) => {
+      const tr = ev.target && ev.target.closest('tr[data-id]');
+      if (!tr) return;
+      ev.preventDefault();
+
+      const id = String(tr.dataset.id || '');
+      const row = currentRows.find(x => String(x.id || '') === id) || rows.find(x => String(x.id || '') === id);
+      if (!row) return;
+
+      window.__candRowMenuRow = row;
+      const menu = window.__ensureCandidateRowMenu();
+      if (!menu) return;
+
+      const x = ev.clientX;
+      const y = ev.clientY;
+
+      menu.style.left = `${x}px`;
+      menu.style.top  = `${y}px`;
+      menu.style.display = 'block';
+    });
+  }
+
+  tb.addEventListener('click', (ev) => {
+    const tr = ev.target && ev.target.closest('tr'); if (!tr) return;
+    if (ev.target && ev.target.classList && ev.target.classList.contains('row-select')) return;
+    tb.querySelectorAll('tr.selected').forEach(n => n.classList.remove('selected'));
+    tr.classList.add('selected');
+    const id = tr.dataset.id;
+    currentSelection = currentRows.find(x => String(x.id) === id) || null;
+  });
+
+  tb.addEventListener('dblclick', (ev) => {
+    const tr = ev.target && ev.target.closest('tr'); if (!tr) return;
+    if (!confirmDiscardChangesIfDirty()) return;
+    tb.querySelectorAll('tr.selected').forEach(n => n.classList.remove('selected'));
+    tr.classList.add('selected');
+    const id = tr.dataset.id;
+    const row = currentRows.find(x => String(x.id) === id) || null;
+    if (!row) return;
+    const beforeDepth = (window.__modalStack && window.__modalStack.length) || 0;
+    openDetails(row);
+    setTimeout(() => {
+      const afterDepth = (window.__modalStack && window.__modalStack.length) || 0;
+      if (afterDepth > beforeDepth) tb.querySelectorAll('tr.selected').forEach(n => n.classList.remove('selected'));
+    }, 0);
+  });
+
+  // ── Apply widths + wire resize/reorder + header context menu ────────────────
+  applyUserGridPrefs(currentSection, tbl, cols);
+  wireGridColumnResizing(currentSection, tbl);
+  wireGridColumnReorder(currentSection, tbl);
+  attachHeaderContextMenu(currentSection, tbl);
+
+  // Footer/pager
+  const pager = document.createElement('div');
+  pager.style.cssText = 'display:flex;align-items:center;gap:6px;padding:8px 10px;border-top:1px solid var(--line);';
+  const info = document.createElement('span'); info.className = 'mini';
+
+  const mkBtn = (label, disabled, onClick) => {
+    const b = document.createElement('button');
+    b.textContent = label; b.disabled = !!disabled;
+    b.style.cssText = 'border:1px solid var(--line);background:#0b152a;color:var(--text);padding:4px 8px;border-radius:8px;cursor:pointer';
+    if (!disabled) b.addEventListener('click', onClick);
+    return b;
+  };
+
+  const hasMore = !!st.hasMore;
+  const totalKnown = (typeof st.total === 'number');
+  const current = page;
+  let maxPageToShow;
+  if (totalKnown && pageSize !== 'ALL') maxPageToShow = Math.max(1, Math.ceil(st.total / Number(pageSize)));
+  else if (pageSize === 'ALL') maxPageToShow = 1;
+  else maxPageToShow = hasMore ? (current + 1) : current;
+
+  // If pageSize is ALL, hide navigation controls (single-page UX)
+  if (pageSize !== 'ALL') {
+    const prevBtn = mkBtn('Prev', current <= 1, async () => {
+      window.__listState[currentSection].page = Math.max(1, current - 1);
+      const data = await loadSection();
+      renderSummary(data);
+    });
+    pager.appendChild(prevBtn);
+
+    const makePageLink = (n) => mkBtn(String(n), n === current, async () => {
+      window.__listState[currentSection].page = n;
+      const data = await loadSection();
+      renderSummary(data);
+    });
+
+    const pages = [];
+    if (maxPageToShow <= 7) { for (let n=1; n<=maxPageToShow; n++) pages.push(n); }
+    else {
+      pages.push(1);
+      if (current > 3) pages.push('…');
+      for (let n=Math.max(2, current-1); n<=Math.min(maxPageToShow-1, current+1); n++) pages.push(n);
+      if (hasMore || current+1 < maxPageToShow) pages.push('…');
+      pages.push(maxPageToShow);
+    }
+    pages.forEach(pn => {
+      if (pn === '…') { const span = document.createElement('span'); span.textContent = '…'; span.className = 'mini'; pager.appendChild(span); }
+      else pager.appendChild(makePageLink(pn));
+    });
+
+    const nextBtn = mkBtn('Next', (!hasMore && (!totalKnown || current >= maxPageToShow)), async () => {
+      window.__listState[currentSection].page = current + 1;
+      const data = await loadSection();
+      renderSummary(data);
+    });
+    pager.appendChild(nextBtn);
+  }
+
+  if (pageSize === 'ALL') info.textContent = `Showing all ${effectiveRows.length} ${currentSection}.`;
+  else if (totalKnown) {
+    const ps = Number(pageSize);
+    const start = (current-1)*ps + 1;
+    const end = Math.min(start + effectiveRows.length - 1, st.total || start - 1);
+    info.textContent = `Showing ${start}–${end}${st.total!=null ? ` of ${st.total}` : ''}`;
+  } else {
+    const ps = Number(pageSize);
+    const start = (current-1)*ps + 1;
+    const end = start + effectiveRows.length - 1;
+    info.textContent = `Showing ${start}–${end}${hasMore ? '+' : ''}`;
+  }
+  const spacer = document.createElement('div'); spacer.style.flex = '1';
+  pager.appendChild(spacer); pager.appendChild(info);
+  content.appendChild(pager);
+
+  // Selection toolbar
+  const selBar = document.createElement('div');
+  selBar.style.cssText = 'display:flex;justify-content:flex-end;gap:8px;padding:6px 10px;border-top:1px dashed var(--line)';
+  btnFocus = document.createElement('button');
+  btnFocus.title = 'Focus on records';
+  btnFocus.textContent = '🔍 Focus';
+  btnFocus.style.cssText = 'border:1px solid var(--line);background:#0b152a;color:var(--text);padding:4px 8px;border-radius:8px;cursor:pointer';
+
+  btnSave = document.createElement('button');
+  btnSave.title = 'Save selection';
+  btnSave.textContent = '🔍 Save';
+  btnSave.style.cssText = btnFocus.style.cssText;
+
+  const btnLoad = document.createElement('button');
+  btnLoad.title = 'Load selection';
+  btnLoad.textContent = '🔍 Load';
+  btnLoad.style.cssText = btnFocus.style.cssText;
+
+  btnFocus.addEventListener('click', async () => {
+    if (sel.ids.size === 0) return;
+    const ids = Array.from(sel.ids);
+    try {
+      if (typeof applySelectionAsFilter === 'function') {
+        await applySelectionAsFilter(currentSection, { ids });
+      } else {
+        window.__listState = window.__listState || {};
+        const st2 = (window.__listState[currentSection] ||= { page:1, pageSize:50, total:null, hasMore:false, filters:null, sort:{ key:null, dir:'asc' } });
+        st2.page = 1; st2.filters = { ...(st2.filters||{}), ids };
+        const rows2 = await search(currentSection, st2.filters);
+        renderSummary(rows2);
+      }
+    } catch (e) { console.error('Focus failed', e); }
+  });
+
+  btnSave.addEventListener('click', async () => {
+    if (sel.ids.size === 0) return;
+    try { await openSaveSelectionModal ? openSaveSelectionModal(currentSection) : null; } catch {}
+  });
+
+  btnLoad.addEventListener('click', async () => {
+    try {
+      if (typeof openLoadSelectionModal === 'function') await openLoadSelectionModal(currentSection);
+    } catch {}
+  });
+
+  selBar.appendChild(btnFocus);
+  selBar.appendChild(btnSave);
+  selBar.appendChild(btnLoad);
+
+  // NEW: Timesheets Resolve… button (uses current selection)
+  if (currentSection === 'timesheets' && typeof openTimesheetsResolveModal === 'function') {
+    btnResolve = document.createElement('button');
+    btnResolve.title = 'Resolve candidate/client for selected timesheets';
+    btnResolve.textContent = 'Resolve…';
+    btnResolve.style.cssText = btnFocus.style.cssText;
+    btnResolve.disabled = sel.ids.size === 0;
+
+    btnResolve.addEventListener('click', () => {
+      if (sel.ids.size === 0) return;
+      const selectedRows = currentRows.filter(r => sel.ids.has(String(r.id || '')));
+      if (!selectedRows.length) return;
+      openTimesheetsResolveModal(selectedRows);
+    });
+
+    selBar.appendChild(btnResolve);
+  }
+
+  content.appendChild(selBar);
+
+  // Restore scroll memory on inner summary-body (data rows only)
+  try {
+    const scrollHost = content.querySelector('.summary-body');
+    if (scrollHost) {
+      scrollHost.__activeMemKey = memKey;
+      scrollHost.scrollTop = prevScrollY;
+      if (!scrollHost.__scrollMemHooked) {
+        scrollHost.addEventListener('scroll', () => {
+          const k = scrollHost.__activeMemKey || memKey;
+          window.__scrollMemory[k] = scrollHost.scrollTop || 0;
+        });
+        scrollHost.__scrollMemHooked = true;
+      }
+    }
+  } catch {}
+
+  // Initial states
+  computeHeaderState();
+  updateButtons();
+
+  try { primeSummaryMembership(currentSection, fp); } catch (e) { /* non-blocking */ }
+}
+
+ 
+
 
 
 async function openInvoiceBatchIssueModal() {
@@ -30620,6 +33775,7 @@ async function openInvoiceBatchGenerateModal() {
   }
 }
 
+
 async function openUserManagementModal() {
   // ─────────────────────────────────────────────────────────────
   // User Management (Admin) — Utility modal
@@ -30646,6 +33802,10 @@ async function openUserManagementModal() {
 
   const byIdLocal = (id) => (typeof byId === 'function' ? byId(id) : document.getElementById(id));
   const esc = encodeURIComponent;
+
+  const deepClone = (o) => {
+    try { return JSON.parse(JSON.stringify(o || {})); } catch { return (o && typeof o === 'object') ? { ...o } : o; }
+  };
 
   const safeJson = async (res) => { try { return await res.json(); } catch { return null; } };
 
@@ -30702,6 +33862,9 @@ async function openUserManagementModal() {
     role: '',
     is_active: '',
 
+    // row selection (blue highlight)
+    selectedUserId: null,
+
     // create panel
     createOpen: false,
     creating: false,
@@ -30725,6 +33888,11 @@ async function openUserManagementModal() {
       email_settings_text: '{}',
       new_password: '' // optional
     },
+
+    // edit close/discard support
+    editBaseline: null,        // snapshot of editModel when opened
+    editDirty: false,
+    editUserSnapshot: null,    // snapshot of original user row used for discard restore
 
     // finance settings
     settingsLoaded: false,
@@ -30831,6 +33999,79 @@ async function openUserManagementModal() {
     return j?.settings || j?.data?.settings || j || null;
   };
 
+  const syncUsersRowSelection = () => {
+    const table = document.getElementById('umUsersTable');
+    if (!table) return;
+    const rows = table.querySelectorAll('tbody tr[data-uid]');
+    rows.forEach(tr => {
+      const uid = String(tr.getAttribute('data-uid') || '').trim();
+      const on = !!uid && (String(state.selectedUserId || '') === uid);
+      if (on) {
+        tr.style.background = 'rgba(79,70,229,.18)';
+        tr.style.outline = '1px solid rgba(129,140,248,.55)';
+      } else {
+        tr.style.background = '';
+        tr.style.outline = '';
+      }
+    });
+  };
+
+  const computeEditDirty = () => {
+    const b = state.editBaseline;
+    const m = state.editModel || {};
+    if (!b || typeof b !== 'object') {
+      state.editDirty = false;
+      return false;
+    }
+
+    const norm = (v) => String(v ?? '');
+    const normTrim = (v) => String(v ?? '').trim();
+    const normLowerTrim = (v) => String(v ?? '').trim().toLowerCase();
+
+    let dirty = false;
+
+    if (normLowerTrim(m.email) !== normLowerTrim(b.email)) dirty = true;
+    if (normTrim(m.display_name) !== normTrim(b.display_name)) dirty = true;
+    if (normLowerTrim(m.role) !== normLowerTrim(b.role)) dirty = true;
+    if (!!m.is_active !== !!b.is_active) dirty = true;
+
+    // email settings text: compare trimmed
+    if (normTrim(m.email_settings_text) !== normTrim(b.email_settings_text)) dirty = true;
+
+    // new password: any non-empty means dirty
+    if (normTrim(m.new_password)) dirty = true;
+
+    state.editDirty = dirty;
+    return dirty;
+  };
+
+  const syncEditCloseDiscardUi = () => {
+    const btn = document.getElementById('umEditCloseBtn');
+    if (!btn) return;
+    btn.textContent = state.editDirty ? 'Discard' : 'Close';
+    btn.setAttribute('title', state.editDirty ? 'Discard changes (keeps panel open)' : 'Close editor');
+  };
+
+  const seedEditModel = (user) => {
+    const u = user || {};
+    state.editModel = {
+      id: String(u.id || ''),
+      email: String(u.email || ''),
+      display_name: String(u.display_name || ''),
+      role: String(u.role || 'admin'),
+      is_active: !!u.is_active,
+      email_settings_text: JSON.stringify((u.email_settings && typeof u.email_settings === 'object') ? u.email_settings : {}, null, 2),
+      new_password: ''
+    };
+
+    state.editBaseline = deepClone(state.editModel);
+    state.editDirty = false;
+    state.editUserSnapshot = deepClone(u);
+
+    // best-effort update if button already exists
+    try { syncEditCloseDiscardUi(); } catch {}
+  };
+
   const loadUsers = async () => {
     state.usersLoading = true;
     setError('');
@@ -30840,6 +34081,14 @@ async function openUserManagementModal() {
       const users = await apiGetUsers({});
       state.users = Array.isArray(users) ? users : [];
       state.usersLoaded = true;
+
+      // if selected user vanished, clear selection
+      try {
+        const sel = String(state.selectedUserId || '');
+        if (sel && !(state.users || []).some(u => String(u?.id || '') === sel)) {
+          state.selectedUserId = null;
+        }
+      } catch {}
     } finally {
       state.usersLoading = false;
       paint();
@@ -30896,19 +34145,6 @@ async function openUserManagementModal() {
       }
       return true;
     });
-  };
-
-  const seedEditModel = (user) => {
-    const u = user || {};
-    state.editModel = {
-      id: String(u.id || ''),
-      email: String(u.email || ''),
-      display_name: String(u.display_name || ''),
-      role: String(u.role || 'admin'),
-      is_active: !!u.is_active,
-      email_settings_text: JSON.stringify((u.email_settings && typeof u.email_settings === 'object') ? u.email_settings : {}, null, 2),
-      new_password: ''
-    };
   };
 
   const renderSkeleton = (k) => {
@@ -31194,16 +34430,76 @@ async function openUserManagementModal() {
         const card = document.createElement('div');
         card.className = 'card';
 
+        // Header row with top-right Close/Discard (as requested)
+        const headRow = document.createElement('div');
+        headRow.style.display = 'flex';
+        headRow.style.alignItems = 'flex-start';
+        headRow.style.justifyContent = 'space-between';
+        headRow.style.gap = '10px';
+        headRow.style.flexWrap = 'wrap';
+
+        const leftHead = document.createElement('div');
+
         const title = document.createElement('div');
         title.style.fontWeight = '700';
         title.textContent = `Edit user`;
-        card.appendChild(title);
+        leftHead.appendChild(title);
 
         const sub = document.createElement('div');
         sub.className = 'mini';
         sub.style.opacity = '0.9';
         sub.textContent = u ? (String(u.email || '') || String(u.id || '')) : String(state.editingUserId);
-        card.appendChild(sub);
+        leftHead.appendChild(sub);
+
+        const rightHead = document.createElement('div');
+        rightHead.style.display = 'flex';
+        rightHead.style.gap = '8px';
+        rightHead.style.alignItems = 'center';
+
+        const btnCloseDiscard = document.createElement('button');
+        btnCloseDiscard.type = 'button';
+        btnCloseDiscard.className = 'btn mini';
+        btnCloseDiscard.id = 'umEditCloseBtn';
+        btnCloseDiscard.textContent = state.editDirty ? 'Discard' : 'Close';
+        btnCloseDiscard.title = state.editDirty ? 'Discard changes (keeps panel open)' : 'Close editor';
+
+        btnCloseDiscard.addEventListener('click', () => {
+          // If dirty: Discard -> restore baseline and keep panel open
+          if (state.editDirty) {
+            const snap = (state.editUserSnapshot && typeof state.editUserSnapshot === 'object') ? state.editUserSnapshot : null;
+            if (snap) {
+              seedEditModel(snap);
+              setError('');
+              setNotice('Changes discarded.');
+              paint();
+            } else {
+              // fallback: just close
+              state.editingUserId = null;
+              state.editBaseline = null;
+              state.editDirty = false;
+              state.editUserSnapshot = null;
+              setError('');
+              setNotice('');
+              paint();
+            }
+            return;
+          }
+
+          // Not dirty: Close -> exit editor
+          state.editingUserId = null;
+          state.editBaseline = null;
+          state.editDirty = false;
+          state.editUserSnapshot = null;
+          setError('');
+          setNotice('');
+          paint();
+        });
+
+        rightHead.appendChild(btnCloseDiscard);
+
+        headRow.appendChild(leftHead);
+        headRow.appendChild(rightHead);
+        card.appendChild(headRow);
 
         const grid = document.createElement('div');
         grid.className = 'form';
@@ -31219,15 +34515,20 @@ async function openUserManagementModal() {
           return r;
         };
 
+        const markDirtyAndSync = () => {
+          computeEditDirty();
+          syncEditCloseDiscardUi();
+        };
+
         const inEmail = document.createElement('input');
         inEmail.className = 'input';
         inEmail.value = String(state.editModel.email || '');
-        inEmail.addEventListener('input', () => { state.editModel.email = inEmail.value; });
+        inEmail.addEventListener('input', () => { state.editModel.email = inEmail.value; markDirtyAndSync(); });
 
         const inDN = document.createElement('input');
         inDN.className = 'input';
         inDN.value = String(state.editModel.display_name || '');
-        inDN.addEventListener('input', () => { state.editModel.display_name = inDN.value; });
+        inDN.addEventListener('input', () => { state.editModel.display_name = inDN.value; markDirtyAndSync(); });
 
         const inRole = document.createElement('select');
         inRole.className = 'input';
@@ -31236,7 +34537,7 @@ async function openUserManagementModal() {
           <option value="user">user</option>
         `;
         inRole.value = String(state.editModel.role || 'admin');
-        inRole.addEventListener('change', () => { state.editModel.role = inRole.value; });
+        inRole.addEventListener('change', () => { state.editModel.role = inRole.value; markDirtyAndSync(); });
 
         const inActive = document.createElement('select');
         inActive.className = 'input';
@@ -31245,20 +34546,20 @@ async function openUserManagementModal() {
           <option value="false">Inactive</option>
         `;
         inActive.value = state.editModel.is_active ? 'true' : 'false';
-        inActive.addEventListener('change', () => { state.editModel.is_active = (inActive.value === 'true'); });
+        inActive.addEventListener('change', () => { state.editModel.is_active = (inActive.value === 'true'); markDirtyAndSync(); });
 
         const inEmailSettings = document.createElement('textarea');
         inEmailSettings.className = 'input';
         inEmailSettings.style.minHeight = '140px';
         inEmailSettings.value = String(state.editModel.email_settings_text || '{}');
-        inEmailSettings.addEventListener('input', () => { state.editModel.email_settings_text = inEmailSettings.value; });
+        inEmailSettings.addEventListener('input', () => { state.editModel.email_settings_text = inEmailSettings.value; markDirtyAndSync(); });
 
         const inNewPw = document.createElement('input');
         inNewPw.className = 'input';
         inNewPw.type = 'password';
         inNewPw.placeholder = 'Set new password (optional)';
         inNewPw.value = String(state.editModel.new_password || '');
-        inNewPw.addEventListener('input', () => { state.editModel.new_password = inNewPw.value; });
+        inNewPw.addEventListener('input', () => { state.editModel.new_password = inNewPw.value; markDirtyAndSync(); });
 
         grid.appendChild(mkRow('Email', inEmail));
         grid.appendChild(mkRow('Display name', inDN));
@@ -31297,8 +34598,16 @@ async function openUserManagementModal() {
         actions.style.justifyContent = 'space-between';
         actions.style.flexWrap = 'wrap';
 
-        actions.appendChild(mkBtn('Cancel', () => {
+        // Bottom-left Close (kept) – closes editor; if dirty, confirms discard+close
+        actions.appendChild(mkBtn('Close', () => {
+          if (state.editDirty) {
+            const ok = window.confirm('Discard changes and close?');
+            if (!ok) return;
+          }
           state.editingUserId = null;
+          state.editBaseline = null;
+          state.editDirty = false;
+          state.editUserSnapshot = null;
           setError('');
           setNotice('');
           paint();
@@ -31365,6 +34674,10 @@ async function openUserManagementModal() {
 
             setNotice(newPw ? 'User updated and password reset.' : 'User updated.');
             state.editingUserId = null;
+            state.editBaseline = null;
+            state.editDirty = false;
+            state.editUserSnapshot = null;
+
             await loadUsers();
           } catch (e) {
             setError(e?.message || e);
@@ -31378,6 +34691,9 @@ async function openUserManagementModal() {
 
         card.appendChild(actions);
         body.appendChild(card);
+
+        // ensure button label is correct after render
+        try { computeEditDirty(); syncEditCloseDiscardUi(); } catch {}
       }
 
       // ── Users table ───────────────────────────────────────────
@@ -31399,7 +34715,7 @@ async function openUserManagementModal() {
       const hint = document.createElement('div');
       hint.className = 'mini';
       hint.style.opacity = '0.85';
-      hint.textContent = 'Edit opens a panel above. Reset password can be done per row.';
+      hint.textContent = 'Click a row to select (blue). Double-click a row to edit. Edit opens a panel above.';
       hdr.appendChild(hint);
 
       tblCard.appendChild(hdr);
@@ -31412,6 +34728,7 @@ async function openUserManagementModal() {
       wrap.style.borderRadius = '10px';
 
       const table = document.createElement('table');
+      table.id = 'umUsersTable';
       table.className = 'grid';
       table.style.margin = '0';
 
@@ -31462,6 +34779,50 @@ async function openUserManagementModal() {
       tblCard.appendChild(wrap);
       body.appendChild(tblCard);
 
+      // Wire row click + double-click (selection + edit)
+      try {
+        const tbody = table.querySelector('tbody');
+        if (tbody && !tbody.dataset.wired) {
+          tbody.dataset.wired = '1';
+
+          tbody.addEventListener('click', (ev) => {
+            const tr = ev.target && ev.target.closest ? ev.target.closest('tr[data-uid]') : null;
+            if (!tr) return;
+
+            // If clicking one of the action buttons, let that handler run
+            if (ev.target && ev.target.closest && ev.target.closest('button[data-um-act]')) return;
+
+            const uid = String(tr.getAttribute('data-uid') || '').trim();
+            if (!uid) return;
+
+            state.selectedUserId = uid;
+            syncUsersRowSelection();
+          });
+
+          tbody.addEventListener('dblclick', (ev) => {
+            const tr = ev.target && ev.target.closest ? ev.target.closest('tr[data-uid]') : null;
+            if (!tr) return;
+
+            // Ignore dblclick on buttons (they already have explicit actions)
+            if (ev.target && ev.target.closest && ev.target.closest('button[data-um-act]')) return;
+
+            const uid = String(tr.getAttribute('data-uid') || '').trim();
+            if (!uid) return;
+
+            const user = (state.users || []).find(x => String(x?.id || '') === uid) || null;
+            if (!user) return;
+
+            state.selectedUserId = uid;
+            state.editingUserId = uid;
+            state.createOpen = false;
+            seedEditModel(user);
+            setError('');
+            setNotice('');
+            paint();
+          });
+        }
+      } catch {}
+
       // Wire table action buttons
       const btns = table.querySelectorAll('button[data-um-act][data-uid]');
       btns.forEach(b => {
@@ -31475,6 +34836,9 @@ async function openUserManagementModal() {
           const act = String(b.getAttribute('data-um-act') || '');
           const uid = String(b.getAttribute('data-uid') || '').trim();
           if (!uid) return;
+
+          state.selectedUserId = uid;
+          syncUsersRowSelection();
 
           const user = (state.users || []).find(x => String(x?.id || '') === uid) || null;
 
@@ -31517,6 +34881,9 @@ async function openUserManagementModal() {
           }
         });
       });
+
+      // Apply selection highlight after render
+      try { syncUsersRowSelection(); } catch {}
 
       return;
     }
@@ -32041,69 +35408,80 @@ function setFormReadOnly(root, ro) {
 
     // Buttons: in ro mode, keep specific IDs + any timesheet action buttons enabled
     if (el.type === 'button' || el.tagName === 'BUTTON') {
-  const allow = new Set([
-  'btnCloseModal',
-  'btnDelete',
-  'btnEditModal',
-  'btnSave',
-  'btnRelated',
+      const allow = new Set([
+        'btnCloseModal',
+        'btnDelete',
+        'btnEditModal',
+        'btnSave',
+        'btnRelated',
 
-  // ✅ Keep ONLY non-conversion footer actions
-  'btnTsDeleteTimesheet',
-  'btnTsProcessTimesheet',
-  'btnTsUnprocessTimesheet',   // ✅ NEW
-  'btnTsAuthorise',
-  'btnTsUnauthorise'
-]);
+        // ✅ Keep ONLY non-conversion footer actions
+        'btnTsDeleteTimesheet',
+        'btnTsProcessTimesheet',
+        'btnTsUnprocessTimesheet',   // ✅ NEW
+        'btnTsAuthorise',
+        'btnTsUnauthorise'
+      ]);
 
+      // Keep Timesheet action buttons enabled in VIEW only if they are "safe view actions".
+      // Do NOT keep weekly schedule edit buttons enabled (reset / add/remove shift lines).
+      try {
+        const top = (typeof currentFrame === 'function') ? currentFrame() : null;
+        const isTimesheetFrame = !!(top && top.entity === 'timesheets');
 
+        const tsAction = (el.getAttribute('data-ts-action') || '').toLowerCase();
 
-// NOTE: conversions are now Overview actions (data-ts-action buttons),
-// and setFormReadOnly already auto-enables data-ts-action buttons in VIEW.
+        // Evidence table actions (View/Delete) are not data-ts-action
+        const hasEvidenceAction =
+          !!el.getAttribute('data-evidence-view') ||
+          !!el.getAttribute('data-evidence-remove');
 
+        // Actions that must NEVER be clickable in VIEW (schedule-driven weekly grid)
+        const scheduleEditActions = new Set([
+          'reset-schedule',
+          'extra-shift-add',
+          'extra-shift-remove',
+          'extra-break-add',
+          'extra-break-remove'
+        ]);
 
- // Keep Timesheet action buttons enabled in VIEW only if they are "safe view actions".
-// Do NOT keep weekly schedule edit buttons enabled (reset / add/remove shift lines).
-try {
-  const top = (typeof currentFrame === 'function') ? currentFrame() : null;
-  const isTimesheetFrame = !!(top && top.entity === 'timesheets');
+        // Hard block schedule edit actions when read-only
+        if (isTimesheetFrame && ro && tsAction && scheduleEditActions.has(tsAction)) {
+          el.disabled = true;
+          return;
+        }
 
-  const tsAction = (el.getAttribute('data-ts-action') || '').toLowerCase();
+        if (isTimesheetFrame && hasEvidenceAction) {
+          el.disabled = false;
+          return;
+        }
 
-  // Evidence table actions (View/Delete) are not data-ts-action
-  const hasEvidenceAction =
-    !!el.getAttribute('data-evidence-view') ||
-    !!el.getAttribute('data-evidence-remove');
+        // Only auto-enable data-ts-action buttons in VIEW if they are NOT schedule edit actions
+        if (isTimesheetFrame && ro && tsAction && !scheduleEditActions.has(tsAction)) {
+          el.disabled = false;
+          return;
+        }
+      } catch {}
 
-  // Actions that must NEVER be clickable in VIEW (schedule-driven weekly grid)
-  const scheduleEditActions = new Set([
-    'reset-schedule',
-    'extra-shift-add',
-    'extra-shift-remove',
-    'extra-break-add',
-    'extra-break-remove'
-  ]);
+      // ✅ NEW: Invoice modal internal buttons must remain clickable in VIEW.
+      // We only enable a SAFE allow-list of invoice actions.
+      try {
+        const top = (typeof currentFrame === 'function') ? currentFrame() : null;
+        const isInvoiceFrame = !!(top && top.entity === 'invoices');
+        const invAction = (el.getAttribute('data-inv-action') || '').toLowerCase();
 
-  // Hard block schedule edit actions when read-only
-  if (isTimesheetFrame && ro && tsAction && scheduleEditActions.has(tsAction)) {
-    el.disabled = true;
-    return;
-  }
+        const safeInvActions = new Set([
+          'render-pdf',     // Open invoice PDF
+          'email',          // Email / Re-email
+          'toggle-group',   // Accordion open/close
+          'open-timesheet'  // Jump to timesheet modal
+        ]);
 
-  if (isTimesheetFrame && hasEvidenceAction) {
-    el.disabled = false;
-    return;
-  }
-
-  // Only auto-enable data-ts-action buttons in VIEW if they are NOT schedule edit actions
-  if (isTimesheetFrame && ro && tsAction && !scheduleEditActions.has(tsAction)) {
-    el.disabled = false;
-    return;
-  }
-} catch {}
-
-
-
+        if (isInvoiceFrame && ro && invAction && safeInvActions.has(invAction)) {
+          el.disabled = false;
+          return;
+        }
+      } catch {}
 
       // In read-only mode, disable everything except allow-listed buttons
       if (ro) {
@@ -32140,6 +35518,7 @@ try {
     });
   } catch {}
 }
+
 
 
 
@@ -45876,1274 +49255,6 @@ function __settingsFinanceSync() {
   }
 }
 
-function renderSummary(rows){
-  currentRows = rows;
-  currentSelection = null;
-
-  // ── paging state (per section)
-  window.__listState = window.__listState || {};
-  const st = (window.__listState[currentSection] ||= {
-    page: 1,
-    pageSize: 50,
-    total: null,
-    hasMore: false,
-    filters: null,
-    sort: { key: null, dir: 'asc' }
-  });
-
-  // Ensure we always have a sort object
-  if (!st.sort || typeof st.sort !== 'object') {
-    st.sort = { key: null, dir: 'asc' };
-  }
-  const sortState = st.sort;
-
-  const page     = Number(st.page || 1);
-  const pageSize = st.pageSize; // 50 | 100 | 200 | 'ALL'
-
-  // ── selection state (per section) — explicit IDs only
-  window.__selection = window.__selection || {};
-  const ensureSel = (section)=>{ const init = { fingerprint:'', ids:new Set() }; return (window.__selection[section] ||= init); };
-  const sel = ensureSel(currentSection);
-
-  const isRowSelected = (id)=> sel.ids.has(String(id||''));
-  const setRowSelected = (id, selected)=>{
-    id = String(id||''); if (!id) return;
-    if (selected) sel.ids.add(id); else sel.ids.delete(id);
-  };
-  const clearSelection = ()=>{ sel.ids.clear(); };
-
-  // Small helper: render red issue badges or green OK for the Issues column
-  const renderIssueBadges = (codes) => {
-    const wrap = document.createElement('div');
-    wrap.className = 'issue-badges';
-
-    const arr = Array.isArray(codes) ? codes.filter(Boolean) : [];
-
-    if (!arr.length) {
-      // No issues → green OK badge
-      const ok = document.createElement('span');
-      ok.className = 'pill pill-ok';
-      ok.textContent = 'OK';
-      wrap.appendChild(ok);
-      return wrap;
-    }
-
-    arr.forEach(code => {
-      const span = document.createElement('span');
-      const label = String(code || '').trim() || 'Issue';
-
-      // Default: red (issue)
-      let cls = 'pill pill-bad';
-
-      // Slightly softer amber for "On hold" / "Validation" / "Authorisation"
-      const up = label.toUpperCase();
-      if (up === 'ON HOLD' || up === 'VALIDATION' || up === 'AUTHORISATION') {
-        cls = 'pill pill-warn';
-      }
-
-      span.className = cls;
-      span.textContent = label;
-      wrap.appendChild(span);
-    });
-
-    return wrap;
-  };
-
-  // Tie selection to dataset via fingerprint (filters + section)
-  const computeFp = ()=> getSummaryFingerprint(currentSection);
-  const fp = computeFp();
-  if (sel.fingerprint !== fp) { sel.fingerprint = fp; clearSelection(); }
-
-  // ─────────────────────────────────────────────────────────────
-  // Section-specific pre-formatting / normalisation
-  // ─────────────────────────────────────────────────────────────
-  if (currentSection === 'candidates') {
-    rows.forEach(r => {
-      // Rota roles only – do NOT use this for Job Titles
-      r.role = (r && Array.isArray(r.roles)) ? formatRolesSummary(r.roles) : '';
-
-      // Ensure job_titles_display exists as a string so the grid
-      // can show it via prefs as its own column
-      if (r.job_titles_display == null) {
-        r.job_titles_display = '';
-      } else {
-        r.job_titles_display = String(r.job_titles_display);
-      }
-    });
-  } else if (currentSection === 'contracts') {
-    rows.forEach(r => {
-      const j = r && r.bucket_labels_json;
-      if (j && typeof j === 'object') {
-        const day   = (j.day   || '').trim();
-        const night = (j.night || '').trim();
-        const sat   = (j.sat   || '').trim();
-        const sun   = (j.sun   || '').trim();
-        const bh    = (j.bh    || '').trim();
-        const parts = [day,night,sat,sun,bh].filter(Boolean);
-        r.bucket_labels_preview = parts.length === 5 ? parts.join('/') : '';
-      } else {
-        r.bucket_labels_preview = '';
-      }
-    });
-  } else if (currentSection === 'timesheets') {
-    // Normalise timesheet rows so they always have a stable id:
-    // - real TS → id = timesheet_id
-    // - planned/contract_week only → id = contract_week_id
-    rows.forEach(r => {
-      if (!r || typeof r !== 'object') return;
-      const tsId = r.timesheet_id || null;
-      const cwId = r.contract_week_id || null;
-      const stableId = tsId || cwId || r.id || null;
-      if (stableId) {
-        r.id = stableId;
-      }
-    });
-  } else if (currentSection === 'invoices') {
-    // Flatten joined client name (backend returns client: { name, ... })
-    rows.forEach(r => {
-      if (!r || typeof r !== 'object') return;
-      if (r.client_name == null || r.client_name === '') {
-        const cn = r.client && typeof r.client === 'object' ? (r.client.name || '') : '';
-        if (cn) r.client_name = cn;
-      }
-    });
-
-    // Keep UI sort state aligned with backend allowed sorts for /api/invoices
-    const INVOICE_SORT_ALLOWED = new Set([
-      'issued_at_utc',
-      'due_at_utc',
-      'created_at',
-      'status_date_utc',
-      'invoice_no',
-      'subtotal_ex_vat',
-      'vat_amount',
-      'total_inc_vat',
-      'status'
-    ]);
-
-    if (sortState && sortState.key) {
-      const k = String(sortState.key || '');
-      if (k && !INVOICE_SORT_ALLOWED.has(k)) {
-        // Reset to backend default to avoid "arrow says sorted by X" when backend ignores it
-        sortState.key = 'issued_at_utc';
-        sortState.dir = 'desc';
-        window.__listState[currentSection].sort = sortState;
-      }
-    }
-  }
-
-  const content = byId('content');
-  byId('title').textContent = sections.find(s=>s.key===currentSection)?.label || '';
-
-  // Preserve scroll position per section — for .summary-body, not #content
-  window.__scrollMemory = window.__scrollMemory || {};
-  const memKey = `summary:${currentSection}`;
-  const prevScrollY = window.__scrollMemory[memKey] ?? 0;
-
-  content.innerHTML = '';
-  if (currentSection === 'settings') return renderSettingsPanel(content);
-  if (currentSection === 'audit')    return renderAuditTable(content, rows);
-
-  // ── top controls ────────────────────────────────────────────────────────────
-  const topControls = document.createElement('div');
-  topControls.style.cssText = 'display:flex;align-items:center;gap:10px;padding:8px 10px;border-bottom:1px solid var(--line);flex-wrap:wrap';
-
-  // Page size
-  const sizeLabel = document.createElement('span'); sizeLabel.className = 'mini'; sizeLabel.textContent = 'Page size:';
-  const sizeSel = document.createElement('select'); sizeSel.id = 'summaryPageSize';
-  ['50','100','200','ALL'].forEach(optVal => {
-    const opt = document.createElement('option');
-    opt.value = optVal; opt.textContent = (optVal === 'ALL') ? 'All' : `First ${optVal}`;
-    if (String(pageSize) === optVal) opt.selected = true;
-    sizeSel.appendChild(opt);
-  });
-  sizeSel.addEventListener('change', async () => {
-    const val = sizeSel.value;
-    window.__listState[currentSection].pageSize = (val === 'ALL') ? 'ALL' : Number(val);
-    window.__listState[currentSection].page = 1;
-    const data = await loadSection();
-    renderSummary(data);
-  });
-
-  topControls.appendChild(sizeLabel);
-  topControls.appendChild(sizeSel);
-
-  // ─────────────────────────────────────────────────────────────
-  // NEW: Invoices quick filters row (Status multi + Week ending + Issued + q)
-  // ─────────────────────────────────────────────────────────────
-  if (currentSection === 'invoices') {
-    const stFilters = window.__listState[currentSection].filters || {};
-    window.__listState[currentSection].filters = stFilters;
-
-    // Default statuses (first entry)
-    const curStatus = stFilters.status;
-    const hasStatus =
-      (Array.isArray(curStatus) && curStatus.length > 0) ||
-      (typeof curStatus === 'string' && curStatus.trim().length > 0);
-    if (!hasStatus) {
-      stFilters.status = ['DRAFT','ON_HOLD','ISSUED','PAID'];
-      window.__listState[currentSection].filters = stFilters;
-    }
-
-    const applyFilters = async (patch) => {
-      const cur = { ...(window.__listState[currentSection].filters || {}) };
-
-      Object.keys(patch || {}).forEach(k => {
-        const v = patch[k];
-        // normalise empties: delete
-        if (v == null) { delete cur[k]; return; }
-        if (typeof v === 'string' && v.trim() === '') { delete cur[k]; return; }
-        if (Array.isArray(v) && v.length === 0) { delete cur[k]; return; }
-        cur[k] = v;
-      });
-
-      window.__listState[currentSection].filters = cur;
-      window.__listState[currentSection].page = 1;
-
-      const data = await loadSection();
-      renderSummary(data);
-    };
-
-    // Status multi-select dropdown (checkbox menu)
-    const statusLabel = document.createElement('span');
-    statusLabel.className = 'mini';
-    statusLabel.textContent = 'Status:';
-
-    const statusBtn = document.createElement('button');
-    statusBtn.type = 'button';
-    statusBtn.style.cssText = 'border:1px solid var(--line);background:#0b152a;color:var(--text);padding:4px 8px;border-radius:8px;cursor:pointer';
-    statusBtn.title = 'Filter invoice statuses';
-
-    const getStatusArr = () => {
-      let s = (window.__listState[currentSection].filters || {}).status;
-      if (typeof s === 'string' && s.trim()) {
-        s = s.split(',').map(x => x.trim()).filter(Boolean);
-      }
-      if (!Array.isArray(s)) s = [];
-      return s.map(x => String(x).toUpperCase());
-    };
-
-    const setStatusBtnText = () => {
-      const arr = getStatusArr();
-      statusBtn.textContent = arr.length ? arr.join(', ') : 'Any';
-    };
-    setStatusBtnText();
-
-    const closeInvStatusMenu = () => {
-      const m = document.getElementById('__invStatusMenu');
-      if (m) m.remove();
-      document.removeEventListener('click', onDocClose, true);
-      document.removeEventListener('keydown', onEscClose, true);
-    };
-    const onDocClose = (e) => {
-      const m = document.getElementById('__invStatusMenu');
-      if (!m) return;
-      if (m.contains(e.target) || statusBtn.contains(e.target)) return;
-      closeInvStatusMenu();
-    };
-    const onEscClose = (e) => { if (e.key === 'Escape') closeInvStatusMenu(); };
-
-    statusBtn.addEventListener('click', (ev) => {
-      ev.preventDefault();
-      const existing = document.getElementById('__invStatusMenu');
-      if (existing) { closeInvStatusMenu(); return; }
-
-      const menu = document.createElement('div');
-      menu.id = '__invStatusMenu';
-      menu.style.position = 'absolute';
-      menu.style.zIndex = '1000';
-      menu.style.background = 'var(--panel, #0b1221)';
-      menu.style.border = '1px solid var(--line, #334155)';
-      menu.style.borderRadius = '10px';
-      menu.style.boxShadow = 'var(--shadow, 0 6px 20px rgba(0,0,0,.25))';
-      menu.style.padding = '8px';
-      menu.style.minWidth = '220px';
-      menu.style.userSelect = 'none';
-
-      const opts = ['DRAFT','ON_HOLD','ISSUED','PAID'];
-      const selected = new Set(getStatusArr());
-
-      const mkRow = (code) => {
-        const lab = document.createElement('label');
-        lab.className = 'mini';
-        lab.style.display = 'flex';
-        lab.style.alignItems = 'center';
-        lab.style.gap = '8px';
-        lab.style.padding = '6px 6px';
-        lab.style.cursor = 'pointer';
-
-        const cb = document.createElement('input');
-        cb.type = 'checkbox';
-        cb.checked = selected.has(code);
-
-        cb.addEventListener('change', () => {
-          if (cb.checked) selected.add(code);
-          else selected.delete(code);
-        });
-
-        const txt = document.createElement('span');
-        txt.textContent = code;
-
-        lab.appendChild(cb);
-        lab.appendChild(txt);
-        return lab;
-      };
-
-      // header actions
-      const actions = document.createElement('div');
-      actions.style.cssText = 'display:flex;gap:8px;justify-content:flex-end;margin-bottom:6px;';
-      const btnAll = document.createElement('button');
-      btnAll.type = 'button';
-      btnAll.className = 'btn mini';
-      btnAll.textContent = 'All';
-      btnAll.addEventListener('click', () => { opts.forEach(o => selected.add(o)); refreshChecks(); });
-
-      const btnNone = document.createElement('button');
-      btnNone.type = 'button';
-      btnNone.className = 'btn mini';
-      btnNone.textContent = 'None';
-      btnNone.addEventListener('click', () => { selected.clear(); refreshChecks(); });
-
-      actions.appendChild(btnAll);
-      actions.appendChild(btnNone);
-
-      const list = document.createElement('div');
-      list.style.cssText = 'display:flex;flex-direction:column;gap:2px;';
-
-      const rowsEls = opts.map(o => mkRow(o));
-      rowsEls.forEach(el => list.appendChild(el));
-
-      const refreshChecks = () => {
-        rowsEls.forEach((el, idx) => {
-          const code = opts[idx];
-          const cb = el.querySelector('input[type="checkbox"]');
-          if (cb) cb.checked = selected.has(code);
-        });
-      };
-
-      const footer = document.createElement('div');
-      footer.style.cssText = 'display:flex;gap:8px;justify-content:flex-end;margin-top:8px;';
-      const applyBtn = document.createElement('button');
-      applyBtn.type = 'button';
-      applyBtn.className = 'btn btn-primary mini';
-      applyBtn.textContent = 'Apply';
-      applyBtn.addEventListener('click', async () => {
-        closeInvStatusMenu();
-        const arr = Array.from(selected);
-        await applyFilters({ status: arr });
-      });
-
-      footer.appendChild(applyBtn);
-
-      menu.appendChild(actions);
-      menu.appendChild(list);
-      menu.appendChild(footer);
-
-      document.body.appendChild(menu);
-      const r = statusBtn.getBoundingClientRect();
-      menu.style.left = `${Math.round(window.scrollX + r.left)}px`;
-      menu.style.top  = `${Math.round(window.scrollY + r.bottom + 6)}px`;
-
-      setTimeout(() => {
-        document.addEventListener('click', onDocClose, true);
-        document.addEventListener('keydown', onEscClose, true);
-      }, 0);
-    });
-
-    topControls.appendChild(statusLabel);
-    topControls.appendChild(statusBtn);
-
-    // Week ending date range (FE sends week_ending_from/to)
-    const weLabel = document.createElement('span');
-    weLabel.className = 'mini';
-    weLabel.textContent = 'Week ending:';
-
-    const weFrom = document.createElement('input');
-    weFrom.type = 'date';
-    weFrom.className = 'input';
-    weFrom.style.cssText = 'width:160px;min-width:160px;';
-    weFrom.value = String(stFilters.week_ending_from || '');
-
-    const weTo = document.createElement('input');
-    weTo.type = 'date';
-    weTo.className = 'input';
-    weTo.style.cssText = 'width:160px;min-width:160px;';
-    weTo.value = String(stFilters.week_ending_to || '');
-
-    weFrom.addEventListener('change', async () => {
-      await applyFilters({ week_ending_from: weFrom.value || null });
-    });
-    weTo.addEventListener('change', async () => {
-      await applyFilters({ week_ending_to: weTo.value || null });
-    });
-
-    topControls.appendChild(weLabel);
-    topControls.appendChild(weFrom);
-    topControls.appendChild(weTo);
-
-    // Issued date range
-    const issLabel = document.createElement('span');
-    issLabel.className = 'mini';
-    issLabel.textContent = 'Issued:';
-
-    const issFrom = document.createElement('input');
-    issFrom.type = 'date';
-    issFrom.className = 'input';
-    issFrom.style.cssText = 'width:160px;min-width:160px;';
-    issFrom.value = String(stFilters.issued_from || '');
-
-    const issTo = document.createElement('input');
-    issTo.type = 'date';
-    issTo.className = 'input';
-    issTo.style.cssText = 'width:160px;min-width:160px;';
-    issTo.value = String(stFilters.issued_to || '');
-
-    issFrom.addEventListener('change', async () => {
-      await applyFilters({ issued_from: issFrom.value || null });
-    });
-    issTo.addEventListener('change', async () => {
-      await applyFilters({ issued_to: issTo.value || null });
-    });
-
-    topControls.appendChild(issLabel);
-    topControls.appendChild(issFrom);
-    topControls.appendChild(issTo);
-
-    // Search box bound to filters.q
-    const qLabel = document.createElement('span');
-    qLabel.className = 'mini';
-    qLabel.textContent = 'Search:';
-
-    const qInp = document.createElement('input');
-    qInp.type = 'text';
-    qInp.className = 'input';
-    qInp.placeholder = 'Invoice no…';
-    qInp.style.cssText = 'width:220px;min-width:220px;';
-    qInp.value = String(stFilters.q || '');
-
-    const applyQ = async () => {
-      const v = (qInp.value || '').trim();
-      await applyFilters({ q: v || null });
-    };
-    qInp.addEventListener('keydown', async (e) => {
-      if (e.key !== 'Enter') return;
-      await applyQ();
-    });
-    qInp.addEventListener('blur', async () => {
-      // keep UX light: only apply if value differs from stored filter
-      const cur = String((window.__listState[currentSection].filters || {}).q || '').trim();
-      const next = String((qInp.value || '')).trim();
-      if (cur !== next) await applyQ();
-    });
-
-    topControls.appendChild(qLabel);
-    topControls.appendChild(qInp);
-
-    // Refresh status button text if filters changed by defaults
-    setStatusBtnText();
-  }
-
-  // ── Contracts quick Status menu ─────────────────────────────────────────────
-  let statusSel = null;
-  if (currentSection === 'contracts') {
-    const stFilters = window.__listState[currentSection].filters || {};
-
-    // Default to "active" if no status has been chosen yet
-    if (!('status' in stFilters)) stFilters.status = 'active';
-    window.__listState[currentSection].filters = stFilters;
-
-    const statusLabel = document.createElement('span');
-    statusLabel.className = 'mini';
-    statusLabel.textContent = 'Status:';
-
-    statusSel = document.createElement('select');
-
-    [['all','All'], ['active','Active'], ['unassigned','Unassigned'], ['completed','Completed']]
-      .forEach(([v, l]) => {
-        const o = document.createElement('option');
-        o.value = v;
-        o.textContent = l;
-        if ((stFilters.status || '').toLowerCase() === v) o.selected = true;
-        statusSel.appendChild(o);
-      });
-
-    statusSel.addEventListener('change', async () => {
-      const val = statusSel.value;
-      const curFilters = { ...(window.__listState[currentSection].filters || {}) };
-      curFilters.status = val;
-      window.__listState[currentSection].filters = curFilters;
-      window.__listState[currentSection].page = 1;
-      const data = await loadSection();
-      renderSummary(data);
-    });
-
-    topControls.appendChild(statusLabel);
-    topControls.appendChild(statusSel);
-  }
-
-  // ── Timesheets quick filters: Status / Route / Scope / Flags ───────────────
-  if (currentSection === 'timesheets') {
-    const stFilters = window.__listState[currentSection].filters || {};
-    window.__listState[currentSection].filters = stFilters;
-
-    // Status dropdown
-    const statusLabel2 = document.createElement('span');
-    statusLabel2.className = 'mini';
-    statusLabel2.textContent = 'Status:';
-    const statusSel2 = document.createElement('select');
-
-    const statusOpts = [
-      ['ALL',               'All'],
-      ['NO_MATCH_ID',       'No match to Candidate/Client'],
-      ['RATE_MISSING',      'Rate missing'],
-      ['PAY_CHAN_MISS',     'Pay channel missing'],
-      ['READY_FOR_HR',      'Ready for Healthroster validation'],
-      ['READY_FOR_INV',     'Ready for invoice'],
-      ['HR_HOURS_MISMATCH', 'Timesheet hours mismatch with Healthroster']
-    ];
-    const statusCur2 = (stFilters.status_code || 'ALL').toUpperCase();
-    statusOpts.forEach(([v, label]) => {
-      const o = document.createElement('option');
-      o.value = v;
-      o.textContent = label;
-      if (statusCur2 === v) o.selected = true;
-      statusSel2.appendChild(o);
-    });
-    statusSel2.addEventListener('change', async () => {
-      const val = statusSel2.value;
-      const curFilters = { ...(window.__listState[currentSection].filters || {}) };
-
-      // Remember UI choice
-      curFilters.status_code = val;
-
-      // Reset hr_issue by default
-      if ('hr_issue' in curFilters) {
-        delete curFilters.hr_issue;
-      }
-
-      // Map to backend processing_status / hr_issue only when it helps
-      switch (val) {
-        case 'NO_MATCH_ID':
-          curFilters.processing_status = 'UNASSIGNED,CLIENT_UNRESOLVED';
-          break;
-        case 'READY_FOR_HR':
-          curFilters.processing_status = 'READY_FOR_HR';
-          break;
-        case 'READY_FOR_INV':
-          curFilters.processing_status = 'READY_FOR_INVOICE';
-          break;
-        case 'HR_HOURS_MISMATCH':
-          curFilters.processing_status = 'ALL';
-          curFilters.hr_issue = 'HOURS_MISMATCH_HR';
-          break;
-        default:
-          curFilters.processing_status = 'ALL';
-          break;
-      }
-
-      window.__listState[currentSection].filters = curFilters;
-      window.__listState[currentSection].page = 1;
-      const data = await loadSection();
-      renderSummary(data);
-    });
-    topControls.appendChild(statusLabel2);
-    topControls.appendChild(statusSel2);
-
-    // Route dropdown
-    const routeLabel = document.createElement('span');
-    routeLabel.className = 'mini';
-    routeLabel.textContent = 'Route:';
-    const routeSel = document.createElement('select');
-    const routeOpts = [
-      ['ALL',         'All'],
-      ['ELECTRONIC',  'Electronic'],
-      ['MANUAL',      'Manual'],
-      ['NHSP',        'NHSP'],
-      ['HEALTHROSTER','Healthroster'],
-      ['QR',          'QR timesheets']
-    ];
-    const routeCur = (stFilters.route_type || 'ALL').toUpperCase();
-    routeOpts.forEach(([v, label]) => {
-      const o = document.createElement('option');
-      o.value = v;
-      o.textContent = label;
-      if (routeCur === v) o.selected = true;
-      routeSel.appendChild(o);
-    });
-    routeSel.addEventListener('change', async () => {
-      const val = routeSel.value;
-      const curFilters = { ...(window.__listState[currentSection].filters || {}) };
-      curFilters.route_type = val;
-      window.__listState[currentSection].filters = curFilters;
-      window.__listState[currentSection].page = 1;
-      const data = await loadSection();
-      renderSummary(data);
-    });
-    topControls.appendChild(routeLabel);
-    topControls.appendChild(routeSel);
-
-    // Scope dropdown
-    const scopeLabel = document.createElement('span');
-    scopeLabel.className = 'mini';
-    scopeLabel.textContent = 'Type:';
-    const scopeSel = document.createElement('select');
-    const scopeOpts = [
-      ['ALL',    'Both'],
-      ['WEEKLY', 'Weekly only'],
-      ['DAILY',  'Daily only']
-    ];
-    const scopeCur = (stFilters.sheet_scope || 'ALL').toUpperCase();
-    scopeOpts.forEach(([v, label]) => {
-      const o = document.createElement('option');
-      o.value = v;
-      o.textContent = label;
-      if (scopeCur === v) o.selected = true;
-      scopeSel.appendChild(o);
-    });
-    scopeSel.addEventListener('change', async () => {
-      const val = scopeSel.value;
-      const curFilters = { ...(window.__listState[currentSection].filters || {}) };
-      curFilters.sheet_scope = val;
-      window.__listState[currentSection].filters = curFilters;
-      window.__listState[currentSection].page = 1;
-      const data = await loadSection();
-      renderSummary(data);
-    });
-    topControls.appendChild(scopeLabel);
-    topControls.appendChild(scopeSel);
-
-    // Flags: Adjusted only (Needs attention lives in Tools)
-    const mkFlag = (name, label) => {
-      const wrap = document.createElement('label');
-      wrap.className = 'mini';
-      wrap.style.display = 'flex';
-      wrap.style.alignItems = 'center';
-      wrap.style.gap = '4px';
-      const cb = document.createElement('input');
-      cb.type = 'checkbox';
-      cb.checked = !!stFilters[name];
-      cb.addEventListener('change', async () => {
-        const curFilters = { ...(window.__listState[currentSection].filters || {}) };
-        curFilters[name] = cb.checked ? true : false;
-        window.__listState[currentSection].filters = curFilters;
-        window.__listState[currentSection].page = 1;
-        const data = await loadSection();
-        renderSummary(data);
-      });
-      wrap.appendChild(cb);
-      wrap.appendChild(document.createTextNode(label));
-      return wrap;
-    };
-
-    topControls.appendChild(mkFlag('is_adjusted', 'Adjusted only'));
-  }
-
-  // Columns button (already supports per-column display name overrides via openColumnsDialog)
-  const btnCols = document.createElement('button');
-  btnCols.textContent = 'Columns';
-  btnCols.style.cssText = 'border:1px solid var(--line);background:#0b152a;color:var(--text);padding:4px 8px;border-radius:8px;cursor:pointer';
-  btnCols.addEventListener('click', () => openColumnsDialog(currentSection));
-  topControls.appendChild(btnCols);
-
-  const spacerTop = document.createElement('div'); spacerTop.style.flex = '1';
-  topControls.appendChild(spacerTop);
-
-  // Selected info / clear
-  const selInfo = document.createElement('div'); selInfo.className = 'mini';
-  const renderSelInfo = ()=>{ selInfo.textContent = (sel.ids.size > 0) ? `${sel.ids.size} selected.` : ''; };
-  renderSelInfo();
-
-  const clearBtn = document.createElement('button');
-  clearBtn.textContent = 'Clear selection';
-  clearBtn.style.cssText = 'border:1px solid var(--line);background:#0b152a;color:var(--text);padding:4px 8px;border-radius:8px;cursor:pointer;display:none';
-  clearBtn.onclick = ()=>{
-    clearSelection(); renderSelInfo();
-    Array.from(document.querySelectorAll('input.row-select')).forEach(cb=>{ cb.checked = false; });
-    const hdr = byId('summarySelectAll'); if (hdr) { hdr.checked=false; hdr.indeterminate=false; }
-    updateButtons();
-  };
-
-  topControls.appendChild(selInfo);
-  topControls.appendChild(clearBtn);
-  content.appendChild(topControls);
-
-  // ── apply extra Status filtering client-side for timesheets ────────────────
-  let effectiveRows = rows;
-  if (currentSection === 'timesheets') {
-    const stFilters = window.__listState[currentSection].filters || {};
-    const statusCode = (stFilters.status_code || 'ALL').toUpperCase();
-
-    if (statusCode === 'NO_MATCH_ID') {
-      effectiveRows = effectiveRows.filter(r => !r.candidate_id || !r.client_id);
-    } else if (statusCode === 'RATE_MISSING') {
-      effectiveRows = effectiveRows.filter(r => r.has_rate_issue === true);
-    } else if (statusCode === 'PAY_CHAN_MISS') {
-      effectiveRows = effectiveRows.filter(r => r.has_pay_channel_issue === true);
-    } else if (statusCode === 'READY_FOR_HR') {
-      effectiveRows = effectiveRows.filter(r =>
-        String(r.processing_status || '').toUpperCase() === 'READY_FOR_HR'
-      );
-    } else if (statusCode === 'READY_FOR_INV') {
-      effectiveRows = effectiveRows.filter(r =>
-        String(r.processing_status || '').toUpperCase() === 'READY_FOR_INVOICE'
-      );
-    }
-    // HR_HOURS_MISMATCH relies on backend hr_issue filter only
-  }
-  currentRows = effectiveRows;
-
-  // ── single table (header + body) inside scroll host ────────────────────────
-  const bodyWrap = document.createElement('div');
-  bodyWrap.className = 'summary-body';
-  content.appendChild(bodyWrap);
-
-  const tbl = document.createElement('table');
-  tbl.className = 'grid';
-
-  const thead = document.createElement('thead');
-  thead.style.borderBottom = '1px solid var(--line)';
-  const trh = document.createElement('tr');
-  thead.appendChild(trh);
-  tbl.appendChild(thead);
-
-  const tb = document.createElement('tbody');
-  tbl.appendChild(tb);
-  bodyWrap.appendChild(tbl);
-
-  let btnFocus, btnSave, btnResolve;
-
-  const computeHeaderState = ()=>{
-    const idsVisible = effectiveRows.map(r => String(r.id || ''));
-    const selectedOfVisible = idsVisible.filter(id => sel.ids.has(id)).length;
-    const hdrCbEl = byId('summarySelectAll');
-    if (hdrCbEl) {
-      hdrCbEl.checked = (idsVisible.length > 0 && selectedOfVisible === idsVisible.length);
-      hdrCbEl.indeterminate = (selectedOfVisible > 0 && selectedOfVisible < idsVisible.length);
-    }
-  };
-
-  const updateButtons = ()=>{
-    const any = sel.ids.size > 0;
-    if (btnFocus)   btnFocus.disabled   = !any;
-    if (btnSave)    btnSave.disabled    = !any;
-    if (btnResolve) btnResolve.disabled = !any;
-    clearBtn.style.display = any ? '' : 'none';
-    renderSelInfo();
-  };
-
-  // Determine columns (using server prefs)
-  const cols = getVisibleColumnsForSection(currentSection, effectiveRows);
-
-  // ── Force Issues column into timesheets view ───────────────────────────────
-  if (currentSection === 'timesheets') {
-    if (!cols.includes('issue_codes')) {
-      // Put Issues near the left so it’s visible by default
-      cols.unshift('issue_codes');
-    }
-  }
-
-  // Header checkbox (first column)
-  const thSel = document.createElement('th');
-  thSel.style.width = '40px';
-  thSel.style.minWidth = '40px';
-  thSel.style.maxWidth = '40px';
-
-  const hdrCb = document.createElement('input'); hdrCb.type='checkbox'; hdrCb.id='summarySelectAll';
-  hdrCb.addEventListener('click', (e)=>{
-    e.stopPropagation();
-    const idsVisible = effectiveRows.map(r => String(r.id || ''));
-    const wantOn = !!hdrCb.checked;
-    idsVisible.forEach(id => { if (wantOn) sel.ids.add(id); else sel.ids.delete(id); });
-    Array.from(document.querySelectorAll('input.row-select')).forEach(cb=>{ cb.checked = wantOn; });
-    computeHeaderState();
-    updateButtons();
-  });
-  thSel.appendChild(hdrCb);
-  trh.appendChild(thSel);
-
-  // Invoice sortable keys (backend /api/invoices allows only these)
-  const INVOICE_SORT_ALLOWED = new Set([
-    'issued_at_utc',
-    'due_at_utc',
-    'created_at',
-    'status_date_utc',
-    'invoice_no',
-    'subtotal_ex_vat',
-    'vat_amount',
-    'total_inc_vat',
-    'status'
-  ]);
-
-  // Build header cells with friendly labels, resizer handles, and click-to-sort
-  cols.forEach(c=>{
-    const th = document.createElement('th');
-    th.dataset.colKey = String(c);
-    th.style.cursor = 'pointer';
-
-    let label = getFriendlyHeaderLabel(currentSection, c);
-    if (currentSection === 'timesheets' && c === 'issue_codes') {
-      label = 'Issues';
-    }
-
-    // Only show sort arrow for invoice-supported keys when in invoices section
-    const isSortable =
-      (currentSection !== 'invoices') ? true : INVOICE_SORT_ALLOWED.has(String(c));
-
-    const isActive = isSortable && sortState && sortState.key === c;
-    const arrow = isActive ? (sortState.dir === 'asc' ? ' ▲' : ' ▼') : '';
-    th.textContent = label + arrow;
-
-    const res = document.createElement('div');
-    res.className = 'col-resizer';
-    res.title = 'Drag to resize. Double-click to reset.';
-    res.style.cssText = 'position:absolute;right:0;top:0;width:6px;height:100%;cursor:col-resize;user-select:none;';
-    th.appendChild(res);
-
-    th.draggable = true;
-
-    th.addEventListener('click', async (ev) => {
-      if (ev.target && ev.target.closest && ev.target.closest('.col-resizer')) return;
-
-      const colKey = th.dataset.colKey;
-      if (!colKey) return;
-
-      // invoices: only allow backend-supported sort keys (avoid misleading arrows)
-      if (currentSection === 'invoices' && !INVOICE_SORT_ALLOWED.has(colKey)) return;
-
-      window.__listState = window.__listState || {};
-      const st2 = (window.__listState[currentSection] ||= {
-        page: 1,
-        pageSize: 50,
-        total: null,
-        hasMore: false,
-        filters: null,
-        sort: { key: null, dir: 'asc' }
-      });
-
-      if (!st2.sort || typeof st2.sort !== 'object') {
-        st2.sort = { key: null, dir: 'asc' };
-      }
-
-      const prevDir = (st2.sort && st2.sort.key === colKey) ? st2.sort.dir : null;
-      const nextDir = (prevDir === 'asc') ? 'desc' : 'asc';
-
-      st2.sort = { key: colKey, dir: nextDir };
-      st2.page = 1;
-
-      try {
-        const data = await loadSection();
-        renderSummary(data);
-      } catch (e) {
-        console.error('Failed to apply sort', e);
-      }
-    });
-
-    trh.appendChild(th);
-  });
-
-  // Body rows
-  if (currentSection === 'candidates') {
-    tbl.style.width = 'auto';
-  }
-
-  effectiveRows.forEach(r=>{
-    const tr = document.createElement('tr');
-    tr.dataset.id = (r && r.id) ? String(r.id) : '';
-    tr.dataset.section = currentSection;
-
-    const tdSel = document.createElement('td');
-    tdSel.style.width = '40px';
-    tdSel.style.minWidth = '40px';
-    tdSel.style.maxWidth = '40px';
-
-    const cb = document.createElement('input'); cb.type='checkbox'; cb.className='row-select';
-    cb.checked = isRowSelected(tr.dataset.id);
-    cb.addEventListener('click', (e)=>{
-      e.stopPropagation();
-      const id = tr.dataset.id; setRowSelected(id, cb.checked);
-      computeHeaderState();
-      updateButtons();
-    });
-    tdSel.appendChild(cb); tr.appendChild(tdSel);
-
-    cols.forEach(c=>{
-      const td = document.createElement('td');
-      td.dataset.colKey = String(c);
-      const v = r[c];
-
-      if (currentSection === 'candidates' && c === 'job_titles_display') {
-        const raw = typeof r.job_titles_display === 'string' ? r.job_titles_display : (v || '');
-        if (!raw.trim()) {
-          td.textContent = '';
-        } else {
-          const parts = raw.split(';').map(s => s.trim()).filter(Boolean);
-          const rest  = parts.slice(1); // drop primary
-          td.textContent = rest.join('; ');
-        }
-      } else if (currentSection === 'timesheets' && c === 'issue_codes') {
-        // ── Issues column: badges ─────────────────────────────────────────────
-        td.classList.add('mini');
-
-        const hasTs = !!r.timesheet_id;
-        const codes = Array.isArray(v) ? v.filter(Boolean) : [];
-
-        if (!hasTs) {
-          // No timesheet yet (planned week only) – show nothing
-          td.textContent = '';
-        } else {
-          // Timesheet exists – use shared helper (green OK or red/amber badges)
-          td.appendChild(renderIssueBadges(codes));
-        }
-      } else if (currentSection === 'timesheets' && c === 'processing_status') {
-        // ─────────────────────────────────────────────────────────────
-        // ✅ UI overlay ONLY (do NOT change row.processing_status):
-        // If timesheet is invoiced AND locked_invoice_status exists:
-        //   - PAID   → "Invoice Paid" (precedence)
-        //   - ISSUED → "Invoiced (Issued)"
-        //   - else   → "Invoiced (Not issued)"
-        // Otherwise show raw processing_status value.
-        // ─────────────────────────────────────────────────────────────
-        const hasLockedInvoiceId = !!(r && r.locked_by_invoice_id);
-        const lis = String((r && Object.prototype.hasOwnProperty.call(r, 'locked_invoice_status')) ? (r.locked_invoice_status ?? '') : '').trim().toUpperCase();
-
-        if (hasLockedInvoiceId && lis) {
-          if (lis === 'PAID') td.textContent = 'Invoice Paid';
-          else if (lis === 'ISSUED') td.textContent = 'Invoiced (Issued)';
-          else td.textContent = 'Invoiced (Not issued)';
-        } else {
-          td.textContent = formatDisplayValue(c, v);
-        }
-      } else if (currentSection === 'invoices' && c === 'client_name') {
-        // Flattened client name (already set in pre-normalisation)
-        td.textContent = String(r.client_name || '');
-      } else {
-        td.textContent = formatDisplayValue(c, v);
-      }
-
-      tr.appendChild(td);
-    });
-
-    tb.appendChild(tr);
-  });
-
-  // ── Apply pending focus (from operations like pay-method change, change rates) ──
-  try {
-    if (window.__pendingFocus && window.__pendingFocus.section === currentSection) {
-      const pf   = window.__pendingFocus;
-      const ids  = Array.isArray(pf.ids) ? pf.ids.map(String) : [];
-      const pids = Array.isArray(pf.primaryIds) ? pf.primaryIds.map(String) : [];
-      const idSet   = new Set(ids);
-      const priSet  = new Set(pids);
-      let firstPrimaryRow = null;
-
-      tb.querySelectorAll('tr').forEach(tr => {
-        const id = String(tr.dataset.id || '');
-        if (idSet.has(id)) {
-          tr.classList.add('pending-focus');
-          if (priSet.has(id)) tr.classList.add('pending-focus-primary');
-          if (!firstPrimaryRow && priSet.has(id)) {
-            firstPrimaryRow = tr;
-          }
-        }
-      });
-
-      if (firstPrimaryRow) {
-        try {
-          firstPrimaryRow.scrollIntoView({ block: 'center', behavior: 'smooth' });
-        } catch {}
-      }
-
-      window.__pendingFocus = null;
-    }
-  } catch (e) {
-    console.warn('pendingFocus application failed (non-fatal)', e);
-  }
-
-  // ── NEW: Candidates row context menu (Open / Advances & loans) ─────────────
-  if (currentSection === 'candidates') {
-    if (!window.__ensureCandidateRowMenu) {
-      window.__candRowMenuEl = null;
-      window.__candRowMenuRow = null;
-
-      window.__hideCandidateRowMenu = function() {
-        const el = window.__candRowMenuEl;
-        if (el) el.style.display = 'none';
-        window.__candRowMenuRow = null;
-      };
-
-      window.__ensureCandidateRowMenu = function() {
-        if (!window.__candRowMenuEl) {
-          const menu = document.createElement('div');
-          menu.id = 'candidateRowContextMenu';
-          menu.style.position = 'fixed';
-          menu.style.zIndex = '9999';
-          menu.style.background = '#0b152a';
-          menu.style.border = '1px solid var(--line)';
-          menu.style.borderRadius = '6px';
-          menu.style.minWidth = '180px';
-          menu.style.boxShadow = '0 4px 12px rgba(0,0,0,0.5)';
-          menu.style.display = 'none';
-          menu.innerHTML = `
-            <div class="ctx-item" data-action="open" style="padding:6px 10px;cursor:pointer;">Open candidate…</div>
-            <div class="ctx-item" data-action="advances" style="padding:6px 10px;cursor:pointer;border-top:1px solid var(--line);">
-              Advances / loans…
-            </div>
-          `;
-          menu.addEventListener('click', (e) => {
-            const item = e.target.closest('.ctx-item');
-            if (!item) return;
-            const action = item.getAttribute('data-action') || '';
-            const row = window.__candRowMenuRow;
-            window.__hideCandidateRowMenu();
-            if (!row) return;
-            if (action === 'open') {
-              if (typeof openCandidate === 'function') openCandidate(row);
-            } else if (action === 'advances') {
-              if (typeof openCandidateAdvancesModal === 'function') openCandidateAdvancesModal(row);
-            }
-          });
-          document.body.appendChild(menu);
-          window.__candRowMenuEl = menu;
-
-          document.addEventListener('click', (ev) => {
-            const el = window.__candRowMenuEl;
-            if (!el || el.style.display === 'none') return;
-            if (ev.target && el.contains(ev.target)) return;
-            window.__hideCandidateRowMenu();
-          }, true);
-
-          document.addEventListener('contextmenu', (ev) => {
-            const el = window.__candRowMenuEl;
-            if (!el || el.style.display === 'none') return;
-            if (ev.target && el.contains(ev.target)) return;
-            window.__hideCandidateRowMenu();
-          }, true);
-
-          window.addEventListener('scroll', () => window.__hideCandidateRowMenu(), true);
-        }
-        return window.__candRowMenuEl;
-      };
-    }
-
-    tb.addEventListener('contextmenu', (ev) => {
-      const tr = ev.target && ev.target.closest('tr[data-id]');
-      if (!tr) return;
-      ev.preventDefault();
-
-      const id = String(tr.dataset.id || '');
-      const row = currentRows.find(x => String(x.id || '') === id) || rows.find(x => String(x.id || '') === id);
-      if (!row) return;
-
-      window.__candRowMenuRow = row;
-      const menu = window.__ensureCandidateRowMenu();
-      if (!menu) return;
-
-      const x = ev.clientX;
-      const y = ev.clientY;
-
-      menu.style.left = `${x}px`;
-      menu.style.top  = `${y}px`;
-      menu.style.display = 'block';
-    });
-  }
-
-  tb.addEventListener('click', (ev) => {
-    const tr = ev.target && ev.target.closest('tr'); if (!tr) return;
-    if (ev.target && ev.target.classList && ev.target.classList.contains('row-select')) return;
-    tb.querySelectorAll('tr.selected').forEach(n => n.classList.remove('selected'));
-    tr.classList.add('selected');
-    const id = tr.dataset.id;
-    currentSelection = currentRows.find(x => String(x.id) === id) || null;
-  });
-
-  tb.addEventListener('dblclick', (ev) => {
-    const tr = ev.target && ev.target.closest('tr'); if (!tr) return;
-    if (!confirmDiscardChangesIfDirty()) return;
-    tb.querySelectorAll('tr.selected').forEach(n => n.classList.remove('selected'));
-    tr.classList.add('selected');
-    const id = tr.dataset.id;
-    const row = currentRows.find(x => String(x.id) === id) || null;
-    if (!row) return;
-    const beforeDepth = (window.__modalStack && window.__modalStack.length) || 0;
-    openDetails(row);
-    setTimeout(() => {
-      const afterDepth = (window.__modalStack && window.__modalStack.length) || 0;
-      if (afterDepth > beforeDepth) tb.querySelectorAll('tr.selected').forEach(n => n.classList.remove('selected'));
-    }, 0);
-  });
-
-  // ── Apply widths + wire resize/reorder + header context menu ────────────────
-  applyUserGridPrefs(currentSection, tbl, cols);
-  wireGridColumnResizing(currentSection, tbl);
-  wireGridColumnReorder(currentSection, tbl);
-  attachHeaderContextMenu(currentSection, tbl);
-
-  // Footer/pager
-  const pager = document.createElement('div');
-  pager.style.cssText = 'display:flex;align-items:center;gap:6px;padding:8px 10px;border-top:1px solid var(--line);';
-  const info = document.createElement('span'); info.className = 'mini';
-
-  const mkBtn = (label, disabled, onClick) => {
-    const b = document.createElement('button');
-    b.textContent = label; b.disabled = !!disabled;
-    b.style.cssText = 'border:1px solid var(--line);background:#0b152a;color:var(--text);padding:4px 8px;border-radius:8px;cursor:pointer';
-    if (!disabled) b.addEventListener('click', onClick);
-    return b;
-  };
-
-  const hasMore = !!st.hasMore;
-  const totalKnown = (typeof st.total === 'number');
-  const current = page;
-  let maxPageToShow;
-  if (totalKnown && pageSize !== 'ALL') maxPageToShow = Math.max(1, Math.ceil(st.total / Number(pageSize)));
-  else if (pageSize === 'ALL') maxPageToShow = 1;
-  else maxPageToShow = hasMore ? (current + 1) : current;
-
-  // If pageSize is ALL, hide navigation controls (single-page UX)
-  if (pageSize !== 'ALL') {
-    const prevBtn = mkBtn('Prev', current <= 1, async () => {
-      window.__listState[currentSection].page = Math.max(1, current - 1);
-      const data = await loadSection();
-      renderSummary(data);
-    });
-    pager.appendChild(prevBtn);
-
-    const makePageLink = (n) => mkBtn(String(n), n === current, async () => {
-      window.__listState[currentSection].page = n;
-      const data = await loadSection();
-      renderSummary(data);
-    });
-
-    const pages = [];
-    if (maxPageToShow <= 7) { for (let n=1; n<=maxPageToShow; n++) pages.push(n); }
-    else {
-      pages.push(1);
-      if (current > 3) pages.push('…');
-      for (let n=Math.max(2, current-1); n<=Math.min(maxPageToShow-1, current+1); n++) pages.push(n);
-      if (hasMore || current+1 < maxPageToShow) pages.push('…');
-      pages.push(maxPageToShow);
-    }
-    pages.forEach(pn => {
-      if (pn === '…') { const span = document.createElement('span'); span.textContent = '…'; span.className = 'mini'; pager.appendChild(span); }
-      else pager.appendChild(makePageLink(pn));
-    });
-
-    const nextBtn = mkBtn('Next', (!hasMore && (!totalKnown || current >= maxPageToShow)), async () => {
-      window.__listState[currentSection].page = current + 1;
-      const data = await loadSection();
-      renderSummary(data);
-    });
-    pager.appendChild(nextBtn);
-  }
-
-  if (pageSize === 'ALL') info.textContent = `Showing all ${effectiveRows.length} ${currentSection}.`;
-  else if (totalKnown) {
-    const ps = Number(pageSize);
-    const start = (current-1)*ps + 1;
-    const end = Math.min(start + effectiveRows.length - 1, st.total || start - 1);
-    info.textContent = `Showing ${start}–${end}${st.total!=null ? ` of ${st.total}` : ''}`;
-  } else {
-    const ps = Number(pageSize);
-    const start = (current-1)*ps + 1;
-    const end = start + effectiveRows.length - 1;
-    info.textContent = `Showing ${start}–${end}${hasMore ? '+' : ''}`;
-  }
-  const spacer = document.createElement('div'); spacer.style.flex = '1';
-  pager.appendChild(spacer); pager.appendChild(info);
-  content.appendChild(pager);
-
-  // Selection toolbar
-  const selBar = document.createElement('div');
-  selBar.style.cssText = 'display:flex;justify-content:flex-end;gap:8px;padding:6px 10px;border-top:1px dashed var(--line)';
-  btnFocus = document.createElement('button');
-  btnFocus.title = 'Focus on records';
-  btnFocus.textContent = '🔍 Focus';
-  btnFocus.style.cssText = 'border:1px solid var(--line);background:#0b152a;color:var(--text);padding:4px 8px;border-radius:8px;cursor:pointer';
-
-  btnSave = document.createElement('button');
-  btnSave.title = 'Save selection';
-  btnSave.textContent = '🔍 Save';
-  btnSave.style.cssText = btnFocus.style.cssText;
-
-  const btnLoad = document.createElement('button');
-  btnLoad.title = 'Load selection';
-  btnLoad.textContent = '🔍 Load';
-  btnLoad.style.cssText = btnFocus.style.cssText;
-
-  btnFocus.addEventListener('click', async () => {
-    if (sel.ids.size === 0) return;
-    const ids = Array.from(sel.ids);
-    try {
-      if (typeof applySelectionAsFilter === 'function') {
-        await applySelectionAsFilter(currentSection, { ids });
-      } else {
-        window.__listState = window.__listState || {};
-        const st2 = (window.__listState[currentSection] ||= { page:1, pageSize:50, total:null, hasMore:false, filters:null, sort:{ key:null, dir:'asc' } });
-        st2.page = 1; st2.filters = { ...(st2.filters||{}), ids };
-        const rows2 = await search(currentSection, st2.filters);
-        renderSummary(rows2);
-      }
-    } catch (e) { console.error('Focus failed', e); }
-  });
-
-  btnSave.addEventListener('click', async () => {
-    if (sel.ids.size === 0) return;
-    try { await openSaveSelectionModal ? openSaveSelectionModal(currentSection) : null; } catch {}
-  });
-
-  btnLoad.addEventListener('click', async () => {
-    try {
-      if (typeof openLoadSelectionModal === 'function') await openLoadSelectionModal(currentSection);
-    } catch {}
-  });
-
-  selBar.appendChild(btnFocus);
-  selBar.appendChild(btnSave);
-  selBar.appendChild(btnLoad);
-
-  // NEW: Timesheets Resolve… button (uses current selection)
-  if (currentSection === 'timesheets' && typeof openTimesheetsResolveModal === 'function') {
-    btnResolve = document.createElement('button');
-    btnResolve.title = 'Resolve candidate/client for selected timesheets';
-    btnResolve.textContent = 'Resolve…';
-    btnResolve.style.cssText = btnFocus.style.cssText;
-    btnResolve.disabled = sel.ids.size === 0;
-
-    btnResolve.addEventListener('click', () => {
-      if (sel.ids.size === 0) return;
-      const selectedRows = currentRows.filter(r => sel.ids.has(String(r.id || '')));
-      if (!selectedRows.length) return;
-      openTimesheetsResolveModal(selectedRows);
-    });
-
-    selBar.appendChild(btnResolve);
-  }
-
-  content.appendChild(selBar);
-
-  // Restore scroll memory on inner summary-body (data rows only)
-  try {
-    const scrollHost = content.querySelector('.summary-body');
-    if (scrollHost) {
-      scrollHost.__activeMemKey = memKey;
-      scrollHost.scrollTop = prevScrollY;
-      if (!scrollHost.__scrollMemHooked) {
-        scrollHost.addEventListener('scroll', () => {
-          const k = scrollHost.__activeMemKey || memKey;
-          window.__scrollMemory[k] = scrollHost.scrollTop || 0;
-        });
-        scrollHost.__scrollMemHooked = true;
-      }
-    }
-  } catch {}
-
-  // Initial states
-  computeHeaderState();
-  updateButtons();
-
-  try { primeSummaryMembership(currentSection, fp); } catch (e) { /* non-blocking */ }
-}
-
 
 // ================== NEW: renderSettingsTab (tab renderer; showModal controls read-only) ==================
 function renderSettingsTab(key, s = {}) {
@@ -48963,1724 +51074,6 @@ function renderTimesheetExpensesTab(ctx) {
             Note: Evidence enforcement happens on Save. If required evidence is missing, Save will fail with an “Evidence required” message and you should upload receipts in the Evidence tab.
           </div>
           ${evidenceHint}
-        </div>
-      </div>
-    </div>
-  `;
-}
-
-
-function renderTimesheetLinesTab(ctx) {
-    const { LOGM, L, GC, GE } = getTsLoggers('[TS][LINES]');
-  const { row, details, related, state } = normaliseTimesheetCtx(ctx);
-
-
-  GC('render');
-
-  const ts      = details.timesheet || {};
-  const tsId    = row.timesheet_id || ts.timesheet_id || null;
-  const segs    = Array.isArray(details.segments) ? details.segments : [];
-  const ib      = details.invoiceBreakdown || null;
-  const mode    = ib && typeof ib.mode === 'string' ? ib.mode : null;
-  const shifts  = Array.isArray(details.shifts) ? details.shifts : [];
-  const isSegments = !!details.isSegmentsMode;
-
-  const sheetScope = (details.sheet_scope || row.sheet_scope || ts.sheet_scope || '').toUpperCase();
-  const subMode    = (row.submission_mode || ts.submission_mode || '').toUpperCase();
-
-  const tsfin  = details.tsfin || {};
-  const locked = !!(tsfin.locked_by_invoice_id || tsfin.paid_at_utc);
-  const basis  = String(tsfin.basis || row.basis || '').toUpperCase();
-
-  const isNhspOrHrSelfBillBasis = [
-    'NHSP',
-    'NHSP_ADJUSTMENT',
-    'HEALTHROSTER_SELF_BILL',
-    'HEALTHROSTER_ADJUSTMENT'
-  ].includes(basis);
-
-  const segTargets = state.segmentInvoiceTargets || {};
-  state.segmentInvoiceTargets = segTargets;
-
-  const hasTsfin = !!(
-    tsfin && (
-      tsfin.timesheet_id ||
-      tsfin.total_hours != null ||
-      tsfin.total_pay_ex_vat != null ||
-      tsfin.processing_status
-    )
-  );
-  const hasContractWeek = !!(details.contract_week_id || row.contract_week_id);
-  const isPlannedOnly   = !hasTsfin && hasContractWeek && !tsId;
-
-  L('snapshot', {
-    tsId,
-    mode,
-    segmentsCount: segs.length,
-    shiftsCount: shifts.length,
-    sheetScope,
-    subMode,
-    basis,
-    hasTsfin,
-    hasContractWeek,
-    isPlannedOnly,
-    locked
-  });
-  GE();
-
-  const esc = (typeof escapeHtml === 'function')
-    ? escapeHtml
-    : (s) => String(s == null ? '' : s)
-        .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
-        .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
-
-  // UI helper: YYYY-MM-DD → DD-MM-YYYY
-  const fmtYmdDmy = (ymd) => {
-    if (!ymd || typeof ymd !== 'string') return ymd || '';
-    const m = ymd.match(/^(\d{4})-(\d{2})-(\d{2})$/);
-    if (!m) return ymd;
-    const [, y, mo, d] = m;
-    return `${d}-${mo}-${y}`;
-  };
-
-  const toYmd = (d) => {
-    const yyyy = d.getUTCFullYear();
-    const mm   = String(d.getUTCMonth() + 1).padStart(2, '0');
-    const dd   = String(d.getUTCDate()).toString().padStart(2, '0');
-    return `${yyyy}-${mm}-${dd}`;
-  };
-
-  // ─────────────────────────────────────────────────────
-  // SEGMENTS mode (NHSP / HR self-bill) unchanged
-  // ─────────────────────────────────────────────────────
-  const computeWeekStartFromWeekEnding = (weYmd) => {
-    if (!weYmd) return null;
-    const d = new Date(`${weYmd}T00:00:00Z`);
-    if (Number.isNaN(d.getTime())) return weYmd;
-    d.setUTCDate(d.getUTCDate() - 6);
-    return toYmd(d);
-  };
-
-  // Current invoice week = Monday of "today"
-  const computeCurrentWeekStart = () => {
-    const now = new Date();
-    const base = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
-    const day = base.getUTCDay();      // 0=Sun..6=Sat
-    const offset = (day + 6) % 7;      // since Monday
-    base.setUTCDate(base.getUTCDate() - offset);
-    return toYmd(base);
-  };
-
-  const tsWeekEnding     =
-    ts.week_ending_date ||
-    row.week_ending_date ||
-    (details.contract_week && details.contract_week.week_ending_date) ||
-    null;
-
-  const naturalWeekStart = tsWeekEnding ? computeWeekStartFromWeekEnding(tsWeekEnding) : null;
-  const currentWeekStart = computeCurrentWeekStart();
-  const pauseWeekStart   = '2099-01-05'; // "Pause"
-
-  const disabledAttr = locked ? 'disabled' : '';
-
-const buildInvoiceWeekSelectHtml = (seg) => {
-  if (!isNhspOrHrSelfBillBasis) return '<span class="mini">—</span>';
-  const segId = String(seg.segment_id || '');
-  if (!segId) return '<span class="mini">—</span>';
-
-  // ✅ Capture these BEFORE we potentially write segTargets[segId] below
-  // (prevents "default This week" being treated as an explicit delay)
-  const hadStagedBefore = Object.prototype.hasOwnProperty.call(segTargets, segId);
-  const storedTargetRaw = String(seg.invoice_target_week_start || '').trim();
-  const lockedInvoiceId = String(seg.invoice_locked_invoice_id || '').trim();
-
-  const currentTarget =
-    segTargets[segId] ||
-    storedTargetRaw ||
-    currentWeekStart ||
-    '';
-
-  const opts = [];
-  const seen = new Set();
-
-  if (currentWeekStart) {
-    opts.push({ value: currentWeekStart, label: 'This week' });
-    seen.add(currentWeekStart);
-
-    const nextDate = new Date(`${currentWeekStart}T00:00:00Z`);
-    nextDate.setUTCDate(nextDate.getUTCDate() + 7);
-    const nextWeekStart = toYmd(nextDate);
-    opts.push({ value: nextWeekStart, label: `Week starting ${fmtYmdDmy(nextWeekStart)}` });
-    seen.add(nextWeekStart);
-
-    for (let i = 2; i <= 8; i++) {
-      const d = new Date(`${currentWeekStart}T00:00:00Z`);
-      d.setUTCDate(d.getUTCDate() + i * 7);
-      const ws = toYmd(d);
-      if (!seen.has(ws)) {
-        opts.push({ value: ws, label: `Week starting ${fmtYmdDmy(ws)}` });
-        seen.add(ws);
-      }
-    }
-  }
-
-  if (naturalWeekStart && !seen.has(naturalWeekStart)) {
-    opts.push({ value: naturalWeekStart, label: `Natural week (${fmtYmdDmy(naturalWeekStart)})` });
-    seen.add(naturalWeekStart);
-  }
-
-  if (!seen.has(pauseWeekStart)) {
-    opts.push({ value: pauseWeekStart, label: 'Pause (defer)' });
-    seen.add(pauseWeekStart);
-  }
-
-  let selectedVal = currentTarget || currentWeekStart || '';
-  const optionValues = opts.map(o => o.value);
-  if (!optionValues.includes(selectedVal)) {
-    selectedVal = optionValues.includes(currentWeekStart) ? currentWeekStart : pauseWeekStart;
-  }
-
-  // Keep existing behavior: always stage the selected value
-  segTargets[segId] = selectedVal;
-
-  const optionsHtml = opts.map(o => {
-    const sel = (o.value === selectedVal) ? 'selected' : '';
-    return `<option value="${o.value}" ${sel}>${o.label}</option>`;
-  }).join('');
-
-  // helper just for the hint text (DD/MM/YYYY)
-  const fmtYmdDmySlash = (ymd) => {
-    const s = String(ymd || '').slice(0, 10);
-    const m = s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
-    if (!m) return s;
-    const [, y, mo, d] = m;
-    return `${d}/${mo}/${y}`;
-  };
-
-  // ✅ Match SQL semantics:
-  // delayed if:
-  //   invoice_locked_invoice_id is null/empty AND
-  //   invoice_target_week_start is explicitly present (stored OR previously staged) AND
-  //   invoice_target_week_start !== baseline week start
-  //
-  // where baseline is naturalWeekStart (week_ending_date - 6)
-  const hasExplicitTarget = hadStagedBefore || !!storedTargetRaw;
-  const targetForDelay = hadStagedBefore ? String(selectedVal || '').trim() : storedTargetRaw;
-
-  const isPermanentDelay = (targetForDelay === pauseWeekStart);
-
-  const isInvoiceDelayed =
-    hasExplicitTarget &&
-    !lockedInvoiceId &&
-    (
-      isPermanentDelay ||
-      (!!naturalWeekStart && !!targetForDelay && targetForDelay !== naturalWeekStart)
-    );
-
-  const delayHint = isInvoiceDelayed
-    ? (isPermanentDelay ? 'Permanently delayed' : `Delayed until ${fmtYmdDmySlash(targetForDelay)}`)
-    : '';
-
-  return `
-    <select name="seg_invoice_week" data-segment-id="${segId}" ${disabledAttr}>
-      ${optionsHtml}
-    </select>
-    ${delayHint ? `<span class="mini">${delayHint}</span>` : ``}
-  `;
-};
-
-
-  if (isSegments && segs.length && isNhspOrHrSelfBillBasis) {
-    const headHtml = `
-      <thead>
-        <tr>
-          <th>Date</th>
-          <th>Ref / Request</th>
-          <th>Source</th>
-          <th>Hours</th>
-          <th>Pay</th>
-          <th>Charge</th>
-          <th>Exclude from pay</th>
-          <th>Invoice week / Pause</th>
-        </tr>
-      </thead>
-    `;
-
-    const bodyRows = segs.map((seg) => {
-      const effOverride = state.segmentOverrides && state.segmentOverrides[seg.segment_id];
-      const effExclude  = effOverride && Object.prototype.hasOwnProperty.call(effOverride, 'exclude_from_pay')
-        ? !!effOverride.exclude_from_pay
-        : !!seg.exclude_from_pay;
-
-      const srcRaw = seg.source_system || (seg.segment_id || '').split(':')[0] || '';
-      const src  = srcRaw || '';
-      const rawDate = seg.date || seg.work_date || '';
-      const displayDate = rawDate ? fmtYmdDmy(rawDate) : '';
-      const dateCellHtml = displayDate || '<span class="mini">—</span>';
-
-      const hours = seg.total_hours ?? seg.hours_day ?? seg.hours_night ?? seg.hours ?? '';
-      const pay   = seg.pay_amount   ?? seg.pay_ex_vat ?? '';
-      const charge= seg.charge_amount?? seg.charge_ex_vat ?? '';
-
-      const ref   = seg.ref_num || '';
-      const reqId = seg.request_id || '';
-
- const segId = String(seg.segment_id || '');
-
-// ✅ MUST capture these BEFORE buildInvoiceWeekSelectHtml() mutates segTargets[segId]
-const hadStagedBefore = Object.prototype.hasOwnProperty.call(segTargets, segId);
-const storedTargetRaw = String(seg.invoice_target_week_start || '').trim();
-const lockedInvoiceId = String(seg.invoice_locked_invoice_id || '').trim();
-
-// build HTML (this may write segTargets[segId])
-const invoiceWeekCellHtml = buildInvoiceWeekSelectHtml(seg);
-
-// ✅ Determine delay using SQL semantics (explicit stored OR staged-before)
-const hasExplicitTarget = hadStagedBefore || !!storedTargetRaw;
-const targetForDelay = hadStagedBefore ? String(segTargets[segId] || '').trim() : storedTargetRaw;
-
-const baseline = String(naturalWeekStart || '').trim();
-const isPermanentDelay = (targetForDelay === pauseWeekStart);
-
-const isInvoiceDelayed =
-  hasExplicitTarget &&
-  !lockedInvoiceId &&
-  (
-    isPermanentDelay ||
-    (baseline && targetForDelay && targetForDelay !== baseline)
-  );
-
-const rowIsFlagged = !!effExclude || isInvoiceDelayed;
-const rowStyle = rowIsFlagged ? ` style="background: rgba(192, 57, 43, 0.18);"` : '';
-
-
-
-
-      return `
-        <tr data-segment-id="${seg.segment_id}"${rowStyle}>
-          <td>${dateCellHtml}</td>
-          <td>
-            ${ref ? `<span class="mini">Ref: ${esc(ref)}</span>` : ''}
-            ${reqId ? `<br><span class="mini">Req: ${esc(reqId)}</span>` : ''}
-            ${(!ref && !reqId) ? '<span class="mini">—</span>' : ''}
-          </td>
-          <td>${src ? esc(src) : '<span class="mini">—</span>'}</td>
-          <td>${hours !== '' ? esc(hours) : '<span class="mini">—</span>'}</td>
-          <td>${pay   !== '' ? esc(pay)   : '<span class="mini">—</span>'}</td>
-          <td>${charge!== '' ? esc(charge): '<span class="mini">—</span>'}</td>
-          <td>
-            <input
-              type="checkbox"
-              name="seg_exclude_from_pay"
-              data-segment-id="${seg.segment_id}"
-              ${effExclude ? 'checked' : ''}
-              ${disabledAttr}
-            />
-            <span class="mini">Tick = exclude from pay (staged)</span>
-          </td>
-          <td>${invoiceWeekCellHtml}</td>
-        </tr>
-      `;
-    }).join('');
-
-    return `
-      <div class="tabc">
-        <div class="card">
-          <div class="row">
-            <label>Timesheet ID</label>
-            <div class="controls">${tsId || '<span class="mini">Unknown</span>'}</div>
-          </div>
-          <div class="row">
-            <label>Mode</label>
-            <div class="controls">
-              <span class="mini">Invoice breakdown mode: ${esc(mode || 'UNKNOWN')} (basis: ${esc(basis || 'UNKNOWN')})</span>
-            </div>
-          </div>
-        </div>
-
-        <div class="card" style="margin-top:10px;">
-          <div class="row">
-            <label>Lines</label>
-            <div class="controls">
-              <div style="max-height:320px;overflow:auto;">
-                <table class="grid mini">
-                  ${headHtml}
-                  <tbody>${bodyRows}</tbody>
-                </table>
-              </div>
-            </div>
-          </div>
-          <div class="row">
-            <label></label>
-            <div class="controls">
-              <span class="mini">Changes to "Exclude from pay" and "Invoice week / Pause" are staged only. They are applied when you click Save on the Timesheet modal.</span>
-            </div>
-          </div>
-        </div>
-      </div>
-    `;
-  }
-
-  // ─────────────────────────────────────────────────────
-  // WEEKLY: shift-line grid (schedule-driven ONLY)
-  // ─────────────────────────────────────────────────────
-  if (sheetScope === 'WEEKLY') {
-    const frameMode =
-      (typeof window.__getModalFrame === 'function' ? window.__getModalFrame()?.mode : null) ||
-      'view';
-
-    const isEditMode = (frameMode === 'edit' || frameMode === 'create');
-    const canEditSchedule = isEditMode && !locked && subMode === 'MANUAL';
-
-    // Build full 7-day week list (always show all days)
-    const dowShort = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
-    let weekDays = [];
-    if (tsWeekEnding) {
-      try {
-        const base = new Date(`${tsWeekEnding}T00:00:00Z`);
-        for (let offset = 6; offset >= 0; offset--) {
-          const d = new Date(base);
-          d.setUTCDate(base.getUTCDate() - offset);
-          weekDays.push({
-            ymd: toYmd(d),
-            dow: dowShort[d.getUTCDay()]
-          });
-        }
-      } catch {
-        weekDays = [];
-      }
-    }
-    if (!weekDays.length) {
-      // still render something rather than crash; schedule editor expects 7 days when week ending exists
-      weekDays = [{ ymd: '', dow: '' }];
-    }
-
-    // Persist weekDays on state so the window helper can always build/validate
-    state.__weekDaysForSchedule = weekDays;
-
-    const tryParse = (src) => {
-      if (!src) return null;
-      if (Array.isArray(src) || typeof src === 'object') return JSON.parse(JSON.stringify(src));
-      if (typeof src === 'string') {
-        try {
-          const p = JSON.parse(src);
-          if (Array.isArray(p) || typeof p === 'object') return p;
-        } catch {}
-      }
-      return null;
-    };
-
-    let seedSchedule = null;
-    if (Array.isArray(state.schedule) && state.schedule.length) {
-      seedSchedule = tryParse(state.schedule);
-    } else {
-      seedSchedule = tryParse(ts.actual_schedule_json);
-      if ((!seedSchedule || !seedSchedule.length) && details && details.contract_week) {
-        const cw2 = details.contract_week;
-        const src = (cw2.planned_schedule_json != null) ? cw2.planned_schedule_json
-                 : (cw2.std_schedule_json != null)     ? cw2.std_schedule_json
-                 : null;
-        seedSchedule = tryParse(src);
-      }
-    }
-    if (!Array.isArray(seedSchedule)) seedSchedule = [];
-
-    const normDate = (seg) => String(seg?.date || seg?.date_ymd || seg?.work_date || '').trim();
-
-    const asLondonHHMM = (iso) => {
-      try {
-        const d = new Date(String(iso || ''));
-        if (Number.isNaN(d.getTime())) return '';
-        return d.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'Europe/London' });
-      } catch { return ''; }
-    };
-
-    const normHHMM = (seg, keyHH, keyIso) => {
-      const s = String(seg?.[keyHH] || '').trim();
-      if (s) return s;
-      const iso = seg?.[keyIso] || null;
-      return iso ? asLondonHHMM(iso) : '';
-    };
-
-    const segRef = (seg) => {
-      const v =
-        seg?.ref_num ??
-        seg?.reference ??
-        seg?.ref ??
-        seg?.ref_number ??
-        seg?.request_id ??
-        '';
-      return String(v || '').trim();
-    };
-
-    // de-dupe primary break if break_start/break_end also appears in breaks[]
-    const segBreaks = (seg) => {
-      const out = [];
-      const seen = new Set();
-
-      const add = (startRaw, endRaw) => {
-        const s = String(startRaw || '').trim();
-        const e = String(endRaw   || '').trim();
-        if (!s && !e) return;
-        const key = `${s}→${e}`;
-        if (seen.has(key)) return;
-        seen.add(key);
-        out.push({ start: s, end: e });
-      };
-
-      const bArr = Array.isArray(seg?.breaks) ? seg.breaks : [];
-      add(seg?.break_start, seg?.break_end);
-      bArr.forEach(b => add(b?.start, b?.end));
-      return out;
-    };
-
-    const parseHHMM = (s) => {
-      const m = String(s || '').trim().match(/^(\d{1,2}):(\d{2})$/);
-      if (!m) return null;
-      const hh = Number(m[1]), mm = Number(m[2]);
-      if (!Number.isFinite(hh) || !Number.isFinite(mm)) return null;
-      if (hh < 0 || hh > 23 || mm < 0 || mm > 59) return null;
-      return hh * 60 + mm;
-    };
-
-    const parseBreakMins = (v) => {
-      const s = String(v == null ? '' : v).trim();
-      if (!s) return 0;
-      const m = s.match(/^(\d{1,4})(?:\s*m)?$/i);
-      if (!m) return NaN;
-      const n = Number(m[1]);
-      if (!Number.isFinite(n) || n < 0) return NaN;
-      return Math.floor(n);
-    };
-
-    // Build default linesByDate from seedSchedule (shift lines + break-only lines)
-    // supports schedule seg.break_minutes -> seeds break_mins
-    const buildLinesFromSchedule = () => {
-      const byDate = {};
-      for (const seg of seedSchedule) {
-        const ymd = normDate(seg);
-        if (!ymd) continue;
-        (byDate[ymd] ||= []).push(seg);
-      }
-
-      for (const ymd of Object.keys(byDate)) {
-        byDate[ymd].sort((a, b) => {
-          const sa = parseHHMM(normHHMM(a, 'start', 'start_utc')) ?? -1;
-          const sb = parseHHMM(normHHMM(b, 'start', 'start_utc')) ?? -1;
-          if (sa !== sb) return sa - sb;
-          const ea = parseHHMM(normHHMM(a, 'end', 'end_utc')) ?? -1;
-          const eb = parseHHMM(normHHMM(b, 'end', 'end_utc')) ?? -1;
-          return ea - eb;
-        });
-      }
-
-      const linesByDate = {};
-      for (const wd of weekDays) {
-        const ymd = wd.ymd;
-        const segsDay = (ymd && byDate[ymd]) ? byDate[ymd] : [];
-        const lines = [];
-
-        for (const seg of segsDay) {
-          const breaks = segBreaks(seg);
-          const b0 = breaks[0] || { start: '', end: '' };
-
-          const segBreakMinutes =
-            (seg && (seg.break_minutes != null || seg.break_mins != null))
-              ? (Number(seg.break_minutes ?? seg.break_mins) || 0)
-              : 0;
-
-          const useBreakMins = (!breaks.length && segBreakMinutes > 0);
-
-          lines.push({
-            ref: segRef(seg),
-            start: normHHMM(seg, 'start', 'start_utc'),
-            end:   normHHMM(seg, 'end',   'end_utc'),
-            break_start: useBreakMins ? '' : String(b0.start || '').trim(),
-            break_end:   useBreakMins ? '' : String(b0.end   || '').trim(),
-            break_mins:  useBreakMins ? String(Math.round(segBreakMinutes)) : ''
-          });
-
-          for (let i = 1; i < breaks.length; i++) {
-            const b = breaks[i] || {};
-            lines.push({
-              ref: '',
-              start: '',
-              end: '',
-              break_start: String(b.start || '').trim(),
-              break_end:   String(b.end   || '').trim(),
-              break_mins: ''
-            });
-          }
-        }
-
-        if (!lines.length) {
-          lines.push({ ref:'', start:'', end:'', break_start:'', break_end:'', break_mins:'' });
-        }
-
-        linesByDate[ymd] = lines;
-      }
-
-      return linesByDate;
-    };
-
-    const stable = (x) => { try { return JSON.stringify(x || null); } catch { return ''; } };
-
-    state.weeklyLinesByDate = (state.weeklyLinesByDate && typeof state.weeklyLinesByDate === 'object') ? state.weeklyLinesByDate : null;
-    state.extraShiftCount   = Number.isFinite(Number(state.extraShiftCount)) ? Math.max(0, Number(state.extraShiftCount)) : 0;
-
-    const seedHash  = stable(seedSchedule);
-    const priorHash = state.__weeklyLinesSeedHash || '';
-
-    // Only auto-reseed in VIEW mode (never clobber edits)
-    if (!state.weeklyLinesByDate || (frameMode === 'view' && priorHash !== seedHash)) {
-      state.weeklyLinesByDate = buildLinesFromSchedule();
-      state.__weeklyLinesSeedHash = seedHash;
-
-      // derive extraShiftCount so the UI shows all stored lines (including break-only lines)
-      let maxLines = 1;
-      for (const wd of weekDays) {
-        const arr = state.weeklyLinesByDate[wd.ymd] || [];
-        if (arr.length > maxLines) maxLines = arr.length;
-      }
-      state.extraShiftCount = Math.max(0, maxLines - 1);
-    }
-
-    // Ensure every day has the same number of visible line slots
-    const totalLinesPerDay = Math.max(1, 1 + Number(state.extraShiftCount || 0), (() => {
-      let m = 1;
-      for (const wd of weekDays) {
-        const arr = state.weeklyLinesByDate?.[wd.ymd] || [];
-        if (arr.length > m) m = arr.length;
-      }
-      return m;
-    })());
-
-    for (const wd of weekDays) {
-      const ymd = wd.ymd;
-      const arr = Array.isArray(state.weeklyLinesByDate?.[ymd]) ? state.weeklyLinesByDate[ymd].slice() : [];
-      while (arr.length < totalLinesPerDay) arr.push({ ref:'', start:'', end:'', break_start:'', break_end:'', break_mins:'' });
-      if (arr.length > totalLinesPerDay) arr.length = totalLinesPerDay;
-      state.weeklyLinesByDate[ymd] = arr;
-    }
-
-    // Paid hours per shift line (includes break-only lines below it)
-    const paidByKey = {};
-    for (const wd of weekDays) {
-      const ymd = wd.ymd;
-      const lines = state.weeklyLinesByDate[ymd] || [];
-
-      let curShiftIdx = null;
-      let curShiftStart = null;
-      let curShiftEndAdj = null;
-      let curBreakMins = 0;
-
-      const diffMins = (a, b) => {
-        const am = parseHHMM(a);
-        const bm = parseHHMM(b);
-        if (am == null || bm == null) return null;
-        let d = bm - am;
-        if (d < 0) d += 1440;
-        return d;
-      };
-
-      const addBreakFromLine = (ln) => {
-        const bm = parseBreakMins(ln.break_mins);
-        const hasMins = Number.isFinite(bm) && bm > 0;
-        const hasWin = !!(String(ln.break_start || '').trim() || String(ln.break_end || '').trim());
-
-        if (hasMins) { curBreakMins += bm; return; }
-        if (hasWin) {
-          const d = diffMins(ln.break_start, ln.break_end);
-          if (Number.isFinite(d) && d > 0) curBreakMins += d;
-        }
-      };
-
-      const finalize = () => {
-        if (curShiftIdx == null) return;
-        if (curShiftStart == null || curShiftEndAdj == null) {
-          paidByKey[`${ymd}:${curShiftIdx}`] = '';
-          return;
-        }
-        const shiftMins = Math.max(0, curShiftEndAdj - curShiftStart);
-        const paidMins = Math.max(0, shiftMins - (Number(curBreakMins) || 0));
-        paidByKey[`${ymd}:${curShiftIdx}`] = (Math.round((paidMins / 60) * 100) / 100).toFixed(2);
-      };
-
-      for (let i = 0; i < lines.length; i++) {
-        const ln = lines[i] || {};
-        const hasShift = !!(String(ln.start||'').trim() || String(ln.end||'').trim());
-        const hasBreakAny =
-          !!(String(ln.break_start||'').trim() || String(ln.break_end||'').trim()) ||
-          (Number.isFinite(parseBreakMins(ln.break_mins)) && parseBreakMins(ln.break_mins) > 0);
-
-        if (hasShift) {
-          finalize();
-
-          const s0 = parseHHMM(ln.start);
-          const e0 = parseHHMM(ln.end);
-
-          curShiftIdx = i;
-          curBreakMins = 0;
-
-          if (s0 != null && e0 != null && s0 !== e0) {
-            curShiftStart = s0;
-            curShiftEndAdj = (e0 > s0) ? e0 : (e0 + 1440);
-          } else {
-            curShiftStart = null;
-            curShiftEndAdj = null;
-          }
-
-          if (hasBreakAny) addBreakFromLine(ln);
-        } else if (hasBreakAny && curShiftIdx != null) {
-          addBreakFromLine(ln);
-        }
-      }
-      finalize();
-    }
-
-    const disabledAttrManual = (!canEditSchedule) ? 'disabled' : '';
-
-    // Ensure these exist
-    state.scheduleErrorsByDate = (state.scheduleErrorsByDate && typeof state.scheduleErrorsByDate === 'object') ? state.scheduleErrorsByDate : {};
-    state.scheduleHasErrors = !!state.scheduleHasErrors;
-
-    // ─────────────────────────────────────────────────────────────
-    // Uses your NEW global helper: buildWeeklyScheduleFromLinesAndValidate
-    // Updates state.schedule + state.scheduleHasErrors + state.scheduleErrorsByDate
-    // Also does UI highlighting + dispatch event for Finance tab.
-    // ─────────────────────────────────────────────────────────────
-    const applyScheduleFromLines = (st) => {
-      if (typeof buildWeeklyScheduleFromLinesAndValidate !== 'function') return null;
-
-      const wd = Array.isArray(st.__weekDaysForSchedule) && st.__weekDaysForSchedule.length
-        ? st.__weekDaysForSchedule
-        : weekDays;
-
-      const out = buildWeeklyScheduleFromLinesAndValidate(st.weeklyLinesByDate, wd, {
-        allowOvernight: true,
-        allowBreakMins: true
-      });
-
-      st.schedule = Array.isArray(out?.schedule) ? out.schedule : [];
-      st.scheduleErrorsByDate = (out?.errorsByDate && typeof out.errorsByDate === 'object') ? out.errorsByDate : {};
-      st.scheduleHasErrors = !!out?.hasErrors;
-      st.__scheduleUpdatedAt = Date.now();
-
-      // Live highlight: if a date has any errors, mark all inputs for that date
-      try {
-        const errs = st.scheduleErrorsByDate || {};
-        const allDates = new Set(Object.keys(st.weeklyLinesByDate || {}));
-        for (const d of allDates) {
-          const hasErr = !!errs[d];
-          const sel = `#tsWeeklySchedule input[data-date="${CSS.escape(d)}"]`;
-          document.querySelectorAll(sel).forEach(inp => {
-            if (hasErr) inp.classList.add('is-invalid');
-            else inp.classList.remove('is-invalid');
-          });
-        }
-        const banner = document.getElementById('tsWeeklyErrorsBanner');
-        if (banner) banner.style.display = st.scheduleHasErrors ? '' : 'none';
-      } catch {}
-
-      // Notify other tabs (Finance) that schedule/errors changed
-      try {
-        window.dispatchEvent(new CustomEvent('ts-weekly-schedule-updated', {
-          detail: {
-            hasErrors: !!st.scheduleHasErrors,
-            errorsByDate: st.scheduleErrorsByDate || {},
-            scheduleCount: Array.isArray(st.schedule) ? st.schedule.length : 0
-          }
-        }));
-      } catch {}
-
-      return out;
-    };
-
-    // Install helper in THIS TAB (not showModal)
-    try {
-      if (!window.__tsWeeklyLinesHelper || window.__tsWeeklyLinesHelper.__v !== 4) {
-        window.__tsWeeklyLinesHelper = {
-          __v: 4,
-
-          _hhmm(raw) {
-            let s = String(raw || '').trim();
-            if (!s) return '';
-            if (/^\d{1,2}:\d{2}$/.test(s)) {
-              const [h, m] = s.split(':');
-              const hh = String(Number(h) || 0).padStart(2, '0');
-              const mm = String(Number(m) || 0).padStart(2, '0');
-              return `${hh}:${mm}`;
-            }
-            s = s.replace(':', '');
-            if (!/^\d{1,4}$/.test(s)) return '';
-            if (s.length <= 2) {
-              const h = Number(s);
-              if (!Number.isFinite(h)) return '';
-              return `${String(h).padStart(2, '0')}:00`;
-            }
-            const mm = s.slice(-2);
-            const h  = s.slice(0, -2);
-            const hh = String(Number(h) || 0).padStart(2, '0');
-            const mm2 = String(Number(mm) || 0).padStart(2, '0');
-            return `${hh}:${mm2}`;
-          },
-
-          _normBreakMins(raw) {
-            const s = String(raw == null ? '' : raw).trim();
-            if (!s) return '';
-            const m = s.match(/^(\d{1,4})(?:\s*m)?$/i);
-            if (!m) return '';
-            const n = Number(m[1]);
-            if (!Number.isFinite(n) || n < 0) return '';
-            return String(Math.floor(n));
-          },
-
-          _parse(s) {
-            const m = String(s || '').trim().match(/^(\d{1,2}):(\d{2})$/);
-            if (!m) return null;
-            const hh = Number(m[1]), mm = Number(m[2]);
-            if (!Number.isFinite(hh) || !Number.isFinite(mm) || hh < 0 || hh > 23 || mm < 0 || mm > 59) return null;
-            return hh * 60 + mm;
-          },
-
-          _diff(a, b) {
-            const am = this._parse(a);
-            const bm = this._parse(b);
-            if (am == null || bm == null) return null;
-            let d = bm - am;
-            if (d < 0) d += 1440;
-            return d;
-          },
-
-          _parseBreakMins(raw) {
-            const s = String(raw == null ? '' : raw).trim();
-            if (!s) return 0;
-            const m = s.match(/^(\d{1,4})(?:\s*m)?$/i);
-            if (!m) return NaN;
-            const n = Number(m[1]);
-            if (!Number.isFinite(n) || n < 0) return NaN;
-            return Math.floor(n);
-          },
-
-          _getState() {
-            const mc = window.modalCtx || {};
-            const st = mc.timesheetState || null;
-            const fr = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
-            if (!st) return { st: null, fr: null };
-
-            st.weeklyLinesByDate = (st.weeklyLinesByDate && typeof st.weeklyLinesByDate === 'object') ? st.weeklyLinesByDate : {};
-            st.scheduleErrorsByDate = (st.scheduleErrorsByDate && typeof st.scheduleErrorsByDate === 'object') ? st.scheduleErrorsByDate : {};
-            st.extraShiftCount = Number.isFinite(Number(st.extraShiftCount)) ? Math.max(0, Number(st.extraShiftCount)) : 0;
-            st.scheduleHasErrors = !!st.scheduleHasErrors;
-
-            return { st, fr };
-          },
-
-      _ensureLine(st, date, idx) {
-  const d = String(date || '');
-  const i = Number(idx || 0);
-  if (!d || !Number.isFinite(i) || i < 0) return null;
-
-  st.weeklyLinesByDate[d] = Array.isArray(st.weeklyLinesByDate[d]) ? st.weeklyLinesByDate[d] : [];
-  while (st.weeklyLinesByDate[d].length <= i) {
-    st.weeklyLinesByDate[d].push({ ref:'', start:'', end:'', break_start:'', break_end:'', break_mins:'' });
-  }
-  st.weeklyLinesByDate[d][i] = st.weeklyLinesByDate[d][i] || { ref:'', start:'', end:'', break_start:'', break_end:'', break_mins:'' };
-  if (st.weeklyLinesByDate[d][i].break_mins == null) st.weeklyLinesByDate[d][i].break_mins = '';
-  return st.weeklyLinesByDate[d][i];
-},
-
-_syncBreakMinsLock(date, idx, ln) {
-  try {
-    const d = String(date || '');
-    const i = Number(idx);
-    if (!d || !Number.isFinite(i)) return;
-
-    const hasWindow = !!(String(ln?.break_start || '').trim() || String(ln?.break_end || '').trim());
-
-    const minsEl = document.querySelector(
-      `input[data-weekly-field="break_mins"][data-date="${CSS.escape(d)}"][data-line-idx="${i}"]`
-    );
-    if (!minsEl) return;
-
-    if (hasWindow) {
-      minsEl.dataset.breaklock = '1';
-      minsEl.disabled = true;
-      minsEl.readOnly = true;
-      return;
-    }
-
-    // Only re-enable if we were the reason it was disabled (avoid fighting global readonly)
-    if (minsEl.dataset.breaklock === '1') {
-      minsEl.disabled = false;
-      minsEl.readOnly = false;
-      delete minsEl.dataset.breaklock;
-    }
-  } catch {}
-},
-
-          _recalcPaidForDate(st, date) {
-            const d = String(date || '');
-            if (!d) return;
-
-            const lines = Array.isArray(st.weeklyLinesByDate[d]) ? st.weeklyLinesByDate[d] : [];
-            let curShiftIdx = null;
-            let curShiftStart = null;
-            let curShiftEndAdj = null;
-            let curBreakMins = 0;
-
-            const setPaid = (idx, val) => {
-              try {
-                const el = document.querySelector(`span.sched-paid-hours[data-date="${CSS.escape(d)}"][data-line-idx="${idx}"]`);
-                if (el) el.textContent = (val == null ? '' : String(val));
-              } catch {}
-            };
-
-            const fin = () => {
-              if (curShiftIdx == null) return;
-              if (curShiftStart == null || curShiftEndAdj == null) {
-                setPaid(curShiftIdx, '');
-                return;
-              }
-              const shiftMins = Math.max(0, curShiftEndAdj - curShiftStart);
-              const paidMins  = Math.max(0, shiftMins - (Number(curBreakMins) || 0));
-              setPaid(curShiftIdx, (Math.round((paidMins / 60) * 100) / 100).toFixed(2));
-            };
-
-            const addBreak = (ln) => {
-              const bm = this._parseBreakMins(ln.break_mins);
-              const hasMins = Number.isFinite(bm) && bm > 0;
-              const hasWin = !!(String(ln.break_start||'').trim() || String(ln.break_end||'').trim());
-
-              if (hasMins) { curBreakMins += bm; return; }
-              if (hasWin) {
-                const x = this._diff(ln.break_start, ln.break_end);
-                if (Number.isFinite(x) && x > 0) curBreakMins += x;
-              }
-            };
-
-            for (let i = 0; i < lines.length; i++) {
-              const ln = lines[i] || {};
-              const hasShift = !!(String(ln.start||'').trim() || String(ln.end||'').trim());
-              const bm = this._parseBreakMins(ln.break_mins);
-              const hasBreak =
-                !!(String(ln.break_start||'').trim() || String(ln.break_end||'').trim()) ||
-                (Number.isFinite(bm) && bm > 0);
-
-              if (hasShift) {
-                fin();
-
-                const s0 = this._parse(ln.start);
-                const e0 = this._parse(ln.end);
-
-                curShiftIdx = i;
-                curBreakMins = 0;
-
-                if (s0 != null && e0 != null && s0 !== e0) {
-                  curShiftStart = s0;
-                  curShiftEndAdj = (e0 > s0) ? e0 : (e0 + 1440);
-                } else {
-                  curShiftStart = null;
-                  curShiftEndAdj = null;
-                }
-
-                if (hasBreak) addBreak(ln);
-              } else if (hasBreak && curShiftIdx != null) {
-                addBreak(ln);
-              }
-            }
-
-            fin();
-
-            // clear paid text for non-shift lines
-            for (let i = 0; i < lines.length; i++) {
-              const ln = lines[i] || {};
-              const hasShift = !!(String(ln.start||'').trim() || String(ln.end||'').trim());
-              if (!hasShift) setPaid(i, '');
-            }
-          },
-
-          _markDirty() {
-            try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
-          },
-
-          onInput(el) {
-            try {
-              const { st } = this._getState();
-              if (!st || !el) return;
-
-              const date  = String(el.dataset.date || '');
-              const idx   = Number(el.dataset.lineIdx || '0');
-              const field = String(el.dataset.weeklyField || '');
-
-              if (!date || !Number.isFinite(idx) || idx < 0 || !field) return;
-
-              const ln = this._ensureLine(st, date, idx);
-              if (!ln) return;
-
-           ln[field] = String(el.value || '');
-
-// If user is using break start/end on this line:
-// - keep break_mins OUT of state (avoid mixing)
-// - but auto-populate the break_mins *display* so the user can see the duration
-if (field === 'break_start' || field === 'break_end') {
-  const bs = String(ln.break_start || '').trim();
-  const be = String(ln.break_end   || '').trim();
-  const hasWindow = !!(bs || be);
-
-  // Always keep mins empty in state when a window is used
-  if (hasWindow) ln.break_mins = '';
-
-  // Auto-fill the UI mins box (read-only/disabled is fine; value still shows)
-  try {
-    const minsEl = document.querySelector(
-      `input[data-weekly-field="break_mins"][data-date="${CSS.escape(date)}"][data-line-idx="${idx}"]`
-    );
-    if (minsEl) {
-      // Only show mins when BOTH start+end are present and valid
-      const d = (bs && be) ? this._diff(bs, be) : null; // minutes, supports overnight
-      minsEl.value = (Number.isFinite(d) && d >= 0) ? String(d) : '';
-    }
-  } catch {}
-
-  // ✅ lock/unlock break mins for THIS line only
-  this._syncBreakMinsLock(date, idx, ln);
-} else {
-  // keep existing behaviour for other fields
-  this._syncBreakMinsLock(date, idx, ln);
-}
-
-
-// ✅ paid hours updates live, including after tab-away (onBlur calls onInput)
-this._recalcPaidForDate(st, date);
-
-// ✅ rebuild + validate schedule on every edit (pre-save Finance preview fix)
-applyScheduleFromLines(st);
-
-this._markDirty();
-
-            } catch {}
-          },
-
-          onBlur(el) {
-            try {
-              if (!el) return;
-              const field = String(el.dataset.weeklyField || '');
-              if (field === 'start' || field === 'end' || field === 'break_start' || field === 'break_end') {
-                el.value = this._hhmm(el.value);
-              }
-              if (field === 'break_mins') {
-                el.value = this._normBreakMins(el.value);
-              }
-              this.onInput(el);
-            } catch {}
-          },
-
-          addLine() {
-            const { st, fr } = this._getState();
-            if (!st) return;
-
-            const dates = Object.keys(st.weeklyLinesByDate || {});
-            if (!dates.length) return;
-
-            const cur = Number(st.extraShiftCount || 0);
-            st.extraShiftCount = (Number.isFinite(cur) ? cur : 0) + 1;
-
-            const wantLen = 1 + st.extraShiftCount;
-            for (const d of dates) {
-              st.weeklyLinesByDate[d] = Array.isArray(st.weeklyLinesByDate[d]) ? st.weeklyLinesByDate[d] : [];
-              while (st.weeklyLinesByDate[d].length < wantLen) {
-                st.weeklyLinesByDate[d].push({ ref:'', start:'', end:'', break_start:'', break_end:'', break_mins:'' });
-              }
-              if (st.weeklyLinesByDate[d].length > wantLen) st.weeklyLinesByDate[d].length = wantLen;
-              this._recalcPaidForDate(st, d);
-            }
-
-            applyScheduleFromLines(st);
-            this._markDirty();
-
-            try {
-              if (fr && fr.entity === 'timesheets') {
-                fr._suppressDirty = true;
-                fr.setTab('lines');
-                fr._suppressDirty = false;
-                fr._updateButtons && fr._updateButtons();
-              }
-            } catch {}
-          },
-
-          removeLine() {
-            const { st, fr } = this._getState();
-            if (!st) return;
-
-            const cur = Number(st.extraShiftCount || 0);
-            if (!Number.isFinite(cur) || cur <= 0) return;
-
-            const wantLen = 1 + (cur - 1);
-
-            let hasData = false;
-            for (const d of Object.keys(st.weeklyLinesByDate || {})) {
-              const arr = Array.isArray(st.weeklyLinesByDate[d]) ? st.weeklyLinesByDate[d] : [];
-              const last = arr[arr.length - 1] || null;
-              if (last) {
-                if (
-                  String(last.ref || '').trim() ||
-                  String(last.start || '').trim() ||
-                  String(last.end || '').trim() ||
-                  String(last.break_start || '').trim() ||
-                  String(last.break_end || '').trim() ||
-                  String(last.break_mins || '').trim()
-                ) {
-                  hasData = true;
-                  break;
-                }
-              }
-            }
-            if (hasData) {
-              const ok = window.confirm('The last shift line contains data on at least one day. Remove it anyway?');
-              if (!ok) return;
-            }
-
-            st.extraShiftCount = cur - 1;
-
-            for (const d of Object.keys(st.weeklyLinesByDate || {})) {
-              const arr = Array.isArray(st.weeklyLinesByDate[d]) ? st.weeklyLinesByDate[d] : [];
-              if (arr.length > wantLen) arr.length = wantLen;
-              while (arr.length < wantLen) arr.push({ ref:'', start:'', end:'', break_start:'', break_end:'', break_mins:'' });
-              st.weeklyLinesByDate[d] = arr;
-              this._recalcPaidForDate(st, d);
-            }
-
-            applyScheduleFromLines(st);
-            this._markDirty();
-
-            try {
-              if (fr && fr.entity === 'timesheets') {
-                fr._suppressDirty = true;
-                fr.setTab('lines');
-                fr._suppressDirty = false;
-                fr._updateButtons && fr._updateButtons();
-              }
-            } catch {}
-          },
-
-          resetAll() {
-            const { st, fr } = this._getState();
-            if (!st) return;
-
-            const ok = window.confirm('Reset the weekly schedule grid back to a blank week?');
-            if (!ok) return;
-
-            st.extraShiftCount = 0;
-            for (const d of Object.keys(st.weeklyLinesByDate || {})) {
-              st.weeklyLinesByDate[d] = [{ ref:'', start:'', end:'', break_start:'', break_end:'', break_mins:'' }];
-              this._recalcPaidForDate(st, d);
-            }
-
-            applyScheduleFromLines(st);
-            this._markDirty();
-
-            try {
-              if (fr && fr.entity === 'timesheets') {
-                fr._suppressDirty = true;
-                fr.setTab('lines');
-                fr._suppressDirty = false;
-                fr._updateButtons && fr._updateButtons();
-              }
-            } catch {}
-          }
-        };
-      }
-    } catch {}
-
-    // Ensure schedule/errors are computed at least once for this render
-    try { applyScheduleFromLines(state); } catch {}
-
-   const badgeHtml = (!tsId)
-  ? (subMode === 'MANUAL'
-      ? '<span class="pill pill-bad">UNPROCESSED (manual)</span>'
-      : '<span class="pill pill-info">UNPROCESSED (electronic, read-only)</span>')
-  : (subMode === 'MANUAL'
-      ? '<span class="pill pill-ok">CONFIRMED HOURS (manual)</span>'
-      : '<span class="pill pill-elec">CONFIRMED HOURS (electronic, read-only)</span>');
-
-    const errorsByDate = (state.scheduleErrorsByDate && typeof state.scheduleErrorsByDate === 'object')
-      ? state.scheduleErrorsByDate
-      : {};
-
-    const hasAnyErrors = !!(state.scheduleHasErrors || Object.keys(errorsByDate).length);
-
-    const rowsHtml = weekDays.map((wd) => {
-      const ymd = wd.ymd;
-      const dayLines = state.weeklyLinesByDate?.[ymd] || [];
-      const displayDate = ymd ? fmtYmdDmy(ymd) : '';
-      const dateCellHtml = displayDate || '<span class="mini">—</span>';
-
-      const dateHasErr = !!errorsByDate[ymd];
-      const errClass = dateHasErr ? ' is-invalid' : '';
-
-      return dayLines.map((ln, lineIdx) => {
-        const keyPaid = paidByKey[`${ymd}:${lineIdx}`] || '';
-        const lineNo = lineIdx + 1;
-       // ✅ compute these OUTSIDE the template string
-  const hasBreakWindow = !!(String(ln?.break_start || '').trim() || String(ln?.break_end || '').trim());
-  const breakMinsLockAttr = hasBreakWindow ? 'disabled' : '';
-  const breakMinsLockData = hasBreakWindow ? 'data-breaklock="1"' : ''; 
-
-        return `
-        
-          <tr data-weekly-line="1" data-date="${esc(ymd)}" data-line-idx="${lineIdx}">
-            <td>${esc(wd.dow || '') || '<span class="mini">—</span>'}</td>
-            <td>${dateCellHtml}</td>
-            <td><span class="mini">#${lineNo}</span></td>
-
-            <td>
-              <input type="text"
-                     class="input mini${errClass}"
-                     name="wl_ref_${esc(ymd)}_${lineIdx}"
-                     data-weekly-field="ref"
-                     data-date="${esc(ymd)}"
-                     data-line-idx="${lineIdx}"
-                     value="${esc(ln?.ref || '')}"
-                     oninput="window.__tsWeeklyLinesHelper&&window.__tsWeeklyLinesHelper.onInput(this)"
-                     ${disabledAttrManual} />
-            </td>
-
-            <td>
-              <input type="text"
-                     class="input${errClass}"
-                     name="wl_start_${esc(ymd)}_${lineIdx}"
-                     data-weekly-field="start"
-                     data-date="${esc(ymd)}"
-                     data-line-idx="${lineIdx}"
-                     value="${esc(ln?.start || '')}"
-                     oninput="window.__tsWeeklyLinesHelper&&window.__tsWeeklyLinesHelper.onInput(this)"
-                     onblur="window.__tsWeeklyLinesHelper&&window.__tsWeeklyLinesHelper.onBlur(this)"
-                     ${disabledAttrManual} />
-            </td>
-
-            <td>
-              <input type="text"
-                     class="input${errClass}"
-                     name="wl_end_${esc(ymd)}_${lineIdx}"
-                     data-weekly-field="end"
-                     data-date="${esc(ymd)}"
-                     data-line-idx="${lineIdx}"
-                     value="${esc(ln?.end || '')}"
-                     oninput="window.__tsWeeklyLinesHelper&&window.__tsWeeklyLinesHelper.onInput(this)"
-                     onblur="window.__tsWeeklyLinesHelper&&window.__tsWeeklyLinesHelper.onBlur(this)"
-                     ${disabledAttrManual} />
-            </td>
-
-            <td>
-              <input type="text"
-                     class="input${errClass}"
-                     name="wl_break_start_${esc(ymd)}_${lineIdx}"
-                     data-weekly-field="break_start"
-                     data-date="${esc(ymd)}"
-                     data-line-idx="${lineIdx}"
-                     value="${esc(ln?.break_start || '')}"
-                     oninput="window.__tsWeeklyLinesHelper&&window.__tsWeeklyLinesHelper.onInput(this)"
-                     onblur="window.__tsWeeklyLinesHelper&&window.__tsWeeklyLinesHelper.onBlur(this)"
-                     ${disabledAttrManual} />
-            </td>
-
-            <td>
-              <input type="text"
-                     class="input${errClass}"
-                     name="wl_break_end_${esc(ymd)}_${lineIdx}"
-                     data-weekly-field="break_end"
-                     data-date="${esc(ymd)}"
-                     data-line-idx="${lineIdx}"
-                     value="${esc(ln?.break_end || '')}"
-                     oninput="window.__tsWeeklyLinesHelper&&window.__tsWeeklyLinesHelper.onInput(this)"
-                     onblur="window.__tsWeeklyLinesHelper&&window.__tsWeeklyLinesHelper.onBlur(this)"
-                     ${disabledAttrManual} />
-            </td>
-
-          <td>
-  <input type="text"
-         class="input${errClass}"
-         name="wl_break_mins_${esc(ymd)}_${lineIdx}"
-         data-weekly-field="break_mins"
-         data-date="${esc(ymd)}"
-         data-line-idx="${lineIdx}"
-         ${breakMinsLockData}
-         value="${esc(ln?.break_mins || '')}"
-         oninput="window.__tsWeeklyLinesHelper&&window.__tsWeeklyLinesHelper.onInput(this)"
-         onblur="window.__tsWeeklyLinesHelper&&window.__tsWeeklyLinesHelper.onBlur(this)"
-         ${disabledAttrManual} ${breakMinsLockAttr} />
-</td>
-
-
-            <td>
-              <span class="mini sched-paid-hours" data-date="${esc(ymd)}" data-line-idx="${lineIdx}">
-                ${esc(keyPaid || '')}
-              </span>
-            </td>
-          </tr>
-        `;
-      }).join('');
-    }).join('');
-
-    const resetButtonHtml = (!canEditSchedule)
-      ? ''
-      : `
-        <button type="button"
-                class="btn mini"
-                data-ts-action="reset-schedule"
-                onclick="window.__tsWeeklyLinesHelper&&window.__tsWeeklyLinesHelper.resetAll();return false;">
-          Reset timesheet schedule
-        </button>
-      `;
-
-    const extraLineButtonsHtml = (!canEditSchedule)
-      ? ''
-      : `
-        <button type="button"
-                class="btn mini"
-                data-ts-action="extra-shift-add"
-                onclick="window.__tsWeeklyLinesHelper&&window.__tsWeeklyLinesHelper.addLine();return false;">
-          Extra shift lines +
-        </button>
-        <button type="button"
-                class="btn mini"
-                data-ts-action="extra-shift-remove"
-                onclick="window.__tsWeeklyLinesHelper&&window.__tsWeeklyLinesHelper.removeLine();return false;">
-          Extra shift lines -
-        </button>
-      `;
-
-      const scheduleHelpText = canEditSchedule
-      ? 'Each line is either: (1) a shift (fill Ref + Start + End), OR (2) an additional break for the most recent shift above (leave Start/End blank). For breaks you may use either Break start/end OR Break (mins) (do not mix). Save applies changes.'
-      : 'Schedule is shown read-only. Multiple shifts on the same day appear as multiple lines.';
-
-    // ✅ NEW: Additional Rates units entry table (weekly manual only, same edit gate as schedule)
-    let extrasCardHtml = '';
-    try {
-      const isWeeklyManualContext = (sheetScope === 'WEEKLY' && subMode === 'MANUAL');
-      const canEditExtras = !!canEditSchedule;
-      const disabledAttrExtras = canEditExtras ? '' : 'disabled';
-
-      const contract = (related && related.contract) ? related.contract : null;
-
-      let cfgArr = (contract && contract.additional_rates_json != null) ? contract.additional_rates_json : [];
-      if (typeof cfgArr === 'string') {
-        try { cfgArr = JSON.parse(cfgArr); } catch { cfgArr = []; }
-      }
-      if (!Array.isArray(cfgArr)) cfgArr = [];
-
-      if (isWeeklyManualContext && cfgArr.length) {
-        // BH list is global and supplied on details.policy (openTimesheet planned-week stub now includes it)
-        let bhArr = [];
-        try {
-          const raw = details && details.policy ? details.policy.bh_list : null;
-          if (Array.isArray(raw)) bhArr = raw;
-          else if (typeof raw === 'string') {
-            try {
-              const p = JSON.parse(raw || '[]');
-              if (Array.isArray(p)) bhArr = p;
-            } catch {}
-          }
-        } catch { bhArr = []; }
-
-        const bhSet = new Set((bhArr || []).map(x => String(x).slice(0, 10)));
-
-        const freqNorm = (raw) => {
-          const s = String(raw || '').toUpperCase();
-          if (s === 'ONE_PER_WEEK') return 'ONE_PER_WEEK';
-          if (s === 'ONE_PER_DAY') return 'ONE_PER_DAY';
-          if (s === 'WEEKENDS_AND_BH_ONLY') return 'WEEKENDS_AND_BH_ONLY';
-          if (s === 'WEEKDAYS_EXCL_BH_ONLY') return 'WEEKDAYS_EXCL_BH_ONLY';
-          return 'ONE_PER_WEEK';
-        };
-
-        const weekRangeLabel = (() => {
-          if (Array.isArray(weekDays) && weekDays.length === 7 && weekDays[0]?.ymd && weekDays[6]?.ymd) {
-            return `${fmtYmdDmy(String(weekDays[0].ymd).slice(0, 10))} – ${fmtYmdDmy(String(weekDays[6].ymd).slice(0, 10))}`;
-          }
-          if (tsWeekEnding) return fmtYmdDmy(String(tsWeekEnding).slice(0, 10));
-          return '';
-        })();
-
-        // Current staged values live in state.additionalRates (seeded by openTimesheet)
-        const stExtras = (state && state.additionalRates && typeof state.additionalRates === 'object')
-          ? state.additionalRates
-          : {};
-
-        const getStagedWeekUnits = (code) => {
-          const r = stExtras[code];
-          if (!r || typeof r !== 'object') return '';
-          const v = r.units_week;
-          if (v == null) return '';
-          return String(v);
-        };
-
-        const getStagedDayUnits = (code, ymd) => {
-          const r = stExtras[code];
-          if (!r || typeof r !== 'object') return '';
-          const per = (r.units_per_day && typeof r.units_per_day === 'object') ? r.units_per_day : {};
-          const v = per[ymd];
-          if (v == null) return '';
-          return String(v);
-        };
-
-        const rows = [];
-
-        for (let i = 0; i < cfgArr.length; i++) {
-          const cfg = cfgArr[i] && typeof cfgArr[i] === 'object' ? cfgArr[i] : {};
-          const code = String(cfg.code || '').toUpperCase().trim();
-          if (!code) continue;
-
-          const bucketName = String(cfg.bucket_name || code);
-          const unitName   = String(cfg.unit_name || '');
-          const freq       = freqNorm(cfg.frequency);
-
-          if (freq === 'ONE_PER_WEEK') {
-            rows.push({
-              dayLabel: 'Week',
-              dateLabel: weekRangeLabel,
-              code,
-              bucketName,
-              unitName,
-              ymd: '',
-              value: getStagedWeekUnits(code)
-            });
-            continue;
-          }
-
-          // Per-day modes always iterate the same 7 day list used by the schedule grid.
-          for (const wd of (Array.isArray(weekDays) ? weekDays : [])) {
-            const ymd = String(wd?.ymd || '').slice(0, 10);
-            const dow = String(wd?.dow || '').trim();
-            if (!/^\d{4}-\d{2}-\d{2}$/.test(ymd)) continue;
-
-            const isBh = bhSet.has(ymd);
-            const isWeekend = (dow === 'Sat' || dow === 'Sun');
-            const isWeekday = (dow === 'Mon' || dow === 'Tue' || dow === 'Wed' || dow === 'Thu' || dow === 'Fri');
-
-            let include = false;
-            let dayLabel = dow;
-
-            if (freq === 'ONE_PER_DAY') {
-              include = true;
-            } else if (freq === 'WEEKENDS_AND_BH_ONLY') {
-              include = isWeekend || isBh;
-              // ✅ overlap rule: if BH on Sat/Sun, render ONCE but label as BH
-              if (include && isBh) dayLabel = 'BH';
-            } else if (freq === 'WEEKDAYS_EXCL_BH_ONLY') {
-              // ✅ Mon–Fri excluding BH weekdays
-              include = isWeekday && !isBh;
-            }
-
-            if (!include) continue;
-
-            rows.push({
-              dayLabel,
-              dateLabel: fmtYmdDmy(ymd),
-              code,
-              bucketName,
-              unitName,
-              ymd,
-              value: getStagedDayUnits(code, ymd)
-            });
-          }
-        }
-
-        const rowsHtml = rows.map(r => {
-          const nameAttr = r.ymd
-            ? `extra_units_${esc(r.code)}_${esc(r.ymd)}`
-            : `extra_units_${esc(r.code)}`;
-
-          const ymdAttr = r.ymd ? `data-extra-ymd="${esc(r.ymd)}"` : '';
-
-          return `
-            <tr>
-              <td>${esc(r.dayLabel)}</td>
-              <td>${esc(r.dateLabel)}</td>
-              <td>${esc(r.bucketName)}</td>
-              <td>
-                <input
-                  type="number"
-                  min="0"
-                  step="0.01"
-                  class="input"
-                  name="${nameAttr}"
-                  data-extra-code="${esc(r.code)}"
-                  ${ymdAttr}
-                  value="${esc(r.value || '')}"
-                  ${disabledAttrExtras}
-                />
-              </td>
-              <td>${esc(r.unitName)}</td>
-            </tr>
-          `;
-        }).join('');
-
-        extrasCardHtml = `
-          <div class="card" style="margin-top:10px;">
-            <div class="row">
-              <label>Additional Rates</label>
-              <div class="controls">
-                <div style="max-height:260px;overflow:auto;">
-                  <table class="grid mini" id="tsWeeklyExtras">
-                    <thead>
-                      <tr>
-                        <th>Day</th>
-                        <th>Date</th>
-                        <th>Bucket name</th>
-                        <th>No. of units</th>
-                        <th>Unit name</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      ${rowsHtml || `<tr><td colspan="5"><span class="mini">No additional rates configured for this contract.</span></td></tr>`}
-                    </tbody>
-                  </table>
-                </div>
-
-                <span class="mini" style="display:block;margin-top:4px;">
-                  Editable only when the weekly schedule is editable. Values are saved with the week.
-                </span>
-              </div>
-            </div>
-          </div>
-        `;
-      }
-    } catch (e) {
-      try { L('weekly extras render failed (non-fatal)', e); } catch {}
-      extrasCardHtml = '';
-    }
-
-    return `
-      <div class="tabc">
-
-        <div class="card">
-          <div class="row">
-            <label>Status</label>
-            <div class="controls">
-              ${badgeHtml}
-              <span class="mini" style="margin-left:8px;">
-                ${(!tsId)
-                  ? 'This is a planned week. The grid shows the full week so you can add shifts.'
-                  : 'This shows the stored schedule. Multiple shifts per day are supported.'}
-              </span>
-            </div>
-          </div>
-          <div class="row">
-            <label>Timesheet ID</label>
-            <div class="controls">
-              ${tsId || '<span class="mini">Not yet created (planned week)</span>'}
-            </div>
-          </div>
-        </div>
-
-        <div class="card" style="margin-top:10px;">
-          <div class="row">
-            <label>Weekly schedule</label>
-            <div class="controls">
-
-              <div id="tsWeeklyErrorsBanner"
-                   class="hint mini"
-                   style="${hasAnyErrors ? '' : 'display:none;'}margin-bottom:6px;">
-                Fix the highlighted shift/break times before saving.
-              </div>
-
-              <div style="max-height:340px;overflow:auto;">
-                <table class="grid mini" id="tsWeeklySchedule">
-                  <thead>
-                    <tr>
-                      <th>Day</th>
-                      <th>Date</th>
-                      <th>Line</th>
-                      <th>Ref #</th>
-                      <th>Start</th>
-                      <th>End</th>
-                      <th>Break start</th>
-                      <th>Break end</th>
-                      <th>Break (mins)</th>
-                      <th>Paid hours</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    ${rowsHtml}
-                  </tbody>
-                </table>
-              </div>
-
-              <span class="mini" style="display:block;margin-top:4px;">
-                ${scheduleHelpText}
-              </span>
-
-              ${locked ? '<span class="mini">This timesheet is locked (paid/invoiced); schedule is read-only.</span>' : ''}
-
-              <div style="margin-top:8px;">
-                ${resetButtonHtml}
-                ${extraLineButtonsHtml}
-              </div>
-            </div>
-          </div>
-        </div>
-
-        ${extrasCardHtml}
-      </div>
-    `;
-
-  }
-
-  // ─────────────────────────────────────────────────────
-  // DAILY (unchanged)
-  // ─────────────────────────────────────────────────────
-  if (sheetScope === 'DAILY') {
-    const startIso = ts.worked_start_iso || null;
-    const endIso   = ts.worked_end_iso   || null;
-    const brStartIso = ts.break_start_iso || null;
-    const brEndIso   = ts.break_end_iso   || null;
-    const brMinsRaw  = ts.break_minutes   != null ? Number(ts.break_minutes) : null;
-
-    const toLocalHHMM = (iso) => {
-      if (!iso) return '';
-      const d = new Date(iso);
-      if (Number.isNaN(d.getTime())) return '';
-      try {
-        return d.toLocaleTimeString('en-GB', {
-          hour: '2-digit',
-          minute: '2-digit',
-          hour12: false,
-          timeZone: 'Europe/London'
-        });
-      } catch {
-        const hh = String(d.getHours()).padStart(2, '0');
-        const mm = String(d.getMinutes()).padStart(2, '0');
-        return `${hh}:${mm}`;
-      }
-    };
-
-    const toLocalDateYmd = (iso) => {
-      if (!iso) return tsWeekEnding || row.week_ending_date || '';
-      const d = new Date(iso);
-      if (Number.isNaN(d.getTime())) return tsWeekEnding || row.week_ending_date || '';
-      const yyyy = d.getFullYear();
-      const mm   = String(d.getMonth() + 1).padStart(2, '0');
-      const dd   = String(d.getDate()).toString().padStart(2, '0');
-      return `${yyyy}-${mm}-${dd}`;
-    };
-
-    const toLocalDowShort = (isoOrYmd) => {
-      if (!isoOrYmd) return '';
-      let d;
-      if (/^\d{4}-\d{2}-\d{2}$/.test(isoOrYmd)) d = new Date(`${isoOrYmd}T00:00:00Z`);
-      else d = new Date(isoOrYmd);
-      if (Number.isNaN(d.getTime())) return '';
-      return d.toLocaleDateString('en-GB', { weekday: 'short', timeZone: 'Europe/London' });
-    };
-
-    const dateYmd  = toLocalDateYmd(startIso);
-    const dateDmy  = dateYmd ? fmtYmdDmy(dateYmd) : '';
-    const dowShort = toLocalDowShort(dateYmd);
-
-    const startHHMM   = toLocalHHMM(startIso);
-    const endHHMM     = toLocalHHMM(endIso);
-    const brStartHHMM = toLocalHHMM(brStartIso);
-    const brEndHHMM   = toLocalHHMM(brEndIso);
-
-    let paidHoursText = '';
-    try {
-      if (startIso && endIso) {
-        const dStart = new Date(startIso);
-        const dEnd   = new Date(endIso);
-        if (!Number.isNaN(dStart.getTime()) && !Number.isNaN(dEnd.getTime())) {
-          let diffMin = (dEnd.getTime() - dStart.getTime()) / 60000;
-          if (diffMin < 0) diffMin = 0;
-          const brMin = Number.isFinite(brMinsRaw) && brMinsRaw > 0 ? brMinsRaw : 0;
-          const paidMin = Math.max(0, diffMin - brMin);
-          paidHoursText = paidMin > 0 ? (Math.round((paidMin / 60) * 100) / 100).toFixed(2) : '0.00';
-        }
-      }
-    } catch { paidHoursText = ''; }
-
-    const badgeHtml = `
-      <span class="pill pill-elec">Electronic daily shift</span>
-      <span class="mini" style="margin-left:8px;">Start/End and break times are shown read-only.</span>
-    `;
-
-    return `
-      <div class="tabc">
-        <div class="card">
-          <div class="row">
-            <label>Status</label>
-            <div class="controls">${badgeHtml}</div>
-          </div>
-          <div class="row">
-            <label>Timesheet ID</label>
-            <div class="controls">${tsId || '<span class="mini">Unknown</span>'}</div>
-          </div>
-        </div>
-
-        <div class="card" style="margin-top:10px;">
-          <div class="row">
-            <label>Shift details</label>
-            <div class="controls">
-              <div style="max-height:240px;overflow:auto;">
-                <table class="grid mini">
-                  <thead>
-                    <tr>
-                      <th>Day</th>
-                      <th>Date</th>
-                      <th>Start</th>
-                      <th>End</th>
-                      <th>Break start</th>
-                      <th>Break end</th>
-                      <th>Break (mins)</th>
-                      <th>Paid hours</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <tr>
-                      <td>${dowShort || '<span class="mini">—</span>'}</td>
-                      <td>${dateDmy || '<span class="mini">—</span>'}</td>
-                      <td>${startHHMM || '<span class="mini">—</span>'}</td>
-                      <td>${endHHMM   || '<span class="mini">—</span>'}</td>
-                      <td>${brStartHHMM || '<span class="mini">—</span>'}</td>
-                      <td>${brEndHHMM   || '<span class="mini">—</span>'}</td>
-                      <td>${Number.isFinite(brMinsRaw) && brMinsRaw > 0 ? brMinsRaw : 0}</td>
-                      <td>${paidHoursText || '<span class="mini">—</span>'}</td>
-                    </tr>
-                  </tbody>
-                </table>
-              </div>
-              <span class="mini" style="display:block;margin-top:4px;">
-                Bucketed hours and pay/charge for this shift are shown in the Finance tab.
-              </span>
-            </div>
-          </div>
-        </div>
-      </div>
-    `;
-  }
-
-  // ─────────────────────────────────────────────────────
-  // Fallback
-  // ─────────────────────────────────────────────────────
-  const fallbackMsg = isPlannedOnly
-    ? `
-      <span class="mini">
-        This is a planned/open week without a financial snapshot yet.
-        Once the week is processed, a detailed line breakdown will appear here.
-      </span>
-    `
-    : `
-      <span class="mini">
-        This timesheet does not have a detailed line breakdown for editing in this view.
-      </span>
-    `;
-
-  return `
-    <div class="tabc">
-      <div class="card">
-        <div class="row">
-          <label>Lines</label>
-          <div class="controls">${fallbackMsg}</div>
         </div>
       </div>
     </div>
