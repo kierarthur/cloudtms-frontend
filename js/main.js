@@ -320,6 +320,12 @@ const GRID_COLUMN_META_DEFAULTS = {
   }
 };
 
+const fmtMoney = (n) => {
+  const x = invoiceModalRound2(Number(n || 0));
+  const abs = Math.abs(x).toFixed(2);
+  // show negatives as -£12.34, positives as £12.34
+  return (x < 0) ? `-£${abs}` : `£${abs}`;
+};
 
 // Quick DOM helper
 const byId = (id)=>document.getElementById(id);
@@ -28527,6 +28533,7 @@ async function invoiceModalSaveEdits(modalCtx, { rerender, reload }) {
     rerender();
   }
 }
+
 
 function renderInvoiceModalShell(modalCtx) {
   // Top-level shell with tabs; content is delegated to per-tab renderers
