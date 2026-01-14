@@ -28126,32 +28126,6 @@ async function openInvoiceModal(row) {
     return root;
   };
 
-  const invoiceModalFetchJson = async (path, options = {}) => {
-    const headers = { ...(options.headers || {}), 'Accept': 'application/json' };
-    // Only set Content-Type automatically when we send a body
-    if (options.body !== undefined && options.body !== null && !headers['Content-Type']) {
-      headers['Content-Type'] = 'application/json';
-    }
-
-    const res = await authFetch(API(path), { ...options, headers });
-
-    let data = null;
-    try {
-      data = await res.json();
-    } catch {
-      data = null;
-    }
-
-    if (!res.ok) {
-      const msg =
-        (data && (data.error || data.message)) ? (data.error || data.message)
-        : `Request failed (${res.status})`;
-      throw new Error(msg);
-    }
-
-    return data;
-  };
-
   const rerender = () => {
     // keep snapshot-friendly mirrors in sync
     try {
@@ -28267,6 +28241,30 @@ async function openInvoiceModal(row) {
   await reload();
 }
 
+async function invoiceModalFetchJson(path, options = {}) {
+  const headers = { ...(options.headers || {}), 'Accept': 'application/json' };
+  if (options.body !== undefined && options.body !== null && !headers['Content-Type']) {
+    headers['Content-Type'] = 'application/json';
+  }
+
+  const res = await authFetch(API(path), { ...options, headers });
+
+  let data = null;
+  try {
+    data = await res.json();
+  } catch {
+    data = null;
+  }
+
+  if (!res.ok) {
+    const msg =
+      (data && (data.error || data.message)) ? (data.error || data.message)
+      : `Request failed (${res.status})`;
+    throw new Error(msg);
+  }
+
+  return data;
+}
 
 
 function invoiceModalIsEditable(invoice) {
@@ -28880,6 +28878,30 @@ async function openInvoiceAddAdjustmentModal(modalCtx, { rerender }) {
       closeModal('invAdjModal');
       rerender();
     };
+  }
+}
+function fmtLondonTs(iso) {
+  const s = String(iso || '').trim();
+  if (!s) return '';
+  try {
+    const d = new Date(s);
+    if (Number.isNaN(d.getTime())) return s;
+
+    const parts = new Intl.DateTimeFormat('en-GB', {
+      timeZone: 'Europe/London',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false
+    }).formatToParts(d);
+
+    const get = (t) => (parts.find(p => p.type === t)?.value || '');
+    return `${get('day')}/${get('month')}/${get('year')} ${get('hour')}:${get('minute')}:${get('second')}`;
+  } catch {
+    return s;
   }
 }
 
