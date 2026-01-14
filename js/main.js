@@ -28040,6 +28040,11 @@ async function handleInvoiceEmail(modalCtx) {
 
 async function openInvoiceModal(row) {
   // Invoice modal (staged edits, no MutationObserver loops)
+    const fmtMoney = (n) => {
+    const x = round2(Number(n || 0));
+    const s = x.toFixed(2);
+    return (x > 0 ? `+${s}` : s);
+  };
   const invoiceId = row?.invoice_id || row?.id;
   if (!invoiceId) return;
 
