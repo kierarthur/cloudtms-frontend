@@ -28813,6 +28813,233 @@ function attachInvoiceModalDelegatedHandlers(modalCtx, rootEl, { rerender, reloa
 }
 
 
+async function openInvoiceModal(row) {
+  // Invoice modal (staged edits, no MutationObserver loops)
+  const fmtMoney = (n) => {
+    const x = round2(Number(n || 0));
+    const s = x.toFixed(2);
+    return (x > 0 ? `+${s}` : s);
+  };
+
+  const invoiceId = row?.invoice_id || row?.id;
+  if (!invoiceId) return;
+
+  // Seed modal context BEFORE calling showModal so the frame snapshots it.
+  const modalCtx = {
+    entity: 'invoices',
+    kind: 'invoice-modal',
+
+    // keep stable id for Related menu + general modal framework
+    data: { id: invoiceId },
+
+    invoiceId,
+    activeTab: 'invoice',
+
+    // Keep raw API payload
+    dataLoaded: null,
+
+    // ✅ Canonical invoice detail store used by existing helpers (handleInvoiceDelete expects this)
+    invoiceDetail: null,
+
+    // Invoice edit staging buckets
+    isEditing: false,
+    invoiceEdits: {
+      remove_invoice_line_ids: new Set(),
+      add_timesheet_ids: new Set(),
+      add_adjustments: [],
+
+      // ✅ NEW: staged status toggles (null = unchanged, boolean = desired state)
+      staged_status: { issued: null, paid: null, on_hold: null },
+
+      // ✅ NEW: staged timestamps for UI preview (populated on click; committed on Save pipeline)
+      staged_dates: { issued_at_utc: null, paid_at_utc: null, status_date_utc: null }
+    },
+
+    // Cached eligible timesheets for Add Timesheet modal + preview totals
+    eligibleTimesheetsCache: null,
+
+    // UI state
+    isBusy: true,
+    error: null
+  };
+
+  // Mirror into fields showModal snapshots/restores
+  modalCtx.invoiceState = {
+    isEditing: false,
+    invoiceEdits: modalCtx.invoiceEdits
+  };
+  modalCtx.invoiceUi = {
+    activeTab: modalCtx.activeTab,
+    // ✅ track expanded rows in a JSON-safe way
+    expanded_timesheets: {} // { [timesheet_id]: true }
+  };
+
+  // Debug convenience
+  window.modalCtx = modalCtx;
+
+  let root = null;
+
+  const resetStagedStatus = () => {
+    try {
+      if (!modalCtx.invoiceEdits || typeof modalCtx.invoiceEdits !== 'object') return;
+      modalCtx.invoiceEdits.staged_status = { issued: null, paid: null, on_hold: null };
+      modalCtx.invoiceEdits.staged_dates  = { issued_at_utc: null, paid_at_utc: null, status_date_utc: null };
+    } catch {}
+  };
+
+  const safeHasPendingEdits = () => {
+    const e = modalCtx?.invoiceEdits;
+    if (!e) return false;
+
+    const st = e.staged_status || {};
+    const hasStagedStatus =
+      (st.issued !== null && st.issued !== undefined) ||
+      (st.paid !== null && st.paid !== undefined) ||
+      (st.on_hold !== null && st.on_hold !== undefined);
+
+    return (
+      hasStagedStatus ||
+      (e.remove_invoice_line_ids && e.remove_invoice_line_ids.size > 0) ||
+      (e.add_timesheet_ids && e.add_timesheet_ids.size > 0) ||
+      (Array.isArray(e.add_adjustments) && e.add_adjustments.length > 0)
+    );
+  };
+
+  const syncEditingFromFrame = () => {
+    try {
+      const fr = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
+      const inEdit = !!(fr && fr.entity === 'invoices' && fr.kind === 'invoice-modal' && (fr.mode === 'edit' || fr.mode === 'create'));
+      modalCtx.isEditing = inEdit;
+      if (modalCtx.invoiceState && typeof modalCtx.invoiceState === 'object') {
+        modalCtx.invoiceState.isEditing = inEdit;
+      }
+    } catch {}
+  };
+
+  const ensureRootAndHandlers = () => {
+    const el = document.getElementById('invModalRoot');
+    if (!el) return null;
+
+    if (el !== root) {
+      root = el;
+      try {
+        attachInvoiceModalDelegatedHandlers(modalCtx, root, { rerender, reload });
+      } catch {}
+    } else {
+      try {
+        attachInvoiceModalDelegatedHandlers(modalCtx, root, { rerender, reload });
+      } catch {}
+    }
+    return root;
+  };
+
+  const rerender = () => {
+    try {
+      if (modalCtx.invoiceUi && typeof modalCtx.invoiceUi === 'object') {
+        modalCtx.invoiceUi.activeTab = modalCtx.activeTab;
+      }
+      if (modalCtx.invoiceState && typeof modalCtx.invoiceState === 'object') {
+        modalCtx.invoiceState.invoiceEdits = modalCtx.invoiceEdits;
+      }
+    } catch {}
+
+    syncEditingFromFrame();
+
+    const r = ensureRootAndHandlers();
+    if (!r) return;
+
+    r.innerHTML = renderInvoiceModalShell(modalCtx);
+
+    // Keep showModal footer dirty state aligned
+    try {
+      const fr = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
+      if (fr && fr.entity === 'invoices' && fr.kind === 'invoice-modal' && (fr.mode === 'edit' || fr.mode === 'create')) {
+        fr.isDirty = safeHasPendingEdits();
+        fr._updateButtons && fr._updateButtons();
+      }
+    } catch {}
+  };
+
+  const reload = async ({ includeCorrespondence = false } = {}) => {
+    modalCtx.isBusy = true;
+    modalCtx.error = null;
+    rerender();
+
+    try {
+      const qs = includeCorrespondence ? '?include_correspondence=1' : '';
+      const payload = await invoiceModalFetchJson(`/api/invoices/${encodeURIComponent(invoiceId)}${qs}`);
+
+      // ✅ Store on both canonical holders:
+      modalCtx.dataLoaded = payload;
+      modalCtx.invoiceDetail = payload;
+
+      // ✅ Ensure modalCtx.data remains "stable id + payload" for:
+      // - invoiceModalGetInvoiceData (expects .invoice/.items/etc on modalCtx.data)
+      // - related menu / modal framework (expects modalCtx.data.id)
+      modalCtx.data = { id: invoiceId, ...(payload || {}) };
+
+    } catch (e) {
+      modalCtx.error = String(e?.message || e || 'Failed to load invoice');
+      modalCtx.dataLoaded = null;
+      modalCtx.invoiceDetail = null;
+      modalCtx.data = { id: invoiceId };
+    } finally {
+      modalCtx.isBusy = false;
+
+      // If invoice is not editable, force-exit edit mode and clear staged edits
+      const inv = modalCtx?.data?.invoice || null;
+      if (!invoiceModalIsEditable(inv)) {
+        modalCtx.isEditing = false;
+        if (modalCtx.invoiceState && typeof modalCtx.invoiceState === 'object') {
+          modalCtx.invoiceState.isEditing = false;
+        }
+        invoiceModalResetEdits(modalCtx);
+        resetStagedStatus();
+      }
+
+      rerender();
+    }
+  };
+
+  showModal(
+    'Invoice',
+    [{ key: 'invoice', label: 'Invoice' }],
+    () => `
+      <div id="invModalRoot">
+        ${renderInvoiceModalShell(modalCtx)}
+      </div>
+    `,
+    async () => {
+      if (!safeHasPendingEdits()) return true;
+      await invoiceModalSaveEdits(modalCtx, { rerender, reload });
+      return { ok: true };
+    },
+    true,
+    null,
+    { kind: 'invoice-modal' }
+  );
+
+  ensureRootAndHandlers();
+  rerender();
+
+  const onModeChanged = () => {
+    try {
+      const fr = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
+      if (!fr || fr.entity !== 'invoices' || fr.kind !== 'invoice-modal') return;
+      ensureRootAndHandlers();
+      rerender();
+    } catch {}
+  };
+  window.addEventListener('modal-frame-mode-changed', onModeChanged);
+
+  try {
+    modalCtx._onDismiss = () => {
+      try { window.removeEventListener('modal-frame-mode-changed', onModeChanged); } catch {}
+    };
+  } catch {}
+
+  await reload();
+}
 
 
 function invoiceModalNewClientToken() {
