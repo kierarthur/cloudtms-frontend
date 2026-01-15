@@ -4912,7 +4912,7 @@ async function search(section, filters = {}) {
 
   // Reset selection when applying a new dataset (fingerprint change)
   window.__selection = window.__selection || {};
-  const sel = (window.__selection[section] ||= { fingerprint:'', ids:new Set() });
+  const sel = (window.__selection[section] ||= { fingerprint: '', ids: new Set() });
   sel.fingerprint = JSON.stringify({
     section,
     filters: filters || {},
@@ -4920,29 +4920,106 @@ async function search(section, filters = {}) {
   });
   sel.ids.clear();
 
-  // Default mappings for existing sections
+  // Default mappings for existing sections (KEEP)
   const map = {
-    candidates:'/api/search/candidates',
-    clients:'/api/search/clients',
-    umbrellas:'/api/search/umbrellas',
-    timesheets:'/api/search/timesheets',
-    invoices:'/api/invoices' // ✅ switched from /api/search/invoices
+    candidates: '/api/search/candidates',
+    clients: '/api/search/clients',
+    umbrellas: '/api/search/umbrellas',
+    timesheets: '/api/search/timesheets',
+    invoices: '/api/invoices' // ✅ invoices use list endpoint (supports include_count/include_totals)
   };
 
   // Contracts use /api/contracts (admin list)
   let p = (section === 'contracts') ? '/api/contracts' : map[section];
   if (!p) return [];
 
-  const qs = buildSearchQS(section, filters);
-  const url = qs ? `${p}?${qs}` : p;
+  const qs = new URLSearchParams();
+
+  // Apply filters
+  Object.entries(filters || {}).forEach(([k, v]) => {
+    if (v == null || v === '') return;
+
+    // Contracts + count endpoint expects ids as CSV (q('ids')), not repeated params
+    if (k === 'ids' && Array.isArray(v)) {
+      const csv = v.map(x => String(x || '').trim()).filter(Boolean).join(',');
+      if (csv) qs.set('ids', csv);
+      return;
+    }
+
+    if (Array.isArray(v)) {
+      v.forEach(vv => {
+        if (vv == null || vv === '') return;
+        qs.append(k, vv);
+      });
+    } else {
+      qs.set(k, v);
+    }
+  });
+
+  // Paging (fixes “stuck on page 1”)
+  const page = Math.max(1, Number(st.page || 1));
+  const pageSize = st.pageSize;
+
+  if (pageSize !== 'ALL') {
+    qs.set('page', String(page));
+    qs.set('page_size', String(Number(pageSize || 50)));
+  }
+
+  // Sorting (when set)
+  if (st.sort && st.sort.key) {
+    qs.set('order_by', String(st.sort.key));
+    qs.set('order_dir', String(st.sort.dir || 'asc'));
+  }
+
+  // Invoices: request count + totals so footer/paging can be correct
+  if (section === 'invoices') {
+    qs.set('include_count', 'true');
+    qs.set('include_totals', 'true');
+  }
+
+  const url = qs.toString() ? `${p}?${qs.toString()}` : p;
+
+  const safeJson = async (res) => { try { return await res.json(); } catch { return null; } };
 
   const r = await authFetch(API(url));
-  const rows = await toList(r);
+  const j = await safeJson(r);
+
+  // Normalize rows
+  const rows =
+    Array.isArray(j) ? j :
+    (j && Array.isArray(j.items)) ? j.items :
+    (j && Array.isArray(j.rows)) ? j.rows :
+    [];
 
   // update state
   st.filters = { ...(filters || {}) };
   const ps = (st.pageSize === 'ALL') ? null : Number(st.pageSize || 50);
   st.hasMore = (ps != null) ? (Array.isArray(rows) && rows.length === ps) : false;
+
+  // Persist list meta where available
+  try {
+    if (section === 'invoices' && j && typeof j === 'object') {
+      if (typeof j.count === 'number') st.total = Number(j.count);
+      if (j.totals && typeof j.totals === 'object') st.totals = j.totals;
+    }
+  } catch {}
+
+  // Contracts: count comes from /api/contracts/count (for footer + paging)
+  if (section === 'contracts') {
+    try {
+      const qsCount = new URLSearchParams(qs);
+      qsCount.delete('page');
+      qsCount.delete('page_size');
+      qsCount.delete('order_by');
+      qsCount.delete('order_dir');
+
+      const cr = await authFetch(API(`/api/contracts/count?${qsCount.toString()}`));
+      const cj = await safeJson(cr);
+      if (cr.ok && cj && typeof cj.count === 'number') {
+        st.total = Number(cj.count);
+      }
+    } catch {}
+  }
 
   return rows;
 }
@@ -27902,13 +27979,19 @@ async function handleInvoiceDelete(modalCtx) {
 
 async function handleInvoiceRenderPdf(modalCtx) {
   const mc = modalCtx || {};
-  const inv = mc.invoiceDetail?.invoice || mc.data || null;
-  const invoiceId = String(inv?.id || '').trim();
+  const invoiceId =
+    String(mc?.invoiceId || mc?.dataLoaded?.invoice?.id || mc?.dataLoaded?.invoice_row?.id || mc?.data?.id || '').trim();
+
   if (!invoiceId) { alert('Invoice id missing'); return; }
 
   const safeJson = async (res) => { try { return await res.json(); } catch { return null; } };
 
-  let pdfUrl = null;
+  // ✅ Match the timesheet viewer flow:
+  //   1) Render invoice bundle server-side (ensures PDF exists in R2)
+  //   2) Presign download using /api/files/presign-download (POST { key })
+  //   3) Open viewer with the signed URL
+
+  let pdfKey = null;
 
   try {
     const res = await authFetch(API(`/api/invoices/${encodeURIComponent(invoiceId)}/render`), {
@@ -27916,26 +27999,59 @@ async function handleInvoiceRenderPdf(modalCtx) {
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({})
     });
+
     const j = await safeJson(res);
+
     if (!res.ok) {
       const t = await res.text().catch(()=> '');
       const msg = (j && (j.error || j.message)) ? (j.error || j.message) : (t || `Render failed (${res.status})`);
       throw new Error(String(msg || 'Render failed'));
     }
-    pdfUrl = String(j?.pdf_url || '').trim();
-    if (!pdfUrl) throw new Error('Render returned no pdf_url');
+
+    // Preferred: backend explicitly returns pdf_key (future-proof)
+    const k1 = (j && typeof j.pdf_key === 'string') ? j.pdf_key.trim() : '';
+    const k2 = (j && typeof j.key === 'string') ? j.key.trim() : '';
+    pdfKey = (k1 || k2) ? String(k1 || k2).replace(/^\/+/, '') : null;
+
+    // Current backend returns pdf_url; but the rendered file is always stored at this deterministic key.
+    if (!pdfKey) {
+      pdfKey = `docs-pdf/invoices/invoice_${invoiceId}.pdf`;
+    }
   } catch (e) {
     alert(String(e?.message || e || 'Failed to render invoice PDF'));
     return;
   }
 
-  // Preview viewer modal (like evidence viewer design: iframe inside card)
-  const invNo = String(inv?.invoice_no || '').trim() || String(invoiceId).slice(0, 8);
+  // Presign download (exactly like timesheet evidence/timesheet PDF viewers)
+  let signedUrl = null;
+  try {
+    const cleanKey = String(pdfKey || '').trim().replace(/^\/+/, '');
+    const presRes = await authFetch(API('/api/files/presign-download'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key: cleanKey })
+    });
 
+    const text = await presRes.text().catch(() => '');
+    if (!presRes.ok) throw new Error(text || 'Failed to presign download URL');
+
+    const json = text ? JSON.parse(text) : {};
+    signedUrl = String(json.url || json.signed_url || json.download_url || '').trim();
+    if (!signedUrl) throw new Error('No URL returned from presign-download');
+  } catch (e) {
+    alert(String(e?.message || e || 'Failed to presign invoice PDF download'));
+    return;
+  }
+
+  const invNo =
+    String(mc?.dataLoaded?.invoice?.invoice_no || mc?.dataLoaded?.invoice_row?.invoice_no || '').trim() ||
+    String(invoiceId).slice(0, 8);
+
+  // Viewer modal (same pattern as existing evidence viewer: iframe inside card)
   window.modalCtx = {
     entity: 'invoices',
     openToken: `invoice-pdf:${invoiceId}:${Date.now()}:${Math.random().toString(36).slice(2)}`,
-    data: { id: invoiceId, invoice_no: invNo, pdf_url: pdfUrl }
+    data: { id: invoiceId, invoice_no: invNo, pdf_url: signedUrl }
   };
 
   showModal(
@@ -27966,6 +28082,7 @@ async function handleInvoiceRenderPdf(modalCtx) {
     { kind: 'import-summary-invoice-pdf', noParentGate: true }
   );
 }
+
 
 async function handleInvoiceEmail(modalCtx) {
   const mc = modalCtx || {};
@@ -28044,212 +28161,93 @@ async function handleInvoiceEmail(modalCtx) {
   }
 }
 
-async function openInvoiceModal(row) {
-  // Invoice modal (staged edits, no MutationObserver loops)
-    const fmtMoney = (n) => {
-    const x = round2(Number(n || 0));
-    const s = x.toFixed(2);
-    return (x > 0 ? `+${s}` : s);
-  };
-  const invoiceId = row?.invoice_id || row?.id;
-  if (!invoiceId) return;
+// 🔹 Top-level Invoice Modal → wire global Delete button (VIEW mode only, eligible only)
+// NOTE: This aligns with your brief: delete is only possible AFTER unissue + remove all lines + Save.
+// We DO NOT delete in edit mode; we only show the delete button in VIEW when invoice is eligible.
+if (!isChild && top.entity === 'invoices' && top.kind === 'invoice-modal') {
+  const mc = window.modalCtx || {};
+  const det = mc.data || mc.dataLoaded || mc.invoiceDetail || null;
 
-  // Seed modal context BEFORE calling showModal so the frame snapshots it.
-  const modalCtx = {
-    entity: 'invoices',
-    kind: 'invoice-modal',
+  const inv = det && typeof det === 'object'
+    ? (det.invoice || det.invoice_row || det.invoiceRow || null)
+    : null;
 
-    // Give showModal something stable for related menus etc (safe default)
-    data: { id: invoiceId },
+  const items = (det && Array.isArray(det.items)) ? det.items : [];
 
-    invoiceId,
-    activeTab: 'invoice',
+  const status = String(inv?.status || '').toUpperCase();
+  const eligible =
+    !!inv &&
+    (inv.paid_at_utc == null) &&
+    (inv.issued_at_utc == null) &&
+    (status === 'DRAFT') &&
+    (items.length === 0);
 
-    // Loaded from backend
-    dataLoaded: null, // we keep the API payload here to avoid clobbering modalCtx.data (used by showModal)
-    // (renderers read modalCtx.dataLoaded via the helpers below)
-
-    // Invoice line edit mode + staging buckets
-    isEditing: false,
-    invoiceEdits: {
-      remove_invoice_line_ids: new Set(),
-      add_timesheet_ids: new Set(),
-      add_adjustments: [] // { client_token, description, amount_ex_vat }
-    },
-
-    // Cached eligible timesheets for Add Timesheet modal + preview totals
-    eligibleTimesheetsCache: null,
-
-    // UI state
-    isBusy: true,   // start in loading so the shell renders "Loading…"
-    error: null
-  };
-
-  // Mirror into fields showModal already snapshots/restores (optional, but makes discard reliable)
-  modalCtx.invoiceState = {
-    isEditing: false,
-    invoiceEdits: modalCtx.invoiceEdits
-  };
-  modalCtx.invoiceUi = { activeTab: modalCtx.activeTab };
-
-  // Debug convenience (matches existing pattern)
-  window.modalCtx = modalCtx;
-
-  let root = null;
-
-  const safeHasPendingEdits = () => {
-    const e = modalCtx?.invoiceEdits;
-    if (!e) return false;
-    return (
-      (e.remove_invoice_line_ids && e.remove_invoice_line_ids.size > 0) ||
-      (e.add_timesheet_ids && e.add_timesheet_ids.size > 0) ||
-      (Array.isArray(e.add_adjustments) && e.add_adjustments.length > 0)
-    );
-  };
-
-  const syncEditingFromFrame = () => {
-    try {
-      const fr = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
-      const inEdit = !!(fr && fr.entity === 'invoices' && fr.kind === 'invoice-modal' && (fr.mode === 'edit' || fr.mode === 'create'));
-      modalCtx.isEditing = inEdit;
-      if (modalCtx.invoiceState && typeof modalCtx.invoiceState === 'object') {
-        modalCtx.invoiceState.isEditing = inEdit;
-      }
-    } catch {}
-  };
-
-  const ensureRootAndHandlers = () => {
-    const el = document.getElementById('invModalRoot');
-    if (!el) return null;
-
-    // If showModal repainted, root is a fresh node → reattach delegated handlers.
-    if (el !== root) {
-      root = el;
+  if (top.mode === 'view' && eligible) {
+    btnDel.style.display = '';
+    btnDel.disabled = !!top._saving;
+    btnDel.textContent = 'Delete Invoice';
+    btnDel.onclick = async () => {
       try {
-        attachInvoiceModalDelegatedHandlers(modalCtx, root, { rerender, reload });
-      } catch {}
-    } else {
-      // root same: ensure handler exists if caller never attached
-      try {
-        attachInvoiceModalDelegatedHandlers(modalCtx, root, { rerender, reload });
-      } catch {}
-    }
-    return root;
-  };
-
-  const rerender = () => {
-    // keep snapshot-friendly mirrors in sync
-    try {
-      if (modalCtx.invoiceUi && typeof modalCtx.invoiceUi === 'object') {
-        modalCtx.invoiceUi.activeTab = modalCtx.activeTab;
-      }
-      if (modalCtx.invoiceState && typeof modalCtx.invoiceState === 'object') {
-        modalCtx.invoiceState.invoiceEdits = modalCtx.invoiceEdits;
-      }
-    } catch {}
-
-    syncEditingFromFrame();
-
-    const r = ensureRootAndHandlers();
-    if (!r) return;
-
-    // Render using the payload we store in dataLoaded (invoiceModalGetInvoiceData already tolerates shape)
-    r.innerHTML = renderInvoiceModalShell({
-      ...modalCtx,
-      data: modalCtx.dataLoaded // 👈 keep existing invoice modal helpers working
-    });
-
-    // Keep showModal footer state aligned with pending invoice edits while in EDIT
-    try {
-      const fr = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
-      if (fr && fr.entity === 'invoices' && fr.kind === 'invoice-modal' && (fr.mode === 'edit' || fr.mode === 'create')) {
-        fr.isDirty = safeHasPendingEdits();
-        fr._updateButtons && fr._updateButtons();
-      }
-    } catch {}
-  };
-
-  const reload = async ({ includeCorrespondence = false } = {}) => {
-    modalCtx.isBusy = true;
-    modalCtx.error = null;
-    rerender();
-
-    try {
-      const qs = includeCorrespondence ? '?include_correspondence=1' : '';
-      modalCtx.dataLoaded = await invoiceModalFetchJson(`/api/invoices/${encodeURIComponent(invoiceId)}${qs}`);
-    } catch (e) {
-      modalCtx.error = String(e?.message || e || 'Failed to load invoice');
-      modalCtx.dataLoaded = null;
-    } finally {
-      modalCtx.isBusy = false;
-
-      // If invoice is not editable, force-exit edit mode and clear staged line edits
-      const inv = modalCtx.dataLoaded?.invoice || null;
-      if (!invoiceModalIsEditable(inv)) {
-        modalCtx.isEditing = false;
-        if (modalCtx.invoiceState && typeof modalCtx.invoiceState === 'object') {
-          modalCtx.invoiceState.isEditing = false;
+        if (typeof handleInvoiceDelete === 'function') {
+          await handleInvoiceDelete(mc);
+        } else {
+          alert('Delete invoice action is not available.');
+          return;
         }
-        invoiceModalResetEdits(modalCtx);
+        try { byId('btnCloseModal')?.click(); } catch {}
+        try { await renderAll(); } catch {}
+      } catch (e) {
+        alert(e?.message || 'Delete failed');
       }
-
-      rerender();
-    }
-  };
-
-  // showModal tab list is intentionally minimal; invoice modal renders its own internal tabs.
-  // IMPORTANT: hasId=true so the modal opens in VIEW mode with Save hidden.
-  showModal(
-    'Invoice',
-    [{ key: 'invoice', label: 'Invoice' }],
-    () => `
-      <div id="invModalRoot">
-        ${renderInvoiceModalShell({ ...modalCtx, data: modalCtx.dataLoaded })}
-      </div>
-    `,
-    // onSave: commit staged invoice edits (called by showModal’s footer Save button)
-    async () => {
-      // Only allow Save in edit mode; if nothing pending, treat as ok/no-op.
-      if (!safeHasPendingEdits()) return true;
-
-      // invoiceModalSaveEdits already commits via /save-edits and refreshes
-      await invoiceModalSaveEdits(modalCtx, { rerender, reload });
-      return { ok: true };
-    },
-    true,
-    null,
-    {
-      kind: 'invoice-modal'
-    }
-  );
-
-  // Attach handlers + initial paint
-  ensureRootAndHandlers();
-  rerender();
-
-  // Keep invoice UI synced when showModal flips VIEW<->EDIT (it repaints modalBody)
-  const onModeChanged = (ev) => {
-    try {
-      const fr = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
-      if (!fr || fr.entity !== 'invoices' || fr.kind !== 'invoice-modal') return;
-
-      // After showModal repaints, invModalRoot is recreated → re-find + reattach.
-      ensureRootAndHandlers();
-      rerender();
-    } catch {}
-  };
-  window.addEventListener('modal-frame-mode-changed', onModeChanged);
-
-  // Ensure we detach listener when modal closes
-  try {
-    // showModal supports onDismiss via options; we can piggyback by storing on modalCtx for cleanup
-    modalCtx._onDismiss = () => {
-      try { window.removeEventListener('modal-frame-mode-changed', onModeChanged); } catch {}
     };
-  } catch {}
+  } else {
+    btnDel.style.display = 'none';
+    btnDel.disabled = true;
+    btnDel.onclick = null;
+    // restore default label if other flows rely on it
+    btnDel.textContent = 'Delete';
+  }
 
-  // Initial load
-  await reload();
+} else
+
+// 🔹 Top-level Edit Contract → wire global Delete button
+if (!isChild && top.entity === 'contracts') {
+  const canDelete = !!(window.modalCtx?.data && window.modalCtx.data.can_delete);
+  const showDelete = (top.mode === 'edit' && top.hasId && canDelete);
+
+  if (showDelete) {
+    btnDel.style.display = '';
+    btnDel.disabled = !!top._saving;
+    btnDel.onclick = async () => {
+      const id = window.modalCtx?.data?.id;
+      if (!id) return;
+
+      const ok = window.confirm('Do you want to permanently delete this contract?');
+      if (!ok) return;
+
+      try {
+        if (typeof deleteContract === 'function') {
+          if (LOG) console.log('[MODAL][CONTRACTS] delete via btnDelete', { id });
+          await deleteContract(id);
+        } else {
+          alert('Delete contract action is not available.');
+          return;
+        }
+        try { discardAllModalsAndState(); } catch {}
+        try { await renderAll(); } catch {}
+      } catch (e) {
+        alert(e?.message || 'Delete failed');
+      }
+    };
+  } else {
+    btnDel.style.display = 'none';
+    btnDel.disabled = true;
+    btnDel.onclick = null;
+  }
+} else if (!isChild) {
+  btnDel.style.display = 'none';
+  btnDel.disabled = true;
+  btnDel.onclick = null;
 }
 
 async function invoiceModalFetchJson(path, options = {}) {
@@ -28476,67 +28474,204 @@ function invoiceModalRemoveStagedAdjustment(modalCtx, clientToken) {
 }
 
 async function invoiceModalSaveEdits(modalCtx, { rerender, reload }) {
-  const { invoice } = invoiceModalGetInvoiceData(modalCtx);
-  if (!invoiceModalIsEditable(invoice)) {
-    throw new Error('Invoice is not editable (must be DRAFT/ON_HOLD and UNPAID).');
+  // ✅ Single Save pipeline:
+  //   1) hold/unhold (if staged)
+  //   2) issue/unissue (if staged)
+  //   3) paid/unpaid (if staged)
+  //   4) apply line edits (/save-edits)
+  //   5) reload + clear staging
+
+  const invoiceId = modalCtx?.invoiceId ? String(modalCtx.invoiceId) : '';
+  if (!invoiceId) throw new Error('Invoice id missing.');
+
+  // Prefer the loaded invoice payload (openInvoiceModal stores it on dataLoaded)
+  const inv =
+    modalCtx?.dataLoaded?.invoice ||
+    modalCtx?.dataLoaded?.invoice_row ||
+    modalCtx?.data?.invoice ||
+    null;
+
+  if (!inv || typeof inv !== 'object') {
+    throw new Error('Invoice not loaded.');
   }
 
-  const invoiceId = modalCtx.invoiceId;
+  const type = String(inv.type || '').toUpperCase();
+  if (type === 'CREDIT_NOTE') throw new Error('Credit notes cannot be edited.');
 
-  const payload = {
-    remove_invoice_line_ids: Array.from(modalCtx.invoiceEdits.remove_invoice_line_ids || []),
-    add_timesheet_ids: Array.from(modalCtx.invoiceEdits.add_timesheet_ids || []),
-    add_adjustments: (modalCtx.invoiceEdits.add_adjustments || []).map(a => ({
+  // Current state
+  const curStatus = String(inv.status || '').toUpperCase();
+  const curIsHold = (curStatus === 'ON_HOLD');
+  const curIsIssued = (curStatus === 'ISSUED');
+  const curIsPaid = !!inv.paid_at_utc;
+
+  // Staged status toggles (added by the invoice modal UI changes)
+  // Expected shape:
+  //   modalCtx.invoiceEdits.staged_status = { on_hold: boolean|null, issued: boolean|null, paid: boolean|null }
+  // Optional:
+  //   modalCtx.invoiceEdits.staged_reason = { on_hold_reason?: string|null, paid_date?: string|null }
+  const stagedStatus = (modalCtx?.invoiceEdits && typeof modalCtx.invoiceEdits === 'object' && modalCtx.invoiceEdits.staged_status && typeof modalCtx.invoiceEdits.staged_status === 'object')
+    ? modalCtx.invoiceEdits.staged_status
+    : {};
+
+  const stagedReason = (modalCtx?.invoiceEdits && typeof modalCtx.invoiceEdits === 'object' && modalCtx.invoiceEdits.staged_reason && typeof modalCtx.invoiceEdits.staged_reason === 'object')
+    ? modalCtx.invoiceEdits.staged_reason
+    : {};
+
+  const wantHold   = (Object.prototype.hasOwnProperty.call(stagedStatus, 'on_hold') && stagedStatus.on_hold != null) ? !!stagedStatus.on_hold : null;
+  const wantIssued = (Object.prototype.hasOwnProperty.call(stagedStatus, 'issued')  && stagedStatus.issued  != null) ? !!stagedStatus.issued  : null;
+  const wantPaid   = (Object.prototype.hasOwnProperty.call(stagedStatus, 'paid')    && stagedStatus.paid    != null) ? !!stagedStatus.paid    : null;
+
+  // Line edits payload
+  const linePayload = {
+    remove_invoice_line_ids: Array.from(modalCtx?.invoiceEdits?.remove_invoice_line_ids || []),
+    add_timesheet_ids: Array.from(modalCtx?.invoiceEdits?.add_timesheet_ids || []),
+    add_adjustments: (modalCtx?.invoiceEdits?.add_adjustments || []).map(a => ({
       client_token: a.client_token,
       description: a.description,
       amount_ex_vat: a.amount_ex_vat
     }))
   };
 
+  const hasLineEdits =
+    (linePayload.remove_invoice_line_ids && linePayload.remove_invoice_line_ids.length > 0) ||
+    (linePayload.add_timesheet_ids && linePayload.add_timesheet_ids.length > 0) ||
+    (linePayload.add_adjustments && linePayload.add_adjustments.length > 0);
+
+  // If there are line edits, we must ensure the invoice will NOT be ISSUED at apply-edits time.
+  // Also, if invoice is PAID we require it to be un-paid before any line edits.
+  if (hasLineEdits) {
+    const willStillBeIssued = (wantIssued == null) ? curIsIssued : wantIssued;
+    if (willStillBeIssued) {
+      throw new Error('Cannot edit invoice lines while invoice is ISSUED. Unissue first (staged) and Save again.');
+    }
+
+    const willStillBePaid = (wantPaid == null) ? curIsPaid : wantPaid;
+    if (willStillBePaid) {
+      throw new Error('Cannot edit invoice lines while invoice is PAID. Mark unpaid first (staged) and Save again.');
+    }
+  }
+
   modalCtx.isBusy = true;
   modalCtx.error = null;
   rerender();
 
   try {
-    const res = await invoiceModalFetchJson(`/api/invoices/${encodeURIComponent(invoiceId)}/save-edits`, {
-      method: 'POST',
-      body: JSON.stringify(payload)
-    });
+    // 1) HOLD / UNHOLD
+    if (wantHold !== null && wantHold !== curIsHold) {
+      if (wantHold) {
+        const reason = (typeof stagedReason.on_hold_reason === 'string' && stagedReason.on_hold_reason.trim())
+          ? stagedReason.on_hold_reason.trim()
+          : null;
 
-    const out = (res && typeof res === 'object') ? res : {};
-    if (!out.ok) {
-      throw new Error(out.error || 'Failed to save edits');
+        await invoiceModalFetchJson(`/api/invoices/${encodeURIComponent(invoiceId)}/hold`, {
+          method: 'POST',
+          body: JSON.stringify({ reason })
+        });
+      } else {
+        await invoiceModalFetchJson(`/api/invoices/${encodeURIComponent(invoiceId)}/unhold`, {
+          method: 'POST',
+          body: JSON.stringify({})
+        });
+      }
     }
 
-    // Update modal data from response (already includes updated invoice/items/email_summary)
-    modalCtx.data = {
-      invoice: out.invoice || out.invoice_row || null,
-      items: Array.isArray(out.items) ? out.items : [],
-      header_snapshot_json: (out.header_snapshot_json && typeof out.header_snapshot_json === 'object') ? out.header_snapshot_json : {},
-      email_summary: (out.email_summary && typeof out.email_summary === 'object') ? out.email_summary : null,
+    // 2) ISSUE / UNISSUE
+    // Note: issuing can return status=ON_HOLD from backend; we surface that explicitly.
+    if (wantIssued !== null && wantIssued !== curIsIssued) {
+      if (wantIssued) {
+        const issueRes = await invoiceModalFetchJson(`/api/invoices/${encodeURIComponent(invoiceId)}/issue`, {
+          method: 'POST',
+          body: JSON.stringify({})
+        });
 
-      // pass-through extras if present
-      attach_policy: out.attach_policy ?? null,
-      evidence: Array.isArray(out.evidence) ? out.evidence : [],
-      hr_source_rows_cache: Array.isArray(out.hr_source_rows_cache) ? out.hr_source_rows_cache : [],
-      tsfin_external_source_rows: Array.isArray(out.tsfin_external_source_rows) ? out.tsfin_external_source_rows : []
-    };
+        const st = String(issueRes?.status || '').toUpperCase();
+        if (st === 'ON_HOLD') {
+          const reasons = Array.isArray(issueRes?.reasons) ? issueRes.reasons : [];
+          const msg = reasons.length
+            ? `Invoice is ON HOLD and cannot be issued: ${reasons.join(', ')}`
+            : 'Invoice is ON HOLD and cannot be issued.';
+          throw new Error(msg);
+        }
+        if (st !== 'ISSUED') {
+          throw new Error('Failed to issue invoice.');
+        }
+      } else {
+        // Do not force clear_pdf by default; render step regenerates anyway.
+        await invoiceModalFetchJson(`/api/invoices/${encodeURIComponent(invoiceId)}/unissue`, {
+          method: 'POST',
+          body: JSON.stringify({ clear_pdf: false })
+        });
+      }
+    }
 
-    // Clear staged edits + exit edit mode
+    // 3) PAID / UNPAID
+    if (wantPaid !== null && wantPaid !== curIsPaid) {
+      if (wantPaid) {
+        const paid_date = (typeof stagedReason.paid_date === 'string' && stagedReason.paid_date.trim())
+          ? stagedReason.paid_date.trim()
+          : null;
+
+        await invoiceModalFetchJson(`/api/invoices/${encodeURIComponent(invoiceId)}/mark-paid`, {
+          method: 'POST',
+          body: JSON.stringify(paid_date ? { paid_date } : {})
+        });
+      } else {
+        await invoiceModalFetchJson(`/api/invoices/${encodeURIComponent(invoiceId)}/mark-unpaid`, {
+          method: 'POST',
+          body: JSON.stringify({})
+        });
+      }
+    }
+
+    // 4) APPLY LINE EDITS (only if there are line edits staged)
+    if (hasLineEdits) {
+      const res = await invoiceModalFetchJson(`/api/invoices/${encodeURIComponent(invoiceId)}/save-edits`, {
+        method: 'POST',
+        body: JSON.stringify(linePayload)
+      });
+
+      const out = (res && typeof res === 'object') ? res : {};
+      if (!out.ok) {
+        throw new Error(out.error || 'Failed to save edits');
+      }
+
+      // Keep both stores updated (modal uses dataLoaded for render, helpers sometimes read data)
+      const newData = {
+        invoice: out.invoice || out.invoice_row || null,
+        items: Array.isArray(out.items) ? out.items : [],
+        header_snapshot_json: (out.header_snapshot_json && typeof out.header_snapshot_json === 'object') ? out.header_snapshot_json : {},
+        email_summary: (out.email_summary && typeof out.email_summary === 'object') ? out.email_summary : null,
+
+        attach_policy: out.attach_policy ?? null,
+        evidence: Array.isArray(out.evidence) ? out.evidence : [],
+        hr_source_rows_cache: Array.isArray(out.hr_source_rows_cache) ? out.hr_source_rows_cache : [],
+        tsfin_external_source_rows: Array.isArray(out.tsfin_external_source_rows) ? out.tsfin_external_source_rows : []
+      };
+
+      modalCtx.data = newData;
+      modalCtx.dataLoaded = newData;
+    }
+
+    // Clear staged edits (including staged status toggles) + exit edit mode
+    try {
+      if (modalCtx.invoiceEdits && typeof modalCtx.invoiceEdits === 'object') {
+        if (modalCtx.invoiceEdits.staged_status) delete modalCtx.invoiceEdits.staged_status;
+        if (modalCtx.invoiceEdits.staged_reason) delete modalCtx.invoiceEdits.staged_reason;
+      }
+    } catch {}
+
     invoiceModalResetEdits(modalCtx);
     modalCtx.isEditing = false;
 
-    // Force a reload to ensure we re-pull any server side computed fields (optional but safe)
-    await reload();
+    // Final reload (single source of truth)
+    await reload({ includeCorrespondence: true });
   } finally {
     modalCtx.isBusy = false;
     rerender();
   }
 }
 
-
 function renderInvoiceModalShell(modalCtx) {
-  // Top-level shell with tabs; content is delegated to per-tab renderers
   const active = modalCtx.activeTab || 'invoice';
 
   const tabBtn = (key, label) => {
@@ -28558,7 +28693,7 @@ function renderInvoiceModalShell(modalCtx) {
       </div>`;
   }
 
-  if (modalCtx.isBusy && !modalCtx.data) {
+  if (modalCtx.isBusy && !(modalCtx.data && modalCtx.data.invoice)) {
     return `<div class="p-3 text-muted">Loading invoice…</div>`;
   }
 
@@ -28584,6 +28719,30 @@ function renderInvoiceModalShell(modalCtx) {
 function attachInvoiceModalDelegatedHandlers(modalCtx, rootEl, { rerender, reload }) {
   if (!rootEl || rootEl.__invDelegatedAttached) return;
 
+  const setStaged = (k, v) => {
+    modalCtx.invoiceEdits = modalCtx.invoiceEdits || {};
+    modalCtx.invoiceEdits.staged_status = (modalCtx.invoiceEdits.staged_status && typeof modalCtx.invoiceEdits.staged_status === 'object')
+      ? modalCtx.invoiceEdits.staged_status
+      : { issued: null, paid: null, on_hold: null };
+
+    modalCtx.invoiceEdits.staged_dates = (modalCtx.invoiceEdits.staged_dates && typeof modalCtx.invoiceEdits.staged_dates === 'object')
+      ? modalCtx.invoiceEdits.staged_dates
+      : { issued_at_utc: null, paid_at_utc: null, status_date_utc: null };
+
+    modalCtx.invoiceEdits.staged_status[k] = v;
+
+    const now = new Date().toISOString();
+    if (k === 'issued') {
+      modalCtx.invoiceEdits.staged_dates.issued_at_utc = (v === true) ? now : null;
+    }
+    if (k === 'paid') {
+      modalCtx.invoiceEdits.staged_dates.paid_at_utc = (v === true) ? now : null;
+    }
+    if (k === 'on_hold') {
+      modalCtx.invoiceEdits.staged_dates.status_date_utc = (v === true) ? now : null;
+    }
+  };
+
   const handler = async (e) => {
     const el = e.target?.closest?.('[data-action]');
     if (!el) return;
@@ -28598,7 +28757,6 @@ function attachInvoiceModalDelegatedHandlers(modalCtx, rootEl, { rerender, reloa
     try {
       switch (action) {
         case 'inv-close': {
-          // Best-effort cleanup
           try { rootEl.removeEventListener('click', handler); } catch {}
           try { rootEl.__invDelegatedAttached = false; } catch {}
           closeModal('invModal');
@@ -28610,14 +28768,12 @@ function attachInvoiceModalDelegatedHandlers(modalCtx, rootEl, { rerender, reloa
           modalCtx.activeTab = tab;
 
           if (tab === 'correspondence') {
-            // Lazy load correspondence (manifest already includes email_summary for button label)
             const hasCorr = Array.isArray(modalCtx.data?.correspondence);
             if (!hasCorr) {
               await reload({ includeCorrespondence: true });
               return;
             }
           }
-
           rerender();
           return;
         }
@@ -28638,43 +28794,65 @@ function attachInvoiceModalDelegatedHandlers(modalCtx, rootEl, { rerender, reloa
           return;
         }
 
-        case 'inv-delete-invoice': {
-          if (typeof handleInvoiceDelete === 'function') {
-            await handleInvoiceDelete(modalCtx);
-          }
-          closeModal('invModal');
-          return;
-        }
+        // ✅ Expand/collapse timesheet rows
+        case 'inv-toggle-expand-timesheet': {
+          const tsId = String(el.getAttribute('data-timesheet-id') || '').trim();
+          if (!tsId) return;
 
-        case 'inv-toggle-edit': {
-          if (!invoiceModalIsEditable(invoice)) return;
-          modalCtx.isEditing = true;
+          modalCtx.invoiceUi = (modalCtx.invoiceUi && typeof modalCtx.invoiceUi === 'object') ? modalCtx.invoiceUi : {};
+          modalCtx.invoiceUi.expanded_timesheets = (modalCtx.invoiceUi.expanded_timesheets && typeof modalCtx.invoiceUi.expanded_timesheets === 'object')
+            ? modalCtx.invoiceUi.expanded_timesheets
+            : {};
+
+          const cur = !!modalCtx.invoiceUi.expanded_timesheets[tsId];
+          if (cur) delete modalCtx.invoiceUi.expanded_timesheets[tsId];
+          else modalCtx.invoiceUi.expanded_timesheets[tsId] = true;
+
           rerender();
           return;
         }
 
-        case 'inv-cancel-edit': {
-          modalCtx.isEditing = false;
-          invoiceModalResetEdits(modalCtx);
+        // ✅ Status pill toggles (EDIT mode only)
+        case 'inv-toggle-issued': {
+          if (!modalCtx.isEditing || !invoiceModalIsEditable(invoice)) return;
+          const baseIssued = !!invoice?.issued_at_utc;
+          const st = modalCtx.invoiceEdits?.staged_status || {};
+          const effIssued = (st.issued === null || st.issued === undefined) ? baseIssued : !!st.issued;
+          setStaged('issued', !effIssued);
           rerender();
           return;
         }
 
+        case 'inv-toggle-paid': {
+          if (!modalCtx.isEditing || !invoiceModalIsEditable(invoice)) return;
+          const basePaid = !!invoice?.paid_at_utc;
+          const st = modalCtx.invoiceEdits?.staged_status || {};
+          const effPaid = (st.paid === null || st.paid === undefined) ? basePaid : !!st.paid;
+          setStaged('paid', !effPaid);
+          rerender();
+          return;
+        }
+
+        case 'inv-toggle-hold': {
+          if (!modalCtx.isEditing || !invoiceModalIsEditable(invoice)) return;
+          const baseHold = (String(invoice?.status || '').toUpperCase() === 'ON_HOLD');
+          const st = modalCtx.invoiceEdits?.staged_status || {};
+          const effHold = (st.on_hold === null || st.on_hold === undefined) ? baseHold : !!st.on_hold;
+          setStaged('on_hold', !effHold);
+          rerender();
+          return;
+        }
+
+        // ✅ Line add/remove staging (EDIT mode only)
         case 'inv-add-timesheets': {
-          if (!invoiceModalIsEditable(invoice)) return;
+          if (!modalCtx.isEditing || !invoiceModalIsEditable(invoice)) return;
           await openInvoiceAddTimesheetsModal(modalCtx, { rerender });
           return;
         }
 
         case 'inv-add-adjustment': {
-          if (!invoiceModalIsEditable(invoice)) return;
+          if (!modalCtx.isEditing || !invoiceModalIsEditable(invoice)) return;
           await openInvoiceAddAdjustmentModal(modalCtx, { rerender });
-          return;
-        }
-
-        case 'inv-save-edits': {
-          if (!invoiceModalHasPendingEdits(modalCtx)) return;
-          await invoiceModalSaveEdits(modalCtx, { rerender, reload });
           return;
         }
 
@@ -28723,25 +28901,143 @@ function attachInvoiceModalDelegatedHandlers(modalCtx, rootEl, { rerender, reloa
   rootEl.__invDelegatedAttached = true;
 }
 
+
+
+
+function invoiceModalNewClientToken() {
+  try {
+    if (typeof crypto !== 'undefined' && crypto?.randomUUID) return crypto.randomUUID();
+  } catch {}
+  return `tok_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+}
+
+async function openInvoiceAddAdjustmentModal(modalCtx, { rerender }) {
+  const { invoice } = invoiceModalGetInvoiceData(modalCtx);
+  if (!invoiceModalIsEditable(invoice)) return;
+
+  // Ensure showModal uses the invoice modal ctx (shared context across modal stack)
+  try { window.modalCtx = modalCtx; } catch {}
+
+  const html = `
+    <div class="p-3">
+      <div class="h6 mb-3">Invoice Adjustment</div>
+
+      <div class="mb-2">
+        <label class="form-label small text-muted">Description</label>
+        <input id="invAdjDesc" class="form-control" type="text" placeholder="e.g. Manual correction" />
+      </div>
+
+      <div class="mb-2">
+        <label class="form-label small text-muted">Amount (ex VAT)</label>
+        <input id="invAdjAmt" class="form-control" type="number" step="0.01" placeholder="0.00" />
+        <div class="text-muted small mt-1">Use a negative number for a credit/discount.</div>
+      </div>
+
+      <div class="d-flex justify-content-end gap-2 mt-3">
+        <button type="button" class="btn btn-sm btn-secondary" id="invAdjCancel">Cancel</button>
+        <button type="button" class="btn btn-sm btn-primary" id="invAdjAdd">Add adjustment</button>
+      </div>
+    </div>
+  `;
+
+  showModal(
+    'Invoice Adjustment',
+    [{ key: 'main', label: 'Adjustment' }],
+    () => html,
+    null,
+    true,
+    null,
+    // Utility child: no footer Save/Edit, but inputs remain usable because we set noParentGate + utility kind.
+    { kind: 'invoice-batch-add-adjustment', noParentGate: true }
+  );
+
+  const closeTop = () => {
+    // Close ONLY the top frame (this child) using the stack-safe close button
+    try { document.getElementById('btnCloseModal')?.click(); } catch {}
+  };
+
+  const btnCancel = document.getElementById('invAdjCancel');
+  const btnAdd = document.getElementById('invAdjAdd');
+
+  if (btnCancel && !btnCancel.__invWired) {
+    btnCancel.__invWired = true;
+    btnCancel.onclick = (e) => {
+      e.preventDefault();
+      closeTop();
+    };
+  }
+
+  if (btnAdd && !btnAdd.__invWired) {
+    btnAdd.__invWired = true;
+    btnAdd.onclick = (e) => {
+      e.preventDefault();
+
+      const desc = String(document.getElementById('invAdjDesc')?.value || '').trim();
+      const amtRaw = document.getElementById('invAdjAmt')?.value;
+      const amt = Number(amtRaw);
+
+      if (!desc) {
+        alert('Adjustment description is required.');
+        return;
+      }
+      if (!Number.isFinite(amt)) {
+        alert('Adjustment amount must be a valid number.');
+        return;
+      }
+
+      // Stage ONLY on confirm
+      modalCtx.invoiceEdits = modalCtx.invoiceEdits || {};
+      modalCtx.invoiceEdits.add_adjustments = Array.isArray(modalCtx.invoiceEdits.add_adjustments)
+        ? modalCtx.invoiceEdits.add_adjustments
+        : [];
+
+      modalCtx.invoiceEdits.add_adjustments.push({
+        client_token: invoiceModalNewClientToken(),
+        description: desc,
+        amount_ex_vat: invoiceModalRound2(amt)
+      });
+
+      closeTop();
+
+      // Ensure parent invoice modal reflects the staged change immediately
+      try { setTimeout(() => { rerender && rerender(); }, 0); } catch {}
+    };
+  }
+}
+
 async function openInvoiceAddTimesheetsModal(modalCtx, { rerender }) {
   const { invoice, items } = invoiceModalGetInvoiceData(modalCtx);
   if (!invoiceModalIsEditable(invoice)) return;
+
+  // Ensure showModal uses the invoice modal ctx (shared context across modal stack)
+  try { window.modalCtx = modalCtx; } catch {}
+
+  // Local money formatting (do NOT rely on outer openInvoiceModal closure)
+  const fmtMoney = (n) => {
+    const x = invoiceModalRound2(Number(n || 0));
+    const s = x.toFixed(2);
+    return (x > 0 ? `+${s}` : s);
+  };
 
   // Ensure cache
   const eligible = await invoiceModalEnsureEligibleTimesheets(modalCtx);
   const all = Array.isArray(eligible?.timesheets) ? eligible.timesheets : [];
 
   const existingTs = new Set((items || []).map(it => String(it?.timesheet_id || '')).filter(Boolean));
+
+  modalCtx.invoiceEdits = modalCtx.invoiceEdits || {};
+  modalCtx.invoiceEdits.add_timesheet_ids = (modalCtx.invoiceEdits.add_timesheet_ids instanceof Set)
+    ? modalCtx.invoiceEdits.add_timesheet_ids
+    : new Set();
+
   const stagedTs = modalCtx.invoiceEdits.add_timesheet_ids;
 
-  const rows = all
-    .filter(t => {
-      const id = String(t?.timesheet_id || '');
-      if (!id) return false;
-      // Already on invoice => don't show as eligible-add
-      if (existingTs.has(id)) return false;
-      return true;
-    });
+  const rows = all.filter(t => {
+    const id = String(t?.timesheet_id || '');
+    if (!id) return false;
+    if (existingTs.has(id)) return false; // already on invoice
+    return true;
+  });
 
   const fmtRow = (t) => {
     const tsId = String(t?.timesheet_id || '');
@@ -28790,108 +29086,60 @@ async function openInvoiceAddTimesheetsModal(modalCtx, { rerender }) {
     </div>
   `;
 
-  showModal(html, { id: 'invAddTsModal' });
+  showModal(
+    'Add Timesheets',
+    [{ key: 'main', label: 'Timesheets' }],
+    () => html,
+    null,
+    true,
+    null,
+    // Utility child: no footer Save/Edit, but inputs remain usable because we set noParentGate + utility kind.
+    { kind: 'invoice-batch-add-timesheets', noParentGate: true }
+  );
+
+  const closeTop = () => {
+    try { document.getElementById('btnCloseModal')?.click(); } catch {}
+  };
 
   const btnCancel = document.getElementById('invAddTsCancel');
   const btnConfirm = document.getElementById('invAddTsConfirm');
 
-  if (btnCancel) {
+  if (btnCancel && !btnCancel.__invWired) {
+    btnCancel.__invWired = true;
     btnCancel.onclick = (e) => {
       e.preventDefault();
-      closeModal('invAddTsModal');
+      closeTop();
     };
   }
 
-  if (btnConfirm) {
+  if (btnConfirm && !btnConfirm.__invWired) {
+    btnConfirm.__invWired = true;
     btnConfirm.onclick = (e) => {
       e.preventDefault();
+
       const list = document.getElementById('invAddTsList');
       const checks = list ? Array.from(list.querySelectorAll('input[type="checkbox"]')) : [];
+
+      // Stage ONLY on confirm
       for (const c of checks) {
         const id = String(c.value || '').trim();
         if (!id) continue;
         if (c.checked) stagedTs.add(id);
         else stagedTs.delete(id);
       }
-      closeModal('invAddTsModal');
-      rerender();
+
+      closeTop();
+
+      // Ensure parent invoice modal reflects the staged change immediately
+      try { setTimeout(() => { rerender && rerender(); }, 0); } catch {}
     };
   }
 }
 
-function invoiceModalNewClientToken() {
-  try {
-    if (typeof crypto !== 'undefined' && crypto?.randomUUID) return crypto.randomUUID();
-  } catch {}
-  return `tok_${Date.now()}_${Math.random().toString(16).slice(2)}`;
-}
 
-async function openInvoiceAddAdjustmentModal(modalCtx, { rerender }) {
-  const { invoice } = invoiceModalGetInvoiceData(modalCtx);
-  if (!invoiceModalIsEditable(invoice)) return;
 
-  const html = `
-    <div class="p-3">
-      <div class="h6 mb-3">Invoice Adjustment</div>
 
-      <div class="mb-2">
-        <label class="form-label small text-muted">Description</label>
-        <input id="invAdjDesc" class="form-control" type="text" placeholder="e.g. Manual correction" />
-      </div>
 
-      <div class="mb-2">
-        <label class="form-label small text-muted">Amount (ex VAT)</label>
-        <input id="invAdjAmt" class="form-control" type="number" step="0.01" placeholder="0.00" />
-        <div class="text-muted small mt-1">Use a negative number for a credit/discount.</div>
-      </div>
-
-      <div class="d-flex justify-content-end gap-2 mt-3">
-        <button type="button" class="btn btn-sm btn-secondary" id="invAdjCancel">Cancel</button>
-        <button type="button" class="btn btn-sm btn-primary" id="invAdjAdd">Add adjustment</button>
-      </div>
-    </div>
-  `;
-
-  showModal(html, { id: 'invAdjModal' });
-
-  const btnCancel = document.getElementById('invAdjCancel');
-  const btnAdd = document.getElementById('invAdjAdd');
-
-  if (btnCancel) {
-    btnCancel.onclick = (e) => {
-      e.preventDefault();
-      closeModal('invAdjModal');
-    };
-  }
-
-  if (btnAdd) {
-    btnAdd.onclick = (e) => {
-      e.preventDefault();
-
-      const desc = String(document.getElementById('invAdjDesc')?.value || '').trim();
-      const amtRaw = document.getElementById('invAdjAmt')?.value;
-      const amt = Number(amtRaw);
-
-      if (!desc) {
-        alert('Adjustment description is required.');
-        return;
-      }
-      if (!Number.isFinite(amt)) {
-        alert('Adjustment amount must be a valid number.');
-        return;
-      }
-
-      modalCtx.invoiceEdits.add_adjustments.push({
-        client_token: invoiceModalNewClientToken(),
-        description: desc,
-        amount_ex_vat: invoiceModalRound2(amt)
-      });
-
-      closeModal('invAdjModal');
-      rerender();
-    };
-  }
-}
 function fmtLondonTs(iso) {
   const s = String(iso || '').trim();
   if (!s) return '';
@@ -28918,103 +29166,207 @@ function fmtLondonTs(iso) {
 }
 
 function renderInvoiceModalContent(modalCtx, invoiceData) {
+  const fmtMoneyLocal = (n) => {
+    const x = invoiceModalRound2(Number(n || 0));
+    const s = x.toFixed(2);
+    return `£${s}`;
+  };
+
+  const nowIso = () => {
+    try { return new Date().toISOString(); } catch { return null; }
+  };
+
   const { invoice, header_snapshot_json, items, email_summary } = invoiceModalGetInvoiceData(modalCtx);
 
   if (!invoice) {
     return `<div class="p-3 text-muted">Invoice not found.</div>`;
   }
 
-  const status = String(invoice.status || '').toUpperCase();
-  const isPaid = !!invoice.paid_at_utc;
-  const isIssued = (status === 'ISSUED');
-  const isOnHold = (status === 'ON_HOLD');
+  const baseStatus = String(invoice.status || '').toUpperCase();
+  const baseIsIssued = !!invoice.issued_at_utc;
+  const baseIsPaid   = !!invoice.paid_at_utc;
+  const baseIsOnHold = (baseStatus === 'ON_HOLD');
 
   const isEditable = invoiceModalIsEditable(invoice);
-  const isEditing = !!modalCtx.isEditing && isEditable;
+  const isEditing  = !!modalCtx.isEditing && isEditable;
+
+  const staged = (modalCtx && modalCtx.invoiceEdits && typeof modalCtx.invoiceEdits === 'object') ? modalCtx.invoiceEdits : {};
+  const st = (staged.staged_status && typeof staged.staged_status === 'object') ? staged.staged_status : { issued: null, paid: null, on_hold: null };
+  const sd = (staged.staged_dates && typeof staged.staged_dates === 'object') ? staged.staged_dates : { issued_at_utc: null, paid_at_utc: null, status_date_utc: null };
+
+  const effIssued = (st.issued === null || st.issued === undefined) ? baseIsIssued : !!st.issued;
+  const effPaid   = (st.paid   === null || st.paid   === undefined) ? baseIsPaid   : !!st.paid;
+  const effHold   = (st.on_hold=== null || st.on_hold=== undefined) ? baseIsOnHold : !!st.on_hold;
+
+  const dueAt = invoice.due_at_utc ? new Date(invoice.due_at_utc) : null;
+  const overdue =
+    !!effIssued &&
+    !effPaid &&
+    dueAt &&
+    Number.isFinite(dueAt.getTime()) &&
+    (dueAt.getTime() < Date.now());
+
+  // Dates to show (prefer actual; else staged preview; else "—")
+  const displayIssuedAt = (() => {
+    if (effIssued) {
+      if (invoice.issued_at_utc) return fmtLondonTs(invoice.issued_at_utc);
+      if (isEditing && st.issued === true && sd.issued_at_utc) return `${fmtLondonTs(sd.issued_at_utc)} (staged)`;
+      return '—';
+    }
+    if (isEditing && st.issued === false) return 'Will clear';
+    return '—';
+  })();
+
+  const displayPaidAt = (() => {
+    if (effPaid) {
+      if (invoice.paid_at_utc) return fmtLondonTs(invoice.paid_at_utc);
+      if (isEditing && st.paid === true && sd.paid_at_utc) return `${fmtLondonTs(sd.paid_at_utc)} (staged)`;
+      return '—';
+    }
+    if (isEditing && st.paid === false) return 'Will clear';
+    return '—';
+  })();
+
+  const displayHoldAt = (() => {
+    if (effHold) {
+      // on hold date uses status_date_utc as "since"
+      if (invoice.status_date_utc) return fmtLondonTs(invoice.status_date_utc);
+      if (isEditing && st.on_hold === true && sd.status_date_utc) return `${fmtLondonTs(sd.status_date_utc)} (staged)`;
+      return '—';
+    }
+    if (isEditing && st.on_hold === false) return 'Will clear';
+    return '—';
+  })();
+
+  const clientName =
+    header_snapshot_json?.client_name ||
+    invoice?.client?.name ||
+    (invoiceData && invoiceData.client && invoiceData.client.name) ||
+    '';
+
+  const invoiceNo = (invoice.invoice_no != null && String(invoice.invoice_no).trim())
+    ? `Invoice #${escapeHtml(String(invoice.invoice_no))}`
+    : `Invoice ${escapeHtml(String(invoice.id || ''))}`;
+
+  const invoiceDate = effIssued && invoice.issued_at_utc ? fmtLondonTs(invoice.issued_at_utc) : '—';
+  const createdDate = invoice.created_at ? fmtLondonTs(invoice.created_at) : '—';
+
+  // Pending edits (line edits OR status edits)
+  const hasLineEdits = (() => {
+    const e = modalCtx?.invoiceEdits;
+    if (!e) return false;
+    return (
+      (e.remove_invoice_line_ids && e.remove_invoice_line_ids.size > 0) ||
+      (e.add_timesheet_ids && e.add_timesheet_ids.size > 0) ||
+      (Array.isArray(e.add_adjustments) && e.add_adjustments.length > 0)
+    );
+  })();
+  const hasStatusEdits =
+    (st.issued !== null && st.issued !== undefined) ||
+    (st.paid !== null && st.paid !== undefined) ||
+    (st.on_hold !== null && st.on_hold !== undefined);
+
+  const hasPendingEdits = hasLineEdits || hasStatusEdits;
+
+  // Totals
+  const currentTotals = {
+    subtotal_ex_vat: invoiceModalRound2(invoice.subtotal_ex_vat || 0),
+    vat_amount:      invoiceModalRound2(invoice.vat_amount || 0),
+    total_inc_vat:   invoiceModalRound2(invoice.total_inc_vat || 0)
+  };
+
+  const previewTotals = hasLineEdits ? invoiceModalComputePreviewTotals(modalCtx) : currentTotals;
+  const totalsToShow = hasLineEdits ? previewTotals : currentTotals;
+
+  // Pill rendering (timesheet-style pills)
+  const pillSpan = (text, cls) => `<span class="pill ${cls}">${escapeHtml(text)}</span>`;
+  const pillBtn  = (action, text, cls) => `
+    <button type="button" class="pill ${cls}" data-action="${action}">
+      ${escapeHtml(text)}
+    </button>
+  `;
+
+  const issuedPill = isEditing
+    ? pillBtn('inv-toggle-issued', effIssued ? 'Issued' : 'Unissued', effIssued ? 'pill-ok' : 'pill-bad')
+    : pillSpan(effIssued ? 'Issued' : 'Unissued', effIssued ? 'pill-ok' : 'pill-bad');
+
+  const paidPill = isEditing
+    ? pillBtn('inv-toggle-paid', effPaid ? 'Paid' : 'Unpaid', effPaid ? 'pill-ok' : 'pill-bad')
+    : pillSpan(effPaid ? 'Paid' : 'Unpaid', effPaid ? 'pill-ok' : 'pill-bad');
+
+  const holdPill = isEditing
+    ? pillBtn('inv-toggle-hold', effHold ? 'On hold' : 'Active', effHold ? 'pill-warn' : '')
+    : pillSpan(effHold ? 'On hold' : 'Active', effHold ? 'pill-warn' : '');
+
+  const overduePill = overdue ? pillSpan('Overdue', 'pill-bad') : '';
 
   const emailedOnce = !!email_summary?.emailed_once;
   const emailLabel = emailedOnce ? 'Re-email' : 'Email';
-
-  const hasPendingEdits = invoiceModalHasPendingEdits(modalCtx);
-
-  const previewTotals = invoiceModalComputePreviewTotals(modalCtx);
-
-  const currentTotals = {
-    subtotal_ex_vat: invoiceModalRound2(invoice.subtotal_ex_vat || 0),
-    vat_amount: invoiceModalRound2(invoice.vat_amount || 0),
-    total_inc_vat: invoiceModalRound2(invoice.total_inc_vat || 0)
-  };
-
-  const totalsToShow = hasPendingEdits ? previewTotals : currentTotals;
-
-  const pill = (text, cls) => `<span class="badge ${cls} me-2">${escapeHtml(text)}</span>`;
-
-  const invoiceTitle = invoice.invoice_no ? `Invoice #${escapeHtml(String(invoice.invoice_no))}` : `Invoice ${escapeHtml(String(invoice.id || ''))}`;
-
-  const weekStart = header_snapshot_json?.meta?.invoice_week_start || null;
 
   return `
     <div class="p-2">
 
       ${modalCtx.error ? `<div class="alert alert-danger mb-3">${escapeHtml(modalCtx.error)}</div>` : ''}
 
-      <div class="d-flex justify-content-between align-items-start">
-        <div>
-          <div class="h6 mb-1">${invoiceTitle}</div>
-          <div class="mb-2">
-            ${isOnHold ? pill('ON HOLD', 'bg-warning text-dark') : ''}
-            ${isIssued ? pill('ISSUED', 'bg-success') : pill('UNISSUED', 'bg-secondary')}
-            ${isPaid ? pill('PAID', 'bg-success') : pill('UNPAID', 'bg-secondary')}
-          </div>
-          <div class="text-muted small">
-            ${weekStart ? `Invoice week start: <span class="fw-semibold">${escapeHtml(String(weekStart))}</span><br/>` : ''}
-            Created: ${fmtLondonTs(invoice.created_at)}
-          </div>
-        </div>
+      <div class="mb-2">
+        <div class="h6 mb-1">${invoiceNo}</div>
+        <div class="text-muted small">${escapeHtml(String(clientName || ''))}</div>
+      </div>
 
-        <div class="text-end">
-          <button type="button" class="btn btn-sm btn-secondary" data-action="inv-close">Close</button>
+      <div class="d-flex flex-wrap gap-3 mb-3">
+        <div>
+          <div class="mini text-muted">Invoice date</div>
+          <div class="fw-semibold">${escapeHtml(String(invoiceDate))}</div>
+        </div>
+        <div>
+          <div class="mini text-muted">Created</div>
+          <div class="fw-semibold">${escapeHtml(String(createdDate))}</div>
+        </div>
+        <div>
+          <div class="mini text-muted">Amount (ex VAT)</div>
+          <div class="fw-semibold">${fmtMoneyLocal(totalsToShow.subtotal_ex_vat)}</div>
+        </div>
+        <div>
+          <div class="mini text-muted">Amount (inc VAT)</div>
+          <div class="fw-semibold">${fmtMoneyLocal(totalsToShow.total_inc_vat)}</div>
         </div>
       </div>
 
-      <hr class="my-3"/>
+      <div class="d-flex flex-wrap gap-3 align-items-start mb-3">
+        <div>
+          ${issuedPill}
+          <div class="mini text-muted mt-1">${escapeHtml(String(displayIssuedAt))}</div>
+        </div>
+        <div>
+          ${paidPill}
+          <div class="mini text-muted mt-1">${escapeHtml(String(displayPaidAt))}</div>
+        </div>
+        <div>
+          ${holdPill}
+          <div class="mini text-muted mt-1">${escapeHtml(String(displayHoldAt))}</div>
+        </div>
+        <div class="ms-auto">
+          ${overduePill}
+        </div>
+      </div>
 
       <div class="d-flex flex-wrap gap-2 align-items-center mb-3">
         <button type="button" class="btn btn-sm btn-primary" data-action="inv-open-pdf">
-          Open Invoice
+          Open invoice PDF
         </button>
 
         <button type="button" class="btn btn-sm btn-secondary" data-action="inv-email">
-          ${emailLabel}
+          ${escapeHtml(emailLabel)}
         </button>
-
-        ${isEditable && !isEditing ? `
-          <button type="button" class="btn btn-sm btn-outline-primary" data-action="inv-toggle-edit">
-            Edit
-          </button>
-        ` : ''}
 
         ${isEditing ? `
           <button type="button" class="btn btn-sm btn-outline-secondary" data-action="inv-add-timesheets">
-            + Timesheet
+            + Add timesheet
           </button>
           <button type="button" class="btn btn-sm btn-outline-secondary" data-action="inv-add-adjustment">
-            + Adjustment
-          </button>
-
-          <button type="button" class="btn btn-sm btn-success" data-action="inv-save-edits" ${hasPendingEdits ? '' : 'disabled'}>
-            Save
-          </button>
-          <button type="button" class="btn btn-sm btn-secondary" data-action="inv-cancel-edit">
-            Cancel
+            + Add adjustment
           </button>
         ` : ''}
-
-        <span class="ms-auto"></span>
-
-        <button type="button" class="btn btn-sm btn-outline-danger" data-action="inv-delete-invoice">
-          Delete
-        </button>
       </div>
 
       ${isEditing && hasPendingEdits ? `
@@ -29023,21 +29375,12 @@ function renderInvoiceModalContent(modalCtx, invoiceData) {
         </div>
       ` : ''}
 
-      <div class="border rounded p-2 mb-3">
-        <div class="d-flex justify-content-between align-items-center">
-          <div class="fw-semibold">Totals ${hasPendingEdits ? '<span class="badge bg-info text-dark ms-2">Preview</span>' : ''}</div>
-          <div class="text-end">
-            <div><span class="text-muted me-2">Ex VAT:</span> <span class="fw-semibold">${fmtMoney(totalsToShow.subtotal_ex_vat)}</span></div>
-            <div><span class="text-muted me-2">VAT:</span> <span class="fw-semibold">${fmtMoney(totalsToShow.vat_amount)}</span></div>
-            <div><span class="text-muted me-2">Inc VAT:</span> <span class="fw-semibold">${fmtMoney(totalsToShow.total_inc_vat)}</span></div>
-          </div>
-        </div>
-      </div>
-
       ${renderInvoiceLinesTable(modalCtx, invoiceData, items)}
     </div>
   `;
 }
+
+
 
 function renderInvoiceModalCorrespondenceTab(modalCtx, corrRows) {
   // corrRows is only present if invoice was loaded with ?include_correspondence=1
@@ -29092,6 +29435,11 @@ function renderInvoiceModalCorrespondenceTab(modalCtx, corrRows) {
 }
 
 function renderInvoiceLinesTable(modalCtx, invoiceData, items) {
+  const fmtMoneyLocal = (n) => {
+    const x = invoiceModalRound2(Number(n || 0));
+    return `£${x.toFixed(2)}`;
+  };
+
   const { invoice } = invoiceModalGetInvoiceData(modalCtx);
 
   const isEditable = invoiceModalIsEditable(invoice);
@@ -29099,71 +29447,106 @@ function renderInvoiceLinesTable(modalCtx, invoiceData, items) {
 
   const removedSet = modalCtx?.invoiceEdits?.remove_invoice_line_ids || new Set();
 
-  // Group invoice lines:
-  // - timesheet groups: by timesheet_id (multiple lines per timesheet)
-  // - adjustments: each line is its own group (timesheet_id null)
-  const tsGroups = new Map();
-  const adjGroups = [];
+  modalCtx.invoiceUi = (modalCtx.invoiceUi && typeof modalCtx.invoiceUi === 'object') ? modalCtx.invoiceUi : {};
+  modalCtx.invoiceUi.expanded_timesheets = (modalCtx.invoiceUi.expanded_timesheets && typeof modalCtx.invoiceUi.expanded_timesheets === 'object')
+    ? modalCtx.invoiceUi.expanded_timesheets
+    : {};
 
-  for (const it of (items || [])) {
-    const tsId = it?.timesheet_id ? String(it.timesheet_id) : null;
+  const asLineType = (it) => {
+    const mj = (it && it.meta_json && typeof it.meta_json === 'object') ? it.meta_json : {};
+    const lt = String(it?.line_type_norm || mj?.line_type || '').trim().toUpperCase();
+    return lt;
+  };
 
-    if (tsId) {
-      if (!tsGroups.has(tsId)) tsGroups.set(tsId, { key: tsId, timesheet_id: tsId, lines: [] });
-      tsGroups.get(tsId).lines.push(it);
-    } else {
-      const lid = String(it?.invoice_line_id || '');
-      adjGroups.push({ key: `adj:${lid}`, timesheet_id: null, lines: [it] });
-    }
-  }
+  const isExpenseType = (lt) => {
+    const t = String(lt || '').toUpperCase();
+    return (t === 'EXPENSES' || t === 'MILEAGE' || t === 'TRAVEL' || t === 'ACCOMMODATION' || t === 'OTHER');
+  };
 
-  const groups = [
-    ...Array.from(tsGroups.values()),
-    ...adjGroups
-  ];
+  const isAdditionalRateType = (lt) => {
+    const t = String(lt || '').toUpperCase();
+    return (t === 'ADDITIONAL_RATE' || t === 'ADDITIONAL' || t === 'ADDITIONAL_RATES');
+  };
 
-  const sumQty = (it) => {
+  const getWeekEnding = (g) => {
+    const first = g.lines[0] || {};
+    const mj = (first.meta_json && typeof first.meta_json === 'object') ? first.meta_json : {};
+    return (
+      mj.week_ending_date ||
+      mj.week_ending_date_local ||
+      mj.week_ending ||
+      mj.week_end_date ||
+      ''
+    );
+  };
+
+  const getCandidate = (g) => {
+    const first = g.lines[0] || {};
+    const mj = (first.meta_json && typeof first.meta_json === 'object') ? first.meta_json : {};
+    return (
+      mj.candidate_display ||
+      mj.candidate_name ||
+      mj.worker_name ||
+      ''
+    );
+  };
+
+  const sumBucketQty = (it) => {
     const q = it?.qty || {};
-    const parts = ['day', 'night', 'sat', 'sun', 'bh'];
-    let total = 0;
-    for (const k of parts) total += Number(q?.[k] || 0);
-    return total;
+    return (
+      Number(q.day || 0) +
+      Number(q.night || 0) +
+      Number(q.sat || 0) +
+      Number(q.sun || 0) +
+      Number(q.bh || 0)
+    );
   };
 
   const groupTotals = (g) => {
-    let hrs = 0, ex = 0, vat = 0, inc = 0, margin = 0;
+    let hrs = 0;
+    let ex = 0;
+    let inc = 0;
+    let margin = 0;
+    let expensesEx = 0;
+    let additionalHours = 0;
+
     for (const l of g.lines) {
-      hrs += sumQty(l);
+      const lt = asLineType(l);
+
+      const qtyHrs = sumBucketQty(l);
+      if (qtyHrs > 0) hrs += qtyHrs;
+
       ex += Number(l?.total_charge_ex_vat || 0);
-      vat += Number(l?.vat_amount || 0);
       inc += Number(l?.total_inc_vat || 0);
       margin += Number(l?.margin_ex_vat || 0);
+
+      if (isExpenseType(lt)) {
+        expensesEx += Number(l?.total_charge_ex_vat || 0);
+      }
+
+      // Additional Hours from Additional Rates where unit_name looks like hours
+      if (isAdditionalRateType(lt)) {
+        const mj = (l.meta_json && typeof l.meta_json === 'object') ? l.meta_json : {};
+        const u = (mj.units && typeof mj.units === 'object') ? mj.units : {};
+        const unitName = String(u.unit_name || '').toLowerCase();
+        const unitCount = Number(u.unit_count || 0);
+
+        if (unitCount > 0 && unitName && unitName.includes('hour')) {
+          additionalHours += unitCount;
+        }
+      }
     }
+
     return {
-      hours: invoiceModalRound2(hrs),
+      week: getWeekEnding(g),
+      candidate: getCandidate(g),
+      totalHours: invoiceModalRound2(hrs),
+      additionalHours: invoiceModalRound2(additionalHours),
+      expensesEx: invoiceModalRound2(expensesEx),
       ex: invoiceModalRound2(ex),
-      vat: invoiceModalRound2(vat),
       inc: invoiceModalRound2(inc),
       margin: invoiceModalRound2(margin)
     };
-  };
-
-  const groupLabel = (g) => {
-    const first = g.lines[0] || {};
-    const mj = first?.meta_json || {};
-    // Prefer explicit grouping hints if present; fall back to description.
-    const cand = mj?.candidate_display || mj?.candidate_name || mj?.worker_name || '';
-    const week = mj?.week_ending_date || mj?.week_end_date || mj?.week_ending || '';
-    const basis = mj?.basis || mj?.submission_mode || '';
-
-    const desc = first?.description || '';
-
-    let label = '';
-    if (cand) label += String(cand);
-    if (week) label += (label ? ' — ' : '') + `WE ${week}`;
-    if (basis) label += (label ? ' — ' : '') + String(basis);
-    if (!label) label = desc ? String(desc) : (g.timesheet_id ? `Timesheet ${g.timesheet_id}` : 'Adjustment');
-    return escapeHtml(label);
   };
 
   const isGroupRemoved = (g) => {
@@ -29172,108 +29555,225 @@ function renderInvoiceLinesTable(modalCtx, invoiceData, items) {
     return ids.every(id => removedSet.has(id));
   };
 
-  const renderLineBreakdown = (l) => {
+  // Group invoice lines:
+  const tsGroups = new Map();
+  const adjLines = [];
+
+  for (const it of (items || [])) {
+    const tsId = it?.timesheet_id ? String(it.timesheet_id) : null;
+    const lt = asLineType(it);
+
+    if (tsId) {
+      if (!tsGroups.has(tsId)) tsGroups.set(tsId, { key: tsId, timesheet_id: tsId, lines: [] });
+      tsGroups.get(tsId).lines.push(it);
+    } else {
+      // adjustments: timesheet_id null
+      const lid = String(it?.invoice_line_id || '');
+      adjLines.push({ key: `adj:${lid}`, invoice_line_id: lid, line: it, line_type: lt });
+    }
+  }
+
+  const tsGroupArr = Array.from(tsGroups.values());
+
+  // Build expanded detail rows
+  const allocByWeights = (total, weights) => {
+    const out = {};
+    const keys = Object.keys(weights || {}).filter(k => Number(weights[k] || 0) > 0);
+    if (!keys.length) return out;
+
+    const sumW = keys.reduce((s, k) => s + Number(weights[k] || 0), 0);
+    if (!(sumW > 0)) return out;
+
+    // allocate rounded to 2dp, push rounding remainder into last key
+    let used = 0;
+    keys.forEach((k, idx) => {
+      const w = Number(weights[k] || 0);
+      const raw = (total * w) / sumW;
+      const val = invoiceModalRound2(raw);
+      out[k] = val;
+      used += val;
+    });
+
+    const remainder = invoiceModalRound2(total - used);
+    const lastKey = keys[keys.length - 1];
+    out[lastKey] = invoiceModalRound2((out[lastKey] || 0) + remainder);
+    return out;
+  };
+
+  const buildHourBucketRows = (l) => {
     const q = l?.qty || {};
     const pr = l?.pay_rate || {};
     const cr = l?.charge_rate || {};
-    const parts = ['day', 'night', 'sat', 'sun', 'bh'];
 
-    const hasHours = parts.some(k => Number(q?.[k] || 0) > 0);
-    if (!hasHours) return '';
+    const buckets = [
+      ['day', 'Day'],
+      ['night', 'Night'],
+      ['sat', 'Sat'],
+      ['sun', 'Sun'],
+      ['bh', 'BH']
+    ];
 
-    const row = (k, label) => {
+    const qtyBy = {};
+    const wChg = {};
+    const wPay = {};
+
+    for (const [k] of buckets) {
       const qty = Number(q?.[k] || 0);
-      if (!qty) return '';
-      const pay = Number(pr?.[k] || 0);
-      const chg = Number(cr?.[k] || 0);
-      return `<div class="small text-muted">${label}: ${invoiceModalFmtHours(qty)} @ pay ${fmtMoney(pay)} / charge ${fmtMoney(chg)}</div>`;
+      if (qty > 0) {
+        qtyBy[k] = qty;
+
+        const chgR = Number(cr?.[k]);
+        const payR = Number(pr?.[k]);
+
+        // weights: prefer qty*rate if rate is finite, else qty
+        wChg[k] = (Number.isFinite(chgR) ? (qty * chgR) : qty);
+        wPay[k] = (Number.isFinite(payR) ? (qty * payR) : qty);
+      }
+    }
+
+    const totalPay = invoiceModalRound2(Number(l?.total_pay_ex_vat || 0));
+    const totalChg = invoiceModalRound2(Number(l?.total_charge_ex_vat || 0));
+    const totalVat = invoiceModalRound2(Number(l?.vat_amount || 0));
+    const totalInc = invoiceModalRound2(Number(l?.total_inc_vat || 0));
+    const vatRatePct = Number(l?.vat_rate_pct || 0);
+
+    const allocPay = allocByWeights(totalPay, wPay);
+    const allocChg = allocByWeights(totalChg, wChg);
+
+    // Allocate VAT by charge weights so VAT+INC sum exactly matches stored line totals
+    const allocVat = allocByWeights(totalVat, wChg);
+
+    const rows = [];
+    for (const [k, label] of buckets) {
+      const qty = Number(qtyBy[k] || 0);
+      if (!(qty > 0)) continue;
+
+      const payEx = invoiceModalRound2(Number(allocPay[k] || 0));
+      const chgEx = invoiceModalRound2(Number(allocChg[k] || 0));
+      const vat   = invoiceModalRound2(Number(allocVat[k] || 0));
+      const chgInc = invoiceModalRound2(chgEx + vat);
+
+      rows.push({
+        unit: label,
+        qty: qty,
+        pay_ex: payEx,
+        pay_inc: null,
+        margin: invoiceModalRound2(chgEx - payEx),
+        chg_ex: chgEx,
+        chg_inc: chgInc
+      });
+    }
+
+    return rows;
+  };
+
+  const buildNonHourRow = (l) => {
+    const lt = asLineType(l);
+    const mj = (l.meta_json && typeof l.meta_json === 'object') ? l.meta_json : {};
+    const u = (mj.units && typeof mj.units === 'object') ? mj.units : {};
+    const bucket = (mj.bucket && typeof mj.bucket === 'object') ? mj.bucket : {};
+
+    const unitName =
+      bucket.name ||
+      u.unit_name ||
+      (isExpenseType(lt) ? lt : (lt || (l.description || '')));
+
+    const qty =
+      (Number.isFinite(Number(u.unit_count)) && Number(u.unit_count) !== 0)
+        ? Number(u.unit_count)
+        : null;
+
+    const payEx = invoiceModalRound2(Number(l?.total_pay_ex_vat || 0));
+    const chgEx = invoiceModalRound2(Number(l?.total_charge_ex_vat || 0));
+    const inc   = invoiceModalRound2(Number(l?.total_inc_vat || 0));
+    const margin= invoiceModalRound2(Number(l?.margin_ex_vat || 0));
+
+    // Show only if meaningful (and always allow expense/mileage if pay or charge exists)
+    const shouldShow =
+      (isExpenseType(lt) ? (payEx !== 0 || chgEx !== 0) : ((qty && qty !== 0) || payEx !== 0 || chgEx !== 0));
+
+    if (!shouldShow) return null;
+
+    return {
+      unit: String(unitName || ''),
+      qty: qty,
+      pay_ex: payEx,
+      pay_inc: (mj?.totals && mj.totals.pay_inc_vat != null) ? Number(mj.totals.pay_inc_vat) : null,
+      margin: margin,
+      chg_ex: chgEx,
+      chg_inc: inc
+    };
+  };
+
+  const renderExpandedTable = (g) => {
+    const rows = [];
+
+    for (const l of g.lines) {
+      const lt = asLineType(l);
+
+      const qtyHrs = sumBucketQty(l);
+
+      if (qtyHrs > 0) {
+        const parts = buildHourBucketRows(l);
+        parts.forEach(r => rows.push(r));
+        continue;
+      }
+
+      const r = buildNonHourRow(l);
+      if (r) rows.push(r);
+    }
+
+    if (!rows.length) {
+      return `<div class="text-muted small">No billable lines.</div>`;
+    }
+
+    const tr = (r) => {
+      const payIncTxt = (r.pay_inc == null) ? '—' : fmtMoneyLocal(r.pay_inc);
+      const qtyTxt = (r.qty == null) ? '—' : invoiceModalFmtHours(Number(r.qty || 0));
+      return `
+        <tr>
+          <td>${escapeHtml(String(r.unit || ''))}</td>
+          <td class="text-end">${escapeHtml(String(qtyTxt))}</td>
+          <td class="text-end">${fmtMoneyLocal(r.pay_ex)}</td>
+          <td class="text-end">${escapeHtml(String(payIncTxt))}</td>
+          <td class="text-end">${fmtMoneyLocal(r.margin)}</td>
+          <td class="text-end">${fmtMoneyLocal(r.chg_ex)}</td>
+          <td class="text-end">${fmtMoneyLocal(r.chg_inc)}</td>
+        </tr>
+      `;
     };
 
     return `
-      <div class="mt-1">
-        ${row('day', 'Day')}
-        ${row('night', 'Night')}
-        ${row('sat', 'Sat')}
-        ${row('sun', 'Sun')}
-        ${row('bh', 'BH')}
+      <div class="mt-2">
+        <table class="grid" style="width:100%">
+          <thead>
+            <tr>
+              <th>Unit</th>
+              <th class="text-end">Qty</th>
+              <th class="text-end">Pay (ex VAT)</th>
+              <th class="text-end">Pay (inc VAT)</th>
+              <th class="text-end">Margin</th>
+              <th class="text-end">Charge (ex VAT)</th>
+              <th class="text-end">Charge (inc VAT)</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${rows.map(tr).join('')}
+          </tbody>
+        </table>
       </div>
     `;
   };
 
-  const renderGroup = (g) => {
-    const removed = isGroupRemoved(g);
-    const totals = groupTotals(g);
-
-    const removeBtn = (() => {
-      if (!isEditing) return '';
-      if (g.timesheet_id) {
-        return `
-          <button type="button"
-            class="btn btn-sm ${removed ? 'btn-outline-secondary' : 'btn-outline-danger'}"
-            data-action="inv-toggle-remove-timesheet"
-            data-timesheet-id="${escapeHtml(g.timesheet_id)}">
-            ${removed ? 'Undo' : 'Remove'}
-          </button>
-        `;
-      }
-      const lid = String(g.lines?.[0]?.invoice_line_id || '');
-      return `
-        <button type="button"
-          class="btn btn-sm ${removed ? 'btn-outline-secondary' : 'btn-outline-danger'}"
-          data-action="inv-toggle-remove-line"
-          data-invoice-line-id="${escapeHtml(lid)}">
-          ${removed ? 'Undo' : 'Remove'}
-        </button>
-      `;
-    })();
-
-    const summaryRight = `
-      <div class="text-end">
-        <div class="fw-semibold">${fmtMoney(totals.ex)}</div>
-        <div class="text-muted small">${invoiceModalFmtHours(totals.hours)}</div>
-      </div>`;
-
-    const lineRows = g.lines.map(l => {
-      const lid = escapeHtml(String(l?.invoice_line_id || ''));
-      const desc = escapeHtml(String(l?.description || ''));
-      const ex = fmtMoney(Number(l?.total_charge_ex_vat || 0));
-      const vat = fmtMoney(Number(l?.vat_amount || 0));
-      const inc = fmtMoney(Number(l?.total_inc_vat || 0));
-      const margin = fmtMoney(Number(l?.margin_ex_vat || 0));
-
-      const cls = removedSet.has(String(l?.invoice_line_id || '')) ? 'opacity-50' : '';
-      return `
-        <div class="border rounded p-2 mb-2 ${cls}">
-          <div class="d-flex justify-content-between align-items-start">
-            <div class="fw-semibold">${desc}</div>
-            <div class="text-end small">
-              <div><span class="text-muted me-2">Ex:</span>${ex}</div>
-              <div><span class="text-muted me-2">VAT:</span>${vat}</div>
-              <div><span class="text-muted me-2">Inc:</span>${inc}</div>
-              <div><span class="text-muted me-2">Margin:</span>${margin}</div>
-            </div>
-          </div>
-          ${renderLineBreakdown(l)}
-        </div>
-      `;
-    }).join('');
-
+  const renderRemoveBtnForTimesheet = (g, removed) => {
+    if (!isEditing) return '';
     return `
-      <details class="border rounded mb-2" ${removed ? '' : ''}>
-        <summary class="p-2 d-flex justify-content-between align-items-center" style="cursor:pointer;">
-          <div>
-            <div class="fw-semibold">${groupLabel(g)} ${removed ? '<span class="badge bg-warning text-dark ms-2">Removed</span>' : ''}</div>
-            ${g.timesheet_id ? `<div class="text-muted small">Timesheet: ${escapeHtml(g.timesheet_id)}</div>` : `<div class="text-muted small">Adjustment</div>`}
-          </div>
-          <div class="d-flex align-items-center gap-2">
-            ${summaryRight}
-            ${removeBtn}
-          </div>
-        </summary>
-        <div class="p-2">
-          ${lineRows}
-        </div>
-      </details>
+      <button type="button"
+        class="btn btn-sm ${removed ? 'btn-outline-secondary' : 'btn-outline-danger'}"
+        data-action="inv-toggle-remove-timesheet"
+        data-timesheet-id="${escapeHtml(g.timesheet_id)}">
+        ${removed ? 'Undo' : 'Remove'}
+      </button>
     `;
   };
 
@@ -29283,17 +29783,15 @@ function renderInvoiceLinesTable(modalCtx, invoiceData, items) {
   const stagedAdjs = Array.isArray(staged.add_adjustments) ? staged.add_adjustments : [];
 
   const stagedBlocks = [];
-
   if (isEditing && (stagedTs.size || stagedAdjs.length)) {
     const blocks = [];
 
-    // Staged timesheets
     if (stagedTs.size) {
       const tsHtml = Array.from(stagedTs).map(tsId => {
         const t = invoiceModalLookupEligibleTimesheet(modalCtx, tsId);
         const name = escapeHtml(String(t?.candidate_name || t?.candidate_id || tsId));
         const we = escapeHtml(String(t?.source_week_ending_date || ''));
-        const ex = fmtMoney(Number(t?.invoiceable_charge_ex_vat || 0));
+        const ex = fmtMoneyLocal(Number(t?.invoiceable_charge_ex_vat || 0));
         const hrs = invoiceModalFmtHours(Number(t?.invoiceable_hours || 0));
         return `
           <div class="border rounded p-2 mb-2">
@@ -29317,15 +29815,14 @@ function renderInvoiceLinesTable(modalCtx, invoiceData, items) {
           </div>
         `;
       }).join('');
-      blocks.push(`<div class="mb-3"><div class="fw-semibold mb-2">Pending Timesheets</div>${tsHtml}</div>`);
+      blocks.push(`<div class="mb-3"><div class="fw-semibold mb-2">Pending timesheets</div>${tsHtml}</div>`);
     }
 
-    // Staged adjustments
     if (stagedAdjs.length) {
       const adjHtml = stagedAdjs.map(a => {
         const tok = escapeHtml(String(a?.client_token || ''));
         const desc = escapeHtml(String(a?.description || ''));
-        const ex = fmtMoney(Number(a?.amount_ex_vat || 0));
+        const ex = fmtMoneyLocal(Number(a?.amount_ex_vat || 0));
         return `
           <div class="border rounded p-2 mb-2">
             <div class="d-flex justify-content-between">
@@ -29342,7 +29839,7 @@ function renderInvoiceLinesTable(modalCtx, invoiceData, items) {
           </div>
         `;
       }).join('');
-      blocks.push(`<div class="mb-3"><div class="fw-semibold mb-2">Pending Adjustments</div>${adjHtml}</div>`);
+      blocks.push(`<div class="mb-3"><div class="fw-semibold mb-2">Pending adjustments</div>${adjHtml}</div>`);
     }
 
     stagedBlocks.push(`
@@ -29353,18 +29850,126 @@ function renderInvoiceLinesTable(modalCtx, invoiceData, items) {
     `);
   }
 
-  if (!groups.length && stagedBlocks.length === 0) {
+  // Timesheets table
+  const head = `
+    <thead>
+      <tr>
+        <th>Week ending</th>
+        <th>Candidate</th>
+        <th class="text-end">Total hours</th>
+        <th class="text-end">Additional hours</th>
+        <th class="text-end">Expenses</th>
+        <th class="text-end">Cost (ex VAT)</th>
+        <th class="text-end">Cost (inc VAT)</th>
+        <th class="text-end">Margin</th>
+        ${isEditing ? '<th class="text-end">Actions</th>' : ''}
+      </tr>
+    </thead>
+  `;
+
+  const bodyRows = tsGroupArr.map(g => {
+    const totals = groupTotals(g);
+    const removed = isGroupRemoved(g);
+    const expanded = !!modalCtx.invoiceUi.expanded_timesheets[String(g.timesheet_id)];
+
+    const trMain = `
+      <tr data-action="inv-toggle-expand-timesheet" data-timesheet-id="${escapeHtml(g.timesheet_id)}" style="cursor:pointer;">
+        <td>${escapeHtml(String(totals.week || ''))}</td>
+        <td>${escapeHtml(String(totals.candidate || ''))}</td>
+        <td class="text-end">${escapeHtml(invoiceModalFmtHours(totals.totalHours))}</td>
+        <td class="text-end">${escapeHtml(invoiceModalFmtHours(totals.additionalHours))}</td>
+        <td class="text-end">${fmtMoneyLocal(totals.expensesEx)}</td>
+        <td class="text-end">${fmtMoneyLocal(totals.ex)}</td>
+        <td class="text-end">${fmtMoneyLocal(totals.inc)}</td>
+        <td class="text-end">${fmtMoneyLocal(totals.margin)}</td>
+        ${isEditing ? `<td class="text-end">${renderRemoveBtnForTimesheet(g, removed)}</td>` : ''}
+      </tr>
+    `;
+
+    const trExpanded = expanded ? `
+      <tr>
+        <td colspan="${isEditing ? 9 : 8}">
+          ${renderExpandedTable(g)}
+        </td>
+      </tr>
+    ` : '';
+
+    return trMain + trExpanded;
+  }).join('');
+
+  // Adjustments table
+  const adjTable = (() => {
+    if (!adjLines.length) return '';
+
+    const rows = adjLines.map(a => {
+      const l = a.line || {};
+      const lid = String(l?.invoice_line_id || a.invoice_line_id || '');
+      const desc = String(l?.description || 'Adjustment');
+      const ex = invoiceModalRound2(Number(l?.total_charge_ex_vat || 0));
+      const inc = invoiceModalRound2(Number(l?.total_inc_vat || 0));
+      const margin = invoiceModalRound2(Number(l?.margin_ex_vat || 0));
+
+      const removed = removedSet.has(lid);
+
+      const btn = (!isEditing)
+        ? ''
+        : `
+          <button type="button"
+            class="btn btn-sm ${removed ? 'btn-outline-secondary' : 'btn-outline-danger'}"
+            data-action="inv-toggle-remove-line"
+            data-invoice-line-id="${escapeHtml(lid)}">
+            ${removed ? 'Undo' : 'Remove'}
+          </button>
+        `;
+
+      return `
+        <tr class="${removed ? 'opacity-50' : ''}">
+          <td>${escapeHtml(desc)}</td>
+          <td class="text-end">${fmtMoneyLocal(ex)}</td>
+          <td class="text-end">${fmtMoneyLocal(inc)}</td>
+          <td class="text-end">${fmtMoneyLocal(margin)}</td>
+          ${isEditing ? `<td class="text-end">${btn}</td>` : ''}
+        </tr>
+      `;
+    }).join('');
+
+    return `
+      <div class="mt-3">
+        <div class="fw-semibold mb-2">Adjustments</div>
+        <table class="grid" style="width:100%">
+          <thead>
+            <tr>
+              <th>Description</th>
+              <th class="text-end">Cost (ex VAT)</th>
+              <th class="text-end">Cost (inc VAT)</th>
+              <th class="text-end">Margin</th>
+              ${isEditing ? '<th class="text-end">Actions</th>' : ''}
+            </tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+    `;
+  })();
+
+  if (!tsGroupArr.length && !adjLines.length && stagedBlocks.length === 0) {
     return `<div class="text-muted">No invoice lines.</div>`;
   }
 
   return `
     <div>
       ${stagedBlocks.join('')}
-      <div class="fw-semibold mb-2">Invoice lines</div>
-      ${groups.map(renderGroup).join('')}
+      <div class="fw-semibold mb-2">Timesheets</div>
+      <table class="grid" style="width:100%">
+        ${head}
+        <tbody>${bodyRows}</tbody>
+      </table>
+      ${adjTable}
     </div>
   `;
 }
+
+
 
 function deriveTimesheetInvoicingDisplay(row) {
   // Prefer new segment-aware fields where present (v_timesheets_summary_base additions),
@@ -31992,6 +32597,43 @@ function renderSummary(rows){
     tr.dataset.id = (r && r.id) ? String(r.id) : '';
     tr.dataset.section = currentSection;
 
+    // ─────────────────────────────────────────────────────────────
+    // ✅ NEW summary styling rules (Timesheets / Invoices)
+    // ─────────────────────────────────────────────────────────────
+    try {
+      if (currentSection === 'timesheets') {
+        const proc = String(r?.processing_status || '').trim().toUpperCase();
+        const invSegStage = String(r?.invoice_segment_stage || '').trim().toUpperCase();
+
+        const isReadyToInvoice = (proc === 'READY_FOR_INVOICE');
+
+        // FULLY invoiced (segment-aware from v_timesheets_summary_base)
+        const isFullyInvoiced = (invSegStage === 'FULLY_INVOICED');
+
+        const isPaidToCandidate = !!r?.paid_at_utc;
+
+        // Row rules:
+        // - Paid + fully invoiced => deep green row
+        // - Ready to invoice      => light green row
+        if (isPaidToCandidate && isFullyInvoiced) {
+          tr.classList.add('row-deep-green');
+        } else if (isReadyToInvoice) {
+          tr.classList.add('row-light-green');
+        }
+      }
+
+      if (currentSection === 'invoices') {
+        const stInv = String(r?.status || '').trim().toUpperCase();
+        const isIssued = !!r?.issued_at_utc && (stInv === 'ISSUED' || stInv === 'PAID');
+
+        // Row rule:
+        // - Invoiced and issued => deep green row
+        if (isIssued) {
+          tr.classList.add('row-deep-green');
+        }
+      }
+    } catch {}
+
     const tdSel = document.createElement('td');
     tdSel.style.width = '40px';
     tdSel.style.minWidth = '40px';
@@ -32021,6 +32663,7 @@ function renderSummary(rows){
           const rest  = parts.slice(1); // drop primary
           td.textContent = rest.join('; ');
         }
+
       } else if (currentSection === 'timesheets' && c === 'issue_codes') {
         // ── Issues column: badges ─────────────────────────────────────────────
         td.classList.add('mini');
@@ -32035,28 +32678,83 @@ function renderSummary(rows){
           // Timesheet exists – use shared helper (green OK or red/amber badges)
           td.appendChild(renderIssueBadges(codes));
         }
+
+      } else if (currentSection === 'timesheets' && c === 'candidate_name') {
+        // ─────────────────────────────────────────────────────────────
+        // ✅ Paid to candidate indicator:
+        // - NO row green for "paid" alone
+        // - Gold coin in candidate cell, right-aligned
+        // ─────────────────────────────────────────────────────────────
+        const txt = String(formatDisplayValue(c, v) ?? '');
+        const isPaidToCandidate = !!r?.paid_at_utc;
+
+        if (isPaidToCandidate && txt) {
+          const wrap = document.createElement('div');
+          wrap.className = 'cell-right-icon';
+
+          const main = document.createElement('span');
+          main.className = 'cell-main';
+          main.textContent = txt;
+
+          const coin = document.createElement('span');
+          coin.className = 'coin-badge';
+          coin.textContent = '£';
+
+          wrap.appendChild(main);
+          wrap.appendChild(coin);
+          td.appendChild(wrap);
+        } else {
+          td.textContent = txt;
+        }
+
       } else if (currentSection === 'timesheets' && c === 'processing_status') {
         // ─────────────────────────────────────────────────────────────
-        // ✅ UI overlay ONLY (do NOT change row.processing_status):
-        // If timesheet is invoiced AND locked_invoice_status exists:
-        //   - PAID   → "Invoice Paid" (precedence)
-        //   - ISSUED → "Invoiced (Issued)"
-        //   - else   → "Invoiced (Not issued)"
-        // Otherwise show raw processing_status value.
+        // ✅ Processing State column rules:
+        // - If FULLY invoiced => text "Invoiced" + green cell background
+        // - Else show raw processing_status
+        // (uses v_timesheets_summary_base.invoice_segment_stage)
         // ─────────────────────────────────────────────────────────────
-        const hasLockedInvoiceId = !!(r && r.locked_by_invoice_id);
-        const lis = String((r && Object.prototype.hasOwnProperty.call(r, 'locked_invoice_status')) ? (r.locked_invoice_status ?? '') : '').trim().toUpperCase();
+        const invSegStage = String(r?.invoice_segment_stage || '').trim().toUpperCase();
+        const isFullyInvoiced = (invSegStage === 'FULLY_INVOICED');
 
-        if (hasLockedInvoiceId && lis) {
-          if (lis === 'PAID') td.textContent = 'Invoice Paid';
-          else if (lis === 'ISSUED') td.textContent = 'Invoiced (Issued)';
-          else td.textContent = 'Invoiced (Not issued)';
+        if (isFullyInvoiced) {
+          td.textContent = 'Invoiced';
+          td.classList.add('cell-invoiced');
         } else {
           td.textContent = formatDisplayValue(c, v);
         }
+
+      } else if (currentSection === 'invoices' && c === 'invoice_no') {
+        // ─────────────────────────────────────────────────────────────
+        // ✅ Paid indicator in invoice number cell:
+        // - Gold coin on the right if paid_at_utc exists
+        // ─────────────────────────────────────────────────────────────
+        const txt = String(formatDisplayValue(c, v) ?? '');
+        const isPaid = !!r?.paid_at_utc;
+
+        if (isPaid && txt) {
+          const wrap = document.createElement('div');
+          wrap.className = 'cell-right-icon';
+
+          const main = document.createElement('span');
+          main.className = 'cell-main';
+          main.textContent = txt;
+
+          const coin = document.createElement('span');
+          coin.className = 'coin-badge';
+          coin.textContent = '£';
+
+          wrap.appendChild(main);
+          wrap.appendChild(coin);
+          td.appendChild(wrap);
+        } else {
+          td.textContent = txt;
+        }
+
       } else if (currentSection === 'invoices' && c === 'client_name') {
         // Flattened client name (already set in pre-normalisation)
         td.textContent = String(r.client_name || '');
+
       } else {
         td.textContent = formatDisplayValue(c, v);
       }
@@ -32066,6 +32764,7 @@ function renderSummary(rows){
 
     tb.appendChild(tr);
   });
+
 
   // ── Apply pending focus (from operations like pay-method change, change rates) ──
   try {
@@ -32219,6 +32918,62 @@ function renderSummary(rows){
   wireGridColumnReorder(currentSection, tbl);
   attachHeaderContextMenu(currentSection, tbl);
 
+   // ─────────────────────────────────────────────────────────────
+  // ✅ Footer totals block (above Prev/Next)
+  // - Must reflect ALL rows matching filters, not current page
+  // - Values come from list loaders:
+  //   - timesheets: listTimesheetsSummary(include_totals=true) → st.totals
+  //   - invoices:   search(invoices, include_count+totals) → st.totals
+  //   - contracts:  search(contracts) fetches /api/contracts/count → st.total
+  // ─────────────────────────────────────────────────────────────
+  const totalsBar = document.createElement('div');
+  totalsBar.className = 'summary-totals-bar';
+  totalsBar.style.cssText = 'display:flex;align-items:center;gap:14px;padding:8px 10px;border-top:1px solid var(--line);background:#081024;flex-wrap:wrap;';
+
+  const fmtGBP = (n) => {
+    const x = Number(n || 0);
+    const v = Number.isFinite(x) ? x : 0;
+    return `£${v.toFixed(2)}`;
+  };
+
+  const mkTot = (label, value) => {
+    const s = document.createElement('span');
+    s.className = 'mini';
+    s.innerHTML = `<span style="opacity:.85;">${label}:</span> <span style="font-weight:700;">${value}</span>`;
+    return s;
+  };
+
+  try {
+    if (currentSection === 'invoices') {
+      const t = (st && st.totals && typeof st.totals === 'object') ? st.totals : null;
+      const countAll = Number((t && t.count_all != null) ? t.count_all : (st.total != null ? st.total : 0));
+
+      totalsBar.appendChild(mkTot('Count', String(countAll)));
+      totalsBar.appendChild(mkTot('Subtotal ex VAT', fmtGBP(t?.subtotal_ex_vat_sum)));
+      totalsBar.appendChild(mkTot('Total inc VAT', fmtGBP(t?.total_inc_vat_sum)));
+      totalsBar.appendChild(mkTot('Margin', fmtGBP(t?.margin_ex_vat_sum)));
+    }
+
+    if (currentSection === 'timesheets') {
+      const t = (st && st.totals && typeof st.totals === 'object') ? st.totals : null;
+      const countAll = Number((t && t.count_all != null) ? t.count_all : (st.total != null ? st.total : 0));
+
+      totalsBar.appendChild(mkTot('Count', String(countAll)));
+      totalsBar.appendChild(mkTot('Total pay ex VAT', fmtGBP(t?.total_pay_ex_vat_sum)));
+      totalsBar.appendChild(mkTot('Margin', fmtGBP(t?.margin_ex_vat_sum)));
+    }
+
+    if (currentSection === 'contracts') {
+      const countAll = Number(st.total != null ? st.total : 0);
+      totalsBar.appendChild(mkTot('Count', String(countAll)));
+    }
+  } catch {}
+
+  // Only show totals bar on sections that require it
+  if (totalsBar.childNodes && totalsBar.childNodes.length > 0) {
+    content.appendChild(totalsBar);
+  }
+
   // Footer/pager
   const pager = document.createElement('div');
   pager.style.cssText = 'display:flex;align-items:center;gap:6px;padding:8px 10px;border-top:1px solid var(--line);';
@@ -32292,6 +33047,7 @@ function renderSummary(rows){
   const spacer = document.createElement('div'); spacer.style.flex = '1';
   pager.appendChild(spacer); pager.appendChild(info);
   content.appendChild(pager);
+
 
   // Selection toolbar
   const selBar = document.createElement('div');
@@ -32502,20 +33258,41 @@ async function openInvoiceBatchIssueModal() {
     seedDefaultSelection();
   };
 
-  const refreshInvoiceSummary = async () => {
+   const refreshInvoiceSummary = async (invoiceIds) => {
+    // ✅ 4.9: After batch issue, switch UI to Invoice Summary and filter to invoices touched in this run.
     try {
+      const ids = Array.from(new Set((invoiceIds || []).map(String).filter(Boolean)));
+
       window.__listState = window.__listState || {};
-      window.__listState.invoices = window.__listState.invoices || { page: 1, pageSize: 50, total: null, hasMore: false, filters: null, sort: { key: null, dir: 'asc' } };
+      window.__listState.invoices = window.__listState.invoices || {
+        page: 1,
+        pageSize: 50,
+        total: null,
+        hasMore: false,
+        filters: null,
+        sort: { key: null, dir: 'asc' }
+      };
+
       window.__listState.invoices.page = 1;
       window.__listState.invoices.total = null;
       window.__listState.invoices.hasMore = false;
 
-      if (currentSection === 'invoices') {
-        const data = await loadSection();
-        renderSummary(data);
-      }
+      // Replace filters so we show ONLY this run’s invoices
+      window.__listState.invoices.filters = {
+        ids,
+        include_totals: 1
+      };
+
+      try { currentSection = 'invoices'; } catch {}
+
+      // Close the utility modal first (so the user sees the summary immediately)
+      try { document.getElementById('btnCloseModal')?.click(); } catch {}
+
+      const data = await loadSection();
+      renderSummary(data);
     } catch {}
   };
+
 
   const renderSkeleton = () => `
     <div id="invBatchIssueRoot" class="invbatch-root">
@@ -32612,7 +33389,6 @@ async function openInvoiceBatchIssueModal() {
       state.selectedInvoiceIds.clear();
       paint();
     }, { disabled: state.busy || selectedCount === 0 }));
-
     controls.appendChild(mkBtn(`Confirm (${selectedCount})`, async () => {
       if (state.busy) return;
 
@@ -32641,7 +33417,19 @@ async function openInvoiceBatchIssueModal() {
 
         state.results = out || {};
         window.__toast && window.__toast('Batch issue complete.');
-        await refreshInvoiceSummary();
+
+        // ✅ collect invoice ids touched in this run (prefer RPC results; fallback to selection)
+        const invRes = Array.isArray(out?.invoice_results) ? out.invoice_results : [];
+        const touched = [];
+
+        for (const r of invRes) {
+          const id = String(r?.invoice_id || '').trim();
+          if (id) touched.push(id);
+        }
+
+        const idsForNav = touched.length ? touched : ids;
+
+        await refreshInvoiceSummary(idsForNav);
 
       } catch (e) {
         state.error = String(e?.message || e);
@@ -32650,6 +33438,7 @@ async function openInvoiceBatchIssueModal() {
         paint();
       }
     }, { primary: true, disabled: state.busy || selectedCount === 0 }));
+
 
     const selInfo = document.createElement('div');
     selInfo.className = 'mini';
@@ -33292,29 +34081,43 @@ async function openInvoiceBatchGenerateModal() {
     }
   };
 
-  const refreshSummariesAfterSuccess = async () => {
-    // Make the next summary view fetch fresh pages
+  const refreshSummariesAfterSuccess = async (invoiceIds) => {
+    // ✅ 4.9: After batch generate, switch UI to Invoice Summary and filter to invoices from this run.
     try {
-      window.__listState = window.__listState || {};
+      const ids = Array.from(new Set((invoiceIds || []).map(String).filter(Boolean)));
 
-      window.__listState.invoices   = window.__listState.invoices   || { page:1, pageSize:50, total:null, hasMore:false, filters:null, sort:{ key:null, dir:'asc' } };
-      window.__listState.timesheets = window.__listState.timesheets || { page:1, pageSize:50, total:null, hasMore:false, filters:null, sort:{ key:null, dir:'asc' } };
+      // Always reset invoice paging so the filter view is stable
+      window.__listState = window.__listState || {};
+      window.__listState.invoices = window.__listState.invoices || {
+        page: 1,
+        pageSize: 50,
+        total: null,
+        hasMore: false,
+        filters: null,
+        sort: { key: null, dir: 'asc' }
+      };
 
       window.__listState.invoices.page = 1;
       window.__listState.invoices.total = null;
       window.__listState.invoices.hasMore = false;
 
-      window.__listState.timesheets.page = 1;
-      window.__listState.timesheets.total = null;
-      window.__listState.timesheets.hasMore = false;
+      // Replace filters so we show ONLY this run’s invoices
+      window.__listState.invoices.filters = {
+        ids,
+        include_totals: 1
+      };
 
-      // If they are currently viewing either sheet behind the modal, refresh immediately
-      if (currentSection === 'invoices' || currentSection === 'timesheets') {
-        const data = await loadSection();
-        renderSummary(data);
-      }
+      // Switch section and repaint (same primitives you already use elsewhere)
+      try { currentSection = 'invoices'; } catch {}
+
+      // Close the utility modal first (so the user sees the summary immediately)
+      try { document.getElementById('btnCloseModal')?.click(); } catch {}
+
+      const data = await loadSection();
+      renderSummary(data);
     } catch {}
   };
+
 
   const renderSkeleton = () => {
     // NOTE: no inline styling beyond minimal structure; CSS will be added in index.html.
@@ -33423,7 +34226,7 @@ async function openInvoiceBatchGenerateModal() {
       paint();
     }, { disabled: state.busy || selectedCount === 0 }));
 
-    controls.appendChild(mkBtn(`Confirm (${selectedCount})`, async () => {
+      controls.appendChild(mkBtn(`Confirm (${selectedCount})`, async () => {
       if (state.busy) return;
 
       const rowsPayload = buildRowsPayload();
@@ -33451,7 +34254,19 @@ async function openInvoiceBatchGenerateModal() {
 
         state.results = out || {};
         window.__toast && window.__toast(`Batch generate complete (generated: ${Number(out?.generated || 0)}).`);
-        await refreshSummariesAfterSuccess();
+
+        // ✅ collect invoice ids produced in this run (for summary filter)
+        const jobs = Array.isArray(out?.jobs) ? out.jobs : [];
+        const allInvoices = [];
+        for (const j of jobs) {
+          const ids = Array.isArray(j?.invoice_ids) ? j.invoice_ids : [];
+          for (const id of ids) {
+            const s = String(id || '').trim();
+            if (s) allInvoices.push(s);
+          }
+        }
+
+        await refreshSummariesAfterSuccess(allInvoices);
       } catch (e) {
         state.error = String(e?.message || e);
       } finally {
@@ -33459,6 +34274,7 @@ async function openInvoiceBatchGenerateModal() {
         paint();
       }
     }, { primary: true, disabled: state.busy || selectedCount === 0 }));
+
 
     const selInfo = document.createElement('div');
     selInfo.className = 'mini';
@@ -39216,45 +40032,95 @@ await refreshFooter();
     }
 
 
-    // 🔹 Top-level Edit Contract → wire global Delete button
-    if (!isChild && top.entity === 'contracts') {
-      const canDelete = !!(window.modalCtx?.data && window.modalCtx.data.can_delete);
-      const showDelete = (top.mode === 'edit' && top.hasId && canDelete);
+   // 🔹 Top-level Invoice Modal → wire global Delete button (VIEW mode only, eligible only)
+// NOTE: This aligns with your brief: delete is only possible AFTER unissue + remove all lines + Save.
+// We DO NOT delete in edit mode; we only show the delete button in VIEW when invoice is eligible.
+if (!isChild && top.entity === 'invoices' && top.kind === 'invoice-modal') {
+  const mc = window.modalCtx || {};
+  const det = mc.data || mc.dataLoaded || mc.invoiceDetail || null;
 
-      if (showDelete) {
-        btnDel.style.display = '';
-        btnDel.disabled = !!top._saving;
-        btnDel.onclick = async () => {
-          const id = window.modalCtx?.data?.id;
-          if (!id) return;
+  const inv = det && typeof det === 'object'
+    ? (det.invoice || det.invoice_row || det.invoiceRow || null)
+    : null;
 
-          const ok = window.confirm('Do you want to permanently delete this contract?');
-          if (!ok) return;
+  const items = (det && Array.isArray(det.items)) ? det.items : [];
 
-          try {
-            if (typeof deleteContract === 'function') {
-              if (LOG) console.log('[MODAL][CONTRACTS] delete via btnDelete', { id });
-              await deleteContract(id);
-            } else {
-              alert('Delete contract action is not available.');
-              return;
-            }
-            try { discardAllModalsAndState(); } catch {}
-            try { await renderAll(); } catch {}
-          } catch (e) {
-            alert(e?.message || 'Delete failed');
-          }
-        };
-      } else {
-        btnDel.style.display = 'none';
-        btnDel.disabled = true;
-        btnDel.onclick = null;
+  const status = String(inv?.status || '').toUpperCase();
+  const eligible =
+    !!inv &&
+    (inv.paid_at_utc == null) &&
+    (inv.issued_at_utc == null) &&
+    (status === 'DRAFT') &&
+    (items.length === 0);
+
+  if (top.mode === 'view' && eligible) {
+    btnDel.style.display = '';
+    btnDel.disabled = !!top._saving;
+    btnDel.textContent = 'Delete Invoice';
+    btnDel.onclick = async () => {
+      try {
+        if (typeof handleInvoiceDelete === 'function') {
+          await handleInvoiceDelete(mc);
+        } else {
+          alert('Delete invoice action is not available.');
+          return;
+        }
+        try { byId('btnCloseModal')?.click(); } catch {}
+        try { await renderAll(); } catch {}
+      } catch (e) {
+        alert(e?.message || 'Delete failed');
       }
-    } else if (!isChild) {
-      btnDel.style.display = 'none';
-      btnDel.disabled = true;
-      btnDel.onclick = null;
-    }
+    };
+  } else {
+    btnDel.style.display = 'none';
+    btnDel.disabled = true;
+    btnDel.onclick = null;
+    // restore default label if other flows rely on it
+    btnDel.textContent = 'Delete';
+  }
+
+} else
+
+// 🔹 Top-level Edit Contract → wire global Delete button
+if (!isChild && top.entity === 'contracts') {
+  const canDelete = !!(window.modalCtx?.data && window.modalCtx.data.can_delete);
+  const showDelete = (top.mode === 'edit' && top.hasId && canDelete);
+
+  if (showDelete) {
+    btnDel.style.display = '';
+    btnDel.disabled = !!top._saving;
+    btnDel.onclick = async () => {
+      const id = window.modalCtx?.data?.id;
+      if (!id) return;
+
+      const ok = window.confirm('Do you want to permanently delete this contract?');
+      if (!ok) return;
+
+      try {
+        if (typeof deleteContract === 'function') {
+          if (LOG) console.log('[MODAL][CONTRACTS] delete via btnDelete', { id });
+          await deleteContract(id);
+        } else {
+          alert('Delete contract action is not available.');
+          return;
+        }
+        try { discardAllModalsAndState(); } catch {}
+        try { await renderAll(); } catch {}
+      } catch (e) {
+        alert(e?.message || 'Delete failed');
+      }
+    };
+  } else {
+    btnDel.style.display = 'none';
+    btnDel.disabled = true;
+    btnDel.onclick = null;
+  }
+} else if (!isChild) {
+  btnDel.style.display = 'none';
+  btnDel.disabled = true;
+  btnDel.onclick = null;
+}
+
   }
 
   setCloseLabel();
@@ -59639,9 +60505,12 @@ async function listTimesheetsSummary(filters = {}) {
     ? 200
     : Number(pageSizeRaw) || 50;
 
-  const qs = new URLSearchParams();
+    const qs = new URLSearchParams();
   qs.set('page', String(page));
   qs.set('page_size', String(pageSize));
+
+  // ✅ Totals must reflect ALL rows matching filters (not just this page)
+  qs.set('include_totals', 'true');
 
   const f = filters || {};
 
@@ -59665,6 +60534,10 @@ async function listTimesheetsSummary(filters = {}) {
   const scope = (f.sheet_scope || '').toUpperCase();
   if (scope && scope !== 'ALL') qs.set('sheet_scope', scope);
 
+  // ✅ Week ending range (backend supports week_ending_from/to)
+  if (f.week_ending_from) qs.set('week_ending_from', String(f.week_ending_from).slice(0, 10));
+  if (f.week_ending_to)   qs.set('week_ending_to',   String(f.week_ending_to).slice(0, 10));
+
   // processing_status filter (supports single or comma-joined list)
   const procStatusRaw = f.processing_status || '';
   if (procStatusRaw && procStatusRaw !== 'ALL') {
@@ -59673,6 +60546,10 @@ async function listTimesheetsSummary(filters = {}) {
       : procStatusRaw.toUpperCase();
     qs.set('processing_status', procStatus);
   }
+
+  // ✅ status_code must be passed so totals match FE’s extra client-side filter
+  const statusCode = (f.status_code || '').toUpperCase();
+  if (statusCode) qs.set('status_code', statusCode);
 
   // Adjusted-only flag
   if (f.is_adjusted === true)  qs.set('is_adjusted', 'true');
@@ -59691,6 +60568,7 @@ async function listTimesheetsSummary(filters = {}) {
   if (f.hr_issue) {
     qs.set('hr_issue', f.hr_issue);
   }
+
 
   const sortState = st.sort || { key: null, dir: 'asc' };
   const sortKeyRaw = (sortState.key || '').toLowerCase();
@@ -59726,8 +60604,11 @@ async function listTimesheetsSummary(filters = {}) {
   let json;
   try { json = text ? JSON.parse(text) : {}; } catch { json = {}; }
 
-  const rows  = Array.isArray(json.items) ? json.items : (json.rows || []);
+   const rows  = Array.isArray(json.items) ? json.items : (json.rows || []);
   const total = (typeof json.count === 'number') ? json.count : rows.length;
+
+  // ✅ Persist totals for Summary footer (ALL matching filters, not just this page)
+  const totals = (json && typeof json.totals === 'object' && json.totals) ? json.totals : null;
 
   rows.forEach(r => {
     if (!r.id && r.timesheet_id) {
@@ -59740,9 +60621,11 @@ async function listTimesheetsSummary(filters = {}) {
 
   st.hasMore = rows.length === pageSize;
   st.total   = total;
+  st.totals  = totals;
   st.filters = { ...(f || {}) };
 
   return rows;
+
 }
 
 
