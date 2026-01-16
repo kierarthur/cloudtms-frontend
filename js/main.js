@@ -28839,18 +28839,57 @@ function attachInvoiceModalDelegatedHandlers(modalCtx, rootEl, deps) {
   if (!mc || typeof mc !== 'object') return;
   if (!body) return;
 
+  const computePendingEdits = () => {
+    try {
+      const e = mc.invoiceEdits || {};
+
+      const st = (e.staged_status && typeof e.staged_status === 'object')
+        ? e.staged_status
+        : { issued: null, paid: null, on_hold: null };
+
+      const hasStatus =
+        (st.issued !== null && st.issued !== undefined) ||
+        (st.paid !== null && st.paid !== undefined) ||
+        (st.on_hold !== null && st.on_hold !== undefined);
+
+      const hasLines =
+        (e.remove_invoice_line_ids && e.remove_invoice_line_ids.size > 0) ||
+        (e.add_timesheet_ids && e.add_timesheet_ids.size > 0) ||
+        (Array.isArray(e.add_adjustments) && e.add_adjustments.length > 0);
+
+      return !!(hasStatus || hasLines);
+    } catch {
+      return false;
+    }
+  };
+
+  const syncFrameDirty = () => {
+    try {
+      const fr = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
+      if (!fr || fr.entity !== 'invoices' || fr.kind !== 'invoice-modal') return;
+      if (fr._ctxRef !== mc) return;
+
+      fr.isDirty = computePendingEdits();
+      fr._updateButtons && fr._updateButtons();
+    } catch {}
+  };
+
   // Allow deps to be optional; create safe fallbacks so showModal can call this too.
   const safeRerender = (deps && typeof deps.rerender === 'function')
     ? deps.rerender
     : (() => {
         try {
           const fr = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
-          if (fr && fr.entity === 'invoices' && fr.kind === 'invoice-modal') {
+          if (fr && fr.entity === 'invoices' && fr.kind === 'invoice-modal' && fr._ctxRef === mc) {
+            // ✅ Keep dirty state aligned BEFORE repaint (setTab preserves prevDirty)
+            fr.isDirty = computePendingEdits();
+
             fr._suppressDirty = true;
             Promise.resolve(fr.setTab(fr.currentTabKey || 'invoice'))
               .finally(() => {
                 fr._suppressDirty = false;
-                fr._updateButtons && fr._updateButtons();
+                // ✅ Ensure Save + Close label reflect dirty state
+                syncFrameDirty();
               });
           }
         } catch {}
@@ -28922,6 +28961,9 @@ function attachInvoiceModalDelegatedHandlers(modalCtx, rootEl, deps) {
     if (!fr || fr.entity !== 'invoices' || fr.kind !== 'invoice-modal') return;
     if (fr._ctxRef !== mc) return;
 
+    // ✅ Keep mc.isEditing consistent with the actual frame mode
+    mc.isEditing = (fr.mode === 'edit' || fr.mode === 'create');
+
     const el = e.target?.closest?.('[data-action]');
     if (!el) return;
 
@@ -28985,6 +29027,7 @@ function attachInvoiceModalDelegatedHandlers(modalCtx, rootEl, deps) {
           if (cur) delete mc.invoiceUi.expanded_timesheets[tsId];
           else mc.invoiceUi.expanded_timesheets[tsId] = true;
 
+          // UI-only: do NOT mark dirty
           safeRerender();
           return;
         }
@@ -29001,6 +29044,7 @@ function attachInvoiceModalDelegatedHandlers(modalCtx, rootEl, deps) {
           }
 
           setStaged('issued', !effIssued);
+          syncFrameDirty();
           safeRerender();
           return;
         }
@@ -29009,6 +29053,7 @@ function attachInvoiceModalDelegatedHandlers(modalCtx, rootEl, deps) {
           if (!mc.isEditing || !invoiceModalIsEditable(invoice, mc, 'status')) return;
           const { effPaid } = getEffectiveFlags(invoice);
           setStaged('paid', !effPaid);
+          syncFrameDirty();
           safeRerender();
           return;
         }
@@ -29019,6 +29064,7 @@ function attachInvoiceModalDelegatedHandlers(modalCtx, rootEl, deps) {
           const st = mc.invoiceEdits?.staged_status || {};
           const effHold = (st.on_hold === null || st.on_hold === undefined) ? baseHold : !!st.on_hold;
           setStaged('on_hold', !effHold);
+          syncFrameDirty();
           safeRerender();
           return;
         }
@@ -29026,12 +29072,14 @@ function attachInvoiceModalDelegatedHandlers(modalCtx, rootEl, deps) {
         case 'inv-add-timesheets': {
           if (!mc.isEditing) return;
           await openInvoiceAddTimesheetsModal(mc, { rerender: safeRerender });
+          // dirty will be synced by safeRerender after staging
           return;
         }
 
         case 'inv-add-adjustment': {
           if (!mc.isEditing) return;
           await openInvoiceAddAdjustmentModal(mc, { rerender: safeRerender });
+          // dirty will be synced by safeRerender after staging
           return;
         }
 
@@ -29044,6 +29092,7 @@ function attachInvoiceModalDelegatedHandlers(modalCtx, rootEl, deps) {
           }
           const tsId = el.getAttribute('data-timesheet-id');
           invoiceModalToggleRemoveTimesheet(mc, tsId);
+          syncFrameDirty();
           safeRerender();
           return;
         }
@@ -29057,6 +29106,7 @@ function attachInvoiceModalDelegatedHandlers(modalCtx, rootEl, deps) {
           }
           const lineId = el.getAttribute('data-invoice-line-id');
           invoiceModalToggleRemoveLine(mc, lineId);
+          syncFrameDirty();
           safeRerender();
           return;
         }
@@ -29065,6 +29115,7 @@ function attachInvoiceModalDelegatedHandlers(modalCtx, rootEl, deps) {
           if (!mc.isEditing) return;
           const tsId = el.getAttribute('data-timesheet-id');
           invoiceModalToggleAddTimesheet(mc, tsId);
+          syncFrameDirty();
           safeRerender();
           return;
         }
@@ -29073,6 +29124,7 @@ function attachInvoiceModalDelegatedHandlers(modalCtx, rootEl, deps) {
           if (!mc.isEditing) return;
           const tok = el.getAttribute('data-client-token');
           invoiceModalRemoveStagedAdjustment(mc, tok);
+          syncFrameDirty();
           safeRerender();
           return;
         }
@@ -29094,6 +29146,9 @@ function attachInvoiceModalDelegatedHandlers(modalCtx, rootEl, deps) {
 
   // Keep a light marker on rootEl only for debugging (not used for gating anymore)
   try { if (rootEl) rootEl.__invDelegatedAttached = true; } catch {}
+
+  // ✅ Ensure initial Save/Close label state is correct on first attach
+  syncFrameDirty();
 }
 
 
