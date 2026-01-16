@@ -28032,21 +28032,49 @@ function canonicalizeClientSettings(input) {
 
   return cs;
 }
-
-
 async function handleInvoiceDelete(modalCtx) {
   const mc = modalCtx || {};
-  const inv = mc.invoiceDetail?.invoice || mc.data || null;
-  const invoiceId = String(inv?.id || '').trim();
+
+  // Prefer canonical invoice/items from the same source your invoice modal uses
+  let invoice = null;
+  let items = [];
+
+  try {
+    if (typeof invoiceModalGetInvoiceData === 'function') {
+      const d = invoiceModalGetInvoiceData(mc) || {};
+      invoice = d.invoice || null;
+      items = Array.isArray(d.items) ? d.items : [];
+    }
+  } catch {}
+
+  // Fallbacks (defensive)
+  if (!invoice) {
+    const det = mc.invoiceDetail || mc.dataLoaded || mc.data || null;
+    invoice =
+      (det && typeof det === 'object' && (det.invoice || det.invoice_row || det.invoiceRow))
+        ? (det.invoice || det.invoice_row || det.invoiceRow)
+        : det;
+  }
+
+  if (!items.length) {
+    items =
+      (Array.isArray(mc.invoiceDetail?.items) ? mc.invoiceDetail.items : []) ||
+      (Array.isArray(mc.dataLoaded?.items) ? mc.dataLoaded.items : []) ||
+      (Array.isArray(mc.data?.items) ? mc.data.items : []);
+  }
+
+  const invoiceId = String(invoice?.id || '').trim();
   if (!invoiceId) { alert('Invoice id missing'); return; }
 
-  const status = String(inv?.status || '').toUpperCase();
-  const items = Array.isArray(mc.invoiceDetail?.items) ? mc.invoiceDetail.items : [];
+  const status = String(invoice?.status || '').toUpperCase();
 
+  // ✅ Align with “delete only after unissue + remove all lines + Save”
+  // i.e. unissued + unpaid + empty
   const can =
-    (inv?.paid_at_utc == null) &&
+    (invoice?.paid_at_utc == null) &&
+    (invoice?.issued_at_utc == null) &&
     (status === 'DRAFT' || status === 'ON_HOLD') &&
-    items.length === 0;
+    (items.length === 0);
 
   if (!can) {
     alert('Delete is only available for empty, unissued (DRAFT/ON_HOLD), unpaid invoices.');
@@ -28076,6 +28104,8 @@ async function handleInvoiceDelete(modalCtx) {
     }
   } catch {}
 }
+
+
 async function handleInvoiceRenderPdf(modalCtx) {
   const mc = modalCtx || {};
   const invoiceId =
@@ -28303,45 +28333,64 @@ function invoiceModalIsEditable(invoice, modalCtx, purpose = 'lines') {
   // purpose:
   //  - 'status' => canToggleStatus (in edit mode, not credit note)
   //  - 'lines'  => canEditLines (only if invoice will be UNISSUED + UNPAID when saving)
+
   if (!invoice || typeof invoice !== 'object') return false;
+
+  // ✅ If caller didn’t pass modalCtx, use the current invoice modal ctx (avoids false negatives)
+  const mc = (modalCtx && typeof modalCtx === 'object')
+    ? modalCtx
+    : ((window.modalCtx && typeof window.modalCtx === 'object') ? window.modalCtx : null);
 
   const type = String(invoice.type || '').toUpperCase();
   if (type === 'CREDIT_NOTE') return false;
 
   const status = String(invoice.status || '').toUpperCase();
   const baseIssued = !!invoice.issued_at_utc || status === 'ISSUED';
-  const basePaid = !!invoice.paid_at_utc || status === 'PAID';
+  const basePaid   = !!invoice.paid_at_utc   || status === 'PAID';
 
-  const st = (modalCtx && modalCtx.invoiceEdits && modalCtx.invoiceEdits.staged_status && typeof modalCtx.invoiceEdits.staged_status === 'object')
-    ? modalCtx.invoiceEdits.staged_status
+  const st = (mc && mc.invoiceEdits && mc.invoiceEdits.staged_status && typeof mc.invoiceEdits.staged_status === 'object')
+    ? mc.invoiceEdits.staged_status
     : { issued: null, paid: null, on_hold: null };
 
   const effIssued = (st.issued === null || st.issued === undefined) ? baseIssued : !!st.issued;
-  const effPaid = (st.paid === null || st.paid === undefined) ? basePaid : !!st.paid;
+  const effPaid   = (st.paid   === null || st.paid   === undefined) ? basePaid   : !!st.paid;
 
   if (purpose === 'status') {
-    // Status pills are clickable in edit mode for non-credit notes.
-    // (Specific illegal transitions like "unissue while paid" are enforced at the handler level.)
-    return !!(modalCtx && modalCtx.isEditing);
+    // Status pills clickable in edit mode (non-credit notes).
+    return !!(mc && mc.isEditing);
   }
 
   // purpose === 'lines'
-  // You can only add/remove lines if the invoice will be UNISSUED and UNPAID when saved.
-  // That means: effectivePaid must be false AND effectiveIssued must be false.
+  // Lines can only be edited if invoice will be UNISSUED and UNPAID when saved.
   if (effPaid) return false;
   if (effIssued) return false;
 
-  // Also avoid editing lines for unexpected terminal statuses (safety).
-  // DRAFT/ON_HOLD are always OK; ISSUED is OK only if staged to unissue (handled by effIssued false).
+  // Safety: allow only known terminal statuses (DRAFT/ON_HOLD ok; ISSUED/PAID ok only if staged to unissue/unpay,
+  // which would have already passed effIssued/effPaid checks above).
   if (!(status === 'DRAFT' || status === 'ON_HOLD' || status === 'ISSUED' || status === 'PAID')) return false;
 
   return true;
 }
 
+
 function invoiceModalHasPendingEdits(modalCtx) {
   const e = modalCtx?.invoiceEdits;
   if (!e) return false;
+
+  const st = (e.staged_status && typeof e.staged_status === 'object')
+    ? e.staged_status
+    : null;
+
+  const hasStagedStatus =
+    !!st &&
+    (
+      (st.issued !== null && st.issued !== undefined) ||
+      (st.paid !== null && st.paid !== undefined) ||
+      (st.on_hold !== null && st.on_hold !== undefined)
+    );
+
   return (
+    hasStagedStatus ||
     (e.remove_invoice_line_ids && e.remove_invoice_line_ids.size > 0) ||
     (e.add_timesheet_ids && e.add_timesheet_ids.size > 0) ||
     (Array.isArray(e.add_adjustments) && e.add_adjustments.length > 0)
@@ -28350,13 +28399,21 @@ function invoiceModalHasPendingEdits(modalCtx) {
 
 function invoiceModalResetEdits(modalCtx) {
   if (!modalCtx) return;
+
   modalCtx.invoiceEdits = {
     remove_invoice_line_ids: new Set(),
     add_timesheet_ids: new Set(),
-    add_adjustments: []
+    add_adjustments: [],
+
+    // ✅ Keep shape consistent with openInvoiceModal + delegated handlers
+    staged_status: { issued: null, paid: null, on_hold: null },
+    staged_dates:  { issued_at_utc: null, paid_at_utc: null, status_date_utc: null }
   };
+
   // Keep eligibleTimesheetsCache; it’s still valid across edits.
 }
+
+
 
 function invoiceModalGetInvoiceData(modalCtx) {
   const d = modalCtx?.data || {};
@@ -28985,7 +29042,6 @@ function attachInvoiceModalDelegatedHandlers(modalCtx, rootEl, { rerender, reloa
   rootEl.__invDelegatedAttached = true;
 }
 
-
 async function openInvoiceModal(row) {
   // Invoice modal (staged edits, no MutationObserver loops)
   const fmtMoney = (n) => {
@@ -29159,16 +29215,20 @@ async function openInvoiceModal(row) {
     } finally {
       modalCtx.isBusy = false;
 
-      // If invoice is not editable, force-exit edit mode and clear staged edits
-      const inv = modalCtx?.data?.invoice || null;
-      if (!invoiceModalIsEditable(inv)) {
-        modalCtx.isEditing = false;
-        if (modalCtx.invoiceState && typeof modalCtx.invoiceState === 'object') {
-          modalCtx.invoiceState.isEditing = false;
+      // ✅ Only hard-block CREDIT_NOTE from entering edit mode.
+      // Issued/Paid invoices remain editable for status toggles under the new model.
+      try {
+        const inv = modalCtx?.data?.invoice || null;
+        const typ = String(inv?.type || '').toUpperCase();
+        if (typ === 'CREDIT_NOTE') {
+          modalCtx.isEditing = false;
+          if (modalCtx.invoiceState && typeof modalCtx.invoiceState === 'object') {
+            modalCtx.invoiceState.isEditing = false;
+          }
+          invoiceModalResetEdits(modalCtx);
+          resetStagedStatus();
         }
-        invoiceModalResetEdits(modalCtx);
-        resetStagedStatus();
-      }
+      } catch {}
 
       rerender();
     }
@@ -29542,6 +29602,16 @@ async function openInvoiceAddTimesheetsModal(modalCtx, { rerender }) {
 
 
 
+
+
+
+
+
+
+
+
+
+
 function fmtLondonTs(iso) {
   const s = String(iso || '').trim();
   if (!s) return '';
@@ -29566,7 +29636,6 @@ function fmtLondonTs(iso) {
     return s;
   }
 }
-
 function renderInvoiceModalContent(modalCtx, invoiceData) {
   const fmtMoneyLocal = (n) => {
     const x = invoiceModalRound2(Number(n || 0));
@@ -29589,8 +29658,11 @@ function renderInvoiceModalContent(modalCtx, invoiceData) {
   const baseIsPaid   = !!invoice.paid_at_utc;
   const baseIsOnHold = (baseStatus === 'ON_HOLD');
 
-  const isEditable = invoiceModalIsEditable(invoice);
-  const isEditing  = !!modalCtx.isEditing && isEditable;
+  const isEditing = !!modalCtx.isEditing;
+
+  // ✅ Two-permission model
+  const canToggleStatus = invoiceModalIsEditable(invoice, modalCtx, 'status');
+  const canEditLines    = invoiceModalIsEditable(invoice, modalCtx, 'lines');
 
   const staged = (modalCtx && modalCtx.invoiceEdits && typeof modalCtx.invoiceEdits === 'object') ? modalCtx.invoiceEdits : {};
   const st = (staged.staged_status && typeof staged.staged_status === 'object') ? staged.staged_status : { issued: null, paid: null, on_hold: null };
@@ -29607,6 +29679,13 @@ function renderInvoiceModalContent(modalCtx, invoiceData) {
     dueAt &&
     Number.isFinite(dueAt.getTime()) &&
     (dueAt.getTime() < Date.now());
+
+  // ✅ Date-only helper (uses your existing fmtLondonTs output)
+  const fmtLondonDateOnly = (iso) => {
+    const s = String(fmtLondonTs(iso) || '').trim();
+    const m = s.match(/^(\d{2}\/\d{2}\/\d{4})/);
+    return m ? m[1] : s;
+  };
 
   // Dates to show (prefer actual; else staged preview; else "—")
   const displayIssuedAt = (() => {
@@ -29631,7 +29710,6 @@ function renderInvoiceModalContent(modalCtx, invoiceData) {
 
   const displayHoldAt = (() => {
     if (effHold) {
-      // on hold date uses status_date_utc as "since"
       if (invoice.status_date_utc) return fmtLondonTs(invoice.status_date_utc);
       if (isEditing && st.on_hold === true && sd.status_date_utc) return `${fmtLondonTs(sd.status_date_utc)} (staged)`;
       return '—';
@@ -29650,7 +29728,8 @@ function renderInvoiceModalContent(modalCtx, invoiceData) {
     ? `Invoice #${escapeHtml(String(invoice.invoice_no))}`
     : `Invoice ${escapeHtml(String(invoice.id || ''))}`;
 
-  const invoiceDate = effIssued && invoice.issued_at_utc ? fmtLondonTs(invoice.issued_at_utc) : '—';
+  // ✅ Invoice Date must be DATE ONLY
+  const invoiceDate = (effIssued && invoice.issued_at_utc) ? fmtLondonDateOnly(invoice.issued_at_utc) : '—';
   const createdDate = invoice.created_at ? fmtLondonTs(invoice.created_at) : '—';
 
   // Pending edits (line edits OR status edits)
@@ -29663,6 +29742,7 @@ function renderInvoiceModalContent(modalCtx, invoiceData) {
       (Array.isArray(e.add_adjustments) && e.add_adjustments.length > 0)
     );
   })();
+
   const hasStatusEdits =
     (st.issued !== null && st.issued !== undefined) ||
     (st.paid !== null && st.paid !== undefined) ||
@@ -29680,7 +29760,6 @@ function renderInvoiceModalContent(modalCtx, invoiceData) {
   const previewTotals = hasLineEdits ? invoiceModalComputePreviewTotals(modalCtx) : currentTotals;
   const totalsToShow = hasLineEdits ? previewTotals : currentTotals;
 
-  // Pill rendering (timesheet-style pills)
   const pillSpan = (text, cls) => `<span class="pill ${cls}">${escapeHtml(text)}</span>`;
   const pillBtn  = (action, text, cls) => `
     <button type="button" class="pill ${cls}" data-action="${action}">
@@ -29688,15 +29767,15 @@ function renderInvoiceModalContent(modalCtx, invoiceData) {
     </button>
   `;
 
-  const issuedPill = isEditing
+  const issuedPill = canToggleStatus
     ? pillBtn('inv-toggle-issued', effIssued ? 'Issued' : 'Unissued', effIssued ? 'pill-ok' : 'pill-bad')
     : pillSpan(effIssued ? 'Issued' : 'Unissued', effIssued ? 'pill-ok' : 'pill-bad');
 
-  const paidPill = isEditing
+  const paidPill = canToggleStatus
     ? pillBtn('inv-toggle-paid', effPaid ? 'Paid' : 'Unpaid', effPaid ? 'pill-ok' : 'pill-bad')
     : pillSpan(effPaid ? 'Paid' : 'Unpaid', effPaid ? 'pill-ok' : 'pill-bad');
 
-  const holdPill = isEditing
+  const holdPill = canToggleStatus
     ? pillBtn('inv-toggle-hold', effHold ? 'On hold' : 'Active', effHold ? 'pill-warn' : '')
     : pillSpan(effHold ? 'On hold' : 'Active', effHold ? 'pill-warn' : '');
 
@@ -29704,6 +29783,10 @@ function renderInvoiceModalContent(modalCtx, invoiceData) {
 
   const emailedOnce = !!email_summary?.emailed_once;
   const emailLabel = emailedOnce ? 'Re-email' : 'Email';
+
+  // ✅ Add buttons should only be enabled when canEditLines
+  const addDisabledAttr = canEditLines ? '' : 'disabled';
+  const addDisabledTitle = canEditLines ? '' : 'title="Unissue and unpay the invoice first (staged), then you can edit lines."';
 
   return `
     <div class="p-2">
@@ -29715,40 +29798,59 @@ function renderInvoiceModalContent(modalCtx, invoiceData) {
         <div class="text-muted small">${escapeHtml(String(clientName || ''))}</div>
       </div>
 
-      <div class="d-flex flex-wrap gap-3 mb-3">
-        <div>
-          <div class="mini text-muted">Invoice date</div>
-          <div class="fw-semibold">${escapeHtml(String(invoiceDate))}</div>
+      <!-- ✅ Structured 2-column header layout -->
+      <div class="d-flex gap-3 align-items-start mb-3" style="flex-wrap:wrap;">
+        <div style="flex:1;min-width:320px;">
+          <table class="table table-sm" style="margin:0;">
+            <tbody>
+              <tr>
+                <td class="mini text-muted" style="width:160px;">Invoice date</td>
+                <td class="fw-semibold">${escapeHtml(String(invoiceDate))}</td>
+              </tr>
+              <tr>
+                <td class="mini text-muted">Created</td>
+                <td class="fw-semibold">${escapeHtml(String(createdDate))}</td>
+              </tr>
+              <tr>
+                <td class="mini text-muted">Amount (ex VAT)</td>
+                <td class="fw-semibold">${fmtMoneyLocal(totalsToShow.subtotal_ex_vat)}</td>
+              </tr>
+              <tr>
+                <td class="mini text-muted">Amount (inc VAT)</td>
+                <td class="fw-semibold">${fmtMoneyLocal(totalsToShow.total_inc_vat)}</td>
+              </tr>
+              <tr>
+                <td class="mini text-muted">Issue Date</td>
+                <td class="fw-semibold">${escapeHtml(String(displayIssuedAt))}</td>
+              </tr>
+              <tr>
+                <td class="mini text-muted">Paid On</td>
+                <td class="fw-semibold">${escapeHtml(String(displayPaidAt))}</td>
+              </tr>
+              <tr>
+                <td class="mini text-muted">On Hold Since</td>
+                <td class="fw-semibold">${escapeHtml(String(displayHoldAt))}</td>
+              </tr>
+            </tbody>
+          </table>
         </div>
-        <div>
-          <div class="mini text-muted">Created</div>
-          <div class="fw-semibold">${escapeHtml(String(createdDate))}</div>
-        </div>
-        <div>
-          <div class="mini text-muted">Amount (ex VAT)</div>
-          <div class="fw-semibold">${fmtMoneyLocal(totalsToShow.subtotal_ex_vat)}</div>
-        </div>
-        <div>
-          <div class="mini text-muted">Amount (inc VAT)</div>
-          <div class="fw-semibold">${fmtMoneyLocal(totalsToShow.total_inc_vat)}</div>
-        </div>
-      </div>
 
-      <div class="d-flex flex-wrap gap-3 align-items-start mb-3">
-        <div>
-          ${issuedPill}
-          <div class="mini text-muted mt-1">${escapeHtml(String(displayIssuedAt))}</div>
-        </div>
-        <div>
-          ${paidPill}
-          <div class="mini text-muted mt-1">${escapeHtml(String(displayPaidAt))}</div>
-        </div>
-        <div>
-          ${holdPill}
-          <div class="mini text-muted mt-1">${escapeHtml(String(displayHoldAt))}</div>
-        </div>
-        <div class="ms-auto">
-          ${overduePill}
+        <div style="min-width:220px;">
+          <div class="d-flex flex-column gap-2">
+            <div>
+              ${issuedPill}
+              <div class="mini text-muted mt-1">${escapeHtml(String(displayIssuedAt))}</div>
+            </div>
+            <div>
+              ${paidPill}
+              <div class="mini text-muted mt-1">${escapeHtml(String(displayPaidAt))}</div>
+            </div>
+            <div>
+              ${holdPill}
+              <div class="mini text-muted mt-1">${escapeHtml(String(displayHoldAt))}</div>
+            </div>
+            ${overdue ? `<div>${overduePill}</div>` : ''}
+          </div>
         </div>
       </div>
 
@@ -29762,10 +29864,10 @@ function renderInvoiceModalContent(modalCtx, invoiceData) {
         </button>
 
         ${isEditing ? `
-          <button type="button" class="btn btn-sm btn-outline-secondary" data-action="inv-add-timesheets">
+          <button type="button" class="btn btn-sm btn-outline-secondary" data-action="inv-add-timesheets" ${addDisabledAttr} ${addDisabledTitle}>
             + Add timesheet
           </button>
-          <button type="button" class="btn btn-sm btn-outline-secondary" data-action="inv-add-adjustment">
+          <button type="button" class="btn btn-sm btn-outline-secondary" data-action="inv-add-adjustment" ${addDisabledAttr} ${addDisabledTitle}>
             + Add adjustment
           </button>
         ` : ''}
@@ -29844,8 +29946,11 @@ function renderInvoiceLinesTable(modalCtx, invoiceData, items) {
 
   const { invoice } = invoiceModalGetInvoiceData(modalCtx);
 
-  const isEditable = invoiceModalIsEditable(invoice);
-  const isEditing = !!modalCtx.isEditing && isEditable;
+  // ✅ Keep "edit mode" purely driven by modal state (so ISSUED invoices still show edit UI for status toggles)
+  const isEditing = !!modalCtx.isEditing;
+
+  // ✅ Separate permission for line edits (staging-aware)
+  const canEditLines = invoiceModalIsEditable(invoice, modalCtx, 'lines');
 
   const removedSet = modalCtx?.invoiceEdits?.remove_invoice_line_ids || new Set();
 
@@ -29988,7 +30093,7 @@ function renderInvoiceLinesTable(modalCtx, invoiceData, items) {
 
     // allocate rounded to 2dp, push rounding remainder into last key
     let used = 0;
-    keys.forEach((k, idx) => {
+    keys.forEach((k) => {
       const w = Number(weights[k] || 0);
       const raw = (total * w) / sumW;
       const val = invoiceModalRound2(raw);
@@ -30036,8 +30141,6 @@ function renderInvoiceLinesTable(modalCtx, invoiceData, items) {
     const totalPay = invoiceModalRound2(Number(l?.total_pay_ex_vat || 0));
     const totalChg = invoiceModalRound2(Number(l?.total_charge_ex_vat || 0));
     const totalVat = invoiceModalRound2(Number(l?.vat_amount || 0));
-    const totalInc = invoiceModalRound2(Number(l?.total_inc_vat || 0));
-    const vatRatePct = Number(l?.vat_rate_pct || 0);
 
     const allocPay = allocByWeights(totalPay, wPay);
     const allocChg = allocByWeights(totalChg, wChg);
@@ -30111,8 +30214,6 @@ function renderInvoiceLinesTable(modalCtx, invoiceData, items) {
     const rows = [];
 
     for (const l of g.lines) {
-      const lt = asLineType(l);
-
       const qtyHrs = sumBucketQty(l);
 
       if (qtyHrs > 0) {
@@ -30167,14 +30268,31 @@ function renderInvoiceLinesTable(modalCtx, invoiceData, items) {
     `;
   };
 
+  // ✅ Remove/Undo buttons:
+  // - show Undo whenever a thing is already staged as removed (even if canEditLines is false)
+  // - show Remove only when canEditLines is true
   const renderRemoveBtnForTimesheet = (g, removed) => {
     if (!isEditing) return '';
+
+    if (removed) {
+      return `
+        <button type="button"
+          class="btn btn-sm btn-outline-secondary"
+          data-action="inv-toggle-remove-timesheet"
+          data-timesheet-id="${escapeHtml(g.timesheet_id)}">
+          Undo
+        </button>
+      `;
+    }
+
+    if (!canEditLines) return '';
+
     return `
       <button type="button"
-        class="btn btn-sm ${removed ? 'btn-outline-secondary' : 'btn-outline-danger'}"
+        class="btn btn-sm btn-outline-danger"
         data-action="inv-toggle-remove-timesheet"
         data-timesheet-id="${escapeHtml(g.timesheet_id)}">
-        ${removed ? 'Undo' : 'Remove'}
+        Remove
       </button>
     `;
   };
@@ -30313,16 +30431,27 @@ function renderInvoiceLinesTable(modalCtx, invoiceData, items) {
 
       const removed = removedSet.has(lid);
 
+      // ✅ Undo always available when already staged removed; Remove only if canEditLines
       const btn = (!isEditing)
         ? ''
-        : `
-          <button type="button"
-            class="btn btn-sm ${removed ? 'btn-outline-secondary' : 'btn-outline-danger'}"
-            data-action="inv-toggle-remove-line"
-            data-invoice-line-id="${escapeHtml(lid)}">
-            ${removed ? 'Undo' : 'Remove'}
-          </button>
-        `;
+        : (removed
+          ? `
+            <button type="button"
+              class="btn btn-sm btn-outline-secondary"
+              data-action="inv-toggle-remove-line"
+              data-invoice-line-id="${escapeHtml(lid)}">
+              Undo
+            </button>
+          `
+          : (canEditLines ? `
+            <button type="button"
+              class="btn btn-sm btn-outline-danger"
+              data-action="inv-toggle-remove-line"
+              data-invoice-line-id="${escapeHtml(lid)}">
+              Remove
+            </button>
+          ` : '')
+        );
 
       return `
         <tr class="${removed ? 'opacity-50' : ''}">
@@ -30370,7 +30499,6 @@ function renderInvoiceLinesTable(modalCtx, invoiceData, items) {
     </div>
   `;
 }
-
 
 
 function deriveTimesheetInvoicingDisplay(row) {
