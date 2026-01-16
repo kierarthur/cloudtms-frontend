@@ -32122,7 +32122,8 @@ this._markDirty();
   `;
 }
 
-function renderSummary(rows){
+
+ function renderSummary(rows){
   currentRows = rows;
   currentSelection = null;
 
@@ -32594,7 +32595,260 @@ function renderSummary(rows){
     setStatusBtnText();
   }
 
-  // ... (unchanged parts above table building)
+  // ── Contracts quick Status menu ─────────────────────────────────────────────
+  let statusSel = null;
+  if (currentSection === 'contracts') {
+    const stFilters = window.__listState[currentSection].filters || {};
+
+    // Default to "active" if no status has been chosen yet
+    if (!('status' in stFilters)) stFilters.status = 'active';
+    window.__listState[currentSection].filters = stFilters;
+
+    const statusLabel = document.createElement('span');
+    statusLabel.className = 'mini';
+    statusLabel.textContent = 'Status:';
+
+    statusSel = document.createElement('select');
+    statusSel.classList.add('dark-control');
+
+    [['all','All'], ['active','Active'], ['unassigned','Unassigned'], ['completed','Completed']]
+      .forEach(([v, l]) => {
+        const o = document.createElement('option');
+        o.value = v;
+        o.textContent = l;
+        if ((stFilters.status || '').toLowerCase() === v) o.selected = true;
+        statusSel.appendChild(o);
+      });
+
+    statusSel.addEventListener('change', async () => {
+      const val = statusSel.value;
+      const curFilters = { ...(window.__listState[currentSection].filters || {}) };
+      curFilters.status = val;
+      window.__listState[currentSection].filters = curFilters;
+      window.__listState[currentSection].page = 1;
+      const data = await loadSection();
+      renderSummary(data);
+    });
+
+    topControls.appendChild(statusLabel);
+    topControls.appendChild(statusSel);
+  }
+
+  // ── Timesheets quick filters: Status / Route / Scope / Flags ───────────────
+  if (currentSection === 'timesheets') {
+    const stFilters = window.__listState[currentSection].filters || {};
+    window.__listState[currentSection].filters = stFilters;
+
+    // Status dropdown
+    const statusLabel2 = document.createElement('span');
+    statusLabel2.className = 'mini';
+    statusLabel2.textContent = 'Status:';
+    const statusSel2 = document.createElement('select');
+    statusSel2.classList.add('dark-control');
+
+    const statusOpts = [
+      ['ALL',               'All'],
+      ['NO_MATCH_ID',       'No match to Candidate/Client'],
+      ['RATE_MISSING',      'Rate missing'],
+      ['PAY_CHAN_MISS',     'Pay channel missing'],
+      ['READY_FOR_HR',      'Ready for Healthroster validation'],
+      ['READY_FOR_INV',     'Ready for invoice'],
+      ['HR_HOURS_MISMATCH', 'Timesheet hours mismatch with Healthroster']
+    ];
+    const statusCur2 = (stFilters.status_code || 'ALL').toUpperCase();
+    statusOpts.forEach(([v, label]) => {
+      const o = document.createElement('option');
+      o.value = v;
+      o.textContent = label;
+      if (statusCur2 === v) o.selected = true;
+      statusSel2.appendChild(o);
+    });
+    statusSel2.addEventListener('change', async () => {
+      const val = statusSel2.value;
+      const curFilters = { ...(window.__listState[currentSection].filters || {}) };
+
+      // Remember UI choice
+      curFilters.status_code = val;
+
+      // Reset hr_issue by default
+      if ('hr_issue' in curFilters) {
+        delete curFilters.hr_issue;
+      }
+
+      // Map to backend processing_status / hr_issue only when it helps
+      switch (val) {
+        case 'NO_MATCH_ID':
+          curFilters.processing_status = 'UNASSIGNED,CLIENT_UNRESOLVED';
+          break;
+        case 'READY_FOR_HR':
+          curFilters.processing_status = 'READY_FOR_HR';
+          break;
+        case 'READY_FOR_INV':
+          curFilters.processing_status = 'READY_FOR_INVOICE';
+          break;
+        case 'HR_HOURS_MISMATCH':
+          curFilters.processing_status = 'ALL';
+          curFilters.hr_issue = 'HOURS_MISMATCH_HR';
+          break;
+        default:
+          curFilters.processing_status = 'ALL';
+          break;
+      }
+
+      window.__listState[currentSection].filters = curFilters;
+      window.__listState[currentSection].page = 1;
+      const data = await loadSection();
+      renderSummary(data);
+    });
+    topControls.appendChild(statusLabel2);
+    topControls.appendChild(statusSel2);
+
+    // Route dropdown
+    const routeLabel = document.createElement('span');
+    routeLabel.className = 'mini';
+    routeLabel.textContent = 'Route:';
+    const routeSel = document.createElement('select');
+    routeSel.classList.add('dark-control');
+
+    const routeOpts = [
+      ['ALL',         'All'],
+      ['ELECTRONIC',  'Electronic'],
+      ['MANUAL',      'Manual'],
+      ['NHSP',        'NHSP'],
+      ['HEALTHROSTER','Healthroster'],
+      ['QR',          'QR timesheets']
+    ];
+    const routeCur = (stFilters.route_type || 'ALL').toUpperCase();
+    routeOpts.forEach(([v, label]) => {
+      const o = document.createElement('option');
+      o.value = v;
+      o.textContent = label;
+      if (routeCur === v) o.selected = true;
+      routeSel.appendChild(o);
+    });
+    routeSel.addEventListener('change', async () => {
+      const val = routeSel.value;
+      const curFilters = { ...(window.__listState[currentSection].filters || {}) };
+      curFilters.route_type = val;
+      window.__listState[currentSection].filters = curFilters;
+      window.__listState[currentSection].page = 1;
+      const data = await loadSection();
+      renderSummary(data);
+    });
+    topControls.appendChild(routeLabel);
+    topControls.appendChild(routeSel);
+
+    // Scope dropdown
+    const scopeLabel = document.createElement('span');
+    scopeLabel.className = 'mini';
+    scopeLabel.textContent = 'Type:';
+    const scopeSel = document.createElement('select');
+    scopeSel.classList.add('dark-control');
+
+    const scopeOpts = [
+      ['ALL',    'Both'],
+      ['WEEKLY', 'Weekly only'],
+      ['DAILY',  'Daily only']
+    ];
+    const scopeCur = (stFilters.sheet_scope || 'ALL').toUpperCase();
+    scopeOpts.forEach(([v, label]) => {
+      const o = document.createElement('option');
+      o.value = v;
+      o.textContent = label;
+      if (scopeCur === v) o.selected = true;
+      scopeSel.appendChild(o);
+    });
+    scopeSel.addEventListener('change', async () => {
+      const val = scopeSel.value;
+      const curFilters = { ...(window.__listState[currentSection].filters || {}) };
+      curFilters.sheet_scope = val;
+      window.__listState[currentSection].filters = curFilters;
+      window.__listState[currentSection].page = 1;
+      const data = await loadSection();
+      renderSummary(data);
+    });
+    topControls.appendChild(scopeLabel);
+    topControls.appendChild(scopeSel);
+
+    // Flags: Adjusted only (Needs attention lives in Tools)
+    const mkFlag = (name, label) => {
+      const wrap = document.createElement('label');
+      wrap.className = 'mini';
+      wrap.style.display = 'flex';
+      wrap.style.alignItems = 'center';
+      wrap.style.gap = '4px';
+      const cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.checked = !!stFilters[name];
+      cb.addEventListener('change', async () => {
+        const curFilters = { ...(window.__listState[currentSection].filters || {}) };
+        curFilters[name] = cb.checked ? true : false;
+        window.__listState[currentSection].filters = curFilters;
+        window.__listState[currentSection].page = 1;
+        const data = await loadSection();
+        renderSummary(data);
+      });
+      wrap.appendChild(cb);
+      wrap.appendChild(document.createTextNode(label));
+      return wrap;
+    };
+
+    topControls.appendChild(mkFlag('is_adjusted', 'Adjusted only'));
+  }
+
+  // Columns button (already supports per-column display name overrides via openColumnsDialog)
+  const btnCols = document.createElement('button');
+  btnCols.textContent = 'Columns';
+  btnCols.style.cssText = 'border:1px solid var(--line);background:#0b152a;color:var(--text);padding:4px 8px;border-radius:8px;cursor:pointer';
+  btnCols.addEventListener('click', () => openColumnsDialog(currentSection));
+  topControls.appendChild(btnCols);
+
+  const spacerTop = document.createElement('div'); spacerTop.style.flex = '1';
+  topControls.appendChild(spacerTop);
+
+  // Selected info / clear
+  const selInfo = document.createElement('div'); selInfo.className = 'mini';
+  const renderSelInfo = ()=>{ selInfo.textContent = (sel.ids.size > 0) ? `${sel.ids.size} selected.` : ''; };
+  renderSelInfo();
+
+  const clearBtn = document.createElement('button');
+  clearBtn.textContent = 'Clear selection';
+  clearBtn.style.cssText = 'border:1px solid var(--line);background:#0b152a;color:var(--text);padding:4px 8px;border-radius:8px;cursor:pointer;display:none';
+  clearBtn.onclick = ()=>{
+    clearSelection(); renderSelInfo();
+    Array.from(document.querySelectorAll('input.row-select')).forEach(cb=>{ cb.checked = false; });
+    const hdr = byId('summarySelectAll'); if (hdr) { hdr.checked=false; hdr.indeterminate=false; }
+    updateButtons();
+  };
+
+  topControls.appendChild(selInfo);
+  topControls.appendChild(clearBtn);
+  content.appendChild(topControls);
+
+  // ── apply extra Status filtering client-side for timesheets ────────────────
+  let effectiveRows = rows;
+  if (currentSection === 'timesheets') {
+    const stFilters = window.__listState[currentSection].filters || {};
+    const statusCode = (stFilters.status_code || 'ALL').toUpperCase();
+
+    if (statusCode === 'NO_MATCH_ID') {
+      effectiveRows = effectiveRows.filter(r => !r.candidate_id || !r.client_id);
+    } else if (statusCode === 'RATE_MISSING') {
+      effectiveRows = effectiveRows.filter(r => r.has_rate_issue === true);
+    } else if (statusCode === 'PAY_CHAN_MISS') {
+      effectiveRows = effectiveRows.filter(r => r.has_pay_channel_issue === true);
+    } else if (statusCode === 'READY_FOR_HR') {
+      effectiveRows = effectiveRows.filter(r =>
+        String(r.processing_status || '').toUpperCase() === 'READY_FOR_HR'
+      );
+    } else if (statusCode === 'READY_FOR_INV') {
+      effectiveRows = effectiveRows.filter(r =>
+        String(r.processing_status || '').toUpperCase() === 'READY_FOR_INVOICE'
+      );
+    }
+    // HR_HOURS_MISMATCH relies on backend hr_issue filter only
+  }
+  currentRows = effectiveRows;
 
   // ── single table (header + body) inside scroll host ────────────────────────
   const bodyWrap = document.createElement('div');
@@ -32638,7 +32892,117 @@ function renderSummary(rows){
   // Determine columns (using server prefs)
   const cols = getVisibleColumnsForSection(currentSection, effectiveRows);
 
-  // (unchanged header building code...)
+  // ── Force Issues column into timesheets view ───────────────────────────────
+  if (currentSection === 'timesheets') {
+    if (!cols.includes('issue_codes')) {
+      // Put Issues near the left so it’s visible by default
+      cols.unshift('issue_codes');
+    }
+  }
+
+  // Header checkbox (first column)
+  const thSel = document.createElement('th');
+  thSel.style.width = '40px';
+  thSel.style.minWidth = '40px';
+  thSel.style.maxWidth = '40px';
+
+  const hdrCb = document.createElement('input'); hdrCb.type='checkbox'; hdrCb.id='summarySelectAll';
+  hdrCb.addEventListener('click', (e)=>{
+    e.stopPropagation();
+    const idsVisible = effectiveRows.map(r => String(r.id || ''));
+    const wantOn = !!hdrCb.checked;
+    idsVisible.forEach(id => { if (wantOn) sel.ids.add(id); else sel.ids.delete(id); });
+    Array.from(document.querySelectorAll('input.row-select')).forEach(cb=>{ cb.checked = wantOn; });
+    computeHeaderState();
+    updateButtons();
+  });
+  thSel.appendChild(hdrCb);
+  trh.appendChild(thSel);
+
+  // Invoice sortable keys (backend /api/invoices allows only these)
+  const INVOICE_SORT_ALLOWED = new Set([
+    'issued_at_utc',
+    'due_at_utc',
+    'created_at',
+    'status_date_utc',
+    'invoice_no',
+    'subtotal_ex_vat',
+    'vat_amount',
+    'total_inc_vat',
+    'status'
+  ]);
+
+  // Build header cells with friendly labels, resizer handles, and click-to-sort
+  cols.forEach(c=>{
+    const th = document.createElement('th');
+    th.dataset.colKey = String(c);
+    th.style.cursor = 'pointer';
+
+    let label = getFriendlyHeaderLabel(currentSection, c);
+    if (currentSection === 'timesheets' && c === 'issue_codes') {
+      label = 'Issues';
+    }
+
+    // Only show sort arrow for invoice-supported keys when in invoices section
+    const isSortable =
+      (currentSection !== 'invoices') ? true : INVOICE_SORT_ALLOWED.has(String(c));
+
+    const isActive = isSortable && sortState && sortState.key === c;
+    const arrow = isActive ? (sortState.dir === 'asc' ? ' ▲' : ' ▼') : '';
+    th.textContent = label + arrow;
+
+    const res = document.createElement('div');
+    res.className = 'col-resizer';
+    res.title = 'Drag to resize. Double-click to reset.';
+    res.style.cssText = 'position:absolute;right:0;top:0;width:6px;height:100%;cursor:col-resize;user-select:none;';
+    th.appendChild(res);
+
+    th.draggable = true;
+
+    th.addEventListener('click', async (ev) => {
+      if (ev.target && ev.target.closest && ev.target.closest('.col-resizer')) return;
+
+      const colKey = th.dataset.colKey;
+      if (!colKey) return;
+
+      // invoices: only allow backend-supported sort keys (avoid misleading arrows)
+      if (currentSection === 'invoices' && !INVOICE_SORT_ALLOWED.has(colKey)) return;
+
+      window.__listState = window.__listState || {};
+      const st2 = (window.__listState[currentSection] ||= {
+        page: 1,
+        pageSize: 50,
+        total: null,
+        hasMore: false,
+        filters: null,
+        sort: { key: null, dir: 'asc' }
+      });
+
+      if (!st2.sort || typeof st2.sort !== 'object') {
+        st2.sort = { key: null, dir: 'asc' };
+      }
+
+      const prevDir = (st2.sort && st2.sort.key === colKey) ? st2.sort.dir : null;
+      const nextDir = (prevDir === 'asc') ? 'desc' : 'asc';
+
+      st2.sort = { key: colKey, dir: nextDir };
+      st2.page = 1;
+
+      try {
+        const data = await loadSection();
+        renderSummary(data);
+      } catch (e) {
+        console.error('Failed to apply sort', e);
+      }
+    });
+
+    trh.appendChild(th);
+  });
+
+  // Body rows
+  if (currentSection === 'candidates') {
+    tbl.style.width = 'auto';
+  }
 
   effectiveRows.forEach(r=>{
     const tr = document.createElement('tr');
@@ -32654,14 +33018,16 @@ function renderSummary(rows){
         const invSegStage   = String(r?.invoice_segment_stage || '').trim().toUpperCase();
         const invIssueStage = String(r?.invoice_issue_stage || '').trim().toUpperCase();
 
-        const isFullyInvoiced = (invSegStage === 'FULLY_INVOICED');
-        const isPaidToCandidate = !!r?.paid_at_utc;
-
-        const isInvoiceIssued    = (invIssueStage === 'INVOICED_ISSUED');
-        const isInvoiceNotIssued = (invIssueStage === 'INVOICED_NOT_ISSUED');
+        const isFullyInvoiced      = (invSegStage === 'FULLY_INVOICED');
+        const isPaidToCandidate    = !!r?.paid_at_utc;
+        const isInvoiceIssued      = (invIssueStage === 'INVOICED_ISSUED');
+        const isInvoiceNotIssued   = (invIssueStage === 'INVOICED_NOT_ISSUED');
 
         // Ready-for-invoice highlight applies only when NOT invoiced/locked
-        const isReadyForInvoiceUninvoiced = (proc === 'READY_FOR_INVOICE' && !invIssueStage);
+        const isReadyForInvoiceUninvoiced =
+          (proc === 'READY_FOR_INVOICE') &&
+          !isFullyInvoiced &&
+          !invIssueStage;
 
         // Row rules:
         // - Fully invoiced + Candidate Paid + Invoice issued => deep green row
@@ -32679,11 +33045,14 @@ function renderSummary(rows){
       if (currentSection === 'invoices') {
         const stInv = String(r?.status || '').trim().toUpperCase();
         const isIssued = !!r?.issued_at_utc && (stInv === 'ISSUED' || stInv === 'PAID');
-        if (isIssued) tr.classList.add('row-deep-green');
+
+        // Row rule:
+        // - Invoiced and issued => deep green row
+        if (isIssued) {
+          tr.classList.add('row-deep-green');
+        }
       }
     } catch {}
-
-    // (unchanged checkbox + cells loop, except processing_status block below)
 
     const tdSel = document.createElement('td');
     tdSel.style.width = '40px';
@@ -32705,12 +33074,60 @@ function renderSummary(rows){
       td.dataset.colKey = String(c);
       const v = r[c];
 
-      // (unchanged branches...)
+      if (currentSection === 'candidates' && c === 'job_titles_display') {
+        const raw = typeof r.job_titles_display === 'string' ? r.job_titles_display : (v || '');
+        if (!raw.trim()) {
+          td.textContent = '';
+        } else {
+          const parts = raw.split(';').map(s => s.trim()).filter(Boolean);
+          const rest  = parts.slice(1); // drop primary
+          td.textContent = rest.join('; ');
+        }
 
-      if (currentSection === 'timesheets' && c === 'processing_status') {
-        // - FULLY_INVOICED => "Invoiced" + dark cell style
+      } else if (currentSection === 'timesheets' && c === 'issue_codes') {
+        // ── Issues column: badges ─────────────────────────────────────────────
+        td.classList.add('mini');
+
+        const hasTs = !!r.timesheet_id;
+        const codes = Array.isArray(v) ? v.filter(Boolean) : [];
+
+        if (!hasTs) {
+          // No timesheet yet (planned week only) – show nothing
+          td.textContent = '';
+        } else {
+          // Timesheet exists – use shared helper (green OK or red/amber badges)
+          td.appendChild(renderIssueBadges(codes));
+        }
+
+      } else if (currentSection === 'timesheets' && c === 'candidate_name') {
+        // Paid coin in candidate cell
+        const txt = String(formatDisplayValue(c, v) ?? '');
+        const isPaidToCandidate = !!r?.paid_at_utc;
+
+        if (isPaidToCandidate && txt) {
+          const wrap = document.createElement('div');
+          wrap.className = 'cell-right-icon';
+
+          const main = document.createElement('span');
+          main.className = 'cell-main';
+          main.textContent = txt;
+
+          const coin = document.createElement('span');
+          coin.className = 'coin-badge';
+          coin.textContent = '£';
+
+          wrap.appendChild(main);
+          wrap.appendChild(coin);
+          td.appendChild(wrap);
+        } else {
+          td.textContent = txt;
+        }
+
+      } else if (currentSection === 'timesheets' && c === 'processing_status') {
+        // ✅ Processing State column rules:
+        // - FULLY_INVOICED => "Invoiced" + green cell background (dark)
         // - PARTIALLY_INVOICED => "Partially Invoiced"
-        // - else => normal formatted status
+        // - Else => formatted processing_status
         const invSegStage = String(r?.invoice_segment_stage || '').trim().toUpperCase();
         const isFullyInvoiced = (invSegStage === 'FULLY_INVOICED');
         const isPartiallyInvoiced = (invSegStage === 'PARTIALLY_INVOICED');
@@ -32724,8 +33141,35 @@ function renderSummary(rows){
           td.textContent = formatDisplayValue(c, v);
         }
 
+      } else if (currentSection === 'invoices' && c === 'invoice_no') {
+        // Paid coin in invoice number cell
+        const txt = String(formatDisplayValue(c, v) ?? '');
+        const isPaid = !!r?.paid_at_utc;
+
+        if (isPaid && txt) {
+          const wrap = document.createElement('div');
+          wrap.className = 'cell-right-icon';
+
+          const main = document.createElement('span');
+          main.className = 'cell-main';
+          main.textContent = txt;
+
+          const coin = document.createElement('span');
+          coin.className = 'coin-badge';
+          coin.textContent = '£';
+
+          wrap.appendChild(main);
+          wrap.appendChild(coin);
+          td.appendChild(wrap);
+        } else {
+          td.textContent = txt;
+        }
+
+      } else if (currentSection === 'invoices' && c === 'client_name') {
+        // Flattened client name (already set in pre-normalisation)
+        td.textContent = String(r.client_name || '');
+
       } else {
-        // fall through to your existing render branches
         td.textContent = formatDisplayValue(c, v);
       }
 
@@ -32735,12 +33179,380 @@ function renderSummary(rows){
     tb.appendChild(tr);
   });
 
-  // (rest of function unchanged — pager/totals/selection toolbar/scroll restore)
+  // ── Apply pending focus (from operations like pay-method change, change rates) ──
+  try {
+    if (window.__pendingFocus && window.__pendingFocus.section === currentSection) {
+      const pf   = window.__pendingFocus;
+      const ids  = Array.isArray(pf.ids) ? pf.ids.map(String) : [];
+      const pids = Array.isArray(pf.primaryIds) ? pf.primaryIds.map(String) : [];
+      const idSet   = new Set(ids);
+      const priSet  = new Set(pids);
+      let firstPrimaryRow = null;
+
+      tb.querySelectorAll('tr').forEach(tr => {
+        const id = String(tr.dataset.id || '');
+        if (idSet.has(id)) {
+          tr.classList.add('pending-focus');
+          if (priSet.has(id)) tr.classList.add('pending-focus-primary');
+          if (!firstPrimaryRow && priSet.has(id)) {
+            firstPrimaryRow = tr;
+          }
+        }
+      });
+
+      if (firstPrimaryRow) {
+        try {
+          firstPrimaryRow.scrollIntoView({ block: 'center', behavior: 'smooth' });
+        } catch {}
+      }
+
+      window.__pendingFocus = null;
+    }
+  } catch (e) {
+    console.warn('pendingFocus application failed (non-fatal)', e);
+  }
+
+  // ── NEW: Candidates row context menu (Open / Advances & loans) ─────────────
+  if (currentSection === 'candidates') {
+    if (!window.__ensureCandidateRowMenu) {
+      window.__candRowMenuEl = null;
+      window.__candRowMenuRow = null;
+
+      window.__hideCandidateRowMenu = function() {
+        const el = window.__candRowMenuEl;
+        if (el) el.style.display = 'none';
+        window.__candRowMenuRow = null;
+      };
+
+      window.__ensureCandidateRowMenu = function() {
+        if (!window.__candRowMenuEl) {
+          const menu = document.createElement('div');
+          menu.id = 'candidateRowContextMenu';
+          menu.style.position = 'fixed';
+          menu.style.zIndex = '9999';
+          menu.style.background = '#0b152a';
+          menu.style.border = '1px solid var(--line)';
+          menu.style.borderRadius = '6px';
+          menu.style.minWidth = '180px';
+          menu.style.boxShadow = '0 4px 12px rgba(0,0,0,0.5)';
+          menu.style.display = 'none';
+          menu.innerHTML = `
+            <div class="ctx-item" data-action="open" style="padding:6px 10px;cursor:pointer;">Open candidate…</div>
+            <div class="ctx-item" data-action="advances" style="padding:6px 10px;cursor:pointer;border-top:1px solid var(--line);">
+              Advances / loans…
+            </div>
+          `;
+          menu.addEventListener('click', (e) => {
+            const item = e.target.closest('.ctx-item');
+            if (!item) return;
+            const action = item.getAttribute('data-action') || '';
+            const row = window.__candRowMenuRow;
+            window.__hideCandidateRowMenu();
+            if (!row) return;
+            if (action === 'open') {
+              if (typeof openCandidate === 'function') openCandidate(row);
+            } else if (action === 'advances') {
+              if (typeof openCandidateAdvancesModal === 'function') openCandidateAdvancesModal(row);
+            }
+          });
+          document.body.appendChild(menu);
+          window.__candRowMenuEl = menu;
+
+          document.addEventListener('click', (ev) => {
+            const el = window.__candRowMenuEl;
+            if (!el || el.style.display === 'none') return;
+            if (ev.target && el.contains(ev.target)) return;
+            window.__hideCandidateRowMenu();
+          }, true);
+
+          document.addEventListener('contextmenu', (ev) => {
+            const el = window.__candRowMenuEl;
+            if (!el || el.style.display === 'none') return;
+            if (ev.target && el.contains(ev.target)) return;
+            window.__hideCandidateRowMenu();
+          }, true);
+
+          window.addEventListener('scroll', () => window.__hideCandidateRowMenu(), true);
+        }
+        return window.__candRowMenuEl;
+      };
+    }
+
+    tb.addEventListener('contextmenu', (ev) => {
+      const tr = ev.target && ev.target.closest('tr[data-id]');
+      if (!tr) return;
+      ev.preventDefault();
+
+      const id = String(tr.dataset.id || '');
+      const row = currentRows.find(x => String(x.id || '') === id) || rows.find(x => String(x.id || '') === id);
+      if (!row) return;
+
+      window.__candRowMenuRow = row;
+      const menu = window.__ensureCandidateRowMenu();
+      if (!menu) return;
+
+      const x = ev.clientX;
+      const y = ev.clientY;
+
+      menu.style.left = `${x}px`;
+      menu.style.top  = `${y}px`;
+      menu.style.display = 'block';
+    });
+  }
+
+  tb.addEventListener('click', (ev) => {
+    const tr = ev.target && ev.target.closest('tr'); if (!tr) return;
+    if (ev.target && ev.target.classList && ev.target.classList.contains('row-select')) return;
+    tb.querySelectorAll('tr.selected').forEach(n => n.classList.remove('selected'));
+    tr.classList.add('selected');
+    const id = tr.dataset.id;
+    currentSelection = currentRows.find(x => String(x.id) === id) || null;
+  });
+
+  tb.addEventListener('dblclick', (ev) => {
+    const tr = ev.target && ev.target.closest('tr'); if (!tr) return;
+    if (!confirmDiscardChangesIfDirty()) return;
+    tb.querySelectorAll('tr.selected').forEach(n => n.classList.remove('selected'));
+    tr.classList.add('selected');
+    const id = tr.dataset.id;
+    const row = currentRows.find(x => String(x.id) === id) || null;
+    if (!row) return;
+    const beforeDepth = (window.__modalStack && window.__modalStack.length) || 0;
+    openDetails(row);
+    setTimeout(() => {
+      const afterDepth = (window.__modalStack && window.__modalStack.length) || 0;
+      if (afterDepth > beforeDepth) tb.querySelectorAll('tr.selected').forEach(n => n.classList.remove('selected'));
+    }, 0);
+  });
+
+  // ── Apply widths + wire resize/reorder + header context menu ────────────────
+  applyUserGridPrefs(currentSection, tbl, cols);
+  wireGridColumnResizing(currentSection, tbl);
+  wireGridColumnReorder(currentSection, tbl);
+  attachHeaderContextMenu(currentSection, tbl);
+
+  // ─────────────────────────────────────────────────────────────
+  // ✅ Footer totals block (above Prev/Next)
+  // ─────────────────────────────────────────────────────────────
+  const totalsBar = document.createElement('div');
+  totalsBar.className = 'summary-totals-bar';
+  totalsBar.style.cssText = 'display:flex;align-items:center;gap:14px;padding:8px 10px;border-top:1px solid var(--line);background:#081024;flex-wrap:wrap;';
+
+  const fmtGBP = (n) => {
+    const x = Number(n || 0);
+    const v = Number.isFinite(x) ? x : 0;
+    return `£${v.toFixed(2)}`;
+  };
+
+  const mkTot = (label, value) => {
+    const s = document.createElement('span');
+    s.className = 'mini';
+    s.innerHTML = `<span style="opacity:.85;">${label}:</span> <span style="font-weight:700;">${value}</span>`;
+    return s;
+  };
+
+  try {
+    if (currentSection === 'invoices') {
+      const t = (st && st.totals && typeof st.totals === 'object') ? st.totals : null;
+      const countAll = Number((t && t.count_all != null) ? t.count_all : (st.total != null ? st.total : 0));
+
+      totalsBar.appendChild(mkTot('Count', String(countAll)));
+      totalsBar.appendChild(mkTot('Subtotal ex VAT', fmtGBP(t?.subtotal_ex_vat_sum)));
+      totalsBar.appendChild(mkTot('Total inc VAT', fmtGBP(t?.total_inc_vat_sum)));
+      totalsBar.appendChild(mkTot('Margin', fmtGBP(t?.margin_ex_vat_sum)));
+    }
+
+    if (currentSection === 'timesheets') {
+      const t = (st && st.totals && typeof st.totals === 'object') ? st.totals : null;
+      const countAll = Number((t && t.count_all != null) ? t.count_all : (st.total != null ? st.total : 0));
+
+      totalsBar.appendChild(mkTot('Count', String(countAll)));
+      totalsBar.appendChild(mkTot('Total pay ex VAT', fmtGBP(t?.total_pay_ex_vat_sum)));
+      totalsBar.appendChild(mkTot('Margin', fmtGBP(t?.margin_ex_vat_sum)));
+    }
+
+    if (currentSection === 'contracts') {
+      const countAll = Number(st.total != null ? st.total : 0);
+      totalsBar.appendChild(mkTot('Count', String(countAll)));
+    }
+  } catch {}
+
+  if (totalsBar.childNodes && totalsBar.childNodes.length > 0) {
+    content.appendChild(totalsBar);
+  }
+
+  // Footer/pager
+  const pager = document.createElement('div');
+  pager.classList.add('pager');
+  pager.style.cssText = 'display:flex;align-items:center;gap:6px;padding:8px 10px;border-top:1px solid var(--line);';
+  const info = document.createElement('span'); info.className = 'mini';
+
+  const mkBtn = (label, disabled, onClick, isActive) => {
+    const b = document.createElement('button');
+    b.textContent = label;
+    b.disabled = !!disabled;
+    b.classList.add('pager-btn');
+    if (isActive) b.classList.add('active');
+    b.style.cssText = 'border:1px solid var(--line);background:#0b152a;color:var(--text);padding:4px 8px;border-radius:8px;cursor:pointer';
+    if (!disabled && typeof onClick === 'function') b.addEventListener('click', onClick);
+    return b;
+  };
+
+  const hasMore = !!st.hasMore;
+  const totalKnown = (typeof st.total === 'number');
+  const current = page;
+  let maxPageToShow;
+  if (totalKnown && pageSize !== 'ALL') maxPageToShow = Math.max(1, Math.ceil(st.total / Number(pageSize)));
+  else if (pageSize === 'ALL') maxPageToShow = 1;
+  else maxPageToShow = hasMore ? (current + 1) : current;
+
+  if (pageSize !== 'ALL') {
+    const prevBtn = mkBtn('Prev', current <= 1, async () => {
+      window.__listState[currentSection].page = Math.max(1, current - 1);
+      const data = await loadSection();
+      renderSummary(data);
+    }, false);
+    pager.appendChild(prevBtn);
+
+    const makePageLink = (n) => {
+      const isActive = (n === current);
+      return mkBtn(String(n), false, isActive ? null : async () => {
+        window.__listState[currentSection].page = n;
+        const data = await loadSection();
+        renderSummary(data);
+      }, isActive);
+    };
+
+    const pages = [];
+    if (maxPageToShow <= 7) { for (let n=1; n<=maxPageToShow; n++) pages.push(n); }
+    else {
+      pages.push(1);
+      if (current > 3) pages.push('…');
+      for (let n=Math.max(2, current-1); n<=Math.min(maxPageToShow-1, current+1); n++) pages.push(n);
+      if (hasMore || current+1 < maxPageToShow) pages.push('…');
+      pages.push(maxPageToShow);
+    }
+    pages.forEach(pn => {
+      if (pn === '…') { const span = document.createElement('span'); span.textContent = '…'; span.className = 'mini'; pager.appendChild(span); }
+      else pager.appendChild(makePageLink(pn));
+    });
+
+    const nextBtn = mkBtn('Next', (!hasMore && (!totalKnown || current >= maxPageToShow)), async () => {
+      window.__listState[currentSection].page = current + 1;
+      const data = await loadSection();
+      renderSummary(data);
+    }, false);
+    pager.appendChild(nextBtn);
+  }
+
+  if (pageSize === 'ALL') info.textContent = `Showing all ${effectiveRows.length} ${currentSection}.`;
+  else if (totalKnown) {
+    const ps = Number(pageSize);
+    const start = (current-1)*ps + 1;
+    const end = Math.min(start + effectiveRows.length - 1, st.total || start - 1);
+    info.textContent = `Showing ${start}–${end}${st.total!=null ? ` of ${st.total}` : ''}`;
+  } else {
+    const ps = Number(pageSize);
+    const start = (current-1)*ps + 1;
+    const end = start + effectiveRows.length - 1;
+    info.textContent = `Showing ${start}–${end}${hasMore ? '+' : ''}`;
+  }
+  const spacer = document.createElement('div'); spacer.style.flex = '1';
+  pager.appendChild(spacer); pager.appendChild(info);
+  content.appendChild(pager);
+
+  // Selection toolbar
+  const selBar = document.createElement('div');
+  selBar.style.cssText = 'display:flex;justify-content:flex-end;gap:8px;padding:6px 10px;border-top:1px dashed var(--line)';
+  btnFocus = document.createElement('button');
+  btnFocus.title = 'Focus on records';
+  btnFocus.textContent = '🔍 Focus';
+  btnFocus.style.cssText = 'border:1px solid var(--line);background:#0b152a;color:var(--text);padding:4px 8px;border-radius:8px;cursor:pointer';
+
+  btnSave = document.createElement('button');
+  btnSave.title = 'Save selection';
+  btnSave.textContent = '🔍 Save';
+  btnSave.style.cssText = btnFocus.style.cssText;
+
+  const btnLoad = document.createElement('button');
+  btnLoad.title = 'Load selection';
+  btnLoad.textContent = '🔍 Load';
+  btnLoad.style.cssText = btnFocus.style.cssText;
+
+  btnFocus.addEventListener('click', async () => {
+    if (sel.ids.size === 0) return;
+    const ids = Array.from(sel.ids);
+    try {
+      if (typeof applySelectionAsFilter === 'function') {
+        await applySelectionAsFilter(currentSection, { ids });
+      } else {
+        window.__listState = window.__listState || {};
+        const st2 = (window.__listState[currentSection] ||= { page:1, pageSize:50, total:null, hasMore:false, filters:null, sort:{ key:null, dir:'asc' } });
+        st2.page = 1; st2.filters = { ...(st2.filters||{}), ids };
+        const rows2 = await search(currentSection, st2.filters);
+        renderSummary(rows2);
+      }
+    } catch (e) { console.error('Focus failed', e); }
+  });
+
+  btnSave.addEventListener('click', async () => {
+    if (sel.ids.size === 0) return;
+    try { await openSaveSelectionModal ? openSaveSelectionModal(currentSection) : null; } catch {}
+  });
+
+  btnLoad.addEventListener('click', async () => {
+    try {
+      if (typeof openLoadSelectionModal === 'function') await openLoadSelectionModal(currentSection);
+    } catch {}
+  });
+
+  selBar.appendChild(btnFocus);
+  selBar.appendChild(btnSave);
+  selBar.appendChild(btnLoad);
+
+  // NEW: Timesheets Resolve… button (uses current selection)
+  if (currentSection === 'timesheets' && typeof openTimesheetsResolveModal === 'function') {
+    btnResolve = document.createElement('button');
+    btnResolve.title = 'Resolve candidate/client for selected timesheets';
+    btnResolve.textContent = 'Resolve…';
+    btnResolve.style.cssText = btnFocus.style.cssText;
+    btnResolve.disabled = sel.ids.size === 0;
+
+    btnResolve.addEventListener('click', () => {
+      if (sel.ids.size === 0) return;
+      const selectedRows = currentRows.filter(r => sel.ids.has(String(r.id || '')));
+      if (!selectedRows.length) return;
+      openTimesheetsResolveModal(selectedRows);
+    });
+
+    selBar.appendChild(btnResolve);
+  }
+
+  content.appendChild(selBar);
+
+  // Restore scroll memory on inner summary-body (data rows only)
+  try {
+    const scrollHost = content.querySelector('.summary-body');
+    if (scrollHost) {
+      scrollHost.__activeMemKey = memKey;
+      scrollHost.scrollTop = prevScrollY;
+      if (!scrollHost.__scrollMemHooked) {
+        scrollHost.addEventListener('scroll', () => {
+          const k = scrollHost.__activeMemKey || memKey;
+          window.__scrollMemory[k] = scrollHost.scrollTop || 0;
+        });
+        scrollHost.__scrollMemHooked = true;
+      }
+    }
+  } catch {}
+
+  // Initial states
+  computeHeaderState();
+  updateButtons();
 
   try { primeSummaryMembership(currentSection, fp); } catch (e) { /* non-blocking */ }
 }
 
- 
 
 
 
