@@ -28825,49 +28825,103 @@ function renderInvoiceModalShell(modalCtx) {
   return `${tabs}${body}`;
 }
 
-function attachInvoiceModalDelegatedHandlers(modalCtx, rootEl, { rerender, reload }) {
-  if (!rootEl || rootEl.__invDelegatedAttached) return;
+function attachInvoiceModalDelegatedHandlers(modalCtx, rootEl, deps) {
+  // NOTE:
+  // - invModalRoot is frequently replaced by showModal.setTab() (modalBody.innerHTML swap)
+  // - so binding click handlers to invModalRoot is fragile.
+  // FIX:
+  // - bind once to #modalBody (stable container) and gate by current frame + modalCtx identity.
+  // - store attachment state on modalCtx, not on the DOM node.
+
+  const mc = modalCtx || {};
+  const body = document.getElementById('modalBody');
+
+  if (!mc || typeof mc !== 'object') return;
+  if (!body) return;
+
+  // Allow deps to be optional; create safe fallbacks so showModal can call this too.
+  const safeRerender = (deps && typeof deps.rerender === 'function')
+    ? deps.rerender
+    : (() => {
+        try {
+          const fr = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
+          if (fr && fr.entity === 'invoices' && fr.kind === 'invoice-modal') {
+            fr._suppressDirty = true;
+            Promise.resolve(fr.setTab(fr.currentTabKey || 'invoice'))
+              .finally(() => {
+                fr._suppressDirty = false;
+                fr._updateButtons && fr._updateButtons();
+              });
+          }
+        } catch {}
+      });
+
+  const safeReload = (deps && typeof deps.reload === 'function')
+    ? deps.reload
+    : (async ({ includeCorrespondence = false } = {}) => {
+        try {
+          const invoiceId = String(mc?.invoiceId || mc?.data?.id || '').trim();
+          if (!invoiceId) return;
+
+          const qs = includeCorrespondence ? '?include_correspondence=1' : '';
+          const payload = await invoiceModalFetchJson(`/api/invoices/${encodeURIComponent(invoiceId)}${qs}`);
+
+          mc.dataLoaded = payload;
+          mc.invoiceDetail = payload;
+          mc.data = { id: invoiceId, ...(payload || {}) };
+        } catch (e) {
+          mc.error = String(e?.message || e || 'Failed to reload invoice');
+        } finally {
+          safeRerender();
+        }
+      });
+
+  // If we previously attached, detach first (defensive, avoids duplicate handlers)
+  try {
+    if (mc.__invDelegated && mc.__invDelegated.targetEl && mc.__invDelegated.handler) {
+      mc.__invDelegated.targetEl.removeEventListener('click', mc.__invDelegated.handler, true);
+    }
+  } catch {}
 
   const setStaged = (k, v) => {
-    modalCtx.invoiceEdits = modalCtx.invoiceEdits || {};
-    modalCtx.invoiceEdits.staged_status = (modalCtx.invoiceEdits.staged_status && typeof modalCtx.invoiceEdits.staged_status === 'object')
-      ? modalCtx.invoiceEdits.staged_status
+    mc.invoiceEdits = mc.invoiceEdits || {};
+    mc.invoiceEdits.staged_status = (mc.invoiceEdits.staged_status && typeof mc.invoiceEdits.staged_status === 'object')
+      ? mc.invoiceEdits.staged_status
       : { issued: null, paid: null, on_hold: null };
 
-    modalCtx.invoiceEdits.staged_dates = (modalCtx.invoiceEdits.staged_dates && typeof modalCtx.invoiceEdits.staged_dates === 'object')
-      ? modalCtx.invoiceEdits.staged_dates
+    mc.invoiceEdits.staged_dates = (mc.invoiceEdits.staged_dates && typeof mc.invoiceEdits.staged_dates === 'object')
+      ? mc.invoiceEdits.staged_dates
       : { issued_at_utc: null, paid_at_utc: null, status_date_utc: null };
 
-    modalCtx.invoiceEdits.staged_status[k] = v;
+    mc.invoiceEdits.staged_status[k] = v;
 
     const now = new Date().toISOString();
-    if (k === 'issued') {
-      modalCtx.invoiceEdits.staged_dates.issued_at_utc = (v === true) ? now : null;
-    }
-    if (k === 'paid') {
-      modalCtx.invoiceEdits.staged_dates.paid_at_utc = (v === true) ? now : null;
-    }
-    if (k === 'on_hold') {
-      modalCtx.invoiceEdits.staged_dates.status_date_utc = (v === true) ? now : null;
-    }
+    if (k === 'issued') mc.invoiceEdits.staged_dates.issued_at_utc = (v === true) ? now : null;
+    if (k === 'paid')   mc.invoiceEdits.staged_dates.paid_at_utc   = (v === true) ? now : null;
+    if (k === 'on_hold')mc.invoiceEdits.staged_dates.status_date_utc = (v === true) ? now : null;
   };
 
   const getEffectiveFlags = (invoice) => {
     const status = String(invoice?.status || '').toUpperCase();
     const baseIssued = !!invoice?.issued_at_utc || status === 'ISSUED';
-    const basePaid = !!invoice?.paid_at_utc || status === 'PAID';
+    const basePaid   = !!invoice?.paid_at_utc   || status === 'PAID';
 
-    const st = (modalCtx?.invoiceEdits?.staged_status && typeof modalCtx.invoiceEdits.staged_status === 'object')
-      ? modalCtx.invoiceEdits.staged_status
+    const st = (mc?.invoiceEdits?.staged_status && typeof mc.invoiceEdits.staged_status === 'object')
+      ? mc.invoiceEdits.staged_status
       : { issued: null, paid: null, on_hold: null };
 
     const effIssued = (st.issued === null || st.issued === undefined) ? baseIssued : !!st.issued;
-    const effPaid = (st.paid === null || st.paid === undefined) ? basePaid : !!st.paid;
+    const effPaid   = (st.paid   === null || st.paid   === undefined) ? basePaid   : !!st.paid;
 
     return { baseIssued, basePaid, effIssued, effPaid };
   };
 
   const handler = async (e) => {
+    // Gate: only respond when invoice modal is the TOP frame and its ctx is this mc.
+    const fr = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
+    if (!fr || fr.entity !== 'invoices' || fr.kind !== 'invoice-modal') return;
+    if (fr._ctxRef !== mc) return;
+
     const el = e.target?.closest?.('[data-action]');
     if (!el) return;
 
@@ -28876,156 +28930,150 @@ function attachInvoiceModalDelegatedHandlers(modalCtx, rootEl, { rerender, reloa
 
     e.preventDefault();
 
-    const { invoice, header_snapshot_json, items } = invoiceModalGetInvoiceData(modalCtx);
+    const { invoice, header_snapshot_json, items } = invoiceModalGetInvoiceData(mc);
 
     try {
       switch (action) {
         case 'inv-close': {
-          try { rootEl.removeEventListener('click', handler); } catch {}
-          try { rootEl.__invDelegatedAttached = false; } catch {}
-          closeModal('invModal');
+          // Close top frame safely
+          try { document.getElementById('btnCloseModal')?.click(); } catch {}
           return;
         }
 
         case 'inv-set-tab': {
           const tab = String(el.getAttribute('data-tab') || 'invoice');
-          modalCtx.activeTab = tab;
+          mc.activeTab = tab;
 
           if (tab === 'correspondence') {
-            const hasCorr = Array.isArray(modalCtx.data?.correspondence);
+            const hasCorr = Array.isArray(mc.data?.correspondence);
             if (!hasCorr) {
-              await reload({ includeCorrespondence: true });
+              await safeReload({ includeCorrespondence: true });
               return;
             }
           }
-          rerender();
+
+          safeRerender();
           return;
         }
 
         case 'inv-open-pdf': {
           if (typeof handleInvoiceRenderPdf === 'function') {
-            await handleInvoiceRenderPdf(modalCtx, { invoice, header_snapshot_json, items });
+            await handleInvoiceRenderPdf(mc, { invoice, header_snapshot_json, items });
           }
-          await reload();
+          await safeReload();
           return;
         }
 
         case 'inv-email': {
           if (typeof handleInvoiceEmail === 'function') {
-            await handleInvoiceEmail(modalCtx, { invoice, header_snapshot_json, items });
+            await handleInvoiceEmail(mc, { invoice, header_snapshot_json, items });
           }
-          await reload({ includeCorrespondence: true });
+          await safeReload({ includeCorrespondence: true });
           return;
         }
 
-        // ✅ Expand/collapse timesheet rows
         case 'inv-toggle-expand-timesheet': {
           const tsId = String(el.getAttribute('data-timesheet-id') || '').trim();
           if (!tsId) return;
 
-          modalCtx.invoiceUi = (modalCtx.invoiceUi && typeof modalCtx.invoiceUi === 'object') ? modalCtx.invoiceUi : {};
-          modalCtx.invoiceUi.expanded_timesheets = (modalCtx.invoiceUi.expanded_timesheets && typeof modalCtx.invoiceUi.expanded_timesheets === 'object')
-            ? modalCtx.invoiceUi.expanded_timesheets
+          mc.invoiceUi = (mc.invoiceUi && typeof mc.invoiceUi === 'object') ? mc.invoiceUi : {};
+          mc.invoiceUi.expanded_timesheets = (mc.invoiceUi.expanded_timesheets && typeof mc.invoiceUi.expanded_timesheets === 'object')
+            ? mc.invoiceUi.expanded_timesheets
             : {};
 
-          const cur = !!modalCtx.invoiceUi.expanded_timesheets[tsId];
-          if (cur) delete modalCtx.invoiceUi.expanded_timesheets[tsId];
-          else modalCtx.invoiceUi.expanded_timesheets[tsId] = true;
+          const cur = !!mc.invoiceUi.expanded_timesheets[tsId];
+          if (cur) delete mc.invoiceUi.expanded_timesheets[tsId];
+          else mc.invoiceUi.expanded_timesheets[tsId] = true;
 
-          rerender();
+          safeRerender();
           return;
         }
 
-        // ✅ Status pill toggles (EDIT mode only; allowed even if invoice is ISSUED)
         case 'inv-toggle-issued': {
-          if (!modalCtx.isEditing || !invoiceModalIsEditable(invoice, modalCtx, 'status')) return;
+          if (!mc.isEditing || !invoiceModalIsEditable(invoice, mc, 'status')) return;
 
           const { effIssued, effPaid } = getEffectiveFlags(invoice);
 
-          // You cannot unissue while the invoice is (effectively) paid.
           if (effIssued === true && effPaid === true) {
-            modalCtx.error = 'Unpay invoice first (then unissue).';
-            rerender();
+            mc.error = 'Unpay invoice first (then unissue).';
+            safeRerender();
             return;
           }
 
           setStaged('issued', !effIssued);
-          rerender();
+          safeRerender();
           return;
         }
 
         case 'inv-toggle-paid': {
-          if (!modalCtx.isEditing || !invoiceModalIsEditable(invoice, modalCtx, 'status')) return;
+          if (!mc.isEditing || !invoiceModalIsEditable(invoice, mc, 'status')) return;
           const { effPaid } = getEffectiveFlags(invoice);
           setStaged('paid', !effPaid);
-          rerender();
+          safeRerender();
           return;
         }
 
         case 'inv-toggle-hold': {
-          if (!modalCtx.isEditing || !invoiceModalIsEditable(invoice, modalCtx, 'status')) return;
+          if (!mc.isEditing || !invoiceModalIsEditable(invoice, mc, 'status')) return;
           const baseHold = (String(invoice?.status || '').toUpperCase() === 'ON_HOLD');
-          const st = modalCtx.invoiceEdits?.staged_status || {};
+          const st = mc.invoiceEdits?.staged_status || {};
           const effHold = (st.on_hold === null || st.on_hold === undefined) ? baseHold : !!st.on_hold;
           setStaged('on_hold', !effHold);
-          rerender();
+          safeRerender();
           return;
         }
 
-        // ✅ Line add/remove staging (EDIT mode only)
         case 'inv-add-timesheets': {
-          if (!modalCtx.isEditing) return;
-          // Always allow opening; selection is disabled inside the modal with banner if not eligible.
-          await openInvoiceAddTimesheetsModal(modalCtx, { rerender });
+          if (!mc.isEditing) return;
+          await openInvoiceAddTimesheetsModal(mc, { rerender: safeRerender });
           return;
         }
 
         case 'inv-add-adjustment': {
-          if (!modalCtx.isEditing) return;
-          // Always allow opening; selection is disabled inside the modal with banner if not eligible.
-          await openInvoiceAddAdjustmentModal(modalCtx, { rerender });
+          if (!mc.isEditing) return;
+          await openInvoiceAddAdjustmentModal(mc, { rerender: safeRerender });
           return;
         }
 
         case 'inv-toggle-remove-timesheet': {
-          if (!modalCtx.isEditing) return;
-          if (!invoiceModalIsEditable(invoice, modalCtx, 'lines')) {
-            modalCtx.error = 'Unissue invoice first.';
-            rerender();
+          if (!mc.isEditing) return;
+          if (!invoiceModalIsEditable(invoice, mc, 'lines')) {
+            mc.error = 'Unissue and unpay invoice first.';
+            safeRerender();
             return;
           }
           const tsId = el.getAttribute('data-timesheet-id');
-          invoiceModalToggleRemoveTimesheet(modalCtx, tsId);
-          rerender();
+          invoiceModalToggleRemoveTimesheet(mc, tsId);
+          safeRerender();
           return;
         }
 
         case 'inv-toggle-remove-line': {
-          if (!modalCtx.isEditing) return;
-          if (!invoiceModalIsEditable(invoice, modalCtx, 'lines')) {
-            modalCtx.error = 'Unissue invoice first.';
-            rerender();
+          if (!mc.isEditing) return;
+          if (!invoiceModalIsEditable(invoice, mc, 'lines')) {
+            mc.error = 'Unissue and unpay invoice first.';
+            safeRerender();
             return;
           }
           const lineId = el.getAttribute('data-invoice-line-id');
-          invoiceModalToggleRemoveLine(modalCtx, lineId);
-          rerender();
+          invoiceModalToggleRemoveLine(mc, lineId);
+          safeRerender();
           return;
         }
 
         case 'inv-unstage-add-timesheet': {
-          if (!modalCtx.isEditing) return;
+          if (!mc.isEditing) return;
           const tsId = el.getAttribute('data-timesheet-id');
-          invoiceModalToggleAddTimesheet(modalCtx, tsId);
-          rerender();
+          invoiceModalToggleAddTimesheet(mc, tsId);
+          safeRerender();
           return;
         }
 
         case 'inv-remove-staged-adjustment': {
-          if (!modalCtx.isEditing) return;
+          if (!mc.isEditing) return;
           const tok = el.getAttribute('data-client-token');
-          invoiceModalRemoveStagedAdjustment(modalCtx, tok);
-          rerender();
+          invoiceModalRemoveStagedAdjustment(mc, tok);
+          safeRerender();
           return;
         }
 
@@ -29033,14 +29081,21 @@ function attachInvoiceModalDelegatedHandlers(modalCtx, rootEl, { rerender, reloa
           return;
       }
     } catch (err) {
-      modalCtx.error = String(err?.message || err || 'Action failed');
-      rerender();
+      mc.error = String(err?.message || err || 'Action failed');
+      safeRerender();
     }
   };
 
-  rootEl.addEventListener('click', handler);
-  rootEl.__invDelegatedAttached = true;
+  // Attach in CAPTURE phase so it reliably sees clicks even with nested tables/labels
+  body.addEventListener('click', handler, true);
+
+  // Record attachment so showModal can clean it up on dismiss
+  mc.__invDelegated = { targetEl: body, handler };
+
+  // Keep a light marker on rootEl only for debugging (not used for gating anymore)
+  try { if (rootEl) rootEl.__invDelegatedAttached = true; } catch {}
 }
+
 
 async function openInvoiceModal(row) {
   // Invoice modal (staged edits, no MutationObserver loops)
@@ -37489,16 +37544,29 @@ async setTab(k) {
 
   byId('modalBody').innerHTML = this.renderTab(k, merged) || '';
 
-  // ───────────────────── Imports: Main tab wiring (dropzones) ─────────────────────
-  if (this.entity === 'imports' && this.kind === 'imports' && k === 'main') {
-    try {
-      if (typeof wireImportDropzones === 'function') {
-        wireImportDropzones();
-      }
-    } catch (e) {
-      console.warn('[IMPORTS][WIRE] wireImportDropzones failed', e);
+// ✅ Invoices: ensure invoice modal delegated handlers survive DOM replacement
+if (this.entity === 'invoices' && this.kind === 'invoice-modal') {
+  try {
+    const mcInv = window.modalCtx || {};
+    const invRoot = document.getElementById('invModalRoot');
+    if (invRoot && typeof attachInvoiceModalDelegatedHandlers === 'function') {
+      // deps optional; attachInvoiceModalDelegatedHandlers has safe fallbacks now
+      attachInvoiceModalDelegatedHandlers(mcInv, invRoot, null);
     }
+  } catch {}
+}
+
+// ───────────────────── Imports: Main tab wiring (dropzones) ─────────────────────
+if (this.entity === 'imports' && this.kind === 'imports' && k === 'main') {
+  try {
+    if (typeof wireImportDropzones === 'function') {
+      wireImportDropzones();
+    }
+  } catch (e) {
+    console.warn('[IMPORTS][WIRE] wireImportDropzones failed', e);
   }
+}
+
 
   // ───────────────────── Clients: Rates tab wiring ─────────────────────
   if (this.entity === 'clients' && k === 'rates') {
@@ -40911,6 +40979,16 @@ try {
     ctx._invoiceObserver = null;
   }
 } catch {}
+
+// ✅ NEW: detach invoice delegated click handler (bound to #modalBody)
+try {
+  const ctx = closing && closing._ctxRef ? closing._ctxRef : null;
+  if (ctx && ctx.__invDelegated && ctx.__invDelegated.targetEl && ctx.__invDelegated.handler) {
+    try { ctx.__invDelegated.targetEl.removeEventListener('click', ctx.__invDelegated.handler, true); } catch {}
+    ctx.__invDelegated = null;
+  }
+} catch {}
+
 
 if (closing?._detachDirty){ try{closing._detachDirty();}catch{} closing._detachDirty=null; }
 
