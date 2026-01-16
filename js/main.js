@@ -41418,17 +41418,65 @@ if (!frameObj.hasId && mode === 'view' && !isPlannedTimesheetStub && !isUtilityK
   }
 }
 
+const onSaveClick = async (ev)=>{
+  const btn = ev?.currentTarget || byId('btnSave');
 
-  const onSaveClick = async (ev)=>{
-    const btn=ev?.currentTarget || byId('btnSave');
-    const topNow=currentFrame(); const bound=btn?.dataset?.ownerToken;
-    if (LOG) console.log('[MODAL] click #btnSave (global)', {boundToken:bound, topToken:topNow?._token, topKind:topNow?.kind, topTitle:topNow?.title});
-    if(!topNow) return; if(bound!==topNow._token){ if(LOG) console.warn('[MODAL] token mismatch (global); using top frame'); }
-    await saveForFrame(topNow);
-  };
+  // ✅ Guard: utility/hidden Save must not fire (prevents Enter / stale handler surprises)
+  try {
+    if (!btn) return;
+    if (btn.disabled) return;
+    const disp = (btn.style && btn.style.display) ? String(btn.style.display) : '';
+    if (disp === 'none') return;
+  } catch {}
 
-  const bindSave = (btn,fr)=>{ if(!btn||!fr) return; btn.dataset.ownerToken = fr._token; btn.onclick = onSaveClick; if(LOG) console.log('[MODAL] bind #btnSave → (global)',{ownerToken:fr._token,kind:fr.kind||'(parent)',title:fr.title,mode:fr.mode}); };
-  bindSave(btnSave, top);
+  const topNow = currentFrame();
+  const bound  = btn?.dataset?.ownerToken;
+
+  if (LOG) console.log('[MODAL] click #btnSave (global)', {
+    boundToken: bound,
+    topToken: topNow?._token,
+    topKind: topNow?.kind,
+    topTitle: topNow?.title
+  });
+
+  if (!topNow) return;
+  if (bound !== topNow._token) {
+    if (LOG) console.warn('[MODAL] token mismatch (global); using top frame');
+  }
+
+  await saveForFrame(topNow);
+};
+
+const bindSave = (btn, fr) => {
+  if (!btn || !fr) return;
+
+  // ✅ If Save is hidden, clear any previous handler so it cannot trigger via Enter/stale state.
+  let hidden = false;
+  try {
+    if (btn.hidden) hidden = true;
+    const disp = (btn.style && btn.style.display) ? String(btn.style.display) : '';
+    if (disp === 'none') hidden = true;
+  } catch {}
+
+  if (hidden) {
+    try { btn.onclick = null; } catch {}
+    try { btn.dataset.ownerToken = ''; } catch {}
+    return;
+  }
+
+  btn.dataset.ownerToken = fr._token;
+  btn.onclick = onSaveClick;
+
+  if (LOG) console.log('[MODAL] bind #btnSave → (global)', {
+    ownerToken: fr._token,
+    kind: fr.kind || '(parent)',
+    title: fr.title,
+    mode: fr.mode
+  });
+};
+
+bindSave(btnSave, top);
+
   // FIX: ignore programmatic "dirty" while suppression is active
    const onDirtyEvt = ()=> {
     const fr = currentFrame();
