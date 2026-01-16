@@ -1308,9 +1308,24 @@ function getFriendlyHeaderLabel(section, key) {
   const prefs = (window.__gridPrefs && window.__gridPrefs.grid && window.__gridPrefs.grid[section]) || {};
   const useFriendly = prefs.use_friendly_labels !== false; // default ON
   if (!useFriendly) return key;
+
   const overrides = prefs.labels || {};
   const def = (DEFAULT_COLUMN_LABELS[section] || {});
-  return overrides[key] || def[key] || key;
+  const hit = overrides[key] || def[key];
+  if (hit) return hit;
+
+  const k = String(key || '');
+  if (k.includes('_')) {
+    const raw = k.replace(/_/g, ' ').toLowerCase();
+    const tc = raw.replace(/\b\w/g, (c) => c.toUpperCase());
+    return tc
+      .replace(/\bNhsp\b/g, 'NHSP')
+      .replace(/\bHr\b/g, 'HR')
+      .replace(/\bNhs\b/g, 'NHS')
+      .replace(/\bVat\b/g, 'VAT');
+  }
+
+  return k;
 }
 
 
@@ -13061,8 +13076,10 @@ function renderTools(){
     const stageLabel = document.createElement('div');
     stageLabel.textContent = 'Stage:';
     stageLabel.style.marginBottom = '2px';
-    const stageSel = document.createElement('select');
-    stageSel.style.width = '100%';
+ const stageSel = document.createElement('select');
+stageSel.style.width = '100%';
+stageSel.classList.add('dark-control');
+
 
     const stageOpts = [
       ['ALL',         'All'],
@@ -13700,9 +13717,91 @@ function formatUkTimestampFromUtc(isoLike){
   const hh = g('hour'), mi = g('minute');
   return `${dd}/${mm}/${yyyy} ${hh}${mi}hrs`;
 }
+
 function formatDisplayValue(key, val){
   if (val === null || val === undefined || val === '') return '—';
   if (typeof val === 'boolean') return val ? 'Yes' : 'No';
+
+  const normEnum = (s) => String(s || '').trim().replace(/-/g, '_').toUpperCase();
+
+  const titleCaseEnum = (s) => {
+    const raw = normEnum(s).replace(/_/g, ' ').toLowerCase();
+    const tc = raw.replace(/\b\w/g, (c) => c.toUpperCase());
+
+    // Preserve common acronyms
+    return tc
+      .replace(/\bNhsp\b/g, 'NHSP')
+      .replace(/\bHr\b/g, 'HR')
+      .replace(/\bNhs\b/g, 'NHS')
+      .replace(/\bVat\b/g, 'VAT');
+  };
+
+  const friendlyProcessingStatus = (s) => {
+    const up = normEnum(s);
+    const map = {
+      READY_FOR_INVOICE: 'Ready to Invoice',
+      PENDING_AUTH: 'Awaiting Authorisation',
+      UNASSIGNED: 'Unassigned',
+      RATE_MISSING: 'Rate Missing'
+    };
+    return map[up] || titleCaseEnum(up);
+  };
+
+  const friendlyRouteType = (s) => {
+    const up = normEnum(s);
+    const map = {
+      WEEKLY_NHSP: 'Weekly NHSP',
+      WEEKLY_NHSP_ADJUSTMENT: 'Weekly NHSP Adjustment',
+      WEEKLY_HEALTHROSTER: 'Weekly HealthRoster',
+      WEEKLY_ELECTRONIC: 'Weekly Electronic',
+      DAILY_ELECTRONIC: 'Daily Electronic',
+      WEEKLY_MANUAL: 'Weekly Manual',
+      DAILY_MANUAL: 'Daily Manual',
+      UNKNOWN: 'Unknown'
+    };
+    return map[up] || titleCaseEnum(up);
+  };
+
+  const friendlySheetScope = (s) => {
+    const up = normEnum(s);
+    if (up === 'WEEKLY') return 'Weekly';
+    if (up === 'DAILY') return 'Daily';
+    return titleCaseEnum(up);
+  };
+
+  const friendlySubmissionMode = (s) => {
+    const up = normEnum(s);
+    if (up === 'MANUAL') return 'Manual';
+    if (up === 'ELECTRONIC') return 'Electronic';
+    return titleCaseEnum(up);
+  };
+
+  const friendlyInvoiceStatus = (s) => {
+    const up = normEnum(s);
+    if (up === 'DRAFT') return 'Draft';
+    if (up === 'ON_HOLD') return 'On Hold';
+    if (up === 'ISSUED') return 'Issued';
+    if (up === 'PAID') return 'Paid';
+    return titleCaseEnum(up);
+  };
+
+  // Friendly enum display (must happen before date heuristics)
+  const k = String(key || '').toLowerCase();
+  if (k === 'processing_status' || k === 'summary_stage') {
+    return friendlyProcessingStatus(val);
+  }
+  if (k === 'route_type') {
+    return friendlyRouteType(val);
+  }
+  if (k === 'sheet_scope') {
+    return friendlySheetScope(val);
+  }
+  if (k === 'submission_mode') {
+    return friendlySubmissionMode(val);
+  }
+  if (k === 'status') {
+    return friendlyInvoiceStatus(val);
+  }
 
   if (typeof val === 'string'){
     // date-only?
@@ -13722,6 +13821,7 @@ function formatDisplayValue(key, val){
 
   return String(val);
 }
+
 
 // === UPDATED: Summary renders role summary for candidates (computed from JSON) ===
 
@@ -27976,7 +28076,6 @@ async function handleInvoiceDelete(modalCtx) {
     }
   } catch {}
 }
-
 async function handleInvoiceRenderPdf(modalCtx) {
   const mc = modalCtx || {};
   const invoiceId =
@@ -27990,7 +28089,6 @@ async function handleInvoiceRenderPdf(modalCtx) {
   //   1) Render invoice bundle server-side (ensures PDF exists in R2)
   //   2) Presign download using /api/files/presign-download (POST { key })
   //   3) Open viewer with the signed URL
-
   let pdfKey = null;
 
   try {
@@ -28013,7 +28111,7 @@ async function handleInvoiceRenderPdf(modalCtx) {
     const k2 = (j && typeof j.key === 'string') ? j.key.trim() : '';
     pdfKey = (k1 || k2) ? String(k1 || k2).replace(/^\/+/, '') : null;
 
-    // Current backend returns pdf_url; but the rendered file is always stored at this deterministic key.
+    // Fallback deterministic key (kept for safety)
     if (!pdfKey) {
       pdfKey = `docs-pdf/invoices/invoice_${invoiceId}.pdf`;
     }
@@ -28047,18 +28145,22 @@ async function handleInvoiceRenderPdf(modalCtx) {
     String(mc?.dataLoaded?.invoice?.invoice_no || mc?.dataLoaded?.invoice_row?.invoice_no || '').trim() ||
     String(invoiceId).slice(0, 8);
 
-  // Viewer modal (same pattern as existing evidence viewer: iframe inside card)
-  window.modalCtx = {
-    entity: 'invoices',
-    openToken: `invoice-pdf:${invoiceId}:${Date.now()}:${Math.random().toString(36).slice(2)}`,
-    data: { id: invoiceId, invoice_no: invNo, pdf_url: signedUrl }
+  // ✅ Store on existing modalCtx (do NOT clobber window.modalCtx)
+  mc.invoiceUi = (mc.invoiceUi && typeof mc.invoiceUi === 'object') ? mc.invoiceUi : {};
+  mc.invoiceUi.pdf_preview = {
+    invoice_id: invoiceId,
+    invoice_no: invNo,
+    pdf_url: signedUrl,
+    pdf_key: String(pdfKey || '').trim(),
+    opened_at_utc: new Date().toISOString()
   };
 
+  // Viewer modal (child utility, noParentGate)
   showModal(
     `Invoice ${invNo} — PDF Preview`,
     [{ key: 'main', label: 'PDF' }],
     () => {
-      const u = String(window.modalCtx?.data?.pdf_url || '');
+      const u = String(mc?.invoiceUi?.pdf_preview?.pdf_url || '');
       return `
         <div class="card" style="display:flex;flex-direction:column;gap:10px;min-height:0;">
           <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;">
@@ -28079,7 +28181,18 @@ async function handleInvoiceRenderPdf(modalCtx) {
     null,
     true,
     null,
-    { kind: 'import-summary-invoice-pdf', noParentGate: true }
+    {
+      kind: 'import-summary-invoice-pdf',
+      noParentGate: true,
+      // ✅ Clean up preview state on dismiss (prevents stale URL reuse)
+      onDismiss: () => {
+        try {
+          if (mc && mc.invoiceUi && mc.invoiceUi.pdf_preview) {
+            delete mc.invoiceUi.pdf_preview;
+          }
+        } catch {}
+      }
+    }
   );
 }
 
@@ -28186,14 +28299,42 @@ async function invoiceModalFetchJson(path, options = {}) {
   return data;
 }
 
-
-function invoiceModalIsEditable(invoice) {
+function invoiceModalIsEditable(invoice, modalCtx, purpose = 'lines') {
+  // purpose:
+  //  - 'status' => canToggleStatus (in edit mode, not credit note)
+  //  - 'lines'  => canEditLines (only if invoice will be UNISSUED + UNPAID when saving)
   if (!invoice || typeof invoice !== 'object') return false;
-  const status = String(invoice.status || '').toUpperCase();
+
   const type = String(invoice.type || '').toUpperCase();
   if (type === 'CREDIT_NOTE') return false;
-  if (!(status === 'DRAFT' || status === 'ON_HOLD')) return false;
-  if (invoice.paid_at_utc) return false;
+
+  const status = String(invoice.status || '').toUpperCase();
+  const baseIssued = !!invoice.issued_at_utc || status === 'ISSUED';
+  const basePaid = !!invoice.paid_at_utc || status === 'PAID';
+
+  const st = (modalCtx && modalCtx.invoiceEdits && modalCtx.invoiceEdits.staged_status && typeof modalCtx.invoiceEdits.staged_status === 'object')
+    ? modalCtx.invoiceEdits.staged_status
+    : { issued: null, paid: null, on_hold: null };
+
+  const effIssued = (st.issued === null || st.issued === undefined) ? baseIssued : !!st.issued;
+  const effPaid = (st.paid === null || st.paid === undefined) ? basePaid : !!st.paid;
+
+  if (purpose === 'status') {
+    // Status pills are clickable in edit mode for non-credit notes.
+    // (Specific illegal transitions like "unissue while paid" are enforced at the handler level.)
+    return !!(modalCtx && modalCtx.isEditing);
+  }
+
+  // purpose === 'lines'
+  // You can only add/remove lines if the invoice will be UNISSUED and UNPAID when saved.
+  // That means: effectivePaid must be false AND effectiveIssued must be false.
+  if (effPaid) return false;
+  if (effIssued) return false;
+
+  // Also avoid editing lines for unexpected terminal statuses (safety).
+  // DRAFT/ON_HOLD are always OK; ISSUED is OK only if staged to unissue (handled by effIssued false).
+  if (!(status === 'DRAFT' || status === 'ON_HOLD' || status === 'ISSUED' || status === 'PAID')) return false;
+
   return true;
 }
 
@@ -28654,6 +28795,21 @@ function attachInvoiceModalDelegatedHandlers(modalCtx, rootEl, { rerender, reloa
     }
   };
 
+  const getEffectiveFlags = (invoice) => {
+    const status = String(invoice?.status || '').toUpperCase();
+    const baseIssued = !!invoice?.issued_at_utc || status === 'ISSUED';
+    const basePaid = !!invoice?.paid_at_utc || status === 'PAID';
+
+    const st = (modalCtx?.invoiceEdits?.staged_status && typeof modalCtx.invoiceEdits.staged_status === 'object')
+      ? modalCtx.invoiceEdits.staged_status
+      : { issued: null, paid: null, on_hold: null };
+
+    const effIssued = (st.issued === null || st.issued === undefined) ? baseIssued : !!st.issued;
+    const effPaid = (st.paid === null || st.paid === undefined) ? basePaid : !!st.paid;
+
+    return { baseIssued, basePaid, effIssued, effPaid };
+  };
+
   const handler = async (e) => {
     const el = e.target?.closest?.('[data-action]');
     if (!el) return;
@@ -28723,29 +28879,34 @@ function attachInvoiceModalDelegatedHandlers(modalCtx, rootEl, { rerender, reloa
           return;
         }
 
-        // ✅ Status pill toggles (EDIT mode only)
+        // ✅ Status pill toggles (EDIT mode only; allowed even if invoice is ISSUED)
         case 'inv-toggle-issued': {
-          if (!modalCtx.isEditing || !invoiceModalIsEditable(invoice)) return;
-          const baseIssued = !!invoice?.issued_at_utc;
-          const st = modalCtx.invoiceEdits?.staged_status || {};
-          const effIssued = (st.issued === null || st.issued === undefined) ? baseIssued : !!st.issued;
+          if (!modalCtx.isEditing || !invoiceModalIsEditable(invoice, modalCtx, 'status')) return;
+
+          const { effIssued, effPaid } = getEffectiveFlags(invoice);
+
+          // You cannot unissue while the invoice is (effectively) paid.
+          if (effIssued === true && effPaid === true) {
+            modalCtx.error = 'Unpay invoice first (then unissue).';
+            rerender();
+            return;
+          }
+
           setStaged('issued', !effIssued);
           rerender();
           return;
         }
 
         case 'inv-toggle-paid': {
-          if (!modalCtx.isEditing || !invoiceModalIsEditable(invoice)) return;
-          const basePaid = !!invoice?.paid_at_utc;
-          const st = modalCtx.invoiceEdits?.staged_status || {};
-          const effPaid = (st.paid === null || st.paid === undefined) ? basePaid : !!st.paid;
+          if (!modalCtx.isEditing || !invoiceModalIsEditable(invoice, modalCtx, 'status')) return;
+          const { effPaid } = getEffectiveFlags(invoice);
           setStaged('paid', !effPaid);
           rerender();
           return;
         }
 
         case 'inv-toggle-hold': {
-          if (!modalCtx.isEditing || !invoiceModalIsEditable(invoice)) return;
+          if (!modalCtx.isEditing || !invoiceModalIsEditable(invoice, modalCtx, 'status')) return;
           const baseHold = (String(invoice?.status || '').toUpperCase() === 'ON_HOLD');
           const st = modalCtx.invoiceEdits?.staged_status || {};
           const effHold = (st.on_hold === null || st.on_hold === undefined) ? baseHold : !!st.on_hold;
@@ -28756,19 +28917,26 @@ function attachInvoiceModalDelegatedHandlers(modalCtx, rootEl, { rerender, reloa
 
         // ✅ Line add/remove staging (EDIT mode only)
         case 'inv-add-timesheets': {
-          if (!modalCtx.isEditing || !invoiceModalIsEditable(invoice)) return;
+          if (!modalCtx.isEditing) return;
+          // Always allow opening; selection is disabled inside the modal with banner if not eligible.
           await openInvoiceAddTimesheetsModal(modalCtx, { rerender });
           return;
         }
 
         case 'inv-add-adjustment': {
-          if (!modalCtx.isEditing || !invoiceModalIsEditable(invoice)) return;
+          if (!modalCtx.isEditing) return;
+          // Always allow opening; selection is disabled inside the modal with banner if not eligible.
           await openInvoiceAddAdjustmentModal(modalCtx, { rerender });
           return;
         }
 
         case 'inv-toggle-remove-timesheet': {
           if (!modalCtx.isEditing) return;
+          if (!invoiceModalIsEditable(invoice, modalCtx, 'lines')) {
+            modalCtx.error = 'Unissue invoice first.';
+            rerender();
+            return;
+          }
           const tsId = el.getAttribute('data-timesheet-id');
           invoiceModalToggleRemoveTimesheet(modalCtx, tsId);
           rerender();
@@ -28777,6 +28945,11 @@ function attachInvoiceModalDelegatedHandlers(modalCtx, rootEl, { rerender, reloa
 
         case 'inv-toggle-remove-line': {
           if (!modalCtx.isEditing) return;
+          if (!invoiceModalIsEditable(invoice, modalCtx, 'lines')) {
+            modalCtx.error = 'Unissue invoice first.';
+            rerender();
+            return;
+          }
           const lineId = el.getAttribute('data-invoice-line-id');
           invoiceModalToggleRemoveLine(modalCtx, lineId);
           rerender();
@@ -29051,29 +29224,70 @@ function invoiceModalNewClientToken() {
 
 async function openInvoiceAddAdjustmentModal(modalCtx, { rerender }) {
   const { invoice } = invoiceModalGetInvoiceData(modalCtx);
-  if (!invoiceModalIsEditable(invoice)) return;
 
   // Ensure showModal uses the invoice modal ctx (shared context across modal stack)
   try { window.modalCtx = modalCtx; } catch {}
+
+  // Determine whether user is allowed to edit lines right now (staging-aware)
+  const canEditLines = invoiceModalIsEditable(invoice, modalCtx, 'lines');
+
+  const status = String(invoice?.status || '').toUpperCase();
+  const baseIssued = !!invoice?.issued_at_utc || status === 'ISSUED';
+  const basePaid = !!invoice?.paid_at_utc || status === 'PAID';
+
+  const st = (modalCtx?.invoiceEdits?.staged_status && typeof modalCtx.invoiceEdits.staged_status === 'object')
+    ? modalCtx.invoiceEdits.staged_status
+    : { issued: null, paid: null, on_hold: null };
+
+  const effIssued = (st.issued === null || st.issued === undefined) ? baseIssued : !!st.issued;
+  const effPaid = (st.paid === null || st.paid === undefined) ? basePaid : !!st.paid;
+
+  let bannerHtml = '';
+  if (!canEditLines) {
+    if (effPaid) {
+      bannerHtml = `
+        <div class="alert alert-warning py-2 mb-3">
+          <b>Unpay invoice first</b> (then unissue invoice).
+        </div>
+      `;
+    } else if (effIssued) {
+      bannerHtml = `
+        <div class="alert alert-warning py-2 mb-3">
+          <b>Unissue invoice first</b>.
+        </div>
+      `;
+    } else {
+      bannerHtml = `
+        <div class="alert alert-warning py-2 mb-3">
+          <b>Invoice is not editable</b>.
+        </div>
+      `;
+    }
+  }
+
+  const disabledAttr = canEditLines ? '' : 'disabled';
+  const disabledOpacity = canEditLines ? '' : 'opacity-50';
 
   const html = `
     <div class="p-3">
       <div class="h6 mb-3">Invoice Adjustment</div>
 
-      <div class="mb-2">
+      ${bannerHtml}
+
+      <div class="mb-2 ${disabledOpacity}">
         <label class="form-label small text-muted">Description</label>
-        <input id="invAdjDesc" class="form-control" type="text" placeholder="e.g. Manual correction" />
+        <input id="invAdjDesc" class="form-control" type="text" placeholder="e.g. Manual correction" ${disabledAttr} />
       </div>
 
-      <div class="mb-2">
+      <div class="mb-2 ${disabledOpacity}">
         <label class="form-label small text-muted">Amount (ex VAT)</label>
-        <input id="invAdjAmt" class="form-control" type="number" step="0.01" placeholder="0.00" />
+        <input id="invAdjAmt" class="form-control" type="number" step="0.01" placeholder="0.00" ${disabledAttr} />
         <div class="text-muted small mt-1">Use a negative number for a credit/discount.</div>
       </div>
 
       <div class="d-flex justify-content-end gap-2 mt-3">
         <button type="button" class="btn btn-sm btn-secondary" id="invAdjCancel">Cancel</button>
-        <button type="button" class="btn btn-sm btn-primary" id="invAdjAdd">Add adjustment</button>
+        <button type="button" class="btn btn-sm btn-primary" id="invAdjAdd" ${canEditLines ? '' : 'disabled'}>Add adjustment</button>
       </div>
     </div>
   `;
@@ -29085,7 +29299,6 @@ async function openInvoiceAddAdjustmentModal(modalCtx, { rerender }) {
     null,
     true,
     null,
-    // Utility child: no footer Save/Edit, but inputs remain usable because we set noParentGate + utility kind.
     { kind: 'invoice-batch-add-adjustment', noParentGate: true }
   );
 
@@ -29109,6 +29322,9 @@ async function openInvoiceAddAdjustmentModal(modalCtx, { rerender }) {
     btnAdd.__invWired = true;
     btnAdd.onclick = (e) => {
       e.preventDefault();
+
+      // If selection is disabled (must unpay/unissue first), do nothing.
+      if (!canEditLines) return;
 
       const desc = String(document.getElementById('invAdjDesc')?.value || '').trim();
       const amtRaw = document.getElementById('invAdjAmt')?.value;
@@ -29145,7 +29361,6 @@ async function openInvoiceAddAdjustmentModal(modalCtx, { rerender }) {
 
 async function openInvoiceAddTimesheetsModal(modalCtx, { rerender }) {
   const { invoice, items } = invoiceModalGetInvoiceData(modalCtx);
-  if (!invoiceModalIsEditable(invoice)) return;
 
   // Ensure showModal uses the invoice modal ctx (shared context across modal stack)
   try { window.modalCtx = modalCtx; } catch {}
@@ -29156,6 +29371,45 @@ async function openInvoiceAddTimesheetsModal(modalCtx, { rerender }) {
     const s = x.toFixed(2);
     return (x > 0 ? `+${s}` : s);
   };
+
+  // Determine whether user is allowed to edit lines right now (with staging)
+  const canEditLines = invoiceModalIsEditable(invoice, modalCtx, 'lines');
+
+  // Compute banner message when selection is disabled
+  const status = String(invoice?.status || '').toUpperCase();
+  const baseIssued = !!invoice?.issued_at_utc || status === 'ISSUED';
+  const basePaid = !!invoice?.paid_at_utc || status === 'PAID';
+
+  const st = (modalCtx?.invoiceEdits?.staged_status && typeof modalCtx.invoiceEdits.staged_status === 'object')
+    ? modalCtx.invoiceEdits.staged_status
+    : { issued: null, paid: null, on_hold: null };
+
+  const effIssued = (st.issued === null || st.issued === undefined) ? baseIssued : !!st.issued;
+  const effPaid = (st.paid === null || st.paid === undefined) ? basePaid : !!st.paid;
+
+  let bannerHtml = '';
+  if (!canEditLines) {
+    // You asked for banner "Unissue invoice first" (and also remember paid blocks unissue).
+    if (effPaid) {
+      bannerHtml = `
+        <div class="alert alert-warning py-2 mb-3">
+          <b>Unpay invoice first</b> (then unissue invoice).
+        </div>
+      `;
+    } else if (effIssued) {
+      bannerHtml = `
+        <div class="alert alert-warning py-2 mb-3">
+          <b>Unissue invoice first</b>.
+        </div>
+      `;
+    } else {
+      bannerHtml = `
+        <div class="alert alert-warning py-2 mb-3">
+          <b>Invoice is not editable</b>.
+        </div>
+      `;
+    }
+  }
 
   // Ensure cache
   const eligible = await invoiceModalEnsureEligibleTimesheets(modalCtx);
@@ -29184,13 +29438,19 @@ async function openInvoiceAddTimesheetsModal(modalCtx, { rerender }) {
     const hrs = invoiceModalFmtHours(Number(t?.invoiceable_hours || 0));
     const ex = fmtMoney(Number(t?.invoiceable_charge_ex_vat || 0));
 
-    const blocked = !!t?.blocked_by_hr_validation;
+    const blockedByHr = !!t?.blocked_by_hr_validation;
     const checked = stagedTs.has(tsId) ? 'checked' : '';
-    const disabled = blocked ? 'disabled' : '';
 
-    const badge = blocked ? `<span class="badge bg-warning text-dark ms-2">HR blocked</span>` : '';
+    // Disable selection if:
+    // - HR blocked, OR
+    // - user cannot edit lines right now (must unissue/unpay first)
+    const disabled = (blockedByHr || !canEditLines) ? 'disabled' : '';
+
+    const badge = blockedByHr ? `<span class="badge bg-warning text-dark ms-2">HR blocked</span>` : '';
+    const opacity = (blockedByHr || !canEditLines) ? 'opacity-50' : '';
+
     return `
-      <label class="d-flex align-items-center justify-content-between border rounded p-2 mb-2 ${blocked ? 'opacity-50' : ''}">
+      <label class="d-flex align-items-center justify-content-between border rounded p-2 mb-2 ${opacity}">
         <div class="d-flex align-items-center gap-2">
           <input type="checkbox" class="form-check-input" value="${escapeHtml(tsId)}" ${checked} ${disabled}/>
           <div>
@@ -29209,6 +29469,8 @@ async function openInvoiceAddTimesheetsModal(modalCtx, { rerender }) {
     <div class="p-3">
       <div class="h6 mb-3">Add Timesheets to Invoice</div>
 
+      ${bannerHtml}
+
       <div class="text-muted small mb-2">
         Only timesheets eligible for this invoice’s client/week are shown. Amounts are segment-aware for the invoice week.
       </div>
@@ -29219,7 +29481,9 @@ async function openInvoiceAddTimesheetsModal(modalCtx, { rerender }) {
 
       <div class="d-flex justify-content-end gap-2 mt-3">
         <button type="button" class="btn btn-sm btn-secondary" id="invAddTsCancel">Cancel</button>
-        <button type="button" class="btn btn-sm btn-primary" id="invAddTsConfirm" ${rows.length ? '' : 'disabled'}>Add selected</button>
+        <button type="button" class="btn btn-sm btn-primary" id="invAddTsConfirm"
+          ${rows.length && canEditLines ? '' : 'disabled'}
+        >Add selected</button>
       </div>
     </div>
   `;
@@ -29231,7 +29495,6 @@ async function openInvoiceAddTimesheetsModal(modalCtx, { rerender }) {
     null,
     true,
     null,
-    // Utility child: no footer Save/Edit, but inputs remain usable because we set noParentGate + utility kind.
     { kind: 'invoice-batch-add-timesheets', noParentGate: true }
   );
 
@@ -29255,6 +29518,9 @@ async function openInvoiceAddTimesheetsModal(modalCtx, { rerender }) {
     btnConfirm.onclick = (e) => {
       e.preventDefault();
 
+      // If selection is disabled (must unissue/unpay first), do nothing.
+      if (!canEditLines) return;
+
       const list = document.getElementById('invAddTsList');
       const checks = list ? Array.from(list.querySelectorAll('input[type="checkbox"]')) : [];
 
@@ -29273,8 +29539,6 @@ async function openInvoiceAddTimesheetsModal(modalCtx, { rerender }) {
     };
   }
 }
-
-
 
 
 
@@ -32034,23 +32298,25 @@ function renderSummary(rows){
 
   // Page size
   const sizeLabel = document.createElement('span'); sizeLabel.className = 'mini'; sizeLabel.textContent = 'Page size:';
-  const sizeSel = document.createElement('select'); sizeSel.id = 'summaryPageSize';
-  ['50','100','200','ALL'].forEach(optVal => {
-    const opt = document.createElement('option');
-    opt.value = optVal; opt.textContent = (optVal === 'ALL') ? 'All' : `First ${optVal}`;
-    if (String(pageSize) === optVal) opt.selected = true;
-    sizeSel.appendChild(opt);
-  });
-  sizeSel.addEventListener('change', async () => {
-    const val = sizeSel.value;
-    window.__listState[currentSection].pageSize = (val === 'ALL') ? 'ALL' : Number(val);
-    window.__listState[currentSection].page = 1;
-    const data = await loadSection();
-    renderSummary(data);
-  });
+ const sizeSel = document.createElement('select'); sizeSel.id = 'summaryPageSize';
+sizeSel.classList.add('dark-control');
+['50','100','200','ALL'].forEach(optVal => {
+  const opt = document.createElement('option');
+  opt.value = optVal; opt.textContent = (optVal === 'ALL') ? 'All' : `First ${optVal}`;
+  if (String(pageSize) === optVal) opt.selected = true;
+  sizeSel.appendChild(opt);
+});
+sizeSel.addEventListener('change', async () => {
+  const val = sizeSel.value;
+  window.__listState[currentSection].pageSize = (val === 'ALL') ? 'ALL' : Number(val);
+  window.__listState[currentSection].page = 1;
+  const data = await loadSection();
+  renderSummary(data);
+});
 
-  topControls.appendChild(sizeLabel);
-  topControls.appendChild(sizeSel);
+topControls.appendChild(sizeLabel);
+topControls.appendChild(sizeSel);
+
 
   // ─────────────────────────────────────────────────────────────
   // NEW: Invoices quick filters row (Status multi + Week ending + Issued + q)
@@ -32242,86 +32508,81 @@ function renderSummary(rows){
     weLabel.className = 'mini';
     weLabel.textContent = 'Week ending:';
 
-    const weFrom = document.createElement('input');
-    weFrom.type = 'date';
-    weFrom.className = 'input';
-    weFrom.style.cssText = 'width:160px;min-width:160px;';
-    weFrom.value = String(stFilters.week_ending_from || '');
+ const weFrom = document.createElement('input');
+weFrom.type = 'date';
+weFrom.className = 'input';
+weFrom.classList.add('dark-control');
+weFrom.style.cssText = 'width:160px;min-width:160px;';
+weFrom.value = String(stFilters.week_ending_from || '');
 
-    const weTo = document.createElement('input');
-    weTo.type = 'date';
-    weTo.className = 'input';
-    weTo.style.cssText = 'width:160px;min-width:160px;';
-    weTo.value = String(stFilters.week_ending_to || '');
+const weTo = document.createElement('input');
+weTo.type = 'date';
+weTo.className = 'input';
+weTo.classList.add('dark-control');
+weTo.style.cssText = 'width:160px;min-width:160px;';
+weTo.value = String(stFilters.week_ending_to || '');
 
-    weFrom.addEventListener('change', async () => {
-      await applyFilters({ week_ending_from: weFrom.value || null });
-    });
-    weTo.addEventListener('change', async () => {
-      await applyFilters({ week_ending_to: weTo.value || null });
-    });
+weFrom.addEventListener('change', async () => {
+  await applyFilters({ week_ending_from: weFrom.value || null });
+});
+weTo.addEventListener('change', async () => {
+  await applyFilters({ week_ending_to: weTo.value || null });
+});
 
-    topControls.appendChild(weLabel);
-    topControls.appendChild(weFrom);
-    topControls.appendChild(weTo);
+topControls.appendChild(weLabel);
+topControls.appendChild(weFrom);
+topControls.appendChild(weTo);
 
-    // Issued date range
-    const issLabel = document.createElement('span');
-    issLabel.className = 'mini';
-    issLabel.textContent = 'Issued:';
+const issFrom = document.createElement('input');
+issFrom.type = 'date';
+issFrom.className = 'input';
+issFrom.classList.add('dark-control');
+issFrom.style.cssText = 'width:160px;min-width:160px;';
+issFrom.value = String(stFilters.issued_from || '');
 
-    const issFrom = document.createElement('input');
-    issFrom.type = 'date';
-    issFrom.className = 'input';
-    issFrom.style.cssText = 'width:160px;min-width:160px;';
-    issFrom.value = String(stFilters.issued_from || '');
+const issTo = document.createElement('input');
+issTo.type = 'date';
+issTo.className = 'input';
+issTo.classList.add('dark-control');
+issTo.style.cssText = 'width:160px;min-width:160px;';
+issTo.value = String(stFilters.issued_to || '');
 
-    const issTo = document.createElement('input');
-    issTo.type = 'date';
-    issTo.className = 'input';
-    issTo.style.cssText = 'width:160px;min-width:160px;';
-    issTo.value = String(stFilters.issued_to || '');
+issFrom.addEventListener('change', async () => {
+  await applyFilters({ issued_from: issFrom.value || null });
+});
+issTo.addEventListener('change', async () => {
+  await applyFilters({ issued_to: issTo.value || null });
+});
 
-    issFrom.addEventListener('change', async () => {
-      await applyFilters({ issued_from: issFrom.value || null });
-    });
-    issTo.addEventListener('change', async () => {
-      await applyFilters({ issued_to: issTo.value || null });
-    });
+topControls.appendChild(issLabel);
+topControls.appendChild(issFrom);
+topControls.appendChild(issTo);
 
-    topControls.appendChild(issLabel);
-    topControls.appendChild(issFrom);
-    topControls.appendChild(issTo);
+const qInp = document.createElement('input');
+qInp.type = 'text';
+qInp.className = 'input';
+qInp.classList.add('dark-control');
+qInp.placeholder = 'Invoice no…';
+qInp.style.cssText = 'width:220px;min-width:220px;';
+qInp.value = String(stFilters.q || '');
 
-    // Search box bound to filters.q
-    const qLabel = document.createElement('span');
-    qLabel.className = 'mini';
-    qLabel.textContent = 'Search:';
+const applyQ = async () => {
+  const v = (qInp.value || '').trim();
+  await applyFilters({ q: v || null });
+};
+qInp.addEventListener('keydown', async (e) => {
+  if (e.key !== 'Enter') return;
+  await applyQ();
+});
+qInp.addEventListener('blur', async () => {
+  const cur = String((window.__listState[currentSection].filters || {}).q || '').trim();
+  const next = String((qInp.value || '')).trim();
+  if (cur !== next) await applyQ();
+});
 
-    const qInp = document.createElement('input');
-    qInp.type = 'text';
-    qInp.className = 'input';
-    qInp.placeholder = 'Invoice no…';
-    qInp.style.cssText = 'width:220px;min-width:220px;';
-    qInp.value = String(stFilters.q || '');
+topControls.appendChild(qLabel);
+topControls.appendChild(qInp);
 
-    const applyQ = async () => {
-      const v = (qInp.value || '').trim();
-      await applyFilters({ q: v || null });
-    };
-    qInp.addEventListener('keydown', async (e) => {
-      if (e.key !== 'Enter') return;
-      await applyQ();
-    });
-    qInp.addEventListener('blur', async () => {
-      // keep UX light: only apply if value differs from stored filter
-      const cur = String((window.__listState[currentSection].filters || {}).q || '').trim();
-      const next = String((qInp.value || '')).trim();
-      if (cur !== next) await applyQ();
-    });
-
-    topControls.appendChild(qLabel);
-    topControls.appendChild(qInp);
 
     // Refresh status button text if filters changed by defaults
     setStatusBtnText();
@@ -32340,16 +32601,18 @@ function renderSummary(rows){
     statusLabel.className = 'mini';
     statusLabel.textContent = 'Status:';
 
-    statusSel = document.createElement('select');
+ statusSel = document.createElement('select');
+statusSel.classList.add('dark-control');
 
-    [['all','All'], ['active','Active'], ['unassigned','Unassigned'], ['completed','Completed']]
-      .forEach(([v, l]) => {
-        const o = document.createElement('option');
-        o.value = v;
-        o.textContent = l;
-        if ((stFilters.status || '').toLowerCase() === v) o.selected = true;
-        statusSel.appendChild(o);
-      });
+[['all','All'], ['active','Active'], ['unassigned','Unassigned'], ['completed','Completed']]
+  .forEach(([v, l]) => {
+    const o = document.createElement('option');
+    o.value = v;
+    o.textContent = l;
+    if ((stFilters.status || '').toLowerCase() === v) o.selected = true;
+    statusSel.appendChild(o);
+  });
+
 
     statusSel.addEventListener('change', async () => {
       const val = statusSel.value;
@@ -32374,7 +32637,9 @@ function renderSummary(rows){
     const statusLabel2 = document.createElement('span');
     statusLabel2.className = 'mini';
     statusLabel2.textContent = 'Status:';
-    const statusSel2 = document.createElement('select');
+  const statusSel2 = document.createElement('select');
+statusSel2.classList.add('dark-control');
+
 
     const statusOpts = [
       ['ALL',               'All'],
@@ -33113,62 +33378,71 @@ function renderSummary(rows){
   }
 
   // Footer/pager
-  const pager = document.createElement('div');
-  pager.style.cssText = 'display:flex;align-items:center;gap:6px;padding:8px 10px;border-top:1px solid var(--line);';
-  const info = document.createElement('span'); info.className = 'mini';
+ const pager = document.createElement('div');
+pager.classList.add('pager');
+pager.style.cssText = 'display:flex;align-items:center;gap:6px;padding:8px 10px;border-top:1px solid var(--line);';
+const info = document.createElement('span'); info.className = 'mini';
 
-  const mkBtn = (label, disabled, onClick) => {
-    const b = document.createElement('button');
-    b.textContent = label; b.disabled = !!disabled;
-    b.style.cssText = 'border:1px solid var(--line);background:#0b152a;color:var(--text);padding:4px 8px;border-radius:8px;cursor:pointer';
-    if (!disabled) b.addEventListener('click', onClick);
-    return b;
-  };
+const mkBtn = (label, disabled, onClick, isActive) => {
+  const b = document.createElement('button');
+  b.textContent = label;
+  b.disabled = !!disabled;
+  b.classList.add('pager-btn');
+  if (isActive) b.classList.add('active');
+  b.style.cssText = 'border:1px solid var(--line);background:#0b152a;color:var(--text);padding:4px 8px;border-radius:8px;cursor:pointer';
+  if (!disabled && typeof onClick === 'function') b.addEventListener('click', onClick);
+  return b;
+};
 
-  const hasMore = !!st.hasMore;
-  const totalKnown = (typeof st.total === 'number');
-  const current = page;
-  let maxPageToShow;
-  if (totalKnown && pageSize !== 'ALL') maxPageToShow = Math.max(1, Math.ceil(st.total / Number(pageSize)));
-  else if (pageSize === 'ALL') maxPageToShow = 1;
-  else maxPageToShow = hasMore ? (current + 1) : current;
+const hasMore = !!st.hasMore;
+const totalKnown = (typeof st.total === 'number');
+const current = page;
+let maxPageToShow;
+if (totalKnown && pageSize !== 'ALL') maxPageToShow = Math.max(1, Math.ceil(st.total / Number(pageSize)));
+else if (pageSize === 'ALL') maxPageToShow = 1;
+else maxPageToShow = hasMore ? (current + 1) : current;
 
-  // If pageSize is ALL, hide navigation controls (single-page UX)
-  if (pageSize !== 'ALL') {
-    const prevBtn = mkBtn('Prev', current <= 1, async () => {
-      window.__listState[currentSection].page = Math.max(1, current - 1);
-      const data = await loadSection();
-      renderSummary(data);
-    });
-    pager.appendChild(prevBtn);
+// If pageSize is ALL, hide navigation controls (single-page UX)
+if (pageSize !== 'ALL') {
+  const prevBtn = mkBtn('Prev', current <= 1, async () => {
+    window.__listState[currentSection].page = Math.max(1, current - 1);
+    const data = await loadSection();
+    renderSummary(data);
+  }, false);
+  pager.appendChild(prevBtn);
 
-    const makePageLink = (n) => mkBtn(String(n), n === current, async () => {
+  const makePageLink = (n) => {
+    const isActive = (n === current);
+    // Active page should be highlighted, not disabled; and it should not re-fetch.
+    return mkBtn(String(n), false, isActive ? null : async () => {
       window.__listState[currentSection].page = n;
       const data = await loadSection();
       renderSummary(data);
-    });
+    }, isActive);
+  };
 
-    const pages = [];
-    if (maxPageToShow <= 7) { for (let n=1; n<=maxPageToShow; n++) pages.push(n); }
-    else {
-      pages.push(1);
-      if (current > 3) pages.push('…');
-      for (let n=Math.max(2, current-1); n<=Math.min(maxPageToShow-1, current+1); n++) pages.push(n);
-      if (hasMore || current+1 < maxPageToShow) pages.push('…');
-      pages.push(maxPageToShow);
-    }
-    pages.forEach(pn => {
-      if (pn === '…') { const span = document.createElement('span'); span.textContent = '…'; span.className = 'mini'; pager.appendChild(span); }
-      else pager.appendChild(makePageLink(pn));
-    });
-
-    const nextBtn = mkBtn('Next', (!hasMore && (!totalKnown || current >= maxPageToShow)), async () => {
-      window.__listState[currentSection].page = current + 1;
-      const data = await loadSection();
-      renderSummary(data);
-    });
-    pager.appendChild(nextBtn);
+  const pages = [];
+  if (maxPageToShow <= 7) { for (let n=1; n<=maxPageToShow; n++) pages.push(n); }
+  else {
+    pages.push(1);
+    if (current > 3) pages.push('…');
+    for (let n=Math.max(2, current-1); n<=Math.min(maxPageToShow-1, current+1); n++) pages.push(n);
+    if (hasMore || current+1 < maxPageToShow) pages.push('…');
+    pages.push(maxPageToShow);
   }
+  pages.forEach(pn => {
+    if (pn === '…') { const span = document.createElement('span'); span.textContent = '…'; span.className = 'mini'; pager.appendChild(span); }
+    else pager.appendChild(makePageLink(pn));
+  });
+
+  const nextBtn = mkBtn('Next', (!hasMore && (!totalKnown || current >= maxPageToShow)), async () => {
+    window.__listState[currentSection].page = current + 1;
+    const data = await loadSection();
+    renderSummary(data);
+  }, false);
+  pager.appendChild(nextBtn);
+}
+
 
   if (pageSize === 'ALL') info.textContent = `Showing all ${effectiveRows.length} ${currentSection}.`;
   else if (totalKnown) {
@@ -40413,7 +40687,13 @@ try { if (closing && typeof closing._onDismiss === 'function') closing._onDismis
       });
     }
 
-    try { renderCandidateRatesTable?.(); } catch {}
+   try {
+  const frNow = currentFrame();
+  if (frNow && frNow.entity === 'candidates' && frNow.currentTabKey === 'rates') {
+    renderCandidateRatesTable?.();
+  }
+} catch {}
+
   }
   try {
     if (top.entity === 'contracts') {
@@ -40508,30 +40788,48 @@ try {
 if (closing?._detachDirty){ try{closing._detachDirty();}catch{} closing._detachDirty=null; }
 
     if (closing?._detachGlobal){ try{closing._detachGlobal();}catch{} closing._detachGlobal=null; } top._wired=false;
-    if (stack().length>0) {
-      const p=currentFrame();
-      // restore parent context to ensure actions (Clone & Extend) render correctly
-      if (p && p._ctxRef) window.modalCtx = p._ctxRef;
-      // ▶ for most children, resume the original parent mode; for the rate-presets picker,
-      //    keep whatever mode the parent is currently in (typically 'edit' after Apply).
-      const resumeMode =
-        (typeof closing !== 'undefined' &&
-         closing &&
-         closing._parentModeOnOpen &&
-         closing.kind !== 'rate-presets-picker')
-          ? closing._parentModeOnOpen
-          : p.mode;
+   if (stack().length>0) {
+  const p = currentFrame();
 
+  // restore parent context for the frame now on top
+  if (p && p._ctxRef) window.modalCtx = p._ctxRef;
 
-      try { setFrameMode(p, resumeMode); } catch {}
-      p._updateButtons && p._updateButtons();
-      renderTop();
+  const closingKind = (closing && typeof closing.kind === 'string') ? closing.kind : '';
+  const closingIsUtility =
+    (typeof closingKind === 'string' && (
+      closingKind.startsWith('import-summary-') ||
+      closingKind.startsWith('invoice-batch-') ||
+      closingKind.startsWith('import-summary-invoice-batch-')
+    ));
 
-      try{ p.onReturn && p.onReturn(); }catch{}
-    } else {
-      discardAllModalsAndState();
-      if (window.__pendingFocus) { try{ renderAll(); } catch(e) { console.error('refresh after modal close failed', e); } }
-    }
+  // ✅ Utility modal rule:
+  // Closing a utility child should NOT trigger parent "restore" work beyond renderTop().
+  // This prevents unrelated redraws (e.g., rates table) and modal stack corruption.
+  if (closingIsUtility) {
+    renderTop();
+    try { p.onReturn && p.onReturn(); } catch {}
+    return;
+  }
+
+  // Non-utility children: resume parent mode normally
+  const resumeMode =
+    (typeof closing !== 'undefined' &&
+     closing &&
+     closing._parentModeOnOpen &&
+     closing.kind !== 'rate-presets-picker')
+      ? closing._parentModeOnOpen
+      : p.mode;
+
+  try { setFrameMode(p, resumeMode); } catch {}
+  p._updateButtons && p._updateButtons();
+  renderTop();
+
+  try { p.onReturn && p.onReturn(); } catch {}
+} else {
+  discardAllModalsAndState();
+  if (window.__pendingFocus) { try { renderAll(); } catch(e) { console.error('refresh after modal close failed', e); } }
+}
+
 
   };
   // AFTER
@@ -60643,7 +60941,7 @@ async function listTimesheetsSummary(filters = {}) {
     ? 200
     : Number(pageSizeRaw) || 50;
 
-    const qs = new URLSearchParams();
+  const qs = new URLSearchParams();
   qs.set('page', String(page));
   qs.set('page_size', String(pageSize));
 
@@ -60652,7 +60950,7 @@ async function listTimesheetsSummary(filters = {}) {
 
   const f = filters || {};
 
-  // Stage filter (Tools use ts_stage; we also support summary_stage for future calls)
+  // Stage filter
   const stage = (f.ts_stage || f.summary_stage || '').toUpperCase();
   if (stage && stage !== 'ALL') qs.set('summary_stage', stage);
 
@@ -60660,10 +60958,8 @@ async function listTimesheetsSummary(filters = {}) {
   const route = (f.route_type || '').toUpperCase();
   if (route && route !== 'ALL') {
     if (route === 'QR') {
-      // Route = QR timesheets → filter via is_qr=true
       qs.set('is_qr', 'true');
     } else {
-      // Other route codes handled by backend switch (ELECTRONIC/MANUAL/NHSP/HEALTHROSTER)
       qs.set('route_type', route);
     }
   }
@@ -60672,11 +60968,11 @@ async function listTimesheetsSummary(filters = {}) {
   const scope = (f.sheet_scope || '').toUpperCase();
   if (scope && scope !== 'ALL') qs.set('sheet_scope', scope);
 
-  // ✅ Week ending range (backend supports week_ending_from/to)
+  // Week ending range
   if (f.week_ending_from) qs.set('week_ending_from', String(f.week_ending_from).slice(0, 10));
   if (f.week_ending_to)   qs.set('week_ending_to',   String(f.week_ending_to).slice(0, 10));
 
-  // processing_status filter (supports single or comma-joined list)
+  // processing_status filter
   const procStatusRaw = f.processing_status || '';
   if (procStatusRaw && procStatusRaw !== 'ALL') {
     const procStatus = procStatusRaw.includes(',')
@@ -60685,28 +60981,20 @@ async function listTimesheetsSummary(filters = {}) {
     qs.set('processing_status', procStatus);
   }
 
-  // ✅ status_code must be passed so totals match FE’s extra client-side filter
+  // status_code passthrough
   const statusCode = (f.status_code || '').toUpperCase();
   if (statusCode) qs.set('status_code', statusCode);
 
-  // Adjusted-only flag
   if (f.is_adjusted === true)  qs.set('is_adjusted', 'true');
-
-  // QR-only flag still supported if someone uses it directly (though Route=QR is preferred)
   if (f.is_qr === true)        qs.set('is_qr', 'true');
-
-  // Needs attention (also wired from Tools)
   if (f.needs_attention === true) qs.set('needs_attention', 'true');
 
-  // NEW: Tools filters – Candidate Paid / Client Invoiced
   if (f.candidate_paid === true)   qs.set('candidate_paid', 'true');
   if (f.client_invoiced === true)  qs.set('client_invoiced', 'true');
 
-  // NEW: HR issue filter – e.g. 'HOURS_MISMATCH_HR'
   if (f.hr_issue) {
     qs.set('hr_issue', f.hr_issue);
   }
-
 
   const sortState = st.sort || { key: null, dir: 'asc' };
   const sortKeyRaw = (sortState.key || '').toLowerCase();
@@ -60717,6 +61005,7 @@ async function listTimesheetsSummary(filters = {}) {
     client_name:         'client_name',
     candidate_name:      'candidate_name',
     summary_stage:       'summary_stage',
+    processing_status:   'processing_status', // ✅ NEW (FE → BE sort wiring)
     route_type:          'route_type',
     sheet_scope:         'sheet_scope',
     total_pay_ex_vat:    'total_pay_ex_vat',
@@ -60742,17 +61031,15 @@ async function listTimesheetsSummary(filters = {}) {
   let json;
   try { json = text ? JSON.parse(text) : {}; } catch { json = {}; }
 
-   const rows  = Array.isArray(json.items) ? json.items : (json.rows || []);
+  const rows  = Array.isArray(json.items) ? json.items : (json.rows || []);
   const total = (typeof json.count === 'number') ? json.count : rows.length;
 
-  // ✅ Persist totals for Summary footer (ALL matching filters, not just this page)
   const totals = (json && typeof json.totals === 'object' && json.totals) ? json.totals : null;
 
   rows.forEach(r => {
     if (!r.id && r.timesheet_id) {
       r.id = r.timesheet_id;
     } else if (!r.id && !r.timesheet_id && r.contract_week_id) {
-      // Planned / OPEN week without a TS yet – use contract_week_id as stable id
       r.id = r.contract_week_id;
     }
   });
@@ -60763,7 +61050,6 @@ async function listTimesheetsSummary(filters = {}) {
   st.filters = { ...(f || {}) };
 
   return rows;
-
 }
 
 
