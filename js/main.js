@@ -39271,8 +39271,8 @@ function setFrameMode(frameObj, mode) {
     isPlannedTimesheetStub = false;
   }
 
- // ▶ correct accidental 'view' on brand-new frames (e.g., successor create)
- //    but DO NOT do this for planned timesheet weeks or utility modals where we *want* view+no id.
+  // ▶ correct accidental 'view' on brand-new frames (e.g., successor create)
+  //    but DO NOT do this for planned timesheet weeks or utility modals where we *want* view+no id.
   const isUtilityKind =
     frameObj.kind === 'timesheets-resolve' ||
     frameObj.kind === 'resolve-candidate'  ||
@@ -39316,14 +39316,6 @@ function setFrameMode(frameObj, mode) {
   }
 
   if (typeof frameObj._updateButtons === 'function') frameObj._updateButtons();
-
-  // ✅ FIX: When switching view→edit/create, Save becomes visible but may still have no handler/token
-  // because bindSave() cleared it while hidden in view mode. Rebind here for the TOP frame only.
-  try {
-    if (isTop && typeof bindSave === 'function') {
-      bindSave(byId('btnSave'), frameObj);
-    }
-  } catch {}
 
   try {
     const idx = stack().indexOf(frameObj);
@@ -41542,11 +41534,42 @@ bindSave(btnSave, top);
     if(LOG) console.log('[MODAL] onApplyEvt (global) → _applyDesired =', enabled,'rebound save to top frame');
   };
 
-  const onModeChanged = ev=>{
-    const isChildNow=(stack().length>1); if(!isChildNow) return;
-    const parentIdx=stack().length-2, changed=ev?.detail?.frameIndex ?? -1;
-    if(changed===parentIdx){ if(LOG) console.log('[MODAL] parent mode changed (global) → child _updateButtons()'); const t=currentFrame(); t._updateButtons&&t._updateButtons(); bindSave(byId('btnSave'), t); }
-  };
+ const onModeChanged = ev=>{
+  const t = currentFrame();
+  if (!t) return;
+
+  const isChildNow = (stack().length > 1);
+
+  // ✅ Existing behavior: parent mode change should update/rebind the child frame
+  if (isChildNow) {
+    const parentIdx = stack().length - 2;
+    const changed   = ev?.detail?.frameIndex ?? -1;
+
+    if (changed === parentIdx) {
+      if (LOG) console.log('[MODAL] parent mode changed (global) → child _updateButtons()');
+      const topChild = currentFrame();
+      topChild._updateButtons && topChild._updateButtons();
+      bindSave(byId('btnSave'), topChild);
+      bindClose(byId('btnCloseModal'), topChild);
+    }
+    return;
+  }
+
+  // ✅ NEW: top-level mode flips (e.g. View→Edit) must rebind Save/Close
+  // because bindSave() clears onclick/token when Save was hidden in view mode.
+  try {
+    const changed = ev?.detail?.frameIndex ?? -1;
+    const topIdx  = stack().length - 1;
+
+    if (changed === topIdx) {
+      if (LOG) console.log('[MODAL] top mode changed (global) → rebind Save/Close');
+      t._updateButtons && t._updateButtons();
+      bindSave(byId('btnSave'), t);
+      bindClose(byId('btnCloseModal'), t);
+    }
+  } catch {}
+};
+
 
   const onMarginsEvt = ()=>{ try { const t=currentFrame(); if (t && (t.mode==='edit'||t.mode==='create')) t._updateButtons(); } catch {} };
 
