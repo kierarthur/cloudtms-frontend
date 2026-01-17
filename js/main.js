@@ -39272,34 +39272,31 @@ function setFrameMode(frameObj, mode) {
   }
 
  // ▶ correct accidental 'view' on brand-new frames (e.g., successor create)
-//    but DO NOT do this for planned timesheet weeks or utility modals where we *want* view+no id.
-const isUtilityKind =
-  frameObj.kind === 'timesheets-resolve' ||
-  frameObj.kind === 'resolve-candidate'  ||
-  frameObj.kind === 'resolve-client'     ||
-  (typeof frameObj.kind === 'string' && frameObj.kind.startsWith('import-summary-')) ||
-  (typeof frameObj.kind === 'string' && frameObj.kind.startsWith('invoice-batch-')) ||
-  (typeof frameObj.kind === 'string' && frameObj.kind.startsWith('import-summary-invoice-batch-'));
+ //    but DO NOT do this for planned timesheet weeks or utility modals where we *want* view+no id.
+  const isUtilityKind =
+    frameObj.kind === 'timesheets-resolve' ||
+    frameObj.kind === 'resolve-candidate'  ||
+    frameObj.kind === 'resolve-client'     ||
+    (typeof frameObj.kind === 'string' && frameObj.kind.startsWith('import-summary-')) ||
+    (typeof frameObj.kind === 'string' && frameObj.kind.startsWith('invoice-batch-')) ||
+    (typeof frameObj.kind === 'string' && frameObj.kind.startsWith('import-summary-invoice-batch-'));
 
-if (!frameObj.hasId && mode === 'view' && !isPlannedTimesheetStub && !isUtilityKind) {
-  mode = frameObj.forceEdit ? 'edit' : 'create';
-  frameObj.mode = mode;
-}
+  if (!frameObj.hasId && mode === 'view' && !isPlannedTimesheetStub && !isUtilityKind) {
+    mode = frameObj.forceEdit ? 'edit' : 'create';
+    frameObj.mode = mode;
+  }
 
-
-
-   // ▶ Only toggle read-only on the DOM that actually belongs to the top frame.
+  // ▶ Only toggle read-only on the DOM that actually belongs to the top frame.
   //    When updating a non-top frame (e.g., the parent while a picker is open),
   //    do not flip the global #modalBody to avoid UI flicker/regressions.
   if (isTop) {
-      const isUtilityKindForFrame =
+    const isUtilityKindForFrame =
       frameObj.kind === 'timesheets-resolve' ||
       frameObj.kind === 'resolve-candidate'  ||
       frameObj.kind === 'resolve-client'     ||
       (typeof frameObj.kind === 'string' && frameObj.kind.startsWith('import-summary-')) ||
       (typeof frameObj.kind === 'string' && frameObj.kind.startsWith('invoice-batch-')) ||
       (typeof frameObj.kind === 'string' && frameObj.kind.startsWith('import-summary-invoice-batch-'));
-
 
     if (!isChild && (mode === 'create' || mode === 'edit')) {
       setFormReadOnly(byId('modalBody'), false);
@@ -39318,8 +39315,15 @@ if (!frameObj.hasId && mode === 'view' && !isPlannedTimesheetStub && !isUtilityK
     L('setFrameMode (non-top): skipped read-only toggle to avoid affecting current child');
   }
 
-
   if (typeof frameObj._updateButtons === 'function') frameObj._updateButtons();
+
+  // ✅ FIX: When switching view→edit/create, Save becomes visible but may still have no handler/token
+  // because bindSave() cleared it while hidden in view mode. Rebind here for the TOP frame only.
+  try {
+    if (isTop && typeof bindSave === 'function') {
+      bindSave(byId('btnSave'), frameObj);
+    }
+  } catch {}
 
   try {
     const idx = stack().indexOf(frameObj);
@@ -39348,7 +39352,7 @@ if (!frameObj.hasId && mode === 'view' && !isPlannedTimesheetStub && !isUtilityK
 
   updateCalendarInteractivity(mode === 'edit' || mode === 'create');
 
-   if (repaint) {
+  if (repaint) {
     // ✅ Preserve calendar viewport across mode flips (View↔Edit) so we don't snap to top/year.
     let vp = null;
     try {
@@ -39399,7 +39403,6 @@ if (!frameObj.hasId && mode === 'view' && !isPlannedTimesheetStub && !isUtilityK
       })
       .catch(() => {});
   }
-
 }
 
 const parentOnOpen = currentFrame();
