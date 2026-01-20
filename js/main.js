@@ -1358,8 +1358,20 @@ async function loadSection() {
     st.sort = { key: null, dir: 'asc' };
   }
 
+  // ✅ Related mode detection (exclusive list mode)
+  const related = (st.filters && typeof st.filters === 'object' && st.filters.related && typeof st.filters.related === 'object')
+    ? st.filters.related
+    : null;
+
+  const inRelatedMode =
+    !!related &&
+    String(related.source_entity || '').trim() &&
+    String(related.source_id || '').trim() &&
+    String(related.relation_type || '').trim();
+
   // Default Contracts quick-filter to "active" if nothing specified
-  if (currentSection === 'contracts') {
+  // ✅ Ignore incompatible normal defaults while in related mode
+  if (!inRelatedMode && currentSection === 'contracts') {
     if (!st.filters || typeof st.filters !== 'object') st.filters = {};
     if (!('status' in st.filters) || !st.filters.status) {
       st.filters.status = 'active';
@@ -1367,7 +1379,8 @@ async function loadSection() {
   }
 
   // ✅ Default Invoices filter (only if not already specified)
-  if (currentSection === 'invoices') {
+  // ✅ Ignore incompatible normal defaults while in related mode
+  if (!inRelatedMode && currentSection === 'invoices') {
     if (!st.filters || typeof st.filters !== 'object') st.filters = {};
     const cur = st.filters.status;
     const hasStatus =
@@ -1385,14 +1398,66 @@ async function loadSection() {
   const hasSort    = !!(st.sort && st.sort.key);
 
   // ✅ ALWAYS use search for candidates + contracts + invoices
+  // ✅ But related mode is a dedicated branch and does NOT use search()
   const useSearch =
     (currentSection === 'candidates' || currentSection === 'contracts' || currentSection === 'invoices')
       ? true
       : (hasFilters || hasSort);
 
+  const fetchRelatedPage = async (section, page, pageSize, rel) => {
+    // ✅ Keep fetchRelated(...) as the single fetcher for related views.
+    // It handles v2 RPC routing server-side and normalizes via toList().
+    //
+    // We must pass pagination parameters via the section list-state.
+    // fetchRelated itself builds the URL using page/page_size.
+    window.__listState = window.__listState || {};
+    const stSec = (window.__listState[section] ||= {
+      page: 1,
+      pageSize: 50,
+      total: null,
+      hasMore: false,
+      filters: null,
+      sort: { key: null, dir: 'asc' }
+    });
+
+    stSec.page = page;
+    stSec.pageSize = pageSize;
+
+    const srcEntity = String(rel.source_entity || '').trim();
+    const srcId     = String(rel.source_id || '').trim();
+    const relType   = String(rel.relation_type || '').trim();
+
+    // fetchRelated returns a normalized list via toList(res)
+    const list = await fetchRelated(srcEntity, srcId, relType);
+
+    // Tolerate both shapes:
+    // - { items: [...], total: number|null }
+    // - [...items] (legacy)
+    const items = Array.isArray(list?.items) ? list.items : (Array.isArray(list) ? list : []);
+    const total = (list && typeof list === 'object' && typeof list.total === 'number') ? list.total : null;
+
+    // Persist totals/hasMore in section state (for pager/footer)
+    stSec.total = total;
+
+    const ps = (pageSize === 'ALL') ? items.length : Number(pageSize || 50);
+    const pg = Math.max(1, Number(page || 1));
+
+    stSec.hasMore =
+      (typeof total === 'number')
+        ? ((pg * ps) < total)
+        : (Array.isArray(items) && items.length === ps);
+
+    return items;
+  };
+
   const fetchOne = async (section, page, pageSize) => {
     window.__listState[section].page = page;
     window.__listState[section].pageSize = pageSize;
+
+    // ✅ Related mode branch (exclusive; ignore other filters)
+    if (inRelatedMode) {
+      return await fetchRelatedPage(section, page, pageSize, related);
+    }
 
     // Timesheets always go via the summary endpoint (v_timesheets_summary)
     if (section === 'timesheets') {
@@ -1415,18 +1480,34 @@ async function loadSection() {
   };
 
   // PageSize = ALL → fetch all pages sequentially (respecting filters + sort)
+  // ✅ Related mode: keep using the single related fetcher; just page through.
   if (st.pageSize === 'ALL') {
     const acc = [];
     let p = 1;
-    const chunk = 200;
+
+    // Related fetcher is page-based; use 200 for non-related, and 100 for related if backend caps.
+    const chunk = inRelatedMode ? 100 : 200;
+
     let gotMore = true;
     while (gotMore) {
       const rows = await fetchOne(currentSection, p, chunk);
       acc.push(...(rows || []));
-      gotMore = Array.isArray(rows) && rows.length === chunk;
+
+      if (inRelatedMode) {
+        const total = window.__listState[currentSection].total;
+        if (typeof total === 'number') {
+          gotMore = acc.length < total;
+        } else {
+          gotMore = Array.isArray(rows) && rows.length === chunk;
+        }
+      } else {
+        gotMore = Array.isArray(rows) && rows.length === chunk;
+      }
+
       p += 1;
       if (!gotMore) break;
     }
+
     window.__listState[currentSection].page = 1;
     window.__listState[currentSection].hasMore = false;
     window.__listState[currentSection].total = acc.length;
@@ -1440,9 +1521,14 @@ async function loadSection() {
   // Normal paged case
   const page = Number(st.page || 1);
   const ps   = Number(st.pageSize || 50);
+
   const rows = await fetchOne(currentSection, page, ps);
-  const hasMore = Array.isArray(rows) && rows.length === ps;
-  window.__listState[currentSection].hasMore = hasMore;
+
+  // ✅ In related mode, hasMore/total are set by fetchRelatedPage()
+  if (!inRelatedMode) {
+    const hasMore = Array.isArray(rows) && rows.length === ps;
+    window.__listState[currentSection].hasMore = hasMore;
+  }
 
   try {
     primeSummaryMembership(currentSection, getSummaryFingerprint(currentSection));
@@ -12994,7 +13080,6 @@ function wireAdvancedSearch() {
 // - Keep Search…, add “Saved searches…” shortcut that opens Search modal pre-focused on loading presets
 // -----------------------------
 
-
 function renderTools(){
   const el = byId('toolButtons');
   const canCreate = ['candidates','clients','umbrellas','contracts'].includes(currentSection); // added contracts
@@ -13027,6 +13112,26 @@ function renderTools(){
     });
     const filters = st.filters || {};
     window.__listState['timesheets'].filters = filters;
+
+    // ✅ FIX: proactively remove legacy ts_stage so it cannot silently affect list mode.
+    // If it was previously used, map it to summary_stage once and delete it.
+    try {
+      const tsStageRaw = (filters && Object.prototype.hasOwnProperty.call(filters, 'ts_stage'))
+        ? String(filters.ts_stage || '').trim().toUpperCase()
+        : '';
+
+      if (tsStageRaw) {
+        // Attempt a safe mapping if it matches our canonical values; otherwise drop it.
+        const allowed = new Set(['ALL','UNPROCESSED','READY_FOR_INVOICE','PROCESSED','INVOICED']);
+        if (!Object.prototype.hasOwnProperty.call(filters, 'summary_stage')) {
+          if (allowed.has(tsStageRaw)) {
+            filters.summary_stage = tsStageRaw;
+          }
+        }
+        delete filters.ts_stage;
+        window.__listState['timesheets'].filters = filters;
+      }
+    } catch {}
 
     const box = document.createElement('div');
     box.style.cssText = 'margin-top:10px;padding:8px;border:1px solid var(--line);border-radius:6px;background:#0b152a;';
@@ -13063,31 +13168,39 @@ function renderTools(){
     // Candidate Paid  → candidate_paid = true → backend: paid_at_utc NOT NULL
     box.appendChild(mkToolFlag('candidate_paid', 'Candidate paid'));
 
-    // Client Invoiced → client_invoiced = true → backend: locked_by_invoice_id NOT NULL
+    // Client Invoiced → client_invoiced = true → backend: locked_by_invoice_id NOT NULL (segment-aware in v_timesheets_summary)
     box.appendChild(mkToolFlag('client_invoiced', 'Client invoiced'));
 
     // Needs Attention → needs_attention = true → backend: needs_attention = true
     box.appendChild(mkToolFlag('needs_attention', 'Needs attention'));
 
-    // ── Stage selector (All / Unprocessed / Processed / Authorised) ──────────
+    // ── Stage selector (canonical summary_stage pipeline) ────────────────────
+    // ✅ No "Awaiting authorisation"
+    // ✅ Includes Unprocessed (contract-week stubs / no timesheet yet)
+    // ✅ Apply via summary_stage only (do not use legacy ts_stage)
     const stageWrap = document.createElement('div');
     stageWrap.style.marginTop = '8px';
     stageWrap.className = 'mini';
+
     const stageLabel = document.createElement('div');
     stageLabel.textContent = 'Stage:';
     stageLabel.style.marginBottom = '2px';
- const stageSel = document.createElement('select');
-stageSel.style.width = '100%';
-stageSel.classList.add('dark-control');
 
+    const stageSel = document.createElement('select');
+    stageSel.style.width = '100%';
+    stageSel.classList.add('dark-control');
 
     const stageOpts = [
-      ['ALL',         'All'],
-      ['UNPROCESSED', 'Unprocessed'],
-      ['PROCESSED',   'Processed'],
-      ['AUTHORISED',  'Awaiting authorisation']
+      ['ALL',              'All'],
+      ['UNPROCESSED',      'Unprocessed'],
+      ['READY_FOR_INVOICE','Ready to invoice'],
+      ['PROCESSED',        'Processed'],
+      ['INVOICED',         'Invoiced']
     ];
-    const curStage = (filters.ts_stage || 'ALL').toUpperCase();
+
+    // ✅ Now prefer summary_stage only (ts_stage was proactively removed above)
+    const curStage = String((filters.summary_stage || 'ALL')).toUpperCase();
+
     stageOpts.forEach(([v, label]) => {
       const o = document.createElement('option');
       o.value = v;
@@ -13097,11 +13210,16 @@ stageSel.classList.add('dark-control');
     });
 
     stageSel.addEventListener('change', async () => {
-      const val = stageSel.value;
+      const val = String(stageSel.value || '').toUpperCase();
       const curFilters = { ...(window.__listState['timesheets'].filters || {}) };
-      curFilters.ts_stage = val; // All/UNPROCESSED/PROCESSED/AUTHORISED
+
+      // ✅ Use modern pipeline only
+      delete curFilters.ts_stage;     // (defensive; should already be absent)
+      curFilters.summary_stage = val; // ALL | UNPROCESSED | READY_FOR_INVOICE | PROCESSED | INVOICED
+
       window.__listState['timesheets'].filters = curFilters;
       window.__listState['timesheets'].page = 1;
+
       const data = await loadSection();
       renderSummary(data);
     });
@@ -14252,10 +14370,40 @@ async function getSettingsCached() {
 
 // Related counts (object map: {type: count, ...})
 async function fetchRelatedCounts(entity, id){
-  const r = await authFetch(API(`/api/related/${entity}/${id}/counts`));
-  if (!r.ok) return {};
-  return r.json();
+  try {
+    const r = await authFetch(API(`/api/related/${entity}/${id}/counts`));
+    if (!r.ok) return {};
+
+    const j = await r.json().catch(() => ({}));
+    const out = (j && typeof j === 'object') ? { ...j } : {};
+
+    // ✅ Treat invoice count as integer (segment splits can make this >1)
+    if (Object.prototype.hasOwnProperty.call(out, 'invoices')) {
+      const n = Number(out.invoices);
+      out.invoices = Number.isFinite(n) ? Math.max(0, Math.trunc(n)) : 0;
+    }
+    if (Object.prototype.hasOwnProperty.call(out, 'invoice_count')) {
+      const n = Number(out.invoice_count);
+      out.invoice_count = Number.isFinite(n) ? Math.max(0, Math.trunc(n)) : 0;
+    }
+
+    // ✅ Treat series count as already "other timesheets in series" (no subtraction here)
+    if (Object.prototype.hasOwnProperty.call(out, 'series')) {
+      const n = Number(out.series);
+      out.series = Number.isFinite(n) ? Math.max(0, Math.trunc(n)) : 0;
+    }
+    if (Object.prototype.hasOwnProperty.call(out, 'series_count')) {
+      const n = Number(out.series_count);
+      out.series_count = Number.isFinite(n) ? Math.max(0, Math.trunc(n)) : 0;
+    }
+
+    return out;
+  } catch {
+    // keep "return {} on error"
+    return {};
+  }
 }
+
 // ===== UPDATED: upsertCandidate — normalize server response so we always return the created/updated object with an id
 async function upsertCandidate(payload, id){
   if ('tms_ref' in payload) delete payload.tms_ref; // safety
@@ -18969,19 +19117,33 @@ async function openClient(row) {
   };
 
   // Canonicalise immediately so UI always starts in a consistent state
-  // Canonicalise immediately so UI always starts in a consistent state
-  // ✅ Preserve manual-invoice routing + auto-invoice even if canonicalize strips unknown keys
+  // ✅ Preserve manual-invoice routing + auto-invoice + new invoicing/ref-to-issue fields
   try {
     const cs0 = window.modalCtx.clientSettingsState || {};
+
     const keepAutoInv     = !!cs0.auto_invoice_default;
     const keepManualFlag  = !!cs0.send_manual_invoices_to_different_email;
     const keepManualEmail = String(cs0.manual_invoices_alt_email_address || '').trim();
+
+    // ✅ NEW: preserve these fields even if canonicalize strips unknown keys
+    const keepInvConsol =
+      (cs0.invoice_consolidation_mode != null) ? String(cs0.invoice_consolidation_mode) : '';
+    const keepRefToIssue =
+      (typeof cs0.reference_number_required_to_issue_invoice === 'boolean')
+        ? cs0.reference_number_required_to_issue_invoice
+        : (cs0.reference_number_required_to_issue_invoice === '1' || cs0.reference_number_required_to_issue_invoice === 1 || cs0.reference_number_required_to_issue_invoice === 'true');
 
     window.modalCtx.clientSettingsState = canonicalizeClientSettings(cs0 || {});
 
     window.modalCtx.clientSettingsState.auto_invoice_default = keepAutoInv;
     window.modalCtx.clientSettingsState.send_manual_invoices_to_different_email = keepManualFlag;
     window.modalCtx.clientSettingsState.manual_invoices_alt_email_address = keepManualFlag ? keepManualEmail : '';
+
+    // ✅ restore new fields after canonicalize
+    if (keepInvConsol != null && String(keepInvConsol).trim() !== '') {
+      window.modalCtx.clientSettingsState.invoice_consolidation_mode = String(keepInvConsol).trim();
+    }
+    window.modalCtx.clientSettingsState.reference_number_required_to_issue_invoice = !!keepRefToIssue;
   } catch {}
 
   L('window.modalCtx seeded', {
@@ -19034,12 +19196,14 @@ async function openClient(row) {
       const hasFormMounted = !!byId('clientSettingsForm');
       const hasFullBaseline = ['day_start','day_end','night_start','night_end'].every(k => typeof baseline[k] === 'string' && baseline[k] !== '');
 
-      const hasManualInvoiceRoutingKeys =
+      const hasClientSettingsKeys =
         Object.prototype.hasOwnProperty.call(baseline, 'send_manual_invoices_to_different_email') ||
         Object.prototype.hasOwnProperty.call(baseline, 'manual_invoices_alt_email_address') ||
-        Object.prototype.hasOwnProperty.call(baseline, 'auto_invoice_default');
+        Object.prototype.hasOwnProperty.call(baseline, 'auto_invoice_default') ||
+        Object.prototype.hasOwnProperty.call(baseline, 'invoice_consolidation_mode') ||
+        Object.prototype.hasOwnProperty.call(baseline, 'reference_number_required_to_issue_invoice');
 
-      const shouldValidateSettings = hasFormMounted || hasFullBaseline || hasManualInvoiceRoutingKeys;
+      const shouldValidateSettings = hasFormMounted || hasFullBaseline || hasClientSettingsKeys;
 
       let pendingSettings = null;
       if (shouldValidateSettings) {
@@ -19083,6 +19247,10 @@ async function openClient(row) {
             if (wm) csMerged.weekly_mode = String(wm.value || '').trim();
             if (hp) csMerged.hr_weekly_behaviour = String(hp.value || '').trim();
 
+            // ✅ NEW: invoice consolidation mode radio (DB-backed)
+            const icm = formEl.querySelector('input[type="radio"][name="invoice_consolidation_mode"]:checked');
+            if (icm) csMerged.invoice_consolidation_mode = String(icm.value || '').trim();
+
             // Checkboxes that may be present depending on gate
             const BOOL_KEYS = [
               'pay_reference_required',
@@ -19090,10 +19258,13 @@ async function openClient(row) {
               'self_bill_no_invoices_sent',
               'daily_calc_of_invoices',
               'group_nightsat_sunbh',
-              'auto_invoice_default',     // ✅ NEW (was not being captured)
+              'auto_invoice_default',
               'hr_attach_to_invoice',
               'ts_attach_to_invoice',
-              'send_manual_invoices_to_different_email'
+              'send_manual_invoices_to_different_email',
+
+              // ✅ NEW: ref-to-issue (DB-backed)
+              'reference_number_required_to_issue_invoice'
             ];
             csMerged.__from_ui = true;
             for (const key of BOOL_KEYS) {
@@ -19116,6 +19287,10 @@ async function openClient(row) {
         const keepManualEmail = String(csMerged.manual_invoices_alt_email_address || '').trim();
         const keepAutoInv     = !!csMerged.auto_invoice_default;
 
+        // ✅ NEW: preserve invoicing/ref-to-issue fields across canonicalize
+        const keepInvConsol = (csMerged.invoice_consolidation_mode != null) ? String(csMerged.invoice_consolidation_mode) : '';
+        const keepRefToIssue = !!csMerged.reference_number_required_to_issue_invoice;
+
         try {
           csMerged = canonicalizeClientSettings(csMerged);
         } catch {}
@@ -19125,7 +19300,13 @@ async function openClient(row) {
         csMerged.send_manual_invoices_to_different_email = keepManualFlag;
         csMerged.manual_invoices_alt_email_address = keepManualFlag ? keepManualEmail : '';
 
-        // ✅ NEW: Save-time validation (prevent roundtrip)
+        // ✅ restore new fields
+        if (keepInvConsol != null && String(keepInvConsol).trim() !== '') {
+          csMerged.invoice_consolidation_mode = String(keepInvConsol).trim();
+        }
+        csMerged.reference_number_required_to_issue_invoice = !!keepRefToIssue;
+
+        // ✅ Save-time validation (prevent roundtrip)
         if (csMerged.send_manual_invoices_to_different_email) {
           const em = String(csMerged.manual_invoices_alt_email_address || '').trim();
           if (!em) {
@@ -19161,7 +19342,7 @@ async function openClient(row) {
         delete csClean.hr_weekly_behaviour;
         delete csClean.__from_ui;
 
-        // ✅ NEW: Ensure manual invoice routing keys are ALWAYS sent (including false),
+        // ✅ Ensure manual invoice routing keys are ALWAYS sent (including false),
         // so backend does not keep stale values when user toggles off.
         csClean.send_manual_invoices_to_different_email = !!csMerged.send_manual_invoices_to_different_email;
         csClean.manual_invoices_alt_email_address =
@@ -19171,6 +19352,10 @@ async function openClient(row) {
 
         // (keep auto-invoice stable too)
         csClean.auto_invoice_default = !!csMerged.auto_invoice_default;
+
+        // ✅ NEW: always send these client settings fields (round-trip, no special endpoints)
+        csClean.invoice_consolidation_mode = String(csMerged.invoice_consolidation_mode || '').trim() || 'NONE';
+        csClean.reference_number_required_to_issue_invoice = !!csMerged.reference_number_required_to_issue_invoice;
 
         if (APILOG) console.log('[OPEN_CLIENT] client_settings (merged→canon→clean)', { csMerged, csClean, csInvalid, hasFormMounted, hasFullBaseline });
         if (csInvalid) { alert('Times must be HH:MM (24-hour).'); return { ok:false }; }
@@ -27884,8 +28069,6 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
 
   return markup;
 }
-
-
 function canonicalizeClientSettings(input) {
   const cs = { ...(input || {}) };
 
@@ -27900,6 +28083,15 @@ function canonicalizeClientSettings(input) {
 
   // ✅ Preserve + canonicalise "Auto-invoice by default" across all mode branches
   const autoInvDefault = toBool(cs.auto_invoice_default, false);
+
+  // ✅ NEW: Client invoicing consolidation mode (DB-backed)
+  // Allowed: NONE | BY_WEEK | ANY_WEEK  (UI may send "ALL" -> ANY_WEEK)
+  let invConsol = up(cs.invoice_consolidation_mode);
+  if (invConsol === 'ALL') invConsol = 'ANY_WEEK';
+  if (invConsol !== 'NONE' && invConsol !== 'BY_WEEK' && invConsol !== 'ANY_WEEK') invConsol = 'NONE';
+
+  // ✅ NEW: Reference numbers required to ISSUE invoice (DB-backed)
+  const refToIssue = toBool(cs.reference_number_required_to_issue_invoice, false);
 
   // Determine weekly mode (UI helper first; else derive from legacy flags)
   let weeklyMode = up(cs.weekly_mode);
@@ -27949,8 +28141,10 @@ function canonicalizeClientSettings(input) {
     cs.weekly_mode = 'NHSP';
     cs.hr_weekly_behaviour = ''; // irrelevant in NHSP
 
-    // ✅ keep
+    // ✅ keep (client-level)
     cs.auto_invoice_default = autoInvDefault;
+    cs.invoice_consolidation_mode = invConsol;
+    cs.reference_number_required_to_issue_invoice = refToIssue;
 
     return cs;
   }
@@ -27976,8 +28170,10 @@ function canonicalizeClientSettings(input) {
     cs.weekly_mode = 'NONE';
     cs.hr_weekly_behaviour = ''; // irrelevant
 
-    // ✅ keep
+    // ✅ keep (client-level)
     cs.auto_invoice_default = autoInvDefault;
+    cs.invoice_consolidation_mode = invConsol;
+    cs.reference_number_required_to_issue_invoice = refToIssue;
 
     return cs;
   }
@@ -28001,8 +28197,10 @@ function canonicalizeClientSettings(input) {
     cs.weekly_mode = 'HEALTHROSTER';
     cs.hr_weekly_behaviour = 'CREATE';
 
-    // ✅ keep
+    // ✅ keep (client-level)
     cs.auto_invoice_default = autoInvDefault;
+    cs.invoice_consolidation_mode = invConsol;
+    cs.reference_number_required_to_issue_invoice = refToIssue;
 
     return cs;
   }
@@ -28027,11 +28225,14 @@ function canonicalizeClientSettings(input) {
   cs.weekly_mode = 'HEALTHROSTER';
   cs.hr_weekly_behaviour = 'VERIFY';
 
-  // ✅ keep
+  // ✅ keep (client-level)
   cs.auto_invoice_default = autoInvDefault;
+  cs.invoice_consolidation_mode = invConsol;
+  cs.reference_number_required_to_issue_invoice = refToIssue;
 
   return cs;
 }
+
 async function handleInvoiceDelete(modalCtx) {
   const mc = modalCtx || {};
 
@@ -28373,6 +28574,170 @@ function invoiceModalIsEditable(invoice, modalCtx, purpose = 'lines') {
 }
 
 
+
+function invoiceModalGetInvoiceData(modalCtx) {
+  const d = modalCtx?.data || {};
+
+  // Cache per raw object reference (avoids re-normalising on every render pass)
+  try {
+    if (modalCtx && modalCtx.__invoiceDataCache && modalCtx.__invoiceDataCacheRaw === d) {
+      return modalCtx.__invoiceDataCache;
+    }
+  } catch {}
+
+  const invoice = d.invoice || null;
+
+  const header_snapshot_json =
+    (d.header_snapshot_json && typeof d.header_snapshot_json === 'object')
+      ? d.header_snapshot_json
+      : (invoice?.header_snapshot_json && typeof invoice.header_snapshot_json === 'object' ? invoice.header_snapshot_json : {});
+
+  const items = Array.isArray(d.items) ? d.items : [];
+
+  // Prefer the top-level manifest returned by GET /api/invoices/:id
+  const manifest =
+    (d.manifest && typeof d.manifest === 'object')
+      ? d.manifest
+      : (invoice?.invoice_render_manifest && typeof invoice.invoice_render_manifest === 'object'
+          ? invoice.invoice_render_manifest
+          : null);
+
+  // Email summary (prefer top-level; else manifest)
+  let email_summary = null;
+  if (d.email_summary && typeof d.email_summary === 'object') {
+    email_summary = d.email_summary;
+  } else if (manifest && typeof manifest === 'object' && manifest.email_summary && typeof manifest.email_summary === 'object') {
+    email_summary = manifest.email_summary;
+  }
+
+  // Attach policy (prefer top-level; else manifest)
+  const attach_policy =
+    (d.attach_policy && typeof d.attach_policy === 'object')
+      ? d.attach_policy
+      : ((manifest && typeof manifest === 'object' && manifest.attach_policy && typeof manifest.attach_policy === 'object')
+          ? manifest.attach_policy
+          : null);
+
+  // Evidence arrays (prefer top-level; else manifest; else empty)
+  const evidence =
+    Array.isArray(d.evidence) ? d.evidence
+    : (Array.isArray(manifest?.evidence) ? manifest.evidence : []);
+
+  const timesheet_evidence =
+    Array.isArray(d.timesheet_evidence) ? d.timesheet_evidence
+    : (Array.isArray(manifest?.timesheet_evidence) ? manifest.timesheet_evidence : []);
+
+  const evidence_other =
+    Array.isArray(d.evidence_other) ? d.evidence_other
+    : (Array.isArray(manifest?.evidence_other) ? manifest.evidence_other : []);
+
+  // Segment expansion maps (prefer top-level; else manifest; support alias)
+  const segments_on_invoice_by_timesheet =
+    (d.segments_on_invoice_by_timesheet && typeof d.segments_on_invoice_by_timesheet === 'object')
+      ? d.segments_on_invoice_by_timesheet
+      : ((d.segments_by_timesheet && typeof d.segments_by_timesheet === 'object')
+          ? d.segments_by_timesheet
+          : ((manifest?.segments_on_invoice_by_timesheet && typeof manifest.segments_on_invoice_by_timesheet === 'object')
+              ? manifest.segments_on_invoice_by_timesheet
+              : ((manifest?.segments_by_timesheet && typeof manifest.segments_by_timesheet === 'object')
+                  ? manifest.segments_by_timesheet
+                  : {})));
+
+  // Alias stored too (same object reference)
+  const segments_by_timesheet = segments_on_invoice_by_timesheet;
+
+  // History (prefer top-level; else manifest; else empty)
+  const history =
+    Array.isArray(d.history) ? d.history
+    : (Array.isArray(manifest?.history) ? manifest.history : []);
+
+  // TSFIN id map (prefer top-level; else manifest; else empty object)
+  const tsfin_id_by_timesheet_id =
+    (d.tsfin_id_by_timesheet_id && typeof d.tsfin_id_by_timesheet_id === 'object')
+      ? d.tsfin_id_by_timesheet_id
+      : ((manifest?.tsfin_id_by_timesheet_id && typeof manifest.tsfin_id_by_timesheet_id === 'object')
+          ? manifest.tsfin_id_by_timesheet_id
+          : {});
+
+  // Reference rows (prefer top-level; else manifest; else empty)
+  const reference_rows =
+    Array.isArray(d.reference_rows) ? d.reference_rows
+    : (Array.isArray(manifest?.reference_rows) ? manifest.reference_rows : []);
+
+  const out = {
+    // Existing fields relied on by current renderers
+    invoice,
+    header_snapshot_json,
+    items,
+    email_summary,
+
+    // Manifest-enriched fields (single source of truth, no extra fetches)
+    manifest,
+    segments_on_invoice_by_timesheet,
+    segments_by_timesheet,
+    history,
+    tsfin_id_by_timesheet_id,
+    reference_rows,
+    timesheet_evidence,
+    evidence_other,
+    evidence,
+    attach_policy,
+
+    // Always keep the raw payload available
+    raw: d
+  };
+
+  // Write once to modalCtx so subsequent renders read from modalCtx only
+  try {
+    if (modalCtx && typeof modalCtx === 'object') {
+      modalCtx.__invoiceDataCache = out;
+      modalCtx.__invoiceDataCacheRaw = d;
+    }
+  } catch {}
+
+  return out;
+}
+
+
+function invoiceModalResetEdits(modalCtx) {
+  if (!modalCtx) return;
+
+  modalCtx.invoiceEdits = {
+    remove_invoice_line_ids: new Set(),
+    add_timesheet_ids: new Set(),
+    add_adjustments: [],
+
+    // ✅ NEW: segment edit staging (array of { tsfin_id, segment_id })
+    remove_segment_refs: [],
+    add_segment_refs: [],
+
+    // ✅ NEW: reference updates (opaque payload consumed by backend)
+    reference_updates: [],
+
+    // ✅ Keep shape consistent with openInvoiceModal + delegated handlers
+    staged_status: { issued: null, paid: null, on_hold: null },
+    staged_dates:  { issued_at_utc: null, paid_at_utc: null, status_date_utc: null }
+  };
+
+  // Keep eligibleTimesheetsCache; it’s still valid across edits.
+
+  // Keep invoiceState pointers/mirror consistent for showModal snapshot/restore.
+  try {
+    if (modalCtx.invoiceState && typeof modalCtx.invoiceState === 'object') {
+      modalCtx.invoiceState.invoiceEdits = modalCtx.invoiceEdits;
+      modalCtx.invoiceState.invoiceEdits_json = {
+        remove_invoice_line_ids: [],
+        add_timesheet_ids: [],
+        add_adjustments: [],
+        remove_segment_refs: [],
+        add_segment_refs: [],
+        reference_updates: [],
+        staged_status: { issued: null, paid: null, on_hold: null },
+        staged_dates: { issued_at_utc: null, paid_at_utc: null, status_date_utc: null }
+      };
+    }
+  } catch {}
+}
 function invoiceModalHasPendingEdits(modalCtx) {
   const e = modalCtx?.invoiceEdits;
   if (!e) return false;
@@ -28389,101 +28754,37 @@ function invoiceModalHasPendingEdits(modalCtx) {
       (st.on_hold !== null && st.on_hold !== undefined)
     );
 
+  const nonEmpty = (v) => {
+    if (!v) return false;
+    if (Array.isArray(v)) return v.length > 0;
+    if (v instanceof Set || v instanceof Map) return v.size > 0;
+    if (typeof v === 'object') return Object.keys(v).length > 0;
+    return false;
+  };
+
   return (
     hasStagedStatus ||
     (e.remove_invoice_line_ids && e.remove_invoice_line_ids.size > 0) ||
     (e.add_timesheet_ids && e.add_timesheet_ids.size > 0) ||
-    (Array.isArray(e.add_adjustments) && e.add_adjustments.length > 0)
+    (Array.isArray(e.add_adjustments) && e.add_adjustments.length > 0) ||
+    nonEmpty(e.remove_segment_refs) ||
+    nonEmpty(e.add_segment_refs) ||
+    nonEmpty(e.reference_updates)
   );
 }
 
-function invoiceModalResetEdits(modalCtx) {
-  if (!modalCtx) return;
-
-  modalCtx.invoiceEdits = {
-    remove_invoice_line_ids: new Set(),
-    add_timesheet_ids: new Set(),
-    add_adjustments: [],
-
-    // ✅ Keep shape consistent with openInvoiceModal + delegated handlers
-    staged_status: { issued: null, paid: null, on_hold: null },
-    staged_dates:  { issued_at_utc: null, paid_at_utc: null, status_date_utc: null }
-  };
-
-  // Keep eligibleTimesheetsCache; it’s still valid across edits.
-}
-
-
-
-function invoiceModalGetInvoiceData(modalCtx) {
-  const d = modalCtx?.data || {};
-  const invoice = d.invoice || null;
-  const header_snapshot_json = (d.header_snapshot_json && typeof d.header_snapshot_json === 'object')
-    ? d.header_snapshot_json
-    : (invoice?.header_snapshot_json && typeof invoice.header_snapshot_json === 'object' ? invoice.header_snapshot_json : {});
-  const items = Array.isArray(d.items) ? d.items : [];
-  let email_summary = null;
-  if (d.email_summary && typeof d.email_summary === 'object') {
-    email_summary = d.email_summary;
-  } else if (invoice?.invoice_render_manifest && typeof invoice.invoice_render_manifest === 'object') {
-    const es = invoice.invoice_render_manifest.email_summary;
-    if (es && typeof es === 'object') email_summary = es;
-  }
-  return { invoice, header_snapshot_json, items, email_summary, raw: d };
-}
-
-function invoiceModalRound2(n) {
-  const v = Number(n);
-  if (!Number.isFinite(v)) return 0;
-  return Math.round(v * 100) / 100;
-}
-
-function invoiceModalFmtHours(n) {
-  const v = Number(n);
-  if (!Number.isFinite(v)) return '0';
-  const r = invoiceModalRound2(v);
-  // Show up to 2dp, trim trailing .00
-  return String(r.toFixed(2)).replace(/\.00$/, '');
-}
-
-
-function invoiceModalGetVatRatePct(invoice, header_snapshot_json) {
-  // Prefer explicit invoice.vat_rate_pct if present; fall back to header snapshot VAT if present; else 0.
-  const v1 = Number(invoice?.vat_rate_pct);
-  if (Number.isFinite(v1)) return v1;
-
-  const v2 = Number(header_snapshot_json?.vat_rate_pct ?? header_snapshot_json?.vat?.rate_pct);
-  if (Number.isFinite(v2)) return v2;
-
-  return 0;
-}
-
-async function invoiceModalEnsureEligibleTimesheets(modalCtx) {
-  if (modalCtx.eligibleTimesheetsCache) return modalCtx.eligibleTimesheetsCache;
-
-  const invoiceId = modalCtx?.invoiceId;
-  if (!invoiceId) throw new Error('Missing invoiceId');
-
-  const res = await invoiceModalFetchJson(`/api/invoices/${encodeURIComponent(invoiceId)}/eligible-timesheets`);
-  // Handler returns a JSON object; tolerate array wrapper just in case
-  const obj = Array.isArray(res) ? (res[0] ?? {}) : (res ?? {});
-  modalCtx.eligibleTimesheetsCache = obj;
-  return obj;
-}
-
-function invoiceModalLookupEligibleTimesheet(modalCtx, timesheetId) {
-  const cache = modalCtx?.eligibleTimesheetsCache;
-  const arr = Array.isArray(cache?.timesheets) ? cache.timesheets : [];
-  return arr.find(t => String(t?.timesheet_id || '') === String(timesheetId)) || null;
-}
-
 function invoiceModalComputePreviewTotals(modalCtx) {
-  const { invoice, header_snapshot_json, items } = invoiceModalGetInvoiceData(modalCtx);
+  const invData = invoiceModalGetInvoiceData(modalCtx);
+  const { invoice, header_snapshot_json, items } = invData;
+
   const vatRatePct = invoiceModalGetVatRatePct(invoice, header_snapshot_json);
 
   const removed = modalCtx?.invoiceEdits?.remove_invoice_line_ids || new Set();
   const stagedAddTs = modalCtx?.invoiceEdits?.add_timesheet_ids || new Set();
   const stagedAdjs = Array.isArray(modalCtx?.invoiceEdits?.add_adjustments) ? modalCtx.invoiceEdits.add_adjustments : [];
+
+  const stagedRemoveSeg = Array.isArray(modalCtx?.invoiceEdits?.remove_segment_refs) ? modalCtx.invoiceEdits.remove_segment_refs : [];
+  const stagedAddSeg    = Array.isArray(modalCtx?.invoiceEdits?.add_segment_refs) ? modalCtx.invoiceEdits.add_segment_refs : [];
 
   let subtotal_ex_vat = 0;
   let vat_amount = 0;
@@ -28508,7 +28809,7 @@ function invoiceModalComputePreviewTotals(modalCtx) {
     total_inc_vat += (ex + vat);
   }
 
-  // Add staged timesheets using eligible-timesheets cache (segment-aware totals)
+  // Add staged timesheets using eligible-timesheets cache (segment-aware totals as provided by RPC)
   if (stagedAddTs.size > 0) {
     const cache = modalCtx?.eligibleTimesheetsCache;
     const arr = Array.isArray(cache?.timesheets) ? cache.timesheets : [];
@@ -28527,67 +28828,113 @@ function invoiceModalComputePreviewTotals(modalCtx) {
     }
   }
 
+  // ─────────────────────────────────────────────────────────────
+  // Segment staging adjustments (remove/add segments)
+  // ─────────────────────────────────────────────────────────────
+  const key = (tsfinId, segId) => `${String(tsfinId || '')}::${String(segId || '')}`;
+
+  // Build lookup for segments currently on this invoice (manifest)
+  const segMap =
+    (invData?.segments_on_invoice_by_timesheet && typeof invData.segments_on_invoice_by_timesheet === 'object')
+      ? invData.segments_on_invoice_by_timesheet
+      : ((invData?.segments_by_timesheet && typeof invData.segments_by_timesheet === 'object')
+          ? invData.segments_by_timesheet
+          : {});
+
+  const tsfinMap =
+    (invData?.tsfin_id_by_timesheet_id && typeof invData.tsfin_id_by_timesheet_id === 'object')
+      ? invData.tsfin_id_by_timesheet_id
+      : {};
+
+  const invoicedSegByKey = new Map();
+  try {
+    for (const tsId of Object.keys(segMap || {})) {
+      const info = segMap[tsId];
+      if (!info || typeof info !== 'object') continue;
+
+      const tsfinId = (info.tsfin_id != null && String(info.tsfin_id).trim())
+        ? String(info.tsfin_id)
+        : (tsfinMap[tsId] != null ? String(tsfinMap[tsId]) : '');
+
+      const segs = Array.isArray(info.invoiced_segments) ? info.invoiced_segments : [];
+      if (!tsfinId || !segs.length) continue;
+
+      for (const s of segs) {
+        if (!s || typeof s !== 'object') continue;
+        const segId = (s.segment_id != null && String(s.segment_id).trim()) ? String(s.segment_id) : '';
+        if (!segId) continue;
+
+        const chg = Number(
+          (s.charge_amount != null ? s.charge_amount : (s['charge_amount'] != null ? s['charge_amount'] : 0))
+        ) || 0;
+
+        invoicedSegByKey.set(key(tsfinId, segId), { charge_amount: chg });
+      }
+    }
+  } catch {}
+
+  // Build lookup for eligible segments (eligible-timesheets cache)
+  const eligibleSegByKey = new Map();
+  try {
+    const cache = modalCtx?.eligibleTimesheetsCache;
+    const arr = Array.isArray(cache?.timesheets) ? cache.timesheets : [];
+    for (const t of arr) {
+      if (!t || typeof t !== 'object') continue;
+      const tsfinId = (t.tsfin_id != null && String(t.tsfin_id).trim()) ? String(t.tsfin_id) : '';
+      if (!tsfinId) continue;
+
+      const segs = Array.isArray(t.eligible_segments) ? t.eligible_segments : [];
+      for (const s of segs) {
+        if (!s || typeof s !== 'object') continue;
+        const segId = (s.segment_id != null && String(s.segment_id).trim()) ? String(s.segment_id) : '';
+        if (!segId) continue;
+
+        const chg = Number(s.charge_amount || 0) || 0;
+        eligibleSegByKey.set(key(tsfinId, segId), { charge_amount: chg });
+      }
+    }
+  } catch {}
+
+  const applyDelta = (chargeEx, sign) => {
+    const ex = Number(chargeEx || 0);
+    if (!Number.isFinite(ex) || ex === 0) return;
+
+    const vat = ex * (vatRatePct / 100);
+    subtotal_ex_vat += sign * ex;
+    vat_amount += sign * vat;
+    total_inc_vat += sign * (ex + vat);
+  };
+
+  // Remove segments staged for removal (subtract their charge)
+  for (const r of stagedRemoveSeg) {
+    if (!r || typeof r !== 'object') continue;
+    const k = key(r.tsfin_id, r.segment_id);
+    const seg = invoicedSegByKey.get(k);
+    if (!seg) continue;
+    applyDelta(seg.charge_amount, -1);
+  }
+
+  // Add segments staged for add (add their charge)
+  for (const r of stagedAddSeg) {
+    if (!r || typeof r !== 'object') continue;
+    const k = key(r.tsfin_id, r.segment_id);
+    const seg = eligibleSegByKey.get(k);
+    if (!seg) continue;
+    applyDelta(seg.charge_amount, +1);
+  }
+
   return {
     subtotal_ex_vat: invoiceModalRound2(subtotal_ex_vat),
     vat_amount: invoiceModalRound2(vat_amount),
     total_inc_vat: invoiceModalRound2(total_inc_vat)
   };
 }
-
-function invoiceModalToggleRemoveTimesheet(modalCtx, timesheetId) {
-  const { items } = invoiceModalGetInvoiceData(modalCtx);
-  const set = modalCtx.invoiceEdits.remove_invoice_line_ids;
-
-  const ts = String(timesheetId || '').trim();
-  if (!ts) return;
-
-  const lineIds = (items || [])
-    .filter(it => String(it?.timesheet_id || '') === ts)
-    .map(it => String(it?.invoice_line_id || ''))
-    .filter(Boolean);
-
-  if (!lineIds.length) return;
-
-  const allAlready = lineIds.every(id => set.has(id));
-  if (allAlready) {
-    for (const id of lineIds) set.delete(id);
-  } else {
-    for (const id of lineIds) set.add(id);
-  }
-}
-
-function invoiceModalToggleRemoveLine(modalCtx, invoiceLineId) {
-  const id = String(invoiceLineId || '').trim();
-  if (!id) return;
-
-  const set = modalCtx.invoiceEdits.remove_invoice_line_ids;
-  if (set.has(id)) set.delete(id);
-  else set.add(id);
-}
-
-function invoiceModalToggleAddTimesheet(modalCtx, timesheetId) {
-  const id = String(timesheetId || '').trim();
-  if (!id) return;
-
-  const set = modalCtx.invoiceEdits.add_timesheet_ids;
-  if (set.has(id)) set.delete(id);
-  else set.add(id);
-}
-
-function invoiceModalRemoveStagedAdjustment(modalCtx, clientToken) {
-  const tok = String(clientToken || '').trim();
-  if (!tok) return;
-
-  modalCtx.invoiceEdits.add_adjustments =
-    (modalCtx.invoiceEdits.add_adjustments || []).filter(a => String(a?.client_token || '') !== tok);
-}
-
 async function invoiceModalSaveEdits(modalCtx, { rerender, reload }) {
   // ✅ Single Save pipeline:
   //   1) hold/unhold (if staged)
   //   2) issue/unissue (if staged)
   //   3) paid/unpaid (if staged)
-  //   4) apply line edits (/save-edits)
+  //   4) apply edits (/save-edits) (lines + segments + references)
   //   5) reload + clear staging
 
   const invoiceId = modalCtx?.invoiceId ? String(modalCtx.invoiceId) : '';
@@ -28610,18 +28957,17 @@ async function invoiceModalSaveEdits(modalCtx, { rerender, reload }) {
   // Current state
   const curStatus = String(inv.status || '').toUpperCase();
   const curIsHold = (curStatus === 'ON_HOLD');
-  const curIsIssued = (curStatus === 'ISSUED');
+
+  // Treat issued as either status ISSUED or issued_at_utc present (defensive)
+  const curIsIssued = (curStatus === 'ISSUED') || !!inv.issued_at_utc;
   const curIsPaid = !!inv.paid_at_utc;
 
-  // Staged status toggles (added by the invoice modal UI changes)
-  // Expected shape:
-  //   modalCtx.invoiceEdits.staged_status = { on_hold: boolean|null, issued: boolean|null, paid: boolean|null }
-  // Optional:
-  //   modalCtx.invoiceEdits.staged_reason = { on_hold_reason?: string|null, paid_date?: string|null }
+  // Staged status toggles
   const stagedStatus = (modalCtx?.invoiceEdits && typeof modalCtx.invoiceEdits === 'object' && modalCtx.invoiceEdits.staged_status && typeof modalCtx.invoiceEdits.staged_status === 'object')
     ? modalCtx.invoiceEdits.staged_status
     : {};
 
+  // Optional legacy reason payload (existing codepath)
   const stagedReason = (modalCtx?.invoiceEdits && typeof modalCtx.invoiceEdits === 'object' && modalCtx.invoiceEdits.staged_reason && typeof modalCtx.invoiceEdits.staged_reason === 'object')
     ? modalCtx.invoiceEdits.staged_reason
     : {};
@@ -28630,33 +28976,65 @@ async function invoiceModalSaveEdits(modalCtx, { rerender, reload }) {
   const wantIssued = (Object.prototype.hasOwnProperty.call(stagedStatus, 'issued')  && stagedStatus.issued  != null) ? !!stagedStatus.issued  : null;
   const wantPaid   = (Object.prototype.hasOwnProperty.call(stagedStatus, 'paid')    && stagedStatus.paid    != null) ? !!stagedStatus.paid    : null;
 
-  // Line edits payload
-  const linePayload = {
-    remove_invoice_line_ids: Array.from(modalCtx?.invoiceEdits?.remove_invoice_line_ids || []),
-    add_timesheet_ids: Array.from(modalCtx?.invoiceEdits?.add_timesheet_ids || []),
-    add_adjustments: (modalCtx?.invoiceEdits?.add_adjustments || []).map(a => ({
-      client_token: a.client_token,
-      description: a.description,
-      amount_ex_vat: a.amount_ex_vat
-    }))
+  const toast = (msg) => {
+    try {
+      if (typeof window.toast === 'function') return window.toast(msg);
+      if (typeof window.showToast === 'function') return window.showToast(msg);
+      if (typeof window.notify === 'function') return window.notify(msg);
+      console.log('[INV][TOAST]', msg);
+    } catch {}
   };
 
-  const hasLineEdits =
-    (linePayload.remove_invoice_line_ids && linePayload.remove_invoice_line_ids.length > 0) ||
-    (linePayload.add_timesheet_ids && linePayload.add_timesheet_ids.length > 0) ||
-    (linePayload.add_adjustments && linePayload.add_adjustments.length > 0);
+  // Build payload including only non-empty keys
+  const e = (modalCtx?.invoiceEdits && typeof modalCtx.invoiceEdits === 'object') ? modalCtx.invoiceEdits : {};
 
-  // If there are line edits, we must ensure the invoice will NOT be ISSUED at apply-edits time.
-  // Also, if invoice is PAID we require it to be un-paid before any line edits.
-  if (hasLineEdits) {
+  const remove_invoice_line_ids = Array.from(e.remove_invoice_line_ids || []);
+  const add_timesheet_ids = Array.from(e.add_timesheet_ids || []);
+
+  const add_adjustments = (Array.isArray(e.add_adjustments) ? e.add_adjustments : []).map(a => ({
+    client_token: a.client_token,
+    description: a.description,
+    amount_ex_vat: a.amount_ex_vat
+  })).filter(a => (a && (a.amount_ex_vat != null || (a.description && String(a.description).trim()))));
+
+  const normSeg = (r) => {
+    if (!r || typeof r !== 'object') return null;
+    const tsfin_id = (r.tsfin_id != null) ? String(r.tsfin_id) : '';
+    const segment_id = (r.segment_id != null) ? String(r.segment_id) : '';
+    if (!tsfin_id || !segment_id) return null;
+    return { tsfin_id, segment_id };
+  };
+
+  const remove_segment_refs = (Array.isArray(e.remove_segment_refs) ? e.remove_segment_refs : [])
+    .map(normSeg)
+    .filter(Boolean);
+
+  const add_segment_refs = (Array.isArray(e.add_segment_refs) ? e.add_segment_refs : [])
+    .map(normSeg)
+    .filter(Boolean);
+
+  const reference_updates = Array.isArray(e.reference_updates) ? e.reference_updates : [];
+
+  const payload = {};
+  if (remove_invoice_line_ids.length) payload.remove_invoice_line_ids = remove_invoice_line_ids;
+  if (add_timesheet_ids.length) payload.add_timesheet_ids = add_timesheet_ids;
+  if (add_adjustments.length) payload.add_adjustments = add_adjustments;
+  if (remove_segment_refs.length) payload.remove_segment_refs = remove_segment_refs;
+  if (add_segment_refs.length) payload.add_segment_refs = add_segment_refs;
+  if (reference_updates.length) payload.reference_updates = reference_updates;
+
+  const hasApplyEdits = Object.keys(payload).length > 0;
+
+  // If there are apply-edits staged, we must ensure invoice will NOT be ISSUED/PAID at apply time.
+  if (hasApplyEdits) {
     const willStillBeIssued = (wantIssued == null) ? curIsIssued : wantIssued;
     if (willStillBeIssued) {
-      throw new Error('Cannot edit invoice lines while invoice is ISSUED. Unissue first (staged) and Save again.');
+      throw new Error('Cannot edit invoice lines/segments/refs while invoice is ISSUED. Unissue first (staged) and Save again.');
     }
 
     const willStillBePaid = (wantPaid == null) ? curIsPaid : wantPaid;
     if (willStillBePaid) {
-      throw new Error('Cannot edit invoice lines while invoice is PAID. Mark unpaid first (staged) and Save again.');
+      throw new Error('Cannot edit invoice lines/segments/refs while invoice is PAID. Mark unpaid first (staged) and Save again.');
     }
   }
 
@@ -28732,64 +29110,269 @@ async function invoiceModalSaveEdits(modalCtx, { rerender, reload }) {
       }
     }
 
-    // 4) APPLY LINE EDITS (only if there are line edits staged)
-    if (hasLineEdits) {
-      const res = await invoiceModalFetchJson(`/api/invoices/${encodeURIComponent(invoiceId)}/save-edits`, {
-        method: 'POST',
-        body: JSON.stringify(linePayload)
-      });
+    // 4) APPLY EDITS (only if there are edits staged)
+    if (hasApplyEdits) {
+      try {
+        const res = await invoiceModalFetchJson(`/api/invoices/${encodeURIComponent(invoiceId)}/save-edits`, {
+          method: 'POST',
+          body: JSON.stringify(payload)
+        });
 
-      const out = (res && typeof res === 'object') ? res : {};
-      if (!out.ok) {
-        throw new Error(out.error || 'Failed to save edits');
+        const out = (res && typeof res === 'object') ? res : {};
+        if (!out.ok) {
+          throw new Error(out.error || 'Failed to save edits');
+        }
+      } catch (err) {
+        const msg = String(err?.message || err || '');
+
+        // Friendly segment-block messages (server is authoritative)
+        if (/Segments cannot be moved when additional rates exist/i.test(msg)) {
+          modalCtx.error = 'Cannot move segments because this invoice contains additional rates. Remove additional rates or remove the whole timesheet instead.';
+          toast(modalCtx.error);
+          rerender();
+          throw err;
+        }
+        if (/Segments cannot be moved when expenses or mileage exist/i.test(msg)) {
+          modalCtx.error = 'Cannot move segments because this invoice contains expenses or mileage. Remove expenses/mileage or remove the whole timesheet instead.';
+          toast(modalCtx.error);
+          rerender();
+          throw err;
+        }
+
+        throw err;
       }
-
-      // Keep both stores updated (modal uses dataLoaded for render, helpers sometimes read data)
-      const newData = {
-        invoice: out.invoice || out.invoice_row || null,
-        items: Array.isArray(out.items) ? out.items : [],
-        header_snapshot_json: (out.header_snapshot_json && typeof out.header_snapshot_json === 'object') ? out.header_snapshot_json : {},
-        email_summary: (out.email_summary && typeof out.email_summary === 'object') ? out.email_summary : null,
-
-        attach_policy: out.attach_policy ?? null,
-        evidence: Array.isArray(out.evidence) ? out.evidence : [],
-        hr_source_rows_cache: Array.isArray(out.hr_source_rows_cache) ? out.hr_source_rows_cache : [],
-        tsfin_external_source_rows: Array.isArray(out.tsfin_external_source_rows) ? out.tsfin_external_source_rows : []
-      };
-
-      modalCtx.data = newData;
-      modalCtx.dataLoaded = newData;
     }
 
-    // Clear staged edits (including staged status toggles) + exit edit mode
-    try {
-      if (modalCtx.invoiceEdits && typeof modalCtx.invoiceEdits === 'object') {
-        if (modalCtx.invoiceEdits.staged_status) delete modalCtx.invoiceEdits.staged_status;
-        if (modalCtx.invoiceEdits.staged_reason) delete modalCtx.invoiceEdits.staged_reason;
-      }
-    } catch {}
-
+    // 5) Clear staged edits + exit edit mode
     invoiceModalResetEdits(modalCtx);
     modalCtx.isEditing = false;
 
     // Final reload (single source of truth)
-    await reload({ includeCorrespondence: true });
+    await reload();
   } finally {
     modalCtx.isBusy = false;
     rerender();
   }
 }
 
+
+
+
+function invoiceModalRound2(n) {
+  const v = Number(n);
+  if (!Number.isFinite(v)) return 0;
+  return Math.round(v * 100) / 100;
+}
+
+function invoiceModalFmtHours(n) {
+  const v = Number(n);
+  if (!Number.isFinite(v)) return '0';
+  const r = invoiceModalRound2(v);
+  // Show up to 2dp, trim trailing .00
+  return String(r.toFixed(2)).replace(/\.00$/, '');
+}
+
+
+function invoiceModalGetVatRatePct(invoice, header_snapshot_json) {
+  // Prefer explicit invoice.vat_rate_pct if present; fall back to header snapshot VAT if present; else 0.
+  const v1 = Number(invoice?.vat_rate_pct);
+  if (Number.isFinite(v1)) return v1;
+
+  const v2 = Number(header_snapshot_json?.vat_rate_pct ?? header_snapshot_json?.vat?.rate_pct);
+  if (Number.isFinite(v2)) return v2;
+
+  return 0;
+}
+
+
+
+function invoiceModalLookupEligibleTimesheet(modalCtx, timesheetId) {
+  const cache = modalCtx?.eligibleTimesheetsCache;
+  const arr = Array.isArray(cache?.timesheets) ? cache.timesheets : [];
+  return arr.find(t => String(t?.timesheet_id || '') === String(timesheetId)) || null;
+}
+
+function invoiceModalToggleRemoveTimesheet(modalCtx, timesheetId) {
+  const invData = invoiceModalGetInvoiceData(modalCtx);
+  const { items, tsfin_id_by_timesheet_id, segments_on_invoice_by_timesheet, segments_by_timesheet } = invData;
+
+  if (!modalCtx || !modalCtx.invoiceEdits) return;
+
+  const set = (modalCtx.invoiceEdits.remove_invoice_line_ids instanceof Set)
+    ? modalCtx.invoiceEdits.remove_invoice_line_ids
+    : (modalCtx.invoiceEdits.remove_invoice_line_ids = new Set());
+
+  const ts = String(timesheetId || '').trim();
+  if (!ts) return;
+
+  const lineIds = (items || [])
+    .filter(it => String(it?.timesheet_id || '') === ts)
+    .map(it => String(it?.invoice_line_id || ''))
+    .filter(Boolean);
+
+  if (!lineIds.length) return;
+
+  const allAlready = lineIds.every(id => set.has(id));
+
+  // If currently removed → undo removal (do NOT resurrect any previously cleared segment staging)
+  if (allAlready) {
+    for (const id of lineIds) set.delete(id);
+    return;
+  }
+
+  // Toggling removal ON: clear conflicting segment staging for this timesheet (by tsfin_id)
+  try {
+    const segMap =
+      (segments_on_invoice_by_timesheet && typeof segments_on_invoice_by_timesheet === 'object')
+        ? segments_on_invoice_by_timesheet
+        : ((segments_by_timesheet && typeof segments_by_timesheet === 'object') ? segments_by_timesheet : {});
+
+    const tsfinFromSegMap = (segMap && segMap[ts] && segMap[ts].tsfin_id != null) ? String(segMap[ts].tsfin_id).trim() : '';
+    const tsfinFromMap = (tsfin_id_by_timesheet_id && tsfin_id_by_timesheet_id[ts] != null) ? String(tsfin_id_by_timesheet_id[ts]).trim() : '';
+    const tsfinId = tsfinFromSegMap || tsfinFromMap;
+
+    if (tsfinId) {
+      // add_segment_refs
+      if (Array.isArray(modalCtx.invoiceEdits.add_segment_refs)) {
+        modalCtx.invoiceEdits.add_segment_refs =
+          modalCtx.invoiceEdits.add_segment_refs.filter(r => String(r?.tsfin_id || '').trim() !== tsfinId);
+      }
+
+      // remove_segment_refs
+      if (Array.isArray(modalCtx.invoiceEdits.remove_segment_refs)) {
+        modalCtx.invoiceEdits.remove_segment_refs =
+          modalCtx.invoiceEdits.remove_segment_refs.filter(r => String(r?.tsfin_id || '').trim() !== tsfinId);
+      }
+    }
+  } catch {}
+
+  // Stage whole-timesheet removal as before
+  for (const id of lineIds) set.add(id);
+}
+async function invoiceModalReload(modalCtx, opts = {}) {
+  const mc = modalCtx;
+  if (!mc || typeof mc !== 'object') throw new Error('Missing modal context');
+
+  const invoiceId = String(mc?.invoiceId || mc?.data?.id || '').trim();
+  if (!invoiceId) throw new Error('Missing invoiceId');
+
+  const {
+    // if true, clear staged edits after reload (e.g., caller indicates Save success)
+    clearEdits = false,
+
+    // preserve active tab across reload (default true)
+    preserveTab = true,
+
+    // optional rerender callback
+    rerender = null
+  } = opts || {};
+
+  const prevTab = preserveTab ? String(mc.activeTab || (mc.invoiceUi?.activeTab || 'invoice')) : null;
+
+  mc.isBusy = true;
+  mc.error = null;
+  try { if (typeof rerender === 'function') rerender(); } catch {}
+
+  try {
+    // ✅ Single source of truth: one GET only, no correspondence/history follow-ups
+    const payload = await invoiceModalFetchJson(`/api/invoices/${encodeURIComponent(invoiceId)}`);
+
+    mc.dataLoaded = payload;
+    mc.invoiceDetail = payload;
+    mc.data = { id: invoiceId, ...(payload || {}) };
+
+    // Optionally clear staged edits (after successful Save)
+    if (clearEdits) {
+      invoiceModalResetEdits(mc); // already clears remove/add segment refs + reference_updates (per updated function)
+    }
+
+    // Preserve selected tab across reload
+    if (preserveTab && prevTab) {
+      mc.activeTab = prevTab;
+      try {
+        mc.invoiceUi = (mc.invoiceUi && typeof mc.invoiceUi === 'object') ? mc.invoiceUi : {};
+        mc.invoiceUi.activeTab = prevTab;
+      } catch {}
+    }
+
+    // Rehydrate through the same normalisation path used on open
+    const invData = invoiceModalGetInvoiceData(mc);
+
+    // Store commonly-needed manifest-derived fields onto modalCtx for zero-fetch child modals
+    try {
+      mc.manifest = invData.manifest;
+      mc.segments_on_invoice_by_timesheet = invData.segments_on_invoice_by_timesheet;
+      mc.segments_by_timesheet = invData.segments_by_timesheet;
+      mc.tsfin_id_by_timesheet_id = invData.tsfin_id_by_timesheet_id;
+      mc.history = invData.history;
+      mc.reference_rows = invData.reference_rows;
+      mc.timesheet_evidence = invData.timesheet_evidence;
+      mc.evidence_other = invData.evidence_other;
+      mc.evidence = invData.evidence;
+      mc.email_summary = invData.email_summary;
+      mc.attach_policy = invData.attach_policy;
+    } catch {}
+
+  } catch (e) {
+    mc.error = String(e?.message || e || 'Failed to reload invoice');
+    throw e;
+  } finally {
+    mc.isBusy = false;
+    try { if (typeof rerender === 'function') rerender(); } catch {}
+  }
+}
+
+
+function invoiceModalToggleRemoveLine(modalCtx, invoiceLineId) {
+  const id = String(invoiceLineId || '').trim();
+  if (!id) return;
+
+  const set = modalCtx.invoiceEdits.remove_invoice_line_ids;
+  if (set.has(id)) set.delete(id);
+  else set.add(id);
+}
+
+function invoiceModalToggleAddTimesheet(modalCtx, timesheetId) {
+  const id = String(timesheetId || '').trim();
+  if (!id) return;
+
+  const set = modalCtx.invoiceEdits.add_timesheet_ids;
+  if (set.has(id)) set.delete(id);
+  else set.add(id);
+}
+
+function invoiceModalRemoveStagedAdjustment(modalCtx, clientToken) {
+  const tok = String(clientToken || '').trim();
+  if (!tok) return;
+
+  modalCtx.invoiceEdits.add_adjustments =
+    (modalCtx.invoiceEdits.add_adjustments || []).filter(a => String(a?.client_token || '') !== tok);
+}
+
 function renderInvoiceModalShell(modalCtx) {
   const active = modalCtx.activeTab || 'invoice';
 
-  const tabBtn = (key, label) => {
-    const isActive = key === active;
+  const tabBtn = (key, label, opts = {}) => {
+    const isActive = (key === active);
+    const isDisabled = !!opts.disabled;
+    const title = (isDisabled && opts.title) ? String(opts.title) : '';
+
+    // IMPORTANT: do NOT use native disabled attribute (per platform rule).
+    // Use .disabled / data-disabled="1" and block clicks via delegated handler.
+    const cls = [
+      'btn',
+      'btn-sm',
+      isActive ? 'btn-primary' : 'btn-outline-secondary',
+      isDisabled ? 'disabled' : ''
+    ].filter(Boolean).join(' ');
+
     return `
       <button type="button"
-        class="btn btn-sm ${isActive ? 'btn-primary' : 'btn-outline-secondary'}"
+        class="${cls}"
         data-action="inv-set-tab"
-        data-tab="${key}">
+        data-tab="${key}"
+        ${isDisabled ? 'data-disabled="1"' : ''}
+        ${title ? `title="${escapeHtml(title)}"` : ''}>
         ${label}
       </button>`;
   };
@@ -28806,25 +29389,41 @@ function renderInvoiceModalShell(modalCtx) {
     return `<div class="p-3 text-muted">Loading invoice…</div>`;
   }
 
-  const { raw } = invoiceModalGetInvoiceData(modalCtx);
+  // Always use the normalised invoice data; renderers should prefer manifest fields.
+  const invData = invoiceModalGetInvoiceData(modalCtx);
 
   const tabs = `
     <div class="d-flex gap-2 mb-3">
       ${tabBtn('invoice', 'Invoice')}
-      ${tabBtn('correspondence', 'Correspondence')}
+      ${tabBtn('evidence', 'Evidence')}
+      ${tabBtn('history', 'Invoice History')}
     </div>`;
 
   let body = '';
-  if (active === 'correspondence') {
-    const corr = Array.isArray(raw?.correspondence) ? raw.correspondence : null;
-    body = renderInvoiceModalCorrespondenceTab(modalCtx, corr);
+
+  // Remove any correspondence codepath entirely.
+  if (active === 'evidence') {
+    // Evidence tab renderer will use invData.* arrays (timesheet_evidence, evidence_other, evidence)
+    // If renderer doesn't exist yet, fall back to a friendly placeholder without breaking the modal.
+    if (typeof renderInvoiceModalEvidenceTab === 'function') {
+      body = renderInvoiceModalEvidenceTab(modalCtx, invData);
+    } else {
+      body = `<div class="text-muted">Evidence view not implemented yet.</div>`;
+    }
+  } else if (active === 'history') {
+    // History tab renderer uses invData.history (manifest-enriched).
+    if (typeof renderInvoiceModalHistoryTab === 'function') {
+      body = renderInvoiceModalHistoryTab(modalCtx, invData);
+    } else {
+      body = `<div class="text-muted">Invoice history view not implemented yet.</div>`;
+    }
   } else {
-    body = renderInvoiceModalContent(modalCtx, raw);
+    // Default invoice view (header + lines/etc.) uses the same canonical payload.
+    body = renderInvoiceModalContent(modalCtx, invData);
   }
 
   return `${tabs}${body}`;
 }
-
 function attachInvoiceModalDelegatedHandlers(modalCtx, rootEl, deps) {
   // NOTE:
   // - invModalRoot is frequently replaced by showModal.setTab() (modalBody.innerHTML swap)
@@ -28839,8 +29438,21 @@ function attachInvoiceModalDelegatedHandlers(modalCtx, rootEl, deps) {
   if (!mc || typeof mc !== 'object') return;
   if (!body) return;
 
+  const nonEmpty = (v) => {
+    if (!v) return false;
+    if (Array.isArray(v)) return v.length > 0;
+    if (v instanceof Set || v instanceof Map) return v.size > 0;
+    if (typeof v === 'object') return Object.keys(v).length > 0;
+    return false;
+  };
+
   const computePendingEdits = () => {
     try {
+      if (typeof invoiceModalHasPendingEdits === 'function') {
+        return !!invoiceModalHasPendingEdits(mc);
+      }
+
+      // Fallback (should not be needed once invoiceModalHasPendingEdits is updated)
       const e = mc.invoiceEdits || {};
 
       const st = (e.staged_status && typeof e.staged_status === 'object')
@@ -28857,7 +29469,13 @@ function attachInvoiceModalDelegatedHandlers(modalCtx, rootEl, deps) {
         (e.add_timesheet_ids && e.add_timesheet_ids.size > 0) ||
         (Array.isArray(e.add_adjustments) && e.add_adjustments.length > 0);
 
-      return !!(hasStatus || hasLines);
+      const hasSeg =
+        nonEmpty(e.remove_segment_refs) ||
+        nonEmpty(e.add_segment_refs);
+
+      const hasRefs = nonEmpty(e.reference_updates);
+
+      return !!(hasStatus || hasLines || hasSeg || hasRefs);
     } catch {
       return false;
     }
@@ -28895,22 +29513,33 @@ function attachInvoiceModalDelegatedHandlers(modalCtx, rootEl, deps) {
         } catch {}
       });
 
+  // ✅ safeReload now uses invoiceModalReload (single GET, preserve tab, no correspondence)
   const safeReload = (deps && typeof deps.reload === 'function')
     ? deps.reload
-    : (async ({ includeCorrespondence = false } = {}) => {
+    : (async (opts = {}) => {
         try {
-          const invoiceId = String(mc?.invoiceId || mc?.data?.id || '').trim();
-          if (!invoiceId) return;
+          // invoiceModalReload is the canonical path
+          if (typeof invoiceModalReload === 'function') {
+            await invoiceModalReload(mc, {
+              clearEdits: !!opts.clearEdits,
+              preserveTab: (opts.preserveTab !== false),
+              rerender: safeRerender
+            });
+          } else {
+            // Defensive fallback if invoiceModalReload not loaded yet
+            const invoiceId = String(mc?.invoiceId || mc?.data?.id || '').trim();
+            if (!invoiceId) return;
 
-          const qs = includeCorrespondence ? '?include_correspondence=1' : '';
-          const payload = await invoiceModalFetchJson(`/api/invoices/${encodeURIComponent(invoiceId)}${qs}`);
+            const payload = await invoiceModalFetchJson(`/api/invoices/${encodeURIComponent(invoiceId)}`);
 
-          mc.dataLoaded = payload;
-          mc.invoiceDetail = payload;
-          mc.data = { id: invoiceId, ...(payload || {}) };
+            mc.dataLoaded = payload;
+            mc.invoiceDetail = payload;
+            mc.data = { id: invoiceId, ...(payload || {}) };
+
+            safeRerender();
+          }
         } catch (e) {
           mc.error = String(e?.message || e || 'Failed to reload invoice');
-        } finally {
           safeRerender();
         }
       });
@@ -28919,6 +29548,9 @@ function attachInvoiceModalDelegatedHandlers(modalCtx, rootEl, deps) {
   try {
     if (mc.__invDelegated && mc.__invDelegated.targetEl && mc.__invDelegated.handler) {
       mc.__invDelegated.targetEl.removeEventListener('click', mc.__invDelegated.handler, true);
+    }
+    if (mc.__invDelegated && mc.__invDelegated.targetEl && mc.__invDelegated.changeHandler) {
+      mc.__invDelegated.targetEl.removeEventListener('change', mc.__invDelegated.changeHandler, true);
     }
   } catch {}
 
@@ -28955,6 +29587,85 @@ function attachInvoiceModalDelegatedHandlers(modalCtx, rootEl, deps) {
     return { baseIssued, basePaid, effIssued, effPaid };
   };
 
+  const ensureSegArrays = () => {
+    mc.invoiceEdits = mc.invoiceEdits || {};
+    mc.invoiceEdits.remove_segment_refs = Array.isArray(mc.invoiceEdits.remove_segment_refs) ? mc.invoiceEdits.remove_segment_refs : [];
+    mc.invoiceEdits.add_segment_refs = Array.isArray(mc.invoiceEdits.add_segment_refs) ? mc.invoiceEdits.add_segment_refs : [];
+    mc.invoiceEdits.reference_updates = Array.isArray(mc.invoiceEdits.reference_updates) ? mc.invoiceEdits.reference_updates : [];
+  };
+
+  const segKey = (tsfinId, segId) => `${String(tsfinId || '')}::${String(segId || '')}`;
+
+  const stageRemoveSegment = (tsfinId, segId, checked) => {
+    ensureSegArrays();
+    const tsfin_id = String(tsfinId || '').trim();
+    const segment_id = String(segId || '').trim();
+    if (!tsfin_id || !segment_id) return;
+
+    const k = segKey(tsfin_id, segment_id);
+
+    // remove existing occurrences
+    for (let i = mc.invoiceEdits.remove_segment_refs.length - 1; i >= 0; i--) {
+      const r = mc.invoiceEdits.remove_segment_refs[i];
+      if (!r || typeof r !== 'object') continue;
+      if (segKey(r.tsfin_id, r.segment_id) === k) {
+        mc.invoiceEdits.remove_segment_refs.splice(i, 1);
+      }
+    }
+
+    if (checked) {
+      mc.invoiceEdits.remove_segment_refs.push({ tsfin_id, segment_id });
+    }
+  };
+
+  const getTsfinIdForTimesheet = (invData, tsId) => {
+    const tid = String(tsId || '').trim();
+    if (!tid) return '';
+
+    // Prefer segments_on_invoice_by_timesheet[timesheet_id].tsfin_id
+    const segMap =
+      (invData?.segments_on_invoice_by_timesheet && typeof invData.segments_on_invoice_by_timesheet === 'object')
+        ? invData.segments_on_invoice_by_timesheet
+        : ((invData?.segments_by_timesheet && typeof invData.segments_by_timesheet === 'object')
+            ? invData.segments_by_timesheet
+            : {});
+    const info = segMap && typeof segMap === 'object' ? segMap[tid] : null;
+
+    const tsfin1 = (info && typeof info === 'object' && info.tsfin_id != null) ? String(info.tsfin_id).trim() : '';
+    if (tsfin1) return tsfin1;
+
+    const tsfinMap = (invData?.tsfin_id_by_timesheet_id && typeof invData.tsfin_id_by_timesheet_id === 'object')
+      ? invData.tsfin_id_by_timesheet_id
+      : {};
+    const tsfin2 = (tsfinMap && tsfinMap[tid] != null) ? String(tsfinMap[tid]).trim() : '';
+    return tsfin2 || '';
+  };
+
+  const stageRemoveAllSegmentsForTimesheet = (invData, tsId) => {
+    const tid = String(tsId || '').trim();
+    if (!tid) return;
+
+    const segMap =
+      (invData?.segments_on_invoice_by_timesheet && typeof invData.segments_on_invoice_by_timesheet === 'object')
+        ? invData.segments_on_invoice_by_timesheet
+        : ((invData?.segments_by_timesheet && typeof invData.segments_by_timesheet === 'object')
+            ? invData.segments_by_timesheet
+            : {});
+    const info = segMap && typeof segMap === 'object' ? segMap[tid] : null;
+    const segs = (info && typeof info === 'object' && Array.isArray(info.invoiced_segments)) ? info.invoiced_segments : [];
+    if (!segs.length) return;
+
+    const tsfinId = getTsfinIdForTimesheet(invData, tid);
+    if (!tsfinId) return;
+
+    for (const s of segs) {
+      if (!s || typeof s !== 'object') continue;
+      const segId = (s.segment_id != null) ? String(s.segment_id).trim() : '';
+      if (!segId) continue;
+      stageRemoveSegment(tsfinId, segId, true);
+    }
+  };
+
   const handler = async (e) => {
     // Gate: only respond when invoice modal is the TOP frame and its ctx is this mc.
     const fr = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
@@ -28970,29 +29681,37 @@ function attachInvoiceModalDelegatedHandlers(modalCtx, rootEl, deps) {
     const action = el.getAttribute('data-action');
     if (!action) return;
 
+    // Respect disabled tab convention and general disabled buttons:
+    // - DO NOT rely on native disabled for tabs.
+    // - Block if data-disabled="1" or has .disabled
+    try {
+      if (el.getAttribute('data-disabled') === '1' || el.getAttribute('data-disabled') === 'true' || el.classList.contains('disabled')) {
+        return;
+      }
+      if (el.disabled === true) return;
+    } catch {}
+
     e.preventDefault();
 
-    const { invoice, header_snapshot_json, items } = invoiceModalGetInvoiceData(mc);
+    const invData = invoiceModalGetInvoiceData(mc);
+    const { invoice, header_snapshot_json, items } = invData;
 
     try {
       switch (action) {
         case 'inv-close': {
-          // Close top frame safely
           try { document.getElementById('btnCloseModal')?.click(); } catch {}
           return;
         }
 
         case 'inv-set-tab': {
-          const tab = String(el.getAttribute('data-tab') || 'invoice');
-          mc.activeTab = tab;
+          const tab = String(el.getAttribute('data-tab') || 'invoice').trim().toLowerCase();
+          const allowed = (tab === 'invoice' || tab === 'evidence' || tab === 'history');
+          mc.activeTab = allowed ? tab : 'invoice';
 
-          if (tab === 'correspondence') {
-            const hasCorr = Array.isArray(mc.data?.correspondence);
-            if (!hasCorr) {
-              await safeReload({ includeCorrespondence: true });
-              return;
-            }
-          }
+          try {
+            mc.invoiceUi = (mc.invoiceUi && typeof mc.invoiceUi === 'object') ? mc.invoiceUi : {};
+            mc.invoiceUi.activeTab = mc.activeTab;
+          } catch {}
 
           safeRerender();
           return;
@@ -29007,10 +29726,24 @@ function attachInvoiceModalDelegatedHandlers(modalCtx, rootEl, deps) {
         }
 
         case 'inv-email': {
+          if (invoice && invoice.do_not_send === true) {
+            mc.error = 'Do not send invoice (closeout).';
+            safeRerender();
+            return;
+          }
           if (typeof handleInvoiceEmail === 'function') {
             await handleInvoiceEmail(mc, { invoice, header_snapshot_json, items });
           }
-          await safeReload({ includeCorrespondence: true });
+          await safeReload();
+          return;
+        }
+
+        case 'inv-open-reference-numbers': {
+          if (typeof openInvoiceReferenceNumbersModal === 'function') {
+            await openInvoiceReferenceNumbersModal(mc, { rerender: safeRerender });
+          }
+          syncFrameDirty();
+          safeRerender();
           return;
         }
 
@@ -29027,7 +29760,6 @@ function attachInvoiceModalDelegatedHandlers(modalCtx, rootEl, deps) {
           if (cur) delete mc.invoiceUi.expanded_timesheets[tsId];
           else mc.invoiceUi.expanded_timesheets[tsId] = true;
 
-          // UI-only: do NOT mark dirty
           safeRerender();
           return;
         }
@@ -29072,14 +29804,16 @@ function attachInvoiceModalDelegatedHandlers(modalCtx, rootEl, deps) {
         case 'inv-add-timesheets': {
           if (!mc.isEditing) return;
           await openInvoiceAddTimesheetsModal(mc, { rerender: safeRerender });
-          // dirty will be synced by safeRerender after staging
+          syncFrameDirty();
+          safeRerender();
           return;
         }
 
         case 'inv-add-adjustment': {
           if (!mc.isEditing) return;
           await openInvoiceAddAdjustmentModal(mc, { rerender: safeRerender });
-          // dirty will be synced by safeRerender after staging
+          syncFrameDirty();
+          safeRerender();
           return;
         }
 
@@ -29129,28 +29863,138 @@ function attachInvoiceModalDelegatedHandlers(modalCtx, rootEl, deps) {
           return;
         }
 
+        case 'inv-toggle-remove-segment': {
+          if (!mc.isEditing) return;
+          if (!invoiceModalIsEditable(invoice, mc, 'lines')) {
+            mc.error = 'Unissue and unpay invoice first.';
+            safeRerender();
+            return;
+          }
+          ensureSegArrays();
+
+          const tsId = String(el.getAttribute('data-timesheet-id') || '').trim();
+          const segId = String(el.getAttribute('data-segment-id') || '').trim();
+          let tsfinId = String(el.getAttribute('data-tsfin-id') || '').trim();
+
+          if (!tsfinId) {
+            tsfinId = getTsfinIdForTimesheet(invData, tsId);
+          }
+
+          const inp = e.target && (e.target.matches && e.target.matches('input[type="checkbox"]')) ? e.target : null;
+          const checked = inp ? !!inp.checked : true;
+
+          stageRemoveSegment(tsfinId, segId, checked);
+
+          syncFrameDirty();
+          safeRerender();
+          return;
+        }
+
+        case 'inv-stage-remove-selected-segments': {
+          if (!mc.isEditing) return;
+          if (!invoiceModalIsEditable(invoice, mc, 'lines')) {
+            mc.error = 'Unissue and unpay invoice first.';
+            safeRerender();
+            return;
+          }
+          ensureSegArrays();
+
+          const tsId = String(el.getAttribute('data-timesheet-id') || '').trim();
+          const tsfinFromBtn = String(el.getAttribute('data-tsfin-id') || '').trim();
+          const tsfinId = tsfinFromBtn || getTsfinIdForTimesheet(invData, tsId);
+          if (!tsId || !tsfinId) return;
+
+          const checks = Array.from(body.querySelectorAll(`input[type="checkbox"][data-action="inv-toggle-remove-segment"][data-timesheet-id="${CSS.escape(tsId)}"]`));
+          for (const c of checks) {
+            const segId = String(c.getAttribute('data-segment-id') || '').trim();
+            if (!segId) continue;
+            if (c.checked) stageRemoveSegment(tsfinId, segId, true);
+          }
+
+          syncFrameDirty();
+          safeRerender();
+          return;
+        }
+
+        case 'inv-stage-remove-all-segments': {
+          if (!mc.isEditing) return;
+          if (!invoiceModalIsEditable(invoice, mc, 'lines')) {
+            mc.error = 'Unissue and unpay invoice first.';
+            safeRerender();
+            return;
+          }
+          ensureSegArrays();
+
+          const tsId = String(el.getAttribute('data-timesheet-id') || '').trim();
+          if (!tsId) return;
+
+          stageRemoveAllSegmentsForTimesheet(invData, tsId);
+
+          syncFrameDirty();
+          safeRerender();
+          return;
+        }
+
         default:
           return;
       }
     } catch (err) {
-      mc.error = String(err?.message || err || 'Action failed');
+      const msg = String(err?.message || err || 'Action failed');
+
+      if (/Segments cannot be moved when additional rates exist/i.test(msg)) {
+        mc.error = 'Remove additional rates before moving segments.';
+      } else if (/Segments cannot be moved when expenses or mileage exist/i.test(msg)) {
+        mc.error = 'Remove expenses/mileage before moving segments.';
+      } else {
+        mc.error = msg;
+      }
+
       safeRerender();
     }
   };
 
-  // Attach in CAPTURE phase so it reliably sees clicks even with nested tables/labels
+  const changeHandler = async (e) => {
+    try {
+      const fr = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
+      if (!fr || fr.entity !== 'invoices' || fr.kind !== 'invoice-modal') return;
+      if (fr._ctxRef !== mc) return;
+
+      const target = e.target;
+      if (!target) return;
+
+      if (target.matches && target.matches('input[type="checkbox"][data-action="inv-toggle-remove-segment"]')) {
+        const invData = invoiceModalGetInvoiceData(mc);
+        const { invoice } = invData;
+
+        mc.isEditing = (fr.mode === 'edit' || fr.mode === 'create');
+
+        if (!mc.isEditing) return;
+        if (!invoiceModalIsEditable(invoice, mc, 'lines')) return;
+
+        ensureSegArrays();
+
+        const tsId = String(target.getAttribute('data-timesheet-id') || '').trim();
+        const segId = String(target.getAttribute('data-segment-id') || '').trim();
+        let tsfinId = String(target.getAttribute('data-tsfin-id') || '').trim();
+        if (!tsfinId) tsfinId = getTsfinIdForTimesheet(invData, tsId);
+
+        stageRemoveSegment(tsfinId, segId, !!target.checked);
+
+        syncFrameDirty();
+        safeRerender();
+      }
+    } catch {}
+  };
+
   body.addEventListener('click', handler, true);
+  body.addEventListener('change', changeHandler, true);
 
-  // Record attachment so showModal can clean it up on dismiss
-  mc.__invDelegated = { targetEl: body, handler };
+  mc.__invDelegated = { targetEl: body, handler, changeHandler };
 
-  // Keep a light marker on rootEl only for debugging (not used for gating anymore)
   try { if (rootEl) rootEl.__invDelegatedAttached = true; } catch {}
 
-  // ✅ Ensure initial Save/Close label state is correct on first attach
   syncFrameDirty();
 }
-
 
 async function openInvoiceModal(row) {
   // Invoice modal (staged edits, no MutationObserver loops)
@@ -29172,6 +30016,10 @@ async function openInvoiceModal(row) {
     data: { id: invoiceId },
 
     invoiceId,
+
+    // stable token for modal framework + Related menu
+    openToken: `invoice:${String(invoiceId)}:${Date.now()}`,
+
     activeTab: 'invoice',
 
     // Keep raw API payload
@@ -29180,12 +30028,22 @@ async function openInvoiceModal(row) {
     // ✅ Canonical invoice detail store used by existing helpers (handleInvoiceDelete expects this)
     invoiceDetail: null,
 
+    // Track last-seen json snapshot signature so we can detect showModal restore
+    _editsJsonSig: null,
+
     // Invoice edit staging buckets
     isEditing: false,
     invoiceEdits: {
       remove_invoice_line_ids: new Set(),
       add_timesheet_ids: new Set(),
       add_adjustments: [],
+
+      // ✅ NEW: segment edit staging (array of { tsfin_id, segment_id })
+      remove_segment_refs: [],
+      add_segment_refs: [],
+
+      // ✅ NEW: reference updates (opaque payload consumed by backend)
+      reference_updates: [],
 
       // ✅ NEW: staged status toggles (null = unchanged, boolean = desired state)
       staged_status: { issued: null, paid: null, on_hold: null },
@@ -29202,10 +30060,76 @@ async function openInvoiceModal(row) {
     error: null
   };
 
+  const cloneJson = (v, fallback) => {
+    try {
+      return JSON.parse(JSON.stringify(v));
+    } catch {
+      return fallback;
+    }
+  };
+
+  const editsToJson = (e) => {
+    const out = {
+      remove_invoice_line_ids: [],
+      add_timesheet_ids: [],
+      add_adjustments: [],
+      remove_segment_refs: [],
+      add_segment_refs: [],
+      reference_updates: [],
+      staged_status: { issued: null, paid: null, on_hold: null },
+      staged_dates: { issued_at_utc: null, paid_at_utc: null, status_date_utc: null }
+    };
+
+    if (!e || typeof e !== 'object') return out;
+
+    // Sets → arrays
+    try {
+      if (e.remove_invoice_line_ids && typeof e.remove_invoice_line_ids.size === 'number') {
+        out.remove_invoice_line_ids = Array.from(e.remove_invoice_line_ids);
+      }
+    } catch {}
+
+    try {
+      if (e.add_timesheet_ids && typeof e.add_timesheet_ids.size === 'number') {
+        out.add_timesheet_ids = Array.from(e.add_timesheet_ids);
+      }
+    } catch {}
+
+    // arrays
+    out.add_adjustments = Array.isArray(e.add_adjustments) ? cloneJson(e.add_adjustments, []) : [];
+    out.remove_segment_refs = Array.isArray(e.remove_segment_refs) ? cloneJson(e.remove_segment_refs, []) : [];
+    out.add_segment_refs = Array.isArray(e.add_segment_refs) ? cloneJson(e.add_segment_refs, []) : [];
+    out.reference_updates = Array.isArray(e.reference_updates) ? cloneJson(e.reference_updates, []) : [];
+
+    // staged objects
+    if (e.staged_status && typeof e.staged_status === 'object') {
+      out.staged_status = {
+        issued: (e.staged_status.issued !== undefined ? e.staged_status.issued : null),
+        paid: (e.staged_status.paid !== undefined ? e.staged_status.paid : null),
+        on_hold: (e.staged_status.on_hold !== undefined ? e.staged_status.on_hold : null)
+      };
+    }
+
+    if (e.staged_dates && typeof e.staged_dates === 'object') {
+      out.staged_dates = {
+        issued_at_utc: (e.staged_dates.issued_at_utc !== undefined ? e.staged_dates.issued_at_utc : null),
+        paid_at_utc: (e.staged_dates.paid_at_utc !== undefined ? e.staged_dates.paid_at_utc : null),
+        status_date_utc: (e.staged_dates.status_date_utc !== undefined ? e.staged_dates.status_date_utc : null)
+      };
+    }
+
+    return out;
+  };
+
   // Mirror into fields showModal snapshots/restores
   modalCtx.invoiceState = {
     isEditing: false,
-    invoiceEdits: modalCtx.invoiceEdits
+
+    // keep a runtime pointer for any existing code that expects this
+    invoiceEdits: modalCtx.invoiceEdits,
+
+    // ✅ JSON-safe mirror to survive showModal snapshot/restore
+    invoiceEdits_json: editsToJson(modalCtx.invoiceEdits)
   };
   modalCtx.invoiceUi = {
     activeTab: modalCtx.activeTab,
@@ -29222,11 +30146,124 @@ async function openInvoiceModal(row) {
     try {
       if (!modalCtx.invoiceEdits || typeof modalCtx.invoiceEdits !== 'object') return;
       modalCtx.invoiceEdits.staged_status = { issued: null, paid: null, on_hold: null };
-      modalCtx.invoiceEdits.staged_dates  = { issued_at_utc: null, paid_at_utc: null, status_date_utc: null };
+      modalCtx.invoiceEdits.staged_dates = { issued_at_utc: null, paid_at_utc: null, status_date_utc: null };
+    } catch {}
+  };
+
+  const ensureEditsRuntimeFromJson = () => {
+    try {
+      if (!modalCtx.invoiceState || typeof modalCtx.invoiceState !== 'object') {
+        modalCtx.invoiceState = { isEditing: !!modalCtx.isEditing };
+      }
+
+      // Ensure json mirror exists (showModal will snapshot/restore this reliably)
+      if (!modalCtx.invoiceState.invoiceEdits_json || typeof modalCtx.invoiceState.invoiceEdits_json !== 'object') {
+        modalCtx.invoiceState.invoiceEdits_json = editsToJson(modalCtx.invoiceEdits);
+      }
+
+      const j = modalCtx.invoiceState.invoiceEdits_json || null;
+      let sig = '';
+      try { sig = j ? JSON.stringify(j) : ''; } catch { sig = ''; }
+
+      if (!modalCtx.invoiceEdits || typeof modalCtx.invoiceEdits !== 'object') {
+        modalCtx.invoiceEdits = {
+          remove_invoice_line_ids: new Set(),
+          add_timesheet_ids: new Set(),
+          add_adjustments: [],
+          remove_segment_refs: [],
+          add_segment_refs: [],
+          reference_updates: [],
+          staged_status: { issued: null, paid: null, on_hold: null },
+          staged_dates: { issued_at_utc: null, paid_at_utc: null, status_date_utc: null }
+        };
+      }
+
+      const e = modalCtx.invoiceEdits;
+
+      const applyJson = () => {
+        // Always rebuild from json mirror when it changes (handles showModal restore)
+        e.remove_invoice_line_ids = new Set(Array.isArray(j?.remove_invoice_line_ids) ? j.remove_invoice_line_ids : []);
+        e.add_timesheet_ids = new Set(Array.isArray(j?.add_timesheet_ids) ? j.add_timesheet_ids : []);
+
+        e.add_adjustments = Array.isArray(j?.add_adjustments) ? cloneJson(j.add_adjustments, []) : [];
+        e.remove_segment_refs = Array.isArray(j?.remove_segment_refs) ? cloneJson(j.remove_segment_refs, []) : [];
+        e.add_segment_refs = Array.isArray(j?.add_segment_refs) ? cloneJson(j.add_segment_refs, []) : [];
+        e.reference_updates = Array.isArray(j?.reference_updates) ? cloneJson(j.reference_updates, []) : [];
+
+        e.staged_status = (j?.staged_status && typeof j.staged_status === 'object')
+          ? { issued: j.staged_status.issued ?? null, paid: j.staged_status.paid ?? null, on_hold: j.staged_status.on_hold ?? null }
+          : { issued: null, paid: null, on_hold: null };
+
+        e.staged_dates = (j?.staged_dates && typeof j.staged_dates === 'object')
+          ? { issued_at_utc: j.staged_dates.issued_at_utc ?? null, paid_at_utc: j.staged_dates.paid_at_utc ?? null, status_date_utc: j.staged_dates.status_date_utc ?? null }
+          : { issued_at_utc: null, paid_at_utc: null, status_date_utc: null };
+      };
+
+      if (sig && sig !== modalCtx._editsJsonSig) {
+        applyJson();
+        modalCtx._editsJsonSig = sig;
+      } else {
+        // Ensure types (defensive) even when no restore occurred
+        if (!(e.remove_invoice_line_ids instanceof Set)) {
+          e.remove_invoice_line_ids = new Set(Array.isArray(j?.remove_invoice_line_ids) ? j.remove_invoice_line_ids : []);
+        }
+        if (!(e.add_timesheet_ids instanceof Set)) {
+          e.add_timesheet_ids = new Set(Array.isArray(j?.add_timesheet_ids) ? j.add_timesheet_ids : []);
+        }
+        if (!Array.isArray(e.add_adjustments)) e.add_adjustments = Array.isArray(j?.add_adjustments) ? cloneJson(j.add_adjustments, []) : [];
+        if (!Array.isArray(e.remove_segment_refs)) e.remove_segment_refs = Array.isArray(j?.remove_segment_refs) ? cloneJson(j.remove_segment_refs, []) : [];
+        if (!Array.isArray(e.add_segment_refs)) e.add_segment_refs = Array.isArray(j?.add_segment_refs) ? cloneJson(j.add_segment_refs, []) : [];
+        if (!Array.isArray(e.reference_updates)) e.reference_updates = Array.isArray(j?.reference_updates) ? cloneJson(j.reference_updates, []) : [];
+        if (!e.staged_status || typeof e.staged_status !== 'object') {
+          e.staged_status = (j?.staged_status && typeof j.staged_status === 'object')
+            ? { issued: j.staged_status.issued ?? null, paid: j.staged_status.paid ?? null, on_hold: j.staged_status.on_hold ?? null }
+            : { issued: null, paid: null, on_hold: null };
+        }
+        if (!e.staged_dates || typeof e.staged_dates !== 'object') {
+          e.staged_dates = (j?.staged_dates && typeof j.staged_dates === 'object')
+            ? { issued_at_utc: j.staged_dates.issued_at_utc ?? null, paid_at_utc: j.staged_dates.paid_at_utc ?? null, status_date_utc: j.staged_dates.status_date_utc ?? null }
+            : { issued_at_utc: null, paid_at_utc: null, status_date_utc: null };
+        }
+      }
+
+      // Keep runtime pointer mirrored for any existing code paths
+      modalCtx.invoiceState.invoiceEdits = e;
+
+      // Refresh json mirror so next snapshot is correct
+      modalCtx.invoiceState.invoiceEdits_json = editsToJson(e);
+      try { modalCtx._editsJsonSig = JSON.stringify(modalCtx.invoiceState.invoiceEdits_json || {}); } catch {}
+    } catch {}
+  };
+
+  const ensureUiDefaults = () => {
+    try {
+      if (!modalCtx.invoiceUi || typeof modalCtx.invoiceUi !== 'object') {
+        modalCtx.invoiceUi = { activeTab: modalCtx.activeTab, expanded_timesheets: {} };
+      }
+
+      // Restore tab state FROM invoiceUi (reverse sync) before rendering
+      if (modalCtx.invoiceUi.activeTab) {
+        modalCtx.activeTab = modalCtx.invoiceUi.activeTab;
+      }
+
+      // Ensure expanded_timesheets is a plain object
+      const ex = modalCtx.invoiceUi.expanded_timesheets;
+      if (!ex || typeof ex !== 'object' || Array.isArray(ex)) {
+        modalCtx.invoiceUi.expanded_timesheets = {};
+      }
+
+      // Then push active tab back into invoiceUi for snapshot consistency
+      modalCtx.invoiceUi.activeTab = modalCtx.activeTab;
     } catch {}
   };
 
   const safeHasPendingEdits = () => {
+    try {
+      if (typeof invoiceModalHasPendingEdits === 'function') {
+        return !!invoiceModalHasPendingEdits(modalCtx);
+      }
+    } catch {}
+
     const e = modalCtx?.invoiceEdits;
     if (!e) return false;
 
@@ -29240,7 +30277,10 @@ async function openInvoiceModal(row) {
       hasStagedStatus ||
       (e.remove_invoice_line_ids && e.remove_invoice_line_ids.size > 0) ||
       (e.add_timesheet_ids && e.add_timesheet_ids.size > 0) ||
-      (Array.isArray(e.add_adjustments) && e.add_adjustments.length > 0)
+      (Array.isArray(e.add_adjustments) && e.add_adjustments.length > 0) ||
+      (Array.isArray(e.remove_segment_refs) && e.remove_segment_refs.length > 0) ||
+      (Array.isArray(e.add_segment_refs) && e.add_segment_refs.length > 0) ||
+      (Array.isArray(e.reference_updates) && e.reference_updates.length > 0)
     );
   };
 
@@ -29273,12 +30313,19 @@ async function openInvoiceModal(row) {
   };
 
   const rerender = () => {
+    // Ensure modal UI and edits survive showModal snapshot/restore
+    ensureUiDefaults();
+    ensureEditsRuntimeFromJson();
+
+    // Keep snapshot mirrors aligned
     try {
-      if (modalCtx.invoiceUi && typeof modalCtx.invoiceUi === 'object') {
-        modalCtx.invoiceUi.activeTab = modalCtx.activeTab;
-      }
       if (modalCtx.invoiceState && typeof modalCtx.invoiceState === 'object') {
         modalCtx.invoiceState.invoiceEdits = modalCtx.invoiceEdits;
+        modalCtx.invoiceState.invoiceEdits_json = editsToJson(modalCtx.invoiceEdits);
+        try { modalCtx._editsJsonSig = JSON.stringify(modalCtx.invoiceState.invoiceEdits_json || {}); } catch {}
+      }
+      if (modalCtx.invoiceUi && typeof modalCtx.invoiceUi === 'object') {
+        modalCtx.invoiceUi.activeTab = modalCtx.activeTab;
       }
     } catch {}
 
@@ -29299,34 +30346,16 @@ async function openInvoiceModal(row) {
     } catch {}
   };
 
-  const reload = async ({ includeCorrespondence = false } = {}) => {
-    modalCtx.isBusy = true;
-    modalCtx.error = null;
-    rerender();
-
+  // ✅ Reload wrapper wired to invoiceModalReload (single GET, preserve tab, no correspondence)
+  const reload = async (opts = {}) => {
     try {
-      const qs = includeCorrespondence ? '?include_correspondence=1' : '';
-      const payload = await invoiceModalFetchJson(`/api/invoices/${encodeURIComponent(invoiceId)}${qs}`);
+      await invoiceModalReload(modalCtx, {
+        clearEdits: !!opts.clearEdits,
+        preserveTab: (opts.preserveTab !== false),
+        rerender
+      });
 
-      // ✅ Store on both canonical holders:
-      modalCtx.dataLoaded = payload;
-      modalCtx.invoiceDetail = payload;
-
-      // ✅ Ensure modalCtx.data remains "stable id + payload" for:
-      // - invoiceModalGetInvoiceData (expects .invoice/.items/etc on modalCtx.data)
-      // - related menu / modal framework (expects modalCtx.data.id)
-      modalCtx.data = { id: invoiceId, ...(payload || {}) };
-
-    } catch (e) {
-      modalCtx.error = String(e?.message || e || 'Failed to load invoice');
-      modalCtx.dataLoaded = null;
-      modalCtx.invoiceDetail = null;
-      modalCtx.data = { id: invoiceId };
-    } finally {
-      modalCtx.isBusy = false;
-
-      // ✅ Only hard-block CREDIT_NOTE from entering edit mode.
-      // Issued/Paid invoices remain editable for status toggles under the new model.
+      // ✅ Keep existing CREDIT_NOTE hard block (front-end only), and ensure staged buckets are cleared too.
       try {
         const inv = modalCtx?.data?.invoice || null;
         const typ = String(inv?.type || '').toUpperCase();
@@ -29337,9 +30366,35 @@ async function openInvoiceModal(row) {
           }
           invoiceModalResetEdits(modalCtx);
           resetStagedStatus();
+
+          // Ensure new staging buckets are also cleared even if reset helper has not been extended yet
+          try {
+            if (modalCtx.invoiceEdits && typeof modalCtx.invoiceEdits === 'object') {
+              if (Array.isArray(modalCtx.invoiceEdits.remove_segment_refs)) modalCtx.invoiceEdits.remove_segment_refs.length = 0;
+              else modalCtx.invoiceEdits.remove_segment_refs = [];
+
+              if (Array.isArray(modalCtx.invoiceEdits.add_segment_refs)) modalCtx.invoiceEdits.add_segment_refs.length = 0;
+              else modalCtx.invoiceEdits.add_segment_refs = [];
+
+              if (Array.isArray(modalCtx.invoiceEdits.reference_updates)) modalCtx.invoiceEdits.reference_updates.length = 0;
+              else modalCtx.invoiceEdits.reference_updates = [];
+            }
+          } catch {}
+
+          // Keep json mirror aligned after the forced reset
+          try {
+            if (modalCtx.invoiceState && typeof modalCtx.invoiceState === 'object') {
+              modalCtx.invoiceState.invoiceEdits = modalCtx.invoiceEdits;
+              modalCtx.invoiceState.invoiceEdits_json = editsToJson(modalCtx.invoiceEdits);
+              try { modalCtx._editsJsonSig = JSON.stringify(modalCtx.invoiceState.invoiceEdits_json || {}); } catch {}
+            }
+          } catch {}
         }
       } catch {}
 
+      rerender();
+    } catch (e) {
+      modalCtx.error = String(e?.message || e || 'Failed to load invoice');
       rerender();
     }
   };
@@ -29347,11 +30402,30 @@ async function openInvoiceModal(row) {
   showModal(
     'Invoice',
     [{ key: 'invoice', label: 'Invoice' }],
-    () => `
-      <div id="invModalRoot">
-        ${renderInvoiceModalShell(modalCtx)}
-      </div>
-    `,
+    () => {
+      // IMPORTANT: showModal re-renders by calling this function directly after snapshot/restore.
+      // So we must ensure UI + edit state are re-synced BEFORE generating HTML.
+      ensureUiDefaults();
+      ensureEditsRuntimeFromJson();
+      syncEditingFromFrame();
+
+      try {
+        if (modalCtx.invoiceState && typeof modalCtx.invoiceState === 'object') {
+          modalCtx.invoiceState.invoiceEdits = modalCtx.invoiceEdits;
+          modalCtx.invoiceState.invoiceEdits_json = editsToJson(modalCtx.invoiceEdits);
+          try { modalCtx._editsJsonSig = JSON.stringify(modalCtx.invoiceState.invoiceEdits_json || {}); } catch {}
+        }
+        if (modalCtx.invoiceUi && typeof modalCtx.invoiceUi === 'object') {
+          modalCtx.invoiceUi.activeTab = modalCtx.activeTab;
+        }
+      } catch {}
+
+      return `
+        <div id="invModalRoot">
+          ${renderInvoiceModalShell(modalCtx)}
+        </div>
+      `;
+    },
     async () => {
       if (!safeHasPendingEdits()) return true;
       await invoiceModalSaveEdits(modalCtx, { rerender, reload });
@@ -29383,7 +30457,6 @@ async function openInvoiceModal(row) {
 
   await reload();
 }
-
 
 function invoiceModalNewClientToken() {
   try {
@@ -29529,8 +30602,54 @@ async function openInvoiceAddAdjustmentModal(modalCtx, { rerender }) {
   }
 }
 
+async function invoiceModalEnsureEligibleTimesheets(modalCtx) {
+  // One-call discipline
+  if (modalCtx.eligibleTimesheetsCache) return modalCtx.eligibleTimesheetsCache;
+
+  const invoiceId = modalCtx?.invoiceId;
+  if (!invoiceId) throw new Error('Missing invoiceId');
+
+  const res = await invoiceModalFetchJson(`/api/invoices/${encodeURIComponent(invoiceId)}/eligible-timesheets`);
+
+  // Handler returns a JSON object; tolerate array wrapper just in case
+  const obj = Array.isArray(res) ? (res[0] ?? {}) : (res ?? {});
+  const list = Array.isArray(obj?.timesheets) ? obj.timesheets : [];
+
+  // Build fast lookup maps for segment-level preview totals and UI
+  // - byTimesheetId: timesheet_id -> timesheet object
+  // - bySegKey: `${tsfin_id}::${segment_id}` -> segment object (from eligible_segments only)
+  const byTimesheetId = new Map();
+  const bySegKey = new Map();
+
+  for (const t of list) {
+    if (!t || typeof t !== 'object') continue;
+    const tsId = String(t?.timesheet_id || '').trim();
+    if (tsId) byTimesheetId.set(tsId, t);
+
+    const tsfinId = String(t?.tsfin_id || '').trim();
+    const segs = Array.isArray(t?.eligible_segments) ? t.eligible_segments : [];
+    if (tsfinId && segs.length) {
+      for (const s of segs) {
+        if (!s || typeof s !== 'object') continue;
+        const segId = String(s?.segment_id || '').trim();
+        if (!segId) continue;
+        bySegKey.set(`${tsfinId}::${segId}`, s);
+      }
+    }
+  }
+
+  // Cache full backend object + fast lookup helpers (no per-timesheet calls)
+  obj._byTimesheetId = byTimesheetId;
+  obj._bySegKey = bySegKey;
+
+  modalCtx.eligibleTimesheetsCache = obj;
+  return obj;
+}
+
+
 async function openInvoiceAddTimesheetsModal(modalCtx, { rerender }) {
-  const { invoice, items } = invoiceModalGetInvoiceData(modalCtx);
+  const invData = invoiceModalGetInvoiceData(modalCtx);
+  const { invoice, items } = invData;
 
   // Ensure showModal uses the invoice modal ctx (shared context across modal stack)
   try { window.modalCtx = modalCtx; } catch {}
@@ -29541,6 +30660,8 @@ async function openInvoiceAddTimesheetsModal(modalCtx, { rerender }) {
     const s = x.toFixed(2);
     return (x > 0 ? `+${s}` : s);
   };
+
+  const fmtHours = (n) => invoiceModalFmtHours(Number(n || 0));
 
   // Determine whether user is allowed to edit lines right now (with staging)
   const canEditLines = invoiceModalIsEditable(invoice, modalCtx, 'lines');
@@ -29559,7 +30680,6 @@ async function openInvoiceAddTimesheetsModal(modalCtx, { rerender }) {
 
   let bannerHtml = '';
   if (!canEditLines) {
-    // You asked for banner "Unissue invoice first" (and also remember paid blocks unissue).
     if (effPaid) {
       bannerHtml = `
         <div class="alert alert-warning py-2 mb-3">
@@ -29581,58 +30701,177 @@ async function openInvoiceAddTimesheetsModal(modalCtx, { rerender }) {
     }
   }
 
-  // Ensure cache
+  // Ensure cache (one call) + fast segment lookup map
   const eligible = await invoiceModalEnsureEligibleTimesheets(modalCtx);
   const all = Array.isArray(eligible?.timesheets) ? eligible.timesheets : [];
+  const bySegKey = eligible?._bySegKey instanceof Map ? eligible._bySegKey : new Map();
 
+  // Timesheets already on invoice (any line with that timesheet_id)
   const existingTs = new Set((items || []).map(it => String(it?.timesheet_id || '')).filter(Boolean));
 
+  // Ensure staged containers exist and are correct types
   modalCtx.invoiceEdits = modalCtx.invoiceEdits || {};
   modalCtx.invoiceEdits.add_timesheet_ids = (modalCtx.invoiceEdits.add_timesheet_ids instanceof Set)
     ? modalCtx.invoiceEdits.add_timesheet_ids
     : new Set();
 
-  const stagedTs = modalCtx.invoiceEdits.add_timesheet_ids;
+  // Segment staging array
+  modalCtx.invoiceEdits.add_segment_refs = Array.isArray(modalCtx.invoiceEdits.add_segment_refs)
+    ? modalCtx.invoiceEdits.add_segment_refs
+    : [];
 
+  const stagedTs = modalCtx.invoiceEdits.add_timesheet_ids;
+  const stagedSeg = modalCtx.invoiceEdits.add_segment_refs;
+
+  const segKey = (tsfinId, segId) => `${String(tsfinId || '')}::${String(segId || '')}`;
+
+  const segIsStaged = (tsfinId, segId) => {
+    const k = segKey(tsfinId, segId);
+    for (const r of stagedSeg) {
+      if (!r || typeof r !== 'object') continue;
+      if (segKey(r.tsfin_id, r.segment_id) === k) return true;
+    }
+    return false;
+  };
+
+  const stageSeg = (tsfinId, segId, checked) => {
+    const tsfin_id = String(tsfinId || '').trim();
+    const segment_id = String(segId || '').trim();
+    if (!tsfin_id || !segment_id) return;
+
+    const k = segKey(tsfin_id, segment_id);
+
+    // remove existing
+    for (let i = stagedSeg.length - 1; i >= 0; i--) {
+      const r = stagedSeg[i];
+      if (!r || typeof r !== 'object') continue;
+      if (segKey(r.tsfin_id, r.segment_id) === k) {
+        stagedSeg.splice(i, 1);
+      }
+    }
+
+    if (checked) {
+      stagedSeg.push({ tsfin_id, segment_id });
+    }
+  };
+
+  // Only show eligible timesheets that are not already on invoice
   const rows = all.filter(t => {
     const id = String(t?.timesheet_id || '');
     if (!id) return false;
-    if (existingTs.has(id)) return false; // already on invoice
+    if (existingTs.has(id)) return false;
     return true;
   });
 
+  const fmtSegRow = (tsId, tsfinId, s, disabled) => {
+    const segId = String(s?.segment_id || '').trim();
+    const k = segKey(tsfinId, segId);
+    const checked = segIsStaged(tsfinId, segId) ? 'checked' : '';
+
+    // Segment summary fields
+    const date = escapeHtml(String(s?.date || ''));
+    const start = escapeHtml(String(s?.start_utc || s?.start || ''));
+    const end = escapeHtml(String(s?.end_utc || s?.end || ''));
+    const hrs = fmtHours(Number(
+      (s?.hours_day || 0) +
+      (s?.hours_night || 0) +
+      (s?.hours_sat || 0) +
+      (s?.hours_sun || 0) +
+      (s?.hours_bh || 0)
+    ));
+    const chg = fmtMoney(Number(s?.charge_amount || 0));
+    const pay = fmtMoney(Number(s?.pay_amount || 0));
+    const ref = escapeHtml(String(s?.ref_num || ''));
+
+    const segDisabled = disabled ? 'disabled' : '';
+    const opacity = disabled ? 'opacity-50' : '';
+
+    return `
+      <label class="d-flex align-items-start justify-content-between border rounded p-2 mb-2 ${opacity}" style="margin-left:28px;">
+        <div class="d-flex align-items-start gap-2">
+          <input type="checkbox"
+            class="form-check-input"
+            data-kind="seg"
+            data-timesheet-id="${escapeHtml(tsId)}"
+            data-tsfin-id="${escapeHtml(tsfinId)}"
+            data-segment-id="${escapeHtml(segId)}"
+            ${checked}
+            ${segDisabled}
+          />
+          <div>
+            <div class="fw-semibold">${date} <span class="text-muted small">${start} → ${end}</span></div>
+            <div class="text-muted small">
+              Hours: ${escapeHtml(String(hrs))} · Ref: ${ref || '—'}
+            </div>
+          </div>
+        </div>
+        <div class="text-end">
+          <div class="fw-semibold">${escapeHtml(String(chg))}</div>
+          <div class="text-muted small">Pay: ${escapeHtml(String(pay))}</div>
+        </div>
+      </label>
+    `;
+  };
+
   const fmtRow = (t) => {
-    const tsId = String(t?.timesheet_id || '');
+    const tsId = String(t?.timesheet_id || '').trim();
     const name = escapeHtml(String(t?.candidate_name || t?.candidate_id || tsId));
     const we = escapeHtml(String(t?.source_week_ending_date || ''));
-    const hrs = invoiceModalFmtHours(Number(t?.invoiceable_hours || 0));
+    const hrs = fmtHours(Number(t?.invoiceable_hours || 0));
     const ex = fmtMoney(Number(t?.invoiceable_charge_ex_vat || 0));
 
     const blockedByHr = !!t?.blocked_by_hr_validation;
     const checked = stagedTs.has(tsId) ? 'checked' : '';
 
+    const mode = String(t?.invoice_breakdown_mode || '').toUpperCase();
+    const isSegments = (mode === 'SEGMENTS');
+    const tsfinId = String(t?.tsfin_id || '').trim();
+
     // Disable selection if:
     // - HR blocked, OR
     // - user cannot edit lines right now (must unissue/unpay first)
-    const disabled = (blockedByHr || !canEditLines) ? 'disabled' : '';
+    const disabled = (blockedByHr || !canEditLines);
 
     const badge = blockedByHr ? `<span class="badge bg-warning text-dark ms-2">HR blocked</span>` : '';
-    const opacity = (blockedByHr || !canEditLines) ? 'opacity-50' : '';
+    const opacity = disabled ? 'opacity-50' : '';
+
+    const tsCheckboxDisabled = (disabled || isSegments) ? 'disabled' : ''; // SEGMENTS uses segment checkboxes only
+
+    const segs = Array.isArray(t?.eligible_segments) ? t.eligible_segments : [];
+    const segListHtml = (isSegments && tsfinId && segs.length)
+      ? `
+        <div class="mt-2">
+          ${segs.map(s => fmtSegRow(tsId, tsfinId, s, disabled)).join('')}
+        </div>
+      `
+      : (isSegments ? `<div class="text-muted small mt-2" style="margin-left:28px;">No eligible segments.</div>` : '');
+
+    const modePill = isSegments ? `<span class="badge bg-secondary ms-2">SEGMENTS</span>` : '';
 
     return `
-      <label class="d-flex align-items-center justify-content-between border rounded p-2 mb-2 ${opacity}">
-        <div class="d-flex align-items-center gap-2">
-          <input type="checkbox" class="form-check-input" value="${escapeHtml(tsId)}" ${checked} ${disabled}/>
-          <div>
-            <div class="fw-semibold">${name}${badge}</div>
-            <div class="text-muted small">Week ending: ${we}</div>
+      <div class="border rounded p-2 mb-2 ${opacity}">
+        <label class="d-flex align-items-center justify-content-between">
+          <div class="d-flex align-items-center gap-2">
+            <input type="checkbox"
+              class="form-check-input"
+              data-kind="ts"
+              value="${escapeHtml(tsId)}"
+              ${checked}
+              ${tsCheckboxDisabled}
+            />
+            <div>
+              <div class="fw-semibold">${name}${badge}${modePill}</div>
+              <div class="text-muted small">Week ending: ${we}</div>
+            </div>
           </div>
-        </div>
-        <div class="text-end">
-          <div class="fw-semibold">${ex}</div>
-          <div class="text-muted small">${hrs}</div>
-        </div>
-      </label>`;
+          <div class="text-end">
+            <div class="fw-semibold">${escapeHtml(String(ex))}</div>
+            <div class="text-muted small">${escapeHtml(String(hrs))}</div>
+          </div>
+        </label>
+        ${segListHtml}
+      </div>
+    `;
   };
 
   const html = `
@@ -29642,7 +30881,7 @@ async function openInvoiceAddTimesheetsModal(modalCtx, { rerender }) {
       ${bannerHtml}
 
       <div class="text-muted small mb-2">
-        Only timesheets eligible for this invoice’s client/week are shown. Amounts are segment-aware for the invoice week.
+        Only timesheets eligible for this invoice’s client/week are shown. Segment timesheets can be added by selecting individual segments.
       </div>
 
       <div id="invAddTsList" class="mt-2">
@@ -29653,7 +30892,7 @@ async function openInvoiceAddTimesheetsModal(modalCtx, { rerender }) {
         <button type="button" class="btn btn-sm btn-secondary" id="invAddTsCancel">Cancel</button>
         <button type="button" class="btn btn-sm btn-primary" id="invAddTsConfirm"
           ${rows.length && canEditLines ? '' : 'disabled'}
-        >Add selected</button>
+        >Apply</button>
       </div>
     </div>
   `;
@@ -29692,14 +30931,30 @@ async function openInvoiceAddTimesheetsModal(modalCtx, { rerender }) {
       if (!canEditLines) return;
 
       const list = document.getElementById('invAddTsList');
-      const checks = list ? Array.from(list.querySelectorAll('input[type="checkbox"]')) : [];
+      if (!list) {
+        closeTop();
+        try { setTimeout(() => { rerender && rerender(); }, 0); } catch {}
+        return;
+      }
 
-      // Stage ONLY on confirm
-      for (const c of checks) {
+      // Stage ONLY on Apply
+      // - For non-SEGMENTS timesheets: use add_timesheet_ids Set
+      // - For SEGMENTS timesheets: stage add_segment_refs [{tsfin_id,segment_id}]
+      const tsChecks = Array.from(list.querySelectorAll('input[type="checkbox"][data-kind="ts"]'));
+      for (const c of tsChecks) {
         const id = String(c.value || '').trim();
         if (!id) continue;
+        // only non-segment timesheets have enabled checkbox; but keep logic safe
         if (c.checked) stagedTs.add(id);
         else stagedTs.delete(id);
+      }
+
+      const segChecks = Array.from(list.querySelectorAll('input[type="checkbox"][data-kind="seg"]'));
+      for (const c of segChecks) {
+        const tsfinId = String(c.getAttribute('data-tsfin-id') || '').trim();
+        const segId = String(c.getAttribute('data-segment-id') || '').trim();
+        if (!tsfinId || !segId) continue;
+        stageSeg(tsfinId, segId, !!c.checked);
       }
 
       closeTop();
@@ -29710,13 +30965,497 @@ async function openInvoiceAddTimesheetsModal(modalCtx, { rerender }) {
   }
 }
 
+async function openInvoiceReferenceNumbersModal(parentModalCtx, { rerender } = {}) {
+  if (!parentModalCtx || typeof parentModalCtx !== 'object') throw new Error('Missing parent modal context.');
+
+  // Ensure showModal uses the invoice modal ctx (shared context across modal stack)
+  try { window.modalCtx = parentModalCtx; } catch {}
+
+  // Source rows must already be present (zero extra calls)
+  const refRows = Array.isArray(parentModalCtx?.reference_rows)
+    ? parentModalCtx.reference_rows
+    : (Array.isArray(parentModalCtx?.data?.reference_rows) ? parentModalCtx.data.reference_rows : []);
+
+  // Ensure staging container exists
+  parentModalCtx.invoiceEdits = (parentModalCtx.invoiceEdits && typeof parentModalCtx.invoiceEdits === 'object')
+    ? parentModalCtx.invoiceEdits
+    : {};
+  parentModalCtx.invoiceEdits.reference_updates = Array.isArray(parentModalCtx.invoiceEdits.reference_updates)
+    ? parentModalCtx.invoiceEdits.reference_updates
+    : [];
+
+  // Build stable row key (prefer explicit key fields if present; else fallback to deterministic composite)
+  const rowKeyOf = (r) => {
+    if (!r || typeof r !== 'object') return '';
+    const explicit =
+      (r.row_key != null && String(r.row_key).trim()) ? String(r.row_key).trim()
+      : ((r.reference_row_id != null && String(r.reference_row_id).trim()) ? String(r.reference_row_id).trim() : '');
+    if (explicit) return explicit;
+
+    const tsid = (r.timesheet_id != null) ? String(r.timesheet_id) : '';
+    const dt = (r.day_date != null) ? String(r.day_date) : (r.date != null ? String(r.date) : '');
+    const kind = (r.kind != null) ? String(r.kind) : '';
+    return `${tsid}::${dt}::${kind}`;
+  };
+
+  // Existing staged edits map by row key
+  const stagedByKey = new Map();
+  for (const u of parentModalCtx.invoiceEdits.reference_updates) {
+    if (!u || typeof u !== 'object') continue;
+    const k = (u.row_key != null && String(u.row_key).trim()) ? String(u.row_key).trim() : '';
+    if (!k) continue;
+    stagedByKey.set(k, u);
+  }
+
+  const fmtRowCandidate = (r) => {
+    const name =
+      r?.candidate_display ||
+      r?.candidate_name ||
+      r?.worker_name ||
+      '';
+    const tsRef =
+      r?.timesheet_ref ||
+      r?.timesheet_reference ||
+      r?.timesheet_id ||
+      '';
+    if (name) return String(name);
+    return tsRef ? String(tsRef) : '';
+  };
+
+  const fmtRowDate = (r) => {
+    return (
+      r?.day_date ||
+      r?.date ||
+      r?.week_ending_date ||
+      ''
+    );
+  };
+
+  // Build initial editable values per row from staged updates (if any) else from current_reference
+  const initialValueFor = (r) => {
+    const k = rowKeyOf(r);
+    const staged = stagedByKey.get(k);
+    if (staged && staged.current_reference != null) return String(staged.current_reference);
+    if (r && r.current_reference != null) return String(r.current_reference);
+    return '';
+  };
+
+  const renderTableRows = () => {
+    if (!refRows.length) {
+      return `<tr><td colspan="5" class="text-muted">No reference rows on this invoice.</td></tr>`;
+    }
+
+    return refRows.map((r, idx) => {
+      const k = rowKeyOf(r);
+      const who = escapeHtml(fmtRowCandidate(r));
+      const dt = escapeHtml(fmtRowDate(r));
+      const isReq = !!r?.is_required;
+
+      const cur = initialValueFor(r);
+      const curTrim = String(cur || '').trim();
+      const missing = isReq && !curTrim;
+
+      const reqTxt = isReq ? 'Yes' : 'No';
+      const missChip = missing ? `<span class="pill pill-warn">Missing</span>` : '';
+
+      return `
+        <tr data-ref-row="${escapeHtml(k)}">
+          <td>${who || '—'}</td>
+          <td>${dt || '—'}</td>
+          <td style="min-width:240px;">
+            <input type="text"
+              class="form-control form-control-sm"
+              data-ref-input="1"
+              data-ref-row="${escapeHtml(k)}"
+              value="${escapeHtml(cur)}"
+              placeholder="Enter reference"
+            />
+          </td>
+          <td>${escapeHtml(reqTxt)}</td>
+          <td class="text-end">${missChip}</td>
+        </tr>
+      `;
+    }).join('');
+  };
+
+  const html = `
+    <div class="p-3">
+      <div class="h6 mb-3">Reference Numbers</div>
+
+      <div class="text-muted small mb-2">
+        Edit references below. Changes are staged and only applied when you press <b>Save</b> on the invoice.
+      </div>
+
+      <div class="table-responsive">
+        <table class="table table-sm align-middle" style="margin:0;">
+          <thead>
+            <tr>
+              <th>Candidate / Timesheet</th>
+              <th>Date</th>
+              <th>Reference</th>
+              <th>Required</th>
+              <th class="text-end"></th>
+            </tr>
+          </thead>
+          <tbody>
+            ${renderTableRows()}
+          </tbody>
+        </table>
+      </div>
+
+      <div class="d-flex justify-content-end gap-2 mt-3">
+        <button type="button" class="btn btn-sm btn-secondary" id="invRefCancel">Close</button>
+        <button type="button" class="btn btn-sm btn-primary" id="invRefApply" ${refRows.length ? '' : 'disabled'}>Apply</button>
+      </div>
+    </div>
+  `;
+
+  showModal(
+    'Reference Numbers',
+    [{ key: 'main', label: 'References' }],
+    () => html,
+    null,
+    true,
+    null,
+    { kind: 'invoice-reference-numbers', noParentGate: true }
+  );
+
+  const closeTop = () => {
+    try { document.getElementById('btnCloseModal')?.click(); } catch {}
+  };
+
+  const btnCancel = document.getElementById('invRefCancel');
+  const btnApply = document.getElementById('invRefApply');
+
+  if (btnCancel && !btnCancel.__invWired) {
+    btnCancel.__invWired = true;
+    btnCancel.onclick = (e) => {
+      e.preventDefault();
+      closeTop();
+    };
+  }
+
+  if (btnApply && !btnApply.__invWired) {
+    btnApply.__invWired = true;
+    btnApply.onclick = (e) => {
+      e.preventDefault();
+
+      // Build staged updates (do not submit)
+      const listRoot = document.querySelector('#modalBody');
+      const inputs = listRoot ? Array.from(listRoot.querySelectorAll('input[data-ref-input="1"]')) : [];
+
+      // Start from existing staged updates map, then overwrite with current inputs
+      const next = new Map();
+      for (const u of parentModalCtx.invoiceEdits.reference_updates) {
+        if (!u || typeof u !== 'object') continue;
+        const k = (u.row_key != null && String(u.row_key).trim()) ? String(u.row_key).trim() : '';
+        if (!k) continue;
+        next.set(k, u);
+      }
+
+      for (const inp of inputs) {
+        const k = String(inp.getAttribute('data-ref-row') || '').trim();
+        if (!k) continue;
+        const val = String(inp.value || '').trim();
+
+        // Find the source row so we can include the backend-expected identifiers
+        const src = refRows.find(r => rowKeyOf(r) === k) || null;
+
+        // Backend-expected shape (opaque to FE beyond providing identifiers + value)
+        const upd = {
+          row_key: k,
+          timesheet_id: src?.timesheet_id != null ? String(src.timesheet_id) : null,
+          day_date: src?.day_date != null ? String(src.day_date) : (src?.date != null ? String(src.date) : null),
+          kind: src?.kind != null ? String(src.kind) : null,
+          current_reference: val
+        };
+
+        next.set(k, upd);
+      }
+
+      // Store staged updates back onto parent ctx (staged only)
+      parentModalCtx.invoiceEdits.reference_updates = Array.from(next.values());
+
+      closeTop();
+
+      // Ensure parent invoice modal reflects staged change immediately
+      try { setTimeout(() => { rerender && rerender(); }, 0); } catch {}
+    };
+  }
+}
 
 
+function renderInvoiceModalEvidenceTab(modalCtx, invoiceData) {
+  const invData = (invoiceData && typeof invoiceData === 'object')
+    ? invoiceData
+    : invoiceModalGetInvoiceData(modalCtx);
+
+  const pickUrl = (e) => {
+    if (!e || typeof e !== 'object') return '';
+    return String(
+      e.url ||
+      e.file_url ||
+      e.signed_url ||
+      e.download_url ||
+      e.public_url ||
+      e.link ||
+      ''
+    ).trim();
+  };
+
+  const pickName = (e) => {
+    if (!e || typeof e !== 'object') return '';
+    return String(
+      e.display_name ||
+      e.filename ||
+      e.file_name ||
+      e.name ||
+      e.title ||
+      e.kind ||
+      'Evidence'
+    ).trim();
+  };
+
+  const pickTs = (e) => {
+    if (!e || typeof e !== 'object') return '';
+    return String(
+      e.created_at ||
+      e.uploaded_at ||
+      e.ts_utc ||
+      e.created_at_utc ||
+      ''
+    ).trim();
+  };
+
+  const fmtTs = (iso) => {
+    if (!iso) return '—';
+    try { return fmtLondonTs(iso); } catch { return String(iso); }
+  };
+
+  const renderList = (arr) => {
+    const list = Array.isArray(arr) ? arr : [];
+    if (!list.length) return `<div class="text-muted">No evidence attached.</div>`;
+
+    const rows = list.map((e) => {
+      const name = pickName(e);
+      const ts = fmtTs(pickTs(e));
+      const url = pickUrl(e);
+
+      const link = url
+        ? `<a href="${escapeHtml(url)}" target="_blank" rel="noopener">Download</a>`
+        : `<span class="text-muted">—</span>`;
+
+      return `
+        <tr>
+          <td>${escapeHtml(name)}</td>
+          <td class="text-muted small">${escapeHtml(ts)}</td>
+          <td class="text-end">${link}</td>
+        </tr>
+      `;
+    }).join('');
+
+    return `
+      <div class="table-responsive">
+        <table class="table table-sm align-middle" style="margin:0;">
+          <thead>
+            <tr>
+              <th>File</th>
+              <th>Uploaded</th>
+              <th class="text-end">Link</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${rows}
+          </tbody>
+        </table>
+      </div>
+    `;
+  };
+
+  const tsEvidence = Array.isArray(invData?.timesheet_evidence) ? invData.timesheet_evidence : [];
+  const otherEvidence = Array.isArray(invData?.evidence_other) ? invData.evidence_other : [];
+  const legacyEvidence = Array.isArray(invData?.evidence) ? invData.evidence : [];
+
+  const hasAny = (tsEvidence.length + otherEvidence.length + legacyEvidence.length) > 0;
+
+  // Fallback: if timesheet_evidence and evidence_other are empty, use legacy evidence as "Timesheet Evidence"
+  const useLegacyAsFallback = (!tsEvidence.length && !otherEvidence.length && legacyEvidence.length);
+
+  const blockTimesheet = useLegacyAsFallback ? legacyEvidence : tsEvidence;
+  const blockOther = useLegacyAsFallback ? [] : otherEvidence;
+
+  if (!hasAny) {
+    return `<div class="text-muted">No evidence attached.</div>`;
+  }
+
+  return `
+    <div class="p-2">
+      <div class="mb-3">
+        <div class="fw-semibold mb-2">Timesheet Evidence</div>
+        ${renderList(blockTimesheet)}
+      </div>
+
+      <div class="mb-2">
+        <div class="fw-semibold mb-2">Other Evidence</div>
+        ${blockOther.length ? renderList(blockOther) : `<div class="text-muted">No evidence attached.</div>`}
+      </div>
+    </div>
+  `;
+}
 
 
+function renderInvoiceModalHistoryTab(modalCtx, invoiceData) {
+  const invData = (invoiceData && typeof invoiceData === 'object')
+    ? invoiceData
+    : invoiceModalGetInvoiceData(modalCtx);
 
+  const list = Array.isArray(invData?.history) ? invData.history : [];
 
+  const fmtTs = (iso) => {
+    if (!iso) return '—';
+    try { return fmtLondonTs(iso); } catch { return String(iso); }
+  };
 
+  const pickTs = (h) => {
+    if (!h || typeof h !== 'object') return '';
+    return String(
+      h.ts_utc ||
+      h.created_at ||
+      h.created_at_utc ||
+      h.sent_at_utc ||
+      h.event_at_utc ||
+      h.occurred_at_utc ||
+      ''
+    ).trim();
+  };
+
+  const isEmailEvent = (h) => {
+    if (!h || typeof h !== 'object') return false;
+    const t = String(h.type || h.kind || h.source || '').toUpperCase();
+    // Heuristic: mail/outbox-style events often include to/subject/status
+    if (h.to || h.recipient || h.email_to || h.subject || h.status) return true;
+    return (t.includes('MAIL') || t.includes('EMAIL') || t.includes('OUTBOX'));
+  };
+
+  const actionText = (h) => {
+    if (!h || typeof h !== 'object') return '';
+    const a =
+      h.action ||
+      h.event ||
+      h.kind ||
+      h.type ||
+      h.status ||
+      '';
+    return String(a || '').trim();
+  };
+
+  const userText = (h) => {
+    if (!h || typeof h !== 'object') return '';
+    const u =
+      h.actor_display ||
+      h.actor_name ||
+      h.user_display ||
+      h.user_name ||
+      h.created_by_display ||
+      h.created_by ||
+      '';
+    return String(u || '').trim();
+  };
+
+  const detailsText = (h) => {
+    if (!h || typeof h !== 'object') return '';
+    const d =
+      h.detail ||
+      h.details ||
+      h.message ||
+      h.summary ||
+      '';
+    return String(d || '').trim();
+  };
+
+  const emailInline = (h) => {
+    const to = String(h.to || h.recipient || h.email_to || '').trim();
+    const subj = String(h.subject || h.email_subject || '').trim();
+    const st = String(h.status || h.delivery_status || '').trim();
+    const parts = [];
+    if (to) parts.push(`To: ${to}`);
+    if (subj) parts.push(`Subject: ${subj}`);
+    if (st) parts.push(`Status: ${st}`);
+    return parts.join(' · ');
+  };
+
+  const safeJson = (v) => {
+    try { return JSON.stringify(v, null, 2); } catch { return ''; }
+  };
+
+  if (!list.length) {
+    return `<div class="p-2 text-muted">No history.</div>`;
+  }
+
+  // Assume newest-first; if not, sort descending by timestamp.
+  const sorted = (() => {
+    const arr = list.slice();
+    try {
+      arr.sort((a, b) => {
+        const ta = Date.parse(pickTs(a) || '') || 0;
+        const tb = Date.parse(pickTs(b) || '') || 0;
+        return tb - ta;
+      });
+    } catch {}
+    return arr;
+  })();
+
+  const rows = sorted.map((h) => {
+    const ts = fmtTs(pickTs(h));
+    const isEmail = isEmailEvent(h);
+
+    const action = isEmail ? 'Email' : (actionText(h) || 'Event');
+    const user = userText(h) || '—';
+
+    const inline = isEmail ? emailInline(h) : detailsText(h);
+    const inlineSafe = inline ? escapeHtml(inline) : '—';
+
+    const raw = safeJson(h);
+    const canExpand = !!raw;
+
+    return `
+      <tr>
+        <td class="text-muted small" style="white-space:nowrap;">${escapeHtml(ts)}</td>
+        <td>${escapeHtml(action)}</td>
+        <td>${escapeHtml(user)}</td>
+        <td>
+          <div>${inlineSafe}</div>
+          ${canExpand ? `
+            <details class="mt-1">
+              <summary class="text-muted small" style="cursor:pointer;">Details</summary>
+              <pre class="mt-2 p-2 bg-light border rounded" style="white-space:pre-wrap; word-break:break-word; margin:0;">${escapeHtml(raw)}</pre>
+            </details>
+          ` : ''}
+        </td>
+      </tr>
+    `;
+  }).join('');
+
+  return `
+    <div class="p-2">
+      <div class="table-responsive">
+        <table class="table table-sm align-middle" style="margin:0;">
+          <thead>
+            <tr>
+              <th style="width:160px;">Date/Time</th>
+              <th style="width:140px;">Action</th>
+              <th style="width:180px;">User</th>
+              <th>Details</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${rows}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  `;
+}
 
 
 
@@ -29757,7 +31496,18 @@ function renderInvoiceModalContent(modalCtx, invoiceData) {
     try { return new Date().toISOString(); } catch { return null; }
   };
 
-  const { invoice, header_snapshot_json, items, email_summary } = invoiceModalGetInvoiceData(modalCtx);
+  // Prefer the passed-in normalised object if supplied; otherwise normalise from modalCtx.
+  const invData = (invoiceData && typeof invoiceData === 'object')
+    ? invoiceData
+    : invoiceModalGetInvoiceData(modalCtx);
+
+  const {
+    invoice,
+    header_snapshot_json,
+    items,
+    email_summary,
+    reference_rows
+  } = invData || {};
 
   if (!invoice) {
     return `<div class="p-3 text-muted">Invoice not found.</div>`;
@@ -29849,7 +31599,9 @@ function renderInvoiceModalContent(modalCtx, invoiceData) {
     return (
       (e.remove_invoice_line_ids && e.remove_invoice_line_ids.size > 0) ||
       (e.add_timesheet_ids && e.add_timesheet_ids.size > 0) ||
-      (Array.isArray(e.add_adjustments) && e.add_adjustments.length > 0)
+      (Array.isArray(e.add_adjustments) && e.add_adjustments.length > 0) ||
+      (Array.isArray(e.remove_segment_refs) && e.remove_segment_refs.length > 0) ||
+      (Array.isArray(e.add_segment_refs) && e.add_segment_refs.length > 0)
     );
   })();
 
@@ -29858,7 +31610,12 @@ function renderInvoiceModalContent(modalCtx, invoiceData) {
     (st.paid !== null && st.paid !== undefined) ||
     (st.on_hold !== null && st.on_hold !== undefined);
 
-  const hasPendingEdits = hasLineEdits || hasStatusEdits;
+  const hasRefEdits = (() => {
+    const e = modalCtx?.invoiceEdits;
+    return !!(e && Array.isArray(e.reference_updates) && e.reference_updates.length > 0);
+  })();
+
+  const hasPendingEdits = hasLineEdits || hasStatusEdits || hasRefEdits;
 
   // Totals
   const currentTotals = {
@@ -29891,77 +31648,89 @@ function renderInvoiceModalContent(modalCtx, invoiceData) {
 
   const overduePill = overdue ? pillSpan('Overdue', 'pill-bad') : '';
 
+  // Email summary must come from invData (no extra calls)
   const emailedOnce = !!email_summary?.emailed_once;
   const emailLabel = emailedOnce ? 'Re-email' : 'Email';
+
+  // Email disable rule for closeout invoices
+  const doNotSend = !!invoice.do_not_send;
+  const emailDisabledAttr = doNotSend ? 'disabled' : '';
+  const emailTitle = doNotSend ? 'title="Do not send invoice (closeout)"' : '';
+
+  // Reference Numbers action (enabled even when ON_HOLD; disabled only if no rows)
+  const hasRefRows = Array.isArray(reference_rows) && reference_rows.length > 0;
+  const refDisabledAttr = hasRefRows ? '' : 'disabled';
+  const refTitle = hasRefRows ? '' : 'title="No reference rows on this invoice"';
 
   // ✅ Add buttons should only be enabled when canEditLines
   const addDisabledAttr = canEditLines ? '' : 'disabled';
   const addDisabledTitle = canEditLines ? '' : 'title="Unissue and unpay the invoice first (staged), then you can edit lines."';
+
+  // ON_HOLD reason text (surface the reason)
+  const holdReason = (invoice.on_hold_reason != null && String(invoice.on_hold_reason).trim())
+    ? String(invoice.on_hold_reason)
+    : '';
 
   return `
     <div class="p-2">
 
       ${modalCtx.error ? `<div class="alert alert-danger mb-3">${escapeHtml(modalCtx.error)}</div>` : ''}
 
-      <div class="mb-2">
-        <div class="h6 mb-1">${invoiceNo}</div>
-        <div class="text-muted small">${escapeHtml(String(clientName || ''))}</div>
+      <div class="mb-2 d-flex align-items-start justify-content-between gap-3" style="flex-wrap:wrap;">
+        <div>
+          <div class="h6 mb-1">${invoiceNo}</div>
+          <div class="text-muted small">${escapeHtml(String(clientName || ''))}</div>
+        </div>
+
+        <!-- ✅ Header pills top-right (no mini timestamps under pills) -->
+        <div class="d-flex align-items-center gap-2" style="margin-left:auto; flex-wrap:wrap; justify-content:flex-end;">
+          ${issuedPill}
+          ${paidPill}
+          ${holdPill}
+          ${overdue ? overduePill : ''}
+        </div>
       </div>
 
-      <!-- ✅ Structured 2-column header layout -->
-      <div class="d-flex gap-3 align-items-start mb-3" style="flex-wrap:wrap;">
-        <div style="flex:1;min-width:320px;">
-          <table class="table table-sm" style="margin:0;">
-            <tbody>
-              <tr>
-                <td class="mini text-muted" style="width:160px;">Invoice date</td>
-                <td class="fw-semibold">${escapeHtml(String(invoiceDate))}</td>
-              </tr>
-              <tr>
-                <td class="mini text-muted">Created</td>
-                <td class="fw-semibold">${escapeHtml(String(createdDate))}</td>
-              </tr>
-              <tr>
-                <td class="mini text-muted">Amount (ex VAT)</td>
-                <td class="fw-semibold">${fmtMoneyLocal(totalsToShow.subtotal_ex_vat)}</td>
-              </tr>
-              <tr>
-                <td class="mini text-muted">Amount (inc VAT)</td>
-                <td class="fw-semibold">${fmtMoneyLocal(totalsToShow.total_inc_vat)}</td>
-              </tr>
-              <tr>
-                <td class="mini text-muted">Issue Date</td>
-                <td class="fw-semibold">${escapeHtml(String(displayIssuedAt))}</td>
-              </tr>
-              <tr>
-                <td class="mini text-muted">Paid On</td>
-                <td class="fw-semibold">${escapeHtml(String(displayPaidAt))}</td>
-              </tr>
-              <tr>
-                <td class="mini text-muted">On Hold Since</td>
-                <td class="fw-semibold">${escapeHtml(String(displayHoldAt))}</td>
-              </tr>
-            </tbody>
-          </table>
+      ${effHold && holdReason ? `
+        <div class="alert alert-warning py-2 px-2 small mb-3">
+          <b>On hold:</b> ${escapeHtml(holdReason)}
         </div>
+      ` : ''}
 
-        <div style="min-width:220px;">
-          <div class="d-flex flex-column gap-2">
-            <div>
-              ${issuedPill}
-              <div class="mini text-muted mt-1">${escapeHtml(String(displayIssuedAt))}</div>
-            </div>
-            <div>
-              ${paidPill}
-              <div class="mini text-muted mt-1">${escapeHtml(String(displayPaidAt))}</div>
-            </div>
-            <div>
-              ${holdPill}
-              <div class="mini text-muted mt-1">${escapeHtml(String(displayHoldAt))}</div>
-            </div>
-            ${overdue ? `<div>${overduePill}</div>` : ''}
-          </div>
-        </div>
+      <!-- ✅ Structured details block; all dates live here (no duplicate mini dates under pills) -->
+      <div class="mb-3">
+        <table class="table table-sm" style="margin:0;">
+          <tbody>
+            <tr>
+              <td class="mini text-muted" style="width:160px;">Invoice date</td>
+              <td class="fw-semibold">${escapeHtml(String(invoiceDate))}</td>
+            </tr>
+            <tr>
+              <td class="mini text-muted">Created</td>
+              <td class="fw-semibold">${escapeHtml(String(createdDate))}</td>
+            </tr>
+            <tr>
+              <td class="mini text-muted">Amount (ex VAT)</td>
+              <td class="fw-semibold">${fmtMoneyLocal(totalsToShow.subtotal_ex_vat)}</td>
+            </tr>
+            <tr>
+              <td class="mini text-muted">Amount (inc VAT)</td>
+              <td class="fw-semibold">${fmtMoneyLocal(totalsToShow.total_inc_vat)}</td>
+            </tr>
+            <tr>
+              <td class="mini text-muted">Issue Date</td>
+              <td class="fw-semibold">${escapeHtml(String(displayIssuedAt))}</td>
+            </tr>
+            <tr>
+              <td class="mini text-muted">Paid On</td>
+              <td class="fw-semibold">${escapeHtml(String(displayPaidAt))}</td>
+            </tr>
+            <tr>
+              <td class="mini text-muted">On Hold Since</td>
+              <td class="fw-semibold">${escapeHtml(String(displayHoldAt))}</td>
+            </tr>
+          </tbody>
+        </table>
       </div>
 
       <div class="d-flex flex-wrap gap-2 align-items-center mb-3">
@@ -29969,8 +31738,13 @@ function renderInvoiceModalContent(modalCtx, invoiceData) {
           Open invoice PDF
         </button>
 
-        <button type="button" class="btn btn-sm btn-secondary" data-action="inv-email">
+        <button type="button" class="btn btn-sm btn-secondary" data-action="inv-email" ${emailDisabledAttr} ${emailTitle}>
           ${escapeHtml(emailLabel)}
+        </button>
+
+        <!-- ✅ Reference Numbers action (child modal) -->
+        <button type="button" class="btn btn-sm btn-outline-secondary" data-action="inv-open-reference-numbers" ${refDisabledAttr} ${refTitle}>
+          Reference Numbers
         </button>
 
         ${isEditing ? `
@@ -29996,65 +31770,17 @@ function renderInvoiceModalContent(modalCtx, invoiceData) {
 
 
 
-function renderInvoiceModalCorrespondenceTab(modalCtx, corrRows) {
-  // corrRows is only present if invoice was loaded with ?include_correspondence=1
-  if (modalCtx.isBusy && !corrRows) {
-    return `<div class="p-3 text-muted">Loading correspondence…</div>`;
-  }
-
-  if (!Array.isArray(corrRows)) {
-    return `
-      <div class="p-3">
-        <div class="text-muted mb-3">Correspondence not loaded.</div>
-        <button type="button" class="btn btn-sm btn-primary" data-action="inv-set-tab" data-tab="correspondence">
-          Load
-        </button>
-      </div>
-    `;
-  }
-
-  if (corrRows.length === 0) {
-    return `<div class="p-3 text-muted">No correspondence events found.</div>`;
-  }
-
-  const rowsHtml = corrRows.map(ev => {
-    const ts = escapeHtml(String(ev?.ts_utc || ''));
-    const action = escapeHtml(String(ev?.action || ''));
-    const mail = ev?.email || null;
-
-    const subj = mail?.subject ? escapeHtml(String(mail.subject)) : '';
-    const to = mail?.to ? escapeHtml(String(mail.to)) : '';
-    const status = mail?.status ? escapeHtml(String(mail.status)) : '';
-
-    return `
-      <div class="border rounded p-2 mb-2">
-        <div class="d-flex justify-content-between">
-          <div class="fw-semibold">${action}</div>
-          <div class="text-muted small">${ts}</div>
-        </div>
-        ${mail ? `
-          <div class="text-muted small mt-1">
-            <div><span class="me-2">To:</span>${to}</div>
-            <div><span class="me-2">Subject:</span>${subj}</div>
-            <div><span class="me-2">Status:</span>${status}</div>
-          </div>
-        ` : `
-          <div class="text-muted small mt-1">No mail_outbox details for this event.</div>
-        `}
-      </div>
-    `;
-  }).join('');
-
-  return `<div class="p-2">${rowsHtml}</div>`;
-}
-
 function renderInvoiceLinesTable(modalCtx, invoiceData, items) {
   const fmtMoneyLocal = (n) => {
     const x = invoiceModalRound2(Number(n || 0));
     return `£${x.toFixed(2)}`;
   };
 
-  const { invoice } = invoiceModalGetInvoiceData(modalCtx);
+  const invData = (invoiceData && typeof invoiceData === 'object')
+    ? invoiceData
+    : invoiceModalGetInvoiceData(modalCtx);
+
+  const { invoice, segments_by_timesheet, segments_on_invoice_by_timesheet, tsfin_id_by_timesheet_id } = invData || {};
 
   // ✅ Keep "edit mode" purely driven by modal state (so ISSUED invoices still show edit UI for status toggles)
   const isEditing = !!modalCtx.isEditing;
@@ -30062,7 +31788,28 @@ function renderInvoiceLinesTable(modalCtx, invoiceData, items) {
   // ✅ Separate permission for line edits (staging-aware)
   const canEditLines = invoiceModalIsEditable(invoice, modalCtx, 'lines');
 
+  // Segment edits are unissued-only
+  const isUnissued = !(invoice && invoice.issued_at_utc);
+
+  // Removed invoice lines staging
   const removedSet = modalCtx?.invoiceEdits?.remove_invoice_line_ids || new Set();
+
+  // Segment removal staging (array of { tsfin_id, segment_id })
+  const stagedSegRemoveArr = (modalCtx?.invoiceEdits && Array.isArray(modalCtx.invoiceEdits.remove_segment_refs))
+    ? modalCtx.invoiceEdits.remove_segment_refs
+    : [];
+
+  // Build a fast membership set for staged removals
+  const segKey = (tsfinId, segId) => `${String(tsfinId || '')}::${String(segId || '')}`;
+  const stagedSegRemoveSet = (() => {
+    const s = new Set();
+    for (const r of stagedSegRemoveArr) {
+      if (!r || typeof r !== 'object') continue;
+      const k = segKey(r.tsfin_id, r.segment_id);
+      s.add(k);
+    }
+    return s;
+  })();
 
   modalCtx.invoiceUi = (modalCtx.invoiceUi && typeof modalCtx.invoiceUi === 'object') ? modalCtx.invoiceUi : {};
   modalCtx.invoiceUi.expanded_timesheets = (modalCtx.invoiceUi.expanded_timesheets && typeof modalCtx.invoiceUi.expanded_timesheets === 'object')
@@ -30075,15 +31822,58 @@ function renderInvoiceLinesTable(modalCtx, invoiceData, items) {
     return lt;
   };
 
-  const isExpenseType = (lt) => {
+  const isExpenseLineType = (lt) => {
     const t = String(lt || '').toUpperCase();
-    return (t === 'EXPENSES' || t === 'MILEAGE' || t === 'TRAVEL' || t === 'ACCOMMODATION' || t === 'OTHER');
+    // Canonical: EXPENSE_* (per brief). Keep legacy fallbacks too.
+    return (
+      t === 'EXPENSE' ||
+      t.startsWith('EXPENSE_') ||
+      t === 'TRAVEL' ||
+      t === 'ACCOMMODATION' ||
+      t === 'OTHER'
+    );
+  };
+
+  const isMileageLineType = (lt) => {
+    const t = String(lt || '').toUpperCase();
+    return (t === 'MILEAGE');
   };
 
   const isAdditionalRateType = (lt) => {
     const t = String(lt || '').toUpperCase();
-    return (t === 'ADDITIONAL_RATE' || t === 'ADDITIONAL' || t === 'ADDITIONAL_RATES');
+    // Final rule uses patterns like TS_*_ADDITIONAL_*
+    return (
+      t === 'ADDITIONAL_RATE' ||
+      t === 'ADDITIONAL' ||
+      t === 'ADDITIONAL_RATES' ||
+      t.includes('_ADDITIONAL_') ||
+      (t.startsWith('TS_') && t.includes('ADDITIONAL'))
+    );
   };
+
+  // Segment edits blocked rule: if invoice contains additional rates OR expenses/mileage
+  // (compute on effective lines, excluding staged removed invoice lines)
+  const segmentBlock = (() => {
+    let hasAdditional = false;
+    let hasExpense = false;
+    let hasMileage = false;
+
+    for (const l of (items || [])) {
+      const id = String(l?.invoice_line_id || '');
+      if (id && removedSet && typeof removedSet.has === 'function' && removedSet.has(id)) continue;
+
+      const lt = asLineType(l);
+      if (!hasAdditional && isAdditionalRateType(lt)) hasAdditional = true;
+
+      // expense gating should treat EXPENSE_* as expenses; mileage separate
+      if (!hasMileage && isMileageLineType(lt)) hasMileage = true;
+      if (!hasExpense && isExpenseLineType(lt)) hasExpense = true;
+
+      if (hasAdditional && (hasExpense || hasMileage)) break;
+    }
+
+    return { hasAdditional, hasExpense, hasMileage, blocked: (hasAdditional || hasExpense || hasMileage) };
+  })();
 
   const getWeekEnding = (g) => {
     const first = g.lines[0] || {};
@@ -30119,6 +31909,17 @@ function renderInvoiceLinesTable(modalCtx, invoiceData, items) {
     );
   };
 
+  const sumSegmentHours = (seg) => {
+    const s = seg && typeof seg === 'object' ? seg : {};
+    return (
+      Number(s.hours_day || 0) +
+      Number(s.hours_night || 0) +
+      Number(s.hours_sat || 0) +
+      Number(s.hours_sun || 0) +
+      Number(s.hours_bh || 0)
+    );
+  };
+
   const groupTotals = (g) => {
     let hrs = 0;
     let ex = 0;
@@ -30129,6 +31930,10 @@ function renderInvoiceLinesTable(modalCtx, invoiceData, items) {
 
     for (const l of g.lines) {
       const lt = asLineType(l);
+      const id = String(l?.invoice_line_id || '');
+      const isRemoved = (id && removedSet && typeof removedSet.has === 'function' && removedSet.has(id));
+
+      if (isRemoved) continue;
 
       const qtyHrs = sumBucketQty(l);
       if (qtyHrs > 0) hrs += qtyHrs;
@@ -30137,7 +31942,8 @@ function renderInvoiceLinesTable(modalCtx, invoiceData, items) {
       inc += Number(l?.total_inc_vat || 0);
       margin += Number(l?.margin_ex_vat || 0);
 
-      if (isExpenseType(lt)) {
+      // Expenses column should include EXPENSE_* (and legacy expense types), but NOT mileage
+      if (isExpenseLineType(lt) && !isMileageLineType(lt)) {
         expensesEx += Number(l?.total_charge_ex_vat || 0);
       }
 
@@ -30153,6 +31959,54 @@ function renderInvoiceLinesTable(modalCtx, invoiceData, items) {
         }
       }
     }
+
+    // Segment-staging-aware totals for SEGMENTS timesheets:
+    // If segments_on_invoice_by_timesheet indicates this timesheet is SEGMENTS-mode and has segments on this invoice,
+    // subtract staged removed segment amounts/hours from the base group totals so the UI reflects pending removals.
+    try {
+      const tsId = String(g.timesheet_id || '');
+      const segMap = (segments_on_invoice_by_timesheet && typeof segments_on_invoice_by_timesheet === 'object')
+        ? segments_on_invoice_by_timesheet
+        : ((segments_by_timesheet && typeof segments_by_timesheet === 'object') ? segments_by_timesheet : {});
+      const info = (tsId && segMap && typeof segMap === 'object') ? segMap[tsId] : null;
+
+      const invoicedSegs = (info && typeof info === 'object' && Array.isArray(info.invoiced_segments))
+        ? info.invoiced_segments
+        : null;
+
+      if (invoicedSegs && invoicedSegs.length) {
+        const tsfinId = (info && info.tsfin_id) ? String(info.tsfin_id) : (tsfin_id_by_timesheet_id && tsfin_id_by_timesheet_id[tsId] ? String(tsfin_id_by_timesheet_id[tsId]) : '');
+
+        if (tsfinId) {
+          let deltaEx = 0;
+          let deltaPay = 0;
+          let deltaHours = 0;
+
+          for (const seg of invoicedSegs) {
+            if (!seg || typeof seg !== 'object') continue;
+            const segId = (seg.segment_id != null) ? String(seg.segment_id) : '';
+            if (!segId) continue;
+
+            if (stagedSegRemoveSet.has(segKey(tsfinId, segId))) {
+              deltaEx += Number(seg.charge_amount || 0);
+              deltaPay += Number(seg.pay_amount || 0);
+              deltaHours += sumSegmentHours(seg);
+            }
+          }
+
+          // VAT factor: approximate using current totals (safe fallback to 1 if ex is 0)
+          const vatFactor = (ex && Number(ex) !== 0) ? (Number(inc || 0) / Number(ex || 1)) : 1;
+
+          const deltaInc = deltaEx * vatFactor;
+          const deltaMargin = (deltaEx - deltaPay);
+
+          hrs -= deltaHours;
+          ex -= deltaEx;
+          inc -= deltaInc;
+          margin -= deltaMargin;
+        }
+      }
+    } catch {}
 
     return {
       week: getWeekEnding(g),
@@ -30191,6 +32045,24 @@ function renderInvoiceLinesTable(modalCtx, invoiceData, items) {
   }
 
   const tsGroupArr = Array.from(tsGroups.values());
+
+  const segMapForUi = (() => {
+    // prefer alias, but both keys are present in manifest; keep compatibility
+    if (segments_on_invoice_by_timesheet && typeof segments_on_invoice_by_timesheet === 'object') return segments_on_invoice_by_timesheet;
+    if (segments_by_timesheet && typeof segments_by_timesheet === 'object') return segments_by_timesheet;
+    return {};
+  })();
+
+  const hasAnySegmentTimesheets = (() => {
+    try {
+      for (const g of tsGroupArr) {
+        const info = segMapForUi[String(g.timesheet_id || '')];
+        const segs = (info && typeof info === 'object' && Array.isArray(info.invoiced_segments)) ? info.invoiced_segments : null;
+        if (segs && segs.length) return true;
+      }
+    } catch {}
+    return false;
+  })();
 
   // Build expanded detail rows
   const allocByWeights = (total, weights) => {
@@ -30291,7 +32163,7 @@ function renderInvoiceLinesTable(modalCtx, invoiceData, items) {
     const unitName =
       bucket.name ||
       u.unit_name ||
-      (isExpenseType(lt) ? lt : (lt || (l.description || '')));
+      ((isExpenseLineType(lt) || isMileageLineType(lt)) ? lt : (lt || (l.description || '')));
 
     const qty =
       (Number.isFinite(Number(u.unit_count)) && Number(u.unit_count) !== 0)
@@ -30305,7 +32177,7 @@ function renderInvoiceLinesTable(modalCtx, invoiceData, items) {
 
     // Show only if meaningful (and always allow expense/mileage if pay or charge exists)
     const shouldShow =
-      (isExpenseType(lt) ? (payEx !== 0 || chgEx !== 0) : ((qty && qty !== 0) || payEx !== 0 || chgEx !== 0));
+      ((isExpenseLineType(lt) || isMileageLineType(lt)) ? (payEx !== 0 || chgEx !== 0) : ((qty && qty !== 0) || payEx !== 0 || chgEx !== 0));
 
     if (!shouldShow) return null;
 
@@ -30320,10 +32192,165 @@ function renderInvoiceLinesTable(modalCtx, invoiceData, items) {
     };
   };
 
+  const renderSegmentsOnInvoiceTable = (g) => {
+    const tsId = String(g.timesheet_id || '');
+    const info = (segMapForUi && typeof segMapForUi === 'object') ? segMapForUi[tsId] : null;
+    const invoicedSegs = (info && typeof info === 'object' && Array.isArray(info.invoiced_segments)) ? info.invoiced_segments : [];
+
+    if (!invoicedSegs.length) return '';
+
+    const tsfinId =
+      (info && typeof info === 'object' && info.tsfin_id) ? String(info.tsfin_id)
+      : (tsfin_id_by_timesheet_id && tsfin_id_by_timesheet_id[tsId] ? String(tsfin_id_by_timesheet_id[tsId]) : '');
+
+    const uninvoicedCount = (info && typeof info === 'object' && Number.isFinite(Number(info.uninvoiced_segment_count)))
+      ? Number(info.uninvoiced_segment_count)
+      : 0;
+
+    const lockedElsewhereCount = (info && typeof info === 'object' && Number.isFinite(Number(info.locked_elsewhere_segment_count)))
+      ? Number(info.locked_elsewhere_segment_count)
+      : 0;
+
+    const stagedCountForTs = (() => {
+      if (!tsfinId) return 0;
+      let c = 0;
+      for (const seg of invoicedSegs) {
+        if (!seg || typeof seg !== 'object') continue;
+        const segId = (seg.segment_id != null) ? String(seg.segment_id) : '';
+        if (!segId) continue;
+        if (stagedSegRemoveSet.has(segKey(tsfinId, segId))) c += 1;
+      }
+      return c;
+    })();
+
+    const canStageSegments =
+      !!isEditing &&
+      !!canEditLines &&
+      !!isUnissued &&
+      !segmentBlock.blocked;
+
+    const disabledReason = (() => {
+      if (!isEditing) return 'Not in edit mode';
+      if (!canEditLines) return 'Invoice lines are not editable';
+      if (!isUnissued) return 'Segments can only be changed before issuing';
+      if (segmentBlock.hasAdditional) return 'Segments cannot be moved when additional rates exist';
+      if (segmentBlock.hasMileage || segmentBlock.hasExpense) return 'Segments cannot be moved when expenses or mileage exist';
+      return '';
+    })();
+
+    const banner = (!canStageSegments && isEditing && (segmentBlock.blocked || !isUnissued)) ? `
+      <div class="alert alert-warning py-2 px-2 small mb-2">
+        <b>Segment edits disabled:</b> ${escapeHtml(disabledReason || 'Not allowed for this invoice.')}
+      </div>
+    ` : '';
+
+    const rows = invoicedSegs.map(seg => {
+      const segId = (seg && typeof seg === 'object' && seg.segment_id != null) ? String(seg.segment_id) : '';
+      const date = (seg && typeof seg === 'object' && seg.date != null) ? String(seg.date) : '';
+      const startUtc = (seg && typeof seg === 'object' && seg.start_utc != null) ? String(seg.start_utc) : '';
+      const endUtc = (seg && typeof seg === 'object' && seg.end_utc != null) ? String(seg.end_utc) : '';
+      const refNum = (seg && typeof seg === 'object' && seg.ref_num != null) ? String(seg.ref_num) : '';
+      const hrs = invoiceModalRound2(sumSegmentHours(seg));
+      const chg = invoiceModalRound2(Number(seg?.charge_amount || 0));
+      const pay = invoiceModalRound2(Number(seg?.pay_amount || 0));
+
+      const k = segKey(tsfinId, segId);
+      const stagedRemove = (!!tsfinId && !!segId && stagedSegRemoveSet.has(k));
+
+      const checkbox = `
+        <input type="checkbox"
+          class="form-check-input"
+          data-action="inv-toggle-remove-segment"
+          data-timesheet-id="${escapeHtml(tsId)}"
+          data-tsfin-id="${escapeHtml(String(tsfinId || ''))}"
+          data-segment-id="${escapeHtml(String(segId || ''))}"
+          ${stagedRemove ? 'checked' : ''}
+          ${canStageSegments ? '' : 'disabled'}
+        />
+      `;
+
+      const pendingChip = stagedRemove ? `<span class="pill pill-warn">Pending removal</span>` : '';
+
+      return `
+        <tr class="${stagedRemove ? 'opacity-50' : ''}">
+          <td style="width:32px;">${checkbox}</td>
+          <td>${escapeHtml(date)}</td>
+          <td class="text-muted small">${escapeHtml(startUtc)}</td>
+          <td class="text-muted small">${escapeHtml(endUtc)}</td>
+          <td>${escapeHtml(refNum || '—')}</td>
+          <td class="text-end">${escapeHtml(invoiceModalFmtHours(hrs))}</td>
+          <td class="text-end">${fmtMoneyLocal(chg)}</td>
+          <td class="text-end">${fmtMoneyLocal(pay)}</td>
+          <td class="text-end">${pendingChip}</td>
+        </tr>
+      `;
+    }).join('');
+
+    const btnRemoveSelected = `
+      <button type="button"
+        class="btn btn-sm btn-outline-danger"
+        data-action="inv-stage-remove-selected-segments"
+        data-timesheet-id="${escapeHtml(tsId)}"
+        data-tsfin-id="${escapeHtml(String(tsfinId || ''))}"
+        ${(!canStageSegments || stagedCountForTs === 0) ? 'disabled' : ''}>
+        Remove selected segments
+      </button>
+    `;
+
+    const btnRemoveAll = `
+      <button type="button"
+        class="btn btn-sm btn-outline-danger"
+        data-action="inv-stage-remove-all-segments"
+        data-timesheet-id="${escapeHtml(tsId)}"
+        data-tsfin-id="${escapeHtml(String(tsfinId || ''))}"
+        ${(!canStageSegments) ? 'disabled' : ''}>
+        Remove all segments on this invoice
+      </button>
+    `;
+
+    return `
+      <div class="mt-3">
+        <div class="d-flex align-items-center justify-content-between flex-wrap gap-2 mb-2">
+          <div class="fw-semibold">
+            Segments on this invoice
+            <span class="text-muted small">
+              (${invoicedSegs.length} on invoice, ${uninvoicedCount} uninvoiced, ${lockedElsewhereCount} locked elsewhere)
+            </span>
+          </div>
+          ${isEditing ? `<div class="d-flex gap-2">${btnRemoveSelected}${btnRemoveAll}</div>` : ''}
+        </div>
+
+        ${banner}
+
+        <table class="grid" style="width:100%">
+          <thead>
+            <tr>
+              <th style="width:32px;"></th>
+              <th>Date</th>
+              <th>Start (UTC)</th>
+              <th>End (UTC)</th>
+              <th>Ref</th>
+              <th class="text-end">Hours</th>
+              <th class="text-end">Charge (ex VAT)</th>
+              <th class="text-end">Pay (ex VAT)</th>
+              <th class="text-end"></th>
+            </tr>
+          </thead>
+          <tbody>
+            ${rows}
+          </tbody>
+        </table>
+      </div>
+    `;
+  };
+
   const renderExpandedTable = (g) => {
     const rows = [];
 
     for (const l of g.lines) {
+      const id = String(l?.invoice_line_id || '');
+      if (id && removedSet && typeof removedSet.has === 'function' && removedSet.has(id)) continue;
+
       const qtyHrs = sumBucketQty(l);
 
       if (qtyHrs > 0) {
@@ -30336,46 +32363,47 @@ function renderInvoiceLinesTable(modalCtx, invoiceData, items) {
       if (r) rows.push(r);
     }
 
-    if (!rows.length) {
-      return `<div class="text-muted small">No billable lines.</div>`;
-    }
-
-    const tr = (r) => {
-      const payIncTxt = (r.pay_inc == null) ? '—' : fmtMoneyLocal(r.pay_inc);
-      const qtyTxt = (r.qty == null) ? '—' : invoiceModalFmtHours(Number(r.qty || 0));
-      return `
-        <tr>
-          <td>${escapeHtml(String(r.unit || ''))}</td>
-          <td class="text-end">${escapeHtml(String(qtyTxt))}</td>
-          <td class="text-end">${fmtMoneyLocal(r.pay_ex)}</td>
-          <td class="text-end">${escapeHtml(String(payIncTxt))}</td>
-          <td class="text-end">${fmtMoneyLocal(r.margin)}</td>
-          <td class="text-end">${fmtMoneyLocal(r.chg_ex)}</td>
-          <td class="text-end">${fmtMoneyLocal(r.chg_inc)}</td>
-        </tr>
+    const breakdownHtml = (!rows.length)
+      ? `<div class="text-muted small">No billable lines.</div>`
+      : `
+        <div class="mt-2">
+          <table class="grid" style="width:100%">
+            <thead>
+              <tr>
+                <th>Unit</th>
+                <th class="text-end">Qty</th>
+                <th class="text-end">Pay (ex VAT)</th>
+                <th class="text-end">Pay (inc VAT)</th>
+                <th class="text-end">Margin</th>
+                <th class="text-end">Charge (ex VAT)</th>
+                <th class="text-end">Charge (inc VAT)</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${rows.map(r => {
+                const payIncTxt = (r.pay_inc == null) ? '—' : fmtMoneyLocal(r.pay_inc);
+                const qtyTxt = (r.qty == null) ? '—' : invoiceModalFmtHours(Number(r.qty || 0));
+                return `
+                  <tr>
+                    <td>${escapeHtml(String(r.unit || ''))}</td>
+                    <td class="text-end">${escapeHtml(String(qtyTxt))}</td>
+                    <td class="text-end">${fmtMoneyLocal(r.pay_ex)}</td>
+                    <td class="text-end">${escapeHtml(String(payIncTxt))}</td>
+                    <td class="text-end">${fmtMoneyLocal(r.margin)}</td>
+                    <td class="text-end">${fmtMoneyLocal(r.chg_ex)}</td>
+                    <td class="text-end">${fmtMoneyLocal(r.chg_inc)}</td>
+                  </tr>
+                `;
+              }).join('')}
+            </tbody>
+          </table>
+        </div>
       `;
-    };
 
-    return `
-      <div class="mt-2">
-        <table class="grid" style="width:100%">
-          <thead>
-            <tr>
-              <th>Unit</th>
-              <th class="text-end">Qty</th>
-              <th class="text-end">Pay (ex VAT)</th>
-              <th class="text-end">Pay (inc VAT)</th>
-              <th class="text-end">Margin</th>
-              <th class="text-end">Charge (ex VAT)</th>
-              <th class="text-end">Charge (inc VAT)</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${rows.map(tr).join('')}
-          </tbody>
-        </table>
-      </div>
-    `;
+    // Append SEGMENTS expansion (segments locked to this invoice) if applicable
+    const segmentsHtml = renderSegmentsOnInvoiceTable(g);
+
+    return `${breakdownHtml}${segmentsHtml}`;
   };
 
   // ✅ Remove/Undo buttons:
@@ -30413,6 +32441,21 @@ function renderInvoiceLinesTable(modalCtx, invoiceData, items) {
   const stagedAdjs = Array.isArray(staged.add_adjustments) ? staged.add_adjustments : [];
 
   const stagedBlocks = [];
+
+  // Segment edit blocked banner (global) — only relevant if there are segment timesheets on the invoice
+  if (isEditing && hasAnySegmentTimesheets && (segmentBlock.blocked || !isUnissued)) {
+    const reason = segmentBlock.hasAdditional
+      ? 'Segments cannot be moved when additional rates exist.'
+      : ((segmentBlock.hasMileage || segmentBlock.hasExpense)
+          ? 'Segments cannot be moved when expenses or mileage exist.'
+          : (!isUnissued ? 'Segments can only be changed before issuing.' : ''));
+    stagedBlocks.push(`
+      <div class="alert alert-warning py-2 px-2 small mb-3">
+        <b>Segment edits disabled:</b> ${escapeHtml(reason)}
+      </div>
+    `);
+  }
+
   if (isEditing && (stagedTs.size || stagedAdjs.length)) {
     const blocks = [];
 
@@ -30654,9 +32697,66 @@ function renderTimesheetLinesTab(ctx) {
   const sheetScope = (details.sheet_scope || row.sheet_scope || ts.sheet_scope || '').toUpperCase();
   const subMode    = (row.submission_mode || ts.submission_mode || '').toUpperCase();
 
-  const tsfin  = details.tsfin || {};
+   const tsfin  = details.tsfin || {};
   const locked = !!(tsfin.locked_by_invoice_id || tsfin.paid_at_utc);
   const basis  = String(tsfin.basis || row.basis || '').toUpperCase();
+
+  // ✅ NEW: invoice_id -> invoice_no lookup (computed ONCE per render)
+  // Source of truth is already in modal context (segment-aware):
+  // - related.invoice_no_by_invoice_id (preferred)
+  // - else build from related.invoices[] (fallback)
+  const invoiceNoById = (() => {
+    try {
+      const r = (related && typeof related === 'object') ? related : {};
+      const m0 = (r.invoice_no_by_invoice_id && typeof r.invoice_no_by_invoice_id === 'object')
+        ? r.invoice_no_by_invoice_id
+        : null;
+
+      const out = Object.create(null);
+
+      if (m0) {
+        for (const [k, v] of Object.entries(m0)) {
+          const id = String(k || '').trim();
+          const no = String(v || '').trim();
+          if (id && no) out[id] = no;
+        }
+      }
+
+      const invs = Array.isArray(r.invoices) ? r.invoices : [];
+      for (const inv of invs) {
+        if (!inv || typeof inv !== 'object') continue;
+        const id =
+          String(inv.invoice_id || inv.id || '').trim();
+        const no =
+          String(inv.invoice_no || '').trim();
+        if (id && no && !out[id]) out[id] = no;
+      }
+
+      // Back-compat: if older code still sets related.invoice only
+      const inv1 = (r.invoice && typeof r.invoice === 'object') ? r.invoice : null;
+      if (inv1) {
+        const id = String(inv1.invoice_id || inv1.id || '').trim();
+        const no = String(inv1.invoice_no || '').trim();
+        if (id && no && !out[id]) out[id] = no;
+      }
+
+      return out;
+    } catch {
+      return Object.create(null);
+    }
+  })();
+
+  const fmtInvoiceHint = (invoiceId) => {
+    const iid = String(invoiceId || '').trim();
+    if (!iid) return '✅ Invoiced';
+    const invNo = invoiceNoById[iid] ? String(invoiceNoById[iid]).trim() : '';
+    return invNo ? `✅ Invoiced – ${invNo}` : '✅ Invoiced';
+  };
+
+  // ✅ NEW: whole-timesheet invoice hint (single invoice id used for all lines)
+  // Only show when the timesheet is actually locked to an invoice id.
+  const wholeInvoiceId = String(tsfin?.locked_by_invoice_id || '').trim();
+  const wholeInvoiceHint = wholeInvoiceId ? fmtInvoiceHint(wholeInvoiceId) : '';
 
   const isNhspOrHrSelfBillBasis = [
     'NHSP',
@@ -30667,6 +32767,7 @@ function renderTimesheetLinesTab(ctx) {
 
   const segTargets = state.segmentInvoiceTargets || {};
   state.segmentInvoiceTargets = segTargets;
+
 
   const hasTsfin = !!(
     tsfin && (
@@ -30850,7 +32951,7 @@ const buildInvoiceWeekSelectHtml = (seg) => {
   const isSegLocked = !!lockedInvoiceId;
 
   const invoiceStateHint = isSegLocked
-    ? '✅ Invoiced'
+    ? fmtInvoiceHint(lockedInvoiceId)
     : (delayHint ? `⏳ ${delayHint}` : '○ Invoiceable now');
 
   return `
@@ -30859,6 +32960,7 @@ const buildInvoiceWeekSelectHtml = (seg) => {
     </select>
     <span class="mini">${invoiceStateHint}</span>
   `;
+
 
 };
 
@@ -32128,7 +34230,7 @@ this._markDirty();
     return `
       <div class="tabc">
 
-        <div class="card">
+               <div class="card">
           <div class="row">
             <label>Status</label>
             <div class="controls">
@@ -32146,7 +34248,17 @@ this._markDirty();
               ${tsId || '<span class="mini">Not yet created (planned week)</span>'}
             </div>
           </div>
+
+          ${wholeInvoiceHint ? `
+            <div class="row">
+              <label>Invoice</label>
+              <div class="controls">
+                <span class="mini">${esc(wholeInvoiceHint)}</span>
+              </div>
+            </div>
+          ` : ''}
         </div>
+
 
         <div class="card" style="margin-top:10px;">
           <div class="row">
@@ -32279,7 +34391,7 @@ this._markDirty();
 
     return `
       <div class="tabc">
-        <div class="card">
+              <div class="card">
           <div class="row">
             <label>Status</label>
             <div class="controls">${badgeHtml}</div>
@@ -32288,7 +34400,17 @@ this._markDirty();
             <label>Timesheet ID</label>
             <div class="controls">${tsId || '<span class="mini">Unknown</span>'}</div>
           </div>
+
+          ${wholeInvoiceHint ? `
+            <div class="row">
+              <label>Invoice</label>
+              <div class="controls">
+                <span class="mini">${esc(wholeInvoiceHint)}</span>
+              </div>
+            </div>
+          ` : ''}
         </div>
+
 
         <div class="card" style="margin-top:10px;">
           <div class="row">
@@ -33793,19 +35915,21 @@ this._markDirty();
 
 
 
-
 async function openInvoiceBatchIssueModal() {
   // ─────────────────────────────────────────────────────────────
   // Batch Issue — server authoritative gating
   // - candidates endpoint uses invoice_batch_issue_candidates(p_allow_early, p_limit)
   // - if allow_early=false, future weeks are not returned by server
   // - selection defaults: DRAFT checked; ON_HOLD unchecked & visually red (disabled)
+  //
+  // ✅ Results MUST render from confirm response:
+  //   - invoice_results_enriched[] and invoice_map (no per-invoice follow-ups)
+  //   - email_outbox summary from confirm response only
+  //   - optional navigation to Invoice Summary (single list reload; never per invoice)
   // ─────────────────────────────────────────────────────────────
 
   const API_CANDIDATES = '/api/invoices/batch-issue/candidates';
   const API_CONFIRM    = '/api/invoices/batch-issue/confirm';
-
-  const esc = encodeURIComponent;
 
   const escapeHtml = (s) => String(s ?? '')
     .replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;')
@@ -33907,8 +36031,9 @@ async function openInvoiceBatchIssueModal() {
     seedDefaultSelection();
   };
 
-   const refreshInvoiceSummary = async (invoiceIds) => {
-    // ✅ 4.9: After batch issue, switch UI to Invoice Summary and filter to invoices touched in this run.
+  const refreshInvoiceSummary = async (invoiceIds) => {
+    // After batch issue, switch UI to Invoice Summary and filter to invoices touched in this run.
+    // NOTE: optional navigation; does not do per-invoice GET calls.
     try {
       const ids = Array.from(new Set((invoiceIds || []).map(String).filter(Boolean)));
 
@@ -33926,7 +36051,6 @@ async function openInvoiceBatchIssueModal() {
       window.__listState.invoices.total = null;
       window.__listState.invoices.hasMore = false;
 
-      // Replace filters so we show ONLY this run’s invoices
       window.__listState.invoices.filters = {
         ids,
         include_totals: 1
@@ -33941,7 +36065,6 @@ async function openInvoiceBatchIssueModal() {
       renderSummary(data);
     } catch {}
   };
-
 
   const renderSkeleton = () => `
     <div id="invBatchIssueRoot" class="invbatch-root">
@@ -33959,6 +36082,250 @@ async function openInvoiceBatchIssueModal() {
       </div>
     </div>
   `;
+
+  const paintResultsFromConfirm = (resEl, out, selectedIds) => {
+    resEl.innerHTML = '';
+
+    const invResEnriched = Array.isArray(out?.invoice_results_enriched) ? out.invoice_results_enriched : [];
+    const invMap = (out?.invoice_map && typeof out.invoice_map === 'object') ? out.invoice_map : {};
+
+    // Backwards compat: if enriched missing, fall back to raw invoice_results (still no extra fetches)
+    const invResRaw = Array.isArray(out?.invoice_results) ? out.invoice_results : [];
+    const invRes = invResEnriched.length ? invResEnriched : invResRaw;
+
+    const mails = Array.isArray(out?.email_outbox) ? out.email_outbox : [];
+    const maxA = Number(out?.max_attachments_per_email || 0) || null;
+
+    const norm = (x) => String(x || '').trim().toUpperCase();
+
+    const issuedCount = invRes.filter(r => norm(r?.status) === 'ISSUED' && r?.ok === true).length;
+    const heldCount   = invRes.filter(r => norm(r?.status) === 'ON_HOLD').length;
+    const notDueCount = invRes.filter(r => norm(r?.error) === 'NOT_DUE_YET').length;
+
+    const head = document.createElement('div');
+    head.style.fontWeight = '700';
+    head.style.marginBottom = '6px';
+    head.textContent = `Results — Issued ${issuedCount} • Held ${heldCount} • Not due yet ${notDueCount} • Emails queued ${mails.length}${maxA ? ` (max attachments/email ${maxA})` : ''}`;
+    resEl.appendChild(head);
+
+    const note = document.createElement('div');
+    note.className = 'mini';
+    note.style.opacity = '0.9';
+    note.textContent = 'Rendered from confirm response only (invoice_results_enriched + invoice_map).';
+    resEl.appendChild(note);
+
+    // Optional navigation to summary (single reload; never per invoice)
+    const touchedIds = Array.from(new Set(invRes.map(r => String(r?.invoice_id || '').trim()).filter(Boolean)));
+    const navIds = touchedIds.length ? touchedIds : (Array.isArray(selectedIds) ? selectedIds : []);
+
+    const actionsRow = document.createElement('div');
+    actionsRow.style.display = 'flex';
+    actionsRow.style.gap = '8px';
+    actionsRow.style.flexWrap = 'wrap';
+    actionsRow.style.alignItems = 'center';
+    actionsRow.style.marginTop = '10px';
+
+    const btnView = document.createElement('button');
+    btnView.type = 'button';
+    btnView.className = 'btn btn-sm btn-outline';
+    btnView.textContent = `View invoices in summary (${navIds.length})`;
+    btnView.disabled = !navIds.length;
+    btnView.addEventListener('click', async (ev) => {
+      ev.preventDefault();
+      await refreshInvoiceSummary(navIds);
+    });
+
+    actionsRow.appendChild(btnView);
+    resEl.appendChild(actionsRow);
+
+    // Emails summary (confirm response only)
+    if (mails.length) {
+      const hr0 = document.createElement('div');
+      hr0.style.height = '1px';
+      hr0.style.background = 'var(--line)';
+      hr0.style.margin = '10px 0';
+      resEl.appendChild(hr0);
+
+      const t = document.createElement('div');
+      t.className = 'mini';
+      t.style.opacity = '0.9';
+      t.textContent = 'Queued emails (bundled by client/week and split by attachment cap):';
+      resEl.appendChild(t);
+
+      const box = document.createElement('div');
+      box.style.marginTop = '8px';
+
+      mails.forEach(m => {
+        const line = document.createElement('div');
+        line.className = 'mini';
+        line.style.cssText = 'display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:6px 0;border-top:1px solid rgba(255,255,255,0.06);';
+
+        const pill = document.createElement('span');
+        pill.className = 'pill pill-info';
+        pill.textContent = 'QUEUED';
+
+        const to = document.createElement('span');
+        to.textContent = `To: ${String(m?.to || '').trim() || '—'}`;
+
+        const subj = document.createElement('span');
+        subj.style.opacity = '0.9';
+        subj.textContent = `Subject: ${String(m?.subject || '').trim() || '—'}`;
+
+        const ref = document.createElement('span');
+        ref.style.opacity = '0.9';
+        ref.textContent = `Ref: ${String(m?.reference || '').trim() || '—'}`;
+
+        const id = document.createElement('span');
+        id.style.opacity = '0.9';
+        id.textContent = `Outbox: ${String(m?.mail_outbox_id || '').trim() || '—'}`;
+
+        line.appendChild(pill);
+        line.appendChild(to);
+        line.appendChild(subj);
+        line.appendChild(ref);
+        line.appendChild(id);
+
+        box.appendChild(line);
+      });
+
+      resEl.appendChild(box);
+    }
+
+    // Invoice outcomes (enriched)
+    const hr = document.createElement('div');
+    hr.style.cssText = 'height:1px;background:var(--line);margin:10px 0;';
+    resEl.appendChild(hr);
+
+    const title = document.createElement('div');
+    title.style.fontWeight = '700';
+    title.style.marginBottom = '6px';
+    title.textContent = 'Invoice outcomes';
+    resEl.appendChild(title);
+
+    if (!invRes.length) {
+      const empty = document.createElement('div');
+      empty.className = 'mini';
+      empty.style.opacity = '0.85';
+      empty.textContent = 'No invoice results returned.';
+      resEl.appendChild(empty);
+      return;
+    }
+
+    // Group by client_id for readability (no extra fetch; client_name comes from enriched/map)
+    const byClient = new Map();
+    for (const r of invRes) {
+      const iid = String(r?.invoice_id || '').trim();
+      const mapRow = iid ? (invMap[iid] || null) : null;
+
+      const clientId = String(r?.client_id || mapRow?.client_id || '').trim();
+      if (!byClient.has(clientId)) byClient.set(clientId, []);
+      byClient.get(clientId).push({ r, mapRow });
+    }
+
+    for (const [clientId, rows] of byClient.entries()) {
+      const cName = String(rows[0]?.r?.client_name || rows[0]?.mapRow?.client_name || clientId || 'Client');
+
+      const box = document.createElement('div');
+      box.className = 'invbatch-card';
+      box.style.background = '#081024';
+      box.style.padding = '10px';
+      box.style.marginBottom = '10px';
+
+      const h2 = document.createElement('div');
+      h2.style.fontWeight = '700';
+      h2.style.marginBottom = '6px';
+      h2.textContent = cName;
+      box.appendChild(h2);
+
+      // Sort: week ending desc, invoice_no
+      rows.sort((a, b) => {
+        const wa = String(a?.r?.week_ending_date || a?.mapRow?.week_ending_date || '');
+        const wb = String(b?.r?.week_ending_date || b?.mapRow?.week_ending_date || '');
+        if (wa < wb) return 1;
+        if (wa > wb) return -1;
+        const na = String(a?.r?.invoice_no || a?.mapRow?.invoice_no || '');
+        const nb = String(b?.r?.invoice_no || b?.mapRow?.invoice_no || '');
+        return na.localeCompare(nb);
+      });
+
+      rows.forEach(({ r, mapRow }) => {
+        const iid = String(r?.invoice_id || '').trim();
+
+        const invoiceNo = (r?.invoice_no != null && String(r.invoice_no).trim())
+          ? String(r.invoice_no).trim()
+          : (mapRow?.invoice_no != null ? String(mapRow.invoice_no).trim() : '');
+
+        const weekEnding = (r?.week_ending_date || mapRow?.week_ending_date)
+          ? fmtYmd(String(r.week_ending_date || mapRow.week_ending_date))
+          : '—';
+
+        const dns = (r?.do_not_send === true) || (mapRow?.do_not_send === true);
+
+        const candName = (r?.candidate_name != null && String(r.candidate_name).trim())
+          ? String(r.candidate_name).trim()
+          : (mapRow?.candidate_name != null ? String(mapRow.candidate_name).trim() : '');
+
+        const candDisp = candName ? candName : '—';
+
+        const st = norm(r?.status);
+        const ok = (r?.ok === true);
+        const err = String(r?.error || '').trim();
+        const holdReason = String(r?.on_hold_reason || '').trim();
+
+        // Blocking reason text
+        const reasonTxt =
+          (err === 'NOT_DUE_YET') ? 'Not due yet'
+          : (st === 'ON_HOLD' && holdReason) ? holdReason
+          : (err ? err : '');
+
+        const line = document.createElement('div');
+        line.className = 'mini';
+        line.style.cssText = 'display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:8px 0;border-top:1px solid rgba(255,255,255,0.06);';
+
+        const pill = document.createElement('span');
+        pill.className = 'pill';
+        if (err === 'NOT_DUE_YET') pill.classList.add('pill-warn');
+        else if (st === 'ON_HOLD') pill.classList.add('pill-bad');
+        else if (ok && st === 'ISSUED') pill.classList.add('pill-ok');
+        else pill.classList.add('pill-info');
+
+        pill.textContent =
+          (err === 'NOT_DUE_YET') ? 'NOT DUE YET' :
+          (st ? st : (ok ? 'OK' : 'FAILED'));
+
+        const invTxt = document.createElement('span');
+        invTxt.style.fontWeight = '700';
+        invTxt.textContent = invoiceNo ? `Invoice ${invoiceNo}` : (iid ? `Invoice ${iid.slice(0, 8)}…` : 'Invoice');
+
+        const meta = document.createElement('span');
+        meta.style.opacity = '0.9';
+        meta.textContent = `${candDisp} • Week ending ${weekEnding}`;
+
+        const dnsPill = document.createElement('span');
+        dnsPill.className = 'pill';
+        dnsPill.classList.add(dns ? 'pill-warn' : 'pill-info');
+        dnsPill.textContent = dns ? 'Do not send' : 'Send';
+        dnsPill.title = dns ? 'Invoice is marked do_not_send' : '';
+
+        line.appendChild(pill);
+        line.appendChild(invTxt);
+        line.appendChild(dnsPill);
+        line.appendChild(meta);
+
+        if (reasonTxt) {
+          const msg = document.createElement('span');
+          msg.style.opacity = '0.9';
+          msg.style.color = '#ffb4b4';
+          msg.textContent = `Reason: ${reasonTxt}`;
+          line.appendChild(msg);
+        }
+
+        box.appendChild(line);
+      });
+
+      resEl.appendChild(box);
+    }
+  };
 
   const paint = () => {
     const root = document.getElementById('invBatchIssueRoot');
@@ -34038,6 +36405,7 @@ async function openInvoiceBatchIssueModal() {
       state.selectedInvoiceIds.clear();
       paint();
     }, { disabled: state.busy || selectedCount === 0 }));
+
     controls.appendChild(mkBtn(`Confirm (${selectedCount})`, async () => {
       if (state.busy) return;
 
@@ -34066,20 +36434,6 @@ async function openInvoiceBatchIssueModal() {
 
         state.results = out || {};
         window.__toast && window.__toast('Batch issue complete.');
-
-        // ✅ collect invoice ids touched in this run (prefer RPC results; fallback to selection)
-        const invRes = Array.isArray(out?.invoice_results) ? out.invoice_results : [];
-        const touched = [];
-
-        for (const r of invRes) {
-          const id = String(r?.invoice_id || '').trim();
-          if (id) touched.push(id);
-        }
-
-        const idsForNav = touched.length ? touched : ids;
-
-        await refreshInvoiceSummary(idsForNav);
-
       } catch (e) {
         state.error = String(e?.message || e);
       } finally {
@@ -34087,7 +36441,6 @@ async function openInvoiceBatchIssueModal() {
         paint();
       }
     }, { primary: true, disabled: state.busy || selectedCount === 0 }));
-
 
     const selInfo = document.createElement('div');
     selInfo.className = 'mini';
@@ -34290,10 +36643,7 @@ async function openInvoiceBatchIssueModal() {
           cb.type = 'checkbox';
           cb.checked = !!(invId && state.selectedInvoiceIds.has(invId));
 
-          // Default selection rules:
-          // - ON_HOLD is unchecked + visually red + NOT selectable
           const disabled = state.busy || !invId || (st === 'ON_HOLD');
-
           cb.disabled = !!disabled;
 
           cb.addEventListener('change', () => {
@@ -34383,122 +36733,11 @@ async function openInvoiceBatchIssueModal() {
       bodyEl.appendChild(clientDetails);
     });
 
-    // Results
+    // Results (confirm response only)
     if (state.results) {
       resEl.style.display = '';
       resEl.innerHTML = '';
-
-      const out = state.results || {};
-      const invRes = Array.isArray(out?.invoice_results) ? out.invoice_results : [];
-      const mails  = Array.isArray(out?.email_outbox) ? out.email_outbox : [];
-      const maxA   = Number(out?.max_attachments_per_email || 0) || null;
-
-      const norm = (x) => String(x || '').trim().toUpperCase();
-      const issuedCount = invRes.filter(r => norm(r?.status) === 'ISSUED' && r?.ok === true).length;
-      const heldCount   = invRes.filter(r => norm(r?.status) === 'ON_HOLD').length;
-      const notDueCount = invRes.filter(r => norm(r?.error) === 'NOT_DUE_YET').length;
-
-      const head = document.createElement('div');
-      head.style.fontWeight = '700';
-      head.style.marginBottom = '6px';
-      head.textContent = `Results — Issued ${issuedCount} • Held ${heldCount} • Not due yet ${notDueCount} • Emails queued ${mails.length}${maxA ? ` (max attachments/email ${maxA})` : ''}`;
-      resEl.appendChild(head);
-
-      if (mails.length) {
-        const t = document.createElement('div');
-        t.className = 'mini';
-        t.style.opacity = '0.9';
-        t.textContent = 'Queued emails (bundled by client/week and split by attachment cap):';
-        resEl.appendChild(t);
-
-        const box = document.createElement('div');
-        box.style.marginTop = '8px';
-
-        mails.forEach(m => {
-          const line = document.createElement('div');
-          line.className = 'mini';
-          line.style.cssText = 'display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:6px 0;border-top:1px solid rgba(255,255,255,0.06);';
-
-          const pill = document.createElement('span');
-          pill.className = 'pill pill-info';
-          pill.textContent = 'QUEUED';
-
-          const to = document.createElement('span');
-          to.textContent = `To: ${String(m?.to || '').trim() || '—'}`;
-
-          const subj = document.createElement('span');
-          subj.style.opacity = '0.9';
-          subj.textContent = `Subject: ${String(m?.subject || '').trim() || '—'}`;
-
-          const ref = document.createElement('span');
-          ref.style.opacity = '0.9';
-          ref.textContent = `Ref: ${String(m?.reference || '').trim() || '—'}`;
-
-          const id = document.createElement('span');
-          id.style.opacity = '0.9';
-          id.textContent = `Outbox: ${String(m?.mail_outbox_id || '').trim() || '—'}`;
-
-          line.appendChild(pill);
-          line.appendChild(to);
-          line.appendChild(subj);
-          line.appendChild(ref);
-          line.appendChild(id);
-
-          box.appendChild(line);
-        });
-
-        resEl.appendChild(box);
-      }
-
-      if (invRes.length) {
-        const hr = document.createElement('div');
-        hr.style.cssText = 'height:1px;background:var(--line);margin:10px 0;';
-        resEl.appendChild(hr);
-
-        const t = document.createElement('div');
-        t.style.fontWeight = '700';
-        t.style.marginBottom = '6px';
-        t.textContent = 'Invoice outcomes';
-        resEl.appendChild(t);
-
-        invRes.forEach(r => {
-          const st = norm(r?.status);
-          const ok = (r?.ok === true);
-
-          const line = document.createElement('div');
-          line.className = 'mini';
-          line.style.cssText = 'display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:6px 0;border-top:1px solid rgba(255,255,255,0.06);';
-
-          const pill = document.createElement('span');
-          pill.className = 'pill';
-          if (norm(r?.error) === 'NOT_DUE_YET') pill.classList.add('pill-warn');
-          else if (st === 'ON_HOLD') pill.classList.add('pill-bad');
-          else if (ok && st === 'ISSUED') pill.classList.add('pill-ok');
-          else pill.classList.add('pill-info');
-
-          pill.textContent =
-            norm(r?.error) === 'NOT_DUE_YET' ? 'NOT DUE YET' :
-            st ? st :
-            ok ? 'OK' : 'FAILED';
-
-          const invTxt = document.createElement('span');
-          invTxt.textContent = r?.invoice_id ? `Invoice ${String(r.invoice_id).slice(0, 8)}…` : 'Invoice';
-
-          const msg = document.createElement('span');
-          msg.style.opacity = '0.9';
-          msg.textContent =
-            r?.on_hold_reason ? `Reason: ${r.on_hold_reason}` :
-            r?.error ? `Error: ${r.error}` :
-            '';
-
-          line.appendChild(pill);
-          line.appendChild(invTxt);
-          if (msg.textContent) line.appendChild(msg);
-
-          resEl.appendChild(line);
-        });
-      }
-
+      paintResultsFromConfirm(resEl, state.results || {}, Array.from(state.selectedInvoiceIds).map(String).filter(Boolean));
     } else {
       resEl.style.display = 'none';
       resEl.innerHTML = '';
@@ -34567,30 +36806,14 @@ async function openInvoiceBatchGenerateModal() {
   //    - When allow_early=false, the RPC MUST NOT return future weeks (it doesn’t).
   //    - UI does NOT compute “future” or hide/show based on local date.
   //
+  // ✅ Results UI renders ONLY from confirm response out.results_invoices[].
+  //    No per-invoice GET calls.
+  //
   // ✅ Styling: uses existing modal shell + existing .btn/.mini styles.
   //    We add modal classes so index.html CSS can:
   //      - widen/tall the modal for batch lists
   //      - disable outer .modal-b scrolling (avoid double scrollbars)
   //      - make only the inner list scroll
-  //
-  // 📌 CSS to add in index.html next (NOT done here):
-  //   .invbatch-modal { /* optional: width/max-width overrides */ }
-  //   .invbatch-modal .modal-b { overflow:hidden; }               // kill outer scrollbar
-  //   .invbatch-root { display:flex; flex-direction:column; gap:10px; height:100%; }
-  //   .invbatch-controls { display:flex; align-items:center; gap:10px; flex-wrap:wrap;
-  //                        padding:10px; border:1px solid var(--line); border-radius:12px;
-  //                        background:#0b1427; }
-  //   .invbatch-scroll { overflow:auto; max-height:60vh; padding:6px 2px; }
-  //   .invbatch-card { border:1px solid var(--line); border-radius:12px; background:#0b1427; }
-  //   .invbatch-card-head { display:flex; align-items:center; justify-content:space-between; gap:10px;
-  //                         padding:10px; cursor:pointer; }
-  //   .invbatch-week-head { background:#081024; }
-  //   .invbatch-row { display:flex; align-items:center; gap:10px; padding:10px; }
-  //   .invbatch-right { display:flex; flex-direction:column; align-items:flex-end; gap:2px; min-width:140px; }
-  //   .invbatch-badge { padding:3px 8px; border:1px solid var(--line); border-radius:999px; background:#0b152a; }
-  //   .invbatch-badge-warn { border-color:#a33; background:#3a1214; color:#ffb4b4; }
-  //   .invbatch-results { margin-top:10px; padding:10px; border:1px solid var(--line); border-radius:12px;
-  //                       background:#0b1427; }
   // ─────────────────────────────────────────────────────────────
 
   const API_CANDIDATES = '/api/invoices/batch-generate/candidates';
@@ -34609,6 +36832,9 @@ async function openInvoiceBatchGenerateModal() {
 
     openClients: new Set(),  // client_id strings
     openWeeks: new Set()     // `${client_id}|${invoice_week_start}`
+
+    // Results expanders
+    ,openResultClients: new Set() // client_id strings
   };
 
   const fmtMoney = (n) => {
@@ -34660,8 +36886,6 @@ async function openInvoiceBatchGenerateModal() {
     //   { client_id, invoice_week_start: "YYYY-MM-DD", timesheet_ids:[uuid...] },
     //   ...
     // ]
-    //
-    // Source: public.invoice_outbox_enqueue_by_week_selected docs.
     const map = new Map(); // key -> {client_id, invoice_week_start, timesheet_ids:[]}
 
     (state.groups || []).forEach(c => {
@@ -34731,11 +36955,11 @@ async function openInvoiceBatchGenerateModal() {
   };
 
   const refreshSummariesAfterSuccess = async (invoiceIds) => {
-    // ✅ 4.9: After batch generate, switch UI to Invoice Summary and filter to invoices from this run.
+    // After batch generate, switch UI to Invoice Summary and filter to invoices from this run.
+    // NOTE: optional navigation; does not do per-invoice GET calls.
     try {
       const ids = Array.from(new Set((invoiceIds || []).map(String).filter(Boolean)));
 
-      // Always reset invoice paging so the filter view is stable
       window.__listState = window.__listState || {};
       window.__listState.invoices = window.__listState.invoices || {
         page: 1,
@@ -34750,16 +36974,13 @@ async function openInvoiceBatchGenerateModal() {
       window.__listState.invoices.total = null;
       window.__listState.invoices.hasMore = false;
 
-      // Replace filters so we show ONLY this run’s invoices
       window.__listState.invoices.filters = {
         ids,
         include_totals: 1
       };
 
-      // Switch section and repaint (same primitives you already use elsewhere)
       try { currentSection = 'invoices'; } catch {}
 
-      // Close the utility modal first (so the user sees the summary immediately)
       try { document.getElementById('btnCloseModal')?.click(); } catch {}
 
       const data = await loadSection();
@@ -34767,9 +36988,7 @@ async function openInvoiceBatchGenerateModal() {
     } catch {}
   };
 
-
   const renderSkeleton = () => {
-    // NOTE: no inline styling beyond minimal structure; CSS will be added in index.html.
     return `
       <div id="invBatchGenRoot" class="invbatch-root">
         <div class="mini" style="opacity:.95">
@@ -34786,6 +37005,210 @@ async function openInvoiceBatchGenerateModal() {
         </div>
       </div>
     `;
+  };
+
+  const paintResultsFromConfirm = (resEl, out) => {
+    const results = Array.isArray(out?.results_invoices) ? out.results_invoices : [];
+    const invoiceIds = Array.isArray(out?.invoice_ids) ? out.invoice_ids : [];
+
+    resEl.innerHTML = '';
+
+    const wrap = document.createElement('div');
+
+    const h = document.createElement('div');
+    h.style.fontWeight = '700';
+    h.style.marginBottom = '6px';
+    h.textContent = `Results — Enqueued ${Number(out?.enqueued || 0)} • Generated ${Number(out?.generated || 0)}`;
+    wrap.appendChild(h);
+
+    const note = document.createElement('div');
+    note.className = 'mini';
+    note.style.opacity = '0.9';
+    note.textContent = 'Rendered from confirm response only (no per-invoice fetch).';
+    wrap.appendChild(note);
+
+    const actionsRow = document.createElement('div');
+    actionsRow.style.display = 'flex';
+    actionsRow.style.gap = '8px';
+    actionsRow.style.flexWrap = 'wrap';
+    actionsRow.style.alignItems = 'center';
+    actionsRow.style.marginTop = '10px';
+
+    const btnView = document.createElement('button');
+    btnView.type = 'button';
+    btnView.className = 'btn btn-sm btn-outline';
+    btnView.textContent = `View invoices in summary (${invoiceIds.length})`;
+    btnView.disabled = !invoiceIds.length;
+    btnView.addEventListener('click', async (ev) => {
+      ev.preventDefault();
+      await refreshSummariesAfterSuccess(invoiceIds);
+    });
+
+    actionsRow.appendChild(btnView);
+    wrap.appendChild(actionsRow);
+
+    const hr = document.createElement('div');
+    hr.style.height = '1px';
+    hr.style.background = 'var(--line)';
+    hr.style.margin = '10px 0';
+    wrap.appendChild(hr);
+
+    if (!results.length) {
+      const empty = document.createElement('div');
+      empty.className = 'mini';
+      empty.textContent = 'No invoices returned.';
+      wrap.appendChild(empty);
+      resEl.appendChild(wrap);
+      return;
+    }
+
+    // Group by client_id
+    const byClient = new Map();
+    for (const r of results) {
+      const cid = String(r?.client_id || '');
+      if (!byClient.has(cid)) byClient.set(cid, []);
+      byClient.get(cid).push(r);
+    }
+
+    // Render grouped sections
+    for (const [cid, arr] of byClient.entries()) {
+      const clientName = String(arr[0]?.client_name || cid || 'Client');
+
+      const details = document.createElement('details');
+      details.className = 'invbatch-card';
+      details.open = state.openResultClients.has(cid) || false;
+
+      details.addEventListener('toggle', () => {
+        if (details.open) state.openResultClients.add(cid);
+        else state.openResultClients.delete(cid);
+      });
+
+      const sum = document.createElement('summary');
+      sum.className = 'invbatch-card-head';
+      sum.style.listStyle = 'none';
+
+      const left = document.createElement('div');
+      left.style.display = 'flex';
+      left.style.flexDirection = 'column';
+      left.style.gap = '2px';
+
+      const t = document.createElement('div');
+      t.style.fontWeight = '700';
+      t.textContent = clientName;
+
+      const sub = document.createElement('div');
+      sub.className = 'mini';
+      sub.style.opacity = '0.85';
+      sub.textContent = `${arr.length} invoice(s)`;
+
+      left.appendChild(t);
+      left.appendChild(sub);
+
+      sum.appendChild(left);
+      details.appendChild(sum);
+
+      const inner = document.createElement('div');
+      inner.style.display = 'flex';
+      inner.style.flexDirection = 'column';
+      inner.style.gap = '8px';
+      inner.style.padding = '10px 6px 6px 6px';
+
+      // Sort by week_ending_date then invoice_no
+      arr.sort((a, b) => {
+        const wa = String(a?.week_ending_date || '');
+        const wb = String(b?.week_ending_date || '');
+        if (wa < wb) return -1;
+        if (wa > wb) return 1;
+        const na = String(a?.invoice_no || '');
+        const nb = String(b?.invoice_no || '');
+        return na.localeCompare(nb);
+      });
+
+      for (const r of arr) {
+        const invoiceNo = (r?.invoice_no != null && String(r.invoice_no).trim()) ? String(r.invoice_no) : '—';
+        const cand = (r?.candidate_name != null && String(r.candidate_name).trim())
+          ? String(r.candidate_name)
+          : (Array.isArray(r?.candidate_names) && r.candidate_names.length ? 'Multiple' : '—');
+
+        const we = r?.week_ending_date ? `Week ending ${ymdToDMY(r.week_ending_date)}` : 'Week ending —';
+        const dns = (r?.do_not_send === true);
+
+        const ok = (r?.ok === true);
+        const warnings = Array.isArray(r?.warnings) ? r.warnings : (r?.warnings ? [r.warnings] : []);
+        const warnTxt = warnings.length ? warnings.map(w => {
+          try { return (typeof w === 'string') ? w : JSON.stringify(w); } catch { return String(w); }
+        }).join(' | ') : '';
+
+        const card = document.createElement('div');
+        card.className = 'invbatch-row';
+        card.style.border = '1px solid var(--line)';
+        card.style.borderRadius = '12px';
+        card.style.background = '#0b1427';
+        card.style.display = 'flex';
+        card.style.flexWrap = 'wrap';
+        card.style.gap = '10px';
+        card.style.alignItems = 'center';
+        card.style.justifyContent = 'space-between';
+
+        const leftBox = document.createElement('div');
+        leftBox.style.display = 'flex';
+        leftBox.style.flexDirection = 'column';
+        leftBox.style.gap = '2px';
+        leftBox.style.minWidth = '0';
+        leftBox.style.flex = '1';
+
+        const line1 = document.createElement('div');
+        line1.style.display = 'flex';
+        line1.style.gap = '8px';
+        line1.style.flexWrap = 'wrap';
+        line1.style.alignItems = 'center';
+
+        const pill = document.createElement('span');
+        pill.className = 'mini invbatch-badge';
+        pill.style.borderColor = ok ? '#2d6' : '#a33';
+        pill.style.background  = ok ? '#0f2a1b' : '#3a1214';
+        pill.style.color       = ok ? '#bfffe0' : '#ffb4b4';
+        pill.textContent = ok ? 'OK' : 'FAILED';
+
+        const invTxt = document.createElement('span');
+        invTxt.style.fontWeight = '700';
+        invTxt.textContent = `INV ${invoiceNo}`;
+
+        const dnsPill = document.createElement('span');
+        dnsPill.className = 'mini invbatch-badge';
+        dnsPill.style.opacity = dns ? '1' : '0.3';
+        dnsPill.textContent = dns ? 'Do not send' : 'Send';
+
+        line1.appendChild(pill);
+        line1.appendChild(invTxt);
+        line1.appendChild(dnsPill);
+
+        const line2 = document.createElement('div');
+        line2.className = 'mini';
+        line2.style.opacity = '0.9';
+        line2.textContent = `${cand} • ${we}`;
+
+        leftBox.appendChild(line1);
+        leftBox.appendChild(line2);
+
+        if (warnTxt) {
+          const line3 = document.createElement('div');
+          line3.className = 'mini';
+          line3.style.opacity = '0.9';
+          line3.style.color = '#ffb4b4';
+          line3.textContent = `Notes: ${warnTxt}`;
+          leftBox.appendChild(line3);
+        }
+
+        card.appendChild(leftBox);
+        inner.appendChild(card);
+      }
+
+      details.appendChild(inner);
+      wrap.appendChild(details);
+    }
+
+    resEl.appendChild(wrap);
   };
 
   const paint = () => {
@@ -34809,7 +37232,6 @@ async function openInvoiceBatchGenerateModal() {
       b.type = 'button';
       b.textContent = label;
 
-      // Match existing modal button conventions
       const cls = ['btn', 'btn-sm'];
       if (opts.primary) cls.push('btn-primary');
       else cls.push('btn-outline');
@@ -34875,7 +37297,7 @@ async function openInvoiceBatchGenerateModal() {
       paint();
     }, { disabled: state.busy || selectedCount === 0 }));
 
-      controls.appendChild(mkBtn(`Confirm (${selectedCount})`, async () => {
+    controls.appendChild(mkBtn(`Confirm (${selectedCount})`, async () => {
       if (state.busy) return;
 
       const rowsPayload = buildRowsPayload();
@@ -34903,19 +37325,6 @@ async function openInvoiceBatchGenerateModal() {
 
         state.results = out || {};
         window.__toast && window.__toast(`Batch generate complete (generated: ${Number(out?.generated || 0)}).`);
-
-        // ✅ collect invoice ids produced in this run (for summary filter)
-        const jobs = Array.isArray(out?.jobs) ? out.jobs : [];
-        const allInvoices = [];
-        for (const j of jobs) {
-          const ids = Array.isArray(j?.invoice_ids) ? j.invoice_ids : [];
-          for (const id of ids) {
-            const s = String(id || '').trim();
-            if (s) allInvoices.push(s);
-          }
-        }
-
-        await refreshSummariesAfterSuccess(allInvoices);
       } catch (e) {
         state.error = String(e?.message || e);
       } finally {
@@ -34923,7 +37332,6 @@ async function openInvoiceBatchGenerateModal() {
         paint();
       }
     }, { primary: true, disabled: state.busy || selectedCount === 0 }));
-
 
     const selInfo = document.createElement('div');
     selInfo.className = 'mini';
@@ -34940,7 +37348,7 @@ async function openInvoiceBatchGenerateModal() {
       errEl.textContent = '';
     }
 
-    // ── groups ────────────────────────────────────────────────
+    // ── groups (candidate selection) ───────────────────────────
     bodyEl.innerHTML = '';
     const groups = Array.isArray(state.groups) ? state.groups : [];
 
@@ -35221,132 +37629,20 @@ async function openInvoiceBatchGenerateModal() {
       bodyEl.appendChild(clientDetails);
     });
 
-    // ── results (inside the SAME scroll area to avoid outer scrolling) ──
+    // ── results (confirm response only) ─────────────────────────
     if (state.results) {
       resEl.style.display = '';
-      const out = state.results || {};
-      const jobs = Array.isArray(out?.jobs) ? out.jobs : [];
-
-      const grouped = new Map(); // client_id -> array of jobs
-      jobs.forEach(j => {
-        const cid = String(j?.client_id || '');
-        if (!grouped.has(cid)) grouped.set(cid, []);
-        grouped.get(cid).push(j);
-      });
-
-      const findClientName = (cid) => {
-        const g = (state.groups || []).find(x => String(x?.client_id || '') === cid);
-        return String(g?.client_name || cid || 'Client');
-      };
-
-      const wrap = document.createElement('div');
-
-      const h = document.createElement('div');
-      h.style.fontWeight = '700';
-      h.style.marginBottom = '6px';
-      h.textContent = `Results — Enqueued ${Number(out?.enqueued || 0)} • Generated ${Number(out?.generated || 0)}`;
-      wrap.appendChild(h);
-
-      const note = document.createElement('div');
-      note.className = 'mini';
-      note.style.opacity = '0.9';
-      note.textContent = 'Invoices are created as DRAFT/ON_HOLD according to policy. You can now Batch Issue from the Invoices menu.';
-      wrap.appendChild(note);
-
-      const hr = document.createElement('div');
-      hr.style.height = '1px';
-      hr.style.background = 'var(--line)';
-      hr.style.margin = '10px 0';
-      wrap.appendChild(hr);
-
-      if (!jobs.length) {
-        const empty = document.createElement('div');
-        empty.className = 'mini';
-        empty.textContent = 'No jobs returned.';
-        wrap.appendChild(empty);
-      }
-
-      for (const [cid, arr] of grouped.entries()) {
-        const box = document.createElement('div');
-        box.className = 'invbatch-card';
-        box.style.background = '#081024';
-        box.style.padding = '10px';
-        box.style.marginBottom = '10px';
-
-        const t = document.createElement('div');
-        t.style.fontWeight = '700';
-        t.style.marginBottom = '6px';
-        t.textContent = findClientName(cid);
-        box.appendChild(t);
-
-        arr.forEach(j => {
-          const wk = String(j?.invoice_week_start || '');
-          const ok = !!j?.ok;
-          const invIds = Array.isArray(j?.invoice_ids) ? j.invoice_ids : [];
-
-          const line = document.createElement('div');
-          line.className = 'mini';
-          line.style.display = 'flex';
-          line.style.flexWrap = 'wrap';
-          line.style.gap = '8px';
-          line.style.alignItems = 'center';
-          line.style.padding = '6px 0';
-          line.style.borderTop = '1px solid rgba(255,255,255,0.06)';
-
-          const pill = document.createElement('span');
-          pill.className = 'mini invbatch-badge';
-          pill.style.borderColor = ok ? '#2d6' : '#a33';
-          pill.style.background  = ok ? '#0f2a1b' : '#3a1214';
-          pill.style.color       = ok ? '#bfffe0' : '#ffb4b4';
-          pill.textContent = ok ? 'OK' : 'FAILED';
-
-          const wkTxt = document.createElement('span');
-          wkTxt.textContent = `Week start ${ymdToDMY(wk)}`;
-
-          const invTxt = document.createElement('span');
-          invTxt.textContent = invIds.length ? `Invoices: ${invIds.length}` : 'Invoices: 0';
-
-          line.appendChild(pill);
-          line.appendChild(wkTxt);
-          line.appendChild(invTxt);
-
-          if (j?.enqueue_action) {
-            const a = document.createElement('span');
-            a.style.opacity = '0.9';
-            a.textContent = `Outbox: ${String(j.enqueue_action)}`;
-            line.appendChild(a);
-          }
-
-          if (j?.warnings) {
-            const wj = document.createElement('span');
-            wj.style.opacity = '0.9';
-            try {
-              wj.textContent = `Notes: ${JSON.stringify(j.warnings)}`;
-            } catch {
-              wj.textContent = 'Notes: (unavailable)';
-            }
-            line.appendChild(wj);
-          }
-
-          box.appendChild(line);
-        });
-
-        wrap.appendChild(box);
-      }
-
-      resEl.innerHTML = '';
-      resEl.appendChild(wrap);
+      paintResultsFromConfirm(resEl, state.results || {});
     } else {
       resEl.style.display = 'none';
       resEl.innerHTML = '';
     }
 
-    // Restore scroll
     scrollEl.scrollTop = prevScroll;
   };
 
   // ─────────────────────────────────────────────────────────────
-  // Open modal (no showModal changes required yet)
+  // Open modal
   // ─────────────────────────────────────────────────────────────
   window.modalCtx = {
     entity: 'invoices',
@@ -35362,9 +37658,6 @@ async function openInvoiceBatchGenerateModal() {
     true,
     null,
     {
-      // Use existing "utility kind" pattern so showModal:
-      // - hides Save/Edit
-      // - keeps inputs enabled even in view mode
       kind: 'import-summary-invoice-batch-generate',
       noParentGate: true,
       onDismiss: () => {
@@ -35379,7 +37672,6 @@ async function openInvoiceBatchGenerateModal() {
     }
   );
 
-  // Add modal sizing/overflow class hooks (CSS added in index.html next)
   try {
     const modalNode = document.getElementById('modal');
     if (modalNode) {
@@ -37098,13 +39390,15 @@ function setFormReadOnly(root, ro) {
 
         const act = String(el.getAttribute('data-action') || '').toLowerCase();
 
-        const safeDataActions = new Set([
+           const safeDataActions = new Set([
           'inv-open-pdf',
           'inv-email',
+          'inv-open-reference-numbers',
           'inv-set-tab',
           'inv-close',
           'inv-delete-invoice'
         ]);
+
 
         if (isInvoiceFrame && ro && act && safeDataActions.has(act)) {
           el.disabled = false;
@@ -37237,11 +39531,12 @@ const frame = {
   if (opts.forceEdit) return 'edit';
   if (!hasId && opts.kind === 'rate-preset') return 'edit';
 
-   // NEW: utility modals – always view-only, no Save/Edit
+    // NEW: utility modals – always view-only, no Save/Edit
   const isUtilityKind =
     opts.kind === 'timesheets-resolve' ||
     opts.kind === 'resolve-candidate'  ||
     opts.kind === 'resolve-client'     ||
+    opts.kind === 'invoice-reference-numbers' ||
     (typeof opts.kind === 'string' && opts.kind.startsWith('import-summary-')) ||
     (typeof opts.kind === 'string' && opts.kind.startsWith('invoice-batch-')) ||
     (typeof opts.kind === 'string' && opts.kind.startsWith('import-summary-invoice-batch-'));
@@ -37249,6 +39544,7 @@ const frame = {
   if (isUtilityKind) {
     return 'view';
   }
+
 
 
 
@@ -39107,14 +41403,16 @@ try {
 
   const isChild = (stack().length > 1);
 
-    // Utility modals (resolve/import summaries) should keep inner buttons active
+  // Utility modals (resolve/import summaries) should keep inner buttons active
   const isUtilityKindForThis =
     this.kind === 'timesheets-resolve' ||
     this.kind === 'resolve-candidate'  ||
     this.kind === 'resolve-client'     ||
+    this.kind === 'invoice-reference-numbers' ||
     (typeof this.kind === 'string' && this.kind.startsWith('import-summary-')) ||
     (typeof this.kind === 'string' && this.kind.startsWith('invoice-batch-')) ||
     (typeof this.kind === 'string' && this.kind.startsWith('import-summary-invoice-batch-'));
+
 
 if (this.noParentGate) {
   const ro = isUtilityKindForThis
@@ -39788,9 +42086,11 @@ const isUtilityKind =
   top.kind === 'timesheets-resolve' ||
   top.kind === 'resolve-candidate'  ||
   top.kind === 'resolve-client'     ||
+  top.kind === 'invoice-reference-numbers' ||
   (typeof top.kind === 'string' && top.kind.startsWith('import-summary-')) ||
   (typeof top.kind === 'string' && top.kind.startsWith('invoice-batch-')) ||
   (typeof top.kind === 'string' && top.kind.startsWith('import-summary-invoice-batch-'));
+
 
 
 
@@ -39899,10 +42199,11 @@ top._updateButtons = ()=> {
     btnClose.setAttribute('title', 'Cancel');
     return;
 
-   } else if (
+     } else if (
     top.kind === 'timesheets-resolve' ||
     top.kind === 'resolve-candidate'  ||
     top.kind === 'resolve-client'     ||
+    top.kind === 'invoice-reference-numbers' ||
     (typeof top.kind === 'string' && top.kind.startsWith('import-summary-')) ||
     (typeof top.kind === 'string' && top.kind.startsWith('invoice-batch-')) ||
     (typeof top.kind === 'string' && top.kind.startsWith('import-summary-invoice-batch-'))
@@ -41033,11 +43334,21 @@ try {
 // ✅ NEW: detach invoice delegated click handler (bound to #modalBody)
 try {
   const ctx = closing && closing._ctxRef ? closing._ctxRef : null;
-  if (ctx && ctx.__invDelegated && ctx.__invDelegated.targetEl && ctx.__invDelegated.handler) {
-    try { ctx.__invDelegated.targetEl.removeEventListener('click', ctx.__invDelegated.handler, true); } catch {}
+  if (ctx && ctx.__invDelegated && ctx.__invDelegated.targetEl) {
+    try {
+      if (ctx.__invDelegated.handler) {
+        ctx.__invDelegated.targetEl.removeEventListener('click', ctx.__invDelegated.handler, true);
+      }
+    } catch {}
+    try {
+      if (ctx.__invDelegated.changeHandler) {
+        ctx.__invDelegated.targetEl.removeEventListener('change', ctx.__invDelegated.changeHandler, true);
+      }
+    } catch {}
     ctx.__invDelegated = null;
   }
 } catch {}
+
 
 
 if (closing?._detachDirty){ try{closing._detachDirty();}catch{} closing._detachDirty=null; }
@@ -41052,10 +43363,12 @@ if (closing?._detachDirty){ try{closing._detachDirty();}catch{} closing._detachD
   const closingKind = (closing && typeof closing.kind === 'string') ? closing.kind : '';
   const closingIsUtility =
     (typeof closingKind === 'string' && (
+      closingKind === 'invoice-reference-numbers' ||
       closingKind.startsWith('import-summary-') ||
       closingKind.startsWith('invoice-batch-') ||
       closingKind.startsWith('import-summary-invoice-batch-')
     ));
+
 
   // ✅ Utility modal rule:
   // Closing a utility child should NOT trigger parent "restore" work beyond renderTop().
@@ -44700,33 +47013,75 @@ async function focusCurrentSelection(section) {
 // Apply IDs-only selection as a filter and reload
 // Apply IDs-only selection as a filter and reload
 async function applySelectionAsFilter(section, selectionSnapshot) {
+  // Supports:
+  // - Focus by explicit ids[]
+  // - Related-mode focus via selectionSnapshot.related { source_entity, source_id, relation_type }
+  //
+  // Rule:
+  // - When entering related mode, REPLACE filters with { related: ... } (do not merge any existing filters).
+
   const ids = Array.isArray(selectionSnapshot?.ids)
     ? selectionSnapshot.ids.map(String).filter(Boolean)
     : [];
 
-  if (!ids.length) {
+  const related = (selectionSnapshot && typeof selectionSnapshot === 'object' && selectionSnapshot.related && typeof selectionSnapshot.related === 'object')
+    ? {
+        source_entity: String(selectionSnapshot.related.source_entity || '').trim(),
+        source_id: String(selectionSnapshot.related.source_id || '').trim(),
+        relation_type: String(selectionSnapshot.related.relation_type || '').trim()
+      }
+    : null;
+
+  const hasRelated =
+    !!related &&
+    !!related.source_entity &&
+    !!related.source_id &&
+    !!related.relation_type;
+
+  if (!hasRelated && !ids.length) {
     alert('No records selected to focus.');
     return;
   }
 
-  // Reset paging & REPLACE existing filters with IDs-only
+  // Reset paging & REPLACE existing filters
   window.__listState = window.__listState || {};
   const st = (window.__listState[section] ||= {
     page: 1, pageSize: 50, total: null, hasMore: false, filters: null,
   });
   st.page = 1;
-  st.filters = { ids }; // ← replace, don't merge
+  st.total = null;
+  st.hasMore = false;
+
+  if (hasRelated) {
+    // ✅ Related mode: do NOT merge incompatible filters; replace entirely
+    st.filters = { related };
+  } else {
+    // ✅ IDs-only focus: replace entirely
+    st.filters = { ids };
+  }
 
   // Mirror into selection for checkbox sync
   const sel = ensureSelection(section);
   sel.fingerprint = JSON.stringify({ section, filters: st.filters || {} });
-  sel.ids = new Set(ids);
+  sel.ids = new Set(hasRelated ? [] : ids);
 
-  // Reload data and re-render
+  // Reload data and re-render (use normal section list load path if available)
+  try {
+    if (typeof loadSection === 'function' && typeof renderSummary === 'function') {
+      // Ensure currentSection is correct before loadSection
+      try { currentSection = section; } catch {}
+      const data = await loadSection();
+      renderSummary(data);
+      return;
+    }
+  } catch (e) {
+    console.warn('[applySelectionAsFilter] loadSection path failed, falling back to search()', e);
+  }
+
+  // Fallback: direct search
   const rows = await search(section, st.filters);
   renderSummary(rows);
 }
-
 
 
 
@@ -47296,6 +49651,15 @@ async function renderClientSettingsUI(settingsObj){
     'bh_start','bh_end'
   ];
 
+  const toBool = (v, def = false) => {
+    if (typeof v === 'boolean') return v;
+    if (v === 'on' || v === 'true' || v === true || v === 1 || v === '1') return true;
+    if (v === 'false' || v === false || v === 0 || v === '0' || v == null || v === '') return false;
+    return def;
+  };
+
+  const up = (v) => String(v || '').trim().toUpperCase();
+
   // ✅ Seed WITHOUT forcing defaults. Blank means “inherit global”.
   const seed = {
     ...initial,
@@ -47333,7 +49697,11 @@ async function renderClientSettingsUI(settingsObj){
       String(initial.manual_invoices_alt_email_address || '').trim(),
 
     weekly_mode: initial.weekly_mode || '',
-    hr_weekly_behaviour: initial.hr_weekly_behaviour || ''
+    hr_weekly_behaviour: initial.hr_weekly_behaviour || '',
+
+    // ✅ NEW (DB-backed): invoice consolidation mode + ref-to-issue flag
+    invoice_consolidation_mode: up(initial.invoice_consolidation_mode || 'NONE'),
+    reference_number_required_to_issue_invoice: toBool(initial.reference_number_required_to_issue_invoice, false)
   };
 
   // ✅ Preserve blanks through canonicalise (so UI can represent “inherit global”)
@@ -47450,6 +49818,42 @@ async function renderClientSettingsUI(settingsObj){
     </label>
   `;
 
+  const checkChoiceWithDesc = (name, title, desc, checked) => `
+    <label style="
+      display:grid;
+      grid-template-columns: 18px 1fr;
+      column-gap:8px;
+      row-gap:4px;
+      align-items:start;
+      cursor:pointer;
+      margin:0;
+    ">
+      <input type="checkbox" name="${name}" ${checked ? 'checked' : ''} style="margin-top:2px;" />
+      <div style="min-width:0;">
+        <div style="line-height:1.2;white-space:normal;word-break:normal;overflow-wrap:break-word;min-width:0;">${title}</div>
+        ${desc ? `<div class="mini" style="opacity:0.9;line-height:1.25;white-space:normal;overflow-wrap:break-word;">${desc}</div>` : ``}
+      </div>
+    </label>
+  `;
+
+  const invoicingModePanelHTML = (st) => {
+    const m = up(st.invoice_consolidation_mode || 'NONE');
+    const mode = (m === 'ALL') ? 'ANY_WEEK' : m;
+
+    return `
+      <div class="row" style="margin:0;">
+        <label style="white-space:normal">Invoice consolidation</label>
+        <div class="controls" style="display:flex;flex-direction:column;gap:8px;min-width:0;">
+          <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;">
+            ${radioPill('invoice_consolidation_mode', 'BY_WEEK', 'By week (per client)', mode === 'BY_WEEK')}
+            ${radioPill('invoice_consolidation_mode', 'ANY_WEEK', 'All weeks (for client)', mode === 'ANY_WEEK')}
+            ${radioPill('invoice_consolidation_mode', 'NONE', 'None', mode === 'NONE')}
+          </div>
+        </div>
+      </div>
+    `;
+  };
+
   const hrBehaviourHTML = (st) => {
     const mode = String(st.weekly_mode || 'NONE').toUpperCase();
     if (mode !== 'HEALTHROSTER') return '';
@@ -47526,6 +49930,16 @@ async function renderClientSettingsUI(settingsObj){
       }
     `;
 
+    // ✅ NEW checkbox (DB-backed) shown in all modes
+    const refToIssueBlock = `
+      ${checkChoiceWithDesc(
+        'reference_number_required_to_issue_invoice',
+        'Reference Numbers required to Issue Invoices',
+        'Affects issuing only; invoicing may still occur per contract rules.',
+        !!st.reference_number_required_to_issue_invoice
+      )}
+    `;
+
     if (mode === 'NHSP') {
       return `
         <div class="row" style="margin:0;">
@@ -47535,6 +49949,7 @@ async function renderClientSettingsUI(settingsObj){
               NHSP mode controls references, invoicing behaviour and attachments automatically.
             </div>
             <div style="display:grid;grid-template-columns:1fr;gap:8px;">
+              ${refToIssueBlock}
               ${checkChoice('auto_invoice_default', 'Auto-invoice by default', !!st.auto_invoice_default)}
               ${manualEmailBlock}
             </div>
@@ -47549,6 +49964,7 @@ async function renderClientSettingsUI(settingsObj){
           <label style="white-space:normal">References & flags</label>
           <div class="controls" style="display:flex;flex-direction:column;gap:12px;min-width:0;">
             <div style="display:grid;grid-template-columns:1fr;gap:8px;">
+              ${refToIssueBlock}
               ${checkChoice('pay_reference_required', 'Ref No. required to PAY', !!st.pay_reference_required)}
               ${checkChoice('invoice_reference_required', 'Ref No. required to INVOICE', !!st.invoice_reference_required)}
             </div>
@@ -47574,6 +49990,7 @@ async function renderClientSettingsUI(settingsObj){
         <label style="white-space:normal">References & flags</label>
         <div class="controls" style="display:flex;flex-direction:column;gap:12px;min-width:0;">
           <div style="display:grid;grid-template-columns:1fr;gap:8px;">
+            ${refToIssueBlock}
             ${checkChoice('self_bill_no_invoices_sent', 'Self-bill (no invoices sent)', !!st.self_bill_no_invoices_sent)}
             ${checkChoice('daily_calc_of_invoices', 'Daily invoice calculation', !!st.daily_calc_of_invoices)}
             ${checkChoice('group_nightsat_sunbh', 'Group Night/Sat/Sun/BH', !!st.group_nightsat_sunbh)}
@@ -47630,6 +50047,7 @@ async function renderClientSettingsUI(settingsObj){
         </div>
 
         <div style="min-width:0;overflow-wrap:break-word;display:flex;flex-direction:column;gap:14px;">
+          <div id="csInvModePanel">${invoicingModePanelHTML(s)}</div>
           <div id="csWeeklyPanel">${weeklyPanelHTML(s)}</div>
           <div id="csFlagsPanel">${flagsPanelHTML(s)}</div>
         </div>
@@ -47665,12 +50083,17 @@ async function renderClientSettingsUI(settingsObj){
 
   const paintRightPanels = (which) => {
     const st = ctx.clientSettingsState || {};
+    const invModeEl = root.querySelector('#csInvModePanel');
     const weeklyEl = root.querySelector('#csWeeklyPanel');
     const flagsEl  = root.querySelector('#csFlagsPanel');
-    if (!which || which === 'both' || which === 'weekly') {
+
+    if (!which || which === 'both' || which === 'inv' || which === 'all') {
+      if (invModeEl) invModeEl.innerHTML = invoicingModePanelHTML(st);
+    }
+    if (!which || which === 'both' || which === 'weekly' || which === 'all') {
       if (weeklyEl) weeklyEl.innerHTML = weeklyPanelHTML(st);
     }
-    if (!which || which === 'both' || which === 'flags') {
+    if (!which || which === 'both' || which === 'flags' || which === 'all') {
       if (flagsEl)  flagsEl.innerHTML  = flagsPanelHTML(st);
     }
   };
@@ -47700,7 +50123,6 @@ async function renderClientSettingsUI(settingsObj){
     const hasSomeBlank = (blankTimeKeys.length > 0 && blankTimeKeys.length < TIME_KEYS.length);
 
     if (!soft && hasSomeBlank) {
-      // Revert to last valid (either all filled or all blank)
       TIME_KEYS.forEach(k => {
         next[k] = String(lastValid[k] ?? '');
         const el = root.querySelector(`input[name="${k}"]`);
@@ -47714,7 +50136,6 @@ async function renderClientSettingsUI(settingsObj){
         'Use “Clear shift times and default to global shift times” to blank them all.'
       );
 
-      // keep state unchanged (lastValid already represents it)
       ctx.clientSettingsState = { ...lastValid };
       return;
     }
@@ -47731,12 +50152,18 @@ async function renderClientSettingsUI(settingsObj){
       next.default_submission_mode = (dsm === 'ELECTRONIC' || dsm === 'MANUAL') ? dsm : 'ELECTRONIC';
     }
 
+    // Weekly mode / HR behaviour
     const wm = getRadio('weekly_mode');
     if (wm) next.weekly_mode = wm;
 
     const hb = getRadio('hr_weekly_behaviour');
     if (hb) next.hr_weekly_behaviour = hb;
 
+    // ✅ NEW: invoice consolidation mode (radio)
+    const icm = getRadio('invoice_consolidation_mode');
+    if (icm) next.invoice_consolidation_mode = icm;
+
+    // Checkboxes
     const cbKeys = [
       'pay_reference_required',
       'invoice_reference_required',
@@ -47746,7 +50173,10 @@ async function renderClientSettingsUI(settingsObj){
       'auto_invoice_default',
       'hr_attach_to_invoice',
       'ts_attach_to_invoice',
-      'send_manual_invoices_to_different_email'
+      'send_manual_invoices_to_different_email',
+
+      // ✅ NEW: ref-to-issue checkbox
+      'reference_number_required_to_issue_invoice'
     ];
     cbKeys.forEach(k=>{
       const v = getCheckbox(k);
@@ -47777,7 +50207,7 @@ async function renderClientSettingsUI(settingsObj){
 
     next = canonicalizeClientSettings(next);
 
-    // Ensure keys survive canonicalisation
+    // Ensure keys survive canonicalisation for existing UI toggles
     next.auto_invoice_default = keepAutoInv;
     next.send_manual_invoices_to_different_email = keepManualFlag;
     next.manual_invoices_alt_email_address = keepManualFlag ? keepManualEmail : '';
@@ -47791,12 +50221,21 @@ async function renderClientSettingsUI(settingsObj){
     const manualFlagPrev = !!prev.send_manual_invoices_to_different_email;
     const manualFlagNext = !!next.send_manual_invoices_to_different_email;
 
+    const invModePrev = up(prev.invoice_consolidation_mode || 'NONE');
+    const invModeNext = up(next.invoice_consolidation_mode || 'NONE');
+
     ctx.clientSettingsState = next;
     lastValid = { ...next };
 
     // Repaint panels when:
-    // - Weekly mode / HR behaviour changes (both panels)
-    // - Manual invoices toggle changes (flags panel only, so the email input shows/hides)
+    // - Invoice consolidation mode changes (inv panel only)
+    // - Weekly mode / HR behaviour changes (weekly + flags)
+    // - Manual invoices toggle changes (flags panel only)
+    if (invModePrev !== invModeNext) {
+      paintRightPanels('inv');
+      try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
+    }
+
     if (gatePrev !== gateNext) {
       paintRightPanels('both');
       try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
@@ -47807,128 +50246,6 @@ async function renderClientSettingsUI(settingsObj){
   };
 
   const syncSoft = ()=> applyFromDOM(true);
-
-  let lastAlertAt = 0;
- // ✅ NEW helper: validate shift-time rules only on Save (no alert spam)
-const validateShiftTimesOnSave = (settings) => {
-  const s = (settings && typeof settings === 'object') ? settings : {};
-  const errs = [];
-
-  const hhmm = /^([01]\d|2[0-3]):([0-5]\d)$/;
-
-  // NOTE: “either all blank or all filled” for each *pair*
-  // (day/night) are required; sat/sun/bh are optional but must be complete if any part is provided.
-  const PAIRS = [
-    { a:'day_start',   b:'day_end',   label:'Day' },
-    { a:'night_start', b:'night_end', label:'Night' },
-
-    { a:'sat_start',   b:'sat_end',   label:'Saturday' },
-    { a:'sun_start',   b:'sun_end',   label:'Sunday' },
-    { a:'bh_start',    b:'bh_end',    label:'Bank Holiday' }
-  ];
-
-  const norm = (v) => {
-    if (v == null) return '';
-    const str = String(v).trim();
-    if (!str) return '';
-    // accept "HH:MM:SS" and normalise to HH:MM for validation
-    const m = str.match(/^(\d{2}:\d{2})/);
-    return m ? m[1] : str;
-  };
-
-  const isFilled = (v) => !!norm(v);
-  const isValidTime = (v) => {
-    const t = norm(v);
-    if (!t) return true; // blank is allowed at this stage
-    return hhmm.test(t);
-  };
-
-  for (const p of PAIRS) {
-    const a = norm(s[p.a]);
-    const b = norm(s[p.b]);
-
-    const aFilled = !!a;
-    const bFilled = !!b;
-
-    // If one is filled, both must be filled
-    if ((aFilled && !bFilled) || (!aFilled && bFilled)) {
-      errs.push(`${p.label} times must be either both blank or both filled.`);
-      continue;
-    }
-
-    // If provided, must be valid HH:MM
-    if (aFilled && !hhmm.test(a)) errs.push(`${p.label} start time must be HH:MM.`);
-    if (bFilled && !hhmm.test(b)) errs.push(`${p.label} end time must be HH:MM.`);
-  }
-
-  // Week ending weekday (0..6)
-  // NOTE: allow blank/null only if your system supports “unset”; otherwise enforce required.
-  if (Object.prototype.hasOwnProperty.call(s, 'week_ending_weekday')) {
-    const raw = s.week_ending_weekday;
-    if (!(raw === '' || raw === null || raw === undefined)) {
-      const w = Number(raw);
-      if (!Number.isInteger(w) || w < 0 || w > 6) errs.push('Week ending weekday must be 0–6.');
-    }
-  }
-
-  return errs;
-};
-
-
-// ✅ UPDATED: syncValidate no longer alerts; it only applies/stages state and optionally highlights fields
-const syncValidate = ()=> {
-  const frame = _currentFrame();
-  if (!frame || frame.mode !== 'edit') return;
-
-  const vals = collectForm('#clientSettingsForm', false);
-
-  // Keep existing behaviour: stage into modal state
-  applyFromDOM(false);
-
-  // ✅ No alerts here. Optional: live UI hinting/highlight only.
-  // If you don’t want any live UI effects, you can remove this block entirely.
-  try {
-    const errs = validateShiftTimesOnSave(vals);
-
-    // Simple highlight: mark inputs with data-time-field="1" red when invalid
-    // (This is optional UX; no modal spam.)
-    const form = document.querySelector('#clientSettingsForm');
-    if (form) {
-      // Clear old markers
-      form.querySelectorAll('[data-time-field="1"]').forEach(el => {
-        el.classList.remove('input-invalid');
-        el.removeAttribute('title');
-      });
-
-      // Mark invalid times specifically
-      const hhmm = /^([01]\d|2[0-3]):([0-5]\d)$/;
-      const TIME_KEYS = ['day_start','day_end','night_start','night_end','sat_start','sat_end','sun_start','sun_end','bh_start','bh_end'];
-
-      TIME_KEYS.forEach(k => {
-        const el = form.querySelector(`[name="${k}"]`);
-        if (!el) return;
-
-        const raw = String(vals[k] ?? '').trim();
-        if (!raw) return;
-
-        const m = raw.match(/^(\d{2}:\d{2})/);
-        const hh = m ? m[1] : raw;
-
-        if (!hhmm.test(hh)) {
-          el.classList.add('input-invalid');
-          el.setAttribute('title', 'Invalid time (HH:MM)');
-        }
-      });
-
-      // Show a small inline hint if errors exist
-      const hint = form.querySelector('[data-settings-validate-hint="1"]');
-      if (hint) {
-        hint.style.display = errs.length ? '' : 'none';
-        hint.textContent = errs.length ? 'Some fields are invalid. Fix before Save.' : '';
-      }
-    }
-  } catch {}
-};
 
   // ✅ Wire clear-to-global button
   const btnClear = root.querySelector('#btnClearClientShiftTimes');
@@ -47950,6 +50267,11 @@ const syncValidate = ()=> {
   }
 
   root.__syncSoft = syncSoft;
+
+  // Keep existing validation handler binding if present in your current file.
+  // (Your current code defines syncValidate below; we keep it intact here by reusing root.__syncValidate.)
+  const syncValidate = root.__syncValidate || (() => applyFromDOM(false));
+
   root.__syncValidate = syncValidate;
   root.addEventListener('input',  syncSoft, true);
   root.addEventListener('change', syncValidate, true);
@@ -50640,9 +52962,8 @@ function escCloseRelatedMenu(ev){
 function showRelatedMenu(x, y, counts, entity, id){
   closeRelatedMenu();
 
-  const entries = counts && typeof counts === 'object'
-    ? Object.entries(counts).filter(([k]) => k && k.trim().length > 0)
-    : [];
+  const obj = (counts && typeof counts === 'object') ? counts : {};
+  const entries = Object.entries(obj).filter(([k]) => k && String(k).trim().length > 0);
 
   const menu = document.createElement('div');
   menu.id = 'relatedMenu';
@@ -50660,7 +52981,41 @@ function showRelatedMenu(x, y, counts, entity, id){
   menu.style.color = '#f8fafc';
   menu.style.font = '14px/1.4 system-ui,Segoe UI,Roboto,Helvetica,Arial';
 
-  function item(label, disabled, onClick){
+  const toInt = (v) => {
+    const n = Number(v);
+    return Number.isFinite(n) ? Math.max(0, Math.trunc(n)) : 0;
+  };
+
+  const plural = (n, one, many) => (n === 1 ? one : many);
+
+  const resolveTargetSection = (relationType) => {
+    const t = String(relationType || '').toLowerCase();
+    switch (t) {
+      case 'timesheet':
+      case 'timesheets':
+      case 'series':
+        return 'timesheets';
+      case 'invoice':
+      case 'invoices':
+        return 'invoices';
+      case 'client':
+      case 'clients':
+        return 'clients';
+      case 'candidate':
+      case 'candidates':
+        return 'candidates';
+      case 'umbrella':
+      case 'umbrellas':
+        return 'umbrellas';
+      case 'contract':
+      case 'contracts':
+        return 'contracts';
+      default:
+        return currentSection || null;
+    }
+  };
+
+  const item = (label, disabled, relationType) => {
     const it = document.createElement('div');
     it.textContent = label;
     it.style.padding = '8px 10px';
@@ -50669,97 +53024,100 @@ function showRelatedMenu(x, y, counts, entity, id){
     it.style.opacity = disabled ? '.6' : '1';
     it.onmouseenter = ()=>{ if (!disabled) it.style.background = 'rgba(255,255,255,.06)'; };
     it.onmouseleave = ()=>{ it.style.background = 'transparent'; };
+
     if (!disabled) {
       it.onclick = async (ev)=>{
         ev.stopPropagation();
-        const rows = await fetchRelated(entity, id, onClick.type);
 
-        if (rows && Array.isArray(rows)) {
-          // Tear down any open modal before switching section
-          if ((window.__modalStack?.length || 0) > 0 || window.modalCtx?.entity) {
-            discardAllModalsAndState();
-          }
+        // Tear down any open modal before switching section
+        if ((window.__modalStack?.length || 0) > 0 || window.modalCtx?.entity) {
+          discardAllModalsAndState();
+        }
 
-          // Decide which summary section to show
-          let targetSection = currentSection;
-          const t = String(onClick.type || '').toLowerCase();
+        const targetSection = resolveTargetSection(relationType);
+        if (!targetSection) {
+          closeRelatedMenu();
+          return;
+        }
 
-          switch (t) {
-            case 'timesheet':
-            case 'timesheets':
-            case 'series':         // Adjustments series for a timesheet
-              targetSection = 'timesheets';
-              break;
+        // ✅ Persist related view mode into section list-state filters
+        window.__listState = window.__listState || {};
+        const st = (window.__listState[targetSection] ||= {
+          page: 1,
+          pageSize: 50,
+          total: null,
+          hasMore: false,
+          filters: null,
+          sort: { key: null, dir: 'asc' }
+        });
 
-            case 'invoice':
-            case 'invoices':
-              targetSection = 'invoices';
-              break;
+        st.page = 1;
+        st.total = null;
+        st.hasMore = false;
 
-            case 'client':
-            case 'clients':
-              targetSection = 'clients';
-              break;
+        const curFilters = (st.filters && typeof st.filters === 'object') ? { ...st.filters } : {};
+        curFilters.related = {
+          source_entity: String(entity || ''),
+          source_id: String(id || ''),
+          relation_type: String(relationType || '')
+        };
+        st.filters = curFilters;
 
-            case 'candidate':
-            case 'candidates':
-              targetSection = 'candidates';
-              break;
+        // ✅ Fix first-click nav highlight bug:
+        // update section BEFORE load/render so nav highlights correctly.
+        currentSection = targetSection;
 
-            case 'umbrella':
-            case 'umbrellas':
-              targetSection = 'umbrellas';
-              break;
-
-            case 'contract':
-            case 'contracts':
-              targetSection = 'contracts';
-              break;
-
-            default:
-              // leave currentSection as-is
-              break;
-          }
-
-          if (targetSection) {
-            currentSection = targetSection;
-          }
-
-          renderSummary(rows);
+        // ✅ Use normal section navigation/list load path (no bespoke inject renderSummary(rows))
+        try {
+          const data = await loadSection();
+          renderSummary(data);
+        } catch (e) {
+          console.warn('[RELATED] failed to load related view', e);
         }
 
         closeRelatedMenu();
       };
     }
+
     menu.appendChild(it);
-  }
+  };
 
   if (!entries.length) {
-    item('No related records', true, {});
+    item('No related records', true, '');
   } else {
-    entries.sort((a,b)=> (b[1]||0)-(a[1]||0));
+    // Sort by count desc
+    entries.sort((a,b)=> (toInt(b[1]) - toInt(a[1])));
+
     entries.forEach(([rawType, rawCount])=>{
-      const type = rawType;
-      let count = typeof rawCount === 'number' ? rawCount : 0;
+      const type = String(rawType || '').trim();
+      const count = toInt(rawCount);
 
-      let niceType = type;
-      let displayCount = count;
+      // ✅ No UI-side "series minus 1" (server already returns "other timesheets in series")
+      // Friendly label + plural
+      let label = '';
+      const t = type.toLowerCase();
 
-      // Rename "series" → "Adjustments" and show "other timesheets" only
-      if (type === 'series') {
-        niceType = 'Adjustments';
-        displayCount = Math.max(count - 1, 0);
-      } else if (type === 'umbrella') {
-        niceType = 'Umbrella';
-      } else if (type === 'umbrellas') {
-        niceType = 'Umbrellas';
-      } else if (type === 'timesheets') {
-        niceType = 'timesheets';
+      if (t === 'series') {
+        label = `${count} ${plural(count, 'other timesheet in series', 'other timesheets in series')}`;
+      } else if (t === 'invoice' || t === 'invoices') {
+        label = `${count} ${plural(count, 'related invoice', 'related invoices')}`;
+      } else if (t === 'timesheet' || t === 'timesheets') {
+        label = `${count} ${plural(count, 'related timesheet', 'related timesheets')}`;
+      } else if (t === 'client' || t === 'clients') {
+        label = `${count} ${plural(count, 'related client', 'related clients')}`;
+      } else if (t === 'candidate' || t === 'candidates') {
+        label = `${count} ${plural(count, 'related candidate', 'related candidates')}`;
+      } else if (t === 'umbrella' || t === 'umbrellas') {
+        label = `${count} ${plural(count, 'related umbrella', 'related umbrellas')}`;
+      } else if (t === 'contract' || t === 'contracts') {
+        label = `${count} ${plural(count, 'related contract', 'related contracts')}`;
+      } else {
+        // Fallback
+        label = `${count} related ${type}`;
       }
 
-      const label = `${displayCount} related ${niceType}`;
-      const disabled = displayCount === 0;
-      item(label, disabled, { type });
+      const disabled = (count === 0);
+      item(label, disabled, type);
     });
   }
 
@@ -52025,7 +54383,6 @@ async function fetchTimesheetDetails(timesheetId) {
   return detail;
 }
 
-
 async function fetchTimesheetRelated(timesheetId) {
   const LOGM = (typeof window.__LOG_MODAL === 'boolean') ? window.__LOG_MODAL : false;
   const L    = (...a) => { if (LOGM) console.log('[TS][RELATED]', ...a); };
@@ -52049,22 +54406,48 @@ async function fetchTimesheetRelated(timesheetId) {
     counts = {};
   }
 
+  const toInt = (v) => {
+    const n = Number(v);
+    return Number.isFinite(n) ? Math.max(0, Math.trunc(n)) : 0;
+  };
+
+  // Normalize count keys (backend may emit singular/plural aliases)
+  const countCandidate = toInt(counts.candidate ?? counts.candidates ?? 0);
+  const countClient    = toInt(counts.client    ?? counts.clients    ?? 0);
+  const countInvoice   = toInt(counts.invoice   ?? counts.invoices   ?? counts.invoice_count ?? 0);
+  const countUmbrella  = toInt(counts.umbrella  ?? counts.umbrellas  ?? 0);
+  const countContract  = toInt(counts.contract  ?? counts.contracts  ?? 0);
+  const countSeries    = toInt(counts.series    ?? 0);
+
   const out = {
     counts,
+
     candidate: null,
     client:    null,
-    invoice:   null,
+
+    // ✅ NEW: many-to-many invoices
+    invoices: [],
+    // Back-compat single invoice (do not rely on this; kept for legacy readers)
+    invoice: null,
+
+    // ✅ NEW: invoice id -> invoice no (used by Lines tab "Invoiced – INV...")
+    invoice_no_by_invoice_id: {},
+
     umbrella:  null,
     contract:  null,
     series:    []
   };
 
-  // Helper to safely fetch related items
+  // Helper to safely fetch related items (tolerate both list shapes)
   const safeFetch = async (typeKey, label) => {
     try {
-      const items = await fetchRelated('timesheet', timesheetId, typeKey);
-      L(`related[${label}]`, { count: Array.isArray(items) ? items.length : -1, items });
-      return items || [];
+      const res = await fetchRelated('timesheet', timesheetId, typeKey);
+
+      // tolerate both shapes: array OR {items,total}
+      const items = Array.isArray(res?.items) ? res.items : (Array.isArray(res) ? res : []);
+      L(`related[${label}]`, { count: items.length, sample: items[0] || null });
+
+      return items;
     } catch (err) {
       L(`related[${label}] failed`, err);
       return [];
@@ -52072,37 +54455,60 @@ async function fetchTimesheetRelated(timesheetId) {
   };
 
   // Candidate (0/1)
-  if ((counts.candidate ?? 0) > 0) {
+  if (countCandidate > 0) {
     const items = await safeFetch('candidate', 'candidate');
     out.candidate = items[0] || null;
   }
 
   // Client (0/1)
-  if ((counts.client ?? 0) > 0) {
+  if (countClient > 0) {
     const items = await safeFetch('client', 'client');
     out.client = items[0] || null;
   }
 
-  // Invoice (0/1)
-  if ((counts.invoice ?? 0) > 0) {
+  // ✅ Invoices (0..n) — segment-aware many-to-many
+  if (countInvoice > 0) {
     const items = await safeFetch('invoice', 'invoice');
-    out.invoice = items[0] || null;
+
+    out.invoices = Array.isArray(items) ? items : [];
+    out.invoice  = out.invoices[0] || null; // back-compat only
+
+    // Build invoice_no_by_invoice_id map for downstream use
+    const map = {};
+    for (const it of out.invoices) {
+      if (!it || typeof it !== 'object') continue;
+
+      // tolerate possible keys
+      const iid =
+        (it.invoice_id != null ? String(it.invoice_id) : '') ||
+        (it.id != null ? String(it.id) : '');
+
+      if (!iid) continue;
+
+      const ino =
+        (it.invoice_no != null && String(it.invoice_no).trim())
+          ? String(it.invoice_no).trim()
+          : '';
+
+      if (ino) map[iid] = ino;
+    }
+    out.invoice_no_by_invoice_id = map;
   }
 
   // Umbrella (0/1)
-  if ((counts.umbrella ?? 0) > 0) {
+  if (countUmbrella > 0) {
     const items = await safeFetch('umbrella', 'umbrella');
     out.umbrella = items[0] || null;
   }
 
   // Contract (0/1)
-  if ((counts.contract ?? 0) > 0) {
+  if (countContract > 0) {
     const items = await safeFetch('contract', 'contract');
     out.contract = items[0] || null;
   }
 
-  // Series (base + adjustments for same contract/week)
-  if ((counts.series ?? 0) > 0) {
+  // Series (already "other timesheets in series" from SQL; do not subtract in UI)
+  if (countSeries > 0) {
     const items = await safeFetch('series', 'series');
     out.series = Array.isArray(items) ? items : [];
   }
@@ -52110,14 +54516,16 @@ async function fetchTimesheetRelated(timesheetId) {
   L('RESULT', {
     hasCandidate: !!out.candidate,
     hasClient: !!out.client,
-    hasInvoice: !!out.invoice,
+    invoiceCount: out.invoices.length,
     hasUmbrella: !!out.umbrella,
     hasContract: !!out.contract,
-    seriesCount: out.series.length
+    seriesCount: out.series.length,
+    invoiceNoMapKeys: Object.keys(out.invoice_no_by_invoice_id || {}).length
   });
   GE();
   return out;
 }
+
 
 // NEW: Electronic signatures evidence viewer
 // Expects backend evidence item with preview_mode: 'SIGNATURES' and meta/meta_json containing booking_id,
@@ -57071,39 +59479,67 @@ if (hasTs) {
   });
 }
 
-
-
     let related;
     if (hasTs) {
       try {
         related = await fetchTimesheetRelated(tsId);
+
+        // ✅ Ensure required new shape exists even if an older fetcher version is still in memory
+        if (!Array.isArray(related.invoices)) related.invoices = [];
+        if (!related.invoice_no_by_invoice_id || typeof related.invoice_no_by_invoice_id !== 'object') {
+          related.invoice_no_by_invoice_id = {};
+        }
+
         L('related fetched', {
           candidate: !!related.candidate,
           client: !!related.client,
           contract: !!related.contract,
-          invoice: !!related.invoice,
+          invoiceCount: Array.isArray(related.invoices) ? related.invoices.length : 0,
           umbrella: !!related.umbrella,
           series: (related.series || []).length
         });
       } catch (err) {
         L('fetchTimesheetRelated FAILED (non-fatal)', err);
-        related = { counts: {}, candidate: null, client: null, invoice: null, umbrella: null, contract: null, series: [] };
+        related = {
+          counts: {},
+          candidate: null,
+          client: null,
+
+          // ✅ new shape (required)
+          invoices: [],
+          invoice_no_by_invoice_id: {},
+
+          // legacy/back-compat
+          invoice: null,
+
+          umbrella: null,
+          contract: null,
+          series: []
+        };
       }
-   } else {
-  related = {
-    counts: {},
-    candidate: (baseRow.candidate_id || baseRow.candidate_name || baseRow.occupant_key_norm)
-      ? { id: baseRow.candidate_id || null, display_name: baseRow.candidate_name || baseRow.occupant_key_norm || null, first_name: null, last_name: null }
-      : null,
-    client: (baseRow.client_id || baseRow.client_name)
-      ? { id: baseRow.client_id || null, name: baseRow.client_name || null }
-      : null,
-    invoice: null,
-    umbrella: null,
-    contract: plannedContract || null,
-    series: []
-  };
-}
+    } else {
+      related = {
+        counts: {},
+        candidate: (baseRow.candidate_id || baseRow.candidate_name || baseRow.occupant_key_norm)
+          ? { id: baseRow.candidate_id || null, display_name: baseRow.candidate_name || baseRow.occupant_key_norm || null, first_name: null, last_name: null }
+          : null,
+        client: (baseRow.client_id || baseRow.client_name)
+          ? { id: baseRow.client_id || null, name: baseRow.client_name || null }
+          : null,
+
+        // ✅ new shape (required)
+        invoices: [],
+        invoice_no_by_invoice_id: {},
+
+        // legacy/back-compat
+        invoice: null,
+
+        umbrella: null,
+        contract: plannedContract || null,
+        series: []
+      };
+    }
+
 
 
        const tsLocal    = details.timesheet || {};
@@ -59117,7 +61553,13 @@ function renderTimesheetRelatedTab(ctx) {
 
   const candidate = related.candidate;
   const client    = related.client;
-  const invoice   = related.invoice;
+
+  // ✅ NEW: invoices list (many-to-many)
+  const invoices  = Array.isArray(related.invoices) ? related.invoices : [];
+  // back-compat: if only old shape present, fall back
+  const invoiceFallback = related.invoice ? [related.invoice] : [];
+  const invoicesEff = invoices.length ? invoices : invoiceFallback;
+
   const umbrella  = related.umbrella;
   const contract  = related.contract;
   const series    = Array.isArray(related.series) ? related.series : [];
@@ -59166,20 +61608,6 @@ function renderTimesheetRelatedTab(ctx) {
     `
     : '<span class="mini">No contract linked for this timesheet.</span>';
 
-  const invoiceHtml = invoice
-    ? `
-      <div>
-        <div>Invoice ${invoice.invoice_no || invoice.invoice_id}</div>
-        <div class="mini">
-          Status: ${invoice.status || 'UNKNOWN'}<br/>
-          Issued: ${invoice.issued_at_utc || '—'}<br/>
-          Total inc VAT: ${invoice.total_inc_vat != null ? invoice.total_inc_vat : '—'}
-        </div>
-        <button type="button" data-ts-related="invoice" data-id="${invoice.invoice_id}">Open invoice</button>
-      </div>
-    `
-    : '<span class="mini">No invoice currently linked.</span>';
-
   const umbrellaHtml = umbrella
     ? `
       <div>
@@ -59188,6 +61616,53 @@ function renderTimesheetRelatedTab(ctx) {
       </div>
     `
     : '<span class="mini">No umbrella linked (PAYE or no umbrella).</span>';
+
+  const invoiceListHtml = (() => {
+    if (!invoicesEff.length) {
+      return '<span class="mini">No invoice currently linked.</span>';
+    }
+
+    const header = `
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;">
+        <div><b>Invoices (${invoicesEff.length})</b></div>
+        <button type="button"
+          data-ts-related="invoices-summary"
+          data-source-entity="timesheet"
+          data-source-id="${row.timesheet_id || ''}"
+          data-relation-type="invoice">
+          View all in Invoice Summary
+        </button>
+      </div>
+    `;
+
+    const rows = invoicesEff.map(inv => {
+      const invoiceId =
+        (inv && (inv.invoice_id != null)) ? String(inv.invoice_id)
+        : (inv && (inv.id != null)) ? String(inv.id)
+        : '';
+
+      const invNo = (inv && inv.invoice_no != null) ? String(inv.invoice_no) : '';
+      const status = (inv && inv.status != null) ? String(inv.status) : 'UNKNOWN';
+      const issued = (inv && inv.issued_at_utc != null) ? String(inv.issued_at_utc) : '—';
+      const total  = (inv && inv.total_inc_vat != null) ? String(inv.total_inc_vat) : '—';
+
+      return `
+        <div class="border rounded p-2 mb-2">
+          <div style="display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;">
+            <div>
+              <div><b>Invoice ${invNo || invoiceId}</b></div>
+              <div class="mini">Status: ${status} · Issued: ${issued} · Total inc VAT: ${total}</div>
+            </div>
+            <div>
+              <button type="button" data-ts-related="invoice" data-id="${invoiceId}">Open invoice</button>
+            </div>
+          </div>
+        </div>
+      `;
+    }).join('');
+
+    return `${header}<div style="margin-top:8px;">${rows}</div>`;
+  })();
 
   const seriesHtml = series.length
     ? `
@@ -59233,7 +61708,7 @@ function renderTimesheetRelatedTab(ctx) {
       ${renderBlock('Candidate', candidateHtml)}
       ${renderBlock('Client', clientHtml)}
       ${renderBlock('Contract', contractHtml)}
-      ${renderBlock('Invoice', invoiceHtml)}
+      ${renderBlock('Invoices', invoiceListHtml)}
       ${renderBlock('Umbrella', umbrellaHtml)}
       ${renderBlock('Series (base + adjustments)', seriesHtml)}
     </div>
@@ -61282,14 +63757,48 @@ async function listTimesheetsSummary(filters = {}) {
   // ✅ Totals must reflect ALL rows matching filters (not just this page)
   qs.set('include_totals', 'true');
 
-  const f = filters || {};
+  // ✅ FIX: enforce canonical stage pipeline:
+  // - migrate legacy ts_stage -> summary_stage only if summary_stage is absent and value is valid
+  // - then DROP ts_stage so it never re-enters the pipeline
+  const f0 = (filters && typeof filters === 'object') ? filters : {};
+  const f = { ...(f0 || {}) };
 
-  // Stage filter
-  const stage = (f.ts_stage || f.summary_stage || '').toUpperCase();
+  try {
+    const legacy = Object.prototype.hasOwnProperty.call(f, 'ts_stage')
+      ? String(f.ts_stage || '').trim().toUpperCase()
+      : '';
+
+    const allowedStages = new Set(['ALL','UNPROCESSED','READY_FOR_INVOICE','PROCESSED','INVOICED']);
+
+    if (!Object.prototype.hasOwnProperty.call(f, 'summary_stage')) {
+      if (legacy && allowedStages.has(legacy)) {
+        f.summary_stage = legacy;
+      }
+    }
+
+    // Always remove legacy key from the effective filters snapshot
+    delete f.ts_stage;
+
+    // Normalise summary_stage if present but invalid
+    if (Object.prototype.hasOwnProperty.call(f, 'summary_stage')) {
+      const ss = String(f.summary_stage || '').trim().toUpperCase();
+      if (!ss || !allowedStages.has(ss)) {
+        f.summary_stage = 'ALL';
+      } else {
+        f.summary_stage = ss;
+      }
+    }
+  } catch {
+    // non-fatal
+    try { delete f.ts_stage; } catch {}
+  }
+
+  // Stage filter (canonical only)
+  const stage = String(f.summary_stage || '').toUpperCase();
   if (stage && stage !== 'ALL') qs.set('summary_stage', stage);
 
   // Route filter (aggregated: ELECTRONIC / MANUAL / NHSP / HEALTHROSTER / QR)
-  const route = (f.route_type || '').toUpperCase();
+  const route = String(f.route_type || '').toUpperCase();
   if (route && route !== 'ALL') {
     if (route === 'QR') {
       qs.set('is_qr', 'true');
@@ -61299,7 +63808,7 @@ async function listTimesheetsSummary(filters = {}) {
   }
 
   // Scope filter
-  const scope = (f.sheet_scope || '').toUpperCase();
+  const scope = String(f.sheet_scope || '').toUpperCase();
   if (scope && scope !== 'ALL') qs.set('sheet_scope', scope);
 
   // Week ending range
@@ -61309,29 +63818,29 @@ async function listTimesheetsSummary(filters = {}) {
   // processing_status filter
   const procStatusRaw = f.processing_status || '';
   if (procStatusRaw && procStatusRaw !== 'ALL') {
-    const procStatus = procStatusRaw.includes(',')
-      ? procStatusRaw
-      : procStatusRaw.toUpperCase();
+    const procStatus = String(procStatusRaw).includes(',')
+      ? String(procStatusRaw)
+      : String(procStatusRaw).toUpperCase();
     qs.set('processing_status', procStatus);
   }
 
   // status_code passthrough
-  const statusCode = (f.status_code || '').toUpperCase();
+  const statusCode = String(f.status_code || '').toUpperCase();
   if (statusCode) qs.set('status_code', statusCode);
 
-  if (f.is_adjusted === true)  qs.set('is_adjusted', 'true');
-  if (f.is_qr === true)        qs.set('is_qr', 'true');
+  if (f.is_adjusted === true)     qs.set('is_adjusted', 'true');
+  if (f.is_qr === true)           qs.set('is_qr', 'true');
   if (f.needs_attention === true) qs.set('needs_attention', 'true');
 
-  if (f.candidate_paid === true)   qs.set('candidate_paid', 'true');
-  if (f.client_invoiced === true)  qs.set('client_invoiced', 'true');
+  if (f.candidate_paid === true)  qs.set('candidate_paid', 'true');
+  if (f.client_invoiced === true) qs.set('client_invoiced', 'true');
 
   if (f.hr_issue) {
     qs.set('hr_issue', f.hr_issue);
   }
 
   const sortState = st.sort || { key: null, dir: 'asc' };
-  const sortKeyRaw = (sortState.key || '').toLowerCase();
+  const sortKeyRaw = String(sortState.key || '').toLowerCase();
   const sortDir    = (sortState.dir === 'desc') ? 'desc' : 'asc';
 
   const sortMap = {
@@ -61365,8 +63874,14 @@ async function listTimesheetsSummary(filters = {}) {
   let json;
   try { json = text ? JSON.parse(text) : {}; } catch { json = {}; }
 
-  const rows  = Array.isArray(json.items) ? json.items : (json.rows || []);
-  const total = (typeof json.count === 'number') ? json.count : rows.length;
+  const rows  = Array.isArray(json.items) ? json.items : (Array.isArray(json.rows) ? json.rows : []);
+
+  // ✅ total: tolerate multiple server keys
+  const total =
+    (typeof json.total === 'number') ? json.total
+    : (typeof json.count === 'number') ? json.count
+    : (typeof json.count_all === 'number') ? json.count_all
+    : rows.length;
 
   const totals = (json && typeof json.totals === 'object' && json.totals) ? json.totals : null;
 
@@ -61378,14 +63893,21 @@ async function listTimesheetsSummary(filters = {}) {
     }
   });
 
-  st.hasMore = rows.length === pageSize;
-  st.total   = total;
+  // ✅ hasMore: use total when available (correct), else fallback to "full page" heuristic
+  const hasMore =
+    (typeof total === 'number')
+      ? ((page * pageSize) < total)
+      : (rows.length === pageSize);
+
+  st.hasMore = hasMore;
+  st.total   = (typeof total === 'number') ? total : null;
   st.totals  = totals;
+
+  // ✅ Persist effective filters WITHOUT legacy ts_stage
   st.filters = { ...(f || {}) };
 
   return rows;
 }
-
 
 
 
