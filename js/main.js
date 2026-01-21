@@ -28925,6 +28925,7 @@ async function invoiceModalSaveEdits(modalCtx, { rerender, reload }) {
   //   3) paid/unpaid (if staged)
   //   4) apply edits (/save-edits) (lines + segments + references)
   //   5) reload + clear staging
+  //   6) refresh the summary sheet behind the modal (so totals/columns update immediately)
 
   const invoiceId = modalCtx?.invoiceId ? String(modalCtx.invoiceId) : '';
   if (!invoiceId) throw new Error('Invoice id missing.');
@@ -28973,6 +28974,34 @@ async function invoiceModalSaveEdits(modalCtx, { rerender, reload }) {
       if (typeof window.__toast === 'function') return window.__toast(msg);
       console.log('[INV][TOAST]', msg);
     } catch {}
+  };
+
+  // Refresh the summary sheet behind the modal (best-effort; safe no-ops if functions don't exist)
+  const refreshSummaryBehindModal = async () => {
+    try {
+      if (typeof window.refreshCurrentSummary === 'function') {
+        await window.refreshCurrentSummary();
+        return;
+      }
+      if (typeof window.renderSummary === 'function') {
+        await window.renderSummary();
+        return;
+      }
+      if (typeof window.renderAll === 'function') {
+        await window.renderAll();
+        return;
+      }
+      if (typeof window.renderInvoicesSummary === 'function') {
+        await window.renderInvoicesSummary();
+        return;
+      }
+      if (typeof window.renderInvoices === 'function') {
+        await window.renderInvoices();
+        return;
+      }
+    } catch (e) {
+      try { console.warn('[INV][SAVE] summary refresh failed (non-fatal)', e); } catch {}
+    }
   };
 
   // Build payload including only non-empty keys
@@ -29053,7 +29082,6 @@ async function invoiceModalSaveEdits(modalCtx, { rerender, reload }) {
     }
 
     // 2) ISSUE / UNISSUE
-    // Note: issuing can return status=ON_HOLD from backend; we surface that explicitly.
     if (wantIssued !== null && wantIssued !== curIsIssued) {
       if (wantIssued) {
         const issueRes = await invoiceModalFetchJson(`/api/invoices/${encodeURIComponent(invoiceId)}/issue`, {
@@ -29073,7 +29101,6 @@ async function invoiceModalSaveEdits(modalCtx, { rerender, reload }) {
           throw new Error('Failed to issue invoice.');
         }
       } else {
-        // Do not force clear_pdf by default; render step regenerates anyway.
         await invoiceModalFetchJson(`/api/invoices/${encodeURIComponent(invoiceId)}/unissue`, {
           method: 'POST',
           body: JSON.stringify({ clear_pdf: false })
@@ -29121,8 +29148,6 @@ async function invoiceModalSaveEdits(modalCtx, { rerender, reload }) {
       } catch (err) {
         const msg = String(err?.message || err || '');
 
-        // ✅ User-friendly “no longer available” message for race conditions
-        // (scheduler/another user invoiced segments while this invoice was being amended)
         if (/Segment already invoiced/i.test(msg) || /already invoiced/i.test(msg) || /no longer available/i.test(msg)) {
           modalCtx.error =
             'This amended invoice cannot be saved because the timesheets you have selected are no longer available to invoice.';
@@ -29131,7 +29156,6 @@ async function invoiceModalSaveEdits(modalCtx, { rerender, reload }) {
           throw err;
         }
 
-        // Friendly segment-block messages (server is authoritative)
         if (/Segments cannot be moved when additional rates exist/i.test(msg)) {
           modalCtx.error = 'Cannot move segments because this invoice contains additional rates. Remove additional rates or remove the whole timesheet instead.';
           toast(modalCtx.error);
@@ -29145,7 +29169,6 @@ async function invoiceModalSaveEdits(modalCtx, { rerender, reload }) {
           throw err;
         }
 
-        // Default: bubble original message
         modalCtx.error = msg || 'Failed to save invoice edits.';
         toast(modalCtx.error);
         rerender();
@@ -29159,6 +29182,10 @@ async function invoiceModalSaveEdits(modalCtx, { rerender, reload }) {
 
     // Final reload (single source of truth)
     await reload();
+
+    // ✅ Refresh the summary sheet behind the modal so the list updates immediately
+    await refreshSummaryBehindModal();
+
   } finally {
     modalCtx.isBusy = false;
     rerender();
@@ -32584,29 +32611,7 @@ function renderInvoiceLinesTable(modalCtx, invoiceData, items) {
       `;
     }).join('');
 
-    const btnRemoveSelected = `
-      <button type="button"
-        class="btn btn-sm btn-outline-danger"
-        data-action="inv-stage-remove-selected-segments"
-        data-timesheet-id="${esc(tsId)}"
-        data-tsfin-id="${esc(String(tsfinId || ''))}"
-        ${(!canStageSegments) ? 'disabled' : ''}>
-        Remove selected segments
-      </button>
-    `;
-
-    const btnRemoveAll = `
-      <button type="button"
-        class="btn btn-sm btn-outline-danger"
-        data-action="inv-stage-remove-all-segments"
-        data-timesheet-id="${esc(tsId)}"
-        data-tsfin-id="${esc(String(tsfinId || ''))}"
-        ${(!canStageSegments) ? 'disabled' : ''}>
-        Remove all segments on this invoice
-      </button>
-    `;
-
-    return `
+     return `
       <div class="mt-3">
         <div class="d-flex align-items-center justify-content-between flex-wrap gap-2 mb-2">
           <div class="fw-semibold">
@@ -32615,7 +32620,6 @@ function renderInvoiceLinesTable(modalCtx, invoiceData, items) {
               (${invoicedSegs.length} on invoice, ${uninvoicedCount} uninvoiced, ${lockedElsewhereCount} locked elsewhere)
             </span>
           </div>
-          ${isEditing ? `<div class="d-flex gap-2">${btnRemoveSelected}${btnRemoveAll}</div>` : ''}
         </div>
 
         ${banner}
@@ -32623,7 +32627,14 @@ function renderInvoiceLinesTable(modalCtx, invoiceData, items) {
         <table class="grid" style="width:100%">
           <thead>
             <tr>
-              <th style="width:32px;"></th>
+              <th style="width:32px;" class="text-center">
+                <input type="checkbox"
+                  class="form-check-input"
+                  title="Select / deselect all"
+                  ${canStageSegments ? '' : 'disabled'}
+                  onchange="(function(cb){ try{ var tbl=cb.closest('table'); if(!tbl) return; var qs=tbl.querySelectorAll('tbody input[type=&quot;checkbox&quot;].form-check-input[data-action]'); for (var i=0;i<qs.length;i++){ var x=qs[i]; if(!x || x.disabled) continue; x.checked = cb.checked; try{ x.dispatchEvent(new Event('change',{bubbles:true})); }catch(e){} } }catch(e){} })(this)"
+                />
+              </th>
               <th>Date</th>
               <th>Start</th>
               <th>End</th>
@@ -32638,6 +32649,7 @@ function renderInvoiceLinesTable(modalCtx, invoiceData, items) {
         </table>
       </div>
     `;
+
   };
 
   const renderExpandedTable = (g) => {
@@ -39255,8 +39267,17 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
   const parentFrame  = () => (stack().length > 1 ? stack()[stack().length - 2] : null);
   const deep = (o) => JSON.parse(JSON.stringify(o));
 
-   let opts = options || {};
+     let opts = options || {};
   if (onReturn && typeof onReturn === 'object' && options === undefined) { opts = onReturn; onReturn = undefined; }
+
+  // ✅ Force: these invoice child modals must never show the global footer Save button
+  try {
+    const k = (opts && typeof opts.kind === 'string') ? String(opts.kind) : '';
+    if (k === 'invoice-batch-add-timesheets' || k === 'invoice-batch-add-adjustment') {
+      opts.showSave = false;
+      opts.showApply = true;
+    }
+  } catch {}
 
 // ✅ Back-compat: if caller seeded global `modalCtx` (legacy) but not `window.modalCtx`,
 // adopt it before we snapshot the frame. Uses openToken to avoid clobbering the active ctx.
@@ -41965,12 +41986,22 @@ function renderTop() {
     try { hintEl.classList.remove('ok','warn','err'); } catch {}
   }
 
-  const isChild = (stack().length > 1);
+   const isChild = (stack().length > 1);
   const top     = currentFrame();
   const parent  = parentFrame();
 
+  // ✅ Force: these invoice child modals must never show the global footer Save button
+  try {
+    const k = (top && typeof top.kind === 'string') ? String(top.kind) : '';
+    if (k === 'invoice-batch-add-timesheets' || k === 'invoice-batch-add-adjustment') {
+      top._showSave = false;
+      top._showApply = true;
+    }
+  } catch {}
+
   // restore the parent/owner context for whatever frame is now on top
   if (top && top._ctxRef) window.modalCtx = top._ctxRef;
+
 
   if (typeof top._detachGlobal === 'function') { try { top._detachGlobal(); } catch {} top._wired = false; }
 
