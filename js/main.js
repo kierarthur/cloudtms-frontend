@@ -24141,7 +24141,6 @@ try {
   const fallback = Array.isArray(base.additional_rates_json) ? base.additional_rates_json : null;
   additional_rates_json = fallback || null;
 }
-
 const data = {
   id: window.modalCtx.data?.id || null,
   candidate_id,
@@ -24164,9 +24163,14 @@ const data = {
   group_nightsat_sunbh,
   self_bill,
 
+  // ✅ MISSING (attachments)
+  hr_attach_to_invoice,
+  ts_attach_to_invoice,
+
   auto_invoice,
   require_reference_to_pay,
   require_reference_to_invoice,
+
   rates_json: mergedRates,
   std_hours_json,
   std_schedule_json,
@@ -24175,6 +24179,7 @@ const data = {
   mileage_charge_rate: mileage_charge_rate,
   mileage_pay_rate:    mileage_pay_rate
 };
+
 
 
 if (LOGC) {
@@ -28929,6 +28934,7 @@ function invoiceModalComputePreviewTotals(modalCtx) {
     total_inc_vat: invoiceModalRound2(total_inc_vat)
   };
 }
+
 async function invoiceModalSaveEdits(modalCtx, { rerender, reload }) {
   // ✅ Single Save pipeline:
   //   1) hold/unhold (if staged)
@@ -29110,7 +29116,7 @@ async function invoiceModalSaveEdits(modalCtx, { rerender, reload }) {
       }
     }
 
-    // 4) APPLY EDITS (only if there are edits staged)
+       // 4) APPLY EDITS (only if there are edits staged)
     if (hasApplyEdits) {
       try {
         const res = await invoiceModalFetchJson(`/api/invoices/${encodeURIComponent(invoiceId)}/save-edits`, {
@@ -29122,8 +29128,15 @@ async function invoiceModalSaveEdits(modalCtx, { rerender, reload }) {
         if (!out.ok) {
           throw new Error(out.error || 'Failed to save edits');
         }
+
+        // invoice content changed → eligibility cache must be treated as stale
+        try {
+          modalCtx.eligibleTimesheetsCache = null;
+          modalCtx.eligibleTimesheetsCacheRev = null;
+        } catch {}
       } catch (err) {
         const msg = String(err?.message || err || '');
+
 
         // Friendly segment-block messages (server is authoritative)
         if (/Segments cannot be moved when additional rates exist/i.test(msg)) {
@@ -29141,6 +29154,12 @@ async function invoiceModalSaveEdits(modalCtx, { rerender, reload }) {
 
         throw err;
       }
+
+      // ✅ IMPORTANT FIX: invoice changed → invalidate eligibility cache so Add Timesheets refetches
+      try {
+        modalCtx.eligibleTimesheetsCache = null;
+        modalCtx.eligibleTimesheetsCacheRev = null;
+      } catch {}
     }
 
     // 5) Clear staged edits + exit edit mode
@@ -29154,7 +29173,6 @@ async function invoiceModalSaveEdits(modalCtx, { rerender, reload }) {
     rerender();
   }
 }
-
 
 
 
@@ -29249,6 +29267,7 @@ function invoiceModalToggleRemoveTimesheet(modalCtx, timesheetId) {
   // Stage whole-timesheet removal as before
   for (const id of lineIds) set.add(id);
 }
+
 async function invoiceModalReload(modalCtx, opts = {}) {
   const mc = modalCtx;
   if (!mc || typeof mc !== 'object') throw new Error('Missing modal context');
@@ -29280,6 +29299,15 @@ async function invoiceModalReload(modalCtx, opts = {}) {
     mc.dataLoaded = payload;
     mc.invoiceDetail = payload;
     mc.data = { id: invoiceId, ...(payload || {}) };
+
+    // ✅ bump invoice revision (used to invalidate derived caches)
+    mc.invoiceRev = Number(mc.invoiceRev || 0) + 1;
+
+    // ✅ invoice has changed → derived eligibility cache must be considered stale
+    try {
+      mc.eligibleTimesheetsCache = null;
+      mc.eligibleTimesheetsCacheRev = null;
+    } catch {}
 
     // Optionally clear staged edits (after successful Save)
     if (clearEdits) {
@@ -30464,22 +30492,22 @@ function invoiceModalNewClientToken() {
   } catch {}
   return `tok_${Date.now()}_${Math.random().toString(16).slice(2)}`;
 }
-
 async function openInvoiceAddAdjustmentModal(modalCtx, { rerender }) {
-  const { invoice } = invoiceModalGetInvoiceData(modalCtx);
+  const parentCtx = modalCtx; // ✅ stable reference
+  const { invoice } = invoiceModalGetInvoiceData(parentCtx);
 
   // Ensure showModal uses the invoice modal ctx (shared context across modal stack)
-  try { window.modalCtx = modalCtx; } catch {}
+  try { window.modalCtx = parentCtx; } catch {}
 
   // Determine whether user is allowed to edit lines right now (staging-aware)
-  const canEditLines = invoiceModalIsEditable(invoice, modalCtx, 'lines');
+  const canEditLines = invoiceModalIsEditable(invoice, parentCtx, 'lines');
 
   const status = String(invoice?.status || '').toUpperCase();
   const baseIssued = !!invoice?.issued_at_utc || status === 'ISSUED';
   const basePaid = !!invoice?.paid_at_utc || status === 'PAID';
 
-  const st = (modalCtx?.invoiceEdits?.staged_status && typeof modalCtx.invoiceEdits.staged_status === 'object')
-    ? modalCtx.invoiceEdits.staged_status
+  const st = (parentCtx?.invoiceEdits?.staged_status && typeof parentCtx.invoiceEdits.staged_status === 'object')
+    ? parentCtx.invoiceEdits.staged_status
     : { issued: null, paid: null, on_hold: null };
 
   const effIssued = (st.issued === null || st.issued === undefined) ? baseIssued : !!st.issued;
@@ -30542,7 +30570,7 @@ async function openInvoiceAddAdjustmentModal(modalCtx, { rerender }) {
     null,
     true,
     null,
-    { kind: 'invoice-batch-add-adjustment', noParentGate: true }
+    { kind: 'invoice-batch-add-adjustment', noParentGate: true, showSave: false, showApply: true }
   );
 
   const closeTop = () => {
@@ -30583,12 +30611,12 @@ async function openInvoiceAddAdjustmentModal(modalCtx, { rerender }) {
       }
 
       // Stage ONLY on confirm
-      modalCtx.invoiceEdits = modalCtx.invoiceEdits || {};
-      modalCtx.invoiceEdits.add_adjustments = Array.isArray(modalCtx.invoiceEdits.add_adjustments)
-        ? modalCtx.invoiceEdits.add_adjustments
+      parentCtx.invoiceEdits = parentCtx.invoiceEdits || {};
+      parentCtx.invoiceEdits.add_adjustments = Array.isArray(parentCtx.invoiceEdits.add_adjustments)
+        ? parentCtx.invoiceEdits.add_adjustments
         : [];
 
-      modalCtx.invoiceEdits.add_adjustments.push({
+      parentCtx.invoiceEdits.add_adjustments.push({
         client_token: invoiceModalNewClientToken(),
         description: desc,
         amount_ex_vat: invoiceModalRound2(amt)
@@ -30602,9 +30630,14 @@ async function openInvoiceAddAdjustmentModal(modalCtx, { rerender }) {
   }
 }
 
-async function invoiceModalEnsureEligibleTimesheets(modalCtx) {
-  // One-call discipline
-  if (modalCtx.eligibleTimesheetsCache) return modalCtx.eligibleTimesheetsCache;
+async function invoiceModalEnsureEligibleTimesheets(modalCtx, opts = {}) {
+  const force = !!opts?.force;
+
+  // One-call discipline (but safe invalidation via invoiceRev)
+  const curRev = Number(modalCtx?.invoiceRev || 0);
+  const cacheRev = Number(modalCtx?.eligibleTimesheetsCacheRev ?? -1);
+
+  if (!force && modalCtx.eligibleTimesheetsCache && cacheRev === curRev) return modalCtx.eligibleTimesheetsCache;
 
   const invoiceId = modalCtx?.invoiceId;
   if (!invoiceId) throw new Error('Missing invoiceId');
@@ -30643,16 +30676,19 @@ async function invoiceModalEnsureEligibleTimesheets(modalCtx) {
   obj._bySegKey = bySegKey;
 
   modalCtx.eligibleTimesheetsCache = obj;
+  modalCtx.eligibleTimesheetsCacheRev = curRev;
+
   return obj;
 }
 
 
 async function openInvoiceAddTimesheetsModal(modalCtx, { rerender }) {
-  const invData = invoiceModalGetInvoiceData(modalCtx);
+  const parentCtx = modalCtx; // ✅ stable reference (do NOT rely on window.modalCtx for logic)
+  const invData = invoiceModalGetInvoiceData(parentCtx);
   const { invoice, items } = invData;
 
   // Ensure showModal uses the invoice modal ctx (shared context across modal stack)
-  try { window.modalCtx = modalCtx; } catch {}
+  try { window.modalCtx = parentCtx; } catch {}
 
   // Local money formatting (do NOT rely on outer openInvoiceModal closure)
   const fmtMoney = (n) => {
@@ -30664,15 +30700,15 @@ async function openInvoiceAddTimesheetsModal(modalCtx, { rerender }) {
   const fmtHours = (n) => invoiceModalFmtHours(Number(n || 0));
 
   // Determine whether user is allowed to edit lines right now (with staging)
-  const canEditLines = invoiceModalIsEditable(invoice, modalCtx, 'lines');
+  const canEditLines = invoiceModalIsEditable(invoice, parentCtx, 'lines');
 
   // Compute banner message when selection is disabled
   const status = String(invoice?.status || '').toUpperCase();
   const baseIssued = !!invoice?.issued_at_utc || status === 'ISSUED';
   const basePaid = !!invoice?.paid_at_utc || status === 'PAID';
 
-  const st = (modalCtx?.invoiceEdits?.staged_status && typeof modalCtx.invoiceEdits.staged_status === 'object')
-    ? modalCtx.invoiceEdits.staged_status
+  const st = (parentCtx?.invoiceEdits?.staged_status && typeof parentCtx.invoiceEdits.staged_status === 'object')
+    ? parentCtx.invoiceEdits.staged_status
     : { issued: null, paid: null, on_hold: null };
 
   const effIssued = (st.issued === null || st.issued === undefined) ? baseIssued : !!st.issued;
@@ -30702,26 +30738,116 @@ async function openInvoiceAddTimesheetsModal(modalCtx, { rerender }) {
   }
 
   // Ensure cache (one call) + fast segment lookup map
-  const eligible = await invoiceModalEnsureEligibleTimesheets(modalCtx);
+  const eligible = await invoiceModalEnsureEligibleTimesheets(parentCtx);
   const all = Array.isArray(eligible?.timesheets) ? eligible.timesheets : [];
   const bySegKey = eligible?._bySegKey instanceof Map ? eligible._bySegKey : new Map();
 
   // Timesheets already on invoice (any line with that timesheet_id)
   const existingTs = new Set((items || []).map(it => String(it?.timesheet_id || '')).filter(Boolean));
 
+  // ✅ Debug log (do NOT inspect window.modalCtx in console; log from the real parent ctx here)
+  try {
+    const LOG = (typeof window.__LOG_ADD_TS === 'boolean')
+      ? window.__LOG_ADD_TS
+      : ((typeof window.__LOG_MODAL === 'boolean') ? window.__LOG_MODAL : true);
+
+    if (LOG) {
+      const segsOnInvoiceByTs =
+        parentCtx?.segments_on_invoice_by_timesheet ||
+        parentCtx?.manifest?.segments_on_invoice_by_timesheet ||
+        invData?.segments_on_invoice_by_timesheet ||
+        invData?.manifest?.segments_on_invoice_by_timesheet ||
+        {};
+
+      const pick = all.find(t => String(t?.invoice_breakdown_mode || '').toUpperCase() === 'SEGMENTS') || all[0] || null;
+      const pickTsId = pick ? String(pick?.timesheet_id || '').trim() : '';
+      const pickTsfinId = pick ? String(pick?.tsfin_id || '').trim() : '';
+      const pickEligSegs = pick && Array.isArray(pick?.eligible_segments) ? pick.eligible_segments : [];
+
+      const rawOnInv = (pickTsId && segsOnInvoiceByTs && typeof segsOnInvoiceByTs === 'object')
+        ? segsOnInvoiceByTs[pickTsId]
+        : null;
+
+      const onInvCount = (() => {
+        if (!rawOnInv) return 0;
+        if (Array.isArray(rawOnInv)) return rawOnInv.length;
+        if (typeof rawOnInv === 'object') return Object.keys(rawOnInv).length;
+        return 0;
+      })();
+
+      const intersectCount = (() => {
+        if (!rawOnInv) return 0;
+
+        const contains = (segId) => {
+          if (!segId) return false;
+
+          // array of strings (segment_id / segRef / keys)
+          if (Array.isArray(rawOnInv)) {
+            if (rawOnInv.includes(segId)) return true;
+            if (pickTsfinId && rawOnInv.includes(`${pickTsfinId}::${segId}`)) return true;
+            // common case: "nhsp:timesheet_id:segment_id"
+            if (rawOnInv.some(x => (typeof x === 'string') && (x.endsWith(`:${segId}`) || x.endsWith(`::${segId}`)))) return true;
+            return false;
+          }
+
+          // object keyed by segId or segRef
+          if (typeof rawOnInv === 'object') {
+            if (Object.prototype.hasOwnProperty.call(rawOnInv, segId)) return true;
+            if (pickTsfinId && Object.prototype.hasOwnProperty.call(rawOnInv, `${pickTsfinId}::${segId}`)) return true;
+            for (const k of Object.keys(rawOnInv)) {
+              if (k === segId) return true;
+              if (k.endsWith(`:${segId}`) || k.endsWith(`::${segId}`)) return true;
+            }
+            return false;
+          }
+
+          return false;
+        };
+
+        let n = 0;
+        for (const s of pickEligSegs) {
+          const segId = String(s?.segment_id || '').trim();
+          if (!segId) continue;
+          if (contains(segId)) n++;
+        }
+        return n;
+      })();
+
+      console.log('[ADD-TS DEBUG]', {
+        invoiceId: parentCtx?.invoiceId,
+        canEditLines,
+        existingTsCount: existingTs.size,
+        eligibleTimesheets: all.length,
+        pick: pick ? {
+          timesheet_id: pickTsId,
+          tsfin_id: pickTsfinId,
+          invoice_breakdown_mode: String(pick?.invoice_breakdown_mode || ''),
+          eligible_segments_len: pickEligSegs.length
+        } : null,
+        onInvoiceSegsCount: onInvCount,
+        eligible_vs_onInvoice_intersection: intersectCount,
+        cacheKeys: {
+          hasEligibleCache: !!parentCtx.eligibleTimesheetsCache,
+          eligibleCacheRev: parentCtx.eligibleTimesheetsCacheRev ?? null,
+          invoiceRev: parentCtx.invoiceRev ?? null
+        }
+      });
+    }
+  } catch {}
+
   // Ensure staged containers exist and are correct types
-  modalCtx.invoiceEdits = modalCtx.invoiceEdits || {};
-  modalCtx.invoiceEdits.add_timesheet_ids = (modalCtx.invoiceEdits.add_timesheet_ids instanceof Set)
-    ? modalCtx.invoiceEdits.add_timesheet_ids
+  parentCtx.invoiceEdits = parentCtx.invoiceEdits || {};
+  parentCtx.invoiceEdits.add_timesheet_ids = (parentCtx.invoiceEdits.add_timesheet_ids instanceof Set)
+    ? parentCtx.invoiceEdits.add_timesheet_ids
     : new Set();
 
   // Segment staging array
-  modalCtx.invoiceEdits.add_segment_refs = Array.isArray(modalCtx.invoiceEdits.add_segment_refs)
-    ? modalCtx.invoiceEdits.add_segment_refs
+  parentCtx.invoiceEdits.add_segment_refs = Array.isArray(parentCtx.invoiceEdits.add_segment_refs)
+    ? parentCtx.invoiceEdits.add_segment_refs
     : [];
 
-  const stagedTs = modalCtx.invoiceEdits.add_timesheet_ids;
-  const stagedSeg = modalCtx.invoiceEdits.add_segment_refs;
+  const stagedTs = parentCtx.invoiceEdits.add_timesheet_ids;
+  const stagedSeg = parentCtx.invoiceEdits.add_segment_refs;
 
   const segKey = (tsfinId, segId) => `${String(tsfinId || '')}::${String(segId || '')}`;
 
@@ -30755,11 +30881,26 @@ async function openInvoiceAddTimesheetsModal(modalCtx, { rerender }) {
     }
   };
 
-  // Only show eligible timesheets that are not already on invoice
+  // ✅ IMPORTANT FIX:
+  // Previously: hide ANY timesheet already on the invoice.
+  // That breaks SEGMENTS mode (owner invoice has same timesheet_id for remaining segments).
+  // New rule:
+  // - Non-SEGMENTS: hide if already on invoice (same as before).
+  // - SEGMENTS: show if it has ANY eligible_segments, even if timesheet_id is already on invoice.
   const rows = all.filter(t => {
-    const id = String(t?.timesheet_id || '');
+    const id = String(t?.timesheet_id || '').trim();
     if (!id) return false;
-    if (existingTs.has(id)) return false;
+
+    const mode = String(t?.invoice_breakdown_mode || '').toUpperCase();
+    const isSegments = (mode === 'SEGMENTS');
+
+    if (existingTs.has(id) && !isSegments) return false;
+
+    if (isSegments) {
+      const segs = Array.isArray(t?.eligible_segments) ? t.eligible_segments : [];
+      if (!segs.length) return false;
+    }
+
     return true;
   });
 
@@ -30904,7 +31045,7 @@ async function openInvoiceAddTimesheetsModal(modalCtx, { rerender }) {
     null,
     true,
     null,
-    { kind: 'invoice-batch-add-timesheets', noParentGate: true }
+    { kind: 'invoice-batch-add-timesheets', noParentGate: true, showSave: false, showApply: true }
   );
 
   const closeTop = () => {
@@ -39516,6 +39657,9 @@ const frame = {
   onReturn,
   hasId: !!hasId,
   entity: (ctxForFrame && ctxForFrame.entity) || null,
+  _showSave: (opts && Object.prototype.hasOwnProperty.call(opts, 'showSave')) ? !!opts.showSave : null,
+  _showApply: (opts && Object.prototype.hasOwnProperty.call(opts, 'showApply')) ? !!opts.showApply : null,
+
 
 
   // NEW: optional dismiss hook (called when user closes the modal via Close/ESC)
@@ -42124,6 +42268,31 @@ top._updateButtons = ()=> {
 
   const parentEditable = top.noParentGate ? true : (parent ? (parent.mode==='edit' || parent.mode==='create') : true);
   const relatedBtn = byId('btnRelated');
+
+  if (top && top._showSave === false) {
+    btnSave.style.display = 'none';
+    btnSave.disabled = true;
+    btnEdit.style.display = 'none';
+
+    if (relatedBtn) {
+      relatedBtn.style.display = 'none';
+      relatedBtn.disabled = true;
+    }
+
+    btnClose.textContent = 'Close';
+    btnClose.setAttribute('aria-label', 'Close');
+    btnClose.setAttribute('title', 'Close');
+
+    L('_updateButtons snapshot (forced no-save)', {
+      kind: top.kind,
+      isChild,
+      mode: top.mode,
+      btnSave: { display: btnSave.style.display, disabled: btnSave.disabled },
+      btnEdit: { display: btnEdit.style.display }
+    });
+    return;
+  }
+
 
   // NEW: hide Preset Manager's "New" button whenever a child is open or when the top frame isn't the manager
   try {
