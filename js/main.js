@@ -28579,11 +28579,9 @@ function invoiceModalIsEditable(invoice, modalCtx, purpose = 'lines') {
 }
 
 
-
 function invoiceModalGetInvoiceData(modalCtx) {
   const d = modalCtx?.data || {};
 
-  // Cache per raw object reference (avoids re-normalising on every render pass)
   try {
     if (modalCtx && modalCtx.__invoiceDataCache && modalCtx.__invoiceDataCacheRaw === d) {
       return modalCtx.__invoiceDataCache;
@@ -28599,7 +28597,6 @@ function invoiceModalGetInvoiceData(modalCtx) {
 
   const items = Array.isArray(d.items) ? d.items : [];
 
-  // Prefer the top-level manifest returned by GET /api/invoices/:id
   const manifest =
     (d.manifest && typeof d.manifest === 'object')
       ? d.manifest
@@ -28607,7 +28604,6 @@ function invoiceModalGetInvoiceData(modalCtx) {
           ? invoice.invoice_render_manifest
           : null);
 
-  // Email summary (prefer top-level; else manifest)
   let email_summary = null;
   if (d.email_summary && typeof d.email_summary === 'object') {
     email_summary = d.email_summary;
@@ -28615,7 +28611,6 @@ function invoiceModalGetInvoiceData(modalCtx) {
     email_summary = manifest.email_summary;
   }
 
-  // Attach policy (prefer top-level; else manifest)
   const attach_policy =
     (d.attach_policy && typeof d.attach_policy === 'object')
       ? d.attach_policy
@@ -28623,7 +28618,6 @@ function invoiceModalGetInvoiceData(modalCtx) {
           ? manifest.attach_policy
           : null);
 
-  // Evidence arrays (prefer top-level; else manifest; else empty)
   const evidence =
     Array.isArray(d.evidence) ? d.evidence
     : (Array.isArray(manifest?.evidence) ? manifest.evidence : []);
@@ -28636,7 +28630,6 @@ function invoiceModalGetInvoiceData(modalCtx) {
     Array.isArray(d.evidence_other) ? d.evidence_other
     : (Array.isArray(manifest?.evidence_other) ? manifest.evidence_other : []);
 
-  // Segment expansion maps (prefer top-level; else manifest; support alias)
   const segments_on_invoice_by_timesheet =
     (d.segments_on_invoice_by_timesheet && typeof d.segments_on_invoice_by_timesheet === 'object')
       ? d.segments_on_invoice_by_timesheet
@@ -28648,15 +28641,12 @@ function invoiceModalGetInvoiceData(modalCtx) {
                   ? manifest.segments_by_timesheet
                   : {})));
 
-  // Alias stored too (same object reference)
   const segments_by_timesheet = segments_on_invoice_by_timesheet;
 
-  // History (prefer top-level; else manifest; else empty)
   const history =
     Array.isArray(d.history) ? d.history
     : (Array.isArray(manifest?.history) ? manifest.history : []);
 
-  // TSFIN id map (prefer top-level; else manifest; else empty object)
   const tsfin_id_by_timesheet_id =
     (d.tsfin_id_by_timesheet_id && typeof d.tsfin_id_by_timesheet_id === 'object')
       ? d.tsfin_id_by_timesheet_id
@@ -28664,19 +28654,15 @@ function invoiceModalGetInvoiceData(modalCtx) {
           ? manifest.tsfin_id_by_timesheet_id
           : {});
 
-  // Reference rows (prefer top-level; else manifest; else empty)
   const reference_rows =
     Array.isArray(d.reference_rows) ? d.reference_rows
     : (Array.isArray(manifest?.reference_rows) ? manifest.reference_rows : []);
 
   const out = {
-    // Existing fields relied on by current renderers
     invoice,
     header_snapshot_json,
     items,
     email_summary,
-
-    // Manifest-enriched fields (single source of truth, no extra fetches)
     manifest,
     segments_on_invoice_by_timesheet,
     segments_by_timesheet,
@@ -28687,12 +28673,9 @@ function invoiceModalGetInvoiceData(modalCtx) {
     evidence_other,
     evidence,
     attach_policy,
-
-    // Always keep the raw payload available
     raw: d
   };
 
-  // Write once to modalCtx so subsequent renders read from modalCtx only
   try {
     if (modalCtx && typeof modalCtx === 'object') {
       modalCtx.__invoiceDataCache = out;
@@ -28987,6 +28970,7 @@ async function invoiceModalSaveEdits(modalCtx, { rerender, reload }) {
       if (typeof window.toast === 'function') return window.toast(msg);
       if (typeof window.showToast === 'function') return window.showToast(msg);
       if (typeof window.notify === 'function') return window.notify(msg);
+      if (typeof window.__toast === 'function') return window.__toast(msg);
       console.log('[INV][TOAST]', msg);
     } catch {}
   };
@@ -29077,15 +29061,15 @@ async function invoiceModalSaveEdits(modalCtx, { rerender, reload }) {
           body: JSON.stringify({})
         });
 
-        const st = String(issueRes?.status || '').toUpperCase();
-        if (st === 'ON_HOLD') {
+        const st2 = String(issueRes?.status || '').toUpperCase();
+        if (st2 === 'ON_HOLD') {
           const reasons = Array.isArray(issueRes?.reasons) ? issueRes.reasons : [];
           const msg = reasons.length
             ? `Invoice is ON HOLD and cannot be issued: ${reasons.join(', ')}`
             : 'Invoice is ON HOLD and cannot be issued.';
           throw new Error(msg);
         }
-        if (st !== 'ISSUED') {
+        if (st2 !== 'ISSUED') {
           throw new Error('Failed to issue invoice.');
         }
       } else {
@@ -29116,7 +29100,7 @@ async function invoiceModalSaveEdits(modalCtx, { rerender, reload }) {
       }
     }
 
-       // 4) APPLY EDITS (only if there are edits staged)
+    // 4) APPLY EDITS (only if there are edits staged)
     if (hasApplyEdits) {
       try {
         const res = await invoiceModalFetchJson(`/api/invoices/${encodeURIComponent(invoiceId)}/save-edits`, {
@@ -29137,6 +29121,15 @@ async function invoiceModalSaveEdits(modalCtx, { rerender, reload }) {
       } catch (err) {
         const msg = String(err?.message || err || '');
 
+        // ✅ User-friendly “no longer available” message for race conditions
+        // (scheduler/another user invoiced segments while this invoice was being amended)
+        if (/Segment already invoiced/i.test(msg) || /already invoiced/i.test(msg) || /no longer available/i.test(msg)) {
+          modalCtx.error =
+            'This amended invoice cannot be saved because the timesheets you have selected are no longer available to invoice.';
+          toast(modalCtx.error);
+          rerender();
+          throw err;
+        }
 
         // Friendly segment-block messages (server is authoritative)
         if (/Segments cannot be moved when additional rates exist/i.test(msg)) {
@@ -29152,14 +29145,12 @@ async function invoiceModalSaveEdits(modalCtx, { rerender, reload }) {
           throw err;
         }
 
+        // Default: bubble original message
+        modalCtx.error = msg || 'Failed to save invoice edits.';
+        toast(modalCtx.error);
+        rerender();
         throw err;
       }
-
-      // ✅ IMPORTANT FIX: invoice changed → invalidate eligibility cache so Add Timesheets refetches
-      try {
-        modalCtx.eligibleTimesheetsCache = null;
-        modalCtx.eligibleTimesheetsCacheRev = null;
-      } catch {}
     }
 
     // 5) Clear staged edits + exit edit mode
@@ -29646,6 +29637,31 @@ function attachInvoiceModalDelegatedHandlers(modalCtx, rootEl, deps) {
     }
   };
 
+  // ✅ NEW: stage/unstage added segments (inv-toggle-add-segment)
+  const stageAddSegment = (tsfinId, segId, tsId, checked) => {
+    ensureSegArrays();
+    const tsfin_id = String(tsfinId || '').trim();
+    const segment_id = String(segId || '').trim();
+    const timesheet_id = String(tsId || '').trim();
+    if (!tsfin_id || !segment_id) return;
+
+    const k = segKey(tsfin_id, segment_id);
+
+    // remove existing occurrences
+    for (let i = mc.invoiceEdits.add_segment_refs.length - 1; i >= 0; i--) {
+      const r = mc.invoiceEdits.add_segment_refs[i];
+      if (!r || typeof r !== 'object') continue;
+      if (segKey(r.tsfin_id, r.segment_id) === k) {
+        mc.invoiceEdits.add_segment_refs.splice(i, 1);
+      }
+    }
+
+    if (checked) {
+      // keep timesheet_id for UI merge/highlight; backend ignores extra fields when saving (normaliser strips it)
+      mc.invoiceEdits.add_segment_refs.push({ tsfin_id, segment_id, timesheet_id });
+    }
+  };
+
   const getTsfinIdForTimesheet = (invData, tsId) => {
     const tid = String(tsId || '').trim();
     if (!tid) return '';
@@ -29918,6 +29934,33 @@ function attachInvoiceModalDelegatedHandlers(modalCtx, rootEl, deps) {
           return;
         }
 
+        // ✅ NEW: allow un-staging staged-added segments from the invoice modal
+        case 'inv-toggle-add-segment': {
+          if (!mc.isEditing) return;
+          if (!invoiceModalIsEditable(invoice, mc, 'lines')) {
+            mc.error = 'Unissue and unpay invoice first.';
+            safeRerender();
+            return;
+          }
+          ensureSegArrays();
+
+          const tsId = String(el.getAttribute('data-timesheet-id') || '').trim();
+          const segId = String(el.getAttribute('data-segment-id') || '').trim();
+          let tsfinId = String(el.getAttribute('data-tsfin-id') || '').trim();
+          if (!tsfinId) tsfinId = getTsfinIdForTimesheet(invData, tsId);
+
+          // Because click handler uses preventDefault, make checkbox toggle explicit
+          const inp = e.target && (e.target.matches && e.target.matches('input[type="checkbox"]')) ? e.target : null;
+          const desired = inp ? !inp.checked : true;
+          if (inp) inp.checked = desired;
+
+          stageAddSegment(tsfinId, segId, tsId, desired);
+
+          syncFrameDirty();
+          safeRerender();
+          return;
+        }
+
         case 'inv-stage-remove-selected-segments': {
           if (!mc.isEditing) return;
           if (!invoiceModalIsEditable(invoice, mc, 'lines')) {
@@ -29990,6 +30033,7 @@ function attachInvoiceModalDelegatedHandlers(modalCtx, rootEl, deps) {
       const target = e.target;
       if (!target) return;
 
+      // remove-segment checkbox
       if (target.matches && target.matches('input[type="checkbox"][data-action="inv-toggle-remove-segment"]')) {
         const invData = invoiceModalGetInvoiceData(mc);
         const { invoice } = invData;
@@ -30010,6 +30054,31 @@ function attachInvoiceModalDelegatedHandlers(modalCtx, rootEl, deps) {
 
         syncFrameDirty();
         safeRerender();
+        return;
+      }
+
+      // ✅ NEW: add-segment checkbox (staged add) → unstage/restage
+      if (target.matches && target.matches('input[type="checkbox"][data-action="inv-toggle-add-segment"]')) {
+        const invData = invoiceModalGetInvoiceData(mc);
+        const { invoice } = invData;
+
+        mc.isEditing = (fr.mode === 'edit' || fr.mode === 'create');
+
+        if (!mc.isEditing) return;
+        if (!invoiceModalIsEditable(invoice, mc, 'lines')) return;
+
+        ensureSegArrays();
+
+        const tsId = String(target.getAttribute('data-timesheet-id') || '').trim();
+        const segId = String(target.getAttribute('data-segment-id') || '').trim();
+        let tsfinId = String(target.getAttribute('data-tsfin-id') || '').trim();
+        if (!tsfinId) tsfinId = getTsfinIdForTimesheet(invData, tsId);
+
+        stageAddSegment(tsfinId, segId, tsId, !!target.checked);
+
+        syncFrameDirty();
+        safeRerender();
+        return;
       }
     } catch {}
   };
@@ -30023,6 +30092,7 @@ function attachInvoiceModalDelegatedHandlers(modalCtx, rootEl, deps) {
 
   syncFrameDirty();
 }
+
 
 async function openInvoiceModal(row) {
   // Invoice modal (staged edits, no MutationObserver loops)
@@ -30681,16 +30751,13 @@ async function invoiceModalEnsureEligibleTimesheets(modalCtx, opts = {}) {
   return obj;
 }
 
-
 async function openInvoiceAddTimesheetsModal(modalCtx, { rerender }) {
-  const parentCtx = modalCtx; // ✅ stable reference (do NOT rely on window.modalCtx for logic)
+  const parentCtx = modalCtx; // stable reference
   const invData = invoiceModalGetInvoiceData(parentCtx);
   const { invoice, items } = invData;
 
-  // Ensure showModal uses the invoice modal ctx (shared context across modal stack)
   try { window.modalCtx = parentCtx; } catch {}
 
-  // Local money formatting (do NOT rely on outer openInvoiceModal closure)
   const fmtMoney = (n) => {
     const x = invoiceModalRound2(Number(n || 0));
     const s = x.toFixed(2);
@@ -30699,10 +30766,8 @@ async function openInvoiceAddTimesheetsModal(modalCtx, { rerender }) {
 
   const fmtHours = (n) => invoiceModalFmtHours(Number(n || 0));
 
-  // Determine whether user is allowed to edit lines right now (with staging)
   const canEditLines = invoiceModalIsEditable(invoice, parentCtx, 'lines');
 
-  // Compute banner message when selection is disabled
   const status = String(invoice?.status || '').toUpperCase();
   const baseIssued = !!invoice?.issued_at_utc || status === 'ISSUED';
   const basePaid = !!invoice?.paid_at_utc || status === 'PAID';
@@ -30737,111 +30802,16 @@ async function openInvoiceAddTimesheetsModal(modalCtx, { rerender }) {
     }
   }
 
-  // Ensure cache (one call) + fast segment lookup map
   const eligible = await invoiceModalEnsureEligibleTimesheets(parentCtx);
   const all = Array.isArray(eligible?.timesheets) ? eligible.timesheets : [];
-  const bySegKey = eligible?._bySegKey instanceof Map ? eligible._bySegKey : new Map();
 
-  // Timesheets already on invoice (any line with that timesheet_id)
   const existingTs = new Set((items || []).map(it => String(it?.timesheet_id || '')).filter(Boolean));
 
-  // ✅ Debug log (do NOT inspect window.modalCtx in console; log from the real parent ctx here)
-  try {
-    const LOG = (typeof window.__LOG_ADD_TS === 'boolean')
-      ? window.__LOG_ADD_TS
-      : ((typeof window.__LOG_MODAL === 'boolean') ? window.__LOG_MODAL : true);
-
-    if (LOG) {
-      const segsOnInvoiceByTs =
-        parentCtx?.segments_on_invoice_by_timesheet ||
-        parentCtx?.manifest?.segments_on_invoice_by_timesheet ||
-        invData?.segments_on_invoice_by_timesheet ||
-        invData?.manifest?.segments_on_invoice_by_timesheet ||
-        {};
-
-      const pick = all.find(t => String(t?.invoice_breakdown_mode || '').toUpperCase() === 'SEGMENTS') || all[0] || null;
-      const pickTsId = pick ? String(pick?.timesheet_id || '').trim() : '';
-      const pickTsfinId = pick ? String(pick?.tsfin_id || '').trim() : '';
-      const pickEligSegs = pick && Array.isArray(pick?.eligible_segments) ? pick.eligible_segments : [];
-
-      const rawOnInv = (pickTsId && segsOnInvoiceByTs && typeof segsOnInvoiceByTs === 'object')
-        ? segsOnInvoiceByTs[pickTsId]
-        : null;
-
-      const onInvCount = (() => {
-        if (!rawOnInv) return 0;
-        if (Array.isArray(rawOnInv)) return rawOnInv.length;
-        if (typeof rawOnInv === 'object') return Object.keys(rawOnInv).length;
-        return 0;
-      })();
-
-      const intersectCount = (() => {
-        if (!rawOnInv) return 0;
-
-        const contains = (segId) => {
-          if (!segId) return false;
-
-          // array of strings (segment_id / segRef / keys)
-          if (Array.isArray(rawOnInv)) {
-            if (rawOnInv.includes(segId)) return true;
-            if (pickTsfinId && rawOnInv.includes(`${pickTsfinId}::${segId}`)) return true;
-            // common case: "nhsp:timesheet_id:segment_id"
-            if (rawOnInv.some(x => (typeof x === 'string') && (x.endsWith(`:${segId}`) || x.endsWith(`::${segId}`)))) return true;
-            return false;
-          }
-
-          // object keyed by segId or segRef
-          if (typeof rawOnInv === 'object') {
-            if (Object.prototype.hasOwnProperty.call(rawOnInv, segId)) return true;
-            if (pickTsfinId && Object.prototype.hasOwnProperty.call(rawOnInv, `${pickTsfinId}::${segId}`)) return true;
-            for (const k of Object.keys(rawOnInv)) {
-              if (k === segId) return true;
-              if (k.endsWith(`:${segId}`) || k.endsWith(`::${segId}`)) return true;
-            }
-            return false;
-          }
-
-          return false;
-        };
-
-        let n = 0;
-        for (const s of pickEligSegs) {
-          const segId = String(s?.segment_id || '').trim();
-          if (!segId) continue;
-          if (contains(segId)) n++;
-        }
-        return n;
-      })();
-
-      console.log('[ADD-TS DEBUG]', {
-        invoiceId: parentCtx?.invoiceId,
-        canEditLines,
-        existingTsCount: existingTs.size,
-        eligibleTimesheets: all.length,
-        pick: pick ? {
-          timesheet_id: pickTsId,
-          tsfin_id: pickTsfinId,
-          invoice_breakdown_mode: String(pick?.invoice_breakdown_mode || ''),
-          eligible_segments_len: pickEligSegs.length
-        } : null,
-        onInvoiceSegsCount: onInvCount,
-        eligible_vs_onInvoice_intersection: intersectCount,
-        cacheKeys: {
-          hasEligibleCache: !!parentCtx.eligibleTimesheetsCache,
-          eligibleCacheRev: parentCtx.eligibleTimesheetsCacheRev ?? null,
-          invoiceRev: parentCtx.invoiceRev ?? null
-        }
-      });
-    }
-  } catch {}
-
-  // Ensure staged containers exist and are correct types
   parentCtx.invoiceEdits = parentCtx.invoiceEdits || {};
   parentCtx.invoiceEdits.add_timesheet_ids = (parentCtx.invoiceEdits.add_timesheet_ids instanceof Set)
     ? parentCtx.invoiceEdits.add_timesheet_ids
     : new Set();
 
-  // Segment staging array
   parentCtx.invoiceEdits.add_segment_refs = Array.isArray(parentCtx.invoiceEdits.add_segment_refs)
     ? parentCtx.invoiceEdits.add_segment_refs
     : [];
@@ -30860,33 +30830,67 @@ async function openInvoiceAddTimesheetsModal(modalCtx, { rerender }) {
     return false;
   };
 
-  const stageSeg = (tsfinId, segId, checked) => {
+  // NOTE: We stage timesheet_id as well for UI merge/highlight; backend ignores extra fields.
+  const stageSeg = (tsfinId, segId, tsId, checked) => {
     const tsfin_id = String(tsfinId || '').trim();
     const segment_id = String(segId || '').trim();
+    const timesheet_id = String(tsId || '').trim();
     if (!tsfin_id || !segment_id) return;
 
     const k = segKey(tsfin_id, segment_id);
 
-    // remove existing
     for (let i = stagedSeg.length - 1; i >= 0; i--) {
       const r = stagedSeg[i];
       if (!r || typeof r !== 'object') continue;
-      if (segKey(r.tsfin_id, r.segment_id) === k) {
-        stagedSeg.splice(i, 1);
-      }
+      if (segKey(r.tsfin_id, r.segment_id) === k) stagedSeg.splice(i, 1);
     }
 
-    if (checked) {
-      stagedSeg.push({ tsfin_id, segment_id });
-    }
+    if (checked) stagedSeg.push({ tsfin_id, segment_id, timesheet_id });
   };
 
-  // ✅ IMPORTANT FIX:
-  // Previously: hide ANY timesheet already on the invoice.
-  // That breaks SEGMENTS mode (owner invoice has same timesheet_id for remaining segments).
-  // New rule:
-  // - Non-SEGMENTS: hide if already on invoice (same as before).
-  // - SEGMENTS: show if it has ANY eligible_segments, even if timesheet_id is already on invoice.
+  const esc = (typeof escapeHtml === 'function') ? escapeHtml : (s) => String(s == null ? '' : s);
+
+  const fmtDowDmy = (ymd) => {
+    const s = String(ymd || '').slice(0, 10);
+    const m = s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (!m) return s || '—';
+    const [, y, mo, d] = m;
+    let dow = '';
+    try {
+      const dt = new Date(`${s}T00:00:00Z`);
+      dow = dt.toLocaleDateString('en-GB', { weekday: 'short', timeZone: 'Europe/London' });
+    } catch {}
+    return `${dow || ''} ${d}/${mo}/${y}`.trim();
+  };
+
+  const isoToHHMM = (iso) => {
+    try {
+      const d = new Date(String(iso || ''));
+      if (Number.isNaN(d.getTime())) return '';
+      const t = d.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'Europe/London' });
+      return String(t || '').replace(':', '');
+    } catch { return ''; }
+  };
+
+  const isoToDowDmy = (iso) => {
+    try {
+      const d = new Date(String(iso || ''));
+      if (Number.isNaN(d.getTime())) return '';
+      const parts = new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/London', year: 'numeric', month: '2-digit', day: '2-digit', weekday: 'short' }).formatToParts(d);
+      const get = (t) => (parts.find(p => p.type === t)?.value || '');
+      const dd = get('day'), mm = get('month'), yy = get('year'), wd = get('weekday');
+      return `${wd} ${dd}/${mm}/${yy}`.trim();
+    } catch { return ''; }
+  };
+
+  const sumSegHours = (s) => (
+    Number(s?.hours_day || 0) +
+    Number(s?.hours_night || 0) +
+    Number(s?.hours_sat || 0) +
+    Number(s?.hours_sun || 0) +
+    Number(s?.hours_bh || 0)
+  );
+
   const rows = all.filter(t => {
     const id = String(t?.timesheet_id || '').trim();
     if (!id) return false;
@@ -30904,116 +30908,206 @@ async function openInvoiceAddTimesheetsModal(modalCtx, { rerender }) {
     return true;
   });
 
-  const fmtSegRow = (tsId, tsfinId, s, disabled) => {
-    const segId = String(s?.segment_id || '').trim();
-    const k = segKey(tsfinId, segId);
-    const checked = segIsStaged(tsfinId, segId) ? 'checked' : '';
-
-    // Segment summary fields
-    const date = escapeHtml(String(s?.date || ''));
-    const start = escapeHtml(String(s?.start_utc || s?.start || ''));
-    const end = escapeHtml(String(s?.end_utc || s?.end || ''));
-    const hrs = fmtHours(Number(
-      (s?.hours_day || 0) +
-      (s?.hours_night || 0) +
-      (s?.hours_sat || 0) +
-      (s?.hours_sun || 0) +
-      (s?.hours_bh || 0)
-    ));
-    const chg = fmtMoney(Number(s?.charge_amount || 0));
-    const pay = fmtMoney(Number(s?.pay_amount || 0));
-    const ref = escapeHtml(String(s?.ref_num || ''));
-
-    const segDisabled = disabled ? 'disabled' : '';
-    const opacity = disabled ? 'opacity-50' : '';
-
-    return `
-      <label class="d-flex align-items-start justify-content-between border rounded p-2 mb-2 ${opacity}" style="margin-left:28px;">
-        <div class="d-flex align-items-start gap-2">
-          <input type="checkbox"
-            class="form-check-input"
-            data-kind="seg"
-            data-timesheet-id="${escapeHtml(tsId)}"
-            data-tsfin-id="${escapeHtml(tsfinId)}"
-            data-segment-id="${escapeHtml(segId)}"
-            ${checked}
-            ${segDisabled}
-          />
-          <div>
-            <div class="fw-semibold">${date} <span class="text-muted small">${start} → ${end}</span></div>
-            <div class="text-muted small">
-              Hours: ${escapeHtml(String(hrs))} · Ref: ${ref || '—'}
-            </div>
-          </div>
-        </div>
-        <div class="text-end">
-          <div class="fw-semibold">${escapeHtml(String(chg))}</div>
-          <div class="text-muted small">Pay: ${escapeHtml(String(pay))}</div>
-        </div>
-      </label>
-    `;
-  };
-
-  const fmtRow = (t) => {
+  // Build groups (one group per timesheet row; rendered as a table with expandable child table)
+  const groups = rows.map((t) => {
     const tsId = String(t?.timesheet_id || '').trim();
-    const name = escapeHtml(String(t?.candidate_name || t?.candidate_id || tsId));
-    const we = escapeHtml(String(t?.source_week_ending_date || ''));
-    const hrs = fmtHours(Number(t?.invoiceable_hours || 0));
-    const ex = fmtMoney(Number(t?.invoiceable_charge_ex_vat || 0));
-
-    const blockedByHr = !!t?.blocked_by_hr_validation;
-    const checked = stagedTs.has(tsId) ? 'checked' : '';
-
     const mode = String(t?.invoice_breakdown_mode || '').toUpperCase();
     const isSegments = (mode === 'SEGMENTS');
     const tsfinId = String(t?.tsfin_id || '').trim();
 
-    // Disable selection if:
-    // - HR blocked, OR
-    // - user cannot edit lines right now (must unissue/unpay first)
-    const disabled = (blockedByHr || !canEditLines);
+    const candidate = String(t?.candidate_name || t?.candidate_id || '').trim() || '—';
+    const weYmd = String(t?.source_week_ending_date || '').trim();
+    const weLabel = weYmd ? fmtDowDmy(weYmd) : '—';
 
-    const badge = blockedByHr ? `<span class="badge bg-warning text-dark ms-2">HR blocked</span>` : '';
-    const opacity = disabled ? 'opacity-50' : '';
+    let totalHrs = 0;
+    let totalChg = 0;
+    let totalPay = 0;
 
-    const tsCheckboxDisabled = (disabled || isSegments) ? 'disabled' : ''; // SEGMENTS uses segment checkboxes only
+    const segs = Array.isArray(t?.eligible_segments) ? t.eligible_segments.slice() : [];
 
-    const segs = Array.isArray(t?.eligible_segments) ? t.eligible_segments : [];
-    const segListHtml = (isSegments && tsfinId && segs.length)
-      ? `
-        <div class="mt-2">
-          ${segs.map(s => fmtSegRow(tsId, tsfinId, s, disabled)).join('')}
-        </div>
-      `
-      : (isSegments ? `<div class="text-muted small mt-2" style="margin-left:28px;">No eligible segments.</div>` : '');
+    if (isSegments) {
+      for (const s of segs) {
+        totalHrs += sumSegHours(s);
+        totalChg += Number(s?.charge_amount || 0);
+        totalPay += Number(s?.pay_amount || 0);
+      }
+    } else {
+      totalHrs = Number(t?.invoiceable_hours || 0);
+      totalChg = Number(t?.invoiceable_charge_ex_vat || 0);
+      totalPay = Number(t?.invoiceable_pay_ex_vat || 0);
+    }
 
-    const modePill = isSegments ? `<span class="badge bg-secondary ms-2">SEGMENTS</span>` : '';
+    // sort segments by start time (London) / fallback by date
+    if (isSegments && segs.length) {
+      segs.sort((a, b) => {
+        const ta = new Date(String(a?.start_utc || a?.start || '')).getTime();
+        const tb = new Date(String(b?.start_utc || b?.start || '')).getTime();
+        if (Number.isFinite(ta) && Number.isFinite(tb) && ta !== tb) return ta - tb;
+
+        const da = String(a?.date || '');
+        const db = String(b?.date || '');
+        if (da && db && da !== db) return da < db ? -1 : 1;
+        return 0;
+      });
+    }
+
+    return {
+      tsId,
+      tsfinId,
+      mode,
+      isSegments,
+      candidate,
+      weLabel,
+      totalHrs,
+      totalChg,
+      totalPay,
+      segs,
+      blockedByHr: !!t?.blocked_by_hr_validation
+    };
+  });
+
+  const expanded = Object.create(null); // local state (collapsed by default)
+
+  const groupRowHtml = (g) => {
+    const disabled = (!!g.blockedByHr || !canEditLines);
+    const disAttr = disabled ? 'disabled' : '';
+
+    const typeLabel = g.isSegments ? 'Segments' : 'Timesheet';
+    const hrsTxt = fmtHours(g.totalHrs);
+    const chgTxt = fmtMoney(g.totalChg);
+    const payTxt = fmtMoney(g.totalPay);
+
+    const expBtn = g.isSegments
+      ? `<button type="button" class="btn btn-sm btn-outline-secondary" data-invaddts="toggle" data-tsid="${esc(g.tsId)}">+</button>`
+      : `<span class="text-muted">—</span>`;
+
+    const allCheckbox = `
+      <input type="checkbox"
+        class="form-check-input"
+        data-invaddts="all"
+        data-tsid="${esc(g.tsId)}"
+        ${disAttr}
+      />
+    `;
 
     return `
-      <div class="border rounded p-2 mb-2 ${opacity}">
-        <label class="d-flex align-items-center justify-content-between">
-          <div class="d-flex align-items-center gap-2">
+      <tr class="${disabled ? 'opacity-50' : ''}">
+        <td style="width:36px;" class="text-center">${expBtn}</td>
+        <td class="fw-semibold">${esc(g.candidate)}</td>
+        <td>${esc(g.weLabel)}</td>
+        <td>${esc(typeLabel)}</td>
+        <td class="text-end">${esc(String(hrsTxt))}</td>
+        <td class="text-end">${esc(String(chgTxt))}</td>
+        <td class="text-end">${esc(String(payTxt))}</td>
+        <td style="width:140px;" class="text-center">
+          <div class="d-flex align-items-center justify-content-center gap-2">
+            ${allCheckbox}
+            <span class="mini">Add all eligible</span>
+          </div>
+        </td>
+      </tr>
+    `;
+  };
+
+  const segmentsTableHtml = (g) => {
+    if (!g.isSegments) return '';
+    const disabled = (!!g.blockedByHr || !canEditLines);
+    const disAttr = disabled ? 'disabled' : '';
+
+    const rowsHtml = g.segs.map((s) => {
+      const segId = String(s?.segment_id || '').trim();
+      const startIso = String(s?.start_utc || s?.start || '').trim();
+      const endIso = String(s?.end_utc || s?.end || '').trim();
+
+      const dateLabel = (() => {
+        const raw = String(s?.date || '').slice(0, 10);
+        if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return fmtDowDmy(raw);
+        const fromIso = isoToDowDmy(startIso);
+        return fromIso || '—';
+      })();
+
+      const st = isoToHHMM(startIso);
+      const en = isoToHHMM(endIso);
+      const timeLabel = (st && en) ? `${st}–${en}` : '—';
+
+      const hrs = fmtHours(sumSegHours(s));
+      const chg = fmtMoney(Number(s?.charge_amount || 0));
+      const pay = fmtMoney(Number(s?.pay_amount || 0));
+      const ref = String(s?.ref_num || '').trim() || '—';
+
+      const checked = segIsStaged(g.tsfinId, segId) ? 'checked' : '';
+
+      return `
+        <tr class="${disabled ? 'opacity-50' : ''}">
+          <td style="width:36px;" class="text-center">
             <input type="checkbox"
               class="form-check-input"
-              data-kind="ts"
-              value="${escapeHtml(tsId)}"
+              data-kind="seg"
+              data-timesheet-id="${esc(g.tsId)}"
+              data-tsfin-id="${esc(g.tsfinId)}"
+              data-segment-id="${esc(segId)}"
               ${checked}
-              ${tsCheckboxDisabled}
+              ${disAttr}
             />
-            <div>
-              <div class="fw-semibold">${name}${badge}${modePill}</div>
-              <div class="text-muted small">Week ending: ${we}</div>
-            </div>
-          </div>
-          <div class="text-end">
-            <div class="fw-semibold">${escapeHtml(String(ex))}</div>
-            <div class="text-muted small">${escapeHtml(String(hrs))}</div>
-          </div>
-        </label>
-        ${segListHtml}
+          </td>
+          <td>${esc(dateLabel)}</td>
+          <td>${esc(timeLabel)}</td>
+          <td>${esc(ref)}</td>
+          <td class="text-end">${esc(String(hrs))}</td>
+          <td class="text-end">${esc(String(chg))}</td>
+          <td class="text-end">${esc(String(pay))}</td>
+        </tr>
+      `;
+    }).join('');
+
+    return `
+      <div class="mt-2">
+        <table class="grid mini" style="width:100%;">
+          <thead>
+            <tr>
+              <th style="width:36px;"></th>
+              <th>Date</th>
+              <th>Time</th>
+              <th>Ref</th>
+              <th class="text-end">Hours</th>
+              <th class="text-end">Charge (ex VAT)</th>
+              <th class="text-end">Pay (ex VAT)</th>
+            </tr>
+          </thead>
+          <tbody>${rowsHtml}</tbody>
+        </table>
       </div>
     `;
   };
+
+  const tableHtml = `
+    <table class="grid" style="width:100%;">
+      <thead>
+        <tr>
+          <th style="width:36px;"></th>
+          <th>Candidate</th>
+          <th>Week ending</th>
+          <th>Type</th>
+          <th class="text-end">Eligible hours</th>
+          <th class="text-end">Eligible charge</th>
+          <th class="text-end">Eligible pay</th>
+          <th style="width:140px;" class="text-center"></th>
+        </tr>
+      </thead>
+      <tbody>
+        ${groups.map(g => {
+          const segWrap = g.isSegments ? `
+            <tr data-invaddts="wrap" data-tsid="${esc(g.tsId)}" style="display:none;">
+              <td colspan="8">
+                ${segmentsTableHtml(g)}
+              </td>
+            </tr>
+          ` : '';
+          return groupRowHtml(g) + segWrap;
+        }).join('')}
+      </tbody>
+    </table>
+  `;
 
   const html = `
     <div class="p-3">
@@ -31022,17 +31116,17 @@ async function openInvoiceAddTimesheetsModal(modalCtx, { rerender }) {
       ${bannerHtml}
 
       <div class="text-muted small mb-2">
-        Only timesheets eligible for this invoice’s client/week are shown. Segment timesheets can be added by selecting individual segments.
+        Tick <b>Add all eligible</b> to add all eligible items in a group, or expand a Segments row to pick individual segments.
       </div>
 
-      <div id="invAddTsList" class="mt-2">
-        ${rows.length ? rows.map(fmtRow).join('') : '<div class="text-muted">No eligible timesheets.</div>'}
+      <div id="invAddTsTableWrap" class="mt-2">
+        ${groups.length ? tableHtml : '<div class="text-muted">No eligible timesheets.</div>'}
       </div>
 
       <div class="d-flex justify-content-end gap-2 mt-3">
         <button type="button" class="btn btn-sm btn-secondary" id="invAddTsCancel">Cancel</button>
         <button type="button" class="btn btn-sm btn-primary" id="invAddTsConfirm"
-          ${rows.length && canEditLines ? '' : 'disabled'}
+          ${groups.length && canEditLines ? '' : 'disabled'}
         >Apply</button>
       </div>
     </div>
@@ -31055,6 +31149,57 @@ async function openInvoiceAddTimesheetsModal(modalCtx, { rerender }) {
   const btnCancel = document.getElementById('invAddTsCancel');
   const btnConfirm = document.getElementById('invAddTsConfirm');
 
+  // Wire expand/collapse + "add all" (DOM-only; staging happens on Apply)
+  try {
+    const wrap = document.getElementById('invAddTsTableWrap');
+    if (wrap && !wrap.__invWired) {
+      wrap.__invWired = true;
+
+      wrap.addEventListener('click', (e) => {
+        const btn = e.target?.closest?.('[data-invaddts="toggle"]');
+        if (!btn) return;
+        e.preventDefault();
+
+        const tsId = String(btn.getAttribute('data-tsid') || '').trim();
+        if (!tsId) return;
+
+        const row = wrap.querySelector(`tr[data-invaddts="wrap"][data-tsid="${CSS.escape(tsId)}"]`);
+        if (!row) return;
+
+        const isOpen = (row.style.display !== 'none');
+        row.style.display = isOpen ? 'none' : '';
+        btn.textContent = isOpen ? '+' : '–';
+      }, true);
+
+      wrap.addEventListener('change', (e) => {
+        const c = e.target;
+        if (!c || !(c.matches && c.matches('input[type="checkbox"][data-invaddts="all"]'))) return;
+
+        const tsId = String(c.getAttribute('data-tsid') || '').trim();
+        if (!tsId) return;
+
+        const checked = !!c.checked;
+
+        // If this is a SEGMENTS group: toggle all segment checkboxes in the wrapped row.
+        const segWrap = wrap.querySelector(`tr[data-invaddts="wrap"][data-tsid="${CSS.escape(tsId)}"]`);
+        if (segWrap) {
+          const segChecks = Array.from(segWrap.querySelectorAll('input[type="checkbox"][data-kind="seg"]'));
+          for (const sc of segChecks) {
+            if (sc.disabled) continue;
+            sc.checked = checked;
+          }
+          return;
+        }
+
+        // Non-segments: we don't render per-seg; treat group checkbox as the timesheet selection
+        // by creating/updating an invisible selection input.
+        // (Apply uses checkbox scanning; we stage this directly here.)
+        if (checked) stagedTs.add(tsId);
+        else stagedTs.delete(tsId);
+      }, true);
+    }
+  } catch {}
+
   if (btnCancel && !btnCancel.__invWired) {
     btnCancel.__invWired = true;
     btnCancel.onclick = (e) => {
@@ -31067,44 +31212,31 @@ async function openInvoiceAddTimesheetsModal(modalCtx, { rerender }) {
     btnConfirm.__invWired = true;
     btnConfirm.onclick = (e) => {
       e.preventDefault();
-
-      // If selection is disabled (must unissue/unpay first), do nothing.
       if (!canEditLines) return;
 
-      const list = document.getElementById('invAddTsList');
-      if (!list) {
+      const wrap = document.getElementById('invAddTsTableWrap');
+      if (!wrap) {
         closeTop();
         try { setTimeout(() => { rerender && rerender(); }, 0); } catch {}
         return;
       }
 
-      // Stage ONLY on Apply
-      // - For non-SEGMENTS timesheets: use add_timesheet_ids Set
-      // - For SEGMENTS timesheets: stage add_segment_refs [{tsfin_id,segment_id}]
-      const tsChecks = Array.from(list.querySelectorAll('input[type="checkbox"][data-kind="ts"]'));
-      for (const c of tsChecks) {
-        const id = String(c.value || '').trim();
-        if (!id) continue;
-        // only non-segment timesheets have enabled checkbox; but keep logic safe
-        if (c.checked) stagedTs.add(id);
-        else stagedTs.delete(id);
-      }
-
-      const segChecks = Array.from(list.querySelectorAll('input[type="checkbox"][data-kind="seg"]'));
+      // Stage segment additions from visible segment checkboxes
+      const segChecks = Array.from(wrap.querySelectorAll('input[type="checkbox"][data-kind="seg"]'));
       for (const c of segChecks) {
+        const tsId = String(c.getAttribute('data-timesheet-id') || '').trim();
         const tsfinId = String(c.getAttribute('data-tsfin-id') || '').trim();
         const segId = String(c.getAttribute('data-segment-id') || '').trim();
         if (!tsfinId || !segId) continue;
-        stageSeg(tsfinId, segId, !!c.checked);
+        stageSeg(tsfinId, segId, tsId, !!c.checked);
       }
 
       closeTop();
-
-      // Ensure parent invoice modal reflects the staged change immediately
       try { setTimeout(() => { rerender && rerender(); }, 0); } catch {}
     };
   }
 }
+
 
 async function openInvoiceReferenceNumbersModal(parentModalCtx, { rerender } = {}) {
   if (!parentModalCtx || typeof parentModalCtx !== 'object') throw new Error('Missing parent modal context.');
@@ -31599,33 +31731,6 @@ function renderInvoiceModalHistoryTab(modalCtx, invoiceData) {
 }
 
 
-
-
-
-function fmtLondonTs(iso) {
-  const s = String(iso || '').trim();
-  if (!s) return '';
-  try {
-    const d = new Date(s);
-    if (Number.isNaN(d.getTime())) return s;
-
-    const parts = new Intl.DateTimeFormat('en-GB', {
-      timeZone: 'Europe/London',
-      year: 'numeric',
-      month: '2-digit',
-      day: '2-digit',
-      hour: '2-digit',
-      minute: '2-digit',
-      second: '2-digit',
-      hour12: false
-    }).formatToParts(d);
-
-    const get = (t) => (parts.find(p => p.type === t)?.value || '');
-    return `${get('day')}/${get('month')}/${get('year')} ${get('hour')}:${get('minute')}:${get('second')}`;
-  } catch {
-    return s;
-  }
-}
 function renderInvoiceModalContent(modalCtx, invoiceData) {
   const fmtMoneyLocal = (n) => {
     const x = invoiceModalRound2(Number(n || 0));
@@ -31633,11 +31738,6 @@ function renderInvoiceModalContent(modalCtx, invoiceData) {
     return `£${s}`;
   };
 
-  const nowIso = () => {
-    try { return new Date().toISOString(); } catch { return null; }
-  };
-
-  // Prefer the passed-in normalised object if supplied; otherwise normalise from modalCtx.
   const invData = (invoiceData && typeof invoiceData === 'object')
     ? invoiceData
     : invoiceModalGetInvoiceData(modalCtx);
@@ -31650,9 +31750,7 @@ function renderInvoiceModalContent(modalCtx, invoiceData) {
     reference_rows
   } = invData || {};
 
-  if (!invoice) {
-    return `<div class="p-3 text-muted">Invoice not found.</div>`;
-  }
+  if (!invoice) return `<div class="p-3 text-muted">Invoice not found.</div>`;
 
   const baseStatus = String(invoice.status || '').toUpperCase();
   const baseIsIssued = !!invoice.issued_at_utc;
@@ -31661,7 +31759,6 @@ function renderInvoiceModalContent(modalCtx, invoiceData) {
 
   const isEditing = !!modalCtx.isEditing;
 
-  // ✅ Two-permission model
   const canToggleStatus = invoiceModalIsEditable(invoice, modalCtx, 'status');
   const canEditLines    = invoiceModalIsEditable(invoice, modalCtx, 'lines');
 
@@ -31681,14 +31778,12 @@ function renderInvoiceModalContent(modalCtx, invoiceData) {
     Number.isFinite(dueAt.getTime()) &&
     (dueAt.getTime() < Date.now());
 
-  // ✅ Date-only helper (uses your existing fmtLondonTs output)
   const fmtLondonDateOnly = (iso) => {
     const s = String(fmtLondonTs(iso) || '').trim();
     const m = s.match(/^(\d{2}\/\d{2}\/\d{4})/);
     return m ? m[1] : s;
   };
 
-  // Dates to show (prefer actual; else staged preview; else "—")
   const displayIssuedAt = (() => {
     if (effIssued) {
       if (invoice.issued_at_utc) return fmtLondonTs(invoice.issued_at_utc);
@@ -31729,11 +31824,9 @@ function renderInvoiceModalContent(modalCtx, invoiceData) {
     ? `Invoice #${escapeHtml(String(invoice.invoice_no))}`
     : `Invoice ${escapeHtml(String(invoice.id || ''))}`;
 
-  // ✅ Invoice Date must be DATE ONLY
   const invoiceDate = (effIssued && invoice.issued_at_utc) ? fmtLondonDateOnly(invoice.issued_at_utc) : '—';
   const createdDate = invoice.created_at ? fmtLondonTs(invoice.created_at) : '—';
 
-  // Pending edits (line edits OR status edits)
   const hasLineEdits = (() => {
     const e = modalCtx?.invoiceEdits;
     if (!e) return false;
@@ -31758,7 +31851,6 @@ function renderInvoiceModalContent(modalCtx, invoiceData) {
 
   const hasPendingEdits = hasLineEdits || hasStatusEdits || hasRefEdits;
 
-  // Totals
   const currentTotals = {
     subtotal_ex_vat: invoiceModalRound2(invoice.subtotal_ex_vat || 0),
     vat_amount:      invoiceModalRound2(invoice.vat_amount || 0),
@@ -31789,25 +31881,20 @@ function renderInvoiceModalContent(modalCtx, invoiceData) {
 
   const overduePill = overdue ? pillSpan('Overdue', 'pill-bad') : '';
 
-  // Email summary must come from invData (no extra calls)
   const emailedOnce = !!email_summary?.emailed_once;
   const emailLabel = emailedOnce ? 'Re-email' : 'Email';
 
-  // Email disable rule for closeout invoices
   const doNotSend = !!invoice.do_not_send;
   const emailDisabledAttr = doNotSend ? 'disabled' : '';
   const emailTitle = doNotSend ? 'title="Do not send invoice (closeout)"' : '';
 
-  // Reference Numbers action (enabled even when ON_HOLD; disabled only if no rows)
   const hasRefRows = Array.isArray(reference_rows) && reference_rows.length > 0;
   const refDisabledAttr = hasRefRows ? '' : 'disabled';
   const refTitle = hasRefRows ? '' : 'title="No reference rows on this invoice"';
 
-  // ✅ Add buttons should only be enabled when canEditLines
   const addDisabledAttr = canEditLines ? '' : 'disabled';
   const addDisabledTitle = canEditLines ? '' : 'title="Unissue and unpay the invoice first (staged), then you can edit lines."';
 
-  // ON_HOLD reason text (surface the reason)
   const holdReason = (invoice.on_hold_reason != null && String(invoice.on_hold_reason).trim())
     ? String(invoice.on_hold_reason)
     : '';
@@ -31819,11 +31906,10 @@ function renderInvoiceModalContent(modalCtx, invoiceData) {
 
       <div class="mb-2 d-flex align-items-start justify-content-between gap-3" style="flex-wrap:wrap;">
         <div>
-          <div class="h6 mb-1">${invoiceNo}</div>
-          <div class="text-muted small">${escapeHtml(String(clientName || ''))}</div>
+          <div class="h5 fw-bold mb-1">${invoiceNo}</div>
+          <div class="fw-bold" style="font-size:1.05rem;">${escapeHtml(String(clientName || ''))}</div>
         </div>
 
-        <!-- ✅ Header pills top-right (no mini timestamps under pills) -->
         <div class="d-flex align-items-center gap-2" style="margin-left:auto; flex-wrap:wrap; justify-content:flex-end;">
           ${issuedPill}
           ${paidPill}
@@ -31838,38 +31924,16 @@ function renderInvoiceModalContent(modalCtx, invoiceData) {
         </div>
       ` : ''}
 
-      <!-- ✅ Structured details block; all dates live here (no duplicate mini dates under pills) -->
       <div class="mb-3">
-        <table class="table table-sm" style="margin:0;">
+        <table class="grid mini" style="width:100%;">
           <tbody>
-            <tr>
-              <td class="mini text-muted" style="width:160px;">Invoice date</td>
-              <td class="fw-semibold">${escapeHtml(String(invoiceDate))}</td>
-            </tr>
-            <tr>
-              <td class="mini text-muted">Created</td>
-              <td class="fw-semibold">${escapeHtml(String(createdDate))}</td>
-            </tr>
-            <tr>
-              <td class="mini text-muted">Amount (ex VAT)</td>
-              <td class="fw-semibold">${fmtMoneyLocal(totalsToShow.subtotal_ex_vat)}</td>
-            </tr>
-            <tr>
-              <td class="mini text-muted">Amount (inc VAT)</td>
-              <td class="fw-semibold">${fmtMoneyLocal(totalsToShow.total_inc_vat)}</td>
-            </tr>
-            <tr>
-              <td class="mini text-muted">Issue Date</td>
-              <td class="fw-semibold">${escapeHtml(String(displayIssuedAt))}</td>
-            </tr>
-            <tr>
-              <td class="mini text-muted">Paid On</td>
-              <td class="fw-semibold">${escapeHtml(String(displayPaidAt))}</td>
-            </tr>
-            <tr>
-              <td class="mini text-muted">On Hold Since</td>
-              <td class="fw-semibold">${escapeHtml(String(displayHoldAt))}</td>
-            </tr>
+            <tr><td style="width:180px;">Invoice date</td><td class="fw-semibold">${escapeHtml(String(invoiceDate))}</td></tr>
+            <tr><td>Created</td><td class="fw-semibold">${escapeHtml(String(createdDate))}</td></tr>
+            <tr><td>Amount (ex VAT)</td><td class="fw-semibold">${fmtMoneyLocal(totalsToShow.subtotal_ex_vat)}</td></tr>
+            <tr><td>Amount (inc VAT)</td><td class="fw-semibold">${fmtMoneyLocal(totalsToShow.total_inc_vat)}</td></tr>
+            <tr><td>Issue Date</td><td class="fw-semibold">${escapeHtml(String(displayIssuedAt))}</td></tr>
+            <tr><td>Paid On</td><td class="fw-semibold">${escapeHtml(String(displayPaidAt))}</td></tr>
+            <tr><td>On Hold Since</td><td class="fw-semibold">${escapeHtml(String(displayHoldAt))}</td></tr>
           </tbody>
         </table>
       </div>
@@ -31883,7 +31947,6 @@ function renderInvoiceModalContent(modalCtx, invoiceData) {
           ${escapeHtml(emailLabel)}
         </button>
 
-        <!-- ✅ Reference Numbers action (child modal) -->
         <button type="button" class="btn btn-sm btn-outline-secondary" data-action="inv-open-reference-numbers" ${refDisabledAttr} ${refTitle}>
           Reference Numbers
         </button>
@@ -31911,6 +31974,33 @@ function renderInvoiceModalContent(modalCtx, invoiceData) {
 
 
 
+function fmtLondonTs(iso) {
+  const s = String(iso || '').trim();
+  if (!s) return '';
+  try {
+    const d = new Date(s);
+    if (Number.isNaN(d.getTime())) return s;
+
+    const parts = new Intl.DateTimeFormat('en-GB', {
+      timeZone: 'Europe/London',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false
+    }).formatToParts(d);
+
+    const get = (t) => (parts.find(p => p.type === t)?.value || '');
+    return `${get('day')}/${get('month')}/${get('year')} ${get('hour')}:${get('minute')}:${get('second')}`;
+  } catch {
+    return s;
+  }
+}
+
+
+
 function renderInvoiceLinesTable(modalCtx, invoiceData, items) {
   const fmtMoneyLocal = (n) => {
     const x = invoiceModalRound2(Number(n || 0));
@@ -31923,31 +32013,36 @@ function renderInvoiceLinesTable(modalCtx, invoiceData, items) {
 
   const { invoice, segments_by_timesheet, segments_on_invoice_by_timesheet, tsfin_id_by_timesheet_id } = invData || {};
 
-  // ✅ Keep "edit mode" purely driven by modal state (so ISSUED invoices still show edit UI for status toggles)
   const isEditing = !!modalCtx.isEditing;
-
-  // ✅ Separate permission for line edits (staging-aware)
   const canEditLines = invoiceModalIsEditable(invoice, modalCtx, 'lines');
-
-  // Segment edits are unissued-only
   const isUnissued = !(invoice && invoice.issued_at_utc);
 
-  // Removed invoice lines staging
   const removedSet = modalCtx?.invoiceEdits?.remove_invoice_line_ids || new Set();
 
-  // Segment removal staging (array of { tsfin_id, segment_id })
   const stagedSegRemoveArr = (modalCtx?.invoiceEdits && Array.isArray(modalCtx.invoiceEdits.remove_segment_refs))
     ? modalCtx.invoiceEdits.remove_segment_refs
     : [];
 
-  // Build a fast membership set for staged removals
+  const stagedSegAddArr = (modalCtx?.invoiceEdits && Array.isArray(modalCtx.invoiceEdits.add_segment_refs))
+    ? modalCtx.invoiceEdits.add_segment_refs
+    : [];
+
   const segKey = (tsfinId, segId) => `${String(tsfinId || '')}::${String(segId || '')}`;
+
   const stagedSegRemoveSet = (() => {
     const s = new Set();
     for (const r of stagedSegRemoveArr) {
       if (!r || typeof r !== 'object') continue;
-      const k = segKey(r.tsfin_id, r.segment_id);
-      s.add(k);
+      s.add(segKey(r.tsfin_id, r.segment_id));
+    }
+    return s;
+  })();
+
+  const stagedSegAddSet = (() => {
+    const s = new Set();
+    for (const r of stagedSegAddArr) {
+      if (!r || typeof r !== 'object') continue;
+      s.add(segKey(r.tsfin_id, r.segment_id));
     }
     return s;
   })();
@@ -31957,43 +32052,58 @@ function renderInvoiceLinesTable(modalCtx, invoiceData, items) {
     ? modalCtx.invoiceUi.expanded_timesheets
     : {};
 
+  const esc = (typeof escapeHtml === 'function') ? escapeHtml : (s) => String(s == null ? '' : s);
+
+  const fmtDowDmy = (ymd) => {
+    const s = String(ymd || '').slice(0, 10);
+    const m = s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (!m) return s || '—';
+    const [, y, mo, d] = m;
+    let dow = '';
+    try {
+      const dt = new Date(`${s}T00:00:00Z`);
+      dow = dt.toLocaleDateString('en-GB', { weekday: 'short', timeZone: 'Europe/London' });
+    } catch {}
+    return `${dow || ''} ${d}/${mo}/${y}`.trim();
+  };
+
+  const isoToHHMM = (iso) => {
+    try {
+      const d = new Date(String(iso || ''));
+      if (Number.isNaN(d.getTime())) return '';
+      const t = d.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'Europe/London' });
+      return String(t || '').replace(':', '');
+    } catch { return ''; }
+  };
+
+  const isoToDowDmy = (iso) => {
+    try {
+      const d = new Date(String(iso || ''));
+      if (Number.isNaN(d.getTime())) return '';
+      const parts = new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/London', year: 'numeric', month: '2-digit', day: '2-digit', weekday: 'short' }).formatToParts(d);
+      const get = (t) => (parts.find(p => p.type === t)?.value || '');
+      const dd = get('day'), mm = get('month'), yy = get('year'), wd = get('weekday');
+      return `${wd} ${dd}/${mm}/${yy}`.trim();
+    } catch { return ''; }
+  };
+
   const asLineType = (it) => {
     const mj = (it && it.meta_json && typeof it.meta_json === 'object') ? it.meta_json : {};
-    const lt = String(it?.line_type_norm || mj?.line_type || '').trim().toUpperCase();
-    return lt;
+    return String(it?.line_type_norm || mj?.line_type || '').trim().toUpperCase();
   };
 
   const isExpenseLineType = (lt) => {
     const t = String(lt || '').toUpperCase();
-    // Canonical: EXPENSE_* (per brief). Keep legacy fallbacks too.
-    return (
-      t === 'EXPENSE' ||
-      t.startsWith('EXPENSE_') ||
-      t === 'TRAVEL' ||
-      t === 'ACCOMMODATION' ||
-      t === 'OTHER'
-    );
+    return (t === 'EXPENSE' || t.startsWith('EXPENSE_') || t === 'TRAVEL' || t === 'ACCOMMODATION' || t === 'OTHER');
   };
 
-  const isMileageLineType = (lt) => {
-    const t = String(lt || '').toUpperCase();
-    return (t === 'MILEAGE');
-  };
+  const isMileageLineType = (lt) => String(lt || '').toUpperCase() === 'MILEAGE';
 
   const isAdditionalRateType = (lt) => {
     const t = String(lt || '').toUpperCase();
-    // Final rule uses patterns like TS_*_ADDITIONAL_*
-    return (
-      t === 'ADDITIONAL_RATE' ||
-      t === 'ADDITIONAL' ||
-      t === 'ADDITIONAL_RATES' ||
-      t.includes('_ADDITIONAL_') ||
-      (t.startsWith('TS_') && t.includes('ADDITIONAL'))
-    );
+    return (t === 'ADDITIONAL_RATE' || t === 'ADDITIONAL' || t === 'ADDITIONAL_RATES' || t.includes('_ADDITIONAL_') || (t.startsWith('TS_') && t.includes('ADDITIONAL')));
   };
 
-  // Segment edits blocked rule: if invoice contains additional rates OR expenses/mileage
-  // (compute on effective lines, excluding staged removed invoice lines)
   const segmentBlock = (() => {
     let hasAdditional = false;
     let hasExpense = false;
@@ -32005,8 +32115,6 @@ function renderInvoiceLinesTable(modalCtx, invoiceData, items) {
 
       const lt = asLineType(l);
       if (!hasAdditional && isAdditionalRateType(lt)) hasAdditional = true;
-
-      // expense gating should treat EXPENSE_* as expenses; mileage separate
       if (!hasMileage && isMileageLineType(lt)) hasMileage = true;
       if (!hasExpense && isExpenseLineType(lt)) hasExpense = true;
 
@@ -32016,50 +32124,36 @@ function renderInvoiceLinesTable(modalCtx, invoiceData, items) {
     return { hasAdditional, hasExpense, hasMileage, blocked: (hasAdditional || hasExpense || hasMileage) };
   })();
 
-  const getWeekEnding = (g) => {
+  const getWeekEndingRaw = (g) => {
     const first = g.lines[0] || {};
     const mj = (first.meta_json && typeof first.meta_json === 'object') ? first.meta_json : {};
-    return (
-      mj.week_ending_date ||
-      mj.week_ending_date_local ||
-      mj.week_ending ||
-      mj.week_end_date ||
-      ''
-    );
+    return (mj.week_ending_date || mj.week_ending_date_local || mj.week_ending || mj.week_end_date || '');
+  };
+
+  const getWeekEndingLabel = (g) => {
+    const raw = String(getWeekEndingRaw(g) || '').slice(0, 10);
+    if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return fmtDowDmy(raw);
+    return raw || '—';
   };
 
   const getCandidate = (g) => {
     const first = g.lines[0] || {};
     const mj = (first.meta_json && typeof first.meta_json === 'object') ? first.meta_json : {};
-    return (
-      mj.candidate_display ||
-      mj.candidate_name ||
-      mj.worker_name ||
-      ''
-    );
+    return (mj.candidate_display || mj.candidate_name || mj.worker_name || '');
   };
 
   const sumBucketQty = (it) => {
     const q = it?.qty || {};
-    return (
-      Number(q.day || 0) +
-      Number(q.night || 0) +
-      Number(q.sat || 0) +
-      Number(q.sun || 0) +
-      Number(q.bh || 0)
-    );
+    return (Number(q.day || 0) + Number(q.night || 0) + Number(q.sat || 0) + Number(q.sun || 0) + Number(q.bh || 0));
   };
 
-  const sumSegmentHours = (seg) => {
-    const s = seg && typeof seg === 'object' ? seg : {};
-    return (
-      Number(s.hours_day || 0) +
-      Number(s.hours_night || 0) +
-      Number(s.hours_sat || 0) +
-      Number(s.hours_sun || 0) +
-      Number(s.hours_bh || 0)
-    );
-  };
+  const sumSegHours = (seg) => (
+    Number(seg?.hours_day || 0) +
+    Number(seg?.hours_night || 0) +
+    Number(seg?.hours_sat || 0) +
+    Number(seg?.hours_sun || 0) +
+    Number(seg?.hours_bh || 0)
+  );
 
   const groupTotals = (g) => {
     let hrs = 0;
@@ -32073,7 +32167,6 @@ function renderInvoiceLinesTable(modalCtx, invoiceData, items) {
       const lt = asLineType(l);
       const id = String(l?.invoice_line_id || '');
       const isRemoved = (id && removedSet && typeof removedSet.has === 'function' && removedSet.has(id));
-
       if (isRemoved) continue;
 
       const qtyHrs = sumBucketQty(l);
@@ -32083,27 +32176,18 @@ function renderInvoiceLinesTable(modalCtx, invoiceData, items) {
       inc += Number(l?.total_inc_vat || 0);
       margin += Number(l?.margin_ex_vat || 0);
 
-      // Expenses column should include EXPENSE_* (and legacy expense types), but NOT mileage
-      if (isExpenseLineType(lt) && !isMileageLineType(lt)) {
-        expensesEx += Number(l?.total_charge_ex_vat || 0);
-      }
+      if (isExpenseLineType(lt) && !isMileageLineType(lt)) expensesEx += Number(l?.total_charge_ex_vat || 0);
 
-      // Additional Hours from Additional Rates where unit_name looks like hours
       if (isAdditionalRateType(lt)) {
         const mj = (l.meta_json && typeof l.meta_json === 'object') ? l.meta_json : {};
         const u = (mj.units && typeof mj.units === 'object') ? mj.units : {};
         const unitName = String(u.unit_name || '').toLowerCase();
         const unitCount = Number(u.unit_count || 0);
-
-        if (unitCount > 0 && unitName && unitName.includes('hour')) {
-          additionalHours += unitCount;
-        }
+        if (unitCount > 0 && unitName && unitName.includes('hour')) additionalHours += unitCount;
       }
     }
 
-    // Segment-staging-aware totals for SEGMENTS timesheets:
-    // If segments_on_invoice_by_timesheet indicates this timesheet is SEGMENTS-mode and has segments on this invoice,
-    // subtract staged removed segment amounts/hours from the base group totals so the UI reflects pending removals.
+    // subtract staged removed segments (keeps preview coherent)
     try {
       const tsId = String(g.timesheet_id || '');
       const segMap = (segments_on_invoice_by_timesheet && typeof segments_on_invoice_by_timesheet === 'object')
@@ -32111,13 +32195,10 @@ function renderInvoiceLinesTable(modalCtx, invoiceData, items) {
         : ((segments_by_timesheet && typeof segments_by_timesheet === 'object') ? segments_by_timesheet : {});
       const info = (tsId && segMap && typeof segMap === 'object') ? segMap[tsId] : null;
 
-      const invoicedSegs = (info && typeof info === 'object' && Array.isArray(info.invoiced_segments))
-        ? info.invoiced_segments
-        : null;
+      const invoicedSegs = (info && typeof info === 'object' && Array.isArray(info.invoiced_segments)) ? info.invoiced_segments : null;
 
       if (invoicedSegs && invoicedSegs.length) {
         const tsfinId = (info && info.tsfin_id) ? String(info.tsfin_id) : (tsfin_id_by_timesheet_id && tsfin_id_by_timesheet_id[tsId] ? String(tsfin_id_by_timesheet_id[tsId]) : '');
-
         if (tsfinId) {
           let deltaEx = 0;
           let deltaPay = 0;
@@ -32127,17 +32208,14 @@ function renderInvoiceLinesTable(modalCtx, invoiceData, items) {
             if (!seg || typeof seg !== 'object') continue;
             const segId = (seg.segment_id != null) ? String(seg.segment_id) : '';
             if (!segId) continue;
-
             if (stagedSegRemoveSet.has(segKey(tsfinId, segId))) {
               deltaEx += Number(seg.charge_amount || 0);
               deltaPay += Number(seg.pay_amount || 0);
-              deltaHours += sumSegmentHours(seg);
+              deltaHours += sumSegHours(seg);
             }
           }
 
-          // VAT factor: approximate using current totals (safe fallback to 1 if ex is 0)
           const vatFactor = (ex && Number(ex) !== 0) ? (Number(inc || 0) / Number(ex || 1)) : 1;
-
           const deltaInc = deltaEx * vatFactor;
           const deltaMargin = (deltaEx - deltaPay);
 
@@ -32150,7 +32228,7 @@ function renderInvoiceLinesTable(modalCtx, invoiceData, items) {
     } catch {}
 
     return {
-      week: getWeekEnding(g),
+      week: getWeekEndingLabel(g),
       candidate: getCandidate(g),
       totalHours: invoiceModalRound2(hrs),
       additionalHours: invoiceModalRound2(additionalHours),
@@ -32167,7 +32245,7 @@ function renderInvoiceLinesTable(modalCtx, invoiceData, items) {
     return ids.every(id => removedSet.has(id));
   };
 
-  // Group invoice lines:
+  // Group invoice lines by timesheet_id; adjustments separate
   const tsGroups = new Map();
   const adjLines = [];
 
@@ -32179,16 +32257,14 @@ function renderInvoiceLinesTable(modalCtx, invoiceData, items) {
       if (!tsGroups.has(tsId)) tsGroups.set(tsId, { key: tsId, timesheet_id: tsId, lines: [] });
       tsGroups.get(tsId).lines.push(it);
     } else {
-      // adjustments: timesheet_id null
       const lid = String(it?.invoice_line_id || '');
-      adjLines.push({ key: `adj:${lid}`, invoice_line_id: lid, line: it, line_type: lt });
+      adjLines.push({ key: `adj:${lid}`, invoice_line_id: lid, line: it, line_type: lt, staged: false });
     }
   }
 
   const tsGroupArr = Array.from(tsGroups.values());
 
   const segMapForUi = (() => {
-    // prefer alias, but both keys are present in manifest; keep compatibility
     if (segments_on_invoice_by_timesheet && typeof segments_on_invoice_by_timesheet === 'object') return segments_on_invoice_by_timesheet;
     if (segments_by_timesheet && typeof segments_by_timesheet === 'object') return segments_by_timesheet;
     return {};
@@ -32205,7 +32281,22 @@ function renderInvoiceLinesTable(modalCtx, invoiceData, items) {
     return false;
   })();
 
-  // Build expanded detail rows
+  // Staged adjustments: render inside Adjustments table (green), not a separate "Pending" block.
+  const stagedAdjs = (modalCtx?.invoiceEdits && Array.isArray(modalCtx.invoiceEdits.add_adjustments))
+    ? modalCtx.invoiceEdits.add_adjustments
+    : [];
+
+  const stagedAdjRows = stagedAdjs.map((a) => {
+    const tok = String(a?.client_token || '').trim();
+    return {
+      key: `staged-adj:${tok}`,
+      client_token: tok,
+      description: String(a?.description || '').trim() || 'Adjustment',
+      ex: invoiceModalRound2(Number(a?.amount_ex_vat || 0)),
+      staged: true
+    };
+  });
+
   const allocByWeights = (total, weights) => {
     const out = {};
     const keys = Object.keys(weights || {}).filter(k => Number(weights[k] || 0) > 0);
@@ -32214,7 +32305,6 @@ function renderInvoiceLinesTable(modalCtx, invoiceData, items) {
     const sumW = keys.reduce((s, k) => s + Number(weights[k] || 0), 0);
     if (!(sumW > 0)) return out;
 
-    // allocate rounded to 2dp, push rounding remainder into last key
     let used = 0;
     keys.forEach((k) => {
       const w = Number(weights[k] || 0);
@@ -32235,13 +32325,7 @@ function renderInvoiceLinesTable(modalCtx, invoiceData, items) {
     const pr = l?.pay_rate || {};
     const cr = l?.charge_rate || {};
 
-    const buckets = [
-      ['day', 'Day'],
-      ['night', 'Night'],
-      ['sat', 'Sat'],
-      ['sun', 'Sun'],
-      ['bh', 'BH']
-    ];
+    const buckets = [['day','Day'],['night','Night'],['sat','Sat'],['sun','Sun'],['bh','BH']];
 
     const qtyBy = {};
     const wChg = {};
@@ -32251,11 +32335,8 @@ function renderInvoiceLinesTable(modalCtx, invoiceData, items) {
       const qty = Number(q?.[k] || 0);
       if (qty > 0) {
         qtyBy[k] = qty;
-
         const chgR = Number(cr?.[k]);
         const payR = Number(pr?.[k]);
-
-        // weights: prefer qty*rate if rate is finite, else qty
         wChg[k] = (Number.isFinite(chgR) ? (qty * chgR) : qty);
         wPay[k] = (Number.isFinite(payR) ? (qty * payR) : qty);
       }
@@ -32267,8 +32348,6 @@ function renderInvoiceLinesTable(modalCtx, invoiceData, items) {
 
     const allocPay = allocByWeights(totalPay, wPay);
     const allocChg = allocByWeights(totalChg, wChg);
-
-    // Allocate VAT by charge weights so VAT+INC sum exactly matches stored line totals
     const allocVat = allocByWeights(totalVat, wChg);
 
     const rows = [];
@@ -32316,7 +32395,6 @@ function renderInvoiceLinesTable(modalCtx, invoiceData, items) {
     const inc   = invoiceModalRound2(Number(l?.total_inc_vat || 0));
     const margin= invoiceModalRound2(Number(l?.margin_ex_vat || 0));
 
-    // Show only if meaningful (and always allow expense/mileage if pay or charge exists)
     const shouldShow =
       ((isExpenseLineType(lt) || isMileageLineType(lt)) ? (payEx !== 0 || chgEx !== 0) : ((qty && qty !== 0) || payEx !== 0 || chgEx !== 0));
 
@@ -32333,16 +32411,61 @@ function renderInvoiceLinesTable(modalCtx, invoiceData, items) {
     };
   };
 
+  const lookupEligibleSeg = (tsfinId, segId) => {
+    try {
+      const obj = modalCtx?.eligibleTimesheetsCache;
+      const map = obj?._bySegKey instanceof Map ? obj._bySegKey : null;
+      if (!map) return null;
+      return map.get(`${String(tsfinId || '')}::${String(segId || '')}`) || null;
+    } catch { return null; }
+  };
+
   const renderSegmentsOnInvoiceTable = (g) => {
     const tsId = String(g.timesheet_id || '');
     const info = (segMapForUi && typeof segMapForUi === 'object') ? segMapForUi[tsId] : null;
     const invoicedSegs = (info && typeof info === 'object' && Array.isArray(info.invoiced_segments)) ? info.invoiced_segments : [];
 
-    if (!invoicedSegs.length) return '';
-
     const tsfinId =
       (info && typeof info === 'object' && info.tsfin_id) ? String(info.tsfin_id)
       : (tsfin_id_by_timesheet_id && tsfin_id_by_timesheet_id[tsId] ? String(tsfin_id_by_timesheet_id[tsId]) : '');
+
+    // staged added segments for this timesheet
+    const stagedAddsForTs = (() => {
+      const out = [];
+      for (const r of stagedSegAddArr) {
+        if (!r || typeof r !== 'object') continue;
+        const tId = String(r.timesheet_id || '').trim();
+        if (tId && tId !== tsId) continue;
+        if (!tId) {
+          // fallback: infer from segment_id pattern "...:<timesheet_id>:..."
+          const sid = String(r.segment_id || '');
+          if (sid && tsId && sid.includes(`:${tsId}:`) === false && sid.includes(`:${tsId}`) === false) continue;
+        }
+        out.push(r);
+      }
+      return out;
+    })();
+
+    const stagedAddSegs = stagedAddsForTs.map(r => {
+      const s = lookupEligibleSeg(r.tsfin_id, r.segment_id) || {};
+      return {
+        __staged_add: true,
+        segment_id: String(r.segment_id || ''),
+        date: String(s.date || ''),
+        start_utc: String(s.start_utc || s.start || ''),
+        end_utc: String(s.end_utc || s.end || ''),
+        ref_num: String(s.ref_num || ''),
+        charge_amount: Number(s.charge_amount || 0),
+        pay_amount: Number(s.pay_amount || 0),
+        hours_day: Number(s.hours_day || 0),
+        hours_night: Number(s.hours_night || 0),
+        hours_sat: Number(s.hours_sat || 0),
+        hours_sun: Number(s.hours_sun || 0),
+        hours_bh: Number(s.hours_bh || 0)
+      };
+    });
+
+    if (!invoicedSegs.length && !stagedAddSegs.length) return '';
 
     const uninvoicedCount = (info && typeof info === 'object' && Number.isFinite(Number(info.uninvoiced_segment_count)))
       ? Number(info.uninvoiced_segment_count)
@@ -32351,18 +32474,6 @@ function renderInvoiceLinesTable(modalCtx, invoiceData, items) {
     const lockedElsewhereCount = (info && typeof info === 'object' && Number.isFinite(Number(info.locked_elsewhere_segment_count)))
       ? Number(info.locked_elsewhere_segment_count)
       : 0;
-
-    const stagedCountForTs = (() => {
-      if (!tsfinId) return 0;
-      let c = 0;
-      for (const seg of invoicedSegs) {
-        if (!seg || typeof seg !== 'object') continue;
-        const segId = (seg.segment_id != null) ? String(seg.segment_id) : '';
-        if (!segId) continue;
-        if (stagedSegRemoveSet.has(segKey(tsfinId, segId))) c += 1;
-      }
-      return c;
-    })();
 
     const canStageSegments =
       !!isEditing &&
@@ -32381,48 +32492,94 @@ function renderInvoiceLinesTable(modalCtx, invoiceData, items) {
 
     const banner = (!canStageSegments && isEditing && (segmentBlock.blocked || !isUnissued)) ? `
       <div class="alert alert-warning py-2 px-2 small mb-2">
-        <b>Segment edits disabled:</b> ${escapeHtml(disabledReason || 'Not allowed for this invoice.')}
+        <b>Segment edits disabled:</b> ${esc(disabledReason || 'Not allowed for this invoice.')}
       </div>
     ` : '';
 
-    const rows = invoicedSegs.map(seg => {
+    const combined = [
+      ...invoicedSegs.map(s => ({ ...(s || {}), __staged_add: false })),
+      ...stagedAddSegs
+    ];
+
+    // sort by start time then date
+    combined.sort((a, b) => {
+      const ta = new Date(String(a?.start_utc || '')).getTime();
+      const tb = new Date(String(b?.start_utc || '')).getTime();
+      if (Number.isFinite(ta) && Number.isFinite(tb) && ta !== tb) return ta - tb;
+
+      const da = String(a?.date || '').slice(0,10);
+      const db = String(b?.date || '').slice(0,10);
+      if (da && db && da !== db) return da < db ? -1 : 1;
+      return 0;
+    });
+
+    const rows = combined.map(seg => {
       const segId = (seg && typeof seg === 'object' && seg.segment_id != null) ? String(seg.segment_id) : '';
-      const date = (seg && typeof seg === 'object' && seg.date != null) ? String(seg.date) : '';
       const startUtc = (seg && typeof seg === 'object' && seg.start_utc != null) ? String(seg.start_utc) : '';
       const endUtc = (seg && typeof seg === 'object' && seg.end_utc != null) ? String(seg.end_utc) : '';
+
+      const dateLabel = (() => {
+        const raw = String(seg?.date || '').slice(0, 10);
+        if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return fmtDowDmy(raw);
+        const fromIso = isoToDowDmy(startUtc);
+        return fromIso || '—';
+      })();
+
+      const startHH = isoToHHMM(startUtc);
+      const endHH = isoToHHMM(endUtc);
+
       const refNum = (seg && typeof seg === 'object' && seg.ref_num != null) ? String(seg.ref_num) : '';
-      const hrs = invoiceModalRound2(sumSegmentHours(seg));
+      const hrs = invoiceModalRound2(sumSegHours(seg));
       const chg = invoiceModalRound2(Number(seg?.charge_amount || 0));
       const pay = invoiceModalRound2(Number(seg?.pay_amount || 0));
 
       const k = segKey(tsfinId, segId);
       const stagedRemove = (!!tsfinId && !!segId && stagedSegRemoveSet.has(k));
+      const stagedAdd = !!seg.__staged_add;
 
-      const checkbox = `
-        <input type="checkbox"
-          class="form-check-input"
-          data-action="inv-toggle-remove-segment"
-          data-timesheet-id="${escapeHtml(tsId)}"
-          data-tsfin-id="${escapeHtml(String(tsfinId || ''))}"
-          data-segment-id="${escapeHtml(String(segId || ''))}"
-          ${stagedRemove ? 'checked' : ''}
-          ${canStageSegments ? '' : 'disabled'}
-        />
-      `;
+      const checkbox = stagedAdd
+        ? `
+          <input type="checkbox"
+            class="form-check-input"
+            data-action="inv-toggle-add-segment"
+            data-timesheet-id="${esc(tsId)}"
+            data-tsfin-id="${esc(String(tsfinId || ''))}"
+            data-segment-id="${esc(String(segId || ''))}"
+            checked
+            ${canStageSegments ? '' : 'disabled'}
+          />
+        `
+        : `
+          <input type="checkbox"
+            class="form-check-input"
+            data-action="inv-toggle-remove-segment"
+            data-timesheet-id="${esc(tsId)}"
+            data-tsfin-id="${esc(String(tsfinId || ''))}"
+            data-segment-id="${esc(String(segId || ''))}"
+            ${stagedRemove ? 'checked' : ''}
+            ${canStageSegments ? '' : 'disabled'}
+          />
+        `;
 
-      const pendingChip = stagedRemove ? `<span class="pill pill-warn">Pending removal</span>` : '';
+      const chip = stagedAdd
+        ? `<span class="pill pill-ok">Staged add</span>`
+        : (stagedRemove ? `<span class="pill pill-warn">Pending removal</span>` : '');
+
+      const rowStyle = stagedAdd
+        ? ` style="background: rgba(46, 204, 113, 0.18);"`
+        : (stagedRemove ? ` class="opacity-50"` : '');
 
       return `
-        <tr class="${stagedRemove ? 'opacity-50' : ''}">
+        <tr${rowStyle}>
           <td style="width:32px;">${checkbox}</td>
-          <td>${escapeHtml(date)}</td>
-          <td class="text-muted small">${escapeHtml(startUtc)}</td>
-          <td class="text-muted small">${escapeHtml(endUtc)}</td>
-          <td>${escapeHtml(refNum || '—')}</td>
-          <td class="text-end">${escapeHtml(invoiceModalFmtHours(hrs))}</td>
+          <td>${esc(dateLabel)}</td>
+          <td>${esc(startHH || '—')}</td>
+          <td>${esc(endHH || '—')}</td>
+          <td>${esc(refNum || '—')}</td>
+          <td class="text-end">${esc(invoiceModalFmtHours(hrs))}</td>
           <td class="text-end">${fmtMoneyLocal(chg)}</td>
           <td class="text-end">${fmtMoneyLocal(pay)}</td>
-          <td class="text-end">${pendingChip}</td>
+          <td class="text-end">${chip}</td>
         </tr>
       `;
     }).join('');
@@ -32431,9 +32588,9 @@ function renderInvoiceLinesTable(modalCtx, invoiceData, items) {
       <button type="button"
         class="btn btn-sm btn-outline-danger"
         data-action="inv-stage-remove-selected-segments"
-        data-timesheet-id="${escapeHtml(tsId)}"
-        data-tsfin-id="${escapeHtml(String(tsfinId || ''))}"
-        ${(!canStageSegments || stagedCountForTs === 0) ? 'disabled' : ''}>
+        data-timesheet-id="${esc(tsId)}"
+        data-tsfin-id="${esc(String(tsfinId || ''))}"
+        ${(!canStageSegments) ? 'disabled' : ''}>
         Remove selected segments
       </button>
     `;
@@ -32442,8 +32599,8 @@ function renderInvoiceLinesTable(modalCtx, invoiceData, items) {
       <button type="button"
         class="btn btn-sm btn-outline-danger"
         data-action="inv-stage-remove-all-segments"
-        data-timesheet-id="${escapeHtml(tsId)}"
-        data-tsfin-id="${escapeHtml(String(tsfinId || ''))}"
+        data-timesheet-id="${esc(tsId)}"
+        data-tsfin-id="${esc(String(tsfinId || ''))}"
         ${(!canStageSegments) ? 'disabled' : ''}>
         Remove all segments on this invoice
       </button>
@@ -32453,7 +32610,7 @@ function renderInvoiceLinesTable(modalCtx, invoiceData, items) {
       <div class="mt-3">
         <div class="d-flex align-items-center justify-content-between flex-wrap gap-2 mb-2">
           <div class="fw-semibold">
-            Segments on this invoice
+            Segments
             <span class="text-muted small">
               (${invoicedSegs.length} on invoice, ${uninvoicedCount} uninvoiced, ${lockedElsewhereCount} locked elsewhere)
             </span>
@@ -32468,8 +32625,8 @@ function renderInvoiceLinesTable(modalCtx, invoiceData, items) {
             <tr>
               <th style="width:32px;"></th>
               <th>Date</th>
-              <th>Start (UTC)</th>
-              <th>End (UTC)</th>
+              <th>Start</th>
+              <th>End</th>
               <th>Ref</th>
               <th class="text-end">Hours</th>
               <th class="text-end">Charge (ex VAT)</th>
@@ -32477,9 +32634,7 @@ function renderInvoiceLinesTable(modalCtx, invoiceData, items) {
               <th class="text-end"></th>
             </tr>
           </thead>
-          <tbody>
-            ${rows}
-          </tbody>
+          <tbody>${rows}</tbody>
         </table>
       </div>
     `;
@@ -32526,10 +32681,10 @@ function renderInvoiceLinesTable(modalCtx, invoiceData, items) {
                 const qtyTxt = (r.qty == null) ? '—' : invoiceModalFmtHours(Number(r.qty || 0));
                 return `
                   <tr>
-                    <td>${escapeHtml(String(r.unit || ''))}</td>
-                    <td class="text-end">${escapeHtml(String(qtyTxt))}</td>
+                    <td>${esc(String(r.unit || ''))}</td>
+                    <td class="text-end">${esc(String(qtyTxt))}</td>
                     <td class="text-end">${fmtMoneyLocal(r.pay_ex)}</td>
-                    <td class="text-end">${escapeHtml(String(payIncTxt))}</td>
+                    <td class="text-end">${esc(String(payIncTxt))}</td>
                     <td class="text-end">${fmtMoneyLocal(r.margin)}</td>
                     <td class="text-end">${fmtMoneyLocal(r.chg_ex)}</td>
                     <td class="text-end">${fmtMoneyLocal(r.chg_inc)}</td>
@@ -32541,15 +32696,11 @@ function renderInvoiceLinesTable(modalCtx, invoiceData, items) {
         </div>
       `;
 
-    // Append SEGMENTS expansion (segments locked to this invoice) if applicable
     const segmentsHtml = renderSegmentsOnInvoiceTable(g);
 
     return `${breakdownHtml}${segmentsHtml}`;
   };
 
-  // ✅ Remove/Undo buttons:
-  // - show Undo whenever a thing is already staged as removed (even if canEditLines is false)
-  // - show Remove only when canEditLines is true
   const renderRemoveBtnForTimesheet = (g, removed) => {
     if (!isEditing) return '';
 
@@ -32558,7 +32709,7 @@ function renderInvoiceLinesTable(modalCtx, invoiceData, items) {
         <button type="button"
           class="btn btn-sm btn-outline-secondary"
           data-action="inv-toggle-remove-timesheet"
-          data-timesheet-id="${escapeHtml(g.timesheet_id)}">
+          data-timesheet-id="${esc(g.timesheet_id)}">
           Undo
         </button>
       `;
@@ -32570,20 +32721,14 @@ function renderInvoiceLinesTable(modalCtx, invoiceData, items) {
       <button type="button"
         class="btn btn-sm btn-outline-danger"
         data-action="inv-toggle-remove-timesheet"
-        data-timesheet-id="${escapeHtml(g.timesheet_id)}">
+        data-timesheet-id="${esc(g.timesheet_id)}">
         Remove
       </button>
     `;
   };
 
-  // Staged additions (not yet saved)
-  const staged = modalCtx.invoiceEdits || {};
-  const stagedTs = staged.add_timesheet_ids || new Set();
-  const stagedAdjs = Array.isArray(staged.add_adjustments) ? staged.add_adjustments : [];
-
   const stagedBlocks = [];
 
-  // Segment edit blocked banner (global) — only relevant if there are segment timesheets on the invoice
   if (isEditing && hasAnySegmentTimesheets && (segmentBlock.blocked || !isUnissued)) {
     const reason = segmentBlock.hasAdditional
       ? 'Segments cannot be moved when additional rates exist.'
@@ -32592,79 +32737,11 @@ function renderInvoiceLinesTable(modalCtx, invoiceData, items) {
           : (!isUnissued ? 'Segments can only be changed before issuing.' : ''));
     stagedBlocks.push(`
       <div class="alert alert-warning py-2 px-2 small mb-3">
-        <b>Segment edits disabled:</b> ${escapeHtml(reason)}
+        <b>Segment edits disabled:</b> ${esc(reason)}
       </div>
     `);
   }
 
-  if (isEditing && (stagedTs.size || stagedAdjs.length)) {
-    const blocks = [];
-
-    if (stagedTs.size) {
-      const tsHtml = Array.from(stagedTs).map(tsId => {
-        const t = invoiceModalLookupEligibleTimesheet(modalCtx, tsId);
-        const name = escapeHtml(String(t?.candidate_name || t?.candidate_id || tsId));
-        const we = escapeHtml(String(t?.source_week_ending_date || ''));
-        const ex = fmtMoneyLocal(Number(t?.invoiceable_charge_ex_vat || 0));
-        const hrs = invoiceModalFmtHours(Number(t?.invoiceable_hours || 0));
-        return `
-          <div class="border rounded p-2 mb-2">
-            <div class="d-flex justify-content-between">
-              <div>
-                <div class="fw-semibold">ADD: ${name}</div>
-                <div class="text-muted small">Week ending: ${we}</div>
-              </div>
-              <div class="text-end">
-                <div class="fw-semibold">${ex}</div>
-                <div class="text-muted small">${hrs}</div>
-              </div>
-            </div>
-            <div class="d-flex justify-content-end mt-2">
-              <button type="button" class="btn btn-sm btn-outline-danger"
-                data-action="inv-unstage-add-timesheet"
-                data-timesheet-id="${escapeHtml(tsId)}">
-                Remove
-              </button>
-            </div>
-          </div>
-        `;
-      }).join('');
-      blocks.push(`<div class="mb-3"><div class="fw-semibold mb-2">Pending timesheets</div>${tsHtml}</div>`);
-    }
-
-    if (stagedAdjs.length) {
-      const adjHtml = stagedAdjs.map(a => {
-        const tok = escapeHtml(String(a?.client_token || ''));
-        const desc = escapeHtml(String(a?.description || ''));
-        const ex = fmtMoneyLocal(Number(a?.amount_ex_vat || 0));
-        return `
-          <div class="border rounded p-2 mb-2">
-            <div class="d-flex justify-content-between">
-              <div class="fw-semibold">ADJ: ${desc}</div>
-              <div class="fw-semibold">${ex}</div>
-            </div>
-            <div class="d-flex justify-content-end mt-2">
-              <button type="button" class="btn btn-sm btn-outline-danger"
-                data-action="inv-remove-staged-adjustment"
-                data-client-token="${tok}">
-                Remove
-              </button>
-            </div>
-          </div>
-        `;
-      }).join('');
-      blocks.push(`<div class="mb-3"><div class="fw-semibold mb-2">Pending adjustments</div>${adjHtml}</div>`);
-    }
-
-    stagedBlocks.push(`
-      <div class="border rounded p-2 mb-3 bg-light">
-        <div class="fw-semibold mb-2">Pending additions (not saved)</div>
-        ${blocks.join('')}
-      </div>
-    `);
-  }
-
-  // Timesheets table
   const head = `
     <thead>
       <tr>
@@ -32687,11 +32764,11 @@ function renderInvoiceLinesTable(modalCtx, invoiceData, items) {
     const expanded = !!modalCtx.invoiceUi.expanded_timesheets[String(g.timesheet_id)];
 
     const trMain = `
-      <tr data-action="inv-toggle-expand-timesheet" data-timesheet-id="${escapeHtml(g.timesheet_id)}" style="cursor:pointer;">
-        <td>${escapeHtml(String(totals.week || ''))}</td>
-        <td>${escapeHtml(String(totals.candidate || ''))}</td>
-        <td class="text-end">${escapeHtml(invoiceModalFmtHours(totals.totalHours))}</td>
-        <td class="text-end">${escapeHtml(invoiceModalFmtHours(totals.additionalHours))}</td>
+      <tr data-action="inv-toggle-expand-timesheet" data-timesheet-id="${esc(g.timesheet_id)}" style="cursor:pointer;">
+        <td>${esc(String(totals.week || ''))}</td>
+        <td>${esc(String(totals.candidate || ''))}</td>
+        <td class="text-end">${esc(invoiceModalFmtHours(totals.totalHours))}</td>
+        <td class="text-end">${esc(invoiceModalFmtHours(totals.additionalHours))}</td>
         <td class="text-end">${fmtMoneyLocal(totals.expensesEx)}</td>
         <td class="text-end">${fmtMoneyLocal(totals.ex)}</td>
         <td class="text-end">${fmtMoneyLocal(totals.inc)}</td>
@@ -32711,11 +32788,39 @@ function renderInvoiceLinesTable(modalCtx, invoiceData, items) {
     return trMain + trExpanded;
   }).join('');
 
-  // Adjustments table
   const adjTable = (() => {
-    if (!adjLines.length) return '';
+    const allAdj = [...stagedAdjRows, ...adjLines];
 
-    const rows = adjLines.map(a => {
+    if (!allAdj.length) return '';
+
+    const rows = allAdj.map(a => {
+      const isStaged = !!a.staged;
+
+      if (isStaged) {
+        const desc = String(a.description || 'Adjustment');
+        const ex = invoiceModalRound2(Number(a.ex || 0));
+
+        const btn = (!isEditing)
+          ? ''
+          : `
+            <button type="button" class="btn btn-sm btn-outline-danger"
+              data-action="inv-remove-staged-adjustment"
+              data-client-token="${esc(String(a.client_token || ''))}">
+              Remove
+            </button>
+          `;
+
+        return `
+          <tr style="background: rgba(46, 204, 113, 0.18);">
+            <td>${esc(desc)} <span class="pill pill-ok" style="margin-left:6px;">Staged</span></td>
+            <td class="text-end">${fmtMoneyLocal(ex)}</td>
+            <td class="text-end">—</td>
+            <td class="text-end">—</td>
+            ${isEditing ? `<td class="text-end">${btn}</td>` : ''}
+          </tr>
+        `;
+      }
+
       const l = a.line || {};
       const lid = String(l?.invoice_line_id || a.invoice_line_id || '');
       const desc = String(l?.description || 'Adjustment');
@@ -32725,7 +32830,6 @@ function renderInvoiceLinesTable(modalCtx, invoiceData, items) {
 
       const removed = removedSet.has(lid);
 
-      // ✅ Undo always available when already staged removed; Remove only if canEditLines
       const btn = (!isEditing)
         ? ''
         : (removed
@@ -32733,7 +32837,7 @@ function renderInvoiceLinesTable(modalCtx, invoiceData, items) {
             <button type="button"
               class="btn btn-sm btn-outline-secondary"
               data-action="inv-toggle-remove-line"
-              data-invoice-line-id="${escapeHtml(lid)}">
+              data-invoice-line-id="${esc(lid)}">
               Undo
             </button>
           `
@@ -32741,7 +32845,7 @@ function renderInvoiceLinesTable(modalCtx, invoiceData, items) {
             <button type="button"
               class="btn btn-sm btn-outline-danger"
               data-action="inv-toggle-remove-line"
-              data-invoice-line-id="${escapeHtml(lid)}">
+              data-invoice-line-id="${esc(lid)}">
               Remove
             </button>
           ` : '')
@@ -32749,7 +32853,7 @@ function renderInvoiceLinesTable(modalCtx, invoiceData, items) {
 
       return `
         <tr class="${removed ? 'opacity-50' : ''}">
-          <td>${escapeHtml(desc)}</td>
+          <td>${esc(desc)}</td>
           <td class="text-end">${fmtMoneyLocal(ex)}</td>
           <td class="text-end">${fmtMoneyLocal(inc)}</td>
           <td class="text-end">${fmtMoneyLocal(margin)}</td>
@@ -32777,7 +32881,7 @@ function renderInvoiceLinesTable(modalCtx, invoiceData, items) {
     `;
   })();
 
-  if (!tsGroupArr.length && !adjLines.length && stagedBlocks.length === 0) {
+  if (!tsGroupArr.length && !adjLines.length && stagedAdjRows.length === 0 && stagedBlocks.length === 0) {
     return `<div class="text-muted">No invoice lines.</div>`;
   }
 
