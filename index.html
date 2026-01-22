@@ -1421,12 +1421,20 @@ body{
         0 1px 2px rgba(0,0,0,.35);
     }
 
-    /* Row highlights */
-    .row-light-green{
-      background: rgba(34,197,94,0.14);
+      /* Row highlights (must beat zebra striping) */
+    .summary-body .grid tbody tr.row-light-green{
+      background: rgba(34,197,94,0.14) !important;
     }
-    .row-deep-green{
-      background: rgba(34,197,94,0.28);
+    .summary-body .grid tbody tr.row-deep-green{
+      background: rgba(34,197,94,0.28) !important;
+    }
+
+    /* Optional: keep highlight while hovering */
+    .summary-body .grid tbody tr.row-light-green:hover{
+      background: rgba(34,197,94,0.20) !important;
+    }
+    .summary-body .grid tbody tr.row-deep-green:hover{
+      background: rgba(34,197,94,0.34) !important;
     }
 
       /* Processing State cell when fully invoiced */
@@ -1449,17 +1457,7 @@ body{
     }
     #globalLoadingOverlay[data-show="1"]{ display:grid; }
 
-    #globalLoadingOverlay .gload-card{
-      display:flex;
-      flex-direction:column;
-      align-items:center;
-      gap:10px;
-      padding:14px 16px;
-      border-radius:14px;
-      border:1px solid var(--line, #334155);
-      background: linear-gradient(180deg,#0e1428,#0b1221);
-      box-shadow: var(--shadow, 0 6px 20px rgba(0,0,0,.25));
-    }
+   
     #globalLoadingOverlay .gload-spinner{
       position:relative;
       width:54px;
@@ -1523,16 +1521,14 @@ body{
     </main>
    </div>
 
-  <!-- ✅ Global loading overlay (used by beginGlobalLoading / endGlobalLoading) -->
+   <!-- ✅ Global loading overlay (spinner only) -->
   <div id="globalLoadingOverlay" aria-hidden="true">
-    <div class="gload-card" role="status" aria-live="polite">
-      <div class="gload-spinner" aria-hidden="true">
-        <span style="--i:0"></span><span style="--i:1"></span><span style="--i:2"></span><span style="--i:3"></span>
-        <span style="--i:4"></span><span style="--i:5"></span><span style="--i:6"></span><span style="--i:7"></span>
-      </div>
-      <div class="mini" id="globalLoadingText">Loading…</div>
+    <div class="gload-spinner" aria-hidden="true">
+      <span style="--i:0"></span><span style="--i:1"></span><span style="--i:2"></span><span style="--i:3"></span>
+      <span style="--i:4"></span><span style="--i:5"></span><span style="--i:6"></span><span style="--i:7"></span>
     </div>
   </div>
+
 
   <!-- ===== Draggable modal ===== -->
   <div class="modal-back" id="modalBack">
@@ -1643,3 +1639,4 @@ body{
   <script src="./js/main.js"></script>
 </body>
 </html>
+
