@@ -1343,75 +1343,11 @@ function getFriendlyHeaderLabel(section, key) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 async function loadSection() {
-  window.__listState = window.__listState || {};
-  const st = (window.__listState[currentSection] ||= {
-    page: 1,
-    pageSize: 50,
-    total: null,
-    hasMore: false,
-    filters: null,
-    sort: { key: null, dir: 'asc' }
-  });
+  const gl = beginGlobalLoading('Loading list…');
 
-  // Ensure sort object exists (for older sessions where it wasn't seeded)
-  if (!st.sort || typeof st.sort !== 'object') {
-    st.sort = { key: null, dir: 'asc' };
-  }
-
-  // ✅ Related mode detection (exclusive list mode)
-  const related = (st.filters && typeof st.filters === 'object' && st.filters.related && typeof st.filters.related === 'object')
-    ? st.filters.related
-    : null;
-
-  const inRelatedMode =
-    !!related &&
-    String(related.source_entity || '').trim() &&
-    String(related.source_id || '').trim() &&
-    String(related.relation_type || '').trim();
-
-  // Default Contracts quick-filter to "active" if nothing specified
-  // ✅ Ignore incompatible normal defaults while in related mode
-  if (!inRelatedMode && currentSection === 'contracts') {
-    if (!st.filters || typeof st.filters !== 'object') st.filters = {};
-    if (!('status' in st.filters) || !st.filters.status) {
-      st.filters.status = 'active';
-    }
-  }
-
-  // ✅ Default Invoices filter (only if not already specified)
-  // ✅ Ignore incompatible normal defaults while in related mode
-  if (!inRelatedMode && currentSection === 'invoices') {
-    if (!st.filters || typeof st.filters !== 'object') st.filters = {};
-    const cur = st.filters.status;
-    const hasStatus =
-      (Array.isArray(cur) && cur.length > 0) ||
-      (typeof cur === 'string' && cur.trim().length > 0);
-    if (!hasStatus) {
-      st.filters.status = ['DRAFT','ON_HOLD','ISSUED','PAID'];
-    }
-  }
-
-  // Ensure user grid prefs are loaded once per session (per section).
-  await loadUserGridPrefs(currentSection);
-
-  const hasFilters = !!st.filters && Object.keys(st.filters).length > 0;
-  const hasSort    = !!(st.sort && st.sort.key);
-
-  // ✅ ALWAYS use search for candidates + contracts + invoices
-  // ✅ But related mode is a dedicated branch and does NOT use search()
-  const useSearch =
-    (currentSection === 'candidates' || currentSection === 'contracts' || currentSection === 'invoices')
-      ? true
-      : (hasFilters || hasSort);
-
-  const fetchRelatedPage = async (section, page, pageSize, rel) => {
-    // ✅ Keep fetchRelated(...) as the single fetcher for related views.
-    // It handles v2 RPC routing server-side and normalizes via toList().
-    //
-    // We must pass pagination parameters via the section list-state.
-    // fetchRelated itself builds the URL using page/page_size.
+  try {
     window.__listState = window.__listState || {};
-    const stSec = (window.__listState[section] ||= {
+    const st = (window.__listState[currentSection] ||= {
       page: 1,
       pageSize: 50,
       total: null,
@@ -1420,120 +1356,190 @@ async function loadSection() {
       sort: { key: null, dir: 'asc' }
     });
 
-    stSec.page = page;
-    stSec.pageSize = pageSize;
-
-    const srcEntity = String(rel.source_entity || '').trim();
-    const srcId     = String(rel.source_id || '').trim();
-    const relType   = String(rel.relation_type || '').trim();
-
-    // fetchRelated returns a normalized list via toList(res)
-    const list = await fetchRelated(srcEntity, srcId, relType);
-
-    // Tolerate both shapes:
-    // - { items: [...], total: number|null }
-    // - [...items] (legacy)
-    const items = Array.isArray(list?.items) ? list.items : (Array.isArray(list) ? list : []);
-    const total = (list && typeof list === 'object' && typeof list.total === 'number') ? list.total : null;
-
-    // Persist totals/hasMore in section state (for pager/footer)
-    stSec.total = total;
-
-    const ps = (pageSize === 'ALL') ? items.length : Number(pageSize || 50);
-    const pg = Math.max(1, Number(page || 1));
-
-    stSec.hasMore =
-      (typeof total === 'number')
-        ? ((pg * ps) < total)
-        : (Array.isArray(items) && items.length === ps);
-
-    return items;
-  };
-
-  const fetchOne = async (section, page, pageSize) => {
-    window.__listState[section].page = page;
-    window.__listState[section].pageSize = pageSize;
-
-    // ✅ Related mode branch (exclusive; ignore other filters)
-    if (inRelatedMode) {
-      return await fetchRelatedPage(section, page, pageSize, related);
+    // Ensure sort object exists (for older sessions where it wasn't seeded)
+    if (!st.sort || typeof st.sort !== 'object') {
+      st.sort = { key: null, dir: 'asc' };
     }
 
-    // Timesheets always go via the summary endpoint (v_timesheets_summary)
-    if (section === 'timesheets') {
-      const filters = window.__listState[section].filters || {};
-      return await listTimesheetsSummary(filters);
-    }
+    // ✅ Related mode detection (exclusive list mode)
+    const related = (st.filters && typeof st.filters === 'object' && st.filters.related && typeof st.filters.related === 'object')
+      ? st.filters.related
+      : null;
 
-    if (useSearch) {
-      return await search(section, window.__listState[section].filters || {});
-    } else {
-      switch (section) {
-        case 'candidates': return await listCandidates();
-        case 'clients':    return await listClients();
-        case 'umbrellas':  return await listUmbrellas();
-        case 'settings':   return await getSettings();
-        case 'audit':      return await listOutbox();
-        default:           return [];
+    const inRelatedMode =
+      !!related &&
+      String(related.source_entity || '').trim() &&
+      String(related.source_id || '').trim() &&
+      String(related.relation_type || '').trim();
+
+    // Default Contracts quick-filter to "active" if nothing specified
+    // ✅ Ignore incompatible normal defaults while in related mode
+    if (!inRelatedMode && currentSection === 'contracts') {
+      if (!st.filters || typeof st.filters !== 'object') st.filters = {};
+      if (!('status' in st.filters) || !st.filters.status) {
+        st.filters.status = 'active';
       }
     }
-  };
 
-  // PageSize = ALL → fetch all pages sequentially (respecting filters + sort)
-  // ✅ Related mode: keep using the single related fetcher; just page through.
-  if (st.pageSize === 'ALL') {
-    const acc = [];
-    let p = 1;
+    // ✅ Default Invoices filter (only if not already specified)
+    // ✅ Ignore incompatible normal defaults while in related mode
+    if (!inRelatedMode && currentSection === 'invoices') {
+      if (!st.filters || typeof st.filters !== 'object') st.filters = {};
+      const cur = st.filters.status;
+      const hasStatus =
+        (Array.isArray(cur) && cur.length > 0) ||
+        (typeof cur === 'string' && cur.trim().length > 0);
+      if (!hasStatus) {
+        st.filters.status = ['DRAFT','ON_HOLD','ISSUED','PAID'];
+      }
+    }
 
-    // Related fetcher is page-based; use 200 for non-related, and 100 for related if backend caps.
-    const chunk = inRelatedMode ? 100 : 200;
+    // Ensure user grid prefs are loaded once per session (per section).
+    await loadUserGridPrefs(currentSection);
 
-    let gotMore = true;
-    while (gotMore) {
-      const rows = await fetchOne(currentSection, p, chunk);
-      acc.push(...(rows || []));
+    const hasFilters = !!st.filters && Object.keys(st.filters).length > 0;
+    const hasSort    = !!(st.sort && st.sort.key);
 
+    // ✅ ALWAYS use search for candidates + contracts + invoices
+    // ✅ But related mode is a dedicated branch and does NOT use search()
+    const useSearch =
+      (currentSection === 'candidates' || currentSection === 'contracts' || currentSection === 'invoices')
+        ? true
+        : (hasFilters || hasSort);
+
+    const fetchRelatedPage = async (section, page, pageSize, rel) => {
+      // ✅ Keep fetchRelated(...) as the single fetcher for related views.
+      // It handles v2 RPC routing server-side and normalizes via toList().
+      //
+      // We must pass pagination parameters via the section list-state.
+      // fetchRelated itself builds the URL using page/page_size.
+      window.__listState = window.__listState || {};
+      const stSec = (window.__listState[section] ||= {
+        page: 1,
+        pageSize: 50,
+        total: null,
+        hasMore: false,
+        filters: null,
+        sort: { key: null, dir: 'asc' }
+      });
+
+      stSec.page = page;
+      stSec.pageSize = pageSize;
+
+      const srcEntity = String(rel.source_entity || '').trim();
+      const srcId     = String(rel.source_id || '').trim();
+      const relType   = String(rel.relation_type || '').trim();
+
+      // fetchRelated returns a normalized list via toList(res)
+      const list = await fetchRelated(srcEntity, srcId, relType);
+
+      // Tolerate both shapes:
+      // - { items: [...], total: number|null }
+      // - [...items] (legacy)
+      const items = Array.isArray(list?.items) ? list.items : (Array.isArray(list) ? list : []);
+      const total = (list && typeof list === 'object' && typeof list.total === 'number') ? list.total : null;
+
+      // Persist totals/hasMore in section state (for pager/footer)
+      stSec.total = total;
+
+      const ps = (pageSize === 'ALL') ? items.length : Number(pageSize || 50);
+      const pg = Math.max(1, Number(page || 1));
+
+      stSec.hasMore =
+        (typeof total === 'number')
+          ? ((pg * ps) < total)
+          : (Array.isArray(items) && items.length === ps);
+
+      return items;
+    };
+
+    const fetchOne = async (section, page, pageSize) => {
+      window.__listState[section].page = page;
+      window.__listState[section].pageSize = pageSize;
+
+      // ✅ Related mode branch (exclusive; ignore other filters)
       if (inRelatedMode) {
-        const total = window.__listState[currentSection].total;
-        if (typeof total === 'number') {
-          gotMore = acc.length < total;
+        return await fetchRelatedPage(section, page, pageSize, related);
+      }
+
+      // Timesheets always go via the summary endpoint (v_timesheets_summary)
+      if (section === 'timesheets') {
+        const filters = window.__listState[section].filters || {};
+        return await listTimesheetsSummary(filters);
+      }
+
+      if (useSearch) {
+        return await search(section, window.__listState[section].filters || {});
+      } else {
+        switch (section) {
+          case 'candidates': return await listCandidates();
+          case 'clients':    return await listClients();
+          case 'umbrellas':  return await listUmbrellas();
+          case 'settings':   return await getSettings();
+          case 'audit':      return await listOutbox();
+          default:           return [];
+        }
+      }
+    };
+
+    // PageSize = ALL → fetch all pages sequentially (respecting filters + sort)
+    // ✅ Related mode: keep using the single related fetcher; just page through.
+    if (st.pageSize === 'ALL') {
+      const acc = [];
+      let p = 1;
+
+      // Related fetcher is page-based; use 200 for non-related, and 100 for related if backend caps.
+      const chunk = inRelatedMode ? 100 : 200;
+
+      let gotMore = true;
+      while (gotMore) {
+        const rows = await fetchOne(currentSection, p, chunk);
+        acc.push(...(rows || []));
+
+        if (inRelatedMode) {
+          const total = window.__listState[currentSection].total;
+          if (typeof total === 'number') {
+            gotMore = acc.length < total;
+          } else {
+            gotMore = Array.isArray(rows) && rows.length === chunk;
+          }
         } else {
           gotMore = Array.isArray(rows) && rows.length === chunk;
         }
-      } else {
-        gotMore = Array.isArray(rows) && rows.length === chunk;
+
+        p += 1;
+        if (!gotMore) break;
       }
 
-      p += 1;
-      if (!gotMore) break;
+      window.__listState[currentSection].page = 1;
+      window.__listState[currentSection].hasMore = false;
+      window.__listState[currentSection].total = acc.length;
+
+      try {
+        primeSummaryMembership(currentSection, getSummaryFingerprint(currentSection));
+      } catch {}
+      return acc;
     }
 
-    window.__listState[currentSection].page = 1;
-    window.__listState[currentSection].hasMore = false;
-    window.__listState[currentSection].total = acc.length;
+    // Normal paged case
+    const page = Number(st.page || 1);
+    const ps   = Number(st.pageSize || 50);
+
+    const rows = await fetchOne(currentSection, page, ps);
+
+    // ✅ In related mode, hasMore/total are set by fetchRelatedPage()
+    if (!inRelatedMode) {
+      const hasMore = Array.isArray(rows) && rows.length === ps;
+      window.__listState[currentSection].hasMore = hasMore;
+    }
 
     try {
       primeSummaryMembership(currentSection, getSummaryFingerprint(currentSection));
     } catch {}
-    return acc;
+    return rows;
+  } finally {
+    endGlobalLoading();
   }
-
-  // Normal paged case
-  const page = Number(st.page || 1);
-  const ps   = Number(st.pageSize || 50);
-
-  const rows = await fetchOne(currentSection, page, ps);
-
-  // ✅ In related mode, hasMore/total are set by fetchRelatedPage()
-  if (!inRelatedMode) {
-    const hasMore = Array.isArray(rows) && rows.length === ps;
-    window.__listState[currentSection].hasMore = hasMore;
-  }
-
-  try {
-    primeSummaryMembership(currentSection, getSummaryFingerprint(currentSection));
-  } catch {}
-  return rows;
 }
 
 
@@ -14552,23 +14558,26 @@ let modalCtx = { entity:null, data:null };
 
 
 // ✅ CHANGED: make this async, always hydrate fresh from server before opening
-function openDetails(rowOrId) {
+async function openDetails(rowOrId) {
   if (!confirmDiscardChangesIfDirty()) return;
 
-  let row = rowOrId;
-  let id  = null;
+  const gl = beginGlobalLoading('Opening…');
 
-  if (!row || typeof row !== 'object') {
-    id = String(rowOrId || '');
-    row = currentRows.find(x => String(x.id) === id) || null;
-  } else {
-    id = String(row.id || '');
-  }
+  try {
+    let row = rowOrId;
+    let id  = null;
 
-  if (!id) { alert('Record id not provided'); return; }
+    if (!row || typeof row !== 'object') {
+      id = String(rowOrId || '');
+      row = currentRows.find(x => String(x.id) === id) || null;
+    } else {
+      id = String(row.id || '');
+    }
 
-  if (currentSection === 'contracts') {
-    (async () => {
+    if (!id) { alert('Record id not provided'); return; }
+
+    // Contracts: fetch fresh wrapper/row best-effort, then open
+    if (currentSection === 'contracts') {
       let fresh = null;
       try {
         fresh = await getContract(id);
@@ -14580,24 +14589,166 @@ function openDetails(rowOrId) {
       currentSelection = effective;
       console.debug('[OPEN] openDetails', { section: currentSection, id: effective.id });
       openContract(effective);
-    })();
-    return;
+      return;
+    }
+
+    if (!row) { alert('Record not found'); return; }
+
+    currentSelection = row;
+    console.debug('[OPEN] openDetails', { section: currentSection, id: row.id });
+
+    if (currentSection === 'candidates')      await openCandidate(row);
+    else if (currentSection === 'clients')    await openClient(row);
+    else if (currentSection === 'umbrellas')  await openUmbrella(row);
+    else if (currentSection === 'audit')      openAuditItem(row);
+    else if (currentSection === 'contracts')  openContract(row);
+    else if (currentSection === 'timesheets') await openTimesheet(row);
+    else if (currentSection === 'invoices')   await openInvoiceModal(row); // ✅ NEW
+  } catch (e) {
+    console.warn('[OPEN] openDetails failed', e);
+    alert(e?.message || 'Failed to open record.');
+  } finally {
+    endGlobalLoading();
   }
-
-  if (!row) { alert('Record not found'); return; }
-
-  currentSelection = row;
-  console.debug('[OPEN] openDetails', { section: currentSection, id: row.id });
-
-  if (currentSection === 'candidates')      openCandidate(row);
-  else if (currentSection === 'clients')    openClient(row);
-  else if (currentSection === 'umbrellas')  openUmbrella(row);
-  else if (currentSection === 'audit')      openAuditItem(row);
-  else if (currentSection === 'contracts')  openContract(row);
-  else if (currentSection === 'timesheets') openTimesheet(row);
-  else if (currentSection === 'invoices')   openInvoiceModal(row); // ✅ NEW
 }
 
+
+// ─────────────────────────────────────────────────────────────
+// Global loading overlay (rotating dots) — minimal + safe
+// ─────────────────────────────────────────────────────────────
+function ensureGlobalLoadingOverlay() {
+  try {
+    if (document.getElementById('globalLoadingOverlay')) return;
+
+    // Inject CSS once
+    if (!document.getElementById('__globalLoadingCss')) {
+      const st = document.createElement('style');
+      st.id = '__globalLoadingCss';
+      st.textContent = `
+#globalLoadingOverlay{
+  position:fixed;
+  inset:0;
+  display:none;
+  place-items:center;
+  z-index:9999;
+  background: rgba(2,6,23,0.35);
+  backdrop-filter: blur(1px);
+}
+#globalLoadingOverlay[data-show="1"]{ display:grid; }
+#globalLoadingOverlay .gload-card{
+  display:flex;
+  flex-direction:column;
+  align-items:center;
+  gap:10px;
+  padding:14px 16px;
+  border-radius:14px;
+  border:1px solid var(--line, #334155);
+  background: linear-gradient(180deg,#0e1428,#0b1221);
+  box-shadow: var(--shadow, 0 6px 20px rgba(0,0,0,.25));
+}
+#globalLoadingOverlay .gload-spinner{
+  position:relative;
+  width:54px;
+  height:54px;
+  animation: gloadSpin 0.95s linear infinite;
+}
+#globalLoadingOverlay .gload-spinner span{
+  position:absolute;
+  top:50%;
+  left:50%;
+  width:8px;
+  height:8px;
+  margin:-4px;
+  border-radius:50%;
+  background:#e5e7eb;
+  opacity:.25;
+  transform: rotate(calc(var(--i) * 45deg)) translate(20px);
+}
+#globalLoadingOverlay .gload-spinner span:nth-child(1){opacity:.25}
+#globalLoadingOverlay .gload-spinner span:nth-child(2){opacity:.30}
+#globalLoadingOverlay .gload-spinner span:nth-child(3){opacity:.35}
+#globalLoadingOverlay .gload-spinner span:nth-child(4){opacity:.45}
+#globalLoadingOverlay .gload-spinner span:nth-child(5){opacity:.60}
+#globalLoadingOverlay .gload-spinner span:nth-child(6){opacity:.75}
+#globalLoadingOverlay .gload-spinner span:nth-child(7){opacity:.90}
+#globalLoadingOverlay .gload-spinner span:nth-child(8){opacity:1.00}
+
+@keyframes gloadSpin{ to { transform: rotate(360deg); } }
+      `;
+      document.head.appendChild(st);
+    }
+
+    // Create overlay
+    const ov = document.createElement('div');
+    ov.id = 'globalLoadingOverlay';
+    ov.setAttribute('aria-hidden', 'true');
+
+    ov.innerHTML = `
+      <div class="gload-card" role="status" aria-live="polite">
+        <div class="gload-spinner" aria-hidden="true">
+          <span style="--i:0"></span><span style="--i:1"></span><span style="--i:2"></span><span style="--i:3"></span>
+          <span style="--i:4"></span><span style="--i:5"></span><span style="--i:6"></span><span style="--i:7"></span>
+        </div>
+        <div class="mini" id="globalLoadingText">Loading…</div>
+      </div>
+    `;
+
+    document.body.appendChild(ov);
+  } catch {}
+}
+
+function beginGlobalLoading(label) {
+  try {
+    ensureGlobalLoadingOverlay();
+
+    const st = (window.__gload ||= {
+      count: 0,
+      visibleSince: 0,
+      hideTimer: null
+    });
+
+    st.count += 1;
+    if (st.count === 1) st.visibleSince = Date.now();
+
+    if (st.hideTimer) { clearTimeout(st.hideTimer); st.hideTimer = null; }
+
+    const ov = document.getElementById('globalLoadingOverlay');
+    if (ov) {
+      ov.dataset.show = '1';
+      ov.setAttribute('aria-hidden', 'false');
+      const txt = document.getElementById('globalLoadingText');
+      if (txt) txt.textContent = (label ? `Loading… ${String(label)}` : 'Loading…');
+    }
+  } catch {}
+
+  return `gl:${Date.now()}:${Math.random().toString(36).slice(2)}`;
+}
+
+function endGlobalLoading() {
+  try {
+    const st = window.__gload;
+    if (!st || !Number.isFinite(st.count)) return;
+
+    st.count = Math.max(0, st.count - 1);
+    if (st.count > 0) return;
+
+    const ov = document.getElementById('globalLoadingOverlay');
+    if (!ov) return;
+
+    // Ensure it stays visible a tiny minimum time (prevents “flash”)
+    const minMs = 250;
+    const elapsed = Date.now() - (st.visibleSince || 0);
+    const wait = Math.max(0, minMs - elapsed);
+
+    st.hideTimer = setTimeout(() => {
+      try {
+        ov.dataset.show = '';
+        ov.setAttribute('aria-hidden', 'true');
+      } catch {}
+      st.hideTimer = null;
+    }, wait);
+  } catch {}
+}
 
 
 
@@ -35443,30 +35594,58 @@ this._markDirty();
   topControls.appendChild(clearBtn);
   content.appendChild(topControls);
 
-  // ── apply extra Status filtering client-side for timesheets ────────────────
-  let effectiveRows = rows;
-  if (currentSection === 'timesheets') {
-    const stFilters = window.__listState[currentSection].filters || {};
-    const statusCode = (stFilters.status_code || 'ALL').toUpperCase();
+ // ── apply extra Status filtering client-side for timesheets ────────────────
+let effectiveRows = rows;
+if (currentSection === 'timesheets') {
+  const stFilters = window.__listState[currentSection].filters || {};
+  const statusCode = (stFilters.status_code || 'ALL').toUpperCase();
 
-    if (statusCode === 'NO_MATCH_ID') {
-      effectiveRows = effectiveRows.filter(r => !r.candidate_id || !r.client_id);
-    } else if (statusCode === 'RATE_MISSING') {
-      effectiveRows = effectiveRows.filter(r => r.has_rate_issue === true);
-    } else if (statusCode === 'PAY_CHAN_MISS') {
-      effectiveRows = effectiveRows.filter(r => r.has_pay_channel_issue === true);
-    } else if (statusCode === 'READY_FOR_HR') {
-      effectiveRows = effectiveRows.filter(r =>
-        String(r.processing_status || '').toUpperCase() === 'READY_FOR_HR'
-      );
-    } else if (statusCode === 'READY_FOR_INV') {
-      effectiveRows = effectiveRows.filter(r =>
-        String(r.processing_status || '').toUpperCase() === 'READY_FOR_INVOICE'
-      );
-    }
-    // HR_HOURS_MISMATCH relies on backend hr_issue filter only
+  if (statusCode === 'NO_MATCH_ID') {
+    effectiveRows = effectiveRows.filter(r => !r.candidate_id || !r.client_id);
+
+  } else if (statusCode === 'RATE_MISSING') {
+    effectiveRows = effectiveRows.filter(r => r.has_rate_issue === true);
+
+  } else if (statusCode === 'PAY_CHAN_MISS') {
+    effectiveRows = effectiveRows.filter(r => r.has_pay_channel_issue === true);
+
+  } else if (statusCode === 'READY_FOR_HR') {
+    // Only show genuinely “ready for HR” (not invoiced/locked)
+    effectiveRows = effectiveRows.filter(r => {
+      const proc = String(r.processing_status || '').toUpperCase();
+      if (proc !== 'READY_FOR_HR') return false;
+
+      const invSegStage = String(r.invoice_segment_stage || '').trim().toUpperCase();
+      const locked = !!r.locked_by_invoice_id;
+
+      // Exclude anything already invoiced/part-invoiced/locked
+      if (locked) return false;
+      if (invSegStage && invSegStage !== 'NOT_INVOICED') return false;
+
+      return true;
+    });
+
+  } else if (statusCode === 'READY_FOR_INV') {
+    // Only show genuinely “ready for invoice” (not invoiced/locked)
+    effectiveRows = effectiveRows.filter(r => {
+      const proc = String(r.processing_status || '').toUpperCase();
+      if (proc !== 'READY_FOR_INVOICE') return false;
+
+      const invSegStage = String(r.invoice_segment_stage || '').trim().toUpperCase();
+      const locked = !!r.locked_by_invoice_id;
+
+      // Exclude anything already invoiced/part-invoiced/locked
+      if (locked) return false;
+      if (invSegStage && invSegStage !== 'NOT_INVOICED') return false;
+
+      return true;
+    });
   }
-  currentRows = effectiveRows;
+
+  // HR_HOURS_MISMATCH relies on backend hr_issue filter only
+}
+currentRows = effectiveRows;
+
 
   // ── single table (header + body) inside scroll host ────────────────────────
   const bodyWrap = document.createElement('div');
@@ -35741,23 +35920,29 @@ this._markDirty();
           td.textContent = txt;
         }
 
-      } else if (currentSection === 'timesheets' && c === 'processing_status') {
-        // ✅ Processing State column rules:
-        // - FULLY_INVOICED => "Invoiced" + green cell background (dark)
-        // - PARTIALLY_INVOICED => "Partially Invoiced"
-        // - Else => formatted processing_status
-        const invSegStage = String(r?.invoice_segment_stage || '').trim().toUpperCase();
-        const isFullyInvoiced = (invSegStage === 'FULLY_INVOICED');
-        const isPartiallyInvoiced = (invSegStage === 'PARTIALLY_INVOICED');
+   } else if (currentSection === 'timesheets' && c === 'processing_status') {
+  // ✅ Processing State column rules (segment-aware):
+  // - FULLY_INVOICED => "Invoiced" + green cell background (dark)
+  // - PARTIALLY_INVOICED => "Partially Invoiced"
+  // - NOT_INVOICED + READY_FOR_INVOICE => "Ready for invoice"
+  // - NOT_INVOICED + READY_FOR_HR      => "Ready for HR"
+  // - Else => formatted processing_status
+  const stageRaw = String(v || '').trim().toUpperCase();
+  const invSegStage = String(r?.invoice_segment_stage || '').trim().toUpperCase();
 
-        if (isFullyInvoiced) {
-          td.textContent = 'Invoiced';
-          td.classList.add('cell-invoiced');
-        } else if (isPartiallyInvoiced) {
-          td.textContent = 'Partially Invoiced';
-        } else {
-          td.textContent = formatDisplayValue(c, v);
-        }
+  if (invSegStage === 'FULLY_INVOICED') {
+    td.textContent = 'Invoiced';
+    td.classList.add('cell-invoiced');
+  } else if (invSegStage === 'PARTIALLY_INVOICED') {
+    td.textContent = 'Partially Invoiced';
+  } else if (invSegStage === 'NOT_INVOICED' && stageRaw === 'READY_FOR_INVOICE') {
+    td.textContent = 'Ready for invoice';
+  } else if (invSegStage === 'NOT_INVOICED' && stageRaw === 'READY_FOR_HR') {
+    td.textContent = 'Ready for HR';
+  } else {
+    td.textContent = formatDisplayValue(c, v);
+  }
+
 
       } else if (currentSection === 'invoices' && c === 'invoice_no') {
         // Paid coin in invoice number cell
