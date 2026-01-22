@@ -33121,6 +33121,7 @@ const buildInvoiceWeekSelectHtml = (seg) => {
   const currentTarget =
     segTargets[segId] ||
     storedTargetRaw ||
+    naturalWeekStart ||
     currentWeekStart ||
     '';
 
@@ -33158,14 +33159,13 @@ const buildInvoiceWeekSelectHtml = (seg) => {
     seen.add(pauseWeekStart);
   }
 
-  let selectedVal = currentTarget || currentWeekStart || '';
+  let selectedVal = currentTarget || naturalWeekStart || currentWeekStart || '';
   const optionValues = opts.map(o => o.value);
   if (!optionValues.includes(selectedVal)) {
-    selectedVal = optionValues.includes(currentWeekStart) ? currentWeekStart : pauseWeekStart;
+    selectedVal =
+      (naturalWeekStart && optionValues.includes(naturalWeekStart)) ? naturalWeekStart :
+      (optionValues.includes(currentWeekStart) ? currentWeekStart : pauseWeekStart);
   }
-
-  // Keep existing behavior: always stage the selected value
-  segTargets[segId] = selectedVal;
 
   const optionsHtml = opts.map(o => {
     const sel = (o.value === selectedVal) ? 'selected' : '';
@@ -33211,8 +33211,10 @@ const buildInvoiceWeekSelectHtml = (seg) => {
     ? fmtInvoiceHint(lockedInvoiceId)
     : (delayHint ? `⏳ ${delayHint}` : '○ Invoiceable now');
 
+  const disabledAttrSeg = (disabledAttr || isSegLocked) ? 'disabled' : '';
+
   return `
-    <select name="seg_invoice_week" data-segment-id="${segId}" ${disabledAttr}>
+    <select name="seg_invoice_week" data-segment-id="${segId}" ${disabledAttrSeg}>
       ${optionsHtml}
     </select>
     <span class="mini">${invoiceStateHint}</span>
@@ -33220,7 +33222,6 @@ const buildInvoiceWeekSelectHtml = (seg) => {
 
 
 };
-
 
   if (isSegments && segs.length && isNhspOrHrSelfBillBasis) {
     const headHtml = `
@@ -41146,7 +41147,7 @@ if (this.entity === 'timesheets' && k === 'lines') {
         });
       });
 
-      // ✅ SEGMENTS: invoice week select wiring (still needed)
+         // ✅ SEGMENTS: invoice week select wiring (still needed)
       const weekSelects = root.querySelectorAll('select[name="seg_invoice_week"][data-segment-id]');
       weekSelects.forEach(sel => {
         if (sel.__tsWeekWired) return;
@@ -41162,9 +41163,77 @@ if (this.entity === 'timesheets' && k === 'lines') {
         const staged = mc.timesheetState.segmentInvoiceTargets[segId];
         if (staged) sel.value = staged;
 
+        // Baseline week start (natural week) for this timesheet
+        const computeWeekStartFromWeekEnding = (weYmd) => {
+          if (!weYmd) return null;
+          const d = new Date(`${String(weYmd).slice(0,10)}T00:00:00Z`);
+          if (Number.isNaN(d.getTime())) return null;
+          d.setUTCDate(d.getUTCDate() - 6);
+          const yyyy = d.getUTCFullYear();
+          const mm   = String(d.getUTCMonth() + 1).padStart(2, '0');
+          const dd   = String(d.getUTCDate()).padStart(2, '0');
+          return `${yyyy}-${mm}-${dd}`;
+        };
+
+        const det = mc.timesheetDetails || {};
+        const ts  = det.timesheet || {};
+        const tsWeekEnding =
+          ts.week_ending_date ||
+          mc.data?.week_ending_date ||
+          (det.contract_week && det.contract_week.week_ending_date) ||
+          null;
+
+        const naturalWeekStart = tsWeekEnding ? computeWeekStartFromWeekEnding(tsWeekEnding) : null;
+        const pauseWeekStart   = '2099-01-05';
+
         sel.addEventListener('change', () => {
-          mc.timesheetState.segmentInvoiceTargets[segId] = String(sel.value || '').trim();
-          try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
+          const segObj =
+            (mc.timesheetDetails && Array.isArray(mc.timesheetDetails.segments))
+              ? mc.timesheetDetails.segments.find(s => s && String(s.segment_id || '') === String(segId))
+              : null;
+
+          const lockedInvoiceId = segObj ? String(segObj.invoice_locked_invoice_id || '').trim() : '';
+          const storedTargetRaw = segObj ? String(segObj.invoice_target_week_start || '').trim() : '';
+
+          // If locked, do not stage anything (and snap back to stored/baseline)
+          if (lockedInvoiceId) {
+            const back =
+              storedTargetRaw ||
+              naturalWeekStart ||
+              String(sel.value || '').trim() ||
+              '';
+            sel.value = back;
+            if (Object.prototype.hasOwnProperty.call(mc.timesheetState.segmentInvoiceTargets, segId)) {
+              delete mc.timesheetState.segmentInvoiceTargets[segId];
+            }
+            return;
+          }
+
+          const v = String(sel.value || '').trim();
+
+          // Baseline selection means "not delayed" → do not stage
+          if (!v || (naturalWeekStart && v === naturalWeekStart)) {
+            if (Object.prototype.hasOwnProperty.call(mc.timesheetState.segmentInvoiceTargets, segId)) {
+              delete mc.timesheetState.segmentInvoiceTargets[segId];
+            }
+            try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
+            return;
+          }
+
+          // If user selected the stored value, also do not stage
+          if (storedTargetRaw && v === storedTargetRaw) {
+            if (Object.prototype.hasOwnProperty.call(mc.timesheetState.segmentInvoiceTargets, segId)) {
+              delete mc.timesheetState.segmentInvoiceTargets[segId];
+            }
+            try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
+            return;
+          }
+
+          // Pause or delayed week → stage explicitly
+          if (v === pauseWeekStart || (!naturalWeekStart || v !== naturalWeekStart)) {
+            mc.timesheetState.segmentInvoiceTargets[segId] = v;
+            try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
+          }
         });
       });
 
@@ -41732,12 +41801,26 @@ if (isEditing && importAuth && hasRealTs) {
   const root2 = byId('modalBody');
   if (root2) {
 
-    // Allowlist: deferral controls remain editable
+       // Allowlist: deferral controls remain editable
     const isDeferralControl = (el) => {
       const nm = String(el?.name || '');
-      if (nm === 'seg_exclude_from_pay' && el.hasAttribute('data-segment-id')) return true;
-      if (nm === 'seg_invoice_week'    && el.hasAttribute('data-segment-id')) return true;
-      return false;
+      if (nm !== 'seg_exclude_from_pay' && nm !== 'seg_invoice_week') return false;
+      if (!el.hasAttribute('data-segment-id')) return false;
+
+      const segId = String(el.getAttribute('data-segment-id') || '').trim();
+      if (!segId) return false;
+
+      try {
+        const segObj =
+          (window.modalCtx && window.modalCtx.timesheetDetails && Array.isArray(window.modalCtx.timesheetDetails.segments))
+            ? window.modalCtx.timesheetDetails.segments.find(s => s && String(s.segment_id || '') === segId)
+            : null;
+
+        const lockedInvoiceId = segObj ? String(segObj.invoice_locked_invoice_id || '').trim() : '';
+        if (lockedInvoiceId) return false;
+      } catch {}
+
+      return true;
     };
 
     // Lock ALL inputs/selects/textareas in Lines tab except deferral controls
@@ -41750,6 +41833,7 @@ if (isEditing && importAuth && hasRealTs) {
       el.disabled = true;
       try { el.setAttribute('readonly', 'true'); } catch {}
     });
+
 
     // Lock schedule edit buttons
     const scheduleEditActions = new Set([
@@ -61155,8 +61239,10 @@ const onSaveTimesheet = async () => {
         const hasOverride = Object.prototype.hasOwnProperty.call(o, 'exclude_from_pay');
         const exclude = hasOverride ? !!o.exclude_from_pay : !!seg.exclude_from_pay;
 
-        const originalTarget = seg.invoice_target_week_start || null;
-        const stagedTarget   = targets[sid] || originalTarget || null;
+           const originalTarget = seg.invoice_target_week_start || null;
+
+        const hasStagedTarget = Object.prototype.hasOwnProperty.call(targets, sid);
+        const stagedTarget    = hasStagedTarget ? (targets[sid] || null) : null;
 
         const update = { segment_id: sid };
         let changed = false;
@@ -61174,6 +61260,7 @@ const onSaveTimesheet = async () => {
         }
 
         if (changed) updates.push(update);
+
       }
 
       if (!updates.length) return;
