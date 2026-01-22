@@ -380,12 +380,28 @@ body{
       text-align:center;
     }
 
-    .grid tbody tr:nth-child(2n){
+     .grid tbody tr:nth-child(2n){
       background:rgba(15,23,42,.55);
     }
     .grid tbody tr:hover{
       background:rgba(30,64,175,.25);
     }
+
+    /* ✅ Summary grid rows are clickable: use pointer instead of I-beam */
+    .summary-body .grid tbody tr,
+    .summary-body .grid tbody td{
+      cursor:pointer;
+    }
+
+    /* Keep native cursors for actual interactive controls inside cells */
+    .summary-body .grid tbody td input,
+    .summary-body .grid tbody td select,
+    .summary-body .grid tbody td textarea,
+    .summary-body .grid tbody td button,
+    .summary-body .grid tbody td a{
+      cursor:auto;
+    }
+
 /* ===== Weekly Import Summary (NHSP + HR weekly) ===== */
 #weeklyImportSummary .weekly-import-card{
   background:#0c172d;
@@ -1413,13 +1429,68 @@ body{
       background: rgba(34,197,94,0.28);
     }
 
-    /* Processing State cell when fully invoiced */
+      /* Processing State cell when fully invoiced */
     td.cell-invoiced{
       background: rgba(34,197,94,0.35);
       border-radius: 6px;
     }
 
+    /* ─────────────────────────────────────────────────────────────
+       Global loading overlay (rotating dots)
+       ───────────────────────────────────────────────────────────── */
+    #globalLoadingOverlay{
+      position:fixed;
+      inset:0;
+      display:none;
+      place-items:center;
+      z-index:9999;
+      background: rgba(2,6,23,0.35);
+      backdrop-filter: blur(1px);
+    }
+    #globalLoadingOverlay[data-show="1"]{ display:grid; }
+
+    #globalLoadingOverlay .gload-card{
+      display:flex;
+      flex-direction:column;
+      align-items:center;
+      gap:10px;
+      padding:14px 16px;
+      border-radius:14px;
+      border:1px solid var(--line, #334155);
+      background: linear-gradient(180deg,#0e1428,#0b1221);
+      box-shadow: var(--shadow, 0 6px 20px rgba(0,0,0,.25));
+    }
+    #globalLoadingOverlay .gload-spinner{
+      position:relative;
+      width:54px;
+      height:54px;
+      animation: gloadSpin 0.95s linear infinite;
+    }
+    #globalLoadingOverlay .gload-spinner span{
+      position:absolute;
+      top:50%;
+      left:50%;
+      width:8px;
+      height:8px;
+      margin:-4px;
+      border-radius:50%;
+      background:#e5e7eb;
+      opacity:.25;
+      transform: rotate(calc(var(--i) * 45deg)) translate(20px);
+    }
+    #globalLoadingOverlay .gload-spinner span:nth-child(1){opacity:.25}
+    #globalLoadingOverlay .gload-spinner span:nth-child(2){opacity:.30}
+    #globalLoadingOverlay .gload-spinner span:nth-child(3){opacity:.35}
+    #globalLoadingOverlay .gload-spinner span:nth-child(4){opacity:.45}
+    #globalLoadingOverlay .gload-spinner span:nth-child(5){opacity:.60}
+    #globalLoadingOverlay .gload-spinner span:nth-child(6){opacity:.75}
+    #globalLoadingOverlay .gload-spinner span:nth-child(7){opacity:.90}
+    #globalLoadingOverlay .gload-spinner span:nth-child(8){opacity:1.00}
+
+    @keyframes gloadSpin{ to { transform: rotate(360deg); } }
+
   </style>
+
 </head>
 
 <body>
@@ -1450,11 +1521,23 @@ body{
       </div>
       <div id="content"></div>
     </main>
+   </div>
+
+  <!-- ✅ Global loading overlay (used by beginGlobalLoading / endGlobalLoading) -->
+  <div id="globalLoadingOverlay" aria-hidden="true">
+    <div class="gload-card" role="status" aria-live="polite">
+      <div class="gload-spinner" aria-hidden="true">
+        <span style="--i:0"></span><span style="--i:1"></span><span style="--i:2"></span><span style="--i:3"></span>
+        <span style="--i:4"></span><span style="--i:5"></span><span style="--i:6"></span><span style="--i:7"></span>
+      </div>
+      <div class="mini" id="globalLoadingText">Loading…</div>
+    </div>
   </div>
 
   <!-- ===== Draggable modal ===== -->
   <div class="modal-back" id="modalBack">
   <div class="modal" id="modal">
+
     <div class="modal-h" id="modalDrag">
       <div class="ttl" id="modalTitle">Details</div>
       <div class="spacer"></div>
