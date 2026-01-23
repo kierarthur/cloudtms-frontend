@@ -5606,6 +5606,1493 @@ function normaliseBucketLabelsInput(raw) {
   return out;
 }
 
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Summary patching helpers for modal saves (NEW)
+// ─────────────────────────────────────────────────────────────────────────────
+
+function captureSummaryContextForModalOpen() {
+  const deep = (o) => {
+    try { return JSON.parse(JSON.stringify(o)); } catch { return null; }
+  };
+
+  const stableStringify = (obj) => {
+    const seen = new WeakSet();
+    const norm = (v) => {
+      if (v == null) return v;
+      if (typeof v !== 'object') return v;
+      if (seen.has(v)) return null;
+      seen.add(v);
+
+      if (Array.isArray(v)) return v.map(norm);
+
+      const out = {};
+      Object.keys(v).sort().forEach(k => {
+        out[k] = norm(v[k]);
+      });
+      return out;
+    };
+
+    try { return JSON.stringify(norm(obj)); } catch { return ''; }
+  };
+
+  window.__listState = window.__listState || {};
+  const st = window.__listState[currentSection] || {
+    page: 1,
+    pageSize: 50,
+    total: null,
+    hasMore: false,
+    filters: null,
+    sort: { key: null, dir: 'asc' }
+  };
+
+  const filters = (st && typeof st.filters === 'object' && st.filters) ? st.filters : {};
+  const sort    = (st && typeof st.sort === 'object' && st.sort) ? st.sort : { key: null, dir: 'asc' };
+
+  const related = (filters && typeof filters === 'object' && filters.related && typeof filters.related === 'object')
+    ? filters.related
+    : null;
+
+  const inRelatedMode =
+    !!related &&
+    String(related.source_entity || '').trim() &&
+    String(related.source_id || '').trim() &&
+    String(related.relation_type || '').trim();
+
+  // Attempt to capture the id the modal opened for (helps rotation-safe patching)
+  let openedId = null;
+  try {
+    const mc = (window.modalCtx && typeof window.modalCtx === 'object') ? window.modalCtx : null;
+    openedId =
+      (mc && mc.data && (mc.data.id || mc.data.invoice_id || mc.data.timesheet_id || mc.data.contract_week_id))
+        ? String(mc.data.id || mc.data.invoice_id || mc.data.timesheet_id || mc.data.contract_week_id)
+        : null;
+  } catch { openedId = null; }
+
+  const fp = (typeof getSummaryFingerprint === 'function')
+    ? getSummaryFingerprint(currentSection)
+    : stableStringify({ section: currentSection, filters });
+
+  return {
+    // identity
+    section: String(currentSection || ''),
+    opened_id: openedId || null,
+
+    // dataset state
+    page: Number(st.page || 1) || 1,
+    pageSize: st.pageSize,
+    inRelatedMode: !!inRelatedMode,
+
+    // signatures for “still active?”
+    fingerprint: String(fp || ''),
+    filters_sig: stableStringify(filters || {}),
+    sort_sig: stableStringify({ key: sort.key || null, dir: (sort.dir === 'desc') ? 'desc' : 'asc' }),
+
+    // metadata
+    captured_at_ms: Date.now()
+  };
+}
+
+function isSummaryContextStillActive(ctx) {
+  if (!ctx || typeof ctx !== 'object') return false;
+
+  const stableStringify = (obj) => {
+    const seen = new WeakSet();
+    const norm = (v) => {
+      if (v == null) return v;
+      if (typeof v !== 'object') return v;
+      if (seen.has(v)) return null;
+      seen.add(v);
+      if (Array.isArray(v)) return v.map(norm);
+      const out = {};
+      Object.keys(v).sort().forEach(k => { out[k] = norm(v[k]); });
+      return out;
+    };
+    try { return JSON.stringify(norm(obj)); } catch { return ''; }
+  };
+
+  // Must still be on the same section
+  if (String(currentSection || '') !== String(ctx.section || '')) return false;
+
+  window.__listState = window.__listState || {};
+  const st = window.__listState[currentSection] || null;
+  if (!st || typeof st !== 'object') return false;
+
+  const filtersNow = (st.filters && typeof st.filters === 'object') ? st.filters : {};
+  const sortNow    = (st.sort && typeof st.sort === 'object') ? st.sort : { key: null, dir: 'asc' };
+
+  const filtersSigNow = stableStringify(filtersNow || {});
+  const sortSigNow    = stableStringify({ key: sortNow.key || null, dir: (sortNow.dir === 'desc') ? 'desc' : 'asc' });
+
+  // If filters/sort changed since modal opened, do NOT patch the visible summary
+  if (String(filtersSigNow) !== String(ctx.filters_sig || '')) return false;
+  if (String(sortSigNow)    !== String(ctx.sort_sig    || '')) return false;
+
+  // Optional: fingerprint parity when available
+  if (typeof getSummaryFingerprint === 'function') {
+    const fpNow = String(getSummaryFingerprint(currentSection) || '');
+    if (ctx.fingerprint && fpNow && fpNow !== String(ctx.fingerprint)) return false;
+  }
+
+  return true;
+}
+
+function getSectionForEntity(entity) {
+  const e = String(entity || '').trim().toLowerCase();
+
+  // Your modal entities map 1:1 to sections in the left nav.
+  if (e === 'candidates') return 'candidates';
+  if (e === 'clients')    return 'clients';
+  if (e === 'contracts')  return 'contracts';
+  if (e === 'timesheets') return 'timesheets';
+  if (e === 'invoices')   return 'invoices';
+  if (e === 'umbrellas')  return 'umbrellas';
+  if (e === 'imports')    return 'imports';
+  if (e === 'audit')      return 'audit';
+  if (e === 'settings')   return 'settings';
+
+  // Fallback: treat unknown entity as current section (safe no-op patching)
+  return String(currentSection || '');
+}
+
+function normalizeSavedRecordForSummary(entity, saved) {
+  const ent = String(entity || '').trim().toLowerCase();
+  const s = (saved && typeof saved === 'object') ? saved : null;
+
+  // Build an id candidate from common shapes
+  const pickId = (obj) => {
+    if (!obj || typeof obj !== 'object') return null;
+    const v =
+      obj.id ??
+      obj.invoice_id ??
+      obj.timesheet_id ??
+      obj.contract_week_id ??
+      null;
+    return v != null ? String(v) : null;
+  };
+
+  // Merge with existing row (if present) so we don’t lose summary-only fields
+  const mergeWithExistingIfPresent = (section, id, patch) => {
+    try {
+      if (String(currentSection || '') !== String(section || '')) return patch;
+      if (!Array.isArray(currentRows) || !id) return patch;
+
+      const idStr = String(id);
+
+      const rowIdOf = (r) => {
+        if (!r || typeof r !== 'object') return '';
+        return String(
+          r.id ??
+          r.invoice_id ??
+          r.timesheet_id ??
+          r.contract_week_id ??
+          ''
+        );
+      };
+
+      const idx = currentRows.findIndex(r => rowIdOf(r) === idStr);
+      if (idx < 0) return patch;
+
+      const base = (currentRows[idx] && typeof currentRows[idx] === 'object') ? currentRows[idx] : {};
+      return { ...base, ...patch };
+    } catch {
+      return patch;
+    }
+  };
+
+  // If no saved payload, return null so caller can decide to fetch canonical
+  if (!s) return null;
+
+  let section = getSectionForEntity(ent);
+
+  // TIMESHEETS: your summary rows use id = timesheet_id else contract_week_id
+  if (ent === 'timesheets') {
+    const tsId = (s.timesheet_id != null) ? String(s.timesheet_id) : null;
+    const cwId = (s.contract_week_id != null) ? String(s.contract_week_id) : null;
+
+    const id = tsId || cwId || pickId(s);
+    if (!id) return null;
+
+    const out = { ...(s || {}) };
+
+    // Ensure canonical identifiers exist
+    out.timesheet_id = tsId || out.timesheet_id || null;
+    out.contract_week_id = cwId || out.contract_week_id || null;
+    out.id = id;
+
+    // Merge with existing summary row to preserve summary-only columns
+    return mergeWithExistingIfPresent(section, id, out);
+  }
+
+  // INVOICES: summary list expects id to be invoice id
+  if (ent === 'invoices') {
+    const id = pickId(s);
+    if (!id) return null;
+
+    const out = { ...(s || {}) };
+    out.id = id;
+
+    return mergeWithExistingIfPresent(section, id, out);
+  }
+
+  // CONTRACTS: preserve candidate_display/client_name if present in existing row
+  if (ent === 'contracts') {
+    const id = pickId(s);
+    if (!id) return null;
+    const out = { ...(s || {}) };
+    out.id = id;
+    return mergeWithExistingIfPresent(section, id, out);
+  }
+
+  // Default: candidates/clients/umbrellas/etc
+  const id = pickId(s);
+  if (!id) return null;
+
+  const out = { ...(s || {}) };
+  out.id = id;
+
+  return mergeWithExistingIfPresent(section, id, out);
+}
+
+async function summaryApplySavedRecordToActiveSummary(arg1, arg2, arg3) {
+  // Supports both signatures:
+  //  A) (ctx, saved)
+  //  B) (entity, saved, ctx)
+  let ctx = null;
+  let saved = null;
+  let entity = null;
+
+  if (typeof arg1 === 'string') {
+    entity = arg1;
+    saved  = arg2;
+    ctx    = arg3 || null;
+  } else {
+    ctx    = arg1 || null;
+    saved  = arg2;
+    entity = (ctx && ctx.section) ? ctx.section : (window.modalCtx?.entity || currentSection || '');
+  }
+
+  const section =
+    (typeof getSectionForEntity === 'function')
+      ? getSectionForEntity(entity)
+      : String(entity || '');
+
+  if (!section) return { ok: false, reason: 'no-section' };
+
+  // If ctx was not provided, capture best-effort now (still guarded by isSummaryContextStillActive)
+  if (!ctx && typeof captureSummaryContextForModalOpen === 'function') {
+    try { ctx = captureSummaryContextForModalOpen(); } catch { ctx = null; }
+  }
+
+  // Only patch the visible summary if the user is still on that dataset
+  if (ctx && typeof isSummaryContextStillActive === 'function') {
+    if (!isSummaryContextStillActive(ctx)) {
+      return { ok: false, reason: 'context-not-active' };
+    }
+  } else {
+    // Without ctx validation, never patch cross-section
+    if (String(currentSection || '') !== String(section || '')) {
+      return { ok: false, reason: 'section-not-active' };
+    }
+  }
+
+  const inRelatedMode = !!(ctx && ctx.inRelatedMode);
+
+  const pickId = (obj) => {
+    if (!obj || typeof obj !== 'object') return null;
+    const v = obj.id ?? obj.invoice_id ?? obj.timesheet_id ?? obj.contract_week_id ?? null;
+    return v != null ? String(v) : null;
+  };
+
+  const rawId =
+    pickId(saved) ||
+    (ctx && ctx.opened_id ? String(ctx.opened_id) : null) ||
+    (window.modalCtx && window.modalCtx.data ? pickId(window.modalCtx.data) : null);
+
+  if (!rawId) return { ok: false, reason: 'no-id' };
+
+  // Normalize locally (may merge with existing summary row)
+  let patchedRow = null;
+  try {
+    if (typeof normalizeSavedRecordForSummary === 'function') {
+      patchedRow = normalizeSavedRecordForSummary(section, saved);
+    } else {
+      patchedRow = (saved && typeof saved === 'object') ? { ...(saved || {}) } : null;
+      if (patchedRow) patchedRow.id = String(patchedRow.id ?? rawId);
+    }
+  } catch {
+    patchedRow = null;
+  }
+
+  // RELATED MODE: do not fetch canonical, do not insert/remove.
+  // Only patch if the row is already present (safe + minimal).
+  if (inRelatedMode) {
+    const id = String((patchedRow && patchedRow.id) ? patchedRow.id : rawId);
+
+    const patched = (typeof summaryPatchRowIfPresent === 'function')
+      ? summaryPatchRowIfPresent(section, id, patchedRow || { id })
+      : false;
+
+    if (patched) {
+      try { if (typeof summaryUpdateRowDom === 'function') summaryUpdateRowDom(section, id, patchedRow || { id }); } catch {}
+      try { if (typeof summaryMaybeResortDom === 'function') summaryMaybeResortDom(section); } catch {}
+      return { ok: true, action: 'patched', id, related: true };
+    }
+
+    // ✅ Optional future improvement (implemented safely): if not present in related-mode,
+    // do a minimal related-list reload instead of inserting/removing.
+    try {
+      if (String(currentSection || '') === String(section || '') &&
+          typeof loadSection === 'function' &&
+          typeof renderSummary === 'function') {
+        await loadSection();
+        try { renderSummary(currentRows || []); } catch {}
+        return { ok: true, action: 'reloaded', id, related: true };
+      }
+    } catch {}
+
+    return { ok: false, reason: 'related-not-present', id, related: true };
+  }
+
+  // For TIMESHEETS/INVOICES we sometimes only have “details” shapes.
+  // Minimise calls: fetch canonical ONLY if we’re missing key summary fields.
+  const needsCanonical = (() => {
+    if (!patchedRow || typeof patchedRow !== 'object') return true;
+
+    if (section === 'timesheets') {
+      return !(
+        patchedRow.week_ending_date &&
+        (patchedRow.client_name || patchedRow.client_id) &&
+        (patchedRow.candidate_name || patchedRow.candidate_id) &&
+        ('tools_stage' in patchedRow || 'processing_status_display' in patchedRow)
+      );
+    }
+
+    if (section === 'invoices') {
+      return !(
+        patchedRow.invoice_no &&
+        patchedRow.status &&
+        ('subtotal_ex_vat' in patchedRow) &&
+        ('total_inc_vat' in patchedRow)
+      );
+    }
+
+    return false;
+  })();
+
+  if (needsCanonical && typeof summaryFetchCanonicalRow === 'function') {
+    try {
+      const canon = await summaryFetchCanonicalRow(section, rawId, ctx);
+      if (canon && typeof canon === 'object') patchedRow = canon;
+    } catch {
+      // non-fatal
+    }
+  }
+
+  if (!patchedRow || typeof patchedRow !== 'object') {
+    return { ok: false, reason: 'no-row' };
+  }
+
+  const id = String(patchedRow.id ?? rawId);
+  patchedRow.id = id;
+
+  // Patch in-memory list + DOM
+  const patched = (typeof summaryPatchRowIfPresent === 'function')
+    ? summaryPatchRowIfPresent(section, id, patchedRow)
+    : false;
+
+  if (patched) {
+    try { if (typeof summaryUpdateRowDom === 'function') summaryUpdateRowDom(section, id, patchedRow); } catch {}
+    try { if (typeof summaryMaybeResortDom === 'function') summaryMaybeResortDom(section); } catch {}
+
+    // Enforce filter parity (async)
+    try {
+      if (typeof summaryRemoveRowIfNowExcluded === 'function') {
+        const removed = await summaryRemoveRowIfNowExcluded(section, id, ctx);
+        if (removed) return { ok: true, action: 'removed', id };
+      }
+    } catch {}
+
+    return { ok: true, action: 'patched', id };
+  }
+
+  // Not present → insert (memory), then DOM, then resort, then parity check
+  let inserted = false;
+  try {
+    if (typeof summaryInsertRowIfMissing === 'function') {
+      inserted = !!summaryInsertRowIfMissing(section, patchedRow);
+    }
+  } catch { inserted = false; }
+
+  if (inserted) {
+    try { if (typeof summaryInsertRowDom === 'function') summaryInsertRowDom(section, patchedRow); } catch {}
+    try { if (typeof summaryMaybeResortDom === 'function') summaryMaybeResortDom(section); } catch {}
+
+    try {
+      if (typeof summaryRemoveRowIfNowExcluded === 'function') {
+        const removed = await summaryRemoveRowIfNowExcluded(section, id, ctx);
+        if (removed) return { ok: true, action: 'removed', id };
+      }
+    } catch {}
+
+    return { ok: true, action: 'inserted', id };
+  }
+
+  return { ok: false, reason: 'not-present-and-no-insert', id };
+}
+
+
+function summaryPatchRowIfPresent(section, id, patchedRow) {
+  try {
+    const sec = String(section || '');
+    const idStr = String(id || '');
+    if (!sec || !idStr) return false;
+
+    // Only patch the currently visible section list
+    if (String(currentSection || '') !== sec) return false;
+    if (!Array.isArray(currentRows)) return false;
+
+    const rowIdOf = (r) => {
+      if (!r || typeof r !== 'object') return '';
+      return String(
+        r.id ??
+        r.invoice_id ??
+        r.timesheet_id ??
+        r.contract_week_id ??
+        ''
+      );
+    };
+
+    const idx = currentRows.findIndex(r => rowIdOf(r) === idStr);
+    if (idx < 0) return false;
+
+    const base = (currentRows[idx] && typeof currentRows[idx] === 'object') ? currentRows[idx] : {};
+    const merged = { ...base, ...(patchedRow || {}) };
+
+    // Ensure a stable id field for the grid
+    merged.id = String(merged.id ?? idStr);
+
+    currentRows[idx] = merged;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+
+
+
+
+async function summaryRemoveRowIfNowExcluded(section, id, ctx) {
+  section = String(section || '').trim();
+  id      = String(id || '').trim();
+
+  if (!section || !id) return false;
+  if (typeof currentSection !== 'string' || currentSection !== section) return false;
+
+  // If ctx provided and context no longer active, skip (don’t mutate a different dataset)
+  if (ctx && typeof isSummaryContextStillActive === 'function') {
+    if (!isSummaryContextStillActive(ctx)) return false;
+  }
+
+  // Related mode: we cannot reliably test inclusion without a dedicated id fetcher,
+  // so do not remove automatically.
+  if (ctx && ctx.inRelatedMode) return false;
+
+  if (typeof summaryFetchCanonicalRow !== 'function') return false;
+
+  let canonical = null;
+  try { canonical = await summaryFetchCanonicalRow(section, id, ctx); } catch { canonical = null; }
+
+  const included = !!(canonical && typeof canonical === 'object');
+  if (included) {
+    // Still included → optionally refresh row
+    try { if (typeof summaryPatchRowIfPresent === 'function') summaryPatchRowIfPresent(section, id, canonical); } catch {}
+    try { if (typeof summaryUpdateRowDom === 'function') summaryUpdateRowDom(section, id, canonical); } catch {}
+    try { if (typeof summaryMaybeResortDom === 'function') summaryMaybeResortDom(section); } catch {}
+    return false;
+  }
+
+  // Remove from currentRows
+  try {
+    if (Array.isArray(window.currentRows)) {
+      window.currentRows = window.currentRows.filter(r => {
+        const rid = r && (r.id ?? r.timesheet_id ?? r.contract_week_id ?? r.invoice_id);
+        return String(rid || '') !== id;
+      });
+    }
+  } catch {}
+
+  // Clear currentSelection if it was this row
+  try {
+    if (window.currentSelection) {
+      const selId = window.currentSelection.id ?? window.currentSelection.timesheet_id ?? window.currentSelection.contract_week_id ?? window.currentSelection.invoice_id;
+      if (String(selId || '') === id) window.currentSelection = null;
+    }
+  } catch {}
+
+  // Remove from selection set if present
+  try {
+    window.__selection = window.__selection || {};
+    const sel = window.__selection[section];
+    if (sel && sel.ids instanceof Set) sel.ids.delete(id);
+  } catch {}
+
+  // Remove from DOM
+  try {
+    const content = document.getElementById('content');
+    const bodyWrap = content ? content.querySelector('.summary-body') : null;
+    const tbl = bodyWrap ? bodyWrap.querySelector('table.grid') : null;
+    const tb = tbl ? tbl.querySelector('tbody') : null;
+    if (tb) {
+      const tr = Array.from(tb.querySelectorAll('tr[data-id]'))
+        .find(x => String(x.dataset.id || '') === id) || null;
+      if (tr && tr.parentNode) tr.parentNode.removeChild(tr);
+    }
+  } catch {}
+
+  // Refresh header checkbox state + toolbar disables (best-effort)
+  try {
+    const content = document.getElementById('content');
+    if (content) {
+      const hdrCbEl = document.getElementById('summarySelectAll');
+
+      const bodyWrap = content.querySelector('.summary-body');
+      const tbl = bodyWrap ? bodyWrap.querySelector('table.grid') : null;
+      const tb = tbl ? tbl.querySelector('tbody') : null;
+
+      const visibleIds = tb ? Array.from(tb.querySelectorAll('tr[data-id]')).map(tr => String(tr.dataset.id || '')) : [];
+
+      const sel = (window.__selection && window.__selection[section]) ? window.__selection[section] : null;
+      const ids = (sel && sel.ids instanceof Set) ? sel.ids : new Set();
+
+      const selectedOfVisible = visibleIds.filter(x => ids.has(x)).length;
+
+      if (hdrCbEl) {
+        hdrCbEl.checked = (visibleIds.length > 0 && selectedOfVisible === visibleIds.length);
+        hdrCbEl.indeterminate = (selectedOfVisible > 0 && selectedOfVisible < visibleIds.length);
+      }
+
+      const any = (ids.size > 0);
+      const btns = Array.from(content.querySelectorAll('button'));
+      const focusBtn   = btns.find(b => b.title === 'Focus on records') || null;
+      const saveBtn    = btns.find(b => b.title === 'Save selection') || null;
+      const resolveBtn = btns.find(b => b.title === 'Resolve candidate/client for selected timesheets') || null;
+
+      if (focusBtn) focusBtn.disabled = !any;
+      if (saveBtn) saveBtn.disabled = !any;
+      if (resolveBtn) resolveBtn.disabled = !any;
+
+      // Clear selection button visibility (best-effort by label)
+      const clearBtn = btns.find(b => (b.textContent || '').trim() === 'Clear selection') || null;
+      if (clearBtn) clearBtn.style.display = any ? '' : 'none';
+
+      // Selected count label (best-effort)
+      const topControls = (function () {
+        const ps = document.getElementById('summaryPageSize');
+        return ps ? ps.parentElement : null;
+      })();
+      if (topControls) {
+        const minis = Array.from(topControls.querySelectorAll('div.mini'));
+        const selInfo = minis.length ? minis[minis.length - 1] : null;
+        if (selInfo) selInfo.textContent = any ? `${ids.size} selected.` : '';
+      }
+    }
+  } catch {}
+
+  return true;
+}
+
+function summaryInsertRowIfMissing(section, patchedRow) {
+  try {
+    section = String(section || '').trim();
+    if (!section) return false;
+    if (typeof currentSection !== 'string' || currentSection !== section) return false;
+
+    const row = (patchedRow && typeof patchedRow === 'object') ? patchedRow : null;
+    if (!row) return false;
+
+    const id =
+      (row.id != null ? String(row.id) : '') ||
+      (row.invoice_id != null ? String(row.invoice_id) : '') ||
+      (row.timesheet_id != null ? String(row.timesheet_id) : '') ||
+      (row.contract_week_id != null ? String(row.contract_week_id) : '');
+
+    if (!id) return false;
+
+    if (!Array.isArray(window.currentRows)) return false;
+
+    const exists = window.currentRows.some(r => {
+      const rid = r && (r.id ?? r.timesheet_id ?? r.contract_week_id ?? r.invoice_id);
+      return String(rid || '') === id;
+    });
+
+    if (exists) return false;
+
+    // Insert into in-memory list. DOM insertion is handled by caller (summaryInsertRowDom).
+    window.currentRows.push({ ...(row || {}), id });
+
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+
+function summaryUpdateRowDom(section, id, patchedRow) {
+  section = String(section || '').trim();
+  id = String(id || '').trim();
+  const row = (patchedRow && typeof patchedRow === 'object') ? patchedRow : null;
+  if (!section || !id || !row) return false;
+  if (typeof currentSection !== 'string' || currentSection !== section) return false;
+
+  // Update currentRows cache
+  try {
+    if (Array.isArray(window.currentRows)) {
+      const idx = window.currentRows.findIndex(r => {
+        const rid = r && (r.id ?? r.timesheet_id ?? r.contract_week_id ?? r.invoice_id);
+        return String(rid || '') === id;
+      });
+      if (idx >= 0) {
+        window.currentRows[idx] = { ...(window.currentRows[idx] || {}), ...(row || {}) };
+      }
+    }
+  } catch {}
+
+  const content = document.getElementById('content');
+  const bodyWrap = content ? content.querySelector('.summary-body') : null;
+  const tbl = bodyWrap ? bodyWrap.querySelector('table.grid') : null;
+  const tb = tbl ? tbl.querySelector('tbody') : null;
+  if (!tb) return false;
+
+  const trList = Array.from(tb.querySelectorAll('tr[data-id]'));
+  const tr = trList.find(x => String(x.dataset.id || '') === id) || null;
+  if (!tr) return false;
+
+  // Determine visible columns from the current header
+  const ths = tbl ? Array.from(tbl.querySelectorAll('thead th[data-col-key]')) : [];
+  const cols = ths.map(th => String(th.dataset.colKey || '')).filter(Boolean);
+
+  const clearStyleClasses = () => {
+    try {
+      tr.classList.remove('row-deep-green');
+      tr.classList.remove('row-light-green');
+    } catch {}
+  };
+
+  const applyRowStyle = () => {
+    clearStyleClasses();
+
+    try {
+      if (section === 'timesheets') {
+        const toolsStage = String(row?.tools_stage || '').trim().toUpperCase();
+        const invSegStage   = String(row?.invoice_segment_stage || '').trim().toUpperCase();
+        const invIssueStage = String(row?.invoice_issue_stage || '').trim().toUpperCase();
+
+        const isFullyInvoiced      = (invSegStage === 'FULLY_INVOICED');
+        const isPaidToCandidate    = !!row?.paid_at_utc;
+        const isInvoiceIssued      = (invIssueStage === 'INVOICED_ISSUED');
+        const isInvoiceNotIssued   = (invIssueStage === 'INVOICED_NOT_ISSUED');
+
+        const isReadyForInvoiceUninvoiced =
+          (toolsStage === 'AUTHORISED_FOR_INVOICING');
+
+        if (isFullyInvoiced && isPaidToCandidate && isInvoiceIssued) {
+          tr.classList.add('row-deep-green');
+        } else if (isFullyInvoiced && isInvoiceNotIssued) {
+          tr.classList.add('row-light-green');
+        } else if (isReadyForInvoiceUninvoiced) {
+          tr.classList.add('row-light-green');
+        }
+      }
+
+      if (section === 'invoices') {
+        const stInv = String(row?.status || '').trim().toUpperCase();
+        const isIssued = !!row?.issued_at_utc && (stInv === 'ISSUED' || stInv === 'PAID');
+        if (isIssued) tr.classList.add('row-deep-green');
+      }
+    } catch {}
+  };
+
+  const renderIssueBadges = (codes) => {
+    const wrap = document.createElement('div');
+    wrap.className = 'issue-badges';
+
+    const arr = Array.isArray(codes) ? codes.filter(Boolean) : [];
+
+    if (!arr.length) {
+      const ok = document.createElement('span');
+      ok.className = 'pill pill-ok';
+      ok.textContent = 'OK';
+      wrap.appendChild(ok);
+      return wrap;
+    }
+
+    arr.forEach(code => {
+      const span = document.createElement('span');
+      const label = String(code || '').trim() || 'Issue';
+
+      let cls = 'pill pill-bad';
+      const up = label.toUpperCase();
+      if (up === 'ON HOLD' || up === 'VALIDATION' || up === 'AUTHORISATION') {
+        cls = 'pill pill-warn';
+      }
+
+      span.className = cls;
+      span.textContent = label;
+      wrap.appendChild(span);
+    });
+
+    return wrap;
+  };
+
+  const buildCell = (colKey) => {
+    const td = document.createElement('td');
+    td.dataset.colKey = String(colKey);
+
+    const v = row[colKey];
+
+    // Match renderSummary special cases
+    if (section === 'candidates' && colKey === 'job_titles_display') {
+      const raw = typeof row.job_titles_display === 'string' ? row.job_titles_display : (v || '');
+      if (!String(raw || '').trim()) {
+        td.textContent = '';
+      } else {
+        const parts = String(raw).split(';').map(s => s.trim()).filter(Boolean);
+        const rest  = parts.slice(1);
+        td.textContent = rest.join('; ');
+      }
+      return td;
+    }
+
+    if (section === 'timesheets' && colKey === 'issue_codes') {
+      td.classList.add('mini');
+      const hasTs = !!row.timesheet_id;
+      const codes = Array.isArray(v) ? v.filter(Boolean) : [];
+      if (!hasTs) td.textContent = '';
+      else td.appendChild(renderIssueBadges(codes));
+      return td;
+    }
+
+    if (section === 'timesheets' && colKey === 'candidate_name') {
+      const txt = String((typeof formatDisplayValue === 'function' ? formatDisplayValue(colKey, v) : (v ?? '')) ?? '');
+      const isPaidToCandidate = !!row?.paid_at_utc;
+
+      if (isPaidToCandidate && txt) {
+        const wrap = document.createElement('div');
+        wrap.className = 'cell-right-icon';
+
+        const main = document.createElement('span');
+        main.className = 'cell-main';
+        main.textContent = txt;
+
+        const coin = document.createElement('span');
+        coin.className = 'coin-badge';
+        coin.textContent = '£';
+
+        wrap.appendChild(main);
+        wrap.appendChild(coin);
+        td.appendChild(wrap);
+      } else {
+        td.textContent = txt;
+      }
+      return td;
+    }
+
+    if (section === 'timesheets' && (colKey === 'processing_status' || colKey === 'processing_status_display')) {
+      const txtBase = String(row?.processing_status_display || '').trim();
+      const txt = txtBase || String((typeof formatDisplayValue === 'function' ? formatDisplayValue(colKey, v) : (v ?? '')) ?? '');
+
+      const invoicePaid = (row && (row.invoice_is_paid === true || String(row.invoice_is_paid).toLowerCase() === 'true'));
+      const stageNow = String(row?.tools_stage || '').trim().toUpperCase();
+
+      if (invoicePaid && stageNow === 'INVOICED' && txt) {
+        const wrap = document.createElement('div');
+        wrap.className = 'cell-right-icon';
+
+        const main = document.createElement('span');
+        main.className = 'cell-main';
+        main.textContent = txt;
+
+        const coin = document.createElement('span');
+        coin.className = 'coin-badge';
+        coin.textContent = '£';
+
+        wrap.appendChild(main);
+        wrap.appendChild(coin);
+        td.appendChild(wrap);
+      } else {
+        td.textContent = txt;
+      }
+      return td;
+    }
+
+    if (section === 'invoices' && colKey === 'invoice_no') {
+      const txt = String((typeof formatDisplayValue === 'function' ? formatDisplayValue(colKey, v) : (v ?? '')) ?? '');
+      const isPaid = !!row?.paid_at_utc;
+
+      if (isPaid && txt) {
+        const wrap = document.createElement('div');
+        wrap.className = 'cell-right-icon';
+
+        const main = document.createElement('span');
+        main.className = 'cell-main';
+        main.textContent = txt;
+
+        const coin = document.createElement('span');
+        coin.className = 'coin-badge';
+        coin.textContent = '£';
+
+        wrap.appendChild(main);
+        wrap.appendChild(coin);
+        td.appendChild(wrap);
+      } else {
+        td.textContent = txt;
+      }
+      return td;
+    }
+
+    if (section === 'invoices' && colKey === 'client_name') {
+      td.textContent = String(row.client_name || '');
+      return td;
+    }
+
+    td.textContent = (typeof formatDisplayValue === 'function')
+      ? formatDisplayValue(colKey, v)
+      : String(v == null ? '—' : v);
+
+    return td;
+  };
+
+  // Update each visible column cell in-place
+  cols.forEach(colKey => {
+    const existing = Array.from(tr.querySelectorAll('td[data-col-key]'))
+      .find(td => String(td.dataset.colKey || '') === colKey) || null;
+
+    const next = buildCell(colKey);
+
+    if (existing) {
+      existing.replaceWith(next);
+    } else {
+      tr.appendChild(next);
+    }
+  });
+
+  applyRowStyle();
+  return true;
+}
+
+function summaryInsertRowDom(section, patchedRow) {
+  section = String(section || '').trim();
+  const row = (patchedRow && typeof patchedRow === 'object') ? patchedRow : null;
+  if (!section || !row) return false;
+  if (typeof currentSection !== 'string' || currentSection !== section) return false;
+
+  const content = document.getElementById('content');
+  const bodyWrap = content ? content.querySelector('.summary-body') : null;
+  const tbl = bodyWrap ? bodyWrap.querySelector('table.grid') : null;
+  const tb = tbl ? tbl.querySelector('tbody') : null;
+  if (!tb) return false;
+
+  // Determine visible columns
+  const cols = Array.from(tbl.querySelectorAll('thead th[data-col-key]'))
+    .map(th => String(th.dataset.colKey || ''))
+    .filter(Boolean);
+
+  // Stable id
+  const stableId =
+    (row.id != null ? String(row.id) : '') ||
+    (row.timesheet_id != null ? String(row.timesheet_id) : '') ||
+    (row.contract_week_id != null ? String(row.contract_week_id) : '') ||
+    (row.invoice_id != null ? String(row.invoice_id) : '');
+
+  if (!stableId) return false;
+
+  // If already exists, do nothing
+  const exists = Array.from(tb.querySelectorAll('tr[data-id]')).some(tr => String(tr.dataset.id || '') === stableId);
+  if (exists) return false;
+
+  // Update currentRows cache (append for now; resort can reposition)
+  try {
+    if (Array.isArray(window.currentRows)) window.currentRows.push({ ...(row || {}), id: stableId });
+  } catch {}
+
+  const renderIssueBadges = (codes) => {
+    const wrap = document.createElement('div');
+    wrap.className = 'issue-badges';
+
+    const arr = Array.isArray(codes) ? codes.filter(Boolean) : [];
+
+    if (!arr.length) {
+      const ok = document.createElement('span');
+      ok.className = 'pill pill-ok';
+      ok.textContent = 'OK';
+      wrap.appendChild(ok);
+      return wrap;
+    }
+
+    arr.forEach(code => {
+      const span = document.createElement('span');
+      const label = String(code || '').trim() || 'Issue';
+
+      let cls = 'pill pill-bad';
+      const up = label.toUpperCase();
+      if (up === 'ON HOLD' || up === 'VALIDATION' || up === 'AUTHORISATION') {
+        cls = 'pill pill-warn';
+      }
+
+      span.className = cls;
+      span.textContent = label;
+      wrap.appendChild(span);
+    });
+
+    return wrap;
+  };
+
+  const buildCell = (colKey) => {
+    const td = document.createElement('td');
+    td.dataset.colKey = String(colKey);
+
+    const v = row[colKey];
+
+    if (section === 'candidates' && colKey === 'job_titles_display') {
+      const raw = typeof row.job_titles_display === 'string' ? row.job_titles_display : (v || '');
+      if (!String(raw || '').trim()) {
+        td.textContent = '';
+      } else {
+        const parts = String(raw).split(';').map(s => s.trim()).filter(Boolean);
+        const rest  = parts.slice(1);
+        td.textContent = rest.join('; ');
+      }
+      return td;
+    }
+
+    if (section === 'timesheets' && colKey === 'issue_codes') {
+      td.classList.add('mini');
+      const hasTs = !!row.timesheet_id;
+      const codes = Array.isArray(v) ? v.filter(Boolean) : [];
+      if (!hasTs) td.textContent = '';
+      else td.appendChild(renderIssueBadges(codes));
+      return td;
+    }
+
+    if (section === 'timesheets' && colKey === 'candidate_name') {
+      const txt = String((typeof formatDisplayValue === 'function' ? formatDisplayValue(colKey, v) : (v ?? '')) ?? '');
+      const isPaidToCandidate = !!row?.paid_at_utc;
+
+      if (isPaidToCandidate && txt) {
+        const wrap = document.createElement('div');
+        wrap.className = 'cell-right-icon';
+
+        const main = document.createElement('span');
+        main.className = 'cell-main';
+        main.textContent = txt;
+
+        const coin = document.createElement('span');
+        coin.className = 'coin-badge';
+        coin.textContent = '£';
+
+        wrap.appendChild(main);
+        wrap.appendChild(coin);
+        td.appendChild(wrap);
+      } else {
+        td.textContent = txt;
+      }
+      return td;
+    }
+
+    if (section === 'timesheets' && (colKey === 'processing_status' || colKey === 'processing_status_display')) {
+      const txtBase = String(row?.processing_status_display || '').trim();
+      const txt = txtBase || String((typeof formatDisplayValue === 'function' ? formatDisplayValue(colKey, v) : (v ?? '')) ?? '');
+
+      const invoicePaid = (row && (row.invoice_is_paid === true || String(row.invoice_is_paid).toLowerCase() === 'true'));
+      const stageNow = String(row?.tools_stage || '').trim().toUpperCase();
+
+      if (invoicePaid && stageNow === 'INVOICED' && txt) {
+        const wrap = document.createElement('div');
+        wrap.className = 'cell-right-icon';
+
+        const main = document.createElement('span');
+        main.className = 'cell-main';
+        main.textContent = txt;
+
+        const coin = document.createElement('span');
+        coin.className = 'coin-badge';
+        coin.textContent = '£';
+
+        wrap.appendChild(main);
+        wrap.appendChild(coin);
+        td.appendChild(wrap);
+      } else {
+        td.textContent = txt;
+      }
+      return td;
+    }
+
+    if (section === 'invoices' && colKey === 'invoice_no') {
+      const txt = String((typeof formatDisplayValue === 'function' ? formatDisplayValue(colKey, v) : (v ?? '')) ?? '');
+      const isPaid = !!row?.paid_at_utc;
+
+      if (isPaid && txt) {
+        const wrap = document.createElement('div');
+        wrap.className = 'cell-right-icon';
+
+        const main = document.createElement('span');
+        main.className = 'cell-main';
+        main.textContent = txt;
+
+        const coin = document.createElement('span');
+        coin.className = 'coin-badge';
+        coin.textContent = '£';
+
+        wrap.appendChild(main);
+        wrap.appendChild(coin);
+        td.appendChild(wrap);
+      } else {
+        td.textContent = txt;
+      }
+      return td;
+    }
+
+    if (section === 'invoices' && colKey === 'client_name') {
+      td.textContent = String(row.client_name || '');
+      return td;
+    }
+
+    td.textContent = (typeof formatDisplayValue === 'function')
+      ? formatDisplayValue(colKey, v)
+      : String(v == null ? '—' : v);
+
+    return td;
+  };
+
+  const applyRowStyle = (tr) => {
+    try {
+      tr.classList.remove('row-deep-green', 'row-light-green');
+
+      if (section === 'timesheets') {
+        const toolsStage = String(row?.tools_stage || '').trim().toUpperCase();
+        const invSegStage   = String(row?.invoice_segment_stage || '').trim().toUpperCase();
+        const invIssueStage = String(row?.invoice_issue_stage || '').trim().toUpperCase();
+
+        const isFullyInvoiced      = (invSegStage === 'FULLY_INVOICED');
+        const isPaidToCandidate    = !!row?.paid_at_utc;
+        const isInvoiceIssued      = (invIssueStage === 'INVOICED_ISSUED');
+        const isInvoiceNotIssued   = (invIssueStage === 'INVOICED_NOT_ISSUED');
+
+        const isReadyForInvoiceUninvoiced = (toolsStage === 'AUTHORISED_FOR_INVOICING');
+
+        if (isFullyInvoiced && isPaidToCandidate && isInvoiceIssued) tr.classList.add('row-deep-green');
+        else if (isFullyInvoiced && isInvoiceNotIssued) tr.classList.add('row-light-green');
+        else if (isReadyForInvoiceUninvoiced) tr.classList.add('row-light-green');
+      }
+
+      if (section === 'invoices') {
+        const stInv = String(row?.status || '').trim().toUpperCase();
+        const isIssued = !!row?.issued_at_utc && (stInv === 'ISSUED' || stInv === 'PAID');
+        if (isIssued) tr.classList.add('row-deep-green');
+      }
+    } catch {}
+  };
+
+  const refreshSelectionUi = () => {
+    try {
+      window.__selection = window.__selection || {};
+      const sel = window.__selection[section] || { ids: new Set() };
+      const ids = (sel.ids instanceof Set) ? sel.ids : new Set();
+
+      const hdrCbEl = document.getElementById('summarySelectAll');
+      const visibleIds = Array.from(tb.querySelectorAll('tr[data-id]')).map(tr => String(tr.dataset.id || ''));
+      const selectedOfVisible = visibleIds.filter(x => ids.has(x)).length;
+
+      if (hdrCbEl) {
+        hdrCbEl.checked = (visibleIds.length > 0 && selectedOfVisible === visibleIds.length);
+        hdrCbEl.indeterminate = (selectedOfVisible > 0 && selectedOfVisible < visibleIds.length);
+      }
+
+      const topControls = (function () {
+        const ps = document.getElementById('summaryPageSize');
+        return ps ? ps.parentElement : null;
+      })();
+
+      if (topControls) {
+        const selInfo = topControls.querySelector('div.mini');
+        if (selInfo) selInfo.textContent = (ids.size > 0) ? `${ids.size} selected.` : '';
+
+        const clearBtn = Array.from(topControls.querySelectorAll('button')).find(b => (b.textContent || '').trim() === 'Clear selection') || null;
+        if (clearBtn) clearBtn.style.display = (ids.size > 0) ? '' : 'none';
+      }
+
+      const btns = Array.from((content || document).querySelectorAll('button'));
+      const focusBtn   = btns.find(b => b.title === 'Focus on records') || null;
+      const saveBtn    = btns.find(b => b.title === 'Save selection') || null;
+      const resolveBtn = btns.find(b => b.title === 'Resolve candidate/client for selected timesheets') || null;
+
+      const any = (ids.size > 0);
+      if (focusBtn) focusBtn.disabled = !any;
+      if (saveBtn) saveBtn.disabled = !any;
+      if (resolveBtn) resolveBtn.disabled = !any;
+    } catch {}
+  };
+
+  const tr = document.createElement('tr');
+  tr.dataset.id = stableId;
+  tr.dataset.section = section;
+
+  // Selection cell
+  const tdSel = document.createElement('td');
+  tdSel.style.width = '40px';
+  tdSel.style.minWidth = '40px';
+  tdSel.style.maxWidth = '40px';
+
+  const cb = document.createElement('input');
+  cb.type = 'checkbox';
+  cb.className = 'row-select';
+
+  try {
+    window.__selection = window.__selection || {};
+    const sel = window.__selection[section] || { ids: new Set() };
+    const ids = (sel.ids instanceof Set) ? sel.ids : new Set();
+    cb.checked = ids.has(stableId);
+  } catch {
+    cb.checked = false;
+  }
+
+  cb.addEventListener('click', (e) => {
+    e.stopPropagation();
+    try {
+      window.__selection = window.__selection || {};
+      const sel = (window.__selection[section] ||= { fingerprint: '', ids: new Set() });
+      if (!(sel.ids instanceof Set)) sel.ids = new Set();
+      if (cb.checked) sel.ids.add(stableId);
+      else sel.ids.delete(stableId);
+    } catch {}
+    refreshSelectionUi();
+  });
+
+  tdSel.appendChild(cb);
+  tr.appendChild(tdSel);
+
+  // Data cells
+  cols.forEach(colKey => {
+    tr.appendChild(buildCell(colKey));
+  });
+
+  applyRowStyle(tr);
+  tb.appendChild(tr);
+
+  refreshSelectionUi();
+  return true;
+}
+function summaryMaybeResortDom(section) {
+  section = String(section || '').trim();
+  if (!section) return false;
+  if (typeof currentSection !== 'string' || currentSection !== section) return false;
+
+  const st = (window.__listState && window.__listState[section]) ? window.__listState[section] : null;
+  const sort = (st && st.sort && typeof st.sort === 'object') ? st.sort : { key: null, dir: 'asc' };
+
+  const key = String(sort.key || '').trim();
+  const dir = (String(sort.dir || 'asc').toLowerCase() === 'desc') ? 'desc' : 'asc';
+  if (!key) return false;
+
+  if (!Array.isArray(window.currentRows)) return false;
+
+  // Stable sort using existing order as tie-breaker
+  const rowsWithIdx = window.currentRows.map((r, idx) => ({ r, idx }));
+
+  const isIsoDate = (s) => /^\d{4}-\d{2}-\d{2}$/.test(s);
+  const isIsoTs = (s) => typeof s === 'string' && /\d{4}-\d{2}-\d{2}T/.test(s);
+
+  const norm = (v) => {
+    if (v == null) return { t: 'null', v: null };
+    if (typeof v === 'number') return { t: 'num', v };
+    if (typeof v === 'boolean') return { t: 'num', v: v ? 1 : 0 };
+    if (typeof v === 'string') {
+      const s = v.trim();
+      if (!s) return { t: 'null', v: null };
+      if (isIsoDate(s)) return { t: 'date', v: s };
+      if (isIsoTs(s)) {
+        const ms = Date.parse(s);
+        if (Number.isFinite(ms)) return { t: 'ms', v: ms };
+      }
+      const n = Number(s);
+      if (Number.isFinite(n) && String(n) === s) return { t: 'num', v: n };
+      return { t: 'str', v: s.toLowerCase() };
+    }
+    return { t: 'str', v: String(v).toLowerCase() };
+  };
+
+  const cmp = (a0, b0) => {
+    const a = norm(a0);
+    const b = norm(b0);
+
+    // nulls last always
+    if (a.t === 'null' && b.t === 'null') return 0;
+    if (a.t === 'null') return 1;
+    if (b.t === 'null') return -1;
+
+    // compare
+    if (a.t === 'num' && b.t === 'num') return a.v - b.v;
+    if ((a.t === 'ms' || a.t === 'date') && (b.t === 'ms' || b.t === 'date')) {
+      const av = (a.t === 'ms') ? a.v : a.v;
+      const bv = (b.t === 'ms') ? b.v : b.v;
+      return (av < bv ? -1 : av > bv ? 1 : 0);
+    }
+    if (a.t === 'str' && b.t === 'str') return a.v.localeCompare(b.v);
+
+    // mixed types: string compare
+    return String(a0).localeCompare(String(b0));
+  };
+
+  rowsWithIdx.sort((A, B) => {
+    const av = (A.r && Object.prototype.hasOwnProperty.call(A.r, key)) ? A.r[key] : null;
+    const bv = (B.r && Object.prototype.hasOwnProperty.call(B.r, key)) ? B.r[key] : null;
+
+    const c = cmp(av, bv);
+    if (c !== 0) return (dir === 'desc') ? -c : c;
+
+    // stable tie-break
+    return A.idx - B.idx;
+  });
+
+  const sorted = rowsWithIdx.map(x => x.r);
+  window.currentRows = sorted;
+
+  // Reorder DOM rows to match sorted currentRows, but only for ids currently visible in DOM
+  const content = document.getElementById('content');
+  const bodyWrap = content ? content.querySelector('.summary-body') : null;
+  const tbl = bodyWrap ? bodyWrap.querySelector('table.grid') : null;
+  const tb = tbl ? tbl.querySelector('tbody') : null;
+  if (!tb) return false;
+
+  const domById = new Map();
+  Array.from(tb.querySelectorAll('tr[data-id]')).forEach(tr => {
+    domById.set(String(tr.dataset.id || ''), tr);
+  });
+
+  // Append in sorted order (appendChild moves nodes)
+  sorted.forEach(r => {
+    const rid = r && (r.id ?? r.timesheet_id ?? r.contract_week_id ?? r.invoice_id);
+    const id = String(rid || '');
+    const tr = domById.get(id);
+    if (tr) tb.appendChild(tr);
+  });
+
+  return true;
+}
+
+
+async function summaryFetchCanonicalRow(section, id, ctx) {
+  section = String(section || '').trim();
+  id      = String(id || '').trim();
+  if (!section || !id) return null;
+
+  // Related mode: do not attempt server canonical fetch (no dedicated id fetcher).
+  // If the row is already in-memory, return it; else return null.
+  const inferredRelated =
+    !!(window.__listState &&
+       window.__listState[section] &&
+       window.__listState[section].filters &&
+       window.__listState[section].filters.related);
+
+  const inRelatedMode = !!((ctx && ctx.inRelatedMode) || inferredRelated);
+
+  if (inRelatedMode) {
+    try {
+      if (String(currentSection || '') !== section) return null;
+      if (!Array.isArray(window.currentRows)) return null;
+
+      const row = window.currentRows.find(r => {
+        const rid = r && (r.id ?? r.timesheet_id ?? r.contract_week_id ?? r.invoice_id);
+        return String(rid || '') === id;
+      }) || null;
+
+      return row && typeof row === 'object' ? { ...(row || {}) } : null;
+    } catch {
+      return null;
+    }
+  }
+
+  // Cache by section + fingerprint + id to avoid repeat calls
+  const fp = (typeof getSummaryFingerprint === 'function')
+    ? String(getSummaryFingerprint(section) || '')
+    : (() => {
+        const st0 = (window.__listState && window.__listState[section]) ? window.__listState[section] : {};
+        const filters0 = st0 && st0.filters ? st0.filters : {};
+        try { return JSON.stringify({ section, filters: filters0 }); } catch { return `${section}`; }
+      })();
+
+  window.__summaryCanonicalCache = window.__summaryCanonicalCache || {};
+  const cacheKey = `${section}::${fp}::${id}`;
+  const now = Date.now();
+
+  const hit = window.__summaryCanonicalCache[cacheKey];
+  if (hit && hit.t && (now - hit.t) < 8000) {
+    return hit.row || null;
+  }
+
+  const st = (window.__listState && window.__listState[section]) ? window.__listState[section] : null;
+  const filters = (st && st.filters && typeof st.filters === 'object') ? st.filters : {};
+  const sort    = (st && st.sort && typeof st.sort === 'object') ? st.sort : { key: null, dir: 'asc' };
+
+  // ── Selection-filter parity (avoid incorrect “included” fetch) ──────────────
+  const parseIdSetFromFilters = (f) => {
+    const out = new Set();
+
+    const add = (v) => {
+      const s = String(v || '').trim();
+      if (s) out.add(s);
+    };
+
+    // ids can be array OR csv
+    if (Object.prototype.hasOwnProperty.call(f, 'ids')) {
+      const v = f.ids;
+      if (Array.isArray(v)) v.forEach(add);
+      else String(v || '').split(',').map(x => x.trim()).filter(Boolean).forEach(add);
+    }
+
+    // id can be a single uuid OR an in.(...) expression
+    if (Object.prototype.hasOwnProperty.call(f, 'id')) {
+      const v = String(f.id || '').trim();
+      if (v) {
+        if (/^in\.\(.+\)$/.test(v)) {
+          const inner = v.replace(/^in\.\(/, '').replace(/\)$/, '');
+          inner.split(',').map(x => x.trim()).filter(Boolean).forEach(add);
+        } else {
+          add(v);
+        }
+      }
+    }
+
+    return out;
+  };
+
+  try {
+    const selIds = parseIdSetFromFilters(filters || {});
+    if (selIds.size > 0 && !selIds.has(id)) {
+      window.__summaryCanonicalCache[cacheKey] = { t: now, row: null };
+      return null;
+    }
+  } catch {}
+
+  const qs = new URLSearchParams();
+
+  // Always request a single row
+  qs.set('page', '1');
+  qs.set('page_size', '1');
+
+  const appendFilter = (k, v) => {
+    if (v == null) return;
+    if (typeof v === 'string' && v.trim() === '') return;
+
+    if (Array.isArray(v)) {
+      v.forEach(x => {
+        if (x == null) return;
+        const s = String(x).trim();
+        if (!s) return;
+        qs.append(k, s);
+      });
+      return;
+    }
+
+    qs.set(k, String(v));
+  };
+
+  // Apply existing filters, but strip:
+  // - related (handled elsewhere)
+  // - id/ids (we already validated selection parity; we’ll set our own id fetch)
+  // - pagination keys (we set page/page_size)
+  Object.entries(filters || {}).forEach(([k, v]) => {
+    if (k === 'related') return;
+    if (k === 'page' || k === 'page_size' || k === 'limit' || k === 'offset') return;
+    if (k === 'id' || k === 'ids') return;
+    appendFilter(k, v);
+  });
+
+  // Apply sort where supported (best-effort; backend will ignore if unsupported)
+  try {
+    if (sort && sort.key) {
+      qs.set('order_by', String(sort.key));
+      qs.set('order_dir', (String(sort.dir).toLowerCase() === 'desc') ? 'desc' : 'asc');
+    }
+  } catch {}
+
+  // Choose path + id filter
+  let path = '';
+  if (section === 'timesheets') {
+    path = '/api/timesheets/summary';
+    qs.set('include_totals', 'false');
+    qs.set('id', id); // backend supports OR(timesheet_id, contract_week_id)
+  } else if (section === 'invoices') {
+    path = '/api/search/invoices';
+    qs.set('ids', id);
+  } else if (section === 'contracts') {
+    path = '/api/contracts';
+    qs.set('ids', id);
+  } else if (section === 'candidates') {
+    path = '/api/search/candidates';
+    qs.set('ids', id);
+  } else if (section === 'clients') {
+    path = '/api/search/clients';
+    qs.set('ids', id);
+  } else if (section === 'umbrellas') {
+    path = '/api/search/umbrellas';
+    qs.set('ids', id);
+  } else {
+    path = `/api/search/${encodeURIComponent(section)}`;
+    qs.set('ids', id);
+  }
+
+  const url = `${path}?${qs.toString()}`;
+
+  try {
+    const res = await authFetch(API(url));
+    if (!res || !res.ok) {
+      window.__summaryCanonicalCache[cacheKey] = { t: now, row: null };
+      return null;
+    }
+
+    const j = await res.json().catch(() => null);
+
+    let rows = [];
+    if (Array.isArray(j)) rows = j;
+    else if (j && Array.isArray(j.items)) rows = j.items;
+    else if (j && Array.isArray(j.rows))  rows = j.rows;
+    else if (j && Array.isArray(j.data))  rows = j.data;
+
+    const row = (rows && rows.length) ? rows[0] : null;
+    if (!row || typeof row !== 'object') {
+      window.__summaryCanonicalCache[cacheKey] = { t: now, row: null };
+      return null;
+    }
+
+    // Normalizations to match renderSummary expectations
+    try {
+      if (section === 'timesheets') {
+        if (!row.id) row.id = row.timesheet_id || row.contract_week_id || id;
+      }
+
+      if (section === 'invoices') {
+        if (!row.id) row.id = row.invoice_id || id;
+
+        // Flatten joined client name if present
+        if ((row.client_name == null || row.client_name === '') && row.client && typeof row.client === 'object') {
+          row.client_name = row.client.name || '';
+        }
+      }
+    } catch {}
+
+    window.__summaryCanonicalCache[cacheKey] = { t: now, row };
+    return row;
+  } catch {
+    window.__summaryCanonicalCache[cacheKey] = { t: now, row: null };
+    return null;
+  }
+}
+
+
+
 function getBucketLabelsForContract(contract) {
   const userSet = normaliseBucketLabelsInput(contract?.bucket_labels_json || null);
   return userSet || labelsDefault();
@@ -21697,43 +23184,53 @@ function openContract(row) {
     fs.__forId = preToken || fs.__forId || (base.id ?? window.modalCtx.openToken ?? null);
     if (LOGC) console.log('[CONTRACTS] formState forId bound', { preToken, forId: fs.__forId, openToken: window.modalCtx.openToken });
 
-    const m = (fs.main ||= {});
-    if (m.__seeded !== true) {
-      if (base.candidate_id != null) m.candidate_id = base.candidate_id;
-      if (base.client_id != null)    m.client_id    = base.client_id;
-      if (base.role != null)         m.role         = base.role;
-      if (base.band != null)         m.band         = base.band;
-      if (base.display_site != null) m.display_site = base.display_site;
-      if (base.start_date)           m.start_date   = base.start_date;
-      if (base.end_date)             m.end_date     = base.end_date;
-         if (base.pay_method_snapshot)  m.pay_method_snapshot = base.pay_method_snapshot;
-      if (base.default_submission_mode) m.default_submission_mode = base.default_submission_mode;
+ const m = (fs.main ||= {});
+if (m.__seeded !== true) {
+  if (base.candidate_id != null) m.candidate_id = base.candidate_id;
+  if (base.client_id != null)    m.client_id    = base.client_id;
+  if (base.role != null)         m.role         = base.role;
+  if (base.band != null)         m.band         = base.band;
+  if (base.display_site != null) m.display_site = base.display_site;
+  if (base.start_date)           m.start_date   = base.start_date;
+  if (base.end_date)             m.end_date     = base.end_date;
+  if (base.pay_method_snapshot)  m.pay_method_snapshot = base.pay_method_snapshot;
+  if (base.default_submission_mode) m.default_submission_mode = base.default_submission_mode;
 
-      // NEW: seed contract route/settings overrides (only if present on row)
-      if (base.is_nhsp != null)              m.is_nhsp = base.is_nhsp;
-      if (base.autoprocess_hr != null)       m.autoprocess_hr = base.autoprocess_hr;
-      if (base.requires_hr != null)          m.requires_hr = base.requires_hr;
-      if (base.no_timesheet_required != null) m.no_timesheet_required = base.no_timesheet_required;
-      if (base.daily_calc_of_invoices != null) m.daily_calc_of_invoices = base.daily_calc_of_invoices;
-      if (base.group_nightsat_sunbh != null) m.group_nightsat_sunbh = base.group_nightsat_sunbh;
-      if (base.self_bill != null)            m.self_bill = base.self_bill;
+  // NEW: seed contract route/settings overrides (only if present on row)
+  if (base.is_nhsp != null)               m.is_nhsp = base.is_nhsp;
+  if (base.autoprocess_hr != null)        m.autoprocess_hr = base.autoprocess_hr;
+  if (base.requires_hr != null)           m.requires_hr = base.requires_hr;
+  if (base.no_timesheet_required != null) m.no_timesheet_required = base.no_timesheet_required;
+  if (base.daily_calc_of_invoices != null) m.daily_calc_of_invoices = base.daily_calc_of_invoices;
+  if (base.group_nightsat_sunbh != null) m.group_nightsat_sunbh = base.group_nightsat_sunbh;
+  if (base.self_bill != null)            m.self_bill = base.self_bill;
 
-      if (base.week_ending_weekday_snapshot != null) m.week_ending_weekday_snapshot = String(base.week_ending_weekday_snapshot);
-      if (base.bucket_labels_json)   m.__bucket_labels = base.bucket_labels_json;
-      if (base.std_schedule_json)    m.__template      = base.std_schedule_json;
-      if (base.std_hours_json)       m.__hours         = base.std_hours_json;
-      // Seed mileage if present on row
-      if (base.mileage_charge_rate != null) m.mileage_charge_rate = base.mileage_charge_rate;
-      if (base.mileage_pay_rate != null)    m.mileage_pay_rate    = base.mileage_pay_rate;
-      m.__seeded = true;
+  // ✅ NEW: attachments (seed into formState.main)
+  if (base.hr_attach_to_invoice != null)  m.hr_attach_to_invoice = base.hr_attach_to_invoice;
+  if (base.ts_attach_to_invoice != null)  m.ts_attach_to_invoice = base.ts_attach_to_invoice;
 
-      if (LOGC) console.log('[CONTRACTS] seed formState (main/pay) from base row', {
-        forId: (window.modalCtx.formState && window.modalCtx.formState.__forId),
-        mainKeys: Object.keys(window.modalCtx.formState?.main || {}),
-        payKeys: Object.keys(window.modalCtx.formState?.pay || {})
-      });
+  // ✅ NEW: contract-level refs + auto-invoice (seed into formState.main)
+  if (base.auto_invoice != null)                 m.auto_invoice = base.auto_invoice;
+  if (base.require_reference_to_pay != null)     m.require_reference_to_pay = base.require_reference_to_pay;
+  if (base.require_reference_to_invoice != null) m.require_reference_to_invoice = base.require_reference_to_invoice;
 
-    }
+  if (base.week_ending_weekday_snapshot != null) m.week_ending_weekday_snapshot = String(base.week_ending_weekday_snapshot);
+  if (base.bucket_labels_json)   m.__bucket_labels = base.bucket_labels_json;
+  if (base.std_schedule_json)    m.__template      = base.std_schedule_json;
+  if (base.std_hours_json)       m.__hours         = base.std_hours_json;
+  // Seed mileage if present on row
+  if (base.mileage_charge_rate != null) m.mileage_charge_rate = base.mileage_charge_rate;
+  if (base.mileage_pay_rate != null)    m.mileage_pay_rate    = base.mileage_pay_rate;
+
+  m.__seeded = true;
+
+  if (LOGC) console.log('[CONTRACTS] seed formState (main/pay) from base row', {
+    forId: (window.modalCtx.formState && window.modalCtx.formState.__forId),
+    mainKeys: Object.keys(window.modalCtx.formState?.main || {}),
+    payKeys: Object.keys(window.modalCtx.formState?.pay || {})
+  });
+}
+
     const p = (fs.pay ||= {});
     if (!Object.keys(p).length && base.rates_json && typeof base.rates_json === 'object') {
       const buckets = ['paye_day','paye_night','paye_sat','paye_sun','paye_bh','umb_day','umb_night','umb_sat','umb_sun','umb_bh','charge_day','charge_night','charge_sat','charge_sun','charge_bh'];
@@ -28247,7 +29744,6 @@ function attachInvoiceModalDelegatedHandlers(modalCtx, rootEl, deps) {
   syncFrameDirty();
 }
 
-
 async function openInvoiceModal(row) {
   // Invoice modal (staged edits, no MutationObserver loops)
   const fmtMoney = (n) => {
@@ -28319,6 +29815,17 @@ async function openInvoiceModal(row) {
       return fallback;
     }
   };
+
+  // Capture the active Summary context (so we can patch the invoices grid after save)
+  try {
+    if (typeof captureSummaryContextForModalOpen === 'function') {
+      modalCtx.__summaryCtx = cloneJson(captureSummaryContextForModalOpen(), null);
+    } else {
+      modalCtx.__summaryCtx = null;
+    }
+  } catch {
+    modalCtx.__summaryCtx = null;
+  }
 
   const editsToJson = (e) => {
     const out = {
@@ -28680,7 +30187,38 @@ async function openInvoiceModal(row) {
     },
     async () => {
       if (!safeHasPendingEdits()) return true;
+
       await invoiceModalSaveEdits(modalCtx, { rerender, reload });
+
+      // ✅ Patch the active summary grid row in-place (filter parity + obey sort)
+      try {
+        const ctx = modalCtx.__summaryCtx || null;
+
+        if (
+          ctx &&
+          typeof isSummaryContextStillActive === 'function' &&
+          typeof summaryFetchCanonicalRow === 'function' &&
+          typeof summaryApplySavedRecordToActiveSummary === 'function'
+        ) {
+          if (isSummaryContextStillActive(ctx)) {
+            const invId = (modalCtx?.data?.id || modalCtx?.invoiceId || invoiceId || null);
+            if (invId) {
+              let canonical = await summaryFetchCanonicalRow('invoices', invId);
+
+              if (canonical && typeof normalizeSavedRecordForSummary === 'function') {
+                canonical = normalizeSavedRecordForSummary('invoices', canonical) || canonical;
+              }
+
+              if (canonical && typeof canonical === 'object') {
+                summaryApplySavedRecordToActiveSummary('invoices', canonical, ctx);
+              }
+            }
+          }
+        }
+      } catch (e) {
+        console.warn('[SUMMARY][INVOICES] summary patch failed (non-fatal)', e);
+      }
+
       return { ok: true };
     },
     true,
@@ -28709,6 +30247,7 @@ async function openInvoiceModal(row) {
 
   await reload();
 }
+
 
 function invoiceModalNewClientToken() {
   try {
@@ -37409,8 +38948,19 @@ function ensureTsRefreshAndRepaintOverview() {
 
   window.__tsRefreshAndRepaintOverview = async function(tsTabKey) {
     const mc = window.modalCtx || {};
+
+    // Capture/retain the summary context for this modal (used for summary patching)
+    try {
+      if (!mc.__summaryCtx && typeof captureSummaryContextForModalOpen === 'function') {
+        mc.__summaryCtx = captureSummaryContextForModalOpen();
+      }
+    } catch {}
+
     const idNow   = mc.data?.timesheet_id || null;
     const weekId  = mc.data?.contract_week_id || null;
+
+    let finalTsId   = idNow;
+    let finalWeekId = weekId;
 
     // 1) Refresh details (TS or planned CW)
     try {
@@ -37425,6 +38975,8 @@ function ensureTsRefreshAndRepaintOverview() {
           mc.data.id = movedId;
           mc.timesheetMeta = mc.timesheetMeta || {};
           mc.timesheetMeta.expected_timesheet_id = movedId;
+
+          finalTsId = movedId;
         }
 
         mc.timesheetDetails = fresh;
@@ -37443,8 +38995,6 @@ function ensureTsRefreshAndRepaintOverview() {
         } catch {}
 
         // ✅ Option A: rebuild timesheetMeta from refreshed details (safe)
-        // - Preserve expected_timesheet_id even if a builder returns a new object without it
-        // - If a builder returns null/undefined/non-object, fall back to local rebuild
         try {
           const prevExpected =
             (mc.timesheetMeta && typeof mc.timesheetMeta === 'object' && mc.timesheetMeta.expected_timesheet_id)
@@ -37461,14 +39011,12 @@ function ensureTsRefreshAndRepaintOverview() {
             built = window.seedTimesheetMetaFromDetails(mc, fresh);
           }
 
-          // Accept builder output only if it's a real object
           if (built && typeof built === 'object') {
             mc.timesheetMeta = built;
           } else {
             mc.timesheetMeta = (mc.timesheetMeta && typeof mc.timesheetMeta === 'object') ? mc.timesheetMeta : {};
           }
 
-          // ✅ Canonicalise mode fields ALWAYS (builder or fallback)
           const ts    = fresh?.timesheet || {};
           const cw    = fresh?.contract_week || {};
           const tsfin = fresh?.tsfin || {};
@@ -37505,7 +39053,6 @@ function ensureTsRefreshAndRepaintOverview() {
           mc.timesheetMeta.isPaid     = !!(tsfin.paid_at_utc || mc.data?.paid_at_utc);
           mc.timesheetMeta.isInvoiced = !!(tsfin.locked_by_invoice_id || mc.data?.locked_by_invoice_id);
 
-          // ✅ Always enforce expected_timesheet_id after rebuild
           mc.timesheetMeta.expected_timesheet_id =
             (mc.data && mc.data.timesheet_id) ||
             prevExpected ||
@@ -37558,6 +39105,8 @@ function ensureTsRefreshAndRepaintOverview() {
             mc.timesheetDetails = mc.timesheetDetails || {};
             if (cwFound) mc.timesheetDetails.contract_week = cwFound;
             mc.timesheetDetails.contract_week_id = weekId;
+
+            finalWeekId = weekId;
 
             // ✅ Keep modalCtx.data in sync so any legacy callers using mc.data.* aren't stale
             try {
@@ -37643,7 +39192,7 @@ function ensureTsRefreshAndRepaintOverview() {
       console.warn('[TS][REFRESH] details refresh failed', e);
     }
 
-    // 2) Refresh summary (for TS id only)
+    // 2) Refresh summary (for TS id only) — keeps local summary caches coherent (rotation-safe)
     try {
       const id2 = mc.data?.timesheet_id || null;
       if (id2 && typeof refreshTimesheetsSummaryAfterRotation === 'function') {
@@ -37655,15 +39204,55 @@ function ensureTsRefreshAndRepaintOverview() {
     try {
       const id3 = mc.data?.timesheet_id || null;
       if (id3 && typeof refreshTimesheetEvidenceListAndUi === 'function') {
-        // Signature differs across versions; call defensively
         await refreshTimesheetEvidenceListAndUi(id3);
       }
     } catch {}
 
-    // 3) Repaint modal + grid
-    try { await renderAll(); } catch {}
+     // 3) Update the active Summary grid in-place (filter-parity + obey current sort),
+    //    otherwise fall back to a full renderAll() refresh.
+    let didSummaryPatch = false;
+    try {
+      const ctx = mc.__summaryCtx || null;
+
+      if (
+        ctx &&
+        typeof isSummaryContextStillActive === 'function' &&
+        typeof summaryFetchCanonicalRow === 'function' &&
+        typeof summaryApplySavedRecordToActiveSummary === 'function'
+      ) {
+        if (isSummaryContextStillActive(ctx)) {
+          const fetchId = (mc.data?.timesheet_id || finalTsId || mc.data?.contract_week_id || finalWeekId || null);
+
+          if (fetchId) {
+            let canonical = await summaryFetchCanonicalRow('timesheets', fetchId, ctx);
+
+            if (canonical && typeof normalizeSavedRecordForSummary === 'function') {
+              canonical = normalizeSavedRecordForSummary('timesheets', canonical) || canonical;
+            }
+
+            if (canonical && typeof canonical === 'object') {
+              // Keep modalCtx.data aligned with the canonical summary row shape where possible
+              try {
+                mc.data = { ...(mc.data || {}), ...(canonical || {}) };
+              } catch {}
+
+              const r = await summaryApplySavedRecordToActiveSummary('timesheets', canonical, ctx);
+              didSummaryPatch = !!(r && r.ok);
+            }
+          }
+        }
+      }
+    } catch (e) {
+      console.warn('[SUMMARY][TS] summary patch failed (will fall back to renderAll)', e);
+      didSummaryPatch = false;
+    }
+
+    if (!didSummaryPatch) {
+      try { await renderAll(); } catch {}
+    }
 
     // 4) Repaint the current modal tab (or the requested tab)
+
     try {
       const fr = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
       if (fr && fr.entity === 'timesheets') {
@@ -37872,13 +39461,22 @@ function setFormReadOnly(root, ro) {
   if (opts && opts.kind === 'rate-presets-picker') {
     L('showModal(kind=rate-presets-picker): interactive child (noParentGate=false)');
   }
-
-
 const ctxForFrame = window.modalCtx;
+
+// ✅ Capture the currently-active Summary context at modal-open time
+// (section, fingerprint, filters/sort/page, etc). Used to patch Summary in-place after save.
+const summaryCtxOnOpen =
+  (typeof captureSummaryContextForModalOpen === 'function')
+    ? captureSummaryContextForModalOpen()
+    : null;
 
 const frame = {
   _token: `f:${Date.now()}:${Math.random().toString(36).slice(2)}`,
   _ctxRef: ctxForFrame,
+
+  // ✅ Summary patch context (used only if still active at save time)
+  _summaryCtx: summaryCtxOnOpen,
+
   title,
   tabs: Array.isArray(tabs) ? tabs.slice() : [],
   renderTab,
@@ -41947,12 +43545,54 @@ if (shouldNoop) {
   L('saveForFrame GUARD (global): no-op (no changes and apply not allowed)');
   if (isChildNow) {
     sanitizeModalGeometry();
-    window.__modalStack.pop();
+
+    const closing = window.__modalStack.pop();
+
+    // ✅ Cleanup (mirror the Close/ESC path) so we don't leak listeners/observers
+    try { if (closing && typeof closing._onDismiss === 'function') closing._onDismiss(); } catch {}
+
+    // Prevent MutationObserver leaks from invoice modal wiring
+    try {
+      const ctx = closing && closing._ctxRef ? closing._ctxRef : null;
+      if (ctx && ctx._invoiceObserver) {
+        try { ctx._invoiceObserver.disconnect(); } catch {}
+        ctx._invoiceObserver = null;
+      }
+    } catch {}
+
+    // Detach invoice delegated click handler (bound to #modalBody)
+    try {
+      const ctx = closing && closing._ctxRef ? closing._ctxRef : null;
+      if (ctx && ctx.__invDelegated && ctx.__invDelegated.targetEl) {
+        try {
+          if (ctx.__invDelegated.handler) {
+            ctx.__invDelegated.targetEl.removeEventListener('click', ctx.__invDelegated.handler, true);
+          }
+        } catch {}
+        try {
+          if (ctx.__invDelegated.changeHandler) {
+            ctx.__invDelegated.targetEl.removeEventListener('change', ctx.__invDelegated.changeHandler, true);
+          }
+        } catch {}
+        ctx.__invDelegated = null;
+      }
+    } catch {}
+
+    if (closing?._detachDirty) { try { closing._detachDirty(); } catch {} closing._detachDirty = null; }
+    if (closing?._detachGlobal){ try { closing._detachGlobal(); } catch {} closing._detachGlobal = null; }
+    try { if (closing) closing._wired = false; } catch {}
+
     if (window.__modalStack.length > 0) {
       const p = window.__modalStack[window.__modalStack.length - 1];
       renderTop();
       try { p.onReturn && p.onReturn(); } catch {}
+    } else {
+      discardAllModalsAndState();
+      if (window.__pendingFocus) {
+        try { renderAll(); } catch(e) { console.error('refresh after modal close failed', e); }
+      }
     }
+
   } else {
     fr.isDirty = false;
     fr._snapshot = null;
@@ -41963,118 +43603,9 @@ if (shouldNoop) {
   return;
 }
 
+// ✅ IMPORTANT: do NOT re-declare setFrameMode() inside saveForFrame.
+// saveForFrame must always use the single authoritative setFrameMode() defined in showModal scope.
 
- function setFrameMode(frameObj, mode) {
-  L('setFrameMode ENTER', {
-    prevMode: frameObj.mode,
-    nextMode: mode,
-    isChild: (stack().length > 1),
-    noParentGate: frameObj.noParentGate
-  });
-
-  const prev    = frameObj.mode;
-  frameObj.mode = mode;
-
-  const isChild = (stack().length > 1);
-  const isTop   = (currentFrame && currentFrame() === frameObj);
-
-  // ▶ Special case: planned timesheet week (no timesheet_id yet, but has a contract_week)
-  // We want to allow "view without id" here, so do NOT auto-convert to create/edit.
-  let isPlannedTimesheetStub = false;
-  try {
-    if (frameObj.entity === 'timesheets' && !frameObj.hasId) {
-      // Prefer the frame's own ctxRef, then fall back to global modalCtx
-      const ctx = frameObj._ctxRef || window.modalCtx || {};
-      const d   = ctx.data || {};
-      const hasWeek = !!(d.contract_week_id || d.week_id || d.week_ending_date);
-      const hasTsId = !!d.timesheet_id;
-      if (hasWeek && !hasTsId) {
-        isPlannedTimesheetStub = true;
-      }
-    }
-  } catch (e) {
-    // Non-fatal; treat as normal frame if detection fails
-    isPlannedTimesheetStub = false;
-  }
-
- // ▶ correct accidental 'view' on brand-new frames (e.g., successor create)
-//    but DO NOT do this for planned timesheet weeks or utility modals where we *want* view+no id.
-const isUtilityKind =
-  frameObj.kind === 'timesheets-resolve' ||
-  frameObj.kind === 'resolve-candidate'  ||
-  frameObj.kind === 'resolve-client'     ||
-  (typeof frameObj.kind === 'string' && frameObj.kind.startsWith('import-summary-'));
-
-if (!frameObj.hasId && mode === 'view' && !isPlannedTimesheetStub && !isUtilityKind) {
-  mode = frameObj.forceEdit ? 'edit' : 'create';
-  frameObj.mode = mode;
-}
-
-
-   // ▶ Only toggle read-only on the DOM that actually belongs to the top frame.
-  //    When updating a non-top frame (e.g., the parent while a picker is open),
-  //    do not flip the global #modalBody to avoid UI flicker/regressions.
-  if (isTop) {
-    const isUtilityKindForFrame =
-      frameObj.kind === 'timesheets-resolve' ||
-      frameObj.kind === 'resolve-candidate'  ||
-      frameObj.kind === 'resolve-client'     ||
-      (typeof frameObj.kind === 'string' && frameObj.kind.startsWith('import-summary-'));
-
-    if (!isChild && (mode === 'create' || mode === 'edit')) {
-      setFormReadOnly(byId('modalBody'), false);
-    } else if (frameObj.noParentGate) {
-      const ro = isUtilityKindForFrame
-        ? false
-        : (mode === 'view' || mode === 'saving');
-      setFormReadOnly(byId('modalBody'), ro);
-    } else if (isChild) {
-      const p = parentFrame();
-      setFormReadOnly(byId('modalBody'), !(p && (p.mode === 'edit' || p.mode === 'create')));
-    } else {
-      setFormReadOnly(byId('modalBody'), (mode === 'view' || mode === 'saving'));
-    }
-  } else {
-    L('setFrameMode (non-top): skipped read-only toggle to avoid affecting current child');
-  }
-
-
-  if (typeof frameObj._updateButtons === 'function') frameObj._updateButtons();
-
-  try {
-    const idx = stack().indexOf(frameObj);
-    window.dispatchEvent(new CustomEvent('modal-frame-mode-changed', {
-      detail: { frameIndex: idx, mode }
-    }));
-  } catch {}
-
-  const repaint = !!(frameObj._hasMountedOnce && frameObj.currentTabKey);
-  L('setFrameMode', {
-    prevMode: prev,
-    nextMode: mode,
-    _hasMountedOnce: frameObj._hasMountedOnce,
-    willRepaint: repaint,
-    isPlannedTimesheetStub
-  });
-
-  try {
-    const pc = document.getElementById('btnPickCandidate');
-    const pl = document.getElementById('btnPickClient');
-    L('setFrameMode picker snapshot', {
-      pickCandidate: { exists: !!pc, disabled: !!(pc && pc.disabled) },
-      pickClient:    { exists: !!pl, disabled: !!(pl && pl.disabled) }
-    });
-  } catch {}
-
-  updateCalendarInteractivity(mode === 'edit' || mode === 'create');
-
-  if (repaint) {
-    // Just repaint the current tab; do NOT call onReturn here
-    Promise
-      .resolve(frameObj.setTab(frameObj.currentTabKey))
-      .catch(() => {});
-  }
-}
 
 
   fr.persistCurrentTabState();
@@ -42108,6 +43639,33 @@ if (!frameObj.hasId && mode === 'view' && !isPlannedTimesheetStub && !isUtilityK
     return;
   }
 
+   // ✅ NEW: Patch Summary in-place (filter parity + obey current sort), with minimal server calls.
+  // This runs BEFORE modal close/view flip so the grid updates immediately.
+  try {
+    if (saved && typeof summaryApplySavedRecordToActiveSummary === 'function') {
+      const sctx = fr._summaryCtx || null;
+
+      // Only patch if the saved modal entity maps to the captured summary section.
+      const ent = String(fr.entity || window.modalCtx?.entity || '').trim();
+      const secEnt = (typeof getSectionForEntity === 'function')
+        ? getSectionForEntity(ent)
+        : String(currentSection || '');
+
+      if (sctx && secEnt && String(sctx.section || '') === String(secEnt)) {
+        // Prefer common wrapper shapes but fall back to saved as-is
+        const savedRoot = (saved && typeof saved === 'object')
+          ? (saved.contract || saved.candidate || saved.client || saved.invoice || saved.timesheet || saved.umbrella || saved)
+          : saved;
+
+        await summaryApplySavedRecordToActiveSummary(ent, savedRoot, sctx);
+      }
+    }
+  } catch (e) {
+    // Never break save/close flow if Summary patch fails
+    try { console.warn('[SUMMARY][PATCH] failed (non-fatal)', e); } catch {}
+  }
+
+
   // ─────────────────────────────────────────────
   // Existing post-save logic (unchanged)
   // ─────────────────────────────────────────────
@@ -42118,6 +43676,7 @@ if (!frameObj.hasId && mode === 'view' && !isPlannedTimesheetStub && !isUtilityK
     if (closing?._detachDirty) { try { closing._detachDirty(); } catch {} closing._detachDirty = null; }
     if (closing?._detachGlobal) { try { closing._detachGlobal(); } catch {} closing._detachGlobal = null; }
     fr._wired = false;
+
 
     if (window.__modalStack.length > 0) {
       const p = window.__modalStack[window.__modalStack.length - 1];
