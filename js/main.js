@@ -28541,7 +28541,6 @@ function invoiceModalComputePreviewTotals(modalCtx) {
     total_inc_vat: invoiceModalRound2(total_inc_vat)
   };
 }
-
 async function invoiceModalSaveEdits(modalCtx, { rerender, reload }) {
   // ✅ Single Save pipeline:
   //   1) hold/unhold (if staged)
@@ -28600,29 +28599,47 @@ async function invoiceModalSaveEdits(modalCtx, { rerender, reload }) {
     } catch {}
   };
 
-  // Refresh the summary sheet behind the modal (best-effort; safe no-ops if functions don't exist)
+  // ✅ Refresh the summary sheet behind the modal (best-effort)
+  // IMPORTANT: never call renderSummary() with no rows (it expects an array).
   const refreshSummaryBehindModal = async () => {
     try {
-      if (typeof window.refreshCurrentSummary === 'function') {
-        await window.refreshCurrentSummary();
-        return;
+      // Prefer captured summary context (set at modal-open in showModal/openInvoiceModal). Fallback to capture now.
+      let ctx = (modalCtx && modalCtx.__summaryCtx) ? modalCtx.__summaryCtx : null;
+      if (!ctx && typeof captureSummaryContextForModalOpen === 'function') {
+        try { ctx = captureSummaryContextForModalOpen(); } catch { ctx = null; }
       }
-      if (typeof window.renderSummary === 'function') {
-        await window.renderSummary();
-        return;
+
+      // If we have the summary patch pipeline available, use it
+      if (typeof summaryFetchCanonicalRow === 'function' && typeof summaryApplySavedRecordToActiveSummary === 'function') {
+        let canonical = null;
+        try {
+          canonical = await summaryFetchCanonicalRow('invoices', invoiceId, ctx);
+        } catch {
+          canonical = null;
+        }
+
+        if (canonical && typeof normalizeSavedRecordForSummary === 'function') {
+          try { canonical = normalizeSavedRecordForSummary('invoices', canonical) || canonical; } catch {}
+        }
+
+        if (canonical && typeof canonical === 'object') {
+          const r = await summaryApplySavedRecordToActiveSummary('invoices', canonical, ctx);
+          if (r && r.ok) return;
+        }
       }
+
+      // Fallback: only use renderAll (safe full pipeline) — do NOT call renderSummary() with no args
       if (typeof window.renderAll === 'function') {
         await window.renderAll();
         return;
       }
-      if (typeof window.renderInvoicesSummary === 'function') {
-        await window.renderInvoicesSummary();
+
+      // Last resort: section-specific refresh helper, if you have one
+      if (typeof window.refreshCurrentSummary === 'function') {
+        await window.refreshCurrentSummary();
         return;
       }
-      if (typeof window.renderInvoices === 'function') {
-        await window.renderInvoices();
-        return;
-      }
+
     } catch (e) {
       try { console.warn('[INV][SAVE] summary refresh failed (non-fatal)', e); } catch {}
     }
@@ -28786,6 +28803,7 @@ async function invoiceModalSaveEdits(modalCtx, { rerender, reload }) {
           rerender();
           throw err;
         }
+
         if (/Segments cannot be moved when expenses or mileage exist/i.test(msg)) {
           modalCtx.error = 'Cannot move segments because this invoice contains expenses or mileage. Remove expenses/mileage or remove the whole timesheet instead.';
           toast(modalCtx.error);
@@ -32877,14 +32895,61 @@ const buildInvoiceWeekSelectHtml = (seg) => {
     ? fmtInvoiceHint(lockedInvoiceId)
     : (delayHint ? `⏳ ${delayHint}` : '○ Invoiceable now');
 
-  const disabledAttrSeg = (disabledAttr || isSegLocked) ? 'disabled' : '';
+   const disabledAttrSeg = (disabledAttr || isSegLocked) ? 'disabled' : '';
+
+  // ✅ Preferred display: UK date (DD/MM/YYYY) for the picker input
+  const toUk = (ymd) => {
+    const s = String(ymd || '').slice(0, 10);
+    if (!s) return '';
+    if (typeof formatIsoToUk === 'function') return formatIsoToUk(s);
+    const m = s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    return m ? `${m[3]}/${m[2]}/${m[1]}` : s;
+  };
+
+  // Only show an explicit selected date if it is explicitly stored or explicitly staged
+  const stagedExplicit = Object.prototype.hasOwnProperty.call(segTargets, segId);
+  const storedExplicit = !!storedTargetRaw;
+
+  const explicitTarget =
+    stagedExplicit ? String(segTargets[segId] || '').trim()
+    : (storedExplicit ? storedTargetRaw : '');
+
+  const isPaused = (explicitTarget === pauseWeekStart);
+  const valueUk  = (!isPaused && explicitTarget) ? toUk(explicitTarget) : '';
+
+  // Disable date input if paused or already invoiced/locked
+  const dateDisabled = (disabledAttrSeg || isPaused) ? 'disabled' : '';
+  const pauseDisabled = disabledAttrSeg ? 'disabled' : '';
+
+  const pauseChecked = isPaused ? 'checked' : '';
 
   return `
-    <select name="seg_invoice_week" data-segment-id="${segId}" ${disabledAttrSeg}>
-      ${optionsHtml}
-    </select>
-    <span class="mini">${invoiceStateHint}</span>
+    <div style="display:flex;flex-direction:column;gap:4px;">
+      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
+        <input
+          type="text"
+          class="input mini"
+          name="seg_invoice_week"
+          data-segment-id="${segId}"
+          placeholder="DD/MM/YYYY"
+          value="${valueUk}"
+          ${dateDisabled}
+        />
+        <label class="mini" style="display:flex;gap:6px;align-items:center;user-select:none;">
+          <input
+            type="checkbox"
+            name="seg_invoice_pause"
+            data-segment-id="${segId}"
+            ${pauseChecked}
+            ${pauseDisabled}
+          />
+          Delay indefinitely
+        </label>
+      </div>
+      <span class="mini">${invoiceStateHint}</span>
+    </div>
   `;
+
 
 
 };
@@ -32968,13 +33033,16 @@ const rowStyle = rowIsFlagged ? ` style="background: rgba(192, 57, 43, 0.18);"` 
           <td>${pay   !== '' ? esc(pay)   : '<span class="mini">—</span>'}</td>
           <td>${charge!== '' ? esc(charge): '<span class="mini">—</span>'}</td>
           <td>
-            <input
-              type="checkbox"
-              name="seg_exclude_from_pay"
-              data-segment-id="${seg.segment_id}"
-              ${effExclude ? 'checked' : ''}
-              ${disabledAttr}
-            />
+     const disabledExcludeAttr = (disabledAttr || lockedInvoiceId) ? 'disabled' : '';
+
+<input
+  type="checkbox"
+  name="seg_exclude_from_pay"
+  data-segment-id="${seg.segment_id}"
+  ${effExclude ? 'checked' : ''}
+  ${disabledExcludeAttr}
+/>
+
             <span class="mini">Tick = exclude from pay (staged)</span>
           </td>
           <td>${invoiceWeekCellHtml}</td>
@@ -40848,80 +40916,131 @@ if (this.entity === 'timesheets' && k === 'lines') {
         });
       });
 
-         // ✅ SEGMENTS: invoice week select wiring (still needed)
-      const weekSelects = root.querySelectorAll('select[name="seg_invoice_week"][data-segment-id]');
-      weekSelects.forEach(sel => {
-        if (sel.__tsWeekWired) return;
-        sel.__tsWeekWired = true;
+           // ✅ SEGMENTS: invoice week input + pause checkbox wiring (still needed)
+      // New UI:
+      //   - input[name="seg_invoice_week"] (UK date picker)
+      //   - input[name="seg_invoice_pause"] (Delay indefinitely → 2099-01-05)
+      // Enforces:
+      //   - Monday-only
+      //   - min Monday = current week start
+      // Prevents staging if invoice_locked_invoice_id exists (snap back).
+      const weekInputs = root.querySelectorAll('input[name="seg_invoice_week"][data-segment-id]');
+      const pauseChecks = root.querySelectorAll('input[name="seg_invoice_pause"][data-segment-id]');
 
-        const segId = sel.getAttribute('data-segment-id') || '';
-        if (!segId) return;
+      // Baseline week start (natural week) for this timesheet
+      const computeWeekStartFromWeekEnding = (weYmd) => {
+        if (!weYmd) return null;
+        const d = new Date(`${String(weYmd).slice(0,10)}T00:00:00Z`);
+        if (Number.isNaN(d.getTime())) return null;
+        d.setUTCDate(d.getUTCDate() - 6);
+        const yyyy = d.getUTCFullYear();
+        const mm   = String(d.getUTCMonth() + 1).padStart(2, '0');
+        const dd   = String(d.getUTCDate()).padStart(2, '0');
+        return `${yyyy}-${mm}-${dd}`;
+      };
 
-        mc.timesheetState.segmentInvoiceTargets = (mc.timesheetState.segmentInvoiceTargets && typeof mc.timesheetState.segmentInvoiceTargets === 'object')
-          ? mc.timesheetState.segmentInvoiceTargets
-          : {};
+      // Current invoice week start (Monday of "today")
+      const computeCurrentWeekStart = () => {
+        const now = new Date();
+        const base = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+        const day = base.getUTCDay();      // 0=Sun..6=Sat
+        const offset = (day + 6) % 7;      // since Monday
+        base.setUTCDate(base.getUTCDate() - offset);
+        const yyyy = base.getUTCFullYear();
+        const mm   = String(base.getUTCMonth() + 1).padStart(2, '0');
+        const dd   = String(base.getUTCDate()).padStart(2, '0');
+        return `${yyyy}-${mm}-${dd}`;
+      };
 
-        const staged = mc.timesheetState.segmentInvoiceTargets[segId];
-        if (staged) sel.value = staged;
+      const det = mc.timesheetDetails || {};
+      const ts  = det.timesheet || {};
+      const tsWeekEnding =
+        ts.week_ending_date ||
+        mc.data?.week_ending_date ||
+        (det.contract_week && det.contract_week.week_ending_date) ||
+        null;
 
-        // Baseline week start (natural week) for this timesheet
-        const computeWeekStartFromWeekEnding = (weYmd) => {
-          if (!weYmd) return null;
-          const d = new Date(`${String(weYmd).slice(0,10)}T00:00:00Z`);
-          if (Number.isNaN(d.getTime())) return null;
-          d.setUTCDate(d.getUTCDate() - 6);
-          const yyyy = d.getUTCFullYear();
-          const mm   = String(d.getUTCMonth() + 1).padStart(2, '0');
-          const dd   = String(d.getUTCDate()).padStart(2, '0');
-          return `${yyyy}-${mm}-${dd}`;
-        };
+      const naturalWeekStart = tsWeekEnding ? computeWeekStartFromWeekEnding(tsWeekEnding) : null;
+      const currentWeekStart = computeCurrentWeekStart();
+      const pauseWeekStart   = '2099-01-05';
 
-        const det = mc.timesheetDetails || {};
-        const ts  = det.timesheet || {};
-        const tsWeekEnding =
-          ts.week_ending_date ||
-          mc.data?.week_ending_date ||
-          (det.contract_week && det.contract_week.week_ending_date) ||
-          null;
+      mc.timesheetState.segmentInvoiceTargets = (mc.timesheetState.segmentInvoiceTargets && typeof mc.timesheetState.segmentInvoiceTargets === 'object')
+        ? mc.timesheetState.segmentInvoiceTargets
+        : {};
 
-        const naturalWeekStart = tsWeekEnding ? computeWeekStartFromWeekEnding(tsWeekEnding) : null;
-        const pauseWeekStart   = '2099-01-05';
+      const isMondayIso = (iso) => {
+        try {
+          const d = new Date(`${String(iso).slice(0,10)}T00:00:00Z`);
+          if (Number.isNaN(d.getTime())) return false;
+          return d.getUTCDay() === 1; // Monday
+        } catch {
+          return false;
+        }
+      };
 
-        sel.addEventListener('change', () => {
-          const segObj =
-            (mc.timesheetDetails && Array.isArray(mc.timesheetDetails.segments))
-              ? mc.timesheetDetails.segments.find(s => s && String(s.segment_id || '') === String(segId))
-              : null;
+      const applyUiFromTarget = (segId, targetIso) => {
+        const inEl = root.querySelector(`input[name="seg_invoice_week"][data-segment-id="${CSS.escape(String(segId))}"]`);
+        const pEl  = root.querySelector(`input[name="seg_invoice_pause"][data-segment-id="${CSS.escape(String(segId))}"]`);
+        if (!inEl || !pEl) return;
 
-          const lockedInvoiceId = segObj ? String(segObj.invoice_locked_invoice_id || '').trim() : '';
-          const storedTargetRaw = segObj ? String(segObj.invoice_target_week_start || '').trim() : '';
+        const t = String(targetIso || '').trim();
+        const paused = (t === pauseWeekStart);
 
-          // If locked, do not stage anything (and snap back to stored/baseline)
-          if (lockedInvoiceId) {
-            const back =
-              storedTargetRaw ||
-              naturalWeekStart ||
-              String(sel.value || '').trim() ||
-              '';
-            sel.value = back;
-            if (Object.prototype.hasOwnProperty.call(mc.timesheetState.segmentInvoiceTargets, segId)) {
-              delete mc.timesheetState.segmentInvoiceTargets[segId];
-            }
-            return;
+        // Pause checkbox reflects sentinel
+        pEl.checked = paused;
+
+        // Date input shows only non-pause explicit date (UK formatted)
+        if (paused || !t) {
+          inEl.value = '';
+        } else {
+          try {
+            inEl.value = (typeof formatIsoToUk === 'function') ? formatIsoToUk(t) : inEl.value;
+          } catch {}
+        }
+
+        // If paused, date input should be disabled (matches renderer behaviour)
+        if (paused) {
+          inEl.disabled = true;
+        }
+      };
+
+      const stageTargetFromControls = (segId) => {
+        const inEl = root.querySelector(`input[name="seg_invoice_week"][data-segment-id="${CSS.escape(String(segId))}"]`);
+        const pEl  = root.querySelector(`input[name="seg_invoice_pause"][data-segment-id="${CSS.escape(String(segId))}"]`);
+        if (!inEl || !pEl) return;
+
+        const segObj =
+          (mc.timesheetDetails && Array.isArray(mc.timesheetDetails.segments))
+            ? mc.timesheetDetails.segments.find(s => s && String(s.segment_id || '') === String(segId))
+            : null;
+
+        const lockedInvoiceId = segObj ? String(segObj.invoice_locked_invoice_id || '').trim() : '';
+        const storedTargetRaw = segObj ? String(segObj.invoice_target_week_start || '').trim() : '';
+
+        // If locked, do not stage anything (snap back to stored/staged UI)
+        if (lockedInvoiceId) {
+          const back =
+            (Object.prototype.hasOwnProperty.call(mc.timesheetState.segmentInvoiceTargets, segId)
+              ? String(mc.timesheetState.segmentInvoiceTargets[segId] || '').trim()
+              : '') ||
+            storedTargetRaw ||
+            '';
+
+          applyUiFromTarget(segId, back);
+          if (Object.prototype.hasOwnProperty.call(mc.timesheetState.segmentInvoiceTargets, segId)) {
+            delete mc.timesheetState.segmentInvoiceTargets[segId];
           }
+          return;
+        }
 
-          const v = String(sel.value || '').trim();
+        // Pause mapping: checkbox wins and maps to sentinel
+        if (pEl.checked) {
+          inEl.value = '';
+          inEl.disabled = true;
 
-          // Baseline selection means "not delayed" → do not stage
-          if (!v || (naturalWeekStart && v === naturalWeekStart)) {
-            if (Object.prototype.hasOwnProperty.call(mc.timesheetState.segmentInvoiceTargets, segId)) {
-              delete mc.timesheetState.segmentInvoiceTargets[segId];
-            }
-            try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
-            return;
-          }
+          const v = pauseWeekStart;
 
-          // If user selected the stored value, also do not stage
+          // If equals stored value, do not stage
           if (storedTargetRaw && v === storedTargetRaw) {
             if (Object.prototype.hasOwnProperty.call(mc.timesheetState.segmentInvoiceTargets, segId)) {
               delete mc.timesheetState.segmentInvoiceTargets[segId];
@@ -40930,13 +41049,108 @@ if (this.entity === 'timesheets' && k === 'lines') {
             return;
           }
 
-          // Pause or delayed week → stage explicitly
-          if (v === pauseWeekStart || (!naturalWeekStart || v !== naturalWeekStart)) {
-            mc.timesheetState.segmentInvoiceTargets[segId] = v;
-            try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
+          mc.timesheetState.segmentInvoiceTargets[segId] = v;
+          try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
+          return;
+        }
+
+        // Not paused: enable date input
+        inEl.disabled = false;
+
+        const uk = String(inEl.value || '').trim();
+        const iso = uk ? (typeof parseUkDateToIso === 'function' ? parseUkDateToIso(uk) : null) : null;
+
+        // Empty date means "not explicitly delayed" → do not stage
+        if (!iso) {
+          if (Object.prototype.hasOwnProperty.call(mc.timesheetState.segmentInvoiceTargets, segId)) {
+            delete mc.timesheetState.segmentInvoiceTargets[segId];
           }
+          try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
+          return;
+        }
+
+        // Enforce Monday-only
+        if (!isMondayIso(iso)) {
+          alert('Please select a Monday (week start).');
+          const back =
+            (Object.prototype.hasOwnProperty.call(mc.timesheetState.segmentInvoiceTargets, segId)
+              ? String(mc.timesheetState.segmentInvoiceTargets[segId] || '').trim()
+              : '') ||
+            storedTargetRaw ||
+            '';
+          applyUiFromTarget(segId, back);
+          return;
+        }
+
+        // Enforce min Monday = current week start
+        if (currentWeekStart && iso < currentWeekStart) {
+          alert(`You can’t select a week before ${typeof formatIsoToUk === 'function' ? formatIsoToUk(currentWeekStart) : currentWeekStart}.`);
+          const back =
+            (Object.prototype.hasOwnProperty.call(mc.timesheetState.segmentInvoiceTargets, segId)
+              ? String(mc.timesheetState.segmentInvoiceTargets[segId] || '').trim()
+              : '') ||
+            storedTargetRaw ||
+            '';
+          applyUiFromTarget(segId, back);
+          return;
+        }
+
+        // Baseline selection means "not delayed" → do not stage
+        if (naturalWeekStart && iso === naturalWeekStart) {
+          if (Object.prototype.hasOwnProperty.call(mc.timesheetState.segmentInvoiceTargets, segId)) {
+            delete mc.timesheetState.segmentInvoiceTargets[segId];
+          }
+          try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
+          return;
+        }
+
+        // If equals stored value, do not stage
+        if (storedTargetRaw && iso === storedTargetRaw) {
+          if (Object.prototype.hasOwnProperty.call(mc.timesheetState.segmentInvoiceTargets, segId)) {
+            delete mc.timesheetState.segmentInvoiceTargets[segId];
+          }
+          try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
+          return;
+        }
+
+        // Stage explicitly
+        mc.timesheetState.segmentInvoiceTargets[segId] = iso;
+        try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
+      };
+
+      // Wire date inputs (attach UK date picker + change handler)
+      weekInputs.forEach(inEl => {
+        if (!inEl || inEl.__tsWeekWired) return;
+        inEl.__tsWeekWired = true;
+
+        const segId = inEl.getAttribute('data-segment-id') || '';
+        if (!segId) return;
+
+        // Attach UK date picker with min bound (dynamic safe)
+        try {
+          if (typeof attachUkDatePicker === 'function') {
+            attachUkDatePicker(inEl, { minDate: currentWeekStart });
+          }
+        } catch {}
+
+        inEl.addEventListener('change', () => {
+          stageTargetFromControls(segId);
         });
       });
+
+      // Wire pause checkboxes
+      pauseChecks.forEach(pEl => {
+        if (!pEl || pEl.__tsPauseWired) return;
+        pEl.__tsPauseWired = true;
+
+        const segId = pEl.getAttribute('data-segment-id') || '';
+        if (!segId) return;
+
+        pEl.addEventListener('change', () => {
+          stageTargetFromControls(segId);
+        });
+      });
+
 
          // ✅ KEEP: Additional Rates weekly extras inputs
       // ✅ EXTEND: support per-day units via data-extra-ymd="YYYY-MM-DD"
@@ -41503,9 +41717,9 @@ if (isEditing && importAuth && hasRealTs) {
   if (root2) {
 
        // Allowlist: deferral controls remain editable
-    const isDeferralControl = (el) => {
+     const isDeferralControl = (el) => {
       const nm = String(el?.name || '');
-      if (nm !== 'seg_exclude_from_pay' && nm !== 'seg_invoice_week') return false;
+      if (nm !== 'seg_exclude_from_pay' && nm !== 'seg_invoice_week' && nm !== 'seg_invoice_pause') return false;
       if (!el.hasAttribute('data-segment-id')) return false;
 
       const segId = String(el.getAttribute('data-segment-id') || '').trim();
@@ -41521,8 +41735,18 @@ if (isEditing && importAuth && hasRealTs) {
         if (lockedInvoiceId) return false;
       } catch {}
 
+      // If the segment is paused (delay indefinitely), keep the DATE input disabled.
+      // The pause checkbox itself remains editable.
+      try {
+        if (nm === 'seg_invoice_week') {
+          const pauseEl = root2.querySelector(`input[name="seg_invoice_pause"][data-segment-id="${CSS.escape(segId)}"]`);
+          if (pauseEl && pauseEl.checked) return false;
+        }
+      } catch {}
+
       return true;
     };
+
 
     // Lock ALL inputs/selects/textareas in Lines tab except deferral controls
     root2.querySelectorAll('input, select, textarea').forEach(el => {
@@ -43647,23 +43871,29 @@ if (shouldNoop) {
 
       // Only patch if the saved modal entity maps to the captured summary section.
       const ent = String(fr.entity || window.modalCtx?.entity || '').trim();
-      const secEnt = (typeof getSectionForEntity === 'function')
-        ? getSectionForEntity(ent)
-        : String(currentSection || '');
 
-      if (sctx && secEnt && String(sctx.section || '') === String(secEnt)) {
-        // Prefer common wrapper shapes but fall back to saved as-is
-        const savedRoot = (saved && typeof saved === 'object')
-          ? (saved.contract || saved.candidate || saved.client || saved.invoice || saved.timesheet || saved.umbrella || saved)
-          : saved;
+      // ✅ OPTION A: Timesheets already refresh/patch Summary via their own post-save refresh pipeline.
+      // Skipping the generic patch here prevents the visible "flip back then forward" bounce.
+      if (String(ent).toLowerCase() !== 'timesheets') {
+        const secEnt = (typeof getSectionForEntity === 'function')
+          ? getSectionForEntity(ent)
+          : String(currentSection || '');
 
-        await summaryApplySavedRecordToActiveSummary(ent, savedRoot, sctx);
+        if (sctx && secEnt && String(sctx.section || '') === String(secEnt)) {
+          // Prefer common wrapper shapes but fall back to saved as-is
+          const savedRoot = (saved && typeof saved === 'object')
+            ? (saved.contract || saved.candidate || saved.client || saved.invoice || saved.timesheet || saved.umbrella || saved)
+            : saved;
+
+          await summaryApplySavedRecordToActiveSummary(ent, savedRoot, sctx);
+        }
       }
     }
   } catch (e) {
     // Never break save/close flow if Summary patch fails
     try { console.warn('[SUMMARY][PATCH] failed (non-fatal)', e); } catch {}
   }
+
 
 
   // ─────────────────────────────────────────────
@@ -53072,12 +53302,15 @@ function showRelatedMenu(x, y, counts, entity, id){
     it.style.borderRadius = '8px';
     it.style.cursor = disabled ? 'default' : 'pointer';
     it.style.opacity = disabled ? '.6' : '1';
-    it.onmouseenter = ()=>{ if (!disabled) it.style.background = 'rgba(255,255,255,.06)'; };
+    it.onmouseenter = ()=>{ if (!disabled) it.style.background = 'rgba(255,255,255,06)'; };
     it.onmouseleave = ()=>{ it.style.background = 'transparent'; };
 
     if (!disabled) {
       it.onclick = async (ev)=>{
         ev.stopPropagation();
+
+        // ✅ Close menu BEFORE switching (prevents overlay/state glitches)
+        closeRelatedMenu();
 
         // Tear down any open modal before switching section
         if ((window.__modalStack?.length || 0) > 0 || window.modalCtx?.entity) {
@@ -53085,12 +53318,9 @@ function showRelatedMenu(x, y, counts, entity, id){
         }
 
         const targetSection = resolveTargetSection(relationType);
-        if (!targetSection) {
-          closeRelatedMenu();
-          return;
-        }
+        if (!targetSection) return;
 
-        // ✅ Persist related view mode into section list-state filters
+        // ✅ Persist related view mode into section list-state filters (EXCLUSIVE; do not merge)
         window.__listState = window.__listState || {};
         const st = (window.__listState[targetSection] ||= {
           page: 1,
@@ -53105,27 +53335,26 @@ function showRelatedMenu(x, y, counts, entity, id){
         st.total = null;
         st.hasMore = false;
 
-        const curFilters = (st.filters && typeof st.filters === 'object') ? { ...st.filters } : {};
-        curFilters.related = {
-          source_entity: String(entity || ''),
-          source_id: String(id || ''),
-          relation_type: String(relationType || '')
+        st.filters = {
+          related: {
+            source_entity: String(entity || ''),
+            source_id: String(id || ''),
+            relation_type: String(relationType || '')
+          }
         };
-        st.filters = curFilters;
 
-        // ✅ Fix first-click nav highlight bug:
-        // update section BEFORE load/render so nav highlights correctly.
-        currentSection = targetSection;
+        // ✅ Reset selection state for target section (prevents mixed-grid weirdness)
+        window.__selection = window.__selection || {};
+        window.__selection[targetSection] = window.__selection[targetSection] || { fingerprint:'', ids:new Set() };
 
-        // ✅ Use normal section navigation/list load path (no bespoke inject renderSummary(rows))
-        try {
-          const data = await loadSection();
-          renderSummary(data);
-        } catch (e) {
-          console.warn('[RELATED] failed to load related view', e);
+        // ✅ Switch section and force full app render path (nav highlight + correct columns/data)
+        currentSection   = targetSection;
+        currentRows      = [];
+        currentSelection = null;
+
+        try { await renderAll(); } catch (e) {
+          console.warn('[RELATED] failed to render related view', e);
         }
-
-        closeRelatedMenu();
       };
     }
 
@@ -59612,15 +59841,19 @@ const hasQr = !!(qrStatusRaw && String(qrStatusRaw).trim());
 const expensesTabEnabled =
   !!hasTsForExpenses &&
   !!hasFin &&
+  (sheetScope !== 'SEGMENT') &&
   (subMode === 'MANUAL' || hasQr);
 
 const expensesTabReason = !hasTsForExpenses
   ? 'Expenses are available once a timesheet exists.'
   : (!hasFin
       ? 'Expenses unavailable until TSFIN snapshot exists.'
-      : (!(subMode === 'MANUAL' || hasQr)
-          ? 'Expenses are available for Manual or QR timesheets.'
-          : ''));
+      : ((sheetScope === 'SEGMENT')
+          ? 'Expenses must be added via Manual Timesheet for Segment Timesheets'
+          : (!(subMode === 'MANUAL' || hasQr)
+              ? 'Expenses are available for Manual or QR timesheets.'
+              : '')));
+
 
 // ─────────────────────────────────────────────
 // ✅ Expenses draft seed (derived from TSFIN)
