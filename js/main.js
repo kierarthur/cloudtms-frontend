@@ -4940,6 +4940,19 @@ function extractFiltersFromForm(formSel='#searchForm'){
     }
   });
 
+  // ✅ Safety: strip legacy timesheets-summary keys if they ever appear in the form payload
+  // (these must not drive summary filtering anymore)
+  [
+    'ts_stage',
+    'summary_stage',
+    'status_code',
+    'processing_status',
+    'client_invoiced',
+    'needs_attention'
+  ].forEach(k => {
+    if (Object.prototype.hasOwnProperty.call(raw, k)) delete raw[k];
+  });
+
   return raw;
 }
 
@@ -4961,6 +4974,16 @@ function populateSearchFormFromFilters(filters={}, formSel='#searchForm'){
   ];
 
   for (const [k,v] of Object.entries(filters || {})) {
+    // ✅ Ignore legacy keys if they exist in state (they should not be reapplied to the form)
+    if (k === 'ts_stage' ||
+        k === 'summary_stage' ||
+        k === 'status_code' ||
+        k === 'processing_status' ||
+        k === 'client_invoiced' ||
+        k === 'needs_attention') {
+      continue;
+    }
+
     const el = form.querySelector(`[name="${k}"]`);
     if (!el) continue;
 
@@ -4986,6 +5009,7 @@ function populateSearchFormFromFilters(filters={}, formSel='#searchForm'){
     el.value = (v == null ? '' : String(v));
   }
 }
+
 
 
 
@@ -5814,2142 +5838,6 @@ function renderContractsTable(rows) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 // ✅ CHANGED: honour fresh row; give the modal an openToken for stable formState binding
-
-async function openContract(row) {
-  const LOGC = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : true;
-  const isCreate = !row || !row.id;
-  if (LOGC) console.log('[CONTRACTS] openContract ENTRY', { isCreate, rowPreview: !!row });
-
-  window.modalCtx = {
-  entity: 'contracts',
-  mode: isCreate ? 'create' : 'view',
-  data: { ...(row || {}) },
-  _saveInFlight: false,
-
-  // ✅ NEW: track whether this save is calendar-only
-  __calendarDirty: false,
-  __nonCalendarDirty: false
-};
-
-  // ✅ NEW: always hydrate prevailing finance (ERNI/VAT) from server.
-  // - CREATE: GET /api/contracts/finance-globals (today’s window)
-  // - EDIT:   GET /api/contracts/:id (contract + finance + margins)
-  try {
-    // Prefer backend as source-of-truth for live finance multipliers
-    if (isCreate) {
-      const r = await authFetch(API('/api/contracts/finance-globals'));
-      if (r.ok) {
-        const j = await r.json().catch(() => null);
-        const fin = (j && j.finance && typeof j.finance === 'object') ? j.finance : null;
-        if (fin) {
-          window.modalCtx.finance = fin;
-          try {
-            if (typeof fin.erni_multiplier === 'number' && fin.erni_multiplier > 0) window.__ERNI_MULT__ = fin.erni_multiplier;
-            if (typeof fin.vat_multiplier  === 'number' && fin.vat_multiplier  > 0) window.__VAT_MULT__  = fin.vat_multiplier;
-          } catch {}
-        }
-      }
-    } else {
-      const cid = window.modalCtx?.data?.id || null;
-      if (cid && typeof getContract === 'function') {
-        const raw = await getContract(cid);
-        const c   = (raw && raw.contract && typeof raw.contract === 'object') ? raw.contract : raw;
-        const fin = (raw && raw.finance  && typeof raw.finance  === 'object') ? raw.finance  : null;
-        const mg  = (raw && raw.margins  && typeof raw.margins  === 'object') ? raw.margins  : null;
-
-        if (c && typeof c === 'object') {
-          window.modalCtx.data = { ...(window.modalCtx.data || {}), ...c };
-        }
-        if (fin) {
-          window.modalCtx.finance = fin;
-          try {
-            if (typeof fin.erni_multiplier === 'number' && fin.erni_multiplier > 0) window.__ERNI_MULT__ = fin.erni_multiplier;
-            if (typeof fin.vat_multiplier  === 'number' && fin.vat_multiplier  > 0) window.__VAT_MULT__  = fin.vat_multiplier;
-          } catch {}
-        }
-        if (mg) {
-          window.modalCtx.margins = mg;
-        }
-      }
-    }
-  } catch (e) {
-    if (LOGC) console.warn('[CONTRACTS] finance/margins hydrate failed (non-fatal)', e);
-  }
-
-
-  const preToken = window.__preOpenToken || null;
-  if (LOGC) console.log('[CONTRACTS] preOpenToken snapshot', preToken);
-
-
-  if (isCreate) {
-    if (preToken) {
-      window.modalCtx.openToken = preToken;
-      try { delete window.__preOpenToken; } catch {}
-      if (LOGC) console.log('[CONTRACTS] using preOpenToken for create', preToken);
-    } else if (!window.modalCtx.openToken) {
-      window.modalCtx.openToken = `contract:new:${Date.now()}:${Math.random().toString(36).slice(2)}`;
-      if (LOGC) console.log('[CONTRACTS] openToken issued for create', window.modalCtx.openToken);
-    }
-  }
-
-  // If this create comes from Clone&Extend staging, pull intent (end-old etc.)
-  try {
-    const intents = (window.__cloneIntents || {});
-    const token   = window.modalCtx.openToken;
-    const ci      = intents[token];
-
-    if (LOGC) console.groupCollapsed('[CLONE][attach-intent]');
-    if (LOGC) console.log('openToken', token);
-    if (LOGC) console.log('staging.keys', Object.keys(intents || {}));
-    if (LOGC) console.log('staging.has(openToken)?', Object.prototype.hasOwnProperty.call(intents, token));
-
-    if (ci) {
-      // Normalise & echo intent
-      const endIso = ci.end_existing_on || null;
-      window.modalCtx.__cloneIntent = {
-        source_contract_id: ci.source_contract_id || null,
-        end_existing: !!ci.end_existing,
-        end_existing_on: endIso
-      };
-      if (LOGC) console.log('ATTACHED', window.modalCtx.__cloneIntent);
-      // one-shot: keep it only on this modal
-      try { delete intents[token]; if (LOGC) console.log('intent cleared from staging bucket'); } catch {}
-    } else {
-      if (LOGC) console.log('NO_INTENT_FOR_TOKEN (possible token mismatch) – will not truncate tail unless a later step re-attaches.');
-    }
-    if (LOGC) console.groupEnd?.();
-  } catch (e) {
-    if (LOGC) console.warn('[CLONE][attach-intent] EXCEPTION', e);
-  }
-
-  try {
-    const base = window.modalCtx.data || {};
-
-    const fs = (window.modalCtx.formState ||= { __forId: (base.id ?? window.modalCtx.openToken ?? null), main:{}, pay:{} });
-    fs.__forId = preToken || fs.__forId || (base.id ?? window.modalCtx.openToken ?? null);
-    if (LOGC) console.log('[CONTRACTS] formState forId bound', { preToken, forId: fs.__forId, openToken: window.modalCtx.openToken });
-
-    const m = (fs.main ||= {});
-    if (m.__seeded !== true) {
-      if (base.candidate_id != null) m.candidate_id = base.candidate_id;
-      if (base.client_id != null)    m.client_id    = base.client_id;
-      if (base.role != null)         m.role         = base.role;
-      if (base.band != null)         m.band         = base.band;
-      if (base.display_site != null) m.display_site = base.display_site;
-      if (base.start_date)           m.start_date   = base.start_date;
-      if (base.end_date)             m.end_date     = base.end_date;
-         if (base.pay_method_snapshot)  m.pay_method_snapshot = base.pay_method_snapshot;
-      if (base.default_submission_mode) m.default_submission_mode = base.default_submission_mode;
-
-      // NEW: seed contract route/settings overrides (only if present on row)
-    if (base.is_nhsp != null)               m.is_nhsp = base.is_nhsp;
-if (base.autoprocess_hr != null)        m.autoprocess_hr = base.autoprocess_hr;
-if (base.requires_hr != null)           m.requires_hr = base.requires_hr;
-if (base.no_timesheet_required != null) m.no_timesheet_required = base.no_timesheet_required;
-
-// ✅ NEW: attachments
-if (base.hr_attach_to_invoice != null)  m.hr_attach_to_invoice = base.hr_attach_to_invoice;
-if (base.ts_attach_to_invoice != null)  m.ts_attach_to_invoice = base.ts_attach_to_invoice;
-
-      if (base.daily_calc_of_invoices != null) m.daily_calc_of_invoices = base.daily_calc_of_invoices;
-      if (base.group_nightsat_sunbh != null) m.group_nightsat_sunbh = base.group_nightsat_sunbh;
-      if (base.self_bill != null)            m.self_bill = base.self_bill;
-
-      if (base.week_ending_weekday_snapshot != null) m.week_ending_weekday_snapshot = String(base.week_ending_weekday_snapshot);
-      if (base.bucket_labels_json)   m.__bucket_labels = base.bucket_labels_json;
-      if (base.std_schedule_json)    m.__template      = base.std_schedule_json;
-      if (base.std_hours_json)       m.__hours         = base.std_hours_json;
-      // Seed mileage if present on row
-      if (base.mileage_charge_rate != null) m.mileage_charge_rate = base.mileage_charge_rate;
-      if (base.mileage_pay_rate != null)    m.mileage_pay_rate    = base.mileage_pay_rate;
-      m.__seeded = true;
-
-      if (LOGC) console.log('[CONTRACTS] seed formState (main/pay) from base row', {
-        forId: (window.modalCtx.formState && window.modalCtx.formState.__forId),
-        mainKeys: Object.keys(window.modalCtx.formState?.main || {}),
-        payKeys: Object.keys(window.modalCtx.formState?.pay || {})
-      });
-
-    }
-    const p = (fs.pay ||= {});
-    if (!Object.keys(p).length && base.rates_json && typeof base.rates_json === 'object') {
-      const buckets = ['paye_day','paye_night','paye_sat','paye_sun','paye_bh','umb_day','umb_night','umb_sat','umb_sun','umb_bh','charge_day','charge_night','charge_sat','charge_sun','charge_bh'];
-      for (const k of buckets) {
-        const v = base.rates_json[k];
-        if (v === 0 || (typeof v === 'number' && Number.isFinite(v))) p[k] = String(v);
-      }
-    }
-  } catch {}
-
-    const extraButtons = [];
-
-  // Only attach Delete Contract for existing contracts that the backend
-  // has marked as deletable (can_delete === true).
-  const hasId     = !!window.modalCtx.data?.id;
-  const canDelete = !!(hasId && window.modalCtx.data?.can_delete);
-
-  if (!isCreate && hasId && canDelete) {
-    extraButtons.push({
-      label: 'Delete contract',
-      role: 'danger',
-      onClick: async () => {
-        const id = window.modalCtx.data?.id;
-        if (!id) return;
-
-        // Only allow action in EDIT mode – if still in view mode,
-        // nudge the user to click Edit first.
-        const fr = (typeof window.__getModalFrame === 'function')
-          ? window.__getModalFrame()
-          : null;
-        if (fr && fr.mode !== 'edit') {
-          alert('Click Edit to make changes before deleting this contract.');
-          return;
-        }
-
-        const ok = window.confirm('Do you want to permanently delete this contract?');
-        if (!ok) return;
-
-        try {
-          if (LOGC) console.log('[CONTRACTS] deleteContract', { id });
-          await deleteContract(id);
-          try { discardAllModalsAndState(); } catch {}
-          await renderAll();
-        } catch (e) {
-          alert(e?.message || 'Delete failed');
-        }
-      }
-    });
-  }
-
-const tabDefs = [
-  { key: 'main',     title: 'Main' },
-  { key: 'rates',    title: 'Rates' },
-  { key: 'extras',   title: 'Additional Rates' }, // NEW TAB
-  { key: 'calendar', title: 'Calendar' }
-];
-if (LOGC) console.log('[CONTRACTS] tabs', tabDefs.map(t => t.key));
-
-  const isSuccessorCreate = isCreate && ( !!window.modalCtx?.__cloneIntent || !!preToken );
-  if (LOGC) console.log('[CONTRACTS] showModal opts preview', {
-    hasId, isCreate, isSuccessorCreate,
-    stayOpenOnSave: !!isSuccessorCreate, noParentGate: !!isSuccessorCreate,
-    openToken: window.modalCtx.openToken, hasCloneIntent: !!window.modalCtx.__cloneIntent
-  });
-
-  showModal(
-
-  isCreate ? 'Create Contract' : 'Edit Contract',
-  tabDefs,
-  (key, row) => {
-    const ctx = { data: row };
-    if (key === 'main')     return renderContractMainTab(ctx);
-    if (key === 'rates')    return renderContractRatesTab(ctx);
-    if (key === 'extras')   return renderContractAdditionalRatesTab(ctx); // NEW
-    if (key === 'calendar') return renderContractCalendarTab(ctx);
-    return `<div class="tabc">Unknown tab.</div>`;
-  },
-  async () => {
-      if (window.modalCtx?._saveInFlight) return false;
-      window.modalCtx._saveInFlight = true;
-      try {
-        if (LOGC) console.groupCollapsed('[CONTRACTS] onSave pipeline');
-
-        snapshotContractForm();
-        console.warn('[BREACH A] after snapshotContractForm');
-
-// ✅ Capture calendar viewport BEFORE we do anything that might re-render/reset it
-try {
-  const fr0 = window.__getModalFrame?.();
-  const tab0 = fr0?.currentTabKey || (document.querySelector('#modalTabs button.active')?.textContent?.toLowerCase() || '');
-  const cid0 = window.modalCtx?.data?.id || null;
-
-  if (tab0 === 'calendar' && cid0) {
-    const cal0 = window.__calState?.[cid0] || {};
-    const sb0  = document.getElementById('__calScroll');
-
-    window.modalCtx.__calViewport = {
-      contract_id: cid0,
-      view: cal0.view || 'year',
-      win: (cal0.win && cal0.win.from && cal0.win.to) ? { from: cal0.win.from, to: cal0.win.to } : null,
-      scrollTop: sb0 ? sb0.scrollTop : 0,
-      scrollLeft: sb0 ? sb0.scrollLeft : 0
-    };
-
-    if (LOGC) console.log('[CAL][viewport] captured', window.modalCtx.__calViewport);
-  }
-} catch (e) {
-  if (LOGC) console.warn('[CAL][viewport] capture failed (non-fatal)', e);
-}
-
-
-
-
-
-
-
-        // Keep a stable copy in case something re-renders and drops modalCtx.__cloneIntent
-        const __preCloneIntent = window.modalCtx?.__cloneIntent
-          ? { ...window.modalCtx.__cloneIntent }
-          : null;
-        if (LOGC) console.log('[CLONE][pre-save snapshot]', __preCloneIntent || '(none)');
-
-        const base = window.modalCtx?.data || {};
-        const fs   = (window.modalCtx?.formState || { main:{}, pay:{} });
-        const fdForm = document.querySelector('#contractForm');
-        const fd = fdForm ? new FormData(fdForm) : null;
-
-        const fromFS = (k, fallback='') => {
-          const v = (fs.main||{})[k]; return (v===undefined ? fallback : v);
-        };
-        const fromFD = (k, fallback='') => {
-          if (!fd) return fallback;
-          const raw = fd.get(k); return (raw==null ? fallback : String(raw).trim());
-        };
-        const choose = (key, fallback='') => {
-          const fsVal = fromFS(key, null);
-          if (fsVal !== null && fsVal !== undefined && fsVal !== '') return fsVal;
-          const fdVal = fromFD(key, null);
-          if (fdVal !== null && fdVal !== undefined && fdVal !== '') return fdVal;
-          return (base[key] ?? fallback);
-        };
-
-        const ukToIso = (ddmmyyyy, fb=null) => {
-          try {
-            return (typeof parseUkDateToIso === 'function')
-              ? (parseUkDateToIso(ddmmyyyy) || fb)
-              : ((ddmmyyyy && /^\d{2}\/\d{2}\/\d{4}$/.test(ddmmyyyy)) ? ddmmyyyy : (ddmmyyyy || fb));
-          } catch { return ddmmyyyy || fb; }
-        };
-
-              const domLabels = (typeof _collectBucketLabelsFromForm === 'function')
-          ? _collectBucketLabelsFromForm('#contractForm')
-          : null;
-
-        let bucket_labels_json = null;
-
-        // 1) Prefer DOM-collected labels (used as-is, including empty strings)
-        if (domLabels && typeof domLabels === 'object' && Object.keys(domLabels).length) {
-          bucket_labels_json = { ...domLabels };
-        }
-
-        // 2) Else prefer staged labels from preset/application (__bucket_labels)
-        if (!bucket_labels_json) {
-          const stagedMap = (fs.main && typeof fs.main.__bucket_labels === 'object')
-            ? fs.main.__bucket_labels
-            : null;
-          if (stagedMap && Object.keys(stagedMap).length) {
-            bucket_labels_json = { ...stagedMap };
-          }
-        }
-
-        // 3) Else fall back to individual bucket_* / bucket_label_* fields
-        if (!bucket_labels_json) {
-          const staged = {
-            day   : String(fs.main?.bucket_day            ?? fs.main?.bucket_label_day   ?? '').trim(),
-            night : String(fs.main?.bucket_night          ?? fs.main?.bucket_label_night ?? '').trim(),
-            sat   : String(fs.main?.bucket_sat            ?? fs.main?.bucket_label_sat   ?? '').trim(),
-            sun   : String(fs.main?.bucket_sun            ?? fs.main?.bucket_label_sun   ?? '').trim(),
-            bh    : String(fs.main?.bucket_bh             ?? fs.main?.bucket_label_bh    ?? '').trim()
-          };
-          const hasAnyFromStaged = Object.values(staged).some(v => v !== '');
-          bucket_labels_json = hasAnyFromStaged ? staged : (base.bucket_labels_json ?? null);
-        }
-
-
-        const numOrNull = (s) => {
-          const raw = fromFS(s, fromFD(s, ''));
-          if (raw === '' || raw === null || raw === undefined) return null;
-          const n = Number(raw); return Number.isFinite(n) ? n : null;
-        };
-            const gh = { mon: numOrNull('gh_mon'), tue: numOrNull('gh_tue'), wed: numOrNull('gh_wed'),
-                     thu: numOrNull('gh_thu'), fri: numOrNull('gh_fri'), sat: numOrNull('gh_sat'), sun: numOrNull('gh_sun') };
-        const ghFilled = Object.values(gh).some(v => v != null && v !== 0);
-        let std_hours_json = ghFilled ? gh : (base.std_hours_json ?? null);
-        if (!std_hours_json && fs.main && fs.main.__hours) std_hours_json = fs.main.__hours;
-
-        // --- Build std_schedule_json from mon_start/end/break etc. ---
-        const buildScheduleJson = () => {
-          const formEl = document.querySelector('#contractForm');
-          const fd = formEl ? new FormData(formEl) : null;
-          const fsLocal = window.modalCtx?.formState || {};
-          const mainFS  = fsLocal.main || {};
-          const baseRow = window.modalCtx?.data || {};
-
-          const fromFS = (k, fallback = '') => {
-            const v = mainFS[k];
-            return (v === undefined ? fallback : v);
-          };
-          const fromFD = (k, fallback = '') => {
-            if (!fd) return fallback;
-            const raw = fd.get(k);
-            return (raw == null ? fallback : String(raw).trim());
-          };
-          const val = (key, fallback = '') => {
-            const staged = fromFS(key, undefined);
-            if (staged !== undefined && staged !== null && String(staged).trim() !== '') {
-              return String(staged).trim();
-            }
-            const domVal = fromFD(key, undefined);
-            if (domVal !== undefined && domVal !== null && String(domVal).trim() !== '') {
-              return String(domVal).trim();
-            }
-            return fallback;
-          };
-
-          const parseTime = (raw) => {
-            const s = String(raw || '').trim();
-            if (!s) return null;
-
-            // 3–4 digits → HHMM (800, 0830, 2000)
-            if (/^\d{3,4}$/.test(s)) {
-              const p = s.padStart(4, '0');
-              const h = +p.slice(0, 2);
-              const m = +p.slice(2, 4);
-              if (h < 0 || h > 23 || m < 0 || m > 59) return null;
-              return { h, m };
-            }
-
-            // H:MM / HH:MM
-            if (/^\d{1,2}:\d{1,2}$/.test(s)) {
-              const [hh, mm] = s.split(':');
-              const h = +hh;
-              const m = +mm;
-              if (h < 0 || h > 23 || m < 0 || m > 59) return null;
-              return { h, m };
-            }
-
-            return null;
-          };
-
-          const days   = ['mon','tue','wed','thu','fri','sat','sun'];
-          const sched  = {};
-          const issues = [];
-
-          for (const d of days) {
-            const startRaw = val(`${d}_start`, '');
-            const endRaw   = val(`${d}_end`, '');
-            const brRaw    = val(`${d}_break`, '');
-
-            // Completely blank day → skip
-            if (!startRaw && !endRaw && !brRaw) continue;
-
-            const start = parseTime(startRaw);
-            const end   = parseTime(endRaw);
-            const br    = brRaw ? (Number(brRaw) || 0) : 0;
-
-            if (!start || !end) {
-              issues.push(d.toUpperCase());
-              continue;
-            }
-
-            const startStr = `${String(start.h).padStart(2,'0')}:${String(start.m).padStart(2,'0')}`;
-            const endStr   = `${String(end.h).padStart(2,'0')}:${String(end.m).padStart(2,'0')}`;
-
-            sched[d] = {
-              start: startStr,
-              end:   endStr,
-              break_minutes: Math.max(0, br)
-            };
-          }
-
-          if (issues.length) {
-            const msg = `Fix invalid times on: ${issues.join(', ')}`;
-            if (typeof showModalHint === 'function') showModalHint(msg, 'warn');
-            else alert(msg);
-          }
-
-          return { schedule: sched, issues };
-        };
-
-        const { schedule, issues } = buildScheduleJson();
-        if (issues.length) {
-          // Block save; user must fix bad times first
-          window.modalCtx._saveInFlight = false;
-          if (LOGC) console.groupEnd?.();
-          return false;
-        }
-
-        let std_schedule_json = null;
-
-        if (schedule && Object.keys(schedule).length) {
-          // New schedule fully replaces previous one
-          std_schedule_json = schedule;
-        } else if (fs.main && fs.main.__template) {
-          // No rows entered this time → keep last template if present
-          std_schedule_json = fs.main.__template;
-        } else if (base.std_schedule_json) {
-          std_schedule_json = base.std_schedule_json;
-        }
-
-
-
-        const prevStartIso = base.start_date || null;
-        const prevEndIso   = base.end_date   || null;
-
-        const startIso = ukToIso(choose('start_date', ''), base.start_date ?? null);
-        const endIso   = ukToIso(choose('end_date', ''),   base.end_date   ?? null);
-
-        const payMethodSnap = String(
-          (fs.main?.pay_method_snapshot) ||
-          fromFD('pay_method_snapshot', fromFD('default_pay_method_snapshot', base.pay_method_snapshot || 'PAYE')) ||
-          base.pay_method_snapshot || 'PAYE'
-        ).toUpperCase();
-
-        const default_submission_mode = String(
-          choose('default_submission_mode', base.default_submission_mode || 'ELECTRONIC')
-        ).toUpperCase();
-
-        const week_ending_weekday_snapshot = String(
-          choose('week_ending_weekday_snapshot', (base.week_ending_weekday_snapshot ?? '0'))
-        );
-
-    const candidate_id = choose('candidate_id', base.candidate_id ?? null) || null;
-
-// NEW: polite confirmation when saving with no candidate
-if (!candidate_id) {
-  const okProceed = window.confirm('No candidate is selected. Save this contract as “<Unassigned>”?');
-  if (!okProceed) {
-    window.modalCtx._saveInFlight = false;
-    if (LOGC) console.groupEnd?.();
-    return false;
-  }
-}
-
-const client_id    = choose('client_id', base.client_id ?? null) || null;
-const role         = choose('role', base.role ?? null);
-const band         = choose('band', base.band ?? null);
-const display_site = choose('display_site', base.display_site ?? '');
-
-
-         const boolFromFS = (name, baseVal=false) => {
-          if (fs && fs.main && Object.prototype.hasOwnProperty.call(fs.main, name)) {
-            const v = fs.main[name];
-            return v === 'on' || v === true || v === 'true' || v === 1 || v === '1';
-          }
-          return !!base[name];
-        };
-
-        // NEW: tri-state boolean (preserve NULL contract overrides unless explicitly set)
-           const boolTriFromFS = (name) => {
-          // Tri-state rule:
-          // - if field is NOT present in fs.main: preserve base boolean or null
-          // - if field IS present in fs.main: interpret truthy vs falsey ('' counts as false, not null)
-          if (fs && fs.main && Object.prototype.hasOwnProperty.call(fs.main, name)) {
-            const v = fs.main[name];
-            if (v === null || v === undefined) return null;
-            return v === 'on' || v === true || v === 'true' || v === 1 || v === '1';
-          }
-          const b = base ? base[name] : undefined;
-          return (b === true || b === false) ? b : null;
-        };
-
-
-        // NEW: contract route/settings fields (tri-state)
-      let is_nhsp               = boolTriFromFS('is_nhsp');
-let autoprocess_hr        = boolTriFromFS('autoprocess_hr');
-let requires_hr           = boolTriFromFS('requires_hr');
-let no_timesheet_required = boolTriFromFS('no_timesheet_required');
-let daily_calc_of_invoices= boolTriFromFS('daily_calc_of_invoices');
-let group_nightsat_sunbh  = boolTriFromFS('group_nightsat_sunbh');
-let self_bill             = boolTriFromFS('self_bill');
-
-// ✅ NEW: attachments
-let hr_attach_to_invoice  = boolTriFromFS('hr_attach_to_invoice');
-let ts_attach_to_invoice  = boolTriFromFS('ts_attach_to_invoice');
-
-
-        // NEW: canonicalise route flags only if any route override is present (avoids clobbering NULL legacy overrides)
-        const anyRouteSet = [is_nhsp, autoprocess_hr, no_timesheet_required].some(v => v === true || v === false);
-        if (anyRouteSet) {
-          // Manual: is_nhsp=false, autoprocess_hr=false, no_timesheet_required=false
-          // NHSP: is_nhsp=true, autoprocess_hr=false, no_timesheet_required=false
-          // HR required: autoprocess_hr=true, is_nhsp=false, no_timesheet_required=false
-          // HR no-timesheets: autoprocess_hr=true, is_nhsp=false, no_timesheet_required=true
-          if (is_nhsp === true) {
-            autoprocess_hr = false;
-            no_timesheet_required = false;
-          }
-          if (no_timesheet_required === true) {
-            autoprocess_hr = true;
-            is_nhsp = false;
-          }
-          if (autoprocess_hr === true) {
-            is_nhsp = false;
-          }
-          if (autoprocess_hr !== true) {
-            no_timesheet_required = false;
-          }
-        }
-
-        const auto_invoice                 = boolFromFS('auto_invoice',                 !!base.auto_invoice);
-        const require_reference_to_pay     = boolFromFS('require_reference_to_pay',     !!base.require_reference_to_pay);
-        const require_reference_to_invoice = boolFromFS('require_reference_to_invoice', !!base.require_reference_to_invoice);
-
-
-        const BUCKETS = ['paye_day','paye_night','paye_sat','paye_sun','paye_bh','umb_day','umb_night','umb_sat','umb_sun','umb_bh','charge_day','charge_night','charge_sat','charge_sun','charge_bh'];
-        const baseRates = { ...(base.rates_json || {}) };
-        const mergedRates = { ...baseRates };
-        for (const k of BUCKETS) {
-          const staged = (fs.pay || {})[k];
-          if (staged !== undefined && staged !== '') {
-            const n = Number(staged);
-            mergedRates[k] = Number.isFinite(n) ? n : 0;
-          } else {
-            const domVal = fd ? fd.get(k) : null;
-            if (domVal !== null && domVal !== undefined && String(domVal).trim() !== '') {
-              const n = Number(domVal);
-              mergedRates[k] = Number.isFinite(n) ? n : 0;
-            }
-          }
-        }
-
-      // NEW: mileage values — prefer Rates tab DOM, then FS staging, else null
-const mcrDom = document.querySelector('#contractRatesTab input[name="mileage_charge_rate"]');
-const mprDom = document.querySelector('#contractRatesTab input[name="mileage_pay_rate"]');
-const mileage_charge_rate = (mcrDom && mcrDom.value !== '') ? (Number(mcrDom.value) || null) : numOrNull('mileage_charge_rate');
-const mileage_pay_rate    = (mprDom && mprDom.value !== '') ? (Number(mprDom.value) || null) : numOrNull('mileage_pay_rate');
-
-// NEW: collect Additional Rates (up to 5 slots) from "Additional Rates" tab
-let additional_rates_json = null;
-try {
-  const existing = Array.isArray(base.additional_rates_json) ? base.additional_rates_json : null;
-  const rows = [];
-
-  const normaliseFrequency = (raw) => {
-    if (!raw) return null;
-    const s = String(raw).trim().toUpperCase();
-    const ALLOWED = [
-      'ONE_PER_WEEK',
-      'ONE_PER_DAY',
-      'WEEKENDS_AND_BH_ONLY',
-      'WEEKDAYS_EXCL_BH_ONLY'
-    ];
-    return ALLOWED.includes(s) ? s : null;
-  };
-
-  const tab = document.getElementById('contractAdditionalRatesTab');
-  if (tab) {
-    for (let i = 1; i <= 5; i++) {
-      const code = `EX${i}`;
-      const bnEl = tab.querySelector(`input[name="extra_bucket_name_${i}"]`);
-      const unEl = tab.querySelector(`input[name="extra_unit_name_${i}"]`);
-      const frEl = tab.querySelector(`select[name="extra_frequency_${i}"]`);
-      const prEl = tab.querySelector(`input[name="extra_pay_${i}"]`);
-      const crEl = tab.querySelector(`input[name="extra_charge_${i}"]`);
-
-      const bucket_name = (bnEl?.value || '').trim();
-      const unit_name   = (unEl?.value || '').trim();
-      const freqRaw     = (frEl?.value || '').trim();
-      const payRaw      = (prEl?.value || '').trim();
-      const chargeRaw   = (crEl?.value || '').trim();
-
-      const hasAny = !!(bucket_name || unit_name || freqRaw || payRaw || chargeRaw);
-      if (!hasAny) continue;
-
-      const payNum    = payRaw === '' ? null : Number(payRaw);
-      const chargeNum = chargeRaw === '' ? null : Number(chargeRaw);
-      const frequency = normaliseFrequency(freqRaw) || 'ONE_PER_WEEK';
-
-      rows.push({
-        code,
-        bucket_name,
-        unit_name: unit_name || null,
-        frequency,
-        pay_rate: Number.isFinite(payNum) ? payNum : null,
-        charge_rate: Number.isFinite(chargeNum) ? chargeNum : null
-      });
-    }
-  }
-
-  if (rows.length) {
-    additional_rates_json = rows;
-  } else if (existing) {
-    // If the tab was never touched this session, keep what backend sent
-    additional_rates_json = existing;
-  } else {
-    additional_rates_json = null;
-  }
-} catch (e) {
-  if (LOGC) console.warn('[CONTRACTS] additional_rates_json build failed', e);
-  const fallback = Array.isArray(base.additional_rates_json) ? base.additional_rates_json : null;
-  additional_rates_json = fallback || null;
-}
-
-const data = {
-  id: window.modalCtx.data?.id || null,
-  candidate_id,
-  client_id,
-  role,
-  band,
-  display_site,
-  start_date:   startIso,
-  end_date:     endIso,
-  pay_method_snapshot: payMethodSnap,
-  default_submission_mode,
-  week_ending_weekday_snapshot,
-
-  // NEW: contract route/settings overrides
-  is_nhsp,
-  autoprocess_hr,
-  requires_hr,
-  no_timesheet_required,
-  daily_calc_of_invoices,
-  group_nightsat_sunbh,
-   self_bill,
-
-  // ✅ NEW: attachments
-  hr_attach_to_invoice,
-  ts_attach_to_invoice,
-
-  auto_invoice,
-  require_reference_to_pay,
-  require_reference_to_invoice,
-
-  rates_json: mergedRates,
-  std_hours_json,
-  std_schedule_json,
-  bucket_labels_json,
-  additional_rates_json,                     // 🔹 NEW FIELD
-  mileage_charge_rate: mileage_charge_rate,
-  mileage_pay_rate:    mileage_pay_rate
-};
-
-
-if (LOGC) {
-  const preview = {
-    ...data,
-    rates_json: '(object)',
-    std_hours_json: std_hours_json ? '(object)' : null,
-    std_schedule_json: std_schedule_json ? '(object)' : null,
-    additional_rates_json: additional_rates_json ? '(object)' : null
-  };
-  console.log('[CONTRACTS] onSave payload (preview)', preview);
-}
-
-        let overlapProceed = true;
-        try {
-          if (typeof checkContractOverlap === 'function' && data.candidate_id && data.start_date && data.end_date) {
-            const ov = await checkContractOverlap({
-              candidate_id: data.candidate_id,
-              start_date: data.start_date,
-              end_date: data.end_date,
-              ignore_contract_id: data.id || null
-            });
-            if (ov && ov.has_overlap) {
-              const lines = (ov.overlaps || []).slice(0, 3).map(o => {
-                const nm = o.client_name || o.client || 'Client';
-                const a  = o.overlap_from || '';
-                const b  = o.overlap_to   || '';
-                return `${nm} ${a}→${b}`;
-              });
-              const extra = (ov.overlaps || []).length > 3 ? ` …and ${ov.overlaps.length - 3} more` : '';
-              const msg = `This contract overlaps existing contract(s):\n• ${lines.join('\n• ')}${extra}\n\nProceed anyway?`;
-              overlapProceed = !!window.confirm(msg);
-            }
-          }
-        } catch (e) {
-          if (LOGC) console.warn('[CONTRACTS] overlap check failed (non-blocking)', e);
-        }
-        if (!overlapProceed) {
-          window.modalCtx._saveInFlight = false;
-          if (LOGC) console.log('[CONTRACTS] Save cancelled by user on overlap dialog');
-          console.groupEnd?.();
-          return false;
-        }
-
-        try {} catch {}
-
-        if (!isCreate && data.id && typeof callCheckTimesheetBoundary === 'function' && data.start_date && data.end_date) {
-          try {
-            const boundary = await callCheckTimesheetBoundary(data.id, data.start_date, data.end_date);
-            window.__tsBoundaryResult = boundary || null;
-            if (!boundary || boundary.ok === false) {
-              let msg = 'Date range excludes existing timesheets.';
-              try {
-                const v = boundary?.violations || [];
-                if (v.length) {
-                  const sample = v.slice(0,3).map(x => {
-                    const nm = x.client_name || 'Client';
-                    const dt = x.date || '';
-                    const st = x.status || '';
-                    return `${nm} ${dt}${st?` (${st})`:''}`;
-                  }).join(' • ');
-                  msg = `Dates exclude existing timesheets: ${sample}${v.length>3? '…':''}`;
-                } else if (boundary?.min_ts_date || boundary?.max_ts_date) {
-                  const a = boundary.min_ts_date || '';
-                  const b = boundary.max_ts_date || '';
-                  msg = `Dates exclude timesheets in range ${a} → ${b}.`;
-                }
-              } catch {}
-              if (typeof showModalHint === 'function') showModalHint(msg, 'warn'); else alert(msg);
-              window.modalCtx._saveInFlight = false;
-              console.groupEnd?.();
-              return false;
-            }
-          } catch (e) {
-            if (LOGC) console.warn('[CONTRACTS] timesheet boundary check failed (non-blocking fallback)', e);
-          }
-        }
-
-        let hasManualStage = false;
-        try {
-          const stageKey = data.id || window.modalCtx.openToken || null;
-          if (stageKey && typeof getContractCalendarStageState === 'function') {
-            const st = getContractCalendarStageState(stageKey);
-            hasManualStage = !!(st && (st.add?.size || st.remove?.size || Object.keys(st.additional || {}).length));
-          }
-        } catch {}
-
-        if (!isCreate && hasManualStage) data.skip_generate_weeks = true;
-
-        // --- detect calendar stage shape BEFORE any persistence ---
-        let stageShape = { hasAny:false, hasRemoveAll:false, hasAdds:false, hasAdditionals:false };
-        try {
-          const stageKey = data.id || window.modalCtx.openToken || null;
-          if (stageKey && typeof getContractCalendarStageState === 'function') {
-            const st = getContractCalendarStageState(stageKey);
-            stageShape.hasAny         = !!st && (!!st.removeAll || st.add.size || st.remove.size || Object.keys(st.additional||{}).length);
-            stageShape.hasRemoveAll   = !!st?.removeAll;
-            stageShape.hasAdds        = !!(st && st.add && st.add.size);
-            stageShape.hasAdditionals = !!(st && st.additional && Object.keys(st.additional).length);
-          }
-        } catch {}
-
-        // === CREATE vs EDIT ordering ===
-        // CREATE: upsert first to obtain id → then commit stage (if any) → normalize window → (maybe) generate defaults
-        // EDIT: if any stage present, always commit calendar FIRST → normalize window → then upsert metadata
-  if (!isCreate && data.id && stageShape.hasAny) {
-  if (LOGC) console.log('[CONTRACTS] calendar (any stage) → commitContractCalendarStageIfPending');
-  const preCalRes = await commitContractCalendarStageIfPending(data.id);
-  if (!preCalRes.ok) {
-    const msg = `Calendar save failed: ${preCalRes.message || 'unknown error'}. Contract details were not saved.`;
-    if (LOGC) console.warn('[CONTRACTS] calendar commit failed (pre-upsert)', preCalRes);
-    if (typeof showModalHint === 'function') showModalHint(msg, 'warn'); else alert(msg);
-    window.modalCtx._saveInFlight = false;
-    console.groupEnd?.();
-    return false;
-  }
-
-  // Do NOT normalize on the FE — backend now owns window shrink/extend.
-  // Instead, pull the fresh contract (authoritative window) and bind it.
-  try {
-    const fresh = await getContract(data.id);
-    if (fresh && fresh.id) {
-      window.modalCtx.data = fresh;
-
-      // Update formState (so subsequent PUTs never push stale dates)
-      const fs = (window.modalCtx.formState ||= { __forId: (data.id||null), main:{}, pay:{} });
-      fs.main ||= {};
-      fs.main.start_date = fresh.start_date || null;
-      fs.main.end_date   = fresh.end_date   || null;
-
-      // Update visible inputs if we're on the Main tab
-      try {
-        const form = document.querySelector('#contractForm');
-        if (form) {
-          const sd = form.querySelector('input[name="start_date"]');
-          const ed = form.querySelector('input[name="end_date"]');
-          const toUk = (iso) => {
-            try { return (typeof formatIsoToUk === 'function') ? (formatIsoToUk(iso) || iso) : iso; } catch { return iso; }
-          };
-          if (sd && fresh.start_date) sd.value = toUk(fresh.start_date);
-          if (ed && fresh.end_date)   ed.value = toUk(fresh.end_date);
-        }
-      } catch {}
-      // Ensure the payload carries authoritative dates unless user explicitly changed them
-      const userEditedStart = !!(prevStartIso && startIso && startIso !== prevStartIso);
-      const userEditedEnd   = !!(prevEndIso   && endIso   && endIso   !== prevEndIso);
-      data.__userChangedDates = (userEditedStart || userEditedEnd);
-      if (!data.__userChangedDates) {
-        data.start_date = fresh.start_date;
-        data.end_date   = fresh.end_date;
-      }
-    }
-  } catch (e) {
-    if (LOGC) console.warn('[CONTRACTS] fresh refetch failed (proceeding with current modal data)', e);
-  }
-
-  // Avoid auto-generation when calendar stage was present
-  data.skip_generate_weeks = true;
-}
-
-
-// ✅ NEW: calendar-only saves should NOT PUT the contract (avoids “rates” validation etc)
-const calendarOnlySave =
-  !isCreate &&
-  !!data.id &&
-  !!stageShape?.hasAny &&
-  window.modalCtx?.__calendarDirty === true &&
-  window.modalCtx?.__nonCalendarDirty !== true;
-
-if (calendarOnlySave) {
-  if (LOGC) console.log('[CONTRACTS] calendar-only save: skipping upsertContract (no contract fields changed)');
-
-  // Clear markers so future edits behave normally
-  try {
-    window.modalCtx.__calendarDirty = false;
-    window.modalCtx.__calendarOnly = false;
-  } catch {}
-
-  if (LOGC) console.groupEnd?.();
-  return { ok: true, saved: (window.modalCtx.data || base) };
-}
-
-if (LOGC) console.log('[CONTRACTS] upsert → upsertContract');
-const saved = await upsertContract(data, data.id || undefined);
-
-
-const persistedId = saved?.id || saved?.contract?.id || null;
-if (LOGC) console.log('[CONTRACTS] upsertContract result', {
-  isCreate, persistedId, rawHasSaved: !!saved
-});
-
-window.modalCtx.data = saved?.contract || saved || window.modalCtx.data;
-if (LOGC) console.log('[CONTRACTS] modalCtx.data snapshot', {
-  id: window.modalCtx.data?.id || null,
-  start_date: window.modalCtx.data?.start_date || null,
-  end_date:   window.modalCtx.data?.end_date   || null
-});
-
-// 🔎 breadcrumb to prove we reached the post-save gate
-console.warn('[AFTER UPSERT] reached post-save pre-gate', {
-  modalId: window.modalCtx?.data?.id,
-  isCreate,
-  openToken: window.modalCtx?.openToken,
-  persistedId
-});
-
-        try {
-          const warnings = saved?.warnings || saved?.contract?.warnings || [];
-          const warnStr  = Array.isArray(warnings) ? warnings.join(', ') : (saved?.warning || '');
-          if (warnStr) { if (LOGC) console.warn('[CONTRACTS] warnings', warnStr); showModalHint?.(`Warning: ${warnStr}`, 'warn'); }
-        } catch {}
-
-        const contractId = saved?.id || saved?.contract?.id;
-        if (contractId) {
-          window.__pendingFocus = { section: 'contracts', id: contractId };
-
-          // If this was a Clone&Extend staging and user opted to end the old contract, apply now.
-          try {
-            const t0 = Date.now();
-            const savedContractId = contractId || (saved?.contract?.id) || (saved?.id) || null;
-
-            // Prefer the live intent; if lost due to UI state flips, fall back to the pre-save snapshot
-            const ciLive     = window.modalCtx?.__cloneIntent || null;
-            const ciSnapshot = __preCloneIntent || null;
-            const ci         = (ciLive ?? ciSnapshot) || null;
-
-            const hasCi      = !!ci;
-            const wantsEnd   = !!ci?.end_existing;
-            const hasSource  = !!ci?.source_contract_id;
-            const hasEndDate = !!ci?.end_existing_on;
-
-            // Resolve callable from either module/global or window
-            const fnLive = (typeof endContractSafely === 'function') ? endContractSafely : undefined;
-            const fnWin  = (typeof window !== 'undefined' && typeof window.endContractSafely === 'function') ? window.endContractSafely : undefined;
-            const trimFn = fnLive || fnWin;
-            const hasFn  = !!trimFn;
-
-            if (LOGC) {
-              console.groupCollapsed('[CLONE][post-save gate]');
-              console.log({
-                isCreate,
-                savedContractId,
-                modalCtxId: window.modalCtx?.data?.id || null,
-                savedStart: window.modalCtx?.data?.start_date || null,
-                savedEnd:   window.modalCtx?.data?.end_date   || null,
-                openToken:  window.modalCtx?.openToken || null,
-                hasCi, wantsEnd, hasSource, hasEndDate,
-                ciLive: !!ciLive,
-                ciSnapshot: !!ciSnapshot,
-                ci: {
-                  source_contract_id: ci?.source_contract_id ?? null,
-                  end_existing:       ci?.end_existing ?? null,
-                  end_existing_on:    ci?.end_existing_on ?? null
-                },
-                hasFnLive:  !!fnLive,
-                hasFnWin:   !!fnWin,
-                hasFnResolved: hasFn
-              });
-              console.groupEnd();
-            }
-
-            if (hasCi && wantsEnd && hasSource && hasEndDate && hasFn) {
-              if (LOGC) console.log('WILL_CALL endContractSafely', { source: ci.source_contract_id, desired_end: ci.end_existing_on });
-
-              let res = null, ok=false, clamped=false, safe_end=null, message=null, t1=0;
-              try {
-                console.groupCollapsed('[TRIM_CALL] →', { source: ci.source_contract_id, desired_end: ci.end_existing_on });
-                res = await trimFn(ci.source_contract_id, ci.end_existing_on);
-                t1 = Date.now();
-                ok       = !!(res && (res.ok ?? (res === true)));
-                clamped  = !!res?.clamped;
-                safe_end = res?.safe_end || null;
-                message  = res?.message  || null;
-                console.log('result', { ok, clamped, safe_end, message, raw: res, elapsed_ms: (t1 - t0) });
-                console.groupEnd();
-              } catch (err) {
-                console.warn('[TRIM_CALL] ✖ threw', err);
-              }
-
-              if (ok) {
-                if (clamped && typeof showTailClampWarning === 'function') {
-                  try { showTailClampWarning(safe_end, ci.end_existing_on); } catch {}
-                }
-                if (typeof refreshOldContractAfterTruncate === 'function') {
-                  try { await refreshOldContractAfterTruncate(ci.source_contract_id); } catch (e) { if (LOGC) console.warn('refreshOldContractAfterTruncate failed', e); }
-                }
-                if (LOGC) console.log('CLEAR_INTENT (after endContractSafely)');
-                clearCloneIntent();
-              } else {
-                if (LOGC) console.warn('TRIM_CALL did not report ok', { res });
-                if (LOGC) console.log('CLEAR_INTENT (after not-ok result)');
-                clearCloneIntent();
-              }
-            } else {
-              const reasons = [];
-              if (!hasCi)               reasons.push('NO_INTENT');
-              if (hasCi && !wantsEnd)   reasons.push('BOX_UNTICKED_end_existing=false');
-              if (hasCi && !hasSource)  reasons.push('MISSING_source_contract_id');
-              if (hasCi && !hasEndDate) reasons.push('MISSING_end_existing_on');
-              if (!hasFn)               reasons.push(`NO_endContractSafely (live=${!!fnLive}, window=${!!fnWin})`);
-              console.warn('[CLONE][post-save SKIP] not calling endContractSafely', { reasons });
-              console.log('CLEAR_INTENT (skip path)');
-              clearCloneIntent();
-            }
-
-          } catch (e) {
-            if (LOGC) console.warn('[CLONE][post-save decision] EXCEPTION', e);
-          }
-
-        }
-
-        try { if (typeof computeContractMargins === 'function') computeContractMargins(); } catch {}
-
-        try {
-          const fr = window.__getModalFrame?.();
-          const currentTab = fr?.currentTabKey || (document.querySelector('#modalTabs button.active')?.textContent?.toLowerCase() || 'main');
-          if (LOGC) console.log('[CONTRACTS] post-save repaint (in-place)', { currentTab, contractId: (window.modalCtx?.data?.id) });
-if (currentTab === 'calendar' && window.modalCtx?.data?.id) {
-  const contractId2 = window.modalCtx.data.id;
-  const candId = window.modalCtx?.data?.candidate_id || null;
-
-  // ✅ Prefer captured viewport from pre-save (stable), otherwise fall back to current calState
-  const vp = (window.modalCtx && window.modalCtx.__calViewport && window.modalCtx.__calViewport.contract_id === contractId2)
-    ? window.modalCtx.__calViewport
-    : null;
-
-  const cal = window.__calState?.[contractId2] || {};
-  const view = vp?.view || cal.view || 'year';
-  const win  = vp?.win  || cal.win  || null;
-
-  const prevScrollTop  = (vp?.scrollTop  ?? document.getElementById('__calScroll')?.scrollTop ?? 0);
-  const prevScrollLeft = (vp?.scrollLeft ?? document.getElementById('__calScroll')?.scrollLeft ?? 0);
-
-  const applyScroll = () => {
-    const sb = document.getElementById('__calScroll');
-    if (!sb) return;
-    sb.scrollTop  = prevScrollTop;
-    sb.scrollLeft = prevScrollLeft;
-  };
-
-  if (typeof fetchAndRenderCandidateCalendarForContract === 'function' && candId) {
-    await fetchAndRenderCandidateCalendarForContract(contractId2, candId, {
-      from: win?.from, to: win?.to, view,
-      weekEnding: window.modalCtx?.data?.week_ending_weekday_snapshot ?? 0,
-      __restoreScroll: { top: prevScrollTop, left: prevScrollLeft }
-    });
-  } else {
-    await fetchAndRenderContractCalendar(contractId2, win ? {
-      from: win.from, to: win.to, view,
-      __restoreScroll: { top: prevScrollTop, left: prevScrollLeft }
-    } : undefined);
-  }
-
-  // ✅ Restore scroll AFTER layout settles (prevents snapping to top)
-  requestAnimationFrame(() => requestAnimationFrame(applyScroll));
-}
- else if (currentTab === 'rates') {
-            try { computeContractMargins(); } catch {}
-          }
-          try { window.__toast?.('Saved'); } catch {}
-        } catch (e) {
-          if (LOGC) console.warn('[CONTRACTS] post-save repaint failed', e);
-        }
-
-        if (LOGC) console.groupEnd?.();
-        // Return the saved row so saveForFrame() can set hasId=true and flip to View
-        const savedRow = (window.modalCtx.data || null);
-        return { ok: true, saved: savedRow };
-
-       } catch (e) {
-        if (LOGC) { console.error('[CONTRACTS] Save failed', e); console.groupEnd?.(); }
-        alert(`Save failed: ${e?.message || e}`);
-        return false;
-      } finally {
-        window.modalCtx._saveInFlight = false;
-      }
-    },
-
-    hasId, // 5th
-
-    // 6th: onReturn — single, deduped
-    () => {
-      const wire = () => {
-        snapshotContractForm();
-
-     const form   = document.querySelector('#contractForm');
-    const tabsEl = document.getElementById('modalTabs');
-    const active = tabsEl?.querySelector('button.active')?.textContent?.toLowerCase() || 'main';
-
-
-     if (form) {
-      if (!form.__wiredStage) {
-        form.__wiredStage = true;
-const stage = (e) => {
-  const t = e.target;
-  if (!t || !t.name) return;
-
-  const name = t.name;
-
-  const v = t.type === 'checkbox'
-    ? (t.checked ? 'on' : '')
-    : t.value;
-
-  const isScheduleTime = /^(mon|tue|wed|thu|fri|sat|sun)_(start|end)$/.test(name);
-
-  // ✅ NEW: any form input here is NON-calendar (calendar staging uses separate functions)
-  try {
-    window.modalCtx = window.modalCtx || {};
-    window.modalCtx.__nonCalendarDirty = true;
-    window.modalCtx.__calendarOnly = false;
-  } catch {}
-
-  if (isScheduleTime) {
-    window.modalCtx = window.modalCtx || {};
-    const fs = (window.modalCtx.formState ||= {
-      __forId: (window.modalCtx.data?.id ?? window.modalCtx.openToken ?? null),
-      main:{},
-      pay:{}
-    });
-    fs.main ||= {};
-    fs.main[name] = v;
-  } else {
-    setContractFormValue(name, v);
-
-    if (name === 'pay_method_snapshot' || /^(paye_|umb_|charge_)/.test(name)) {
-      computeContractMargins();
-    }
-  }
-
-  try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
-};
-
-
-
-
-
-
-        form.addEventListener('input', stage, true);
-        form.addEventListener('change', stage, true);
-
-        // NEW: lock pay_method_snapshot select appropriately
-        try {
-          const sel = form.querySelector('select[name="pay_method_snapshot"], select[name="default_pay_method_snapshot"]');
-          const candId = window.modalCtx?.data?.candidate_id || null;
-          const hasId  = !!window.modalCtx?.data?.id;
-          const mainFs = (window.modalCtx?.formState && window.modalCtx.formState.main) || {};
-
-          if (sel) {
-            if (hasId) {
-              // Edit mode: always read-only – pay method comes from candidate / history
-              sel.disabled = true;
-            } else if (candId) {
-              // New contract with candidate already chosen:
-              // re-use derived snapshot and keep it locked
-              sel.disabled = true;
-            } else if (mainFs.__pay_locked) {
-              // Candidate picker has already derived & locked the snapshot
-              sel.disabled = true;
-            } else {
-              // Brand-new, no candidate yet → leave editable (rare case, but allowed)
-              sel.disabled = false;
-            }
-          }
-        } catch (e) {
-          if (LOGC) console.warn('[CONTRACTS] pay_method_snapshot lock wiring failed', e);
-        }
-
-            const normaliseTimeInput = (t) => {
-              if (!t || !/^(mon|tue|wed|thu|fri|sat|sun)_(start|end)$/.test(t.name)) return;
-              const raw = (t.value || '').trim();
-              const norm = (function (x) {
-                if (!x) return '';
-                const y = x.replace(/\s+/g, '');
-                let h, m;
-                if (/^\d{3,4}$/.test(y)) {
-                  const s = y.padStart(4, '0'); h = +s.slice(0, 2); m = +s.slice(2, 4);
-                } else if (/^\d{1,2}:\d{1,2}$/.test(y)) {
-                  const parts = y.split(':'); h = +parts[0]; m = +parts[1];
-                } else return '';
-                if (h < 0 || h > 23 || m < 0 || m > 59) return '';
-                return String(h).padStart(2, '0') + ':' + String(m).padStart(2, '0');
-              })(raw);
-
-              if (!norm && raw) {
-                t.value = '';
-                t.setAttribute('data-invalid', '1');
-                t.setAttribute('title', 'Enter a valid time HH:MM (00:00–23:59)');
-                setContractFormValue(t.name, '');
-                try { t.dispatchEvent(new Event('input', { bubbles: true })); t.dispatchEvent(new Event('change', { bubbles: true })); } catch {}
-                try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
-                return;
-              }
-
-              if (norm) {
-                t.value = norm;
-                t.removeAttribute('data-invalid');
-                t.removeAttribute('title');
-                setContractFormValue(t.name, norm);
-                try { t.dispatchEvent(new Event('input', { bubbles: true })); t.dispatchEvent(new Event('change', { bubbles: true })); } catch {}
-                try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
-              }
-            };
-
-            const onBlurNorm = (e) => { normaliseTimeInput(e.target); };
-            form.addEventListener('blur', onBlurNorm, true);
-
-            const onKeydownNorm = (e) => {
-              if (e.key === 'Tab') normaliseTimeInput(e.target);
-            };
-            form.addEventListener('keydown', onKeydownNorm, true);
-          }
-
-          if (active === 'main') {
-            try {
-              const sd = form.querySelector('input[name="start_date"]');
-              const ed = form.querySelector('input[name="end_date"]');
-              const toUk = (iso) => {
-                try { return (typeof formatIsoToUk === 'function') ? (formatIsoToUk(iso) || '') : (iso || ''); }
-                catch { return iso || ''; }
-              };
-              if (sd && /^\d{4}-\d{2}-\d{2}$/.test(sd.value||'')) sd.value = toUk(sd.value);
-              if (ed && /^\d{4}-\d{2}-\d{2}$/.test(ed.value||'')) ed.value = toUk(ed.value);
-              if (sd) { sd.setAttribute('placeholder','DD/MM/YYYY'); if (typeof attachUkDatePicker === 'function') attachUkDatePicker(sd); }
-              if (ed) { ed.setAttribute('placeholder','DD/MM/YYYY'); if (typeof attachUkDatePicker === 'function') attachUkDatePicker(ed, { minDate: sd?.value || null }); }
-              if (sd && ed) {
-                sd.addEventListener('change', () => {
-                  const sv = sd.value || '';
-                  if (typeof attachUkDatePicker === 'function') attachUkDatePicker(ed, { minDate: sv || null });
-                  if (sv && ed.value) {
-                    try {
-                      const si = parseUkDateToIso?.(sv) || sv;
-                      const ei = parseUkDateToIso?.(ed.value) || ed.value;
-                      if (si && ei && si > ei) { ed.value=''; showModalHint?.('Pick an end date after start','warn'); setContractFormValue('end_date',''); }
-                    } catch {}
-                  }
-                });
-              }
-              if (LOGC) console.log('[CONTRACTS] datepickers wired for start_date/end_date', { hasStart: !!sd, hasEnd: !!ed });
-            } catch (e) {
-              if (LOGC) console.warn('[CONTRACTS] datepicker wiring failed', e);
-            }
-
-            const btnPC = document.getElementById('btnPickCandidate');
-            const btnCC = document.getElementById('btnClearCandidate');
-            const btnPL = document.getElementById('btnPickClient');
-            const btnCL = document.getElementById('btnClearClient');
-            const candInput = document.getElementById('candidate_name_display');
-            const cliInput  = document.getElementById('client_name_display');
-
-            const ensurePrimed = async (entity) => {
-              try {
-                await ensurePickerDatasetPrimed(entity);
-                const fp = getSummaryFingerprint(entity);
-                const mem = getSummaryMembership(entity, fp);
-                if (!mem?.ids?.length || mem?.stale) {
-                  await primeSummaryMembership(entity, fp);
-                }
-              } catch (e) { if (LOGC) console.warn('[CONTRACTS] typeahead priming failed', entity, e); }
-            };
-
-            const buildItemLabel = (entity, r) => {
-              if (entity === 'candidates') {
-                const first = (r.first_name||'').trim();
-                const last  = (r.last_name||'').trim();
-                const role  = ((r.roles_display||'').split(/[•;,]/)[0]||'').trim();
-                return `${last}${last?', ':''}${first}${role?` ${role}`:''}`.trim();
-              } else {
-                const name  = (r.name||'').trim();
-                return name;
-              }
-            };
-
-            const wireTypeahead = async (entity, inputEl, hiddenName, labelElId) => {
-              if (!inputEl) return;
-              await ensurePrimed(entity);
-
-              const menuId = entity === 'candidates' ? 'candTypeaheadMenu' : 'clientTypeaheadMenu';
-              let menu = document.getElementById(menuId);
-              if (!menu) {
-                menu = document.createElement('div');
-                menu.id = menuId;
-                menu.className = 'typeahead-menu';
-                menu.style.position = 'absolute';
-                menu.style.zIndex = '1000';
-                menu.style.background = 'var(--panel, #fff)';
-                menu.style.border = '1px solid var(--line, #ddd)';
-                menu.style.boxShadow = '0 4px 12px rgba(0,0,0,0.08)';
-                menu.style.maxHeight = '240px';
-                menu.style.overflowY = 'auto';
-                menu.style.display = 'none';
-                document.body.appendChild(menu);
-              }
-
-              const positionMenu = () => {
-                const r = inputEl.getBoundingClientRect();
-                menu.style.minWidth = `${Math.max(260, r.width)}px`;
-                menu.style.left = `${window.scrollX + r.left}px`;
-                menu.style.top  = `${window.scrollY + r.bottom + 4}px`;
-              };
-
-              const closeMenu = () => { menu.style.display = 'none'; menu.innerHTML = ''; };
-              const openMenu  = () => { positionMenu(); menu.style.display = ''; };
-
-              const getDataset = () => {
-                const fp  = getSummaryFingerprint(entity);
-                const mem = getSummaryMembership(entity, fp);
-                const ds  = (window.__pickerData ||= {})[entity] || { since:null, itemsById:{} };
-                const items = ds.itemsById || {};
-                let ids = Array.isArray(mem?.ids) ? mem.ids : [];
-                if (!ids.length) ids = Object.keys(items);
-                return { ids, items };
-              };
-
-              const applyList = (rows) => {
-                menu.innerHTML = rows.slice(0, 10).map(r => {
-                  const label = buildItemLabel(entity, r);
-                  return `<div class="ta-item" data-id="${r.id||''}" data-label="${(label||'').replace(/"/g,'&quot;')}" style="padding:8px 10px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${label}</div>`;
-                }).join('');
-                const first = menu.querySelector('.ta-item');
-                if (first) first.style.background = 'var(--hover, #f5f5f5)';
-              };
-
-              const selectRow = (id, label) => {
-                setContractFormValue(hiddenName, id);
-                inputEl.value = label || '';
-                const labEl = document.getElementById(labelElId);
-                if (labEl) labEl.textContent = label ? `Chosen: ${label}` : '';
-
-                try {
-                  const fs = (window.modalCtx.formState ||= { __forId: (window.modalCtx.data?.id ?? window.modalCtx.openToken ?? null), main:{}, pay:{} });
-                  fs.main ||= {};
-                  fs.main[hiddenName] = id;
-                  if (hiddenName === 'candidate_id') fs.main['candidate_display'] = label;
-                  if (hiddenName === 'client_id')    fs.main['client_name']       = label;
-                } catch {}
-
-                try {
-                  window.modalCtx.data = window.modalCtx.data || {};
-                  if (hiddenName === 'candidate_id') { window.modalCtx.data.candidate_id = id; window.modalCtx.data.candidate_display = label; }
-                  if (hiddenName === 'client_id')    { window.modalCtx.data.client_id    = id; window.modalCtx.data.client_name = label; }
-                } catch {}
-if (hiddenName === 'candidate_id') {
-  (async () => {
-    try {
-      const candRaw = await getCandidate(id);
-      // Support both shapes: { candidate:{...} } or flat row
-      const cand = (candRaw && candRaw.candidate) ? candRaw.candidate : candRaw;
-
-      const pmRaw = cand && cand.pay_method ? String(cand.pay_method).toUpperCase() : '';
-      const derived =
-        (pmRaw === 'UMBRELLA' && cand && cand.umbrella_id)
-          ? 'UMBRELLA'
-          : 'PAYE';
-
-      const fsm = (window.modalCtx.formState ||= { main:{}, pay:{} }).main ||= {};
-      fsm.pay_method_snapshot = derived;
-      fsm.__pay_locked = true;
-      const sel = document.querySelector('select[name="pay_method_snapshot"], select[name="default_pay_method_snapshot"]');
-      if (sel) { sel.value = derived; sel.disabled = true; }
-      computeContractMargins();
-    } catch (e) {
-      if (LOGC) console.warn('[CONTRACTS] derive pay method failed', e);
-    }
-  })();
-}
-
-
-                closeMenu();
-                try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
-              };
-
-              let debTimer = 0;
-              const handleInput = () => {
-                const q = (inputEl.value||'').trim();
-                if (q.length < 3) { closeMenu(); return; }
-                if (debTimer) clearTimeout(debTimer);
-                debTimer = setTimeout(() => {
-                  const { ids, items } = getDataset();
-                  const rows = pickersLocalFilterAndSort(entity, ids, q, entity==='candidates'?'last_name':'name', 'asc')
-                    .map(v => (typeof v === 'object' ? v : items[String(v)]))
-                    .filter(Boolean);
-                  if (!rows.length) { closeMenu(); return; }
-                  applyList(rows);
-                  openMenu();
-                }, 120);
-              };
-
-              const handleKeyDown = (e) => {
-                if (menu.style.display === 'none') return;
-                const items = Array.from(menu.querySelectorAll('.ta-item'));
-                if (!items.length) return;
-                const idx = items.findIndex(n => n.style.background && n.style.background.includes('hover'));
-                const setActive = (i) => {
-                  items.forEach(n => n.style.background='');
-                  items[i].style.background = 'var(--hover, #f5f5f5)';
-                  items[i].scrollIntoView({ block:'nearest' });
-                };
-                if (e.key === 'ArrowDown') { e.preventDefault(); setActive(Math.min((idx<0?0:idx+1), items.length-1)); }
-                if (e.key === 'ArrowUp')   { e.preventDefault(); setActive(Math.max((idx<0?0:idx-1), 0)); }
-                if (e.key === 'Enter')     { e.preventDefault(); const n = items[Math.max(idx,0)]; if (n) selectRow(n.dataset.id, n.dataset.label); }
-                if (e.key === 'Escape')    { e.preventDefault(); closeMenu(); }
-              };
-
-              menu.addEventListener('click', (ev) => {
-                const n = ev.target && ev.target.closest('.ta-item'); if (!n) return;
-                selectRow(n.dataset.id, n.dataset.label);
-              });
-
-              let blurTimer = 0;
-              inputEl.addEventListener('blur', () => { blurTimer = setTimeout(closeMenu, 150); });
-              menu.addEventListener('mousedown', () => { if (blurTimer) clearTimeout(blurTimer); });
-
-              inputEl.addEventListener('input', handleInput);
-              inputEl.addEventListener('keydown', handleKeyDown);
-            };
-
-            wireTypeahead('candidates', candInput, 'candidate_id', 'candidatePickLabel');
-            wireTypeahead('clients',    cliInput,  'client_id',    'clientPickLabel');
-
-   if (btnPC && !btnPC.__wired) {
-  btnPC.__wired = true;
-  btnPC.addEventListener('click', async () => {
-    if (LOGC) console.log('[CONTRACTS] Pick Candidate clicked');
-    openCandidatePicker(async ({ id, label }) => {
-      if (LOGC) console.log('[CONTRACTS] Pick Candidate → selected', { id, label });
-
-      let candRow = null;
-      try {
-        const candRaw = await getCandidate(id);
-        // Support both shapes: { candidate:{...} } or flat row
-        candRow = (candRaw && candRaw.candidate) ? candRaw.candidate : candRaw;
-      } catch (e) {
-        alert('Failed to load candidate details for this contract.');
-        if (LOGC) console.warn('[CONTRACTS] getCandidate failed', e);
-        return;
-      }
-
-      const pmRaw = candRow && candRow.pay_method ? String(candRow.pay_method).toUpperCase() : '';
-      const pm    = (pmRaw === 'PAYE' || pmRaw === 'UMBRELLA') ? pmRaw : null;
-
-      if (!pm) {
-        alert('This candidate has no pay method set (Unknown). Please set their pay method to PAYE or UMBRELLA before creating a contract.');
-        if (LOGC) console.warn('[CONTRACTS] blocking contract create for candidate with Unknown pay_method', {
-          candidate_id: id,
-          pay_method: candRow?.pay_method
-        });
-        return;
-      }
-
-      // Only now do we bind candidate + snapshot into the contract form
-      setContractFormValue('candidate_id', id);
-      const lab = document.getElementById('candidatePickLabel'); if (lab) lab.textContent = `Chosen: ${label}`;
-      try {
-        const fs2 = (window.modalCtx.formState ||= { __forId: (window.modalCtx.data?.id ?? window.modalCtx.openToken ?? null), main:{}, pay:{} });
-        fs2.main ||= {}; fs2.main.candidate_id = id; fs2.main.candidate_display = label;
-        window.modalCtx.data = window.modalCtx.data || {};
-        window.modalCtx.data.candidate_id = id; window.modalCtx.data.candidate_display = label;
-      } catch {}
-
-      try {
-        const fsm = (window.modalCtx.formState ||= { main:{}, pay:{} }).main ||= {};
-        fsm.pay_method_snapshot = pm;
-        fsm.__pay_locked = true;
-        const sel = document.querySelector('select[name="pay_method_snapshot"], select[name="default_pay_method_snapshot"]');
-        if (sel) { sel.value = pm; sel.disabled = true; }
-        computeContractMargins();
-      } catch (e) {
-        if (LOGC) console.warn('[CONTRACTS] prefillPayMethodFromCandidate failed', e);
-      }
-    });
-  });
-
-  if (LOGC) console.log('[CONTRACTS] wired btnPickCandidate');
-}
-
-      if (btnCC && !btnCC.__wired) {
-  btnCC.__wired = true;
-  btnCC.addEventListener('click', () => {
-    if (LOGC) console.log('[CONTRACTS] Clear Candidate clicked');
-    setContractFormValue('candidate_id', '');
-
-    // 🔹 Clear the visible candidate text input as well
-    const candInput = document.getElementById('candidate_name_display');
-    if (candInput) candInput.value = '';
-
-    const lab = document.getElementById('candidatePickLabel');
-    if (lab) lab.textContent = '';
-
-    try {
-      const fs2 = (window.modalCtx.formState ||= {
-        __forId: (window.modalCtx.data?.id ?? window.modalCtx.openToken ?? null),
-        main:{}, pay:{}
-      });
-      fs2.main ||= {};
-      delete fs2.main.candidate_id;
-      delete fs2.main.candidate_display;
-      fs2.main.__pay_locked = false;
-      fs2.main.pay_method_snapshot = 'PAYE';
-
-      const sel = document.querySelector('select[name="pay_method_snapshot"], select[name="default_pay_method_snapshot"]');
-      if (sel) { sel.disabled = false; sel.value = 'PAYE'; }
-
-      window.modalCtx.data = window.modalCtx.data || {};
-      delete window.modalCtx.data.candidate_id;
-      delete window.modalCtx.data.candidate_display;
-    } catch {}
-    try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
-  });
-  if (LOGC) console.log('[CONTRACTS] wired btnClearCandidate');
-}
-
-
-            if (btnPL && !btnPL.__wired) {
-              btnPL.__wired = true;
-              btnPL.addEventListener('click', async () => {
-                if (LOGC) console.log('[CONTRACTS] Pick Client clicked');
-                openClientPicker(async ({ id, label }) => {
-                  if (LOGC) console.log('[CONTRACTS] Pick Client → selected', { id, label });
-                  setContractFormValue('client_id', id);
-                  const lab = document.getElementById('clientPickLabel'); if (lab) lab.textContent = `Chosen: ${label}`;
-                  try {
-                    const fs2 = (window.modalCtx.formState ||= { __forId: (window.modalCtx.data?.id ?? window.modalCtx.openToken ?? null), main:{}, pay:{} });
-                    fs2.main ||= {}; fs2.main.client_id = id; fs2.main.client_name = label;
-                    window.modalCtx.data = window.modalCtx.data || {};
-                    window.modalCtx.data.client_id = id; window.modalCtx.data.client_name = label;
-                  } catch {}
-                  try {
-                    const client = await getClient(id);
-                    const h = checkClientInvoiceEmailPresence(client);
-                    if (h) showModalHint(h, 'warn');
-                    const we = (client?.week_ending_weekday ?? (client?.client_settings && client.client_settings.week_ending_weekday)) ?? 0;
-                    const fs2 = (window.modalCtx.formState ||= { main:{}, pay:{} });
-                    fs2.main ||= {}; fs2.main.week_ending_weekday_snapshot = String(we);
-                    const weekNames = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
-                    const lbl = document.getElementById('weLabel'); if (lbl) lbl.textContent = weekNames[Number(we)] || 'Sunday';
-                    const hidden = form?.querySelector('input[name="week_ending_weekday_snapshot"]'); if (hidden) hidden.value = String(we);
-
-                      // NEW: 2.5 defaults (only on brand new contract and if not manually set yet)
-try {
-  const isNewContract = !window.modalCtx?.data?.id;
-  const cs = client?.client_settings || {};
-  if (isNewContract) {
-    const main = (window.modalCtx.formState ||= {main:{},pay:{}}).main ||= {};
-
-    // NEW: contract route defaults from client settings (only if unset)
-    if (!Object.prototype.hasOwnProperty.call(main, 'is_nhsp')) {
-      const v = !!cs.is_nhsp;
-      setContractFormValue('is_nhsp', v ? 'on' : '');
-      main.is_nhsp = v;
-    }
-    if (!Object.prototype.hasOwnProperty.call(main, 'autoprocess_hr')) {
-      const v = !!cs.autoprocess_hr;
-      setContractFormValue('autoprocess_hr', v ? 'on' : '');
-      main.autoprocess_hr = v;
-    }
-    if (!Object.prototype.hasOwnProperty.call(main, 'requires_hr')) {
-      const v = !!cs.requires_hr;
-      setContractFormValue('requires_hr', v ? 'on' : '');
-      main.requires_hr = v;
-    }
-    if (!Object.prototype.hasOwnProperty.call(main, 'no_timesheet_required')) {
-      const v = !!cs.no_timesheet_required;
-      setContractFormValue('no_timesheet_required', v ? 'on' : '');
-      main.no_timesheet_required = v;
-    }
-       if (!Object.prototype.hasOwnProperty.call(main, 'daily_calc_of_invoices')) {
-      const v = !!cs.daily_calc_of_invoices;
-      setContractFormValue('daily_calc_of_invoices', v ? 'on' : '');
-      main.daily_calc_of_invoices = v;
-    }
-       if (!Object.prototype.hasOwnProperty.call(main, 'group_nightsat_sunbh')) {
-      const v = !!cs.group_nightsat_sunbh;
-      setContractFormValue('group_nightsat_sunbh', v ? 'on' : '');
-      main.group_nightsat_sunbh = v;
-    }
-
-    // NEW: self-bill default (client_settings column is self_bill_no_invoices_sent)
-    if (!Object.prototype.hasOwnProperty.call(main, 'self_bill')) {
-      const v = !!cs.self_bill_no_invoices_sent;
-      setContractFormValue('self_bill', v ? 'on' : '');
-      main.self_bill = v;
-    }
-
-    // NEW: canonicalise route flags (matches brief)
-    // Manual: is_nhsp=false, autoprocess_hr=false, no_timesheet_required=false
-    // NHSP: is_nhsp=true, autoprocess_hr=false, no_timesheet_required=false
-    // HR required: autoprocess_hr=true, is_nhsp=false, no_timesheet_required=false
-    // HR no-timesheets: autoprocess_hr=true, is_nhsp=false, no_timesheet_required=true
-    const r_isNhsp = !!main.is_nhsp;
-    const r_isHr   = !!main.autoprocess_hr;
-    const r_noTs   = !!main.no_timesheet_required;
-
-
-
-    if (r_isNhsp) {
-      if (main.autoprocess_hr) {
-        setContractFormValue('autoprocess_hr', '');
-        main.autoprocess_hr = false;
-      }
-      if (main.no_timesheet_required) {
-        setContractFormValue('no_timesheet_required', '');
-        main.no_timesheet_required = false;
-      }
-    }
-    if (r_noTs) {
-      if (!main.autoprocess_hr) {
-        setContractFormValue('autoprocess_hr', 'on');
-        main.autoprocess_hr = true;
-      }
-      if (main.is_nhsp) {
-        setContractFormValue('is_nhsp', '');
-        main.is_nhsp = false;
-      }
-    }
-    if (main.autoprocess_hr) {
-      if (main.is_nhsp) {
-        setContractFormValue('is_nhsp', '');
-        main.is_nhsp = false;
-      }
-    }
-    if (!main.autoprocess_hr) {
-      if (main.no_timesheet_required) {
-        setContractFormValue('no_timesheet_required', '');
-        main.no_timesheet_required = false;
-      }
-    }
-
-    // Optional: update visible route label immediately if present (non-blocking)
-    try {
-      const lbl = document.getElementById('contractRouteLabel');
-      if (lbl) {
-        const isNhsp = !!main.is_nhsp;
-        const isHr   = !!main.autoprocess_hr;
-        const noTs   = !!main.no_timesheet_required;
-        const routeLabel =
-          isNhsp ? 'NHSP' :
-          (isHr && noTs) ? 'HealthRoster (no timesheets)' :
-          (isHr) ? 'HealthRoster (timesheets required)' :
-          'Manual';
-        lbl.innerHTML = `<strong>${routeLabel}</strong>`;
-      }
-    } catch {}
-
-    if (!Object.prototype.hasOwnProperty.call(main, 'require_reference_to_pay')) {
-      const v = !!cs.pay_reference_required;
-      setContractFormValue('require_reference_to_pay', v ? 'on' : '');
-      main.require_reference_to_pay = v;
-    }
-    if (!Object.prototype.hasOwnProperty.call(main, 'require_reference_to_invoice')) {
-      const v = !!cs.invoice_reference_required;
-      setContractFormValue('require_reference_to_invoice', v ? 'on' : '');
-      main.require_reference_to_invoice = v;
-    }
-    if (!Object.prototype.hasOwnProperty.call(main, 'default_submission_mode')) {
-      const mode = String(cs.default_submission_mode || 'ELECTRONIC').toUpperCase();
-      const sel = document.querySelector('select[name="default_submission_mode"]');
-      if (sel) sel.value = mode;
-      main.default_submission_mode = mode;
-    }
-
-       // NEW: auto_invoice default from client_settings (client-level default feeds contract)
-    if (!Object.prototype.hasOwnProperty.call(main, 'auto_invoice')) {
-      const v = !!cs.auto_invoice_default;
-      setContractFormValue('auto_invoice', v ? 'on' : '');
-      main.auto_invoice = v;
-      const cb = form?.querySelector('input[name="auto_invoice"]');
-      if (cb) cb.checked = v;
-    }
-
-
-
-    // NEW: mileage default from client when empty
-    const mcrEl = document.querySelector('#contractRatesTab input[name="mileage_charge_rate"]');
-    const mprEl = document.querySelector('#contractRatesTab input[name="mileage_pay_rate"]');
-    const isBlank = (el) => !el || String(el.value||'').trim()==='';
-    if ((isBlank(mcrEl) && !main.mileage_charge_rate) || (isBlank(mprEl) && !main.mileage_pay_rate)) {
-      const charge = (client?.mileage_charge_rate != null) ? Number(client.mileage_charge_rate) : null;
-      if (charge != null && Number.isFinite(charge)) {
-        const pay = Math.max(0, charge - 0.10);
-        if (mcrEl) mcrEl.value = charge;
-        if (mprEl) mprEl.value = pay;
-        main.mileage_charge_rate = charge;
-        main.mileage_pay_rate    = pay;
-        try {
-          if (mcrEl) { mcrEl.dispatchEvent(new Event('input',{bubbles:true})); mcrEl.dispatchEvent(new Event('change',{bubbles:true})); }
-          if (mprEl) { mprEl.dispatchEvent(new Event('input',{bubbles:true})); mprEl.dispatchEvent(new Event('change',{bubbles:true})); }
-        } catch {}
-      }
-    }
-  }
-} catch (e) { if (LOGC) console.warn('[CONTRACTS] client defaults (gates/submission/mileage) failed', e); }
-
-
-                    try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
-                  } catch (e) { if (LOGC) console.warn('[CONTRACTS] client hint/week-ending check failed', e); }
-                });
-              });
-              if (LOGC) console.log('[CONTRACTS] wired btnPickClient');
-            }
-        if (btnCL && !btnCL.__wired) {
-  btnCL.__wired = true;
-  btnCL.addEventListener('click', () => {
-    if (LOGC) console.log('[CONTRACTS] Clear Client clicked');
-    setContractFormValue('client_id', '');
-
-    // 🔹 Clear the visible client text input as well
-    const cliInput = document.getElementById('client_name_display');
-    if (cliInput) cliInput.value = '';
-
-    const lab = document.getElementById('clientPickLabel');
-    if (lab) lab.textContent = '';
-
-    try {
-      const fs2 = (window.modalCtx.formState ||= {
-        __forId: (window.modalCtx.data?.id ?? window.modalCtx.openToken ?? null),
-        main:{}, pay:{}
-      });
-      fs2.main ||= {};
-      delete fs2.main.client_id;
-      delete fs2.main.client_name;
-      delete fs2.main.week_ending_weekday_snapshot;
-
-      window.modalCtx.data = window.modalCtx.data || {};
-      delete window.modalCtx.data.client_id;
-      delete window.modalCtx.data.client_name;
-
-      const lbl = document.getElementById('weLabel');
-      if (lbl) lbl.textContent = 'Sunday';
-
-      const hidden = form?.querySelector('input[name="week_ending_weekday_snapshot"]');
-      if (hidden) hidden.value = '';
-    } catch {}
-    try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
-  });
-  if (LOGC) console.log('[CONTRACTS] wired btnClearClient');
-}
-
-
-            const openOnType = (inputEl, openerName) => {
-              if (!inputEl || inputEl.__wiredTyping) return;
-              inputEl.__wiredTyping = true;
-              if (LOGC) console.log('[CONTRACTS] typing handler installed for', openerName);
-            };
-            openOnType(candInput, 'candidate');
-            openOnType(cliInput, 'client');
-          }
-        }
-
-           const ratesTab = document.querySelector('#contractRatesTab');
-        if (ratesTab) {
-          // One-time wiring for the tab container (stageRates, margins)
-          if (!ratesTab.__wiredStage) {
-            ratesTab.__wiredStage = true;
-
-            // Stage numeric rate fields + margins
-            const stageRates = (e) => {
-              const t = e.target;
-              if (!t || !t.name) return;
-              if (/^(paye_|umb_|charge_)/.test(t.name) || /^mileage_(charge|pay)_rate$/.test(t.name)) {
-                setContractFormValue(t.name, t.value);
-                if (/^(paye_|umb_|charge_)/.test(t.name)) computeContractMargins();
-                try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
-              }
-            };
-            ratesTab.addEventListener('input', stageRates, true);
-            ratesTab.addEventListener('change', stageRates, true);
-            computeContractMargins();
-          }
-
-          // Choose preset wiring: may run on every wire(), guarded per-button
- // Choose preset wiring: may run on every wire(), guarded per-button
-const chooseBtn = document.getElementById('btnChoosePreset');
-if (chooseBtn && !chooseBtn.__wired) {
-  chooseBtn.__wired = true;
-  chooseBtn.addEventListener('click', () => {
-    console.log('[CONTRACTS] Choose preset clicked');
-
-    const payMethod = (function () {
-      try {
-        const v =
-          (window.modalCtx?.formState?.main?.pay_method_snapshot) ||
-          document.querySelector('select[name="pay_method_snapshot"], select[name="default_pay_method_snapshot"]')?.value ||
-          window.modalCtx?.data?.pay_method_snapshot ||
-          'PAYE';
-        return String(v).toUpperCase();
-      } catch { return 'PAYE'; }
-    })();
-
-    const formEl = document.querySelector('#contractForm');
-    const fsMain = window.modalCtx?.formState?.main || {};
-
-    // Prefer staged state and modalCtx.data for client_id; DOM is last resort
-    let clientId =
-      (fsMain.client_id && String(fsMain.client_id).trim()) ||
-      (window.modalCtx?.data?.client_id && String(window.modalCtx.data.client_id).trim()) ||
-      (formEl?.querySelector('[name="client_id"]')?.value?.trim()) ||
-      null;
-
-    clientId = clientId || null; // normalise empty string to null
-
-    const start =
-      (formEl?.querySelector('[name="start_date"]')?.value?.trim()) ||
-      (fsMain.start_date && String(fsMain.start_date)) ||
-      (window.modalCtx?.data?.start_date && String(window.modalCtx.data.start_date)) ||
-      null;
-
-    openRatePresetPicker(
-      (preset) => {
-        // NEW: pre-apply snapshot for Reset
-        try {
-          if (typeof snapshotContractForm === 'function') snapshotContractForm();
-          const src = window.modalCtx && window.modalCtx.formState ? window.modalCtx.formState : null;
-          if (src) {
-            window.modalCtx.__presetBefore =
-              (typeof structuredClone === 'function')
-                ? structuredClone(src)
-                : JSON.parse(JSON.stringify(src));
-          }
-        } catch (e) {
-          console.warn('[CONTRACTS] pre-apply snapshot failed (non-fatal)', e);
-        }
-
-        applyRatePresetToContractForm(preset, payMethod);
-        try {
-          const chip = document.getElementById('presetChip');
-          if (chip) {
-            chip.style.display = '';
-            const title =
-              preset.name ||
-              [preset.role, preset.band ? `Band ${preset.band}` : '']
-                .filter(Boolean)
-                .join(' / ') ||
-              'Preset';
-            chip.textContent = `Preset: ${title}`;
-          }
-        } catch {}
-        try { computeContractMargins(); } catch {}
-        // Mark the contracts frame dirty so Save becomes available
-        try {
-          const fr = window.__getModalFrame?.();
-          if (fr && (fr.kind === 'contracts' || fr.entity === 'contracts')) {
-            fr.isDirty = true;
-            if (typeof fr._updateButtons === 'function') fr._updateButtons();
-          }
-        } catch {}
-        try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
-      },
-      {
-        client_id:    clientId,
-        start_date:   start,
-        defaultScope: clientId ? 'CLIENT' : 'GLOBAL'
-      }
-    );
-  });
-}
-
-
-
-          // Full reset wiring: same pattern (per-button guard, not tied to __wiredStage)
-              // Full reset wiring: same pattern (per-button guard, not tied to __wiredStage)
-            const resetBtn = document.getElementById('btnResetPreset');
-          if (resetBtn && !resetBtn.__wired) {
-            resetBtn.__wired = true;
-            resetBtn.addEventListener('click', () => {
-              const snap = window.modalCtx && window.modalCtx.__presetBefore ? window.modalCtx.__presetBefore : null;
-              if (snap && typeof snap === 'object') {
-                // Restore from snapshot
-                try {
-                  const form = document.querySelector('#contractForm');
-                  const writeInput = (name, value) => {
-                    const el = document.querySelector(`#contractRatesTab input[name="${name}"]`) ||
-                               (form && form.querySelector(`[name="${name}"]`)) ||
-                               document.querySelector(`[name="${name}"]`);
-                    if (el) el.value = (value == null ? '' : String(value));
-                    setContractFormValue(name, (value == null ? '' : String(value)));
-                  };
-
-                  // Rates
-                  const rateKeys = ['paye_day','paye_night','paye_sat','paye_sun','paye_bh','umb_day','umb_night','umb_sat','umb_sun','umb_bh','charge_day','charge_night','charge_sat','charge_sun','charge_bh'];
-                  for (const k of rateKeys) writeInput(k, (snap.pay || {})[k] ?? '');
-
-                  // Mileage – try both main & pay snapshots
-                  const mp = (snap.main || {})['mileage_pay_rate'];
-                  const mc = (snap.main || {})['mileage_charge_rate'];
-                  const mp2= (snap.pay  || {})['mileage_pay_rate'];
-                  const mc2= (snap.pay  || {})['mileage_charge_rate'];
-                  writeInput('mileage_pay_rate',    mp  ?? mp2  ?? '');
-                  writeInput('mileage_charge_rate', mc  ?? mc2  ?? '');
-
-                  // Bucket labels (prefer consolidated labels map if present)
-                  const L = (snap.main && snap.main.__bucket_labels) ? snap.main.__bucket_labels : {
-                    day:   (snap.main || {})['bucket_day']   || '',
-                    night: (snap.main || {})['bucket_night'] || '',
-                    sat:   (snap.main || {})['bucket_sat']   || '',
-                    sun:   (snap.main || {})['bucket_sun']   || '',
-                    bh:    (snap.main || {})['bucket_bh']    || ''
-                  };
-                  [['day','bucket_label_day'],
-                   ['night','bucket_label_night'],
-                   ['sat','bucket_label_sat'],
-                   ['sun','bucket_label_sun'],
-                   ['bh','bucket_label_bh']].forEach(([k, field]) => {
-                    writeInput(field, L[k] || '');
-                    // mirror to any "bucket_" fields if present
-                    if (form) {
-                      const el2 = form.querySelector(`[name="bucket_${k}"]`);
-                      if (el2) el2.value = (L[k] || '');
-                    }
-                    const tr = document.querySelector(`#marginsTable tr[data-b="${k}"] > td:first-child`);
-                    if (tr) tr.textContent = (L[k] || '');
-                    ['cardPAYE','cardUMB','cardCHG'].forEach(cid=>{
-                      const card = document.getElementById(cid);
-                      const inp = card?.querySelector(`input[name$="_${k}"]`);
-                      if (card && inp) { const row = inp.closest('.row'); if (row) { const lab=row.querySelector('label'); if (lab) lab.textContent=(L[k] || ''); } }
-                    });
-                  });
-
-                  // Schedule
-                  const tpl = (snap.main || {}).__template || null;
-                  const days = ['mon','tue','wed','thu','fri','sat','sun'];
-                  if (tpl) {
-                    days.forEach(d => {
-                      const S = tpl[d] || {};
-                      writeInput(`${d}_start`, S.start || '');
-                      writeInput(`${d}_end`,   S.end   || '');
-                      writeInput(`${d}_break`, (S.break_minutes == null ? '' : String(S.break_minutes)));
-                    });
-                    const fs = (window.modalCtx.formState ||= { main:{}, pay:{} });
-                    fs.main.__template = tpl;
-                  } else {
-                    // fallback: if snapshot had raw fields
-                    days.forEach(d => {
-                      writeInput(`${d}_start`, (snap.main || {})[`${d}_start`] || '');
-                      writeInput(`${d}_end`,   (snap.main || {})[`${d}_end`]   || '');
-                      writeInput(`${d}_break`, (snap.main || {})[`${d}_break`] || '');
-                    });
-                    const fs = (window.modalCtx.formState ||= { main:{}, pay:{} });
-                    fs.main.__template = null;
-                  }
-
-                  // Role / band / display_site
-                  writeInput('role',         (snap.main || {}).role || '');
-                  writeInput('band',         (snap.main || {}).band || '');
-                  writeInput('display_site', (snap.main || {}).display_site || '');
-
-                  // Hide chip
-                  try { const chip=document.getElementById('presetChip'); if (chip) { chip.style.display='none'; chip.textContent=''; } } catch {}
-                } catch (err) {
-                  console.warn('[CONTRACTS] preset reset restore failed, falling back to clear', err);
-                }
-
-                try { computeContractMargins(); } catch {}
-                try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
-                return;
-              }
-
-              // Fallback: your previous clear-to-blank behavior
-              const clear = (sel) => { ratesTab.querySelectorAll(sel).forEach(el => { el.value=''; setContractFormValue(el.name, ''); }); };
-              clear('input[name^="paye_"]');
-              clear('input[name^="umb_"]');
-              clear('input[name^="charge_"]');
-
-              // Clear mileage
-              ['mileage_charge_rate','mileage_pay_rate'].forEach(n=>{
-                const el = ratesTab.querySelector(`input[name="${n}"]`);
-                if (el) el.value = '';
-                setContractFormValue(n, '');
-              });
-
-              // Reset bucket labels to defaults & update headings
-              try {
-                const defaults = { day:'Day', night:'Night', sat:'Sat', sun:'Sun', bh:'BH' };
-                const form = document.querySelector('#contractForm');
-                Object.entries(defaults).forEach(([k,v])=>{
-                  setContractFormValue(`bucket_label_${k}`, v);
-                  if (form) {
-                    const el1 = form.querySelector(`[name="bucket_label_${k}"]`);
-                    const el2 = form.querySelector(`[name="bucket_${k}"]`);
-                    if (el1) el1.value = v;
-                    if (el2) el2.value = v;
-                  }
-                  const tr = document.querySelector(`#marginsTable tr[data-b="${k}"] > td:first-child`);
-                  if (tr) tr.textContent = v;
-                  ['cardPAYE','cardUMB','cardCHG'].forEach(cid=>{
-                    const card = document.getElementById(cid);
-                    const inp = card?.querySelector(`input[name$="_${k}"]`);
-                    if (card && inp) { const row = inp.closest('.row'); if (row) { const lab=row.querySelector('label'); if (lab) lab.textContent=v; } }
-                  });
-                });
-              } catch {}
-
-              // Clear schedule grid and stage std_schedule_json=null
-              try {
-                const days = ['mon','tue','wed','thu','fri','sat','sun'];
-                days.forEach(d=>{
-                  const s = document.querySelector(`input[name="${d}_start"]`);
-                  const e = document.querySelector(`input[name="${d}_end"]`);
-                  const b = document.querySelector(`input[name="${d}_break"]`);
-                  if (s) s.value = '';
-                  if (e) e.value = '';
-                  if (b) b.value = '';
-                });
-                const fs = (window.modalCtx.formState ||= { main:{}, pay:{} });
-                fs.main.__template = null;
-              } catch {}
-
-              // Clear role/band/display_site
-              try {
-                const fs = (window.modalCtx.formState ||= { main:{}, pay:{} }).main ||= {};
-                fs.role = ''; fs.band = ''; fs.display_site = '';
-                const form = document.querySelector('#contractForm');
-                if (form) {
-                  const r=form.querySelector('[name="role"]'); if (r) r.value='';
-                  const b=form.querySelector('[name="band"]'); if (b) b.value='';
-                  const s=form.querySelector('[name="display_site"]'); if (s) s.value='';
-                }
-              } catch {}
-
-              // Clear chip & recompute margins
-              try { const chip=document.getElementById('presetChip'); if (chip) { chip.style.display='none'; chip.textContent=''; } } catch {}
-              try { computeContractMargins(); } catch {}
-              try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
-            });
-          }
-
-
-        }
-
-       };
-
-  setTimeout(() => {
-        const fr = window.__getModalFrame?.();
-        const prevDirty = fr?.isDirty;
-        if (fr) fr._suppressDirty = true;
-
-        wire();
-
-        if (fr) {
-          fr._suppressDirty = false;
-          fr.isDirty = prevDirty;
-          fr._updateButtons && fr._updateButtons();
-        }
-      }, 0);
-      if (!window.__contractsWireBound) {
-        window.__contractsWireBound = true;
-
-        const rewire = () => {
-          const fr = window.__getModalFrame?.();
-          const prevDirty = fr?.isDirty;
-          if (fr) fr._suppressDirty = true;
-
-          setTimeout(() => {
-            wire();
-            if (fr) {
-              fr._suppressDirty = false;
-              fr.isDirty = prevDirty;
-              fr._updateButtons && fr._updateButtons();
-            }
-          }, 0);
-        };
-
-        window.addEventListener('contracts-main-rendered', rewire);
-        window.addEventListener('contracts-rates-rendered', rewire);
-      }
-
- // Re-wire when the user clicks between Main / Rates / Calendar
-      const tabsEl = document.getElementById('modalTabs');
-      if (tabsEl && !tabsEl.__wired_contract_stage) {
-        tabsEl.__wired_contract_stage = true;
-        tabsEl.addEventListener('click', () => {
-          const fr = window.__getModalFrame?.();
-          const prevDirty = fr?.isDirty;
-          if (fr) fr._suppressDirty = true;
-
-          snapshotContractForm();
-          setTimeout(() => {
-            wire();
-            if (fr) {
-              fr._suppressDirty = false;
-              fr.isDirty = prevDirty;
-              fr._updateButtons && fr._updateButtons();
-            }
-          }, 0);
-        });
-      }
-
-    },
-
-
-    // 7th: options (now with noParentGate)
-    {
-      kind: 'contracts',
-      extraButtons,
-      noParentGate: !!isSuccessorCreate,
-      stayOpenOnSave: !!isSuccessorCreate,
-      _trace: (LOGC && {
-        tag: 'contracts-open',
-        isCreate,
-        isSuccessorCreate,
-        openToken: window.modalCtx.openToken
-      })
-    }
-  );
-   setTimeout(() => {
-    try {
-      const fr = window.__getModalFrame?.();
-      if (fr && (fr.entity === 'contracts' || fr.kind === 'contracts') && typeof fr.onReturn === 'function' && !fr.__contractsInit) {
-        fr.__contractsInit = true;
-        fr.onReturn();
-        if (LOGC) console.log('[CONTRACTS] initial onReturn() executed');
-      } else if (LOGC) {
-        console.log('[CONTRACTS] onReturn not executed', {
-          hasFrame: !!fr, entity: fr?.entity, kind: fr?.kind, hasOnReturn: typeof fr?.onReturn === 'function', init: !!fr?.__contractsInit
-        });
-      }
-
-      // 🔹 After wiring, surface any pay-method mismatch warnings returned by backend
-      try {
-        const baseData = (window.modalCtx && window.modalCtx.data)
-          ? window.modalCtx.data
-          : (row || {});
-        const warnings = Array.isArray(baseData.warnings) ? baseData.warnings : [];
-        if (warnings.length && typeof showModalHint === 'function') {
-          showModalHint(warnings.join(' '), 'warn');
-        }
-      } catch (warnErr) {
-        if (LOGC) console.warn('[CONTRACTS] show pay-method warnings failed', warnErr);
-      }
-
-    } catch (e) {
-      if (LOGC) console.warn('[CONTRACTS] initial onReturn failed', e);
-    } finally {
-      if (LOGC) console.log('[CONTRACTS] openContract EXIT');
-    }
-  }, 0);
-}
-
 
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -12675,8 +10563,9 @@ async function loadSelectionPreset(section, idOrName) {
 })();
 
 async function openSearchModal(opts = {}) {
-  const TIMESHEET_STATUS = ['ERROR','RECEIVED','REVOKED','STORED','SAT','SUN','BH'];
-  const INVOICE_STATUS   = ['DRAFT','ISSUED','ON_HOLD','PAID'];
+  // ✅ UPDATED: Timesheets advanced search aligns to summary filters (tools_stage + issues_filter)
+  // Keep invoices status list as-is
+  const INVOICE_STATUS = ['DRAFT','ISSUED','ON_HOLD','PAID'];
 
   const row = (label, inner) => `
     <div class="row">
@@ -12787,6 +10676,7 @@ async function openSearchModal(opts = {}) {
       row('Umbrella Name',   inputText('umbrella_name')),
       row('TMS Ref',         inputText('tms_ref'))
     ].join('');
+
   } else if (currentSection === 'clients') {
     const lblName     = friendly('clients','name','Client name');
     const lblCliRef   = friendly('clients','cli_ref','Client ref');
@@ -12809,6 +10699,7 @@ async function openSearchModal(opts = {}) {
       dateRangeRow('created_from','created_to','Created date (from / to)'),
       dateRangeRow('updated_from','updated_to','Last updated (from / to)')
     ].join('');
+
   } else if (currentSection === 'umbrellas') {
     inner = [
       row('Name',                 inputText('name')),
@@ -12819,16 +10710,76 @@ async function openSearchModal(opts = {}) {
       row('Enabled',              boolSelect('enabled')),
       datePair('created_from','Created from','created_to','Created to')
     ].join('');
+
   } else if (currentSection === 'timesheets') {
+    // ✅ Updated to match the NEW canonical summary model:
+    // tools_stage + issues_filter + route/scope + week-ending + checkboxes via boolSelect
     inner = [
-      row('Booking ID',           inputText('booking_id')),
-      row('Candidate key',        inputText('occupant_key_norm', 'candidate_id / key_norm')),
-      row('Hospital',             inputText('hospital_norm')),
-      datePair('worked_from','Worked from (date)','worked_to','Worked to (date)'),
-      datePair('week_ending_from','Week ending from','week_ending_to','Week ending to'),
-      row('Status',               multi('status', TIMESHEET_STATUS)),
-      datePair('created_from','Created from','created_to','Created to')
+      row('Tools stage', `
+        <select name="tools_stage">
+          <option value="">Any</option>
+          <option value="UNPROCESSED">Unprocessed</option>
+          <option value="PROCESSING_DELAYED">Processing Delayed</option>
+          <option value="AWAITING_AUTHORISATION">Awaiting Authorisation</option>
+          <option value="AUTHORISED_FOR_INVOICING">Authorised for Invoicing</option>
+          <option value="INVOICED">Invoiced</option>
+        </select>`),
+
+      row('Issues', `
+        <select name="issues_filter">
+          <option value="">Any</option>
+          <option value="NO_MATCH_ID">No match to Candidate/Client</option>
+          <option value="RATE_MISSING">Rate missing</option>
+          <option value="PAY_CHAN_MISS">Pay channel missing</option>
+          <option value="AWAITING_HR_VALIDATION">Awaiting HR validation</option>
+          <option value="HR_HOURS_MISMATCH">Hours mismatch (HealthRoster)</option>
+          <option value="HR_HOURS_MISSING">HR hours missing</option>
+          <option value="DUPLICATE_CONTRACTS">Duplicate contracts</option>
+          <option value="TIMESHEET_EVIDENCE">Timesheet evidence missing</option>
+          <option value="EXPENSES_EVIDENCE">Expenses evidence missing</option>
+          <option value="MILEAGE_EVIDENCE">Mileage evidence missing</option>
+          <option value="REFERENCE_MISSING">Reference missing</option>
+          <option value="VALIDATION">Validation</option>
+          <option value="ON_HOLD">On hold</option>
+          <option value="AUTHORISATION">Awaiting Authorisation</option>
+          <option value="QR_NOT_ISSUED">QR not issued</option>
+          <option value="QR_AWAITING_SIGNATURE">QR awaiting signature</option>
+        </select>`),
+
+      row('Route', `
+        <select name="route_type">
+          <option value="">Any</option>
+          <option value="ALL">All</option>
+          <option value="ELECTRONIC">Electronic</option>
+          <option value="MANUAL">Manual</option>
+          <option value="NHSP">NHSP</option>
+          <option value="HEALTHROSTER">HealthRoster</option>
+          <option value="QR">QR</option>
+        </select>`),
+
+      row('Type (scope)', `
+        <select name="sheet_scope">
+          <option value="">Any</option>
+          <option value="ALL">Both</option>
+          <option value="WEEKLY">Weekly</option>
+          <option value="DAILY">Daily</option>
+        </select>`),
+
+      row('QR status', `
+        <select name="qr_status">
+          <option value="">Any</option>
+          <option value="PENDING">PENDING</option>
+          <option value="SIGNED">SIGNED</option>
+          <option value="REFUSED">REFUSED</option>
+          <option value="REISSUE_REQUIRED">REISSUE_REQUIRED</option>
+        </select>`),
+
+      dateRangeRow('week_ending_from','week_ending_to','Week ending (from / to)'),
+
+      row('Candidate paid', boolSelect('candidate_paid')),
+      row('Adjusted timesheets', boolSelect('is_adjusted'))
     ].join('');
+
   } else if (currentSection === 'invoices') {
     inner = [
       row('Invoice no',           inputText('invoice_no')),
@@ -12838,6 +10789,7 @@ async function openSearchModal(opts = {}) {
       datePair('due_from','Due from','due_to','Due to'),
       datePair('created_from','Created from','created_to','Created to')
     ].join('');
+
   } else if (currentSection === 'contracts') {
     const weekdayOptions = [
       { value: '',    label: 'Any'    },
@@ -12948,11 +10900,23 @@ async function openSearchModal(opts = {}) {
       // Reset selection for the new dataset (IDs-only)
       window.__selection = window.__selection || {};
       const sel = (window.__selection[currentSection] ||= { fingerprint:'', ids:new Set() });
+
       const filters = extractFiltersFromForm('#searchForm');
       sel.fingerprint = JSON.stringify({ section: currentSection, filters });
       sel.ids.clear();
 
-      const rows = await search(currentSection, filters);
+      // Persist filters into list state (so paging + re-open uses the same criteria)
+      st.filters = { ...(filters || {}) };
+
+      // ✅ Timesheets: run via the normal section list path (summary endpoint), not /api/search/timesheets
+      // This keeps Tools Stage / Issues logic consistent with the main Timesheets Summary.
+      let rows = null;
+      if (currentSection === 'timesheets') {
+        rows = await loadSection();
+      } else {
+        rows = await search(currentSection, filters);
+      }
+
       if (rows) renderSummary(rows);
       return true; // saveForFrame will close this advanced-search frame on success
     },
@@ -13119,24 +11083,34 @@ function renderTools(){
     const filters = st.filters || {};
     window.__listState['timesheets'].filters = filters;
 
-    // ✅ FIX: proactively remove legacy ts_stage so it cannot silently affect list mode.
-    // If it was previously used, map it to summary_stage once and delete it.
+    // ✅ Drop legacy/stale keys that should no longer drive list mode
+    // - ts_stage / summary_stage were legacy stage concepts
+    // - client_invoiced / needs_attention are removed from Tools UI
     try {
-      const tsStageRaw = (filters && Object.prototype.hasOwnProperty.call(filters, 'ts_stage'))
-        ? String(filters.ts_stage || '').trim().toUpperCase()
-        : '';
+      if (Object.prototype.hasOwnProperty.call(filters, 'client_invoiced')) delete filters.client_invoiced;
+      if (Object.prototype.hasOwnProperty.call(filters, 'needs_attention')) delete filters.needs_attention;
 
-      if (tsStageRaw) {
-        // Attempt a safe mapping if it matches our canonical values; otherwise drop it.
-        const allowed = new Set(['ALL','UNPROCESSED','READY_FOR_INVOICE','PROCESSED','INVOICED']);
-        if (!Object.prototype.hasOwnProperty.call(filters, 'summary_stage')) {
-          if (allowed.has(tsStageRaw)) {
-            filters.summary_stage = tsStageRaw;
-          }
-        }
-        delete filters.ts_stage;
-        window.__listState['timesheets'].filters = filters;
+      // If an old session stored a legacy stage, map only the safe values to tools_stage
+      // (we intentionally do NOT guess mappings for READY_FOR_INVOICE/PROCESSED)
+      if (!Object.prototype.hasOwnProperty.call(filters, 'tools_stage')) {
+        const legacyTsStage = Object.prototype.hasOwnProperty.call(filters, 'ts_stage')
+          ? String(filters.ts_stage || '').trim().toUpperCase()
+          : '';
+        const legacySumStage = Object.prototype.hasOwnProperty.call(filters, 'summary_stage')
+          ? String(filters.summary_stage || '').trim().toUpperCase()
+          : '';
+
+        const legacy = legacyTsStage || legacySumStage;
+
+        if (legacy === 'UNPROCESSED') filters.tools_stage = 'UNPROCESSED';
+        else if (legacy === 'INVOICED') filters.tools_stage = 'INVOICED';
       }
+
+      if (Object.prototype.hasOwnProperty.call(filters, 'ts_stage')) delete filters.ts_stage;
+      if (Object.prototype.hasOwnProperty.call(filters, 'summary_stage')) delete filters.summary_stage;
+      if (Object.prototype.hasOwnProperty.call(filters, 'processing_status')) delete filters.processing_status;
+
+      window.__listState['timesheets'].filters = filters;
     } catch {}
 
     const box = document.createElement('div');
@@ -13171,19 +11145,13 @@ function renderTools(){
       return wrap;
     };
 
-    // Candidate Paid  → candidate_paid = true → backend: paid_at_utc NOT NULL
+    // ✅ Candidate Paid (checkbox): filters by candidate-paid timestamp (paid_at_utc NOT NULL)
     box.appendChild(mkToolFlag('candidate_paid', 'Candidate paid'));
 
-    // Client Invoiced → client_invoiced = true → backend: locked_by_invoice_id NOT NULL (segment-aware in v_timesheets_summary)
-    box.appendChild(mkToolFlag('client_invoiced', 'Client invoiced'));
+    // ✅ Adjusted timesheets (checkbox): moved from summary header
+    box.appendChild(mkToolFlag('is_adjusted', 'Adjusted timesheets'));
 
-    // Needs Attention → needs_attention = true → backend: needs_attention = true
-    box.appendChild(mkToolFlag('needs_attention', 'Needs attention'));
-
-    // ── Stage selector (canonical summary_stage pipeline) ────────────────────
-    // ✅ No "Awaiting authorisation"
-    // ✅ Includes Unprocessed (contract-week stubs / no timesheet yet)
-    // ✅ Apply via summary_stage only (do not use legacy ts_stage)
+    // ── Tools Stage selector (canonical tools_stage) ─────────────────────────
     const stageWrap = document.createElement('div');
     stageWrap.style.marginTop = '8px';
     stageWrap.className = 'mini';
@@ -13197,21 +11165,23 @@ function renderTools(){
     stageSel.classList.add('dark-control');
 
     const stageOpts = [
-      ['ALL',              'All'],
-      ['UNPROCESSED',      'Unprocessed'],
-      ['READY_FOR_INVOICE','Ready to invoice'],
-      ['PROCESSED',        'Processed'],
-      ['INVOICED',         'Invoiced']
+      ['ALL',                    'All'],
+      ['UNPROCESSED',            'Unprocessed'],
+      ['PROCESSING_DELAYED',     'Processing Delayed'],
+      ['AWAITING_AUTHORISATION', 'Awaiting Authorisation'],
+      ['AUTHORISED_FOR_INVOICING','Authorised for Invoicing'],
+      ['INVOICED',               'Invoiced']
     ];
 
-    // ✅ Now prefer summary_stage only (ts_stage was proactively removed above)
-    const curStage = String((filters.summary_stage || 'ALL')).toUpperCase();
+    const allowedStages = new Set(stageOpts.map(x => x[0]));
+    const curStage = String((filters.tools_stage || 'ALL')).toUpperCase();
+    const curStageSafe = allowedStages.has(curStage) ? curStage : 'ALL';
 
     stageOpts.forEach(([v, label]) => {
       const o = document.createElement('option');
       o.value = v;
       o.textContent = label;
-      if (curStage === v) o.selected = true;
+      if (curStageSafe === v) o.selected = true;
       stageSel.appendChild(o);
     });
 
@@ -13219,9 +11189,15 @@ function renderTools(){
       const val = String(stageSel.value || '').toUpperCase();
       const curFilters = { ...(window.__listState['timesheets'].filters || {}) };
 
-      // ✅ Use modern pipeline only
-      delete curFilters.ts_stage;     // (defensive; should already be absent)
-      curFilters.summary_stage = val; // ALL | UNPROCESSED | READY_FOR_INVOICE | PROCESSED | INVOICED
+      // Canonical tools stage only
+      curFilters.tools_stage = val;
+
+      // Ensure legacy keys cannot affect list mode
+      if ('ts_stage' in curFilters) delete curFilters.ts_stage;
+      if ('summary_stage' in curFilters) delete curFilters.summary_stage;
+      if ('processing_status' in curFilters) delete curFilters.processing_status;
+      if ('client_invoiced' in curFilters) delete curFilters.client_invoiced;
+      if ('needs_attention' in curFilters) delete curFilters.needs_attention;
 
       window.__listState['timesheets'].filters = curFilters;
       window.__listState['timesheets'].page = 1;
@@ -34892,7 +32868,7 @@ this._markDirty();
 }
 
 
- function renderSummary(rows){
+function renderSummary(rows){
   currentRows = rows;
   currentSelection = null;
 
@@ -35086,7 +33062,7 @@ this._markDirty();
   topControls.appendChild(sizeSel);
 
   // ─────────────────────────────────────────────────────────────
-  // NEW: Invoices quick filters row (Status multi + Week ending + Issued + q)
+  // Invoices quick filters row (Status multi + Week ending + Issued + q)
   // ─────────────────────────────────────────────────────────────
   if (currentSection === 'invoices') {
     const stFilters = window.__listState[currentSection].filters || {};
@@ -35403,74 +33379,87 @@ this._markDirty();
     topControls.appendChild(statusSel);
   }
 
-  // ── Timesheets quick filters: Status / Route / Scope / Flags ───────────────
+  // ── Timesheets quick filters: Issues / Route / Scope ───────────────
   if (currentSection === 'timesheets') {
     const stFilters = window.__listState[currentSection].filters || {};
     window.__listState[currentSection].filters = stFilters;
 
-    // Status dropdown
-    const statusLabel2 = document.createElement('span');
-    statusLabel2.className = 'mini';
-    statusLabel2.textContent = 'Status:';
-    const statusSel2 = document.createElement('select');
-    statusSel2.classList.add('dark-control');
+    // Back-compat: if old sessions had status_code, migrate to issues_filter once.
+    try {
+      const hasIssues = Object.prototype.hasOwnProperty.call(stFilters, 'issues_filter');
+      const sc = Object.prototype.hasOwnProperty.call(stFilters, 'status_code')
+        ? String(stFilters.status_code || '').trim().toUpperCase()
+        : '';
+      if (!hasIssues && sc) {
+        if (sc === 'NO_MATCH_ID') stFilters.issues_filter = 'NO_MATCH_ID';
+        else if (sc === 'RATE_MISSING') stFilters.issues_filter = 'RATE_MISSING';
+        else if (sc === 'PAY_CHAN_MISS') stFilters.issues_filter = 'PAY_CHAN_MISS';
+        else if (sc === 'HR_HOURS_MISMATCH') stFilters.issues_filter = 'HR_HOURS_MISMATCH';
+        else if (sc === 'READY_FOR_HR') stFilters.issues_filter = 'AWAITING_HR_VALIDATION';
+      }
+      if (Object.prototype.hasOwnProperty.call(stFilters, 'status_code')) delete stFilters.status_code;
+      if (Object.prototype.hasOwnProperty.call(stFilters, 'processing_status')) delete stFilters.processing_status;
+      window.__listState[currentSection].filters = stFilters;
+    } catch {}
 
-    const statusOpts = [
-      ['ALL',               'All'],
-      ['NO_MATCH_ID',       'No match to Candidate/Client'],
-      ['RATE_MISSING',      'Rate missing'],
-      ['PAY_CHAN_MISS',     'Pay channel missing'],
-      ['READY_FOR_HR',      'Ready for Healthroster validation'],
-      ['READY_FOR_INV',     'Ready for invoice'],
-      ['HR_HOURS_MISMATCH', 'Timesheet hours mismatch with Healthroster']
+    // Issues dropdown (canonical; filters by issue type, not by workflow stage)
+    const issuesLabel = document.createElement('span');
+    issuesLabel.className = 'mini';
+    issuesLabel.textContent = 'Issues:';
+    const issuesSel = document.createElement('select');
+    issuesSel.classList.add('dark-control');
+
+    const issuesOpts = [
+      ['ALL',                   'All'],
+      ['NO_MATCH_ID',           'No match to Candidate/Client'],
+      ['RATE_MISSING',          'Rate missing'],
+      ['PAY_CHAN_MISS',         'Pay channel missing'],
+      ['AWAITING_HR_VALIDATION','Awaiting HR validation'],
+      ['HR_HOURS_MISMATCH',     'Hours mismatch (HealthRoster)'],
+      ['HR_HOURS_MISSING',      'HR hours missing'],
+      ['DUPLICATE_CONTRACTS',   'Duplicate contracts'],
+      ['TIMESHEET_EVIDENCE',    'Timesheet evidence missing'],
+      ['EXPENSES_EVIDENCE',     'Expenses evidence missing'],
+      ['MILEAGE_EVIDENCE',      'Mileage evidence missing'],
+      ['REFERENCE_MISSING',     'Reference missing'],
+      ['VALIDATION',            'Validation'],
+      ['ON_HOLD',               'On hold'],
+      ['AUTHORISATION',         'Awaiting Authorisation'],
+      ['QR_NOT_ISSUED',         'QR not issued'],
+      ['QR_AWAITING_SIGNATURE', 'QR awaiting signature']
     ];
-    const statusCur2 = (stFilters.status_code || 'ALL').toUpperCase();
-    statusOpts.forEach(([v, label]) => {
+
+    const issuesCur = String(stFilters.issues_filter || 'ALL').toUpperCase();
+    issuesOpts.forEach(([v, label]) => {
       const o = document.createElement('option');
       o.value = v;
       o.textContent = label;
-      if (statusCur2 === v) o.selected = true;
-      statusSel2.appendChild(o);
+      if (issuesCur === v) o.selected = true;
+      issuesSel.appendChild(o);
     });
-    statusSel2.addEventListener('change', async () => {
-      const val = statusSel2.value;
+
+    issuesSel.addEventListener('change', async () => {
+      const val = String(issuesSel.value || '').toUpperCase();
       const curFilters = { ...(window.__listState[currentSection].filters || {}) };
 
-      // Remember UI choice
-      curFilters.status_code = val;
+      // Remember UI choice (canonical)
+      curFilters.issues_filter = val;
 
-      // Reset hr_issue by default
-      if ('hr_issue' in curFilters) {
-        delete curFilters.hr_issue;
-      }
+      // Ensure legacy/stale keys cannot affect list mode
+      if ('status_code' in curFilters) delete curFilters.status_code;
+      if ('processing_status' in curFilters) delete curFilters.processing_status;
 
-      // Map to backend processing_status / hr_issue only when it helps
-      switch (val) {
-        case 'NO_MATCH_ID':
-          curFilters.processing_status = 'UNASSIGNED,CLIENT_UNRESOLVED';
-          break;
-        case 'READY_FOR_HR':
-          curFilters.processing_status = 'READY_FOR_HR';
-          break;
-        case 'READY_FOR_INV':
-          curFilters.processing_status = 'READY_FOR_INVOICE';
-          break;
-        case 'HR_HOURS_MISMATCH':
-          curFilters.processing_status = 'ALL';
-          curFilters.hr_issue = 'HOURS_MISMATCH_HR';
-          break;
-        default:
-          curFilters.processing_status = 'ALL';
-          break;
-      }
+      // Issues dropdown owns HR mismatch filtering now; clear any explicit hr_issue unless set elsewhere
+      if ('hr_issue' in curFilters) delete curFilters.hr_issue;
 
       window.__listState[currentSection].filters = curFilters;
       window.__listState[currentSection].page = 1;
       const data = await loadSection();
       renderSummary(data);
     });
-    topControls.appendChild(statusLabel2);
-    topControls.appendChild(statusSel2);
+
+    topControls.appendChild(issuesLabel);
+    topControls.appendChild(issuesSel);
 
     // Route dropdown
     const routeLabel = document.createElement('span');
@@ -35538,31 +33527,6 @@ this._markDirty();
     });
     topControls.appendChild(scopeLabel);
     topControls.appendChild(scopeSel);
-
-    // Flags: Adjusted only (Needs attention lives in Tools)
-    const mkFlag = (name, label) => {
-      const wrap = document.createElement('label');
-      wrap.className = 'mini';
-      wrap.style.display = 'flex';
-      wrap.style.alignItems = 'center';
-      wrap.style.gap = '4px';
-      const cb = document.createElement('input');
-      cb.type = 'checkbox';
-      cb.checked = !!stFilters[name];
-      cb.addEventListener('change', async () => {
-        const curFilters = { ...(window.__listState[currentSection].filters || {}) };
-        curFilters[name] = cb.checked ? true : false;
-        window.__listState[currentSection].filters = curFilters;
-        window.__listState[currentSection].page = 1;
-        const data = await loadSection();
-        renderSummary(data);
-      });
-      wrap.appendChild(cb);
-      wrap.appendChild(document.createTextNode(label));
-      return wrap;
-    };
-
-    topControls.appendChild(mkFlag('is_adjusted', 'Adjusted only'));
   }
 
   // Columns button (already supports per-column display name overrides via openColumnsDialog)
@@ -35594,58 +33558,9 @@ this._markDirty();
   topControls.appendChild(clearBtn);
   content.appendChild(topControls);
 
- // ── apply extra Status filtering client-side for timesheets ────────────────
-let effectiveRows = rows;
-if (currentSection === 'timesheets') {
-  const stFilters = window.__listState[currentSection].filters || {};
-  const statusCode = (stFilters.status_code || 'ALL').toUpperCase();
-
-  if (statusCode === 'NO_MATCH_ID') {
-    effectiveRows = effectiveRows.filter(r => !r.candidate_id || !r.client_id);
-
-  } else if (statusCode === 'RATE_MISSING') {
-    effectiveRows = effectiveRows.filter(r => r.has_rate_issue === true);
-
-  } else if (statusCode === 'PAY_CHAN_MISS') {
-    effectiveRows = effectiveRows.filter(r => r.has_pay_channel_issue === true);
-
-  } else if (statusCode === 'READY_FOR_HR') {
-    // Only show genuinely “ready for HR” (not invoiced/locked)
-    effectiveRows = effectiveRows.filter(r => {
-      const proc = String(r.processing_status || '').toUpperCase();
-      if (proc !== 'READY_FOR_HR') return false;
-
-      const invSegStage = String(r.invoice_segment_stage || '').trim().toUpperCase();
-      const locked = !!r.locked_by_invoice_id;
-
-      // Exclude anything already invoiced/part-invoiced/locked
-      if (locked) return false;
-      if (invSegStage && invSegStage !== 'NOT_INVOICED') return false;
-
-      return true;
-    });
-
-  } else if (statusCode === 'READY_FOR_INV') {
-    // Only show genuinely “ready for invoice” (not invoiced/locked)
-    effectiveRows = effectiveRows.filter(r => {
-      const proc = String(r.processing_status || '').toUpperCase();
-      if (proc !== 'READY_FOR_INVOICE') return false;
-
-      const invSegStage = String(r.invoice_segment_stage || '').trim().toUpperCase();
-      const locked = !!r.locked_by_invoice_id;
-
-      // Exclude anything already invoiced/part-invoiced/locked
-      if (locked) return false;
-      if (invSegStage && invSegStage !== 'NOT_INVOICED') return false;
-
-      return true;
-    });
-  }
-
-  // HR_HOURS_MISMATCH relies on backend hr_issue filter only
-}
-currentRows = effectiveRows;
-
+  // ── No client-side filtering for timesheets (backend + view handle Tools Stage + Issues) ──
+  let effectiveRows = rows;
+  currentRows = effectiveRows;
 
   // ── single table (header + body) inside scroll host ────────────────────────
   const bodyWrap = document.createElement('div');
@@ -35811,7 +33726,7 @@ currentRows = effectiveRows;
     // ─────────────────────────────────────────────────────────────
     try {
       if (currentSection === 'timesheets') {
-        const proc = String(r?.processing_status || '').trim().toUpperCase();
+        const toolsStage = String(r?.tools_stage || '').trim().toUpperCase();
         const invSegStage   = String(r?.invoice_segment_stage || '').trim().toUpperCase();
         const invIssueStage = String(r?.invoice_issue_stage || '').trim().toUpperCase();
 
@@ -35820,16 +33735,14 @@ currentRows = effectiveRows;
         const isInvoiceIssued      = (invIssueStage === 'INVOICED_ISSUED');
         const isInvoiceNotIssued   = (invIssueStage === 'INVOICED_NOT_ISSUED');
 
-        // Ready-for-invoice highlight applies only when NOT invoiced/locked
+        // Ready-for-invoice highlight applies only when canonical stage says authorised-for-invoicing
         const isReadyForInvoiceUninvoiced =
-          (proc === 'READY_FOR_INVOICE') &&
-          !isFullyInvoiced &&
-          !invIssueStage;
+          (toolsStage === 'AUTHORISED_FOR_INVOICING');
 
         // Row rules:
         // - Fully invoiced + Candidate Paid + Invoice issued => deep green row
-        // - Fully invoiced but invoice not issued => light green row (cell still shows Invoiced with dark cell)
-        // - Not invoiced/locked but ready for invoice => light green row
+        // - Fully invoiced but invoice not issued => light green row
+        // - Authorised for invoicing => light green row
         if (isFullyInvoiced && isPaidToCandidate && isInvoiceIssued) {
           tr.classList.add('row-deep-green');
         } else if (isFullyInvoiced && isInvoiceNotIssued) {
@@ -35897,7 +33810,7 @@ currentRows = effectiveRows;
         }
 
       } else if (currentSection === 'timesheets' && c === 'candidate_name') {
-        // Paid coin in candidate cell
+        // Candidate-paid coin in candidate cell
         const txt = String(formatDisplayValue(c, v) ?? '');
         const isPaidToCandidate = !!r?.paid_at_utc;
 
@@ -35920,29 +33833,34 @@ currentRows = effectiveRows;
           td.textContent = txt;
         }
 
-   } else if (currentSection === 'timesheets' && c === 'processing_status') {
-  // ✅ Processing State column rules (segment-aware):
-  // - FULLY_INVOICED => "Invoiced" + green cell background (dark)
-  // - PARTIALLY_INVOICED => "Partially Invoiced"
-  // - NOT_INVOICED + READY_FOR_INVOICE => "Ready for invoice"
-  // - NOT_INVOICED + READY_FOR_HR      => "Ready for HR"
-  // - Else => formatted processing_status
-  const stageRaw = String(v || '').trim().toUpperCase();
-  const invSegStage = String(r?.invoice_segment_stage || '').trim().toUpperCase();
+      } else if (currentSection === 'timesheets' && (c === 'processing_status' || c === 'processing_status_display')) {
+        // ✅ Processing Status is the canonical display label from the view (never TSFIN raw status)
+        const txtBase = String(r?.processing_status_display || '').trim();
+        const txt = txtBase || String(formatDisplayValue(c, v) ?? '');
 
-  if (invSegStage === 'FULLY_INVOICED') {
-    td.textContent = 'Invoiced';
-    td.classList.add('cell-invoiced');
-  } else if (invSegStage === 'PARTIALLY_INVOICED') {
-    td.textContent = 'Partially Invoiced';
-  } else if (invSegStage === 'NOT_INVOICED' && stageRaw === 'READY_FOR_INVOICE') {
-    td.textContent = 'Ready for invoice';
-  } else if (invSegStage === 'NOT_INVOICED' && stageRaw === 'READY_FOR_HR') {
-    td.textContent = 'Ready for HR';
-  } else {
-    td.textContent = formatDisplayValue(c, v);
-  }
+        // Invoice-paid coin (distinct from candidate-paid coin)
+        const invoicePaid = (r && (r.invoice_is_paid === true || String(r.invoice_is_paid).toLowerCase() === 'true'));
+        const stageNow = String(r?.tools_stage || '').trim().toUpperCase();
 
+        // Show coin only when invoice is actually paid AND row is in the INVOICED stage bucket
+        if (invoicePaid && stageNow === 'INVOICED' && txt) {
+          const wrap = document.createElement('div');
+          wrap.className = 'cell-right-icon';
+
+          const main = document.createElement('span');
+          main.className = 'cell-main';
+          main.textContent = txt;
+
+          const coin = document.createElement('span');
+          coin.className = 'coin-badge';
+          coin.textContent = '£';
+
+          wrap.appendChild(main);
+          wrap.appendChild(coin);
+          td.appendChild(wrap);
+        } else {
+          td.textContent = txt;
+        }
 
       } else if (currentSection === 'invoices' && c === 'invoice_no') {
         // Paid coin in invoice number cell
@@ -64333,45 +62251,89 @@ async function listTimesheetsSummary(filters = {}) {
   // ✅ Totals must reflect ALL rows matching filters (not just this page)
   qs.set('include_totals', 'true');
 
-  // ✅ FIX: enforce canonical stage pipeline:
-  // - migrate legacy ts_stage -> summary_stage only if summary_stage is absent and value is valid
-  // - then DROP ts_stage so it never re-enters the pipeline
+  // Work on a safe copy
   const f0 = (filters && typeof filters === 'object') ? filters : {};
   const f = { ...(f0 || {}) };
 
+  // ─────────────────────────────────────────────────────────────
+  // Canonical filters:
+  // - tools_stage (5-stage classification)
+  // - issues_filter (issue category)
+  // ─────────────────────────────────────────────────────────────
+
   try {
-    const legacy = Object.prototype.hasOwnProperty.call(f, 'ts_stage')
-      ? String(f.ts_stage || '').trim().toUpperCase()
-      : '';
+    // Drop removed legacy flags
+    if (Object.prototype.hasOwnProperty.call(f, 'client_invoiced')) delete f.client_invoiced;
+    if (Object.prototype.hasOwnProperty.call(f, 'needs_attention')) delete f.needs_attention;
 
-    const allowedStages = new Set(['ALL','UNPROCESSED','READY_FOR_INVOICE','PROCESSED','INVOICED']);
+    // Migrate legacy stage keys only for safe values
+    if (!Object.prototype.hasOwnProperty.call(f, 'tools_stage')) {
+      const legacyTsStage = Object.prototype.hasOwnProperty.call(f, 'ts_stage')
+        ? String(f.ts_stage || '').trim().toUpperCase()
+        : '';
+      const legacySumStage = Object.prototype.hasOwnProperty.call(f, 'summary_stage')
+        ? String(f.summary_stage || '').trim().toUpperCase()
+        : '';
 
-    if (!Object.prototype.hasOwnProperty.call(f, 'summary_stage')) {
-      if (legacy && allowedStages.has(legacy)) {
-        f.summary_stage = legacy;
-      }
+      const legacy = legacyTsStage || legacySumStage;
+      if (legacy === 'UNPROCESSED') f.tools_stage = 'UNPROCESSED';
+      else if (legacy === 'INVOICED') f.tools_stage = 'INVOICED';
     }
 
-    // Always remove legacy key from the effective filters snapshot
-    delete f.ts_stage;
+    // Always remove legacy keys from the effective snapshot
+    if (Object.prototype.hasOwnProperty.call(f, 'ts_stage')) delete f.ts_stage;
+    if (Object.prototype.hasOwnProperty.call(f, 'summary_stage')) delete f.summary_stage;
+    if (Object.prototype.hasOwnProperty.call(f, 'processing_status')) delete f.processing_status;
 
-    // Normalise summary_stage if present but invalid
-    if (Object.prototype.hasOwnProperty.call(f, 'summary_stage')) {
-      const ss = String(f.summary_stage || '').trim().toUpperCase();
-      if (!ss || !allowedStages.has(ss)) {
-        f.summary_stage = 'ALL';
+    // Migrate legacy status_code to issues_filter only when it maps cleanly
+    if (!Object.prototype.hasOwnProperty.call(f, 'issues_filter')) {
+      const sc = Object.prototype.hasOwnProperty.call(f, 'status_code')
+        ? String(f.status_code || '').trim().toUpperCase()
+        : '';
+
+      if (sc === 'NO_MATCH_ID') f.issues_filter = 'NO_MATCH_ID';
+      else if (sc === 'RATE_MISSING') f.issues_filter = 'RATE_MISSING';
+      else if (sc === 'PAY_CHAN_MISS') f.issues_filter = 'PAY_CHAN_MISS';
+      else if (sc === 'HR_HOURS_MISMATCH') f.issues_filter = 'HR_HOURS_MISMATCH';
+      else if (sc === 'READY_FOR_HR') f.issues_filter = 'AWAITING_HR_VALIDATION';
+    }
+
+    if (Object.prototype.hasOwnProperty.call(f, 'status_code')) delete f.status_code;
+
+    // Normalise tools_stage
+    const allowedStages = new Set([
+      'ALL',
+      'UNPROCESSED',
+      'PROCESSING_DELAYED',
+      'AWAITING_AUTHORISATION',
+      'AUTHORISED_FOR_INVOICING',
+      'INVOICED'
+    ]);
+
+    if (Object.prototype.hasOwnProperty.call(f, 'tools_stage')) {
+      const ts = String(f.tools_stage || '').trim().toUpperCase();
+      if (!ts || !allowedStages.has(ts)) {
+        f.tools_stage = 'ALL';
       } else {
-        f.summary_stage = ss;
+        f.tools_stage = ts;
       }
     }
   } catch {
     // non-fatal
     try { delete f.ts_stage; } catch {}
+    try { delete f.summary_stage; } catch {}
+    try { delete f.processing_status; } catch {}
+    try { delete f.client_invoiced; } catch {}
+    try { delete f.needs_attention; } catch {}
   }
 
-  // Stage filter (canonical only)
-  const stage = String(f.summary_stage || '').toUpperCase();
-  if (stage && stage !== 'ALL') qs.set('summary_stage', stage);
+  // Tools Stage filter
+  const toolsStage = String(f.tools_stage || '').toUpperCase();
+  if (toolsStage && toolsStage !== 'ALL') qs.set('tools_stage', toolsStage);
+
+  // Issues filter (main summary Issues dropdown)
+  const issues = String(f.issues_filter || '').toUpperCase();
+  if (issues && issues !== 'ALL') qs.set('issues_filter', issues);
 
   // Route filter (aggregated: ELECTRONIC / MANUAL / NHSP / HEALTHROSTER / QR)
   const route = String(f.route_type || '').toUpperCase();
@@ -64387,52 +62349,41 @@ async function listTimesheetsSummary(filters = {}) {
   const scope = String(f.sheet_scope || '').toUpperCase();
   if (scope && scope !== 'ALL') qs.set('sheet_scope', scope);
 
+  // QR status filter (optional)
+  const qrStatus = String(f.qr_status || '').toUpperCase();
+  if (qrStatus) qs.set('qr_status', qrStatus);
+
   // Week ending range
   if (f.week_ending_from) qs.set('week_ending_from', String(f.week_ending_from).slice(0, 10));
   if (f.week_ending_to)   qs.set('week_ending_to',   String(f.week_ending_to).slice(0, 10));
 
-  // processing_status filter
-  const procStatusRaw = f.processing_status || '';
-  if (procStatusRaw && procStatusRaw !== 'ALL') {
-    const procStatus = String(procStatusRaw).includes(',')
-      ? String(procStatusRaw)
-      : String(procStatusRaw).toUpperCase();
-    qs.set('processing_status', procStatus);
-  }
+  // Tools checkboxes
+  if (f.is_adjusted === true)    qs.set('is_adjusted', 'true');
+  if (f.is_qr === true)          qs.set('is_qr', 'true');
+  if (f.candidate_paid === true) qs.set('candidate_paid', 'true');
 
-  // status_code passthrough
-  const statusCode = String(f.status_code || '').toUpperCase();
-  if (statusCode) qs.set('status_code', statusCode);
-
-  if (f.is_adjusted === true)     qs.set('is_adjusted', 'true');
-  if (f.is_qr === true)           qs.set('is_qr', 'true');
-  if (f.needs_attention === true) qs.set('needs_attention', 'true');
-
-  if (f.candidate_paid === true)  qs.set('candidate_paid', 'true');
-  if (f.client_invoiced === true) qs.set('client_invoiced', 'true');
-
-  if (f.hr_issue) {
-    qs.set('hr_issue', f.hr_issue);
-  }
+  // Power filter passthrough (optional)
+  if (f.hr_issue) qs.set('hr_issue', f.hr_issue);
 
   const sortState = st.sort || { key: null, dir: 'asc' };
   const sortKeyRaw = String(sortState.key || '').toLowerCase();
   const sortDir    = (sortState.dir === 'desc') ? 'desc' : 'asc';
 
   const sortMap = {
-    week_ending_date:    'week_ending_date',
-    client_name:         'client_name',
-    candidate_name:      'candidate_name',
-    summary_stage:       'summary_stage',
-    processing_status:   'processing_status', // ✅ NEW (FE → BE sort wiring)
-    route_type:          'route_type',
-    sheet_scope:         'sheet_scope',
-    total_pay_ex_vat:    'total_pay_ex_vat',
-    total_charge_ex_vat: 'total_charge_ex_vat',
-    margin_ex_vat:       'margin_ex_vat',
-    pay:                 'total_pay_ex_vat',
-    charge:              'total_charge_ex_vat',
-    margin:              'margin_ex_vat'
+    week_ending_date:          'week_ending_date',
+    client_name:               'client_name',
+    candidate_name:            'candidate_name',
+    tools_stage:               'tools_stage',
+    processing_status:         'processing_status_display',
+    processing_status_display: 'processing_status_display',
+    route_type:                'route_type',
+    sheet_scope:               'sheet_scope',
+    total_pay_ex_vat:          'total_pay_ex_vat',
+    total_charge_ex_vat:       'total_charge_ex_vat',
+    margin_ex_vat:             'margin_ex_vat',
+    pay:                       'total_pay_ex_vat',
+    charge:                    'total_charge_ex_vat',
+    margin:                    'margin_ex_vat'
   };
 
   const orderBy = sortMap[sortKeyRaw] || 'week_ending_date';
@@ -64479,7 +62430,7 @@ async function listTimesheetsSummary(filters = {}) {
   st.total   = (typeof total === 'number') ? total : null;
   st.totals  = totals;
 
-  // ✅ Persist effective filters WITHOUT legacy ts_stage
+  // ✅ Persist effective filters WITHOUT legacy keys
   st.filters = { ...(f || {}) };
 
   return rows;
