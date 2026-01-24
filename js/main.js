@@ -1411,8 +1411,13 @@ async function loadSection() {
       // ✅ Keep fetchRelated(...) as the single fetcher for related views.
       // It handles v2 RPC routing server-side and normalizes via toList().
       //
-      // We must pass pagination parameters via the section list-state.
-      // fetchRelated itself builds the URL using page/page_size.
+      // NOTE: the related endpoint may not return the same row shape as the normal list/search endpoint.
+      // For invoices specifically, the summary grid expects the canonical /api/search/invoices shape so
+      // configured columns work. We therefore:
+      //   1) fetch related → extract ids
+      //   2) fetch canonical invoices via search('invoices', { ids })
+      //   3) return canonical rows (same shape as normal invoices list)
+
       window.__listState = window.__listState || {};
       const stSec = (window.__listState[section] ||= {
         page: 1,
@@ -1437,17 +1442,90 @@ async function loadSection() {
       // - { items: [...], total: number|null }
       // - [...items] (legacy)
       const items = Array.isArray(list?.items) ? list.items : (Array.isArray(list) ? list : []);
-      const total = (list && typeof list === 'object' && typeof list.total === 'number') ? list.total : null;
+      const totalFromApi = (list && typeof list === 'object' && typeof list.total === 'number') ? list.total : null;
 
-      // Persist totals/hasMore in section state (for pager/footer)
-      stSec.total = total;
+      // ✅ SPECIAL CASE: invoices in related mode → return canonical row shape (so configured columns work)
+      if (section === 'invoices') {
+        const idsAll = [];
+        try {
+          (items || []).forEach(it => {
+            if (!it || typeof it !== 'object') return;
+            const id = it.id ?? it.invoice_id ?? null;
+            if (id != null) idsAll.push(String(id));
+          });
+        } catch {}
+
+        // de-dupe but keep first-seen order
+        const seen = new Set();
+        const idsDedup = [];
+        for (const id of idsAll) {
+          const s = String(id || '').trim();
+          if (!s || seen.has(s)) continue;
+          seen.add(s);
+          idsDedup.push(s);
+        }
+
+        const total = (typeof totalFromApi === 'number') ? totalFromApi : idsDedup.length;
+        stSec.total = total;
+
+        const ps = (pageSize === 'ALL') ? idsDedup.length : Number(pageSize || 50);
+        const pg = Math.max(1, Number(page || 1));
+
+        stSec.hasMore =
+          (typeof total === 'number')
+            ? ((pg * ps) < total)
+            : (idsDedup.length > ((pg - 1) * ps + ps));
+
+        // Apply paging slice locally (related endpoint may not page)
+        let pageIds = idsDedup;
+        if (pageSize !== 'ALL') {
+          const start = (pg - 1) * ps;
+          pageIds = idsDedup.slice(start, start + ps);
+        }
+
+        if (!pageIds.length) return [];
+
+        // Canonical fetch via existing invoices search pipeline
+        const canon = await search('invoices', { ids: pageIds });
+
+        const canonRows = Array.isArray(canon?.rows) ? canon.rows : (Array.isArray(canon) ? canon : []);
+
+        // Preserve the related id order if the search endpoint returns different order
+        const byId = new Map();
+        canonRows.forEach(r => {
+          const rid = r && (r.id ?? r.invoice_id);
+          if (rid != null) byId.set(String(rid), r);
+        });
+
+        const ordered = [];
+        pageIds.forEach(id => {
+          const row = byId.get(String(id)) || null;
+          if (row) ordered.push(row);
+        });
+
+        // If anything didn’t match (defensive), append remaining rows
+        if (ordered.length !== canonRows.length) {
+          canonRows.forEach(r => {
+            const rid = r && (r.id ?? r.invoice_id);
+            const k = (rid != null) ? String(rid) : '';
+            if (!k) return;
+            if (pageIds.includes(k) && byId.get(k) && ordered.find(x => String((x.id ?? x.invoice_id) || '') === k)) return;
+            if (!ordered.includes(r)) ordered.push(r);
+          });
+        }
+
+        return ordered;
+      }
+
+      // Default: non-invoices related mode returns related endpoint items as-is
+      stSec.total = totalFromApi;
 
       const ps = (pageSize === 'ALL') ? items.length : Number(pageSize || 50);
       const pg = Math.max(1, Number(page || 1));
 
       stSec.hasMore =
-        (typeof total === 'number')
-          ? ((pg * ps) < total)
+        (typeof totalFromApi === 'number')
+          ? ((pg * ps) < totalFromApi)
           : (Array.isArray(items) && items.length === ps);
 
       return items;
@@ -1541,6 +1619,7 @@ async function loadSection() {
     endGlobalLoading();
   }
 }
+
 
 
 function clearSession(){
@@ -33017,37 +33096,34 @@ const isInvoiceDelayed =
 const rowIsFlagged = !!effExclude || isInvoiceDelayed;
 const rowStyle = rowIsFlagged ? ` style="background: rgba(192, 57, 43, 0.18);"` : '';
 
+const disabledExcludeAttr = (disabledAttr || lockedInvoiceId) ? 'disabled' : '';
 
+return `
+  <tr data-segment-id="${seg.segment_id}"${rowStyle}>
+    <td>${dateCellHtml}</td>
+    <td>
+      ${ref ? `<span class="mini">Ref: ${esc(ref)}</span>` : ''}
+      ${reqId ? `<br><span class="mini">Req: ${esc(reqId)}</span>` : ''}
+      ${(!ref && !reqId) ? '<span class="mini">—</span>' : ''}
+    </td>
+    <td>${src ? esc(src) : '<span class="mini">—</span>'}</td>
+    <td>${hours !== '' ? esc(hours) : '<span class="mini">—</span>'}</td>
+    <td>${pay   !== '' ? esc(pay)   : '<span class="mini">—</span>'}</td>
+    <td>${charge!== '' ? esc(charge): '<span class="mini">—</span>'}</td>
+    <td>
+      <input
+        type="checkbox"
+        name="seg_exclude_from_pay"
+        data-segment-id="${seg.segment_id}"
+        ${effExclude ? 'checked' : ''}
+        ${disabledExcludeAttr}
+      />
+      <span class="mini">Tick = exclude from pay (staged)</span>
+    </td>
+    <td>${invoiceWeekCellHtml}</td>
+  </tr>
+`;
 
-
-      return `
-        <tr data-segment-id="${seg.segment_id}"${rowStyle}>
-          <td>${dateCellHtml}</td>
-          <td>
-            ${ref ? `<span class="mini">Ref: ${esc(ref)}</span>` : ''}
-            ${reqId ? `<br><span class="mini">Req: ${esc(reqId)}</span>` : ''}
-            ${(!ref && !reqId) ? '<span class="mini">—</span>' : ''}
-          </td>
-          <td>${src ? esc(src) : '<span class="mini">—</span>'}</td>
-          <td>${hours !== '' ? esc(hours) : '<span class="mini">—</span>'}</td>
-          <td>${pay   !== '' ? esc(pay)   : '<span class="mini">—</span>'}</td>
-          <td>${charge!== '' ? esc(charge): '<span class="mini">—</span>'}</td>
-          <td>
-     const disabledExcludeAttr = (disabledAttr || lockedInvoiceId) ? 'disabled' : '';
-
-<input
-  type="checkbox"
-  name="seg_exclude_from_pay"
-  data-segment-id="${seg.segment_id}"
-  ${effExclude ? 'checked' : ''}
-  ${disabledExcludeAttr}
-/>
-
-            <span class="mini">Tick = exclude from pay (staged)</span>
-          </td>
-          <td>${invoiceWeekCellHtml}</td>
-        </tr>
-      `;
     }).join('');
 
     return `
