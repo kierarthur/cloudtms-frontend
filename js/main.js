@@ -30891,24 +30891,26 @@ async function openInvoiceModal(row) {
 
     // Invoice edit staging buckets
     isEditing: false,
-    invoiceEdits: {
-      remove_invoice_line_ids: new Set(),
-      add_timesheet_ids: new Set(),
-      add_adjustments: [],
+  invoiceEdits: {
+  remove_invoice_line_ids: new Set(),
+  add_timesheet_ids: new Set(),
+  add_adjustments: [],
 
-      // ✅ NEW: segment edit staging (array of { tsfin_id, segment_id })
-      remove_segment_refs: [],
-      add_segment_refs: [],
+  // ✅ NEW: segment edit staging (array of { tsfin_id, segment_id })
+  remove_segment_refs: [],
+  add_segment_refs: [],
 
-      // ✅ NEW: reference updates (opaque payload consumed by backend)
-      reference_updates: [],
+  // ✅ References: support BOTH legacy array + new keyed staging model
+  reference_updates: [],
+  reference_updates_by_key: {},
 
-      // ✅ NEW: staged status toggles (null = unchanged, boolean = desired state)
-      staged_status: { issued: null, paid: null, on_hold: null },
+  // ✅ NEW: staged status toggles (null = unchanged, boolean = desired state)
+  staged_status: { issued: null, paid: null, on_hold: null },
 
-      // ✅ NEW: staged timestamps for UI preview (populated on click; committed on Save pipeline)
-      staged_dates: { issued_at_utc: null, paid_at_utc: null, status_date_utc: null }
-    },
+  // ✅ NEW: staged timestamps for UI preview (populated on click; committed on Save pipeline)
+  staged_dates: { issued_at_utc: null, paid_at_utc: null, status_date_utc: null }
+},
+
 
     // Cached eligible timesheets for Add Timesheet modal + preview totals
     eligibleTimesheetsCache: null,
@@ -30937,58 +30939,66 @@ async function openInvoiceModal(row) {
     modalCtx.__summaryCtx = null;
   }
 
-  const editsToJson = (e) => {
-    const out = {
-      remove_invoice_line_ids: [],
-      add_timesheet_ids: [],
-      add_adjustments: [],
-      remove_segment_refs: [],
-      add_segment_refs: [],
-      reference_updates: [],
-      staged_status: { issued: null, paid: null, on_hold: null },
-      staged_dates: { issued_at_utc: null, paid_at_utc: null, status_date_utc: null }
-    };
-
-    if (!e || typeof e !== 'object') return out;
-
-    // Sets → arrays
-    try {
-      if (e.remove_invoice_line_ids && typeof e.remove_invoice_line_ids.size === 'number') {
-        out.remove_invoice_line_ids = Array.from(e.remove_invoice_line_ids);
-      }
-    } catch {}
-
-    try {
-      if (e.add_timesheet_ids && typeof e.add_timesheet_ids.size === 'number') {
-        out.add_timesheet_ids = Array.from(e.add_timesheet_ids);
-      }
-    } catch {}
-
-    // arrays
-    out.add_adjustments = Array.isArray(e.add_adjustments) ? cloneJson(e.add_adjustments, []) : [];
-    out.remove_segment_refs = Array.isArray(e.remove_segment_refs) ? cloneJson(e.remove_segment_refs, []) : [];
-    out.add_segment_refs = Array.isArray(e.add_segment_refs) ? cloneJson(e.add_segment_refs, []) : [];
-    out.reference_updates = Array.isArray(e.reference_updates) ? cloneJson(e.reference_updates, []) : [];
-
-    // staged objects
-    if (e.staged_status && typeof e.staged_status === 'object') {
-      out.staged_status = {
-        issued: (e.staged_status.issued !== undefined ? e.staged_status.issued : null),
-        paid: (e.staged_status.paid !== undefined ? e.staged_status.paid : null),
-        on_hold: (e.staged_status.on_hold !== undefined ? e.staged_status.on_hold : null)
-      };
-    }
-
-    if (e.staged_dates && typeof e.staged_dates === 'object') {
-      out.staged_dates = {
-        issued_at_utc: (e.staged_dates.issued_at_utc !== undefined ? e.staged_dates.issued_at_utc : null),
-        paid_at_utc: (e.staged_dates.paid_at_utc !== undefined ? e.staged_dates.paid_at_utc : null),
-        status_date_utc: (e.staged_dates.status_date_utc !== undefined ? e.staged_dates.status_date_utc : null)
-      };
-    }
-
-    return out;
+ const editsToJson = (e) => {
+  const out = {
+    remove_invoice_line_ids: [],
+    add_timesheet_ids: [],
+    add_adjustments: [],
+    remove_segment_refs: [],
+    add_segment_refs: [],
+    reference_updates: [],
+    reference_updates_by_key: {},
+    staged_status: { issued: null, paid: null, on_hold: null },
+    staged_dates: { issued_at_utc: null, paid_at_utc: null, status_date_utc: null }
   };
+
+  if (!e || typeof e !== 'object') return out;
+
+  // Sets → arrays
+  try {
+    if (e.remove_invoice_line_ids && typeof e.remove_invoice_line_ids.size === 'number') {
+      out.remove_invoice_line_ids = Array.from(e.remove_invoice_line_ids);
+    }
+  } catch {}
+
+  try {
+    if (e.add_timesheet_ids && typeof e.add_timesheet_ids.size === 'number') {
+      out.add_timesheet_ids = Array.from(e.add_timesheet_ids);
+    }
+  } catch {}
+
+  // arrays
+  out.add_adjustments   = Array.isArray(e.add_adjustments) ? cloneJson(e.add_adjustments, []) : [];
+  out.remove_segment_refs = Array.isArray(e.remove_segment_refs) ? cloneJson(e.remove_segment_refs, []) : [];
+  out.add_segment_refs  = Array.isArray(e.add_segment_refs) ? cloneJson(e.add_segment_refs, []) : [];
+  out.reference_updates = Array.isArray(e.reference_updates) ? cloneJson(e.reference_updates, []) : [];
+
+  // ✅ keyed refs (JSON-safe object map)
+  out.reference_updates_by_key =
+    (e.reference_updates_by_key && typeof e.reference_updates_by_key === 'object' && !Array.isArray(e.reference_updates_by_key))
+      ? cloneJson(e.reference_updates_by_key, {})
+      : {};
+
+  // staged objects
+  if (e.staged_status && typeof e.staged_status === 'object') {
+    out.staged_status = {
+      issued: (e.staged_status.issued !== undefined ? e.staged_status.issued : null),
+      paid: (e.staged_status.paid !== undefined ? e.staged_status.paid : null),
+      on_hold: (e.staged_status.on_hold !== undefined ? e.staged_status.on_hold : null)
+    };
+  }
+
+  if (e.staged_dates && typeof e.staged_dates === 'object') {
+    out.staged_dates = {
+      issued_at_utc: (e.staged_dates.issued_at_utc !== undefined ? e.staged_dates.issued_at_utc : null),
+      paid_at_utc: (e.staged_dates.paid_at_utc !== undefined ? e.staged_dates.paid_at_utc : null),
+      status_date_utc: (e.staged_dates.status_date_utc !== undefined ? e.staged_dates.status_date_utc : null)
+    };
+  }
+
+  return out;
+};
+
 
   // Mirror into fields showModal snapshots/restores
   modalCtx.invoiceState = {
@@ -31035,16 +31045,16 @@ async function openInvoiceModal(row) {
       try { sig = j ? JSON.stringify(j) : ''; } catch { sig = ''; }
 
       if (!modalCtx.invoiceEdits || typeof modalCtx.invoiceEdits !== 'object') {
-        modalCtx.invoiceEdits = {
-          remove_invoice_line_ids: new Set(),
-          add_timesheet_ids: new Set(),
-          add_adjustments: [],
-          remove_segment_refs: [],
-          add_segment_refs: [],
-          reference_updates: [],
-          staged_status: { issued: null, paid: null, on_hold: null },
-          staged_dates: { issued_at_utc: null, paid_at_utc: null, status_date_utc: null }
-        };
+       modalCtx.invoiceEdits = {
+  remove_invoice_line_ids: new Set(),
+  add_timesheet_ids: new Set(),
+  add_adjustments: [],
+  remove_segment_refs: [],
+  add_segment_refs: [],
+  reference_updates: [],
+  staged_status: { issued: null, paid: null, on_hold: null },
+  staged_dates: { issued_at_utc: null, paid_at_utc: null, status_date_utc: null }
+};
       }
 
       const e = modalCtx.invoiceEdits;
@@ -31057,7 +31067,20 @@ async function openInvoiceModal(row) {
         e.add_adjustments = Array.isArray(j?.add_adjustments) ? cloneJson(j.add_adjustments, []) : [];
         e.remove_segment_refs = Array.isArray(j?.remove_segment_refs) ? cloneJson(j.remove_segment_refs, []) : [];
         e.add_segment_refs = Array.isArray(j?.add_segment_refs) ? cloneJson(j.add_segment_refs, []) : [];
-        e.reference_updates = Array.isArray(j?.reference_updates) ? cloneJson(j.reference_updates, []) : [];
+       // ✅ Rehydrate refs (keyed is canonical; legacy array stays in sync)
+const byKey =
+  (j?.reference_updates_by_key && typeof j.reference_updates_by_key === 'object' && !Array.isArray(j.reference_updates_by_key))
+    ? cloneJson(j.reference_updates_by_key, {})
+    : {};
+
+e.reference_updates_by_key = byKey;
+
+if (byKey && typeof byKey === 'object' && Object.keys(byKey).length > 0) {
+  const keys = Object.keys(byKey).sort();
+  e.reference_updates = keys.map(k => byKey[k]).filter(x => x && typeof x === 'object');
+} else {
+  e.reference_updates = Array.isArray(j?.reference_updates) ? cloneJson(j.reference_updates, []) : [];
+}
 
         e.staged_status = (j?.staged_status && typeof j.staged_status === 'object')
           ? { issued: j.staged_status.issued ?? null, paid: j.staged_status.paid ?? null, on_hold: j.staged_status.on_hold ?? null }
@@ -31142,15 +31165,20 @@ async function openInvoiceModal(row) {
       (st.paid !== null && st.paid !== undefined) ||
       (st.on_hold !== null && st.on_hold !== undefined);
 
-    return (
-      hasStagedStatus ||
-      (e.remove_invoice_line_ids && e.remove_invoice_line_ids.size > 0) ||
-      (e.add_timesheet_ids && e.add_timesheet_ids.size > 0) ||
-      (Array.isArray(e.add_adjustments) && e.add_adjustments.length > 0) ||
-      (Array.isArray(e.remove_segment_refs) && e.remove_segment_refs.length > 0) ||
-      (Array.isArray(e.add_segment_refs) && e.add_segment_refs.length > 0) ||
-      (Array.isArray(e.reference_updates) && e.reference_updates.length > 0)
-    );
+  const hasRefStaging =
+  (e.reference_updates_by_key && typeof e.reference_updates_by_key === 'object' && !Array.isArray(e.reference_updates_by_key) && Object.keys(e.reference_updates_by_key).length > 0) ||
+  (Array.isArray(e.reference_updates) && e.reference_updates.length > 0);
+
+return (
+  hasStagedStatus ||
+  (e.remove_invoice_line_ids && e.remove_invoice_line_ids.size > 0) ||
+  (e.add_timesheet_ids && e.add_timesheet_ids.size > 0) ||
+  (Array.isArray(e.add_adjustments) && e.add_adjustments.length > 0) ||
+  (Array.isArray(e.remove_segment_refs) && e.remove_segment_refs.length > 0) ||
+  (Array.isArray(e.add_segment_refs) && e.add_segment_refs.length > 0) ||
+  hasRefStaging
+);
+
   };
 
   const syncEditingFromFrame = () => {
@@ -32494,22 +32522,44 @@ async function openInvoiceReferenceNumbersModal(parentModalCtx, { rerender } = {
         nextByKey[k] = upd;
       }
 
-      // Store staged updates back onto parent ctx (staged only)
-      parentModalCtx.invoiceEdits.reference_updates_by_key = nextByKey;
+   // Store staged updates back onto parent ctx (staged only)
+parentModalCtx.invoiceEdits.reference_updates_by_key = nextByKey;
 
-      // Keep legacy array in sync for any older code paths
-      try {
-        const keys = Object.keys(nextByKey).sort();
-        parentModalCtx.invoiceEdits.reference_updates = keys.map(k => nextByKey[k]).filter(x => x && typeof x === 'object');
-      } catch {
-        // best-effort only
-      }
+// Keep legacy array in sync for any older code paths
+try {
+  const keys = Object.keys(nextByKey).sort();
+  parentModalCtx.invoiceEdits.reference_updates = keys.map(k => nextByKey[k]).filter(x => x && typeof x === 'object');
+} catch {
+  // best-effort only
+}
 
-      closeTop();
+// ✅ Persist into JSON mirror immediately (so renderTop()/setTab() cannot drop it)
+try {
+  const cloneJsonLocal = (v) => { try { return JSON.parse(JSON.stringify(v)); } catch { return v; } };
 
-      // Mark parent invoice modal dirty + rerender (best-effort)
-      try { window.dispatchEvent(new CustomEvent('modal-dirty')); } catch {}
-      try { setTimeout(() => { rerender && rerender(); }, 0); } catch {}
+  parentModalCtx.invoiceState = (parentModalCtx.invoiceState && typeof parentModalCtx.invoiceState === 'object')
+    ? parentModalCtx.invoiceState
+    : {};
+
+  parentModalCtx.invoiceState.invoiceEdits = parentModalCtx.invoiceEdits;
+
+  parentModalCtx.invoiceState.invoiceEdits_json =
+    (parentModalCtx.invoiceState.invoiceEdits_json && typeof parentModalCtx.invoiceState.invoiceEdits_json === 'object')
+      ? parentModalCtx.invoiceState.invoiceEdits_json
+      : {};
+
+  parentModalCtx.invoiceState.invoiceEdits_json.reference_updates_by_key = cloneJsonLocal(nextByKey);
+  parentModalCtx.invoiceState.invoiceEdits_json.reference_updates = cloneJsonLocal(parentModalCtx.invoiceEdits.reference_updates);
+
+  try { parentModalCtx._editsJsonSig = JSON.stringify(parentModalCtx.invoiceState.invoiceEdits_json || {}); } catch {}
+} catch {}
+
+closeTop();
+
+// Mark parent invoice modal dirty + rerender (best-effort)
+try { window.dispatchEvent(new CustomEvent('modal-dirty')); } catch {}
+try { setTimeout(() => { rerender && rerender(); }, 0); } catch {}
+
     };
   }
 }
@@ -32901,10 +32951,17 @@ function renderInvoiceModalContent(modalCtx, invoiceData) {
     (st.paid !== null && st.paid !== undefined) ||
     (st.on_hold !== null && st.on_hold !== undefined);
 
-  const hasRefEdits = (() => {
-    const e = modalCtx?.invoiceEdits;
-    return !!(e && Array.isArray(e.reference_updates) && e.reference_updates.length > 0);
-  })();
+const hasRefEdits = (() => {
+  const e = modalCtx?.invoiceEdits;
+  if (!e) return false;
+
+  if (e.reference_updates_by_key && typeof e.reference_updates_by_key === 'object' && !Array.isArray(e.reference_updates_by_key)) {
+    if (Object.keys(e.reference_updates_by_key).length > 0) return true;
+  }
+
+  return (Array.isArray(e.reference_updates) && e.reference_updates.length > 0);
+})();
+
 
   const hasPendingEdits = hasLineEdits || hasStatusEdits || hasRefEdits;
 
