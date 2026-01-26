@@ -9283,7 +9283,6 @@ function mergeContractStateIntoRow(row, formState) {
   return base;
 }
 
-
 function openContractSettingsModal() {
   const LOGC = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : true;
 
@@ -9295,6 +9294,18 @@ function openContractSettingsModal() {
   const base = window.modalCtx?.data || {};
   const contractId = base?.id || null;
 
+  // ✅ Parent contract modal mode gating:
+  // - VIEW mode: cannot tick or edit anything in this child modal
+  // - EDIT/CREATE mode: allow interactions per override rules
+  let parentEditable = true;
+  try {
+    const frParent = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
+    if (frParent && (frParent.kind === 'contracts' || frParent.entity === 'contracts')) {
+      parentEditable = (frParent.mode === 'edit' || frParent.mode === 'create');
+    }
+  } catch {}
+  const parentViewOnly = !parentEditable;
+
   // ✅ View-only gating: if real timesheets exist, OPEN view-only (do NOT block opening)
   const hasRealTimesheets = (() => {
     const d = base || {};
@@ -9305,7 +9316,8 @@ function openContractSettingsModal() {
     return false;
   })();
 
-  const viewOnly = !!(contractId && hasRealTimesheets);
+  // ✅ Final viewOnly: either parent is view-only OR real timesheets exist (existing rule)
+  const viewOnly = !!(parentViewOnly || (contractId && hasRealTimesheets));
 
   const fs = (window.modalCtx.formState ||= {
     __forId: (window.modalCtx.data?.id ?? window.modalCtx.openToken ?? null),
@@ -9550,14 +9562,6 @@ function openContractSettingsModal() {
     changed = setMainTriUpper('default_submission_mode', dsm ? dsm : null) || changed;
 
     // Canonicalise route flags exactly as per existing contract settings rules
-    // Manual:
-    //  is_nhsp=false, autoprocess_hr=false, no_timesheet_required=false, requires_hr=false
-    // NHSP:
-    //  is_nhsp=true,  autoprocess_hr=false, no_timesheet_required=false, requires_hr=false
-    // HR VERIFY:
-    //  is_nhsp=false, autoprocess_hr=true,  no_timesheet_required=false, requires_hr=true
-    // HR CREATE:
-    //  is_nhsp=false, autoprocess_hr=true,  no_timesheet_required=true,  requires_hr=false
     const isNhsp = !!boolish(fs.main.is_nhsp);
     const isHr   = !!boolish(fs.main.autoprocess_hr);
     const noTs   = !!boolish(fs.main.no_timesheet_required);
@@ -9703,16 +9707,19 @@ function openContractSettingsModal() {
     const st = computeEffective();
     const { hasSnapshot, overrideOn, weeklyMode, hrMode, isHrCreate, eff } = st;
 
+    // ✅ Critical gating:
+    // - viewOnly => everything disabled
+    // - override OFF (in edit mode) => only override checkbox enabled, everything else disabled
     const disabledAll = viewOnly ? 'disabled' : '';
     const disabledIfInherit = (!overrideOn || viewOnly) ? 'disabled' : '';
 
     const hint = viewOnly
-      ? `This contract has real timesheets. Settings are view-only.`
+      ? `View-only. You cannot change contract settings here.`
       : (!hasSnapshot
           ? `Client settings snapshot is not available. Pick a client (or reopen the contract) to enable seeding when overriding.`
           : (overrideOn
               ? `Override is ON. Changes here are staged and applied when you Save the contract.`
-              : `Override is OFF. Values shown are inherited from client settings. Tick “Override client settings” to stage contract-specific values.`));
+              : `Override is OFF. Only the override checkbox is editable. Tick “Override client settings” to stage contract-specific values.`));
 
     const radioPill = (name, value, text, checked, disabledAttr) => `
       <label class="inline chk-tight"
@@ -9839,7 +9846,7 @@ function openContractSettingsModal() {
           <label style="white-space:normal">References & flags</label>
           <div class="controls" style="display:flex;flex-direction:column;gap:12px;min-width:0;">
 
-            <!-- NEW: default submission mode (nullable / inherit) -->
+            <!-- default submission mode (nullable / inherit) -->
             <div id="contractDefaultSubmissionModeRow" style="margin-bottom:6px; display:${(showNhsp || isHrCreate) ? 'none' : ''};">
               <div class="mini" style="opacity:0.85;margin-bottom:6px;">Default submission mode</div>
               <select name="default_submission_mode" class="form-select form-select-sm" ${disabledIfInherit}>
@@ -9849,7 +9856,7 @@ function openContractSettingsModal() {
               </select>
             </div>
 
-            <!-- NEW: ref required to ISSUE invoice -->
+            <!-- ref required to ISSUE invoice -->
             <div style="display:grid;grid-template-columns:1fr;gap:8px;">
               ${checkChoice(
                 'reference_number_required_to_issue_invoice',
@@ -9859,7 +9866,7 @@ function openContractSettingsModal() {
               )}
             </div>
 
-            <!-- NEW: manual invoice email routing -->
+            <!-- manual invoice email routing -->
             <div style="display:grid;grid-template-columns:1fr;gap:8px;margin-top:6px;">
               ${checkChoice(
                 'send_manual_invoices_to_different_email',
@@ -9941,6 +9948,9 @@ function openContractSettingsModal() {
     if (!root) return false;
     const initial = !!opts.initial;
 
+    // ✅ If view-only, never stage changes.
+    if (viewOnly) return false;
+
     const beforeOverride = !!boolish(getMainRaw('overrideclientsettings'));
     const overrideChecked = !!root.querySelector('input[type="checkbox"][name="overrideclientsettings"]')?.checked;
 
@@ -9961,7 +9971,6 @@ function openContractSettingsModal() {
           const cs = getClientSettingsSnapshot();
           if (!cs) {
             alert('Cannot enable override: client settings snapshot is missing. Pick a client (or reopen this contract) first.');
-            // revert checkbox UI best-effort (caller will re-render on Apply anyway)
             try { root.querySelector('input[name="overrideclientsettings"]').checked = false; } catch {}
             changed = setMainTriBool('overrideclientsettings', false) || changed;
             return false;
@@ -9970,14 +9979,11 @@ function openContractSettingsModal() {
         }
       } else {
         // turning OFF
-        // stash current override values so untick→tick restores during staging
         try {
           window.modalCtx[STASH_KEY] = captureOverrideValuesAsStaged();
         } catch {}
 
         changed = setMainTriBool('overrideclientsettings', false) || changed;
-
-        // clear override values to NULL (inherit)
         changed = clearOverrideValuesToNull() || changed;
       }
     }
@@ -9989,9 +9995,6 @@ function openContractSettingsModal() {
       if (!initial && changed) setContractDirtyIfChanged(true);
       return !!changed;
     }
-
-    // If view-only, do not stage further changes
-    if (viewOnly) return false;
 
     // Read UI selection (enabled only when overrideOnNow)
     const weekly = String(root.querySelector('input[type="radio"][name="weekly_mode"]:checked')?.value || 'NONE').toUpperCase();
@@ -10025,7 +10028,6 @@ function openContractSettingsModal() {
     changed = setMainTriBool('auto_invoice', !!root.querySelector('input[type="checkbox"][name="auto_invoice"]')?.checked) || changed;
 
     // Default submission mode (nullable / inherit)
-    // Hidden in NHSP and HR CREATE (no timesheets)
     const dsmSel = root.querySelector('select[name="default_submission_mode"]');
     if (weekly === 'NHSP' || (weekly === 'HEALTHROSTER' && isHrCreate) || !dsmSel) {
       changed = setMainTriUpper('default_submission_mode', null) || changed;
@@ -10034,13 +10036,13 @@ function openContractSettingsModal() {
       changed = setMainTriUpper('default_submission_mode', v ? v : null) || changed;
     }
 
-    // NEW: ref required to ISSUE invoice
+    // Ref required to ISSUE invoice
     changed = setMainTriBool(
       'reference_number_required_to_issue_invoice',
       !!root.querySelector('input[type="checkbox"][name="reference_number_required_to_issue_invoice"]')?.checked
     ) || changed;
 
-    // NEW: manual invoice email routing
+    // Manual invoice email routing
     const sendManual = !!root.querySelector('input[type="checkbox"][name="send_manual_invoices_to_different_email"]')?.checked;
     changed = setMainTriBool('send_manual_invoices_to_different_email', sendManual) || changed;
 
@@ -10075,7 +10077,6 @@ function openContractSettingsModal() {
     }
 
     if (weekly === 'HEALTHROSTER') {
-      // forced references off
       changed = setMainTriBool('require_reference_to_pay', false) || changed;
       changed = setMainTriBool('require_reference_to_invoice', false) || changed;
 
@@ -10086,7 +10087,6 @@ function openContractSettingsModal() {
       changed = setMainTriBool('hr_attach_to_invoice', !!root.querySelector('input[type="checkbox"][name="hr_attach_to_invoice"]')?.checked) || changed;
 
       if (isHrCreate) {
-        // forced off
         changed = setMainTriBool('ts_attach_to_invoice', false) || changed;
       } else {
         changed = setMainTriBool('ts_attach_to_invoice', !!root.querySelector('input[type="checkbox"][name="ts_attach_to_invoice"]')?.checked) || changed;
@@ -10103,7 +10103,6 @@ function openContractSettingsModal() {
     root.__wired = true;
 
     const rerenderSelf = () => {
-      // Re-render by forcing showModal to repaint this child tab
       try {
         const fr = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
         if (fr && fr.kind === 'contract_settings') {
@@ -10116,13 +10115,11 @@ function openContractSettingsModal() {
     };
 
     const onAnyChange = () => {
+      // ✅ View-only means nothing in the form should stage.
       if (viewOnly) return;
 
-      // Apply staging; if override toggle changed, we need to repaint sections/disabled states
       const did = applyFromDOM(root, { initial: false });
-      if (did) {
-        rerenderSelf();
-      }
+      if (did) rerenderSelf();
     };
 
     root.addEventListener('change', onAnyChange, true);
@@ -10132,9 +10129,6 @@ function openContractSettingsModal() {
     try { applyFromDOM(root, { initial: true }); } catch {}
   };
 
-  // Show modal:
-  // - normal case: open as APPLY-style child → must be in create mode (hasId=false)
-  // - viewOnly case: open in VIEW mode + hide Save/Apply (hasId=true + showSave=false + noParentGate=true)
   showModal(
     'Contract settings',
     [{ key: 'settings', title: 'Settings' }],
@@ -10145,9 +10139,9 @@ function openContractSettingsModal() {
     viewOnly ? null : async () => {
       // Apply once more on Apply, then close (staging only; parent Save persists)
       const root = document.getElementById('contractSettingsForm');
-      const ok = applyFromDOM(root, { initial: false });
+      applyFromDOM(root, { initial: false });
 
-      // If override is OFF at Apply time, we must FORGET the old override values (per brief)
+      // If override is OFF at Apply time, forget the old override values (per brief)
       try {
         const overrideOn = !!boolish(getMainRaw('overrideclientsettings'));
         if (!overrideOn && window.modalCtx && window.modalCtx[STASH_KEY]) {
@@ -10161,15 +10155,12 @@ function openContractSettingsModal() {
     null,
     {
       kind: 'contract_settings',
-      // viewOnly must ignore parent edit state (noParentGate true) so it stays read-only even from edit mode
       noParentGate: !!viewOnly,
-      // hide Apply in view-only mode
       showSave: viewOnly ? false : undefined,
       _trace: (LOGC && { tag: 'contract-settings', contract_id: window.modalCtx?.data?.id || null })
     }
   );
 
-  // Wire immediately after open
   setTimeout(() => {
     try { wire(); } catch (e) { if (LOGC) console.warn('[CONTRACT_SETTINGS] wire failed', e); }
   }, 0);
@@ -19368,17 +19359,32 @@ async function openClient(row) {
         const raw = await r.clone().text();
         if (LOG) console.debug('[HTTP] raw body (≤2KB):', raw.slice(0, 2048));
       } catch (peekErr) { W('[HTTP] raw peek failed', peekErr?.message || peekErr); }
-
       if (r.ok) {
         const data = await r.json().catch(()=> ({}));
-        const clientObj   = data?.client || unwrapSingle(data, 'client') || null;
-        const settingsObj = data?.client_settings || data?.settings || null;
-        settingsSeed = settingsObj ? deep(settingsObj) : null;
+
+        const clientObj = data?.client || unwrapSingle(data, 'client') || null;
+
+        // ✅ Robust: support multiple response shapes:
+        // - { client_settings: {...} }
+        // - { settings: {...} }
+        // - { client: { ..., client_settings: {...} } }
+        // - { client: { ... }, client_settings: { ... } }
+        const settingsObj =
+          data?.client_settings ||
+          data?.settings ||
+          clientObj?.client_settings ||
+          data?.client?.client_settings ||
+          null;
+
+        settingsSeed = (settingsObj && typeof settingsObj === 'object') ? deep(settingsObj) : null;
+
         full = clientObj || incoming;
+
         L('hydrated JSON keys', Object.keys(data||{}), 'client keys', Object.keys(clientObj||{}), 'hasSettingsSeed', !!settingsSeed);
       } else {
         W('non-OK response, using incoming row');
       }
+
     } catch (e) {
       W('openClient hydrate failed; using summary row', e);
     }
@@ -19417,10 +19423,14 @@ async function openClient(row) {
     // ✅ NEW: preserve these fields even if canonicalize strips unknown keys
     const keepInvConsol =
       (cs0.invoice_consolidation_mode != null) ? String(cs0.invoice_consolidation_mode) : '';
-    const keepRefToIssue =
-      (typeof cs0.reference_number_required_to_issue_invoice === 'boolean')
-        ? cs0.reference_number_required_to_issue_invoice
-        : (cs0.reference_number_required_to_issue_invoice === '1' || cs0.reference_number_required_to_issue_invoice === 1 || cs0.reference_number_required_to_issue_invoice === 'true');
+    const keepRefToIssue = (() => {
+      const v = cs0.reference_number_required_to_issue_invoice;
+      if (typeof v === 'boolean') return v;
+      if (v === 1 || v === '1') return true;
+      const s = String(v ?? '').trim().toLowerCase();
+      if (s === 'true' || s === 't' || s === 'yes' || s === 'y' || s === 'on') return true;
+      return false;
+    })();
 
     window.modalCtx.clientSettingsState = canonicalizeClientSettings(cs0 || {});
 
@@ -23698,7 +23708,7 @@ function openContract(row) {
     wrapper: !!__wrapper,
     wrapper_id: __wrapper?.contract?.id
   });
-  window.modalCtx = {
+    window.modalCtx = {
   entity: 'contracts',
   mode: isCreate ? 'create' : 'view',
   data: { ...(__baseRow || {}) },
@@ -23708,6 +23718,9 @@ function openContract(row) {
   __calendarDirty: false,
   __nonCalendarDirty: false,
 
+  // ✅ NEW: only block contract settings edits when the user actually touched those fields
+  __contractSettingsDirty: false,
+
   // ✅ NEW: keep latest client_settings snapshot in memory (used by overrideclientsettings seeding)
   client_settings_snapshot: null,
   client_settings_snapshot_client_id: null,
@@ -23715,6 +23728,7 @@ function openContract(row) {
   // ✅ NEW: stash used by Contract Settings modal override toggle
   __overrideClientSettingsStash: null
 };
+
 
 
    // ✅ If backend returned warnings separately (wrapper shape), attach them so your existing UI works
@@ -24407,13 +24421,15 @@ const settingsChanged =
   (String((base.manual_invoices_alt_email_address ?? '')).trim() !== String((manual_invoices_alt_email_address ?? '')).trim()) ||
   (String((base.default_submission_mode ?? '')).trim().toUpperCase() !== String((default_submission_mode ?? '')).trim().toUpperCase());
 
+const contractSettingsTouched = !!window.modalCtx?.__contractSettingsDirty;
 
-if (hasRealTimesheets && settingsChanged) {
+if (hasRealTimesheets && contractSettingsTouched && settingsChanged) {
   alert('Cannot change contract settings because real timesheets already exist for this contract.');
   window.modalCtx._saveInFlight = false;
   console.groupEnd?.();
   return false;
 }
+
 
 
 
@@ -24963,11 +24979,37 @@ const stage = (e) => {
 
   const isScheduleTime = /^(mon|tue|wed|thu|fri|sat|sun)_(start|end)$/.test(name);
 
+  // ✅ NEW: mark contract-settings dirty only when a contract-settings field is touched
+  const CONTRACT_SETTINGS_FIELDS = new Set([
+    'overrideclientsettings',
+    'is_nhsp',
+    'autoprocess_hr',
+    'requires_hr',
+    'no_timesheet_required',
+    'daily_calc_of_invoices',
+    'group_nightsat_sunbh',
+    'self_bill',
+    'hr_attach_to_invoice',
+    'ts_attach_to_invoice',
+    'auto_invoice',
+    'require_reference_to_pay',
+    'require_reference_to_invoice',
+    'reference_number_required_to_issue_invoice',
+    'send_manual_invoices_to_different_email',
+    'manual_invoices_alt_email_address',
+    'default_submission_mode'
+  ]);
+
   // ✅ NEW: any form input here is NON-calendar (calendar staging uses separate functions)
   try {
     window.modalCtx = window.modalCtx || {};
     window.modalCtx.__nonCalendarDirty = true;
     window.modalCtx.__calendarOnly = false;
+
+    // Only flip this flag when user touches an actual contract-settings control
+    if (CONTRACT_SETTINGS_FIELDS.has(name)) {
+      window.modalCtx.__contractSettingsDirty = true;
+    }
   } catch {}
 
   if (isScheduleTime) {
@@ -24989,6 +25031,7 @@ const stage = (e) => {
 
   try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
 };
+
 
 
 
@@ -29377,7 +29420,7 @@ async function invoiceModalSaveEdits(modalCtx, { rerender, reload }) {
   });
 
   // ─────────────────────────────────────────────────────────────
-  // ✅ NEW: Compile row-level ref edits into DB-applied updates
+  // ✅ Compile row-level ref edits into DB-applied updates
   // invoice_apply_edits only applies:
   //   reference_number, day_references_json, actual_schedule_json
   // (keyed by timesheet_id). Do NOT send row-level edits to DB.
@@ -29524,9 +29567,8 @@ async function invoiceModalSaveEdits(modalCtx, { rerender, reload }) {
         }
 
         if (target === 'SEGMENT') {
-          // Safety: do not attempt to reconstruct a missing schedule array.
-          // If schedule is missing, we cannot safely update segment refs without risking data loss.
-          if (!Array.isArray(newSched)) {
+          // We require a schedule-like array (manual schedule OR TSFIN-derived SEGMENTS schedule from manifest).
+          if (!Array.isArray(newSched) || newSched.length === 0) {
             throw new Error(`Cannot update segment reference(s): schedule is missing for timesheet ${tsid}. Reload the invoice and try again.`);
           }
 
@@ -29535,7 +29577,6 @@ async function invoiceModalSaveEdits(modalCtx, { rerender, reload }) {
           const end = getEnd(meta);
 
           // 1) Manual weekly index form: segment_id = "ts:<timesheet_id>:<idx>"
-          let handled = false;
           if (segId && segId.startsWith(`ts:${tsid}:`)) {
             const parts = segId.split(':');
             const idxStr = parts[parts.length - 1];
@@ -29551,15 +29592,37 @@ async function invoiceModalSaveEdits(modalCtx, { rerender, reload }) {
                 newSched[idx] = seg;
                 changedSched = true;
               }
-              handled = true;
-            } else {
-              throw new Error(`Cannot update segment reference: invalid segment index "${idxStr}" for timesheet ${tsid}.`);
+              continue;
+            }
+
+            throw new Error(`Cannot update segment reference: invalid segment index "${idxStr}" for timesheet ${tsid}.`);
+          }
+
+          // 2) Segment-id match (preferred for NHSP/HR/import segments; supports multi-shift/day)
+          if (segId) {
+            let foundById = -1;
+            for (let i = 0; i < newSched.length; i++) {
+              const seg = newSched[i];
+              if (!seg || typeof seg !== 'object') continue;
+              const sid = normStr(seg.segment_id);
+              if (sid && sid === segId) { foundById = i; break; }
+            }
+
+            if (foundById >= 0) {
+              const seg = (newSched[foundById] && typeof newSched[foundById] === 'object') ? newSched[foundById] : {};
+              const prev = toRefVal(seg.ref_num);
+              const next = toRefVal(val);
+
+              if (prev !== next) {
+                seg.ref_num = next;
+                newSched[foundById] = seg;
+                changedSched = true;
+              }
+              continue;
             }
           }
 
-          if (handled) continue;
-
-          // 2) Match by start/end window (preferred for non-indexed segments)
+          // 3) Match by start/end window (fallback)
           if (!start || !end) {
             throw new Error(`Cannot update segment reference: missing start/end identifiers for timesheet ${tsid}.`);
           }
@@ -29579,7 +29642,8 @@ async function invoiceModalSaveEdits(modalCtx, { rerender, reload }) {
           }
 
           if (found < 0) {
-            throw new Error(`Cannot update segment reference: no matching schedule entry for timesheet ${tsid} (${start} → ${end}).`);
+            const sidTxt = segId ? ` seg_id=${segId}` : '';
+            throw new Error(`Cannot update segment reference: no matching schedule entry for timesheet ${tsid}${sidTxt} (${start} → ${end}).`);
           }
 
           const seg = (newSched[found] && typeof newSched[found] === 'object') ? newSched[found] : {};
@@ -32154,7 +32218,6 @@ function invoiceModalGetInvoiceData(modalCtx) {
   return out;
 }
 
-
 async function openInvoiceReferenceNumbersModal(parentModalCtx, { rerender } = {}) {
   if (!parentModalCtx || typeof parentModalCtx !== 'object') throw new Error('Missing parent modal context.');
 
@@ -32238,19 +32301,14 @@ async function openInvoiceReferenceNumbersModal(parentModalCtx, { rerender } = {
     }
   } catch {}
 
+  // ✅ UPDATED: do NOT fall back to showing timesheet_id anywhere.
   const fmtRowCandidate = (r) => {
     const name =
       r?.candidate_display ||
       r?.candidate_name ||
       r?.worker_name ||
       '';
-    const tsRef =
-      r?.timesheet_ref ||
-      r?.timesheet_reference ||
-      r?.timesheet_id ||
-      '';
-    if (name) return String(name);
-    return tsRef ? String(tsRef) : '';
+    return name ? String(name) : '';
   };
 
   const fmtRowDate = (r) => {
@@ -32330,7 +32388,7 @@ async function openInvoiceReferenceNumbersModal(parentModalCtx, { rerender } = {
         <table class="table table-sm align-middle" style="margin:0;">
           <thead>
             <tr>
-              <th>Candidate / Timesheet</th>
+              <th>Candidate</th>
               <th>Date</th>
               <th>Reference</th>
               <th>Required</th>
