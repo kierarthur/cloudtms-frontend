@@ -6316,8 +6316,6 @@ function summaryInsertRowIfMissing(section, patchedRow) {
     return false;
   }
 }
-
-
 function summaryUpdateRowDom(section, id, patchedRow) {
   section = String(section || '').trim();
   id = String(id || '').trim();
@@ -6397,7 +6395,29 @@ function summaryUpdateRowDom(section, id, patchedRow) {
     const wrap = document.createElement('div');
     wrap.className = 'issue-badges';
 
-    const arr = Array.isArray(codes) ? codes.filter(Boolean) : [];
+    const raw = Array.isArray(codes) ? codes.filter(Boolean) : [];
+    const arr0 = raw.map(x => String(x || '').trim()).filter(Boolean);
+
+    // ✅ Reference blocker pills (Option A: DB emits exact strings into issue_codes)
+    // Ensure we never display more than one, even if legacy data ever contains multiples.
+    const REF_ALL = new Set([
+      'Refs (Invoicing Blocked)',
+      'Refs (Issue Invoice Blocked)',
+      'Refs (Invoice and Issue Blocked)'
+    ]);
+    const REF_PRECEDENCE = [
+      'Refs (Invoice and Issue Blocked)',
+      'Refs (Invoicing Blocked)',
+      'Refs (Issue Invoice Blocked)'
+    ];
+
+    let refChosen = '';
+    for (const k of REF_PRECEDENCE) {
+      if (arr0.includes(k)) { refChosen = k; break; }
+    }
+
+    const rest = arr0.filter(x => !REF_ALL.has(x));
+    const arr = refChosen ? [refChosen, ...rest] : rest;
 
     if (!arr.length) {
       const ok = document.createElement('span');
@@ -6600,7 +6620,29 @@ function summaryInsertRowDom(section, patchedRow) {
     const wrap = document.createElement('div');
     wrap.className = 'issue-badges';
 
-    const arr = Array.isArray(codes) ? codes.filter(Boolean) : [];
+    const raw = Array.isArray(codes) ? codes.filter(Boolean) : [];
+    const arr0 = raw.map(x => String(x || '').trim()).filter(Boolean);
+
+    // ✅ Reference blocker pills (Option A: DB emits exact strings into issue_codes)
+    // Ensure we never display more than one, even if legacy data ever contains multiples.
+    const REF_ALL = new Set([
+      'Refs (Invoicing Blocked)',
+      'Refs (Issue Invoice Blocked)',
+      'Refs (Invoice and Issue Blocked)'
+    ]);
+    const REF_PRECEDENCE = [
+      'Refs (Invoice and Issue Blocked)',
+      'Refs (Invoicing Blocked)',
+      'Refs (Issue Invoice Blocked)'
+    ];
+
+    let refChosen = '';
+    for (const k of REF_PRECEDENCE) {
+      if (arr0.includes(k)) { refChosen = k; break; }
+    }
+
+    const rest = arr0.filter(x => !REF_ALL.has(x));
+    const arr = refChosen ? [refChosen, ...rest] : rest;
 
     if (!arr.length) {
       const ok = document.createElement('span');
@@ -6863,6 +6905,10 @@ function summaryInsertRowDom(section, patchedRow) {
   refreshSelectionUi();
   return true;
 }
+
+
+
+
 function summaryMaybeResortDom(section) {
   section = String(section || '').trim();
   if (!section) return false;
@@ -9238,7 +9284,6 @@ function mergeContractStateIntoRow(row, formState) {
 }
 
 
-
 function openContractSettingsModal() {
   const LOGC = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : true;
 
@@ -9250,25 +9295,17 @@ function openContractSettingsModal() {
   const base = window.modalCtx?.data || {};
   const contractId = base?.id || null;
 
-  // ✅ Gate: only allow changes if NO real timesheets exist.
-  // We only have a best-effort FE check here (backend should enforce authoritatively).
+  // ✅ View-only gating: if real timesheets exist, OPEN view-only (do NOT block opening)
   const hasRealTimesheets = (() => {
     const d = base || {};
-    const n =
-      Number(d.real_timesheets_count ?? d.real_timesheet_count ?? d.timesheets_count ?? d.timesheet_count ?? NaN);
+    const n = Number(d.real_timesheets_count ?? d.real_timesheet_count ?? d.timesheets_count ?? d.timesheet_count ?? NaN);
     if (Number.isFinite(n) && n > 0) return true;
-
     if (d.has_real_timesheets === true) return true;
     if (d.has_timesheets === true) return true;
-
     return false;
   })();
 
-  // Allow on CREATE (no id yet) but block on EDIT if we know there are real timesheets.
-  if (contractId && hasRealTimesheets) {
-    alert('Contract settings cannot be changed because real timesheets already exist for this contract.');
-    return;
-  }
+  const viewOnly = !!(contractId && hasRealTimesheets);
 
   const fs = (window.modalCtx.formState ||= {
     __forId: (window.modalCtx.data?.id ?? window.modalCtx.openToken ?? null),
@@ -9279,15 +9316,69 @@ function openContractSettingsModal() {
 
   const boolish = (v) => (v === 'on' || v === true || v === 'true' || v === 1 || v === '1');
 
-  const getMainBool = (k, fallback = false) => {
-    if (Object.prototype.hasOwnProperty.call(fs.main, k)) return !!boolish(fs.main[k]);
-    if (Object.prototype.hasOwnProperty.call(base, k)) return !!base[k];
-    return !!fallback;
+  // --- Contract/client snapshot helpers ---
+  const getClientSettingsSnapshot = () => {
+    // Preferred: stored by openContract on open + on client change
+    const cs1 = window.modalCtx?.client_settings_snapshot;
+    if (cs1 && typeof cs1 === 'object') return cs1;
+
+    // Secondary: tolerate alternative property names
+    const cs2 = window.modalCtx?.clientSettingsSnapshot;
+    if (cs2 && typeof cs2 === 'object') return cs2;
+
+    return null;
   };
 
-  const setMainBool = (k, b) => {
-    const next = b ? 'on' : '';
+  const getClientSettingsClientId = () => {
+    const id1 = window.modalCtx?.client_settings_snapshot_client_id;
+    if (id1) return String(id1);
+    return null;
+  };
+
+  // Staged value getter (fs.main wins), preserving nulls
+  const getMainRaw = (k) => {
+    if (Object.prototype.hasOwnProperty.call(fs.main, k)) return fs.main[k];
+    if (Object.prototype.hasOwnProperty.call(base, k)) return base[k];
+    return undefined;
+  };
+
+  // Tri-normalise: null/undefined => null, otherwise boolean coercion
+  const triBool = (v) => {
+    if (v === null || v === undefined) return null;
+    return !!boolish(v);
+  };
+
+  const triString = (v) => {
+    if (v === null || v === undefined) return null;
+    return String(v);
+  };
+
+  const triUpperOrNull = (v) => {
+    if (v === null || v === undefined) return null;
+    const s = String(v).trim();
+    if (!s) return null;
+    return s.toUpperCase();
+  };
+
+  const setMainTriBool = (k, bOrNull) => {
     const prev = Object.prototype.hasOwnProperty.call(fs.main, k) ? fs.main[k] : undefined;
+    const next = (bOrNull === null) ? null : (bOrNull ? 'on' : '');
+    if (prev === next) return false;
+    fs.main[k] = next;
+    return true;
+  };
+
+  const setMainTriString = (k, sOrNull) => {
+    const prev = Object.prototype.hasOwnProperty.call(fs.main, k) ? fs.main[k] : undefined;
+    const next = (sOrNull === null) ? null : String(sOrNull);
+    if (prev === next) return false;
+    fs.main[k] = next;
+    return true;
+  };
+
+  const setMainTriUpper = (k, sOrNull) => {
+    const prev = Object.prototype.hasOwnProperty.call(fs.main, k) ? fs.main[k] : undefined;
+    const next = (sOrNull === null) ? null : String(sOrNull).trim().toUpperCase();
     if (prev === next) return false;
     fs.main[k] = next;
     return true;
@@ -9305,7 +9396,6 @@ function openContractSettingsModal() {
     // Mark parent contract frame dirty (so Save becomes available after Apply closes)
     try {
       const fr = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
-      // If this is the child frame, parent should be one below; if not available, rely on modal-dirty propagation.
       if (fr && fr.kind === 'contracts') {
         fr.isDirty = true;
         fr._updateButtons && fr._updateButtons();
@@ -9315,185 +9405,696 @@ function openContractSettingsModal() {
     try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
   };
 
-  const applyFromDOM = (root, opts = {}) => {
-    if (!root) return false;
+  // --- Override stash mechanics ---
+  // Stored on parent modalCtx so toggling survives re-render while modal is open
+  const STASH_KEY = '__overrideClientSettingsStash';
 
-    const initial = !!opts.initial;
+  const BOOL_FIELDS = [
+    'is_nhsp',
+    'autoprocess_hr',
+    'requires_hr',
+    'no_timesheet_required',
+    'daily_calc_of_invoices',
+    'group_nightsat_sunbh',
+    'self_bill',
+    'hr_attach_to_invoice',
+    'ts_attach_to_invoice',
+    'auto_invoice',
+    'require_reference_to_pay',
+    'require_reference_to_invoice',
+    'reference_number_required_to_issue_invoice',
+    'send_manual_invoices_to_different_email'
+  ];
 
-    // Read the UI selection
-    const weekly = String(root.querySelector('input[type="radio"][name="weekly_mode"]:checked')?.value || 'NONE').toUpperCase();
-    const hrMode = String(root.querySelector('input[type="radio"][name="hr_timesheet_mode"]:checked')?.value || 'REQUIRE_TS').toUpperCase();
-    const isHrCreate = (weekly === 'HEALTHROSTER' && hrMode === 'NO_TS');
+  const STR_FIELDS = [
+    'manual_invoices_alt_email_address'
+  ];
 
-    // Snapshot current (effective-from-stage) before we mutate
-    const before = {
-      is_nhsp:                getMainBool('is_nhsp'),
-      autoprocess_hr:         getMainBool('autoprocess_hr'),
-      no_timesheet_required:  getMainBool('no_timesheet_required'),
-      requires_hr:            getMainBool('requires_hr'),
+  const ENUM_FIELDS = [
+    'default_submission_mode'
+  ];
 
-      require_reference_to_pay:     getMainBool('require_reference_to_pay'),
-      require_reference_to_invoice: getMainBool('require_reference_to_invoice'),
+  const captureOverrideValuesAsStaged = () => {
+    const out = {};
 
-      self_bill:              getMainBool('self_bill'),
-      daily_calc_of_invoices: getMainBool('daily_calc_of_invoices'),
-      group_nightsat_sunbh:   getMainBool('group_nightsat_sunbh'),
+    for (const k of BOOL_FIELDS) {
+      const raw = getMainRaw(k);
+      out[k] = (raw === null || raw === undefined) ? null : (boolish(raw) ? 'on' : '');
+    }
+    for (const k of STR_FIELDS) {
+      const raw = getMainRaw(k);
+      out[k] = (raw === null || raw === undefined) ? null : String(raw);
+    }
+    for (const k of ENUM_FIELDS) {
+      const raw = getMainRaw(k);
+      out[k] = (raw === null || raw === undefined) ? null : triUpperOrNull(raw);
+    }
 
-      auto_invoice:           getMainBool('auto_invoice'),
+    return out;
+  };
 
-      hr_attach_to_invoice:   getMainBool('hr_attach_to_invoice'),
-      ts_attach_to_invoice:   getMainBool('ts_attach_to_invoice')
-    };
-
+  const applyOverrideValuesStaged = (stashObj) => {
+    if (!stashObj || typeof stashObj !== 'object') return false;
     let changed = false;
 
-    // --- Route canonicalisation (contract-level) ---
+    for (const k of BOOL_FIELDS) {
+      if (Object.prototype.hasOwnProperty.call(stashObj, k)) {
+        const v = stashObj[k];
+        if (v === null) changed = setMainTriBool(k, null) || changed;
+        else changed = setMainTriBool(k, !!boolish(v)) || changed;
+      }
+    }
+    for (const k of STR_FIELDS) {
+      if (Object.prototype.hasOwnProperty.call(stashObj, k)) {
+        const v = stashObj[k];
+        changed = setMainTriString(k, (v === null ? null : String(v))) || changed;
+      }
+    }
+    for (const k of ENUM_FIELDS) {
+      if (Object.prototype.hasOwnProperty.call(stashObj, k)) {
+        const v = stashObj[k];
+        changed = setMainTriUpper(k, (v === null ? null : String(v))) || changed;
+      }
+    }
+
+    return changed;
+  };
+
+  const clearOverrideValuesToNull = () => {
+    let changed = false;
+    for (const k of BOOL_FIELDS) changed = setMainTriBool(k, null) || changed;
+    for (const k of STR_FIELDS)  changed = setMainTriString(k, null) || changed;
+    for (const k of ENUM_FIELDS) changed = setMainTriUpper(k, null) || changed;
+    return changed;
+  };
+
+  // --- Seed from client_settings snapshot (when override toggled ON from OFF, and no stash restore) ---
+  const seedFromClientSettingsSnapshot = (cs) => {
+    if (!cs || typeof cs !== 'object') return false;
+
+    // booleans from client settings
+    const csBool = (k, def = false) => {
+      if (!cs || typeof cs !== 'object') return !!def;
+      if (!Object.prototype.hasOwnProperty.call(cs, k)) return !!def;
+      return !!cs[k];
+    };
+
+    const csStr = (k) => {
+      if (!cs || typeof cs !== 'object') return '';
+      const v = cs[k];
+      return (v == null) ? '' : String(v).trim();
+    };
+
+    const csMode = (k) => {
+      const v = cs[k];
+      const s = (v == null) ? '' : String(v).trim().toUpperCase();
+      return s || '';
+    };
+
+    // Map: client_settings → contract fields
+    // NOTE: this is staging-only; parent Save persists it.
+    let changed = false;
+
+    changed = setMainTriBool('is_nhsp',               csBool('is_nhsp', false)) || changed;
+    changed = setMainTriBool('autoprocess_hr',        csBool('autoprocess_hr', false)) || changed;
+    changed = setMainTriBool('requires_hr',           csBool('requires_hr', false)) || changed;
+    changed = setMainTriBool('no_timesheet_required', csBool('no_timesheet_required', false)) || changed;
+
+    changed = setMainTriBool('daily_calc_of_invoices', csBool('daily_calc_of_invoices', false)) || changed;
+    changed = setMainTriBool('group_nightsat_sunbh',   csBool('group_nightsat_sunbh', false)) || changed;
+
+    // client setting name: self_bill_no_invoices_sent
+    changed = setMainTriBool('self_bill', csBool('self_bill_no_invoices_sent', false)) || changed;
+
+    // references (client settings names)
+    changed = setMainTriBool('require_reference_to_pay',     csBool('pay_reference_required', false)) || changed;
+    changed = setMainTriBool('require_reference_to_invoice', csBool('invoice_reference_required', false)) || changed;
+
+    // attachments
+    changed = setMainTriBool('hr_attach_to_invoice', csBool('hr_attach_to_invoice', true)) || changed;
+    changed = setMainTriBool('ts_attach_to_invoice', csBool('ts_attach_to_invoice', true)) || changed;
+
+    // auto-invoice default (client-level default)
+    changed = setMainTriBool('auto_invoice', csBool('auto_invoice_default', false)) || changed;
+
+    // NEW: ref required to ISSUE invoice (client-level value exists; contract will override)
+    changed = setMainTriBool('reference_number_required_to_issue_invoice', csBool('reference_number_required_to_issue_invoice', false)) || changed;
+
+    // NEW: manual invoice email routing (contract-level)
+    changed = setMainTriBool('send_manual_invoices_to_different_email', csBool('send_manual_invoices_to_different_email', false)) || changed;
+    const altEmail = csStr('manual_invoices_alt_email_address');
+    changed = setMainTriString('manual_invoices_alt_email_address', altEmail ? altEmail : null) || changed;
+
+    // NEW: default submission mode (nullable, “inherit” option)
+    const dsm = csMode('default_submission_mode');
+    changed = setMainTriUpper('default_submission_mode', dsm ? dsm : null) || changed;
+
+    // Canonicalise route flags exactly as per existing contract settings rules
     // Manual:
     //  is_nhsp=false, autoprocess_hr=false, no_timesheet_required=false, requires_hr=false
     // NHSP:
     //  is_nhsp=true,  autoprocess_hr=false, no_timesheet_required=false, requires_hr=false
-    // HR VERIFY (timesheets required):
+    // HR VERIFY:
     //  is_nhsp=false, autoprocess_hr=true,  no_timesheet_required=false, requires_hr=true
-    // HR CREATE (no timesheets):
+    // HR CREATE:
     //  is_nhsp=false, autoprocess_hr=true,  no_timesheet_required=true,  requires_hr=false
-    if (weekly === 'NHSP') {
-      changed = setMainBool('is_nhsp', true) || changed;
-      changed = setMainBool('autoprocess_hr', false) || changed;
-      changed = setMainBool('no_timesheet_required', false) || changed;
-      changed = setMainBool('requires_hr', false) || changed;
-    } else if (weekly === 'HEALTHROSTER') {
-      changed = setMainBool('is_nhsp', false) || changed;
-      changed = setMainBool('autoprocess_hr', true) || changed;
-      if (isHrCreate) {
-        changed = setMainBool('no_timesheet_required', true) || changed;
-        changed = setMainBool('requires_hr', false) || changed;
+    const isNhsp = !!boolish(fs.main.is_nhsp);
+    const isHr   = !!boolish(fs.main.autoprocess_hr);
+    const noTs   = !!boolish(fs.main.no_timesheet_required);
+
+    if (isNhsp) {
+      changed = setMainTriBool('autoprocess_hr', false) || changed;
+      changed = setMainTriBool('no_timesheet_required', false) || changed;
+      changed = setMainTriBool('requires_hr', false) || changed;
+    } else if (isHr) {
+      changed = setMainTriBool('is_nhsp', false) || changed;
+      if (noTs) {
+        changed = setMainTriBool('requires_hr', false) || changed;
       } else {
-        changed = setMainBool('no_timesheet_required', false) || changed;
-        changed = setMainBool('requires_hr', true) || changed;
+        changed = setMainTriBool('requires_hr', true) || changed;
+        changed = setMainTriBool('no_timesheet_required', false) || changed;
       }
     } else {
-      changed = setMainBool('is_nhsp', false) || changed;
-      changed = setMainBool('autoprocess_hr', false) || changed;
-      changed = setMainBool('no_timesheet_required', false) || changed;
-      changed = setMainBool('requires_hr', false) || changed;
+      changed = setMainTriBool('is_nhsp', false) || changed;
+      changed = setMainTriBool('no_timesheet_required', false) || changed;
+      changed = setMainTriBool('requires_hr', false) || changed;
     }
 
-    // --- Contract-scoped flags (some are forced by route) ---
+    return changed;
+  };
 
-    // Auto-invoice is always user-controlled (all modes)
-    const ai = !!root.querySelector('input[type="checkbox"][name="auto_invoice"]')?.checked;
-    changed = setMainBool('auto_invoice', ai) || changed;
+  // --- Effective value computation (for rendering) ---
+  const computeEffective = () => {
+    const cs = getClientSettingsSnapshot();
+    const contractClientId = String(base.client_id || '') || null;
 
-    // NHSP: references + invoicing flags controlled automatically
-    if (weekly === 'NHSP') {
-      changed = setMainBool('require_reference_to_pay', false) || changed;
-      changed = setMainBool('require_reference_to_invoice', false) || changed;
+    const overrideOn = !!boolish(getMainRaw('overrideclientsettings'));
 
-      changed = setMainBool('self_bill', true) || changed;
-      changed = setMainBool('daily_calc_of_invoices', true) || changed;
-      changed = setMainBool('group_nightsat_sunbh', false) || changed;
-
-      changed = setMainBool('hr_attach_to_invoice', false) || changed;
-      changed = setMainBool('ts_attach_to_invoice', false) || changed;
-    }
-
-    // Manual: allow ref flags + invoice flags; attachments forced
-    if (weekly === 'NONE') {
-      const rPay = !!root.querySelector('input[type="checkbox"][name="require_reference_to_pay"]')?.checked;
-      const rInv = !!root.querySelector('input[type="checkbox"][name="require_reference_to_invoice"]')?.checked;
-
-      const sb   = !!root.querySelector('input[type="checkbox"][name="self_bill"]')?.checked;
-      const di   = !!root.querySelector('input[type="checkbox"][name="daily_calc_of_invoices"]')?.checked;
-      const gn   = !!root.querySelector('input[type="checkbox"][name="group_nightsat_sunbh"]')?.checked;
-
-      changed = setMainBool('require_reference_to_pay', rPay) || changed;
-      changed = setMainBool('require_reference_to_invoice', rInv) || changed;
-      changed = setMainBool('self_bill', sb) || changed;
-      changed = setMainBool('daily_calc_of_invoices', di) || changed;
-      changed = setMainBool('group_nightsat_sunbh', gn) || changed;
-
-      // forced
-      changed = setMainBool('hr_attach_to_invoice', false) || changed;
-      changed = setMainBool('ts_attach_to_invoice', true) || changed;
-    }
-
-    // HealthRoster: references forced off; invoicing flags user-controlled; attachments depend on CREATE vs VERIFY
-    if (weekly === 'HEALTHROSTER') {
-      changed = setMainBool('require_reference_to_pay', false) || changed;
-      changed = setMainBool('require_reference_to_invoice', false) || changed;
-
-      const sb   = !!root.querySelector('input[type="checkbox"][name="self_bill"]')?.checked;
-      const di   = !!root.querySelector('input[type="checkbox"][name="daily_calc_of_invoices"]')?.checked;
-      const gn   = !!root.querySelector('input[type="checkbox"][name="group_nightsat_sunbh"]')?.checked;
-
-      changed = setMainBool('self_bill', sb) || changed;
-      changed = setMainBool('daily_calc_of_invoices', di) || changed;
-      changed = setMainBool('group_nightsat_sunbh', gn) || changed;
-
-      const ha = !!root.querySelector('input[type="checkbox"][name="hr_attach_to_invoice"]')?.checked;
-      changed = setMainBool('hr_attach_to_invoice', ha) || changed;
-
-      if (isHrCreate) {
-        // forced
-        changed = setMainBool('ts_attach_to_invoice', false) || changed;
-      } else {
-        const ta = !!root.querySelector('input[type="checkbox"][name="ts_attach_to_invoice"]')?.checked;
-        changed = setMainBool('ts_attach_to_invoice', ta) || changed;
-      }
-    }
-
-    // Update route pill in the parent contract main tab if it exists
-    try {
-      const lbl = document.getElementById('contractRouteLabel');
-      if (lbl) {
-        const routeLabel =
-          (weekly === 'NHSP') ? 'NHSP' :
-          (weekly === 'HEALTHROSTER' && isHrCreate) ? 'HealthRoster (no timesheets)' :
-          (weekly === 'HEALTHROSTER') ? 'HealthRoster (timesheets required)' :
-          'Manual';
-        lbl.innerHTML = `<strong>${routeLabel}</strong>`;
-      }
-    } catch {}
-
-    // Best-effort: hide default submission mode select row if it exists (main tab may re-render later anyway)
-    try {
-      const form = document.querySelector('#contractForm');
-      if (form) {
-        const sel = form.querySelector('select[name="default_submission_mode"]');
-        if (sel) {
-          const hideDSM = (weekly === 'NHSP') || (weekly === 'HEALTHROSTER' && isHrCreate);
-          const row = sel.closest('.row');
-          if (row) row.style.display = hideDSM ? 'none' : '';
-        }
-      }
-    } catch {}
-
-    // Only mark parent dirty if something actually changed (avoid dirty-on-open)
-    const after = {
-      is_nhsp:                getMainBool('is_nhsp'),
-      autoprocess_hr:         getMainBool('autoprocess_hr'),
-      no_timesheet_required:  getMainBool('no_timesheet_required'),
-      requires_hr:            getMainBool('requires_hr'),
-
-      require_reference_to_pay:     getMainBool('require_reference_to_pay'),
-      require_reference_to_invoice: getMainBool('require_reference_to_invoice'),
-
-      self_bill:              getMainBool('self_bill'),
-      daily_calc_of_invoices: getMainBool('daily_calc_of_invoices'),
-      group_nightsat_sunbh:   getMainBool('group_nightsat_sunbh'),
-
-      auto_invoice:           getMainBool('auto_invoice'),
-
-      hr_attach_to_invoice:   getMainBool('hr_attach_to_invoice'),
-      ts_attach_to_invoice:   getMainBool('ts_attach_to_invoice')
+    const csBool = (k, def = false) => {
+      if (!cs || typeof cs !== 'object') return !!def;
+      if (!Object.prototype.hasOwnProperty.call(cs, k)) return !!def;
+      return !!cs[k];
     };
 
-    const changedNet =
-      Object.keys(after).some(k => after[k] !== before[k]);
+    const csStr = (k) => {
+      if (!cs || typeof cs !== 'object') return '';
+      const v = cs[k];
+      return (v == null) ? '' : String(v).trim();
+    };
 
-    if (!initial && changedNet) setContractDirtyIfChanged(true);
+    const csUpper = (k) => {
+      const v = cs ? cs[k] : null;
+      const s = (v == null) ? '' : String(v).trim().toUpperCase();
+      return s || '';
+    };
 
-    return changedNet;
+    // Resolve effective flags
+    const eff = {};
+
+    // Route flags
+    if (overrideOn) {
+      eff.is_nhsp               = (triBool(getMainRaw('is_nhsp'))               ?? false);
+      eff.autoprocess_hr        = (triBool(getMainRaw('autoprocess_hr'))        ?? false);
+      eff.no_timesheet_required = (triBool(getMainRaw('no_timesheet_required')) ?? false);
+      eff.requires_hr           = (triBool(getMainRaw('requires_hr'))           ?? false);
+    } else {
+      eff.is_nhsp               = csBool('is_nhsp', false);
+      eff.autoprocess_hr        = csBool('autoprocess_hr', false);
+      eff.no_timesheet_required = csBool('no_timesheet_required', false);
+      eff.requires_hr           = csBool('requires_hr', false);
+    }
+
+    // Non-route flags
+    if (overrideOn) {
+      eff.require_reference_to_pay     = (triBool(getMainRaw('require_reference_to_pay'))     ?? false);
+      eff.require_reference_to_invoice = (triBool(getMainRaw('require_reference_to_invoice')) ?? false);
+
+      eff.self_bill              = (triBool(getMainRaw('self_bill'))              ?? false);
+      eff.daily_calc_of_invoices = (triBool(getMainRaw('daily_calc_of_invoices')) ?? false);
+      eff.group_nightsat_sunbh   = (triBool(getMainRaw('group_nightsat_sunbh'))   ?? false);
+
+      eff.auto_invoice           = (triBool(getMainRaw('auto_invoice'))           ?? false);
+
+      eff.hr_attach_to_invoice   = (triBool(getMainRaw('hr_attach_to_invoice'))   ?? false);
+      eff.ts_attach_to_invoice   = (triBool(getMainRaw('ts_attach_to_invoice'))   ?? false);
+
+      // NEW fields
+      eff.reference_number_required_to_issue_invoice =
+        (triBool(getMainRaw('reference_number_required_to_issue_invoice')) ?? false);
+
+      eff.send_manual_invoices_to_different_email =
+        (triBool(getMainRaw('send_manual_invoices_to_different_email')) ?? false);
+
+      eff.manual_invoices_alt_email_address =
+        (triString(getMainRaw('manual_invoices_alt_email_address')) ?? '');
+
+      eff.default_submission_mode =
+        (triUpperOrNull(getMainRaw('default_submission_mode')) ?? null);
+
+    } else {
+      // inherited from client settings snapshot
+      eff.require_reference_to_pay     = csBool('pay_reference_required', false);
+      eff.require_reference_to_invoice = csBool('invoice_reference_required', false);
+
+      eff.self_bill              = csBool('self_bill_no_invoices_sent', false);
+      eff.daily_calc_of_invoices = csBool('daily_calc_of_invoices', false);
+      eff.group_nightsat_sunbh   = csBool('group_nightsat_sunbh', false);
+
+      eff.auto_invoice           = csBool('auto_invoice_default', false);
+
+      eff.hr_attach_to_invoice   = csBool('hr_attach_to_invoice', true);
+      eff.ts_attach_to_invoice   = csBool('ts_attach_to_invoice', true);
+
+      // NEW inherited fields
+      eff.reference_number_required_to_issue_invoice =
+        csBool('reference_number_required_to_issue_invoice', false);
+
+      eff.send_manual_invoices_to_different_email =
+        csBool('send_manual_invoices_to_different_email', false);
+
+      eff.manual_invoices_alt_email_address =
+        csStr('manual_invoices_alt_email_address');
+
+      eff.default_submission_mode =
+        (csUpper('default_submission_mode') || null);
+    }
+
+    const weeklyMode =
+      eff.is_nhsp ? 'NHSP' : (eff.autoprocess_hr ? 'HEALTHROSTER' : 'NONE');
+
+    const hrMode =
+      (eff.autoprocess_hr && eff.no_timesheet_required) ? 'NO_TS' : 'REQUIRE_TS';
+
+    return {
+      cs,
+      contractClientId,
+      snapshotClientId: getClientSettingsClientId(),
+      hasSnapshot: !!(cs && typeof cs === 'object'),
+      overrideOn,
+      weeklyMode,
+      hrMode,
+      isHrCreate: (weeklyMode === 'HEALTHROSTER' && hrMode === 'NO_TS'),
+      eff
+    };
+  };
+
+  // --- Render HTML (self-contained; does not rely on renderContractSettingsModal) ---
+  const renderHtml = () => {
+    const st = computeEffective();
+    const { hasSnapshot, overrideOn, weeklyMode, hrMode, isHrCreate, eff } = st;
+
+    const disabledAll = viewOnly ? 'disabled' : '';
+    const disabledIfInherit = (!overrideOn || viewOnly) ? 'disabled' : '';
+
+    const hint = viewOnly
+      ? `This contract has real timesheets. Settings are view-only.`
+      : (!hasSnapshot
+          ? `Client settings snapshot is not available. Pick a client (or reopen the contract) to enable seeding when overriding.`
+          : (overrideOn
+              ? `Override is ON. Changes here are staged and applied when you Save the contract.`
+              : `Override is OFF. Values shown are inherited from client settings. Tick “Override client settings” to stage contract-specific values.`));
+
+    const radioPill = (name, value, text, checked, disabledAttr) => `
+      <label class="inline chk-tight"
+        style="display:inline-flex;align-items:center;gap:6px;margin-right:10px;white-space:nowrap;opacity:${disabledAttr ? '0.7' : '1'};">
+        <input type="radio" name="${name}" value="${value}" ${checked ? 'checked' : ''} ${disabledAttr}/>
+        <span style="white-space:nowrap;">${text}</span>
+      </label>
+    `;
+
+    const radioChoice = (name, value, title, desc, checked, disabledAttr) => `
+      <label style="
+        display:grid;
+        grid-template-columns: 18px 1fr;
+        column-gap:8px;
+        row-gap:4px;
+        align-items:start;
+        cursor:pointer;
+        margin:0;
+        opacity:${disabledAttr ? '0.7' : '1'};
+      ">
+        <input type="radio" name="${name}" value="${value}" ${checked ? 'checked' : ''} ${disabledAttr} style="margin-top:2px;" />
+        <div style="min-width:0;">
+          <div style="line-height:1.2;white-space:normal;word-break:normal;overflow-wrap:break-word;">${title}</div>
+          ${desc ? `<div class="mini" style="opacity:0.9;line-height:1.25;white-space:normal;word-break:normal;overflow-wrap:break-word;">${desc}</div>` : ``}
+        </div>
+      </label>
+    `;
+
+    const checkChoice = (name, title, checked, disabledAttr) => `
+      <label style="
+        display:grid;
+        grid-template-columns: 18px 1fr;
+        column-gap:8px;
+        align-items:start;
+        cursor:pointer;
+        margin:0;
+        opacity:${disabledAttr ? '0.7' : '1'};
+      ">
+        <input type="checkbox" name="${name}" ${checked ? 'checked' : ''} ${disabledAttr} style="margin-top:2px;" />
+        <div style="line-height:1.2;white-space:normal;word-break:normal;overflow-wrap:break-word;min-width:0;">${title}</div>
+      </label>
+    `;
+
+    const showNhsp   = (weeklyMode === 'NHSP');
+    const showManual = (weeklyMode === 'NONE');
+    const showHr     = (weeklyMode === 'HEALTHROSTER');
+    const showHrTsAttach = showHr && !isHrCreate;
+
+    // default_submission_mode: allow “inherit” (NULL) option
+    const dsmVal = eff.default_submission_mode ? String(eff.default_submission_mode).toUpperCase() : '';
+
+    // manual invoices alt email input enable
+    const manualEmailEnabled = !!eff.send_manual_invoices_to_different_email;
+    const altEmailVal = String(eff.manual_invoices_alt_email_address || '');
+
+    return `
+      <form id="contractSettingsForm" class="tabc form">
+
+        ${hint ? `
+          <div class="alert alert-warning py-2 px-2 small" style="margin-bottom:12px;">
+            ${escapeHtml(hint)}
+          </div>
+        ` : ''}
+
+        <div class="row" style="margin:0;">
+          <label style="white-space:normal">Override client settings</label>
+          <div class="controls" style="display:flex;flex-direction:column;gap:8px;min-width:0;">
+            <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+              <label class="inline chk-tight" style="display:inline-flex;align-items:center;gap:6px;white-space:nowrap;">
+                <input type="checkbox" name="overrideclientsettings" ${overrideOn ? 'checked' : ''} ${disabledAll}/>
+                <span>Override client settings for this contract</span>
+              </label>
+              <span class="mini" style="opacity:0.8;">(Staged only until you Save the contract)</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="row" style="margin-top:12px;">
+          <label style="white-space:normal">Weekly timesheet source</label>
+          <div class="controls" style="display:flex;flex-direction:column;gap:8px;min-width:0;">
+            <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;">
+              ${radioPill('weekly_mode', 'NONE', 'None (manual)', weeklyMode === 'NONE', disabledIfInherit)}
+              ${radioPill('weekly_mode', 'NHSP', 'NHSP', weeklyMode === 'NHSP', disabledIfInherit)}
+              ${radioPill('weekly_mode', 'HEALTHROSTER', 'HealthRoster', weeklyMode === 'HEALTHROSTER', disabledIfInherit)}
+            </div>
+
+            <div id="contractWeeklyMsg" class="mini" style="opacity:0.9;line-height:1.25;white-space:normal;overflow-wrap:break-word;">
+              ${
+                weeklyMode === 'NONE'
+                  ? 'Weekly timesheets are managed manually (no external weekly import source). Candidates will submit timesheets electronically or using a QR Timesheet.'
+                  : weeklyMode === 'NHSP'
+                  ? 'NHSP weekly imports will be used for this contract. Candidates will not submit any timesheets.'
+                  : 'HealthRoster weekly imports will be used for this contract.'
+              }
+            </div>
+          </div>
+        </div>
+
+        <div id="contractHrModeWrap" style="display:${showHr ? '' : 'none'};">
+          <div class="row" style="margin-top:12px;">
+            <label style="white-space:normal">Weekly HealthRoster behaviour</label>
+            <div class="controls" style="display:flex;flex-direction:column;gap:12px;min-width:0;">
+              ${radioChoice(
+                'hr_timesheet_mode',
+                'REQUIRE_TS',
+                'Worker will provide timesheets; the agency will also import healthroster data to verify workers hours',
+                'Import will validate that HealthRoster hours match the worker’s weekly timesheet. Mismatches fail validation and healthroster or timesheet will need amending before it can be paid.',
+                hrMode === 'REQUIRE_TS',
+                disabledIfInherit
+              )}
+              ${radioChoice(
+                'hr_timesheet_mode',
+                'NO_TS',
+                'Worker will not provide timesheets; imports create them if a contract exists',
+                'Import will create/update weekly timesheets from HealthRoster hours when a contract exists. Healthroster hours will not require any seperate checks.',
+                hrMode === 'NO_TS',
+                disabledIfInherit
+              )}
+            </div>
+          </div>
+        </div>
+
+        <div class="row" style="margin-top:12px;">
+          <label style="white-space:normal">References & flags</label>
+          <div class="controls" style="display:flex;flex-direction:column;gap:12px;min-width:0;">
+
+            <!-- NEW: default submission mode (nullable / inherit) -->
+            <div id="contractDefaultSubmissionModeRow" style="margin-bottom:6px; display:${(showNhsp || isHrCreate) ? 'none' : ''};">
+              <div class="mini" style="opacity:0.85;margin-bottom:6px;">Default submission mode</div>
+              <select name="default_submission_mode" class="form-select form-select-sm" ${disabledIfInherit}>
+                <option value="" ${dsmVal === '' ? 'selected' : ''}>Inherit (client default)</option>
+                <option value="ELECTRONIC" ${dsmVal === 'ELECTRONIC' ? 'selected' : ''}>Electronic</option>
+                <option value="MANUAL" ${dsmVal === 'MANUAL' ? 'selected' : ''}>Manual</option>
+              </select>
+            </div>
+
+            <!-- NEW: ref required to ISSUE invoice -->
+            <div style="display:grid;grid-template-columns:1fr;gap:8px;">
+              ${checkChoice(
+                'reference_number_required_to_issue_invoice',
+                'Ref No. required to ISSUE invoice',
+                !!eff.reference_number_required_to_issue_invoice,
+                disabledIfInherit
+              )}
+            </div>
+
+            <!-- NEW: manual invoice email routing -->
+            <div style="display:grid;grid-template-columns:1fr;gap:8px;margin-top:6px;">
+              ${checkChoice(
+                'send_manual_invoices_to_different_email',
+                'Send manual/QR adjustment invoices to a different email address',
+                !!eff.send_manual_invoices_to_different_email,
+                disabledIfInherit
+              )}
+              <div style="margin-left:24px;opacity:${(!manualEmailEnabled || disabledIfInherit) ? '0.65' : '1'};">
+                <div class="mini" style="opacity:0.85;margin-bottom:6px;">Alternate email</div>
+                <input type="text"
+                  name="manual_invoices_alt_email_address"
+                  class="form-control form-control-sm"
+                  value="${escapeHtml(altEmailVal)}"
+                  placeholder="e.g. accounts@client.nhs.uk"
+                  ${(!manualEmailEnabled || disabledIfInherit) ? 'disabled' : ''}
+                />
+              </div>
+            </div>
+
+            <!-- NHSP -->
+            <div id="contractFlagsNHSP" style="display:${showNhsp ? '' : 'none'};">
+              <div class="mini" style="opacity:0.9;line-height:1.25;white-space:normal;overflow-wrap:break-word;">
+                NHSP mode controls references, invoicing behaviour and attachments automatically.
+              </div>
+              <div style="display:grid;grid-template-columns:1fr;gap:8px;margin-top:10px;">
+                ${checkChoice('auto_invoice', 'Auto-invoice (this contract)', !!eff.auto_invoice, disabledIfInherit)}
+              </div>
+            </div>
+
+            <!-- MANUAL -->
+            <div id="contractFlagsManual" style="display:${showManual ? '' : 'none'};">
+              <div style="display:grid;grid-template-columns:1fr;gap:8px;">
+                ${checkChoice('require_reference_to_pay', 'Ref No. required to PAY', !!eff.require_reference_to_pay, disabledIfInherit)}
+                ${checkChoice('require_reference_to_invoice', 'Ref No. required to INVOICE', !!eff.require_reference_to_invoice, disabledIfInherit)}
+              </div>
+
+              <div style="display:grid;grid-template-columns:1fr;gap:8px;margin-top:10px;">
+                ${checkChoice('self_bill', 'Self-bill (no invoices sent)', !!eff.self_bill, disabledIfInherit)}
+                ${checkChoice('daily_calc_of_invoices', 'Daily invoice calculation', !!eff.daily_calc_of_invoices, disabledIfInherit)}
+                ${checkChoice('group_nightsat_sunbh', 'Group Night/Sat/Sun/BH', !!eff.group_nightsat_sunbh, disabledIfInherit)}
+                ${checkChoice('auto_invoice', 'Auto-invoice (this contract)', !!eff.auto_invoice, disabledIfInherit)}
+              </div>
+
+              <div class="mini" style="opacity:0.9;line-height:1.25;white-space:normal;overflow-wrap:break-word;margin-top:10px;">
+                Timesheets will always be attached to invoices for manual clients.
+              </div>
+            </div>
+
+            <!-- HEALTHROSTER -->
+            <div id="contractFlagsHR" style="display:${showHr ? '' : 'none'};">
+              <div style="display:grid;grid-template-columns:1fr;gap:8px;">
+                ${checkChoice('self_bill', 'Self-bill (no invoices sent)', !!eff.self_bill, disabledIfInherit)}
+                ${checkChoice('daily_calc_of_invoices', 'Daily invoice calculation', !!eff.daily_calc_of_invoices, disabledIfInherit)}
+                ${checkChoice('group_nightsat_sunbh', 'Group Night/Sat/Sun/BH', !!eff.group_nightsat_sunbh, disabledIfInherit)}
+                ${checkChoice('auto_invoice', 'Auto-invoice (this contract)', !!eff.auto_invoice, disabledIfInherit)}
+              </div>
+
+              <div style="display:grid;grid-template-columns:1fr;gap:8px;margin-top:10px;">
+                ${checkChoice('hr_attach_to_invoice', 'Attach HealthRoster to invoice', !!eff.hr_attach_to_invoice, disabledIfInherit)}
+                <div id="contractTsAttachRow" style="display:${showHrTsAttach ? '' : 'none'};">
+                  ${checkChoice('ts_attach_to_invoice', 'Attach timesheets to invoice', !!eff.ts_attach_to_invoice, disabledIfInherit)}
+                </div>
+              </div>
+            </div>
+
+            <div class="mini" style="opacity:0.8;line-height:1.25;white-space:normal;overflow-wrap:break-word;">
+              Day/night boundary time settings remain client-level and are not shown here.
+            </div>
+
+          </div>
+        </div>
+
+      </form>
+    `;
+  };
+
+  // --- Apply staging from DOM ---
+  const applyFromDOM = (root, opts = {}) => {
+    if (!root) return false;
+    const initial = !!opts.initial;
+
+    const beforeOverride = !!boolish(getMainRaw('overrideclientsettings'));
+    const overrideChecked = !!root.querySelector('input[type="checkbox"][name="overrideclientsettings"]')?.checked;
+
+    let changed = false;
+
+    // Toggle override: OFF → ON seeds from snapshot (unless stash restore), ON → OFF clears to NULL (stash saved)
+    if (overrideChecked !== beforeOverride) {
+      if (overrideChecked) {
+        // turning ON
+        changed = setMainTriBool('overrideclientsettings', true) || changed;
+
+        const stash = window.modalCtx?.[STASH_KEY];
+        if (stash && typeof stash === 'object') {
+          // Restore prior override values
+          changed = applyOverrideValuesStaged(stash) || changed;
+        } else {
+          // Seed from client settings snapshot
+          const cs = getClientSettingsSnapshot();
+          if (!cs) {
+            alert('Cannot enable override: client settings snapshot is missing. Pick a client (or reopen this contract) first.');
+            // revert checkbox UI best-effort (caller will re-render on Apply anyway)
+            try { root.querySelector('input[name="overrideclientsettings"]').checked = false; } catch {}
+            changed = setMainTriBool('overrideclientsettings', false) || changed;
+            return false;
+          }
+          changed = seedFromClientSettingsSnapshot(cs) || changed;
+        }
+      } else {
+        // turning OFF
+        // stash current override values so untick→tick restores during staging
+        try {
+          window.modalCtx[STASH_KEY] = captureOverrideValuesAsStaged();
+        } catch {}
+
+        changed = setMainTriBool('overrideclientsettings', false) || changed;
+
+        // clear override values to NULL (inherit)
+        changed = clearOverrideValuesToNull() || changed;
+      }
+    }
+
+    const overrideOnNow = !!boolish(getMainRaw('overrideclientsettings'));
+
+    // If override is OFF, nothing else is staged (inherit). Do not mark dirty on initial paint.
+    if (!overrideOnNow) {
+      if (!initial && changed) setContractDirtyIfChanged(true);
+      return !!changed;
+    }
+
+    // If view-only, do not stage further changes
+    if (viewOnly) return false;
+
+    // Read UI selection (enabled only when overrideOnNow)
+    const weekly = String(root.querySelector('input[type="radio"][name="weekly_mode"]:checked')?.value || 'NONE').toUpperCase();
+    const hrMode = String(root.querySelector('input[type="radio"][name="hr_timesheet_mode"]:checked')?.value || 'REQUIRE_TS').toUpperCase();
+    const isHrCreate = (weekly === 'HEALTHROSTER' && hrMode === 'NO_TS');
+
+    // Route canonicalisation
+    if (weekly === 'NHSP') {
+      changed = setMainTriBool('is_nhsp', true) || changed;
+      changed = setMainTriBool('autoprocess_hr', false) || changed;
+      changed = setMainTriBool('no_timesheet_required', false) || changed;
+      changed = setMainTriBool('requires_hr', false) || changed;
+    } else if (weekly === 'HEALTHROSTER') {
+      changed = setMainTriBool('is_nhsp', false) || changed;
+      changed = setMainTriBool('autoprocess_hr', true) || changed;
+      if (isHrCreate) {
+        changed = setMainTriBool('no_timesheet_required', true) || changed;
+        changed = setMainTriBool('requires_hr', false) || changed;
+      } else {
+        changed = setMainTriBool('no_timesheet_required', false) || changed;
+        changed = setMainTriBool('requires_hr', true) || changed;
+      }
+    } else {
+      changed = setMainTriBool('is_nhsp', false) || changed;
+      changed = setMainTriBool('autoprocess_hr', false) || changed;
+      changed = setMainTriBool('no_timesheet_required', false) || changed;
+      changed = setMainTriBool('requires_hr', false) || changed;
+    }
+
+    // Auto-invoice (user-controlled)
+    changed = setMainTriBool('auto_invoice', !!root.querySelector('input[type="checkbox"][name="auto_invoice"]')?.checked) || changed;
+
+    // Default submission mode (nullable / inherit)
+    // Hidden in NHSP and HR CREATE (no timesheets)
+    const dsmSel = root.querySelector('select[name="default_submission_mode"]');
+    if (weekly === 'NHSP' || (weekly === 'HEALTHROSTER' && isHrCreate) || !dsmSel) {
+      changed = setMainTriUpper('default_submission_mode', null) || changed;
+    } else {
+      const v = String(dsmSel.value || '').trim().toUpperCase();
+      changed = setMainTriUpper('default_submission_mode', v ? v : null) || changed;
+    }
+
+    // NEW: ref required to ISSUE invoice
+    changed = setMainTriBool(
+      'reference_number_required_to_issue_invoice',
+      !!root.querySelector('input[type="checkbox"][name="reference_number_required_to_issue_invoice"]')?.checked
+    ) || changed;
+
+    // NEW: manual invoice email routing
+    const sendManual = !!root.querySelector('input[type="checkbox"][name="send_manual_invoices_to_different_email"]')?.checked;
+    changed = setMainTriBool('send_manual_invoices_to_different_email', sendManual) || changed;
+
+    const altEmailEl = root.querySelector('input[name="manual_invoices_alt_email_address"]');
+    const altEmail = altEmailEl ? String(altEmailEl.value || '').trim() : '';
+    changed = setMainTriString('manual_invoices_alt_email_address', sendManual ? (altEmail || '') : null) || changed;
+
+    // Route-specific forced flags
+    if (weekly === 'NHSP') {
+      changed = setMainTriBool('require_reference_to_pay', false) || changed;
+      changed = setMainTriBool('require_reference_to_invoice', false) || changed;
+
+      changed = setMainTriBool('self_bill', true) || changed;
+      changed = setMainTriBool('daily_calc_of_invoices', true) || changed;
+      changed = setMainTriBool('group_nightsat_sunbh', false) || changed;
+
+      changed = setMainTriBool('hr_attach_to_invoice', false) || changed;
+      changed = setMainTriBool('ts_attach_to_invoice', false) || changed;
+    }
+
+    if (weekly === 'NONE') {
+      changed = setMainTriBool('require_reference_to_pay', !!root.querySelector('input[type="checkbox"][name="require_reference_to_pay"]')?.checked) || changed;
+      changed = setMainTriBool('require_reference_to_invoice', !!root.querySelector('input[type="checkbox"][name="require_reference_to_invoice"]')?.checked) || changed;
+
+      changed = setMainTriBool('self_bill', !!root.querySelector('input[type="checkbox"][name="self_bill"]')?.checked) || changed;
+      changed = setMainTriBool('daily_calc_of_invoices', !!root.querySelector('input[type="checkbox"][name="daily_calc_of_invoices"]')?.checked) || changed;
+      changed = setMainTriBool('group_nightsat_sunbh', !!root.querySelector('input[type="checkbox"][name="group_nightsat_sunbh"]')?.checked) || changed;
+
+      // forced attachments
+      changed = setMainTriBool('hr_attach_to_invoice', false) || changed;
+      changed = setMainTriBool('ts_attach_to_invoice', true) || changed;
+    }
+
+    if (weekly === 'HEALTHROSTER') {
+      // forced references off
+      changed = setMainTriBool('require_reference_to_pay', false) || changed;
+      changed = setMainTriBool('require_reference_to_invoice', false) || changed;
+
+      changed = setMainTriBool('self_bill', !!root.querySelector('input[type="checkbox"][name="self_bill"]')?.checked) || changed;
+      changed = setMainTriBool('daily_calc_of_invoices', !!root.querySelector('input[type="checkbox"][name="daily_calc_of_invoices"]')?.checked) || changed;
+      changed = setMainTriBool('group_nightsat_sunbh', !!root.querySelector('input[type="checkbox"][name="group_nightsat_sunbh"]')?.checked) || changed;
+
+      changed = setMainTriBool('hr_attach_to_invoice', !!root.querySelector('input[type="checkbox"][name="hr_attach_to_invoice"]')?.checked) || changed;
+
+      if (isHrCreate) {
+        // forced off
+        changed = setMainTriBool('ts_attach_to_invoice', false) || changed;
+      } else {
+        changed = setMainTriBool('ts_attach_to_invoice', !!root.querySelector('input[type="checkbox"][name="ts_attach_to_invoice"]')?.checked) || changed;
+      }
+    }
+
+    if (!initial && changed) setContractDirtyIfChanged(true);
+    return !!changed;
   };
 
   const wire = () => {
@@ -9501,79 +10102,74 @@ function openContractSettingsModal() {
     if (!root || root.__wired) return;
     root.__wired = true;
 
-    const updatePanels = () => {
-      const weekly = String(root.querySelector('input[type="radio"][name="weekly_mode"]:checked')?.value || 'NONE').toUpperCase();
-      const hrMode = String(root.querySelector('input[type="radio"][name="hr_timesheet_mode"]:checked')?.value || 'REQUIRE_TS').toUpperCase();
-      const isHr = (weekly === 'HEALTHROSTER');
-      const isNhsp = (weekly === 'NHSP');
-      const isManual = (weekly === 'NONE');
-      const isHrCreate = isHr && hrMode === 'NO_TS';
-
-      const hrWrap = document.getElementById('contractHrModeWrap');
-      if (hrWrap) hrWrap.style.display = isHr ? '' : 'none';
-
-      const nhspPanel   = document.getElementById('contractFlagsNHSP');
-      const manualPanel = document.getElementById('contractFlagsManual');
-      const hrPanel     = document.getElementById('contractFlagsHR');
-      if (nhspPanel)   nhspPanel.style.display   = isNhsp ? '' : 'none';
-      if (manualPanel) manualPanel.style.display = isManual ? '' : 'none';
-      if (hrPanel)     hrPanel.style.display     = isHr ? '' : 'none';
-
-      // HR CREATE: hide TS attach option (forced off)
-      const tsAttachRow = document.getElementById('contractTsAttachRow');
-      if (tsAttachRow) tsAttachRow.style.display = (isHr && !isHrCreate) ? '' : 'none';
-
-      // weekly message
-      const msgEl = document.getElementById('contractWeeklyMsg');
-      if (msgEl) {
-        msgEl.textContent =
-          isManual
-            ? 'Weekly timesheets are managed manually (no external weekly import source). Candidates will submit timesheets electronically or using a QR Timesheet.'
-            : isNhsp
-            ? 'NHSP weekly imports will be used for this contract. Candidates will not submit any timesheets.'
-            : 'HealthRoster weekly imports will be used for this contract.';
-      }
+    const rerenderSelf = () => {
+      // Re-render by forcing showModal to repaint this child tab
+      try {
+        const fr = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
+        if (fr && fr.kind === 'contract_settings') {
+          fr._suppressDirty = true;
+          fr.setTab(fr.currentTabKey || 'settings');
+          fr._suppressDirty = false;
+          fr._updateButtons && fr._updateButtons();
+        }
+      } catch {}
     };
 
-    const onAnyChange = (ev) => {
-      // Apply canonical changes + stage fields (dirty only if net change)
-      try { applyFromDOM(root, { initial: false }); } catch {}
-      try { updatePanels(); } catch {}
+    const onAnyChange = () => {
+      if (viewOnly) return;
+
+      // Apply staging; if override toggle changed, we need to repaint sections/disabled states
+      const did = applyFromDOM(root, { initial: false });
+      if (did) {
+        rerenderSelf();
+      }
     };
 
     root.addEventListener('change', onAnyChange, true);
     root.addEventListener('input',  onAnyChange, true);
 
-    // Initial paint: update UI + canonicalise WITHOUT dirty
-    try { updatePanels(); } catch {}
+    // Initial canonicalise WITHOUT dirty
     try { applyFromDOM(root, { initial: true }); } catch {}
   };
 
+  // Show modal:
+  // - normal case: open as APPLY-style child → must be in create mode (hasId=false)
+  // - viewOnly case: open in VIEW mode + hide Save/Apply (hasId=true + showSave=false + noParentGate=true)
   showModal(
     'Contract settings',
     [{ key: 'settings', title: 'Settings' }],
     (key) => {
       if (key !== 'settings') return `<div class="tabc">Unknown tab.</div>`;
-      return renderContractSettingsModal({ data: (window.modalCtx && window.modalCtx.data) ? window.modalCtx.data : {} });
+      return renderHtml();
     },
-    async () => {
+    viewOnly ? null : async () => {
       // Apply once more on Apply, then close (staging only; parent Save persists)
+      const root = document.getElementById('contractSettingsForm');
+      const ok = applyFromDOM(root, { initial: false });
+
+      // If override is OFF at Apply time, we must FORGET the old override values (per brief)
       try {
-        const root = document.getElementById('contractSettingsForm');
-        applyFromDOM(root, { initial: false });
+        const overrideOn = !!boolish(getMainRaw('overrideclientsettings'));
+        if (!overrideOn && window.modalCtx && window.modalCtx[STASH_KEY]) {
+          delete window.modalCtx[STASH_KEY];
+        }
       } catch {}
+
       return { ok: true, saved: null };
     },
-    true, // ✅ treat as "hasId" so modal opens in VIEW (Apply still works because it's a child)
+    viewOnly ? true : false,
     null,
     {
       kind: 'contract_settings',
-      noParentGate: false, // ✅ IMPORTANT: child Apply must mark parent dirty & require parent editable
+      // viewOnly must ignore parent edit state (noParentGate true) so it stays read-only even from edit mode
+      noParentGate: !!viewOnly,
+      // hide Apply in view-only mode
+      showSave: viewOnly ? false : undefined,
       _trace: (LOGC && { tag: 'contract-settings', contract_id: window.modalCtx?.data?.id || null })
     }
   );
 
-  // ✅ Wire immediately after open (showModal does NOT call onReturn on initial open)
+  // Wire immediately after open
   setTimeout(() => {
     try { wire(); } catch (e) { if (LOGC) console.warn('[CONTRACT_SETTINGS] wire failed', e); }
   }, 0);
@@ -23102,7 +23698,6 @@ function openContract(row) {
     wrapper: !!__wrapper,
     wrapper_id: __wrapper?.contract?.id
   });
-
   window.modalCtx = {
   entity: 'contracts',
   mode: isCreate ? 'create' : 'view',
@@ -23111,8 +23706,16 @@ function openContract(row) {
 
   // ✅ NEW: track whether this save is calendar-only
   __calendarDirty: false,
-  __nonCalendarDirty: false
+  __nonCalendarDirty: false,
+
+  // ✅ NEW: keep latest client_settings snapshot in memory (used by overrideclientsettings seeding)
+  client_settings_snapshot: null,
+  client_settings_snapshot_client_id: null,
+
+  // ✅ NEW: stash used by Contract Settings modal override toggle
+  __overrideClientSettingsStash: null
 };
+
 
    // ✅ If backend returned warnings separately (wrapper shape), attach them so your existing UI works
   try {
@@ -23209,7 +23812,29 @@ function openContract(row) {
   })();
 
 
+  // ✅ NEW: load and store client_settings snapshot when opening the contract (or after reload)
+  (async () => {
+    try {
+      const cid = window.modalCtx?.data?.client_id || null;
+      if (!cid) return;
 
+      const existingFor = window.modalCtx?.client_settings_snapshot_client_id || null;
+      if (existingFor && String(existingFor) === String(cid) && window.modalCtx?.client_settings_snapshot) return;
+
+      const client = await getClient(cid);
+      const cs = client?.client_settings || null;
+
+      if (cs && typeof cs === 'object') {
+        window.modalCtx.client_settings_snapshot = cs;
+        window.modalCtx.client_settings_snapshot_client_id = String(cid);
+        if (LOGC) console.log('[CONTRACTS] stored client_settings snapshot (open)', { client_id: cid });
+      } else {
+        if (LOGC) console.warn('[CONTRACTS] client_settings snapshot missing on client payload (open)', { client_id: cid });
+      }
+    } catch (e) {
+      if (LOGC) console.warn('[CONTRACTS] failed to load client_settings snapshot (open, non-fatal)', e);
+    }
+  })();
 
   const preToken = window.__preOpenToken || null;
   if (LOGC) console.log('[CONTRACTS] preOpenToken snapshot', preToken);
@@ -23634,9 +24259,11 @@ try {
           base.pay_method_snapshot || 'PAYE'
         ).toUpperCase();
 
-        const default_submission_mode = String(
-          choose('default_submission_mode', base.default_submission_mode || 'ELECTRONIC')
-        ).toUpperCase();
+           // ✅ UPDATED: allow “inherit” (NULL) for default_submission_mode
+        const dsmRaw = choose('default_submission_mode', (base.default_submission_mode ?? 'ELECTRONIC'));
+        const dsmUp = (dsmRaw == null) ? '' : String(dsmRaw).trim().toUpperCase();
+        const default_submission_mode = (!dsmUp || dsmUp === 'INHERIT') ? null : dsmUp;
+
 
         const week_ending_weekday_snapshot = String(
           choose('week_ending_weekday_snapshot', (base.week_ending_weekday_snapshot ?? '0'))
@@ -23719,9 +24346,31 @@ if (anyRouteSet) {
   }
 }
 
-const auto_invoice                 = boolFromFS('auto_invoice',                 !!base.auto_invoice);
-const require_reference_to_pay     = boolFromFS('require_reference_to_pay',     !!base.require_reference_to_pay);
-const require_reference_to_invoice = boolFromFS('require_reference_to_invoice', !!base.require_reference_to_invoice);
+// ✅ UPDATED: these must be tri-state (nullable) when overrideclientsettings is toggled off
+let auto_invoice                 = boolTriFromFS('auto_invoice');
+let require_reference_to_pay     = boolTriFromFS('require_reference_to_pay');
+let require_reference_to_invoice = boolTriFromFS('require_reference_to_invoice');
+
+// ✅ NEW: overrideclientsettings (boolean)
+const overrideclientsettings = boolFromFS('overrideclientsettings', !!base.overrideclientsettings);
+
+// ✅ NEW: additional contract-level settings
+let reference_number_required_to_issue_invoice = boolTriFromFS('reference_number_required_to_issue_invoice');
+let send_manual_invoices_to_different_email    = boolTriFromFS('send_manual_invoices_to_different_email');
+
+// contract-level string (nullable)
+let manual_invoices_alt_email_address = null;
+try {
+  const v =
+    (fs && fs.main && Object.prototype.hasOwnProperty.call(fs.main, 'manual_invoices_alt_email_address'))
+      ? fs.main.manual_invoices_alt_email_address
+      : (base.manual_invoices_alt_email_address ?? null);
+  manual_invoices_alt_email_address = (v === null || v === undefined) ? null : String(v).trim();
+  if (manual_invoices_alt_email_address === '') manual_invoices_alt_email_address = (send_manual_invoices_to_different_email === true) ? '' : null;
+} catch {
+  manual_invoices_alt_email_address = null;
+}
+
 
 // ✅ FE guard: if real timesheets exist, block changes to route/settings.
 // Backend should enforce authoritatively; this is a UX guard only.
@@ -23730,19 +24379,34 @@ const hasRealTimesheets =
   (base.has_real_timesheets === true) ||
   (base.has_timesheets === true);
 
+// ✅ UPDATED: tri-state change detection (null vs false is a real change)
+const normTri = (v) => {
+  if (v === null || v === undefined) return null;
+  const s = String(v).trim().toLowerCase();
+  if (v === true || s === 'on' || s === 'true' || s === '1' || s === 'yes') return true;
+  if (v === false || s === '' || s === 'false' || s === '0' || s === 'no') return false;
+  return null;
+};
+
 const settingsChanged =
-  (!!base.is_nhsp !== !!is_nhsp) ||
-  (!!base.autoprocess_hr !== !!autoprocess_hr) ||
-  (!!base.no_timesheet_required !== !!no_timesheet_required) ||
-  (!!base.requires_hr !== !!requires_hr) ||
-  (!!base.self_bill !== !!self_bill) ||
-  (!!base.daily_calc_of_invoices !== !!daily_calc_of_invoices) ||
-  (!!base.group_nightsat_sunbh !== !!group_nightsat_sunbh) ||
-  (!!base.auto_invoice !== !!auto_invoice) ||
-  (!!base.hr_attach_to_invoice !== !!hr_attach_to_invoice) ||
-  (!!base.ts_attach_to_invoice !== !!ts_attach_to_invoice) ||
-  (!!base.require_reference_to_pay !== !!require_reference_to_pay) ||
-  (!!base.require_reference_to_invoice !== !!require_reference_to_invoice);
+  (normTri(base.is_nhsp) !== normTri(is_nhsp)) ||
+  (normTri(base.autoprocess_hr) !== normTri(autoprocess_hr)) ||
+  (normTri(base.no_timesheet_required) !== normTri(no_timesheet_required)) ||
+  (normTri(base.requires_hr) !== normTri(requires_hr)) ||
+  (normTri(base.self_bill) !== normTri(self_bill)) ||
+  (normTri(base.daily_calc_of_invoices) !== normTri(daily_calc_of_invoices)) ||
+  (normTri(base.group_nightsat_sunbh) !== normTri(group_nightsat_sunbh)) ||
+  (normTri(base.auto_invoice) !== normTri(auto_invoice)) ||
+  (normTri(base.hr_attach_to_invoice) !== normTri(hr_attach_to_invoice)) ||
+  (normTri(base.ts_attach_to_invoice) !== normTri(ts_attach_to_invoice)) ||
+  (normTri(base.require_reference_to_pay) !== normTri(require_reference_to_pay)) ||
+  (normTri(base.require_reference_to_invoice) !== normTri(require_reference_to_invoice)) ||
+  (normTri(base.overrideclientsettings) !== normTri(overrideclientsettings)) ||
+  (normTri(base.reference_number_required_to_issue_invoice) !== normTri(reference_number_required_to_issue_invoice)) ||
+  (normTri(base.send_manual_invoices_to_different_email) !== normTri(send_manual_invoices_to_different_email)) ||
+  (String((base.manual_invoices_alt_email_address ?? '')).trim() !== String((manual_invoices_alt_email_address ?? '')).trim()) ||
+  (String((base.default_submission_mode ?? '')).trim().toUpperCase() !== String((default_submission_mode ?? '')).trim().toUpperCase());
+
 
 if (hasRealTimesheets && settingsChanged) {
   alert('Cannot change contract settings because real timesheets already exist for this contract.');
@@ -23854,10 +24518,16 @@ const data = {
   start_date:   startIso,
   end_date:     endIso,
   pay_method_snapshot: payMethodSnap,
+
+  // ✅ UPDATED: nullable (inherit) supported
   default_submission_mode,
+
   week_ending_weekday_snapshot,
 
-  // NEW: contract route/settings overrides
+  // ✅ NEW: overrideclientsettings gate
+  overrideclientsettings,
+
+  // contract route/settings overrides (nullable)
   is_nhsp,
   autoprocess_hr,
   requires_hr,
@@ -23866,23 +24536,28 @@ const data = {
   group_nightsat_sunbh,
   self_bill,
 
-  // ✅ MISSING (attachments)
+  // attachments (nullable)
   hr_attach_to_invoice,
   ts_attach_to_invoice,
 
+  // refs/auto-invoice (nullable)
   auto_invoice,
   require_reference_to_pay,
   require_reference_to_invoice,
+
+  // ✅ NEW: extra contract-level settings (nullable)
+  reference_number_required_to_issue_invoice,
+  send_manual_invoices_to_different_email,
+  manual_invoices_alt_email_address,
 
   rates_json: mergedRates,
   std_hours_json,
   std_schedule_json,
   bucket_labels_json,
-  additional_rates_json,                     // 🔹 NEW FIELD
+  additional_rates_json,
   mileage_charge_rate: mileage_charge_rate,
   mileage_pay_rate:    mileage_pay_rate
 };
-
 
 
 if (LOGC) {
@@ -24709,11 +25384,27 @@ if (hiddenName === 'candidate_id') {
                     window.modalCtx.data = window.modalCtx.data || {};
                     window.modalCtx.data.client_id = id; window.modalCtx.data.client_name = label;
                   } catch {}
-                  try {
+                         try {
                     const client = await getClient(id);
+
+                    // ✅ NEW: store the latest client_settings snapshot for overrideclientsettings seeding
+                    try {
+                      const cs = client?.client_settings || null;
+                      if (cs && typeof cs === 'object') {
+                        window.modalCtx.client_settings_snapshot = cs;
+                        window.modalCtx.client_settings_snapshot_client_id = String(id);
+                        if (LOGC) console.log('[CONTRACTS] stored client_settings snapshot (client change)', { client_id: id });
+                      } else {
+                        window.modalCtx.client_settings_snapshot = null;
+                        window.modalCtx.client_settings_snapshot_client_id = String(id);
+                        if (LOGC) console.warn('[CONTRACTS] client_settings snapshot missing on client payload (client change)', { client_id: id });
+                      }
+                    } catch {}
+
                     const h = checkClientInvoiceEmailPresence(client);
                     if (h) showModalHint(h, 'warn');
                     const we = (client?.week_ending_weekday ?? (client?.client_settings && client.client_settings.week_ending_weekday)) ?? 0;
+
                     const fs2 = (window.modalCtx.formState ||= { main:{}, pay:{} });
                     fs2.main ||= {}; fs2.main.week_ending_weekday_snapshot = String(we);
                     const weekNames = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
@@ -24904,6 +25595,13 @@ try {
       delete fs2.main.client_id;
       delete fs2.main.client_name;
       delete fs2.main.week_ending_weekday_snapshot;
+
+      // ✅ NEW: clear stored client_settings snapshot when client is cleared
+      try {
+        window.modalCtx.client_settings_snapshot = null;
+        window.modalCtx.client_settings_snapshot_client_id = null;
+      } catch {}
+
 
       window.modalCtx.data = window.modalCtx.data || {};
       delete window.modalCtx.data.client_id;
@@ -28282,113 +28980,6 @@ function invoiceModalIsEditable(invoice, modalCtx, purpose = 'lines') {
 }
 
 
-function invoiceModalGetInvoiceData(modalCtx) {
-  const d = modalCtx?.data || {};
-
-  try {
-    if (modalCtx && modalCtx.__invoiceDataCache && modalCtx.__invoiceDataCacheRaw === d) {
-      return modalCtx.__invoiceDataCache;
-    }
-  } catch {}
-
-  const invoice = d.invoice || null;
-
-  const header_snapshot_json =
-    (d.header_snapshot_json && typeof d.header_snapshot_json === 'object')
-      ? d.header_snapshot_json
-      : (invoice?.header_snapshot_json && typeof invoice.header_snapshot_json === 'object' ? invoice.header_snapshot_json : {});
-
-  const items = Array.isArray(d.items) ? d.items : [];
-
-  const manifest =
-    (d.manifest && typeof d.manifest === 'object')
-      ? d.manifest
-      : (invoice?.invoice_render_manifest && typeof invoice.invoice_render_manifest === 'object'
-          ? invoice.invoice_render_manifest
-          : null);
-
-  let email_summary = null;
-  if (d.email_summary && typeof d.email_summary === 'object') {
-    email_summary = d.email_summary;
-  } else if (manifest && typeof manifest === 'object' && manifest.email_summary && typeof manifest.email_summary === 'object') {
-    email_summary = manifest.email_summary;
-  }
-
-  const attach_policy =
-    (d.attach_policy && typeof d.attach_policy === 'object')
-      ? d.attach_policy
-      : ((manifest && typeof manifest === 'object' && manifest.attach_policy && typeof manifest.attach_policy === 'object')
-          ? manifest.attach_policy
-          : null);
-
-  const evidence =
-    Array.isArray(d.evidence) ? d.evidence
-    : (Array.isArray(manifest?.evidence) ? manifest.evidence : []);
-
-  const timesheet_evidence =
-    Array.isArray(d.timesheet_evidence) ? d.timesheet_evidence
-    : (Array.isArray(manifest?.timesheet_evidence) ? manifest.timesheet_evidence : []);
-
-  const evidence_other =
-    Array.isArray(d.evidence_other) ? d.evidence_other
-    : (Array.isArray(manifest?.evidence_other) ? manifest.evidence_other : []);
-
-  const segments_on_invoice_by_timesheet =
-    (d.segments_on_invoice_by_timesheet && typeof d.segments_on_invoice_by_timesheet === 'object')
-      ? d.segments_on_invoice_by_timesheet
-      : ((d.segments_by_timesheet && typeof d.segments_by_timesheet === 'object')
-          ? d.segments_by_timesheet
-          : ((manifest?.segments_on_invoice_by_timesheet && typeof manifest.segments_on_invoice_by_timesheet === 'object')
-              ? manifest.segments_on_invoice_by_timesheet
-              : ((manifest?.segments_by_timesheet && typeof manifest.segments_by_timesheet === 'object')
-                  ? manifest.segments_by_timesheet
-                  : {})));
-
-  const segments_by_timesheet = segments_on_invoice_by_timesheet;
-
-  const history =
-    Array.isArray(d.history) ? d.history
-    : (Array.isArray(manifest?.history) ? manifest.history : []);
-
-  const tsfin_id_by_timesheet_id =
-    (d.tsfin_id_by_timesheet_id && typeof d.tsfin_id_by_timesheet_id === 'object')
-      ? d.tsfin_id_by_timesheet_id
-      : ((manifest?.tsfin_id_by_timesheet_id && typeof manifest.tsfin_id_by_timesheet_id === 'object')
-          ? manifest.tsfin_id_by_timesheet_id
-          : {});
-
-  const reference_rows =
-    Array.isArray(d.reference_rows) ? d.reference_rows
-    : (Array.isArray(manifest?.reference_rows) ? manifest.reference_rows : []);
-
-  const out = {
-    invoice,
-    header_snapshot_json,
-    items,
-    email_summary,
-    manifest,
-    segments_on_invoice_by_timesheet,
-    segments_by_timesheet,
-    history,
-    tsfin_id_by_timesheet_id,
-    reference_rows,
-    timesheet_evidence,
-    evidence_other,
-    evidence,
-    attach_policy,
-    raw: d
-  };
-
-  try {
-    if (modalCtx && typeof modalCtx === 'object') {
-      modalCtx.__invoiceDataCache = out;
-      modalCtx.__invoiceDataCacheRaw = d;
-    }
-  } catch {}
-
-  return out;
-}
-
 
 function invoiceModalResetEdits(modalCtx) {
   if (!modalCtx) return;
@@ -28398,14 +28989,15 @@ function invoiceModalResetEdits(modalCtx) {
     add_timesheet_ids: new Set(),
     add_adjustments: [],
 
-    // ✅ NEW: segment edit staging (array of { tsfin_id, segment_id })
+    // segment edit staging (array of { tsfin_id, segment_id })
     remove_segment_refs: [],
     add_segment_refs: [],
 
-    // ✅ NEW: reference updates (opaque payload consumed by backend)
+    // ✅ References: support BOTH legacy array + new keyed staging model
     reference_updates: [],
+    reference_updates_by_key: {},
 
-    // ✅ Keep shape consistent with openInvoiceModal + delegated handlers
+    // status staging
     staged_status: { issued: null, paid: null, on_hold: null },
     staged_dates:  { issued_at_utc: null, paid_at_utc: null, status_date_utc: null }
   };
@@ -28423,6 +29015,7 @@ function invoiceModalResetEdits(modalCtx) {
         remove_segment_refs: [],
         add_segment_refs: [],
         reference_updates: [],
+        reference_updates_by_key: {},
         staged_status: { issued: null, paid: null, on_hold: null },
         staged_dates: { issued_at_utc: null, paid_at_utc: null, status_date_utc: null }
       };
@@ -28453,6 +29046,11 @@ function invoiceModalHasPendingEdits(modalCtx) {
     return false;
   };
 
+  const hasRefs =
+    nonEmpty(e.reference_updates_by_key) ||
+    nonEmpty(e.reference_updates_map) ||
+    nonEmpty(e.reference_updates);
+
   return (
     hasStagedStatus ||
     (e.remove_invoice_line_ids && e.remove_invoice_line_ids.size > 0) ||
@@ -28460,7 +29058,7 @@ function invoiceModalHasPendingEdits(modalCtx) {
     (Array.isArray(e.add_adjustments) && e.add_adjustments.length > 0) ||
     nonEmpty(e.remove_segment_refs) ||
     nonEmpty(e.add_segment_refs) ||
-    nonEmpty(e.reference_updates)
+    hasRefs
   );
 }
 
@@ -28620,6 +29218,7 @@ function invoiceModalComputePreviewTotals(modalCtx) {
     total_inc_vat: invoiceModalRound2(total_inc_vat)
   };
 }
+
 async function invoiceModalSaveEdits(modalCtx, { rerender, reload }) {
   // ✅ Single Save pipeline:
   //   1) hold/unhold (if staged)
@@ -28676,6 +29275,14 @@ async function invoiceModalSaveEdits(modalCtx, { rerender, reload }) {
       if (typeof window.__toast === 'function') return window.__toast(msg);
       console.log('[INV][TOAST]', msg);
     } catch {}
+  };
+
+  const nonEmpty = (v) => {
+    if (!v) return false;
+    if (Array.isArray(v)) return v.length > 0;
+    if (v instanceof Set || v instanceof Map) return v.size > 0;
+    if (typeof v === 'object') return Object.keys(v).length > 0;
+    return false;
   };
 
   // ✅ Refresh the summary sheet behind the modal (best-effort)
@@ -28752,7 +29359,269 @@ async function invoiceModalSaveEdits(modalCtx, { rerender, reload }) {
     .map(normSeg)
     .filter(Boolean);
 
-  const reference_updates = Array.isArray(e.reference_updates) ? e.reference_updates : [];
+  // ✅ References: support new keyed staging model (object map) + Map + legacy array
+  let reference_updates = [];
+  if (nonEmpty(e.reference_updates_by_key)) {
+    const keys = Object.keys(e.reference_updates_by_key || {}).sort(); // stable
+    reference_updates = keys.map(k => e.reference_updates_by_key[k]).filter(x => x && typeof x === 'object');
+  } else if (e.reference_updates_map instanceof Map && e.reference_updates_map.size > 0) {
+    reference_updates = Array.from(e.reference_updates_map.values()).filter(x => x && typeof x === 'object');
+  } else if (Array.isArray(e.reference_updates)) {
+    reference_updates = e.reference_updates.filter(x => x && typeof x === 'object');
+  }
+
+  // Require timesheet_id for any ref update
+  reference_updates = reference_updates.filter(u => {
+    const tsId = (u && u.timesheet_id != null) ? String(u.timesheet_id).trim() : '';
+    return !!tsId;
+  });
+
+  // ─────────────────────────────────────────────────────────────
+  // ✅ NEW: Compile row-level ref edits into DB-applied updates
+  // invoice_apply_edits only applies:
+  //   reference_number, day_references_json, actual_schedule_json
+  // (keyed by timesheet_id). Do NOT send row-level edits to DB.
+  // ─────────────────────────────────────────────────────────────
+  const compileReferenceUpdatesForDb = (rowLevelUpdates) => {
+    if (!Array.isArray(rowLevelUpdates) || rowLevelUpdates.length === 0) return [];
+
+    // Prefer the pre-hydrated maps from invoice manifest/GET (zero extra calls).
+    const sourcesById =
+      (modalCtx?.timesheet_reference_sources_by_id && typeof modalCtx.timesheet_reference_sources_by_id === 'object')
+        ? modalCtx.timesheet_reference_sources_by_id
+        : ((modalCtx?.dataLoaded?.timesheet_reference_sources_by_id && typeof modalCtx.dataLoaded.timesheet_reference_sources_by_id === 'object')
+            ? modalCtx.dataLoaded.timesheet_reference_sources_by_id
+            : null);
+
+    const rowsByKey =
+      (modalCtx?.reference_rows_by_key && typeof modalCtx.reference_rows_by_key === 'object')
+        ? modalCtx.reference_rows_by_key
+        : null;
+
+    if (!sourcesById || typeof sourcesById !== 'object') {
+      throw new Error('Reference sources are missing on this invoice payload. Reload the invoice and try again.');
+    }
+
+    const normStr = (v) => (v == null ? '' : String(v).trim());
+    const upperStr = (v) => normStr(v).toUpperCase();
+
+    const deepClone = (v) => {
+      if (v == null) return v;
+      try { return JSON.parse(JSON.stringify(v)); } catch { return v; }
+    };
+
+    const toRefVal = (v) => {
+      const s = normStr(v);
+      return s ? s : null;
+    };
+
+    const getMeta = (u) => {
+      const k = normStr(u?.row_key);
+      if (k && rowsByKey && rowsByKey[k] && typeof rowsByKey[k] === 'object') return rowsByKey[k];
+      return (u && typeof u === 'object') ? u : {};
+    };
+
+    const getTarget = (meta) => {
+      return upperStr(meta?.ref_target || meta?.kind || meta?.target);
+    };
+
+    const getDay = (meta) => {
+      return normStr(meta?.day_ymd || meta?.day_date || meta?.date);
+    };
+
+    const getSegId = (meta) => {
+      return normStr(meta?.segment_id);
+    };
+
+    const getStart = (meta) => {
+      return normStr(meta?.start_utc || meta?.start);
+    };
+
+    const getEnd = (meta) => {
+      return normStr(meta?.end_utc || meta?.end);
+    };
+
+    // Group updates per timesheet_id
+    const byTs = new Map();
+    for (const u of rowLevelUpdates) {
+      const tsid = normStr(u?.timesheet_id);
+      if (!tsid) continue;
+      if (!byTs.has(tsid)) byTs.set(tsid, []);
+      byTs.get(tsid).push(u);
+    }
+
+    const tsIds = Array.from(byTs.keys()).sort();
+    const out = [];
+
+    for (const tsid of tsIds) {
+      const base = (sourcesById[tsid] && typeof sourcesById[tsid] === 'object') ? sourcesById[tsid] : {};
+      const baseRefNum = toRefVal(base.reference_number);
+
+      const baseDayRefs =
+        (base.day_references_json && typeof base.day_references_json === 'object' && !Array.isArray(base.day_references_json))
+          ? base.day_references_json
+          : null;
+
+      const baseSched =
+        Array.isArray(base.actual_schedule_json)
+          ? base.actual_schedule_json
+          : null;
+
+      let newRefNum = baseRefNum;
+      let newDayRefs = baseDayRefs ? deepClone(baseDayRefs) : null;
+      let newSched = baseSched ? deepClone(baseSched) : null;
+
+      let changedRefNum = false;
+      let changedDayRefs = false;
+      let changedSched = false;
+
+      const updates = byTs.get(tsid) || [];
+
+      for (const u of updates) {
+        const meta = getMeta(u);
+        const target = getTarget(meta);
+        const val = toRefVal(u?.current_reference);
+
+        if (target === 'TIMESHEET') {
+          const prev = toRefVal(newRefNum);
+          const next = toRefVal(val);
+          if (prev !== next) {
+            newRefNum = next;
+            changedRefNum = true;
+          }
+          continue;
+        }
+
+        if (target === 'FREEFORM') {
+          const day = getDay(meta);
+          if (!day) continue;
+
+          if (!newDayRefs || typeof newDayRefs !== 'object' || Array.isArray(newDayRefs)) {
+            newDayRefs = {};
+          }
+
+          const prev = toRefVal(newDayRefs[day]);
+          const next = toRefVal(val);
+
+          if (next == null) {
+            if (Object.prototype.hasOwnProperty.call(newDayRefs, day)) {
+              delete newDayRefs[day];
+              changedDayRefs = true;
+            }
+          } else {
+            if (prev !== next) {
+              newDayRefs[day] = next;
+              changedDayRefs = true;
+            }
+          }
+
+          // collapse empty map to null
+          if (newDayRefs && typeof newDayRefs === 'object' && !Array.isArray(newDayRefs)) {
+            if (Object.keys(newDayRefs).length === 0) newDayRefs = null;
+          }
+
+          continue;
+        }
+
+        if (target === 'SEGMENT') {
+          // Safety: do not attempt to reconstruct a missing schedule array.
+          // If schedule is missing, we cannot safely update segment refs without risking data loss.
+          if (!Array.isArray(newSched)) {
+            throw new Error(`Cannot update segment reference(s): schedule is missing for timesheet ${tsid}. Reload the invoice and try again.`);
+          }
+
+          const segId = getSegId(meta);
+          const start = getStart(meta);
+          const end = getEnd(meta);
+
+          // 1) Manual weekly index form: segment_id = "ts:<timesheet_id>:<idx>"
+          let handled = false;
+          if (segId && segId.startsWith(`ts:${tsid}:`)) {
+            const parts = segId.split(':');
+            const idxStr = parts[parts.length - 1];
+            const idx = Number.parseInt(idxStr, 10);
+
+            if (Number.isFinite(idx) && idx >= 0 && idx < newSched.length) {
+              const seg = (newSched[idx] && typeof newSched[idx] === 'object') ? newSched[idx] : {};
+              const prev = toRefVal(seg.ref_num);
+              const next = toRefVal(val);
+
+              if (prev !== next) {
+                seg.ref_num = next;
+                newSched[idx] = seg;
+                changedSched = true;
+              }
+              handled = true;
+            } else {
+              throw new Error(`Cannot update segment reference: invalid segment index "${idxStr}" for timesheet ${tsid}.`);
+            }
+          }
+
+          if (handled) continue;
+
+          // 2) Match by start/end window (preferred for non-indexed segments)
+          if (!start || !end) {
+            throw new Error(`Cannot update segment reference: missing start/end identifiers for timesheet ${tsid}.`);
+          }
+
+          let found = -1;
+          for (let i = 0; i < newSched.length; i++) {
+            const seg = newSched[i];
+            if (!seg || typeof seg !== 'object') continue;
+
+            const s1 = normStr(seg.start_utc || seg.start);
+            const e1 = normStr(seg.end_utc || seg.end);
+
+            if (s1 === start && e1 === end) {
+              found = i;
+              break;
+            }
+          }
+
+          if (found < 0) {
+            throw new Error(`Cannot update segment reference: no matching schedule entry for timesheet ${tsid} (${start} → ${end}).`);
+          }
+
+          const seg = (newSched[found] && typeof newSched[found] === 'object') ? newSched[found] : {};
+          const prev = toRefVal(seg.ref_num);
+          const next = toRefVal(val);
+
+          if (prev !== next) {
+            seg.ref_num = next;
+            newSched[found] = seg;
+            changedSched = true;
+          }
+
+          continue;
+        }
+
+        // Unknown target: ignore (defensive)
+      }
+
+      if (!changedRefNum && !changedDayRefs && !changedSched) continue;
+
+      const obj = { timesheet_id: tsid };
+
+      if (changedRefNum) obj.reference_number = newRefNum;
+
+      if (changedDayRefs) {
+        // If newDayRefs is null we send null (DB converts json null -> SQL null)
+        obj.day_references_json = (newDayRefs && typeof newDayRefs === 'object' && !Array.isArray(newDayRefs)) ? newDayRefs : null;
+      }
+
+      if (changedSched) {
+        // Never null-out schedule here; we only edit ref_num within existing entries
+        obj.actual_schedule_json = Array.isArray(newSched) ? newSched : null;
+      }
+
+      out.push(obj);
+    }
+
+    return out;
+  };
+
+  // Compile now (but do NOT mutate staged row-level updates)
+  const reference_updates_compiled = compileReferenceUpdatesForDb(reference_updates);
 
   const payload = {};
   if (remove_invoice_line_ids.length) payload.remove_invoice_line_ids = remove_invoice_line_ids;
@@ -28760,9 +29629,34 @@ async function invoiceModalSaveEdits(modalCtx, { rerender, reload }) {
   if (add_adjustments.length) payload.add_adjustments = add_adjustments;
   if (remove_segment_refs.length) payload.remove_segment_refs = remove_segment_refs;
   if (add_segment_refs.length) payload.add_segment_refs = add_segment_refs;
-  if (reference_updates.length) payload.reference_updates = reference_updates;
+
+  // ✅ Only send DB-applied compiled updates (never row-level edits)
+  if (reference_updates_compiled.length) payload.reference_updates = reference_updates_compiled;
 
   const hasApplyEdits = Object.keys(payload).length > 0;
+
+  // ✅ Confirm dialogs (status changes only)
+  // (Do this BEFORE we mark the modal busy)
+  if (wantHold !== null && wantHold !== curIsHold) {
+    const ok = window.confirm(wantHold ? 'Put this invoice ON HOLD?' : 'Remove ON HOLD from this invoice?');
+    if (!ok) return;
+  }
+  if (wantIssued !== null && wantIssued !== curIsIssued) {
+    const ok = window.confirm(wantIssued ? 'Issue this invoice now?' : 'Unissue this invoice? (This will invalidate the PDF)');
+    if (!ok) return;
+  }
+  if (wantPaid !== null && wantPaid !== curIsPaid) {
+    const ok = window.confirm(wantPaid ? 'Mark this invoice as PAID?' : 'Mark this invoice as UNPAID?');
+    if (!ok) return;
+  }
+
+  // ✅ Hard-block issuing while ON_HOLD (unless unhold is staged in this same save)
+  if (wantIssued === true) {
+    const effHold = (wantHold === null) ? curIsHold : !!wantHold;
+    if (effHold) {
+      throw new Error('Invoice is ON HOLD. Unhold first.');
+    }
+  }
 
   // If there are apply-edits staged, we must ensure invoice will NOT be ISSUED/PAID at apply time.
   if (hasApplyEdits) {
@@ -28821,9 +29715,10 @@ async function invoiceModalSaveEdits(modalCtx, { rerender, reload }) {
           throw new Error('Failed to issue invoice.');
         }
       } else {
+        // ✅ clear_pdf MUST be true on unissue (invalidate bundle)
         await invoiceModalFetchJson(`/api/invoices/${encodeURIComponent(invoiceId)}/unissue`, {
           method: 'POST',
-          body: JSON.stringify({ clear_pdf: false })
+          body: JSON.stringify({ clear_pdf: true })
         });
       }
     }
@@ -29215,11 +30110,14 @@ function attachInvoiceModalDelegatedHandlers(modalCtx, rootEl, deps) {
 
   const computePendingEdits = () => {
     try {
+      // If a helper exists but hasn't been updated for the new ref-staging shape yet,
+      // we must still detect reference edits here to keep Save enabled.
       if (typeof invoiceModalHasPendingEdits === 'function') {
-        return !!invoiceModalHasPendingEdits(mc);
+        const r = !!invoiceModalHasPendingEdits(mc);
+        if (r) return true;
       }
 
-      // Fallback (should not be needed once invoiceModalHasPendingEdits is updated)
+      // Fallback (also covers the new reference_updates_by_key / Map shape)
       const e = mc.invoiceEdits || {};
 
       const st = (e.staged_status && typeof e.staged_status === 'object')
@@ -29240,7 +30138,11 @@ function attachInvoiceModalDelegatedHandlers(modalCtx, rootEl, deps) {
         nonEmpty(e.remove_segment_refs) ||
         nonEmpty(e.add_segment_refs);
 
-      const hasRefs = nonEmpty(e.reference_updates);
+      // ✅ Support new keyed staging + legacy array (and Map, if used)
+      const hasRefs =
+        nonEmpty(e.reference_updates_by_key) ||
+        nonEmpty(e.reference_updates_map) ||
+        nonEmpty(e.reference_updates);
 
       return !!(hasStatus || hasLines || hasSeg || hasRefs);
     } catch {
@@ -29343,6 +30245,7 @@ function attachInvoiceModalDelegatedHandlers(modalCtx, rootEl, deps) {
     const status = String(invoice?.status || '').toUpperCase();
     const baseIssued = !!invoice?.issued_at_utc || status === 'ISSUED';
     const basePaid   = !!invoice?.paid_at_utc   || status === 'PAID';
+    const baseHold   = (status === 'ON_HOLD');
 
     const st = (mc?.invoiceEdits?.staged_status && typeof mc.invoiceEdits.staged_status === 'object')
       ? mc.invoiceEdits.staged_status
@@ -29350,15 +30253,26 @@ function attachInvoiceModalDelegatedHandlers(modalCtx, rootEl, deps) {
 
     const effIssued = (st.issued === null || st.issued === undefined) ? baseIssued : !!st.issued;
     const effPaid   = (st.paid   === null || st.paid   === undefined) ? basePaid   : !!st.paid;
+    const effHold   = (st.on_hold === null || st.on_hold === undefined) ? baseHold : !!st.on_hold;
 
-    return { baseIssued, basePaid, effIssued, effPaid };
+    return { baseIssued, basePaid, baseHold, effIssued, effPaid, effHold };
   };
 
   const ensureSegArrays = () => {
     mc.invoiceEdits = mc.invoiceEdits || {};
     mc.invoiceEdits.remove_segment_refs = Array.isArray(mc.invoiceEdits.remove_segment_refs) ? mc.invoiceEdits.remove_segment_refs : [];
     mc.invoiceEdits.add_segment_refs = Array.isArray(mc.invoiceEdits.add_segment_refs) ? mc.invoiceEdits.add_segment_refs : [];
-    mc.invoiceEdits.reference_updates = Array.isArray(mc.invoiceEdits.reference_updates) ? mc.invoiceEdits.reference_updates : [];
+
+    // ✅ References: do NOT clobber the new keyed staging model.
+    // Keep legacy array for back-compat if other code still reads it.
+    if (!(mc.invoiceEdits.reference_updates instanceof Map) && !Array.isArray(mc.invoiceEdits.reference_updates)) {
+      mc.invoiceEdits.reference_updates = [];
+    }
+
+    // New canonical keyed container (JSON-safe object map)
+    if (!mc.invoiceEdits.reference_updates_by_key || typeof mc.invoiceEdits.reference_updates_by_key !== 'object' || Array.isArray(mc.invoiceEdits.reference_updates_by_key)) {
+      mc.invoiceEdits.reference_updates_by_key = {};
+    }
   };
 
   const segKey = (tsfinId, segId) => `${String(tsfinId || '')}::${String(segId || '')}`;
@@ -29559,7 +30473,7 @@ function attachInvoiceModalDelegatedHandlers(modalCtx, rootEl, deps) {
         case 'inv-toggle-issued': {
           if (!mc.isEditing || !invoiceModalIsEditable(invoice, mc, 'status')) return;
 
-          const { effIssued, effPaid } = getEffectiveFlags(invoice);
+          const { effIssued, effPaid, effHold } = getEffectiveFlags(invoice);
 
           if (effIssued === true && effPaid === true) {
             mc.error = 'Unpay invoice first (then unissue).';
@@ -29567,7 +30481,19 @@ function attachInvoiceModalDelegatedHandlers(modalCtx, rootEl, deps) {
             return;
           }
 
-          setStaged('issued', !effIssued);
+          const desired = !effIssued;
+
+          // ✅ Hard-block issuing when (effective) ON_HOLD
+          if (desired === true && effHold === true) {
+            alert('Unhold invoice first.');
+            return;
+          }
+
+          // ✅ Confirm issue/unissue
+          const ok = window.confirm(desired ? 'Are you sure you want to issue this invoice?' : 'Are you sure you want to unissue this invoice?');
+          if (!ok) return;
+
+          setStaged('issued', desired);
           syncFrameDirty();
           safeRerender();
           return;
@@ -29575,8 +30501,15 @@ function attachInvoiceModalDelegatedHandlers(modalCtx, rootEl, deps) {
 
         case 'inv-toggle-paid': {
           if (!mc.isEditing || !invoiceModalIsEditable(invoice, mc, 'status')) return;
+
           const { effPaid } = getEffectiveFlags(invoice);
-          setStaged('paid', !effPaid);
+          const desired = !effPaid;
+
+          // ✅ Confirm paid/unpaid
+          const ok = window.confirm(desired ? 'Are you sure you want to mark this invoice as paid?' : 'Are you sure you want to mark this invoice as unpaid?');
+          if (!ok) return;
+
+          setStaged('paid', desired);
           syncFrameDirty();
           safeRerender();
           return;
@@ -29584,10 +30517,15 @@ function attachInvoiceModalDelegatedHandlers(modalCtx, rootEl, deps) {
 
         case 'inv-toggle-hold': {
           if (!mc.isEditing || !invoiceModalIsEditable(invoice, mc, 'status')) return;
-          const baseHold = (String(invoice?.status || '').toUpperCase() === 'ON_HOLD');
-          const st = mc.invoiceEdits?.staged_status || {};
-          const effHold = (st.on_hold === null || st.on_hold === undefined) ? baseHold : !!st.on_hold;
-          setStaged('on_hold', !effHold);
+
+          const { effHold } = getEffectiveFlags(invoice);
+          const desired = !effHold;
+
+          // ✅ Confirm hold/unhold
+          const ok = window.confirm(desired ? 'Are you sure you want to put this invoice on hold?' : 'Are you sure you want to remove the hold from this invoice?');
+          if (!ok) return;
+
+          setStaged('on_hold', desired);
           syncFrameDirty();
           safeRerender();
           return;
@@ -29840,6 +30778,7 @@ function attachInvoiceModalDelegatedHandlers(modalCtx, rootEl, deps) {
 
   syncFrameDirty();
 }
+
 
 async function openInvoiceModal(row) {
   // Invoice modal (staged edits, no MutationObserver loops)
@@ -31027,6 +31966,194 @@ async function openInvoiceAddTimesheetsModal(modalCtx, { rerender }) {
   }
 }
 
+function invoiceModalGetInvoiceData(modalCtx) {
+  const d = modalCtx?.data || {};
+
+  try {
+    if (modalCtx && modalCtx.__invoiceDataCache && modalCtx.__invoiceDataCacheRaw === d) {
+      return modalCtx.__invoiceDataCache;
+    }
+  } catch {}
+
+  const invoice = d.invoice || null;
+
+  const header_snapshot_json =
+    (d.header_snapshot_json && typeof d.header_snapshot_json === 'object')
+      ? d.header_snapshot_json
+      : (invoice?.header_snapshot_json && typeof invoice.header_snapshot_json === 'object' ? invoice.header_snapshot_json : {});
+
+  const items = Array.isArray(d.items) ? d.items : [];
+
+  const manifest =
+    (d.manifest && typeof d.manifest === 'object')
+      ? d.manifest
+      : (invoice?.invoice_render_manifest && typeof invoice.invoice_render_manifest === 'object'
+          ? invoice.invoice_render_manifest
+          : null);
+
+  let email_summary = null;
+  if (d.email_summary && typeof d.email_summary === 'object') {
+    email_summary = d.email_summary;
+  } else if (manifest && typeof manifest === 'object' && manifest.email_summary && typeof manifest.email_summary === 'object') {
+    email_summary = manifest.email_summary;
+  }
+
+  const attach_policy =
+    (d.attach_policy && typeof d.attach_policy === 'object')
+      ? d.attach_policy
+      : ((manifest && typeof manifest === 'object' && manifest.attach_policy && typeof manifest.attach_policy === 'object')
+          ? manifest.attach_policy
+          : null);
+
+  const evidence =
+    Array.isArray(d.evidence) ? d.evidence
+    : (Array.isArray(manifest?.evidence) ? manifest.evidence : []);
+
+  const timesheet_evidence =
+    Array.isArray(d.timesheet_evidence) ? d.timesheet_evidence
+    : (Array.isArray(manifest?.timesheet_evidence) ? manifest.timesheet_evidence : []);
+
+  const evidence_other =
+    Array.isArray(d.evidence_other) ? d.evidence_other
+    : (Array.isArray(manifest?.evidence_other) ? manifest.evidence_other : []);
+
+  const segments_on_invoice_by_timesheet =
+    (d.segments_on_invoice_by_timesheet && typeof d.segments_on_invoice_by_timesheet === 'object')
+      ? d.segments_on_invoice_by_timesheet
+      : ((d.segments_by_timesheet && typeof d.segments_by_timesheet === 'object')
+          ? d.segments_by_timesheet
+          : ((manifest?.segments_on_invoice_by_timesheet && typeof manifest.segments_on_invoice_by_timesheet === 'object')
+              ? manifest.segments_on_invoice_by_timesheet
+              : ((manifest?.segments_by_timesheet && typeof manifest.segments_by_timesheet === 'object')
+                  ? manifest.segments_by_timesheet
+                  : {})));
+
+  const segments_by_timesheet = segments_on_invoice_by_timesheet;
+
+  const history =
+    Array.isArray(d.history) ? d.history
+    : (Array.isArray(manifest?.history) ? manifest.history : []);
+
+  const tsfin_id_by_timesheet_id =
+    (d.tsfin_id_by_timesheet_id && typeof d.tsfin_id_by_timesheet_id === 'object')
+      ? d.tsfin_id_by_timesheet_id
+      : ((manifest?.tsfin_id_by_timesheet_id && typeof manifest.tsfin_id_by_timesheet_id === 'object')
+          ? manifest.tsfin_id_by_timesheet_id
+          : {});
+
+  // ✅ NEW: reference source blobs (used by FE to compile DB-applied updates with zero extra calls)
+  const timesheet_reference_sources_by_id =
+    (d.timesheet_reference_sources_by_id && typeof d.timesheet_reference_sources_by_id === 'object')
+      ? d.timesheet_reference_sources_by_id
+      : ((manifest?.timesheet_reference_sources_by_id && typeof manifest.timesheet_reference_sources_by_id === 'object')
+          ? manifest.timesheet_reference_sources_by_id
+          : null);
+
+  const reference_rows_raw =
+    Array.isArray(d.reference_rows) ? d.reference_rows
+    : (Array.isArray(manifest?.reference_rows) ? manifest.reference_rows : []);
+
+  // ✅ NEW: Normalise reference rows for stable UI identity + correct field names.
+  // DB reference rows use: ref_target + day_ymd (+ segment_id/start_utc/end_utc).
+  // UI expects: kind + day_date, and needs a stable row_key to avoid collisions.
+  const reference_rows_by_key = {};
+  const reference_rows = (() => {
+    const out = [];
+    const seen = new Map();
+
+    const normStr = (v) => (v == null ? '' : String(v).trim());
+
+    const baseKeyOf = (r2) => {
+      const tsid = normStr(r2?.timesheet_id);
+      const tgt  = normStr(r2?.ref_target || r2?.kind);
+      const sid  = normStr(r2?.segment_id);
+      const day  = normStr(r2?.day_ymd || r2?.day_date || r2?.date);
+      const st   = normStr(r2?.start_utc);
+      const en   = normStr(r2?.end_utc);
+      // Include all structural identifiers; do NOT include current_reference (it changes on edit).
+      return [tsid, tgt, sid, day, st, en].join('::');
+    };
+
+    for (let i = 0; i < reference_rows_raw.length; i++) {
+      const r = reference_rows_raw[i];
+      if (!r || typeof r !== 'object') continue;
+
+      // Shallow clone so we don't mutate raw manifest payload.
+      const x = { ...r };
+
+      // Alias fields for existing UI expectations.
+      if ((x.kind == null || String(x.kind).trim() === '') && x.ref_target != null) {
+        x.kind = String(x.ref_target);
+      }
+      if ((x.day_date == null || String(x.day_date).trim() === '') && x.day_ymd != null) {
+        x.day_date = String(x.day_ymd);
+      }
+      if ((x.date == null || String(x.date).trim() === '') && x.day_ymd != null) {
+        x.date = String(x.day_ymd);
+      }
+
+      // Build stable row_key if missing.
+      let k =
+        (x.row_key != null && String(x.row_key).trim()) ? String(x.row_key).trim()
+        : ((x.reference_row_id != null && String(x.reference_row_id).trim()) ? String(x.reference_row_id).trim() : '');
+
+      if (!k) {
+        const base = baseKeyOf(x);
+        const prev = seen.get(base) || 0;
+        const next = prev + 1;
+        seen.set(base, next);
+        k = (next === 1) ? base : `${base}::${next}`;
+      }
+
+      x.row_key = k;
+
+      out.push(x);
+      reference_rows_by_key[k] = x;
+    }
+
+    return out;
+  })();
+
+  const out = {
+    invoice,
+    header_snapshot_json,
+    items,
+    email_summary,
+    manifest,
+    segments_on_invoice_by_timesheet,
+    segments_by_timesheet,
+    history,
+    tsfin_id_by_timesheet_id,
+
+    // ✅ NEW
+    timesheet_reference_sources_by_id,
+
+    // ✅ UPDATED (normalised)
+    reference_rows,
+    reference_rows_by_key,
+
+    timesheet_evidence,
+    evidence_other,
+    evidence,
+    attach_policy,
+    raw: d
+  };
+
+  try {
+    if (modalCtx && typeof modalCtx === 'object') {
+      // Keep commonly-needed fields on modalCtx for zero-fetch child modals
+      modalCtx.timesheet_reference_sources_by_id = timesheet_reference_sources_by_id;
+      modalCtx.reference_rows_by_key = reference_rows_by_key;
+
+      // Cache
+      modalCtx.__invoiceDataCache = out;
+      modalCtx.__invoiceDataCacheRaw = d;
+    }
+  } catch {}
+
+  return out;
+}
+
 
 async function openInvoiceReferenceNumbersModal(parentModalCtx, { rerender } = {}) {
   if (!parentModalCtx || typeof parentModalCtx !== 'object') throw new Error('Missing parent modal context.');
@@ -31034,41 +32161,82 @@ async function openInvoiceReferenceNumbersModal(parentModalCtx, { rerender } = {
   // Ensure showModal uses the invoice modal ctx (shared context across modal stack)
   try { window.modalCtx = parentModalCtx; } catch {}
 
+  // Determine whether invoice is currently editable (source-of-truth = invoice modal frame mode)
+  let canEdit = !!parentModalCtx.isEditing;
+  try {
+    const fr = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
+    if (fr && fr.kind === 'invoice-modal' && fr.entity === 'invoices' && fr._ctxRef === parentModalCtx) {
+      canEdit = (fr.mode === 'edit' || fr.mode === 'create');
+      parentModalCtx.isEditing = canEdit;
+    }
+  } catch {}
+
   // Source rows must already be present (zero extra calls)
-  const refRows = Array.isArray(parentModalCtx?.reference_rows)
-    ? parentModalCtx.reference_rows
-    : (Array.isArray(parentModalCtx?.data?.reference_rows) ? parentModalCtx.data.reference_rows : []);
+  // Prefer invoiceModalGetInvoiceData() so rows are normalised (row_key/kind/day_date).
+  const invData = (typeof invoiceModalGetInvoiceData === 'function') ? invoiceModalGetInvoiceData(parentModalCtx) : null;
+
+  const refRows = Array.isArray(invData?.reference_rows)
+    ? invData.reference_rows
+    : (Array.isArray(parentModalCtx?.reference_rows) ? parentModalCtx.reference_rows
+      : (Array.isArray(parentModalCtx?.data?.reference_rows) ? parentModalCtx.data.reference_rows : []));
+
+  const refRowsByKey = (invData?.reference_rows_by_key && typeof invData.reference_rows_by_key === 'object')
+    ? invData.reference_rows_by_key
+    : ((parentModalCtx?.reference_rows_by_key && typeof parentModalCtx.reference_rows_by_key === 'object')
+        ? parentModalCtx.reference_rows_by_key
+        : {});
 
   // Ensure staging container exists
   parentModalCtx.invoiceEdits = (parentModalCtx.invoiceEdits && typeof parentModalCtx.invoiceEdits === 'object')
     ? parentModalCtx.invoiceEdits
     : {};
+
+  // ✅ Use keyed staging model (JSON-safe) so rows never collide and Save pipeline can serialise deterministically.
+  parentModalCtx.invoiceEdits.reference_updates_by_key =
+    (parentModalCtx.invoiceEdits.reference_updates_by_key && typeof parentModalCtx.invoiceEdits.reference_updates_by_key === 'object')
+      ? parentModalCtx.invoiceEdits.reference_updates_by_key
+      : {};
+
+  // Keep legacy array for backward compatibility (some renderers still look at reference_updates[])
   parentModalCtx.invoiceEdits.reference_updates = Array.isArray(parentModalCtx.invoiceEdits.reference_updates)
     ? parentModalCtx.invoiceEdits.reference_updates
     : [];
 
-  // Build stable row key (prefer explicit key fields if present; else fallback to deterministic composite)
   const rowKeyOf = (r) => {
     if (!r || typeof r !== 'object') return '';
-    const explicit =
-      (r.row_key != null && String(r.row_key).trim()) ? String(r.row_key).trim()
-      : ((r.reference_row_id != null && String(r.reference_row_id).trim()) ? String(r.reference_row_id).trim() : '');
-    if (explicit) return explicit;
+    const k = (r.row_key != null && String(r.row_key).trim()) ? String(r.row_key).trim() : '';
+    if (k) return k;
 
+    // fallback (should be rare if rows are normalised)
     const tsid = (r.timesheet_id != null) ? String(r.timesheet_id) : '';
-    const dt = (r.day_date != null) ? String(r.day_date) : (r.date != null ? String(r.date) : '');
-    const kind = (r.kind != null) ? String(r.kind) : '';
-    return `${tsid}::${dt}::${kind}`;
+    const dt = (r.day_date != null) ? String(r.day_date) : (r.day_ymd != null ? String(r.day_ymd) : (r.date != null ? String(r.date) : ''));
+    const kind = (r.kind != null) ? String(r.kind) : (r.ref_target != null ? String(r.ref_target) : '');
+    const sid = (r.segment_id != null) ? String(r.segment_id) : '';
+    const st  = (r.start_utc != null) ? String(r.start_utc) : '';
+    const en  = (r.end_utc != null) ? String(r.end_utc) : '';
+    return `${tsid}::${kind}::${sid}::${dt}::${st}::${en}`;
   };
 
-  // Existing staged edits map by row key
+  // Existing staged edits map by row key (priority: by_key, else legacy array)
   const stagedByKey = new Map();
-  for (const u of parentModalCtx.invoiceEdits.reference_updates) {
-    if (!u || typeof u !== 'object') continue;
-    const k = (u.row_key != null && String(u.row_key).trim()) ? String(u.row_key).trim() : '';
-    if (!k) continue;
-    stagedByKey.set(k, u);
-  }
+  try {
+    const byKey = parentModalCtx.invoiceEdits.reference_updates_by_key || {};
+    for (const [k, u] of Object.entries(byKey)) {
+      if (!k || !u || typeof u !== 'object') continue;
+      stagedByKey.set(String(k), u);
+    }
+  } catch {}
+
+  try {
+    if (stagedByKey.size === 0 && Array.isArray(parentModalCtx.invoiceEdits.reference_updates)) {
+      for (const u of parentModalCtx.invoiceEdits.reference_updates) {
+        if (!u || typeof u !== 'object') continue;
+        const k = (u.row_key != null && String(u.row_key).trim()) ? String(u.row_key).trim() : '';
+        if (!k) continue;
+        stagedByKey.set(k, u);
+      }
+    }
+  } catch {}
 
   const fmtRowCandidate = (r) => {
     const name =
@@ -31088,13 +32256,13 @@ async function openInvoiceReferenceNumbersModal(parentModalCtx, { rerender } = {
   const fmtRowDate = (r) => {
     return (
       r?.day_date ||
+      r?.day_ymd ||
       r?.date ||
       r?.week_ending_date ||
       ''
     );
   };
 
-  // Build initial editable values per row from staged updates (if any) else from current_reference
   const initialValueFor = (r) => {
     const k = rowKeyOf(r);
     const staged = stagedByKey.get(k);
@@ -31103,12 +32271,15 @@ async function openInvoiceReferenceNumbersModal(parentModalCtx, { rerender } = {
     return '';
   };
 
+  const disabledAttr = canEdit ? '' : 'disabled';
+  const readOnlyAttr = canEdit ? '' : 'readonly';
+
   const renderTableRows = () => {
     if (!refRows.length) {
       return `<tr><td colspan="5" class="text-muted">No reference rows on this invoice.</td></tr>`;
     }
 
-    return refRows.map((r, idx) => {
+    return refRows.map((r) => {
       const k = rowKeyOf(r);
       const who = escapeHtml(fmtRowCandidate(r));
       const dt = escapeHtml(fmtRowDate(r));
@@ -31132,6 +32303,8 @@ async function openInvoiceReferenceNumbersModal(parentModalCtx, { rerender } = {
               data-ref-row="${escapeHtml(k)}"
               value="${escapeHtml(cur)}"
               placeholder="Enter reference"
+              ${disabledAttr}
+              ${readOnlyAttr}
             />
           </td>
           <td>${escapeHtml(reqTxt)}</td>
@@ -31141,12 +32314,16 @@ async function openInvoiceReferenceNumbersModal(parentModalCtx, { rerender } = {
     }).join('');
   };
 
+  const hintText = canEdit
+    ? `Edit references below. Changes are staged and only applied when you press <b>Save</b> on the invoice.`
+    : `View-only. Click <b>Edit</b> on the invoice to amend reference numbers.`;
+
   const html = `
     <div class="p-3">
       <div class="h6 mb-3">Reference Numbers</div>
 
       <div class="text-muted small mb-2">
-        Edit references below. Changes are staged and only applied when you press <b>Save</b> on the invoice.
+        ${hintText}
       </div>
 
       <div class="table-responsive">
@@ -31168,11 +32345,18 @@ async function openInvoiceReferenceNumbersModal(parentModalCtx, { rerender } = {
 
       <div class="d-flex justify-content-end gap-2 mt-3">
         <button type="button" class="btn btn-sm btn-secondary" id="invRefCancel">Close</button>
-        <button type="button" class="btn btn-sm btn-primary" id="invRefApply" ${refRows.length ? '' : 'disabled'}>Apply</button>
+        ${canEdit
+          ? `<button type="button" class="btn btn-sm btn-primary" id="invRefApply" ${refRows.length ? '' : 'disabled'}>Apply</button>`
+          : ``
+        }
       </div>
     </div>
   `;
 
+  // IMPORTANT:
+  // - Utility modal kind forces frame.mode='view' (so Save/Edit buttons remain hidden).
+  // - noParentGate MUST be true when we want inputs active inside a view-mode utility child.
+  // - When parent is view-only, use noParentGate=false so modal framework will keep it read-only.
   showModal(
     'Reference Numbers',
     [{ key: 'main', label: 'References' }],
@@ -31180,7 +32364,7 @@ async function openInvoiceReferenceNumbersModal(parentModalCtx, { rerender } = {
     null,
     true,
     null,
-    { kind: 'invoice-reference-numbers', noParentGate: true }
+    { kind: 'invoice-reference-numbers', noParentGate: !!canEdit }
   );
 
   const closeTop = () => {
@@ -31188,8 +32372,6 @@ async function openInvoiceReferenceNumbersModal(parentModalCtx, { rerender } = {
   };
 
   const btnCancel = document.getElementById('invRefCancel');
-  const btnApply = document.getElementById('invRefApply');
-
   if (btnCancel && !btnCancel.__invWired) {
     btnCancel.__invWired = true;
     btnCancel.onclick = (e) => {
@@ -31198,6 +32380,10 @@ async function openInvoiceReferenceNumbersModal(parentModalCtx, { rerender } = {
     };
   }
 
+  // View-only: no Apply wiring
+  if (!canEdit) return;
+
+  const btnApply = document.getElementById('invRefApply');
   if (btnApply && !btnApply.__invWired) {
     btnApply.__invWired = true;
     btnApply.onclick = (e) => {
@@ -31207,41 +32393,54 @@ async function openInvoiceReferenceNumbersModal(parentModalCtx, { rerender } = {
       const listRoot = document.querySelector('#modalBody');
       const inputs = listRoot ? Array.from(listRoot.querySelectorAll('input[data-ref-input="1"]')) : [];
 
-      // Start from existing staged updates map, then overwrite with current inputs
-      const next = new Map();
-      for (const u of parentModalCtx.invoiceEdits.reference_updates) {
-        if (!u || typeof u !== 'object') continue;
-        const k = (u.row_key != null && String(u.row_key).trim()) ? String(u.row_key).trim() : '';
-        if (!k) continue;
-        next.set(k, u);
-      }
+      // Start from existing staged updates, then overwrite with current inputs
+      const nextByKey = { ...(parentModalCtx.invoiceEdits.reference_updates_by_key || {}) };
 
       for (const inp of inputs) {
         const k = String(inp.getAttribute('data-ref-row') || '').trim();
         if (!k) continue;
         const val = String(inp.value || '').trim();
 
-        // Find the source row so we can include the backend-expected identifiers
-        const src = refRows.find(r => rowKeyOf(r) === k) || null;
+        // Find the source row so we can include stable identifiers for later compilation
+        const src =
+          (refRowsByKey && refRowsByKey[k]) ? refRowsByKey[k]
+          : (refRows.find(r => rowKeyOf(r) === k) || null);
 
-        // Backend-expected shape (opaque to FE beyond providing identifiers + value)
         const upd = {
           row_key: k,
+
+          // Always include the timesheet_id so Save pipeline accepts it.
           timesheet_id: src?.timesheet_id != null ? String(src.timesheet_id) : null,
-          day_date: src?.day_date != null ? String(src.day_date) : (src?.date != null ? String(src.date) : null),
-          kind: src?.kind != null ? String(src.kind) : null,
+
+          // Preserve DB-derived identifiers for later compile step (segment/freeform/timesheet)
+          ref_target: src?.ref_target != null ? String(src.ref_target) : (src?.kind != null ? String(src.kind) : null),
+          segment_id: src?.segment_id != null ? String(src.segment_id) : null,
+          day_ymd: src?.day_ymd != null ? String(src.day_ymd) : (src?.day_date != null ? String(src.day_date) : null),
+          start_utc: src?.start_utc != null ? String(src.start_utc) : null,
+          end_utc: src?.end_utc != null ? String(src.end_utc) : null,
+
+          // The edited value (still opaque at this stage; compilation happens in Save pipeline)
           current_reference: val
         };
 
-        next.set(k, upd);
+        nextByKey[k] = upd;
       }
 
       // Store staged updates back onto parent ctx (staged only)
-      parentModalCtx.invoiceEdits.reference_updates = Array.from(next.values());
+      parentModalCtx.invoiceEdits.reference_updates_by_key = nextByKey;
+
+      // Keep legacy array in sync for any older code paths
+      try {
+        const keys = Object.keys(nextByKey).sort();
+        parentModalCtx.invoiceEdits.reference_updates = keys.map(k => nextByKey[k]).filter(x => x && typeof x === 'object');
+      } catch {
+        // best-effort only
+      }
 
       closeTop();
 
-      // Ensure parent invoice modal reflects staged change immediately
+      // Mark parent invoice modal dirty + rerender (best-effort)
+      try { window.dispatchEvent(new CustomEvent('modal-dirty')); } catch {}
       try { setTimeout(() => { rerender && rerender(); }, 0); } catch {}
     };
   }
@@ -31651,14 +32850,30 @@ function renderInvoiceModalContent(modalCtx, invoiceData) {
   const totalsToShow = hasLineEdits ? previewTotals : currentTotals;
 
   const pillSpan = (text, cls) => `<span class="pill ${cls}">${escapeHtml(text)}</span>`;
-  const pillBtn  = (action, text, cls) => `
-    <button type="button" class="pill ${cls}" data-action="${action}">
-      ${escapeHtml(text)}
-    </button>
-  `;
 
+  // ✅ Support disabling the Issued pill when invoice is ON_HOLD (must unhold first).
+  const pillBtn = (action, text, cls, opts = {}) => {
+    const disabled = !!opts.disabled;
+    const title = (opts.title != null && String(opts.title).trim()) ? String(opts.title).trim() : '';
+    const disAttr = disabled ? 'disabled data-disabled="1"' : '';
+    const disCls = disabled ? ' disabled' : '';
+    const titleAttr = title ? ` title="${escapeHtml(title)}"` : '';
+    return `
+      <button type="button" class="pill ${cls}${disCls}" data-action="${action}" ${disAttr}${titleAttr}>
+        ${escapeHtml(text)}
+      </button>
+    `;
+  };
+
+  // ✅ Hard-block issuing while ON_HOLD (UI-level): disable Issued toggle when ON_HOLD and currently unissued.
+  const blockIssueWhileHold = !!(effHold && !effIssued);
   const issuedPill = canToggleStatus
-    ? pillBtn('inv-toggle-issued', effIssued ? 'Issued' : 'Unissued', effIssued ? 'pill-ok' : 'pill-bad')
+    ? pillBtn(
+        'inv-toggle-issued',
+        effIssued ? 'Issued' : 'Unissued',
+        effIssued ? 'pill-ok' : 'pill-bad',
+        blockIssueWhileHold ? { disabled: true, title: 'Unhold first' } : {}
+      )
     : pillSpan(effIssued ? 'Issued' : 'Unissued', effIssued ? 'pill-ok' : 'pill-bad');
 
   const paidPill = canToggleStatus
@@ -31689,6 +32904,13 @@ function renderInvoiceModalContent(modalCtx, invoiceData) {
     ? String(invoice.on_hold_reason)
     : '';
 
+  // ✅ Additional user-facing message in edit mode when hold blocks issuing.
+  const holdIssueBlockMsg = (isEditing && blockIssueWhileHold) ? `
+    <div class="alert alert-warning py-2 px-2 small mb-3">
+      <b>On hold:</b> Unhold this invoice before issuing.
+    </div>
+  ` : '';
+
   return `
     <div class="p-2">
 
@@ -31707,6 +32929,8 @@ function renderInvoiceModalContent(modalCtx, invoiceData) {
           ${overdue ? overduePill : ''}
         </div>
       </div>
+
+      ${holdIssueBlockMsg}
 
       ${effHold && holdReason ? `
         <div class="alert alert-warning py-2 px-2 small mb-3">
@@ -32875,18 +34099,29 @@ const buildInvoiceWeekSelectHtml = (seg) => {
   const segId = String(seg.segment_id || '');
   if (!segId) return '<span class="mini">—</span>';
 
-  // ✅ Capture these BEFORE we potentially write segTargets[segId] below
-  // (prevents "default This week" being treated as an explicit delay)
-  const hadStagedBefore = Object.prototype.hasOwnProperty.call(segTargets, segId);
   const storedTargetRaw = String(seg.invoice_target_week_start || '').trim();
   const lockedInvoiceId = String(seg.invoice_locked_invoice_id || '').trim();
 
+  // ✅ IMPORTANT: staged target must be read by key-presence, not truthiness.
+  // This allows an explicit "clear" stage where segTargets[segId] === null.
+  const stagedExplicit = Object.prototype.hasOwnProperty.call(segTargets, segId);
+  const stagedRaw = stagedExplicit ? segTargets[segId] : undefined;
+  const stagedNorm =
+    stagedExplicit
+      ? (stagedRaw == null ? null : String(stagedRaw).trim())
+      : null;
+
+  const hadStagedBefore = stagedExplicit;
+
   const currentTarget =
-    segTargets[segId] ||
-    storedTargetRaw ||
-    naturalWeekStart ||
-    currentWeekStart ||
-    '';
+    stagedExplicit
+      ? (stagedNorm == null ? '' : stagedNorm)
+      : (
+          storedTargetRaw ||
+          naturalWeekStart ||
+          currentWeekStart ||
+          ''
+        );
 
   const opts = [];
   const seen = new Set();
@@ -32930,11 +34165,6 @@ const buildInvoiceWeekSelectHtml = (seg) => {
       (optionValues.includes(currentWeekStart) ? currentWeekStart : pauseWeekStart);
   }
 
-  const optionsHtml = opts.map(o => {
-    const sel = (o.value === selectedVal) ? 'selected' : '';
-    return `<option value="${o.value}" ${sel}>${o.label}</option>`;
-  }).join('');
-
   // helper just for the hint text (DD/MM/YYYY)
   const fmtYmdDmySlash = (ymd) => {
     const s = String(ymd || '').slice(0, 10);
@@ -32944,15 +34174,18 @@ const buildInvoiceWeekSelectHtml = (seg) => {
     return `${d}/${mo}/${y}`;
   };
 
-  // ✅ Match SQL semantics:
+  // ✅ Match SQL semantics (and support explicit clear):
   // delayed if:
   //   invoice_locked_invoice_id is null/empty AND
-  //   invoice_target_week_start is explicitly present (stored OR previously staged) AND
+  //   invoice_target_week_start is explicitly present (stored OR staged) AND
   //   invoice_target_week_start !== baseline week start
   //
-  // where baseline is naturalWeekStart (week_ending_date - 6)
-  const hasExplicitTarget = hadStagedBefore || !!storedTargetRaw;
-  const targetForDelay = hadStagedBefore ? String(selectedVal || '').trim() : storedTargetRaw;
+  // Explicit clear = stagedExplicit && stagedNorm == null  → treated as "no explicit target"
+  const hasExplicitTarget = stagedExplicit ? (stagedNorm != null && stagedNorm !== '') : !!storedTargetRaw;
+  const targetForDelay =
+    stagedExplicit
+      ? (stagedNorm == null ? '' : stagedNorm)
+      : storedTargetRaw;
 
   const isPermanentDelay = (targetForDelay === pauseWeekStart);
 
@@ -32974,7 +34207,7 @@ const buildInvoiceWeekSelectHtml = (seg) => {
     ? fmtInvoiceHint(lockedInvoiceId)
     : (delayHint ? `⏳ ${delayHint}` : '○ Invoiceable now');
 
-   const disabledAttrSeg = (disabledAttr || isSegLocked) ? 'disabled' : '';
+  const disabledAttrSeg = (disabledAttr || isSegLocked) ? 'disabled' : '';
 
   // ✅ Preferred display: UK date (DD/MM/YYYY) for the picker input
   const toUk = (ymd) => {
@@ -32986,12 +34219,12 @@ const buildInvoiceWeekSelectHtml = (seg) => {
   };
 
   // Only show an explicit selected date if it is explicitly stored or explicitly staged
-  const stagedExplicit = Object.prototype.hasOwnProperty.call(segTargets, segId);
   const storedExplicit = !!storedTargetRaw;
 
   const explicitTarget =
-    stagedExplicit ? String(segTargets[segId] || '').trim()
-    : (storedExplicit ? storedTargetRaw : '');
+    stagedExplicit
+      ? (stagedNorm == null ? '' : stagedNorm)
+      : (storedExplicit ? storedTargetRaw : '');
 
   const isPaused = (explicitTarget === pauseWeekStart);
   const valueUk  = (!isPaused && explicitTarget) ? toUk(explicitTarget) : '';
@@ -33028,10 +34261,8 @@ const buildInvoiceWeekSelectHtml = (seg) => {
       <span class="mini">${invoiceStateHint}</span>
     </div>
   `;
-
-
-
 };
+
 
   if (isSegments && segs.length && isNhspOrHrSelfBillBasis) {
     const headHtml = `
@@ -34587,12 +35818,38 @@ function renderSummary(rows){
   };
   const clearSelection = ()=>{ sel.ids.clear(); };
 
-  // Small helper: render red issue badges or green OK for the Issues column
+   // Small helper: render red issue badges or green OK for the Issues column
   const renderIssueBadges = (codes) => {
     const wrap = document.createElement('div');
     wrap.className = 'issue-badges';
 
-    const arr = Array.isArray(codes) ? codes.filter(Boolean) : [];
+    const raw = Array.isArray(codes) ? codes.filter(Boolean) : [];
+    const arr0 = raw.map(x => String(x || '').trim()).filter(Boolean);
+
+    // ✅ Reference blocker pills (Option A: DB emits exact strings into issue_codes)
+    // Ensure we never display more than one, even if legacy data ever contains multiples.
+    const REF_ALL = new Set([
+      'Refs (Invoicing Blocked)',
+      'Refs (Issue Invoice Blocked)',
+      'Refs (Invoice and Issue Blocked)'
+    ]);
+
+    const REF_PRECEDENCE = [
+      'Refs (Invoice and Issue Blocked)',
+      'Refs (Invoicing Blocked)',
+      'Refs (Issue Invoice Blocked)'
+    ];
+
+    let refChosen = '';
+    for (const k of REF_PRECEDENCE) {
+      if (arr0.includes(k)) { refChosen = k; break; }
+    }
+
+    // Keep all other issue codes, but remove any additional ref codes so only one displays.
+    const rest = arr0.filter(x => !REF_ALL.has(x));
+
+    // Place the chosen ref pill first (most important blocker), then all other issues.
+    const arr = refChosen ? [refChosen, ...rest] : rest;
 
     if (!arr.length) {
       // No issues → green OK badge
@@ -34623,6 +35880,7 @@ function renderSummary(rows){
 
     return wrap;
   };
+
 
   // Tie selection to dataset via fingerprint (filters + section)
   const computeFp = ()=> getSummaryFingerprint(currentSection);
@@ -39793,8 +41051,7 @@ if (this.entity === 'contracts' && (this.currentTabKey === 'rates' || this.curre
     L('persistCurrentTabState contracts/rates+extras failed', e);
   }
 }
-
-   if (this.entity === 'clients' && this.currentTabKey === 'settings') {
+  if (this.entity === 'clients' && this.currentTabKey === 'settings') {
     try {
       const formEl = byId('clientSettingsForm');
       if (formEl && typeof canonicalizeClientSettings === 'function') {
@@ -39806,6 +41063,10 @@ if (this.entity === 'contracts' && (this.currentTabKey === 'rates' || this.curre
         if (wm) merged.weekly_mode = String(wm.value || '').trim();
         if (hp) merged.hr_weekly_behaviour = String(hp.value || '').trim();
 
+        // ✅ NEW: capture invoice consolidation mode radio (DB-backed)
+        const icm = formEl.querySelector('input[type="radio"][name="invoice_consolidation_mode"]:checked');
+        if (icm) merged.invoice_consolidation_mode = String(icm.value || '').trim();
+
         const BOOL_KEYS = [
           'pay_reference_required',
           'invoice_reference_required',
@@ -39815,7 +41076,10 @@ if (this.entity === 'contracts' && (this.currentTabKey === 'rates' || this.curre
           'hr_attach_to_invoice',
           'ts_attach_to_invoice',
           'auto_invoice_default',
-          'send_manual_invoices_to_different_email'
+          'send_manual_invoices_to_different_email',
+
+          // ✅ NEW: DB-backed checkbox
+          'reference_number_required_to_issue_invoice'
         ];
         for (const key of BOOL_KEYS) {
           const el = formEl.querySelector(`input[type="checkbox"][name="${key}"]`);
@@ -39833,17 +41097,30 @@ if (this.entity === 'contracts' && (this.currentTabKey === 'rates' || this.curre
         const keepManualFlag  = !!merged.send_manual_invoices_to_different_email;
         const keepManualEmail = String(merged.manual_invoices_alt_email_address || '').trim();
 
+        // ✅ NEW: preserve DB-backed invoicing keys across canonicalizeClientSettings()
+        const keepInvConsol =
+          (merged.invoice_consolidation_mode != null) ? String(merged.invoice_consolidation_mode) : '';
+        const keepRefToIssue =
+          (typeof merged.reference_number_required_to_issue_invoice === 'boolean')
+            ? merged.reference_number_required_to_issue_invoice
+            : (merged.reference_number_required_to_issue_invoice === '1' || merged.reference_number_required_to_issue_invoice === 1 || merged.reference_number_required_to_issue_invoice === 'true');
+
         merged = canonicalizeClientSettings(merged);
 
         merged.auto_invoice_default = keepAutoInv;
         merged.send_manual_invoices_to_different_email = keepManualFlag;
         merged.manual_invoices_alt_email_address = keepManualFlag ? keepManualEmail : '';
 
+        // ✅ restore DB-backed invoicing keys after canonicalize
+        if (keepInvConsol != null && String(keepInvConsol).trim() !== '') {
+          merged.invoice_consolidation_mode = String(keepInvConsol).trim();
+        }
+        merged.reference_number_required_to_issue_invoice = !!keepRefToIssue;
+
         window.modalCtx.clientSettingsState = merged;
       }
     } catch {}
   }
-
 
 
   window.modalCtx.formState = fs;
@@ -41054,145 +42331,152 @@ if (this.entity === 'timesheets' && k === 'lines') {
         }
       };
 
-      const applyUiFromTarget = (segId, targetIso) => {
-        const inEl = root.querySelector(`input[name="seg_invoice_week"][data-segment-id="${CSS.escape(String(segId))}"]`);
-        const pEl  = root.querySelector(`input[name="seg_invoice_pause"][data-segment-id="${CSS.escape(String(segId))}"]`);
-        if (!inEl || !pEl) return;
+  const applyUiFromTarget = (segId, targetIso) => {
+  const inEl = root.querySelector(`input[name="seg_invoice_week"][data-segment-id="${CSS.escape(String(segId))}"]`);
+  const pEl  = root.querySelector(`input[name="seg_invoice_pause"][data-segment-id="${CSS.escape(String(segId))}"]`);
+  if (!inEl || !pEl) return;
 
-        const t = String(targetIso || '').trim();
-        const paused = (t === pauseWeekStart);
+  // targetIso can be null to mean "clear"
+  const t = (targetIso == null) ? '' : String(targetIso || '').trim();
+  const paused = (t === pauseWeekStart);
 
-        // Pause checkbox reflects sentinel
-        pEl.checked = paused;
+  pEl.checked = paused;
 
-        // Date input shows only non-pause explicit date (UK formatted)
-        if (paused || !t) {
-          inEl.value = '';
-        } else {
-          try {
-            inEl.value = (typeof formatIsoToUk === 'function') ? formatIsoToUk(t) : inEl.value;
-          } catch {}
-        }
+  if (paused || !t) {
+    inEl.value = '';
+  } else {
+    try {
+      inEl.value = (typeof formatIsoToUk === 'function') ? formatIsoToUk(t) : inEl.value;
+    } catch {}
+  }
 
-        // If paused, date input should be disabled (matches renderer behaviour)
-        if (paused) {
-          inEl.disabled = true;
-        }
-      };
+  // paused disables date input; otherwise ensure enabled (unless global readonly locks it)
+  if (paused) {
+    inEl.disabled = true;
+  } else {
+    try { inEl.disabled = false; } catch {}
+  }
+};
 
-      const stageTargetFromControls = (segId) => {
-        const inEl = root.querySelector(`input[name="seg_invoice_week"][data-segment-id="${CSS.escape(String(segId))}"]`);
-        const pEl  = root.querySelector(`input[name="seg_invoice_pause"][data-segment-id="${CSS.escape(String(segId))}"]`);
-        if (!inEl || !pEl) return;
+const stageTargetFromControls = (segId) => {
+  const inEl = root.querySelector(`input[name="seg_invoice_week"][data-segment-id="${CSS.escape(String(segId))}"]`);
+  const pEl  = root.querySelector(`input[name="seg_invoice_pause"][data-segment-id="${CSS.escape(String(segId))}"]`);
+  if (!inEl || !pEl) return;
 
-        const segObj =
-          (mc.timesheetDetails && Array.isArray(mc.timesheetDetails.segments))
-            ? mc.timesheetDetails.segments.find(s => s && String(s.segment_id || '') === String(segId))
-            : null;
+  const segObj =
+    (mc.timesheetDetails && Array.isArray(mc.timesheetDetails.segments))
+      ? mc.timesheetDetails.segments.find(s => s && String(s.segment_id || '') === String(segId))
+      : null;
 
-        const lockedInvoiceId = segObj ? String(segObj.invoice_locked_invoice_id || '').trim() : '';
-        const storedTargetRaw = segObj ? String(segObj.invoice_target_week_start || '').trim() : '';
+  const lockedInvoiceId = segObj ? String(segObj.invoice_locked_invoice_id || '').trim() : '';
+  const storedTargetRaw = segObj ? String(segObj.invoice_target_week_start || '').trim() : '';
 
-        // If locked, do not stage anything (snap back to stored/staged UI)
-        if (lockedInvoiceId) {
-          const back =
-            (Object.prototype.hasOwnProperty.call(mc.timesheetState.segmentInvoiceTargets, segId)
-              ? String(mc.timesheetState.segmentInvoiceTargets[segId] || '').trim()
-              : '') ||
-            storedTargetRaw ||
-            '';
+  // If locked, do not stage anything; snap back to stored and remove staged key if present
+  if (lockedInvoiceId) {
+    applyUiFromTarget(segId, storedTargetRaw || null);
+    if (Object.prototype.hasOwnProperty.call(mc.timesheetState.segmentInvoiceTargets, segId)) {
+      delete mc.timesheetState.segmentInvoiceTargets[segId];
+    }
+    try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
+    return;
+  }
 
-          applyUiFromTarget(segId, back);
-          if (Object.prototype.hasOwnProperty.call(mc.timesheetState.segmentInvoiceTargets, segId)) {
-            delete mc.timesheetState.segmentInvoiceTargets[segId];
-          }
-          return;
-        }
+  // Pause mapping: checkbox wins and maps to sentinel
+  if (pEl.checked) {
+    inEl.value = '';
+    inEl.disabled = true;
 
-        // Pause mapping: checkbox wins and maps to sentinel
-        if (pEl.checked) {
-          inEl.value = '';
-          inEl.disabled = true;
+    const v = pauseWeekStart;
 
-          const v = pauseWeekStart;
+    // If equals stored value, do not stage
+    if (storedTargetRaw && v === storedTargetRaw) {
+      if (Object.prototype.hasOwnProperty.call(mc.timesheetState.segmentInvoiceTargets, segId)) {
+        delete mc.timesheetState.segmentInvoiceTargets[segId];
+      }
+      try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
+      return;
+    }
 
-          // If equals stored value, do not stage
-          if (storedTargetRaw && v === storedTargetRaw) {
-            if (Object.prototype.hasOwnProperty.call(mc.timesheetState.segmentInvoiceTargets, segId)) {
-              delete mc.timesheetState.segmentInvoiceTargets[segId];
-            }
-            try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
-            return;
-          }
+    mc.timesheetState.segmentInvoiceTargets[segId] = v;
+    try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
+    return;
+  }
 
-          mc.timesheetState.segmentInvoiceTargets[segId] = v;
-          try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
-          return;
-        }
+  // Not paused: enable date input
+  inEl.disabled = false;
 
-        // Not paused: enable date input
-        inEl.disabled = false;
+  const uk = String(inEl.value || '').trim();
+  const iso = uk ? (typeof parseUkDateToIso === 'function' ? parseUkDateToIso(uk) : null) : null;
 
-        const uk = String(inEl.value || '').trim();
-        const iso = uk ? (typeof parseUkDateToIso === 'function' ? parseUkDateToIso(uk) : null) : null;
+  // ✅ Empty date now means:
+  // - if there IS a stored target (including a stored pause), we must stage an explicit CLEAR (null)
+  // - otherwise, remove staging (no-op)
+  if (!iso) {
+    if (storedTargetRaw) {
+      mc.timesheetState.segmentInvoiceTargets[segId] = null;   // explicit clear
+      applyUiFromTarget(segId, null);
+    } else {
+      if (Object.prototype.hasOwnProperty.call(mc.timesheetState.segmentInvoiceTargets, segId)) {
+        delete mc.timesheetState.segmentInvoiceTargets[segId];
+      }
+    }
+    try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
+    return;
+  }
 
-        // Empty date means "not explicitly delayed" → do not stage
-        if (!iso) {
-          if (Object.prototype.hasOwnProperty.call(mc.timesheetState.segmentInvoiceTargets, segId)) {
-            delete mc.timesheetState.segmentInvoiceTargets[segId];
-          }
-          try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
-          return;
-        }
+  // Enforce Monday-only
+  if (!isMondayIso(iso)) {
+    alert('Please select a Monday (week start).');
 
-        // Enforce Monday-only
-        if (!isMondayIso(iso)) {
-          alert('Please select a Monday (week start).');
-          const back =
-            (Object.prototype.hasOwnProperty.call(mc.timesheetState.segmentInvoiceTargets, segId)
-              ? String(mc.timesheetState.segmentInvoiceTargets[segId] || '').trim()
-              : '') ||
-            storedTargetRaw ||
-            '';
-          applyUiFromTarget(segId, back);
-          return;
-        }
+    // Restore UI from staged (including null) if present, otherwise stored
+    const hasStaged = Object.prototype.hasOwnProperty.call(mc.timesheetState.segmentInvoiceTargets, segId);
+    const stagedRaw = hasStaged ? mc.timesheetState.segmentInvoiceTargets[segId] : undefined;
+    const stagedNorm = hasStaged ? (stagedRaw == null ? null : String(stagedRaw).trim()) : null;
 
-        // Enforce min Monday = current week start
-        if (currentWeekStart && iso < currentWeekStart) {
-          alert(`You can’t select a week before ${typeof formatIsoToUk === 'function' ? formatIsoToUk(currentWeekStart) : currentWeekStart}.`);
-          const back =
-            (Object.prototype.hasOwnProperty.call(mc.timesheetState.segmentInvoiceTargets, segId)
-              ? String(mc.timesheetState.segmentInvoiceTargets[segId] || '').trim()
-              : '') ||
-            storedTargetRaw ||
-            '';
-          applyUiFromTarget(segId, back);
-          return;
-        }
+    applyUiFromTarget(segId, hasStaged ? stagedNorm : (storedTargetRaw || null));
+    return;
+  }
 
-        // Baseline selection means "not delayed" → do not stage
-        if (naturalWeekStart && iso === naturalWeekStart) {
-          if (Object.prototype.hasOwnProperty.call(mc.timesheetState.segmentInvoiceTargets, segId)) {
-            delete mc.timesheetState.segmentInvoiceTargets[segId];
-          }
-          try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
-          return;
-        }
+  // Enforce min Monday = current week start
+  if (currentWeekStart && iso < currentWeekStart) {
+    alert(`You can’t select a week before ${typeof formatIsoToUk === 'function' ? formatIsoToUk(currentWeekStart) : currentWeekStart}.`);
 
-        // If equals stored value, do not stage
-        if (storedTargetRaw && iso === storedTargetRaw) {
-          if (Object.prototype.hasOwnProperty.call(mc.timesheetState.segmentInvoiceTargets, segId)) {
-            delete mc.timesheetState.segmentInvoiceTargets[segId];
-          }
-          try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
-          return;
-        }
+    const hasStaged = Object.prototype.hasOwnProperty.call(mc.timesheetState.segmentInvoiceTargets, segId);
+    const stagedRaw = hasStaged ? mc.timesheetState.segmentInvoiceTargets[segId] : undefined;
+    const stagedNorm = hasStaged ? (stagedRaw == null ? null : String(stagedRaw).trim()) : null;
 
-        // Stage explicitly
-        mc.timesheetState.segmentInvoiceTargets[segId] = iso;
-        try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
-      };
+    applyUiFromTarget(segId, hasStaged ? stagedNorm : (storedTargetRaw || null));
+    return;
+  }
+
+  // Baseline selection means "not delayed" → if there was a stored target, stage explicit clear
+  if (naturalWeekStart && iso === naturalWeekStart) {
+    if (storedTargetRaw) {
+      mc.timesheetState.segmentInvoiceTargets[segId] = null; // explicit clear
+      applyUiFromTarget(segId, null);
+    } else {
+      if (Object.prototype.hasOwnProperty.call(mc.timesheetState.segmentInvoiceTargets, segId)) {
+        delete mc.timesheetState.segmentInvoiceTargets[segId];
+      }
+    }
+    try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
+    return;
+  }
+
+  // If equals stored value, do not stage
+  if (storedTargetRaw && iso === storedTargetRaw) {
+    if (Object.prototype.hasOwnProperty.call(mc.timesheetState.segmentInvoiceTargets, segId)) {
+      delete mc.timesheetState.segmentInvoiceTargets[segId];
+    }
+    try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
+    return;
+  }
+
+  // Stage explicitly
+  mc.timesheetState.segmentInvoiceTargets[segId] = iso;
+  try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
+};
+
 
       // Wire date inputs (attach UK date picker + change handler)
       weekInputs.forEach(inEl => {
@@ -43379,7 +44663,7 @@ await refreshFooter();
     }
 
 
-   // 🔹 Top-level Invoice Modal → wire global Delete button (VIEW mode only, eligible only)
+  // 🔹 Top-level Invoice Modal → wire global Delete button (VIEW mode only, eligible only)
 // NOTE: This aligns with your brief: delete is only possible AFTER unissue + remove all lines + Save.
 // We DO NOT delete in edit mode; we only show the delete button in VIEW when invoice is eligible.
 if (!isChild && top.entity === 'invoices' && top.kind === 'invoice-modal') {
@@ -43436,6 +44720,10 @@ if (!isChild && top.entity === 'contracts') {
   if (showDelete) {
     btnDel.style.display = '';
     btnDel.disabled = !!top._saving;
+
+    // ✅ FIX: ensure label is correct for Contracts (prevents “Delete Invoice” bleed)
+    btnDel.textContent = 'Delete Contract';
+
     btnDel.onclick = async () => {
       const id = window.modalCtx?.data?.id;
       if (!id) return;
@@ -43461,12 +44749,19 @@ if (!isChild && top.entity === 'contracts') {
     btnDel.style.display = 'none';
     btnDel.disabled = true;
     btnDel.onclick = null;
+
+    // ✅ FIX: reset label when hidden so it can’t carry over from other entities
+    btnDel.textContent = 'Delete';
   }
 } else if (!isChild) {
   btnDel.style.display = 'none';
   btnDel.disabled = true;
   btnDel.onclick = null;
+
+  // ✅ FIX: reset label on any non-child non-contract/non-invoice top frame
+  btnDel.textContent = 'Delete';
 }
+
 
   }
 
@@ -50062,10 +51357,13 @@ async function renderClientSettingsUI(settingsObj){
 
   // ✅ Preserve blanks through canonicalise (so UI can represent “inherit global”)
   const seedBlankTimeKeys = TIME_KEYS.filter(k => String(seed[k] ?? '').trim() === '');
-
   const keepAutoInvSeed   = !!seed.auto_invoice_default;
   const keepManualFlagSeed= !!seed.send_manual_invoices_to_different_email;
   const keepManualEmailSeed = String(seed.manual_invoices_alt_email_address || '').trim();
+
+  // ✅ NEW: preserve DB-backed invoicing keys across canonicalizeClientSettings()
+  const keepInvConsolSeed = up(seed.invoice_consolidation_mode || 'NONE');
+  const keepRefToIssueSeed = !!seed.reference_number_required_to_issue_invoice;
 
   let s = canonicalizeClientSettings(seed);
 
@@ -50074,10 +51372,15 @@ async function renderClientSettingsUI(settingsObj){
   s.send_manual_invoices_to_different_email = keepManualFlagSeed;
   s.manual_invoices_alt_email_address = keepManualFlagSeed ? keepManualEmailSeed : '';
 
+  // ✅ restore DB-backed keys after canonicalize
+  s.invoice_consolidation_mode = keepInvConsolSeed;
+  s.reference_number_required_to_issue_invoice = keepRefToIssueSeed;
+
   // ✅ restore blanks (so they inherit global)
   seedBlankTimeKeys.forEach(k => { s[k] = ''; });
 
   ctx.clientSettingsState = { ...initial, ...s };
+
 
   const pairTimeRow = (label, aName, aVal, bName, bVal) => `
     <div class="row">
@@ -50544,7 +51847,6 @@ async function renderClientSettingsUI(settingsObj){
     if (!next.send_manual_invoices_to_different_email) {
       next.manual_invoices_alt_email_address = '';
     }
-
     const keepAutoInv =
       (typeof next.auto_invoice_default === 'boolean')
         ? next.auto_invoice_default
@@ -50558,6 +51860,13 @@ async function renderClientSettingsUI(settingsObj){
     const keepManualEmail =
       String(next.manual_invoices_alt_email_address || '').trim();
 
+    // ✅ NEW: preserve DB-backed invoicing keys across canonicalizeClientSettings()
+    const keepInvConsol = up(next.invoice_consolidation_mode || prev.invoice_consolidation_mode || 'NONE');
+    const keepRefToIssue =
+      (typeof next.reference_number_required_to_issue_invoice === 'boolean')
+        ? next.reference_number_required_to_issue_invoice
+        : !!prev.reference_number_required_to_issue_invoice;
+
     // ✅ Preserve blanks through canonicalise
     const blankKeysNow = TIME_KEYS.filter(k => String(next[k] ?? '').trim() === '');
 
@@ -50568,8 +51877,13 @@ async function renderClientSettingsUI(settingsObj){
     next.send_manual_invoices_to_different_email = keepManualFlag;
     next.manual_invoices_alt_email_address = keepManualFlag ? keepManualEmail : '';
 
+    // ✅ restore DB-backed keys after canonicalize
+    next.invoice_consolidation_mode = keepInvConsol;
+    next.reference_number_required_to_issue_invoice = !!keepRefToIssue;
+
     // ✅ restore blanks (so they inherit global)
     blankKeysNow.forEach(k => { next[k] = ''; });
+
 
     const gatePrev = `${String(prev.weekly_mode||'').toUpperCase()}|${String(prev.hr_weekly_behaviour||'').toUpperCase()}`;
     const gateNext = `${String(next.weekly_mode||'').toUpperCase()}|${String(next.hr_weekly_behaviour||'').toUpperCase()}`;
@@ -53612,7 +54926,7 @@ function __ensureSettingsFinanceWindowsWiring() {
     try { attachUkDatePicker(el, {}); } catch {}
   });
 
-  // ✅ NEW helper: normalise mileage defaults to 2dp and enforce > 0
+  // ✅ Helper: normalise mileage defaults to 2dp and enforce > 0
   // - "45"   -> "0.45"
   // - "1.00" -> "1.00"
   // - <= 0 clears
@@ -53636,29 +54950,34 @@ function __ensureSettingsFinanceWindowsWiring() {
     el.value = n.toFixed(2);
   };
 
+  const isMileageId = (id) => (
+    id === 'fw_cur_mpay' || id === 'fw_cur_mcharge' ||
+    id === 'fw_fut_mpay' || id === 'fw_fut_mcharge' ||
+    id === 'fw_new_mpay' || id === 'fw_new_mcharge'
+  );
+
   // Keep draft fields in modalCtx and enforce no-overlap auto-adjust rules
   document.addEventListener('input', (e) => {
     const el = e.target;
     if (!modalCtx || modalCtx.entity !== 'settings') return;
     if (!el || !el.id) return;
 
-    // Persist Add-new draft values live
+    // Persist Add-new draft values live (including mileage)
     if (el.id.startsWith('fw_new_')) {
-      modalCtx.finance_new_draft = modalCtx.finance_new_draft || { date_from:'', date_to:'', vat:'', hol:'', erni:'' };
-      if (el.id === 'fw_new_from') modalCtx.finance_new_draft.date_from = el.value || '';
-      if (el.id === 'fw_new_to')   modalCtx.finance_new_draft.date_to   = el.value || '';
-      if (el.id === 'fw_new_vat')  modalCtx.finance_new_draft.vat       = el.value;
-      if (el.id === 'fw_new_hol')  modalCtx.finance_new_draft.hol       = el.value;
-      if (el.id === 'fw_new_erni') modalCtx.finance_new_draft.erni      = el.value;
+      modalCtx.finance_new_draft = modalCtx.finance_new_draft || { date_from:'', date_to:'', vat:'', hol:'', erni:'', mpay:'', mcharge:'' };
+
+      if (el.id === 'fw_new_from')     modalCtx.finance_new_draft.date_from = el.value || '';
+      if (el.id === 'fw_new_to')       modalCtx.finance_new_draft.date_to   = el.value || '';
+      if (el.id === 'fw_new_vat')      modalCtx.finance_new_draft.vat       = el.value;
+      if (el.id === 'fw_new_hol')      modalCtx.finance_new_draft.hol       = el.value;
+      if (el.id === 'fw_new_erni')     modalCtx.finance_new_draft.erni      = el.value;
+      if (el.id === 'fw_new_mpay')     modalCtx.finance_new_draft.mpay      = el.value;
+      if (el.id === 'fw_new_mcharge')  modalCtx.finance_new_draft.mcharge   = el.value;
     }
 
-    // ✅ NEW: live-normalise mileage defaults (current window) as user types
-    // (keeps the displayed value in the intended format before Save)
-    if (el.id === 'fw_cur_mpay' || el.id === 'fw_cur_mcharge') {
-      // only normalise if user typed something "complete-ish"
-      // (we still normalise on blur/change via change handler below)
-      // This avoids fighting the cursor while typing decimals.
-      // If no dot and length >= 2, treat as pence and normalise.
+    // ✅ Live-normalise mileage defaults as user types (current/future/new)
+    // Avoid fighting the cursor: only auto-normalise integer-like inputs (no dot) once >=2 chars.
+    if (isMileageId(el.id)) {
       const v = String(el.value ?? '').trim();
       if (v && !v.includes('.') && v.length >= 2) {
         normPence2dpNonZero(el);
@@ -53666,12 +54985,12 @@ function __ensureSettingsFinanceWindowsWiring() {
     }
   });
 
-  // ✅ NEW: on blur, always enforce formatting for mileage defaults
+  // ✅ On blur, always enforce formatting for mileage defaults
   document.addEventListener('focusout', (e) => {
     if (!modalCtx || modalCtx.entity !== 'settings') return;
     const el = e.target;
     if (!el || !el.id) return;
-    if (el.id === 'fw_cur_mpay' || el.id === 'fw_cur_mcharge') {
+    if (isMileageId(el.id)) {
       normPence2dpNonZero(el);
     }
   });
@@ -53682,9 +55001,18 @@ function __ensureSettingsFinanceWindowsWiring() {
     if (!el || !el.id) return;
 
     // ✅ Ensure mileage defaults are normalised before any save/auto-adjust logic runs
-    if (el.id === 'fw_cur_mpay' || el.id === 'fw_cur_mcharge') {
+    // Also: do NOT trigger __settingsFinanceSync for mileage-only edits (prevents wiping draft fields).
+    if (isMileageId(el.id)) {
       normPence2dpNonZero(el);
-      return; // no need to run __settingsFinanceSync for mileage-only edits
+
+      // Keep new draft mileage persisted even if future sync runs later
+      if (el.id === 'fw_new_mpay' || el.id === 'fw_new_mcharge') {
+        modalCtx.finance_new_draft = modalCtx.finance_new_draft || { date_from:'', date_to:'', vat:'', hol:'', erni:'', mpay:'', mcharge:'' };
+        if (el.id === 'fw_new_mpay')    modalCtx.finance_new_draft.mpay = el.value;
+        if (el.id === 'fw_new_mcharge') modalCtx.finance_new_draft.mcharge = el.value;
+      }
+
+      return;
     }
 
     if (!/^fw_(cur|fut|new)_/.test(el.id)) return;
@@ -54150,10 +55478,9 @@ async function handleSaveSettings() {
     return n;
   };
 
-  // ✅ NEW: mileage defaults normaliser
+  // ✅ Mileage defaults normaliser (must be > 0)
   // - "45"   -> 0.45   (pence)
   // - "1.00" -> 1.00   (as-is)
-  // - must be > 0
   const mustMileageNonZero = (v, label) => {
     const raw = String(v ?? '').trim();
     if (!raw) throw new Error(`Invalid ${label} value`);
@@ -54171,7 +55498,7 @@ async function handleSaveSettings() {
     // Must be > 0 (cannot be zero or negative)
     if (!(n > 0)) throw new Error(`${label} must be greater than 0`);
 
-    // Optional: round to 2dp to align with UI
+    // Round to 2dp
     n = Math.round(n * 100) / 100;
 
     if (!(n > 0)) throw new Error(`${label} must be greater than 0`);
@@ -54188,7 +55515,7 @@ async function handleSaveSettings() {
   const cur_hol_raw  = byId('fw_cur_hol')?.value;
   const cur_erni_raw = byId('fw_cur_erni')?.value;
 
-  // ✅ NEW: current mileage defaults (under BH feed URL box)
+  // Current mileage defaults
   const cur_mpay_raw     = byId('fw_cur_mpay')?.value;
   const cur_mcharge_raw  = byId('fw_cur_mcharge')?.value;
 
@@ -54199,12 +55526,20 @@ async function handleSaveSettings() {
   const fut_hol_raw = byId('fw_fut_hol')?.value;
   const fut_erni_raw= byId('fw_fut_erni')?.value;
 
+  // ✅ NEW: future mileage defaults
+  const fut_mpay_raw     = byId('fw_fut_mpay')?.value;
+  const fut_mcharge_raw  = byId('fw_fut_mcharge')?.value;
+
   // New (draft)
   const new_from_uk = byId('fw_new_from')?.value || '';
   const new_to_uk   = byId('fw_new_to')?.value || '';
   const new_vat_raw = byId('fw_new_vat')?.value;
   const new_hol_raw = byId('fw_new_hol')?.value;
   const new_erni_raw= byId('fw_new_erni')?.value;
+
+  // ✅ NEW: new draft mileage defaults
+  const new_mpay_raw     = byId('fw_new_mpay')?.value;
+  const new_mcharge_raw  = byId('fw_new_mcharge')?.value;
 
   // Build finance operations
   let patchCurrent = null;
@@ -54222,7 +55557,7 @@ async function handleSaveSettings() {
         holiday_pay_pct: mustNum(cur_hol_raw, 'Current Holiday %'),
         erni_pct: mustNum(cur_erni_raw, 'Current ERNI %'),
 
-        // ✅ NEW: mileage defaults (must be > 0)
+        // Mileage defaults (must be > 0)
         mileage_pay_defaults: mustMileageNonZero(cur_mpay_raw, 'Default Mileage Pay'),
         mileage_charge_defaults: mustMileageNonZero(cur_mcharge_raw, 'Default Mileage Charge')
       };
@@ -54236,7 +55571,11 @@ async function handleSaveSettings() {
 
         vat_rate_pct: mustNum(fut_vat_raw, 'Future VAT %'),
         holiday_pay_pct: mustNum(fut_hol_raw, 'Future Holiday %'),
-        erni_pct: mustNum(fut_erni_raw, 'Future ERNI %')
+        erni_pct: mustNum(fut_erni_raw, 'Future ERNI %'),
+
+        // ✅ NEW: future mileage defaults (must be > 0)
+        mileage_pay_defaults: mustMileageNonZero(fut_mpay_raw, 'Future Default Mileage Pay'),
+        mileage_charge_defaults: mustMileageNonZero(fut_mcharge_raw, 'Future Default Mileage Charge')
       };
     }
 
@@ -54250,6 +55589,10 @@ async function handleSaveSettings() {
         vat_rate_pct: mustNum(new_vat_raw, 'New VAT %'),
         holiday_pay_pct: mustNum(new_hol_raw, 'New Holiday %'),
         erni_pct: mustNum(new_erni_raw, 'New ERNI %'),
+
+        // ✅ NEW: new mileage defaults (must be > 0)
+        mileage_pay_defaults: mustMileageNonZero(new_mpay_raw, 'New Default Mileage Pay'),
+        mileage_charge_defaults: mustMileageNonZero(new_mcharge_raw, 'New Default Mileage Charge'),
 
         // Optional (not exposed in UI yet; keep null)
         apply_holiday_to: null,
@@ -54302,14 +55645,20 @@ async function handleSaveSettings() {
 
     modalCtx.finance_windows = JSON.parse(JSON.stringify(freshWindows));
 
-    // Clear draft "Add new" row after successful save
-    modalCtx.finance_new_draft = { date_from:'', date_to:'', vat:'', hol:'', erni:'' };
+    // ✅ Clear draft "Add new" row after successful save (including mileage)
+    modalCtx.finance_new_draft = { date_from:'', date_to:'', vat:'', hol:'', erni:'', mpay:'', mcharge:'' };
 
     return { ok:true, saved: modalCtx.data };
   } catch {
     // Fallback: keep current modalCtx.data and return merged payload (non-finance only)
     const saved = { ...(modalCtx.data || {}), ...payload, id: keepId };
     modalCtx.data = saved;
+
+    // ✅ still clear draft locally (including mileage) to avoid “ghost” draft values after save
+    try {
+      modalCtx.finance_new_draft = { date_from:'', date_to:'', vat:'', hol:'', erni:'', mpay:'', mcharge:'' };
+    } catch {}
+
     return { ok:true, saved };
   }
 }
@@ -57362,7 +58711,7 @@ function renderTimesheetOverviewTab(ctx) {
     }
   } catch {}
 
-  // ─────────────────────────────────────────────────────────────
+    // ─────────────────────────────────────────────────────────────
   // Stage badges + tooltips
   // ─────────────────────────────────────────────────────────────
   const stageBadges = [];
@@ -57381,6 +58730,38 @@ function renderTimesheetOverviewTab(ctx) {
     );
   };
 
+  // ✅ NEW: Reference blocker pill (Option A: DB emits these exact strings into issue_codes)
+  // Show at most one (DB should already guarantee this; we apply precedence defensively).
+  try {
+    const rawCodes =
+      Array.isArray(row?.issue_codes) ? row.issue_codes :
+      (Array.isArray(details?.issue_codes) ? details.issue_codes : []);
+
+    const codes = rawCodes.map(x => String(x || '').trim()).filter(Boolean);
+
+    const REF_PRECEDENCE = [
+      'Refs (Invoice and Issue Blocked)',
+      'Refs (Invoicing Blocked)',
+      'Refs (Issue Invoice Blocked)'
+    ];
+
+    let refChosen = '';
+    for (const k of REF_PRECEDENCE) {
+      if (codes.includes(k)) { refChosen = k; break; }
+    }
+
+    if (refChosen) {
+      const title =
+        (refChosen === 'Refs (Invoice and Issue Blocked)')
+          ? 'Reference numbers are missing. This blocks both creating invoices and issuing invoices until references are added.'
+          : (refChosen === 'Refs (Invoicing Blocked)')
+            ? 'Reference numbers are missing. This blocks creating invoices until references are added.'
+            : 'Reference numbers are missing. Invoices can be created, but cannot be issued until references are added.';
+
+      addStage(refChosen, 'pill-bad', title);
+    }
+  } catch {}
+
     // ✅ map TSFIN.UNASSIGNED to "Unprocessed" (never show UNASSIGNED to admins)
   if (hasTsfin && stageRaw === 'UNASSIGNED') {
     addStage(
@@ -57395,6 +58776,7 @@ function renderTimesheetOverviewTab(ctx) {
       'This timesheet is unprocessed. No real hours have been entered yet (the Lines tab shows the default contract schedule until you enter actual hours).'
     );
   }
+
 
   // ─────────────────────────────────────────────────────────────
   // ✅ Invoice issuance overlay (server-authoritative from SUMMARY row)
@@ -58418,7 +59800,6 @@ async function switchContractWeekToManual(weekId) {
   return json;
 }
 
-
 function renderTimesheetIssuesTab(ctx) {
   const { LOGM, L, GC, GE } = getTsLoggers('[TS][ISSUES]');
   const { row, details } = normaliseTimesheetCtx(ctx);
@@ -58502,6 +59883,17 @@ function renderTimesheetIssuesTab(ctx) {
     return (s === 'true' || s === '1' || s === 'yes' || s === 'y' || s === 'on');
   };
 
+  const normStr = (v) => (v == null ? '' : String(v).trim());
+
+  const fmtHHMM = (isoLike) => {
+    const s = String(isoLike || '');
+    const m1 = s.match(/T(\d{2}:\d{2})/);
+    if (m1 && m1[1]) return m1[1];
+    const m2 = s.match(/(\d{2}:\d{2})/);
+    if (m2 && m2[1]) return m2[1];
+    return '';
+  };
+
   // Facts used only for issues list (not for Processing State label)
   const procStatusRaw =
     tsfin.processing_status ||
@@ -58521,6 +59913,116 @@ function renderTimesheetIssuesTab(ctx) {
   }
 
   const issues = [];
+
+  // ─────────────────────────────────────────────────────────────
+  // ✅ NEW: Reference blocker issue + per-day/segment detail
+  // Source of truth:
+  //  - ref blocker codes live in issue_codes (Option A strings)
+  //  - detail list lives in details.refs_missing_items_json / count (details view only)
+  // ─────────────────────────────────────────────────────────────
+  try {
+    const rawCodes =
+      Array.isArray(row?.issue_codes) ? row.issue_codes :
+      (Array.isArray(details?.issue_codes) ? details.issue_codes : []);
+
+    const codes = rawCodes.map(x => String(x || '').trim()).filter(Boolean);
+
+    const REF_PRECEDENCE = [
+      'Refs (Invoice and Issue Blocked)',
+      'Refs (Invoicing Blocked)',
+      'Refs (Issue Invoice Blocked)'
+    ];
+
+    let refChosen = '';
+    for (const k of REF_PRECEDENCE) {
+      if (codes.includes(k)) { refChosen = k; break; }
+    }
+
+    if (refChosen) {
+      if (refChosen === 'Refs (Invoice and Issue Blocked)') {
+        issues.push('Reference numbers are missing — invoicing and issuing invoices are both blocked until references are added.');
+      } else if (refChosen === 'Refs (Invoicing Blocked)') {
+        issues.push('Reference numbers are missing — invoicing is blocked until references are added.');
+      } else if (refChosen === 'Refs (Issue Invoice Blocked)') {
+        issues.push('Reference numbers are missing — invoices can be created, but cannot be issued until references are added.');
+      }
+
+      let items = details?.refs_missing_items_json ?? null;
+      if (typeof items === 'string') {
+        try { items = JSON.parse(items); } catch { items = null; }
+      }
+      if (!Array.isArray(items)) items = [];
+
+      const countRaw = details?.refs_missing_items_count;
+      const count = Number(countRaw);
+      const countNum = Number.isFinite(count) ? count : null;
+
+      if (items.length > 0) {
+        issues.push(`Missing reference numbers on ${items.length} day(s)/segment(s):`);
+
+        const sorted = items.slice().sort((a, b) => {
+          const ad = normStr(a?.day_ymd || a?.day_date || a?.date);
+          const bd = normStr(b?.day_ymd || b?.day_date || b?.date);
+          if (ad !== bd) return ad.localeCompare(bd);
+          const ak = normStr(a?.kind);
+          const bk = normStr(b?.kind);
+          if (ak !== bk) return ak.localeCompare(bk);
+          const ai = Number(a?.segment_index);
+          const bi = Number(b?.segment_index);
+          const aok = Number.isFinite(ai);
+          const bok = Number.isFinite(bi);
+          if (aok && bok) return ai - bi;
+          if (aok) return -1;
+          if (bok) return 1;
+          return 0;
+        });
+
+        for (const it of sorted) {
+          const kind = String(it?.kind || '').trim().toUpperCase();
+          let day = normStr(it?.day_ymd || it?.day_date || it?.date);
+
+          // Fallback day extraction from start values
+          if (!day) {
+            const s1 = normStr(it?.start_utc || it?.start);
+            const m = s1.match(/^(\d{4}-\d{2}-\d{2})/);
+            if (m && m[1]) day = m[1];
+          }
+
+          const dmy = day ? fmtYmdToDmy(day) : '';
+          const dow = day ? fmtDow(day) : '';
+
+          if (kind === 'TIMESHEET') {
+            const st = normStr(it?.start_utc || it?.start);
+            const en = normStr(it?.end_utc || it?.end);
+            const t1 = fmtHHMM(st);
+            const t2 = fmtHHMM(en);
+            const tr = (t1 && t2) ? `${t1}–${t2}` : '';
+            issues.push(`Missing reference: ${dow ? dow + ' ' : ''}${dmy || day || 'Unknown date'}${tr ? ` (${tr})` : ''} (Daily timesheet).`);
+          } else if (kind === 'FREEFORM') {
+            issues.push(`Missing reference: ${dow ? dow + ' ' : ''}${dmy || day || 'Unknown date'} (Weekly day reference).`);
+          } else if (kind === 'SEGMENT') {
+            const idx0 = Number(it?.segment_index);
+            const idx = Number.isFinite(idx0) ? (idx0 + 1) : null;
+
+            const st = normStr(it?.start);
+            const en = normStr(it?.end);
+            const t1 = fmtHHMM(st);
+            const t2 = fmtHHMM(en);
+            const tr = (t1 && t2) ? `${t1}–${t2}` : '';
+
+            const segLabel = idx != null ? `Segment ${idx}` : 'Segment';
+            issues.push(`Missing reference: ${dow ? dow + ' ' : ''}${dmy || day || 'Unknown date'}${tr ? ` (${tr})` : ''} (${segLabel}).`);
+          } else {
+            issues.push(`Missing reference: ${dow ? dow + ' ' : ''}${dmy || day || 'Unknown date'}.`);
+          }
+        }
+      } else if (countNum != null && countNum > 0) {
+        issues.push(`Missing reference numbers on ${countNum} day(s)/segment(s).`);
+      }
+    }
+  } catch (e) {
+    if (LOGM) L('[ISSUES] reference missing detail mapping failed (non-fatal)', e);
+  }
 
   // Processing-status based issues (keep concise)
   if (procStatus === 'RATE_MISSING') {
@@ -61190,58 +62692,101 @@ const onSaveTimesheet = async () => {
     });
   }
 
-  // Segments staging apply (unchanged)
-  if (det.isSegmentsMode && (hasSegOverrides || hasSegTargets) && (tsIdSave || rowNow.timesheet_id)) {
-    tasks.push(async () => {
-      const currentDetails = window.modalCtx.timesheetDetails || det;
-      const segments = Array.isArray(currentDetails.segments) ? currentDetails.segments : [];
-      if (!segments.length) return;
+  // Segments staging apply (FIXED: supports explicit clear + updates in-memory segments)
+if (det.isSegmentsMode && (hasSegOverrides || hasSegTargets) && (tsIdSave || rowNow.timesheet_id)) {
+  tasks.push(async () => {
+    const currentDetails = window.modalCtx.timesheetDetails || det;
+    const segments = Array.isArray(currentDetails.segments) ? currentDetails.segments : [];
+    if (!segments.length) return;
 
-      const updates = [];
-      const overrides = window.modalCtx.timesheetState.segmentOverrides || {};
-      const targets   = window.modalCtx.timesheetState.segmentInvoiceTargets || {};
+    const updates = [];
+    const overrides = window.modalCtx.timesheetState.segmentOverrides || {};
+    const targets   = window.modalCtx.timesheetState.segmentInvoiceTargets || {};
 
-      for (const seg of segments) {
-        if (!seg || typeof seg !== 'object') continue;
-        const sid = String(seg.segment_id || '').trim();
-        if (!sid) continue;
+    const normTarget = (v) => {
+      if (v == null) return null;
+      const s = String(v || '').trim();
+      return s ? s : null;
+    };
 
-        const o = overrides[sid] || {};
-        const hasOverride = Object.prototype.hasOwnProperty.call(o, 'exclude_from_pay');
-        const exclude = hasOverride ? !!o.exclude_from_pay : !!seg.exclude_from_pay;
+    for (const seg of segments) {
+      if (!seg || typeof seg !== 'object') continue;
+      const sid = String(seg.segment_id || '').trim();
+      if (!sid) continue;
 
-           const originalTarget = seg.invoice_target_week_start || null;
+      const o = overrides[sid] || {};
+      const hasOverride = Object.prototype.hasOwnProperty.call(o, 'exclude_from_pay');
+      const exclude = hasOverride ? !!o.exclude_from_pay : !!seg.exclude_from_pay;
 
-        const hasStagedTarget = Object.prototype.hasOwnProperty.call(targets, sid);
-        const stagedTarget    = hasStagedTarget ? (targets[sid] || null) : null;
+      const originalTarget = normTarget(seg.invoice_target_week_start);
 
-        const update = { segment_id: sid };
-        let changed = false;
+      const hasStagedTarget = Object.prototype.hasOwnProperty.call(targets, sid);
+      const stagedTargetRaw = hasStagedTarget ? targets[sid] : undefined;
 
-        if (exclude !== !!seg.exclude_from_pay) {
-          update.exclude_from_pay = exclude;
-          changed = true;
-        } else {
-          update.exclude_from_pay = exclude;
-        }
+      // ✅ stagedTarget may be:
+      // - 'YYYY-MM-DD'  (delay)
+      // - '2099-01-05'  (pause)
+      // - null          (explicit clear)
+      const desiredTarget = hasStagedTarget ? normTarget(stagedTargetRaw) : originalTarget;
 
-        if (stagedTarget && stagedTarget !== originalTarget) {
-          update.invoice_target_week_start = stagedTarget;
-          changed = true;
-        }
+      const update = { segment_id: sid };
+      let changed = false;
 
-        if (changed) updates.push(update);
-
+      // exclude_from_pay (always sent; changed flag only when differs)
+      if (exclude !== !!seg.exclude_from_pay) {
+        update.exclude_from_pay = exclude;
+        changed = true;
+      } else {
+        update.exclude_from_pay = exclude;
       }
 
-      if (!updates.length) return;
+      // ✅ invoice_target_week_start: include whenever staged is present AND differs (including clear-to-null)
+      if (hasStagedTarget) {
+        const differs =
+          (desiredTarget == null && originalTarget != null) ||
+          (desiredTarget != null && originalTarget == null) ||
+          (desiredTarget != null && originalTarget != null && String(desiredTarget) !== String(originalTarget));
 
-      await apiPatchJson(
-        `/api/tsfin/${encodeURIComponent(tsIdSave || rowNow.timesheet_id)}/segments`,
-        { expected_timesheet_id: (window.modalCtx?.timesheetMeta?.expected_timesheet_id || tsIdSave), segments: updates }
-      );
-    });
-  }
+        if (differs) {
+          update.invoice_target_week_start = desiredTarget; // may be null
+          changed = true;
+        }
+      }
+
+      if (changed) updates.push(update);
+    }
+
+    if (!updates.length) return;
+
+    const res = await apiPatchJson(
+      `/api/tsfin/${encodeURIComponent(tsIdSave || rowNow.timesheet_id)}/segments`,
+      {
+        expected_timesheet_id: (window.modalCtx?.timesheetMeta?.expected_timesheet_id || tsIdSave),
+        segments: updates
+      }
+    );
+
+    // ✅ Update in-memory segments so the Lines tab reflects the save immediately (no close/reopen needed)
+    try {
+      const detNow = window.modalCtx.timesheetDetails || currentDetails;
+      const segsNow = Array.isArray(detNow.segments) ? detNow.segments : [];
+      for (const u of updates) {
+        const sid = String(u.segment_id || '').trim();
+        if (!sid) continue;
+        const s = segsNow.find(x => x && String(x.segment_id || '').trim() === sid) || null;
+        if (!s) continue;
+
+        if (Object.prototype.hasOwnProperty.call(u, 'exclude_from_pay')) {
+          s.exclude_from_pay = !!u.exclude_from_pay;
+        }
+        if (Object.prototype.hasOwnProperty.call(u, 'invoice_target_week_start')) {
+          s.invoice_target_week_start = u.invoice_target_week_start; // may be null
+        }
+      }
+    } catch {}
+  });
+}
+
 
   // Reference update (kept as-is; separate from per-shift refs)
   if (refChanged && tsIdSave) {
