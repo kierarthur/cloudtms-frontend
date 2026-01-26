@@ -29429,17 +29429,27 @@ async function invoiceModalSaveEdits(modalCtx, { rerender, reload }) {
     if (!Array.isArray(rowLevelUpdates) || rowLevelUpdates.length === 0) return [];
 
     // Prefer the pre-hydrated maps from invoice manifest/GET (zero extra calls).
+    // NOTE: payloads may store these at:
+    //  - modalCtx.timesheet_reference_sources_by_id
+    //  - modalCtx.dataLoaded.timesheet_reference_sources_by_id
+    //  - modalCtx.dataLoaded.manifest.timesheet_reference_sources_by_id
     const sourcesById =
       (modalCtx?.timesheet_reference_sources_by_id && typeof modalCtx.timesheet_reference_sources_by_id === 'object')
         ? modalCtx.timesheet_reference_sources_by_id
         : ((modalCtx?.dataLoaded?.timesheet_reference_sources_by_id && typeof modalCtx.dataLoaded.timesheet_reference_sources_by_id === 'object')
             ? modalCtx.dataLoaded.timesheet_reference_sources_by_id
-            : null);
+            : ((modalCtx?.dataLoaded?.manifest?.timesheet_reference_sources_by_id && typeof modalCtx.dataLoaded.manifest.timesheet_reference_sources_by_id === 'object')
+                ? modalCtx.dataLoaded.manifest.timesheet_reference_sources_by_id
+                : null));
 
     const rowsByKey =
       (modalCtx?.reference_rows_by_key && typeof modalCtx.reference_rows_by_key === 'object')
         ? modalCtx.reference_rows_by_key
-        : null;
+        : ((modalCtx?.dataLoaded?.reference_rows_by_key && typeof modalCtx.dataLoaded.reference_rows_by_key === 'object')
+            ? modalCtx.dataLoaded.reference_rows_by_key
+            : ((modalCtx?.dataLoaded?.manifest?.reference_rows_by_key && typeof modalCtx.dataLoaded.manifest.reference_rows_by_key === 'object')
+                ? modalCtx.dataLoaded.manifest.reference_rows_by_key
+                : null));
 
     if (!sourcesById || typeof sourcesById !== 'object') {
       throw new Error('Reference sources are missing on this invoice payload. Reload the invoice and try again.');
