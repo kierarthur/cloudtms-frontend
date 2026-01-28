@@ -57550,13 +57550,101 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
     if (colCount === 0 && Array.isArray(headerColsRaw) && headerColsRaw.length) colCount = headerColsRaw.length;
     if (colCount === 0 && Array.isArray(rows?.[0]?.raw_columns)) colCount = rows[0].raw_columns.length;
 
-    // If still unknown, show a safe empty table
     if (!Number.isFinite(colCount) || colCount < 0) colCount = 0;
 
     // Pad header rows to colCount with blanks (preserve alignment)
     const headerRowsPadded = headerRows.map(r =>
       Array.from({ length: colCount }, (_, i) => (i < (r?.length || 0) ? r[i] : ''))
     );
+
+    // ─────────────────────────────────────────────────────────────
+    // Formatting helpers (match PDF renderer behaviour)
+    // ─────────────────────────────────────────────────────────────
+    const pad2 = (n) => String(n).padStart(2, '0');
+
+    const toNum = (v) => {
+      if (typeof v === 'number') return Number.isFinite(v) ? v : null;
+      const s = String(v ?? '').trim();
+      if (!s) return null;
+      const n = Number(s);
+      return Number.isFinite(n) ? n : null;
+    };
+
+    const excelSerialToDmy = (v) => {
+      const n = toNum(v);
+      if (n == null) return String(v ?? '');
+      if (n < 20000 || n > 90000) return String(v ?? '');
+      const base = Date.UTC(1899, 11, 30, 0, 0, 0, 0);
+      const ms = base + Math.round(n) * 86400000;
+      if (!Number.isFinite(ms)) return String(v ?? '');
+      const d = new Date(ms);
+      if (Number.isNaN(d.getTime())) return String(v ?? '');
+      return `${pad2(d.getUTCDate())}/${pad2(d.getUTCMonth() + 1)}/${d.getUTCFullYear()}`;
+    };
+
+    const excelFracToHHMM = (v) => {
+      const n = toNum(v);
+      if (n == null) {
+        const s = String(v ?? '').trim();
+        if (/^\d{1,2}:\d{2}(:\d{2})?$/.test(s)) {
+          const parts = s.split(':');
+          const hh = pad2(Number(parts[0]) || 0);
+          const mm = pad2(Number(parts[1]) || 0);
+          return `${hh}:${mm}`;
+        }
+        return String(v ?? '');
+      }
+      if (n < 0 || n > 2) return String(v ?? '');
+      const mins = Math.round(n * 1440);
+      const hh = Math.floor(mins / 60);
+      const mm = mins % 60;
+      return `${pad2(hh)}:${pad2(mm)}`;
+    };
+
+    const fmtInt = (v) => {
+      const n = toNum(v);
+      if (n == null) return String(v ?? '');
+      return String(Math.round(n));
+    };
+
+    const fmtMoney = (v) => {
+      if (typeof v === 'string') {
+        const s = v.trim();
+        if (s && Number.isFinite(Number(s))) return s; // preserve numeric strings like "50.7"
+        return String(v ?? '');
+      }
+      const n = toNum(v);
+      if (n == null) return String(v ?? '');
+      return n.toFixed(2);
+    };
+
+    const normH = (s) => String(s || '').trim().toLowerCase().replace(/\s+/g, ' ');
+
+    // Determine per-column meaning using headers (prefer header_rows bottom-up, else header_columns)
+    const labelAt = (i) => {
+      for (let r = headerRowsPadded.length - 1; r >= 0; r--) {
+        const row = headerRowsPadded[r];
+        if (!Array.isArray(row)) continue;
+        const v = (i < row.length) ? String(row[i] ?? '').trim() : '';
+        if (v) return v;
+      }
+      if (Array.isArray(headerColsRaw) && i < headerColsRaw.length) {
+        const v2 = String(headerColsRaw[i] ?? '').trim();
+        if (v2) return v2;
+      }
+      return '';
+    };
+
+    const colKinds = [];
+    for (let i = 0; i < colCount; i++) {
+      const hn = normH(labelAt(i));
+      let kind = 'text';
+      if (hn.includes('date')) kind = 'date';
+      else if (hn === 'start' || hn === 'end' || hn === 'total') kind = 'time';
+      else if (hn.includes('break') && hn.includes('minute')) kind = 'break';
+      else if (hn === 'commission' || hn.includes('commission') || hn === 'total cost' || hn.includes('total cost')) kind = 'money';
+      colKinds.push(kind);
+    }
 
     // Download key
     const downloadKeyRaw =
@@ -57602,7 +57690,6 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
     `;
 
     const mkTableRawImport = () => {
-      // If no headers at all, generate a single header row as Column 1..N
       const hdrRows =
         (headerRowsPadded.length && colCount > 0)
           ? headerRowsPadded
@@ -57614,7 +57701,7 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
             ${hdrRows.map((rowArr, rowIdx) => `
               <tr>
                 ${rowArr.map((cell, colIdx) => {
-                  const topPx = rowIdx * 32; // stack sticky header rows
+                  const topPx = rowIdx * 32;
                   const z = 10 - rowIdx;
                   const v = (cell == null) ? '' : String(cell);
                   return `<th style="top:${topPx}px; z-index:${z};">${escapeHtml(v)}</th>`;
@@ -57630,8 +57717,17 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
             const raw = Array.isArray(r?.raw_columns) ? r.raw_columns : [];
             const cells = [];
             for (let i = 0; i < colCount; i++) {
-              const v = (i < raw.length) ? raw[i] : '';
-              cells.push(`<td>${escapeHtml(String(v ?? ''))}</td>`);
+              const v0 = (i < raw.length) ? raw[i] : '';
+              const k = colKinds[i] || 'text';
+
+              let out = '';
+              if (k === 'date') out = excelSerialToDmy(v0);
+              else if (k === 'time') out = excelFracToHHMM(v0);
+              else if (k === 'break') out = fmtInt(v0);
+              else if (k === 'money') out = fmtMoney(v0);
+              else out = String(v0 ?? '');
+
+              cells.push(`<td>${escapeHtml(out)}</td>`);
             }
             return `<tr>${cells.join('')}</tr>`;
           }).join('')
@@ -57909,11 +58005,8 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
 
   const title = `Evidence ${String(tsId).slice(0, 8)}…`;
 
-  // ✅ Canonical evidence type options (UI labels)
-  // NOTE: "Other" is allowed, but does NOT satisfy invoice readiness unless it maps to a canonical kind.
   const OPTIONS = ['Timesheet', 'Mileage', 'Travel', 'Accommodation', 'Other'];
 
-  // ✅ Map canonical stored kinds to UI labels
   const kindTrim = String(kind || '').trim();
   const kindUpper = kindTrim.toUpperCase();
 
@@ -57924,7 +58017,7 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
     if (u === 'TRAVEL') return 'Travel';
     if (u === 'ACCOMMODATION') return 'Accommodation';
     if (u === 'OTHER') return 'Other';
-    return null; // unknown => Other + free text
+    return null;
   };
 
   const uiToKind = (label, otherText) => {
@@ -57936,8 +58029,6 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
     if (v === 'ACCOMMODATION') return 'ACCOMMODATION';
     if (v === 'OTHER') return 'OTHER';
 
-    // If "Other" in the select, allow free-text value but it will not satisfy gating.
-    // Keep it stable; backend will uppercase it.
     const txt = String(otherText || '').trim();
     return txt || 'OTHER';
   };
@@ -58044,7 +58135,6 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
     </div>
   `;
 
-  // Hide Delete Timesheet button while viewer open
   let __tsDelPrev = null;
   const __hideTsDelete = () => {
     try {
@@ -58093,7 +58183,6 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
         return { ok: false };
       }
 
-      // Canonicalise (backend also normalises; do it here for correctness / clarity)
       newKind = String(newKind || '').trim().toUpperCase();
 
       if (!newKind) {
@@ -58102,7 +58191,6 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
         return { ok: false };
       }
 
-      // If user chose Other, require a value (either "OTHER" or free text)
       if (String(selVal || '').trim().toLowerCase() === 'other') {
         if (!otherVal) {
           alert('Please enter an evidence type (or enter "Other").');
@@ -58120,13 +58208,11 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
       const idNow = tsIdNow();
       if (!idNow) throw new Error('Timesheet id missing.');
 
-      // ✅ Guarded PATCH with expected_timesheet_id
       await apiPatchJson(
         `/api/timesheets/${enc(idNow)}/evidence/${enc(evidenceId)}`,
         { expected_timesheet_id: expectedNow(), kind: newKind }
       );
 
-      // Refresh evidence list in parent modal state (use current id)
       try {
         if (typeof refreshTimesheetEvidenceIntoModalState === 'function') {
           await refreshTimesheetEvidenceIntoModalState(idNow);
@@ -58173,7 +58259,6 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
 
   try { requestAnimationFrame(() => __hideTsDelete()); } catch {}
 
-  // Wire: show/hide Other + delete evidence
   try {
     if (canEditType) {
       const sel = document.getElementById(selId);
@@ -58210,13 +58295,11 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
             const idNow = tsIdNow();
             if (!idNow) throw new Error('Timesheet id missing.');
 
-            // ✅ Guarded DELETE with expected_timesheet_id
             await apiDeleteJson(
               `/api/timesheets/${enc(idNow)}/evidence/${enc(evidenceId)}`,
               { expected_timesheet_id: expectedNow() }
             );
 
-            // Refresh evidence list for current id
             try {
               if (typeof refreshTimesheetEvidenceIntoModalState === 'function') {
                 await refreshTimesheetEvidenceIntoModalState(idNow);
@@ -58225,7 +58308,6 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
 
             if (window.__toast) window.__toast('Evidence removed');
 
-            // Close viewer
             try { document.getElementById('btnCloseModal')?.click(); } catch {}
           } catch (err) {
             if (await handleMovedInViewer(err, 'evidence-viewer-delete')) return;
