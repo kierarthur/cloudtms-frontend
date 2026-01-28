@@ -29319,6 +29319,86 @@ async function invoiceModalSaveEdits(modalCtx, { rerender, reload }) {
       console.log('[INV][TOAST]', msg);
     } catch {}
   };
+  // ✅ NEW: Styled modal prompt (not window.confirm)
+  // Returns true if user clicks "Yes, send now", otherwise false.
+  const promptSendInvoiceEmailNow = async ({ toEmail } = {}) => {
+    const to = (typeof toEmail === 'string' && toEmail.trim()) ? toEmail.trim() : '';
+
+    const title = 'Send invoice by email now?';
+
+    const renderTab = () => {
+      const recipientLine = to ? `<div class="mini" style="margin-top:6px;"><b>Recipient:</b> ${escapeHtml(to)}</div>` : '';
+      return `
+        <div style="padding: 6px 2px;">
+          <div style="font-size:14px; font-weight:700; margin-bottom:6px;">
+            Do you want to send the newly issued invoice to the client by email now?
+          </div>
+          ${recipientLine}
+          <div class="mini" style="margin-top:10px; color:#666;">
+            If you choose “Yes”, the email will be queued immediately. The PDF will be generated via the invoice PDF queue if needed.
+          </div>
+
+          <div style="display:flex; gap:10px; margin-top:14px;">
+            <button id="btnInvSendEmailYes" type="button" class="btn btn-primary">Yes, send now</button>
+            <button id="btnInvSendEmailNo"  type="button" class="btn btn-outline">No, not now</button>
+          </div>
+        </div>
+      `;
+    };
+
+    return await new Promise((resolve) => {
+      let done = false;
+      const finish = (v) => {
+        if (done) return;
+        done = true;
+        resolve(!!v);
+      };
+
+      // Utility modal: no Save footer, Close works as "No"
+      showModal(
+        title,
+        [{ key: 'confirm', label: 'Confirm' }],
+        () => renderTab(),
+        null,
+        true,
+        null,
+        {
+          kind: 'invoice-send-email-confirm',
+          noParentGate: true,
+          showSave: false,
+          showApply: false,
+          onDismiss: () => finish(false)
+        }
+      );
+
+      const wire = () => {
+        const yes = document.getElementById('btnInvSendEmailYes');
+        const no  = document.getElementById('btnInvSendEmailNo');
+
+        if (yes && !yes.__wired) {
+          yes.__wired = true;
+          yes.onclick = () => {
+            finish(true);
+            try { document.getElementById('btnCloseModal')?.click(); } catch {}
+          };
+        }
+
+        if (no && !no.__wired) {
+          no.__wired = true;
+          no.onclick = () => {
+            finish(false);
+            try { document.getElementById('btnCloseModal')?.click(); } catch {}
+          };
+        }
+      };
+
+      try {
+        requestAnimationFrame(() => requestAnimationFrame(wire));
+      } catch {
+        setTimeout(wire, 0);
+      }
+    });
+  };
 
   const nonEmpty = (v) => {
     if (!v) return false;
@@ -29787,6 +29867,28 @@ async function invoiceModalSaveEdits(modalCtx, { rerender, reload }) {
         }
         if (st2 !== 'ISSUED') {
           throw new Error('Failed to issue invoice.');
+        }
+
+        // ✅ NEW: Ask whether to email now (only if backend says eligible)
+        const emailEligible = (issueRes?.email_eligible === true);
+
+        if (emailEligible) {
+          const sendNow = await promptSendInvoiceEmailNow({
+            toEmail: issueRes?.email_to_suggest || issueRes?.email_to || null
+          });
+
+          if (sendNow) {
+            try {
+              await invoiceModalFetchJson(`/api/invoices/${encodeURIComponent(invoiceId)}/email`, {
+                method: 'POST',
+                body: JSON.stringify({})
+              });
+              toast('Invoice email queued.');
+            } catch (err) {
+              const msg = String(err?.message || err || 'Failed to queue invoice email.');
+              toast(msg);
+            }
+          }
         }
       } else {
         // ✅ clear_pdf MUST be true on unissue (invalidate bundle)
@@ -41005,6 +41107,7 @@ const frame = {
     opts.kind === 'resolve-candidate'  ||
     opts.kind === 'resolve-client'     ||
     opts.kind === 'invoice-reference-numbers' ||
+    opts.kind === 'invoice-send-email-confirm' ||
     (typeof opts.kind === 'string' && opts.kind.startsWith('import-summary-')) ||
     (typeof opts.kind === 'string' && opts.kind.startsWith('invoice-batch-')) ||
     (typeof opts.kind === 'string' && opts.kind.startsWith('import-summary-invoice-batch-'));
@@ -41012,6 +41115,7 @@ const frame = {
   if (isUtilityKind) {
     return 'view';
   }
+
 
 
 
@@ -43112,15 +43216,15 @@ try {
   const isChild = (stack().length > 1);
 
   // Utility modals (resolve/import summaries) should keep inner buttons active
-  const isUtilityKindForThis =
+   const isUtilityKindForThis =
     this.kind === 'timesheets-resolve' ||
     this.kind === 'resolve-candidate'  ||
     this.kind === 'resolve-client'     ||
     this.kind === 'invoice-reference-numbers' ||
+    this.kind === 'invoice-send-email-confirm' ||
     (typeof this.kind === 'string' && this.kind.startsWith('import-summary-')) ||
     (typeof this.kind === 'string' && this.kind.startsWith('invoice-batch-')) ||
     (typeof this.kind === 'string' && this.kind.startsWith('import-summary-invoice-batch-'));
-
 
 if (this.noParentGate) {
   const ro = isUtilityKindForThis
@@ -43834,10 +43938,10 @@ const isUtilityKind =
   top.kind === 'resolve-candidate'  ||
   top.kind === 'resolve-client'     ||
   top.kind === 'invoice-reference-numbers' ||
+  top.kind === 'invoice-send-email-confirm' ||
   (typeof top.kind === 'string' && top.kind.startsWith('import-summary-')) ||
   (typeof top.kind === 'string' && top.kind.startsWith('invoice-batch-')) ||
   (typeof top.kind === 'string' && top.kind.startsWith('import-summary-invoice-batch-'));
-
 
 
 
@@ -45147,6 +45251,7 @@ if (closing?._detachDirty){ try{closing._detachDirty();}catch{} closing._detachD
   const closingIsUtility =
     (typeof closingKind === 'string' && (
       closingKind === 'invoice-reference-numbers' ||
+      closingKind === 'invoice-send-email-confirm' ||
       closingKind.startsWith('import-summary-') ||
       closingKind.startsWith('invoice-batch-') ||
       closingKind.startsWith('import-summary-invoice-batch-')
