@@ -56291,6 +56291,81 @@ async function fetchTimesheetDetails(timesheetId) {
   return detail;
 }
 
+async function fetchTimesheetSourceRows(timesheetId, opts = {}) {
+  const LOGM = (typeof window.__LOG_MODAL === 'boolean') ? window.__LOG_MODAL : false;
+  const L    = (...a) => { if (LOGM) console.log('[TS][SOURCE]', ...a); };
+  const GC   = (label) => { if (LOGM) console.groupCollapsed('[TS][SOURCE]', label); };
+  const GE   = () => { if (LOGM) console.groupEnd(); };
+
+  if (!timesheetId) {
+    throw new Error('fetchTimesheetSourceRows: timesheetId is required');
+  }
+
+  const scopeRaw = (opts.scope || 'all').toLowerCase();
+  const scope    = scopeRaw === 'shift' ? 'shift' : 'all';
+  const shiftId  = scope === 'shift' ? (opts.shiftId || opts.shift_id || '') : '';
+  const includeExcluded = !!opts.includeExcluded || !!opts.include_excluded;
+
+  // ✅ NEW: optional filter to fetch only a specific import batch
+  const importId = String(opts.importId || opts.import_id || '').trim();
+
+  const qp = new URLSearchParams();
+  qp.set('scope', scope);
+  if (scope === 'shift' && shiftId) qp.set('shift_id', String(shiftId));
+  if (includeExcluded) qp.set('include_excluded', 'true');
+  if (importId) qp.set('import_id', importId);
+
+  const encId = encodeURIComponent(timesheetId);
+  const url   = API(`/api/timesheets/${encId}/source-print?${qp.toString()}`);
+
+  GC('request');
+  L('→ GET', { url, timesheetId, scope, shiftId: shiftId || null, includeExcluded, importId: importId || null });
+
+  let res;
+  try {
+    res = await authFetch(url);
+  } catch (err) {
+    L('network error', { url, error: err });
+    GE();
+    throw err;
+  }
+
+  let json;
+  try {
+    const text = await res.text();
+    if (!res.ok) {
+      L('server error', { status: res.status, bodyPreview: text.slice(0, 400) });
+      GE();
+      throw new Error(text || `Source rows failed (${res.status})`);
+    }
+    json = text ? JSON.parse(text) : {};
+  } catch (err) {
+    L('parse error', { status: res.status, error: err });
+    GE();
+    throw err;
+  }
+
+  const imports = Array.isArray(json.imports) ? json.imports : [];
+  const summary = imports.map(i => ({
+    source_system: i.source_system,
+    import_id: i.import_id,
+    header_rows: Array.isArray(i.header_rows) ? i.header_rows.length : 0,
+    header_columns: Array.isArray(i.header_columns) ? i.header_columns.length : 0,
+    rows: Array.isArray(i.rows) ? i.rows.length : 0
+  }));
+
+  L('RESULT', {
+    timesheet_id: json.timesheet_id || timesheetId,
+    scope: json.scope || scope,
+    includes_excluded: json.includes_excluded ?? includeExcluded,
+    importsCount: imports.length,
+    importsSummary: summary
+  });
+  GE();
+  return json;
+}
+
+
 async function fetchTimesheetRelated(timesheetId) {
   const LOGM = (typeof window.__LOG_MODAL === 'boolean') ? window.__LOG_MODAL : false;
   const L    = (...a) => { if (LOGM) console.log('[TS][RELATED]', ...a); };
@@ -56620,79 +56695,6 @@ async function openTimesheetEvidenceViewerSignatures(ev) {
   );
 
   GE();
-}
-
-async function fetchTimesheetSourceRows(timesheetId, opts = {}) {
-  const LOGM = (typeof window.__LOG_MODAL === 'boolean') ? window.__LOG_MODAL : false;
-  const L    = (...a) => { if (LOGM) console.log('[TS][SOURCE]', ...a); };
-  const GC   = (label) => { if (LOGM) console.groupCollapsed('[TS][SOURCE]', label); };
-  const GE   = () => { if (LOGM) console.groupEnd(); };
-
-  if (!timesheetId) {
-    throw new Error('fetchTimesheetSourceRows: timesheetId is required');
-  }
-
-  const scopeRaw = (opts.scope || 'all').toLowerCase();
-  const scope    = scopeRaw === 'shift' ? 'shift' : 'all';
-  const shiftId  = scope === 'shift' ? (opts.shiftId || opts.shift_id || '') : '';
-  const includeExcluded = !!opts.includeExcluded || !!opts.include_excluded;
-
-  // ✅ NEW: optional filter to fetch only a specific import batch
-  const importId = String(opts.importId || opts.import_id || '').trim();
-
-  const qp = new URLSearchParams();
-  qp.set('scope', scope);
-  if (scope === 'shift' && shiftId) qp.set('shift_id', String(shiftId));
-  if (includeExcluded) qp.set('include_excluded', 'true');
-  if (importId) qp.set('import_id', importId);
-
-  const encId = encodeURIComponent(timesheetId);
-  const url   = API(`/api/timesheets/${encId}/source-print?${qp.toString()}`);
-
-  GC('request');
-  L('→ GET', { url, timesheetId, scope, shiftId: shiftId || null, includeExcluded, importId: importId || null });
-
-  let res;
-  try {
-    res = await authFetch(url);
-  } catch (err) {
-    L('network error', { url, error: err });
-    GE();
-    throw err;
-  }
-
-  let json;
-  try {
-    const text = await res.text();
-    if (!res.ok) {
-      L('server error', { status: res.status, bodyPreview: text.slice(0, 400) });
-      GE();
-      throw new Error(text || `Source rows failed (${res.status})`);
-    }
-    json = text ? JSON.parse(text) : {};
-  } catch (err) {
-    L('parse error', { status: res.status, error: err });
-    GE();
-    throw err;
-  }
-
-  const imports = Array.isArray(json.imports) ? json.imports : [];
-  const summary = imports.map(i => ({
-    source_system: i.source_system,
-    import_id: i.import_id,
-    header_columns: Array.isArray(i.header_columns) ? i.header_columns.length : 0,
-    rows: Array.isArray(i.rows) ? i.rows.length : 0
-  }));
-
-  L('RESULT', {
-    timesheet_id: json.timesheet_id || timesheetId,
-    scope: json.scope || scope,
-    includes_excluded: json.includes_excluded ?? includeExcluded,
-    importsCount: imports.length,
-    importsSummary: summary
-  });
-  GE();
-  return json;
 }
 
 
@@ -57490,7 +57492,7 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
   };
 
   // ─────────────────────────────────────────────────────────────
-  // IMPORT TABLE preview (NHSP “pretty” + generic fallback)
+  // IMPORT TABLE preview (raw table: multi-row header_rows + raw_columns)
   // ─────────────────────────────────────────────────────────────
   if (previewMode === 'IMPORT_TABLE') {
     const importId =
@@ -57523,28 +57525,40 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
     const imports = Array.isArray(json.imports) ? json.imports : [];
     const imp = imports.find(x => String(x?.import_id) === String(importId)) || imports[0] || null;
 
+    const headerRowsRaw = Array.isArray(imp?.header_rows) ? imp.header_rows : [];
     const headerColsRaw = Array.isArray(imp?.header_columns) ? imp.header_columns : [];
     const rows = Array.isArray(imp?.rows) ? imp.rows : [];
 
-    // ✅ CRITICAL: preserve header alignment (DO NOT drop blanks).
-    // header columns may include blanks because the source has merged / multi-row headers.
-    const headerCols = (() => {
-      const mapped = (headerColsRaw || []).map(x => {
-        const s = (x == null) ? '' : String(x);
-        return s.replace(/\s+/g, ' ').trim();
-      });
+    // Normalise headers:
+    // - Prefer header_rows (multi-row). Preserve blanks (do NOT drop).
+    // - Else fallback to single-row header_columns.
+    let headerRows = [];
+    if (Array.isArray(headerRowsRaw) && headerRowsRaw.length) {
+      headerRows = headerRowsRaw.map(r => (Array.isArray(r) ? r : []));
+    } else if (Array.isArray(headerColsRaw) && headerColsRaw.length) {
+      headerRows = [headerColsRaw];
+    } else {
+      headerRows = [];
+    }
 
-      if (mapped.length) return mapped;
+    // Column count:
+    // max(header_rows widths) -> else header_columns length -> else first row raw_columns length -> else 0
+    let colCount = 0;
+    for (const r of headerRows) {
+      if (Array.isArray(r) && r.length > colCount) colCount = r.length;
+    }
+    if (colCount === 0 && Array.isArray(headerColsRaw) && headerColsRaw.length) colCount = headerColsRaw.length;
+    if (colCount === 0 && Array.isArray(rows?.[0]?.raw_columns)) colCount = rows[0].raw_columns.length;
 
-      const raw0 = Array.isArray(rows?.[0]?.raw_columns) ? rows[0].raw_columns : [];
-      const n = Array.isArray(raw0) ? raw0.length : 0;
-      if (n > 0) return Array.from({ length: n }, (_, i) => `Column ${i + 1}`);
-      return [];
-    })();
+    // If still unknown, show a safe empty table
+    if (!Number.isFinite(colCount) || colCount < 0) colCount = 0;
 
-    // For display only (keep indexing headerCols intact)
-    const headerDisp = headerCols.map((h, i) => (h ? h : `C${i + 1}`));
+    // Pad header rows to colCount with blanks (preserve alignment)
+    const headerRowsPadded = headerRows.map(r =>
+      Array.from({ length: colCount }, (_, i) => (i < (r?.length || 0) ? r[i] : ''))
+    );
 
+    // Download key
     const downloadKeyRaw =
       (evidenceItem.download_storage_key != null && String(evidenceItem.download_storage_key).trim())
         ? String(evidenceItem.download_storage_key).trim()
@@ -57554,271 +57568,6 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
 
     const downloadKey = downloadKeyRaw.replace(/^\/+/, '').trim();
 
-    // ── shared formatting helpers ───────────────────────────────
-    const normH = (s) => String(s || '').trim().toLowerCase().replace(/\s+/g, ' ');
-    const headersNorm = headerCols.map(normH); // keep blanks as ''
-
-    const fmtYmdToDmy = (ymd) => {
-      const s = String(ymd || '').trim();
-      const m = s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
-      if (!m) return s || '—';
-      return `${m[3]}/${m[2]}/${m[1]}`;
-    };
-
-    const parseDmyToMs = (dmy) => {
-      const s = String(dmy || '').trim();
-      const m = s.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
-      if (!m) return null;
-      const dd = Number(m[1]), mm = Number(m[2]), yy = Number(m[3]);
-      if (!Number.isFinite(dd) || !Number.isFinite(mm) || !Number.isFinite(yy)) return null;
-      const ms = Date.UTC(yy, mm - 1, dd, 0, 0, 0, 0);
-      return Number.isFinite(ms) ? ms : null;
-    };
-
-    const parseYmdToMs = (ymd) => {
-      const s = String(ymd || '').trim();
-      const m = s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
-      if (!m) return null;
-      const yy = Number(m[1]), mm = Number(m[2]), dd = Number(m[3]);
-      if (!Number.isFinite(dd) || !Number.isFinite(mm) || !Number.isFinite(yy)) return null;
-      const ms = Date.UTC(yy, mm - 1, dd, 0, 0, 0, 0);
-      return Number.isFinite(ms) ? ms : null;
-    };
-
-    // Excel time/duration fractions (0.375 = 09:00, 0.3125 = 07:30)
-    const fmtDayFractionToHHMM = (v) => {
-      const n = Number(v);
-      if (!Number.isFinite(n)) {
-        const s = String(v ?? '').trim();
-        if (/^\d{1,2}:\d{2}$/.test(s)) {
-          const [h, m] = s.split(':');
-          return `${String(Number(h) || 0).padStart(2, '0')}:${String(Number(m) || 0).padStart(2, '0')}`;
-        }
-        return String(v ?? '');
-      }
-      // treat 0..2 as day fractions (covers durations up to 48h)
-      if (n < 0 || n > 2) return String(v ?? '');
-      const mins = Math.round(n * 1440);
-      const hh = Math.floor((mins % 1440) / 60);
-      const mm = mins % 60;
-      return `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
-    };
-
-    const parseTimeToSortMinutes = (v) => {
-      const n = Number(v);
-      if (Number.isFinite(n) && n >= 0 && n <= 2) return Math.round(n * 1440);
-
-      const s = String(v ?? '').trim();
-      const m = s.match(/^(\d{1,2}):(\d{2})$/);
-      if (!m) return null;
-      const hh = Number(m[1]);
-      const mm = Number(m[2]);
-      if (!Number.isFinite(hh) || !Number.isFinite(mm)) return null;
-      if (hh < 0 || hh > 47 || mm < 0 || mm > 59) return null;
-      return hh * 60 + mm;
-    };
-
-    const fmtMoney2 = (v) => {
-      const n = Number(v);
-      if (!Number.isFinite(n)) return String(v ?? '');
-      return n.toFixed(2);
-    };
-
-    const fmtInt = (v) => {
-      const n = Number(v);
-      if (!Number.isFinite(n)) return String(v ?? '');
-      return String(Math.round(n));
-    };
-
-    const normalizeDateDisplayAndSort = (payload, raw0) => {
-      // Prefer parsed fields
-      const ymd =
-        payload?.work_date ? String(payload.work_date).trim() :
-        payload?.date_local ? String(payload.date_local).trim() :
-        payload?.date ? String(payload.date).trim() :
-        '';
-
-      let ms = parseYmdToMs(ymd);
-      if (ms != null) return { display: fmtYmdToDmy(ymd), ms };
-
-      // If raw0 is dd/mm/yyyy
-      const rawS = String(raw0 ?? '').trim();
-      ms = parseDmyToMs(rawS);
-      if (ms != null) return { display: rawS, ms };
-
-      // If raw0 is yyyy-mm-dd
-      ms = parseYmdToMs(rawS);
-      if (ms != null) return { display: fmtYmdToDmy(rawS), ms };
-
-      // Excel serial date (rough)
-      const n = Number(raw0);
-      if (Number.isFinite(n) && n >= 20000) {
-        // Excel epoch: 1899-12-30
-        const base = Date.UTC(1899, 11, 30, 0, 0, 0, 0);
-        const ms2 = base + Math.round(n) * 86400000;
-        if (Number.isFinite(ms2)) {
-          const d = new Date(ms2);
-          const dd = String(d.getUTCDate()).padStart(2, '0');
-          const mm = String(d.getUTCMonth() + 1).padStart(2, '0');
-          const yy = String(d.getUTCFullYear());
-          return { display: `${dd}/${mm}/${yy}`, ms: ms2 };
-        }
-      }
-
-      return { display: rawS || '—', ms: null };
-    };
-
-    // ── NHSP detection + indices ────────────────────────────────
-    const hasAll = (need) => need.every(t => headersNorm.some(h => h === t || h.includes(t)));
-
-    const nhspNeed = [
-      'ref num',
-      'agency worker name',
-      'agency worker unique id',
-      'trust',
-      'ward',
-      'assignment',
-      'commission',
-      'total cost'
-    ];
-
-    const countEq = (x) => headersNorm.filter(h => h === x).length;
-    const hasSubStarts  = countEq('start') >= 2;
-    const hasSubEnds    = countEq('end') >= 2;
-    const hasSubTotals  = countEq('total') >= 2;
-    const hasSubBreak   = headersNorm.some(h => h.includes('break') && h.includes('minute'));
-
-    const hasGroupContract = headersNorm.some(h => h === 'contract' || h.includes('contract'));
-    const hasGroupActual   = headersNorm.some(h => h === 'actual'   || h.includes('actual'));
-
-    // Works for:
-    // - NEW flattened headers: start/end/break/total appear twice
-    // - OLD “group-only” headers: Contract/Actual present but subheaders missing
-    const looksLikeNhsp =
-      hasAll(nhspNeed) &&
-      (
-        (hasSubStarts && hasSubEnds && hasSubTotals && hasSubBreak) ||
-        (hasGroupContract && hasGroupActual)
-      );
-
-    const findFirstIdx = (pred) => {
-      for (let i = 0; i < headersNorm.length; i++) if (pred(headersNorm[i], headerCols[i], i)) return i;
-      return -1;
-    };
-
-    const findAllIdx = (pred, startAt = 0) => {
-      const out = [];
-      for (let i = Math.max(0, startAt); i < headersNorm.length; i++) {
-        if (pred(headersNorm[i], headerCols[i], i)) out.push(i);
-      }
-      return out;
-    };
-
-    const idxDate = findFirstIdx((hn) => hn === 'date' || hn.startsWith('date'));
-    const idxAssign = findFirstIdx((hn) => hn === 'assignment');
-
-    const scanFrom = (idxAssign >= 0 ? idxAssign + 1 : 0);
-
-    // If we only have Contract/Actual group labels (older stored headers),
-    // fall back to the canonical NHSP column positions relative to Assignment.
-    const usePositionalNhsp =
-      looksLikeNhsp &&
-      idxAssign >= 0 &&
-      !(hasSubStarts && hasSubEnds && hasSubTotals && hasSubBreak);
-
-    const idxStartAll = usePositionalNhsp
-      ? [idxAssign + 1, idxAssign + 5]
-      : findAllIdx((hn) => hn === 'start', scanFrom);
-
-    const idxEndAll = usePositionalNhsp
-      ? [idxAssign + 2, idxAssign + 6]
-      : findAllIdx((hn) => hn === 'end', scanFrom);
-
-    const idxBreakAll = usePositionalNhsp
-      ? [idxAssign + 3, idxAssign + 7]
-      : findAllIdx((hn) => hn === 'break in minutes' || (hn.includes('break') && hn.includes('minute')), scanFrom);
-
-    const idxTotalAll = usePositionalNhsp
-      ? [idxAssign + 4, idxAssign + 8]
-      : findAllIdx((hn) => hn === 'total', scanFrom);
-
-    const idxCommission = findFirstIdx((hn) => hn === 'commission' || hn.includes('commission'));
-    const idxTotalCost  = findFirstIdx((hn) => hn === 'total cost' || hn.includes('total cost'));
-
-    const canPrettyNhsp =
-      looksLikeNhsp &&
-      idxAssign >= 0 &&
-      idxStartAll.length >= 2 &&
-      idxEndAll.length >= 2 &&
-      idxBreakAll.length >= 2 &&
-      idxTotalAll.length >= 2 &&
-      idxCommission >= 0 &&
-      idxTotalCost >= 0;
-
-    const nhspIdx = canPrettyNhsp ? {
-      date: (idxDate >= 0 ? idxDate : 0),
-      ref: findFirstIdx((hn) => hn === 'ref num' || hn.includes('ref num')),
-      workerName: findFirstIdx((hn) => hn === 'agency worker name' || hn.includes('agency worker name')),
-      workerId: findFirstIdx((hn) => hn === 'agency worker unique id' || hn.includes('agency worker unique id')),
-      trust: findFirstIdx((hn) => hn === 'trust' || hn.includes('trust')),
-      ward: findFirstIdx((hn) => hn === 'ward' || hn.includes('ward')),
-      assignment: idxAssign,
-
-      // Contract block (first occurrence)
-      cStart: idxStartAll[0],
-      cEnd:   idxEndAll[0],
-      cBreak: idxBreakAll[0],
-      cTotal: idxTotalAll[0],
-
-      // Actual block (second occurrence)
-      aStart: idxStartAll[1],
-      aEnd:   idxEndAll[1],
-      aBreak: idxBreakAll[1],
-      aTotal: idxTotalAll[1],
-
-      commission: idxCommission,
-      totalCost:  idxTotalCost
-    } : null;
-
-    const genericIdx = (() => {
-      const d = idxDate >= 0 ? idxDate : findFirstIdx((hn) => hn.includes('date'));
-      const aStart =
-        findFirstIdx((hn) => hn.includes('actual start')) >= 0
-          ? findFirstIdx((hn) => hn.includes('actual start'))
-          : (idxStartAll.length >= 2 ? idxStartAll[1] : (idxStartAll.length ? idxStartAll[0] : -1));
-      return { date: d, aStart };
-    })();
-
-    // Sort rows oldest->newest, tie by ACTUAL start time
-    const rowsSorted = rows
-      .map((r, idx) => {
-        const payload = (r && typeof r.payload === 'object' && r.payload) ? r.payload : {};
-        const raw = Array.isArray(r?.raw_columns) ? r.raw_columns : [];
-
-        const dateColIdx = (nhspIdx ? nhspIdx.date : (genericIdx.date >= 0 ? genericIdx.date : 0));
-        const d = normalizeDateDisplayAndSort(payload, raw[dateColIdx]);
-
-        const aStartIdx = (nhspIdx ? nhspIdx.aStart : genericIdx.aStart);
-        const actualStartSort = (aStartIdx != null && aStartIdx >= 0) ? parseTimeToSortMinutes(raw[aStartIdx]) : null;
-
-        return {
-          _idx: idx,
-          _dateMs: d.ms,
-          _dateDisp: d.display,
-          _actualStartSort: (actualStartSort == null ? 999999 : actualStartSort),
-          _raw: raw,
-          _payload: payload
-        };
-      })
-      .sort((a, b) => {
-        const am = (a._dateMs == null) ? Number.POSITIVE_INFINITY : a._dateMs;
-        const bm = (b._dateMs == null) ? Number.POSITIVE_INFINITY : b._dateMs;
-        if (am !== bm) return am - bm;
-        if (a._actualStartSort !== b._actualStartSort) return a._actualStartSort - b._actualStartSort;
-        return a._idx - b._idx;
-      });
-
-    // ── table renderers ─────────────────────────────────────────
     const commonWrapStyle = `
       <style>
         .ts-import-wrap {
@@ -57836,13 +57585,15 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
         table.ts-import-table td {
           padding:6px 8px;
           vertical-align:top;
-          border:1px solid rgba(255,255,255,.16); /* ✅ borders around every cell */
+          border:1px solid rgba(255,255,255,.16);
         }
         table.ts-import-table thead th {
           background:#0f0f0f;
           position:sticky;
           z-index:5;
           border:1px solid rgba(255,255,255,.22);
+          text-align:left;
+          white-space:normal;
         }
         table.ts-import-table td {
           white-space:normal;
@@ -57850,57 +57601,41 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
       </style>
     `;
 
-    const mkTableGeneric = () => {
-      const hdr = headerCols.length
-        ? headerCols
-        : Array.from({ length: (rowsSorted[0]?._raw?.length || 0) }, (_, i) => `Column ${i + 1}`);
+    const mkTableRawImport = () => {
+      // If no headers at all, generate a single header row as Column 1..N
+      const hdrRows =
+        (headerRowsPadded.length && colCount > 0)
+          ? headerRowsPadded
+          : (colCount > 0 ? [Array.from({ length: colCount }, (_, i) => `Column ${i + 1}`)] : []);
 
-      const hdrDisp = hdr.map((h, i) => (String(h || '').trim() ? String(h).trim() : `Column ${i + 1}`));
-      const hdrNorm = hdr.map(normH);
+      const head = hdrRows.length
+        ? `
+          <thead>
+            ${hdrRows.map((rowArr, rowIdx) => `
+              <tr>
+                ${rowArr.map((cell, colIdx) => {
+                  const topPx = rowIdx * 32; // stack sticky header rows
+                  const z = 10 - rowIdx;
+                  const v = (cell == null) ? '' : String(cell);
+                  return `<th style="top:${topPx}px; z-index:${z};">${escapeHtml(v)}</th>`;
+                }).join('')}
+              </tr>
+            `).join('')}
+          </thead>
+        `
+        : '';
 
-      const head = `
-        <thead>
-          <tr>
-            ${hdrDisp.map((h) => `<th style="top:0; z-index:6; text-align:left;">${escapeHtml(String(h))}</th>`).join('')}
-          </tr>
-        </thead>
-      `;
-
-      const fmtCell = (i, v, hn) => {
-        const h = hn || '';
-        if (h.includes('date')) {
-          const d = normalizeDateDisplayAndSort(null, v);
-          return d.display;
-        }
-        if (h.includes('commission') || h.includes('total cost') || (h.includes('cost') && !h.includes('cost centre'))) {
-          return fmtMoney2(v);
-        }
-        if (h.includes('break') && h.includes('minute')) {
-          return fmtInt(v);
-        }
-        if (h === 'start' || h === 'end' || h === 'total' || h.includes(' start') || h.includes(' end') || h.includes(' total')) {
-          const n = Number(v);
-          if (Number.isFinite(n) && n >= 0 && n <= 2) return fmtDayFractionToHHMM(v);
-          const s = String(v ?? '').trim();
-          if (/^\d{1,2}:\d{2}$/.test(s)) return fmtDayFractionToHHMM(s);
-        }
-        return String(v ?? '');
-      };
-
-      const body = rowsSorted.length
-        ? rowsSorted.map((x) => {
-            const raw = Array.isArray(x._raw) ? x._raw : [];
-            const nCols = hdr.length ? hdr.length : raw.length;
-
+      const body = rows.length
+        ? rows.map((r) => {
+            const raw = Array.isArray(r?.raw_columns) ? r.raw_columns : [];
             const cells = [];
-            for (let i = 0; i < nCols; i++) {
-              const v = raw[i];
-              const hn = hdrNorm[i] || '';
-              cells.push(`<td>${escapeHtml(fmtCell(i, v, hn))}</td>`);
+            for (let i = 0; i < colCount; i++) {
+              const v = (i < raw.length) ? raw[i] : '';
+              cells.push(`<td>${escapeHtml(String(v ?? ''))}</td>`);
             }
             return `<tr>${cells.join('')}</tr>`;
           }).join('')
-        : `<tr><td colspan="${escapeHtml(String(hdr.length || 1))}" style="padding:10px; opacity:.85;">No rows found for this import.</td></tr>`;
+        : `<tr><td colspan="${escapeHtml(String(Math.max(colCount, 1)))}" style="padding:10px; opacity:.85;">No rows found for this import.</td></tr>`;
 
       return `
         ${commonWrapStyle}
@@ -57911,128 +57646,6 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
           </table>
         </div>
       `;
-    };
-
-    const mkTableNhspPretty = () => {
-      const style = `
-        <style>
-          .ts-import-wrap {
-            max-height:520px;
-            overflow:auto;
-            border:1px solid var(--line);
-            border-radius:8px;
-            background:#000;
-          }
-          table.ts-import-table { width:100%; border-collapse:collapse; }
-          table.ts-import-table th, table.ts-import-table td {
-            padding:6px 8px;
-            vertical-align:top;
-            border:1px solid rgba(255,255,255,.16); /* ✅ borders around every cell */
-          }
-          table.ts-import-table thead th {
-            background:#0f0f0f;
-            position:sticky;
-            z-index:5;
-            border:1px solid rgba(255,255,255,.22);
-          }
-          table.ts-import-table thead tr:nth-child(1) th { top:0;   z-index:6; }
-          table.ts-import-table thead tr:nth-child(2) th { top:32px; z-index:5; }
-          table.ts-import-table td { white-space:normal; }
-          .ts-import-center { text-align:center; }
-        </style>
-      `;
-
-      const get = (raw, i) => (i != null && i >= 0) ? raw[i] : null;
-
-      const body = rowsSorted.length
-        ? rowsSorted.map((x) => {
-            const raw = Array.isArray(x._raw) ? x._raw : [];
-            const payload = (x._payload && typeof x._payload === 'object') ? x._payload : {};
-
-            const dateDisp = (() => {
-              const raw0 = raw[nhspIdx.date];
-              const d = normalizeDateDisplayAndSort(payload, raw0);
-              return d.display;
-            })();
-
-            const refNum     = String(get(raw, nhspIdx.ref) ?? '');
-            const workerName = String(get(raw, nhspIdx.workerName) ?? '');
-            const workerId   = String(get(raw, nhspIdx.workerId) ?? '');
-            const trust      = String(get(raw, nhspIdx.trust) ?? '');
-            const ward       = String(get(raw, nhspIdx.ward) ?? '');
-            const assignment = String(get(raw, nhspIdx.assignment) ?? '');
-
-            const cStart = fmtDayFractionToHHMM(get(raw, nhspIdx.cStart));
-            const cEnd   = fmtDayFractionToHHMM(get(raw, nhspIdx.cEnd));
-            const cBr    = fmtInt(get(raw, nhspIdx.cBreak));
-            const cTot   = fmtDayFractionToHHMM(get(raw, nhspIdx.cTotal));
-
-            const aStart = fmtDayFractionToHHMM(get(raw, nhspIdx.aStart));
-            const aEnd   = fmtDayFractionToHHMM(get(raw, nhspIdx.aEnd));
-            const aBr    = fmtInt(get(raw, nhspIdx.aBreak));
-            const aTot   = fmtDayFractionToHHMM(get(raw, nhspIdx.aTotal));
-
-            const commission = fmtMoney2(get(raw, nhspIdx.commission));
-            const totalCost  = fmtMoney2(get(raw, nhspIdx.totalCost));
-
-            const cells = [
-              dateDisp,
-              refNum,
-              workerName,
-              workerId,
-              trust,
-              ward,
-              assignment,
-              cStart, cEnd, cBr, cTot,
-              aStart, aEnd, aBr, aTot,
-              commission,
-              totalCost
-            ];
-
-            return `<tr>${cells.map(v => `<td>${escapeHtml(String(v ?? ''))}</td>`).join('')}</tr>`;
-          }).join('')
-        : `<tr><td colspan="17" style="padding:10px; opacity:.85;">No rows found for this import.</td></tr>`;
-
-      // ✅ EXACT layout requested:
-      // Contract / Actual grouped headings, and subcolumns Start/End/Break/Total beneath each.
-      const head = `
-        <thead>
-          <tr>
-            <th rowspan="2">Date</th>
-            <th rowspan="2">Ref Num</th>
-            <th rowspan="2">Agency Worker Name</th>
-            <th rowspan="2">Agency Worker Unique Id</th>
-            <th rowspan="2">Trust</th>
-            <th rowspan="2">Ward</th>
-            <th rowspan="2">Assignment</th>
-
-            <th colspan="4" class="ts-import-center">Contract</th>
-            <th colspan="4" class="ts-import-center">Actual</th>
-
-            <th rowspan="2">Commission</th>
-            <th rowspan="2">Total Cost</th>
-          </tr>
-          <tr>
-            <th>Start</th><th>End</th><th>Break In Minutes</th><th>Total</th>
-            <th>Start</th><th>End</th><th>Break In Minutes</th><th>Total</th>
-          </tr>
-        </thead>
-      `;
-
-      return `
-        ${style}
-        <div class="ts-import-wrap">
-          <table class="ts-import-table">
-            ${head}
-            <tbody>${body}</tbody>
-          </table>
-        </div>
-      `;
-    };
-
-    const mkTable = () => {
-      if (nhspIdx) return mkTableNhspPretty();
-      return mkTableGeneric();
     };
 
     const title = `Import evidence ${String(tsIdForPrint).slice(0, 8)}…`;
@@ -58047,8 +57660,9 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
          </button>`
       : `<span class="mini" style="opacity:.85;">No downloadable import file key</span>`;
 
-    const rowsMatched = Array.isArray(rowsSorted) ? rowsSorted.length : 0;
+    const rowsMatched = Array.isArray(rows) ? rows.length : 0;
     const sourceLabel = String(imp?.source_system || evidenceItem.kind || 'IMPORT');
+    const headerRowsCount = Array.isArray(headerRowsRaw) ? headerRowsRaw.length : 0;
 
     const bodyHtml = `
       <div class="tabc">
@@ -58058,7 +57672,7 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
             <div class="controls">
               <span class="mini">${escapeHtml(sourceLabel)}</span>
               <div class="mini" style="opacity:.75; margin-top:2px;">
-                ${nhspIdx ? 'NHSP view' : 'Generic view'}
+                Raw import view (no derived columns)
               </div>
             </div>
           </div>
@@ -58066,6 +57680,12 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
             <label>Rows matched</label>
             <div class="controls">
               <span class="mini">${escapeHtml(String(rowsMatched))}</span>
+            </div>
+          </div>
+          <div class="row">
+            <label>Header rows</label>
+            <div class="controls">
+              <span class="mini">${escapeHtml(String(headerRowsCount || (headerColsRaw.length ? 1 : 0)))}</span>
             </div>
           </div>
           <div class="row">
@@ -58086,7 +57706,7 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
           <div class="row">
             <label>Rows (this timesheet only)</label>
             <div class="controls">
-              ${mkTable()}
+              ${mkTableRawImport()}
             </div>
           </div>
         </div>
@@ -58485,8 +58105,6 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
       // If user chose Other, require a value (either "OTHER" or free text)
       if (String(selVal || '').trim().toLowerCase() === 'other') {
         if (!otherVal) {
-          // Allow "OTHER" explicitly if user wants canonical OTHER
-          // (But UI requires clarity to prevent accidental blank)
           alert('Please enter an evidence type (or enter "Other").');
           GE();
           return { ok: false };
@@ -58525,7 +58143,6 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
         return { ok: false };
       }
 
-      // ✅ Friendly lock/paid messaging
       const msg = String(err?.message || 'Failed to update evidence type.');
       if (/invoiced|paid|locked/i.test(msg)) {
         try { window.__toast && window.__toast(msg); } catch {}
@@ -58631,6 +58248,8 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
 
   GE();
 }
+
+
 
 function renderTimesheetOverviewTab(ctx) {
   const { LOGM, L, GC, GE } = getTsLoggers('[TS][OVERVIEW]');
