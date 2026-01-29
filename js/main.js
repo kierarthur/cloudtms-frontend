@@ -12892,6 +12892,7 @@ async function openSearchModal(opts = {}) {
           <option value="EXPENSES_EVIDENCE">Expenses evidence missing</option>
           <option value="MILEAGE_EVIDENCE">Mileage evidence missing</option>
           <option value="REFERENCE_MISSING">Reference missing</option>
+          <option value="REFS_PDF_INVALID">Refs - Timesheet PDF invalid</option>
           <option value="VALIDATION">Validation</option>
           <option value="ON_HOLD">On hold</option>
           <option value="AUTHORISATION">Awaiting Authorisation</option>
@@ -13123,6 +13124,429 @@ async function openSearchModal(opts = {}) {
 
   // Extra wiring (eg. load/save presets actions)
   setTimeout(wireAdvancedSearch, 0);
+}
+
+function renderTimesheetIssuesTab(ctx) {
+  const { LOGM, L, GC, GE } = getTsLoggers('[TS][ISSUES]');
+  const { row, details } = normaliseTimesheetCtx(ctx);
+
+  GC('render');
+
+  const tsfin  = details.tsfin || {};
+  const ts     = details.timesheet || {};
+
+  // ✅ Use the shared helper for requiresAuth/authorised/badge rule (per spec)
+  let authInfo = { requires: false, authorised: false, showAwaitingBadge: false };
+  if (typeof computeRequiresTimesheetAuthorisation === 'function') {
+    try {
+      authInfo = computeRequiresTimesheetAuthorisation(details, row) || authInfo;
+    } catch (e) {
+      if (LOGM) L('[ISSUES] computeRequiresTimesheetAuthorisation failed (non-fatal)', e);
+    }
+  }
+
+  // ✅ Use the shared helper for the mutually-exclusive Processing State label (per spec)
+  let ps = { key: '', label: 'Unprocessed' };
+  if (typeof computeTimesheetProcessingState === 'function') {
+    try {
+      ps = computeTimesheetProcessingState(details, row) || ps;
+    } catch (e) {
+      if (LOGM) L('[ISSUES] computeTimesheetProcessingState failed (non-fatal)', e);
+    }
+  } else {
+    // If helper is not yet implemented, do not invent alternate state logic here.
+    // The tab must still render without crashing.
+    ps = { key: 'UNPROCESSED', label: 'Unprocessed' };
+  }
+
+  const esc = (typeof escapeHtml === 'function')
+    ? escapeHtml
+    : (s) => String(s == null ? '' : s)
+        .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+        .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+
+  const fmtYmdToDmy = (ymd) => {
+    const s = String(ymd || '').slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+    const [y, m, d] = s.split('-');
+    return `${d}/${m}/${y}`;
+  };
+
+  const fmtDow = (ymd) => {
+    const s = String(ymd || '').slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return '';
+    const d = new Date(`${s}T00:00:00Z`);
+    if (Number.isNaN(d.getTime())) return '';
+    return d.toLocaleDateString('en-GB', { weekday: 'short', timeZone: 'Europe/London' });
+  };
+
+  const addDaysYmd = (ymd, deltaDays) => {
+    const s = String(ymd || '').slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return null;
+    const [yy, mm, dd] = s.split('-').map(Number);
+    const dt = new Date(Date.UTC(yy, mm - 1, dd));
+    dt.setUTCDate(dt.getUTCDate() + Number(deltaDays || 0));
+    return dt.toISOString().slice(0, 10);
+  };
+
+  // Monday start (matches Postgres date_trunc('week', ...) behaviour)
+  const weekStartMondayYmd = (ymd) => {
+    const s = String(ymd || '').slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return null;
+    const [yy, mm, dd] = s.split('-').map(Number);
+    const dt = new Date(Date.UTC(yy, mm - 1, dd));
+    const jsDow = dt.getUTCDay();        // Sun=0..Sat=6
+    const monIndex = (jsDow + 6) % 7;   // Mon=0..Sun=6
+    dt.setUTCDate(dt.getUTCDate() - monIndex);
+    return dt.toISOString().slice(0, 10);
+  };
+
+  const boolish = (v) => {
+    if (v === true) return true;
+    if (v === false) return false;
+    if (v == null) return false;
+    const s = String(v).trim().toLowerCase();
+    return (s === 'true' || s === '1' || s === 'yes' || s === 'y' || s === 'on');
+  };
+
+  const normStr = (v) => (v == null ? '' : String(v).trim());
+
+  const fmtHHMM = (isoLike) => {
+    const s = String(isoLike || '');
+    const m1 = s.match(/T(\d{2}:\d{2})/);
+    if (m1 && m1[1]) return m1[1];
+    const m2 = s.match(/(\d{2}:\d{2})/);
+    if (m2 && m2[1]) return m2[1];
+    return '';
+  };
+
+  // Facts used only for issues list (not for Processing State label)
+  const procStatusRaw =
+    tsfin.processing_status ||
+    details.processing_status ||
+    row.processing_status ||
+    null;
+
+  const procStatus = String(procStatusRaw || '').toUpperCase();
+
+  if (LOGM) {
+    L('snapshot', {
+      procStatus,
+      requiresAuth: !!authInfo.requires,
+      authorised: !!authInfo.authorised,
+      processingState: ps
+    });
+  }
+
+  const issues = [];
+
+  // ─────────────────────────────────────────────────────────────
+  // ✅ NEW: Reference blocker issue + per-day/segment detail
+  // Source of truth:
+  //  - ref blocker codes live in issue_codes (Option A strings)
+  //  - detail list lives in details.refs_missing_items_json / count (details view only)
+  // ─────────────────────────────────────────────────────────────
+  try {
+    const rawCodes =
+      Array.isArray(row?.issue_codes) ? row.issue_codes :
+      (Array.isArray(details?.issue_codes) ? details.issue_codes : []);
+
+    const codes = rawCodes.map(x => String(x || '').trim()).filter(Boolean);
+
+    // ✅ Friendly mapping for "Refs - Timesheet PDF invalid"
+    if (codes.includes('Refs - Timesheet PDF invalid')) {
+      const smUpper = String(ts?.submission_mode || '').trim().toUpperCase();
+
+      const qrIssued =
+        (
+          (ts?.qr_token && String(ts.qr_token).trim() && ts?.qr_generated_at)
+          || (ts?.qr_last_sent_hash && String(ts.qr_last_sent_hash).trim())
+        ) ? true : false;
+
+      if (smUpper === 'ELECTRONIC') {
+        issues.push('Refs changed since PDF generated — system will regenerate automatically.');
+      } else if (qrIssued) {
+        issues.push('Refs changed since QR PDF issued — signed/issued QR evidence may not match current refs.');
+      } else {
+        issues.push('Refs changed since timesheet PDF generated.');
+      }
+    }
+
+    const REF_PRECEDENCE = [
+      'Refs (Invoice and Issue Blocked)',
+      'Refs (Invoicing Blocked)',
+      'Refs (Issue Invoice Blocked)'
+    ];
+
+    let refChosen = '';
+    for (const k of REF_PRECEDENCE) {
+      if (codes.includes(k)) { refChosen = k; break; }
+    }
+
+    if (refChosen) {
+      if (refChosen === 'Refs (Invoice and Issue Blocked)') {
+        issues.push('Reference numbers are missing — invoicing and issuing invoices are both blocked until references are added.');
+      } else if (refChosen === 'Refs (Invoicing Blocked)') {
+        issues.push('Reference numbers are missing — invoicing is blocked until references are added.');
+      } else if (refChosen === 'Refs (Issue Invoice Blocked)') {
+        issues.push('Reference numbers are missing — invoices can be created, but cannot be issued until references are added.');
+      }
+
+      let items = details?.refs_missing_items_json ?? null;
+      if (typeof items === 'string') {
+        try { items = JSON.parse(items); } catch { items = null; }
+      }
+      if (!Array.isArray(items)) items = [];
+
+      const countRaw = details?.refs_missing_items_count;
+      const count = Number(countRaw);
+      const countNum = Number.isFinite(count) ? count : null;
+
+      if (items.length > 0) {
+        issues.push(`Missing reference numbers on ${items.length} day(s)/segment(s):`);
+
+        const sorted = items.slice().sort((a, b) => {
+          const ad = normStr(a?.day_ymd || a?.day_date || a?.date);
+          const bd = normStr(b?.day_ymd || b?.day_date || b?.date);
+          if (ad !== bd) return ad.localeCompare(bd);
+          const ak = normStr(a?.kind);
+          const bk = normStr(b?.kind);
+          if (ak !== bk) return ak.localeCompare(bk);
+          const ai = Number(a?.segment_index);
+          const bi = Number(b?.segment_index);
+          const aok = Number.isFinite(ai);
+          const bok = Number.isFinite(bi);
+          if (aok && bok) return ai - bi;
+          if (aok) return -1;
+          if (bok) return 1;
+          return 0;
+        });
+
+        for (const it of sorted) {
+          const kind = String(it?.kind || '').trim().toUpperCase();
+          let day = normStr(it?.day_ymd || it?.day_date || it?.date);
+
+          // Fallback day extraction from start values
+          if (!day) {
+            const s1 = normStr(it?.start_utc || it?.start);
+            const m = s1.match(/^(\d{4}-\d{2}-\d{2})/);
+            if (m && m[1]) day = m[1];
+          }
+
+          const dmy = day ? fmtYmdToDmy(day) : '';
+          const dow = day ? fmtDow(day) : '';
+
+          if (kind === 'TIMESHEET') {
+            const st = normStr(it?.start_utc || it?.start);
+            const en = normStr(it?.end_utc || it?.end);
+            const t1 = fmtHHMM(st);
+            const t2 = fmtHHMM(en);
+            const tr = (t1 && t2) ? `${t1}–${t2}` : '';
+            issues.push(`Missing reference: ${dow ? dow + ' ' : ''}${dmy || day || 'Unknown date'}${tr ? ` (${tr})` : ''} (Daily timesheet).`);
+          } else if (kind === 'FREEFORM') {
+            issues.push(`Missing reference: ${dow ? dow + ' ' : ''}${dmy || day || 'Unknown date'} (Weekly day reference).`);
+          } else if (kind === 'SEGMENT') {
+            const idx0 = Number(it?.segment_index);
+            const idx = Number.isFinite(idx0) ? (idx0 + 1) : null;
+
+            const st = normStr(it?.start);
+            const en = normStr(it?.end);
+            const t1 = fmtHHMM(st);
+            const t2 = fmtHHMM(en);
+            const tr = (t1 && t2) ? `${t1}–${t2}` : '';
+
+            const segLabel = idx != null ? `Segment ${idx}` : 'Segment';
+            issues.push(`Missing reference: ${dow ? dow + ' ' : ''}${dmy || day || 'Unknown date'}${tr ? ` (${tr})` : ''} (${segLabel}).`);
+          } else {
+            issues.push(`Missing reference: ${dow ? dow + ' ' : ''}${dmy || day || 'Unknown date'}.`);
+          }
+        }
+      } else if (countNum != null && countNum > 0) {
+        issues.push(`Missing reference numbers on ${countNum} day(s)/segment(s).`);
+      }
+    }
+  } catch (e) {
+    if (LOGM) L('[ISSUES] reference missing detail mapping failed (non-fatal)', e);
+  }
+
+  // Processing-status based issues (keep concise)
+  if (procStatus === 'RATE_MISSING') {
+    issues.push('Rate missing: no pay/charge rates found for this client/role/band on this date.');
+  }
+  if (procStatus === 'PAY_CHANNEL_MISSING') {
+    issues.push('Pay channel missing: candidate bank/umbrella details incomplete for this timesheet.');
+  }
+  if (procStatus === 'CLIENT_UNRESOLVED') {
+    issues.push('Client unresolved: timesheet could not be linked to a client correctly.');
+  }
+  if (procStatus === 'UNASSIGNED') {
+    issues.push('Unassigned: this timesheet has not been fully matched or processed yet.');
+  }
+
+  // Pay hold (sheet-level, from row or tsfin)
+  const payOnHold = !!(tsfin.pay_on_hold ?? row.pay_on_hold);
+  if (payOnHold) {
+    issues.push('Pay is currently on hold for this timesheet. It will be excluded from pay runs until released.');
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // ✅ NEW: SEGMENTS-mode per-day delays (matches your SQL rules)
+  //   - invoice delayed per day: invoice_locked_invoice_id empty AND invoice_target_week_start present AND target != baseline
+  //   - pay delayed per day: exclude_from_pay === true
+  // Only list dates that are actually delayed.
+  // ─────────────────────────────────────────────────────────────
+  try {
+    const weYmd = (ts.week_ending_date || row.week_ending_date || null);
+    const baselineWeekStart =
+      (weYmd && /^\d{4}-\d{2}-\d{2}$/.test(String(weYmd).slice(0,10)))
+        ? addDaysYmd(String(weYmd).slice(0,10), -6)
+        : null;
+
+    let inv = tsfin.invoice_breakdown_json ?? null;
+    if (typeof inv === 'string') {
+      try { inv = JSON.parse(inv); } catch { inv = null; }
+    }
+
+    const mode = String(inv?.mode || '').toUpperCase();
+    const segs = Array.isArray(inv?.segments) ? inv.segments : [];
+
+    if (mode === 'SEGMENTS' && segs.length) {
+      const invoiceDelayed = [];
+      const payDelayed     = [];
+
+      for (const seg of segs) {
+        if (!seg || typeof seg !== 'object') continue;
+
+        const segDate = String(seg.date || '').slice(0, 10);
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(segDate)) continue;
+
+        // --- pay delay (exclude_from_pay) ---
+        if (boolish(seg.exclude_from_pay)) {
+          // optional reason (only if present; doesn't invent anything)
+          const reason = (seg.held_back_reason != null && String(seg.held_back_reason).trim())
+            ? String(seg.held_back_reason).trim()
+            : '';
+          payDelayed.push({ date: segDate, reason });
+        }
+
+        // --- invoice delay (exactly your SQL rule) ---
+        const lockedRaw = seg.invoice_locked_invoice_id;
+        const lockedId  = (lockedRaw == null) ? '' : String(lockedRaw).trim(); // SQL nullif(...,'') behaviour
+
+        const targetRaw = seg.invoice_target_week_start;
+        const target    = (targetRaw == null) ? '' : String(targetRaw).slice(0, 10).trim(); // keep YYYY-MM-DD
+
+        const baseStart = baselineWeekStart || weekStartMondayYmd(segDate);
+
+        const hasLocked = !!lockedId;
+        const hasTarget = !!target;
+
+        const isDelayed = (!hasLocked) && hasTarget && baseStart && (target !== baseStart);
+
+        if (isDelayed) {
+          const isPermanent = (target === '2099-01-05') || (/^2099-/.test(target));
+          invoiceDelayed.push({
+            date: segDate,
+            targetWeekStart: target,
+            permanent: isPermanent
+          });
+        }
+      }
+
+      // Only add when we actually have delays
+      if (invoiceDelayed.length) {
+        // summary + per-date lines
+        const allInvDelayed = (invoiceDelayed.length === segs.length);
+        issues.push(allInvDelayed
+          ? 'Whole invoice is delayed: all dated lines are being held back for invoicing.'
+          : `Some invoice issuing delays: ${invoiceDelayed.length} dated line(s) are being held back for invoicing.`
+        );
+
+        // per-date detail
+        for (const it of invoiceDelayed.sort((a,b)=>String(a.date).localeCompare(String(b.date)))) {
+          const dmy = fmtYmdToDmy(it.date);
+          const dow = fmtDow(it.date);
+          if (it.permanent) {
+            issues.push(`Invoice delayed: ${dow ? dow + ' ' : ''}${dmy} — permanently delayed.`);
+          } else {
+            issues.push(`Invoice delayed: ${dow ? dow + ' ' : ''}${dmy} — delayed until week starting ${fmtYmdToDmy(it.targetWeekStart)}.`);
+          }
+        }
+      }
+
+      if (payDelayed.length) {
+        const allPayDelayed = (payDelayed.length === segs.length);
+        issues.push(allPayDelayed
+          ? 'All pay is on hold (line-level): all dated lines are excluded from pay.'
+          : `Some pay is on hold (line-level): ${payDelayed.length} dated line(s) are excluded from pay.`
+        );
+
+        for (const it of payDelayed.sort((a,b)=>String(a.date).localeCompare(String(b.date)))) {
+          const dmy = fmtYmdToDmy(it.date);
+          const dow = fmtDow(it.date);
+          const extra = it.reason ? ` (Reason: ${it.reason})` : '';
+          issues.push(`Pay excluded: ${dow ? dow + ' ' : ''}${dmy}${extra}.`);
+        }
+      }
+    }
+  } catch (e) {
+    if (LOGM) L('[ISSUES] SEGMENTS delay scan failed (non-fatal)', e);
+  }
+
+  // HR cross-check issues (from TSFIN) — keep as “issues flagged”, but no Validation Log UI
+  try {
+    const hrIssuesArr = Array.isArray(tsfin.hr_crosscheck_issues) ? tsfin.hr_crosscheck_issues : [];
+    const hrIssues = hrIssuesArr.map(c => String(c || '').toUpperCase()).filter(Boolean);
+
+    const seen = new Set();
+    for (const code of hrIssues) {
+      if (seen.has(code)) continue;
+      seen.add(code);
+
+      if (code === 'HOURS_MISMATCH_HR') {
+        issues.push('Timesheet hours mismatch with HealthRoster.');
+      } else if (code === 'HR_HOURS_MISSING') {
+        issues.push('Timesheet has hours not yet on HealthRoster.');
+      } else if (code === 'DUPLICATE_CONTRACTS') {
+        issues.push('Multiple contracts cover the same period for this client.');
+      }
+    }
+  } catch (e) {
+    if (LOGM) L('[ISSUES] hr_crosscheck_issues mapping failed (non-fatal)', e);
+  }
+
+  // Authorisation required but not yet authorised (issue line)
+  if (authInfo.requires && !authInfo.authorised) {
+    issues.push('Awaiting authorisation by team.');
+  }
+
+  const issuesHtml = issues.length
+    ? `<ul class="mini">${issues.map(i => `<li>${esc(i)}</li>`).join('')}</ul>`
+    : `<span class="mini">No issues detected.</span>`;
+
+  GE();
+
+  return `
+    <div class="tabc">
+      <div class="card">
+        <div class="row">
+          <label>Processing State</label>
+          <div class="controls">
+            <span class="mini">${esc(ps.label || 'Unprocessed')}</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="card" style="margin-top:10px;">
+        <div class="row">
+          <label>Issues Flagged</label>
+          <div class="controls">
+            ${issuesHtml}
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
 }
 
 
@@ -36542,25 +36966,27 @@ function renderSummary(rows){
     const issuesSel = document.createElement('select');
     issuesSel.classList.add('dark-control');
 
-    const issuesOpts = [
-      ['ALL',                   'All'],
-      ['NO_MATCH_ID',           'No match to Candidate/Client'],
-      ['RATE_MISSING',          'Rate missing'],
-      ['PAY_CHAN_MISS',         'Pay channel missing'],
-      ['AWAITING_HR_VALIDATION','Awaiting HR validation'],
-      ['HR_HOURS_MISMATCH',     'Hours mismatch (HealthRoster)'],
-      ['HR_HOURS_MISSING',      'HR hours missing'],
-      ['DUPLICATE_CONTRACTS',   'Duplicate contracts'],
-      ['TIMESHEET_EVIDENCE',    'Timesheet evidence missing'],
-      ['EXPENSES_EVIDENCE',     'Expenses evidence missing'],
-      ['MILEAGE_EVIDENCE',      'Mileage evidence missing'],
-      ['REFERENCE_MISSING',     'Reference missing'],
-      ['VALIDATION',            'Validation'],
-      ['ON_HOLD',               'On hold'],
-      ['AUTHORISATION',         'Awaiting Authorisation'],
-      ['QR_NOT_ISSUED',         'QR not issued'],
-      ['QR_AWAITING_SIGNATURE', 'QR awaiting signature']
-    ];
+   const issuesOpts = [
+  ['ALL',                   'All'],
+  ['NO_MATCH_ID',           'No match to Candidate/Client'],
+  ['RATE_MISSING',          'Rate missing'],
+  ['PAY_CHAN_MISS',         'Pay channel missing'],
+  ['AWAITING_HR_VALIDATION','Awaiting HR validation'],
+  ['HR_HOURS_MISMATCH',     'Hours mismatch (HealthRoster)'],
+  ['HR_HOURS_MISSING',      'HR hours missing'],
+  ['DUPLICATE_CONTRACTS',   'Duplicate contracts'],
+  ['TIMESHEET_EVIDENCE',    'Timesheet evidence missing'],
+  ['EXPENSES_EVIDENCE',     'Expenses evidence missing'],
+  ['MILEAGE_EVIDENCE',      'Mileage evidence missing'],
+  ['REFERENCE_MISSING',     'Reference missing'],
+  ['REFS_PDF_INVALID',      'Refs - Timesheet PDF invalid'],
+  ['VALIDATION',            'Validation'],
+  ['ON_HOLD',               'On hold'],
+  ['AUTHORISATION',         'Awaiting Authorisation'],
+  ['QR_NOT_ISSUED',         'QR not issued'],
+  ['QR_AWAITING_SIGNATURE', 'QR awaiting signature']
+];
+
 
     const issuesCur = String(stFilters.issues_filter || 'ALL').toUpperCase();
     issuesOpts.forEach(([v, label]) => {
@@ -59703,410 +60129,6 @@ async function switchContractWeekToManual(weekId) {
   L('RESULT', json);
   GE();
   return json;
-}
-
-function renderTimesheetIssuesTab(ctx) {
-  const { LOGM, L, GC, GE } = getTsLoggers('[TS][ISSUES]');
-  const { row, details } = normaliseTimesheetCtx(ctx);
-
-  GC('render');
-
-  const tsfin  = details.tsfin || {};
-  const ts     = details.timesheet || {};
-
-  // ✅ Use the shared helper for requiresAuth/authorised/badge rule (per spec)
-  let authInfo = { requires: false, authorised: false, showAwaitingBadge: false };
-  if (typeof computeRequiresTimesheetAuthorisation === 'function') {
-    try {
-      authInfo = computeRequiresTimesheetAuthorisation(details, row) || authInfo;
-    } catch (e) {
-      if (LOGM) L('[ISSUES] computeRequiresTimesheetAuthorisation failed (non-fatal)', e);
-    }
-  }
-
-  // ✅ Use the shared helper for the mutually-exclusive Processing State label (per spec)
-  let ps = { key: '', label: 'Unprocessed' };
-  if (typeof computeTimesheetProcessingState === 'function') {
-    try {
-      ps = computeTimesheetProcessingState(details, row) || ps;
-    } catch (e) {
-      if (LOGM) L('[ISSUES] computeTimesheetProcessingState failed (non-fatal)', e);
-    }
-  } else {
-    // If helper is not yet implemented, do not invent alternate state logic here.
-    // The tab must still render without crashing.
-    ps = { key: 'UNPROCESSED', label: 'Unprocessed' };
-  }
-
-  const esc = (typeof escapeHtml === 'function')
-    ? escapeHtml
-    : (s) => String(s == null ? '' : s)
-        .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
-        .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
-
-  const fmtYmdToDmy = (ymd) => {
-    const s = String(ymd || '').slice(0, 10);
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
-    const [y, m, d] = s.split('-');
-    return `${d}/${m}/${y}`;
-  };
-
-  const fmtDow = (ymd) => {
-    const s = String(ymd || '').slice(0, 10);
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return '';
-    const d = new Date(`${s}T00:00:00Z`);
-    if (Number.isNaN(d.getTime())) return '';
-    return d.toLocaleDateString('en-GB', { weekday: 'short', timeZone: 'Europe/London' });
-  };
-
-  const addDaysYmd = (ymd, deltaDays) => {
-    const s = String(ymd || '').slice(0, 10);
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return null;
-    const [yy, mm, dd] = s.split('-').map(Number);
-    const dt = new Date(Date.UTC(yy, mm - 1, dd));
-    dt.setUTCDate(dt.getUTCDate() + Number(deltaDays || 0));
-    return dt.toISOString().slice(0, 10);
-  };
-
-  // Monday start (matches Postgres date_trunc('week', ...) behaviour)
-  const weekStartMondayYmd = (ymd) => {
-    const s = String(ymd || '').slice(0, 10);
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return null;
-    const [yy, mm, dd] = s.split('-').map(Number);
-    const dt = new Date(Date.UTC(yy, mm - 1, dd));
-    const jsDow = dt.getUTCDay();        // Sun=0..Sat=6
-    const monIndex = (jsDow + 6) % 7;   // Mon=0..Sun=6
-    dt.setUTCDate(dt.getUTCDate() - monIndex);
-    return dt.toISOString().slice(0, 10);
-  };
-
-  const boolish = (v) => {
-    if (v === true) return true;
-    if (v === false) return false;
-    if (v == null) return false;
-    const s = String(v).trim().toLowerCase();
-    return (s === 'true' || s === '1' || s === 'yes' || s === 'y' || s === 'on');
-  };
-
-  const normStr = (v) => (v == null ? '' : String(v).trim());
-
-  const fmtHHMM = (isoLike) => {
-    const s = String(isoLike || '');
-    const m1 = s.match(/T(\d{2}:\d{2})/);
-    if (m1 && m1[1]) return m1[1];
-    const m2 = s.match(/(\d{2}:\d{2})/);
-    if (m2 && m2[1]) return m2[1];
-    return '';
-  };
-
-  // Facts used only for issues list (not for Processing State label)
-  const procStatusRaw =
-    tsfin.processing_status ||
-    details.processing_status ||
-    row.processing_status ||
-    null;
-
-  const procStatus = String(procStatusRaw || '').toUpperCase();
-
-  if (LOGM) {
-    L('snapshot', {
-      procStatus,
-      requiresAuth: !!authInfo.requires,
-      authorised: !!authInfo.authorised,
-      processingState: ps
-    });
-  }
-
-  const issues = [];
-
-  // ─────────────────────────────────────────────────────────────
-  // ✅ NEW: Reference blocker issue + per-day/segment detail
-  // Source of truth:
-  //  - ref blocker codes live in issue_codes (Option A strings)
-  //  - detail list lives in details.refs_missing_items_json / count (details view only)
-  // ─────────────────────────────────────────────────────────────
-  try {
-    const rawCodes =
-      Array.isArray(row?.issue_codes) ? row.issue_codes :
-      (Array.isArray(details?.issue_codes) ? details.issue_codes : []);
-
-    const codes = rawCodes.map(x => String(x || '').trim()).filter(Boolean);
-
-    const REF_PRECEDENCE = [
-      'Refs (Invoice and Issue Blocked)',
-      'Refs (Invoicing Blocked)',
-      'Refs (Issue Invoice Blocked)'
-    ];
-
-    let refChosen = '';
-    for (const k of REF_PRECEDENCE) {
-      if (codes.includes(k)) { refChosen = k; break; }
-    }
-
-    if (refChosen) {
-      if (refChosen === 'Refs (Invoice and Issue Blocked)') {
-        issues.push('Reference numbers are missing — invoicing and issuing invoices are both blocked until references are added.');
-      } else if (refChosen === 'Refs (Invoicing Blocked)') {
-        issues.push('Reference numbers are missing — invoicing is blocked until references are added.');
-      } else if (refChosen === 'Refs (Issue Invoice Blocked)') {
-        issues.push('Reference numbers are missing — invoices can be created, but cannot be issued until references are added.');
-      }
-
-      let items = details?.refs_missing_items_json ?? null;
-      if (typeof items === 'string') {
-        try { items = JSON.parse(items); } catch { items = null; }
-      }
-      if (!Array.isArray(items)) items = [];
-
-      const countRaw = details?.refs_missing_items_count;
-      const count = Number(countRaw);
-      const countNum = Number.isFinite(count) ? count : null;
-
-      if (items.length > 0) {
-        issues.push(`Missing reference numbers on ${items.length} day(s)/segment(s):`);
-
-        const sorted = items.slice().sort((a, b) => {
-          const ad = normStr(a?.day_ymd || a?.day_date || a?.date);
-          const bd = normStr(b?.day_ymd || b?.day_date || b?.date);
-          if (ad !== bd) return ad.localeCompare(bd);
-          const ak = normStr(a?.kind);
-          const bk = normStr(b?.kind);
-          if (ak !== bk) return ak.localeCompare(bk);
-          const ai = Number(a?.segment_index);
-          const bi = Number(b?.segment_index);
-          const aok = Number.isFinite(ai);
-          const bok = Number.isFinite(bi);
-          if (aok && bok) return ai - bi;
-          if (aok) return -1;
-          if (bok) return 1;
-          return 0;
-        });
-
-        for (const it of sorted) {
-          const kind = String(it?.kind || '').trim().toUpperCase();
-          let day = normStr(it?.day_ymd || it?.day_date || it?.date);
-
-          // Fallback day extraction from start values
-          if (!day) {
-            const s1 = normStr(it?.start_utc || it?.start);
-            const m = s1.match(/^(\d{4}-\d{2}-\d{2})/);
-            if (m && m[1]) day = m[1];
-          }
-
-          const dmy = day ? fmtYmdToDmy(day) : '';
-          const dow = day ? fmtDow(day) : '';
-
-          if (kind === 'TIMESHEET') {
-            const st = normStr(it?.start_utc || it?.start);
-            const en = normStr(it?.end_utc || it?.end);
-            const t1 = fmtHHMM(st);
-            const t2 = fmtHHMM(en);
-            const tr = (t1 && t2) ? `${t1}–${t2}` : '';
-            issues.push(`Missing reference: ${dow ? dow + ' ' : ''}${dmy || day || 'Unknown date'}${tr ? ` (${tr})` : ''} (Daily timesheet).`);
-          } else if (kind === 'FREEFORM') {
-            issues.push(`Missing reference: ${dow ? dow + ' ' : ''}${dmy || day || 'Unknown date'} (Weekly day reference).`);
-          } else if (kind === 'SEGMENT') {
-            const idx0 = Number(it?.segment_index);
-            const idx = Number.isFinite(idx0) ? (idx0 + 1) : null;
-
-            const st = normStr(it?.start);
-            const en = normStr(it?.end);
-            const t1 = fmtHHMM(st);
-            const t2 = fmtHHMM(en);
-            const tr = (t1 && t2) ? `${t1}–${t2}` : '';
-
-            const segLabel = idx != null ? `Segment ${idx}` : 'Segment';
-            issues.push(`Missing reference: ${dow ? dow + ' ' : ''}${dmy || day || 'Unknown date'}${tr ? ` (${tr})` : ''} (${segLabel}).`);
-          } else {
-            issues.push(`Missing reference: ${dow ? dow + ' ' : ''}${dmy || day || 'Unknown date'}.`);
-          }
-        }
-      } else if (countNum != null && countNum > 0) {
-        issues.push(`Missing reference numbers on ${countNum} day(s)/segment(s).`);
-      }
-    }
-  } catch (e) {
-    if (LOGM) L('[ISSUES] reference missing detail mapping failed (non-fatal)', e);
-  }
-
-  // Processing-status based issues (keep concise)
-  if (procStatus === 'RATE_MISSING') {
-    issues.push('Rate missing: no pay/charge rates found for this client/role/band on this date.');
-  }
-  if (procStatus === 'PAY_CHANNEL_MISSING') {
-    issues.push('Pay channel missing: candidate bank/umbrella details incomplete for this timesheet.');
-  }
-  if (procStatus === 'CLIENT_UNRESOLVED') {
-    issues.push('Client unresolved: timesheet could not be linked to a client correctly.');
-  }
-  if (procStatus === 'UNASSIGNED') {
-    issues.push('Unassigned: this timesheet has not been fully matched or processed yet.');
-  }
-
-  // Pay hold (sheet-level, from row or tsfin)
-  const payOnHold = !!(tsfin.pay_on_hold ?? row.pay_on_hold);
-  if (payOnHold) {
-    issues.push('Pay is currently on hold for this timesheet. It will be excluded from pay runs until released.');
-  }
-
-  // ─────────────────────────────────────────────────────────────
-  // ✅ NEW: SEGMENTS-mode per-day delays (matches your SQL rules)
-  //   - invoice delayed per day: invoice_locked_invoice_id empty AND invoice_target_week_start present AND target != baseline
-  //   - pay delayed per day: exclude_from_pay === true
-  // Only list dates that are actually delayed.
-  // ─────────────────────────────────────────────────────────────
-  try {
-    const weYmd = (ts.week_ending_date || row.week_ending_date || null);
-    const baselineWeekStart =
-      (weYmd && /^\d{4}-\d{2}-\d{2}$/.test(String(weYmd).slice(0,10)))
-        ? addDaysYmd(String(weYmd).slice(0,10), -6)
-        : null;
-
-    let inv = tsfin.invoice_breakdown_json ?? null;
-    if (typeof inv === 'string') {
-      try { inv = JSON.parse(inv); } catch { inv = null; }
-    }
-
-    const mode = String(inv?.mode || '').toUpperCase();
-    const segs = Array.isArray(inv?.segments) ? inv.segments : [];
-
-    if (mode === 'SEGMENTS' && segs.length) {
-      const invoiceDelayed = [];
-      const payDelayed     = [];
-
-      for (const seg of segs) {
-        if (!seg || typeof seg !== 'object') continue;
-
-        const segDate = String(seg.date || '').slice(0, 10);
-        if (!/^\d{4}-\d{2}-\d{2}$/.test(segDate)) continue;
-
-        // --- pay delay (exclude_from_pay) ---
-        if (boolish(seg.exclude_from_pay)) {
-          // optional reason (only if present; doesn't invent anything)
-          const reason = (seg.held_back_reason != null && String(seg.held_back_reason).trim())
-            ? String(seg.held_back_reason).trim()
-            : '';
-          payDelayed.push({ date: segDate, reason });
-        }
-
-        // --- invoice delay (exactly your SQL rule) ---
-        const lockedRaw = seg.invoice_locked_invoice_id;
-        const lockedId  = (lockedRaw == null) ? '' : String(lockedRaw).trim(); // SQL nullif(...,'') behaviour
-
-        const targetRaw = seg.invoice_target_week_start;
-        const target    = (targetRaw == null) ? '' : String(targetRaw).slice(0, 10).trim(); // keep YYYY-MM-DD
-
-        const baseStart = baselineWeekStart || weekStartMondayYmd(segDate);
-
-        const hasLocked = !!lockedId;
-        const hasTarget = !!target;
-
-        const isDelayed = (!hasLocked) && hasTarget && baseStart && (target !== baseStart);
-
-        if (isDelayed) {
-          const isPermanent = (target === '2099-01-05') || (/^2099-/.test(target));
-          invoiceDelayed.push({
-            date: segDate,
-            targetWeekStart: target,
-            permanent: isPermanent
-          });
-        }
-      }
-
-      // Only add when we actually have delays
-      if (invoiceDelayed.length) {
-        // summary + per-date lines
-        const allInvDelayed = (invoiceDelayed.length === segs.length);
-        issues.push(allInvDelayed
-          ? 'Whole invoice is delayed: all dated lines are being held back for invoicing.'
-          : `Some invoice issuing delays: ${invoiceDelayed.length} dated line(s) are being held back for invoicing.`
-        );
-
-        // per-date detail
-        for (const it of invoiceDelayed.sort((a,b)=>String(a.date).localeCompare(String(b.date)))) {
-          const dmy = fmtYmdToDmy(it.date);
-          const dow = fmtDow(it.date);
-          if (it.permanent) {
-            issues.push(`Invoice delayed: ${dow ? dow + ' ' : ''}${dmy} — permanently delayed.`);
-          } else {
-            issues.push(`Invoice delayed: ${dow ? dow + ' ' : ''}${dmy} — delayed until week starting ${fmtYmdToDmy(it.targetWeekStart)}.`);
-          }
-        }
-      }
-
-      if (payDelayed.length) {
-        const allPayDelayed = (payDelayed.length === segs.length);
-        issues.push(allPayDelayed
-          ? 'All pay is on hold (line-level): all dated lines are excluded from pay.'
-          : `Some pay is on hold (line-level): ${payDelayed.length} dated line(s) are excluded from pay.`
-        );
-
-        for (const it of payDelayed.sort((a,b)=>String(a.date).localeCompare(String(b.date)))) {
-          const dmy = fmtYmdToDmy(it.date);
-          const dow = fmtDow(it.date);
-          const extra = it.reason ? ` (Reason: ${it.reason})` : '';
-          issues.push(`Pay excluded: ${dow ? dow + ' ' : ''}${dmy}${extra}.`);
-        }
-      }
-    }
-  } catch (e) {
-    if (LOGM) L('[ISSUES] SEGMENTS delay scan failed (non-fatal)', e);
-  }
-
-  // HR cross-check issues (from TSFIN) — keep as “issues flagged”, but no Validation Log UI
-  try {
-    const hrIssuesArr = Array.isArray(tsfin.hr_crosscheck_issues) ? tsfin.hr_crosscheck_issues : [];
-    const hrIssues = hrIssuesArr.map(c => String(c || '').toUpperCase()).filter(Boolean);
-
-    const seen = new Set();
-    for (const code of hrIssues) {
-      if (seen.has(code)) continue;
-      seen.add(code);
-
-      if (code === 'HOURS_MISMATCH_HR') {
-        issues.push('Timesheet hours mismatch with HealthRoster.');
-      } else if (code === 'HR_HOURS_MISSING') {
-        issues.push('Timesheet has hours not yet on HealthRoster.');
-      } else if (code === 'DUPLICATE_CONTRACTS') {
-        issues.push('Multiple contracts cover the same period for this client.');
-      }
-    }
-  } catch (e) {
-    if (LOGM) L('[ISSUES] hr_crosscheck_issues mapping failed (non-fatal)', e);
-  }
-
-  // Authorisation required but not yet authorised (issue line)
-  if (authInfo.requires && !authInfo.authorised) {
-    issues.push('Awaiting authorisation by team.');
-  }
-
-  const issuesHtml = issues.length
-    ? `<ul class="mini">${issues.map(i => `<li>${esc(i)}</li>`).join('')}</ul>`
-    : `<span class="mini">No issues detected.</span>`;
-
-  GE();
-
-  return `
-    <div class="tabc">
-      <div class="card">
-        <div class="row">
-          <label>Processing State</label>
-          <div class="controls">
-            <span class="mini">${esc(ps.label || 'Unprocessed')}</span>
-          </div>
-        </div>
-      </div>
-
-      <div class="card" style="margin-top:10px;">
-        <div class="row">
-          <label>Issues Flagged</label>
-          <div class="controls">
-            ${issuesHtml}
-          </div>
-        </div>
-      </div>
-    </div>
-  `;
 }
 
 
