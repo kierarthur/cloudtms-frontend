@@ -19820,20 +19820,27 @@ async function openClient(row) {
   const fullKeys = Object.keys(full || {});
   L('seeding window.modalCtx', { entity: 'clients', fullId: full?.id, fullKeys });
 
-  window.modalCtx = {
-    entity: 'clients',
-    data: deep(full),
-    formState: { __forId: full?.id || null, main: {} },
-    ratesState: [],
-    ratesBaseline: [],
-    hospitalsState: { existing: [], stagedNew: [], stagedEdits: {}, stagedDeletes: new Set() },
-    clientSettingsState: settingsSeed ? deep(settingsSeed) : {},
-    openToken: ((full?.id) || 'new') + ':' + Date.now(),
-    // NEW: persistent set for staged client-rate deletes (survives refresh/merge)
-    ratesStagedDeletes: (window.modalCtx && window.modalCtx.ratesStagedDeletes instanceof Set)
-      ? window.modalCtx.ratesStagedDeletes
-      : new Set()
-  };
+ window.modalCtx = {
+  entity: 'clients',
+  data: deep(full),
+  formState: { __forId: full?.id || null, main: {} },
+  ratesState: [],
+  ratesBaseline: [],
+  hospitalsState: { existing: [], stagedNew: [], stagedEdits: {}, stagedDeletes: new Set() },
+
+  // ✅ NEW: keep an immutable DB baseline (used for comparisons / “snap back” safety)
+  clientSettingsBaseline: settingsSeed ? deep(settingsSeed) : {},
+
+  // ✅ State used by UI for edits (starts as DB snapshot)
+  clientSettingsState: settingsSeed ? deep(settingsSeed) : {},
+
+  openToken: ((full?.id) || 'new') + ':' + Date.now(),
+  // NEW: persistent set for staged client-rate deletes (survives refresh/merge)
+  ratesStagedDeletes: (window.modalCtx && window.modalCtx.ratesStagedDeletes instanceof Set)
+    ? window.modalCtx.ratesStagedDeletes
+    : new Set()
+};
+
 
   // Canonicalise immediately so UI always starts in a consistent state
   // ✅ Preserve manual-invoice routing + auto-invoice + new invoicing/ref-to-issue fields
@@ -51911,9 +51918,19 @@ async function renderClientSettingsUI(settingsObj){
 
   const ctx = window.modalCtx;
 
-  const initial = (ctx.clientSettingsState && typeof ctx.clientSettingsState === 'object')
-    ? ctx.clientSettingsState
-    : (settingsObj && typeof settingsObj === 'object' ? settingsObj : {});
+const initial = (ctx.clientSettingsState && typeof ctx.clientSettingsState === 'object')
+  ? ctx.clientSettingsState
+  : (settingsObj && typeof settingsObj === 'object' ? settingsObj : {});
+
+// ✅ Ensure we always have a baseline available (DB snapshot) if caller didn’t seed it
+try {
+  const hasBaseline =
+    (ctx.clientSettingsBaseline && typeof ctx.clientSettingsBaseline === 'object' && Object.keys(ctx.clientSettingsBaseline).length > 0);
+  if (!hasBaseline) {
+    ctx.clientSettingsBaseline = { ...(settingsObj && typeof settingsObj === 'object' ? settingsObj : {}) };
+  }
+} catch {}
+
 
   // ✅ Robust: accepts "06:00", "06:00:00", "06:00:00+00", etc
   const _toHHMM = (v) => {
