@@ -5418,11 +5418,33 @@ async function upsertContract(payload, id /* optional */) {
     if (LOGC) console.warn('[CONTRACTS][UPSERT] logging/pre-seed failed', e);
   }
 
+   // ✅ CRITICAL: never send default_submission_mode unless overrideclientsettings is TRUE.
+  // This prevents “Cannot change default_submission_mode after timesheets have been submitted”
+  // when the user is only adding/removing weeks (calendar workflow) and the contract inherits client settings.
+  try {
+    const ocs = patch.overrideclientsettings;
+    const ocsTrue =
+      (ocs === true) ||
+      (ocs === 'on') ||
+      (ocs === 'true') ||
+      (ocs === 1) ||
+      (ocs === '1');
+
+    if (!ocsTrue) {
+      if (Object.prototype.hasOwnProperty.call(patch, 'default_submission_mode')) {
+        delete patch.default_submission_mode;
+      }
+    }
+  } catch (e) {
+    if (LOGC) console.warn('[CONTRACTS][UPSERT] overrideclientsettings gate failed (non-fatal)', e);
+  }
+
   const res = await authFetch(API(url), {
     method,
     headers: { 'content-type': 'application/json' },
     body: _json(patch)
   });
+
 
   let data = null;
   try { data = await res.json(); } catch (_) {}
@@ -24342,14 +24364,20 @@ if (m.__seeded !== true) {
   if (base.display_site != null) m.display_site = base.display_site;
   if (base.start_date)           m.start_date   = base.start_date;
   if (base.end_date)             m.end_date     = base.end_date;
-  if (base.pay_method_snapshot)  m.pay_method_snapshot = base.pay_method_snapshot;
-  if (base.default_submission_mode) m.default_submission_mode = base.default_submission_mode;
+   if (base.pay_method_snapshot)  m.pay_method_snapshot = base.pay_method_snapshot;
+
+  // ✅ Only stage contract.default_submission_mode if overrideclientsettings is TRUE.
+  // When overrideclientsettings is FALSE, this field must behave as INHERIT (i.e., not used / not sent).
+  if (base.overrideclientsettings === true && base.default_submission_mode) {
+    m.default_submission_mode = base.default_submission_mode;
+  }
 
   // NEW: seed contract route/settings overrides (only if present on row)
   if (base.is_nhsp != null)               m.is_nhsp = base.is_nhsp;
   if (base.autoprocess_hr != null)        m.autoprocess_hr = base.autoprocess_hr;
   if (base.requires_hr != null)           m.requires_hr = base.requires_hr;
   if (base.no_timesheet_required != null) m.no_timesheet_required = base.no_timesheet_required;
+
   if (base.daily_calc_of_invoices != null) m.daily_calc_of_invoices = base.daily_calc_of_invoices;
   if (base.group_nightsat_sunbh != null) m.group_nightsat_sunbh = base.group_nightsat_sunbh;
   if (base.self_bill != null)            m.self_bill = base.self_bill;
@@ -24704,11 +24732,10 @@ try {
           base.pay_method_snapshot || 'PAYE'
         ).toUpperCase();
 
-           // ✅ UPDATED: allow “inherit” (NULL) for default_submission_mode
+      // ✅ UPDATED: allow “inherit” (NULL) for default_submission_mode
         const dsmRaw = choose('default_submission_mode', (base.default_submission_mode ?? 'ELECTRONIC'));
         const dsmUp = (dsmRaw == null) ? '' : String(dsmRaw).trim().toUpperCase();
-        const default_submission_mode = (!dsmUp || dsmUp === 'INHERIT') ? null : dsmUp;
-
+        let default_submission_mode = (!dsmUp || dsmUp === 'INHERIT') ? null : dsmUp;
 
         const week_ending_weekday_snapshot = String(
           choose('week_ending_weekday_snapshot', (base.week_ending_weekday_snapshot ?? '0'))
@@ -24796,8 +24823,13 @@ let auto_invoice                 = boolTriFromFS('auto_invoice');
 let require_reference_to_pay     = boolTriFromFS('require_reference_to_pay');
 let require_reference_to_invoice = boolTriFromFS('require_reference_to_invoice');
 
-// ✅ NEW: overrideclientsettings (boolean)
-const overrideclientsettings = boolFromFS('overrideclientsettings', !!base.overrideclientsettings);
+  // ✅ NEW: overrideclientsettings (boolean)
+        const overrideclientsettings = boolFromFS('overrideclientsettings', !!base.overrideclientsettings);
+          // ✅ CRITICAL: when overrideclientsettings is FALSE, contract.default_submission_mode must behave as INHERIT.
+        // So force it to NULL in the payload logic (and later we also ensure it is not sent on PUT).
+        if (overrideclientsettings !== true) {
+          default_submission_mode = null;
+        }
 
 // ✅ NEW: additional contract-level settings
 let reference_number_required_to_issue_invoice = boolTriFromFS('reference_number_required_to_issue_invoice');
@@ -24850,7 +24882,7 @@ const settingsChanged =
   (normTri(base.reference_number_required_to_issue_invoice) !== normTri(reference_number_required_to_issue_invoice)) ||
   (normTri(base.send_manual_invoices_to_different_email) !== normTri(send_manual_invoices_to_different_email)) ||
   (String((base.manual_invoices_alt_email_address ?? '')).trim() !== String((manual_invoices_alt_email_address ?? '')).trim()) ||
-  (String((base.default_submission_mode ?? '')).trim().toUpperCase() !== String((default_submission_mode ?? '')).trim().toUpperCase());
+   (String((base.default_submission_mode ?? '')).trim().toUpperCase() !== String((default_submission_mode ?? '')).trim().toUpperCase());
 
 const contractSettingsTouched = !!window.modalCtx?.__contractSettingsDirty;
 
