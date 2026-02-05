@@ -2179,6 +2179,8 @@ async function refreshWeeklyImportSummary(type, importId) {
     // - drop selections that no longer exist
     // - ensure hidden MISSING_FROM_IMPORT cancellations never stay selected
     //   (except when required to satisfy Policy A for a selected new shift key)
+    //   IMPORTANT: "selected new shift" includes auto-applied NEW shifts
+    //   via preview.auto_apply_action_ids (even though user never ticks them).
     // ─────────────────────────────────────────────────────────────
     try {
       const impId = String(importId);
@@ -2188,6 +2190,26 @@ async function refreshWeeklyImportSummary(type, importId) {
 
       const ui = window.__weeklyImportUi[t][impId] || null;
       const acts = Array.isArray(preview?.actions) ? preview.actions : [];
+
+      const autoApplyIds = (() => {
+        const raw =
+          preview?.auto_apply_action_ids ??
+          preview?.autoApplyActionIds ??
+          (preview?.summary && (preview.summary.auto_apply_action_ids ?? preview.summary.autoApplyActionIds)) ??
+          null;
+
+        const arr = Array.isArray(raw) ? raw : [];
+        const out = [];
+        const seen = new Set();
+        for (const v of arr) {
+          const s = String(v || '').trim();
+          if (!s) continue;
+          if (seen.has(s)) continue;
+          seen.add(s);
+          out.push(s);
+        }
+        return out;
+      })();
 
       const asYmd = (v) => {
         if (!v) return null;
@@ -2227,11 +2249,12 @@ async function refreshWeeklyImportSummary(type, importId) {
         const reason = String(a?.reason || a?.cancel_reason || a?.kind_reason || '').toUpperCase();
         if (reason !== 'MISSING_FROM_IMPORT') return false;
 
+        const id = String(actionIdOf(a) || '').toUpperCase();
         const isCancel =
           (a?.is_cancellation === true) ||
           (a?.isCancellation === true) ||
           (String(a?.action_kind || a?.actionKind || '').toUpperCase().includes('CANCEL')) ||
-          (String(actionIdOf(a) || '').toUpperCase().startsWith('CANCEL:'));
+          id.startsWith('CANCEL:');
 
         return !!isCancel;
       };
@@ -2248,10 +2271,13 @@ async function refreshWeeklyImportSummary(type, importId) {
 
       // Only reconcile if store exists (we must not create/reset it here).
       if (ui && (ui.actionSelection instanceof Set)) {
-        const opt = (ui.options && typeof ui.options === 'object') ? ui.options : { missingShiftsEnabled: false, dateFrom: null, dateTo: null };
+        const opt = (ui.options && typeof ui.options === 'object')
+          ? ui.options
+          : { missingShiftsEnabled: false, dateFrom: null, dateTo: null };
+
         const missingEnabled = (opt.missingShiftsEnabled === true);
 
-        // Build quick lookup for current actions by id
+        // Current action lookup by id
         const byId = new Map();
         for (const a of acts) {
           const id = actionIdOf(a);
@@ -2259,20 +2285,30 @@ async function refreshWeeklyImportSummary(type, importId) {
           byId.set(id, a);
         }
 
-        // Determine which replacement_day_keys have a selected new shift
-        // (so we don't auto-drop missing-from-import cancels that might be required by Policy A)
+        // Selection set used for Policy A protection:
+        // user ticks + auto-applied NEW shifts
+        const selectedAll = new Set([
+          ...Array.from(ui.actionSelection),
+          ...autoApplyIds
+        ]);
+
+        // replacement_day_keys that have a selected new shift
         const selectedNewShiftKeys = new Set();
         for (const a of acts) {
           const id = actionIdOf(a);
           if (!id) continue;
-          if (!ui.actionSelection.has(id)) continue;
+          if (!selectedAll.has(id)) continue;
+
           const isNew = (a?.is_new_shift === true || a?.isNewShift === true);
           if (!isNew) continue;
+
           const rk = replacementKeyOf(a);
           if (rk) selectedNewShiftKeys.add(rk);
         }
 
-        // Reconcile: remove selections that no longer exist, plus hidden missing-from-import cancels
+        // Reconcile:
+        // - remove selections that no longer exist
+        // - remove hidden missing-from-import cancels unless protected by Policy A (selected new shift day)
         for (const sel of Array.from(ui.actionSelection)) {
           const a = byId.get(String(sel)) || null;
 
@@ -2282,9 +2318,7 @@ async function refreshWeeklyImportSummary(type, importId) {
             continue;
           }
 
-          // Hide/unselect missing-from-import cancels when:
-          // - missing shifts disabled OR date out of range,
-          // BUT keep them if they share a replacement_day_key that has a selected new shift
+          // Missing-from-import cancels: keep only if visible OR Policy-A-protected
           if (isMissingFromImportCancel(a)) {
             const rk = replacementKeyOf(a);
             const protectedByPolicyA = !!(rk && selectedNewShiftKeys.has(rk));
@@ -28576,59 +28610,159 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
     ? rootObj.summary
     : (rootObj || {});
 
-  const total = summary.total_rows || (rows ? rows.length : 0) || 0;
+   const total = summary.total_rows || (rows ? rows.length : 0) || 0;
 
-  const changedShifts =
-    Array.isArray(rootObj.changed_shifts) ? rootObj.changed_shifts :
-    Array.isArray(summary.changed_shifts) ? summary.changed_shifts :
-    Array.isArray(rootObj?.summary?.changed_shifts) ? rootObj.summary.changed_shifts :
-    [];
+  const TYPE = String(type || '').toUpperCase();
 
-  const changedCount =
-    (typeof summary.changed_shifts_count === 'number') ? summary.changed_shifts_count :
-    (typeof rootObj.changed_shifts_count === 'number') ? rootObj.changed_shifts_count :
-    (changedShifts?.length || 0);
+  const enc = (typeof escapeHtml === 'function')
+    ? escapeHtml
+    : (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({
+        '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+      }[c]));
 
   const asBool = (v) => (v === true || v === 'true' || v === 1 || v === '1');
   const asNum  = (v) => (v == null || v === '' ? 0 : (Number(v) || 0));
   const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
   const normUpper = (s) => String(s || '').trim().toUpperCase();
 
-  const changedDecisionNeededCount =
-    (typeof summary.changed_shifts_decision_needed_count === 'number') ? summary.changed_shifts_decision_needed_count :
-    (typeof rootObj.changed_shifts_decision_needed_count === 'number') ? rootObj.changed_shifts_decision_needed_count :
-    (changedShifts || []).filter(x => asBool(x?.requires_any_decision)).length;
+  // ✅ Weekly action approvals (changes/cancels) come from preview.actions
+  const actions =
+    Array.isArray(rootObj.actions) ? rootObj.actions :
+    Array.isArray(summary.actions) ? summary.actions :
+    [];
 
-  // Actions which mean the group is actionable / “ready to process”
-  const READY_ACTIONS = new Set([
-    'NEW_AUTOPROC_TIMESHEET',
-    'UPDATE_AUTOPROC_TS',
-    'UPDATE_MANUAL_WEEK',
-    'UPDATE_ADJUSTMENT_TS',
-    'CREATE_ADJUSTMENT_TS',
-    'CREATE_PAY_ADJUSTMENT_ONLY'
+  // ✅ NEW shifts are not shown in Actions; backend gives auto_apply_action_ids for them
+  const auto_apply_action_ids = (() => {
+    const raw =
+      rootObj.auto_apply_action_ids ??
+      summary.auto_apply_action_ids ??
+      rootObj.autoApplyActionIds ??
+      summary.autoApplyActionIds ??
+      null;
+
+    const arr = Array.isArray(raw) ? raw : [];
+    const out = [];
+    const seen = new Set();
+    for (const v of arr) {
+      const s = String(v || '').trim();
+      if (!s) continue;
+      if (seen.has(s)) continue;
+      seen.add(s);
+      out.push(s);
+    }
+    return out;
+  })();
+
+  // ✅ Weekly UI state store (actionSelection must persist across rerenders)
+  window.__weeklyImportUi = window.__weeklyImportUi || {};
+  window.__weeklyImportUi[TYPE] = window.__weeklyImportUi[TYPE] || {};
+  const ui = window.__weeklyImportUi[TYPE][String(importId)] || (window.__weeklyImportUi[TYPE][String(importId)] = {
+    options: { missingShiftsEnabled: false, dateFrom: null, dateTo: null },
+    actionSelection: new Set(),
+    filters: { showOnlyRed: false, showOnlyUnticked: false, showOnlyCancellations: false, search: '' },
+    emailSelection: new Set(),
+    hydratedFlags: { didInitDefaultActionChecks: false }
+  });
+  if (!(ui.actionSelection instanceof Set)) ui.actionSelection = new Set();
+
+  const selected_action_ids_all = new Set([
+    ...Array.from(ui.actionSelection),
+    ...auto_apply_action_ids
   ]);
 
-  const isIssueAction = (a) => {
-    const x = normUpper(a);
-    if (!x) return true;
-    if (READY_ACTIONS.has(x)) return false;
-    if (x === 'OK' || x === 'APPLY' || x === 'SKIP_ALREADY_PROCESSED') return false;
-    if (x.startsWith('REJECT_')) return true;
-    if (x.startsWith('BLOCK_'))  return true;
-    if (x === 'NO_CANDIDATE' || x === 'NO_CLIENT') return true;
-    if (x === 'UNKNOWN') return true;
+  const actionIdOf = (a) => {
+    const id = a?.action_id ?? a?.actionId ?? null;
+    return (id != null) ? String(id) : null;
+  };
+
+  const extOfAction = (a) => {
+    const k = a?.external_row_key ?? a?.externalRowKey ?? null;
+    return (k != null) ? String(k).trim() : '';
+  };
+
+  // Map: external_row_key -> action_id (for changed-row actions)
+  const changeActionIdByExternalKey = new Map();
+
+  // Map: action_id -> action object (for reason_text / names)
+  const actionById = new Map();
+
+  for (const a of (actions || [])) {
+    const id = actionIdOf(a);
+    if (!id) continue;
+
+    actionById.set(id, a);
+
+    if (id.toUpperCase().startsWith('ROW:')) {
+      const ek = extOfAction(a);
+      if (ek) changeActionIdByExternalKey.set(ek, id);
+    }
+  }
+
+  const rowExternalKeyOf = (r) => {
+    const ek = r?.external_row_key ?? r?.externalRowKey ?? null;
+    return (ek != null) ? String(ek).trim() : '';
+  };
+
+  const rowActionRawOf = (r) => normUpper(r?.resolution_status || r?.action || '');
+
+  const isResolutionProblem = (actionRaw) => {
+    if (!actionRaw) return true;
+    if (actionRaw === 'NO_CANDIDATE' || actionRaw === 'REJECT_NO_CANDIDATE') return true;
+    if (actionRaw === 'NO_CLIENT'    || actionRaw === 'REJECT_NO_CLIENT') return true;
+    if (actionRaw === 'REJECT_NO_CONTRACT') return true;
+    if (actionRaw === 'REJECT_NO_CONTRACT_BAND_MISMATCH') return true;
+    if (actionRaw.startsWith('REJECT_')) return true;
+    if (actionRaw.startsWith('BLOCK_'))  return true;
+    if (actionRaw === 'UNKNOWN') return true;
     return false;
   };
 
-  // Overview counts
-  let readyCount = 0;
-  let issueCount = 0;
-  for (const r of rows || []) {
-    const actionRaw = normUpper(r.resolution_status || r.action || '');
-    if (READY_ACTIONS.has(actionRaw)) readyCount++;
-    else if (isIssueAction(actionRaw)) issueCount++;
+  const isIgnoredRow = (actionRaw) => {
+    // “Already processed” explicitly
+    if (actionRaw === 'SKIP_ALREADY_PROCESSED') return true;
+    // If it’s OK/APPLY and it is not a NEW auto-apply row and not a changed row, it’s effectively a no-op/ignored
+    if (actionRaw === 'OK' || actionRaw === 'APPLY') return true;
+    return false;
+  };
+
+  // ✅ Overview counts should reflect what WILL happen on finalise
+  let count_apply = 0;         // green
+  let count_not_approved = 0;  // red
+  let count_ignored = 0;       // black
+  let count_needs_resolution = 0; // light red
+
+  for (const r of (rows || [])) {
+    const actionRaw = rowActionRawOf(r);
+    if (isResolutionProblem(actionRaw)) {
+      count_needs_resolution += 1;
+      continue;
+    }
+
+    const ek = rowExternalKeyOf(r);
+    const rowId = ek ? `ROW:${ek}` : '';
+
+    // NEW shifts: auto-apply list
+    const isAutoNew = !!(rowId && auto_apply_action_ids.includes(rowId));
+
+    // Changed rows: appear in actions[] as ROW:<ek> (but require explicit tick)
+    const isChangeRow = !!(ek && changeActionIdByExternalKey.has(ek));
+
+    if (isAutoNew) {
+      count_apply += 1;
+      continue;
+    }
+
+    if (isChangeRow) {
+      if (rowId && selected_action_ids_all.has(rowId)) count_apply += 1;
+      else count_not_approved += 1;
+      continue;
+    }
+
+    // Otherwise ignored (no-op / already applied)
+    if (isIgnoredRow(actionRaw)) count_ignored += 1;
+    else count_ignored += 1;
   }
+
 
   const fmtMoney = (n) => {
     const x = round2(Number(n || 0));
@@ -28651,164 +28785,9 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
   // ─────────────────────────────────────────────────────────────
   // Canonical decisions store (survives rerenders, defaults init safe)
   // ─────────────────────────────────────────────────────────────
-  const decisionStore =
-    (typeof getOrInitWeeklyImportDecisionsStore === 'function')
-      ? getOrInitWeeklyImportDecisionsStore(type, importId, rootObj)
-      : null;
+   // ✅ REMOVE legacy changed-hours decision UI entirely.
+  // Weekly import decisions now happen ONLY via the Actions (approval) section above.
 
-  // Ensure defaults are initialised (safe; doesn't overwrite edits)
-  try { decisionStore && decisionStore.initFromPreview && decisionStore.initFromPreview(rootObj); } catch {}
-
-  const changedHtml = (() => {
-    if (!changedShifts || !changedShifts.length) {
-      return `<div class="mini" style="color:#666;">No changed-hours shifts detected for this import.</div>`;
-    }
-
-    const head = `
-      <div class="mini" style="margin-bottom:6px;">
-        Detected changed hours for <strong>${enc(String(changedCount))}</strong> shift(s).
-        Decision required for <strong>${enc(String(changedDecisionNeededCount))}</strong>.
-      </div>
-      <div class="mini" style="color:#666;margin-bottom:10px;">
-        For paid/invoiced shifts you must choose <em>Skip</em> or allow the correction artefacts to be created.
-        Invoiced shifts require a credit week + reinvoice week.
-      </div>
-    `;
-
-    const rowsHtml = changedShifts.map((cs) => {
-      const ek = String(cs?.external_row_key || '').trim();
-      const shiftId = cs?.shift_id || '';
-      const we = cs?.week_ending_date || '';
-
-      const paid = asBool(cs?.is_paid);
-      const invoiced = asBool(cs?.is_invoiced);
-      const requires = asBool(cs?.requires_any_decision);
-
-      const oldStart = cs?.old_start_utc || cs?.old_start || '';
-      const oldEnd   = cs?.old_end_utc   || cs?.old_end   || '';
-      const oldBreak = Number(cs?.old_break_mins ?? cs?.old_break_minutes ?? 0) || 0;
-
-      const newStart = cs?.new_start_utc || cs?.new_start || '';
-      const newEnd   = cs?.new_end_utc   || cs?.new_end   || '';
-      const newBreak = Number(cs?.new_break_mins ?? cs?.new_break_minutes ?? 0) || 0;
-
-      const oldPay    = asNum(cs?.old_pay_ex ?? cs?.old_pay_ex_vat ?? cs?.old_pay);
-      const newPay    = asNum(cs?.new_pay_ex ?? cs?.new_pay_ex_vat ?? cs?.new_pay);
-      const deltaPay  = asNum(cs?.delta_pay_ex ?? cs?.delta_pay_ex_vat ?? cs?.delta_pay);
-
-      const oldCharge   = asNum(cs?.old_charge_ex ?? cs?.old_charge_ex_vat ?? cs?.old_charge);
-      const newCharge   = asNum(cs?.new_charge_ex ?? cs?.new_charge_ex_vat ?? cs?.new_charge);
-      const deltaCharge = asNum(cs?.delta_charge_ex ?? cs?.delta_charge_ex_vat ?? cs?.delta_charge);
-
-      const d = decisionStore && decisionStore.get ? (decisionStore.get(ek) || {}) : {};
-      const skip = asBool(d?.skip);
-
-      const opts = (typeof getWeeklyMondayOptions === 'function')
-        ? getWeeklyMondayOptions(cs?.week_start || cs?.week_ending_date || '')
-        : [];
-
-      const creditVal = d?.credit_week_start || '';
-      const reinvVal  = d?.reinvoice_week_start || '';
-
-      const payDir =
-        paid
-          ? (deltaPay > 0 ? `Underpay ${fmtMoney(deltaPay)} (will be paid next pay CSV run)` :
-             deltaPay < 0 ? `Overpay ${fmtMoney(deltaPay)} (recovery scheduled)` :
-             `No pay delta`)
-          : '—';
-
-      return `
-        <tr class="${requires ? 'wi-row-issue' : ''}">
-          <td class="mini">${enc(ek || '—')}</td>
-          <td class="mini">${enc(shiftId || '—')}</td>
-          <td class="mini">${enc(formatYmdToNiceDate(String(we || '')) || '—')}</td>
-
-          <td class="mini">${enc(fmtTime(oldStart))} → ${enc(fmtTime(newStart))}</td>
-          <td class="mini">${enc(fmtTime(oldEnd))} → ${enc(fmtTime(newEnd))}</td>
-          <td class="mini">${enc(String(oldBreak))} → ${enc(String(newBreak))}</td>
-
-          <td class="mini">${enc(fmtMoney(oldPay))} → ${enc(fmtMoney(newPay))}<br/><span style="color:#666">Δ ${enc(fmtMoney(deltaPay))}</span></td>
-          <td class="mini">${enc(fmtMoney(oldCharge))} → ${enc(fmtMoney(newCharge))}<br/><span style="color:#666">Δ ${enc(fmtMoney(deltaCharge))}</span></td>
-
-          <td class="mini">${paid ? 'Yes' : 'No'}</td>
-          <td class="mini">${invoiced ? 'Yes' : 'No'}</td>
-
-          <td class="mini">${requires ? '<strong>Yes</strong>' : 'No'}</td>
-
-          <td class="mini">
-            ${
-              requires
-                ? `
-                  <label class="mini" style="display:flex;gap:6px;align-items:center;">
-                    <input type="checkbox" data-act="chg-skip" data-ek="${enc(ek)}" ${skip ? 'checked' : ''}/>
-                    Skip
-                  </label>
-                `
-                : '—'
-            }
-          </td>
-
-          <td class="mini">
-            ${
-              (requires && invoiced)
-                ? `
-                  <select data-act="chg-credit-week" data-ek="${enc(ek)}" class="mini">
-                    ${opts.map(o => `<option value="${enc(o.value)}" ${String(o.value)===String(creditVal) ? 'selected' : ''}>${enc(o.label)}</option>`).join('')}
-                  </select>
-                `
-                : '—'
-            }
-          </td>
-
-          <td class="mini">
-            ${
-              (requires && invoiced)
-                ? `
-                  <select data-act="chg-reinvoice-week" data-ek="${enc(ek)}" class="mini">
-                    ${opts.map(o => `<option value="${enc(o.value)}" ${String(o.value)===String(reinvVal) ? 'selected' : ''}>${enc(o.label)}</option>`).join('')}
-                  </select>
-                `
-                : '—'
-            }
-          </td>
-
-          <td class="mini">
-            ${requires && paid ? enc(payDir) : '—'}
-          </td>
-        </tr>
-      `;
-    }).join('');
-
-    return `
-      ${head}
-      <div class="wi-table-wrap" style="max-height:240px;">
-        <table class="grid wi-grid">
-          <thead>
-            <tr>
-              <th class="mini">External key</th>
-              <th class="mini">Shift</th>
-              <th class="mini">Week ending</th>
-              <th class="mini">Start</th>
-              <th class="mini">End</th>
-              <th class="mini">Break</th>
-              <th class="mini">Pay</th>
-              <th class="mini">Charge</th>
-              <th class="mini">Paid</th>
-              <th class="mini">Invoiced</th>
-              <th class="mini">Decision?</th>
-              <th class="mini">Skip</th>
-              <th class="mini">Credit week</th>
-              <th class="mini">Reinvoice week</th>
-              <th class="mini">Pay correction</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${rowsHtml}
-          </tbody>
-        </table>
-      </div>
-    `;
-  })();
 
   const rowsHtml = (rows && rows.length)
     ? rows.map((r, idx) => {
@@ -28838,31 +28817,61 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
            r.assignment_grade_norm ||
            '').toString();
 
-        const reasonText = (r.reason || '').toString();
-        const actionRaw = normUpper(r.resolution_status || r.action || '');
+             let reasonText = (r.reason || '').toString();
+        const actionRaw = rowActionRawOf(r);
 
-        let displayAction = actionRaw ? actionRaw.replace(/_/g, ' ') : 'UNKNOWN';
-        if (actionRaw === 'NEW_AUTOPROC_TIMESHEET') displayAction = 'READY TO PROCESS';
+        const ek = rowExternalKeyOf(r);
+        const rowId = ek ? `ROW:${ek}` : '';
 
+        // ✅ If this row corresponds to a change/cancel action, prefer backend-friendly reason_text
+        if (ek && changeActionIdByExternalKey.has(ek)) {
+          const aid = changeActionIdByExternalKey.get(ek);
+          const act = aid ? (actionById.get(aid) || null) : null;
+          const rt =
+            act && (act.reason_text || act.reasonText)
+              ? String(act.reason_text || act.reasonText).trim()
+              : '';
+          if (rt) reasonText = rt;
+        } else if (rowId && auto_apply_action_ids.includes(rowId)) {
+          reasonText = 'New shift (auto-applied)';
+        } else if (actionRaw === 'SKIP_ALREADY_PROCESSED') {
+          reasonText = 'Already processed';
+        }
+
+        const isAutoNew = !!(rowId && auto_apply_action_ids.includes(rowId));
+        const isChangeRow = !!(ek && changeActionIdByExternalKey.has(ek));
+        const isApprovedChange = !!(rowId && selected_action_ids_all.has(rowId));
+
+        let rowClass = '';
         let cls = 'pill-info';
-        if (actionRaw === 'OK' || actionRaw === 'APPLY' || actionRaw === 'NEW_AUTOPROC_TIMESHEET') cls = 'pill-ok';
-        else if (
-          actionRaw === 'NO_CANDIDATE' ||
-          actionRaw === 'REJECT_NO_CANDIDATE' ||
-          actionRaw === 'NO_CLIENT' ||
-          actionRaw === 'REJECT_NO_CLIENT'
-        ) cls = 'pill-bad';
-        else if (
-          actionRaw === 'REJECT_NO_CONTRACT' ||
-          actionRaw === 'REJECT_NO_CONTRACT_BAND_MISMATCH' ||
-          actionRaw.startsWith('REJECT_') ||
-          actionRaw.startsWith('BLOCK_') ||
-          actionRaw === 'UNKNOWN'
-        ) cls = 'pill-warn';
+        let displayAction = 'IGNORED';
 
-        const rowClass =
-          READY_ACTIONS.has(actionRaw) ? 'wi-row-ready'
-          : (isIssueAction(actionRaw) ? 'wi-row-issue' : '');
+        if (isResolutionProblem(actionRaw)) {
+          // light red warning background (mapping / contract / band issues)
+          rowClass = 'wi-row-warn';
+          cls = 'pill-warn';
+          displayAction = 'NEEDS RESOLUTION';
+        } else if (isAutoNew) {
+          rowClass = 'wi-row-ready';
+          cls = 'pill-ok';
+          displayAction = 'WILL APPLY';
+        } else if (isChangeRow) {
+          if (isApprovedChange) {
+            rowClass = 'wi-row-ready';
+            cls = 'pill-ok';
+            displayAction = 'WILL APPLY';
+          } else {
+            rowClass = 'wi-row-issue';
+            cls = 'pill-bad';
+            displayAction = 'NOT APPROVED';
+          }
+        } else {
+          // ignored: already processed / no-op / unchanged
+          rowClass = 'wi-row-ignore';
+          cls = 'pill-info';
+          displayAction = (actionRaw === 'SKIP_ALREADY_PROCESSED') ? 'ALREADY PROCESSED' : 'IGNORED';
+        }
+
 
         const canAssignCand   = (actionRaw === 'NO_CANDIDATE' || actionRaw === 'REJECT_NO_CANDIDATE');
         const canAssignClient = (actionRaw === 'NO_CLIENT'    || actionRaw === 'REJECT_NO_CLIENT');
@@ -28899,15 +28908,72 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
             <div class="mini">
               Import ID: <span class="mono">${enc(importId || '—')}</span><br/>
               Total rows: ${total}<br/>
-              Ready to process: ${readyCount} &nbsp;|&nbsp; Needs attention: ${issueCount}<br/>
-              Changed shifts: ${enc(String(changedCount))} &nbsp;|&nbsp; Decision required: ${enc(String(changedDecisionNeededCount))}
+             Will apply: ${enc(String(count_apply))} &nbsp;|&nbsp;
+              Not approved: ${enc(String(count_not_approved))} &nbsp;|&nbsp;
+              Ignored: ${enc(String(count_ignored))} &nbsp;|&nbsp;
+              Needs resolution: ${enc(String(count_needs_resolution))}<br/>
+              Auto new shifts: ${enc(String(auto_apply_action_ids.length))}
             </div>
           </div>
         </div>
 
-        <div class="row" style="margin-top:10px;">
-          <label>Changed shifts</label>
-          <div class="controls">${changedHtml}</div>
+       <div class="row" style="margin-top:10px;">
+          <label>Changes requiring approval</label>
+          <div class="controls">
+            <div class="mini" style="color:#666;margin-bottom:8px;">
+              Tick the boxes below to approve changes/cancellations. New shifts are applied automatically on Finalise.
+            </div>
+            <div class="wi-table-wrap" style="max-height:240px;">
+              <table class="grid wi-grid">
+                <thead>
+                  <tr>
+                    <th style="width:40px;"></th>
+                    <th>Action</th>
+                    <th>Work date</th>
+                    <th>Candidate</th>
+                    <th>Client</th>
+                    <th>Reason</th>
+                  </tr>
+                </thead>
+                <tbody id="weeklyActionsApprovalTbody">
+                  ${
+                    (actions && actions.length)
+                      ? actions.map(a => {
+                          const id = actionIdOf(a) || '';
+                          const wd = String(a?.work_date || a?.workDate || '') || '';
+                          const wdNice = (typeof formatYmdToNiceDate === 'function' && wd) ? formatYmdToNiceDate(wd) : wd;
+
+                          const cand = String(a?.candidate_name || a?.candidateName || '') || '—';
+                          const cli  = String(a?.client_name || a?.clientName || '') || '—';
+
+                          const reasonTxt = String(a?.reason_text || a?.reasonText || a?.reason || '') || '';
+                          const labelTxt  = String(a?.label || a?.action_label || a?.actionLabel || 'Change') || 'Change';
+
+                          const checked = (id && ui.actionSelection && ui.actionSelection.has(id)) ? 'checked' : '';
+
+                          return `
+                            <tr class="wi-row-issue">
+                              <td class="mini" style="text-align:center;">
+                                <input type="checkbox" data-act="weekly-approve-action" data-action-id="${enc(id)}" ${checked}/>
+                              </td>
+                              <td class="mini">${enc(labelTxt)}</td>
+                              <td class="mini">${enc(wdNice || '—')}</td>
+                              <td class="mini">${enc(cand)}</td>
+                              <td class="mini">${enc(cli)}</td>
+                              <td class="mini">${enc(reasonTxt)}</td>
+                            </tr>
+                          `;
+                        }).join('')
+                      : `
+                        <tr>
+                          <td colspan="6"><span class="mini">No changes detected.</span></td>
+                        </tr>
+                      `
+                  }
+                </tbody>
+              </table>
+            </div>
+          </div>
         </div>
 
         <div class="row" style="margin-top:10px;">
@@ -28937,9 +29003,10 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
           <div class="controls">
             <button type="button" class="btn" data-act="weekly-import-refresh">Refresh</button>
             <button type="button" class="btn" style="margin-left:8px;" data-act="weekly-import-apply">Finalise import</button>
-            <span class="mini" style="margin-left:8px;">
-              Changed-hours decisions are validated client-side before finalise.
+                      <span class="mini" style="margin-left:8px;">
+              Tick approvals above to apply changes/cancellations. New shifts are auto-applied on Finalise.
             </span>
+
           </div>
         </div>
       </div>
@@ -28970,47 +29037,37 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
         return m;
       };
 
-      // decision changes update canonical store
-      root.addEventListener('change', (ev) => {
-        const el = ev.target;
-        if (!el) return;
-        const act = el.getAttribute && el.getAttribute('data-act');
-        if (!act) return;
-        const ek = (el.getAttribute('data-ek') || '').trim();
-        if (!ek) return;
+    // ✅ Approval checkbox toggles (top section)
+          root.addEventListener('change', (ev) => {
+        const cb = ev.target && ev.target.closest ? ev.target.closest('input[data-act="weekly-approve-action"]') : null;
+        if (!cb) return;
 
-        const previewNow = getPreview();
-        const ds = (typeof getOrInitWeeklyImportDecisionsStore === 'function')
-          ? getOrInitWeeklyImportDecisionsStore(type, importId, previewNow)
-          : null;
+        const id = String(cb.getAttribute('data-action-id') || '').trim();
+        if (!id) return;
 
-        if (!ds || !ds.set) return;
+        if (!(ui.actionSelection instanceof Set)) ui.actionSelection = new Set();
 
-        if (act === 'chg-skip') {
-          ds.set(ek, { skip: !!el.checked });
-          LW('decision set', { ek, skip: !!el.checked });
-          return;
-        }
-        if (act === 'chg-credit-week') {
-          ds.set(ek, { credit_week_start: String(el.value || '') });
-          LW('decision set', { ek, credit_week_start: String(el.value || '') });
-          return;
-        }
-        if (act === 'chg-reinvoice-week') {
-          ds.set(ek, { reinvoice_week_start: String(el.value || '') });
-          LW('decision set', { ek, reinvoice_week_start: String(el.value || '') });
-          return;
-        }
+        if (cb.checked) ui.actionSelection.add(id);
+        else ui.actionSelection.delete(id);
+
+        // Re-render the summary so the Rows table colours update immediately (green/red/black)
+        try {
+          const previewNow = getPreview();
+          if (typeof renderImportSummaryModal === 'function') {
+            renderImportSummaryModal(T, previewNow);
+          }
+        } catch {}
       });
 
-      // Existing resolve buttons (unchanged)
+
+          // Existing resolve buttons (unchanged)
       root.addEventListener('click', (ev) => {
         const btn = ev.target.closest('button[data-act]');
         if (!btn) return;
         const act = btn.getAttribute('data-act');
         if (act !== 'weekly-resolve-candidate' && act !== 'weekly-resolve-client') return;
 
-        const st = window.__importSummaryState && window.__importSummaryState[type];
+        const st = window.__importSummaryState && window.__importSummaryState[T];
         const rowsState = st && Array.isArray(st.rows) ? st.rows : (Array.isArray(rows) ? rows : []);
         const idx = Number(btn.getAttribute('data-row-idx') || '-1');
         if (idx < 0 || idx >= rowsState.length) return;
@@ -29018,6 +29075,7 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
         const row = rowsState[idx];
         const staffRaw = row.staff_name || row.staff_raw || '';
         const hospRaw  = row.hospital_or_trust || row.unit || row.hospital_norm || '';
+
 
         if (act === 'weekly-resolve-candidate') {
           openCandidatePicker(async ({ id, label }) => {
@@ -29078,32 +29136,26 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
             const ok = window.confirm('Are you sure you want to finalise now?');
             if (!ok) return;
 
-            const previewNow = getPreview();
-            const ds = (typeof getOrInitWeeklyImportDecisionsStore === 'function')
-              ? getOrInitWeeklyImportDecisionsStore(type, importId, previewNow)
-              : null;
+                   const previewNow = getPreview();
 
-            // Client-side validation (required by brief)
-            if (ds && ds.validate) {
-              const v = ds.validate(previewNow);
-              if (!v.ok) {
-                alert(
-                  `Cannot finalise: missing/invalid decisions for changed-hours shifts:\n\n` +
-                  v.errors.slice(0, 20).map(x => `- ${x}`).join('\n') +
-                  (v.errors.length > 20 ? `\n\n(and ${v.errors.length - 20} more)` : '')
-                );
-                return;
-              }
+            // ✅ Transactional apply (new contract)
+            if (typeof applyWeeklyImportTransactional !== 'function') {
+              throw new Error('applyWeeklyImportTransactional is not defined.');
             }
 
-            const mappings = ensureWeeklyImportMappings();
-            const payload = {
-              candidate_mappings: mappings.candidate_mappings || [],
-              client_aliases: mappings.client_aliases || [],
-              decisions: ds && ds.serialize ? ds.serialize(previewNow) : {}
-            };
+            // ✅ Apply = ticked approvals + auto-applied NEW shifts
+            const selected_action_ids = Array.from(new Set([
+              ...Array.from(ui.actionSelection || []),
+              ...auto_apply_action_ids
+            ]));
 
-            const result = await resolveImportConflicts(importId, type, payload) || {};
+                   const result = await applyWeeklyImportTransactional(T, importId, {
+              selected_action_ids,
+              decisions: {} // ✅ no legacy credit/reinvoice or phase-3 UI decisions
+            }) || {};
+
+
+
             alert(`Import ${result.import_id || importId} has been finalised.`);
             await refreshWeeklyImportSummary(type, importId);
           } catch (err) {
@@ -41110,7 +41162,7 @@ function showModal(title, tabs, renderTab, onSave, hasId, onReturn, options) {
      let opts = options || {};
   if (onReturn && typeof onReturn === 'object' && options === undefined) { opts = onReturn; onReturn = undefined; }
 
- // ✅ Force: these invoice child modals must never show the global footer Save button
+  // ✅ Force: these invoice child modals must never show the global footer Save button
 try {
   const k = (opts && typeof opts.kind === 'string') ? String(opts.kind) : '';
   if (
@@ -41121,7 +41173,14 @@ try {
     opts.showSave = false;
     opts.showApply = true;
   }
+
+  // ✅ NEW: Import summary utility modals must never show global footer Save (belt-and-braces)
+  if (k && k.startsWith('import-summary-')) {
+    opts.showSave = false;
+    opts.showApply = false;
+  }
 } catch {}
+
 
 
 // ✅ Back-compat: if caller seeded global `modalCtx` (legacy) but not `window.modalCtx`,
@@ -50287,7 +50346,7 @@ function renderImportSummaryModal(importType, summaryState) {
   // This ensures top-level extensions like actions / groups / truth_meta and
   // changed_shifts are never dropped (even if nested under summary).
   // ─────────────────────────────────────────────────────────────
-  const normalizePreview = (ss) => {
+    const normalizePreview = (ss) => {
     const raw = ss || {};
     const sum = (raw && typeof raw.summary === 'object' && raw.summary) ? raw.summary : raw;
 
@@ -50334,6 +50393,14 @@ function renderImportSummaryModal(importType, summaryState) {
       (sum && typeof sum.validation_meta === 'object' && sum.validation_meta) ? sum.validation_meta :
       null;
 
+    // ✅ Preserve NEW auto-apply action IDs (even if nested under summary or camelCase)
+    const auto_apply_action_ids =
+      Array.isArray(raw.auto_apply_action_ids) ? raw.auto_apply_action_ids :
+      Array.isArray(sum.auto_apply_action_ids) ? sum.auto_apply_action_ids :
+      Array.isArray(raw.autoApplyActionIds) ? raw.autoApplyActionIds :
+      Array.isArray(sum.autoApplyActionIds) ? sum.autoApplyActionIds :
+      [];
+
     const asBool = (v) => (v === true || v === 'true' || v === 1 || v === '1');
     const decisionNeededCount = changed_shifts.filter(x => asBool(x?.requires_any_decision)).length;
 
@@ -50342,6 +50409,9 @@ function renderImportSummaryModal(importType, summaryState) {
     if (!Array.isArray(summary.changed_shifts)) summary.changed_shifts = changed_shifts;
     if (typeof summary.changed_shifts_count !== 'number') summary.changed_shifts_count = changed_shifts.length;
     if (typeof summary.changed_shifts_decision_needed_count !== 'number') summary.changed_shifts_decision_needed_count = decisionNeededCount;
+
+    // ✅ Put auto_apply_action_ids into summary too, so summary-only code paths see them.
+    if (!Array.isArray(summary.auto_apply_action_ids)) summary.auto_apply_action_ids = auto_apply_action_ids;
 
     const canonical = Object.assign({}, raw);
     canonical.import_id = importId;
@@ -50359,8 +50429,13 @@ function renderImportSummaryModal(importType, summaryState) {
     if (truth_meta) canonical.truth_meta = truth_meta;
     if (validation_meta) canonical.validation_meta = validation_meta;
 
+    // ✅ Hoist auto-apply IDs (snake + camel for max compatibility)
+    canonical.auto_apply_action_ids = auto_apply_action_ids;
+    canonical.autoApplyActionIds = auto_apply_action_ids;
+
     return canonical;
   };
+
 
   const preview = normalizePreview(summaryState);
   const importId = preview.import_id || null;
@@ -50606,7 +50681,7 @@ function renderImportSummaryModal(importType, summaryState) {
           ? 'NHSP Weekly Import Summary'
           : 'HealthRoster Weekly Import Summary'));
 
-  // Create or reuse modal frame
+    // Create or reuse modal frame
   if (!existingSummaryFrame) {
     showModal(
       summaryTitle,
@@ -50618,10 +50693,14 @@ function renderImportSummaryModal(importType, summaryState) {
       {
         kind: summaryKind,
         noParentGate: true,
-        stayOpenOnSave: false
+        stayOpenOnSave: false,
+
+        // ✅ Belt-and-braces: never show global footer Save for import summary utility modals
+        showSave: false
       }
     );
   } else {
+
     try {
       existingSummaryFrame.title         = summaryTitle;
       existingSummaryFrame.tabs          = [{ key: 'main', label: 'Summary' }];
@@ -51787,57 +51866,16 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
         '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
       }[c]));
 
-  const changedShifts =
-    Array.isArray(rootObj.changed_shifts) ? rootObj.changed_shifts :
-    Array.isArray(summary.changed_shifts) ? summary.changed_shifts :
-    Array.isArray(rootObj?.summary?.changed_shifts) ? rootObj.summary.changed_shifts :
-    [];
-
-  const changedCount =
-    (typeof summary.changed_shifts_count === 'number') ? summary.changed_shifts_count :
-    (typeof rootObj.changed_shifts_count === 'number') ? rootObj.changed_shifts_count :
-    (changedShifts?.length || 0);
-
-  const asBool = (v) => (v === true || v === 'true' || v === 1 || v === '1');
+   const asBool = (v) => (v === true || v === 'true' || v === 1 || v === '1');
   const asNum  = (v) => (v == null || v === '' ? 0 : (Number(v) || 0));
   const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
   const normUpper = (s) => String(s || '').trim().toUpperCase();
 
-  const changedDecisionNeededCount =
-    (typeof summary.changed_shifts_decision_needed_count === 'number') ? summary.changed_shifts_decision_needed_count :
-    (typeof rootObj.changed_shifts_decision_needed_count === 'number') ? rootObj.changed_shifts_decision_needed_count :
-    (changedShifts || []).filter(x => asBool(x?.requires_any_decision)).length;
+  // ✅ Legacy changed-hours/READY_ACTIONS logic removed.
+  // Weekly import decisions now come ONLY from:
+  // - Actions table (ticked changes/cancels)
+  // - auto_apply_action_ids (new shifts, auto-applied)
 
-  // Actions which mean the group is actionable / “ready to process”
-  const READY_ACTIONS = new Set([
-    'NEW_AUTOPROC_TIMESHEET',
-    'UPDATE_AUTOPROC_TS',
-    'UPDATE_MANUAL_WEEK',
-    'UPDATE_ADJUSTMENT_TS',
-    'CREATE_ADJUSTMENT_TS',
-    'CREATE_PAY_ADJUSTMENT_ONLY'
-  ]);
-
-  const isIssueAction = (a) => {
-    const x = normUpper(a);
-    if (!x) return true;
-    if (READY_ACTIONS.has(x)) return false;
-    if (x === 'OK' || x === 'APPLY' || x === 'SKIP_ALREADY_PROCESSED') return false;
-    if (x.startsWith('REJECT_')) return true;
-    if (x.startsWith('BLOCK_'))  return true;
-    if (x === 'NO_CANDIDATE' || x === 'NO_CLIENT') return true;
-    if (x === 'UNKNOWN') return true;
-    return false;
-  };
-
-  // Overview counts (legacy rows table, still useful for mapping issues)
-  let readyCount = 0;
-  let issueCount = 0;
-  for (const r of rows || []) {
-    const actionRaw = normUpper(r.resolution_status || r.action || '');
-    if (READY_ACTIONS.has(actionRaw)) readyCount++;
-    else if (isIssueAction(actionRaw)) issueCount++;
-  }
 
   const fmtMoney = (n) => {
     const x = round2(Number(n || 0));
@@ -51935,30 +51973,70 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
   const ui = ensureWeeklyUi();
 
   // ─────────────────────────────────────────────────────────────
-  // Actions table helpers (ROW:/CANCEL: selector + filters + Policy A banner)
+  // Actions table helpers (CHANGED + CANCEL only; friendly display)
   // ─────────────────────────────────────────────────────────────
   const actionsAll =
     Array.isArray(rootObj.actions) ? rootObj.actions :
     Array.isArray(summary.actions) ? summary.actions :
     [];
 
+  const autoApplyIdsFromPreview = (() => {
+    const raw = rootObj?.auto_apply_action_ids ?? summary?.auto_apply_action_ids ?? rootObj?.autoApplyActionIds ?? null;
+    const arr = Array.isArray(raw) ? raw : [];
+    const out = [];
+    const seen = new Set();
+    for (const v of arr) {
+      const s = String(v || '').trim();
+      if (!s) continue;
+      if (seen.has(s)) continue;
+      seen.add(s);
+      out.push(s);
+    }
+    return out;
+  })();
+
   const actionIdOf = (a) => {
     const id = a?.action_id ?? a?.actionId ?? null;
     return id != null ? String(id) : null;
   };
+
+  const actionKindOf = (a) => String(a?.action_kind || a?.actionKind || '').toUpperCase();
 
   const isCancelAction = (a) => {
     if (!a) return false;
     if (a.is_cancellation === true || a.isCancellation === true) return true;
     const id = actionIdOf(a);
     if (id && id.toUpperCase().startsWith('CANCEL:')) return true;
-    const k = String(a.action_kind || a.actionKind || '').toUpperCase();
+    const k = actionKindOf(a);
     return k.includes('CANCEL');
   };
 
-  const isRedAction = (a) => (a?.is_red === true || a?.isRed === true);
+  const isChangedAction = (a) => {
+    const k = actionKindOf(a);
+    if (k === 'SHIFT_CHANGED') return true;
+    // safety: treat any ROW: with reason_text as "changed" (legacy compatibility)
+    const id = (actionIdOf(a) || '').toUpperCase();
+    const rt = String(a?.reason_text || a?.reasonText || '').trim();
+    return (id.startsWith('ROW:') && !!rt);
+  };
 
-  const reasonOf = (a) => String(a?.reason || a?.cancel_reason || a?.kind_reason || '').toUpperCase();
+  // ✅ Ensure we only render "real changes" (changed + cancel)
+  const isRenderableAction = (a) => isCancelAction(a) || isChangedAction(a);
+
+  const isRedAction = (a) => (a?.is_red === true || a?.isRed === true || true); // weekly change actions are always treated as "red"
+
+  const reasonTextOf = (a) => {
+    const rt = (a?.reason_text ?? a?.reasonText ?? null);
+    if (rt != null && String(rt).trim()) return String(rt).trim();
+
+    const r = String(a?.reason || a?.cancel_reason || a?.kind_reason || '').toUpperCase();
+    if (r === 'SHIFT_NO_LONGER_WORKED' || r === 'MISSING_FROM_IMPORT') return 'Shift no longer worked';
+    if (r === 'REPLACEMENT_DAY') return 'Shift no longer worked';
+    if (r === 'HOURS_INCREASED') return 'Hours increased';
+    if (r === 'HOURS_DECREASED') return 'Hours decreased';
+    if (r === 'SHIFT_DETAILS_CHANGED') return 'Shift details changed';
+    return r ? r.replace(/_/g, ' ').toLowerCase().replace(/^\w/, c => c.toUpperCase()) : '';
+  };
 
   const workDateOf = (a) => asYmd(a?.work_date || a?.workDate || a?.date_local || a?.date || null);
 
@@ -51972,7 +52050,29 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
     return null;
   };
 
-  const labelOf = (a) => String(a?.label || a?.action_label || a?.actionLabel || a?.action_kind || a?.actionKind || '').trim();
+  const candidateNameOf = (a) => {
+    const nm = a?.candidate_name ?? a?.candidateName ?? null;
+    const s = (nm != null) ? String(nm).trim() : '';
+    return s || null;
+  };
+
+  const clientNameOf = (a) => {
+    const nm = a?.client_name ?? a?.clientName ?? null;
+    const s = (nm != null) ? String(nm).trim() : '';
+    return s || null;
+  };
+
+  const candidateIdOf = (a) => String(a?.candidate_id ?? a?.candidateId ?? '').trim();
+  const clientIdOf = (a) => String(a?.client_id ?? a?.clientId ?? '').trim();
+
+  const labelOf = (a) => {
+    const s = String(a?.label || a?.action_label || a?.actionLabel || '').trim();
+    if (s) return s;
+    const k = actionKindOf(a);
+    if (k === 'SHIFT_CANCEL') return 'Cancel shift';
+    if (k === 'SHIFT_CHANGED') return 'Update existing shift';
+    return k || 'Action';
+  };
 
   const inYmdRange = (ymd, fromYmd, toYmd) => {
     const d = asYmd(ymd);
@@ -51988,27 +52088,34 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
     const acts = Array.isArray(previewNow?.actions) ? previewNow.actions : [];
     const selectedNewKeys = new Set();
 
+    // ✅ IMPORTANT: scan ALL actions for is_new_shift, not just renderable ones.
+    // New shifts are often hidden/non-renderable but still selected (auto-applied).
     for (const a of acts) {
       const id = actionIdOf(a);
       if (!id) continue;
       if (!selSet.has(id)) continue;
+
       const isNew = (a?.is_new_shift === true || a?.isNewShift === true);
       if (!isNew) continue;
+
       const rk = replacementKeyOf(a);
       if (rk) selectedNewKeys.add(rk);
     }
 
-    // required cancels = all cancellation actions in preview that share the same replacement_day_key
+    // required cancels = all cancellation actions that share the same replacement_day_key
     const missing = [];
     for (const rk of selectedNewKeys) {
       const cancelsForKey = [];
       for (const a of acts) {
         if (!isCancelAction(a)) continue;
+
         const key = replacementKeyOf(a);
         if (key !== rk) continue;
+
         const id = actionIdOf(a);
         if (id) cancelsForKey.push(id);
       }
+
       const notSelected = cancelsForKey.filter(id => !selSet.has(id));
       if (notSelected.length) {
         missing.push({ replacement_day_key: rk, missing_cancel_action_ids: notSelected.slice(0, 50) });
@@ -52018,11 +52125,16 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
     return { selectedNewKeys, missing };
   };
 
+
   const shouldHideActionUnderOptions = (a, policyCtx) => {
-    // Only options-hide MISSING_FROM_IMPORT cancellations
+    // Only options-hide missing-from-import cancellations (back-compat)
     if (!a) return false;
     if (!isCancelAction(a)) return false;
-    if (reasonOf(a) !== 'MISSING_FROM_IMPORT') return false;
+
+    const reason = String(a?.reason || a?.cancel_reason || a?.kind_reason || '').toUpperCase();
+    const isMissingFromImport = (reason === 'MISSING_FROM_IMPORT');
+
+    if (!isMissingFromImport) return false;
 
     // If this cancellation belongs to a key where a new shift is selected, do NOT hide it (Policy A must remain satisfiable).
     const rk = replacementKeyOf(a);
@@ -52054,12 +52166,10 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
     if (q) {
       const parts = [
         labelOf(a),
-        actionIdOf(a),
-        reasonOf(a),
-        String(a?.candidate_id || a?.candidateId || ''),
-        String(a?.client_id || a?.clientId || ''),
-        String(workDateOf(a) || ''),
-        String(replacementKeyOf(a) || '')
+        reasonTextOf(a),
+        candidateNameOf(a) || '',
+        clientNameOf(a) || '',
+        String(workDateOf(a) || '')
       ].filter(Boolean).join(' ').toLowerCase();
       if (!parts.includes(q)) return false;
     }
@@ -52068,16 +52178,45 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
   };
 
   const buildActionsTableHtml = (previewNow, selSet) => {
-    const policy = computePolicyA(previewNow, selSet);
+    // ✅ Policy A must consider auto-applied NEW shifts (auto_apply_action_ids) as selected,
+    // even though they are not renderable and not user-ticked.
+    const autoIdsNow = (() => {
+      const raw =
+        previewNow?.auto_apply_action_ids ??
+        previewNow?.autoApplyActionIds ??
+        null;
+
+      const arr = Array.isArray(raw) ? raw : [];
+      const out = [];
+      const seen = new Set();
+      for (const v of arr) {
+        const s = String(v || '').trim();
+        if (!s) continue;
+        if (seen.has(s)) continue;
+        seen.add(s);
+        out.push(s);
+      }
+      return out;
+    })();
+
+    const policySel = new Set([
+      ...Array.from(selSet || []),
+      ...autoIdsNow
+    ]);
+
+    const policy = computePolicyA(previewNow, policySel);
 
     const visible = [];
     for (const a of (Array.isArray(previewNow?.actions) ? previewNow.actions : [])) {
+      if (!isRenderableAction(a)) continue;
       if (shouldHideActionUnderOptions(a, policy)) continue;
+
+      // Filters/checkbox state must remain based on USER selection only (selSet)
       if (!passesFilters(a, selSet)) continue;
       visible.push(a);
     }
 
-    // Group by replacement_day_key (fallback to candidate|client|date)
+    // Group by replacement_day_key (for correctness), but display group header as "Name — Client — Date"
     const groups = new Map();
     for (const a of visible) {
       const gk = replacementKeyOf(a) || '—';
@@ -52113,9 +52252,15 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
 
     const tableBody = (() => {
       if (!groupKeys.length) {
+        const extra = autoApplyIdsFromPreview.length
+          ? `<div class="mini" style="margin-top:6px;color:#666;">Note: ${enc(String(autoApplyIdsFromPreview.length))} new shift(s) will be processed automatically when you finalise.</div>`
+          : '';
         return `
           <tr>
-            <td colspan="7"><span class="mini">No actions to show (filters/options may be hiding everything).</span></td>
+            <td colspan="7">
+              <span class="mini">No changes to review.</span>
+              ${extra}
+            </td>
           </tr>
         `;
       }
@@ -52123,23 +52268,39 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
       const rowsOut = [];
       for (const gk of groupKeys) {
         const list = groups.get(gk) || [];
-        const counts = { cancel: 0, row: 0, red: 0, selected: 0 };
+
+        // Derive friendly group title from first row (do not show IDs)
+        const a0 = list[0] || null;
+        const candName = candidateNameOf(a0) || 'Candidate';
+        const clientName = clientNameOf(a0) || 'Client';
+
+        // work_date from key or row
+        let dYmd = null;
+        try {
+          const parts = String(gk || '').split('|');
+          if (parts.length >= 3) dYmd = String(parts[2] || '').slice(0, 10);
+        } catch {}
+        if (!dYmd) dYmd = workDateOf(a0);
+
+        const dNice = (typeof formatYmdToNiceDate === 'function' && dYmd) ? formatYmdToNiceDate(dYmd) : (dYmd || '—');
+
+        const groupTitle = `${candName} — ${clientName} — ${dNice}`;
+
+        const counts = { changed: 0, cancel: 0, red: 0, selected: 0 };
         for (const a of list) {
           if (isCancelAction(a)) counts.cancel++;
-          else counts.row++;
+          else counts.changed++;
           if (isRedAction(a)) counts.red++;
           const id = actionIdOf(a);
-          if (id && selSet.has(id)) counts.selected++;
+          if (id && selSet.has(id)) counts.selected++; // ✅ user ticks only
         }
 
-        // Group header row
         rowsOut.push(`
-          <tr style="background:#fafafa;">
-            <td colspan="7">
-              <span class="mini"><strong>${enc(gk)}</strong></span>
-              ${counts.row ? makePill(`New/Row ${counts.row}`, 'pill-info') : ''}
-              ${counts.cancel ? makePill(`Cancel ${counts.cancel}`, 'pill-warn') : ''}
-              ${counts.red ? makePill(`Red ${counts.red}`, 'pill-bad') : ''}
+          <tr>
+            <td colspan="7" title="${enc(gk)}">
+              <span class="mini"><strong>${enc(groupTitle)}</strong></span>
+              ${counts.changed ? makePill(`Changed ${counts.changed}`, 'pill-warn') : ''}
+              ${counts.cancel ? makePill(`Cancelled ${counts.cancel}`, 'pill-bad') : ''}
               ${counts.selected ? makePill(`Ticked ${counts.selected}`, 'pill-ok') : ''}
             </td>
           </tr>
@@ -52147,26 +52308,49 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
 
         for (const a of list) {
           const id = actionIdOf(a) || '';
-          const checked = id && selSet.has(id);
+          const checked = id && selSet.has(id); // ✅ user ticks only
+
           const wd = workDateOf(a);
           const wdNice = (typeof formatYmdToNiceDate === 'function' && wd) ? formatYmdToNiceDate(wd) : (wd || '—');
-          const lab = labelOf(a) || (isCancelAction(a) ? 'Cancel' : 'Apply row');
-          const sev = isRedAction(a) ? `<span class="pill pill-bad">RED</span>` : `<span class="pill pill-ok">OK</span>`;
-          const reason = reasonOf(a) || '';
-          const cand = String(a?.candidate_id || a?.candidateId || '—');
-          const cli  = String(a?.client_id || a?.clientId || '—');
+
+          const lab = labelOf(a);
+          const sev = `<span class="pill pill-bad">RED</span>`;
+
+          const reasonTxt = reasonTextOf(a) || '';
+
+          const candNm = candidateNameOf(a);
+          const cliNm  = clientNameOf(a);
+
+          // Do NOT show CCR; show candidate name only (fallback to ID)
+          const candDisplay = candNm || candidateIdOf(a) || '—';
+          const candTitle = candidateIdOf(a) ? `Candidate ID: ${candidateIdOf(a)}` : '';
+
+          const clientDisplay = cliNm || clientIdOf(a) || '—';
+          const clientTitle = clientIdOf(a) ? `Client ID: ${clientIdOf(a)}` : '';
+
+          // Optional: show old→new hours for changed rows (very helpful)
+          const det = (a && typeof a.details === 'object' && a.details) ? a.details : {};
+          const oldH = det.old_hours_display ? String(det.old_hours_display) : '';
+          const newH = det.new_hours_display ? String(det.new_hours_display) : '';
+          const hrsLine =
+            (!isCancelAction(a) && oldH && newH)
+              ? `<div class="mini" style="color:#666;margin-top:2px;">Hours: ${enc(oldH)} → ${enc(newH)}</div>`
+              : '';
 
           rowsOut.push(`
-            <tr class="${isRedAction(a) ? 'wi-row-issue' : ''}">
+            <tr class="wi-row-issue">
               <td class="mini" style="width:36px;">
                 <input type="checkbox" data-act="weekly-action-check" data-action-id="${enc(id)}" ${checked ? 'checked' : ''}/>
               </td>
               <td class="mini" style="width:90px;">${sev}</td>
-              <td class="mini" style="white-space:normal;word-break:break-word;">${enc(lab)}</td>
+              <td class="mini" style="white-space:normal;word-break:break-word;">
+                ${enc(lab)}
+                ${hrsLine}
+              </td>
               <td class="mini">${enc(wdNice)}</td>
-              <td class="mini">${enc(cand)}</td>
-              <td class="mini">${enc(cli)}</td>
-              <td class="mini">${enc(reason)}</td>
+              <td class="mini" title="${enc(candTitle)}">${enc(candDisplay)}</td>
+              <td class="mini" title="${enc(clientTitle)}">${enc(clientDisplay)}</td>
+              <td class="mini">${enc(reasonTxt)}</td>
             </tr>
           `);
         }
@@ -52176,7 +52360,7 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
     })();
 
     const visibleCount = visible.length;
-    const selectedCount = Array.from(selSet || []).length;
+    const selectedCount = Array.from(selSet || []).length; // ✅ user ticks only
 
     return {
       bannerHtml,
@@ -52187,167 +52371,10 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
     };
   };
 
-  // ─────────────────────────────────────────────────────────────
-  // Canonical decisions store (survives rerenders, defaults init safe)
-  // ─────────────────────────────────────────────────────────────
-  const decisionStore =
-    (typeof getOrInitWeeklyImportDecisionsStore === 'function')
-      ? getOrInitWeeklyImportDecisionsStore(TYPE, importId, rootObj)
-      : null;
 
-  // Ensure defaults are initialised (safe; doesn't overwrite edits)
-  try { decisionStore && decisionStore.initFromPreview && decisionStore.initFromPreview(rootObj); } catch {}
+   // ✅ Legacy “Changed shifts” (credit/reinvoice) UI removed.
+  // Weekly import approval happens ONLY in the Actions table above.
 
-  const changedHtml = (() => {
-    if (!changedShifts || !changedShifts.length) {
-      return `<div class="mini" style="color:#666;">No changed-hours shifts detected for this import.</div>`;
-    }
-
-    const head = `
-      <div class="mini" style="margin-bottom:6px;">
-        Detected changed hours for <strong>${enc(String(changedCount))}</strong> shift(s).
-        Decision required for <strong>${enc(String(changedDecisionNeededCount))}</strong>.
-      </div>
-      <div class="mini" style="color:#666;margin-bottom:10px;">
-        For paid/invoiced shifts you must choose <em>Skip</em> or allow the correction artefacts to be created.
-        Invoiced shifts require a credit week + reinvoice week.
-      </div>
-    `;
-
-    const rowsHtml = changedShifts.map((cs) => {
-      const ek = String(cs?.external_row_key || '').trim();
-      const shiftId = cs?.shift_id || '';
-      const we = cs?.week_ending_date || '';
-
-      const paid = asBool(cs?.is_paid);
-      const invoiced = asBool(cs?.is_invoiced);
-      const requires = asBool(cs?.requires_any_decision);
-
-      const oldStart = cs?.old_start_utc || cs?.old_start || '';
-      const oldEnd   = cs?.old_end_utc   || cs?.old_end   || '';
-      const oldBreak = Number(cs?.old_break_mins ?? cs?.old_break_minutes ?? 0) || 0;
-
-      const newStart = cs?.new_start_utc || cs?.new_start || '';
-      const newEnd   = cs?.new_end_utc   || cs?.new_end   || '';
-      const newBreak = Number(cs?.new_break_mins ?? cs?.new_break_minutes ?? 0) || 0;
-
-      const oldPay    = asNum(cs?.old_pay_ex ?? cs?.old_pay_ex_vat ?? cs?.old_pay);
-      const newPay    = asNum(cs?.new_pay_ex ?? cs?.new_pay_ex_vat ?? cs?.new_pay);
-      const deltaPay  = asNum(cs?.delta_pay_ex ?? cs?.delta_pay_ex_vat ?? cs?.delta_pay);
-
-      const oldCharge   = asNum(cs?.old_charge_ex ?? cs?.old_charge_ex_vat ?? cs?.old_charge);
-      const newCharge   = asNum(cs?.new_charge_ex ?? cs?.new_charge_ex_vat ?? cs?.new_charge);
-      const deltaCharge = asNum(cs?.delta_charge_ex ?? cs?.delta_charge_ex_vat ?? cs?.delta_charge);
-
-      const d = decisionStore && decisionStore.get ? (decisionStore.get(ek) || {}) : {};
-      const skip = asBool(d?.skip);
-
-      const opts = (typeof getWeeklyMondayOptions === 'function')
-        ? getWeeklyMondayOptions(cs?.week_start || cs?.week_ending_date || '')
-        : [];
-
-      const creditVal = d?.credit_week_start || '';
-      const reinvVal  = d?.reinvoice_week_start || '';
-
-      const payDir =
-        paid
-          ? (deltaPay > 0 ? `Underpay ${fmtMoney(deltaPay)} (will be paid next pay CSV run)` :
-             deltaPay < 0 ? `Overpay ${fmtMoney(deltaPay)} (recovery scheduled)` :
-             `No pay delta`)
-          : '—';
-
-      return `
-        <tr class="${requires ? 'wi-row-issue' : ''}">
-          <td class="mini">${enc(ek || '—')}</td>
-          <td class="mini">${enc(shiftId || '—')}</td>
-          <td class="mini">${enc((typeof formatYmdToNiceDate === 'function' ? formatYmdToNiceDate(String(we || '')) : String(we || '')) || '—')}</td>
-
-          <td class="mini">${enc(fmtTime(oldStart))} → ${enc(fmtTime(newStart))}</td>
-          <td class="mini">${enc(fmtTime(oldEnd))} → ${enc(fmtTime(newEnd))}</td>
-          <td class="mini">${enc(String(oldBreak))} → ${enc(String(newBreak))}</td>
-
-          <td class="mini">${enc(fmtMoney(oldPay))} → ${enc(fmtMoney(newPay))}<br/><span style="color:#666">Δ ${enc(fmtMoney(deltaPay))}</span></td>
-          <td class="mini">${enc(fmtMoney(oldCharge))} → ${enc(fmtMoney(newCharge))}<br/><span style="color:#666">Δ ${enc(fmtMoney(deltaCharge))}</span></td>
-
-          <td class="mini">${paid ? 'Yes' : 'No'}</td>
-          <td class="mini">${invoiced ? 'Yes' : 'No'}</td>
-
-          <td class="mini">${requires ? '<strong>Yes</strong>' : 'No'}</td>
-
-          <td class="mini">
-            ${
-              requires
-                ? `
-                  <label class="mini" style="display:flex;gap:6px;align-items:center;">
-                    <input type="checkbox" data-act="chg-skip" data-ek="${enc(ek)}" ${skip ? 'checked' : ''}/>
-                    Skip
-                  </label>
-                `
-                : '—'
-            }
-          </td>
-
-          <td class="mini">
-            ${
-              (requires && invoiced)
-                ? `
-                  <select data-act="chg-credit-week" data-ek="${enc(ek)}" class="mini">
-                    ${opts.map(o => `<option value="${enc(o.value)}" ${String(o.value)===String(creditVal) ? 'selected' : ''}>${enc(o.label)}</option>`).join('')}
-                  </select>
-                `
-                : '—'
-            }
-          </td>
-
-          <td class="mini">
-            ${
-              (requires && invoiced)
-                ? `
-                  <select data-act="chg-reinvoice-week" data-ek="${enc(ek)}" class="mini">
-                    ${opts.map(o => `<option value="${enc(o.value)}" ${String(o.value)===String(reinvVal) ? 'selected' : ''}>${enc(o.label)}</option>`).join('')}
-                  </select>
-                `
-                : '—'
-            }
-          </td>
-
-          <td class="mini">
-            ${requires && paid ? enc(payDir) : '—'}
-          </td>
-        </tr>
-      `;
-    }).join('');
-
-    return `
-      ${head}
-      <div class="wi-table-wrap" style="max-height:240px;">
-        <table class="grid wi-grid">
-          <thead>
-            <tr>
-              <th class="mini">External key</th>
-              <th class="mini">Shift</th>
-              <th class="mini">Week ending</th>
-              <th class="mini">Start</th>
-              <th class="mini">End</th>
-              <th class="mini">Break</th>
-              <th class="mini">Pay</th>
-              <th class="mini">Charge</th>
-              <th class="mini">Paid</th>
-              <th class="mini">Invoiced</th>
-              <th class="mini">Decision?</th>
-              <th class="mini">Skip</th>
-              <th class="mini">Credit week</th>
-              <th class="mini">Reinvoice week</th>
-              <th class="mini">Pay correction</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${rowsHtml}
-          </tbody>
-        </table>
-      </div>
-    `;
-  })();
 
   // Build initial actions HTML (uses store state)
   const selSet0 = ui && ui.actionSelection ? ui.actionSelection : new Set();
@@ -52361,18 +52388,66 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
 
   const f = ui && ui.filters ? ui.filters : { showOnlyRed: false, showOnlyUnticked: false, showOnlyCancellations: false, search: '' };
 
+  // ✅ Row outcome colour/state mapping:
+  // - wi-row-ready  = GREEN (will be processed)
+  // - wi-row-issue  = RED (would change but NOT approved)
+  // - wi-row-ignore = BLACK (ignored/no-op/already processed)
+  // - wi-row-warn   = LIGHT RED (mapping/contract/band issues)
+  //
+  // Counts are computed here for the Overview.
+  let count_apply = 0;
+  let count_not_approved = 0;
+  let count_ignored = 0;
+  let count_needs_resolution = 0;
+
+  const autoApplySet = new Set((autoApplyIdsFromPreview || []).map(v => String(v || '').trim()).filter(Boolean));
+
+  const actionById2 = new Map();
+  const changedRowIdSet = new Set();
+
+  for (const a of (actionsAll || [])) {
+    const id = actionIdOf(a);
+    if (!id) continue;
+    actionById2.set(id, a);
+
+    // Changed rows are represented as ROW:<external_key> with SHIFT_CHANGED kind or reason_text.
+    if (String(id).toUpperCase().startsWith('ROW:') && isChangedAction(a)) {
+      changedRowIdSet.add(String(id));
+    }
+  }
+
+  const isRowProblem = (actionRaw) => {
+    const x = String(actionRaw || '').toUpperCase();
+    if (!x) return true;
+    if (x === 'NO_CANDIDATE' || x === 'REJECT_NO_CANDIDATE') return true;
+    if (x === 'NO_CLIENT'    || x === 'REJECT_NO_CLIENT') return true;
+    if (x === 'REJECT_NO_CONTRACT') return true;
+    if (x === 'REJECT_NO_CONTRACT_BAND_MISMATCH') return true;
+    if (x.startsWith('REJECT_')) return true;
+    if (x.startsWith('BLOCK_'))  return true;
+    if (x === 'UNKNOWN') return true;
+    return false;
+  };
+
+  const isRowIgnored = (actionRaw) => {
+    const x = String(actionRaw || '').toUpperCase();
+    if (x === 'SKIP_ALREADY_PROCESSED') return true;
+    if (x === 'OK' || x === 'APPLY') return true;
+    return false;
+  };
+
   const rowsHtml = (rows && rows.length)
     ? rows.map((r, idx) => {
         const level = String(r.level || '').toLowerCase();
 
         const staff =
           (level === 'group')
-            ? (r.candidate_name || r.candidate_id || r.staff_name || r.staff_raw || '')
+            ? (r.candidate_name || r.staff_name || r.staff_raw || r.candidate_id || '')
             : (r.staff_name || r.staff_raw || '');
 
         const unit =
           (level === 'group')
-            ? (r.client_name || r.client_id || r.unit || r.hospital_or_trust || r.hospital_norm || '')
+            ? (r.client_name || r.unit || r.hospital_or_trust || r.hospital_norm || r.client_id || '')
             : (r.unit || r.hospital_or_trust || r.hospital_norm || '');
 
         const rawDateYmd =
@@ -52389,31 +52464,70 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
            r.assignment_grade_norm ||
            '').toString();
 
-        const reasonText = (r.reason || '').toString();
+        let reasonText = (r.reason || '').toString();
         const actionRaw = normUpper(r.resolution_status || r.action || '');
 
-        let displayAction = actionRaw ? actionRaw.replace(/_/g, ' ') : 'UNKNOWN';
-        if (actionRaw === 'NEW_AUTOPROC_TIMESHEET') displayAction = 'READY TO PROCESS';
+        // Row id (only non-group shift rows will have external_row_key)
+        const ek = String(r?.external_row_key ?? r?.externalRowKey ?? '').trim();
+        const rowId = ek ? `ROW:${ek}` : '';
 
-        let cls = 'pill-info';
-        if (actionRaw === 'OK' || actionRaw === 'APPLY' || actionRaw === 'NEW_AUTOPROC_TIMESHEET') cls = 'pill-ok';
-        else if (
-          actionRaw === 'NO_CANDIDATE' ||
-          actionRaw === 'REJECT_NO_CANDIDATE' ||
-          actionRaw === 'NO_CLIENT' ||
-          actionRaw === 'REJECT_NO_CLIENT'
-        ) cls = 'pill-bad';
-        else if (
-          actionRaw === 'REJECT_NO_CONTRACT' ||
-          actionRaw === 'REJECT_NO_CONTRACT_BAND_MISMATCH' ||
-          actionRaw.startsWith('REJECT_') ||
-          actionRaw.startsWith('BLOCK_') ||
-          actionRaw === 'UNKNOWN'
-        ) cls = 'pill-warn';
+        const uSel = (ui && ui.actionSelection instanceof Set) ? ui.actionSelection : new Set();
 
-        const rowClass =
-          READY_ACTIONS.has(actionRaw) ? 'wi-row-ready'
-          : (isIssueAction(actionRaw) ? 'wi-row-issue' : '');
+        const isAutoNew = !!(rowId && autoApplySet.has(rowId));
+        const isChanged = !!(rowId && changedRowIdSet.has(rowId));
+        const isApproved = !!(rowId && uSel.has(rowId));
+
+        // Prefer action reason_text for changed rows
+        if (isChanged) {
+          const a = actionById2.get(rowId) || null;
+          const rt = a ? reasonTextOf(a) : '';
+          if (rt) reasonText = rt;
+        } else if (isAutoNew) {
+          reasonText = 'New shift (auto-applied)';
+        } else if (String(actionRaw).toUpperCase() === 'SKIP_ALREADY_PROCESSED') {
+          reasonText = 'Already processed';
+        }
+
+        let rowClass = '';
+        let pillCls = 'pill-info';
+        let displayAction = 'IGNORED';
+
+        // Only count rows that represent a real shift row id
+        const countable = !!rowId;
+
+        if (isRowProblem(actionRaw)) {
+          rowClass = 'wi-row-warn';
+          pillCls = 'pill-warn';
+          displayAction = 'NEEDS RESOLUTION';
+          if (countable) count_needs_resolution += 1;
+        } else if (isAutoNew) {
+          rowClass = 'wi-row-ready';
+          pillCls = 'pill-ok';
+          displayAction = 'WILL APPLY';
+          if (countable) count_apply += 1;
+        } else if (isChanged) {
+          if (isApproved) {
+            rowClass = 'wi-row-ready';
+            pillCls = 'pill-ok';
+            displayAction = 'WILL APPLY';
+            if (countable) count_apply += 1;
+          } else {
+            rowClass = 'wi-row-issue';
+            pillCls = 'pill-bad';
+            displayAction = 'NOT APPROVED';
+            if (countable) count_not_approved += 1;
+          }
+        } else if (isRowIgnored(actionRaw)) {
+          rowClass = 'wi-row-ignore';
+          pillCls = 'pill-info';
+          displayAction = (String(actionRaw).toUpperCase() === 'SKIP_ALREADY_PROCESSED') ? 'ALREADY PROCESSED' : 'IGNORED';
+          if (countable) count_ignored += 1;
+        } else {
+          rowClass = 'wi-row-ignore';
+          pillCls = 'pill-info';
+          displayAction = 'IGNORED';
+          if (countable) count_ignored += 1;
+        }
 
         const canAssignCand   = (actionRaw === 'NO_CANDIDATE' || actionRaw === 'REJECT_NO_CANDIDATE');
         const canAssignClient = (actionRaw === 'NO_CLIENT'    || actionRaw === 'REJECT_NO_CLIENT');
@@ -52424,7 +52538,7 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
             <td class="wi-col-unit"><span class="mini">${enc(unit || '—')}</span></td>
             <td class="wi-col-date"><span class="mini">${enc(date || '—')}</span></td>
             <td class="wi-col-code"><span class="mini" style="white-space: normal; word-break: break-word; display:inline-block;">${enc(code || '—')}</span></td>
-            <td class="wi-col-status"><span class="pill ${cls}" style="white-space: normal; word-break: break-word; display:inline-block; text-align:center;">${enc(displayAction || 'UNKNOWN')}</span></td>
+            <td class="wi-col-status"><span class="pill ${pillCls}" style="white-space: normal; word-break: break-word; display:inline-block; text-align:center;">${enc(displayAction || 'IGNORED')}</span></td>
             <td class="wi-col-reason"><span class="mini" style="white-space: normal; word-break: break-word; display:inline-block;">${enc(reasonText || '')}</span></td>
             <td class="wi-col-actions">
               <div class="wi-actions">
@@ -52441,6 +52555,11 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
       </tr>
     `;
 
+
+  const autoPill = autoApplyIdsFromPreview.length
+    ? `<span class="pill pill-ok">Auto new shifts: ${enc(String(autoApplyIdsFromPreview.length))}</span>`
+    : '';
+
   const markup = html(`
     <div id="weeklyImportSummary">
       <div class="card weekly-import-card">
@@ -52450,8 +52569,12 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
             <div class="mini">
               Import ID: <span class="mono">${enc(importId || '—')}</span><br/>
               Total rows: ${total}<br/>
-              Ready to process: ${readyCount} &nbsp;|&nbsp; Needs attention: ${issueCount}<br/>
-              Changed shifts: ${enc(String(changedCount))} &nbsp;|&nbsp; Decision required: ${enc(String(changedDecisionNeededCount))}
+                      Will apply: ${enc(String(count_apply))} &nbsp;|&nbsp;
+              Not approved: ${enc(String(count_not_approved))} &nbsp;|&nbsp;
+              Ignored: ${enc(String(count_ignored))} &nbsp;|&nbsp;
+              Needs resolution: ${enc(String(count_needs_resolution))}<br/>
+              Auto new shifts: ${enc(String(autoApplyIdsFromPreview.length))}
+
             </div>
           </div>
         </div>
@@ -52462,6 +52585,7 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
             <div class="mini" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
               ${missPill}
               <span class="pill pill-info">Range: ${enc(String(optFromNice))} → ${enc(String(optToNice))}</span>
+              ${autoPill}
               <button type="button" class="btn mini" data-act="weekly-import-options">Change options…</button>
               <span class="mini" style="color:#666;">(Shift date = start date; cross-midnight belongs to start date.)</span>
             </div>
@@ -52513,15 +52637,13 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
             </div>
 
             <div class="mini" style="margin-top:8px;color:#666;">
-              Note: Missing-from-import cancellations are always unchecked by default. When missing shifts are OFF, those cancellations are hidden unless required by a replacement-day selection.
+              Only real changes are shown here (hours increased/decreased or shift cancelled). New shifts are processed automatically when you finalise.
             </div>
           </div>
         </div>
 
-        <div class="row" style="margin-top:10px;">
-          <label>Changed shifts</label>
-          <div class="controls">${changedHtml}</div>
-        </div>
+              <!-- ✅ Removed legacy "Changed shifts" decision section (credit/reinvoice UI) -->
+
 
         <div class="row" style="margin-top:10px;">
           <label>Rows</label>
@@ -52550,9 +52672,10 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
           <div class="controls">
             <button type="button" class="btn" data-act="weekly-import-refresh">Refresh</button>
             <button type="button" class="btn" style="margin-left:8px;" data-act="weekly-import-apply">Finalise import</button>
-            <span class="mini" style="margin-left:8px;">
-              Changed-hours decisions are validated client-side before finalise.
+                     <span class="mini" style="margin-left:8px;">
+              Tick approvals above to apply changes/cancellations. New shifts are auto-applied on Finalise.
             </span>
+
           </div>
         </div>
       </div>
@@ -52560,17 +52683,20 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
   `);
 
   // Wiring: decisions updates + action selection + filters + options + apply + existing resolve actions
-  setTimeout(() => {
+   setTimeout(() => {
     try {
       const root = document.getElementById('weeklyImportSummary');
-      if (!root || (TYPE !== 'NHSP' && TYPE !== 'HR_WEEKLY')) return;
+
+      const T = String(type || '').toUpperCase();
+      if (!root || (T !== 'NHSP' && T !== 'HR_WEEKLY')) return;
+
       if (root.__weeklyWired) return;
       root.__weeklyWired = true;
 
       const LOGW = (typeof window.__LOG_IMPORTS === 'boolean') ? window.__LOG_IMPORTS : true;
       const LW   = (...a) => { if (LOGW) console.log('[IMPORTS][WEEKLY]', ...a); };
 
-      const getPreview = () => (window.__importSummaryState && window.__importSummaryState[TYPE]) ? window.__importSummaryState[TYPE] : rootObj;
+      const getPreview = () => (window.__importSummaryState && window.__importSummaryState[T]) ? window.__importSummaryState[T] : rootObj;
 
       const getUiLive = () => {
         const u = getWeeklyUi();
@@ -52578,69 +52704,71 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
         return ensureWeeklyUi();
       };
 
-  const updateActionsDom = () => {
-  const previewNow = getPreview();
-  const u = getUiLive();
-  const sel = (u && u.actionSelection instanceof Set) ? u.actionSelection : new Set();
-
-  const build = buildActionsTableHtml(previewNow, sel);
-
-  const banner = document.getElementById('weeklyPolicyBanner');
-  if (banner) banner.innerHTML = build.bannerHtml || '';
-
-  const tbody = document.getElementById('weeklyActionsTbody');
-  if (tbody) tbody.innerHTML = build.tableBody || '';
-
-  // ✅ NEW: enable/disable "Finalise import" using CSS hook (no native disabled attribute)
-  try {
-    const btnApplyNow = root.querySelector('button[data-act="weekly-import-apply"]');
-
-    let disableReason = '';
-
-    // Policy A: replacement-day violations block finalise
-    try {
-      const pol = computePolicyA(previewNow, sel);
-      if (pol && Array.isArray(pol.missing) && pol.missing.length) {
-        disableReason = 'Replacement-day rule: tick all required cancellations for the day(s) highlighted above.';
-      }
-    } catch {}
-
-    // Changed-hours decisions validation blocks finalise (when invalid)
-    if (!disableReason) {
-      try {
-        const ds = (typeof getOrInitWeeklyImportDecisionsStore === 'function')
-          ? getOrInitWeeklyImportDecisionsStore(TYPE, importId, previewNow)
-          : null;
-
-        if (ds && typeof ds.validate === 'function') {
-          const v = ds.validate(previewNow);
-          if (v && v.ok === false) {
-            disableReason = 'Changed-hours decisions are incomplete/invalid. Please resolve the highlighted decision rows.';
-          }
+      const getAutoApplyIdsNow = (previewNow) => {
+        const raw = previewNow?.auto_apply_action_ids ?? previewNow?.autoApplyActionIds ?? null;
+        const arr = Array.isArray(raw) ? raw : [];
+        const out = [];
+        const seen = new Set();
+        for (const v of arr) {
+          const s = String(v || '').trim();
+          if (!s) continue;
+          if (seen.has(s)) continue;
+          seen.add(s);
+          out.push(s);
         }
-      } catch {}
-    }
+        return out;
+      };
 
-    if (btnApplyNow) {
-      if (disableReason) {
-        btnApplyNow.classList.add('disabled');
-        btnApplyNow.setAttribute('data-disabled', '1');
-        btnApplyNow.title = disableReason;
-      } else {
-        btnApplyNow.classList.remove('disabled');
-        btnApplyNow.removeAttribute('data-disabled');
-        btnApplyNow.title = '';
-      }
-    }
-  } catch {}
+      const updateActionsDom = () => {
+        const previewNow = getPreview();
+        const u = getUiLive();
+        const sel = (u && u.actionSelection instanceof Set) ? u.actionSelection : new Set();
 
-  // Update visible/ticked counters in the filter bar by re-rendering the pills text if present
-  try {
-    const pills = root.querySelectorAll('.pill');
-    // not strictly necessary; keep minimal and safe
-    void pills;
-  } catch {}
-};
+        const build = buildActionsTableHtml(previewNow, sel);
+
+        const banner = document.getElementById('weeklyPolicyBanner');
+        if (banner) banner.innerHTML = build.bannerHtml || '';
+
+        const tbody = document.getElementById('weeklyActionsTbody');
+        if (tbody) tbody.innerHTML = build.tableBody || '';
+
+        // enable/disable "Finalise import" using CSS hook (no native disabled attribute)
+        try {
+          const btnApplyNow = root.querySelector('button[data-act="weekly-import-apply"]');
+
+          let disableReason = '';
+
+          // Policy A: replacement-day violations block finalise
+          try {
+            // Policy must consider the full selection set the backend will receive:
+            // user-ticked actions + auto-applied new shifts
+            const autoNow = getAutoApplyIdsNow(previewNow);
+            const selAll = new Set([...Array.from(sel), ...autoNow]);
+
+            const pol = computePolicyA(previewNow, selAll);
+            if (pol && Array.isArray(pol.missing) && pol.missing.length) {
+              disableReason = 'Replacement-day rule: tick all required cancellations for the day(s) highlighted above.';
+            }
+          } catch {}
+
+                 // ✅ Removed legacy changed-hours decision validation gate (credit/reinvoice UI no longer exists)
+
+
+          if (btnApplyNow) {
+            if (disableReason) {
+              btnApplyNow.classList.add('disabled');
+              btnApplyNow.setAttribute('data-disabled', '1');
+              btnApplyNow.title = disableReason;
+            } else {
+              btnApplyNow.classList.remove('disabled');
+              btnApplyNow.removeAttribute('data-disabled');
+              btnApplyNow.title = '';
+            }
+          }
+        } catch {}
+
+        try { void root.querySelectorAll('.pill'); } catch {}
+      };
 
       const ensureWeeklyImportMappings = () => {
         window.__weeklyImportMappings = window.__weeklyImportMappings || {};
@@ -52653,13 +52781,11 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
         return m;
       };
 
-      // Change handler: action checkbox + filters + decisions
       root.addEventListener('change', (ev) => {
         const el = ev.target;
         if (!el || !el.getAttribute) return;
         const act = el.getAttribute('data-act') || '';
 
-        // ✅ NEW: action checkbox toggles (ROW:/CANCEL:)
         if (act === 'weekly-action-check') {
           const id = (el.getAttribute('data-action-id') || '').trim();
           if (!id) return;
@@ -52676,7 +52802,6 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
           return;
         }
 
-        // ✅ NEW: filters (checkbox toggles)
         if (act === 'weekly-filter-red' || act === 'weekly-filter-unticked' || act === 'weekly-filter-cancellations') {
           const u = getUiLive();
           if (!u) return;
@@ -52689,37 +52814,10 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
           return;
         }
 
-        // Existing decision changes update canonical store
-        if (act === 'chg-skip' || act === 'chg-credit-week' || act === 'chg-reinvoice-week') {
-          const ek = (el.getAttribute('data-ek') || '').trim();
-          if (!ek) return;
+             // ✅ Removed legacy changed-hours decision inputs (credit/reinvoice UI no longer exists)
 
-          const previewNow = getPreview();
-          const ds = (typeof getOrInitWeeklyImportDecisionsStore === 'function')
-            ? getOrInitWeeklyImportDecisionsStore(TYPE, importId, previewNow)
-            : null;
-
-          if (!ds || !ds.set) return;
-
-          if (act === 'chg-skip') {
-            ds.set(ek, { skip: !!el.checked });
-            LW('decision set', { ek, skip: !!el.checked });
-            return;
-          }
-          if (act === 'chg-credit-week') {
-            ds.set(ek, { credit_week_start: String(el.value || '') });
-            LW('decision set', { ek, credit_week_start: String(el.value || '') });
-            return;
-          }
-          if (act === 'chg-reinvoice-week') {
-            ds.set(ek, { reinvoice_week_start: String(el.value || '') });
-            LW('decision set', { ek, reinvoice_week_start: String(el.value || '') });
-            return;
-          }
-        }
       });
 
-      // ✅ NEW: filters (search input)
       root.addEventListener('input', (ev) => {
         const el = ev.target;
         if (!el || !el.getAttribute) return;
@@ -52733,13 +52831,11 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
         updateActionsDom();
       });
 
-      // Click handler: resolve buttons + options + refresh/apply
       root.addEventListener('click', (ev) => {
         const btn = ev.target && ev.target.closest ? ev.target.closest('button[data-act]') : null;
         if (!btn) return;
         const act = btn.getAttribute('data-act');
 
-        // ✅ NEW: Change options -> reopen options modal, then re-render summary so visibility matches
         if (act === 'weekly-import-options') {
           (async () => {
             try {
@@ -52764,7 +52860,6 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
           return;
         }
 
-        // Existing resolve buttons (unchanged)
         if (act === 'weekly-resolve-candidate' || act === 'weekly-resolve-client') {
           const st = window.__importSummaryState && window.__importSummaryState[TYPE];
           const rowsState = st && Array.isArray(st.rows) ? st.rows : (Array.isArray(rows) ? rows : []);
@@ -52832,41 +52927,29 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
       const btnApply = root.querySelector('button[data-act="weekly-import-apply"]');
       if (btnApply && !btnApply.__weeklyApplyWired) {
         btnApply.__weeklyApplyWired = true;
-    btnApply.addEventListener('click', async () => {
-  try {
-    // ✅ NEW: guard (in case CSS changes and click still fires)
-    if (btnApply.classList.contains('disabled') || btnApply.getAttribute('data-disabled') === '1') {
-      const reason = btnApply.title || 'Cannot finalise yet.';
-      if (window.__toast) window.__toast(reason); else alert(reason);
-      return;
-    }
-
-    const ok = window.confirm('Are you sure you want to finalise now?');
-    if (!ok) return;
-
-    const previewNow = getPreview();
-    const ds = (typeof getOrInitWeeklyImportDecisionsStore === 'function')
-      ? getOrInitWeeklyImportDecisionsStore(TYPE, importId, previewNow)
-      : null;
-
-
-            // Client-side validation (changed-hours decisions)
-            if (ds && ds.validate) {
-              const v = ds.validate(previewNow);
-              if (!v.ok) {
-                alert(
-                  `Cannot finalise: missing/invalid decisions for changed-hours shifts:\n\n` +
-                  v.errors.slice(0, 20).map(x => `- ${x}`).join('\n') +
-                  (v.errors.length > 20 ? `\n\n(and ${v.errors.length - 20} more)` : '')
-                );
-                return;
-              }
+        btnApply.addEventListener('click', async () => {
+          try {
+            if (btnApply.classList.contains('disabled') || btnApply.getAttribute('data-disabled') === '1') {
+              const reason = btnApply.title || 'Cannot finalise yet.';
+              if (window.__toast) window.__toast(reason); else alert(reason);
+              return;
             }
 
-            // Policy A pre-check (based on preview actions + selection)
+            const ok = window.confirm('Are you sure you want to finalise now?');
+            if (!ok) return;
+
+       const previewNow = getPreview();
+
             const u = getUiLive();
             const sel = (u && u.actionSelection instanceof Set) ? u.actionSelection : new Set();
-            const pol = computePolicyA(previewNow, sel);
+            const autoNow = getAutoApplyIdsNow(previewNow);
+
+            // ✅ Final payload must include user-selected actions + auto-apply NEW actions (hidden)
+            const selAll = new Set([...Array.from(sel), ...autoNow]);
+            const selected_action_ids = Array.from(selAll);
+
+            // Policy A pre-check must consider the full selection set (including auto-applied)
+            const pol = computePolicyA(previewNow, selAll);
             if (pol.missing.length) {
               alert(
                 `Cannot finalise: Replacement-day rule violation.\n\n` +
@@ -52876,12 +52959,10 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
               return;
             }
 
-            const selected_action_ids = Array.from(sel);
-
-            const body = {
+           const body = {
               selected_action_ids,
-              decisions: (ds && ds.serialize) ? ds.serialize(previewNow) : {}
-              // HR_WEEKLY email_actions are handled elsewhere (will be added when Mode A email UI is implemented)
+              decisions: {} // ✅ no legacy credit/reinvoice decisions
+              // HR_WEEKLY email_actions handled elsewhere (Mode A)
             };
 
             let url;
@@ -52911,7 +52992,6 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
         });
       }
 
-      // Initial banner/table refresh (ensures Policy A banner reflects default selection)
       updateActionsDom();
     } catch (e) {
       console.warn('[IMPORTS] weekly wiring failed', e);
@@ -52920,6 +53000,7 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
 
   return markup;
 }
+
 
 function computePolicyAViolations(actions, selectedActionIds) {
   const acts = Array.isArray(actions) ? actions : [];
