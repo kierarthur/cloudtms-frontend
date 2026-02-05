@@ -2140,7 +2140,6 @@ async function postWeeklyResolveMappings(importId, type, payload) {
 }
 
 
-
 async function refreshWeeklyImportSummary(type, importId) {
   const LOG = (typeof window.__LOG_IMPORTS === 'boolean') ? window.__LOG_IMPORTS : true;
   const L   = (...a) => { if (LOG) console.log('[IMPORTS][WEEKLY][REFRESH]', ...a); };
@@ -2171,9 +2170,148 @@ async function refreshWeeklyImportSummary(type, importId) {
       throw new Error(text || `Weekly import preview refresh failed (${res.status})`);
     }
 
-    const preview = text ? JSON.parse(text) : {};
+    let preview;
+    try { preview = text ? JSON.parse(text) : {}; } catch { preview = {}; }
 
-    // IMPORTANT: renderImportSummaryModal will now normalize + store canonical preview.
+    // ─────────────────────────────────────────────────────────────
+    // ✅ NEW: Reconcile weekly UI state BEFORE rendering
+    // - keep options + selections stable
+    // - drop selections that no longer exist
+    // - ensure hidden MISSING_FROM_IMPORT cancellations never stay selected
+    //   (except when required to satisfy Policy A for a selected new shift key)
+    // ─────────────────────────────────────────────────────────────
+    try {
+      const impId = String(importId);
+
+      window.__weeklyImportUi = window.__weeklyImportUi || {};
+      window.__weeklyImportUi[t] = window.__weeklyImportUi[t] || {};
+
+      const ui = window.__weeklyImportUi[t][impId] || null;
+      const acts = Array.isArray(preview?.actions) ? preview.actions : [];
+
+      const asYmd = (v) => {
+        if (!v) return null;
+        if (typeof v === 'string') {
+          const s = v.trim();
+          if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+          if (s.length >= 10 && /^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);
+        }
+        try {
+          const d = new Date(v);
+          if (Number.isNaN(d.getTime())) return null;
+          const yyyy = d.getUTCFullYear();
+          const mm   = String(d.getUTCMonth() + 1).padStart(2, '0');
+          const dd   = String(d.getUTCDate()).padStart(2, '0');
+          return `${yyyy}-${mm}-${dd}`;
+        } catch {
+          return null;
+        }
+      };
+
+      const actionIdOf = (a) => {
+        const id = a?.action_id ?? a?.actionId ?? null;
+        return id == null ? null : String(id).trim();
+      };
+
+      const replacementKeyOf = (a) => {
+        const rk = a?.replacement_day_key ?? a?.replacementDayKey ?? null;
+        if (rk != null && String(rk).trim()) return String(rk).trim();
+        const cid = a?.candidate_id ?? a?.candidateId ?? null;
+        const cli = a?.client_id ?? a?.clientId ?? null;
+        const wd  = asYmd(a?.work_date ?? a?.workDate ?? a?.date_local ?? a?.date ?? null);
+        if (cid && cli && wd) return `${String(cid)}|${String(cli)}|${String(wd)}`;
+        return null;
+      };
+
+      const isMissingFromImportCancel = (a) => {
+        const reason = String(a?.reason || a?.cancel_reason || a?.kind_reason || '').toUpperCase();
+        if (reason !== 'MISSING_FROM_IMPORT') return false;
+
+        const isCancel =
+          (a?.is_cancellation === true) ||
+          (a?.isCancellation === true) ||
+          (String(a?.action_kind || a?.actionKind || '').toUpperCase().includes('CANCEL')) ||
+          (String(actionIdOf(a) || '').toUpperCase().startsWith('CANCEL:'));
+
+        return !!isCancel;
+      };
+
+      const inYmdRange = (ymd, fromYmd, toYmd) => {
+        const d = asYmd(ymd);
+        const f = asYmd(fromYmd);
+        const t2 = asYmd(toYmd);
+        if (!d) return false;
+        if (f && d < f) return false;
+        if (t2 && d > t2) return false;
+        return true;
+      };
+
+      // Only reconcile if store exists (we must not create/reset it here).
+      if (ui && (ui.actionSelection instanceof Set)) {
+        const opt = (ui.options && typeof ui.options === 'object') ? ui.options : { missingShiftsEnabled: false, dateFrom: null, dateTo: null };
+        const missingEnabled = (opt.missingShiftsEnabled === true);
+
+        // Build quick lookup for current actions by id
+        const byId = new Map();
+        for (const a of acts) {
+          const id = actionIdOf(a);
+          if (!id) continue;
+          byId.set(id, a);
+        }
+
+        // Determine which replacement_day_keys have a selected new shift
+        // (so we don't auto-drop missing-from-import cancels that might be required by Policy A)
+        const selectedNewShiftKeys = new Set();
+        for (const a of acts) {
+          const id = actionIdOf(a);
+          if (!id) continue;
+          if (!ui.actionSelection.has(id)) continue;
+          const isNew = (a?.is_new_shift === true || a?.isNewShift === true);
+          if (!isNew) continue;
+          const rk = replacementKeyOf(a);
+          if (rk) selectedNewShiftKeys.add(rk);
+        }
+
+        // Reconcile: remove selections that no longer exist, plus hidden missing-from-import cancels
+        for (const sel of Array.from(ui.actionSelection)) {
+          const a = byId.get(String(sel)) || null;
+
+          // Selection no longer exists in new preview
+          if (!a) {
+            ui.actionSelection.delete(sel);
+            continue;
+          }
+
+          // Hide/unselect missing-from-import cancels when:
+          // - missing shifts disabled OR date out of range,
+          // BUT keep them if they share a replacement_day_key that has a selected new shift
+          if (isMissingFromImportCancel(a)) {
+            const rk = replacementKeyOf(a);
+            const protectedByPolicyA = !!(rk && selectedNewShiftKeys.has(rk));
+
+            if (!protectedByPolicyA) {
+              if (!missingEnabled) {
+                ui.actionSelection.delete(sel);
+                continue;
+              }
+              const wd = asYmd(a?.work_date ?? a?.workDate ?? a?.date_local ?? a?.date ?? null);
+              if (!inYmdRange(wd, opt.dateFrom, opt.dateTo)) {
+                ui.actionSelection.delete(sel);
+                continue;
+              }
+            }
+          }
+        }
+
+        // Write back (no reset)
+        window.__weeklyImportUi[t][impId] = ui;
+      }
+    } catch (e) {
+      // Non-fatal; renderImportSummaryModal also re-reconciles defensively.
+      L('pre-render reconcile failed (non-fatal)', { err: e?.message || String(e) });
+    }
+
+    // IMPORTANT: renderImportSummaryModal will normalize + store canonical preview.
     if (typeof renderImportSummaryModal === 'function') {
       renderImportSummaryModal(t, preview);
     } else {
@@ -48799,7 +48937,6 @@ function getWeeklySelectedGroupIds(type, importId) {
   return selected;
 }
 
-
 async function handleHrWeeklyFileDrop(file) {
   const summaryEl = document.getElementById('hrWeeklyImportSummary');
   if (summaryEl) {
@@ -48879,7 +49016,20 @@ async function handleHrWeeklyFileDrop(file) {
     let summaryState;
     try { summaryState = textPrev ? JSON.parse(textPrev) : {}; } catch { summaryState = {}; }
 
-    // 4) Persist and render summary modal
+    // ✅ NEW: Import Options step must run BEFORE summary modal is rendered.
+    // If user cancels, abort flow (do not open the summary modal).
+    if (typeof openWeeklyImportOptionsModal === 'function') {
+      if (summaryEl) summaryEl.textContent = `Import ${importId}: choose import options…`;
+      const continued = await openWeeklyImportOptionsModal('HR_WEEKLY', importId, summaryState);
+      if (!continued) {
+        if (summaryEl) summaryEl.textContent = `Import ${importId}: cancelled before preview.`;
+        return;
+      }
+    } else {
+      console.warn('[IMPORTS] openWeeklyImportOptionsModal is not defined; skipping Import Options step.');
+    }
+
+    // 4) Persist and render summary modal (only after options chosen)
     window.modalCtx = window.modalCtx || {};
     window.modalCtx.importsState = window.modalCtx.importsState || {};
     window.modalCtx.importsState.hrWeekly = {
@@ -48911,7 +49061,6 @@ async function handleHrWeeklyFileDrop(file) {
     alert(err?.message || 'HealthRoster weekly import failed.');
   }
 }
-
 
 
 async function handleHrRotaFileDrop(file) {
@@ -49019,64 +49168,7 @@ async function searchClientsForResolve(term) {
   return Array.isArray(json) ? json : [];
 }
 
-async function resolveImportConflicts(importId, importType, payloadIn) {
-  const type = String(importType || '').toUpperCase();
-  const encId = encodeURIComponent(String(importId || ''));
 
-  if (!encId) {
-    throw new Error('Missing import_id for resolveImportConflicts.');
-  }
-
-  const p = payloadIn && typeof payloadIn === 'object' ? payloadIn : {};
-
-  const payload = {
-    candidate_mappings: Array.isArray(p.candidate_mappings) ? p.candidate_mappings : [],
-    client_aliases:     Array.isArray(p.client_aliases)     ? p.client_aliases     : [],
-    decisions:          (p.decisions && typeof p.decisions === 'object' && !Array.isArray(p.decisions)) ? p.decisions : {},
-    selected_group_ids: Array.isArray(p.selected_group_ids) ? p.selected_group_ids : null
-  };
-
-  if (type === 'NHSP') {
-    const url = `/api/nhsp/${encId}/apply`;
-    const res = await authFetch(API(url), {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(payload)
-    });
-
-    const text = await res.text();
-    if (!res.ok) {
-      throw new Error(text || `NHSP import apply failed (${res.status})`);
-    }
-
-    window.__toast && window.__toast('NHSP import applied.');
-    try { return text ? JSON.parse(text) : {}; } catch { return {}; }
-  }
-
-  if (type === 'HR_WEEKLY') {
-    const url = `/api/healthroster/${encId}/autoprocess-apply`;
-    const res = await authFetch(API(url), {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(payload)
-    });
-
-    const text = await res.text();
-    if (!res.ok) {
-      throw new Error(text || `HealthRoster weekly apply failed (${res.status})`);
-    }
-
-    window.__toast && window.__toast('HealthRoster weekly import applied.');
-    try { return text ? JSON.parse(text) : {}; } catch { return {}; }
-  }
-
-  if (type === 'HR_ROTA_DAILY') {
-    console.warn('[IMPORTS] resolveImportConflicts called for HR_ROTA_DAILY; nothing to apply here.');
-    return {};
-  }
-
-  throw new Error(`Unsupported import type for resolveImportConflicts: ${type}`);
-}
 
 async function uploadImportFileToR2(file) {
   if (!file) {
@@ -49129,25 +49221,31 @@ async function uploadImportFileToR2(file) {
   return { fileKey, filename };
 }
 
-
-
-
 async function applyHrRotaValidation(importId, sendEmailRowIds) {
-  const encId = encodeURIComponent(String(importId || ''));
-  if (!encId) {
+  const rawId = String(importId || '').trim();
+  if (!rawId) {
     throw new Error('Missing import_id for applyHrRotaValidation.');
+  }
+  const encId = encodeURIComponent(rawId);
+
+  if (typeof authFetch !== 'function' || typeof API !== 'function') {
+    throw new Error('authFetch/API helper missing in applyHrRotaValidation.');
   }
 
   const body = {
-    send_email_row_ids: Array.isArray(sendEmailRowIds) ? sendEmailRowIds : []
+    // Ensure we only send string ids (FE already ensures these are real hr_row_id values)
+    send_email_row_ids: Array.isArray(sendEmailRowIds)
+      ? sendEmailRowIds.map(x => String(x || '').trim()).filter(Boolean)
+      : []
   };
 
-  const res  = await authFetch(API(`/api/imports/hr-rota/${encId}/apply`), {
+  const res = await authFetch(API(`/api/imports/hr-rota/${encId}/apply`), {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(body)
   });
-  const text = await res.text();
+
+  const text = await res.text().catch(() => '');
   if (!res.ok) {
     throw new Error(text || `HR rota apply failed (${res.status})`);
   }
@@ -49155,16 +49253,37 @@ async function applyHrRotaValidation(importId, sendEmailRowIds) {
   let payload;
   try { payload = text ? JSON.parse(text) : {}; } catch { payload = {}; }
 
-  const ok     = payload.validations_ok    ?? 0;
-  const failed = payload.validations_failed ?? 0;
-  const emailed= payload.emails_queued     ?? (body.send_email_row_ids.length || 0);
+  // New backend shape:
+  // { import_id, apply: { validations_upserted, ... , email_jobs }, post_commit: { emails_queued, email_failures } }
+  const apply = (payload && typeof payload.apply === 'object' && payload.apply) ? payload.apply : {};
+  const post  = (payload && typeof payload.post_commit === 'object' && payload.post_commit) ? payload.post_commit : {};
 
-  const msg = `Applied HR rota validations (${ok} OK, ${failed} failed, ${emailed} emails queued).`;
-  window.__toast && window.__toast(msg);
+  const validationsUpserted =
+    (apply.validations_upserted ?? payload.validations_upserted ?? 0);
 
-  // Optional: you could auto-close the summary modal here or re-render it.
+  const emailsQueued =
+    (post.emails_queued ?? payload.emails_queued ?? body.send_email_row_ids.length ?? 0);
+
+  const emailFailuresCount =
+    Array.isArray(post.email_failures) ? post.email_failures.length : 0;
+
+  const msg =
+    `Applied HR rota validations (${validationsUpserted} validations upserted, ${emailsQueued} emails queued` +
+    (emailFailuresCount ? `, ${emailFailuresCount} email failures` : '') +
+    ').';
+
+  if (window.__toast) window.__toast(msg);
+
+  // Refresh so email_already_sent and related flags reflect immediately
+  if (typeof refreshHrRotaSummary === 'function') {
+    await refreshHrRotaSummary(rawId);
+  }
+
   return payload;
 }
+
+
+
 
 async function apiQueueHrRotaTsoEmail(row) {
   if (!row || !row.timesheet_id) {
@@ -50156,7 +50275,6 @@ function ensureWeeklyImportMappings(type, importId) {
   }
   return m;
 }
-
 function renderImportSummaryModal(importType, summaryState) {
   const enc = (typeof escapeHtml === 'function')
     ? escapeHtml
@@ -50166,7 +50284,8 @@ function renderImportSummaryModal(importType, summaryState) {
 
   // ─────────────────────────────────────────────────────────────
   // Normalize preview wrapper vs summary-only payload into a canonical object.
-  // This ensures top-level extensions like changed_shifts are never dropped.
+  // This ensures top-level extensions like actions / groups / truth_meta and
+  // changed_shifts are never dropped (even if nested under summary).
   // ─────────────────────────────────────────────────────────────
   const normalizePreview = (ss) => {
     const raw = ss || {};
@@ -50188,6 +50307,33 @@ function renderImportSummaryModal(importType, summaryState) {
       Array.isArray(sum.changed_shifts) ? sum.changed_shifts :
       [];
 
+    // ✅ Preserve weekly preview fields even when nested under summary
+    const actions =
+      Array.isArray(raw.actions) ? raw.actions :
+      Array.isArray(sum.actions) ? sum.actions :
+      [];
+
+    const validation_groups =
+      Array.isArray(raw.validation_groups) ? raw.validation_groups :
+      Array.isArray(sum.validation_groups) ? sum.validation_groups :
+      [];
+
+    const action_groups =
+      Array.isArray(raw.action_groups) ? raw.action_groups :
+      Array.isArray(sum.action_groups) ? sum.action_groups :
+      [];
+
+    const truth_meta =
+      (raw && typeof raw.truth_meta === 'object' && raw.truth_meta) ? raw.truth_meta :
+      (sum && typeof sum.truth_meta === 'object' && sum.truth_meta) ? sum.truth_meta :
+      null;
+
+    // Keep validation_meta if present (useful for weekly HR email UI)
+    const validation_meta =
+      (raw && typeof raw.validation_meta === 'object' && raw.validation_meta) ? raw.validation_meta :
+      (sum && typeof sum.validation_meta === 'object' && sum.validation_meta) ? sum.validation_meta :
+      null;
+
     const asBool = (v) => (v === true || v === 'true' || v === 1 || v === '1');
     const decisionNeededCount = changed_shifts.filter(x => asBool(x?.requires_any_decision)).length;
 
@@ -50201,9 +50347,17 @@ function renderImportSummaryModal(importType, summaryState) {
     canonical.import_id = importId;
     canonical.summary = summary;
     canonical.rows = rows;
+
     canonical.changed_shifts = changed_shifts;
     canonical.changed_shifts_count = summary.changed_shifts_count;
     canonical.changed_shifts_decision_needed_count = summary.changed_shifts_decision_needed_count;
+
+    // ✅ Hoist weekly preview payload fields to top level for consistent access
+    canonical.actions = actions;
+    canonical.validation_groups = validation_groups;
+    canonical.action_groups = action_groups;
+    if (truth_meta) canonical.truth_meta = truth_meta;
+    if (validation_meta) canonical.validation_meta = validation_meta;
 
     return canonical;
   };
@@ -50217,8 +50371,187 @@ function renderImportSummaryModal(importType, summaryState) {
   // Store canonical preview object (NOT just summary+rows)
   window.__importSummaryState[type] = preview;
 
+  // ─────────────────────────────────────────────────────────────
+  // ✅ Persistent weekly UI store (options + selections + filters)
+  // Keeps weekly selection/options stable across rerender/refresh.
+  // ─────────────────────────────────────────────────────────────
+  const ensureWeeklyUiStore = (t, impId, ss) => {
+    if (!(t === 'NHSP' || t === 'HR_WEEKLY')) return null;
+    if (!impId) return null;
+
+    window.__weeklyImportUi = window.__weeklyImportUi || {};
+    window.__weeklyImportUi[t] = window.__weeklyImportUi[t] || {};
+
+    const existing = window.__weeklyImportUi[t][impId] || null;
+
+    const asYmd = (v) => {
+      if (!v) return null;
+      if (typeof v === 'string') {
+        const s = v.trim();
+        if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+        if (s.length >= 10 && /^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);
+      }
+      try {
+        const d = new Date(v);
+        if (Number.isNaN(d.getTime())) return null;
+        const yyyy = d.getUTCFullYear();
+        const mm = String(d.getUTCMonth() + 1).padStart(2, '0');
+        const dd = String(d.getUTCDate()).padStart(2, '0');
+        return `${yyyy}-${mm}-${dd}`;
+      } catch {
+        return null;
+      }
+    };
+
+    const actions = Array.isArray(ss?.actions) ? ss.actions : [];
+    const truthMeta = (ss && typeof ss.truth_meta === 'object' && ss.truth_meta) ? ss.truth_meta : {};
+    const fileMin = asYmd(truthMeta.file_date_min);
+    const fileMax = asYmd(truthMeta.file_date_max);
+
+    const minMaxFromActions = () => {
+      let minD = null, maxD = null;
+      for (const a of (actions || [])) {
+        const wd = asYmd(a?.work_date || a?.workDate || a?.date_local || a?.date || null);
+        if (!wd) continue;
+        if (!minD || wd < minD) minD = wd;
+        if (!maxD || wd > maxD) maxD = wd;
+      }
+      return { minD, maxD };
+    };
+
+    const minMaxFromRows = () => {
+      let minD = null, maxD = null;
+      for (const r of (Array.isArray(ss?.rows) ? ss.rows : [])) {
+        const d = asYmd(r?.date_local || r?.work_date || r?.date || r?.week_ending_date || null);
+        if (!d) continue;
+        if (!minD || d < minD) minD = d;
+        if (!maxD || d > maxD) maxD = d;
+      }
+      return { minD, maxD };
+    };
+
+    const { minD: actMin, maxD: actMax } = minMaxFromActions();
+    const { minD: rowMin, maxD: rowMax } = minMaxFromRows();
+
+    const defaultFrom = fileMin || actMin || rowMin || null;
+    const defaultTo   = fileMax || actMax || rowMax || null;
+
+    const ui = existing || {
+      options: {
+        missingShiftsEnabled: false,
+        dateFrom: null,
+        dateTo: null
+      },
+      actionSelection: new Set(),
+      filters: {
+        showOnlyRed: false,
+        showOnlyUnticked: false,
+        showOnlyCancellations: false,
+        search: ''
+      },
+      emailSelection: new Set(),
+      hydratedFlags: {
+        didInitDefaultActionChecks: false
+      }
+    };
+
+    // Ensure shape (in case older store existed)
+    ui.options = ui.options && typeof ui.options === 'object' ? ui.options : {};
+    if (typeof ui.options.missingShiftsEnabled !== 'boolean') ui.options.missingShiftsEnabled = false;
+    if (!ui.options.dateFrom) ui.options.dateFrom = defaultFrom;
+    if (!ui.options.dateTo)   ui.options.dateTo = defaultTo;
+
+    // Fix invalid ranges without overwriting user intent unless broken
+    const df = asYmd(ui.options.dateFrom);
+    const dt = asYmd(ui.options.dateTo);
+    if (df && dt && df > dt) {
+      // If user somehow inverted it, revert to sensible defaults.
+      ui.options.dateFrom = defaultFrom;
+      ui.options.dateTo = defaultTo;
+    } else {
+      ui.options.dateFrom = df || ui.options.dateFrom || defaultFrom;
+      ui.options.dateTo = dt || ui.options.dateTo || defaultTo;
+    }
+
+    ui.actionSelection = (ui.actionSelection instanceof Set) ? ui.actionSelection : new Set();
+    ui.filters = ui.filters && typeof ui.filters === 'object' ? ui.filters : {};
+    if (typeof ui.filters.showOnlyRed !== 'boolean') ui.filters.showOnlyRed = false;
+    if (typeof ui.filters.showOnlyUnticked !== 'boolean') ui.filters.showOnlyUnticked = false;
+    if (typeof ui.filters.showOnlyCancellations !== 'boolean') ui.filters.showOnlyCancellations = false;
+    if (typeof ui.filters.search !== 'string') ui.filters.search = '';
+
+    ui.emailSelection = (ui.emailSelection instanceof Set) ? ui.emailSelection : new Set();
+    ui.hydratedFlags = ui.hydratedFlags && typeof ui.hydratedFlags === 'object' ? ui.hydratedFlags : {};
+    if (typeof ui.hydratedFlags.didInitDefaultActionChecks !== 'boolean') ui.hydratedFlags.didInitDefaultActionChecks = false;
+
+    // Reconcile actionSelection against current actions[] and current options.
+    // Options only govern visibility/eligibility of MISSING_FROM_IMPORT cancellations.
+    const byId = new Map();
+    for (const a of (actions || [])) {
+      const id = a?.action_id ? String(a.action_id) : (a?.actionId ? String(a.actionId) : null);
+      if (!id) continue;
+      byId.set(id, a);
+    }
+
+    const inYmdRange = (ymd, fromYmd, toYmd) => {
+      const d = asYmd(ymd);
+      const f = asYmd(fromYmd);
+      const t2 = asYmd(toYmd);
+      if (!d) return false;
+      if (f && d < f) return false;
+      if (t2 && d > t2) return false;
+      return true;
+    };
+
+    const isMissingFromImportCancel = (a) => {
+      if (!a) return false;
+      const isCancel = (a.is_cancellation === true) || (a.isCancellation === true) || String(a.action_kind || '').toUpperCase().includes('CANCEL');
+      if (!isCancel) return false;
+      const reason = String(a.reason || a.cancel_reason || a.kind_reason || '').toUpperCase();
+      return reason === 'MISSING_FROM_IMPORT';
+    };
+
+    const shouldHideMissingCancel = (a) => {
+      if (!isMissingFromImportCancel(a)) return false;
+      if (!ui.options.missingShiftsEnabled) return true;
+      const wd = a?.work_date || a?.workDate || a?.date_local || a?.date || null;
+      return !inYmdRange(wd, ui.options.dateFrom, ui.options.dateTo);
+    };
+
+    // Drop selections that no longer exist or are now hidden by options.
+    for (const sel of Array.from(ui.actionSelection)) {
+      const a = byId.get(String(sel)) || null;
+      if (!a) {
+        ui.actionSelection.delete(sel);
+        continue;
+      }
+      if (shouldHideMissingCancel(a)) {
+        ui.actionSelection.delete(sel);
+      }
+    }
+
+    // One-time hydration of default_checked actions (only if visible by options).
+    if (!ui.hydratedFlags.didInitDefaultActionChecks) {
+      for (const [id, a] of byId.entries()) {
+        const def = (a?.default_checked === true) || (a?.defaultChecked === true);
+        if (!def) continue;
+        if (shouldHideMissingCancel(a)) continue;
+        ui.actionSelection.add(id);
+      }
+      ui.hydratedFlags.didInitDefaultActionChecks = true;
+    }
+
+    window.__weeklyImportUi[t][impId] = ui;
+    return ui;
+  };
+
   // Ensure decisions store exists and init defaults for newly-seen decision-needed keys.
   if ((type === 'NHSP' || type === 'HR_WEEKLY') && importId) {
+    // ✅ First ensure weekly UI store exists (so downstream renderers/wiring can read it)
+    try { ensureWeeklyUiStore(type, String(importId), preview); } catch (e) {
+      console.warn('[IMPORTS][SUMMARY] weekly UI store init failed', e);
+    }
+
     try {
       const ds = getOrInitWeeklyImportDecisionsStore(type, importId, preview);
       ds.initFromPreview(preview); // safe: doesn't overwrite existing edits
@@ -50310,6 +50643,374 @@ function renderImportSummaryModal(importType, summaryState) {
       wireWeeklyImportSummaryActions(type, importId);
     }
   } catch {}
+}
+
+async function openWeeklyImportOptionsModal(type, importId, preview) {
+  const t = String(type || '').toUpperCase();
+  const impId = (importId != null) ? String(importId) : '';
+
+  // Only meaningful for weekly imports; for anything else, just allow flow to continue.
+  if (!impId || (t !== 'NHSP' && t !== 'HR_WEEKLY')) return true;
+
+  const enc = (typeof escapeHtml === 'function')
+    ? escapeHtml
+    : (s) => String(s == null ? '' : s);
+
+  const asYmd = (v) => {
+    if (!v) return null;
+    if (typeof v === 'string') {
+      const s = v.trim();
+      if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+      if (s.length >= 10 && /^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);
+    }
+    try {
+      const d = new Date(v);
+      if (Number.isNaN(d.getTime())) return null;
+      const yyyy = d.getUTCFullYear();
+      const mm   = String(d.getUTCMonth() + 1).padStart(2, '0');
+      const dd   = String(d.getUTCDate()).padStart(2, '0');
+      return `${yyyy}-${mm}-${dd}`;
+    } catch {
+      return null;
+    }
+  };
+
+  const p = (preview && typeof preview === 'object') ? preview : {};
+  const truthMeta = (p.truth_meta && typeof p.truth_meta === 'object') ? p.truth_meta : {};
+  const actions = Array.isArray(p.actions) ? p.actions : [];
+
+  const fileMin = asYmd(truthMeta.file_date_min);
+  const fileMax = asYmd(truthMeta.file_date_max);
+
+  const minMaxFromActions = () => {
+    let minD = null, maxD = null;
+    for (const a of actions) {
+      const wd = asYmd(a?.work_date || a?.workDate || a?.date_local || a?.date || null);
+      if (!wd) continue;
+      if (!minD || wd < minD) minD = wd;
+      if (!maxD || wd > maxD) maxD = wd;
+    }
+    return { minD, maxD };
+  };
+
+  const { minD: actMin, maxD: actMax } = minMaxFromActions();
+  const defaultFrom = fileMin || actMin || null;
+  const defaultTo   = fileMax || actMax || null;
+
+  // Ensure persistent weekly UI store exists (options must live outside modal DOM)
+  window.__weeklyImportUi = window.__weeklyImportUi || {};
+  window.__weeklyImportUi[t] = window.__weeklyImportUi[t] || {};
+  const ui = window.__weeklyImportUi[t][impId] || {
+    options: { missingShiftsEnabled: false, dateFrom: null, dateTo: null },
+    actionSelection: new Set(),
+    filters: { showOnlyRed: false, showOnlyUnticked: false, showOnlyCancellations: false, search: '' },
+    emailSelection: new Set(),
+    hydratedFlags: { didInitDefaultActionChecks: false }
+  };
+
+  ui.options = (ui.options && typeof ui.options === 'object') ? ui.options : {};
+  if (typeof ui.options.missingShiftsEnabled !== 'boolean') ui.options.missingShiftsEnabled = false;
+  if (!ui.options.dateFrom) ui.options.dateFrom = defaultFrom;
+  if (!ui.options.dateTo)   ui.options.dateTo = defaultTo;
+
+  // Normalise / repair inverted ranges to defaults
+  const df0 = asYmd(ui.options.dateFrom);
+  const dt0 = asYmd(ui.options.dateTo);
+  if (df0 && dt0 && df0 > dt0) {
+    ui.options.dateFrom = defaultFrom;
+    ui.options.dateTo = defaultTo;
+  } else {
+    ui.options.dateFrom = df0 || ui.options.dateFrom || defaultFrom;
+    ui.options.dateTo = dt0 || ui.options.dateTo || defaultTo;
+  }
+
+  // Re-store (so caller can rely on it immediately)
+  window.__weeklyImportUi[t][impId] = ui;
+
+  const kind = `import-summary-weekly-options-${t.toLowerCase()}`;
+  const title = (t === 'NHSP') ? 'NHSP Weekly Import Options' : 'HealthRoster Weekly Import Options';
+
+  const rootId = `weeklyImportOptionsRoot_${t}_${impId}`;
+  const cbId   = `weeklyOptMissing_${t}_${impId}`;
+  const fromId = `weeklyOptFrom_${t}_${impId}`;
+  const toId   = `weeklyOptTo_${t}_${impId}`;
+  const noteId = `weeklyOptNote_${t}_${impId}`;
+
+  const noteHtml = (enabled) => {
+    const line1 = enabled
+      ? 'Cancellations are red and unchecked by default.'
+      : 'No missing-from-import cancellations will be shown.';
+    const line2 = 'Shift date = start date (cross-midnight belongs to start date).';
+    return `<div class="mini">${enc(line1)}<br/>${enc(line2)}</div>`;
+  };
+
+  const renderTab = (key) => {
+    if (key !== 'main') return '';
+    const opt = (window.__weeklyImportUi && window.__weeklyImportUi[t] && window.__weeklyImportUi[t][impId] && window.__weeklyImportUi[t][impId].options)
+      ? window.__weeklyImportUi[t][impId].options
+      : ui.options;
+
+    const missOn = !!opt.missingShiftsEnabled;
+    const vFrom = asYmd(opt.dateFrom) || '';
+    const vTo   = asYmd(opt.dateTo) || '';
+
+    return html(`
+      <div class="form" id="${enc(rootId)}">
+        <div class="card">
+          <div class="row">
+            <label>Missing shifts</label>
+            <div class="controls">
+              <label style="display:flex; align-items:center; gap:8px;">
+                <input id="${enc(cbId)}" type="checkbox" data-act="weekly-opt-missing" ${missOn ? 'checked' : ''}/>
+                <span>Treat missing shifts as cancelled</span>
+              </label>
+            </div>
+          </div>
+
+          <div class="row">
+            <label>Date range</label>
+            <div class="controls" style="display:flex; gap:12px; flex-wrap:wrap; align-items:flex-end;">
+              <div style="display:flex; flex-direction:column; gap:4px;">
+                <span class="mini">Start date</span>
+                <input id="${enc(fromId)}" type="date" value="${enc(vFrom)}" data-act="weekly-opt-from"/>
+              </div>
+              <div style="display:flex; flex-direction:column; gap:4px;">
+                <span class="mini">End date</span>
+                <input id="${enc(toId)}" type="date" value="${enc(vTo)}" data-act="weekly-opt-to"/>
+              </div>
+            </div>
+          </div>
+
+          <div class="row">
+            <label>Notes</label>
+            <div class="controls">
+              <div id="${enc(noteId)}">${noteHtml(missOn)}</div>
+            </div>
+          </div>
+
+          <div class="row" style="margin-top:10px;">
+            <label></label>
+            <div class="controls">
+              <button type="button" class="btn btn-primary" data-act="weekly-opt-continue">Continue</button>
+              <button type="button" class="btn" style="margin-left:8px;" data-act="weekly-opt-cancel">Cancel</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    `);
+  };
+
+  // Promise resolves true=Continue, false=Cancel/Close
+  return await new Promise((resolve) => {
+    let done = false;
+    const resolveOnce = (v) => {
+      if (done) return;
+      done = true;
+      try { cleanup(); } catch {}
+      resolve(!!v);
+    };
+
+    const topFrameIsMine = (token) => {
+      try {
+        const fr = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
+        return !!(fr && fr.kind === kind && fr._token === token);
+      } catch {
+        return false;
+      }
+    };
+
+    const closeModalBtnClick = () => {
+      try {
+        const btn = document.getElementById('btnCloseModal');
+        if (btn) btn.click();
+        else if (typeof closeModal === 'function') closeModal();
+      } catch {
+        try { if (typeof closeModal === 'function') closeModal(); } catch {}
+      }
+    };
+
+    let ownerToken = null;
+    let watchTimer = 0;
+
+    const onHeaderCloseCapture = (ev) => {
+      if (done) return;
+      const btn = document.getElementById('btnCloseModal');
+      const bound = btn?.dataset?.ownerToken || null;
+      if (!ownerToken || !bound) return;
+      if (String(bound) !== String(ownerToken)) return;
+      // Only treat as ours if our frame is currently top.
+      if (!topFrameIsMine(ownerToken)) return;
+      resolveOnce(false);
+      // do NOT prevent default; showModal's bindClose will close the modal
+    };
+
+    const onBodyClick = (ev) => {
+      if (done) return;
+      const btn = ev.target && ev.target.closest ? ev.target.closest('button[data-act]') : null;
+      if (!btn) return;
+
+      if (!ownerToken || !topFrameIsMine(ownerToken)) return;
+
+      const act = btn.getAttribute('data-act') || '';
+      if (act !== 'weekly-opt-continue' && act !== 'weekly-opt-cancel') return;
+
+      if (act === 'weekly-opt-cancel') {
+        resolveOnce(false);
+        closeModalBtnClick();
+        return;
+      }
+
+      // Continue
+      const cb = document.getElementById(cbId);
+      const inpFrom = document.getElementById(fromId);
+      const inpTo = document.getElementById(toId);
+
+      const missingOn = !!(cb && cb.checked);
+      const df = asYmd(inpFrom && inpFrom.value ? inpFrom.value : null);
+      const dt = asYmd(inpTo && inpTo.value ? inpTo.value : null);
+
+      if (df && dt && df > dt) {
+        alert('Start date must be on or before End date.');
+        return;
+      }
+
+      // Persist options
+      window.__weeklyImportUi = window.__weeklyImportUi || {};
+      window.__weeklyImportUi[t] = window.__weeklyImportUi[t] || {};
+      const store = window.__weeklyImportUi[t][impId] || ui;
+      store.options = (store.options && typeof store.options === 'object') ? store.options : {};
+      store.options.missingShiftsEnabled = missingOn;
+      store.options.dateFrom = df || null;
+      store.options.dateTo = dt || null;
+
+      // If missing shifts disabled, immediately drop any selected missing-from-import cancellations.
+      // If enabled with date-range, drop any selected missing-from-import cancellations outside range.
+      try {
+        const sel = (store.actionSelection instanceof Set) ? store.actionSelection : new Set();
+        const inYmdRange = (ymd, fromYmd, toYmd) => {
+          const d = asYmd(ymd);
+          const f = asYmd(fromYmd);
+          const t2 = asYmd(toYmd);
+          if (!d) return false;
+          if (f && d < f) return false;
+          if (t2 && d > t2) return false;
+          return true;
+        };
+        const byId = new Map();
+        for (const a of actions) {
+          const id = a?.action_id ? String(a.action_id) : (a?.actionId ? String(a.actionId) : null);
+          if (!id) continue;
+          byId.set(id, a);
+        }
+        const isMissingCancel = (a) => {
+          const isCancel = (a?.is_cancellation === true) || (a?.isCancellation === true) || String(a?.action_kind || '').toUpperCase().includes('CANCEL');
+          if (!isCancel) return false;
+          const reason = String(a?.reason || a?.cancel_reason || a?.kind_reason || '').toUpperCase();
+          return reason === 'MISSING_FROM_IMPORT';
+        };
+
+        for (const id of Array.from(sel)) {
+          const a = byId.get(String(id)) || null;
+          if (!a) continue;
+          if (!isMissingCancel(a)) continue;
+
+          if (!missingOn) {
+            sel.delete(id);
+            continue;
+          }
+
+          const wd = a?.work_date || a?.workDate || a?.date_local || a?.date || null;
+          if (!inYmdRange(wd, store.options.dateFrom, store.options.dateTo)) {
+            sel.delete(id);
+          }
+        }
+
+        store.actionSelection = sel;
+      } catch {}
+
+      window.__weeklyImportUi[t][impId] = store;
+
+      resolveOnce(true);
+      closeModalBtnClick();
+    };
+
+    const onBodyChange = (ev) => {
+      if (done) return;
+      if (!ownerToken || !topFrameIsMine(ownerToken)) return;
+
+      const el = ev.target;
+      if (!el || !el.getAttribute) return;
+
+      const act = el.getAttribute('data-act') || '';
+      if (act !== 'weekly-opt-missing') return;
+
+      const note = document.getElementById(noteId);
+      if (note) note.innerHTML = noteHtml(!!el.checked);
+    };
+
+    const cleanup = () => {
+      try {
+        const body = document.getElementById('modalBody');
+        if (body) {
+          body.removeEventListener('click', onBodyClick);
+          body.removeEventListener('change', onBodyChange);
+        }
+      } catch {}
+      try {
+        const closeBtn = document.getElementById('btnCloseModal');
+        if (closeBtn) closeBtn.removeEventListener('click', onHeaderCloseCapture, true);
+      } catch {}
+      try { if (watchTimer) clearInterval(watchTimer); } catch {}
+      watchTimer = 0;
+    };
+
+    // Open modal
+    showModal(
+      title,
+      [{ key: 'main', label: 'Options' }],
+      renderTab,
+      null,
+      false,
+      null,
+      {
+        kind,
+        noParentGate: true,
+        stayOpenOnSave: false,
+        showSave: false
+      }
+    );
+
+    // Capture token for this frame so we can gate events safely
+    try {
+      const fr = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
+      ownerToken = fr && fr.kind === kind ? fr._token : null;
+    } catch {
+      ownerToken = null;
+    }
+
+    // Wire DOM events (delegated to modalBody; gated by top frame token + kind)
+    try {
+      const body = document.getElementById('modalBody');
+      if (body) {
+        body.addEventListener('click', onBodyClick);
+        body.addEventListener('change', onBodyChange);
+      }
+    } catch {}
+
+    // Ensure closing via the header Close button resolves as Cancel too
+    try {
+      const closeBtn = document.getElementById('btnCloseModal');
+      if (closeBtn) closeBtn.addEventListener('click', onHeaderCloseCapture, true);
+    } catch {}
+
+    // Safety: if frame is closed by any other route, resolve as Cancel (no hang)
+    watchTimer = setInterval(() => {
+      if (done) return;
+      const stk = window.__modalStack || [];
+      const stillThere = ownerToken && stk.some(fr => fr && fr._token === ownerToken);
+      if (!stillThere) resolveOnce(false);
+    }, 250);
+  });
 }
 
 
@@ -51070,18 +51771,21 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
   // ─────────────────────────────────────────────────────────────
   // Robust preview / summary shape handling
   // ─────────────────────────────────────────────────────────────
-  
+
+  const TYPE = String(type || '').toUpperCase();
+
   const rootObj = ss || {};
   const summary = (rootObj && typeof rootObj.summary === 'object' && rootObj.summary)
     ? rootObj.summary
     : (rootObj || {});
 
   const total = summary.total_rows || (rows ? rows.length : 0) || 0;
-const enc = (typeof escapeHtml === 'function')
-  ? escapeHtml
-  : (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({
-      '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
-    }[c]));
+
+  const enc = (typeof escapeHtml === 'function')
+    ? escapeHtml
+    : (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({
+        '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+      }[c]));
 
   const changedShifts =
     Array.isArray(rootObj.changed_shifts) ? rootObj.changed_shifts :
@@ -51126,7 +51830,7 @@ const enc = (typeof escapeHtml === 'function')
     return false;
   };
 
-  // Overview counts
+  // Overview counts (legacy rows table, still useful for mapping issues)
   let readyCount = 0;
   let issueCount = 0;
   for (const r of rows || []) {
@@ -51153,12 +51857,342 @@ const enc = (typeof escapeHtml === 'function')
     return s;
   };
 
+  const asYmd = (v) => {
+    if (!v) return null;
+    if (typeof v === 'string') {
+      const s = v.trim();
+      if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+      if (s.length >= 10 && /^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);
+    }
+    try {
+      const d = new Date(v);
+      if (Number.isNaN(d.getTime())) return null;
+      const yyyy = d.getUTCFullYear();
+      const mm   = String(d.getUTCMonth() + 1).padStart(2, '0');
+      const dd   = String(d.getUTCDate()).padStart(2, '0');
+      return `${yyyy}-${mm}-${dd}`;
+    } catch {
+      return null;
+    }
+  };
+
+  // ─────────────────────────────────────────────────────────────
+  // Weekly UI store (options + actionSelection + filters)
+  // ─────────────────────────────────────────────────────────────
+  const getWeeklyUi = () => {
+    try {
+      if (!importId) return null;
+      if (!(TYPE === 'NHSP' || TYPE === 'HR_WEEKLY')) return null;
+      const u = window.__weeklyImportUi && window.__weeklyImportUi[TYPE] && window.__weeklyImportUi[TYPE][String(importId)]
+        ? window.__weeklyImportUi[TYPE][String(importId)]
+        : null;
+      return u;
+    } catch {
+      return null;
+    }
+  };
+
+  const ensureWeeklyUi = () => {
+    if (!importId) return null;
+    if (!(TYPE === 'NHSP' || TYPE === 'HR_WEEKLY')) return null;
+
+    window.__weeklyImportUi = window.__weeklyImportUi || {};
+    window.__weeklyImportUi[TYPE] = window.__weeklyImportUi[TYPE] || {};
+
+    let u = window.__weeklyImportUi[TYPE][String(importId)] || null;
+    if (!u) {
+      const truthMeta = (rootObj && typeof rootObj.truth_meta === 'object' && rootObj.truth_meta)
+        ? rootObj.truth_meta
+        : ((summary && typeof summary.truth_meta === 'object') ? summary.truth_meta : {});
+      const fileMin = asYmd(truthMeta?.file_date_min);
+      const fileMax = asYmd(truthMeta?.file_date_max);
+
+      u = {
+        options: { missingShiftsEnabled: false, dateFrom: fileMin || null, dateTo: fileMax || null },
+        actionSelection: new Set(),
+        filters: { showOnlyRed: false, showOnlyUnticked: false, showOnlyCancellations: false, search: '' },
+        emailSelection: new Set(),
+        hydratedFlags: { didInitDefaultActionChecks: false }
+      };
+      window.__weeklyImportUi[TYPE][String(importId)] = u;
+    }
+
+    u.options = (u.options && typeof u.options === 'object') ? u.options : { missingShiftsEnabled: false, dateFrom: null, dateTo: null };
+    if (typeof u.options.missingShiftsEnabled !== 'boolean') u.options.missingShiftsEnabled = false;
+    u.options.dateFrom = asYmd(u.options.dateFrom) || u.options.dateFrom || null;
+    u.options.dateTo   = asYmd(u.options.dateTo)   || u.options.dateTo   || null;
+
+    u.actionSelection = (u.actionSelection instanceof Set) ? u.actionSelection : new Set();
+    u.filters = (u.filters && typeof u.filters === 'object') ? u.filters : {};
+    if (typeof u.filters.showOnlyRed !== 'boolean') u.filters.showOnlyRed = false;
+    if (typeof u.filters.showOnlyUnticked !== 'boolean') u.filters.showOnlyUnticked = false;
+    if (typeof u.filters.showOnlyCancellations !== 'boolean') u.filters.showOnlyCancellations = false;
+    if (typeof u.filters.search !== 'string') u.filters.search = '';
+
+    return u;
+  };
+
+  const ui = ensureWeeklyUi();
+
+  // ─────────────────────────────────────────────────────────────
+  // Actions table helpers (ROW:/CANCEL: selector + filters + Policy A banner)
+  // ─────────────────────────────────────────────────────────────
+  const actionsAll =
+    Array.isArray(rootObj.actions) ? rootObj.actions :
+    Array.isArray(summary.actions) ? summary.actions :
+    [];
+
+  const actionIdOf = (a) => {
+    const id = a?.action_id ?? a?.actionId ?? null;
+    return id != null ? String(id) : null;
+  };
+
+  const isCancelAction = (a) => {
+    if (!a) return false;
+    if (a.is_cancellation === true || a.isCancellation === true) return true;
+    const id = actionIdOf(a);
+    if (id && id.toUpperCase().startsWith('CANCEL:')) return true;
+    const k = String(a.action_kind || a.actionKind || '').toUpperCase();
+    return k.includes('CANCEL');
+  };
+
+  const isRedAction = (a) => (a?.is_red === true || a?.isRed === true);
+
+  const reasonOf = (a) => String(a?.reason || a?.cancel_reason || a?.kind_reason || '').toUpperCase();
+
+  const workDateOf = (a) => asYmd(a?.work_date || a?.workDate || a?.date_local || a?.date || null);
+
+  const replacementKeyOf = (a) => {
+    const rk = a?.replacement_day_key ?? a?.replacementDayKey ?? null;
+    if (rk != null && String(rk).trim()) return String(rk).trim();
+    const cid = a?.candidate_id ?? a?.candidateId ?? null;
+    const cli = a?.client_id ?? a?.clientId ?? null;
+    const wd = workDateOf(a);
+    if (cid && cli && wd) return `${String(cid)}|${String(cli)}|${String(wd)}`;
+    return null;
+  };
+
+  const labelOf = (a) => String(a?.label || a?.action_label || a?.actionLabel || a?.action_kind || a?.actionKind || '').trim();
+
+  const inYmdRange = (ymd, fromYmd, toYmd) => {
+    const d = asYmd(ymd);
+    const f = asYmd(fromYmd);
+    const t2 = asYmd(toYmd);
+    if (!d) return false;
+    if (f && d < f) return false;
+    if (t2 && d > t2) return false;
+    return true;
+  };
+
+  const computePolicyA = (previewNow, selSet) => {
+    const acts = Array.isArray(previewNow?.actions) ? previewNow.actions : [];
+    const selectedNewKeys = new Set();
+
+    for (const a of acts) {
+      const id = actionIdOf(a);
+      if (!id) continue;
+      if (!selSet.has(id)) continue;
+      const isNew = (a?.is_new_shift === true || a?.isNewShift === true);
+      if (!isNew) continue;
+      const rk = replacementKeyOf(a);
+      if (rk) selectedNewKeys.add(rk);
+    }
+
+    // required cancels = all cancellation actions in preview that share the same replacement_day_key
+    const missing = [];
+    for (const rk of selectedNewKeys) {
+      const cancelsForKey = [];
+      for (const a of acts) {
+        if (!isCancelAction(a)) continue;
+        const key = replacementKeyOf(a);
+        if (key !== rk) continue;
+        const id = actionIdOf(a);
+        if (id) cancelsForKey.push(id);
+      }
+      const notSelected = cancelsForKey.filter(id => !selSet.has(id));
+      if (notSelected.length) {
+        missing.push({ replacement_day_key: rk, missing_cancel_action_ids: notSelected.slice(0, 50) });
+      }
+    }
+
+    return { selectedNewKeys, missing };
+  };
+
+  const shouldHideActionUnderOptions = (a, policyCtx) => {
+    // Only options-hide MISSING_FROM_IMPORT cancellations
+    if (!a) return false;
+    if (!isCancelAction(a)) return false;
+    if (reasonOf(a) !== 'MISSING_FROM_IMPORT') return false;
+
+    // If this cancellation belongs to a key where a new shift is selected, do NOT hide it (Policy A must remain satisfiable).
+    const rk = replacementKeyOf(a);
+    if (rk && policyCtx && policyCtx.selectedNewKeys && policyCtx.selectedNewKeys.has(rk)) {
+      return false;
+    }
+
+    // Otherwise apply options
+    const opt = ui && ui.options ? ui.options : { missingShiftsEnabled: false, dateFrom: null, dateTo: null };
+    if (!opt.missingShiftsEnabled) return true;
+
+    const wd = workDateOf(a);
+    return !inYmdRange(wd, opt.dateFrom, opt.dateTo);
+  };
+
+  const passesFilters = (a, selSet) => {
+    const f = ui && ui.filters ? ui.filters : { showOnlyRed: false, showOnlyUnticked: false, showOnlyCancellations: false, search: '' };
+
+    if (f.showOnlyRed && !isRedAction(a)) return false;
+
+    if (f.showOnlyUnticked) {
+      const id = actionIdOf(a);
+      if (id && selSet.has(id)) return false;
+    }
+
+    if (f.showOnlyCancellations && !isCancelAction(a)) return false;
+
+    const q = String(f.search || '').trim().toLowerCase();
+    if (q) {
+      const parts = [
+        labelOf(a),
+        actionIdOf(a),
+        reasonOf(a),
+        String(a?.candidate_id || a?.candidateId || ''),
+        String(a?.client_id || a?.clientId || ''),
+        String(workDateOf(a) || ''),
+        String(replacementKeyOf(a) || '')
+      ].filter(Boolean).join(' ').toLowerCase();
+      if (!parts.includes(q)) return false;
+    }
+
+    return true;
+  };
+
+  const buildActionsTableHtml = (previewNow, selSet) => {
+    const policy = computePolicyA(previewNow, selSet);
+
+    const visible = [];
+    for (const a of (Array.isArray(previewNow?.actions) ? previewNow.actions : [])) {
+      if (shouldHideActionUnderOptions(a, policy)) continue;
+      if (!passesFilters(a, selSet)) continue;
+      visible.push(a);
+    }
+
+    // Group by replacement_day_key (fallback to candidate|client|date)
+    const groups = new Map();
+    for (const a of visible) {
+      const gk = replacementKeyOf(a) || '—';
+      if (!groups.has(gk)) groups.set(gk, []);
+      groups.get(gk).push(a);
+    }
+
+    const groupKeys = Array.from(groups.keys()).sort();
+
+    const makePill = (txt, cls) => `<span class="pill ${cls}" style="margin-left:6px;">${enc(txt)}</span>`;
+
+    const bannerHtml = (() => {
+      if (!policy.missing.length) return '';
+      const items = policy.missing.slice(0, 10).map(x => {
+        const key = String(x.replacement_day_key || '');
+        const parts = key.split('|');
+        const d = parts.length >= 3 ? parts[2] : '';
+        const dNice = (typeof formatYmdToNiceDate === 'function' && d) ? formatYmdToNiceDate(d) : d;
+        return `<li class="mini">${enc(dNice || key)}</li>`;
+      }).join('');
+      const more = policy.missing.length > 10 ? `<div class="mini" style="margin-top:6px;">(and ${enc(String(policy.missing.length - 10))} more)</div>` : '';
+      return `
+        <div class="card" style="border-color:#d33;background:#fff5f5;">
+          <div class="mini" style="color:#b00;">
+            <strong>Replacement-day rule:</strong> To add new shifts on a day, you must also tick <strong>all cancellations</strong> for that day.
+          </div>
+          <div class="mini" style="margin-top:6px;">Missing required cancellations for:</div>
+          <ul style="margin:6px 0 0 18px;">${items}</ul>
+          ${more}
+        </div>
+      `;
+    })();
+
+    const tableBody = (() => {
+      if (!groupKeys.length) {
+        return `
+          <tr>
+            <td colspan="7"><span class="mini">No actions to show (filters/options may be hiding everything).</span></td>
+          </tr>
+        `;
+      }
+
+      const rowsOut = [];
+      for (const gk of groupKeys) {
+        const list = groups.get(gk) || [];
+        const counts = { cancel: 0, row: 0, red: 0, selected: 0 };
+        for (const a of list) {
+          if (isCancelAction(a)) counts.cancel++;
+          else counts.row++;
+          if (isRedAction(a)) counts.red++;
+          const id = actionIdOf(a);
+          if (id && selSet.has(id)) counts.selected++;
+        }
+
+        // Group header row
+        rowsOut.push(`
+          <tr style="background:#fafafa;">
+            <td colspan="7">
+              <span class="mini"><strong>${enc(gk)}</strong></span>
+              ${counts.row ? makePill(`New/Row ${counts.row}`, 'pill-info') : ''}
+              ${counts.cancel ? makePill(`Cancel ${counts.cancel}`, 'pill-warn') : ''}
+              ${counts.red ? makePill(`Red ${counts.red}`, 'pill-bad') : ''}
+              ${counts.selected ? makePill(`Ticked ${counts.selected}`, 'pill-ok') : ''}
+            </td>
+          </tr>
+        `);
+
+        for (const a of list) {
+          const id = actionIdOf(a) || '';
+          const checked = id && selSet.has(id);
+          const wd = workDateOf(a);
+          const wdNice = (typeof formatYmdToNiceDate === 'function' && wd) ? formatYmdToNiceDate(wd) : (wd || '—');
+          const lab = labelOf(a) || (isCancelAction(a) ? 'Cancel' : 'Apply row');
+          const sev = isRedAction(a) ? `<span class="pill pill-bad">RED</span>` : `<span class="pill pill-ok">OK</span>`;
+          const reason = reasonOf(a) || '';
+          const cand = String(a?.candidate_id || a?.candidateId || '—');
+          const cli  = String(a?.client_id || a?.clientId || '—');
+
+          rowsOut.push(`
+            <tr class="${isRedAction(a) ? 'wi-row-issue' : ''}">
+              <td class="mini" style="width:36px;">
+                <input type="checkbox" data-act="weekly-action-check" data-action-id="${enc(id)}" ${checked ? 'checked' : ''}/>
+              </td>
+              <td class="mini" style="width:90px;">${sev}</td>
+              <td class="mini" style="white-space:normal;word-break:break-word;">${enc(lab)}</td>
+              <td class="mini">${enc(wdNice)}</td>
+              <td class="mini">${enc(cand)}</td>
+              <td class="mini">${enc(cli)}</td>
+              <td class="mini">${enc(reason)}</td>
+            </tr>
+          `);
+        }
+      }
+
+      return rowsOut.join('');
+    })();
+
+    const visibleCount = visible.length;
+    const selectedCount = Array.from(selSet || []).length;
+
+    return {
+      bannerHtml,
+      tableBody,
+      visibleCount,
+      selectedCount,
+      policyMissingCount: policy.missing.length
+    };
+  };
+
   // ─────────────────────────────────────────────────────────────
   // Canonical decisions store (survives rerenders, defaults init safe)
   // ─────────────────────────────────────────────────────────────
   const decisionStore =
     (typeof getOrInitWeeklyImportDecisionsStore === 'function')
-      ? getOrInitWeeklyImportDecisionsStore(type, importId, rootObj)
+      ? getOrInitWeeklyImportDecisionsStore(TYPE, importId, rootObj)
       : null;
 
   // Ensure defaults are initialised (safe; doesn't overwrite edits)
@@ -51226,7 +52260,7 @@ const enc = (typeof escapeHtml === 'function')
         <tr class="${requires ? 'wi-row-issue' : ''}">
           <td class="mini">${enc(ek || '—')}</td>
           <td class="mini">${enc(shiftId || '—')}</td>
-          <td class="mini">${enc(formatYmdToNiceDate(String(we || '')) || '—')}</td>
+          <td class="mini">${enc((typeof formatYmdToNiceDate === 'function' ? formatYmdToNiceDate(String(we || '')) : String(we || '')) || '—')}</td>
 
           <td class="mini">${enc(fmtTime(oldStart))} → ${enc(fmtTime(newStart))}</td>
           <td class="mini">${enc(fmtTime(oldEnd))} → ${enc(fmtTime(newEnd))}</td>
@@ -51315,6 +52349,18 @@ const enc = (typeof escapeHtml === 'function')
     `;
   })();
 
+  // Build initial actions HTML (uses store state)
+  const selSet0 = ui && ui.actionSelection ? ui.actionSelection : new Set();
+  const previewForActions = rootObj;
+  const actionBuild0 = buildActionsTableHtml(previewForActions, selSet0);
+
+  const opt = ui && ui.options ? ui.options : { missingShiftsEnabled: false, dateFrom: null, dateTo: null };
+  const optFromNice = opt.dateFrom && typeof formatYmdToNiceDate === 'function' ? formatYmdToNiceDate(String(opt.dateFrom)) : (opt.dateFrom || '—');
+  const optToNice   = opt.dateTo   && typeof formatYmdToNiceDate === 'function' ? formatYmdToNiceDate(String(opt.dateTo))   : (opt.dateTo || '—');
+  const missPill = opt.missingShiftsEnabled ? `<span class="pill pill-warn">Missing shifts: ON</span>` : `<span class="pill pill-ok">Missing shifts: OFF</span>`;
+
+  const f = ui && ui.filters ? ui.filters : { showOnlyRed: false, showOnlyUnticked: false, showOnlyCancellations: false, search: '' };
+
   const rowsHtml = (rows && rows.length)
     ? rows.map((r, idx) => {
         const level = String(r.level || '').toLowerCase();
@@ -51334,7 +52380,7 @@ const enc = (typeof escapeHtml === 'function')
             ? (r.week_ending_date || r.work_date || r.date_local || r.date || '')
             : (r.date_local || r.work_date || r.date || r.week_ending_date || '');
 
-        const date = formatYmdToNiceDate(rawDateYmd);
+        const date = (typeof formatYmdToNiceDate === 'function') ? formatYmdToNiceDate(rawDateYmd) : rawDateYmd;
 
         const code =
           (r.incoming_code ||
@@ -51411,6 +52457,68 @@ const enc = (typeof escapeHtml === 'function')
         </div>
 
         <div class="row" style="margin-top:10px;">
+          <label>Import options</label>
+          <div class="controls">
+            <div class="mini" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
+              ${missPill}
+              <span class="pill pill-info">Range: ${enc(String(optFromNice))} → ${enc(String(optToNice))}</span>
+              <button type="button" class="btn mini" data-act="weekly-import-options">Change options…</button>
+              <span class="mini" style="color:#666;">(Shift date = start date; cross-midnight belongs to start date.)</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="row" style="margin-top:10px;">
+          <label>Actions</label>
+          <div class="controls">
+            <div class="mini" style="margin-bottom:8px;display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
+              <label class="mini" style="display:flex;gap:6px;align-items:center;">
+                <input type="checkbox" data-act="weekly-filter-red" ${f.showOnlyRed ? 'checked' : ''}/>
+                Show only RED
+              </label>
+              <label class="mini" style="display:flex;gap:6px;align-items:center;">
+                <input type="checkbox" data-act="weekly-filter-unticked" ${f.showOnlyUnticked ? 'checked' : ''}/>
+                Show only unticked
+              </label>
+              <label class="mini" style="display:flex;gap:6px;align-items:center;">
+                <input type="checkbox" data-act="weekly-filter-cancellations" ${f.showOnlyCancellations ? 'checked' : ''}/>
+                Show only cancellations
+              </label>
+              <input type="text" class="mini" data-act="weekly-filter-search" value="${enc(f.search || '')}" placeholder="Search…" style="min-width:220px;"/>
+              <span class="pill pill-info">Visible: ${enc(String(actionBuild0.visibleCount))}</span>
+              <span class="pill pill-ok">Ticked: ${enc(String(actionBuild0.selectedCount))}</span>
+            </div>
+
+            <div id="weeklyPolicyBanner">
+              ${actionBuild0.bannerHtml}
+            </div>
+
+            <div class="wi-table-wrap" style="max-height:260px;">
+              <table class="grid wi-grid">
+                <thead>
+                  <tr>
+                    <th class="mini" style="width:36px;"></th>
+                    <th class="mini" style="width:90px;">Severity</th>
+                    <th class="mini">Action</th>
+                    <th class="mini">Work date</th>
+                    <th class="mini">Candidate</th>
+                    <th class="mini">Client</th>
+                    <th class="mini">Reason</th>
+                  </tr>
+                </thead>
+                <tbody id="weeklyActionsTbody">
+                  ${actionBuild0.tableBody}
+                </tbody>
+              </table>
+            </div>
+
+            <div class="mini" style="margin-top:8px;color:#666;">
+              Note: Missing-from-import cancellations are always unchecked by default. When missing shifts are OFF, those cancellations are hidden unless required by a replacement-day selection.
+            </div>
+          </div>
+        </div>
+
+        <div class="row" style="margin-top:10px;">
           <label>Changed shifts</label>
           <div class="controls">${changedHtml}</div>
         </div>
@@ -51451,118 +52559,264 @@ const enc = (typeof escapeHtml === 'function')
     </div>
   `);
 
-  // Wiring: decisions updates + apply validation + existing resolve actions
+  // Wiring: decisions updates + action selection + filters + options + apply + existing resolve actions
   setTimeout(() => {
     try {
       const root = document.getElementById('weeklyImportSummary');
-      if (!root || (type !== 'NHSP' && type !== 'HR_WEEKLY')) return;
+      if (!root || (TYPE !== 'NHSP' && TYPE !== 'HR_WEEKLY')) return;
       if (root.__weeklyWired) return;
       root.__weeklyWired = true;
 
       const LOGW = (typeof window.__LOG_IMPORTS === 'boolean') ? window.__LOG_IMPORTS : true;
       const LW   = (...a) => { if (LOGW) console.log('[IMPORTS][WEEKLY]', ...a); };
 
-      const getPreview = () => (window.__importSummaryState && window.__importSummaryState[type]) ? window.__importSummaryState[type] : rootObj;
+      const getPreview = () => (window.__importSummaryState && window.__importSummaryState[TYPE]) ? window.__importSummaryState[TYPE] : rootObj;
+
+      const getUiLive = () => {
+        const u = getWeeklyUi();
+        if (u) return u;
+        return ensureWeeklyUi();
+      };
+
+  const updateActionsDom = () => {
+  const previewNow = getPreview();
+  const u = getUiLive();
+  const sel = (u && u.actionSelection instanceof Set) ? u.actionSelection : new Set();
+
+  const build = buildActionsTableHtml(previewNow, sel);
+
+  const banner = document.getElementById('weeklyPolicyBanner');
+  if (banner) banner.innerHTML = build.bannerHtml || '';
+
+  const tbody = document.getElementById('weeklyActionsTbody');
+  if (tbody) tbody.innerHTML = build.tableBody || '';
+
+  // ✅ NEW: enable/disable "Finalise import" using CSS hook (no native disabled attribute)
+  try {
+    const btnApplyNow = root.querySelector('button[data-act="weekly-import-apply"]');
+
+    let disableReason = '';
+
+    // Policy A: replacement-day violations block finalise
+    try {
+      const pol = computePolicyA(previewNow, sel);
+      if (pol && Array.isArray(pol.missing) && pol.missing.length) {
+        disableReason = 'Replacement-day rule: tick all required cancellations for the day(s) highlighted above.';
+      }
+    } catch {}
+
+    // Changed-hours decisions validation blocks finalise (when invalid)
+    if (!disableReason) {
+      try {
+        const ds = (typeof getOrInitWeeklyImportDecisionsStore === 'function')
+          ? getOrInitWeeklyImportDecisionsStore(TYPE, importId, previewNow)
+          : null;
+
+        if (ds && typeof ds.validate === 'function') {
+          const v = ds.validate(previewNow);
+          if (v && v.ok === false) {
+            disableReason = 'Changed-hours decisions are incomplete/invalid. Please resolve the highlighted decision rows.';
+          }
+        }
+      } catch {}
+    }
+
+    if (btnApplyNow) {
+      if (disableReason) {
+        btnApplyNow.classList.add('disabled');
+        btnApplyNow.setAttribute('data-disabled', '1');
+        btnApplyNow.title = disableReason;
+      } else {
+        btnApplyNow.classList.remove('disabled');
+        btnApplyNow.removeAttribute('data-disabled');
+        btnApplyNow.title = '';
+      }
+    }
+  } catch {}
+
+  // Update visible/ticked counters in the filter bar by re-rendering the pills text if present
+  try {
+    const pills = root.querySelectorAll('.pill');
+    // not strictly necessary; keep minimal and safe
+    void pills;
+  } catch {}
+};
 
       const ensureWeeklyImportMappings = () => {
         window.__weeklyImportMappings = window.__weeklyImportMappings || {};
-        window.__weeklyImportMappings[type] = window.__weeklyImportMappings[type] || {};
-        let m = window.__weeklyImportMappings[type][importId];
+        window.__weeklyImportMappings[TYPE] = window.__weeklyImportMappings[TYPE] || {};
+        let m = window.__weeklyImportMappings[TYPE][importId];
         if (!m) {
           m = { candidate_mappings: [], client_aliases: [] };
-          window.__weeklyImportMappings[type][importId] = m;
+          window.__weeklyImportMappings[TYPE][importId] = m;
         }
         return m;
       };
 
-      // decision changes update canonical store
+      // Change handler: action checkbox + filters + decisions
       root.addEventListener('change', (ev) => {
         const el = ev.target;
-        if (!el) return;
-        const act = el.getAttribute && el.getAttribute('data-act');
-        if (!act) return;
-        const ek = (el.getAttribute('data-ek') || '').trim();
-        if (!ek) return;
+        if (!el || !el.getAttribute) return;
+        const act = el.getAttribute('data-act') || '';
 
-        const previewNow = getPreview();
-        const ds = (typeof getOrInitWeeklyImportDecisionsStore === 'function')
-          ? getOrInitWeeklyImportDecisionsStore(type, importId, previewNow)
-          : null;
+        // ✅ NEW: action checkbox toggles (ROW:/CANCEL:)
+        if (act === 'weekly-action-check') {
+          const id = (el.getAttribute('data-action-id') || '').trim();
+          if (!id) return;
 
-        if (!ds || !ds.set) return;
+          const u = getUiLive();
+          if (!u || !(u.actionSelection instanceof Set)) return;
 
-        if (act === 'chg-skip') {
-          ds.set(ek, { skip: !!el.checked });
-          LW('decision set', { ek, skip: !!el.checked });
+          if (el.checked) u.actionSelection.add(id);
+          else u.actionSelection.delete(id);
+
+          LW('action selection', { action_id: id, checked: !!el.checked, selected_count: u.actionSelection.size });
+
+          updateActionsDom();
           return;
         }
-        if (act === 'chg-credit-week') {
-          ds.set(ek, { credit_week_start: String(el.value || '') });
-          LW('decision set', { ek, credit_week_start: String(el.value || '') });
+
+        // ✅ NEW: filters (checkbox toggles)
+        if (act === 'weekly-filter-red' || act === 'weekly-filter-unticked' || act === 'weekly-filter-cancellations') {
+          const u = getUiLive();
+          if (!u) return;
+          u.filters = (u.filters && typeof u.filters === 'object') ? u.filters : {};
+          if (act === 'weekly-filter-red') u.filters.showOnlyRed = !!el.checked;
+          if (act === 'weekly-filter-unticked') u.filters.showOnlyUnticked = !!el.checked;
+          if (act === 'weekly-filter-cancellations') u.filters.showOnlyCancellations = !!el.checked;
+
+          updateActionsDom();
           return;
         }
-        if (act === 'chg-reinvoice-week') {
-          ds.set(ek, { reinvoice_week_start: String(el.value || '') });
-          LW('decision set', { ek, reinvoice_week_start: String(el.value || '') });
-          return;
+
+        // Existing decision changes update canonical store
+        if (act === 'chg-skip' || act === 'chg-credit-week' || act === 'chg-reinvoice-week') {
+          const ek = (el.getAttribute('data-ek') || '').trim();
+          if (!ek) return;
+
+          const previewNow = getPreview();
+          const ds = (typeof getOrInitWeeklyImportDecisionsStore === 'function')
+            ? getOrInitWeeklyImportDecisionsStore(TYPE, importId, previewNow)
+            : null;
+
+          if (!ds || !ds.set) return;
+
+          if (act === 'chg-skip') {
+            ds.set(ek, { skip: !!el.checked });
+            LW('decision set', { ek, skip: !!el.checked });
+            return;
+          }
+          if (act === 'chg-credit-week') {
+            ds.set(ek, { credit_week_start: String(el.value || '') });
+            LW('decision set', { ek, credit_week_start: String(el.value || '') });
+            return;
+          }
+          if (act === 'chg-reinvoice-week') {
+            ds.set(ek, { reinvoice_week_start: String(el.value || '') });
+            LW('decision set', { ek, reinvoice_week_start: String(el.value || '') });
+            return;
+          }
         }
       });
 
-      // Existing resolve buttons (unchanged)
+      // ✅ NEW: filters (search input)
+      root.addEventListener('input', (ev) => {
+        const el = ev.target;
+        if (!el || !el.getAttribute) return;
+        const act = el.getAttribute('data-act') || '';
+        if (act !== 'weekly-filter-search') return;
+
+        const u = getUiLive();
+        if (!u) return;
+        u.filters = (u.filters && typeof u.filters === 'object') ? u.filters : {};
+        u.filters.search = String(el.value || '');
+        updateActionsDom();
+      });
+
+      // Click handler: resolve buttons + options + refresh/apply
       root.addEventListener('click', (ev) => {
-        const btn = ev.target.closest('button[data-act]');
+        const btn = ev.target && ev.target.closest ? ev.target.closest('button[data-act]') : null;
         if (!btn) return;
         const act = btn.getAttribute('data-act');
-        if (act !== 'weekly-resolve-candidate' && act !== 'weekly-resolve-client') return;
 
-        const st = window.__importSummaryState && window.__importSummaryState[type];
-        const rowsState = st && Array.isArray(st.rows) ? st.rows : (Array.isArray(rows) ? rows : []);
-        const idx = Number(btn.getAttribute('data-row-idx') || '-1');
-        if (idx < 0 || idx >= rowsState.length) return;
-
-        const row = rowsState[idx];
-        const staffRaw = row.staff_name || row.staff_raw || '';
-        const hospRaw  = row.hospital_or_trust || row.unit || row.hospital_norm || '';
-
-        if (act === 'weekly-resolve-candidate') {
-          openCandidatePicker(async ({ id, label }) => {
-            const mappings = ensureWeeklyImportMappings();
-            const mapping = {
-              staff_norm:        row.staff_norm || staffRaw || '',
-              hospital_or_trust: hospRaw || null,
-              candidate_id:      id,
-              client_id:         row.client_id || null,
-              work_date:         row.work_date || row.date_local || row.date || row.week_ending_date || null
-            };
-
+        // ✅ NEW: Change options -> reopen options modal, then re-render summary so visibility matches
+        if (act === 'weekly-import-options') {
+          (async () => {
             try {
-              await postWeeklyResolveMappings(importId, type, { candidate_mappings: [mapping], client_aliases: [] });
-              mappings.candidate_mappings.push(mapping);
-              window.__toast && window.__toast(`Candidate ${label} linked. Reclassifying…`);
-              await refreshWeeklyImportSummary(type, importId);
+              const previewNow = getPreview();
+              if (typeof openWeeklyImportOptionsModal !== 'function') {
+                alert('Import options modal is not available.');
+                return;
+              }
+              const continued = await openWeeklyImportOptionsModal(TYPE, importId, previewNow);
+              if (!continued) return;
+
+              if (typeof renderImportSummaryModal === 'function') {
+                renderImportSummaryModal(TYPE, previewNow);
+              } else {
+                updateActionsDom();
+              }
             } catch (err) {
-              console.error('[IMPORTS][WEEKLY] resolve-candidate failed', err);
-              alert(err?.message || 'Failed to resolve candidate.');
+              console.error('[IMPORTS][WEEKLY] change options failed', err);
+              alert(err?.message || 'Failed to update import options.');
             }
-          }, { context: { importId, staffName: staffRaw, unit: hospRaw, source_system: type, rowIndex: idx } });
+          })();
+          return;
         }
 
-        if (act === 'weekly-resolve-client') {
-          openClientPicker(async ({ id, label }) => {
-            const mappings = ensureWeeklyImportMappings();
-            const hrRowIds = Array.isArray(row.hr_row_ids) ? row.hr_row_ids.map(String) : (row.hr_row_id ? [String(row.hr_row_id)] : []);
-            const mapping = { client_id: id, hr_row_ids: hrRowIds.filter(Boolean), hospital_norm: row.hospital_norm || hospRaw || '' };
+        // Existing resolve buttons (unchanged)
+        if (act === 'weekly-resolve-candidate' || act === 'weekly-resolve-client') {
+          const st = window.__importSummaryState && window.__importSummaryState[TYPE];
+          const rowsState = st && Array.isArray(st.rows) ? st.rows : (Array.isArray(rows) ? rows : []);
+          const idx = Number(btn.getAttribute('data-row-idx') || '-1');
+          if (idx < 0 || idx >= rowsState.length) return;
 
-            try {
-              await postWeeklyResolveMappings(importId, type, { candidate_mappings: [], client_aliases: [mapping] });
-              mappings.client_aliases.push(mapping);
-              window.__toast && window.__toast(`Client ${label} linked. Reclassifying…`);
-              await refreshWeeklyImportSummary(type, importId);
-            } catch (err) {
-              console.error('[IMPORTS][WEEKLY] resolve-client failed', err);
-              alert(err?.message || 'Failed to resolve client.');
-            }
-          }, { nhspOnly: (type === 'NHSP'), hrAutoOnly: (type === 'HR_WEEKLY'), context: { importId, unit: hospRaw } });
+          const row = rowsState[idx];
+          const staffRaw = row.staff_name || row.staff_raw || '';
+          const hospRaw  = row.hospital_or_trust || row.unit || row.hospital_norm || '';
+
+          if (act === 'weekly-resolve-candidate') {
+            openCandidatePicker(async ({ id, label }) => {
+              const mappings = ensureWeeklyImportMappings();
+              const mapping = {
+                staff_norm:        row.staff_norm || staffRaw || '',
+                hospital_or_trust: hospRaw || null,
+                candidate_id:      id,
+                client_id:         row.client_id || null,
+                work_date:         row.work_date || row.date_local || row.date || row.week_ending_date || null
+              };
+
+              try {
+                await postWeeklyResolveMappings(importId, TYPE, { candidate_mappings: [mapping], client_aliases: [] });
+                mappings.candidate_mappings.push(mapping);
+                window.__toast && window.__toast(`Candidate ${label} linked. Reclassifying…`);
+                await refreshWeeklyImportSummary(TYPE, importId);
+              } catch (err) {
+                console.error('[IMPORTS][WEEKLY] resolve-candidate failed', err);
+                alert(err?.message || 'Failed to resolve candidate.');
+              }
+            }, { context: { importId, staffName: staffRaw, unit: hospRaw, source_system: TYPE, rowIndex: idx } });
+          }
+
+          if (act === 'weekly-resolve-client') {
+            openClientPicker(async ({ id, label }) => {
+              const mappings = ensureWeeklyImportMappings();
+              const hrRowIds = Array.isArray(row.hr_row_ids) ? row.hr_row_ids.map(String) : (row.hr_row_id ? [String(row.hr_row_id)] : []);
+              const mapping = { client_id: id, hr_row_ids: hrRowIds.filter(Boolean), hospital_norm: row.hospital_norm || hospRaw || '' };
+
+              try {
+                await postWeeklyResolveMappings(importId, TYPE, { candidate_mappings: [], client_aliases: [mapping] });
+                mappings.client_aliases.push(mapping);
+                window.__toast && window.__toast(`Client ${label} linked. Reclassifying…`);
+                await refreshWeeklyImportSummary(TYPE, importId);
+              } catch (err) {
+                console.error('[IMPORTS][WEEKLY] resolve-client failed', err);
+                alert(err?.message || 'Failed to resolve client.');
+              }
+            }, { nhspOnly: (TYPE === 'NHSP'), hrAutoOnly: (TYPE === 'HR_WEEKLY'), context: { importId, unit: hospRaw } });
+          }
+
+          return;
         }
       });
 
@@ -51570,7 +52824,7 @@ const enc = (typeof escapeHtml === 'function')
       if (btnRefresh && !btnRefresh.__weeklyRefreshWired) {
         btnRefresh.__weeklyRefreshWired = true;
         btnRefresh.addEventListener('click', async () => {
-          try { await refreshWeeklyImportSummary(type, importId); }
+          try { await refreshWeeklyImportSummary(TYPE, importId); }
           catch (err) { console.error('[IMPORTS][WEEKLY] refresh failed', err); alert(err?.message || 'Refresh failed.'); }
         });
       }
@@ -51578,17 +52832,25 @@ const enc = (typeof escapeHtml === 'function')
       const btnApply = root.querySelector('button[data-act="weekly-import-apply"]');
       if (btnApply && !btnApply.__weeklyApplyWired) {
         btnApply.__weeklyApplyWired = true;
-        btnApply.addEventListener('click', async () => {
-          try {
-            const ok = window.confirm('Are you sure you want to finalise now?');
-            if (!ok) return;
+    btnApply.addEventListener('click', async () => {
+  try {
+    // ✅ NEW: guard (in case CSS changes and click still fires)
+    if (btnApply.classList.contains('disabled') || btnApply.getAttribute('data-disabled') === '1') {
+      const reason = btnApply.title || 'Cannot finalise yet.';
+      if (window.__toast) window.__toast(reason); else alert(reason);
+      return;
+    }
 
-            const previewNow = getPreview();
-            const ds = (typeof getOrInitWeeklyImportDecisionsStore === 'function')
-              ? getOrInitWeeklyImportDecisionsStore(type, importId, previewNow)
-              : null;
+    const ok = window.confirm('Are you sure you want to finalise now?');
+    if (!ok) return;
 
-            // Client-side validation (required by brief)
+    const previewNow = getPreview();
+    const ds = (typeof getOrInitWeeklyImportDecisionsStore === 'function')
+      ? getOrInitWeeklyImportDecisionsStore(TYPE, importId, previewNow)
+      : null;
+
+
+            // Client-side validation (changed-hours decisions)
             if (ds && ds.validate) {
               const v = ds.validate(previewNow);
               if (!v.ok) {
@@ -51601,22 +52863,56 @@ const enc = (typeof escapeHtml === 'function')
               }
             }
 
-            const mappings = ensureWeeklyImportMappings();
-            const payload = {
-              candidate_mappings: mappings.candidate_mappings || [],
-              client_aliases: mappings.client_aliases || [],
-              decisions: ds && ds.serialize ? ds.serialize(previewNow) : {}
+            // Policy A pre-check (based on preview actions + selection)
+            const u = getUiLive();
+            const sel = (u && u.actionSelection instanceof Set) ? u.actionSelection : new Set();
+            const pol = computePolicyA(previewNow, sel);
+            if (pol.missing.length) {
+              alert(
+                `Cannot finalise: Replacement-day rule violation.\n\n` +
+                `Tick all required cancellations for the day(s) shown in red before finalising.`
+              );
+              updateActionsDom();
+              return;
+            }
+
+            const selected_action_ids = Array.from(sel);
+
+            const body = {
+              selected_action_ids,
+              decisions: (ds && ds.serialize) ? ds.serialize(previewNow) : {}
+              // HR_WEEKLY email_actions are handled elsewhere (will be added when Mode A email UI is implemented)
             };
 
-            const result = await resolveImportConflicts(importId, type, payload) || {};
-            alert(`Import ${result.import_id || importId} has been finalised.`);
-            await refreshWeeklyImportSummary(type, importId);
+            let url;
+            if (TYPE === 'HR_WEEKLY') url = API(`/api/healthroster/${encodeURIComponent(importId)}/autoprocess-apply`);
+            else url = API(`/api/nhsp/${encodeURIComponent(importId)}/apply`);
+
+            const res = await authFetch(url, {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify(body)
+            });
+
+            const txt = await res.text().catch(() => '');
+            if (!res.ok) {
+              throw new Error(txt || `Apply failed (${res.status})`);
+            }
+
+            let payload;
+            try { payload = txt ? JSON.parse(txt) : {}; } catch { payload = {}; }
+
+            window.__toast && window.__toast(`Import ${payload?.import_id || importId} finalised.`);
+            await refreshWeeklyImportSummary(TYPE, importId);
           } catch (err) {
             console.error('[IMPORTS][WEEKLY] apply failed', err);
             alert(err?.message || 'Weekly import apply failed.');
           }
         });
       }
+
+      // Initial banner/table refresh (ensures Policy A banner reflects default selection)
+      updateActionsDom();
     } catch (e) {
       console.warn('[IMPORTS] weekly wiring failed', e);
     }
@@ -51624,6 +52920,225 @@ const enc = (typeof escapeHtml === 'function')
 
   return markup;
 }
+
+function computePolicyAViolations(actions, selectedActionIds) {
+  const acts = Array.isArray(actions) ? actions : [];
+
+  // Accept Set or Array; normalise to Set<string>
+  const sel = (() => {
+    if (selectedActionIds instanceof Set) {
+      const out = new Set();
+      for (const v of selectedActionIds) out.add(String(v));
+      return out;
+    }
+    if (Array.isArray(selectedActionIds)) {
+      return new Set(selectedActionIds.map(v => String(v)));
+    }
+    return new Set();
+  })();
+
+  const actionIdOf = (a) => {
+    if (!a) return null;
+    const id = a.action_id ?? a.actionId ?? null;
+    if (id == null) return null;
+    const s = String(id).trim();
+    return s ? s : null;
+  };
+
+  const replacementKeyOf = (a) => {
+    if (!a) return null;
+    const rk = a.replacement_day_key ?? a.replacementDayKey ?? null;
+    if (rk != null) {
+      const s = String(rk).trim();
+      if (s) return s;
+    }
+    // Fallback (should rarely be needed if backend always supplies replacement_day_key)
+    const cid = a.candidate_id ?? a.candidateId ?? null;
+    const cli = a.client_id ?? a.clientId ?? null;
+    const wd = a.work_date ?? a.workDate ?? a.date_local ?? a.date ?? null;
+    if (cid && cli && wd) return `${String(cid)}|${String(cli)}|${String(wd).slice(0, 10)}`;
+    return null;
+  };
+
+  const isNewShift = (a) => (a?.is_new_shift === true || a?.isNewShift === true);
+  const isCancel = (a) => (a?.is_cancellation === true || a?.isCancellation === true);
+
+  // Build maps by replacement_day_key
+  const newShiftActionIdsByKey = new Map();  // key -> string[]
+  const cancelActionIdsByKey = new Map();    // key -> string[]
+
+  for (const a of acts) {
+    const id = actionIdOf(a);
+    if (!id) continue;
+
+    const key = replacementKeyOf(a);
+    if (!key) continue;
+
+    if (isNewShift(a)) {
+      if (!newShiftActionIdsByKey.has(key)) newShiftActionIdsByKey.set(key, []);
+      newShiftActionIdsByKey.get(key).push(id);
+    }
+
+    if (isCancel(a)) {
+      if (!cancelActionIdsByKey.has(key)) cancelActionIdsByKey.set(key, []);
+      cancelActionIdsByKey.get(key).push(id);
+    }
+  }
+
+  // Evaluate violations
+  const violations = [];
+  const selectedNewShiftKeys = [];
+
+  for (const [key, newIds] of newShiftActionIdsByKey.entries()) {
+    // If any new-shift action for this key is selected, then ALL cancels for this key must be selected
+    const anyNewSelected = (newIds || []).some(id => sel.has(id));
+    if (!anyNewSelected) continue;
+
+    selectedNewShiftKeys.push(key);
+
+    const cancels = cancelActionIdsByKey.get(key) || [];
+    const missingCancels = cancels.filter(id => !sel.has(id));
+
+    if (missingCancels.length) {
+      violations.push({
+        replacement_day_key: key,
+        selected_new_shift_action_ids: newIds.filter(id => sel.has(id)),
+        required_cancel_action_ids: cancels.slice(),
+        missing_cancel_action_ids: missingCancels.slice()
+      });
+    }
+  }
+
+  // A helper structure that makes the “Tick required cancellations for this day” button trivial
+  const requiredCancelsByKey = {};
+  for (const [key, ids] of cancelActionIdsByKey.entries()) {
+    requiredCancelsByKey[key] = (ids || []).slice();
+  }
+
+  return {
+    ok: violations.length === 0,
+    violations,
+    selected_new_shift_keys: selectedNewShiftKeys,
+    required_cancel_action_ids_by_key: requiredCancelsByKey
+  };
+}
+
+
+async function applyWeeklyImportTransactional(type, importId, payloadIn) {
+  const t = String(type || '').toUpperCase();
+  const encId = encodeURIComponent(String(importId || '').trim());
+
+  if (!encId) {
+    throw new Error('Missing import_id for applyWeeklyImportTransactional.');
+  }
+
+  if (typeof authFetch !== 'function' || typeof API !== 'function') {
+    throw new Error('authFetch/API helper missing in applyWeeklyImportTransactional.');
+  }
+
+  if (t !== 'NHSP' && t !== 'HR_WEEKLY') {
+    throw new Error(`Unsupported weekly import type for applyWeeklyImportTransactional: ${t}`);
+  }
+
+  const p = (payloadIn && typeof payloadIn === 'object' && !Array.isArray(payloadIn)) ? payloadIn : {};
+
+  // selected_action_ids: accept Set or Array; normalise to unique string[]
+  const selected_action_ids = (() => {
+    const raw = p.selected_action_ids ?? p.selectedActionIds ?? p.selected_actions ?? p.selectedActions ?? null;
+
+    let arr = [];
+    if (raw instanceof Set) {
+      arr = Array.from(raw).map(v => String(v)).filter(Boolean);
+    } else if (Array.isArray(raw)) {
+      arr = raw.map(v => String(v)).filter(Boolean);
+    } else {
+      arr = [];
+    }
+
+    // de-dupe, preserve order
+    const seen = new Set();
+    const out = [];
+    for (const x of arr) {
+      if (seen.has(x)) continue;
+      seen.add(x);
+      out.push(x);
+    }
+    return out;
+  })();
+
+  const decisions =
+    (p.decisions && typeof p.decisions === 'object' && !Array.isArray(p.decisions))
+      ? p.decisions
+      : {};
+
+  // HR weekly only: email_actions [{timesheet_id, issue_fingerprint}]
+  const email_actions = (() => {
+    if (t !== 'HR_WEEKLY') return undefined;
+    const raw = p.email_actions ?? p.emailActions ?? null;
+    const arr = Array.isArray(raw) ? raw : [];
+    const out = [];
+
+    for (const it of arr) {
+      if (!it || typeof it !== 'object') continue;
+      const tsId = (it.timesheet_id ?? it.timesheetId ?? null);
+      const fp   = (it.issue_fingerprint ?? it.issueFingerprint ?? null);
+      const ts = tsId != null ? String(tsId).trim() : '';
+      const f  = fp != null ? String(fp).trim() : '';
+      if (!ts || !f) continue;
+      out.push({ timesheet_id: ts, issue_fingerprint: f });
+    }
+
+    // de-dupe by timesheet_id + fingerprint
+    const seen = new Set();
+    const uniq = [];
+    for (const x of out) {
+      const k = `${x.timesheet_id}__${x.issue_fingerprint}`;
+      if (seen.has(k)) continue;
+      seen.add(k);
+      uniq.push(x);
+    }
+    return uniq;
+  })();
+
+  const urlPath =
+    (t === 'NHSP')
+      ? `/api/nhsp/${encId}/apply`
+      : `/api/healthroster/${encId}/autoprocess-apply`;
+
+  const body = { selected_action_ids, decisions };
+  if (t === 'HR_WEEKLY') body.email_actions = email_actions || [];
+
+  const res = await authFetch(API(urlPath), {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body)
+  });
+
+  const text = await res.text().catch(() => '');
+
+  if (!res.ok) {
+    // Try to surface a friendly server error message if body is JSON.
+    let msg = text || `Weekly import apply failed (${res.status})`;
+    try {
+      if (text) {
+        const j = JSON.parse(text);
+        if (j && typeof j === 'object') {
+          if (typeof j.message === 'string' && j.message.trim()) msg = j.message.trim();
+          else if (typeof j.error === 'string' && j.error.trim()) msg = j.error.trim();
+        }
+      }
+    } catch {
+      // ignore JSON parse errors
+    }
+    throw new Error(msg);
+  }
+
+  try { return text ? JSON.parse(text) : {}; } catch { return {}; }
+}
+
+
+
+
 
 
 function renderClientHospitalsTable() {
@@ -59708,16 +61223,17 @@ function renderTimesheetOverviewTab(ctx) {
 }
 
 
-
 function renderHrRotaDailySummary(type, importId, rows, ss) {
-  const summary = ss.summary || {};
+  const enc = (typeof escapeHtml === 'function')
+    ? escapeHtml
+    : (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({
+        '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+      }[c]));
+
+  const summary = (ss && typeof ss.summary === 'object' && ss.summary) ? ss.summary : {};
   const total   = summary.total_rows || rows.length || 0;
 
-  const counts = {
-    OK: 0,
-    FAILED: 0,
-    UNMATCHED: 0
-  };
+  const counts = { OK: 0, FAILED: 0, UNMATCHED: 0 };
   rows.forEach(r => {
     const st = String(r.status || '').toUpperCase();
     if (st === 'OK' || st === 'VALIDATION_OK') counts.OK++;
@@ -59725,9 +61241,26 @@ function renderHrRotaDailySummary(type, importId, rows, ss) {
     else counts.FAILED++;
   });
 
+  // ✅ Persist selections across rerender/refresh (do NOT reset every render)
   window.__hrRotaEmailSelections = window.__hrRotaEmailSelections || {};
-  window.__hrRotaEmailSelections[importId] = new Set();
-  const emailSel = window.__hrRotaEmailSelections[importId];
+  const impKey = String(importId || '').trim();
+
+  if (!window.__hrRotaEmailSelections[impKey] || !(window.__hrRotaEmailSelections[impKey] instanceof Set)) {
+    window.__hrRotaEmailSelections[impKey] = new Set();
+  }
+  const emailSel = window.__hrRotaEmailSelections[impKey];
+
+  // ✅ Reconcile selection set to only contain REAL hr_row_id values present in this render
+  // (prevents ever sending fallback idx ids, and drops stale selections after refresh)
+  const validHrRowIds = new Set();
+  for (const r of (rows || [])) {
+    const hrid = r && r.hr_row_id ? String(r.hr_row_id).trim() : '';
+    if (hrid) validHrRowIds.add(hrid);
+  }
+  for (const id of Array.from(emailSel)) {
+    const s = String(id || '').trim();
+    if (!s || !validHrRowIds.has(s)) emailSel.delete(id);
+  }
 
   const rowsHtml = rows.length
     ? rows.map((r, idx) => {
@@ -59770,20 +61303,50 @@ function renderHrRotaDailySummary(type, importId, rows, ss) {
         } else if (reasonCode === 'break_minutes_mismatch') {
           pillLabel = 'BREAK MISMATCH';
         } else {
-          // Generic: reason_code like "reject_no_contract_band_mismatch"
           pillLabel = (reasonCode || 'UNKNOWN').replace(/_/g, ' ').toUpperCase();
         }
 
-        const emailEligible    = r.email_eligible === true;
-        const emailAlreadySent = r.email_already_sent === true;
+        // ✅ New backend fields
+        const canEmail = (r.can_email === true);
+        const recipientMissing = (r.recipient_missing === true);
+        const recipientEmail = (r.recipient_email != null) ? String(r.recipient_email).trim() : '';
+        const emailAlreadySent = (r.email_already_sent === true);
 
-        const rowId = r.hr_row_id || r.id || `${idx}`;
+        // ✅ Must only ever use REAL hr_row_id for email selection
+        const hrRowId = r.hr_row_id ? String(r.hr_row_id).trim() : '';
 
         let emailCellHtml;
-        if (!emailEligible) {
+
+        // If we cannot identify a real row id, never allow selecting it.
+        if (!hrRowId) {
           emailCellHtml = '<span class="mini">—</span>';
+        } else if (recipientMissing) {
+          // ✅ Recipient missing: show red badge and no checkbox (tooltip explains)
+          const title = recipientEmail
+            ? `Recipient email present but marked missing: ${recipientEmail}`
+            : 'Recipient email missing (clients.ts_queries_email not set).';
+          const iconHtml = emailAlreadySent
+            ? `<span class="email-icon" title="Email previously sent" style="font-size:0.8rem;opacity:0.7;">&#x2709;&#x2713;</span>`
+            : '';
+          emailCellHtml = `
+            <div class="hr-email-cell" style="display:flex;align-items:center;justify-content:center;gap:6px;">
+              <span class="pill pill-bad" title="${enc(title)}">RECIPIENT MISSING</span>
+              ${iconHtml}
+            </div>
+          `;
+        } else if (!canEmail) {
+          // ✅ Checkbox gate is can_email (not email_eligible)
+          const iconHtml = emailAlreadySent
+            ? `<span class="email-icon" title="Email previously sent" style="font-size:0.8rem;opacity:0.7;">&#x2709;&#x2713;</span>`
+            : '';
+          emailCellHtml = `
+            <div class="hr-email-cell" style="display:flex;align-items:center;justify-content:center;gap:4px;">
+              <span class="mini">—</span>
+              ${iconHtml}
+            </div>
+          `;
         } else {
-          const checked = (emailSel instanceof Set && emailSel.has(rowId)) ? 'checked' : '';
+          const checked = (emailSel instanceof Set && emailSel.has(hrRowId)) ? 'checked' : '';
           const iconHtml = emailAlreadySent
             ? `<span class="email-icon" title="Email previously sent" style="font-size:0.8rem;opacity:0.7;">&#x2709;&#x2713;</span>`
             : '';
@@ -59792,7 +61355,7 @@ function renderHrRotaDailySummary(type, importId, rows, ss) {
             <div class="hr-email-cell" style="display:flex;align-items:center;justify-content:center;gap:4px;">
               <input type="checkbox"
                      data-act="hr-rota-email"
-                     data-row-id="${escapeHtml(rowId)}"
+                     data-row-id="${enc(hrRowId)}"
                      data-row-idx="${idx}"
                      ${checked} />
               ${iconHtml}
@@ -59802,9 +61365,9 @@ function renderHrRotaDailySummary(type, importId, rows, ss) {
 
         return `
           <tr>
-            <td><span class="mini">${escapeHtml(staff || '—')}</span></td>
-            <td><span class="mini">${escapeHtml(unit || '—')}</span></td>
-            <td><span class="mini">${escapeHtml(date || '—')}</span></td>
+            <td><span class="mini">${enc(staff || '—')}</span></td>
+            <td><span class="mini">${enc(unit || '—')}</span></td>
+            <td><span class="mini">${enc(date || '—')}</span></td>
             <td>
               <span
                 class="pill ${stCls}"
@@ -59816,7 +61379,7 @@ function renderHrRotaDailySummary(type, importId, rows, ss) {
                   text-align: center;
                 "
               >
-                ${escapeHtml(pillLabel || 'UNKNOWN')}
+                ${enc(pillLabel || 'UNKNOWN')}
               </span>
             </td>
             <td>
@@ -59861,7 +61424,7 @@ function renderHrRotaDailySummary(type, importId, rows, ss) {
           <label>Overview</label>
           <div class="controls">
             <div class="mini">
-              Import ID: <span class="mono">${escapeHtml(importId || '—')}</span><br/>
+              Import ID: <span class="mono">${enc(importId || '—')}</span><br/>
               Total rows: ${total}<br/>
               OK: ${counts.OK} &nbsp; Failed: ${counts.FAILED} &nbsp; Unmatched: ${counts.UNMATCHED}
             </div>
@@ -60040,19 +61603,18 @@ function renderHrRotaDailySummary(type, importId, rows, ss) {
         const cb = ev.target.closest('input[data-act="hr-rota-email"]');
         if (!cb) return;
 
-        const rowId = cb.getAttribute('data-row-id') || '';
-        if (!rowId) return;
+        const rowId = String(cb.getAttribute('data-row-id') || '').trim();
+        if (!rowId) return; // ✅ only real hr_row_id values ever
 
         window.__hrRotaEmailSelections = window.__hrRotaEmailSelections || {};
-        const sel = window.__hrRotaEmailSelections[importId] || new Set();
-        if (!(sel instanceof Set)) {
-          window.__hrRotaEmailSelections[importId] = new Set();
+        if (!window.__hrRotaEmailSelections[impKey] || !(window.__hrRotaEmailSelections[impKey] instanceof Set)) {
+          window.__hrRotaEmailSelections[impKey] = new Set();
         }
 
         if (cb.checked) {
-          window.__hrRotaEmailSelections[importId].add(rowId);
+          window.__hrRotaEmailSelections[impKey].add(rowId);
         } else {
-          window.__hrRotaEmailSelections[importId].delete(rowId);
+          window.__hrRotaEmailSelections[impKey].delete(rowId);
         }
       });
 
@@ -60086,8 +61648,9 @@ function renderHrRotaDailySummary(type, importId, rows, ss) {
             const ok = window.confirm('Are you sure you are ready to finalise?');
             if (!ok) return;
 
-            const sel = window.__hrRotaEmailSelections && window.__hrRotaEmailSelections[importId];
-            const sendEmailRowIds = (sel instanceof Set) ? Array.from(sel) : [];
+            // ✅ Only REAL hr_row_id values are sent
+            const sel = window.__hrRotaEmailSelections && window.__hrRotaEmailSelections[impKey];
+            const sendEmailRowIds = (sel instanceof Set) ? Array.from(sel).map(x => String(x).trim()).filter(Boolean) : [];
 
             const result = await applyHrRotaValidation(importId, sendEmailRowIds) || {};
 
