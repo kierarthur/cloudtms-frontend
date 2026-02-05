@@ -401,7 +401,6 @@ body{
     .summary-body .grid tbody td a{
       cursor:auto;
     }
-
 /* ===== Weekly Import Summary (NHSP + HR weekly) ===== */
 #weeklyImportSummary .weekly-import-card{
   background:#0c172d;
@@ -415,7 +414,6 @@ body{
 #weeklyImportSummary .wi-grid{
   table-layout:auto;
 }
-
 
 /* Scroll only the table area */
 #weeklyImportSummary .wi-table-wrap{
@@ -433,7 +431,6 @@ body{
   background:#020617;
   box-shadow: 0 1px 0 var(--line);  /* keeps a crisp line when scrolling */
 }
-
 
 /* Wider columns (so it’s not cramped) */
 #weeklyImportSummary .wi-col-staff{   width: 200px; }
@@ -466,6 +463,56 @@ body{
 }
 #weeklyImportSummary tr.wi-row-issue:hover{
   background: rgba(239,68,68,.14) !important;
+}
+
+/* ─────────────────────────────────────────────────────────────
+   NEW: Weekly Actions table (2nd table) polish
+   Uses #weeklyActionsTbody as the stable hook.
+   ───────────────────────────────────────────────────────────── */
+
+/* Column sizing for body cells (header widths are already set inline in the renderer) */
+#weeklyImportSummary #weeklyActionsTbody td:nth-child(1){
+  width:44px;
+  min-width:44px;
+  max-width:44px;
+  text-align:center;
+}
+#weeklyImportSummary #weeklyActionsTbody td:nth-child(2){
+  width:110px;
+  min-width:110px;
+  max-width:110px;
+}
+#weeklyImportSummary #weeklyActionsTbody td:nth-child(4){
+  width:170px;
+  min-width:170px;
+  max-width:170px;
+  white-space:nowrap;
+}
+#weeklyImportSummary #weeklyActionsTbody td:nth-child(7){
+  width:240px;
+  min-width:240px;
+  max-width:240px;
+  white-space:normal;
+  word-break:break-word;
+}
+
+/* Subtle group header row styling (group headers are the rows with a single colspan cell) */
+#weeklyImportSummary #weeklyActionsTbody tr td[colspan]{
+  background: rgba(15,23,42,.55) !important;
+  border-bottom: 1px solid var(--line);
+}
+
+/* Disabled internal buttons (if/when used in the weekly import card) */
+#weeklyImportSummary .btn.disabled,
+#weeklyImportSummary .btn[data-disabled="1"]{
+  opacity:.45;
+  cursor:not-allowed !important;
+  filter:saturate(0.6) brightness(0.9);
+  pointer-events:none;
+}
+#weeklyImportSummary .btn.disabled:hover,
+#weeklyImportSummary .btn[data-disabled="1"]:hover{
+  background:#0b152a;
 }
 
     .grid tr.active{
