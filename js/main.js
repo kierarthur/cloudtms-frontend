@@ -28601,6 +28601,7 @@ async function refreshOldContractAfterTruncate(oldContractId) {
     if (LOGC) console.warn('[CONTRACTS] refreshOldContractAfterTruncate calendar refresh failed', e);
   }
 }
+
 function renderWeeklyImportSummary(type, importId, rows, ss) {
   // ─────────────────────────────────────────────────────────────
   // Robust preview / summary shape handling
@@ -28610,9 +28611,10 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
     ? rootObj.summary
     : (rootObj || {});
 
-   const total = summary.total_rows || (rows ? rows.length : 0) || 0;
+  const total = summary.total_rows || (rows ? rows.length : 0) || 0;
 
   const TYPE = String(type || '').toUpperCase();
+  const T = TYPE; // ✅ FIX: ensure legacy references to T are defined (used in handlers below)
 
   const enc = (typeof escapeHtml === 'function')
     ? escapeHtml
@@ -28763,7 +28765,6 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
     else count_ignored += 1;
   }
 
-
   const fmtMoney = (n) => {
     const x = round2(Number(n || 0));
     const s = x.toFixed(2);
@@ -28785,9 +28786,8 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
   // ─────────────────────────────────────────────────────────────
   // Canonical decisions store (survives rerenders, defaults init safe)
   // ─────────────────────────────────────────────────────────────
-   // ✅ REMOVE legacy changed-hours decision UI entirely.
+  // ✅ REMOVE legacy changed-hours decision UI entirely.
   // Weekly import decisions now happen ONLY via the Actions (approval) section above.
-
 
   const rowsHtml = (rows && rows.length)
     ? rows.map((r, idx) => {
@@ -28817,7 +28817,7 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
            r.assignment_grade_norm ||
            '').toString();
 
-             let reasonText = (r.reason || '').toString();
+        let reasonText = (r.reason || '').toString();
         const actionRaw = rowActionRawOf(r);
 
         const ek = rowExternalKeyOf(r);
@@ -28872,7 +28872,6 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
           displayAction = (actionRaw === 'SKIP_ALREADY_PROCESSED') ? 'ALREADY PROCESSED' : 'IGNORED';
         }
 
-
         const canAssignCand   = (actionRaw === 'NO_CANDIDATE' || actionRaw === 'REJECT_NO_CANDIDATE');
         const canAssignClient = (actionRaw === 'NO_CLIENT'    || actionRaw === 'REJECT_NO_CLIENT');
 
@@ -28908,7 +28907,7 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
             <div class="mini">
               Import ID: <span class="mono">${enc(importId || '—')}</span><br/>
               Total rows: ${total}<br/>
-             Will apply: ${enc(String(count_apply))} &nbsp;|&nbsp;
+              Will apply: ${enc(String(count_apply))} &nbsp;|&nbsp;
               Not approved: ${enc(String(count_not_approved))} &nbsp;|&nbsp;
               Ignored: ${enc(String(count_ignored))} &nbsp;|&nbsp;
               Needs resolution: ${enc(String(count_needs_resolution))}<br/>
@@ -28917,7 +28916,7 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
           </div>
         </div>
 
-       <div class="row" style="margin-top:10px;">
+        <div class="row" style="margin-top:10px;">
           <label>Changes requiring approval</label>
           <div class="controls">
             <div class="mini" style="color:#666;margin-bottom:8px;">
@@ -29003,10 +29002,9 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
           <div class="controls">
             <button type="button" class="btn" data-act="weekly-import-refresh">Refresh</button>
             <button type="button" class="btn" style="margin-left:8px;" data-act="weekly-import-apply">Finalise import</button>
-                      <span class="mini" style="margin-left:8px;">
+            <span class="mini" style="margin-left:8px;">
               Tick approvals above to apply changes/cancellations. New shifts are auto-applied on Finalise.
             </span>
-
           </div>
         </div>
       </div>
@@ -29037,8 +29035,8 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
         return m;
       };
 
-    // ✅ Approval checkbox toggles (top section)
-          root.addEventListener('change', (ev) => {
+      // ✅ Approval checkbox toggles (top section)
+      root.addEventListener('change', (ev) => {
         const cb = ev.target && ev.target.closest ? ev.target.closest('input[data-act="weekly-approve-action"]') : null;
         if (!cb) return;
 
@@ -29059,8 +29057,7 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
         } catch {}
       });
 
-
-          // Existing resolve buttons (unchanged)
+      // Existing resolve buttons (unchanged)
       root.addEventListener('click', (ev) => {
         const btn = ev.target.closest('button[data-act]');
         if (!btn) return;
@@ -29076,16 +29073,15 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
         const staffRaw = row.staff_name || row.staff_raw || '';
         const hospRaw  = row.hospital_or_trust || row.unit || row.hospital_norm || '';
 
-
         if (act === 'weekly-resolve-candidate') {
           openCandidatePicker(async ({ id, label }) => {
             const mappings = ensureWeeklyImportMappings();
             const mapping = {
-              staff_norm:        row.staff_norm || staffRaw || '',
+              staff_norm: row.staff_norm || staffRaw || '',
               hospital_or_trust: hospRaw || null,
-              candidate_id:      id,
-              client_id:         row.client_id || null,
-              work_date:         row.work_date || row.date_local || row.date || row.week_ending_date || null
+              candidate_id: id,
+              client_id: row.client_id || null,
+              work_date: row.work_date || row.date_local || row.date || row.week_ending_date || null
             };
 
             try {
@@ -29136,7 +29132,7 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
             const ok = window.confirm('Are you sure you want to finalise now?');
             if (!ok) return;
 
-                   const previewNow = getPreview();
+            const previewNow = getPreview();
 
             // ✅ Transactional apply (new contract)
             if (typeof applyWeeklyImportTransactional !== 'function') {
@@ -29149,12 +29145,10 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
               ...auto_apply_action_ids
             ]));
 
-                   const result = await applyWeeklyImportTransactional(T, importId, {
+            const result = await applyWeeklyImportTransactional(T, importId, {
               selected_action_ids,
               decisions: {} // ✅ no legacy credit/reinvoice or phase-3 UI decisions
             }) || {};
-
-
 
             alert(`Import ${result.import_id || importId} has been finalised.`);
             await refreshWeeklyImportSummary(type, importId);
@@ -29171,6 +29165,8 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
 
   return markup;
 }
+
+
 function canonicalizeClientSettings(input) {
   const cs = { ...(input || {}) };
 
