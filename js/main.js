@@ -28602,570 +28602,6 @@ async function refreshOldContractAfterTruncate(oldContractId) {
   }
 }
 
-function renderWeeklyImportSummary(type, importId, rows, ss) {
-  // ─────────────────────────────────────────────────────────────
-  // Robust preview / summary shape handling
-  // ─────────────────────────────────────────────────────────────
-  const rootObj = ss || {};
-  const summary = (rootObj && typeof rootObj.summary === 'object' && rootObj.summary)
-    ? rootObj.summary
-    : (rootObj || {});
-
-  const total = summary.total_rows || (rows ? rows.length : 0) || 0;
-
-  const TYPE = String(type || '').toUpperCase();
-  const T = TYPE; // ✅ FIX: ensure legacy references to T are defined (used in handlers below)
-
-  const enc = (typeof escapeHtml === 'function')
-    ? escapeHtml
-    : (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({
-        '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
-      }[c]));
-
-  const asBool = (v) => (v === true || v === 'true' || v === 1 || v === '1');
-  const asNum  = (v) => (v == null || v === '' ? 0 : (Number(v) || 0));
-  const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
-  const normUpper = (s) => String(s || '').trim().toUpperCase();
-
-  // ✅ Weekly action approvals (changes/cancels) come from preview.actions
-  const actions =
-    Array.isArray(rootObj.actions) ? rootObj.actions :
-    Array.isArray(summary.actions) ? summary.actions :
-    [];
-
-  // ✅ NEW shifts are not shown in Actions; backend gives auto_apply_action_ids for them
-  const auto_apply_action_ids = (() => {
-    const raw =
-      rootObj.auto_apply_action_ids ??
-      summary.auto_apply_action_ids ??
-      rootObj.autoApplyActionIds ??
-      summary.autoApplyActionIds ??
-      null;
-
-    const arr = Array.isArray(raw) ? raw : [];
-    const out = [];
-    const seen = new Set();
-    for (const v of arr) {
-      const s = String(v || '').trim();
-      if (!s) continue;
-      if (seen.has(s)) continue;
-      seen.add(s);
-      out.push(s);
-    }
-    return out;
-  })();
-
-  // ✅ Weekly UI state store (actionSelection must persist across rerenders)
-  window.__weeklyImportUi = window.__weeklyImportUi || {};
-  window.__weeklyImportUi[TYPE] = window.__weeklyImportUi[TYPE] || {};
-  const ui = window.__weeklyImportUi[TYPE][String(importId)] || (window.__weeklyImportUi[TYPE][String(importId)] = {
-    options: { missingShiftsEnabled: false, dateFrom: null, dateTo: null },
-    actionSelection: new Set(),
-    filters: { showOnlyRed: false, showOnlyUnticked: false, showOnlyCancellations: false, search: '' },
-    emailSelection: new Set(),
-    hydratedFlags: { didInitDefaultActionChecks: false }
-  });
-  if (!(ui.actionSelection instanceof Set)) ui.actionSelection = new Set();
-
-  const selected_action_ids_all = new Set([
-    ...Array.from(ui.actionSelection),
-    ...auto_apply_action_ids
-  ]);
-
-  const actionIdOf = (a) => {
-    const id = a?.action_id ?? a?.actionId ?? null;
-    return (id != null) ? String(id) : null;
-  };
-
-  const extOfAction = (a) => {
-    const k = a?.external_row_key ?? a?.externalRowKey ?? null;
-    return (k != null) ? String(k).trim() : '';
-  };
-
-  // Map: external_row_key -> action_id (for changed-row actions)
-  const changeActionIdByExternalKey = new Map();
-
-  // Map: action_id -> action object (for reason_text / names)
-  const actionById = new Map();
-
-  for (const a of (actions || [])) {
-    const id = actionIdOf(a);
-    if (!id) continue;
-
-    actionById.set(id, a);
-
-    if (id.toUpperCase().startsWith('ROW:')) {
-      const ek = extOfAction(a);
-      if (ek) changeActionIdByExternalKey.set(ek, id);
-    }
-  }
-
-  const rowExternalKeyOf = (r) => {
-    const ek = r?.external_row_key ?? r?.externalRowKey ?? null;
-    return (ek != null) ? String(ek).trim() : '';
-  };
-
-  const rowActionRawOf = (r) => normUpper(r?.resolution_status || r?.action || '');
-
-  const isResolutionProblem = (actionRaw) => {
-    if (!actionRaw) return true;
-    if (actionRaw === 'NO_CANDIDATE' || actionRaw === 'REJECT_NO_CANDIDATE') return true;
-    if (actionRaw === 'NO_CLIENT'    || actionRaw === 'REJECT_NO_CLIENT') return true;
-    if (actionRaw === 'REJECT_NO_CONTRACT') return true;
-    if (actionRaw === 'REJECT_NO_CONTRACT_BAND_MISMATCH') return true;
-    if (actionRaw.startsWith('REJECT_')) return true;
-    if (actionRaw.startsWith('BLOCK_'))  return true;
-    if (actionRaw === 'UNKNOWN') return true;
-    return false;
-  };
-
-  const isIgnoredRow = (actionRaw) => {
-    // “Already processed” explicitly
-    if (actionRaw === 'SKIP_ALREADY_PROCESSED') return true;
-    // If it’s OK/APPLY and it is not a NEW auto-apply row and not a changed row, it’s effectively a no-op/ignored
-    if (actionRaw === 'OK' || actionRaw === 'APPLY') return true;
-    return false;
-  };
-
-  // ✅ Overview counts should reflect what WILL happen on finalise
-  let count_apply = 0;         // green
-  let count_not_approved = 0;  // red
-  let count_ignored = 0;       // black
-  let count_needs_resolution = 0; // light red
-
-  for (const r of (rows || [])) {
-    const actionRaw = rowActionRawOf(r);
-    if (isResolutionProblem(actionRaw)) {
-      count_needs_resolution += 1;
-      continue;
-    }
-
-    const ek = rowExternalKeyOf(r);
-    const rowId = ek ? `ROW:${ek}` : '';
-
-    // NEW shifts: auto-apply list
-    const isAutoNew = !!(rowId && auto_apply_action_ids.includes(rowId));
-
-    // Changed rows: appear in actions[] as ROW:<ek> (but require explicit tick)
-    const isChangeRow = !!(ek && changeActionIdByExternalKey.has(ek));
-
-    if (isAutoNew) {
-      count_apply += 1;
-      continue;
-    }
-
-    if (isChangeRow) {
-      if (rowId && selected_action_ids_all.has(rowId)) count_apply += 1;
-      else count_not_approved += 1;
-      continue;
-    }
-
-    // Otherwise ignored (no-op / already applied)
-    if (isIgnoredRow(actionRaw)) count_ignored += 1;
-    else count_ignored += 1;
-  }
-
-  const fmtMoney = (n) => {
-    const x = round2(Number(n || 0));
-    const s = x.toFixed(2);
-    return (x > 0 ? `+${s}` : s);
-  };
-
-  const fmtTime = (isoOrYmdHm) => {
-    const s = String(isoOrYmdHm || '').trim();
-    if (!s) return '—';
-    const d = new Date(s);
-    if (!Number.isNaN(d.getTime())) {
-      const hh = String(d.getUTCHours()).padStart(2, '0');
-      const mm = String(d.getUTCMinutes()).padStart(2, '0');
-      return `${hh}:${mm}Z`;
-    }
-    return s;
-  };
-
-  // ─────────────────────────────────────────────────────────────
-  // Canonical decisions store (survives rerenders, defaults init safe)
-  // ─────────────────────────────────────────────────────────────
-  // ✅ REMOVE legacy changed-hours decision UI entirely.
-  // Weekly import decisions now happen ONLY via the Actions (approval) section above.
-
-  const rowsHtml = (rows && rows.length)
-    ? rows.map((r, idx) => {
-        const level = String(r.level || '').toLowerCase();
-
-        const staff =
-          (level === 'group')
-            ? (r.candidate_name || r.candidate_id || r.staff_name || r.staff_raw || '')
-            : (r.staff_name || r.staff_raw || '');
-
-        const unit =
-          (level === 'group')
-            ? (r.client_name || r.client_id || r.unit || r.hospital_or_trust || r.hospital_norm || '')
-            : (r.unit || r.hospital_or_trust || r.hospital_norm || '');
-
-        const rawDateYmd =
-          (level === 'group')
-            ? (r.week_ending_date || r.work_date || r.date_local || r.date || '')
-            : (r.date_local || r.work_date || r.date || r.week_ending_date || '');
-
-        const date = formatYmdToNiceDate(rawDateYmd);
-
-        const code =
-          (r.incoming_code ||
-           r.assignment_code ||
-           r.assignment ||
-           r.assignment_grade_norm ||
-           '').toString();
-
-        let reasonText = (r.reason || '').toString();
-        const actionRaw = rowActionRawOf(r);
-
-        const ek = rowExternalKeyOf(r);
-        const rowId = ek ? `ROW:${ek}` : '';
-
-        // ✅ If this row corresponds to a change/cancel action, prefer backend-friendly reason_text
-        if (ek && changeActionIdByExternalKey.has(ek)) {
-          const aid = changeActionIdByExternalKey.get(ek);
-          const act = aid ? (actionById.get(aid) || null) : null;
-          const rt =
-            act && (act.reason_text || act.reasonText)
-              ? String(act.reason_text || act.reasonText).trim()
-              : '';
-          if (rt) reasonText = rt;
-        } else if (rowId && auto_apply_action_ids.includes(rowId)) {
-          reasonText = 'New shift (auto-applied)';
-        } else if (actionRaw === 'SKIP_ALREADY_PROCESSED') {
-          reasonText = 'Already processed';
-        }
-
-        const isAutoNew = !!(rowId && auto_apply_action_ids.includes(rowId));
-        const isChangeRow = !!(ek && changeActionIdByExternalKey.has(ek));
-        const isApprovedChange = !!(rowId && selected_action_ids_all.has(rowId));
-
-        let rowClass = '';
-        let cls = 'pill-info';
-        let displayAction = 'IGNORED';
-
-        if (isResolutionProblem(actionRaw)) {
-          // light red warning background (mapping / contract / band issues)
-          rowClass = 'wi-row-warn';
-          cls = 'pill-warn';
-          displayAction = 'NEEDS RESOLUTION';
-        } else if (isAutoNew) {
-          rowClass = 'wi-row-ready';
-          cls = 'pill-ok';
-          displayAction = 'WILL APPLY';
-        } else if (isChangeRow) {
-          if (isApprovedChange) {
-            rowClass = 'wi-row-ready';
-            cls = 'pill-ok';
-            displayAction = 'WILL APPLY';
-          } else {
-            rowClass = 'wi-row-issue';
-            cls = 'pill-bad';
-            displayAction = 'NOT APPROVED';
-          }
-        } else {
-          // ignored: already processed / no-op / unchanged
-          rowClass = 'wi-row-ignore';
-          cls = 'pill-info';
-          displayAction = (actionRaw === 'SKIP_ALREADY_PROCESSED') ? 'ALREADY PROCESSED' : 'IGNORED';
-        }
-
-        const canAssignCand   = (actionRaw === 'NO_CANDIDATE' || actionRaw === 'REJECT_NO_CANDIDATE');
-        const canAssignClient = (actionRaw === 'NO_CLIENT'    || actionRaw === 'REJECT_NO_CLIENT');
-
-        return `
-          <tr class="${rowClass}">
-            <td class="wi-col-staff"><span class="mini">${enc(staff || '—')}</span></td>
-            <td class="wi-col-unit"><span class="mini">${enc(unit || '—')}</span></td>
-            <td class="wi-col-date"><span class="mini">${enc(date || '—')}</span></td>
-            <td class="wi-col-code"><span class="mini" style="white-space: normal; word-break: break-word; display:inline-block;">${enc(code || '—')}</span></td>
-            <td class="wi-col-status"><span class="pill ${cls}" style="white-space: normal; word-break: break-word; display:inline-block; text-align:center;">${enc(displayAction || 'UNKNOWN')}</span></td>
-            <td class="wi-col-reason"><span class="mini" style="white-space: normal; word-break: break-word; display:inline-block;">${enc(reasonText || '')}</span></td>
-            <td class="wi-col-actions">
-              <div class="wi-actions">
-                ${canAssignCand ? `<button type="button" class="btn mini" data-act="weekly-resolve-candidate" data-row-idx="${idx}" data-staff="${enc(staff)}" data-unit="${enc(unit)}">Assign candidate…</button>` : ''}
-                ${canAssignClient ? `<button type="button" class="btn mini" data-act="weekly-resolve-client" data-row-idx="${idx}" data-unit="${enc(unit)}">Assign client…</button>` : ''}
-              </div>
-            </td>
-          </tr>
-        `;
-      }).join('')
-    : `
-      <tr>
-        <td colspan="7"><span class="mini">No rows to show.</span></td>
-      </tr>
-    `;
-
-  const markup = html(`
-    <div id="weeklyImportSummary">
-      <div class="card weekly-import-card">
-        <div class="row">
-          <label>Overview</label>
-          <div class="controls">
-            <div class="mini">
-              Import ID: <span class="mono">${enc(importId || '—')}</span><br/>
-              Total rows: ${total}<br/>
-              Will apply: ${enc(String(count_apply))} &nbsp;|&nbsp;
-              Not approved: ${enc(String(count_not_approved))} &nbsp;|&nbsp;
-              Ignored: ${enc(String(count_ignored))} &nbsp;|&nbsp;
-              Needs resolution: ${enc(String(count_needs_resolution))}<br/>
-              Auto new shifts: ${enc(String(auto_apply_action_ids.length))}
-            </div>
-          </div>
-        </div>
-
-        <div class="row" style="margin-top:10px;">
-          <label>Changes requiring approval</label>
-          <div class="controls">
-            <div class="mini" style="color:#666;margin-bottom:8px;">
-              Tick the boxes below to approve changes/cancellations. New shifts are applied automatically on Finalise.
-            </div>
-            <div class="wi-table-wrap" style="max-height:240px;">
-              <table class="grid wi-grid">
-                <thead>
-                  <tr>
-                    <th style="width:40px;"></th>
-                    <th>Action</th>
-                    <th>Work date</th>
-                    <th>Candidate</th>
-                    <th>Client</th>
-                    <th>Reason</th>
-                  </tr>
-                </thead>
-                <tbody id="weeklyActionsApprovalTbody">
-                  ${
-                    (actions && actions.length)
-                      ? actions.map(a => {
-                          const id = actionIdOf(a) || '';
-                          const wd = String(a?.work_date || a?.workDate || '') || '';
-                          const wdNice = (typeof formatYmdToNiceDate === 'function' && wd) ? formatYmdToNiceDate(wd) : wd;
-
-                          const cand = String(a?.candidate_name || a?.candidateName || '') || '—';
-                          const cli  = String(a?.client_name || a?.clientName || '') || '—';
-
-                          const reasonTxt = String(a?.reason_text || a?.reasonText || a?.reason || '') || '';
-                          const labelTxt  = String(a?.label || a?.action_label || a?.actionLabel || 'Change') || 'Change';
-
-                          const checked = (id && ui.actionSelection && ui.actionSelection.has(id)) ? 'checked' : '';
-
-                          return `
-                            <tr class="wi-row-issue">
-                              <td class="mini" style="text-align:center;">
-                                <input type="checkbox" data-act="weekly-approve-action" data-action-id="${enc(id)}" ${checked}/>
-                              </td>
-                              <td class="mini">${enc(labelTxt)}</td>
-                              <td class="mini">${enc(wdNice || '—')}</td>
-                              <td class="mini">${enc(cand)}</td>
-                              <td class="mini">${enc(cli)}</td>
-                              <td class="mini">${enc(reasonTxt)}</td>
-                            </tr>
-                          `;
-                        }).join('')
-                      : `
-                        <tr>
-                          <td colspan="6"><span class="mini">No changes detected.</span></td>
-                        </tr>
-                      `
-                  }
-                </tbody>
-              </table>
-            </div>
-          </div>
-        </div>
-
-        <div class="row" style="margin-top:10px;">
-          <label>Rows</label>
-          <div class="controls">
-            <div class="wi-table-wrap">
-              <table class="grid wi-grid">
-                <thead>
-                  <tr>
-                    <th class="wi-col-staff">Staff</th>
-                    <th class="wi-col-unit">Unit / Site</th>
-                    <th class="wi-col-date">Date / Week ending</th>
-                    <th class="wi-col-code">Code</th>
-                    <th class="wi-col-status">Resolution</th>
-                    <th class="wi-col-reason">Reason</th>
-                    <th class="wi-col-actions">Resolve</th>
-                  </tr>
-                </thead>
-                <tbody>${rowsHtml}</tbody>
-              </table>
-            </div>
-          </div>
-        </div>
-
-        <div class="row weekly-import-footer" style="margin-top:10px;">
-          <label></label>
-          <div class="controls">
-            <button type="button" class="btn" data-act="weekly-import-refresh">Refresh</button>
-            <button type="button" class="btn" style="margin-left:8px;" data-act="weekly-import-apply">Finalise import</button>
-            <span class="mini" style="margin-left:8px;">
-              Tick approvals above to apply changes/cancellations. New shifts are auto-applied on Finalise.
-            </span>
-          </div>
-        </div>
-      </div>
-    </div>
-  `);
-
-  // Wiring: decisions updates + apply validation + existing resolve actions
-  setTimeout(() => {
-    try {
-      const root = document.getElementById('weeklyImportSummary');
-      if (!root || (type !== 'NHSP' && type !== 'HR_WEEKLY')) return;
-      if (root.__weeklyWired) return;
-      root.__weeklyWired = true;
-
-      const LOGW = (typeof window.__LOG_IMPORTS === 'boolean') ? window.__LOG_IMPORTS : true;
-      const LW   = (...a) => { if (LOGW) console.log('[IMPORTS][WEEKLY]', ...a); };
-
-      const getPreview = () => (window.__importSummaryState && window.__importSummaryState[type]) ? window.__importSummaryState[type] : rootObj;
-
-      const ensureWeeklyImportMappings = () => {
-        window.__weeklyImportMappings = window.__weeklyImportMappings || {};
-        window.__weeklyImportMappings[type] = window.__weeklyImportMappings[type] || {};
-        let m = window.__weeklyImportMappings[type][importId];
-        if (!m) {
-          m = { candidate_mappings: [], client_aliases: [] };
-          window.__weeklyImportMappings[type][importId] = m;
-        }
-        return m;
-      };
-
-      // ✅ Approval checkbox toggles (top section)
-      root.addEventListener('change', (ev) => {
-        const cb = ev.target && ev.target.closest ? ev.target.closest('input[data-act="weekly-approve-action"]') : null;
-        if (!cb) return;
-
-        const id = String(cb.getAttribute('data-action-id') || '').trim();
-        if (!id) return;
-
-        if (!(ui.actionSelection instanceof Set)) ui.actionSelection = new Set();
-
-        if (cb.checked) ui.actionSelection.add(id);
-        else ui.actionSelection.delete(id);
-
-        // Re-render the summary so the Rows table colours update immediately (green/red/black)
-        try {
-          const previewNow = getPreview();
-          if (typeof renderImportSummaryModal === 'function') {
-            renderImportSummaryModal(T, previewNow);
-          }
-        } catch {}
-      });
-
-      // Existing resolve buttons (unchanged)
-      root.addEventListener('click', (ev) => {
-        const btn = ev.target.closest('button[data-act]');
-        if (!btn) return;
-        const act = btn.getAttribute('data-act');
-        if (act !== 'weekly-resolve-candidate' && act !== 'weekly-resolve-client') return;
-
-        const st = window.__importSummaryState && window.__importSummaryState[T];
-        const rowsState = st && Array.isArray(st.rows) ? st.rows : (Array.isArray(rows) ? rows : []);
-        const idx = Number(btn.getAttribute('data-row-idx') || '-1');
-        if (idx < 0 || idx >= rowsState.length) return;
-
-        const row = rowsState[idx];
-        const staffRaw = row.staff_name || row.staff_raw || '';
-        const hospRaw  = row.hospital_or_trust || row.unit || row.hospital_norm || '';
-
-        if (act === 'weekly-resolve-candidate') {
-          openCandidatePicker(async ({ id, label }) => {
-            const mappings = ensureWeeklyImportMappings();
-            const mapping = {
-              staff_norm: row.staff_norm || staffRaw || '',
-              hospital_or_trust: hospRaw || null,
-              candidate_id: id,
-              client_id: row.client_id || null,
-              work_date: row.work_date || row.date_local || row.date || row.week_ending_date || null
-            };
-
-            try {
-              await postWeeklyResolveMappings(importId, type, { candidate_mappings: [mapping], client_aliases: [] });
-              mappings.candidate_mappings.push(mapping);
-              window.__toast && window.__toast(`Candidate ${label} linked. Reclassifying…`);
-              await refreshWeeklyImportSummary(type, importId);
-            } catch (err) {
-              console.error('[IMPORTS][WEEKLY] resolve-candidate failed', err);
-              alert(err?.message || 'Failed to resolve candidate.');
-            }
-          }, { context: { importId, staffName: staffRaw, unit: hospRaw, source_system: type, rowIndex: idx } });
-        }
-
-        if (act === 'weekly-resolve-client') {
-          openClientPicker(async ({ id, label }) => {
-            const mappings = ensureWeeklyImportMappings();
-            const hrRowIds = Array.isArray(row.hr_row_ids) ? row.hr_row_ids.map(String) : (row.hr_row_id ? [String(row.hr_row_id)] : []);
-            const mapping = { client_id: id, hr_row_ids: hrRowIds.filter(Boolean), hospital_norm: row.hospital_norm || hospRaw || '' };
-
-            try {
-              await postWeeklyResolveMappings(importId, type, { candidate_mappings: [], client_aliases: [mapping] });
-              mappings.client_aliases.push(mapping);
-              window.__toast && window.__toast(`Client ${label} linked. Reclassifying…`);
-              await refreshWeeklyImportSummary(type, importId);
-            } catch (err) {
-              console.error('[IMPORTS][WEEKLY] resolve-client failed', err);
-              alert(err?.message || 'Failed to resolve client.');
-            }
-          }, { nhspOnly: (type === 'NHSP'), hrAutoOnly: (type === 'HR_WEEKLY'), context: { importId, unit: hospRaw } });
-        }
-      });
-
-      const btnRefresh = root.querySelector('button[data-act="weekly-import-refresh"]');
-      if (btnRefresh && !btnRefresh.__weeklyRefreshWired) {
-        btnRefresh.__weeklyRefreshWired = true;
-        btnRefresh.addEventListener('click', async () => {
-          try { await refreshWeeklyImportSummary(type, importId); }
-          catch (err) { console.error('[IMPORTS][WEEKLY] refresh failed', err); alert(err?.message || 'Refresh failed.'); }
-        });
-      }
-
-      const btnApply = root.querySelector('button[data-act="weekly-import-apply"]');
-      if (btnApply && !btnApply.__weeklyApplyWired) {
-        btnApply.__weeklyApplyWired = true;
-        btnApply.addEventListener('click', async () => {
-          try {
-            const ok = window.confirm('Are you sure you want to finalise now?');
-            if (!ok) return;
-
-            const previewNow = getPreview();
-
-            // ✅ Transactional apply (new contract)
-            if (typeof applyWeeklyImportTransactional !== 'function') {
-              throw new Error('applyWeeklyImportTransactional is not defined.');
-            }
-
-            // ✅ Apply = ticked approvals + auto-applied NEW shifts
-            const selected_action_ids = Array.from(new Set([
-              ...Array.from(ui.actionSelection || []),
-              ...auto_apply_action_ids
-            ]));
-
-            const result = await applyWeeklyImportTransactional(T, importId, {
-              selected_action_ids,
-              decisions: {} // ✅ no legacy credit/reinvoice or phase-3 UI decisions
-            }) || {};
-
-            alert(`Import ${result.import_id || importId} has been finalised.`);
-            await refreshWeeklyImportSummary(type, importId);
-          } catch (err) {
-            console.error('[IMPORTS][WEEKLY] apply failed', err);
-            alert(err?.message || 'Weekly import apply failed.');
-          }
-        });
-      }
-    } catch (e) {
-      console.warn('[IMPORTS] weekly wiring failed', e);
-    }
-  }, 0);
-
-  return markup;
-}
-
 
 function canonicalizeClientSettings(input) {
   const cs = { ...(input || {}) };
@@ -51846,7 +51282,6 @@ function openAssignmentBandMappingsModal(opts) {
     }
   }, 0);
 }
-
 function renderWeeklyImportSummary(type, importId, rows, ss) {
   // ─────────────────────────────────────────────────────────────
   // Robust preview / summary shape handling
@@ -51859,6 +51294,7 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
   const total = summary.total_rows || (rows ? rows.length : 0) || 0;
 
   const TYPE = String(type || '').toUpperCase();
+  const T = TYPE; // ✅ FIX: ensure legacy references to T are defined (used in handlers below)
 
   const enc = (typeof escapeHtml === 'function')
     ? escapeHtml
@@ -51866,8 +51302,6 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
         '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
       }[c]));
 
-  const asBool = (v) => (v === true || v === 'true' || v === 1 || v === '1');
-  const asNum  = (v) => (v == null || v === '' ? 0 : (Number(v) || 0));
   const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
   const normUpper = (s) => String(s || '').trim().toUpperCase();
 
@@ -51903,7 +51337,7 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
   window.__weeklyImportUi = window.__weeklyImportUi || {};
   window.__weeklyImportUi[TYPE] = window.__weeklyImportUi[TYPE] || {};
   const ui = window.__weeklyImportUi[TYPE][String(importId)] || (window.__weeklyImportUi[TYPE][String(importId)] = {
-    // ✅ DEFAULT: cancellations ON by default (still requires tick to apply)
+    // ✅ DEFAULT: missing shifts enabled (user can disable in Options)
     options: { missingShiftsEnabled: true, dateFrom: null, dateTo: null },
     actionSelection: new Set(),
     filters: { showOnlyRed: false, showOnlyUnticked: false, showOnlyCancellations: false, search: '' },
@@ -51925,6 +51359,15 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
   const extOfAction = (a) => {
     const k = a?.external_row_key ?? a?.externalRowKey ?? null;
     return (k != null) ? String(k).trim() : '';
+  };
+
+  const ymdAddDays = (ymd, deltaDays) => {
+    const s = String(ymd || '').trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return null;
+    const d = new Date(`${s}T00:00:00Z`);
+    if (Number.isNaN(d.getTime())) return null;
+    d.setUTCDate(d.getUTCDate() + (Number(deltaDays) || 0));
+    return d.toISOString().slice(0, 10);
   };
 
   // Map: external_row_key -> action_id (for changed-row actions)
@@ -51965,167 +51408,111 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
   };
 
   const isIgnoredRow = (actionRaw) => {
-    // “Already processed” explicitly
     if (actionRaw === 'SKIP_ALREADY_PROCESSED') return true;
-    // If it’s OK/APPLY and it is not a NEW auto-apply row and not a changed row, it’s effectively a no-op/ignored
     if (actionRaw === 'OK' || actionRaw === 'APPLY') return true;
     return false;
   };
 
-  // ─────────────────────────────────────────────────────────────
-  // Group-row action aggregation (fix misleading IGNORED on group rows)
-  // ─────────────────────────────────────────────────────────────
-  const parseYmdUtc = (ymd) => {
-    const s = String(ymd || '').trim();
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return null;
-    const [Y, M, D] = s.split('-').map(Number);
-    const dt = new Date(Date.UTC(Y, (M || 1) - 1, D || 1));
-    return Number.isNaN(dt.getTime()) ? null : dt;
-  };
+  const groupRequiredActionIds = (gr) => {
+    const cid = gr?.candidate_id != null ? String(gr.candidate_id) : '';
+    const cli = gr?.client_id != null ? String(gr.client_id) : '';
+    const con = gr?.contract_id != null ? String(gr.contract_id) : '';
+    const we  = gr?.week_ending_date != null ? String(gr.week_ending_date) : '';
 
-  const daysBetweenUtc = (aYmd, bYmd) => {
-    const a = parseYmdUtc(aYmd);
-    const b = parseYmdUtc(bYmd);
-    if (!a || !b) return null;
-    const ms = b.getTime() - a.getTime();
-    return Math.round(ms / 86400000);
-  };
+    const out = [];
+    if (!cid || !cli || !we) return out;
 
-  const groupKeyOf = (r) => {
-    const cid = r?.candidate_id ?? r?.candidateId ?? null;
-    const cli = r?.client_id ?? r?.clientId ?? null;
-    const co  = r?.contract_id ?? r?.contractId ?? null;
-    const we  = r?.week_ending_date ?? r?.weekEndingDate ?? null;
-    if (!cid || !cli || !co || !we) return '';
-    return `${String(cid)}|${String(cli)}|${String(co)}|${String(we)}`;
-  };
+    const weekStart = ymdAddDays(we, -6);
 
-  const groupMetaByKey = new Map(); // gk -> { hasAnyActions, hasApproved, hasAutoNew }
-  const groupsByCandClient = new Map(); // `${cid}|${cli}` -> [{ gk, we }]
-  const groupKeys = new Set();
+    for (const a of (actions || [])) {
+      const id = actionIdOf(a);
+      if (!id) continue;
 
-  for (const r of (rows || [])) {
-    const level = String(r?.level || '').toLowerCase();
-    if (level !== 'group') continue;
-    const gk = groupKeyOf(r);
-    if (!gk) continue;
-    groupKeys.add(gk);
-    if (!groupMetaByKey.has(gk)) {
-      groupMetaByKey.set(gk, { hasAnyActions: false, hasApproved: false, hasAutoNew: false });
-    }
-    const cid = String(r?.candidate_id ?? '');
-    const cli = String(r?.client_id ?? '');
-    const we  = String(r?.week_ending_date ?? '');
-    if (cid && cli && we) {
-      const ck = `${cid}|${cli}`;
-      const arr = groupsByCandClient.get(ck) || [];
-      arr.push({ gk, we });
-      groupsByCandClient.set(ck, arr);
-    }
-  }
+      const ak = String(a?.action_kind || '').toUpperCase();
 
-  // Link row-level (file rows) to group meta (auto-new + changed approvals)
-  for (const r of (rows || [])) {
-    const level = String(r?.level || '').toLowerCase();
-    if (level !== 'row') continue;
+      // Changed rows: can bind precisely by contract_id + week_ending_date (and candidate/client for safety)
+      if (id.toUpperCase().startsWith('ROW:') || ak === 'SHIFT_CHANGED') {
+        const aCid = a?.candidate_id != null ? String(a.candidate_id) : '';
+        const aCli = a?.client_id != null ? String(a.client_id) : '';
+        const aCon = a?.contract_id != null ? String(a.contract_id) : '';
+        const aWe  = a?.week_ending_date != null ? String(a.week_ending_date) : '';
 
-    const gk = groupKeyOf(r);
-    if (!gk || !groupMetaByKey.has(gk)) continue;
-
-    const ek = rowExternalKeyOf(r);
-    const rowId = ek ? `ROW:${ek}` : '';
-    const meta = groupMetaByKey.get(gk);
-
-    if (rowId && auto_apply_action_ids.includes(rowId)) {
-      meta.hasAnyActions = true;
-      meta.hasAutoNew = true;
-      meta.hasApproved = true; // auto-applied means it WILL apply
-    }
-
-    if (ek && changeActionIdByExternalKey.has(ek)) {
-      const aid = changeActionIdByExternalKey.get(ek);
-      if (aid) {
-        meta.hasAnyActions = true;
-        if (selected_action_ids_all.has(aid) || (rowId && selected_action_ids_all.has(rowId))) {
-          meta.hasApproved = true;
+        if (aCid && aCli && aCon && aWe) {
+          if (aCid === cid && aCli === cli && aCon === con && aWe === we) out.push(id);
         }
+        continue;
       }
-    }
-  }
 
-  // Link cancellation actions to the appropriate group (by candidate+client and work_date within 7-day window ending at group.week_ending_date)
-  for (const a of (actions || [])) {
-    const aid = actionIdOf(a);
-    if (!aid) continue;
-    const kind = String(a?.action_kind || a?.actionKind || '').toUpperCase();
-    if (kind !== 'SHIFT_CANCEL') continue;
+      // Cancellations: best-effort bind by candidate+client and work_date within [we-6, we]
+      if (id.toUpperCase().startsWith('CANCEL:') || ak === 'SHIFT_CANCEL') {
+        const aCid = a?.candidate_id != null ? String(a.candidate_id) : '';
+        const aCli = a?.client_id != null ? String(a.client_id) : '';
+        const wd = String(a?.work_date || a?.workDate || '').slice(0, 10);
 
-    const cid = a?.candidate_id ?? a?.candidateId ?? null;
-    const cli = a?.client_id ?? a?.clientId ?? null;
-    const wd  = a?.work_date ?? a?.workDate ?? null;
-    if (!cid || !cli || !wd) continue;
-
-    const ck = `${String(cid)}|${String(cli)}`;
-    const groupList = groupsByCandClient.get(ck) || [];
-    if (!groupList.length) continue;
-
-    // choose the group whose week_ending_date is >= work_date and within 0..6 days
-    let best = null;
-    let bestDelta = null;
-
-    for (const g of groupList) {
-      const d = daysBetweenUtc(String(wd), String(g.we)); // (we - wd) in days
-      if (d == null) continue;
-      if (d < 0 || d > 6) continue;
-      if (best == null || d < bestDelta) {
-        best = g;
-        bestDelta = d;
+        if (aCid === cid && aCli === cli && weekStart && wd) {
+          if (wd >= weekStart && wd <= we) out.push(id);
+        }
+        continue;
       }
     }
 
-    if (!best) continue;
-    const meta = groupMetaByKey.get(best.gk);
-    if (!meta) continue;
+    return out;
+  };
 
-    meta.hasAnyActions = true;
-    if (selected_action_ids_all.has(aid)) meta.hasApproved = true;
-  }
+  const classifyRowState = (r) => {
+    const level = String(r?.level || '').toLowerCase();
+    const actionRaw = rowActionRawOf(r);
 
-  // ✅ Overview counts should reflect what WILL happen on finalise
-  let count_apply = 0;         // green
-  let count_not_approved = 0;  // red
-  let count_ignored = 0;       // black
+    if (isResolutionProblem(actionRaw)) return { state: 'NEEDS_RESOLUTION' };
+
+    // SHIFT (row-level) state: per-shift only
+    if (level === 'row') {
+      const ek = rowExternalKeyOf(r);
+      const rowId = ek ? `ROW:${ek}` : '';
+
+      const isAutoNew = !!(rowId && auto_apply_action_ids.includes(rowId));
+      const isChangeRow = !!(ek && changeActionIdByExternalKey.has(ek));
+      const isApprovedChange = !!(rowId && selected_action_ids_all.has(rowId));
+
+      if (isAutoNew) return { state: 'WILL_APPLY' };
+      if (isChangeRow) return { state: isApprovedChange ? 'WILL_APPLY' : 'NOT_APPROVED' };
+
+      return { state: (actionRaw === 'SKIP_ALREADY_PROCESSED') ? 'ALREADY_PROCESSED' : 'IGNORED' };
+    }
+
+    // GROUP (week-level) state: based on actions affecting the group
+    if (level === 'group') {
+      const requiredIds = groupRequiredActionIds(r);
+      const hasRequired = requiredIds.length > 0;
+      const hasUnapprovedRequired = requiredIds.some((id) => !selected_action_ids_all.has(String(id)));
+
+      if (actionRaw === 'SKIP_ALREADY_PROCESSED' && !hasRequired) {
+        return { state: 'ALREADY_PROCESSED' };
+      }
+
+      if (hasUnapprovedRequired) {
+        return { state: 'NOT_APPROVED' };
+      }
+
+      // If group is not already-processed and has no unapproved required actions,
+      // then either it has approved actions, or it’s an auto-applied situation (e.g. new shifts / deterministic apply).
+      return { state: 'WILL_APPLY' };
+    }
+
+    return { state: 'IGNORED' };
+  };
+
+  // ✅ Overview counts should reflect what WILL happen on finalise (using the same state logic as the table)
+  let count_apply = 0;            // green
+  let count_not_approved = 0;     // red
+  let count_ignored = 0;          // black
   let count_needs_resolution = 0; // light red
 
   for (const r of (rows || [])) {
-    const actionRaw = rowActionRawOf(r);
-    if (isResolutionProblem(actionRaw)) {
-      count_needs_resolution += 1;
-      continue;
-    }
-
-    const ek = rowExternalKeyOf(r);
-    const rowId = ek ? `ROW:${ek}` : '';
-
-    // NEW shifts: auto-apply list
-    const isAutoNew = !!(rowId && auto_apply_action_ids.includes(rowId));
-
-    // Changed rows: appear in actions[] as ROW:<ek> (but require explicit tick)
-    const isChangeRow = !!(ek && changeActionIdByExternalKey.has(ek));
-
-    if (isAutoNew) {
-      count_apply += 1;
-      continue;
-    }
-
-    if (isChangeRow) {
-      if (rowId && selected_action_ids_all.has(rowId)) count_apply += 1;
-      else count_not_approved += 1;
-      continue;
-    }
-
-    // Otherwise ignored (no-op / already applied)
-    if (isIgnoredRow(actionRaw)) count_ignored += 1;
+    const st = classifyRowState(r).state;
+    if (st === 'NEEDS_RESOLUTION') count_needs_resolution += 1;
+    else if (st === 'WILL_APPLY') count_apply += 1;
+    else if (st === 'NOT_APPROVED') count_not_approved += 1;
     else count_ignored += 1;
   }
 
@@ -52187,7 +51574,7 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
         const ek = rowExternalKeyOf(r);
         const rowId = ek ? `ROW:${ek}` : '';
 
-        // ✅ If this row corresponds to a change/cancel action, prefer backend-friendly reason_text
+        // ✅ If this row corresponds to a change action, prefer backend-friendly reason_text
         if (ek && changeActionIdByExternalKey.has(ek)) {
           const aid = changeActionIdByExternalKey.get(ek);
           const act = aid ? (actionById.get(aid) || null) : null;
@@ -52202,65 +51589,41 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
           reasonText = 'Already processed';
         }
 
-        const isAutoNew = !!(rowId && auto_apply_action_ids.includes(rowId));
-        const isChangeRow = !!(ek && changeActionIdByExternalKey.has(ek));
-        const isApprovedChange = !!(rowId && selected_action_ids_all.has(rowId));
+        const st = classifyRowState(r).state;
 
-        // ✅ Group row status logic (fix misleading IGNORED)
-        let groupHasAnyActions = false;
-        let groupHasApproved = false;
-        if (level === 'group') {
-          const gk = groupKeyOf(r);
-          const meta = gk ? (groupMetaByKey.get(gk) || null) : null;
-          groupHasAnyActions = !!(meta && meta.hasAnyActions);
-          groupHasApproved = !!(meta && meta.hasApproved);
-        }
-
-        let rowClass = '';
+        let rowClass = 'wi-row-ignore';
         let cls = 'pill-info';
         let displayAction = 'IGNORED';
 
-        if (isResolutionProblem(actionRaw)) {
-          // light red warning background (mapping / contract / band issues)
+        if (st === 'NEEDS_RESOLUTION') {
           rowClass = 'wi-row-warn';
           cls = 'pill-warn';
           displayAction = 'NEEDS RESOLUTION';
-        } else if (level === 'group') {
-          if (groupHasAnyActions) {
-            if (groupHasApproved) {
-              rowClass = 'wi-row-ready';
-              cls = 'pill-ok';
-              displayAction = 'WILL APPLY';
-            } else {
-              rowClass = 'wi-row-issue';
-              cls = 'pill-bad';
-              displayAction = 'NOT APPROVED';
-            }
-          } else {
-            // truly no actions in this group
-            rowClass = 'wi-row-ignore';
-            cls = 'pill-info';
-            displayAction = (actionRaw === 'SKIP_ALREADY_PROCESSED') ? 'ALREADY PROCESSED' : 'IGNORED';
-          }
-        } else if (isAutoNew) {
+        } else if (st === 'WILL_APPLY') {
           rowClass = 'wi-row-ready';
           cls = 'pill-ok';
           displayAction = 'WILL APPLY';
-        } else if (isChangeRow) {
-          if (isApprovedChange) {
-            rowClass = 'wi-row-ready';
-            cls = 'pill-ok';
-            displayAction = 'WILL APPLY';
-          } else {
-            rowClass = 'wi-row-issue';
-            cls = 'pill-bad';
-            displayAction = 'NOT APPROVED';
-          }
-        } else {
-          // ignored: already processed / no-op / unchanged
+        } else if (st === 'NOT_APPROVED') {
+          rowClass = 'wi-row-issue';
+          cls = 'pill-bad';
+          displayAction = 'NOT APPROVED';
+        } else if (st === 'ALREADY_PROCESSED') {
           rowClass = 'wi-row-ignore';
           cls = 'pill-info';
-          displayAction = (actionRaw === 'SKIP_ALREADY_PROCESSED') ? 'ALREADY PROCESSED' : 'IGNORED';
+          displayAction = 'ALREADY PROCESSED';
+        } else {
+          rowClass = 'wi-row-ignore';
+          cls = 'pill-info';
+          displayAction = 'IGNORED';
+        }
+
+        // If group row is NOT APPROVED, make the reason explicit (without changing backend reason text)
+        if (level === 'group' && st === 'NOT_APPROVED') {
+          const reqIds = groupRequiredActionIds(r);
+          const unapproved = reqIds.filter((id) => !selected_action_ids_all.has(String(id)));
+          if (unapproved.length) {
+            reasonText = `Not approved yet: tick required changes/cancellations above to apply them.`;
+          }
         }
 
         const canAssignCand   = (actionRaw === 'NO_CANDIDATE' || actionRaw === 'REJECT_NO_CANDIDATE');
@@ -52411,7 +51774,7 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
       root.__weeklyWired = true;
 
       const LOGW = (typeof window.__LOG_IMPORTS === 'boolean') ? window.__LOG_IMPORTS : true;
-      const LW = (...a) => { if (LOGW) console.log('[IMPORTS][WEEKLY]', ...a); };
+      const LW   = (...a) => { if (LOGW) console.log('[IMPORTS][WEEKLY]', ...a); };
 
       const getPreview = () => (window.__importSummaryState && window.__importSummaryState[type]) ? window.__importSummaryState[type] : rootObj;
 
@@ -52462,7 +51825,7 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
 
         const row = rowsState[idx];
         const staffRaw = row.staff_name || row.staff_raw || '';
-        const hospRaw = row.hospital_or_trust || row.unit || row.hospital_norm || '';
+        const hospRaw  = row.hospital_or_trust || row.unit || row.hospital_norm || '';
 
         if (act === 'weekly-resolve-candidate') {
           openCandidatePicker(async ({ id, label }) => {
@@ -52556,6 +51919,7 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
 
   return markup;
 }
+
 
 
 function computePolicyAViolations(actions, selectedActionIds) {
