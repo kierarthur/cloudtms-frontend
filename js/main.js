@@ -51313,7 +51313,7 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
 
   const total = summary.total_rows || rowsState.length || 0;
 
-  // ✅ Weekly action approvals (changes/cancels) come from preview.actions
+  // ✅ Weekly action approvals (changes/cancels/attach) come from preview.actions
   const actions =
     Array.isArray(rootObj.actions) ? rootObj.actions :
     Array.isArray(summary.actions) ? summary.actions :
@@ -51353,6 +51353,7 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
     hydratedFlags: { didInitDefaultActionChecks: false }
   });
   if (!(ui.actionSelection instanceof Set)) ui.actionSelection = new Set();
+  if (!ui.hydratedFlags || typeof ui.hydratedFlags !== 'object') ui.hydratedFlags = { didInitDefaultActionChecks: false };
 
   const actionIdOf = (a) => {
     const id = a?.action_id ?? a?.actionId ?? null;
@@ -51373,7 +51374,7 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
     return d.toISOString().slice(0, 10);
   };
 
-  // Map: external_row_key -> action_id (for changed-row actions)
+  // Map: external_row_key -> action_id (for ROW actions)
   const changeActionIdByExternalKey = new Map();
 
   // Map: action_id -> action object (for reason_text / names)
@@ -51390,6 +51391,216 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
       if (ek) changeActionIdByExternalKey.set(ek, id);
     }
   }
+
+  // ─────────────────────────────────────────────────────────────
+  // ✅ NEW: Hydrate default-checked action IDs ONCE per import
+  //
+  // Needed so backend can send SHIFT_ATTACH (or others) with default_checked=true
+  // and the UI will actually include them in selected_action_ids unless unticked.
+  // ─────────────────────────────────────────────────────────────
+  const defaultCheckedActionIds = (() => {
+    const out = [];
+    const seen = new Set();
+
+    // Prefer explicit contract list if present
+    const contractObj =
+      rootObj.action_contract ??
+      summary.action_contract ??
+      rootObj.actionContract ??
+      summary.actionContract ??
+      null;
+
+    const rawList =
+      contractObj?.default_checked_action_ids ??
+      contractObj?.defaultCheckedActionIds ??
+      null;
+
+    const pushId = (v) => {
+      const s = String(v || '').trim();
+      if (!s) return;
+      if (seen.has(s)) return;
+      seen.add(s);
+      out.push(s);
+    };
+
+    if (Array.isArray(rawList)) {
+      for (const v of rawList) pushId(v);
+    }
+
+    // Fallback: derive from actions[].default_checked
+    for (const a of (actions || [])) {
+      const id = actionIdOf(a);
+      if (!id) continue;
+      const dc = (a?.default_checked === true || a?.defaultChecked === true);
+      if (dc) pushId(id);
+    }
+
+    return out;
+  })();
+
+  if (ui.hydratedFlags.didInitDefaultActionChecks !== true) {
+    const beforeCount = ui.actionSelection.size;
+
+    for (const id of (defaultCheckedActionIds || [])) {
+      ui.actionSelection.add(String(id));
+    }
+
+    ui.hydratedFlags.didInitDefaultActionChecks = true;
+
+    // Lightweight debug log (front-end) for controlled runs; does not affect UX.
+    try {
+      const LOGW = (typeof window.__LOG_IMPORTS === 'boolean') ? window.__LOG_IMPORTS : true;
+      if (LOGW && defaultCheckedActionIds.length) {
+        console.log('[IMPORTS][WEEKLY]', 'default-checked hydrated', {
+          type: TYPE,
+          import_id: String(importId),
+          added: Math.max(0, ui.actionSelection.size - beforeCount),
+          default_checked_count: defaultCheckedActionIds.length
+        });
+      }
+    } catch {}
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // ✅ NEW: Surface backend warnings + detached/missing-timesheet meta
+  // ─────────────────────────────────────────────────────────────
+  const truthMeta =
+    (rootObj && typeof rootObj.truth_meta === 'object' && rootObj.truth_meta) ? rootObj.truth_meta :
+    (summary && typeof summary.truth_meta === 'object' && summary.truth_meta) ? summary.truth_meta :
+    (rootObj && typeof rootObj.truthMeta === 'object' && rootObj.truthMeta) ? rootObj.truthMeta :
+    (summary && typeof summary.truthMeta === 'object' && summary.truthMeta) ? summary.truthMeta :
+    {};
+
+  const backendWarningsRaw =
+    (Array.isArray(rootObj.warnings) ? rootObj.warnings :
+     Array.isArray(summary.warnings) ? summary.warnings :
+     Array.isArray(rootObj.warning) ? rootObj.warning :
+     Array.isArray(summary.warning) ? summary.warning :
+     []);
+
+  const warnings = (() => {
+    const out = [];
+    const seenKey = new Set();
+
+    const addWarn = (w) => {
+      if (!w || typeof w !== 'object') return;
+      const code = String(w.code || '').trim();
+      const msg = String(w.message || w.reason || '').trim();
+      const sev = String(w.severity || '').trim().toUpperCase();
+      const k = `${code}__${msg}__${sev}`;
+      if (seenKey.has(k)) return;
+      seenKey.add(k);
+      out.push({
+        code: code || 'WARN',
+        severity: (sev || 'WARN'),
+        message: (msg || 'Warning'),
+        detached_active_shift_count: (w.detached_active_shift_count != null ? Number(w.detached_active_shift_count) : null),
+        missing_timesheet_row_count: (w.missing_timesheet_row_count != null ? Number(w.missing_timesheet_row_count) : null),
+        detached_active_shift_ids_sample: Array.isArray(w.detached_active_shift_ids_sample) ? w.detached_active_shift_ids_sample.map(String) : [],
+        missing_timesheet_ids_sample: Array.isArray(w.missing_timesheet_ids_sample) ? w.missing_timesheet_ids_sample.map(String) : []
+      });
+    };
+
+    for (const w of backendWarningsRaw) addWarn(w);
+
+    // Synthesize warnings from truth_meta if backend warnings not present (or to reinforce visibility)
+    const detachedCount = (truthMeta && truthMeta.detached_active_shift_count != null)
+      ? Number(truthMeta.detached_active_shift_count || 0)
+      : 0;
+    const missingTsCount = (truthMeta && truthMeta.missing_timesheet_row_count != null)
+      ? Number(truthMeta.missing_timesheet_row_count || 0)
+      : 0;
+
+    if (detachedCount > 0) {
+      addWarn({
+        code: 'DETACHED_ACTIVE_SHIFTS_PRESENT',
+        severity: 'WARN',
+        message: 'Active NHSP shifts exist with no timesheet_id. This should not occur after apply; investigate if seen before finalise.',
+        detached_active_shift_count: detachedCount,
+        detached_active_shift_ids_sample: Array.isArray(truthMeta.detached_active_shift_ids_sample) ? truthMeta.detached_active_shift_ids_sample : []
+      });
+    }
+
+    if (missingTsCount > 0) {
+      addWarn({
+        code: 'MISSING_TIMESHEET_ROWS_REFERENCED',
+        severity: 'WARN',
+        message: 'NHSP shifts reference timesheet_id values that do not exist in timesheets. This indicates deleted timesheets or inconsistent data.',
+        missing_timesheet_row_count: missingTsCount,
+        missing_timesheet_ids_sample: Array.isArray(truthMeta.missing_timesheet_ids_sample) ? truthMeta.missing_timesheet_ids_sample : []
+      });
+    }
+
+    return out;
+  })();
+
+  const warningsHtml = (() => {
+    if (!warnings.length) return '';
+
+    const rows = warnings.map((w) => {
+      const code = String(w.code || 'WARN');
+      const msg = String(w.message || 'Warning');
+      const sev = String(w.severity || 'WARN').toUpperCase();
+
+      const detCnt = (w.detached_active_shift_count != null && Number.isFinite(Number(w.detached_active_shift_count)))
+        ? Number(w.detached_active_shift_count)
+        : null;
+      const missCnt = (w.missing_timesheet_row_count != null && Number.isFinite(Number(w.missing_timesheet_row_count)))
+        ? Number(w.missing_timesheet_row_count)
+        : null;
+
+      const detSample = Array.isArray(w.detached_active_shift_ids_sample) ? w.detached_active_shift_ids_sample.slice(0, 15) : [];
+      const missSample = Array.isArray(w.missing_timesheet_ids_sample) ? w.missing_timesheet_ids_sample.slice(0, 15) : [];
+
+      const metricsBits = [];
+      if (detCnt != null) metricsBits.push(`Detached active shifts: ${detCnt}`);
+      if (missCnt != null) metricsBits.push(`Missing timesheet rows: ${missCnt}`);
+
+      const metrics = metricsBits.length ? metricsBits.join(' | ') : '';
+
+      const hasDetails = (detSample.length || missSample.length);
+
+      const detailsHtml = hasDetails ? `
+        <details style="margin-top:6px;">
+          <summary class="mini" style="cursor:pointer;">Show details</summary>
+          ${
+            detSample.length
+              ? `<div class="mini" style="margin-top:6px;"><b>Detached active shift IDs (sample):</b><br/><span class="mono">${enc(detSample.join(', '))}</span></div>`
+              : ''
+          }
+          ${
+            missSample.length
+              ? `<div class="mini" style="margin-top:6px;"><b>Missing timesheet IDs (sample):</b><br/><span class="mono">${enc(missSample.join(', '))}</span></div>`
+              : ''
+          }
+        </details>
+      ` : '';
+
+      // Keep it simple: use existing "mini" + subtle box; no dependency on CSS classes that may not exist.
+      return `
+        <div style="border:1px solid #e6b800; background:#fff8d6; border-radius:8px; padding:10px; margin-bottom:8px;">
+          <div class="mini" style="margin-bottom:4px;">
+            <b>${enc(sev)}</b> — <span class="mono">${enc(code)}</span>
+          </div>
+          <div class="mini">${enc(msg)}</div>
+          ${metrics ? `<div class="mini" style="margin-top:4px;color:#444;">${enc(metrics)}</div>` : ''}
+          ${detailsHtml}
+        </div>
+      `;
+    }).join('');
+
+    return `
+      <div class="row" style="margin-top:10px;">
+        <label>Warnings</label>
+        <div class="controls">
+          <div class="mini" style="color:#666;margin-bottom:6px;">
+            These warnings indicate inconsistent data (usually caused by deleted timesheets or detached shifts). Continue only if expected in your controlled test.
+          </div>
+          ${rows}
+        </div>
+      </div>
+    `;
+  })();
 
   const rowExternalKeyOf = (r) => {
     const ek = r?.external_row_key ?? r?.externalRowKey ?? null;
@@ -51432,8 +51643,8 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
 
       const ak = String(a?.action_kind || '').toUpperCase();
 
-      // Changed rows: bind by contract_id + week_ending_date (and candidate/client for safety)
-      if (id.toUpperCase().startsWith('ROW:') || ak === 'SHIFT_CHANGED') {
+      // ROW actions (includes SHIFT_CHANGED and SHIFT_ATTACH): bind by contract_id + week_ending_date (and candidate/client for safety)
+      if (id.toUpperCase().startsWith('ROW:') || ak === 'SHIFT_CHANGED' || ak === 'SHIFT_ATTACH') {
         const aCid = a?.candidate_id != null ? String(a.candidate_id) : '';
         const aCli = a?.client_id != null ? String(a.client_id) : '';
         const aCon = a?.contract_id != null ? String(a.contract_id) : '';
@@ -51472,11 +51683,11 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
       const rowId = ek ? `ROW:${ek}` : '';
 
       const isAutoNew = !!(rowId && auto_apply_action_ids.includes(rowId));
-      const isChangeRow = !!(ek && changeActionIdByExternalKey.has(ek));
-      const isApprovedChange = !!(rowId && selectedAllSet.has(rowId));
+      const isRowActionKnown = !!(rowId && changeActionIdByExternalKey.has(ek));
+      const isApprovedRowAction = !!(rowId && selectedAllSet.has(rowId));
 
       if (isAutoNew) return 'WILL_APPLY';
-      if (isChangeRow) return (isApprovedChange ? 'WILL_APPLY' : 'NOT_APPROVED');
+      if (isRowActionKnown) return (isApprovedRowAction ? 'WILL_APPLY' : 'NOT_APPROVED');
 
       return (actionRaw === 'SKIP_ALREADY_PROCESSED') ? 'ALREADY_PROCESSED' : 'IGNORED';
     }
@@ -51553,7 +51764,7 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
       const ek = rowExternalKeyOf(r);
       const rowId = ek ? `ROW:${ek}` : '';
 
-      // Prefer action reason_text for changed shifts
+      // Prefer action reason_text for ROW actions (changed/attach)
       if (ek && changeActionIdByExternalKey.has(ek)) {
         const aid = changeActionIdByExternalKey.get(ek);
         const act = aid ? (actionById.get(aid) || null) : null;
@@ -51635,6 +51846,8 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
   const markup = html(`
     <div id="weeklyImportSummary">
       <div class="card weekly-import-card">
+        ${warningsHtml}
+
         <div class="row">
           <label>Overview</label>
           <div class="controls">
@@ -51646,6 +51859,11 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
               Ignored: <span id="wiIgnored_${enc(idSafe)}">${enc(String(countsInit.count_ignored))}</span> &nbsp;|&nbsp;
               Needs resolution: <span id="wiNeedsRes_${enc(idSafe)}">${enc(String(countsInit.count_needs_resolution))}</span><br/>
               Auto new shifts: ${enc(String(auto_apply_action_ids.length))}
+              ${
+                (truthMeta && (Number(truthMeta.detached_active_shift_count || 0) > 0 || Number(truthMeta.missing_timesheet_row_count || 0) > 0))
+                  ? `<br/>Detached active shifts: <span class="mono">${enc(String(Number(truthMeta.detached_active_shift_count || 0)))}</span> &nbsp;|&nbsp; Missing timesheet rows: <span class="mono">${enc(String(Number(truthMeta.missing_timesheet_row_count || 0)))}</span>`
+                  : ``
+              }
             </div>
           </div>
         </div>
