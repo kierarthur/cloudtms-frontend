@@ -44472,9 +44472,27 @@ const canProcessNow =
   (cwModeNow === 'MANUAL');
 
 
+ // ✅ NEW: delete-preview policy (backend-authoritative; do NOT replace existing UI gating — only tighten delete)
+  const dpNow =
+    (mcNow && mcNow.timesheetDeletePreview && typeof mcNow.timesheetDeletePreview === 'object')
+      ? mcNow.timesheetDeletePreview
+      : null;
+
+  const dpKindNow = String((dpNow && dpNow.kind) ? dpNow.kind : '').toUpperCase();
+  const dpEligibleNow = (dpNow && typeof dpNow.eligible === 'boolean') ? dpNow.eligible : false;
+
   // Delete (real OR planned)
-  const canDeleteNow =
+  const isPlannedOnlyNow = (!tsIdNow && !!weekIdNow);
+
+  const canDeleteNowBase =
     ((top.mode === 'edit' || top.mode === 'view') && !lockedNow && (!!tsIdNow || !!weekIdNow));
+
+  const canDeleteNow =
+    canDeleteNowBase &&
+    (
+      isPlannedOnlyNow ||
+      (dpEligibleNow === true && dpKindNow !== 'IMPORT_CHILD_ADJUSTMENT')
+    );
 
   // ✅ Unprocess eligibility:
   // - real TS exists
@@ -44825,21 +44843,212 @@ await refreshFooter();
 
           const isPlannedOnly = (!tsIdX && !!weekIdX);
 
-          const ok = window.confirm(
+          // ✅ Enforce backend delete-preview policy for real timesheets (planned weeks keep existing behaviour)
+          const dpX =
+            (mc && mc.timesheetDeletePreview && typeof mc.timesheetDeletePreview === 'object')
+              ? mc.timesheetDeletePreview
+              : null;
+
+          const dpKindX = String((dpX && dpX.kind) ? dpX.kind : '').toUpperCase();
+          const dpEligibleX = (dpX && typeof dpX.eligible === 'boolean') ? dpX.eligible : false;
+
+          if (!isPlannedOnly) {
+            if (dpKindX === 'IMPORT_CHILD_ADJUSTMENT') {
+              alert("This is an NHSP/HR child adjustment and can't be deleted directly. Delete must be performed via the parent timesheet (if eligible).");
+              return;
+            }
+            if (dpEligibleX !== true) {
+              alert('Delete is not available for this timesheet (it may be locked, invoiced/paid, or not eligible).');
+              return;
+            }
+          }
+
+          // Friendly confirm modal (uses preview.delete_items for details)
+          const enc2 = escapeHtml;
+
+          const fmtGBP = (n) => {
+            const x = Number(n || 0);
+            const v = Number.isFinite(x) ? x : 0;
+            return `£${v.toFixed(2)}`;
+          };
+
+          const fmtHours = (n) => {
+            const x = Number(n || 0);
+            const v = Number.isFinite(x) ? x : 0;
+            return v.toFixed(2);
+          };
+
+          const roleLabel = (it) => {
+            const r = String(it?.display_role || '').toUpperCase();
+            if (r === 'PARENT') return 'Parent';
+            if (r === 'MANUAL_ADJUSTMENT') return 'Manual Adjustment';
+            if (r === 'IMPORT_CHILD_ADJUSTMENT') return 'Import Adjustment';
+            if (r === 'ADJUSTMENT') return 'Adjustment';
+            return 'Timesheet';
+          };
+
+          const buildDeleteTableHtml = (items) => {
+            const list = Array.isArray(items) ? items : [];
+            if (!list.length) return '';
+
+            let sumH = 0, sumPay = 0, sumChg = 0;
+            const rows = list.map(it => {
+              const h = Number(it?.total_hours || 0) || 0;
+              const p = Number(it?.total_pay_ex_vat || 0) || 0;
+              const c = Number(it?.total_charge_ex_vat || 0) || 0;
+              sumH += h; sumPay += p; sumChg += c;
+
+              const id8 = String(it?.timesheet_id || '').slice(0, 8);
+              return `
+                <tr>
+                  <td style="padding:6px 8px;border-bottom:1px solid var(--line);">${enc2(roleLabel(it))}</td>
+                  <td style="padding:6px 8px;border-bottom:1px solid var(--line);font-family:monospace;">${enc2(id8 ? `${id8}…` : '')}</td>
+                  <td style="padding:6px 8px;border-bottom:1px solid var(--line);text-align:right;">${enc2(fmtHours(h))}</td>
+                  <td style="padding:6px 8px;border-bottom:1px solid var(--line);text-align:right;">${enc2(fmtGBP(p))}</td>
+                  <td style="padding:6px 8px;border-bottom:1px solid var(--line);text-align:right;">${enc2(fmtGBP(c))}</td>
+                </tr>
+              `;
+            }).join('');
+
+            const totalRow = `
+              <tr>
+                <td style="padding:6px 8px;font-weight:700;">Total</td>
+                <td style="padding:6px 8px;"></td>
+                <td style="padding:6px 8px;text-align:right;font-weight:700;">${enc2(fmtHours(sumH))}</td>
+                <td style="padding:6px 8px;text-align:right;font-weight:700;">${enc2(fmtGBP(sumPay))}</td>
+                <td style="padding:6px 8px;text-align:right;font-weight:700;">${enc2(fmtGBP(sumChg))}</td>
+              </tr>
+            `;
+
+            return `
+              <div style="margin-top:10px;">
+                <div class="mini" style="margin-bottom:6px;opacity:.85;">
+                  The following timesheet(s) will be deleted:
+                </div>
+                <table style="width:100%;border-collapse:collapse;border:1px solid var(--line);border-radius:10px;overflow:hidden;">
+                  <thead>
+                    <tr>
+                      <th style="text-align:left;padding:6px 8px;border-bottom:1px solid var(--line);">Type</th>
+                      <th style="text-align:left;padding:6px 8px;border-bottom:1px solid var(--line);">ID</th>
+                      <th style="text-align:right;padding:6px 8px;border-bottom:1px solid var(--line);">Hours</th>
+                      <th style="text-align:right;padding:6px 8px;border-bottom:1px solid var(--line);">Net pay</th>
+                      <th style="text-align:right;padding:6px 8px;border-bottom:1px solid var(--line);">Net charge</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    ${rows}
+                    ${totalRow}
+                  </tbody>
+                </table>
+              </div>
+            `;
+          };
+
+          const dpItems = (!isPlannedOnly && dpX && Array.isArray(dpX.delete_items)) ? dpX.delete_items : [];
+          const weYmdX =
+            (dpItems[0] && dpItems[0].week_ending_date) ? String(dpItems[0].week_ending_date) :
+            (det?.timesheet?.week_ending_date) ? String(det.timesheet.week_ending_date) :
+            (mc.data?.week_ending_date) ? String(mc.data.week_ending_date) :
+            '';
+
+          const title =
+            isPlannedOnly ? 'Delete planned week?' : 'Delete timesheet(s)?';
+
+          const messageHtml =
             isPlannedOnly
-              ? (
-                  'Delete this timesheet?\n\n' +
-                  'This is a planned week (no timesheet has been created yet).\n' +
-                  'Deleting will remove the planned contract week.\n\n' +
-                  'This action cannot be undone.'
-                )
-              : (
-                  'Permanently delete this timesheet?\n\n' +
-                  'This will remove all versions and financial snapshots for this timesheet_id.\n' +
-                  'This action cannot be undone.'
-                )
-          );
-          if (!ok) return;
+              ? `
+                <div style="font-size:14px;font-weight:700;margin-bottom:6px;">
+                  Delete this planned week?
+                </div>
+                <div class="mini" style="white-space:pre-wrap;">
+                  This is a planned week (no timesheet has been created yet).
+                  Deleting will remove the planned contract week.
+                </div>
+                <div class="mini" style="margin-top:10px;opacity:.8;">
+                  This action cannot be undone.
+                </div>
+              `
+              : `
+                <div style="font-size:14px;font-weight:700;margin-bottom:6px;">
+                  Delete timesheet(s) for week ending ${enc2(weYmdX || 'Unknown')}?
+                </div>
+                <div class="mini" style="white-space:pre-wrap;">
+                  This will permanently delete the timesheet(s) listed below.
+                </div>
+                <div class="mini" style="margin-top:10px;opacity:.8;">
+                  This action cannot be undone.
+                </div>
+              `;
+
+          const extraHtml =
+            isPlannedOnly ? '' : buildDeleteTableHtml(dpItems);
+
+          const confirmLabel =
+            isPlannedOnly ? 'Delete planned week' : 'Delete timesheet(s)';
+
+          const confirmRes = await openUiConfirmModal({
+            title,
+            message_html: messageHtml,
+            extra_html: extraHtml,
+            confirm_label: confirmLabel,
+            cancel_label: 'Cancel',
+            confirm_class: 'btn btn-warn',
+            cancel_class: 'btn btn-outline'
+          });
+
+          if (!confirmRes || !confirmRes.confirmed) return;
+
+          // OK-only info modal (utility child)
+          const showOkInfoModal = async (infoTitle, infoHtml) => {
+            const modalKind = 'import-summary-ui-info';
+            const btnId = `btnUiInfoOk_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+
+            return await new Promise((resolve) => {
+              let done = false;
+              const finish = () => { if (done) return; done = true; resolve(true); };
+
+              showModal(
+                String(infoTitle || 'Done'),
+                [{ key: 'ok', label: 'OK' }],
+                () => `
+                  <div style="padding: 6px 2px;">
+                    ${String(infoHtml || '')}
+                    <div style="display:flex; gap:10px; margin-top:14px;">
+                      <button id="${enc2(btnId)}" type="button" class="btn btn-primary">OK</button>
+                    </div>
+                  </div>
+                `,
+                null,
+                true,
+                null,
+                {
+                  kind: modalKind,
+                  noParentGate: true,
+                  showSave: false,
+                  showApply: false,
+                  onDismiss: () => finish()
+                }
+              );
+
+              const wire = () => {
+                const okBtn = document.getElementById(btnId);
+                if (okBtn && !okBtn.__wired) {
+                  okBtn.__wired = true;
+                  okBtn.onclick = () => {
+                    finish();
+                    try { document.getElementById('btnCloseModal')?.click(); } catch {}
+                  };
+                }
+              };
+
+              try { requestAnimationFrame(() => requestAnimationFrame(wire)); } catch { setTimeout(wire, 0); }
+            });
+          };
+
+          // Capture summary ctx (if available) BEFORE closing anything
+          let summaryCtx = null;
+          try { summaryCtx = fr._summaryCtx || top._summaryCtx || mc.__summaryCtx || null; } catch { summaryCtx = null; }
+          try { mc.__summaryCtx = summaryCtx || null; } catch {}
 
           try {
             if (isPlannedOnly) {
@@ -44850,9 +45059,34 @@ await refreshFooter();
               await deleteTimesheetPermanent(tsIdX);
             }
 
-            alert('This timesheet has been deleted.');
+            await showOkInfoModal(
+              'Deleted',
+              `<div style="font-size:14px;font-weight:700;margin-bottom:6px;">Deleted successfully.</div>
+               <div class="mini">The selected timesheet(s) have been deleted.</div>`
+            );
+
+                  // Update summary behind (use helper; fallback to renderAll only if needed)
+            try {
+              if (typeof applyTimesheetDeleteImpactToSummary === 'function') {
+                await applyTimesheetDeleteImpactToSummary({
+                  entity: 'timesheets',
+                  preview: dpX || null,
+                  opened_timesheet_id: tsIdX || null,
+                  planned_contract_week_id: (isPlannedOnly ? (weekIdX || null) : null),
+                  summaryCtx: summaryCtx || null,
+                  fallbackFullRefresh: true
+                });
+              } else {
+                try { await renderAll(); } catch {}
+              }
+            } catch {
+              try { await renderAll(); } catch {}
+            }
+
+            // Close the timesheet modal after the user confirms OK
             try { byId('btnCloseModal').click(); } catch {}
-            try { await renderAll(); } catch {}
+
+
           } catch (e) {
             try {
               if (typeof tsHandleMoved409Modal === 'function') {
@@ -44868,6 +45102,7 @@ await refreshFooter();
           }
         };
       }
+
 
   } else {
   // not a top-level timesheet → hide footer actions
@@ -45890,6 +46125,75 @@ bindSave(btnSave, top);
   renderTop();
 }
 
+async function applyTimesheetDeleteImpactToSummary(opts = {}) {
+  const entity = String(opts.entity || 'timesheets');
+  const preview = (opts.preview && typeof opts.preview === 'object') ? opts.preview : null;
+
+  const openedTimesheetId = opts.opened_timesheet_id ? String(opts.opened_timesheet_id) : '';
+  const plannedWeekId = opts.planned_contract_week_id ? String(opts.planned_contract_week_id) : '';
+
+  // Prefer caller-provided summary ctx; otherwise try to capture from current UI state
+  let summaryCtx = opts.summaryCtx || null;
+  if (!summaryCtx) {
+    try {
+      if (typeof captureSummaryContextForModalOpen === 'function') {
+        summaryCtx = captureSummaryContextForModalOpen();
+      }
+    } catch {
+      summaryCtx = null;
+    }
+  }
+
+  const ids = new Set();
+
+  if (plannedWeekId) ids.add(plannedWeekId);
+
+  // Use preview.delete_items if present (this is your canonical UI list)
+  try {
+    const items = (preview && Array.isArray(preview.delete_items)) ? preview.delete_items : [];
+    for (const it of items) {
+      const id = it && it.timesheet_id ? String(it.timesheet_id) : '';
+      if (id) ids.add(id);
+    }
+  } catch {}
+
+  // Also ensure the currently-opened id is included (defensive)
+  if (openedTimesheetId) ids.add(openedTimesheetId);
+
+  const idList = Array.from(ids).filter(Boolean);
+
+  // If we have nothing to update, do nothing
+  if (!idList.length) {
+    return { ok: true, didTargeted: false, didFallback: false, removedAny: false, ids: [] };
+  }
+
+  // Targeted removal pass
+  let removedAny = false;
+  let didTargeted = false;
+
+  if (typeof summaryRemoveRowIfNowExcluded === 'function') {
+    didTargeted = true;
+    for (const id of idList) {
+      try {
+        const removed = await summaryRemoveRowIfNowExcluded(entity, id, summaryCtx);
+        if (removed) removedAny = true;
+      } catch {}
+    }
+  }
+
+  // Fallback: if we couldn’t remove anything (or targeted helper unavailable), do full refresh
+  const allowFallback = (opts.fallbackFullRefresh !== false);
+  if (allowFallback && (!didTargeted || !removedAny)) {
+    try {
+      if (typeof renderAll === 'function') {
+        await renderAll();
+        return { ok: true, didTargeted, didFallback: true, removedAny, ids: idList };
+      }
+    } catch {}
+  }
+
+  return { ok: true, didTargeted, didFallback: false, removedAny, ids: idList };
+}
 
 
 
@@ -60414,6 +60718,46 @@ function renderTimesheetOverviewTab(ctx) {
     return `<div style="display:flex;flex-wrap:wrap;gap:8px;">${safeBtns.join('')}</div>`;
   })();
 
+   // ✅ NEW: delete-policy badge (backend-authoritative; does not change existing route text)
+  const dp =
+    (window.modalCtx && window.modalCtx.timesheetDeletePreview && typeof window.modalCtx.timesheetDeletePreview === 'object')
+      ? window.modalCtx.timesheetDeletePreview
+      : null;
+
+  const dpKind = String((dp && dp.kind) ? dp.kind : '').toUpperCase();
+  const dpEligible = (dp && typeof dp.eligible === 'boolean') ? dp.eligible : false;
+
+   const deletePolicyBadgeHtml = (() => {
+    if (dpKind === 'IMPORT_CHILD_ADJUSTMENT') {
+      const t = 'This is an NHSP/HR child adjustment and cannot be deleted directly. Delete must be performed via the parent timesheet (if eligible).';
+      return `<span class="pill pill-bad" style="font-weight:600;" title="${enc(t)}">${enc("Adjustment – Can't Delete")}</span>`;
+    }
+
+    if (dpKind === 'WEEKLY_CHAIN_DELETE_PARENT') {
+      if (dpEligible) {
+        const t = 'This is the weekly parent; it can be deleted (and will delete related import adjustments) when the chain is safe.';
+        return `<span class="pill pill-ok" style="font-weight:600;" title="${enc(t)}">${enc('Parent Adjustment – Can Delete')}</span>`;
+      } else {
+        const reasons =
+          (dp && Array.isArray(dp.blocked_reasons) && dp.blocked_reasons.length)
+            ? dp.blocked_reasons
+                .map(r => (r && r.message) ? String(r.message) : '')
+                .filter(Boolean)
+                .join(' ')
+            : '';
+
+        const t = reasons
+          ? `Can't delete yet. ${reasons}`
+          : "Can't delete yet. This parent (or a related adjustment) is locked, invoiced, paid, or otherwise not eligible.";
+
+        return `<span class="pill pill-bad" style="font-weight:600;" title="${enc(t)}">${enc("Parent Adjustment – Can't delete yet")}</span>`;
+      }
+    }
+
+    return '';
+  })();
+
+
   const routeHtml = `
     <div class="card" style="margin-top:10px;">
       <div class="row">
@@ -60426,6 +60770,7 @@ function renderTimesheetOverviewTab(ctx) {
       <div class="row">
         <label>Route</label>
         <div class="controls" style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;">
+          ${deletePolicyBadgeHtml}
           <span class="pill ${routePillClass}" style="font-weight:600;" ${routeTitle ? `title="${enc(routeTitle)}"` : ''}>${enc(routeLabel)}</span>
           <span class="pill ${scopePillClass}" style="font-weight:600;">${enc(scopeLabel)}</span>
         </div>
@@ -60437,6 +60782,7 @@ function renderTimesheetOverviewTab(ctx) {
       </div>
     </div>
   `;
+
 
   GE();
 
@@ -61841,6 +62187,202 @@ async function getTimesheetPdfUrl(timesheetId) {
   };
 }
 
+async function openUiConfirmModal(opts = {}) {
+  const enc = (typeof escapeHtml === 'function')
+    ? escapeHtml
+    : (s) => String(s ?? '')
+        .replaceAll('&','&amp;')
+        .replaceAll('<','&lt;')
+        .replaceAll('>','&gt;')
+        .replaceAll('"','&quot;')
+        .replaceAll("'","&#39;");
+
+  const htmlWrap = (typeof html === 'function') ? html : (s) => String(s ?? '');
+
+  const title = String(opts.title ?? 'Confirm').trim() || 'Confirm';
+
+  // message can be plain text or pre-rendered html
+  const messageHtml =
+    (opts.message_html != null && String(opts.message_html).trim() !== '')
+      ? String(opts.message_html)
+      : (opts.message != null && String(opts.message).trim() !== '')
+        ? `<div class="mini" style="white-space:pre-wrap;">${enc(String(opts.message))}</div>`
+        : `<div class="mini">Are you sure?</div>`;
+
+  const extraHtml =
+    (opts.extra_html != null && String(opts.extra_html).trim() !== '')
+      ? String(opts.extra_html)
+      : '';
+
+  const confirmLabel = String(opts.confirm_label ?? 'Confirm').trim() || 'Confirm';
+  const cancelLabel  = String(opts.cancel_label  ?? 'Cancel').trim()  || 'Cancel';
+
+  const confirmBtnClass = String(opts.confirm_class ?? 'btn btn-primary').trim() || 'btn btn-primary';
+  const cancelBtnClass  = String(opts.cancel_class  ?? 'btn btn-outline').trim() || 'btn btn-outline';
+
+  // ✅ Use import-summary-* so showModal treats it as a utility child:
+  //  - footer Save hidden by default
+  //  - close does not trigger parent restore beyond renderTop()
+  const kind = 'import-summary-ui-confirm';
+
+  const instanceId = `uicf_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+  const rootId = `${instanceId}_root`;
+
+  return await new Promise((resolve) => {
+    let done = false;
+    let ownerToken = null;
+    let watchTimer = 0;
+
+    const resolveOnce = (confirmed) => {
+      if (done) return;
+      done = true;
+      try { cleanup(); } catch {}
+      resolve({ confirmed: !!confirmed });
+    };
+
+    const topFrameIsMine = (token) => {
+      try {
+        const fr = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
+        return !!(fr && fr.kind === kind && fr._token === token);
+      } catch {
+        return false;
+      }
+    };
+
+    const closeModalBtnClick = () => {
+      try {
+        const btn = document.getElementById('btnCloseModal');
+        if (btn) btn.click();
+        else if (typeof closeModal === 'function') closeModal();
+      } catch {
+        try { if (typeof closeModal === 'function') closeModal(); } catch {}
+      }
+    };
+
+    const onBodyClick = (ev) => {
+      if (done) return;
+      if (ownerToken && !topFrameIsMine(ownerToken)) return;
+
+      const btn = ev?.target && ev.target.closest ? ev.target.closest('button[data-act]') : null;
+      if (!btn) return;
+
+      const act = String(btn.getAttribute('data-act') || '');
+      if (act !== 'uicf-confirm' && act !== 'uicf-cancel') return;
+
+      if (act === 'uicf-cancel') {
+        resolveOnce(false);
+        closeModalBtnClick();
+        return;
+      }
+
+      // confirm
+      resolveOnce(true);
+      closeModalBtnClick();
+    };
+
+    const onHeaderCloseCapture = (ev) => {
+      if (done) return;
+      const btn = document.getElementById('btnCloseModal');
+      const bound = btn?.dataset?.ownerToken || null;
+      if (!ownerToken || !bound) return;
+      if (String(bound) !== String(ownerToken)) return;
+      if (!topFrameIsMine(ownerToken)) return;
+      resolveOnce(false);
+      // do NOT prevent default; showModal will close it
+    };
+
+    const cleanup = () => {
+      try {
+        const body = document.getElementById('modalBody');
+        if (body) body.removeEventListener('click', onBodyClick);
+      } catch {}
+      try {
+        const closeBtn = document.getElementById('btnCloseModal');
+        if (closeBtn) closeBtn.removeEventListener('click', onHeaderCloseCapture, true);
+      } catch {}
+      try { if (watchTimer) clearInterval(watchTimer); } catch {}
+      watchTimer = 0;
+    };
+
+    const renderTab = (key) => {
+      if (key !== 'main') return '';
+      const extraBlock = extraHtml
+        ? `<div style="margin-top:10px;">${extraHtml}</div>`
+        : '';
+
+      return htmlWrap(`
+        <div class="tabc" id="${enc(rootId)}">
+          <div class="card">
+            <div class="row">
+              <label></label>
+              <div class="controls">
+                <div style="font-size:14px;font-weight:700;margin-bottom:6px;">${enc(title)}</div>
+                ${messageHtml}
+                ${extraBlock}
+
+                <div style="display:flex;gap:10px;margin-top:14px;align-items:center;">
+                  <button type="button" class="${enc(confirmBtnClass)}" data-act="uicf-confirm">${enc(confirmLabel)}</button>
+                  <button type="button" class="${enc(cancelBtnClass)}" data-act="uicf-cancel">${enc(cancelLabel)}</button>
+                </div>
+
+                <div class="mini" style="margin-top:10px;opacity:.75;">
+                  You can also close this dialog to cancel.
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      `);
+    };
+
+    // Open modal
+    showModal(
+      title,
+      [{ key: 'main', label: 'Confirm' }],
+      renderTab,
+      null,
+      false,
+      null,
+      {
+        kind,
+        noParentGate: true,
+        showSave: false,
+        showApply: false,
+        onDismiss: () => resolveOnce(false)
+      }
+    );
+
+    // Capture token for this frame so we can gate events safely
+    try {
+      const fr = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
+      ownerToken = fr && fr.kind === kind ? fr._token : null;
+    } catch {
+      ownerToken = null;
+    }
+
+    // Wire DOM events (delegated to modalBody; gated by top frame token + kind)
+    try {
+      const body = document.getElementById('modalBody');
+      if (body) body.addEventListener('click', onBodyClick);
+    } catch {}
+
+    // Ensure closing via the header Close button resolves as Cancel too (no hang)
+    try {
+      const closeBtn = document.getElementById('btnCloseModal');
+      if (closeBtn) closeBtn.addEventListener('click', onHeaderCloseCapture, true);
+    } catch {}
+
+    // Safety: if frame is closed by any other route, resolve as Cancel (no hang)
+    watchTimer = setInterval(() => {
+      if (done) return;
+      const stk = window.__modalStack || [];
+      const stillThere = ownerToken && stk.some(fr => fr && fr._token === ownerToken);
+      if (!stillThere) resolveOnce(false);
+    }, 250);
+  });
+}
+
+
 async function openTimesheet(row) {
   const { LOGM, L, GC, GE } = getTsLoggers('[TS][OPEN]');
   GC('openTimesheet');
@@ -61876,9 +62418,12 @@ baseRow.id = hasTs ? realTsId : (weekId || baseRow.id);
 
     L('ENTRY', { tsId, weekId, isPlannedWeek, sheetScopeRaw, subModeRaw, basisRaw, routeTypeRaw, rowKeys: Object.keys(baseRow || {}) });
 
-  let details;
+let details;
 let evidence = [];
 let plannedContract = null;
+
+// ✅ NEW: delete preview payload (used for delete gating + friendly warning modal + route labels)
+let deletePreview = null;
 
 if (hasTs) {
   try {
@@ -61898,6 +62443,46 @@ if (hasTs) {
       details.current_timesheet_id = newId;
 
       try { await refreshTimesheetsSummaryAfterRotation(newId); } catch {}
+    }
+
+    // ✅ NEW: fetch delete preview (non-fatal; used by modal footer + overview route label + warning modal)
+    try {
+      const encTsIdPrev = encodeURIComponent(tsId);
+      const resPrev = await authFetch(API(`/api/timesheets/${encTsIdPrev}/delete-preview`));
+      const txtPrev = await resPrev.text().catch(() => '');
+      if (!resPrev.ok) throw new Error(txtPrev || 'Failed to fetch delete preview');
+
+      let parsedPrev = null;
+      try { parsedPrev = txtPrev ? JSON.parse(txtPrev) : null; } catch { parsedPrev = null; }
+      deletePreview = (parsedPrev && typeof parsedPrev === 'object') ? parsedPrev : null;
+
+      // If preview indicates a different current id (should be rare because we already stale-resolved),
+      // adopt it consistently so subsequent calls are aligned.
+      const movedIdPrev =
+        deletePreview && deletePreview.current_timesheet_id
+          ? String(deletePreview.current_timesheet_id)
+          : null;
+
+      if (movedIdPrev && String(movedIdPrev) !== String(tsId)) {
+        tsId = movedIdPrev;
+        baseRow.timesheet_id = movedIdPrev;
+        baseRow.id = movedIdPrev;
+
+        // Re-fetch details so UI state matches the resolved id
+        try {
+          details = await fetchTimesheetDetails(tsId);
+          if (details && details.current_timesheet_id) {
+            details.current_timesheet_id = String(details.current_timesheet_id);
+          }
+        } catch {}
+
+        try { await refreshTimesheetsSummaryAfterRotation(movedIdPrev); } catch {}
+      }
+
+    } catch (err) {
+      // Non-fatal: UI will fall back to existing gating; delete preview can be retried later.
+      L('fetch delete preview FAILED (non-fatal)', err);
+      deletePreview = null;
     }
 
     // ✅ NEW: fetch contract for gating (NHSP / HR CREATE) even when hasTs
@@ -61956,6 +62541,7 @@ if (hasTs) {
       L('fetch evidence FAILED', { status: res.status, bodyPreview: (txt || '').slice(0, 400) });
       throw new Error(txt || 'Failed to fetch evidence');
     }
+
 
     let parsed = null;
     try { parsed = txt ? JSON.parse(txt) : null; } catch { parsed = null; }
@@ -62549,7 +63135,7 @@ try {
       '';
     const cwSubSnap = String(cwSubSnapRaw || '').toUpperCase();
 
-  window.modalCtx = {
+ window.modalCtx = {
   ...(window.modalCtx || {}),
   entity: 'timesheets',
 
@@ -62568,6 +63154,9 @@ try {
 
   timesheetDetails: details,
   timesheetRelated: related,
+
+  // ✅ NEW: delete preview policy payload (kind/eligible/blocked_reasons/delete_items)
+  timesheetDeletePreview: deletePreview,
 
   timesheetState: {
     reference: initialReference,
@@ -62608,6 +63197,7 @@ try {
     hasElectronicOriginal: !!(details && details.action_flags && details.action_flags.can_revert_to_electronic)
   }
 };
+
 
 
 const tabDefs = [
