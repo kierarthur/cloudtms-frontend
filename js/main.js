@@ -13938,7 +13938,8 @@ function renderTools(){
     stageWrap.style.marginTop = '8px';
     stageWrap.className = 'mini';
 
-    const stageLabel = document.create typography='div');
+    const stageLabel = document.createElement('div');
+
     stageLabel.textContent = 'Stage:';
     stageLabel.style.marginBottom = '2px';
 
