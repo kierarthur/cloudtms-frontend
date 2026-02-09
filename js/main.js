@@ -13838,6 +13838,17 @@ function renderTools(){
   addBtn('Show all records', () => showAllRecords(currentSection));
   addBtn('Search…', () => openSearchModal()); // left toolbar search
 
+  // ✅ NEW: Refresh button (forces reload of the current summary view using existing state/filters)
+  addBtn('Refresh', async () => {
+    try {
+      const data = await loadSection();
+      renderSummary(data);
+    } catch (e) {
+      console.error('[TOOLS][REFRESH] failed', e);
+      alert(e?.message || 'Refresh failed');
+    }
+  });
+
   if (!canCreate) btnCreate.disabled = true;
 
   // ── Timesheet filters box (only when in Timesheets summary) ────────────────
@@ -13927,7 +13938,7 @@ function renderTools(){
     stageWrap.style.marginTop = '8px';
     stageWrap.className = 'mini';
 
-    const stageLabel = document.createElement('div');
+    const stageLabel = document.create typography='div');
     stageLabel.textContent = 'Stage:';
     stageLabel.style.marginBottom = '2px';
 
@@ -13984,6 +13995,7 @@ function renderTools(){
     el.appendChild(box);
   }
 }
+
 
 
 async function showAllRecords(section = currentSection){
@@ -15054,8 +15066,25 @@ async function listCandidateRates(candidate_id){
   return toList(r);
 }
 // =========================== fetchRelated (unchanged API) ===========================
-async function fetchRelated(entity, id, type){
-  const url = API(`/api/related/${entity}/${id}/${type}`);
+  async function fetchRelated(entity, id, type){
+  const sp = new URLSearchParams();
+
+  // ✅ NEW: when showing related timesheets, forward the current stage filter (if present)
+  try {
+    const t = String(type || '').toLowerCase();
+    const stage =
+      (typeof filters === 'object' && filters && filters.tools_stage != null)
+        ? String(filters.tools_stage || '').trim()
+        : '';
+
+    if (t === 'timesheets' && stage) {
+      sp.set('tools_stage', stage);
+    }
+  } catch {}
+
+  const qs = sp.toString();
+  const url = API(`/api/related/${entity}/${id}/${type}${qs ? `?${qs}` : ''}`);
+
   let res;
   try {
     res = await authFetch(url);
@@ -15071,6 +15100,7 @@ async function fetchRelated(entity, id, type){
   }
   return toList(res);
 }
+
 
 
 
