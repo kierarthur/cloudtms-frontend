@@ -52584,7 +52584,6 @@ function computePolicyAViolations(actions, selectedActionIds) {
   };
 }
 
-
 async function applyWeeklyImportTransactional(type, importId, payloadIn) {
   const t = String(type || '').toUpperCase();
   const encId = encodeURIComponent(String(importId || '').trim());
@@ -52666,8 +52665,47 @@ async function applyWeeklyImportTransactional(type, importId, payloadIn) {
       ? `/api/nhsp/${encId}/apply`
       : `/api/healthroster/${encId}/autoprocess-apply`;
 
+  // -------------------------------------------------------------------
+  // ✅ CHANGE (HR_WEEKLY only):
+  // - Do NOT show any extra modal for "include missing shifts" / date range.
+  // - Always include missing shifts.
+  // - Always send the file date-range min/max already computed for the import
+  //   (earliest + latest shift in the import file).
+  //
+  // This is a no-op for NHSP.
+  // -------------------------------------------------------------------
+  const hrFileDateMin =
+    (t === 'HR_WEEKLY')
+      ? (
+          (p.file_date_min ?? p.fileDateMin ?? p.date_min ?? p.dateMin ?? null) ??
+          (p.truth_meta?.file_date_min ?? p.truthMeta?.file_date_min ?? null) ??
+          (p.truth_meta?.file_date_min ?? p.truthMeta?.fileDateMin ?? null) ??
+          null
+        )
+      : null;
+
+  const hrFileDateMax =
+    (t === 'HR_WEEKLY')
+      ? (
+          (p.file_date_max ?? p.fileDateMax ?? p.date_max ?? p.dateMax ?? null) ??
+          (p.truth_meta?.file_date_max ?? p.truthMeta?.file_date_max ?? null) ??
+          (p.truth_meta?.file_date_max ?? p.truthMeta?.fileDateMax ?? null) ??
+          null
+        )
+      : null;
+
   const body = { selected_action_ids, decisions };
-  if (t === 'HR_WEEKLY') body.email_actions = email_actions || [];
+
+  if (t === 'HR_WEEKLY') {
+    body.email_actions = email_actions || [];
+
+    // Always include missing shifts (no UI prompt).
+    body.include_missing_shifts = true;
+
+    // Always send the date range (best-effort; backend may ignore if not needed).
+    if (hrFileDateMin) body.file_date_min = String(hrFileDateMin);
+    if (hrFileDateMax) body.file_date_max = String(hrFileDateMax);
+  }
 
   const res = await authFetch(API(urlPath), {
     method: 'POST',
@@ -52696,7 +52734,6 @@ async function applyWeeklyImportTransactional(type, importId, payloadIn) {
 
   try { return text ? JSON.parse(text) : {}; } catch { return {}; }
 }
-
 
 
 
