@@ -1923,7 +1923,6 @@ function normalizeClientSettingsForSave(raw) {
   if (fromUi || ('auto_invoice_default' in src)) {
     out.auto_invoice_default = asBool(src.auto_invoice_default);
   }
-
   const BOOL_KEYS = [
     'pay_reference_required',
     'invoice_reference_required',
@@ -28810,6 +28809,8 @@ function canonicalizeClientSettings(input) {
   cs.reference_number_required_to_issue_invoice = refToIssue;
 
   return cs;
+
+}
 
 async function handleInvoiceDelete(modalCtx) {
   const mc = modalCtx || {};
