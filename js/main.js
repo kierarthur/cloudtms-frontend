@@ -1928,6 +1928,7 @@ function normalizeClientSettingsForSave(raw) {
     'pay_reference_required',
     'invoice_reference_required',
     'requires_hr',
+    'hr_validation_required',
     'autoprocess_hr',
     'hr_attach_to_invoice',
     'ts_attach_to_invoice',
@@ -1937,6 +1938,7 @@ function normalizeClientSettingsForSave(raw) {
     'no_timesheet_required',
     'group_nightsat_sunbh'
   ];
+
 
   for (const k of BOOL_KEYS) {
     if (fromUi || (k in src)) {
@@ -28693,6 +28695,9 @@ function canonicalizeClientSettings(input) {
     cs.requires_hr = false;
     cs.no_timesheet_required = false;
 
+    // ✅ NEW: NHSP does not use HR validation
+    cs.hr_validation_required = false;
+
     cs.pay_reference_required = false;
     cs.invoice_reference_required = false;
 
@@ -28714,12 +28719,16 @@ function canonicalizeClientSettings(input) {
     return cs;
   }
 
-  if (weeklyMode === 'NONE') {
+
+   if (weeklyMode === 'NONE') {
     cs.is_nhsp = false;
 
     cs.autoprocess_hr = false;
     cs.requires_hr = false;
     cs.no_timesheet_required = false;
+
+    // ✅ NEW: manual weekly source does not use HR validation
+    cs.hr_validation_required = false;
 
     // Manual: keep these user-configurable defaults (false if unset)
     cs.pay_reference_required = payRef;
@@ -28743,13 +28752,16 @@ function canonicalizeClientSettings(input) {
     return cs;
   }
 
+
   // HEALTHROSTER
   cs.is_nhsp = false;
   cs.autoprocess_hr = true;
-
   if (hrBehaviour === 'CREATE') {
     cs.requires_hr = false;
     cs.no_timesheet_required = true;
+
+    // ✅ NEW: CREATE mode means we do NOT require HR validation
+    cs.hr_validation_required = false;
 
     // Hidden + forced
     cs.pay_reference_required = false;
@@ -28769,10 +28781,12 @@ function canonicalizeClientSettings(input) {
 
     return cs;
   }
-
   // VERIFY
   cs.requires_hr = true;
   cs.no_timesheet_required = false;
+
+  // ✅ NEW: VERIFY mode means HR validation IS required
+  cs.hr_validation_required = true;
 
   // Hidden + forced
   cs.pay_reference_required = false;
@@ -28796,7 +28810,6 @@ function canonicalizeClientSettings(input) {
   cs.reference_number_required_to_issue_invoice = refToIssue;
 
   return cs;
-}
 
 async function handleInvoiceDelete(modalCtx) {
   const mc = modalCtx || {};
