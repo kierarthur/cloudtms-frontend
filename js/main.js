@@ -50578,290 +50578,48 @@ async function openWeeklyImportOptionsModal(type, importId, preview) {
   // Re-store (so caller can rely on it immediately)
   window.__weeklyImportUi[t][impId] = ui;
 
-  const kind = `import-summary-weekly-options-${t.toLowerCase()}`;
-  const title = (t === 'NHSP') ? 'NHSP Weekly Import Options' : 'HealthRoster Weekly Import Options';
+  // AFTER (openWeeklyImportOptionsModal) — no modal; silently initialise defaults and continue
 
-  const rootId = `weeklyImportOptionsRoot_${t}_${impId}`;
-  const cbId   = `weeklyOptMissing_${t}_${impId}`;
-  const fromId = `weeklyOptFrom_${t}_${impId}`;
-  const toId   = `weeklyOptTo_${t}_${impId}`;
-  const noteId = `weeklyOptNote_${t}_${impId}`;
+  // ✅ HR_WEEKLY: do NOT show an options modal.
+  // Always enable missing shifts and default date range to file min/max (or derived from actions).
+  // This preserves the exact same persistent store shape the rest of the weekly UI expects.
+  // Returns true so the flow continues directly to the summary.
+  try {
+    window.__weeklyImportUi = window.__weeklyImportUi || {};
+    window.__weeklyImportUi[t] = window.__weeklyImportUi[t] || {};
 
-  const noteHtml = (enabled) => {
-    const line1 = enabled
-      ? 'Cancellations are red and unchecked by default.'
-      : 'No missing-from-import cancellations will be shown.';
-    const line2 = 'Shift date = start date (cross-midnight belongs to start date).';
-    return `<div class="mini">${enc(line1)}<br/>${enc(line2)}</div>`;
-  };
+    const store = window.__weeklyImportUi[t][impId] || ui;
+    store.options = (store.options && typeof store.options === 'object') ? store.options : {};
 
-  const renderTab = (key) => {
-    if (key !== 'main') return '';
-    const opt = (window.__weeklyImportUi && window.__weeklyImportUi[t] && window.__weeklyImportUi[t][impId] && window.__weeklyImportUi[t][impId].options)
-      ? window.__weeklyImportUi[t][impId].options
-      : ui.options;
-
-    const missOn = !!opt.missingShiftsEnabled;
-    const vFrom = asYmd(opt.dateFrom) || '';
-    const vTo   = asYmd(opt.dateTo) || '';
-
-    return html(`
-      <div class="form" id="${enc(rootId)}">
-        <div class="card">
-          <div class="row">
-            <label>Missing shifts</label>
-            <div class="controls">
-              <label style="display:flex; align-items:center; gap:8px;">
-                <input id="${enc(cbId)}" type="checkbox" data-act="weekly-opt-missing" ${missOn ? 'checked' : ''}/>
-                <span>Treat missing shifts as cancelled</span>
-              </label>
-            </div>
-          </div>
-
-          <div class="row">
-            <label>Date range</label>
-            <div class="controls" style="display:flex; gap:12px; flex-wrap:wrap; align-items:flex-end;">
-              <div style="display:flex; flex-direction:column; gap:4px;">
-                <span class="mini">Start date</span>
-                <input id="${enc(fromId)}" type="date" value="${enc(vFrom)}" data-act="weekly-opt-from"/>
-              </div>
-              <div style="display:flex; flex-direction:column; gap:4px;">
-                <span class="mini">End date</span>
-                <input id="${enc(toId)}" type="date" value="${enc(vTo)}" data-act="weekly-opt-to"/>
-              </div>
-            </div>
-          </div>
-
-          <div class="row">
-            <label>Notes</label>
-            <div class="controls">
-              <div id="${enc(noteId)}">${noteHtml(missOn)}</div>
-            </div>
-          </div>
-
-          <div class="row" style="margin-top:10px;">
-            <label></label>
-            <div class="controls">
-              <button type="button" class="btn btn-primary" data-act="weekly-opt-continue">Continue</button>
-              <button type="button" class="btn" style="margin-left:8px;" data-act="weekly-opt-cancel">Cancel</button>
-            </div>
-          </div>
-        </div>
-      </div>
-    `);
-  };
-
-  // Promise resolves true=Continue, false=Cancel/Close
-  return await new Promise((resolve) => {
-    let done = false;
-    const resolveOnce = (v) => {
-      if (done) return;
-      done = true;
-      try { cleanup(); } catch {}
-      resolve(!!v);
-    };
-
-    const topFrameIsMine = (token) => {
-      try {
-        const fr = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
-        return !!(fr && fr.kind === kind && fr._token === token);
-      } catch {
-        return false;
-      }
-    };
-
-    const closeModalBtnClick = () => {
-      try {
-        const btn = document.getElementById('btnCloseModal');
-        if (btn) btn.click();
-        else if (typeof closeModal === 'function') closeModal();
-      } catch {
-        try { if (typeof closeModal === 'function') closeModal(); } catch {}
-      }
-    };
-
-    let ownerToken = null;
-    let watchTimer = 0;
-
-    const onHeaderCloseCapture = (ev) => {
-      if (done) return;
-      const btn = document.getElementById('btnCloseModal');
-      const bound = btn?.dataset?.ownerToken || null;
-      if (!ownerToken || !bound) return;
-      if (String(bound) !== String(ownerToken)) return;
-      // Only treat as ours if our frame is currently top.
-      if (!topFrameIsMine(ownerToken)) return;
-      resolveOnce(false);
-      // do NOT prevent default; showModal's bindClose will close the modal
-    };
-
-    const onBodyClick = (ev) => {
-      if (done) return;
-      const btn = ev.target && ev.target.closest ? ev.target.closest('button[data-act]') : null;
-      if (!btn) return;
-
-      if (!ownerToken || !topFrameIsMine(ownerToken)) return;
-
-      const act = btn.getAttribute('data-act') || '';
-      if (act !== 'weekly-opt-continue' && act !== 'weekly-opt-cancel') return;
-
-      if (act === 'weekly-opt-cancel') {
-        resolveOnce(false);
-        closeModalBtnClick();
-        return;
-      }
-
-      // Continue
-      const cb = document.getElementById(cbId);
-      const inpFrom = document.getElementById(fromId);
-      const inpTo = document.getElementById(toId);
-
-      const missingOn = !!(cb && cb.checked);
-      const df = asYmd(inpFrom && inpFrom.value ? inpFrom.value : null);
-      const dt = asYmd(inpTo && inpTo.value ? inpTo.value : null);
-
-      if (df && dt && df > dt) {
-        alert('Start date must be on or before End date.');
-        return;
-      }
-
-      // Persist options
-      window.__weeklyImportUi = window.__weeklyImportUi || {};
-      window.__weeklyImportUi[t] = window.__weeklyImportUi[t] || {};
-      const store = window.__weeklyImportUi[t][impId] || ui;
-      store.options = (store.options && typeof store.options === 'object') ? store.options : {};
-      store.options.missingShiftsEnabled = missingOn;
-      store.options.dateFrom = df || null;
-      store.options.dateTo = dt || null;
-
-      // If missing shifts disabled, immediately drop any selected missing-from-import cancellations.
-      // If enabled with date-range, drop any selected missing-from-import cancellations outside range.
-      try {
-        const sel = (store.actionSelection instanceof Set) ? store.actionSelection : new Set();
-        const inYmdRange = (ymd, fromYmd, toYmd) => {
-          const d = asYmd(ymd);
-          const f = asYmd(fromYmd);
-          const t2 = asYmd(toYmd);
-          if (!d) return false;
-          if (f && d < f) return false;
-          if (t2 && d > t2) return false;
-          return true;
-        };
-        const byId = new Map();
-        for (const a of actions) {
-          const id = a?.action_id ? String(a.action_id) : (a?.actionId ? String(a.actionId) : null);
-          if (!id) continue;
-          byId.set(id, a);
-        }
-        const isMissingCancel = (a) => {
-          const isCancel = (a?.is_cancellation === true) || (a?.isCancellation === true) || String(a?.action_kind || '').toUpperCase().includes('CANCEL');
-          if (!isCancel) return false;
-          const reason = String(a?.reason || a?.cancel_reason || a?.kind_reason || '').toUpperCase();
-          return reason === 'MISSING_FROM_IMPORT';
-        };
-
-        for (const id of Array.from(sel)) {
-          const a = byId.get(String(id)) || null;
-          if (!a) continue;
-          if (!isMissingCancel(a)) continue;
-
-          if (!missingOn) {
-            sel.delete(id);
-            continue;
-          }
-
-          const wd = a?.work_date || a?.workDate || a?.date_local || a?.date || null;
-          if (!inYmdRange(wd, store.options.dateFrom, store.options.dateTo)) {
-            sel.delete(id);
-          }
-        }
-
-        store.actionSelection = sel;
-      } catch {}
-
-      window.__weeklyImportUi[t][impId] = store;
-
-      resolveOnce(true);
-      closeModalBtnClick();
-    };
-
-    const onBodyChange = (ev) => {
-      if (done) return;
-      if (!ownerToken || !topFrameIsMine(ownerToken)) return;
-
-      const el = ev.target;
-      if (!el || !el.getAttribute) return;
-
-      const act = el.getAttribute('data-act') || '';
-      if (act !== 'weekly-opt-missing') return;
-
-      const note = document.getElementById(noteId);
-      if (note) note.innerHTML = noteHtml(!!el.checked);
-    };
-
-    const cleanup = () => {
-      try {
-        const body = document.getElementById('modalBody');
-        if (body) {
-          body.removeEventListener('click', onBodyClick);
-          body.removeEventListener('change', onBodyChange);
-        }
-      } catch {}
-      try {
-        const closeBtn = document.getElementById('btnCloseModal');
-        if (closeBtn) closeBtn.removeEventListener('click', onHeaderCloseCapture, true);
-      } catch {}
-      try { if (watchTimer) clearInterval(watchTimer); } catch {}
-      watchTimer = 0;
-    };
-
-    // Open modal
-    showModal(
-      title,
-      [{ key: 'main', label: 'Options' }],
-      renderTab,
-      null,
-      false,
-      null,
-      {
-        kind,
-        noParentGate: true,
-        stayOpenOnSave: false,
-        showSave: false
-      }
-    );
-
-    // Capture token for this frame so we can gate events safely
-    try {
-      const fr = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
-      ownerToken = fr && fr.kind === kind ? fr._token : null;
-    } catch {
-      ownerToken = null;
+    if (typeof store.options.missingShiftsEnabled !== 'boolean') {
+      store.options.missingShiftsEnabled = true;
+    } else {
+      store.options.missingShiftsEnabled = true; // force on for HR_WEEKLY (as per requirement)
     }
 
-    // Wire DOM events (delegated to modalBody; gated by top frame token + kind)
-    try {
-      const body = document.getElementById('modalBody');
-      if (body) {
-        body.addEventListener('click', onBodyClick);
-        body.addEventListener('change', onBodyChange);
-      }
-    } catch {}
+    const df0 = asYmd(store.options.dateFrom);
+    const dt0 = asYmd(store.options.dateTo);
 
-    // Ensure closing via the header Close button resolves as Cancel too
-    try {
-      const closeBtn = document.getElementById('btnCloseModal');
-      if (closeBtn) closeBtn.addEventListener('click', onHeaderCloseCapture, true);
-    } catch {}
+    if (!df0) store.options.dateFrom = defaultFrom;
+    if (!dt0) store.options.dateTo = defaultTo;
 
-    // Safety: if frame is closed by any other route, resolve as Cancel (no hang)
-    watchTimer = setInterval(() => {
-      if (done) return;
-      const stk = window.__modalStack || [];
-      const stillThere = ownerToken && stk.some(fr => fr && fr._token === ownerToken);
-      if (!stillThere) resolveOnce(false);
-    }, 250);
-  });
+    const df1 = asYmd(store.options.dateFrom);
+    const dt1 = asYmd(store.options.dateTo);
+    if (df1 && dt1 && df1 > dt1) {
+      store.options.dateFrom = defaultFrom;
+      store.options.dateTo = defaultTo;
+    } else {
+      store.options.dateFrom = df1 || store.options.dateFrom || defaultFrom;
+      store.options.dateTo   = dt1 || store.options.dateTo   || defaultTo;
+    }
+
+    window.__weeklyImportUi[t][impId] = store;
+  } catch {
+    // best-effort; never block the user from reaching the summary
+  }
+
+  return true;
+
 }
 
 
