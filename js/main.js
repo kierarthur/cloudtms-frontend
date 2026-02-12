@@ -1673,26 +1673,7 @@ function __unwrapSingle(json) {
   return null;
 }
 
-async function apiListAssignmentBandMappings(params) {
-  const p = params || {};
-  const query = __qs({
-    system_type: p.system_type,
-    candidate_id: p.candidate_id,
-    client_id: p.client_id,
-    incoming_like: p.incoming_like,                 // backend supports this (if you used my handler)
-    scope: p.scope,                                 // GLOBAL|CLIENT|CANDIDATE (optional)
-    include_inactive: p.include_inactive ? 'true' : undefined
-  });
 
-  const res = await authFetch(API(`/api/assignment-band-mappings${query}`), { method: 'GET' });
-  const txt = await res.text().catch(() => '');
-  if (!res.ok) throw new Error(txt || `Failed to list assignment-band-mappings (${res.status})`);
-
-  let json;
-  try { json = txt ? JSON.parse(txt) : null; } catch { json = null; }
-
-  return __unwrapRows(json);
-}
 
 async function apiCreateAssignmentBandMapping(payload) {
   const res = await authFetch(API(`/api/assignment-band-mappings`), {
@@ -49535,6 +49516,423 @@ function dedupeIds(arr) {
   return Array.from(new Set((arr || []).map(String)));
 }
 
+
+async function apiListAssignmentBandMappings(params) {
+  const p = params || {};
+
+  // ✅ Accept either incoming_like or incoming_code (exact) from callers.
+  // If only incoming_code is provided, treat it as incoming_like for compatibility.
+  const incomingLike =
+    (p.incoming_like != null ? p.incoming_like : null) ??
+    (p.incoming_code != null ? p.incoming_code : null);
+
+  const query = __qs({
+    system_type: p.system_type,
+    candidate_id: p.candidate_id,
+    client_id: p.client_id,
+    incoming_like: incomingLike,                 // backend supports this
+    scope: p.scope,                              // GLOBAL|CLIENT|CANDIDATE (optional)
+    include_inactive: p.include_inactive ? 'true' : undefined
+  });
+
+  const res = await authFetch(API(`/api/assignment-band-mappings${query}`), { method: 'GET' });
+  const txt = await res.text().catch(() => '');
+  if (!res.ok) throw new Error(txt || `Failed to list assignment-band-mappings (${res.status})`);
+
+  let json;
+  try { json = txt ? JSON.parse(txt) : null; } catch { json = null; }
+
+  return __unwrapRows(json);
+}
+
+async function openHrWeeklyBandResolveModal(opts) {
+  const enc = (typeof escapeHtml === 'function')
+    ? escapeHtml
+    : (s) => String(s == null ? '' : s)
+        .replace(/[&<>"']/g, (c) => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
+
+  const seed = (opts && typeof opts === 'object') ? opts : {};
+
+  const importId = String(seed.import_id || seed.importId || '').trim();
+  const candidateId = String(seed.candidate_id || seed.candidateId || '').trim();
+  const clientId = String(seed.client_id || seed.clientId || '').trim();
+  const incomingCode = String(seed.incoming_code || seed.incomingCode || '').trim();
+
+  // Scope date (used to list contracts "active in scope")
+  const scopeYmd =
+    String(seed.work_date || seed.workDate || seed.week_ending_date || seed.weekEndingDate || seed.active_on || seed.activeOn || '').trim() || null;
+
+  if (!importId) throw new Error('openHrWeeklyBandResolveModal: import_id is required');
+  if (!candidateId) throw new Error('openHrWeeklyBandResolveModal: candidate_id is required');
+  if (!clientId) throw new Error('openHrWeeklyBandResolveModal: client_id is required');
+  if (!incomingCode) throw new Error('openHrWeeklyBandResolveModal: incoming_code is required');
+
+  if (typeof showModal !== 'function') throw new Error('showModal is not defined');
+  if (typeof listContracts !== 'function') throw new Error('listContracts is not defined');
+  if (typeof apiCreateAssignmentBandMapping !== 'function') throw new Error('apiCreateAssignmentBandMapping is not defined');
+
+  const kind = 'import-summary-hr-weekly-band-resolve';
+
+  const toYmd = (v) => {
+    const s = String(v || '').trim();
+    if (!s) return null;
+    if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+    if (s.length >= 10 && /^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);
+    return null;
+  };
+
+  const state = {
+    import_id: importId,
+    candidate_id: candidateId,
+    client_id: clientId,
+    incoming_code: incomingCode,
+    scope_ymd: toYmd(scopeYmd) || null,
+
+    loading: false,
+    error: '',
+    contracts: [],
+    selected_contract_id: null,
+
+    // derived display
+    candidate_display: '',
+    client_name: ''
+  };
+
+  const repaint = () => {
+    const fr = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
+    if (!fr) return;
+    try { fr.setTab(fr.currentTabKey || 'main'); } catch {}
+    try {
+      const fr2 = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
+      if (fr2 && typeof fr2.onReturn === 'function') fr2.onReturn();
+    } catch {}
+  };
+
+  const safeBand = (c) => {
+    const b = String(c?.band || c?.band_snapshot || c?.band_label || '').trim();
+    return b || '';
+  };
+
+  const safeRole = (c) => {
+    const r = String(c?.role || c?.role_snapshot || c?.job_title || c?.job_title_norm || '').trim();
+    return r || '';
+  };
+
+  const safeSite = (c) => {
+    const s =
+      String(
+        c?.display_site ||
+        c?.hospital_norm ||
+        c?.client_site ||
+        c?.site ||
+        c?.ward_hint ||
+        c?.ward_norm ||
+        ''
+      ).trim();
+    return s || '';
+  };
+
+  const safeDate = (d) => {
+    const s = String(d || '').trim();
+    return s ? s : '—';
+  };
+
+  const loadContracts = async () => {
+    state.loading = true;
+    state.error = '';
+    repaint();
+
+    try {
+      const activeOn = state.scope_ymd || null;
+
+      // listContracts is already in your frontend and hits /api/contracts
+      const rows = await listContracts({
+        client_id: state.client_id,
+        candidate_id: state.candidate_id,
+        active_only: true,
+        active_on: activeOn
+      });
+
+      state.contracts = Array.isArray(rows) ? rows : [];
+
+      // best-effort display labels
+      if (!state.candidate_display) {
+        const any = state.contracts.find(Boolean) || null;
+        const cd = String(any?.candidate_display || any?.candidate_name || '').trim();
+        if (cd) state.candidate_display = cd;
+      }
+      if (!state.client_name) {
+        const any = state.contracts.find(Boolean) || null;
+        const cn = String(any?.client_name || any?.client || '').trim();
+        if (cn) state.client_name = cn;
+      }
+
+      // If only one contract, preselect it
+      if (!state.selected_contract_id && state.contracts.length === 1) {
+        const onlyId = String(state.contracts[0]?.id || '').trim();
+        if (onlyId) state.selected_contract_id = onlyId;
+      }
+    } catch (e) {
+      state.contracts = [];
+      state.error = e?.message || String(e);
+    } finally {
+      state.loading = false;
+      repaint();
+    }
+  };
+
+  const renderTab = (key) => {
+    if (key !== 'main') return '';
+
+    const contracts = Array.isArray(state.contracts) ? state.contracts : [];
+    const selectedId = String(state.selected_contract_id || '').trim();
+
+    const headerCandidate = state.candidate_display ? state.candidate_display : 'Selected candidate';
+    const headerClient = state.client_name ? state.client_name : state.client_id;
+
+    const tableBody = contracts.length
+      ? contracts.map((c) => {
+          const id = String(c?.id || '').trim();
+          const band = safeBand(c);
+          const role = safeRole(c);
+          const site = safeSite(c);
+
+          const start = safeDate(c?.start_date);
+          const end = safeDate(c?.end_date);
+
+          const isSel = (id && id === selectedId);
+          const radio = id
+            ? `<input type="radio" name="hrwbr_contract" data-act="hrwbr-select" data-id="${enc(id)}" ${isSel ? 'checked' : ''}/>`
+            : `<span class="mini">—</span>`;
+
+          return `
+            <tr data-id="${enc(id)}" style="cursor:pointer;" data-act="hrwbr-row">
+              <td class="mini" style="width:70px; text-align:center;">${radio}</td>
+              <td class="mini" style="white-space:normal; word-break:break-word;">${enc(band || '—')}</td>
+              <td class="mini" style="white-space:normal; word-break:break-word;">${enc(role || '—')}</td>
+              <td class="mini" style="white-space:normal; word-break:break-word;">${enc(site || '—')}</td>
+              <td class="mini" style="width:120px; white-space:nowrap;">${enc(start)}</td>
+              <td class="mini" style="width:120px; white-space:nowrap;">${enc(end)}</td>
+            </tr>
+          `;
+        }).join('')
+      : `
+        <tr>
+          <td colspan="6">
+            <span class="mini">${state.loading ? 'Loading…' : 'No active contracts found for this candidate/client on this date.'}</span>
+          </td>
+        </tr>
+      `;
+
+    const errHtml = state.error
+      ? `<div class="hint" style="color:#ffb4b4; margin-top:8px;">${enc(state.error)}</div>`
+      : '';
+
+    const scopeLine = state.scope_ymd ? `Active on: <span class="mono">${enc(state.scope_ymd)}</span>` : 'Active on: <span class="mini">—</span>';
+
+    return `
+      <div id="hrWeeklyBandResolveModal" data-import-id="${enc(state.import_id)}">
+        <div class="card">
+          <div class="row">
+            <label>Resolve HealthRoster grade to band</label>
+            <div class="controls">
+              <div class="mini">
+                Incoming HealthRoster code: <span class="mono">${enc(state.incoming_code)}</span><br/>
+                Candidate: <strong>${enc(headerCandidate)}</strong><br/>
+                Client: <span class="mini">${enc(headerClient)}</span><br/>
+                ${scopeLine}
+              </div>
+              <div class="hint" style="margin-top:8px;">
+                Pick the correct contract band for this candidate. We will create a <strong>candidate-specific</strong> mapping for this incoming code.
+              </div>
+              ${errHtml}
+            </div>
+          </div>
+        </div>
+
+        <div class="card" style="margin-top:10px;">
+          <div class="row">
+            <label>Active contracts</label>
+            <div class="controls">
+              <div style="max-height:46vh; overflow:auto; border:1px solid var(--line); border-radius:10px;">
+                <table class="grid" style="table-layout:auto; width:100%; min-width:980px;">
+                  <thead>
+                    <tr>
+                      <th style="width:70px;">Pick</th>
+                      <th style="width:140px;">Band</th>
+                      <th style="width:220px;">Role</th>
+                      <th>Site / Ward</th>
+                      <th style="width:120px;">Start</th>
+                      <th style="width:120px;">End</th>
+                    </tr>
+                  </thead>
+                  <tbody>${tableBody}</tbody>
+                </table>
+              </div>
+
+              <div class="hint" style="margin-top:8px;">
+                This creates a candidate-scoped rule: <span class="mono">${enc(state.incoming_code)}</span> → <span class="mono">(selected band)</span>.
+                It will apply whenever this candidate appears with this code in future imports.
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="row" style="margin-top:10px;">
+          <label></label>
+          <div class="controls">
+            <button type="button" class="btn" data-act="hrwbr-refresh" ${state.loading ? 'disabled' : ''}>Refresh</button>
+            <button type="button" class="btn btn-primary" style="margin-left:8px;" data-act="hrwbr-save" ${state.loading ? 'disabled' : ''}>Save mapping</button>
+            <button type="button" class="btn" style="margin-left:8px;" data-act="hrwbr-cancel">Close</button>
+          </div>
+        </div>
+      </div>
+    `;
+  };
+
+  const onReturn = () => {
+    const root = document.getElementById('hrWeeklyBandResolveModal');
+    if (!root) return;
+
+    // De-dupe wiring
+    if (root.__hrwbrWired) return;
+    root.__hrwbrWired = true;
+
+    const modalBody = document.getElementById('modalBody');
+
+    const closeModal = () => {
+      const closeBtn = document.getElementById('btnCloseModal');
+      if (closeBtn) closeBtn.click();
+    };
+
+    // Row click -> select
+    root.addEventListener('click', async (ev) => {
+      const btn = ev.target && ev.target.closest ? ev.target.closest('[data-act]') : null;
+      const act = btn ? String(btn.getAttribute('data-act') || '') : '';
+
+      // Row selection
+      const tr = ev.target && ev.target.closest ? ev.target.closest('tr[data-act="hrwbr-row"]') : null;
+      if (tr) {
+        const id = String(tr.getAttribute('data-id') || '').trim();
+        if (id) {
+          state.selected_contract_id = id;
+          repaint();
+        }
+        return;
+      }
+
+      if (act === 'hrwbr-select') {
+        const id = String(btn.getAttribute('data-id') || '').trim();
+        if (id) {
+          state.selected_contract_id = id;
+          repaint();
+        }
+        return;
+      }
+
+      if (act === 'hrwbr-refresh') {
+        await loadContracts();
+        return;
+      }
+
+      if (act === 'hrwbr-cancel') {
+        closeModal();
+        return;
+      }
+
+      if (act === 'hrwbr-save') {
+        try {
+          const selId = String(state.selected_contract_id || '').trim();
+          if (!selId) {
+            alert('Pick a contract row first.');
+            return;
+          }
+
+          const c = (state.contracts || []).find(x => String(x?.id || '').trim() === selId) || null;
+          if (!c) {
+            alert('Selected contract not found (please refresh).');
+            return;
+          }
+
+          const band = safeBand(c);
+          if (!band) {
+            alert('Selected contract has no band value. Cannot create mapping.');
+            return;
+          }
+
+          const ok = window.confirm(
+            `Create candidate-specific mapping?\n\nIncoming code: ${state.incoming_code}\nBand: ${band}\n\nThis will affect future HR weekly imports for this candidate.`
+          );
+          if (!ok) return;
+
+          state.loading = true;
+          state.error = '';
+          repaint();
+
+          // IMPORTANT: backend forbids candidate_id + client_id together.
+          // Candidate-scoped mapping is still effective because contract matching already narrows by client + candidate.
+          await apiCreateAssignmentBandMapping({
+            system_type: 'HR_WEEKLY',
+            incoming_code: state.incoming_code,
+            candidate_id: state.candidate_id,
+            client_id: null,
+            band_match_pattern: band,
+            active: true,
+            notes: `Resolved via HR_WEEKLY import ${state.import_id} (client ${state.client_id}).`
+          });
+
+          if (window.__toast) window.__toast('Band mapping saved.');
+
+          state.loading = false;
+          repaint();
+
+          // Reclassify the weekly import preview immediately
+          if (typeof refreshWeeklyImportSummary === 'function') {
+            try { await refreshWeeklyImportSummary('HR_WEEKLY', state.import_id); } catch {}
+          }
+
+          closeModal();
+        } catch (e) {
+          state.loading = false;
+          state.error = e?.message || String(e);
+          repaint();
+          alert(state.error);
+        }
+      }
+    });
+  };
+
+  showModal(
+    'Resolve HealthRoster grade',
+    [{ key: 'main', label: 'Resolve band' }],
+    renderTab,
+    null,
+    false,
+    onReturn,
+    {
+      kind,
+      noParentGate: true,
+      stayOpenOnSave: false,
+      showSave: false
+    }
+  );
+
+  // Initial load
+  setTimeout(() => {
+    try {
+      const fr = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
+      if (fr && fr.kind === kind && typeof fr.onReturn === 'function' && !fr.__hrwbrInit) {
+        fr.__hrwbrInit = true;
+        fr.onReturn();
+        loadContracts();
+      }
+    } catch (e) {
+      console.warn('[HR_WEEKLY_BAND_RESOLVE] init failed', e);
+    }
+  }, 0);
+}
+
+
 async function openHrWeeklyClientPicker() {
   window.modalCtx = window.modalCtx || {};
   window.modalCtx.importsState = window.modalCtx.importsState || {};
@@ -50750,8 +51148,6 @@ async function openWeeklyImportOptionsModal(type, importId, preview) {
     setTimeout(onShown, 0);
   });
 }
-
-
 function openAssignmentBandMappingsModal(opts) {
   // Ensure we have a local HTML-escape helper in this closure
   // (prevents "ReferenceError: enc is not defined")
@@ -50812,11 +51208,12 @@ function openAssignmentBandMappingsModal(opts) {
 
   const kind = 'import-summary-assignment-band-mappings';
 
+  // ✅ Scope label: do NOT include IDs; candidate/client names are shown in dedicated columns where available.
   const scopeLabelForRow = (r) => {
     const hasCand = !!r.candidate_id;
     const hasCli  = !!r.client_id;
-    if (hasCand) return `Candidate${r.candidate_name ? `: ${r.candidate_name}` : ''}`;
-    if (hasCli)  return `Client${r.client_name ? `: ${r.client_name}` : ''}`;
+    if (hasCand) return 'Candidate';
+    if (hasCli)  return 'Client';
     return 'Global';
   };
 
@@ -50849,6 +51246,10 @@ function openAssignmentBandMappingsModal(opts) {
           const pill    = active ? 'pill-ok' : 'pill-warn';
           const pillTxt = active ? 'ACTIVE' : 'INACTIVE';
 
+          const hasCand = !!r.candidate_id;
+          const candName = String(r.candidate_name || r.candidate_label || '').trim();
+          const candDisp = hasCand ? (candName || 'Candidate') : '—';
+
           const scopeTxt = scopeLabelForRow(r);
 
           return `
@@ -50861,8 +51262,11 @@ function openAssignmentBandMappingsModal(opts) {
               </td>
               <td>
                 <span class="mini" style="white-space:normal;word-break:break-word;display:inline-block;max-width:260px;">
-                  ${enc(scopeTxt)}
+                  ${enc(candDisp)}
                 </span>
+              </td>
+              <td>
+                <span class="mini">${enc(scopeTxt)}</span>
               </td>
               <td><span class="pill ${pill}" style="padding:2px 8px;font-size:12px;">${enc(pillTxt)}</span></td>
               <td>
@@ -50886,7 +51290,7 @@ function openAssignmentBandMappingsModal(opts) {
         }).join('')
       : `
         <tr>
-          <td colspan="6"><span class="mini">${state.loading ? 'Loading…' : 'No mappings found for this filter.'}</span></td>
+          <td colspan="7"><span class="mini">${state.loading ? 'Loading…' : 'No mappings found for this filter.'}</span></td>
         </tr>
       `;
 
@@ -50933,14 +51337,14 @@ function openAssignmentBandMappingsModal(opts) {
             <div class="controls" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
               <div style="display:${showFilterCand ? '' : 'none'};">
                 <span class="mini">Candidate:</span>
-                <span class="mini mono" id="abm_filter_candidate_label">${enc(state.filter_candidate_label || state.filter_candidate_id || '—')}</span>
+                <span class="mini mono" id="abm_filter_candidate_label">${enc(state.filter_candidate_label || (state.filter_candidate_id ? 'Selected candidate' : '—'))}</span>
                 <button type="button" class="btn mini" style="margin-left:6px;" data-act="abm-pick-filter-candidate">Pick…</button>
                 <button type="button" class="btn mini" style="margin-left:4px;" data-act="abm-clear-filter-candidate">Clear</button>
               </div>
 
               <div style="display:${showFilterCli ? '' : 'none'};">
                 <span class="mini">Client:</span>
-                <span class="mini mono" id="abm_filter_client_label">${enc(state.filter_client_label || state.filter_client_id || '—')}</span>
+                <span class="mini mono" id="abm_filter_client_label">${enc(state.filter_client_label || (state.filter_client_id ? 'Selected client' : '—'))}</span>
                 <button type="button" class="btn mini" style="margin-left:6px;" data-act="abm-pick-filter-client">Pick…</button>
                 <button type="button" class="btn mini" style="margin-left:4px;" data-act="abm-clear-filter-client">Clear</button>
               </div>
@@ -51007,7 +51411,7 @@ function openAssignmentBandMappingsModal(opts) {
           <div class="row" style="margin-top:6px; display:${showAddCand ? '' : 'none'};">
             <label>Candidate</label>
             <div class="controls" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
-              <span class="mini mono" id="abm_add_candidate_label">${enc(state.add_candidate_label || state.add_candidate_id || '—')}</span>
+              <span class="mini mono" id="abm_add_candidate_label">${enc(state.add_candidate_label || (state.add_candidate_id ? 'Selected candidate' : '—'))}</span>
               <button type="button" class="btn mini" data-act="abm-pick-add-candidate">Pick…</button>
               <button type="button" class="btn mini" data-act="abm-clear-add-candidate">Clear</button>
             </div>
@@ -51016,7 +51420,7 @@ function openAssignmentBandMappingsModal(opts) {
           <div class="row" style="margin-top:6px; display:${showAddCli ? '' : 'none'};">
             <label>Client</label>
             <div class="controls" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
-              <span class="mini mono" id="abm_add_client_label">${enc(state.add_client_label || state.add_client_id || '—')}</span>
+              <span class="mini mono" id="abm_add_client_label">${enc(state.add_client_label || (state.add_client_id ? 'Selected client' : '—'))}</span>
               <button type="button" class="btn mini" data-act="abm-pick-add-client">Pick…</button>
               <button type="button" class="btn mini" data-act="abm-clear-add-client">Clear</button>
             </div>
@@ -51066,7 +51470,6 @@ function openAssignmentBandMappingsModal(opts) {
           <div class="row">
             <label>Mappings</label>
             <div class="controls">
-              <!-- ✅ Only the rows scroll; header + hint stay fixed -->
               <div style="
                 max-height: 46vh;
                 overflow: auto;
@@ -51078,7 +51481,8 @@ function openAssignmentBandMappingsModal(opts) {
                     <tr>
                       <th style="width:140px;">Incoming code</th>
                       <th style="width:220px;">Band pattern</th>
-                      <th style="width:220px;">Scope</th>
+                      <th style="width:260px;">Candidate</th>
+                      <th style="width:140px;">Scope</th>
                       <th style="width:90px;">Active</th>
                       <th>Notes</th>
                       <th style="width:260px;">Actions</th>
@@ -51504,6 +51908,7 @@ function openAssignmentBandMappingsModal(opts) {
     }
   }, 0);
 }
+
 
 function renderWeeklyImportSummary(type, importId, rows, ss) {
   // ─────────────────────────────────────────────────────────────
@@ -60748,6 +61153,8 @@ function renderTimesheetOverviewTab(ctx) {
     </div>
   `;
 }
+
+
 function renderHrWeeklyValidationSummary(type, importId, preview) {
   const T = String(type || '').toUpperCase();
   const impId = (importId != null) ? String(importId) : '';
@@ -60837,7 +61244,7 @@ function renderHrWeeklyValidationSummary(type, importId, preview) {
     return a.replace(/_/g, ' ');
   };
 
-  // Fallback: Flatten legacy days[].pairings[] => rows with date + TS + HR + tick/cross
+  // Fallback: Flatten legacy days[].pairings[] => comparisons-like rows
   const flattenComparisonsFromDays = (days) => {
     const out = [];
     const arr = Array.isArray(days) ? days : [];
@@ -60877,10 +61284,10 @@ function renderHrWeeklyValidationSummary(type, importId, preview) {
           match_status: matchStatus || (isMatch ? 'MATCH' : 'MISMATCH'),
           timesheet_start: String(tsStart || '').trim(),
           timesheet_end: String(tsEnd || '').trim(),
-          timesheet_break_mins: (tsBreak == null ? null : Number(tsBreak)),
+          timesheet_break_mins: (tsBreak == null || tsBreak === '' ? null : Number(tsBreak)),
           healthroster_start: String(hrStart || '').trim(),
           healthroster_end: String(hrEnd || '').trim(),
-          healthroster_break_mins: (hrBreak == null ? null : Number(hrBreak))
+          healthroster_break_mins: (hrBreak == null || hrBreak === '' ? null : Number(hrBreak))
         });
       }
     }
@@ -60931,7 +61338,12 @@ function renderHrWeeklyValidationSummary(type, importId, preview) {
     const act = String(r.action || r.resolution_status || r.status || '').toUpperCase();
     if (!act) continue;
 
-    const unresolvedHere = act.startsWith('REJECT_') || act === 'NO_CANDIDATE' || act === 'NO_CLIENT' || act === 'BAD_ROW';
+    const unresolvedHere =
+      act.startsWith('REJECT_') ||
+      act === 'NO_CANDIDATE' ||
+      act === 'NO_CLIENT' ||
+      act === 'BAD_ROW';
+
     if (!unresolvedHere) continue;
 
     unresolved.push({ idx: i, row: r, act });
@@ -60944,6 +61356,7 @@ function renderHrWeeklyValidationSummary(type, importId, preview) {
       const staff = row.staff_name || row.staff_raw || row.staff_norm || '';
       const unit  = row.ward || row.unit || row.hospital_or_trust || row.trust_raw || row.unit_raw || '';
       const wd    = row.work_date || row.date_local || row.date || '';
+      const we    = row.week_ending_date || row.weekEndingDate || '';
       const code  = row.incoming_code || row.grade_raw || row.assignment_code || row.assignment_grade_norm || '';
       const reason = row.reason || row.reason_text || row.reason_code || '';
 
@@ -60957,6 +61370,7 @@ function renderHrWeeklyValidationSummary(type, importId, preview) {
         ? `<button type="button" class="btn mini" data-act="hr-weekly-val-resolve-candidate" data-row-idx="${enc(String(idx))}">Assign candidate…</button>`
         : '';
 
+      // ✅ Pass full context needed by candidate-specific band resolver modal
       const btnBand = needsBandMap
         ? `<button type="button"
                    class="btn mini"
@@ -60964,6 +61378,8 @@ function renderHrWeeklyValidationSummary(type, importId, preview) {
                    data-incoming-code="${enc(String(code || '').trim())}"
                    data-client-id="${enc(String(row.client_id || importClientId || '').trim())}"
                    data-candidate-id="${enc(String(row.candidate_id || '').trim())}"
+                   data-work-date="${enc(String(wd || '').trim())}"
+                   data-week-ending-date="${enc(String(we || '').trim())}"
                    data-import-id="${enc(impId)}">
              Fix band mapping…
            </button>`
@@ -61028,7 +61444,7 @@ function renderHrWeeklyValidationSummary(type, importId, preview) {
 
         const failureReasons = g?.failure_reasons || g?.failureReasons || [];
 
-        // Email controls (kept for wiring only; never displayed as IDs)
+        // Email controls (used for wiring only)
         const tsid = g?.timesheet_id || g?.timesheetId || null;
         const recip = String(g?.recipient_email || g?.recipientEmail || '').trim();
         const emailedAlready = (g?.emailed_already === true) || (g?.emailedAlready === true);
@@ -61037,12 +61453,11 @@ function renderHrWeeklyValidationSummary(type, importId, preview) {
 
         const statusPill = `<span class="pill ${pillForStatus(overall)}" style="padding:2px 8px;">${enc(String(overall).toUpperCase())}</span>`;
 
-        // ✅ NEW: Prefer comparisons[] from backend. Fallback to legacy days/pairings.
+        // ✅ Prefer comparisons[] from backend. Fallback to legacy days/pairings.
         const comparisonsNew = normaliseComparisons(g?.comparisons || g?.comparison_rows || g?.comparisonRows || []);
         const comparisonsFallback = (comparisonsNew.length === 0)
           ? flattenComparisonsFromDays(g?.days || [])
           : [];
-
         const comps = comparisonsNew.length ? comparisonsNew : comparisonsFallback;
 
         const compTable = (() => {
@@ -61086,7 +61501,7 @@ function renderHrWeeklyValidationSummary(type, importId, preview) {
 
         // ✅ Email UI must only exist when mismatch exists
         const emailBlock = (() => {
-          if (!hasMismatch) return ''; // <- your rule: no email option for perfect match
+          if (!hasMismatch) return '';
 
           // If mismatch exists but can_email is false, show a short explanation (no checkbox)
           if (!canEmail) {
@@ -61171,7 +61586,6 @@ function renderHrWeeklyValidationSummary(type, importId, preview) {
     ? 'Finalise (apply actions + emails)'
     : 'Finalise validations';
 
-  // IMPORTANT: do not use .form wrapper here (keeps full-width layout consistent with other full-width modals)
   return html(`
     <div id="hrWeeklyValidationSummary" data-import-id="${enc(impId)}" data-mode="${enc(mode)}">
       <div class="card">
@@ -61371,19 +61785,28 @@ function wireHrWeeklyValidationSummaryActions(type, importId) {
         }
 
         if (act === 'hr-weekly-val-fix-band') {
+          // ✅ Candidate-specific band resolver (NOT the global mappings modal)
           try {
-            if (typeof openAssignmentBandMappingsModal !== 'function') throw new Error('openAssignmentBandMappingsModal is not defined.');
-
             const incoming_code = String(btn.getAttribute('data-incoming-code') || '').trim();
             const client_id_raw = String(btn.getAttribute('data-client-id') || '').trim();
             const cand_id_raw   = String(btn.getAttribute('data-candidate-id') || '').trim();
+            const work_date_raw = String(btn.getAttribute('data-work-date') || '').trim();
+            const we_raw        = String(btn.getAttribute('data-week-ending-date') || '').trim();
 
-            openAssignmentBandMappingsModal({
-              system_type: 'HR_WEEKLY',
-              incoming_code: incoming_code || '',
+            if (!incoming_code) throw new Error('Missing incoming code for band resolver.');
+            if (!client_id_raw) throw new Error('Missing client_id for band resolver.');
+
+            if (typeof openHrWeeklyBandResolveModal !== 'function') {
+              throw new Error('openHrWeeklyBandResolveModal is not defined.');
+            }
+
+            await openHrWeeklyBandResolveModal({
+              import_id: impId,
               client_id: client_id_raw || null,
               candidate_id: cand_id_raw || null,
-              import_id: impId
+              incoming_code: incoming_code,
+              work_date: work_date_raw || null,
+              week_ending_date: we_raw || null
             });
           } catch (e) {
             console.error('[IMPORTS][HR_WEEKLY][VAL] fix-band failed', e);
